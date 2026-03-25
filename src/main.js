@@ -44,6 +44,11 @@ function redoubleBidAndRender() {
   renderGame()
 }
 
+function playCardAndRender(cardId) {
+  game.playCard(cardId)
+  renderGame()
+}
+
 game.startNewGame()
 renderGame()
 
@@ -55,3 +60,4 @@ window.bidAllTrumpsAndRender = bidAllTrumpsAndRender
 window.bidNoTrumpsAndRender = bidNoTrumpsAndRender
 window.doubleBidAndRender = doubleBidAndRender
 window.redoubleBidAndRender = redoubleBidAndRender
+window.playCardAndRender = playCardAndRender

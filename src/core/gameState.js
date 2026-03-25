@@ -31,6 +31,8 @@ export function createInitialGameState() {
       allowedContracts: [],
       isDoubled: false,
       isRedoubled: false,
+      canDouble: false,
+      canRedouble: false,
     },
 
     deck: [],
@@ -46,9 +48,28 @@ export function createInitialGameState() {
     firstRoundDealt: false,
     secondRoundDealt: false,
 
+    currentTrick: [],
+    completedTricks: [],
+    trickLeaderIndex: null,
+    lastTrickWinnerIndex: null,
+    cardsPlayedCount: 0,
+    roundWinnerTeam: null,
+
+    announcements: {
+      belotDeclaredBy: [],
+      declarations: [],
+    },
+
+    // Оставяме го временно за съвместимост,
+    // докато прехвърлим engine/UI изцяло към currentTrick
     trick: [],
 
     scores: {
+      teamA: 0,
+      teamB: 0,
+    },
+
+    trickWins: {
       teamA: 0,
       teamB: 0,
     },
