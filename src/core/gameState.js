@@ -1,14 +1,22 @@
 export function createInitialGameState() {
   return {
+    // Общо състояние
     status: 'idle',
     phase: 'setup',
 
-    dealerIndex: 0,
-    currentPlayerIndex: 0,
+    // Рунд / дилър / цепене
+    roundNumber: 0,
+    dealerIndex: null,
+    initialDealerIndex: null,
+    currentPlayerIndex: null,
     currentTurn: null,
     bidStarter: null,
     cuttingPlayer: null,
+    dealerRotationDirection: 'counter-clockwise',
+    randomDealerChosen: false,
+    awaitingCut: true,
 
+    // Обява
     trumpSuit: null,
     contract: null,
     winningBidder: null,
@@ -35,9 +43,25 @@ export function createInitialGameState() {
       canRedouble: false,
     },
 
+    // Тесте / shuffle / cut
     deck: [],
     cutIndex: null,
+    isDeckShuffled: false,
+    isDeckSpreadForCut: false,
+    isDeckCut: false,
 
+    // Нов flow за cut / collect / deal animation
+    selectedCutIndex: null,
+    isCutSelectionLocked: false,
+    isDeckCollecting: false,
+    isDeckCollected: false,
+    dealStep: null, // null | first-3 | next-2 | last-3
+    dealingPacketSize: 0,
+    dealingTargetPlayer: null,
+    dealingAnimationQueue: [],
+    lastDealBatchComplete: false,
+
+    // Ръце
     hands: {
       bottom: [],
       left: [],
@@ -45,9 +69,11 @@ export function createInitialGameState() {
       right: [],
     },
 
+    // Раздаване
     firstRoundDealt: false,
     secondRoundDealt: false,
 
+    // Взятки
     currentTrick: [],
     completedTricks: [],
     trickLeaderIndex: null,
@@ -55,15 +81,16 @@ export function createInitialGameState() {
     cardsPlayedCount: 0,
     roundWinnerTeam: null,
 
+    // Анонси
     announcements: {
       belotDeclaredBy: [],
       declarations: [],
     },
 
-    // Оставяме го временно за съвместимост,
-    // докато прехвърлим engine/UI изцяло към currentTrick
+    // Временно за съвместимост
     trick: [],
 
+    // Точки
     scores: {
       teamA: 0,
       teamB: 0,

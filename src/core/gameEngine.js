@@ -1,5 +1,5 @@
 import { createInitialGameState } from './gameState.js'
-import { createDeck, shuffleDeck, cutDeck } from './deck.js'
+import { createDeck, shuffleDeck, cutDeck as cutDeckCards } from './deck.js'
 import { dealFirstRound } from './deal.js'
 import { dealSecondRound } from './dealSecondRound.js'
 import {
@@ -11,294 +11,48 @@ import {
   applyDouble,
   applyRedouble,
 } from './bidding.js'
-
-const PLAYER_ORDER = ['bottom', 'right', 'top', 'left']
-
-const NORMAL_RANK_POWER = {
-  '7': 0,
-  '8': 1,
-  '9': 2,
-  J: 3,
-  Q: 4,
-  K: 5,
-  '10': 6,
-  A: 7,
-}
-
-const TRUMP_RANK_POWER = {
-  '7': 0,
-  '8': 1,
-  Q: 2,
-  K: 3,
-  '10': 4,
-  A: 5,
-  '9': 6,
-  J: 7,
-}
-
-function isBotPlayer(playerId) {
-  return playerId !== 'bottom'
-}
-
-function normalizePlayerIndex(index) {
-  return ((index % PLAYER_ORDER.length) + PLAYER_ORDER.length) % PLAYER_ORDER.length
-}
-
-function getRandomPlayerIndex() {
-  return Math.floor(Math.random() * PLAYER_ORDER.length)
-}
-
-function getPlayerIdByIndex(index) {
-  return PLAYER_ORDER[normalizePlayerIndex(index)]
-}
-
-function getPlayerIndexById(playerId) {
-  return PLAYER_ORDER.indexOf(playerId)
-}
-
-function getNextPlayerId(playerId) {
-  const currentIndex = PLAYER_ORDER.indexOf(playerId)
-
-  if (currentIndex === -1) {
-    return PLAYER_ORDER[0]
-  }
-
-  return PLAYER_ORDER[normalizePlayerIndex(currentIndex + 1)]
-}
-
-function getPreviousPlayerId(playerId) {
-  const currentIndex = PLAYER_ORDER.indexOf(playerId)
-
-  if (currentIndex === -1) {
-    return PLAYER_ORDER[PLAYER_ORDER.length - 1]
-  }
-
-  return PLAYER_ORDER[normalizePlayerIndex(currentIndex - 1)]
-}
-
-function getNextPlayerIndex(index) {
-  return normalizePlayerIndex(index + 1)
-}
-
-function getTeamByPlayerId(playerId) {
-  return playerId === 'bottom' || playerId === 'top' ? 'teamA' : 'teamB'
-}
-
-function getRoundWinnerTeam(trickWins) {
-  if (trickWins.teamA > trickWins.teamB) {
-    return 'teamA'
-  }
-
-  if (trickWins.teamB > trickWins.teamA) {
-    return 'teamB'
-  }
-
-  return 'draw'
-}
-
-function normalizeCardRank(rank) {
-  if (rank === null || rank === undefined) {
-    return null
-  }
-
-  const value = String(rank).trim().toUpperCase()
-
-  if (value === 'JACK') return 'J'
-  if (value === 'QUEEN') return 'Q'
-  if (value === 'KING') return 'K'
-  if (value === 'ACE') return 'A'
-
-  return value
-}
-
-function getCardRank(card) {
-  return normalizeCardRank(card?.rank ?? card?.value ?? card?.face ?? card?.name ?? null)
-}
-
-function getCardSuit(card) {
-  return card?.suit ?? null
-}
-
-function getCardId(card) {
-  return card?.id ?? `${getCardSuit(card)}-${getCardRank(card)}`
-}
-
-function formatSuitLabel(suit) {
-  if (suit === 'clubs') return 'Спатия'
-  if (suit === 'diamonds') return 'Каро'
-  if (suit === 'hearts') return 'Купа'
-  if (suit === 'spades') return 'Пика'
-  return suit ?? 'Няма'
-}
-
-function formatContractLabel(contract) {
-  if (contract === 'color') return 'Цвят'
-  if (contract === 'all-trumps') return 'Всичко коз'
-  if (contract === 'no-trumps') return 'Без коз'
-  return contract ?? 'Няма'
-}
-
-function isAllTrumpsContract(state) {
-  const contract = String(state.contract ?? '').toLowerCase()
-  const trumpSuit = String(state.trumpSuit ?? '').toLowerCase()
-
-  return (
-    contract === 'all-trumps' ||
-    contract === 'all_trumps' ||
-    contract === 'all trumps' ||
-    contract === 'vsichko-koz' ||
-    contract === 'vsichko koz' ||
-    trumpSuit === 'all-trumps' ||
-    trumpSuit === 'all_trumps' ||
-    trumpSuit === 'all trumps'
-  )
-}
-
-function isNoTrumpsContract(state) {
-  const contract = String(state.contract ?? '').toLowerCase()
-  const trumpSuit = String(state.trumpSuit ?? '').toLowerCase()
-
-  return (
-    contract === 'no-trumps' ||
-    contract === 'no_trumps' ||
-    contract === 'no trumps' ||
-    contract === 'bez-koz' ||
-    contract === 'bez koz' ||
-    trumpSuit === 'no-trumps' ||
-    trumpSuit === 'no_trumps' ||
-    trumpSuit === 'no trumps'
-  )
-}
-
-function isSuitContract(state) {
-  return !isAllTrumpsContract(state) && !isNoTrumpsContract(state) && !!state.trumpSuit
-}
-
-function getCardPower(state, card, { treatAsTrump = false } = {}) {
-  const rank = getCardRank(card)
-
-  if (!rank) {
-    return -1
-  }
-
-  const powerMap = treatAsTrump ? TRUMP_RANK_POWER : NORMAL_RANK_POWER
-
-  return powerMap[rank] ?? -1
-}
-
-function isHandEmpty(hand = []) {
-  return !hand || hand.length === 0
-}
-
-function cloneTrickEntries(entries = []) {
-  return entries.map((entry) => ({
-    playerId: entry.playerId,
-    playerIndex: entry.playerIndex,
-    card: entry.card,
-  }))
-}
-
-function getWinningTrickEntry(state, trickEntries = []) {
-  if (!trickEntries.length) {
-    return null
-  }
-
-  const leadSuit = getCardSuit(trickEntries[0].card)
-
-  if (!leadSuit) {
-    return trickEntries[0]
-  }
-
-  if (isSuitContract(state)) {
-    const trumpEntries = trickEntries.filter((entry) => getCardSuit(entry.card) === state.trumpSuit)
-
-    if (trumpEntries.length > 0) {
-      return trumpEntries.reduce((best, current) => {
-        const currentPower = getCardPower(state, current.card, { treatAsTrump: true })
-        const bestPower = getCardPower(state, best.card, { treatAsTrump: true })
-
-        return currentPower > bestPower ? current : best
-      })
-    }
-
-    const leadSuitEntries = trickEntries.filter((entry) => getCardSuit(entry.card) === leadSuit)
-
-    return leadSuitEntries.reduce((best, current) => {
-      const currentPower = getCardPower(state, current.card, { treatAsTrump: false })
-      const bestPower = getCardPower(state, best.card, { treatAsTrump: false })
-
-      return currentPower > bestPower ? current : best
-    })
-  }
-
-  if (isAllTrumpsContract(state)) {
-    const leadSuitEntries = trickEntries.filter((entry) => getCardSuit(entry.card) === leadSuit)
-
-    return leadSuitEntries.reduce((best, current) => {
-      const currentPower = getCardPower(state, current.card, { treatAsTrump: true })
-      const bestPower = getCardPower(state, best.card, { treatAsTrump: true })
-
-      return currentPower > bestPower ? current : best
-    })
-  }
-
-  const leadSuitEntries = trickEntries.filter((entry) => getCardSuit(entry.card) === leadSuit)
-
-  return leadSuitEntries.reduce((best, current) => {
-    const currentPower = getCardPower(state, current.card, { treatAsTrump: false })
-    const bestPower = getCardPower(state, best.card, { treatAsTrump: false })
-
-    return currentPower > bestPower ? current : best
-  })
-}
-
-function canBeatCard(state, candidateCard, targetCard, contextSuit) {
-  if (!candidateCard || !targetCard) {
-    return false
-  }
-
-  if (getCardSuit(candidateCard) !== getCardSuit(targetCard)) {
-    return false
-  }
-
-  const suit = getCardSuit(candidateCard)
-  const treatAsTrump =
-    isAllTrumpsContract(state) ||
-    (isSuitContract(state) && suit === state.trumpSuit) ||
-    (contextSuit && suit === contextSuit && contextSuit === state.trumpSuit)
-
-  return (
-    getCardPower(state, candidateCard, { treatAsTrump }) >
-    getCardPower(state, targetCard, { treatAsTrump })
-  )
-}
-
-function findCardIndexInHand(hand = [], cardOrId) {
-  if (!hand.length) {
-    return -1
-  }
-
-  if (typeof cardOrId === 'string') {
-    return hand.findIndex((card) => getCardId(card) === cardOrId)
-  }
-
-  const targetId = getCardId(cardOrId)
-  return hand.findIndex((card) => getCardId(card) === targetId)
-}
+import { PLAYER_ORDER } from './constants.js'
+import {
+  isBotPlayer,
+  normalizePlayerIndex,
+  getRandomPlayerIndex,
+  getPlayerIdByIndex,
+  getPlayerIndexById,
+  getNextPlayerId,
+  getPreviousPlayerId,
+  getNextPlayerIndex,
+  getRoundWinnerTeam,
+  formatPlayerLabel,
+  getTeamByPlayerId,
+} from './playerOrder.js'
+import {
+  getCardSuit,
+  getCardId,
+  isHandEmpty,
+  cloneTrickEntries,
+  findCardIndexInHand,
+} from './cardUtils.js'
+import { formatSuitLabel, formatContractLabel } from './contractUtils.js'
+import { getWinningTrickEntry } from './trickLogic.js'
+import { getPlayableCardsForPlayer } from './playRules.js'
 
 export function createGameEngine() {
   const state = createInitialGameState()
 
   function setCurrentTurn(playerId) {
-    state.currentTurn = playerId
-    state.currentPlayerIndex = getPlayerIndexById(playerId)
+    state.currentTurn = playerId ?? null
+    state.currentPlayerIndex = playerId ? getPlayerIndexById(playerId) : null
   }
 
   function resetRoundState() {
+    state.status = 'idle'
+    state.phase = 'setup'
+
+    state.currentPlayerIndex = null
     state.currentTurn = null
-    state.currentPlayerIndex = 0
     state.bidStarter = null
     state.cuttingPlayer = null
+
     state.trumpSuit = null
     state.contract = null
     state.winningBidder = null
@@ -306,36 +60,61 @@ export function createGameEngine() {
     state.isRedoubled = false
     state.bidHistory = []
     state.passedPlayers = []
-    state.firstRoundDealt = false
-    state.secondRoundDealt = false
-    state.currentTrick = []
-    state.completedTricks = []
-    state.trickLeaderIndex = null
-    state.lastTrickWinnerIndex = null
-    state.cardsPlayedCount = 0
-    state.roundWinnerTeam = null
-    state.trick = []
-    state.trickWins = {
-      teamA: 0,
-      teamB: 0,
-    }
-    state.announcements = {
-      belotDeclaredBy: [],
-      declarations: [],
-    }
+
+    state.deck = []
+    state.cutIndex = null
+    state.selectedCutIndex = null
+    state.isCutSelectionLocked = false
+    state.isDeckShuffled = false
+    state.isDeckSpreadForCut = false
+    state.isDeckCut = false
+    state.awaitingCut = true
+    state.isDeckCollecting = false
+    state.isDeckCollected = false
+    state.dealStep = null
+    state.dealingPacketSize = 0
+    state.dealingTargetPlayer = null
+    state.dealingAnimationQueue = []
+    state.lastDealBatchComplete = false
+
     state.hands = {
       bottom: [],
       right: [],
       top: [],
       left: [],
     }
+
+    state.firstRoundDealt = false
+    state.secondRoundDealt = false
+
+    state.currentTrick = []
+    state.completedTricks = []
+    state.trickLeaderIndex = null
+    state.lastTrickWinnerIndex = null
+    state.cardsPlayedCount = 0
+    state.roundWinnerTeam = null
+
+    state.announcements = {
+      belotDeclaredBy: [],
+      declarations: [],
+    }
+
+    state.trick = []
+
+    state.trickWins = {
+      teamA: 0,
+      teamB: 0,
+    }
+
     state.bidding = createInitialBiddingState('bottom')
   }
 
   function syncBiddingToRootState() {
     state.bidStarter = state.bidding.starter
     state.currentTurn = state.bidding.currentTurn
-    state.currentPlayerIndex = getPlayerIndexById(state.bidding.currentTurn)
+    state.currentPlayerIndex = state.bidding.currentTurn
+      ? getPlayerIndexById(state.bidding.currentTurn)
+      : null
     state.bidHistory = state.bidding.history
     state.contract = state.bidding.contract
     state.trumpSuit = state.bidding.trumpSuit
@@ -357,8 +136,13 @@ export function createGameEngine() {
     return state
   }
 
-  function startRound({ advanceDealer = false } = {}) {
-    if (advanceDealer) {
+  function prepareRoundForCut({ advanceDealer = false, pickRandomDealer = false } = {}) {
+    if (pickRandomDealer || state.dealerIndex === null || state.dealerIndex === undefined) {
+      const randomDealerIndex = getRandomPlayerIndex()
+      state.dealerIndex = randomDealerIndex
+      state.initialDealerIndex = randomDealerIndex
+      state.randomDealerChosen = true
+    } else if (advanceDealer) {
       state.dealerIndex = normalizePlayerIndex(state.dealerIndex + 1)
     }
 
@@ -377,13 +161,35 @@ export function createGameEngine() {
     const shuffledDeck = shuffleDeck(freshDeck)
 
     state.deck = shuffledDeck
+    state.isDeckShuffled = true
+    state.isDeckSpreadForCut = true
+    state.isDeckCut = false
+    state.awaitingCut = true
 
-    const cutResult = cutDeck(shuffledDeck)
+    return state
+  }
 
+  function performCutAndDeal(cutIndex = null) {
+    if (state.phase !== 'cutting' || !state.awaitingCut) {
+      return state
+    }
+
+    const dealerPlayer = getPlayerIdByIndex(state.dealerIndex)
+    const resolvedCutIndex = cutIndex ?? state.selectedCutIndex ?? null
+    const cutResult = cutDeckCards(state.deck, resolvedCutIndex)
+
+    state.selectedCutIndex = cutResult.cutIndex
     state.cutIndex = cutResult.cutIndex
     state.deck = cutResult.deck
+    state.isCutSelectionLocked = true
+    state.isDeckCut = true
+    state.isDeckSpreadForCut = false
+    state.awaitingCut = false
 
     state.phase = 'dealing'
+    state.isDeckCollecting = false
+    state.isDeckCollected = true
+    state.dealStep = 'first-5'
 
     const firstRoundResult = dealFirstRound(state.deck, dealerPlayer)
 
@@ -391,93 +197,49 @@ export function createGameEngine() {
     state.hands = firstRoundResult.hands
     state.firstRoundDealt = true
     state.secondRoundDealt = false
+    state.dealStep = null
     state.phase = 'bidding'
 
     const bidStarter = getNextPlayerId(dealerPlayer)
     const biddingState = createInitialBiddingState(bidStarter)
 
     state.bidding = biddingState
-
     syncBiddingToRootState()
+
+    runBotBiddingUntilHumanOrEnd(api)
+
+    if (state.phase === 'playing') {
+      runBotPlayingUntilHumanOrEnd()
+    }
 
     return state
   }
 
-  function finishBiddingIfComplete(api) {
+  function runBotCutIfNeeded() {
+    if (
+      state.phase === 'cutting' &&
+      state.awaitingCut &&
+      state.cuttingPlayer &&
+      isBotPlayer(state.cuttingPlayer)
+    ) {
+      performCutAndDeal()
+    }
+
+    return state
+  }
+
+  function finishBiddingIfComplete(apiInstance) {
     if (!state.bidding.isComplete) {
       return false
     }
 
     if (!state.bidding.contract) {
-      api.restartRoundAfterAllPass()
+      apiInstance.restartRoundAfterAllPass()
       return true
     }
 
-    api.dealRemainingCardsAfterBidding()
+    apiInstance.dealRemainingCardsAfterBidding()
     return true
-  }
-
-  function getPlayableCardsForPlayer(playerId) {
-    if (state.phase !== 'playing' || state.currentTurn !== playerId) {
-      return []
-    }
-
-    const hand = state.hands[playerId] ?? []
-
-    if (!hand.length) {
-      return []
-    }
-
-    if (!state.currentTrick.length) {
-      return [...hand]
-    }
-
-    const leadCard = state.currentTrick[0].card
-    const leadSuit = getCardSuit(leadCard)
-    const sameSuitCards = hand.filter((card) => getCardSuit(card) === leadSuit)
-
-    if (sameSuitCards.length > 0) {
-      if (isSuitContract(state) && leadSuit === state.trumpSuit) {
-        const currentWinningEntry = getWinningTrickEntry(state, state.currentTrick)
-        const higherCards = sameSuitCards.filter((card) =>
-          canBeatCard(state, card, currentWinningEntry.card, leadSuit)
-        )
-
-        return higherCards.length > 0 ? higherCards : sameSuitCards
-      }
-
-      return sameSuitCards
-    }
-
-    if (isNoTrumpsContract(state) || isAllTrumpsContract(state)) {
-      return [...hand]
-    }
-
-    const trumpsInHand = hand.filter((card) => getCardSuit(card) === state.trumpSuit)
-
-    if (!trumpsInHand.length) {
-      return [...hand]
-    }
-
-    const currentWinningEntry = getWinningTrickEntry(state, state.currentTrick)
-    const currentWinningTeam = getTeamByPlayerId(currentWinningEntry.playerId)
-    const currentPlayerTeam = getTeamByPlayerId(playerId)
-
-    if (currentWinningTeam === currentPlayerTeam) {
-      return [...hand]
-    }
-
-    const winningCardIsTrump = getCardSuit(currentWinningEntry.card) === state.trumpSuit
-
-    if (!winningCardIsTrump) {
-      return trumpsInHand
-    }
-
-    const higherTrumps = trumpsInHand.filter((card) =>
-      canBeatCard(state, card, currentWinningEntry.card, state.trumpSuit)
-    )
-
-    return higherTrumps.length > 0 ? higherTrumps : trumpsInHand
   }
 
   function playCardInternal(playerId, cardOrId) {
@@ -493,7 +255,7 @@ export function createGameEngine() {
     }
 
     const card = hand[cardIndex]
-    const playableCards = getPlayableCardsForPlayer(playerId)
+    const playableCards = getPlayableCardsForPlayer(state, playerId)
     const isCardPlayable = playableCards.some((playableCard) => getCardId(playableCard) === getCardId(card))
 
     if (!isCardPlayable) {
@@ -547,7 +309,7 @@ export function createGameEngine() {
       state.status = 'finished'
       state.trickLeaderIndex = null
       state.currentTurn = null
-      state.currentPlayerIndex = -1
+      state.currentPlayerIndex = null
       state.roundWinnerTeam = getRoundWinnerTeam(state.trickWins)
       return state
     }
@@ -558,7 +320,7 @@ export function createGameEngine() {
     return state
   }
 
-  function runBotBiddingUntilHumanOrEnd(api) {
+  function runBotBiddingUntilHumanOrEnd(apiInstance) {
     if (state.phase !== 'bidding') {
       return state
     }
@@ -571,7 +333,7 @@ export function createGameEngine() {
       applyPass(state.bidding)
       syncBiddingToRootState()
 
-      if (finishBiddingIfComplete(api)) {
+      if (finishBiddingIfComplete(apiInstance)) {
         break
       }
     }
@@ -586,7 +348,7 @@ export function createGameEngine() {
 
     while (state.phase === 'playing' && state.currentTurn && isBotPlayer(state.currentTurn)) {
       const playerId = state.currentTurn
-      const playableCards = getPlayableCardsForPlayer(playerId)
+      const playableCards = getPlayableCardsForPlayer(state, playerId)
 
       if (!playableCards.length) {
         break
@@ -604,16 +366,54 @@ export function createGameEngine() {
     },
 
     startNewGame() {
-      state.dealerIndex = getRandomPlayerIndex()
-      const result = startRound({ advanceDealer: false })
-      runBotBiddingUntilHumanOrEnd(api)
-      return result
+      state.scores = {
+        teamA: 0,
+        teamB: 0,
+      }
+
+      state.roundNumber = 1
+      state.dealerIndex = null
+      state.initialDealerIndex = null
+      state.randomDealerChosen = false
+
+      prepareRoundForCut({ pickRandomDealer: true })
+      runBotCutIfNeeded()
+
+      return state
     },
 
     restartRoundAfterAllPass() {
-      const result = startRound({ advanceDealer: true })
-      runBotBiddingUntilHumanOrEnd(api)
-      return result
+      state.roundNumber += 1
+
+      prepareRoundForCut({ advanceDealer: true })
+      runBotCutIfNeeded()
+
+      return state
+    },
+
+    startNextRound() {
+      if (!state.randomDealerChosen) {
+        return api.startNewGame()
+      }
+
+      state.roundNumber += 1
+
+      prepareRoundForCut({ advanceDealer: true })
+      runBotCutIfNeeded()
+
+      return state
+    },
+
+    cutDeckAndDeal(cutIndex = null) {
+      if (state.phase !== 'cutting' || !state.awaitingCut || state.cuttingPlayer !== 'bottom') {
+        return state
+      }
+
+      return performCutAndDeal(cutIndex)
+    },
+
+    confirmCut(cutIndex = null) {
+      return api.cutDeckAndDeal(cutIndex)
     },
 
     passBid() {
@@ -774,9 +574,11 @@ export function createGameEngine() {
       const dealerPlayer = getPlayerIdByIndex(state.dealerIndex)
       const secondRoundResult = dealSecondRound(state.deck, state.hands, dealerPlayer)
 
+      state.dealStep = 'last-3'
       state.deck = secondRoundResult.remainingDeck
       state.hands = secondRoundResult.hands
       state.secondRoundDealt = true
+      state.dealStep = null
 
       startPlayingPhase()
 
@@ -784,7 +586,7 @@ export function createGameEngine() {
     },
 
     getPlayableCards(playerId = 'bottom') {
-      return getPlayableCardsForPlayer(playerId)
+      return getPlayableCardsForPlayer(state, playerId)
     },
 
     playCard(cardOrId) {
@@ -799,22 +601,30 @@ export function createGameEngine() {
     },
 
     getStatusText() {
-      const dealerPlayer = getPlayerIdByIndex(state.dealerIndex)
+      const dealerPlayer = state.dealerIndex !== null ? getPlayerIdByIndex(state.dealerIndex) : null
+      const dealerLabel = formatPlayerLabel(dealerPlayer)
+      const cutterLabel = formatPlayerLabel(state.cuttingPlayer)
+      const currentLabel = formatPlayerLabel(state.currentTurn)
+
       const contractLabel = formatContractLabel(state.contract)
       const trumpLabel = state.trumpSuit ? formatSuitLabel(state.trumpSuit) : 'Няма'
       const leadSuit =
         state.currentTrick.length > 0 ? formatSuitLabel(getCardSuit(state.currentTrick[0].card)) : 'Няма'
 
+      if (state.phase === 'cutting') {
+        return `Нова раздача. Дилър е ${dealerLabel}. Цепи ${cutterLabel}. Картите са разбъркани и разгънати за цепене.`
+      }
+
       if (state.phase === 'bidding') {
-        return `Стъпка 4: започва наддаването след първите 5 карти. Дилър е ${dealerPlayer}, първи на ход е ${state.currentTurn}.`
+        return `Раздадени са първите 3+2 карти. Дилър е ${dealerLabel}, на ход за обява е ${currentLabel}.`
       }
 
       if (state.phase === 'playing') {
         if (state.currentTrick.length === 0) {
-          return `Стъпка 5: наддаването приключи, раздадени са последните 3 карти. Играе се на ${contractLabel}${state.trumpSuit ? ` (${trumpLabel})` : ''}. ${state.currentTurn} започва взятката.`
+          return `Наддаването приключи и са раздадени последните 3 карти. Играе се на ${contractLabel}${state.trumpSuit ? ` (${trumpLabel})` : ''}. ${currentLabel} започва взятката.`
         }
 
-        return `Играе се взятка ${state.completedTricks.length + 1}. На ход е ${state.currentTurn}. Водещ цвят: ${leadSuit}.`
+        return `Играе се взятка ${state.completedTricks.length + 1}. На ход е ${currentLabel}. Водещ цвят: ${leadSuit}.`
       }
 
       if (state.phase === 'round-complete') {
@@ -822,14 +632,10 @@ export function createGameEngine() {
       }
 
       if (state.phase === 'dealing' && state.firstRoundDealt) {
-        return `Стъпка 3: раздадени са първите 3+2 карти от дилър ${dealerPlayer}. Остават ${state.deck.length} карти в тестето.`
+        return 'Първите 3+2 карти са раздадени.'
       }
 
-      if (state.phase === 'cutting') {
-        return `Стъпка 2: тестето е събрано, разбъркано и е дадено за цепене на ${state.cuttingPlayer}. Дилър е ${dealerPlayer}.`
-      }
-
-      return 'Стъпка 1: играта е инициализирана'
+      return 'Играта е инициализирана.'
     },
   }
 
