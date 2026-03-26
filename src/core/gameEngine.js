@@ -169,6 +169,17 @@ export function createGameEngine() {
     return state
   }
 
+  function selectCutIndex(cutIndex) {
+    if (state.phase !== 'cutting' || !state.awaitingCut) {
+      return state
+    }
+
+    state.selectedCutIndex = cutIndex
+    state.isCutSelectionLocked = true
+
+    return state
+  }
+
   function performCutAndDeal(cutIndex = null) {
     if (state.phase !== 'cutting' || !state.awaitingCut) {
       return state
@@ -216,15 +227,6 @@ export function createGameEngine() {
   }
 
   function runBotCutIfNeeded() {
-    if (
-      state.phase === 'cutting' &&
-      state.awaitingCut &&
-      state.cuttingPlayer &&
-      isBotPlayer(state.cuttingPlayer)
-    ) {
-      performCutAndDeal()
-    }
-
     return state
   }
 
@@ -404,8 +406,12 @@ export function createGameEngine() {
       return state
     },
 
+    selectCut(cutIndex) {
+      return selectCutIndex(cutIndex)
+    },
+
     cutDeckAndDeal(cutIndex = null) {
-      if (state.phase !== 'cutting' || !state.awaitingCut || state.cuttingPlayer !== 'bottom') {
+      if (state.phase !== 'cutting' || !state.awaitingCut) {
         return state
       }
 
@@ -413,7 +419,15 @@ export function createGameEngine() {
     },
 
     confirmCut(cutIndex = null) {
-      return api.cutDeckAndDeal(cutIndex)
+      if (state.phase !== 'cutting' || !state.awaitingCut) {
+        return state
+      }
+
+      if (cutIndex !== null && cutIndex !== undefined) {
+        selectCutIndex(cutIndex)
+      }
+
+      return api.cutDeckAndDeal(cutIndex ?? state.selectedCutIndex ?? null)
     },
 
     passBid() {
@@ -612,6 +626,10 @@ export function createGameEngine() {
         state.currentTrick.length > 0 ? formatSuitLabel(getCardSuit(state.currentTrick[0].card)) : 'Няма'
 
       if (state.phase === 'cutting') {
+        if (state.selectedCutIndex !== null && state.selectedCutIndex !== undefined) {
+          return `Нова раздача. Дилър е ${dealerLabel}. Цепи ${cutterLabel}. Избрана е позиция ${state.selectedCutIndex + 1} за цепене.`
+        }
+
         return `Нова раздача. Дилър е ${dealerLabel}. Цепи ${cutterLabel}. Картите са разбъркани и разгънати за цепене.`
       }
 
