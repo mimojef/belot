@@ -8,7 +8,7 @@ export function renderBottomHandCards(hand = [], phase, currentTurn, contract, t
   const sortedHand = sortBottomHand(hand, contract, trumpSuit)
   const canPlayNow = phase === 'playing' && currentTurn === 'bottom'
   const middleIndex = (sortedHand.length - 1) / 2
-  const spreadStep = sortedHand.length >= 8 ? 72 : 84
+  const spreadStep = sortedHand.length >= 8 ? 66 : 78
 
   return `
     <div
@@ -26,21 +26,29 @@ export function renderBottomHandCards(hand = [], phase, currentTurn, contract, t
           const suit = getCardSuit(card)
           const color = getSuitColor(suit)
           const cardId = getCardId(card)
+
           const offsetFromCenter = index - middleIndex
-          const rotate = offsetFromCenter * 8.5
+          const distanceFromCenter = Math.abs(offsetFromCenter)
+          const maxDistance = Math.max(middleIndex, 1)
+          const normalizedDistance = distanceFromCenter / maxDistance
+
+          const rotate = offsetFromCenter * 7.5
           const horizontal = offsetFromCenter * spreadStep
-          const curveLift = Math.abs(offsetFromCenter) * 11
+
+          // Центърът стои една идея по-високо, а краищата слизат плавно надолу
+          const curveLift = 34 - (normalizedDistance * normalizedDistance * 28)
+
           const zIndex = 100 + index
 
           return `
             <div
               style="
                 position: absolute;
-                left: 44%;
+                left: 50%;
                 bottom: 0;
                 width: clamp(126px, 10vw, 168px);
                 height: clamp(184px, 15vw, 238px);
-                transform: translateX(${horizontal}px) translateY(-${curveLift}px) rotate(${rotate}deg);
+                transform: translateX(calc(-50% + ${horizontal}px)) translateY(-${curveLift}px) rotate(${rotate}deg);
                 transform-origin: center bottom;
                 z-index: ${zIndex};
                 overflow: visible;
