@@ -11,7 +11,7 @@ if (!rootElement) {
 const app = bootstrapApp()
 
 function render(): void {
-  renderApp(rootElement, app, {
+  renderApp(rootElement!, app, {
     onNextPhaseClick: () => {
       app.engine.goToNextPhase()
       render()
@@ -22,6 +22,30 @@ function render(): void {
     },
     onResolveCutClick: () => {
       app.engine.resolveCutPhase()
+      render()
+    },
+    onBidPass: () => {
+      app.engine.submitBidAction({ type: 'pass' })
+      render()
+    },
+    onBidSuit: (suit) => {
+      app.engine.submitBidAction({ type: 'suit', suit })
+      render()
+    },
+    onBidNoTrumps: () => {
+      app.engine.submitBidAction({ type: 'no-trumps' })
+      render()
+    },
+    onBidAllTrumps: () => {
+      app.engine.submitBidAction({ type: 'all-trumps' })
+      render()
+    },
+    onBidDouble: () => {
+      app.engine.submitBidAction({ type: 'double' })
+      render()
+    },
+    onBidRedouble: () => {
+      app.engine.submitBidAction({ type: 'redouble' })
       render()
     },
   })

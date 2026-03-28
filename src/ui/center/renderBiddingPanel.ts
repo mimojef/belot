@@ -53,11 +53,15 @@ function renderBidButton(
   value: string,
   enabled: boolean
 ): string {
+  const extraAttributes =
+    action === 'bid-suit' ? `data-suit="${value}" data-bid-suit="${value}"` : ''
+
   return `
     <button
       type="button"
       data-action="${action}"
       data-value="${value}"
+      ${extraAttributes}
       ${enabled ? '' : 'disabled'}
       style="
         border: 0;

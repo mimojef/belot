@@ -1,10 +1,19 @@
 import type { AppBootstrap } from './bootstrap'
 import type { Seat } from '../data/constants/seatOrder'
+import type { Suit } from '../core/state/gameTypes'
+import { getBiddingViewState } from '../core/state/getBiddingViewState'
+import { renderBiddingPanel } from '../ui/center/renderBiddingPanel'
 
 type RenderAppOptions = {
   onNextPhaseClick?: () => void
   onSelectCutIndex?: (cutIndex: number) => void
   onResolveCutClick?: () => void
+  onBidPass?: () => void
+  onBidSuit?: (suit: Suit) => void
+  onBidNoTrumps?: () => void
+  onBidAllTrumps?: () => void
+  onBidDouble?: () => void
+  onBidRedouble?: () => void
 }
 
 function formatSeat(seat: Seat | null): string {
@@ -15,6 +24,116 @@ function formatSeat(seat: Seat | null): string {
   return '—'
 }
 
+function getActionElements(rootElement: HTMLElement, actionName: string): HTMLElement[] {
+  const selectorsByAction: Record<string, string[]> = {
+    'bid-pass': [
+      '#bid-pass',
+      '[data-action="bid-pass"]',
+      '[data-bid-action="pass"]',
+      '[data-bid-pass]',
+    ],
+    'bid-suit': [
+      '[data-action="bid-suit"]',
+      '[data-bid-action="suit"]',
+      '[data-bid-suit]',
+    ],
+    'bid-no-trumps': [
+      '#bid-no-trumps',
+      '[data-action="bid-no-trumps"]',
+      '[data-bid-action="no-trumps"]',
+      '[data-bid-no-trumps]',
+    ],
+    'bid-all-trumps': [
+      '#bid-all-trumps',
+      '[data-action="bid-all-trumps"]',
+      '[data-bid-action="all-trumps"]',
+      '[data-bid-all-trumps]',
+    ],
+    'bid-double': [
+      '#bid-double',
+      '[data-action="bid-double"]',
+      '[data-bid-action="double"]',
+      '[data-bid-double]',
+    ],
+    'bid-redouble': [
+      '#bid-redouble',
+      '[data-action="bid-redouble"]',
+      '[data-bid-action="redouble"]',
+      '[data-bid-redouble]',
+    ],
+  }
+
+  const selectors = selectorsByAction[actionName] ?? []
+  const uniqueElements = new Set<HTMLElement>()
+
+  for (const selector of selectors) {
+    rootElement.querySelectorAll<HTMLElement>(selector).forEach((element) => {
+      uniqueElements.add(element)
+    })
+  }
+
+  return Array.from(uniqueElements)
+}
+
+function readSuitFromElement(element: HTMLElement): Suit | null {
+  const datasetSuit =
+    element.dataset.suit ??
+    element.dataset.bidSuit ??
+    element.getAttribute('data-suit') ??
+    element.getAttribute('data-bid-suit')
+
+  const valueSuit =
+    'value' in element && typeof element.value === 'string' ? element.value : null
+
+  const rawSuit = datasetSuit ?? valueSuit
+
+  if (
+    rawSuit === 'clubs' ||
+    rawSuit === 'diamonds' ||
+    rawSuit === 'hearts' ||
+    rawSuit === 'spades'
+  ) {
+    return rawSuit
+  }
+
+  return null
+}
+
+function bindClick(elements: HTMLElement[], handler?: () => void): void {
+  if (!handler) {
+    return
+  }
+
+  for (const element of elements) {
+    element.addEventListener('click', (event) => {
+      event.preventDefault()
+      handler()
+    })
+  }
+}
+
+function bindSuitClicks(
+  elements: HTMLElement[],
+  handler?: (suit: Suit) => void
+): void {
+  if (!handler) {
+    return
+  }
+
+  for (const element of elements) {
+    element.addEventListener('click', (event) => {
+      event.preventDefault()
+
+      const suit = readSuitFromElement(element)
+      if (!suit) {
+        return
+      }
+
+      handler(suit)
+    })
+  }
+}
+
 export function renderApp(
   rootElement: HTMLElement,
   app: AppBootstrap,
@@ -22,6 +141,8 @@ export function renderApp(
 ): void {
   const state = app.engine.getState()
   const isCuttingPhase = state.phase === 'cutting'
+  const isBiddingPhase = state.phase === 'bidding'
+  const biddingViewState = isBiddingPhase ? getBiddingViewState(state) : null
 
   rootElement.innerHTML = `
     <div style="padding: 24px; font-family: Arial, Helvetica, sans-serif; color: white; background: #0f172a; min-height: 100vh;">
@@ -135,6 +256,16 @@ export function renderApp(
           : ''
       }
 
+      ${
+        biddingViewState
+          ? `
+        <div style="max-width: 720px; margin-bottom: 16px;">
+          ${renderBiddingPanel(biddingViewState)}
+        </div>
+      `
+          : ''
+      }
+
       <button
         type="button"
         data-action="next-phase"
@@ -183,4 +314,22 @@ export function renderApp(
   resolveCutButton?.addEventListener('click', () => {
     options.onResolveCutClick?.()
   })
+
+  if (isBiddingPhase) {
+    bindClick(getActionElements(rootElement, 'bid-pass'), options.onBidPass)
+    bindSuitClicks(getActionElements(rootElement, 'bid-suit'), options.onBidSuit)
+    bindClick(
+      getActionElements(rootElement, 'bid-no-trumps'),
+      options.onBidNoTrumps
+    )
+    bindClick(
+      getActionElements(rootElement, 'bid-all-trumps'),
+      options.onBidAllTrumps
+    )
+    bindClick(getActionElements(rootElement, 'bid-double'), options.onBidDouble)
+    bindClick(
+      getActionElements(rootElement, 'bid-redouble'),
+      options.onBidRedouble
+    )
+  }
 }
