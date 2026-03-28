@@ -1,208 +1,28 @@
 import { renderOpponentCardFan } from './renderOpponentCardFan.js'
 import { renderDealerMarker } from './renderDealerMarker.js'
 import { renderSeatPanel } from './renderSeatPanel.js'
+import {
+  getActiveBiddingPlayerId,
+  getBidInfoForPlayer,
+  getBiddingTimeProgress,
+  getBiddingSecondsLeft,
+} from '../../helpers/tableBiddingUi.js'
 
-function getBidInfoForPlayer(gameState = {}, playerId) {
-  const history = gameState?.bidding?.history ?? gameState?.bidHistory ?? []
-
-  if (!Array.isArray(history) || history.length === 0) {
-    return null
-  }
-
-  const lastEntry = [...history].reverse().find((entry) => entry?.playerId === playerId)
-
-  if (!lastEntry) {
-    return null
-  }
-
-  if (lastEntry.type === 'pass') {
-    return { type: 'pass' }
-  }
-
-  if (lastEntry.type === 'double') {
-    return { type: 'double' }
-  }
-
-  if (lastEntry.type === 'redouble') {
-    return { type: 'redouble' }
-  }
-
-  if (lastEntry.type === 'all-trumps') {
-    return { type: 'all-trumps' }
-  }
-
-  if (lastEntry.type === 'no-trumps') {
-    return { type: 'no-trumps' }
-  }
-
-  if (lastEntry.type === 'suit') {
-    return {
-      type: 'suit',
-      suit: lastEntry.suit ?? lastEntry.trumpSuit ?? null,
-    }
-  }
-
-  if (lastEntry.contract === 'all-trumps') {
-    return { type: 'all-trumps' }
-  }
-
-  if (lastEntry.contract === 'no-trumps') {
-    return { type: 'no-trumps' }
-  }
-
-  if (lastEntry.contract === 'color' || lastEntry.suit || lastEntry.trumpSuit) {
-    return {
-      type: 'suit',
-      suit: lastEntry.suit ?? lastEntry.trumpSuit ?? null,
-    }
-  }
-
-  return lastEntry.label ? { label: lastEntry.label } : null
-}
-
-function getActiveBiddingPlayerId(gameState = {}) {
-  return (
-    gameState?.ui?.bidding?.activePlayerId ??
-    gameState?.bidding?.currentPlayerId ??
-    gameState?.bidding?.currentPlayer ??
-    gameState?.bidding?.activePlayerId ??
-    gameState?.bidding?.activePlayer ??
-    gameState?.currentPlayerId ??
-    gameState?.currentPlayer ??
-    null
-  )
-}
-
-function getBiddingTimeProgress(gameState = {}, playerId, isActive) {
-  if (!isActive) {
-    return 0
-  }
-
-  const phase = gameState?.phase ?? null
-
-  if (phase !== 'bidding') {
-    return 0
-  }
-
-  const uiMsLeft = gameState?.ui?.bidding?.msLeft ?? null
-  const uiTurnLimitMs = gameState?.ui?.bidding?.turnLimitMs ?? null
-
-  if (uiMsLeft !== null && uiTurnLimitMs) {
-    const safeMsLeft = Math.max(0, Number(uiMsLeft))
-    const safeLimit = Math.max(1, Number(uiTurnLimitMs))
-    return (safeMsLeft / safeLimit) * 100
-  }
-
-  const turnStartedAt = gameState?.bidding?.turnStartedAt ?? gameState?.turnStartedAt ?? null
-  const turnTimeLimitMs = gameState?.bidding?.turnTimeLimitMs ?? gameState?.turnTimeLimitMs ?? 15000
-
-  if (!turnStartedAt || !turnTimeLimitMs) {
-    return 100
-  }
-
-  const startedAtMs = new Date(turnStartedAt).getTime()
-
-  if (Number.isNaN(startedAtMs)) {
-    return 100
-  }
-
-  const elapsed = Date.now() - startedAtMs
-  const remaining = Math.max(0, turnTimeLimitMs - elapsed)
-
-  return (remaining / turnTimeLimitMs) * 100
-}
-
-function getBiddingSecondsLeft(gameState = {}, playerId, isActive) {
-  if (!isActive) {
-    return 0
-  }
-
-  const phase = gameState?.phase ?? null
-
-  if (phase !== 'bidding') {
-    return 0
-  }
-
-  const uiSecondsLeft = gameState?.ui?.bidding?.secondsLeft ?? null
-
-  if (uiSecondsLeft !== null && uiSecondsLeft !== undefined) {
-    return Math.max(0, Number(uiSecondsLeft))
-  }
-
-  const turnStartedAt = gameState?.bidding?.turnStartedAt ?? gameState?.turnStartedAt ?? null
-  const turnTimeLimitMs = gameState?.bidding?.turnTimeLimitMs ?? gameState?.turnTimeLimitMs ?? 15000
-
-  if (!turnStartedAt || !turnTimeLimitMs) {
-    return Math.ceil(turnTimeLimitMs / 1000)
-  }
-
-  const startedAtMs = new Date(turnStartedAt).getTime()
-
-  if (Number.isNaN(startedAtMs)) {
-    return Math.ceil(turnTimeLimitMs / 1000)
-  }
-
-  const elapsed = Date.now() - startedAtMs
-  const remaining = Math.max(0, turnTimeLimitMs - elapsed)
-
-  return Math.ceil(remaining / 1000)
-}
-
-export function renderSeat({
-  player,
-  name,
-  cardsCount,
-  currentTurn,
-  playerId,
-  position,
-  dealerPlayerId,
-  gameState = {},
-}) {
-  const activeBiddingPlayerId = getActiveBiddingPlayerId(gameState)
-  const phase = gameState?.phase ?? null
-  const isBiddingPhase = phase === 'bidding'
-
-  const isActive = isBiddingPhase ? activeBiddingPlayerId === playerId : currentTurn === playerId
-  const isDealer = dealerPlayerId === playerId
-
-  const firstRoundDealt = gameState?.firstRoundDealt ?? false
-  const secondRoundDealt = gameState?.secondRoundDealt ?? false
-
-  const showBidInfo =
-    phase === 'bidding' ||
-    (firstRoundDealt && !secondRoundDealt && phase !== 'playing' && phase !== 'round-complete')
-
-  const lastBidInfo = getBidInfoForPlayer(gameState, playerId)
-  const timeProgress = getBiddingTimeProgress(gameState, playerId, isActive)
-  const timerSecondsLeft = getBiddingSecondsLeft(gameState, playerId, isActive)
-
+function buildSeatWrapperStyle(position) {
   let wrapperStyle = `
     position: absolute;
     z-index: 4;
   `
 
-  let seatStyle = `
-    position: absolute;
-    width: clamp(112px, 8.4vw, 136px);
-    height: ${showBidInfo ? 'clamp(186px, 13.8vw, 220px)' : 'clamp(148px, 11vw, 176px)'};
-    z-index: 4;
-  `
-
   if (position === 'top') {
-  wrapperStyle += `
-    top: clamp(4px, 0.6vw, 10px);
-    left: 50%;
-    transform: translateX(-50%);
-    width: min(48vw, 620px);
-    height: 230px;
-  `
-
-  seatStyle += `
-    left: 50%;
-    top: 0;
-    transform: translateX(-50%);
-  `
-}
+    wrapperStyle += `
+      top: clamp(4px, 0.6vw, 10px);
+      left: 50%;
+      transform: translateX(-50%);
+      width: min(48vw, 620px);
+      height: 230px;
+    `
+  }
 
   if (position === 'left') {
     wrapperStyle += `
@@ -211,12 +31,6 @@ export function renderSeat({
       transform: translateY(-50%);
       width: 320px;
       height: min(46vh, 460px);
-    `
-
-    seatStyle += `
-      right: 200px;
-      top: 50%;
-      transform: translateY(-50%);
     `
   }
 
@@ -228,7 +42,36 @@ export function renderSeat({
       width: 320px;
       height: min(46vh, 460px);
     `
+  }
 
+  return wrapperStyle
+}
+
+function buildSeatCardStyle(position, showBidInfo) {
+  let seatStyle = `
+    position: absolute;
+    width: clamp(112px, 8.4vw, 136px);
+    height: ${showBidInfo ? 'clamp(186px, 13.8vw, 220px)' : 'clamp(148px, 11vw, 176px)'};
+    z-index: 4;
+  `
+
+  if (position === 'top') {
+    seatStyle += `
+      left: 50%;
+      top: 0;
+      transform: translateX(-50%);
+    `
+  }
+
+  if (position === 'left') {
+    seatStyle += `
+      right: 200px;
+      top: 50%;
+      transform: translateY(-50%);
+    `
+  }
+
+  if (position === 'right') {
     seatStyle += `
       left: 200px;
       top: 50%;
@@ -236,17 +79,95 @@ export function renderSeat({
     `
   }
 
+  return seatStyle
+}
+
+function buildFallbackSeatUi({
+  playerId,
+  cardsCount,
+  currentTurn,
+  dealerPlayerId,
+  gameState = {},
+}) {
+  const phase = gameState?.phase ?? null
+  const activeBiddingPlayerId = getActiveBiddingPlayerId(gameState)
+  const isBiddingPhase = phase === 'bidding'
+
+  const isActive = isBiddingPhase
+    ? activeBiddingPlayerId === playerId
+    : currentTurn === playerId
+
+  const firstRoundDealt = gameState?.firstRoundDealt ?? false
+  const secondRoundDealt = gameState?.secondRoundDealt ?? false
+
+  const showBidInfo =
+    phase === 'bidding' ||
+    (firstRoundDealt && !secondRoundDealt && phase !== 'playing' && phase !== 'round-complete')
+
+  return {
+    seatId: playerId,
+    cardCount: cardsCount,
+    isDealer: dealerPlayerId === playerId,
+    isActive,
+    showBidInfo,
+    bidInfo: getBidInfoForPlayer(gameState, playerId),
+    biddingTimeProgress: getBiddingTimeProgress(gameState, playerId, isActive),
+    biddingSecondsLeft: getBiddingSecondsLeft(gameState, playerId, isActive),
+    showCuttingTimer: false,
+    cuttingTimeProgress: 0,
+    mode: isActive ? 'active' : 'idle',
+  }
+}
+
+export function renderSeat({
+  player,
+  name,
+  cardsCount,
+  currentTurn,
+  playerId,
+  position,
+  dealerPlayerId,
+  gameState = {},
+  seatUi = null,
+}) {
+  const resolvedSeatUi =
+    seatUi ??
+    gameState?.seatUi?.[playerId] ??
+    buildFallbackSeatUi({
+      playerId,
+      cardsCount,
+      currentTurn,
+      dealerPlayerId,
+      gameState,
+    })
+
+  const resolvedCardsCount = resolvedSeatUi.cardCount ?? cardsCount
+  const isDealer = resolvedSeatUi.isDealer ?? dealerPlayerId === playerId
+  const isActive = resolvedSeatUi.isActive ?? false
+  const showBidInfo = resolvedSeatUi.showBidInfo ?? false
+  const lastBidInfo = resolvedSeatUi.bidInfo ?? null
+  const timeProgress = resolvedSeatUi.biddingTimeProgress ?? 0
+  const timerSecondsLeft = resolvedSeatUi.biddingSecondsLeft ?? 0
+  const showCuttingTimer = resolvedSeatUi.showCuttingTimer ?? false
+  const cuttingTimeProgress = resolvedSeatUi.cuttingTimeProgress ?? 0
+
+  const wrapperStyle = buildSeatWrapperStyle(position)
+  const seatStyle = buildSeatCardStyle(position, showBidInfo)
+
   return `
     <div style="${wrapperStyle}">
-      ${renderOpponentCardFan(cardsCount, position)}
+      ${renderOpponentCardFan(resolvedCardsCount, position)}
       ${renderDealerMarker(position, isDealer)}
 
       <div style="${seatStyle}">
         ${renderSeatPanel(player, name, isActive, {
+          playerId,
           showBidInfo,
           lastBidInfo,
           timeProgress,
           timerSecondsLeft,
+          showCuttingTimer,
+          cuttingTimeProgress,
         })}
       </div>
     </div>

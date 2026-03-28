@@ -6,55 +6,118 @@ import {
   getBiddingSecondsLeft,
 } from './tableBiddingUi.js'
 
-export function buildTableLayoutState(players, hands = {}, gameState = {}) {
-  const topPlayer = players.find((player) => player.position === 'top')
-  const leftPlayer = players.find((player) => player.position === 'left')
-  const rightPlayer = players.find((player) => player.position === 'right')
-  const bottomPlayer = players.find((player) => player.position === 'bottom')
+const SEAT_ORDER_COUNTERCLOCKWISE = ['bottom', 'right', 'top', 'left']
 
-  const topCount = hands.top?.length ?? 0
-  const leftCount = hands.left?.length ?? 0
-  const rightCount = hands.right?.length ?? 0
-  const bottomCount = hands.bottom?.length ?? 0
+function getPlayerByPosition(players, position) {
+  return players.find((player) => player.position === position) ?? null
+}
 
-  const phase = gameState.phase ?? null
-  const dealStep = gameState.dealStep ?? null
-  const isLastThreeDealPhase = phase === 'dealing' && dealStep === 'last-3'
-  const bidding = gameState.bidding ?? {}
+function getSeatCardCount(hands = {}, seatId) {
+  return hands?.[seatId]?.length ?? 0
+}
 
-  const currentTurn =
-    phase === 'bidding'
-      ? getActiveBiddingPlayerId(gameState)
-      : gameState.currentTurn ?? gameState.currentPlayerId ?? null
+function hasSelectedCutIndex(gameState = {}) {
+  return gameState?.selectedCutIndex !== null && gameState?.selectedCutIndex !== undefined
+}
 
-  const contract = bidding.contract ?? gameState.contract ?? null
-  const trumpSuit = bidding.trumpSuit ?? gameState.trumpSuit ?? null
-  const winningBidder = bidding.winningBidder ?? gameState.winningBidder ?? null
-  const currentTrick = gameState.currentTrick ?? []
-  const scores = gameState.scores ?? { teamA: 0, teamB: 0 }
-  const dealerPlayerId = getPlayerIdByIndex(gameState.dealerIndex)
-
-  const showBottomHand =
-    phase === 'bidding' || phase === 'playing' || phase === 'round-complete'
-
-  const firstRoundDealt = gameState?.firstRoundDealt ?? false
-  const secondRoundDealt = gameState?.secondRoundDealt ?? false
-
-  const showBottomBidInfo =
+function shouldShowSeatBidInfo({
+  phase,
+  isLastThreeDealPhase,
+  firstRoundDealt,
+  secondRoundDealt,
+}) {
+  return (
     !isLastThreeDealPhase &&
     (
       phase === 'bidding' ||
       (firstRoundDealt && !secondRoundDealt && phase !== 'playing' && phase !== 'round-complete')
     )
+  )
+}
 
-  const isBottomActive = currentTurn === 'bottom'
-  const bottomBidInfo = getBidInfoForPlayer(gameState, 'bottom')
-  const bottomTimeProgress = getBiddingTimeProgress(gameState, 'bottom', isBottomActive)
-  const bottomTimerSecondsLeft = getBiddingSecondsLeft(gameState, 'bottom', isBottomActive)
+function resolveCurrentTurn(phase, gameState = {}) {
+  return phase === 'bidding'
+    ? getActiveBiddingPlayerId(gameState)
+    : gameState.currentTurn ?? gameState.currentPlayerId ?? null
+}
 
-  const centerBoxStyle =
-    phase === 'cutting' || isLastThreeDealPhase
-      ? `
+function resolveSeatMode({
+  phase,
+  seatId,
+  activeSeatId,
+  cuttingPlayer,
+  cutAlreadySelected,
+}) {
+  if (phase === 'bidding' && activeSeatId === seatId) {
+    return 'bidding-active'
+  }
+
+  if (phase === 'cutting' && cuttingPlayer === seatId && !cutAlreadySelected) {
+    return 'cutting-active'
+  }
+
+  if (phase === 'dealing') {
+    return 'dealing'
+  }
+
+  if (phase === 'playing' && activeSeatId === seatId) {
+    return 'playing-active'
+  }
+
+  return 'idle'
+}
+
+function buildSeatUiState({
+  seatId,
+  player,
+  cardCount,
+  phase,
+  activeSeatId,
+  dealerPlayerId,
+  cuttingPlayer,
+  cutAlreadySelected,
+  showBidInfo,
+  gameState,
+}) {
+  const isBiddingActive = phase === 'bidding' && activeSeatId === seatId
+  const isCuttingActive = phase === 'cutting' && cuttingPlayer === seatId && !cutAlreadySelected
+  const isPlayingActive = phase === 'playing' && activeSeatId === seatId
+
+  const biddingTimeProgress = getBiddingTimeProgress(gameState, seatId, isBiddingActive)
+  const biddingSecondsLeft = getBiddingSecondsLeft(gameState, seatId, isBiddingActive)
+  const cuttingTimeProgress = Math.max(
+    0,
+    Math.min(100, Number(gameState?.ui?.cutting?.progressPercent ?? 100))
+  )
+
+  return {
+    seatId,
+    player,
+    cardCount,
+    isDealer: dealerPlayerId === seatId,
+    isActive: isBiddingActive || isCuttingActive || isPlayingActive,
+    isBiddingActive,
+    isCuttingActive,
+    isPlayingActive,
+    showBidInfo,
+    bidInfo: getBidInfoForPlayer(gameState, seatId),
+    biddingTimeProgress,
+    biddingSecondsLeft,
+    showCuttingTimer: isCuttingActive,
+    cuttingTimeProgress,
+    mode: resolveSeatMode({
+      phase,
+      seatId,
+      activeSeatId,
+      cuttingPlayer,
+      cutAlreadySelected,
+    }),
+  }
+}
+
+function buildCenterBoxStyle(phase, isLastThreeDealPhase) {
+  return phase === 'cutting' || isLastThreeDealPhase
+    ? `
         position: absolute;
         left: 50%;
         top: 50%;
@@ -68,7 +131,7 @@ export function buildTableLayoutState(players, hands = {}, gameState = {}) {
         min-height: 260px;
         z-index: 2;
       `
-      : `
+    : `
         position: absolute;
         left: 50%;
         top: 50%;
@@ -82,6 +145,98 @@ export function buildTableLayoutState(players, hands = {}, gameState = {}) {
         min-height: 220px;
         z-index: 2;
       `
+}
+
+export function buildTableLayoutState(players, hands = {}, gameState = {}) {
+  const phase = gameState.phase ?? null
+  const dealStep = gameState.dealStep ?? null
+  const isLastThreeDealPhase = phase === 'dealing' && dealStep === 'last-3'
+  const bidding = gameState.bidding ?? {}
+
+  const topPlayer = getPlayerByPosition(players, 'top')
+  const leftPlayer = getPlayerByPosition(players, 'left')
+  const rightPlayer = getPlayerByPosition(players, 'right')
+  const bottomPlayer = getPlayerByPosition(players, 'bottom')
+
+  const topCount = getSeatCardCount(hands, 'top')
+  const leftCount = getSeatCardCount(hands, 'left')
+  const rightCount = getSeatCardCount(hands, 'right')
+  const bottomCount = getSeatCardCount(hands, 'bottom')
+
+  const firstRoundDealt = gameState?.firstRoundDealt ?? false
+  const secondRoundDealt = gameState?.secondRoundDealt ?? false
+  const cuttingPlayer = gameState?.cuttingPlayer ?? null
+  const cutAlreadySelected = hasSelectedCutIndex(gameState)
+
+  const currentTurn = resolveCurrentTurn(phase, gameState)
+
+  const contract = bidding.contract ?? gameState.contract ?? null
+  const trumpSuit = bidding.trumpSuit ?? gameState.trumpSuit ?? null
+  const winningBidder = bidding.winningBidder ?? gameState.winningBidder ?? null
+  const currentTrick = gameState.currentTrick ?? []
+  const scores = gameState.scores ?? { teamA: 0, teamB: 0 }
+  const dealerPlayerId = getPlayerIdByIndex(gameState.dealerIndex)
+
+  const showBottomHand =
+    phase === 'bidding' || phase === 'playing' || phase === 'round-complete'
+
+  const showSeatBidInfo = shouldShowSeatBidInfo({
+    phase,
+    isLastThreeDealPhase,
+    firstRoundDealt,
+    secondRoundDealt,
+  })
+
+  const seatUi = {
+    bottom: buildSeatUiState({
+      seatId: 'bottom',
+      player: bottomPlayer,
+      cardCount: bottomCount,
+      phase,
+      activeSeatId: currentTurn,
+      dealerPlayerId,
+      cuttingPlayer,
+      cutAlreadySelected,
+      showBidInfo: showSeatBidInfo,
+      gameState,
+    }),
+    right: buildSeatUiState({
+      seatId: 'right',
+      player: rightPlayer,
+      cardCount: rightCount,
+      phase,
+      activeSeatId: currentTurn,
+      dealerPlayerId,
+      cuttingPlayer,
+      cutAlreadySelected,
+      showBidInfo: showSeatBidInfo,
+      gameState,
+    }),
+    top: buildSeatUiState({
+      seatId: 'top',
+      player: topPlayer,
+      cardCount: topCount,
+      phase,
+      activeSeatId: currentTurn,
+      dealerPlayerId,
+      cuttingPlayer,
+      cutAlreadySelected,
+      showBidInfo: showSeatBidInfo,
+      gameState,
+    }),
+    left: buildSeatUiState({
+      seatId: 'left',
+      player: leftPlayer,
+      cardCount: leftCount,
+      phase,
+      activeSeatId: currentTurn,
+      dealerPlayerId,
+      cuttingPlayer,
+      cutAlreadySelected,
+      showBidInfo: showSeatBidInfo,
+      gameState,
+    }),
+  }
 
   return {
     topPlayer,
@@ -103,11 +258,17 @@ export function buildTableLayoutState(players, hands = {}, gameState = {}) {
     currentTrick,
     scores,
     dealerPlayerId,
+    cuttingPlayer,
+    cutAlreadySelected,
     showBottomHand,
-    showBottomBidInfo,
-    bottomBidInfo,
-    bottomTimeProgress,
-    bottomTimerSecondsLeft,
-    centerBoxStyle,
+    showBottomBidInfo: seatUi.bottom.showBidInfo,
+    bottomBidInfo: seatUi.bottom.bidInfo,
+    bottomTimeProgress: seatUi.bottom.biddingTimeProgress,
+    bottomTimerSecondsLeft: seatUi.bottom.biddingSecondsLeft,
+    showBottomCuttingTimer: seatUi.bottom.showCuttingTimer,
+    bottomCuttingTimeProgress: seatUi.bottom.cuttingTimeProgress,
+    seatUi,
+    seatOrderCounterClockwise: SEAT_ORDER_COUNTERCLOCKWISE,
+    centerBoxStyle: buildCenterBoxStyle(phase, isLastThreeDealPhase),
   }
 }

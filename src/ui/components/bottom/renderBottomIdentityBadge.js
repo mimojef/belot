@@ -45,6 +45,71 @@ function formatTimerText(secondsLeft) {
   return `${safeSeconds} сек`
 }
 
+function renderBottomAvatarContent(avatar, safeName, displayName) {
+  if (avatar) {
+    return `
+      <img
+        src="${escapeHtml(avatar)}"
+        alt="${safeName}"
+        style="width:100%; height:100%; object-fit:cover; display:block;"
+      />
+    `
+  }
+
+  return `
+    <div
+      style="
+        width:100%;
+        height:100%;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        background:
+          radial-gradient(circle at 30% 30%, rgba(255,255,255,0.16), transparent 35%),
+          linear-gradient(135deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02)),
+          #223854;
+        color: rgba(255,255,255,0.92);
+        font-size: clamp(28px, 2.1vw, 40px);
+        font-weight: 800;
+      "
+    >
+      ${escapeHtml(getPlayerInitial(displayName))}
+    </div>
+  `
+}
+
+function renderProgressBar({
+  dataAttribute,
+  width,
+  opacity,
+  outerShadow,
+}) {
+  return `
+    <div
+      style="
+        width: 100%;
+        height: 8px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: rgba(7, 18, 33, 0.9);
+        box-shadow: ${outerShadow};
+      "
+    >
+      <div
+        ${dataAttribute}
+        style="
+          width: ${width};
+          height: 100%;
+          border-radius: 999px;
+          background: linear-gradient(90deg, #22c55e 0%, #4ade80 100%);
+          transition: width 0.15s linear, opacity 0.15s linear;
+          opacity: ${opacity};
+        "
+      ></div>
+    </div>
+  `
+}
+
 export function renderBottomIdentityBadge(
   player,
   fallbackName,
@@ -56,18 +121,19 @@ export function renderBottomIdentityBadge(
   const displayName = getPlayerDisplayName(player, fallbackName)
   const safeName = escapeHtml(displayName)
   const seatId = 'bottom'
-  const isActive = currentTurn === seatId
 
   const showBidInfo = options.showBidInfo ?? false
   const lastBidText = formatBidText(options.lastBidInfo)
   const timeProgress = Math.max(0, Math.min(100, Number(options.timeProgress ?? 0)))
   const timerSecondsLeft = Math.max(0, Number(options.timerSecondsLeft ?? 0))
-  const showTimer = showBidInfo && isActive
-
   const showCuttingTimer = options.showCuttingTimer ?? false
   const cuttingTimeProgress = Math.max(0, Math.min(100, Number(options.cuttingTimeProgress ?? 0)))
 
+  const isActive = options.isActive ?? currentTurn === seatId
   const isCompactActiveBiddingCard = showBidInfo && isActive
+  const showBiddingTimer = showBidInfo && isActive
+
+  const avatarContent = renderBottomAvatarContent(avatar, safeName, displayName)
 
   if (isCompactActiveBiddingCard) {
     return `
@@ -108,67 +174,20 @@ export function renderBottomIdentityBadge(
               border: 1px solid rgba(255,255,255,0.10);
             "
           >
-            ${
-              avatar
-                ? `
-                  <img
-                    src="${escapeHtml(avatar)}"
-                    alt="${safeName}"
-                    style="width:100%; height:100%; object-fit:cover; display:block;"
-                  />
-                `
-                : `
-                  <div
-                    style="
-                      width:100%;
-                      height:100%;
-                      display:flex;
-                      align-items:center;
-                      justify-content:center;
-                      background:
-                        radial-gradient(circle at 30% 30%, rgba(255,255,255,0.16), transparent 35%),
-                        linear-gradient(135deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02)),
-                        #223854;
-                      color: rgba(255,255,255,0.92);
-                      font-size: clamp(28px, 2.1vw, 40px);
-                      font-weight: 800;
-                    "
-                  >
-                    ${escapeHtml(getPlayerInitial(displayName))}
-                  </div>
-                `
-            }
+            ${avatarContent}
           </div>
         </div>
 
-        <div
-          style="
-            width: 100%;
-            height: 8px;
-            border-radius: 999px;
-            overflow: hidden;
-            background: rgba(7, 18, 33, 0.9);
-            box-shadow: inset 0 1px 2px rgba(0,0,0,0.24), 0 6px 14px rgba(0,0,0,0.18);
-          "
-        >
-          <div
-            data-bidding-progress-bar="${seatId}"
-            style="
-              width: ${showTimer ? `${timeProgress}%` : '0%'};
-              height: 100%;
-              border-radius: 999px;
-              background: linear-gradient(90deg, #22c55e 0%, #4ade80 100%);
-              transition: width 0.15s linear, opacity 0.15s linear;
-              opacity: ${showTimer ? '1' : '0'};
-            "
-          ></div>
-        </div>
+        ${renderProgressBar({
+          dataAttribute: `data-bidding-progress-bar="${seatId}"`,
+          width: showBiddingTimer ? `${timeProgress}%` : '0%',
+          opacity: showBiddingTimer ? '1' : '0',
+          outerShadow: 'inset 0 1px 2px rgba(0,0,0,0.24), 0 6px 14px rgba(0,0,0,0.18)',
+        })}
 
         <div
           data-bidding-timer-text="${seatId}"
-          style="
-            display: none;
-          "
+          style="display: none;"
         >
           ${escapeHtml(formatTimerText(timerSecondsLeft))}
         </div>
@@ -241,36 +260,7 @@ export function renderBottomIdentityBadge(
               border: 1px solid rgba(255,255,255,0.10);
             "
           >
-            ${
-              avatar
-                ? `
-                  <img
-                    src="${escapeHtml(avatar)}"
-                    alt="${safeName}"
-                    style="width:100%; height:100%; object-fit:cover; display:block;"
-                  />
-                `
-                : `
-                  <div
-                    style="
-                      width:100%;
-                      height:100%;
-                      display:flex;
-                      align-items:center;
-                      justify-content:center;
-                      background:
-                        radial-gradient(circle at 30% 30%, rgba(255,255,255,0.16), transparent 35%),
-                        linear-gradient(135deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02)),
-                        #223854;
-                      color: rgba(255,255,255,0.92);
-                      font-size: clamp(28px, 2.1vw, 40px);
-                      font-weight: 800;
-                    "
-                  >
-                    ${escapeHtml(getPlayerInitial(displayName))}
-                  </div>
-                `
-            }
+            ${avatarContent}
           </div>
         </div>
 
@@ -380,30 +370,12 @@ export function renderBottomIdentityBadge(
 
       ${
         showCuttingTimer
-          ? `
-            <div
-              style="
-                width: 100%;
-                height: 8px;
-                border-radius: 999px;
-                overflow: hidden;
-                background: rgba(7, 18, 33, 0.9);
-                box-shadow: inset 0 1px 2px rgba(0,0,0,0.24), 0 6px 14px rgba(0,0,0,0.18);
-              "
-            >
-              <div
-                data-cutting-progress-bar
-                style="
-                  width: ${`${cuttingTimeProgress}%`};
-                  height: 100%;
-                  border-radius: 999px;
-                  background: linear-gradient(90deg, #22c55e 0%, #4ade80 100%);
-                  transition: width 0.15s linear, opacity 0.15s linear;
-                  opacity: 1;
-                "
-              ></div>
-            </div>
-          `
+          ? renderProgressBar({
+              dataAttribute: 'data-cutting-progress-bar',
+              width: `${cuttingTimeProgress}%`,
+              opacity: '1',
+              outerShadow: 'inset 0 1px 2px rgba(0,0,0,0.24), 0 6px 14px rgba(0,0,0,0.18)',
+            })
           : ''
       }
     </div>

@@ -10,6 +10,7 @@ export function renderTableSeats({
   currentTurn,
   dealerPlayerId,
   gameState,
+  seatUi = {},
 }) {
   return `
     ${renderSeat({
@@ -21,6 +22,7 @@ export function renderTableSeats({
       position: 'top',
       dealerPlayerId,
       gameState,
+      seatUi: seatUi.top ?? null,
     })}
 
     ${renderSeat({
@@ -32,6 +34,7 @@ export function renderTableSeats({
       position: 'left',
       dealerPlayerId,
       gameState,
+      seatUi: seatUi.left ?? null,
     })}
 
     ${renderSeat({
@@ -43,6 +46,7 @@ export function renderTableSeats({
       position: 'right',
       dealerPlayerId,
       gameState,
+      seatUi: seatUi.right ?? null,
     })}
   `
 }
