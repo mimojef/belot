@@ -23,7 +23,6 @@ export function renderCuttingScreen(gameState = {}, statusText = '') {
 
   const cuttingUi = gameState?.ui?.cutting ?? {}
   const timerSecondsLeft = Math.max(0, Number(cuttingUi.secondsLeft ?? 15))
-  const timeProgress = Math.max(0, Math.min(100, Number(cuttingUi.progressPercent ?? 100)))
 
   const shouldAutoStartCutAnimation =
     Boolean(cuttingPlayer) &&
@@ -37,8 +36,6 @@ export function renderCuttingScreen(gameState = {}, statusText = '') {
     isHumanCutting &&
     !hasSelectedCutIndex &&
     timerSecondsLeft > 0
-
-  const showCuttingTimer = Boolean(cuttingPlayer) && !hasSelectedCutIndex
 
   const primaryTitle = isHumanCutting
     ? 'ТИ ЦЕПИШ'
@@ -103,55 +100,6 @@ export function renderCuttingScreen(gameState = {}, statusText = '') {
         "
       >
         ${primaryTitle}
-      </div>
-
-      <div
-        data-cutting-timer-wrap
-        style="
-          width: min(34vw, 320px);
-          display: ${showCuttingTimer ? 'flex' : 'none'};
-          flex-direction: column;
-          align-items: center;
-          gap: 6px;
-          margin-bottom: 2px;
-          transition: opacity 0.2s ease, transform 0.2s ease;
-        "
-      >
-        <div
-          data-cutting-timer-text
-          style="
-            color: #ffffff;
-            font-size: clamp(14px, 1vw, 18px);
-            font-weight: 800;
-            text-shadow: 0 2px 8px rgba(0,0,0,0.24);
-            line-height: 1;
-          "
-        >
-          ${timerSecondsLeft} сек
-        </div>
-
-        <div
-          style="
-            width: 100%;
-            height: 8px;
-            border-radius: 999px;
-            overflow: hidden;
-            background: rgba(7, 18, 33, 0.82);
-            box-shadow: inset 0 1px 2px rgba(0,0,0,0.24), 0 8px 18px rgba(0,0,0,0.12);
-          "
-        >
-          <div
-            data-cutting-progress-bar
-            style="
-              width: ${showCuttingTimer ? `${timeProgress}%` : '0%'};
-              height: 100%;
-              border-radius: 999px;
-              background: linear-gradient(90deg, #22c55e 0%, #4ade80 100%);
-              transition: width 0.15s linear, opacity 0.15s linear;
-              opacity: ${showCuttingTimer ? '1' : '0'};
-            "
-          ></div>
-        </div>
       </div>
 
       ${renderCuttingDeck({

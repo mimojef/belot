@@ -16,6 +16,20 @@ export function renderTableLayout(players, statusText, hands = {}, gameState = {
     bidding: viewState.bidding,
   })
 
+  const cuttingUi = gameState?.ui?.cutting ?? {}
+  const hasSelectedCutIndex =
+    gameState?.selectedCutIndex !== null && gameState?.selectedCutIndex !== undefined
+
+  const showBottomCuttingTimer =
+    gameState?.phase === 'cutting' &&
+    gameState?.cuttingPlayer === 'bottom' &&
+    !hasSelectedCutIndex
+
+  const bottomCuttingTimeProgress = Math.max(
+    0,
+    Math.min(100, Number(cuttingUi.progressPercent ?? 100))
+  )
+
   return `
     <div class="app">
       <main
@@ -90,6 +104,8 @@ export function renderTableLayout(players, statusText, hands = {}, gameState = {
             bottomBidInfo: viewState.bottomBidInfo,
             bottomTimeProgress: viewState.bottomTimeProgress,
             bottomTimerSecondsLeft: viewState.bottomTimerSecondsLeft,
+            showBottomCuttingTimer,
+            bottomCuttingTimeProgress,
           })}
 
           ${renderTableBiddingPanel(viewState.phase, biddingControlsHtml)}

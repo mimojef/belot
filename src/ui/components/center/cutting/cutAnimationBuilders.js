@@ -180,6 +180,39 @@ function buildCutAnimationRunnerScript(dealCardHtml) {
 
       ${buildSeatTargetRuntimeHelpers()}
 
+      function normalizeBottomSeatAfterCutSelection() {
+        const bottomSeatRoot = document.querySelector('[data-bidding-seat-root="bottom"]');
+
+        if (!bottomSeatRoot) {
+          return;
+        }
+
+        bottomSeatRoot.style.gap = '0';
+
+        const bottomSeatCard = bottomSeatRoot.firstElementChild;
+        if (bottomSeatCard) {
+          bottomSeatCard.style.border = '3px solid rgba(255,255,255,0.12)';
+          bottomSeatCard.style.boxShadow = '0 12px 24px rgba(0,0,0,0.22)';
+        }
+
+        const cuttingProgressBar = bottomSeatRoot.querySelector('[data-cutting-progress-bar]');
+        const cuttingProgressWrap = cuttingProgressBar ? cuttingProgressBar.parentElement : null;
+
+        if (cuttingProgressBar) {
+          cuttingProgressBar.style.opacity = '0';
+          cuttingProgressBar.style.width = '0%';
+        }
+
+        if (cuttingProgressWrap) {
+          cuttingProgressWrap.style.opacity = '0';
+          cuttingProgressWrap.style.transform = 'translateY(-4px)';
+          cuttingProgressWrap.style.pointerEvents = 'none';
+          cuttingProgressWrap.style.transition = 'opacity 0.15s linear, transform 0.15s ease';
+        }
+      }
+
+      normalizeBottomSeatAfterCutSelection();
+
       const cards = Array.from(deck.querySelectorAll('[data-cut-card-index]'));
       const leftCards = cards.filter((card) => Number(card.dataset.cutCardIndex) < cutIndex);
       const rightCards = cards.filter((card) => Number(card.dataset.cutCardIndex) >= cutIndex);

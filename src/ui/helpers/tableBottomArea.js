@@ -16,6 +16,8 @@ export function renderTableBottomArea({
   bottomBidInfo = null,
   bottomTimeProgress = 0,
   bottomTimerSecondsLeft = 0,
+  showBottomCuttingTimer = false,
+  bottomCuttingTimeProgress = 0,
 }) {
   return `
     <div
@@ -39,6 +41,8 @@ export function renderTableBottomArea({
         lastBidInfo: bottomBidInfo,
         timeProgress: bottomTimeProgress,
         timerSecondsLeft: bottomTimerSecondsLeft,
+        showCuttingTimer: showBottomCuttingTimer,
+        cuttingTimeProgress: bottomCuttingTimeProgress,
       })}
       ${renderDealerMarker('bottom', dealerPlayerId === 'bottom')}
     </div>
