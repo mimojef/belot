@@ -1,14 +1,15 @@
 {
-  "name": "belot",
-  "version": "0.0.0",
+  "name": "belot-v2",
   "private": true,
+  "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "tsc && vite build",
     "preview": "vite preview"
   },
   "devDependencies": {
+    "typescript": "~5.9.3",
     "vite": "^8.0.1"
   }
 }
