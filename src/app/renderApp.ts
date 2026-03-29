@@ -4,9 +4,11 @@ import type { Suit } from '../core/state/gameTypes'
 import { getBiddingViewState } from '../core/state/getBiddingViewState'
 import { getPlayingViewState } from '../core/state/getPlayingViewState'
 import { getBottomHandViewState } from '../core/state/getBottomHandViewState'
+import { getScoringViewState } from '../core/state/getScoringViewState'
 import { renderBiddingPanel } from '../ui/center/renderBiddingPanel'
 import { renderPlayingPanel } from '../ui/center/renderPlayingPanel'
 import { renderBottomHandPanel } from '../ui/center/renderBottomHandPanel'
+import { renderScoringPanel } from '../ui/center/renderScoringPanel'
 
 type RenderAppOptions = {
   onNextPhaseClick?: () => void
@@ -176,9 +178,18 @@ export function renderApp(
   const isCuttingPhase = state.phase === 'cutting'
   const isBiddingPhase = state.phase === 'bidding'
   const isPlayingPhase = state.phase === 'playing'
+  const isScoringPhase = state.phase === 'scoring'
+  const isSummaryPhase = state.phase === 'summary'
+  const shouldShowScoringPanel = isScoringPhase || isSummaryPhase
 
   const biddingViewState = isBiddingPhase ? getBiddingViewState(state) : null
   const playingViewState = isPlayingPhase ? getPlayingViewState(state) : null
+  const scoringViewState = shouldShowScoringPanel
+    ? {
+        ...getScoringViewState(state),
+        isVisible: true,
+      }
+    : null
   const bottomHandViewState = getBottomHandViewState(state)
 
   rootElement.innerHTML = `
@@ -219,7 +230,7 @@ export function renderApp(
       </div>
 
       ${
-        !isPlayingPhase && bottomHandViewState.shouldShow
+        !isPlayingPhase && !isScoringPhase && !isSummaryPhase && bottomHandViewState.shouldShow
           ? `
         <div style="max-width: 920px; margin-bottom: 16px;">
           ${renderBottomHandPanel(bottomHandViewState)}
@@ -318,6 +329,16 @@ export function renderApp(
           ? `
         <div style="max-width: 920px; margin-bottom: 16px;">
           ${renderPlayingPanel(playingViewState)}
+        </div>
+      `
+          : ''
+      }
+
+      ${
+        scoringViewState
+          ? `
+        <div style="max-width: 920px; margin-bottom: 16px;">
+          ${renderScoringPanel(scoringViewState)}
         </div>
       `
           : ''

@@ -61,7 +61,7 @@ export type BiddingState = {
   consecutivePasses: number
 }
 
-export type DeclarationType = 'sequence-3' | 'sequence-4' | 'sequence-5-plus' | 'belote'
+export type DeclarationType = 'sequence' | 'square' | 'belote'
 
 export type Declaration = {
   seat: Seat
@@ -105,6 +105,41 @@ export type PlayingState = {
   lastCompletedTrickWinnerTeam: Team | null
   wonTricksBySeat: Record<Seat, Card[][]>
   wonTricksByTeam: Record<Team, Card[][]>
+}
+
+export type BaseRoundTeamScore = {
+  team: Team
+  rawPoints: number
+  tricksWon: number
+}
+
+export type BaseRoundScoreResult = {
+  teamA: BaseRoundTeamScore
+  teamB: BaseRoundTeamScore
+  lastTrickWinner: Seat | null
+  expectedTotalPoints: number
+  actualTotalPoints: number
+  isComplete: boolean
+  isPointTotalValid: boolean
+}
+
+export type RoundOutcomeType = 'made' | 'inside' | 'tie' | 'unknown'
+
+export type RoundOutcomeResult = {
+  bidderTeam: Team | null
+  defenderTeam: Team | null
+  bidderPoints: number
+  defenderPoints: number
+  isTie: boolean
+  isInside: boolean
+  isMade: boolean
+  winningTeam: Team | null
+  outcome: RoundOutcomeType
+}
+
+export type ScoringState = {
+  baseRoundScore: BaseRoundScoreResult | null
+  roundOutcome: RoundOutcomeResult | null
 }
 
 export type RoundScore = {
@@ -152,6 +187,7 @@ export type GameState = {
   currentTrick: TrickState
   wonTricks: Record<Team, Card[][]>
   playing?: PlayingState
+  scoring?: ScoringState
   score: {
     round: ScoreBreakdown
     match: RoundScore

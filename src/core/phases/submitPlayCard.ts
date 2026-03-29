@@ -1,13 +1,81 @@
-import type { Card, GameState, TrickPlay } from '../state/gameTypes'
+import type { Card, GameState, RoundScore, TrickPlay } from '../state/gameTypes'
 import {
   getNextSeatCounterClockwise,
   getTeamBySeat,
 } from '../state/createInitialState'
 import { getValidCardsForSeat } from '../rules/getValidCardsForSeat'
 import { getWinningTrickPlay } from '../rules/getWinningTrickPlay'
+import { calculateBaseRoundScore } from '../rules/calculateBaseRoundScore'
+import { calculateRoundOutcome } from '../rules/calculateRoundOutcome'
+import { buildOfficialRoundScore } from '../rules/buildOfficialRoundScore'
+import {
+  buildBeloteScore,
+  buildComparableDeclarationsScore,
+  resolveDeclarations,
+} from '../rules/declarationsRules'
 
 function removeCardFromHand(hand: Card[], cardId: string): Card[] {
   return hand.filter((card) => card.id !== cardId)
+}
+
+function addRoundScore(current: RoundScore, added: RoundScore): RoundScore {
+  return {
+    teamA: current.teamA + added.teamA,
+    teamB: current.teamB + added.teamB,
+  }
+}
+
+function resolveScoringContract(
+  winningBid: GameState['bidding']['winningBid']
+): 'color' | 'all-trumps' | 'no-trumps' | null {
+  if (!winningBid) {
+    return null
+  }
+
+  if (winningBid.contract === 'suit') {
+    return 'color'
+  }
+
+  if (winningBid.contract === 'all-trumps') {
+    return 'all-trumps'
+  }
+
+  if (winningBid.contract === 'no-trumps') {
+    return 'no-trumps'
+  }
+
+  return null
+}
+
+function resolveScoringTrumpSuit(
+  winningBid: GameState['bidding']['winningBid']
+): 'clubs' | 'diamonds' | 'hearts' | 'spades' | null {
+  if (!winningBid) {
+    return null
+  }
+
+  const rawTrumpSuit = winningBid.trumpSuit
+
+  if (
+    rawTrumpSuit === 'clubs' ||
+    rawTrumpSuit === 'diamonds' ||
+    rawTrumpSuit === 'hearts' ||
+    rawTrumpSuit === 'spades'
+  ) {
+    return rawTrumpSuit
+  }
+
+  return null
+}
+
+function resolveBidderSeat(
+  winningBid: GameState['bidding']['winningBid']
+): 'bottom' | 'right' | 'top' | 'left' | null {
+  if (!winningBid) {
+    return null
+  }
+
+  return winningBid.seat
 }
 
 export function submitPlayCard(state: GameState, cardId: string): GameState {
@@ -98,18 +166,22 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
     [winnerTeam]: [...state.wonTricks[winnerTeam], trickCards],
   }
 
+  const nextCompletedTricks = [...(state.playing?.completedTricks ?? []), completedTrick]
+
+  const nextCurrentTrick = {
+    leaderSeat: winnerSeat,
+    currentSeat: winnerSeat,
+    plays: [],
+    winnerSeat: null,
+    trickIndex: completedTrickIndex + 1,
+  }
+
   const nextPlaying = state.playing
     ? {
         ...state.playing,
         currentTurnSeat: winnerSeat,
-        currentTrick: {
-          leaderSeat: winnerSeat,
-          currentSeat: winnerSeat,
-          plays: [],
-          winnerSeat: null,
-          trickIndex: completedTrickIndex + 1,
-        },
-        completedTricks: [...state.playing.completedTricks, completedTrick],
+        currentTrick: nextCurrentTrick,
+        completedTricks: nextCompletedTricks,
         lastCompletedTrickWinnerSeat: winnerSeat,
         lastCompletedTrickWinnerTeam: winnerTeam,
         wonTricksBySeat: {
@@ -123,12 +195,76 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
       }
     : state.playing
 
-  const nextCurrentTrick = {
-    leaderSeat: winnerSeat,
-    currentSeat: winnerSeat,
-    plays: [],
-    winnerSeat: null,
-    trickIndex: completedTrickIndex + 1,
+  const isRoundComplete = nextCompletedTricks.length === 8
+
+  if (isRoundComplete) {
+    const scoringContract = resolveScoringContract(state.bidding.winningBid)
+    const scoringTrumpSuit = resolveScoringTrumpSuit(state.bidding.winningBid)
+    const bidderSeat = resolveBidderSeat(state.bidding.winningBid)
+
+    if (!scoringContract) {
+      return {
+        ...state,
+        hands: nextHands,
+        currentTrick: nextCurrentTrick,
+        wonTricks: nextWonTricks,
+        playing: nextPlaying,
+      }
+    }
+
+    const baseRoundScore = calculateBaseRoundScore({
+      tricks: nextCompletedTricks.map((trick) => ({
+        winner: trick.winnerSeat,
+        cards: trick.plays.map((play) => ({
+          suit: play.card.suit,
+          rank: play.card.rank,
+        })),
+      })),
+      contract: scoringContract,
+      trumpSuit: scoringTrumpSuit,
+    })
+
+    const declarationResolution = resolveDeclarations(state.declarations)
+    const resolvedDeclarations = declarationResolution.resolvedDeclarations
+    const declarationsScore = buildComparableDeclarationsScore(resolvedDeclarations)
+    const beloteScore = buildBeloteScore(resolvedDeclarations)
+
+    const roundOutcome = calculateRoundOutcome({
+      baseRoundScore,
+      bidderSeat,
+      declarationsTeamA: declarationsScore.teamA,
+      declarationsTeamB: declarationsScore.teamB,
+      beloteTeamA: beloteScore.teamA,
+      beloteTeamB: beloteScore.teamB,
+    })
+
+    const officialRoundScore = buildOfficialRoundScore({
+      baseRoundScore,
+      roundOutcome,
+      currentCarryOver: state.score.carryOver,
+      declarationsScore,
+      beloteScore,
+    })
+
+    return {
+      ...state,
+      phase: 'scoring',
+      hands: nextHands,
+      declarations: resolvedDeclarations,
+      currentTrick: nextCurrentTrick,
+      wonTricks: nextWonTricks,
+      playing: nextPlaying,
+      scoring: {
+        baseRoundScore,
+        roundOutcome,
+      },
+      score: {
+        ...state.score,
+        round: officialRoundScore.roundBreakdown,
+        match: addRoundScore(state.score.match, officialRoundScore.roundBreakdown.total),
+        carryOver: officialRoundScore.nextCarryOver,
+      },
+    }
   }
 
   return {

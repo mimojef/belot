@@ -33,35 +33,35 @@ function getTrumpSuit(winningBid: WinningBid): Suit | null {
   return winningBid.trumpSuit
 }
 
-function getHighestTrumpCard(plays: TrickPlay[], trumpSuit: Suit): Card | null {
-  const trumpCards = plays
+function getHighestCardInSuitByTrumpOrder(plays: TrickPlay[], suit: Suit): Card | null {
+  const suitedCards = plays
     .map((play) => play.card)
-    .filter((card) => card.suit === trumpSuit)
+    .filter((card) => card.suit === suit)
 
-  if (trumpCards.length === 0) {
+  if (suitedCards.length === 0) {
     return null
   }
 
-  let highestTrumpCard = trumpCards[0]
+  let highestCard = suitedCards[0]
 
-  for (let index = 1; index < trumpCards.length; index += 1) {
-    const challenger = trumpCards[index]
+  for (let index = 1; index < suitedCards.length; index += 1) {
+    const challenger = suitedCards[index]
 
-    if (TRUMP_RANK_POWER[challenger.rank] > TRUMP_RANK_POWER[highestTrumpCard.rank]) {
-      highestTrumpCard = challenger
+    if (TRUMP_RANK_POWER[challenger.rank] > TRUMP_RANK_POWER[highestCard.rank]) {
+      highestCard = challenger
     }
   }
 
-  return highestTrumpCard
+  return highestCard
 }
 
-function getHigherTrumpCards(cards: Card[], highestTrumpCard: Card | null): Card[] {
-  if (!highestTrumpCard) {
+function getHigherCardsByTrumpOrder(cards: Card[], highestCard: Card | null): Card[] {
+  if (!highestCard) {
     return cards
   }
 
   return cards.filter(
-    (card) => TRUMP_RANK_POWER[card.rank] > TRUMP_RANK_POWER[highestTrumpCard.rank]
+    (card) => TRUMP_RANK_POWER[card.rank] > TRUMP_RANK_POWER[highestCard.rank]
   )
 }
 
@@ -97,8 +97,8 @@ function getValidCardsInSuitContract(
       return hand
     }
 
-    const highestTrumpCard = getHighestTrumpCard(plays, trumpSuit)
-    const higherTrumpCards = getHigherTrumpCards(followSuitCards, highestTrumpCard)
+    const highestTrumpCard = getHighestCardInSuitByTrumpOrder(plays, trumpSuit)
+    const higherTrumpCards = getHigherCardsByTrumpOrder(followSuitCards, highestTrumpCard)
 
     if (higherTrumpCards.length > 0) {
       return higherTrumpCards
@@ -119,14 +119,38 @@ function getValidCardsInSuitContract(
     return hand
   }
 
-  const highestTrumpCard = getHighestTrumpCard(plays, trumpSuit)
-  const higherTrumpCards = getHigherTrumpCards(trumpCards, highestTrumpCard)
+  const highestTrumpCard = getHighestCardInSuitByTrumpOrder(plays, trumpSuit)
+  const higherTrumpCards = getHigherCardsByTrumpOrder(trumpCards, highestTrumpCard)
 
   if (higherTrumpCards.length > 0) {
     return higherTrumpCards
   }
 
   return trumpCards
+}
+
+function getValidCardsInAllTrumpsContract(
+  hand: Card[],
+  plays: TrickPlay[],
+  leadSuit: Suit
+): Card[] {
+  const followSuitCards = getCardsBySuit(hand, leadSuit)
+
+  if (followSuitCards.length === 0) {
+    return hand
+  }
+
+  const highestLeadSuitCard = getHighestCardInSuitByTrumpOrder(plays, leadSuit)
+  const higherLeadSuitCards = getHigherCardsByTrumpOrder(
+    followSuitCards,
+    highestLeadSuitCard
+  )
+
+  if (higherLeadSuitCards.length > 0) {
+    return higherLeadSuitCards
+  }
+
+  return followSuitCards
 }
 
 export function getValidCardsForSeat(state: GameState, seat: Seat): Card[] {
@@ -141,6 +165,10 @@ export function getValidCardsForSeat(state: GameState, seat: Seat): Card[] {
 
   if (!leadSuit) {
     return hand
+  }
+
+  if (winningBid?.contract === 'all-trumps') {
+    return getValidCardsInAllTrumpsContract(hand, trickPlays, leadSuit)
   }
 
   const trumpSuit = getTrumpSuit(winningBid)

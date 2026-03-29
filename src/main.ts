@@ -2,6 +2,7 @@ import './style.css'
 import { bootstrapApp } from './app/bootstrap'
 import { runPlayingBotsUntilHumanTurn } from './app/runPlayingBotsUntilHumanTurn'
 import { renderApp } from './app/renderApp'
+import { createBelotePromptController } from './app/playPrompts/createBelotePromptController'
 
 const rootElement = document.querySelector<HTMLDivElement>('#app')
 
@@ -9,12 +10,13 @@ if (!rootElement) {
   throw new Error('Root element #app was not found.')
 }
 
+const appRoot = rootElement
 const app = bootstrapApp()
 
 function render(): void {
   runPlayingBotsUntilHumanTurn(app)
 
-  renderApp(rootElement!, app, {
+  renderApp(appRoot, app, {
     onNextPhaseClick: () => {
       app.engine.goToNextPhase()
       render()
@@ -52,10 +54,23 @@ function render(): void {
       render()
     },
     onPlayCard: (cardId) => {
+      const didOpenBelotePrompt = belotePromptController.handlePlayCard(cardId)
+
+      if (didOpenBelotePrompt) {
+        return
+      }
+
       app.engine.submitPlayCard(cardId)
       render()
     },
   })
+
+  belotePromptController.renderPendingPrompt()
 }
+
+const belotePromptController = createBelotePromptController({
+  app,
+  render,
+})
 
 render()
