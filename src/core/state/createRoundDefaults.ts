@@ -5,6 +5,7 @@ import type {
   CarryOverPoints,
   Declaration,
   PlayerState,
+  PlayingState,
   RoundScore,
   ScoreBreakdown,
   Team,
@@ -79,6 +80,28 @@ export function createEmptyWonTricks(): Record<Team, Card[][]> {
   return {
     A: [],
     B: [],
+  }
+}
+
+export function createEmptyWonTricksBySeat(): Record<Seat, Card[][]> {
+  return {
+    bottom: [],
+    right: [],
+    top: [],
+    left: [],
+  }
+}
+
+export function createEmptyPlayingState(): PlayingState {
+  return {
+    hasStarted: false,
+    currentTurnSeat: null,
+    currentTrick: createEmptyTrickState(),
+    completedTricks: [],
+    lastCompletedTrickWinnerSeat: null,
+    lastCompletedTrickWinnerTeam: null,
+    wonTricksBySeat: createEmptyWonTricksBySeat(),
+    wonTricksByTeam: createEmptyWonTricks(),
   }
 }
 

@@ -3,6 +3,7 @@ import {
   createEmptyBiddingState,
   createEmptyDeclarations,
   createEmptyHands,
+  createEmptyPlayingState,
   createEmptyScoreBreakdown,
   createEmptyTrickState,
   createEmptyWonTricks,
@@ -32,6 +33,7 @@ export function createRoundStartState(state: GameState, dealerSeat: Seat): GameS
     declarations: createEmptyDeclarations(),
     currentTrick: createEmptyTrickState(),
     wonTricks: createEmptyWonTricks(),
+    playing: createEmptyPlayingState(),
     score: {
       ...state.score,
       round: createEmptyScoreBreakdown(),

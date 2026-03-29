@@ -2,7 +2,11 @@ import type { AppBootstrap } from './bootstrap'
 import type { Seat } from '../data/constants/seatOrder'
 import type { Suit } from '../core/state/gameTypes'
 import { getBiddingViewState } from '../core/state/getBiddingViewState'
+import { getPlayingViewState } from '../core/state/getPlayingViewState'
+import { getBottomHandViewState } from '../core/state/getBottomHandViewState'
 import { renderBiddingPanel } from '../ui/center/renderBiddingPanel'
+import { renderPlayingPanel } from '../ui/center/renderPlayingPanel'
+import { renderBottomHandPanel } from '../ui/center/renderBottomHandPanel'
 
 type RenderAppOptions = {
   onNextPhaseClick?: () => void
@@ -14,6 +18,7 @@ type RenderAppOptions = {
   onBidAllTrumps?: () => void
   onBidDouble?: () => void
   onBidRedouble?: () => void
+  onPlayCard?: (cardId: string) => void
 }
 
 function formatSeat(seat: Seat | null): string {
@@ -61,6 +66,7 @@ function getActionElements(rootElement: HTMLElement, actionName: string): HTMLEl
       '[data-bid-action="redouble"]',
       '[data-bid-redouble]',
     ],
+    'play-card': ['[data-action="play-card"]'],
   }
 
   const selectors = selectorsByAction[actionName] ?? []
@@ -99,6 +105,11 @@ function readSuitFromElement(element: HTMLElement): Suit | null {
   return null
 }
 
+function readCardIdFromElement(element: HTMLElement): string | null {
+  const cardId = element.dataset.cardId ?? element.getAttribute('data-card-id') ?? null
+  return cardId && cardId.length > 0 ? cardId : null
+}
+
 function bindClick(elements: HTMLElement[], handler?: () => void): void {
   if (!handler) {
     return
@@ -134,6 +145,28 @@ function bindSuitClicks(
   }
 }
 
+function bindPlayCardClicks(
+  elements: HTMLElement[],
+  handler?: (cardId: string) => void
+): void {
+  if (!handler) {
+    return
+  }
+
+  for (const element of elements) {
+    element.addEventListener('click', (event) => {
+      event.preventDefault()
+
+      const cardId = readCardIdFromElement(element)
+      if (!cardId) {
+        return
+      }
+
+      handler(cardId)
+    })
+  }
+}
+
 export function renderApp(
   rootElement: HTMLElement,
   app: AppBootstrap,
@@ -142,7 +175,11 @@ export function renderApp(
   const state = app.engine.getState()
   const isCuttingPhase = state.phase === 'cutting'
   const isBiddingPhase = state.phase === 'bidding'
+  const isPlayingPhase = state.phase === 'playing'
+
   const biddingViewState = isBiddingPhase ? getBiddingViewState(state) : null
+  const playingViewState = isPlayingPhase ? getPlayingViewState(state) : null
+  const bottomHandViewState = getBottomHandViewState(state)
 
   rootElement.innerHTML = `
     <div style="padding: 24px; font-family: Arial, Helvetica, sans-serif; color: white; background: #0f172a; min-height: 100vh;">
@@ -180,6 +217,16 @@ export function renderApp(
           <div style="margin-top: 8px;">Карти: ${state.hands.left.length}</div>
         </div>
       </div>
+
+      ${
+        !isPlayingPhase && bottomHandViewState.shouldShow
+          ? `
+        <div style="max-width: 920px; margin-bottom: 16px;">
+          ${renderBottomHandPanel(bottomHandViewState)}
+        </div>
+      `
+          : ''
+      }
 
       ${
         isCuttingPhase
@@ -266,6 +313,16 @@ export function renderApp(
           : ''
       }
 
+      ${
+        playingViewState
+          ? `
+        <div style="max-width: 920px; margin-bottom: 16px;">
+          ${renderPlayingPanel(playingViewState)}
+        </div>
+      `
+          : ''
+      }
+
       <button
         type="button"
         data-action="next-phase"
@@ -331,5 +388,9 @@ export function renderApp(
       getActionElements(rootElement, 'bid-redouble'),
       options.onBidRedouble
     )
+  }
+
+  if (isPlayingPhase) {
+    bindPlayCardClicks(getActionElements(rootElement, 'play-card'), options.onPlayCard)
   }
 }

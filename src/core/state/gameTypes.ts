@@ -88,6 +88,25 @@ export type TrickState = {
   trickIndex: number
 }
 
+export type CompletedTrick = {
+  trickIndex: number
+  leaderSeat: Seat
+  plays: TrickPlay[]
+  winnerSeat: Seat
+  winningTeam: Team
+}
+
+export type PlayingState = {
+  hasStarted: boolean
+  currentTurnSeat: Seat | null
+  currentTrick: TrickState
+  completedTricks: CompletedTrick[]
+  lastCompletedTrickWinnerSeat: Seat | null
+  lastCompletedTrickWinnerTeam: Team | null
+  wonTricksBySeat: Record<Seat, Card[][]>
+  wonTricksByTeam: Record<Team, Card[][]>
+}
+
 export type RoundScore = {
   teamA: number
   teamB: number
@@ -132,6 +151,7 @@ export type GameState = {
   declarations: Declaration[]
   currentTrick: TrickState
   wonTricks: Record<Team, Card[][]>
+  playing?: PlayingState
   score: {
     round: ScoreBreakdown
     match: RoundScore

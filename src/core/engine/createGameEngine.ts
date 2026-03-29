@@ -3,6 +3,7 @@ import { resolveCutPhase } from '../phases/resolveCutPhase'
 import { runPhaseTransition } from '../phases/runPhaseTransition'
 import { selectCutIndex } from '../phases/selectCutIndex'
 import { submitBidAction } from '../phases/submitBidAction'
+import { submitPlayCard } from '../phases/submitPlayCard'
 import { createInitialState } from '../state/createInitialState'
 import type { BidAction, GameState } from '../state/gameTypes'
 import type { PhaseType } from '../phases/phaseTypes'
@@ -19,6 +20,7 @@ export type GameEngine = {
   selectCutIndex: (cutIndex: number) => void
   resolveCutPhase: () => void
   submitBidAction: (action: BidAction) => void
+  submitPlayCard: (cardId: string) => void
 }
 
 function cloneState<T>(value: T): T {
@@ -80,6 +82,10 @@ export function createGameEngine(): GameEngine {
     state = submitBidAction(state, action)
   }
 
+  function runSubmitPlayCard(cardId: string): void {
+    state = submitPlayCard(state, cardId)
+  }
+
   return {
     getState,
     setState,
@@ -92,5 +98,6 @@ export function createGameEngine(): GameEngine {
     selectCutIndex: runSelectCutIndex,
     resolveCutPhase: runResolveCutPhase,
     submitBidAction: runSubmitBidAction,
+    submitPlayCard: runSubmitPlayCard,
   }
 }

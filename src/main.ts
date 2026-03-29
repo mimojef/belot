@@ -1,5 +1,6 @@
 import './style.css'
 import { bootstrapApp } from './app/bootstrap'
+import { runPlayingBotsUntilHumanTurn } from './app/runPlayingBotsUntilHumanTurn'
 import { renderApp } from './app/renderApp'
 
 const rootElement = document.querySelector<HTMLDivElement>('#app')
@@ -11,6 +12,8 @@ if (!rootElement) {
 const app = bootstrapApp()
 
 function render(): void {
+  runPlayingBotsUntilHumanTurn(app)
+
   renderApp(rootElement!, app, {
     onNextPhaseClick: () => {
       app.engine.goToNextPhase()
@@ -46,6 +49,10 @@ function render(): void {
     },
     onBidRedouble: () => {
       app.engine.submitBidAction({ type: 'redouble' })
+      render()
+    },
+    onPlayCard: (cardId) => {
+      app.engine.submitPlayCard(cardId)
       render()
     },
   })

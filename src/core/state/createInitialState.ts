@@ -5,6 +5,7 @@ import {
   createEmptyBiddingState,
   createEmptyCarryOverPoints,
   createEmptyHands,
+  createEmptyPlayingState,
   createEmptyScoreBreakdown,
   createEmptyTimerState,
   createEmptyTrickState,
@@ -57,6 +58,7 @@ export function createInitialState(): GameState {
     declarations: [],
     currentTrick: createEmptyTrickState(),
     wonTricks: createEmptyWonTricks(),
+    playing: createEmptyPlayingState(),
     score: {
       round: createEmptyScoreBreakdown(),
       match: {

@@ -5,6 +5,7 @@ import { dealLastThreePhase } from './dealLastThreePhase'
 import { dealNextTwoPhase } from './dealNextTwoPhase'
 import { resolveCutPhase } from './resolveCutPhase'
 import { startBiddingPhase } from './startBiddingPhase'
+import { startPlayingPhase } from './startPlayingPhase'
 
 export function enterPhase(state: GameState, phase: PhaseType): GameState {
   if (phase === 'cut-resolve') {
@@ -25,6 +26,10 @@ export function enterPhase(state: GameState, phase: PhaseType): GameState {
 
   if (phase === 'deal-last-3') {
     return dealLastThreePhase(state)
+  }
+
+  if (phase === 'playing') {
+    return startPlayingPhase(state)
   }
 
   return {
