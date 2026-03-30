@@ -13,6 +13,8 @@ if (!rootElement) {
 const appRoot = rootElement
 const app = bootstrapApp()
 
+let resizeFrameId: number | null = null
+
 function render(): void {
   runPlayingBotsUntilHumanTurn(app)
 
@@ -71,6 +73,17 @@ function render(): void {
 const belotePromptController = createBelotePromptController({
   app,
   render,
+})
+
+window.addEventListener('resize', () => {
+  if (resizeFrameId !== null) {
+    window.cancelAnimationFrame(resizeFrameId)
+  }
+
+  resizeFrameId = window.requestAnimationFrame(() => {
+    resizeFrameId = null
+    render()
+  })
 })
 
 render()

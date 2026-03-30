@@ -5,6 +5,7 @@ import {
 } from '../state/createInitialState'
 import { getValidCardsForSeat } from '../rules/getValidCardsForSeat'
 import { getWinningTrickPlay } from '../rules/getWinningTrickPlay'
+import { resolveBeloteDeclarationForPlay } from '../rules/resolveBeloteDeclarationForPlay'
 import { calculateBaseRoundScore } from '../rules/calculateBaseRoundScore'
 import { calculateRoundOutcome } from '../rules/calculateRoundOutcome'
 import { buildOfficialRoundScore } from '../rules/buildOfficialRoundScore'
@@ -78,6 +79,24 @@ function resolveBidderSeat(
   return winningBid.seat
 }
 
+function tryResolveBotBeloteDeclaration(
+  state: GameState,
+  currentSeat: NonNullable<GameState['currentTrick']['currentSeat']>,
+  cardId: string
+) {
+  const player = state.players[currentSeat]
+
+  if (!player || player.mode !== 'bot') {
+    return null
+  }
+
+  return resolveBeloteDeclarationForPlay({
+    state,
+    seat: currentSeat,
+    cardId,
+  })
+}
+
 export function submitPlayCard(state: GameState, cardId: string): GameState {
   if (state.phase !== 'playing') {
     return state
@@ -102,6 +121,11 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
   if (!isValidCard) {
     return state
   }
+
+  const botBeloteDeclaration = tryResolveBotBeloteDeclaration(state, currentSeat, cardId)
+  const nextDeclarations = botBeloteDeclaration
+    ? [...state.declarations, botBeloteDeclaration]
+    : state.declarations
 
   const nextHands = {
     ...state.hands,
@@ -128,6 +152,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
     return {
       ...state,
       hands: nextHands,
+      declarations: nextDeclarations,
       currentTrick: nextCurrentTrick,
       playing: state.playing
         ? {
@@ -145,6 +170,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
     return {
       ...state,
       hands: nextHands,
+      declarations: nextDeclarations,
     }
   }
 
@@ -206,6 +232,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
       return {
         ...state,
         hands: nextHands,
+        declarations: nextDeclarations,
         currentTrick: nextCurrentTrick,
         wonTricks: nextWonTricks,
         playing: nextPlaying,
@@ -224,7 +251,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
       trumpSuit: scoringTrumpSuit,
     })
 
-    const declarationResolution = resolveDeclarations(state.declarations)
+    const declarationResolution = resolveDeclarations(nextDeclarations)
     const resolvedDeclarations = declarationResolution.resolvedDeclarations
     const declarationsScore = buildComparableDeclarationsScore(resolvedDeclarations)
     const beloteScore = buildBeloteScore(resolvedDeclarations)
@@ -270,6 +297,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
   return {
     ...state,
     hands: nextHands,
+    declarations: nextDeclarations,
     currentTrick: nextCurrentTrick,
     wonTricks: nextWonTricks,
     playing: nextPlaying,

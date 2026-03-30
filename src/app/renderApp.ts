@@ -9,6 +9,11 @@ import { renderBiddingPanel } from '../ui/center/renderBiddingPanel'
 import { renderPlayingPanel } from '../ui/center/renderPlayingPanel'
 import { renderBottomHandPanel } from '../ui/center/renderBottomHandPanel'
 import { renderScoringPanel } from '../ui/center/renderScoringPanel'
+import { renderCenterDeck } from '../ui/center/renderCenterDeck'
+import { renderCuttingScreen } from '../ui/center/renderCuttingScreen'
+import { renderDealAnimationScreen } from '../ui/center/renderDealAnimationScreen'
+import { renderSeatPanel } from '../ui/layout/renderSeatPanel'
+import { renderScoreHud } from '../ui/layout/renderScoreHud'
 
 type RenderAppOptions = {
   onNextPhaseClick?: () => void
@@ -23,12 +28,73 @@ type RenderAppOptions = {
   onPlayCard?: (cardId: string) => void
 }
 
-function formatSeat(seat: Seat | null): string {
-  if (seat === 'bottom') return 'Долу'
-  if (seat === 'right') return 'Дясно'
-  if (seat === 'top') return 'Горе'
-  if (seat === 'left') return 'Ляво'
-  return '—'
+const GAME_STAGE_WIDTH = 1600
+const GAME_STAGE_HEIGHT = 900
+const STAGE_EDGE_GAP = 5
+const SEAT_PANEL_HEIGHT = 176
+const BOTTOM_HAND_GAP = 12
+const BOTTOM_HAND_BOTTOM_OFFSET = STAGE_EDGE_GAP + SEAT_PANEL_HEIGHT + BOTTOM_HAND_GAP
+const SCORE_HUD_INTERNAL_OFFSET = 18
+
+let autoPhaseTimeoutId: number | null = null
+let autoCutTimeoutId: number | null = null
+let autoPhaseKey = ''
+let autoCutKey = ''
+let cutResolveTimeoutId: number | null = null
+
+function clearAutoPhaseTimeout(): void {
+  if (autoPhaseTimeoutId !== null) {
+    window.clearTimeout(autoPhaseTimeoutId)
+    autoPhaseTimeoutId = null
+  }
+
+  autoPhaseKey = ''
+}
+
+function clearAutoCutTimeout(): void {
+  if (autoCutTimeoutId !== null) {
+    window.clearTimeout(autoCutTimeoutId)
+    autoCutTimeoutId = null
+  }
+
+  autoCutKey = ''
+}
+
+function clearCutResolveTimeout(): void {
+  if (cutResolveTimeoutId !== null) {
+    window.clearTimeout(cutResolveTimeoutId)
+    cutResolveTimeoutId = null
+  }
+}
+
+function getStageScale(): number {
+  if (typeof window === 'undefined') {
+    return 1
+  }
+
+  const horizontalScale = window.innerWidth / GAME_STAGE_WIDTH
+  const verticalScale = window.innerHeight / GAME_STAGE_HEIGHT
+
+  return Math.min(horizontalScale, verticalScale, 1)
+}
+
+function triggerCutResolveSequence(
+  cutIndex: number,
+  options: RenderAppOptions
+): void {
+  clearAutoCutTimeout()
+  clearCutResolveTimeout()
+
+  options.onSelectCutIndex?.(cutIndex)
+
+  if (!options.onResolveCutClick) {
+    return
+  }
+
+  cutResolveTimeoutId = window.setTimeout(() => {
+    cutResolveTimeoutId = null
+    options.onResolveCutClick?.()
+  }, 920)
 }
 
 function getActionElements(rootElement: HTMLElement, actionName: string): HTMLElement[] {
@@ -169,18 +235,114 @@ function bindPlayCardClicks(
   }
 }
 
+function renderCenterPanel(content: string, width: number): string {
+  return `
+    <div
+      style="
+        width:${width}px;
+        margin:0 auto;
+      "
+    >
+      ${content}
+    </div>
+  `
+}
+
+function scheduleAutoPhaseAdvance(
+  phase: string,
+  onNextPhaseClick?: () => void
+): void {
+  if (!onNextPhaseClick) {
+    clearAutoPhaseTimeout()
+    return
+  }
+
+  const phaseDelayMap: Record<string, number> = {
+    'new-game': 140,
+    'choose-first-dealer': 220,
+    'cut-resolve': 20,
+    'deal-first-3': 2850,
+    'deal-next-2': 2250,
+    'deal-last-3': 2850,
+  }
+
+  const delay = phaseDelayMap[phase]
+
+  if (!delay) {
+    clearAutoPhaseTimeout()
+    return
+  }
+
+  const nextKey = `${phase}:${delay}`
+
+  if (autoPhaseKey === nextKey) {
+    return
+  }
+
+  clearAutoPhaseTimeout()
+  autoPhaseKey = nextKey
+
+  autoPhaseTimeoutId = window.setTimeout(() => {
+    autoPhaseTimeoutId = null
+    autoPhaseKey = ''
+    onNextPhaseClick()
+  }, delay)
+}
+
+function scheduleAutoCut(
+  phase: string,
+  cutterSeat: Seat | null,
+  selectedCutIndex: number | null | undefined,
+  options: RenderAppOptions
+): void {
+  if (phase !== 'cutting') {
+    clearAutoCutTimeout()
+    return
+  }
+
+  const isHumanCutting = cutterSeat === 'bottom'
+  const cutIndex = selectedCutIndex ?? 16
+  const delay = isHumanCutting ? 20000 : 1500
+  const nextKey = `${phase}:${cutterSeat ?? 'none'}:${cutIndex}:${delay}`
+
+  if (autoCutKey === nextKey) {
+    return
+  }
+
+  clearAutoCutTimeout()
+  autoCutKey = nextKey
+
+  autoCutTimeoutId = window.setTimeout(() => {
+    autoCutTimeoutId = null
+    autoCutKey = ''
+
+    triggerCutResolveSequence(cutIndex, options)
+  }, delay)
+}
+
 export function renderApp(
   rootElement: HTMLElement,
   app: AppBootstrap,
   options: RenderAppOptions = {}
 ): void {
   const state = app.engine.getState()
+  const stageScale = getStageScale()
+
   const isCuttingPhase = state.phase === 'cutting'
+  const isCutResolvePhase = state.phase === 'cut-resolve'
   const isBiddingPhase = state.phase === 'bidding'
   const isPlayingPhase = state.phase === 'playing'
   const isScoringPhase = state.phase === 'scoring'
   const isSummaryPhase = state.phase === 'summary'
+  const isDealAnimationPhase =
+    state.phase === 'deal-first-3' ||
+    state.phase === 'deal-next-2' ||
+    state.phase === 'deal-last-3'
   const shouldShowScoringPanel = isScoringPhase || isSummaryPhase
+
+  if (!isCuttingPhase) {
+    clearCutResolveTimeout()
+  }
 
   const biddingViewState = isBiddingPhase ? getBiddingViewState(state) : null
   const playingViewState = isPlayingPhase ? getPlayingViewState(state) : null
@@ -192,206 +354,209 @@ export function renderApp(
     : null
   const bottomHandViewState = getBottomHandViewState(state)
 
+  const activeSeat: Seat | null = isBiddingPhase
+    ? state.bidding.currentSeat
+    : ((state.playing?.currentTurnSeat ?? null) as Seat | null)
+
+  const centerMainContent = isCuttingPhase
+    ? renderCuttingScreen(state.round.cutterSeat, state.round.selectedCutIndex)
+    : state.phase === 'deal-first-3'
+      ? renderDealAnimationScreen('deal-first-3', state.round.dealerSeat)
+      : state.phase === 'deal-next-2'
+        ? renderDealAnimationScreen('deal-next-2', state.round.dealerSeat)
+        : state.phase === 'deal-last-3'
+          ? renderDealAnimationScreen('deal-last-3', state.round.dealerSeat)
+          : biddingViewState
+            ? renderCenterPanel(renderBiddingPanel(biddingViewState), 760)
+            : playingViewState
+              ? renderCenterPanel(renderPlayingPanel(playingViewState), 980)
+              : scoringViewState
+                ? renderCenterPanel(renderScoringPanel(scoringViewState), 980)
+                : ''
+
   rootElement.innerHTML = `
-    <div style="padding: 24px; font-family: Arial, Helvetica, sans-serif; color: white; background: #0f172a; min-height: 100vh;">
-      <h1 style="margin: 0 0 16px 0;">Belot V2</h1>
+    <div class="game-shell">
+      <div
+        class="game-stage"
+        style="transform: translate(-50%, -50%) scale(${stageScale});"
+      >
+        <div
+          style="
+            position:relative;
+            width:${GAME_STAGE_WIDTH}px;
+            height:${GAME_STAGE_HEIGHT}px;
+            overflow:hidden;
+            color:#ffffff;
+          "
+        >
+          <div
+            style="
+              position:relative;
+              width:100%;
+              height:100%;
+              padding:0;
+            "
+          >
+            <div
+              style="
+                position:absolute;
+                left:50%;
+                top:49%;
+                transform:translate(-50%, -50%);
+                width:1080px;
+                z-index:2;
+                display:flex;
+                flex-direction:column;
+                align-items:center;
+                gap:26px;
+              "
+            >
+              ${isCuttingPhase || isDealAnimationPhase || isCutResolvePhase ? '' : renderCenterDeck(state.deck.length)}
+              ${centerMainContent}
+            </div>
 
-      <div style="padding: 16px; border-radius: 12px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); max-width: 720px; margin-bottom: 16px;">
-        <div style="margin-bottom: 10px;"><strong>Фаза:</strong> ${state.phase}</div>
-        <div style="margin-bottom: 10px;"><strong>Дилър:</strong> ${formatSeat(state.round.dealerSeat)}</div>
-        <div style="margin-bottom: 10px;"><strong>Цепи:</strong> ${formatSeat(state.round.cutterSeat)}</div>
-        <div style="margin-bottom: 10px;"><strong>Първи обявява:</strong> ${formatSeat(state.round.firstBidderSeat)}</div>
-        <div style="margin-bottom: 10px;"><strong>Първо се раздава на:</strong> ${formatSeat(state.round.firstDealSeat)}</div>
-        <div style="margin-bottom: 10px;"><strong>Брой карти в тестето:</strong> ${state.deck.length}</div>
-        <div style="margin-bottom: 10px;"><strong>Избран cut index:</strong> ${state.round.selectedCutIndex ?? '—'}</div>
-        <div><strong>Текущ обявяващ:</strong> ${formatSeat(state.bidding.currentSeat)}</div>
+            ${
+              !isPlayingPhase &&
+              !isScoringPhase &&
+              !isSummaryPhase &&
+              !isDealAnimationPhase &&
+              !isCuttingPhase &&
+              !isCutResolvePhase &&
+              bottomHandViewState.shouldShow
+                ? `
+              <div
+                style="
+                  position:absolute;
+                  left:50%;
+                  bottom:${BOTTOM_HAND_BOTTOM_OFFSET}px;
+                  transform:translateX(-50%);
+                  width:1040px;
+                  z-index:4;
+                "
+              >
+                ${renderBottomHandPanel(bottomHandViewState)}
+              </div>
+            `
+                : ''
+            }
+          </div>
+        </div>
       </div>
 
-      <div style="display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 12px; max-width: 720px; margin-bottom: 16px;">
-        <div style="padding: 14px; border-radius: 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12);">
-          <strong>Долу</strong>
-          <div style="margin-top: 8px;">Карти: ${state.hands.bottom.length}</div>
-        </div>
-
-        <div style="padding: 14px; border-radius: 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12);">
-          <strong>Дясно</strong>
-          <div style="margin-top: 8px;">Карти: ${state.hands.right.length}</div>
-        </div>
-
-        <div style="padding: 14px; border-radius: 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12);">
-          <strong>Горе</strong>
-          <div style="margin-top: 8px;">Карти: ${state.hands.top.length}</div>
-        </div>
-
-        <div style="padding: 14px; border-radius: 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12);">
-          <strong>Ляво</strong>
-          <div style="margin-top: 8px;">Карти: ${state.hands.left.length}</div>
-        </div>
-      </div>
-
-      ${
-        !isPlayingPhase && !isScoringPhase && !isSummaryPhase && bottomHandViewState.shouldShow
-          ? `
-        <div style="max-width: 920px; margin-bottom: 16px;">
-          ${renderBottomHandPanel(bottomHandViewState)}
-        </div>
-      `
-          : ''
-      }
-
-      ${
-        isCuttingPhase
-          ? `
-        <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px;">
-          <button
-            type="button"
-            data-action="cut-index"
-            data-cut-index="8"
-            style="
-              border: 0;
-              border-radius: 10px;
-              padding: 12px 18px;
-              background: #38bdf8;
-              color: #082f49;
-              font-weight: 700;
-              cursor: pointer;
-            "
-          >
-            Избери cut 8
-          </button>
-
-          <button
-            type="button"
-            data-action="cut-index"
-            data-cut-index="16"
-            style="
-              border: 0;
-              border-radius: 10px;
-              padding: 12px 18px;
-              background: #38bdf8;
-              color: #082f49;
-              font-weight: 700;
-              cursor: pointer;
-            "
-          >
-            Избери cut 16
-          </button>
-
-          <button
-            type="button"
-            data-action="cut-index"
-            data-cut-index="24"
-            style="
-              border: 0;
-              border-radius: 10px;
-              padding: 12px 18px;
-              background: #38bdf8;
-              color: #082f49;
-              font-weight: 700;
-              cursor: pointer;
-            "
-          >
-            Избери cut 24
-          </button>
-
-          <button
-            type="button"
-            data-action="resolve-cut"
-            style="
-              border: 0;
-              border-radius: 10px;
-              padding: 12px 18px;
-              background: #f59e0b;
-              color: #451a03;
-              font-weight: 700;
-              cursor: pointer;
-            "
-          >
-            Потвърди цепенето
-          </button>
-        </div>
-      `
-          : ''
-      }
-
-      ${
-        biddingViewState
-          ? `
-        <div style="max-width: 720px; margin-bottom: 16px;">
-          ${renderBiddingPanel(biddingViewState)}
-        </div>
-      `
-          : ''
-      }
-
-      ${
-        playingViewState
-          ? `
-        <div style="max-width: 920px; margin-bottom: 16px;">
-          ${renderPlayingPanel(playingViewState)}
-        </div>
-      `
-          : ''
-      }
-
-      ${
-        scoringViewState
-          ? `
-        <div style="max-width: 920px; margin-bottom: 16px;">
-          ${renderScoringPanel(scoringViewState)}
-        </div>
-      `
-          : ''
-      }
-
-      <button
-        type="button"
-        data-action="next-phase"
+      <div
         style="
-          border: 0;
-          border-radius: 10px;
-          padding: 12px 18px;
-          background: #22c55e;
-          color: #052e16;
-          font-weight: 700;
-          cursor: pointer;
+          position:fixed;
+          top:${5 - SCORE_HUD_INTERNAL_OFFSET * stageScale}px;
+          left:${5 - SCORE_HUD_INTERNAL_OFFSET * stageScale}px;
+          width:0;
+          height:0;
+          z-index:8;
+          pointer-events:none;
+          transform:scale(${stageScale});
+          transform-origin:top left;
         "
       >
-        Следваща фаза
-      </button>
+        ${renderScoreHud(state)}
+      </div>
+
+      <div
+        style="
+          position:fixed;
+          left:50%;
+          top:5px;
+          z-index:7;
+          pointer-events:none;
+          transform:translateX(-50%) scale(${stageScale});
+          transform-origin:top center;
+        "
+      >
+        ${renderSeatPanel(
+          'top',
+          state.hands.top.length,
+          state.round.dealerSeat,
+          state.round.cutterSeat,
+          activeSeat
+        )}
+      </div>
+
+      <div
+        style="
+          position:fixed;
+          left:5px;
+          top:50%;
+          z-index:7;
+          pointer-events:none;
+          transform:translateY(-50%) scale(${stageScale});
+          transform-origin:left center;
+        "
+      >
+        ${renderSeatPanel(
+          'left',
+          state.hands.left.length,
+          state.round.dealerSeat,
+          state.round.cutterSeat,
+          activeSeat
+        )}
+      </div>
+
+      <div
+        style="
+          position:fixed;
+          right:5px;
+          top:50%;
+          z-index:7;
+          pointer-events:none;
+          transform:translateY(-50%) scale(${stageScale});
+          transform-origin:right center;
+        "
+      >
+        ${renderSeatPanel(
+          'right',
+          state.hands.right.length,
+          state.round.dealerSeat,
+          state.round.cutterSeat,
+          activeSeat
+        )}
+      </div>
+
+      <div
+        style="
+          position:fixed;
+          left:50%;
+          bottom:5px;
+          z-index:7;
+          pointer-events:none;
+          transform:translateX(-50%) scale(${stageScale});
+          transform-origin:bottom center;
+        "
+      >
+        ${renderSeatPanel(
+          'bottom',
+          state.hands.bottom.length,
+          state.round.dealerSeat,
+          state.round.cutterSeat,
+          activeSeat
+        )}
+      </div>
     </div>
   `
 
-  const nextPhaseButton = rootElement.querySelector<HTMLButtonElement>(
-    '[data-action="next-phase"]'
+  const cutCardButtons = rootElement.querySelectorAll<HTMLButtonElement>(
+    '[data-action="cut-card"]'
   )
 
-  nextPhaseButton?.addEventListener('click', () => {
-    options.onNextPhaseClick?.()
-  })
-
-  const cutIndexButtons = rootElement.querySelectorAll<HTMLButtonElement>(
-    '[data-action="cut-index"]'
-  )
-
-  for (const button of cutIndexButtons) {
+  for (const button of cutCardButtons) {
     button.addEventListener('click', () => {
       const rawCutIndex = button.dataset.cutIndex
       const cutIndex = rawCutIndex ? Number(rawCutIndex) : NaN
 
-      if (!Number.isNaN(cutIndex)) {
-        options.onSelectCutIndex?.(cutIndex)
+      if (Number.isNaN(cutIndex)) {
+        return
       }
+
+      triggerCutResolveSequence(cutIndex, options)
     })
   }
-
-  const resolveCutButton = rootElement.querySelector<HTMLButtonElement>(
-    '[data-action="resolve-cut"]'
-  )
-
-  resolveCutButton?.addEventListener('click', () => {
-    options.onResolveCutClick?.()
-  })
 
   if (isBiddingPhase) {
     bindClick(getActionElements(rootElement, 'bid-pass'), options.onBidPass)
@@ -414,4 +579,12 @@ export function renderApp(
   if (isPlayingPhase) {
     bindPlayCardClicks(getActionElements(rootElement, 'play-card'), options.onPlayCard)
   }
+
+  scheduleAutoPhaseAdvance(state.phase, options.onNextPhaseClick)
+  scheduleAutoCut(
+    state.phase,
+    state.round.cutterSeat,
+    state.round.selectedCutIndex,
+    options
+  )
 }

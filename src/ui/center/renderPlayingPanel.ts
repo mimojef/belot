@@ -2,6 +2,21 @@ import type { PlayingViewState } from '../../core/state/getPlayingViewState'
 import type { Seat } from '../../data/constants/seatOrder'
 import type { Card, Suit, WinningBid } from '../../core/state/gameTypes'
 
+type DebugDeclarationView = {
+  seat: Seat
+  type: 'sequence' | 'square' | 'belote'
+  points: number
+  cards: Card[]
+  suit: Suit | null
+  highRank: Card['rank'] | null
+  announced: boolean
+  valid: boolean
+}
+
+type PlayingPanelViewState = PlayingViewState & {
+  botDebugDeclarations?: DebugDeclarationView[]
+}
+
 function formatSeat(seat: Seat | null): string {
   if (seat === 'bottom') return 'Долу'
   if (seat === 'right') return 'Дясно'
@@ -49,6 +64,35 @@ function formatWinningBid(winningBid: WinningBid): string {
   }
 
   return `${label} — ${formatSeat(winningBid.seat)}`
+}
+
+function formatDeclarationType(
+  declaration: DebugDeclarationView
+): string {
+  if (declaration.type === 'belote') {
+    return 'Белот'
+  }
+
+  if (declaration.type === 'square') {
+    const rank = declaration.cards[0]?.rank ?? declaration.highRank ?? ''
+    return `Каре ${rank}`
+  }
+
+  const length = declaration.cards.length
+
+  if (length >= 5) {
+    return '100'
+  }
+
+  if (length === 4) {
+    return '50'
+  }
+
+  return 'Терца'
+}
+
+function formatDeclarationCards(cards: Card[]): string {
+  return cards.map((card) => formatCard(card)).join(' • ')
 }
 
 function renderPlayedCards(viewState: PlayingViewState): string {
@@ -127,7 +171,64 @@ function renderBottomHand(viewState: PlayingViewState): string {
   `
 }
 
+function renderBotDeclarationsDebug(viewState: PlayingPanelViewState): string {
+  const declarations = (viewState.botDebugDeclarations ?? []).filter(
+    (declaration) => declaration.seat !== 'bottom'
+  )
+
+  if (declarations.length === 0) {
+    return `
+      <div style="opacity: 0.72;">
+        Още няма записани бот анонси.
+      </div>
+    `
+  }
+
+  return `
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      ${declarations
+        .map(
+          (declaration) => `
+            <div
+              style="
+                padding: 12px 14px;
+                border-radius: 10px;
+                background: rgba(255,255,255,0.05);
+                border: 1px solid rgba(255,255,255,0.12);
+              "
+            >
+              <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px;">
+                <div style="font-weight: 800;">${formatSeat(declaration.seat)}</div>
+                <div style="opacity: 0.92;">${formatDeclarationType(declaration)}</div>
+                <div style="opacity: 0.72;">${declaration.points} т.</div>
+                <div
+                  style="
+                    padding: 2px 8px;
+                    border-radius: 999px;
+                    font-size: 12px;
+                    font-weight: 700;
+                    background: ${declaration.valid ? 'rgba(34,197,94,0.18)' : 'rgba(248,113,113,0.18)'};
+                    color: ${declaration.valid ? '#86efac' : '#fca5a5'};
+                  "
+                >
+                  ${declaration.valid ? 'валидно' : 'невалидно'}
+                </div>
+              </div>
+
+              <div style="font-size: 14px; line-height: 1.45; opacity: 0.9;">
+                ${formatDeclarationCards(declaration.cards)}
+              </div>
+            </div>
+          `
+        )
+        .join('')}
+    </div>
+  `
+}
+
 export function renderPlayingPanel(viewState: PlayingViewState): string {
+  const debugViewState = viewState as PlayingPanelViewState
+
   return `
     <div style="max-width: 920px; margin-bottom: 16px;">
       <div
@@ -157,6 +258,19 @@ export function renderPlayingPanel(viewState: PlayingViewState): string {
       >
         <div style="margin-bottom: 10px; font-weight: 700;">Текуща взятка</div>
         ${renderPlayedCards(viewState)}
+      </div>
+
+      <div
+        style="
+          padding: 16px;
+          border-radius: 12px;
+          background: rgba(255,255,255,0.06);
+          border: 1px solid rgba(255,255,255,0.12);
+          margin-bottom: 12px;
+        "
+      >
+        <div style="margin-bottom: 10px; font-weight: 700;">Бот анонси — дебъг</div>
+        ${renderBotDeclarationsDebug(debugViewState)}
       </div>
 
       <div

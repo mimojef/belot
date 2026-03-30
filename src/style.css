@@ -7,15 +7,68 @@ body {
   margin: 0;
   padding: 0;
   min-height: 100%;
+  width: 100%;
+}
+
+:root {
+  font-family: Arial, Helvetica, sans-serif;
+  color: #ffffff;
+  --game-stage-width: 1600px;
+  --game-stage-height: 900px;
 }
 
 body {
   min-height: 100vh;
-  background: #0f172a;
+  overflow: hidden;
+  position: relative;
+  background:
+    radial-gradient(circle at 50% 52%, rgba(118, 184, 236, 0.38) 0%, rgba(93, 156, 210, 0.28) 18%, rgba(57, 110, 167, 0.18) 34%, rgba(23, 60, 107, 0.08) 52%, rgba(11, 35, 68, 0) 72%),
+    linear-gradient(180deg, #163b67 0%, #0e2f56 38%, #092447 100%);
   color: #ffffff;
-  font-family: Arial, Helvetica, sans-serif;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0) 18%, rgba(255, 255, 255, 0.02) 52%, rgba(255, 255, 255, 0) 100%);
+  opacity: 0.7;
 }
 
 #app {
+  width: 100%;
   min-height: 100vh;
+  height: 100vh;
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+#app > * {
+  position: relative;
+  z-index: 1;
+}
+
+.game-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.game-stage {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: var(--game-stage-width);
+  height: var(--game-stage-height);
+  transform: translate(-50%, -50%);
+  transform-origin: center center;
+  will-change: transform;
+}
+
+.game-stage * {
+  box-sizing: border-box;
 }

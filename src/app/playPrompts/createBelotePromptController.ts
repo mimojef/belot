@@ -6,7 +6,7 @@ import type {
   GameState,
   Suit,
 } from '../../core/state/gameTypes'
-import { getValidCardsForSeat } from '../../core/rules/getValidCardsForSeat'
+import { resolveBeloteDeclarationForPlay } from '../../core/rules/resolveBeloteDeclarationForPlay'
 
 type PendingPromptOption = {
   id: string
@@ -28,18 +28,6 @@ export type BelotePromptController = {
 
 const SUIT_ORDER: Suit[] = ['spades', 'hearts', 'diamonds', 'clubs']
 const RANK_ORDER: Card['rank'][] = ['7', '8', '9', '10', 'J', 'Q', 'K', 'A']
-
-function getCounterpartRank(rank: Card['rank']): Card['rank'] | null {
-  if (rank === 'Q') {
-    return 'K'
-  }
-
-  if (rank === 'K') {
-    return 'Q'
-  }
-
-  return null
-}
 
 function getCompletedTricks(state: GameState): CompletedTrick[] {
   return state.playing?.completedTricks ?? []
@@ -78,53 +66,12 @@ function formatCardsLabel(cards: Card[]): string {
   return cards.map((card) => formatRankLabel(card.rank)).join(' - ')
 }
 
-function isBeloteContract(state: GameState, suit: Suit): boolean {
-  const winningBid = state.bidding.winningBid
-
-  if (!winningBid) {
-    return false
-  }
-
-  if (winningBid.contract === 'all-trumps') {
-    return true
-  }
-
-  if (winningBid.contract === 'suit' && winningBid.trumpSuit === suit) {
-    return true
-  }
-
-  return false
-}
-
-function isAllowedBeloteAnnouncementMoment(
-  state: GameState,
-  selectedCard: Card
-): boolean {
-  if (state.phase !== 'playing') {
-    return false
-  }
-
-  const validCards = getValidCardsForSeat(state, 'bottom')
-
-  return validCards.some((card) => card.id === selectedCard.id)
-}
-
 function isInitialRoundAnnouncementMoment(state: GameState): boolean {
   if (state.phase !== 'playing') {
     return false
   }
 
   return getCompletedTricks(state).length === 0
-}
-
-function hasBeloteAlreadyDeclared(state: GameState, suit: Suit): boolean {
-  return state.declarations.some(
-    (declaration) =>
-      declaration.type === 'belote' &&
-      declaration.seat === 'bottom' &&
-      declaration.suit === suit &&
-      declaration.valid
-  )
 }
 
 function getDeclarationCardKey(declaration: Declaration): string {
@@ -146,24 +93,6 @@ function hasSameDeclaration(
     declaration.highRank === candidate.highRank &&
     getDeclarationCardKey(declaration) === getDeclarationCardKey(candidate)
   )
-}
-
-function createBeloteDeclaration(
-  state: GameState,
-  selectedCard: Card,
-  counterpartCard: Card
-): Declaration {
-  return {
-    seat: 'bottom',
-    team: state.players.bottom.team,
-    type: 'belote',
-    points: 20,
-    cards: [selectedCard, counterpartCard],
-    suit: selectedCard.suit,
-    highRank: null,
-    announced: true,
-    valid: true,
-  }
 }
 
 function getSequencePoints(length: number): number {
@@ -315,17 +244,15 @@ function buildSquareDeclarations(state: GameState): Declaration[] {
   return declarations
 }
 
-function createBelotePromptOption(
-  state: GameState,
-  selectedCard: Card,
-  counterpartCard: Card
-): PendingPromptOption {
-  const declaration = createBeloteDeclaration(state, selectedCard, counterpartCard)
+function createBelotePromptOption(declaration: Declaration): PendingPromptOption {
+  const cards = sortCardsByRank(declaration.cards)
+  const firstCard = cards[0]
+  const secondCard = cards[1]
 
   return {
-    id: `belote-${selectedCard.suit}`,
+    id: `belote-${declaration.suit ?? 'unknown'}`,
     title: 'Белот',
-    description: `${formatSuitLabel(selectedCard.suit)} • ${formatRankLabel(selectedCard.rank)} и ${formatRankLabel(counterpartCard.rank)} • 20 точки`,
+    description: `${formatSuitLabel(declaration.suit ?? 'spades')} • ${formatRankLabel(firstCard?.rank ?? 'Q')} и ${formatRankLabel(secondCard?.rank ?? 'K')} • 20 точки`,
     declarations: [declaration],
     defaultChecked: true,
   }
@@ -362,40 +289,17 @@ function resolveBelotePromptOption(
   state: GameState,
   cardId: string
 ): PendingPromptOption | null {
-  const hand = getBottomHand(state)
-  const selectedCard = hand.find((card) => card.id === cardId)
+  const beloteDeclaration = resolveBeloteDeclarationForPlay({
+    state,
+    seat: 'bottom',
+    cardId,
+  })
 
-  if (!selectedCard) {
+  if (!beloteDeclaration) {
     return null
   }
 
-  const counterpartRank = getCounterpartRank(selectedCard.rank)
-
-  if (!counterpartRank) {
-    return null
-  }
-
-  if (!isBeloteContract(state, selectedCard.suit)) {
-    return null
-  }
-
-  if (!isAllowedBeloteAnnouncementMoment(state, selectedCard)) {
-    return null
-  }
-
-  const counterpartCard = hand.find(
-    (card) => card.suit === selectedCard.suit && card.rank === counterpartRank
-  )
-
-  if (!counterpartCard) {
-    return null
-  }
-
-  if (hasBeloteAlreadyDeclared(state, selectedCard.suit)) {
-    return null
-  }
-
-  return createBelotePromptOption(state, selectedCard, counterpartCard)
+  return createBelotePromptOption(beloteDeclaration)
 }
 
 function resolveRoundDeclarationPromptOptions(state: GameState): PendingPromptOption[] {

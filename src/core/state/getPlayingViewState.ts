@@ -1,5 +1,11 @@
 import type { Seat } from '../../data/constants/seatOrder'
-import type { Card, GameState, TrickPlay, WinningBid } from './gameTypes'
+import type {
+  Card,
+  Declaration,
+  GameState,
+  TrickPlay,
+  WinningBid,
+} from './gameTypes'
 import { getValidCardsForSeat } from '../rules/getValidCardsForSeat'
 
 export type PlayingViewState = {
@@ -12,6 +18,7 @@ export type PlayingViewState = {
   bottomHand: Card[]
   validBottomCardIds: string[]
   isBottomTurn: boolean
+  botDebugDeclarations: Declaration[]
 }
 
 export function getPlayingViewState(state: GameState): PlayingViewState | null {
@@ -26,6 +33,14 @@ export function getPlayingViewState(state: GameState): PlayingViewState | null {
   const validBottomCards =
     currentTurnSeat === 'bottom' ? getValidCardsForSeat(state, 'bottom') : []
 
+  const botDebugDeclarations = state.declarations.filter((declaration) => {
+    if (declaration.seat === 'bottom') {
+      return false
+    }
+
+    return state.players[declaration.seat]?.mode === 'bot'
+  })
+
   return {
     phase: 'playing',
     currentTurnSeat,
@@ -36,5 +51,6 @@ export function getPlayingViewState(state: GameState): PlayingViewState | null {
     bottomHand,
     validBottomCardIds: validBottomCards.map((card) => card.id),
     isBottomTurn: currentTurnSeat === 'bottom',
+    botDebugDeclarations,
   }
 }
