@@ -10,8 +10,7 @@ import { renderPlayingPanel } from '../ui/center/renderPlayingPanel'
 import { renderBottomHandPanel } from '../ui/center/renderBottomHandPanel'
 import { renderScoringPanel } from '../ui/center/renderScoringPanel'
 import { renderCenterDeck } from '../ui/center/renderCenterDeck'
-import { renderCuttingScreen } from '../ui/center/renderCuttingScreen'
-import { renderDealAnimationScreen } from '../ui/center/renderDealAnimationScreen'
+import { getRoundSetupFlowResult } from '../ui/center/renderRoundSetupFlow'
 import { renderSeatPanel } from '../ui/layout/renderSeatPanel'
 import { renderScoreHud } from '../ui/layout/renderScoreHud'
 
@@ -41,6 +40,7 @@ let autoCutTimeoutId: number | null = null
 let autoPhaseKey = ''
 let autoCutKey = ''
 let cutResolveTimeoutId: number | null = null
+let roundSetupRerenderTimeoutId: number | null = null
 
 function clearAutoPhaseTimeout(): void {
   if (autoPhaseTimeoutId !== null) {
@@ -64,6 +64,13 @@ function clearCutResolveTimeout(): void {
   if (cutResolveTimeoutId !== null) {
     window.clearTimeout(cutResolveTimeoutId)
     cutResolveTimeoutId = null
+  }
+}
+
+function clearRoundSetupRerenderTimeout(): void {
+  if (roundSetupRerenderTimeoutId !== null) {
+    window.clearTimeout(roundSetupRerenderTimeoutId)
+    roundSetupRerenderTimeoutId = null
   }
 }
 
@@ -320,6 +327,25 @@ function scheduleAutoCut(
   }, delay)
 }
 
+function scheduleRoundSetupRerender(
+  delayMs: number | null,
+  rootElement: HTMLElement,
+  app: AppBootstrap,
+  options: RenderAppOptions
+): void {
+  if (delayMs === null) {
+    clearRoundSetupRerenderTimeout()
+    return
+  }
+
+  clearRoundSetupRerenderTimeout()
+
+  roundSetupRerenderTimeoutId = window.setTimeout(() => {
+    roundSetupRerenderTimeoutId = null
+    renderApp(rootElement, app, options)
+  }, delayMs)
+}
+
 export function renderApp(
   rootElement: HTMLElement,
   app: AppBootstrap,
@@ -328,21 +354,28 @@ export function renderApp(
   const state = app.engine.getState()
   const stageScale = getStageScale()
 
-  const isCuttingPhase = state.phase === 'cutting'
-  const isCutResolvePhase = state.phase === 'cut-resolve'
   const isBiddingPhase = state.phase === 'bidding'
   const isPlayingPhase = state.phase === 'playing'
   const isScoringPhase = state.phase === 'scoring'
   const isSummaryPhase = state.phase === 'summary'
-  const isDealAnimationPhase =
-    state.phase === 'deal-first-3' ||
-    state.phase === 'deal-next-2' ||
-    state.phase === 'deal-last-3'
   const shouldShowScoringPanel = isScoringPhase || isSummaryPhase
 
-  if (!isCuttingPhase) {
+  if (state.phase !== 'cutting') {
     clearCutResolveTimeout()
   }
+
+  const roundSetupFlow = getRoundSetupFlowResult({
+    phase: state.phase,
+    dealerSeat: state.round.dealerSeat,
+    cutterSeat: state.round.cutterSeat,
+    selectedCutIndex: state.round.selectedCutIndex,
+    actualHandCounts: {
+      bottom: state.hands.bottom.length,
+      right: state.hands.right.length,
+      top: state.hands.top.length,
+      left: state.hands.left.length,
+    },
+  })
 
   const biddingViewState = isBiddingPhase ? getBiddingViewState(state) : null
   const playingViewState = isPlayingPhase ? getPlayingViewState(state) : null
@@ -358,21 +391,15 @@ export function renderApp(
     ? state.bidding.currentSeat
     : ((state.playing?.currentTurnSeat ?? null) as Seat | null)
 
-  const centerMainContent = isCuttingPhase
-    ? renderCuttingScreen(state.round.cutterSeat, state.round.selectedCutIndex)
-    : state.phase === 'deal-first-3'
-      ? renderDealAnimationScreen('deal-first-3', state.round.dealerSeat)
-      : state.phase === 'deal-next-2'
-        ? renderDealAnimationScreen('deal-next-2', state.round.dealerSeat)
-        : state.phase === 'deal-last-3'
-          ? renderDealAnimationScreen('deal-last-3', state.round.dealerSeat)
-          : biddingViewState
-            ? renderCenterPanel(renderBiddingPanel(biddingViewState), 760)
-            : playingViewState
-              ? renderCenterPanel(renderPlayingPanel(playingViewState), 980)
-              : scoringViewState
-                ? renderCenterPanel(renderScoringPanel(scoringViewState), 980)
-                : ''
+  const centerMainContent = roundSetupFlow.isRoundSetupPhase
+    ? roundSetupFlow.centerContent
+    : biddingViewState
+      ? renderCenterPanel(renderBiddingPanel(biddingViewState), 760)
+      : playingViewState
+        ? renderCenterPanel(renderPlayingPanel(playingViewState), 980)
+        : scoringViewState
+          ? renderCenterPanel(renderScoringPanel(scoringViewState), 980)
+          : ''
 
   rootElement.innerHTML = `
     <div class="game-shell">
@@ -411,7 +438,7 @@ export function renderApp(
                 gap:26px;
               "
             >
-              ${isCuttingPhase || isDealAnimationPhase || isCutResolvePhase ? '' : renderCenterDeck(state.deck.length)}
+              ${roundSetupFlow.shouldHideCenterDeck ? '' : renderCenterDeck(state.deck.length)}
               ${centerMainContent}
             </div>
 
@@ -419,9 +446,7 @@ export function renderApp(
               !isPlayingPhase &&
               !isScoringPhase &&
               !isSummaryPhase &&
-              !isDealAnimationPhase &&
-              !isCuttingPhase &&
-              !isCutResolvePhase &&
+              !roundSetupFlow.isRoundSetupPhase &&
               bottomHandViewState.shouldShow
                 ? `
               <div
@@ -472,7 +497,7 @@ export function renderApp(
       >
         ${renderSeatPanel(
           'top',
-          state.hands.top.length,
+          roundSetupFlow.seatHandCounts.top,
           state.round.dealerSeat,
           state.round.cutterSeat,
           activeSeat
@@ -492,7 +517,7 @@ export function renderApp(
       >
         ${renderSeatPanel(
           'left',
-          state.hands.left.length,
+          roundSetupFlow.seatHandCounts.left,
           state.round.dealerSeat,
           state.round.cutterSeat,
           activeSeat
@@ -512,7 +537,7 @@ export function renderApp(
       >
         ${renderSeatPanel(
           'right',
-          state.hands.right.length,
+          roundSetupFlow.seatHandCounts.right,
           state.round.dealerSeat,
           state.round.cutterSeat,
           activeSeat
@@ -532,7 +557,7 @@ export function renderApp(
       >
         ${renderSeatPanel(
           'bottom',
-          state.hands.bottom.length,
+          roundSetupFlow.seatHandCounts.bottom,
           state.round.dealerSeat,
           state.round.cutterSeat,
           activeSeat
@@ -585,6 +610,12 @@ export function renderApp(
     state.phase,
     state.round.cutterSeat,
     state.round.selectedCutIndex,
+    options
+  )
+  scheduleRoundSetupRerender(
+    roundSetupFlow.nextRerenderInMs,
+    rootElement,
+    app,
     options
   )
 }

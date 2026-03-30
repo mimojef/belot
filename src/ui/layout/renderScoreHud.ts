@@ -28,32 +28,62 @@ function formatBidType(type: string | null, suit: Suit | null): string {
   return 'Няма обява'
 }
 
-function getBidIcon(type: string | null, suit: Suit | null): string {
-  if (type === 'all-trumps') return 'J'
-  if (type === 'no-trumps') return 'A'
+function getBidIconMarkup(type: string | null, suit: Suit | null): string {
+  if (type === 'all-trumps') {
+    return `
+      <img
+        src="/images/ui/score-hud/plain-black-J.png"
+        alt=""
+        draggable="false"
+        style="
+          width:45px;
+          height:45px;
+          object-fit:contain;
+          display:block;
+          user-select:none;
+          pointer-events:none;
+        "
+      />
+    `
+  }
+
+  if (type === 'no-trumps') {
+    return `
+      <img
+        src="/images/ui/score-hud/plain-black-A.png"
+        alt=""
+        draggable="false"
+        style="
+          width:45px;
+          height:45px;
+          object-fit:contain;
+          display:block;
+          user-select:none;
+          pointer-events:none;
+        "
+      />
+    `
+  }
 
   if (type === 'color' || type === 'suit') {
-    if (suit === 'clubs') return '♣'
-    if (suit === 'diamonds') return '♦'
-    if (suit === 'hearts') return '♥'
-    if (suit === 'spades') return '♠'
+    if (suit === 'clubs') {
+      return '<span style="color:#111111; font-size:52px; line-height:1;">♣</span>'
+    }
+
+    if (suit === 'diamonds') {
+      return '<span style="color:#c62828; font-size:52px; line-height:1;">♦</span>'
+    }
+
+    if (suit === 'hearts') {
+      return '<span style="color:#c62828; font-size:52px; line-height:1;">♥</span>'
+    }
+
+    if (suit === 'spades') {
+      return '<span style="color:#111111; font-size:52px; line-height:1;">♠</span>'
+    }
   }
 
   return ''
-}
-
-function getBidIconColor(type: string | null, suit: Suit | null): string {
-  if (type === 'color' || type === 'suit') {
-    if (suit === 'hearts' || suit === 'diamonds') {
-      return '#c62828'
-    }
-
-    if (suit === 'clubs' || suit === 'spades') {
-      return '#111111'
-    }
-  }
-
-  return '#111111'
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -223,19 +253,15 @@ export function renderScoreHud(
   const teamBScore = state.score.match.teamB
 
   const bidLabel = formatBidType(presentation.baseType, presentation.baseSuit)
-  const bidIcon = getBidIcon(presentation.baseType, presentation.baseSuit)
-  const bidIconColor = getBidIconColor(
+  const bidIconMarkup = getBidIconMarkup(
     presentation.baseType,
     presentation.baseSuit
   )
-  const showIcon = bidIcon.length > 0
+  const showIcon = bidIconMarkup.length > 0
 
-  const modifierText =
-    presentation.modifierType === 'double'
-      ? `Контра: ${formatSeat(presentation.modifierSeat)}`
-      : presentation.modifierType === 'redouble'
-        ? `Ре контра: ${formatSeat(presentation.modifierSeat)}`
-        : ''
+  const bidSummary = `${bidLabel}: ${
+    presentation.baseSeat ? formatSeat(presentation.baseSeat) : '—'
+  }`
 
   return `
     <div
@@ -278,7 +304,7 @@ export function renderScoreHud(
           style="
             display:grid;
             grid-template-columns: 1fr 40px 1fr;
-            align-items:center;
+            align-items:stretch;
             min-height:112px;
           "
         >
@@ -286,7 +312,7 @@ export function renderScoreHud(
             style="
               text-align:center;
               padding:12px 10px 16px 10px;
-              border-right:1px solid rgba(255,255,255,0.07);
+              border-right:1px solid rgba(255,255,255,0.10);
             "
           >
             <div
@@ -318,10 +344,10 @@ export function renderScoreHud(
               display:flex;
               align-items:center;
               justify-content:center;
-              color:rgba(255,255,255,0.42);
+              color:#ffffff;
               font-size:26px;
               font-weight:700;
-              border-right:1px solid rgba(255,255,255,0.07);
+              border-right:1px solid rgba(255,255,255,0.10);
             "
           >
             :
@@ -361,11 +387,10 @@ export function renderScoreHud(
         <div
           style="
             display:grid;
-            grid-template-columns:${showIcon ? '58px 1fr' : '1fr'};
+            grid-template-columns:${showIcon ? '68px 1fr' : '1fr'};
             align-items:stretch;
             min-height:56px;
             background: linear-gradient(180deg, rgba(247, 181, 34, 0.98) 0%, rgba(236, 168, 26, 0.98) 100%);
-            color:#ffffff;
             border-top:1px solid rgba(255,255,255,0.08);
           "
         >
@@ -378,13 +403,10 @@ export function renderScoreHud(
                 align-items:center;
                 justify-content:center;
                 border-right:1px solid rgba(0,0,0,0.12);
-                font-size:${bidIcon === 'J' || bidIcon === 'A' ? '34px' : '28px'};
                 line-height:1;
-                font-weight:900;
-                color:${bidIconColor};
               "
             >
-              ${bidIcon}
+              ${bidIconMarkup}
             </div>
           `
               : ''
@@ -393,78 +415,19 @@ export function renderScoreHud(
           <div
             style="
               display:flex;
-              flex-direction:column;
-              justify-content:center;
-              padding:8px 12px 7px 12px;
+              align-items:center;
+              padding:0 12px;
               min-width:0;
+              font-size:16px;
+              font-weight:900;
+              line-height:1.1;
+              color:#111111;
+              white-space:nowrap;
+              overflow:hidden;
+              text-overflow:ellipsis;
             "
           >
-            <div
-              style="
-                font-size:10px;
-                font-weight:900;
-                letter-spacing:0.1em;
-                text-transform:uppercase;
-                color:rgba(20,20,20,0.72);
-                margin-bottom:2px;
-              "
-            >
-              Обява
-            </div>
-
-            <div
-              style="
-                font-size:15px;
-                font-weight:900;
-                line-height:1.1;
-                color:#ffffff;
-                white-space:nowrap;
-                overflow:hidden;
-                text-overflow:ellipsis;
-              "
-            >
-              ${bidLabel}
-            </div>
-
-            <div
-              style="
-                margin-top:3px;
-                font-size:12px;
-                font-weight:700;
-                line-height:1.15;
-                color:rgba(255,255,255,0.92);
-                white-space:nowrap;
-                overflow:hidden;
-                text-overflow:ellipsis;
-              "
-            >
-              ${
-                presentation.baseSeat
-                  ? `Обявил: ${formatSeat(presentation.baseSeat)}`
-                  : 'Обявил: —'
-              }
-            </div>
-
-            ${
-              modifierText
-                ? `
-              <div
-                style="
-                  margin-top:2px;
-                  font-size:12px;
-                  font-weight:800;
-                  line-height:1.15;
-                  color:#173252;
-                  white-space:nowrap;
-                  overflow:hidden;
-                  text-overflow:ellipsis;
-                "
-              >
-                ${modifierText}
-              </div>
-            `
-                : ''
-            }
+            ${bidSummary}
           </div>
         </div>
       </div>

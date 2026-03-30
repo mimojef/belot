@@ -74,7 +74,7 @@ function getPacketTarget(
   if (seat === 'bottom') {
     return {
       x: 0,
-      y: 248,
+      y: 258,
       rotate: packetCount === 3 ? '-4deg' : '-2deg',
     }
   }
@@ -82,21 +82,21 @@ function getPacketTarget(
   if (seat === 'top') {
     return {
       x: 0,
-      y: -248,
+      y: -258,
       rotate: packetCount === 3 ? '4deg' : '2deg',
     }
   }
 
   if (seat === 'left') {
     return {
-      x: -360,
+      x: -372,
       y: 0,
       rotate: packetCount === 3 ? '-90deg' : '-88deg',
     }
   }
 
   return {
-    x: 360,
+    x: 372,
     y: 0,
     rotate: packetCount === 3 ? '90deg' : '88deg',
   }
@@ -270,6 +270,7 @@ export function renderDealAnimationScreen(
             transform:translate(-50%, -50%);
             pointer-events:none;
             animation: belot-deal-center-stack-in 220ms ease forwards;
+            z-index:90;
           "
         >
           <div
