@@ -35,42 +35,12 @@ const BOTTOM_HAND_GAP = 12
 const BOTTOM_HAND_BOTTOM_OFFSET = STAGE_EDGE_GAP + SEAT_PANEL_HEIGHT + BOTTOM_HAND_GAP
 const SCORE_HUD_INTERNAL_OFFSET = 18
 
-let autoPhaseTimeoutId: number | null = null
-let autoCutTimeoutId: number | null = null
-let autoPhaseKey = ''
-let autoCutKey = ''
 let cutResolveTimeoutId: number | null = null
-let roundSetupRerenderTimeoutId: number | null = null
-
-function clearAutoPhaseTimeout(): void {
-  if (autoPhaseTimeoutId !== null) {
-    window.clearTimeout(autoPhaseTimeoutId)
-    autoPhaseTimeoutId = null
-  }
-
-  autoPhaseKey = ''
-}
-
-function clearAutoCutTimeout(): void {
-  if (autoCutTimeoutId !== null) {
-    window.clearTimeout(autoCutTimeoutId)
-    autoCutTimeoutId = null
-  }
-
-  autoCutKey = ''
-}
 
 function clearCutResolveTimeout(): void {
   if (cutResolveTimeoutId !== null) {
     window.clearTimeout(cutResolveTimeoutId)
     cutResolveTimeoutId = null
-  }
-}
-
-function clearRoundSetupRerenderTimeout(): void {
-  if (roundSetupRerenderTimeoutId !== null) {
-    window.clearTimeout(roundSetupRerenderTimeoutId)
-    roundSetupRerenderTimeoutId = null
   }
 }
 
@@ -89,7 +59,6 @@ function triggerCutResolveSequence(
   cutIndex: number,
   options: RenderAppOptions
 ): void {
-  clearAutoCutTimeout()
   clearCutResolveTimeout()
 
   options.onSelectCutIndex?.(cutIndex)
@@ -253,97 +222,6 @@ function renderCenterPanel(content: string, width: number): string {
       ${content}
     </div>
   `
-}
-
-function scheduleAutoPhaseAdvance(
-  phase: string,
-  onNextPhaseClick?: () => void
-): void {
-  if (!onNextPhaseClick) {
-    clearAutoPhaseTimeout()
-    return
-  }
-
-  const phaseDelayMap: Record<string, number> = {
-    'new-game': 140,
-    'choose-first-dealer': 220,
-    'cut-resolve': 20,
-    'deal-first-3': 2850,
-    'deal-next-2': 2250,
-    'deal-last-3': 2850,
-  }
-
-  const delay = phaseDelayMap[phase]
-
-  if (!delay) {
-    clearAutoPhaseTimeout()
-    return
-  }
-
-  const nextKey = `${phase}:${delay}`
-
-  if (autoPhaseKey === nextKey) {
-    return
-  }
-
-  clearAutoPhaseTimeout()
-  autoPhaseKey = nextKey
-
-  autoPhaseTimeoutId = window.setTimeout(() => {
-    autoPhaseTimeoutId = null
-    autoPhaseKey = ''
-    onNextPhaseClick()
-  }, delay)
-}
-
-function scheduleAutoCut(
-  phase: string,
-  cutterSeat: Seat | null,
-  selectedCutIndex: number | null | undefined,
-  options: RenderAppOptions
-): void {
-  if (phase !== 'cutting') {
-    clearAutoCutTimeout()
-    return
-  }
-
-  const isHumanCutting = cutterSeat === 'bottom'
-  const cutIndex = selectedCutIndex ?? 16
-  const delay = isHumanCutting ? 20000 : 1500
-  const nextKey = `${phase}:${cutterSeat ?? 'none'}:${cutIndex}:${delay}`
-
-  if (autoCutKey === nextKey) {
-    return
-  }
-
-  clearAutoCutTimeout()
-  autoCutKey = nextKey
-
-  autoCutTimeoutId = window.setTimeout(() => {
-    autoCutTimeoutId = null
-    autoCutKey = ''
-
-    triggerCutResolveSequence(cutIndex, options)
-  }, delay)
-}
-
-function scheduleRoundSetupRerender(
-  delayMs: number | null,
-  rootElement: HTMLElement,
-  app: AppBootstrap,
-  options: RenderAppOptions
-): void {
-  if (delayMs === null) {
-    clearRoundSetupRerenderTimeout()
-    return
-  }
-
-  clearRoundSetupRerenderTimeout()
-
-  roundSetupRerenderTimeoutId = window.setTimeout(() => {
-    roundSetupRerenderTimeoutId = null
-    renderApp(rootElement, app, options)
-  }, delayMs)
 }
 
 export function renderApp(
@@ -563,8 +441,72 @@ export function renderApp(
           activeSeat
         )}
       </div>
+
+      <div
+  style="
+    position:fixed;
+    right:18px;
+    top:18px;
+    z-index:30;
+    pointer-events:auto;
+    display:flex;
+    flex-direction:column;
+    align-items:flex-end;
+    gap:10px;
+  "
+>
+        <div
+          style="
+            padding:8px 12px;
+            border-radius:10px;
+            background:rgba(6, 22, 40, 0.92);
+            border:1px solid rgba(255,255,255,0.12);
+            color:#f4f8ff;
+            font-size:12px;
+            font-weight:800;
+            letter-spacing:0.06em;
+            text-transform:uppercase;
+            box-shadow:0 10px 24px rgba(0,0,0,0.18);
+          "
+        >
+          Фаза: ${state.phase}
+        </div>
+
+        <button
+          type="button"
+          data-action="debug-next-phase"
+          ${options.onNextPhaseClick ? '' : 'disabled'}
+          style="
+            min-width:160px;
+            height:46px;
+            padding:0 18px;
+            border:none;
+            border-radius:12px;
+            background:${options.onNextPhaseClick ? 'rgba(245, 187, 55, 0.98)' : 'rgba(120,120,120,0.7)'};
+            color:#13253d;
+            font-size:14px;
+            font-weight:900;
+            letter-spacing:0.04em;
+            cursor:${options.onNextPhaseClick ? 'pointer' : 'default'};
+            box-shadow:0 12px 24px rgba(0,0,0,0.20);
+          "
+        >
+          Следваща фаза
+        </button>
+      </div>
     </div>
   `
+
+  const debugNextPhaseButton = rootElement.querySelector<HTMLButtonElement>(
+    '[data-action="debug-next-phase"]'
+  )
+
+  if (debugNextPhaseButton && options.onNextPhaseClick) {
+    debugNextPhaseButton.addEventListener('click', (event) => {
+      event.preventDefault()
+      options.onNextPhaseClick?.()
+    })
+  }
 
   const cutCardButtons = rootElement.querySelectorAll<HTMLButtonElement>(
     '[data-action="cut-card"]'
@@ -604,18 +546,4 @@ export function renderApp(
   if (isPlayingPhase) {
     bindPlayCardClicks(getActionElements(rootElement, 'play-card'), options.onPlayCard)
   }
-
-  scheduleAutoPhaseAdvance(state.phase, options.onNextPhaseClick)
-  scheduleAutoCut(
-    state.phase,
-    state.round.cutterSeat,
-    state.round.selectedCutIndex,
-    options
-  )
-  scheduleRoundSetupRerender(
-    roundSetupFlow.nextRerenderInMs,
-    rootElement,
-    app,
-    options
-  )
 }

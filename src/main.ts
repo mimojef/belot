@@ -1,6 +1,5 @@
 import './style.css'
 import { bootstrapApp } from './app/bootstrap'
-import { runPlayingBotsUntilHumanTurn } from './app/runPlayingBotsUntilHumanTurn'
 import { renderApp } from './app/renderApp'
 import { createBelotePromptController } from './app/playPrompts/createBelotePromptController'
 
@@ -16,8 +15,6 @@ const app = bootstrapApp()
 let resizeFrameId: number | null = null
 
 function render(): void {
-  runPlayingBotsUntilHumanTurn(app)
-
   renderApp(appRoot, app, {
     onNextPhaseClick: () => {
       app.engine.goToNextPhase()
