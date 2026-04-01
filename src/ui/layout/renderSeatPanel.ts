@@ -4,6 +4,10 @@ const DEAL_PACKET_START_DELAY = 220
 const DEAL_PACKET_DELAY_STEP = 420
 const DEAL_PACKET_DURATION = 860
 
+const FAN_SPREAD_STEP = 38
+const FAN_ROTATE_STEP = 6
+const FAN_CURVE_STEP = 7
+
 function formatSeatShort(seat: Seat): string {
   if (seat === 'bottom') return 'ТИ'
   if (seat === 'right') return 'ДЯСНО'
@@ -23,6 +27,33 @@ function formatSeatAvatarLabel(seat: Seat): string {
 function renderDealerBadge(seat: Seat, dealerSeat: Seat | null): string {
   if (seat !== dealerSeat) {
     return ''
+  }
+
+  if (seat === 'bottom') {
+    return `
+      <div
+        style="
+          position:absolute;
+          right:8px;
+          top:50%;
+          transform:translateY(-50%);
+          width:28px;
+          height:28px;
+          display:inline-flex;
+          align-items:center;
+          justify-content:center;
+          border-radius:10px;
+          background: rgba(245, 187, 55, 0.98);
+          color:#13253d;
+          font-size:14px;
+          font-weight:900;
+          box-shadow: 0 6px 14px rgba(0,0,0,0.22);
+          z-index:5;
+        "
+      >
+        D
+      </div>
+    `
   }
 
   return `
@@ -200,6 +231,50 @@ function getCardAnimationStyle(
   return `opacity:0; animation: belot-seat-reveal 120ms ease ${revealDelayMs}ms forwards;`
 }
 
+function getFanDistance(index: number, visibleCount: number): number {
+  return index - (visibleCount - 1) / 2
+}
+
+function getBottomFanTransform(distance: number): string {
+  const distanceAbs = Math.abs(distance)
+
+  return `
+    translateX(calc(-50% + ${distance * 50}px))
+    translateY(${distanceAbs * 4}px)
+    rotate(${distance * 7}deg)
+  `
+}
+
+function getTopFanTransform(distance: number): string {
+  const distanceAbs = Math.abs(distance)
+
+  return `
+    translateX(calc(-50% + ${distance * FAN_SPREAD_STEP}px))
+    translateY(${-distanceAbs * FAN_CURVE_STEP}px)
+    rotate(${-distance * FAN_ROTATE_STEP}deg)
+  `
+}
+
+function getLeftFanTransform(distance: number): string {
+  const distanceAbs = Math.abs(distance)
+
+  return `
+    translateY(calc(-50% + ${distance * FAN_SPREAD_STEP}px))
+    translateX(${-distanceAbs * FAN_CURVE_STEP}px)
+    rotate(${90 + distance * FAN_ROTATE_STEP}deg)
+  `
+}
+
+function getRightFanTransform(distance: number): string {
+  const distanceAbs = Math.abs(distance)
+
+  return `
+    translateY(calc(-50% + ${distance * FAN_SPREAD_STEP}px))
+    translateX(${distanceAbs * FAN_CURVE_STEP}px)
+    rotate(${-90 - distance * FAN_ROTATE_STEP}deg)
+  `
+}
+
 function renderSeatCards(
   seat: Seat,
   handCount: number,
@@ -215,7 +290,7 @@ function renderSeatCards(
   const revealDelayMs = getSeatRevealDelayMs(seat, dealerSeat)
 
   const cards = Array.from({ length: visibleCount }, (_, index) => {
-    const offset = index * 22
+    const distance = getFanDistance(index, visibleCount)
     const animationStyle = getCardAnimationStyle(
       currentPhase,
       visibleCount,
@@ -234,67 +309,67 @@ function renderSeatCards(
     `
 
     if (seat === 'top') {
-  return `
-    <div
-      style="
-        ${commonStyles}
-        left:50%;
-        bottom:-50px;
-        transform:translateX(calc(-50% + ${offset - ((visibleCount - 1) * 7)}px)) rotate(${((visibleCount - 1) / 2 - index) * 8}deg);
-        transform-origin:center 10%;
-      "
-    >
-      ${renderCardBackOrFront(seat)}
-    </div>
-  `
-}
+      return `
+        <div
+          style="
+            ${commonStyles}
+            left:50%;
+            bottom:-50px;
+            transform:${getTopFanTransform(distance)};
+            transform-origin:center 10%;
+          "
+        >
+          ${renderCardBackOrFront(seat)}
+        </div>
+      `
+    }
 
     if (seat === 'bottom') {
-  return `
-    <div
-      style="
-        ${commonStyles}
-        left:50%;
-        top:-80px;
-        transform:translateX(calc(-50% + ${offset - ((visibleCount - 1) * 7)}px)) rotate(${(index - (visibleCount - 1) / 2) * 8}deg);
-        transform-origin:center 90%;
-        box-shadow: 0 8px 14px rgba(0,0,0,0.18);
-      "
-    >
-      ${renderCardBackOrFront(seat)}
-    </div>
-  `
-}
+      return `
+        <div
+          style="
+            ${commonStyles}
+            left:50%;
+            top:-120px;
+            transform:${getBottomFanTransform(distance)};
+            transform-origin:center 90%;
+            box-shadow: 0 8px 14px rgba(0,0,0,0.18);
+          "
+        >
+          ${renderCardBackOrFront(seat)}
+        </div>
+      `
+    }
 
     if (seat === 'left') {
-  return `
-    <div
-      style="
-        ${commonStyles}
-        top:19%;
-        right:-80px;
-        transform:translateY(calc(-50% + ${offset - ((visibleCount - 1) * 7)}px)) rotate(${90 + ((index - (visibleCount - 1) / 2) * 8)}deg);
-        transform-origin:10% center;
-      "
-    >
-      ${renderCardBackOrFront(seat)}
-    </div>
-  `
-}
+      return `
+        <div
+          style="
+            ${commonStyles}
+            top:19%;
+            right:-80px;
+            transform:${getLeftFanTransform(distance)};
+            transform-origin:10% center;
+          "
+        >
+          ${renderCardBackOrFront(seat)}
+        </div>
+      `
+    }
 
     return `
-  <div
-    style="
-      ${commonStyles}
-      top:19%;
-      left:-80px;
-      transform:translateY(calc(-50% + ${offset - ((visibleCount - 1) * 7)}px)) rotate(${-90 + (((visibleCount - 1) / 2 - index) * 8)}deg);
-      transform-origin:90% center;
-    "
-  >
-    ${renderCardBackOrFront(seat)}
-  </div>
-`
+      <div
+        style="
+          ${commonStyles}
+          top:19%;
+          left:-80px;
+          transform:${getRightFanTransform(distance)};
+          transform-origin:90% center;
+        "
+      >
+        ${renderCardBackOrFront(seat)}
+      </div>
+    `
   }).join('')
 
   return `
@@ -312,6 +387,162 @@ function renderSeatCards(
   `
 }
 
+function renderBottomSeatFace(isActive: boolean, dealerSeat: Seat | null): string {
+  return `
+    <div
+      style="
+        position:absolute;
+        inset:0;
+        border-radius:14px;
+        overflow:hidden;
+        z-index:3;
+        border:2px solid ${isActive ? 'rgba(245, 187, 55, 0.96)' : 'rgba(255,255,255,0.18)'};
+        background:
+          radial-gradient(circle at 30% 28%, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0.05) 18%, rgba(18, 79, 118, 0.0) 40%),
+          linear-gradient(180deg, rgba(16, 145, 151, 0.96) 0%, rgba(17, 95, 118, 0.96) 54%, rgba(10, 44, 70, 0.98) 100%);
+        box-shadow:
+          inset 0 1px 0 rgba(255,255,255,0.14),
+          0 14px 28px rgba(0,0,0,0.22);
+      "
+    >
+      <div
+        style="
+          position:absolute;
+          left:5px;
+          top:5px;
+          width:84px;
+          height:84px;
+          border-radius:14px;
+          background:
+            linear-gradient(180deg, rgba(255,255,255,0.97) 0%, rgba(232,240,248,0.97) 100%);
+          box-shadow:
+            inset 0 1px 0 rgba(255,255,255,0.8),
+            0 10px 18px rgba(0,0,0,0.18);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          color:#16314f;
+          font-size:30px;
+          font-weight:900;
+          letter-spacing:0.04em;
+        "
+      >
+        ${formatSeatAvatarLabel('bottom')}
+      </div>
+
+      <div
+        style="
+          position:absolute;
+          left:99px;
+          right:40px;
+          top:14px;
+          height:26px;
+          display:flex;
+          align-items:center;
+          color:#f4f8ff;
+          font-size:18px;
+          font-weight:800;
+          letter-spacing:0.02em;
+          line-height:1;
+          text-transform:uppercase;
+          text-shadow:0 2px 8px rgba(0,0,0,0.20);
+        "
+      >
+        ${formatSeatShort('bottom')}
+      </div>
+
+      <div
+        style="
+          position:absolute;
+          left:101px;
+          right:5px;
+          bottom:5px;
+          height:18px;
+          border-radius:6px;
+          background:rgba(245, 187, 55, 0.96);
+          box-shadow:0 4px 10px rgba(0,0,0,0.18);
+        "
+      ></div>
+
+      ${renderDealerBadge('bottom', dealerSeat)}
+    </div>
+  `
+}
+
+function renderDefaultSeatFace(
+  seat: Seat,
+  isActive: boolean,
+  dealerSeat: Seat | null
+): string {
+  return `
+    <div
+      style="
+        position:absolute;
+        inset:0;
+        border-radius:12px;
+        overflow:hidden;
+        z-index:3;
+        border:2px solid ${isActive ? 'rgba(245, 187, 55, 0.96)' : 'rgba(255,255,255,0.18)'};
+        background:
+          radial-gradient(circle at 35% 30%, rgba(255,255,255,0.22) 0%, rgba(255,255,255,0.06) 18%, rgba(18, 79, 118, 0.0) 40%),
+          linear-gradient(180deg, rgba(18, 154, 160, 0.95) 0%, rgba(19, 104, 121, 0.95) 52%, rgba(12, 55, 82, 0.96) 100%);
+        box-shadow:
+          inset 0 1px 0 rgba(255,255,255,0.14),
+          0 14px 28px rgba(0,0,0,0.22);
+      "
+    >
+      <div
+        style="
+          position:absolute;
+          top:5px;
+          left:5px;
+          right:5px;
+          bottom:43px;
+          border-radius:12px;
+          background:
+            linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(232,240,248,0.96) 100%);
+          box-shadow:
+            inset 0 1px 0 rgba(255,255,255,0.8),
+            0 10px 18px rgba(0,0,0,0.18);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          color:#16314f;
+          font-size:42px;
+          font-weight:900;
+          letter-spacing:0.04em;
+        "
+      >
+        ${formatSeatAvatarLabel(seat)}
+      </div>
+
+      ${renderDealerBadge(seat, dealerSeat)}
+
+      <div
+        style="
+          position:absolute;
+          left:0;
+          right:0;
+          bottom:0;
+          min-height:38px;
+          padding:10px 12px 11px 12px;
+          background: rgba(6, 22, 40, 0.94);
+          border-top:1px solid rgba(255,255,255,0.12);
+          color:#f4f8ff;
+          text-align:center;
+          font-size:14px;
+          font-weight:800;
+          letter-spacing:0.04em;
+          line-height:1.1;
+          text-transform:uppercase;
+        "
+      >
+        ${formatSeatShort(seat)}
+      </div>
+    </div>
+  `
+}
+
 export function renderSeatPanel(
   seat: Seat,
   handCount: number,
@@ -321,6 +552,8 @@ export function renderSeatPanel(
   currentPhase?: string
 ): string {
   const isActive = seat === activeSeat
+  const panelWidth = seat === 'bottom' ? 260 : 138
+  const panelHeight = seat === 'bottom' ? 98 : 176
 
   return `
     <style>
@@ -337,80 +570,19 @@ export function renderSeatPanel(
     <div
       style="
         position:relative;
-        width:138px;
-        height:176px;
+        width:${panelWidth}px;
+        height:${panelHeight}px;
         overflow:visible;
         filter:${isActive ? 'drop-shadow(0 0 22px rgba(245, 187, 55, 0.30))' : 'drop-shadow(0 12px 22px rgba(0,0,0,0.22))'};
       "
     >
       ${renderSeatCards(seat, handCount, dealerSeat, currentPhase)}
 
-      <div
-        style="
-          position:absolute;
-          inset:0;
-          border-radius:12px;
-          overflow:hidden;
-          z-index:3;
-          border:2px solid ${isActive ? 'rgba(245, 187, 55, 0.96)' : 'rgba(255,255,255,0.18)'};
-          background:
-            radial-gradient(circle at 35% 30%, rgba(255,255,255,0.22) 0%, rgba(255,255,255,0.06) 18%, rgba(18, 79, 118, 0.0) 40%),
-            linear-gradient(180deg, rgba(18, 154, 160, 0.95) 0%, rgba(19, 104, 121, 0.95) 52%, rgba(12, 55, 82, 0.96) 100%);
-          box-shadow:
-            inset 0 1px 0 rgba(255,255,255,0.14),
-            0 14px 28px rgba(0,0,0,0.22);
-        "
-      >
-        <div
-          style="
-            position:absolute;
-            top:18px;
-            left:50%;
-            transform:translateX(-50%);
-            width:76px;
-            height:76px;
-            border-radius:20px;
-            background:
-              linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(232,240,248,0.96) 100%);
-            box-shadow:
-              inset 0 1px 0 rgba(255,255,255,0.8),
-              0 10px 18px rgba(0,0,0,0.18);
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            color:#16314f;
-            font-size:34px;
-            font-weight:900;
-            letter-spacing:0.04em;
-          "
-        >
-          ${formatSeatAvatarLabel(seat)}
-        </div>
-
-        ${renderDealerBadge(seat, dealerSeat)}
-
-        <div
-          style="
-            position:absolute;
-            left:0;
-            right:0;
-            bottom:0;
-            min-height:38px;
-            padding:10px 12px 11px 12px;
-            background: rgba(6, 22, 40, 0.94);
-            border-top:1px solid rgba(255,255,255,0.12);
-            color:#f4f8ff;
-            text-align:center;
-            font-size:14px;
-            font-weight:800;
-            letter-spacing:0.04em;
-            line-height:1.1;
-            text-transform:uppercase;
-          "
-        >
-          ${formatSeatShort(seat)}
-        </div>
-      </div>
+      ${
+        seat === 'bottom'
+          ? renderBottomSeatFace(isActive, dealerSeat)
+          : renderDefaultSeatFace(seat, isActive, dealerSeat)
+      }
     </div>
   `
 }

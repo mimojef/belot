@@ -283,19 +283,22 @@ export function renderApp(
     : null
   const bottomHandViewState = getBottomHandViewState(state)
 
+  const biddingOverlayContent =
+    !roundSetupFlow.isRoundSetupPhase && biddingViewState
+      ? renderCenterPanel(renderBiddingPanel(biddingViewState), 760)
+      : ''
+
   const activeSeat: Seat | null = isBiddingPhase
     ? state.bidding.currentSeat
     : ((state.playing?.currentTurnSeat ?? null) as Seat | null)
 
   const centerMainContent = roundSetupFlow.isRoundSetupPhase
     ? roundSetupFlow.centerContent
-    : biddingViewState
-      ? renderCenterPanel(renderBiddingPanel(biddingViewState), 760)
-      : playingViewState
-        ? renderCenterPanel(renderPlayingPanel(playingViewState), 980)
-        : scoringViewState
-          ? renderCenterPanel(renderScoringPanel(scoringViewState), 980)
-          : ''
+    : playingViewState
+      ? renderCenterPanel(renderPlayingPanel(playingViewState), 980)
+      : scoringViewState
+        ? renderCenterPanel(renderScoringPanel(scoringViewState), 980)
+        : ''
 
   rootElement.innerHTML = `
     <div class="game-shell">
@@ -306,23 +309,23 @@ export function renderApp(
         style="transform: translate(-50%, -50%) scale(${stageScale});"
       >
         <div
-  style="
-    position:relative;
-    width:${GAME_STAGE_WIDTH}px;
-    height:${GAME_STAGE_HEIGHT}px;
-    overflow:visible;
-    color:#ffffff;
-  "
->
+          style="
+            position:relative;
+            width:${GAME_STAGE_WIDTH}px;
+            height:${GAME_STAGE_HEIGHT}px;
+            overflow:visible;
+            color:#ffffff;
+          "
+        >
           <div
-  style="
-    position:relative;
-    width:100%;
-    height:100%;
-    padding:0;
-    overflow:visible;
-  "
->
+            style="
+              position:relative;
+              width:100%;
+              height:100%;
+              padding:0;
+              overflow:visible;
+            "
+          >
             <div
               style="
                 position:absolute;
@@ -367,6 +370,29 @@ export function renderApp(
         </div>
       </div>
 
+      ${
+        biddingOverlayContent
+          ? `
+        <div
+          style="
+            position:fixed;
+            left:50%;
+            top:35%;
+            z-index:20;
+            pointer-events:auto;
+            transform:translate(-50%, -50%) scale(${stageScale});
+            transform-origin:center center;
+            width:1080px;
+            display:flex;
+            justify-content:center;
+          "
+        >
+          ${biddingOverlayContent}
+        </div>
+      `
+          : ''
+      }
+
       <div
         style="
           position:fixed;
@@ -396,13 +422,13 @@ export function renderApp(
         "
       >
         ${renderSeatPanel(
-  'top',
-  roundSetupFlow.seatHandCounts.top,
-  state.round.dealerSeat,
-  state.round.cutterSeat,
-  activeSeat,
-  state.phase
-)}
+          'top',
+          roundSetupFlow.seatHandCounts.top,
+          state.round.dealerSeat,
+          state.round.cutterSeat,
+          activeSeat,
+          state.phase
+        )}
       </div>
 
       <div
@@ -418,13 +444,13 @@ export function renderApp(
         "
       >
         ${renderSeatPanel(
-  'left',
-  roundSetupFlow.seatHandCounts.left,
-  state.round.dealerSeat,
-  state.round.cutterSeat,
-  activeSeat,
-  state.phase
-)}
+          'left',
+          roundSetupFlow.seatHandCounts.left,
+          state.round.dealerSeat,
+          state.round.cutterSeat,
+          activeSeat,
+          state.phase
+        )}
       </div>
 
       <div
@@ -440,13 +466,13 @@ export function renderApp(
         "
       >
         ${renderSeatPanel(
-  'right',
-  roundSetupFlow.seatHandCounts.right,
-  state.round.dealerSeat,
-  state.round.cutterSeat,
-  activeSeat,
-  state.phase
-)}
+          'right',
+          roundSetupFlow.seatHandCounts.right,
+          state.round.dealerSeat,
+          state.round.cutterSeat,
+          activeSeat,
+          state.phase
+        )}
       </div>
 
       <div
@@ -462,13 +488,13 @@ export function renderApp(
         "
       >
         ${renderSeatPanel(
-  'bottom',
-  roundSetupFlow.seatHandCounts.bottom,
-  state.round.dealerSeat,
-  state.round.cutterSeat,
-  activeSeat,
-  state.phase
-)}
+          'bottom',
+          roundSetupFlow.seatHandCounts.bottom,
+          state.round.dealerSeat,
+          state.round.cutterSeat,
+          activeSeat,
+          state.phase
+        )}
       </div>
 
       <div
