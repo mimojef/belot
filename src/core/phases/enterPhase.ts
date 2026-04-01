@@ -7,33 +7,48 @@ import { resolveCutPhase } from './resolveCutPhase'
 import { startBiddingPhase } from './startBiddingPhase'
 import { startPlayingPhase } from './startPlayingPhase'
 
+function getPhaseEnteredAt(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now()
+  }
+
+  return Date.now()
+}
+
+function withPhaseEnteredAt(state: GameState): GameState {
+  return {
+    ...state,
+    phaseEnteredAt: getPhaseEnteredAt(),
+  }
+}
+
 export function enterPhase(state: GameState, phase: PhaseType): GameState {
   if (phase === 'cut-resolve') {
-    return resolveCutPhase(state)
+    return withPhaseEnteredAt(resolveCutPhase(state))
   }
 
   if (phase === 'deal-first-3') {
-    return dealFirstThreePhase(state)
+    return withPhaseEnteredAt(dealFirstThreePhase(state))
   }
 
   if (phase === 'deal-next-2') {
-    return dealNextTwoPhase(state)
+    return withPhaseEnteredAt(dealNextTwoPhase(state))
   }
 
   if (phase === 'bidding') {
-    return startBiddingPhase(state)
+    return withPhaseEnteredAt(startBiddingPhase(state))
   }
 
   if (phase === 'deal-last-3') {
-    return dealLastThreePhase(state)
+    return withPhaseEnteredAt(dealLastThreePhase(state))
   }
 
   if (phase === 'playing') {
-    return startPlayingPhase(state)
+    return withPhaseEnteredAt(startPlayingPhase(state))
   }
 
-  return {
+  return withPhaseEnteredAt({
     ...state,
     phase,
-  }
+  })
 }

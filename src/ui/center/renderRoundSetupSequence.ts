@@ -1,4 +1,4 @@
-import type { Seat } from '../../data/constants/seatOrder'
+import { SEAT_ORDER, type Seat } from '../../data/constants/seatOrder'
 
 export type RoundSetupSequencePhase =
   | 'new-game'
@@ -13,11 +13,24 @@ type RoundSetupSequenceParams = {
   phase: RoundSetupSequencePhase | string
   cutterSeat: Seat | null
   selectedCutIndex: number | null | undefined
+  dealerSeat?: Seat | null
 }
 
 const CUT_CARD_WIDTH = 130
 const CUT_CARD_HEIGHT = 190
 const CUT_CARD_TOP = 28
+
+const DEAL_PACKET_START_DELAY = 220
+const DEAL_PACKET_DELAY_STEP = 420
+const DEAL_PACKET_DURATION = 860
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
 
 function formatSeatLabel(seat: Seat): string {
   if (seat === 'bottom') return 'ТИ'
@@ -33,6 +46,25 @@ function clampCutIndex(value: number | null | undefined): number {
   }
 
   return Math.max(4, Math.min(28, Math.floor(value as number)))
+}
+
+function getDealOrder(dealerSeat: Seat | null | undefined): Seat[] {
+  if (!dealerSeat) {
+    return ['right', 'top', 'left', 'bottom']
+  }
+
+  const dealerIndex = SEAT_ORDER.indexOf(dealerSeat)
+
+  if (dealerIndex === -1) {
+    return ['right', 'top', 'left', 'bottom']
+  }
+
+  return [
+    SEAT_ORDER[(dealerIndex + 1) % SEAT_ORDER.length],
+    SEAT_ORDER[(dealerIndex + 2) % SEAT_ORDER.length],
+    SEAT_ORDER[(dealerIndex + 3) % SEAT_ORDER.length],
+    SEAT_ORDER[(dealerIndex + 4) % SEAT_ORDER.length],
+  ]
 }
 
 function renderSequenceStyles(): string {
@@ -65,6 +97,29 @@ function renderSequenceStyles(): string {
         100% {
           transform: var(--cut-final-transform);
           box-shadow: 0 3px 6px rgba(0,0,0,0.08);
+        }
+      }
+
+      @keyframes belot-seq-deal-packet {
+        0% {
+          opacity: 0;
+          transform: var(--deal-from-transform);
+          filter: brightness(1);
+        }
+        8% {
+          opacity: 1;
+          transform: var(--deal-from-transform);
+          filter: brightness(1.03);
+        }
+        82% {
+          opacity: 1;
+          transform: var(--deal-to-transform);
+          filter: brightness(1);
+        }
+        100% {
+          opacity: 0;
+          transform: var(--deal-to-transform);
+          filter: brightness(1);
         }
       }
     </style>
@@ -238,6 +293,7 @@ function renderStaticGatheredCards(selectedCutIndex: number): string {
         position:relative;
         width:100%;
         height:290px;
+        overflow:visible;
       "
     >
       <div
@@ -260,17 +316,266 @@ function renderStaticGatheredCards(selectedCutIndex: number): string {
   `
 }
 
+function renderDealingPile(cardCount: number): string {
+  const cards = Array.from({ length: cardCount }, (_, index) => {
+    const pileOffset = cardCount - index - 1
+
+    return `
+      <div
+        style="
+          position:absolute;
+          left:50%;
+          top:${CUT_CARD_TOP}px;
+          width:${CUT_CARD_WIDTH}px;
+          height:${CUT_CARD_HEIGHT}px;
+          transform:translateX(-50%) translate(${pileOffset * 0.18}px, ${12 - pileOffset * 0.2}px) rotate(-2.6deg);
+          transform-origin:center bottom;
+          border-radius:15px;
+          background:
+            linear-gradient(135deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.04) 18%, rgba(255,255,255,0.02) 100%),
+            linear-gradient(180deg, #21476e 0%, #173454 100%);
+          border:1px solid rgba(255,255,255,0.24);
+          box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+          overflow:hidden;
+          pointer-events:none;
+          z-index:${10 + index};
+        "
+      >
+        ${renderCardBack()}
+      </div>
+    `
+  }).join('')
+
+  return `
+    <div
+      style="
+        position:relative;
+        width:100%;
+        height:290px;
+        overflow:visible;
+      "
+    >
+      <div
+        style="
+          position:absolute;
+          left:50%;
+          top:${CUT_CARD_TOP}px;
+          width:124px;
+          height:176px;
+          transform:translateX(-50%) translate(8px, 18px) rotate(-3deg);
+          border-radius:18px;
+          background:rgba(0,0,0,0.14);
+          filter:blur(12px);
+          pointer-events:none;
+        "
+      ></div>
+
+      ${cards}
+    </div>
+  `
+}
+
+function getFallbackDealTarget(seat: Seat): { x: number; y: number; rotate: number } {
+  if (seat === 'top') {
+    return { x: 0, y: -330, rotate: 0 }
+  }
+
+  if (seat === 'bottom') {
+    return { x: 0, y: 345, rotate: 0 }
+  }
+
+  if (seat === 'left') {
+    return { x: -710, y: 8, rotate: -90 }
+  }
+
+  return { x: 710, y: 8, rotate: 90 }
+}
+
+function buildDealTargetSyncHandler(): string {
+  return `
+(function() {
+  const root = this.closest('[data-round-setup-sequence]');
+  const stageElement = document.querySelector('[data-game-stage="1"]');
+
+  if (!root || !stageElement) {
+    return;
+  }
+
+  const run = () => {
+    const stageScale = Number(stageElement.getAttribute('data-stage-scale') || '1') || 1;
+    const packetNodes = root.querySelectorAll('[data-deal-packet-seat]');
+
+    packetNodes.forEach((packetNode) => {
+      const seat = packetNode.getAttribute('data-deal-packet-seat');
+      const rotate = Number(packetNode.getAttribute('data-deal-rotate') || '0');
+
+      if (!seat) {
+        return;
+      }
+
+      const anchor = document.querySelector('[data-seat-anchor="' + seat + '"]');
+
+      if (!anchor) {
+        return;
+      }
+
+      const packetRect = packetNode.getBoundingClientRect();
+      const anchorRect = anchor.getBoundingClientRect();
+
+      const sourceX = packetRect.left + packetRect.width / 2;
+      const sourceY = packetRect.top + packetRect.height / 2;
+
+      let targetX = anchorRect.left + anchorRect.width / 2;
+      let targetY = anchorRect.top + anchorRect.height / 2;
+
+      if (seat === 'top') {
+        targetY = anchorRect.bottom - anchorRect.height * 0.22;
+      } else if (seat === 'bottom') {
+        targetY = anchorRect.top + anchorRect.height * 0.22;
+      } else if (seat === 'left') {
+        targetX = anchorRect.right - anchorRect.width * 0.22;
+      } else if (seat === 'right') {
+        targetX = anchorRect.left + anchorRect.width * 0.22;
+      }
+
+      const dx = (targetX - sourceX) / stageScale;
+      const dy = (targetY - sourceY) / stageScale;
+
+      packetNode.style.setProperty(
+        '--deal-to-transform',
+        'translateX(-50%) translate(' + dx.toFixed(2) + 'px, ' + dy.toFixed(2) + 'px) rotate(' + rotate + 'deg)'
+      );
+    });
+  };
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(run);
+  });
+}).call(this)
+  `.trim()
+}
+
+function renderPacketCards(packetSize: number, seat: Seat): string {
+  const cards = Array.from({ length: packetSize }, (_, index) => {
+    const centered = index - (packetSize - 1) / 2
+
+    let innerTransform = `translate(${centered * 16}px, ${Math.abs(centered) * 4}px) rotate(${centered * 4}deg)`
+
+    if (seat === 'left' || seat === 'right') {
+      innerTransform = `translate(${Math.abs(centered) * 4}px, ${centered * 16}px) rotate(${centered * 4}deg)`
+    }
+
+    return `
+      <div
+        style="
+          position:absolute;
+          left:50%;
+          top:50%;
+          width:${CUT_CARD_WIDTH}px;
+          height:${CUT_CARD_HEIGHT}px;
+          transform:translate(-50%, -50%) ${innerTransform};
+          border-radius:15px;
+          background:
+            linear-gradient(135deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.04) 18%, rgba(255,255,255,0.02) 100%),
+            linear-gradient(180deg, #21476e 0%, #173454 100%);
+          border:1px solid rgba(255,255,255,0.24);
+          box-shadow: 0 10px 18px rgba(0,0,0,0.14);
+          overflow:hidden;
+        "
+      >
+        ${renderCardBack()}
+      </div>
+    `
+  }).join('')
+
+  return cards
+}
+
+function renderDealPackets(
+  dealerSeat: Seat | null | undefined,
+  packetSize: number,
+  remainingCardsInPile: number,
+  sequenceName: 'deal-first-3' | 'deal-next-2'
+): string {
+  const dealOrder = getDealOrder(dealerSeat)
+  const syncTargetsHandler = buildDealTargetSyncHandler()
+  const safeSyncTargetsHandler = escapeHtmlAttribute(syncTargetsHandler)
+
+  const packets = dealOrder.map((seat, index) => {
+    const target = getFallbackDealTarget(seat)
+    const delay = DEAL_PACKET_START_DELAY + index * DEAL_PACKET_DELAY_STEP
+    const fromTransform = `translateX(-50%) translate(0px, 12px) rotate(-3deg)`
+    const toTransform = `translateX(-50%) translate(${target.x}px, ${target.y}px) rotate(${target.rotate}deg)`
+
+    return `
+      <div
+        data-deal-packet-seat="${seat}"
+        data-deal-rotate="${target.rotate}"
+        style="
+          position:absolute;
+          left:50%;
+          top:${CUT_CARD_TOP}px;
+          width:${CUT_CARD_WIDTH + 40}px;
+          height:${CUT_CARD_HEIGHT + 40}px;
+          overflow:visible;
+          transform-origin:center center;
+          pointer-events:none;
+          z-index:${120 + index};
+          --deal-from-transform:${fromTransform};
+          --deal-to-transform:${toTransform};
+          animation: belot-seq-deal-packet ${DEAL_PACKET_DURATION}ms cubic-bezier(0.18, 0.82, 0.22, 1) ${delay}ms forwards;
+        "
+      >
+        ${renderPacketCards(packetSize, seat)}
+      </div>
+    `
+  }).join('')
+
+  return `
+    <div
+      data-round-setup-sequence="${sequenceName}"
+      style="
+        position:relative;
+        width:100%;
+        height:330px;
+        overflow:visible;
+      "
+    >
+      <img
+        alt=""
+        src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+        style="display:none"
+        onload="${safeSyncTargetsHandler}"
+      />
+      ${renderDealingPile(remainingCardsInPile)}
+      ${packets}
+    </div>
+  `
+}
+
+function renderDealFirstThreePackets(dealerSeat: Seat | null | undefined): string {
+  return renderDealPackets(dealerSeat, 3, 20, 'deal-first-3')
+}
+
+function renderDealNextTwoPackets(dealerSeat: Seat | null | undefined): string {
+  return renderDealPackets(dealerSeat, 2, 8, 'deal-next-2')
+}
+
 export function renderRoundSetupSequence({
   phase,
   cutterSeat,
   selectedCutIndex,
+  dealerSeat = null,
 }: RoundSetupSequenceParams): string {
   const isHumanCutting = cutterSeat === 'bottom'
   const isCuttingPhase = phase === 'cutting'
   const isCutResolvePhase = phase === 'cut-resolve'
+  const isDealFirstThreePhase = phase === 'deal-first-3'
+  const isDealNextTwoPhase = phase === 'deal-next-2'
+
   const shouldRenderCutSequence = isCuttingPhase || isCutResolvePhase
 
-  if (!shouldRenderCutSequence) {
+  if (!shouldRenderCutSequence && !isDealFirstThreePhase && !isDealNextTwoPhase) {
     return ''
   }
 
@@ -278,8 +583,8 @@ export function renderRoundSetupSequence({
   const shouldAnimateCut =
     isCuttingPhase && selectedCutIndex !== null && selectedCutIndex !== undefined
 
-  const heading = isHumanCutting ? 'ТИ ЦЕПИШ' : `ЦЕПИ ${formatSeatLabel(cutterSeat ?? 'top')}`
-  const subText = isCutResolvePhase
+  let heading = isHumanCutting ? 'ТИ ЦЕПИШ' : `ЦЕПИ ${formatSeatLabel(cutterSeat ?? 'top')}`
+  let subText = isCutResolvePhase
     ? 'Тестето е събрано.'
     : shouldAnimateCut
       ? 'Цепене...'
@@ -287,16 +592,31 @@ export function renderRoundSetupSequence({
         ? 'Посочи карта с мишката и щракни там, откъдето искаш да цепиш.'
         : 'Изчаква се автоматично цепене.'
 
-  const cards = isCutResolvePhase
+  let contentHeight = 290
+  let cards = isCutResolvePhase
     ? renderStaticGatheredCards(normalizedCutIndex)
     : Array.from({ length: 32 }, (_, index) =>
         renderCutCard(index, shouldAnimateCut, normalizedCutIndex, isHumanCutting)
       ).join('')
 
+  if (isDealFirstThreePhase) {
+    heading = 'РАЗДАВАНЕ ПО 3 КАРТИ'
+    subText = 'От събраната камара тръгват първите 3 карти към всеки играч.'
+    contentHeight = 330
+    cards = renderDealFirstThreePackets(dealerSeat)
+  }
+
+  if (isDealNextTwoPhase) {
+    heading = 'РАЗДАВАНЕ ПО 2 КАРТИ'
+    subText = 'От останалата камара тръгват следващите 2 карти към всеки играч.'
+    contentHeight = 330
+    cards = renderDealNextTwoPackets(dealerSeat)
+  }
+
   return `
     <div
       style="
-        width:min(96vw, 980px);
+        width:980px;
         margin:0 auto;
         display:flex;
         flex-direction:column;
@@ -333,10 +653,11 @@ export function renderRoundSetupSequence({
       <div
         style="
           position:relative;
-          width:min(92vw, 900px);
-          height:290px;
+          width:900px;
+          height:${contentHeight}px;
           margin-top:8px;
           user-select:none;
+          overflow:visible;
         "
       >
         ${cards}

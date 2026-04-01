@@ -36,11 +36,19 @@ const BOTTOM_HAND_BOTTOM_OFFSET = STAGE_EDGE_GAP + SEAT_PANEL_HEIGHT + BOTTOM_HA
 const SCORE_HUD_INTERNAL_OFFSET = 18
 
 let cutResolveTimeoutId: number | null = null
+let roundSetupRerenderTimeoutId: number | null = null
 
 function clearCutResolveTimeout(): void {
   if (cutResolveTimeoutId !== null) {
     window.clearTimeout(cutResolveTimeoutId)
     cutResolveTimeoutId = null
+  }
+}
+
+function clearRoundSetupRerenderTimeout(): void {
+  if (roundSetupRerenderTimeoutId !== null) {
+    window.clearTimeout(roundSetupRerenderTimeoutId)
+    roundSetupRerenderTimeoutId = null
   }
 }
 
@@ -253,7 +261,17 @@ export function renderApp(
       top: state.hands.top.length,
       left: state.hands.left.length,
     },
+    phaseEnteredAt: state.phaseEnteredAt,
   })
+
+  clearRoundSetupRerenderTimeout()
+
+  if (roundSetupFlow.nextRerenderInMs !== null) {
+    roundSetupRerenderTimeoutId = window.setTimeout(() => {
+      roundSetupRerenderTimeoutId = null
+      renderApp(rootElement, app, options)
+    }, roundSetupFlow.nextRerenderInMs)
+  }
 
   const biddingViewState = isBiddingPhase ? getBiddingViewState(state) : null
   const playingViewState = isPlayingPhase ? getPlayingViewState(state) : null
@@ -283,25 +301,28 @@ export function renderApp(
     <div class="game-shell">
       <div
         class="game-stage"
+        data-game-stage="1"
+        data-stage-scale="${stageScale}"
         style="transform: translate(-50%, -50%) scale(${stageScale});"
       >
         <div
-          style="
-            position:relative;
-            width:${GAME_STAGE_WIDTH}px;
-            height:${GAME_STAGE_HEIGHT}px;
-            overflow:hidden;
-            color:#ffffff;
-          "
-        >
+  style="
+    position:relative;
+    width:${GAME_STAGE_WIDTH}px;
+    height:${GAME_STAGE_HEIGHT}px;
+    overflow:visible;
+    color:#ffffff;
+  "
+>
           <div
-            style="
-              position:relative;
-              width:100%;
-              height:100%;
-              padding:0;
-            "
-          >
+  style="
+    position:relative;
+    width:100%;
+    height:100%;
+    padding:0;
+    overflow:visible;
+  "
+>
             <div
               style="
                 position:absolute;
@@ -363,6 +384,7 @@ export function renderApp(
       </div>
 
       <div
+        data-seat-anchor="top"
         style="
           position:fixed;
           left:50%;
@@ -374,15 +396,17 @@ export function renderApp(
         "
       >
         ${renderSeatPanel(
-          'top',
-          roundSetupFlow.seatHandCounts.top,
-          state.round.dealerSeat,
-          state.round.cutterSeat,
-          activeSeat
-        )}
+  'top',
+  roundSetupFlow.seatHandCounts.top,
+  state.round.dealerSeat,
+  state.round.cutterSeat,
+  activeSeat,
+  state.phase
+)}
       </div>
 
       <div
+        data-seat-anchor="left"
         style="
           position:fixed;
           left:5px;
@@ -394,15 +418,17 @@ export function renderApp(
         "
       >
         ${renderSeatPanel(
-          'left',
-          roundSetupFlow.seatHandCounts.left,
-          state.round.dealerSeat,
-          state.round.cutterSeat,
-          activeSeat
-        )}
+  'left',
+  roundSetupFlow.seatHandCounts.left,
+  state.round.dealerSeat,
+  state.round.cutterSeat,
+  activeSeat,
+  state.phase
+)}
       </div>
 
       <div
+        data-seat-anchor="right"
         style="
           position:fixed;
           right:5px;
@@ -414,15 +440,17 @@ export function renderApp(
         "
       >
         ${renderSeatPanel(
-          'right',
-          roundSetupFlow.seatHandCounts.right,
-          state.round.dealerSeat,
-          state.round.cutterSeat,
-          activeSeat
-        )}
+  'right',
+  roundSetupFlow.seatHandCounts.right,
+  state.round.dealerSeat,
+  state.round.cutterSeat,
+  activeSeat,
+  state.phase
+)}
       </div>
 
       <div
+        data-seat-anchor="bottom"
         style="
           position:fixed;
           left:50%;
@@ -434,27 +462,28 @@ export function renderApp(
         "
       >
         ${renderSeatPanel(
-          'bottom',
-          roundSetupFlow.seatHandCounts.bottom,
-          state.round.dealerSeat,
-          state.round.cutterSeat,
-          activeSeat
-        )}
+  'bottom',
+  roundSetupFlow.seatHandCounts.bottom,
+  state.round.dealerSeat,
+  state.round.cutterSeat,
+  activeSeat,
+  state.phase
+)}
       </div>
 
       <div
-  style="
-    position:fixed;
-    right:18px;
-    top:18px;
-    z-index:30;
-    pointer-events:auto;
-    display:flex;
-    flex-direction:column;
-    align-items:flex-end;
-    gap:10px;
-  "
->
+        style="
+          position:fixed;
+          right:18px;
+          top:18px;
+          z-index:30;
+          pointer-events:auto;
+          display:flex;
+          flex-direction:column;
+          align-items:flex-end;
+          gap:10px;
+        "
+      >
         <div
           style="
             padding:8px 12px;

@@ -44,6 +44,7 @@ export function getTeamBySeat(seat: Seat): Team {
 export function createInitialState(): GameState {
   return {
     phase: 'new-game',
+    phaseEnteredAt: null,
     players: createPlayersState(),
     round: {
       dealerSeat: null,

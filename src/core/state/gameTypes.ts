@@ -178,6 +178,7 @@ export type RoundMeta = {
 
 export type GameState = {
   phase: PhaseType
+  phaseEnteredAt: number | null
   players: Record<Seat, PlayerState>
   round: RoundMeta
   deck: Card[]

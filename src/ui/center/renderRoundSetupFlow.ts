@@ -4,7 +4,7 @@ import {
   type RoundSetupSequencePhase,
 } from './renderRoundSetupSequence'
 
-type RoundSetupFlowResult = {
+export type RoundSetupFlowResult = {
   isRoundSetupPhase: boolean
   shouldHideCenterDeck: boolean
   centerContent: string
@@ -18,6 +18,7 @@ type RoundSetupFlowParams = {
   cutterSeat: Seat | null
   selectedCutIndex: number | null | undefined
   actualHandCounts: Record<Seat, number>
+  phaseEnteredAt?: number | null
 }
 
 function createEmptySeatCounts(): Record<Seat, number> {
@@ -26,6 +27,15 @@ function createEmptySeatCounts(): Record<Seat, number> {
     right: 0,
     top: 0,
     left: 0,
+  }
+}
+
+function createActualSeatCounts(actualHandCounts: Record<Seat, number>): Record<Seat, number> {
+  return {
+    bottom: actualHandCounts.bottom,
+    right: actualHandCounts.right,
+    top: actualHandCounts.top,
+    left: actualHandCounts.left,
   }
 }
 
@@ -46,6 +56,7 @@ export function getRoundSetupFlowResult(
 ): RoundSetupFlowResult {
   const {
     phase,
+    dealerSeat,
     cutterSeat,
     selectedCutIndex,
     actualHandCounts,
@@ -56,19 +67,12 @@ export function getRoundSetupFlowResult(
       isRoundSetupPhase: false,
       shouldHideCenterDeck: false,
       centerContent: '',
-      seatHandCounts: {
-        bottom: actualHandCounts.bottom,
-        right: actualHandCounts.right,
-        top: actualHandCounts.top,
-        left: actualHandCounts.left,
-      },
+      seatHandCounts: createActualSeatCounts(actualHandCounts),
       nextRerenderInMs: null,
     }
   }
 
-  const isCutPhase = phase === 'cutting' || phase === 'cut-resolve'
-
-  if (isCutPhase) {
+  if (phase === 'cutting' || phase === 'cut-resolve') {
     return {
       isRoundSetupPhase: true,
       shouldHideCenterDeck: true,
@@ -76,8 +80,39 @@ export function getRoundSetupFlowResult(
         phase,
         cutterSeat,
         selectedCutIndex,
+        dealerSeat,
       }),
       seatHandCounts: createEmptySeatCounts(),
+      nextRerenderInMs: null,
+    }
+  }
+
+  if (phase === 'deal-first-3') {
+    return {
+      isRoundSetupPhase: true,
+      shouldHideCenterDeck: true,
+      centerContent: renderRoundSetupSequence({
+        phase,
+        cutterSeat,
+        selectedCutIndex,
+        dealerSeat,
+      }),
+      seatHandCounts: createActualSeatCounts(actualHandCounts),
+      nextRerenderInMs: null,
+    }
+  }
+
+  if (phase === 'deal-next-2') {
+    return {
+      isRoundSetupPhase: true,
+      shouldHideCenterDeck: true,
+      centerContent: renderRoundSetupSequence({
+        phase,
+        cutterSeat,
+        selectedCutIndex,
+        dealerSeat,
+      }),
+      seatHandCounts: createActualSeatCounts(actualHandCounts),
       nextRerenderInMs: null,
     }
   }
@@ -86,7 +121,7 @@ export function getRoundSetupFlowResult(
     isRoundSetupPhase: true,
     shouldHideCenterDeck: true,
     centerContent: '',
-    seatHandCounts: createEmptySeatCounts(),
+    seatHandCounts: createActualSeatCounts(actualHandCounts),
     nextRerenderInMs: null,
   }
 }
