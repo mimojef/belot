@@ -28,9 +28,9 @@ type RenderAppOptions = {
 const GAME_STAGE_WIDTH = 1600
 const GAME_STAGE_HEIGHT = 900
 const STAGE_EDGE_GAP = 5
-const SEAT_PANEL_HEIGHT = 176
-const BOTTOM_HAND_GAP = 12
-const BOTTOM_HAND_BOTTOM_OFFSET = STAGE_EDGE_GAP + SEAT_PANEL_HEIGHT + BOTTOM_HAND_GAP
+const BOTTOM_SEAT_PANEL_HEIGHT = 98
+const BOTTOM_HAND_GAP = -120
+const BOTTOM_HAND_BOTTOM_OFFSET = STAGE_EDGE_GAP + BOTTOM_SEAT_PANEL_HEIGHT + BOTTOM_HAND_GAP
 const SCORE_HUD_INTERNAL_OFFSET = 18
 
 let cutResolveTimeoutId: number | null = null
@@ -295,8 +295,8 @@ export function renderApp(
       ? renderCenterPanel(renderScoringPanel(scoringViewState), 980)
       : ''
 
-      const shouldShowCenterDeck =
-  roundSetupFlow.isRoundSetupPhase && !roundSetupFlow.shouldHideCenterDeck
+  const shouldShowCenterDeck =
+    roundSetupFlow.isRoundSetupPhase && !roundSetupFlow.shouldHideCenterDeck
 
   rootElement.innerHTML = `
     <div class="game-shell">
@@ -341,28 +341,6 @@ export function renderApp(
               ${shouldShowCenterDeck ? renderCenterDeck(state.deck.length) : ''}
               ${centerMainContent}
             </div>
-
-            ${
-              !isScoringPhase &&
-              !isSummaryPhase &&
-              !roundSetupFlow.isRoundSetupPhase &&
-              bottomHandViewState.shouldShow
-                ? `
-              <div
-                style="
-                  position:absolute;
-                  left:50%;
-                  bottom:${BOTTOM_HAND_BOTTOM_OFFSET}px;
-                  transform:translateX(-50%);
-                  width:1040px;
-                  z-index:4;
-                "
-              >
-                ${renderBottomHandPanel(bottomHandViewState)}
-              </div>
-            `
-                : ''
-            }
           </div>
         </div>
       </div>
@@ -473,26 +451,57 @@ export function renderApp(
       </div>
 
       <div
-        data-seat-anchor="bottom"
-        style="
-          position:fixed;
-          left:50%;
-          bottom:5px;
-          z-index:7;
-          pointer-events:none;
-          transform:translateX(-50%) scale(${stageScale});
-          transform-origin:bottom center;
-        "
-      >
-        ${renderSeatPanel(
-          'bottom',
-          roundSetupFlow.seatHandCounts.bottom,
-          state.round.dealerSeat,
-          state.round.cutterSeat,
-          activeSeat,
-          state.phase
-        )}
-      </div>
+  data-seat-anchor="bottom"
+  style="
+    position:fixed;
+    left:50%;
+    bottom:5px;
+    z-index:7;
+    pointer-events:none;
+    overflow:visible;
+    transform:translateX(-50%) scale(${stageScale});
+    transform-origin:bottom center;
+  "
+>
+  ${
+    !isScoringPhase &&
+    !isSummaryPhase &&
+    bottomHandViewState.shouldShow
+      ? `
+    <div
+      style="
+        position:absolute;
+        left:50%;
+        bottom:${BOTTOM_HAND_BOTTOM_OFFSET}px;
+        transform:translateX(-50%);
+        width:1040px;
+        z-index:1;
+        pointer-events:auto;
+      "
+    >
+      ${renderBottomHandPanel(bottomHandViewState)}
+    </div>
+  `
+      : ''
+  }
+
+  <div
+    style="
+      position:relative;
+      z-index:3;
+      pointer-events:none;
+    "
+  >
+    ${renderSeatPanel(
+      'bottom',
+      roundSetupFlow.seatHandCounts.bottom,
+      state.round.dealerSeat,
+      state.round.cutterSeat,
+      activeSeat,
+      state.phase
+    )}
+  </div>
+</div>
 
       <div
         style="

@@ -113,76 +113,7 @@ function getSeatRevealDelayMs(seat: Seat, dealerSeat: Seat | null): number {
 
 function renderCardBackOrFront(seat: Seat): string {
   if (seat === 'bottom') {
-    return `
-      <div
-        style="
-          position:absolute;
-          inset:0;
-          border-radius:8px;
-          background:
-            linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(240,244,250,0.98) 100%);
-          box-shadow:
-            inset 0 1px 0 rgba(255,255,255,0.95),
-            inset 0 -1px 0 rgba(0,0,0,0.05);
-        "
-      ></div>
-
-      <div
-        style="
-          position:absolute;
-          inset:4px;
-          border-radius:6px;
-          border:1px solid rgba(20, 49, 84, 0.16);
-          background:
-            linear-gradient(180deg, rgba(255,255,255,0.92) 0%, rgba(248,250,253,0.92) 100%);
-        "
-      ></div>
-
-      <div
-        style="
-          position:absolute;
-          left:8px;
-          top:6px;
-          font-size:12px;
-          font-weight:900;
-          color:#b3261e;
-          letter-spacing:0.02em;
-          line-height:1;
-        "
-      >
-        A
-      </div>
-
-      <div
-        style="
-          position:absolute;
-          right:8px;
-          bottom:6px;
-          font-size:12px;
-          font-weight:900;
-          color:#b3261e;
-          letter-spacing:0.02em;
-          line-height:1;
-          transform:rotate(180deg);
-        "
-      >
-        A
-      </div>
-
-      <div
-        style="
-          position:absolute;
-          left:50%;
-          top:50%;
-          width:18px;
-          height:18px;
-          transform:translate(-50%, -50%) rotate(45deg);
-          border-radius:4px;
-          background:rgba(179, 38, 30, 0.16);
-          border:1px solid rgba(179, 38, 30, 0.28);
-        "
-      ></div>
-    `
+    return ''
   }
 
   return `
@@ -238,16 +169,6 @@ function getFanDistance(index: number, visibleCount: number): number {
   return index - (visibleCount - 1) / 2
 }
 
-function getBottomFanTransform(distance: number): string {
-  const distanceAbs = Math.abs(distance)
-
-  return `
-    translateX(calc(-50% + ${distance * 50}px))
-    translateY(${distanceAbs * 4}px)
-    rotate(${distance * 7}deg)
-  `
-}
-
 function getTopFanTransform(distance: number): string {
   const distanceAbs = Math.abs(distance)
 
@@ -284,6 +205,10 @@ function renderSeatCards(
   dealerSeat: Seat | null,
   currentPhase?: string
 ): string {
+  if (seat === 'bottom') {
+    return ''
+  }
+
   const visibleCount = Math.max(0, Math.min(handCount, 8))
 
   if (visibleCount === 0) {
@@ -306,7 +231,7 @@ function renderSeatCards(
       width:170px;
       height:250px;
       border-radius:8px;
-      border:1px solid ${seat === 'bottom' ? 'rgba(20,49,84,0.14)' : 'rgba(255,255,255,0.20)'};
+      border:1px solid rgba(255,255,255,0.20);
       z-index:${index + 1};
       ${animationStyle}
     `
@@ -320,23 +245,6 @@ function renderSeatCards(
             bottom:-50px;
             transform:${getTopFanTransform(distance)};
             transform-origin:center 10%;
-          "
-        >
-          ${renderCardBackOrFront(seat)}
-        </div>
-      `
-    }
-
-    if (seat === 'bottom') {
-      return `
-        <div
-          style="
-            ${commonStyles}
-            left:50%;
-            top:-120px;
-            transform:${getBottomFanTransform(distance)};
-            transform-origin:center 90%;
-            box-shadow: 0 8px 14px rgba(0,0,0,0.18);
           "
         >
           ${renderCardBackOrFront(seat)}

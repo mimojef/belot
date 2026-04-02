@@ -1,5 +1,420 @@
+import { SEAT_ORDER, type Seat } from '../../data/constants/seatOrder'
 import type { BottomHandViewState } from '../../core/state/getBottomHandViewState'
 
-export function renderBottomHandPanel(_viewState: BottomHandViewState): string {
-  return ''
+type ViewCard = BottomHandViewState['cards'][number]
+
+type SortedHandCard = {
+  card: ViewCard
+  originalIndex: number
+}
+
+const DEAL_PACKET_START_DELAY = 220
+const DEAL_PACKET_DELAY_STEP = 420
+const DEAL_PACKET_DURATION = 860
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function readCardRank(card: ViewCard): string {
+  const rawRank = (card as { rank?: unknown }).rank
+  return rawRank === null || rawRank === undefined ? '' : String(rawRank).toUpperCase()
+}
+
+function readCardSuit(card: ViewCard): string {
+  const rawSuit = (card as { suit?: unknown }).suit
+  return rawSuit === null || rawSuit === undefined ? '' : String(rawSuit)
+}
+
+function readCardId(card: ViewCard, index: number): string {
+  const rawId = (card as { id?: unknown }).id
+
+  if (typeof rawId === 'string' && rawId.trim().length > 0) {
+    return rawId
+  }
+
+  return `${readCardSuit(card)}-${readCardRank(card)}-${index}`
+}
+
+function getSuitSymbol(suit: string): string {
+  if (suit === 'spades') return '♠'
+  if (suit === 'hearts') return '♥'
+  if (suit === 'diamonds') return '♦'
+  if (suit === 'clubs') return '♣'
+  return '?'
+}
+
+function isRedSuit(suit: string): boolean {
+  return suit === 'hearts' || suit === 'diamonds'
+}
+
+function getSuitSortOrder(suit: string): number {
+  if (suit === 'clubs') return 0
+  if (suit === 'diamonds') return 1
+  if (suit === 'spades') return 2
+  if (suit === 'hearts') return 3
+  return 99
+}
+
+function getAllTrumpsRankSortOrder(rank: string): number {
+  if (rank === '7') return 0
+  if (rank === '8') return 1
+  if (rank === 'Q') return 2
+  if (rank === 'K') return 3
+  if (rank === '10') return 4
+  if (rank === 'A') return 5
+  if (rank === '9') return 6
+  if (rank === 'J') return 7
+  return 99
+}
+
+function getNoTrumpsRankSortOrder(rank: string): number {
+  if (rank === '7') return 0
+  if (rank === '8') return 1
+  if (rank === '9') return 2
+  if (rank === 'J') return 3
+  if (rank === 'Q') return 4
+  if (rank === 'K') return 5
+  if (rank === '10') return 6
+  if (rank === 'A') return 7
+  return 99
+}
+
+function getRankSortOrder(card: ViewCard, viewState: BottomHandViewState): number {
+  const rank = readCardRank(card)
+  const suit = readCardSuit(card)
+  const contract = viewState.sortMode?.contract ?? 'unknown'
+  const trumpSuit = viewState.sortMode?.trumpSuit ?? null
+
+  if (contract === 'all-trumps') {
+    return getAllTrumpsRankSortOrder(rank)
+  }
+
+  if (contract === 'no-trumps') {
+    return getNoTrumpsRankSortOrder(rank)
+  }
+
+  if (contract === 'suit') {
+    if (trumpSuit && suit === trumpSuit) {
+      return getAllTrumpsRankSortOrder(rank)
+    }
+
+    return getNoTrumpsRankSortOrder(rank)
+  }
+
+  return getAllTrumpsRankSortOrder(rank)
+}
+
+function getSortedCards(
+  cards: ViewCard[],
+  viewState: BottomHandViewState
+): SortedHandCard[] {
+  return cards
+    .map((card, originalIndex) => ({
+      card,
+      originalIndex,
+    }))
+    .sort((left, right) => {
+      const suitOrderDiff =
+        getSuitSortOrder(readCardSuit(left.card)) - getSuitSortOrder(readCardSuit(right.card))
+
+      if (suitOrderDiff !== 0) {
+        return suitOrderDiff
+      }
+
+      const rankOrderDiff =
+        getRankSortOrder(left.card, viewState) - getRankSortOrder(right.card, viewState)
+
+      if (rankOrderDiff !== 0) {
+        return rankOrderDiff
+      }
+
+      return left.originalIndex - right.originalIndex
+    })
+}
+
+function getFanDistance(index: number, visibleCount: number): number {
+  return index - (visibleCount - 1) / 2
+}
+
+function getBottomCardTransform(distance: number): string {
+  const distanceAbs = Math.abs(distance)
+
+  return `
+    translateX(calc(-50% + ${distance * 58}px))
+    translateY(${distanceAbs * 5}px)
+    rotate(${distance * 7}deg)
+  `
+}
+
+function getDealOrder(dealerSeat: Seat | null): Seat[] {
+  if (!dealerSeat) {
+    return ['right', 'top', 'left', 'bottom']
+  }
+
+  const dealerIndex = SEAT_ORDER.indexOf(dealerSeat)
+
+  if (dealerIndex === -1) {
+    return ['right', 'top', 'left', 'bottom']
+  }
+
+  return [
+    SEAT_ORDER[(dealerIndex + 1) % SEAT_ORDER.length],
+    SEAT_ORDER[(dealerIndex + 2) % SEAT_ORDER.length],
+    SEAT_ORDER[(dealerIndex + 3) % SEAT_ORDER.length],
+    SEAT_ORDER[(dealerIndex + 4) % SEAT_ORDER.length],
+  ]
+}
+
+function getBottomRevealDelayMs(dealerSeat: Seat | null): number {
+  const dealOrder = getDealOrder(dealerSeat)
+  const seatIndex = dealOrder.indexOf('bottom')
+
+  if (seatIndex === -1) {
+    return DEAL_PACKET_START_DELAY + DEAL_PACKET_DURATION
+  }
+
+  return DEAL_PACKET_START_DELAY + seatIndex * DEAL_PACKET_DELAY_STEP + DEAL_PACKET_DURATION
+}
+
+function shouldAnimateCardReveal(
+  viewState: BottomHandViewState,
+  originalIndex: number
+): boolean {
+  if (viewState.phase === 'deal-first-3') {
+    return originalIndex < 3
+  }
+
+  if (viewState.phase === 'deal-next-2') {
+    return originalIndex >= 3
+  }
+
+  if (viewState.phase === 'deal-last-3') {
+    return originalIndex >= 5
+  }
+
+  return false
+}
+
+function getCardAnimationStyle(
+  viewState: BottomHandViewState,
+  originalIndex: number
+): string {
+  if (!shouldAnimateCardReveal(viewState, originalIndex)) {
+    return ''
+  }
+
+  const revealDelayMs = getBottomRevealDelayMs(viewState.dealerSeat)
+
+  return `opacity:0; animation: belot-bottom-hand-reveal 120ms ease ${revealDelayMs}ms forwards;`
+}
+
+function renderHandCard(
+  sortedCard: SortedHandCard,
+  displayIndex: number,
+  visibleCount: number,
+  viewState: BottomHandViewState
+): string {
+  const card = sortedCard.card
+  const rank = escapeHtml(readCardRank(card))
+  const suit = readCardSuit(card)
+  const suitSymbol = escapeHtml(getSuitSymbol(suit))
+  const cardId = escapeHtml(readCardId(card, sortedCard.originalIndex))
+  const cardColor = isRedSuit(suit) ? '#b3261e' : '#13253d'
+  const distance = getFanDistance(displayIndex, visibleCount)
+  const animationStyle = getCardAnimationStyle(viewState, sortedCard.originalIndex)
+  const isInteractive = viewState.phase === 'playing'
+
+  return `
+    <button
+      type="button"
+      data-action="play-card"
+      data-card-id="${cardId}"
+      style="
+        position:absolute;
+        left:50%;
+        top:0;
+        width:170px;
+        height:250px;
+        padding:0;
+        border:none;
+        outline:none;
+        border-radius:12px;
+        transform:${getBottomCardTransform(distance)};
+        transform-origin:center 90%;
+        background:transparent;
+        cursor:${isInteractive ? 'pointer' : 'default'};
+        pointer-events:${isInteractive ? 'auto' : 'none'};
+        box-shadow:0 12px 24px rgba(0,0,0,0.18);
+        overflow:visible;
+        z-index:${100 + displayIndex};
+        transition:transform 140ms ease, box-shadow 140ms ease, filter 140ms ease;
+        ${animationStyle}
+      "
+      onmouseenter="
+        this.style.transform='${getBottomCardTransform(distance).replace(
+          `translateY(${Math.abs(distance) * 5}px)`,
+          `translateY(${Math.abs(distance) * 5 - 16}px)`
+        )}';
+        this.style.boxShadow='0 18px 30px rgba(0,0,0,0.24)';
+        this.style.filter='brightness(1.02)';
+      "
+      onmouseleave="
+        this.style.transform='${getBottomCardTransform(distance)}';
+        this.style.boxShadow='0 12px 24px rgba(0,0,0,0.18)';
+        this.style.filter='brightness(1)';
+      "
+    >
+      <div
+        style="
+          position:absolute;
+          inset:0;
+          border-radius:12px;
+          background:linear-gradient(180deg, rgba(255,255,255,0.99) 0%, rgba(240,244,250,0.99) 100%);
+          box-shadow:
+            inset 0 1px 0 rgba(255,255,255,0.95),
+            inset 0 -1px 0 rgba(0,0,0,0.05);
+        "
+      ></div>
+
+      <div
+        style="
+          position:absolute;
+          inset:5px;
+          border-radius:9px;
+          border:1px solid rgba(20,49,84,0.14);
+          background:linear-gradient(180deg, rgba(255,255,255,0.94) 0%, rgba(248,250,253,0.94) 100%);
+        "
+      ></div>
+
+      <div
+        style="
+          position:absolute;
+          left:10px;
+          top:8px;
+          display:flex;
+          flex-direction:column;
+          align-items:center;
+          gap:2px;
+          color:${cardColor};
+          line-height:1;
+        "
+      >
+        <span
+          style="
+            font-size:20px;
+            font-weight:900;
+            letter-spacing:0.02em;
+          "
+        >
+          ${rank}
+        </span>
+        <span
+          style="
+            font-size:18px;
+            font-weight:900;
+          "
+        >
+          ${suitSymbol}
+        </span>
+      </div>
+
+      <div
+        style="
+          position:absolute;
+          right:10px;
+          bottom:8px;
+          display:flex;
+          flex-direction:column;
+          align-items:center;
+          gap:2px;
+          color:${cardColor};
+          line-height:1;
+          transform:rotate(180deg);
+        "
+      >
+        <span
+          style="
+            font-size:20px;
+            font-weight:900;
+            letter-spacing:0.02em;
+          "
+        >
+          ${rank}
+        </span>
+        <span
+          style="
+            font-size:18px;
+            font-weight:900;
+          "
+        >
+          ${suitSymbol}
+        </span>
+      </div>
+
+      <div
+        style="
+          position:absolute;
+          left:50%;
+          top:50%;
+          transform:translate(-50%, -50%);
+          color:${cardColor};
+          font-size:54px;
+          line-height:1;
+          font-weight:900;
+          text-shadow:0 2px 6px rgba(0,0,0,0.08);
+        "
+      >
+        ${suitSymbol}
+      </div>
+    </button>
+  `
+}
+
+export function renderBottomHandPanel(viewState: BottomHandViewState): string {
+  const sortedCards = getSortedCards(viewState.cards ?? [], viewState)
+
+  if (sortedCards.length === 0) {
+    return ''
+  }
+
+  return `
+    <style>
+      @keyframes belot-bottom-hand-reveal {
+        0% {
+          opacity: 0;
+        }
+        100% {
+          opacity: 1;
+        }
+      }
+    </style>
+
+    <div
+      style="
+        position:relative;
+        width:100%;
+        height:260px;
+        overflow:visible;
+        pointer-events:none;
+      "
+    >
+      <div
+        style="
+          position:absolute;
+          inset:0;
+          overflow:visible;
+          pointer-events:${viewState.phase === 'playing' ? 'auto' : 'none'};
+        "
+      >
+        ${sortedCards
+          .map((card, index) => renderHandCard(card, index, sortedCards.length, viewState))
+          .join('')}
+      </div>
+    </div>
+  `
 }
