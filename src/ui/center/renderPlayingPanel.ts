@@ -1,4 +1,5 @@
 import type { PlayingViewState } from '../../core/state/getPlayingViewState'
+import type { Seat } from '../../data/constants/seatOrder'
 import type { Card, Suit } from '../../core/state/gameTypes'
 
 function escapeHtml(value: string): string {
@@ -20,7 +21,27 @@ function isRedSuit(suit: Suit): boolean {
   return suit === 'hearts' || suit === 'diamonds'
 }
 
-function getPlayedCardOffset(index: number, count: number): {
+function getSeatCardOffset(seat: Seat): {
+  leftOffset: number
+  topOffset: number
+  rotate: number
+} {
+  if (seat === 'top') {
+    return { leftOffset: 0, topOffset: -54, rotate: 0 }
+  }
+
+  if (seat === 'left') {
+    return { leftOffset: -78, topOffset: 0, rotate: -8 }
+  }
+
+  if (seat === 'right') {
+    return { leftOffset: 78, topOffset: 0, rotate: 8 }
+  }
+
+  return { leftOffset: 0, topOffset: 54, rotate: 0 }
+}
+
+function getPlayOrderSpread(index: number, count: number): {
   leftOffset: number
   topOffset: number
   rotate: number
@@ -28,20 +49,89 @@ function getPlayedCardOffset(index: number, count: number): {
   const distance = index - (count - 1) / 2
 
   return {
-    leftOffset: distance * 28,
-    topOffset: Math.abs(distance) * 5,
-    rotate: distance * 6,
+    leftOffset: distance * 8,
+    topOffset: Math.abs(distance) * 3,
+    rotate: distance * 2,
   }
 }
 
+function getEntryOffsetBySeat(seat: Seat): { x: number; y: number } {
+  if (seat === 'top') {
+    return { x: 0, y: -170 }
+  }
+
+  if (seat === 'left') {
+    return { x: -190, y: 0 }
+  }
+
+  if (seat === 'right') {
+    return { x: 190, y: 0 }
+  }
+
+  return { x: 0, y: 190 }
+}
+
+function renderPlayTarget(seat: Seat): string {
+  const seatOffset = getSeatCardOffset(seat)
+
+  return `
+    <div
+      data-play-target-seat="${seat}"
+      style="
+        position:absolute;
+        left:50%;
+        top:50%;
+        width:112px;
+        height:162px;
+        margin-left:${-56 + seatOffset.leftOffset}px;
+        margin-top:${-81 + seatOffset.topOffset}px;
+        transform:rotate(${seatOffset.rotate}deg);
+        transform-origin:center center;
+        opacity:0;
+        pointer-events:none;
+        z-index:0;
+      "
+    ></div>
+  `
+}
+
+function getEntryAnimationStyle(
+  play: { seat: Seat },
+  index: number,
+  count: number,
+  finalRotate: number
+): string {
+  const isNewestCard = index === count - 1
+
+  if (!isNewestCard) {
+    return `opacity:1;`
+  }
+
+  const entryOffset = getEntryOffsetBySeat(play.seat)
+
+  return `
+    --belot-entry-x:${entryOffset.x}px;
+    --belot-entry-y:${entryOffset.y}px;
+    --belot-final-rotate:${finalRotate}deg;
+    animation: belot-play-card-entry 260ms cubic-bezier(0.22, 1, 0.36, 1);
+    opacity:1;
+  `
+}
+
 function renderPlayedCard(
-  play: { card: Card },
+  play: { seat: Seat; card: Card },
   index: number,
   count: number
 ): string {
   const suitSymbol = getSuitSymbol(play.card.suit)
   const cardColor = isRedSuit(play.card.suit) ? '#b3261e' : '#13253d'
-  const offset = getPlayedCardOffset(index, count)
+  const seatOffset = getSeatCardOffset(play.seat)
+  const orderSpread = getPlayOrderSpread(index, count)
+
+  const finalLeft = seatOffset.leftOffset + orderSpread.leftOffset
+  const finalTop = seatOffset.topOffset + orderSpread.topOffset
+  const finalRotate = seatOffset.rotate + orderSpread.rotate
+  const animationStyle = getEntryAnimationStyle(play, index, count, finalRotate)
 
   return `
     <div
@@ -51,12 +141,13 @@ function renderPlayedCard(
         top:50%;
         width:112px;
         height:162px;
-        margin-left:${-56 + offset.leftOffset}px;
-        margin-top:${-81 + offset.topOffset}px;
-        transform:rotate(${offset.rotate}deg);
+        margin-left:${-56 + finalLeft}px;
+        margin-top:${-81 + finalTop}px;
+        transform:rotate(${finalRotate}deg);
         transform-origin:center center;
         z-index:${10 + index};
         pointer-events:none;
+        ${animationStyle}
       "
     >
       <div
@@ -169,6 +260,25 @@ function renderPlayedCard(
 
 function renderCenterTrick(viewState: PlayingViewState): string {
   return `
+    <style>
+      @keyframes belot-play-card-entry {
+        0% {
+          opacity: 0;
+          transform:
+            translate(var(--belot-entry-x), var(--belot-entry-y))
+            rotate(var(--belot-final-rotate))
+            scale(1.42);
+        }
+        100% {
+          opacity: 1;
+          transform:
+            translate(0px, 0px)
+            rotate(var(--belot-final-rotate))
+            scale(1);
+        }
+      }
+    </style>
+
     <div
       style="
         position:relative;
@@ -179,6 +289,10 @@ function renderCenterTrick(viewState: PlayingViewState): string {
         pointer-events:none;
       "
     >
+      ${renderPlayTarget('bottom')}
+      ${renderPlayTarget('left')}
+      ${renderPlayTarget('top')}
+      ${renderPlayTarget('right')}
       ${viewState.plays
         .map((play, index) => renderPlayedCard(play, index, viewState.plays.length))
         .join('')}

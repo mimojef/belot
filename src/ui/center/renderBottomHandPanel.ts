@@ -241,6 +241,7 @@ function buildPlayCardPointerDown(cardId: string, distance: number, isPlayable: 
 
     var rect = this.getBoundingClientRect();
     var clone = this.cloneNode(true);
+    var target = document.querySelector('[data-play-target-seat="bottom"]');
 
     clone.setAttribute('data-flying-play-card', 'bottom');
     clone.style.position = 'fixed';
@@ -254,7 +255,7 @@ function buildPlayCardPointerDown(cardId: string, distance: number, isPlayable: 
     clone.style.pointerEvents = 'none';
     clone.style.transform = 'rotate(${startRotate}deg)';
     clone.style.transformOrigin = 'center center';
-    clone.style.transition = 'transform 440ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 440ms ease, filter 440ms ease';
+    clone.style.transition = 'transform 440ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 440ms ease, filter 440ms ease, opacity 180ms ease';
     clone.style.boxShadow = '0 20px 36px rgba(0,0,0,0.28)';
     clone.style.filter = 'brightness(1.04)';
 
@@ -264,17 +265,32 @@ function buildPlayCardPointerDown(cardId: string, distance: number, isPlayable: 
 
     var targetLeft = window.innerWidth / 2 - rect.width / 2;
     var targetTop = window.innerHeight / 2 - rect.height / 2 + 18;
+    var targetScale = 0.66;
+
+    if (target) {
+      var targetRect = target.getBoundingClientRect();
+      targetLeft = targetRect.left;
+      targetTop = targetRect.top;
+      targetScale = targetRect.width / rect.width;
+    }
+
     var deltaX = targetLeft - rect.left;
     var deltaY = targetTop - rect.top;
 
     requestAnimationFrame(function () {
-      clone.style.transform = 'translate(' + deltaX + 'px, ' + deltaY + 'px) rotate(0deg) scale(0.84)';
+      clone.style.transform =
+        'translate(' + deltaX + 'px, ' + deltaY + 'px) rotate(0deg) scale(' + targetScale + ')';
     });
 
     setTimeout(function () {
-      clone.style.boxShadow = '0 16px 28px rgba(0,0,0,0.24)';
-      clone.style.filter = 'brightness(1.02)';
-    }, 460);
+      clone.style.opacity = '0';
+    }, 430);
+
+    setTimeout(function () {
+      if (clone && clone.parentNode) {
+        clone.parentNode.removeChild(clone);
+      }
+    }, 620);
   `
 }
 
@@ -453,6 +469,7 @@ export function renderBottomHandPanel(viewState: BottomHandViewState): string {
     </style>
 
     <div
+      data-bottom-hand-root="1"
       style="
         position:relative;
         width:100%;
