@@ -32,7 +32,7 @@ function getBidIconMarkup(type: string | null, suit: Suit | null): string {
   if (type === 'all-trumps') {
     return `
       <img
-        src="/images/ui/score-hud/plain-black-J.png"
+        src="/images/ui/score-hud/plain-red-J.png"
         alt=""
         draggable="false"
         style="
