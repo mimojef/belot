@@ -2,11 +2,9 @@ import type { AppBootstrap } from './bootstrap'
 import type { Seat } from '../data/constants/seatOrder'
 import type { Suit } from '../core/state/gameTypes'
 import { getBiddingViewState } from '../core/state/getBiddingViewState'
-import { getPlayingViewState } from '../core/state/getPlayingViewState'
 import { getBottomHandViewState } from '../core/state/getBottomHandViewState'
 import { getScoringViewState } from '../core/state/getScoringViewState'
 import { renderBiddingPanel } from '../ui/center/renderBiddingPanel'
-import { renderPlayingPanel } from '../ui/center/renderPlayingPanel'
 import { renderBottomHandPanel } from '../ui/center/renderBottomHandPanel'
 import { renderScoringPanel } from '../ui/center/renderScoringPanel'
 import { renderCenterDeck } from '../ui/center/renderCenterDeck'
@@ -274,7 +272,6 @@ export function renderApp(
   }
 
   const biddingViewState = isBiddingPhase ? getBiddingViewState(state) : null
-  const playingViewState = isPlayingPhase ? getPlayingViewState(state) : null
   const scoringViewState = shouldShowScoringPanel
     ? {
         ...getScoringViewState(state),
@@ -294,11 +291,12 @@ export function renderApp(
 
   const centerMainContent = roundSetupFlow.isRoundSetupPhase
     ? roundSetupFlow.centerContent
-    : playingViewState
-      ? renderCenterPanel(renderPlayingPanel(playingViewState), 980)
-      : scoringViewState
-        ? renderCenterPanel(renderScoringPanel(scoringViewState), 980)
-        : ''
+    : scoringViewState
+      ? renderCenterPanel(renderScoringPanel(scoringViewState), 980)
+      : ''
+
+      const shouldShowCenterDeck =
+  roundSetupFlow.isRoundSetupPhase && !roundSetupFlow.shouldHideCenterDeck
 
   rootElement.innerHTML = `
     <div class="game-shell">
@@ -340,12 +338,11 @@ export function renderApp(
                 gap:26px;
               "
             >
-              ${roundSetupFlow.shouldHideCenterDeck ? '' : renderCenterDeck(state.deck.length)}
+              ${shouldShowCenterDeck ? renderCenterDeck(state.deck.length) : ''}
               ${centerMainContent}
             </div>
 
             ${
-              !isPlayingPhase &&
               !isScoringPhase &&
               !isSummaryPhase &&
               !roundSetupFlow.isRoundSetupPhase &&

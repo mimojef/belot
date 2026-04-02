@@ -23,6 +23,8 @@ const CUT_CARD_TOP = 28
 const DEAL_PACKET_START_DELAY = 220
 const DEAL_PACKET_DELAY_STEP = 420
 const DEAL_PACKET_DURATION = 860
+const DEAL_LAST_PACKET_END_DELAY =
+  DEAL_PACKET_START_DELAY + DEAL_PACKET_DELAY_STEP * 3 + DEAL_PACKET_DURATION
 
 function escapeHtmlAttribute(value: string): string {
   return value
@@ -120,6 +122,19 @@ function renderSequenceStyles(): string {
           opacity: 0;
           transform: var(--deal-to-transform);
           filter: brightness(1);
+        }
+      }
+
+      @keyframes belot-seq-pile-disappear {
+        0% {
+          opacity: 1;
+          transform: translateY(0px) scale(1);
+          filter: brightness(1);
+        }
+        100% {
+          opacity: 0;
+          transform: translateY(-10px) scale(0.94);
+          filter: brightness(1.02);
         }
       }
     </style>
@@ -316,7 +331,7 @@ function renderStaticGatheredCards(selectedCutIndex: number): string {
   `
 }
 
-function renderDealingPile(cardCount: number): string {
+function renderDealingPile(cardCount: number, shouldDisappear = false): string {
   const cards = Array.from({ length: cardCount }, (_, index) => {
     const pileOffset = cardCount - index - 1
 
@@ -353,6 +368,7 @@ function renderDealingPile(cardCount: number): string {
         width:100%;
         height:290px;
         overflow:visible;
+        ${shouldDisappear ? `animation: belot-seq-pile-disappear 420ms ease ${DEAL_LAST_PACKET_END_DELAY - 180}ms forwards;` : ''}
       "
     >
       <div
@@ -495,11 +511,12 @@ function renderDealPackets(
   dealerSeat: Seat | null | undefined,
   packetSize: number,
   remainingCardsInPile: number,
-  sequenceName: 'deal-first-3' | 'deal-next-2'
+  sequenceName: 'deal-first-3' | 'deal-next-2' | 'deal-last-3'
 ): string {
   const dealOrder = getDealOrder(dealerSeat)
   const syncTargetsHandler = buildDealTargetSyncHandler()
   const safeSyncTargetsHandler = escapeHtmlAttribute(syncTargetsHandler)
+  const shouldDisappearPile = sequenceName === 'deal-last-3'
 
   const packets = dealOrder.map((seat, index) => {
     const target = getFallbackDealTarget(seat)
@@ -547,7 +564,7 @@ function renderDealPackets(
         style="display:none"
         onload="${safeSyncTargetsHandler}"
       />
-      ${renderDealingPile(remainingCardsInPile)}
+      ${renderDealingPile(remainingCardsInPile, shouldDisappearPile)}
       ${packets}
     </div>
   `
@@ -558,7 +575,11 @@ function renderDealFirstThreePackets(dealerSeat: Seat | null | undefined): strin
 }
 
 function renderDealNextTwoPackets(dealerSeat: Seat | null | undefined): string {
-  return renderDealPackets(dealerSeat, 2, 8, 'deal-next-2')
+  return renderDealPackets(dealerSeat, 2, 12, 'deal-next-2')
+}
+
+function renderDealLastThreePackets(dealerSeat: Seat | null | undefined): string {
+  return renderDealPackets(dealerSeat, 3, 12, 'deal-last-3')
 }
 
 export function renderRoundSetupSequence({
@@ -572,10 +593,19 @@ export function renderRoundSetupSequence({
   const isCutResolvePhase = phase === 'cut-resolve'
   const isDealFirstThreePhase = phase === 'deal-first-3'
   const isDealNextTwoPhase = phase === 'deal-next-2'
+  const isDealLastThreePhase = phase === 'deal-last-3'
+
+  const isDealPhase =
+    isDealFirstThreePhase || isDealNextTwoPhase || isDealLastThreePhase
 
   const shouldRenderCutSequence = isCuttingPhase || isCutResolvePhase
 
-  if (!shouldRenderCutSequence && !isDealFirstThreePhase && !isDealNextTwoPhase) {
+  if (
+    !shouldRenderCutSequence &&
+    !isDealFirstThreePhase &&
+    !isDealNextTwoPhase &&
+    !isDealLastThreePhase
+  ) {
     return ''
   }
 
@@ -600,17 +630,18 @@ export function renderRoundSetupSequence({
       ).join('')
 
   if (isDealFirstThreePhase) {
-    heading = 'РАЗДАВАНЕ ПО 3 КАРТИ'
-    subText = 'От събраната камара тръгват първите 3 карти към всеки играч.'
     contentHeight = 330
     cards = renderDealFirstThreePackets(dealerSeat)
   }
 
   if (isDealNextTwoPhase) {
-    heading = 'РАЗДАВАНЕ ПО 2 КАРТИ'
-    subText = 'От останалата камара тръгват следващите 2 карти към всеки играч.'
     contentHeight = 330
     cards = renderDealNextTwoPackets(dealerSeat)
+  }
+
+  if (isDealLastThreePhase) {
+    contentHeight = 330
+    cards = renderDealLastThreePackets(dealerSeat)
   }
 
   return `
@@ -621,11 +652,15 @@ export function renderRoundSetupSequence({
         display:flex;
         flex-direction:column;
         align-items:center;
-        gap:12px;
+        gap:${isDealPhase ? '0' : '12px'};
       "
     >
       ${renderSequenceStyles()}
 
+      ${
+        isDealPhase
+          ? ''
+          : `
       <div
         style="
           font-size:24px;
@@ -649,13 +684,15 @@ export function renderRoundSetupSequence({
       >
         ${subText}
       </div>
+      `
+      }
 
       <div
         style="
           position:relative;
           width:900px;
           height:${contentHeight}px;
-          margin-top:8px;
+          margin-top:${isDealPhase ? '0' : '8px'};
           user-select:none;
           overflow:visible;
         "

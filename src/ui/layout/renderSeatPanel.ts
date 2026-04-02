@@ -224,7 +224,10 @@ function getCardAnimationStyle(
   const isDealNextTwoReveal =
     currentPhase === 'deal-next-2' && visibleCount >= 5 && cardIndex >= 3
 
-  if (!isDealFirstThreeReveal && !isDealNextTwoReveal) {
+  const isDealLastThreeReveal =
+    currentPhase === 'deal-last-3' && visibleCount >= 8 && cardIndex >= 5
+
+  if (!isDealFirstThreeReveal && !isDealNextTwoReveal && !isDealLastThreeReveal) {
     return ''
   }
 
