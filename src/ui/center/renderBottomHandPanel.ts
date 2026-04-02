@@ -20,6 +20,10 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;')
 }
 
+function escapeJsString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+}
+
 function readCardRank(card: ViewCard): string {
   const rawRank = (card as { rank?: unknown }).rank
   return rawRank === null || rawRank === undefined ? '' : String(rawRank).toUpperCase()
@@ -38,6 +42,10 @@ function readCardId(card: ViewCard, index: number): string {
   }
 
   return `${readCardSuit(card)}-${readCardRank(card)}-${index}`
+}
+
+function readCardPlayable(card: ViewCard): boolean {
+  return (card as { isPlayable?: boolean }).isPlayable === true
 }
 
 function getSuitSymbol(suit: string): string {
@@ -144,11 +152,13 @@ function getFanDistance(index: number, visibleCount: number): number {
 function getBottomCardTransform(distance: number): string {
   const distanceAbs = Math.abs(distance)
 
-  return `
-    translateX(calc(-50% + ${distance * 58}px))
-    translateY(${distanceAbs * 5}px)
-    rotate(${distance * 7}deg)
-  `
+  return `translateX(calc(-50% + ${distance * 58}px)) translateY(${distanceAbs * 5}px) rotate(${distance * 7}deg)`
+}
+
+function getHoveredBottomCardTransform(distance: number): string {
+  const distanceAbs = Math.abs(distance)
+
+  return `translateX(calc(-50% + ${distance * 58}px)) translateY(${distanceAbs * 5 - 16}px) rotate(${distance * 7}deg)`
 }
 
 function getDealOrder(dealerSeat: Seat | null): Seat[] {
@@ -213,6 +223,61 @@ function getCardAnimationStyle(
   return `opacity:0; animation: belot-bottom-hand-reveal 120ms ease ${revealDelayMs}ms forwards;`
 }
 
+function buildPlayCardPointerDown(cardId: string, distance: number, isPlayable: boolean): string {
+  if (!isPlayable) {
+    return ''
+  }
+
+  const startRotate = distance * 7
+  const safeCardId = escapeJsString(cardId)
+
+  return `
+    if (this.dataset.flightLocked === '1') return;
+    this.dataset.flightLocked = '1';
+    this.dataset.cardId = '${safeCardId}';
+
+    var oldClone = document.querySelector('[data-flying-play-card="bottom"]');
+    if (oldClone) oldClone.remove();
+
+    var rect = this.getBoundingClientRect();
+    var clone = this.cloneNode(true);
+
+    clone.setAttribute('data-flying-play-card', 'bottom');
+    clone.style.position = 'fixed';
+    clone.style.left = rect.left + 'px';
+    clone.style.top = rect.top + 'px';
+    clone.style.width = rect.width + 'px';
+    clone.style.height = rect.height + 'px';
+    clone.style.margin = '0';
+    clone.style.inset = 'auto';
+    clone.style.zIndex = '9999';
+    clone.style.pointerEvents = 'none';
+    clone.style.transform = 'rotate(${startRotate}deg)';
+    clone.style.transformOrigin = 'center center';
+    clone.style.transition = 'transform 440ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 440ms ease, filter 440ms ease';
+    clone.style.boxShadow = '0 20px 36px rgba(0,0,0,0.28)';
+    clone.style.filter = 'brightness(1.04)';
+
+    document.body.appendChild(clone);
+
+    this.style.opacity = '0.15';
+
+    var targetLeft = window.innerWidth / 2 - rect.width / 2;
+    var targetTop = window.innerHeight / 2 - rect.height / 2 + 18;
+    var deltaX = targetLeft - rect.left;
+    var deltaY = targetTop - rect.top;
+
+    requestAnimationFrame(function () {
+      clone.style.transform = 'translate(' + deltaX + 'px, ' + deltaY + 'px) rotate(0deg) scale(0.84)';
+    });
+
+    setTimeout(function () {
+      clone.style.boxShadow = '0 16px 28px rgba(0,0,0,0.24)';
+      clone.style.filter = 'brightness(1.02)';
+    }, 460);
+  `
+}
+
 function renderHandCard(
   sortedCard: SortedHandCard,
   displayIndex: number,
@@ -223,17 +288,20 @@ function renderHandCard(
   const rank = escapeHtml(readCardRank(card))
   const suit = readCardSuit(card)
   const suitSymbol = escapeHtml(getSuitSymbol(suit))
-  const cardId = escapeHtml(readCardId(card, sortedCard.originalIndex))
+  const rawCardId = readCardId(card, sortedCard.originalIndex)
+  const cardId = escapeHtml(rawCardId)
   const cardColor = isRedSuit(suit) ? '#b3261e' : '#13253d'
   const distance = getFanDistance(displayIndex, visibleCount)
   const animationStyle = getCardAnimationStyle(viewState, sortedCard.originalIndex)
   const isInteractive = viewState.phase === 'playing'
+  const isPlayable = readCardPlayable(card)
+  const baseTransform = getBottomCardTransform(distance)
+  const hoveredTransform = getHoveredBottomCardTransform(distance)
 
   return `
     <button
       type="button"
-      data-action="play-card"
-      data-card-id="${cardId}"
+      ${isPlayable ? `data-action="play-card" data-card-id="${cardId}"` : ''}
       style="
         position:absolute;
         left:50%;
@@ -244,30 +312,20 @@ function renderHandCard(
         border:none;
         outline:none;
         border-radius:12px;
-        transform:${getBottomCardTransform(distance)};
+        transform:${baseTransform};
         transform-origin:center 90%;
         background:transparent;
-        cursor:${isInteractive ? 'pointer' : 'default'};
+        cursor:${isPlayable ? 'pointer' : 'default'};
         pointer-events:${isInteractive ? 'auto' : 'none'};
         box-shadow:0 12px 24px rgba(0,0,0,0.18);
         overflow:visible;
         z-index:${100 + displayIndex};
-        transition:transform 140ms ease, box-shadow 140ms ease, filter 140ms ease;
+        transition:transform 140ms ease, box-shadow 140ms ease, filter 140ms ease, opacity 120ms ease;
         ${animationStyle}
       "
-      onmouseenter="
-        this.style.transform='${getBottomCardTransform(distance).replace(
-          `translateY(${Math.abs(distance) * 5}px)`,
-          `translateY(${Math.abs(distance) * 5 - 16}px)`
-        )}';
-        this.style.boxShadow='0 18px 30px rgba(0,0,0,0.24)';
-        this.style.filter='brightness(1.02)';
-      "
-      onmouseleave="
-        this.style.transform='${getBottomCardTransform(distance)}';
-        this.style.boxShadow='0 12px 24px rgba(0,0,0,0.18)';
-        this.style.filter='brightness(1)';
-      "
+      onpointerenter="${isPlayable ? `this.style.transform='${hoveredTransform}'; this.style.boxShadow='0 18px 30px rgba(0,0,0,0.24)'; this.style.filter='brightness(1.02)';` : ''}"
+      onpointerleave="${isPlayable ? `this.style.transform='${baseTransform}'; this.style.boxShadow='0 12px 24px rgba(0,0,0,0.18)'; this.style.filter='brightness(1)';` : ''}"
+      onpointerdown="${buildPlayCardPointerDown(rawCardId, distance, isPlayable)}"
     >
       <div
         style="

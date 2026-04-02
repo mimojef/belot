@@ -1,289 +1,191 @@
 import type { PlayingViewState } from '../../core/state/getPlayingViewState'
-import type { Seat } from '../../data/constants/seatOrder'
-import type { Card, Suit, WinningBid } from '../../core/state/gameTypes'
+import type { Card, Suit } from '../../core/state/gameTypes'
 
-type DebugDeclarationView = {
-  seat: Seat
-  type: 'sequence' | 'square' | 'belote'
-  points: number
-  cards: Card[]
-  suit: Suit | null
-  highRank: Card['rank'] | null
-  announced: boolean
-  valid: boolean
+function escapeHtml(value: string): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
 }
 
-type PlayingPanelViewState = PlayingViewState & {
-  botDebugDeclarations?: DebugDeclarationView[]
+function getSuitSymbol(suit: Suit): string {
+  if (suit === 'clubs') return '♣'
+  if (suit === 'diamonds') return '♦'
+  if (suit === 'hearts') return '♥'
+  return '♠'
 }
 
-function formatSeat(seat: Seat | null): string {
-  if (seat === 'bottom') return 'Долу'
-  if (seat === 'right') return 'Дясно'
-  if (seat === 'top') return 'Горе'
-  if (seat === 'left') return 'Ляво'
-  return '—'
+function isRedSuit(suit: Suit): boolean {
+  return suit === 'hearts' || suit === 'diamonds'
 }
 
-function formatSuit(suit: Suit): string {
-  if (suit === 'clubs') return 'Спатия'
-  if (suit === 'diamonds') return 'Каро'
-  if (suit === 'hearts') return 'Купа'
-  return 'Пика'
+function getPlayedCardOffset(index: number, count: number): {
+  leftOffset: number
+  topOffset: number
+  rotate: number
+} {
+  const distance = index - (count - 1) / 2
+
+  return {
+    leftOffset: distance * 28,
+    topOffset: Math.abs(distance) * 5,
+    rotate: distance * 6,
+  }
 }
 
-function formatCard(card: Card): string {
-  return `${card.rank} ${formatSuit(card.suit)}`
-}
-
-function formatWinningBid(winningBid: WinningBid): string {
-  if (!winningBid) {
-    return 'Няма активна обява'
-  }
-
-  let label = ''
-
-  if (winningBid.contract === 'suit' && winningBid.trumpSuit) {
-    label = formatSuit(winningBid.trumpSuit)
-  }
-
-  if (winningBid.contract === 'no-trumps') {
-    label = 'Без коз'
-  }
-
-  if (winningBid.contract === 'all-trumps') {
-    label = 'Всичко коз'
-  }
-
-  if (winningBid.doubled) {
-    label += ' / Контра'
-  }
-
-  if (winningBid.redoubled) {
-    label += ' / Ре контра'
-  }
-
-  return `${label} — ${formatSeat(winningBid.seat)}`
-}
-
-function formatDeclarationType(
-  declaration: DebugDeclarationView
+function renderPlayedCard(
+  play: { card: Card },
+  index: number,
+  count: number
 ): string {
-  if (declaration.type === 'belote') {
-    return 'Белот'
-  }
-
-  if (declaration.type === 'square') {
-    const rank = declaration.cards[0]?.rank ?? declaration.highRank ?? ''
-    return `Каре ${rank}`
-  }
-
-  const length = declaration.cards.length
-
-  if (length >= 5) {
-    return '100'
-  }
-
-  if (length === 4) {
-    return '50'
-  }
-
-  return 'Терца'
-}
-
-function formatDeclarationCards(cards: Card[]): string {
-  return cards.map((card) => formatCard(card)).join(' • ')
-}
-
-function renderPlayedCards(viewState: PlayingViewState): string {
-  if (viewState.plays.length === 0) {
-    return `
-      <div style="opacity: 0.7;">
-        Все още няма изиграни карти в тази взятка.
-      </div>
-    `
-  }
+  const suitSymbol = getSuitSymbol(play.card.suit)
+  const cardColor = isRedSuit(play.card.suit) ? '#b3261e' : '#13253d'
+  const offset = getPlayedCardOffset(index, count)
 
   return `
-    <div style="display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 10px;">
+    <div
+      style="
+        position:absolute;
+        left:50%;
+        top:50%;
+        width:112px;
+        height:162px;
+        margin-left:${-56 + offset.leftOffset}px;
+        margin-top:${-81 + offset.topOffset}px;
+        transform:rotate(${offset.rotate}deg);
+        transform-origin:center center;
+        z-index:${10 + index};
+        pointer-events:none;
+      "
+    >
+      <div
+        style="
+          position:absolute;
+          inset:0;
+          border-radius:14px;
+          background:linear-gradient(180deg, rgba(255,255,255,0.99) 0%, rgba(241,245,250,0.99) 100%);
+          box-shadow:
+            0 16px 34px rgba(0,0,0,0.24),
+            inset 0 1px 0 rgba(255,255,255,0.95),
+            inset 0 -1px 0 rgba(0,0,0,0.05);
+          border:1px solid rgba(21,48,82,0.10);
+        "
+      ></div>
+
+      <div
+        style="
+          position:absolute;
+          inset:4px;
+          border-radius:10px;
+          border:1px solid rgba(20,49,84,0.12);
+          background:linear-gradient(180deg, rgba(255,255,255,0.94) 0%, rgba(248,250,253,0.94) 100%);
+        "
+      ></div>
+
+      <div
+        style="
+          position:absolute;
+          left:9px;
+          top:10px;
+          display:flex;
+          flex-direction:column;
+          align-items:center;
+          gap:1px;
+          color:${cardColor};
+          line-height:1;
+        "
+      >
+        <span
+          style="
+            font-size:18px;
+            font-weight:900;
+            letter-spacing:0.02em;
+          "
+        >
+          ${escapeHtml(String(play.card.rank))}
+        </span>
+        <span
+          style="
+            font-size:16px;
+            font-weight:900;
+          "
+        >
+          ${escapeHtml(suitSymbol)}
+        </span>
+      </div>
+
+      <div
+        style="
+          position:absolute;
+          right:9px;
+          bottom:8px;
+          display:flex;
+          flex-direction:column;
+          align-items:center;
+          gap:1px;
+          color:${cardColor};
+          line-height:1;
+          transform:rotate(180deg);
+        "
+      >
+        <span
+          style="
+            font-size:18px;
+            font-weight:900;
+            letter-spacing:0.02em;
+          "
+        >
+          ${escapeHtml(String(play.card.rank))}
+        </span>
+        <span
+          style="
+            font-size:16px;
+            font-weight:900;
+          "
+        >
+          ${escapeHtml(suitSymbol)}
+        </span>
+      </div>
+
+      <div
+        style="
+          position:absolute;
+          left:50%;
+          top:54%;
+          transform:translate(-50%, -50%);
+          color:${cardColor};
+          font-size:42px;
+          line-height:1;
+          font-weight:900;
+          text-shadow:0 2px 6px rgba(0,0,0,0.08);
+        "
+      >
+        ${escapeHtml(suitSymbol)}
+      </div>
+    </div>
+  `
+}
+
+function renderCenterTrick(viewState: PlayingViewState): string {
+  return `
+    <div
+      style="
+        position:relative;
+        width:420px;
+        height:260px;
+        margin:0 auto;
+        background:transparent;
+        pointer-events:none;
+      "
+    >
       ${viewState.plays
-        .map(
-          (play) => `
-            <div
-              style="
-                padding: 12px 14px;
-                border-radius: 10px;
-                background: rgba(255,255,255,0.05);
-                border: 1px solid rgba(255,255,255,0.12);
-              "
-            >
-              <div style="margin-bottom: 6px; font-weight: 700;">${formatSeat(play.seat)}</div>
-              <div>${formatCard(play.card)}</div>
-            </div>
-          `
-        )
-        .join('')}
-    </div>
-  `
-}
-
-function renderBottomHand(viewState: PlayingViewState): string {
-  if (viewState.bottomHand.length === 0) {
-    return `
-      <div style="opacity: 0.7;">
-        Няма карти в ръката.
-      </div>
-    `
-  }
-
-  return `
-    <div style="display: flex; flex-wrap: wrap; gap: 10px;">
-      ${viewState.bottomHand
-        .map((card) => {
-          const isPlayable =
-            viewState.isBottomTurn &&
-            viewState.validBottomCardIds.includes(card.id)
-
-          return `
-            <button
-              type="button"
-              data-action="play-card"
-              data-card-id="${card.id}"
-              ${isPlayable ? '' : 'disabled'}
-              style="
-                border: 0;
-                border-radius: 10px;
-                padding: 12px 14px;
-                font-weight: 700;
-                cursor: ${isPlayable ? 'pointer' : 'not-allowed'};
-                opacity: ${isPlayable ? '1' : '0.5'};
-                background: ${isPlayable ? '#e5e7eb' : '#94a3b8'};
-                color: #0f172a;
-                min-width: 110px;
-              "
-            >
-              ${formatCard(card)}
-            </button>
-          `
-        })
-        .join('')}
-    </div>
-  `
-}
-
-function renderBotDeclarationsDebug(viewState: PlayingPanelViewState): string {
-  const declarations = (viewState.botDebugDeclarations ?? []).filter(
-    (declaration) => declaration.seat !== 'bottom'
-  )
-
-  if (declarations.length === 0) {
-    return `
-      <div style="opacity: 0.72;">
-        Още няма записани бот анонси.
-      </div>
-    `
-  }
-
-  return `
-    <div style="display: flex; flex-direction: column; gap: 10px;">
-      ${declarations
-        .map(
-          (declaration) => `
-            <div
-              style="
-                padding: 12px 14px;
-                border-radius: 10px;
-                background: rgba(255,255,255,0.05);
-                border: 1px solid rgba(255,255,255,0.12);
-              "
-            >
-              <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px;">
-                <div style="font-weight: 800;">${formatSeat(declaration.seat)}</div>
-                <div style="opacity: 0.92;">${formatDeclarationType(declaration)}</div>
-                <div style="opacity: 0.72;">${declaration.points} т.</div>
-                <div
-                  style="
-                    padding: 2px 8px;
-                    border-radius: 999px;
-                    font-size: 12px;
-                    font-weight: 700;
-                    background: ${declaration.valid ? 'rgba(34,197,94,0.18)' : 'rgba(248,113,113,0.18)'};
-                    color: ${declaration.valid ? '#86efac' : '#fca5a5'};
-                  "
-                >
-                  ${declaration.valid ? 'валидно' : 'невалидно'}
-                </div>
-              </div>
-
-              <div style="font-size: 14px; line-height: 1.45; opacity: 0.9;">
-                ${formatDeclarationCards(declaration.cards)}
-              </div>
-            </div>
-          `
-        )
+        .map((play, index) => renderPlayedCard(play, index, viewState.plays.length))
         .join('')}
     </div>
   `
 }
 
 export function renderPlayingPanel(viewState: PlayingViewState): string {
-  const debugViewState = viewState as PlayingPanelViewState
-
-  return `
-    <div style="max-width: 920px; margin-bottom: 16px;">
-      <div
-        style="
-          padding: 16px;
-          border-radius: 12px;
-          background: rgba(255,255,255,0.06);
-          border: 1px solid rgba(255,255,255,0.12);
-          margin-bottom: 12px;
-        "
-      >
-        <div style="margin-bottom: 8px;"><strong>Фаза:</strong> Игра</div>
-        <div style="margin-bottom: 8px;"><strong>На ход:</strong> ${formatSeat(viewState.currentTurnSeat)}</div>
-        <div style="margin-bottom: 8px;"><strong>Води:</strong> ${formatSeat(viewState.leaderSeat)}</div>
-        <div style="margin-bottom: 8px;"><strong>Взятка:</strong> ${viewState.trickIndex + 1}</div>
-        <div><strong>Договор:</strong> ${formatWinningBid(viewState.winningBid)}</div>
-      </div>
-
-      <div
-        style="
-          padding: 16px;
-          border-radius: 12px;
-          background: rgba(255,255,255,0.06);
-          border: 1px solid rgba(255,255,255,0.12);
-          margin-bottom: 12px;
-        "
-      >
-        <div style="margin-bottom: 10px; font-weight: 700;">Текуща взятка</div>
-        ${renderPlayedCards(viewState)}
-      </div>
-
-      <div
-        style="
-          padding: 16px;
-          border-radius: 12px;
-          background: rgba(255,255,255,0.06);
-          border: 1px solid rgba(255,255,255,0.12);
-          margin-bottom: 12px;
-        "
-      >
-        <div style="margin-bottom: 10px; font-weight: 700;">Бот анонси — дебъг</div>
-        ${renderBotDeclarationsDebug(debugViewState)}
-      </div>
-
-      <div
-        style="
-          padding: 16px;
-          border-radius: 12px;
-          background: rgba(255,255,255,0.06);
-          border: 1px solid rgba(255,255,255,0.12);
-        "
-      >
-        <div style="margin-bottom: 10px; font-weight: 700;">Твоите карти</div>
-        ${renderBottomHand(viewState)}
-      </div>
-    </div>
-  `
+  return renderCenterTrick(viewState)
 }

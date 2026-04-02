@@ -3,9 +3,11 @@ import type { Seat } from '../data/constants/seatOrder'
 import type { Suit } from '../core/state/gameTypes'
 import { getBiddingViewState } from '../core/state/getBiddingViewState'
 import { getBottomHandViewState } from '../core/state/getBottomHandViewState'
+import { getPlayingViewState } from '../core/state/getPlayingViewState'
 import { getScoringViewState } from '../core/state/getScoringViewState'
 import { renderBiddingPanel } from '../ui/center/renderBiddingPanel'
 import { renderBottomHandPanel } from '../ui/center/renderBottomHandPanel'
+import { renderPlayingPanel } from '../ui/center/renderPlayingPanel'
 import { renderScoringPanel } from '../ui/center/renderScoringPanel'
 import { renderCenterDeck } from '../ui/center/renderCenterDeck'
 import { getRoundSetupFlowResult } from '../ui/center/renderRoundSetupFlow'
@@ -116,7 +118,14 @@ function getActionElements(rootElement: HTMLElement, actionName: string): HTMLEl
       '[data-bid-action="redouble"]',
       '[data-bid-redouble]',
     ],
-    'play-card': ['[data-action="play-card"]'],
+    'play-card': [
+      '[data-action="play-card"]',
+      '[data-play-card]',
+      '[data-card-action="play"]',
+      '[data-card-id][data-playable="true"]',
+      '[data-card-id][data-is-playable="true"]',
+      '[data-card-id]',
+    ],
   }
 
   const selectors = selectorsByAction[actionName] ?? []
@@ -156,7 +165,11 @@ function readSuitFromElement(element: HTMLElement): Suit | null {
 }
 
 function readCardIdFromElement(element: HTMLElement): string | null {
-  const cardId = element.dataset.cardId ?? element.getAttribute('data-card-id') ?? null
+  const cardId =
+    element.dataset.cardId ??
+    element.getAttribute('data-card-id') ??
+    null
+
   return cardId && cardId.length > 0 ? cardId : null
 }
 
@@ -272,6 +285,7 @@ export function renderApp(
   }
 
   const biddingViewState = isBiddingPhase ? getBiddingViewState(state) : null
+  const playingViewState = isPlayingPhase ? getPlayingViewState(state) : null
   const scoringViewState = shouldShowScoringPanel
     ? {
         ...getScoringViewState(state),
@@ -293,7 +307,9 @@ export function renderApp(
     ? roundSetupFlow.centerContent
     : scoringViewState
       ? renderCenterPanel(renderScoringPanel(scoringViewState), 980)
-      : ''
+      : playingViewState
+        ? renderCenterPanel(renderPlayingPanel(playingViewState), 980)
+        : ''
 
   const shouldShowCenterDeck =
     roundSetupFlow.isRoundSetupPhase && !roundSetupFlow.shouldHideCenterDeck
@@ -451,57 +467,58 @@ export function renderApp(
       </div>
 
       <div
-  data-seat-anchor="bottom"
-  style="
-    position:fixed;
-    left:50%;
-    bottom:5px;
-    z-index:7;
-    pointer-events:none;
-    overflow:visible;
-    transform:translateX(-50%) scale(${stageScale});
-    transform-origin:bottom center;
-  "
->
-  ${
-    !isScoringPhase &&
-    !isSummaryPhase &&
-    bottomHandViewState.shouldShow
-      ? `
-    <div
-      style="
-        position:absolute;
-        left:50%;
-        bottom:${BOTTOM_HAND_BOTTOM_OFFSET}px;
-        transform:translateX(-50%);
-        width:1040px;
-        z-index:1;
-        pointer-events:auto;
-      "
-    >
-      ${renderBottomHandPanel(bottomHandViewState)}
-    </div>
-  `
-      : ''
-  }
+        data-seat-anchor="bottom"
+        style="
+          position:fixed;
+          left:50%;
+          bottom:5px;
+          z-index:7;
+          pointer-events:none;
+          overflow:visible;
+          transform:translateX(-50%) scale(${stageScale});
+          transform-origin:bottom center;
+        "
+      >
+        ${
+          !isScoringPhase &&
+          !isSummaryPhase &&
+          bottomHandViewState.shouldShow
+            ? `
+          <div
+            data-bottom-hand-root="1"
+            style="
+              position:absolute;
+              left:50%;
+              bottom:${BOTTOM_HAND_BOTTOM_OFFSET}px;
+              transform:translateX(-50%);
+              width:1040px;
+              z-index:1;
+              pointer-events:auto;
+            "
+          >
+            ${renderBottomHandPanel(bottomHandViewState)}
+          </div>
+        `
+            : ''
+        }
 
-  <div
-    style="
-      position:relative;
-      z-index:3;
-      pointer-events:none;
-    "
-  >
-    ${renderSeatPanel(
-      'bottom',
-      roundSetupFlow.seatHandCounts.bottom,
-      state.round.dealerSeat,
-      state.round.cutterSeat,
-      activeSeat,
-      state.phase
-    )}
-  </div>
-</div>
+        <div
+          style="
+            position:relative;
+            z-index:3;
+            pointer-events:none;
+          "
+        >
+          ${renderSeatPanel(
+            'bottom',
+            roundSetupFlow.seatHandCounts.bottom,
+            state.round.dealerSeat,
+            state.round.cutterSeat,
+            activeSeat,
+            state.phase
+          )}
+        </div>
+      </div>
 
       <div
         style="

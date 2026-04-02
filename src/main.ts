@@ -1,6 +1,7 @@
 import './style.css'
 import { bootstrapApp } from './app/bootstrap'
 import { renderApp } from './app/renderApp'
+import { runPlayingBotsUntilHumanTurn } from './app/runPlayingBotsUntilHumanTurn'
 import { createBelotePromptController } from './app/playPrompts/createBelotePromptController'
 
 const rootElement = document.querySelector<HTMLDivElement>('#app')
@@ -14,43 +15,48 @@ const app = bootstrapApp()
 
 let resizeFrameId: number | null = null
 
+function syncPlayingBotsAndRender(): void {
+  runPlayingBotsUntilHumanTurn(app)
+  render()
+}
+
 function render(): void {
   renderApp(appRoot, app, {
     onNextPhaseClick: () => {
       app.engine.goToNextPhase()
-      render()
+      syncPlayingBotsAndRender()
     },
     onSelectCutIndex: (cutIndex: number) => {
       app.engine.selectCutIndex(cutIndex)
-      render()
+      syncPlayingBotsAndRender()
     },
     onResolveCutClick: () => {
       app.engine.resolveCutPhase()
-      render()
+      syncPlayingBotsAndRender()
     },
     onBidPass: () => {
       app.engine.submitBidAction({ type: 'pass' })
-      render()
+      syncPlayingBotsAndRender()
     },
     onBidSuit: (suit) => {
       app.engine.submitBidAction({ type: 'suit', suit })
-      render()
+      syncPlayingBotsAndRender()
     },
     onBidNoTrumps: () => {
       app.engine.submitBidAction({ type: 'no-trumps' })
-      render()
+      syncPlayingBotsAndRender()
     },
     onBidAllTrumps: () => {
       app.engine.submitBidAction({ type: 'all-trumps' })
-      render()
+      syncPlayingBotsAndRender()
     },
     onBidDouble: () => {
       app.engine.submitBidAction({ type: 'double' })
-      render()
+      syncPlayingBotsAndRender()
     },
     onBidRedouble: () => {
       app.engine.submitBidAction({ type: 'redouble' })
-      render()
+      syncPlayingBotsAndRender()
     },
     onPlayCard: (cardId) => {
       const didOpenBelotePrompt = belotePromptController.handlePlayCard(cardId)
@@ -60,7 +66,7 @@ function render(): void {
       }
 
       app.engine.submitPlayCard(cardId)
-      render()
+      syncPlayingBotsAndRender()
     },
   })
 
@@ -83,4 +89,4 @@ window.addEventListener('resize', () => {
   })
 })
 
-render()
+syncPlayingBotsAndRender()

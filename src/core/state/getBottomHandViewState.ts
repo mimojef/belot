@@ -1,14 +1,19 @@
 import type { Card, GameState } from './gameTypes'
 import type { Seat } from '../../data/constants/seatOrder'
+import { getValidCardsForSeat } from '../rules/getValidCardsForSeat'
 
 export type BottomHandSortMode = {
   contract: 'all-trumps' | 'no-trumps' | 'suit' | 'unknown'
   trumpSuit: string | null
 }
 
+export type BottomHandViewCard = Card & {
+  isPlayable?: boolean
+}
+
 export type BottomHandViewState = {
   shouldShow: boolean
-  cards: Card[]
+  cards: BottomHandViewCard[]
   phase: GameState['phase']
   dealerSeat: Seat | null
   phaseEnteredAt: number | null
@@ -121,12 +126,46 @@ function resolveBottomHandSortMode(state: GameState): BottomHandSortMode {
   }
 }
 
+function resolvePlayableCardIds(state: GameState): Set<string> {
+  if (state.phase !== 'playing') {
+    return new Set()
+  }
+
+  const currentTurnSeat = state.playing?.currentTurnSeat ?? null
+
+  if (currentTurnSeat !== 'bottom') {
+    return new Set()
+  }
+
+  const validCards = getValidCardsForSeat(state, 'bottom')
+  const validIds = new Set<string>()
+
+  for (const card of validCards) {
+    if (typeof card.id === 'string' && card.id.length > 0) {
+      validIds.add(card.id)
+    }
+  }
+
+  return validIds
+}
+
 export function getBottomHandViewState(state: GameState): BottomHandViewState {
   const shouldShow = shouldShowBottomHandForPhase(state.phase)
+  const playableCardIds = resolvePlayableCardIds(state)
+  const cards = shouldShow
+    ? state.hands.bottom.map((card) => ({
+        ...card,
+        isPlayable:
+          state.phase === 'playing' &&
+          state.playing?.currentTurnSeat === 'bottom' &&
+          typeof card.id === 'string' &&
+          playableCardIds.has(card.id),
+      }))
+    : []
 
   return {
     shouldShow,
-    cards: shouldShow ? state.hands.bottom : [],
+    cards,
     phase: state.phase,
     dealerSeat: state.round.dealerSeat,
     phaseEnteredAt: state.phaseEnteredAt ?? null,
