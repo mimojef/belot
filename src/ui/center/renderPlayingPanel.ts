@@ -10,6 +10,14 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;')
 }
 
+function escapeHtmlAttribute(value: string): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
 function getSuitSymbol(suit: Suit): string {
   if (suit === 'clubs') return '♣'
   if (suit === 'diamonds') return '♦'
@@ -102,8 +110,9 @@ function getEntryAnimationStyle(
   finalRotate: number
 ): string {
   const isNewestCard = index === count - 1
+  const shouldAnimateNewestCard = isNewestCard && count < 4
 
-  if (!isNewestCard) {
+  if (!shouldAnimateNewestCard) {
     return `opacity:1;`
   }
 
@@ -135,6 +144,11 @@ function renderPlayedCard(
 
   return `
     <div
+      data-current-trick-card="1"
+      data-trick-card="1"
+      data-played-card="1"
+      data-trick-seat="${play.seat}"
+      data-card-id="${escapeHtmlAttribute(play.card.id)}"
       style="
         position:absolute;
         left:50%;
@@ -280,6 +294,8 @@ function renderCenterTrick(viewState: PlayingViewState): string {
     </style>
 
     <div
+      data-current-trick="1"
+      data-trick-area="1"
       style="
         position:relative;
         width:420px;

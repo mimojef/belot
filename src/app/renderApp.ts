@@ -5,6 +5,7 @@ import { getBiddingViewState } from '../core/state/getBiddingViewState'
 import { getBottomHandViewState } from '../core/state/getBottomHandViewState'
 import { getPlayingViewState } from '../core/state/getPlayingViewState'
 import { getScoringViewState } from '../core/state/getScoringViewState'
+import { createAppAnimations } from './animations/createAppAnimations'
 import { renderBiddingPanel } from '../ui/center/renderBiddingPanel'
 import { renderBottomHandPanel } from '../ui/center/renderBottomHandPanel'
 import { renderPlayingPanel } from '../ui/center/renderPlayingPanel'
@@ -37,6 +38,8 @@ const SCORE_HUD_INTERNAL_OFFSET = 18
 
 let cutResolveTimeoutId: number | null = null
 let roundSetupRerenderTimeoutId: number | null = null
+
+const appAnimations = createAppAnimations()
 
 function clearCutResolveTimeout(): void {
   if (cutResolveTimeoutId !== null) {
@@ -261,6 +264,25 @@ export function renderApp(
     clearCutResolveTimeout()
   }
 
+  if (!isPlayingPhase) {
+    appAnimations.reset()
+  }
+
+  const trickCollectionState = appAnimations.getTrickCollectionState(state)
+  const shouldHideCompletedTrickSnapshot =
+    isPlayingPhase && appAnimations.hasCompletedTrick(trickCollectionState.trickKey)
+
+  const renderState =
+    shouldHideCompletedTrickSnapshot && state.playing
+      ? {
+          ...state,
+          playing: {
+            ...state.playing,
+            trickCollectionSnapshot: null,
+          },
+        }
+      : state
+
   const roundSetupFlow = getRoundSetupFlowResult({
     phase: state.phase,
     dealerSeat: state.round.dealerSeat,
@@ -284,15 +306,15 @@ export function renderApp(
     }, roundSetupFlow.nextRerenderInMs)
   }
 
-  const biddingViewState = isBiddingPhase ? getBiddingViewState(state) : null
-  const playingViewState = isPlayingPhase ? getPlayingViewState(state) : null
+  const biddingViewState = isBiddingPhase ? getBiddingViewState(renderState) : null
+  const playingViewState = isPlayingPhase ? getPlayingViewState(renderState) : null
   const scoringViewState = shouldShowScoringPanel
     ? {
-        ...getScoringViewState(state),
+        ...getScoringViewState(renderState),
         isVisible: true,
       }
     : null
-  const bottomHandViewState = getBottomHandViewState(state)
+  const bottomHandViewState = getBottomHandViewState(renderState)
 
   const biddingOverlayContent =
     !roundSetupFlow.isRoundSetupPhase && biddingViewState
@@ -300,8 +322,8 @@ export function renderApp(
       : ''
 
   const activeSeat: Seat | null = isBiddingPhase
-    ? state.bidding.currentSeat
-    : ((state.playing?.currentTurnSeat ?? null) as Seat | null)
+    ? renderState.bidding.currentSeat
+    : ((renderState.playing?.currentTurnSeat ?? null) as Seat | null)
 
   const centerMainContent = roundSetupFlow.isRoundSetupPhase
     ? roundSetupFlow.centerContent
@@ -397,7 +419,7 @@ export function renderApp(
           transform-origin:top left;
         "
       >
-        ${renderScoreHud(state)}
+        ${renderScoreHud(renderState)}
       </div>
 
       <div
@@ -624,4 +646,6 @@ export function renderApp(
   if (isPlayingPhase) {
     bindPlayCardClicks(getActionElements(rootElement, 'play-card'), options.onPlayCard)
   }
+
+  void appAnimations.sync(state)
 }
