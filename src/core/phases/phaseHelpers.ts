@@ -47,5 +47,5 @@ export function isPlayingPhase(phase: PhaseType): boolean {
 }
 
 export function isScoringPhase(phase: PhaseType): boolean {
-  return phase === 'scoring' || phase === 'summary' || phase === 'next-round'
+  return phase === 'scoring' || phase === 'next-round'
 }

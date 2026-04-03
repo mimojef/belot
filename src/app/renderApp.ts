@@ -303,8 +303,7 @@ export function renderApp(
   const isBiddingPhase = renderState.phase === 'bidding'
   const isPlayingPhase = renderState.phase === 'playing'
   const isScoringPhase = renderState.phase === 'scoring'
-  const isSummaryPhase = renderState.phase === 'summary'
-  const shouldShowScoringPanel = isScoringPhase || isSummaryPhase
+  const shouldShowScoringPanel = isScoringPhase
 
   const roundSetupFlow = getRoundSetupFlowResult({
     phase: renderState.phase,
@@ -526,7 +525,6 @@ export function renderApp(
       >
         ${
           !isScoringPhase &&
-          !isSummaryPhase &&
           bottomHandViewState.shouldShow
             ? `
           <div

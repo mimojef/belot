@@ -205,7 +205,7 @@ export function getScoringViewState(state: GameState): ScoringViewState {
     beloteScore.teamB
 
   return {
-    isVisible: state.phase === 'scoring' || state.phase === 'summary',
+    isVisible: state.phase === 'scoring',
     hasBaseRoundScore: Boolean(baseRoundScore),
     hasOutcome: Boolean(outcome),
     winningBidLabel: resolveWinningBidLabel(state.bidding.winningBid),

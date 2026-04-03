@@ -9,7 +9,6 @@ export const PHASE_TYPES = [
   'deal-last-3',
   'playing',
   'scoring',
-  'summary',
   'next-round',
 ] as const
 

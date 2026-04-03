@@ -11,6 +11,7 @@ type SortedHandCard = {
 const DEAL_PACKET_START_DELAY = 220
 const DEAL_PACKET_DELAY_STEP = 420
 const DEAL_PACKET_DURATION = 860
+const DEAL_REVEAL_OVERLAP = 500
 
 function escapeHtml(value: string): string {
   return value
@@ -152,13 +153,13 @@ function getFanDistance(index: number, visibleCount: number): number {
 function getBottomCardTransform(distance: number): string {
   const distanceAbs = Math.abs(distance)
 
-  return `translateX(calc(-50% + ${distance * 58}px)) translateY(${distanceAbs * 5}px) rotate(${distance * 7}deg)`
+  return `translateX(calc(-50% + ${distance * 55}px)) translateY(${distanceAbs * 5}px) rotate(${distance * 7}deg)`
 }
 
 function getHoveredBottomCardTransform(distance: number): string {
   const distanceAbs = Math.abs(distance)
 
-  return `translateX(calc(-50% + ${distance * 58}px)) translateY(${distanceAbs * 5 - 16}px) rotate(${distance * 7}deg)`
+  return `translateX(calc(-50% + ${distance * 55}px)) translateY(${distanceAbs * 5 - 16}px) rotate(${distance * 7}deg)`
 }
 
 function getDealOrder(dealerSeat: Seat | null): Seat[] {
@@ -185,10 +186,15 @@ function getBottomRevealDelayMs(dealerSeat: Seat | null): number {
   const seatIndex = dealOrder.indexOf('bottom')
 
   if (seatIndex === -1) {
-    return DEAL_PACKET_START_DELAY + DEAL_PACKET_DURATION
+    return DEAL_PACKET_START_DELAY + DEAL_PACKET_DURATION - DEAL_REVEAL_OVERLAP
   }
 
-  return DEAL_PACKET_START_DELAY + seatIndex * DEAL_PACKET_DELAY_STEP + DEAL_PACKET_DURATION
+  return (
+    DEAL_PACKET_START_DELAY +
+    seatIndex * DEAL_PACKET_DELAY_STEP +
+    DEAL_PACKET_DURATION -
+    DEAL_REVEAL_OVERLAP
+  )
 }
 
 function isDealPhase(viewState: BottomHandViewState): boolean {
@@ -526,7 +532,7 @@ function renderHandCard(
       >
         <span
           style="
-            font-size:20px;
+            font-size:30px;
             font-weight:900;
             letter-spacing:0.02em;
           "
@@ -535,7 +541,7 @@ function renderHandCard(
         </span>
         <span
           style="
-            font-size:18px;
+            font-size:45px;
             font-weight:900;
           "
         >
@@ -559,7 +565,7 @@ function renderHandCard(
       >
         <span
           style="
-            font-size:20px;
+            font-size:30px;
             font-weight:900;
             letter-spacing:0.02em;
           "
@@ -568,7 +574,7 @@ function renderHandCard(
         </span>
         <span
           style="
-            font-size:18px;
+            font-size:45px;
             font-weight:900;
           "
         >

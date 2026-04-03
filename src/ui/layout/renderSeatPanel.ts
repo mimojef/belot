@@ -3,6 +3,7 @@ import { SEAT_ORDER, type Seat } from '../../data/constants/seatOrder'
 const DEAL_PACKET_START_DELAY = 220
 const DEAL_PACKET_DELAY_STEP = 420
 const DEAL_PACKET_DURATION = 860
+const DEAL_REVEAL_OVERLAP = 500
 
 const FAN_SPREAD_STEP = 38
 const FAN_ROTATE_STEP = 6
@@ -105,10 +106,15 @@ function getSeatRevealDelayMs(seat: Seat, dealerSeat: Seat | null): number {
   const seatIndex = dealOrder.indexOf(seat)
 
   if (seatIndex === -1) {
-    return DEAL_PACKET_START_DELAY + DEAL_PACKET_DURATION
+    return DEAL_PACKET_START_DELAY + DEAL_PACKET_DURATION - DEAL_REVEAL_OVERLAP
   }
 
-  return DEAL_PACKET_START_DELAY + seatIndex * DEAL_PACKET_DELAY_STEP + DEAL_PACKET_DURATION
+  return (
+    DEAL_PACKET_START_DELAY +
+    seatIndex * DEAL_PACKET_DELAY_STEP +
+    DEAL_PACKET_DURATION -
+    DEAL_REVEAL_OVERLAP
+  )
 }
 
 function renderCardBackOrFront(seat: Seat): string {
@@ -116,17 +122,32 @@ function renderCardBackOrFront(seat: Seat): string {
     return ''
   }
 
+  const isTopSeat = seat === 'top'
+
+  const outerBackground = isTopSeat
+    ? 'linear-gradient(180deg, rgba(30, 68, 112, 0.98) 0%, rgba(18, 43, 74, 0.98) 100%)'
+    : 'linear-gradient(180deg, rgba(20, 49, 84, 0.98) 0%, rgba(11, 27, 49, 0.98) 100%)'
+
+  const outerShadow = isTopSeat
+    ? 'inset 0 1px 0 rgba(255,255,255,0.18), 0 7px 12px rgba(0,0,0,0.16)'
+    : 'inset 0 1px 0 rgba(255,255,255,0.14), 0 8px 14px rgba(0,0,0,0.22)'
+
+  const innerBorder = isTopSeat
+    ? '1px solid rgba(255,255,255,0.16)'
+    : '1px solid rgba(255,255,255,0.12)'
+
+  const innerBackground = isTopSeat
+    ? 'radial-gradient(circle at center, rgba(255,255,255,0.11) 0%, rgba(255,255,255,0.05) 30%, rgba(255,255,255,0.03) 100%)'
+    : 'radial-gradient(circle at center, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.03) 30%, rgba(255,255,255,0.02) 100%)'
+
   return `
     <div
       style="
         position:absolute;
         inset:0;
         border-radius:8px;
-        background:
-          linear-gradient(180deg, rgba(20, 49, 84, 0.98) 0%, rgba(11, 27, 49, 0.98) 100%);
-        box-shadow:
-          inset 0 1px 0 rgba(255,255,255,0.14),
-          0 8px 14px rgba(0,0,0,0.22);
+        background:${outerBackground};
+        box-shadow:${outerShadow};
       "
     ></div>
 
@@ -135,9 +156,8 @@ function renderCardBackOrFront(seat: Seat): string {
         position:absolute;
         inset:5px;
         border-radius:6px;
-        border:1px solid rgba(255,255,255,0.12);
-        background:
-          radial-gradient(circle at center, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.03) 30%, rgba(255,255,255,0.02) 100%);
+        border:${innerBorder};
+        background:${innerBackground};
       "
     ></div>
   `
@@ -321,7 +341,6 @@ function renderSeatCards(
   const revealDelayMs = getSeatRevealDelayMs(seat, dealerSeat)
 
   const cards = Array.from({ length: visibleCount }, (_, index) => {
-    const finalTransform = getSeatFanTransform(seat, getFanDistance(index, visibleCount))
     const initialTransform = getSeatCardInitialTransform(
       seat,
       currentPhase,

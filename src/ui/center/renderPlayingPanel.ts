@@ -89,8 +89,8 @@ function renderPlayTarget(seat: Seat): string {
         position:absolute;
         left:50%;
         top:50%;
-        width:112px;
-        height:162px;
+        width:148px;
+        height:215px;
         margin-left:${-56 + seatOffset.leftOffset}px;
         margin-top:${-81 + seatOffset.topOffset}px;
         transform:rotate(${seatOffset.rotate}deg);
@@ -153,8 +153,8 @@ function renderPlayedCard(
         position:absolute;
         left:50%;
         top:50%;
-        width:112px;
-        height:162px;
+        width:148px;
+        height:215px;
         margin-left:${-56 + finalLeft}px;
         margin-top:${-81 + finalTop}px;
         transform:rotate(${finalRotate}deg);

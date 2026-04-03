@@ -10,8 +10,7 @@ export const PHASE_FLOW: Record<PhaseType, PhaseType | null> = {
   'bidding': 'deal-last-3',
   'deal-last-3': 'playing',
   'playing': 'scoring',
-  'scoring': 'summary',
-  'summary': 'next-round',
+  'scoring': 'next-round',
   'next-round': 'cutting',
 }
 
