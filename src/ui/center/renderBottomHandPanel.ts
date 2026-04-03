@@ -191,6 +191,37 @@ function getBottomRevealDelayMs(dealerSeat: Seat | null): number {
   return DEAL_PACKET_START_DELAY + seatIndex * DEAL_PACKET_DELAY_STEP + DEAL_PACKET_DURATION
 }
 
+function isDealPhase(viewState: BottomHandViewState): boolean {
+  return (
+    viewState.phase === 'deal-first-3' ||
+    viewState.phase === 'deal-next-2' ||
+    viewState.phase === 'deal-last-3'
+  )
+}
+
+function getStableVisibleCountBeforeCurrentPacket(viewState: BottomHandViewState): number {
+  if (viewState.phase === 'deal-first-3') {
+    return 0
+  }
+
+  if (viewState.phase === 'deal-next-2') {
+    return 3
+  }
+
+  if (viewState.phase === 'deal-last-3') {
+    return 5
+  }
+
+  return viewState.cards?.length ?? 0
+}
+
+function isExistingCardBeforeCurrentPacket(
+  viewState: BottomHandViewState,
+  originalIndex: number
+): boolean {
+  return originalIndex < getStableVisibleCountBeforeCurrentPacket(viewState)
+}
+
 function shouldAnimateCardReveal(
   viewState: BottomHandViewState,
   originalIndex: number
@@ -210,7 +241,7 @@ function shouldAnimateCardReveal(
   return false
 }
 
-function getCardAnimationStyle(
+function getCardRevealAnimationStyle(
   viewState: BottomHandViewState,
   originalIndex: number
 ): string {
@@ -221,6 +252,105 @@ function getCardAnimationStyle(
   const revealDelayMs = getBottomRevealDelayMs(viewState.dealerSeat)
 
   return `opacity:0; animation: belot-bottom-hand-reveal 120ms ease ${revealDelayMs}ms forwards;`
+}
+
+function getStableDisplayIndexMap(
+  sortedCards: SortedHandCard[],
+  viewState: BottomHandViewState
+): Map<string, number> {
+  const stableCards = sortedCards.filter((sortedCard) =>
+    isExistingCardBeforeCurrentPacket(viewState, sortedCard.originalIndex)
+  )
+
+  const result = new Map<string, number>()
+
+  stableCards.forEach((sortedCard, stableIndex) => {
+    result.set(readCardId(sortedCard.card, sortedCard.originalIndex), stableIndex)
+  })
+
+  return result
+}
+
+function getInitialBottomCardTransform(
+  sortedCard: SortedHandCard,
+  displayIndex: number,
+  visibleCount: number,
+  viewState: BottomHandViewState,
+  stableDisplayIndexMap: Map<string, number>
+): string {
+  const finalDistance = getFanDistance(displayIndex, visibleCount)
+  const finalTransform = getBottomCardTransform(finalDistance)
+
+  if (!isDealPhase(viewState)) {
+    return finalTransform
+  }
+
+  if (!isExistingCardBeforeCurrentPacket(viewState, sortedCard.originalIndex)) {
+    return finalTransform
+  }
+
+  const stableVisibleCount = getStableVisibleCountBeforeCurrentPacket(viewState)
+
+  if (stableVisibleCount <= 0) {
+    return finalTransform
+  }
+
+  const cardId = readCardId(sortedCard.card, sortedCard.originalIndex)
+  const stableDisplayIndex = stableDisplayIndexMap.get(cardId)
+
+  if (stableDisplayIndex === undefined) {
+    return finalTransform
+  }
+
+  const stableDistance = getFanDistance(stableDisplayIndex, stableVisibleCount)
+  return getBottomCardTransform(stableDistance)
+}
+
+function getCardShiftAnimationStyle(
+  sortedCard: SortedHandCard,
+  displayIndex: number,
+  visibleCount: number,
+  viewState: BottomHandViewState,
+  stableDisplayIndexMap: Map<string, number>
+): string {
+  if (!isDealPhase(viewState)) {
+    return ''
+  }
+
+  if (!isExistingCardBeforeCurrentPacket(viewState, sortedCard.originalIndex)) {
+    return ''
+  }
+
+  const stableVisibleCount = getStableVisibleCountBeforeCurrentPacket(viewState)
+
+  if (stableVisibleCount <= 0) {
+    return ''
+  }
+
+  const cardId = readCardId(sortedCard.card, sortedCard.originalIndex)
+  const stableDisplayIndex = stableDisplayIndexMap.get(cardId)
+
+  if (stableDisplayIndex === undefined) {
+    return ''
+  }
+
+  const fromTransform = getBottomCardTransform(
+    getFanDistance(stableDisplayIndex, stableVisibleCount)
+  )
+
+  const toTransform = getBottomCardTransform(getFanDistance(displayIndex, visibleCount))
+
+  if (fromTransform === toTransform) {
+    return ''
+  }
+
+  const revealDelayMs = getBottomRevealDelayMs(viewState.dealerSeat)
+
+  return `
+    --belot-hand-from-transform:${fromTransform};
+    --belot-hand-to-transform:${toTransform};
+    animation: belot-bottom-hand-shift 150ms cubic-bezier(0.22, 1, 0.36, 1) ${revealDelayMs}ms forwards;
+  `
 }
 
 function buildPlayCardPointerDown(cardId: string, distance: number, isPlayable: boolean): string {
@@ -298,7 +428,8 @@ function renderHandCard(
   sortedCard: SortedHandCard,
   displayIndex: number,
   visibleCount: number,
-  viewState: BottomHandViewState
+  viewState: BottomHandViewState,
+  stableDisplayIndexMap: Map<string, number>
 ): string {
   const card = sortedCard.card
   const rank = escapeHtml(readCardRank(card))
@@ -308,10 +439,24 @@ function renderHandCard(
   const cardId = escapeHtml(rawCardId)
   const cardColor = isRedSuit(suit) ? '#b3261e' : '#13253d'
   const distance = getFanDistance(displayIndex, visibleCount)
-  const animationStyle = getCardAnimationStyle(viewState, sortedCard.originalIndex)
+  const finalTransform = getBottomCardTransform(distance)
+  const initialTransform = getInitialBottomCardTransform(
+    sortedCard,
+    displayIndex,
+    visibleCount,
+    viewState,
+    stableDisplayIndexMap
+  )
+  const revealAnimationStyle = getCardRevealAnimationStyle(viewState, sortedCard.originalIndex)
+  const shiftAnimationStyle = getCardShiftAnimationStyle(
+    sortedCard,
+    displayIndex,
+    visibleCount,
+    viewState,
+    stableDisplayIndexMap
+  )
   const isInteractive = viewState.phase === 'playing'
   const isPlayable = readCardPlayable(card)
-  const baseTransform = getBottomCardTransform(distance)
   const hoveredTransform = getHoveredBottomCardTransform(distance)
 
   return `
@@ -328,7 +473,7 @@ function renderHandCard(
         border:none;
         outline:none;
         border-radius:12px;
-        transform:${baseTransform};
+        transform:${initialTransform};
         transform-origin:center 90%;
         background:transparent;
         cursor:${isPlayable ? 'pointer' : 'default'};
@@ -337,10 +482,11 @@ function renderHandCard(
         overflow:visible;
         z-index:${100 + displayIndex};
         transition:transform 140ms ease, box-shadow 140ms ease, filter 140ms ease, opacity 120ms ease;
-        ${animationStyle}
+        ${revealAnimationStyle}
+        ${shiftAnimationStyle}
       "
       onpointerenter="${isPlayable ? `this.style.transform='${hoveredTransform}'; this.style.boxShadow='0 18px 30px rgba(0,0,0,0.24)'; this.style.filter='brightness(1.02)';` : ''}"
-      onpointerleave="${isPlayable ? `this.style.transform='${baseTransform}'; this.style.boxShadow='0 12px 24px rgba(0,0,0,0.18)'; this.style.filter='brightness(1)';` : ''}"
+      onpointerleave="${isPlayable ? `this.style.transform='${finalTransform}'; this.style.boxShadow='0 12px 24px rgba(0,0,0,0.18)'; this.style.filter='brightness(1)';` : ''}"
       onpointerdown="${buildPlayCardPointerDown(rawCardId, distance, isPlayable)}"
     >
       <div
@@ -456,6 +602,8 @@ export function renderBottomHandPanel(viewState: BottomHandViewState): string {
     return ''
   }
 
+  const stableDisplayIndexMap = getStableDisplayIndexMap(sortedCards, viewState)
+
   return `
     <style>
       @keyframes belot-bottom-hand-reveal {
@@ -464,6 +612,15 @@ export function renderBottomHandPanel(viewState: BottomHandViewState): string {
         }
         100% {
           opacity: 1;
+        }
+      }
+
+      @keyframes belot-bottom-hand-shift {
+        0% {
+          transform: var(--belot-hand-from-transform);
+        }
+        100% {
+          transform: var(--belot-hand-to-transform);
         }
       }
     </style>
@@ -487,7 +644,9 @@ export function renderBottomHandPanel(viewState: BottomHandViewState): string {
         "
       >
         ${sortedCards
-          .map((card, index) => renderHandCard(card, index, sortedCards.length, viewState))
+          .map((card, index) =>
+            renderHandCard(card, index, sortedCards.length, viewState, stableDisplayIndexMap)
+          )
           .join('')}
       </div>
     </div>

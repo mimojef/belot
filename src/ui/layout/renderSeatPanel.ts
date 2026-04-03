@@ -143,7 +143,38 @@ function renderCardBackOrFront(seat: Seat): string {
   `
 }
 
-function getCardAnimationStyle(
+function isDealPhase(currentPhase: string | undefined): boolean {
+  return (
+    currentPhase === 'deal-first-3' ||
+    currentPhase === 'deal-next-2' ||
+    currentPhase === 'deal-last-3'
+  )
+}
+
+function getStableVisibleCountBeforeCurrentPacket(currentPhase: string | undefined): number {
+  if (currentPhase === 'deal-first-3') {
+    return 0
+  }
+
+  if (currentPhase === 'deal-next-2') {
+    return 3
+  }
+
+  if (currentPhase === 'deal-last-3') {
+    return 5
+  }
+
+  return 0
+}
+
+function isExistingCardBeforeCurrentPacket(
+  currentPhase: string | undefined,
+  cardIndex: number
+): boolean {
+  return cardIndex < getStableVisibleCountBeforeCurrentPacket(currentPhase)
+}
+
+function getSeatCardRevealAnimationStyle(
   currentPhase: string | undefined,
   visibleCount: number,
   cardIndex: number,
@@ -199,6 +230,78 @@ function getRightFanTransform(distance: number): string {
   `
 }
 
+function getSeatFanTransform(seat: Seat, distance: number): string {
+  if (seat === 'top') {
+    return getTopFanTransform(distance)
+  }
+
+  if (seat === 'left') {
+    return getLeftFanTransform(distance)
+  }
+
+  return getRightFanTransform(distance)
+}
+
+function getSeatCardInitialTransform(
+  seat: Seat,
+  currentPhase: string | undefined,
+  cardIndex: number,
+  visibleCount: number
+): string {
+  const finalTransform = getSeatFanTransform(seat, getFanDistance(cardIndex, visibleCount))
+
+  if (!isDealPhase(currentPhase)) {
+    return finalTransform
+  }
+
+  if (!isExistingCardBeforeCurrentPacket(currentPhase, cardIndex)) {
+    return finalTransform
+  }
+
+  const stableVisibleCount = getStableVisibleCountBeforeCurrentPacket(currentPhase)
+
+  if (stableVisibleCount <= 0) {
+    return finalTransform
+  }
+
+  return getSeatFanTransform(seat, getFanDistance(cardIndex, stableVisibleCount))
+}
+
+function getSeatCardShiftAnimationStyle(
+  seat: Seat,
+  currentPhase: string | undefined,
+  cardIndex: number,
+  visibleCount: number,
+  revealDelayMs: number
+): string {
+  if (!isDealPhase(currentPhase)) {
+    return ''
+  }
+
+  if (!isExistingCardBeforeCurrentPacket(currentPhase, cardIndex)) {
+    return ''
+  }
+
+  const stableVisibleCount = getStableVisibleCountBeforeCurrentPacket(currentPhase)
+
+  if (stableVisibleCount <= 0) {
+    return ''
+  }
+
+  const fromTransform = getSeatFanTransform(seat, getFanDistance(cardIndex, stableVisibleCount))
+  const toTransform = getSeatFanTransform(seat, getFanDistance(cardIndex, visibleCount))
+
+  if (fromTransform === toTransform) {
+    return ''
+  }
+
+  return `
+    --belot-seat-from-transform:${fromTransform};
+    --belot-seat-to-transform:${toTransform};
+    animation: belot-seat-shift 150ms cubic-bezier(0.22, 1, 0.36, 1) ${revealDelayMs}ms forwards;
+  `
+}
+
 function renderSeatCards(
   seat: Seat,
   handCount: number,
@@ -218,11 +321,24 @@ function renderSeatCards(
   const revealDelayMs = getSeatRevealDelayMs(seat, dealerSeat)
 
   const cards = Array.from({ length: visibleCount }, (_, index) => {
-    const distance = getFanDistance(index, visibleCount)
-    const animationStyle = getCardAnimationStyle(
+    const finalTransform = getSeatFanTransform(seat, getFanDistance(index, visibleCount))
+    const initialTransform = getSeatCardInitialTransform(
+      seat,
+      currentPhase,
+      index,
+      visibleCount
+    )
+    const revealAnimationStyle = getSeatCardRevealAnimationStyle(
       currentPhase,
       visibleCount,
       index,
+      revealDelayMs
+    )
+    const shiftAnimationStyle = getSeatCardShiftAnimationStyle(
+      seat,
+      currentPhase,
+      index,
+      visibleCount,
       revealDelayMs
     )
 
@@ -233,7 +349,9 @@ function renderSeatCards(
       border-radius:8px;
       border:1px solid rgba(255,255,255,0.20);
       z-index:${index + 1};
-      ${animationStyle}
+      transform:${initialTransform};
+      ${revealAnimationStyle}
+      ${shiftAnimationStyle}
     `
 
     if (seat === 'top') {
@@ -243,7 +361,6 @@ function renderSeatCards(
             ${commonStyles}
             left:50%;
             bottom:-50px;
-            transform:${getTopFanTransform(distance)};
             transform-origin:center 10%;
           "
         >
@@ -259,7 +376,6 @@ function renderSeatCards(
             ${commonStyles}
             top:19%;
             right:-80px;
-            transform:${getLeftFanTransform(distance)};
             transform-origin:10% center;
           "
         >
@@ -274,7 +390,6 @@ function renderSeatCards(
           ${commonStyles}
           top:19%;
           left:-80px;
-          transform:${getRightFanTransform(distance)};
           transform-origin:90% center;
         "
       >
@@ -474,6 +589,15 @@ export function renderSeatPanel(
         }
         100% {
           opacity: 1;
+        }
+      }
+
+      @keyframes belot-seat-shift {
+        0% {
+          transform: var(--belot-seat-from-transform);
+        }
+        100% {
+          transform: var(--belot-seat-to-transform);
         }
       }
     </style>
