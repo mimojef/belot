@@ -1,4 +1,5 @@
 import { chooseFirstDealer } from '../phases/chooseFirstDealer'
+import { finalizePendingScoringTransition } from '../phases/finalizePendingScoringTransition'
 import { resolveCutPhase } from '../phases/resolveCutPhase'
 import { runPhaseTransition } from '../phases/runPhaseTransition'
 import { selectCutIndex } from '../phases/selectCutIndex'
@@ -21,6 +22,7 @@ export type GameEngine = {
   resolveCutPhase: () => void
   submitBidAction: (action: BidAction) => void
   submitPlayCard: (cardId: string) => void
+  finalizePendingScoringTransition: () => void
 }
 
 function cloneState<T>(value: T): T {
@@ -86,6 +88,10 @@ export function createGameEngine(): GameEngine {
     state = submitPlayCard(state, cardId)
   }
 
+  function runFinalizePendingScoringTransition(): void {
+    state = finalizePendingScoringTransition(state)
+  }
+
   return {
     getState,
     setState,
@@ -99,5 +105,6 @@ export function createGameEngine(): GameEngine {
     resolveCutPhase: runResolveCutPhase,
     submitBidAction: runSubmitBidAction,
     submitPlayCard: runSubmitPlayCard,
+    finalizePendingScoringTransition: runFinalizePendingScoringTransition,
   }
 }

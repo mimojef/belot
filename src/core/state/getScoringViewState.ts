@@ -1,4 +1,4 @@
-import type { GameState, BaseRoundScoreResult, RoundOutcomeResult, RoundScore } from './gameTypes'
+import type { GameState, BaseRoundScoreResult, RoundOutcomeResult, RoundScore, Team } from './gameTypes'
 import { buildBeloteScore, buildComparableDeclarationsScore } from '../rules/declarationsRules'
 import { calculateRoundOutcome } from '../rules/calculateRoundOutcome'
 import { buildOfficialRoundScore } from '../rules/buildOfficialRoundScore'
@@ -11,10 +11,17 @@ export type ScoringViewState = {
   hasBaseRoundScore: boolean
   hasOutcome: boolean
   winningBidLabel: string
+  winningBidOwnerLabel: string
   teamARawPoints: number
   teamBRawPoints: number
   teamATricksWon: number
   teamBTricksWon: number
+  teamADeclarationPoints: number
+  teamBDeclarationPoints: number
+  teamABelotePoints: number
+  teamBBelotePoints: number
+  teamASumPoints: number
+  teamBSumPoints: number
   expectedTotalPoints: number
   actualTotalPoints: number
   isComplete: boolean
@@ -26,6 +33,7 @@ export type ScoringViewState = {
   defenderPoints: number
   winningTeamLabel: string
   outcomeLabel: string
+  outcomeShortLabel: string
   isInside: boolean
   isMade: boolean
   isTie: boolean
@@ -97,6 +105,51 @@ function resolveOutcomeLabel(
   return 'Неизвестен резултат'
 }
 
+function resolveOutcomeShortLabel(
+  outcome: 'made' | 'inside' | 'tie' | 'unknown'
+): string {
+  if (outcome === 'made') return 'Изкарана'
+  if (outcome === 'inside') return 'Вътре'
+  if (outcome === 'tie') return 'Равна'
+  return '—'
+}
+
+function getTeamBySeat(
+  seat: GameState['bidding']['winningBid'] extends infer T ? T : never
+): Team | null {
+  if (!seat || typeof seat !== 'object' || !('seat' in seat)) {
+    return null
+  }
+
+  const winningBidSeat = seat.seat
+
+  if (winningBidSeat === 'bottom' || winningBidSeat === 'top') {
+    return 'A'
+  }
+
+  if (winningBidSeat === 'left' || winningBidSeat === 'right') {
+    return 'B'
+  }
+
+  return null
+}
+
+function resolveWinningBidOwnerLabel(
+  winningBid: GameState['bidding']['winningBid']
+): string {
+  const team = getTeamBySeat(winningBid)
+
+  if (team === 'A') {
+    return 'НИЕ'
+  }
+
+  if (team === 'B') {
+    return 'ВИЕ'
+  }
+
+  return '—'
+}
+
 export function getScoringViewState(state: GameState): ScoringViewState {
   const scoringState = state.scoring
   const baseRoundScore: BaseRoundScore | null = scoringState?.baseRoundScore ?? null
@@ -141,21 +194,40 @@ export function getScoringViewState(state: GameState): ScoringViewState {
     beloteScore.teamA +
     beloteScore.teamB
 
+  const teamASumPoints =
+    (baseRoundScore?.teamA.rawPoints ?? 0) +
+    declarationsScore.teamA +
+    beloteScore.teamA
+
+  const teamBSumPoints =
+    (baseRoundScore?.teamB.rawPoints ?? 0) +
+    declarationsScore.teamB +
+    beloteScore.teamB
+
   return {
     isVisible: state.phase === 'scoring' || state.phase === 'summary',
     hasBaseRoundScore: Boolean(baseRoundScore),
     hasOutcome: Boolean(outcome),
     winningBidLabel: resolveWinningBidLabel(state.bidding.winningBid),
+    winningBidOwnerLabel: resolveWinningBidOwnerLabel(state.bidding.winningBid),
     teamARawPoints: baseRoundScore?.teamA.rawPoints ?? 0,
     teamBRawPoints: baseRoundScore?.teamB.rawPoints ?? 0,
     teamATricksWon: baseRoundScore?.teamA.tricksWon ?? 0,
     teamBTricksWon: baseRoundScore?.teamB.tricksWon ?? 0,
+    teamADeclarationPoints: declarationsScore.teamA,
+    teamBDeclarationPoints: declarationsScore.teamB,
+    teamABelotePoints: beloteScore.teamA,
+    teamBBelotePoints: beloteScore.teamB,
+    teamASumPoints,
+    teamBSumPoints,
     expectedTotalPoints: (baseRoundScore?.expectedTotalPoints ?? 0) + premiumPointsTotal,
     actualTotalPoints: (baseRoundScore?.actualTotalPoints ?? 0) + premiumPointsTotal,
     isComplete: baseRoundScore?.isComplete ?? false,
     isPointTotalValid:
-      baseRoundScore ? (baseRoundScore.actualTotalPoints + premiumPointsTotal) ===
-        (baseRoundScore.expectedTotalPoints + premiumPointsTotal) : false,
+      baseRoundScore
+        ? (baseRoundScore.actualTotalPoints + premiumPointsTotal) ===
+          (baseRoundScore.expectedTotalPoints + premiumPointsTotal)
+        : false,
     lastTrickWinnerLabel: formatSeatLabel(baseRoundScore?.lastTrickWinner ?? null),
     bidderTeamLabel: formatTeamLabel(outcome?.bidderTeam ?? null),
     defenderTeamLabel: formatTeamLabel(outcome?.defenderTeam ?? null),
@@ -163,6 +235,7 @@ export function getScoringViewState(state: GameState): ScoringViewState {
     defenderPoints: outcome?.defenderPoints ?? 0,
     winningTeamLabel: formatTeamLabel(outcome?.winningTeam ?? null),
     outcomeLabel: resolveOutcomeLabel(outcome?.outcome ?? 'unknown'),
+    outcomeShortLabel: resolveOutcomeShortLabel(outcome?.outcome ?? 'unknown'),
     isInside: outcome?.isInside ?? false,
     isMade: outcome?.isMade ?? false,
     isTie: outcome?.isTie ?? false,

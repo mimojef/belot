@@ -9,47 +9,175 @@ function escapeHtml(value: string): string {
     .replaceAll("'", '&#39;')
 }
 
-function renderValidityLabel(isPointTotalValid: boolean): string {
-  return isPointTotalValid ? 'Да' : 'Не'
-}
-
-function renderCompletenessLabel(isComplete: boolean): string {
-  return isComplete ? 'Да' : 'Не'
-}
-
-function resolveOutcomeAccent(viewState: ScoringViewState): {
-  background: string
-  border: string
-  text: string
+function resolveBidIcon(viewState: ScoringViewState): {
+  symbol: string
+  color: string
 } {
-  if (viewState.isInside) {
-    return {
-      background: 'rgba(127, 29, 29, 0.24)',
-      border: 'rgba(248, 113, 113, 0.35)',
-      text: '#fecaca',
-    }
+  if (viewState.winningBidLabel === 'Купа') {
+    return { symbol: '♥', color: '#ef4444' }
   }
 
-  if (viewState.isMade) {
-    return {
-      background: 'rgba(20, 83, 45, 0.24)',
-      border: 'rgba(74, 222, 128, 0.35)',
-      text: '#bbf7d0',
-    }
+  if (viewState.winningBidLabel === 'Каро') {
+    return { symbol: '♦', color: '#ef4444' }
   }
 
+  if (viewState.winningBidLabel === 'Пика') {
+    return { symbol: '♠', color: '#ffffff' }
+  }
+
+  if (viewState.winningBidLabel === 'Спатия') {
+    return { symbol: '♣', color: '#ffffff' }
+  }
+
+  if (viewState.winningBidLabel === 'Всичко коз') {
+    return { symbol: 'J', color: '#ffffff' }
+  }
+
+  if (viewState.winningBidLabel === 'Без коз') {
+    return { symbol: 'A', color: '#ffffff' }
+  }
+
+  return { symbol: '•', color: '#ffffff' }
+}
+
+function formatBonusValue(value: number): string {
+  if (value <= 0) {
+    return '0'
+  }
+
+  return `+${value}`
+}
+
+function renderTableRow(
+  label: string,
+  leftValue: string,
+  rightValue: string,
+  options: {
+    isHighlighted?: boolean
+    valueColor?: string
+  } = {},
+): string {
+  const { isHighlighted = false, valueColor = '#f8fafc' } = options
+
+  if (isHighlighted) {
+    return `
+      <div
+        style="
+          display:grid;
+          grid-template-columns: 1.4fr 1fr 1fr;
+          align-items:center;
+          min-height:54px;
+          background:#e7a321;
+          color:#fff7e6;
+          font-weight:800;
+        "
+      >
+        <div
+          style="
+            padding:0 18px;
+            font-size:22px;
+            text-transform:uppercase;
+          "
+        >
+          ${escapeHtml(label)}
+        </div>
+
+        <div
+          style="
+            text-align:center;
+            font-size:22px;
+          "
+        >
+          ${escapeHtml(leftValue)}
+        </div>
+
+        <div
+          style="
+            text-align:center;
+            font-size:22px;
+          "
+        >
+          ${escapeHtml(rightValue)}
+        </div>
+      </div>
+    `
+  }
+
+  return `
+    <div
+      style="
+        display:grid;
+        grid-template-columns: 1.4fr 1fr 1fr;
+        align-items:center;
+        min-height:54px;
+        border-top:1px solid rgba(214, 156, 46, 0.72);
+      "
+    >
+      <div
+        style="
+          padding:0 18px;
+          color:#f4f1e8;
+          font-size:18px;
+          font-weight:500;
+          text-transform:uppercase;
+        "
+      >
+        ${escapeHtml(label)}
+      </div>
+
+      <div
+        style="
+          text-align:center;
+          color:${valueColor};
+          font-size:18px;
+          font-weight:700;
+        "
+      >
+        ${escapeHtml(leftValue)}
+      </div>
+
+      <div
+        style="
+          text-align:center;
+          color:${valueColor};
+          font-size:18px;
+          font-weight:700;
+        "
+      >
+        ${escapeHtml(rightValue)}
+      </div>
+    </div>
+  `
+}
+
+function resolveOutcomeCells(viewState: ScoringViewState): {
+  left: string
+  right: string
+} {
   if (viewState.isTie) {
     return {
-      background: 'rgba(120, 53, 15, 0.24)',
-      border: 'rgba(251, 191, 36, 0.35)',
-      text: '#fde68a',
+      left: viewState.outcomeShortLabel,
+      right: viewState.outcomeShortLabel,
+    }
+  }
+
+  if (viewState.bidderTeamLabel === 'Отбор A') {
+    return {
+      left: viewState.outcomeShortLabel,
+      right: '',
+    }
+  }
+
+  if (viewState.bidderTeamLabel === 'Отбор B') {
+    return {
+      left: '',
+      right: viewState.outcomeShortLabel,
     }
   }
 
   return {
-    background: 'rgba(30, 41, 59, 0.82)',
-    border: 'rgba(148, 163, 184, 0.16)',
-    text: '#e2e8f0',
+    left: viewState.outcomeShortLabel,
+    right: '',
   }
 }
 
@@ -58,712 +186,155 @@ export function renderScoringPanel(viewState: ScoringViewState): string {
     return ''
   }
 
-  const outcomeAccent = resolveOutcomeAccent(viewState)
+  const bidIcon = resolveBidIcon(viewState)
+  const outcomeCells = resolveOutcomeCells(viewState)
 
   return `
     <section
       style="
-        width: 100%;
-        max-width: 760px;
-        margin: 0 auto;
-        background: rgba(15, 23, 42, 0.92);
-        border: 1px solid rgba(148, 163, 184, 0.22);
-        border-radius: 18px;
-        padding: 20px;
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+        width:100%;
+        max-width:730px;
+        margin:0 auto;
+        background:rgba(14, 34, 50, 0.94);
+        border:2px solid #d79b2b;
+        border-radius:14px;
+        overflow:hidden;
+        box-shadow:0 18px 40px rgba(0,0,0,0.28);
+        backdrop-filter: blur(3px);
       "
     >
       <div
         style="
-          display: flex;
-          flex-direction: column;
-          gap: 18px;
+          padding:10px 18px 0 18px;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          gap:10px;
+          color:#f7f4ec;
+          font-size:22px;
+          font-weight:700;
+          text-transform:uppercase;
         "
       >
+        <div
+          style="
+            width:46px;
+            height:46px;
+            border-radius:50%;
+            background:rgba(255,255,255,0.92);
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            font-size:34px;
+            line-height:1;
+            color:${bidIcon.color};
+            box-shadow:0 4px 12px rgba(0,0,0,0.18);
+            flex:0 0 auto;
+          "
+        >
+          ${escapeHtml(bidIcon.symbol)}
+        </div>
+
         <div>
-          <div
-            style="
-              font-size: 28px;
-              font-weight: 800;
-              color: #f8fafc;
-              margin-bottom: 6px;
-            "
-          >
-            Край на рунда
-          </div>
-
-          <div
-            style="
-              font-size: 14px;
-              color: #94a3b8;
-            "
-          >
-            Сурови точки + официално записване
-          </div>
+          ${escapeHtml(viewState.winningBidLabel.toUpperCase())}
+          ${viewState.winningBidOwnerLabel !== '—'
+            ? `(${escapeHtml(viewState.winningBidOwnerLabel)})`
+            : ''}
         </div>
+      </div>
 
-        ${
-          viewState.hasOutcome
-            ? `
-              <div
-                style="
-                  background: ${outcomeAccent.background};
-                  border: 1px solid ${outcomeAccent.border};
-                  border-radius: 14px;
-                  padding: 16px;
-                "
-              >
-                <div
-                  style="
-                    font-size: 22px;
-                    font-weight: 800;
-                    color: ${outcomeAccent.text};
-                    margin-bottom: 12px;
-                  "
-                >
-                  ${escapeHtml(viewState.outcomeLabel)}
-                </div>
-
-                <div
-                  style="
-                    display: grid;
-                    grid-template-columns: repeat(3, minmax(0, 1fr));
-                    gap: 12px;
-                  "
-                >
-                  <div>
-                    <div
-                      style="
-                        font-size: 12px;
-                        color: #94a3b8;
-                        margin-bottom: 4px;
-                      "
-                    >
-                      Обявил отбор
-                    </div>
-                    <div
-                      style="
-                        font-size: 16px;
-                        font-weight: 700;
-                        color: #f8fafc;
-                      "
-                    >
-                      ${escapeHtml(viewState.bidderTeamLabel)}
-                    </div>
-                  </div>
-
-                  <div>
-                    <div
-                      style="
-                        font-size: 12px;
-                        color: #94a3b8;
-                        margin-bottom: 4px;
-                      "
-                    >
-                      Защита
-                    </div>
-                    <div
-                      style="
-                        font-size: 16px;
-                        font-weight: 700;
-                        color: #f8fafc;
-                      "
-                    >
-                      ${escapeHtml(viewState.defenderTeamLabel)}
-                    </div>
-                  </div>
-
-                  <div>
-                    <div
-                      style="
-                        font-size: 12px;
-                        color: #94a3b8;
-                        margin-bottom: 4px;
-                      "
-                    >
-                      Победител в рунда
-                    </div>
-                    <div
-                      style="
-                        font-size: 16px;
-                        font-weight: 700;
-                        color: #f8fafc;
-                      "
-                    >
-                      ${escapeHtml(viewState.winningTeamLabel)}
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  style="
-                    margin-top: 14px;
-                    display: grid;
-                    grid-template-columns: repeat(2, minmax(0, 1fr));
-                    gap: 12px;
-                  "
-                >
-                  <div
-                    style="
-                      background: rgba(15, 23, 42, 0.35);
-                      border: 1px solid rgba(148, 163, 184, 0.16);
-                      border-radius: 12px;
-                      padding: 12px;
-                    "
-                  >
-                    <div
-                      style="
-                        font-size: 12px;
-                        color: #94a3b8;
-                        margin-bottom: 4px;
-                      "
-                    >
-                      Точки на обявилия
-                    </div>
-                    <div
-                      style="
-                        font-size: 22px;
-                        font-weight: 800;
-                        color: #f8fafc;
-                      "
-                    >
-                      ${viewState.bidderPoints}
-                    </div>
-                  </div>
-
-                  <div
-                    style="
-                      background: rgba(15, 23, 42, 0.35);
-                      border: 1px solid rgba(148, 163, 184, 0.16);
-                      border-radius: 12px;
-                      padding: 12px;
-                    "
-                  >
-                    <div
-                      style="
-                        font-size: 12px;
-                        color: #94a3b8;
-                        margin-bottom: 4px;
-                      "
-                    >
-                      Точки на защитата
-                    </div>
-                    <div
-                      style="
-                        font-size: 22px;
-                        font-weight: 800;
-                        color: #f8fafc;
-                      "
-                    >
-                      ${viewState.defenderPoints}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            `
-            : ''
-        }
-
+      <div
+        style="
+          padding:10px 0 0 0;
+        "
+      >
         <div
           style="
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 12px;
+            display:grid;
+            grid-template-columns: 1.4fr 1fr 1fr;
+            align-items:end;
+            min-height:64px;
           "
         >
+          <div></div>
+
           <div
             style="
-              background: rgba(30, 41, 59, 0.9);
-              border: 1px solid rgba(148, 163, 184, 0.16);
-              border-radius: 14px;
-              padding: 14px;
+              text-align:center;
+              color:#e7a321;
+              font-size:24px;
+              font-weight:700;
             "
           >
-            <div
-              style="
-                font-size: 13px;
-                color: #94a3b8;
-                margin-bottom: 6px;
-              "
-            >
-              Обява
-            </div>
-            <div
-              style="
-                font-size: 20px;
-                font-weight: 700;
-                color: #f8fafc;
-              "
-            >
-              ${escapeHtml(viewState.winningBidLabel)}
-            </div>
+            НИЕ
           </div>
 
           <div
             style="
-              background: rgba(30, 41, 59, 0.9);
-              border: 1px solid rgba(148, 163, 184, 0.16);
-              border-radius: 14px;
-              padding: 14px;
+              text-align:center;
+              color:#e7a321;
+              font-size:24px;
+              font-weight:700;
             "
           >
-            <div
-              style="
-                font-size: 13px;
-                color: #94a3b8;
-                margin-bottom: 6px;
-              "
-            >
-              Последна взятка
-            </div>
-            <div
-              style="
-                font-size: 20px;
-                font-weight: 700;
-                color: #f8fafc;
-              "
-            >
-              ${escapeHtml(viewState.lastTrickWinnerLabel)}
-            </div>
+            ВИЕ
           </div>
         </div>
 
-        <div
-          style="
-            background: rgba(30, 41, 59, 0.72);
-            border: 1px solid rgba(148, 163, 184, 0.16);
-            border-radius: 14px;
-            padding: 16px;
-          "
-        >
-          <div
-            style="
-              font-size: 16px;
-              font-weight: 800;
-              color: #f8fafc;
-              margin-bottom: 12px;
-            "
-          >
-            Сурови точки от взятките
-          </div>
+        ${renderTableRow(
+          'Белоти',
+          String(viewState.teamABelotePoints),
+          String(viewState.teamBBelotePoints),
+        )}
 
-          <div
-            style="
-              display: grid;
-              grid-template-columns: repeat(2, minmax(0, 1fr));
-              gap: 12px;
-            "
-          >
-            <div
-              style="
-                background: rgba(15, 23, 42, 0.42);
-                border: 1px solid rgba(59, 130, 246, 0.22);
-                border-radius: 14px;
-                padding: 16px;
-              "
-            >
-              <div
-                style="
-                  font-size: 14px;
-                  font-weight: 700;
-                  color: #bfdbfe;
-                  margin-bottom: 12px;
-                "
-              >
-                Отбор A (Долу + Горе)
-              </div>
+        ${renderTableRow(
+          'Обявяване',
+          formatBonusValue(viewState.teamADeclarationPoints),
+          formatBonusValue(viewState.teamBDeclarationPoints),
+          { valueColor: '#f4b63a' },
+        )}
 
-              <div
-                style="
-                  display: flex;
-                  justify-content: space-between;
-                  align-items: center;
-                  margin-bottom: 8px;
-                  color: #e2e8f0;
-                  font-size: 15px;
-                "
-              >
-                <span>Точки</span>
-                <strong style="font-size: 22px; color: #f8fafc;">
-                  ${viewState.teamARawPoints}
-                </strong>
-              </div>
+        ${renderTableRow(
+          'От ръцете',
+          String(viewState.teamARawPoints),
+          String(viewState.teamBRawPoints),
+        )}
 
-              <div
-                style="
-                  display: flex;
-                  justify-content: space-between;
-                  align-items: center;
-                  color: #cbd5e1;
-                  font-size: 14px;
-                "
-              >
-                <span>Спечелени взятки</span>
-                <strong>${viewState.teamATricksWon}</strong>
-              </div>
-            </div>
+        ${renderTableRow(
+          'Сбор',
+          String(viewState.teamASumPoints),
+          String(viewState.teamBSumPoints),
+        )}
 
-            <div
-              style="
-                background: rgba(15, 23, 42, 0.42);
-                border: 1px solid rgba(16, 185, 129, 0.22);
-                border-radius: 14px;
-                padding: 16px;
-              "
-            >
-              <div
-                style="
-                  font-size: 14px;
-                  font-weight: 700;
-                  color: #bbf7d0;
-                  margin-bottom: 12px;
-                "
-              >
-                Отбор B (Ляво + Дясно)
-              </div>
+        ${renderTableRow(
+          'Изход',
+          outcomeCells.left,
+          outcomeCells.right,
+        )}
 
-              <div
-                style="
-                  display: flex;
-                  justify-content: space-between;
-                  align-items: center;
-                  margin-bottom: 8px;
-                  color: #e2e8f0;
-                  font-size: 15px;
-                "
-              >
-                <span>Точки</span>
-                <strong style="font-size: 22px; color: #f8fafc;">
-                  ${viewState.teamBRawPoints}
-                </strong>
-              </div>
+        ${renderTableRow(
+          'Резултат',
+          String(viewState.officialRoundTeamA),
+          String(viewState.officialRoundTeamB),
+          { isHighlighted: true },
+        )}
+      </div>
 
-              <div
-                style="
-                  display: flex;
-                  justify-content: space-between;
-                  align-items: center;
-                  color: #cbd5e1;
-                  font-size: 14px;
-                "
-              >
-                <span>Спечелени взятки</span>
-                <strong>${viewState.teamBTricksWon}</strong>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div
-          style="
-            background: rgba(30, 41, 59, 0.72);
-            border: 1px solid rgba(148, 163, 184, 0.16);
-            border-radius: 14px;
-            padding: 16px;
-          "
-        >
-          <div
-            style="
-              font-size: 16px;
-              font-weight: 800;
-              color: #f8fafc;
-              margin-bottom: 12px;
-            "
-          >
-            Официално записване
-          </div>
-
-          <div
-            style="
-              display: grid;
-              grid-template-columns: repeat(2, minmax(0, 1fr));
-              gap: 12px;
-              margin-bottom: 12px;
-            "
-          >
-            <div
-              style="
-                background: rgba(15, 23, 42, 0.42);
-                border: 1px solid rgba(59, 130, 246, 0.22);
-                border-radius: 14px;
-                padding: 16px;
-              "
-            >
-              <div
-                style="
-                  font-size: 14px;
-                  font-weight: 700;
-                  color: #bfdbfe;
-                  margin-bottom: 12px;
-                "
-              >
-                Записан рунд — Отбор A
-              </div>
-              <div
-                style="
-                  font-size: 26px;
-                  font-weight: 800;
-                  color: #f8fafc;
-                "
-              >
-                ${viewState.officialRoundTeamA}
-              </div>
-            </div>
-
-            <div
-              style="
-                background: rgba(15, 23, 42, 0.42);
-                border: 1px solid rgba(16, 185, 129, 0.22);
-                border-radius: 14px;
-                padding: 16px;
-              "
-            >
-              <div
-                style="
-                  font-size: 14px;
-                  font-weight: 700;
-                  color: #bbf7d0;
-                  margin-bottom: 12px;
-                "
-              >
-                Записан рунд — Отбор B
-              </div>
-              <div
-                style="
-                  font-size: 26px;
-                  font-weight: 800;
-                  color: #f8fafc;
-                "
-              >
-                ${viewState.officialRoundTeamB}
-              </div>
-            </div>
-          </div>
-
-          <div
-            style="
-              display: grid;
-              grid-template-columns: repeat(2, minmax(0, 1fr));
-              gap: 12px;
-              margin-bottom: 12px;
-            "
-          >
-            <div
-              style="
-                background: rgba(15, 23, 42, 0.42);
-                border: 1px solid rgba(59, 130, 246, 0.22);
-                border-radius: 14px;
-                padding: 16px;
-              "
-            >
-              <div
-                style="
-                  font-size: 14px;
-                  font-weight: 700;
-                  color: #bfdbfe;
-                  margin-bottom: 12px;
-                "
-              >
-                Общ резултат — Отбор A
-              </div>
-              <div
-                style="
-                  font-size: 26px;
-                  font-weight: 800;
-                  color: #f8fafc;
-                "
-              >
-                ${viewState.matchTotalTeamA}
-              </div>
-            </div>
-
-            <div
-              style="
-                background: rgba(15, 23, 42, 0.42);
-                border: 1px solid rgba(16, 185, 129, 0.22);
-                border-radius: 14px;
-                padding: 16px;
-              "
-            >
-              <div
-                style="
-                  font-size: 14px;
-                  font-weight: 700;
-                  color: #bbf7d0;
-                  margin-bottom: 12px;
-                "
-              >
-                Общ резултат — Отбор B
-              </div>
-              <div
-                style="
-                  font-size: 26px;
-                  font-weight: 800;
-                  color: #f8fafc;
-                "
-              >
-                ${viewState.matchTotalTeamB}
-              </div>
-            </div>
-          </div>
-
-          <div
-            style="
-              display: grid;
-              grid-template-columns: repeat(2, minmax(0, 1fr));
-              gap: 12px;
-            "
-          >
-            <div
-              style="
-                background: rgba(15, 23, 42, 0.42);
-                border: 1px solid rgba(59, 130, 246, 0.22);
-                border-radius: 14px;
-                padding: 16px;
-              "
-            >
-              <div
-                style="
-                  font-size: 14px;
-                  font-weight: 700;
-                  color: #bfdbfe;
-                  margin-bottom: 12px;
-                "
-              >
-                Висящи точки — Отбор A
-              </div>
-              <div
-                style="
-                  font-size: 26px;
-                  font-weight: 800;
-                  color: #f8fafc;
-                "
-              >
-                ${viewState.carryOverTeamA}
-              </div>
-            </div>
-
-            <div
-              style="
-                background: rgba(15, 23, 42, 0.42);
-                border: 1px solid rgba(16, 185, 129, 0.22);
-                border-radius: 14px;
-                padding: 16px;
-              "
-            >
-              <div
-                style="
-                  font-size: 14px;
-                  font-weight: 700;
-                  color: #bbf7d0;
-                  margin-bottom: 12px;
-                "
-              >
-                Висящи точки — Отбор B
-              </div>
-              <div
-                style="
-                  font-size: 26px;
-                  font-weight: 800;
-                  color: #f8fafc;
-                "
-              >
-                ${viewState.carryOverTeamB}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div
-          style="
-            display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 12px;
-          "
-        >
-          <div
-            style="
-              background: rgba(30, 41, 59, 0.82);
-              border: 1px solid rgba(148, 163, 184, 0.16);
-              border-radius: 12px;
-              padding: 12px;
-            "
-          >
-            <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">
-              Очакван сбор
-            </div>
-            <div style="font-size: 18px; font-weight: 700; color: #f8fafc;">
-              ${viewState.expectedTotalPoints}
-            </div>
-          </div>
-
-          <div
-            style="
-              background: rgba(30, 41, 59, 0.82);
-              border: 1px solid rgba(148, 163, 184, 0.16);
-              border-radius: 12px;
-              padding: 12px;
-            "
-          >
-            <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">
-              Реален сбор
-            </div>
-            <div style="font-size: 18px; font-weight: 700; color: #f8fafc;">
-              ${viewState.actualTotalPoints}
-            </div>
-          </div>
-
-          <div
-            style="
-              background: rgba(30, 41, 59, 0.82);
-              border: 1px solid rgba(148, 163, 184, 0.16);
-              border-radius: 12px;
-              padding: 12px;
-            "
-          >
-            <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">
-              8 взятки
-            </div>
-            <div style="font-size: 18px; font-weight: 700; color: #f8fafc;">
-              ${renderCompletenessLabel(viewState.isComplete)}
-            </div>
-          </div>
-
-          <div
-            style="
-              background: rgba(30, 41, 59, 0.82);
-              border: 1px solid rgba(148, 163, 184, 0.16);
-              border-radius: 12px;
-              padding: 12px;
-            "
-          >
-            <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">
-              Валиден сбор
-            </div>
-            <div style="font-size: 18px; font-weight: 700; color: #f8fafc;">
-              ${renderValidityLabel(viewState.isPointTotalValid)}
-            </div>
-          </div>
-        </div>
-
-        ${
-          !viewState.hasBaseRoundScore
-            ? `
-              <div
-                style="
-                  background: rgba(127, 29, 29, 0.24);
-                  border: 1px solid rgba(248, 113, 113, 0.35);
-                  border-radius: 12px;
-                  padding: 14px;
-                  color: #fecaca;
-                  font-size: 14px;
-                "
-              >
-                Няма наличен scoring result за този рунд.
-              </div>
-            `
-            : ''
-        }
+      <div
+        style="
+          min-height:52px;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          padding:0 18px;
+          color:#f1f5f9;
+          font-size:18px;
+          font-weight:500;
+          background:rgba(10, 24, 36, 0.72);
+          border-top:1px solid rgba(214, 156, 46, 0.5);
+        "
+      >
+        ${escapeHtml(viewState.outcomeLabel)}
       </div>
     </section>
   `

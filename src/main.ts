@@ -297,7 +297,7 @@ function animateFinalTrickCardThenSubmit(cardId: string, seat: Seat): boolean {
   document.body.appendChild(floatingCard)
 
   if (start.sourceElement) {
-    start.sourceElement.style.opacity = '0.08'
+    start.sourceElement.style.opacity = '0'
   }
 
   const deltaX = targetRect.left - start.left
@@ -335,7 +335,7 @@ function submitPlayCardWithFlow(cardId: string, seat: Seat): void {
   }
 
   const playingViewState = getPlayingViewState(state)
-const isFinalCardOfTrick = (playingViewState?.plays.length ?? 0) === 3
+  const isFinalCardOfTrick = (playingViewState?.plays.length ?? 0) === 3
 
   if (isFinalCardOfTrick) {
     const didStartAnimation = animateFinalTrickCardThenSubmit(cardId, seat)

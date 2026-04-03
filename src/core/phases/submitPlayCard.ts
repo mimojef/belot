@@ -1,4 +1,11 @@
-import type { Card, GameState, RoundScore, TrickPlay } from '../state/gameTypes'
+import type {
+  Card,
+  GameState,
+  PendingScoringTransition,
+  RoundScore,
+  TrickCollectionSnapshot,
+  TrickPlay,
+} from '../state/gameTypes'
 import {
   getNextSeatCounterClockwise,
   getTeamBySeat,
@@ -14,16 +21,6 @@ import {
   buildComparableDeclarationsScore,
   resolveDeclarations,
 } from '../rules/declarationsRules'
-
-type TrickCollectionSnapshot = {
-  trickIndex: number
-  winnerSeat: NonNullable<GameState['currentTrick']['leaderSeat']>
-  plays: TrickPlay[]
-}
-
-type PlayingStateWithAnimationSnapshot = NonNullable<GameState['playing']> & {
-  trickCollectionSnapshot?: TrickCollectionSnapshot | null
-}
 
 function removeCardFromHand(hand: Card[], cardId: string): Card[] {
   return hand.filter((card) => card.id !== cardId)
@@ -107,9 +104,10 @@ function tryResolveBotBeloteDeclaration(
   })
 }
 
-function withTrickCollectionSnapshot(
+function withPlayingUiState(
   playing: GameState['playing'],
-  snapshot: TrickCollectionSnapshot | null
+  trickCollectionSnapshot: TrickCollectionSnapshot | null,
+  pendingScoringTransition: PendingScoringTransition | null
 ): GameState['playing'] {
   if (!playing) {
     return playing
@@ -117,8 +115,9 @@ function withTrickCollectionSnapshot(
 
   return {
     ...playing,
-    trickCollectionSnapshot: snapshot,
-  } as PlayingStateWithAnimationSnapshot
+    trickCollectionSnapshot,
+    pendingScoringTransition,
+  }
 }
 
 export function submitPlayCard(state: GameState, cardId: string): GameState {
@@ -178,7 +177,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
       hands: nextHands,
       declarations: nextDeclarations,
       currentTrick: nextCurrentTrick,
-      playing: withTrickCollectionSnapshot(
+      playing: withPlayingUiState(
         state.playing
           ? {
               ...state.playing,
@@ -186,6 +185,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
               currentTrick: nextCurrentTrick,
             }
           : state.playing,
+        null,
         null
       ),
     }
@@ -198,7 +198,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
       ...state,
       hands: nextHands,
       declarations: nextDeclarations,
-      playing: withTrickCollectionSnapshot(state.playing, null),
+      playing: withPlayingUiState(state.playing, null, null),
     }
   }
 
@@ -236,27 +236,24 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
     trickIndex: completedTrickIndex + 1,
   }
 
-  const nextPlaying = withTrickCollectionSnapshot(
-    state.playing
-      ? {
-          ...state.playing,
-          currentTurnSeat: winnerSeat,
-          currentTrick: nextCurrentTrick,
-          completedTricks: nextCompletedTricks,
-          lastCompletedTrickWinnerSeat: winnerSeat,
-          lastCompletedTrickWinnerTeam: winnerTeam,
-          wonTricksBySeat: {
-            ...state.playing.wonTricksBySeat,
-            [winnerSeat]: [...state.playing.wonTricksBySeat[winnerSeat], trickCards],
-          },
-          wonTricksByTeam: {
-            ...state.playing.wonTricksByTeam,
-            [winnerTeam]: [...state.playing.wonTricksByTeam[winnerTeam], trickCards],
-          },
-        }
-      : state.playing,
-    trickCollectionSnapshot
-  )
+  const nextPlayingBase = state.playing
+    ? {
+        ...state.playing,
+        currentTurnSeat: winnerSeat,
+        currentTrick: nextCurrentTrick,
+        completedTricks: nextCompletedTricks,
+        lastCompletedTrickWinnerSeat: winnerSeat,
+        lastCompletedTrickWinnerTeam: winnerTeam,
+        wonTricksBySeat: {
+          ...state.playing.wonTricksBySeat,
+          [winnerSeat]: [...state.playing.wonTricksBySeat[winnerSeat], trickCards],
+        },
+        wonTricksByTeam: {
+          ...state.playing.wonTricksByTeam,
+          [winnerTeam]: [...state.playing.wonTricksByTeam[winnerTeam], trickCards],
+        },
+      }
+    : state.playing
 
   const isRoundComplete = nextCompletedTricks.length === 8
 
@@ -272,7 +269,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
         declarations: nextDeclarations,
         currentTrick: nextCurrentTrick,
         wonTricks: nextWonTricks,
-        playing: nextPlaying,
+        playing: withPlayingUiState(nextPlayingBase, trickCollectionSnapshot, null),
       }
     }
 
@@ -310,24 +307,28 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
       beloteScore,
     })
 
-    return {
-      ...state,
-      phase: 'scoring',
-      hands: nextHands,
+    const pendingScoringTransition: PendingScoringTransition = {
       declarations: resolvedDeclarations,
-      currentTrick: nextCurrentTrick,
-      wonTricks: nextWonTricks,
-      playing: nextPlaying,
       scoring: {
         baseRoundScore,
         roundOutcome,
       },
-      score: {
-        ...state.score,
-        round: officialRoundScore.roundBreakdown,
-        match: addRoundScore(state.score.match, officialRoundScore.roundBreakdown.total),
-        carryOver: officialRoundScore.nextCarryOver,
-      },
+      roundScore: officialRoundScore.roundBreakdown,
+      matchScore: addRoundScore(state.score.match, officialRoundScore.roundBreakdown.total),
+      carryOver: officialRoundScore.nextCarryOver,
+    }
+
+    return {
+      ...state,
+      hands: nextHands,
+      declarations: nextDeclarations,
+      currentTrick: nextCurrentTrick,
+      wonTricks: nextWonTricks,
+      playing: withPlayingUiState(
+        nextPlayingBase,
+        trickCollectionSnapshot,
+        pendingScoringTransition
+      ),
     }
   }
 
@@ -337,6 +338,6 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
     declarations: nextDeclarations,
     currentTrick: nextCurrentTrick,
     wonTricks: nextWonTricks,
-    playing: nextPlaying,
+    playing: withPlayingUiState(nextPlayingBase, trickCollectionSnapshot, null),
   }
 }

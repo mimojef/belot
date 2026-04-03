@@ -222,11 +222,12 @@ export function getTrickCollectionAnimationState(
   const snapshotWinnerSeat = resolveSnapshotWinnerSeat(snapshot)
   const snapshotTrickIndex = resolveSnapshotTrickIndex(snapshot)
 
-  if (
-    state.phase === 'playing' &&
+  const canAnimateSnapshot =
+    (state.phase === 'playing' || state.phase === 'scoring') &&
     snapshotCards.length > 0 &&
     snapshotWinnerSeat !== null
-  ) {
+
+  if (canAnimateSnapshot) {
     return {
       trickKey: buildTrickKey(resolveRoundIndex(state), snapshotTrickIndex, snapshotCards),
       winnerSeat: snapshotWinnerSeat,

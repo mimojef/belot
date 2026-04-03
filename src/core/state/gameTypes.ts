@@ -96,15 +96,10 @@ export type CompletedTrick = {
   winningTeam: Team
 }
 
-export type PlayingState = {
-  hasStarted: boolean
-  currentTurnSeat: Seat | null
-  currentTrick: TrickState
-  completedTricks: CompletedTrick[]
-  lastCompletedTrickWinnerSeat: Seat | null
-  lastCompletedTrickWinnerTeam: Team | null
-  wonTricksBySeat: Record<Seat, Card[][]>
-  wonTricksByTeam: Record<Team, Card[][]>
+export type TrickCollectionSnapshot = {
+  trickIndex: number
+  winnerSeat: Seat
+  plays: TrickPlay[]
 }
 
 export type BaseRoundTeamScore = {
@@ -159,6 +154,27 @@ export type ScoreBreakdown = {
 export type CarryOverPoints = {
   teamA: number
   teamB: number
+}
+
+export type PendingScoringTransition = {
+  declarations: Declaration[]
+  scoring: ScoringState
+  roundScore: ScoreBreakdown
+  matchScore: RoundScore
+  carryOver: CarryOverPoints
+}
+
+export type PlayingState = {
+  hasStarted: boolean
+  currentTurnSeat: Seat | null
+  currentTrick: TrickState
+  completedTricks: CompletedTrick[]
+  lastCompletedTrickWinnerSeat: Seat | null
+  lastCompletedTrickWinnerTeam: Team | null
+  wonTricksBySeat: Record<Seat, Card[][]>
+  wonTricksByTeam: Record<Team, Card[][]>
+  trickCollectionSnapshot: TrickCollectionSnapshot | null
+  pendingScoringTransition: PendingScoringTransition | null
 }
 
 export type TimerState = {

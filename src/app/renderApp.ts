@@ -1,6 +1,6 @@
 import type { AppBootstrap } from './bootstrap'
 import type { Seat } from '../data/constants/seatOrder'
-import type { Suit } from '../core/state/gameTypes'
+import type { GameState, Suit } from '../core/state/gameTypes'
 import { getBiddingViewState } from '../core/state/getBiddingViewState'
 import { getBottomHandViewState } from '../core/state/getBottomHandViewState'
 import { getPlayingViewState } from '../core/state/getPlayingViewState'
@@ -26,6 +26,10 @@ type RenderAppOptions = {
   onBidDouble?: () => void
   onBidRedouble?: () => void
   onPlayCard?: (cardId: string) => void
+}
+
+type PlayingStateWithTrickCollectionSnapshot = NonNullable<GameState['playing']> & {
+  trickCollectionSnapshot?: null
 }
 
 const GAME_STAGE_WIDTH = 1600
@@ -254,37 +258,56 @@ export function renderApp(
   const state = app.engine.getState()
   const stageScale = getStageScale()
 
-  const isBiddingPhase = state.phase === 'bidding'
-  const isPlayingPhase = state.phase === 'playing'
-  const isScoringPhase = state.phase === 'scoring'
-  const isSummaryPhase = state.phase === 'summary'
-  const shouldShowScoringPanel = isScoringPhase || isSummaryPhase
-
   if (state.phase !== 'cutting') {
     clearCutResolveTimeout()
   }
 
-  if (!isPlayingPhase) {
+  const trickCollectionState = appAnimations.getTrickCollectionState(state)
+  const hasCompletedCurrentTrickCollection = appAnimations.hasCompletedTrick(
+    trickCollectionState.trickKey
+  )
+
+  const hasPendingScoringTransition =
+    state.phase === 'playing' && !!state.playing?.pendingScoringTransition
+
+  if (hasPendingScoringTransition && hasCompletedCurrentTrickCollection) {
+    app.engine.finalizePendingScoringTransition()
+    renderApp(rootElement, app, options)
+    return
+  }
+
+  const shouldKeepAnimationController = state.phase === 'playing'
+
+  if (!shouldKeepAnimationController) {
     appAnimations.reset()
   }
 
-  const trickCollectionState = appAnimations.getTrickCollectionState(state)
   const shouldHideCompletedTrickSnapshot =
-    isPlayingPhase && appAnimations.hasCompletedTrick(trickCollectionState.trickKey)
+    state.phase === 'playing' && hasCompletedCurrentTrickCollection
 
-  const renderState =
-    shouldHideCompletedTrickSnapshot && state.playing
-      ? {
-          ...state,
-          playing: {
-            ...state.playing,
-            trickCollectionSnapshot: null,
-          },
-        }
-      : state
+  let renderState = state
+
+  if (shouldHideCompletedTrickSnapshot && renderState.playing) {
+    const playingWithSnapshot =
+      renderState.playing as PlayingStateWithTrickCollectionSnapshot
+
+    renderState = {
+      ...renderState,
+      playing: {
+        ...playingWithSnapshot,
+        trickCollectionSnapshot: null,
+      } as GameState['playing'],
+    }
+  }
+
+  const isBiddingPhase = renderState.phase === 'bidding'
+  const isPlayingPhase = renderState.phase === 'playing'
+  const isScoringPhase = renderState.phase === 'scoring'
+  const isSummaryPhase = renderState.phase === 'summary'
+  const shouldShowScoringPanel = isScoringPhase || isSummaryPhase
 
   const roundSetupFlow = getRoundSetupFlowResult({
-    phase: state.phase,
+    phase: renderState.phase,
     dealerSeat: state.round.dealerSeat,
     cutterSeat: state.round.cutterSeat,
     selectedCutIndex: state.round.selectedCutIndex,
@@ -440,7 +463,7 @@ export function renderApp(
           state.round.dealerSeat,
           state.round.cutterSeat,
           activeSeat,
-          state.phase
+          renderState.phase
         )}
       </div>
 
@@ -462,7 +485,7 @@ export function renderApp(
           state.round.dealerSeat,
           state.round.cutterSeat,
           activeSeat,
-          state.phase
+          renderState.phase
         )}
       </div>
 
@@ -484,7 +507,7 @@ export function renderApp(
           state.round.dealerSeat,
           state.round.cutterSeat,
           activeSeat,
-          state.phase
+          renderState.phase
         )}
       </div>
 
@@ -537,7 +560,7 @@ export function renderApp(
             state.round.dealerSeat,
             state.round.cutterSeat,
             activeSeat,
-            state.phase
+            renderState.phase
           )}
         </div>
       </div>
@@ -569,7 +592,7 @@ export function renderApp(
             box-shadow:0 10px 24px rgba(0,0,0,0.18);
           "
         >
-          Фаза: ${state.phase}
+          Фаза: ${renderState.phase}
         </div>
 
         <button
@@ -643,9 +666,26 @@ export function renderApp(
     )
   }
 
-  if (isPlayingPhase) {
+  if (state.phase === 'playing' && isPlayingPhase) {
     bindPlayCardClicks(getActionElements(rootElement, 'play-card'), options.onPlayCard)
   }
 
-  void appAnimations.sync(state)
+  if (shouldKeepAnimationController) {
+    void appAnimations.sync(state).then(() => {
+      const latestState = app.engine.getState()
+
+      if (latestState.phase !== 'playing' || !latestState.playing?.pendingScoringTransition) {
+        return
+      }
+
+      const latestTrickCollectionState = appAnimations.getTrickCollectionState(latestState)
+
+      if (!appAnimations.hasCompletedTrick(latestTrickCollectionState.trickKey)) {
+        return
+      }
+
+      app.engine.finalizePendingScoringTransition()
+      renderApp(rootElement, app, options)
+    })
+  }
 }
