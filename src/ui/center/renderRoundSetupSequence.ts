@@ -19,12 +19,17 @@ type RoundSetupSequenceParams = {
 const CUT_CARD_WIDTH = 130
 const CUT_CARD_HEIGHT = 190
 const CUT_CARD_TOP = 28
+const DEAL_PILE_CENTER_TOP = CUT_CARD_TOP + CUT_CARD_HEIGHT / 2
+const DEAL_BASE_VISIBLE_CARDS = 10
 
 const DEAL_PACKET_START_DELAY = 220
 const DEAL_PACKET_DELAY_STEP = 420
 const DEAL_PACKET_DURATION = 860
+const DEAL_PACKET_LIFT_OFFSET = Math.round(DEAL_PACKET_DURATION * 0.16)
 const DEAL_LAST_PACKET_END_DELAY =
   DEAL_PACKET_START_DELAY + DEAL_PACKET_DELAY_STEP * 3 + DEAL_PACKET_DURATION
+const DEAL_LAST_PACKET_TAKEOFF_DELAY =
+  DEAL_PACKET_START_DELAY + DEAL_PACKET_DELAY_STEP * 3 + DEAL_PACKET_LIFT_OFFSET
 
 function escapeHtmlAttribute(value: string): string {
   return value
@@ -104,14 +109,19 @@ function renderSequenceStyles(): string {
 
       @keyframes belot-seq-deal-packet {
         0% {
-          opacity: 0;
+          opacity: 1;
           transform: var(--deal-from-transform);
           filter: brightness(1);
         }
         8% {
           opacity: 1;
           transform: var(--deal-from-transform);
-          filter: brightness(1.03);
+          filter: brightness(1.01);
+        }
+        16% {
+          opacity: 1;
+          transform: var(--deal-lift-transform);
+          filter: brightness(1.05);
         }
         82% {
           opacity: 1;
@@ -122,6 +132,44 @@ function renderSequenceStyles(): string {
           opacity: 0;
           transform: var(--deal-to-transform);
           filter: brightness(1);
+        }
+      }
+
+      @keyframes belot-seq-packet-spread {
+        0% {
+          transform:
+            translate(-50%, -50%)
+            translate(var(--stack-x), var(--stack-y))
+            rotate(var(--stack-r));
+          box-shadow: 0 8px 14px rgba(0,0,0,0.12);
+        }
+        12% {
+          transform:
+            translate(-50%, -50%)
+            translate(var(--stack-x), var(--stack-y))
+            rotate(var(--stack-r));
+          box-shadow: 0 8px 14px rgba(0,0,0,0.12);
+        }
+        24% {
+          transform:
+            translate(-50%, -50%)
+            translate(var(--fan-x), var(--fan-y))
+            rotate(var(--fan-r));
+          box-shadow: 0 12px 20px rgba(0,0,0,0.16);
+        }
+        82% {
+          transform:
+            translate(-50%, -50%)
+            translate(var(--fan-x), var(--fan-y))
+            rotate(var(--fan-r));
+          box-shadow: 0 12px 20px rgba(0,0,0,0.16);
+        }
+        100% {
+          transform:
+            translate(-50%, -50%)
+            translate(var(--fan-x), var(--fan-y))
+            rotate(var(--fan-r));
+          box-shadow: 0 12px 20px rgba(0,0,0,0.16);
         }
       }
 
@@ -271,10 +319,14 @@ function renderCutCard(
   `
 }
 
-function renderStaticGatheredCards(selectedCutIndex: number): string {
-  const cards = Array.from({ length: 32 }, (_, index) => {
-    const cardNumber = index + 1
-    const finalTransform = buildGatheredTransform(cardNumber, selectedCutIndex)
+function renderStaticGatheredCards(_selectedCutIndex: number): string {
+  const visibleCount = 10
+
+  const cards = Array.from({ length: visibleCount }, (_, index) => {
+    const layerIndex = visibleCount - index - 1
+    const x = layerIndex * 1.5
+    const y = 12 - layerIndex * 1.5
+    const rotate = -2.8 + layerIndex * 0.14
 
     return `
       <div
@@ -284,17 +336,17 @@ function renderStaticGatheredCards(selectedCutIndex: number): string {
           top:${CUT_CARD_TOP}px;
           width:${CUT_CARD_WIDTH}px;
           height:${CUT_CARD_HEIGHT}px;
-          transform:${finalTransform};
+          transform:translateX(-50%) translate(${x.toFixed(2)}px, ${y.toFixed(2)}px) rotate(${rotate.toFixed(2)}deg);
           transform-origin:center bottom;
           border-radius:15px;
           background:
             linear-gradient(135deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.04) 18%, rgba(255,255,255,0.02) 100%),
             linear-gradient(180deg, #21476e 0%, #173454 100%);
           border:1px solid rgba(255,255,255,0.24);
-          box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+          box-shadow: 0 1px 2px rgba(0,0,0,0.06);
           overflow:hidden;
           pointer-events:none;
-          z-index:${10 + index};
+          z-index:${20 + index};
         "
       >
         ${renderCardBack()}
@@ -309,66 +361,6 @@ function renderStaticGatheredCards(selectedCutIndex: number): string {
         width:100%;
         height:290px;
         overflow:visible;
-      "
-    >
-      <div
-        style="
-          position:absolute;
-          left:50%;
-          top:${CUT_CARD_TOP}px;
-          width:124px;
-          height:176px;
-          transform:translateX(-50%) translate(8px, 18px) rotate(-3deg);
-          border-radius:18px;
-          background:rgba(0,0,0,0.14);
-          filter:blur(12px);
-          pointer-events:none;
-        "
-      ></div>
-
-      ${cards}
-    </div>
-  `
-}
-
-function renderDealingPile(cardCount: number, shouldDisappear = false): string {
-  const cards = Array.from({ length: cardCount }, (_, index) => {
-    const pileOffset = cardCount - index - 1
-
-    return `
-      <div
-        style="
-          position:absolute;
-          left:50%;
-          top:${CUT_CARD_TOP}px;
-          width:${CUT_CARD_WIDTH}px;
-          height:${CUT_CARD_HEIGHT}px;
-          transform:translateX(-50%) translate(${pileOffset * 0.18}px, ${12 - pileOffset * 0.2}px) rotate(-2.6deg);
-          transform-origin:center bottom;
-          border-radius:15px;
-          background:
-            linear-gradient(135deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.04) 18%, rgba(255,255,255,0.02) 100%),
-            linear-gradient(180deg, #21476e 0%, #173454 100%);
-          border:1px solid rgba(255,255,255,0.24);
-          box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-          overflow:hidden;
-          pointer-events:none;
-          z-index:${10 + index};
-        "
-      >
-        ${renderCardBack()}
-      </div>
-    `
-  }).join('')
-
-  return `
-    <div
-      style="
-        position:relative;
-        width:100%;
-        height:290px;
-        overflow:visible;
-        ${shouldDisappear ? `animation: belot-seq-pile-disappear 420ms ease ${DEAL_LAST_PACKET_END_DELAY - 180}ms forwards;` : ''}
       "
     >
       <div
@@ -405,6 +397,37 @@ function getFallbackDealTarget(seat: Seat): { x: number; y: number; rotate: numb
   }
 
   return { x: 710, y: 8, rotate: 90 }
+}
+
+function buildDealDeckCardTransform(layerIndex: number): string {
+  const x = layerIndex * 0.28
+  const y = 18 - layerIndex * 0.55
+  const rotate = -2.8 + layerIndex * 0.16
+
+  return `
+    translate(-50%, -50%)
+    translate(${x.toFixed(2)}px, ${y.toFixed(2)}px)
+    rotate(${rotate.toFixed(2)}deg)
+  `
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function getDealVisibleCardCount(cardCount: number): number {
+  return Math.max(1, Math.min(DEAL_BASE_VISIBLE_CARDS, cardCount))
+}
+
+function getPacketFanTransform(
+  index: number,
+  packetSize: number
+): { x: number; y: number; rotate: number } {
+  const centered = index - (packetSize - 1) / 2
+
+  return {
+    x: centered * 18,
+    y: Math.abs(centered) * 4,
+    rotate: centered * 5,
+  }
 }
 
 function buildDealTargetSyncHandler(): string {
@@ -459,7 +482,7 @@ function buildDealTargetSyncHandler(): string {
 
       packetNode.style.setProperty(
         '--deal-to-transform',
-        'translateX(-50%) translate(' + dx.toFixed(2) + 'px, ' + dy.toFixed(2) + 'px) rotate(' + rotate + 'deg)'
+        'translate(-50%, -50%) translate(' + dx.toFixed(2) + 'px, ' + dy.toFixed(2) + 'px) rotate(' + rotate + 'deg)'
       );
     });
   };
@@ -471,15 +494,81 @@ function buildDealTargetSyncHandler(): string {
   `.trim()
 }
 
-function renderPacketCards(packetSize: number, seat: Seat): string {
-  const cards = Array.from({ length: packetSize }, (_, index) => {
-    const centered = index - (packetSize - 1) / 2
+function renderDealingPile(cardCount: number, shouldDisappear = false): string {
+  const visibleCount = getDealVisibleCardCount(cardCount)
 
-    let innerTransform = `translate(${centered * 16}px, ${Math.abs(centered) * 4}px) rotate(${centered * 4}deg)`
+  const cards = Array.from({ length: visibleCount }, (_, index) => {
+    const layerIndex = visibleCount - index - 1
+    const transform = buildDealDeckCardTransform(layerIndex)
 
-    if (seat === 'left' || seat === 'right') {
-      innerTransform = `translate(${Math.abs(centered) * 4}px, ${centered * 16}px) rotate(${centered * 4}deg)`
-    }
+    return `
+      <div
+        style="
+          position:absolute;
+          left:50%;
+          top:${DEAL_PILE_CENTER_TOP}px;
+          width:${CUT_CARD_WIDTH}px;
+          height:${CUT_CARD_HEIGHT}px;
+          transform:${transform};
+          transform-origin:center bottom;
+          border-radius:15px;
+          background:
+            linear-gradient(135deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.04) 18%, rgba(255,255,255,0.02) 100%),
+            linear-gradient(180deg, #21476e 0%, #173454 100%);
+          border:1px solid rgba(255,255,255,0.24);
+          box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+          overflow:hidden;
+          pointer-events:none;
+          z-index:${20 + index};
+        "
+      >
+        ${renderCardBack()}
+      </div>
+    `
+  }).join('')
+
+  return `
+    <div
+      style="
+        position:relative;
+        width:100%;
+        height:330px;
+        overflow:visible;
+        ${shouldDisappear ? `animation: belot-seq-pile-disappear 180ms ease ${DEAL_LAST_PACKET_TAKEOFF_DELAY}ms forwards;` : ''}
+      "
+    >
+      <div
+        style="
+          position:absolute;
+          left:50%;
+          top:${DEAL_PILE_CENTER_TOP}px;
+          width:132px;
+          height:178px;
+          transform:translate(-50%, -50%) translate(8px, 20px) rotate(-3deg);
+          border-radius:18px;
+          background:rgba(0,0,0,0.16);
+          filter:blur(12px);
+          pointer-events:none;
+        "
+      ></div>
+
+      ${cards}
+    </div>
+  `
+}
+
+function renderPacketCards(
+  packetSize: number,
+  visibleBaseCards: number,
+  delay: number
+): string {
+  return Array.from({ length: packetSize }, (_, index) => {
+    const stackLayer = visibleBaseCards + index
+    const stackX = `${(stackLayer * 0.28).toFixed(2)}px`
+    const stackY = `${(18 - stackLayer * 0.55).toFixed(2)}px`
+    const stackR = `${(-2.8 + stackLayer * 0.16).toFixed(2)}deg`
+
+    const fan = getPacketFanTransform(index, packetSize)
 
     return `
       <div
@@ -489,22 +578,31 @@ function renderPacketCards(packetSize: number, seat: Seat): string {
           top:50%;
           width:${CUT_CARD_WIDTH}px;
           height:${CUT_CARD_HEIGHT}px;
-          transform:translate(-50%, -50%) ${innerTransform};
+          --stack-x:${stackX};
+          --stack-y:${stackY};
+          --stack-r:${stackR};
+          --fan-x:${fan.x}px;
+          --fan-y:${fan.y}px;
+          --fan-r:${fan.rotate}deg;
+          transform:
+            translate(-50%, -50%)
+            translate(var(--stack-x), var(--stack-y))
+            rotate(var(--stack-r));
+          transform-origin:center bottom;
           border-radius:15px;
           background:
             linear-gradient(135deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.04) 18%, rgba(255,255,255,0.02) 100%),
             linear-gradient(180deg, #21476e 0%, #173454 100%);
           border:1px solid rgba(255,255,255,0.24);
-          box-shadow: 0 10px 18px rgba(0,0,0,0.14);
+          box-shadow: 0 8px 14px rgba(0,0,0,0.12);
           overflow:hidden;
+          animation: belot-seq-packet-spread ${DEAL_PACKET_DURATION}ms cubic-bezier(0.2, 0.82, 0.22, 1) ${delay}ms forwards;
         "
       >
         ${renderCardBack()}
       </div>
     `
   }).join('')
-
-  return cards
 }
 
 function renderDealPackets(
@@ -517,12 +615,22 @@ function renderDealPackets(
   const syncTargetsHandler = buildDealTargetSyncHandler()
   const safeSyncTargetsHandler = escapeHtmlAttribute(syncTargetsHandler)
   const shouldDisappearPile = sequenceName === 'deal-last-3'
+  const visibleBaseCards = getDealVisibleCardCount(remainingCardsInPile)
 
   const packets = dealOrder.map((seat, index) => {
     const target = getFallbackDealTarget(seat)
     const delay = DEAL_PACKET_START_DELAY + index * DEAL_PACKET_DELAY_STEP
-    const fromTransform = `translateX(-50%) translate(0px, 12px) rotate(-3deg)`
-    const toTransform = `translateX(-50%) translate(${target.x}px, ${target.y}px) rotate(${target.rotate}deg)`
+    const fromTransform =
+      'translate(-50%, -50%) translate(0px, 0px) rotate(-2.6deg)'
+    const liftTransform =
+      'translate(-50%, -50%) translate(0px, -18px) rotate(-4deg)'
+    const toTransform = `
+      translate(-50%, -50%)
+      translate(${target.x}px, ${target.y}px)
+      rotate(${target.rotate}deg)
+    `
+      .replace(/\s+/g, ' ')
+      .trim()
 
     return `
       <div
@@ -531,19 +639,21 @@ function renderDealPackets(
         style="
           position:absolute;
           left:50%;
-          top:${CUT_CARD_TOP}px;
-          width:${CUT_CARD_WIDTH + 40}px;
-          height:${CUT_CARD_HEIGHT + 40}px;
-          overflow:visible;
+          top:${DEAL_PILE_CENTER_TOP}px;
+          width:${CUT_CARD_WIDTH + 50}px;
+          height:${CUT_CARD_HEIGHT + 50}px;
           transform-origin:center center;
           pointer-events:none;
-          z-index:${120 + index};
+          z-index:${140 + index};
+          opacity:0;
+          transform:${fromTransform};
           --deal-from-transform:${fromTransform};
+          --deal-lift-transform:${liftTransform};
           --deal-to-transform:${toTransform};
           animation: belot-seq-deal-packet ${DEAL_PACKET_DURATION}ms cubic-bezier(0.18, 0.82, 0.22, 1) ${delay}ms forwards;
         "
       >
-        ${renderPacketCards(packetSize, seat)}
+        ${renderPacketCards(packetSize, visibleBaseCards, delay)}
       </div>
     `
   }).join('')
@@ -564,6 +674,7 @@ function renderDealPackets(
         style="display:none"
         onload="${safeSyncTargetsHandler}"
       />
+
       ${renderDealingPile(remainingCardsInPile, shouldDisappearPile)}
       ${packets}
     </div>
@@ -652,14 +763,40 @@ export function renderRoundSetupSequence({
         display:flex;
         flex-direction:column;
         align-items:center;
-        gap:${isDealPhase ? '0' : '12px'};
+        gap:12px;
       "
     >
       ${renderSequenceStyles()}
 
       ${
         isDealPhase
-          ? ''
+          ? `
+      <div
+        style="
+          font-size:24px;
+          line-height:1;
+          font-weight:900;
+          letter-spacing:0.12em;
+          color:#f5bb37;
+          text-transform:uppercase;
+          visibility:hidden;
+        "
+      >
+        ${heading}
+      </div>
+
+      <div
+        style="
+          font-size:13px;
+          font-weight:700;
+          color:rgba(239,245,255,0.82);
+          text-align:center;
+          visibility:hidden;
+        "
+      >
+        ${subText}
+      </div>
+      `
           : `
       <div
         style="
@@ -692,7 +829,7 @@ export function renderRoundSetupSequence({
           position:relative;
           width:900px;
           height:${contentHeight}px;
-          margin-top:${isDealPhase ? '0' : '8px'};
+          margin-top:8px;
           user-select:none;
           overflow:visible;
         "
