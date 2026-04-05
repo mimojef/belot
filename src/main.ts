@@ -1,7 +1,6 @@
 import './style.css'
 import { bootstrapApp } from './app/bootstrap'
 import { renderApp } from './app/renderApp'
-import { getPlayingViewState } from './core/state/getPlayingViewState'
 import { pickBotCardToPlay } from './core/rules/pickBotCardToPlay'
 import type { Seat } from './data/constants/seatOrder'
 import type { Card, Suit } from './core/state/gameTypes'
@@ -23,8 +22,10 @@ const app = bootstrapApp()
 
 let resizeFrameId: number | null = null
 let botPlayTimeoutId: number | null = null
-let finalTrickAnimationTimeoutId: number | null = null
 let isAnimatingFinalTrickCard = false
+let activeFinalTrickAnimation: Animation | null = null
+let activeFinalTrickFloatingCard: HTMLElement | null = null
+let activeFinalTrickSourceElement: HTMLElement | null = null
 
 function clearBotPlayTimeout(): void {
   if (botPlayTimeoutId !== null) {
@@ -34,11 +35,23 @@ function clearBotPlayTimeout(): void {
 }
 
 function clearFinalTrickAnimationTimeout(): void {
-  if (finalTrickAnimationTimeoutId !== null) {
-    window.clearTimeout(finalTrickAnimationTimeoutId)
-    finalTrickAnimationTimeoutId = null
+  if (activeFinalTrickAnimation) {
+    const animationToCancel = activeFinalTrickAnimation
+    activeFinalTrickAnimation = null
+    animationToCancel.cancel()
   }
 
+  if (activeFinalTrickFloatingCard?.parentNode) {
+    activeFinalTrickFloatingCard.parentNode.removeChild(activeFinalTrickFloatingCard)
+  }
+
+  activeFinalTrickFloatingCard = null
+
+  if (activeFinalTrickSourceElement) {
+    activeFinalTrickSourceElement.style.opacity = ''
+  }
+
+  activeFinalTrickSourceElement = null
   isAnimatingFinalTrickCard = false
 }
 
@@ -90,6 +103,59 @@ function getSeatAnchor(seat: Seat): HTMLElement | null {
   return document.querySelector<HTMLElement>(`[data-seat-anchor="${seat}"]`)
 }
 
+function getSeatPlayOffset(seat: Seat): { leftOffset: number; topOffset: number; rotate: number } {
+  if (seat === 'top') {
+    return { leftOffset: 0, topOffset: -54, rotate: 0 }
+  }
+
+  if (seat === 'left') {
+    return { leftOffset: -78, topOffset: 0, rotate: -8 }
+  }
+
+  if (seat === 'right') {
+    return { leftOffset: 78, topOffset: 0, rotate: 8 }
+  }
+
+  return { leftOffset: 0, topOffset: 54, rotate: 0 }
+}
+
+function resolveFallbackStartRectForSeat(
+  seat: Seat
+): { left: number; top: number; rotate: number } {
+  const centerX = window.innerWidth / 2
+  const centerY = window.innerHeight / 2
+
+  if (seat === 'top') {
+    return {
+      left: centerX - FLOATING_CARD_WIDTH / 2,
+      top: 64,
+      rotate: 0,
+    }
+  }
+
+  if (seat === 'left') {
+    return {
+      left: 52,
+      top: centerY - FLOATING_CARD_HEIGHT / 2,
+      rotate: -8,
+    }
+  }
+
+  if (seat === 'right') {
+    return {
+      left: window.innerWidth - FLOATING_CARD_WIDTH - 52,
+      top: centerY - FLOATING_CARD_HEIGHT / 2,
+      rotate: 8,
+    }
+  }
+
+  return {
+    left: centerX - FLOATING_CARD_WIDTH / 2,
+    top: window.innerHeight - FLOATING_CARD_HEIGHT - 72,
+    rotate: 0,
+  }
+}
+
 function resolveStartRectForSeat(
   seat: Seat,
   cardId: string
@@ -112,40 +178,67 @@ function resolveStartRectForSeat(
 
   const anchor = getSeatAnchor(seat)
 
-  if (!anchor) {
-    return null
-  }
+  if (anchor) {
+    const rect = anchor.getBoundingClientRect()
 
-  const rect = anchor.getBoundingClientRect()
+    if (seat === 'top') {
+      return {
+        left: rect.left + rect.width / 2 - FLOATING_CARD_WIDTH / 2,
+        top: rect.top + rect.height - 36,
+        rotate: 0,
+      }
+    }
 
-  if (seat === 'top') {
+    if (seat === 'left') {
+      return {
+        left: rect.left + rect.width - 34,
+        top: rect.top + rect.height / 2 - FLOATING_CARD_HEIGHT / 2,
+        rotate: -8,
+      }
+    }
+
+    if (seat === 'right') {
+      return {
+        left: rect.left - FLOATING_CARD_WIDTH + 34,
+        top: rect.top + rect.height / 2 - FLOATING_CARD_HEIGHT / 2,
+        rotate: 8,
+      }
+    }
+
     return {
       left: rect.left + rect.width / 2 - FLOATING_CARD_WIDTH / 2,
-      top: rect.top + rect.height - 36,
+      top: rect.top - FLOATING_CARD_HEIGHT + 34,
       rotate: 0,
     }
   }
 
-  if (seat === 'left') {
+  return resolveFallbackStartRectForSeat(seat)
+}
+
+function resolvePlayTargetRectForSeat(
+  seat: Seat
+): { left: number; top: number; rotate: number } {
+  const target = document.querySelector<HTMLElement>(`[data-play-target-seat="${seat}"]`)
+
+  if (target) {
+    const targetRect = target.getBoundingClientRect()
+    const targetRotate = parseRotationFromTransform(window.getComputedStyle(target).transform)
+
     return {
-      left: rect.left + rect.width - 34,
-      top: rect.top + rect.height / 2 - FLOATING_CARD_HEIGHT / 2,
-      rotate: -8,
+      left: targetRect.left,
+      top: targetRect.top,
+      rotate: targetRotate,
     }
   }
 
-  if (seat === 'right') {
-    return {
-      left: rect.left - FLOATING_CARD_WIDTH + 34,
-      top: rect.top + rect.height / 2 - FLOATING_CARD_HEIGHT / 2,
-      rotate: 8,
-    }
-  }
+  const centerX = window.innerWidth / 2
+  const centerY = window.innerHeight / 2
+  const seatOffset = getSeatPlayOffset(seat)
 
   return {
-    left: rect.left + rect.width / 2 - FLOATING_CARD_WIDTH / 2,
-    top: rect.top - FLOATING_CARD_HEIGHT + 34,
-    rotate: 0,
+    left: centerX - 56 + seatOffset.leftOffset,
+    top: centerY - 81 + seatOffset.topOffset,
+    rotate: seatOffset.rotate,
   }
 }
 
@@ -278,49 +371,93 @@ function animateFinalTrickCardThenSubmit(cardId: string, seat: Seat): boolean {
 
   const card = resolveCardForSeat(cardId, seat)
   const start = resolveStartRectForSeat(seat, cardId)
-  const target = document.querySelector<HTMLElement>(`[data-play-target-seat="${seat}"]`)
 
-  if (!card || !start || !target) {
+  if (!card || !start) {
     return false
   }
 
-  const targetRect = target.getBoundingClientRect()
-  const targetRotate = parseRotationFromTransform(window.getComputedStyle(target).transform)
+  const target = resolvePlayTargetRectForSeat(seat)
+
+  clearFinalTrickAnimationTimeout()
 
   const floatingCard = createFloatingCardElement(card)
   floatingCard.style.left = `${start.left}px`
   floatingCard.style.top = `${start.top}px`
   floatingCard.style.opacity = '1'
-  floatingCard.style.transform = `rotate(${start.rotate}deg)`
-  floatingCard.style.transition = `transform ${FINAL_TRICK_CARD_FLIGHT_MS}ms cubic-bezier(0.22, 1, 0.36, 1), opacity 120ms ease`
 
-  document.body.appendChild(floatingCard)
+  const host = document.querySelector<HTMLElement>('#app') ?? document.body
+  host.appendChild(floatingCard)
 
   if (start.sourceElement) {
     start.sourceElement.style.opacity = '0'
+    activeFinalTrickSourceElement = start.sourceElement
+  } else {
+    activeFinalTrickSourceElement = null
   }
 
-  const deltaX = targetRect.left - start.left
-  const deltaY = targetRect.top - start.top
-
+  activeFinalTrickFloatingCard = floatingCard
   isAnimatingFinalTrickCard = true
-  clearFinalTrickAnimationTimeout()
 
-  window.requestAnimationFrame(() => {
-    floatingCard.style.transform = `translate(${deltaX}px, ${deltaY}px) rotate(${targetRotate}deg)`
-  })
+  const deltaX = target.left - start.left
+  const deltaY = target.top - start.top
 
-  finalTrickAnimationTimeoutId = window.setTimeout(() => {
-    finalTrickAnimationTimeoutId = null
-    isAnimatingFinalTrickCard = false
-
-    if (floatingCard.parentNode) {
-      floatingCard.parentNode.removeChild(floatingCard)
+  const animation = floatingCard.animate(
+    [
+      {
+        transform: `translate(0px, 0px) rotate(${start.rotate}deg)`,
+        opacity: 1,
+      },
+      {
+        transform: `translate(${deltaX}px, ${deltaY}px) rotate(${target.rotate}deg)`,
+        opacity: 1,
+      },
+    ],
+    {
+      duration: FINAL_TRICK_CARD_FLIGHT_MS,
+      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+      fill: 'forwards',
     }
+  )
+
+  activeFinalTrickAnimation = animation
+
+  animation.onfinish = () => {
+    if (activeFinalTrickAnimation !== animation) {
+      return
+    }
+
+    activeFinalTrickAnimation = null
+
+    if (activeFinalTrickFloatingCard?.parentNode) {
+      activeFinalTrickFloatingCard.parentNode.removeChild(activeFinalTrickFloatingCard)
+    }
+
+    activeFinalTrickFloatingCard = null
+    activeFinalTrickSourceElement = null
+    isAnimatingFinalTrickCard = false
 
     app.engine.submitPlayCard(cardId)
     render()
-  }, FINAL_TRICK_CARD_FLIGHT_MS)
+  }
+
+  animation.oncancel = () => {
+    if (activeFinalTrickAnimation === animation) {
+      activeFinalTrickAnimation = null
+    }
+
+    if (activeFinalTrickFloatingCard?.parentNode) {
+      activeFinalTrickFloatingCard.parentNode.removeChild(activeFinalTrickFloatingCard)
+    }
+
+    activeFinalTrickFloatingCard = null
+
+    if (activeFinalTrickSourceElement) {
+      activeFinalTrickSourceElement.style.opacity = ''
+    }
+
+    activeFinalTrickSourceElement = null
+    isAnimatingFinalTrickCard = false
+  }
 
   return true
 }
@@ -334,8 +471,10 @@ function submitPlayCardWithFlow(cardId: string, seat: Seat): void {
     return
   }
 
-  const playingViewState = getPlayingViewState(state)
-  const isFinalCardOfTrick = (playingViewState?.plays.length ?? 0) === 3
+  const liveCurrentTrickPlays =
+    state.playing?.currentTrick.plays ?? state.currentTrick.plays ?? []
+
+  const isFinalCardOfTrick = liveCurrentTrickPlays.length === 3
 
   if (isFinalCardOfTrick) {
     const didStartAnimation = animateFinalTrickCardThenSubmit(cardId, seat)
