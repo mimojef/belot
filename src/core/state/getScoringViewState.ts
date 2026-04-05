@@ -6,6 +6,8 @@ import { buildOfficialRoundScore } from '../rules/buildOfficialRoundScore'
 type BaseRoundScore = BaseRoundScoreResult
 type Outcome = RoundOutcomeResult
 
+const SCORING_AUTO_ADVANCE_MS = 5000
+
 export type ScoringViewState = {
   isVisible: boolean
   hasBaseRoundScore: boolean
@@ -46,6 +48,8 @@ export type ScoringViewState = {
   hasDouble: boolean
   hasRedouble: boolean
   counterMultiplier: number
+  countdownSeconds: number
+  autoAdvanceCountdownSeconds: number
 }
 
 function createZeroRoundScore(): RoundScore {
@@ -171,6 +175,47 @@ function resolveCounterMultiplier(
   return 1
 }
 
+function getNowForTimestamp(timestamp: number | null | undefined): number {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+      return performance.now()
+    }
+
+    return Date.now()
+  }
+
+  if (timestamp > 1_000_000_000_000) {
+    return Date.now()
+  }
+
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now()
+  }
+
+  return Date.now()
+}
+
+function resolveScoringCountdownSeconds(state: GameState): number {
+  if (state.phase !== 'scoring') {
+    return 5
+  }
+
+  const phaseEnteredAt =
+    typeof state.phaseEnteredAt === 'number' && Number.isFinite(state.phaseEnteredAt)
+      ? state.phaseEnteredAt
+      : null
+
+  if (phaseEnteredAt === null) {
+    return 5
+  }
+
+  const now = getNowForTimestamp(phaseEnteredAt)
+  const elapsedMs = Math.max(0, now - phaseEnteredAt)
+  const remainingMs = Math.max(0, SCORING_AUTO_ADVANCE_MS - elapsedMs)
+
+  return Math.ceil(remainingMs / 1000)
+}
+
 export function getScoringViewState(state: GameState): ScoringViewState {
   const scoringState = state.scoring
   const baseRoundScore: BaseRoundScore | null = scoringState?.baseRoundScore ?? null
@@ -227,6 +272,8 @@ export function getScoringViewState(state: GameState): ScoringViewState {
     declarationsScore.teamB +
     beloteScore.teamB
 
+  const countdownSeconds = resolveScoringCountdownSeconds(state)
+
   return {
     isVisible: state.phase === 'scoring',
     hasBaseRoundScore: Boolean(baseRoundScore),
@@ -273,5 +320,7 @@ export function getScoringViewState(state: GameState): ScoringViewState {
     hasDouble: state.bidding.winningBid?.doubled ?? false,
     hasRedouble: state.bidding.winningBid?.redoubled ?? false,
     counterMultiplier,
+    countdownSeconds,
+    autoAdvanceCountdownSeconds: countdownSeconds,
   }
 }

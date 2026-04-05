@@ -3,7 +3,7 @@ import { bootstrapApp } from './app/bootstrap'
 import { renderApp } from './app/renderApp'
 import { pickBotCardToPlay } from './core/rules/pickBotCardToPlay'
 import type { Seat } from './data/constants/seatOrder'
-import type { Card, Suit } from './core/state/gameTypes'
+import type { Card, GameState, Suit } from './core/state/gameTypes'
 import { createBelotePromptController } from './app/playPrompts/createBelotePromptController'
 
 const rootElement = document.querySelector<HTMLDivElement>('#app')
@@ -16,12 +16,16 @@ const BOT_PLAY_DELAY_MS = 700
 const FINAL_TRICK_CARD_FLIGHT_MS = 460
 const FLOATING_CARD_WIDTH = 112
 const FLOATING_CARD_HEIGHT = 162
+const SCORING_AUTO_ADVANCE_MS = 5000
+const SCORING_TIMER_FUDGE_MS = 24
 
 const appRoot = rootElement
 const app = bootstrapApp()
 
 let resizeFrameId: number | null = null
 let botPlayTimeoutId: number | null = null
+let scoringTickTimeoutId: number | null = null
+let scoringAutoAdvanceTimeoutId: number | null = null
 let isAnimatingFinalTrickCard = false
 let activeFinalTrickAnimation: Animation | null = null
 let activeFinalTrickFloatingCard: HTMLElement | null = null
@@ -31,6 +35,18 @@ function clearBotPlayTimeout(): void {
   if (botPlayTimeoutId !== null) {
     window.clearTimeout(botPlayTimeoutId)
     botPlayTimeoutId = null
+  }
+}
+
+function clearScoringTimeouts(): void {
+  if (scoringTickTimeoutId !== null) {
+    window.clearTimeout(scoringTickTimeoutId)
+    scoringTickTimeoutId = null
+  }
+
+  if (scoringAutoAdvanceTimeoutId !== null) {
+    window.clearTimeout(scoringAutoAdvanceTimeoutId)
+    scoringAutoAdvanceTimeoutId = null
   }
 }
 
@@ -364,6 +380,116 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
   return wrapper
 }
 
+function getClockNowForPhaseTimestamp(timestamp: number | null | undefined): number {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+      return performance.now()
+    }
+
+    return Date.now()
+  }
+
+  if (timestamp > 1_000_000_000_000) {
+    return Date.now()
+  }
+
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now()
+  }
+
+  return Date.now()
+}
+
+function getScoringRemainingMs(state: GameState): number | null {
+  if (state.phase !== 'scoring') {
+    return null
+  }
+
+  const phaseEnteredAt =
+    typeof state.phaseEnteredAt === 'number' && Number.isFinite(state.phaseEnteredAt)
+      ? state.phaseEnteredAt
+      : null
+
+  if (phaseEnteredAt === null) {
+    return SCORING_AUTO_ADVANCE_MS
+  }
+
+  const now = getClockNowForPhaseTimestamp(phaseEnteredAt)
+  const elapsedMs = Math.max(0, now - phaseEnteredAt)
+
+  return Math.max(0, SCORING_AUTO_ADVANCE_MS - elapsedMs)
+}
+
+function scheduleScoringPhaseTimers(): void {
+  clearScoringTimeouts()
+
+  const state = app.engine.getState()
+  const remainingMs = getScoringRemainingMs(state)
+
+  if (remainingMs === null) {
+    return
+  }
+
+  if (remainingMs <= 0) {
+    scoringAutoAdvanceTimeoutId = window.setTimeout(() => {
+      scoringAutoAdvanceTimeoutId = null
+
+      const latestState = app.engine.getState()
+
+      if (latestState.phase !== 'scoring') {
+        render()
+        return
+      }
+
+      clearBotPlayTimeout()
+      clearFinalTrickAnimationTimeout()
+      clearScoringTimeouts()
+      app.engine.goToNextPhase()
+      render()
+    }, 0)
+
+    return
+  }
+
+  const currentDisplayedSeconds = Math.ceil(remainingMs / 1000)
+  const delayToNextCountdownStep =
+    remainingMs - Math.max(0, currentDisplayedSeconds - 1) * 1000 + SCORING_TIMER_FUDGE_MS
+  const tickDelay = Math.max(
+    SCORING_TIMER_FUDGE_MS,
+    Math.min(delayToNextCountdownStep, remainingMs)
+  )
+
+  scoringTickTimeoutId = window.setTimeout(() => {
+    scoringTickTimeoutId = null
+
+    const latestState = app.engine.getState()
+
+    if (latestState.phase !== 'scoring') {
+      render()
+      return
+    }
+
+    render()
+  }, tickDelay)
+
+  scoringAutoAdvanceTimeoutId = window.setTimeout(() => {
+    scoringAutoAdvanceTimeoutId = null
+
+    const latestState = app.engine.getState()
+
+    if (latestState.phase !== 'scoring') {
+      render()
+      return
+    }
+
+    clearBotPlayTimeout()
+    clearFinalTrickAnimationTimeout()
+    clearScoringTimeouts()
+    app.engine.goToNextPhase()
+    render()
+  }, remainingMs + SCORING_TIMER_FUDGE_MS)
+}
+
 function animateFinalTrickCardThenSubmit(cardId: string, seat: Seat): boolean {
   if (isAnimatingFinalTrickCard) {
     return true
@@ -543,60 +669,70 @@ function render(): void {
   renderApp(appRoot, app, {
     onNextPhaseClick: () => {
       clearBotPlayTimeout()
+      clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.goToNextPhase()
       render()
     },
     onSelectCutIndex: (cutIndex: number) => {
       clearBotPlayTimeout()
+      clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.selectCutIndex(cutIndex)
       render()
     },
     onResolveCutClick: () => {
       clearBotPlayTimeout()
+      clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.resolveCutPhase()
       render()
     },
     onBidPass: () => {
       clearBotPlayTimeout()
+      clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.submitBidAction({ type: 'pass' })
       render()
     },
     onBidSuit: (suit) => {
       clearBotPlayTimeout()
+      clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.submitBidAction({ type: 'suit', suit })
       render()
     },
     onBidNoTrumps: () => {
       clearBotPlayTimeout()
+      clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.submitBidAction({ type: 'no-trumps' })
       render()
     },
     onBidAllTrumps: () => {
       clearBotPlayTimeout()
+      clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.submitBidAction({ type: 'all-trumps' })
       render()
     },
     onBidDouble: () => {
       clearBotPlayTimeout()
+      clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.submitBidAction({ type: 'double' })
       render()
     },
     onBidRedouble: () => {
       clearBotPlayTimeout()
+      clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.submitBidAction({ type: 'redouble' })
       render()
     },
     onPlayCard: (cardId) => {
       clearBotPlayTimeout()
+      clearScoringTimeouts()
 
       const didOpenBelotePrompt = belotePromptController.handlePlayCard(cardId)
 
@@ -610,6 +746,7 @@ function render(): void {
 
   belotePromptController.renderPendingPrompt()
   scheduleNextBotPlay()
+  scheduleScoringPhaseTimers()
 }
 
 const belotePromptController = createBelotePromptController({
