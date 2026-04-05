@@ -16,6 +16,8 @@ const BOT_PLAY_DELAY_MS = 700
 const FINAL_TRICK_CARD_FLIGHT_MS = 460
 const FLOATING_CARD_WIDTH = 112
 const FLOATING_CARD_HEIGHT = 162
+const DEAL_FIRST_THREE_AUTO_ADVANCE_MS = 2000
+const DEAL_NEXT_TWO_AUTO_ADVANCE_MS = 1900
 const SCORING_AUTO_ADVANCE_MS = 5000
 const SCORING_TIMER_FUDGE_MS = 24
 
@@ -24,6 +26,8 @@ const app = bootstrapApp()
 
 let resizeFrameId: number | null = null
 let botPlayTimeoutId: number | null = null
+let dealPhaseAutoAdvanceTimeoutId: number | null = null
+let activeDealPhaseAutoAdvance: string | null = null
 let scoringTickTimeoutId: number | null = null
 let scoringAutoAdvanceTimeoutId: number | null = null
 let isAnimatingFinalTrickCard = false
@@ -36,6 +40,15 @@ function clearBotPlayTimeout(): void {
     window.clearTimeout(botPlayTimeoutId)
     botPlayTimeoutId = null
   }
+}
+
+function clearDealPhaseAutoAdvanceTimeout(): void {
+  if (dealPhaseAutoAdvanceTimeoutId !== null) {
+    window.clearTimeout(dealPhaseAutoAdvanceTimeoutId)
+    dealPhaseAutoAdvanceTimeoutId = null
+  }
+
+  activeDealPhaseAutoAdvance = null
 }
 
 function clearScoringTimeouts(): void {
@@ -420,6 +433,57 @@ function getScoringRemainingMs(state: GameState): number | null {
   return Math.max(0, SCORING_AUTO_ADVANCE_MS - elapsedMs)
 }
 
+function getDealPhaseAutoAdvanceDelay(phase: string): number | null {
+  if (phase === 'deal-first-3') {
+    return DEAL_FIRST_THREE_AUTO_ADVANCE_MS
+  }
+
+  if (phase === 'deal-next-2') {
+    return DEAL_NEXT_TWO_AUTO_ADVANCE_MS
+  }
+
+  return null
+}
+
+function scheduleDealPhaseAutoAdvance(): void {
+  const state = app.engine.getState()
+  const delay = getDealPhaseAutoAdvanceDelay(state.phase)
+
+  if (delay === null) {
+    clearDealPhaseAutoAdvanceTimeout()
+    return
+  }
+
+  if (
+    dealPhaseAutoAdvanceTimeoutId !== null &&
+    activeDealPhaseAutoAdvance === state.phase
+  ) {
+    return
+  }
+
+  clearDealPhaseAutoAdvanceTimeout()
+  activeDealPhaseAutoAdvance = state.phase
+
+  dealPhaseAutoAdvanceTimeoutId = window.setTimeout(() => {
+    dealPhaseAutoAdvanceTimeoutId = null
+
+    const latestState = app.engine.getState()
+
+    if (latestState.phase !== state.phase) {
+      activeDealPhaseAutoAdvance = null
+      render()
+      return
+    }
+
+    activeDealPhaseAutoAdvance = null
+    clearBotPlayTimeout()
+    clearScoringTimeouts()
+    clearFinalTrickAnimationTimeout()
+    app.engine.goToNextPhase()
+    render()
+  }, delay)
+}
+
 function scheduleScoringPhaseTimers(): void {
   clearScoringTimeouts()
 
@@ -442,6 +506,7 @@ function scheduleScoringPhaseTimers(): void {
       }
 
       clearBotPlayTimeout()
+      clearDealPhaseAutoAdvanceTimeout()
       clearFinalTrickAnimationTimeout()
       clearScoringTimeouts()
       app.engine.goToNextPhase()
@@ -483,6 +548,7 @@ function scheduleScoringPhaseTimers(): void {
     }
 
     clearBotPlayTimeout()
+    clearDealPhaseAutoAdvanceTimeout()
     clearFinalTrickAnimationTimeout()
     clearScoringTimeouts()
     app.engine.goToNextPhase()
@@ -669,6 +735,7 @@ function render(): void {
   renderApp(appRoot, app, {
     onNextPhaseClick: () => {
       clearBotPlayTimeout()
+      clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.goToNextPhase()
@@ -676,6 +743,7 @@ function render(): void {
     },
     onSelectCutIndex: (cutIndex: number) => {
       clearBotPlayTimeout()
+      clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.selectCutIndex(cutIndex)
@@ -683,6 +751,7 @@ function render(): void {
     },
     onResolveCutClick: () => {
       clearBotPlayTimeout()
+      clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.resolveCutPhase()
@@ -690,6 +759,7 @@ function render(): void {
     },
     onBidPass: () => {
       clearBotPlayTimeout()
+      clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.submitBidAction({ type: 'pass' })
@@ -697,6 +767,7 @@ function render(): void {
     },
     onBidSuit: (suit) => {
       clearBotPlayTimeout()
+      clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.submitBidAction({ type: 'suit', suit })
@@ -704,6 +775,7 @@ function render(): void {
     },
     onBidNoTrumps: () => {
       clearBotPlayTimeout()
+      clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.submitBidAction({ type: 'no-trumps' })
@@ -711,6 +783,7 @@ function render(): void {
     },
     onBidAllTrumps: () => {
       clearBotPlayTimeout()
+      clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.submitBidAction({ type: 'all-trumps' })
@@ -718,6 +791,7 @@ function render(): void {
     },
     onBidDouble: () => {
       clearBotPlayTimeout()
+      clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.submitBidAction({ type: 'double' })
@@ -725,6 +799,7 @@ function render(): void {
     },
     onBidRedouble: () => {
       clearBotPlayTimeout()
+      clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
       clearFinalTrickAnimationTimeout()
       app.engine.submitBidAction({ type: 'redouble' })
@@ -732,6 +807,7 @@ function render(): void {
     },
     onPlayCard: (cardId) => {
       clearBotPlayTimeout()
+      clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
 
       const didOpenBelotePrompt = belotePromptController.handlePlayCard(cardId)
@@ -745,6 +821,7 @@ function render(): void {
   })
 
   belotePromptController.renderPendingPrompt()
+  scheduleDealPhaseAutoAdvance()
   scheduleNextBotPlay()
   scheduleScoringPhaseTimers()
 }
