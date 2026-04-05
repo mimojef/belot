@@ -82,7 +82,17 @@ function getAverageCenter(rects: DOMRect[]): Point {
   }
 }
 
-function createOverlay(zIndex: number): HTMLDivElement {
+function resolveOverlayHost(): HTMLElement {
+  const appRoot = document.querySelector('#app')
+
+  if (appRoot instanceof HTMLElement) {
+    return appRoot
+  }
+
+  return document.body
+}
+
+function createOverlay(host: HTMLElement, zIndex: number): HTMLDivElement {
   const overlay = document.createElement('div')
 
   overlay.style.position = 'fixed'
@@ -90,6 +100,8 @@ function createOverlay(zIndex: number): HTMLDivElement {
   overlay.style.pointerEvents = 'none'
   overlay.style.zIndex = String(zIndex)
   overlay.style.overflow = 'visible'
+
+  host.appendChild(overlay)
 
   return overlay
 }
@@ -277,7 +289,7 @@ export async function animateTrickCollection(
     flyDurationMs = 420,
     gatherSpreadPx = 6,
     stackSpreadPx = 12,
-    overlayZIndex = 2500,
+    overlayZIndex = 0,
   } = options
 
   const measuredCards = measureCards(options.cards)
@@ -301,8 +313,8 @@ export async function animateTrickCollection(
     return
   }
 
-  const overlay = createOverlay(overlayZIndex)
-  document.body.appendChild(overlay)
+  const overlayHost = resolveOverlayHost()
+  const overlay = createOverlay(overlayHost, overlayZIndex)
 
   const floatingCards = measuredCards.map((measuredCard, index) =>
     createFloatingCard(measuredCard, overlay, overlayZIndex + index + 1),
@@ -324,10 +336,8 @@ export async function animateTrickCollection(
         const rect = floatingCard.node.getBoundingClientRect()
         const offset = getGatherOffset(index, floatingCards.length, gatherSpreadPx)
 
-        const destinationLeft =
-          trickCenter.x + offset.x - rect.width / 2
-        const destinationTop =
-          trickCenter.y + offset.y - rect.height / 2
+        const destinationLeft = trickCenter.x + offset.x - rect.width / 2
+        const destinationTop = trickCenter.y + offset.y - rect.height / 2
 
         return animateToGatherPoint(
           floatingCard,
@@ -354,10 +364,8 @@ export async function animateTrickCollection(
           stackSpreadPx,
         )
 
-        const destinationLeft =
-          winnerAnchor.x + offset.x - rect.width / 2
-        const destinationTop =
-          winnerAnchor.y + offset.y - rect.height / 2
+        const destinationLeft = winnerAnchor.x + offset.x - rect.width / 2
+        const destinationTop = winnerAnchor.y + offset.y - rect.height / 2
 
         await animateToWinner(
           floatingCard,
