@@ -43,6 +43,9 @@ export type ScoringViewState = {
   matchTotalTeamB: number
   carryOverTeamA: number
   carryOverTeamB: number
+  hasDouble: boolean
+  hasRedouble: boolean
+  counterMultiplier: number
 }
 
 function createZeroRoundScore(): RoundScore {
@@ -150,6 +153,24 @@ function resolveWinningBidOwnerLabel(
   return '—'
 }
 
+function resolveCounterMultiplier(
+  winningBid: GameState['bidding']['winningBid']
+): number {
+  if (!winningBid) {
+    return 1
+  }
+
+  if (winningBid.redoubled) {
+    return 4
+  }
+
+  if (winningBid.doubled) {
+    return 2
+  }
+
+  return 1
+}
+
 export function getScoringViewState(state: GameState): ScoringViewState {
   const scoringState = state.scoring
   const baseRoundScore: BaseRoundScore | null = scoringState?.baseRoundScore ?? null
@@ -176,6 +197,7 @@ export function getScoringViewState(state: GameState): ScoringViewState {
       : null
 
   const outcome: Outcome | null = computedOutcome ?? storedOutcome
+  const counterMultiplier = resolveCounterMultiplier(state.bidding.winningBid)
 
   const officialRoundResult =
     baseRoundScore && outcome
@@ -185,6 +207,7 @@ export function getScoringViewState(state: GameState): ScoringViewState {
           currentCarryOver: state.score.carryOver,
           declarationsScore,
           beloteScore,
+          counterMultiplier,
         })
       : null
 
@@ -247,5 +270,8 @@ export function getScoringViewState(state: GameState): ScoringViewState {
     matchTotalTeamB: state.score.match.teamB,
     carryOverTeamA: state.score.carryOver.teamA,
     carryOverTeamB: state.score.carryOver.teamB,
+    hasDouble: state.bidding.winningBid?.doubled ?? false,
+    hasRedouble: state.bidding.winningBid?.redoubled ?? false,
+    counterMultiplier,
   }
 }

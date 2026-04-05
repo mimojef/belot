@@ -114,6 +114,10 @@ function readString(value: unknown): string | null {
   return typeof value === 'string' ? value : null
 }
 
+function readBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null
+}
+
 type ParsedBid = {
   type: string | null
   suit: Suit | null
@@ -235,6 +239,27 @@ function extractBidPresentation(
       modifierCandidates.find((candidate) => isModifierType(candidate.type)) ?? null
   }
 
+  if (!modifierBid) {
+    const winningBidRecord = asRecord(biddingRecord?.winningBid)
+    const isRedoubled = readBoolean(winningBidRecord?.redoubled)
+    const isDoubled = readBoolean(winningBidRecord?.doubled)
+    const winningBidSeat = readSeat(winningBidRecord?.seat)
+
+    if (isRedoubled) {
+      modifierBid = {
+        type: 'redouble',
+        suit: null,
+        seat: winningBidSeat,
+      }
+    } else if (isDoubled) {
+      modifierBid = {
+        type: 'double',
+        suit: null,
+        seat: winningBidSeat,
+      }
+    }
+  }
+
   return {
     baseType: baseBid?.type ?? null,
     baseSuit: baseBid?.suit ?? null,
@@ -243,6 +268,18 @@ function extractBidPresentation(
       modifierBid && isModifierType(modifierBid.type) ? modifierBid.type : null,
     modifierSeat: modifierBid?.seat ?? null,
   }
+}
+
+function getBidMultiplierLabel(modifierType: 'double' | 'redouble' | null): string {
+  if (modifierType === 'redouble') {
+    return ' x4'
+  }
+
+  if (modifierType === 'double') {
+    return ' x2'
+  }
+
+  return ''
 }
 
 export function renderScoreHud(
@@ -258,8 +295,9 @@ export function renderScoreHud(
     presentation.baseSuit
   )
   const showIcon = bidIconMarkup.length > 0
+  const bidMultiplierLabel = getBidMultiplierLabel(presentation.modifierType)
 
-  const bidSummary = `${bidLabel}: ${
+  const bidSummary = `${bidLabel}${bidMultiplierLabel}: ${
     presentation.baseSeat ? formatSeat(presentation.baseSeat) : '—'
   }`
 

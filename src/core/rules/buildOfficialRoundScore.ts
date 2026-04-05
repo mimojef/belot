@@ -70,6 +70,17 @@ function subtractRoundScores(first: RoundScore, second: RoundScore): RoundScore 
   }
 }
 
+function multiplyRoundScore(score: RoundScore, multiplier: number): RoundScore {
+  if (multiplier <= 1) {
+    return score
+  }
+
+  return {
+    teamA: score.teamA * multiplier,
+    teamB: score.teamB * multiplier,
+  }
+}
+
 function getCarryOverForTeam(carryOver: CarryOverPoints, team: Team): number {
   return team === 'A' ? carryOver.teamA : carryOver.teamB
 }
@@ -170,16 +181,30 @@ function getCombinedRecordedScore(score: RoundScore): number {
   return score.teamA + score.teamB
 }
 
+function normalizeCounterMultiplier(value: number | undefined): number {
+  if (value === 4) {
+    return 4
+  }
+
+  if (value === 2) {
+    return 2
+  }
+
+  return 1
+}
+
 export function buildOfficialRoundScore(input: {
   baseRoundScore: BaseRoundScoreResult
   roundOutcome: RoundOutcomeResult
   currentCarryOver: CarryOverPoints
   declarationsScore?: RoundScore
   beloteScore?: RoundScore
+  counterMultiplier?: number
 }): OfficialRoundScoreResult {
   const { baseRoundScore, roundOutcome, currentCarryOver } = input
   const declarationsScore = input.declarationsScore ?? createZeroRoundScore()
   const beloteScore = input.beloteScore ?? createZeroRoundScore()
+  const counterMultiplier = normalizeCounterMultiplier(input.counterMultiplier)
   const roundBreakdown = createZeroBreakdown()
 
   const expectedTotalWithPremiums =
@@ -307,7 +332,7 @@ export function buildOfficialRoundScore(input: {
     nextCarryOver = setCarryOverForTeam(
       nextCarryOver,
       roundOutcome.bidderTeam,
-      bidderRecordedPoints
+      bidderRecordedPoints * counterMultiplier
     )
   }
 
@@ -315,6 +340,8 @@ export function buildOfficialRoundScore(input: {
     addRoundScores(awardedTricks, awardedDeclarations),
     awardedBelote
   )
+
+  totalScore = multiplyRoundScore(totalScore, counterMultiplier)
 
   totalScore = applyResolvedCarryOver(
     totalScore,

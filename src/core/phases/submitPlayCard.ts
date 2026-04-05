@@ -86,6 +86,24 @@ function resolveBidderSeat(
   return winningBid.seat
 }
 
+function resolveCounterMultiplier(
+  winningBid: GameState['bidding']['winningBid']
+): number {
+  if (!winningBid) {
+    return 1
+  }
+
+  if (winningBid.redoubled) {
+    return 4
+  }
+
+  if (winningBid.doubled) {
+    return 2
+  }
+
+  return 1
+}
+
 function tryResolveBotBeloteDeclaration(
   state: GameState,
   currentSeat: NonNullable<GameState['currentTrick']['currentSeat']>,
@@ -261,6 +279,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
     const scoringContract = resolveScoringContract(state.bidding.winningBid)
     const scoringTrumpSuit = resolveScoringTrumpSuit(state.bidding.winningBid)
     const bidderSeat = resolveBidderSeat(state.bidding.winningBid)
+    const counterMultiplier = resolveCounterMultiplier(state.bidding.winningBid)
 
     if (!scoringContract) {
       return {
@@ -305,6 +324,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
       currentCarryOver: state.score.carryOver,
       declarationsScore,
       beloteScore,
+      counterMultiplier,
     })
 
     const pendingScoringTransition: PendingScoringTransition = {

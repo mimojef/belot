@@ -1,5 +1,16 @@
 import type { ScoringViewState } from '../../core/state/getScoringViewState'
 
+type ExtendedScoringViewState = ScoringViewState & {
+  counterMultiplier?: number
+  bidMultiplier?: number
+  hasDouble?: boolean
+  hasRedouble?: boolean
+  isDoubled?: boolean
+  isRedoubled?: boolean
+  countdownSeconds?: number
+  autoAdvanceCountdownSeconds?: number
+}
+
 function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -13,31 +24,80 @@ function resolveBidIcon(viewState: ScoringViewState): {
   symbol: string
   color: string
 } {
+  const blackColor = '#111111'
+  const richRedColor = '#c1121f'
+
   if (viewState.winningBidLabel === 'Купа') {
-    return { symbol: '♥', color: '#ef4444' }
+    return { symbol: '♥', color: richRedColor }
   }
 
   if (viewState.winningBidLabel === 'Каро') {
-    return { symbol: '♦', color: '#ef4444' }
+    return { symbol: '♦', color: richRedColor }
   }
 
   if (viewState.winningBidLabel === 'Пика') {
-    return { symbol: '♠', color: '#ffffff' }
+    return { symbol: '♠', color: blackColor }
   }
 
   if (viewState.winningBidLabel === 'Спатия') {
-    return { symbol: '♣', color: '#ffffff' }
+    return { symbol: '♣', color: blackColor }
   }
 
   if (viewState.winningBidLabel === 'Всичко коз') {
-    return { symbol: 'J', color: '#ffffff' }
+    return { symbol: 'J', color: richRedColor }
   }
 
   if (viewState.winningBidLabel === 'Без коз') {
-    return { symbol: 'A', color: '#ffffff' }
+    return { symbol: 'A', color: blackColor }
   }
 
-  return { symbol: '•', color: '#ffffff' }
+  return { symbol: '•', color: blackColor }
+}
+
+function resolveBidMultiplierText(viewState: ScoringViewState): string {
+  const extendedViewState = viewState as ExtendedScoringViewState
+
+  const explicitMultiplier =
+    typeof extendedViewState.counterMultiplier === 'number'
+      ? extendedViewState.counterMultiplier
+      : typeof extendedViewState.bidMultiplier === 'number'
+        ? extendedViewState.bidMultiplier
+        : null
+
+  if (explicitMultiplier === 4) {
+    return ' x4'
+  }
+
+  if (explicitMultiplier === 2) {
+    return ' x2'
+  }
+
+  if (extendedViewState.hasRedouble || extendedViewState.isRedoubled) {
+    return ' x4'
+  }
+
+  if (extendedViewState.hasDouble || extendedViewState.isDoubled) {
+    return ' x2'
+  }
+
+  return ''
+}
+
+function resolveCountdownSeconds(viewState: ScoringViewState): number {
+  const extendedViewState = viewState as ExtendedScoringViewState
+
+  const rawValue =
+    typeof extendedViewState.countdownSeconds === 'number'
+      ? extendedViewState.countdownSeconds
+      : typeof extendedViewState.autoAdvanceCountdownSeconds === 'number'
+        ? extendedViewState.autoAdvanceCountdownSeconds
+        : 5
+
+  if (!Number.isFinite(rawValue)) {
+    return 5
+  }
+
+  return Math.max(0, Math.ceil(rawValue))
 }
 
 function formatBonusValue(value: number): string {
@@ -187,6 +247,8 @@ export function renderScoringPanel(viewState: ScoringViewState): string {
   }
 
   const bidIcon = resolveBidIcon(viewState)
+  const bidMultiplierText = resolveBidMultiplierText(viewState)
+  const countdownSeconds = resolveCountdownSeconds(viewState)
   const outcomeCells = resolveOutcomeCells(viewState)
 
   return `
@@ -238,8 +300,9 @@ export function renderScoringPanel(viewState: ScoringViewState): string {
         <div>
           ${escapeHtml(viewState.winningBidLabel.toUpperCase())}
           ${viewState.winningBidOwnerLabel !== '—'
-            ? `(${escapeHtml(viewState.winningBidOwnerLabel)})`
+            ? ` (${escapeHtml(viewState.winningBidOwnerLabel)})`
             : ''}
+          ${escapeHtml(bidMultiplierText)}
         </div>
       </div>
 
@@ -322,11 +385,12 @@ export function renderScoringPanel(viewState: ScoringViewState): string {
 
       <div
         style="
+          position:relative;
           min-height:52px;
           display:flex;
           align-items:center;
           justify-content:center;
-          padding:0 18px;
+          padding:0 88px 0 18px;
           color:#f1f5f9;
           font-size:18px;
           font-weight:500;
@@ -334,7 +398,24 @@ export function renderScoringPanel(viewState: ScoringViewState): string {
           border-top:1px solid rgba(214, 156, 46, 0.5);
         "
       >
-        ${escapeHtml(viewState.outcomeLabel)}
+        <div>
+          ${escapeHtml(viewState.outcomeLabel)}
+        </div>
+
+        <div
+          style="
+            position:absolute;
+            right:18px;
+            bottom:12px;
+            color:#f4b63a;
+            font-size:16px;
+            font-weight:800;
+            letter-spacing:0.02em;
+            white-space:nowrap;
+          "
+        >
+          ${escapeHtml(String(countdownSeconds))} сек.
+        </div>
       </div>
     </section>
   `
