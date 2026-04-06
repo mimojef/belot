@@ -13,12 +13,14 @@ if (!rootElement) {
   throw new Error('Root element #app was not found.')
 }
 
-const BOT_PLAY_DELAY_MS = 700
+const BOT_PLAY_DELAY_MS = 1500
 const BOT_BIDDING_DELAY_MS = 1500
-const FINAL_TRICK_CARD_FLIGHT_MS = 460
+const FINAL_TRICK_CARD_FLIGHT_MS = 420
+const FINAL_TRICK_CARD_HOLD_MS = 340
 const FLOATING_CARD_WIDTH = 148
 const FLOATING_CARD_HEIGHT = 215
 const CUTTING_COUNTDOWN_MS = 20000
+const PLAYING_COUNTDOWN_MS = 20000
 const BOT_CUTTING_AUTO_SELECT_MS = 1500
 const CUTTING_SELECTION_RESOLVE_MS = 500
 const CUT_RESOLVE_AUTO_ADVANCE_MS = 0
@@ -70,6 +72,9 @@ let resizeFrameId: number | null = null
 let botPlayTimeoutId: number | null = null
 let botBidTimeoutId: number | null = null
 let activeBotBidTurnKey: string | null = null
+let activePlayingTurnKey: string | null = null
+let activePlayingTurnStartedAt = 0
+let activePlayingPausedRemainingMs: number | null = null
 let cuttingAutoSelectTimeoutId: number | null = null
 let cuttingResolveTimeoutId: number | null = null
 let dealPhaseAutoAdvanceTimeoutId: number | null = null
@@ -80,6 +85,8 @@ let isAnimatingFinalTrickCard = false
 let activeFinalTrickAnimation: Animation | null = null
 let activeFinalTrickFloatingCard: HTMLElement | null = null
 let activeFinalTrickSourceElement: HTMLElement | null = null
+let finalTrickHoldTimeoutId: number | null = null
+let bottomBotTakeoverActive = false
 
 function clearBotPlayTimeout(): void {
   if (botPlayTimeoutId !== null) {
@@ -139,6 +146,11 @@ function clearFinalTrickAnimationTimeout(): void {
     animationToCancel.cancel()
   }
 
+  if (finalTrickHoldTimeoutId !== null) {
+    window.clearTimeout(finalTrickHoldTimeoutId)
+    finalTrickHoldTimeoutId = null
+  }
+
   if (activeFinalTrickFloatingCard?.parentNode) {
     activeFinalTrickFloatingCard.parentNode.removeChild(activeFinalTrickFloatingCard)
   }
@@ -151,6 +163,37 @@ function clearFinalTrickAnimationTimeout(): void {
 
   activeFinalTrickSourceElement = null
   isAnimatingFinalTrickCard = false
+}
+
+function resetPlayingTurnTracking(): void {
+  activePlayingTurnKey = null
+  activePlayingTurnStartedAt = 0
+  activePlayingPausedRemainingMs = null
+}
+
+function removeBottomBotTakeoverPopup(): void {
+  document.querySelector('[data-bottom-bot-takeover-popup-root]')?.remove()
+}
+
+function setBottomBotTakeoverActive(nextValue: boolean): void {
+  if (bottomBotTakeoverActive === nextValue) {
+    return
+  }
+
+  bottomBotTakeoverActive = nextValue
+  resetPlayingTurnTracking()
+
+  if (!nextValue) {
+    removeBottomBotTakeoverPopup()
+  }
+}
+
+function getRenderClockNow(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now()
+  }
+
+  return Date.now()
 }
 
 function parseRotationFromTransform(transformValue: string | null): number {
@@ -182,6 +225,26 @@ function getSuitSymbol(suit: Suit): string {
 
 function isRedSuit(suit: Suit): boolean {
   return suit === 'hearts' || suit === 'diamonds'
+}
+
+function getCurrentStageScale(): number {
+  const stageElement = document.querySelector<HTMLElement>('[data-game-stage="1"]')
+  const rawScale = Number(stageElement?.dataset.stageScale ?? '1')
+
+  if (!Number.isFinite(rawScale) || rawScale <= 0) {
+    return 1
+  }
+
+  return rawScale
+}
+
+function getScaledFloatingCardSize(): { width: number; height: number } {
+  const stageScale = getCurrentStageScale()
+
+  return {
+    width: FLOATING_CARD_WIDTH * stageScale,
+    height: FLOATING_CARD_HEIGHT * stageScale,
+  }
 }
 
 function resolveCardForSeat(cardId: string, seat: Seat): Card | null {
@@ -220,12 +283,13 @@ function getSeatPlayOffset(seat: Seat): { leftOffset: number; topOffset: number;
 function resolveFallbackStartRectForSeat(
   seat: Seat
 ): { left: number; top: number; rotate: number } {
+  const { width, height } = getScaledFloatingCardSize()
   const centerX = window.innerWidth / 2
   const centerY = window.innerHeight / 2
 
   if (seat === 'top') {
     return {
-      left: centerX - FLOATING_CARD_WIDTH / 2,
+      left: centerX - width / 2,
       top: 64,
       rotate: 0,
     }
@@ -234,22 +298,22 @@ function resolveFallbackStartRectForSeat(
   if (seat === 'left') {
     return {
       left: 52,
-      top: centerY - FLOATING_CARD_HEIGHT / 2,
+      top: centerY - height / 2,
       rotate: -8,
     }
   }
 
   if (seat === 'right') {
     return {
-      left: window.innerWidth - FLOATING_CARD_WIDTH - 52,
-      top: centerY - FLOATING_CARD_HEIGHT / 2,
+      left: window.innerWidth - width - 52,
+      top: centerY - height / 2,
       rotate: 8,
     }
   }
 
   return {
-    left: centerX - FLOATING_CARD_WIDTH / 2,
-    top: window.innerHeight - FLOATING_CARD_HEIGHT - 72,
+    left: centerX - width / 2,
+    top: window.innerHeight - height - 72,
     rotate: 0,
   }
 }
@@ -258,6 +322,8 @@ function resolveStartRectForSeat(
   seat: Seat,
   cardId: string
 ): { left: number; top: number; rotate: number; sourceElement?: HTMLElement | null } | null {
+  const { width, height } = getScaledFloatingCardSize()
+
   if (seat === 'bottom') {
     const sourceElement = getBottomSourceElement(cardId)
 
@@ -281,7 +347,7 @@ function resolveStartRectForSeat(
 
     if (seat === 'top') {
       return {
-        left: rect.left + rect.width / 2 - FLOATING_CARD_WIDTH / 2,
+        left: rect.left + rect.width / 2 - width / 2,
         top: rect.top + rect.height - 36,
         rotate: 0,
       }
@@ -290,22 +356,22 @@ function resolveStartRectForSeat(
     if (seat === 'left') {
       return {
         left: rect.left + rect.width - 34,
-        top: rect.top + rect.height / 2 - FLOATING_CARD_HEIGHT / 2,
+        top: rect.top + rect.height / 2 - height / 2,
         rotate: -8,
       }
     }
 
     if (seat === 'right') {
       return {
-        left: rect.left - FLOATING_CARD_WIDTH + 34,
-        top: rect.top + rect.height / 2 - FLOATING_CARD_HEIGHT / 2,
+        left: rect.left - width + 34,
+        top: rect.top + rect.height / 2 - height / 2,
         rotate: 8,
       }
     }
 
     return {
-      left: rect.left + rect.width / 2 - FLOATING_CARD_WIDTH / 2,
-      top: rect.top - FLOATING_CARD_HEIGHT + 34,
+      left: rect.left + rect.width / 2 - width / 2,
+      top: rect.top - height + 34,
       rotate: 0,
     }
   }
@@ -341,13 +407,15 @@ function resolvePlayTargetRectForSeat(
 }
 
 function createFloatingCardElement(card: Card): HTMLDivElement {
+  const { width, height } = getScaledFloatingCardSize()
   const suitSymbol = getSuitSymbol(card.suit)
   const cardColor = isRedSuit(card.suit) ? '#b3261e' : '#13253d'
+  const stageScale = getCurrentStageScale()
 
   const wrapper = document.createElement('div')
   wrapper.style.position = 'fixed'
-  wrapper.style.width = `${FLOATING_CARD_WIDTH}px`
-  wrapper.style.height = `${FLOATING_CARD_HEIGHT}px`
+  wrapper.style.width = `${width}px`
+  wrapper.style.height = `${height}px`
   wrapper.style.pointerEvents = 'none'
   wrapper.style.zIndex = '9999'
   wrapper.style.transformOrigin = 'center center'
@@ -357,10 +425,10 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
       style="
         position:absolute;
         inset:0;
-        border-radius:14px;
+        border-radius:${14 * stageScale}px;
         background:linear-gradient(180deg, rgba(255,255,255,0.99) 0%, rgba(241,245,250,0.99) 100%);
         box-shadow:
-          0 16px 34px rgba(0,0,0,0.24),
+          0 ${16 * stageScale}px ${34 * stageScale}px rgba(0,0,0,0.24),
           inset 0 1px 0 rgba(255,255,255,0.95),
           inset 0 -1px 0 rgba(0,0,0,0.05);
         border:1px solid rgba(21,48,82,0.10);
@@ -370,8 +438,8 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
     <div
       style="
         position:absolute;
-        inset:4px;
-        border-radius:10px;
+        inset:${4 * stageScale}px;
+        border-radius:${10 * stageScale}px;
         border:1px solid rgba(20,49,84,0.12);
         background:linear-gradient(180deg, rgba(255,255,255,0.94) 0%, rgba(248,250,253,0.94) 100%);
       "
@@ -380,19 +448,19 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
     <div
       style="
         position:absolute;
-        left:9px;
-        top:10px;
+        left:${9 * stageScale}px;
+        top:${10 * stageScale}px;
         display:flex;
         flex-direction:column;
         align-items:center;
-        gap:1px;
+        gap:${1 * stageScale}px;
         color:${cardColor};
         line-height:1;
       "
     >
       <span
         style="
-          font-size:18px;
+          font-size:${18 * stageScale}px;
           font-weight:900;
           letter-spacing:0.02em;
         "
@@ -401,7 +469,7 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
       </span>
       <span
         style="
-          font-size:16px;
+          font-size:${16 * stageScale}px;
           font-weight:900;
         "
       >
@@ -412,12 +480,12 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
     <div
       style="
         position:absolute;
-        right:9px;
-        bottom:8px;
+        right:${9 * stageScale}px;
+        bottom:${8 * stageScale}px;
         display:flex;
         flex-direction:column;
         align-items:center;
-        gap:1px;
+        gap:${1 * stageScale}px;
         color:${cardColor};
         line-height:1;
         transform:rotate(180deg);
@@ -425,7 +493,7 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
     >
       <span
         style="
-          font-size:18px;
+          font-size:${18 * stageScale}px;
           font-weight:900;
           letter-spacing:0.02em;
         "
@@ -434,7 +502,7 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
       </span>
       <span
         style="
-          font-size:16px;
+          font-size:${16 * stageScale}px;
           font-weight:900;
         "
       >
@@ -449,7 +517,7 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
         top:54%;
         transform:translate(-50%, -50%);
         color:${cardColor};
-        font-size:42px;
+        font-size:${42 * stageScale}px;
         line-height:1;
         font-weight:900;
         text-shadow:0 2px 6px rgba(0,0,0,0.08);
@@ -752,6 +820,257 @@ function getBotBidTurnKey(state: GameState): string | null {
   return `${state.phase}:${state.bidding.entries.length}:${currentSeat}`
 }
 
+function getPlayingTurnKey(state: GameState): string | null {
+  if (state.phase !== 'playing') {
+    return null
+  }
+
+  const currentSeat = state.playing?.currentTurnSeat ?? null
+
+  if (!currentSeat) {
+    return null
+  }
+
+  const completedTricksCount = state.playing?.completedTricks.length ?? 0
+  const currentTrickPlaysCount =
+    state.playing?.currentTrick.plays.length ?? state.currentTrick.plays.length ?? 0
+
+  const controlMode =
+    currentSeat === 'bottom' && !bottomBotTakeoverActive ? 'human' : 'bot'
+
+  return `${completedTricksCount}:${currentTrickPlaysCount}:${currentSeat}:${controlMode}`
+}
+
+function syncPlayingTurnState(state: GameState): void {
+  const turnKey = getPlayingTurnKey(state)
+
+  if (turnKey === null) {
+    resetPlayingTurnTracking()
+    return
+  }
+
+  if (activePlayingTurnKey === turnKey) {
+    return
+  }
+
+  activePlayingTurnKey = turnKey
+  activePlayingTurnStartedAt = getRenderClockNow()
+  activePlayingPausedRemainingMs = null
+}
+
+function isPlayingCountdownPaused(state: GameState): boolean {
+  if (state.phase !== 'playing') {
+    return false
+  }
+
+  const currentSeat = state.playing?.currentTurnSeat ?? null
+
+  return (
+    currentSeat === 'bottom' &&
+    !bottomBotTakeoverActive &&
+    belotePromptController.hasPendingPrompt()
+  )
+}
+
+function getRawPlayingCountdownRemainingMs(state: GameState): number | null {
+  if (state.phase !== 'playing') {
+    return null
+  }
+
+  const turnKey = getPlayingTurnKey(state)
+
+  if (!turnKey) {
+    return null
+  }
+
+  if (
+    activePlayingTurnKey !== turnKey ||
+    !Number.isFinite(activePlayingTurnStartedAt) ||
+    activePlayingTurnStartedAt <= 0
+  ) {
+    return PLAYING_COUNTDOWN_MS
+  }
+
+  const now = getRenderClockNow()
+  const elapsedMs = Math.max(0, now - activePlayingTurnStartedAt)
+
+  return Math.max(0, PLAYING_COUNTDOWN_MS - elapsedMs)
+}
+
+function getPlayingCountdownRemainingMs(state: GameState): number | null {
+  if (state.phase !== 'playing') {
+    return null
+  }
+
+  if (activePlayingPausedRemainingMs !== null) {
+    return Math.max(0, Math.min(PLAYING_COUNTDOWN_MS, activePlayingPausedRemainingMs))
+  }
+
+  return getRawPlayingCountdownRemainingMs(state)
+}
+
+function getPlayingActionDelayMs(state: GameState): number | null {
+  if (state.phase !== 'playing') {
+    return null
+  }
+
+  const currentSeat = state.playing?.currentTurnSeat ?? null
+
+  if (!currentSeat) {
+    return null
+  }
+
+  if (currentSeat === 'bottom' && !bottomBotTakeoverActive) {
+    return PLAYING_COUNTDOWN_MS
+  }
+
+  return BOT_PLAY_DELAY_MS
+}
+
+function getPlayingActionRemainingMs(state: GameState): number | null {
+  const totalDelayMs = getPlayingActionDelayMs(state)
+
+  if (totalDelayMs === null) {
+    return null
+  }
+
+  if (
+    state.phase === 'playing' &&
+    state.playing?.currentTurnSeat === 'bottom' &&
+    !bottomBotTakeoverActive &&
+    activePlayingPausedRemainingMs !== null
+  ) {
+    return Math.max(0, Math.min(totalDelayMs, activePlayingPausedRemainingMs))
+  }
+
+  const turnKey = getPlayingTurnKey(state)
+
+  if (
+    !turnKey ||
+    activePlayingTurnKey !== turnKey ||
+    !Number.isFinite(activePlayingTurnStartedAt) ||
+    activePlayingTurnStartedAt <= 0
+  ) {
+    return totalDelayMs
+  }
+
+  const now = getRenderClockNow()
+  const elapsedMs = Math.max(0, now - activePlayingTurnStartedAt)
+
+  return Math.max(0, totalDelayMs - elapsedMs)
+}
+
+function syncPlayingPauseState(state: GameState): void {
+  if (state.phase !== 'playing') {
+    activePlayingPausedRemainingMs = null
+    return
+  }
+
+  const shouldPause = isPlayingCountdownPaused(state)
+
+  if (shouldPause) {
+    if (activePlayingPausedRemainingMs === null) {
+      activePlayingPausedRemainingMs = getRawPlayingCountdownRemainingMs(state)
+    }
+
+    return
+  }
+
+  if (activePlayingPausedRemainingMs !== null) {
+    activePlayingTurnStartedAt =
+      getRenderClockNow() - (PLAYING_COUNTDOWN_MS - activePlayingPausedRemainingMs)
+    activePlayingPausedRemainingMs = null
+  }
+}
+
+function renderBottomBotTakeoverPopup(): void {
+  const state = app.engine.getState()
+  const shouldShowPopup = bottomBotTakeoverActive && state.phase === 'playing'
+
+  if (!shouldShowPopup) {
+    removeBottomBotTakeoverPopup()
+    return
+  }
+
+  const existingRoot = document.querySelector('[data-bottom-bot-takeover-popup-root]')
+
+  if (existingRoot) {
+    return
+  }
+
+  const overlay = document.createElement('div')
+  overlay.setAttribute('data-bottom-bot-takeover-popup-root', 'true')
+  overlay.innerHTML = `
+    <div
+      style="
+        position:fixed;
+        inset:0;
+        background:rgba(2, 6, 23, 0.52);
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        padding:24px;
+        z-index:9998;
+        pointer-events:auto;
+      "
+    >
+      <div
+        style="
+          width:min(92vw, 560px);
+          background:rgba(15, 23, 42, 0.98);
+          border:1px solid rgba(148, 163, 184, 0.22);
+          border-radius:18px;
+          padding:22px;
+          box-shadow:0 24px 60px rgba(0,0,0,0.35);
+          color:#f8fafc;
+          font-family:Arial, Helvetica, sans-serif;
+          text-align:center;
+        "
+      >
+        <div
+          style="
+            font-size:22px;
+            font-weight:800;
+            line-height:1.4;
+            margin-bottom:18px;
+          "
+        >
+          Поради изтичане на времето за реакция играта беше поета от робот
+        </div>
+
+        <button
+          type="button"
+          data-bottom-bot-takeover-return-button
+          style="
+            min-width:180px;
+            border:0;
+            border-radius:12px;
+            padding:13px 18px;
+            background:#22c55e;
+            color:#052e16;
+            font-size:15px;
+            font-weight:800;
+            cursor:pointer;
+          "
+        >
+          Върни се
+        </button>
+      </div>
+    </div>
+  `
+
+  document.body.appendChild(overlay)
+
+  const returnButton = overlay.querySelector<HTMLButtonElement>(
+    '[data-bottom-bot-takeover-return-button]'
+  )
+
+  returnButton?.addEventListener('click', () => {
+    setBottomBotTakeoverActive(false)
+    render()
+  })
+}
+
 function scheduleCuttingAutoSelect(): void {
   clearCuttingAutoSelectTimeout()
 
@@ -1014,21 +1333,35 @@ function animateFinalTrickCardThenSubmit(cardId: string, seat: Seat): boolean {
 
     activeFinalTrickAnimation = null
 
-    if (activeFinalTrickFloatingCard?.parentNode) {
-      activeFinalTrickFloatingCard.parentNode.removeChild(activeFinalTrickFloatingCard)
-    }
+    finalTrickHoldTimeoutId = window.setTimeout(() => {
+      finalTrickHoldTimeoutId = null
 
-    activeFinalTrickFloatingCard = null
-    activeFinalTrickSourceElement = null
-    isAnimatingFinalTrickCard = false
+      if (activeFinalTrickFloatingCard?.parentNode) {
+        activeFinalTrickFloatingCard.parentNode.removeChild(activeFinalTrickFloatingCard)
+      }
 
-    app.engine.submitPlayCard(cardId)
-    render()
+      activeFinalTrickFloatingCard = null
+
+      if (activeFinalTrickSourceElement) {
+        activeFinalTrickSourceElement.style.opacity = ''
+      }
+
+      activeFinalTrickSourceElement = null
+      isAnimatingFinalTrickCard = false
+
+      app.engine.submitPlayCard(cardId)
+      render()
+    }, FINAL_TRICK_CARD_HOLD_MS)
   }
 
   animation.oncancel = () => {
     if (activeFinalTrickAnimation === animation) {
       activeFinalTrickAnimation = null
+    }
+
+    if (finalTrickHoldTimeoutId !== null) {
+      window.clearTimeout(finalTrickHoldTimeoutId)
+      finalTrickHoldTimeoutId = null
     }
 
     if (activeFinalTrickFloatingCard?.parentNode) {
@@ -1074,7 +1407,7 @@ function submitPlayCardWithFlow(cardId: string, seat: Seat): void {
   render()
 }
 
-function scheduleNextBotPlay(): void {
+function schedulePlayingPhaseTimers(): void {
   clearBotPlayTimeout()
 
   if (isAnimatingFinalTrickCard) {
@@ -1089,7 +1422,20 @@ function scheduleNextBotPlay(): void {
 
   const currentTurnSeat = state.playing?.currentTurnSeat ?? null
 
-  if (!currentTurnSeat || currentTurnSeat === 'bottom') {
+  if (!currentTurnSeat) {
+    return
+  }
+
+  syncPlayingTurnState(state)
+  syncPlayingPauseState(state)
+
+  if (isPlayingCountdownPaused(state)) {
+    return
+  }
+
+  const actionRemainingMs = getPlayingActionRemainingMs(state)
+
+  if (actionRemainingMs === null) {
     return
   }
 
@@ -1107,9 +1453,27 @@ function scheduleNextBotPlay(): void {
       return
     }
 
+    if (isPlayingCountdownPaused(latestState)) {
+      render()
+      return
+    }
+
+    const latestTurnKey = getPlayingTurnKey(latestState)
+
+    if (latestTurnKey === null || latestTurnKey !== activePlayingTurnKey) {
+      render()
+      return
+    }
+
     const latestSeat = latestState.playing?.currentTurnSeat ?? null
 
-    if (!latestSeat || latestSeat === 'bottom') {
+    if (!latestSeat) {
+      render()
+      return
+    }
+
+    if (latestSeat === 'bottom' && !bottomBotTakeoverActive) {
+      setBottomBotTakeoverActive(true)
       render()
       return
     }
@@ -1121,8 +1485,12 @@ function scheduleNextBotPlay(): void {
       return
     }
 
+    if (latestSeat === 'bottom' && bottomBotTakeoverActive) {
+      belotePromptController.registerAutoDeclarationsForPlay(botCard.id)
+    }
+
     submitPlayCardWithFlow(botCard.id, latestSeat)
-  }, BOT_PLAY_DELAY_MS)
+  }, Math.max(0, actionRemainingMs))
 }
 
 function scheduleNextBotBid(): void {
@@ -1180,6 +1548,17 @@ function scheduleNextBotBid(): void {
 }
 
 function render(): void {
+  const stateBeforeRender = app.engine.getState()
+
+  if (stateBeforeRender.phase !== 'playing' && bottomBotTakeoverActive) {
+    setBottomBotTakeoverActive(false)
+  }
+
+  syncPlayingTurnState(stateBeforeRender)
+  syncPlayingPauseState(stateBeforeRender)
+
+  const playingCountdownRemainingMs = getPlayingCountdownRemainingMs(stateBeforeRender)
+
   renderApp(appRoot, app, {
     onNextPhaseClick: () => {
       clearBotPlayTimeout()
@@ -1291,19 +1670,24 @@ function render(): void {
       const didOpenBelotePrompt = belotePromptController.handlePlayCard(cardId)
 
       if (didOpenBelotePrompt) {
+        activePlayingPausedRemainingMs = getRawPlayingCountdownRemainingMs(app.engine.getState())
+        belotePromptController.renderPendingPrompt()
         return
       }
 
       submitPlayCardWithFlow(cardId, 'bottom')
     },
+    playingCountdownRemainingMs,
+    bottomBotTakeoverActive,
   })
 
   belotePromptController.renderPendingPrompt()
+  renderBottomBotTakeoverPopup()
   scheduleCuttingAutoSelect()
   scheduleCuttingResolve()
   scheduleDealPhaseAutoAdvance()
   scheduleNextBotBid()
-  scheduleNextBotPlay()
+  schedulePlayingPhaseTimers()
   scheduleScoringPhaseTimers()
 }
 

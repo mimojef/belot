@@ -26,6 +26,8 @@ type RenderAppOptions = {
   onBidDouble?: () => void
   onBidRedouble?: () => void
   onPlayCard?: (cardId: string) => void
+  playingCountdownRemainingMs?: number | null
+  bottomBotTakeoverActive?: boolean
 }
 
 type PlayingStateWithTrickCollectionSnapshot = NonNullable<GameState['playing']> & {
@@ -380,6 +382,7 @@ export function renderApp(
   const stageScale = getStageScale()
   const cuttingCountdownRemainingMs = getCuttingCountdownRemainingMs(state)
   const biddingCountdownRemainingMs = getBiddingCountdownRemainingMs(state)
+  const bottomBotTakeoverActive = options.bottomBotTakeoverActive === true
 
   if (state.phase !== 'cutting') {
     clearCutResolveTimeout()
@@ -474,11 +477,30 @@ export function renderApp(
     ? renderState.bidding.currentSeat
     : ((renderState.playing?.currentTurnSeat ?? null) as Seat | null)
 
-  const seatPanelPhase = isBiddingPhase ? 'cutting' : renderState.phase
-  const seatPanelCountdownSeat = isBiddingPhase ? activeSeat : state.round.cutterSeat
-  const seatPanelCountdownRemainingMs = isBiddingPhase
+  const shouldReuseCountdownForBidding =
+    isBiddingPhase && activeSeat !== null
+
+  const shouldReuseCountdownForPlaying =
+    isPlayingPhase &&
+    activeSeat !== null &&
+    typeof options.playingCountdownRemainingMs === 'number' &&
+    Number.isFinite(options.playingCountdownRemainingMs)
+
+  const seatPanelPhase =
+    shouldReuseCountdownForBidding || shouldReuseCountdownForPlaying
+      ? 'cutting'
+      : renderState.phase
+
+  const seatPanelCountdownSeat =
+    shouldReuseCountdownForBidding || shouldReuseCountdownForPlaying
+      ? activeSeat
+      : state.round.cutterSeat
+
+  const seatPanelCountdownRemainingMs = shouldReuseCountdownForBidding
     ? biddingCountdownRemainingMs
-    : cuttingCountdownRemainingMs
+    : shouldReuseCountdownForPlaying
+      ? options.playingCountdownRemainingMs ?? 0
+      : cuttingCountdownRemainingMs
 
   const centerMainContent = roundSetupFlow.isRoundSetupPhase
     ? roundSetupFlow.centerContent
@@ -672,7 +694,7 @@ export function renderApp(
               transform:translateX(-50%);
               width:1040px;
               z-index:1;
-              pointer-events:auto;
+              pointer-events:${bottomBotTakeoverActive ? 'none' : 'auto'};
             "
           >
             ${renderBottomHandPanel(bottomHandViewState)}
@@ -801,7 +823,7 @@ export function renderApp(
     )
   }
 
-  if (state.phase === 'playing' && isPlayingPhase) {
+  if (state.phase === 'playing' && isPlayingPhase && !bottomBotTakeoverActive) {
     bindPlayCardClicks(getActionElements(rootElement, 'play-card'), options.onPlayCard)
   }
 

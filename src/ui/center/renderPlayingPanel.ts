@@ -2,6 +2,8 @@ import type { PlayingViewState } from '../../core/state/getPlayingViewState'
 import type { Seat } from '../../data/constants/seatOrder'
 import type { Card, Suit } from '../../core/state/gameTypes'
 
+let lastRenderedTrickStateKey: string | null = null
+
 function escapeHtml(value: string): string {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -79,6 +81,12 @@ function getEntryOffsetBySeat(seat: Seat): { x: number; y: number } {
   return { x: 0, y: 190 }
 }
 
+function getCurrentTrickStateKey(viewState: PlayingViewState): string {
+  return viewState.plays
+    .map((play) => `${play.seat}:${play.card.id}`)
+    .join('|')
+}
+
 function renderPlayTarget(seat: Seat): string {
   const seatOffset = getSeatCardOffset(seat)
 
@@ -107,13 +115,13 @@ function getEntryAnimationStyle(
   play: { seat: Seat },
   index: number,
   count: number,
-  finalRotate: number
+  finalRotate: number,
+  shouldAnimateNewestCard: boolean
 ): string {
   const isNewestCard = index === count - 1
-  const shouldAnimateNewestCard = isNewestCard && count < 4
 
-  if (!shouldAnimateNewestCard) {
-    return `opacity:1;`
+  if (!isNewestCard || !shouldAnimateNewestCard) {
+    return 'opacity:1;'
   }
 
   const entryOffset = getEntryOffsetBySeat(play.seat)
@@ -122,7 +130,7 @@ function getEntryAnimationStyle(
     --belot-entry-x:${entryOffset.x}px;
     --belot-entry-y:${entryOffset.y}px;
     --belot-final-rotate:${finalRotate}deg;
-    animation: belot-play-card-entry 260ms cubic-bezier(0.22, 1, 0.36, 1);
+    animation: belot-play-card-entry 400ms cubic-bezier(0.22, 1, 0.36, 1);
     opacity:1;
   `
 }
@@ -130,7 +138,8 @@ function getEntryAnimationStyle(
 function renderPlayedCard(
   play: { seat: Seat; card: Card },
   index: number,
-  count: number
+  count: number,
+  shouldAnimateNewestCard: boolean
 ): string {
   const suitSymbol = getSuitSymbol(play.card.suit)
   const cardColor = isRedSuit(play.card.suit) ? '#b3261e' : '#13253d'
@@ -140,7 +149,13 @@ function renderPlayedCard(
   const finalLeft = seatOffset.leftOffset + orderSpread.leftOffset
   const finalTop = seatOffset.topOffset + orderSpread.topOffset
   const finalRotate = seatOffset.rotate + orderSpread.rotate
-  const animationStyle = getEntryAnimationStyle(play, index, count, finalRotate)
+  const animationStyle = getEntryAnimationStyle(
+    play,
+    index,
+    count,
+    finalRotate,
+    shouldAnimateNewestCard
+  )
 
   return `
     <div
@@ -273,11 +288,17 @@ function renderPlayedCard(
 }
 
 function renderCenterTrick(viewState: PlayingViewState): string {
-  return `
+  const trickStateKey = getCurrentTrickStateKey(viewState)
+  const shouldAnimateNewestCard =
+    viewState.plays.length > 0 &&
+    viewState.plays.length < 4 &&
+    trickStateKey !== lastRenderedTrickStateKey
+
+  const html = `
     <style>
       @keyframes belot-play-card-entry {
         0% {
-          opacity: 0;
+          opacity: 1;
           transform:
             translate(var(--belot-entry-x), var(--belot-entry-y))
             rotate(var(--belot-final-rotate))
@@ -310,10 +331,20 @@ function renderCenterTrick(viewState: PlayingViewState): string {
       ${renderPlayTarget('top')}
       ${renderPlayTarget('right')}
       ${viewState.plays
-        .map((play, index) => renderPlayedCard(play, index, viewState.plays.length))
+        .map((play, index) =>
+          renderPlayedCard(
+            play,
+            index,
+            viewState.plays.length,
+            shouldAnimateNewestCard
+          )
+        )
         .join('')}
     </div>
   `
+
+  lastRenderedTrickStateKey = trickStateKey || null
+  return html
 }
 
 export function renderPlayingPanel(viewState: PlayingViewState): string {

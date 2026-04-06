@@ -23,6 +23,8 @@ type PendingBelotePrompt = {
 
 export type BelotePromptController = {
   handlePlayCard(cardId: string): boolean
+  registerAutoDeclarationsForPlay(cardId: string): void
+  hasPendingPrompt(): boolean
   renderPendingPrompt(): void
 }
 
@@ -343,6 +345,42 @@ function resolvePromptOptions(state: GameState, cardId: string): PendingPromptOp
   })
 }
 
+function getPendingBelotePromptKey(prompt: PendingBelotePrompt): string {
+  const optionKeys = prompt.options.map((option) => {
+    const declarationKeys = option.declarations
+      .map((declaration) => {
+        return [
+          declaration.type,
+          declaration.points,
+          declaration.suit ?? '',
+          declaration.highRank ?? '',
+          getDeclarationCardKey(declaration),
+        ].join(':')
+      })
+      .join(',')
+
+    return `${option.id}:${option.defaultChecked ? '1' : '0'}:${declarationKeys}`
+  })
+
+  return `${prompt.cardId}::${optionKeys.join('|')}`
+}
+
+function getDefaultDeclarationsFromPrompt(
+  prompt: PendingBelotePrompt | null
+): Declaration[] {
+  if (!prompt) {
+    return []
+  }
+
+  return prompt.options.flatMap((option) => {
+    if (!option.defaultChecked) {
+      return []
+    }
+
+    return option.declarations
+  })
+}
+
 export function createBelotePromptController(params: {
   app: AppBootstrap
   render: () => void
@@ -350,9 +388,11 @@ export function createBelotePromptController(params: {
   const { app, render } = params
 
   let pendingBelotePrompt: PendingBelotePrompt | null = null
+  let renderedPromptKey: string | null = null
 
   function removeBelotePrompt(): void {
     document.querySelector('[data-belote-prompt-root]')?.remove()
+    renderedPromptKey = null
   }
 
   function registerDeclarations(declarations: Declaration[]): void {
@@ -399,10 +439,23 @@ export function createBelotePromptController(params: {
     }
   }
 
-  function renderPendingPrompt(): void {
-    removeBelotePrompt()
+  function hasPendingPrompt(): boolean {
+    return pendingBelotePrompt !== null
+  }
 
+  function registerAutoDeclarationsForPlay(cardId: string): void {
+    const prompt = resolveBelotePrompt(cardId)
+
+    if (!prompt) {
+      return
+    }
+
+    registerDeclarations(getDefaultDeclarationsFromPrompt(prompt))
+  }
+
+  function renderPendingPrompt(): void {
     if (!pendingBelotePrompt) {
+      removeBelotePrompt()
       return
     }
 
@@ -410,8 +463,19 @@ export function createBelotePromptController(params: {
 
     if (currentState.phase !== 'playing') {
       pendingBelotePrompt = null
+      removeBelotePrompt()
       return
     }
+
+    const promptKey = getPendingBelotePromptKey(pendingBelotePrompt)
+    const existingRoot = document.querySelector('[data-belote-prompt-root]')
+
+    if (existingRoot && renderedPromptKey === promptKey) {
+      return
+    }
+
+    removeBelotePrompt()
+    renderedPromptKey = promptKey
 
     const overlay = document.createElement('div')
     overlay.setAttribute('data-belote-prompt-root', 'true')
@@ -600,6 +664,8 @@ export function createBelotePromptController(params: {
 
   return {
     handlePlayCard,
+    registerAutoDeclarationsForPlay,
+    hasPendingPrompt,
     renderPendingPrompt,
   }
 }
