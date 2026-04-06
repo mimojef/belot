@@ -39,6 +39,7 @@ const BOTTOM_SEAT_PANEL_HEIGHT = 98
 const BOTTOM_HAND_GAP = -120
 const BOTTOM_HAND_BOTTOM_OFFSET = STAGE_EDGE_GAP + BOTTOM_SEAT_PANEL_HEIGHT + BOTTOM_HAND_GAP
 const SCORE_HUD_INTERNAL_OFFSET = 18
+const CUTTING_COUNTDOWN_MS = 20000
 
 let cutResolveTimeoutId: number | null = null
 let roundSetupRerenderTimeoutId: number | null = null
@@ -68,6 +69,54 @@ function getStageScale(): number {
   const verticalScale = window.innerHeight / GAME_STAGE_HEIGHT
 
   return Math.min(horizontalScale, verticalScale, 1)
+}
+
+function getClockNowForPhaseTimestamp(timestamp: number | null | undefined): number {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+      return performance.now()
+    }
+
+    return Date.now()
+  }
+
+  if (timestamp > 1_000_000_000_000) {
+    return Date.now()
+  }
+
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now()
+  }
+
+  return Date.now()
+}
+
+function getCuttingCountdownRemainingMs(state: GameState): number {
+  if (state.phase !== 'cutting') {
+    return 0
+  }
+
+  if (state.round.cutterSeat !== 'bottom') {
+    return 0
+  }
+
+  if (typeof state.round.selectedCutIndex === 'number' && Number.isFinite(state.round.selectedCutIndex)) {
+    return 0
+  }
+
+  const phaseEnteredAt =
+    typeof state.phaseEnteredAt === 'number' && Number.isFinite(state.phaseEnteredAt)
+      ? state.phaseEnteredAt
+      : null
+
+  if (phaseEnteredAt === null) {
+    return CUTTING_COUNTDOWN_MS
+  }
+
+  const now = getClockNowForPhaseTimestamp(phaseEnteredAt)
+  const elapsedMs = Math.max(0, now - phaseEnteredAt)
+
+  return Math.max(0, CUTTING_COUNTDOWN_MS - elapsedMs)
 }
 
 function triggerCutResolveSequence(
@@ -257,6 +306,7 @@ export function renderApp(
 ): void {
   const state = app.engine.getState()
   const stageScale = getStageScale()
+  const cuttingCountdownRemainingMs = getCuttingCountdownRemainingMs(state)
 
   if (state.phase !== 'cutting') {
     clearCutResolveTimeout()
@@ -558,7 +608,8 @@ export function renderApp(
             state.round.dealerSeat,
             state.round.cutterSeat,
             activeSeat,
-            renderState.phase
+            renderState.phase,
+            cuttingCountdownRemainingMs
           )}
         </div>
       </div>

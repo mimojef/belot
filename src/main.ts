@@ -16,6 +16,7 @@ const BOT_PLAY_DELAY_MS = 700
 const FINAL_TRICK_CARD_FLIGHT_MS = 460
 const FLOATING_CARD_WIDTH = 112
 const FLOATING_CARD_HEIGHT = 162
+const CUTTING_COUNTDOWN_MS = 20000
 const CUTTING_SELECTION_RESOLVE_MS = 500
 const CUT_RESOLVE_AUTO_ADVANCE_MS = 0
 const DEAL_FIRST_THREE_AUTO_ADVANCE_MS = 2000
@@ -29,6 +30,7 @@ const app = bootstrapApp()
 
 let resizeFrameId: number | null = null
 let botPlayTimeoutId: number | null = null
+let cuttingAutoSelectTimeoutId: number | null = null
 let cuttingResolveTimeoutId: number | null = null
 let dealPhaseAutoAdvanceTimeoutId: number | null = null
 let activeDealPhaseAutoAdvance: string | null = null
@@ -43,6 +45,13 @@ function clearBotPlayTimeout(): void {
   if (botPlayTimeoutId !== null) {
     window.clearTimeout(botPlayTimeoutId)
     botPlayTimeoutId = null
+  }
+}
+
+function clearCuttingAutoSelectTimeout(): void {
+  if (cuttingAutoSelectTimeoutId !== null) {
+    window.clearTimeout(cuttingAutoSelectTimeoutId)
+    cuttingAutoSelectTimeoutId = null
   }
 }
 
@@ -444,6 +453,34 @@ function getScoringRemainingMs(state: GameState): number | null {
   return Math.max(0, SCORING_AUTO_ADVANCE_MS - elapsedMs)
 }
 
+function getCuttingRemainingMs(state: GameState): number | null {
+  if (state.phase !== 'cutting') {
+    return null
+  }
+
+  if (state.round.cutterSeat !== 'bottom') {
+    return null
+  }
+
+  if (getSelectedCutIndexFromState(state) !== null) {
+    return null
+  }
+
+  const phaseEnteredAt =
+    typeof state.phaseEnteredAt === 'number' && Number.isFinite(state.phaseEnteredAt)
+      ? state.phaseEnteredAt
+      : null
+
+  if (phaseEnteredAt === null) {
+    return CUTTING_COUNTDOWN_MS
+  }
+
+  const now = getClockNowForPhaseTimestamp(phaseEnteredAt)
+  const elapsedMs = Math.max(0, now - phaseEnteredAt)
+
+  return Math.max(0, CUTTING_COUNTDOWN_MS - elapsedMs)
+}
+
 function getSelectedCutIndexFromState(state: GameState): number | null {
   const extendedState = state as GameState & {
     selectedCutIndex?: number | null
@@ -476,6 +513,23 @@ function getSelectedCutIndexFromState(state: GameState): number | null {
   return null
 }
 
+function pickAutoCutIndex(state: GameState): number {
+  const totalCards = state.deck.length
+
+  if (totalCards <= 2) {
+    return 1
+  }
+
+  const minIndex = Math.min(6, totalCards - 1)
+  const maxIndex = Math.max(minIndex, totalCards - 6)
+
+  if (maxIndex <= minIndex) {
+    return Math.max(1, Math.floor(totalCards / 2))
+  }
+
+  return minIndex + Math.floor(Math.random() * (maxIndex - minIndex + 1))
+}
+
 function getDealPhaseAutoAdvanceDelay(phase: string): number | null {
   if (phase === 'cut-resolve') {
     return CUT_RESOLVE_AUTO_ADVANCE_MS
@@ -494,6 +548,49 @@ function getDealPhaseAutoAdvanceDelay(phase: string): number | null {
   }
 
   return null
+}
+
+function scheduleCuttingAutoSelect(): void {
+  clearCuttingAutoSelectTimeout()
+
+  const state = app.engine.getState()
+  const remainingMs = getCuttingRemainingMs(state)
+
+  if (remainingMs === null) {
+    return
+  }
+
+  cuttingAutoSelectTimeoutId = window.setTimeout(() => {
+    cuttingAutoSelectTimeoutId = null
+
+    const latestState = app.engine.getState()
+
+    if (latestState.phase !== 'cutting') {
+      render()
+      return
+    }
+
+    if (latestState.round.cutterSeat !== 'bottom') {
+      render()
+      return
+    }
+
+    if (getSelectedCutIndexFromState(latestState) !== null) {
+      render()
+      return
+    }
+
+    const autoCutIndex = pickAutoCutIndex(latestState)
+
+    clearBotPlayTimeout()
+    clearCuttingResolveTimeout()
+    clearDealPhaseAutoAdvanceTimeout()
+    clearScoringTimeouts()
+    clearFinalTrickAnimationTimeout()
+
+    app.engine.selectCutIndex(autoCutIndex)
+    render()
+  }, Math.max(0, remainingMs))
 }
 
 function scheduleCuttingResolve(): void {
@@ -561,6 +658,7 @@ function scheduleDealPhaseAutoAdvance(): void {
 
     activeDealPhaseAutoAdvance = null
     clearBotPlayTimeout()
+    clearCuttingAutoSelectTimeout()
     clearCuttingResolveTimeout()
     clearScoringTimeouts()
     clearFinalTrickAnimationTimeout()
@@ -591,6 +689,7 @@ function scheduleScoringPhaseTimers(): void {
       }
 
       clearBotPlayTimeout()
+      clearCuttingAutoSelectTimeout()
       clearCuttingResolveTimeout()
       clearDealPhaseAutoAdvanceTimeout()
       clearFinalTrickAnimationTimeout()
@@ -634,6 +733,7 @@ function scheduleScoringPhaseTimers(): void {
     }
 
     clearBotPlayTimeout()
+    clearCuttingAutoSelectTimeout()
     clearCuttingResolveTimeout()
     clearDealPhaseAutoAdvanceTimeout()
     clearFinalTrickAnimationTimeout()
@@ -822,6 +922,7 @@ function render(): void {
   renderApp(appRoot, app, {
     onNextPhaseClick: () => {
       clearBotPlayTimeout()
+      clearCuttingAutoSelectTimeout()
       clearCuttingResolveTimeout()
       clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
@@ -831,6 +932,7 @@ function render(): void {
     },
     onSelectCutIndex: (cutIndex: number) => {
       clearBotPlayTimeout()
+      clearCuttingAutoSelectTimeout()
       clearCuttingResolveTimeout()
       clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
@@ -840,6 +942,7 @@ function render(): void {
     },
     onResolveCutClick: () => {
       clearBotPlayTimeout()
+      clearCuttingAutoSelectTimeout()
       clearCuttingResolveTimeout()
       clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
@@ -849,6 +952,7 @@ function render(): void {
     },
     onBidPass: () => {
       clearBotPlayTimeout()
+      clearCuttingAutoSelectTimeout()
       clearCuttingResolveTimeout()
       clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
@@ -858,6 +962,7 @@ function render(): void {
     },
     onBidSuit: (suit) => {
       clearBotPlayTimeout()
+      clearCuttingAutoSelectTimeout()
       clearCuttingResolveTimeout()
       clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
@@ -867,6 +972,7 @@ function render(): void {
     },
     onBidNoTrumps: () => {
       clearBotPlayTimeout()
+      clearCuttingAutoSelectTimeout()
       clearCuttingResolveTimeout()
       clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
@@ -876,6 +982,7 @@ function render(): void {
     },
     onBidAllTrumps: () => {
       clearBotPlayTimeout()
+      clearCuttingAutoSelectTimeout()
       clearCuttingResolveTimeout()
       clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
@@ -885,6 +992,7 @@ function render(): void {
     },
     onBidDouble: () => {
       clearBotPlayTimeout()
+      clearCuttingAutoSelectTimeout()
       clearCuttingResolveTimeout()
       clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
@@ -894,6 +1002,7 @@ function render(): void {
     },
     onBidRedouble: () => {
       clearBotPlayTimeout()
+      clearCuttingAutoSelectTimeout()
       clearCuttingResolveTimeout()
       clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
@@ -903,6 +1012,7 @@ function render(): void {
     },
     onPlayCard: (cardId) => {
       clearBotPlayTimeout()
+      clearCuttingAutoSelectTimeout()
       clearCuttingResolveTimeout()
       clearDealPhaseAutoAdvanceTimeout()
       clearScoringTimeouts()
@@ -918,6 +1028,7 @@ function render(): void {
   })
 
   belotePromptController.renderPendingPrompt()
+  scheduleCuttingAutoSelect()
   scheduleCuttingResolve()
   scheduleDealPhaseAutoAdvance()
   scheduleNextBotPlay()
