@@ -96,11 +96,14 @@ function getCuttingCountdownRemainingMs(state: GameState): number {
     return 0
   }
 
-  if (state.round.cutterSeat !== 'bottom') {
+  if (!state.round.cutterSeat) {
     return 0
   }
 
-  if (typeof state.round.selectedCutIndex === 'number' && Number.isFinite(state.round.selectedCutIndex)) {
+  if (
+    typeof state.round.selectedCutIndex === 'number' &&
+    Number.isFinite(state.round.selectedCutIndex)
+  ) {
     return 0
   }
 
@@ -512,7 +515,8 @@ export function renderApp(
           state.round.dealerSeat,
           state.round.cutterSeat,
           activeSeat,
-          renderState.phase
+          renderState.phase,
+          cuttingCountdownRemainingMs
         )}
       </div>
 
@@ -534,7 +538,8 @@ export function renderApp(
           state.round.dealerSeat,
           state.round.cutterSeat,
           activeSeat,
-          renderState.phase
+          renderState.phase,
+          cuttingCountdownRemainingMs
         )}
       </div>
 
@@ -556,7 +561,8 @@ export function renderApp(
           state.round.dealerSeat,
           state.round.cutterSeat,
           activeSeat,
-          renderState.phase
+          renderState.phase,
+          cuttingCountdownRemainingMs
         )}
       </div>
 

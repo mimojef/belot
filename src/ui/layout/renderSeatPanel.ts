@@ -4,7 +4,7 @@ const DEAL_PACKET_START_DELAY = 220
 const DEAL_PACKET_DELAY_STEP = 420
 const DEAL_PACKET_DURATION = 860
 const DEAL_REVEAL_OVERLAP = 500
-const BOTTOM_CUTTING_COUNTDOWN_MS = 20000
+const CUTTING_COUNTDOWN_MS = 20000
 
 const FAN_SPREAD_STEP = 38
 const FAN_ROTATE_STEP = 6
@@ -437,26 +437,31 @@ function renderSeatCards(
   `
 }
 
-function renderBottomCountdownBar(
+function renderCuttingCountdownFillStyle(
   shouldShowCuttingCountdown: boolean,
   cuttingCountdownRemainingMs: number | null
 ): string {
   const remainingMs = clamp(
-    cuttingCountdownRemainingMs ?? BOTTOM_CUTTING_COUNTDOWN_MS,
+    cuttingCountdownRemainingMs ?? CUTTING_COUNTDOWN_MS,
     0,
-    BOTTOM_CUTTING_COUNTDOWN_MS
+    CUTTING_COUNTDOWN_MS
   )
-  const elapsedMs = BOTTOM_CUTTING_COUNTDOWN_MS - remainingMs
+  const elapsedMs = CUTTING_COUNTDOWN_MS - remainingMs
 
-  const fillStyle = shouldShowCuttingCountdown
-    ? `
-      animation: belot-bottom-cut-countdown ${BOTTOM_CUTTING_COUNTDOWN_MS}ms linear forwards;
-      animation-delay: -${elapsedMs}ms;
-    `
-    : `
-      transform:scaleX(0);
-    `
+  if (!shouldShowCuttingCountdown) {
+    return 'transform:scaleX(0);'
+  }
 
+  return `
+    animation: belot-cut-countdown ${CUTTING_COUNTDOWN_MS}ms linear forwards;
+    animation-delay: -${elapsedMs}ms;
+  `
+}
+
+function renderBottomCountdownBar(
+  shouldShowCuttingCountdown: boolean,
+  cuttingCountdownRemainingMs: number | null
+): string {
   return `
     <div
       style="
@@ -480,7 +485,10 @@ function renderBottomCountdownBar(
           border-radius:6px;
           background:linear-gradient(90deg, rgba(245, 187, 55, 0.98) 0%, rgba(255, 166, 0, 0.98) 100%);
           transform-origin:left center;
-          ${fillStyle}
+          ${renderCuttingCountdownFillStyle(
+            shouldShowCuttingCountdown,
+            cuttingCountdownRemainingMs
+          )}
         "
       ></div>
     </div>
@@ -569,7 +577,9 @@ function renderBottomSeatFace(
 function renderDefaultSeatFace(
   seat: Seat,
   isActive: boolean,
-  dealerSeat: Seat | null
+  dealerSeat: Seat | null,
+  shouldShowCuttingCountdown: boolean,
+  cuttingCountdownRemainingMs: number | null
 ): string {
   return `
     <div
@@ -625,16 +635,38 @@ function renderDefaultSeatFace(
           padding:10px 12px 11px 12px;
           background: rgba(6, 22, 40, 0.94);
           border-top:1px solid rgba(255,255,255,0.12);
-          color:#f4f8ff;
-          text-align:center;
-          font-size:14px;
-          font-weight:800;
-          letter-spacing:0.04em;
-          line-height:1.1;
-          text-transform:uppercase;
+          overflow:hidden;
         "
       >
-        ${formatSeatShort(seat)}
+        <div
+          style="
+            position:absolute;
+            inset:0;
+            background:linear-gradient(90deg, rgba(245, 187, 55, 0.98) 0%, rgba(255, 166, 0, 0.98) 100%);
+            transform-origin:left center;
+            ${renderCuttingCountdownFillStyle(
+              shouldShowCuttingCountdown,
+              cuttingCountdownRemainingMs
+            )}
+          "
+        ></div>
+
+        <div
+          style="
+            position:relative;
+            z-index:2;
+            color:#f4f8ff;
+            text-align:center;
+            font-size:14px;
+            font-weight:800;
+            letter-spacing:0.04em;
+            line-height:1.1;
+            text-transform:uppercase;
+            text-shadow:0 1px 4px rgba(0,0,0,0.35);
+          "
+        >
+          ${formatSeatShort(seat)}
+        </div>
       </div>
     </div>
   `
@@ -653,10 +685,9 @@ export function renderSeatPanel(
   const panelWidth = seat === 'bottom' ? 260 : 138
   const panelHeight = seat === 'bottom' ? 98 : 176
 
-  const shouldShowBottomCuttingCountdown =
-    seat === 'bottom' &&
+  const shouldShowCuttingCountdown =
     currentPhase === 'cutting' &&
-    cutterSeat === 'bottom'
+    cutterSeat === seat
 
   return `
     <style>
@@ -678,7 +709,7 @@ export function renderSeatPanel(
         }
       }
 
-      @keyframes belot-bottom-cut-countdown {
+      @keyframes belot-cut-countdown {
         0% {
           transform:scaleX(1);
         }
@@ -704,10 +735,16 @@ export function renderSeatPanel(
           ? renderBottomSeatFace(
               isActive,
               dealerSeat,
-              shouldShowBottomCuttingCountdown,
+              shouldShowCuttingCountdown,
               cuttingCountdownRemainingMs
             )
-          : renderDefaultSeatFace(seat, isActive, dealerSeat)
+          : renderDefaultSeatFace(
+              seat,
+              isActive,
+              dealerSeat,
+              shouldShowCuttingCountdown,
+              cuttingCountdownRemainingMs
+            )
       }
     </div>
   `

@@ -14,9 +14,10 @@ if (!rootElement) {
 
 const BOT_PLAY_DELAY_MS = 700
 const FINAL_TRICK_CARD_FLIGHT_MS = 460
-const FLOATING_CARD_WIDTH = 112
-const FLOATING_CARD_HEIGHT = 162
+const FLOATING_CARD_WIDTH = 148
+const FLOATING_CARD_HEIGHT = 215
 const CUTTING_COUNTDOWN_MS = 20000
+const BOT_CUTTING_AUTO_SELECT_MS = 1500
 const CUTTING_SELECTION_RESOLVE_MS = 500
 const CUT_RESOLVE_AUTO_ADVANCE_MS = 0
 const DEAL_FIRST_THREE_AUTO_ADVANCE_MS = 2000
@@ -458,7 +459,7 @@ function getCuttingRemainingMs(state: GameState): number | null {
     return null
   }
 
-  if (state.round.cutterSeat !== 'bottom') {
+  if (!state.round.cutterSeat) {
     return null
   }
 
@@ -466,19 +467,24 @@ function getCuttingRemainingMs(state: GameState): number | null {
     return null
   }
 
+  const autoSelectMs =
+    state.round.cutterSeat === 'bottom'
+      ? CUTTING_COUNTDOWN_MS
+      : BOT_CUTTING_AUTO_SELECT_MS
+
   const phaseEnteredAt =
     typeof state.phaseEnteredAt === 'number' && Number.isFinite(state.phaseEnteredAt)
       ? state.phaseEnteredAt
       : null
 
   if (phaseEnteredAt === null) {
-    return CUTTING_COUNTDOWN_MS
+    return autoSelectMs
   }
 
   const now = getClockNowForPhaseTimestamp(phaseEnteredAt)
   const elapsedMs = Math.max(0, now - phaseEnteredAt)
 
-  return Math.max(0, CUTTING_COUNTDOWN_MS - elapsedMs)
+  return Math.max(0, autoSelectMs - elapsedMs)
 }
 
 function getSelectedCutIndexFromState(state: GameState): number | null {
@@ -570,7 +576,7 @@ function scheduleCuttingAutoSelect(): void {
       return
     }
 
-    if (latestState.round.cutterSeat !== 'bottom') {
+    if (!latestState.round.cutterSeat) {
       render()
       return
     }
