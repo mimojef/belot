@@ -40,9 +40,12 @@ const BOTTOM_HAND_GAP = -120
 const BOTTOM_HAND_BOTTOM_OFFSET = STAGE_EDGE_GAP + BOTTOM_SEAT_PANEL_HEIGHT + BOTTOM_HAND_GAP
 const SCORE_HUD_INTERNAL_OFFSET = 18
 const CUTTING_COUNTDOWN_MS = 20000
+const BIDDING_COUNTDOWN_MS = 20000
 
 let cutResolveTimeoutId: number | null = null
 let roundSetupRerenderTimeoutId: number | null = null
+let activeBiddingCountdownTurnKey: string | null = null
+let activeBiddingCountdownStartedAt = 0
 
 const appAnimations = createAppAnimations()
 
@@ -91,6 +94,14 @@ function getClockNowForPhaseTimestamp(timestamp: number | null | undefined): num
   return Date.now()
 }
 
+function getRenderClockNow(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now()
+  }
+
+  return Date.now()
+}
+
 function getCuttingCountdownRemainingMs(state: GameState): number {
   if (state.phase !== 'cutting') {
     return 0
@@ -120,6 +131,62 @@ function getCuttingCountdownRemainingMs(state: GameState): number {
   const elapsedMs = Math.max(0, now - phaseEnteredAt)
 
   return Math.max(0, CUTTING_COUNTDOWN_MS - elapsedMs)
+}
+
+function getBiddingCountdownTurnKey(state: GameState): string | null {
+  if (state.phase !== 'bidding') {
+    return null
+  }
+
+  const currentSeat = state.bidding.currentSeat
+
+  if (!currentSeat) {
+    return null
+  }
+
+  return `${state.phase}:${state.bidding.entries.length}:${currentSeat}`
+}
+
+function syncBiddingCountdownState(state: GameState): void {
+  const turnKey = getBiddingCountdownTurnKey(state)
+
+  if (turnKey === null) {
+    activeBiddingCountdownTurnKey = null
+    activeBiddingCountdownStartedAt = 0
+    return
+  }
+
+  if (activeBiddingCountdownTurnKey === turnKey) {
+    return
+  }
+
+  activeBiddingCountdownTurnKey = turnKey
+  activeBiddingCountdownStartedAt = getRenderClockNow()
+}
+
+function getBiddingCountdownRemainingMs(state: GameState): number {
+  if (state.phase !== 'bidding') {
+    return 0
+  }
+
+  const turnKey = getBiddingCountdownTurnKey(state)
+
+  if (!turnKey) {
+    return 0
+  }
+
+  if (
+    activeBiddingCountdownTurnKey !== turnKey ||
+    !Number.isFinite(activeBiddingCountdownStartedAt) ||
+    activeBiddingCountdownStartedAt <= 0
+  ) {
+    return BIDDING_COUNTDOWN_MS
+  }
+
+  const now = getRenderClockNow()
+  const elapsedMs = Math.max(0, now - activeBiddingCountdownStartedAt)
+
+  return Math.max(0, BIDDING_COUNTDOWN_MS - elapsedMs)
 }
 
 function triggerCutResolveSequence(
@@ -308,8 +375,11 @@ export function renderApp(
   options: RenderAppOptions = {}
 ): void {
   const state = app.engine.getState()
+  syncBiddingCountdownState(state)
+
   const stageScale = getStageScale()
   const cuttingCountdownRemainingMs = getCuttingCountdownRemainingMs(state)
+  const biddingCountdownRemainingMs = getBiddingCountdownRemainingMs(state)
 
   if (state.phase !== 'cutting') {
     clearCutResolveTimeout()
@@ -391,14 +461,24 @@ export function renderApp(
     : null
   const bottomHandViewState = getBottomHandViewState(renderState)
 
-  const biddingOverlayContent =
-    !roundSetupFlow.isRoundSetupPhase && biddingViewState
-      ? renderCenterPanel(renderBiddingPanel(biddingViewState), 760)
-      : ''
+  const shouldShowBottomBiddingPanel =
+    !roundSetupFlow.isRoundSetupPhase &&
+    biddingViewState !== null &&
+    biddingViewState.currentSeat === 'bottom'
+
+  const biddingOverlayContent = shouldShowBottomBiddingPanel
+    ? renderCenterPanel(renderBiddingPanel(biddingViewState), 760)
+    : ''
 
   const activeSeat: Seat | null = isBiddingPhase
     ? renderState.bidding.currentSeat
     : ((renderState.playing?.currentTurnSeat ?? null) as Seat | null)
+
+  const seatPanelPhase = isBiddingPhase ? 'cutting' : renderState.phase
+  const seatPanelCountdownSeat = isBiddingPhase ? activeSeat : state.round.cutterSeat
+  const seatPanelCountdownRemainingMs = isBiddingPhase
+    ? biddingCountdownRemainingMs
+    : cuttingCountdownRemainingMs
 
   const centerMainContent = roundSetupFlow.isRoundSetupPhase
     ? roundSetupFlow.centerContent
@@ -513,10 +593,10 @@ export function renderApp(
           'top',
           roundSetupFlow.seatHandCounts.top,
           state.round.dealerSeat,
-          state.round.cutterSeat,
+          seatPanelCountdownSeat,
           activeSeat,
-          renderState.phase,
-          cuttingCountdownRemainingMs
+          seatPanelPhase,
+          seatPanelCountdownRemainingMs
         )}
       </div>
 
@@ -536,10 +616,10 @@ export function renderApp(
           'left',
           roundSetupFlow.seatHandCounts.left,
           state.round.dealerSeat,
-          state.round.cutterSeat,
+          seatPanelCountdownSeat,
           activeSeat,
-          renderState.phase,
-          cuttingCountdownRemainingMs
+          seatPanelPhase,
+          seatPanelCountdownRemainingMs
         )}
       </div>
 
@@ -559,10 +639,10 @@ export function renderApp(
           'right',
           roundSetupFlow.seatHandCounts.right,
           state.round.dealerSeat,
-          state.round.cutterSeat,
+          seatPanelCountdownSeat,
           activeSeat,
-          renderState.phase,
-          cuttingCountdownRemainingMs
+          seatPanelPhase,
+          seatPanelCountdownRemainingMs
         )}
       </div>
 
@@ -612,10 +692,10 @@ export function renderApp(
             'bottom',
             roundSetupFlow.seatHandCounts.bottom,
             state.round.dealerSeat,
-            state.round.cutterSeat,
+            seatPanelCountdownSeat,
             activeSeat,
-            renderState.phase,
-            cuttingCountdownRemainingMs
+            seatPanelPhase,
+            seatPanelCountdownRemainingMs
           )}
         </div>
       </div>
