@@ -47,7 +47,8 @@ function isRoundSetupSequencePhase(phase: string): phase is RoundSetupSequencePh
     phase === 'cut-resolve' ||
     phase === 'deal-first-3' ||
     phase === 'deal-next-2' ||
-    phase === 'deal-last-3'
+    phase === 'deal-last-3' ||
+    phase === 'next-round'
   )
 }
 
@@ -92,6 +93,21 @@ export function getRoundSetupFlowResult(
     phase === 'deal-next-2' ||
     phase === 'deal-last-3'
   ) {
+    return {
+      isRoundSetupPhase: true,
+      shouldHideCenterDeck: true,
+      centerContent: renderRoundSetupSequence({
+        phase,
+        cutterSeat,
+        selectedCutIndex,
+        dealerSeat,
+      }),
+      seatHandCounts: createActualSeatCounts(actualHandCounts),
+      nextRerenderInMs: null,
+    }
+  }
+
+  if (phase === 'next-round') {
     return {
       isRoundSetupPhase: true,
       shouldHideCenterDeck: true,

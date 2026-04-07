@@ -8,6 +8,7 @@ export type RoundSetupSequencePhase =
   | 'deal-first-3'
   | 'deal-next-2'
   | 'deal-last-3'
+  | 'next-round'
 
 type RoundSetupSequenceParams = {
   phase: RoundSetupSequencePhase | string
@@ -258,7 +259,7 @@ function renderCutCard(
   const splitTransform = shouldAnimateCut
     ? isLeftPile
       ? `translateX(-50%) translate(${translateX - 118 - pileOffset * 1.8}px, ${translateY - 10 - pileOffset * 0.8}px) rotate(${rotate - 7}deg)`
-      : `translateX(-50%) translate(${translateX + 118 + pileOffset * 1.8}px, ${translateY - 10 - pileOffset * 0.8}px) rotate(${rotate + 7}deg)`
+      : `translateX(-50%) translate(${translateX + 118 + pileOffset * 1.8}px, ${translateY - 10 + pileOffset * 0.8}px) rotate(${rotate + 7}deg)`
     : baseTransform
 
   const finalTransform = shouldAnimateCut
@@ -703,6 +704,7 @@ export function renderRoundSetupSequence({
   const isDealFirstThreePhase = phase === 'deal-first-3'
   const isDealNextTwoPhase = phase === 'deal-next-2'
   const isDealLastThreePhase = phase === 'deal-last-3'
+  const isNextRoundPhase = phase === 'next-round'
 
   const isDealPhase =
     isDealFirstThreePhase || isDealNextTwoPhase || isDealLastThreePhase
@@ -713,7 +715,8 @@ export function renderRoundSetupSequence({
     !shouldRenderCutSequence &&
     !isDealFirstThreePhase &&
     !isDealNextTwoPhase &&
-    !isDealLastThreePhase
+    !isDealLastThreePhase &&
+    !isNextRoundPhase
   ) {
     return ''
   }
@@ -722,14 +725,21 @@ export function renderRoundSetupSequence({
   const shouldAnimateCut =
     isCuttingPhase && selectedCutIndex !== null && selectedCutIndex !== undefined
 
-  let heading = isHumanCutting ? 'ТИ ЦЕПИШ' : `ЦЕПИ ${formatSeatLabel(cutterSeat ?? 'top')}`
-  let subText = isCutResolvePhase
-    ? 'Тестето е събрано.'
-    : shouldAnimateCut
-      ? 'Цепене...'
-      : isHumanCutting
-        ? 'Посочи карта с мишката и щракни там, откъдето искаш да цепиш.'
-        : 'Изчаква се автоматично цепене.'
+  let heading = isNextRoundPhase
+    ? 'СЛЕДВАЩ РУНД'
+    : isHumanCutting
+      ? 'ТИ ЦЕПИШ'
+      : `ЦЕПИ ${formatSeatLabel(cutterSeat ?? 'top')}`
+
+  let subText = isNextRoundPhase
+    ? ''
+    : isCutResolvePhase
+      ? 'Тестето е събрано.'
+      : shouldAnimateCut
+        ? 'Цепене...'
+        : isHumanCutting
+          ? 'Посочи карта с мишката и щракни там, откъдето искаш да цепиш.'
+          : 'Изчаква се автоматично цепене.'
 
   let contentHeight = 290
   let cards = isCutResolvePhase
@@ -737,6 +747,11 @@ export function renderRoundSetupSequence({
     : Array.from({ length: 32 }, (_, index) =>
         renderCutCard(index, shouldAnimateCut, normalizedCutIndex, isHumanCutting)
       ).join('')
+
+  if (isNextRoundPhase) {
+    contentHeight = 0
+    cards = ''
+  }
 
   if (isDealFirstThreePhase) {
     contentHeight = 330
@@ -809,6 +824,9 @@ export function renderRoundSetupSequence({
         ${heading}
       </div>
 
+      ${
+        subText
+          ? `
       <div
         style="
           font-size:13px;
@@ -820,8 +838,14 @@ export function renderRoundSetupSequence({
         ${subText}
       </div>
       `
+          : ''
+      }
+      `
       }
 
+      ${
+        cards
+          ? `
       <div
         style="
           position:relative;
@@ -834,6 +858,9 @@ export function renderRoundSetupSequence({
       >
         ${cards}
       </div>
+      `
+          : ''
+      }
     </div>
   `
 }

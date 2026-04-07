@@ -34,6 +34,7 @@ const CUT_RESOLVE_AUTO_ADVANCE_MS = 0
 const DEAL_FIRST_THREE_AUTO_ADVANCE_MS = 2000
 const DEAL_NEXT_TWO_AUTO_ADVANCE_MS = 1900
 const DEAL_LAST_THREE_AUTO_ADVANCE_MS = 2000
+const NEXT_ROUND_AUTO_ADVANCE_MS = 1000
 const SCORING_AUTO_ADVANCE_MS = 5000
 const SCORING_TIMER_FUDGE_MS = 24
 
@@ -675,6 +676,10 @@ function getDealPhaseAutoAdvanceDelay(phase: string): number | null {
 
   if (phase === 'deal-last-3') {
     return DEAL_LAST_THREE_AUTO_ADVANCE_MS
+  }
+
+  if (phase === 'next-round') {
+    return NEXT_ROUND_AUTO_ADVANCE_MS
   }
 
   return null
