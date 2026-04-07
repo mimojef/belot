@@ -10,6 +10,7 @@ export const PHASE_TYPES = [
   'playing',
   'scoring',
   'next-round',
+  'match-ended',
 ] as const
 
 export type PhaseType = (typeof PHASE_TYPES)[number]

@@ -12,6 +12,7 @@ export const PHASE_FLOW: Record<PhaseType, PhaseType | null> = {
   'playing': 'scoring',
   'scoring': 'next-round',
   'next-round': 'cutting',
+  'match-ended': null,
 }
 
 export function getNextPhase(phase: PhaseType): PhaseType | null {

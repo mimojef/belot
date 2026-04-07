@@ -19,6 +19,8 @@ type BidBubbleOverride = {
   label: string
 }
 
+type MatchEndedPlayerStatus = 'waiting' | 'reload' | 'find-new-game' | 'leave'
+
 const BOT_PLAY_DELAY_MS = 800
 const BOT_BIDDING_DELAY_MS = 800
 const FINAL_TRICK_CARD_FLIGHT_MS = 420
@@ -37,6 +39,8 @@ const DEAL_LAST_THREE_AUTO_ADVANCE_MS = 2000
 const NEXT_ROUND_AUTO_ADVANCE_MS = 1000
 const SCORING_AUTO_ADVANCE_MS = 5000
 const SCORING_TIMER_FUDGE_MS = 24
+const MATCH_ENDED_BOT_RELOAD_STEP_MS = 500
+const MATCH_ENDED_RESTART_AFTER_BOTS_MS = 250
 
 const SUIT_OPTIONS: Suit[] = ['clubs', 'diamonds', 'hearts', 'spades']
 
@@ -96,6 +100,8 @@ let activeFinalTrickSourceElement: HTMLElement | null = null
 let finalTrickHoldTimeoutId: number | null = null
 let bottomBotTakeoverActive = false
 let bidBubbleOverride: BidBubbleOverride | null = null
+let matchEndedCoordinationTimeoutIds: number[] = []
+let matchEndedPlayerStatuses: Partial<Record<Seat, MatchEndedPlayerStatus>> = {}
 
 function clearBotPlayTimeout(): void {
   if (botPlayTimeoutId !== null) {
@@ -174,6 +180,14 @@ function clearFinalTrickAnimationTimeout(): void {
   isAnimatingFinalTrickCard = false
 }
 
+function clearMatchEndedCoordinationTimeouts(): void {
+  for (const timeoutId of matchEndedCoordinationTimeoutIds) {
+    window.clearTimeout(timeoutId)
+  }
+
+  matchEndedCoordinationTimeoutIds = []
+}
+
 function resetPlayingTurnTracking(): void {
   activePlayingTurnKey = null
   activePlayingTurnStartedAt = 0
@@ -195,6 +209,110 @@ function setBottomBotTakeoverActive(nextValue: boolean): void {
   if (!nextValue) {
     removeBottomBotTakeoverPopup()
   }
+}
+
+function clearAllAsyncUiState(): void {
+  clearBotPlayTimeout()
+  clearBotBidTimeout()
+  clearCuttingAutoSelectTimeout()
+  clearCuttingResolveTimeout()
+  clearDealPhaseAutoAdvanceTimeout()
+  clearScoringTimeouts()
+  clearFinalTrickAnimationTimeout()
+  clearMatchEndedCoordinationTimeouts()
+}
+
+function resetMatchEndedUiState(): void {
+  clearMatchEndedCoordinationTimeouts()
+  matchEndedPlayerStatuses = {}
+}
+
+function restartLocalMatch(): void {
+  clearAllAsyncUiState()
+  resetMatchEndedUiState()
+  resetPlayingTurnTracking()
+  setBottomBotTakeoverActive(false)
+  setBidBubbleOverride(null)
+  app.engine.startNewGame()
+  app.engine.chooseFirstDealer()
+}
+
+function showTemporaryMatchEndedPlaceholder(message: string): void {
+  window.alert(message)
+}
+
+function setMatchEndedPlayerStatus(seat: Seat, status: MatchEndedPlayerStatus): void {
+  matchEndedPlayerStatuses = {
+    ...matchEndedPlayerStatuses,
+    [seat]: status,
+  }
+}
+
+function getMatchEndedBotSeats(state: GameState): Seat[] {
+  return (['right', 'top', 'left'] as const).filter((seat) => state.players[seat]?.mode === 'bot')
+}
+
+function getMatchEndedHumanSeats(state: GameState): Seat[] {
+  return (['right', 'top', 'left'] as const).filter((seat) => state.players[seat]?.mode === 'human')
+}
+
+function shouldContinueMatchEndedReloadFlow(): boolean {
+  const latestState = app.engine.getState()
+
+  return latestState.phase === 'match-ended' && matchEndedPlayerStatuses.bottom === 'reload'
+}
+
+function scheduleMatchEndedBotReloadFlow(state: GameState): void {
+  const botSeats = getMatchEndedBotSeats(state)
+  const humanSeats = getMatchEndedHumanSeats(state)
+
+  botSeats.forEach((seat, index) => {
+    const timeoutId = window.setTimeout(() => {
+      if (!shouldContinueMatchEndedReloadFlow()) {
+        return
+      }
+
+      setMatchEndedPlayerStatus(seat, 'reload')
+      render()
+    }, MATCH_ENDED_BOT_RELOAD_STEP_MS * (index + 1))
+
+    matchEndedCoordinationTimeoutIds.push(timeoutId)
+  })
+
+  if (humanSeats.length > 0) {
+    return
+  }
+
+  const restartDelayMs =
+    botSeats.length * MATCH_ENDED_BOT_RELOAD_STEP_MS + MATCH_ENDED_RESTART_AFTER_BOTS_MS
+
+  const restartTimeoutId = window.setTimeout(() => {
+    if (!shouldContinueMatchEndedReloadFlow()) {
+      return
+    }
+
+    restartLocalMatch()
+    render()
+  }, restartDelayMs)
+
+  matchEndedCoordinationTimeoutIds.push(restartTimeoutId)
+}
+
+function startMatchEndedReloadFlow(): void {
+  const state = app.engine.getState()
+
+  if (state.phase !== 'match-ended') {
+    return
+  }
+
+  if (matchEndedPlayerStatuses.bottom === 'reload') {
+    return
+  }
+
+  clearMatchEndedCoordinationTimeouts()
+  setMatchEndedPlayerStatus('bottom', 'reload')
+  render()
+  scheduleMatchEndedBotReloadFlow(state)
 }
 
 function getRenderClockNow(): number {
@@ -1684,6 +1802,10 @@ function render(): void {
     setBottomBotTakeoverActive(false)
   }
 
+  if (stateBeforeRender.phase !== 'match-ended') {
+    resetMatchEndedUiState()
+  }
+
   syncPlayingTurnState(stateBeforeRender)
   syncPlayingPauseState(stateBeforeRender)
 
@@ -1762,6 +1884,26 @@ function render(): void {
     onRequestRender: () => {
       render()
     },
+    onMatchEndedReloadGame: () => {
+      startMatchEndedReloadFlow()
+    },
+    onMatchEndedFindNewGame: () => {
+      clearMatchEndedCoordinationTimeouts()
+      setMatchEndedPlayerStatus('bottom', 'find-new-game')
+      render()
+      showTemporaryMatchEndedPlaceholder(
+        'Търсенето на нова игра още не е вързано. Следващата стъпка е search popup + matchmaking логика.'
+      )
+    },
+    onMatchEndedLeave: () => {
+      clearMatchEndedCoordinationTimeouts()
+      setMatchEndedPlayerStatus('bottom', 'leave')
+      render()
+      showTemporaryMatchEndedPlaceholder(
+        'Изходната страница още не е създадена. Следващата стъпка е отделна exit страница и пренасочване към нея.'
+      )
+    },
+    matchEndedPlayerStatuses,
     playingCountdownRemainingMs,
     bottomBotTakeoverActive,
     bidBubbleOverride,

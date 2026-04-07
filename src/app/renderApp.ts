@@ -25,6 +25,8 @@ type ActiveBidBubble = IncomingBidBubble & {
   shownAt: number
 }
 
+type MatchEndedPlayerStatus = 'waiting' | 'reload' | 'find-new-game' | 'leave'
+
 type RenderAppOptions = {
   onNextPhaseClick?: () => void
   onSelectCutIndex?: (cutIndex: number) => void
@@ -37,6 +39,10 @@ type RenderAppOptions = {
   onBidRedouble?: () => void
   onPlayCard?: (cardId: string) => void
   onRequestRender?: () => void
+  onMatchEndedReloadGame?: () => void
+  onMatchEndedFindNewGame?: () => void
+  onMatchEndedLeave?: () => void
+  matchEndedPlayerStatuses?: Partial<Record<Seat, MatchEndedPlayerStatus>>
   playingCountdownRemainingMs?: number | null
   bottomBotTakeoverActive?: boolean
   bidBubbleOverride?: IncomingBidBubble | null
@@ -636,6 +642,394 @@ function renderCenterPanel(content: string, width: number): string {
   `
 }
 
+function getMatchEndedSeatLabel(seat: Seat): string {
+  if (seat === 'bottom') return 'ТИ'
+  if (seat === 'right') return 'ДЯСНО'
+  if (seat === 'top') return 'ГОРЕ'
+  return 'ЛЯВО'
+}
+
+function getMatchEndedStatusView(
+  status: MatchEndedPlayerStatus | undefined
+): {
+  symbol: string
+  label: string
+  textColor: string
+  borderColor: string
+  background: string
+} {
+  if (status === 'reload') {
+    return {
+      symbol: '✓',
+      label: 'Готов',
+      textColor: '#86efac',
+      borderColor: 'rgba(34, 197, 94, 0.32)',
+      background: 'rgba(34, 197, 94, 0.12)',
+    }
+  }
+
+  if (status === 'find-new-game') {
+    return {
+      symbol: '✕',
+      label: 'Нова игра',
+      textColor: '#fca5a5',
+      borderColor: 'rgba(239, 68, 68, 0.30)',
+      background: 'rgba(239, 68, 68, 0.10)',
+    }
+  }
+
+  if (status === 'leave') {
+    return {
+      symbol: '✕',
+      label: 'Изход',
+      textColor: '#fca5a5',
+      borderColor: 'rgba(239, 68, 68, 0.30)',
+      background: 'rgba(239, 68, 68, 0.10)',
+    }
+  }
+
+  return {
+    symbol: '…',
+    label: 'Изчакване',
+    textColor: 'rgba(226, 232, 240, 0.86)',
+    borderColor: 'rgba(148, 163, 184, 0.24)',
+    background: 'rgba(255,255,255,0.05)',
+  }
+}
+
+function renderMatchEndedPlayerCard(
+  seat: Seat,
+  status: MatchEndedPlayerStatus | undefined
+): string {
+  const seatLabel = escapeHtml(getMatchEndedSeatLabel(seat))
+  const view = getMatchEndedStatusView(status)
+
+  return `
+    <div
+      style="
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap:10px;
+        min-height:46px;
+        border-radius:12px;
+        background:rgba(255,255,255,0.05);
+        border:1px solid rgba(255,255,255,0.06);
+        padding:0 12px;
+      "
+    >
+      <span
+        style="
+          font-size:13px;
+          font-weight:800;
+          letter-spacing:0.08em;
+          color:#f8fafc;
+        "
+      >
+        ${seatLabel}
+      </span>
+
+      <div
+        style="
+          display:inline-flex;
+          align-items:center;
+          gap:8px;
+          min-height:30px;
+          padding:0 10px;
+          border-radius:999px;
+          color:${view.textColor};
+          border:1px solid ${view.borderColor};
+          background:${view.background};
+          font-size:12px;
+          font-weight:900;
+          letter-spacing:0.03em;
+          white-space:nowrap;
+        "
+      >
+        <span
+          style="
+            font-size:14px;
+            line-height:1;
+            font-weight:900;
+          "
+        >
+          ${view.symbol}
+        </span>
+        <span>${view.label}</span>
+      </div>
+    </div>
+  `
+}
+
+function renderMatchEndedPanel(state: GameState, options: RenderAppOptions): string {
+  const teamAScore = state.score.match.teamA
+  const teamBScore = state.score.match.teamB
+  const winnerLabel =
+    teamAScore > teamBScore
+      ? 'Победител: НИЕ'
+      : teamBScore > teamAScore
+        ? 'Победител: ВИЕ'
+        : 'Мачът приключи'
+
+  const safeWinnerLabel = escapeHtml(winnerLabel)
+  const matchEndedPlayerStatuses = options.matchEndedPlayerStatuses ?? {}
+
+  return `
+    <div
+      style="
+        width:980px;
+        max-width:980px;
+        margin:0 auto;
+        border-radius:28px;
+        background:linear-gradient(180deg, rgba(9, 20, 38, 0.98) 0%, rgba(13, 29, 52, 0.98) 100%);
+        border:1px solid rgba(255,255,255,0.12);
+        box-shadow:0 30px 70px rgba(0,0,0,0.34);
+        padding:34px 34px 30px;
+        color:#f8fafc;
+      "
+    >
+      <div
+        style="
+          display:flex;
+          align-items:stretch;
+          justify-content:space-between;
+          gap:28px;
+        "
+      >
+        <div style="flex:1 1 auto;">
+          <div
+            style="
+              font-size:16px;
+              font-weight:800;
+              letter-spacing:0.18em;
+              text-transform:uppercase;
+              color:rgba(245, 187, 55, 0.96);
+              margin-bottom:12px;
+            "
+          >
+            Край на мача
+          </div>
+
+          <div
+            style="
+              font-size:42px;
+              line-height:1.08;
+              font-weight:900;
+              letter-spacing:0.01em;
+              margin-bottom:10px;
+            "
+          >
+            ${safeWinnerLabel}
+          </div>
+
+          <div
+            style="
+              font-size:18px;
+              line-height:1.5;
+              color:rgba(226, 232, 240, 0.92);
+              margin-bottom:24px;
+            "
+          >
+            Достигнат е валиден край на играта. Мачът няма да продължи с нов рунд.
+          </div>
+
+          <div
+            style="
+              display:grid;
+              grid-template-columns:repeat(2, minmax(0, 1fr));
+              gap:14px;
+              max-width:420px;
+              margin-bottom:28px;
+            "
+          >
+            <div
+              style="
+                border-radius:18px;
+                background:rgba(255,255,255,0.06);
+                border:1px solid rgba(255,255,255,0.08);
+                padding:18px 18px 16px;
+              "
+            >
+              <div
+                style="
+                  font-size:13px;
+                  font-weight:800;
+                  letter-spacing:0.14em;
+                  text-transform:uppercase;
+                  color:rgba(148, 163, 184, 0.95);
+                  margin-bottom:8px;
+                "
+              >
+                Ние
+              </div>
+              <div
+                style="
+                  font-size:40px;
+                  line-height:1;
+                  font-weight:900;
+                  color:#f8fafc;
+                "
+              >
+                ${teamAScore}
+              </div>
+            </div>
+
+            <div
+              style="
+                border-radius:18px;
+                background:rgba(255,255,255,0.06);
+                border:1px solid rgba(255,255,255,0.08);
+                padding:18px 18px 16px;
+              "
+            >
+              <div
+                style="
+                  font-size:13px;
+                  font-weight:800;
+                  letter-spacing:0.14em;
+                  text-transform:uppercase;
+                  color:rgba(148, 163, 184, 0.95);
+                  margin-bottom:8px;
+                "
+              >
+                Вие
+              </div>
+              <div
+                style="
+                  font-size:40px;
+                  line-height:1;
+                  font-weight:900;
+                  color:#f8fafc;
+                "
+              >
+                ${teamBScore}
+              </div>
+            </div>
+          </div>
+
+          <div
+            style="
+              display:flex;
+              flex-wrap:wrap;
+              gap:12px;
+            "
+          >
+            <button
+              type="button"
+              data-action="match-ended-reload-game"
+              ${options.onMatchEndedReloadGame ? '' : 'disabled'}
+              style="
+                min-width:220px;
+                height:52px;
+                padding:0 20px;
+                border:none;
+                border-radius:14px;
+                background:${options.onMatchEndedReloadGame ? 'rgba(245, 187, 55, 0.98)' : 'rgba(100, 116, 139, 0.55)'};
+                color:${options.onMatchEndedReloadGame ? '#13253d' : 'rgba(226, 232, 240, 0.8)'};
+                font-size:15px;
+                font-weight:900;
+                letter-spacing:0.03em;
+                cursor:${options.onMatchEndedReloadGame ? 'pointer' : 'default'};
+                box-shadow:0 14px 28px rgba(0,0,0,0.20);
+              "
+            >
+              Презареди играта
+            </button>
+
+            <button
+              type="button"
+              data-action="match-ended-find-new-game"
+              ${options.onMatchEndedFindNewGame ? '' : 'disabled'}
+              style="
+                min-width:220px;
+                height:52px;
+                padding:0 20px;
+                border:none;
+                border-radius:14px;
+                background:${options.onMatchEndedFindNewGame ? 'rgba(59, 130, 246, 0.96)' : 'rgba(100, 116, 139, 0.55)'};
+                color:${options.onMatchEndedFindNewGame ? '#eff6ff' : 'rgba(226, 232, 240, 0.8)'};
+                font-size:15px;
+                font-weight:900;
+                letter-spacing:0.03em;
+                cursor:${options.onMatchEndedFindNewGame ? 'pointer' : 'default'};
+                box-shadow:0 14px 28px rgba(0,0,0,0.20);
+              "
+            >
+              Намери нова игра
+            </button>
+
+            <button
+              type="button"
+              data-action="match-ended-leave"
+              ${options.onMatchEndedLeave ? '' : 'disabled'}
+              style="
+                min-width:180px;
+                height:52px;
+                padding:0 20px;
+                border:none;
+                border-radius:14px;
+                background:${options.onMatchEndedLeave ? 'rgba(239, 68, 68, 0.96)' : 'rgba(100, 116, 139, 0.55)'};
+                color:${options.onMatchEndedLeave ? '#fff1f2' : 'rgba(226, 232, 240, 0.8)'};
+                font-size:15px;
+                font-weight:900;
+                letter-spacing:0.03em;
+                cursor:${options.onMatchEndedLeave ? 'pointer' : 'default'};
+                box-shadow:0 14px 28px rgba(0,0,0,0.20);
+              "
+            >
+              Напусни
+            </button>
+          </div>
+        </div>
+
+        <div
+          style="
+            width:260px;
+            flex:0 0 260px;
+            border-radius:20px;
+            background:rgba(255,255,255,0.05);
+            border:1px solid rgba(255,255,255,0.08);
+            padding:18px 16px;
+            align-self:stretch;
+          "
+        >
+          <div
+            style="
+              font-size:13px;
+              font-weight:800;
+              letter-spacing:0.14em;
+              text-transform:uppercase;
+              color:rgba(148, 163, 184, 0.95);
+              margin-bottom:10px;
+            "
+          >
+            Играчи
+          </div>
+
+          <div
+            style="
+              font-size:11px;
+              line-height:1.45;
+              color:rgba(148, 163, 184, 0.92);
+              margin-bottom:14px;
+            "
+          >
+            ✓ = презареждане, ✕ = нова игра или изход
+          </div>
+
+          <div style="display:flex; flex-direction:column; gap:10px;">
+            ${(['bottom', 'right', 'top', 'left'] as const)
+              .map((seat) =>
+                renderMatchEndedPlayerCard(seat, matchEndedPlayerStatuses[seat])
+              )
+              .join('')}
+          </div>
+        </div>
+      </div>
+    </div>
+  `
+}
+
 export function renderApp(
   rootElement: HTMLElement,
   app: AppBootstrap,
@@ -706,6 +1100,7 @@ export function renderApp(
   const isBiddingPhase = renderState.phase === 'bidding'
   const isPlayingPhase = renderState.phase === 'playing'
   const isScoringPhase = renderState.phase === 'scoring'
+  const isMatchEndedPhase = renderState.phase === 'match-ended'
   const shouldShowScoringPanel = isScoringPhase
 
   const roundSetupFlow = getRoundSetupFlowResult({
@@ -781,14 +1176,19 @@ export function renderApp(
 
   const centerMainContent = roundSetupFlow.isRoundSetupPhase
     ? roundSetupFlow.centerContent
-    : scoringViewState
-      ? renderCenterPanel(renderScoringPanel(scoringViewState), 980)
-      : playingViewState
-        ? renderCenterPanel(renderPlayingPanel(playingViewState), 980)
-        : ''
+    : isMatchEndedPhase
+      ? renderCenterPanel(renderMatchEndedPanel(renderState, options), 980)
+      : scoringViewState
+        ? renderCenterPanel(renderScoringPanel(scoringViewState), 980)
+        : playingViewState
+          ? renderCenterPanel(renderPlayingPanel(playingViewState), 980)
+          : ''
 
   const shouldShowCenterDeck =
     roundSetupFlow.isRoundSetupPhase && !roundSetupFlow.shouldHideCenterDeck
+
+  const canUseDebugNextPhase =
+    !!options.onNextPhaseClick && renderState.phase !== 'match-ended'
 
   rootElement.innerHTML = `
     <div class="game-shell">
@@ -965,6 +1365,7 @@ export function renderApp(
 
         ${
           !isScoringPhase &&
+          !isMatchEndedPhase &&
           bottomHandViewState.shouldShow
             ? `
           <div
@@ -1037,19 +1438,19 @@ export function renderApp(
         <button
           type="button"
           data-action="debug-next-phase"
-          ${options.onNextPhaseClick ? '' : 'disabled'}
+          ${canUseDebugNextPhase ? '' : 'disabled'}
           style="
             min-width:160px;
             height:46px;
             padding:0 18px;
             border:none;
             border-radius:12px;
-            background:${options.onNextPhaseClick ? 'rgba(245, 187, 55, 0.98)' : 'rgba(120,120,120,0.7)'};
+            background:${canUseDebugNextPhase ? 'rgba(245, 187, 55, 0.98)' : 'rgba(120,120,120,0.7)'};
             color:#13253d;
             font-size:14px;
             font-weight:900;
             letter-spacing:0.04em;
-            cursor:${options.onNextPhaseClick ? 'pointer' : 'default'};
+            cursor:${canUseDebugNextPhase ? 'pointer' : 'default'};
             box-shadow:0 12px 24px rgba(0,0,0,0.20);
           "
         >
@@ -1063,10 +1464,43 @@ export function renderApp(
     '[data-action="debug-next-phase"]'
   )
 
-  if (debugNextPhaseButton && options.onNextPhaseClick) {
+  if (debugNextPhaseButton && canUseDebugNextPhase && options.onNextPhaseClick) {
     debugNextPhaseButton.addEventListener('click', (event) => {
       event.preventDefault()
       options.onNextPhaseClick?.()
+    })
+  }
+
+  const matchEndedReloadButton = rootElement.querySelector<HTMLButtonElement>(
+    '[data-action="match-ended-reload-game"]'
+  )
+
+  if (matchEndedReloadButton && options.onMatchEndedReloadGame) {
+    matchEndedReloadButton.addEventListener('click', (event) => {
+      event.preventDefault()
+      options.onMatchEndedReloadGame?.()
+    })
+  }
+
+  const matchEndedFindNewGameButton = rootElement.querySelector<HTMLButtonElement>(
+    '[data-action="match-ended-find-new-game"]'
+  )
+
+  if (matchEndedFindNewGameButton && options.onMatchEndedFindNewGame) {
+    matchEndedFindNewGameButton.addEventListener('click', (event) => {
+      event.preventDefault()
+      options.onMatchEndedFindNewGame?.()
+    })
+  }
+
+  const matchEndedLeaveButton = rootElement.querySelector<HTMLButtonElement>(
+    '[data-action="match-ended-leave"]'
+  )
+
+  if (matchEndedLeaveButton && options.onMatchEndedLeave) {
+    matchEndedLeaveButton.addEventListener('click', (event) => {
+      event.preventDefault()
+      options.onMatchEndedLeave?.()
     })
   }
 
