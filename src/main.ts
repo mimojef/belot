@@ -13,15 +13,22 @@ if (!rootElement) {
   throw new Error('Root element #app was not found.')
 }
 
-const BOT_PLAY_DELAY_MS = 1500
-const BOT_BIDDING_DELAY_MS = 1500
+type BidBubbleOverride = {
+  entryKey: string
+  seat: Seat
+  label: string
+}
+
+const BOT_PLAY_DELAY_MS = 800
+const BOT_BIDDING_DELAY_MS = 800
 const FINAL_TRICK_CARD_FLIGHT_MS = 420
 const FINAL_TRICK_CARD_HOLD_MS = 340
 const FLOATING_CARD_WIDTH = 148
 const FLOATING_CARD_HEIGHT = 215
 const CUTTING_COUNTDOWN_MS = 20000
+const BIDDING_COUNTDOWN_MS = 20000
 const PLAYING_COUNTDOWN_MS = 20000
-const BOT_CUTTING_AUTO_SELECT_MS = 1500
+const BOT_CUTTING_AUTO_SELECT_MS = 800
 const CUTTING_SELECTION_RESOLVE_MS = 500
 const CUT_RESOLVE_AUTO_ADVANCE_MS = 0
 const DEAL_FIRST_THREE_AUTO_ADVANCE_MS = 2000
@@ -87,6 +94,7 @@ let activeFinalTrickFloatingCard: HTMLElement | null = null
 let activeFinalTrickSourceElement: HTMLElement | null = null
 let finalTrickHoldTimeoutId: number | null = null
 let bottomBotTakeoverActive = false
+let bidBubbleOverride: BidBubbleOverride | null = null
 
 function clearBotPlayTimeout(): void {
   if (botPlayTimeoutId !== null) {
@@ -460,7 +468,7 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
     >
       <span
         style="
-          font-size:${18 * stageScale}px;
+          font-size:${30 * stageScale}px;
           font-weight:900;
           letter-spacing:0.02em;
         "
@@ -469,7 +477,7 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
       </span>
       <span
         style="
-          font-size:${16 * stageScale}px;
+          font-size:${45 * stageScale}px;
           font-weight:900;
         "
       >
@@ -493,7 +501,7 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
     >
       <span
         style="
-          font-size:${18 * stageScale}px;
+          font-size:${30 * stageScale}px;
           font-weight:900;
           letter-spacing:0.02em;
         "
@@ -502,7 +510,7 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
       </span>
       <span
         style="
-          font-size:${16 * stageScale}px;
+          font-size:${45 * stageScale}px;
           font-weight:900;
         "
       >
@@ -517,7 +525,7 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
         top:54%;
         transform:translate(-50%, -50%);
         color:${cardColor};
-        font-size:${42 * stageScale}px;
+        font-size:${54 * stageScale}px;
         line-height:1;
         font-weight:900;
         text-shadow:0 2px 6px rgba(0,0,0,0.08);
@@ -806,18 +814,34 @@ function pickBotBidAction(state: GameState, seat: Seat): BidAction {
   return { type: 'pass' }
 }
 
-function getBotBidTurnKey(state: GameState): string | null {
+function getBidTurnKey(state: GameState): string | null {
   if (state.phase !== 'bidding' || state.bidding.hasEnded) {
     return null
   }
 
   const currentSeat = state.bidding.currentSeat
 
-  if (!currentSeat || currentSeat === 'bottom') {
+  if (!currentSeat) {
     return null
   }
 
   return `${state.phase}:${state.bidding.entries.length}:${currentSeat}`
+}
+
+function getBidActionDelayMs(state: GameState): number | null {
+  if (state.phase !== 'bidding' || state.bidding.hasEnded) {
+    return null
+  }
+
+  const currentSeat = state.bidding.currentSeat
+
+  if (!currentSeat) {
+    return null
+  }
+
+  return currentSeat === 'bottom'
+    ? BIDDING_COUNTDOWN_MS
+    : BOT_BIDDING_DELAY_MS
 }
 
 function getPlayingTurnKey(state: GameState): string | null {
@@ -1069,6 +1093,113 @@ function renderBottomBotTakeoverPopup(): void {
     setBottomBotTakeoverActive(false)
     render()
   })
+}
+
+function formatBidBubbleLabel(action: BidAction): string {
+  if (action.type === 'pass') {
+    return 'Пас'
+  }
+
+  if (action.type === 'no-trumps') {
+    return 'Без коз'
+  }
+
+  if (action.type === 'all-trumps') {
+    return 'Всичко коз'
+  }
+
+  if (action.type === 'double') {
+    return 'Контра'
+  }
+
+  if (action.type === 'redouble') {
+    return 'Ре контра'
+  }
+
+  if (action.suit === 'clubs') {
+    return 'Спатия'
+  }
+
+  if (action.suit === 'diamonds') {
+    return 'Каро'
+  }
+
+  if (action.suit === 'hearts') {
+    return 'Купа'
+  }
+
+  return 'Пика'
+}
+
+function buildBidBubbleEntryKeyFromState(state: GameState): string | null {
+  const lastEntry = state.bidding.entries.at(-1)
+
+  if (!lastEntry) {
+    return null
+  }
+
+  const phaseMarker =
+    typeof state.phaseEnteredAt === 'number' && Number.isFinite(state.phaseEnteredAt)
+      ? String(state.phaseEnteredAt)
+      : 'no-phase-timestamp'
+
+  const suitPart =
+    lastEntry.action.type === 'suit'
+      ? `:${lastEntry.action.suit}`
+      : ''
+
+  return `${phaseMarker}:${state.bidding.entries.length}:${lastEntry.seat}:${lastEntry.action.type}${suitPart}`
+}
+
+function buildFallbackBidBubbleEntryKey(
+  stateBeforeSubmit: GameState,
+  seat: Seat,
+  action: BidAction
+): string {
+  const phaseMarker =
+    typeof stateBeforeSubmit.phaseEnteredAt === 'number' &&
+    Number.isFinite(stateBeforeSubmit.phaseEnteredAt)
+      ? String(stateBeforeSubmit.phaseEnteredAt)
+      : 'no-phase-timestamp'
+
+  const nextEntryCount = stateBeforeSubmit.bidding.entries.length + 1
+  const suitPart = action.type === 'suit' ? `:${action.suit}` : ''
+
+  return `${phaseMarker}:${nextEntryCount}:${seat}:${action.type}${suitPart}`
+}
+
+function setBidBubbleOverride(nextBubble: BidBubbleOverride | null): void {
+  bidBubbleOverride = nextBubble
+}
+
+function submitBidActionWithBubble(action: BidAction): void {
+  const stateBeforeSubmit = app.engine.getState()
+  const seat = stateBeforeSubmit.bidding.currentSeat
+
+  clearBotPlayTimeout()
+  clearBotBidTimeout()
+  clearCuttingAutoSelectTimeout()
+  clearCuttingResolveTimeout()
+  clearDealPhaseAutoAdvanceTimeout()
+  clearScoringTimeouts()
+  clearFinalTrickAnimationTimeout()
+
+  app.engine.submitBidAction(action)
+
+  if (seat) {
+    const stateAfterSubmit = app.engine.getState()
+    const stateBasedEntryKey = buildBidBubbleEntryKeyFromState(stateAfterSubmit)
+
+    setBidBubbleOverride({
+      entryKey:
+        stateBasedEntryKey ??
+        buildFallbackBidBubbleEntryKey(stateBeforeSubmit, seat, action),
+      seat,
+      label: formatBidBubbleLabel(action),
+    })
+  }
+
+  render()
 }
 
 function scheduleCuttingAutoSelect(): void {
@@ -1493,11 +1624,12 @@ function schedulePlayingPhaseTimers(): void {
   }, Math.max(0, actionRemainingMs))
 }
 
-function scheduleNextBotBid(): void {
+function scheduleNextBidAction(): void {
   const state = app.engine.getState()
-  const turnKey = getBotBidTurnKey(state)
+  const turnKey = getBidTurnKey(state)
+  const delayMs = getBidActionDelayMs(state)
 
-  if (turnKey === null) {
+  if (turnKey === null || delayMs === null) {
     clearBotBidTimeout()
     return
   }
@@ -1517,7 +1649,7 @@ function scheduleNextBotBid(): void {
     botBidTimeoutId = null
 
     const latestState = app.engine.getState()
-    const latestTurnKey = getBotBidTurnKey(latestState)
+    const latestTurnKey = getBidTurnKey(latestState)
 
     if (latestTurnKey === null || latestTurnKey !== activeBotBidTurnKey) {
       activeBotBidTurnKey = null
@@ -1527,24 +1659,17 @@ function scheduleNextBotBid(): void {
 
     const latestSeat = latestState.bidding.currentSeat
 
-    if (!latestSeat || latestSeat === 'bottom') {
+    if (!latestSeat) {
       activeBotBidTurnKey = null
       render()
       return
     }
 
-    const botAction = pickBotBidAction(latestState, latestSeat)
+    const autoAction = pickBotBidAction(latestState, latestSeat)
 
-    clearBotPlayTimeout()
-    clearCuttingAutoSelectTimeout()
-    clearCuttingResolveTimeout()
-    clearDealPhaseAutoAdvanceTimeout()
-    clearScoringTimeouts()
-    clearFinalTrickAnimationTimeout()
     activeBotBidTurnKey = null
-    app.engine.submitBidAction(botAction)
-    render()
-  }, BOT_BIDDING_DELAY_MS)
+    submitBidActionWithBubble(autoAction)
+  }, delayMs)
 }
 
 function render(): void {
@@ -1594,70 +1719,22 @@ function render(): void {
       render()
     },
     onBidPass: () => {
-      clearBotPlayTimeout()
-      clearBotBidTimeout()
-      clearCuttingAutoSelectTimeout()
-      clearCuttingResolveTimeout()
-      clearDealPhaseAutoAdvanceTimeout()
-      clearScoringTimeouts()
-      clearFinalTrickAnimationTimeout()
-      app.engine.submitBidAction({ type: 'pass' })
-      render()
+      submitBidActionWithBubble({ type: 'pass' })
     },
     onBidSuit: (suit) => {
-      clearBotPlayTimeout()
-      clearBotBidTimeout()
-      clearCuttingAutoSelectTimeout()
-      clearCuttingResolveTimeout()
-      clearDealPhaseAutoAdvanceTimeout()
-      clearScoringTimeouts()
-      clearFinalTrickAnimationTimeout()
-      app.engine.submitBidAction({ type: 'suit', suit })
-      render()
+      submitBidActionWithBubble({ type: 'suit', suit })
     },
     onBidNoTrumps: () => {
-      clearBotPlayTimeout()
-      clearBotBidTimeout()
-      clearCuttingAutoSelectTimeout()
-      clearCuttingResolveTimeout()
-      clearDealPhaseAutoAdvanceTimeout()
-      clearScoringTimeouts()
-      clearFinalTrickAnimationTimeout()
-      app.engine.submitBidAction({ type: 'no-trumps' })
-      render()
+      submitBidActionWithBubble({ type: 'no-trumps' })
     },
     onBidAllTrumps: () => {
-      clearBotPlayTimeout()
-      clearBotBidTimeout()
-      clearCuttingAutoSelectTimeout()
-      clearCuttingResolveTimeout()
-      clearDealPhaseAutoAdvanceTimeout()
-      clearScoringTimeouts()
-      clearFinalTrickAnimationTimeout()
-      app.engine.submitBidAction({ type: 'all-trumps' })
-      render()
+      submitBidActionWithBubble({ type: 'all-trumps' })
     },
     onBidDouble: () => {
-      clearBotPlayTimeout()
-      clearBotBidTimeout()
-      clearCuttingAutoSelectTimeout()
-      clearCuttingResolveTimeout()
-      clearDealPhaseAutoAdvanceTimeout()
-      clearScoringTimeouts()
-      clearFinalTrickAnimationTimeout()
-      app.engine.submitBidAction({ type: 'double' })
-      render()
+      submitBidActionWithBubble({ type: 'double' })
     },
     onBidRedouble: () => {
-      clearBotPlayTimeout()
-      clearBotBidTimeout()
-      clearCuttingAutoSelectTimeout()
-      clearCuttingResolveTimeout()
-      clearDealPhaseAutoAdvanceTimeout()
-      clearScoringTimeouts()
-      clearFinalTrickAnimationTimeout()
-      app.engine.submitBidAction({ type: 'redouble' })
-      render()
+      submitBidActionWithBubble({ type: 'redouble' })
     },
     onPlayCard: (cardId) => {
       clearBotPlayTimeout()
@@ -1677,8 +1754,12 @@ function render(): void {
 
       submitPlayCardWithFlow(cardId, 'bottom')
     },
+    onRequestRender: () => {
+      render()
+    },
     playingCountdownRemainingMs,
     bottomBotTakeoverActive,
+    bidBubbleOverride,
   })
 
   belotePromptController.renderPendingPrompt()
@@ -1686,7 +1767,7 @@ function render(): void {
   scheduleCuttingAutoSelect()
   scheduleCuttingResolve()
   scheduleDealPhaseAutoAdvance()
-  scheduleNextBotBid()
+  scheduleNextBidAction()
   schedulePlayingPhaseTimers()
   scheduleScoringPhaseTimers()
 }

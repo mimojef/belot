@@ -130,7 +130,7 @@ function getEntryAnimationStyle(
     --belot-entry-x:${entryOffset.x}px;
     --belot-entry-y:${entryOffset.y}px;
     --belot-final-rotate:${finalRotate}deg;
-    animation: belot-play-card-entry 400ms cubic-bezier(0.22, 1, 0.36, 1);
+    animation: belot-play-card-entry 400ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
     opacity:1;
   `
 }
@@ -165,19 +165,21 @@ function renderPlayedCard(
       data-trick-seat="${play.seat}"
       data-card-id="${escapeHtmlAttribute(play.card.id)}"
       style="
-        position:absolute;
-        left:50%;
-        top:50%;
-        width:148px;
-        height:215px;
-        margin-left:${-56 + finalLeft}px;
-        margin-top:${-81 + finalTop}px;
-        transform:rotate(${finalRotate}deg);
-        transform-origin:center center;
-        z-index:${10 + index};
-        pointer-events:none;
-        ${animationStyle}
-      "
+  position:absolute;
+  left:50%;
+  top:50%;
+  width:148px;
+  height:215px;
+  margin-left:${-56 + finalLeft}px;
+  margin-top:${-81 + finalTop}px;
+  transform:translate(0px, 0px) rotate(${finalRotate}deg) scale(1);
+  transform-origin:center center;
+  backface-visibility:hidden;
+  will-change:transform;
+  z-index:${10 + index};
+  pointer-events:none;
+  ${animationStyle}
+"
     >
       <div
         style="
@@ -218,7 +220,7 @@ function renderPlayedCard(
       >
         <span
           style="
-            font-size:18px;
+            font-size:30px;
             font-weight:900;
             letter-spacing:0.02em;
           "
@@ -227,7 +229,7 @@ function renderPlayedCard(
         </span>
         <span
           style="
-            font-size:16px;
+            font-size:45px;
             font-weight:900;
           "
         >
@@ -251,7 +253,7 @@ function renderPlayedCard(
       >
         <span
           style="
-            font-size:18px;
+            font-size:30px;
             font-weight:900;
             letter-spacing:0.02em;
           "
@@ -260,7 +262,7 @@ function renderPlayedCard(
         </span>
         <span
           style="
-            font-size:16px;
+            font-size:45px;
             font-weight:900;
           "
         >
@@ -275,7 +277,7 @@ function renderPlayedCard(
           top:54%;
           transform:translate(-50%, -50%);
           color:${cardColor};
-          font-size:42px;
+          font-size:54px;
           line-height:1;
           font-weight:900;
           text-shadow:0 2px 6px rgba(0,0,0,0.08);

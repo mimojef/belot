@@ -1,6 +1,6 @@
 import type { AppBootstrap } from './bootstrap'
 import type { Seat } from '../data/constants/seatOrder'
-import type { GameState, Suit } from '../core/state/gameTypes'
+import type { BidAction, GameState, Suit } from '../core/state/gameTypes'
 import { getBiddingViewState } from '../core/state/getBiddingViewState'
 import { getBottomHandViewState } from '../core/state/getBottomHandViewState'
 import { getPlayingViewState } from '../core/state/getPlayingViewState'
@@ -15,6 +15,16 @@ import { getRoundSetupFlowResult } from '../ui/center/renderRoundSetupFlow'
 import { renderSeatPanel } from '../ui/layout/renderSeatPanel'
 import { renderScoreHud } from '../ui/layout/renderScoreHud'
 
+type IncomingBidBubble = {
+  entryKey: string
+  seat: Seat
+  label: string
+}
+
+type ActiveBidBubble = IncomingBidBubble & {
+  shownAt: number
+}
+
 type RenderAppOptions = {
   onNextPhaseClick?: () => void
   onSelectCutIndex?: (cutIndex: number) => void
@@ -26,8 +36,10 @@ type RenderAppOptions = {
   onBidDouble?: () => void
   onBidRedouble?: () => void
   onPlayCard?: (cardId: string) => void
+  onRequestRender?: () => void
   playingCountdownRemainingMs?: number | null
   bottomBotTakeoverActive?: boolean
+  bidBubbleOverride?: IncomingBidBubble | null
 }
 
 type PlayingStateWithTrickCollectionSnapshot = NonNullable<GameState['playing']> & {
@@ -43,11 +55,15 @@ const BOTTOM_HAND_BOTTOM_OFFSET = STAGE_EDGE_GAP + BOTTOM_SEAT_PANEL_HEIGHT + BO
 const SCORE_HUD_INTERNAL_OFFSET = 18
 const CUTTING_COUNTDOWN_MS = 20000
 const BIDDING_COUNTDOWN_MS = 20000
+const BID_BUBBLE_VISIBLE_MS = 2000
 
 let cutResolveTimeoutId: number | null = null
 let roundSetupRerenderTimeoutId: number | null = null
 let activeBiddingCountdownTurnKey: string | null = null
 let activeBiddingCountdownStartedAt = 0
+let bidBubbleHideTimeoutId: number | null = null
+let activeBidBubble: ActiveBidBubble | null = null
+let lastShownBidBubbleEntryKey: string | null = null
 
 const appAnimations = createAppAnimations()
 
@@ -63,6 +79,22 @@ function clearRoundSetupRerenderTimeout(): void {
     window.clearTimeout(roundSetupRerenderTimeoutId)
     roundSetupRerenderTimeoutId = null
   }
+}
+
+function clearBidBubbleHideTimeout(): void {
+  if (bidBubbleHideTimeoutId !== null) {
+    window.clearTimeout(bidBubbleHideTimeoutId)
+    bidBubbleHideTimeoutId = null
+  }
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
 }
 
 function getStageScale(): number {
@@ -189,6 +221,239 @@ function getBiddingCountdownRemainingMs(state: GameState): number {
   const elapsedMs = Math.max(0, now - activeBiddingCountdownStartedAt)
 
   return Math.max(0, BIDDING_COUNTDOWN_MS - elapsedMs)
+}
+
+function formatBidBubbleLabel(action: BidAction): string {
+  if (action.type === 'pass') {
+    return 'Пас'
+  }
+
+  if (action.type === 'no-trumps') {
+    return 'Без коз'
+  }
+
+  if (action.type === 'all-trumps') {
+    return 'Всичко коз'
+  }
+
+  if (action.type === 'double') {
+    return 'Контра'
+  }
+
+  if (action.type === 'redouble') {
+    return 'Ре контра'
+  }
+
+  if (action.suit === 'clubs') {
+    return 'Спатия'
+  }
+
+  if (action.suit === 'diamonds') {
+    return 'Каро'
+  }
+
+  if (action.suit === 'hearts') {
+    return 'Купа'
+  }
+
+  return 'Пика'
+}
+
+function buildBidBubbleEntryKey(state: GameState): string | null {
+  const lastEntry = state.bidding.entries.at(-1)
+
+  if (!lastEntry) {
+    return null
+  }
+
+  const phaseMarker =
+    typeof state.phaseEnteredAt === 'number' && Number.isFinite(state.phaseEnteredAt)
+      ? String(state.phaseEnteredAt)
+      : 'no-phase-timestamp'
+
+  const suitPart =
+    lastEntry.action.type === 'suit'
+      ? `:${lastEntry.action.suit}`
+      : ''
+
+  return `${phaseMarker}:${state.bidding.entries.length}:${lastEntry.seat}:${lastEntry.action.type}${suitPart}`
+}
+
+function showBidBubble(bubble: IncomingBidBubble): void {
+  if (lastShownBidBubbleEntryKey === bubble.entryKey) {
+    return
+  }
+
+  lastShownBidBubbleEntryKey = bubble.entryKey
+  activeBidBubble = {
+    ...bubble,
+    shownAt: getRenderClockNow(),
+  }
+
+  clearBidBubbleHideTimeout()
+
+  bidBubbleHideTimeoutId = window.setTimeout(() => {
+    if (activeBidBubble?.entryKey !== bubble.entryKey) {
+      return
+    }
+
+    activeBidBubble = null
+    bidBubbleHideTimeoutId = null
+  }, BID_BUBBLE_VISIBLE_MS)
+}
+
+function syncBidBubbleFromState(state: GameState): void {
+  const lastEntry = state.bidding.entries.at(-1)
+  const entryKey = buildBidBubbleEntryKey(state)
+
+  if (!lastEntry || !entryKey) {
+    return
+  }
+
+  showBidBubble({
+    entryKey,
+    seat: lastEntry.seat,
+    label: formatBidBubbleLabel(lastEntry.action),
+  })
+}
+
+function syncBidBubbleOverride(bubbleOverride: IncomingBidBubble): void {
+  showBidBubble(bubbleOverride)
+}
+
+function renderBidBubble(seat: Seat, label: string, shownAt: number): string {
+  const safeLabel = escapeHtml(label)
+  const elapsedMs = Math.max(
+    0,
+    Math.min(BID_BUBBLE_VISIBLE_MS, getRenderClockNow() - shownAt)
+  )
+
+  const positionStyle =
+    seat === 'top'
+      ? `
+        left:50%;
+        top:190px;
+        transform:translateX(-50%);
+      `
+      : seat === 'bottom'
+        ? `
+          left:50%;
+          bottom:118px;
+          transform:translateX(-50%);
+        `
+        : seat === 'left'
+          ? `
+            left:154px;
+            top:50%;
+            transform:translateY(-50%);
+          `
+          : `
+            right:154px;
+            top:50%;
+            transform:translateY(-50%);
+          `
+
+  const pointerStyle =
+    seat === 'top'
+      ? `
+        left:50%;
+        top:-8px;
+        transform:translateX(-50%) rotate(45deg);
+      `
+      : seat === 'bottom'
+        ? `
+          left:50%;
+          bottom:-8px;
+          transform:translateX(-50%) rotate(45deg);
+        `
+        : seat === 'left'
+          ? `
+            left:-8px;
+            top:50%;
+            transform:translateY(-50%) rotate(45deg);
+          `
+          : `
+            right:-8px;
+            top:50%;
+            transform:translateY(-50%) rotate(45deg);
+          `
+
+  return `
+    <style>
+      @keyframes belot-bid-bubble-life {
+        0% {
+          opacity: 0;
+          transform: translateY(8px) scale(0.96);
+        }
+        10% {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+        82% {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+        100% {
+          opacity: 0;
+          transform: translateY(-6px) scale(0.98);
+        }
+      }
+    </style>
+
+    <div
+      style="
+        position:absolute;
+        ${positionStyle}
+        z-index:12;
+        pointer-events:none;
+      "
+    >
+      <div
+        style="
+          position:relative;
+          min-width:120px;
+          max-width:240px;
+          padding:14px 22px;
+          border-radius:22px;
+          background:rgba(255,255,255,0.98);
+          color:#14181f;
+          font-size:26px;
+          line-height:1;
+          font-weight:900;
+          letter-spacing:0.01em;
+          text-align:center;
+          white-space:nowrap;
+          box-shadow:
+            0 16px 30px rgba(0,0,0,0.22),
+            inset 0 1px 0 rgba(255,255,255,0.75);
+          animation: belot-bid-bubble-life ${BID_BUBBLE_VISIBLE_MS}ms ease forwards;
+          animation-delay: -${elapsedMs}ms;
+        "
+      >
+        <div
+          style="
+            position:absolute;
+            width:16px;
+            height:16px;
+            background:rgba(255,255,255,0.98);
+            ${pointerStyle}
+          "
+        ></div>
+
+        <div style="position:relative; z-index:2;">
+          ${safeLabel}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderBidBubbleForSeat(seat: Seat): string {
+  if (!activeBidBubble || activeBidBubble.seat !== seat) {
+    return ''
+  }
+
+  return renderBidBubble(seat, activeBidBubble.label, activeBidBubble.shownAt)
 }
 
 function triggerCutResolveSequence(
@@ -379,6 +644,12 @@ export function renderApp(
   const state = app.engine.getState()
   syncBiddingCountdownState(state)
 
+  if (options.bidBubbleOverride) {
+    syncBidBubbleOverride(options.bidBubbleOverride)
+  } else {
+    syncBidBubbleFromState(state)
+  }
+
   const stageScale = getStageScale()
   const cuttingCountdownRemainingMs = getCuttingCountdownRemainingMs(state)
   const biddingCountdownRemainingMs = getBiddingCountdownRemainingMs(state)
@@ -398,7 +669,13 @@ export function renderApp(
 
   if (hasPendingScoringTransition && hasCompletedCurrentTrickCollection) {
     app.engine.finalizePendingScoringTransition()
-    renderApp(rootElement, app, options)
+
+    if (options.onRequestRender) {
+      options.onRequestRender()
+    } else {
+      renderApp(rootElement, app, options)
+    }
+
     return
   }
 
@@ -611,6 +888,7 @@ export function renderApp(
           transform-origin:top center;
         "
       >
+        ${renderBidBubbleForSeat('top')}
         ${renderSeatPanel(
           'top',
           roundSetupFlow.seatHandCounts.top,
@@ -634,6 +912,7 @@ export function renderApp(
           transform-origin:left center;
         "
       >
+        ${renderBidBubbleForSeat('left')}
         ${renderSeatPanel(
           'left',
           roundSetupFlow.seatHandCounts.left,
@@ -657,6 +936,7 @@ export function renderApp(
           transform-origin:right center;
         "
       >
+        ${renderBidBubbleForSeat('right')}
         ${renderSeatPanel(
           'right',
           roundSetupFlow.seatHandCounts.right,
@@ -681,6 +961,8 @@ export function renderApp(
           transform-origin:bottom center;
         "
       >
+        ${renderBidBubbleForSeat('bottom')}
+
         ${
           !isScoringPhase &&
           bottomHandViewState.shouldShow
@@ -842,7 +1124,12 @@ export function renderApp(
       }
 
       app.engine.finalizePendingScoringTransition()
-      renderApp(rootElement, app, options)
+
+      if (options.onRequestRender) {
+        options.onRequestRender()
+      } else {
+        renderApp(rootElement, app, options)
+      }
     })
   }
 }
