@@ -2,6 +2,7 @@ import type { Declaration, Rank, RoundScore, Team } from '../state/gameTypes'
 
 type ComparableDeclarationKind = 'sequence' | 'square'
 type NormalizedDeclarationKind = ComparableDeclarationKind | 'belote' | 'unknown'
+type DeclarationContract = 'color' | 'all-trumps' | 'no-trumps'
 
 export type DeclarationResolutionResult = {
   resolvedDeclarations: Declaration[]
@@ -25,6 +26,10 @@ const SQUARE_STRENGTH_BY_RANK: Record<Rank, number> = {
   Q: 1,
   K: 2,
   A: 4,
+}
+
+function isNoTrumpsContract(contract?: DeclarationContract | null): boolean {
+  return contract === 'no-trumps'
 }
 
 function getRankStrength(rank: Rank | null): number {
@@ -218,12 +223,37 @@ function cloneDeclarationWithValid(
   }
 }
 
+function buildAllInvalidResolution(
+  declarations: Declaration[]
+): DeclarationResolutionResult {
+  const resolvedDeclarations = declarations.map((declaration) =>
+    cloneDeclarationWithValid(declaration, false)
+  )
+
+  return {
+    resolvedDeclarations,
+    validDeclarations: [],
+    invalidDeclarations: resolvedDeclarations,
+    validComparableDeclarations: [],
+    validBeloteDeclarations: [],
+    strongestTeamA: null,
+    strongestTeamB: null,
+    winningComparableTeam: null,
+    isTie: false,
+  }
+}
+
 function buildResolutionFromWinner(params: {
   declarations: Declaration[]
   winningComparableTeam: Team | null
   isTie: boolean
+  contract?: DeclarationContract | null
 }): DeclarationResolutionResult {
-  const { declarations, winningComparableTeam, isTie } = params
+  const { declarations, winningComparableTeam, isTie, contract } = params
+
+  if (isNoTrumpsContract(contract)) {
+    return buildAllInvalidResolution(declarations)
+  }
 
   const resolvedDeclarations = declarations.map((declaration) => {
     if (!declaration.announced) {
@@ -288,8 +318,13 @@ function buildResolutionFromWinner(params: {
 }
 
 export function resolveDeclarations(
-  declarations: Declaration[]
+  declarations: Declaration[],
+  contract?: DeclarationContract | null
 ): DeclarationResolutionResult {
+  if (isNoTrumpsContract(contract)) {
+    return buildAllInvalidResolution(declarations)
+  }
+
   const announcedDeclarations = declarations.filter(
     (declaration) => declaration.announced
   )
@@ -311,6 +346,7 @@ export function resolveDeclarations(
       declarations,
       winningComparableTeam: null,
       isTie: false,
+      contract,
     })
   }
 
@@ -319,6 +355,7 @@ export function resolveDeclarations(
       declarations,
       winningComparableTeam: 'A',
       isTie: false,
+      contract,
     })
   }
 
@@ -327,6 +364,7 @@ export function resolveDeclarations(
       declarations,
       winningComparableTeam: 'B',
       isTie: false,
+      contract,
     })
   }
 
@@ -340,6 +378,7 @@ export function resolveDeclarations(
       declarations,
       winningComparableTeam: null,
       isTie: true,
+      contract,
     })
   }
 
@@ -347,13 +386,15 @@ export function resolveDeclarations(
     declarations,
     winningComparableTeam: comparison > 0 ? 'A' : 'B',
     isTie: false,
+    contract,
   })
 }
 
 export function buildComparableDeclarationsScore(
-  declarations: Declaration[]
+  declarations: Declaration[],
+  contract?: DeclarationContract | null
 ): RoundScore {
-  const resolution = resolveDeclarations(declarations)
+  const resolution = resolveDeclarations(declarations, contract)
 
   return resolution.validComparableDeclarations.reduce<RoundScore>(
     (score, declaration) => {
@@ -376,8 +417,11 @@ export function buildComparableDeclarationsScore(
   )
 }
 
-export function buildBeloteScore(declarations: Declaration[]): RoundScore {
-  const resolution = resolveDeclarations(declarations)
+export function buildBeloteScore(
+  declarations: Declaration[],
+  contract?: DeclarationContract | null
+): RoundScore {
+  const resolution = resolveDeclarations(declarations, contract)
 
   return resolution.validBeloteDeclarations.reduce<RoundScore>(
     (score, declaration) => {

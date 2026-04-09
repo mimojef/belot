@@ -193,6 +193,50 @@ function normalizeCounterMultiplier(value: number | undefined): number {
   return 1
 }
 
+function awardEverythingToTeam(params: {
+  winningTeam: Team
+  recordedTotalWithPremiums: number
+  declarationsRecordedByOwner: RoundScore
+  beloteRecordedByOwner: RoundScore
+}): {
+  awardedTricks: RoundScore
+  awardedDeclarations: RoundScore
+  awardedBelote: RoundScore
+} {
+  const transferredDeclarationsRecorded = getCombinedRecordedScore(
+    params.declarationsRecordedByOwner
+  )
+  const transferredBeloteRecorded = getCombinedRecordedScore(
+    params.beloteRecordedByOwner
+  )
+
+  const awardedDeclarations = setTeamPoints(
+    createZeroRoundScore(),
+    params.winningTeam,
+    transferredDeclarationsRecorded
+  )
+
+  const awardedBelote = setTeamPoints(
+    createZeroRoundScore(),
+    params.winningTeam,
+    transferredBeloteRecorded
+  )
+
+  const awardedTricks = setTeamPoints(
+    createZeroRoundScore(),
+    params.winningTeam,
+    params.recordedTotalWithPremiums -
+      transferredDeclarationsRecorded -
+      transferredBeloteRecorded
+  )
+
+  return {
+    awardedTricks,
+    awardedDeclarations,
+    awardedBelote,
+  }
+}
+
 export function buildOfficialRoundScore(input: {
   baseRoundScore: BaseRoundScoreResult
   roundOutcome: RoundOutcomeResult
@@ -231,58 +275,55 @@ export function buildOfficialRoundScore(input: {
   let awardedBelote = createZeroRoundScore()
 
   if (roundOutcome.outcome === 'made') {
-    const totalRecorded = convertRawPairToRecordedPair(
-      baseRoundScore.teamA.rawPoints +
-        declarationsScore.teamA +
-        beloteScore.teamA,
-      baseRoundScore.teamB.rawPoints +
-        declarationsScore.teamB +
-        beloteScore.teamB,
-      expectedTotalWithPremiums
-    )
+    if (counterMultiplier > 1 && roundOutcome.winningTeam) {
+      const awardedAll = awardEverythingToTeam({
+        winningTeam: roundOutcome.winningTeam,
+        recordedTotalWithPremiums,
+        declarationsRecordedByOwner,
+        beloteRecordedByOwner,
+      })
 
-    awardedDeclarations = {
-      ...declarationsRecordedByOwner,
+      awardedTricks = awardedAll.awardedTricks
+      awardedDeclarations = awardedAll.awardedDeclarations
+      awardedBelote = awardedAll.awardedBelote
+    } else {
+      const totalRecorded = convertRawPairToRecordedPair(
+        baseRoundScore.teamA.rawPoints +
+          declarationsScore.teamA +
+          beloteScore.teamA,
+        baseRoundScore.teamB.rawPoints +
+          declarationsScore.teamB +
+          beloteScore.teamB,
+        expectedTotalWithPremiums
+      )
+
+      awardedDeclarations = {
+        ...declarationsRecordedByOwner,
+      }
+
+      awardedBelote = {
+        ...beloteRecordedByOwner,
+      }
+
+      awardedTricks = subtractRoundScores(
+        totalRecorded,
+        addRoundScores(awardedDeclarations, awardedBelote)
+      )
     }
-
-    awardedBelote = {
-      ...beloteRecordedByOwner,
-    }
-
-    awardedTricks = subtractRoundScores(
-      totalRecorded,
-      addRoundScores(awardedDeclarations, awardedBelote)
-    )
   }
 
   if (roundOutcome.outcome === 'inside') {
     if (roundOutcome.defenderTeam) {
-      const transferredDeclarationsRecorded = getCombinedRecordedScore(
-        declarationsRecordedByOwner
-      )
-      const transferredBeloteRecorded = getCombinedRecordedScore(
-        beloteRecordedByOwner
-      )
+      const awardedAll = awardEverythingToTeam({
+        winningTeam: roundOutcome.defenderTeam,
+        recordedTotalWithPremiums,
+        declarationsRecordedByOwner,
+        beloteRecordedByOwner,
+      })
 
-      awardedDeclarations = setTeamPoints(
-        awardedDeclarations,
-        roundOutcome.defenderTeam,
-        transferredDeclarationsRecorded
-      )
-
-      awardedBelote = setTeamPoints(
-        awardedBelote,
-        roundOutcome.defenderTeam,
-        transferredBeloteRecorded
-      )
-
-      awardedTricks = setTeamPoints(
-        awardedTricks,
-        roundOutcome.defenderTeam,
-        recordedTotalWithPremiums -
-          transferredDeclarationsRecorded -
-          transferredBeloteRecorded
-      )
+      awardedTricks = awardedAll.awardedTricks
+      awardedDeclarations = awardedAll.awardedDeclarations
+      awardedBelote = awardedAll.awardedBelote
     }
   }
 

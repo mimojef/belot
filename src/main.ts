@@ -2,8 +2,8 @@ import './style.css'
 import { bootstrapApp } from './app/bootstrap'
 import { renderApp } from './app/renderApp'
 import { createBelotePromptController } from './app/playPrompts/createBelotePromptController'
+import { pickBotBidAction } from './core/rules/pickBotBidAction'
 import { pickBotCardToPlay } from './core/rules/pickBotCardToPlay'
-import { getBiddingViewState } from './core/state/getBiddingViewState'
 import type { Seat } from './data/constants/seatOrder'
 import type { BidAction, Card, GameState, Suit } from './core/state/gameTypes'
 
@@ -41,41 +41,6 @@ const SCORING_AUTO_ADVANCE_MS = 5000
 const SCORING_TIMER_FUDGE_MS = 24
 const MATCH_ENDED_BOT_RELOAD_STEP_MS = 500
 const MATCH_ENDED_RESTART_AFTER_BOTS_MS = 250
-
-const SUIT_OPTIONS: Suit[] = ['clubs', 'diamonds', 'hearts', 'spades']
-
-const SUIT_BID_RANK_VALUES: Record<string, number> = {
-  J: 6.5,
-  9: 5.5,
-  A: 4,
-  '10': 3.5,
-  K: 2,
-  Q: 1.5,
-  8: 0,
-  7: 0,
-}
-
-const NO_TRUMPS_RANK_VALUES: Record<string, number> = {
-  A: 5,
-  '10': 4,
-  K: 2,
-  Q: 1.2,
-  J: 0.5,
-  9: 0,
-  8: 0,
-  7: 0,
-}
-
-const ALL_TRUMPS_SIDE_VALUES: Record<string, number> = {
-  J: 3,
-  9: 2.5,
-  A: 1.8,
-  '10': 1.2,
-  K: 1,
-  Q: 0.6,
-  8: 0,
-  7: 0,
-}
 
 const appRoot = rootElement
 const app = bootstrapApp()
@@ -801,140 +766,6 @@ function getDealPhaseAutoAdvanceDelay(phase: string): number | null {
   }
 
   return null
-}
-
-function getCardRankScore(card: Card, scoreMap: Record<string, number>): number {
-  return scoreMap[String(card.rank)] ?? 0
-}
-
-function getSuitBidStrength(hand: Card[], suit: Suit): number {
-  const suitCards = hand.filter((card) => card.suit === suit)
-  const rankScore = suitCards.reduce(
-    (sum, card) => sum + getCardRankScore(card, SUIT_BID_RANK_VALUES),
-    0
-  )
-  const count = suitCards.length
-  const lengthBonus = count * 1.4 + (count >= 4 ? 2 : 0) + (count >= 5 ? 3 : 0)
-
-  return rankScore + lengthBonus
-}
-
-function getNoTrumpsBidStrength(hand: Card[]): number {
-  const rankScore = hand.reduce(
-    (sum, card) => sum + getCardRankScore(card, NO_TRUMPS_RANK_VALUES),
-    0
-  )
-  const acesAndTens = hand.filter(
-    (card) => String(card.rank) === 'A' || String(card.rank) === '10'
-  ).length
-
-  return rankScore + acesAndTens * 0.8
-}
-
-function getAllTrumpsBidStrength(hand: Card[]): number {
-  const bestSuitStrength = Math.max(
-    ...SUIT_OPTIONS.map((suit) => getSuitBidStrength(hand, suit))
-  )
-
-  const sideValue = hand.reduce(
-    (sum, card) => sum + getCardRankScore(card, ALL_TRUMPS_SIDE_VALUES),
-    0
-  )
-
-  return bestSuitStrength + sideValue * 0.25
-}
-
-type BotContractCandidate = {
-  action: BidAction
-  score: number
-}
-
-type BotBidValidActions = NonNullable<ReturnType<typeof getBiddingViewState>>['validActions']
-
-function getBestBotContractCandidate(
-  hand: Card[],
-  validActions: BotBidValidActions
-): BotContractCandidate | null {
-  const candidates: BotContractCandidate[] = []
-
-  for (const suit of SUIT_OPTIONS) {
-    if (!validActions.suits[suit]) {
-      continue
-    }
-
-    candidates.push({
-      action: { type: 'suit', suit },
-      score: getSuitBidStrength(hand, suit),
-    })
-  }
-
-  if (validActions.noTrumps) {
-    candidates.push({
-      action: { type: 'no-trumps' },
-      score: getNoTrumpsBidStrength(hand),
-    })
-  }
-
-  if (validActions.allTrumps) {
-    candidates.push({
-      action: { type: 'all-trumps' },
-      score: getAllTrumpsBidStrength(hand),
-    })
-  }
-
-  if (candidates.length === 0) {
-    return null
-  }
-
-  candidates.sort((left, right) => right.score - left.score)
-
-  return candidates[0] ?? null
-}
-
-function getMinimumBotBidScore(action: BidAction): number {
-  if (action.type === 'suit') {
-    return 10.5
-  }
-
-  if (action.type === 'no-trumps') {
-    return 15
-  }
-
-  if (action.type === 'all-trumps') {
-    return 16
-  }
-
-  return Number.POSITIVE_INFINITY
-}
-
-function pickBotBidAction(state: GameState, seat: Seat): BidAction {
-  const biddingViewState = getBiddingViewState(state)
-
-  if (!biddingViewState || biddingViewState.currentSeat !== seat) {
-    return { type: 'pass' }
-  }
-
-  const validActions = biddingViewState.validActions
-  const hand = state.hands[seat] ?? []
-  const bestContract = getBestBotContractCandidate(hand, validActions)
-  const bestContractScore = bestContract?.score ?? 0
-
-  if (validActions.redouble && bestContractScore >= 12.5) {
-    return { type: 'redouble' }
-  }
-
-  if (validActions.double && bestContractScore >= 13.5) {
-    return { type: 'double' }
-  }
-
-  if (
-    bestContract &&
-    bestContractScore >= getMinimumBotBidScore(bestContract.action)
-  ) {
-    return bestContract.action
-  }
-
-  return { type: 'pass' }
 }
 
 function getBidTurnKey(state: GameState): string | null {

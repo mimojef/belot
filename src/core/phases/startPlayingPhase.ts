@@ -12,6 +12,10 @@ function collectBotOpeningDeclarations(state: GameState): Declaration[] {
     return []
   }
 
+  if (winningBid.contract === 'no-trumps') {
+    return []
+  }
+
   const declarations: Declaration[] = []
 
   for (const player of Object.values(state.players)) {
@@ -45,8 +49,13 @@ function collectBotOpeningDeclarations(state: GameState): Declaration[] {
   return declarations
 }
 
+function removeNonBeloteDeclarations(declarations: Declaration[]): Declaration[] {
+  return declarations.filter((declaration) => declaration.type === 'belote')
+}
+
 export function startPlayingPhase(state: GameState): GameState {
   const firstTurnSeat = state.round.firstDealSeat
+  const winningBid = state.bidding.winningBid
 
   const initialTrick = {
     ...createEmptyTrickState(),
@@ -61,10 +70,15 @@ export function startPlayingPhase(state: GameState): GameState {
 
   const botOpeningDeclarations = collectBotOpeningDeclarations(state)
 
+  const declarations =
+    winningBid?.contract === 'no-trumps'
+      ? removeNonBeloteDeclarations(preservedHumanDeclarations)
+      : [...preservedHumanDeclarations, ...botOpeningDeclarations]
+
   return {
     ...state,
     phase: 'playing',
-    declarations: [...preservedHumanDeclarations, ...botOpeningDeclarations],
+    declarations,
     currentTrick: initialTrick,
     playing: {
       ...createEmptyPlayingState(),

@@ -126,7 +126,7 @@ function getValidCardsInSuitContract(
     return higherTrumpCards
   }
 
-  return trumpCards
+  return hand
 }
 
 function getValidCardsInAllTrumpsContract(

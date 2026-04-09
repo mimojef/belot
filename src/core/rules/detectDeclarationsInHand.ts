@@ -321,6 +321,15 @@ export function detectDeclarationsInHand(
   input: DetectDeclarationsInHandInput
 ): Declaration[] {
   const announced = input.announced ?? false
+  const winningBid = input.winningBid
+
+  if (!winningBid) {
+    return []
+  }
+
+  if (winningBid.contract === 'no-trumps') {
+    return []
+  }
 
   return [
     ...findSequenceDeclarations({
@@ -339,7 +348,7 @@ export function detectDeclarationsInHand(
       seat: input.seat,
       team: input.team,
       hand: input.hand,
-      winningBid: input.winningBid,
+      winningBid,
       announced,
     }),
   ]

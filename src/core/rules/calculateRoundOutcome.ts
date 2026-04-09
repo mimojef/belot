@@ -119,7 +119,7 @@ export function calculateRoundOutcome(
     defenderPoints,
     isTie: false,
     isInside: false,
-    isMade: true,
+    isMade,
     winningTeam: bidderTeam,
     outcome: 'made',
   }

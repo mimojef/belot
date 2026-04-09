@@ -35,6 +35,8 @@ export type CalculateBaseRoundScoreResult = {
   isPointTotalValid: boolean
 }
 
+const CAPOT_BONUS_POINTS = 90
+
 function getTeamBySeat(seat: ScoringSeat): ScoringTeam {
   return seat === 'bottom' || seat === 'top' ? 'A' : 'B'
 }
@@ -88,10 +90,30 @@ function getCardPoints(
   return getNonTrumpCardPoints(card.rank)
 }
 
-function getExpectedTotalPoints(contract: ScoringContract): number {
+function getBaseExpectedTotalPoints(contract: ScoringContract): number {
   if (contract === 'all-trumps') return 258
   if (contract === 'no-trumps') return 260
   return 162
+}
+
+function getCapotWinnerTeam(
+  isComplete: boolean,
+  teamATricksWon: number,
+  teamBTricksWon: number
+): ScoringTeam | null {
+  if (!isComplete) {
+    return null
+  }
+
+  if (teamATricksWon === 8) {
+    return 'A'
+  }
+
+  if (teamBTricksWon === 8) {
+    return 'B'
+  }
+
+  return null
 }
 
 export function calculateBaseRoundScore(
@@ -142,9 +164,19 @@ export function calculateBaseRoundScore(
     teamB.rawPoints *= 2
   }
 
-  const actualTotalPoints = teamA.rawPoints + teamB.rawPoints
-  const expectedTotalPoints = getExpectedTotalPoints(input.contract)
   const isComplete = completedTricks.length === 8
+  const capotWinnerTeam = getCapotWinnerTeam(isComplete, teamA.tricksWon, teamB.tricksWon)
+
+  if (capotWinnerTeam === 'A') {
+    teamA.rawPoints += CAPOT_BONUS_POINTS
+  } else if (capotWinnerTeam === 'B') {
+    teamB.rawPoints += CAPOT_BONUS_POINTS
+  }
+
+  const actualTotalPoints = teamA.rawPoints + teamB.rawPoints
+  const expectedTotalPoints =
+    getBaseExpectedTotalPoints(input.contract) +
+    (capotWinnerTeam ? CAPOT_BONUS_POINTS : 0)
 
   return {
     teamA,

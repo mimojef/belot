@@ -102,6 +102,8 @@ export function createEmptyPlayingState(): PlayingState {
     lastCompletedTrickWinnerTeam: null,
     wonTricksBySeat: createEmptyWonTricksBySeat(),
     wonTricksByTeam: createEmptyWonTricks(),
+    trickCollectionSnapshot: null,
+    pendingScoringTransition: null,
   }
 }
 
