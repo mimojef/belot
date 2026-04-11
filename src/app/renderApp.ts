@@ -1,6 +1,6 @@
 import type { AppBootstrap } from './bootstrap'
 import type { Seat } from '../data/constants/seatOrder'
-import type { BidAction, GameState, Suit } from '../core/state/gameTypes'
+import type { BidAction, Declaration, GameState, Suit } from '../core/state/gameTypes'
 import { getBiddingViewState } from '../core/state/getBiddingViewState'
 import { getBottomHandViewState } from '../core/state/getBottomHandViewState'
 import { getPlayingViewState } from '../core/state/getPlayingViewState'
@@ -14,6 +14,7 @@ import { renderCenterDeck } from '../ui/center/renderCenterDeck'
 import { getRoundSetupFlowResult } from '../ui/center/renderRoundSetupFlow'
 import { renderSeatPanel } from '../ui/layout/renderSeatPanel'
 import { renderScoreHud } from '../ui/layout/renderScoreHud'
+import { createGameAudioController } from './audio/createGameAudioController'
 
 type IncomingBidBubble = {
   entryKey: string
@@ -22,6 +23,16 @@ type IncomingBidBubble = {
 }
 
 type ActiveBidBubble = IncomingBidBubble & {
+  shownAt: number
+}
+
+type IncomingDeclarationBubble = {
+  entryKey: string
+  seat: Seat
+  lines: string[]
+}
+
+type ActiveDeclarationBubble = IncomingDeclarationBubble & {
   shownAt: number
 }
 
@@ -59,9 +70,10 @@ const BOTTOM_SEAT_PANEL_HEIGHT = 98
 const BOTTOM_HAND_GAP = -120
 const BOTTOM_HAND_BOTTOM_OFFSET = STAGE_EDGE_GAP + BOTTOM_SEAT_PANEL_HEIGHT + BOTTOM_HAND_GAP
 const SCORE_HUD_INTERNAL_OFFSET = 18
-const CUTTING_COUNTDOWN_MS = 20000
-const BIDDING_COUNTDOWN_MS = 20000
+const CUTTING_COUNTDOWN_MS = 15000
+const BIDDING_COUNTDOWN_MS = 15000
 const BID_BUBBLE_VISIBLE_MS = 2000
+const DECLARATION_BUBBLE_VISIBLE_MS = 2000
 
 let cutResolveTimeoutId: number | null = null
 let roundSetupRerenderTimeoutId: number | null = null
@@ -70,8 +82,13 @@ let activeBiddingCountdownStartedAt = 0
 let bidBubbleHideTimeoutId: number | null = null
 let activeBidBubble: ActiveBidBubble | null = null
 let lastShownBidBubbleEntryKey: string | null = null
+let declarationBubbleHideTimeoutIds: Partial<Record<Seat, number>> = {}
+let activeDeclarationBubbles: Partial<Record<Seat, ActiveDeclarationBubble>> = {}
+let lastShownDeclarationBubbleEntryKeys: Partial<Record<Seat, string>> = {}
+let seenAnnouncedDeclarationSignaturesBySeat: Partial<Record<Seat, string[]>> = {}
 
 const appAnimations = createAppAnimations()
+const gameAudio = createGameAudioController()
 
 function clearCutResolveTimeout(): void {
   if (cutResolveTimeoutId !== null) {
@@ -92,6 +109,26 @@ function clearBidBubbleHideTimeout(): void {
     window.clearTimeout(bidBubbleHideTimeoutId)
     bidBubbleHideTimeoutId = null
   }
+}
+
+function clearDeclarationBubbleHideTimeout(seat: Seat): void {
+  const timeoutId = declarationBubbleHideTimeoutIds[seat]
+
+  if (typeof timeoutId === 'number') {
+    window.clearTimeout(timeoutId)
+  }
+
+  delete declarationBubbleHideTimeoutIds[seat]
+}
+
+function resetDeclarationBubbles(): void {
+  for (const seat of ['bottom', 'right', 'top', 'left'] as const) {
+    clearDeclarationBubbleHideTimeout(seat)
+  }
+
+  activeDeclarationBubbles = {}
+  lastShownDeclarationBubbleEntryKeys = {}
+  seenAnnouncedDeclarationSignaturesBySeat = {}
 }
 
 function escapeHtml(value: string): string {
@@ -265,6 +302,192 @@ function formatBidBubbleLabel(action: BidAction): string {
   return 'Пика'
 }
 
+function getDeclarationBubbleBaseLabel(declaration: Declaration): string {
+  if (declaration.type === 'belote') {
+    return 'Белот'
+  }
+
+  if (declaration.type === 'square') {
+    return 'Каре'
+  }
+
+  const sequenceLength = declaration.cards.length
+
+  if (sequenceLength <= 3) {
+    return 'Терца'
+  }
+
+  if (sequenceLength === 4) {
+    return '50'
+  }
+
+  return '100'
+}
+
+function formatDeclarationBubbleCountLabel(baseLabel: string, count: number): string {
+  if (count <= 1) {
+    return baseLabel
+  }
+
+  if (baseLabel === 'Терца') {
+    return `${count} терци`
+  }
+
+  if (baseLabel === '50') {
+    return `${count} 50`
+  }
+
+  if (baseLabel === '100') {
+    return `${count} 100`
+  }
+
+  if (baseLabel === 'Каре') {
+    return `${count} карета`
+  }
+
+  if (baseLabel === 'Белот') {
+    return `${count} белота`
+  }
+
+  return `${count} ${baseLabel.toLowerCase()}`
+}
+
+function buildDeclarationBubbleLines(declarations: Declaration[]): string[] {
+  const lines: string[] = []
+  const counts = new Map<string, number>()
+
+  for (const declaration of declarations) {
+    const baseLabel = getDeclarationBubbleBaseLabel(declaration)
+    const previousCount = counts.get(baseLabel) ?? 0
+
+    counts.set(baseLabel, previousCount + 1)
+
+    if (previousCount === 0) {
+      lines.push(baseLabel)
+    }
+  }
+
+  return lines.map((baseLabel) =>
+    formatDeclarationBubbleCountLabel(baseLabel, counts.get(baseLabel) ?? 1)
+  )
+}
+
+function getDeclarationSignature(declaration: Declaration): string {
+  return [
+    declaration.type,
+    declaration.points,
+    declaration.suit ?? '',
+    declaration.highRank ?? '',
+    declaration.cards.map((card) => card.id).join(','),
+  ].join(':')
+}
+
+function buildDeclarationBubbleEntryKey(
+  state: GameState,
+  seat: Seat,
+  declarations: Declaration[]
+): string {
+  const phaseMarker =
+    typeof state.phaseEnteredAt === 'number' && Number.isFinite(state.phaseEnteredAt)
+      ? String(state.phaseEnteredAt)
+      : 'no-phase-timestamp'
+
+  const declarationPart = declarations
+    .map((declaration) => getDeclarationSignature(declaration))
+    .join('|')
+
+  return `${phaseMarker}:${seat}:${declarationPart}`
+}
+
+function hasSeatPlayedInCurrentRound(state: GameState, seat: Seat): boolean {
+  const currentTrickPlays =
+    state.playing?.currentTrick.plays ??
+    state.currentTrick?.plays ??
+    []
+
+  if (currentTrickPlays.some((play) => play.seat === seat)) {
+    return true
+  }
+
+  const completedTricks = state.playing?.completedTricks ?? []
+
+  return completedTricks.some((trick) => {
+    return trick.plays.some((play) => play.seat === seat)
+  })
+}
+
+function showDeclarationBubble(bubble: IncomingDeclarationBubble): void {
+  if (lastShownDeclarationBubbleEntryKeys[bubble.seat] === bubble.entryKey) {
+    return
+  }
+
+  lastShownDeclarationBubbleEntryKeys[bubble.seat] = bubble.entryKey
+  gameAudio.playDeclarationBubble(bubble.lines)
+  activeDeclarationBubbles = {
+    ...activeDeclarationBubbles,
+    [bubble.seat]: {
+      ...bubble,
+      shownAt: getRenderClockNow(),
+    },
+  }
+
+  clearDeclarationBubbleHideTimeout(bubble.seat)
+
+  declarationBubbleHideTimeoutIds[bubble.seat] = window.setTimeout(() => {
+    const activeBubble = activeDeclarationBubbles[bubble.seat]
+
+    if (!activeBubble || activeBubble.entryKey !== bubble.entryKey) {
+      return
+    }
+
+    const nextBubbles = { ...activeDeclarationBubbles }
+    delete nextBubbles[bubble.seat]
+    activeDeclarationBubbles = nextBubbles
+
+    clearDeclarationBubbleHideTimeout(bubble.seat)
+  }, DECLARATION_BUBBLE_VISIBLE_MS)
+}
+
+function syncDeclarationBubblesFromState(state: GameState): void {
+  if (state.phase !== 'playing') {
+    resetDeclarationBubbles()
+    return
+  }
+
+  for (const seat of ['bottom', 'right', 'top', 'left'] as const) {
+    if (!hasSeatPlayedInCurrentRound(state, seat)) {
+      continue
+    }
+
+    const announcedDeclarations = state.declarations.filter((declaration) => {
+      return declaration.seat === seat && declaration.announced
+    })
+
+    const announcedSignatures = announcedDeclarations.map((declaration) =>
+      getDeclarationSignature(declaration)
+    )
+    const knownSignatures = new Set(seenAnnouncedDeclarationSignaturesBySeat[seat] ?? [])
+    const newlyAnnouncedDeclarations = announcedDeclarations.filter((declaration) => {
+      return !knownSignatures.has(getDeclarationSignature(declaration))
+    })
+
+    seenAnnouncedDeclarationSignaturesBySeat = {
+      ...seenAnnouncedDeclarationSignaturesBySeat,
+      [seat]: announcedSignatures,
+    }
+
+    if (newlyAnnouncedDeclarations.length === 0) {
+      continue
+    }
+
+    showDeclarationBubble({
+      entryKey: buildDeclarationBubbleEntryKey(state, seat, newlyAnnouncedDeclarations),
+      seat,
+      lines: buildDeclarationBubbleLines(newlyAnnouncedDeclarations),
+    })
+  }
+}
+
 function buildBidBubbleEntryKey(state: GameState): string | null {
   const lastEntry = state.bidding.entries.at(-1)
 
@@ -291,6 +514,7 @@ function showBidBubble(bubble: IncomingBidBubble): void {
   }
 
   lastShownBidBubbleEntryKey = bubble.entryKey
+  gameAudio.playBidBubble(bubble.label)
   activeBidBubble = {
     ...bubble,
     shownAt: getRenderClockNow(),
@@ -327,62 +551,94 @@ function syncBidBubbleOverride(bubbleOverride: IncomingBidBubble): void {
   showBidBubble(bubbleOverride)
 }
 
+function getDealPhaseAudioSequenceKey(state: GameState): string | null {
+  if (
+    state.phase !== 'deal-first-3' &&
+    state.phase !== 'deal-next-2' &&
+    state.phase !== 'deal-last-3'
+  ) {
+    return null
+  }
+
+  const phaseMarker =
+    typeof state.phaseEnteredAt === 'number' && Number.isFinite(state.phaseEnteredAt)
+      ? String(state.phaseEnteredAt)
+      : 'no-phase-timestamp'
+
+  return `${state.phase}:${phaseMarker}`
+}
+
+function syncDealPhaseAudio(state: GameState): void {
+  const dealPhaseAudioSequenceKey = getDealPhaseAudioSequenceKey(state)
+
+  if (!dealPhaseAudioSequenceKey) {
+    gameAudio.clearDealPacketSounds()
+    return
+  }
+
+  gameAudio.scheduleDealPacketSounds(dealPhaseAudioSequenceKey)
+}
+
+function getBubblePositionStyle(seat: Seat): string {
+  return seat === 'top'
+    ? `
+      left:50%;
+      top:190px;
+      transform:translateX(-50%);
+    `
+    : seat === 'bottom'
+      ? `
+        left:50%;
+        bottom:118px;
+        transform:translateX(-50%);
+      `
+      : seat === 'left'
+        ? `
+          left:154px;
+          top:50%;
+          transform:translateY(-50%);
+        `
+        : `
+          right:154px;
+          top:50%;
+          transform:translateY(-50%);
+        `
+}
+
+function getBubblePointerStyle(seat: Seat): string {
+  return seat === 'top'
+    ? `
+      left:50%;
+      top:-8px;
+      transform:translateX(-50%) rotate(45deg);
+    `
+    : seat === 'bottom'
+      ? `
+        left:50%;
+        bottom:-8px;
+        transform:translateX(-50%) rotate(45deg);
+      `
+      : seat === 'left'
+        ? `
+          left:-8px;
+          top:50%;
+          transform:translateY(-50%) rotate(45deg);
+        `
+        : `
+          right:-8px;
+          top:50%;
+          transform:translateY(-50%) rotate(45deg);
+        `
+}
+
 function renderBidBubble(seat: Seat, label: string, shownAt: number): string {
   const safeLabel = escapeHtml(label)
   const elapsedMs = Math.max(
     0,
     Math.min(BID_BUBBLE_VISIBLE_MS, getRenderClockNow() - shownAt)
   )
-
-  const positionStyle =
-    seat === 'top'
-      ? `
-        left:50%;
-        top:190px;
-        transform:translateX(-50%);
-      `
-      : seat === 'bottom'
-        ? `
-          left:50%;
-          bottom:118px;
-          transform:translateX(-50%);
-        `
-        : seat === 'left'
-          ? `
-            left:154px;
-            top:50%;
-            transform:translateY(-50%);
-          `
-          : `
-            right:154px;
-            top:50%;
-            transform:translateY(-50%);
-          `
-
-  const pointerStyle =
-    seat === 'top'
-      ? `
-        left:50%;
-        top:-8px;
-        transform:translateX(-50%) rotate(45deg);
-      `
-      : seat === 'bottom'
-        ? `
-          left:50%;
-          bottom:-8px;
-          transform:translateX(-50%) rotate(45deg);
-        `
-        : seat === 'left'
-          ? `
-            left:-8px;
-            top:50%;
-            transform:translateY(-50%) rotate(45deg);
-          `
-          : `
-            right:-8px;
-            top:50%;
-            transform:translateY(-50%) rotate(45deg);
-          `
+  const positionStyle = getBubblePositionStyle(seat)
+  const pointerStyle = getBubblePointerStyle(seat)
 
   return `
     <style>
@@ -454,12 +710,120 @@ function renderBidBubble(seat: Seat, label: string, shownAt: number): string {
   `
 }
 
+function renderDeclarationBubble(seat: Seat, lines: string[], shownAt: number): string {
+  if (lines.length === 0) {
+    return ''
+  }
+
+  const elapsedMs = Math.max(
+    0,
+    Math.min(DECLARATION_BUBBLE_VISIBLE_MS, getRenderClockNow() - shownAt)
+  )
+  const positionStyle = getBubblePositionStyle(seat)
+  const pointerStyle = getBubblePointerStyle(seat)
+  const safeLines = lines.map((line) => escapeHtml(line))
+
+  return `
+    <style>
+      @keyframes belot-declaration-bubble-life {
+        0% {
+          opacity: 0;
+          transform: translateY(8px) scale(0.96);
+        }
+        10% {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+        82% {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+        100% {
+          opacity: 0;
+          transform: translateY(-6px) scale(0.98);
+        }
+      }
+    </style>
+
+    <div
+      style="
+        position:absolute;
+        ${positionStyle}
+        z-index:13;
+        pointer-events:none;
+      "
+    >
+      <div
+        style="
+          position:relative;
+          min-width:140px;
+          max-width:280px;
+          padding:14px 18px;
+          border-radius:22px;
+          background:rgba(255,255,255,0.98);
+          color:#14181f;
+          font-size:23px;
+          line-height:1.15;
+          font-weight:900;
+          letter-spacing:0.01em;
+          text-align:center;
+          white-space:normal;
+          box-shadow:
+            0 16px 30px rgba(0,0,0,0.22),
+            inset 0 1px 0 rgba(255,255,255,0.75);
+          animation: belot-declaration-bubble-life ${DECLARATION_BUBBLE_VISIBLE_MS}ms ease forwards;
+          animation-delay: -${elapsedMs}ms;
+        "
+      >
+        <div
+          style="
+            position:absolute;
+            width:16px;
+            height:16px;
+            background:rgba(255,255,255,0.98);
+            ${pointerStyle}
+          "
+        ></div>
+
+        <div
+          style="
+            position:relative;
+            z-index:2;
+            display:flex;
+            flex-direction:column;
+            gap:6px;
+            align-items:center;
+          "
+        >
+          ${safeLines
+            .map(
+              (line) => `
+            <div>${line}</div>
+          `
+            )
+            .join('')}
+        </div>
+      </div>
+    </div>
+  `
+}
+
 function renderBidBubbleForSeat(seat: Seat): string {
   if (!activeBidBubble || activeBidBubble.seat !== seat) {
     return ''
   }
 
   return renderBidBubble(seat, activeBidBubble.label, activeBidBubble.shownAt)
+}
+
+function renderDeclarationBubbleForSeat(seat: Seat): string {
+  const activeBubble = activeDeclarationBubbles[seat]
+
+  if (!activeBubble) {
+    return ''
+  }
+
+  return renderDeclarationBubble(seat, activeBubble.lines, activeBubble.shownAt)
 }
 
 function triggerCutResolveSequence(
@@ -1044,6 +1408,9 @@ export function renderApp(
     syncBidBubbleFromState(state)
   }
 
+  syncDeclarationBubblesFromState(state)
+  syncDealPhaseAudio(state)
+
   const stageScale = getStageScale()
   const cuttingCountdownRemainingMs = getCuttingCountdownRemainingMs(state)
   const biddingCountdownRemainingMs = getBiddingCountdownRemainingMs(state)
@@ -1289,6 +1656,7 @@ export function renderApp(
         "
       >
         ${renderBidBubbleForSeat('top')}
+        ${renderDeclarationBubbleForSeat('top')}
         ${renderSeatPanel(
           'top',
           roundSetupFlow.seatHandCounts.top,
@@ -1313,6 +1681,7 @@ export function renderApp(
         "
       >
         ${renderBidBubbleForSeat('left')}
+        ${renderDeclarationBubbleForSeat('left')}
         ${renderSeatPanel(
           'left',
           roundSetupFlow.seatHandCounts.left,
@@ -1337,6 +1706,7 @@ export function renderApp(
         "
       >
         ${renderBidBubbleForSeat('right')}
+        ${renderDeclarationBubbleForSeat('right')}
         ${renderSeatPanel(
           'right',
           roundSetupFlow.seatHandCounts.right,
@@ -1362,6 +1732,7 @@ export function renderApp(
         "
       >
         ${renderBidBubbleForSeat('bottom')}
+        ${renderDeclarationBubbleForSeat('bottom')}
 
         ${
           !isScoringPhase &&

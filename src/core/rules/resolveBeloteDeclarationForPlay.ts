@@ -14,19 +14,38 @@ function getCounterpartRank(rank: Card['rank']): Card['rank'] | null {
   return null
 }
 
-function isBeloteContract(state: GameState, suit: Suit): boolean {
+function getCurrentLeadSuit(state: GameState): Suit | null {
+  const currentTrickPlays =
+    state.playing?.currentTrick.plays ?? state.currentTrick.plays ?? []
+
+  const firstPlay = currentTrickPlays[0]
+
+  if (!firstPlay) {
+    return null
+  }
+
+  return firstPlay.card.suit
+}
+
+function canDeclareBeloteForCard(state: GameState, selectedCard: Card): boolean {
   const winningBid = state.bidding.winningBid
 
   if (!winningBid) {
     return false
   }
 
-  if (winningBid.contract === 'all-trumps') {
-    return true
+  if (winningBid.contract === 'suit') {
+    return winningBid.trumpSuit === selectedCard.suit
   }
 
-  if (winningBid.contract === 'suit' && winningBid.trumpSuit === suit) {
-    return true
+  if (winningBid.contract === 'all-trumps') {
+    const leadSuit = getCurrentLeadSuit(state)
+
+    if (!leadSuit) {
+      return true
+    }
+
+    return selectedCard.suit === leadSuit
   }
 
   return false
@@ -90,7 +109,7 @@ export function resolveBeloteDeclarationForPlay(params: {
     return null
   }
 
-  if (!isBeloteContract(state, selectedCard.suit)) {
+  if (!canDeclareBeloteForCard(state, selectedCard)) {
     return null
   }
 

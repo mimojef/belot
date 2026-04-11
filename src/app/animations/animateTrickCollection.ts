@@ -1,4 +1,5 @@
 import type { Seat } from '../../data/constants/seatOrder'
+import { createGameAudioController } from '../audio/createGameAudioController'
 
 export type TrickCollectionCard = {
   element: HTMLElement
@@ -32,6 +33,8 @@ type FloatingCard = {
   sourceElement: HTMLElement
   node: HTMLElement
 }
+
+const gameAudio = createGameAudioController()
 
 function waitForNextFrame(): Promise<void> {
   return new Promise((resolve) => {
@@ -328,6 +331,7 @@ export async function animateTrickCollection(
 
   try {
     await waitForNextFrame()
+    gameAudio.playCardMove()
 
     const trickCenter = getAverageCenter(measuredCards.map((card) => card.rect))
 

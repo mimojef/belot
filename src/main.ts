@@ -6,6 +6,7 @@ import { pickBotBidAction } from './core/rules/pickBotBidAction'
 import { pickBotCardToPlay } from './core/rules/pickBotCardToPlay'
 import type { Seat } from './data/constants/seatOrder'
 import type { BidAction, Card, GameState, Suit } from './core/state/gameTypes'
+import { createGameAudioController } from './app/audio/createGameAudioController'
 
 const rootElement = document.querySelector<HTMLDivElement>('#app')
 
@@ -21,16 +22,16 @@ type BidBubbleOverride = {
 
 type MatchEndedPlayerStatus = 'waiting' | 'reload' | 'find-new-game' | 'leave'
 
-const BOT_PLAY_DELAY_MS = 800
-const BOT_BIDDING_DELAY_MS = 800
+const BOT_PLAY_DELAY_MS = 1000
+const BOT_BIDDING_DELAY_MS = 1000
 const FINAL_TRICK_CARD_FLIGHT_MS = 420
 const FINAL_TRICK_CARD_HOLD_MS = 340
 const FLOATING_CARD_WIDTH = 148
 const FLOATING_CARD_HEIGHT = 215
-const CUTTING_COUNTDOWN_MS = 20000
-const BIDDING_COUNTDOWN_MS = 20000
-const PLAYING_COUNTDOWN_MS = 20000
-const BOT_CUTTING_AUTO_SELECT_MS = 800
+const CUTTING_COUNTDOWN_MS = 15000
+const BIDDING_COUNTDOWN_MS = 15000
+const PLAYING_COUNTDOWN_MS = 15000
+const BOT_CUTTING_AUTO_SELECT_MS = 1000
 const CUTTING_SELECTION_RESOLVE_MS = 500
 const CUT_RESOLVE_AUTO_ADVANCE_MS = 0
 const DEAL_FIRST_THREE_AUTO_ADVANCE_MS = 2000
@@ -44,6 +45,7 @@ const MATCH_ENDED_RESTART_AFTER_BOTS_MS = 250
 
 const appRoot = rootElement
 const app = bootstrapApp()
+const gameAudio = createGameAudioController()
 
 let resizeFrameId: number | null = null
 let botPlayTimeoutId: number | null = null
@@ -52,6 +54,8 @@ let activeBotBidTurnKey: string | null = null
 let activePlayingTurnKey: string | null = null
 let activePlayingTurnStartedAt = 0
 let activePlayingPausedRemainingMs: number | null = null
+let activeCuttingTurnKey: string | null = null
+let activeCuttingTurnStartedAt = 0
 let cuttingAutoSelectTimeoutId: number | null = null
 let cuttingResolveTimeoutId: number | null = null
 let dealPhaseAutoAdvanceTimeoutId: number | null = null
@@ -159,6 +163,11 @@ function resetPlayingTurnTracking(): void {
   activePlayingPausedRemainingMs = null
 }
 
+function resetCuttingTurnTracking(): void {
+  activeCuttingTurnKey = null
+  activeCuttingTurnStartedAt = 0
+}
+
 function removeBottomBotTakeoverPopup(): void {
   document.querySelector('[data-bottom-bot-takeover-popup-root]')?.remove()
 }
@@ -169,7 +178,11 @@ function setBottomBotTakeoverActive(nextValue: boolean): void {
   }
 
   bottomBotTakeoverActive = nextValue
+  clearBotPlayTimeout()
+  clearBotBidTimeout()
+  clearCuttingAutoSelectTimeout()
   resetPlayingTurnTracking()
+  resetCuttingTurnTracking()
 
   if (!nextValue) {
     removeBottomBotTakeoverPopup()
@@ -196,6 +209,7 @@ function restartLocalMatch(): void {
   clearAllAsyncUiState()
   resetMatchEndedUiState()
   resetPlayingTurnTracking()
+  resetCuttingTurnTracking()
   setBottomBotTakeoverActive(false)
   setBidBubbleOverride(null)
   app.engine.startNewGame()
@@ -662,39 +676,6 @@ function getScoringRemainingMs(state: GameState): number | null {
   return Math.max(0, SCORING_AUTO_ADVANCE_MS - elapsedMs)
 }
 
-function getCuttingRemainingMs(state: GameState): number | null {
-  if (state.phase !== 'cutting') {
-    return null
-  }
-
-  if (!state.round.cutterSeat) {
-    return null
-  }
-
-  if (getSelectedCutIndexFromState(state) !== null) {
-    return null
-  }
-
-  const autoSelectMs =
-    state.round.cutterSeat === 'bottom'
-      ? CUTTING_COUNTDOWN_MS
-      : BOT_CUTTING_AUTO_SELECT_MS
-
-  const phaseEnteredAt =
-    typeof state.phaseEnteredAt === 'number' && Number.isFinite(state.phaseEnteredAt)
-      ? state.phaseEnteredAt
-      : null
-
-  if (phaseEnteredAt === null) {
-    return autoSelectMs
-  }
-
-  const now = getClockNowForPhaseTimestamp(phaseEnteredAt)
-  const elapsedMs = Math.max(0, now - phaseEnteredAt)
-
-  return Math.max(0, autoSelectMs - elapsedMs)
-}
-
 function getSelectedCutIndexFromState(state: GameState): number | null {
   const extendedState = state as GameState & {
     selectedCutIndex?: number | null
@@ -725,6 +706,85 @@ function getSelectedCutIndexFromState(state: GameState): number | null {
   }
 
   return null
+}
+
+function getCuttingTurnKey(state: GameState): string | null {
+  if (state.phase !== 'cutting') {
+    return null
+  }
+
+  const cutterSeat = state.round.cutterSeat
+
+  if (!cutterSeat) {
+    return null
+  }
+
+  if (getSelectedCutIndexFromState(state) !== null) {
+    return null
+  }
+
+  const controlMode =
+    cutterSeat === 'bottom' && !bottomBotTakeoverActive ? 'human' : 'bot'
+
+  const phaseMarker =
+    typeof state.phaseEnteredAt === 'number' && Number.isFinite(state.phaseEnteredAt)
+      ? String(state.phaseEnteredAt)
+      : 'no-phase-timestamp'
+
+  return `${phaseMarker}:${cutterSeat}:${controlMode}`
+}
+
+function syncCuttingTurnState(state: GameState): void {
+  const turnKey = getCuttingTurnKey(state)
+
+  if (turnKey === null) {
+    resetCuttingTurnTracking()
+    return
+  }
+
+  if (activeCuttingTurnKey === turnKey) {
+    return
+  }
+
+  activeCuttingTurnKey = turnKey
+  activeCuttingTurnStartedAt = getRenderClockNow()
+}
+
+function getCuttingRemainingMs(state: GameState): number | null {
+  if (state.phase !== 'cutting') {
+    return null
+  }
+
+  const cutterSeat = state.round.cutterSeat
+
+  if (!cutterSeat) {
+    return null
+  }
+
+  if (getSelectedCutIndexFromState(state) !== null) {
+    return null
+  }
+
+  const autoSelectMs =
+    cutterSeat === 'bottom' && !bottomBotTakeoverActive
+      ? CUTTING_COUNTDOWN_MS
+      : BOT_CUTTING_AUTO_SELECT_MS
+
+  const turnKey = getCuttingTurnKey(state)
+
+  if (
+    turnKey === null ||
+    activeCuttingTurnKey !== turnKey ||
+    !Number.isFinite(activeCuttingTurnStartedAt) ||
+    activeCuttingTurnStartedAt <= 0
+  ) {
+    return autoSelectMs
+  }
+
+  const now = getRenderClockNow()
+  const elapsedMs = Math.max(0, now - activeCuttingTurnStartedAt)
+
+  return Math.max(0, autoSelectMs - elapsedMs)
 }
 
 function pickAutoCutIndex(state: GameState): number {
@@ -779,7 +839,10 @@ function getBidTurnKey(state: GameState): string | null {
     return null
   }
 
-  return `${state.phase}:${state.bidding.entries.length}:${currentSeat}`
+  const controlMode =
+    currentSeat === 'bottom' && !bottomBotTakeoverActive ? 'human' : 'bot'
+
+  return `${state.phase}:${state.bidding.entries.length}:${currentSeat}:${controlMode}`
 }
 
 function getBidActionDelayMs(state: GameState): number | null {
@@ -793,7 +856,7 @@ function getBidActionDelayMs(state: GameState): number | null {
     return null
   }
 
-  return currentSeat === 'bottom'
+  return currentSeat === 'bottom' && !bottomBotTakeoverActive
     ? BIDDING_COUNTDOWN_MS
     : BOT_BIDDING_DELAY_MS
 }
@@ -963,7 +1026,9 @@ function syncPlayingPauseState(state: GameState): void {
 
 function renderBottomBotTakeoverPopup(): void {
   const state = app.engine.getState()
-  const shouldShowPopup = bottomBotTakeoverActive && state.phase === 'playing'
+  const shouldShowPopup =
+    bottomBotTakeoverActive &&
+    state.phase !== 'match-ended'
 
   if (!shouldShowPopup) {
     removeBottomBotTakeoverPopup()
@@ -1160,6 +1225,8 @@ function scheduleCuttingAutoSelect(): void {
   clearCuttingAutoSelectTimeout()
 
   const state = app.engine.getState()
+  syncCuttingTurnState(state)
+
   const remainingMs = getCuttingRemainingMs(state)
 
   if (remainingMs === null) {
@@ -1387,6 +1454,7 @@ function animateFinalTrickCardThenSubmit(cardId: string, seat: Seat): boolean {
 
   activeFinalTrickFloatingCard = floatingCard
   isAnimatingFinalTrickCard = true
+  gameAudio.playCardMove()
 
   const deltaX = target.left - start.left
   const deltaY = target.top - start.top
@@ -1629,14 +1697,11 @@ function scheduleNextBidAction(): void {
 function render(): void {
   const stateBeforeRender = app.engine.getState()
 
-  if (stateBeforeRender.phase !== 'playing' && bottomBotTakeoverActive) {
-    setBottomBotTakeoverActive(false)
-  }
-
   if (stateBeforeRender.phase !== 'match-ended') {
     resetMatchEndedUiState()
   }
 
+  syncCuttingTurnState(stateBeforeRender)
   syncPlayingTurnState(stateBeforeRender)
   syncPlayingPauseState(stateBeforeRender)
 

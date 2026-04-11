@@ -1,8 +1,11 @@
 import type { PlayingViewState } from '../../core/state/getPlayingViewState'
 import type { Seat } from '../../data/constants/seatOrder'
 import type { Card, Suit } from '../../core/state/gameTypes'
+import { createGameAudioController } from '../../app/audio/createGameAudioController'
 
 let lastRenderedTrickStateKey: string | null = null
+
+const gameAudio = createGameAudioController()
 
 function escapeHtml(value: string): string {
   return String(value)
@@ -295,6 +298,10 @@ function renderCenterTrick(viewState: PlayingViewState): string {
     viewState.plays.length > 0 &&
     viewState.plays.length < 4 &&
     trickStateKey !== lastRenderedTrickStateKey
+
+  if (shouldAnimateNewestCard) {
+    gameAudio.playCardMove()
+  }
 
   const html = `
     <style>

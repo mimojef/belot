@@ -678,6 +678,8 @@ function getTrumpDrawLeadBonus(card: Card): number {
       return 74
     case '7':
       return 70
+    default:
+      return 0
   }
 }
 
@@ -696,11 +698,38 @@ function getAllTrumpsJackPlanLeadBonus(
   const hasJack = suitCards.some((suitCard) => suitCard.rank === 'J')
   const hasNine = suitCards.some((suitCard) => suitCard.rank === '9')
   const hasAce = suitCards.some((suitCard) => suitCard.rank === 'A')
+  const hasTen = suitCards.some((suitCard) => suitCard.rank === '10')
+  const hasKing = suitCards.some((suitCard) => suitCard.rank === 'K')
+  const hasQueen = suitCards.some((suitCard) => suitCard.rank === 'Q')
+
+  // Ако вече държи J + 9 + A, развива цвета нормално от J, не от A.
+  if (hasJack && hasNine && hasAce) {
+    if (card.rank === 'J') {
+      let bonus = 128
+
+      if (hasKing || hasQueen || hasTen) {
+        bonus += 10
+      }
+
+      return bonus
+    }
+
+    if (card.rank === 'A') {
+      return -72
+    }
+
+    if (card.rank === '9') {
+      return -36
+    }
+
+    return 0
+  }
 
   if (hasJack) {
     return 0
   }
 
+  // Ако има A + 9 и няма J, избива чуждото J с A, не с 9.
   if (hasAce && hasNine) {
     if (card.rank === 'A') {
       let bonus = 118
@@ -709,7 +738,7 @@ function getAllTrumpsJackPlanLeadBonus(
         bonus += 22
       }
 
-      if (suitCards.some((suitCard) => suitCard.rank === 'Q' || suitCard.rank === 'K' || suitCard.rank === '10')) {
+      if (hasQueen || hasKing || hasTen) {
         bonus += 10
       }
 
@@ -721,6 +750,7 @@ function getAllTrumpsJackPlanLeadBonus(
     }
   }
 
+  // Без A не тръгва да избива J само с 9 + средни карти.
   if (!hasAce && hasNine) {
     if (!contractInfo.isOurTeamBid) {
       if (card.rank === '9' || card.rank === 'Q' || card.rank === 'K' || card.rank === '10') {
@@ -971,5 +1001,7 @@ function getSisterSuit(suit: Suit): Suit {
       return 'hearts'
     case 'hearts':
       return 'diamonds'
+    default:
+      return suit
   }
 }

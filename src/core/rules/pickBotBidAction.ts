@@ -3,6 +3,7 @@ import type { BidAction, Card, GameState, Suit } from '../state/gameTypes'
 import type { Seat } from '../../data/constants/seatOrder'
 
 const SUIT_OPTIONS: Suit[] = ['clubs', 'diamonds', 'hearts', 'spades']
+const SEAT_ORDER: Seat[] = ['bottom', 'right', 'top', 'left']
 
 const SUIT_TRUMP_VALUES: Record<string, number> = {
   J: 8.5,
@@ -68,6 +69,12 @@ type SuitProfile = {
   hasBelote: boolean
 }
 
+type OpponentSuitBidContext = {
+  suit: Suit
+  bidderSeat: Seat
+  bidderPartnerSeat: Seat
+}
+
 export function pickBotBidAction(state: GameState, seat: Seat): BidAction {
   const biddingViewState = getBiddingViewState(state)
 
@@ -78,7 +85,7 @@ export function pickBotBidAction(state: GameState, seat: Seat): BidAction {
   const validActions = biddingViewState.validActions
   const hand = state.hands[seat] ?? []
 
-  const bestContract = getBestBotContractCandidate(hand, validActions)
+  const bestContract = getBestBotContractCandidate(state, seat, hand, validActions)
 
   if (!bestContract) {
     return { type: 'pass' }
@@ -92,6 +99,8 @@ export function pickBotBidAction(state: GameState, seat: Seat): BidAction {
 }
 
 function getBestBotContractCandidate(
+  state: GameState,
+  seat: Seat,
   hand: Card[],
   validActions: BotBidValidActions
 ): BotContractCandidate | null {
@@ -118,7 +127,7 @@ function getBestBotContractCandidate(
   if (validActions.allTrumps) {
     candidates.push({
       action: { type: 'all-trumps' },
-      score: getAllTrumpsBidStrength(hand),
+      score: getAllTrumpsBidStrength(state, seat, hand),
     })
   }
 
@@ -259,7 +268,11 @@ function getNoTrumpsBidStrength(hand: Card[]): number {
   return score
 }
 
-function getAllTrumpsBidStrength(hand: Card[]): number {
+function getAllTrumpsBidStrength(
+  state: GameState,
+  seat: Seat,
+  hand: Card[]
+): number {
   let score = hand.reduce(
     (sum, card) => sum + (ALL_TRUMPS_VALUES[String(card.rank)] ?? 0),
     0
@@ -296,7 +309,77 @@ function getAllTrumpsBidStrength(hand: Card[]): number {
     score -= 6
   }
 
+  score += getAllTrumpsRiskAdjustment(state, seat, hand)
+
   return score
+}
+
+function getAllTrumpsRiskAdjustment(
+  state: GameState,
+  seat: Seat,
+  hand: Card[]
+): number {
+  const context = getLatestOpponentSuitBidContext(state, seat)
+
+  if (!context) {
+    return 0
+  }
+
+  const dangerProfile = buildSuitProfile(hand, context.suit)
+  const totalJacksOutsideDanger = hand.filter(
+    (card) => String(card.rank) === 'J' && card.suit !== context.suit
+  ).length
+
+  const hasAllThreeOtherJacks = totalJacksOutsideDanger === 3
+  const hasCoveredDangerNine = dangerProfile.has9 && dangerProfile.count >= 2
+  const hasTwoOtherJacks = totalJacksOutsideDanger >= 2
+
+  const bidderUnderHand = isSeatUnderHandForBot(context.bidderSeat, seat)
+  const bidderPartnerUnderHand = isSeatUnderHandForBot(context.bidderPartnerSeat, seat)
+  const dangerTeamUnderHand = bidderUnderHand || bidderPartnerUnderHand
+
+  if (hasAllThreeOtherJacks) {
+    return 18
+  }
+
+  if (dangerTeamUnderHand) {
+    return -16
+  }
+
+  if (hasCoveredDangerNine && hasTwoOtherJacks) {
+    return 8
+  }
+
+  if (dangerProfile.has9 && !hasCoveredDangerNine) {
+    return -4
+  }
+
+  return -2
+}
+
+function getLatestOpponentSuitBidContext(
+  state: GameState,
+  seat: Seat
+): OpponentSuitBidContext | null {
+  for (let index = state.bidding.entries.length - 1; index >= 0; index -= 1) {
+    const entry = state.bidding.entries[index]
+
+    if (isSameTeam(entry.seat, seat)) {
+      continue
+    }
+
+    if (entry.action.type !== 'suit') {
+      continue
+    }
+
+    return {
+      suit: entry.action.suit,
+      bidderSeat: entry.seat,
+      bidderPartnerSeat: getPartnerSeat(entry.seat),
+    }
+  }
+
+  return null
 }
 
 function getAllTrumpsSuitCoreScore(profile: SuitProfile): number {
@@ -371,4 +454,39 @@ function getSideStrengthForSuitBid(hand: Card[], trumpSuit: Suit): number {
   }
 
   return score
+}
+
+function getPartnerSeat(seat: Seat): Seat {
+  switch (seat) {
+    case 'bottom':
+      return 'top'
+    case 'top':
+      return 'bottom'
+    case 'right':
+      return 'left'
+    case 'left':
+      return 'right'
+  }
+}
+
+function isSameTeam(firstSeat: Seat, secondSeat: Seat): boolean {
+  return getTeamBySeat(firstSeat) === getTeamBySeat(secondSeat)
+}
+
+function getTeamBySeat(seat: Seat): 'A' | 'B' {
+  return seat === 'bottom' || seat === 'top' ? 'A' : 'B'
+}
+
+function isSeatUnderHandForBot(candidateSeat: Seat, botSeat: Seat): boolean {
+  return getPreviousSeat(botSeat) === candidateSeat
+}
+
+function getPreviousSeat(seat: Seat): Seat {
+  const index = SEAT_ORDER.indexOf(seat)
+
+  if (index <= 0) {
+    return SEAT_ORDER[SEAT_ORDER.length - 1]
+  }
+
+  return SEAT_ORDER[index - 1]
 }
