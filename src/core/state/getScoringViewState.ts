@@ -12,6 +12,7 @@ import { buildOfficialRoundScore } from '../rules/buildOfficialRoundScore'
 
 type BaseRoundScore = BaseRoundScoreResult
 type Outcome = RoundOutcomeResult
+type DeclarationScoringContract = 'color' | 'all-trumps' | 'no-trumps'
 
 const SCORING_AUTO_ADVANCE_MS = 5000
 
@@ -232,6 +233,29 @@ function resolveCounterMultiplier(
 
   return 1
 }
+
+function resolveDeclarationScoringContract(
+  winningBid: GameState['bidding']['winningBid']
+): DeclarationScoringContract | null {
+  if (!winningBid) {
+    return null
+  }
+
+  if (winningBid.contract === 'suit') {
+    return 'color'
+  }
+
+  if (winningBid.contract === 'all-trumps') {
+    return 'all-trumps'
+  }
+
+  if (winningBid.contract === 'no-trumps') {
+    return 'no-trumps'
+  }
+
+  return null
+}
+
 
 function getNowForTimestamp(timestamp: number | null | undefined): number {
   if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
@@ -742,12 +766,24 @@ function buildDeclarationDisplayItem(entry: ExtractedDeclaration): ScoringDeclar
   }
 }
 
-function buildDeclarationsDisplay(state: GameState): {
+function buildDeclarationsDisplay(
+  state: GameState,
+  contract: DeclarationScoringContract | null
+): {
   teamABeloteItems: ScoringBeloteDisplayItem[]
   teamBBeloteItems: ScoringBeloteDisplayItem[]
   teamADeclarationItems: ScoringDeclarationDisplayItem[]
   teamBDeclarationItems: ScoringDeclarationDisplayItem[]
 } {
+  if (contract === 'no-trumps') {
+    return {
+      teamABeloteItems: [],
+      teamBBeloteItems: [],
+      teamADeclarationItems: [],
+      teamBDeclarationItems: [],
+    }
+  }
+
   const extracted = collectExtractedDeclarations(state)
 
   const teamABeloteItems = extracted
@@ -779,12 +815,16 @@ export function getScoringViewState(state: GameState): ScoringViewState {
   const baseRoundScore: BaseRoundScore | null = scoringState?.baseRoundScore ?? null
   const storedOutcome: Outcome | null = scoringState?.roundOutcome ?? null
 
+  const declarationContract = resolveDeclarationScoringContract(
+    state.bidding.winningBid
+  )
+
   const declarationsScore = baseRoundScore
-    ? buildComparableDeclarationsScore(state.declarations)
+    ? buildComparableDeclarationsScore(state.declarations, declarationContract)
     : createZeroRoundScore()
 
   const beloteScore = baseRoundScore
-    ? buildBeloteScore(state.declarations)
+    ? buildBeloteScore(state.declarations, declarationContract)
     : createZeroRoundScore()
 
   const computedOutcome =
@@ -831,7 +871,7 @@ export function getScoringViewState(state: GameState): ScoringViewState {
     beloteScore.teamB
 
   const countdownSeconds = resolveScoringCountdownSeconds(state)
-  const declarationsDisplay = buildDeclarationsDisplay(state)
+  const declarationsDisplay = buildDeclarationsDisplay(state, declarationContract)
 
   return {
     isVisible: state.phase === 'scoring',

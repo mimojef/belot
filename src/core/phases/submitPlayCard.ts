@@ -304,10 +304,13 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
       trumpSuit: scoringTrumpSuit,
     })
 
-    const declarationResolution = resolveDeclarations(nextDeclarations)
+    const declarationResolution = resolveDeclarations(nextDeclarations, scoringContract)
     const resolvedDeclarations = declarationResolution.resolvedDeclarations
-    const declarationsScore = buildComparableDeclarationsScore(resolvedDeclarations)
-    const beloteScore = buildBeloteScore(resolvedDeclarations)
+    const declarationsScore = buildComparableDeclarationsScore(
+      resolvedDeclarations,
+      scoringContract
+    )
+    const beloteScore = buildBeloteScore(resolvedDeclarations, scoringContract)
 
     const roundOutcome = calculateRoundOutcome({
       baseRoundScore,

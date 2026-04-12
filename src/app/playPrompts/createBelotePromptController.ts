@@ -5,6 +5,7 @@ import type {
   Declaration,
   GameState,
   Suit,
+  WinningBid,
 } from '../../core/state/gameTypes'
 import { resolveBeloteDeclarationForPlay } from '../../core/rules/resolveBeloteDeclarationForPlay'
 
@@ -33,6 +34,18 @@ const RANK_ORDER: Card['rank'][] = ['7', '8', '9', '10', 'J', 'Q', 'K', 'A']
 
 function getCompletedTricks(state: GameState): CompletedTrick[] {
   return state.playing?.completedTricks ?? []
+}
+
+function getWinningBid(state: GameState): WinningBid {
+  return state.bidding?.winningBid ?? null
+}
+
+function isNoTrumpsWinningBid(winningBid: WinningBid): boolean {
+  return winningBid?.contract === 'no-trumps'
+}
+
+function shouldDisableDeclarationsForCurrentContract(state: GameState): boolean {
+  return isNoTrumpsWinningBid(getWinningBid(state))
 }
 
 function getBottomHand(state: GameState): Card[] {
@@ -177,6 +190,10 @@ function createSquareDeclaration(
 }
 
 function buildSequenceDeclarations(state: GameState): Declaration[] {
+  if (shouldDisableDeclarationsForCurrentContract(state)) {
+    return []
+  }
+
   const hand = getBottomHand(state)
   const declarations: Declaration[] = []
 
@@ -223,6 +240,10 @@ function buildSequenceDeclarations(state: GameState): Declaration[] {
 }
 
 function buildSquareDeclarations(state: GameState): Declaration[] {
+  if (shouldDisableDeclarationsForCurrentContract(state)) {
+    return []
+  }
+
   const hand = getBottomHand(state)
   const cardsByRank = new Map<Card['rank'], Card[]>()
 
@@ -309,6 +330,10 @@ function resolveRoundDeclarationPromptOptions(state: GameState): PendingPromptOp
     return []
   }
 
+  if (shouldDisableDeclarationsForCurrentContract(state)) {
+    return []
+  }
+
   const sequenceOptions = buildSequenceDeclarations(state).map((declaration) =>
     createSequencePromptOption(declaration)
   )
@@ -321,6 +346,10 @@ function resolveRoundDeclarationPromptOptions(state: GameState): PendingPromptOp
 }
 
 function resolvePromptOptions(state: GameState, cardId: string): PendingPromptOption[] {
+  if (shouldDisableDeclarationsForCurrentContract(state)) {
+    return []
+  }
+
   const options: PendingPromptOption[] = []
   const roundDeclarationOptions = resolveRoundDeclarationPromptOptions(state)
 
