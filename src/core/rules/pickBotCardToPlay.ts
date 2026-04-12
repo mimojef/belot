@@ -33,6 +33,7 @@ type PartnerSeekPlan = {
 const TEAM_A = new Set<Seat>(['bottom', 'top'])
 const TEAM_B = new Set<Seat>(['right', 'left'])
 
+const ALL_RANKS: Rank[] = ['7', '8', '9', 'J', 'Q', 'K', '10', 'A']
 const NORMAL_ORDER: Rank[] = ['7', '8', '9', 'J', 'Q', 'K', '10', 'A']
 const TRUMP_ORDER: Rank[] = ['7', '8', 'Q', 'K', '10', 'A', '9', 'J']
 
@@ -192,13 +193,23 @@ function scoreLeadChoice(
   const strengthIndex = getCardStrengthIndex(card, contractInfo, suit)
   const noTrumpsEntryPlan = getNoTrumpsEntryPlan(state, seat, card, contractInfo)
   const trumpDrawNow = shouldDrawTrumpNow(state, seat, contractInfo)
+  const likelyTopRemaining = isLikelyTopRemainingCardInSuit(state, seat, card, contractInfo)
+  const sureWinnersCount = getRemainingSureWinnerCount(state, seat, contractInfo)
+  const partnerIsBidder =
+    contractInfo.winningBidSeat !== null &&
+    contractInfo.winningBidSeat === getPartnerSeat(seat)
+  const shouldDelayPartnerSearch =
+    contractInfo.mode === 'all-trumps' &&
+    contractInfo.isOurTeamBid &&
+    partnerIsBidder &&
+    sureWinnersCount > 0
 
   let score = 0
 
   if (partnerSeekPlan.primarySuit && suit === partnerSeekPlan.primarySuit) {
-    score += 150
+    score += shouldDelayPartnerSearch ? 26 : 150
   } else if (partnerSeekPlan.secondarySuit && suit === partnerSeekPlan.secondarySuit) {
-    score += 80
+    score += shouldDelayPartnerSearch ? 10 : 80
   }
 
   if (contractInfo.dangerSuit && suit === contractInfo.dangerSuit) {
@@ -218,10 +229,14 @@ function scoreLeadChoice(
   if (trumpDrawNow && contractInfo.trumpSuit) {
     if (suit === contractInfo.trumpSuit) {
       score += getTrumpDrawLeadBonus(card)
+      score += getTrumpLeadSpecialCaseBonus(state, seat, card, contractInfo)
     } else {
       score -= 70
     }
   }
+
+  score += getTopRemainingLeadBonus(state, seat, card, contractInfo)
+  score += getPreserveLastTrumpPenalty(state, seat, card, contractInfo)
 
   if (contractInfo.isDefendingAgainstAllTrumps) {
     score += getAllTrumpsDefenseBonus(card)
@@ -266,6 +281,15 @@ function scoreLeadChoice(
 
     score += getAllTrumpsJackPlanLeadBonus(state, seat, card, contractInfo)
     score += getReturnPartnerSuitAfterJackWinBonus(state, seat, card, contractInfo)
+
+    if (partnerIsBidder) {
+      if (likelyTopRemaining) {
+        score += 78
+        score += pointValue * 2.1
+      } else if (shouldDelayPartnerSearch) {
+        score -= 52
+      }
+    }
   }
 
   if (contractInfo.mode === 'suit' && contractInfo.trumpSuit === suit) {
@@ -594,43 +618,6 @@ function hasAnotherLikelyNoTrumpsEntry(
   return false
 }
 
-function isLikelyTopRemainingCardInSuit(
-  state: GameState,
-  seat: Seat,
-  card: Card,
-  contractInfo: ContractInfo,
-): boolean {
-  if (contractInfo.mode !== 'no-trumps') {
-    return false
-  }
-
-  const playedCards = getPlayedCards(state)
-  const hand = getSeatHand(state, seat)
-  const higherRanks = NORMAL_ORDER.slice(getNormalOrderIndex(card) + 1)
-
-  for (const rank of higherRanks) {
-    const higherCardAlreadyPlayed = playedCards.some(
-      (playedCard) => playedCard.suit === card.suit && playedCard.rank === rank,
-    )
-
-    if (higherCardAlreadyPlayed) {
-      continue
-    }
-
-    const higherCardInOwnHand = hand.some(
-      (handCard) => handCard.suit === card.suit && handCard.rank === rank,
-    )
-
-    if (higherCardInOwnHand) {
-      continue
-    }
-
-    return false
-  }
-
-  return true
-}
-
 function shouldDrawTrumpNow(
   state: GameState,
   seat: Seat,
@@ -638,7 +625,6 @@ function shouldDrawTrumpNow(
 ): boolean {
   if (
     contractInfo.mode !== 'suit' ||
-    !contractInfo.isOurTeamBid ||
     !contractInfo.trumpSuit
   ) {
     return false
@@ -651,13 +637,40 @@ function shouldDrawTrumpNow(
     return false
   }
 
-  const playedTrumpCount = getPlayedCards(state).filter(
-    (card) => card.suit === contractInfo.trumpSuit,
-  ).length
+  const unseenTrumpRanks = getUnseenRanksInSuitOutsideHand(
+    state,
+    seat,
+    contractInfo.trumpSuit,
+    contractInfo,
+  )
 
-  const unseenTrumpOutsideHand = 8 - playedTrumpCount - ownTrumpCards.length
+  const unseenTrumpOutsideHand = unseenTrumpRanks.length
 
-  return unseenTrumpOutsideHand > 0
+  if (unseenTrumpOutsideHand <= 0) {
+    return false
+  }
+
+  if (contractInfo.isOurTeamBid) {
+    if (
+      ownTrumpCards.length === 1 &&
+      unseenTrumpOutsideHand === 1 &&
+      !isSingleOwnTrumpTopOverSingleUnseen(state, seat, contractInfo)
+    ) {
+      return false
+    }
+
+    return true
+  }
+
+  if (
+    ownTrumpCards.length === 1 &&
+    unseenTrumpOutsideHand === 1 &&
+    isSingleOwnTrumpTopOverSingleUnseen(state, seat, contractInfo)
+  ) {
+    return true
+  }
+
+  return false
 }
 
 function getTrumpDrawLeadBonus(card: Card): number {
@@ -683,6 +696,39 @@ function getTrumpDrawLeadBonus(card: Card): number {
   }
 }
 
+function getTrumpLeadSpecialCaseBonus(
+  state: GameState,
+  seat: Seat,
+  card: Card,
+  contractInfo: ContractInfo,
+): number {
+  if (
+    contractInfo.mode !== 'suit' ||
+    !contractInfo.trumpSuit ||
+    card.suit !== contractInfo.trumpSuit
+  ) {
+    return 0
+  }
+
+  const hand = getSeatHand(state, seat)
+  const ownTrumpCards = hand.filter((handCard) => handCard.suit === contractInfo.trumpSuit)
+  const unseenTrumpOutsideHand = countUnseenCardsInSuitOutsideHand(
+    state,
+    seat,
+    contractInfo.trumpSuit,
+  )
+
+  if (ownTrumpCards.length !== 1 || unseenTrumpOutsideHand !== 1) {
+    return 0
+  }
+
+  if (!isSingleOwnTrumpTopOverSingleUnseen(state, seat, contractInfo)) {
+    return 0
+  }
+
+  return contractInfo.isOurTeamBid ? 26 : 120
+}
+
 function getAllTrumpsJackPlanLeadBonus(
   state: GameState,
   seat: Seat,
@@ -702,7 +748,6 @@ function getAllTrumpsJackPlanLeadBonus(
   const hasKing = suitCards.some((suitCard) => suitCard.rank === 'K')
   const hasQueen = suitCards.some((suitCard) => suitCard.rank === 'Q')
 
-  // Ако вече държи J + 9 + A, развива цвета нормално от J, не от A.
   if (hasJack && hasNine && hasAce) {
     if (card.rank === 'J') {
       let bonus = 128
@@ -729,7 +774,6 @@ function getAllTrumpsJackPlanLeadBonus(
     return 0
   }
 
-  // Ако има A + 9 и няма J, избива чуждото J с A, не с 9.
   if (hasAce && hasNine) {
     if (card.rank === 'A') {
       let bonus = 118
@@ -750,7 +794,6 @@ function getAllTrumpsJackPlanLeadBonus(
     }
   }
 
-  // Без A не тръгва да избива J само с 9 + средни карти.
   if (!hasAce && hasNine) {
     if (!contractInfo.isOurTeamBid) {
       if (card.rank === '9' || card.rank === 'Q' || card.rank === 'K' || card.rank === '10') {
@@ -959,6 +1002,272 @@ function getCardsPointTotal(
   leadSuit: Suit | null,
 ): number {
   return cards.reduce((total, candidate) => total + getPointValue(candidate, contractInfo, leadSuit), 0)
+}
+
+function getTopRemainingLeadBonus(
+  state: GameState,
+  seat: Seat,
+  card: Card,
+  contractInfo: ContractInfo,
+): number {
+  if (!isLikelyTopRemainingCardInSuit(state, seat, card, contractInfo)) {
+    return 0
+  }
+
+  const pointValue = getPointValue(card, contractInfo, card.suit)
+  const isTrumpSuit = isTrumpSuitForContract(card.suit, contractInfo)
+
+  let bonus = 0
+
+  if (contractInfo.mode === 'no-trumps') {
+    bonus += 54
+    bonus += pointValue * 2.7
+  } else if (isTrumpSuit) {
+    bonus += 64
+    bonus += pointValue * 2.4
+  } else {
+    bonus += 42
+    bonus += pointValue * 2.2
+  }
+
+  if (card.rank === 'A') {
+    bonus += 14
+  }
+
+  if (card.rank === '10') {
+    bonus += 10
+  }
+
+  if (isTrumpSuit && card.rank === 'J') {
+    bonus += 28
+  }
+
+  if (isTrumpSuit && card.rank === '9') {
+    bonus += 22
+  }
+
+  return bonus
+}
+
+function getPreserveLastTrumpPenalty(
+  state: GameState,
+  seat: Seat,
+  card: Card,
+  contractInfo: ContractInfo,
+): number {
+  if (
+    !shouldPreserveLastTrumpsForFinalTen(state, seat, contractInfo) ||
+    !contractInfo.trumpSuit ||
+    card.suit !== contractInfo.trumpSuit
+  ) {
+    return 0
+  }
+
+  const hand = getSeatHand(state, seat)
+  const ownTrumpCount = hand.filter((handCard) => handCard.suit === contractInfo.trumpSuit).length
+  const hasAlternativeNonTrumpCard = hand.some((handCard) => handCard.suit !== contractInfo.trumpSuit)
+
+  if (!hasAlternativeNonTrumpCard) {
+    return 0
+  }
+
+  let penalty = ownTrumpCount <= 1 ? -260 : -210
+
+  if (isLikelyTopRemainingCardInSuit(state, seat, card, contractInfo)) {
+    penalty -= 24
+  }
+
+  if (card.rank === '10' || card.rank === 'A' || card.rank === '9' || card.rank === 'J') {
+    penalty -= 26
+  }
+
+  return penalty
+}
+
+function shouldPreserveLastTrumpsForFinalTen(
+  state: GameState,
+  seat: Seat,
+  contractInfo: ContractInfo,
+): boolean {
+  if (
+    contractInfo.mode !== 'suit' ||
+    !contractInfo.isOurTeamBid ||
+    !contractInfo.trumpSuit
+  ) {
+    return false
+  }
+
+  const hand = getSeatHand(state, seat)
+  const ownTrumpCards = hand.filter((card) => card.suit === contractInfo.trumpSuit)
+
+  if (ownTrumpCards.length === 0 || ownTrumpCards.length > 2) {
+    return false
+  }
+
+  const unseenTrumpOutsideHand = countUnseenCardsInSuitOutsideHand(
+    state,
+    seat,
+    contractInfo.trumpSuit,
+  )
+
+  if (unseenTrumpOutsideHand > 0) {
+    return false
+  }
+
+  if (!hand.some((card) => card.suit !== contractInfo.trumpSuit)) {
+    return false
+  }
+
+  return true
+}
+
+function getRemainingSureWinnerCount(
+  state: GameState,
+  seat: Seat,
+  contractInfo: ContractInfo,
+): number {
+  return getSeatHand(state, seat).filter((card) =>
+    isLikelyTopRemainingCardInSuit(state, seat, card, contractInfo)
+  ).length
+}
+
+function isLikelyTopRemainingCardInSuit(
+  state: GameState,
+  seat: Seat,
+  card: Card,
+  contractInfo: ContractInfo,
+): boolean {
+  const playedCards = getPlayedCards(state)
+  const hand = getSeatHand(state, seat)
+  const rankOrder = getSuitRankOrder(card.suit, contractInfo)
+  const cardIndex = rankOrder.indexOf(card.rank)
+
+  if (cardIndex === -1) {
+    return false
+  }
+
+  const higherRanks = rankOrder.slice(cardIndex + 1)
+
+  for (const rank of higherRanks) {
+    const higherCardAlreadyPlayed = playedCards.some(
+      (playedCard) => playedCard.suit === card.suit && playedCard.rank === rank,
+    )
+
+    if (higherCardAlreadyPlayed) {
+      continue
+    }
+
+    const higherCardInOwnHand = hand.some(
+      (handCard) => handCard.suit === card.suit && handCard.rank === rank,
+    )
+
+    if (higherCardInOwnHand) {
+      continue
+    }
+
+    return false
+  }
+
+  return true
+}
+
+function isSingleOwnTrumpTopOverSingleUnseen(
+  state: GameState,
+  seat: Seat,
+  contractInfo: ContractInfo,
+): boolean {
+  if (
+    contractInfo.mode !== 'suit' ||
+    !contractInfo.trumpSuit
+  ) {
+    return false
+  }
+
+  const hand = getSeatHand(state, seat)
+  const ownTrumpCards = hand.filter((card) => card.suit === contractInfo.trumpSuit)
+  const unseenTrumpRanks = getUnseenRanksInSuitOutsideHand(
+    state,
+    seat,
+    contractInfo.trumpSuit,
+    contractInfo,
+  )
+
+  if (ownTrumpCards.length !== 1 || unseenTrumpRanks.length !== 1) {
+    return false
+  }
+
+  const ownTrump = ownTrumpCards[0]
+  const unseenRank = unseenTrumpRanks[0]
+
+  return getRankStrengthIndex(ownTrump.rank, contractInfo.trumpSuit, contractInfo) >
+    getRankStrengthIndex(unseenRank, contractInfo.trumpSuit, contractInfo)
+}
+
+function getUnseenRanksInSuitOutsideHand(
+  state: GameState,
+  seat: Seat,
+  suit: Suit,
+  contractInfo: ContractInfo,
+): Rank[] {
+  const playedCards = getPlayedCards(state)
+  const hand = getSeatHand(state, seat)
+  const unseenRanks: Rank[] = []
+
+  for (const rank of ALL_RANKS) {
+    const alreadyPlayed = playedCards.some(
+      (playedCard) => playedCard.suit === suit && playedCard.rank === rank,
+    )
+
+    if (alreadyPlayed) {
+      continue
+    }
+
+    const inOwnHand = hand.some(
+      (handCard) => handCard.suit === suit && handCard.rank === rank,
+    )
+
+    if (inOwnHand) {
+      continue
+    }
+
+    unseenRanks.push(rank)
+  }
+
+  return unseenRanks.sort(
+    (left, right) =>
+      getRankStrengthIndex(left, suit, contractInfo) - getRankStrengthIndex(right, suit, contractInfo)
+  )
+}
+
+function getRankStrengthIndex(
+  rank: Rank,
+  suit: Suit,
+  contractInfo: ContractInfo,
+): number {
+  return getSuitRankOrder(suit, contractInfo).indexOf(rank)
+}
+
+function countUnseenCardsInSuitOutsideHand(
+  state: GameState,
+  seat: Seat,
+  suit: Suit,
+): number {
+  const playedCardsInSuit = getPlayedCards(state).filter((card) => card.suit === suit).length
+  const ownCardsInSuit = getSeatHand(state, seat).filter((card) => card.suit === suit).length
+
+  return Math.max(0, 8 - playedCardsInSuit - ownCardsInSuit)
+}
+
+function isTrumpSuitForContract(suit: Suit, contractInfo: ContractInfo): boolean {
+  if (contractInfo.mode === 'all-trumps') {
+    return true
+  }
+
+  return contractInfo.mode === 'suit' && contractInfo.trumpSuit === suit
+}
+
+function getSuitRankOrder(suit: Suit, contractInfo: ContractInfo): Rank[] {
+  return isTrumpSuitForContract(suit, contractInfo) ? TRUMP_ORDER : NORMAL_ORDER
 }
 
 function getNormalOrderIndex(card: Card): number {

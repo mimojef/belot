@@ -75,6 +75,8 @@ type OpponentSuitBidContext = {
   bidderPartnerSeat: Seat
 }
 
+type RankCounts = Record<string, number>
+
 export function pickBotBidAction(state: GameState, seat: Seat): BidAction {
   const biddingViewState = getBiddingViewState(state)
 
@@ -91,7 +93,7 @@ export function pickBotBidAction(state: GameState, seat: Seat): BidAction {
     return { type: 'pass' }
   }
 
-  if (bestContract.score >= getMinimumBotBidScore(bestContract.action)) {
+  if (bestContract.score >= getMinimumBotBidScore(bestContract.action, hand)) {
     return bestContract.action
   }
 
@@ -113,21 +115,21 @@ function getBestBotContractCandidate(
 
     candidates.push({
       action: { type: 'suit', suit },
-      score: getSuitBidStrength(hand, suit),
+      score: getSuitBidStrength(hand, suit) + getAnnouncementPressureBonus({ type: 'suit', suit }, hand),
     })
   }
 
   if (validActions.noTrumps) {
     candidates.push({
       action: { type: 'no-trumps' },
-      score: getNoTrumpsBidStrength(hand),
+      score: getNoTrumpsBidStrength(hand) + getAnnouncementPressureBonus({ type: 'no-trumps' }, hand),
     })
   }
 
   if (validActions.allTrumps) {
     candidates.push({
       action: { type: 'all-trumps' },
-      score: getAllTrumpsBidStrength(state, seat, hand),
+      score: getAllTrumpsBidStrength(state, seat, hand) + getAnnouncementPressureBonus({ type: 'all-trumps' }, hand),
     })
   }
 
@@ -139,17 +141,44 @@ function getBestBotContractCandidate(
   return candidates[0] ?? null
 }
 
-function getMinimumBotBidScore(action: BidAction): number {
+function getMinimumBotBidScore(action: BidAction, hand: Card[]): number {
+  const rankCounts = getRankCounts(hand)
+  const hasSquareJ = rankCounts.J === 4
+  const hasSquare9 = rankCounts['9'] === 4
+  const hasSquareHigh =
+    rankCounts.A === 4 ||
+    rankCounts['10'] === 4 ||
+    rankCounts.K === 4 ||
+    rankCounts.Q === 4
+
   if (action.type === 'suit') {
-    return 18
+    let minimum = 18
+
+    if (hasSquareJ) {
+      minimum -= 6
+    } else if (hasSquare9) {
+      minimum -= 5
+    } else if (hasSquareHigh) {
+      minimum -= 2
+    }
+
+    return minimum
   }
 
   if (action.type === 'no-trumps') {
-    return 21.5
+    let minimum = 21.5
+
+    if (hasSquareJ) {
+      minimum -= 1
+    } else if (hasSquare9) {
+      minimum -= 0.5
+    }
+
+    return minimum
   }
 
   if (action.type === 'all-trumps') {
-    return 24
+    return 26
   }
 
   return Number.POSITIVE_INFINITY
@@ -279,9 +308,13 @@ function getAllTrumpsBidStrength(
   )
 
   const suitProfiles = SUIT_OPTIONS.map((suit) => buildSuitProfile(hand, suit))
-  const bestSuitScore = Math.max(...suitProfiles.map(getAllTrumpsSuitCoreScore))
+  const bestSuitProfile = getBestAllTrumpsSuitProfile(suitProfiles)
+  const bestSuitScore = getAllTrumpsSuitCoreScore(bestSuitProfile)
   const strongTrumpSuits = suitProfiles.filter(
-    (profile) => profile.hasJ || profile.has9 || (profile.hasA && profile.has10)
+    (profile) =>
+      profile.hasJ ||
+      (profile.has9 && (profile.hasA || profile.has10 || profile.count >= 3)) ||
+      (profile.hasA && profile.has10 && profile.count >= 4)
   ).length
   const beloteCount = suitProfiles.filter((profile) => profile.hasBelote).length
   const totalJacks = hand.filter((card) => String(card.rank) === 'J').length
@@ -301,8 +334,44 @@ function getAllTrumpsBidStrength(
     score += 2
   }
 
+  if (totalJacks >= 3) {
+    score += 2.5
+  }
+
   if (totalNines >= 2) {
     score += 1.5
+  }
+
+  if (bestSuitProfile.hasJ && bestSuitProfile.has9) {
+    score += 3.5
+  }
+
+  if (bestSuitProfile.hasJ && bestSuitProfile.count >= 4) {
+    score += 2
+  }
+
+  if (!bestSuitProfile.hasJ) {
+    score -= 7
+  }
+
+  if (totalJacks === 1) {
+    score -= 5
+  }
+
+  if (totalJacks === 0) {
+    score -= 18
+  }
+
+  if (totalJacks === 0 && totalNines <= 1) {
+    score -= 7
+  }
+
+  if (totalJacks === 0 && strongTrumpSuits < 2) {
+    score -= 6
+  }
+
+  if (totalJacks === 1 && totalNines === 0 && bestSuitProfile.count < 4) {
+    score -= 3.5
   }
 
   if (bestSuitScore < 8 && strongTrumpSuits < 2) {
@@ -312,6 +381,74 @@ function getAllTrumpsBidStrength(
   score += getAllTrumpsRiskAdjustment(state, seat, hand)
 
   return score
+}
+
+function getAnnouncementPressureBonus(action: BidAction, hand: Card[]): number {
+  const rankCounts = getRankCounts(hand)
+
+  const hasSquareJ = rankCounts.J === 4
+  const hasSquare9 = rankCounts['9'] === 4
+  const hasSquareA = rankCounts.A === 4
+  const hasSquare10 = rankCounts['10'] === 4
+  const hasSquareK = rankCounts.K === 4
+  const hasSquareQ = rankCounts.Q === 4
+  const hasAnyHighSquare = hasSquareA || hasSquare10 || hasSquareK || hasSquareQ
+
+  if (action.type === 'suit') {
+    let bonus = 0
+
+    if (hasSquareJ) {
+      bonus += 18
+    }
+
+    if (hasSquare9) {
+      bonus += 15
+    }
+
+    if (hasAnyHighSquare) {
+      bonus += 7
+    }
+
+    return bonus
+  }
+
+  if (action.type === 'no-trumps') {
+    let bonus = 0
+
+    if (hasSquareJ) {
+      bonus += 4
+    }
+
+    if (hasSquare9) {
+      bonus += 3
+    }
+
+    if (hasAnyHighSquare) {
+      bonus += 4
+    }
+
+    return bonus
+  }
+
+  if (action.type === 'all-trumps') {
+    let bonus = 0
+
+    if (hasSquareJ) {
+      bonus += 8
+    }
+
+    if (hasSquare9) {
+      bonus += 4
+    }
+
+    if (hasAnyHighSquare) {
+      bonus += 2
+    }
+
+    return bonus
+  }
+
+  return 0
 }
 
 function getAllTrumpsRiskAdjustment(
@@ -326,6 +463,7 @@ function getAllTrumpsRiskAdjustment(
   }
 
   const dangerProfile = buildSuitProfile(hand, context.suit)
+  const totalJacks = hand.filter((card) => String(card.rank) === 'J').length
   const totalJacksOutsideDanger = hand.filter(
     (card) => String(card.rank) === 'J' && card.suit !== context.suit
   ).length
@@ -342,6 +480,10 @@ function getAllTrumpsRiskAdjustment(
     return 18
   }
 
+  if (dangerTeamUnderHand && totalJacks === 0) {
+    return -22
+  }
+
   if (dangerTeamUnderHand) {
     return -16
   }
@@ -352,6 +494,10 @@ function getAllTrumpsRiskAdjustment(
 
   if (dangerProfile.has9 && !hasCoveredDangerNine) {
     return -4
+  }
+
+  if (totalJacks === 0) {
+    return -6
   }
 
   return -2
@@ -380,6 +526,12 @@ function getLatestOpponentSuitBidContext(
   }
 
   return null
+}
+
+function getBestAllTrumpsSuitProfile(suitProfiles: SuitProfile[]): SuitProfile {
+  return [...suitProfiles].sort(
+    (left, right) => getAllTrumpsSuitCoreScore(right) - getAllTrumpsSuitCoreScore(left)
+  )[0]
 }
 
 function getAllTrumpsSuitCoreScore(profile: SuitProfile): number {
@@ -421,6 +573,17 @@ function buildSuitProfile(hand: Card[], suit: Suit): SuitProfile {
       cards.some((card) => String(card.rank) === 'K') &&
       cards.some((card) => String(card.rank) === 'Q'),
   }
+}
+
+function getRankCounts(hand: Card[]): RankCounts {
+  const counts: RankCounts = {}
+
+  for (const card of hand) {
+    const rank = String(card.rank)
+    counts[rank] = (counts[rank] ?? 0) + 1
+  }
+
+  return counts
 }
 
 function getSuitLengthBonus(count: number): number {

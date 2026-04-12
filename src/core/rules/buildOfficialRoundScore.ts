@@ -12,6 +12,8 @@ export type OfficialRoundScoreResult = {
   nextCarryOver: CarryOverPoints
 }
 
+type RoundingMode = 'suit' | 'all-trumps' | 'no-trumps'
+
 function createZeroRoundScore(): RoundScore {
   return {
     teamA: 0,
@@ -106,54 +108,94 @@ function getRecordedPremiumPoints(rawPoints: number): number {
   return Math.round(rawPoints / 10)
 }
 
+function resolveRoundingMode(expectedTotalPoints: number): RoundingMode {
+  if (expectedTotalPoints === 258) {
+    return 'all-trumps'
+  }
+
+  if (expectedTotalPoints === 260) {
+    return 'no-trumps'
+  }
+
+  return 'suit'
+}
+
+function getRoundingThreshold(mode: RoundingMode): number {
+  if (mode === 'all-trumps') {
+    return 4
+  }
+
+  if (mode === 'no-trumps') {
+    return 5
+  }
+
+  return 6
+}
+
+function roundRawPointsWithThreshold(rawPoints: number, mode: RoundingMode): number {
+  const threshold = getRoundingThreshold(mode)
+  const base = Math.floor(rawPoints / 10)
+  const remainder = rawPoints % 10
+
+  return base + (remainder >= threshold ? 1 : 0)
+}
+
 function convertRawPairToRecordedPair(
   teamARaw: number,
   teamBRaw: number,
-  expectedTotalPoints: number
+  expectedTotalPoints: number,
+  mode: RoundingMode
 ): RoundScore {
   const recordedTotal = getRecordedRoundTotal(expectedTotalPoints)
 
   if (teamARaw === teamBRaw) {
-    const equalRecorded = Math.floor(recordedTotal / 2)
+    const lowerHalf = Math.floor(recordedTotal / 2)
 
     return {
-      teamA: equalRecorded,
-      teamB: recordedTotal - equalRecorded,
+      teamA: lowerHalf,
+      teamB: recordedTotal - lowerHalf,
     }
   }
 
-  if (teamARaw > teamBRaw) {
-    const teamARecorded = Math.round(teamARaw / 10)
+  let teamARecorded = roundRawPointsWithThreshold(teamARaw, mode)
+  let teamBRecorded = roundRawPointsWithThreshold(teamBRaw, mode)
 
-    return {
-      teamA: teamARecorded,
-      teamB: recordedTotal - teamARecorded,
+  const currentTotal = teamARecorded + teamBRecorded
+
+  if (currentTotal > recordedTotal) {
+    if (teamARaw > teamBRaw) {
+      teamARecorded -= 1
+    } else {
+      teamBRecorded -= 1
+    }
+  } else if (currentTotal < recordedTotal) {
+    if (teamARaw < teamBRaw) {
+      teamARecorded += 1
+    } else {
+      teamBRecorded += 1
     }
   }
-
-  const teamBRecorded = Math.round(teamBRaw / 10)
 
   return {
-    teamA: recordedTotal - teamBRecorded,
+    teamA: teamARecorded,
     teamB: teamBRecorded,
   }
 }
 
-function getRecordedPointsForSingleTeam(
-  rawPoints: number,
+function getRecordedScoreForEqualTie(
   expectedTotalPoints: number
-): number {
-  const recordedPair = convertRawPairToRecordedPair(
-    rawPoints,
-    expectedTotalPoints - rawPoints,
-    expectedTotalPoints
-  )
+): {
+  defenderRecorded: number
+  bidderRecorded: number
+} {
+  const recordedTotal = getRecordedRoundTotal(expectedTotalPoints)
+  const defenderRecorded = Math.floor(recordedTotal / 2)
+  const bidderRecorded = recordedTotal - defenderRecorded
 
-  const rawOpponentPoints = expectedTotalPoints - rawPoints
-
-  return rawPoints >= rawOpponentPoints
-    ? Math.max(recordedPair.teamA, recordedPair.teamB)
-    : Math.min(recordedPair.teamA, recordedPair.teamB)
+  return {
+    defenderRecorded,
+    bidderRecorded,
+  }
 }
 
 function applyResolvedCarryOver(
@@ -250,6 +292,7 @@ export function buildOfficialRoundScore(input: {
   const beloteScore = input.beloteScore ?? createZeroRoundScore()
   const counterMultiplier = normalizeCounterMultiplier(input.counterMultiplier)
   const roundBreakdown = createZeroBreakdown()
+  const roundingMode = resolveRoundingMode(baseRoundScore.expectedTotalPoints)
 
   const expectedTotalWithPremiums =
     baseRoundScore.expectedTotalPoints +
@@ -294,7 +337,8 @@ export function buildOfficialRoundScore(input: {
         baseRoundScore.teamB.rawPoints +
           declarationsScore.teamB +
           beloteScore.teamB,
-        expectedTotalWithPremiums
+        expectedTotalWithPremiums,
+        roundingMode
       )
 
       awardedDeclarations = {
@@ -333,12 +377,27 @@ export function buildOfficialRoundScore(input: {
   }
 
   if (roundOutcome.outcome === 'tie' && roundOutcome.defenderTeam && roundOutcome.bidderTeam) {
-    const defenderRecordedPoints = getRecordedPointsForSingleTeam(
-      roundOutcome.defenderPoints,
-      expectedTotalWithPremiums
-    )
+    let defenderRecordedPoints = 0
+    let bidderRecordedPoints = 0
 
-    const bidderRecordedPoints = recordedTotalWithPremiums - defenderRecordedPoints
+    if (roundOutcome.defenderPoints === roundOutcome.bidderPoints) {
+      const equalTieScore = getRecordedScoreForEqualTie(expectedTotalWithPremiums)
+      defenderRecordedPoints = equalTieScore.defenderRecorded
+      bidderRecordedPoints = equalTieScore.bidderRecorded
+    } else {
+      const recordedPair = convertRawPairToRecordedPair(
+        roundOutcome.defenderTeam === 'A' ? roundOutcome.defenderPoints : roundOutcome.bidderPoints,
+        roundOutcome.defenderTeam === 'B' ? roundOutcome.defenderPoints : roundOutcome.bidderPoints,
+        expectedTotalWithPremiums,
+        roundingMode
+      )
+
+      defenderRecordedPoints = getRecordedScoreForTeam(
+        recordedPair,
+        roundOutcome.defenderTeam
+      )
+      bidderRecordedPoints = recordedTotalWithPremiums - defenderRecordedPoints
+    }
 
     const defenderOwnedDeclarationsRecorded = getRecordedScoreForTeam(
       declarationsRecordedByOwner,

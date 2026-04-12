@@ -14,6 +14,9 @@ if (!rootElement) {
   throw new Error('Root element #app was not found.')
 }
 
+const SILENT_AUDIO_UNLOCK_SRC =
+  'data:audio/wav;base64,UklGRjQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YRAAAAAAAAAAAAAAAAAAAAAAAAAA'
+
 type BidBubbleOverride = {
   entryKey: string
   seat: Seat
@@ -71,6 +74,58 @@ let bottomBotTakeoverActive = false
 let bidBubbleOverride: BidBubbleOverride | null = null
 let matchEndedCoordinationTimeoutIds: number[] = []
 let matchEndedPlayerStatuses: Partial<Record<Seat, MatchEndedPlayerStatus>> = {}
+let audioUnlockListenersAttached = false
+let audioUnlockedForDocument = false
+
+function detachInitialAudioUnlockListeners(): void {
+  if (!audioUnlockListenersAttached) {
+    return
+  }
+
+  window.removeEventListener('pointerdown', handleInitialAudioUnlock, true)
+  window.removeEventListener('mousedown', handleInitialAudioUnlock, true)
+  window.removeEventListener('touchstart', handleInitialAudioUnlock, true)
+  window.removeEventListener('keydown', handleInitialAudioUnlock, true)
+
+  audioUnlockListenersAttached = false
+}
+
+function tryUnlockDocumentAudio(): void {
+  if (audioUnlockedForDocument) {
+    return
+  }
+
+  const audio = new Audio(SILENT_AUDIO_UNLOCK_SRC)
+  audio.preload = 'auto'
+  audio.muted = true
+  audio.volume = 0
+
+  void audio.play()
+    .then(() => {
+      audio.pause()
+      audio.currentTime = 0
+      audioUnlockedForDocument = true
+      detachInitialAudioUnlockListeners()
+    })
+    .catch(() => {})
+}
+
+function handleInitialAudioUnlock(): void {
+  tryUnlockDocumentAudio()
+}
+
+function attachInitialAudioUnlockListeners(): void {
+  if (audioUnlockListenersAttached) {
+    return
+  }
+
+  window.addEventListener('pointerdown', handleInitialAudioUnlock, true)
+  window.addEventListener('mousedown', handleInitialAudioUnlock, true)
+  window.addEventListener('touchstart', handleInitialAudioUnlock, true)
+  window.addEventListener('keydown', handleInitialAudioUnlock, true)
+
+  audioUnlockListenersAttached = true
+}
 
 function clearBotPlayTimeout(): void {
   if (botPlayTimeoutId !== null) {
@@ -1109,6 +1164,7 @@ function renderBottomBotTakeoverPopup(): void {
   )
 
   returnButton?.addEventListener('click', () => {
+    tryUnlockDocumentAudio()
     setBottomBotTakeoverActive(false)
     render()
   })
@@ -1709,6 +1765,7 @@ function render(): void {
 
   renderApp(appRoot, app, {
     onNextPhaseClick: () => {
+      tryUnlockDocumentAudio()
       clearBotPlayTimeout()
       clearBotBidTimeout()
       clearCuttingAutoSelectTimeout()
@@ -1719,7 +1776,8 @@ function render(): void {
       app.engine.goToNextPhase()
       render()
     },
-    onSelectCutIndex: (cutIndex: number) => {
+    onSelectCutIndex: (cutIndex) => {
+      tryUnlockDocumentAudio()
       clearBotPlayTimeout()
       clearBotBidTimeout()
       clearCuttingAutoSelectTimeout()
@@ -1731,6 +1789,7 @@ function render(): void {
       render()
     },
     onResolveCutClick: () => {
+      tryUnlockDocumentAudio()
       clearBotPlayTimeout()
       clearBotBidTimeout()
       clearCuttingAutoSelectTimeout()
@@ -1742,24 +1801,31 @@ function render(): void {
       render()
     },
     onBidPass: () => {
+      tryUnlockDocumentAudio()
       submitBidActionWithBubble({ type: 'pass' })
     },
     onBidSuit: (suit) => {
+      tryUnlockDocumentAudio()
       submitBidActionWithBubble({ type: 'suit', suit })
     },
     onBidNoTrumps: () => {
+      tryUnlockDocumentAudio()
       submitBidActionWithBubble({ type: 'no-trumps' })
     },
     onBidAllTrumps: () => {
+      tryUnlockDocumentAudio()
       submitBidActionWithBubble({ type: 'all-trumps' })
     },
     onBidDouble: () => {
+      tryUnlockDocumentAudio()
       submitBidActionWithBubble({ type: 'double' })
     },
     onBidRedouble: () => {
+      tryUnlockDocumentAudio()
       submitBidActionWithBubble({ type: 'redouble' })
     },
     onPlayCard: (cardId) => {
+      tryUnlockDocumentAudio()
       clearBotPlayTimeout()
       clearBotBidTimeout()
       clearCuttingAutoSelectTimeout()
@@ -1781,9 +1847,11 @@ function render(): void {
       render()
     },
     onMatchEndedReloadGame: () => {
+      tryUnlockDocumentAudio()
       startMatchEndedReloadFlow()
     },
     onMatchEndedFindNewGame: () => {
+      tryUnlockDocumentAudio()
       clearMatchEndedCoordinationTimeouts()
       setMatchEndedPlayerStatus('bottom', 'find-new-game')
       render()
@@ -1792,6 +1860,7 @@ function render(): void {
       )
     },
     onMatchEndedLeave: () => {
+      tryUnlockDocumentAudio()
       clearMatchEndedCoordinationTimeouts()
       setMatchEndedPlayerStatus('bottom', 'leave')
       render()
@@ -1819,6 +1888,8 @@ const belotePromptController = createBelotePromptController({
   app,
   render,
 })
+
+attachInitialAudioUnlockListeners()
 
 window.addEventListener('resize', () => {
   if (resizeFrameId !== null) {
