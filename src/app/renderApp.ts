@@ -1557,13 +1557,15 @@ export function renderApp(
   const canUseDebugNextPhase =
     !!options.onNextPhaseClick && renderState.phase !== 'match-ended'
 
+  const shouldRaiseGameStageAboveSeats = isScoringPhase || isMatchEndedPhase
+
   rootElement.innerHTML = `
     <div class="game-shell">
       <div
         class="game-stage"
         data-game-stage="1"
         data-stage-scale="${stageScale}"
-        style="transform: translate(-50%, -50%) scale(${stageScale});"
+        style="transform: translate(-50%, -50%) scale(${stageScale}); z-index:${shouldRaiseGameStageAboveSeats ? 12 : 1};"
       >
         <div
           style="

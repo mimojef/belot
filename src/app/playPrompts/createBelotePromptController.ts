@@ -81,6 +81,34 @@ function formatCardsLabel(cards: Card[]): string {
   return cards.map((card) => formatRankLabel(card.rank)).join(' - ')
 }
 
+function getSuitSymbol(suit: Suit): string {
+  if (suit === 'spades') return '♠'
+  if (suit === 'hearts') return '♥'
+  if (suit === 'diamonds') return '♦'
+  return '♣'
+}
+
+function getSuitColor(suit: Suit): string {
+  if (suit === 'hearts' || suit === 'diamonds') {
+    return '#ef4444'
+  }
+
+  return '#f8fafc'
+}
+
+function getCardRankShortLabel(rank: Card['rank']): string {
+  return rank
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 function isInitialRoundAnnouncementMoment(state: GameState): boolean {
   if (state.phase !== 'playing') {
     return false
@@ -410,6 +438,56 @@ function getDefaultDeclarationsFromPrompt(
   })
 }
 
+function renderPromptOptionValue(option: PendingPromptOption): string {
+  const declaration = option.declarations[0]
+
+  if (!declaration) {
+    return ''
+  }
+
+  if (declaration.type === 'belote') {
+    const suit = declaration.suit ?? 'spades'
+    const suitSymbol = getSuitSymbol(suit)
+    const suitColor = getSuitColor(suit)
+
+    return `
+      <span style="color: ${suitColor}; font-size: 52px; line-height: 1; font-weight: 800;">
+        ${suitSymbol}
+      </span>
+      <span style="color: ${suitColor}; font-size: 32px; line-height: 1; font-weight: 800; letter-spacing: 0.08em;">
+        Q K
+      </span>
+    `
+  }
+
+  if (declaration.type === 'square') {
+    const rank = getCardRankShortLabel(declaration.cards[0]?.rank ?? '7')
+
+    return `
+      <span style="color: #f8fafc; font-size: 32px; line-height: 1; font-weight: 800; letter-spacing: 0.12em; white-space: nowrap;">
+        ${escapeHtml(rank)} ${escapeHtml(rank)} ${escapeHtml(rank)} ${escapeHtml(rank)}
+      </span>
+    `
+  }
+
+  const cards = sortCardsByRank(declaration.cards)
+  const suit = cards[0]?.suit ?? declaration.suit ?? 'spades'
+  const suitSymbol = getSuitSymbol(suit)
+  const suitColor = getSuitColor(suit)
+  const rankMarkup = cards
+    .map((card) => escapeHtml(getCardRankShortLabel(card.rank)))
+    .join(' ')
+
+  return `
+    <span style="color: ${suitColor}; font-size: 52px; line-height: 1; font-weight: 800;">
+      ${suitSymbol}
+    </span>
+    <span style="color: ${suitColor}; font-size: 32px; line-height: 1; font-weight: 800; letter-spacing: 0.08em; white-space: nowrap;">
+      ${rankMarkup}
+    </span>
+  `
+}
+
 export function createBelotePromptController(params: {
   app: AppBootstrap
   render: () => void
@@ -513,7 +591,7 @@ export function createBelotePromptController(params: {
         style="
           position: fixed;
           inset: 0;
-          background: rgba(2, 6, 23, 0.72);
+          background: rgba(6, 16, 32, 0.52);
           display: flex;
           align-items: center;
           justify-content: center;
@@ -523,43 +601,36 @@ export function createBelotePromptController(params: {
       >
         <div
           style="
-            width: min(92vw, 520px);
-            background: rgba(15, 23, 42, 0.98);
-            border: 1px solid rgba(148, 163, 184, 0.22);
-            border-radius: 18px;
-            padding: 22px;
-            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+            width: min(92vw, 640px);
+            background: rgba(14, 33, 51, 0.96);
+            border: 2px solid rgba(243, 170, 28, 0.92);
+            border-radius: 16px;
+            padding: 20px 18px 18px;
+            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
             color: #f8fafc;
             font-family: Arial, Helvetica, sans-serif;
           "
         >
           <div
             style="
-              font-size: 24px;
+              text-align: center;
+              font-size: clamp(32px, 4vw, 44px);
+              line-height: 1.05;
               font-weight: 800;
-              margin-bottom: 8px;
+              letter-spacing: 0.02em;
+              margin-bottom: 18px;
+              text-transform: uppercase;
             "
           >
-            Обяви
-          </div>
-
-          <div
-            style="
-              font-size: 15px;
-              line-height: 1.5;
-              color: #cbd5e1;
-              margin-bottom: 16px;
-            "
-          >
-            Намерени са валидни анонси за тази ръка. Можеш да оставиш чекнати повече от една обява.
+            Избери декларация
           </div>
 
           <div
             style="
               display: flex;
               flex-direction: column;
-              gap: 10px;
               margin-bottom: 18px;
+              border-top: 1px solid rgba(243, 170, 28, 0.3);
             "
           >
             ${pendingBelotePrompt.options
@@ -567,50 +638,54 @@ export function createBelotePromptController(params: {
                 (option) => `
                   <label
                     style="
-                      display: flex;
-                      align-items: flex-start;
-                      gap: 12px;
-                      padding: 12px 14px;
-                      border-radius: 14px;
-                      background: rgba(30, 41, 59, 0.72);
-                      border: 1px solid rgba(148, 163, 184, 0.16);
+                      display: grid;
+                      grid-template-columns: 46px minmax(0, 1fr) auto;
+                      align-items: center;
+                      gap: 16px;
+                      min-height: 108px;
+                      padding: 16px 10px;
+                      border-bottom: 1px solid rgba(243, 170, 28, 0.3);
                       cursor: pointer;
                     "
                   >
                     <input
                       type="checkbox"
                       data-belote-announce-checkbox
-                      value="${option.id}"
+                      value="${escapeHtml(option.id)}"
                       ${option.defaultChecked ? 'checked' : ''}
                       style="
-                        width: 18px;
-                        height: 18px;
-                        margin-top: 2px;
+                        width: 30px;
+                        height: 30px;
+                        margin: 0;
                         cursor: pointer;
-                        flex: 0 0 auto;
+                        accent-color: #60a5fa;
                       "
                     />
 
-                    <div style="display: flex; flex-direction: column; gap: 4px;">
-                      <div
-                        style="
-                          font-size: 16px;
-                          font-weight: 800;
-                          color: #f8fafc;
-                        "
-                      >
-                        ${option.title}
-                      </div>
+                    <div
+                      style="
+                        min-width: 0;
+                        font-size: clamp(28px, 3.4vw, 44px);
+                        line-height: 1;
+                        font-weight: 800;
+                        color: #f8fafc;
+                        text-transform: uppercase;
+                      "
+                    >
+                      ${escapeHtml(option.title)}
+                    </div>
 
-                      <div
-                        style="
-                          font-size: 14px;
-                          line-height: 1.45;
-                          color: #cbd5e1;
-                        "
-                      >
-                        ${option.description}
-                      </div>
+                    <div
+                      style="
+                        display: flex;
+                        align-items: center;
+                        justify-content: flex-end;
+                        gap: 10px;
+                        min-width: 0;
+                        text-align: right;
+                      "
+                    >
+                      ${renderPromptOptionValue(option)}
                     </div>
                   </label>
                 `
@@ -623,14 +698,19 @@ export function createBelotePromptController(params: {
             data-belote-continue-button
             style="
               width: 100%;
+              min-height: 84px;
               border: 0;
-              border-radius: 12px;
-              padding: 13px 16px;
-              background: #22c55e;
-              color: #052e16;
-              font-size: 15px;
+              border-radius: 14px;
+              padding: 12px 18px;
+              background: #f5a623;
+              color: #fff7ed;
+              font-size: clamp(28px, 4vw, 50px);
+              line-height: 1;
               font-weight: 800;
+              letter-spacing: 0.02em;
+              text-transform: uppercase;
               cursor: pointer;
+              box-shadow: inset 0 -4px 0 rgba(0, 0, 0, 0.12);
             "
           >
             Продължи
