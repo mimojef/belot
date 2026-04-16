@@ -1,10 +1,11 @@
 import { createDeck } from '../rules/createDeck'
 import { shuffleDeck } from '../rules/shuffleDeck'
-import { createEmptyTimerState } from '../state/createRoundDefaults'
+import { createCuttingTimerState, clearTimerState } from '../timers/timerStateHelpers'
 import type { GameState } from '../state/gameTypes'
 
 export function startCuttingPhase(state: GameState): GameState {
   const freshDeck = shuffleDeck(createDeck())
+  const cutterSeat = state.round.cutterSeat
 
   return {
     ...state,
@@ -14,6 +15,6 @@ export function startCuttingPhase(state: GameState): GameState {
       selectedCutIndex: null,
     },
     deck: freshDeck,
-    timer: createEmptyTimerState(),
+    timer: cutterSeat ? createCuttingTimerState(state, cutterSeat) : clearTimerState(),
   }
 }

@@ -1,12 +1,19 @@
 import './style.css'
 import { bootstrapApp } from './app/bootstrap'
 import { renderApp } from './app/renderApp'
+import { createLobbyFlowController } from './app/lobby/createLobbyFlowController'
 import { createBelotePromptController } from './app/playPrompts/createBelotePromptController'
 import { pickBotBidAction } from './core/rules/pickBotBidAction'
 import { pickBotCardToPlay } from './core/rules/pickBotCardToPlay'
 import type { Seat } from './data/constants/seatOrder'
 import type { BidAction, Card, GameState, Suit } from './core/state/gameTypes'
 import { createGameAudioController } from './app/audio/createGameAudioController'
+import { createPlayingTimerState } from './core/timers/timerStateHelpers'
+import {
+  createGameServerClient,
+  type MatchStake,
+  type ServerMessage,
+} from './app/network/createGameServerClient'
 
 const rootElement = document.querySelector<HTMLDivElement>('#app')
 
@@ -25,10 +32,33 @@ type BidBubbleOverride = {
 
 type MatchEndedPlayerStatus = 'waiting' | 'reload' | 'find-new-game' | 'leave'
 
+declare global {
+  interface Window {
+    belotServer?: {
+      connect: () => void
+      disconnect: () => void
+      ping: () => void
+      createRoom: (displayName?: string) => void
+      joinRoom: (roomId: string, displayName?: string) => void
+      joinMatchmaking: (stake: MatchStake, displayName?: string) => void
+      leaveMatchmaking: () => void
+      getLatestRoomId: () => string | null
+    }
+  }
+}
+
 const BOT_PLAY_DELAY_MS = 1000
 const BOT_BIDDING_DELAY_MS = 1000
 const FINAL_TRICK_CARD_FLIGHT_MS = 420
 const FINAL_TRICK_CARD_HOLD_MS = 340
+const TRICK_COLLECTION_GATHER_MS = 180
+const TRICK_COLLECTION_FLY_MS = 420
+const TRICK_COLLECTION_STAGGER_MS = 35
+const TRICK_COLLECTION_MAX_STAGGER_STEPS = 3
+const TRICK_COLLECTION_START_DELAY_MS =
+  TRICK_COLLECTION_GATHER_MS +
+  TRICK_COLLECTION_FLY_MS +
+  TRICK_COLLECTION_STAGGER_MS * TRICK_COLLECTION_MAX_STAGGER_STEPS
 const FLOATING_CARD_WIDTH = 148
 const FLOATING_CARD_HEIGHT = 215
 const CUTTING_COUNTDOWN_MS = 15000
@@ -49,6 +79,10 @@ const MATCH_ENDED_RESTART_AFTER_BOTS_MS = 250
 const appRoot = rootElement
 const app = bootstrapApp()
 const gameAudio = createGameAudioController()
+
+let latestServerRoomId: string | null = null
+let latestServerSeat: Seat | null = null
+let currentAppScreen: 'lobby' | 'game' = 'lobby'
 
 let resizeFrameId: number | null = null
 let botPlayTimeoutId: number | null = null
@@ -100,7 +134,8 @@ function tryUnlockDocumentAudio(): void {
   audio.muted = true
   audio.volume = 0
 
-  void audio.play()
+  void audio
+    .play()
     .then(() => {
       audio.pause()
       audio.currentTime = 0
@@ -125,6 +160,146 @@ function attachInitialAudioUnlockListeners(): void {
   window.addEventListener('keydown', handleInitialAudioUnlock, true)
 
   audioUnlockListenersAttached = true
+}
+
+function handleGameServerMessage(message: ServerMessage): void {
+  console.log('[game-server] message:', message)
+
+  if (
+    message.type === 'connected' ||
+    message.type === 'matchmaking_joined' ||
+    message.type === 'matchmaking_status' ||
+    message.type === 'matchmaking_left' ||
+    message.type === 'match_found'
+  ) {
+    const wasHandledByLobbyFlow = lobbyFlowController.handleServerMessage(message)
+
+    if (wasHandledByLobbyFlow) {
+      return
+    }
+  }
+
+  if (message.type === 'room_created') {
+    latestServerRoomId = message.roomId
+    latestServerSeat = message.seat
+    currentAppScreen = 'game'
+    console.log(
+      `[game-server] room created: roomId=${message.roomId}, seat=${message.seat}, host=${message.hostDisplayName}`,
+    )
+    renderServerDebugPanel()
+    return
+  }
+
+  if (message.type === 'room_joined') {
+    latestServerRoomId = message.roomId
+    latestServerSeat = message.seat
+    currentAppScreen = 'game'
+    console.log(
+      `[game-server] room joined: roomId=${message.roomId}, seat=${message.seat}, displayName=${message.displayName}`,
+    )
+    renderServerDebugPanel()
+    return
+  }
+
+  if (message.type === 'room_snapshot') {
+    latestServerRoomId = message.roomId
+    latestServerSeat = message.yourSeat
+    console.log('[game-server] room snapshot seats:', message.seats)
+    renderServerDebugPanel()
+    return
+  }
+
+  if (message.type === 'error') {
+    console.error('[game-server] error:', message.message)
+
+    if (currentAppScreen === 'lobby') {
+      lobbyFlowController.setErrorText(message.message)
+      lobbyFlowController.render()
+    }
+
+    return
+  }
+
+  if (message.type === 'pong') {
+    console.log('[game-server] pong at', new Date(message.timestamp).toISOString())
+    renderServerDebugPanel()
+  }
+}
+
+const gameServerClient = createGameServerClient({
+  onOpen: () => {
+    lobbyFlowController.setConnected(true)
+    lobbyFlowController.setErrorText(null)
+    renderServerDebugPanel()
+  },
+  onClose: () => {
+    latestServerRoomId = null
+    latestServerSeat = null
+    currentAppScreen = 'lobby'
+    lobbyFlowController.setConnected(false)
+    lobbyFlowController.resetToLobby()
+    renderServerDebugPanel()
+  },
+  onError: (event) => {
+    console.error('[game-server] socket error:', event)
+
+    if (currentAppScreen === 'lobby') {
+      lobbyFlowController.setErrorText('Socket error. Провери server терминала.')
+    }
+  },
+  onMessage: (message) => {
+    handleGameServerMessage(message)
+  },
+})
+
+const lobbyFlowController = createLobbyFlowController({
+  root: appRoot,
+  joinMatchmaking: (stake, displayName) => {
+    latestServerRoomId = null
+    latestServerSeat = null
+    gameServerClient.joinMatchmaking(stake, displayName)
+  },
+  leaveMatchmaking: () => {
+    gameServerClient.leaveMatchmaking()
+  },
+  onMatchFound: (message) => {
+    latestServerRoomId = message.roomId
+    latestServerSeat = message.seat
+    currentAppScreen = 'game'
+    render()
+  },
+  tryUnlockDocumentAudio,
+})
+
+function renderServerDebugPanel(): void {
+  render()
+}
+
+function exposeGameServerDebugApi(): void {
+  window.belotServer = {
+    connect: () => {
+      gameServerClient.connect()
+    },
+    disconnect: () => {
+      gameServerClient.disconnect()
+    },
+    ping: () => {
+      gameServerClient.ping()
+    },
+    createRoom: (displayName?: string) => {
+      gameServerClient.createRoom(displayName)
+    },
+    joinRoom: (roomId: string, displayName?: string) => {
+      gameServerClient.joinRoom(roomId, displayName)
+    },
+    joinMatchmaking: (stake: MatchStake, displayName?: string) => {
+      gameServerClient.joinMatchmaking(stake, displayName)
+    },
+    leaveMatchmaking: () => {
+      gameServerClient.leaveMatchmaking()
+    },
+    getLatestRoomId: () => latestServerRoomId,
+  }
 }
 
 function clearBotPlayTimeout(): void {
@@ -227,6 +402,98 @@ function removeBottomBotTakeoverPopup(): void {
   document.querySelector('[data-bottom-bot-takeover-popup-root]')?.remove()
 }
 
+function isBottomControlledByBot(state: GameState): boolean {
+  return Boolean(state.players.bottom?.controlledByBot)
+}
+
+function setBottomPlayerControlledByBot(nextValue: boolean): void {
+  app.engine.updateState((currentState) => {
+    const bottomPlayer = currentState.players.bottom
+
+    if (!bottomPlayer || bottomPlayer.controlledByBot === nextValue) {
+      return currentState
+    }
+
+    let nextState: GameState = {
+      ...currentState,
+      players: {
+        ...currentState.players,
+        bottom: {
+          ...bottomPlayer,
+          controlledByBot: nextValue,
+        },
+      },
+    }
+
+    const currentTurnSeat =
+      nextState.playing?.currentTurnSeat ?? nextState.currentTrick.currentSeat
+
+    if (nextState.phase === 'playing' && currentTurnSeat === 'bottom') {
+      nextState = {
+        ...nextState,
+        timer: createPlayingTimerState(nextState, 'bottom'),
+      }
+    }
+
+    return nextState
+  })
+
+  setBottomBotTakeoverActive(nextValue)
+}
+
+function syncBottomBotTakeoverFromState(): void {
+  const latestState = app.engine.getState()
+  const nextValue = isBottomControlledByBot(latestState)
+
+  if (bottomBotTakeoverActive !== nextValue) {
+    setBottomBotTakeoverActive(nextValue)
+  }
+}
+
+function canResumeSyncFromBackground(state: GameState): boolean {
+  if (state.phase === 'playing' && isAnimatingFinalTrickCard) {
+    return false
+  }
+
+  if (state.phase === 'playing') {
+    const currentSeat = state.playing?.currentTurnSeat ?? state.currentTrick.currentSeat
+
+    if (
+      currentSeat === 'bottom' &&
+      !isBottomControlledByBot(state) &&
+      belotePromptController.hasPendingPrompt()
+    ) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function resumeFromBackground(): void {
+  const stateBeforeResume = app.engine.getState()
+
+  if (!canResumeSyncFromBackground(stateBeforeResume)) {
+    render()
+    return
+  }
+
+  clearBotPlayTimeout()
+  clearBotBidTimeout()
+  clearCuttingAutoSelectTimeout()
+  clearCuttingResolveTimeout()
+  clearDealPhaseAutoAdvanceTimeout()
+  clearScoringTimeouts()
+  clearFinalTrickAnimationTimeout()
+
+  resetPlayingTurnTracking()
+  resetCuttingTurnTracking()
+
+  app.engine.syncToNow()
+  syncBottomBotTakeoverFromState()
+  render()
+}
+
 function setBottomBotTakeoverActive(nextValue: boolean): void {
   if (bottomBotTakeoverActive === nextValue) {
     return
@@ -283,11 +550,15 @@ function setMatchEndedPlayerStatus(seat: Seat, status: MatchEndedPlayerStatus): 
 }
 
 function getMatchEndedBotSeats(state: GameState): Seat[] {
-  return (['right', 'top', 'left'] as const).filter((seat) => state.players[seat]?.mode === 'bot')
+  return (['right', 'top', 'left'] as const).filter(
+    (seat) => state.players[seat]?.mode === 'bot',
+  )
 }
 
 function getMatchEndedHumanSeats(state: GameState): Seat[] {
-  return (['right', 'top', 'left'] as const).filter((seat) => state.players[seat]?.mode === 'human')
+  return (['right', 'top', 'left'] as const).filter(
+    (seat) => state.players[seat]?.mode === 'human',
+  )
 }
 
 function shouldContinueMatchEndedReloadFlow(): boolean {
@@ -350,10 +621,6 @@ function startMatchEndedReloadFlow(): void {
 }
 
 function getRenderClockNow(): number {
-  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
-    return performance.now()
-  }
-
   return Date.now()
 }
 
@@ -417,7 +684,7 @@ function resolveCardForSeat(cardId: string, seat: Seat): Card | null {
 
 function getBottomSourceElement(cardId: string): HTMLElement | null {
   return document.querySelector<HTMLElement>(
-    `[data-bottom-hand-root="1"] [data-card-id="${cardId}"]`
+    `[data-bottom-hand-root="1"] [data-card-id="${cardId}"]`,
   )
 }
 
@@ -425,7 +692,11 @@ function getSeatAnchor(seat: Seat): HTMLElement | null {
   return document.querySelector<HTMLElement>(`[data-seat-anchor="${seat}"]`)
 }
 
-function getSeatPlayOffset(seat: Seat): { leftOffset: number; topOffset: number; rotate: number } {
+function getSeatPlayOffset(seat: Seat): {
+  leftOffset: number
+  topOffset: number
+  rotate: number
+} {
   if (seat === 'top') {
     return { leftOffset: 0, topOffset: -54, rotate: 0 }
   }
@@ -441,9 +712,11 @@ function getSeatPlayOffset(seat: Seat): { leftOffset: number; topOffset: number;
   return { leftOffset: 0, topOffset: 54, rotate: 0 }
 }
 
-function resolveFallbackStartRectForSeat(
-  seat: Seat
-): { left: number; top: number; rotate: number } {
+function resolveFallbackStartRectForSeat(seat: Seat): {
+  left: number
+  top: number
+  rotate: number
+} {
   const { width, height } = getScaledFloatingCardSize()
   const centerX = window.innerWidth / 2
   const centerY = window.innerHeight / 2
@@ -481,7 +754,7 @@ function resolveFallbackStartRectForSeat(
 
 function resolveStartRectForSeat(
   seat: Seat,
-  cardId: string
+  cardId: string,
 ): { left: number; top: number; rotate: number; sourceElement?: HTMLElement | null } | null {
   const { width, height } = getScaledFloatingCardSize()
 
@@ -490,7 +763,9 @@ function resolveStartRectForSeat(
 
     if (sourceElement) {
       const rect = sourceElement.getBoundingClientRect()
-      const rotate = parseRotationFromTransform(window.getComputedStyle(sourceElement).transform)
+      const rotate = parseRotationFromTransform(
+        window.getComputedStyle(sourceElement).transform,
+      )
 
       return {
         left: rect.left,
@@ -540,9 +815,11 @@ function resolveStartRectForSeat(
   return resolveFallbackStartRectForSeat(seat)
 }
 
-function resolvePlayTargetRectForSeat(
-  seat: Seat
-): { left: number; top: number; rotate: number } {
+function resolvePlayTargetRectForSeat(seat: Seat): {
+  left: number
+  top: number
+  rotate: number
+} {
   const target = document.querySelector<HTMLElement>(`[data-play-target-seat="${seat}"]`)
 
   if (target) {
@@ -693,19 +970,7 @@ function createFloatingCardElement(card: Card): HTMLDivElement {
 
 function getClockNowForPhaseTimestamp(timestamp: number | null | undefined): number {
   if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
-    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
-      return performance.now()
-    }
-
     return Date.now()
-  }
-
-  if (timestamp > 1_000_000_000_000) {
-    return Date.now()
-  }
-
-  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
-    return performance.now()
   }
 
   return Date.now()
@@ -763,6 +1028,42 @@ function getSelectedCutIndexFromState(state: GameState): number | null {
   return null
 }
 
+function getStateTimerStartedAt(state: GameState, activeSeat: Seat | null): number | null {
+  if (!activeSeat) {
+    return null
+  }
+
+  if (state.timer.activeSeat !== activeSeat) {
+    return null
+  }
+
+  const startedAt = state.timer.startedAt
+
+  if (typeof startedAt !== 'number' || !Number.isFinite(startedAt)) {
+    return null
+  }
+
+  return startedAt
+}
+
+function getStateTimerExpiresAt(state: GameState, activeSeat: Seat | null): number | null {
+  if (!activeSeat) {
+    return null
+  }
+
+  if (state.timer.activeSeat !== activeSeat) {
+    return null
+  }
+
+  const expiresAt = state.timer.expiresAt
+
+  if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) {
+    return null
+  }
+
+  return expiresAt
+}
+
 function getCuttingTurnKey(state: GameState): string | null {
   if (state.phase !== 'cutting') {
     return null
@@ -778,8 +1079,7 @@ function getCuttingTurnKey(state: GameState): string | null {
     return null
   }
 
-  const controlMode =
-    cutterSeat === 'bottom' && !bottomBotTakeoverActive ? 'human' : 'bot'
+  const controlMode = cutterSeat === 'bottom' && !bottomBotTakeoverActive ? 'human' : 'bot'
 
   const phaseMarker =
     typeof state.phaseEnteredAt === 'number' && Number.isFinite(state.phaseEnteredAt)
@@ -802,7 +1102,8 @@ function syncCuttingTurnState(state: GameState): void {
   }
 
   activeCuttingTurnKey = turnKey
-  activeCuttingTurnStartedAt = getRenderClockNow()
+  activeCuttingTurnStartedAt =
+    getStateTimerStartedAt(state, state.round.cutterSeat) ?? getRenderClockNow()
 }
 
 function getCuttingRemainingMs(state: GameState): number | null {
@@ -894,13 +1195,12 @@ function getBidTurnKey(state: GameState): string | null {
     return null
   }
 
-  const controlMode =
-    currentSeat === 'bottom' && !bottomBotTakeoverActive ? 'human' : 'bot'
+  const controlMode = currentSeat === 'bottom' && !bottomBotTakeoverActive ? 'human' : 'bot'
 
   return `${state.phase}:${state.bidding.entries.length}:${currentSeat}:${controlMode}`
 }
 
-function getBidActionDelayMs(state: GameState): number | null {
+function getBidActionRemainingMs(state: GameState): number | null {
   if (state.phase !== 'bidding' || state.bidding.hasEnded) {
     return null
   }
@@ -909,6 +1209,12 @@ function getBidActionDelayMs(state: GameState): number | null {
 
   if (!currentSeat) {
     return null
+  }
+
+  const timerExpiresAt = getStateTimerExpiresAt(state, currentSeat)
+
+  if (timerExpiresAt !== null) {
+    return Math.max(0, timerExpiresAt - getRenderClockNow())
   }
 
   return currentSeat === 'bottom' && !bottomBotTakeoverActive
@@ -931,10 +1237,29 @@ function getPlayingTurnKey(state: GameState): string | null {
   const currentTrickPlaysCount =
     state.playing?.currentTrick.plays.length ?? state.currentTrick.plays.length ?? 0
 
-  const controlMode =
-    currentSeat === 'bottom' && !bottomBotTakeoverActive ? 'human' : 'bot'
+  const controlMode = currentSeat === 'bottom' && !bottomBotTakeoverActive ? 'human' : 'bot'
 
   return `${completedTricksCount}:${currentTrickPlaysCount}:${currentSeat}:${controlMode}`
+}
+
+function shouldDelayPlayingTurnStart(state: GameState): boolean {
+  if (state.phase !== 'playing') {
+    return false
+  }
+
+  const completedTricksCount = state.playing?.completedTricks.length ?? 0
+  const currentTrickPlaysCount =
+    state.playing?.currentTrick.plays.length ?? state.currentTrick.plays.length ?? 0
+
+  return completedTricksCount > 0 && currentTrickPlaysCount === 0
+}
+
+function getPlayingTurnStartDelayMs(state: GameState): number {
+  if (!shouldDelayPlayingTurnStart(state)) {
+    return 0
+  }
+
+  return TRICK_COLLECTION_START_DELAY_MS
 }
 
 function syncPlayingTurnState(state: GameState): void {
@@ -949,8 +1274,12 @@ function syncPlayingTurnState(state: GameState): void {
     return
   }
 
+  const currentSeat = state.playing?.currentTurnSeat ?? null
+
   activePlayingTurnKey = turnKey
-  activePlayingTurnStartedAt = getRenderClockNow()
+  activePlayingTurnStartedAt =
+    getStateTimerStartedAt(state, currentSeat) ??
+    getRenderClockNow() + getPlayingTurnStartDelayMs(state)
   activePlayingPausedRemainingMs = null
 }
 
@@ -1081,9 +1410,7 @@ function syncPlayingPauseState(state: GameState): void {
 
 function renderBottomBotTakeoverPopup(): void {
   const state = app.engine.getState()
-  const shouldShowPopup =
-    bottomBotTakeoverActive &&
-    state.phase !== 'match-ended'
+  const shouldShowPopup = bottomBotTakeoverActive && state.phase !== 'match-ended'
 
   if (!shouldShowPopup) {
     removeBottomBotTakeoverPopup()
@@ -1160,12 +1487,12 @@ function renderBottomBotTakeoverPopup(): void {
   document.body.appendChild(overlay)
 
   const returnButton = overlay.querySelector<HTMLButtonElement>(
-    '[data-bottom-bot-takeover-return-button]'
+    '[data-bottom-bot-takeover-return-button]',
   )
 
   returnButton?.addEventListener('click', () => {
     tryUnlockDocumentAudio()
-    setBottomBotTakeoverActive(false)
+    setBottomPlayerControlledByBot(false)
     render()
   })
 }
@@ -1218,10 +1545,7 @@ function buildBidBubbleEntryKeyFromState(state: GameState): string | null {
       ? String(state.phaseEnteredAt)
       : 'no-phase-timestamp'
 
-  const suitPart =
-    lastEntry.action.type === 'suit'
-      ? `:${lastEntry.action.suit}`
-      : ''
+  const suitPart = lastEntry.action.type === 'suit' ? `:${lastEntry.action.suit}` : ''
 
   return `${phaseMarker}:${state.bidding.entries.length}:${lastEntry.seat}:${lastEntry.action.type}${suitPart}`
 }
@@ -1229,7 +1553,7 @@ function buildBidBubbleEntryKeyFromState(state: GameState): string | null {
 function buildFallbackBidBubbleEntryKey(
   stateBeforeSubmit: GameState,
   seat: Seat,
-  action: BidAction
+  action: BidAction,
 ): string {
   const phaseMarker =
     typeof stateBeforeSubmit.phaseEnteredAt === 'number' &&
@@ -1267,8 +1591,7 @@ function submitBidActionWithBubble(action: BidAction): void {
 
     setBidBubbleOverride({
       entryKey:
-        stateBasedEntryKey ??
-        buildFallbackBidBubbleEntryKey(stateBeforeSubmit, seat, action),
+        stateBasedEntryKey ?? buildFallbackBidBubbleEntryKey(stateBeforeSubmit, seat, action),
       seat,
       label: formatBidBubbleLabel(action),
     })
@@ -1366,10 +1689,7 @@ function scheduleDealPhaseAutoAdvance(): void {
     return
   }
 
-  if (
-    dealPhaseAutoAdvanceTimeoutId !== null &&
-    activeDealPhaseAutoAdvance === state.phase
-  ) {
+  if (dealPhaseAutoAdvanceTimeoutId !== null && activeDealPhaseAutoAdvance === state.phase) {
     return
   }
 
@@ -1436,10 +1756,12 @@ function scheduleScoringPhaseTimers(): void {
 
   const currentDisplayedSeconds = Math.ceil(remainingMs / 1000)
   const delayToNextCountdownStep =
-    remainingMs - Math.max(0, currentDisplayedSeconds - 1) * 1000 + SCORING_TIMER_FUDGE_MS
+    remainingMs -
+    Math.max(0, currentDisplayedSeconds - 1) * 1000 +
+    SCORING_TIMER_FUDGE_MS
   const tickDelay = Math.max(
     SCORING_TIMER_FUDGE_MS,
-    Math.min(delayToNextCountdownStep, remainingMs)
+    Math.min(delayToNextCountdownStep, remainingMs),
   )
 
   scoringTickTimeoutId = window.setTimeout(() => {
@@ -1530,7 +1852,7 @@ function animateFinalTrickCardThenSubmit(cardId: string, seat: Seat): boolean {
       duration: FINAL_TRICK_CARD_FLIGHT_MS,
       easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
       fill: 'forwards',
-    }
+    },
   )
 
   activeFinalTrickAnimation = animation
@@ -1682,7 +2004,7 @@ function schedulePlayingPhaseTimers(): void {
     }
 
     if (latestSeat === 'bottom' && !bottomBotTakeoverActive) {
-      setBottomBotTakeoverActive(true)
+      setBottomPlayerControlledByBot(true)
       render()
       return
     }
@@ -1705,9 +2027,9 @@ function schedulePlayingPhaseTimers(): void {
 function scheduleNextBidAction(): void {
   const state = app.engine.getState()
   const turnKey = getBidTurnKey(state)
-  const delayMs = getBidActionDelayMs(state)
+  const remainingMs = getBidActionRemainingMs(state)
 
-  if (turnKey === null || delayMs === null) {
+  if (turnKey === null || remainingMs === null) {
     clearBotBidTimeout()
     return
   }
@@ -1747,11 +2069,16 @@ function scheduleNextBidAction(): void {
 
     activeBotBidTurnKey = null
     submitBidActionWithBubble(autoAction)
-  }, delayMs)
+  }, Math.max(0, remainingMs))
 }
 
 function render(): void {
   const stateBeforeRender = app.engine.getState()
+
+  if (currentAppScreen === 'lobby') {
+    lobbyFlowController.render()
+    return
+  }
 
   if (stateBeforeRender.phase !== 'match-ended') {
     resetMatchEndedUiState()
@@ -1856,7 +2183,7 @@ function render(): void {
       setMatchEndedPlayerStatus('bottom', 'find-new-game')
       render()
       showTemporaryMatchEndedPlaceholder(
-        'Търсенето на нова игра още не е вързано. Следващата стъпка е search popup + matchmaking логика.'
+        'Търсенето на нова игра още не е вързано. Следващата стъпка е search popup + matchmaking логика.',
       )
     },
     onMatchEndedLeave: () => {
@@ -1865,7 +2192,7 @@ function render(): void {
       setMatchEndedPlayerStatus('bottom', 'leave')
       render()
       showTemporaryMatchEndedPlaceholder(
-        'Изходната страница още не е създадена. Следващата стъпка е отделна exit страница и пренасочване към нея.'
+        'Изходната страница още не е създадена. Следващата стъпка е отделна exit страница и пренасочване към нея.',
       )
     },
     matchEndedPlayerStatuses,
@@ -1891,6 +2218,22 @@ const belotePromptController = createBelotePromptController({
 
 attachInitialAudioUnlockListeners()
 
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    return
+  }
+
+  resumeFromBackground()
+})
+
+window.addEventListener('focus', () => {
+  resumeFromBackground()
+})
+
+window.addEventListener('pageshow', () => {
+  resumeFromBackground()
+})
+
 window.addEventListener('resize', () => {
   if (resizeFrameId !== null) {
     window.cancelAnimationFrame(resizeFrameId)
@@ -1901,5 +2244,8 @@ window.addEventListener('resize', () => {
     render()
   })
 })
+
+exposeGameServerDebugApi()
+gameServerClient.connect()
 
 render()

@@ -1,0 +1,503 @@
+import { createServer } from 'node:http'
+import { WebSocketServer, WebSocket, type RawData } from 'ws'
+import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js'
+import { broadcastRoomSnapshots } from './core/broadcastRoomSnapshots.js'
+import { createInitialServerState } from './core/createInitialServerState.js'
+import { createServerConnection } from './core/createServerConnection.js'
+import { getConnectionById } from './core/getConnectionById.js'
+import { handleCreateRoom } from './core/handleCreateRoom.js'
+import { handleDisconnect } from './core/handleDisconnect.js'
+import { handleJoinRoom } from './core/handleJoinRoom.js'
+import { rawDataToText } from './core/rawDataToText.js'
+import { sendJsonMessage } from './core/sendJsonMessage.js'
+import type { ConnectionId, ServerState } from './core/serverTypes.js'
+import { updateConnectionHeartbeat } from './core/updateConnectionHeartbeat.js'
+import { updateServerConnectionInState } from './core/updateServerConnectionInState.js'
+import { upsertServerConnection } from './core/upsertServerConnection.js'
+import { upsertServerRoom } from './core/upsertServerRoom.js'
+import { addQueueEntry } from './matchmaking/addQueueEntry.js'
+import { createInitialMatchmakingState } from './matchmaking/createInitialMatchmakingState.js'
+import { createMatchmakingQueueEntry } from './matchmaking/createMatchmakingQueueEntry.js'
+import { getQueueEntryByConnectionId } from './matchmaking/getQueueEntryByConnectionId.js'
+import { getSearchingEntriesByStake } from './matchmaking/getSearchingEntriesByStake.js'
+import type { MatchmakingState } from './matchmaking/matchmakingState.js'
+import {
+  MATCHMAKING_WAIT_MS,
+  SUPPORTED_MATCH_STAKES,
+  type MatchStake,
+} from './matchmaking/matchmakingTypes.js'
+import { removeQueueEntryByConnectionId } from './matchmaking/removeQueueEntryByConnectionId.js'
+import { tryCreatePendingMatchGroup } from './matchmaking/tryCreatePendingMatchGroup.js'
+import { parseClientMessage } from './protocol/parseClientMessage.js'
+
+const HOST = '0.0.0.0'
+const PORT = Number(process.env.PORT ?? 3001)
+const MATCHMAKING_TICK_MS = 250
+const MATCH_PLAYERS_REQUIRED = 4
+
+let serverState: ServerState = createInitialServerState()
+let matchmakingState: MatchmakingState = createInitialMatchmakingState()
+
+const socketRegistry = new Map<ConnectionId, WebSocket>()
+
+function getSocketByConnectionId(connectionId: ConnectionId): WebSocket | null {
+  return socketRegistry.get(connectionId) ?? null
+}
+
+function safeSendToConnection(connectionId: ConnectionId, payload: unknown): void {
+  const socket = getSocketByConnectionId(connectionId)
+
+  if (socket === null || socket.readyState !== WebSocket.OPEN) {
+    return
+  }
+
+  sendJsonMessage(socket, payload)
+}
+
+function getQueueCountsByStake(): Record<string, number> {
+  const counts: Record<string, number> = {}
+
+  for (const stake of SUPPORTED_MATCH_STAKES) {
+    const searchingEntries = getSearchingEntriesByStake(
+      matchmakingState.queueEntries,
+      stake,
+    )
+
+    if (searchingEntries.length > 0) {
+      counts[String(stake)] = searchingEntries.length
+    }
+  }
+
+  return counts
+}
+
+function removeConnectionFromMatchmaking(connectionId: ConnectionId): boolean {
+  const existingEntry = getQueueEntryByConnectionId(
+    matchmakingState.queueEntries,
+    connectionId,
+  )
+
+  if (existingEntry === null) {
+    return false
+  }
+
+  matchmakingState = {
+    ...matchmakingState,
+    queueEntries: removeQueueEntryByConnectionId(
+      matchmakingState.queueEntries,
+      connectionId,
+    ),
+  }
+
+  broadcastMatchmakingStatusForStake(existingEntry.stake)
+  return true
+}
+
+function sendMatchmakingStatusToConnection(
+  connectionId: ConnectionId,
+  stake: MatchStake,
+): void {
+  const ownEntry = getQueueEntryByConnectionId(matchmakingState.queueEntries, connectionId)
+
+  if (ownEntry === null || ownEntry.stake !== stake) {
+    return
+  }
+
+  const searchingEntries = getSearchingEntriesByStake(
+    matchmakingState.queueEntries,
+    stake,
+  ).sort((a, b) => a.joinedAt - b.joinedAt)
+
+  const oldestEntry = searchingEntries[0]
+  const now = Date.now()
+  const countdownEndsAt = oldestEntry?.expiresAt ?? ownEntry.expiresAt
+
+  safeSendToConnection(connectionId, {
+    type: 'matchmaking_status',
+    stake,
+    queuedPlayers: searchingEntries.length,
+    requiredPlayers: MATCH_PLAYERS_REQUIRED,
+    countdownEndsAt,
+    remainingMs: Math.max(0, countdownEndsAt - now),
+  })
+}
+
+function broadcastMatchmakingStatusForStake(stake: MatchStake): void {
+  const searchingEntries = getSearchingEntriesByStake(
+    matchmakingState.queueEntries,
+    stake,
+  )
+
+  for (const entry of searchingEntries) {
+    sendMatchmakingStatusToConnection(entry.connectionId, stake)
+  }
+}
+
+function cleanupPendingGroup(groupId: string): void {
+  matchmakingState = {
+    ...matchmakingState,
+    pendingGroups: matchmakingState.pendingGroups.filter(
+      (group) => group.groupId !== groupId,
+    ),
+  }
+}
+
+function processMatchmaking(): void {
+  let guard = 0
+
+  while (guard < 20) {
+    guard += 1
+
+    const result = tryCreatePendingMatchGroup(matchmakingState)
+
+    matchmakingState = result.matchmakingState
+
+    if (result.room === null || result.group === null) {
+      return
+    }
+
+    let nextServerState = upsertServerRoom(serverState, result.room)
+
+    for (const matchedEntry of result.group.matchedHumans) {
+      const connection = getConnectionById(nextServerState, matchedEntry.connectionId)
+
+      if (connection === null) {
+        continue
+      }
+
+      const seatAssignment = result.group.seatAssignments.find(
+        (assignment) =>
+          assignment.playerId === matchedEntry.playerId && assignment.isBot === false,
+      )
+
+      if (!seatAssignment) {
+        continue
+      }
+
+      const attachedConnection = attachConnectionToRoomSeat(
+        connection,
+        matchedEntry.connectionId,
+        result.room,
+        seatAssignment.seat,
+      )
+
+      nextServerState = updateServerConnectionInState(
+        nextServerState,
+        matchedEntry.connectionId,
+        attachedConnection,
+      )
+
+      safeSendToConnection(matchedEntry.connectionId, {
+        type: 'match_found',
+        roomId: result.room.id,
+        seat: seatAssignment.seat,
+        stake: result.group.stake,
+        humanPlayers: result.group.matchedHumans.length,
+        botPlayers: result.group.addedBots.length,
+        shouldStartImmediately: result.group.shouldStartImmediately,
+      })
+    }
+
+    serverState = nextServerState
+
+    broadcastRoomSnapshots(result.room, socketRegistry)
+    cleanupPendingGroup(result.group.groupId)
+
+    console.log(
+      `[matchmaking] room created ${result.room.id} | stake=${result.group.stake} | humans=${result.group.matchedHumans.length} | bots=${result.group.addedBots.length} | immediate=${result.group.shouldStartImmediately}`,
+    )
+
+    broadcastMatchmakingStatusForStake(result.group.stake)
+  }
+}
+
+const httpServer = createServer((req, res) => {
+  if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+    res.end(
+      JSON.stringify({
+        ok: true,
+        service: 'belot-v2-server',
+        matchmaking: {
+          waitMs: MATCHMAKING_WAIT_MS,
+          queuedPlayersByStake: getQueueCountsByStake(),
+        },
+      }),
+    )
+    return
+  }
+
+  res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
+  res.end(
+    JSON.stringify({
+      ok: false,
+      message: 'Not found',
+    }),
+  )
+})
+
+const wsServer = new WebSocketServer({
+  server: httpServer,
+  path: '/ws',
+})
+
+wsServer.on('connection', (socket, request) => {
+  const connection = createServerConnection({
+    remoteAddress: request.socket.remoteAddress ?? null,
+    userAgent:
+      typeof request.headers['user-agent'] === 'string'
+        ? request.headers['user-agent']
+        : null,
+  })
+
+  serverState = upsertServerConnection(serverState, connection)
+  socketRegistry.set(connection.id, socket)
+
+  console.log(
+    `[ws] client connected: ${connection.id} (${connection.remoteAddress ?? 'unknown'})`,
+  )
+
+  sendJsonMessage(socket, {
+    type: 'connected',
+    clientId: connection.id,
+    message: 'Connected to Belot V2 server.',
+  })
+
+  socket.on('message', (raw: RawData) => {
+    try {
+      const currentConnection = getConnectionById(serverState, connection.id)
+
+      if (currentConnection !== null) {
+        const heartbeatConnection = updateConnectionHeartbeat(
+          currentConnection,
+          connection.id,
+        )
+
+        serverState = updateServerConnectionInState(
+          serverState,
+          connection.id,
+          heartbeatConnection,
+        )
+      }
+
+      const rawText = rawDataToText(raw)
+      const message = parseClientMessage(rawText)
+
+      if (message === null) {
+        sendJsonMessage(socket, {
+          type: 'error',
+          message: 'Invalid message payload.',
+        })
+        return
+      }
+
+      if (message.type === 'ping') {
+        sendJsonMessage(socket, {
+          type: 'pong',
+          timestamp: Date.now(),
+        })
+        return
+      }
+
+      if (message.type === 'join_matchmaking') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection === null) {
+          throw new Error(`Connection "${connection.id}" was not found.`)
+        }
+
+        if (latestConnection.currentRoomId !== null) {
+          throw new Error(
+            `Connection "${connection.id}" is already attached to room "${latestConnection.currentRoomId}".`,
+          )
+        }
+
+        const stablePlayerConnection = {
+          ...latestConnection,
+          playerId: latestConnection.playerId ?? latestConnection.id,
+        }
+
+        serverState = updateServerConnectionInState(
+          serverState,
+          connection.id,
+          stablePlayerConnection,
+        )
+
+        const existingEntry = getQueueEntryByConnectionId(
+          matchmakingState.queueEntries,
+          connection.id,
+        )
+
+        if (existingEntry !== null && existingEntry.stake === message.stake) {
+          safeSendToConnection(connection.id, {
+            type: 'matchmaking_joined',
+            stake: existingEntry.stake,
+            queuedPlayers: getSearchingEntriesByStake(
+              matchmakingState.queueEntries,
+              existingEntry.stake,
+            ).length,
+            requiredPlayers: MATCH_PLAYERS_REQUIRED,
+            countdownEndsAt: existingEntry.expiresAt,
+            remainingMs: Math.max(0, existingEntry.expiresAt - Date.now()),
+          })
+
+          sendMatchmakingStatusToConnection(connection.id, existingEntry.stake)
+          return
+        }
+
+        if (existingEntry !== null) {
+          matchmakingState = {
+            ...matchmakingState,
+            queueEntries: removeQueueEntryByConnectionId(
+              matchmakingState.queueEntries,
+              connection.id,
+            ),
+          }
+
+          broadcastMatchmakingStatusForStake(existingEntry.stake)
+        }
+
+        const nextEntry = createMatchmakingQueueEntry({
+          connectionId: connection.id,
+          playerId: stablePlayerConnection.playerId ?? stablePlayerConnection.id,
+          displayName: message.displayName ?? 'Гост',
+          stake: message.stake,
+        })
+
+        matchmakingState = {
+          ...matchmakingState,
+          queueEntries: addQueueEntry(matchmakingState.queueEntries, nextEntry),
+        }
+
+        safeSendToConnection(connection.id, {
+          type: 'matchmaking_joined',
+          stake: nextEntry.stake,
+          queuedPlayers: getSearchingEntriesByStake(
+            matchmakingState.queueEntries,
+            nextEntry.stake,
+          ).length,
+          requiredPlayers: MATCH_PLAYERS_REQUIRED,
+          countdownEndsAt: nextEntry.expiresAt,
+          remainingMs: Math.max(0, nextEntry.expiresAt - Date.now()),
+        })
+
+        broadcastMatchmakingStatusForStake(nextEntry.stake)
+        processMatchmaking()
+        return
+      }
+
+      if (message.type === 'leave_matchmaking') {
+        const removed = removeConnectionFromMatchmaking(connection.id)
+
+        safeSendToConnection(connection.id, {
+          type: 'matchmaking_left',
+          removed,
+        })
+
+        return
+      }
+
+      if (message.type === 'create_room') {
+        removeConnectionFromMatchmaking(connection.id)
+
+        const result = handleCreateRoom(
+          serverState,
+          connection.id,
+          message.displayName,
+        )
+
+        serverState = result.serverState
+
+        sendJsonMessage(socket, {
+          type: 'room_created',
+          roomId: result.room.id,
+          seat: result.seat,
+          hostDisplayName: result.connection.playerId
+            ? result.room.seats[result.seat].participant?.identity.displayName ?? 'Гост'
+            : 'Гост',
+        })
+
+        broadcastRoomSnapshots(result.room, socketRegistry)
+        return
+      }
+
+      if (message.type === 'join_room') {
+        removeConnectionFromMatchmaking(connection.id)
+
+        const result = handleJoinRoom(
+          serverState,
+          connection.id,
+          message.roomId,
+          message.displayName,
+        )
+
+        serverState = result.serverState
+
+        sendJsonMessage(socket, {
+          type: 'room_joined',
+          roomId: result.room.id,
+          seat: result.seat,
+          displayName:
+            result.room.seats[result.seat].participant?.identity.displayName ?? 'Гост',
+        })
+
+        broadcastRoomSnapshots(result.room, socketRegistry)
+        return
+      }
+
+      sendJsonMessage(socket, {
+        type: 'error',
+        message: 'Unsupported message type.',
+      })
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unexpected server error.'
+
+      sendJsonMessage(socket, {
+        type: 'error',
+        message,
+      })
+    }
+  })
+
+  socket.on('close', () => {
+    try {
+      removeConnectionFromMatchmaking(connection.id)
+
+      const result = handleDisconnect(serverState, connection.id)
+
+      serverState = result.serverState
+      socketRegistry.delete(connection.id)
+
+      if (result.room !== null) {
+        broadcastRoomSnapshots(result.room, socketRegistry)
+      }
+
+      console.log(`[ws] client disconnected: ${connection.id}`)
+    } catch (error) {
+      socketRegistry.delete(connection.id)
+      console.error(`[ws] disconnect error: ${connection.id}`, error)
+    }
+  })
+
+  socket.on('error', (error) => {
+    console.error(`[ws] client error: ${connection.id}`, error)
+  })
+})
+
+setInterval(() => {
+  try {
+    processMatchmaking()
+  } catch (error) {
+    console.error('[matchmaking] processing error', error)
+  }
+}, MATCHMAKING_TICK_MS)
+
+httpServer.listen(PORT, HOST, () => {
+  console.log(`[http] Belot V2 server is running at http://${HOST}:${PORT}`)
+  console.log(`[ws] WebSocket endpoint is ws://localhost:${PORT}/ws`)
+  console.log('[http] Health check: /health')
+  console.log(
+    `[matchmaking] stakes=${SUPPORTED_MATCH_STAKES.join(', ')} | wait=${MATCHMAKING_WAIT_MS}ms`,
+  )
+})

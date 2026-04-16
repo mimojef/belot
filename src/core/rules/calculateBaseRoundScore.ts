@@ -116,6 +116,14 @@ function getCapotWinnerTeam(
   return null
 }
 
+function getCapotBonusPoints(contract: ScoringContract): number {
+  if (contract === 'no-trumps') {
+    return CAPOT_BONUS_POINTS * 2
+  }
+
+  return CAPOT_BONUS_POINTS
+}
+
 export function calculateBaseRoundScore(
   input: CalculateBaseRoundScoreInput
 ): CalculateBaseRoundScoreResult {
@@ -166,17 +174,18 @@ export function calculateBaseRoundScore(
 
   const isComplete = completedTricks.length === 8
   const capotWinnerTeam = getCapotWinnerTeam(isComplete, teamA.tricksWon, teamB.tricksWon)
+  const capotBonusPoints = getCapotBonusPoints(input.contract)
 
   if (capotWinnerTeam === 'A') {
-    teamA.rawPoints += CAPOT_BONUS_POINTS
+    teamA.rawPoints += capotBonusPoints
   } else if (capotWinnerTeam === 'B') {
-    teamB.rawPoints += CAPOT_BONUS_POINTS
+    teamB.rawPoints += capotBonusPoints
   }
 
   const actualTotalPoints = teamA.rawPoints + teamB.rawPoints
   const expectedTotalPoints =
     getBaseExpectedTotalPoints(input.contract) +
-    (capotWinnerTeam ? CAPOT_BONUS_POINTS : 0)
+    (capotWinnerTeam ? capotBonusPoints : 0)
 
   return {
     teamA,

@@ -21,6 +21,10 @@ import {
   buildComparableDeclarationsScore,
   resolveDeclarations,
 } from '../rules/declarationsRules'
+import {
+  clearTimerState,
+  createPlayingTimerState,
+} from '../timers/timerStateHelpers'
 
 function removeCardFromHand(hand: Card[], cardId: string): Card[] {
   return hand.filter((card) => card.id !== cardId)
@@ -190,7 +194,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
       plays: nextPlays,
     }
 
-    return {
+    const nextState: GameState = {
       ...state,
       hands: nextHands,
       declarations: nextDeclarations,
@@ -207,6 +211,11 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
         null
       ),
     }
+
+    return {
+      ...nextState,
+      timer: createPlayingTimerState(nextState, nextCurrentSeat),
+    }
   }
 
   const winningPlay = getWinningTrickPlay(nextPlays, state.bidding.winningBid)
@@ -217,6 +226,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
       hands: nextHands,
       declarations: nextDeclarations,
       playing: withPlayingUiState(state.playing, null, null),
+      timer: clearTimerState(),
     }
   }
 
@@ -289,6 +299,7 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
         currentTrick: nextCurrentTrick,
         wonTricks: nextWonTricks,
         playing: withPlayingUiState(nextPlayingBase, trickCollectionSnapshot, null),
+        timer: clearTimerState(),
       }
     }
 
@@ -352,15 +363,21 @@ export function submitPlayCard(state: GameState, cardId: string): GameState {
         trickCollectionSnapshot,
         pendingScoringTransition
       ),
+      timer: clearTimerState(),
     }
   }
 
-  return {
+  const nextState: GameState = {
     ...state,
     hands: nextHands,
     declarations: nextDeclarations,
     currentTrick: nextCurrentTrick,
     wonTricks: nextWonTricks,
     playing: withPlayingUiState(nextPlayingBase, trickCollectionSnapshot, null),
+  }
+
+  return {
+    ...nextState,
+    timer: createPlayingTimerState(nextState, winnerSeat),
   }
 }

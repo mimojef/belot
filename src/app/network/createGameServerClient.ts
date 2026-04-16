@@ -1,0 +1,268 @@
+export type Seat = 'bottom' | 'right' | 'top' | 'left'
+export type RoomStatus = 'waiting' | 'playing' | 'finished'
+export type MatchStake = 5000 | 8000 | 10000 | 15000 | 20000
+
+export type ClientMessage =
+  | {
+      type: 'ping'
+    }
+  | {
+      type: 'create_room'
+      displayName?: string
+    }
+  | {
+      type: 'join_room'
+      roomId: string
+      displayName?: string
+    }
+  | {
+      type: 'join_matchmaking'
+      displayName?: string
+      stake: MatchStake
+    }
+  | {
+      type: 'leave_matchmaking'
+    }
+
+export type RoomSeatSnapshot = {
+  seat: Seat
+  displayName: string
+  isOccupied: boolean
+  isBot: boolean
+  isConnected: boolean
+}
+
+export type ConnectedMessage = {
+  type: 'connected'
+  clientId: string
+  message: string
+}
+
+export type PongMessage = {
+  type: 'pong'
+  timestamp: number
+}
+
+export type ErrorMessage = {
+  type: 'error'
+  message: string
+}
+
+export type RoomCreatedMessage = {
+  type: 'room_created'
+  roomId: string
+  seat: Seat
+  hostDisplayName: string
+}
+
+export type RoomJoinedMessage = {
+  type: 'room_joined'
+  roomId: string
+  seat: Seat
+  displayName: string
+}
+
+export type RoomSnapshotMessage = {
+  type: 'room_snapshot'
+  roomId: string
+  roomStatus: RoomStatus
+  yourSeat: Seat | null
+  seats: RoomSeatSnapshot[]
+}
+
+export type MatchmakingJoinedMessage = {
+  type: 'matchmaking_joined'
+  stake: MatchStake
+  queuedPlayers: number
+  requiredPlayers: number
+  countdownEndsAt: number
+  remainingMs: number
+}
+
+export type MatchmakingStatusMessage = {
+  type: 'matchmaking_status'
+  stake: MatchStake
+  queuedPlayers: number
+  requiredPlayers: number
+  countdownEndsAt: number
+  remainingMs: number
+}
+
+export type MatchmakingLeftMessage = {
+  type: 'matchmaking_left'
+  removed: boolean
+}
+
+export type MatchFoundMessage = {
+  type: 'match_found'
+  roomId: string
+  seat: Seat
+  stake: MatchStake
+  humanPlayers: number
+  botPlayers: number
+  shouldStartImmediately: boolean
+}
+
+export type ServerMessage =
+  | ConnectedMessage
+  | PongMessage
+  | ErrorMessage
+  | RoomCreatedMessage
+  | RoomJoinedMessage
+  | RoomSnapshotMessage
+  | MatchmakingJoinedMessage
+  | MatchmakingStatusMessage
+  | MatchmakingLeftMessage
+  | MatchFoundMessage
+
+type CreateGameServerClientOptions = {
+  url?: string
+  onOpen?: () => void
+  onClose?: () => void
+  onError?: (event: Event) => void
+  onMessage?: (message: ServerMessage) => void
+}
+
+export type GameServerClient = {
+  connect: () => void
+  disconnect: () => void
+  isConnected: () => boolean
+  ping: () => void
+  createRoom: (displayName?: string) => void
+  joinRoom: (roomId: string, displayName?: string) => void
+  joinMatchmaking: (stake: MatchStake, displayName?: string) => void
+  leaveMatchmaking: () => void
+}
+
+function getDefaultServerUrl(): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const host = window.location.hostname || 'localhost'
+
+  return `${protocol}//${host}:3001/ws`
+}
+
+function isServerMessage(value: unknown): value is ServerMessage {
+  return typeof value === 'object' && value !== null && 'type' in value
+}
+
+function safeParseServerMessage(rawText: string): ServerMessage | null {
+  try {
+    const parsed = JSON.parse(rawText) as unknown
+
+    if (!isServerMessage(parsed)) {
+      return null
+    }
+
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+export function createGameServerClient(
+  options: CreateGameServerClientOptions = {},
+): GameServerClient {
+  const url = options.url ?? getDefaultServerUrl()
+  let socket: WebSocket | null = null
+
+  function send(message: ClientMessage): void {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      console.warn('[game-server] socket is not open')
+      return
+    }
+
+    socket.send(JSON.stringify(message))
+  }
+
+  function connect(): void {
+    if (
+      socket &&
+      (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+    ) {
+      return
+    }
+
+    socket = new WebSocket(url)
+
+    socket.addEventListener('open', () => {
+      options.onOpen?.()
+    })
+
+    socket.addEventListener('close', () => {
+      socket = null
+      options.onClose?.()
+    })
+
+    socket.addEventListener('error', (event) => {
+      options.onError?.(event)
+    })
+
+    socket.addEventListener('message', (event) => {
+      const message = safeParseServerMessage(String(event.data))
+
+      if (!message) {
+        console.warn('[game-server] invalid server message:', event.data)
+        return
+      }
+
+      options.onMessage?.(message)
+    })
+  }
+
+  function disconnect(): void {
+    if (!socket) {
+      return
+    }
+
+    socket.close()
+    socket = null
+  }
+
+  function isConnected(): boolean {
+    return socket?.readyState === WebSocket.OPEN
+  }
+
+  function ping(): void {
+    send({ type: 'ping' })
+  }
+
+  function createRoom(displayName?: string): void {
+    send({
+      type: 'create_room',
+      displayName,
+    })
+  }
+
+  function joinRoom(roomId: string, displayName?: string): void {
+    send({
+      type: 'join_room',
+      roomId,
+      displayName,
+    })
+  }
+
+  function joinMatchmaking(stake: MatchStake, displayName?: string): void {
+    send({
+      type: 'join_matchmaking',
+      stake,
+      displayName,
+    })
+  }
+
+  function leaveMatchmaking(): void {
+    send({
+      type: 'leave_matchmaking',
+    })
+  }
+
+  return {
+    connect,
+    disconnect,
+    isConnected,
+    ping,
+    createRoom,
+    joinRoom,
+    joinMatchmaking,
+    leaveMatchmaking,
+  }
+}

@@ -4,6 +4,10 @@ import {
   createEmptyTrickState,
 } from '../state/createRoundDefaults'
 import type { Declaration, GameState } from '../state/gameTypes'
+import {
+  createPlayingTimerState,
+  clearTimerState,
+} from '../timers/timerStateHelpers'
 
 function collectBotOpeningDeclarations(state: GameState): Declaration[] {
   const winningBid = state.bidding.winningBid
@@ -86,5 +90,8 @@ export function startPlayingPhase(state: GameState): GameState {
       currentTurnSeat: firstTurnSeat,
       currentTrick: initialTrick,
     },
+    timer: firstTurnSeat
+      ? createPlayingTimerState(state, firstTurnSeat)
+      : clearTimerState(),
   }
 }

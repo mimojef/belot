@@ -8,6 +8,7 @@ import { submitPlayCard } from '../phases/submitPlayCard'
 import { createInitialState } from '../state/createInitialState'
 import type { BidAction, GameState } from '../state/gameTypes'
 import type { PhaseType } from '../phases/phaseTypes'
+import { advanceGameToNow } from '../timers/advanceGameToNow'
 
 export type GameEngine = {
   getState: () => GameState
@@ -23,6 +24,7 @@ export type GameEngine = {
   submitBidAction: (action: BidAction) => void
   submitPlayCard: (cardId: string) => void
   finalizePendingScoringTransition: () => void
+  syncToNow: (now?: number) => void
 }
 
 function cloneState<T>(value: T): T {
@@ -92,6 +94,10 @@ export function createGameEngine(): GameEngine {
     state = finalizePendingScoringTransition(state)
   }
 
+  function syncToNow(now?: number): void {
+    state = advanceGameToNow(state, now)
+  }
+
   return {
     getState,
     setState,
@@ -106,5 +112,6 @@ export function createGameEngine(): GameEngine {
     submitBidAction: runSubmitBidAction,
     submitPlayCard: runSubmitPlayCard,
     finalizePendingScoringTransition: runFinalizePendingScoringTransition,
+    syncToNow,
   }
 }

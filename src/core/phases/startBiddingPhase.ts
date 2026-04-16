@@ -1,11 +1,14 @@
-import { createEmptyTimerState } from '../state/createRoundDefaults'
 import type { GameState } from '../state/gameTypes'
+import { createBiddingTimerState, clearTimerState } from '../timers/timerStateHelpers'
 
 export function startBiddingPhase(state: GameState): GameState {
   const firstBidderSeat = state.round.firstBidderSeat
 
   if (!firstBidderSeat) {
-    return state
+    return {
+      ...state,
+      timer: clearTimerState(),
+    }
   }
 
   return {
@@ -18,6 +21,6 @@ export function startBiddingPhase(state: GameState): GameState {
       hasEnded: false,
       consecutivePasses: 0,
     },
-    timer: createEmptyTimerState(),
+    timer: createBiddingTimerState(state, firstBidderSeat),
   }
 }

@@ -124,7 +124,8 @@ export function createGameAudioController(
   options: CreateGameAudioControllerOptions = {},
 ): GameAudioController {
   const bidBasePath = options.bidBasePath ?? DEFAULT_BID_BASE_PATH
-  const declarationBasePath = options.declarationBasePath ?? DEFAULT_DECLARATION_BASE_PATH
+  const declarationBasePath =
+    options.declarationBasePath ?? DEFAULT_DECLARATION_BASE_PATH
   const sfxBasePath = options.sfxBasePath ?? DEFAULT_SFX_BASE_PATH
 
   const dealPacketCount = options.dealPacketCount ?? DEFAULT_DEAL_PACKET_COUNT
@@ -306,7 +307,9 @@ export function createGameAudioController(
       return [buildFilePath(declarationBasePath, `${comboFileBaseName}.mp3`)]
     }
 
-    return sortedSlugs.map((slug) => buildFilePath(declarationBasePath, `${slug}.mp3`))
+    return sortedSlugs.map((slug) =>
+      buildFilePath(declarationBasePath, `${slug}.mp3`),
+    )
   }
 
   function playBidBubble(label: string): void {
