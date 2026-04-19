@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto'
+import { pickRandomBotProfile } from '../bots/botProfiles.js'
 import { createBotParticipant } from '../core/createBotParticipant.js'
 import { createHumanParticipant } from '../core/createHumanParticipant.js'
 import { createServerRoom } from '../core/createServerRoom.js'
 import { seatParticipantInRoom } from '../core/seatParticipantInRoom.js'
 import {
   SERVER_SEAT_ORDER,
+  type BotRoomParticipant,
   type Seat,
   type ServerRoom,
 } from '../core/serverTypes.js'
@@ -53,10 +55,6 @@ function assertSingleStake(entries: MatchmakingQueueEntry[]): MatchStake {
   return stake
 }
 
-function createBotDisplayName(botIndex: number): string {
-  return `Бот ${botIndex}`
-}
-
 export function createMatchedRoomFromEntries(
   entries: MatchmakingQueueEntry[],
   shouldStartImmediately: boolean,
@@ -72,7 +70,7 @@ export function createMatchedRoomFromEntries(
   })
 
   const seatAssignments: MatchSeatAssignment[] = []
-  const addedBots = []
+  const addedBots: BotRoomParticipant[] = []
 
   for (const entry of entries) {
     const seat = shuffledSeats.shift()
@@ -98,8 +96,6 @@ export function createMatchedRoomFromEntries(
     })
   }
 
-  let botIndex = 1
-
   while (shuffledSeats.length > 0) {
     const seat = shuffledSeats.shift()
 
@@ -107,13 +103,23 @@ export function createMatchedRoomFromEntries(
       break
     }
 
-    const participant = createBotParticipant({
-      botCode: `BOT ${botIndex}`,
-      identity: {
-        displayName: createBotDisplayName(botIndex),
-        username: `bot_${botIndex}`,
-      },
-    })
+    const excludedProfileIds = addedBots.flatMap((bot) =>
+      bot.botProfileId ? [bot.botProfileId] : [],
+    )
+
+    const selectedProfile = pickRandomBotProfile(stake, excludedProfileIds)
+
+    const participant: BotRoomParticipant = selectedProfile
+      ? createBotParticipant({
+          botProfileId: selectedProfile.profileId,
+        })
+      : createBotParticipant({
+          botCode: `BOT ${addedBots.length + 1}`,
+          identity: {
+            displayName: `Бот ${addedBots.length + 1}`,
+            username: `bot_${addedBots.length + 1}`,
+          },
+        })
 
     nextRoom = seatParticipantInRoom(nextRoom, seat, participant)
     addedBots.push(participant)
@@ -123,8 +129,6 @@ export function createMatchedRoomFromEntries(
       playerId: participant.playerId,
       isBot: true,
     })
-
-    botIndex += 1
   }
 
   nextRoom = updateRoomHostPlayerId(nextRoom)

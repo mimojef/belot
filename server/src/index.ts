@@ -10,7 +10,13 @@ import { handleDisconnect } from './core/handleDisconnect.js'
 import { handleJoinRoom } from './core/handleJoinRoom.js'
 import { rawDataToText } from './core/rawDataToText.js'
 import { sendJsonMessage } from './core/sendJsonMessage.js'
-import type { ConnectionId, ServerState } from './core/serverTypes.js'
+import type {
+  ConnectionId,
+  PlayerPublicProfileSnapshot,
+  RoomParticipant,
+  Seat,
+  ServerState,
+} from './core/serverTypes.js'
 import { updateConnectionHeartbeat } from './core/updateConnectionHeartbeat.js'
 import { updateServerConnectionInState } from './core/updateServerConnectionInState.js'
 import { upsertServerConnection } from './core/upsertServerConnection.js'
@@ -52,6 +58,73 @@ function safeSendToConnection(connectionId: ConnectionId, payload: unknown): voi
   }
 
   sendJsonMessage(socket, payload)
+}
+
+
+
+function createFallbackPublicProfileSnapshot(
+  participant: RoomParticipant,
+): PlayerPublicProfileSnapshot {
+  const identity = participant.identity
+
+  return {
+    profileId: identity.profileId,
+    displayName: identity.displayName?.trim() || 'Играч',
+    avatarUrl: identity.avatarUrl,
+    level: identity.level,
+    rankTitle: identity.rankTitle,
+    skillRating: identity.skillRating,
+    averageRating: null,
+    totalRatingsCount: null,
+    yellowCoinsBalance: null,
+    galleryImages: [],
+  }
+}
+
+function sendPlayerProfileToConnection(
+  connectionId: ConnectionId,
+  roomId: string,
+  seat: Seat,
+): void {
+  const connection = getConnectionById(serverState, connectionId)
+
+  if (connection === null) {
+    safeSendToConnection(connectionId, {
+      type: 'error',
+      message: 'Connection was not found.',
+    })
+    return
+  }
+
+  if (connection.currentRoomId !== roomId) {
+    safeSendToConnection(connectionId, {
+      type: 'error',
+      message: 'You are not attached to this room.',
+    })
+    return
+  }
+
+  const room = serverState.rooms[roomId] ?? null
+
+  if (room === null) {
+    safeSendToConnection(connectionId, {
+      type: 'error',
+      message: `Room "${roomId}" was not found.`,
+    })
+    return
+  }
+
+  const participant = room.seats[seat]?.participant ?? null
+
+  safeSendToConnection(connectionId, {
+    type: 'player_profile',
+    roomId,
+    seat,
+    profile:
+      participant === null
+        ? null
+        : participant.publicProfile ?? createFallbackPublicProfileSnapshot(participant),
+  })
 }
 
 function getQueueCountsByStake(): Record<string, number> {
@@ -296,6 +369,11 @@ wsServer.on('connection', (socket, request) => {
           type: 'pong',
           timestamp: Date.now(),
         })
+        return
+      }
+
+      if (message.type === 'request_player_profile') {
+        sendPlayerProfileToConnection(connection.id, message.roomId, message.seat)
         return
       }
 

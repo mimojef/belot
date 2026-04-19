@@ -10,6 +10,13 @@ const FAN_SPREAD_STEP = 38
 const FAN_ROTATE_STEP = 6
 const FAN_CURVE_STEP = 7
 
+export type SeatPanelPlayerInfo = {
+  displayName?: string | null
+  avatarUrl?: string | null
+  isOccupied?: boolean
+  isInteractive?: boolean
+}
+
 function formatSeatShort(seat: Seat): string {
   if (seat === 'bottom') return 'ТИ'
   if (seat === 'right') return 'ДЯСНО'
@@ -28,6 +35,109 @@ function formatSeatAvatarLabel(seat: Seat): string {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return escapeHtml(value)
+}
+
+function getNormalizedSeatPlayerInfo(
+  playerInfo: SeatPanelPlayerInfo | null | undefined
+): Required<SeatPanelPlayerInfo> {
+  return {
+    displayName: playerInfo?.displayName ?? null,
+    avatarUrl: playerInfo?.avatarUrl ?? null,
+    isOccupied: playerInfo?.isOccupied ?? true,
+    isInteractive: playerInfo?.isInteractive ?? false,
+  }
+}
+
+function getAvatarFallbackText(
+  seat: Seat,
+  displayName: string | null | undefined
+): string {
+  const normalizedName = displayName?.trim()
+
+  if (!normalizedName) {
+    return formatSeatAvatarLabel(seat)
+  }
+
+  return normalizedName.charAt(0).toUpperCase()
+}
+
+function renderSeatAvatarContent(
+  seat: Seat,
+  playerInfo: Required<SeatPanelPlayerInfo>,
+  imageBorderRadiusPx: number
+): string {
+  const avatarUrl = playerInfo.avatarUrl?.trim() ?? ''
+  const avatarFallback = escapeHtml(getAvatarFallbackText(seat, playerInfo.displayName))
+
+  if (avatarUrl.length > 0) {
+    return `
+      <img
+        src="${escapeHtmlAttribute(avatarUrl)}"
+        alt="${escapeHtmlAttribute(playerInfo.displayName || formatSeatShort(seat))}"
+        draggable="false"
+        style="
+          width:100%;
+          height:100%;
+          object-fit:cover;
+          border-radius:${imageBorderRadiusPx}px;
+          display:block;
+          user-select:none;
+          -webkit-user-drag:none;
+          pointer-events:none;
+        "
+      />
+    `
+  }
+
+  return avatarFallback
+}
+
+function getSeatPanelInteractionAttributes(
+  seat: Seat,
+  playerInfo: Required<SeatPanelPlayerInfo>
+): string {
+  if (!playerInfo.isOccupied) {
+    return `
+      data-seat-panel-seat="${seat}"
+      data-seat-panel-occupied="0"
+      data-seat-panel-interactive="0"
+    `
+  }
+
+  const displayName = playerInfo.displayName?.trim() || formatSeatShort(seat)
+
+  if (!playerInfo.isInteractive) {
+    return `
+      data-seat-panel-seat="${seat}"
+      data-seat-panel-occupied="1"
+      data-seat-panel-interactive="0"
+      data-seat-panel-player-name="${escapeHtmlAttribute(displayName)}"
+    `
+  }
+
+  return `
+    data-seat-panel-seat="${seat}"
+    data-seat-panel-occupied="1"
+    data-seat-panel-interactive="1"
+    data-seat-panel-player-name="${escapeHtmlAttribute(displayName)}"
+    role="button"
+    tabindex="0"
+    aria-label="Покажи профил на ${escapeHtmlAttribute(displayName)}"
+    title="Покажи профил"
+  `
 }
 
 function renderDealerBadge(seat: Seat, dealerSeat: Seat | null): string {
@@ -55,6 +165,7 @@ function renderDealerBadge(seat: Seat, dealerSeat: Seat | null): string {
           font-weight:900;
           box-shadow: 0 6px 14px rgba(0,0,0,0.22);
           z-index:5;
+          pointer-events:none;
         "
       >
         D
@@ -80,6 +191,7 @@ function renderDealerBadge(seat: Seat, dealerSeat: Seat | null): string {
         font-weight:900;
         box-shadow: 0 6px 14px rgba(0,0,0,0.22);
         z-index:4;
+        pointer-events:none;
       "
     >
       D
@@ -496,10 +608,12 @@ function renderBottomCountdownBar(
 }
 
 function renderBottomSeatFace(
+  seat: Seat,
   isActive: boolean,
   dealerSeat: Seat | null,
   shouldShowCuttingCountdown: boolean,
-  cuttingCountdownRemainingMs: number | null
+  cuttingCountdownRemainingMs: number | null,
+  playerInfo: Required<SeatPanelPlayerInfo>
 ): string {
   return `
     <div
@@ -516,9 +630,12 @@ function renderBottomSeatFace(
         box-shadow:
           inset 0 1px 0 rgba(255,255,255,0.14),
           0 14px 28px rgba(0,0,0,0.22);
+        pointer-events:none;
       "
     >
       <div
+        data-seat-avatar-box="1"
+        data-seat-avatar-seat="${seat}"
         style="
           position:absolute;
           left:5px;
@@ -538,9 +655,10 @@ function renderBottomSeatFace(
           font-size:30px;
           font-weight:900;
           letter-spacing:0.04em;
+          overflow:hidden;
         "
       >
-        ${formatSeatAvatarLabel('bottom')}
+        ${renderSeatAvatarContent(seat, playerInfo, 14)}
       </div>
 
       <div
@@ -561,7 +679,7 @@ function renderBottomSeatFace(
           text-shadow:0 2px 8px rgba(0,0,0,0.20);
         "
       >
-        ${formatSeatShort('bottom')}
+        ${formatSeatShort(seat)}
       </div>
 
       ${renderBottomCountdownBar(
@@ -569,7 +687,7 @@ function renderBottomSeatFace(
         cuttingCountdownRemainingMs
       )}
 
-      ${renderDealerBadge('bottom', dealerSeat)}
+      ${renderDealerBadge(seat, dealerSeat)}
     </div>
   `
 }
@@ -579,7 +697,8 @@ function renderDefaultSeatFace(
   isActive: boolean,
   dealerSeat: Seat | null,
   shouldShowCuttingCountdown: boolean,
-  cuttingCountdownRemainingMs: number | null
+  cuttingCountdownRemainingMs: number | null,
+  playerInfo: Required<SeatPanelPlayerInfo>
 ): string {
   return `
     <div
@@ -596,9 +715,12 @@ function renderDefaultSeatFace(
         box-shadow:
           inset 0 1px 0 rgba(255,255,255,0.14),
           0 14px 28px rgba(0,0,0,0.22);
+        pointer-events:none;
       "
     >
       <div
+        data-seat-avatar-box="1"
+        data-seat-avatar-seat="${seat}"
         style="
           position:absolute;
           top:5px;
@@ -618,9 +740,10 @@ function renderDefaultSeatFace(
           font-size:42px;
           font-weight:900;
           letter-spacing:0.04em;
+          overflow:hidden;
         "
       >
-        ${formatSeatAvatarLabel(seat)}
+        ${renderSeatAvatarContent(seat, playerInfo, 12)}
       </div>
 
       ${renderDealerBadge(seat, dealerSeat)}
@@ -679,15 +802,18 @@ export function renderSeatPanel(
   cutterSeat: Seat | null,
   activeSeat: Seat | null,
   currentPhase?: string,
-  cuttingCountdownRemainingMs: number | null = null
+  cuttingCountdownRemainingMs: number | null = null,
+  playerInfo: SeatPanelPlayerInfo | null = null
 ): string {
+  const normalizedPlayerInfo = getNormalizedSeatPlayerInfo(playerInfo)
   const isActive = seat === activeSeat
   const panelWidth = seat === 'bottom' ? 260 : 138
   const panelHeight = seat === 'bottom' ? 98 : 176
-
   const shouldShowCuttingCountdown =
     currentPhase === 'cutting' &&
     cutterSeat === seat
+
+  const isInteractive = normalizedPlayerInfo.isOccupied && normalizedPlayerInfo.isInteractive
 
   return `
     <style>
@@ -720,12 +846,16 @@ export function renderSeatPanel(
     </style>
 
     <div
+      ${getSeatPanelInteractionAttributes(seat, normalizedPlayerInfo)}
       style="
         position:relative;
         width:${panelWidth}px;
         height:${panelHeight}px;
         overflow:visible;
+        cursor:${isInteractive ? 'pointer' : 'default'};
         filter:${isActive ? 'drop-shadow(0 0 22px rgba(245, 187, 55, 0.30))' : 'drop-shadow(0 12px 22px rgba(0,0,0,0.22))'};
+        transition:transform 120ms ease, filter 120ms ease;
+        outline:none;
       "
     >
       ${renderSeatCards(seat, handCount, dealerSeat, currentPhase)}
@@ -733,17 +863,20 @@ export function renderSeatPanel(
       ${
         seat === 'bottom'
           ? renderBottomSeatFace(
+              seat,
               isActive,
               dealerSeat,
               shouldShowCuttingCountdown,
-              cuttingCountdownRemainingMs
+              cuttingCountdownRemainingMs,
+              normalizedPlayerInfo
             )
           : renderDefaultSeatFace(
               seat,
               isActive,
               dealerSeat,
               shouldShowCuttingCountdown,
-              cuttingCountdownRemainingMs
+              cuttingCountdownRemainingMs,
+              normalizedPlayerInfo
             )
       }
     </div>

@@ -1,5 +1,6 @@
 import type {
   PlayerIdentitySnapshot,
+  PlayerPublicProfileSnapshot,
   RoomId,
   RoomStatus,
   Seat,
@@ -27,6 +28,11 @@ export type ClientMessage =
   | {
       type: 'leave_matchmaking'
     }
+  | {
+      type: 'request_player_profile'
+      roomId: RoomId
+      seat: Seat
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -34,6 +40,10 @@ export type RoomSeatSnapshot = {
   isOccupied: boolean
   isBot: boolean
   isConnected: boolean
+  avatarUrl: string | null
+  level: number | null
+  rankTitle: string | null
+  skillRating: number | null
 }
 
 export type RoomSnapshotMessage = {
@@ -58,6 +68,13 @@ export type PongMessage = {
 export type ErrorMessage = {
   type: 'error'
   message: string
+}
+
+export type PlayerProfileMessage = {
+  type: 'player_profile'
+  roomId: RoomId
+  seat: Seat
+  profile: PlayerPublicProfileSnapshot | null
 }
 
 export type RoomCreatedMessage = {
@@ -111,6 +128,7 @@ export type ServerMessage =
   | ConnectedMessage
   | PongMessage
   | ErrorMessage
+  | PlayerProfileMessage
   | RoomCreatedMessage
   | RoomJoinedMessage
   | RoomSnapshotMessage

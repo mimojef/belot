@@ -12,7 +12,10 @@ import { renderPlayingPanel } from '../ui/center/renderPlayingPanel'
 import { renderScoringPanel } from '../ui/center/renderScoringPanel'
 import { renderCenterDeck } from '../ui/center/renderCenterDeck'
 import { getRoundSetupFlowResult } from '../ui/center/renderRoundSetupFlow'
-import { renderSeatPanel } from '../ui/layout/renderSeatPanel'
+import {
+  renderSeatPanel,
+  type SeatPanelPlayerInfo,
+} from '../ui/layout/renderSeatPanel'
 import { renderScoreHud } from '../ui/layout/renderScoreHud'
 import { createGameAudioController } from './audio/createGameAudioController'
 
@@ -49,6 +52,7 @@ type RenderAppOptions = {
   onBidDouble?: () => void
   onBidRedouble?: () => void
   onPlayCard?: (cardId: string) => void
+  onSeatPanelClick?: (seat: Seat) => void
   onRequestRender?: () => void
   onMatchEndedReloadGame?: () => void
   onMatchEndedFindNewGame?: () => void
@@ -57,6 +61,7 @@ type RenderAppOptions = {
   playingCountdownRemainingMs?: number | null
   bottomBotTakeoverActive?: boolean
   bidBubbleOverride?: IncomingBidBubble | null
+  seatPlayerInfos?: Partial<Record<Seat, SeatPanelPlayerInfo>>
 }
 
 type PlayingStateWithTrickCollectionSnapshot = NonNullable<GameState['playing']> & {
@@ -993,6 +998,79 @@ function bindPlayCardClicks(
   }
 }
 
+function readSeatFromElement(element: HTMLElement): Seat | null {
+  const rawSeat =
+    element.dataset.seatPanelSeat ??
+    element.dataset.seat ??
+    element.getAttribute('data-seat-panel-seat') ??
+    element.getAttribute('data-seat')
+
+  if (
+    rawSeat === 'bottom' ||
+    rawSeat === 'right' ||
+    rawSeat === 'top' ||
+    rawSeat === 'left'
+  ) {
+    return rawSeat
+  }
+
+  return null
+}
+
+function bindSeatPanelClicks(
+  rootElement: HTMLElement,
+  handler?: (seat: Seat) => void
+): void {
+  if (!handler) {
+    return
+  }
+
+  const elements = rootElement.querySelectorAll<HTMLElement>(
+    '[data-seat-panel-interactive="1"]'
+  )
+
+  for (const element of elements) {
+    const invokeHandler = (event: Event): void => {
+      event.preventDefault()
+
+      const seat = readSeatFromElement(element)
+
+      if (!seat) {
+        return
+      }
+
+      handler(seat)
+    }
+
+    element.addEventListener('click', invokeHandler)
+
+    element.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') {
+        return
+      }
+
+      invokeHandler(event)
+    })
+  }
+}
+
+function getSeatPlayerInfo(
+  seat: Seat,
+  options: RenderAppOptions
+): SeatPanelPlayerInfo {
+  const providedInfo = options.seatPlayerInfos?.[seat]
+  const isOccupied = providedInfo?.isOccupied ?? true
+
+  return {
+    displayName: providedInfo?.displayName ?? null,
+    avatarUrl: providedInfo?.avatarUrl ?? null,
+    isOccupied,
+    isInteractive:
+      providedInfo?.isInteractive ??
+      (Boolean(options.onSeatPanelClick) && isOccupied),
+  }
+}
+
 function renderCenterPanel(content: string, width: number): string {
   return `
     <div
@@ -1415,6 +1493,10 @@ export function renderApp(
   const cuttingCountdownRemainingMs = getCuttingCountdownRemainingMs(state)
   const biddingCountdownRemainingMs = getBiddingCountdownRemainingMs(state)
   const bottomBotTakeoverActive = options.bottomBotTakeoverActive === true
+  const topSeatPlayerInfo = getSeatPlayerInfo('top', options)
+  const leftSeatPlayerInfo = getSeatPlayerInfo('left', options)
+  const rightSeatPlayerInfo = getSeatPlayerInfo('right', options)
+  const bottomSeatPlayerInfo = getSeatPlayerInfo('bottom', options)
 
   if (state.phase !== 'cutting') {
     clearCutResolveTimeout()
@@ -1652,7 +1734,7 @@ export function renderApp(
           left:50%;
           top:5px;
           z-index:7;
-          pointer-events:none;
+          pointer-events:auto;
           transform:translateX(-50%) scale(${stageScale});
           transform-origin:top center;
         "
@@ -1666,7 +1748,8 @@ export function renderApp(
           seatPanelCountdownSeat,
           activeSeat,
           seatPanelPhase,
-          seatPanelCountdownRemainingMs
+          seatPanelCountdownRemainingMs,
+          topSeatPlayerInfo
         )}
       </div>
 
@@ -1677,7 +1760,7 @@ export function renderApp(
           left:5px;
           top:50%;
           z-index:7;
-          pointer-events:none;
+          pointer-events:auto;
           transform:translateY(-50%) scale(${stageScale});
           transform-origin:left center;
         "
@@ -1691,7 +1774,8 @@ export function renderApp(
           seatPanelCountdownSeat,
           activeSeat,
           seatPanelPhase,
-          seatPanelCountdownRemainingMs
+          seatPanelCountdownRemainingMs,
+          leftSeatPlayerInfo
         )}
       </div>
 
@@ -1702,7 +1786,7 @@ export function renderApp(
           right:5px;
           top:50%;
           z-index:7;
-          pointer-events:none;
+          pointer-events:auto;
           transform:translateY(-50%) scale(${stageScale});
           transform-origin:right center;
         "
@@ -1716,7 +1800,8 @@ export function renderApp(
           seatPanelCountdownSeat,
           activeSeat,
           seatPanelPhase,
-          seatPanelCountdownRemainingMs
+          seatPanelCountdownRemainingMs,
+          rightSeatPlayerInfo
         )}
       </div>
 
@@ -1727,7 +1812,7 @@ export function renderApp(
           left:50%;
           bottom:5px;
           z-index:7;
-          pointer-events:none;
+          pointer-events:auto;
           overflow:visible;
           transform:translateX(-50%) scale(${stageScale});
           transform-origin:bottom center;
@@ -1773,7 +1858,8 @@ export function renderApp(
             seatPanelCountdownSeat,
             activeSeat,
             seatPanelPhase,
-            seatPanelCountdownRemainingMs
+            seatPanelCountdownRemainingMs,
+            bottomSeatPlayerInfo
           )}
         </div>
       </div>
@@ -1915,6 +2001,8 @@ export function renderApp(
   if (state.phase === 'playing' && isPlayingPhase && !bottomBotTakeoverActive) {
     bindPlayCardClicks(getActionElements(rootElement, 'play-card'), options.onPlayCard)
   }
+
+  bindSeatPanelClicks(rootElement, options.onSeatPanelClick)
 
   if (shouldKeepAnimationController) {
     void appAnimations.sync(state).then(() => {

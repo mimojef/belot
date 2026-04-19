@@ -2,6 +2,25 @@ export type Seat = 'bottom' | 'right' | 'top' | 'left'
 export type RoomStatus = 'waiting' | 'playing' | 'finished'
 export type MatchStake = 5000 | 8000 | 10000 | 15000 | 20000
 
+export type PlayerGalleryImageSnapshot = {
+  imageId: string
+  imageUrl: string
+  sortOrder: number
+}
+
+export type PlayerPublicProfileSnapshot = {
+  profileId: string | null
+  displayName: string
+  avatarUrl: string | null
+  level: number | null
+  rankTitle: string | null
+  skillRating: number | null
+  averageRating: number | null
+  totalRatingsCount: number | null
+  yellowCoinsBalance: number | null
+  galleryImages: PlayerGalleryImageSnapshot[]
+}
+
 export type ClientMessage =
   | {
       type: 'ping'
@@ -23,6 +42,11 @@ export type ClientMessage =
   | {
       type: 'leave_matchmaking'
     }
+  | {
+      type: 'request_player_profile'
+      roomId: string
+      seat: Seat
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -30,6 +54,10 @@ export type RoomSeatSnapshot = {
   isOccupied: boolean
   isBot: boolean
   isConnected: boolean
+  avatarUrl: string | null
+  level: number | null
+  rankTitle: string | null
+  skillRating: number | null
 }
 
 export type ConnectedMessage = {
@@ -68,6 +96,13 @@ export type RoomSnapshotMessage = {
   roomStatus: RoomStatus
   yourSeat: Seat | null
   seats: RoomSeatSnapshot[]
+}
+
+export type PlayerProfileMessage = {
+  type: 'player_profile'
+  roomId: string
+  seat: Seat
+  profile: PlayerPublicProfileSnapshot | null
 }
 
 export type MatchmakingJoinedMessage = {
@@ -110,6 +145,7 @@ export type ServerMessage =
   | RoomCreatedMessage
   | RoomJoinedMessage
   | RoomSnapshotMessage
+  | PlayerProfileMessage
   | MatchmakingJoinedMessage
   | MatchmakingStatusMessage
   | MatchmakingLeftMessage
@@ -132,6 +168,7 @@ export type GameServerClient = {
   joinRoom: (roomId: string, displayName?: string) => void
   joinMatchmaking: (stake: MatchStake, displayName?: string) => void
   leaveMatchmaking: () => void
+  requestPlayerProfile: (roomId: string, seat: Seat) => void
 }
 
 function getDefaultServerUrl(): string {
@@ -255,6 +292,14 @@ export function createGameServerClient(
     })
   }
 
+  function requestPlayerProfile(roomId: string, seat: Seat): void {
+    send({
+      type: 'request_player_profile',
+      roomId,
+      seat,
+    })
+  }
+
   return {
     connect,
     disconnect,
@@ -264,5 +309,6 @@ export function createGameServerClient(
     joinRoom,
     joinMatchmaking,
     leaveMatchmaking,
+    requestPlayerProfile,
   }
 }

@@ -1,26 +1,46 @@
+import {
+  getBotProfilesCatalog,
+  pickRandomBotProfile,
+} from '../bots/botProfiles.js'
+import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
 import { addBotToRoom, type AddBotToRoomResult } from './addBotToRoom.js'
 import { getRoomParticipantCount } from './getRoomParticipantCount.js'
 import { isRoomFull } from './isRoomFull.js'
-import type { ServerRoom } from './serverTypes.js'
+import type { ProfileId, ServerRoom } from './serverTypes.js'
+
+export type FillRoomWithBotsOptions = {
+  stake?: MatchStake
+}
 
 export type FillRoomWithBotsResult = {
   room: ServerRoom
   addedBots: AddBotToRoomResult[]
 }
 
-function getNextBotIndex(room: ServerRoom): number {
-  let botCount = 0
+function getExistingBotProfileIds(room: ServerRoom): ProfileId[] {
+  const profileIds: ProfileId[] = []
 
   for (const seatSlot of Object.values(room.seats)) {
-    if (seatSlot.participant?.kind === 'bot') {
-      botCount += 1
+    const participant = seatSlot.participant
+
+    if (participant?.kind === 'bot' && participant.botProfileId) {
+      profileIds.push(participant.botProfileId)
     }
   }
 
-  return botCount + 1
+  return profileIds
 }
 
-export function fillRoomWithBots(room: ServerRoom): FillRoomWithBotsResult {
+function getAddedBotProfileIds(addedBots: AddBotToRoomResult[]): ProfileId[] {
+  return addedBots
+    .map((entry) => entry.participant.botProfileId)
+    .filter((profileId): profileId is ProfileId => profileId !== undefined)
+}
+
+export function fillRoomWithBots(
+  room: ServerRoom,
+  options: FillRoomWithBotsOptions = {},
+): FillRoomWithBotsResult {
   if (!room.config.allowBots) {
     return {
       room,
@@ -32,13 +52,23 @@ export function fillRoomWithBots(room: ServerRoom): FillRoomWithBotsResult {
   const addedBots: AddBotToRoomResult[] = []
 
   while (!isRoomFull(nextRoom) && getRoomParticipantCount(nextRoom) < nextRoom.config.maxPlayers) {
-    const botIndex = getNextBotIndex(nextRoom)
+    const excludedProfileIds = [
+      ...getExistingBotProfileIds(nextRoom),
+      ...getAddedBotProfileIds(addedBots),
+    ]
+
+    const selectedProfile = options.stake
+      ? pickRandomBotProfile(options.stake, excludedProfileIds)
+      : getBotProfilesCatalog().find(
+          (profile) => !excludedProfileIds.includes(profile.profileId),
+        ) ?? null
+
+    if (!selectedProfile) {
+      break
+    }
+
     const result = addBotToRoom(nextRoom, {
-      botCode: `BOT ${botIndex}`,
-      identity: {
-        displayName: `Бот ${botIndex}`,
-        username: `bot_${botIndex}`,
-      },
+      botProfileId: selectedProfile.profileId,
     })
 
     nextRoom = result.room

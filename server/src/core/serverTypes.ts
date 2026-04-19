@@ -19,6 +19,14 @@ export type PlayerKind = 'human' | 'bot'
 export type RoomStatus = 'waiting' | 'playing' | 'finished'
 export type BotDifficulty = 'easy' | 'normal' | 'hard'
 
+export type BotBehaviorPreset =
+  | 'balanced'
+  | 'aggressive'
+  | 'conservative'
+  | 'supportive'
+
+export type BotLogicSource = 'existing-core-v1'
+
 export type PlayerIdentitySnapshot = {
   accountId: AccountId | null
   profileId: ProfileId | null
@@ -30,6 +38,25 @@ export type PlayerIdentitySnapshot = {
   skillRating: number | null
 }
 
+export type PlayerGalleryImageSnapshot = {
+  imageId: string
+  imageUrl: string
+  sortOrder: number
+}
+
+export type PlayerPublicProfileSnapshot = {
+  profileId: ProfileId | null
+  displayName: string
+  avatarUrl: string | null
+  level: number | null
+  rankTitle: string | null
+  skillRating: number | null
+  averageRating: number | null
+  totalRatingsCount: number | null
+  yellowCoinsBalance: number | null
+  galleryImages: PlayerGalleryImageSnapshot[]
+}
+
 export type HumanRoomParticipant = {
   kind: 'human'
   playerId: PlayerId
@@ -39,6 +66,7 @@ export type HumanRoomParticipant = {
   lastSeenAt: number
   reconnectToken: string | null
   identity: PlayerIdentitySnapshot
+  publicProfile?: PlayerPublicProfileSnapshot | null
 }
 
 export type BotRoomParticipant = {
@@ -47,7 +75,11 @@ export type BotRoomParticipant = {
   joinedAt: number
   botCode: string
   difficulty: BotDifficulty
+  botProfileId?: ProfileId
+  behaviorPreset?: BotBehaviorPreset
+  logicSource?: BotLogicSource
   identity: PlayerIdentitySnapshot
+  publicProfile?: PlayerPublicProfileSnapshot | null
 }
 
 export type RoomParticipant = HumanRoomParticipant | BotRoomParticipant

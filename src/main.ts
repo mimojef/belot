@@ -12,8 +12,10 @@ import { createPlayingTimerState } from './core/timers/timerStateHelpers'
 import {
   createGameServerClient,
   type MatchStake,
+  type PlayerPublicProfileSnapshot,
   type ServerMessage,
 } from './app/network/createGameServerClient'
+import { renderPlayerProfilePopup } from './ui/overlays/renderPlayerProfilePopup'
 
 const rootElement = document.querySelector<HTMLDivElement>('#app')
 
@@ -32,6 +34,20 @@ type BidBubbleOverride = {
 
 type MatchEndedPlayerStatus = 'waiting' | 'reload' | 'find-new-game' | 'leave'
 
+type CachedRoomSeatInfo = {
+  displayName: string
+  avatarUrl: string | null
+  isOccupied: boolean
+  isBot: boolean
+}
+
+type SeatPanelInfoForRender = {
+  displayName: string | null
+  avatarUrl: string | null
+  isOccupied: boolean
+  isInteractive: boolean
+}
+
 declare global {
   interface Window {
     belotServer?: {
@@ -42,7 +58,9 @@ declare global {
       joinRoom: (roomId: string, displayName?: string) => void
       joinMatchmaking: (stake: MatchStake, displayName?: string) => void
       leaveMatchmaking: () => void
+      requestPlayerProfile: (roomId: string, seat: Seat) => void
       getLatestRoomId: () => string | null
+      getLatestPlayerProfile: (seat: Seat) => PlayerPublicProfileSnapshot | null
     }
   }
 }
@@ -81,8 +99,15 @@ const app = bootstrapApp()
 const gameAudio = createGameAudioController()
 
 let latestServerRoomId: string | null = null
-let latestServerSeat: Seat | null = null
+let latestServerRoomSeats: Partial<Record<Seat, CachedRoomSeatInfo>> = {}
+let latestServerPlayerProfiles: Partial<Record<Seat, PlayerPublicProfileSnapshot | null>> = {}
 let currentAppScreen: 'lobby' | 'game' = 'lobby'
+
+let activePlayerProfileSeat: Seat | null = null
+let isPlayerProfilePopupOpen = false
+let isPlayerProfilePopupLoading = false
+let playerProfileOverlayRoot: HTMLDivElement | null = null
+let lastPlayerProfilePopupRenderSignature: string | null = null
 
 let resizeFrameId: number | null = null
 let botPlayTimeoutId: number | null = null
@@ -162,15 +187,186 @@ function attachInitialAudioUnlockListeners(): void {
   audioUnlockListenersAttached = true
 }
 
+function resetPlayerProfilePopupState(): void {
+  activePlayerProfileSeat = null
+  isPlayerProfilePopupOpen = false
+  isPlayerProfilePopupLoading = false
+}
+
+function closePlayerProfilePopup(): void {
+  resetPlayerProfilePopupState()
+}
+
+function getActivePlayerProfile(): PlayerPublicProfileSnapshot | null {
+  if (!activePlayerProfileSeat) {
+    return null
+  }
+
+  return latestServerPlayerProfiles[activePlayerProfileSeat] ?? null
+}
+
+function openPlayerProfilePopupForSeat(seat: Seat): void {
+  activePlayerProfileSeat = seat
+  isPlayerProfilePopupOpen = true
+  isPlayerProfilePopupLoading = !(seat in latestServerPlayerProfiles)
+}
+
+function getPlayerProfileOverlayRoot(): HTMLDivElement {
+  if (playerProfileOverlayRoot && playerProfileOverlayRoot.isConnected) {
+    return playerProfileOverlayRoot
+  }
+
+  const overlayRoot = document.createElement('div')
+  overlayRoot.setAttribute('data-player-profile-overlay-root', '1')
+  overlayRoot.style.position = 'fixed'
+  overlayRoot.style.inset = '0'
+  overlayRoot.style.zIndex = '12000'
+  overlayRoot.style.pointerEvents = 'none'
+
+  document.body.appendChild(overlayRoot)
+  playerProfileOverlayRoot = overlayRoot
+
+  return overlayRoot
+}
+
+function getPlayerProfilePopupRenderSignature(): string {
+  if (currentAppScreen !== 'game' || !isPlayerProfilePopupOpen) {
+    return 'closed'
+  }
+
+  return JSON.stringify({
+    isOpen: true,
+    seat: activePlayerProfileSeat,
+    isLoading: isPlayerProfilePopupLoading,
+    profile: getActivePlayerProfile(),
+  })
+}
+
+function bindPlayerProfilePopupEvents(): void {
+  if (!playerProfileOverlayRoot) {
+    return
+  }
+
+  const closeButton = playerProfileOverlayRoot.querySelector<HTMLElement>(
+    '[data-player-profile-popup-close="1"]'
+  )
+  const backdrop = playerProfileOverlayRoot.querySelector<HTMLElement>(
+    '[data-player-profile-popup-backdrop="1"]'
+  )
+
+  closeButton?.addEventListener('click', (event) => {
+    event.preventDefault()
+    closePlayerProfilePopup()
+    renderPlayerProfilePopupOverlay()
+  })
+
+  backdrop?.addEventListener('click', (event) => {
+    event.preventDefault()
+    closePlayerProfilePopup()
+    renderPlayerProfilePopupOverlay()
+  })
+}
+
+function renderPlayerProfilePopupOverlay(force = false): void {
+  const nextSignature = getPlayerProfilePopupRenderSignature()
+
+  if (!force && lastPlayerProfilePopupRenderSignature === nextSignature) {
+    return
+  }
+
+  const overlayRoot = getPlayerProfileOverlayRoot()
+  lastPlayerProfilePopupRenderSignature = nextSignature
+
+  if (nextSignature === 'closed') {
+    overlayRoot.innerHTML = ''
+    overlayRoot.style.pointerEvents = 'none'
+    return
+  }
+
+  overlayRoot.innerHTML = renderPlayerProfilePopup({
+    isOpen: true,
+    seat: activePlayerProfileSeat,
+    profile: getActivePlayerProfile(),
+    isLoading: isPlayerProfilePopupLoading,
+  })
+  overlayRoot.style.pointerEvents = 'auto'
+
+  bindPlayerProfilePopupEvents()
+}
+
+function resetLatestServerRoomCaches(): void {
+  latestServerRoomSeats = {}
+  latestServerPlayerProfiles = {}
+  resetPlayerProfilePopupState()
+  renderPlayerProfilePopupOverlay(true)
+}
+
+function createCachedRoomSeatMap(
+  seats: Array<{
+    seat: Seat
+    displayName: string
+    isOccupied: boolean
+    isBot: boolean
+    avatarUrl: string | null
+  }>
+): Partial<Record<Seat, CachedRoomSeatInfo>> {
+  const nextMap: Partial<Record<Seat, CachedRoomSeatInfo>> = {}
+
+  for (const seatInfo of seats) {
+    nextMap[seatInfo.seat] = {
+      displayName: seatInfo.displayName,
+      avatarUrl: seatInfo.avatarUrl,
+      isOccupied: seatInfo.isOccupied,
+      isBot: seatInfo.isBot,
+    }
+  }
+
+  return nextMap
+}
+
+function getSeatPanelInfosForRender(): Partial<Record<Seat, SeatPanelInfoForRender>> {
+  const seats: Seat[] = ['bottom', 'right', 'top', 'left']
+  const nextInfos: Partial<Record<Seat, SeatPanelInfoForRender>> = {}
+
+  for (const seat of seats) {
+    const cachedSeat = latestServerRoomSeats[seat]
+    const cachedProfile = latestServerPlayerProfiles[seat] ?? null
+    const fallbackDisplayName = seat === 'bottom'
+      ? 'ТИ'
+      : seat === 'right'
+        ? 'ДЯСНО'
+        : seat === 'top'
+          ? 'ГОРЕ'
+          : 'ЛЯВО'
+
+    nextInfos[seat] = {
+      displayName:
+        cachedProfile?.displayName ??
+        cachedSeat?.displayName ??
+        fallbackDisplayName,
+      avatarUrl:
+        cachedProfile?.avatarUrl ??
+        cachedSeat?.avatarUrl ??
+        null,
+      isOccupied: cachedSeat?.isOccupied ?? true,
+      isInteractive: (cachedSeat?.isOccupied ?? true) && currentAppScreen === 'game',
+    }
+  }
+
+  return nextInfos
+}
+
 function handleGameServerMessage(message: ServerMessage): void {
   console.log('[game-server] message:', message)
 
   if (
     message.type === 'connected' ||
+    message.type === 'error' ||
     message.type === 'matchmaking_joined' ||
     message.type === 'matchmaking_status' ||
     message.type === 'matchmaking_left' ||
-    message.type === 'match_found'
+    message.type === 'match_found' ||
+    message.type === 'room_snapshot'
   ) {
     const wasHandledByLobbyFlow = lobbyFlowController.handleServerMessage(message)
 
@@ -179,9 +375,25 @@ function handleGameServerMessage(message: ServerMessage): void {
     }
   }
 
+  if (message.type === 'player_profile') {
+    latestServerPlayerProfiles = {
+      ...latestServerPlayerProfiles,
+      [message.seat]: message.profile,
+    }
+
+    if (activePlayerProfileSeat === message.seat) {
+      isPlayerProfilePopupOpen = true
+      isPlayerProfilePopupLoading = false
+      renderPlayerProfilePopupOverlay()
+    }
+
+    console.log('[game-server] player profile:', message.seat, message.profile)
+    return
+  }
+
   if (message.type === 'room_created') {
     latestServerRoomId = message.roomId
-    latestServerSeat = message.seat
+    resetLatestServerRoomCaches()
     currentAppScreen = 'game'
     console.log(
       `[game-server] room created: roomId=${message.roomId}, seat=${message.seat}, host=${message.hostDisplayName}`,
@@ -192,7 +404,7 @@ function handleGameServerMessage(message: ServerMessage): void {
 
   if (message.type === 'room_joined') {
     latestServerRoomId = message.roomId
-    latestServerSeat = message.seat
+    resetLatestServerRoomCaches()
     currentAppScreen = 'game'
     console.log(
       `[game-server] room joined: roomId=${message.roomId}, seat=${message.seat}, displayName=${message.displayName}`,
@@ -203,7 +415,7 @@ function handleGameServerMessage(message: ServerMessage): void {
 
   if (message.type === 'room_snapshot') {
     latestServerRoomId = message.roomId
-    latestServerSeat = message.yourSeat
+    latestServerRoomSeats = createCachedRoomSeatMap(message.seats)
     console.log('[game-server] room snapshot seats:', message.seats)
     renderServerDebugPanel()
     return
@@ -234,7 +446,7 @@ const gameServerClient = createGameServerClient({
   },
   onClose: () => {
     latestServerRoomId = null
-    latestServerSeat = null
+    resetLatestServerRoomCaches()
     currentAppScreen = 'lobby'
     lobbyFlowController.setConnected(false)
     lobbyFlowController.resetToLobby()
@@ -256,7 +468,7 @@ const lobbyFlowController = createLobbyFlowController({
   root: appRoot,
   joinMatchmaking: (stake, displayName) => {
     latestServerRoomId = null
-    latestServerSeat = null
+    resetLatestServerRoomCaches()
     gameServerClient.joinMatchmaking(stake, displayName)
   },
   leaveMatchmaking: () => {
@@ -264,7 +476,7 @@ const lobbyFlowController = createLobbyFlowController({
   },
   onMatchFound: (message) => {
     latestServerRoomId = message.roomId
-    latestServerSeat = message.seat
+    resetLatestServerRoomCaches()
     currentAppScreen = 'game'
     render()
   },
@@ -298,7 +510,11 @@ function exposeGameServerDebugApi(): void {
     leaveMatchmaking: () => {
       gameServerClient.leaveMatchmaking()
     },
+    requestPlayerProfile: (roomId: string, seat: Seat) => {
+      gameServerClient.requestPlayerProfile(roomId, seat)
+    },
     getLatestRoomId: () => latestServerRoomId,
+    getLatestPlayerProfile: (seat: Seat) => latestServerPlayerProfiles[seat] ?? null,
   }
 }
 
@@ -2076,6 +2292,7 @@ function render(): void {
   const stateBeforeRender = app.engine.getState()
 
   if (currentAppScreen === 'lobby') {
+    renderPlayerProfilePopupOverlay()
     lobbyFlowController.render()
     return
   }
@@ -2199,7 +2416,26 @@ function render(): void {
     playingCountdownRemainingMs,
     bottomBotTakeoverActive,
     bidBubbleOverride,
+    seatPlayerInfos: getSeatPanelInfosForRender(),
+    onSeatPanelClick: (seat) => {
+      if (!latestServerRoomId) {
+        return
+      }
+
+      const seatInfo = latestServerRoomSeats[seat]
+
+      if (seatInfo && !seatInfo.isOccupied) {
+        return
+      }
+
+      tryUnlockDocumentAudio()
+      openPlayerProfilePopupForSeat(seat)
+      renderPlayerProfilePopupOverlay()
+      gameServerClient.requestPlayerProfile(latestServerRoomId, seat)
+    },
   })
+
+  renderPlayerProfilePopupOverlay()
 
   belotePromptController.renderPendingPrompt()
   renderBottomBotTakeoverPopup()
@@ -2232,6 +2468,15 @@ window.addEventListener('focus', () => {
 
 window.addEventListener('pageshow', () => {
   resumeFromBackground()
+})
+
+window.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || !isPlayerProfilePopupOpen) {
+    return
+  }
+
+  closePlayerProfilePopup()
+  renderPlayerProfilePopupOverlay()
 })
 
 window.addEventListener('resize', () => {

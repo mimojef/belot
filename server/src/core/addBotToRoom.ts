@@ -3,18 +3,24 @@ import { findFirstOpenSeat } from './findFirstOpenSeat.js'
 import { isRoomFull } from './isRoomFull.js'
 import { seatParticipantInRoom } from './seatParticipantInRoom.js'
 import type {
+  BotBehaviorPreset,
   BotDifficulty,
+  BotLogicSource,
   BotRoomParticipant,
   PlayerId,
   PlayerIdentitySnapshot,
+  ProfileId,
   Seat,
   ServerRoom,
 } from './serverTypes.js'
 
 type AddBotToRoomOptions = {
   playerId?: PlayerId
+  botProfileId?: ProfileId
   botCode?: string
   difficulty?: BotDifficulty
+  behaviorPreset?: BotBehaviorPreset
+  logicSource?: BotLogicSource
   identity?: Partial<PlayerIdentitySnapshot>
 }
 
@@ -40,8 +46,11 @@ export function addBotToRoom(
 
   const participant = createBotParticipant({
     playerId: options.playerId,
+    botProfileId: options.botProfileId,
     botCode: options.botCode,
     difficulty: options.difficulty,
+    behaviorPreset: options.behaviorPreset,
+    logicSource: options.logicSource,
     identity: options.identity,
   })
 

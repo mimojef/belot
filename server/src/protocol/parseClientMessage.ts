@@ -2,6 +2,7 @@ import {
   SUPPORTED_MATCH_STAKES,
   type MatchStake,
 } from '../matchmaking/matchmakingTypes.js'
+import { SERVER_SEAT_ORDER, type Seat } from '../core/serverTypes.js'
 import type { ClientMessage } from './messageTypes.js'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -28,6 +29,10 @@ function isSupportedStake(value: unknown): value is MatchStake {
     Number.isInteger(value) &&
     SUPPORTED_MATCH_STAKES.includes(value as MatchStake)
   )
+}
+
+function isSeat(value: unknown): value is Seat {
+  return typeof value === 'string' && SERVER_SEAT_ORDER.includes(value as Seat)
 }
 
 export function parseClientMessage(rawText: string): ClientMessage | null {
@@ -90,6 +95,28 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
     ) {
       return {
         type: 'leave_matchmaking',
+      }
+    }
+
+    if (parsed.type === 'request_player_profile') {
+      if (typeof parsed.roomId !== 'string') {
+        return null
+      }
+
+      const roomId = parsed.roomId.trim()
+
+      if (roomId.length === 0) {
+        return null
+      }
+
+      if (!isSeat(parsed.seat)) {
+        return null
+      }
+
+      return {
+        type: 'request_player_profile',
+        roomId,
+        seat: parsed.seat,
       }
     }
 

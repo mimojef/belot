@@ -15,6 +15,10 @@ function createSeatSnapshot(room: ServerRoom, seat: Seat): RoomSeatSnapshot {
       isOccupied: false,
       isBot: false,
       isConnected: false,
+      avatarUrl: null,
+      level: null,
+      rankTitle: null,
+      skillRating: null,
     }
   }
 
@@ -24,6 +28,10 @@ function createSeatSnapshot(room: ServerRoom, seat: Seat): RoomSeatSnapshot {
     isOccupied: true,
     isBot: participant.kind === 'bot',
     isConnected: participant.kind === 'bot' ? true : participant.isConnected,
+    avatarUrl: participant.identity.avatarUrl,
+    level: participant.identity.level,
+    rankTitle: participant.identity.rankTitle,
+    skillRating: participant.identity.skillRating,
   }
 }
 

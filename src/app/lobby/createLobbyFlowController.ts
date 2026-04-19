@@ -9,6 +9,7 @@ import {
 import type {
   MatchFoundMessage,
   MatchStake,
+  RoomSeatSnapshot,
   ServerMessage,
 } from '../network/createGameServerClient'
 
@@ -46,6 +47,8 @@ type InternalLobbyFlowState = {
   remainingMs: number | null
   countdownEndsAt: number | null
   errorText: string | null
+  serverRoomSeats: RoomSeatSnapshot[] | null
+  serverYourSeat: RoomSeatSnapshot['seat'] | null
 }
 
 type StakeCardConfig = {
@@ -112,6 +115,8 @@ function createInitialState(): InternalLobbyFlowState {
     remainingMs: null,
     countdownEndsAt: null,
     errorText: null,
+    serverRoomSeats: null,
+    serverYourSeat: null,
   }
 }
 
@@ -162,6 +167,32 @@ function getRoomStatusText(
   }
 
   return `Чакаме още ${missingPlayers} играчи...`
+}
+
+function countOccupiedSeats(seats: RoomSeatSnapshot[]): number {
+  return seats.reduce((count, seat) => count + (seat.isOccupied ? 1 : 0), 0)
+}
+
+function getLocalSeatSnapshot(
+  state: InternalLobbyFlowState,
+): RoomSeatSnapshot | null {
+  if (!state.serverRoomSeats || !state.serverYourSeat) {
+    return null
+  }
+
+  return state.serverRoomSeats.find((seat) => seat.seat === state.serverYourSeat) ?? null
+}
+
+function getOtherOccupiedSeatSnapshots(
+  state: InternalLobbyFlowState,
+): RoomSeatSnapshot[] {
+  if (!state.serverRoomSeats) {
+    return []
+  }
+
+  return state.serverRoomSeats.filter(
+    (seat) => seat.isOccupied && seat.seat !== state.serverYourSeat,
+  )
 }
 
 function createRandomDigits(length: number): string {
@@ -316,6 +347,11 @@ export function createLobbyFlowController(
     clearSeatFillSoundTimeouts()
   }
 
+  function clearServerRoomSnapshot(): void {
+    state.serverRoomSeats = null
+    state.serverYourSeat = null
+  }
+
   function ensureAutoFillPreviewPlayersCount(count: number): void {
     while (autoFillPreviewPlayers.length < count) {
       autoFillPreviewPlayers.push(
@@ -328,14 +364,18 @@ export function createLobbyFlowController(
     }
   }
 
-  function resetFinalFillSequence(): void {
+  function clearFinalFillAnimationState(): void {
     finalFillSequenceStartedAt = null
     finalFillBaseQueuedPlayers = null
     finalFillAnimatedQueuedPlayers = null
-    pendingMatchFoundMessage = null
-    clearPendingMatchFoundTimeout()
     resetAutoFillPreviewPlayers()
     resetSeatFillSoundTracking()
+  }
+
+  function resetFinalFillSequence(): void {
+    clearFinalFillAnimationState()
+    pendingMatchFoundMessage = null
+    clearPendingMatchFoundTimeout()
   }
 
   function syncLiveCountdownTargets(): void {
@@ -349,6 +389,10 @@ export function createLobbyFlowController(
   }
 
   function getDisplayedQueuedPlayers(): number {
+    if (state.serverRoomSeats) {
+      return countOccupiedSeats(state.serverRoomSeats)
+    }
+
     if (finalFillAnimatedQueuedPlayers !== null) {
       return Math.max(state.queuedPlayers, finalFillAnimatedQueuedPlayers)
     }
@@ -357,6 +401,15 @@ export function createLobbyFlowController(
   }
 
   function createDisplayedJoinedPlayers(): MatchmakingRoomPlayer[] {
+    if (state.serverRoomSeats) {
+      return getOtherOccupiedSeatSnapshots(state).map((seat) => ({
+        id: `room-seat-${seat.seat}`,
+        name: seat.displayName,
+        avatarUrl: seat.avatarUrl,
+        isBot: seat.isBot,
+      }))
+    }
+
     const displayedQueuedPlayers = getDisplayedQueuedPlayers()
     const totalOtherSeats = Math.max(0, displayedQueuedPlayers - 1)
     const actualOtherPlayers = Math.max(0, state.queuedPlayers - 1)
@@ -378,6 +431,26 @@ export function createLobbyFlowController(
     return [...actualPlayers, ...autoFillPreviewPlayers.slice(0, autoFillCount)]
   }
 
+  function createDisplayedLocalPlayer(): MatchmakingRoomPlayer {
+    const localSeatSnapshot = getLocalSeatSnapshot(state)
+
+    if (localSeatSnapshot?.isOccupied) {
+      return {
+        id: `room-seat-${localSeatSnapshot.seat}`,
+        name: localSeatSnapshot.displayName,
+        avatarUrl: localSeatSnapshot.avatarUrl ?? state.localAvatarUrl,
+        isBot: localSeatSnapshot.isBot,
+      }
+    }
+
+    return {
+      id: 'local-player',
+      name: state.displayName.trim() || 'Играч',
+      avatarUrl: state.localAvatarUrl,
+      isBot: false,
+    }
+  }
+
   function clearUiTickLoop(): void {
     clearCountdownAnimationFrame()
     resetLiveCountdownTargets()
@@ -396,6 +469,7 @@ export function createLobbyFlowController(
     state.requiredPlayers = DEFAULT_REQUIRED_PLAYERS
     state.remainingMs = null
     state.countdownEndsAt = null
+    clearServerRoomSnapshot()
     stopWaitingRoomActivity()
     resetFinalFillSequence()
   }
@@ -433,6 +507,10 @@ export function createLobbyFlowController(
   }
 
   function maybeStartFinalFillSequence(): void {
+    if (state.serverRoomSeats) {
+      return
+    }
+
     if (finalFillSequenceStartedAt !== null) {
       return
     }
@@ -460,6 +538,30 @@ export function createLobbyFlowController(
     return getDisplayedQueuedPlayers() >= state.requiredPlayers
   }
 
+  function flushPendingMatchFound(): boolean {
+    const matchFoundMessage = pendingMatchFoundMessage
+
+    if (!matchFoundMessage) {
+      return false
+    }
+
+    pendingMatchFoundMessage = null
+    clearPendingMatchFoundTimeout()
+
+    state.isSearching = false
+    state.queuedPlayers = 0
+    state.requiredPlayers = DEFAULT_REQUIRED_PLAYERS
+    state.remainingMs = null
+    state.countdownEndsAt = null
+
+    clearServerRoomSnapshot()
+    stopWaitingRoomActivity()
+    clearFinalFillAnimationState()
+
+    options.onMatchFound(matchFoundMessage)
+    return true
+  }
+
   function maybeSchedulePendingMatchFound(): void {
     if (!pendingMatchFoundMessage) {
       return
@@ -478,21 +580,8 @@ export function createLobbyFlowController(
     }
 
     pendingMatchFoundTimeoutId = window.setTimeout(() => {
-      const matchFoundMessage = pendingMatchFoundMessage
-
       pendingMatchFoundTimeoutId = null
-      pendingMatchFoundMessage = null
-      state.isSearching = false
-      state.queuedPlayers = 0
-      state.requiredPlayers = DEFAULT_REQUIRED_PLAYERS
-      state.remainingMs = null
-      state.countdownEndsAt = null
-      stopWaitingRoomActivity()
-      resetFinalFillSequence()
-
-      if (matchFoundMessage) {
-        options.onMatchFound(matchFoundMessage)
-      }
+      flushPendingMatchFound()
     }, FINAL_FILL_MATCH_START_DELAY_MS)
   }
 
@@ -547,6 +636,7 @@ export function createLobbyFlowController(
   function renderLobby(): void {
     stopWaitingRoomActivity()
     resetFinalFillSequence()
+    clearServerRoomSnapshot()
 
     const lobbyState: LobbyScreenState = {
       displayName: state.displayName,
@@ -585,6 +675,7 @@ export function createLobbyFlowController(
         state.requiredPlayers = DEFAULT_REQUIRED_PLAYERS
         state.remainingMs = DEFAULT_COUNTDOWN_MS
         state.countdownEndsAt = Date.now() + DEFAULT_COUNTDOWN_MS
+        clearServerRoomSnapshot()
         resetFinalFillSequence()
 
         options.joinMatchmaking(
@@ -617,11 +708,7 @@ export function createLobbyFlowController(
       ${renderMatchmakingRoomScreen({
         prizeAmount: getStakePrizeAmount(state.selectedStake),
         entryAmount: state.selectedStake,
-        localPlayer: {
-          id: 'local-player',
-          name: state.displayName.trim() || 'Играч',
-          avatarUrl: state.localAvatarUrl,
-        },
+        localPlayer: createDisplayedLocalPlayer(),
         joinedPlayers: createDisplayedJoinedPlayers(),
         countdownRemainingMs: remainingMs,
         countdownTotalMs: DEFAULT_COUNTDOWN_MS,
@@ -740,6 +827,7 @@ export function createLobbyFlowController(
       state.remainingMs = message.remainingMs
       state.countdownEndsAt = message.countdownEndsAt
       state.errorText = null
+      clearServerRoomSnapshot()
       startWaitingClockAudio()
       render()
       return true
@@ -754,6 +842,7 @@ export function createLobbyFlowController(
       state.remainingMs = message.remainingMs
       state.countdownEndsAt = message.countdownEndsAt
       state.errorText = null
+      clearServerRoomSnapshot()
       startWaitingClockAudio()
       render()
       return true
@@ -765,23 +854,51 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'room_snapshot') {
+      if (message.roomStatus !== 'waiting') {
+        return false
+      }
+
+      const occupiedSeatsCount = countOccupiedSeats(message.seats)
+      const requiredPlayers = message.seats.length || DEFAULT_REQUIRED_PLAYERS
+
+      state.currentScreen = 'matchmaking-room'
+      state.isSearching = true
+      state.queuedPlayers = occupiedSeatsCount
+      state.requiredPlayers = requiredPlayers
+      state.errorText = null
+      state.serverRoomSeats = message.seats
+      state.serverYourSeat = message.yourSeat
+
+      if (pendingMatchFoundMessage !== null && occupiedSeatsCount >= requiredPlayers) {
+        flushPendingMatchFound()
+        return true
+      }
+
+      clearFinalFillAnimationState()
+      clearPendingMatchFoundTimeout()
+
+      if (occupiedSeatsCount >= requiredPlayers) {
+        stopWaitingClockAudio()
+      } else {
+        startWaitingClockAudio()
+      }
+
+      render()
+      return true
+    }
+
     if (message.type === 'match_found') {
+      pendingMatchFoundMessage = message
+
       if (finalFillSequenceStartedAt !== null) {
-        pendingMatchFoundMessage = message
         state.remainingMs = 0
         state.countdownEndsAt = Date.now()
         maybeSchedulePendingMatchFound()
         return true
       }
 
-      state.isSearching = false
-      state.queuedPlayers = 0
-      state.requiredPlayers = DEFAULT_REQUIRED_PLAYERS
-      state.remainingMs = null
-      state.countdownEndsAt = null
-      stopWaitingRoomActivity()
-      resetFinalFillSequence()
-      options.onMatchFound(message)
+      flushPendingMatchFound()
       return true
     }
 
@@ -792,6 +909,7 @@ export function createLobbyFlowController(
     render,
     destroy: () => {
       stopWaitingRoomActivity()
+      clearServerRoomSnapshot()
       resetFinalFillSequence()
     },
     getCurrentScreen: () => state.currentScreen,
