@@ -1,3 +1,5 @@
+import type { ServerAuthoritativeGameState } from '../game/serverGameTypes.js'
+
 export type ConnectionId = string
 export type RoomId = string
 export type PlayerId = string
@@ -26,6 +28,14 @@ export type BotBehaviorPreset =
   | 'supportive'
 
 export type BotLogicSource = 'existing-core-v1'
+
+export type ServerGamePhase =
+  | 'bootstrap'
+  | 'cutting'
+  | 'bidding'
+  | 'playing'
+  | 'scoring'
+  | 'finished'
 
 export type PlayerIdentitySnapshot = {
   accountId: AccountId | null
@@ -100,14 +110,32 @@ export type ServerRoomConfig = {
   reconnectGraceMs: number
 }
 
+export type ServerBootstrapAuthoritativeState = {
+  kind: 'bootstrap'
+  roomId: RoomId
+  createdAt: number
+  updatedAt: number
+  maxPlayers: number
+  allowBots: boolean
+  isPrivate: boolean
+  targetScore: number
+  turnTimeMs: number
+  reconnectGraceMs: number
+}
+
+export type ServerRoomAuthoritativeState =
+  | ServerBootstrapAuthoritativeState
+  | ServerAuthoritativeGameState
+  | null
+
 export type ServerRoomGameSnapshot = {
-  phase: string | null
+  phase: ServerGamePhase | null
   stateVersion: number
   startedAt: number | null
   updatedAt: number | null
   activeTimerId: TimerId | null
   timerDeadlineAt: number | null
-  authoritativeState: unknown | null
+  authoritativeState: ServerRoomAuthoritativeState
 }
 
 export type ServerRoom = {

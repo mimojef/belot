@@ -8,6 +8,19 @@ type CreateServerRoomOptions = {
   config?: Partial<ServerRoomConfig>
 }
 
+type InitialAuthoritativeRoomState = {
+  kind: 'bootstrap'
+  roomId: RoomId
+  createdAt: number
+  updatedAt: number
+  maxPlayers: number
+  allowBots: boolean
+  isPrivate: boolean
+  targetScore: number
+  turnTimeMs: number
+  reconnectGraceMs: number
+}
+
 function createDefaultRoomConfig(): ServerRoomConfig {
   return {
     maxPlayers: 4,
@@ -20,29 +33,49 @@ function createDefaultRoomConfig(): ServerRoomConfig {
   }
 }
 
+function createInitialAuthoritativeRoomState(
+  roomId: RoomId,
+  now: number,
+  config: ServerRoomConfig,
+): InitialAuthoritativeRoomState {
+  return {
+    kind: 'bootstrap',
+    roomId,
+    createdAt: now,
+    updatedAt: now,
+    maxPlayers: config.maxPlayers,
+    allowBots: config.allowBots,
+    isPrivate: config.isPrivate,
+    targetScore: config.targetScore,
+    turnTimeMs: config.turnTimeMs,
+    reconnectGraceMs: config.reconnectGraceMs,
+  }
+}
+
 export function createServerRoom(options: CreateServerRoomOptions = {}): ServerRoom {
   const now = Date.now()
-  const defaultConfig = createDefaultRoomConfig()
+  const roomId = options.roomId ?? randomUUID()
+  const config: ServerRoomConfig = {
+    ...createDefaultRoomConfig(),
+    ...options.config,
+  }
 
   return {
-    id: options.roomId ?? randomUUID(),
+    id: roomId,
     status: 'waiting',
     createdAt: now,
     updatedAt: now,
     hostPlayerId: options.hostPlayerId ?? null,
-    config: {
-      ...defaultConfig,
-      ...options.config,
-    },
+    config,
     seats: createEmptyRoomSeatMap(),
     game: {
-      phase: null,
-      stateVersion: 0,
+      phase: 'bootstrap',
+      stateVersion: 1,
       startedAt: null,
-      updatedAt: null,
+      updatedAt: now,
       activeTimerId: null,
       timerDeadlineAt: null,
-      authoritativeState: null,
+      authoritativeState: createInitialAuthoritativeRoomState(roomId, now, config),
     },
   }
 }

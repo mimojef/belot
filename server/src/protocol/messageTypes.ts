@@ -7,6 +7,27 @@ import type {
 } from '../core/serverTypes.js'
 import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
 
+export type ClientBidAction =
+  | {
+      type: 'pass'
+    }
+  | {
+      type: 'suit'
+      suit: 'clubs' | 'diamonds' | 'hearts' | 'spades'
+    }
+  | {
+      type: 'no-trumps'
+    }
+  | {
+      type: 'all-trumps'
+    }
+  | {
+      type: 'double'
+    }
+  | {
+      type: 'redouble'
+    }
+
 export type ClientMessage =
   | {
       type: 'ping'
@@ -33,6 +54,25 @@ export type ClientMessage =
       roomId: RoomId
       seat: Seat
     }
+  | {
+      type: 'resume_room'
+      roomId: RoomId
+      reconnectToken: string
+    }
+  | {
+      type: 'leave_active_room'
+      roomId: RoomId
+    }
+  | {
+      type: 'submit_bid_action'
+      roomId: RoomId
+      action: ClientBidAction
+    }
+  | {
+      type: 'submit_cut_index'
+      roomId: RoomId
+      cutIndex: number
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -46,12 +86,50 @@ export type RoomSeatSnapshot = {
   skillRating: number | null
 }
 
+export type RoomGamePhaseSnapshot =
+  | 'bootstrap'
+  | 'cutting'
+  | 'bidding'
+  | 'playing'
+  | 'scoring'
+  | 'finished'
+
+export type RoomAuthoritativePhaseSnapshot =
+  | 'new-game'
+  | 'choose-first-dealer'
+  | 'cutting'
+  | 'cut-resolve'
+  | 'deal-first-3'
+  | 'deal-next-2'
+  | 'bidding'
+  | 'deal-last-3'
+  | 'playing'
+  | 'scoring'
+  | 'next-round'
+  | 'match-ended'
+
+export type RoomCuttingSnapshot = {
+  cutterSeat: Seat | null
+  selectedCutIndex: number | null
+  deckCount: number
+  canSubmitCut: boolean
+}
+
+export type RoomGameSnapshot = {
+  phase: RoomGamePhaseSnapshot | null
+  authoritativePhase: RoomAuthoritativePhaseSnapshot | null
+  timerDeadlineAt: number | null
+  cutting: RoomCuttingSnapshot | null
+}
+
 export type RoomSnapshotMessage = {
   type: 'room_snapshot'
   roomId: RoomId
   roomStatus: RoomStatus
   yourSeat: Seat | null
+  reconnectToken: string | null
   seats: RoomSeatSnapshot[]
+  game?: RoomGameSnapshot | null
 }
 
 export type ConnectedMessage = {
@@ -89,6 +167,24 @@ export type RoomJoinedMessage = {
   roomId: RoomId
   seat: Seat
   displayName: string
+}
+
+export type RoomResumedMessage = {
+  type: 'room_resumed'
+  roomId: RoomId
+  seat: Seat
+}
+
+export type RoomResumeFailedMessage = {
+  type: 'room_resume_failed'
+  roomId: RoomId
+  message: string
+}
+
+export type ActiveRoomLeftMessage = {
+  type: 'left_active_room'
+  roomId: RoomId
+  removed: boolean
 }
 
 export type MatchmakingJoinedMessage = {
@@ -131,6 +227,9 @@ export type ServerMessage =
   | PlayerProfileMessage
   | RoomCreatedMessage
   | RoomJoinedMessage
+  | RoomResumedMessage
+  | RoomResumeFailedMessage
+  | ActiveRoomLeftMessage
   | RoomSnapshotMessage
   | MatchmakingJoinedMessage
   | MatchmakingStatusMessage

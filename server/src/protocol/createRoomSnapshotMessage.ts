@@ -1,6 +1,8 @@
 import { SERVER_SEAT_ORDER, type Seat, type ServerRoom } from '../core/serverTypes.js'
+import type { ServerAuthoritativeGameState } from '../game/serverGameTypes.js'
 import {
   getDisplayNameFromIdentity,
+  type RoomGameSnapshot,
   type RoomSeatSnapshot,
   type RoomSnapshotMessage,
 } from './messageTypes.js'
@@ -35,6 +37,56 @@ function createSeatSnapshot(room: ServerRoom, seat: Seat): RoomSeatSnapshot {
   }
 }
 
+function getReconnectTokenForSeat(
+  room: ServerRoom,
+  yourSeat: Seat | null,
+): string | null {
+  if (yourSeat === null) {
+    return null
+  }
+
+  const participant = room.seats[yourSeat].participant
+
+  if (participant === null || participant.kind !== 'human') {
+    return null
+  }
+
+  return participant.reconnectToken
+}
+
+function isAuthoritativeGameState(
+  value: ServerRoom['game']['authoritativeState'],
+): value is ServerAuthoritativeGameState {
+  return value !== null && !('kind' in value)
+}
+
+function createGameSnapshot(
+  room: ServerRoom,
+  yourSeat: Seat | null,
+): RoomGameSnapshot | null {
+  const authoritativeState = room.game.authoritativeState
+
+  if (!isAuthoritativeGameState(authoritativeState)) {
+    return null
+  }
+
+  return {
+    phase: room.game.phase,
+    authoritativePhase: authoritativeState.phase,
+    timerDeadlineAt: room.game.timerDeadlineAt,
+    cutting: {
+      cutterSeat: authoritativeState.round.cutterSeat,
+      selectedCutIndex: authoritativeState.round.selectedCutIndex,
+      deckCount: authoritativeState.deck.length,
+      canSubmitCut:
+        yourSeat !== null &&
+        yourSeat === authoritativeState.round.cutterSeat &&
+        authoritativeState.phase === 'cutting' &&
+        authoritativeState.round.selectedCutIndex === null,
+    },
+  }
+}
+
 export function createRoomSnapshotMessage(
   room: ServerRoom,
   yourSeat: Seat | null,
@@ -44,6 +96,8 @@ export function createRoomSnapshotMessage(
     roomId: room.id,
     roomStatus: room.status,
     yourSeat,
+    reconnectToken: getReconnectTokenForSeat(room, yourSeat),
     seats: SERVER_SEAT_ORDER.map((seat) => createSeatSnapshot(room, seat)),
+    game: createGameSnapshot(room, yourSeat),
   }
 }

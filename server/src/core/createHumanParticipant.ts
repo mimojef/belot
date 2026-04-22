@@ -38,7 +38,7 @@ export function createHumanParticipant(
     isConnected: options.connectionId != null,
     joinedAt: now,
     lastSeenAt: now,
-    reconnectToken: options.reconnectToken ?? null,
+    reconnectToken: options.reconnectToken ?? randomUUID(),
     identity: {
       ...createDefaultIdentity(),
       ...options.identity,

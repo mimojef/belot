@@ -1,0 +1,14 @@
+{
+  "legacy_base": "legacy/browser-gameplay-reference/",
+  "moved_items": [
+    "src/main.ts",
+    "src/app/bootstrap.ts",
+    "src/app/renderApp.ts",
+    "src/app/runPlayingBotsUntilHumanTurn.ts",
+    "src/app/playPrompts",
+    "src/app/animations",
+    "src/core",
+    "src/ui/center",
+    "src/ui/layout"
+  ]
+}

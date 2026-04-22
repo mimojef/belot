@@ -15,9 +15,17 @@ import type {
   PlayerPublicProfileSnapshot,
   RoomParticipant,
   Seat,
+  ServerRoom,
   ServerState,
 } from './core/serverTypes.js'
+import {
+  createReconnectedHumanParticipant,
+  findHumanParticipantByReconnectToken,
+  type ServerGameRuntime,
+  shouldKeepRoomAlive,
+} from './core/serverGameRuntimeHelpers.js'
 import { updateConnectionHeartbeat } from './core/updateConnectionHeartbeat.js'
+import { updateHumanParticipantInRoom } from './core/updateHumanParticipantInRoom.js'
 import { updateServerConnectionInState } from './core/updateServerConnectionInState.js'
 import { upsertServerConnection } from './core/upsertServerConnection.js'
 import { upsertServerRoom } from './core/upsertServerRoom.js'
@@ -34,17 +42,39 @@ import {
 } from './matchmaking/matchmakingTypes.js'
 import { removeQueueEntryByConnectionId } from './matchmaking/removeQueueEntryByConnectionId.js'
 import { tryCreatePendingMatchGroup } from './matchmaking/tryCreatePendingMatchGroup.js'
+import { advanceRoomAuthoritativeGame } from './game/advanceRoomAuthoritativeGame.js'
+import { initializeRoomAuthoritativeGameState } from './game/initializeRoomAuthoritativeGameState.js'
+import {
+  ensureRoomGameRuntime,
+  getGameRuntimeCountsByPhase,
+  removeRoomGameRuntime,
+} from './game/roomGameRuntimeRegistry.js'
+import { submitHumanBidActionForRoom } from './game/submitHumanBidActionForRoom.js'
+import { submitHumanCutIndexForRoom } from './game/submitHumanCutIndexForRoom.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
 
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
 const MATCHMAKING_TICK_MS = 250
+const GAME_RUNTIME_TICK_MS = 250
 const MATCH_PLAYERS_REQUIRED = 4
+
+type ResumeRoomResult =
+  | {
+      ok: true
+      room: ServerRoom
+      seat: Seat
+    }
+  | {
+      ok: false
+      message: string
+    }
 
 let serverState: ServerState = createInitialServerState()
 let matchmakingState: MatchmakingState = createInitialMatchmakingState()
 
 const socketRegistry = new Map<ConnectionId, WebSocket>()
+const roomGameRuntimeRegistry = new Map<string, ServerGameRuntime>()
 
 function getSocketByConnectionId(connectionId: ConnectionId): WebSocket | null {
   return socketRegistry.get(connectionId) ?? null
@@ -60,7 +90,173 @@ function safeSendToConnection(connectionId: ConnectionId, payload: unknown): voi
   sendJsonMessage(socket, payload)
 }
 
+function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): boolean {
+  const room = serverState.rooms[roomId] ?? null
 
+  if (room === null) {
+    removeRoomGameRuntime(roomGameRuntimeRegistry, roomId)
+    return true
+  }
+
+  if (shouldKeepRoomAlive(room, now)) {
+    return false
+  }
+
+  const nextRooms = { ...serverState.rooms }
+  delete nextRooms[roomId]
+
+  serverState = {
+    ...serverState,
+    rooms: nextRooms,
+  }
+
+  removeRoomGameRuntime(roomGameRuntimeRegistry, roomId)
+  console.log(`[room-cleanup] removed inactive room=${roomId}`)
+
+  return true
+}
+
+function tickRoomGameRuntimes(): void {
+  if (roomGameRuntimeRegistry.size === 0) {
+    return
+  }
+
+  const now = Date.now()
+  let nextRooms: ServerState['rooms'] | null = null
+
+  for (const [roomId, runtime] of roomGameRuntimeRegistry.entries()) {
+    const room = serverState.rooms[roomId] ?? null
+
+    if (room === null) {
+      removeRoomGameRuntime(roomGameRuntimeRegistry, roomId)
+      continue
+    }
+
+    if (!shouldKeepRoomAlive(room, now)) {
+      if (nextRooms === null) {
+        nextRooms = {
+          ...serverState.rooms,
+        }
+      }
+
+      delete nextRooms[roomId]
+      removeRoomGameRuntime(roomGameRuntimeRegistry, roomId)
+      console.log(`[room-cleanup] removed inactive room=${roomId}`)
+      continue
+    }
+
+    const nextRoom = advanceRoomAuthoritativeGame(room, now)
+
+    const nextRuntime: ServerGameRuntime = {
+      ...runtime,
+      phase: nextRoom.game.phase ?? runtime.phase,
+      updatedAt: now,
+      tickCount: runtime.tickCount + 1,
+    }
+
+    roomGameRuntimeRegistry.set(roomId, nextRuntime)
+
+    if (nextRooms === null) {
+      nextRooms = {
+        ...serverState.rooms,
+      }
+    }
+
+    nextRooms[roomId] = nextRoom
+  }
+
+  if (nextRooms !== null) {
+    serverState = {
+      ...serverState,
+      rooms: nextRooms,
+    }
+  }
+}
+
+function tryResumeRoomForConnection(
+  connectionId: ConnectionId,
+  roomId: string,
+  reconnectToken: string,
+): ResumeRoomResult {
+  const connection = getConnectionById(serverState, connectionId)
+
+  if (connection === null) {
+    return {
+      ok: false,
+      message: 'Connection was not found.',
+    }
+  }
+
+  if (connection.currentRoomId !== null) {
+    return {
+      ok: false,
+      message: `Connection "${connection.id}" is already attached to room "${connection.currentRoomId}".`,
+    }
+  }
+
+  const room = serverState.rooms[roomId] ?? null
+
+  if (room === null) {
+    return {
+      ok: false,
+      message: 'Играта вече не е налична.',
+    }
+  }
+
+  const match = findHumanParticipantByReconnectToken(room, reconnectToken)
+
+  if (match === null) {
+    return {
+      ok: false,
+      message: 'Невалиден код за връщане в играта.',
+    }
+  }
+
+  if (
+    match.participant.isConnected &&
+    match.participant.connectionId !== null &&
+    match.participant.connectionId !== connectionId
+  ) {
+    return {
+      ok: false,
+      message: 'Играчът вече е свързан към тази игра.',
+    }
+  }
+
+  const reconnectedParticipant = createReconnectedHumanParticipant(
+    match.participant,
+    connectionId,
+  )
+
+  const nextRoom = updateHumanParticipantInRoom(
+    room,
+    match.seat,
+    reconnectedParticipant,
+  )
+
+  serverState = upsertServerRoom(serverState, nextRoom)
+
+  const attachedConnection = attachConnectionToRoomSeat(
+    connection,
+    connectionId,
+    nextRoom,
+    match.seat,
+  )
+
+  serverState = updateServerConnectionInState(
+    serverState,
+    connectionId,
+    attachedConnection,
+  )
+
+  ensureRoomGameRuntime(roomGameRuntimeRegistry, nextRoom)
+
+  return {
+    ok: true,
+    room: nextRoom,
+    seat: match.seat,
+  }
+}
 
 function createFallbackPublicProfileSnapshot(
   participant: RoomParticipant,
@@ -229,7 +425,8 @@ function processMatchmaking(): void {
       return
     }
 
-    let nextServerState = upsertServerRoom(serverState, result.room)
+    const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
+    let nextServerState = upsertServerRoom(serverState, initializedRoom)
 
     for (const matchedEntry of result.group.matchedHumans) {
       const connection = getConnectionById(nextServerState, matchedEntry.connectionId)
@@ -250,7 +447,7 @@ function processMatchmaking(): void {
       const attachedConnection = attachConnectionToRoomSeat(
         connection,
         matchedEntry.connectionId,
-        result.room,
+        initializedRoom,
         seatAssignment.seat,
       )
 
@@ -262,7 +459,7 @@ function processMatchmaking(): void {
 
       safeSendToConnection(matchedEntry.connectionId, {
         type: 'match_found',
-        roomId: result.room.id,
+        roomId: initializedRoom.id,
         seat: seatAssignment.seat,
         stake: result.group.stake,
         humanPlayers: result.group.matchedHumans.length,
@@ -272,12 +469,13 @@ function processMatchmaking(): void {
     }
 
     serverState = nextServerState
+    ensureRoomGameRuntime(roomGameRuntimeRegistry, initializedRoom)
 
-    broadcastRoomSnapshots(result.room, socketRegistry)
+    broadcastRoomSnapshots(initializedRoom, socketRegistry)
     cleanupPendingGroup(result.group.groupId)
 
     console.log(
-      `[matchmaking] room created ${result.room.id} | stake=${result.group.stake} | humans=${result.group.matchedHumans.length} | bots=${result.group.addedBots.length} | immediate=${result.group.shouldStartImmediately}`,
+      `[matchmaking] room created ${initializedRoom.id} | stake=${result.group.stake} | humans=${result.group.matchedHumans.length} | bots=${result.group.addedBots.length} | immediate=${result.group.shouldStartImmediately}`,
     )
 
     broadcastMatchmakingStatusForStake(result.group.stake)
@@ -294,6 +492,10 @@ const httpServer = createServer((req, res) => {
         matchmaking: {
           waitMs: MATCHMAKING_WAIT_MS,
           queuedPlayersByStake: getQueueCountsByStake(),
+        },
+        gameRuntime: {
+          activeRooms: roomGameRuntimeRegistry.size,
+          roomsByPhase: getGameRuntimeCountsByPhase(roomGameRuntimeRegistry),
         },
       }),
     )
@@ -374,6 +576,146 @@ wsServer.on('connection', (socket, request) => {
 
       if (message.type === 'request_player_profile') {
         sendPlayerProfileToConnection(connection.id, message.roomId, message.seat)
+        return
+      }
+
+      if (message.type === 'submit_bid_action') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Connection was not found.',
+          })
+          return
+        }
+
+        if (latestConnection.currentRoomId !== message.roomId) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'You are not attached to this room.',
+          })
+          return
+        }
+
+        if (!latestConnection.currentSeat) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Your seat was not found.',
+          })
+          return
+        }
+
+        const room = serverState.rooms[message.roomId] ?? null
+
+        if (room === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Room was not found.',
+          })
+          return
+        }
+
+        const result = submitHumanBidActionForRoom(
+          room,
+          latestConnection.currentSeat,
+          message.action,
+        )
+
+        if (!result.ok) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: result.message,
+          })
+          return
+        }
+
+        serverState = upsertServerRoom(serverState, result.room)
+        ensureRoomGameRuntime(roomGameRuntimeRegistry, result.room)
+        broadcastRoomSnapshots(result.room, socketRegistry)
+        return
+      }
+
+      if (message.type === 'submit_cut_index') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Connection was not found.',
+          })
+          return
+        }
+
+        if (latestConnection.currentRoomId !== message.roomId) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'You are not attached to this room.',
+          })
+          return
+        }
+
+        if (!latestConnection.currentSeat) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Your seat was not found.',
+          })
+          return
+        }
+
+        const room = serverState.rooms[message.roomId] ?? null
+
+        if (room === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Room was not found.',
+          })
+          return
+        }
+
+        const result = submitHumanCutIndexForRoom(
+          room,
+          latestConnection.currentSeat,
+          message.cutIndex,
+        )
+
+        if (!result.ok) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: result.message,
+          })
+          return
+        }
+
+        serverState = upsertServerRoom(serverState, result.room)
+        ensureRoomGameRuntime(roomGameRuntimeRegistry, result.room)
+        broadcastRoomSnapshots(result.room, socketRegistry)
+        return
+      }
+
+      if (message.type === 'resume_room') {
+        const result = tryResumeRoomForConnection(
+          connection.id,
+          message.roomId,
+          message.reconnectToken,
+        )
+
+        if (!result.ok) {
+          safeSendToConnection(connection.id, {
+            type: 'room_resume_failed',
+            roomId: message.roomId,
+            message: result.message,
+          })
+          return
+        }
+
+        safeSendToConnection(connection.id, {
+          type: 'room_resumed',
+          roomId: result.room.id,
+          seat: result.seat,
+        })
+
+        broadcastRoomSnapshots(result.room, socketRegistry)
         return
       }
 
@@ -484,18 +826,21 @@ wsServer.on('connection', (socket, request) => {
           message.displayName,
         )
 
-        serverState = result.serverState
+        const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
+
+        serverState = upsertServerRoom(result.serverState, initializedRoom)
+        ensureRoomGameRuntime(roomGameRuntimeRegistry, initializedRoom)
 
         sendJsonMessage(socket, {
           type: 'room_created',
-          roomId: result.room.id,
+          roomId: initializedRoom.id,
           seat: result.seat,
           hostDisplayName: result.connection.playerId
-            ? result.room.seats[result.seat].participant?.identity.displayName ?? 'Гост'
+            ? initializedRoom.seats[result.seat].participant?.identity.displayName ?? 'Гост'
             : 'Гост',
         })
 
-        broadcastRoomSnapshots(result.room, socketRegistry)
+        broadcastRoomSnapshots(initializedRoom, socketRegistry)
         return
       }
 
@@ -509,17 +854,20 @@ wsServer.on('connection', (socket, request) => {
           message.displayName,
         )
 
-        serverState = result.serverState
+        const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
+
+        serverState = upsertServerRoom(result.serverState, initializedRoom)
+        ensureRoomGameRuntime(roomGameRuntimeRegistry, initializedRoom)
 
         sendJsonMessage(socket, {
           type: 'room_joined',
-          roomId: result.room.id,
+          roomId: initializedRoom.id,
           seat: result.seat,
           displayName:
-            result.room.seats[result.seat].participant?.identity.displayName ?? 'Гост',
+            initializedRoom.seats[result.seat].participant?.identity.displayName ?? 'Гост',
         })
 
-        broadcastRoomSnapshots(result.room, socketRegistry)
+        broadcastRoomSnapshots(initializedRoom, socketRegistry)
         return
       }
 
@@ -547,7 +895,13 @@ wsServer.on('connection', (socket, request) => {
       serverState = result.serverState
       socketRegistry.delete(connection.id)
 
+      let roomWasRemoved = false
+
       if (result.room !== null) {
+        roomWasRemoved = cleanupInactiveRoomIfNeeded(result.room.id)
+      }
+
+      if (result.room !== null && !roomWasRemoved) {
         broadcastRoomSnapshots(result.room, socketRegistry)
       }
 
@@ -571,11 +925,22 @@ setInterval(() => {
   }
 }, MATCHMAKING_TICK_MS)
 
+setInterval(() => {
+  try {
+    tickRoomGameRuntimes()
+  } catch (error) {
+    console.error('[game-runtime] tick error', error)
+  }
+}, GAME_RUNTIME_TICK_MS)
+
 httpServer.listen(PORT, HOST, () => {
   console.log(`[http] Belot V2 server is running at http://${HOST}:${PORT}`)
   console.log(`[ws] WebSocket endpoint is ws://localhost:${PORT}/ws`)
   console.log('[http] Health check: /health')
   console.log(
     `[matchmaking] stakes=${SUPPORTED_MATCH_STAKES.join(', ')} | wait=${MATCHMAKING_WAIT_MS}ms`,
+  )
+  console.log(
+    `[game-runtime] passive hook enabled | tick=${GAME_RUNTIME_TICK_MS}ms`,
   )
 })
