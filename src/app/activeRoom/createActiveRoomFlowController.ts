@@ -8,7 +8,10 @@ import {
   type Seat,
   type ServerMessage,
 } from '../network/createGameServerClient'
+import { createCuttingSeatPanelsHtml } from './cutting/renderCuttingSeatPanels'
+import { createCuttingVisualCountdownTracker } from './cutting/cuttingVisualCountdown'
 import { renderCuttingScreen } from './renderCuttingScreen'
+import { getViewportStageMetrics } from '../../ui/layout/viewportStage'
 
 type ActiveRoomState = {
   roomId: string
@@ -34,6 +37,7 @@ type CreateActiveRoomFlowControllerOptions = {
 }
 
 type ActiveRoomFlowController = {
+  render: () => void
   enterActiveRoom: (message: MatchFoundMessage) => void
   handleServerMessage: (message: ServerMessage) => boolean
   setConnected: (value: boolean) => void
@@ -50,11 +54,19 @@ const SEAT_LABELS: Record<Seat, string> = {
   left: 'Ляво',
 }
 
+const ACTIVE_ROOM_STAGE_WIDTH = 1600
+const ACTIVE_ROOM_STAGE_HEIGHT = 900
+const ACTIVE_ROOM_MAX_STAGE_SCALE = 1.06
+const ACTIVE_ROOM_MIN_STAGE_SCALE = 0.46
+const ACTIVE_ROOM_VIEWPORT_HORIZONTAL_PADDING = 20
+const ACTIVE_ROOM_VIEWPORT_VERTICAL_PADDING = 20
+
 export function createActiveRoomFlowController(
   options: CreateActiveRoomFlowControllerOptions,
 ): ActiveRoomFlowController {
   const pendingRoomSnapshots = new Map<string, RoomSnapshotMessage>()
   let activeRoomState: ActiveRoomState | null = null
+  const cuttingVisualCountdown = createCuttingVisualCountdownTracker()
 
   function escapeHtml(value: string): string {
     return value
@@ -195,292 +207,408 @@ export function createActiveRoomFlowController(
     `
   }
 
+  function getActiveRoomStageMetrics(): {
+    stageScale: number
+    scaledStageWidth: number
+    scaledStageHeight: number
+  } {
+    return getViewportStageMetrics({
+      baseWidth: ACTIVE_ROOM_STAGE_WIDTH,
+      baseHeight: ACTIVE_ROOM_STAGE_HEIGHT,
+      minScale: ACTIVE_ROOM_MIN_STAGE_SCALE,
+      maxScale: ACTIVE_ROOM_MAX_STAGE_SCALE,
+      viewportHorizontalPadding: ACTIVE_ROOM_VIEWPORT_HORIZONTAL_PADDING,
+      viewportVerticalPadding: ACTIVE_ROOM_VIEWPORT_VERTICAL_PADDING,
+    })
+  }
+
   function renderActiveRoomScreen(): void {
     if (!activeRoomState) {
       return
     }
 
     const cuttingSnapshot = activeRoomState.game?.cutting ?? null
+    const dealerSeat = activeRoomState.game?.dealerSeat ?? null
     const cutterSeat = cuttingSnapshot?.cutterSeat ?? null
-    const cutterLabel = cutterSeat ? SEAT_LABELS[cutterSeat] : '—'
-    const cutterSnapshot = cutterSeat
-      ? activeRoomState.seats.find((seat) => seat.seat === cutterSeat) ?? null
-      : null
+    const cutterSeatSnapshot =
+      cutterSeat !== null
+        ? activeRoomState.seats.find((seat) => seat.seat === cutterSeat) ?? null
+        : null
+    const cutterDisplayName =
+      cutterSeatSnapshot?.displayName.trim()
+        ? cutterSeatSnapshot.displayName.trim()
+        : cutterSeat !== null
+          ? SEAT_LABELS[cutterSeat]
+          : 'играч'
     const isLocalPlayerCutter = cutterSeat !== null && activeRoomState.seat === cutterSeat
-    const isCutterBot = cutterSnapshot?.isBot ?? false
-    const cuttingInstructionText = cuttingSnapshot
-      ? cuttingSnapshot.canSubmitCut && isLocalPlayerCutter
-        ? 'Избери място за цепене.'
-        : isCutterBot
-          ? 'Ботът ще цепи автоматично.'
-          : `Изчакване ${cutterLabel} да цепи.`
-      : ''
+    const { stageScale, scaledStageWidth, scaledStageHeight } = getActiveRoomStageMetrics()
 
-    const seatsHtml =
-      activeRoomState.seats.length > 0
-        ? activeRoomState.seats.map(createSeatCardHtml).join('')
-        : `
-          <div
-            style="
-              border:1px dashed rgba(148,163,184,0.28);
-              border-radius:18px;
-              padding:24px;
-              color:#cbd5e1;
-              text-align:center;
-              background:rgba(15,23,42,0.42);
-            "
-          >
-            Чакаме първия room snapshot от сървъра...
-          </div>
-        `
+    if (cuttingSnapshot) {
+      const cuttingVisualCountdownContext = {
+        roomId: activeRoomState.roomId,
+        game: activeRoomState.game,
+      }
 
-    options.root.innerHTML = `
-      <div
-        style="
-          min-height:100vh;
-          box-sizing:border-box;
-          padding:28px;
-          background:
-            radial-gradient(circle at top, rgba(59,130,246,0.18), transparent 34%),
-            linear-gradient(180deg, #081120 0%, #0f172a 100%);
-          color:#e2e8f0;
-          font-family:Inter, system-ui, sans-serif;
-        "
-      >
+      cuttingVisualCountdown.syncCuttingVisualCountdownState(cuttingVisualCountdownContext)
+      const cuttingCountdownRemainingMs =
+        cuttingVisualCountdown.getCuttingVisualCountdownRemainingMs(
+          cuttingVisualCountdownContext,
+        )
+
+      options.root.innerHTML = `
         <div
           style="
-            max-width:1180px;
-            margin:0 auto;
-            display:grid;
-            gap:20px;
+            position:relative;
+            min-height:100vh;
+            width:100%;
+            box-sizing:border-box;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            overflow:hidden;
+            background:
+              radial-gradient(circle at center, rgba(74,222,128,0.18) 0%, rgba(34,197,94,0.10) 34%, rgba(21,128,61,0.00) 58%),
+              linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%);
+            font-family:Inter, system-ui, sans-serif;
           "
         >
           <div
             style="
-              border:1px solid rgba(148,163,184,0.18);
-              border-radius:24px;
-              padding:24px;
-              background:rgba(15,23,42,0.72);
-              box-shadow:0 24px 60px rgba(2,6,23,0.34);
+              position:relative;
+              width:${scaledStageWidth}px;
+              height:${scaledStageHeight}px;
+              flex:0 0 auto;
             "
           >
             <div
               style="
-                display:flex;
-                flex-wrap:wrap;
-                align-items:center;
-                justify-content:space-between;
-                gap:16px;
+                position:absolute;
+                left:50%;
+                top:50%;
+                width:${ACTIVE_ROOM_STAGE_WIDTH}px;
+                height:${ACTIVE_ROOM_STAGE_HEIGHT}px;
+                transform:translate(-50%, -50%) scale(${stageScale});
+                transform-origin:center center;
               "
             >
-              <div>
-                <div
-                  style="
-                    font-size:12px;
-                    font-weight:900;
-                    letter-spacing:0.08em;
-                    text-transform:uppercase;
-                    color:#93c5fd;
-                    margin-bottom:8px;
-                  "
-                >
-                  Активна стая
-                </div>
-
-                <h1
-                  style="
-                    margin:0;
-                    font-size:30px;
-                    line-height:1.1;
-                    font-weight:900;
-                    color:#f8fafc;
-                  "
-                >
-                  Намерена е игра
-                </h1>
-
-                <div
-                  style="
-                    margin-top:10px;
-                    font-size:15px;
-                    color:#cbd5e1;
-                  "
-                >
-                  Това е временен екран за стаята. Следващата стъпка е върху него
-                  да вържем чистото server-authoritative gameplay ядро.
-                </div>
-              </div>
-
-              <button
-                type="button"
-                data-active-room-leave-button="1"
+              <div
                 style="
-                  border:0;
-                  border-radius:16px;
-                  padding:14px 18px;
-                  background:linear-gradient(180deg, #8b5cf6 0%, #6d28d9 100%);
-                  color:#f5f3ff;
-                  font-size:14px;
-                  font-weight:900;
-                  cursor:pointer;
-                  box-shadow:0 14px 32px rgba(76,29,149,0.28);
+                  position:relative;
+                  width:100%;
+                  height:100%;
+                  overflow:hidden;
                 "
               >
-                Напусни активната стая
-              </button>
-            </div>
-          </div>
-
-          <div
-            style="
-              display:grid;
-              grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
-              gap:16px;
-            "
-          >
-            <div
-              style="
-                border:1px solid rgba(148,163,184,0.18);
-                border-radius:20px;
-                padding:18px;
-                background:rgba(15,23,42,0.72);
-              "
-            >
-              <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#93c5fd;">
-                Стая
-              </div>
-              <div style="margin-top:8px;font-size:18px;font-weight:800;color:#f8fafc;">
-                ${escapeHtml(activeRoomState.roomId)}
-              </div>
-            </div>
-
-            <div
-              style="
-                border:1px solid rgba(148,163,184,0.18);
-                border-radius:20px;
-                padding:18px;
-                background:rgba(15,23,42,0.72);
-              "
-            >
-              <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#93c5fd;">
-                Твоето място
-              </div>
-              <div style="margin-top:8px;font-size:18px;font-weight:800;color:#f8fafc;">
-                ${SEAT_LABELS[activeRoomState.seat]}
-              </div>
-            </div>
-
-            <div
-              style="
-                border:1px solid rgba(148,163,184,0.18);
-                border-radius:20px;
-                padding:18px;
-                background:rgba(15,23,42,0.72);
-              "
-            >
-              <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#93c5fd;">
-                Залог
-              </div>
-              <div style="margin-top:8px;font-size:18px;font-weight:800;color:#f8fafc;">
-                ${activeRoomState.stake}
-              </div>
-            </div>
-
-            <div
-              style="
-                border:1px solid rgba(148,163,184,0.18);
-                border-radius:20px;
-                padding:18px;
-                background:rgba(15,23,42,0.72);
-              "
-            >
-              <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#93c5fd;">
-                Статус
-              </div>
-              <div style="margin-top:8px;font-size:18px;font-weight:800;color:#f8fafc;">
-                ${
-                  activeRoomState.isConnected
-                    ? 'Свързан със сървъра'
-                    : 'Връзката е прекъсната'
-                }
+                ${renderCuttingScreen({
+                  cuttingSnapshot,
+                  cutterDisplayName,
+                  isInteractive: cuttingSnapshot.canSubmitCut && isLocalPlayerCutter,
+                })}
               </div>
             </div>
           </div>
-
-          <div
-            style="
-              border:1px solid rgba(148,163,184,0.18);
-              border-radius:24px;
-              padding:24px;
-              background:rgba(15,23,42,0.72);
-            "
-          >
+          ${createCuttingSeatPanelsHtml({
+            seats: activeRoomState.seats,
+            localSeat: activeRoomState.seat,
+            dealerSeat,
+            cutterSeat,
+            cuttingCountdownRemainingMs,
+            panelScale: stageScale,
+            escapeHtml,
+          })}
+        </div>
+      `
+    } else {
+      cuttingVisualCountdown.resetCuttingVisualCountdownState()
+      const seatsHtml =
+        activeRoomState.seats.length > 0
+          ? activeRoomState.seats.map(createSeatCardHtml).join('')
+          : `
             <div
               style="
-                display:flex;
-                flex-wrap:wrap;
-                gap:10px 18px;
-                font-size:14px;
+                border:1px dashed rgba(148,163,184,0.28);
+                border-radius:18px;
+                padding:24px;
                 color:#cbd5e1;
+                text-align:center;
+                background:rgba(15,23,42,0.42);
               "
             >
-              <div><strong style="color:#f8fafc;">Хора:</strong> ${activeRoomState.humanPlayers}</div>
-              <div><strong style="color:#f8fafc;">Ботове:</strong> ${activeRoomState.botPlayers}</div>
-              <div><strong style="color:#f8fafc;">Статус на стаята:</strong> ${activeRoomState.roomStatus ?? 'няма още'}</div>
-              <div><strong style="color:#f8fafc;">Старт:</strong> ${
-                activeRoomState.shouldStartImmediately ? 'веднага' : 'нормален'
-              }</div>
+              Чакаме първия room snapshot от сървъра...
             </div>
+          `
 
-            ${
-              activeRoomState.errorText
-                ? `
+      options.root.innerHTML = `
+        <div
+          style="
+            min-height:100vh;
+            box-sizing:border-box;
+            padding:${ACTIVE_ROOM_VIEWPORT_VERTICAL_PADDING / 2}px ${ACTIVE_ROOM_VIEWPORT_HORIZONTAL_PADDING / 2}px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            overflow:hidden;
+            background:
+              radial-gradient(circle at top, rgba(59,130,246,0.18), transparent 34%),
+              linear-gradient(180deg, #081120 0%, #0f172a 100%);
+            font-family:Inter, system-ui, sans-serif;
+          "
+        >
+          <div
+            style="
+              position:relative;
+              width:${scaledStageWidth}px;
+              height:${scaledStageHeight}px;
+              flex:0 0 auto;
+            "
+          >
+            <div
+              style="
+                position:absolute;
+                left:50%;
+                top:50%;
+                width:${ACTIVE_ROOM_STAGE_WIDTH}px;
+                height:${ACTIVE_ROOM_STAGE_HEIGHT}px;
+                transform:translate(-50%, -50%) scale(${stageScale});
+                transform-origin:center center;
+              "
+            >
+              <div
+                style="
+                  position:relative;
+                  width:100%;
+                  height:100%;
+                  overflow:hidden;
+                  background:
+                    radial-gradient(circle at top, rgba(59,130,246,0.18), transparent 34%),
+                    linear-gradient(180deg, #081120 0%, #0f172a 100%);
+                  color:#e2e8f0;
+                "
+              >
+                <div
+                  style="
+                    width:1180px;
+                    margin:0 auto;
+                    padding:34px 0 40px;
+                    display:grid;
+                    gap:20px;
+                  "
+                >
                   <div
                     style="
-                      margin-top:16px;
-                      border-radius:16px;
-                      padding:14px 16px;
-                      background:rgba(127,29,29,0.34);
-                      border:1px solid rgba(248,113,113,0.24);
-                      color:#fecaca;
-                      font-size:14px;
-                      font-weight:700;
+                      border:1px solid rgba(148,163,184,0.18);
+                      border-radius:24px;
+                      padding:24px;
+                      background:rgba(15,23,42,0.72);
+                      box-shadow:0 24px 60px rgba(2,6,23,0.34);
                     "
                   >
-                    ${escapeHtml(activeRoomState.errorText)}
+                    <div
+                      style="
+                        display:flex;
+                        flex-wrap:wrap;
+                        align-items:center;
+                        justify-content:space-between;
+                        gap:16px;
+                      "
+                    >
+                      <div>
+                        <div
+                          style="
+                            font-size:12px;
+                            font-weight:900;
+                            letter-spacing:0.08em;
+                            text-transform:uppercase;
+                            color:#93c5fd;
+                            margin-bottom:8px;
+                          "
+                        >
+                          Активна стая
+                        </div>
+
+                        <h1
+                          style="
+                            margin:0;
+                            font-size:30px;
+                            line-height:1.1;
+                            font-weight:900;
+                            color:#f8fafc;
+                          "
+                        >
+                          Намерена е игра
+                        </h1>
+
+                        <div
+                          style="
+                            margin-top:10px;
+                            font-size:15px;
+                            color:#cbd5e1;
+                          "
+                        >
+                          Това е временен екран за стаята. Следващата стъпка е върху него
+                          да вържем чистото server-authoritative gameplay ядро.
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        data-active-room-leave-button="1"
+                        style="
+                          border:0;
+                          border-radius:16px;
+                          padding:14px 18px;
+                          background:linear-gradient(180deg, #8b5cf6 0%, #6d28d9 100%);
+                          color:#f5f3ff;
+                          font-size:14px;
+                          font-weight:900;
+                          cursor:pointer;
+                          box-shadow:0 14px 32px rgba(76,29,149,0.28);
+                        "
+                      >
+                        Напусни активната стая
+                      </button>
+                    </div>
                   </div>
-                `
-                : ''
-            }
-          </div>
 
-          ${
-            cuttingSnapshot
-              ? renderCuttingScreen({
-                  cuttingSnapshot,
-                  seatLabels: SEAT_LABELS,
-                  escapeHtml,
-                  cutterLabel,
-                  headingText: `Цепи ${cutterLabel}`,
-                  infoText: cuttingInstructionText,
-                  isInteractive: cuttingSnapshot.canSubmitCut && isLocalPlayerCutter,
-                  authoritativePhase: activeRoomState.game?.authoritativePhase ?? null,
-                })
-              : ''
-          }
+                  <div
+                    style="
+                      display:grid;
+                      grid-template-columns:repeat(4, minmax(0, 1fr));
+                      gap:16px;
+                    "
+                  >
+                    <div
+                      style="
+                        border:1px solid rgba(148,163,184,0.18);
+                        border-radius:20px;
+                        padding:18px;
+                        background:rgba(15,23,42,0.72);
+                      "
+                    >
+                      <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#93c5fd;">
+                        Стая
+                      </div>
+                      <div style="margin-top:8px;font-size:18px;font-weight:800;color:#f8fafc;">
+                        ${escapeHtml(activeRoomState.roomId)}
+                      </div>
+                    </div>
 
-          <div
-            style="
-              display:grid;
-              grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
-              gap:16px;
-            "
-          >
-            ${seatsHtml}
+                    <div
+                      style="
+                        border:1px solid rgba(148,163,184,0.18);
+                        border-radius:20px;
+                        padding:18px;
+                        background:rgba(15,23,42,0.72);
+                      "
+                    >
+                      <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#93c5fd;">
+                        Твоето място
+                      </div>
+                      <div style="margin-top:8px;font-size:18px;font-weight:800;color:#f8fafc;">
+                        ${SEAT_LABELS[activeRoomState.seat]}
+                      </div>
+                    </div>
+
+                    <div
+                      style="
+                        border:1px solid rgba(148,163,184,0.18);
+                        border-radius:20px;
+                        padding:18px;
+                        background:rgba(15,23,42,0.72);
+                      "
+                    >
+                      <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#93c5fd;">
+                        Залог
+                      </div>
+                      <div style="margin-top:8px;font-size:18px;font-weight:800;color:#f8fafc;">
+                        ${activeRoomState.stake}
+                      </div>
+                    </div>
+
+                    <div
+                      style="
+                        border:1px solid rgba(148,163,184,0.18);
+                        border-radius:20px;
+                        padding:18px;
+                        background:rgba(15,23,42,0.72);
+                      "
+                    >
+                      <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#93c5fd;">
+                        Статус
+                      </div>
+                      <div style="margin-top:8px;font-size:18px;font-weight:800;color:#f8fafc;">
+                        ${
+                          activeRoomState.isConnected
+                            ? 'Свързан със сървъра'
+                            : 'Връзката е прекъсната'
+                        }
+                      </div>
+                    </div>
+                  </div>
+
+                  <div
+                    style="
+                      border:1px solid rgba(148,163,184,0.18);
+                      border-radius:24px;
+                      padding:24px;
+                      background:rgba(15,23,42,0.72);
+                    "
+                  >
+                    <div
+                      style="
+                        display:flex;
+                        flex-wrap:wrap;
+                        gap:10px 18px;
+                        font-size:14px;
+                        color:#cbd5e1;
+                      "
+                    >
+                      <div><strong style="color:#f8fafc;">Хора:</strong> ${activeRoomState.humanPlayers}</div>
+                      <div><strong style="color:#f8fafc;">Ботове:</strong> ${activeRoomState.botPlayers}</div>
+                      <div><strong style="color:#f8fafc;">Статус на стаята:</strong> ${activeRoomState.roomStatus ?? 'няма още'}</div>
+                      <div><strong style="color:#f8fafc;">Старт:</strong> ${
+                        activeRoomState.shouldStartImmediately ? 'веднага' : 'нормален'
+                      }</div>
+                    </div>
+
+                    ${
+                      activeRoomState.errorText
+                        ? `
+                          <div
+                            style="
+                              margin-top:16px;
+                              border-radius:16px;
+                              padding:14px 16px;
+                              background:rgba(127,29,29,0.34);
+                              border:1px solid rgba(248,113,113,0.24);
+                              color:#fecaca;
+                              font-size:14px;
+                              font-weight:700;
+                            "
+                          >
+                            ${escapeHtml(activeRoomState.errorText)}
+                          </div>
+                        `
+                        : ''
+                    }
+                  </div>
+
+                  <div
+                    style="
+                      display:grid;
+                      grid-template-columns:repeat(4, minmax(0, 1fr));
+                      gap:16px;
+                    "
+                  >
+                    ${seatsHtml}
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
-    `
+      `
+    }
 
     const leaveButton = options.root.querySelector<HTMLButtonElement>(
       '[data-active-room-leave-button="1"]',
@@ -646,6 +774,7 @@ export function createActiveRoomFlowController(
   }
 
   return {
+    render: renderActiveRoomScreen,
     enterActiveRoom,
     handleServerMessage,
     setConnected,

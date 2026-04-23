@@ -1,4 +1,5 @@
 import type { MatchStake } from '../network/createGameServerClient'
+import { getViewportStageMetrics } from '../../ui/layout/viewportStage'
 
 export type LobbyScreenState = {
   displayName: string
@@ -62,43 +63,6 @@ function formatAmount(value: number): string {
   return new Intl.NumberFormat('bg-BG').format(value)
 }
 
-function getViewportSize(): { width: number; height: number } {
-  if (typeof window === 'undefined') {
-    return {
-      width: BASE_STAGE_WIDTH + VIEWPORT_HORIZONTAL_PADDING * 2,
-      height: BASE_STAGE_HEIGHT + VIEWPORT_VERTICAL_PADDING * 2 + RESERVED_TOP_SPACE,
-    }
-  }
-
-  return {
-    width: window.innerWidth,
-    height: window.innerHeight,
-  }
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value))
-}
-
-function getStageScale(): number {
-  const viewport = getViewportSize()
-
-  const availableWidth = Math.max(320, viewport.width - VIEWPORT_HORIZONTAL_PADDING * 2)
-  const availableHeight = Math.max(
-    320,
-    viewport.height - VIEWPORT_VERTICAL_PADDING * 2 - RESERVED_TOP_SPACE,
-  )
-
-  const widthScale = availableWidth / BASE_STAGE_WIDTH
-  const heightScale = availableHeight / BASE_STAGE_HEIGHT
-
-  return clamp(
-    Math.min(widthScale, heightScale, MAX_STAGE_SCALE),
-    MIN_STAGE_SCALE,
-    MAX_STAGE_SCALE,
-  )
-}
-
 export function renderLobbyScreen(
   root: HTMLElement,
   options: RenderLobbyScreenOptions,
@@ -107,9 +71,16 @@ export function renderLobbyScreen(
   const canStartSearch = state.isConnected && !state.isSearching
   const profileName = state.displayName.trim() || 'Играч'
 
-  const stageScale = getStageScale()
-  const scaledStageWidth = Math.round(BASE_STAGE_WIDTH * stageScale)
-  const scaledStageHeight = Math.round(BASE_STAGE_HEIGHT * stageScale)
+  const { stageScale, scaledStageWidth, scaledStageHeight } =
+    getViewportStageMetrics({
+      baseWidth: BASE_STAGE_WIDTH,
+      baseHeight: BASE_STAGE_HEIGHT,
+      minScale: MIN_STAGE_SCALE,
+      maxScale: MAX_STAGE_SCALE,
+      viewportHorizontalPadding: VIEWPORT_HORIZONTAL_PADDING,
+      viewportVerticalPadding: VIEWPORT_VERTICAL_PADDING,
+      reservedTopSpace: RESERVED_TOP_SPACE,
+    })
 
   root.innerHTML = `
     <div

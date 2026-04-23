@@ -1,36 +1,40 @@
 import {
-  type RoomAuthoritativePhaseSnapshot,
   type RoomCuttingSnapshot,
-  type Seat,
 } from '../network/createGameServerClient'
 
 type RenderCuttingScreenOptions = {
   cuttingSnapshot: RoomCuttingSnapshot
-  authoritativePhase: RoomAuthoritativePhaseSnapshot | null
-  seatLabels: Record<Seat, string>
-  escapeHtml: (value: string) => string
-  cutterLabel: string
-  headingText: string
-  infoText: string
+  cutterDisplayName: string
   isInteractive: boolean
 }
 
 const VISUAL_CARD_COUNT = 32
-const CARD_WIDTH = 78
-const CARD_HEIGHT = 116
-const CARD_STEP = 22
+const CARD_WIDTH = 144
+const CARD_HEIGHT = 208
+const CARD_STEP = 26
+const CARD_TOP = 20
+const DECK_PADDING_X = 30
+const CUT_HOTSPOT_WIDTH = 24
+const SELECTED_GAP = 30
 
-function renderCardFace(index: number): string {
-  const accent = index % 2 === 0 ? 'rgba(96,165,250,0.22)' : 'rgba(244,114,182,0.18)'
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
 
+function renderCardFace(): string {
   return `
     <span
       style="
         position:absolute;
         inset:0;
-        border-radius:14px;
+        border-radius:18px;
         background:
-          linear-gradient(180deg, rgba(248,250,252,0.98) 0%, rgba(226,232,240,0.98) 100%);
+          linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(226,232,240,0.96) 100%);
       "
     ></span>
 
@@ -38,163 +42,300 @@ function renderCardFace(index: number): string {
       style="
         position:absolute;
         inset:7px;
-        border-radius:11px;
-        border:1px solid rgba(15,23,42,0.10);
+        border-radius:14px;
+        border:1px solid rgba(226,232,240,0.22);
         background:
-          radial-gradient(circle at top, ${accent}, transparent 38%),
-          linear-gradient(180deg, rgba(255,255,255,0.94) 0%, rgba(241,245,249,0.94) 100%);
+          radial-gradient(circle at 30% 20%, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0.02) 34%, transparent 52%),
+          linear-gradient(145deg, rgba(31,41,55,0.96) 0%, rgba(15,23,42,0.98) 100%);
       "
     ></span>
 
     <span
       style="
         position:absolute;
-        left:10px;
-        top:9px;
-        font-size:11px;
-        font-weight:900;
-        color:#0f172a;
-        letter-spacing:0.08em;
+        inset:16px;
+        border-radius:12px;
+        border:1px solid rgba(148,163,184,0.22);
+        background:
+          linear-gradient(180deg, rgba(148,163,184,0.06) 0%, rgba(148,163,184,0.00) 100%);
+        box-shadow:inset 0 0 0 1px rgba(255,255,255,0.04);
       "
-    >
-      B
-    </span>
+    ></span>
 
     <span
       style="
         position:absolute;
-        right:10px;
-        bottom:9px;
-        font-size:11px;
-        font-weight:900;
-        color:#0f172a;
-        letter-spacing:0.08em;
-        transform:rotate(180deg);
+        left:50%;
+        top:20px;
+        bottom:20px;
+        width:1px;
+        transform:translateX(-50%);
+        background:linear-gradient(180deg, rgba(250,250,249,0.04) 0%, rgba(250,250,249,0.36) 50%, rgba(250,250,249,0.04) 100%);
       "
-    >
-      B
-    </span>
+    ></span>
+
+    <span
+      style="
+        position:absolute;
+        left:20px;
+        right:20px;
+        top:50%;
+        height:1px;
+        transform:translateY(-50%);
+        background:linear-gradient(90deg, rgba(250,250,249,0.04) 0%, rgba(250,250,249,0.30) 50%, rgba(250,250,249,0.04) 100%);
+      "
+    ></span>
 
     <span
       style="
         position:absolute;
         left:50%;
         top:50%;
-        width:28px;
-        height:28px;
+        width:40px;
+        height:40px;
         transform:translate(-50%, -50%) rotate(45deg);
-        border-radius:7px;
-        border:1px solid rgba(30,41,59,0.12);
-        background:rgba(255,255,255,0.58);
-        box-shadow:0 6px 16px rgba(15,23,42,0.08);
+        border-radius:10px;
+        border:1px solid rgba(226,232,240,0.28);
+        background:
+          linear-gradient(145deg, rgba(203,213,225,0.18) 0%, rgba(255,255,255,0.05) 100%);
+        box-shadow:
+          inset 0 0 0 1px rgba(255,255,255,0.06),
+          0 8px 18px rgba(2,6,23,0.18);
       "
     ></span>
   `
 }
 
-function renderVisualDeck(cuttingSnapshot: RoomCuttingSnapshot, isInteractive: boolean): string {
+function getCardLeft(cardNumber: number, selectedCutIndex: number | null): number {
+  const afterSelectedShift =
+    selectedCutIndex !== null && cardNumber > selectedCutIndex ? SELECTED_GAP : 0
+
+  return DECK_PADDING_X + (cardNumber - 1) * CARD_STEP + afterSelectedShift
+}
+
+function getCutSlotCenter(cutIndex: number, selectedCutIndex: number | null): number {
+  if (selectedCutIndex === null) {
+    return DECK_PADDING_X + cutIndex * CARD_STEP
+  }
+
+  if (cutIndex < selectedCutIndex) {
+    return DECK_PADDING_X + cutIndex * CARD_STEP
+  }
+
+  if (cutIndex === selectedCutIndex) {
+    return DECK_PADDING_X + cutIndex * CARD_STEP + SELECTED_GAP / 2
+  }
+
+  return DECK_PADDING_X + cutIndex * CARD_STEP + SELECTED_GAP
+}
+
+function renderVisualDeck(
+  cuttingSnapshot: RoomCuttingSnapshot,
+  cutterDisplayName: string,
+  isInteractive: boolean,
+): string {
   const validCutCount = Math.max(0, cuttingSnapshot.deckCount - 1)
   const selectedCutIndex = cuttingSnapshot.selectedCutIndex
 
   const cardsHtml = Array.from({ length: VISUAL_CARD_COUNT }, (_, index) => {
     const cardNumber = index + 1
-    const isClickable = isInteractive && cardNumber <= validCutCount
-    const isSelected = selectedCutIndex === cardNumber
-    const isAfterSelected = selectedCutIndex !== null && cardNumber > selectedCutIndex
-    const left = index * CARD_STEP + (isAfterSelected ? 18 : 0)
-    const zIndex = index + 1
-    const translateY = isSelected ? -10 : 0
-    const borderColor = isSelected ? 'rgba(251,191,36,0.78)' : 'rgba(255,255,255,0.42)'
-    const shadow = isSelected
-      ? '0 18px 36px rgba(15,23,42,0.28)'
-      : '0 10px 22px rgba(15,23,42,0.22)'
-
-    if (isClickable) {
-      return `
-        <button
-          type="button"
-          data-active-room-cut-index="${cardNumber}"
-          aria-label="Избери място за цепене ${cardNumber}"
-          style="
-            position:absolute;
-            left:${left}px;
-            top:24px;
-            width:${CARD_WIDTH}px;
-            height:${CARD_HEIGHT}px;
-            padding:0;
-            border:1px solid ${borderColor};
-            border-radius:16px;
-            background:transparent;
-            cursor:pointer;
-            overflow:hidden;
-            z-index:${zIndex};
-            transform:translateY(${translateY}px) rotate(${(index - 15.5) * 0.22}deg);
-            transform-origin:center bottom;
-            box-shadow:${shadow};
-            transition:transform 160ms ease, box-shadow 160ms ease, filter 160ms ease, border-color 160ms ease;
-          "
-          onmouseenter="this.style.transform='translateY(${translateY - 8}px) rotate(${(index - 15.5) * 0.22}deg)';this.style.boxShadow='0 22px 40px rgba(15,23,42,0.30)';this.style.filter='brightness(1.03)';"
-          onmouseleave="this.style.transform='translateY(${translateY}px) rotate(${(index - 15.5) * 0.22}deg)';this.style.boxShadow='${shadow}';this.style.filter='brightness(1)';"
-        >
-          ${renderCardFace(index)}
-        </button>
-      `
-    }
+    const left = getCardLeft(cardNumber, selectedCutIndex)
+    const isAdjacentToSelected =
+      selectedCutIndex !== null &&
+      (cardNumber === selectedCutIndex || cardNumber === selectedCutIndex + 1)
+    const borderColor = isAdjacentToSelected
+      ? 'rgba(252,211,77,0.58)'
+      : 'rgba(255,255,255,0.18)'
+    const shadow = isAdjacentToSelected
+      ? '0 14px 28px rgba(2,6,23,0.24)'
+      : '0 10px 22px rgba(2,6,23,0.22)'
 
     return `
       <div
         style="
           position:absolute;
           left:${left}px;
-          top:24px;
+          top:${CARD_TOP}px;
           width:${CARD_WIDTH}px;
           height:${CARD_HEIGHT}px;
           border:1px solid ${borderColor};
-          border-radius:16px;
+          border-radius:20px;
           overflow:hidden;
-          z-index:${zIndex};
-          transform:translateY(${translateY}px) rotate(${(index - 15.5) * 0.22}deg);
-          transform-origin:center bottom;
+          z-index:${index + 1};
           box-shadow:${shadow};
+          transition:border-color 140ms ease, box-shadow 140ms ease;
         "
       >
-        ${renderCardFace(index)}
+        ${renderCardFace()}
       </div>
     `
   }).join('')
 
-  const tableWidth = (VISUAL_CARD_COUNT - 1) * CARD_STEP + CARD_WIDTH + 18
+  const cutButtonsHtml = isInteractive
+    ? Array.from({ length: validCutCount }, (_, index) => {
+        const cutIndex = index + 1
+        const slotCenter = getCutSlotCenter(cutIndex, selectedCutIndex)
+
+        return `
+          <button
+            type="button"
+            data-active-room-cut-index="${cutIndex}"
+            aria-label="Избери място за цепене след карта ${cutIndex}"
+            style="
+              position:absolute;
+              left:${slotCenter - CUT_HOTSPOT_WIDTH / 2}px;
+              top:${CARD_TOP - 12}px;
+              width:${CUT_HOTSPOT_WIDTH}px;
+              height:${CARD_HEIGHT + 24}px;
+              padding:0;
+              border:none;
+              background:transparent;
+              cursor:pointer;
+              z-index:${VISUAL_CARD_COUNT + 12};
+            "
+            onmouseenter="const line=this.firstElementChild;const glow=this.lastElementChild;if(line){line.style.opacity='0.94';line.style.transform='translateX(-50%) scaleY(1)';line.style.boxShadow='0 0 0 1px rgba(254,240,138,0.14), 0 0 10px rgba(250,204,21,0.18)';}if(glow){glow.style.opacity='0.62';glow.style.transform='translate(-50%, -50%) scale(1)';}"
+            onmouseleave="const line=this.firstElementChild;const glow=this.lastElementChild;if(line){line.style.opacity='0';line.style.transform='translateX(-50%) scaleY(0.72)';line.style.boxShadow='none';}if(glow){glow.style.opacity='0';glow.style.transform='translate(-50%, -50%) scale(0.9)';}"
+            onfocus="const line=this.firstElementChild;const glow=this.lastElementChild;if(line){line.style.opacity='0.94';line.style.transform='translateX(-50%) scaleY(1)';line.style.boxShadow='0 0 0 1px rgba(254,240,138,0.14), 0 0 10px rgba(250,204,21,0.18)';}if(glow){glow.style.opacity='0.62';glow.style.transform='translate(-50%, -50%) scale(1)';}"
+            onblur="const line=this.firstElementChild;const glow=this.lastElementChild;if(line){line.style.opacity='0';line.style.transform='translateX(-50%) scaleY(0.72)';line.style.boxShadow='none';}if(glow){glow.style.opacity='0';glow.style.transform='translate(-50%, -50%) scale(0.9)';}"
+          >
+            <span
+              aria-hidden="true"
+              style="
+                position:absolute;
+                left:50%;
+                top:14px;
+                bottom:14px;
+                width:3px;
+                border-radius:999px;
+                transform:translateX(-50%) scaleY(0.72);
+                transform-origin:center;
+                background:
+                  linear-gradient(180deg, rgba(254,240,138,0.00) 0%, rgba(254,240,138,0.90) 22%, rgba(250,204,21,0.90) 78%, rgba(254,240,138,0.00) 100%);
+                opacity:0;
+                transition:opacity 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+              "
+            ></span>
+
+            <span
+              aria-hidden="true"
+              style="
+                position:absolute;
+                left:50%;
+                top:50%;
+                width:22px;
+                height:${CARD_HEIGHT - 36}px;
+                transform:translate(-50%, -50%) scale(0.9);
+                border-radius:999px;
+                background:radial-gradient(circle, rgba(250,204,21,0.10) 0%, rgba(250,204,21,0.05) 46%, rgba(250,204,21,0.00) 72%);
+                opacity:0;
+                transition:opacity 120ms ease, transform 120ms ease;
+              "
+            ></span>
+          </button>
+        `
+      }).join('')
+    : ''
+
+  const selectedMarkerHtml =
+    selectedCutIndex !== null && selectedCutIndex <= validCutCount
+      ? `
+          <div
+            aria-hidden="true"
+            style="
+              position:absolute;
+              left:${getCutSlotCenter(selectedCutIndex, selectedCutIndex) - 2}px;
+              top:${CARD_TOP - 12}px;
+              width:5px;
+              height:${CARD_HEIGHT + 24}px;
+              border-radius:999px;
+              background:
+                linear-gradient(180deg, rgba(254,240,138,0.00) 0%, rgba(254,240,138,0.94) 20%, rgba(250,204,21,0.94) 80%, rgba(254,240,138,0.00) 100%);
+              box-shadow:
+                0 0 0 1px rgba(254,240,138,0.12),
+                0 0 14px rgba(250,204,21,0.18);
+              z-index:${VISUAL_CARD_COUNT + 8};
+            "
+          ></div>
+        `
+      : ''
+
+  const deckTrackWidth = (VISUAL_CARD_COUNT - 1) * CARD_STEP + CARD_WIDTH + SELECTED_GAP
+  const tableWidth = DECK_PADDING_X * 2 + deckTrackWidth
 
   return `
     <section
       style="
-        border-radius:28px;
-        padding:22px 18px 26px;
+        width:100%;
+        height:100%;
+        padding:40px 44px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
         background:
-          radial-gradient(circle at center, rgba(74, 222, 128, 0.24) 0%, rgba(22, 101, 52, 0.18) 34%, rgba(6, 78, 59, 0.92) 100%),
-          linear-gradient(180deg, rgba(20, 83, 45, 0.96) 0%, rgba(5, 46, 22, 0.98) 100%);
-        border:1px solid rgba(134,239,172,0.14);
-        box-shadow:
-          inset 0 1px 0 rgba(255,255,255,0.05),
-          0 24px 60px rgba(2,6,23,0.24);
-        overflow-x:auto;
+          radial-gradient(circle at center, rgba(74,222,128,0.22) 0%, rgba(34,197,94,0.12) 32%, rgba(21,128,61,0.00) 58%),
+          linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%);
+        overflow:hidden;
       "
     >
       <div
         style="
-          min-width:${tableWidth}px;
-          height:${CARD_HEIGHT + 48}px;
-          position:relative;
+          width:100%;
+          height:100%;
+          display:flex;
+          flex-direction:column;
+          align-items:center;
+          justify-content:center;
+          gap:26px;
         "
       >
-        ${cardsHtml}
+        <div
+          style="
+            color:#f8fafc;
+            font-size:26px;
+            font-weight:900;
+            letter-spacing:0.02em;
+            line-height:1;
+            text-align:center;
+            text-shadow:0 4px 12px rgba(0,0,0,0.24);
+            white-space:nowrap;
+          "
+        >
+          Цепи ${escapeHtml(cutterDisplayName)}
+        </div>
+
+        <div
+          style="
+            min-width:${tableWidth}px;
+            height:${CARD_HEIGHT + 42}px;
+            position:relative;
+          "
+        >
+          <div
+            aria-hidden="true"
+            style="
+              position:absolute;
+              left:${DECK_PADDING_X + 10}px;
+              top:${CARD_TOP + CARD_HEIGHT - 12}px;
+              width:${deckTrackWidth - 20}px;
+              height:24px;
+              border-radius:999px;
+              background:
+                radial-gradient(circle at center, rgba(2,6,23,0.22) 0%, rgba(2,6,23,0.10) 48%, rgba(2,6,23,0.00) 78%);
+              filter:blur(4px);
+            "
+          ></div>
+
+          ${cardsHtml}
+          ${selectedMarkerHtml}
+          ${cutButtonsHtml}
+        </div>
       </div>
     </section>
   `
 }
 
 export function renderCuttingScreen(options: RenderCuttingScreenOptions): string {
-  const { cuttingSnapshot, isInteractive } = options
+  const { cuttingSnapshot, cutterDisplayName, isInteractive } = options
 
-  return renderVisualDeck(cuttingSnapshot, isInteractive)
+  return renderVisualDeck(cuttingSnapshot, cutterDisplayName, isInteractive)
 }

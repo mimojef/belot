@@ -49,6 +49,7 @@ type InternalLobbyFlowState = {
   errorText: string | null
   serverRoomSeats: RoomSeatSnapshot[] | null
   serverYourSeat: RoomSeatSnapshot['seat'] | null
+  serverPreviewBotDisplayNames: string[]
 }
 
 type StakeCardConfig = {
@@ -68,27 +69,6 @@ const WAITING_CLOCK_AUDIO_VOLUME = 0.75
 const SEAT_FILL_AUDIO_SRC = '/audio/ui/player-seat-fill.mp3'
 const SEAT_FILL_AUDIO_VOLUME = 0.9
 const SEAT_FILL_SOUND_STAGGER_MS = 120
-
-const AUTO_FILL_NAME_PREFIXES = [
-  'Mody',
-  'Moby',
-  'Nexo',
-  'Rexo',
-  'Viper',
-  'Rado',
-  'Kiro',
-  'Toni',
-  'Miro',
-  'Zed',
-  'Lory',
-  'Bora',
-  'Niki',
-  'A',
-  'B',
-  'X',
-  'Q',
-  'R',
-] as const
 
 const STAKE_CARD_CONFIG: Record<MatchStake, StakeCardConfig> = {
   5000: { stake: 5000, prizeAmount: 8000 },
@@ -117,6 +97,7 @@ function createInitialState(): InternalLobbyFlowState {
     errorText: null,
     serverRoomSeats: null,
     serverYourSeat: null,
+    serverPreviewBotDisplayNames: [],
   }
 }
 
@@ -195,26 +176,20 @@ function getOtherOccupiedSeatSnapshots(
   )
 }
 
-function createRandomDigits(length: number): string {
-  let result = ''
+const WAITING_PLAYER_DISPLAY_NAME = 'Чакаме...'
+const LOCAL_PLAYER_FALLBACK_DISPLAY_NAME = 'Гост'
 
-  for (let index = 0; index < length; index += 1) {
-    result += String(Math.floor(Math.random() * 10))
-  }
-
-  return result
-}
-
-function createAutoFillPreviewPlayer(index: number): MatchmakingRoomPlayer {
-  const prefix = AUTO_FILL_NAME_PREFIXES[index % AUTO_FILL_NAME_PREFIXES.length]
-  const digitsLength = 8 + (index % 2)
-  const digits = createRandomDigits(digitsLength)
+function createAutoFillPreviewPlayer(
+  index: number,
+  displayName: string | null = null,
+): MatchmakingRoomPlayer {
+  const normalizedDisplayName = displayName?.trim() || WAITING_PLAYER_DISPLAY_NAME
 
   return {
-    id: `autofill-preview-${Date.now()}-${index}-${digits}`,
-    name: `${prefix}${digits}`,
+    id: `autofill-preview-${index + 1}`,
+    name: normalizedDisplayName,
     avatarUrl: null,
-    isBot: false,
+    isBot: normalizedDisplayName !== WAITING_PLAYER_DISPLAY_NAME,
   }
 }
 
@@ -353,15 +328,12 @@ export function createLobbyFlowController(
   }
 
   function ensureAutoFillPreviewPlayersCount(count: number): void {
-    while (autoFillPreviewPlayers.length < count) {
-      autoFillPreviewPlayers.push(
-        createAutoFillPreviewPlayer(autoFillPreviewPlayers.length),
+    autoFillPreviewPlayers = Array.from({ length: count }, (_, index) => {
+      return createAutoFillPreviewPlayer(
+        index,
+        state.serverPreviewBotDisplayNames[index] ?? null,
       )
-    }
-
-    if (autoFillPreviewPlayers.length > count) {
-      autoFillPreviewPlayers = autoFillPreviewPlayers.slice(0, count)
-    }
+    })
   }
 
   function clearFinalFillAnimationState(): void {
@@ -413,17 +385,13 @@ export function createLobbyFlowController(
     const displayedQueuedPlayers = getDisplayedQueuedPlayers()
     const totalOtherSeats = Math.max(0, displayedQueuedPlayers - 1)
     const actualOtherPlayers = Math.max(0, state.queuedPlayers - 1)
-    const normalizedLocalName = state.displayName.trim() || 'Играч'
     const autoFillCount = Math.max(0, totalOtherSeats - actualOtherPlayers)
 
     ensureAutoFillPreviewPlayersCount(autoFillCount)
 
     const actualPlayers = Array.from({ length: actualOtherPlayers }, (_, index) => ({
       id: `queued-preview-${index + 1}`,
-      name:
-        index === 0 && normalizedLocalName === 'Играч'
-          ? 'Играч'
-          : `Играч ${index + 2}`,
+      name: WAITING_PLAYER_DISPLAY_NAME,
       avatarUrl: null,
       isBot: false,
     }))
@@ -445,7 +413,7 @@ export function createLobbyFlowController(
 
     return {
       id: 'local-player',
-      name: state.displayName.trim() || 'Играч',
+      name: state.displayName.trim() || LOCAL_PLAYER_FALLBACK_DISPLAY_NAME,
       avatarUrl: state.localAvatarUrl,
       isBot: false,
     }
@@ -469,6 +437,7 @@ export function createLobbyFlowController(
     state.requiredPlayers = DEFAULT_REQUIRED_PLAYERS
     state.remainingMs = null
     state.countdownEndsAt = null
+    state.serverPreviewBotDisplayNames = []
     clearServerRoomSnapshot()
     stopWaitingRoomActivity()
     resetFinalFillSequence()
@@ -675,6 +644,7 @@ export function createLobbyFlowController(
         state.requiredPlayers = DEFAULT_REQUIRED_PLAYERS
         state.remainingMs = DEFAULT_COUNTDOWN_MS
         state.countdownEndsAt = Date.now() + DEFAULT_COUNTDOWN_MS
+        state.serverPreviewBotDisplayNames = []
         clearServerRoomSnapshot()
         resetFinalFillSequence()
 
@@ -827,7 +797,7 @@ export function createLobbyFlowController(
       state.remainingMs = message.remainingMs
       state.countdownEndsAt = message.countdownEndsAt
       state.errorText = null
-      clearServerRoomSnapshot()
+      state.serverPreviewBotDisplayNames = message.previewBotDisplayNames ?? []
       startWaitingClockAudio()
       render()
       return true
@@ -842,7 +812,7 @@ export function createLobbyFlowController(
       state.remainingMs = message.remainingMs
       state.countdownEndsAt = message.countdownEndsAt
       state.errorText = null
-      clearServerRoomSnapshot()
+      state.serverPreviewBotDisplayNames = message.previewBotDisplayNames ?? []
       startWaitingClockAudio()
       render()
       return true

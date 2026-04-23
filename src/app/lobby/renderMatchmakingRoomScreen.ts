@@ -1,3 +1,5 @@
+import { getViewportStageMetrics } from '../../ui/layout/viewportStage'
+
 export type MatchmakingRoomPlayer = {
   id: string
   name: string
@@ -44,10 +46,6 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;')
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value))
-}
-
 function formatAmount(value: number): string {
   return new Intl.NumberFormat('bg-BG').format(value)
 }
@@ -66,39 +64,6 @@ function getInitials(name: string): string {
   return parts
     .map((part) => part.charAt(0).toUpperCase())
     .join('')
-}
-
-function getViewportSize(): { width: number; height: number } {
-  if (typeof window === 'undefined') {
-    return {
-      width: BASE_STAGE_WIDTH + VIEWPORT_HORIZONTAL_PADDING * 2,
-      height: BASE_STAGE_HEIGHT + VIEWPORT_VERTICAL_PADDING * 2 + RESERVED_TOP_SPACE,
-    }
-  }
-
-  return {
-    width: window.innerWidth,
-    height: window.innerHeight,
-  }
-}
-
-function getStageScale(): number {
-  const viewport = getViewportSize()
-
-  const availableWidth = Math.max(320, viewport.width - VIEWPORT_HORIZONTAL_PADDING * 2)
-  const availableHeight = Math.max(
-    320,
-    viewport.height - VIEWPORT_VERTICAL_PADDING * 2 - RESERVED_TOP_SPACE,
-  )
-
-  const widthScale = availableWidth / BASE_STAGE_WIDTH
-  const heightScale = availableHeight / BASE_STAGE_HEIGHT
-
-  return clamp(
-    Math.min(widthScale, heightScale, MAX_STAGE_SCALE),
-    MIN_STAGE_SCALE,
-    MAX_STAGE_SCALE,
-  )
 }
 
 function createSlots(params: RenderMatchmakingRoomScreenParams): MatchmakingRoomSlot[] {
@@ -124,7 +89,7 @@ function createSlots(params: RenderMatchmakingRoomScreenParams): MatchmakingRoom
       kind: player.isBot ? 'bot' : 'player',
       name: player.name,
       avatarUrl: player.avatarUrl ?? null,
-      badgeText: player.isBot ? 'БОТ' : 'ИГРАЧ',
+      badgeText: 'ИГРАЧ',
     })
   }
 
@@ -221,21 +186,17 @@ function renderSlot(slot: MatchmakingRoomSlot, index: number): string {
   const badgeBackground =
     slot.kind === 'local'
       ? 'linear-gradient(180deg, #ffc94a 0%, #ff9f0a 100%)'
-      : slot.kind === 'bot'
-        ? 'linear-gradient(180deg, #5ce0a0 0%, #28b76b 100%)'
-        : slot.kind === 'player'
-          ? 'linear-gradient(180deg, #66c2ff 0%, #2f7ff0 100%)'
-          : 'linear-gradient(180deg, rgba(255,255,255,0.20), rgba(255,255,255,0.10))'
+      : slot.kind === 'player' || slot.kind === 'bot'
+        ? 'linear-gradient(180deg, #66c2ff 0%, #2f7ff0 100%)'
+        : 'linear-gradient(180deg, rgba(255,255,255,0.20), rgba(255,255,255,0.10))'
 
   const badgeTextColor = slot.kind === 'empty' ? '#ffffff' : '#0b1e3f'
   const titleColor = isEmpty ? 'rgba(255,255,255,0.56)' : '#ffffff'
   const subLabel = isLocal
     ? 'Твоят профил'
-    : slot.kind === 'bot'
-      ? 'Автоматично попълване'
-      : slot.kind === 'player'
-        ? 'Играч в стаята'
-        : 'Очаква се играч'
+    : slot.kind === 'player' || slot.kind === 'bot'
+      ? 'Играч в стаята'
+      : 'Очаква се играч'
 
   const avatarTopSpacing = isEmpty ? 10 : 0
 
@@ -331,7 +292,10 @@ export function renderMatchmakingRoomScreen(
   params: RenderMatchmakingRoomScreenParams,
 ): string {
   const countdownTotalMs = Math.max(1, params.countdownTotalMs ?? DEFAULT_COUNTDOWN_TOTAL_MS)
-  const countdownRemainingMs = clamp(params.countdownRemainingMs, 0, countdownTotalMs)
+  const countdownRemainingMs = Math.max(
+    0,
+    Math.min(params.countdownRemainingMs, countdownTotalMs),
+  )
   const countdownSeconds = Math.ceil(countdownRemainingMs / 1000)
   const progressPercent = Math.round((countdownRemainingMs / countdownTotalMs) * 100)
 
@@ -351,9 +315,16 @@ export function renderMatchmakingRoomScreen(
         ? 'Чакаме още 1 играч...'
         : `Чакаме още ${emptyCount} играчи...`)
 
-  const stageScale = getStageScale()
-  const scaledStageWidth = Math.round(BASE_STAGE_WIDTH * stageScale)
-  const scaledStageHeight = Math.round(BASE_STAGE_HEIGHT * stageScale)
+  const { stageScale, scaledStageWidth, scaledStageHeight } =
+    getViewportStageMetrics({
+      baseWidth: BASE_STAGE_WIDTH,
+      baseHeight: BASE_STAGE_HEIGHT,
+      minScale: MIN_STAGE_SCALE,
+      maxScale: MAX_STAGE_SCALE,
+      viewportHorizontalPadding: VIEWPORT_HORIZONTAL_PADDING,
+      viewportVerticalPadding: VIEWPORT_VERTICAL_PADDING,
+      reservedTopSpace: RESERVED_TOP_SPACE,
+    })
 
   return `
     <section

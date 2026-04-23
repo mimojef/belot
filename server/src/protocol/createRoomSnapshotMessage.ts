@@ -74,6 +74,7 @@ function createGameSnapshot(
     phase: room.game.phase,
     authoritativePhase: authoritativeState.phase,
     timerDeadlineAt: room.game.timerDeadlineAt,
+    dealerSeat: authoritativeState.round.dealerSeat,
     cutting: {
       cutterSeat: authoritativeState.round.cutterSeat,
       selectedCutIndex: authoritativeState.round.selectedCutIndex,

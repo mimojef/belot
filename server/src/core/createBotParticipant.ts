@@ -174,7 +174,7 @@ export function createBotParticipant(
     joinedAt: now,
     botCode,
     difficulty,
-    botProfileId: profile?.profileId,
+    botProfileId: options.botProfileId ?? profile?.profileId,
     behaviorPreset,
     logicSource,
     identity: mergedIdentity,

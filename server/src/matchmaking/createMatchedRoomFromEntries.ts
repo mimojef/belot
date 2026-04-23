@@ -17,6 +17,11 @@ import type {
   MatchmakingQueueEntry,
   PendingMatchGroup,
 } from './matchmakingTypes.js'
+import {
+  createMatchmakingBotSelectionSeed,
+  selectMatchmakingBotProfiles,
+  type MatchmakingBotSelectionProfile,
+} from './selectMatchmakingBotProfiles.js'
 
 export type CreateMatchedRoomFromEntriesResult = {
   room: ServerRoom
@@ -53,6 +58,54 @@ function assertSingleStake(entries: MatchmakingQueueEntry[]): MatchStake {
   }
 
   return stake
+}
+
+function createBotParticipantFromSelectedProfile(
+  selectedProfile: MatchmakingBotSelectionProfile | undefined,
+): BotRoomParticipant | null {
+  if (!selectedProfile) {
+    return null
+  }
+
+  return createBotParticipant({
+    botProfileId: selectedProfile.profileId ?? undefined,
+    botCode: selectedProfile.code,
+    difficulty: selectedProfile.difficulty,
+    behaviorPreset: selectedProfile.behaviorPreset,
+    logicSource: selectedProfile.logicSource,
+    identity: selectedProfile.identity,
+    publicProfile: {
+      profileId: selectedProfile.profileId,
+      displayName: selectedProfile.identity.displayName,
+      avatarUrl: selectedProfile.identity.avatarUrl,
+      level: selectedProfile.identity.level,
+      rankTitle: selectedProfile.identity.rankTitle,
+      skillRating: selectedProfile.identity.skillRating,
+      yellowCoinsBalance: selectedProfile.yellowCoinsBalance,
+    },
+  })
+}
+
+function createBotParticipantFromFallbackSelection(
+  stake: MatchStake,
+  excludedProfileIds: string[],
+  botIndex: number,
+): BotRoomParticipant {
+  const selectedFallbackProfile = pickRandomBotProfile(stake, excludedProfileIds)
+
+  if (selectedFallbackProfile) {
+    return createBotParticipant({
+      botProfileId: selectedFallbackProfile.profileId,
+    })
+  }
+
+  return createBotParticipant({
+    botCode: `BOT ${botIndex}`,
+    identity: {
+      displayName: `Бот ${botIndex}`,
+      username: `bot_${botIndex}`,
+    },
+  })
 }
 
 export function createMatchedRoomFromEntries(
@@ -96,6 +149,12 @@ export function createMatchedRoomFromEntries(
     })
   }
 
+  const selectedBotProfiles = selectMatchmakingBotProfiles({
+    stake,
+    count: shuffledSeats.length,
+    selectionSeed: createMatchmakingBotSelectionSeed(stake, entries),
+  })
+
   while (shuffledSeats.length > 0) {
     const seat = shuffledSeats.shift()
 
@@ -103,23 +162,13 @@ export function createMatchedRoomFromEntries(
       break
     }
 
-    const excludedProfileIds = addedBots.flatMap((bot) =>
-      bot.botProfileId ? [bot.botProfileId] : [],
-    )
-
-    const selectedProfile = pickRandomBotProfile(stake, excludedProfileIds)
-
-    const participant: BotRoomParticipant = selectedProfile
-      ? createBotParticipant({
-          botProfileId: selectedProfile.profileId,
-        })
-      : createBotParticipant({
-          botCode: `BOT ${addedBots.length + 1}`,
-          identity: {
-            displayName: `Бот ${addedBots.length + 1}`,
-            username: `bot_${addedBots.length + 1}`,
-          },
-        })
+    const participant =
+      createBotParticipantFromSelectedProfile(selectedBotProfiles[addedBots.length]) ??
+      createBotParticipantFromFallbackSelection(
+        stake,
+        addedBots.flatMap((bot) => (bot.botProfileId ? [bot.botProfileId] : [])),
+        addedBots.length + 1,
+      )
 
     nextRoom = seatParticipantInRoom(nextRoom, seat, participant)
     addedBots.push(participant)

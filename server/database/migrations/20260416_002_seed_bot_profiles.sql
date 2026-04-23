@@ -1,7 +1,5 @@
 PRAGMA foreign_keys = ON;
 
-BEGIN TRANSACTION;
-
 WITH RECURSIVE
   seq(n) AS (
     VALUES(1)
@@ -98,4 +96,3 @@ SELECT
 FROM seq
 CROSS JOIN stakes;
 
-COMMIT;

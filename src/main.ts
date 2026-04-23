@@ -3,6 +3,7 @@ import './style.css'
 import { createActiveRoomFlowController } from './app/activeRoom/createActiveRoomFlowController'
 import { createLobbyFlowController } from './app/lobby/createLobbyFlowController'
 import { createGameServerClient, type GameServerClient } from './app/network/createGameServerClient'
+import { createViewportResizeHandler } from './ui/layout/viewportStage'
 
 const rootElementCandidate = document.querySelector<HTMLDivElement>('#app')
 
@@ -79,7 +80,17 @@ client = createGameServerClient({
   },
 })
 
+const disposeViewportResizeHandler = createViewportResizeHandler(() => {
+  if (activeRoom.hasActiveRoom()) {
+    activeRoom.render()
+    return
+  }
+
+  lobby.render()
+})
+
 window.addEventListener('beforeunload', () => {
+  disposeViewportResizeHandler()
   client.disconnect()
 })
 

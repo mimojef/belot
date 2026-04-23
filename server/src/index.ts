@@ -1,5 +1,7 @@
 import { createServer } from 'node:http'
 import { WebSocketServer, WebSocket, type RawData } from 'ws'
+import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
+import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js'
 import { broadcastRoomSnapshots } from './core/broadcastRoomSnapshots.js'
 import { createInitialServerState } from './core/createInitialServerState.js'
@@ -41,6 +43,10 @@ import {
   type MatchStake,
 } from './matchmaking/matchmakingTypes.js'
 import { removeQueueEntryByConnectionId } from './matchmaking/removeQueueEntryByConnectionId.js'
+import {
+  createMatchmakingBotSelectionSeed,
+  selectMatchmakingBotProfiles,
+} from './matchmaking/selectMatchmakingBotProfiles.js'
 import { tryCreatePendingMatchGroup } from './matchmaking/tryCreatePendingMatchGroup.js'
 import { advanceRoomAuthoritativeGame } from './game/advanceRoomAuthoritativeGame.js'
 import { initializeRoomAuthoritativeGameState } from './game/initializeRoomAuthoritativeGameState.js'
@@ -58,6 +64,18 @@ const PORT = Number(process.env.PORT ?? 3001)
 const MATCHMAKING_TICK_MS = 250
 const GAME_RUNTIME_TICK_MS = 250
 const MATCH_PLAYERS_REQUIRED = 4
+
+const databaseBootstrap = await ensureServerDatabaseReady()
+const botCatalogImport = await importBotProfilesCatalog(
+  databaseBootstrap.databaseFilePath,
+)
+
+console.log(
+  `[db] SQLite ready file=${databaseBootstrap.databaseFilePath} applied=${databaseBootstrap.appliedCount} skipped=${databaseBootstrap.skippedCount}`,
+)
+console.log(
+  `[db] bot catalog import processed=${botCatalogImport.processedCount} inserted=${botCatalogImport.insertedCount} updated=${botCatalogImport.updatedCount}`,
+)
 
 type ResumeRoomResult =
   | {
@@ -380,6 +398,11 @@ function sendMatchmakingStatusToConnection(
   const oldestEntry = searchingEntries[0]
   const now = Date.now()
   const countdownEndsAt = oldestEntry?.expiresAt ?? ownEntry.expiresAt
+  const previewBotDisplayNames = selectMatchmakingBotProfiles({
+    stake,
+    count: Math.max(0, MATCH_PLAYERS_REQUIRED - searchingEntries.length),
+    selectionSeed: createMatchmakingBotSelectionSeed(stake, searchingEntries),
+  }).map((profile) => profile.identity.displayName)
 
   safeSendToConnection(connectionId, {
     type: 'matchmaking_status',
@@ -388,6 +411,7 @@ function sendMatchmakingStatusToConnection(
     requiredPlayers: MATCH_PLAYERS_REQUIRED,
     countdownEndsAt,
     remainingMs: Math.max(0, countdownEndsAt - now),
+    previewBotDisplayNames,
   })
 }
 
@@ -749,6 +773,19 @@ wsServer.on('connection', (socket, request) => {
         )
 
         if (existingEntry !== null && existingEntry.stake === message.stake) {
+          const searchingEntries = getSearchingEntriesByStake(
+            matchmakingState.queueEntries,
+            existingEntry.stake,
+          ).sort((a, b) => a.joinedAt - b.joinedAt)
+          const previewBotDisplayNames = selectMatchmakingBotProfiles({
+            stake: existingEntry.stake,
+            count: Math.max(0, MATCH_PLAYERS_REQUIRED - searchingEntries.length),
+            selectionSeed: createMatchmakingBotSelectionSeed(
+              existingEntry.stake,
+              searchingEntries,
+            ),
+          }).map((profile) => profile.identity.displayName)
+
           safeSendToConnection(connection.id, {
             type: 'matchmaking_joined',
             stake: existingEntry.stake,
@@ -759,6 +796,7 @@ wsServer.on('connection', (socket, request) => {
             requiredPlayers: MATCH_PLAYERS_REQUIRED,
             countdownEndsAt: existingEntry.expiresAt,
             remainingMs: Math.max(0, existingEntry.expiresAt - Date.now()),
+            previewBotDisplayNames,
           })
 
           sendMatchmakingStatusToConnection(connection.id, existingEntry.stake)
@@ -789,6 +827,19 @@ wsServer.on('connection', (socket, request) => {
           queueEntries: addQueueEntry(matchmakingState.queueEntries, nextEntry),
         }
 
+        const searchingEntries = getSearchingEntriesByStake(
+          matchmakingState.queueEntries,
+          nextEntry.stake,
+        ).sort((a, b) => a.joinedAt - b.joinedAt)
+        const previewBotDisplayNames = selectMatchmakingBotProfiles({
+          stake: nextEntry.stake,
+          count: Math.max(0, MATCH_PLAYERS_REQUIRED - searchingEntries.length),
+          selectionSeed: createMatchmakingBotSelectionSeed(
+            nextEntry.stake,
+            searchingEntries,
+          ),
+        }).map((profile) => profile.identity.displayName)
+
         safeSendToConnection(connection.id, {
           type: 'matchmaking_joined',
           stake: nextEntry.stake,
@@ -799,6 +850,7 @@ wsServer.on('connection', (socket, request) => {
           requiredPlayers: MATCH_PLAYERS_REQUIRED,
           countdownEndsAt: nextEntry.expiresAt,
           remainingMs: Math.max(0, nextEntry.expiresAt - Date.now()),
+          previewBotDisplayNames,
         })
 
         broadcastMatchmakingStatusForStake(nextEntry.stake)

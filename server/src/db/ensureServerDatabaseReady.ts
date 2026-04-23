@@ -42,6 +42,15 @@ function getDatabaseFilePath(databaseStorageDirectoryPath: string): string {
   return join(databaseStorageDirectoryPath, DATABASE_FILENAME)
 }
 
+export function getServerDatabaseFilePath(): string {
+  const serverRootPath = getServerRootPath()
+  const databaseDirectoryPath = getDatabaseDirectoryPath(serverRootPath)
+  const databaseStorageDirectoryPath =
+    getDatabaseStorageDirectoryPath(databaseDirectoryPath)
+
+  return getDatabaseFilePath(databaseStorageDirectoryPath)
+}
+
 function compareMigrationFileNames(a: string, b: string): number {
   return a.localeCompare(b, 'en')
 }

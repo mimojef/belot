@@ -120,6 +120,7 @@ export type RoomGameSnapshot = {
   phase: RoomGamePhaseSnapshot | null
   authoritativePhase: RoomAuthoritativePhaseSnapshot | null
   timerDeadlineAt: number | null
+  dealerSeat: Seat | null
   cutting: RoomCuttingSnapshot | null
 }
 
@@ -195,6 +196,7 @@ export type MatchmakingJoinedMessage = {
   requiredPlayers: number
   countdownEndsAt: number
   remainingMs: number
+  previewBotDisplayNames?: string[]
 }
 
 export type MatchmakingStatusMessage = {
@@ -204,6 +206,7 @@ export type MatchmakingStatusMessage = {
   requiredPlayers: number
   countdownEndsAt: number
   remainingMs: number
+  previewBotDisplayNames?: string[]
 }
 
 export type MatchmakingLeftMessage = {
