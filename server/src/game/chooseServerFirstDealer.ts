@@ -10,6 +10,7 @@ function getRandomSeat(): Seat {
 export function chooseServerFirstDealer(
   state: ServerAuthoritativeGameState,
 ): ServerAuthoritativeGameState {
-  const dealerSeat = getRandomSeat()
+  // Temporary cutting UI debug: force the first dealer so the local player cuts.
+  const dealerSeat: Seat = 'right'
   return createServerRoundStartState(state, dealerSeat)
 }

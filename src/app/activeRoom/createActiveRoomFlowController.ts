@@ -1,6 +1,7 @@
 import {
   type MatchFoundMessage,
   type MatchStake,
+  type RoomCuttingSnapshot,
   type RoomGameSnapshot,
   type RoomSeatSnapshot,
   type RoomSnapshotMessage,
@@ -10,7 +11,11 @@ import {
 } from '../network/createGameServerClient'
 import { createCuttingSeatPanelsHtml } from './cutting/renderCuttingSeatPanels'
 import { createCuttingVisualCountdownTracker } from './cutting/cuttingVisualCountdown'
-import { renderCuttingScreen } from './renderCuttingScreen'
+import {
+  CUTTING_VISUAL_ANIMATION_TOTAL_MS,
+  type RenderCuttingAnimationState,
+  renderCuttingScreen,
+} from './renderCuttingScreen'
 import { getViewportStageMetrics } from '../../ui/layout/viewportStage'
 
 type ActiveRoomState = {
@@ -47,6 +52,20 @@ type ActiveRoomFlowController = {
   hasActiveRoom: () => boolean
 }
 
+type CuttingAnimationCache = {
+  armedCycleKey: string | null
+  pendingCycleKey: string | null
+  activeCycleKey: string | null
+  activeSelectionKey: string | null
+  startedAt: number
+  rafId: number | null
+  latchedCuttingSnapshot: RoomCuttingSnapshot | null
+  latchedCutterDisplayName: string
+  latchedDealerSeat: Seat | null
+  isAnimating: boolean
+  hasCompleted: boolean
+}
+
 const SEAT_LABELS: Record<Seat, string> = {
   bottom: 'Долу',
   right: 'Дясно',
@@ -61,12 +80,38 @@ const ACTIVE_ROOM_MIN_STAGE_SCALE = 0.46
 const ACTIVE_ROOM_VIEWPORT_HORIZONTAL_PADDING = 20
 const ACTIVE_ROOM_VIEWPORT_VERTICAL_PADDING = 20
 
+function getCuttingCycleKey(roomId: string, game: RoomGameSnapshot | null): string | null {
+  const cuttingSnapshot = game?.cutting ?? null
+  const cutterSeat = cuttingSnapshot?.cutterSeat ?? null
+  const dealerSeat = game?.dealerSeat ?? null
+  const timerDeadlineAt = game?.timerDeadlineAt ?? 'no-timer'
+
+  if (!cuttingSnapshot || !cutterSeat) {
+    return null
+  }
+
+  return `${roomId}:${dealerSeat ?? 'no-dealer'}:${cutterSeat}:${timerDeadlineAt}`
+}
+
 export function createActiveRoomFlowController(
   options: CreateActiveRoomFlowControllerOptions,
 ): ActiveRoomFlowController {
   const pendingRoomSnapshots = new Map<string, RoomSnapshotMessage>()
   let activeRoomState: ActiveRoomState | null = null
   const cuttingVisualCountdown = createCuttingVisualCountdownTracker()
+  const cuttingAnimation: CuttingAnimationCache = {
+    armedCycleKey: null,
+    pendingCycleKey: null,
+    activeCycleKey: null,
+    activeSelectionKey: null,
+    startedAt: 0,
+    rafId: null,
+    latchedCuttingSnapshot: null,
+    latchedCutterDisplayName: '',
+    latchedDealerSeat: null,
+    isAnimating: false,
+    hasCompleted: false,
+  }
 
   function escapeHtml(value: string): string {
     return value
@@ -222,7 +267,158 @@ export function createActiveRoomFlowController(
     })
   }
 
-  function renderActiveRoomScreen(): void {
+  function cancelCuttingAnimationFrame(): void {
+    if (cuttingAnimation.rafId === null) {
+      return
+    }
+
+    window.cancelAnimationFrame(cuttingAnimation.rafId)
+    cuttingAnimation.rafId = null
+  }
+
+  function clearCuttingAnimationLatch(): void {
+    cuttingAnimation.activeCycleKey = null
+    cuttingAnimation.activeSelectionKey = null
+    cuttingAnimation.startedAt = 0
+    cuttingAnimation.latchedCuttingSnapshot = null
+    cuttingAnimation.latchedCutterDisplayName = ''
+    cuttingAnimation.latchedDealerSeat = null
+    cuttingAnimation.isAnimating = false
+    cuttingAnimation.hasCompleted = false
+  }
+
+  function clearPendingCutSubmission(): void {
+    cuttingAnimation.pendingCycleKey = null
+  }
+
+  function resetCuttingAnimationState(): void {
+    cancelCuttingAnimationFrame()
+    cuttingAnimation.armedCycleKey = null
+    clearPendingCutSubmission()
+    clearCuttingAnimationLatch()
+  }
+
+  function scheduleCuttingAnimationFrame(): void {
+    if (!cuttingAnimation.isAnimating || cuttingAnimation.rafId !== null) {
+      return
+    }
+
+    cuttingAnimation.rafId = window.requestAnimationFrame(() => {
+      cuttingAnimation.rafId = null
+
+      if (!activeRoomState || !cuttingAnimation.isAnimating) {
+        return
+      }
+
+      const elapsedMs = performance.now() - cuttingAnimation.startedAt
+
+      if (elapsedMs >= CUTTING_VISUAL_ANIMATION_TOTAL_MS) {
+        cuttingAnimation.isAnimating = false
+        cuttingAnimation.hasCompleted = true
+        renderActiveRoomScreen()
+        return
+      }
+
+      renderActiveRoomScreen(true)
+      scheduleCuttingAnimationFrame()
+    })
+  }
+
+  function startCuttingAnimation(
+    cuttingSnapshot: RoomCuttingSnapshot,
+    cutterDisplayName: string,
+    dealerSeat: Seat | null,
+    cycleKey: string,
+    selectionKey: string,
+  ): void {
+    cancelCuttingAnimationFrame()
+    cuttingAnimation.activeCycleKey = cycleKey
+    cuttingAnimation.activeSelectionKey = selectionKey
+    cuttingAnimation.startedAt = performance.now()
+    cuttingAnimation.latchedCuttingSnapshot = { ...cuttingSnapshot }
+    cuttingAnimation.latchedCutterDisplayName = cutterDisplayName
+    cuttingAnimation.latchedDealerSeat = dealerSeat
+    cuttingAnimation.isAnimating = true
+    cuttingAnimation.hasCompleted = false
+    scheduleCuttingAnimationFrame()
+  }
+
+  function syncCuttingAnimationState(
+    roomId: string,
+    game: RoomGameSnapshot | null,
+    cuttingSnapshot: RoomCuttingSnapshot | null,
+    cutterDisplayName: string,
+    dealerSeat: Seat | null,
+  ): void {
+    const cycleKey = getCuttingCycleKey(roomId, game)
+    const isAwaitingHumanCutSelection = game?.authoritativePhase === 'cutting'
+
+    if (
+      cuttingSnapshot &&
+      cuttingSnapshot.selectedCutIndex === null &&
+      cycleKey !== null &&
+      isAwaitingHumanCutSelection
+    ) {
+      const shouldResetForNewPendingCycle =
+        cuttingAnimation.activeCycleKey !== null &&
+        (cuttingAnimation.activeCycleKey !== cycleKey ||
+          (cuttingAnimation.activeCycleKey === cycleKey && cuttingAnimation.hasCompleted))
+
+      if (shouldResetForNewPendingCycle) {
+        cancelCuttingAnimationFrame()
+        clearCuttingAnimationLatch()
+      }
+
+      if (cuttingAnimation.pendingCycleKey !== null && cuttingAnimation.pendingCycleKey !== cycleKey) {
+        clearPendingCutSubmission()
+      }
+
+      cuttingAnimation.armedCycleKey = cycleKey
+      return
+    }
+
+    if (cuttingSnapshot && cuttingSnapshot.selectedCutIndex !== null) {
+      const selectionCycleKey =
+        cuttingAnimation.activeCycleKey ?? cuttingAnimation.armedCycleKey ?? cycleKey
+      const selectionKey =
+        selectionCycleKey !== null ? `${selectionCycleKey}:${cuttingSnapshot.selectedCutIndex}` : null
+
+      if (selectionCycleKey === null || selectionKey === null) {
+        return
+      }
+
+      clearPendingCutSubmission()
+
+      if (cuttingAnimation.activeCycleKey === selectionCycleKey) {
+        if (cuttingAnimation.activeSelectionKey === selectionKey) {
+          cuttingAnimation.latchedCuttingSnapshot = { ...cuttingSnapshot }
+          cuttingAnimation.latchedCutterDisplayName = cutterDisplayName
+          cuttingAnimation.latchedDealerSeat = dealerSeat
+        }
+
+        return
+      }
+
+      if (!cuttingAnimation.isAnimating) {
+        startCuttingAnimation(
+          cuttingSnapshot,
+          cutterDisplayName,
+          dealerSeat,
+          selectionCycleKey,
+          selectionKey,
+        )
+        return
+      }
+
+      return
+    }
+
+    if (!cuttingSnapshot && !cuttingAnimation.isAnimating) {
+      resetCuttingAnimationState()
+    }
+  }
+
+  function renderActiveRoomScreen(preferAnimationPatch = false): void {
     if (!activeRoomState) {
       return
     }
@@ -240,10 +436,50 @@ export function createActiveRoomFlowController(
         : cutterSeat !== null
           ? SEAT_LABELS[cutterSeat]
           : 'играч'
-    const isLocalPlayerCutter = cutterSeat !== null && activeRoomState.seat === cutterSeat
+    syncCuttingAnimationState(
+      activeRoomState.roomId,
+      activeRoomState.game,
+      cuttingSnapshot,
+      cutterDisplayName,
+      dealerSeat,
+    )
+
+    const currentCutCycleKey = getCuttingCycleKey(activeRoomState.roomId, activeRoomState.game)
+    const isCutSubmissionPending =
+      currentCutCycleKey !== null &&
+      cuttingAnimation.pendingCycleKey === currentCutCycleKey &&
+      cuttingSnapshot?.selectedCutIndex === null
+    const shouldRenderCompletedCutAnimation =
+      cuttingAnimation.hasCompleted && cuttingSnapshot !== null
+    const shouldRenderCutAnimation =
+      cuttingAnimation.isAnimating || shouldRenderCompletedCutAnimation
+    const cuttingSnapshotForRender =
+      shouldRenderCutAnimation
+        ? cuttingAnimation.latchedCuttingSnapshot ?? cuttingSnapshot
+        : cuttingSnapshot
+    const dealerSeatForRender =
+      shouldRenderCutAnimation
+        ? cuttingAnimation.latchedDealerSeat ?? dealerSeat
+        : dealerSeat
+    const cutterSeatForRender = cuttingSnapshotForRender?.cutterSeat ?? null
+    const cutterDisplayNameForRender =
+      shouldRenderCutAnimation && cuttingAnimation.latchedCutterDisplayName.trim()
+        ? cuttingAnimation.latchedCutterDisplayName
+        : cutterDisplayName
+    const isLocalPlayerCutter =
+      cutterSeatForRender !== null && activeRoomState.seat === cutterSeatForRender
+    const cutAnimationForRender: RenderCuttingAnimationState | null =
+      shouldRenderCutAnimation && cuttingAnimation.latchedCuttingSnapshot?.selectedCutIndex !== null
+        ? {
+            elapsedMs: cuttingAnimation.isAnimating
+              ? performance.now() - cuttingAnimation.startedAt
+              : CUTTING_VISUAL_ANIMATION_TOTAL_MS,
+            totalDurationMs: CUTTING_VISUAL_ANIMATION_TOTAL_MS,
+          }
+        : null
     const { stageScale, scaledStageWidth, scaledStageHeight } = getActiveRoomStageMetrics()
 
-    if (cuttingSnapshot) {
+    if (cuttingSnapshotForRender) {
       const cuttingVisualCountdownContext = {
         roomId: activeRoomState.roomId,
         game: activeRoomState.game,
@@ -254,6 +490,31 @@ export function createActiveRoomFlowController(
         cuttingVisualCountdown.getCuttingVisualCountdownRemainingMs(
           cuttingVisualCountdownContext,
         )
+      const cuttingCountdownRemainingMsForRender =
+        shouldRenderCutAnimation || isCutSubmissionPending
+          ? null
+          : cuttingCountdownRemainingMs
+      const cuttingScreenHtml = renderCuttingScreen({
+        cuttingSnapshot: cuttingSnapshotForRender,
+        cutterDisplayName: cutterDisplayNameForRender,
+        isInteractive:
+          cutAnimationForRender === null &&
+          !isCutSubmissionPending &&
+          cuttingSnapshotForRender.canSubmitCut &&
+          isLocalPlayerCutter,
+        cutAnimation: cutAnimationForRender,
+      })
+
+      if (preferAnimationPatch && cutAnimationForRender !== null) {
+        const cuttingVisualRoot = options.root.querySelector<HTMLDivElement>(
+          '[data-active-room-cutting-visual="1"]',
+        )
+
+        if (cuttingVisualRoot) {
+          cuttingVisualRoot.innerHTML = cuttingScreenHtml
+          return
+        }
+      }
 
       options.root.innerHTML = `
         <div
@@ -292,6 +553,7 @@ export function createActiveRoomFlowController(
               "
             >
               <div
+                data-active-room-cutting-visual="1"
                 style="
                   position:relative;
                   width:100%;
@@ -299,20 +561,16 @@ export function createActiveRoomFlowController(
                   overflow:hidden;
                 "
               >
-                ${renderCuttingScreen({
-                  cuttingSnapshot,
-                  cutterDisplayName,
-                  isInteractive: cuttingSnapshot.canSubmitCut && isLocalPlayerCutter,
-                })}
+                ${cuttingScreenHtml}
               </div>
             </div>
           </div>
           ${createCuttingSeatPanelsHtml({
             seats: activeRoomState.seats,
             localSeat: activeRoomState.seat,
-            dealerSeat,
-            cutterSeat,
-            cuttingCountdownRemainingMs,
+            dealerSeat: dealerSeatForRender,
+            cutterSeat: cutterSeatForRender,
+            cuttingCountdownRemainingMs: cuttingCountdownRemainingMsForRender,
             panelScale: stageScale,
             escapeHtml,
           })}
@@ -648,6 +906,18 @@ export function createActiveRoomFlowController(
             return
           }
 
+          const currentCycleKey = getCuttingCycleKey(activeRoomState.roomId, activeRoomState.game)
+
+          if (
+            currentCycleKey === null ||
+            cuttingAnimation.pendingCycleKey === currentCycleKey ||
+            cuttingAnimation.isAnimating
+          ) {
+            return
+          }
+
+          cuttingAnimation.pendingCycleKey = currentCycleKey
+          renderActiveRoomScreen()
           options.submitCutIndex(activeRoomState.roomId, cutIndex)
         })
       })
@@ -667,11 +937,12 @@ export function createActiveRoomFlowController(
     activeRoomState.seats = message.seats
     activeRoomState.game = message.game ?? null
     activeRoomState.errorText = null
-    renderActiveRoomScreen()
+    renderActiveRoomScreen(cuttingAnimation.isAnimating)
     return true
   }
 
   function enterActiveRoom(message: MatchFoundMessage): void {
+    resetCuttingAnimationState()
     activeRoomState = {
       roomId: message.roomId,
       seat: message.seat,
@@ -713,18 +984,21 @@ export function createActiveRoomFlowController(
     }
 
     if (message.type === 'left_active_room' && message.roomId === activeRoomState.roomId) {
+      resetCuttingAnimationState()
       activeRoomState = null
       options.showLobby(null)
       return true
     }
 
     if (message.type === 'room_resume_failed' && message.roomId === activeRoomState.roomId) {
+      resetCuttingAnimationState()
       activeRoomState = null
       options.showLobby(message.message)
       return true
     }
 
     if (message.type === 'error') {
+      clearPendingCutSubmission()
       activeRoomState.errorText = message.message
       renderActiveRoomScreen()
       return true
@@ -738,6 +1012,10 @@ export function createActiveRoomFlowController(
       return
     }
 
+    if (!value) {
+      clearPendingCutSubmission()
+    }
+
     activeRoomState.isConnected = value
     renderActiveRoomScreen()
   }
@@ -747,6 +1025,10 @@ export function createActiveRoomFlowController(
       return
     }
 
+    if (message) {
+      clearPendingCutSubmission()
+    }
+
     activeRoomState.errorText = message
     renderActiveRoomScreen()
   }
@@ -754,6 +1036,10 @@ export function createActiveRoomFlowController(
   function setConnectionState(isConnected: boolean, message: string | null): void {
     if (!activeRoomState) {
       return
+    }
+
+    if (!isConnected || message) {
+      clearPendingCutSubmission()
     }
 
     activeRoomState.isConnected = isConnected
@@ -766,6 +1052,7 @@ export function createActiveRoomFlowController(
       return
     }
 
+    resetCuttingAnimationState()
     options.leaveActiveRoom(activeRoomState.roomId)
   }
 

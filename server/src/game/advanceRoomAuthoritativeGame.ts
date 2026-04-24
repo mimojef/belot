@@ -15,5 +15,9 @@ export function advanceRoomAuthoritativeGame(
 
   const nextAuthoritativeState = advanceServerGameToNow(authoritativeState, now)
 
+  if (nextAuthoritativeState === authoritativeState) {
+    return room
+  }
+
   return syncRoomWithAuthoritativeState(room, nextAuthoritativeState, now)
 }

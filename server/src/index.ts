@@ -174,13 +174,16 @@ function tickRoomGameRuntimes(): void {
 
     roomGameRuntimeRegistry.set(roomId, nextRuntime)
 
-    if (nextRooms === null) {
-      nextRooms = {
-        ...serverState.rooms,
+    if (nextRoom !== room) {
+      if (nextRooms === null) {
+        nextRooms = {
+          ...serverState.rooms,
+        }
       }
-    }
 
-    nextRooms[roomId] = nextRoom
+      nextRooms[roomId] = nextRoom
+      broadcastRoomSnapshots(nextRoom, socketRegistry)
+    }
   }
 
   if (nextRooms !== null) {

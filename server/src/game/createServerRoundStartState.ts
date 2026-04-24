@@ -1,4 +1,4 @@
-import type { Seat } from '../core/serverTypes.js'
+import { SERVER_SEAT_ORDER, type Seat } from '../core/serverTypes.js'
 import {
   createEmptyBiddingState,
   createEmptyDeclarations,
@@ -16,15 +16,26 @@ export function createServerRoundStartState(
   state: ServerAuthoritativeGameState,
   dealerSeat: Seat,
 ): ServerAuthoritativeGameState {
-  const cutterSeat = getSeatBeforeDealer(dealerSeat)
-  const firstBidderSeat = getSeatAfterDealer(dealerSeat)
-  const firstDealSeat = getSeatAfterDealer(dealerSeat)
+  const humanSeats = SERVER_SEAT_ORDER.filter(
+    (seat) => state.players[seat].mode === 'human',
+  )
+  const debugCutterSeat = humanSeats.length === 1 ? humanSeats[0] : null
+  // TEMP: cutting UI debug. Revert before commit/production.
+  const effectiveDealerSeat =
+    debugCutterSeat === null
+      ? dealerSeat
+      : SERVER_SEAT_ORDER.find(
+          (seat) => getSeatBeforeDealer(seat) === debugCutterSeat,
+        ) ?? dealerSeat
+  const cutterSeat = getSeatBeforeDealer(effectiveDealerSeat)
+  const firstBidderSeat = getSeatAfterDealer(effectiveDealerSeat)
+  const firstDealSeat = getSeatAfterDealer(effectiveDealerSeat)
 
   const roundResetState: ServerAuthoritativeGameState = {
     ...state,
     phase: 'cutting',
     round: {
-      dealerSeat,
+      dealerSeat: effectiveDealerSeat,
       cutterSeat,
       firstBidderSeat,
       firstDealSeat,

@@ -1,6 +1,7 @@
 import type { RoomGameSnapshot } from '../../network/createGameServerClient'
 
 export const CUTTING_COUNTDOWN_MS = 15000
+const SHORT_CUTTING_VISUAL_TIMER_THRESHOLD_MS = 1500
 
 type CuttingVisualCountdownContext = {
   roomId: string
@@ -50,6 +51,28 @@ function getServerTimerDeadlineAt(context: CuttingVisualCountdownContext | null)
   return parseTimerDeadlineAt(context?.game?.timerDeadlineAt)
 }
 
+function resolveCuttingVisualStartedAt(
+  context: CuttingVisualCountdownContext | null,
+): number {
+  const serverTimerDeadlineAt = getServerTimerDeadlineAt(context)
+  const now = Date.now()
+
+  if (serverTimerDeadlineAt === null) {
+    return now
+  }
+
+  const remainingMs = serverTimerDeadlineAt - now
+
+  if (
+    !Number.isFinite(remainingMs) ||
+    remainingMs <= SHORT_CUTTING_VISUAL_TIMER_THRESHOLD_MS
+  ) {
+    return now
+  }
+
+  return serverTimerDeadlineAt - CUTTING_COUNTDOWN_MS
+}
+
 export function createCuttingVisualCountdownTracker(): CuttingVisualCountdownTracker {
   let activeCuttingVisualTurnKey: string | null = null
   let activeCuttingVisualStartedAt = 0
@@ -95,7 +118,7 @@ export function createCuttingVisualCountdownTracker(): CuttingVisualCountdownTra
     }
 
     activeCuttingVisualTurnKey = turnKey
-    activeCuttingVisualStartedAt = Date.now()
+    activeCuttingVisualStartedAt = resolveCuttingVisualStartedAt(context)
   }
 
   function getCuttingVisualCountdownRemainingMs(
@@ -105,12 +128,6 @@ export function createCuttingVisualCountdownTracker(): CuttingVisualCountdownTra
 
     if (turnKey === null) {
       return null
-    }
-
-    const serverTimerDeadlineAt = getServerTimerDeadlineAt(context)
-
-    if (serverTimerDeadlineAt !== null) {
-      return Math.max(0, serverTimerDeadlineAt - Date.now())
     }
 
     if (
