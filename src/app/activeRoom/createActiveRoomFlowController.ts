@@ -9,13 +9,22 @@ import {
   type Seat,
   type ServerMessage,
 } from '../network/createGameServerClient'
-import { createCuttingSeatPanelsHtml } from './cutting/renderCuttingSeatPanels'
+import { createCuttingSeatPanelsHtml, type DealtHandsData } from './cutting/renderCuttingSeatPanels'
 import { createCuttingVisualCountdownTracker } from './cutting/cuttingVisualCountdown'
 import {
   CUTTING_VISUAL_ANIMATION_TOTAL_MS,
   type RenderCuttingAnimationState,
   renderCuttingScreen,
 } from './renderCuttingScreen'
+import {
+  DEAL_FIRST_THREE_VISUAL_TOTAL_MS,
+  DEAL_NEXT_TWO_VISUAL_TOTAL_MS,
+  DEAL_PACKET_DELAY_STEP_MS,
+  DEAL_PACKET_START_DELAY_MS,
+  type RenderDealingAnimationState,
+  renderDealingScreen,
+  syncDealingScreenTargets,
+} from './renderDealingScreen'
 import { getViewportStageMetrics } from '../../ui/layout/viewportStage'
 
 type ActiveRoomState = {
@@ -57,11 +66,22 @@ type CuttingAnimationCache = {
   pendingCycleKey: string | null
   activeCycleKey: string | null
   activeSelectionKey: string | null
+  renderedSelectionKey: string | null
   startedAt: number
-  rafId: number | null
+  completionTimerId: number | null
   latchedCuttingSnapshot: RoomCuttingSnapshot | null
   latchedCutterDisplayName: string
   latchedDealerSeat: Seat | null
+  isAnimating: boolean
+  hasCompleted: boolean
+}
+
+type DealingAnimationCache = {
+  activePhaseKey: string | null
+  renderedPhaseKey: string | null
+  renderedFirstDealSeat: Seat | null
+  startedAt: number
+  completionTimerId: number | null
   isAnimating: boolean
   hasCompleted: boolean
 }
@@ -71,6 +91,22 @@ const SEAT_LABELS: Record<Seat, string> = {
   right: 'Дясно',
   top: 'Горе',
   left: 'Ляво',
+}
+
+const SERVER_DEAL_ORDER: Seat[] = ['bottom', 'right', 'top', 'left']
+
+function getSeatAfterDealerForDealFallback(dealerSeat: Seat | null): Seat | null {
+  if (dealerSeat === null) {
+    return null
+  }
+
+  const dealerIndex = SERVER_DEAL_ORDER.indexOf(dealerSeat)
+
+  if (dealerIndex === -1) {
+    return null
+  }
+
+  return SERVER_DEAL_ORDER[(dealerIndex + 1) % SERVER_DEAL_ORDER.length]
 }
 
 const ACTIVE_ROOM_STAGE_WIDTH = 1600
@@ -93,6 +129,85 @@ function getCuttingCycleKey(roomId: string, game: RoomGameSnapshot | null): stri
   return `${roomId}:${dealerSeat ?? 'no-dealer'}:${cutterSeat}:${timerDeadlineAt}`
 }
 
+function getDealFirstThreePhaseKey(roomId: string, game: RoomGameSnapshot | null): string | null {
+  if (!game) {
+    return null
+  }
+
+  const isLiveFirstDealPhase = game.authoritativePhase === 'deal-first-3'
+  const isAlreadyPastFirstDeal =
+    game.authoritativePhase === 'deal-next-2' ||
+    game.authoritativePhase === 'bidding' ||
+    game.authoritativePhase === 'deal-last-3' ||
+    game.authoritativePhase === 'playing' ||
+    game.authoritativePhase === 'scoring'
+
+  if (!isLiveFirstDealPhase && !(isAlreadyPastFirstDeal && hasVisibleFirstThreeHands(game))) {
+    return null
+  }
+
+  const dealerSeat = game.dealerSeat ?? null
+  const firstDealSeat = game.firstDealSeat ?? getSeatAfterDealerForDealFallback(dealerSeat)
+
+  return `${roomId}:deal-first-3:${dealerSeat ?? 'no-dealer'}:${firstDealSeat ?? 'no-first-deal'}`
+}
+
+function hasVisibleFirstThreeHands(game: RoomGameSnapshot | null): boolean {
+  if (!game) {
+    return false
+  }
+
+  return (
+    game.handCounts.bottom >= 3 &&
+    game.handCounts.right >= 3 &&
+    game.handCounts.top >= 3 &&
+    game.handCounts.left >= 3
+  )
+}
+
+function shouldKeepFirstThreeHandsVisible(game: RoomGameSnapshot | null): boolean {
+  return hasVisibleFirstThreeHands(game)
+}
+
+function getDealNextTwoPhaseKey(roomId: string, game: RoomGameSnapshot | null): string | null {
+  if (!game) {
+    return null
+  }
+
+  const isLiveNextTwoPhase = game.authoritativePhase === 'deal-next-2'
+  const isAlreadyPastNextTwo =
+    game.authoritativePhase === 'bidding' ||
+    game.authoritativePhase === 'deal-last-3' ||
+    game.authoritativePhase === 'playing' ||
+    game.authoritativePhase === 'scoring'
+
+  if (!isLiveNextTwoPhase && !(isAlreadyPastNextTwo && hasVisibleNextTwoHands(game))) {
+    return null
+  }
+
+  const dealerSeat = game.dealerSeat ?? null
+  const firstDealSeat = game.firstDealSeat ?? getSeatAfterDealerForDealFallback(dealerSeat)
+
+  return `${roomId}:deal-next-2:${dealerSeat ?? 'no-dealer'}:${firstDealSeat ?? 'no-first-deal'}`
+}
+
+function hasVisibleNextTwoHands(game: RoomGameSnapshot | null): boolean {
+  if (!game) {
+    return false
+  }
+
+  return (
+    game.handCounts.bottom >= 5 &&
+    game.handCounts.right >= 5 &&
+    game.handCounts.top >= 5 &&
+    game.handCounts.left >= 5
+  )
+}
+
+function shouldKeepNextTwoHandsVisible(game: RoomGameSnapshot | null): boolean {
+  return hasVisibleNextTwoHands(game)
+}
+
 export function createActiveRoomFlowController(
   options: CreateActiveRoomFlowControllerOptions,
 ): ActiveRoomFlowController {
@@ -104,11 +219,30 @@ export function createActiveRoomFlowController(
     pendingCycleKey: null,
     activeCycleKey: null,
     activeSelectionKey: null,
+    renderedSelectionKey: null,
     startedAt: 0,
-    rafId: null,
+    completionTimerId: null,
     latchedCuttingSnapshot: null,
     latchedCutterDisplayName: '',
     latchedDealerSeat: null,
+    isAnimating: false,
+    hasCompleted: false,
+  }
+  const dealingAnimation: DealingAnimationCache = {
+    activePhaseKey: null,
+    renderedPhaseKey: null,
+    renderedFirstDealSeat: null,
+    startedAt: 0,
+    completionTimerId: null,
+    isAnimating: false,
+    hasCompleted: false,
+  }
+  const dealNextTwoAnimation: DealingAnimationCache = {
+    activePhaseKey: null,
+    renderedPhaseKey: null,
+    renderedFirstDealSeat: null,
+    startedAt: 0,
+    completionTimerId: null,
     isAnimating: false,
     hasCompleted: false,
   }
@@ -267,18 +401,19 @@ export function createActiveRoomFlowController(
     })
   }
 
-  function cancelCuttingAnimationFrame(): void {
-    if (cuttingAnimation.rafId === null) {
+  function cancelCuttingAnimationCompletionTimer(): void {
+    if (cuttingAnimation.completionTimerId === null) {
       return
     }
 
-    window.cancelAnimationFrame(cuttingAnimation.rafId)
-    cuttingAnimation.rafId = null
+    window.clearTimeout(cuttingAnimation.completionTimerId)
+    cuttingAnimation.completionTimerId = null
   }
 
   function clearCuttingAnimationLatch(): void {
     cuttingAnimation.activeCycleKey = null
     cuttingAnimation.activeSelectionKey = null
+    cuttingAnimation.renderedSelectionKey = null
     cuttingAnimation.startedAt = 0
     cuttingAnimation.latchedCuttingSnapshot = null
     cuttingAnimation.latchedCutterDisplayName = ''
@@ -292,36 +427,166 @@ export function createActiveRoomFlowController(
   }
 
   function resetCuttingAnimationState(): void {
-    cancelCuttingAnimationFrame()
+    cancelCuttingAnimationCompletionTimer()
     cuttingAnimation.armedCycleKey = null
     clearPendingCutSubmission()
     clearCuttingAnimationLatch()
   }
 
-  function scheduleCuttingAnimationFrame(): void {
-    if (!cuttingAnimation.isAnimating || cuttingAnimation.rafId !== null) {
+  function cancelDealingAnimationCompletionTimer(): void {
+    if (dealingAnimation.completionTimerId === null) {
       return
     }
 
-    cuttingAnimation.rafId = window.requestAnimationFrame(() => {
-      cuttingAnimation.rafId = null
+    window.clearTimeout(dealingAnimation.completionTimerId)
+    dealingAnimation.completionTimerId = null
+  }
+
+  function clearDealingAnimationState(): void {
+    cancelDealingAnimationCompletionTimer()
+    dealingAnimation.activePhaseKey = null
+    dealingAnimation.renderedPhaseKey = null
+    dealingAnimation.renderedFirstDealSeat = null
+    dealingAnimation.startedAt = 0
+    dealingAnimation.isAnimating = false
+    dealingAnimation.hasCompleted = false
+  }
+
+  function scheduleDealingAnimationCompletion(): void {
+    if (!dealingAnimation.isAnimating || dealingAnimation.completionTimerId !== null) {
+      return
+    }
+
+    const remainingMs = Math.max(
+      0,
+      DEAL_FIRST_THREE_VISUAL_TOTAL_MS - (performance.now() - dealingAnimation.startedAt),
+    )
+
+    dealingAnimation.completionTimerId = window.setTimeout(() => {
+      dealingAnimation.completionTimerId = null
+
+      if (!activeRoomState || !dealingAnimation.isAnimating) {
+        return
+      }
+
+      dealingAnimation.isAnimating = false
+      dealingAnimation.hasCompleted = true
+      renderActiveRoomScreen()
+    }, remainingMs)
+  }
+
+  function cancelDealNextTwoAnimationCompletionTimer(): void {
+    if (dealNextTwoAnimation.completionTimerId === null) {
+      return
+    }
+    window.clearTimeout(dealNextTwoAnimation.completionTimerId)
+    dealNextTwoAnimation.completionTimerId = null
+  }
+
+  function clearDealNextTwoAnimationState(): void {
+    cancelDealNextTwoAnimationCompletionTimer()
+    dealNextTwoAnimation.activePhaseKey = null
+    dealNextTwoAnimation.renderedPhaseKey = null
+    dealNextTwoAnimation.renderedFirstDealSeat = null
+    dealNextTwoAnimation.startedAt = 0
+    dealNextTwoAnimation.isAnimating = false
+    dealNextTwoAnimation.hasCompleted = false
+  }
+
+  function scheduleDealNextTwoAnimationCompletion(): void {
+    if (!dealNextTwoAnimation.isAnimating || dealNextTwoAnimation.completionTimerId !== null) {
+      return
+    }
+
+    const remainingMs = Math.max(
+      0,
+      DEAL_NEXT_TWO_VISUAL_TOTAL_MS - (performance.now() - dealNextTwoAnimation.startedAt),
+    )
+
+    dealNextTwoAnimation.completionTimerId = window.setTimeout(() => {
+      dealNextTwoAnimation.completionTimerId = null
+
+      if (!activeRoomState || !dealNextTwoAnimation.isAnimating) {
+        return
+      }
+
+      dealNextTwoAnimation.isAnimating = false
+      dealNextTwoAnimation.hasCompleted = true
+      // No re-render here — CSS fill-mode keeps cards visible at their final state.
+      // The next server snapshot (bidding phase) will trigger a clean full re-render.
+    }, remainingMs)
+  }
+
+  function syncDealNextTwoAnimationState(roomId: string, game: RoomGameSnapshot | null): void {
+    const phaseKey = getDealNextTwoPhaseKey(roomId, game)
+
+    if (phaseKey === null) {
+      if (!dealNextTwoAnimation.isAnimating) {
+        clearDealNextTwoAnimationState()
+      }
+      return
+    }
+
+    if (dealNextTwoAnimation.activePhaseKey === phaseKey) {
+      return
+    }
+
+    cancelDealNextTwoAnimationCompletionTimer()
+    dealNextTwoAnimation.activePhaseKey = phaseKey
+    dealNextTwoAnimation.renderedPhaseKey = null
+    dealNextTwoAnimation.renderedFirstDealSeat = null
+    dealNextTwoAnimation.startedAt = performance.now()
+    dealNextTwoAnimation.isAnimating = true
+    dealNextTwoAnimation.hasCompleted = false
+    scheduleDealNextTwoAnimationCompletion()
+  }
+
+  function syncDealingAnimationState(roomId: string, game: RoomGameSnapshot | null): void {
+    const phaseKey = getDealFirstThreePhaseKey(roomId, game)
+
+    if (phaseKey === null) {
+      if (!dealingAnimation.isAnimating) {
+        clearDealingAnimationState()
+      }
+
+      return
+    }
+
+    if (dealingAnimation.activePhaseKey === phaseKey) {
+      return
+    }
+
+    cancelDealingAnimationCompletionTimer()
+    dealingAnimation.activePhaseKey = phaseKey
+    dealingAnimation.renderedPhaseKey = null
+    dealingAnimation.renderedFirstDealSeat = null
+    dealingAnimation.startedAt = performance.now()
+    dealingAnimation.isAnimating = true
+    dealingAnimation.hasCompleted = false
+    scheduleDealingAnimationCompletion()
+  }
+
+  function scheduleCuttingAnimationCompletion(): void {
+    if (!cuttingAnimation.isAnimating || cuttingAnimation.completionTimerId !== null) {
+      return
+    }
+
+    const remainingMs = Math.max(
+      0,
+      CUTTING_VISUAL_ANIMATION_TOTAL_MS - (performance.now() - cuttingAnimation.startedAt),
+    )
+
+    cuttingAnimation.completionTimerId = window.setTimeout(() => {
+      cuttingAnimation.completionTimerId = null
 
       if (!activeRoomState || !cuttingAnimation.isAnimating) {
         return
       }
 
-      const elapsedMs = performance.now() - cuttingAnimation.startedAt
-
-      if (elapsedMs >= CUTTING_VISUAL_ANIMATION_TOTAL_MS) {
-        cuttingAnimation.isAnimating = false
-        cuttingAnimation.hasCompleted = true
-        renderActiveRoomScreen()
-        return
-      }
-
-      renderActiveRoomScreen(true)
-      scheduleCuttingAnimationFrame()
-    })
+      cuttingAnimation.isAnimating = false
+      cuttingAnimation.hasCompleted = true
+      renderActiveRoomScreen()
+    }, remainingMs)
   }
 
   function startCuttingAnimation(
@@ -331,16 +596,17 @@ export function createActiveRoomFlowController(
     cycleKey: string,
     selectionKey: string,
   ): void {
-    cancelCuttingAnimationFrame()
+    cancelCuttingAnimationCompletionTimer()
     cuttingAnimation.activeCycleKey = cycleKey
     cuttingAnimation.activeSelectionKey = selectionKey
+    cuttingAnimation.renderedSelectionKey = null
     cuttingAnimation.startedAt = performance.now()
     cuttingAnimation.latchedCuttingSnapshot = { ...cuttingSnapshot }
     cuttingAnimation.latchedCutterDisplayName = cutterDisplayName
     cuttingAnimation.latchedDealerSeat = dealerSeat
     cuttingAnimation.isAnimating = true
     cuttingAnimation.hasCompleted = false
-    scheduleCuttingAnimationFrame()
+    scheduleCuttingAnimationCompletion()
   }
 
   function syncCuttingAnimationState(
@@ -365,7 +631,7 @@ export function createActiveRoomFlowController(
           (cuttingAnimation.activeCycleKey === cycleKey && cuttingAnimation.hasCompleted))
 
       if (shouldResetForNewPendingCycle) {
-        cancelCuttingAnimationFrame()
+        cancelCuttingAnimationCompletionTimer()
         clearCuttingAnimationLatch()
       }
 
@@ -425,6 +691,7 @@ export function createActiveRoomFlowController(
 
     const cuttingSnapshot = activeRoomState.game?.cutting ?? null
     const dealerSeat = activeRoomState.game?.dealerSeat ?? null
+    const firstDealSeat = activeRoomState.game?.firstDealSeat ?? null
     const cutterSeat = cuttingSnapshot?.cutterSeat ?? null
     const cutterSeatSnapshot =
       cutterSeat !== null
@@ -444,23 +711,55 @@ export function createActiveRoomFlowController(
       dealerSeat,
     )
 
+    const authoritativePhase = activeRoomState.game?.authoritativePhase ?? null
+    const shouldKeepFirstThreeHands = shouldKeepFirstThreeHandsVisible(activeRoomState.game)
     const currentCutCycleKey = getCuttingCycleKey(activeRoomState.roomId, activeRoomState.game)
     const isCutSubmissionPending =
       currentCutCycleKey !== null &&
       cuttingAnimation.pendingCycleKey === currentCutCycleKey &&
       cuttingSnapshot?.selectedCutIndex === null
     const shouldRenderCompletedCutAnimation =
-      cuttingAnimation.hasCompleted && cuttingSnapshot !== null
+      cuttingAnimation.hasCompleted &&
+      cuttingSnapshot !== null &&
+      !shouldKeepFirstThreeHands &&
+      authoritativePhase !== 'deal-first-3'
     const shouldRenderCutAnimation =
       cuttingAnimation.isAnimating || shouldRenderCompletedCutAnimation
+    if (!shouldRenderCutAnimation) {
+      syncDealingAnimationState(activeRoomState.roomId, activeRoomState.game)
+      if (dealingAnimation.hasCompleted || !dealingAnimation.isAnimating) {
+        syncDealNextTwoAnimationState(activeRoomState.roomId, activeRoomState.game)
+      }
+    }
+
+    const shouldRenderDealFirstThreeAnimation =
+      (authoritativePhase === 'deal-first-3' && !dealingAnimation.hasCompleted) ||
+      dealingAnimation.isAnimating
+    const shouldRenderCompletedDealFirstThreeHands =
+      !shouldRenderDealFirstThreeAnimation &&
+      shouldKeepFirstThreeHands
+    const shouldRenderDealNextTwoAnimation =
+      (authoritativePhase === 'deal-next-2' && !dealNextTwoAnimation.hasCompleted) ||
+      dealNextTwoAnimation.isAnimating
+    const shouldRenderCompletedDealNextTwoHands =
+      !shouldRenderDealNextTwoAnimation &&
+      shouldKeepNextTwoHandsVisible(activeRoomState.game)
+    const isShowingAnyDealPhase =
+      shouldRenderDealFirstThreeAnimation ||
+      shouldRenderCompletedDealFirstThreeHands ||
+      shouldRenderDealNextTwoAnimation ||
+      shouldRenderCompletedDealNextTwoHands
     const cuttingSnapshotForRender =
       shouldRenderCutAnimation
         ? cuttingAnimation.latchedCuttingSnapshot ?? cuttingSnapshot
-        : cuttingSnapshot
+        : isShowingAnyDealPhase
+          ? null
+          : cuttingSnapshot
     const dealerSeatForRender =
       shouldRenderCutAnimation
         ? cuttingAnimation.latchedDealerSeat ?? dealerSeat
         : dealerSeat
+    const dealFirstSeatForRender = firstDealSeat ?? getSeatAfterDealerForDealFallback(dealerSeat)
     const cutterSeatForRender = cuttingSnapshotForRender?.cutterSeat ?? null
     const cutterDisplayNameForRender =
       shouldRenderCutAnimation && cuttingAnimation.latchedCutterDisplayName.trim()
@@ -477,6 +776,24 @@ export function createActiveRoomFlowController(
             totalDurationMs: CUTTING_VISUAL_ANIMATION_TOTAL_MS,
           }
         : null
+    const dealAnimationForRender: RenderDealingAnimationState | null =
+      shouldRenderDealNextTwoAnimation && dealNextTwoAnimation.activePhaseKey !== null
+        ? {
+            elapsedMs: dealNextTwoAnimation.isAnimating
+              ? performance.now() - dealNextTwoAnimation.startedAt
+              : DEAL_NEXT_TWO_VISUAL_TOTAL_MS,
+            totalDurationMs: DEAL_NEXT_TWO_VISUAL_TOTAL_MS,
+          }
+        : shouldRenderDealFirstThreeAnimation && dealingAnimation.activePhaseKey !== null
+          ? {
+              elapsedMs: dealingAnimation.isAnimating
+                ? performance.now() - dealingAnimation.startedAt
+                : DEAL_FIRST_THREE_VISUAL_TOTAL_MS,
+              totalDurationMs: DEAL_FIRST_THREE_VISUAL_TOTAL_MS,
+            }
+          : null
+    const activeDealPhase: 'deal-first-3' | 'deal-next-2' =
+      shouldRenderDealNextTwoAnimation ? 'deal-next-2' : 'deal-first-3'
     const { stageScale, scaledStageWidth, scaledStageHeight } = getActiveRoomStageMetrics()
 
     if (cuttingSnapshotForRender) {
@@ -511,7 +828,16 @@ export function createActiveRoomFlowController(
         )
 
         if (cuttingVisualRoot) {
+          if (
+            cuttingAnimation.isAnimating &&
+            cuttingAnimation.activeSelectionKey !== null &&
+            cuttingAnimation.renderedSelectionKey === cuttingAnimation.activeSelectionKey
+          ) {
+            return
+          }
+
           cuttingVisualRoot.innerHTML = cuttingScreenHtml
+          cuttingAnimation.renderedSelectionKey = cuttingAnimation.activeSelectionKey
           return
         }
       }
@@ -573,9 +899,151 @@ export function createActiveRoomFlowController(
             cuttingCountdownRemainingMs: cuttingCountdownRemainingMsForRender,
             panelScale: stageScale,
             escapeHtml,
+            dealtHands: null,
           })}
         </div>
       `
+
+      if (cutAnimationForRender !== null) {
+        cuttingAnimation.renderedSelectionKey = cuttingAnimation.activeSelectionKey
+      }
+    } else if (isShowingAnyDealPhase) {
+      cuttingVisualCountdown.resetCuttingVisualCountdownState()
+
+      const handCounts = activeRoomState.game?.handCounts ?? {
+        bottom: 0,
+        right: 0,
+        top: 0,
+        left: 0,
+      }
+      const ownHand = activeRoomState.game?.ownHand ?? []
+
+      const showPackets = shouldRenderDealFirstThreeAnimation || shouldRenderDealNextTwoAnimation
+
+      const dealingScreenHtml = renderDealingScreen({
+        firstDealSeat: dealFirstSeatForRender,
+        selectedCutIndex:
+          cuttingAnimation.latchedCuttingSnapshot?.selectedCutIndex ??
+          cuttingSnapshot?.selectedCutIndex ??
+          null,
+        localSeat: activeRoomState.seat,
+        handCounts,
+        ownHand,
+        stageScale,
+        dealAnimation: dealAnimationForRender,
+        showPackets,
+        dealPhase: activeDealPhase,
+      })
+
+      const computeSeatAnimDelays = (): Partial<Record<Seat, number>> => {
+        const firstIdx = SERVER_DEAL_ORDER.indexOf(dealFirstSeatForRender ?? 'bottom')
+        const order = [0, 1, 2, 3].map(
+          (offset) => SERVER_DEAL_ORDER[(firstIdx + offset) % 4],
+        ) as Seat[]
+        const delays: Partial<Record<Seat, number>> = {}
+        order.forEach((seat, i) => {
+          delays[seat] = DEAL_PACKET_START_DELAY_MS + i * DEAL_PACKET_DELAY_STEP_MS + 460
+        })
+        return delays
+      }
+
+      const dealtHandsForPanels: DealtHandsData | null = isShowingAnyDealPhase
+        ? {
+            handCounts,
+            ownHand,
+            localSeat: activeRoomState.seat,
+            maxCardsPerSeat: shouldRenderDealNextTwoAnimation || shouldRenderCompletedDealNextTwoHands ? 5 : 3,
+            animStartIndex: shouldRenderDealNextTwoAnimation ? 3 : 0,
+            seatAnimDelays: showPackets ? computeSeatAnimDelays() : null,
+          }
+        : null
+
+      const activeAnimCache = shouldRenderDealNextTwoAnimation ? dealNextTwoAnimation : dealingAnimation
+
+      if (dealAnimationForRender !== null && showPackets) {
+        const dealingVisualRoot = options.root.querySelector<HTMLDivElement>(
+          '[data-active-room-dealing-visual="1"]',
+        )
+
+        if (
+          dealingVisualRoot !== null &&
+          activeAnimCache.isAnimating &&
+          activeAnimCache.activePhaseKey !== null &&
+          activeAnimCache.renderedPhaseKey === activeAnimCache.activePhaseKey &&
+          activeAnimCache.renderedFirstDealSeat === dealFirstSeatForRender
+        ) {
+          return
+        }
+      }
+
+      options.root.innerHTML = `
+        <div
+          style="
+            position:relative;
+            min-height:100vh;
+            width:100%;
+            box-sizing:border-box;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            overflow:hidden;
+            background:
+              radial-gradient(circle at center, rgba(74,222,128,0.18) 0%, rgba(34,197,94,0.10) 34%, rgba(21,128,61,0.00) 58%),
+              linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%);
+            font-family:Inter, system-ui, sans-serif;
+          "
+        >
+          <div
+            style="
+              position:relative;
+              width:${scaledStageWidth}px;
+              height:${scaledStageHeight}px;
+              flex:0 0 auto;
+            "
+          >
+            <div
+              style="
+                position:absolute;
+                left:50%;
+                top:50%;
+                width:${ACTIVE_ROOM_STAGE_WIDTH}px;
+                height:${ACTIVE_ROOM_STAGE_HEIGHT}px;
+                transform:translate(-50%, -50%) scale(${stageScale});
+                transform-origin:center center;
+              "
+            >
+              <div
+                data-active-room-dealing-visual="1"
+                style="
+                  position:relative;
+                  width:100%;
+                  height:100%;
+                  overflow:visible;
+                "
+              >
+                ${dealingScreenHtml}
+              </div>
+            </div>
+          </div>
+          ${createCuttingSeatPanelsHtml({
+            seats: activeRoomState.seats,
+            localSeat: activeRoomState.seat,
+            dealerSeat,
+            cutterSeat: null,
+            cuttingCountdownRemainingMs: null,
+            panelScale: stageScale,
+            escapeHtml,
+            dealtHands: dealtHandsForPanels,
+          })}
+        </div>
+      `
+
+      if (dealAnimationForRender !== null) {
+        activeAnimCache.renderedPhaseKey = activeAnimCache.activePhaseKey
+        activeAnimCache.renderedFirstDealSeat = dealFirstSeatForRender
+      }
+
+      syncDealingScreenTargets(options.root, stageScale)
     } else {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
       const seatsHtml =
@@ -937,12 +1405,13 @@ export function createActiveRoomFlowController(
     activeRoomState.seats = message.seats
     activeRoomState.game = message.game ?? null
     activeRoomState.errorText = null
-    renderActiveRoomScreen(cuttingAnimation.isAnimating)
+    renderActiveRoomScreen(cuttingAnimation.isAnimating || dealingAnimation.isAnimating)
     return true
   }
 
   function enterActiveRoom(message: MatchFoundMessage): void {
     resetCuttingAnimationState()
+    clearDealingAnimationState()
     activeRoomState = {
       roomId: message.roomId,
       seat: message.seat,
@@ -985,6 +1454,7 @@ export function createActiveRoomFlowController(
 
     if (message.type === 'left_active_room' && message.roomId === activeRoomState.roomId) {
       resetCuttingAnimationState()
+      clearDealingAnimationState()
       activeRoomState = null
       options.showLobby(null)
       return true
@@ -992,6 +1462,7 @@ export function createActiveRoomFlowController(
 
     if (message.type === 'room_resume_failed' && message.roomId === activeRoomState.roomId) {
       resetCuttingAnimationState()
+      clearDealingAnimationState()
       activeRoomState = null
       options.showLobby(message.message)
       return true
@@ -1053,6 +1524,7 @@ export function createActiveRoomFlowController(
     }
 
     resetCuttingAnimationState()
+    clearDealingAnimationState()
     options.leaveActiveRoom(activeRoomState.roomId)
   }
 

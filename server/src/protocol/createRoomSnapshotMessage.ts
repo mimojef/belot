@@ -1,7 +1,10 @@
 import { SERVER_SEAT_ORDER, type Seat, type ServerRoom } from '../core/serverTypes.js'
+import { getValidServerBidActions } from '../game/getValidServerBidActions.js'
 import type { ServerAuthoritativeGameState } from '../game/serverGameTypes.js'
 import {
   getDisplayNameFromIdentity,
+  type RoomBiddingSnapshot,
+  type RoomCardSnapshot,
   type RoomGameSnapshot,
   type RoomSeatSnapshot,
   type RoomSnapshotMessage,
@@ -60,6 +63,47 @@ function isAuthoritativeGameState(
   return value !== null && !('kind' in value)
 }
 
+function createCardSnapshot(card: ServerAuthoritativeGameState['deck'][number]): RoomCardSnapshot {
+  return {
+    id: card.id,
+    suit: card.suit,
+    rank: card.rank,
+  }
+}
+
+function createBiddingSnapshot(
+  authoritativeState: ServerAuthoritativeGameState,
+  yourSeat: Seat | null,
+): RoomBiddingSnapshot | null {
+  if (authoritativeState.phase !== 'bidding') {
+    return null
+  }
+
+  const { bidding } = authoritativeState
+  const canSubmitBid = yourSeat !== null && bidding.currentSeat === yourSeat
+
+  let validActions: RoomBiddingSnapshot['validActions'] = null
+  if (canSubmitBid && yourSeat !== null) {
+    const v = getValidServerBidActions(yourSeat, bidding.winningBid)
+    validActions = {
+      pass: v.pass,
+      suits: v.suits,
+      noTrumps: v.noTrumps,
+      allTrumps: v.allTrumps,
+      double: v.double,
+      redouble: v.redouble,
+    }
+  }
+
+  return {
+    currentBidderSeat: bidding.currentSeat,
+    canSubmitBid,
+    entries: bidding.entries.map((e) => ({ seat: e.seat, action: e.action })),
+    winningBid: bidding.winningBid ?? null,
+    validActions,
+  }
+}
+
 function createGameSnapshot(
   room: ServerRoom,
   yourSeat: Seat | null,
@@ -75,6 +119,7 @@ function createGameSnapshot(
     authoritativePhase: authoritativeState.phase,
     timerDeadlineAt: room.game.timerDeadlineAt,
     dealerSeat: authoritativeState.round.dealerSeat,
+    firstDealSeat: authoritativeState.round.firstDealSeat,
     cutting: {
       cutterSeat: authoritativeState.round.cutterSeat,
       selectedCutIndex: authoritativeState.round.selectedCutIndex,
@@ -85,6 +130,17 @@ function createGameSnapshot(
         authoritativeState.phase === 'cutting' &&
         authoritativeState.round.selectedCutIndex === null,
     },
+    bidding: createBiddingSnapshot(authoritativeState, yourSeat),
+    handCounts: {
+      bottom: authoritativeState.hands.bottom.length,
+      right: authoritativeState.hands.right.length,
+      top: authoritativeState.hands.top.length,
+      left: authoritativeState.hands.left.length,
+    },
+    ownHand:
+      yourSeat !== null
+        ? authoritativeState.hands[yourSeat].map(createCardSnapshot)
+        : [],
   }
 }
 

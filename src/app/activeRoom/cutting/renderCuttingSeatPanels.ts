@@ -1,4 +1,4 @@
-import type { RoomSeatSnapshot, Seat } from '../../network/createGameServerClient'
+import type { RoomCardSnapshot, RoomSeatSnapshot, Seat } from '../../network/createGameServerClient'
 import {
   CUTTING_VISUAL_SEAT_INITIALS,
   CUTTING_VISUAL_SEAT_LABELS,
@@ -11,6 +11,20 @@ import { CUTTING_COUNTDOWN_MS } from './cuttingVisualCountdown'
 
 type EscapeHtml = (value: string) => string
 
+export type DealtHandsData = {
+  handCounts: Record<Seat, number>
+  ownHand: RoomCardSnapshot[]
+  localSeat: Seat
+  seatAnimDelays: Partial<Record<Seat, number>> | null
+  maxCardsPerSeat: number
+  animStartIndex: number
+}
+
+export type SeatBidBubble = {
+  label: string
+  elapsedMs: number
+}
+
 export type RenderCuttingSeatPanelsOptions = {
   seats: RoomSeatSnapshot[]
   localSeat: Seat
@@ -19,6 +33,8 @@ export type RenderCuttingSeatPanelsOptions = {
   cuttingCountdownRemainingMs: number | null
   panelScale: number
   escapeHtml: EscapeHtml
+  dealtHands: DealtHandsData | null
+  bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -94,10 +110,10 @@ export function renderBottomCuttingCountdownBar(
     <div
       style="
         position:absolute;
-        left:112px;
-        right:14px;
-        bottom:8px;
-        height:16px;
+        left:148px;
+        right:18px;
+        bottom:10px;
+        height:18px;
         border-radius:6px;
         overflow:hidden;
         background:rgba(6, 22, 40, 0.94);
@@ -139,7 +155,7 @@ export function renderSideCuttingCountdownFooter(
         left:0;
         right:0;
         bottom:0;
-        min-height:44px;
+        min-height:52px;
         background:rgba(6, 22, 40, 0.94);
         border-top:1px solid rgba(255,255,255,0.12);
         overflow:hidden;
@@ -165,11 +181,11 @@ export function renderSideCuttingCountdownFooter(
         style="
           position:relative;
           z-index:2;
-          min-height:44px;
-          padding:10px 12px 11px;
+          min-height:52px;
+          padding:13px 14px 14px;
           color:#f4f8ff;
           text-align:center;
-          font-size:14px;
+          font-size:18px;
           font-weight:900;
           letter-spacing:0.03em;
           line-height:1.1;
@@ -229,6 +245,209 @@ export function renderCuttingSeatAvatar(
   return getCuttingSeatAvatarFallback(seat, visualSeat, escapeHtml)
 }
 
+const PANEL_CARD_WIDTH = 195
+const PANEL_CARD_HEIGHT = 284
+
+function getSuitSymbol(suit: RoomCardSnapshot['suit']): string {
+  if (suit === 'clubs') return '♣'
+  if (suit === 'diamonds') return '♦'
+  if (suit === 'hearts') return '♥'
+  return '♠'
+}
+
+function isRedSuit(suit: RoomCardSnapshot['suit']): boolean {
+  return suit === 'hearts' || suit === 'diamonds'
+}
+
+function renderPanelCardBack(): string {
+  return `
+    <span style="position:absolute;inset:0;border-radius:24px;background:linear-gradient(180deg,rgba(255,255,255,0.98) 0%,rgba(241,245,249,0.98) 100%);"></span>
+    <span style="position:absolute;inset:11px;border-radius:20px;border:1px solid rgba(15,23,42,0.10);background-image:url('/images/cards/card-back.png');background-size:cover;background-position:center;background-repeat:no-repeat;"></span>
+  `
+}
+
+function renderPanelCardFront(card: RoomCardSnapshot): string {
+  const symbol = getSuitSymbol(card.suit)
+  const color = isRedSuit(card.suit) ? '#b3261e' : '#13253d'
+  return `
+    <div style="position:relative;width:100%;height:100%;box-sizing:border-box;border-radius:24px;border:1px solid rgba(15,23,42,0.12);background:linear-gradient(180deg,#fff 0%,#f8fafc 100%);color:${color};overflow:hidden;">
+      <div style="position:absolute;left:12px;top:12px;font-size:30px;line-height:1;font-weight:900;">${card.rank}</div>
+      <div style="position:absolute;left:12px;top:45px;font-size:30px;line-height:1;font-weight:900;">${symbol}</div>
+      <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font-size:74px;line-height:1;font-weight:900;">${symbol}</div>
+    </div>
+  `
+}
+
+function renderPanelDealtCard(
+  card: RoomCardSnapshot | null,
+  index: number,
+  offsetX: number,
+  offsetY: number,
+  rotate: number,
+  animStyle: string,
+): string {
+  const content = card !== null ? renderPanelCardFront(card) : renderPanelCardBack()
+  return `
+    <div style="
+      position:absolute;
+      left:50%;
+      top:50%;
+      width:${PANEL_CARD_WIDTH}px;
+      height:${PANEL_CARD_HEIGHT}px;
+      border-radius:24px;
+      border:1px solid rgba(255,255,255,0.24);
+      box-shadow:0 8px 18px rgba(0,0,0,0.22);
+      overflow:hidden;
+      transform:translate(-50%,-50%) translate(${offsetX}px,${offsetY}px) rotate(${rotate}deg);
+      z-index:${index + 1};
+      pointer-events:none;
+      ${animStyle}
+    ">
+      ${content}
+    </div>
+  `
+}
+
+function getFanOffset(
+  index: number,
+  count: number,
+): { x: number; y: number; rotate: number } {
+  const centered = index - (count - 1) / 2
+  return {
+    x: centered * 65,
+    y: Math.abs(centered) * 6,
+    rotate: centered * 6,
+  }
+}
+
+function renderDealtCardFanInPanel(
+  actualSeat: Seat,
+  visualSeat: Seat,
+  dealtHands: DealtHandsData,
+): string {
+  const count = Math.min(dealtHands.maxCardsPerSeat, Math.max(0, dealtHands.handCounts[actualSeat] ?? 0))
+  if (count === 0) return ''
+
+  const isLocalSeat = actualSeat === dealtHands.localSeat
+  const cards = isLocalSeat ? dealtHands.ownHand.slice(0, count) : []
+
+  const animDelay = dealtHands.seatAnimDelays?.[actualSeat] ?? null
+
+  const cardElements = Array.from({ length: count }, (_, i) => {
+    const fan = getFanOffset(i, count)
+    const card = isLocalSeat ? (cards[i] ?? null) : null
+    const shouldAnimate = animDelay !== null && i >= dealtHands.animStartIndex
+    const animStyle = shouldAnimate
+      ? `animation: belot-panel-card-appear 220ms ease-out ${animDelay}ms both;`
+      : ''
+    return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle)
+  }).join('')
+
+  // Fan center relative to each panel's anchor point (in unscaled panel coords)
+  // Bottom panel: 360×138, center cards at right portion (x=248) above panel center (y=-60 from panel top = above panel)
+  // Side panels: 186×234, cards float above panel top (y=-60)
+  // Top panel: same as side but mirror
+  let fanCenterX: number
+  let fanCenterY: number
+
+  let fanRotateDeg = 0
+
+  if (visualSeat === 'bottom') {
+    fanCenterX = 180
+    fanCenterY = -PANEL_CARD_HEIGHT / 2 - 8 + 200
+    fanRotateDeg = 0
+  } else if (visualSeat === 'top') {
+    fanCenterX = 93
+    fanCenterY = 234 + PANEL_CARD_HEIGHT / 2 + 8 - 300
+    fanRotateDeg = 180
+  } else if (visualSeat === 'left') {
+    fanCenterX = 186 + PANEL_CARD_WIDTH / 2 + 12 - 200
+    fanCenterY = 117
+    fanRotateDeg = 90
+  } else {
+    fanCenterX = -(PANEL_CARD_WIDTH / 2 + 12) + 200
+    fanCenterY = 117
+    fanRotateDeg = -90
+  }
+
+  const rotateStyle = fanRotateDeg !== 0 ? `rotate: ${fanRotateDeg}deg;` : ''
+
+  return `
+    <div style="
+      position:absolute;
+      left:${fanCenterX}px;
+      top:${fanCenterY}px;
+      width:1px;
+      height:1px;
+      pointer-events:none;
+      z-index:0;
+      ${rotateStyle}
+    ">
+      ${cardElements}
+    </div>
+  `
+}
+
+const BID_BUBBLE_TOTAL_MS = 3200
+
+function getBubbleBgColor(label: string): string {
+  if (label === 'Пас') return 'rgba(51,65,85,0.94)'
+  if (label.startsWith('♦') || label.startsWith('♥')) return 'rgba(159,18,18,0.94)'
+  if (label === 'Без коз') return 'rgba(30,64,175,0.94)'
+  if (label === 'Всичко коз') return 'rgba(120,53,15,0.94)'
+  if (label === 'Контра') return 'rgba(154,52,18,0.94)'
+  if (label === 'Реконтра') return 'rgba(127,29,29,0.94)'
+  return 'rgba(15,23,42,0.94)'
+}
+
+function renderBidBubble(
+  visualSeat: Seat,
+  bubble: SeatBidBubble,
+  escapeHtml: EscapeHtml,
+): string {
+  const totalMs = BID_BUBBLE_TOTAL_MS
+  const fadeInEnd = Math.round((200 / totalMs) * 100)
+  const fadeOutStart = Math.round(((totalMs - 280) / totalMs) * 100)
+  const keyframes = `@keyframes bbb-${visualSeat}{0%{opacity:0}${fadeInEnd}%{opacity:1}${fadeOutStart}%{opacity:1}100%{opacity:0}}`
+
+  let posStyle: string
+  if (visualSeat === 'bottom') {
+    posStyle = 'bottom:155px;left:50%;transform:translateX(-50%);'
+  } else if (visualSeat === 'top') {
+    posStyle = 'top:255px;left:50%;transform:translateX(-50%);'
+  } else if (visualSeat === 'left') {
+    posStyle = 'left:205px;top:117px;transform:translateY(-50%);'
+  } else {
+    posStyle = 'right:205px;top:117px;transform:translateY(-50%);'
+  }
+
+  const elapsed = Math.min(bubble.elapsedMs, totalMs)
+  const bg = getBubbleBgColor(bubble.label)
+
+  return `
+    <style>${keyframes}</style>
+    <div style="
+      position:absolute;
+      ${posStyle}
+      background:${bg};
+      border:1px solid rgba(255,255,255,0.16);
+      border-radius:14px;
+      padding:10px 16px;
+      color:#f8fafc;
+      font-size:22px;
+      font-weight:800;
+      white-space:nowrap;
+      pointer-events:none;
+      z-index:10;
+      animation:bbb-${visualSeat} ${totalMs}ms ease-out forwards;
+      animation-delay:-${elapsed}ms;
+      animation-fill-mode:both;
+    ">
+      ${escapeHtml(bubble.label)}
+    </div>
+  `
+}
+
 export function createCuttingSeatPanelHtml(
   seat: RoomSeatSnapshot,
   visualSeat: Seat,
@@ -237,6 +456,8 @@ export function createCuttingSeatPanelHtml(
   cuttingCountdownRemainingMs: number | null,
   panelScale: number,
   escapeHtml: EscapeHtml,
+  dealtHands: DealtHandsData | null,
+  bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null,
 ): string {
   const isBottomSeat = visualSeat === 'bottom'
   const isCutter = seat.seat === cutterSeat
@@ -250,6 +471,7 @@ export function createCuttingSeatPanelHtml(
       ? displayName
       : CUTTING_VISUAL_SEAT_LABELS[visualSeat]
   const borderColor = isCutter ? 'rgba(245, 187, 55, 0.96)' : 'rgba(255,255,255,0.18)'
+  const borderWidthPx = isCutter ? 4 : 2
   const shadow = isCutter
     ? '0 0 24px rgba(245, 187, 55, 0.24), 0 16px 28px rgba(0,0,0,0.24)'
     : '0 14px 28px rgba(0,0,0,0.24)'
@@ -276,9 +498,14 @@ export function createCuttingSeatPanelHtml(
       `
     : ''
 
+  const bubbleHtml = bidBubbles?.[seat.seat]
+    ? renderBidBubble(visualSeat, bidBubbles[seat.seat]!, escapeHtml)
+    : ''
+
   if (isBottomSeat) {
     return `
       <div
+        data-active-room-seat-anchor="${seat.seat}"
         style="
           position:absolute;
           ${getCuttingSeatPanelAnchorStyle(visualSeat, panelScale)}
@@ -286,28 +513,33 @@ export function createCuttingSeatPanelHtml(
           pointer-events:none;
         "
       >
+        ${bubbleHtml}
+        ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
         <div
           style="
             position:relative;
-            width:280px;
-            height:106px;
-            border-radius:16px;
-            border:2px solid ${borderColor};
+            width:360px;
+            height:138px;
+            box-sizing:border-box;
+            border-radius:20px;
+            border:${borderWidthPx}px solid ${borderColor};
             background:
               radial-gradient(circle at 22% 22%, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0.05) 18%, rgba(18, 79, 118, 0.0) 40%),
               linear-gradient(180deg, rgba(16, 145, 151, 0.96) 0%, rgba(17, 95, 118, 0.96) 54%, rgba(10, 44, 70, 0.98) 100%);
             box-shadow:${shadow};
             overflow:hidden;
+            transform:scale(0.8);
+            transform-origin:bottom center;
           "
         >
           <div
             style="
               position:absolute;
-              left:6px;
-              top:6px;
-              width:92px;
-              height:92px;
-              border-radius:14px;
+              left:4px;
+              top:4px;
+              bottom:4px;
+              width:122px;
+              border-radius:18px;
               background:
                 linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(232,240,248,0.98) 100%);
               box-shadow:
@@ -317,22 +549,22 @@ export function createCuttingSeatPanelHtml(
               align-items:center;
               justify-content:center;
               color:#16314f;
-              font-size:34px;
+              font-size:45px;
               font-weight:900;
               letter-spacing:0.04em;
               overflow:hidden;
             "
           >
-            ${renderCuttingSeatAvatar(seat, visualSeat, 14, escapeHtml)}
+            ${renderCuttingSeatAvatar(seat, visualSeat, 18, escapeHtml)}
           </div>
 
           <div
             style="
               position:absolute;
-              left:112px;
-              top:14px;
+              left:148px;
+              top:17px;
               color:#f4f8ff;
-              font-size:20px;
+              font-size:25px;
               font-weight:900;
               letter-spacing:0.03em;
               line-height:1;
@@ -346,11 +578,11 @@ export function createCuttingSeatPanelHtml(
           <div
             style="
               position:absolute;
-              left:112px;
-              right:14px;
-              top:46px;
+              left:148px;
+              right:18px;
+              top:58px;
               color:#f8fafc;
-              font-size:17px;
+              font-size:22px;
               font-weight:800;
               line-height:1.1;
               white-space:nowrap;
@@ -374,6 +606,7 @@ export function createCuttingSeatPanelHtml(
 
   return `
     <div
+      data-active-room-seat-anchor="${seat.seat}"
       style="
         position:absolute;
         ${getCuttingSeatPanelAnchorStyle(visualSeat, panelScale)}
@@ -381,28 +614,32 @@ export function createCuttingSeatPanelHtml(
         pointer-events:none;
       "
     >
+      ${bubbleHtml}
+      ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
       <div
         style="
           position:relative;
-          width:146px;
-          height:184px;
-          border-radius:14px;
-          border:2px solid ${borderColor};
+          width:186px;
+          height:234px;
+          border-radius:18px;
+          border:${borderWidthPx}px solid ${borderColor};
           background:
             radial-gradient(circle at 35% 30%, rgba(255,255,255,0.22) 0%, rgba(255,255,255,0.06) 18%, rgba(18, 79, 118, 0.0) 40%),
             linear-gradient(180deg, rgba(18, 154, 160, 0.95) 0%, rgba(19, 104, 121, 0.95) 52%, rgba(12, 55, 82, 0.96) 100%);
           box-shadow:${shadow};
           overflow:hidden;
+          transform:scale(0.8);
+          transform-origin:${visualSeat === 'top' ? 'top center' : visualSeat === 'left' ? 'left center' : 'right center'};
         "
       >
         <div
           style="
             position:absolute;
-            top:6px;
-            left:6px;
-            right:6px;
-            bottom:50px;
-            border-radius:12px;
+            top:8px;
+            left:8px;
+            right:8px;
+            bottom:64px;
+            border-radius:16px;
             background:
               linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(232,240,248,0.98) 100%);
             box-shadow:
@@ -412,13 +649,13 @@ export function createCuttingSeatPanelHtml(
             align-items:center;
             justify-content:center;
             color:#16314f;
-            font-size:42px;
+            font-size:56px;
             font-weight:900;
             letter-spacing:0.04em;
             overflow:hidden;
           "
         >
-          ${renderCuttingSeatAvatar(seat, visualSeat, 12, escapeHtml)}
+          ${renderCuttingSeatAvatar(seat, visualSeat, 16, escapeHtml)}
         </div>
 
         ${
@@ -436,13 +673,13 @@ export function createCuttingSeatPanelHtml(
                     left:0;
                     right:0;
                     bottom:0;
-                    min-height:44px;
-                    padding:10px 12px 11px;
+                    min-height:52px;
+                    padding:13px 14px 14px;
                     background:rgba(6, 22, 40, 0.94);
                     border-top:1px solid rgba(255,255,255,0.12);
                     color:#f4f8ff;
                     text-align:center;
-                    font-size:14px;
+                    font-size:18px;
                     font-weight:900;
                     letter-spacing:0.03em;
                     line-height:1.1;
@@ -475,6 +712,8 @@ export function createCuttingSeatPanelsHtml(
     cuttingCountdownRemainingMs,
     panelScale,
     escapeHtml,
+    dealtHands,
+    bidBubbles,
   } = options
   const seatMap = new Map(seats.map((seat) => [seat.seat, seat]))
   const visualOrder: readonly Seat[] = ['top', 'left', 'right', 'bottom']
@@ -500,6 +739,8 @@ export function createCuttingSeatPanelsHtml(
         cuttingCountdownRemainingMs,
         panelScale,
         escapeHtml,
+        dealtHands,
+        bidBubbles ?? null,
       )
     })
     .join('')
@@ -507,12 +748,12 @@ export function createCuttingSeatPanelsHtml(
   return `
     <style>
       @keyframes belot-active-room-cutting-countdown {
-        0% {
-          transform:scaleX(1);
-        }
-        100% {
-          transform:scaleX(0);
-        }
+        0% { transform:scaleX(1); }
+        100% { transform:scaleX(0); }
+      }
+      @keyframes belot-panel-card-appear {
+        0% { opacity:0; scale:0.88; }
+        100% { opacity:1; scale:1; }
       }
     </style>
 

@@ -17,7 +17,7 @@ export function advanceOneServerStep(
   fallbackEventAt: number,
 ): AdvanceOneServerStepResult {
   if (state.phase === 'cutting' && state.round.selectedCutIndex !== null) {
-    return advanceExpiredServerCuttingState(state, fallbackEventAt)
+    return advanceExpiredServerCuttingState(state, now)
   }
 
   const phaseAutoAdvanceExpiry = getServerPhaseAutoAdvanceExpiry(state)

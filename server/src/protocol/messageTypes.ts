@@ -115,12 +115,60 @@ export type RoomCuttingSnapshot = {
   canSubmitCut: boolean
 }
 
+export type RoomBidActionSnapshot =
+  | { type: 'pass' }
+  | { type: 'suit'; suit: 'clubs' | 'diamonds' | 'hearts' | 'spades' }
+  | { type: 'no-trumps' }
+  | { type: 'all-trumps' }
+  | { type: 'double' }
+  | { type: 'redouble' }
+
+export type RoomBidEntrySnapshot = {
+  seat: Seat
+  action: RoomBidActionSnapshot
+}
+
+export type RoomWinningBidSnapshot = {
+  seat: Seat
+  contract: 'suit' | 'no-trumps' | 'all-trumps'
+  trumpSuit: 'clubs' | 'diamonds' | 'hearts' | 'spades' | null
+  doubled: boolean
+  redoubled: boolean
+} | null
+
+export type RoomValidBidActionsSnapshot = {
+  pass: boolean
+  suits: { clubs: boolean; diamonds: boolean; hearts: boolean; spades: boolean }
+  noTrumps: boolean
+  allTrumps: boolean
+  double: boolean
+  redouble: boolean
+}
+
+export type RoomBiddingSnapshot = {
+  currentBidderSeat: Seat | null
+  canSubmitBid: boolean
+  entries: RoomBidEntrySnapshot[]
+  winningBid: RoomWinningBidSnapshot
+  validActions: RoomValidBidActionsSnapshot | null
+}
+
+export type RoomCardSnapshot = {
+  id: string
+  suit: 'clubs' | 'diamonds' | 'hearts' | 'spades'
+  rank: '7' | '8' | '9' | '10' | 'J' | 'Q' | 'K' | 'A'
+}
+
 export type RoomGameSnapshot = {
   phase: RoomGamePhaseSnapshot | null
   authoritativePhase: RoomAuthoritativePhaseSnapshot | null
   timerDeadlineAt: number | null
   dealerSeat: Seat | null
+  firstDealSeat: Seat | null
   cutting: RoomCuttingSnapshot | null
+  bidding: RoomBiddingSnapshot | null
+  handCounts: Record<Seat, number>
+  ownHand: RoomCardSnapshot[]
 }
 
 export type RoomSnapshotMessage = {

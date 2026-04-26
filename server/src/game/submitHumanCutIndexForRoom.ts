@@ -1,4 +1,5 @@
 import type { Seat, ServerRoom } from '../core/serverTypes.js'
+import { advanceExpiredServerCuttingState } from './advanceExpiredServerCuttingState.js'
 import { getRoomAuthoritativeGameState } from './getRoomAuthoritativeGameState.js'
 import { selectServerCutIndex } from './selectServerCutIndex.js'
 import { syncRoomWithAuthoritativeState } from './syncRoomWithAuthoritativeState.js'
@@ -55,8 +56,10 @@ export function submitHumanCutIndexForRoom(
     }
   }
 
-  const nextState = selectServerCutIndex(state, cutIndex)
-  const nextRoom = syncRoomWithAuthoritativeState(room, nextState)
+  const selectedState = selectServerCutIndex(state, cutIndex)
+  const eventAt = Date.now()
+  const resolvedCut = advanceExpiredServerCuttingState(selectedState, eventAt)
+  const nextRoom = syncRoomWithAuthoritativeState(room, resolvedCut.state, eventAt)
 
   return {
     ok: true,

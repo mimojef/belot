@@ -14,53 +14,53 @@ export type RenderCuttingAnimationState = {
   totalDurationMs: number
 }
 
-const VISUAL_CARD_COUNT = 32
-const CARD_WIDTH = 144
-const CARD_HEIGHT = 208
-const CARD_STEP = 26
-const CARD_TOP = 20
-const DECK_PADDING_X = 30
+export const CUTTING_VISUAL_CARD_COUNT = 32
+export const CUTTING_CARD_WIDTH = 195
+export const CUTTING_CARD_HEIGHT = 284
+export const CUTTING_CARD_STEP = 29
+export const CUTTING_CARD_TOP = 0
+export const CUTTING_DECK_PADDING_X = 30
+export const CUTTING_SELECTED_GAP = 30
+export const CUTTING_DECK_TRACK_WIDTH =
+  (CUTTING_VISUAL_CARD_COUNT - 1) * CUTTING_CARD_STEP +
+  CUTTING_CARD_WIDTH +
+  CUTTING_SELECTED_GAP
+export const CUTTING_TABLE_WIDTH = CUTTING_DECK_PADDING_X * 2 + CUTTING_DECK_TRACK_WIDTH
+export const CUTTING_TABLE_HEIGHT = CUTTING_CARD_HEIGHT + 42
+export const CUTTING_PILE_LEFT =
+  CUTTING_DECK_PADDING_X + (CUTTING_DECK_TRACK_WIDTH - CUTTING_CARD_WIDTH) / 2
+export const CUTTING_PILE_TOP = CUTTING_CARD_TOP + 6
+const VISUAL_CARD_COUNT = CUTTING_VISUAL_CARD_COUNT
+const CARD_WIDTH = CUTTING_CARD_WIDTH
+const CARD_HEIGHT = CUTTING_CARD_HEIGHT
+const CARD_STEP = CUTTING_CARD_STEP
+const CARD_TOP = CUTTING_CARD_TOP
+const DECK_PADDING_X = CUTTING_DECK_PADDING_X
 const CUT_HOTSPOT_WIDTH = 24
-const SELECTED_GAP = 30
+const SELECTED_GAP = CUTTING_SELECTED_GAP
 const CARD_HOVER_LIFT_PX = 14
-const CUTTING_VISUAL_SPLIT_MS = 140
-const CUTTING_VISUAL_HOLD_MS = 18
-const CUTTING_VISUAL_GATHER_MS = 290
-const CUTTING_VISUAL_PILE_SETTLE_MS = 118
-export const CUTTING_VISUAL_ANIMATION_TOTAL_MS =
-  CUTTING_VISUAL_SPLIT_MS +
-  CUTTING_VISUAL_HOLD_MS +
-  CUTTING_VISUAL_GATHER_MS +
-  CUTTING_VISUAL_PILE_SETTLE_MS
+export const CUTTING_VISUAL_ANIMATION_TOTAL_MS = 860
 
-function clamp01(value: number): number {
-  return Math.min(1, Math.max(0, value))
+export type CuttingGatheredCardOffset = {
+  x: number
+  y: number
+  rotate: number
 }
 
-function mix(from: number, to: number, progress: number): number {
-  return from + (to - from) * progress
-}
+export function getCuttingGatheredCardOffset(
+  cardNumber: number,
+  selectedCutIndex: number,
+): CuttingGatheredCardOffset {
+  const isLeftPile = cardNumber <= selectedCutIndex
+  const pileOffset = isLeftPile
+    ? selectedCutIndex - cardNumber
+    : cardNumber - selectedCutIndex - 1
 
-function easeOutCubic(value: number): number {
-  const clampedValue = clamp01(value)
-
-  return 1 - (1 - clampedValue) ** 3
-}
-
-function easeInOutCubic(value: number): number {
-  const clampedValue = clamp01(value)
-
-  if (clampedValue < 0.5) {
-    return 4 * clampedValue ** 3
+  return {
+    x: isLeftPile ? 3 - pileOffset * 0.24 : 9 + pileOffset * 0.24,
+    y: 12 - pileOffset * 0.22,
+    rotate: isLeftPile ? -4.4 : -2.2,
   }
-
-  return 1 - ((-2 * clampedValue + 2) ** 3) / 2
-}
-
-function easeOutQuart(value: number): number {
-  const clampedValue = clamp01(value)
-
-  return 1 - (1 - clampedValue) ** 4
 }
 
 function escapeHtml(value: string): string {
@@ -78,75 +78,23 @@ function renderCardFace(): string {
       style="
         position:absolute;
         inset:0;
-        border-radius:18px;
+        border-radius:24px;
         background:
-          linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(226,232,240,0.96) 100%);
+          linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(241,245,249,0.98) 100%);
       "
     ></span>
 
     <span
       style="
         position:absolute;
-        inset:7px;
-        border-radius:14px;
-        border:1px solid rgba(226,232,240,0.22);
-        background:
-          radial-gradient(circle at 30% 20%, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0.02) 34%, transparent 52%),
-          linear-gradient(145deg, rgba(31,41,55,0.96) 0%, rgba(15,23,42,0.98) 100%);
-      "
-    ></span>
-
-    <span
-      style="
-        position:absolute;
-        inset:16px;
-        border-radius:12px;
-        border:1px solid rgba(148,163,184,0.22);
-        background:
-          linear-gradient(180deg, rgba(148,163,184,0.06) 0%, rgba(148,163,184,0.00) 100%);
-        box-shadow:inset 0 0 0 1px rgba(255,255,255,0.04);
-      "
-    ></span>
-
-    <span
-      style="
-        position:absolute;
-        left:50%;
-        top:20px;
-        bottom:20px;
-        width:1px;
-        transform:translateX(-50%);
-        background:linear-gradient(180deg, rgba(250,250,249,0.04) 0%, rgba(250,250,249,0.36) 50%, rgba(250,250,249,0.04) 100%);
-      "
-    ></span>
-
-    <span
-      style="
-        position:absolute;
-        left:20px;
-        right:20px;
-        top:50%;
-        height:1px;
-        transform:translateY(-50%);
-        background:linear-gradient(90deg, rgba(250,250,249,0.04) 0%, rgba(250,250,249,0.30) 50%, rgba(250,250,249,0.04) 100%);
-      "
-    ></span>
-
-    <span
-      style="
-        position:absolute;
-        left:50%;
-        top:50%;
-        width:40px;
-        height:40px;
-        transform:translate(-50%, -50%) rotate(45deg);
-        border-radius:10px;
-        border:1px solid rgba(226,232,240,0.28);
-        background:
-          linear-gradient(145deg, rgba(203,213,225,0.18) 0%, rgba(255,255,255,0.05) 100%);
-        box-shadow:
-          inset 0 0 0 1px rgba(255,255,255,0.06),
-          0 8px 18px rgba(2,6,23,0.18);
+        inset:11px;
+        border-radius:20px;
+        border:1px solid rgba(15,23,42,0.10);
+        background-image:url('/images/cards/card-back.png');
+        background-size:cover;
+        background-position:center;
+        background-repeat:no-repeat;
+        overflow:hidden;
       "
     ></span>
   `
@@ -210,8 +158,10 @@ function buildCutDeckHoverMoveHandler(selectedCutIndex: number | null): string {
 
   return `
     const bounds=this.getBoundingClientRect();
-    const pointerX=typeof event.clientX === 'number' ? event.clientX - bounds.left : -1;
-    const pointerY=typeof event.clientY === 'number' ? event.clientY - bounds.top : -1;
+    const scaleX=bounds.width > 0 && this.offsetWidth > 0 ? bounds.width / this.offsetWidth : 1;
+    const scaleY=bounds.height > 0 && this.offsetHeight > 0 ? bounds.height / this.offsetHeight : 1;
+    const pointerX=typeof event.clientX === 'number' ? (event.clientX - bounds.left) / scaleX : -1;
+    const pointerY=typeof event.clientY === 'number' ? (event.clientY - bounds.top) / scaleY : -1;
     const activeCard=this.querySelector('.belot-active-room-cutting-card.is-hover-lifted');
     if(
       pointerX < ${DECK_PADDING_X} ||
@@ -257,80 +207,39 @@ function buildCutDeckHoverLeaveHandler(): string {
     .trim()
 }
 
-function renderPileOverlay(
-  pileLeft: number,
-  pileTop: number,
-  pileRevealProgress: number,
-  pileSettleProgress: number,
-): string {
-  if (pileRevealProgress <= 0) {
-    return ''
-  }
-
-  const pileShadowOpacity = 0.08 + pileRevealProgress * 0.16
-  const pileShadowScale = mix(0.92, 1.01, pileSettleProgress)
-  const pileCardLift = mix(12, 0, pileRevealProgress)
-  const pileOpacity = 0.14 + pileRevealProgress * 0.46
-  const layerCount = 5
-  const pileLayersHtml = Array.from({ length: layerCount }, (_, index) => {
-    const depthProgress = index / Math.max(1, layerCount - 1)
-    const offsetX = mix(-3.2, 3.2, depthProgress)
-    const offsetY = index * 1.45
-    const rotate = mix(-0.9, 0.9, depthProgress)
-    const layerOpacity = mix(0.14, 0.34, depthProgress) * pileRevealProgress
-
-    return `
-      <span
-        style="
-          position:absolute;
-          inset:0;
-          border-radius:20px;
-          border:1px solid rgba(226,232,240,0.18);
-          background:
-            radial-gradient(circle at 28% 20%, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.02) 32%, transparent 54%),
-            linear-gradient(145deg, rgba(31,41,55,0.92) 0%, rgba(15,23,42,0.97) 100%);
-          box-shadow:0 4px 10px rgba(2,6,23,0.08);
-          opacity:${layerOpacity.toFixed(3)};
-          transform:translate(${offsetX.toFixed(2)}px, ${offsetY.toFixed(2)}px) rotate(${rotate.toFixed(2)}deg);
-        "
-      ></span>
-    `
-  }).join('')
-
+function renderCuttingAnimationStyles(): string {
   return `
-    <div
-      aria-hidden="true"
-      style="
-        position:absolute;
-        left:${pileLeft - 26}px;
-        top:${pileTop + CARD_HEIGHT - 2}px;
-        width:${CARD_WIDTH + 52}px;
-        height:34px;
-        border-radius:999px;
-        background:radial-gradient(circle at center, rgba(2,6,23,0.24) 0%, rgba(2,6,23,0.10) 44%, rgba(2,6,23,0.00) 78%);
-        filter:blur(6px);
-        opacity:${pileShadowOpacity.toFixed(3)};
-        transform:scale(${pileShadowScale.toFixed(3)});
-      "
-    ></div>
+    <style>
+      @keyframes belot-active-room-cut-left {
+        0% {
+          transform: var(--cut-from-transform);
+          box-shadow: 0 14px 24px rgba(0,0,0,0.18);
+        }
+        42% {
+          transform: var(--cut-split-transform);
+          box-shadow: 0 24px 34px rgba(0,0,0,0.24);
+        }
+        100% {
+          transform: var(--cut-final-transform);
+          box-shadow: 0 3px 6px rgba(0,0,0,0.08);
+        }
+      }
 
-    <div
-      aria-hidden="true"
-      style="
-        position:absolute;
-        left:${pileLeft}px;
-        top:${pileTop - pileCardLift}px;
-        width:${CARD_WIDTH}px;
-        height:${CARD_HEIGHT}px;
-        opacity:${pileOpacity.toFixed(3)};
-        transform:translateY(${mix(8, 0, pileSettleProgress).toFixed(2)}px) scale(${mix(0.97, 1, pileSettleProgress).toFixed(3)});
-        transform-origin:center center;
-        pointer-events:none;
-        z-index:0;
-      "
-    >
-      ${pileLayersHtml}
-    </div>
+      @keyframes belot-active-room-cut-right {
+        0% {
+          transform: var(--cut-from-transform);
+          box-shadow: 0 14px 24px rgba(0,0,0,0.18);
+        }
+        42% {
+          transform: var(--cut-split-transform);
+          box-shadow: 0 24px 34px rgba(0,0,0,0.24);
+        }
+        100% {
+          transform: var(--cut-final-transform);
+          box-shadow: 0 3px 6px rgba(0,0,0,0.08);
+        }
+      }
+    </style>
   `
 }
 
@@ -342,65 +251,29 @@ function renderVisualDeck(
 ): string {
   const validCutCount = Math.max(0, cuttingSnapshot.deckCount - 1)
   const selectedCutIndex = cuttingSnapshot.selectedCutIndex
-  const deckTrackWidth = (VISUAL_CARD_COUNT - 1) * CARD_STEP + CARD_WIDTH + SELECTED_GAP
-  const tableWidth = DECK_PADDING_X * 2 + deckTrackWidth
-  const pileLeft = DECK_PADDING_X + (deckTrackWidth - CARD_WIDTH) / 2
-  const pileTop = CARD_TOP + 6
+  const deckTrackWidth = CUTTING_DECK_TRACK_WIDTH
+  const tableWidth = CUTTING_TABLE_WIDTH
+  const pileLeft = CUTTING_PILE_LEFT
+  const pileTop = CUTTING_PILE_TOP
   const animationElapsedMs =
     cutAnimation !== null
       ? Math.max(0, Math.min(cutAnimation.elapsedMs, cutAnimation.totalDurationMs))
       : null
   const isCutAnimationVisible = animationElapsedMs !== null && selectedCutIndex !== null
-  const splitProgress = isCutAnimationVisible
-    ? easeOutCubic(animationElapsedMs / CUTTING_VISUAL_SPLIT_MS)
-    : selectedCutIndex !== null
-      ? 1
-      : 0
-  const gatherProgress = isCutAnimationVisible
-    ? easeInOutCubic(
-        (animationElapsedMs - CUTTING_VISUAL_SPLIT_MS - CUTTING_VISUAL_HOLD_MS) /
-          CUTTING_VISUAL_GATHER_MS,
-      )
-    : 0
-  const pileRevealProgress = isCutAnimationVisible
-    ? easeInOutCubic(
-        (animationElapsedMs - CUTTING_VISUAL_SPLIT_MS - CUTTING_VISUAL_HOLD_MS + 36) /
-          (CUTTING_VISUAL_GATHER_MS + CUTTING_VISUAL_PILE_SETTLE_MS + 24),
-      )
-    : 0
-  const pileSettleProgress = isCutAnimationVisible
-    ? easeOutQuart(
-        (animationElapsedMs -
-          CUTTING_VISUAL_SPLIT_MS -
-          CUTTING_VISUAL_HOLD_MS -
-          CUTTING_VISUAL_GATHER_MS) /
-          CUTTING_VISUAL_PILE_SETTLE_MS,
-      )
-    : 0
-  const markerFadeProgress = isCutAnimationVisible
-    ? easeInOutCubic(
-        (animationElapsedMs - CUTTING_VISUAL_SPLIT_MS + 36) /
-          (CUTTING_VISUAL_HOLD_MS + 120),
-      )
-    : 0
+  const shouldAnimateCut =
+    cutAnimation !== null && isCutAnimationVisible && animationElapsedMs < cutAnimation.totalDurationMs
+  const cardPositionSelectedCutIndex =
+    selectedCutIndex !== null && !isCutAnimationVisible ? selectedCutIndex : null
+  const animationDelayMs = shouldAnimateCut ? -Math.max(0, animationElapsedMs) : 0
 
   const cardsHtml = Array.from({ length: VISUAL_CARD_COUNT }, (_, index) => {
     const cardNumber = index + 1
-    const left = getCardLeft(cardNumber, selectedCutIndex)
-    const isAdjacentToSelected =
-      selectedCutIndex !== null &&
-      (cardNumber === selectedCutIndex || cardNumber === selectedCutIndex + 1)
-    const borderColor = isAdjacentToSelected
-      ? 'rgba(252,211,77,0.58)'
-      : 'rgba(255,255,255,0.18)'
-    const hoverShadow = isAdjacentToSelected
-      ? '0 22px 34px rgba(2,6,23,0.26)'
-      : '0 18px 30px rgba(2,6,23,0.24)'
-    const shadowFadeProgress = Math.max(gatherProgress * 0.92, pileRevealProgress)
-    const shadowOpacity = mix(isAdjacentToSelected ? 0.24 : 0.22, 0.035, shadowFadeProgress)
-    const shadowOffsetY = mix(isAdjacentToSelected ? 14 : 10, 4, shadowFadeProgress)
-    const shadowBlur = mix(isAdjacentToSelected ? 28 : 22, 8, shadowFadeProgress)
-    const shadow = `0 ${shadowOffsetY.toFixed(2)}px ${shadowBlur.toFixed(2)}px rgba(2,6,23,${shadowOpacity.toFixed(3)})`
+    const left = getCardLeft(cardNumber, cardPositionSelectedCutIndex)
+    const borderColor = 'rgba(255,255,255,0.28)'
+    const hoverShadow = '0 20px 30px rgba(0,0,0,0.22)'
+    const shadow = isCutAnimationVisible
+      ? '0 3px 6px rgba(0,0,0,0.08)'
+      : '0 14px 24px rgba(0,0,0,0.18)'
     const isSplitActive = selectedCutIndex !== null
     const isLeftSplitPile = isSplitActive && cardNumber <= selectedCutIndex
     const splitDistanceFromCut = isSplitActive
@@ -408,51 +281,35 @@ function renderVisualDeck(
         ? selectedCutIndex - cardNumber
         : cardNumber - selectedCutIndex - 1
       : 0
-    const splitEmphasis = isSplitActive
-      ? Math.max(0, 1 - splitDistanceFromCut / 12)
-      : 0
     const splitDirection = isSplitActive ? (isLeftSplitPile ? -1 : 1) : 0
     const splitX = isSplitActive
-      ? splitDirection * Math.round(58 + splitEmphasis * 24)
+      ? splitDirection * (118 + splitDistanceFromCut * 1.8)
       : 0
     const splitY = isSplitActive
-      ? -Math.round(4 + splitEmphasis * 4)
+      ? -10 + (isLeftSplitPile ? -splitDistanceFromCut * 0.8 : splitDistanceFromCut * 0.8)
       : 0
     const splitRotate = isSplitActive
-      ? splitDirection * (2.1 + splitEmphasis * 2.4)
+      ? splitDirection * 7
       : 0
-    const fanCurveX = isSplitActive ? splitDirection * Math.max(0, splitDistanceFromCut - 1) * 1.35 : 0
-    const fanCurveY = isSplitActive ? Math.max(0, splitDistanceFromCut - 1) * 0.58 : 0
-    const fanCurveRotate = isSplitActive ? splitDirection * Math.max(0, splitDistanceFromCut - 1) * 0.18 : 0
-    const spreadTranslateX =
-      (splitX + fanCurveX) * splitProgress * (1 - gatherProgress)
-    const spreadTranslateY =
-      (-splitY + fanCurveY) * -1 * splitProgress * (1 - gatherProgress * 0.92)
-    const spreadRotate =
-      (splitRotate + fanCurveRotate) * splitProgress * (1 - gatherProgress)
-    const pileColumnOffset = ((cardNumber - 1) % 5 - 2) * 1.5
-    const pileDepthOffset = Math.floor((cardNumber - 1) / 5) * 0.92
-    const pileSideBias = splitDirection * 1.2 * (1 - pileSettleProgress * 0.82)
-    const pileRotate = (((cardNumber - 1) % 6) - 2.5) * 0.28 * (1 - pileSettleProgress * 0.46)
-    const gatherTranslateX =
-      (pileLeft - left + pileColumnOffset + pileSideBias) * gatherProgress
-    const gatherTranslateY =
-      (pileTop - CARD_TOP + pileDepthOffset - 6 * (1 - pileSettleProgress)) * gatherProgress
-    const finalTranslateX = spreadTranslateX + gatherTranslateX
-    const finalTranslateY = spreadTranslateY + gatherTranslateY
-    const finalRotate = spreadRotate + pileRotate * gatherProgress
-    const cardScale = isCutAnimationVisible
-      ? mix(1, 0.987 + ((cardNumber - 1) % 4) * 0.002, pileRevealProgress)
-      : 1
-    const transformOrigin =
-      isSplitActive && gatherProgress < 0.84
-        ? isLeftSplitPile
-          ? 'right bottom'
-          : 'left bottom'
-        : 'center center'
-    const transformTransition = isCutAnimationVisible
-      ? 'transform 0ms linear'
-      : 'transform 220ms cubic-bezier(0.22, 0.8, 0.3, 1)'
+    const pileTarget = getCuttingGatheredCardOffset(cardNumber, selectedCutIndex ?? 16)
+    const pileTargetX = pileTarget.x
+    const pileTargetY = pileTarget.y
+    const pileRotate = pileTarget.rotate
+    const finalTranslateX = isSplitActive ? pileLeft - left + pileTargetX : 0
+    const finalTranslateY = isSplitActive ? pileTop - CARD_TOP + pileTargetY : 0
+    const baseTransform = 'translate(0px, 0px) rotate(0deg)'
+    const hoverTransform = `translate(0px, var(--belot-cut-card-hover-y, 0px)) rotate(0deg)`
+    const splitTransform = `translate(${splitX.toFixed(2)}px, ${splitY.toFixed(2)}px) rotate(${splitRotate.toFixed(2)}deg)`
+    const finalTransform = `translate(${finalTranslateX.toFixed(2)}px, ${finalTranslateY.toFixed(2)}px) rotate(${pileRotate.toFixed(2)}deg)`
+    const transform = isCutAnimationVisible ? finalTransform : hoverTransform
+    const animationStyle = shouldAnimateCut
+      ? `
+          --cut-from-transform:${baseTransform};
+          --cut-split-transform:${splitTransform};
+          --cut-final-transform:${finalTransform};
+          animation:${isLeftSplitPile ? 'belot-active-room-cut-left' : 'belot-active-room-cut-right'} ${CUTTING_VISUAL_ANIMATION_TOTAL_MS}ms cubic-bezier(0.25, 0.8, 0.25, 1) ${animationDelayMs.toFixed(2)}ms forwards;
+        `
+      : ''
 
     return `
       <div
@@ -465,33 +322,24 @@ function renderVisualDeck(
           width:${CARD_WIDTH}px;
           height:${CARD_HEIGHT}px;
           border:1px solid ${borderColor};
-          border-radius:20px;
+          border-radius:24px;
           overflow:hidden;
           z-index:${index + 1};
-          transform-origin:${transformOrigin};
+          transform-origin:center bottom;
           --belot-cut-card-base-shadow:${shadow};
           --belot-cut-card-hover-shadow:${hoverShadow};
-          --belot-cut-card-translate-x:${finalTranslateX.toFixed(2)}px;
-          --belot-cut-card-translate-y:${finalTranslateY.toFixed(2)}px;
-          --belot-cut-card-rotate:${finalRotate.toFixed(2)}deg;
-          --belot-cut-card-scale:${cardScale.toFixed(4)};
-          transform:
-            translate3d(
-              var(--belot-cut-card-translate-x, 0px),
-              calc(var(--belot-cut-card-hover-y, 0px) + var(--belot-cut-card-translate-y, 0px)),
-              0px
-            )
-            rotate(var(--belot-cut-card-rotate, 0deg))
-            scale(var(--belot-cut-card-scale, 1));
+          transform:${transform};
           box-shadow:var(--belot-cut-card-shadow, var(--belot-cut-card-base-shadow));
-          filter:var(--belot-cut-card-filter, none);
+          filter:var(--belot-cut-card-filter, brightness(1));
           will-change:transform;
           backface-visibility:hidden;
           transition:
-            ${transformTransition},
+            transform 160ms ease,
+            box-shadow 160ms ease,
+            border-color 160ms ease,
             filter 160ms ease,
-            border-color 140ms ease,
-            box-shadow 160ms ease;
+            opacity 160ms ease;
+          ${animationStyle}
         "
       >
         ${renderCardFace()}
@@ -566,37 +414,7 @@ function renderVisualDeck(
       }).join('')
     : ''
 
-  const selectedMarkerHtml =
-    selectedCutIndex !== null && selectedCutIndex <= validCutCount
-      ? `
-          <div
-            aria-hidden="true"
-            style="
-              position:absolute;
-              left:${getCutSlotCenter(selectedCutIndex, selectedCutIndex) - 2}px;
-              top:${CARD_TOP - 12}px;
-              width:5px;
-              height:${CARD_HEIGHT + 24}px;
-              border-radius:999px;
-              background:
-                linear-gradient(180deg, rgba(254,240,138,0.00) 0%, rgba(254,240,138,0.94) 20%, rgba(250,204,21,0.94) 80%, rgba(254,240,138,0.00) 100%);
-              box-shadow:
-                0 0 0 1px rgba(254,240,138,0.12),
-                0 0 14px rgba(250,204,21,0.18);
-              opacity:${(1 - markerFadeProgress).toFixed(3)};
-              transform:translateY(${mix(0, -18, markerFadeProgress).toFixed(2)}px) scaleY(${mix(1, 0.78, markerFadeProgress).toFixed(3)});
-              transform-origin:center center;
-              z-index:${VISUAL_CARD_COUNT + 8};
-            "
-          ></div>
-        `
-      : ''
-  const pileOverlayHtml = renderPileOverlay(
-    pileLeft,
-    pileTop,
-    pileRevealProgress,
-    pileSettleProgress,
-  )
+  const selectedMarkerHtml = ''
   const deckHoverMoveHandler = isInteractive
     ? buildCutDeckHoverMoveHandler(selectedCutIndex)
     : ''
@@ -606,7 +424,7 @@ function renderVisualDeck(
         <style>
           .belot-active-room-cutting-card.is-hover-lifted {
             --belot-cut-card-hover-y:-${CARD_HOVER_LIFT_PX}px;
-            --belot-cut-card-filter:brightness(1.04);
+            --belot-cut-card-filter:brightness(1.08);
             --belot-cut-card-shadow:var(--belot-cut-card-hover-shadow);
           }
         </style>
@@ -614,6 +432,7 @@ function renderVisualDeck(
     : ''
 
   return `
+    ${renderCuttingAnimationStyles()}
     ${hoverLiftStyles}
 
     <section
@@ -643,23 +462,22 @@ function renderVisualDeck(
       >
         <div
           style="
-            color:#f8fafc;
-            font-size:26px;
+            font-size:32px;
             font-weight:900;
             letter-spacing:0.02em;
             line-height:1;
             text-align:center;
-            text-shadow:0 4px 12px rgba(0,0,0,0.24);
             white-space:nowrap;
           "
         >
-          Цепи ${escapeHtml(cutterDisplayName)}
+          <span style="color:#f5bb37;text-shadow:0 3px 8px rgba(0,0,0,0.18);">Цепи:</span>
+          <span style="color:#020617;text-shadow:0 1px 2px rgba(255,255,255,0.16);">${escapeHtml(cutterDisplayName)}</span>
         </div>
 
         <div
           style="
             min-width:${tableWidth}px;
-            height:${CARD_HEIGHT + 42}px;
+            height:${CUTTING_TABLE_HEIGHT}px;
             position:relative;
           "
           ${isInteractive ? `onmousemove="${deckHoverMoveHandler}" onmouseleave="${deckHoverLeaveHandler}"` : ''}
@@ -668,21 +486,20 @@ function renderVisualDeck(
             aria-hidden="true"
             style="
               position:absolute;
-              left:${mix(DECK_PADDING_X + 10, pileLeft - 24, gatherProgress).toFixed(2)}px;
-              top:${mix(CARD_TOP + CARD_HEIGHT - 12, pileTop + CARD_HEIGHT - 4, gatherProgress).toFixed(2)}px;
-              width:${mix(deckTrackWidth - 20, CARD_WIDTH + 48, gatherProgress).toFixed(2)}px;
+              left:${DECK_PADDING_X + 10}px;
+              top:${CARD_TOP + CARD_HEIGHT - 12}px;
+              width:${deckTrackWidth - 20}px;
               height:24px;
               border-radius:999px;
               background:
-                radial-gradient(circle at center, rgba(2,6,23,0.22) 0%, rgba(2,6,23,0.10) 48%, rgba(2,6,23,0.00) 78%);
-              filter:blur(${mix(4, 7, pileRevealProgress).toFixed(2)}px);
-              opacity:${mix(1, 0.3, pileRevealProgress).toFixed(3)};
-              transform:scaleX(${mix(1, 0.74, gatherProgress).toFixed(3)});
+                radial-gradient(circle at center, rgba(2,6,23,0.18) 0%, rgba(2,6,23,0.08) 48%, rgba(2,6,23,0.00) 78%);
+              filter:blur(4px);
+              opacity:${isCutAnimationVisible ? '0' : '1'};
+              transition:opacity 120ms ease;
               transform-origin:center center;
             "
           ></div>
 
-          ${pileOverlayHtml}
           ${cardsHtml}
           ${selectedMarkerHtml}
           ${cutButtonsHtml}
