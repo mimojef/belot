@@ -18,6 +18,7 @@ export type DealtHandsData = {
   seatAnimDelays: Partial<Record<Seat, number>> | null
   maxCardsPerSeat: number
   animStartIndex: number
+  preserveExistingCardOffsets?: boolean
 }
 
 export type SeatBidBubble = {
@@ -320,6 +321,20 @@ function getFanOffset(
   }
 }
 
+function getAppendedFanOffset(
+  index: number,
+  baseCount: number,
+): { x: number; y: number; rotate: number } {
+  const lastStable = getFanOffset(baseCount - 1, baseCount)
+  const appendedStep = index - (baseCount - 1)
+
+  return {
+    x: lastStable.x + appendedStep * 65,
+    y: lastStable.y + appendedStep * 6,
+    rotate: lastStable.rotate + appendedStep * 6,
+  }
+}
+
 function renderDealtCardFanInPanel(
   actualSeat: Seat,
   visualSeat: Seat,
@@ -332,22 +347,35 @@ function renderDealtCardFanInPanel(
   const cards = isLocalSeat ? dealtHands.ownHand.slice(0, count) : []
 
   const animDelay = dealtHands.seatAnimDelays?.[actualSeat] ?? null
+  const shouldPreserveExistingOffsets =
+    isLocalSeat &&
+    dealtHands.preserveExistingCardOffsets === true &&
+    animDelay !== null &&
+    dealtHands.animStartIndex > 0
 
   const cardElements = Array.from({ length: count }, (_, i) => {
-    const fanTo = getFanOffset(i, count)
+    const fanTo = shouldPreserveExistingOffsets
+      ? i < dealtHands.animStartIndex
+        ? getFanOffset(i, dealtHands.animStartIndex)
+        : getAppendedFanOffset(i, dealtHands.animStartIndex)
+      : getFanOffset(i, count)
     const card = isLocalSeat ? (cards[i] ?? null) : null
 
     let animStyle = ''
     if (animDelay !== null && i >= dealtHands.animStartIndex) {
       // New card — appears when packet arrives
-      animStyle = `animation: belot-panel-card-appear 140ms cubic-bezier(0.2,0,0.4,1) ${animDelay}ms both;`
-    } else if (animDelay !== null && i < dealtHands.animStartIndex) {
+      animStyle = `animation: belot-panel-card-appear 80ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;`
+    } else if (
+      animDelay !== null &&
+      i < dealtHands.animStartIndex &&
+      !shouldPreserveExistingOffsets
+    ) {
       // Existing card — repositions from the smaller fan to the larger fan when new cards arrive
       const fanFrom = getFanOffset(i, dealtHands.animStartIndex)
       animStyle = `
         --px-from:${fanFrom.x}px; --py-from:${fanFrom.y}px; --pr-from:${fanFrom.rotate}deg;
         --px-to:${fanTo.x}px; --py-to:${fanTo.y}px; --pr-to:${fanTo.rotate}deg;
-        animation: belot-panel-card-reposition 160ms cubic-bezier(0.2,0,0.4,1) ${animDelay}ms both;
+        animation: belot-panel-card-reposition 110ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;
       `
     }
 
@@ -412,40 +440,88 @@ function renderBidBubble(
   const fadeOutStart = Math.round(((totalMs - 280) / totalMs) * 100)
   const keyframes = `@keyframes bbb-${visualSeat}{0%{opacity:0}${fadeInEnd}%{opacity:1}${fadeOutStart}%{opacity:1}100%{opacity:0}}`
 
-  let posStyle: string
+  let wrapperStyle: string
+  let tailStyle: string
   if (visualSeat === 'bottom') {
-    posStyle = 'bottom:155px;left:50%;transform:translateX(-50%);'
+    wrapperStyle = 'bottom:156px;left:50%;transform:translateX(-50%);'
+    tailStyle = `
+      left:50%;
+      bottom:0;
+      width:20px;
+      height:12px;
+      clip-path:polygon(50% 100%, 0 0, 100% 0);
+      transform:translate(-50%, 90%);
+    `
   } else if (visualSeat === 'top') {
-    posStyle = 'top:255px;left:50%;transform:translateX(-50%);'
+    wrapperStyle = 'left:202px;top:38px;transform:none;'
+    tailStyle = `
+      left:0;
+      top:50%;
+      width:14px;
+      height:20px;
+      clip-path:polygon(0 50%, 100% 0, 100% 100%);
+      transform:translate(-88%, -50%);
+    `
   } else if (visualSeat === 'left') {
-    posStyle = 'left:205px;top:117px;transform:translateY(-50%);'
+    wrapperStyle = 'left:202px;top:84px;transform:none;'
+    tailStyle = `
+      left:0;
+      top:50%;
+      width:14px;
+      height:20px;
+      clip-path:polygon(0 50%, 100% 0, 100% 100%);
+      transform:translate(-88%, -50%);
+    `
   } else {
-    posStyle = 'right:205px;top:117px;transform:translateY(-50%);'
+    wrapperStyle = 'right:202px;top:84px;transform:none;'
+    tailStyle = `
+      right:0;
+      top:50%;
+      width:14px;
+      height:20px;
+      clip-path:polygon(100% 50%, 0 0, 0 100%);
+      transform:translate(88%, -50%);
+    `
   }
 
   const elapsed = Math.min(bubble.elapsedMs, totalMs)
+  const bubbleBackground =
+    'linear-gradient(180deg, rgba(255,255,255,0.99) 0%, rgba(246,248,252,0.97) 100%)'
 
   return `
     <style>${keyframes}</style>
     <div style="
       position:absolute;
-      ${posStyle}
-      background:rgba(255,255,255,0.96);
-      border:1px solid rgba(0,0,0,0.08);
-      border-radius:14px;
-      padding:10px 16px;
-      color:#1e293b;
-      font-size:22px;
-      font-weight:800;
-      white-space:nowrap;
+      ${wrapperStyle}
       pointer-events:none;
       z-index:10;
-      box-shadow:0 4px 16px rgba(0,0,0,0.18);
       animation:bbb-${visualSeat} ${totalMs}ms ease-out forwards;
       animation-delay:-${elapsed}ms;
       animation-fill-mode:both;
     ">
-      ${escapeHtml(bubble.label)}
+      <div style="
+        position:relative;
+        border:1px solid rgba(15,23,42,0.10);
+        border-radius:16px;
+        padding:10px 16px;
+        background:${bubbleBackground};
+        color:#1e293b;
+        font-size:22px;
+        font-weight:800;
+        line-height:1.1;
+        white-space:nowrap;
+        box-shadow:
+          0 10px 22px rgba(15,23,42,0.16),
+          0 3px 10px rgba(15,23,42,0.10);
+      ">
+        <div style="
+          position:absolute;
+          background:${bubbleBackground};
+          box-shadow:0 4px 10px rgba(15,23,42,0.06);
+          ${tailStyle}
+        "></div>
+        ${escapeHtml(bubble.label)}
+      </div>
     </div>
   `
 }
@@ -754,7 +830,7 @@ export function createCuttingSeatPanelsHtml(
         100% { transform:scaleX(0); }
       }
       @keyframes belot-panel-card-appear {
-        0% { opacity:0; scale:0.92; }
+        0% { opacity:0; scale:0.97; }
         100% { opacity:1; scale:1; }
       }
       @keyframes belot-panel-card-reposition {

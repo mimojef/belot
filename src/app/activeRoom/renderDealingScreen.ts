@@ -10,7 +10,7 @@ type RenderDealingScreenOptions = {
   stageScale: number;
   dealAnimation: RenderDealingAnimationState | null;
   showPackets: boolean;
-  dealPhase: 'deal-first-3' | 'deal-next-2';
+  dealPhase: 'deal-first-3' | 'deal-next-2' | 'deal-last-3';
 };
 
 export type RenderDealingAnimationState = {
@@ -31,14 +31,23 @@ const DEAL_CARD_HEIGHT = 284;
 const PILE_VISIBLE_CARDS = 10;
 const TOTAL_DECK_SIZE = 32;
 
+function getVisiblePileCardCountFromDeckRemaining(deckRemaining: number): number {
+  if (deckRemaining <= 0) {
+    return 0;
+  }
+
+  return Math.max(1, Math.round((deckRemaining / TOTAL_DECK_SIZE) * PILE_VISIBLE_CARDS));
+}
+
 export function getPileVisibleCards(handCounts: Record<Seat, number>): number {
   const totalDealt = handCounts.bottom + handCounts.right + handCounts.top + handCounts.left
   const deckRemaining = TOTAL_DECK_SIZE - totalDealt
-  return Math.max(1, Math.round((deckRemaining / TOTAL_DECK_SIZE) * PILE_VISIBLE_CARDS))
+  return getVisiblePileCardCountFromDeckRemaining(deckRemaining)
 }
 
 const DEAL_FIRST_THREE_PACKET_SIZE = 3;
 const DEAL_NEXT_TWO_PACKET_SIZE = 2;
+const DEAL_LAST_THREE_PACKET_SIZE = 3;
 export const DEAL_PACKET_START_DELAY_MS = 120;
 export const DEAL_PACKET_DELAY_STEP_MS = 300;
 const DEAL_PACKET_DURATION_MS = 560;
@@ -50,6 +59,7 @@ export const DEAL_FIRST_THREE_VISUAL_TOTAL_MS =
   160;
 
 export const DEAL_NEXT_TWO_VISUAL_TOTAL_MS = DEAL_FIRST_THREE_VISUAL_TOTAL_MS;
+export const DEAL_LAST_THREE_VISUAL_TOTAL_MS = DEAL_FIRST_THREE_VISUAL_TOTAL_MS;
 
 
 function getDealOrder(firstDealSeat: Seat | null): Seat[] {
@@ -186,6 +196,15 @@ function renderDealingStyles(): string {
           transform:translate(-50%, -50%) translate(var(--fan-x), var(--fan-y)) rotate(var(--fan-r)) scale(1);
         }
       }
+
+      @keyframes belot-deal-pile-hide {
+        0% {
+          opacity:1;
+        }
+        100% {
+          opacity:0;
+        }
+      }
     </style>
   `;
 }
@@ -197,10 +216,22 @@ export function syncDealingScreenTargets(
   // Deal positions are rendered in the fixed 1600x900 table coordinate system.
 }
 
-function renderPileCard(layerIndex: number): string {
+function renderPileCard(
+  layerIndex: number,
+  totalCount: number,
+  hideAtMs?: number,
+  elapsedMs = 0,
+): string {
   const x = 0;
-  const y = -layerIndex * 0.5;
+  const y = -layerIndex * 0.5 - (PILE_VISIBLE_CARDS - totalCount) * 0.5;
   const rotate = -4.0;
+  const hideAnimationStyle =
+    hideAtMs === undefined
+      ? ""
+      : `
+        opacity:1;
+        animation:belot-deal-pile-hide 1ms linear ${hideAtMs - elapsedMs}ms both;
+      `;
 
   return renderLargeCardShell(
     renderCardBack(),
@@ -208,12 +239,34 @@ function renderPileCard(layerIndex: number): string {
       transform:translate(-50%, -50%) translate(${x}px, ${y.toFixed(1)}px) rotate(${rotate}deg);
       z-index:${20 + layerIndex};
       box-shadow:0 1px 2px rgba(0,0,0,0.06);
+      ${hideAnimationStyle}
     `,
   );
 }
 
-export function renderPile(visibleCards = PILE_VISIBLE_CARDS): string {
-  const count = Math.max(1, Math.min(visibleCards, PILE_VISIBLE_CARDS))
+export function renderPile(
+  visibleCards = PILE_VISIBLE_CARDS,
+  options?: {
+    layerHideAtMs?: number[];
+    shadowHideAtMs?: number;
+    elapsedMs?: number;
+  },
+): string {
+  const count = Math.max(0, Math.min(visibleCards, PILE_VISIBLE_CARDS))
+
+  if (count === 0) {
+    return "";
+  }
+
+  const elapsedMs = options?.elapsedMs ?? 0
+  const shadowAnimationStyle =
+    options?.shadowHideAtMs === undefined
+      ? ""
+      : `
+        opacity:1;
+        animation:belot-deal-pile-hide 1ms linear ${options.shadowHideAtMs - elapsedMs}ms both;
+      `
+
   return `
     <div
       aria-hidden="true"
@@ -239,11 +292,17 @@ export function renderPile(visibleCards = PILE_VISIBLE_CARDS): string {
           background:rgba(0,0,0,0.16);
           filter:blur(12px);
           pointer-events:none;
+          ${shadowAnimationStyle}
         "
       ></div>
 
       ${Array.from({ length: count }, (_, index) =>
-        renderPileCard(count - index - 1),
+        renderPileCard(
+          count - index - 1,
+          count,
+          options?.layerHideAtMs?.[index],
+          elapsedMs,
+        ),
       ).join("")}
     </div>
   `;
@@ -324,12 +383,17 @@ function renderDealRound(
   showPackets: boolean,
   packetSize: number,
   sequenceName: string,
+  elapsedMs: number,
 ): string {
   const dealOrder = getDealOrder(firstDealSeat);
 
-  // For deal-next-2 the server already added 2 cards per player to hands, but visually
-  // those cards come FROM the pile, so keep the pile count at the pre-deal-next-2 level.
-  const pileHandCounts = sequenceName === 'deal-next-2'
+  // For subsequent deal phases the server already added the new cards to hands, but
+  // visually those cards still come FROM the pile only while packets are flying.
+  // Once the packets are done, show the real post-deal pile count.
+  const shouldShowPreDealPileCount =
+    showPackets && (sequenceName === 'deal-next-2' || sequenceName === 'deal-last-3')
+
+  const pileHandCounts = shouldShowPreDealPileCount
     ? {
         bottom: Math.max(0, handCounts.bottom - packetSize),
         right: Math.max(0, handCounts.right - packetSize),
@@ -337,6 +401,34 @@ function renderDealRound(
         left: Math.max(0, handCounts.left - packetSize),
       }
     : handCounts
+
+  let pileVisibleCards = getPileVisibleCards(pileHandCounts)
+  let pileRenderOptions:
+    | {
+        layerHideAtMs?: number[];
+        shadowHideAtMs?: number;
+        elapsedMs?: number;
+      }
+    | undefined
+
+  if (sequenceName === 'deal-last-3' && showPackets) {
+    const preDealTotalDealt =
+      pileHandCounts.bottom +
+      pileHandCounts.right +
+      pileHandCounts.top +
+      pileHandCounts.left
+    const preDealDeckRemaining = TOTAL_DECK_SIZE - preDealTotalDealt
+    pileVisibleCards = getVisiblePileCardCountFromDeckRemaining(preDealDeckRemaining)
+    pileRenderOptions = {
+      layerHideAtMs: Array.from(
+        { length: pileVisibleCards },
+        (_, index) => DEAL_PACKET_START_DELAY_MS + index * DEAL_PACKET_DELAY_STEP_MS,
+      ),
+      shadowHideAtMs:
+        DEAL_PACKET_START_DELAY_MS + (dealOrder.length - 1) * DEAL_PACKET_DELAY_STEP_MS,
+      elapsedMs,
+    }
+  }
 
   return `
     <div
@@ -347,7 +439,7 @@ function renderDealRound(
         overflow:visible;
       "
     >
-      ${renderPile(getPileVisibleCards(pileHandCounts))}
+      ${renderPile(pileVisibleCards, pileRenderOptions)}
 
       ${dealOrder
         .map((seat, index) =>
@@ -371,7 +463,6 @@ export function renderDealingScreen(
   // cache in the controller decides whether packets should be shown or only the
   // persistent dealt hands should remain visible.
   const _elapsedMs = options.dealAnimation?.elapsedMs ?? 0;
-  void _elapsedMs;
   void options.selectedCutIndex;
   void options.stageScale;
 
@@ -395,8 +486,13 @@ export function renderDealingScreen(
         options.handCounts,
         options.ownHand,
         options.showPackets,
-        options.dealPhase === 'deal-next-2' ? DEAL_NEXT_TWO_PACKET_SIZE : DEAL_FIRST_THREE_PACKET_SIZE,
+        options.dealPhase === 'deal-next-2'
+          ? DEAL_NEXT_TWO_PACKET_SIZE
+          : options.dealPhase === 'deal-last-3'
+            ? DEAL_LAST_THREE_PACKET_SIZE
+            : DEAL_FIRST_THREE_PACKET_SIZE,
         options.dealPhase,
+        _elapsedMs,
       )}
     </section>
   `;

@@ -75,7 +75,14 @@ function createBiddingSnapshot(
   authoritativeState: ServerAuthoritativeGameState,
   yourSeat: Seat | null,
 ): RoomBiddingSnapshot | null {
-  if (authoritativeState.phase !== 'bidding') {
+  const shouldExposeBiddingSnapshot =
+    authoritativeState.phase === 'bidding' ||
+    (authoritativeState.phase === 'deal-last-3' && authoritativeState.bidding.hasEnded) ||
+    (authoritativeState.phase === 'next-round' &&
+      authoritativeState.bidding.hasEnded &&
+      authoritativeState.bidding.winningBid === null)
+
+  if (!shouldExposeBiddingSnapshot) {
     return null
   }
 

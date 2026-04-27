@@ -17,7 +17,7 @@ export function getServerPhaseAutoAdvanceExpiry(
   state: ServerAuthoritativeGameState,
 ): number | null {
   const phaseEnteredAt = getServerPhaseEnteredAt(state)
-  const delayMs = getServerPhaseAutoAdvanceDelay(state.phase)
+  const delayMs = getServerPhaseAutoAdvanceDelay(state)
 
   if (phaseEnteredAt === null || delayMs === null) {
     return null

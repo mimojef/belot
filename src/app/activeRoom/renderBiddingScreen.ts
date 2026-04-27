@@ -44,10 +44,16 @@ function getWinningBidLabel(winningBid: RoomWinningBidSnapshot): string {
 }
 
 export function renderBiddingStageHtml(
-  _winningBid: RoomWinningBidSnapshot,
-  _currentBidderSeat: Seat | null,
+  winningBid: RoomWinningBidSnapshot,
+  currentBidderSeat: Seat | null,
   handCounts: Record<Seat, number>,
 ): string {
+  const phaseStatus =
+    currentBidderSeat !== null ? 'Чака се следващата обява' : 'Обявяването приключи'
+  const winningBidLabel = winningBid
+    ? `Водеща обява: ${getWinningBidLabel(winningBid)}`
+    : 'Все още няма водеща обява'
+
   return `
     <section
       style="
@@ -60,6 +66,59 @@ export function renderBiddingStageHtml(
         overflow:visible;
       "
     >
+      <div
+        style="
+          position:absolute;
+          left:50%;
+          top:58px;
+          transform:translateX(-50%);
+          min-width:320px;
+          max-width:min(88vw, 520px);
+          padding:14px 18px;
+          border-radius:18px;
+          background:rgba(6, 22, 40, 0.80);
+          border:1px solid rgba(255,255,255,0.12);
+          box-shadow:0 16px 34px rgba(0,0,0,0.18);
+          text-align:center;
+          color:#eff6ff;
+          z-index:2;
+          pointer-events:none;
+          font-family:Inter, system-ui, sans-serif;
+        "
+      >
+        <div
+          style="
+            font-size:11px;
+            font-weight:800;
+            letter-spacing:0.10em;
+            text-transform:uppercase;
+            color:rgba(191,219,254,0.92);
+          "
+        >
+          Обявяване
+        </div>
+        <div
+          style="
+            margin-top:6px;
+            font-size:21px;
+            font-weight:800;
+            line-height:1.2;
+            color:#ffffff;
+          "
+        >
+          ${phaseStatus}
+        </div>
+        <div
+          style="
+            margin-top:6px;
+            font-size:14px;
+            line-height:1.35;
+            color:rgba(226,232,240,0.96);
+          "
+        >
+          ${winningBidLabel}
+        </div>
+      </div>
       ${renderPile(getPileVisibleCards(handCounts))}
     </section>
   `

@@ -1,4 +1,4 @@
-import type { Suit } from '../../core/state/gameTypes'
+type Suit = 'clubs' | 'diamonds' | 'hearts' | 'spades'
 
 export const BID_SUIT_ORDER: Suit[] = ['clubs', 'diamonds', 'hearts', 'spades']
 
