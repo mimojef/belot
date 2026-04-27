@@ -29,6 +29,13 @@ const PILE_CENTER_Y = DEAL_STAGE_HEIGHT / 2 + 6;
 const DEAL_CARD_WIDTH = 195;
 const DEAL_CARD_HEIGHT = 284;
 const PILE_VISIBLE_CARDS = 10;
+const TOTAL_DECK_SIZE = 32;
+
+export function getPileVisibleCards(handCounts: Record<Seat, number>): number {
+  const totalDealt = handCounts.bottom + handCounts.right + handCounts.top + handCounts.left
+  const deckRemaining = TOTAL_DECK_SIZE - totalDealt
+  return Math.max(1, Math.round((deckRemaining / TOTAL_DECK_SIZE) * PILE_VISIBLE_CARDS))
+}
 
 const DEAL_FIRST_THREE_PACKET_SIZE = 3;
 const DEAL_NEXT_TWO_PACKET_SIZE = 2;
@@ -105,7 +112,7 @@ function renderCardBack(): string {
       style="
         position:absolute;
         inset:0;
-        border-radius:24px;
+        border-radius:16px;
         background:linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(241,245,249,0.98) 100%);
       "
     ></span>
@@ -114,7 +121,7 @@ function renderCardBack(): string {
       style="
         position:absolute;
         inset:11px;
-        border-radius:20px;
+        border-radius:12px;
         border:1px solid rgba(15,23,42,0.10);
         background-image:url('/images/cards/card-back.png');
         background-size:cover;
@@ -135,7 +142,7 @@ function renderLargeCardShell(content: string, extraStyle = ""): string {
         top:50%;
         width:${DEAL_CARD_WIDTH}px;
         height:${DEAL_CARD_HEIGHT}px;
-        border-radius:24px;
+        border-radius:16px;
         border:1px solid rgba(255,255,255,0.24);
         box-shadow:0 8px 14px rgba(0,0,0,0.12);
         overflow:hidden;
@@ -152,7 +159,7 @@ function renderDealingStyles(): string {
     <style>
       @keyframes belot-deal-packet-fly {
         0% {
-          opacity:1;
+          opacity:0;
           transform:translate(-50%, -50%) translate(var(--from-x), var(--from-y)) rotate(0deg);
         }
         14% {
@@ -191,21 +198,22 @@ export function syncDealingScreenTargets(
 }
 
 function renderPileCard(layerIndex: number): string {
-  const x = layerIndex * 0.35;
-  const y = 18 - layerIndex * 0.58;
-  const rotate = -2.6 + layerIndex * 0.16;
+  const x = 0;
+  const y = -layerIndex * 0.5;
+  const rotate = -4.0;
 
   return renderLargeCardShell(
     renderCardBack(),
     `
-      transform:translate(-50%, -50%) translate(${x.toFixed(2)}px, ${y.toFixed(2)}px) rotate(${rotate.toFixed(2)}deg);
+      transform:translate(-50%, -50%) translate(${x}px, ${y.toFixed(1)}px) rotate(${rotate}deg);
       z-index:${20 + layerIndex};
       box-shadow:0 1px 2px rgba(0,0,0,0.06);
     `,
   );
 }
 
-function renderPile(): string {
+export function renderPile(visibleCards = PILE_VISIBLE_CARDS): string {
+  const count = Math.max(1, Math.min(visibleCards, PILE_VISIBLE_CARDS))
   return `
     <div
       aria-hidden="true"
@@ -226,7 +234,7 @@ function renderPile(): string {
           top:50%;
           width:238px;
           height:332px;
-          transform:translate(-50%, -50%) translate(8px, 20px) rotate(-3deg);
+          transform:translate(-50%, -50%) translate(6px, 18px) rotate(-4deg);
           border-radius:26px;
           background:rgba(0,0,0,0.16);
           filter:blur(12px);
@@ -234,8 +242,8 @@ function renderPile(): string {
         "
       ></div>
 
-      ${Array.from({ length: PILE_VISIBLE_CARDS }, (_, index) =>
-        renderPileCard(PILE_VISIBLE_CARDS - index - 1),
+      ${Array.from({ length: count }, (_, index) =>
+        renderPileCard(count - index - 1),
       ).join("")}
     </div>
   `;
@@ -289,7 +297,7 @@ function renderFlyingPacket(
         --to-x:${targetX}px;
         --to-y:${targetY}px;
         --to-r:${target.rotate}deg;
-        animation:belot-deal-packet-fly ${DEAL_PACKET_DURATION_MS}ms cubic-bezier(0.18, 0.82, 0.22, 1) ${delay}ms forwards;
+        animation:belot-deal-packet-fly ${DEAL_PACKET_DURATION_MS}ms cubic-bezier(0.18, 0.82, 0.22, 1) ${delay}ms both;
       "
     >
       ${Array.from({ length: packetSize }, (_, cardIndex) => renderPacketCard(cardIndex, packetSize)).join("")}
@@ -319,6 +327,17 @@ function renderDealRound(
 ): string {
   const dealOrder = getDealOrder(firstDealSeat);
 
+  // For deal-next-2 the server already added 2 cards per player to hands, but visually
+  // those cards come FROM the pile, so keep the pile count at the pre-deal-next-2 level.
+  const pileHandCounts = sequenceName === 'deal-next-2'
+    ? {
+        bottom: Math.max(0, handCounts.bottom - packetSize),
+        right: Math.max(0, handCounts.right - packetSize),
+        top: Math.max(0, handCounts.top - packetSize),
+        left: Math.max(0, handCounts.left - packetSize),
+      }
+    : handCounts
+
   return `
     <div
       data-active-room-dealing-sequence="${sequenceName}"
@@ -328,7 +347,7 @@ function renderDealRound(
         overflow:visible;
       "
     >
-      ${renderPile()}
+      ${renderPile(getPileVisibleCards(pileHandCounts))}
 
       ${dealOrder
         .map((seat, index) =>

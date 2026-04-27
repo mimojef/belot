@@ -261,8 +261,8 @@ function isRedSuit(suit: RoomCardSnapshot['suit']): boolean {
 
 function renderPanelCardBack(): string {
   return `
-    <span style="position:absolute;inset:0;border-radius:24px;background:linear-gradient(180deg,rgba(255,255,255,0.98) 0%,rgba(241,245,249,0.98) 100%);"></span>
-    <span style="position:absolute;inset:11px;border-radius:20px;border:1px solid rgba(15,23,42,0.10);background-image:url('/images/cards/card-back.png');background-size:cover;background-position:center;background-repeat:no-repeat;"></span>
+    <span style="position:absolute;inset:0;border-radius:16px;background:linear-gradient(180deg,rgba(255,255,255,0.98) 0%,rgba(241,245,249,0.98) 100%);"></span>
+    <span style="position:absolute;inset:11px;border-radius:12px;border:1px solid rgba(15,23,42,0.10);background-image:url('/images/cards/card-back.png');background-size:cover;background-position:center;background-repeat:no-repeat;"></span>
   `
 }
 
@@ -270,7 +270,7 @@ function renderPanelCardFront(card: RoomCardSnapshot): string {
   const symbol = getSuitSymbol(card.suit)
   const color = isRedSuit(card.suit) ? '#b3261e' : '#13253d'
   return `
-    <div style="position:relative;width:100%;height:100%;box-sizing:border-box;border-radius:24px;border:1px solid rgba(15,23,42,0.12);background:linear-gradient(180deg,#fff 0%,#f8fafc 100%);color:${color};overflow:hidden;">
+    <div style="position:relative;width:100%;height:100%;box-sizing:border-box;border-radius:16px;border:1px solid rgba(15,23,42,0.12);background:linear-gradient(180deg,#fff 0%,#f8fafc 100%);color:${color};overflow:hidden;">
       <div style="position:absolute;left:12px;top:12px;font-size:30px;line-height:1;font-weight:900;">${card.rank}</div>
       <div style="position:absolute;left:12px;top:45px;font-size:30px;line-height:1;font-weight:900;">${symbol}</div>
       <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font-size:74px;line-height:1;font-weight:900;">${symbol}</div>
@@ -294,7 +294,7 @@ function renderPanelDealtCard(
       top:50%;
       width:${PANEL_CARD_WIDTH}px;
       height:${PANEL_CARD_HEIGHT}px;
-      border-radius:24px;
+      border-radius:16px;
       border:1px solid rgba(255,255,255,0.24);
       box-shadow:0 8px 18px rgba(0,0,0,0.22);
       overflow:hidden;
@@ -334,13 +334,24 @@ function renderDealtCardFanInPanel(
   const animDelay = dealtHands.seatAnimDelays?.[actualSeat] ?? null
 
   const cardElements = Array.from({ length: count }, (_, i) => {
-    const fan = getFanOffset(i, count)
+    const fanTo = getFanOffset(i, count)
     const card = isLocalSeat ? (cards[i] ?? null) : null
-    const shouldAnimate = animDelay !== null && i >= dealtHands.animStartIndex
-    const animStyle = shouldAnimate
-      ? `animation: belot-panel-card-appear 220ms ease-out ${animDelay}ms both;`
-      : ''
-    return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle)
+
+    let animStyle = ''
+    if (animDelay !== null && i >= dealtHands.animStartIndex) {
+      // New card — appears when packet arrives
+      animStyle = `animation: belot-panel-card-appear 140ms cubic-bezier(0.2,0,0.4,1) ${animDelay}ms both;`
+    } else if (animDelay !== null && i < dealtHands.animStartIndex) {
+      // Existing card — repositions from the smaller fan to the larger fan when new cards arrive
+      const fanFrom = getFanOffset(i, dealtHands.animStartIndex)
+      animStyle = `
+        --px-from:${fanFrom.x}px; --py-from:${fanFrom.y}px; --pr-from:${fanFrom.rotate}deg;
+        --px-to:${fanTo.x}px; --py-to:${fanTo.y}px; --pr-to:${fanTo.rotate}deg;
+        animation: belot-panel-card-reposition 160ms cubic-bezier(0.2,0,0.4,1) ${animDelay}ms both;
+      `
+    }
+
+    return renderPanelDealtCard(card, i, fanTo.x, fanTo.y, fanTo.rotate, animStyle)
   }).join('')
 
   // Fan center relative to each panel's anchor point (in unscaled panel coords)
@@ -390,15 +401,6 @@ function renderDealtCardFanInPanel(
 
 const BID_BUBBLE_TOTAL_MS = 3200
 
-function getBubbleBgColor(label: string): string {
-  if (label === 'Пас') return 'rgba(51,65,85,0.94)'
-  if (label.startsWith('♦') || label.startsWith('♥')) return 'rgba(159,18,18,0.94)'
-  if (label === 'Без коз') return 'rgba(30,64,175,0.94)'
-  if (label === 'Всичко коз') return 'rgba(120,53,15,0.94)'
-  if (label === 'Контра') return 'rgba(154,52,18,0.94)'
-  if (label === 'Реконтра') return 'rgba(127,29,29,0.94)'
-  return 'rgba(15,23,42,0.94)'
-}
 
 function renderBidBubble(
   visualSeat: Seat,
@@ -422,23 +424,23 @@ function renderBidBubble(
   }
 
   const elapsed = Math.min(bubble.elapsedMs, totalMs)
-  const bg = getBubbleBgColor(bubble.label)
 
   return `
     <style>${keyframes}</style>
     <div style="
       position:absolute;
       ${posStyle}
-      background:${bg};
-      border:1px solid rgba(255,255,255,0.16);
+      background:rgba(255,255,255,0.96);
+      border:1px solid rgba(0,0,0,0.08);
       border-radius:14px;
       padding:10px 16px;
-      color:#f8fafc;
+      color:#1e293b;
       font-size:22px;
       font-weight:800;
       white-space:nowrap;
       pointer-events:none;
       z-index:10;
+      box-shadow:0 4px 16px rgba(0,0,0,0.18);
       animation:bbb-${visualSeat} ${totalMs}ms ease-out forwards;
       animation-delay:-${elapsed}ms;
       animation-fill-mode:both;
@@ -628,7 +630,7 @@ export function createCuttingSeatPanelHtml(
             linear-gradient(180deg, rgba(18, 154, 160, 0.95) 0%, rgba(19, 104, 121, 0.95) 52%, rgba(12, 55, 82, 0.96) 100%);
           box-shadow:${shadow};
           overflow:hidden;
-          transform:scale(0.8);
+          transform:scale(0.9);
           transform-origin:${visualSeat === 'top' ? 'top center' : visualSeat === 'left' ? 'left center' : 'right center'};
         "
       >
@@ -752,8 +754,12 @@ export function createCuttingSeatPanelsHtml(
         100% { transform:scaleX(0); }
       }
       @keyframes belot-panel-card-appear {
-        0% { opacity:0; scale:0.88; }
+        0% { opacity:0; scale:0.92; }
         100% { opacity:1; scale:1; }
+      }
+      @keyframes belot-panel-card-reposition {
+        0% { transform:translate(-50%,-50%) translate(var(--px-from),var(--py-from)) rotate(var(--pr-from)); }
+        100% { transform:translate(-50%,-50%) translate(var(--px-to),var(--py-to)) rotate(var(--pr-to)); }
       }
     </style>
 

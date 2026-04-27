@@ -831,7 +831,11 @@ export function createActiveRoomFlowController(
       dealingAnimation.isAnimating
     const shouldRenderCompletedDealFirstThreeHands =
       !shouldRenderDealFirstThreeAnimation &&
-      shouldKeepFirstThreeHands
+      shouldKeepFirstThreeHands &&
+      authoritativePhase !== 'bidding' &&
+      authoritativePhase !== 'deal-last-3' &&
+      authoritativePhase !== 'playing' &&
+      authoritativePhase !== 'scoring'
     const shouldRenderDealNextTwoAnimation =
       (authoritativePhase === 'deal-next-2' && !dealNextTwoAnimation.hasCompleted) ||
       dealNextTwoAnimation.isAnimating
@@ -846,17 +850,18 @@ export function createActiveRoomFlowController(
       shouldRenderCompletedDealNextTwoHands
     const isShowingBiddingPhase =
       !isShowingAnyDealPhase && authoritativePhase === 'bidding'
+    const isShowingNextRoundPause = authoritativePhase === 'next-round'
 
     if (isShowingBiddingPhase) {
       syncBiddingUiState(activeRoomState.game?.bidding ?? null, activeRoomState.seat)
-    } else {
+    } else if (!isShowingNextRoundPause) {
       clearBiddingUiState()
     }
 
     const cuttingSnapshotForRender =
       shouldRenderCutAnimation
         ? cuttingAnimation.latchedCuttingSnapshot ?? cuttingSnapshot
-        : isShowingAnyDealPhase
+        : isShowingAnyDealPhase || isShowingBiddingPhase
           ? null
           : cuttingSnapshot
     const dealerSeatForRender =
@@ -1139,7 +1144,13 @@ export function createActiveRoomFlowController(
             panelScale: stageScale,
             escapeHtml,
             dealtHands: dealtHandsForPanels,
-            bidBubbles: null,
+            bidBubbles: isShowingNextRoundPause ? (() => {
+              const bubbles: Partial<Record<Seat, SeatBidBubble>> = {}
+              for (const [s, b] of Object.entries(biddingUiState.recentBubbles) as [Seat, { label: string; startedAt: number }][]) {
+                bubbles[s] = { label: b.label, elapsedMs: Math.round(performance.now() - b.startedAt) }
+              }
+              return Object.keys(bubbles).length > 0 ? bubbles : null
+            })() : null,
           })}
         </div>
       `
@@ -1174,9 +1185,17 @@ export function createActiveRoomFlowController(
         }
       }
 
+      // Subtract the deal-next-2 packet size so the pile visually matches the deal-next-2 completed state.
+      const handCountsForPile: Record<Seat, number> = {
+        bottom: Math.max(0, handCounts.bottom - 2),
+        right: Math.max(0, handCounts.right - 2),
+        top: Math.max(0, handCounts.top - 2),
+        left: Math.max(0, handCounts.left - 2),
+      }
       const biddingStageHtml = renderBiddingStageHtml(
         biddingSnapshot.winningBid,
         biddingSnapshot.currentBidderSeat,
+        handCountsForPile,
       )
 
       const biddingInteractionHtml = createBiddingInteractionHtml({

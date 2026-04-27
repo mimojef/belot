@@ -5,6 +5,7 @@ import type {
   RoomWinningBidSnapshot,
   Seat,
 } from '../network/createGameServerClient'
+import { renderPile, getPileVisibleCards } from './renderDealingScreen'
 
 export const BID_HUMAN_TIMEOUT_MS = 15_000
 
@@ -43,19 +44,10 @@ function getWinningBidLabel(winningBid: RoomWinningBidSnapshot): string {
 }
 
 export function renderBiddingStageHtml(
-  winningBid: RoomWinningBidSnapshot,
-  currentBidderSeat: Seat | null,
+  _winningBid: RoomWinningBidSnapshot,
+  _currentBidderSeat: Seat | null,
+  handCounts: Record<Seat, number>,
 ): string {
-  const seatLabels: Record<Seat, string> = {
-    bottom: 'ТИ',
-    right: 'ДЯСНО',
-    top: 'ГОРЕ',
-    left: 'ЛЯВО',
-  }
-
-  const bidderLabel = currentBidderSeat ? seatLabels[currentBidderSeat] : null
-  const winLabel = getWinningBidLabel(winningBid)
-
   return `
     <section
       style="
@@ -66,55 +58,9 @@ export function renderBiddingStageHtml(
           radial-gradient(circle at center, rgba(74,222,128,0.22) 0%, rgba(34,197,94,0.12) 32%, rgba(21,128,61,0.00) 58%),
           linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%);
         overflow:visible;
-        display:flex;
-        align-items:center;
-        justify-content:center;
       "
     >
-      <div style="text-align:center;pointer-events:none;user-select:none;">
-        ${
-          winLabel
-            ? `
-              <div style="
-                color:rgba(255,255,255,0.55);
-                font-size:13px;
-                font-weight:800;
-                letter-spacing:0.1em;
-                text-transform:uppercase;
-                margin-bottom:8px;
-              ">Текуща обява</div>
-              <div style="
-                color:#fbbf24;
-                font-size:42px;
-                font-weight:900;
-                letter-spacing:0.02em;
-                text-shadow:0 2px 12px rgba(0,0,0,0.4);
-              ">${winLabel}</div>
-            `
-            : `
-              <div style="
-                color:rgba(255,255,255,0.30);
-                font-size:15px;
-                font-weight:800;
-                letter-spacing:0.1em;
-                text-transform:uppercase;
-              ">Обявяване</div>
-            `
-        }
-        ${
-          bidderLabel
-            ? `
-              <div style="
-                margin-top:14px;
-                color:rgba(255,255,255,0.46);
-                font-size:13px;
-                font-weight:700;
-                letter-spacing:0.06em;
-              ">Обявява: ${bidderLabel}</div>
-            `
-            : ''
-        }
-      </div>
+      ${renderPile(getPileVisibleCards(handCounts))}
     </section>
   `
 }
@@ -133,10 +79,10 @@ function renderBidTile(options: {
       ${dataAction}
       ${enabled ? '' : 'disabled'}
       style="
-        min-height:88px;
+        min-height:72px;
         border:0;
         border-radius:10px;
-        padding:8px 10px;
+        padding:6px 8px;
         display:flex;
         flex-direction:column;
         align-items:center;
@@ -152,13 +98,13 @@ function renderBidTile(options: {
       onmouseout="${enabled ? "this.style.filter=''" : ''}"
     >
       <span style="
-        font-size:48px;
+        font-size:38px;
         line-height:1;
         font-weight:800;
         color:${enabled ? symbolColor : 'rgba(31,41,55,0.18)'};
       ">${symbol}</span>
       <span style="
-        font-size:16px;
+        font-size:13px;
         line-height:1.05;
         font-weight:600;
         text-transform:uppercase;
@@ -176,13 +122,13 @@ function renderPassButton(enabled: boolean): string {
       ${enabled ? '' : 'disabled'}
       style="
         width:100%;
-        min-height:72px;
+        min-height:56px;
         border:0;
         border-radius:10px;
         cursor:${enabled ? 'pointer' : 'not-allowed'};
         background:${enabled ? '#f5ad1c' : 'rgba(245,173,28,0.40)'};
         color:${enabled ? '#fff' : 'rgba(255,255,255,0.50)'};
-        font-size:40px;
+        font-size:30px;
         line-height:1;
         font-weight:600;
         text-transform:uppercase;
@@ -244,11 +190,11 @@ function renderBidPopup(
       data-bidding-popup="1"
       style="
         position:fixed;
-        bottom:168px;
+        bottom:260px;
         left:50%;
         transform:translateX(-50%);
-        width:min(92vw, 440px);
-        padding:6px;
+        width:min(88vw, 400px);
+        padding:5px;
         border-radius:14px;
         background:rgba(13,34,64,0.88);
         border:2px solid #f5ad1c;
@@ -265,8 +211,8 @@ function renderBidPopup(
       <div style="
         display:grid;
         grid-template-columns:1fr 1fr;
-        gap:6px;
-        margin-bottom:6px;
+        gap:5px;
+        margin-bottom:5px;
       ">
         ${renderBidTile({ symbol: '♣', label: 'Спатия', dataAction: 'data-bid-suit="clubs"', enabled: suits.clubs && !disabled, symbolColor: '#1f1720' })}
         ${renderBidTile({ symbol: 'A', label: 'Без коз', dataAction: 'data-bid-action="no-trumps"', enabled: validActions.noTrumps && !disabled, symbolColor: '#111111' })}

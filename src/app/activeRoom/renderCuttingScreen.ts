@@ -78,7 +78,7 @@ function renderCardFace(): string {
       style="
         position:absolute;
         inset:0;
-        border-radius:24px;
+        border-radius:16px;
         background:
           linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(241,245,249,0.98) 100%);
       "
@@ -88,7 +88,7 @@ function renderCardFace(): string {
       style="
         position:absolute;
         inset:11px;
-        border-radius:20px;
+        border-radius:12px;
         border:1px solid rgba(15,23,42,0.10);
         background-image:url('/images/cards/card-back.png');
         background-size:cover;
@@ -322,7 +322,7 @@ function renderVisualDeck(
           width:${CARD_WIDTH}px;
           height:${CARD_HEIGHT}px;
           border:1px solid ${borderColor};
-          border-radius:24px;
+          border-radius:16px;
           overflow:hidden;
           z-index:${index + 1};
           transform-origin:center bottom;

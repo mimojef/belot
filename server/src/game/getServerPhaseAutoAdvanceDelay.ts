@@ -4,7 +4,7 @@ const CUT_RESOLVE_AUTO_ADVANCE_MS = 0
 const DEAL_FIRST_THREE_AUTO_ADVANCE_MS = 2400
 const DEAL_NEXT_TWO_AUTO_ADVANCE_MS = 1900
 const DEAL_LAST_THREE_AUTO_ADVANCE_MS = 2000
-const NEXT_ROUND_AUTO_ADVANCE_MS = 1000
+const NEXT_ROUND_AUTO_ADVANCE_MS = 2500
 
 export function getServerPhaseAutoAdvanceDelay(
   phase: AuthoritativePhaseType,

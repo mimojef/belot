@@ -1,7 +1,6 @@
 import { enterServerPhase } from './enterServerPhase.js'
 import { applyServerBidAction } from './applyServerBidAction.js'
 import { finalizeServerBiddingPhase } from './finalizeServerBiddingPhase.js'
-import { startNextServerRound } from './startNextServerRound.js'
 import {
   clearServerTimerState,
   createServerBiddingTimerState,
@@ -38,7 +37,7 @@ export function submitServerBidAction(
   }
 
   if (finalizedState.phase === 'next-round') {
-    return startNextServerRound(finalizedState)
+    return enterServerPhase(finalizedState, 'next-round')
   }
 
   return finalizedState
