@@ -1,6 +1,8 @@
 import {
+  type ClientBidAction,
   type MatchFoundMessage,
   type MatchStake,
+  type RoomBiddingSnapshot,
   type RoomCuttingSnapshot,
   type RoomGameSnapshot,
   type RoomSeatSnapshot,
@@ -9,7 +11,11 @@ import {
   type Seat,
   type ServerMessage,
 } from '../network/createGameServerClient'
-import { createCuttingSeatPanelsHtml, type DealtHandsData } from './cutting/renderCuttingSeatPanels'
+import {
+  createCuttingSeatPanelsHtml,
+  type DealtHandsData,
+  type SeatBidBubble,
+} from './cutting/renderCuttingSeatPanels'
 import { createCuttingVisualCountdownTracker } from './cutting/cuttingVisualCountdown'
 import {
   CUTTING_VISUAL_ANIMATION_TOTAL_MS,
@@ -25,6 +31,11 @@ import {
   renderDealingScreen,
   syncDealingScreenTargets,
 } from './renderDealingScreen'
+import {
+  getBidActionLabel,
+  renderBiddingStageHtml,
+  createBiddingInteractionHtml,
+} from './renderBiddingScreen'
 import { getViewportStageMetrics } from '../../ui/layout/viewportStage'
 
 type ActiveRoomState = {
@@ -47,6 +58,7 @@ type CreateActiveRoomFlowControllerOptions = {
   isConnected: () => boolean
   leaveActiveRoom: (roomId: string) => void
   submitCutIndex: (roomId: string, cutIndex: number) => void
+  submitBidAction: (roomId: string, action: ClientBidAction) => void
   showLobby: (errorText?: string | null) => void
 }
 
@@ -84,6 +96,16 @@ type DealingAnimationCache = {
   completionTimerId: number | null
   isAnimating: boolean
   hasCompleted: boolean
+}
+
+type BiddingUiState = {
+  lastKnownEntriesCount: number
+  pendingBidSent: boolean
+  wasMyTurn: boolean
+  recentBubbles: Partial<Record<Seat, { label: string; startedAt: number }>>
+  bubbleTimerIds: Partial<Record<Seat, number>>
+  showBotTakeover: boolean
+  botTakeoverTimerId: number | null
 }
 
 const SEAT_LABELS: Record<Seat, string> = {
@@ -245,6 +267,15 @@ export function createActiveRoomFlowController(
     completionTimerId: null,
     isAnimating: false,
     hasCompleted: false,
+  }
+  const biddingUiState: BiddingUiState = {
+    lastKnownEntriesCount: 0,
+    pendingBidSent: false,
+    wasMyTurn: false,
+    recentBubbles: {},
+    bubbleTimerIds: {},
+    showBotTakeover: false,
+    botTakeoverTimerId: null,
   }
 
   function escapeHtml(value: string): string {
@@ -512,9 +543,72 @@ export function createActiveRoomFlowController(
 
       dealNextTwoAnimation.isAnimating = false
       dealNextTwoAnimation.hasCompleted = true
-      // No re-render here — CSS fill-mode keeps cards visible at their final state.
-      // The next server snapshot (bidding phase) will trigger a clean full re-render.
+      // If the server has already moved past deal-next-2, trigger a re-render now.
+      const postAnimPhase = activeRoomState.game?.authoritativePhase ?? null
+      if (postAnimPhase !== null && postAnimPhase !== 'deal-next-2') {
+        renderActiveRoomScreen()
+      }
     }, remainingMs)
+  }
+
+  function clearBiddingUiState(): void {
+    if (biddingUiState.botTakeoverTimerId !== null) {
+      window.clearTimeout(biddingUiState.botTakeoverTimerId)
+    }
+    for (const timerId of Object.values(biddingUiState.bubbleTimerIds)) {
+      if (timerId !== undefined) window.clearTimeout(timerId)
+    }
+    biddingUiState.lastKnownEntriesCount = 0
+    biddingUiState.pendingBidSent = false
+    biddingUiState.wasMyTurn = false
+    biddingUiState.recentBubbles = {}
+    biddingUiState.bubbleTimerIds = {}
+    biddingUiState.showBotTakeover = false
+    biddingUiState.botTakeoverTimerId = null
+  }
+
+  function addBidBubble(seat: Seat, label: string): void {
+    const existing = biddingUiState.bubbleTimerIds[seat]
+    if (existing !== undefined) window.clearTimeout(existing)
+
+    biddingUiState.recentBubbles[seat] = { label, startedAt: performance.now() }
+    biddingUiState.bubbleTimerIds[seat] = window.setTimeout(() => {
+      delete biddingUiState.recentBubbles[seat]
+      delete biddingUiState.bubbleTimerIds[seat]
+      renderActiveRoomScreen()
+    }, 3300)
+  }
+
+  function syncBiddingUiState(
+    biddingSnapshot: RoomBiddingSnapshot | null,
+    localSeat: Seat,
+  ): void {
+    if (!biddingSnapshot) {
+      clearBiddingUiState()
+      return
+    }
+
+    const currentCount = biddingSnapshot.entries.length
+
+    // Detect new entries since last render
+    if (currentCount > biddingUiState.lastKnownEntriesCount) {
+      for (let i = biddingUiState.lastKnownEntriesCount; i < currentCount; i++) {
+        const entry = biddingSnapshot.entries[i]
+        if (entry) {
+          addBidBubble(entry.seat, getBidActionLabel(entry.action))
+          // If this entry is for the local seat and we didn't send it → bot takeover
+          if (entry.seat === localSeat && !biddingUiState.pendingBidSent && biddingUiState.wasMyTurn) {
+            biddingUiState.showBotTakeover = true
+          }
+          if (entry.seat === localSeat) {
+            biddingUiState.pendingBidSent = false
+          }
+        }
+      }
+      biddingUiState.lastKnownEntriesCount = currentCount
+    }
+
+    biddingUiState.wasMyTurn = biddingSnapshot.canSubmitBid
   }
 
   function syncDealNextTwoAnimationState(roomId: string, game: RoomGameSnapshot | null): void {
@@ -743,12 +837,22 @@ export function createActiveRoomFlowController(
       dealNextTwoAnimation.isAnimating
     const shouldRenderCompletedDealNextTwoHands =
       !shouldRenderDealNextTwoAnimation &&
-      shouldKeepNextTwoHandsVisible(activeRoomState.game)
+      shouldKeepNextTwoHandsVisible(activeRoomState.game) &&
+      authoritativePhase !== 'bidding'
     const isShowingAnyDealPhase =
       shouldRenderDealFirstThreeAnimation ||
       shouldRenderCompletedDealFirstThreeHands ||
       shouldRenderDealNextTwoAnimation ||
       shouldRenderCompletedDealNextTwoHands
+    const isShowingBiddingPhase =
+      !isShowingAnyDealPhase && authoritativePhase === 'bidding'
+
+    if (isShowingBiddingPhase) {
+      syncBiddingUiState(activeRoomState.game?.bidding ?? null, activeRoomState.seat)
+    } else {
+      clearBiddingUiState()
+    }
+
     const cuttingSnapshotForRender =
       shouldRenderCutAnimation
         ? cuttingAnimation.latchedCuttingSnapshot ?? cuttingSnapshot
@@ -900,6 +1004,7 @@ export function createActiveRoomFlowController(
             panelScale: stageScale,
             escapeHtml,
             dealtHands: null,
+            bidBubbles: null,
           })}
         </div>
       `
@@ -1034,6 +1139,7 @@ export function createActiveRoomFlowController(
             panelScale: stageScale,
             escapeHtml,
             dealtHands: dealtHandsForPanels,
+            bidBubbles: null,
           })}
         </div>
       `
@@ -1044,6 +1150,137 @@ export function createActiveRoomFlowController(
       }
 
       syncDealingScreenTargets(options.root, stageScale)
+    } else if (isShowingBiddingPhase) {
+      cuttingVisualCountdown.resetCuttingVisualCountdownState()
+
+      const biddingSnapshot = activeRoomState.game!.bidding!
+      const handCounts = activeRoomState.game?.handCounts ?? { bottom: 0, right: 0, top: 0, left: 0 }
+      const ownHand = activeRoomState.game?.ownHand ?? []
+
+      const dealtHandsForBidding: DealtHandsData = {
+        handCounts,
+        ownHand,
+        localSeat: activeRoomState.seat,
+        maxCardsPerSeat: 5,
+        animStartIndex: 0,
+        seatAnimDelays: null,
+      }
+
+      const bidBubbles: Partial<Record<Seat, SeatBidBubble>> = {}
+      for (const [seat, bubble] of Object.entries(biddingUiState.recentBubbles) as [Seat, { label: string; startedAt: number }][]) {
+        bidBubbles[seat] = {
+          label: bubble.label,
+          elapsedMs: Math.round(performance.now() - bubble.startedAt),
+        }
+      }
+
+      const biddingStageHtml = renderBiddingStageHtml(
+        biddingSnapshot.winningBid,
+        biddingSnapshot.currentBidderSeat,
+      )
+
+      const biddingInteractionHtml = createBiddingInteractionHtml({
+        biddingSnapshot,
+        timerDeadlineAt: activeRoomState.game?.timerDeadlineAt ?? null,
+        isPendingSubmission: biddingUiState.pendingBidSent,
+        showBotTakeover: biddingUiState.showBotTakeover,
+      })
+
+      options.root.innerHTML = `
+        <div
+          style="
+            position:relative;
+            min-height:100vh;
+            width:100%;
+            box-sizing:border-box;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            overflow:hidden;
+            background:
+              radial-gradient(circle at center, rgba(74,222,128,0.18) 0%, rgba(34,197,94,0.10) 34%, rgba(21,128,61,0.00) 58%),
+              linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%);
+            font-family:Inter, system-ui, sans-serif;
+          "
+        >
+          <div
+            style="
+              position:relative;
+              width:${scaledStageWidth}px;
+              height:${scaledStageHeight}px;
+              flex:0 0 auto;
+            "
+          >
+            <div
+              style="
+                position:absolute;
+                left:50%;
+                top:50%;
+                width:${ACTIVE_ROOM_STAGE_WIDTH}px;
+                height:${ACTIVE_ROOM_STAGE_HEIGHT}px;
+                transform:translate(-50%, -50%) scale(${stageScale});
+                transform-origin:center center;
+              "
+            >
+              <div
+                style="
+                  position:relative;
+                  width:100%;
+                  height:100%;
+                  overflow:visible;
+                "
+              >
+                ${biddingStageHtml}
+              </div>
+            </div>
+          </div>
+          ${createCuttingSeatPanelsHtml({
+            seats: activeRoomState.seats,
+            localSeat: activeRoomState.seat,
+            dealerSeat,
+            cutterSeat: null,
+            cuttingCountdownRemainingMs: null,
+            panelScale: stageScale,
+            escapeHtml,
+            dealtHands: dealtHandsForBidding,
+            bidBubbles,
+          })}
+          ${biddingInteractionHtml}
+        </div>
+      `
+
+      // Wire bid popup buttons
+      options.root
+        .querySelectorAll<HTMLButtonElement>('[data-bid-suit]')
+        .forEach((btn) => {
+          btn.addEventListener('click', () => {
+            if (!activeRoomState || biddingUiState.pendingBidSent) return
+            const suit = btn.dataset.bidSuit as 'clubs' | 'diamonds' | 'hearts' | 'spades'
+            biddingUiState.pendingBidSent = true
+            renderActiveRoomScreen()
+            options.submitBidAction(activeRoomState.roomId, { type: 'suit', suit })
+          })
+        })
+
+      options.root
+        .querySelectorAll<HTMLButtonElement>('[data-bid-action]')
+        .forEach((btn) => {
+          btn.addEventListener('click', () => {
+            if (!activeRoomState || biddingUiState.pendingBidSent) return
+            const action = btn.dataset.bidAction as ClientBidAction['type']
+            if (action === 'pass' || action === 'no-trumps' || action === 'all-trumps' || action === 'double' || action === 'redouble') {
+              biddingUiState.pendingBidSent = true
+              renderActiveRoomScreen()
+              options.submitBidAction(activeRoomState.roomId, { type: action } as ClientBidAction)
+            }
+          })
+        })
+
+      const dismissBtn = options.root.querySelector<HTMLButtonElement>('[data-bot-takeover-dismiss="1"]')
+      dismissBtn?.addEventListener('click', () => {
+        biddingUiState.showBotTakeover = false
+        renderActiveRoomScreen()
+      })
     } else {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
       const seatsHtml =
@@ -1412,6 +1649,8 @@ export function createActiveRoomFlowController(
   function enterActiveRoom(message: MatchFoundMessage): void {
     resetCuttingAnimationState()
     clearDealingAnimationState()
+    clearDealNextTwoAnimationState()
+    clearBiddingUiState()
     activeRoomState = {
       roomId: message.roomId,
       seat: message.seat,
@@ -1525,6 +1764,8 @@ export function createActiveRoomFlowController(
 
     resetCuttingAnimationState()
     clearDealingAnimationState()
+    clearDealNextTwoAnimationState()
+    clearBiddingUiState()
     options.leaveActiveRoom(activeRoomState.roomId)
   }
 

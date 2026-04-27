@@ -1,11 +1,10 @@
-import type { ClientBidAction } from './network/createGameServerClient'
 import type {
   RoomBiddingSnapshot,
   RoomBidActionSnapshot,
   RoomValidBidActionsSnapshot,
   RoomWinningBidSnapshot,
   Seat,
-} from '../app/network/createGameServerClient'
+} from '../network/createGameServerClient'
 
 export const BID_HUMAN_TIMEOUT_MS = 15_000
 

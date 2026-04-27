@@ -37,6 +37,9 @@ const activeRoom = createActiveRoomFlowController({
   submitCutIndex: (roomId, cutIndex) => {
     client.submitCutIndex(roomId, cutIndex)
   },
+  submitBidAction: (roomId, action) => {
+    client.submitBidAction(roomId, action)
+  },
   showLobby: (errorText = null) => {
     lobby.setConnected(client.isConnected())
     lobby.resetToLobby()
