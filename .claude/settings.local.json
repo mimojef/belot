@@ -3,7 +3,8 @@
     "allow": [
       "Bash(xargs wc *)",
       "Bash(npx tsc *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(npm run *)"
     ]
   }
 }

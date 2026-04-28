@@ -1,4 +1,5 @@
 import type { RoomCardSnapshot, Seat } from "../network/createGameServerClient";
+import { CARD_BACK_IMAGE_PATH } from './cardImageAssets';
 import { getVisualSeatForLocalPerspective } from "./cutting/cuttingSeatLayout";
 
 type RenderDealingScreenOptions = {
@@ -133,7 +134,7 @@ function renderCardBack(): string {
         inset:11px;
         border-radius:12px;
         border:1px solid rgba(15,23,42,0.10);
-        background-image:url('/images/cards/card-back.png');
+        background-image:url('${CARD_BACK_IMAGE_PATH}');
         background-size:cover;
         background-position:center;
         background-repeat:no-repeat;

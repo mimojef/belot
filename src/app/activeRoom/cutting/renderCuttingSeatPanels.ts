@@ -1,4 +1,5 @@
 import type { RoomCardSnapshot, RoomSeatSnapshot, Seat } from '../../network/createGameServerClient'
+import { CARD_BACK_IMAGE_PATH, getCardFaceImagePath } from '../cardImageAssets'
 import {
   CUTTING_VISUAL_SEAT_INITIALS,
   CUTTING_VISUAL_SEAT_LABELS,
@@ -14,6 +15,7 @@ type EscapeHtml = (value: string) => string
 export type DealtHandsData = {
   handCounts: Record<Seat, number>
   ownHand: RoomCardSnapshot[]
+  previousOwnHand: RoomCardSnapshot[] | null
   localSeat: Seat
   seatAnimDelays: Partial<Record<Seat, number>> | null
   maxCardsPerSeat: number
@@ -248,79 +250,27 @@ export function renderCuttingSeatAvatar(
 const PANEL_CARD_WIDTH = 195
 const PANEL_CARD_HEIGHT = 284
 
-function getSuitSymbol(suit: RoomCardSnapshot['suit']): string {
-  if (suit === 'clubs') return '♣'
-  if (suit === 'diamonds') return '♦'
-  if (suit === 'hearts') return '♥'
-  return '♠'
-}
-
-function isRedSuit(suit: RoomCardSnapshot['suit']): boolean {
-  return suit === 'hearts' || suit === 'diamonds'
-}
-
 function renderPanelCardBack(): string {
   return `
     <span style="position:absolute;inset:0;border-radius:16px;background:linear-gradient(180deg,rgba(255,255,255,0.98) 0%,rgba(241,245,249,0.98) 100%);"></span>
-    <span style="position:absolute;inset:11px;border-radius:12px;border:1px solid rgba(15,23,42,0.10);background-image:url('/images/cards/card-back.png');background-size:cover;background-position:center;background-repeat:no-repeat;"></span>
+    <span style="position:absolute;inset:11px;border-radius:12px;border:1px solid rgba(15,23,42,0.10);background-image:url('${CARD_BACK_IMAGE_PATH}');background-size:cover;background-position:center;background-repeat:no-repeat;"></span>
   `
-}
-
-const cardFaceDataUrlCache = new Map<string, string>()
-
-function createCardFaceDataUrl(card: RoomCardSnapshot): string {
-  const cacheKey = `${card.suit}:${card.rank}`
-  const cachedValue = cardFaceDataUrlCache.get(cacheKey)
-
-  if (cachedValue) {
-    return cachedValue
-  }
-
-  const symbol = getSuitSymbol(card.suit)
-  const color = isRedSuit(card.suit) ? '#b3261e' : '#13253d'
-  const svg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="195" height="284" viewBox="0 0 195 284">
-      <defs>
-        <linearGradient id="belot-card-face-bg" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#ffffff" />
-          <stop offset="100%" stop-color="#f8fafc" />
-        </linearGradient>
-      </defs>
-      <rect x="0.5" y="0.5" width="194" height="283" rx="16" fill="url(#belot-card-face-bg)" stroke="rgba(15,23,42,0.12)" />
-      <text x="12" y="38" fill="${color}" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="900">${card.rank}</text>
-      <text x="12" y="72" fill="${color}" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="900">${symbol}</text>
-      <text
-        x="97.5"
-        y="158"
-        fill="${color}"
-        font-family="Inter, Arial, sans-serif"
-        font-size="74"
-        font-weight="900"
-        text-anchor="middle"
-        dominant-baseline="middle"
-      >${symbol}</text>
-    </svg>
-  `
-  const dataUrl = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`
-  cardFaceDataUrlCache.set(cacheKey, dataUrl)
-  return dataUrl
 }
 
 function renderPanelCardFront(card: RoomCardSnapshot): string {
   return `
     <img
-      src="${createCardFaceDataUrl(card)}"
+      src="${getCardFaceImagePath(card)}"
       alt=""
       draggable="false"
       style="
-        display:block;
         width:100%;
         height:100%;
+        display:block;
+        object-fit:fill;
         pointer-events:none;
         user-select:none;
         -webkit-user-drag:none;
-        backface-visibility:hidden;
-        transform:translateZ(0);
       "
     />
   `
@@ -383,22 +333,43 @@ function renderDealtCardFanInPanel(
   const cards = isLocalSeat ? dealtHands.ownHand.slice(0, count) : []
 
   const animDelay = dealtHands.seatAnimDelays?.[actualSeat] ?? null
+
+  const previousCards = isLocalSeat && dealtHands.previousOwnHand ? dealtHands.previousOwnHand : []
+  const previousIndexById = new Map(previousCards.map((c, idx) => [c.id, idx]))
+
   const cardElements = Array.from({ length: count }, (_, i) => {
     const fanTo = getFanOffset(i, count)
     const card = isLocalSeat ? (cards[i] ?? null) : null
 
     let animStyle = ''
-    if (animDelay !== null && i >= dealtHands.animStartIndex) {
-      // New card — appears when packet arrives
-      animStyle = `animation: belot-panel-card-appear 80ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;`
-    } else if (animDelay !== null && i < dealtHands.animStartIndex) {
-      // Existing card — repositions from the smaller fan to the larger fan when new cards arrive
-      const fanFrom = getFanOffset(i, dealtHands.animStartIndex)
-      animStyle = `
-        --px-from:${fanFrom.x}px; --py-from:${fanFrom.y}px; --pr-from:${fanFrom.rotate}deg;
-        --px-to:${fanTo.x}px; --py-to:${fanTo.y}px; --pr-to:${fanTo.rotate}deg;
-        animation: belot-panel-card-reposition 110ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;
-      `
+    if (animDelay !== null) {
+      if (isLocalSeat && card !== null) {
+        const prevIdx = previousIndexById.get(card.id)
+        if (prevIdx === undefined) {
+          // New card — appears at its sorted position when packet arrives
+          animStyle = `animation: belot-panel-card-appear 80ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;`
+        } else {
+          // Existing card — repositions from its old sorted position to its new sorted position
+          const fanFrom = getFanOffset(prevIdx, previousCards.length)
+          animStyle = `
+            --px-from:${fanFrom.x}px; --py-from:${fanFrom.y}px; --pr-from:${fanFrom.rotate}deg;
+            --px-to:${fanTo.x}px; --py-to:${fanTo.y}px; --pr-to:${fanTo.rotate}deg;
+            animation: belot-panel-card-reposition 110ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;
+          `
+        }
+      } else if (!isLocalSeat) {
+        // Non-local seat: index-based logic (card backs, no face data)
+        if (i >= dealtHands.animStartIndex) {
+          animStyle = `animation: belot-panel-card-appear 80ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;`
+        } else {
+          const fanFrom = getFanOffset(i, dealtHands.animStartIndex)
+          animStyle = `
+            --px-from:${fanFrom.x}px; --py-from:${fanFrom.y}px; --pr-from:${fanFrom.rotate}deg;
+            --px-to:${fanTo.x}px; --py-to:${fanTo.y}px; --pr-to:${fanTo.rotate}deg;
+            animation: belot-panel-card-reposition 110ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;
+          `
+        }
+      }
     }
 
     return renderPanelDealtCard(card, i, fanTo.x, fanTo.y, fanTo.rotate, animStyle)

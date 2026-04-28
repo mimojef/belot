@@ -6,6 +6,7 @@ import {
   type RoomGameSnapshot,
   type RoomSeatSnapshot,
   type RoomSnapshotMessage,
+  type RoomWinningBidSnapshot,
   type Seat,
   type ServerMessage,
 } from '../network/createGameServerClient'
@@ -70,7 +71,7 @@ import {
   renderBiddingStageHtml,
   createBiddingInteractionHtml,
 } from './renderBiddingScreen'
-import { sortLocalHandForAllTrumps } from './sortLocalHand'
+import { sortLocalHandForAllTrumps, sortLocalHandForDisplay, type SortDisplayOptions } from './sortLocalHand'
 
 const SEAT_LABELS: Record<Seat, string> = {
   bottom: 'Долу',
@@ -90,6 +91,14 @@ export function createActiveRoomFlowController(
   const dealNextTwoAnimation: DealingAnimationCache = createDealingAnimationCache()
   const dealLastThreeAnimation: DealingAnimationCache = createDealingAnimationCache()
   const biddingUiState: BiddingUiState = createBiddingUiState()
+  let lastKnownWinningBid: NonNullable<RoomWinningBidSnapshot> | null = null
+
+  function getContractSortOptions(): SortDisplayOptions {
+    if (!lastKnownWinningBid) return { contract: 'default' }
+    if (lastKnownWinningBid.contract === 'no-trumps') return { contract: 'no-trumps' }
+    if (lastKnownWinningBid.contract === 'all-trumps') return { contract: 'all-trumps' }
+    return { contract: 'suit', trumpSuit: lastKnownWinningBid.trumpSuit! }
+  }
 
   function createSeatCardHtml(seat: RoomSeatSnapshot): string {
     const displayName = seat.isOccupied ? seat.displayName : 'Свободно място'
@@ -646,6 +655,11 @@ export function createActiveRoomFlowController(
       return
     }
 
+    const freshWinningBid = activeRoomState.game?.bidding?.winningBid ?? null
+    if (freshWinningBid !== null) {
+      lastKnownWinningBid = freshWinningBid
+    }
+
     const cuttingSnapshot = activeRoomState.game?.cutting ?? null
     const dealerSeat = activeRoomState.game?.dealerSeat ?? null
     const firstDealSeat = activeRoomState.game?.firstDealSeat ?? null
@@ -923,10 +937,29 @@ export function createActiveRoomFlowController(
         shouldRenderDealNextTwoAnimation ||
         shouldRenderDealLastThreeAnimation
       const rawOwnHand = activeRoomState.game?.ownHand ?? []
-      const ownHand =
-        authoritativePhase === 'playing' && !showPackets
-          ? sortLocalHandForAllTrumps(rawOwnHand)
-          : rawOwnHand
+
+      const dealMaxCards =
+        shouldRenderDealLastThreeAnimation || shouldRenderCompletedDealLastThreeHands
+          ? 8
+          : shouldRenderDealNextTwoAnimation || shouldRenderCompletedDealNextTwoHands
+            ? 5
+            : 3
+      const dealPrevCards = showPackets
+        ? shouldRenderDealLastThreeAnimation
+          ? 5
+          : shouldRenderDealNextTwoAnimation
+            ? 3
+            : 0
+        : dealMaxCards
+      const isLastThreeDeal = shouldRenderDealLastThreeAnimation || shouldRenderCompletedDealLastThreeHands
+      const displaySortOptions: SortDisplayOptions = isLastThreeDeal
+        ? getContractSortOptions()
+        : { contract: 'default' }
+      const displayOwnHand = sortLocalHandForDisplay(rawOwnHand.slice(0, dealMaxCards), displaySortOptions)
+      const previousDisplayOwnHand = showPackets
+        ? sortLocalHandForDisplay(rawOwnHand.slice(0, dealPrevCards), { contract: 'default' })
+        : null
+      const ownHand = displayOwnHand
 
       const dealingScreenHtml = renderDealingScreen({
         firstDealSeat: dealFirstSeatForRender,
@@ -958,14 +991,10 @@ export function createActiveRoomFlowController(
       const dealtHandsForPanels: DealtHandsData | null = isShowingAnyDealPhase
         ? {
             handCounts,
-            ownHand,
+            ownHand: displayOwnHand,
+            previousOwnHand: previousDisplayOwnHand,
             localSeat: activeRoomState.seat,
-            maxCardsPerSeat:
-              shouldRenderDealLastThreeAnimation || shouldRenderCompletedDealLastThreeHands
-                ? 8
-                : shouldRenderDealNextTwoAnimation || shouldRenderCompletedDealNextTwoHands
-                  ? 5
-                  : 3,
+            maxCardsPerSeat: dealMaxCards,
             animStartIndex:
               shouldRenderDealLastThreeAnimation
                 ? 5
@@ -1073,11 +1102,12 @@ export function createActiveRoomFlowController(
 
       const biddingSnapshot = activeRoomState.game!.bidding!
       const handCounts = activeRoomState.game?.handCounts ?? { bottom: 0, right: 0, top: 0, left: 0 }
-      const ownHand = activeRoomState.game?.ownHand ?? []
+      const ownHand = sortLocalHandForAllTrumps(activeRoomState.game?.ownHand ?? [])
 
       const dealtHandsForBidding: DealtHandsData = {
         handCounts,
         ownHand,
+        previousOwnHand: null,
         localSeat: activeRoomState.seat,
         maxCardsPerSeat: 5,
         animStartIndex: 0,
@@ -1593,6 +1623,7 @@ export function createActiveRoomFlowController(
     clearDealNextTwoAnimationState()
     clearDealLastThreeAnimationState()
     clearBiddingUiState()
+    lastKnownWinningBid = null
     activeRoomState = {
       roomId: message.roomId,
       seat: message.seat,
@@ -1639,6 +1670,7 @@ export function createActiveRoomFlowController(
       clearDealNextTwoAnimationState()
       clearDealLastThreeAnimationState()
       clearBiddingUiState()
+      lastKnownWinningBid = null
       activeRoomState = null
       options.showLobby(null)
       return true
@@ -1650,6 +1682,7 @@ export function createActiveRoomFlowController(
       clearDealNextTwoAnimationState()
       clearDealLastThreeAnimationState()
       clearBiddingUiState()
+      lastKnownWinningBid = null
       activeRoomState = null
       options.showLobby(message.message)
       return true
@@ -1719,6 +1752,7 @@ export function createActiveRoomFlowController(
     clearDealNextTwoAnimationState()
     clearDealLastThreeAnimationState()
     clearBiddingUiState()
+    lastKnownWinningBid = null
     options.leaveActiveRoom(activeRoomState.roomId)
   }
 

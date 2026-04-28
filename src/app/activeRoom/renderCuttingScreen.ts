@@ -1,6 +1,7 @@
 import {
   type RoomCuttingSnapshot,
 } from '../network/createGameServerClient'
+import { CARD_BACK_IMAGE_PATH } from './cardImageAssets'
 
 type RenderCuttingScreenOptions = {
   cuttingSnapshot: RoomCuttingSnapshot
@@ -90,7 +91,7 @@ function renderCardFace(): string {
         inset:11px;
         border-radius:12px;
         border:1px solid rgba(15,23,42,0.10);
-        background-image:url('/images/cards/card-back.png');
+        background-image:url('${CARD_BACK_IMAGE_PATH}');
         background-size:cover;
         background-position:center;
         background-repeat:no-repeat;
