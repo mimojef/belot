@@ -1,5 +1,4 @@
 import type { RoomGameSnapshot } from '../network/createGameServerClient'
-import { getSeatAfterDealerForDealFallback } from './activeRoomShared'
 
 export function getCuttingCycleKey(roomId: string, game: RoomGameSnapshot | null): string | null {
   const cuttingSnapshot = game?.cutting ?? null
@@ -35,9 +34,8 @@ export function getDealFirstThreePhaseKey(
   }
 
   const dealerSeat = game.dealerSeat ?? null
-  const firstDealSeat = game.firstDealSeat ?? getSeatAfterDealerForDealFallback(dealerSeat)
 
-  return `${roomId}:deal-first-3:${dealerSeat ?? 'no-dealer'}:${firstDealSeat ?? 'no-first-deal'}`
+  return `${roomId}:deal-first-3:${dealerSeat ?? 'no-dealer'}`
 }
 
 export function hasVisibleFirstThreeHands(game: RoomGameSnapshot | null): boolean {
@@ -77,9 +75,8 @@ export function getDealNextTwoPhaseKey(
   }
 
   const dealerSeat = game.dealerSeat ?? null
-  const firstDealSeat = game.firstDealSeat ?? getSeatAfterDealerForDealFallback(dealerSeat)
 
-  return `${roomId}:deal-next-2:${dealerSeat ?? 'no-dealer'}:${firstDealSeat ?? 'no-first-deal'}`
+  return `${roomId}:deal-next-2:${dealerSeat ?? 'no-dealer'}`
 }
 
 export function hasVisibleNextTwoHands(game: RoomGameSnapshot | null): boolean {
@@ -117,9 +114,8 @@ export function getDealLastThreePhaseKey(
   }
 
   const dealerSeat = game.dealerSeat ?? null
-  const firstDealSeat = game.firstDealSeat ?? getSeatAfterDealerForDealFallback(dealerSeat)
 
-  return `${roomId}:deal-last-3:${dealerSeat ?? 'no-dealer'}:${firstDealSeat ?? 'no-first-deal'}`
+  return `${roomId}:deal-last-3:${dealerSeat ?? 'no-dealer'}`
 }
 
 export function hasVisibleLastThreeHands(game: RoomGameSnapshot | null): boolean {
