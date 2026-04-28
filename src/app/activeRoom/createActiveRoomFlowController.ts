@@ -973,8 +973,6 @@ export function createActiveRoomFlowController(
                   ? 3
                   : 0,
             seatAnimDelays: showPackets ? computeSeatAnimDelays() : null,
-            preserveExistingCardOffsets:
-              shouldRenderDealNextTwoAnimation || shouldRenderDealLastThreeAnimation,
           }
         : null
 

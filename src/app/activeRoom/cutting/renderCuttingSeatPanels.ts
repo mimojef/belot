@@ -18,7 +18,6 @@ export type DealtHandsData = {
   seatAnimDelays: Partial<Record<Seat, number>> | null
   maxCardsPerSeat: number
   animStartIndex: number
-  preserveExistingCardOffsets?: boolean
 }
 
 export type SeatBidBubble = {
@@ -267,15 +266,63 @@ function renderPanelCardBack(): string {
   `
 }
 
-function renderPanelCardFront(card: RoomCardSnapshot): string {
+const cardFaceDataUrlCache = new Map<string, string>()
+
+function createCardFaceDataUrl(card: RoomCardSnapshot): string {
+  const cacheKey = `${card.suit}:${card.rank}`
+  const cachedValue = cardFaceDataUrlCache.get(cacheKey)
+
+  if (cachedValue) {
+    return cachedValue
+  }
+
   const symbol = getSuitSymbol(card.suit)
   const color = isRedSuit(card.suit) ? '#b3261e' : '#13253d'
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="195" height="284" viewBox="0 0 195 284">
+      <defs>
+        <linearGradient id="belot-card-face-bg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#ffffff" />
+          <stop offset="100%" stop-color="#f8fafc" />
+        </linearGradient>
+      </defs>
+      <rect x="0.5" y="0.5" width="194" height="283" rx="16" fill="url(#belot-card-face-bg)" stroke="rgba(15,23,42,0.12)" />
+      <text x="12" y="38" fill="${color}" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="900">${card.rank}</text>
+      <text x="12" y="72" fill="${color}" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="900">${symbol}</text>
+      <text
+        x="97.5"
+        y="158"
+        fill="${color}"
+        font-family="Inter, Arial, sans-serif"
+        font-size="74"
+        font-weight="900"
+        text-anchor="middle"
+        dominant-baseline="middle"
+      >${symbol}</text>
+    </svg>
+  `
+  const dataUrl = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`
+  cardFaceDataUrlCache.set(cacheKey, dataUrl)
+  return dataUrl
+}
+
+function renderPanelCardFront(card: RoomCardSnapshot): string {
   return `
-    <div style="position:relative;width:100%;height:100%;box-sizing:border-box;border-radius:16px;border:1px solid rgba(15,23,42,0.12);background:linear-gradient(180deg,#fff 0%,#f8fafc 100%);color:${color};overflow:hidden;">
-      <div style="position:absolute;left:12px;top:12px;font-size:30px;line-height:1;font-weight:900;">${card.rank}</div>
-      <div style="position:absolute;left:12px;top:45px;font-size:30px;line-height:1;font-weight:900;">${symbol}</div>
-      <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font-size:74px;line-height:1;font-weight:900;">${symbol}</div>
-    </div>
+    <img
+      src="${createCardFaceDataUrl(card)}"
+      alt=""
+      draggable="false"
+      style="
+        display:block;
+        width:100%;
+        height:100%;
+        pointer-events:none;
+        user-select:none;
+        -webkit-user-drag:none;
+        backface-visibility:hidden;
+        transform:translateZ(0);
+      "
+    />
   `
 }
 
@@ -300,6 +347,9 @@ function renderPanelDealtCard(
       box-shadow:0 8px 18px rgba(0,0,0,0.22);
       overflow:hidden;
       transform:translate(-50%,-50%) translate(${offsetX}px,${offsetY}px) rotate(${rotate}deg);
+      will-change:transform, opacity;
+      backface-visibility:hidden;
+      transform-style:preserve-3d;
       z-index:${index + 1};
       pointer-events:none;
       ${animStyle}
@@ -321,20 +371,6 @@ function getFanOffset(
   }
 }
 
-function getAppendedFanOffset(
-  index: number,
-  baseCount: number,
-): { x: number; y: number; rotate: number } {
-  const lastStable = getFanOffset(baseCount - 1, baseCount)
-  const appendedStep = index - (baseCount - 1)
-
-  return {
-    x: lastStable.x + appendedStep * 65,
-    y: lastStable.y + appendedStep * 6,
-    rotate: lastStable.rotate + appendedStep * 6,
-  }
-}
-
 function renderDealtCardFanInPanel(
   actualSeat: Seat,
   visualSeat: Seat,
@@ -347,29 +383,15 @@ function renderDealtCardFanInPanel(
   const cards = isLocalSeat ? dealtHands.ownHand.slice(0, count) : []
 
   const animDelay = dealtHands.seatAnimDelays?.[actualSeat] ?? null
-  const shouldPreserveExistingOffsets =
-    isLocalSeat &&
-    dealtHands.preserveExistingCardOffsets === true &&
-    animDelay !== null &&
-    dealtHands.animStartIndex > 0
-
   const cardElements = Array.from({ length: count }, (_, i) => {
-    const fanTo = shouldPreserveExistingOffsets
-      ? i < dealtHands.animStartIndex
-        ? getFanOffset(i, dealtHands.animStartIndex)
-        : getAppendedFanOffset(i, dealtHands.animStartIndex)
-      : getFanOffset(i, count)
+    const fanTo = getFanOffset(i, count)
     const card = isLocalSeat ? (cards[i] ?? null) : null
 
     let animStyle = ''
     if (animDelay !== null && i >= dealtHands.animStartIndex) {
       // New card — appears when packet arrives
       animStyle = `animation: belot-panel-card-appear 80ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;`
-    } else if (
-      animDelay !== null &&
-      i < dealtHands.animStartIndex &&
-      !shouldPreserveExistingOffsets
-    ) {
+    } else if (animDelay !== null && i < dealtHands.animStartIndex) {
       // Existing card — repositions from the smaller fan to the larger fan when new cards arrive
       const fanFrom = getFanOffset(i, dealtHands.animStartIndex)
       animStyle = `
