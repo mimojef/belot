@@ -2,8 +2,10 @@ import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
 import { advanceExpiredServerAutoPhaseState } from './advanceExpiredServerAutoPhaseState.js'
 import { advanceExpiredServerBiddingState } from './advanceExpiredServerBiddingState.js'
 import { advanceExpiredServerCuttingState } from './advanceExpiredServerCuttingState.js'
+import { advanceExpiredServerPlayingState } from './advanceExpiredServerPlayingState.js'
 import { getServerPhaseAutoAdvanceExpiry } from './getServerPhaseAutoAdvanceExpiry.js'
 import { getServerTimerExpiry } from './getServerTimerExpiry.js'
+import { isServerSeatControlledByBot } from './serverTimerStateHelpers.js'
 
 export type AdvanceOneServerStepResult = {
   state: ServerAuthoritativeGameState
@@ -42,6 +44,15 @@ export function advanceOneServerStep(
 
   if (state.phase === 'bidding' && !state.bidding.hasEnded) {
     return advanceExpiredServerBiddingState(state, expiresAt)
+  }
+
+  if (
+    state.phase === 'playing' &&
+    state.playing?.hasStarted &&
+    state.playing.currentTurnSeat !== null &&
+    isServerSeatControlledByBot(state, state.playing.currentTurnSeat)
+  ) {
+    return advanceExpiredServerPlayingState(state, expiresAt)
   }
 
   return {

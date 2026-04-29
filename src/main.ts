@@ -40,6 +40,9 @@ const activeRoom = createActiveRoomFlowController({
   submitBidAction: (roomId, action) => {
     client.submitBidAction(roomId, action)
   },
+  submitPlayCard: (roomId, cardId) => {
+    client.submitPlayCard(roomId, cardId)
+  },
   showLobby: (errorText = null) => {
     lobby.setConnected(client.isConnected())
     lobby.resetToLobby()

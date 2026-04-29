@@ -164,6 +164,18 @@ export type RoomCardSnapshot = {
   rank: '7' | '8' | '9' | '10' | 'J' | 'Q' | 'K' | 'A'
 }
 
+export type RoomPlayCardSnapshot = {
+  seat: Seat
+  card: RoomCardSnapshot
+}
+
+export type RoomPlayingSnapshot = {
+  currentTurnSeat: Seat | null
+  currentTrickPlays: RoomPlayCardSnapshot[]
+  completedTricksCount: number
+  validCardIds: string[] | null
+}
+
 export type RoomGameSnapshot = {
   phase: RoomGamePhaseSnapshot | null
   authoritativePhase: RoomAuthoritativePhaseSnapshot | null
@@ -172,6 +184,7 @@ export type RoomGameSnapshot = {
   firstDealSeat: Seat | null
   cutting: RoomCuttingSnapshot | null
   bidding: RoomBiddingSnapshot | null
+  playing: RoomPlayingSnapshot | null
   handCounts: Record<Seat, number>
   ownHand: RoomCardSnapshot[]
 }

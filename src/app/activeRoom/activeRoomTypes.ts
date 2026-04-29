@@ -31,6 +31,7 @@ export type CreateActiveRoomFlowControllerOptions = {
   leaveActiveRoom: (roomId: string) => void
   submitCutIndex: (roomId: string, cutIndex: number) => void
   submitBidAction: (roomId: string, action: ClientBidAction) => void
+  submitPlayCard: (roomId: string, cardId: string) => void
   showLobby: (errorText?: string | null) => void
 }
 

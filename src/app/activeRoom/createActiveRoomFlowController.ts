@@ -72,6 +72,7 @@ import {
   createBiddingInteractionHtml,
 } from './renderBiddingScreen'
 import { sortLocalHandForAllTrumps, sortLocalHandForDisplay, type SortDisplayOptions } from './sortLocalHand'
+import { renderPlayingDebugScreen } from './renderPlayingDebugScreen'
 
 const SEAT_LABELS: Record<Seat, string> = {
   bottom: 'Долу',
@@ -732,6 +733,7 @@ export function createActiveRoomFlowController(
     const shouldRenderCompletedDealLastThreeHands =
       !shouldRenderDealLastThreeAnimation &&
       shouldKeepLastThreeHandsVisible(activeRoomState.game) &&
+      authoritativePhase !== 'playing' &&
       authoritativePhase !== 'scoring'
     const isShowingAnyDealPhase =
       shouldRenderDealFirstThreeAnimation ||
@@ -743,6 +745,8 @@ export function createActiveRoomFlowController(
     const isShowingNextRoundPause = authoritativePhase === 'next-round'
     const isShowingBiddingPhase =
       !isShowingAnyDealPhase && authoritativePhase === 'bidding'
+    const isShowingPlayingPhase =
+      !isShowingAnyDealPhase && authoritativePhase === 'playing'
     const shouldSyncBiddingSnapshot =
       isShowingBiddingPhase || authoritativePhase === 'deal-last-3' || isShowingNextRoundPause
 
@@ -1246,6 +1250,15 @@ export function createActiveRoomFlowController(
       dismissBtn?.addEventListener('click', () => {
         biddingUiState.showBotTakeover = false
         renderActiveRoomScreen()
+      })
+    } else if (isShowingPlayingPhase && activeRoomState.game) {
+      cuttingVisualCountdown.resetCuttingVisualCountdownState()
+      renderPlayingDebugScreen({
+        root: options.root,
+        game: activeRoomState.game,
+        localSeat: activeRoomState.seat,
+        roomId: activeRoomState.roomId,
+        submitPlayCard: options.submitPlayCard,
       })
     } else {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()

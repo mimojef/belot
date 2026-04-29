@@ -15,7 +15,7 @@ export function startServerPlayingPhase(
     return state
   }
 
-  const firstPlayerSeat = state.round.firstBidderSeat
+  const firstPlayerSeat = state.round.firstDealSeat
 
   if (!firstPlayerSeat) {
     return {

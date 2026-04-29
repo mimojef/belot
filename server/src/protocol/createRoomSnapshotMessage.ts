@@ -1,11 +1,13 @@
 import { SERVER_SEAT_ORDER, type Seat, type ServerRoom } from '../core/serverTypes.js'
 import { getValidServerBidActions } from '../game/getValidServerBidActions.js'
+import { getServerValidPlayCards } from '../game/getServerValidPlayCards.js'
 import type { ServerAuthoritativeGameState } from '../game/serverGameTypes.js'
 import {
   getDisplayNameFromIdentity,
   type RoomBiddingSnapshot,
   type RoomCardSnapshot,
   type RoomGameSnapshot,
+  type RoomPlayingSnapshot,
   type RoomSeatSnapshot,
   type RoomSnapshotMessage,
 } from './messageTypes.js'
@@ -111,6 +113,38 @@ function createBiddingSnapshot(
   }
 }
 
+function createPlayingSnapshot(
+  authoritativeState: ServerAuthoritativeGameState,
+  yourSeat: Seat | null,
+): RoomPlayingSnapshot | null {
+  if (authoritativeState.phase !== 'playing') {
+    return null
+  }
+
+  const playing = authoritativeState.playing
+  if (!playing?.hasStarted) {
+    return null
+  }
+
+  const currentTrickPlays =
+    playing.currentTrick?.plays.map((p) => ({
+      seat: p.seat,
+      card: createCardSnapshot(p.card),
+    })) ?? []
+
+  const isMyTurn = yourSeat !== null && playing.currentTurnSeat === yourSeat
+  const validCardIds = isMyTurn
+    ? getServerValidPlayCards(authoritativeState, yourSeat).map((c) => c.id)
+    : null
+
+  return {
+    currentTurnSeat: playing.currentTurnSeat,
+    currentTrickPlays,
+    completedTricksCount: playing.completedTricks.length,
+    validCardIds,
+  }
+}
+
 function createGameSnapshot(
   room: ServerRoom,
   yourSeat: Seat | null,
@@ -121,23 +155,35 @@ function createGameSnapshot(
     return null
   }
 
+  const phase = authoritativeState.phase
+  const includeCuttingSnapshot =
+    phase === 'cutting' ||
+    phase === 'cut-resolve' ||
+    phase === 'deal-first-3' ||
+    phase === 'deal-next-2' ||
+    phase === 'bidding' ||
+    phase === 'deal-last-3'
+
   return {
     phase: room.game.phase,
-    authoritativePhase: authoritativeState.phase,
+    authoritativePhase: phase,
     timerDeadlineAt: room.game.timerDeadlineAt,
     dealerSeat: authoritativeState.round.dealerSeat,
     firstDealSeat: authoritativeState.round.firstDealSeat,
-    cutting: {
-      cutterSeat: authoritativeState.round.cutterSeat,
-      selectedCutIndex: authoritativeState.round.selectedCutIndex,
-      deckCount: authoritativeState.deck.length,
-      canSubmitCut:
-        yourSeat !== null &&
-        yourSeat === authoritativeState.round.cutterSeat &&
-        authoritativeState.phase === 'cutting' &&
-        authoritativeState.round.selectedCutIndex === null,
-    },
+    cutting: includeCuttingSnapshot
+      ? {
+          cutterSeat: authoritativeState.round.cutterSeat,
+          selectedCutIndex: authoritativeState.round.selectedCutIndex,
+          deckCount: authoritativeState.deck.length,
+          canSubmitCut:
+            yourSeat !== null &&
+            yourSeat === authoritativeState.round.cutterSeat &&
+            phase === 'cutting' &&
+            authoritativeState.round.selectedCutIndex === null,
+        }
+      : null,
     bidding: createBiddingSnapshot(authoritativeState, yourSeat),
+    playing: createPlayingSnapshot(authoritativeState, yourSeat),
     handCounts: {
       bottom: authoritativeState.hands.bottom.length,
       right: authoritativeState.hands.right.length,

@@ -74,6 +74,11 @@ export type ClientMessage =
       roomId: string
       cutIndex: number
     }
+  | {
+      type: 'submit_play_card'
+      roomId: string
+      cardId: string
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -160,6 +165,18 @@ export type RoomCardSnapshot = {
   rank: '7' | '8' | '9' | '10' | 'J' | 'Q' | 'K' | 'A'
 }
 
+export type RoomPlayCardSnapshot = {
+  seat: Seat
+  card: RoomCardSnapshot
+}
+
+export type RoomPlayingSnapshot = {
+  currentTurnSeat: Seat | null
+  currentTrickPlays: RoomPlayCardSnapshot[]
+  completedTricksCount: number
+  validCardIds: string[] | null
+}
+
 export type RoomGameSnapshot = {
   phase: RoomGamePhaseSnapshot | null
   authoritativePhase: RoomAuthoritativePhaseSnapshot | null
@@ -168,6 +185,7 @@ export type RoomGameSnapshot = {
   firstDealSeat: Seat | null
   cutting: RoomCuttingSnapshot | null
   bidding: RoomBiddingSnapshot | null
+  playing: RoomPlayingSnapshot | null
   handCounts: Record<Seat, number>
   ownHand: RoomCardSnapshot[]
 }
@@ -310,6 +328,7 @@ export type GameServerClient = {
   leaveActiveRoom: (roomId: string) => void
   submitBidAction: (roomId: string, action: ClientBidAction) => void
   submitCutIndex: (roomId: string, cutIndex: number) => void
+  submitPlayCard: (roomId: string, cardId: string) => void
 }
 
 function getDefaultServerUrl(): string {
@@ -473,6 +492,14 @@ export function createGameServerClient(
     })
   }
 
+  function submitPlayCard(roomId: string, cardId: string): void {
+    send({
+      type: 'submit_play_card',
+      roomId,
+      cardId,
+    })
+  }
+
   return {
     connect,
     disconnect,
@@ -487,5 +514,6 @@ export function createGameServerClient(
     leaveActiveRoom,
     submitBidAction,
     submitCutIndex,
+    submitPlayCard,
   }
 }
