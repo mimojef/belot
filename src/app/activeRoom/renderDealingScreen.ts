@@ -217,20 +217,35 @@ export function syncDealingScreenTargets(
   // Deal positions are rendered in the fixed 1600x900 table coordinate system.
 }
 
-// Returns standalone HTML for the deal-first-3 flying packets (styles + packet divs).
-// Intended for use with the deal packet overlay, which lives outside root so that
-// server snapshot re-renders cannot reset the CSS animations.
-export function renderDealFirstThreePacketsHtml(
+function renderDealPacketsHtml(
   firstDealSeat: Seat | null,
   localSeat: Seat,
+  packetSize: number,
 ): string {
   const dealOrder = getDealOrder(firstDealSeat)
   const packets = dealOrder
     .map((seat, index) =>
-      renderFlyingPacket(seat, index, localSeat, true, DEAL_FIRST_THREE_PACKET_SIZE),
+      renderFlyingPacket(seat, index, localSeat, true, packetSize),
     )
     .join('')
   return `${renderDealingStyles()}${packets}`
+}
+
+// Returns standalone HTML for deal packet overlays (styles + packet divs).
+// The flow controller keeps the overlay mounted across repeated snapshots, so
+// server updates cannot reset the CSS animations.
+export function renderDealFirstThreePacketsHtml(
+  firstDealSeat: Seat | null,
+  localSeat: Seat,
+): string {
+  return renderDealPacketsHtml(firstDealSeat, localSeat, DEAL_FIRST_THREE_PACKET_SIZE)
+}
+
+export function renderDealNextTwoPacketsHtml(
+  firstDealSeat: Seat | null,
+  localSeat: Seat,
+): string {
+  return renderDealPacketsHtml(firstDealSeat, localSeat, DEAL_NEXT_TWO_PACKET_SIZE)
 }
 
 function renderPileCard(
@@ -480,6 +495,7 @@ export function renderDealingScreen(
   // cache in the controller decides whether packets should be shown or only the
   // persistent dealt hands should remain visible.
   const _elapsedMs = options.dealAnimation?.elapsedMs ?? 0;
+  const showRootPackets = options.dealPhase === 'deal-next-2' ? false : options.showPackets;
   void options.selectedCutIndex;
   void options.stageScale;
 
@@ -502,7 +518,7 @@ export function renderDealingScreen(
         options.localSeat,
         options.handCounts,
         options.ownHand,
-        options.showPackets,
+        showRootPackets,
         options.dealPhase === 'deal-next-2'
           ? DEAL_NEXT_TWO_PACKET_SIZE
           : options.dealPhase === 'deal-last-3'

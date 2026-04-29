@@ -19,7 +19,6 @@ export type DealtHandsData = {
   localSeat: Seat
   seatAnimDelays: Partial<Record<Seat, number>> | null
   hideNewCardsUntilAnimDelaySeats?: Partial<Record<Seat, boolean>>
-  visibleHandCounts?: Partial<Record<Seat, number>>
   maxCardsPerSeat: number
   animStartIndex: number
 }
@@ -348,8 +347,7 @@ function renderDealtCardFanInPanel(
   visualSeat: Seat,
   dealtHands: DealtHandsData,
 ): string {
-  const handCount = dealtHands.visibleHandCounts?.[actualSeat] ?? dealtHands.handCounts[actualSeat] ?? 0
-  const count = Math.min(dealtHands.maxCardsPerSeat, Math.max(0, handCount))
+  const count = Math.min(dealtHands.maxCardsPerSeat, Math.max(0, dealtHands.handCounts[actualSeat] ?? 0))
   if (count === 0) return ''
 
   const isLocalSeat = actualSeat === dealtHands.localSeat
