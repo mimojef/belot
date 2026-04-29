@@ -73,6 +73,11 @@ export type ClientMessage =
       roomId: RoomId
       cutIndex: number
     }
+  | {
+      type: 'submit_play_card'
+      roomId: RoomId
+      cardId: string
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat

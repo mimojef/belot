@@ -242,6 +242,21 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       }
     }
 
+    if (parsed.type === 'submit_play_card') {
+      const roomId = normalizeRequiredText(parsed.roomId)
+      const cardId = normalizeRequiredText(parsed.cardId)
+
+      if (roomId === null || cardId === null) {
+        return null
+      }
+
+      return {
+        type: 'submit_play_card',
+        roomId,
+        cardId,
+      }
+    }
+
     return null
   } catch {
     return null
