@@ -54,6 +54,7 @@ import {
   getBidBubblesForRender as getBidBubblesForRenderFromStore,
 } from './biddingUiState'
 import { createCuttingVisualCountdownTracker } from './cutting/cuttingVisualCountdown'
+import { getVisualSeatForLocalPerspective } from './cutting/cuttingSeatLayout'
 import {
   CUTTING_VISUAL_ANIMATION_TOTAL_MS,
   type RenderCuttingAnimationState,
@@ -63,6 +64,7 @@ import {
   DEAL_FIRST_THREE_VISUAL_TOTAL_MS,
   DEAL_LAST_THREE_VISUAL_TOTAL_MS,
   DEAL_NEXT_TWO_VISUAL_TOTAL_MS,
+  DEAL_PACKET_DURATION_MS,
   DEAL_PACKET_DELAY_STEP_MS,
   DEAL_PACKET_START_DELAY_MS,
   type RenderDealingAnimationState,
@@ -1099,9 +1101,23 @@ export function createActiveRoomFlowController(
         ) as Seat[]
         const delays: Partial<Record<Seat, number>> = {}
         order.forEach((seat, i) => {
-          delays[seat] = DEAL_PACKET_START_DELAY_MS + i * DEAL_PACKET_DELAY_STEP_MS + 460
+          const packetStartMs = DEAL_PACKET_START_DELAY_MS + i * DEAL_PACKET_DELAY_STEP_MS
+          const visualSeat = getVisualSeatForLocalPerspective(seat, activeRoomState!.seat)
+          const revealAfterPacketMs =
+            activeDealPhase === 'deal-next-2' && visualSeat === 'top'
+              ? DEAL_PACKET_DURATION_MS + 24
+              : 460
+          delays[seat] = packetStartMs + revealAfterPacketMs
         })
         return delays
+      }
+      const hideNewCardsUntilAnimDelaySeats: Partial<Record<Seat, boolean>> = {}
+      if (showPackets && activeDealPhase === 'deal-next-2') {
+        SERVER_DEAL_ORDER.forEach((seat) => {
+          if (getVisualSeatForLocalPerspective(seat, activeRoomState!.seat) === 'top') {
+            hideNewCardsUntilAnimDelaySeats[seat] = true
+          }
+        })
       }
 
       const dealtHandsForPanels: DealtHandsData | null = isShowingAnyDealPhase
@@ -1111,6 +1127,7 @@ export function createActiveRoomFlowController(
             previousOwnHand: previousDisplayOwnHand,
             localSeat: activeRoomState.seat,
             maxCardsPerSeat: dealMaxCards,
+            hideNewCardsUntilAnimDelaySeats,
             animStartIndex:
               shouldRenderDealLastThreeAnimation
                 ? 5

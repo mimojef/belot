@@ -18,6 +18,7 @@ export type DealtHandsData = {
   previousOwnHand: RoomCardSnapshot[] | null
   localSeat: Seat
   seatAnimDelays: Partial<Record<Seat, number>> | null
+  hideNewCardsUntilAnimDelaySeats?: Partial<Record<Seat, boolean>>
   maxCardsPerSeat: number
   animStartIndex: number
 }
@@ -353,6 +354,8 @@ function renderDealtCardFanInPanel(
   const cards = isLocalSeat ? dealtHands.ownHand.slice(0, count) : []
 
   const animDelay = dealtHands.seatAnimDelays?.[actualSeat] ?? null
+  const shouldHardHideNewCardsUntilDelay =
+    dealtHands.hideNewCardsUntilAnimDelaySeats?.[actualSeat] === true
 
   const previousCards = isLocalSeat && dealtHands.previousOwnHand ? dealtHands.previousOwnHand : []
   const previousIndexById = new Map(previousCards.map((c, idx) => [c.id, idx]))
@@ -367,7 +370,9 @@ function renderDealtCardFanInPanel(
         const prevIdx = previousIndexById.get(card.id)
         if (prevIdx === undefined) {
           // New card — appears at its sorted position when packet arrives
-          animStyle = `animation: belot-panel-card-appear 80ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;`
+          animStyle = shouldHardHideNewCardsUntilDelay
+            ? `opacity:0; visibility:hidden; animation: belot-panel-card-hidden-appear 80ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;`
+            : `animation: belot-panel-card-appear 80ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;`
         } else {
           // Existing card — repositions from its old sorted position to its new sorted position
           const fanFrom = getFanOffset(prevIdx, previousCards.length)
@@ -380,7 +385,9 @@ function renderDealtCardFanInPanel(
       } else if (!isLocalSeat) {
         // Non-local seat: index-based logic (card backs, no face data)
         if (i >= dealtHands.animStartIndex) {
-          animStyle = `animation: belot-panel-card-appear 80ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;`
+          animStyle = shouldHardHideNewCardsUntilDelay
+            ? `opacity:0; visibility:hidden; animation: belot-panel-card-hidden-appear 80ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;`
+            : `animation: belot-panel-card-appear 80ms cubic-bezier(0.34,0,0.18,1) ${animDelay}ms both;`
         } else {
           const fanFrom = getFanOffset(i, dealtHands.animStartIndex)
           animStyle = `
@@ -875,6 +882,11 @@ export function createCuttingSeatPanelsHtml(
       @keyframes belot-panel-card-appear {
         0% { opacity:0; scale:0.97; }
         100% { opacity:1; scale:1; }
+      }
+      @keyframes belot-panel-card-hidden-appear {
+        0% { visibility:hidden; opacity:0; scale:0.97; }
+        1% { visibility:visible; opacity:0; scale:0.97; }
+        100% { visibility:visible; opacity:1; scale:1; }
       }
       @keyframes belot-panel-card-reposition {
         0% { transform:translate(-50%,-50%) translate(var(--px-from),var(--py-from)) rotate(var(--pr-from)); }
