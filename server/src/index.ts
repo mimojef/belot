@@ -58,6 +58,7 @@ import {
 import { submitHumanBidActionForRoom } from './game/submitHumanBidActionForRoom.js'
 import { submitHumanCutIndexForRoom } from './game/submitHumanCutIndexForRoom.js'
 import { submitHumanPlayCardForRoom } from './game/submitHumanPlayCardForRoom.js'
+import { resumeHumanControlForRoom } from './game/resumeHumanControlForRoom.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
 
 const HOST = '0.0.0.0'
@@ -763,6 +764,59 @@ wsServer.on('connection', (socket, request) => {
           latestConnection.currentSeat,
           message.cardId,
         )
+
+        if (!result.ok) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: result.message,
+          })
+          return
+        }
+
+        serverState = upsertServerRoom(serverState, result.room)
+        ensureRoomGameRuntime(roomGameRuntimeRegistry, result.room)
+        broadcastRoomSnapshots(result.room, socketRegistry)
+        return
+      }
+
+      if (message.type === 'resume_human_control') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Connection was not found.',
+          })
+          return
+        }
+
+        if (latestConnection.currentRoomId !== message.roomId) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'You are not attached to this room.',
+          })
+          return
+        }
+
+        if (!latestConnection.currentSeat) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Your seat was not found.',
+          })
+          return
+        }
+
+        const room = serverState.rooms[message.roomId] ?? null
+
+        if (room === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Room was not found.',
+          })
+          return
+        }
+
+        const result = resumeHumanControlForRoom(room, latestConnection.currentSeat)
 
         if (!result.ok) {
           safeSendToConnection(connection.id, {

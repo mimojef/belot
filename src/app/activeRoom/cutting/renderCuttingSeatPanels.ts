@@ -33,6 +33,11 @@ export type RenderCuttingSeatPanelsOptions = {
   dealerSeat: Seat | null
   cutterSeat: Seat | null
   cuttingCountdownRemainingMs: number | null
+  countdownSeat?: Seat | null
+  countdownRemainingMs?: number | null
+  countdownTotalMs?: number
+  highlightSeat?: Seat | null
+  highlightBadgeLabel?: string | null
   panelScale: number
   escapeHtml: EscapeHtml
   dealtHands: DealtHandsData | null
@@ -46,18 +51,19 @@ function clamp(value: number, min: number, max: number): number {
 function renderCuttingCountdownFillStyle(
   shouldShowCuttingCountdown: boolean,
   cuttingCountdownRemainingMs: number | null,
+  countdownTotalMs: number,
 ): string {
   if (!shouldShowCuttingCountdown || cuttingCountdownRemainingMs === null) {
     return 'opacity:0; transform:scaleX(0);'
   }
 
-  const remainingMs = clamp(cuttingCountdownRemainingMs, 0, CUTTING_COUNTDOWN_MS)
-  const elapsedMs = CUTTING_COUNTDOWN_MS - remainingMs
+  const remainingMs = clamp(cuttingCountdownRemainingMs, 0, countdownTotalMs)
+  const elapsedMs = countdownTotalMs - remainingMs
 
   return `
     opacity:1;
     transform:scaleX(1);
-    animation: belot-active-room-cutting-countdown ${CUTTING_COUNTDOWN_MS}ms linear forwards;
+    animation: belot-active-room-cutting-countdown ${countdownTotalMs}ms linear forwards;
     animation-delay:-${elapsedMs}ms;
     animation-fill-mode:both;
   `
@@ -107,6 +113,7 @@ export function renderCuttingDealerBadge(
 export function renderBottomCuttingCountdownBar(
   shouldShowCuttingCountdown: boolean,
   cuttingCountdownRemainingMs: number | null,
+  countdownTotalMs: number,
 ): string {
   return `
     <div
@@ -137,6 +144,7 @@ export function renderBottomCuttingCountdownBar(
           ${renderCuttingCountdownFillStyle(
             shouldShowCuttingCountdown,
             cuttingCountdownRemainingMs,
+            countdownTotalMs,
           )}
         "
       ></div>
@@ -148,6 +156,7 @@ export function renderSideCuttingCountdownFooter(
   labelText: string,
   shouldShowCuttingCountdown: boolean,
   cuttingCountdownRemainingMs: number | null,
+  countdownTotalMs: number,
   escapeHtml: EscapeHtml,
 ): string {
   return `
@@ -175,6 +184,7 @@ export function renderSideCuttingCountdownFooter(
           ${renderCuttingCountdownFillStyle(
             shouldShowCuttingCountdown,
             cuttingCountdownRemainingMs,
+            countdownTotalMs,
           )}
         "
       ></div>
@@ -273,6 +283,16 @@ function renderPanelCardFront(card: RoomCardSnapshot): string {
         -webkit-user-drag:none;
       "
     />
+    <span
+      aria-hidden="true"
+      style="
+        position:absolute;
+        inset:4px;
+        border-radius:10px;
+        border:1px solid rgba(20,49,84,0.12);
+        pointer-events:none;
+      "
+    ></span>
   `
 }
 
@@ -523,16 +543,20 @@ export function createCuttingSeatPanelHtml(
   seat: RoomSeatSnapshot,
   visualSeat: Seat,
   dealerSeat: Seat | null,
-  cutterSeat: Seat | null,
-  cuttingCountdownRemainingMs: number | null,
+  countdownSeat: Seat | null,
+  countdownRemainingMs: number | null,
+  countdownTotalMs: number,
+  highlightSeat: Seat | null,
+  highlightBadgeLabel: string | null,
   panelScale: number,
   escapeHtml: EscapeHtml,
   dealtHands: DealtHandsData | null,
   bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null,
 ): string {
   const isBottomSeat = visualSeat === 'bottom'
-  const isCutter = seat.seat === cutterSeat
-  const shouldShowCuttingCountdown = isCutter
+  const isCountdownSeat = seat.seat === countdownSeat
+  const isHighlightedSeat = seat.seat === highlightSeat
+  const shouldShowCuttingCountdown = isCountdownSeat
   const displayName =
     seat.isOccupied && seat.displayName.trim().length > 0
       ? seat.displayName
@@ -541,12 +565,12 @@ export function createCuttingSeatPanelHtml(
     seat.isOccupied && displayName.trim().length > 0
       ? displayName
       : CUTTING_VISUAL_SEAT_LABELS[visualSeat]
-  const borderColor = isCutter ? 'rgba(245, 187, 55, 0.96)' : 'rgba(255,255,255,0.18)'
-  const borderWidthPx = isCutter ? 4 : 2
-  const shadow = isCutter
+  const borderColor = isHighlightedSeat ? 'rgba(245, 187, 55, 0.96)' : 'rgba(255,255,255,0.18)'
+  const borderWidthPx = isHighlightedSeat ? 4 : 2
+  const shadow = isHighlightedSeat
     ? '0 0 24px rgba(245, 187, 55, 0.24), 0 16px 28px rgba(0,0,0,0.24)'
     : '0 14px 28px rgba(0,0,0,0.24)'
-  const cutterBadgeHtml = isCutter
+  const cutterBadgeHtml = isHighlightedSeat && highlightBadgeLabel
     ? `
         <div
           style="
@@ -564,7 +588,7 @@ export function createCuttingSeatPanelHtml(
             box-shadow:0 8px 16px rgba(0,0,0,0.18);
           "
         >
-          Цепи
+          ${escapeHtml(highlightBadgeLabel)}
         </div>
       `
     : ''
@@ -666,7 +690,8 @@ export function createCuttingSeatPanelHtml(
 
           ${renderBottomCuttingCountdownBar(
             shouldShowCuttingCountdown,
-            cuttingCountdownRemainingMs,
+            countdownRemainingMs,
+            countdownTotalMs,
           )}
           ${cutterBadgeHtml}
         </div>
@@ -734,7 +759,8 @@ export function createCuttingSeatPanelHtml(
             ? renderSideCuttingCountdownFooter(
                 footerLabel,
                 shouldShowCuttingCountdown,
-                cuttingCountdownRemainingMs,
+                countdownRemainingMs,
+                countdownTotalMs,
                 escapeHtml,
               )
             : `
@@ -781,11 +807,32 @@ export function createCuttingSeatPanelsHtml(
     dealerSeat,
     cutterSeat,
     cuttingCountdownRemainingMs,
+    countdownSeat,
+    countdownRemainingMs,
+    countdownTotalMs,
+    highlightSeat,
+    highlightBadgeLabel,
     panelScale,
     escapeHtml,
     dealtHands,
     bidBubbles,
   } = options
+  const effectiveCountdownSeat =
+    countdownSeat === undefined ? cutterSeat : countdownSeat
+  const effectiveCountdownRemainingMs =
+    countdownRemainingMs === undefined
+      ? cuttingCountdownRemainingMs
+      : countdownRemainingMs
+  const effectiveCountdownTotalMs =
+    countdownTotalMs === undefined ? CUTTING_COUNTDOWN_MS : countdownTotalMs
+  const effectiveHighlightSeat =
+    highlightSeat === undefined ? cutterSeat : highlightSeat
+  const effectiveHighlightBadgeLabel =
+    effectiveHighlightSeat !== null
+      ? highlightBadgeLabel === undefined
+        ? 'Цепи'
+        : highlightBadgeLabel
+      : null
   const seatMap = new Map(seats.map((seat) => [seat.seat, seat]))
   const visualOrder: readonly Seat[] = ['top', 'left', 'right', 'bottom']
 
@@ -806,8 +853,11 @@ export function createCuttingSeatPanelsHtml(
         seatSnapshot,
         visualSeat,
         dealerSeat,
-        cutterSeat,
-        cuttingCountdownRemainingMs,
+        effectiveCountdownSeat,
+        effectiveCountdownRemainingMs,
+        effectiveCountdownTotalMs,
+        effectiveHighlightSeat,
+        effectiveHighlightBadgeLabel,
         panelScale,
         escapeHtml,
         dealtHands,

@@ -22,6 +22,7 @@ export function createEmptySeatSnapshot(seat: Seat): RoomSeatSnapshot {
     displayName: '',
     isOccupied: false,
     isBot: false,
+    isControlledByBot: false,
     isConnected: false,
     avatarUrl: null,
     level: null,

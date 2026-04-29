@@ -257,6 +257,19 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       }
     }
 
+    if (parsed.type === 'resume_human_control') {
+      const roomId = normalizeRequiredText(parsed.roomId)
+
+      if (roomId === null) {
+        return null
+      }
+
+      return {
+        type: 'resume_human_control',
+        roomId,
+      }
+    }
+
     return null
   } catch {
     return null

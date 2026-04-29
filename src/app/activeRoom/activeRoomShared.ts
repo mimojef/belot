@@ -2,15 +2,16 @@ import type {
   BiddingUiState,
   CuttingAnimationCache,
   DealingAnimationCache,
+  PlayingUiCache,
 } from './activeRoomTypes'
 import type { Seat } from '../network/createGameServerClient'
 import { getViewportStageMetrics } from '../../ui/layout/viewportStage'
 
 export const SEAT_LABELS: Record<Seat, string> = {
-  bottom: 'Р”РѕР»Сѓ',
-  right: 'Р”СЏСЃРЅРѕ',
-  top: 'Р“РѕСЂРµ',
-  left: 'Р›СЏРІРѕ',
+  bottom: 'Долу',
+  right: 'Дясно',
+  top: 'Горе',
+  left: 'Ляво',
 }
 
 export const SERVER_DEAL_ORDER: Seat[] = ['bottom', 'right', 'top', 'left']
@@ -87,6 +88,42 @@ export function createDealingAnimationCache(): DealingAnimationCache {
     isAnimating: false,
     hasCompleted: false,
   }
+}
+
+export function createPlayingUiCache(): PlayingUiCache {
+  return {
+    lastTrickKey: null,
+    lastCompletedTricksCount: 0,
+    isTrickCollectionAnimating: false,
+    pendingCompletedTrickKey: null,
+    latestCompletedTrickKey: null,
+    bufferedCompletedTrick: null,
+    hasRenderedSnapshot: false,
+    animationToken: 0,
+    pendingPlayCardSent: false,
+    wasMyTurn: false,
+    observedPlayKeys: [],
+    showBotTakeover: false,
+    hasShownBotTakeover: false,
+    lastPlayedCardRect: null,
+  }
+}
+
+export function resetPlayingUiCache(cache: PlayingUiCache): void {
+  cache.lastTrickKey = null
+  cache.lastCompletedTricksCount = 0
+  cache.isTrickCollectionAnimating = false
+  cache.pendingCompletedTrickKey = null
+  cache.latestCompletedTrickKey = null
+  cache.bufferedCompletedTrick = null
+  cache.hasRenderedSnapshot = false
+  cache.animationToken += 1
+  cache.pendingPlayCardSent = false
+  cache.wasMyTurn = false
+  cache.observedPlayKeys = []
+  cache.showBotTakeover = false
+  cache.hasShownBotTakeover = false
+  cache.lastPlayedCardRect = null
 }
 
 export function createBiddingUiState(): BiddingUiState {

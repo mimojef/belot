@@ -2,6 +2,7 @@ import type {
   ClientBidAction,
   MatchFoundMessage,
   MatchStake,
+  RoomCompletedTrickSnapshot,
   RoomCuttingSnapshot,
   RoomGameSnapshot,
   RoomSeatSnapshot,
@@ -32,6 +33,7 @@ export type CreateActiveRoomFlowControllerOptions = {
   submitCutIndex: (roomId: string, cutIndex: number) => void
   submitBidAction: (roomId: string, action: ClientBidAction) => void
   submitPlayCard: (roomId: string, cardId: string) => void
+  resumeHumanControl: (roomId: string) => void
   showLobby: (errorText?: string | null) => void
 }
 
@@ -69,6 +71,23 @@ export type DealingAnimationCache = {
   completionTimerId: number | null
   isAnimating: boolean
   hasCompleted: boolean
+}
+
+export type PlayingUiCache = {
+  lastTrickKey: string | null
+  lastCompletedTricksCount: number
+  isTrickCollectionAnimating: boolean
+  pendingCompletedTrickKey: string | null
+  latestCompletedTrickKey: string | null
+  bufferedCompletedTrick: RoomCompletedTrickSnapshot | null
+  hasRenderedSnapshot: boolean
+  animationToken: number
+  pendingPlayCardSent: boolean
+  wasMyTurn: boolean
+  observedPlayKeys: string[]
+  showBotTakeover: boolean
+  hasShownBotTakeover: boolean
+  lastPlayedCardRect: DOMRect | null
 }
 
 export type BiddingUiState = {

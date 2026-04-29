@@ -6,6 +6,7 @@ import {
   getDisplayNameFromIdentity,
   type RoomBiddingSnapshot,
   type RoomCardSnapshot,
+  type RoomCompletedTrickSnapshot,
   type RoomGameSnapshot,
   type RoomPlayingSnapshot,
   type RoomSeatSnapshot,
@@ -14,6 +15,9 @@ import {
 
 function createSeatSnapshot(room: ServerRoom, seat: Seat): RoomSeatSnapshot {
   const participant = room.seats[seat].participant
+  const authoritativeState = room.game.authoritativeState
+  const isAuthoritativeState =
+    authoritativeState !== null && !('kind' in authoritativeState)
 
   if (participant === null) {
     return {
@@ -21,6 +25,7 @@ function createSeatSnapshot(room: ServerRoom, seat: Seat): RoomSeatSnapshot {
       displayName: 'Празно място',
       isOccupied: false,
       isBot: false,
+      isControlledByBot: false,
       isConnected: false,
       avatarUrl: null,
       level: null,
@@ -34,6 +39,10 @@ function createSeatSnapshot(room: ServerRoom, seat: Seat): RoomSeatSnapshot {
     displayName: getDisplayNameFromIdentity(participant.identity),
     isOccupied: true,
     isBot: participant.kind === 'bot',
+    isControlledByBot:
+      participant.kind !== 'bot' && isAuthoritativeState
+        ? authoritativeState.players[seat]?.controlledByBot ?? false
+        : false,
     isConnected: participant.kind === 'bot' ? true : participant.isConnected,
     avatarUrl: participant.identity.avatarUrl,
     level: participant.identity.level,
@@ -136,11 +145,24 @@ function createPlayingSnapshot(
   const validCardIds = isMyTurn
     ? getServerValidPlayCards(authoritativeState, yourSeat).map((c) => c.id)
     : null
+  const latestCompletedTrick: RoomCompletedTrickSnapshot | null =
+    playing.completedTricks.length > 0
+      ? {
+          trickIndex: playing.completedTricks[playing.completedTricks.length - 1]!.trickIndex,
+          leaderSeat: playing.completedTricks[playing.completedTricks.length - 1]!.leaderSeat,
+          plays: playing.completedTricks[playing.completedTricks.length - 1]!.plays.map((play) => ({
+            seat: play.seat,
+            card: createCardSnapshot(play.card),
+          })),
+          winnerSeat: playing.completedTricks[playing.completedTricks.length - 1]!.winnerSeat,
+        }
+      : null
 
   return {
     currentTurnSeat: playing.currentTurnSeat,
     currentTrickPlays,
     completedTricksCount: playing.completedTricks.length,
+    latestCompletedTrick,
     validCardIds,
   }
 }

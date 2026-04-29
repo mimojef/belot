@@ -78,12 +78,17 @@ export type ClientMessage =
       roomId: RoomId
       cardId: string
     }
+  | {
+      type: 'resume_human_control'
+      roomId: RoomId
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
   displayName: string
   isOccupied: boolean
   isBot: boolean
+  isControlledByBot: boolean
   isConnected: boolean
   avatarUrl: string | null
   level: number | null
@@ -169,10 +174,18 @@ export type RoomPlayCardSnapshot = {
   card: RoomCardSnapshot
 }
 
+export type RoomCompletedTrickSnapshot = {
+  trickIndex: number
+  leaderSeat: Seat
+  plays: RoomPlayCardSnapshot[]
+  winnerSeat: Seat
+}
+
 export type RoomPlayingSnapshot = {
   currentTurnSeat: Seat | null
   currentTrickPlays: RoomPlayCardSnapshot[]
   completedTricksCount: number
+  latestCompletedTrick: RoomCompletedTrickSnapshot | null
   validCardIds: string[] | null
 }
 

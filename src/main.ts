@@ -43,6 +43,9 @@ const activeRoom = createActiveRoomFlowController({
   submitPlayCard: (roomId, cardId) => {
     client.submitPlayCard(roomId, cardId)
   },
+  resumeHumanControl: (roomId) => {
+    client.resumeHumanControl(roomId)
+  },
   showLobby: (errorText = null) => {
     lobby.setConnected(client.isConnected())
     lobby.resetToLobby()

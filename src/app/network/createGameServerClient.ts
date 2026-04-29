@@ -79,12 +79,17 @@ export type ClientMessage =
       roomId: string
       cardId: string
     }
+  | {
+      type: 'resume_human_control'
+      roomId: string
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
   displayName: string
   isOccupied: boolean
   isBot: boolean
+  isControlledByBot: boolean
   isConnected: boolean
   avatarUrl: string | null
   level: number | null
@@ -170,10 +175,18 @@ export type RoomPlayCardSnapshot = {
   card: RoomCardSnapshot
 }
 
+export type RoomCompletedTrickSnapshot = {
+  trickIndex: number
+  leaderSeat: Seat
+  plays: RoomPlayCardSnapshot[]
+  winnerSeat: Seat
+}
+
 export type RoomPlayingSnapshot = {
   currentTurnSeat: Seat | null
   currentTrickPlays: RoomPlayCardSnapshot[]
   completedTricksCount: number
+  latestCompletedTrick: RoomCompletedTrickSnapshot | null
   validCardIds: string[] | null
 }
 
@@ -329,6 +342,7 @@ export type GameServerClient = {
   submitBidAction: (roomId: string, action: ClientBidAction) => void
   submitCutIndex: (roomId: string, cutIndex: number) => void
   submitPlayCard: (roomId: string, cardId: string) => void
+  resumeHumanControl: (roomId: string) => void
 }
 
 function getDefaultServerUrl(): string {
@@ -500,6 +514,13 @@ export function createGameServerClient(
     })
   }
 
+  function resumeHumanControl(roomId: string): void {
+    send({
+      type: 'resume_human_control',
+      roomId,
+    })
+  }
+
   return {
     connect,
     disconnect,
@@ -515,5 +536,6 @@ export function createGameServerClient(
     submitBidAction,
     submitCutIndex,
     submitPlayCard,
+    resumeHumanControl,
   }
 }

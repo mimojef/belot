@@ -1,6 +1,7 @@
 import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
 import { pickServerBotBidAction } from './pickServerBotBidAction.js'
 import { rebaseServerStateToEventAt } from './rebaseServerStateToEventAt.js'
+import { isServerSeatControlledByBot } from './serverTimerStateHelpers.js'
 import { submitServerBidAction } from './submitServerBidAction.js'
 
 export type AdvanceExpiredServerBiddingStateResult = {
@@ -23,10 +24,22 @@ export function advanceExpiredServerBiddingState(
     }
   }
 
-  const action = pickServerBotBidAction(state, currentSeat)
+  const stateWithBotControl = isServerSeatControlledByBot(state, currentSeat)
+    ? state
+    : {
+        ...state,
+        players: {
+          ...state.players,
+          [currentSeat]: {
+            ...state.players[currentSeat],
+            controlledByBot: true,
+          },
+        },
+      }
+  const action = pickServerBotBidAction(stateWithBotControl, currentSeat)
 
   return {
-    state: rebaseServerStateToEventAt(submitServerBidAction(state, action), eventAt),
+    state: rebaseServerStateToEventAt(submitServerBidAction(stateWithBotControl, action), eventAt),
     advanced: true,
     eventAt,
   }

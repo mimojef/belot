@@ -3,7 +3,10 @@ import { pickServerAutoCutIndex } from './pickServerAutoCutIndex.js'
 import { rebaseServerStateToEventAt } from './rebaseServerStateToEventAt.js'
 import { resolveServerCutPhase } from './resolveServerCutPhase.js'
 import { selectServerCutIndex } from './selectServerCutIndex.js'
-import { clearServerTimerState } from './serverTimerStateHelpers.js'
+import {
+  clearServerTimerState,
+  isServerSeatControlledByBot,
+} from './serverTimerStateHelpers.js'
 
 export type AdvanceExpiredServerCuttingStateResult = {
   state: ServerAuthoritativeGameState
@@ -35,9 +38,24 @@ export function advanceExpiredServerCuttingState(
     return resolveSelectedServerCut(state, eventAt)
   }
 
+  const cutterSeat = state.round.cutterSeat
+  const stateWithBotControl =
+    cutterSeat !== null && !isServerSeatControlledByBot(state, cutterSeat)
+      ? {
+          ...state,
+          players: {
+            ...state.players,
+            [cutterSeat]: {
+              ...state.players[cutterSeat],
+              controlledByBot: true,
+            },
+          },
+        }
+      : state
+
   return {
     state: rebaseServerStateToEventAt(
-      selectServerCutIndex(state, pickServerAutoCutIndex(state)),
+      selectServerCutIndex(stateWithBotControl, pickServerAutoCutIndex(stateWithBotControl)),
       eventAt,
     ),
     advanced: true,

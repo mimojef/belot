@@ -1,6 +1,7 @@
 import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
 import { pickServerBotPlayCard } from './pickServerBotPlayCard.js'
 import { rebaseServerStateToEventAt } from './rebaseServerStateToEventAt.js'
+import { isServerSeatControlledByBot } from './serverTimerStateHelpers.js'
 import { submitServerPlayCard } from './submitServerPlayCard.js'
 
 export type AdvanceExpiredServerPlayingStateResult = {
@@ -25,14 +26,27 @@ export function advanceExpiredServerPlayingState(
     return { state, advanced: false, eventAt }
   }
 
-  const card = pickServerBotPlayCard(state, currentSeat)
+  const stateWithBotControl = isServerSeatControlledByBot(state, currentSeat)
+    ? state
+    : {
+        ...state,
+        players: {
+          ...state.players,
+          [currentSeat]: {
+            ...state.players[currentSeat],
+            controlledByBot: true,
+          },
+        },
+      }
+
+  const card = pickServerBotPlayCard(stateWithBotControl, currentSeat)
 
   if (!card) {
     return { state, advanced: false, eventAt }
   }
 
   const nextState = rebaseServerStateToEventAt(
-    submitServerPlayCard(state, currentSeat, card.id),
+    submitServerPlayCard(stateWithBotControl, currentSeat, card.id),
     eventAt,
   )
 

@@ -8,10 +8,10 @@ import type {
 import { renderPile, getPileVisibleCards } from './renderDealingScreen'
 
 export const BID_HUMAN_TIMEOUT_MS = 15_000
+export const BID_BOT_DELAY_MS = 1_000
 
 export type RenderBiddingScreenOptions = {
   biddingSnapshot: RoomBiddingSnapshot
-  timerDeadlineAt: number | null
   isPendingSubmission: boolean
   showBotTakeover: boolean
 }
@@ -203,41 +203,8 @@ function renderPassButton(enabled: boolean): string {
   `
 }
 
-function renderCountdownBar(timerDeadlineAt: number | null): string {
-  if (timerDeadlineAt === null) return ''
-  const remainingMs = Math.max(0, timerDeadlineAt - Date.now())
-  const elapsedMs = BID_HUMAN_TIMEOUT_MS - remainingMs
-
-  return `
-    <div style="
-      width:100%;
-      height:5px;
-      border-radius:3px 3px 0 0;
-      background:rgba(255,255,255,0.12);
-      overflow:hidden;
-      margin-bottom:6px;
-    ">
-      <style>
-        @keyframes bid-countdown-bar {
-          0% { transform:scaleX(1); }
-          100% { transform:scaleX(0); }
-        }
-      </style>
-      <div style="
-        height:100%;
-        background:linear-gradient(90deg, #fbbf24 0%, #f59e0b 100%);
-        transform-origin:left center;
-        animation:bid-countdown-bar ${BID_HUMAN_TIMEOUT_MS}ms linear forwards;
-        animation-delay:-${Math.round(elapsedMs)}ms;
-        animation-fill-mode:both;
-      "></div>
-    </div>
-  `
-}
-
 function renderBidPopup(
   validActions: RoomValidBidActionsSnapshot,
-  timerDeadlineAt: number | null,
   isPendingSubmission: boolean,
 ): string {
   const disabled = isPendingSubmission
@@ -266,7 +233,6 @@ function renderBidPopup(
         font-family:Inter, system-ui, sans-serif;
       "
     >
-      ${renderCountdownBar(timerDeadlineAt)}
       <div style="
         display:grid;
         grid-template-columns:1fr 1fr;
@@ -349,11 +315,11 @@ function renderBotTakeoverPopup(): string {
 }
 
 export function createBiddingInteractionHtml(options: RenderBiddingScreenOptions): string {
-  const { biddingSnapshot, timerDeadlineAt, isPendingSubmission, showBotTakeover } = options
+  const { biddingSnapshot, isPendingSubmission, showBotTakeover } = options
 
   const popupHtml =
     biddingSnapshot.canSubmitBid && biddingSnapshot.validActions
-      ? renderBidPopup(biddingSnapshot.validActions, timerDeadlineAt, isPendingSubmission)
+      ? renderBidPopup(biddingSnapshot.validActions, isPendingSubmission)
       : ''
 
   const botTakeoverHtml = showBotTakeover ? renderBotTakeoverPopup() : ''

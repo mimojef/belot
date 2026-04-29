@@ -21,6 +21,7 @@ import {
   type CreateActiveRoomFlowControllerOptions,
   type CuttingAnimationCache,
   type DealingAnimationCache,
+  type PlayingUiCache,
 } from './activeRoomTypes'
 import {
   ACTIVE_ROOM_STAGE_HEIGHT,
@@ -31,9 +32,11 @@ import {
   createBiddingUiState,
   createCuttingAnimationCache,
   createDealingAnimationCache,
+  createPlayingUiCache,
   escapeHtml,
   getActiveRoomStageMetrics,
   getSeatAfterDealerForDealFallback,
+  resetPlayingUiCache,
 } from './activeRoomShared'
 import {
   getCuttingCycleKey,
@@ -67,12 +70,14 @@ import {
   syncDealingScreenTargets,
 } from './renderDealingScreen'
 import {
+  BID_BOT_DELAY_MS,
+  BID_HUMAN_TIMEOUT_MS,
   getBidActionLabel,
   renderBiddingStageHtml,
   createBiddingInteractionHtml,
 } from './renderBiddingScreen'
 import { sortLocalHandForAllTrumps, sortLocalHandForDisplay, type SortDisplayOptions } from './sortLocalHand'
-import { renderPlayingDebugScreen } from './renderPlayingDebugScreen'
+import { renderPlayingScreen, type RenderPlayingScreenOptions } from './renderPlayingScreen'
 
 const SEAT_LABELS: Record<Seat, string> = {
   bottom: 'Долу',
@@ -92,7 +97,111 @@ export function createActiveRoomFlowController(
   const dealNextTwoAnimation: DealingAnimationCache = createDealingAnimationCache()
   const dealLastThreeAnimation: DealingAnimationCache = createDealingAnimationCache()
   const biddingUiState: BiddingUiState = createBiddingUiState()
+  const playingCache: PlayingUiCache = createPlayingUiCache()
   let lastKnownWinningBid: NonNullable<RoomWinningBidSnapshot> | null = null
+
+  function getLocalSeatSnapshot(): RoomSeatSnapshot | null {
+    if (!activeRoomState) {
+      return null
+    }
+
+    return activeRoomState.seats.find((seat) => seat.seat === activeRoomState!.seat) ?? null
+  }
+
+  function renderPersistentBotTakeoverPopup(): string {
+    return `
+      <div
+        data-bot-takeover-overlay="1"
+        style="
+          position:fixed;
+          inset:0;
+          z-index:10000;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          background:rgba(2,6,23,0.62);
+          font-family:Inter, system-ui, sans-serif;
+        "
+      >
+        <div style="
+          width:min(88vw, 480px);
+          background:rgba(15,23,42,0.98);
+          border:1px solid rgba(148,163,184,0.22);
+          border-radius:24px;
+          padding:32px 28px;
+          box-shadow:0 32px 72px rgba(0,0,0,0.42);
+          text-align:center;
+        ">
+          <div style="
+            font-size:40px;
+            margin-bottom:18px;
+            line-height:1;
+          ">🤖</div>
+          <div style="
+            color:#f8fafc;
+            font-size:18px;
+            font-weight:700;
+            line-height:1.5;
+            margin-bottom:28px;
+          ">
+            Поради изтичане на времето за реакция,<br>играта беше поета от робот.
+          </div>
+          <button
+            type="button"
+            data-bot-takeover-dismiss="1"
+            style="
+              border:0;
+              border-radius:14px;
+              padding:14px 32px;
+              background:linear-gradient(180deg,#3b82f6 0%,#1d4ed8 100%);
+              color:#fff;
+              font-size:16px;
+              font-weight:800;
+              cursor:pointer;
+              font-family:inherit;
+              box-shadow:0 8px 20px rgba(29,78,216,0.32);
+            "
+          >
+            Върни се
+          </button>
+        </div>
+      </div>
+    `
+  }
+
+  function removePersistentBotTakeoverPopup(): void {
+    document.body.querySelector('[data-bot-takeover-overlay="1"]')?.remove()
+  }
+
+  function syncPersistentBotTakeoverPopup(): void {
+    const localSeatSnapshot = getLocalSeatSnapshot()
+
+    if (!activeRoomState || !localSeatSnapshot?.isControlledByBot) {
+      removePersistentBotTakeoverPopup()
+      return
+    }
+
+    if (document.body.querySelector('[data-bot-takeover-overlay="1"]')) {
+      return
+    }
+
+    document.body.insertAdjacentHTML('beforeend', renderPersistentBotTakeoverPopup())
+
+    const dismissBtn = document.body.querySelector<HTMLButtonElement>('[data-bot-takeover-dismiss="1"]')
+    dismissBtn?.addEventListener('click', () => {
+      if (!activeRoomState) {
+        return
+      }
+
+      if (!options.isConnected()) {
+        activeRoomState.errorText = 'Няма връзка със сървъра.'
+        renderActiveRoomScreen()
+        return
+      }
+
+      options.resumeHumanControl(activeRoomState.roomId)
+    })
+  }
 
   function getContractSortOptions(): SortDisplayOptions {
     if (!lastKnownWinningBid) return { contract: 'default' }
@@ -747,6 +856,9 @@ export function createActiveRoomFlowController(
       !isShowingAnyDealPhase && authoritativePhase === 'bidding'
     const isShowingPlayingPhase =
       !isShowingAnyDealPhase && authoritativePhase === 'playing'
+    if (!isShowingPlayingPhase) {
+      resetPlayingUiCache(playingCache)
+    }
     const shouldSyncBiddingSnapshot =
       isShowingBiddingPhase || authoritativePhase === 'deal-last-3' || isShowingNextRoundPause
 
@@ -1104,9 +1216,10 @@ export function createActiveRoomFlowController(
     } else if (isShowingBiddingPhase) {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
 
-      const biddingSnapshot = activeRoomState.game!.bidding!
-      const handCounts = activeRoomState.game?.handCounts ?? { bottom: 0, right: 0, top: 0, left: 0 }
-      const ownHand = sortLocalHandForAllTrumps(activeRoomState.game?.ownHand ?? [])
+      const biddingGame = activeRoomState.game!
+      const biddingSnapshot = biddingGame.bidding!
+      const handCounts = biddingGame.handCounts ?? { bottom: 0, right: 0, top: 0, left: 0 }
+      const ownHand = sortLocalHandForAllTrumps(biddingGame.ownHand ?? [])
 
       const dealtHandsForBidding: DealtHandsData = {
         handCounts,
@@ -1125,12 +1238,31 @@ export function createActiveRoomFlowController(
         biddingSnapshot.currentBidderSeat,
         handCounts,
       )
+      const biddingCurrentSeatSnapshot =
+        biddingSnapshot.currentBidderSeat !== null
+          ? activeRoomState.seats.find((seat) => seat.seat === biddingSnapshot.currentBidderSeat) ?? null
+          : null
+      const biddingCountdownTotalMs = BID_HUMAN_TIMEOUT_MS
+      const rawBiddingCountdownRemainingMs =
+        biddingSnapshot.currentBidderSeat !== null &&
+        biddingGame.timerDeadlineAt !== null
+          ? Math.max(0, biddingGame.timerDeadlineAt - Date.now())
+          : null
+      const biddingCountdownRemainingMs =
+        rawBiddingCountdownRemainingMs === null
+          ? null
+          : biddingCurrentSeatSnapshot?.isBot
+            ? Math.max(
+                0,
+                BID_HUMAN_TIMEOUT_MS -
+                  (BID_BOT_DELAY_MS - Math.min(BID_BOT_DELAY_MS, rawBiddingCountdownRemainingMs)),
+              )
+            : rawBiddingCountdownRemainingMs
 
       const biddingInteractionHtml = createBiddingInteractionHtml({
         biddingSnapshot,
-        timerDeadlineAt: activeRoomState.game?.timerDeadlineAt ?? null,
         isPendingSubmission: biddingUiState.pendingBidSent,
-        showBotTakeover: biddingUiState.showBotTakeover,
+        showBotTakeover: false,
       })
 
       const biddingErrorHtml = activeRoomState.errorText
@@ -1215,6 +1347,11 @@ export function createActiveRoomFlowController(
             dealerSeat,
             cutterSeat: null,
             cuttingCountdownRemainingMs: null,
+            countdownSeat: biddingSnapshot.currentBidderSeat,
+            countdownRemainingMs: biddingCountdownRemainingMs,
+            countdownTotalMs: biddingCountdownTotalMs,
+            highlightSeat: biddingSnapshot.currentBidderSeat,
+            highlightBadgeLabel: null,
             panelScale: stageScale,
             escapeHtml,
             dealtHands: dealtHandsForBidding,
@@ -1253,13 +1390,19 @@ export function createActiveRoomFlowController(
       })
     } else if (isShowingPlayingPhase && activeRoomState.game) {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
-      renderPlayingDebugScreen({
+      renderPlayingScreen({
         root: options.root,
         game: activeRoomState.game,
+        seats: activeRoomState.seats,
         localSeat: activeRoomState.seat,
         roomId: activeRoomState.roomId,
+        winningBid: lastKnownWinningBid,
+        stageScale,
+        scaledStageWidth,
+        scaledStageHeight,
         submitPlayCard: options.submitPlayCard,
-      })
+        cache: playingCache,
+      } satisfies RenderPlayingScreenOptions)
     } else {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
       const seatsHtml =
@@ -1552,6 +1695,8 @@ export function createActiveRoomFlowController(
       `
     }
 
+    syncPersistentBotTakeoverPopup()
+
     const leaveButton = options.root.querySelector<HTMLButtonElement>(
       '[data-active-room-leave-button="1"]',
     )
@@ -1637,6 +1782,8 @@ export function createActiveRoomFlowController(
     clearDealLastThreeAnimationState()
     clearBiddingUiState()
     lastKnownWinningBid = null
+    resetPlayingUiCache(playingCache)
+    removePersistentBotTakeoverPopup()
     activeRoomState = {
       roomId: message.roomId,
       seat: message.seat,
@@ -1684,6 +1831,8 @@ export function createActiveRoomFlowController(
       clearDealLastThreeAnimationState()
       clearBiddingUiState()
       lastKnownWinningBid = null
+      resetPlayingUiCache(playingCache)
+      removePersistentBotTakeoverPopup()
       activeRoomState = null
       options.showLobby(null)
       return true
@@ -1696,6 +1845,8 @@ export function createActiveRoomFlowController(
       clearDealLastThreeAnimationState()
       clearBiddingUiState()
       lastKnownWinningBid = null
+      resetPlayingUiCache(playingCache)
+      removePersistentBotTakeoverPopup()
       activeRoomState = null
       options.showLobby(message.message)
       return true
@@ -1704,6 +1855,7 @@ export function createActiveRoomFlowController(
     if (message.type === 'error') {
       clearPendingCutSubmission()
       clearPendingBidSubmission()
+      playingCache.pendingPlayCardSent = false
       activeRoomState.errorText = message.message
       renderActiveRoomScreen()
       return true
@@ -1720,6 +1872,7 @@ export function createActiveRoomFlowController(
     if (!value) {
       clearPendingCutSubmission()
       clearPendingBidSubmission()
+      playingCache.pendingPlayCardSent = false
     }
 
     activeRoomState.isConnected = value
@@ -1734,6 +1887,7 @@ export function createActiveRoomFlowController(
     if (message) {
       clearPendingCutSubmission()
       clearPendingBidSubmission()
+      playingCache.pendingPlayCardSent = false
     }
 
     activeRoomState.errorText = message
@@ -1766,6 +1920,7 @@ export function createActiveRoomFlowController(
     clearDealLastThreeAnimationState()
     clearBiddingUiState()
     lastKnownWinningBid = null
+    resetPlayingUiCache(playingCache)
     options.leaveActiveRoom(activeRoomState.roomId)
   }
 

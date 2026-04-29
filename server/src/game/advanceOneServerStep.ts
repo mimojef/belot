@@ -5,7 +5,6 @@ import { advanceExpiredServerCuttingState } from './advanceExpiredServerCuttingS
 import { advanceExpiredServerPlayingState } from './advanceExpiredServerPlayingState.js'
 import { getServerPhaseAutoAdvanceExpiry } from './getServerPhaseAutoAdvanceExpiry.js'
 import { getServerTimerExpiry } from './getServerTimerExpiry.js'
-import { isServerSeatControlledByBot } from './serverTimerStateHelpers.js'
 
 export type AdvanceOneServerStepResult = {
   state: ServerAuthoritativeGameState
@@ -49,8 +48,7 @@ export function advanceOneServerStep(
   if (
     state.phase === 'playing' &&
     state.playing?.hasStarted &&
-    state.playing.currentTurnSeat !== null &&
-    isServerSeatControlledByBot(state, state.playing.currentTurnSeat)
+    state.playing.currentTurnSeat !== null
   ) {
     return advanceExpiredServerPlayingState(state, expiresAt)
   }
