@@ -1,5 +1,6 @@
 import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
 import { createServerRoundStartState } from './createServerRoundStartState.js'
+import { getDevForcedHumanCutterSeatFromState } from './devForceHumanCutter.js'
 import { getNextSeat } from './serverPhaseHelpers.js'
 
 export function startNextServerRound(
@@ -9,6 +10,12 @@ export function startNextServerRound(
 
   if (!currentDealerSeat) {
     return state
+  }
+
+  const forcedCutterSeat = getDevForcedHumanCutterSeatFromState(state)
+
+  if (forcedCutterSeat !== null) {
+    return createServerRoundStartState(state, getNextSeat(forcedCutterSeat))
   }
 
   const nextDealerSeat = getNextSeat(currentDealerSeat)

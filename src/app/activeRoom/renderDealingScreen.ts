@@ -217,6 +217,22 @@ export function syncDealingScreenTargets(
   // Deal positions are rendered in the fixed 1600x900 table coordinate system.
 }
 
+// Returns standalone HTML for the deal-first-3 flying packets (styles + packet divs).
+// Intended for use with the deal packet overlay, which lives outside root so that
+// server snapshot re-renders cannot reset the CSS animations.
+export function renderDealFirstThreePacketsHtml(
+  firstDealSeat: Seat | null,
+  localSeat: Seat,
+): string {
+  const dealOrder = getDealOrder(firstDealSeat)
+  const packets = dealOrder
+    .map((seat, index) =>
+      renderFlyingPacket(seat, index, localSeat, true, DEAL_FIRST_THREE_PACKET_SIZE),
+    )
+    .join('')
+  return `${renderDealingStyles()}${packets}`
+}
+
 function renderPileCard(
   layerIndex: number,
   totalCount: number,

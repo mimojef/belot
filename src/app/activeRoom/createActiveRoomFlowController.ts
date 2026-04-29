@@ -68,9 +68,17 @@ import {
   DEAL_PACKET_DELAY_STEP_MS,
   DEAL_PACKET_START_DELAY_MS,
   type RenderDealingAnimationState,
+  renderDealFirstThreePacketsHtml,
   renderDealingScreen,
   syncDealingScreenTargets,
 } from './renderDealingScreen'
+import {
+  type DealPacketOverlayState,
+  createDealPacketOverlayState,
+  getDealPacketOverlayElapsedMs,
+  mountDealPacketOverlay,
+  unmountDealPacketOverlay,
+} from './dealPacketOverlay'
 import {
   BID_BOT_DELAY_MS,
   BID_HUMAN_TIMEOUT_MS,
@@ -98,6 +106,7 @@ export function createActiveRoomFlowController(
   const dealingAnimation: DealingAnimationCache = createDealingAnimationCache()
   const dealNextTwoAnimation: DealingAnimationCache = createDealingAnimationCache()
   const dealLastThreeAnimation: DealingAnimationCache = createDealingAnimationCache()
+  const firstThreeOverlay: DealPacketOverlayState = createDealPacketOverlayState()
   const biddingUiState: BiddingUiState = createBiddingUiState()
   const playingCache: PlayingUiCache = createPlayingUiCache()
   let lastKnownWinningBid: NonNullable<RoomWinningBidSnapshot> | null = null
@@ -385,6 +394,7 @@ export function createActiveRoomFlowController(
 
   function clearDealingAnimationState(): void {
     cancelDealingAnimationCompletionTimer()
+    unmountDealPacketOverlay(firstThreeOverlay)
     dealingAnimation.activePhaseKey = null
     dealingAnimation.renderedPhaseKey = null
     dealingAnimation.renderedFirstDealSeat = null
@@ -412,6 +422,7 @@ export function createActiveRoomFlowController(
 
       dealingAnimation.isAnimating = false
       dealingAnimation.hasCompleted = true
+      unmountDealPacketOverlay(firstThreeOverlay)
       renderActiveRoomScreen()
     }, remainingMs)
   }
@@ -1054,6 +1065,21 @@ export function createActiveRoomFlowController(
         shouldRenderDealFirstThreeAnimation ||
         shouldRenderDealNextTwoAnimation ||
         shouldRenderDealLastThreeAnimation
+      // Overlay mode: deal-first-3 packets live in the active-room visual layer so
+      // they can sit above the table but below the seat panels.
+      // Only active when deal-first-3 is the sole animated phase (not when deal-next-2
+      // or deal-last-3 are also active — those still use the root render path).
+      const isUsingFirstThreeOverlay =
+        shouldRenderDealFirstThreeAnimation &&
+        !shouldRenderDealNextTwoAnimation &&
+        !shouldRenderDealLastThreeAnimation
+
+      if (!isUsingFirstThreeOverlay && firstThreeOverlay.element !== null) {
+        // deal-next-2 or deal-last-3 became active — drop the deal-first-3 overlay
+        // and let the root render handle packets from here.
+        unmountDealPacketOverlay(firstThreeOverlay)
+      }
+
       const rawOwnHand = activeRoomState.game?.ownHand ?? []
 
       const dealMaxCards =
@@ -1090,7 +1116,7 @@ export function createActiveRoomFlowController(
         ownHand,
         stageScale,
         dealAnimation: dealAnimationForRender,
-        showPackets,
+        showPackets: isUsingFirstThreeOverlay ? false : showPackets,
         dealPhase: activeDealPhase,
       })
 
@@ -1112,10 +1138,12 @@ export function createActiveRoomFlowController(
         return delays
       }
       const hideNewCardsUntilAnimDelaySeats: Partial<Record<Seat, boolean>> = {}
+      const visibleHandCountsForPanels: Partial<Record<Seat, number>> = {}
       if (showPackets && activeDealPhase === 'deal-next-2') {
         SERVER_DEAL_ORDER.forEach((seat) => {
           if (getVisualSeatForLocalPerspective(seat, activeRoomState!.seat) === 'top') {
             hideNewCardsUntilAnimDelaySeats[seat] = true
+            visibleHandCountsForPanels[seat] = Math.min(handCounts[seat] ?? 0, dealPrevCards)
           }
         })
       }
@@ -1128,13 +1156,25 @@ export function createActiveRoomFlowController(
             localSeat: activeRoomState.seat,
             maxCardsPerSeat: dealMaxCards,
             hideNewCardsUntilAnimDelaySeats,
+            visibleHandCounts: visibleHandCountsForPanels,
             animStartIndex:
               shouldRenderDealLastThreeAnimation
                 ? 5
                 : shouldRenderDealNextTwoAnimation
                   ? 3
                   : 0,
-            seatAnimDelays: showPackets ? computeSeatAnimDelays() : null,
+            seatAnimDelays: showPackets
+              ? (() => {
+                  const raw = computeSeatAnimDelays()
+                  if (!isUsingFirstThreeOverlay) return raw
+                  const elapsed = getDealPacketOverlayElapsedMs(firstThreeOverlay)
+                  const compensated: Partial<Record<Seat, number>> = {}
+                  for (const seat of Object.keys(raw) as Seat[]) {
+                    compensated[seat] = Math.max(0, (raw[seat] ?? 0) - elapsed)
+                  }
+                  return compensated
+                })()
+              : null,
           }
         : null
 
@@ -1145,7 +1185,7 @@ export function createActiveRoomFlowController(
             ? dealNextTwoAnimation
             : dealingAnimation
 
-      if (dealAnimationForRender !== null && showPackets) {
+      if (dealAnimationForRender !== null && showPackets && !isUsingFirstThreeOverlay) {
         const dealingVisualRoot = options.root.querySelector<HTMLDivElement>(
           '[data-active-room-dealing-visual="1"]',
         )
@@ -1159,6 +1199,14 @@ export function createActiveRoomFlowController(
         ) {
           return
         }
+      }
+      if (
+        isUsingFirstThreeOverlay &&
+        firstThreeOverlay.phaseKey === dealingAnimation.activePhaseKey &&
+        firstThreeOverlay.element !== null &&
+        firstThreeOverlay.element.isConnected
+      ) {
+        return
       }
 
       options.root.innerHTML = `
@@ -1224,7 +1272,23 @@ export function createActiveRoomFlowController(
         </div>
       `
 
-      if (dealAnimationForRender !== null) {
+      if (isUsingFirstThreeOverlay && dealingAnimation.activePhaseKey !== null) {
+        const overlayHost =
+          options.root.firstElementChild instanceof HTMLElement
+            ? options.root.firstElementChild
+            : options.root
+        mountDealPacketOverlay(
+          firstThreeOverlay,
+          dealingAnimation.activePhaseKey,
+          renderDealFirstThreePacketsHtml(dealFirstSeatForRender, activeRoomState.seat),
+          stageScale,
+          ACTIVE_ROOM_STAGE_WIDTH,
+          ACTIVE_ROOM_STAGE_HEIGHT,
+          overlayHost,
+        )
+      }
+
+      if (dealAnimationForRender !== null && !isUsingFirstThreeOverlay) {
         activeAnimCache.renderedPhaseKey = activeAnimCache.activePhaseKey
         activeAnimCache.renderedFirstDealSeat = dealFirstSeatForRender
       }

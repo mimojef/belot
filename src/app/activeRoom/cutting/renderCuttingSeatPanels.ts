@@ -19,6 +19,7 @@ export type DealtHandsData = {
   localSeat: Seat
   seatAnimDelays: Partial<Record<Seat, number>> | null
   hideNewCardsUntilAnimDelaySeats?: Partial<Record<Seat, boolean>>
+  visibleHandCounts?: Partial<Record<Seat, number>>
   maxCardsPerSeat: number
   animStartIndex: number
 }
@@ -347,7 +348,8 @@ function renderDealtCardFanInPanel(
   visualSeat: Seat,
   dealtHands: DealtHandsData,
 ): string {
-  const count = Math.min(dealtHands.maxCardsPerSeat, Math.max(0, dealtHands.handCounts[actualSeat] ?? 0))
+  const handCount = dealtHands.visibleHandCounts?.[actualSeat] ?? dealtHands.handCounts[actualSeat] ?? 0
+  const count = Math.min(dealtHands.maxCardsPerSeat, Math.max(0, handCount))
   if (count === 0) return ''
 
   const isLocalSeat = actualSeat === dealtHands.localSeat
@@ -439,7 +441,7 @@ function renderDealtCardFanInPanel(
       width:1px;
       height:1px;
       pointer-events:none;
-      z-index:0;
+      z-index:1;
       ${rotateStyle}
     ">
       ${cardElements}
@@ -630,6 +632,7 @@ export function createCuttingSeatPanelHtml(
               linear-gradient(180deg, rgba(16, 145, 151, 0.96) 0%, rgba(17, 95, 118, 0.96) 54%, rgba(10, 44, 70, 0.98) 100%);
             box-shadow:${shadow};
             overflow:hidden;
+            z-index:2;
             transform:scale(0.8);
             transform-origin:bottom center;
           "
@@ -731,6 +734,7 @@ export function createCuttingSeatPanelHtml(
             linear-gradient(180deg, rgba(18, 154, 160, 0.95) 0%, rgba(19, 104, 121, 0.95) 52%, rgba(12, 55, 82, 0.96) 100%);
           box-shadow:${shadow};
           overflow:hidden;
+          z-index:2;
           transform:scale(0.9);
           transform-origin:${visualSeat === 'top' ? 'top center' : visualSeat === 'left' ? 'left center' : 'right center'};
         "
