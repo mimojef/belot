@@ -98,6 +98,8 @@ export function createPlayingUiCache(): PlayingUiCache {
     pendingCompletedTrickKey: null,
     latestCompletedTrickKey: null,
     bufferedCompletedTrick: null,
+    completedTrickEntryKey: null,
+    completedTrickEntryStartedAt: 0,
     hasRenderedSnapshot: false,
     animationToken: 0,
     pendingPlayCardSent: false,
@@ -116,6 +118,8 @@ export function resetPlayingUiCache(cache: PlayingUiCache): void {
   cache.pendingCompletedTrickKey = null
   cache.latestCompletedTrickKey = null
   cache.bufferedCompletedTrick = null
+  cache.completedTrickEntryKey = null
+  cache.completedTrickEntryStartedAt = 0
   cache.hasRenderedSnapshot = false
   cache.animationToken += 1
   cache.pendingPlayCardSent = false

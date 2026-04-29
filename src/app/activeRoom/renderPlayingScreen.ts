@@ -30,7 +30,9 @@ const TABLE_BACKGROUND = `
   linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%)
 `
 
+const PLAY_CARD_ENTRY_ANIMATION_MS = 400
 const COMPLETED_TRICK_PREVIEW_MS = 220
+const PLAYING_COLLECT_OVERLAY_Z_INDEX = 9000
 const PLAY_HUMAN_TIMEOUT_MS = 15_000
 const PLAY_BOT_DELAY_MS = 1_000
 
@@ -228,6 +230,7 @@ function renderTrickCard(
   count: number,
   localSeat: Seat,
   animateNewest: boolean,
+  entryElapsedMs: number,
 ): string {
   const visualSeat = getVisualSeatForLocalPerspective(play.seat, localSeat)
   const seatOffset = SEAT_TRICK_OFFSET[visualSeat]
@@ -244,7 +247,8 @@ function renderTrickCard(
       --belot-entry-x:${entryOffset.x}px;
       --belot-entry-y:${entryOffset.y}px;
       --belot-final-rotate:${finalRotate}deg;
-      animation:belot-play-card-entry 400ms cubic-bezier(0.22,1,0.36,1) forwards;
+      animation:belot-play-card-entry ${PLAY_CARD_ENTRY_ANIMATION_MS}ms cubic-bezier(0.22,1,0.36,1) forwards;
+      animation-delay:-${Math.min(entryElapsedMs, PLAY_CARD_ENTRY_ANIMATION_MS)}ms;
     `
   }
 
@@ -375,6 +379,7 @@ function renderTrickArea(
   plays: RoomPlayCardSnapshot[],
   localSeat: Seat,
   animateNewest: boolean,
+  newestEntryElapsedMs: number,
 ): string {
   return `
     <style>
@@ -399,7 +404,9 @@ function renderTrickArea(
         pointer-events:none;
       "
     >
-      ${plays.map((play, index) => renderTrickCard(play, index, plays.length, localSeat, animateNewest)).join('')}
+      ${plays.map((play, index) =>
+        renderTrickCard(play, index, plays.length, localSeat, animateNewest, newestEntryElapsedMs),
+      ).join('')}
     </div>
   `
 }
@@ -421,8 +428,6 @@ function renderBottomHandOverlay(options: {
     const baseTransform = `translate(-50%,-50%) translate(${offset.x}px,${offset.y}px) rotate(${offset.rotate}deg)`
     const isValid = !isMyTurn || validCardIds === null || validCardIds.includes(card.id)
     const canClick = isMyTurn && isValid
-    const opacity = isMyTurn && !isValid ? 0.62 : 1
-    const filter = isMyTurn && !isValid ? 'saturate(0.68) brightness(0.88)' : 'none'
 
     return `
       <button
@@ -446,9 +451,9 @@ function renderBottomHandOverlay(options: {
           transform:${baseTransform};
           cursor:${canClick ? 'pointer' : 'default'};
           pointer-events:${canClick ? 'auto' : 'none'};
-          opacity:${opacity};
-          filter:${filter};
-          transition:transform 0.12s ease,filter 0.12s ease,opacity 0.15s ease;
+          opacity:1;
+          filter:none;
+          transition:transform 0.12s ease,filter 0.12s ease;
           z-index:${60 + index};
         "
       >
@@ -542,11 +547,13 @@ function renderPlayingStage(options: {
   plays: RoomPlayCardSnapshot[]
   localSeat: Seat
   animateNewest: boolean
+  newestEntryElapsedMs: number
 }): string {
   const {
     plays,
     localSeat,
     animateNewest,
+    newestEntryElapsedMs,
   } = options
 
   return `
@@ -568,7 +575,7 @@ function renderPlayingStage(options: {
           z-index:2;
         "
       >
-        ${renderTrickArea(plays, localSeat, animateNewest)}
+        ${renderTrickArea(plays, localSeat, animateNewest, newestEntryElapsedMs)}
       </div>
     </section>
   `
@@ -586,6 +593,8 @@ function resetCacheForFreshSnapshot(
   cache.pendingCompletedTrickKey = null
   cache.latestCompletedTrickKey = latestCompletedTrickKey
   cache.bufferedCompletedTrick = null
+  cache.completedTrickEntryKey = null
+  cache.completedTrickEntryStartedAt = 0
   cache.hasRenderedSnapshot = true
   cache.animationToken += 1
   cache.pendingPlayCardSent = false
@@ -599,6 +608,7 @@ function resetCacheForFreshSnapshot(
 function scheduleCompletedTrickCollection(
   options: RenderPlayingScreenOptions,
   completedTrick: RoomCompletedTrickSnapshot,
+  delayBeforeCollectMs: number,
 ): void {
   const { cache, root, localSeat } = options
   const expectedToken = cache.animationToken + 1
@@ -606,7 +616,7 @@ function scheduleCompletedTrickCollection(
   cache.isTrickCollectionAnimating = true
 
   void (async () => {
-    await wait(COMPLETED_TRICK_PREVIEW_MS)
+    await wait(delayBeforeCollectMs)
 
     if (cache.animationToken !== expectedToken) {
       return
@@ -622,16 +632,17 @@ function scheduleCompletedTrickCollection(
     const targetElement = root.querySelector<HTMLElement>(
       `[data-active-room-seat-anchor="${completedTrick.winnerSeat}"]`,
     )
+    const overlayHost = root.querySelector<HTMLElement>(
+      '[data-playing-collect-layer-host="1"]',
+    )
 
     const animationPromise = animateTrickCollection({
       cards: cardElements.map((element) => ({ element })),
       winnerSeat: visualWinner,
+      overlayHost,
       targetElement,
-      overlayZIndex: 9000,
+      overlayZIndex: PLAYING_COLLECT_OVERLAY_Z_INDEX,
     })
-
-    cache.pendingCompletedTrickKey = null
-    cache.bufferedCompletedTrick = null
 
     await animationPromise
   })()
@@ -642,6 +653,10 @@ function scheduleCompletedTrickCollection(
       }
 
       cache.isTrickCollectionAnimating = false
+      cache.pendingCompletedTrickKey = null
+      cache.bufferedCompletedTrick = null
+      cache.completedTrickEntryKey = null
+      cache.completedTrickEntryStartedAt = 0
       const latestOptions = latestRenderOptionsByCache.get(cache)
       if (latestOptions) {
         renderPlayingScreen(latestOptions)
@@ -725,6 +740,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
   } = options
 
   latestRenderOptionsByCache.set(cache, options)
+  const isCollectingTrickOnEntry = cache.isTrickCollectionAnimating
 
   const playing = game.playing
   const snapshotPlays = playing?.currentTrickPlays ?? []
@@ -742,6 +758,10 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     cache.latestCompletedTrickKey = latestCompletedTrickKey
   } else if (completedCount < cache.lastCompletedTricksCount) {
     resetCacheForFreshSnapshot(cache, snapshotTrickKey, completedCount, latestCompletedTrickKey)
+  }
+
+  if (isCollectingTrickOnEntry) {
+    return
   }
 
   const hasNewCompletedTrick = completedCount > cache.lastCompletedTricksCount
@@ -764,6 +784,8 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       cache.pendingCompletedTrickKey = latestCompletedTrickKey
       cache.latestCompletedTrickKey = latestCompletedTrickKey
       cache.bufferedCompletedTrick = latestCompletedTrick
+      cache.completedTrickEntryKey = latestCompletedTrickKey
+      cache.completedTrickEntryStartedAt = performance.now()
       shouldStartCollection = true
     } else if (latestCompletedTrickKey !== null) {
       cache.latestCompletedTrickKey = latestCompletedTrickKey
@@ -778,7 +800,18 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
   const displayedPlays = isShowingBufferedCompletedTrick
     ? cache.bufferedCompletedTrick!.plays
     : snapshotPlays
+  const completedTrickEntryElapsedMs =
+    isShowingBufferedCompletedTrick &&
+    cache.pendingCompletedTrickKey !== null &&
+    cache.completedTrickEntryKey === cache.pendingCompletedTrickKey
+      ? Math.max(0, performance.now() - cache.completedTrickEntryStartedAt)
+      : 0
+  const shouldAnimateCompletedTrickNewest =
+    isShowingBufferedCompletedTrick &&
+    completedTrickEntryElapsedMs < PLAY_CARD_ENTRY_ANIMATION_MS &&
+    cache.completedTrickEntryKey === cache.pendingCompletedTrickKey
   const animateNewest =
+    shouldAnimateCompletedTrickNewest ||
     !isShowingBufferedCompletedTrick &&
     !cache.isTrickCollectionAnimating &&
     snapshotPlays.length > 0 &&
@@ -876,10 +909,23 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
               plays: displayedPlays,
               localSeat,
               animateNewest: shouldAnimateNewestViaOverlay ? false : animateNewest,
+              newestEntryElapsedMs: shouldAnimateCompletedTrickNewest
+                ? completedTrickEntryElapsedMs
+                : 0,
             })}
           </div>
         </div>
       </div>
+      <div
+        data-playing-collect-layer-host="1"
+        style="
+          position:fixed;
+          inset:0;
+          z-index:2;
+          pointer-events:none;
+          overflow:visible;
+        "
+      ></div>
       ${createCuttingSeatPanelsHtml({
         seats,
         localSeat,
@@ -928,11 +974,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
 
     button.addEventListener('mouseleave', () => {
       button.style.transform = baseTransform
-      if (button.disabled) {
-        button.style.filter = 'saturate(0.68) brightness(0.88)'
-      } else {
-        button.style.filter = 'none'
-      }
+      button.style.filter = 'none'
       button.style.zIndex = String(baseZIndex)
     })
   })
@@ -952,6 +994,10 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
   }
 
   if (shouldStartCollection && cache.bufferedCompletedTrick !== null) {
-    scheduleCompletedTrickCollection(options, cache.bufferedCompletedTrick)
+    scheduleCompletedTrickCollection(
+      options,
+      cache.bufferedCompletedTrick,
+      PLAY_CARD_ENTRY_ANIMATION_MS + COMPLETED_TRICK_PREVIEW_MS,
+    )
   }
 }

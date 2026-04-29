@@ -80,6 +80,8 @@ export type PlayingUiCache = {
   pendingCompletedTrickKey: string | null
   latestCompletedTrickKey: string | null
   bufferedCompletedTrick: RoomCompletedTrickSnapshot | null
+  completedTrickEntryKey: string | null
+  completedTrickEntryStartedAt: number
   hasRenderedSnapshot: boolean
   animationToken: number
   pendingPlayCardSent: boolean

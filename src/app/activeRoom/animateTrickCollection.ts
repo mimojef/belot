@@ -8,6 +8,7 @@ export type TrickCollectionCard = {
 export type AnimateTrickCollectionOptions = {
   cards: TrickCollectionCard[]
   winnerSeat: Seat
+  overlayHost?: HTMLElement | null
   targetElement?: HTMLElement | null
   hideOriginalCards?: boolean
   gatherDurationMs?: number
@@ -52,8 +53,8 @@ function getAverageCenter(rects: DOMRect[]): Point {
   return { x: total.x / rects.length, y: total.y / rects.length }
 }
 
-function resolveOverlayHost(): HTMLElement {
-  return document.body
+function resolveOverlayHost(host?: HTMLElement | null): HTMLElement {
+  return host ?? document.body
 }
 
 function createOverlay(host: HTMLElement, zIndex: number): HTMLDivElement {
@@ -82,6 +83,8 @@ function createFloatingCard(
   clone.style.pointerEvents = 'none'
   clone.style.transform = 'none'
   clone.style.transformOrigin = 'center center'
+  clone.style.animation = 'none'
+  clone.style.transition = 'none'
   clone.style.willChange = 'transform, opacity'
   clone.style.zIndex = String(zIndex)
   overlay.appendChild(clone)
@@ -175,7 +178,7 @@ export async function animateTrickCollection(
   const targetRect = targetElement.getBoundingClientRect()
   if (targetRect.width === 0 && targetRect.height === 0) return
 
-  const overlayHost = resolveOverlayHost()
+  const overlayHost = resolveOverlayHost(options.overlayHost)
   const overlay = createOverlay(overlayHost, overlayZIndex)
   const floatingCards = measuredCards.map((mc, i) => createFloatingCard(mc, overlay, overlayZIndex + i + 1))
 
