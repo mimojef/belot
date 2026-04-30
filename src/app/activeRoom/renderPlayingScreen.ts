@@ -24,6 +24,7 @@ import {
 import { sortLocalHandForDisplay, type SortDisplayOptions } from './sortLocalHand'
 import { animateTrickCollection } from './animateTrickCollection'
 import type { PlayingUiCache } from './activeRoomTypes'
+import { renderScoreHud } from './renderScoreHud'
 
 const TABLE_BACKGROUND = `
   radial-gradient(circle at center, rgba(74,222,128,0.18) 0%, rgba(34,197,94,0.10) 34%, rgba(21,128,61,0.00) 58%),
@@ -890,10 +891,12 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     snapshotPlays.length < 4 &&
     snapshotTrickKey !== cache.lastTrickKey
 
-  const newestPlay = snapshotPlays[snapshotPlays.length - 1] ?? null
+  const newestDisplayedPlay = animateNewest
+    ? displayedPlays[displayedPlays.length - 1] ?? null
+    : null
   let pendingPlayedCardSource: PlayedCardFlySource | null = null
   let shouldAnimateNewestViaOverlay = false
-  if (animateNewest && newestPlay?.seat === localSeat) {
+  if (animateNewest && newestDisplayedPlay?.seat === localSeat) {
     pendingPlayedCardSource = playedCardFlySourceByCache.get(cache) ?? (
       cache.lastPlayedCardRect === null
         ? null
@@ -1028,6 +1031,12 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         isMyTurn,
         stageScale,
       })}
+      ${renderScoreHud({
+        game,
+        localSeat,
+        winningBid,
+        stageScale,
+      })}
     </div>
   `
 
@@ -1067,10 +1076,16 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     })
   })
 
-  if (shouldAnimateNewestViaOverlay && pendingPlayedCardSource !== null) {
-    const trickCardEl = root.querySelector<HTMLElement>(
-      `[data-current-trick-card][data-trick-seat="${localSeat}"]`,
-    )
+  if (
+    shouldAnimateNewestViaOverlay &&
+    pendingPlayedCardSource !== null &&
+    newestDisplayedPlay?.seat === localSeat
+  ) {
+    const trickCardEl = Array.from(
+      root.querySelectorAll<HTMLElement>(
+        `[data-current-trick-card][data-trick-seat="${localSeat}"]`,
+      ),
+    ).find((element) => element.dataset.cardId === newestDisplayedPlay.card.id)
     if (trickCardEl) {
       const targetRect = trickCardEl.getBoundingClientRect()
       const targetSize = getScaledPhysicalElementSize(trickCardEl, stageScale)

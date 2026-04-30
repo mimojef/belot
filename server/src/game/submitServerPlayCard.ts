@@ -8,7 +8,6 @@ import { getNextSeat } from './serverPhaseHelpers.js'
 import { getTeamBySeat } from './serverStateHelpers.js'
 import { getServerTrickWinner } from './getServerTrickWinner.js'
 import { getServerValidPlayCards } from './getServerValidPlayCards.js'
-import { runServerPhaseTransition } from './runServerPhaseTransition.js'
 import {
   clearServerTimerState,
   createServerPlayingTimerState,
@@ -79,11 +78,13 @@ function applyTrickCompletion(
   }
 
   if (isRoundComplete) {
-    return runServerPhaseTransition({
+    return {
       ...state,
+      phase: 'playing',
+      phaseEnteredAt: Date.now(),
       playing: nextPlaying,
       timer: clearServerTimerState(),
-    })
+    }
   }
 
   const nextState: ServerAuthoritativeGameState = {

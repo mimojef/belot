@@ -89,6 +89,7 @@ import {
 } from './renderBiddingScreen'
 import { sortLocalHandForAllTrumps, sortLocalHandForDisplay, type SortDisplayOptions } from './sortLocalHand'
 import { renderPlayingScreen, type RenderPlayingScreenOptions } from './renderPlayingScreen'
+import { renderScoreHud } from './renderScoreHud'
 
 const SEAT_LABELS: Record<Seat, string> = {
   bottom: 'Долу',
@@ -786,8 +787,17 @@ export function createActiveRoomFlowController(
     }
 
     const freshWinningBid = activeRoomState.game?.bidding?.winningBid ?? null
+    const activeAuthoritativePhase = activeRoomState.game?.authoritativePhase ?? null
     if (freshWinningBid !== null) {
       lastKnownWinningBid = freshWinningBid
+    } else if (
+      activeAuthoritativePhase === 'cutting' ||
+      activeAuthoritativePhase === 'cut-resolve' ||
+      activeAuthoritativePhase === 'deal-first-3' ||
+      activeAuthoritativePhase === 'deal-next-2' ||
+      activeAuthoritativePhase === 'bidding'
+    ) {
+      lastKnownWinningBid = null
     }
 
     const cuttingSnapshot = activeRoomState.game?.cutting ?? null
@@ -949,6 +959,14 @@ export function createActiveRoomFlowController(
           ? 'deal-next-2'
           : 'deal-first-3'
     const { stageScale, scaledStageWidth, scaledStageHeight } = getActiveRoomStageMetrics()
+    const scoreHudHtml = activeRoomState.game
+      ? renderScoreHud({
+          game: activeRoomState.game,
+          localSeat: activeRoomState.seat,
+          winningBid: lastKnownWinningBid,
+          stageScale,
+        })
+      : ''
 
     if (cuttingSnapshotForRender) {
       const cuttingVisualCountdownContext = {
@@ -1057,6 +1075,7 @@ export function createActiveRoomFlowController(
             dealtHands: null,
             bidBubbles: isShowingNextRoundPause ? bidBubblesForRender : null,
           })}
+          ${scoreHudHtml}
         </div>
       `
 
@@ -1311,6 +1330,7 @@ export function createActiveRoomFlowController(
             dealtHands: dealtHandsForPanels,
             bidBubbles: getBidBubblesForRender(),
           })}
+          ${scoreHudHtml}
         </div>
       `
 
@@ -1510,6 +1530,7 @@ export function createActiveRoomFlowController(
             dealtHands: dealtHandsForBidding,
             bidBubbles,
           })}
+          ${scoreHudHtml}
           ${biddingErrorHtml}
           ${biddingInteractionHtml}
         </div>

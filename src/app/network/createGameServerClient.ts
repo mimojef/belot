@@ -190,6 +190,13 @@ export type RoomPlayingSnapshot = {
   validCardIds: string[] | null
 }
 
+export type RoomScoreSnapshot = {
+  match: {
+    teamA: number
+    teamB: number
+  }
+}
+
 export type RoomGameSnapshot = {
   phase: RoomGamePhaseSnapshot | null
   authoritativePhase: RoomAuthoritativePhaseSnapshot | null
@@ -199,6 +206,7 @@ export type RoomGameSnapshot = {
   cutting: RoomCuttingSnapshot | null
   bidding: RoomBiddingSnapshot | null
   playing: RoomPlayingSnapshot | null
+  score: RoomScoreSnapshot
   handCounts: Record<Seat, number>
   ownHand: RoomCardSnapshot[]
 }

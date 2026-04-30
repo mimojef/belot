@@ -206,6 +206,12 @@ function createGameSnapshot(
       : null,
     bidding: createBiddingSnapshot(authoritativeState, yourSeat),
     playing: createPlayingSnapshot(authoritativeState, yourSeat),
+    score: {
+      match: {
+        teamA: authoritativeState.score.match.teamA,
+        teamB: authoritativeState.score.match.teamB,
+      },
+    },
     handCounts: {
       bottom: authoritativeState.hands.bottom.length,
       right: authoritativeState.hands.right.length,
