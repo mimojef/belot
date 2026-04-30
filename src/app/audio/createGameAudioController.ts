@@ -42,6 +42,7 @@ const BID_AUDIO_BY_LABEL: Record<string, string[] | string> = {
   'Всичко коз': 'all-trumps.mp3',
   'Контра': 'double.mp3',
   'Ре контра': 'redouble.mp3',
+  'Реконтра': 'redouble.mp3',
   'Пас': ['pass-1.mp3', 'pass-2.mp3', 'pass-3.mp3'],
 }
 

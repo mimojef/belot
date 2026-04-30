@@ -430,16 +430,17 @@ function buildPendingDeclarationBubbleForSeat(options: {
 function syncTransientDeclarationBubbles(options: {
   cache: PlayingUiCache
   game: RoomGameSnapshot
+  triggerSeat: Seat | null
+  onBubbleShown?: (lines: string[]) => void
 }): Partial<Record<Seat, SeatDeclarationBubble>> | null {
-  const { cache, game } = options
+  const { cache, game, triggerSeat, onBubbleShown } = options
   const state = getDeclarationBubbleUiState(cache)
-  const currentSeat = game.playing?.currentTurnSeat ?? null
 
-  if (currentSeat !== null && !state.activeBubbles[currentSeat]) {
+  if (triggerSeat !== null && !state.activeBubbles[triggerSeat]) {
     const shownSignatures = new Set(state.shownSignatures)
     const pendingBubble = buildPendingDeclarationBubbleForSeat({
       declarations: game.declarations,
-      seat: currentSeat,
+      seat: triggerSeat,
       shownSignatures,
     })
 
@@ -447,25 +448,26 @@ function syncTransientDeclarationBubbles(options: {
       state.shownSignatures = [
         ...new Set([...state.shownSignatures, ...pendingBubble.signatures]),
       ]
-      state.activeBubbles[currentSeat] = {
+      state.activeBubbles[triggerSeat] = {
         entryKey: pendingBubble.entryKey,
         lines: pendingBubble.lines,
       }
+      onBubbleShown?.(pendingBubble.lines)
 
-      const existingTimerId = state.timerIds[currentSeat]
+      const existingTimerId = state.timerIds[triggerSeat]
       if (existingTimerId !== undefined) {
         window.clearTimeout(existingTimerId)
       }
 
-      state.timerIds[currentSeat] = window.setTimeout(() => {
-        const activeBubble = state.activeBubbles[currentSeat]
+      state.timerIds[triggerSeat] = window.setTimeout(() => {
+        const activeBubble = state.activeBubbles[triggerSeat]
 
         if (!activeBubble || activeBubble.entryKey !== pendingBubble.entryKey) {
           return
         }
 
-        delete state.activeBubbles[currentSeat]
-        delete state.timerIds[currentSeat]
+        delete state.activeBubbles[triggerSeat]
+        delete state.timerIds[triggerSeat]
 
         const latestOptions = latestRenderOptionsByCache.get(cache)
         if (latestOptions) {
@@ -1048,6 +1050,7 @@ export type RenderPlayingScreenOptions = {
   scaledStageWidth: number
   scaledStageHeight: number
   submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
+  onDeclarationBubbleShown?: (lines: string[]) => void
   cache: PlayingUiCache
 }
 
@@ -1063,6 +1066,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     scaledStageWidth,
     scaledStageHeight,
     submitPlayCard,
+    onDeclarationBubbleShown,
     cache,
   } = options
 
@@ -1174,7 +1178,13 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
 
   const sortedHand = sortLocalHandForDisplay(game.ownHand, getSortOptions(winningBid))
   const isMyTurn = playing?.currentTurnSeat === localSeat
-  const declarationBubbles = syncTransientDeclarationBubbles({ cache, game })
+  const declarationBubbleTriggerSeat = animateNewest ? newestDisplayedPlay?.seat ?? null : null
+  const declarationBubbles = syncTransientDeclarationBubbles({
+    cache,
+    game,
+    triggerSeat: declarationBubbleTriggerSeat,
+    onBubbleShown: onDeclarationBubbleShown,
+  })
 
   function canSubmitHandCard(cardId: string): boolean {
     if (!isMyTurn) {

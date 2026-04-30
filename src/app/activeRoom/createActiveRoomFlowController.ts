@@ -603,6 +603,21 @@ export function createActiveRoomFlowController(
     return getBidBubblesForRenderFromStore(biddingUiState)
   }
 
+  function getBidActionAudioLabel(action: RoomBiddingSnapshot['entries'][number]['action']): string {
+    if (action.type === 'pass') return 'Пас'
+    if (action.type === 'no-trumps') return 'Без коз'
+    if (action.type === 'all-trumps') return 'Всичко коз'
+    if (action.type === 'double') return 'Контра'
+    if (action.type === 'redouble') return 'Реконтра'
+    if (action.type === 'suit') {
+      if (action.suit === 'clubs') return 'Спатия'
+      if (action.suit === 'diamonds') return 'Каро'
+      if (action.suit === 'hearts') return 'Купа'
+      return 'Пика'
+    }
+    return ''
+  }
+
   function scheduleDealFirstThreePacketSounds(sequenceKey: string): void {
     options.gameAudio?.scheduleDealPacketSounds(sequenceKey, {
       packetCount: SERVER_DEAL_ORDER.length,
@@ -655,7 +670,9 @@ export function createActiveRoomFlowController(
       for (let i = biddingUiState.lastKnownEntriesCount; i < currentCount; i++) {
         const entry = biddingSnapshot.entries[i]
         if (entry) {
-          addBidBubble(entry.seat, getBidActionLabel(entry.action))
+          const bidLabel = getBidActionLabel(entry.action)
+          addBidBubble(entry.seat, bidLabel)
+          options.gameAudio?.playBidBubble(getBidActionAudioLabel(entry.action))
           // If this entry is for the local seat and we didn't send it → bot takeover
           if (entry.seat === localSeat && !biddingUiState.pendingBidSent && biddingUiState.wasMyTurn) {
             biddingUiState.showBotTakeover = true
@@ -1691,6 +1708,9 @@ export function createActiveRoomFlowController(
         scaledStageWidth,
         scaledStageHeight,
         submitPlayCard: options.submitPlayCard,
+        onDeclarationBubbleShown: (lines) => {
+          options.gameAudio?.playDeclarationBubble(lines)
+        },
         cache: playingCache,
       } satisfies RenderPlayingScreenOptions)
     } else if (activeRoomState.game !== null) {
