@@ -14,6 +14,7 @@ import { getNextSeat } from './serverPhaseHelpers.js'
 import { getTeamBySeat } from './serverStateHelpers.js'
 import { getServerTrickWinner } from './getServerTrickWinner.js'
 import { getServerValidPlayCards } from './getServerValidPlayCards.js'
+import { createServerDeclarationRecord } from './serverDeclarationRecordHelpers.js'
 import {
   clearServerTimerState,
   createServerPlayingTimerState,
@@ -24,30 +25,6 @@ const TRICKS_PER_ROUND = 8
 type ServerDeclarationValidationResult =
   | { ok: true; declarations: ServerDeclaration[] }
   | { ok: false; message: string }
-
-function createServerDeclarationRecord(params: {
-  candidate: ServerDeclarationCandidate
-  seat: Seat
-  declaredAtTrickIndex: number
-}): ServerDeclaration {
-  const { candidate, seat, declaredAtTrickIndex } = params
-
-  return {
-    key: candidate.key,
-    seat,
-    team: getTeamBySeat(seat),
-    type: candidate.type,
-    publicLabel: candidate.publicLabel,
-    points: candidate.points,
-    cards: candidate.privateMetadata.cards,
-    cardIds: candidate.cardIds,
-    suit: candidate.privateMetadata.suit,
-    highRank: candidate.privateMetadata.highRank,
-    declaredAtTrickIndex,
-    announced: true,
-    valid: true,
-  }
-}
 
 export function validateServerDeclarationKeysForPlay(
   state: ServerAuthoritativeGameState,
