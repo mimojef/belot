@@ -61,10 +61,14 @@ import {
 } from './renderCuttingScreen'
 import {
   DEAL_FIRST_THREE_VISUAL_TOTAL_MS,
+  DEAL_FIRST_THREE_PACKET_DELAY_STEP_MS,
+  DEAL_FIRST_THREE_PACKET_START_DELAY_MS,
+  DEAL_FIRST_THREE_REVEAL_AFTER_PACKET_MS,
   DEAL_LAST_THREE_VISUAL_TOTAL_MS,
   DEAL_NEXT_TWO_VISUAL_TOTAL_MS,
   DEAL_PACKET_DURATION_MS,
   DEAL_PACKET_DELAY_STEP_MS,
+  DEAL_REVEAL_OVERLAP_MS,
   DEAL_PACKET_START_DELAY_MS,
   type RenderDealingAnimationState,
   renderDealFirstThreePacketsHtml,
@@ -1234,12 +1238,20 @@ export function createActiveRoomFlowController(
           (offset) => SERVER_DEAL_ORDER[(firstIdx + offset) % 4],
         ) as Seat[]
         const delays: Partial<Record<Seat, number>> = {}
+        const packetStartDelayMs =
+          activeDealPhase === 'deal-first-3'
+            ? DEAL_FIRST_THREE_PACKET_START_DELAY_MS
+            : DEAL_PACKET_START_DELAY_MS
+        const packetDelayStepMs =
+          activeDealPhase === 'deal-first-3'
+            ? DEAL_FIRST_THREE_PACKET_DELAY_STEP_MS
+            : DEAL_PACKET_DELAY_STEP_MS
+        const revealAfterPacketMs =
+          activeDealPhase === 'deal-first-3'
+            ? DEAL_FIRST_THREE_REVEAL_AFTER_PACKET_MS
+            : DEAL_PACKET_DURATION_MS - DEAL_REVEAL_OVERLAP_MS
         order.forEach((seat, i) => {
-          const packetStartMs = DEAL_PACKET_START_DELAY_MS + i * DEAL_PACKET_DELAY_STEP_MS
-          const revealAfterPacketMs =
-            activeDealPhase === 'deal-next-2' || activeDealPhase === 'deal-last-3'
-              ? DEAL_PACKET_DURATION_MS + 24
-              : 460
+          const packetStartMs = packetStartDelayMs + i * packetDelayStepMs
           delays[seat] = packetStartMs + revealAfterPacketMs
         })
         return delays
@@ -1259,6 +1271,10 @@ export function createActiveRoomFlowController(
             localSeat: activeRoomState.seat,
             maxCardsPerSeat: dealMaxCards,
             hideNewCardsUntilAnimDelaySeats,
+            replaceLocalHandAtRevealSeats:
+              showPackets && activeDealPhase === 'deal-last-3'
+                ? { [activeRoomState.seat]: true }
+                : undefined,
             animStartIndex:
               shouldRenderDealLastThreeAnimation
                 ? 5

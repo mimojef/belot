@@ -50,18 +50,41 @@ export function getPileVisibleCards(handCounts: Record<Seat, number>): number {
 const DEAL_FIRST_THREE_PACKET_SIZE = 3;
 const DEAL_NEXT_TWO_PACKET_SIZE = 2;
 const DEAL_LAST_THREE_PACKET_SIZE = 3;
-export const DEAL_PACKET_START_DELAY_MS = 120;
-export const DEAL_PACKET_DELAY_STEP_MS = 300;
-export const DEAL_PACKET_DURATION_MS = 560;
+export const DEAL_FIRST_THREE_PACKET_START_DELAY_MS = 120;
+export const DEAL_FIRST_THREE_PACKET_DELAY_STEP_MS = 300;
+export const DEAL_FIRST_THREE_PACKET_DURATION_MS = 560;
+export const DEAL_FIRST_THREE_REVEAL_AFTER_PACKET_MS = 460;
+export const DEAL_PACKET_START_DELAY_MS = 220;
+export const DEAL_PACKET_DELAY_STEP_MS = 420;
+export const DEAL_PACKET_DURATION_MS = 860;
+export const DEAL_REVEAL_OVERLAP_MS = 500;
+const DEAL_FIRST_THREE_SETTLE_BUFFER_MS = 160;
 
 export const DEAL_FIRST_THREE_VISUAL_TOTAL_MS =
-  DEAL_PACKET_START_DELAY_MS +
-  DEAL_PACKET_DELAY_STEP_MS * 3 +
-  DEAL_PACKET_DURATION_MS +
-  160;
+  DEAL_FIRST_THREE_PACKET_START_DELAY_MS +
+  DEAL_FIRST_THREE_PACKET_DELAY_STEP_MS * 3 +
+  DEAL_FIRST_THREE_PACKET_DURATION_MS +
+  DEAL_FIRST_THREE_SETTLE_BUFFER_MS;
+export const DEAL_NEXT_TWO_VISUAL_TOTAL_MS = 1900;
+export const DEAL_LAST_THREE_VISUAL_TOTAL_MS = 2000;
 
-export const DEAL_NEXT_TWO_VISUAL_TOTAL_MS = DEAL_FIRST_THREE_VISUAL_TOTAL_MS;
-export const DEAL_LAST_THREE_VISUAL_TOTAL_MS = DEAL_FIRST_THREE_VISUAL_TOTAL_MS;
+type DealPacketTiming = {
+  startDelayMs: number;
+  delayStepMs: number;
+  durationMs: number;
+};
+
+const DEAL_FIRST_THREE_PACKET_TIMING: DealPacketTiming = {
+  startDelayMs: DEAL_FIRST_THREE_PACKET_START_DELAY_MS,
+  delayStepMs: DEAL_FIRST_THREE_PACKET_DELAY_STEP_MS,
+  durationMs: DEAL_FIRST_THREE_PACKET_DURATION_MS,
+};
+
+const DEAL_DEFAULT_PACKET_TIMING: DealPacketTiming = {
+  startDelayMs: DEAL_PACKET_START_DELAY_MS,
+  delayStepMs: DEAL_PACKET_DELAY_STEP_MS,
+  durationMs: DEAL_PACKET_DURATION_MS,
+};
 
 
 function getDealOrder(firstDealSeat: Seat | null): Seat[] {
@@ -174,7 +197,7 @@ function renderDealingStyles(): string {
           opacity:0;
           transform:translate(-50%, -50%) translate(var(--from-x), var(--from-y)) rotate(0deg);
         }
-        14% {
+        16% {
           opacity:1;
           transform:translate(-50%, -50%) translate(var(--from-x), calc(var(--from-y) - 18px)) rotate(-1.2deg);
         }
@@ -222,11 +245,12 @@ function renderDealPacketsHtml(
   firstDealSeat: Seat | null,
   localSeat: Seat,
   packetSize: number,
+  timing: DealPacketTiming,
 ): string {
   const dealOrder = getDealOrder(firstDealSeat)
   const packets = dealOrder
     .map((seat, index) =>
-      renderFlyingPacket(seat, index, localSeat, true, packetSize),
+      renderFlyingPacket(seat, index, localSeat, true, packetSize, timing),
     )
     .join('')
   return `${renderDealingStyles()}${packets}`
@@ -239,21 +263,36 @@ export function renderDealFirstThreePacketsHtml(
   firstDealSeat: Seat | null,
   localSeat: Seat,
 ): string {
-  return renderDealPacketsHtml(firstDealSeat, localSeat, DEAL_FIRST_THREE_PACKET_SIZE)
+  return renderDealPacketsHtml(
+    firstDealSeat,
+    localSeat,
+    DEAL_FIRST_THREE_PACKET_SIZE,
+    DEAL_FIRST_THREE_PACKET_TIMING,
+  )
 }
 
 export function renderDealNextTwoPacketsHtml(
   firstDealSeat: Seat | null,
   localSeat: Seat,
 ): string {
-  return renderDealPacketsHtml(firstDealSeat, localSeat, DEAL_NEXT_TWO_PACKET_SIZE)
+  return renderDealPacketsHtml(
+    firstDealSeat,
+    localSeat,
+    DEAL_NEXT_TWO_PACKET_SIZE,
+    DEAL_DEFAULT_PACKET_TIMING,
+  )
 }
 
 export function renderDealLastThreePacketsHtml(
   firstDealSeat: Seat | null,
   localSeat: Seat,
 ): string {
-  return renderDealPacketsHtml(firstDealSeat, localSeat, DEAL_LAST_THREE_PACKET_SIZE)
+  return renderDealPacketsHtml(
+    firstDealSeat,
+    localSeat,
+    DEAL_LAST_THREE_PACKET_SIZE,
+    DEAL_DEFAULT_PACKET_TIMING,
+  )
 }
 
 function renderPileCard(
@@ -370,13 +409,14 @@ function renderFlyingPacket(
   localSeat: Seat,
   showPackets: boolean,
   packetSize: number,
+  timing: DealPacketTiming,
 ): string {
   if (!showPackets) {
     return "";
   }
 
   const target = getSeatTarget(seat, localSeat);
-  const delay = DEAL_PACKET_START_DELAY_MS + index * DEAL_PACKET_DELAY_STEP_MS;
+  const delay = timing.startDelayMs + index * timing.delayStepMs;
   const targetX = target.x - PILE_CENTER_X;
   const targetY = target.y - PILE_CENTER_Y;
 
@@ -396,7 +436,7 @@ function renderFlyingPacket(
         --to-x:${targetX}px;
         --to-y:${targetY}px;
         --to-r:${target.rotate}deg;
-        animation:belot-deal-packet-fly ${DEAL_PACKET_DURATION_MS}ms cubic-bezier(0.18, 0.82, 0.22, 1) ${delay}ms both;
+        animation:belot-deal-packet-fly ${timing.durationMs}ms cubic-bezier(0.18, 0.82, 0.22, 1) ${delay}ms both;
       "
     >
       ${Array.from({ length: packetSize }, (_, cardIndex) => renderPacketCard(cardIndex, packetSize)).join("")}
@@ -427,6 +467,10 @@ function renderDealRound(
   showPileAnim: boolean,
 ): string {
   const dealOrder = getDealOrder(firstDealSeat);
+  const packetTiming =
+    sequenceName === 'deal-first-3'
+      ? DEAL_FIRST_THREE_PACKET_TIMING
+      : DEAL_DEFAULT_PACKET_TIMING
 
   // For subsequent deal phases the server already added the new cards to hands, but
   // visually those cards still come FROM the pile only while packets are flying.
@@ -486,7 +530,7 @@ function renderDealRound(
 
       ${dealOrder
         .map((seat, index) =>
-          renderFlyingPacket(seat, index, localSeat, showPackets, packetSize),
+          renderFlyingPacket(seat, index, localSeat, showPackets, packetSize, packetTiming),
         )
         .join("")}
 
