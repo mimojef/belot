@@ -90,6 +90,7 @@ export type PlayingUiCache = {
   showBotTakeover: boolean
   hasShownBotTakeover: boolean
   lastPlayedCardRect: DOMRect | null
+  hoveredHandCardId: string | null
 }
 
 export type BiddingUiState = {

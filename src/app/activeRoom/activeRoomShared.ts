@@ -108,6 +108,7 @@ export function createPlayingUiCache(): PlayingUiCache {
     showBotTakeover: false,
     hasShownBotTakeover: false,
     lastPlayedCardRect: null,
+    hoveredHandCardId: null,
   }
 }
 
@@ -128,6 +129,7 @@ export function resetPlayingUiCache(cache: PlayingUiCache): void {
   cache.showBotTakeover = false
   cache.hasShownBotTakeover = false
   cache.lastPlayedCardRect = null
+  cache.hoveredHandCardId = null
 }
 
 export function createBiddingUiState(): BiddingUiState {

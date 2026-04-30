@@ -45,6 +45,8 @@ const BOTTOM_PANEL_WIDTH = 360
 const BOTTOM_PANEL_HEIGHT = 138
 const BOTTOM_HAND_CENTER_X = 180
 const BOTTOM_HAND_CENTER_Y = 50
+const ACTIVE_HAND_CARD_LIFT = ' translateY(-5px)'
+const ACTIVE_HAND_CARD_FILTER = 'brightness(1.03) drop-shadow(0 8px 12px rgba(0,0,0,0.18))'
 
 const SEAT_TRICK_OFFSET: Record<Seat, { left: number; top: number; rotate: number }> = {
   top: { left: 0, top: -54, rotate: 0 },
@@ -488,8 +490,9 @@ function renderBottomHandOverlay(options: {
   validCardIds: string[] | null
   isMyTurn: boolean
   stageScale: number
+  hoveredHandCardId: string | null
 }): string {
-  const { cards, validCardIds, isMyTurn, stageScale } = options
+  const { cards, validCardIds, isMyTurn, stageScale, hoveredHandCardId } = options
 
   if (cards.length === 0) {
     return ''
@@ -500,6 +503,8 @@ function renderBottomHandOverlay(options: {
     const baseTransform = `translate(-50%,-50%) translate(${offset.x}px,${offset.y}px) rotate(${offset.rotate}deg)`
     const isValid = !isMyTurn || validCardIds === null || validCardIds.includes(card.id)
     const canClick = isMyTurn && isValid
+    const isHovered = canClick && card.id === hoveredHandCardId
+    const cardTransform = isHovered ? `${baseTransform}${ACTIVE_HAND_CARD_LIFT}` : baseTransform
 
     return `
       <button
@@ -520,11 +525,11 @@ function renderBottomHandOverlay(options: {
           background:none;
           overflow:hidden;
           box-shadow:0 8px 18px rgba(0,0,0,0.22);
-          transform:${baseTransform};
+          transform:${cardTransform};
           cursor:${canClick ? 'pointer' : 'default'};
           pointer-events:${canClick ? 'auto' : 'none'};
           opacity:1;
-          filter:none;
+          filter:${isHovered ? ACTIVE_HAND_CARD_FILTER : 'none'};
           transition:transform 0.12s ease,filter 0.12s ease;
           z-index:${60 + index};
         "
@@ -581,6 +586,7 @@ function renderBottomHandOverlay(options: {
 
   return `
     <div
+      data-playing-bottom-hand-overlay="1"
       style="
         position:fixed;
         inset:0;
@@ -599,6 +605,7 @@ function renderBottomHandOverlay(options: {
       >
         ${myTurnBadge}
         <div
+          data-playing-bottom-hand="1"
           style="
             position:absolute;
             left:${BOTTOM_HAND_CENTER_X}px;
@@ -675,6 +682,7 @@ function resetCacheForFreshSnapshot(
   cache.showBotTakeover = false
   cache.hasShownBotTakeover = false
   cache.lastPlayedCardRect = null
+  cache.hoveredHandCardId = null
   playedCardFlySourceByCache.delete(cache)
 }
 
@@ -928,6 +936,17 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     latestCompletedTrick,
   })
   cache.showBotTakeover = false
+  if (cache.hoveredHandCardId !== null) {
+    const hoveredHandCardStillClickable = sortedHand.some((card) => {
+      const isValid = !isMyTurn || validCardIds === null || validCardIds.includes(card.id)
+      return card.id === cache.hoveredHandCardId && isMyTurn && isValid
+    })
+
+    if (!hoveredHandCardStillClickable) {
+      cache.hoveredHandCardId = null
+    }
+  }
+
   const panelHandCounts = {
     ...game.handCounts,
     [localSeat]: 0,
@@ -1030,6 +1049,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         validCardIds,
         isMyTurn,
         stageScale,
+        hoveredHandCardId: cache.hoveredHandCardId,
       })}
       ${renderScoreHud({
         game,
@@ -1040,6 +1060,56 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     </div>
   `
 
+  function canSubmitHandCard(cardId: string): boolean {
+    if (!isMyTurn) {
+      return false
+    }
+
+    if (validCardIds !== null && !validCardIds.includes(cardId)) {
+      return false
+    }
+
+    return sortedHand.some((card) => card.id === cardId)
+  }
+
+  function submitHandCardFromButton(button: HTMLButtonElement, cardId: string): void {
+    if (cache.pendingPlayCardSent || !canSubmitHandCard(cardId)) {
+      return
+    }
+
+    cache.hoveredHandCardId = null
+    cache.lastPlayedCardRect = button.getBoundingClientRect()
+    const sourceSize = getScaledPhysicalElementSize(button, stageScale)
+    playedCardFlySourceByCache.set(cache, {
+      rect: cache.lastPlayedCardRect,
+      physicalWidth: sourceSize.width,
+      physicalHeight: sourceSize.height,
+    })
+    cache.pendingPlayCardSent = true
+    submitPlayCard(roomId, cardId)
+  }
+
+  const bottomHand = root.querySelector<HTMLElement>('[data-playing-bottom-hand="1"]')
+  bottomHand?.addEventListener('pointerup', (event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+      return
+    }
+
+    const target = event.target
+    if (!(target instanceof Element)) {
+      return
+    }
+
+    const button = target.closest<HTMLButtonElement>('.play-hand-card--active')
+    const cardId = button?.dataset.cardId
+    if (!button || !cardId || !bottomHand.contains(button)) {
+      return
+    }
+
+    submitHandCardFromButton(button, cardId)
+    event.preventDefault()
+  })
+
   root.querySelectorAll<HTMLButtonElement>('.play-hand-card--active').forEach((button) => {
     const cardId = button.dataset.cardId
     if (!cardId) {
@@ -1047,15 +1117,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     }
 
     button.addEventListener('click', () => {
-      cache.lastPlayedCardRect = button.getBoundingClientRect()
-      const sourceSize = getScaledPhysicalElementSize(button, stageScale)
-      playedCardFlySourceByCache.set(cache, {
-        rect: cache.lastPlayedCardRect,
-        physicalWidth: sourceSize.width,
-        physicalHeight: sourceSize.height,
-      })
-      cache.pendingPlayCardSent = true
-      submitPlayCard(roomId, cardId)
+      submitHandCardFromButton(button, cardId)
     })
   })
 
@@ -1063,13 +1125,17 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     const baseTransform = button.dataset.baseTransform ?? ''
     const baseZIndex = Number.parseInt(button.dataset.z ?? '50', 10)
 
-    button.addEventListener('mouseenter', () => {
-      button.style.transform = `${baseTransform} translateY(-5px)`
-      button.style.filter = 'brightness(1.03) drop-shadow(0 8px 12px rgba(0,0,0,0.18))'
+    button.addEventListener('pointerenter', () => {
+      cache.hoveredHandCardId = button.dataset.cardId ?? null
+      button.style.transform = `${baseTransform}${ACTIVE_HAND_CARD_LIFT}`
+      button.style.filter = ACTIVE_HAND_CARD_FILTER
       button.style.zIndex = String(baseZIndex)
     })
 
-    button.addEventListener('mouseleave', () => {
+    button.addEventListener('pointerleave', () => {
+      if (cache.hoveredHandCardId === button.dataset.cardId) {
+        cache.hoveredHandCardId = null
+      }
       button.style.transform = baseTransform
       button.style.filter = 'none'
       button.style.zIndex = String(baseZIndex)
