@@ -11,6 +11,7 @@ type RenderDealingScreenOptions = {
   stageScale: number;
   dealAnimation: RenderDealingAnimationState | null;
   showPackets: boolean;
+  showPileAnim?: boolean;
   dealPhase: 'deal-first-3' | 'deal-next-2' | 'deal-last-3';
 };
 
@@ -248,6 +249,13 @@ export function renderDealNextTwoPacketsHtml(
   return renderDealPacketsHtml(firstDealSeat, localSeat, DEAL_NEXT_TWO_PACKET_SIZE)
 }
 
+export function renderDealLastThreePacketsHtml(
+  firstDealSeat: Seat | null,
+  localSeat: Seat,
+): string {
+  return renderDealPacketsHtml(firstDealSeat, localSeat, DEAL_LAST_THREE_PACKET_SIZE)
+}
+
 function renderPileCard(
   layerIndex: number,
   totalCount: number,
@@ -416,14 +424,17 @@ function renderDealRound(
   packetSize: number,
   sequenceName: string,
   elapsedMs: number,
+  showPileAnim: boolean,
 ): string {
   const dealOrder = getDealOrder(firstDealSeat);
 
   // For subsequent deal phases the server already added the new cards to hands, but
   // visually those cards still come FROM the pile only while packets are flying.
   // Once the packets are done, show the real post-deal pile count.
+  // showPileAnim is separate from showPackets so deal-last-3 can use the overlay for
+  // flying packets while still animating the pile disappearing in the root layer.
   const shouldShowPreDealPileCount =
-    showPackets && (sequenceName === 'deal-next-2' || sequenceName === 'deal-last-3')
+    showPileAnim && (sequenceName === 'deal-next-2' || sequenceName === 'deal-last-3')
 
   const pileHandCounts = shouldShowPreDealPileCount
     ? {
@@ -443,7 +454,7 @@ function renderDealRound(
       }
     | undefined
 
-  if (sequenceName === 'deal-last-3' && showPackets) {
+  if (sequenceName === 'deal-last-3' && showPileAnim) {
     const preDealTotalDealt =
       pileHandCounts.bottom +
       pileHandCounts.right +
@@ -495,7 +506,10 @@ export function renderDealingScreen(
   // cache in the controller decides whether packets should be shown or only the
   // persistent dealt hands should remain visible.
   const _elapsedMs = options.dealAnimation?.elapsedMs ?? 0;
-  const showRootPackets = options.dealPhase === 'deal-next-2' ? false : options.showPackets;
+  const showRootPackets = (options.dealPhase === 'deal-next-2' || options.dealPhase === 'deal-last-3') ? false : options.showPackets;
+  // showPileAnim is passed explicitly by the controller for deal-last-3 overlay mode so that
+  // the pile remains visible while packets fly from the overlay, even though showPackets=false.
+  const showPileAnim = options.showPileAnim !== undefined ? options.showPileAnim : showRootPackets;
   void options.selectedCutIndex;
   void options.stageScale;
 
@@ -526,6 +540,7 @@ export function renderDealingScreen(
             : DEAL_FIRST_THREE_PACKET_SIZE,
         options.dealPhase,
         _elapsedMs,
+        showPileAnim,
       )}
     </section>
   `;
