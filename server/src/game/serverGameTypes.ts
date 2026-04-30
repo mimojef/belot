@@ -1,4 +1,5 @@
 import type { Seat, Team } from '../core/serverTypes.js'
+import type { ServerDeclarationPublicLabel } from './declarations/serverDeclarationTypes.js'
 import type { AuthoritativePhaseType } from './serverPhaseTypes.js'
 
 export type ServerPlayerMode = 'human' | 'bot'
@@ -54,13 +55,17 @@ export type ServerBiddingState = {
 export type ServerDeclarationType = 'sequence' | 'square' | 'belote'
 
 export type ServerDeclaration = {
+  key: string
   seat: Seat
   team: Team
   type: ServerDeclarationType
+  publicLabel: ServerDeclarationPublicLabel
   points: number
   cards: ServerCard[]
+  cardIds: string[]
   suit: ServerSuit | null
   highRank: ServerRank | null
+  declaredAtTrickIndex: number
   announced: boolean
   valid: boolean
 }

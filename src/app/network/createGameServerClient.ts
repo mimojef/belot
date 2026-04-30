@@ -1,4 +1,5 @@
 export type Seat = 'bottom' | 'right' | 'top' | 'left'
+export type Team = 'A' | 'B'
 export type RoomStatus = 'waiting' | 'playing' | 'finished'
 export type MatchStake = 5000 | 8000 | 10000 | 15000 | 20000
 
@@ -78,6 +79,7 @@ export type ClientMessage =
       type: 'submit_play_card'
       roomId: string
       cardId: string
+      declarationKeys?: string[]
     }
   | {
       type: 'resume_human_control'
@@ -182,6 +184,15 @@ export type RoomCompletedTrickSnapshot = {
   winnerSeat: Seat
 }
 
+export type RoomDeclarationSnapshot = {
+  seat: Seat
+  team: Team
+  type: 'sequence' | 'square' | 'belote'
+  publicLabel: string
+  points: number
+  declaredAtTrickIndex: number
+}
+
 export type RoomPlayingSnapshot = {
   currentTurnSeat: Seat | null
   currentTrickPlays: RoomPlayCardSnapshot[]
@@ -223,6 +234,7 @@ export type RoomGameSnapshot = {
   bidding: RoomBiddingSnapshot | null
   playing: RoomPlayingSnapshot | null
   scoring: RoomScoringSnapshot | null
+  declarations: RoomDeclarationSnapshot[]
   score: RoomScoreSnapshot
   handCounts: Record<Seat, number>
   ownHand: RoomCardSnapshot[]
@@ -366,7 +378,7 @@ export type GameServerClient = {
   leaveActiveRoom: (roomId: string) => void
   submitBidAction: (roomId: string, action: ClientBidAction) => void
   submitCutIndex: (roomId: string, cutIndex: number) => void
-  submitPlayCard: (roomId: string, cardId: string) => void
+  submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
   resumeHumanControl: (roomId: string) => void
 }
 
@@ -531,11 +543,16 @@ export function createGameServerClient(
     })
   }
 
-  function submitPlayCard(roomId: string, cardId: string): void {
+  function submitPlayCard(
+    roomId: string,
+    cardId: string,
+    declarationKeys: string[] = [],
+  ): void {
     send({
       type: 'submit_play_card',
       roomId,
       cardId,
+      declarationKeys,
     })
   }
 

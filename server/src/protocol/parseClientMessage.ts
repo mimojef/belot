@@ -107,6 +107,16 @@ function normalizeCutIndex(value: unknown): number | null {
   return value
 }
 
+function normalizeDeclarationKeys(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .slice(0, 8)
+}
+
 export function parseClientMessage(rawText: string): ClientMessage | null {
   try {
     const parsed = JSON.parse(rawText) as unknown
@@ -245,6 +255,7 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
     if (parsed.type === 'submit_play_card') {
       const roomId = normalizeRequiredText(parsed.roomId)
       const cardId = normalizeRequiredText(parsed.cardId)
+      const declarationKeys = normalizeDeclarationKeys(parsed.declarationKeys)
 
       if (roomId === null || cardId === null) {
         return null
@@ -254,6 +265,7 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         type: 'submit_play_card',
         roomId,
         cardId,
+        declarationKeys,
       }
     }
 

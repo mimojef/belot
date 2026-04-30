@@ -7,6 +7,7 @@ import {
   type RoomBiddingSnapshot,
   type RoomCardSnapshot,
   type RoomCompletedTrickSnapshot,
+  type RoomDeclarationSnapshot,
   type RoomGameSnapshot,
   type RoomPlayingSnapshot,
   type RoomScoringSnapshot,
@@ -81,6 +82,19 @@ function createCardSnapshot(card: ServerAuthoritativeGameState['deck'][number]):
     id: card.id,
     suit: card.suit,
     rank: card.rank,
+  }
+}
+
+function createDeclarationSnapshot(
+  declaration: ServerAuthoritativeGameState['declarations'][number],
+): RoomDeclarationSnapshot {
+  return {
+    seat: declaration.seat,
+    team: declaration.team,
+    type: declaration.type,
+    publicLabel: declaration.publicLabel,
+    points: declaration.points,
+    declaredAtTrickIndex: declaration.declaredAtTrickIndex,
   }
 }
 
@@ -245,6 +259,7 @@ function createGameSnapshot(
     bidding: createBiddingSnapshot(authoritativeState, yourSeat),
     playing: createPlayingSnapshot(authoritativeState, yourSeat),
     scoring: createScoringSnapshot(authoritativeState),
+    declarations: authoritativeState.declarations.map(createDeclarationSnapshot),
     score: {
       match: createTeamPointsSnapshot(authoritativeState.score.match),
     },

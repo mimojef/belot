@@ -77,6 +77,7 @@ export type ClientMessage =
       type: 'submit_play_card'
       roomId: RoomId
       cardId: string
+      declarationKeys?: string[]
     }
   | {
       type: 'resume_human_control'
@@ -181,6 +182,15 @@ export type RoomCompletedTrickSnapshot = {
   winnerSeat: Seat
 }
 
+export type RoomDeclarationSnapshot = {
+  seat: Seat
+  team: 'A' | 'B'
+  type: 'sequence' | 'square' | 'belote'
+  publicLabel: string
+  points: number
+  declaredAtTrickIndex: number
+}
+
 export type RoomPlayingSnapshot = {
   currentTurnSeat: Seat | null
   currentTrickPlays: RoomPlayCardSnapshot[]
@@ -222,6 +232,7 @@ export type RoomGameSnapshot = {
   bidding: RoomBiddingSnapshot | null
   playing: RoomPlayingSnapshot | null
   scoring: RoomScoringSnapshot | null
+  declarations: RoomDeclarationSnapshot[]
   score: RoomScoreSnapshot
   handCounts: Record<Seat, number>
   ownHand: RoomCardSnapshot[]

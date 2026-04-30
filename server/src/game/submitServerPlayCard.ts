@@ -1,6 +1,12 @@
 import type { Seat } from '../core/serverTypes.js'
+import {
+  detectServerDeclarationsInHand,
+  resolveServerDeclarationConflicts,
+  type ServerDeclarationCandidate,
+} from './declarations/index.js'
 import type {
   ServerAuthoritativeGameState,
+  ServerDeclaration,
   ServerPlayingState,
   ServerTrickPlay,
 } from './serverGameTypes.js'
@@ -14,6 +20,98 @@ import {
 } from './serverTimerStateHelpers.js'
 
 const TRICKS_PER_ROUND = 8
+
+type ServerDeclarationValidationResult =
+  | { ok: true; declarations: ServerDeclaration[] }
+  | { ok: false; message: string }
+
+function createServerDeclarationRecord(params: {
+  candidate: ServerDeclarationCandidate
+  seat: Seat
+  declaredAtTrickIndex: number
+}): ServerDeclaration {
+  const { candidate, seat, declaredAtTrickIndex } = params
+
+  return {
+    key: candidate.key,
+    seat,
+    team: getTeamBySeat(seat),
+    type: candidate.type,
+    publicLabel: candidate.publicLabel,
+    points: candidate.points,
+    cards: candidate.privateMetadata.cards,
+    cardIds: candidate.cardIds,
+    suit: candidate.privateMetadata.suit,
+    highRank: candidate.privateMetadata.highRank,
+    declaredAtTrickIndex,
+    announced: true,
+    valid: true,
+  }
+}
+
+export function validateServerDeclarationKeysForPlay(
+  state: ServerAuthoritativeGameState,
+  seat: Seat,
+  declarationKeys: string[],
+): ServerDeclarationValidationResult {
+  if (declarationKeys.length === 0) {
+    return { ok: true, declarations: [] }
+  }
+
+  const playing = state.playing
+
+  if (playing === null || !playing.hasStarted) {
+    return { ok: false, message: 'Играта не е в playing фаза.' }
+  }
+
+  const uniqueKeys = new Set(declarationKeys)
+
+  if (uniqueKeys.size !== declarationKeys.length) {
+    return { ok: false, message: 'Има повторен анонс.' }
+  }
+
+  const contract = state.bidding.winningBid
+  const candidates = detectServerDeclarationsInHand(state.hands[seat], contract)
+  const candidatesByKey = new Map(candidates.map((candidate) => [candidate.key, candidate]))
+  const selectedCandidates: ServerDeclarationCandidate[] = []
+
+  for (const key of declarationKeys) {
+    const candidate = candidatesByKey.get(key)
+
+    if (!candidate) {
+      return { ok: false, message: 'Невалиден анонс за текущата ръка.' }
+    }
+
+    selectedCandidates.push(candidate)
+  }
+
+  const existingKeysForSeat = new Set(
+    state.declarations
+      .filter((declaration) => declaration.seat === seat)
+      .map((declaration) => declaration.key),
+  )
+
+  if (selectedCandidates.some((candidate) => existingKeysForSeat.has(candidate.key))) {
+    return { ok: false, message: 'Този анонс вече е записан.' }
+  }
+
+  const resolved = resolveServerDeclarationConflicts(selectedCandidates)
+
+  if (resolved.selectedCandidates.length !== selectedCandidates.length) {
+    return { ok: false, message: 'Избраните анонси използват една и съща карта.' }
+  }
+
+  return {
+    ok: true,
+    declarations: selectedCandidates.map((candidate) =>
+      createServerDeclarationRecord({
+        candidate,
+        seat,
+        declaredAtTrickIndex: playing.currentTrick.trickIndex,
+      }),
+    ),
+  }
+}
 
 function applyTrickCompletion(
   state: ServerAuthoritativeGameState,
@@ -102,6 +200,7 @@ export function submitServerPlayCard(
   state: ServerAuthoritativeGameState,
   seat: Seat,
   cardId: string,
+  declarationKeys: string[] = [],
 ): ServerAuthoritativeGameState {
   const playing = state.playing
 
@@ -128,6 +227,17 @@ export function submitServerPlayCard(
   if (!isValidCard) {
     return state
   }
+
+  const declarationValidation = validateServerDeclarationKeysForPlay(
+    state,
+    seat,
+    declarationKeys,
+  )
+
+  if (!declarationValidation.ok) {
+    return state
+  }
+
   const nextHand = hand.filter((_, i) => i !== cardIndex)
 
   const updatedPlays = [...playing.currentTrick.plays, { seat, card }]
@@ -136,6 +246,10 @@ export function submitServerPlayCard(
   const stateWithCard: ServerAuthoritativeGameState = {
     ...state,
     hands: { ...state.hands, [seat]: nextHand },
+    declarations: [
+      ...state.declarations,
+      ...declarationValidation.declarations,
+    ],
   }
 
   if (trickComplete) {

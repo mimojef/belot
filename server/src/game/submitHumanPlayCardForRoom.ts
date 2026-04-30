@@ -1,7 +1,10 @@
 import type { Seat, ServerRoom } from '../core/serverTypes.js'
 import { getRoomAuthoritativeGameState } from './getRoomAuthoritativeGameState.js'
 import { syncRoomWithAuthoritativeState } from './syncRoomWithAuthoritativeState.js'
-import { submitServerPlayCard } from './submitServerPlayCard.js'
+import {
+  submitServerPlayCard,
+  validateServerDeclarationKeysForPlay,
+} from './submitServerPlayCard.js'
 
 type SubmitHumanPlayCardForRoomResult =
   | { ok: true; room: ServerRoom }
@@ -11,6 +14,7 @@ export function submitHumanPlayCardForRoom(
   room: ServerRoom,
   seat: Seat,
   cardId: string,
+  declarationKeys: string[] = [],
 ): SubmitHumanPlayCardForRoomResult {
   const state = getRoomAuthoritativeGameState(room)
 
@@ -38,7 +42,17 @@ export function submitHumanPlayCardForRoom(
     return { ok: false, message: 'Картата не е намерена в ръката на играча.' }
   }
 
-  const nextState = submitServerPlayCard(state, seat, cardId)
+  const declarationValidation = validateServerDeclarationKeysForPlay(
+    state,
+    seat,
+    declarationKeys,
+  )
+
+  if (!declarationValidation.ok) {
+    return { ok: false, message: declarationValidation.message }
+  }
+
+  const nextState = submitServerPlayCard(state, seat, cardId, declarationKeys)
   const nextRoom = syncRoomWithAuthoritativeState(room, nextState)
 
   return { ok: true, room: nextRoom }

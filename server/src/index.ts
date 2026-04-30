@@ -763,6 +763,7 @@ wsServer.on('connection', (socket, request) => {
           room,
           latestConnection.currentSeat,
           message.cardId,
+          message.declarationKeys,
         )
 
         if (!result.ok) {
