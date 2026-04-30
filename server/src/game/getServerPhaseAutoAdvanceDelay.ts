@@ -1,4 +1,5 @@
 import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
+import { SERVER_TIMING_CONFIG } from './serverTimingConfig.js'
 
 const CUT_RESOLVE_AUTO_ADVANCE_MS = 0
 const DEAL_FIRST_THREE_AUTO_ADVANCE_MS = 2400
@@ -40,6 +41,10 @@ export function getServerPhaseAutoAdvanceDelay(
     ) {
       return ROUND_COMPLETE_PLAYING_AUTO_ADVANCE_MS
     }
+  }
+
+  if (phase === 'scoring') {
+    return SERVER_TIMING_CONFIG.summaryVisibleMs
   }
 
   if (phase === 'next-round') {

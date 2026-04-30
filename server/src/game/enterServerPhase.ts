@@ -6,6 +6,7 @@ import { dealServerNextTwoPhase } from './dealServerNextTwoPhase.js'
 import { resolveServerCutPhase } from './resolveServerCutPhase.js'
 import { startServerBiddingPhase } from './startServerBiddingPhase.js'
 import { startServerPlayingPhase } from './startServerPlayingPhase.js'
+import { startServerScoringPhase } from './startServerScoringPhase.js'
 
 function getPhaseEnteredAt(): number {
   return Date.now()
@@ -46,6 +47,10 @@ export function enterServerPhase(
 
   if (phase === 'playing') {
     return withPhaseEnteredAt(startServerPlayingPhase(state))
+  }
+
+  if (phase === 'scoring') {
+    return withPhaseEnteredAt(startServerScoringPhase(state))
   }
 
   return withPhaseEnteredAt({

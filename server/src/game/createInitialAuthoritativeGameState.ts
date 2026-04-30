@@ -62,6 +62,7 @@ export function createInitialAuthoritativeGameState(
     currentTrick: createEmptyTrickState(),
     wonTricks: createEmptyWonTricks(),
     playing: createEmptyPlayingState(),
+    scoring: null,
     score: {
       round: createEmptyScoreBreakdown(),
       match: {

@@ -89,6 +89,7 @@ import {
 } from './renderBiddingScreen'
 import { sortLocalHandForAllTrumps, sortLocalHandForDisplay, type SortDisplayOptions } from './sortLocalHand'
 import { renderPlayingScreen, type RenderPlayingScreenOptions } from './renderPlayingScreen'
+import { renderScoringScreen } from './renderScoringPanel'
 import { renderScoreHud } from './renderScoreHud'
 
 const SEAT_LABELS: Record<Seat, string> = {
@@ -114,6 +115,7 @@ export function createActiveRoomFlowController(
   const biddingUiState: BiddingUiState = createBiddingUiState()
   const playingCache: PlayingUiCache = createPlayingUiCache()
   let lastKnownWinningBid: NonNullable<RoomWinningBidSnapshot> | null = null
+  let scoringCountdownIntervalId: number | null = null
 
   function getLocalSeatSnapshot(): RoomSeatSnapshot | null {
     if (!activeRoomState) {
@@ -353,6 +355,60 @@ export function createActiveRoomFlowController(
         </div>
       </div>
     `
+  }
+
+  function clearScoringCountdownTicker(): void {
+    if (scoringCountdownIntervalId === null) {
+      return
+    }
+
+    window.clearInterval(scoringCountdownIntervalId)
+    scoringCountdownIntervalId = null
+  }
+
+  function getScoringCountdownText(): string {
+    const timerDeadlineAt = activeRoomState?.game?.timerDeadlineAt ?? null
+
+    if (timerDeadlineAt === null) {
+      return '5 сек.'
+    }
+
+    const countdownSeconds = Math.max(0, Math.ceil((timerDeadlineAt - Date.now()) / 1000))
+    return `${countdownSeconds} сек.`
+  }
+
+  function updateScoringCountdownText(): void {
+    const countdownElement = options.root.querySelector<HTMLElement>('[data-scoring-countdown="1"]')
+
+    if (countdownElement === null) {
+      return
+    }
+
+    countdownElement.textContent = getScoringCountdownText()
+  }
+
+  function syncScoringCountdownTicker(): void {
+    const isScoringPhase = activeRoomState?.game?.authoritativePhase === 'scoring'
+
+    if (!isScoringPhase) {
+      clearScoringCountdownTicker()
+      return
+    }
+
+    updateScoringCountdownText()
+
+    if (scoringCountdownIntervalId !== null) {
+      return
+    }
+
+    scoringCountdownIntervalId = window.setInterval(() => {
+      if (activeRoomState?.game?.authoritativePhase !== 'scoring') {
+        clearScoringCountdownTicker()
+        return
+      }
+
+      updateScoringCountdownText()
+    }, 250)
   }
 
   function cancelCuttingAnimationCompletionTimer(): void {
@@ -786,7 +842,10 @@ export function createActiveRoomFlowController(
       return
     }
 
-    const freshWinningBid = activeRoomState.game?.bidding?.winningBid ?? null
+    const freshWinningBid =
+      activeRoomState.game?.bidding?.winningBid ??
+      activeRoomState.game?.scoring?.winningBid ??
+      null
     const activeAuthoritativePhase = activeRoomState.game?.authoritativePhase ?? null
     if (freshWinningBid !== null) {
       lastKnownWinningBid = freshWinningBid
@@ -888,8 +947,13 @@ export function createActiveRoomFlowController(
     const isShowingNextRoundPause = authoritativePhase === 'next-round'
     const isShowingBiddingPhase =
       !isShowingAnyDealPhase && authoritativePhase === 'bidding'
+    const isShowingScoringPhase =
+      !isShowingAnyDealPhase && authoritativePhase === 'scoring'
     const isShowingPlayingPhase =
       !isShowingAnyDealPhase && authoritativePhase === 'playing'
+    if (!isShowingScoringPhase) {
+      clearScoringCountdownTicker()
+    }
     if (!isShowingPlayingPhase) {
       resetPlayingUiCache(playingCache)
     }
@@ -1562,6 +1626,18 @@ export function createActiveRoomFlowController(
         biddingUiState.showBotTakeover = false
         renderActiveRoomScreen()
       })
+    } else if (isShowingScoringPhase && activeRoomState.game?.scoring) {
+      cuttingVisualCountdown.resetCuttingVisualCountdownState()
+      renderScoringScreen({
+        root: options.root,
+        game: activeRoomState.game,
+        localSeat: activeRoomState.seat,
+        winningBid: lastKnownWinningBid,
+        stageScale,
+        scaledStageWidth,
+        scaledStageHeight,
+      })
+      syncScoringCountdownTicker()
     } else if (isShowingPlayingPhase && activeRoomState.game) {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
       renderPlayingScreen({
@@ -1577,6 +1653,74 @@ export function createActiveRoomFlowController(
         submitPlayCard: options.submitPlayCard,
         cache: playingCache,
       } satisfies RenderPlayingScreenOptions)
+    } else if (activeRoomState.game !== null) {
+      cuttingVisualCountdown.resetCuttingVisualCountdownState()
+      options.root.innerHTML = `
+        <div
+          style="
+            position:relative;
+            min-height:100vh;
+            width:100%;
+            box-sizing:border-box;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            overflow:hidden;
+            background:
+              radial-gradient(circle at center, rgba(74,222,128,0.18) 0%, rgba(34,197,94,0.10) 34%, rgba(21,128,61,0.00) 58%),
+              linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%);
+            font-family:Inter, system-ui, sans-serif;
+          "
+        >
+          <div
+            style="
+              width:min(90vw, 560px);
+              border:1px solid rgba(255,255,255,0.16);
+              border-radius:24px;
+              padding:28px 30px;
+              background:rgba(15,23,42,0.72);
+              box-shadow:0 24px 60px rgba(2,6,23,0.34);
+              text-align:center;
+              color:#e2e8f0;
+            "
+          >
+            <div
+              style="
+                font-size:13px;
+                font-weight:900;
+                letter-spacing:0.08em;
+                text-transform:uppercase;
+                color:#93c5fd;
+              "
+            >
+              Активна игра
+            </div>
+
+            <div
+              style="
+                margin-top:12px;
+                font-size:28px;
+                font-weight:900;
+                color:#f8fafc;
+              "
+            >
+              Подготвя се следващата фаза
+            </div>
+
+            <div
+              style="
+                margin-top:10px;
+                font-size:15px;
+                line-height:1.5;
+                color:#cbd5e1;
+              "
+            >
+              Изчакваме следващия gameplay snapshot от сървъра.
+            </div>
+          </div>
+          ${scoreHudHtml}
+        </div>
+      `
     } else {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
       const seatsHtml =
@@ -1954,6 +2098,7 @@ export function createActiveRoomFlowController(
     clearDealingAnimationState()
     clearDealNextTwoAnimationState()
     clearDealLastThreeAnimationState()
+    clearScoringCountdownTicker()
     clearBiddingUiState()
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
@@ -2003,6 +2148,7 @@ export function createActiveRoomFlowController(
       clearDealingAnimationState()
       clearDealNextTwoAnimationState()
       clearDealLastThreeAnimationState()
+      clearScoringCountdownTicker()
       clearBiddingUiState()
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
@@ -2017,6 +2163,7 @@ export function createActiveRoomFlowController(
       clearDealingAnimationState()
       clearDealNextTwoAnimationState()
       clearDealLastThreeAnimationState()
+      clearScoringCountdownTicker()
       clearBiddingUiState()
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
@@ -2092,6 +2239,7 @@ export function createActiveRoomFlowController(
     clearDealingAnimationState()
     clearDealNextTwoAnimationState()
     clearDealLastThreeAnimationState()
+    clearScoringCountdownTicker()
     clearBiddingUiState()
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)

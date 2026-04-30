@@ -131,6 +131,20 @@ export type ServerPlayingState = {
   wonTricksByTeam: Record<Team, ServerCard[][]>
 }
 
+export type ServerScoringState = {
+  winningBid: NonNullable<ServerWinningBid>
+  rawHandPoints: ServerRoundScore
+  declarationPoints: ServerRoundScore
+  belotePoints: ServerRoundScore
+  sumPoints: ServerRoundScore
+  officialRoundPoints: ServerRoundScore
+  matchTotals: ServerRoundScore
+  carryOver: ServerCarryOverPoints
+  outcomeLabel: string
+  outcomeShortLabel: string
+  counterMultiplier: number
+}
+
 export type ServerAuthoritativeGameState = {
   phase: AuthoritativePhaseType
   phaseEnteredAt: number | null
@@ -143,6 +157,7 @@ export type ServerAuthoritativeGameState = {
   currentTrick: ServerTrickState
   wonTricks: Record<Team, ServerCard[][]>
   playing: ServerPlayingState | null
+  scoring: ServerScoringState | null
   score: {
     round: ServerScoreBreakdown
     match: ServerRoundScore

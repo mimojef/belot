@@ -9,8 +9,10 @@ import {
   type RoomCompletedTrickSnapshot,
   type RoomGameSnapshot,
   type RoomPlayingSnapshot,
+  type RoomScoringSnapshot,
   type RoomSeatSnapshot,
   type RoomSnapshotMessage,
+  type RoomTeamPointsSnapshot,
 } from './messageTypes.js'
 
 function createSeatSnapshot(room: ServerRoom, seat: Seat): RoomSeatSnapshot {
@@ -79,6 +81,16 @@ function createCardSnapshot(card: ServerAuthoritativeGameState['deck'][number]):
     id: card.id,
     suit: card.suit,
     rank: card.rank,
+  }
+}
+
+function createTeamPointsSnapshot(score: {
+  teamA: number
+  teamB: number
+}): RoomTeamPointsSnapshot {
+  return {
+    teamA: score.teamA,
+    teamB: score.teamB,
   }
 }
 
@@ -167,6 +179,32 @@ function createPlayingSnapshot(
   }
 }
 
+function createScoringSnapshot(
+  authoritativeState: ServerAuthoritativeGameState,
+): RoomScoringSnapshot | null {
+  const scoring = authoritativeState.scoring
+
+  if (scoring === null) {
+    return null
+  }
+
+  return {
+    winningBid: {
+      ...scoring.winningBid,
+    },
+    rawHandPoints: createTeamPointsSnapshot(scoring.rawHandPoints),
+    declarationPoints: createTeamPointsSnapshot(scoring.declarationPoints),
+    belotePoints: createTeamPointsSnapshot(scoring.belotePoints),
+    sumPoints: createTeamPointsSnapshot(scoring.sumPoints),
+    officialRoundPoints: createTeamPointsSnapshot(scoring.officialRoundPoints),
+    matchTotals: createTeamPointsSnapshot(scoring.matchTotals),
+    carryOver: createTeamPointsSnapshot(scoring.carryOver),
+    outcomeLabel: scoring.outcomeLabel,
+    outcomeShortLabel: scoring.outcomeShortLabel,
+    counterMultiplier: scoring.counterMultiplier,
+  }
+}
+
 function createGameSnapshot(
   room: ServerRoom,
   yourSeat: Seat | null,
@@ -206,11 +244,9 @@ function createGameSnapshot(
       : null,
     bidding: createBiddingSnapshot(authoritativeState, yourSeat),
     playing: createPlayingSnapshot(authoritativeState, yourSeat),
+    scoring: createScoringSnapshot(authoritativeState),
     score: {
-      match: {
-        teamA: authoritativeState.score.match.teamA,
-        teamB: authoritativeState.score.match.teamB,
-      },
+      match: createTeamPointsSnapshot(authoritativeState.score.match),
     },
     handCounts: {
       bottom: authoritativeState.hands.bottom.length,

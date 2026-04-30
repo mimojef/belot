@@ -37,6 +37,7 @@ export function createServerRoundStartState(
     currentTrick: createEmptyTrickState(),
     wonTricks: createEmptyWonTricks(),
     playing: createEmptyPlayingState(),
+    scoring: null,
     score: {
       ...state.score,
       round: createEmptyScoreBreakdown(),
