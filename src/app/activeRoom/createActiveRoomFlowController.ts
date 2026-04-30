@@ -1693,7 +1693,7 @@ export function createActiveRoomFlowController(
                 color:#93c5fd;
               "
             >
-              Активна игра
+              Зареждане
             </div>
 
             <div
@@ -1704,7 +1704,7 @@ export function createActiveRoomFlowController(
                 color:#f8fafc;
               "
             >
-              Подготвя се следващата фаза
+              Зареждане на играта...
             </div>
 
             <div
@@ -1715,7 +1715,7 @@ export function createActiveRoomFlowController(
                 color:#cbd5e1;
               "
             >
-              Изчакваме следващия gameplay snapshot от сървъра.
+              Зареждане на играта...
             </div>
           </div>
           ${scoreHudHtml}
@@ -1737,7 +1737,7 @@ export function createActiveRoomFlowController(
                 background:rgba(15,23,42,0.42);
               "
             >
-              Чакаме първия room snapshot от сървъра...
+              Зареждане на играта...
             </div>
           `
 
@@ -1826,7 +1826,7 @@ export function createActiveRoomFlowController(
                             margin-bottom:8px;
                           "
                         >
-                          Активна стая
+                          Зареждане
                         </div>
 
                         <h1
@@ -1838,7 +1838,7 @@ export function createActiveRoomFlowController(
                             color:#f8fafc;
                           "
                         >
-                          Намерена е игра
+                          Зареждане на играта...
                         </h1>
 
                         <div
@@ -1848,8 +1848,7 @@ export function createActiveRoomFlowController(
                             color:#cbd5e1;
                           "
                         >
-                          Това е временен екран за стаята. Следващата стъпка е върху него
-                          да вържем чистото server-authoritative gameplay ядро.
+                          Изчакваме информация от сървъра.
                         </div>
                       </div>
 
