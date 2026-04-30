@@ -66,14 +66,69 @@ const SUIT_SYMBOL: Record<string, string> = {
   spades: '♠',
 }
 
+type PlayedCardFlySource = {
+  rect: DOMRect
+  physicalWidth: number
+  physicalHeight: number
+}
+
 const latestRenderOptionsByCache = new WeakMap<PlayingUiCache, RenderPlayingScreenOptions>()
+const playedCardFlySourceByCache = new WeakMap<PlayingUiCache, PlayedCardFlySource>()
+
+function getScaledPhysicalElementSize(
+  element: HTMLElement,
+  stageScale: number,
+): {
+  width: number
+  height: number
+} {
+  const computedStyle = window.getComputedStyle(element)
+  const computedWidth = Number.parseFloat(computedStyle.width)
+  const computedHeight = Number.parseFloat(computedStyle.height)
+  const baseWidth = Number.isFinite(computedWidth) && computedWidth > 0
+    ? computedWidth
+    : element.offsetWidth
+  const baseHeight = Number.isFinite(computedHeight) && computedHeight > 0
+    ? computedHeight
+    : element.offsetHeight
+
+  return {
+    width: baseWidth * stageScale,
+    height: baseHeight * stageScale,
+  }
+}
+
+function getRotateDegreesFromTransform(transform: string): number {
+  const rotateMatch = transform.match(/rotate\((-?\d+(?:\.\d+)?)deg\)/)
+  if (!rotateMatch) {
+    return 0
+  }
+
+  const rotateDegrees = Number.parseFloat(rotateMatch[1] ?? '')
+  return Number.isFinite(rotateDegrees) ? rotateDegrees : 0
+}
 
 async function animatePlayedCardFromHand(options: {
   sourceRect: DOMRect
+  sourcePhysicalWidth: number
+  sourcePhysicalHeight: number
   targetRect: DOMRect
+  targetPhysicalWidth: number
+  targetPhysicalHeight: number
   cardElement: HTMLElement
 }): Promise<void> {
-  const { sourceRect, targetRect, cardElement } = options
+  const {
+    sourceRect,
+    sourcePhysicalWidth,
+    sourcePhysicalHeight,
+    targetRect,
+    targetPhysicalWidth,
+    targetPhysicalHeight,
+    cardElement,
+  } = options
+  const sourceCenterX = sourceRect.left + sourceRect.width / 2
+  const sourceCenterY = sourceRect.top + sourceRect.height / 2
+  const targetRotateDeg = getRotateDegreesFromTransform(cardElement.style.transform)
 
   const overlay = document.createElement('div')
   overlay.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:9000;overflow:visible'
@@ -81,10 +136,11 @@ async function animatePlayedCardFromHand(options: {
 
   const clone = cardElement.cloneNode(true) as HTMLElement
   clone.style.position = 'fixed'
-  clone.style.left = `${sourceRect.left}px`
-  clone.style.top = `${sourceRect.top}px`
-  clone.style.width = `${sourceRect.width}px`
-  clone.style.height = `${sourceRect.height}px`
+  clone.style.left = `${sourceCenterX - sourcePhysicalWidth / 2}px`
+  clone.style.top = `${sourceCenterY - sourcePhysicalHeight / 2}px`
+  clone.style.width = `${sourcePhysicalWidth}px`
+  clone.style.height = `${sourcePhysicalHeight}px`
+  clone.style.aspectRatio = `${sourcePhysicalWidth} / ${sourcePhysicalHeight}`
   clone.style.margin = '0'
   clone.style.transform = 'none'
   clone.style.transformOrigin = 'center center'
@@ -97,14 +153,29 @@ async function animatePlayedCardFromHand(options: {
   try {
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
 
-    const dx = targetRect.left - sourceRect.left
-    const dy = targetRect.top - sourceRect.top
-    const scale = targetRect.width > 0 ? targetRect.width / sourceRect.width : 1
+    const targetCenterX = targetRect.left + targetRect.width / 2
+    const targetCenterY = targetRect.top + targetRect.height / 2
+    const dx = targetCenterX - sourceCenterX
+    const dy = targetCenterY - sourceCenterY
+    const widthScale = targetPhysicalWidth > 0 && sourcePhysicalWidth > 0
+      ? targetPhysicalWidth / sourcePhysicalWidth
+      : 1
+    const heightScale = targetPhysicalHeight > 0 && sourcePhysicalHeight > 0
+      ? targetPhysicalHeight / sourcePhysicalHeight
+      : widthScale
+    const scale = Number.isFinite(widthScale) && widthScale > 0
+      ? widthScale
+      : Number.isFinite(heightScale) && heightScale > 0
+        ? heightScale
+        : 1
 
     const anim = clone.animate(
       [
-        { transform: 'translate(0,0) scale(1)', opacity: 1 },
-        { transform: `translate(${dx}px,${dy}px) scale(${scale})`, opacity: 1 },
+        { transform: 'translate(0,0) rotate(0deg) scale(1)', opacity: 1 },
+        {
+          transform: `translate(${dx}px,${dy}px) rotate(${targetRotateDeg}deg) scale(${scale})`,
+          opacity: 1,
+        },
       ],
       { duration: 350, easing: 'cubic-bezier(0.22,1,0.36,1)', fill: 'forwards' },
     )
@@ -603,6 +674,7 @@ function resetCacheForFreshSnapshot(
   cache.showBotTakeover = false
   cache.hasShownBotTakeover = false
   cache.lastPlayedCardRect = null
+  playedCardFlySourceByCache.delete(cache)
 }
 
 function scheduleCompletedTrickCollection(
@@ -819,16 +891,26 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     snapshotTrickKey !== cache.lastTrickKey
 
   const newestPlay = snapshotPlays[snapshotPlays.length - 1] ?? null
-  let pendingPlayedCardRect: DOMRect | null = null
+  let pendingPlayedCardSource: PlayedCardFlySource | null = null
   let shouldAnimateNewestViaOverlay = false
   if (animateNewest && newestPlay?.seat === localSeat) {
-    pendingPlayedCardRect = cache.lastPlayedCardRect
+    pendingPlayedCardSource = playedCardFlySourceByCache.get(cache) ?? (
+      cache.lastPlayedCardRect === null
+        ? null
+        : {
+            rect: cache.lastPlayedCardRect,
+            physicalWidth: cache.lastPlayedCardRect.width,
+            physicalHeight: cache.lastPlayedCardRect.height,
+          }
+    )
     cache.lastPlayedCardRect = null
-    if (pendingPlayedCardRect !== null) {
+    playedCardFlySourceByCache.delete(cache)
+    if (pendingPlayedCardSource !== null) {
       shouldAnimateNewestViaOverlay = true
     }
   } else if (!animateNewest) {
     cache.lastPlayedCardRect = null
+    playedCardFlySourceByCache.delete(cache)
   }
 
   cache.lastTrickKey = snapshotTrickKey
@@ -957,6 +1039,12 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
 
     button.addEventListener('click', () => {
       cache.lastPlayedCardRect = button.getBoundingClientRect()
+      const sourceSize = getScaledPhysicalElementSize(button, stageScale)
+      playedCardFlySourceByCache.set(cache, {
+        rect: cache.lastPlayedCardRect,
+        physicalWidth: sourceSize.width,
+        physicalHeight: sourceSize.height,
+      })
       cache.pendingPlayCardSent = true
       submitPlayCard(roomId, cardId)
     })
@@ -979,15 +1067,20 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     })
   })
 
-  if (shouldAnimateNewestViaOverlay && pendingPlayedCardRect !== null) {
+  if (shouldAnimateNewestViaOverlay && pendingPlayedCardSource !== null) {
     const trickCardEl = root.querySelector<HTMLElement>(
       `[data-current-trick-card][data-trick-seat="${localSeat}"]`,
     )
     if (trickCardEl) {
       const targetRect = trickCardEl.getBoundingClientRect()
+      const targetSize = getScaledPhysicalElementSize(trickCardEl, stageScale)
       void animatePlayedCardFromHand({
-        sourceRect: pendingPlayedCardRect,
+        sourceRect: pendingPlayedCardSource.rect,
+        sourcePhysicalWidth: pendingPlayedCardSource.physicalWidth,
+        sourcePhysicalHeight: pendingPlayedCardSource.physicalHeight,
         targetRect,
+        targetPhysicalWidth: targetSize.width,
+        targetPhysicalHeight: targetSize.height,
         cardElement: trickCardEl,
       })
     }
