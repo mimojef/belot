@@ -7,5 +7,5 @@ export function createInitialRoundSetupAuthoritativeState(
   room: ServerRoom,
 ): ServerAuthoritativeGameState {
   const initialState = createInitialAuthoritativeGameState(room)
-  return chooseServerFirstDealer(initialState, room)
+  return chooseServerFirstDealer(initialState)
 }
