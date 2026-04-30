@@ -40,8 +40,8 @@ const activeRoom = createActiveRoomFlowController({
   submitBidAction: (roomId, action) => {
     client.submitBidAction(roomId, action)
   },
-  submitPlayCard: (roomId, cardId) => {
-    client.submitPlayCard(roomId, cardId)
+  submitPlayCard: (roomId, cardId, declarationKeys) => {
+    client.submitPlayCard(roomId, cardId, declarationKeys)
   },
   resumeHumanControl: (roomId) => {
     client.resumeHumanControl(roomId)

@@ -10,6 +10,7 @@ import type {
   Seat,
   ServerMessage,
 } from '../network/createGameServerClient'
+import type { PendingDeclarationPrompt } from './declarations/declarationPromptTypes'
 
 export type ActiveRoomState = {
   roomId: string
@@ -32,7 +33,7 @@ export type CreateActiveRoomFlowControllerOptions = {
   leaveActiveRoom: (roomId: string) => void
   submitCutIndex: (roomId: string, cutIndex: number) => void
   submitBidAction: (roomId: string, action: ClientBidAction) => void
-  submitPlayCard: (roomId: string, cardId: string) => void
+  submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
   resumeHumanControl: (roomId: string) => void
   showLobby: (errorText?: string | null) => void
 }
@@ -91,6 +92,8 @@ export type PlayingUiCache = {
   hasShownBotTakeover: boolean
   lastPlayedCardRect: DOMRect | null
   hoveredHandCardId: string | null
+  pendingDeclarationPrompt: PendingDeclarationPrompt | null
+  submittedDeclarationKeys: string[]
 }
 
 export type BiddingUiState = {

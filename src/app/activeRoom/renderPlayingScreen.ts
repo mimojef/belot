@@ -25,6 +25,15 @@ import { sortLocalHandForDisplay, type SortDisplayOptions } from './sortLocalHan
 import { animateTrickCollection } from './animateTrickCollection'
 import type { PlayingUiCache } from './activeRoomTypes'
 import { renderScoreHud } from './renderScoreHud'
+import {
+  createPendingDeclarationPrompt,
+  normalizeSelectedDeclarationKeys,
+  resolveClientDeclarationCandidatesForPlay,
+} from './declarations/declarationPromptState'
+import {
+  removeDeclarationPrompt,
+  renderDeclarationPrompt,
+} from './declarations/renderDeclarationPrompt'
 
 const TABLE_BACKGROUND = `
   radial-gradient(circle at center, rgba(74,222,128,0.18) 0%, rgba(34,197,94,0.10) 34%, rgba(21,128,61,0.00) 58%),
@@ -683,6 +692,8 @@ function resetCacheForFreshSnapshot(
   cache.hasShownBotTakeover = false
   cache.lastPlayedCardRect = null
   cache.hoveredHandCardId = null
+  cache.pendingDeclarationPrompt = null
+  cache.submittedDeclarationKeys = []
   playedCardFlySourceByCache.delete(cache)
 }
 
@@ -801,7 +812,7 @@ export type RenderPlayingScreenOptions = {
   stageScale: number
   scaledStageWidth: number
   scaledStageHeight: number
-  submitPlayCard: (roomId: string, cardId: string) => void
+  submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
   cache: PlayingUiCache
 }
 
@@ -928,6 +939,56 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
 
   const sortedHand = sortLocalHandForDisplay(game.ownHand, getSortOptions(winningBid))
   const isMyTurn = playing?.currentTurnSeat === localSeat
+
+  function canSubmitHandCard(cardId: string): boolean {
+    if (!isMyTurn) {
+      return false
+    }
+
+    if (validCardIds !== null && !validCardIds.includes(cardId)) {
+      return false
+    }
+
+    return sortedHand.some((card) => card.id === cardId)
+  }
+
+  function resolveDeclarationCandidatesForCard(cardId: string) {
+    return resolveClientDeclarationCandidatesForPlay({
+      hand: sortedHand,
+      contract: winningBid,
+      cardId,
+      completedTricksCount: completedCount,
+      currentTrickPlays: snapshotPlays,
+      submittedDeclarationKeys: cache.submittedDeclarationKeys,
+    })
+  }
+
+  if (cache.pendingDeclarationPrompt !== null) {
+    const pendingDeclarationCandidates = resolveDeclarationCandidatesForCard(
+      cache.pendingDeclarationPrompt.cardId,
+    )
+
+    if (
+      cache.pendingPlayCardSent ||
+      !canSubmitHandCard(cache.pendingDeclarationPrompt.cardId) ||
+      pendingDeclarationCandidates.length === 0
+    ) {
+      cache.pendingDeclarationPrompt = null
+      removeDeclarationPrompt(root)
+    } else {
+      cache.pendingDeclarationPrompt = {
+        ...cache.pendingDeclarationPrompt,
+        options: [...pendingDeclarationCandidates].sort((left, right) =>
+          left.key.localeCompare(right.key),
+        ),
+        selectedKeys: normalizeSelectedDeclarationKeys(
+          pendingDeclarationCandidates,
+          cache.pendingDeclarationPrompt.selectedKeys,
+        ),
+      }
+    }
+  }
+
   syncPlayingBotTakeoverState({
     cache,
     localSeat,
@@ -1060,23 +1121,17 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     </div>
   `
 
-  function canSubmitHandCard(cardId: string): boolean {
-    if (!isMyTurn) {
-      return false
-    }
-
-    if (validCardIds !== null && !validCardIds.includes(cardId)) {
-      return false
-    }
-
-    return sortedHand.some((card) => card.id === cardId)
-  }
-
-  function submitHandCardFromButton(button: HTMLButtonElement, cardId: string): void {
+  function submitHandCardFromButton(
+    button: HTMLButtonElement,
+    cardId: string,
+    declarationKeys: string[] = [],
+  ): void {
     if (cache.pendingPlayCardSent || !canSubmitHandCard(cardId)) {
       return
     }
 
+    cache.pendingDeclarationPrompt = null
+    removeDeclarationPrompt(root)
     cache.hoveredHandCardId = null
     cache.lastPlayedCardRect = button.getBoundingClientRect()
     const sourceSize = getScaledPhysicalElementSize(button, stageScale)
@@ -1086,7 +1141,95 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       physicalHeight: sourceSize.height,
     })
     cache.pendingPlayCardSent = true
-    submitPlayCard(roomId, cardId)
+    if (declarationKeys.length > 0) {
+      cache.submittedDeclarationKeys = [
+        ...new Set([...cache.submittedDeclarationKeys, ...declarationKeys]),
+      ]
+    }
+    submitPlayCard(roomId, cardId, declarationKeys)
+  }
+
+  function renderPendingDeclarationPrompt(): void {
+    const prompt = cache.pendingDeclarationPrompt
+
+    if (prompt === null) {
+      removeDeclarationPrompt(root)
+      return
+    }
+
+    renderDeclarationPrompt({
+      root,
+      prompt,
+      onSelectionChange: (selectedKeys) => {
+        if (cache.pendingDeclarationPrompt === null) {
+          return
+        }
+
+        cache.pendingDeclarationPrompt = {
+          ...cache.pendingDeclarationPrompt,
+          selectedKeys: normalizeSelectedDeclarationKeys(
+            cache.pendingDeclarationPrompt.options,
+            selectedKeys,
+          ),
+        }
+        renderPendingDeclarationPrompt()
+      },
+      onContinue: (selectedKeys) => {
+        const currentPrompt = cache.pendingDeclarationPrompt
+
+        if (currentPrompt === null || cache.pendingPlayCardSent) {
+          return
+        }
+
+        const cardId = currentPrompt.cardId
+
+        if (!canSubmitHandCard(cardId)) {
+          cache.pendingDeclarationPrompt = null
+          removeDeclarationPrompt(root)
+          return
+        }
+
+        const button = Array.from(
+          root.querySelectorAll<HTMLButtonElement>('.play-hand-card--active'),
+        ).find((candidateButton) => candidateButton.dataset.cardId === cardId)
+
+        if (!button) {
+          cache.pendingDeclarationPrompt = null
+          removeDeclarationPrompt(root)
+          return
+        }
+
+        const finalSelectedKeys = normalizeSelectedDeclarationKeys(
+          currentPrompt.options,
+          selectedKeys,
+        )
+        submitHandCardFromButton(button, cardId, finalSelectedKeys)
+      },
+    })
+  }
+
+  function handleHandCardChoice(button: HTMLButtonElement, cardId: string): void {
+    if (
+      cache.pendingPlayCardSent ||
+      cache.pendingDeclarationPrompt !== null ||
+      !canSubmitHandCard(cardId)
+    ) {
+      return
+    }
+
+    const declarationCandidates = resolveDeclarationCandidatesForCard(cardId)
+
+    if (declarationCandidates.length === 0) {
+      submitHandCardFromButton(button, cardId)
+      return
+    }
+
+    cache.hoveredHandCardId = null
+    cache.pendingDeclarationPrompt = createPendingDeclarationPrompt({
+      cardId,
+      candidates: declarationCandidates,
+    })
+    renderPendingDeclarationPrompt()
   }
 
   const bottomHand = root.querySelector<HTMLElement>('[data-playing-bottom-hand="1"]')
@@ -1106,7 +1249,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       return
     }
 
-    submitHandCardFromButton(button, cardId)
+    handleHandCardChoice(button, cardId)
     event.preventDefault()
   })
 
@@ -1117,7 +1260,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     }
 
     button.addEventListener('click', () => {
-      submitHandCardFromButton(button, cardId)
+      handleHandCardChoice(button, cardId)
     })
   })
 
@@ -1141,6 +1284,8 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       button.style.zIndex = String(baseZIndex)
     })
   })
+
+  renderPendingDeclarationPrompt()
 
   if (
     shouldAnimateNewestViaOverlay &&
