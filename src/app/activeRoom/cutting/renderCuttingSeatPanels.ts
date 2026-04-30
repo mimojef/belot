@@ -447,7 +447,7 @@ function renderDealtCardFanInPanel(
   `
 }
 
-const BID_BUBBLE_TOTAL_MS = 3200
+const BID_BUBBLE_TOTAL_MS = 1500
 
 
 function renderBidBubble(
@@ -456,8 +456,8 @@ function renderBidBubble(
   escapeHtml: EscapeHtml,
 ): string {
   const totalMs = BID_BUBBLE_TOTAL_MS
-  const fadeInEnd = Math.round((200 / totalMs) * 100)
-  const fadeOutStart = Math.round(((totalMs - 280) / totalMs) * 100)
+  const fadeInEnd = Math.round((160 / totalMs) * 100)
+  const fadeOutStart = Math.round(((totalMs - 220) / totalMs) * 100)
   const keyframes = `@keyframes bbb-${visualSeat}{0%{opacity:0}${fadeInEnd}%{opacity:1}${fadeOutStart}%{opacity:1}100%{opacity:0}}`
 
   let wrapperStyle: string
@@ -467,8 +467,8 @@ function renderBidBubble(
     tailStyle = `
       left:50%;
       bottom:0;
-      width:20px;
-      height:12px;
+      width:24px;
+      height:14px;
       clip-path:polygon(50% 100%, 0 0, 100% 0);
       transform:translate(-50%, 90%);
     `
@@ -477,8 +477,8 @@ function renderBidBubble(
     tailStyle = `
       left:0;
       top:50%;
-      width:14px;
-      height:20px;
+      width:16px;
+      height:24px;
       clip-path:polygon(0 50%, 100% 0, 100% 100%);
       transform:translate(-88%, -50%);
     `
@@ -487,8 +487,8 @@ function renderBidBubble(
     tailStyle = `
       left:0;
       top:50%;
-      width:14px;
-      height:20px;
+      width:16px;
+      height:24px;
       clip-path:polygon(0 50%, 100% 0, 100% 100%);
       transform:translate(-88%, -50%);
     `
@@ -497,8 +497,8 @@ function renderBidBubble(
     tailStyle = `
       right:0;
       top:50%;
-      width:14px;
-      height:20px;
+      width:16px;
+      height:24px;
       clip-path:polygon(100% 50%, 0 0, 0 100%);
       transform:translate(88%, -50%);
     `
@@ -522,11 +522,11 @@ function renderBidBubble(
       <div style="
         position:relative;
         border:1px solid rgba(15,23,42,0.10);
-        border-radius:16px;
-        padding:10px 16px;
+        border-radius:18px;
+        padding:12px 20px;
         background:${bubbleBackground};
         color:#1e293b;
-        font-size:22px;
+        font-size:26px;
         font-weight:800;
         line-height:1.1;
         white-space:nowrap;

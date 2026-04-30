@@ -44,7 +44,7 @@ export function addBidBubble(
     delete state.recentBubbles[seat]
     delete state.bubbleTimerIds[seat]
     onBubbleExpired()
-  }, 3300)
+  }, 1600)
 }
 
 export function getBidBubblesForRender(
