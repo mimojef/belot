@@ -459,6 +459,7 @@ export function createActiveRoomFlowController(
   function clearDealingAnimationState(): void {
     cancelDealingAnimationCompletionTimer()
     unmountDealPacketOverlay(firstThreeOverlay)
+    options.gameAudio?.clearDealPacketSounds()
     dealingAnimation.activePhaseKey = null
     dealingAnimation.renderedPhaseKey = null
     dealingAnimation.renderedFirstDealSeat = null
@@ -502,6 +503,7 @@ export function createActiveRoomFlowController(
   function clearDealNextTwoAnimationState(): void {
     cancelDealNextTwoAnimationCompletionTimer()
     unmountDealPacketOverlay(nextTwoOverlay)
+    options.gameAudio?.clearDealPacketSounds()
     dealNextTwoAnimation.activePhaseKey = null
     dealNextTwoAnimation.renderedPhaseKey = null
     dealNextTwoAnimation.renderedFirstDealSeat = null
@@ -549,6 +551,7 @@ export function createActiveRoomFlowController(
   function clearDealLastThreeAnimationState(): void {
     cancelDealLastThreeAnimationCompletionTimer()
     unmountDealPacketOverlay(lastThreeOverlay)
+    options.gameAudio?.clearDealPacketSounds()
     dealLastThreeAnimation.activePhaseKey = null
     dealLastThreeAnimation.renderedPhaseKey = null
     dealLastThreeAnimation.renderedFirstDealSeat = null
@@ -598,6 +601,24 @@ export function createActiveRoomFlowController(
 
   function getBidBubblesForRender() {
     return getBidBubblesForRenderFromStore(biddingUiState)
+  }
+
+  function scheduleDealFirstThreePacketSounds(sequenceKey: string): void {
+    options.gameAudio?.scheduleDealPacketSounds(sequenceKey, {
+      packetCount: SERVER_DEAL_ORDER.length,
+      packetStartDelayMs: DEAL_FIRST_THREE_PACKET_START_DELAY_MS,
+      packetDelayStepMs: DEAL_FIRST_THREE_PACKET_DELAY_STEP_MS,
+      packetLiftOffsetMs: 0,
+    })
+  }
+
+  function scheduleDefaultDealPacketSounds(sequenceKey: string): void {
+    options.gameAudio?.scheduleDealPacketSounds(sequenceKey, {
+      packetCount: SERVER_DEAL_ORDER.length,
+      packetStartDelayMs: DEAL_PACKET_START_DELAY_MS,
+      packetDelayStepMs: DEAL_PACKET_DELAY_STEP_MS,
+      packetLiftOffsetMs: 0,
+    })
   }
 
   function submitBidActionFromUi(action: ClientBidAction): void {
@@ -671,6 +692,7 @@ export function createActiveRoomFlowController(
     dealNextTwoAnimation.startedAt = performance.now()
     dealNextTwoAnimation.isAnimating = true
     dealNextTwoAnimation.hasCompleted = false
+    scheduleDefaultDealPacketSounds(phaseKey)
     scheduleDealNextTwoAnimationCompletion()
   }
 
@@ -695,6 +717,7 @@ export function createActiveRoomFlowController(
     dealLastThreeAnimation.startedAt = performance.now()
     dealLastThreeAnimation.isAnimating = true
     dealLastThreeAnimation.hasCompleted = false
+    scheduleDefaultDealPacketSounds(phaseKey)
     scheduleDealLastThreeAnimationCompletion()
   }
 
@@ -720,6 +743,7 @@ export function createActiveRoomFlowController(
     dealingAnimation.startedAt = performance.now()
     dealingAnimation.isAnimating = true
     dealingAnimation.hasCompleted = false
+    scheduleDealFirstThreePacketSounds(phaseKey)
     scheduleDealingAnimationCompletion()
   }
 

@@ -29,6 +29,10 @@ export type SeatBidBubble = {
   elapsedMs: number
 }
 
+export type SeatDeclarationBubble = {
+  lines: string[]
+}
+
 export type RenderCuttingSeatPanelsOptions = {
   seats: RoomSeatSnapshot[]
   localSeat: Seat
@@ -44,6 +48,7 @@ export type RenderCuttingSeatPanelsOptions = {
   escapeHtml: EscapeHtml
   dealtHands: DealtHandsData | null
   bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null
+  declarationBubbles?: Partial<Record<Seat, SeatDeclarationBubble>> | null
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -524,6 +529,71 @@ function renderDealtCardFanInPanel(
 
 const BID_BUBBLE_TOTAL_MS = 1500
 
+function getBubblePlacement(
+  visualSeat: Seat,
+  offsetIndex: number,
+): {
+  wrapperStyle: string
+  tailStyle: string
+} {
+  if (visualSeat === 'bottom') {
+    const bottomPx = 156 + offsetIndex * 86
+    return {
+      wrapperStyle: `bottom:${bottomPx}px;left:50%;transform:translateX(-50%);`,
+      tailStyle: `
+        left:50%;
+        bottom:0;
+        width:24px;
+        height:14px;
+        clip-path:polygon(50% 100%, 0 0, 100% 0);
+        transform:translate(-50%, 90%);
+      `,
+    }
+  }
+
+  if (visualSeat === 'top') {
+    const topPx = 170 + offsetIndex * 72
+    return {
+      wrapperStyle: `left:202px;top:${topPx}px;transform:none;`,
+      tailStyle: `
+        left:0;
+        top:50%;
+        width:16px;
+        height:24px;
+        clip-path:polygon(0 50%, 100% 0, 100% 100%);
+        transform:translate(-88%, -50%);
+      `,
+    }
+  }
+
+  if (visualSeat === 'left') {
+    const topPx = 84 + offsetIndex * 72
+    return {
+      wrapperStyle: `left:202px;top:${topPx}px;transform:none;`,
+      tailStyle: `
+        left:0;
+        top:50%;
+        width:16px;
+        height:24px;
+        clip-path:polygon(0 50%, 100% 0, 100% 100%);
+        transform:translate(-88%, -50%);
+      `,
+    }
+  }
+
+  const topPx = 84 + offsetIndex * 72
+  return {
+    wrapperStyle: `right:202px;top:${topPx}px;transform:none;`,
+    tailStyle: `
+      right:0;
+      top:50%;
+      width:16px;
+      height:24px;
+      clip-path:polygon(100% 50%, 0 0, 0 100%);
+      transform:translate(88%, -50%);
+    `,
+  }
+}
 
 function renderBidBubble(
   visualSeat: Seat,
@@ -535,49 +605,7 @@ function renderBidBubble(
   const fadeOutStart = Math.round(((totalMs - 220) / totalMs) * 100)
   const keyframes = `@keyframes bbb-${visualSeat}{0%{opacity:0}${fadeInEnd}%{opacity:1}${fadeOutStart}%{opacity:1}100%{opacity:0}}`
 
-  let wrapperStyle: string
-  let tailStyle: string
-  if (visualSeat === 'bottom') {
-    wrapperStyle = 'bottom:156px;left:50%;transform:translateX(-50%);'
-    tailStyle = `
-      left:50%;
-      bottom:0;
-      width:24px;
-      height:14px;
-      clip-path:polygon(50% 100%, 0 0, 100% 0);
-      transform:translate(-50%, 90%);
-    `
-  } else if (visualSeat === 'top') {
-    wrapperStyle = 'left:202px;top:38px;transform:none;'
-    tailStyle = `
-      left:0;
-      top:50%;
-      width:16px;
-      height:24px;
-      clip-path:polygon(0 50%, 100% 0, 100% 100%);
-      transform:translate(-88%, -50%);
-    `
-  } else if (visualSeat === 'left') {
-    wrapperStyle = 'left:202px;top:84px;transform:none;'
-    tailStyle = `
-      left:0;
-      top:50%;
-      width:16px;
-      height:24px;
-      clip-path:polygon(0 50%, 100% 0, 100% 100%);
-      transform:translate(-88%, -50%);
-    `
-  } else {
-    wrapperStyle = 'right:202px;top:84px;transform:none;'
-    tailStyle = `
-      right:0;
-      top:50%;
-      width:16px;
-      height:24px;
-      clip-path:polygon(100% 50%, 0 0, 0 100%);
-      transform:translate(88%, -50%);
-    `
-  }
+  const { wrapperStyle, tailStyle } = getBubblePlacement(visualSeat, 0)
 
   const elapsed = Math.min(bubble.elapsedMs, totalMs)
   const bubbleBackground =
@@ -621,6 +649,66 @@ function renderBidBubble(
   `
 }
 
+function renderDeclarationBubble(
+  visualSeat: Seat,
+  bubble: SeatDeclarationBubble,
+  hasBidBubble: boolean,
+  escapeHtml: EscapeHtml,
+): string {
+  if (bubble.lines.length === 0) {
+    return ''
+  }
+
+  const { wrapperStyle, tailStyle } = getBubblePlacement(visualSeat, hasBidBubble ? 1 : 0)
+  const bubbleBackground =
+    'linear-gradient(180deg, rgba(255,255,255,0.99) 0%, rgba(246,248,252,0.97) 100%)'
+
+  return `
+    <div style="
+      position:absolute;
+      ${wrapperStyle}
+      pointer-events:none;
+      z-index:11;
+    ">
+      <div style="
+        position:relative;
+        min-width:124px;
+        max-width:240px;
+        border:1px solid rgba(15,23,42,0.10);
+        border-radius:18px;
+        padding:10px 16px;
+        background:${bubbleBackground};
+        color:#1e293b;
+        font-size:22px;
+        font-weight:850;
+        line-height:1.14;
+        text-align:center;
+        white-space:normal;
+        box-shadow:
+          0 10px 22px rgba(15,23,42,0.16),
+          0 3px 10px rgba(15,23,42,0.10);
+      ">
+        <div style="
+          position:absolute;
+          background:${bubbleBackground};
+          box-shadow:0 4px 10px rgba(15,23,42,0.06);
+          ${tailStyle}
+        "></div>
+        <div style="
+          position:relative;
+          z-index:2;
+          display:flex;
+          flex-direction:column;
+          align-items:center;
+          gap:4px;
+        ">
+          ${bubble.lines.map((line) => `<div>${escapeHtml(line)}</div>`).join('')}
+        </div>
+      </div>
+    </div>
+  `
+}
+
 export function createCuttingSeatPanelHtml(
   seat: RoomSeatSnapshot,
   visualSeat: Seat,
@@ -634,6 +722,7 @@ export function createCuttingSeatPanelHtml(
   escapeHtml: EscapeHtml,
   dealtHands: DealtHandsData | null,
   bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null,
+  declarationBubbles: Partial<Record<Seat, SeatDeclarationBubble>> | null,
 ): string {
   const isBottomSeat = visualSeat === 'bottom'
   const isCountdownSeat = seat.seat === countdownSeat
@@ -675,8 +764,17 @@ export function createCuttingSeatPanelHtml(
       `
     : ''
 
+  const hasBidBubble = Boolean(bidBubbles?.[seat.seat])
   const bubbleHtml = bidBubbles?.[seat.seat]
     ? renderBidBubble(visualSeat, bidBubbles[seat.seat]!, escapeHtml)
+    : ''
+  const declarationBubbleHtml = declarationBubbles?.[seat.seat]
+    ? renderDeclarationBubble(
+        visualSeat,
+        declarationBubbles[seat.seat]!,
+        hasBidBubble,
+        escapeHtml,
+      )
     : ''
 
   if (isBottomSeat) {
@@ -691,6 +789,7 @@ export function createCuttingSeatPanelHtml(
         "
       >
         ${bubbleHtml}
+        ${declarationBubbleHtml}
         ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
         <div
           style="
@@ -794,6 +893,7 @@ export function createCuttingSeatPanelHtml(
       "
     >
       ${bubbleHtml}
+      ${declarationBubbleHtml}
       ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
       <div
         style="
@@ -900,6 +1000,7 @@ export function createCuttingSeatPanelsHtml(
     escapeHtml,
     dealtHands,
     bidBubbles,
+    declarationBubbles,
   } = options
   const effectiveCountdownSeat =
     countdownSeat === undefined ? cutterSeat : countdownSeat
@@ -946,6 +1047,7 @@ export function createCuttingSeatPanelsHtml(
         escapeHtml,
         dealtHands,
         bidBubbles ?? null,
+        declarationBubbles ?? null,
       )
     })
     .join('')

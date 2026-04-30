@@ -1,6 +1,7 @@
 import type {
   RoomCardSnapshot,
   RoomCompletedTrickSnapshot,
+  RoomDeclarationSnapshot,
   RoomGameSnapshot,
   RoomPlayCardSnapshot,
   RoomSeatSnapshot,
@@ -16,6 +17,7 @@ import {
 import {
   createCuttingSeatPanelsHtml,
   type DealtHandsData,
+  type SeatDeclarationBubble,
 } from './cutting/renderCuttingSeatPanels'
 import {
   getCuttingSeatPanelAnchorStyle,
@@ -45,6 +47,7 @@ const COMPLETED_TRICK_PREVIEW_MS = 220
 const PLAYING_COLLECT_OVERLAY_Z_INDEX = 9000
 const PLAY_HUMAN_TIMEOUT_MS = 15_000
 const PLAY_BOT_DELAY_MS = 1_000
+const DECLARATION_BUBBLE_VISIBLE_MS = 1_500
 
 const TRICK_W = 195
 const TRICK_H = 284
@@ -78,14 +81,33 @@ const SUIT_SYMBOL: Record<string, string> = {
   spades: '♠',
 }
 
+const DECLARATION_LABEL_ORDER: readonly string[] = [
+  'Каре',
+  'Терца',
+  '50',
+  '100',
+  'Белот',
+]
+
 type PlayedCardFlySource = {
   rect: DOMRect
   physicalWidth: number
   physicalHeight: number
 }
 
+type ActiveDeclarationBubble = SeatDeclarationBubble & {
+  entryKey: string
+}
+
+type DeclarationBubbleUiState = {
+  shownSignatures: string[]
+  activeBubbles: Partial<Record<Seat, ActiveDeclarationBubble>>
+  timerIds: Partial<Record<Seat, number>>
+}
+
 const latestRenderOptionsByCache = new WeakMap<PlayingUiCache, RenderPlayingScreenOptions>()
 const playedCardFlySourceByCache = new WeakMap<PlayingUiCache, PlayedCardFlySource>()
+const declarationBubbleStateByCache = new WeakMap<PlayingUiCache, DeclarationBubbleUiState>()
 
 function getScaledPhysicalElementSize(
   element: HTMLElement,
@@ -242,6 +264,218 @@ function getSortOptions(
   }
 
   return { contract: 'suit', trumpSuit: winningBid.trumpSuit }
+}
+
+function getDeclarationBubbleLabel(declaration: RoomDeclarationSnapshot): string | null {
+  if (declaration.type === 'square') {
+    return 'Каре'
+  }
+
+  if (declaration.type === 'belote') {
+    return 'Белот'
+  }
+
+  if (
+    declaration.publicLabel === 'Терца' ||
+    declaration.publicLabel === '50' ||
+    declaration.publicLabel === '100'
+  ) {
+    return declaration.publicLabel
+  }
+
+  return null
+}
+
+function getDeclarationSignature(
+  declaration: RoomDeclarationSnapshot,
+  index: number,
+): string {
+  return [
+    declaration.seat,
+    declaration.type,
+    declaration.publicLabel,
+    String(declaration.points),
+    String(declaration.declaredAtTrickIndex),
+    String(index),
+  ].join(':')
+}
+
+function formatDeclarationBubbleLabel(label: string, count: number): string {
+  if (count <= 1) {
+    return label
+  }
+
+  if (label === 'Терца') {
+    return `${count} терци`
+  }
+
+  return label
+}
+
+function buildDeclarationBubbleLines(
+  declarations: RoomDeclarationSnapshot[],
+): string[] {
+  const counts = new Map<string, number>()
+
+  for (const declaration of declarations) {
+    const label = getDeclarationBubbleLabel(declaration)
+
+    if (label === null) {
+      continue
+    }
+
+    counts.set(label, (counts.get(label) ?? 0) + 1)
+  }
+
+  return DECLARATION_LABEL_ORDER.flatMap((label) => {
+    const count = counts.get(label) ?? 0
+
+    if (count === 0) {
+      return []
+    }
+
+    return [formatDeclarationBubbleLabel(label, count)]
+  })
+}
+
+function getDeclarationBubbleUiState(cache: PlayingUiCache): DeclarationBubbleUiState {
+  let state = declarationBubbleStateByCache.get(cache)
+
+  if (!state) {
+    state = {
+      shownSignatures: [],
+      activeBubbles: {},
+      timerIds: {},
+    }
+    declarationBubbleStateByCache.set(cache, state)
+  }
+
+  return state
+}
+
+function clearDeclarationBubbleUiState(cache: PlayingUiCache): void {
+  const state = declarationBubbleStateByCache.get(cache)
+
+  if (!state) {
+    return
+  }
+
+  for (const timerId of Object.values(state.timerIds)) {
+    if (timerId !== undefined) {
+      window.clearTimeout(timerId)
+    }
+  }
+
+  declarationBubbleStateByCache.delete(cache)
+}
+
+function getActiveDeclarationBubblesForRender(
+  state: DeclarationBubbleUiState,
+): Partial<Record<Seat, SeatDeclarationBubble>> | null {
+  const bubbles: Partial<Record<Seat, SeatDeclarationBubble>> = {}
+
+  for (const [seat, bubble] of Object.entries(state.activeBubbles) as [
+    Seat,
+    ActiveDeclarationBubble | undefined,
+  ][]) {
+    if (bubble) {
+      bubbles[seat] = { lines: bubble.lines }
+    }
+  }
+
+  return Object.keys(bubbles).length > 0 ? bubbles : null
+}
+
+function buildPendingDeclarationBubbleForSeat(options: {
+  declarations: RoomDeclarationSnapshot[]
+  seat: Seat
+  shownSignatures: Set<string>
+}): {
+  entryKey: string
+  signatures: string[]
+  lines: string[]
+} | null {
+  const { declarations, seat, shownSignatures } = options
+  const pending: RoomDeclarationSnapshot[] = []
+  const signatures: string[] = []
+
+  declarations.forEach((declaration, index) => {
+    if (declaration.seat !== seat) {
+      return
+    }
+
+    const signature = getDeclarationSignature(declaration, index)
+
+    if (shownSignatures.has(signature)) {
+      return
+    }
+
+    pending.push(declaration)
+    signatures.push(signature)
+  })
+
+  const lines = buildDeclarationBubbleLines(pending)
+
+  if (lines.length === 0 || signatures.length === 0) {
+    return null
+  }
+
+  return {
+    entryKey: `${seat}:${signatures.join('|')}`,
+    signatures,
+    lines,
+  }
+}
+
+function syncTransientDeclarationBubbles(options: {
+  cache: PlayingUiCache
+  game: RoomGameSnapshot
+}): Partial<Record<Seat, SeatDeclarationBubble>> | null {
+  const { cache, game } = options
+  const state = getDeclarationBubbleUiState(cache)
+  const currentSeat = game.playing?.currentTurnSeat ?? null
+
+  if (currentSeat !== null && !state.activeBubbles[currentSeat]) {
+    const shownSignatures = new Set(state.shownSignatures)
+    const pendingBubble = buildPendingDeclarationBubbleForSeat({
+      declarations: game.declarations,
+      seat: currentSeat,
+      shownSignatures,
+    })
+
+    if (pendingBubble !== null) {
+      state.shownSignatures = [
+        ...new Set([...state.shownSignatures, ...pendingBubble.signatures]),
+      ]
+      state.activeBubbles[currentSeat] = {
+        entryKey: pendingBubble.entryKey,
+        lines: pendingBubble.lines,
+      }
+
+      const existingTimerId = state.timerIds[currentSeat]
+      if (existingTimerId !== undefined) {
+        window.clearTimeout(existingTimerId)
+      }
+
+      state.timerIds[currentSeat] = window.setTimeout(() => {
+        const activeBubble = state.activeBubbles[currentSeat]
+
+        if (!activeBubble || activeBubble.entryKey !== pendingBubble.entryKey) {
+          return
+        }
+
+        delete state.activeBubbles[currentSeat]
+        delete state.timerIds[currentSeat]
+
+        const latestOptions = latestRenderOptionsByCache.get(cache)
+        if (latestOptions) {
+          renderPlayingScreen(latestOptions)
+        }
+      }, DECLARATION_BUBBLE_VISIBLE_MS)
+    }
+  }
+
+  return getActiveDeclarationBubblesForRender(state)
 }
 
 function getPlayOrderSpread(index: number, count: number): {
@@ -695,6 +929,7 @@ function resetCacheForFreshSnapshot(
   cache.pendingDeclarationPrompt = null
   cache.submittedDeclarationKeys = []
   playedCardFlySourceByCache.delete(cache)
+  clearDeclarationBubbleUiState(cache)
 }
 
 function scheduleCompletedTrickCollection(
@@ -939,6 +1174,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
 
   const sortedHand = sortLocalHandForDisplay(game.ownHand, getSortOptions(winningBid))
   const isMyTurn = playing?.currentTurnSeat === localSeat
+  const declarationBubbles = syncTransientDeclarationBubbles({ cache, game })
 
   function canSubmitHandCard(cardId: string): boolean {
     if (!isMyTurn) {
@@ -1104,6 +1340,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         escapeHtml,
         dealtHands: dealtHandsForPanels,
         bidBubbles: null,
+        declarationBubbles,
       })}
       ${renderBottomHandOverlay({
         cards: sortedHand,

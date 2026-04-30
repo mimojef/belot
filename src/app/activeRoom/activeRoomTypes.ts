@@ -10,6 +10,7 @@ import type {
   Seat,
   ServerMessage,
 } from '../network/createGameServerClient'
+import type { GameAudioController } from '../audio/createGameAudioController'
 import type { PendingDeclarationPrompt } from './declarations/declarationPromptTypes'
 
 export type ActiveRoomState = {
@@ -29,6 +30,7 @@ export type ActiveRoomState = {
 
 export type CreateActiveRoomFlowControllerOptions = {
   root: HTMLDivElement
+  gameAudio?: GameAudioController
   isConnected: () => boolean
   leaveActiveRoom: (roomId: string) => void
   submitCutIndex: (roomId: string, cutIndex: number) => void

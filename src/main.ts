@@ -1,6 +1,7 @@
 import './style.css'
 
 import { createActiveRoomFlowController } from './app/activeRoom/createActiveRoomFlowController'
+import { createGameAudioController } from './app/audio/createGameAudioController'
 import { createLobbyFlowController } from './app/lobby/createLobbyFlowController'
 import { createGameServerClient, type GameServerClient } from './app/network/createGameServerClient'
 import { createViewportResizeHandler } from './ui/layout/viewportStage'
@@ -14,6 +15,7 @@ if (!rootElementCandidate) {
 const rootElement: HTMLDivElement = rootElementCandidate
 
 let client: GameServerClient
+const gameAudio = createGameAudioController()
 
 const lobby = createLobbyFlowController({
   root: rootElement,
@@ -30,6 +32,7 @@ const lobby = createLobbyFlowController({
 
 const activeRoom = createActiveRoomFlowController({
   root: rootElement,
+  gameAudio,
   isConnected: () => client.isConnected(),
   leaveActiveRoom: (roomId) => {
     client.leaveActiveRoom(roomId)

@@ -2,9 +2,16 @@ export type GameAudioController = {
   playBidBubble(label: string): void
   playDeclarationBubble(lines: string[]): void
   playCardMove(): void
-  scheduleDealPacketSounds(sequenceKey: string): void
+  scheduleDealPacketSounds(sequenceKey: string, timing?: DealPacketSoundTiming): void
   clearDealPacketSounds(): void
   reset(): void
+}
+
+export type DealPacketSoundTiming = {
+  packetCount?: number
+  packetStartDelayMs?: number
+  packetDelayStepMs?: number
+  packetLiftOffsetMs?: number
 }
 
 type CreateGameAudioControllerOptions = {
@@ -336,7 +343,7 @@ export function createGameAudioController(
     playSfx(buildFilePath(sfxBasePath, 'card-move.mp3'))
   }
 
-  function scheduleDealPacketSounds(sequenceKey: string): void {
+  function scheduleDealPacketSounds(sequenceKey: string, timing: DealPacketSoundTiming = {}): void {
     if (!sequenceKey) {
       return
     }
@@ -348,11 +355,16 @@ export function createGameAudioController(
     clearDealPacketSounds()
     activeDealPacketSequenceKey = sequenceKey
 
-    for (let index = 0; index < dealPacketCount; index += 1) {
+    const packetCount = timing.packetCount ?? dealPacketCount
+    const packetStartDelayMs = timing.packetStartDelayMs ?? dealPacketStartDelayMs
+    const packetDelayStepMs = timing.packetDelayStepMs ?? dealPacketDelayStepMs
+    const packetLiftOffsetMs = timing.packetLiftOffsetMs ?? dealPacketLiftOffsetMs
+
+    for (let index = 0; index < packetCount; index += 1) {
       const delay =
-        dealPacketStartDelayMs +
-        index * dealPacketDelayStepMs +
-        dealPacketLiftOffsetMs
+        packetStartDelayMs +
+        index * packetDelayStepMs +
+        packetLiftOffsetMs
 
       const timeoutId = window.setTimeout(() => {
         if (activeDealPacketSequenceKey !== sequenceKey) {
