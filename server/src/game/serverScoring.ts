@@ -828,6 +828,13 @@ export function resolveServerScoring(
   const officialRoundPoints = officialRoundScore.roundBreakdown.total
   const matchTotals = addRoundScores(state.score.match, officialRoundPoints)
   const carryOver = officialRoundScore.nextCarryOver
+  const isCapotRound =
+    baseRoundScore.isComplete &&
+    (baseRoundScore.teamA.tricksWon === 8 || baseRoundScore.teamB.tricksWon === 8)
+  const isNonCapotRound =
+    baseRoundScore.isComplete &&
+    baseRoundScore.teamA.tricksWon > 0 &&
+    baseRoundScore.teamB.tricksWon > 0
 
   return {
     roundBreakdown: officialRoundScore.roundBreakdown,
@@ -842,6 +849,8 @@ export function resolveServerScoring(
       officialRoundPoints,
       matchTotals,
       carryOver,
+      isCapotRound,
+      isNonCapotRound,
       outcomeLabel: getServerOutcomeLabel(roundOutcome.outcome),
       outcomeShortLabel: getServerOutcomeShortLabel(roundOutcome.outcome),
       counterMultiplier,

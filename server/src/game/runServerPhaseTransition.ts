@@ -6,6 +6,10 @@ import { startNextServerRound } from './startNextServerRound.js'
 export function runServerPhaseTransition(
   state: ServerAuthoritativeGameState,
 ): ServerAuthoritativeGameState {
+  if (state.phase === 'match-ended') {
+    return state
+  }
+
   if (state.phase === 'scoring') {
     return startNextServerRound(state)
   }

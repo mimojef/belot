@@ -47,6 +47,7 @@ export function createInitialAuthoritativeGameState(
   return {
     phase: 'new-game',
     phaseEnteredAt: null,
+    targetScore: room.config.targetScore,
     players: createPlayersStateFromRoom(room),
     round: {
       dealerSeat: null,
@@ -63,6 +64,7 @@ export function createInitialAuthoritativeGameState(
     wonTricks: createEmptyWonTricks(),
     playing: createEmptyPlayingState(),
     scoring: null,
+    matchEnded: null,
     score: {
       round: createEmptyScoreBreakdown(),
       match: {

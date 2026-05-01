@@ -9,6 +9,7 @@ import {
   type RoomCompletedTrickSnapshot,
   type RoomDeclarationSnapshot,
   type RoomGameSnapshot,
+  type RoomMatchEndedSnapshot,
   type RoomPlayingSnapshot,
   type RoomScoringSnapshot,
   type RoomSeatSnapshot,
@@ -219,9 +220,28 @@ function createScoringSnapshot(
     officialRoundPoints: createTeamPointsSnapshot(scoring.officialRoundPoints),
     matchTotals: createTeamPointsSnapshot(scoring.matchTotals),
     carryOver: createTeamPointsSnapshot(scoring.carryOver),
+    isCapotRound: scoring.isCapotRound,
+    isNonCapotRound: scoring.isNonCapotRound,
     outcomeLabel: scoring.outcomeLabel,
     outcomeShortLabel: scoring.outcomeShortLabel,
     counterMultiplier: scoring.counterMultiplier,
+  }
+}
+
+function createMatchEndedSnapshot(
+  authoritativeState: ServerAuthoritativeGameState,
+): RoomMatchEndedSnapshot | null {
+  const matchEnded = authoritativeState.matchEnded
+
+  if (matchEnded === null) {
+    return null
+  }
+
+  return {
+    winnerTeam: matchEnded.winnerTeam,
+    targetScore: matchEnded.targetScore,
+    finalScore: createTeamPointsSnapshot(matchEnded.finalScore),
+    endedAt: matchEnded.endedAt,
   }
 }
 
@@ -265,6 +285,7 @@ function createGameSnapshot(
     bidding: createBiddingSnapshot(authoritativeState, yourSeat),
     playing: createPlayingSnapshot(authoritativeState, yourSeat),
     scoring: createScoringSnapshot(authoritativeState),
+    matchEnded: createMatchEndedSnapshot(authoritativeState),
     declarations: authoritativeState.declarations.map(createDeclarationSnapshot),
     score: {
       match: createTeamPointsSnapshot(authoritativeState.score.match),

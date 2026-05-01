@@ -145,14 +145,24 @@ export type ServerScoringState = {
   officialRoundPoints: ServerRoundScore
   matchTotals: ServerRoundScore
   carryOver: ServerCarryOverPoints
+  isCapotRound: boolean
+  isNonCapotRound: boolean
   outcomeLabel: string
   outcomeShortLabel: string
   counterMultiplier: number
 }
 
+export type ServerMatchEndedState = {
+  winnerTeam: Team
+  targetScore: number
+  finalScore: ServerRoundScore
+  endedAt: number
+}
+
 export type ServerAuthoritativeGameState = {
   phase: AuthoritativePhaseType
   phaseEnteredAt: number | null
+  targetScore: number
   players: Record<Seat, ServerPlayerState>
   round: ServerRoundMeta
   deck: ServerCard[]
@@ -163,6 +173,7 @@ export type ServerAuthoritativeGameState = {
   wonTricks: Record<Team, ServerCard[][]>
   playing: ServerPlayingState | null
   scoring: ServerScoringState | null
+  matchEnded: ServerMatchEndedState | null
   score: {
     round: ServerScoreBreakdown
     match: ServerRoundScore
