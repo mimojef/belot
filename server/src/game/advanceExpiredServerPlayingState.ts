@@ -13,6 +13,25 @@ export type AdvanceExpiredServerPlayingStateResult = {
   eventAt: number
 }
 
+function canDeclareBotBeloteForCard(
+  state: ServerAuthoritativeGameState,
+  card: ServerCard,
+): boolean {
+  const winningBid = state.bidding.winningBid
+
+  if (winningBid === null || winningBid.contract === 'no-trumps') {
+    return false
+  }
+
+  if (winningBid.contract === 'suit') {
+    return winningBid.trumpSuit === card.suit
+  }
+
+  const leadSuit = state.playing?.currentTrick.plays[0]?.card.suit ?? null
+
+  return leadSuit === null || leadSuit === card.suit
+}
+
 function getBotBeloteDeclarationKeysForPlay(
   state: ServerAuthoritativeGameState,
   seat: Seat,
@@ -23,6 +42,10 @@ function getBotBeloteDeclarationKeysForPlay(
   }
 
   if (card.rank !== 'Q' && card.rank !== 'K') {
+    return []
+  }
+
+  if (!canDeclareBotBeloteForCard(state, card)) {
     return []
   }
 

@@ -9,6 +9,7 @@ import type {
   ServerSuit,
   ServerWinningBid,
 } from './serverGameTypes.js'
+import { scoreServerDeclarations } from './declarations/scoreServerDeclarations.js'
 
 type ServerScoringContract = 'suit' | 'all-trumps' | 'no-trumps'
 
@@ -748,10 +749,6 @@ function buildOfficialRoundScore(input: {
   }
 }
 
-function buildZeroDeclarationsScore(): ServerRoundScore {
-  return createZeroRoundScore()
-}
-
 export function getServerCounterMultiplier(
   winningBid: NonNullable<ServerWinningBid>,
 ): number {
@@ -799,8 +796,9 @@ export function resolveServerScoring(
     contract: winningBid.contract,
     trumpSuit: winningBid.trumpSuit,
   })
-  const declarationPoints = buildZeroDeclarationsScore()
-  const belotePoints = buildZeroDeclarationsScore()
+  const { declarationPoints, belotePoints } = scoreServerDeclarations(
+    state.declarations,
+  )
   const roundOutcome = calculateRoundOutcome({
     baseRoundScore,
     bidderSeat: winningBid.seat,

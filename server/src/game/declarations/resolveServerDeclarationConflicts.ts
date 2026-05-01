@@ -65,11 +65,30 @@ function compareDefaultPriority(
   return left.key.localeCompare(right.key)
 }
 
+function declarationCandidatesOverlap(
+  left: ServerDeclarationCandidate,
+  right: ServerDeclarationCandidate,
+): boolean {
+  if (left.type === 'belote' && right.type !== 'belote') {
+    return false
+  }
+
+  if (right.type === 'belote' && left.type !== 'belote') {
+    return false
+  }
+
+  const rightCardIds = new Set(right.cardIds)
+
+  return left.cardIds.some((cardId) => rightCardIds.has(cardId))
+}
+
 function overlapsSelectedCards(
   candidate: ServerDeclarationCandidate,
-  selectedCardIds: Set<string>,
+  selectedCandidates: ServerDeclarationCandidate[],
 ): boolean {
-  return candidate.cardIds.some((cardId) => selectedCardIds.has(cardId))
+  return selectedCandidates.some((selectedCandidate) =>
+    declarationCandidatesOverlap(candidate, selectedCandidate),
+  )
 }
 
 export function resolveServerDeclarationConflicts(
@@ -77,18 +96,14 @@ export function resolveServerDeclarationConflicts(
 ): ServerDeclarationConflictResolution {
   const selectedCandidates: ServerDeclarationCandidate[] = []
   const rejectedCandidates: ServerDeclarationCandidate[] = []
-  const selectedCardIds = new Set<string>()
 
   for (const candidate of [...candidates].sort(compareDefaultPriority)) {
-    if (overlapsSelectedCards(candidate, selectedCardIds)) {
+    if (overlapsSelectedCards(candidate, selectedCandidates)) {
       rejectedCandidates.push(candidate)
       continue
     }
 
     selectedCandidates.push(candidate)
-    for (const cardId of candidate.cardIds) {
-      selectedCardIds.add(cardId)
-    }
   }
 
   selectedCandidates.sort((left, right) => left.key.localeCompare(right.key))

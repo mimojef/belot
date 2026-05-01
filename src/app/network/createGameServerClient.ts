@@ -190,7 +190,13 @@ export type RoomDeclarationSnapshot = {
   type: 'sequence' | 'square' | 'belote'
   publicLabel: string
   points: number
+  cards: RoomCardSnapshot[]
+  cardIds: string[]
+  suit: 'clubs' | 'diamonds' | 'hearts' | 'spades' | null
+  highRank: '7' | '8' | '9' | '10' | 'J' | 'Q' | 'K' | 'A' | null
   declaredAtTrickIndex: number
+  announced: boolean
+  valid: boolean
 }
 
 export type RoomPlayingSnapshot = {

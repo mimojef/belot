@@ -94,7 +94,13 @@ function createDeclarationSnapshot(
     type: declaration.type,
     publicLabel: declaration.publicLabel,
     points: declaration.points,
+    cards: declaration.cards.map(createCardSnapshot),
+    cardIds: declaration.cardIds,
+    suit: declaration.suit,
+    highRank: declaration.highRank,
     declaredAtTrickIndex: declaration.declaredAtTrickIndex,
+    announced: declaration.announced,
+    valid: declaration.valid,
   }
 }
 
