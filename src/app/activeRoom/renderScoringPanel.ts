@@ -19,6 +19,7 @@ const TABLE_BACKGROUND = `
 
 const LABEL_COLUMN_WIDTH_PX = 108
 const TABLE_GRID_COLUMNS = `${LABEL_COLUMN_WIDTH_PX}px minmax(0, 1fr) minmax(0, 1fr)`
+const RESULT_COUNTER_DURATION_MS = 1000
 const RANK_ORDER: RoomDeclarationSnapshot['highRank'][] = [
   '7',
   '8',
@@ -648,10 +649,10 @@ function renderResultRow(ourPoints: number, theirPoints: number): string {
           display:flex;
           align-items:center;
           justify-content:center;
-          font-size:22px;
+          font-size:26px;
         "
       >
-        ${ourPoints}
+        <span data-scoring-result-counter="1" data-target-points="${ourPoints}">0</span>
       </div>
 
       <div
@@ -659,13 +660,46 @@ function renderResultRow(ourPoints: number, theirPoints: number): string {
           display:flex;
           align-items:center;
           justify-content:center;
-          font-size:22px;
+          font-size:26px;
         "
       >
-        ${theirPoints}
+        <span data-scoring-result-counter="1" data-target-points="${theirPoints}">0</span>
       </div>
     </div>
   `
+}
+
+function animateScoringResultCounters(root: HTMLElement): void {
+  const counters = Array.from(
+    root.querySelectorAll<HTMLElement>('[data-scoring-result-counter="1"]'),
+  )
+
+  if (counters.length === 0) {
+    return
+  }
+
+  const targets = counters.map((counter) => {
+    const target = Number(counter.dataset.targetPoints)
+    return Number.isFinite(target) ? target : 0
+  })
+  const startedAt = performance.now()
+
+  function tick(now: number): void {
+    const elapsed = now - startedAt
+    const progress = Math.min(1, elapsed / RESULT_COUNTER_DURATION_MS)
+    const easedProgress = 1 - Math.pow(1 - progress, 3)
+
+    counters.forEach((counter, index) => {
+      const target = targets[index] ?? 0
+      counter.textContent = String(Math.round(target * easedProgress))
+    })
+
+    if (progress < 1) {
+      window.requestAnimationFrame(tick)
+    }
+  }
+
+  window.requestAnimationFrame(tick)
 }
 
 function renderScoringPanelHtml(
@@ -935,4 +969,6 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
       })}
     </div>
   `
+
+  animateScoringResultCounters(root)
 }

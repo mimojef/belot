@@ -45,6 +45,7 @@ export function submitHumanPlayCardForRoom(
   const declarationValidation = validateServerDeclarationKeysForPlay(
     state,
     seat,
+    cardId,
     declarationKeys,
   )
 

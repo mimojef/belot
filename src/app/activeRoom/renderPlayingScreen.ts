@@ -390,17 +390,37 @@ function buildPendingDeclarationBubbleForSeat(options: {
   declarations: RoomDeclarationSnapshot[]
   seat: Seat
   shownSignatures: Set<string>
+  triggerTrickIndex: number | null
+  triggerCardId: string | null
 }): {
   entryKey: string
   signatures: string[]
   lines: string[]
 } | null {
-  const { declarations, seat, shownSignatures } = options
+  const { declarations, seat, shownSignatures, triggerTrickIndex, triggerCardId } = options
   const pending: RoomDeclarationSnapshot[] = []
   const signatures: string[] = []
 
   declarations.forEach((declaration, index) => {
     if (declaration.seat !== seat) {
+      return
+    }
+
+    if (!declaration.announced || !declaration.valid) {
+      return
+    }
+
+    if (
+      triggerTrickIndex === null ||
+      declaration.declaredAtTrickIndex !== triggerTrickIndex
+    ) {
+      return
+    }
+
+    if (
+      declaration.type === 'belote' &&
+      (triggerCardId === null || !declaration.cardIds.includes(triggerCardId))
+    ) {
       return
     }
 
@@ -431,9 +451,11 @@ function syncTransientDeclarationBubbles(options: {
   cache: PlayingUiCache
   game: RoomGameSnapshot
   triggerSeat: Seat | null
+  triggerTrickIndex: number | null
+  triggerCardId: string | null
   onBubbleShown?: (lines: string[]) => void
 }): Partial<Record<Seat, SeatDeclarationBubble>> | null {
-  const { cache, game, triggerSeat, onBubbleShown } = options
+  const { cache, game, triggerSeat, triggerTrickIndex, triggerCardId, onBubbleShown } = options
   const state = getDeclarationBubbleUiState(cache)
 
   if (triggerSeat !== null && !state.activeBubbles[triggerSeat]) {
@@ -442,6 +464,8 @@ function syncTransientDeclarationBubbles(options: {
       declarations: game.declarations,
       seat: triggerSeat,
       shownSignatures,
+      triggerTrickIndex,
+      triggerCardId,
     })
 
     if (pendingBubble !== null) {
@@ -1179,10 +1203,20 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
   const sortedHand = sortLocalHandForDisplay(game.ownHand, getSortOptions(winningBid))
   const isMyTurn = playing?.currentTurnSeat === localSeat
   const declarationBubbleTriggerSeat = animateNewest ? newestDisplayedPlay?.seat ?? null : null
+  const declarationBubbleTriggerTrickIndex = animateNewest
+    ? isShowingBufferedCompletedTrick
+      ? cache.bufferedCompletedTrick?.trickIndex ?? null
+      : completedCount
+    : null
+  const declarationBubbleTriggerCardId = animateNewest
+    ? newestDisplayedPlay?.card.id ?? null
+    : null
   const declarationBubbles = syncTransientDeclarationBubbles({
     cache,
     game,
     triggerSeat: declarationBubbleTriggerSeat,
+    triggerTrickIndex: declarationBubbleTriggerTrickIndex,
+    triggerCardId: declarationBubbleTriggerCardId,
     onBubbleShown: onDeclarationBubbleShown,
   })
 

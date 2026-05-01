@@ -37,7 +37,7 @@ const CARD_HEIGHT = CUTTING_CARD_HEIGHT
 const CARD_STEP = CUTTING_CARD_STEP
 const CARD_TOP = CUTTING_CARD_TOP
 const DECK_PADDING_X = CUTTING_DECK_PADDING_X
-const CUT_HOTSPOT_WIDTH = 24
+const CUT_HOTSPOT_WIDTH = CARD_WIDTH
 const SELECTED_GAP = CUTTING_SELECTED_GAP
 const CARD_HOVER_LIFT_PX = 14
 export const CUTTING_VISUAL_ANIMATION_TOTAL_MS = 860
@@ -124,33 +124,14 @@ function getCutSlotCenter(cutIndex: number, selectedCutIndex: number | null): nu
   return DECK_PADDING_X + cutIndex * CARD_STEP + SELECTED_GAP
 }
 
-function buildCutHotspotInteractionHandler(isActive: boolean): string {
-  const lineOpacity = isActive ? '0.94' : '0'
-  const lineScale = isActive ? '1' : '0.72'
-  const lineShadow = isActive
-    ? '0 0 0 1px rgba(254,240,138,0.14), 0 0 10px rgba(250,204,21,0.18)'
-    : 'none'
-  const glowOpacity = isActive ? '0.62' : '0'
-  const glowScale = isActive ? '1' : '0.9'
-
-  return `
-    const line=this.firstElementChild;
-    const glow=this.lastElementChild;
-    if(line){
-      line.style.opacity='${lineOpacity}';
-      line.style.transform='translateX(-50%) scaleY(${lineScale})';
-      line.style.boxShadow='${lineShadow}';
-    }
-    if(glow){
-      glow.style.opacity='${glowOpacity}';
-      glow.style.transform='translate(-50%, -50%) scale(${glowScale})';
-    }
-  `
-    .replace(/\s+/g, ' ')
-    .trim()
+function buildCutHotspotInteractionHandler(): string {
+  return ''
 }
 
-function buildCutDeckHoverMoveHandler(selectedCutIndex: number | null): string {
+function buildCutDeckHoverMoveHandler(
+  selectedCutIndex: number | null,
+  validCutCount: number,
+): string {
   const cardLeftPositions = Array.from(
     { length: VISUAL_CARD_COUNT },
     (_, index) => getCardLeft(index + 1, selectedCutIndex),
@@ -167,15 +148,20 @@ function buildCutDeckHoverMoveHandler(selectedCutIndex: number | null): string {
     if(
       pointerX < ${DECK_PADDING_X} ||
       pointerX > ${deckMaxX} ||
-      pointerY < ${CARD_TOP} ||
+      pointerY < ${CARD_TOP - CARD_HOVER_LIFT_PX} ||
       pointerY > ${CARD_TOP + CARD_HEIGHT}
     ){
       if(activeCard){
         activeCard.classList.remove('is-hover-lifted');
       }
+      const cutButton=this.querySelector('[data-active-room-cut-hit-area]');
+      if(cutButton){
+        cutButton.removeAttribute('data-active-room-cut-index');
+      }
       return;
     }
     const cardLeftPositions=${JSON.stringify(cardLeftPositions)};
+    const validCutCount=${validCutCount};
     let hoverCardNumber=1;
     for(let index=0; index<cardLeftPositions.length; index+=1){
       if(pointerX >= cardLeftPositions[index]){
@@ -184,6 +170,7 @@ function buildCutDeckHoverMoveHandler(selectedCutIndex: number | null): string {
       }
       break;
     }
+    hoverCardNumber=Math.max(1, Math.min(validCutCount, hoverCardNumber));
     const cards=this.querySelectorAll('.belot-active-room-cutting-card');
     const hoverCard=cards[hoverCardNumber - 1];
     if(activeCard && activeCard !== hoverCard){
@@ -191,6 +178,11 @@ function buildCutDeckHoverMoveHandler(selectedCutIndex: number | null): string {
     }
     if(hoverCard){
       hoverCard.classList.add('is-hover-lifted');
+    }
+    const cutButton=this.querySelector('[data-active-room-cut-hit-area]');
+    if(cutButton){
+      cutButton.setAttribute('data-active-room-cut-index', String(hoverCardNumber));
+      cutButton.setAttribute('aria-label', 'Избери място за цепене след карта ' + hoverCardNumber);
     }
   `
     .replace(/\s+/g, ' ')
@@ -202,6 +194,10 @@ function buildCutDeckHoverLeaveHandler(): string {
     const activeCard=this.querySelector('.belot-active-room-cutting-card.is-hover-lifted');
     if(activeCard){
       activeCard.classList.remove('is-hover-lifted');
+    }
+    const cutButton=this.querySelector('[data-active-room-cut-hit-area]');
+    if(cutButton){
+      cutButton.removeAttribute('data-active-room-cut-index');
     }
   `
     .replace(/\s+/g, ' ')
@@ -352,8 +348,8 @@ function renderVisualDeck(
     ? Array.from({ length: validCutCount }, (_, index) => {
         const cutIndex = index + 1
         const slotCenter = getCutSlotCenter(cutIndex, selectedCutIndex)
-        const activateHoverHandler = buildCutHotspotInteractionHandler(true)
-        const deactivateHoverHandler = buildCutHotspotInteractionHandler(false)
+        const activateHoverHandler = buildCutHotspotInteractionHandler()
+        const deactivateHoverHandler = buildCutHotspotInteractionHandler()
 
         return `
           <button
@@ -363,9 +359,9 @@ function renderVisualDeck(
             style="
               position:absolute;
               left:${slotCenter - CUT_HOTSPOT_WIDTH / 2}px;
-              top:${CARD_TOP - 12}px;
+              top:${CARD_TOP - CARD_HOVER_LIFT_PX}px;
               width:${CUT_HOTSPOT_WIDTH}px;
-              height:${CARD_HEIGHT + 24}px;
+              height:${CARD_HEIGHT + CARD_HOVER_LIFT_PX}px;
               padding:0;
               border:none;
               background:transparent;
@@ -417,7 +413,7 @@ function renderVisualDeck(
 
   const selectedMarkerHtml = ''
   const deckHoverMoveHandler = isInteractive
-    ? buildCutDeckHoverMoveHandler(selectedCutIndex)
+    ? buildCutDeckHoverMoveHandler(selectedCutIndex, validCutCount)
     : ''
   const deckHoverLeaveHandler = isInteractive ? buildCutDeckHoverLeaveHandler() : ''
   const hoverLiftStyles = isInteractive

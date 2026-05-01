@@ -26,9 +26,67 @@ type ServerDeclarationValidationResult =
   | { ok: true; declarations: ServerDeclaration[] }
   | { ok: false; message: string }
 
+function getCounterpartRank(rank: ServerAuthoritativeGameState['hands'][Seat][number]['rank']) {
+  if (rank === 'Q') return 'K'
+  if (rank === 'K') return 'Q'
+  return null
+}
+
+function canDeclareBeloteForCard(
+  state: ServerAuthoritativeGameState,
+  playing: ServerPlayingState,
+  card: ServerAuthoritativeGameState['hands'][Seat][number],
+): boolean {
+  const contract = state.bidding.winningBid
+
+  if (contract === null || contract.contract === 'no-trumps') {
+    return false
+  }
+
+  if (contract.contract === 'suit') {
+    return contract.trumpSuit === card.suit
+  }
+
+  const leadSuit = playing.currentTrick.plays[0]?.card.suit ?? null
+  return leadSuit === null || leadSuit === card.suit
+}
+
+function validateSelectedDeclarationForPlayedCard(params: {
+  state: ServerAuthoritativeGameState
+  playing: ServerPlayingState
+  seat: Seat
+  cardId: string
+  candidate: ServerDeclarationCandidate
+}): boolean {
+  const { state, playing, seat, cardId, candidate } = params
+
+  if (candidate.type !== 'belote') {
+    return playing.currentTrick.trickIndex === 0
+  }
+
+  const card = state.hands[seat].find((handCard) => handCard.id === cardId)
+
+  if (!card || (card.rank !== 'Q' && card.rank !== 'K')) {
+    return false
+  }
+
+  const counterpartRank = getCounterpartRank(card.rank)
+  const hasCounterpart = counterpartRank !== null && state.hands[seat].some(
+    (handCard) => handCard.suit === card.suit && handCard.rank === counterpartRank,
+  )
+
+  return (
+    hasCounterpart &&
+    candidate.cardIds.includes(card.id) &&
+    candidate.privateMetadata.suit === card.suit &&
+    canDeclareBeloteForCard(state, playing, card)
+  )
+}
+
 export function validateServerDeclarationKeysForPlay(
   state: ServerAuthoritativeGameState,
   seat: Seat,
+  cardId: string,
   declarationKeys: string[],
 ): ServerDeclarationValidationResult {
   if (declarationKeys.length === 0) {
@@ -57,6 +115,16 @@ export function validateServerDeclarationKeysForPlay(
 
     if (!candidate) {
       return { ok: false, message: 'Невалиден анонс за текущата ръка.' }
+    }
+
+    if (!validateSelectedDeclarationForPlayedCard({
+      state,
+      playing,
+      seat,
+      cardId,
+      candidate,
+    })) {
+      return { ok: false, message: 'Анонсът не може да се обяви с тази карта.' }
     }
 
     selectedCandidates.push(candidate)
@@ -208,6 +276,7 @@ export function submitServerPlayCard(
   const declarationValidation = validateServerDeclarationKeysForPlay(
     state,
     seat,
+    cardId,
     declarationKeys,
   )
 
