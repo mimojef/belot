@@ -2,6 +2,7 @@ export type GameAudioController = {
   playBidBubble(label: string): void
   playDeclarationBubble(lines: string[]): void
   playCardMove(): void
+  syncReactionCountdownWarning(shouldPlay: boolean): void
   scheduleDealPacketSounds(sequenceKey: string, timing?: DealPacketSoundTiming): void
   clearDealPacketSounds(): void
   reset(): void
@@ -27,6 +28,8 @@ type CreateGameAudioControllerOptions = {
 const DEFAULT_BID_BASE_PATH = '/audio/table-calls'
 const DEFAULT_DECLARATION_BASE_PATH = '/audio/table-calls'
 const DEFAULT_SFX_BASE_PATH = '/audio/card-sfx'
+const DEFAULT_GAME_SOUNDS_BASE_PATH = '/audio/game-sounds'
+const REACTION_COUNTDOWN_WARNING_FILE = 'counter.mp3'
 
 const DEFAULT_DEAL_PACKET_COUNT = 4
 const DEFAULT_DEAL_PACKET_START_DELAY_MS = 220
@@ -147,6 +150,7 @@ export function createGameAudioController(
   let lastPassVariantIndex = -1
   let speechQueue: string[] = []
   let activeSpeechAudio: HTMLAudioElement | null = null
+  let activeReactionCountdownAudio: HTMLAudioElement | null = null
   let activeDealPacketSequenceKey: string | null = null
   let dealPacketTimeoutIds: number[] = []
 
@@ -173,10 +177,21 @@ export function createGameAudioController(
     activeDealPacketSequenceKey = null
   }
 
+  function stopReactionCountdownWarning(): void {
+    if (!activeReactionCountdownAudio) {
+      return
+    }
+
+    activeReactionCountdownAudio.pause()
+    activeReactionCountdownAudio.currentTime = 0
+    activeReactionCountdownAudio = null
+  }
+
   function stopBackgroundAudio(): void {
     clearSpeechQueue()
     clearSpeechAudio()
     clearDealPacketSounds()
+    stopReactionCountdownWarning()
   }
 
   function playNextSpeechFromQueue(): void {
@@ -344,6 +359,29 @@ export function createGameAudioController(
     playSfx(buildFilePath(sfxBasePath, 'card-move.mp3'))
   }
 
+  function syncReactionCountdownWarning(shouldPlay: boolean): void {
+    if (!shouldPlay || !canPlayAudioNow()) {
+      stopReactionCountdownWarning()
+      return
+    }
+
+    if (activeReactionCountdownAudio !== null) {
+      return
+    }
+
+    const audio = createAudio(
+      buildFilePath(DEFAULT_GAME_SOUNDS_BASE_PATH, REACTION_COUNTDOWN_WARNING_FILE),
+    )
+    activeReactionCountdownAudio = audio
+    audio.loop = true
+
+    void audio.play().catch(() => {
+      if (activeReactionCountdownAudio === audio) {
+        activeReactionCountdownAudio = null
+      }
+    })
+  }
+
   function scheduleDealPacketSounds(sequenceKey: string, timing: DealPacketSoundTiming = {}): void {
     if (!sequenceKey) {
       return
@@ -405,6 +443,7 @@ export function createGameAudioController(
     playBidBubble,
     playDeclarationBubble,
     playCardMove,
+    syncReactionCountdownWarning,
     scheduleDealPacketSounds,
     clearDealPacketSounds,
     reset,

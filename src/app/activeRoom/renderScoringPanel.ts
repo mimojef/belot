@@ -20,6 +20,7 @@ const TABLE_BACKGROUND = `
 const LABEL_COLUMN_WIDTH_PX = 108
 const TABLE_GRID_COLUMNS = `${LABEL_COLUMN_WIDTH_PX}px minmax(0, 1fr) minmax(0, 1fr)`
 const SUM_COUNTER_DURATION_MS = 1000
+const SUM_COUNTER_AUDIO_SRC = '/audio/game-sounds/scoring.mp3'
 const RANK_ORDER: RoomDeclarationSnapshot['highRank'][] = [
   '7',
   '8',
@@ -673,6 +674,32 @@ function renderAnimatedSumValue(points: number): string {
   return `<span data-scoring-sum-counter="1" data-target-points="${points}">0</span>`
 }
 
+function canPlayAudioNow(): boolean {
+  if (typeof document === 'undefined') {
+    return true
+  }
+
+  if (document.visibilityState !== 'visible') {
+    return false
+  }
+
+  if (typeof document.hasFocus === 'function' && !document.hasFocus()) {
+    return false
+  }
+
+  return true
+}
+
+function playScoringSumSound(): void {
+  if (!canPlayAudioNow()) {
+    return
+  }
+
+  const audio = new Audio(SUM_COUNTER_AUDIO_SRC)
+  audio.preload = 'auto'
+  void audio.play().catch(() => {})
+}
+
 function animateScoringSumCounters(root: HTMLElement): void {
   const counters = Array.from(
     root.querySelectorAll<HTMLElement>('[data-scoring-sum-counter="1"]'),
@@ -681,6 +708,8 @@ function animateScoringSumCounters(root: HTMLElement): void {
   if (counters.length === 0) {
     return
   }
+
+  playScoringSumSound()
 
   const targets = counters.map((counter) => {
     const target = Number(counter.dataset.targetPoints)

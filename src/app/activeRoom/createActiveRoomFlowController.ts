@@ -104,6 +104,8 @@ const SEAT_LABELS: Record<Seat, string> = {
   left: 'Ляво',
 }
 
+const REACTION_COUNTDOWN_WARNING_THRESHOLD_MS = 5_000
+
 export function createActiveRoomFlowController(
   options: CreateActiveRoomFlowControllerOptions,
 ): ActiveRoomFlowController {
@@ -121,6 +123,7 @@ export function createActiveRoomFlowController(
   const playingCache: PlayingUiCache = createPlayingUiCache()
   let lastKnownWinningBid: NonNullable<RoomWinningBidSnapshot> | null = null
   let scoringCountdownIntervalId: number | null = null
+  let reactionCountdownAudioIntervalId: number | null = null
 
   function getLocalSeatSnapshot(): RoomSeatSnapshot | null {
     if (!activeRoomState) {
@@ -414,6 +417,84 @@ export function createActiveRoomFlowController(
 
       updateScoringCountdownText()
     }, 250)
+  }
+
+  function getLocalReactionCountdownRemainingMs(): number | null {
+    const game = activeRoomState?.game ?? null
+    const timerDeadlineAt = game?.timerDeadlineAt ?? null
+
+    if (game === null || timerDeadlineAt === null) {
+      return null
+    }
+
+    const { seat } = activeRoomState!
+
+    if (
+      game.authoritativePhase === 'bidding' &&
+      game.bidding?.canSubmitBid &&
+      !biddingUiState.pendingBidSent
+    ) {
+      return Math.max(0, timerDeadlineAt - Date.now())
+    }
+
+    if (
+      game.authoritativePhase === 'playing' &&
+      game.playing?.currentTurnSeat === seat &&
+      !playingCache.pendingPlayCardSent
+    ) {
+      return Math.max(0, timerDeadlineAt - Date.now())
+    }
+
+    return null
+  }
+
+  function updateReactionCountdownAudio(): void {
+    const remainingMs = getLocalReactionCountdownRemainingMs()
+    const shouldPlay =
+      remainingMs !== null &&
+      remainingMs > 0 &&
+      remainingMs <= REACTION_COUNTDOWN_WARNING_THRESHOLD_MS
+
+    options.gameAudio?.syncReactionCountdownWarning(shouldPlay)
+  }
+
+  function clearReactionCountdownAudioTicker(): void {
+    if (reactionCountdownAudioIntervalId !== null) {
+      window.clearInterval(reactionCountdownAudioIntervalId)
+      reactionCountdownAudioIntervalId = null
+    }
+
+    options.gameAudio?.syncReactionCountdownWarning(false)
+  }
+
+  function syncReactionCountdownAudioTicker(): void {
+    if (!options.gameAudio) {
+      return
+    }
+
+    const remainingMs = getLocalReactionCountdownRemainingMs()
+
+    if (remainingMs === null || remainingMs <= 0) {
+      clearReactionCountdownAudioTicker()
+      return
+    }
+
+    updateReactionCountdownAudio()
+
+    if (reactionCountdownAudioIntervalId !== null) {
+      return
+    }
+
+    reactionCountdownAudioIntervalId = window.setInterval(() => {
+      const nextRemainingMs = getLocalReactionCountdownRemainingMs()
+
+      if (nextRemainingMs === null || nextRemainingMs <= 0) {
+        clearReactionCountdownAudioTicker()
+        return
+      }
+
+      updateReactionCountdownAudio()
+    }, 200)
   }
 
   function cancelCuttingAnimationCompletionTimer(): void {
@@ -885,6 +966,7 @@ export function createActiveRoomFlowController(
 
   function renderActiveRoomScreen(preferAnimationPatch = false): void {
     if (!activeRoomState) {
+      clearReactionCountdownAudioTicker()
       return
     }
 
@@ -1001,6 +1083,7 @@ export function createActiveRoomFlowController(
     if (!isShowingScoringPhase) {
       clearScoringCountdownTicker()
     }
+    syncReactionCountdownAudioTicker()
     if (!isShowingPlayingPhase) {
       resetPlayingUiCache(playingCache)
     }
@@ -2172,6 +2255,7 @@ export function createActiveRoomFlowController(
     clearDealNextTwoAnimationState()
     clearDealLastThreeAnimationState()
     clearScoringCountdownTicker()
+    clearReactionCountdownAudioTicker()
     clearBiddingUiState()
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
@@ -2222,6 +2306,7 @@ export function createActiveRoomFlowController(
       clearDealNextTwoAnimationState()
       clearDealLastThreeAnimationState()
       clearScoringCountdownTicker()
+      clearReactionCountdownAudioTicker()
       clearBiddingUiState()
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
@@ -2237,6 +2322,7 @@ export function createActiveRoomFlowController(
       clearDealNextTwoAnimationState()
       clearDealLastThreeAnimationState()
       clearScoringCountdownTicker()
+      clearReactionCountdownAudioTicker()
       clearBiddingUiState()
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
@@ -2313,6 +2399,7 @@ export function createActiveRoomFlowController(
     clearDealNextTwoAnimationState()
     clearDealLastThreeAnimationState()
     clearScoringCountdownTicker()
+    clearReactionCountdownAudioTicker()
     clearBiddingUiState()
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
@@ -2329,6 +2416,7 @@ export function createActiveRoomFlowController(
     clearDealNextTwoAnimationState()
     clearDealLastThreeAnimationState()
     clearScoringCountdownTicker()
+    clearReactionCountdownAudioTicker()
     clearBiddingUiState()
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
