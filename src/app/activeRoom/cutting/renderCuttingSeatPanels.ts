@@ -728,6 +728,10 @@ export function createCuttingSeatPanelHtml(
   const isCountdownSeat = seat.seat === countdownSeat
   const isHighlightedSeat = seat.seat === highlightSeat
   const shouldShowCuttingCountdown = isCountdownSeat
+  const displayCountdownRemainingMs =
+    shouldShowCuttingCountdown && (seat.isBot || seat.isControlledByBot)
+      ? countdownTotalMs
+      : countdownRemainingMs
   const displayName =
     seat.isOccupied && seat.displayName.trim().length > 0
       ? seat.displayName
@@ -872,7 +876,7 @@ export function createCuttingSeatPanelHtml(
 
           ${renderBottomCuttingCountdownBar(
             shouldShowCuttingCountdown,
-            countdownRemainingMs,
+            displayCountdownRemainingMs,
             countdownTotalMs,
           )}
           ${cutterBadgeHtml}
@@ -943,7 +947,7 @@ export function createCuttingSeatPanelHtml(
             ? renderSideCuttingCountdownFooter(
                 footerLabel,
                 shouldShowCuttingCountdown,
-                countdownRemainingMs,
+                displayCountdownRemainingMs,
                 countdownTotalMs,
                 escapeHtml,
               )

@@ -30,6 +30,7 @@ const DEFAULT_DECLARATION_BASE_PATH = '/audio/table-calls'
 const DEFAULT_SFX_BASE_PATH = '/audio/card-sfx'
 const DEFAULT_GAME_SOUNDS_BASE_PATH = '/audio/game-sounds'
 const REACTION_COUNTDOWN_WARNING_FILE = 'counter.mp3'
+const REACTION_COUNTDOWN_WARNING_OVERLAP_MS = 90
 
 const DEFAULT_DEAL_PACKET_COUNT = 4
 const DEFAULT_DEAL_PACKET_START_DELAY_MS = 220
@@ -78,6 +79,13 @@ const DECLARATION_COMBO_ORDER = [
   'hundred',
   'two-hundreds',
 ]
+
+type ReactionCountdownLoop = {
+  audios: [HTMLAudioElement, HTMLAudioElement]
+  timeoutId: number | null
+  nextIndex: number
+  isStopped: boolean
+}
 
 function normalizeDeclarationLines(lines: string[]): string[] {
   return lines
@@ -150,7 +158,7 @@ export function createGameAudioController(
   let lastPassVariantIndex = -1
   let speechQueue: string[] = []
   let activeSpeechAudio: HTMLAudioElement | null = null
-  let activeReactionCountdownAudio: HTMLAudioElement | null = null
+  let activeReactionCountdownLoop: ReactionCountdownLoop | null = null
   let activeDealPacketSequenceKey: string | null = null
   let dealPacketTimeoutIds: number[] = []
 
@@ -178,13 +186,23 @@ export function createGameAudioController(
   }
 
   function stopReactionCountdownWarning(): void {
-    if (!activeReactionCountdownAudio) {
+    if (!activeReactionCountdownLoop) {
       return
     }
 
-    activeReactionCountdownAudio.pause()
-    activeReactionCountdownAudio.currentTime = 0
-    activeReactionCountdownAudio = null
+    const loop = activeReactionCountdownLoop
+    loop.isStopped = true
+
+    if (loop.timeoutId !== null) {
+      window.clearTimeout(loop.timeoutId)
+    }
+
+    for (const audio of loop.audios) {
+      audio.pause()
+      audio.currentTime = 0
+    }
+
+    activeReactionCountdownLoop = null
   }
 
   function stopBackgroundAudio(): void {
@@ -365,21 +383,74 @@ export function createGameAudioController(
       return
     }
 
-    if (activeReactionCountdownAudio !== null) {
+    if (activeReactionCountdownLoop !== null) {
       return
     }
 
-    const audio = createAudio(
-      buildFilePath(DEFAULT_GAME_SOUNDS_BASE_PATH, REACTION_COUNTDOWN_WARNING_FILE),
+    const src = buildFilePath(
+      DEFAULT_GAME_SOUNDS_BASE_PATH,
+      REACTION_COUNTDOWN_WARNING_FILE,
     )
-    activeReactionCountdownAudio = audio
-    audio.loop = true
+    const loop: ReactionCountdownLoop = {
+      audios: [createAudio(src), createAudio(src)],
+      timeoutId: null,
+      nextIndex: 1,
+      isStopped: false,
+    }
+    activeReactionCountdownLoop = loop
 
-    void audio.play().catch(() => {
-      if (activeReactionCountdownAudio === audio) {
-        activeReactionCountdownAudio = null
+    function playLoopAudio(audio: HTMLAudioElement): void {
+      audio.pause()
+      audio.currentTime = 0
+      void audio.play().catch(() => {
+        if (activeReactionCountdownLoop === loop) {
+          stopReactionCountdownWarning()
+        }
+      })
+    }
+
+    function scheduleNextFrom(audio: HTMLAudioElement): void {
+      if (loop.isStopped || activeReactionCountdownLoop !== loop) {
+        return
       }
-    })
+
+      if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
+        audio.addEventListener(
+          'loadedmetadata',
+          () => {
+            scheduleNextFrom(audio)
+          },
+          { once: true },
+        )
+        return
+      }
+
+      const durationMs = audio.duration * 1000
+      const delayMs = Math.max(
+        60,
+        durationMs - REACTION_COUNTDOWN_WARNING_OVERLAP_MS,
+      )
+
+      loop.timeoutId = window.setTimeout(() => {
+        if (loop.isStopped || activeReactionCountdownLoop !== loop) {
+          return
+        }
+
+        const nextAudio = loop.audios[loop.nextIndex]
+        loop.nextIndex = (loop.nextIndex + 1) % loop.audios.length
+
+        playLoopAudio(nextAudio)
+        scheduleNextFrom(nextAudio)
+      }, delayMs)
+    }
+
+    for (const audio of loop.audios) {
+      audio.load()
+    }
+
+    const firstAudio = loop.audios[0]
+    playLoopAudio(firstAudio)
+    scheduleNextFrom(firstAudio)
   }
 
   function scheduleDealPacketSounds(sequenceKey: string, timing: DealPacketSoundTiming = {}): void {

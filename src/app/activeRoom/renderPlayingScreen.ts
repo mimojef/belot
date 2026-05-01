@@ -553,6 +553,7 @@ function getPlayingCountdownState(
     seats.find((seat) => seat.seat === countdownSeat) ?? null
 
   const countdownRemainingMs = currentTurnSeatSnapshot?.isBot
+    || currentTurnSeatSnapshot?.isControlledByBot
     ? Math.max(
         0,
         PLAY_HUMAN_TIMEOUT_MS -

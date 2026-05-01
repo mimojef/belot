@@ -428,6 +428,26 @@ export function createActiveRoomFlowController(
     }
 
     const { seat } = activeRoomState!
+    const localSeatSnapshot = getLocalSeatSnapshot()
+
+    if (localSeatSnapshot?.isBot || localSeatSnapshot?.isControlledByBot) {
+      return null
+    }
+
+    if (
+      game.authoritativePhase === 'cutting' &&
+      game.cutting?.cutterSeat === seat &&
+      game.cutting.selectedCutIndex === null
+    ) {
+      const currentCutCycleKey = getCuttingCycleKey(activeRoomState!.roomId, game)
+
+      if (
+        currentCutCycleKey !== null &&
+        cuttingAnimation.pendingCycleKey !== currentCutCycleKey
+      ) {
+        return Math.max(0, timerDeadlineAt - Date.now())
+      }
+    }
 
     if (
       game.authoritativePhase === 'bidding' &&
@@ -1630,7 +1650,7 @@ export function createActiveRoomFlowController(
       const biddingCountdownRemainingMs =
         rawBiddingCountdownRemainingMs === null
           ? null
-          : biddingCurrentSeatSnapshot?.isBot
+          : biddingCurrentSeatSnapshot?.isBot || biddingCurrentSeatSnapshot?.isControlledByBot
             ? Math.max(
                 0,
                 BID_HUMAN_TIMEOUT_MS -
