@@ -116,7 +116,7 @@ export function renderDeclarationPrompt(params: {
         aria-modal="true"
         aria-label="Избор на анонс"
         style="
-          width:min(92vw,520px);
+          width:min(88vw,430px);
           box-sizing:border-box;
           border:2px solid rgba(245,166,35,0.9);
           border-radius:12px;
@@ -146,30 +146,14 @@ export function renderDeclarationPrompt(params: {
         </div>
         <div
           style="
-            display:grid;
-            grid-template-columns:1fr 1fr;
-            gap:10px;
+            display:block;
           "
         >
           <button
             type="button"
-            data-declaration-none="1"
-            style="
-              min-height:54px;
-              border:1px solid rgba(248,250,252,0.22);
-              border-radius:8px;
-              background:rgba(248,250,252,0.08);
-              color:#f8fafc;
-              font-size:18px;
-              line-height:1;
-              font-weight:800;
-              cursor:pointer;
-            "
-          >Без анонс</button>
-          <button
-            type="button"
             data-declaration-continue="1"
             style="
+              width:100%;
               min-height:54px;
               border:0;
               border-radius:8px;
@@ -203,11 +187,6 @@ export function renderDeclarationPrompt(params: {
       onSelectionChange([...new Set(nextSelectedKeys)])
     })
   })
-
-  overlay.querySelector<HTMLButtonElement>('[data-declaration-none="1"]')
-    ?.addEventListener('click', () => {
-      onSelectionChange([])
-    })
 
   overlay.querySelector<HTMLButtonElement>('[data-declaration-continue="1"]')
     ?.addEventListener('click', () => {

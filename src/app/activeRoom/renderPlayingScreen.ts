@@ -830,7 +830,7 @@ function renderBottomHandOverlay(options: {
     `
   }).join('')
 
-  const myTurnBadge = isMyTurn
+  const myTurnBadge = isMyTurn ? '' : String()
     ? `
       <div
         style="
