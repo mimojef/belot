@@ -19,7 +19,7 @@ const TABLE_BACKGROUND = `
 
 const LABEL_COLUMN_WIDTH_PX = 108
 const TABLE_GRID_COLUMNS = `${LABEL_COLUMN_WIDTH_PX}px minmax(0, 1fr) minmax(0, 1fr)`
-const RESULT_COUNTER_DURATION_MS = 1000
+const SUM_COUNTER_DURATION_MS = 1000
 const RANK_ORDER: RoomDeclarationSnapshot['highRank'][] = [
   '7',
   '8',
@@ -628,7 +628,7 @@ function renderResultRow(ourPoints: number, theirPoints: number): string {
         align-items:center;
         min-height:54px;
         background:#e7a321;
-        color:#fff7e6;
+        color:#101418;
         font-weight:800;
       "
     >
@@ -652,7 +652,7 @@ function renderResultRow(ourPoints: number, theirPoints: number): string {
           font-size:26px;
         "
       >
-        <span data-scoring-result-counter="1" data-target-points="${ourPoints}">0</span>
+        ${escapeHtml(String(ourPoints))}
       </div>
 
       <div
@@ -663,15 +663,19 @@ function renderResultRow(ourPoints: number, theirPoints: number): string {
           font-size:26px;
         "
       >
-        <span data-scoring-result-counter="1" data-target-points="${theirPoints}">0</span>
+        ${escapeHtml(String(theirPoints))}
       </div>
     </div>
   `
 }
 
-function animateScoringResultCounters(root: HTMLElement): void {
+function renderAnimatedSumValue(points: number): string {
+  return `<span data-scoring-sum-counter="1" data-target-points="${points}">0</span>`
+}
+
+function animateScoringSumCounters(root: HTMLElement): void {
   const counters = Array.from(
-    root.querySelectorAll<HTMLElement>('[data-scoring-result-counter="1"]'),
+    root.querySelectorAll<HTMLElement>('[data-scoring-sum-counter="1"]'),
   )
 
   if (counters.length === 0) {
@@ -686,7 +690,7 @@ function animateScoringResultCounters(root: HTMLElement): void {
 
   function tick(now: number): void {
     const elapsed = now - startedAt
-    const progress = Math.min(1, elapsed / RESULT_COUNTER_DURATION_MS)
+    const progress = Math.min(1, elapsed / SUM_COUNTER_DURATION_MS)
     const easedProgress = 1 - Math.pow(1 - progress, 3)
 
     counters.forEach((counter, index) => {
@@ -845,7 +849,9 @@ function renderScoringPanelHtml(
             valueColor: '#f4b63a',
           })}
           ${renderMatrixRow('Ръце', String(rawHands.ourPoints), String(rawHands.theirPoints))}
-          ${renderMatrixRow('Сбор', String(sumPoints.ourPoints), String(sumPoints.theirPoints))}
+          ${renderMatrixRow('Сбор', renderAnimatedSumValue(sumPoints.ourPoints), renderAnimatedSumValue(sumPoints.theirPoints), {
+            useValueHtml: true,
+          })}
         </div>
 
         ${renderOutcomeRow(scoring.outcomeShortLabel)}
@@ -970,5 +976,5 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
     </div>
   `
 
-  animateScoringResultCounters(root)
+  animateScoringSumCounters(root)
 }

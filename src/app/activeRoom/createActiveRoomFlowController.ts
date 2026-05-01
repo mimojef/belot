@@ -94,6 +94,7 @@ import {
 import { sortLocalHandForAllTrumps, sortLocalHandForDisplay, type SortDisplayOptions } from './sortLocalHand'
 import { renderPlayingScreen, type RenderPlayingScreenOptions } from './renderPlayingScreen'
 import { renderScoringScreen } from './renderScoringPanel'
+import { renderMatchEndedScreen } from './renderMatchEndedScreen'
 import { renderScoreHud } from './renderScoreHud'
 
 const SEAT_LABELS: Record<Seat, string> = {
@@ -994,6 +995,7 @@ export function createActiveRoomFlowController(
       !isShowingAnyDealPhase && authoritativePhase === 'bidding'
     const isShowingScoringPhase =
       !isShowingAnyDealPhase && authoritativePhase === 'scoring'
+    const isShowingMatchEndedPhase = authoritativePhase === 'match-ended'
     const isShowingPlayingPhase =
       !isShowingAnyDealPhase && authoritativePhase === 'playing'
     if (!isShowingScoringPhase) {
@@ -1683,6 +1685,18 @@ export function createActiveRoomFlowController(
         biddingUiState.showBotTakeover = false
         renderActiveRoomScreen()
       })
+    } else if (isShowingMatchEndedPhase && activeRoomState.game) {
+      cuttingVisualCountdown.resetCuttingVisualCountdownState()
+      renderMatchEndedScreen({
+        root: options.root,
+        game: activeRoomState.game,
+        seats: activeRoomState.seats,
+        localSeat: activeRoomState.seat,
+        stageScale,
+        scaledStageWidth,
+        scaledStageHeight,
+        onReturnToLobby: returnToLobbyFromMatchEnded,
+      })
     } else if (isShowingScoringPhase && activeRoomState.game?.scoring) {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
       renderScoringScreen({
@@ -2303,6 +2317,24 @@ export function createActiveRoomFlowController(
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
     options.leaveActiveRoom(activeRoomState.roomId)
+  }
+
+  function returnToLobbyFromMatchEnded(): void {
+    if (!activeRoomState) {
+      return
+    }
+
+    resetCuttingAnimationState()
+    clearDealingAnimationState()
+    clearDealNextTwoAnimationState()
+    clearDealLastThreeAnimationState()
+    clearScoringCountdownTicker()
+    clearBiddingUiState()
+    lastKnownWinningBid = null
+    resetPlayingUiCache(playingCache)
+    removePersistentBotTakeoverPopup()
+    activeRoomState = null
+    options.showLobby(null)
   }
 
   function hasActiveRoom(): boolean {
