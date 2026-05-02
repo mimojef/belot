@@ -345,10 +345,14 @@ function getFanOffset(
   count: number,
 ): { x: number; y: number; rotate: number } {
   const centered = index - (count - 1) / 2
+  const maxCentered = Math.max(1, (count - 1) / 2)
+  const edgeProgress = Math.abs(centered) / maxCentered
+  const countProgress = Math.min(1, Math.max(0, (count - 1) / 7))
+  const edgeDrop = edgeProgress * edgeProgress * 34 * countProgress
   return {
-    x: centered * 65,
-    y: Math.abs(centered) * 6,
-    rotate: centered * 6,
+    x: centered * 62,
+    y: edgeDrop,
+    rotate: centered * 5,
   }
 }
 

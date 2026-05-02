@@ -523,10 +523,14 @@ function getBottomHandOffset(index: number, count: number): {
   rotate: number
 } {
   const centeredIndex = index - (count - 1) / 2
+  const maxCentered = Math.max(1, (count - 1) / 2)
+  const edgeProgress = Math.abs(centeredIndex) / maxCentered
+  const countProgress = Math.min(1, Math.max(0, (count - 1) / 7))
+  const edgeDrop = edgeProgress * edgeProgress * 34 * countProgress
   return {
-    x: centeredIndex * 65,
-    y: Math.abs(centeredIndex) * 6,
-    rotate: centeredIndex * 6,
+    x: centeredIndex * 62,
+    y: edgeDrop,
+    rotate: centeredIndex * 5,
   }
 }
 
