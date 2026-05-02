@@ -357,6 +357,7 @@ function getFanOffset(
 }
 
 function renderPanelCardFanWrapper(
+  actualSeat: Seat,
   visualSeat: Seat,
   cardElements: string,
 ): string {
@@ -386,7 +387,9 @@ function renderPanelCardFanWrapper(
   const rotateStyle = fanRotateDeg !== 0 ? `rotate: ${fanRotateDeg}deg;` : ''
 
   return `
-    <div style="
+    <div
+      data-active-room-seat-card-fan="${actualSeat}"
+      style="
       position:absolute;
       left:${fanCenterX}px;
       top:${fanCenterY}px;
@@ -441,7 +444,11 @@ function renderDealtCardFanInPanel(
       return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle)
     }).join('')
 
-    return renderPanelCardFanWrapper(visualSeat, `${previousCardElements}${finalCardElements}`)
+    return renderPanelCardFanWrapper(
+      actualSeat,
+      visualSeat,
+      `${previousCardElements}${finalCardElements}`,
+    )
   }
 
   const cardElements = Array.from({ length: count }, (_, i) => {
@@ -516,7 +523,9 @@ function renderDealtCardFanInPanel(
   const rotateStyle = fanRotateDeg !== 0 ? `rotate: ${fanRotateDeg}deg;` : ''
 
   return `
-    <div style="
+    <div
+      data-active-room-seat-card-fan="${actualSeat}"
+      style="
       position:absolute;
       left:${fanCenterX}px;
       top:${fanCenterY}px;

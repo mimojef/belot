@@ -17,8 +17,11 @@ import { getServerValidPlayCards } from './getServerValidPlayCards.js'
 import { createServerDeclarationRecord } from './serverDeclarationRecordHelpers.js'
 import {
   clearServerTimerState,
+  getServerTimerNow,
   createServerPlayingTimerState,
+  isServerSeatControlledByBot,
 } from './serverTimerStateHelpers.js'
+import { SERVER_TIMING_CONFIG } from './serverTimingConfig.js'
 
 const TRICKS_PER_ROUND = 8
 
@@ -234,10 +237,19 @@ function applyTrickCompletion(
     ...state,
     playing: nextPlaying,
   }
+  const timerStartsAt =
+    getServerTimerNow() + SERVER_TIMING_CONFIG.playAfterTrickCollectionDelayMs
+  const winnerTimerStartedAt = isServerSeatControlledByBot(nextState, winnerSeat)
+    ? timerStartsAt - SERVER_TIMING_CONFIG.playBotDelayMs
+    : timerStartsAt
 
   return {
     ...nextState,
-    timer: createServerPlayingTimerState(nextState, winnerSeat),
+    timer: createServerPlayingTimerState(
+      nextState,
+      winnerSeat,
+      winnerTimerStartedAt,
+    ),
   }
 }
 

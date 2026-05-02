@@ -44,6 +44,9 @@ const TABLE_BACKGROUND = `
 
 const PLAY_CARD_ENTRY_ANIMATION_MS = 400
 const COMPLETED_TRICK_PREVIEW_MS = 220
+const TRICK_COLLECTION_GATHER_MS = 180
+const TRICK_COLLECTION_FLY_MS = 420
+const TRICK_COLLECTION_CARD_STAGGER_MS = 35
 const PLAYING_COLLECT_OVERLAY_Z_INDEX = 9000
 const PLAY_HUMAN_TIMEOUT_MS = 15_000
 const PLAY_BOT_DELAY_MS = 800
@@ -142,6 +145,104 @@ function getRotateDegreesFromTransform(transform: string): number {
   return Number.isFinite(rotateDegrees) ? rotateDegrees : 0
 }
 
+function createSourceRectFromPoint(
+  centerX: number,
+  centerY: number,
+  width: number,
+  height: number,
+): DOMRect {
+  return new DOMRect(centerX - width / 2, centerY - height / 2, width, height)
+}
+
+function getSeatPanelFlySourcePoint(rect: DOMRect, visualSeat: Seat): {
+  x: number
+  y: number
+} {
+  const centerX = rect.left + rect.width / 2
+  const centerY = rect.top + rect.height / 2
+
+  if (visualSeat === 'bottom') {
+    return { x: centerX, y: rect.top + rect.height * 0.18 }
+  }
+
+  if (visualSeat === 'top') {
+    return { x: centerX, y: rect.bottom - rect.height * 0.18 }
+  }
+
+  if (visualSeat === 'left') {
+    return { x: rect.right - rect.width * 0.14, y: centerY }
+  }
+
+  return { x: rect.left + rect.width * 0.14, y: centerY }
+}
+
+function resolvePlayedCardFlySourceFromSeat(options: {
+  root: HTMLElement
+  seat: Seat
+  localSeat: Seat
+  fallbackWidth: number
+  fallbackHeight: number
+}): PlayedCardFlySource | null {
+  const { root, seat, localSeat, fallbackWidth, fallbackHeight } = options
+  const fanElement = root.querySelector<HTMLElement>(
+    `[data-active-room-seat-card-fan="${seat}"]`,
+  )
+  const fanCards = fanElement
+    ? Array.from(fanElement.children).filter(
+        (child): child is HTMLElement => child instanceof HTMLElement,
+      )
+    : []
+  const sourceCard = fanCards
+    .reverse()
+    .find((element) => {
+      const rect = element.getBoundingClientRect()
+      return rect.width > 0 && rect.height > 0
+    })
+
+  if (sourceCard) {
+    const sourceRect = sourceCard.getBoundingClientRect()
+    const rect = createSourceRectFromPoint(
+      sourceRect.left + sourceRect.width / 2,
+      sourceRect.top + sourceRect.height / 2,
+      fallbackWidth,
+      fallbackHeight,
+    )
+    return {
+      rect,
+      physicalWidth: fallbackWidth,
+      physicalHeight: fallbackHeight,
+    }
+  }
+
+  const seatAnchor = root.querySelector<HTMLElement>(
+    `[data-active-room-seat-anchor="${seat}"]`,
+  )
+
+  if (!seatAnchor) {
+    return null
+  }
+
+  const seatRect = seatAnchor.getBoundingClientRect()
+  if (seatRect.width <= 0 || seatRect.height <= 0) {
+    return null
+  }
+
+  const visualSeat = getVisualSeatForLocalPerspective(seat, localSeat)
+  const sourcePoint = getSeatPanelFlySourcePoint(seatRect, visualSeat)
+  const rect = createSourceRectFromPoint(
+    sourcePoint.x,
+    sourcePoint.y,
+    fallbackWidth,
+    fallbackHeight,
+  )
+
+  return {
+    rect,
+    physicalWidth: fallbackWidth,
+    physicalHeight: fallbackHeight,
+  }
+}
+
 async function animatePlayedCardFromHand(options: {
   sourceRect: DOMRect
   sourcePhysicalWidth: number
@@ -163,6 +264,18 @@ async function animatePlayedCardFromHand(options: {
   const sourceCenterX = sourceRect.left + sourceRect.width / 2
   const sourceCenterY = sourceRect.top + sourceRect.height / 2
   const targetRotateDeg = getRotateDegreesFromTransform(cardElement.style.transform)
+  const computedStyle = window.getComputedStyle(cardElement)
+  const baseWidth = Number.parseFloat(computedStyle.width)
+  const baseHeight = Number.parseFloat(computedStyle.height)
+  const cloneBaseWidth = Number.isFinite(baseWidth) && baseWidth > 0
+    ? baseWidth
+    : TRICK_W
+  const cloneBaseHeight = Number.isFinite(baseHeight) && baseHeight > 0
+    ? baseHeight
+    : TRICK_H
+  const visualScale = sourcePhysicalWidth > 0 && cloneBaseWidth > 0
+    ? sourcePhysicalWidth / cloneBaseWidth
+    : 1
 
   const overlay = document.createElement('div')
   overlay.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:9000;overflow:visible'
@@ -170,11 +283,11 @@ async function animatePlayedCardFromHand(options: {
 
   const clone = cardElement.cloneNode(true) as HTMLElement
   clone.style.position = 'fixed'
-  clone.style.left = `${sourceCenterX - sourcePhysicalWidth / 2}px`
-  clone.style.top = `${sourceCenterY - sourcePhysicalHeight / 2}px`
-  clone.style.width = `${sourcePhysicalWidth}px`
-  clone.style.height = `${sourcePhysicalHeight}px`
-  clone.style.aspectRatio = `${sourcePhysicalWidth} / ${sourcePhysicalHeight}`
+  clone.style.left = `${sourceCenterX - cloneBaseWidth / 2}px`
+  clone.style.top = `${sourceCenterY - cloneBaseHeight / 2}px`
+  clone.style.width = `${cloneBaseWidth}px`
+  clone.style.height = `${cloneBaseHeight}px`
+  clone.style.aspectRatio = `${cloneBaseWidth} / ${cloneBaseHeight}`
   clone.style.margin = '0'
   clone.style.transform = 'none'
   clone.style.transformOrigin = 'center center'
@@ -191,23 +304,15 @@ async function animatePlayedCardFromHand(options: {
     const targetCenterY = targetRect.top + targetRect.height / 2
     const dx = targetCenterX - sourceCenterX
     const dy = targetCenterY - sourceCenterY
-    const widthScale = targetPhysicalWidth > 0 && sourcePhysicalWidth > 0
-      ? targetPhysicalWidth / sourcePhysicalWidth
-      : 1
-    const heightScale = targetPhysicalHeight > 0 && sourcePhysicalHeight > 0
-      ? targetPhysicalHeight / sourcePhysicalHeight
-      : widthScale
-    const scale = Number.isFinite(widthScale) && widthScale > 0
-      ? widthScale
-      : Number.isFinite(heightScale) && heightScale > 0
-        ? heightScale
-        : 1
+    void sourcePhysicalHeight
+    void targetPhysicalWidth
+    void targetPhysicalHeight
 
     const anim = clone.animate(
       [
-        { transform: 'translate(0,0) rotate(0deg) scale(1)', opacity: 1 },
+        { transform: `translate(0,0) rotate(0deg) scale(${visualScale})`, opacity: 1 },
         {
-          transform: `translate(${dx}px,${dy}px) rotate(${targetRotateDeg}deg) scale(${scale})`,
+          transform: `translate(${dx}px,${dy}px) rotate(${targetRotateDeg}deg) scale(${visualScale})`,
           opacity: 1,
         },
       ],
@@ -504,12 +609,12 @@ function syncTransientDeclarationBubbles(options: {
   return getActiveDeclarationBubblesForRender(state)
 }
 
-function getPlayOrderSpread(index: number, count: number): {
+function getPlayOrderSpread(index: number): {
   left: number
   top: number
   rotate: number
 } {
-  const centeredIndex = index - (count - 1) / 2
+  const centeredIndex = index - 1.5
   return {
     left: centeredIndex * 8,
     top: Math.abs(centeredIndex) * 3,
@@ -537,6 +642,7 @@ function getBottomHandOffset(index: number, count: number): {
 function getPlayingCountdownState(
   game: RoomGameSnapshot,
   seats: RoomSeatSnapshot[],
+  isTrickCollectionPending: boolean,
 ): {
   countdownSeat: Seat | null
   countdownRemainingMs: number | null
@@ -544,7 +650,11 @@ function getPlayingCountdownState(
 } {
   const countdownSeat = game.playing?.currentTurnSeat ?? null
 
-  if (countdownSeat === null || game.timerDeadlineAt === null) {
+  if (
+    countdownSeat === null ||
+    game.timerDeadlineAt === null ||
+    isTrickCollectionPending
+  ) {
     return {
       countdownSeat,
       countdownRemainingMs: null,
@@ -582,7 +692,7 @@ function renderTrickCard(
 ): string {
   const visualSeat = getVisualSeatForLocalPerspective(play.seat, localSeat)
   const seatOffset = SEAT_TRICK_OFFSET[visualSeat]
-  const spreadOffset = getPlayOrderSpread(index, count)
+  const spreadOffset = getPlayOrderSpread(index)
   const finalLeft = seatOffset.left + spreadOffset.left
   const finalTop = seatOffset.top + spreadOffset.top
   const finalRotate = seatOffset.rotate + spreadOffset.rotate
@@ -999,6 +1109,9 @@ function scheduleCompletedTrickCollection(
       winnerSeat: visualWinner,
       overlayHost,
       targetElement,
+      gatherDurationMs: TRICK_COLLECTION_GATHER_MS,
+      flyDurationMs: TRICK_COLLECTION_FLY_MS,
+      staggerDelayMs: TRICK_COLLECTION_CARD_STAGGER_MS,
       overlayZIndex: PLAYING_COLLECT_OVERLAY_Z_INDEX,
     })
 
@@ -1182,7 +1295,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     ? displayedPlays[displayedPlays.length - 1] ?? null
     : null
   let pendingPlayedCardSource: PlayedCardFlySource | null = null
-  let shouldAnimateNewestViaOverlay = false
+  const shouldAnimateNewestViaOverlay = animateNewest && newestDisplayedPlay !== null
   if (animateNewest && newestDisplayedPlay?.seat === localSeat) {
     pendingPlayedCardSource = playedCardFlySourceByCache.get(cache) ?? (
       cache.lastPlayedCardRect === null
@@ -1195,9 +1308,6 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     )
     cache.lastPlayedCardRect = null
     playedCardFlySourceByCache.delete(cache)
-    if (pendingPlayedCardSource !== null) {
-      shouldAnimateNewestViaOverlay = true
-    }
   } else if (!animateNewest) {
     cache.lastPlayedCardRect = null
     playedCardFlySourceByCache.delete(cache)
@@ -1310,7 +1420,11 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     countdownSeat: playingCountdownSeat,
     countdownRemainingMs: playingCountdownRemainingMs,
     countdownTotalMs: playingCountdownTotalMs,
-  } = getPlayingCountdownState(game, seats)
+  } = getPlayingCountdownState(
+    game,
+    seats,
+    isShowingBufferedCompletedTrick || shouldStartCollection,
+  )
 
   root.innerHTML = `
     <div
@@ -1575,26 +1689,48 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
 
   if (
     shouldAnimateNewestViaOverlay &&
-    pendingPlayedCardSource !== null &&
-    newestDisplayedPlay?.seat === localSeat
+    newestDisplayedPlay !== null
   ) {
     const trickCardEl = Array.from(
       root.querySelectorAll<HTMLElement>(
-        `[data-current-trick-card][data-trick-seat="${localSeat}"]`,
+        `[data-current-trick-card][data-trick-seat="${newestDisplayedPlay.seat}"]`,
       ),
     ).find((element) => element.dataset.cardId === newestDisplayedPlay.card.id)
     if (trickCardEl) {
       const targetRect = trickCardEl.getBoundingClientRect()
       const targetSize = getScaledPhysicalElementSize(trickCardEl, stageScale)
-      void animatePlayedCardFromHand({
-        sourceRect: pendingPlayedCardSource.rect,
-        sourcePhysicalWidth: pendingPlayedCardSource.physicalWidth,
-        sourcePhysicalHeight: pendingPlayedCardSource.physicalHeight,
-        targetRect,
-        targetPhysicalWidth: targetSize.width,
-        targetPhysicalHeight: targetSize.height,
-        cardElement: trickCardEl,
-      })
+      const playedCardSource =
+        pendingPlayedCardSource ??
+        resolvePlayedCardFlySourceFromSeat({
+          root,
+          seat: newestDisplayedPlay.seat,
+          localSeat,
+          fallbackWidth: targetSize.width,
+          fallbackHeight: targetSize.height,
+        })
+
+      if (playedCardSource !== null) {
+        const sourceCenterX =
+          playedCardSource.rect.left + playedCardSource.rect.width / 2
+        const sourceCenterY =
+          playedCardSource.rect.top + playedCardSource.rect.height / 2
+        const normalizedSourceRect = createSourceRectFromPoint(
+          sourceCenterX,
+          sourceCenterY,
+          targetSize.width,
+          targetSize.height,
+        )
+
+        void animatePlayedCardFromHand({
+          sourceRect: normalizedSourceRect,
+          sourcePhysicalWidth: targetSize.width,
+          sourcePhysicalHeight: targetSize.height,
+          targetRect,
+          targetPhysicalWidth: targetSize.width,
+          targetPhysicalHeight: targetSize.height,
+          cardElement: trickCardEl,
+        })
+      }
     }
   }
 

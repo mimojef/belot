@@ -13,6 +13,7 @@ export type AnimateTrickCollectionOptions = {
   hideOriginalCards?: boolean
   gatherDurationMs?: number
   flyDurationMs?: number
+  staggerDelayMs?: number
   gatherSpreadPx?: number
   stackSpreadPx?: number
   overlayZIndex?: number
@@ -164,6 +165,7 @@ export async function animateTrickCollection(
     hideOriginalCards = true,
     gatherDurationMs = 180,
     flyDurationMs = 420,
+    staggerDelayMs = 35,
     gatherSpreadPx = 6,
     stackSpreadPx = 12,
     overlayZIndex = 9000,
@@ -201,7 +203,7 @@ export async function animateTrickCollection(
     const winnerAnchor = getWinnerAnchor(targetRect, winnerSeat)
     await Promise.all(
       floatingCards.map(async (fc, i) => {
-        if (i > 0) await wait(i * 35)
+        if (i > 0) await wait(i * staggerDelayMs)
         const rect = fc.node.getBoundingClientRect()
         const offset = getWinnerStackOffset(winnerSeat, i, floatingCards.length, stackSpreadPx)
         await animateToWinner(fc, winnerAnchor.x + offset.x - rect.width / 2, winnerAnchor.y + offset.y - rect.height / 2, flyDurationMs)

@@ -5,8 +5,15 @@ export function rebaseServerStateToEventAt(
   eventAt: number,
 ): ServerAuthoritativeGameState {
   const durationMs = state.timer.durationMs
+  const startedAt = state.timer.startedAt
   const hasTimerDuration =
     typeof durationMs === 'number' && Number.isFinite(durationMs)
+  const rebasedTimerStartedAt =
+    typeof startedAt === 'number' &&
+    Number.isFinite(startedAt) &&
+    startedAt > eventAt
+      ? startedAt
+      : eventAt
 
   return {
     ...state,
@@ -14,8 +21,8 @@ export function rebaseServerStateToEventAt(
     timer: hasTimerDuration
       ? {
           ...state.timer,
-          startedAt: eventAt,
-          expiresAt: eventAt + durationMs,
+          startedAt: rebasedTimerStartedAt,
+          expiresAt: rebasedTimerStartedAt + durationMs,
         }
       : state.timer,
   }
