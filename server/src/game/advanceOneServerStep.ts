@@ -38,11 +38,11 @@ export function advanceOneServerStep(
   }
 
   if (state.phase === 'cutting') {
-    return advanceExpiredServerCuttingState(state, expiresAt)
+    return advanceExpiredServerCuttingState(state, now)
   }
 
   if (state.phase === 'bidding' && !state.bidding.hasEnded) {
-    return advanceExpiredServerBiddingState(state, expiresAt)
+    return advanceExpiredServerBiddingState(state, now)
   }
 
   if (
@@ -50,7 +50,7 @@ export function advanceOneServerStep(
     state.playing?.hasStarted &&
     state.playing.currentTurnSeat !== null
   ) {
-    return advanceExpiredServerPlayingState(state, expiresAt)
+    return advanceExpiredServerPlayingState(state, now)
   }
 
   return {

@@ -157,11 +157,17 @@ export function createActiveRoomFlowController(
           box-shadow:0 32px 72px rgba(0,0,0,0.42);
           text-align:center;
         ">
-          <div style="
-            font-size:40px;
-            margin-bottom:18px;
-            line-height:1;
-          ">🤖</div>
+          <img
+            src="/images/ui/robot_100x100.png"
+            alt="Robot"
+            style="
+              width:64px;
+              height:64px;
+              object-fit:contain;
+              margin-bottom:18px;
+              filter:drop-shadow(0 10px 18px rgba(0,0,0,0.28));
+            "
+          >
           <div style="
             color:#f8fafc;
             font-size:18px;

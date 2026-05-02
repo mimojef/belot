@@ -21,6 +21,7 @@ const LABEL_COLUMN_WIDTH_PX = 108
 const TABLE_GRID_COLUMNS = `${LABEL_COLUMN_WIDTH_PX}px minmax(0, 1fr) minmax(0, 1fr)`
 const SUM_COUNTER_DURATION_MS = 1000
 const SUM_COUNTER_AUDIO_SRC = '/audio/game-sounds/scoring.mp3'
+const SUM_COUNTER_START_SCALE = 4.6
 const RANK_ORDER: RoomDeclarationSnapshot['highRank'][] = [
   '7',
   '8',
@@ -510,12 +511,14 @@ function renderMatrixRow(
   rightValue: string,
   options: {
     minHeight?: number
+    overflowVisible?: boolean
     useValueHtml?: boolean
     valueColor?: string
   } = {},
 ): string {
   const {
     minHeight = 54,
+    overflowVisible = false,
     useValueHtml = false,
     valueColor = '#101418',
   } = options
@@ -529,6 +532,9 @@ function renderMatrixRow(
         min-height:${minHeight}px;
         border-bottom:1px solid rgba(232, 178, 78, 0.78);
         background:#ffffff;
+        position:${overflowVisible ? 'relative' : 'static'};
+        z-index:${overflowVisible ? '4' : 'auto'};
+        overflow:visible;
       "
     >
       <div
@@ -555,6 +561,7 @@ function renderMatrixRow(
           color:${valueColor};
           font-size:18px;
           font-weight:700;
+          overflow:visible;
         "
       >
         ${useValueHtml || leftValue.includes('<') ? leftValue : escapeHtml(leftValue)}
@@ -570,6 +577,7 @@ function renderMatrixRow(
           color:${valueColor};
           font-size:18px;
           font-weight:700;
+          overflow:visible;
         "
       >
         ${useValueHtml || rightValue.includes('<') ? rightValue : escapeHtml(rightValue)}
@@ -671,7 +679,34 @@ function renderResultRow(ourPoints: number, theirPoints: number): string {
 }
 
 function renderAnimatedSumValue(points: number): string {
-  return `<span data-scoring-sum-counter="1" data-target-points="${points}">0</span>`
+  return `
+    <span
+      style="
+        display:inline-flex;
+        align-items:center;
+        justify-content:center;
+        min-width:4ch;
+        height:1.1em;
+        overflow:visible;
+        position:relative;
+        z-index:5;
+      "
+    >
+      <span
+        data-scoring-sum-counter="1"
+        data-target-points="${points}"
+        style="
+          display:inline-block;
+          transform:scale(${SUM_COUNTER_START_SCALE});
+          transform-origin:center center;
+          line-height:1;
+          will-change:transform, opacity;
+          opacity:0.9;
+          text-shadow:0 5px 16px rgba(0,0,0,0.18);
+        "
+      >0</span>
+    </span>
+  `
 }
 
 function canPlayAudioNow(): boolean {
@@ -725,6 +760,9 @@ function animateScoringSumCounters(root: HTMLElement): void {
     counters.forEach((counter, index) => {
       const target = targets[index] ?? 0
       counter.textContent = String(Math.round(target * easedProgress))
+      const scale = SUM_COUNTER_START_SCALE - (SUM_COUNTER_START_SCALE - 1) * easedProgress
+      counter.style.transform = `scale(${scale})`
+      counter.style.opacity = String(0.9 + 0.1 * easedProgress)
     })
 
     if (progress < 1) {
@@ -796,7 +834,7 @@ function renderScoringPanelHtml(
         background:rgba(34, 70, 92, 0.97);
         border:2px solid #dca33a;
         border-radius:14px;
-        overflow:hidden;
+        overflow:visible;
         box-shadow:0 18px 40px rgba(0,0,0,0.22);
         backdrop-filter:blur(3px);
       "
@@ -879,6 +917,7 @@ function renderScoringPanelHtml(
           })}
           ${renderMatrixRow('Ръце', String(rawHands.ourPoints), String(rawHands.theirPoints))}
           ${renderMatrixRow('Сбор', renderAnimatedSumValue(sumPoints.ourPoints), renderAnimatedSumValue(sumPoints.theirPoints), {
+            overflowVisible: true,
             useValueHtml: true,
           })}
         </div>
