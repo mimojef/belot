@@ -1834,6 +1834,9 @@ export function createActiveRoomFlowController(
         onDeclarationBubbleShown: (lines) => {
           options.gameAudio?.playDeclarationBubble(lines)
         },
+        onPlayedCardLanded: () => {
+          options.gameAudio?.playCardOnTable()
+        },
         cache: playingCache,
       } satisfies RenderPlayingScreenOptions)
     } else if (activeRoomState.game !== null) {

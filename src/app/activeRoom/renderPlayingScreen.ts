@@ -251,6 +251,7 @@ async function animatePlayedCardFromHand(options: {
   targetPhysicalWidth: number
   targetPhysicalHeight: number
   cardElement: HTMLElement
+  onLanded?: () => void
 }): Promise<void> {
   const {
     sourceRect,
@@ -260,6 +261,7 @@ async function animatePlayedCardFromHand(options: {
     targetPhysicalWidth,
     targetPhysicalHeight,
     cardElement,
+    onLanded,
   } = options
   const sourceCenterX = sourceRect.left + sourceRect.width / 2
   const sourceCenterY = sourceRect.top + sourceRect.height / 2
@@ -308,6 +310,15 @@ async function animatePlayedCardFromHand(options: {
     void targetPhysicalWidth
     void targetPhysicalHeight
 
+    const durationMs = 350
+    const landedAudioOffsetMs = 100
+    let didPlayLandedAudio = false
+    let landedTimeoutId: number | null = window.setTimeout(() => {
+      landedTimeoutId = null
+      didPlayLandedAudio = true
+      onLanded?.()
+    }, Math.max(0, durationMs - landedAudioOffsetMs))
+
     const anim = clone.animate(
       [
         { transform: `translate(0,0) rotate(0deg) scale(${visualScale})`, opacity: 1 },
@@ -316,13 +327,22 @@ async function animatePlayedCardFromHand(options: {
           opacity: 1,
         },
       ],
-      { duration: 350, easing: 'cubic-bezier(0.22,1,0.36,1)', fill: 'forwards' },
+      { duration: durationMs, easing: 'cubic-bezier(0.22,1,0.36,1)', fill: 'forwards' },
     )
 
-    await new Promise<void>((resolve) => {
-      anim.onfinish = () => resolve()
-      anim.oncancel = () => resolve()
+    const didFinish = await new Promise<boolean>((resolve) => {
+      anim.onfinish = () => resolve(true)
+      anim.oncancel = () => resolve(false)
     })
+
+    if (landedTimeoutId !== null) {
+      window.clearTimeout(landedTimeoutId)
+      landedTimeoutId = null
+    }
+
+    if (didFinish && !didPlayLandedAudio) {
+      onLanded?.()
+    }
   } finally {
     overlay.remove()
     cardElement.style.visibility = ''
@@ -1193,6 +1213,7 @@ export type RenderPlayingScreenOptions = {
   scaledStageHeight: number
   submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
   onDeclarationBubbleShown?: (lines: string[]) => void
+  onPlayedCardLanded?: () => void
   cache: PlayingUiCache
 }
 
@@ -1209,6 +1230,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     scaledStageHeight,
     submitPlayCard,
     onDeclarationBubbleShown,
+    onPlayedCardLanded,
     cache,
   } = options
 
@@ -1729,6 +1751,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
           targetPhysicalWidth: targetSize.width,
           targetPhysicalHeight: targetSize.height,
           cardElement: trickCardEl,
+          onLanded: onPlayedCardLanded,
         })
       }
     }

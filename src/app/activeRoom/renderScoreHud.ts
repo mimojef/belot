@@ -4,6 +4,7 @@ import type {
   Seat,
 } from '../network/createGameServerClient'
 import { escapeHtml } from './activeRoomShared'
+import { getVisualSeatForLocalPerspective } from './cutting/cuttingSeatLayout'
 
 const SCORE_HUD_INTERNAL_OFFSET = 18
 
@@ -22,21 +23,13 @@ function isTeamASeat(seat: Seat): boolean {
 
 function formatSeatForLocalPerspective(seat: Seat | null, localSeat: Seat): string {
   if (seat === null) return '—'
-  if (seat === localSeat) return 'ТИ'
+  const visualSeat = getVisualSeatForLocalPerspective(seat, localSeat)
 
-  const partnerSeat: Seat = localSeat === 'bottom'
-    ? 'top'
-    : localSeat === 'top'
-      ? 'bottom'
-      : localSeat === 'right'
-        ? 'left'
-        : 'right'
-
-  if (seat === partnerSeat) return 'ПАРТНЬОР'
-  if (seat === 'top') return 'ГОРЕ'
-  if (seat === 'left') return 'ЛЯВО'
-  if (seat === 'right') return 'ДЯСНО'
-  return 'ДОЛУ'
+  if (visualSeat === 'bottom') return 'ТИ'
+  if (visualSeat === 'top') return 'ГОРЕ'
+  if (visualSeat === 'left') return 'ЛЯВО'
+  if (visualSeat === 'right') return 'ДЯСНО'
+  return '—'
 }
 
 function formatSuit(suit: Suit | null): string {

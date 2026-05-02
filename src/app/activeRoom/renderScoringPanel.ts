@@ -21,6 +21,7 @@ const LABEL_COLUMN_WIDTH_PX = 108
 const TABLE_GRID_COLUMNS = `${LABEL_COLUMN_WIDTH_PX}px minmax(0, 1fr) minmax(0, 1fr)`
 const SUM_COUNTER_DURATION_MS = 1000
 const SUM_COUNTER_AUDIO_SRC = '/audio/game-sounds/scoring.mp3'
+const SUM_COUNTER_AUDIO_VOLUME = 0.3
 const SUM_COUNTER_START_SCALE = 4.6
 const RANK_ORDER: RoomDeclarationSnapshot['highRank'][] = [
   '7',
@@ -732,6 +733,7 @@ function playScoringSumSound(): void {
 
   const audio = new Audio(SUM_COUNTER_AUDIO_SRC)
   audio.preload = 'auto'
+  audio.volume = SUM_COUNTER_AUDIO_VOLUME
   void audio.play().catch(() => {})
 }
 
@@ -834,7 +836,7 @@ function renderScoringPanelHtml(
         background:rgba(34, 70, 92, 0.97);
         border:2px solid #dca33a;
         border-radius:14px;
-        overflow:visible;
+        overflow:hidden;
         box-shadow:0 18px 40px rgba(0,0,0,0.22);
         backdrop-filter:blur(3px);
       "
