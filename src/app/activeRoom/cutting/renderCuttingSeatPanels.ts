@@ -728,10 +728,7 @@ export function createCuttingSeatPanelHtml(
   const isCountdownSeat = seat.seat === countdownSeat
   const isHighlightedSeat = seat.seat === highlightSeat
   const shouldShowCuttingCountdown = isCountdownSeat
-  const displayCountdownRemainingMs =
-    shouldShowCuttingCountdown && (seat.isBot || seat.isControlledByBot)
-      ? countdownTotalMs
-      : countdownRemainingMs
+  const displayCountdownRemainingMs = countdownRemainingMs
   const displayName =
     seat.isOccupied && seat.displayName.trim().length > 0
       ? seat.displayName
