@@ -2,6 +2,10 @@ import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
 import { enterServerPhase } from './enterServerPhase.js'
 import { advanceToNextServerPhase } from './advanceToNextServerPhase.js'
 import { startNextServerRound } from './startNextServerRound.js'
+import {
+  clearServerTimerState,
+  getServerTimerNow,
+} from './serverTimerStateHelpers.js'
 
 export function runServerPhaseTransition(
   state: ServerAuthoritativeGameState,
@@ -11,6 +15,20 @@ export function runServerPhaseTransition(
   }
 
   if (state.phase === 'scoring') {
+    if (state.matchEnded !== null) {
+      return enterServerPhase(
+        {
+          ...state,
+          matchEnded: {
+            ...state.matchEnded,
+            endedAt: getServerTimerNow(),
+          },
+          timer: clearServerTimerState(),
+        },
+        'match-ended',
+      )
+    }
+
     return startNextServerRound(state)
   }
 

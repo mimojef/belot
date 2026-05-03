@@ -1,6 +1,7 @@
 import type {
   RoomDeclarationSnapshot,
   RoomGameSnapshot,
+  RoomSeatSnapshot,
   RoomTeamPointsSnapshot,
   RoomWinningBidSnapshot,
   Seat,
@@ -47,6 +48,7 @@ const SQUARE_STRENGTH_BY_RANK: Record<string, number> = {
 type RenderScoringScreenOptions = {
   root: HTMLDivElement
   game: RoomGameSnapshot
+  seats: RoomSeatSnapshot[]
   localSeat: Seat
   winningBid: NonNullable<RoomWinningBidSnapshot> | null
   stageScale: number
@@ -971,6 +973,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
   const {
     root,
     game,
+    seats,
     localSeat,
     winningBid,
     stageScale,
@@ -1039,6 +1042,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
 
       ${renderScoreHud({
         game,
+        seats,
         localSeat,
         winningBid: game.scoring?.winningBid ?? winningBid,
         stageScale,

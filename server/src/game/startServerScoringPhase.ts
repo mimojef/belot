@@ -2,7 +2,6 @@ import type { Team } from '../core/serverTypes.js'
 import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
 import { resolveServerScoring } from './serverScoring.js'
 import {
-  clearServerTimerState,
   createServerScoringTimerState,
   getServerTimerNow,
 } from './serverTimerStateHelpers.js'
@@ -58,7 +57,7 @@ export function startServerScoringPhase(
 
   return {
     ...state,
-    phase: matchEnded === null ? 'scoring' : 'match-ended',
+    phase: 'scoring',
     scoring: scoringResolution.scoring,
     matchEnded,
     score: {
@@ -66,8 +65,6 @@ export function startServerScoringPhase(
       match: scoringResolution.matchTotals,
       carryOver: scoringResolution.carryOver,
     },
-    timer: matchEnded === null
-      ? createServerScoringTimerState()
-      : clearServerTimerState(),
+    timer: createServerScoringTimerState(),
   }
 }

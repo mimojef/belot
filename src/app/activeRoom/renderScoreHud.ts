@@ -1,5 +1,6 @@
 import type {
   RoomGameSnapshot,
+  RoomSeatSnapshot,
   RoomWinningBidSnapshot,
   Seat,
 } from '../network/createGameServerClient'
@@ -12,6 +13,7 @@ type Suit = 'clubs' | 'diamonds' | 'hearts' | 'spades'
 
 type RenderScoreHudOptions = {
   game: RoomGameSnapshot
+  seats: RoomSeatSnapshot[]
   localSeat: Seat
   winningBid: NonNullable<RoomWinningBidSnapshot> | null
   stageScale: number
@@ -30,6 +32,21 @@ function formatSeatForLocalPerspective(seat: Seat | null, localSeat: Seat): stri
   if (visualSeat === 'left') return 'ЛЯВО'
   if (visualSeat === 'right') return 'ДЯСНО'
   return '—'
+}
+
+function formatBidOwnerLabel(
+  seat: Seat | null,
+  seats: RoomSeatSnapshot[],
+  localSeat: Seat,
+): string {
+  if (seat === null) return '—'
+
+  const seatSnapshot = seats.find((candidate) => candidate.seat === seat) ?? null
+  const displayName = seatSnapshot?.displayName.trim() ?? ''
+
+  return seatSnapshot?.isOccupied && displayName.length > 0
+    ? displayName
+    : formatSeatForLocalPerspective(seat, localSeat)
 }
 
 function formatSuit(suit: Suit | null): string {
@@ -133,14 +150,14 @@ function getScoreForLocalPerspective(game: RoomGameSnapshot, localSeat: Seat): {
 }
 
 export function renderScoreHud(options: RenderScoreHudOptions): string {
-  const { game, localSeat, winningBid, stageScale } = options
+  const { game, seats, localSeat, winningBid, stageScale } = options
   const { ourScore, theirScore } = getScoreForLocalPerspective(game, localSeat)
   const bidLabel = formatBidType(winningBid)
   const bidIconMarkup = getBidIconMarkup(winningBid)
   const showIcon = bidIconMarkup.length > 0
   const bidMultiplierLabel = getBidMultiplierLabel(winningBid)
   const bidOwnerLabel = winningBid
-    ? formatSeatForLocalPerspective(winningBid.seat, localSeat)
+    ? formatBidOwnerLabel(winningBid.seat, seats, localSeat)
     : '—'
   const bidSummary = `${bidLabel}${bidMultiplierLabel}: ${bidOwnerLabel}`
 

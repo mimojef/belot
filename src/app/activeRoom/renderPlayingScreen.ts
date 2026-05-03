@@ -102,9 +102,16 @@ type ActiveDeclarationBubble = SeatDeclarationBubble & {
   entryKey: string
 }
 
+type DeclarationBubbleTrigger = {
+  seat: Seat
+  trickIndex: number
+  cardId: string
+}
+
 type DeclarationBubbleUiState = {
   shownSignatures: string[]
   activeBubbles: Partial<Record<Seat, ActiveDeclarationBubble>>
+  queuedBubbles: Partial<Record<Seat, ActiveDeclarationBubble>>
   timerIds: Partial<Record<Seat, number>>
 }
 
@@ -470,6 +477,7 @@ function getDeclarationBubbleUiState(cache: PlayingUiCache): DeclarationBubbleUi
     state = {
       shownSignatures: [],
       activeBubbles: {},
+      queuedBubbles: {},
       timerIds: {},
     }
     declarationBubbleStateByCache.set(cache, state)
@@ -511,23 +519,21 @@ function getActiveDeclarationBubblesForRender(
   return Object.keys(bubbles).length > 0 ? bubbles : null
 }
 
-function buildPendingDeclarationBubbleForSeat(options: {
+function buildPendingDeclarationBubbleForTrigger(options: {
   declarations: RoomDeclarationSnapshot[]
-  seat: Seat
+  trigger: DeclarationBubbleTrigger
   shownSignatures: Set<string>
-  triggerTrickIndex: number | null
-  triggerCardId: string | null
 }): {
   entryKey: string
   signatures: string[]
   lines: string[]
 } | null {
-  const { declarations, seat, shownSignatures, triggerTrickIndex, triggerCardId } = options
+  const { declarations, trigger, shownSignatures } = options
   const pending: RoomDeclarationSnapshot[] = []
   const signatures: string[] = []
 
   declarations.forEach((declaration, index) => {
-    if (declaration.seat !== seat) {
+    if (declaration.seat !== trigger.seat) {
       return
     }
 
@@ -535,16 +541,13 @@ function buildPendingDeclarationBubbleForSeat(options: {
       return
     }
 
-    if (
-      triggerTrickIndex === null ||
-      declaration.declaredAtTrickIndex !== triggerTrickIndex
-    ) {
+    if (declaration.declaredAtTrickIndex !== trigger.trickIndex) {
       return
     }
 
     if (
       declaration.type === 'belote' &&
-      (triggerCardId === null || !declaration.cardIds.includes(triggerCardId))
+      !declaration.cardIds.includes(trigger.cardId)
     ) {
       return
     }
@@ -566,63 +569,123 @@ function buildPendingDeclarationBubbleForSeat(options: {
   }
 
   return {
-    entryKey: `${seat}:${signatures.join('|')}`,
+    entryKey: `${trigger.seat}:${signatures.join('|')}`,
     signatures,
     lines,
   }
 }
 
+function scheduleDeclarationBubbleHide(options: {
+  cache: PlayingUiCache
+  state: DeclarationBubbleUiState
+  seat: Seat
+  entryKey: string
+  onBubbleShown?: (lines: string[]) => void
+}): void {
+  const { cache, state, seat, entryKey, onBubbleShown } = options
+
+  const existingTimerId = state.timerIds[seat]
+  if (existingTimerId !== undefined) {
+    window.clearTimeout(existingTimerId)
+  }
+
+  state.timerIds[seat] = window.setTimeout(() => {
+    const activeBubble = state.activeBubbles[seat]
+
+    if (!activeBubble || activeBubble.entryKey !== entryKey) {
+      return
+    }
+
+    delete state.activeBubbles[seat]
+    delete state.timerIds[seat]
+
+    const queuedBubble = state.queuedBubbles[seat]
+    if (queuedBubble) {
+      delete state.queuedBubbles[seat]
+      state.activeBubbles[seat] = queuedBubble
+      onBubbleShown?.(queuedBubble.lines)
+      scheduleDeclarationBubbleHide({
+        cache,
+        state,
+        seat,
+        entryKey: queuedBubble.entryKey,
+        onBubbleShown,
+      })
+    }
+
+    const latestOptions = latestRenderOptionsByCache.get(cache)
+    if (latestOptions) {
+      renderPlayingScreen(latestOptions)
+    }
+  }, DECLARATION_BUBBLE_VISIBLE_MS)
+}
+
+function showOrQueueDeclarationBubble(options: {
+  cache: PlayingUiCache
+  state: DeclarationBubbleUiState
+  trigger: DeclarationBubbleTrigger
+  bubble: {
+    entryKey: string
+    signatures: string[]
+    lines: string[]
+  }
+  onBubbleShown?: (lines: string[]) => void
+}): void {
+  const { cache, state, trigger, bubble, onBubbleShown } = options
+  const activeBubble = state.activeBubbles[trigger.seat]
+
+  state.shownSignatures = [
+    ...new Set([...state.shownSignatures, ...bubble.signatures]),
+  ]
+
+  if (activeBubble) {
+    state.queuedBubbles[trigger.seat] = {
+      entryKey: bubble.entryKey,
+      lines: bubble.lines,
+    }
+    return
+  }
+
+  state.activeBubbles[trigger.seat] = {
+    entryKey: bubble.entryKey,
+    lines: bubble.lines,
+  }
+  onBubbleShown?.(bubble.lines)
+
+  scheduleDeclarationBubbleHide({
+    cache,
+    state,
+    seat: trigger.seat,
+    entryKey: bubble.entryKey,
+    onBubbleShown,
+  })
+}
+
 function syncTransientDeclarationBubbles(options: {
   cache: PlayingUiCache
   game: RoomGameSnapshot
-  triggerSeat: Seat | null
-  triggerTrickIndex: number | null
-  triggerCardId: string | null
+  triggers: DeclarationBubbleTrigger[]
   onBubbleShown?: (lines: string[]) => void
 }): Partial<Record<Seat, SeatDeclarationBubble>> | null {
-  const { cache, game, triggerSeat, triggerTrickIndex, triggerCardId, onBubbleShown } = options
+  const { cache, game, triggers, onBubbleShown } = options
   const state = getDeclarationBubbleUiState(cache)
 
-  if (triggerSeat !== null && !state.activeBubbles[triggerSeat]) {
+  for (const trigger of triggers) {
     const shownSignatures = new Set(state.shownSignatures)
-    const pendingBubble = buildPendingDeclarationBubbleForSeat({
+    const pendingBubble = buildPendingDeclarationBubbleForTrigger({
       declarations: game.declarations,
-      seat: triggerSeat,
+      trigger,
       shownSignatures,
-      triggerTrickIndex,
-      triggerCardId,
     })
 
     if (pendingBubble !== null) {
-      state.shownSignatures = [
-        ...new Set([...state.shownSignatures, ...pendingBubble.signatures]),
-      ]
-      state.activeBubbles[triggerSeat] = {
-        entryKey: pendingBubble.entryKey,
-        lines: pendingBubble.lines,
-      }
-      onBubbleShown?.(pendingBubble.lines)
-
-      const existingTimerId = state.timerIds[triggerSeat]
-      if (existingTimerId !== undefined) {
-        window.clearTimeout(existingTimerId)
-      }
-
-      state.timerIds[triggerSeat] = window.setTimeout(() => {
-        const activeBubble = state.activeBubbles[triggerSeat]
-
-        if (!activeBubble || activeBubble.entryKey !== pendingBubble.entryKey) {
-          return
-        }
-
-        delete state.activeBubbles[triggerSeat]
-        delete state.timerIds[triggerSeat]
-
-        const latestOptions = latestRenderOptionsByCache.get(cache)
-        if (latestOptions) {
-          renderPlayingScreen(latestOptions)
-        }
-      }, DECLARATION_BUBBLE_VISIBLE_MS)
+      showOrQueueDeclarationBubble({
+        cache,
+        state,
+        trigger,
+        bubble: pendingBubble,
+        onBubbleShown,
+      })
     }
   }
 
@@ -1339,21 +1402,21 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
 
   const sortedHand = sortLocalHandForDisplay(game.ownHand, getSortOptions(winningBid))
   const isMyTurn = playing?.currentTurnSeat === localSeat
-  const declarationBubbleTriggerSeat = animateNewest ? newestDisplayedPlay?.seat ?? null : null
-  const declarationBubbleTriggerTrickIndex = animateNewest
-    ? isShowingBufferedCompletedTrick
-      ? cache.bufferedCompletedTrick?.trickIndex ?? null
-      : completedCount
-    : null
-  const declarationBubbleTriggerCardId = animateNewest
-    ? newestDisplayedPlay?.card.id ?? null
-    : null
+  const displayedTrickIndex = isShowingBufferedCompletedTrick
+    ? cache.bufferedCompletedTrick?.trickIndex ?? null
+    : completedCount
+  const declarationBubbleTriggers: DeclarationBubbleTrigger[] =
+    displayedTrickIndex === null
+      ? []
+      : displayedPlays.map((play) => ({
+          seat: play.seat,
+          trickIndex: displayedTrickIndex,
+          cardId: play.card.id,
+        }))
   const declarationBubbles = syncTransientDeclarationBubbles({
     cache,
     game,
-    triggerSeat: declarationBubbleTriggerSeat,
-    triggerTrickIndex: declarationBubbleTriggerTrickIndex,
-    triggerCardId: declarationBubbleTriggerCardId,
+    triggers: declarationBubbleTriggers,
     onBubbleShown: onDeclarationBubbleShown,
   })
 
@@ -1536,6 +1599,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       })}
       ${renderScoreHud({
         game,
+        seats,
         localSeat,
         winningBid,
         stageScale,

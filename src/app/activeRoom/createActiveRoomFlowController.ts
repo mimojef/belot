@@ -1182,6 +1182,7 @@ export function createActiveRoomFlowController(
     const scoreHudHtml = activeRoomState.game
       ? renderScoreHud({
           game: activeRoomState.game,
+          seats: activeRoomState.seats,
           localSeat: activeRoomState.seat,
           winningBid: lastKnownWinningBid,
           stageScale,
@@ -1811,6 +1812,7 @@ export function createActiveRoomFlowController(
       renderScoringScreen({
         root: options.root,
         game: activeRoomState.game,
+        seats: activeRoomState.seats,
         localSeat: activeRoomState.seat,
         winningBid: lastKnownWinningBid,
         stageScale,
