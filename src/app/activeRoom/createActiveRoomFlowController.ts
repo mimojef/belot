@@ -1806,6 +1806,7 @@ export function createActiveRoomFlowController(
         scaledStageWidth,
         scaledStageHeight,
         onReturnToLobby: returnToLobbyFromMatchEnded,
+        onStartNewGame: startNewGameFromMatchEnded,
       })
     } else if (isShowingScoringPhase && activeRoomState.game?.scoring) {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
@@ -2442,6 +2443,8 @@ export function createActiveRoomFlowController(
       return
     }
 
+    const roomId = activeRoomState.roomId
+
     resetCuttingAnimationState()
     clearDealingAnimationState()
     clearDealNextTwoAnimationState()
@@ -2452,8 +2455,35 @@ export function createActiveRoomFlowController(
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
+    options.leaveActiveRoom(roomId)
     activeRoomState = null
     options.showLobby(null)
+  }
+
+  function startNewGameFromMatchEnded(): void {
+    if (!activeRoomState) {
+      return
+    }
+
+    const roomId = activeRoomState.roomId
+    const stake = activeRoomState.stake
+    const displayName = activeRoomState.seats
+      .find((seat) => seat.seat === activeRoomState?.seat)
+      ?.displayName.trim()
+
+    resetCuttingAnimationState()
+    clearDealingAnimationState()
+    clearDealNextTwoAnimationState()
+    clearDealLastThreeAnimationState()
+    clearScoringCountdownTicker()
+    clearReactionCountdownAudioTicker()
+    clearBiddingUiState()
+    lastKnownWinningBid = null
+    resetPlayingUiCache(playingCache)
+    removePersistentBotTakeoverPopup()
+    options.leaveActiveRoom(roomId)
+    activeRoomState = null
+    options.startNewGame(stake, displayName || undefined)
   }
 
   function hasActiveRoom(): boolean {

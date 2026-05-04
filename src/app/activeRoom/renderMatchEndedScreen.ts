@@ -24,6 +24,7 @@ type RenderMatchEndedScreenOptions = {
   scaledStageWidth: number
   scaledStageHeight: number
   onReturnToLobby: () => void
+  onStartNewGame?: () => void
 }
 
 function getTeamBySeat(seat: Seat): Team {
@@ -59,9 +60,12 @@ function renderPlayerTile(seat: RoomSeatSnapshot): string {
       style="
         min-width:0;
         display:flex;
+        flex-direction:column;
         align-items:center;
-        gap:10px;
-        padding:10px 12px;
+        justify-content:center;
+        gap:11px;
+        min-height:172px;
+        padding:18px 14px 14px;
         border-radius:8px;
         background:rgba(255,255,255,0.055);
         border:1px solid rgba(255,255,255,0.10);
@@ -69,9 +73,9 @@ function renderPlayerTile(seat: RoomSeatSnapshot): string {
     >
       <div
         style="
-          width:42px;
-          height:42px;
-          flex:0 0 42px;
+          width:116px;
+          height:116px;
+          flex:0 0 116px;
           border-radius:8px;
           overflow:hidden;
           background:rgba(15,23,42,0.72);
@@ -80,7 +84,7 @@ function renderPlayerTile(seat: RoomSeatSnapshot): string {
           align-items:center;
           justify-content:center;
           color:#facc15;
-          font-size:18px;
+          font-size:42px;
           font-weight:900;
         "
       >
@@ -96,7 +100,7 @@ function renderPlayerTile(seat: RoomSeatSnapshot): string {
         }
       </div>
 
-      <div style="min-width:0;">
+      <div style="min-width:0;width:100%;text-align:center;">
         <div
           style="
             color:#f8fafc;
@@ -110,18 +114,6 @@ function renderPlayerTile(seat: RoomSeatSnapshot): string {
           title="${escapeHtml(displayName)}"
         >
           ${escapeHtml(displayName)}
-        </div>
-        <div
-          style="
-            margin-top:3px;
-            color:rgba(226,232,240,0.68);
-            font-size:11px;
-            font-weight:800;
-            text-transform:uppercase;
-            letter-spacing:0.04em;
-          "
-        >
-          ${seat.isBot ? 'Бот' : 'Играч'}
         </div>
       </div>
     </div>
@@ -244,8 +236,7 @@ function renderMatchEndedPanel(
           style="
             display:flex;
             align-items:center;
-            justify-content:space-between;
-            gap:20px;
+            justify-content:flex-start;
             margin-bottom:24px;
           "
         >
@@ -272,10 +263,53 @@ function renderMatchEndedPanel(
               ${matchEnded ? `Игра до ${matchEnded.targetScore}` : 'Финален резултат'}
             </div>
           </div>
+        </div>
 
+        <div
+          style="
+            display:grid;
+            grid-template-columns:repeat(2, minmax(0, 1fr));
+            gap:18px;
+          "
+        >
+          ${renderTeamPlayers('Ние', ourSeats)}
+          ${renderTeamPlayers('Вие', theirSeats)}
+        </div>
+
+        <div
+          style="
+            margin-top:24px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            gap:12px;
+            flex-wrap:wrap;
+          "
+        >
           <button
             type="button"
             data-match-ended-lobby-button="1"
+            style="
+              height:52px;
+              min-width:168px;
+              border:1px solid rgba(250,204,21,0.42);
+              border-radius:8px;
+              padding:0 22px;
+              background:rgba(15,23,42,0.72);
+              color:#f8fafc;
+              font-family:Inter, system-ui, sans-serif;
+              font-size:16px;
+              font-weight:900;
+              cursor:pointer;
+              box-shadow:0 16px 34px rgba(0,0,0,0.18);
+            "
+          >
+            Към лобито
+          </button>
+
+          <button
+            type="button"
+            data-match-ended-new-game-button="1"
             style="
               height:52px;
               min-width:168px;
@@ -291,19 +325,8 @@ function renderMatchEndedPanel(
               box-shadow:0 16px 34px rgba(0,0,0,0.26);
             "
           >
-            Към лобито
+            Нова игра
           </button>
-        </div>
-
-        <div
-          style="
-            display:grid;
-            grid-template-columns:repeat(2, minmax(0, 1fr));
-            gap:18px;
-          "
-        >
-          ${renderTeamPlayers('Ние', ourSeats)}
-          ${renderTeamPlayers('Вие', theirSeats)}
         </div>
       </div>
     </section>
@@ -320,6 +343,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
     scaledStageWidth,
     scaledStageHeight,
     onReturnToLobby,
+    onStartNewGame,
   } = options
 
   root.innerHTML = `
@@ -377,4 +401,8 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
   root
     .querySelector<HTMLButtonElement>('[data-match-ended-lobby-button="1"]')
     ?.addEventListener('click', onReturnToLobby)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-match-ended-new-game-button="1"]')
+    ?.addEventListener('click', onStartNewGame ?? onReturnToLobby)
 }

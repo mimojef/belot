@@ -31,6 +31,7 @@ export type LobbyFlowController = {
   setDisplayName: (value: string) => void
   setErrorText: (value: string | null) => void
   setLocalAvatarUrl: (value: string | null) => void
+  startMatchmaking: (stake: MatchStake, displayName?: string) => void
   resetToLobby: () => void
   handleServerMessage: (message: ServerMessage) => boolean
 }
@@ -630,31 +631,7 @@ export function createLobbyFlowController(
       },
       onSearchClick: () => {
         options.tryUnlockDocumentAudio?.()
-
-        if (!state.isConnected) {
-          state.errorText = 'Няма връзка със сървъра.'
-          render()
-          return
-        }
-
-        state.errorText = null
-        state.isSearching = true
-        state.currentScreen = 'matchmaking-room'
-        state.queuedPlayers = 1
-        state.requiredPlayers = DEFAULT_REQUIRED_PLAYERS
-        state.remainingMs = DEFAULT_COUNTDOWN_MS
-        state.countdownEndsAt = Date.now() + DEFAULT_COUNTDOWN_MS
-        state.serverPreviewBotDisplayNames = []
-        clearServerRoomSnapshot()
-        resetFinalFillSequence()
-
-        options.joinMatchmaking(
-          state.selectedStake,
-          state.displayName.trim() || undefined,
-        )
-
-        startWaitingClockAudio()
-        render()
+        startMatchmaking(state.selectedStake, state.displayName.trim() || undefined)
       },
       onCancelClick: () => {
         options.tryUnlockDocumentAudio?.()
@@ -664,6 +641,38 @@ export function createLobbyFlowController(
         render()
       },
     })
+  }
+
+  function startMatchmaking(stake: MatchStake, displayName?: string): void {
+    state.selectedStake = stake
+
+    if (displayName !== undefined) {
+      state.displayName = displayName
+    }
+
+    if (!state.isConnected) {
+      state.currentScreen = 'lobby'
+      state.isSearching = false
+      state.errorText = 'Няма връзка със сървъра.'
+      render()
+      return
+    }
+
+    state.errorText = null
+    state.isSearching = true
+    state.currentScreen = 'matchmaking-room'
+    state.queuedPlayers = 1
+    state.requiredPlayers = DEFAULT_REQUIRED_PLAYERS
+    state.remainingMs = DEFAULT_COUNTDOWN_MS
+    state.countdownEndsAt = Date.now() + DEFAULT_COUNTDOWN_MS
+    state.serverPreviewBotDisplayNames = []
+    clearServerRoomSnapshot()
+    resetFinalFillSequence()
+
+    options.joinMatchmaking(stake, state.displayName.trim() || undefined)
+
+    startWaitingClockAudio()
+    render()
   }
 
   function paintMatchmakingRoom(): void {
@@ -899,6 +908,7 @@ export function createLobbyFlowController(
       state.localAvatarUrl = value
       render()
     },
+    startMatchmaking,
     resetToLobby,
     handleServerMessage,
   }

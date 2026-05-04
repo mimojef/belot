@@ -6,10 +6,14 @@ import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js
 import { broadcastRoomSnapshots } from './core/broadcastRoomSnapshots.js'
 import { createInitialServerState } from './core/createInitialServerState.js'
 import { createServerConnection } from './core/createServerConnection.js'
+import { detachConnectionFromRoomSeat } from './core/detachConnectionFromRoomSeat.js'
+import { findHumanParticipantByConnectionId } from './core/findHumanParticipantByConnectionId.js'
+import { findParticipantSeat } from './core/findParticipantSeat.js'
 import { getConnectionById } from './core/getConnectionById.js'
 import { handleCreateRoom } from './core/handleCreateRoom.js'
 import { handleDisconnect } from './core/handleDisconnect.js'
 import { handleJoinRoom } from './core/handleJoinRoom.js'
+import { markHumanParticipantDisconnected } from './core/markHumanParticipantDisconnected.js'
 import { rawDataToText } from './core/rawDataToText.js'
 import { sendJsonMessage } from './core/sendJsonMessage.js'
 import type {
@@ -29,6 +33,7 @@ import {
 import { updateConnectionHeartbeat } from './core/updateConnectionHeartbeat.js'
 import { updateHumanParticipantInRoom } from './core/updateHumanParticipantInRoom.js'
 import { updateServerConnectionInState } from './core/updateServerConnectionInState.js'
+import { updateServerRoomInState } from './core/updateServerRoomInState.js'
 import { upsertServerConnection } from './core/upsertServerConnection.js'
 import { upsertServerRoom } from './core/upsertServerRoom.js'
 import { addQueueEntry } from './matchmaking/addQueueEntry.js'
@@ -981,6 +986,92 @@ wsServer.on('connection', (socket, request) => {
           type: 'matchmaking_left',
           removed,
         })
+
+        return
+      }
+
+      if (message.type === 'leave_active_room') {
+        removeConnectionFromMatchmaking(connection.id)
+
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Connection was not found.',
+          })
+          return
+        }
+
+        if (latestConnection.currentRoomId !== message.roomId) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'You are not attached to this room.',
+          })
+          return
+        }
+
+        const room = serverState.rooms[message.roomId] ?? null
+
+        if (room === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Room was not found.',
+          })
+          return
+        }
+
+        const participant = findHumanParticipantByConnectionId(room, connection.id)
+
+        if (participant === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Your player was not found in this room.',
+          })
+          return
+        }
+
+        const seat = findParticipantSeat(room, participant.playerId)
+
+        if (seat === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Your seat was not found.',
+          })
+          return
+        }
+
+        const disconnectedParticipant = markHumanParticipantDisconnected(
+          participant,
+          connection.id,
+        )
+        const nextRoom = updateHumanParticipantInRoom(
+          room,
+          seat,
+          disconnectedParticipant,
+        )
+        const detachedConnection = detachConnectionFromRoomSeat(
+          latestConnection,
+          connection.id,
+        )
+
+        serverState = updateServerRoomInState(serverState, room.id, nextRoom)
+        serverState = updateServerConnectionInState(
+          serverState,
+          connection.id,
+          detachedConnection,
+        )
+
+        safeSendToConnection(connection.id, {
+          type: 'left_active_room',
+          roomId: message.roomId,
+        })
+
+        const roomWasRemoved = cleanupInactiveRoomIfNeeded(message.roomId)
+
+        if (!roomWasRemoved) {
+          broadcastRoomSnapshots(nextRoom, socketRegistry)
+        }
 
         return
       }

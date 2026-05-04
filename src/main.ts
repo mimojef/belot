@@ -1,6 +1,10 @@
 import './style.css'
 
 import { createActiveRoomFlowController } from './app/activeRoom/createActiveRoomFlowController'
+import {
+  isMatchEndedPreviewRequest,
+  renderMatchEndedPreview,
+} from './app/activeRoom/previewMatchEndedScreen'
 import { createGameAudioController } from './app/audio/createGameAudioController'
 import { createLobbyFlowController } from './app/lobby/createLobbyFlowController'
 import { createGameServerClient, type GameServerClient } from './app/network/createGameServerClient'
@@ -14,6 +18,19 @@ if (!rootElementCandidate) {
 
 const rootElement: HTMLDivElement = rootElementCandidate
 
+if (isMatchEndedPreviewRequest()) {
+  const renderPreview = (): void => {
+    renderMatchEndedPreview(rootElement)
+  }
+
+  const disposeViewportResizeHandler = createViewportResizeHandler(renderPreview)
+
+  window.addEventListener('beforeunload', () => {
+    disposeViewportResizeHandler()
+  })
+
+  renderPreview()
+} else {
 let client: GameServerClient
 const gameAudio = createGameAudioController()
 
@@ -53,6 +70,10 @@ const activeRoom = createActiveRoomFlowController({
     lobby.setConnected(client.isConnected())
     lobby.resetToLobby()
     lobby.setErrorText(errorText)
+  },
+  startNewGame: (stake, displayName) => {
+    lobby.setConnected(client.isConnected())
+    lobby.startMatchmaking(stake, displayName)
   },
 })
 
@@ -108,3 +129,4 @@ window.addEventListener('beforeunload', () => {
 
 lobby.render()
 client.connect()
+}
