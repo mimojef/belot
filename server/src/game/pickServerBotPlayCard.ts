@@ -481,11 +481,13 @@ function partnerSignaledSuit(
 }
 
 /**
- * If the partner discarded a J or A (of trump or the signaled non-trump suit),
- * we're obligated to play into that suit next chance we lead.
+ * Силен директен сигнал от партньорска изчистена карта.
  *
- * Rule from Bulgarian Belot tactics:
- * "If partner discards J/A, you must play in that suit next opportunity."
+ * Четем само последната взятка, спечелена от нашия отбор.
+ * Рангът, който означава "търси ме в тази боя", зависи от договора:
+ *  - Всичко коз: изчистено J е директен сигнал; изчистено A НЕ е.
+ *  - Без коз: изчистено A е директен сигнал; изчистено J НЕ е.
+ *  - Коз боя: запазваме старото поведение за J/A.
  */
 function partnerMandatoryRequestedSuit(
   seat: Seat,
@@ -497,7 +499,6 @@ function partnerMandatoryRequestedSuit(
   const tricks = state.playing?.completedTricks ?? []
 
   // Четем САМО последната взятка СПЕЧЕЛЕНА от нашия отбор.
-  // Ако партньорът е изчистил J или A на НАШ ХОД — силен сигнал: "търси ме тук".
   const ourWonTricks = tricks.filter(
     t => t.winnerSeat === seat || t.winnerSeat === partner
   )
@@ -511,14 +512,19 @@ function partnerMandatoryRequestedSuit(
   if (!partnerPlay) return null
 
   const card = partnerPlay.card
+  if (card.suit === leadSuit) return null
 
-  // Партньорът е изчистил J или A в нечужда боя → силен сигнал
-  if (
-    card.suit !== leadSuit &&
-    (card.rank === 'J' || card.rank === 'A')
-  ) {
+  if (contract === 'all-trumps') {
+    return card.rank === 'J' ? card.suit : null
+  }
+
+  if (contract === 'no-trumps') {
+    return card.rank === 'A' ? card.suit : null
+  }
+
+  // При коз боя оставяме досегашното J/A правило.
+  if (card.rank === 'J' || card.rank === 'A') {
     if (card.suit === trumpSuit) return trumpSuit
-    // Интерпретираме цветната подсказка
     return resolveColorSignal(card.suit, seat, state)
   }
 
