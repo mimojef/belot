@@ -52,8 +52,8 @@ const PLAY_HUMAN_TIMEOUT_MS = 15_000
 const PLAY_BOT_DELAY_MS = 800
 const DECLARATION_BUBBLE_VISIBLE_MS = 1_500
 
-const TRICK_W = 195
-const TRICK_H = 284
+const TRICK_W = 170
+const TRICK_H = 247
 const HAND_W = 195
 const HAND_H = 284
 const BOTTOM_PANEL_WIDTH = 360
@@ -102,6 +102,12 @@ type ActiveDeclarationBubble = SeatDeclarationBubble & {
   entryKey: string
 }
 
+type QueuedDeclarationBubble = {
+  entryKey: string
+  lines: string[]
+  signatures: string[]
+}
+
 type DeclarationBubbleTrigger = {
   seat: Seat
   trickIndex: number
@@ -111,7 +117,7 @@ type DeclarationBubbleTrigger = {
 type DeclarationBubbleUiState = {
   shownSignatures: string[]
   activeBubbles: Partial<Record<Seat, ActiveDeclarationBubble>>
-  queuedBubbles: Partial<Record<Seat, ActiveDeclarationBubble>>
+  queuedBubbles: Partial<Record<Seat, QueuedDeclarationBubble>>
   timerIds: Partial<Record<Seat, number>>
 }
 
@@ -302,6 +308,7 @@ async function animatePlayedCardFromHand(options: {
   clone.style.transformOrigin = 'center center'
   clone.style.pointerEvents = 'none'
   clone.style.zIndex = '9001'
+  clone.style.visibility = 'visible'
   overlay.appendChild(clone)
 
   cardElement.style.visibility = 'hidden'
@@ -602,7 +609,8 @@ function scheduleDeclarationBubbleHide(options: {
     const queuedBubble = state.queuedBubbles[seat]
     if (queuedBubble) {
       delete state.queuedBubbles[seat]
-      state.activeBubbles[seat] = queuedBubble
+      state.shownSignatures = [...new Set([...state.shownSignatures, ...queuedBubble.signatures])]
+      state.activeBubbles[seat] = { entryKey: queuedBubble.entryKey, lines: queuedBubble.lines }
       onBubbleShown?.(queuedBubble.lines)
       scheduleDeclarationBubbleHide({
         cache,
@@ -634,18 +642,18 @@ function showOrQueueDeclarationBubble(options: {
   const { cache, state, trigger, bubble, onBubbleShown } = options
   const activeBubble = state.activeBubbles[trigger.seat]
 
-  state.shownSignatures = [
-    ...new Set([...state.shownSignatures, ...bubble.signatures]),
-  ]
-
   if (activeBubble) {
     state.queuedBubbles[trigger.seat] = {
       entryKey: bubble.entryKey,
       lines: bubble.lines,
+      signatures: bubble.signatures,
     }
     return
   }
 
+  state.shownSignatures = [
+    ...new Set([...state.shownSignatures, ...bubble.signatures]),
+  ]
   state.activeBubbles[trigger.seat] = {
     entryKey: bubble.entryKey,
     lines: bubble.lines,
@@ -671,7 +679,11 @@ function syncTransientDeclarationBubbles(options: {
   const state = getDeclarationBubbleUiState(cache)
 
   for (const trigger of triggers) {
-    const shownSignatures = new Set(state.shownSignatures)
+    const queuedForSeat = state.queuedBubbles[trigger.seat]
+    const shownSignatures = new Set([
+      ...state.shownSignatures,
+      ...(queuedForSeat?.signatures ?? []),
+    ])
     const pendingBubble = buildPendingDeclarationBubbleForTrigger({
       declarations: game.declarations,
       trigger,
@@ -772,6 +784,7 @@ function renderTrickCard(
   localSeat: Seat,
   animateNewest: boolean,
   entryElapsedMs: number,
+  flyingCardPlayKey: string | null,
 ): string {
   const visualSeat = getVisualSeatForLocalPerspective(play.seat, localSeat)
   const seatOffset = SEAT_TRICK_OFFSET[visualSeat]
@@ -780,6 +793,7 @@ function renderTrickCard(
   const finalTop = seatOffset.top + spreadOffset.top
   const finalRotate = seatOffset.rotate + spreadOffset.rotate
   const isNewest = index === count - 1
+  const isHiddenForOverlay = flyingCardPlayKey !== null && getPlayKey(play) === flyingCardPlayKey
 
   let animationStyle = ''
   if (isNewest && animateNewest) {
@@ -816,6 +830,7 @@ function renderTrickCard(
         will-change:transform;
         z-index:${10 + index};
         pointer-events:none;
+        ${isHiddenForOverlay ? 'visibility:hidden;' : ''}
         ${animationStyle}
       "
     >
@@ -921,6 +936,7 @@ function renderTrickArea(
   localSeat: Seat,
   animateNewest: boolean,
   newestEntryElapsedMs: number,
+  flyingCardPlayKey: string | null,
 ): string {
   return `
     <style>
@@ -946,7 +962,7 @@ function renderTrickArea(
       "
     >
       ${plays.map((play, index) =>
-        renderTrickCard(play, index, plays.length, localSeat, animateNewest, newestEntryElapsedMs),
+        renderTrickCard(play, index, plays.length, localSeat, animateNewest, newestEntryElapsedMs, flyingCardPlayKey),
       ).join('')}
     </div>
   `
@@ -1094,12 +1110,14 @@ function renderPlayingStage(options: {
   localSeat: Seat
   animateNewest: boolean
   newestEntryElapsedMs: number
+  flyingCardPlayKey: string | null
 }): string {
   const {
     plays,
     localSeat,
     animateNewest,
     newestEntryElapsedMs,
+    flyingCardPlayKey,
   } = options
 
   return `
@@ -1121,7 +1139,7 @@ function renderPlayingStage(options: {
           z-index:2;
         "
       >
-        ${renderTrickArea(plays, localSeat, animateNewest, newestEntryElapsedMs)}
+        ${renderTrickArea(plays, localSeat, animateNewest, newestEntryElapsedMs, flyingCardPlayKey)}
       </div>
     </section>
   `
@@ -1152,6 +1170,7 @@ function resetCacheForFreshSnapshot(
   cache.hoveredHandCardId = null
   cache.pendingDeclarationPrompt = null
   cache.submittedDeclarationKeys = []
+  cache.flyingCardPlayKey = null
   playedCardFlySourceByCache.delete(cache)
   clearDeclarationBubbleUiState(cache)
 }
@@ -1400,6 +1419,10 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
 
   cache.lastTrickKey = snapshotTrickKey
 
+  if (shouldAnimateNewestViaOverlay && newestDisplayedPlay !== null) {
+    cache.flyingCardPlayKey = getPlayKey(newestDisplayedPlay)
+  }
+
   const sortedHand = sortLocalHandForDisplay(game.ownHand, getSortOptions(winningBid))
   const isMyTurn = playing?.currentTurnSeat === localSeat
   const displayedTrickIndex = isShowingBufferedCompletedTrick
@@ -1561,6 +1584,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
               newestEntryElapsedMs: shouldAnimateCompletedTrickNewest
                 ? completedTrickEntryElapsedMs
                 : 0,
+              flyingCardPlayKey: cache.flyingCardPlayKey,
             })}
           </div>
         </div>
@@ -1807,6 +1831,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
           targetSize.height,
         )
 
+        const flyAnimToken = cache.animationToken
         void animatePlayedCardFromHand({
           sourceRect: normalizedSourceRect,
           sourcePhysicalWidth: targetSize.width,
@@ -1816,6 +1841,15 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
           targetPhysicalHeight: targetSize.height,
           cardElement: trickCardEl,
           onLanded: onPlayedCardLanded,
+        }).finally(() => {
+          if (cache.animationToken !== flyAnimToken) {
+            return
+          }
+          cache.flyingCardPlayKey = null
+          const latestOptions = latestRenderOptionsByCache.get(cache)
+          if (latestOptions) {
+            renderPlayingScreen(latestOptions)
+          }
         })
       }
     }

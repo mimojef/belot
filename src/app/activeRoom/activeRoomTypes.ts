@@ -97,6 +97,7 @@ export type PlayingUiCache = {
   hoveredHandCardId: string | null
   pendingDeclarationPrompt: PendingDeclarationPrompt | null
   submittedDeclarationKeys: string[]
+  flyingCardPlayKey: string | null
 }
 
 export type BiddingUiState = {

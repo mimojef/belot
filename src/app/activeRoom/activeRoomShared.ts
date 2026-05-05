@@ -111,6 +111,7 @@ export function createPlayingUiCache(): PlayingUiCache {
     hoveredHandCardId: null,
     pendingDeclarationPrompt: null,
     submittedDeclarationKeys: [],
+    flyingCardPlayKey: null,
   }
 }
 
@@ -134,6 +135,7 @@ export function resetPlayingUiCache(cache: PlayingUiCache): void {
   cache.hoveredHandCardId = null
   cache.pendingDeclarationPrompt = null
   cache.submittedDeclarationKeys = []
+  cache.flyingCardPlayKey = null
 }
 
 export function createBiddingUiState(): BiddingUiState {
