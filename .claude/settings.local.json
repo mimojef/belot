@@ -8,7 +8,8 @@
       "Bash(npm.cmd run *)",
       "Bash(npm.cmd --prefix server run build)",
       "Bash(xargs grep *)",
-      "Bash(Select-Object Name)"
+      "Bash(Select-Object Name)",
+      "Bash(npx.cmd tsc *)"
     ]
   }
 }

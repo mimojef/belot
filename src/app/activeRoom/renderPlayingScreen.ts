@@ -545,7 +545,7 @@ function buildPendingDeclarationBubbleForTrigger(options: {
       return
     }
 
-    if (!declaration.announced || !declaration.valid) {
+    if (!declaration.announced) {
       return
     }
 
