@@ -1335,6 +1335,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     latestCompletedTrick !== null ? getCompletedTrickKey(latestCompletedTrick) : null
 
   if (!cache.hasRenderedSnapshot) {
+    clearDeclarationBubbleUiState(cache)
     cache.hasRenderedSnapshot = true
     cache.lastCompletedTricksCount = completedCount
     cache.lastTrickKey = snapshotTrickKey
