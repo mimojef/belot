@@ -134,7 +134,7 @@ function getBestBotContractCandidate(
     })
   }
 
-  if (validActions.allTrumps) {
+  if (validActions.allTrumps && getAllTrumpsGuaranteedPoints(hand) >= 54) {
     candidates.push({
       action: { type: 'all-trumps' },
       score:
@@ -597,6 +597,26 @@ function getRankCounts(hand: ServerCard[]): RankCounts {
   }
 
   return counts
+}
+
+/**
+ * Изчислява 100% сигурните бройки при Всичко коз:
+ *   - Всяко Вале = 20 бройки
+ *   - Всяка 9-ка = 14 бройки САМО ако има Вале в същата боя
+ * Всичко останало (Асо, 10, Поп, Дама, 8, 7 и 9 без Вале) не се брои.
+ */
+function getAllTrumpsGuaranteedPoints(hand: ServerCard[]): number {
+  let points = 0
+  for (const suit of SERVER_SUIT_OPTIONS) {
+    const suitCards = hand.filter(c => c.suit === suit)
+    const hasJ = suitCards.some(c => String(c.rank) === 'J')
+    if (hasJ) {
+      points += 20
+      const has9 = suitCards.some(c => String(c.rank) === '9')
+      if (has9) points += 14
+    }
+  }
+  return points
 }
 
 function getSuitLengthBonus(count: number): number {

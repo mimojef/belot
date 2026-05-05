@@ -263,10 +263,13 @@ const ALL_SUITS: ServerSuit[] = ['clubs', 'diamonds', 'hearts', 'spades']
  * Условие: цветът има точно 2 карти (9 + нещо друго),
  * и ние чистим "нещото друго" → остава гола 9.
  */
-function wouldBareNine(card: ServerCard, hand: ServerCard[]): boolean {
+function wouldBareNine(card: ServerCard, hand: ServerCard[], played?: ServerCard[]): boolean {
   if (card.rank === '9') return false
   const suitCards = bySuit(hand, card.suit)
-  return suitCards.length === 2 && suitCards.some(c => c.rank === '9')
+  if (suitCards.length !== 2 || !suitCards.some(c => c.rank === '9')) return false
+  // Ако J вече е изиграно, 9-та е властна — не е опасно да остане сама
+  if (played?.some(c => c.suit === card.suit && c.rank === 'J')) return false
+  return true
 }
 
 /**
@@ -282,9 +285,10 @@ function safeDiscard(
   trumpSuit: ServerSuit | null,
   contract: Contract,
   protectedSuit: ServerSuit | null = null,
+  played?: ServerCard[],
 ): ServerCard {
   const safe = cards.filter(c => {
-    if (wouldBareNine(c, hand)) return false
+    if (wouldBareNine(c, hand, played)) return false
     if (protectedSuit && c.suit === protectedSuit && bySuit(hand, c.suit).length === 1) return false
     return true
   })
@@ -680,7 +684,6 @@ function chooseLead(
   // ── Rule 4а: Всичко коз — различна стратегия за ОБЯВИТЕЛЕН и ЗАЩИТЕН отбор
   if (contract === 'all-trumps') {
     const partner = getPartnerSeat(seat)
-    const [opp1, opp2] = getOpponentSeats(seat)
     const winningBid = state.bidding.winningBid
     const botTeamDeclared =
       winningBid?.seat === seat || winningBid?.seat === partner
@@ -697,12 +700,10 @@ function chooseLead(
         const hasJ = suitCards.some(c => c.rank === 'J')
         if (!hasA || !hasOther || hasJ) continue
 
-        const opponentCards = [
-          ...(state.hands[opp1] ?? []),
-          ...(state.hands[opp2] ?? []),
-        ]
-        const oppHasJ = opponentCards.some(c => c.suit === suit && c.rank === 'J')
-        if (oppHasJ) {
+        // Fair: J не е изиграно и не е в нашата ръка → вероятно е у противника
+        const played = allPlayedCards(state)
+        const jIsPlayed = played.some(c => c.suit === suit && c.rank === 'J')
+        if (!jIsPlayed) {
           return suitCards.find(c => c.rank === 'A')!
         }
       }
@@ -723,11 +724,7 @@ function chooseLead(
       for (const group of allTrumpsSuitGroups) {
         const top = highestCard(group.cards, trumpSuit, contract)
         const topIsMaster = isCardMaster(top, seat, state, trumpSuit, contract)
-        const partnerSuitCards = bySuit(state.hands[partner] ?? [], group.suit)
-        const partnerHasMaster = partnerSuitCards.some(c =>
-          isCardMaster(c, seat, state, trumpSuit, contract)
-        )
-        if (topIsMaster || partnerHasMaster) {
+        if (topIsMaster) {
           return top
         }
       }
@@ -786,19 +783,12 @@ function chooseLead(
       })
 
       if (ninesWithoutJ.length > 0) {
-        // Избираме цвета с 9-ка, в който противниците имат J
-        // (ако нямат J в цвета → нашата 9 е вече властна, случай 2 по-горе)
-        // Водим с най-малката карта от цвета за да изпием техния J
-        const opponentCards = [
-          ...(state.hands[opp1] ?? []),
-          ...(state.hands[opp2] ?? []),
-        ]
+        // Fair: ако J не е изиграно и не е в нашата ръка → вероятно е у противника.
+        // Водим с най-малката карта за да принудим J да излезе.
+        const played = allPlayedCards(state)
         for (const nine of ninesWithoutJ) {
-          const oppHasJackInSuit = opponentCards.some(
-            c => c.suit === nine.suit && c.rank === 'J'
-          )
-          if (oppHasJackInSuit) {
-            // Играем НАЙ-МАЛКАТА карта от този цвят за да принудим J да излезе
+          const jIsPlayed = played.some(c => c.suit === nine.suit && c.rank === 'J')
+          if (!jIsPlayed) {
             const suitCards = bySuit(validCards, nine.suit)
             return lowestCard(suitCards, trumpSuit, contract)
           }
@@ -1069,7 +1059,7 @@ function chooseFollow(
   }
 
   // Не можем да бием → чистим безопасно (не оголваме 9, пазим А-сигналната боя)
-  return safeDiscard(validCards, hand, trumpSuit, contract, aSignaledSuit)
+  return safeDiscard(validCards, hand, trumpSuit, contract, aSignaledSuit, allPlayedCards(state))
 }
 
 // ─── Signal discard ───────────────────────────────────────────────────────────
@@ -1092,6 +1082,24 @@ function chooseFollow(
  *   И никой противник не е чист на тази боя с налични козове
  * - В всичко коз: най-висока останала карта в боята (по козов ред)
  */
+function isNoTrumpsCardMaster(
+  card: ServerCard,
+  hand: ServerCard[],
+  played: ServerCard[],
+): boolean {
+  // Fair: при безкоз картата е властна само ако всички по-високи карти
+  // в същата боя са или в нашата ръка, или вече са изиграни.
+  // Не гледаме скритите ръце на противниците.
+  for (const rank of Object.keys(NO_TRUMP_POWER) as ServerRank[]) {
+    if (NO_TRUMP_POWER[rank] <= NO_TRUMP_POWER[card.rank]) continue
+    const inMyHand = hand.some(c => c.suit === card.suit && c.rank === rank)
+    const wasPlayed = played.some(c => c.suit === card.suit && c.rank === rank)
+    if (!inMyHand && !wasPlayed) return false
+  }
+
+  return true
+}
+
 function isCardMaster(
   card: ServerCard,
   seat: Seat,
@@ -1099,22 +1107,25 @@ function isCardMaster(
   trumpSuit: ServerSuit | null,
   contract: Contract,
 ): boolean {
-  const [opp1, opp2] = getOpponentSeats(seat)
-  const opponentHands = [...(state.hands[opp1] ?? []), ...(state.hands[opp2] ?? [])]
-
   if (contract === 'no-trumps') {
-    // Властна ако никой противник няма по-висока карта в СЪЩАТА боя
-    return !opponentHands.some(c =>
-      c.suit === card.suit && NO_TRUMP_POWER[c.rank] > NO_TRUMP_POWER[card.rank]
-    )
+    return isNoTrumpsCardMaster(card, state.hands[seat] ?? [], allPlayedCards(state))
   }
 
   if (contract === 'all-trumps') {
-    // Всеки цвят е коз — властна ако никой противник няма по-висок в СЪЩАТА боя
-    return !opponentHands.some(c =>
-      c.suit === card.suit && TRUMP_POWER[c.rank] > TRUMP_POWER[card.rank]
-    )
+    // Fair: властна ако всяка по-висока карта е в нашата ръка или вече изиграна
+    const played = allPlayedCards(state)
+    const myHand = state.hands[seat] ?? []
+    for (const rank of Object.keys(TRUMP_POWER) as ServerRank[]) {
+      if (TRUMP_POWER[rank] <= TRUMP_POWER[card.rank]) continue
+      const inMyHand = myHand.some(c => c.suit === card.suit && c.rank === rank)
+      const wasPlayed = played.some(c => c.suit === card.suit && c.rank === rank)
+      if (!inMyHand && !wasPlayed) return false
+    }
+    return true
   }
+
+  const [opp1, opp2] = getOpponentSeats(seat)
+  const opponentHands = [...(state.hands[opp1] ?? []), ...(state.hands[opp2] ?? [])]
 
   // Козова игра (suit contract)
   if (card.suit === trumpSuit) {
@@ -1155,6 +1166,27 @@ function areRemainingCardsAllMasters(
 ): boolean {
   const remaining = (state.hands[seat] ?? []).filter(c => c.id !== excludeCard.id)
   return remaining.every(c => isCardMaster(c, seat, state, trumpSuit, contract))
+}
+
+/**
+ * Проверява дали дадена боя е "контролирана" при Всичко коз.
+ *
+ * Контролирана боя = ботът може да вземе взятката когато тя е водена:
+ *   - имаме J в боята (J е най-силен → контролираме цялата боя)
+ *   - или J е вече изиграно И имаме 9 (9 е сега най-силна → контролираме)
+ *
+ * Картите в контролиран цвят са "пазени" и не се чистят преди
+ * по-опасни карти от неконтролирани цветове.
+ */
+function isAllTrumpsControlledSuit(
+  suit: ServerSuit,
+  hand: ServerCard[],
+  played: ServerCard[],
+): boolean {
+  const suitHand = hand.filter(c => c.suit === suit)
+  if (suitHand.some(c => c.rank === 'J')) return true
+  const jPlayed = played.some(c => c.suit === suit && c.rank === 'J')
+  return jPlayed && suitHand.some(c => c.rank === '9')
 }
 
 function discardSignal(
