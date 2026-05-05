@@ -100,6 +100,7 @@ type PlayedCardFlySource = {
 
 type ActiveDeclarationBubble = SeatDeclarationBubble & {
   entryKey: string
+  needsTimerStart: boolean
 }
 
 type QueuedDeclarationBubble = {
@@ -117,7 +118,7 @@ type DeclarationBubbleTrigger = {
 type DeclarationBubbleUiState = {
   shownSignatures: string[]
   activeBubbles: Partial<Record<Seat, ActiveDeclarationBubble>>
-  queuedBubbles: Partial<Record<Seat, QueuedDeclarationBubble>>
+  queuedBubbles: Partial<Record<Seat, QueuedDeclarationBubble[]>>
   timerIds: Partial<Record<Seat, number>>
 }
 
@@ -606,19 +607,23 @@ function scheduleDeclarationBubbleHide(options: {
     delete state.activeBubbles[seat]
     delete state.timerIds[seat]
 
-    const queuedBubble = state.queuedBubbles[seat]
-    if (queuedBubble) {
-      delete state.queuedBubbles[seat]
-      state.shownSignatures = [...new Set([...state.shownSignatures, ...queuedBubble.signatures])]
-      state.activeBubbles[seat] = { entryKey: queuedBubble.entryKey, lines: queuedBubble.lines }
-      onBubbleShown?.(queuedBubble.lines)
-      scheduleDeclarationBubbleHide({
-        cache,
-        state,
-        seat,
-        entryKey: queuedBubble.entryKey,
-        onBubbleShown,
-      })
+    const queueForSeat = state.queuedBubbles[seat] ?? []
+    const nextBubble = queueForSeat[0]
+
+    if (nextBubble) {
+      const remaining = queueForSeat.slice(1)
+      if (remaining.length === 0) {
+        delete state.queuedBubbles[seat]
+      } else {
+        state.queuedBubbles[seat] = remaining
+      }
+      state.shownSignatures = [...new Set([...state.shownSignatures, ...nextBubble.signatures])]
+      state.activeBubbles[seat] = {
+        entryKey: nextBubble.entryKey,
+        lines: nextBubble.lines,
+        needsTimerStart: true,
+      }
+      onBubbleShown?.(nextBubble.lines)
     }
 
     const latestOptions = latestRenderOptionsByCache.get(cache)
@@ -643,11 +648,11 @@ function showOrQueueDeclarationBubble(options: {
   const activeBubble = state.activeBubbles[trigger.seat]
 
   if (activeBubble) {
-    state.queuedBubbles[trigger.seat] = {
-      entryKey: bubble.entryKey,
-      lines: bubble.lines,
-      signatures: bubble.signatures,
-    }
+    const existing = state.queuedBubbles[trigger.seat] ?? []
+    state.queuedBubbles[trigger.seat] = [
+      ...existing,
+      { entryKey: bubble.entryKey, lines: bubble.lines, signatures: bubble.signatures },
+    ]
     return
   }
 
@@ -657,6 +662,7 @@ function showOrQueueDeclarationBubble(options: {
   state.activeBubbles[trigger.seat] = {
     entryKey: bubble.entryKey,
     lines: bubble.lines,
+    needsTimerStart: false,
   }
   onBubbleShown?.(bubble.lines)
 
@@ -679,10 +685,10 @@ function syncTransientDeclarationBubbles(options: {
   const state = getDeclarationBubbleUiState(cache)
 
   for (const trigger of triggers) {
-    const queuedForSeat = state.queuedBubbles[trigger.seat]
+    const queueForSeat = state.queuedBubbles[trigger.seat] ?? []
     const shownSignatures = new Set([
       ...state.shownSignatures,
-      ...(queuedForSeat?.signatures ?? []),
+      ...queueForSeat.flatMap((q) => q.signatures),
     ])
     const pendingBubble = buildPendingDeclarationBubbleForTrigger({
       declarations: game.declarations,
@@ -1442,6 +1448,21 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     triggers: declarationBubbleTriggers,
     onBubbleShown: onDeclarationBubbleShown,
   })
+
+  const declarationBubbleState = getDeclarationBubbleUiState(cache)
+  for (const seatKey of Object.keys(declarationBubbleState.activeBubbles) as Seat[]) {
+    const pendingActive = declarationBubbleState.activeBubbles[seatKey]
+    if (pendingActive?.needsTimerStart) {
+      pendingActive.needsTimerStart = false
+      scheduleDeclarationBubbleHide({
+        cache,
+        state: declarationBubbleState,
+        seat: seatKey,
+        entryKey: pendingActive.entryKey,
+        onBubbleShown: onDeclarationBubbleShown,
+      })
+    }
+  }
 
   function canSubmitHandCard(cardId: string): boolean {
     if (!isMyTurn) {
