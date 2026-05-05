@@ -125,7 +125,7 @@ function getBestBotContractCandidate(
     })
   }
 
-  if (validActions.noTrumps) {
+  if (validActions.noTrumps && getNoTrumpsGuaranteedPoints(hand) >= 32) {
     candidates.push({
       action: { type: 'no-trumps' },
       score:
@@ -597,6 +597,32 @@ function getRankCounts(hand: ServerCard[]): RankCounts {
   }
 
   return counts
+}
+
+/**
+ * Изчислява 100% сигурните точки при Без коз:
+ *   - Всяко Асо = 11 точки
+ *   - Всяка 10-ка = 10 точки САМО ако има Асо в същата боя
+ * Всичко останало (Поп, Дама, Вале, 9, 8, 7 и 10 без Асо) не се брои.
+ */
+function getNoTrumpsGuaranteedPoints(hand: ServerCard[]): number {
+  let points = 0
+
+  for (const suit of SERVER_SUIT_OPTIONS) {
+    const suitCards = hand.filter((card) => card.suit === suit)
+    const hasAce = suitCards.some((card) => String(card.rank) === 'A')
+
+    if (hasAce) {
+      points += 11
+
+      const hasTen = suitCards.some((card) => String(card.rank) === '10')
+      if (hasTen) {
+        points += 10
+      }
+    }
+  }
+
+  return points
 }
 
 /**
