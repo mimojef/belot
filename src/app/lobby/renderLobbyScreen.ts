@@ -35,11 +35,11 @@ const MATCH_STAKE_CARDS: LobbyStakeCard[] = [
 ]
 
 const COIN_PACKAGES = [
-  { amount: 1000, image: '/assets/lobby/coins-1000.png' },
-  { amount: 5000, image: '/assets/lobby/coins-5000.png' },
-  { amount: 10000, image: '/assets/lobby/coins-10000.png' },
-  { amount: 25000, image: '/assets/lobby/coins-25000.png' },
-  { amount: 50000, image: '/assets/lobby/coins-50000.png' },
+  { amount: 1000, image: '/assets/lobby/coins-1000.png', width: 60, height: 53 },
+  { amount: 5000, image: '/assets/lobby/coins-5000.png', width: 82, height: 74 },
+  { amount: 10000, image: '/assets/lobby/coins-10000.png', width: 89, height: 85 },
+  { amount: 25000, image: '/assets/lobby/coins-25000.png', width: 106, height: 93 },
+  { amount: 50000, image: '/assets/lobby/coins-50000.png', width: 111, height: 98 },
 ]
 
 function escapeHtml(value: string): string {
@@ -60,22 +60,25 @@ function renderNav(_isSearching: boolean): string {
     <nav style="
       background: #0a0a0a;
       border-bottom: 1px solid rgba(255,255,255,0.10);
-      padding: 0 24px;
+      max-width: 1640px;
+      margin: 0 auto;
+      box-sizing: border-box;
+      padding: 0 5px;
       display: flex;
       align-items: center;
       gap: 0;
-      height: 56px;
+      height: 72px;
       position: sticky;
       top: 0;
       z-index: 100;
     ">
       <a href="#" style="display:flex; align-items:center; gap:8px; text-decoration:none; margin-right:16px;">
-        <img src="/assets/lobby/logo.png" alt="Pika.bg" style="height:32px;">
+        <img src="/assets/lobby/logo.png" alt="Pika.bg" style="width:192px; height:52px; display:block; object-fit:contain;">
       </a>
 
       <div style="display:flex; align-items:stretch; gap:0; height:100%; flex:1;">
         <a href="#" style="
-          display:flex; align-items:center; gap:7px;
+          display:flex; align-items:center; gap:10px;
           padding:0 18px;
           text-decoration:none;
           font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
@@ -83,11 +86,11 @@ function renderNav(_isSearching: boolean): string {
           border-bottom:2px solid #d4a520;
           background: rgba(212,165,32,0.06);
         ">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor" style="display:block;"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
           Лоби
         </a>
         <a href="#" style="
-          display:flex; align-items:center; gap:7px;
+          display:flex; align-items:center; gap:10px;
           padding:0 18px;
           text-decoration:none;
           font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
@@ -95,40 +98,40 @@ function renderNav(_isSearching: boolean): string {
           border-bottom:2px solid transparent;
           transition:color 0.15s;
         ">
-          <img src="/assets/lobby/icon-tournaments.png" alt="" style="height:15px; opacity:0.75;">
+          <img src="/assets/lobby/icon-tournaments.png" alt="" style="width:32px; height:29px; display:block; object-fit:contain; opacity:0.85;">
           Турнири
         </a>
         <a href="#" style="
-          display:flex; align-items:center; gap:7px;
+          display:flex; align-items:center; gap:10px;
           padding:0 18px;
           text-decoration:none;
           font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
           color:rgba(255,255,255,0.70);
           border-bottom:2px solid transparent;
         ">
-          <img src="/assets/lobby/icon-shop-cart.png" alt="" style="height:15px; opacity:0.75;">
+          <img src="/assets/lobby/icon-shop.png" alt="" style="width:31px; height:30px; display:block; object-fit:contain; opacity:0.85;">
           Магазин
         </a>
         <a href="#" style="
-          display:flex; align-items:center; gap:7px;
+          display:flex; align-items:center; gap:10px;
           padding:0 18px;
           text-decoration:none;
           font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
           color:rgba(255,255,255,0.70);
           border-bottom:2px solid transparent;
         ">
-          <img src="/assets/lobby/icon-leaderboard.png" alt="" style="height:15px; opacity:0.75;">
+          <img src="/assets/lobby/icon-leaderboard.png" alt="" style="width:29px; height:30px; display:block; object-fit:contain; opacity:0.85;">
           Класация
         </a>
         <a href="#" style="
-          display:flex; align-items:center; gap:7px;
+          display:flex; align-items:center; gap:10px;
           padding:0 18px;
           text-decoration:none;
           font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
           color:rgba(255,255,255,0.70);
           border-bottom:2px solid transparent;
         ">
-          <img src="/assets/lobby/icon-profile.png" alt="" style="height:15px; opacity:0.75;">
+          <img src="/assets/lobby/icon-profile.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain; opacity:0.85;">
           Профил
         </a>
       </div>
@@ -138,18 +141,12 @@ function renderNav(_isSearching: boolean): string {
           background:none; border:none; cursor:pointer; padding:6px;
           color:rgba(255,255,255,0.65); position:relative;
         ">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
+          <img src="/assets/lobby/icon-notifications.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain; opacity:0.85;">
           <span style="
             position:absolute; top:4px; right:4px;
             width:8px; height:8px; border-radius:50%;
             background:#ef4444; border:1.5px solid #0a0a0a;
           "></span>
-        </button>
-        <button style="background:none; border:none; cursor:pointer; padding:6px; color:rgba(255,255,255,0.65);">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
-        </button>
-        <button style="background:none; border:none; cursor:pointer; padding:6px; color:rgba(255,255,255,0.65);">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
         </button>
         <button style="
           display:flex; align-items:center; gap:8px;
@@ -163,8 +160,8 @@ function renderNav(_isSearching: boolean): string {
         ">
           <span style="font-size:16px; font-weight:900;">+</span>
           Купи Жълтици
-          <img src="/assets/lobby/icon-coin.png" alt="" style="height:18px;">
         </button>
+        <img src="/assets/lobby/icon-coin.png" alt="" style="width:33px; height:32px; display:block; object-fit:contain;">
       </div>
     </nav>
   `
@@ -172,96 +169,100 @@ function renderNav(_isSearching: boolean): string {
 
 function renderHeroSection(profileName: string, isConnected: boolean): string {
   return `
-    <div style="display:flex; gap:16px; margin-bottom:16px;">
-      <div style="flex:1; min-width:0; border-radius:14px; overflow:hidden; position:relative;">
+    <div style="display:flex; gap:16px; align-items:stretch; margin-bottom:16px;">
+      <div style="flex:0 1 985px; min-width:0; border-radius:14px; overflow:hidden; position:relative;">
         <img src="/assets/lobby/hero-banner.png" alt="Добре дошъл в лобито"
-          style="width:100%; display:block; object-fit:cover; min-height:180px;">
+          style="width:985px; height:258px; max-width:100%; display:block; object-fit:contain;">
       </div>
 
       <div style="
-        width:320px; flex-shrink:0;
-        background: linear-gradient(160deg, #141414 0%, #0d0d0d 100%);
-        border: 1px solid rgba(255,255,255,0.09);
+        flex:1 1 620px; min-width:580px; height:258px;
+        background: linear-gradient(160deg, #050505 0%, #0d0d0d 100%);
+        border: 1px solid rgba(212,165,32,0.75);
         border-radius:14px;
-        padding:20px;
+        padding:16px 28px;
+        box-sizing:border-box;
       ">
-        <div style="display:flex; align-items:center; gap:14px; margin-bottom:16px;">
-          <div style="
-            width:64px; height:64px; border-radius:50%;
-            border:2px solid #d4a520;
-            overflow:hidden; flex-shrink:0;
-            background:#111111;
-          ">
-            <img src="/assets/lobby/player-avatar.png" alt="${escapeHtml(profileName)}"
-              style="width:100%; height:100%; object-fit:cover;">
+        <div style="display:flex; align-items:center; gap:24px; height:120px;">
+          <div style="position:relative; width:120px; height:120px; flex-shrink:0;">
+            <div style="
+              width:120px; height:120px; border-radius:50%;
+              border:3px solid #d4a520;
+              overflow:hidden;
+              background:#111111;
+              box-shadow:0 0 0 2px rgba(0,0,0,0.65), 0 0 22px rgba(212,165,32,0.18);
+              box-sizing:border-box;
+            ">
+              <img src="/assets/lobby/player-avatar.png" alt="${escapeHtml(profileName)}"
+                style="width:100%; height:100%; object-fit:cover; object-position:center;">
+            </div>
+            <div style="
+              position:absolute; right:4px; bottom:12px;
+              width:18px; height:18px; border-radius:50%;
+              background:${isConnected ? '#22c55e' : '#ef4444'};
+              border:2px solid #050505;
+            "></div>
           </div>
-          <div>
-            <div style="font-size:18px; font-weight:800; color:#ffffff;">${escapeHtml(profileName)}</div>
-            <div style="display:flex; align-items:center; gap:5px; margin-top:3px;">
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:30px; line-height:1; font-weight:800; color:#ffffff;">${escapeHtml(profileName)}</div>
+            <div style="display:flex; align-items:center; gap:8px; margin-top:12px;">
               <div style="
-                width:8px; height:8px; border-radius:50%;
+                width:14px; height:14px; border-radius:50%;
                 background:${isConnected ? '#22c55e' : '#ef4444'};
               "></div>
-              <span style="font-size:12px; color:${isConnected ? '#86efac' : '#fca5a5'}; font-weight:600;">
+              <span style="font-size:16px; color:rgba(255,255,255,0.88); font-weight:600;">
                 ${isConnected ? 'Онлайн' : 'Офлайн'}
               </span>
             </div>
           </div>
-          <div style="margin-left:auto; text-align:right;">
-            <div style="font-size:11px; color:rgba(255,255,255,0.5); font-weight:600; text-transform:uppercase; letter-spacing:0.06em;">Баланс</div>
-            <div style="display:flex; align-items:center; justify-content:flex-end; gap:5px; margin-top:2px;">
-              <span style="font-size:20px; font-weight:900; color:#d4a520;">25 430</span>
-              <img src="/assets/lobby/icon-coin.png" alt="" style="height:20px;">
+          <div style="width:1px; height:92px; background:rgba(212,165,32,0.35);"></div>
+          <div style="width:210px;">
+            <div style="font-size:17px; color:rgba(255,255,255,0.78); font-weight:500;">Баланс</div>
+            <div style="display:flex; align-items:center; gap:8px; margin-top:8px;">
+              <span style="font-size:34px; line-height:1; font-weight:900; color:#d4a520;">25 430</span>
+              <img src="/assets/lobby/icon-coin.png" alt="" style="width:33px; height:32px; display:block; object-fit:contain;">
             </div>
+            <div style="font-size:16px; color:rgba(255,255,255,0.72); margin-top:8px;">жълтици</div>
           </div>
         </div>
 
         <div style="
-          display:grid; grid-template-columns:1fr 1fr;
-          gap:8px;
+          height:1px;
+          background:linear-gradient(90deg, transparent 0%, rgba(212,165,32,0.55) 12%, rgba(212,165,32,0.55) 88%, transparent 100%);
+          margin:10px 0 8px;
+        "></div>
+
+        <div style="
+          display:grid; grid-template-columns:0.82fr 1fr 1.18fr 1.42fr;
+          align-items:center;
+          height:76px;
         ">
-          <div style="
-            background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.07);
-            border-radius:10px; padding:10px 12px;
-            display:flex; align-items:center; gap:8px;
-          ">
-            <img src="/assets/lobby/icon-victories.png" alt="" style="height:22px; flex-shrink:0;">
-            <div>
-              <div style="font-size:10px; color:rgba(255,255,255,0.5); font-weight:600; text-transform:uppercase;">Победи</div>
-              <div style="font-size:15px; font-weight:800; color:#fff;">1 287</div>
+          <div style="display:flex; align-items:center; gap:8px; min-width:0; padding-right:10px;">
+            <img src="/assets/lobby/icon-victories.png" alt="" style="width:36px; height:36px; display:block; object-fit:contain; flex-shrink:0;">
+            <div style="min-width:0;">
+              <div style="font-size:15px; color:rgba(255,255,255,0.82); font-weight:600;">Победи</div>
+              <div style="font-size:22px; line-height:1.1; font-weight:800; color:#ffffff; margin-top:6px;">1287</div>
             </div>
           </div>
-          <div style="
-            background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.07);
-            border-radius:10px; padding:10px 12px;
-            display:flex; align-items:center; gap:8px;
-          ">
-            <img src="/assets/lobby/icon-games-played.png" alt="" style="height:22px; flex-shrink:0;">
-            <div>
-              <div style="font-size:10px; color:rgba(255,255,255,0.5); font-weight:600; text-transform:uppercase;">Изиграни</div>
-              <div style="font-size:15px; font-weight:800; color:#fff;">2 540</div>
+          <div style="display:flex; align-items:center; gap:8px; min-width:0; padding:0 10px; border-left:1px solid rgba(212,165,32,0.35);">
+            <img src="/assets/lobby/icon-games-played.png" alt="" style="width:36px; height:38px; display:block; object-fit:contain; flex-shrink:0;">
+            <div style="min-width:0;">
+              <div style="font-size:14px; line-height:1.1; color:rgba(255,255,255,0.82); font-weight:600;">Изиграни игри</div>
+              <div style="font-size:22px; line-height:1.1; font-weight:800; color:#ffffff; margin-top:6px;">2540</div>
             </div>
           </div>
-          <div style="
-            background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.07);
-            border-radius:10px; padding:10px 12px;
-            display:flex; align-items:center; gap:8px;
-          ">
-            <img src="/assets/lobby/icon-success-rate.png" alt="" style="height:22px; flex-shrink:0;">
-            <div>
-              <div style="font-size:10px; color:rgba(255,255,255,0.5); font-weight:600; text-transform:uppercase;">Успеваемост</div>
-              <div style="font-size:15px; font-weight:800; color:#d4a520;">63%</div>
+          <div style="display:flex; align-items:center; gap:8px; min-width:0; padding:0 10px; border-left:1px solid rgba(212,165,32,0.35);">
+            <img src="/assets/lobby/icon-success-rate.png" alt="" style="width:36px; height:38px; display:block; object-fit:contain; flex-shrink:0;">
+            <div style="min-width:0;">
+              <div style="font-size:14px; line-height:1.1; color:rgba(255,255,255,0.82); font-weight:600;">Успеваемост</div>
+              <div style="font-size:22px; line-height:1.1; font-weight:800; color:#ffffff; margin-top:6px;">63%</div>
             </div>
           </div>
-          <div style="
-            background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.07);
-            border-radius:10px; padding:10px 12px;
-            display:flex; align-items:center; gap:8px;
-          ">
-            <img src="/assets/lobby/icon-rank.png" alt="" style="height:22px; flex-shrink:0;">
-            <div>
-              <div style="font-size:10px; color:rgba(255,255,255,0.5); font-weight:600; text-transform:uppercase;">Ранг</div>
-              <div style="font-size:15px; font-weight:800; color:#fff;">Майстор</div>
+          <div style="display:flex; align-items:center; gap:10px; min-width:0; padding-left:10px; border-left:1px solid rgba(212,165,32,0.35);">
+            <img src="/assets/lobby/icon-rank.png" alt="" style="width:48px; height:62px; display:block; object-fit:contain; flex-shrink:0;">
+            <div style="min-width:0;">
+              <div style="font-size:15px; color:#d4a520; font-weight:700;">Ранг</div>
+              <div style="font-size:18px; line-height:1.15; font-weight:800; color:#ffffff; margin-top:7px;">Майстор</div>
             </div>
           </div>
         </div>
@@ -273,10 +274,10 @@ function renderHeroSection(profileName: string, isConnected: boolean): string {
 function renderStakeSection(
   selectedStake: MatchStake,
   canStartSearch: boolean,
-  _isSearching: boolean,
+  isSearching: boolean,
 ): string {
   const stakeCards = MATCH_STAKE_CARDS.map((card) => {
-    const isSelected = card.stake === selectedStake
+    const isSelected = isSearching && card.stake === selectedStake
     const isDisabled = !canStartSearch
 
     return `
@@ -286,25 +287,23 @@ function renderStakeSection(
         ${isDisabled ? 'disabled' : ''}
         style="
           position:relative;
-          background: ${isSelected
-            ? 'linear-gradient(160deg, #131008 0%, #0c0a04 100%)'
-            : 'linear-gradient(160deg, #141414 0%, #0d0d0d 100%)'
-          };
-          border: 1px solid ${isSelected ? '#c8940e' : 'rgba(255,255,255,0.08)'};
+          background:#000000;
+          border: 1px solid ${isSelected ? '#c8940e' : 'rgba(255,255,255,0.18)'};
           border-radius:12px;
           padding:16px 14px 14px;
           cursor:${isDisabled ? 'default' : 'pointer'};
           text-align:left;
           overflow:hidden;
-          transition:border-color 0.15s, background 0.15s;
+          transition:border-color 0.15s, background 0.15s, box-shadow 0.15s;
           box-shadow: ${isSelected ? '0 0 0 1px rgba(200,148,14,0.3), 0 8px 24px rgba(0,0,0,0.4)' : '0 4px 16px rgba(0,0,0,0.3)'};
           opacity:${isDisabled && !isSelected ? '0.7' : '1'};
         "
       >
         <img src="/assets/lobby/spade-watermark.png" alt=""
           style="
-            position:absolute; bottom:-10px; right:-6px;
-            height:80px; opacity:${isSelected ? '0.12' : '0.07'};
+            position:absolute; bottom:8px; right:18px;
+            width:82px; height:97px; display:block; object-fit:contain;
+            opacity:1;
             pointer-events:none;
           ">
 
@@ -320,13 +319,13 @@ function renderStakeSection(
 
         <div style="font-size:10px; font-weight:700; color:rgba(255,255,255,0.5); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">Награда</div>
         <div style="display:flex; align-items:center; gap:5px; margin-bottom:12px;">
-          <span style="font-size:22px; font-weight:900; color:#ffffff; line-height:1;">${formatAmount(card.prizeAmount)}</span>
+          <span style="font-size:22px; font-weight:900; color:#d4a520; line-height:1;">${formatAmount(card.prizeAmount)}</span>
           <img src="/assets/lobby/icon-coin.png" alt="" style="height:18px;">
         </div>
 
         <div style="font-size:10px; font-weight:700; color:rgba(255,255,255,0.5); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">Вход</div>
         <div style="display:flex; align-items:center; gap:5px; margin-bottom:14px;">
-          <span style="font-size:18px; font-weight:900; color:#d4a520; line-height:1;">${formatAmount(card.stake)}</span>
+          <span style="font-size:18px; font-weight:900; color:#ffffff; line-height:1;">${formatAmount(card.stake)}</span>
           <img src="/assets/lobby/icon-coin.png" alt="" style="height:15px;">
         </div>
 
@@ -363,6 +362,13 @@ function renderStakeSection(
       ">
         ${stakeCards}
       </div>
+
+      <style>
+        [data-lobby-stake-card]:not(:disabled):hover {
+          border-color:#c8940e !important;
+          box-shadow:0 0 0 1px rgba(200,148,14,0.35), 0 8px 24px rgba(212,165,32,0.18) !important;
+        }
+      </style>
     </div>
   `
 }
@@ -370,25 +376,31 @@ function renderStakeSection(
 function renderBottomSection(): string {
   const coinPackages = COIN_PACKAGES.map((pkg) => `
     <div style="
-      background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.07);
-      border-radius:10px; padding:12px 10px;
-      display:flex; flex-direction:column; align-items:center; gap:8px;
+      background:#000000; border:1px solid rgba(255,255,255,0.18);
+      border-radius:10px; padding:10px;
+      display:grid; grid-template-columns:${pkg.width}px minmax(0, 1fr); align-items:center; gap:10px;
       flex:1; min-width:0;
+      overflow:hidden;
     ">
-      <img src="${pkg.image}" alt="${formatAmount(pkg.amount)} жълтици"
-        style="height:52px; object-fit:contain;">
-      <div style="font-size:13px; font-weight:800; color:#ffffff; white-space:nowrap;">
-        ${formatAmount(pkg.amount)}
-        <img src="/assets/lobby/icon-coin.png" alt="" style="height:13px; vertical-align:middle;">
+      <div style="height:98px; display:flex; align-items:center; justify-content:center;">
+        <img src="${pkg.image}" alt="${formatAmount(pkg.amount)} жълтици"
+          style="width:${pkg.width}px; height:${pkg.height}px; display:block; object-fit:contain;">
       </div>
-      <button style="
-        background:linear-gradient(135deg, #d4a520 0%, #a07010 100%);
-        border:none; border-radius:6px;
-        padding:5px 14px;
-        font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:0.06em;
-        color:#000000; cursor:pointer;
-        width:100%;
-      ">Купи</button>
+      <div style="display:flex; flex-direction:column; justify-content:center; align-items:flex-start; min-width:0;">
+        <div style="font-size:21px; line-height:1; font-weight:800; color:#d4a520; white-space:nowrap;">
+          ${formatAmount(pkg.amount)}
+        </div>
+        <div style="font-size:12px; line-height:1; color:rgba(255,255,255,0.82); margin-top:6px; margin-bottom:9px; font-weight:600;">жълтици</div>
+        <button style="
+          background:linear-gradient(135deg, #f4c95b 0%, #c98f13 100%);
+          border:none; border-radius:6px;
+          padding:0 14px;
+          height:28px;
+          font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:0.03em;
+          color:#000000; cursor:pointer;
+          min-width:84px;
+        ">Купи</button>
+      </div>
     </div>
   `).join('')
 
@@ -401,19 +413,19 @@ function renderBottomSection(): string {
       margin-bottom:16px;
     ">
       <div style="
-        background:linear-gradient(160deg, #141414 0%, #0d0d0d 100%);
-        border:1px solid rgba(255,255,255,0.08);
+        background:#000000;
+        border:1px solid rgba(255,255,255,0.18);
         border-radius:12px;
         padding:16px;
         display:flex; flex-direction:column; justify-content:center;
       ">
         <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
           <div style="
-            width:32px; height:32px; border-radius:8px;
-            background:rgba(212,165,32,0.15);
+            width:45px; height:43px; border-radius:8px;
+            background:#000000;
             display:flex; align-items:center; justify-content:center;
           ">
-            <img src="/assets/lobby/icon-shop-cart.png" alt="" style="height:18px;">
+            <img src="/assets/lobby/icon-shop-cart.png" alt="" style="width:45px; height:43px; display:block; object-fit:contain;">
           </div>
           <div style="font-size:13px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Магазин за жълтици</div>
         </div>
@@ -425,8 +437,8 @@ function renderBottomSection(): string {
       ${coinPackages}
 
       <div style="
-        background:linear-gradient(160deg, #0d0d0d 0%, #080808 100%);
-        border:1px solid rgba(255,255,255,0.08);
+        background:#000000;
+        border:1px solid rgba(255,255,255,0.18);
         border-radius:12px;
         overflow:hidden;
         display:flex; align-items:flex-end; justify-content:flex-end;
@@ -609,7 +621,7 @@ export function renderLobbyScreen(
       style="
         position: fixed;
         inset: 0;
-        background: #000000;
+        background: #242424;
         color: #ffffff;
         font-family: Arial, Helvetica, sans-serif;
         overflow-y: auto;
@@ -617,13 +629,61 @@ export function renderLobbyScreen(
         z-index: 50;
       "
     >
-      ${renderNav(state.isSearching)}
+      <style>
+        [data-lobby-screen-root="1"] {
+          --lobby-scale: 1;
+        }
 
-      <div style="max-width: 1360px; margin: 0 auto; padding: 16px 20px;">
-        ${renderHeroSection(profileName, state.isConnected)}
-        ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching)}
-        ${renderBottomSection()}
-        ${renderFooter()}
+        @media (min-width: 2200px) {
+          [data-lobby-screen-root="1"] { --lobby-scale: 1.08; }
+        }
+
+        @media (min-width: 1920px) and (max-width: 2199px) {
+          [data-lobby-screen-root="1"] { --lobby-scale: 1.02; }
+        }
+
+        @media (max-width: 1700px) {
+          [data-lobby-screen-root="1"] { --lobby-scale: 0.96; }
+        }
+
+        @media (max-width: 1600px) {
+          [data-lobby-screen-root="1"] { --lobby-scale: 0.91; }
+        }
+
+        @media (max-width: 1500px) {
+          [data-lobby-screen-root="1"] { --lobby-scale: 0.86; }
+        }
+
+        @media (max-width: 1400px) {
+          [data-lobby-screen-root="1"] { --lobby-scale: 0.80; }
+        }
+
+        @media (max-width: 1280px) {
+          [data-lobby-screen-root="1"] { --lobby-scale: 0.73; }
+        }
+
+        @media (max-width: 1120px) {
+          [data-lobby-screen-root="1"] { --lobby-scale: 0.64; }
+        }
+
+        @media (max-width: 960px) {
+          [data-lobby-screen-root="1"] { --lobby-scale: 0.55; }
+        }
+
+        @media (max-width: 768px) {
+          [data-lobby-screen-root="1"] { --lobby-scale: 0.45; }
+        }
+      </style>
+
+      <div data-lobby-scale-stage="1" style="width:1640px; margin:0 auto; zoom:var(--lobby-scale);">
+        ${renderNav(state.isSearching)}
+
+        <div style="max-width: 1640px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;">
+          ${renderHeroSection(profileName, state.isConnected)}
+          ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching)}
+          ${renderBottomSection()}
+          ${renderFooter()}
+        </div>
       </div>
 
       ${state.isSearching ? `
