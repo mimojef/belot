@@ -170,15 +170,15 @@ function renderNav(_isSearching: boolean): string {
 function renderHeroSection(profileName: string, isConnected: boolean): string {
   return `
     <div style="display:flex; gap:16px; align-items:stretch; margin-bottom:16px;">
-      <div style="flex:0 1 985px; min-width:0; border-radius:14px; overflow:hidden; position:relative;">
+      <div style="flex:0 1 985px; min-width:0; border:2px solid rgba(212,165,32,0.75); border-radius:14px; overflow:hidden; position:relative; box-sizing:border-box;">
         <img src="/assets/lobby/hero-banner.png" alt="Добре дошъл в лобито"
-          style="width:985px; height:258px; max-width:100%; display:block; object-fit:contain;">
+          style="width:100%; height:254px; max-width:100%; display:block; object-fit:contain;">
       </div>
 
       <div style="
         flex:1 1 620px; min-width:580px; height:258px;
         background: linear-gradient(160deg, #050505 0%, #0d0d0d 100%);
-        border: 1px solid rgba(212,165,32,0.75);
+        border: 2px solid rgba(212,165,32,0.75);
         border-radius:14px;
         padding:16px 28px;
         box-sizing:border-box;
@@ -186,7 +186,7 @@ function renderHeroSection(profileName: string, isConnected: boolean): string {
         <div style="display:flex; align-items:center; gap:24px; height:120px;">
           <div style="position:relative; width:120px; height:120px; flex-shrink:0;">
             <div style="
-              width:120px; height:120px; border-radius:50%;
+              width:120px; height:120px; border-radius:12px;
               border:3px solid #d4a520;
               overflow:hidden;
               background:#111111;
@@ -197,7 +197,7 @@ function renderHeroSection(profileName: string, isConnected: boolean): string {
                 style="width:100%; height:100%; object-fit:cover; object-position:center;">
             </div>
             <div style="
-              position:absolute; right:4px; bottom:12px;
+              position:absolute; right:-6px; bottom:-6px;
               width:18px; height:18px; border-radius:50%;
               background:${isConnected ? '#22c55e' : '#ef4444'};
               border:2px solid #050505;
@@ -288,7 +288,7 @@ function renderStakeSection(
         style="
           position:relative;
           background:#000000;
-          border: 1px solid ${isSelected ? '#c8940e' : 'rgba(255,255,255,0.18)'};
+          border: 1px solid ${isSelected ? '#c8940e' : 'rgba(212,165,32,0.72)'};
           border-radius:12px;
           padding:16px 14px 14px;
           cursor:${isDisabled ? 'default' : 'pointer'};
@@ -325,7 +325,7 @@ function renderStakeSection(
 
         <div style="font-size:10px; font-weight:700; color:rgba(255,255,255,0.5); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">Вход</div>
         <div style="display:flex; align-items:center; gap:5px; margin-bottom:14px;">
-          <span style="font-size:18px; font-weight:900; color:#ffffff; line-height:1;">${formatAmount(card.stake)}</span>
+          <span style="font-size:18px; font-weight:400; color:#ffffff; line-height:1;">${formatAmount(card.stake)}</span>
           <img src="/assets/lobby/icon-coin.png" alt="" style="height:15px;">
         </div>
 
@@ -366,7 +366,7 @@ function renderStakeSection(
       <style>
         [data-lobby-stake-card]:not(:disabled):hover {
           border-color:#c8940e !important;
-          box-shadow:0 0 0 1px rgba(200,148,14,0.35), 0 8px 24px rgba(212,165,32,0.18) !important;
+          box-shadow:0 0 0 2px rgba(200,148,14,0.42), 0 8px 24px rgba(212,165,32,0.18) !important;
         }
       </style>
     </div>
@@ -374,13 +374,20 @@ function renderStakeSection(
 }
 
 function renderBottomSection(): string {
-  const coinPackages = COIN_PACKAGES.map((pkg) => `
+  const coinPackages = COIN_PACKAGES.map((pkg, index) => {
+    const isFirstPackage = index === 0
+
+    return `
     <div style="
-      background:#000000; border:1px solid rgba(255,255,255,0.18);
-      border-radius:10px; padding:10px;
+      background:#000000;
+      border:1px solid rgba(212,165,32,0.72);
+      border-radius:12px;
+      padding:10px 12px;
+      margin-left:${isFirstPackage ? '-8px' : '0'};
       display:grid; grid-template-columns:${pkg.width}px minmax(0, 1fr); align-items:center; gap:10px;
       flex:1; min-width:0;
       overflow:hidden;
+      box-shadow:inset 0 0 18px rgba(212,165,32,0.035);
     ">
       <div style="height:98px; display:flex; align-items:center; justify-content:center;">
         <img src="${pkg.image}" alt="${formatAmount(pkg.amount)} жълтици"
@@ -390,8 +397,8 @@ function renderBottomSection(): string {
         <div style="font-size:21px; line-height:1; font-weight:800; color:#d4a520; white-space:nowrap;">
           ${formatAmount(pkg.amount)}
         </div>
-        <div style="font-size:12px; line-height:1; color:rgba(255,255,255,0.82); margin-top:6px; margin-bottom:9px; font-weight:600;">жълтици</div>
-        <button style="
+        <div style="font-size:12px; line-height:1; color:rgba(255,255,255,0.82); margin-top:6px; margin-bottom:9px; font-weight:400;">жълтици</div>
+        <button data-lobby-buy-coins-button="1" style="
           background:linear-gradient(135deg, #f4c95b 0%, #c98f13 100%);
           border:none; border-radius:6px;
           padding:0 14px;
@@ -399,158 +406,142 @@ function renderBottomSection(): string {
           font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:0.03em;
           color:#000000; cursor:pointer;
           min-width:84px;
+          transition:transform 0.14s ease, box-shadow 0.14s ease, filter 0.14s ease;
         ">Купи</button>
       </div>
     </div>
-  `).join('')
+  `
+  }).join('')
 
   return `
     <div style="
       display:grid;
-      grid-template-columns:200px 1fr 1fr 1fr 1fr 1fr 180px;
-      gap:12px;
+      grid-template-columns:310px repeat(5, minmax(0, 1fr));
+      gap:8px;
       align-items:stretch;
       margin-bottom:16px;
     ">
       <div style="
         background:#000000;
-        border:1px solid rgba(255,255,255,0.18);
-        border-radius:12px;
-        padding:16px;
+        border:1px solid rgba(212,165,32,0.72);
+        border-right:0;
+        border-radius:12px 0 0 12px;
+        padding:15px 20px;
         display:flex; flex-direction:column; justify-content:center;
       ">
-        <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+        <div style="display:flex; align-items:flex-start; gap:10px;">
           <div style="
-            width:45px; height:43px; border-radius:8px;
+            width:45px; height:43px; border-radius:12px;
             background:#000000;
             display:flex; align-items:center; justify-content:center;
+            flex-shrink:0;
           ">
             <img src="/assets/lobby/icon-shop-cart.png" alt="" style="width:45px; height:43px; display:block; object-fit:contain;">
           </div>
-          <div style="font-size:13px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Магазин за жълтици</div>
-        </div>
-        <div style="font-size:11px; color:rgba(255,255,255,0.5); font-weight:600; line-height:1.4;">
-          Зареди своя баланс и се върни в играта!
+          <div style="min-width:0;">
+            <div style="font-size:13px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Магазин за жълтици</div>
+            <div style="font-size:11px; color:rgba(255,255,255,0.5); font-weight:400; line-height:1.35; margin-top:5px;">
+              Купи жълтици и се върни в играта
+            </div>
+            <button data-lobby-buy-coins-button="1" style="
+              margin-top:9px;
+              height:28px;
+              padding:0 14px;
+              border:none;
+              border-radius:6px;
+              background:linear-gradient(135deg, #f4c95b 0%, #c98f13 100%);
+              color:#000000;
+              font-size:10px;
+              font-weight:800;
+              text-transform:uppercase;
+              letter-spacing:0.03em;
+              cursor:pointer;
+              min-width:132px;
+              transition:transform 0.14s ease, box-shadow 0.14s ease, filter 0.14s ease;
+            ">Виж всички оферти</button>
+          </div>
         </div>
       </div>
 
       ${coinPackages}
 
-      <div style="
-        background:#000000;
-        border:1px solid rgba(255,255,255,0.18);
-        border-radius:12px;
-        overflow:hidden;
-        display:flex; align-items:flex-end; justify-content:flex-end;
-      ">
-        <img src="/assets/lobby/footer-decor.png" alt=""
-          style="width:100%; height:100%; object-fit:cover; object-position:center;">
-      </div>
+      <style>
+        [data-lobby-buy-coins-button="1"]:hover {
+          filter:brightness(1.12);
+          transform:translateY(-1px);
+          box-shadow:0 4px 12px rgba(212,165,32,0.26);
+        }
+
+        [data-lobby-buy-coins-button="1"]:active {
+          filter:brightness(0.98);
+          transform:translateY(0);
+        }
+      </style>
     </div>
 
     <div style="
       display:grid;
-      grid-template-columns:repeat(4, minmax(0, 1fr));
+      grid-template-columns:repeat(3, minmax(0, 1fr)) 332px;
       gap:12px;
+      align-items:stretch;
     ">
       <div style="
-        background:linear-gradient(160deg, #0d0d0d 0%, #080808 100%);
-        border:1px solid rgba(255,255,255,0.08);
+        background:#000000;
+        border:1px solid rgba(167,139,250,0.62);
         border-radius:12px;
         padding:16px;
-        display:flex; align-items:center; gap:12px;
+        display:flex; align-items:center; gap:14px;
         cursor:pointer;
+        min-height:137px;
       ">
-        <div style="
-          width:44px; height:44px; border-radius:50%;
-          background:rgba(34,197,94,0.12);
-          display:flex; align-items:center; justify-content:center;
-          flex-shrink:0;
-        ">
-          <img src="/assets/lobby/icon-quick-game.png" alt="" style="height:26px;">
-        </div>
+        <img src="/assets/lobby/icon-private-table.png" alt="" style="width:76px; height:75px; display:block; object-fit:contain; flex-shrink:0;">
         <div style="flex:1; min-width:0;">
-          <div style="font-size:13px; font-weight:800; color:#22c55e; text-transform:uppercase; letter-spacing:0.05em;">Бърза игра</div>
-          <div style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:2px; font-weight:600;">Намери противници и влез в игра веднага.</div>
+          <div style="font-size:15px; font-weight:800; color:#a78bfa; text-transform:uppercase; letter-spacing:0.05em;">Частни маси</div>
+          <div style="font-size:13px; color:rgba(255,255,255,0.5); margin-top:4px; font-weight:400;">Създай маса и играй с приятели.</div>
         </div>
-        <span style="color:rgba(255,255,255,0.3); font-size:18px;">→</span>
       </div>
 
       <div style="
-        background:linear-gradient(160deg, #0d0d0d 0%, #080808 100%);
-        border:1px solid rgba(255,255,255,0.08);
+        background:#000000;
+        border:1px solid rgba(212,165,32,0.68);
         border-radius:12px;
         padding:16px;
-        display:flex; align-items:center; gap:12px;
-        cursor:pointer;
-      ">
-        <div style="
-          width:44px; height:44px; border-radius:50%;
-          background:rgba(139,92,246,0.12);
-          display:flex; align-items:center; justify-content:center;
-          flex-shrink:0;
-        ">
-          <img src="/assets/lobby/icon-private-table.png" alt="" style="height:26px;">
-        </div>
-        <div style="flex:1; min-width:0;">
-          <div style="font-size:13px; font-weight:800; color:#a78bfa; text-transform:uppercase; letter-spacing:0.05em;">Частни маси</div>
-          <div style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:2px; font-weight:600;">Създай маса и играй с приятели.</div>
-        </div>
-        <span style="color:rgba(255,255,255,0.3); font-size:18px;">→</span>
-      </div>
-
-      <div style="
-        background:linear-gradient(160deg, #131008 0%, #0c0a04 100%);
-        border:1px solid rgba(255,255,255,0.08);
-        border-radius:12px;
-        padding:16px;
-        display:flex; align-items:center; gap:12px;
+        display:flex; align-items:center; gap:14px;
         cursor:pointer;
         position:relative;
+        min-height:137px;
       ">
-        <div style="
-          width:44px; height:44px; border-radius:50%;
-          background:rgba(212,165,32,0.12);
-          display:flex; align-items:center; justify-content:center;
-          flex-shrink:0;
-        ">
-          <img src="/assets/lobby/icon-daily-rewards.png" alt="" style="height:26px;">
-        </div>
+        <img src="/assets/lobby/icon-daily-rewards.png" alt="" style="width:74px; height:75px; display:block; object-fit:contain; flex-shrink:0;">
         <div style="flex:1; min-width:0;">
-          <div style="font-size:13px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Ежедневни награди</div>
-          <div style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:2px; font-weight:600;">Влизай всеки ден и вземи своите награди.</div>
-        </div>
-        <div style="display:flex; align-items:center; gap:6px;">
-          <div style="
-            width:18px; height:18px; border-radius:50%;
-            background:#ef4444; font-size:10px; font-weight:900; color:#fff;
-            display:flex; align-items:center; justify-content:center;
-          ">1</div>
-          <span style="color:rgba(255,255,255,0.3); font-size:18px;">→</span>
+          <div style="font-size:15px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Ежедневни награди</div>
+          <div style="font-size:13px; color:rgba(255,255,255,0.5); margin-top:4px; font-weight:400;">Влизай всеки ден и вземи своите награди.</div>
         </div>
       </div>
 
       <div style="
-        background:linear-gradient(160deg, #0d0d0d 0%, #080808 100%);
-        border:1px solid rgba(255,255,255,0.08);
+        background:#000000;
+        border:1px solid rgba(96,165,250,0.62);
         border-radius:12px;
         padding:16px;
-        display:flex; align-items:center; gap:12px;
+        display:flex; align-items:center; gap:14px;
         cursor:pointer;
+        min-height:137px;
       ">
-        <div style="
-          width:44px; height:44px; border-radius:50%;
-          background:rgba(59,130,246,0.12);
-          display:flex; align-items:center; justify-content:center;
-          flex-shrink:0;
-        ">
-          <img src="/assets/lobby/icon-missions.png" alt="" style="height:26px;">
-        </div>
+        <img src="/assets/lobby/icon-missions.png" alt="" style="width:73px; height:76px; display:block; object-fit:contain; flex-shrink:0;">
         <div style="flex:1; min-width:0;">
-          <div style="font-size:13px; font-weight:800; color:#60a5fa; text-transform:uppercase; letter-spacing:0.05em;">Мисии</div>
-          <div style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:2px; font-weight:600;">Изпълнявай мисии и печели жълтици.</div>
+          <div style="font-size:15px; font-weight:800; color:#60a5fa; text-transform:uppercase; letter-spacing:0.05em;">Дневни мисии</div>
+          <div style="font-size:13px; color:rgba(255,255,255,0.5); margin-top:4px; font-weight:400;">Изпълнявай дневни мисии и печели жълтици.</div>
         </div>
-        <span style="color:rgba(255,255,255,0.3); font-size:18px;">→</span>
+      </div>
+
+      <div style="
+        min-height:137px;
+        display:flex;
+        align-items:flex-end;
+        justify-content:flex-end;
+        overflow:hidden;
+      ">
+        <img src="/assets/lobby/footer-decor.png" alt="" style="width:332px; height:137px; display:block; object-fit:contain;">
       </div>
     </div>
   `
@@ -566,7 +557,7 @@ function renderFooter(): string {
       align-items:center;
       gap:0;
     ">
-      <div style="display:flex; align-items:center; gap:30px; flex:1;">
+      <div data-lobby-footer-items="1" style="display:flex; align-items:center; gap:30px; flex:1;">
         <div style="display:flex; align-items:center; gap:10px;">
           <img src="/assets/lobby/icon-fair-play.png" alt="" style="height:28px; opacity:0.7;">
           <div>
@@ -584,7 +575,13 @@ function renderFooter(): string {
           </div>
         </div>
         <div style="display:flex; align-items:center; gap:10px;">
-          <img src="/assets/lobby/icon-users.png" alt="" style="height:28px; opacity:0.7;">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" style="display:block; flex-shrink:0; opacity:0.88;">
+            <circle cx="8" cy="9" r="3.1" stroke="#d4a520" stroke-width="1.7"/>
+            <path d="M3.4 19c.7-3.2 2.3-4.8 4.6-4.8s3.9 1.6 4.6 4.8" stroke="#d4a520" stroke-width="1.7" stroke-linecap="round"/>
+            <circle cx="15.8" cy="8.2" r="2.5" stroke="rgba(212,165,32,0.72)" stroke-width="1.55"/>
+            <path d="M13.2 14.2c.7-.7 1.6-1 2.8-1 2 0 3.5 1.5 4.1 4.4" stroke="rgba(212,165,32,0.72)" stroke-width="1.55" stroke-linecap="round"/>
+          </svg>
+          <img src="/assets/lobby/icon-users.png" alt="" style="display:none;">
           <div>
             <div style="font-size:12px; font-weight:700; color:rgba(255,255,255,0.75);">Онлайн играчи</div>
             <div style="font-size:10px; color:rgba(255,255,255,0.4); font-weight:600;">2 456</div>
@@ -600,9 +597,14 @@ function renderFooter(): string {
           </div>
         </div>
       </div>
-      <div style="font-size:11px; color:rgba(255,255,255,0.3); font-weight:600; white-space:nowrap;">
-        © Belot.bg&nbsp; Всички права запазени
-      </div>
+      <img src="/assets/lobby/copyright-pika-2026.png" alt="© Pika.bg 2026 Всички права запазени" style="width:360px; height:31px; display:block; object-fit:contain;">
+      <style>
+        [data-lobby-footer-items="1"] > div:nth-child(1),
+        [data-lobby-footer-items="1"] > div:nth-child(2),
+        [data-lobby-footer-items="1"] > div:nth-child(4) {
+          display:none !important;
+        }
+      </style>
     </footer>
   `
 }
