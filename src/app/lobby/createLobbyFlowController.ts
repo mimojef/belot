@@ -463,15 +463,18 @@ export function createLobbyFlowController(
       DEFAULT_COUNTDOWN_MS,
     )
     const countdownSeconds = Math.ceil(remainingMs / 1000)
-    const progressPercent = (remainingMs / DEFAULT_COUNTDOWN_MS) * 100
+    const progressDegrees = (remainingMs / DEFAULT_COUNTDOWN_MS) * 360
 
     if (lastRenderedCountdownSecond !== countdownSeconds) {
-      countdownTextElement.textContent = `${countdownSeconds} сек.`
+      countdownTextElement.innerHTML = `
+        <span class="mm-countdown-number">${countdownSeconds}</span>
+        <span class="mm-countdown-unit">сек</span>
+      `
       lastRenderedCountdownSecond = countdownSeconds
     }
 
     progressBarElement.style.transition = 'none'
-    progressBarElement.style.width = `${progressPercent}%`
+    progressBarElement.style.setProperty('--matchmaking-progress', `${progressDegrees}deg`)
 
     return true
   }
@@ -683,49 +686,28 @@ export function createLobbyFlowController(
     )
     const displayedQueuedPlayers = getDisplayedQueuedPlayers()
 
-    options.root.innerHTML = `
-      ${renderMatchmakingRoomScreen({
-        prizeAmount: getStakePrizeAmount(state.selectedStake),
-        entryAmount: state.selectedStake,
-        localPlayer: createDisplayedLocalPlayer(),
-        joinedPlayers: createDisplayedJoinedPlayers(),
-        countdownRemainingMs: remainingMs,
-        countdownTotalMs: DEFAULT_COUNTDOWN_MS,
-        statusText: getRoomStatusText(state, displayedQueuedPlayers),
-      })}
-      <button
-        type="button"
-        data-matchmaking-room-cancel-button="1"
-        style="
-          position:fixed;
-          top:20px;
-          right:20px;
-          z-index:50;
-          border:0;
-          border-radius:16px;
-          padding:14px 18px;
-          background:linear-gradient(180deg, #8b5cf6 0%, #6d28d9 100%);
-          color:#f5f3ff;
-          font-size:15px;
-          font-weight:900;
-          cursor:pointer;
-          box-shadow:0 14px 32px rgba(76,29,149,0.30);
-        "
-      >
-        Откажи търсенето
-      </button>
-    `
+    options.root.innerHTML = renderMatchmakingRoomScreen({
+      prizeAmount: getStakePrizeAmount(state.selectedStake),
+      entryAmount: state.selectedStake,
+      localPlayer: createDisplayedLocalPlayer(),
+      joinedPlayers: createDisplayedJoinedPlayers(),
+      countdownRemainingMs: remainingMs,
+      countdownTotalMs: DEFAULT_COUNTDOWN_MS,
+      statusText: getRoomStatusText(state, displayedQueuedPlayers),
+    })
 
-    const cancelButton = options.root.querySelector<HTMLButtonElement>(
+    const cancelButtons = options.root.querySelectorAll<HTMLButtonElement>(
       '[data-matchmaking-room-cancel-button="1"]',
     )
 
-    cancelButton?.addEventListener('click', () => {
-      options.tryUnlockDocumentAudio?.()
-      state.errorText = null
-      switchToLobby()
-      options.leaveMatchmaking()
-      render()
+    cancelButtons.forEach((cancelButton) => {
+      cancelButton.addEventListener('click', () => {
+        options.tryUnlockDocumentAudio?.()
+        state.errorText = null
+        switchToLobby()
+        options.leaveMatchmaking()
+        render()
+      })
     })
 
     syncLiveCountdownTargets()
