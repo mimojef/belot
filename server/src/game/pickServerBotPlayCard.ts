@@ -567,6 +567,141 @@ function suitAttractiveness(
   return score
 }
 
+function isUnsafeTenLeadInPlainSuit(
+  card: ServerCard,
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): boolean {
+  if (contract !== 'suit') return false
+  if (card.rank !== '10') return false
+  if (card.suit === trumpSuit) return false
+
+  const hand = state.hands[seat] ?? []
+  const played = allPlayedCards(state)
+  const aceIsKnownSafe =
+    hand.some(c => c.suit === card.suit && c.rank === 'A') ||
+    played.some(c => c.suit === card.suit && c.rank === 'A')
+
+  return !aceIsKnownSafe
+}
+
+function chooseSafePlainSuitLead(
+  cards: ServerCard[],
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  const safeCards = cards.filter(c =>
+    !isUnsafeTenLeadInPlainSuit(c, seat, state, trumpSuit, contract)
+  )
+
+  if (safeCards.length === 0) return null
+
+  return highestCard(safeCards, trumpSuit, contract)
+}
+
+function countPartnerTrumpLeads(
+  state: ServerAuthoritativeGameState,
+  partner: Seat,
+  trumpSuit: ServerSuit | null,
+): number {
+  if (!trumpSuit) return 0
+
+  return (state.playing?.completedTricks ?? []).filter(trick =>
+    trick.leaderSeat === partner && trick.plays[0]?.card.suit === trumpSuit
+  ).length
+}
+
+function getTrumpLeadTricksBySeat(
+  state: ServerAuthoritativeGameState,
+  seat: Seat,
+  trumpSuit: ServerSuit | null,
+) {
+  if (!trumpSuit) return []
+
+  return (state.playing?.completedTricks ?? []).filter(trick =>
+    trick.leaderSeat === seat && trick.plays[0]?.card.suit === trumpSuit
+  )
+}
+
+function didBothOpponentsVoidOnTrumpLead(
+  state: ServerAuthoritativeGameState,
+  seat: Seat,
+  trumpSuit: ServerSuit | null,
+): boolean {
+  if (!trumpSuit) return false
+
+  const firstTrumpLead = getTrumpLeadTricksBySeat(state, seat, trumpSuit)[0]
+  if (!firstTrumpLead) return false
+
+  const [opp1, opp2] = getOpponentSeats(seat)
+  const opponentPlays = firstTrumpLead.plays.filter(play =>
+    play.seat === opp1 || play.seat === opp2
+  )
+
+  return opponentPlays.length === 2 &&
+    opponentPlays.every(play => play.card.suit !== trumpSuit)
+}
+
+function chooseOwnSuitBidTrumpDraw(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  if (contract !== 'suit' || !trumpSuit) return null
+  if (state.bidding.winningBid?.seat !== seat) return null
+
+  const ourTrumps = trumpCards(validCards, trumpSuit, contract)
+  if (ourTrumps.length === 0) return null
+
+  const ownTrumpLeadTricks = getTrumpLeadTricksBySeat(state, seat, trumpSuit)
+  if (ownTrumpLeadTricks.length >= 2) return null
+
+  if (
+    ownTrumpLeadTricks.length === 1 &&
+    didBothOpponentsVoidOnTrumpLead(state, seat, trumpSuit)
+  ) {
+    return null
+  }
+
+  const jack = ourTrumps.find(c => c.rank === 'J') ?? null
+  const nine = ourTrumps.find(c => c.rank === '9') ?? null
+  const ace = ourTrumps.find(c => c.rank === 'A') ?? null
+
+  if (ownTrumpLeadTricks.length === 0) {
+    if (jack && (nine || ourTrumps.length >= 3)) return jack
+    if (!jack && nine && ace && ourTrumps.length >= 4) return ace
+    return null
+  }
+
+  const firstLeadCard = ownTrumpLeadTricks[0]?.plays[0]?.card ?? null
+  if (!firstLeadCard) return null
+
+  if (firstLeadCard.rank === 'J') {
+    if (nine) return nine
+
+    const remainingTrumps = ourTrumps.filter(c => c.rank !== 'J')
+    if (remainingTrumps.length > 0) {
+      return lowestCard(remainingTrumps, trumpSuit, contract)
+    }
+  }
+
+  if (
+    firstLeadCard.rank === 'A' &&
+    nine &&
+    allPlayedCards(state).some(c => c.suit === trumpSuit && c.rank === 'J')
+  ) {
+    return nine
+  }
+
+  return null
+}
+
 // ─── Leading strategy ─────────────────────────────────────────────────────────
 
 function chooseLead(
@@ -578,7 +713,11 @@ function chooseLead(
 ): ServerCard {
   const partner = getPartnerSeat(seat)
   const winningBid = state.bidding.winningBid
-  const completedTricks = state.playing?.completedTricks ?? []
+
+  const ownTrumpDraw = chooseOwnSuitBidTrumpDraw(seat, state, validCards, trumpSuit, contract)
+  if (ownTrumpDraw) {
+    return ownTrumpDraw
+  }
 
   // ── Rule 1: Partner declared the trump → play trump at first opportunity
   //    Играе НАЙ-ВИСОКАТА коза, с едно изключение:
@@ -586,13 +725,9 @@ function chooseLead(
   //    и играем с другата (най-висока от останалите).
   if (contract === 'suit' && winningBid?.seat === partner) {
     const ourTrumps = trumpCards(validCards, trumpSuit, contract)
+    const partnerTrumpLeadCount = countPartnerTrumpLeads(state, partner, trumpSuit)
 
-    // Check if we've already played trump this round
-    const alreadyPlayedTrump = completedTricks.some(t =>
-      t.plays.some(p => p.seat === seat && p.card.suit === trumpSuit)
-    )
-
-    if (!alreadyPlayedTrump && ourTrumps.length > 0) {
+    if (partnerTrumpLeadCount < 2 && ourTrumps.length > 0) {
       const hasNine = ourTrumps.some(c => c.rank === '9')
       const otherTrumps = ourTrumps.filter(c => c.rank !== '9')
 
@@ -612,6 +747,7 @@ function chooseLead(
   if (contract !== 'all-trumps') {
     const nonTrumpMasters = validCards.filter(c =>
       c.suit !== trumpSuit &&
+      !isUnsafeTenLeadInPlainSuit(c, seat, state, trumpSuit, contract) &&
       isCardMaster(c, seat, state, trumpSuit, contract)
     )
     if (nonTrumpMasters.length > 0) {
@@ -681,7 +817,16 @@ function chooseLead(
           .filter(x => x.cards.length > 0)
           .sort((a, b) => b.score - a.score)
         if (suitScores.length > 0) {
-          return highestCard(suitScores[0]!.cards, trumpSuit, contract)
+          for (const suitScore of suitScores) {
+            const leadCard = chooseSafePlainSuitLead(
+              suitScore.cards,
+              seat,
+              state,
+              trumpSuit,
+              contract,
+            )
+            if (leadCard) return leadCard
+          }
         }
       }
     }
@@ -820,9 +965,18 @@ function chooseLead(
       .sort((a, b) => b.score - a.score)
 
     if (suitScores.length > 0) {
-      const best = suitScores[0]!
-      // Lead with highest in best suit (establish long-suit tricks)
-      return highestCard(best.cards, trumpSuit, contract)
+      for (const suitScore of suitScores) {
+        // Lead with the highest safe card in the best suit. Avoid opening a plain 10
+        // while the ace is still unknown.
+        const leadCard = chooseSafePlainSuitLead(
+          suitScore.cards,
+          seat,
+          state,
+          trumpSuit,
+          contract,
+        )
+        if (leadCard) return leadCard
+      }
     }
   }
 
@@ -992,6 +1146,90 @@ function tryDumpHighValueMaster(
   return bestCard
 }
 
+function didPartnerWinOurLowLeadWithRank(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  suit: ServerSuit,
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+  winningRank: ServerRank,
+): boolean {
+  const partner = getPartnerSeat(seat)
+
+  return (state.playing?.completedTricks ?? []).some(trick => {
+    if (trick.leaderSeat !== seat) return false
+    if (trick.winnerSeat !== partner) return false
+
+    const leadCard = trick.plays[0]?.card
+    if (!leadCard || leadCard.suit !== suit) return false
+    if (contract === 'suit' && leadCard.suit === trumpSuit) return false
+    if (leadCard.rank === winningRank) return false
+    if (winningRank === 'A' && leadCard.rank === '10') return false
+    if (winningRank === 'J' && leadCard.rank === '9') return false
+
+    return trick.plays.some(play =>
+      play.seat === partner &&
+      play.card.suit === suit &&
+      play.card.rank === winningRank
+    )
+  })
+}
+
+function areRemainingCardsInSuitAllMasters(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  suit: ServerSuit,
+  excludeCard: ServerCard,
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): boolean {
+  const remainingSuitCards = (state.hands[seat] ?? []).filter(c =>
+    c.suit === suit && c.id !== excludeCard.id
+  )
+
+  return remainingSuitCards.length > 0 &&
+    remainingSuitCards.every(c => isCardMaster(c, seat, state, trumpSuit, contract))
+}
+
+function chooseFollowUpCardOnReturnedBaitSuit(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  const plays = state.playing?.currentTrick?.plays ?? []
+  const ledSuit = plays[0]?.card.suit ?? null
+  if (!ledSuit || ledSuit === trumpSuit) return null
+  if (plays[0]?.seat !== getPartnerSeat(seat)) return null
+
+  const winningRank: ServerRank = contract === 'all-trumps' ? 'J' : 'A'
+  const followUpRank: ServerRank = contract === 'all-trumps' ? '9' : '10'
+  const followUpCard = validCards.find(c =>
+    c.suit === ledSuit && c.rank === followUpRank
+  ) ?? null
+  if (!followUpCard) return null
+
+  if (
+    !didPartnerWinOurLowLeadWithRank(
+      seat,
+      state,
+      ledSuit,
+      trumpSuit,
+      contract,
+      winningRank,
+    )
+  ) {
+    return null
+  }
+
+  if (areRemainingCardsInSuitAllMasters(seat, state, ledSuit, followUpCard, trumpSuit, contract)) {
+    return null
+  }
+
+  return followUpCard
+}
+
 function chooseFollow(
   seat: Seat,
   state: ServerAuthoritativeGameState,
@@ -1018,6 +1256,17 @@ function chooseFollow(
   //   властните си карти (да трупаме точки) и после да му върнем в неговия цвят.
   const plays = state.playing?.currentTrick?.plays ?? []
   const partnerIsLeader = plays.length > 0 && plays[0]!.seat === getPartnerSeat(seat)
+
+  const returnedBaitFollowUpCard = chooseFollowUpCardOnReturnedBaitSuit(
+    seat,
+    state,
+    validCards,
+    trumpSuit,
+    contract,
+  )
+  if (returnedBaitFollowUpCard) {
+    return returnedBaitFollowUpCard
+  }
 
   if (partnerIsLeader && isMyTeamCurrentlyWinning(seat, state)) {
     const ledSuit = plays[0]!.card.suit

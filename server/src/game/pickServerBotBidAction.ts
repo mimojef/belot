@@ -54,6 +54,17 @@ const ALL_TRUMPS_VALUES: Record<string, number> = {
   7: 0.1,
 }
 
+const SUIT_TRUMP_POINT_VALUES: Record<string, number> = {
+  J: 20,
+  9: 14,
+  A: 11,
+  '10': 10,
+  K: 4,
+  Q: 3,
+  8: 0,
+  7: 0,
+}
+
 type BotContractCandidate = {
   action: ServerBidAction
   score: number
@@ -117,6 +128,10 @@ function getBestBotContractCandidate(
       continue
     }
 
+    if (!canBotBidSuitContract(hand, suit)) {
+      continue
+    }
+
     candidates.push({
       action: { type: 'suit', suit },
       score:
@@ -155,24 +170,9 @@ function getMinimumBotBidScore(action: ServerBidAction, hand: ServerCard[]): num
   const rankCounts = getRankCounts(hand)
   const hasSquareJ = rankCounts.J === 4
   const hasSquare9 = rankCounts['9'] === 4
-  const hasSquareHigh =
-    rankCounts.A === 4 ||
-    rankCounts['10'] === 4 ||
-    rankCounts.K === 4 ||
-    rankCounts.Q === 4
 
   if (action.type === 'suit') {
-    let minimum = 18
-
-    if (hasSquareJ) {
-      minimum -= 6
-    } else if (hasSquare9) {
-      minimum -= 5
-    } else if (hasSquareHigh) {
-      minimum -= 2
-    }
-
-    return minimum
+    return 0
   }
 
   if (action.type === 'no-trumps') {
@@ -192,6 +192,32 @@ function getMinimumBotBidScore(action: ServerBidAction, hand: ServerCard[]): num
   }
 
   return Number.POSITIVE_INFINITY
+}
+
+function canBotBidSuitContract(hand: ServerCard[], suit: ServerSuit): boolean {
+  const profile = buildSuitProfile(hand, suit)
+  const trumpPoints = getSuitTrumpPointTotal(profile.cards)
+
+  if (profile.hasJ && trumpPoints >= 34) {
+    return true
+  }
+
+  if (profile.hasJ && profile.count >= 4) {
+    return true
+  }
+
+  if (profile.has9 && profile.hasA && profile.count >= 4) {
+    return true
+  }
+
+  return false
+}
+
+function getSuitTrumpPointTotal(cards: ServerCard[]): number {
+  return cards.reduce(
+    (sum, card) => sum + (SUIT_TRUMP_POINT_VALUES[String(card.rank)] ?? 0),
+    0,
+  )
 }
 
 function getSuitBidStrength(hand: ServerCard[], suit: ServerSuit): number {
