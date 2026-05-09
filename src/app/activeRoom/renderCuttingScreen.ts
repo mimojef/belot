@@ -16,8 +16,8 @@ export type RenderCuttingAnimationState = {
 }
 
 export const CUTTING_VISUAL_CARD_COUNT = 32
-export const CUTTING_CARD_WIDTH = 150
-export const CUTTING_CARD_HEIGHT = 218
+export const CUTTING_CARD_WIDTH = 195
+export const CUTTING_CARD_HEIGHT = 284
 export const CUTTING_CARD_STEP = 16
 export const CUTTING_CARD_TOP = 6
 export const CUTTING_DECK_PADDING_X = 24

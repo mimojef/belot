@@ -214,6 +214,7 @@ function createScoringSnapshot(
       ...scoring.winningBid,
     },
     rawHandPoints: createTeamPointsSnapshot(scoring.rawHandPoints),
+    rawHandTricksWon: createTeamPointsSnapshot(scoring.rawHandTricksWon),
     declarationPoints: createTeamPointsSnapshot(scoring.declarationPoints),
     belotePoints: createTeamPointsSnapshot(scoring.belotePoints),
     sumPoints: createTeamPointsSnapshot(scoring.sumPoints),

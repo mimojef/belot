@@ -821,6 +821,10 @@ export function resolveServerScoring(
     teamA: baseRoundScore.teamA.rawPoints,
     teamB: baseRoundScore.teamB.rawPoints,
   }
+  const rawHandTricksWon: ServerRoundScore = {
+    teamA: baseRoundScore.teamA.tricksWon,
+    teamB: baseRoundScore.teamB.tricksWon,
+  }
   const sumPoints: ServerRoundScore = {
     teamA: rawHandPoints.teamA + declarationPoints.teamA + belotePoints.teamA,
     teamB: rawHandPoints.teamB + declarationPoints.teamB + belotePoints.teamB,
@@ -843,6 +847,7 @@ export function resolveServerScoring(
     scoring: {
       winningBid,
       rawHandPoints,
+      rawHandTricksWon,
       declarationPoints,
       belotePoints,
       sumPoints,

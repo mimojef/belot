@@ -139,6 +139,7 @@ export type ServerPlayingState = {
 export type ServerScoringState = {
   winningBid: NonNullable<ServerWinningBid>
   rawHandPoints: ServerRoundScore
+  rawHandTricksWon: ServerRoundScore
   declarationPoints: ServerRoundScore
   belotePoints: ServerRoundScore
   sumPoints: ServerRoundScore

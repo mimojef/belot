@@ -213,6 +213,7 @@ export type RoomTeamPointsSnapshot = {
 export type RoomScoringSnapshot = {
   winningBid: RoomWinningBidSnapshot
   rawHandPoints: RoomTeamPointsSnapshot
+  rawHandTricksWon: RoomTeamPointsSnapshot
   declarationPoints: RoomTeamPointsSnapshot
   belotePoints: RoomTeamPointsSnapshot
   sumPoints: RoomTeamPointsSnapshot

@@ -897,6 +897,14 @@ function chooseLead(
         }
       }
 
+      const signaledSuit = partnerSignaledSuit(seat, state, trumpSuit)
+      if (signaledSuit) {
+        const signaledCards = bySuit(validCards, signaledSuit)
+        if (signaledCards.length > 0) {
+          return highestCard(signaledCards, trumpSuit, contract)
+        }
+      }
+
       // Никой цвят не е безопасен → най-ниската карта (не даряваме 9-ки)
       return lowestCard(validCards, trumpSuit, contract)
 
@@ -1237,6 +1245,58 @@ function chooseFollowUpCardOnReturnedBaitSuit(
   return followUpCard
 }
 
+function chooseNonTrumpDiscardWhenCannotOvertrump(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  if (contract !== 'suit' || !trumpSuit) return null
+
+  const plays = state.playing?.currentTrick?.plays ?? []
+  const currentWinner = getServerTrickWinner(plays, state.bidding.winningBid)
+  if (!currentWinner) return null
+  if (currentWinner.seat === seat || currentWinner.seat === getPartnerSeat(seat)) return null
+  if (currentWinner.card.suit !== trumpSuit) return null
+
+  const higherTrumps = validCards.filter(c =>
+    c.suit === trumpSuit && TRUMP_POWER[c.rank] > TRUMP_POWER[currentWinner.card.rank]
+  )
+  if (higherTrumps.length > 0) return null
+
+  const nonTrumps = validCards.filter(c => c.suit !== trumpSuit)
+  if (nonTrumps.length === 0) return null
+
+  return safeDiscard(nonTrumps, state.hands[seat] ?? [], trumpSuit, contract)
+}
+
+function chooseLowTrumpToProtectNineOnPartnerTrumpLead(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  if (contract !== 'suit' || !trumpSuit) return null
+
+  const plays = state.playing?.currentTrick?.plays ?? []
+  if (plays[0]?.seat !== getPartnerSeat(seat)) return null
+
+  const currentWinner = getServerTrickWinner(plays, state.bidding.winningBid)
+  if (currentWinner?.seat !== getPartnerSeat(seat)) return null
+  if (currentWinner.card.suit !== trumpSuit) return null
+
+  const validTrumps = validCards.filter(c => c.suit === trumpSuit)
+  const hasNine = validTrumps.some(c => c.rank === '9')
+  if (!hasNine) return null
+
+  const lowerTrumps = validTrumps.filter(c => c.rank !== '9')
+  if (lowerTrumps.length === 0) return null
+
+  return lowestCard(lowerTrumps, trumpSuit, contract)
+}
+
 function chooseFollow(
   seat: Seat,
   state: ServerAuthoritativeGameState,
@@ -1264,6 +1324,17 @@ function chooseFollow(
   const plays = state.playing?.currentTrick?.plays ?? []
   const partnerIsLeader = plays.length > 0 && plays[0]!.seat === getPartnerSeat(seat)
 
+  const lowTrumpToProtectNine = chooseLowTrumpToProtectNineOnPartnerTrumpLead(
+    seat,
+    state,
+    validCards,
+    trumpSuit,
+    contract,
+  )
+  if (lowTrumpToProtectNine) {
+    return lowTrumpToProtectNine
+  }
+
   const returnedBaitFollowUpCard = chooseFollowUpCardOnReturnedBaitSuit(
     seat,
     state,
@@ -1273,6 +1344,17 @@ function chooseFollow(
   )
   if (returnedBaitFollowUpCard) {
     return returnedBaitFollowUpCard
+  }
+
+  const nonTrumpDiscardWhenCannotOvertrump = chooseNonTrumpDiscardWhenCannotOvertrump(
+    seat,
+    state,
+    validCards,
+    trumpSuit,
+    contract,
+  )
+  if (nonTrumpDiscardWhenCannotOvertrump) {
+    return nonTrumpDiscardWhenCannotOvertrump
   }
 
   if (partnerIsLeader && isMyTeamCurrentlyWinning(seat, state)) {

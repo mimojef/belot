@@ -453,6 +453,21 @@ function formatBonusValue(value: number | string): string {
   return value > 0 ? `+${value}` : '0'
 }
 
+function formatRawHandValue(points: number, tricksWon: number): string {
+  if (tricksWon === 0) {
+    return `
+      <span
+        style="
+          color:#dc2626;
+          font-weight:900;
+        "
+      >КАПО</span>
+    `
+  }
+
+  return String(points)
+}
+
 function getCountdownSeconds(timerDeadlineAt: number | null): number {
   if (timerDeadlineAt === null) {
     return 5
@@ -795,6 +810,7 @@ function renderScoringPanelHtml(
   const bidMultiplierLabel = getBidMultiplierLabel(winningBid)
   const countdownSeconds = getCountdownSeconds(game.timerDeadlineAt)
   const rawHands = getPerspectivePoints(scoring.rawHandPoints, localSeat)
+  const rawHandTricksWon = getPerspectivePoints(scoring.rawHandTricksWon, localSeat)
   const sumPoints = getPerspectivePoints(scoring.sumPoints, localSeat)
   const officialRoundPoints = getPerspectivePoints(scoring.officialRoundPoints, localSeat)
   const scoringDeclarationItems = buildScoringDeclarationItems(game.declarations)
@@ -919,7 +935,11 @@ function renderScoringPanelHtml(
             minHeight: 60,
             valueColor: '#f4b63a',
           })}
-          ${renderMatrixRow('Ръце', String(rawHands.ourPoints), String(rawHands.theirPoints))}
+          ${renderMatrixRow(
+            'Ръце',
+            formatRawHandValue(rawHands.ourPoints, rawHandTricksWon.ourPoints),
+            formatRawHandValue(rawHands.theirPoints, rawHandTricksWon.theirPoints),
+          )}
           ${renderMatrixRow('Сбор', renderAnimatedSumValue(sumPoints.ourPoints), renderAnimatedSumValue(sumPoints.theirPoints), {
             overflowVisible: true,
             useValueHtml: true,
