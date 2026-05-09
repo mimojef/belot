@@ -686,6 +686,13 @@ function chooseOwnSuitBidTrumpDraw(
     if (nine) return nine
 
     const remainingTrumps = ourTrumps.filter(c => c.rank !== 'J')
+    const masterTrumps = remainingTrumps.filter(c =>
+      isCardMaster(c, seat, state, trumpSuit, contract)
+    )
+    if (masterTrumps.length > 0) {
+      return highestCard(masterTrumps, trumpSuit, contract)
+    }
+
     if (remainingTrumps.length > 0) {
       return lowestCard(remainingTrumps, trumpSuit, contract)
     }

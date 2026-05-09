@@ -16,12 +16,12 @@ export type RenderCuttingAnimationState = {
 }
 
 export const CUTTING_VISUAL_CARD_COUNT = 32
-export const CUTTING_CARD_WIDTH = 195
-export const CUTTING_CARD_HEIGHT = 284
-export const CUTTING_CARD_STEP = 29
-export const CUTTING_CARD_TOP = 0
-export const CUTTING_DECK_PADDING_X = 30
-export const CUTTING_SELECTED_GAP = 30
+export const CUTTING_CARD_WIDTH = 150
+export const CUTTING_CARD_HEIGHT = 218
+export const CUTTING_CARD_STEP = 16
+export const CUTTING_CARD_TOP = 6
+export const CUTTING_DECK_PADDING_X = 24
+export const CUTTING_SELECTED_GAP = 24
 export const CUTTING_DECK_TRACK_WIDTH =
   (CUTTING_VISUAL_CARD_COUNT - 1) * CUTTING_CARD_STEP +
   CUTTING_CARD_WIDTH +
@@ -46,6 +46,17 @@ export type CuttingGatheredCardOffset = {
   x: number
   y: number
   rotate: number
+}
+
+function getCuttingLooseCardOffset(cardNumber: number): CuttingGatheredCardOffset {
+  const wave = Math.sin(cardNumber * 1.74)
+  const counterWave = Math.cos(cardNumber * 0.91)
+
+  return {
+    x: Number((counterWave * 1.8).toFixed(2)),
+    y: Number((wave * 4.2 + counterWave * 1.4).toFixed(2)),
+    rotate: Number((wave * 2.8 + counterWave * 0.8).toFixed(2)),
+  }
 }
 
 export function getCuttingGatheredCardOffset(
@@ -294,8 +305,10 @@ function renderVisualDeck(
     const pileRotate = pileTarget.rotate
     const finalTranslateX = isSplitActive ? pileLeft - left + pileTargetX : 0
     const finalTranslateY = isSplitActive ? pileTop - CARD_TOP + pileTargetY : 0
-    const baseTransform = 'translate(0px, 0px) rotate(0deg)'
-    const hoverTransform = `translate(0px, var(--belot-cut-card-hover-y, 0px)) rotate(0deg)`
+    const looseOffset = getCuttingLooseCardOffset(cardNumber)
+    const looseTranslateY = `calc(${looseOffset.y.toFixed(2)}px + var(--belot-cut-card-hover-y, 0px))`
+    const baseTransform = `translate(${looseOffset.x.toFixed(2)}px, ${looseOffset.y.toFixed(2)}px) rotate(${looseOffset.rotate.toFixed(2)}deg)`
+    const hoverTransform = `translate(${looseOffset.x.toFixed(2)}px, ${looseTranslateY}) rotate(${looseOffset.rotate.toFixed(2)}deg)`
     const splitTransform = `translate(${splitX.toFixed(2)}px, ${splitY.toFixed(2)}px) rotate(${splitRotate.toFixed(2)}deg)`
     const finalTransform = `translate(${finalTranslateX.toFixed(2)}px, ${finalTranslateY.toFixed(2)}px) rotate(${pileRotate.toFixed(2)}deg)`
     const transform = isCutAnimationVisible ? finalTransform : hoverTransform
