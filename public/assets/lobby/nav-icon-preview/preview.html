@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="bg">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Navbar Icon Preview</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #111;
+        color: #fff;
+        font-family: Arial, Helvetica, sans-serif;
+      }
+
+      main {
+        width: min(900px, calc(100vw - 40px));
+        margin: 0 auto;
+        padding: 32px 0;
+      }
+
+      h1 {
+        margin: 0 0 24px;
+        color: #d4a520;
+        font-size: 24px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 12px;
+      }
+
+      .item {
+        border: 1px solid rgba(212, 165, 32, 0.45);
+        border-radius: 8px;
+        padding: 16px;
+        background: #050505;
+      }
+
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        min-height: 44px;
+      }
+
+      .name {
+        margin-bottom: 12px;
+        color: rgba(255, 255, 255, 0.72);
+        font-size: 13px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .swatch {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 52px;
+        height: 44px;
+        background: #000;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Navbar Icon Preview</h1>
+      <div class="grid">
+        <section class="item">
+          <div class="name">Home</div>
+          <div class="row">
+            <span class="swatch"><img src="nav-home-gold.svg" alt="Home gold"></span>
+            <span class="swatch"><img src="nav-home-white.svg" alt="Home white"></span>
+          </div>
+        </section>
+        <section class="item">
+          <div class="name">Tournaments</div>
+          <div class="row">
+            <span class="swatch"><img src="nav-tournaments-gold.png" alt="Tournaments gold"></span>
+            <span class="swatch"><img src="nav-tournaments-white.png" alt="Tournaments white"></span>
+          </div>
+        </section>
+        <section class="item">
+          <div class="name">Shop</div>
+          <div class="row">
+            <span class="swatch"><img src="nav-shop-gold.png" alt="Shop gold"></span>
+            <span class="swatch"><img src="nav-shop-white.png" alt="Shop white"></span>
+          </div>
+        </section>
+        <section class="item">
+          <div class="name">Leaderboard</div>
+          <div class="row">
+            <span class="swatch"><img src="nav-leaderboard-gold.png" alt="Leaderboard gold"></span>
+            <span class="swatch"><img src="nav-leaderboard-white.png" alt="Leaderboard white"></span>
+          </div>
+        </section>
+        <section class="item">
+          <div class="name">Profile</div>
+          <div class="row">
+            <span class="swatch"><img src="nav-profile-gold.png" alt="Profile gold"></span>
+            <span class="swatch"><img src="nav-profile-white.png" alt="Profile white"></span>
+          </div>
+        </section>
+        <section class="item">
+          <div class="name">Notifications</div>
+          <div class="row">
+            <span class="swatch"><img src="nav-notifications-gold.png" alt="Notifications gold"></span>
+            <span class="swatch"><img src="nav-notifications-white.png" alt="Notifications white"></span>
+          </div>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>
