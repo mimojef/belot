@@ -37,6 +37,7 @@ function renderOption(option: ClientDeclarationCandidate, params: {
         min-height:68px;
         padding:12px 8px;
         border-bottom:1px solid rgba(245,166,35,0.28);
+        background:${isChecked ? 'rgba(245,166,35,0.10)' : 'rgba(18,18,18,0.72)'};
         cursor:${isDisabled ? 'not-allowed' : 'pointer'};
         opacity:${isDisabled ? '0.48' : '1'};
       "
@@ -106,7 +107,7 @@ export function renderDeclarationPrompt(params: {
         align-items:center;
         justify-content:center;
         padding:18px;
-        background:rgba(6,16,32,0.52);
+        background:rgba(0,0,0,0.58);
         box-sizing:border-box;
         font-family:Inter, system-ui, sans-serif;
       "
@@ -118,10 +119,10 @@ export function renderDeclarationPrompt(params: {
         style="
           width:min(88vw,430px);
           box-sizing:border-box;
-          border:2px solid rgba(245,166,35,0.9);
+          border:3px solid rgba(245,166,35,0.9);
           border-radius:12px;
-          background:rgba(14,33,51,0.97);
-          box-shadow:0 24px 60px rgba(0,0,0,0.30);
+          background:linear-gradient(180deg, rgba(24,24,24,0.98) 0%, rgba(8,8,8,0.99) 100%);
+          box-shadow:0 24px 60px rgba(0,0,0,0.36), 0 0 0 1px rgba(245,166,35,0.18);
           color:#f8fafc;
           padding:18px 16px 16px;
         "
@@ -130,7 +131,7 @@ export function renderDeclarationPrompt(params: {
           style="
             margin:0 0 12px;
             text-align:center;
-            color:#f8fafc;
+            color:#f5a623;
             font-size:28px;
             line-height:1.05;
             font-weight:900;
@@ -158,7 +159,7 @@ export function renderDeclarationPrompt(params: {
               border:0;
               border-radius:8px;
               background:#f5a623;
-              color:#fff7ed;
+              color:#101010;
               font-size:20px;
               line-height:1;
               font-weight:900;

@@ -624,6 +624,20 @@ function countPartnerTrumpLeads(
   ).length
 }
 
+function getTeamTrumpLeadTricks(
+  state: ServerAuthoritativeGameState,
+  seat: Seat,
+  trumpSuit: ServerSuit | null,
+) {
+  if (!trumpSuit) return []
+
+  const partner = getPartnerSeat(seat)
+  return (state.playing?.completedTricks ?? []).filter(trick =>
+    (trick.leaderSeat === seat || trick.leaderSeat === partner) &&
+    trick.plays[0]?.card.suit === trumpSuit
+  )
+}
+
 function getTrumpLeadTricksBySeat(
   state: ServerAuthoritativeGameState,
   seat: Seat,
@@ -653,6 +667,24 @@ function didBothOpponentsVoidOnTrumpLead(
 
   return opponentPlays.length === 2 &&
     opponentPlays.every(play => play.card.suit !== trumpSuit)
+}
+
+function didBothOpponentsVoidOnTeamTrumpLead(
+  state: ServerAuthoritativeGameState,
+  seat: Seat,
+  trumpSuit: ServerSuit | null,
+): boolean {
+  if (!trumpSuit) return false
+
+  const [opp1, opp2] = getOpponentSeats(seat)
+  return getTeamTrumpLeadTricks(state, seat, trumpSuit).some(trick => {
+    const opponentPlays = trick.plays.filter(play =>
+      play.seat === opp1 || play.seat === opp2
+    )
+
+    return opponentPlays.length === 2 &&
+      opponentPlays.every(play => play.card.suit !== trumpSuit)
+  })
 }
 
 function chooseOwnSuitBidTrumpDraw(
@@ -763,6 +795,113 @@ function chooseUnderHandAllTrumpsAceNineAttack(
   return target.cards.find(c => c.rank === 'A') ?? null
 }
 
+function chooseAllTrumpsDeclarerLongSuitUnlock(
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  const played = allPlayedCards(state)
+
+  const candidateGroups = ALL_SUITS
+    .map(suit => {
+      const cards = bySuit(validCards, suit)
+      const jackIsPlayed = played.some(c => c.suit === suit && c.rank === 'J')
+
+      return {
+        suit,
+        cards,
+        hasJack: cards.some(c => c.rank === 'J'),
+        hasNine: cards.some(c => c.rank === '9'),
+        hasAce: cards.some(c => c.rank === 'A'),
+        jackIsPlayed,
+      }
+    })
+    .filter(group =>
+      group.cards.length >= 3 &&
+      !group.hasJack &&
+      !group.jackIsPlayed
+    )
+    .sort((left, right) => {
+      if (right.cards.length !== left.cards.length) {
+        return right.cards.length - left.cards.length
+      }
+
+      const leftTop = cardPower(highestCard(left.cards, null, 'all-trumps'), null, 'all-trumps')
+      const rightTop = cardPower(highestCard(right.cards, null, 'all-trumps'), null, 'all-trumps')
+      return rightTop - leftTop
+    })
+
+  for (const group of candidateGroups) {
+    if (group.hasAce && group.hasNine) {
+      return group.cards.find(c => c.rank === 'A') ?? null
+    }
+
+    if (group.hasNine) {
+      const nonNineCards = group.cards.filter(c => c.rank !== '9')
+      if (nonNineCards.length >= 2) {
+        return highestCard(nonNineCards, null, 'all-trumps')
+      }
+
+      continue
+    }
+
+    return lowestCard(group.cards, null, 'all-trumps')
+  }
+
+  return null
+}
+
+function chooseNoTrumpsDeclarerControlLead(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  const hand = state.hands[seat] ?? []
+  const handCount = hand.length || validCards.length
+  const masters = validCards.filter(c => isCardMaster(c, seat, state, null, 'no-trumps'))
+
+  if (masters.length > 0 && (handCount <= 3 || masters.length === validCards.length)) {
+    return masters.reduce((best, c) =>
+      dumpValue(c, null, 'no-trumps') > dumpValue(best, null, 'no-trumps') ? c : best
+    )
+  }
+
+  const longSuitGroups = ALL_SUITS
+    .map(suit => {
+      const cards = bySuit(validCards, suit)
+      const developCards = cards.filter(c =>
+        !isCardMaster(c, seat, state, null, 'no-trumps') &&
+        !isUnsafeTenLeadInPlainSuit(c, seat, state, null, 'no-trumps')
+      )
+
+      return { suit, cards, developCards }
+    })
+    .filter(group => group.cards.length >= 3 && group.developCards.length > 0)
+    .sort((left, right) => {
+      if (right.cards.length !== left.cards.length) {
+        return right.cards.length - left.cards.length
+      }
+
+      const leftLow = lowestCard(left.developCards, null, 'no-trumps')
+      const rightLow = lowestCard(right.developCards, null, 'no-trumps')
+      return cardPower(leftLow, null, 'no-trumps') - cardPower(rightLow, null, 'no-trumps')
+    })
+
+  if (longSuitGroups.length > 0) {
+    return lowestCard(longSuitGroups[0]!.developCards, null, 'no-trumps')
+  }
+
+  const safeDevelopCards = validCards.filter(c =>
+    !isCardMaster(c, seat, state, null, 'no-trumps') &&
+    !isUnsafeTenLeadInPlainSuit(c, seat, state, null, 'no-trumps')
+  )
+
+  if (safeDevelopCards.length > 0) {
+    return lowestCard(safeDevelopCards, null, 'no-trumps')
+  }
+
+  return null
+}
+
 // ─── Leading strategy ─────────────────────────────────────────────────────────
 
 function chooseLead(
@@ -774,6 +913,10 @@ function chooseLead(
 ): ServerCard {
   const partner = getPartnerSeat(seat)
   const winningBid = state.bidding.winningBid
+  const botTeamDeclared =
+    winningBid?.seat === seat || winningBid?.seat === partner
+  const shouldHoldNoTrumpsMasters =
+    contract === 'no-trumps' && botTeamDeclared
 
   const ownTrumpDraw = chooseOwnSuitBidTrumpDraw(seat, state, validCards, trumpSuit, contract)
   if (ownTrumpDraw) {
@@ -787,8 +930,19 @@ function chooseLead(
   if (contract === 'suit' && winningBid?.seat === partner) {
     const ourTrumps = trumpCards(validCards, trumpSuit, contract)
     const partnerTrumpLeadCount = countPartnerTrumpLeads(state, partner, trumpSuit)
+    const teamTrumpLeadCount = getTeamTrumpLeadTricks(state, seat, trumpSuit).length
+    const opponentsAreVoidInTrump = didBothOpponentsVoidOnTeamTrumpLead(
+      state,
+      seat,
+      trumpSuit,
+    )
 
-    if (partnerTrumpLeadCount < 2 && ourTrumps.length > 0) {
+    if (
+      partnerTrumpLeadCount < 2 &&
+      teamTrumpLeadCount < 2 &&
+      !opponentsAreVoidInTrump &&
+      ourTrumps.length > 0
+    ) {
       const hasNine = ourTrumps.some(c => c.rank === '9')
       const otherTrumps = ourTrumps.filter(c => c.rank !== '9')
 
@@ -805,7 +959,7 @@ function chooseLead(
   // ── Rule 2: Властни некозови карти — ВИНАГИ с приоритет пред сигналите.
   //   Правило: "Първо изиграй властните си карти, след това търси партньора."
   //   Козовите карти пазим за контрол (не ги включваме тук).
-  if (contract !== 'all-trumps') {
+  if (contract !== 'all-trumps' && !shouldHoldNoTrumpsMasters) {
     const nonTrumpMasters = validCards.filter(c =>
       c.suit !== trumpSuit &&
       !isUnsafeTenLeadInPlainSuit(c, seat, state, trumpSuit, contract) &&
@@ -894,13 +1048,20 @@ function chooseLead(
   }
 
   // ── Rule 4а: Всичко коз — различна стратегия за ОБЯВИТЕЛЕН и ЗАЩИТЕН отбор
-  if (contract === 'all-trumps') {
-    const partner = getPartnerSeat(seat)
-    const winningBid = state.bidding.winningBid
-    const botTeamDeclared =
-      winningBid?.seat === seat || winningBid?.seat === partner
+  if (shouldHoldNoTrumpsMasters) {
+    const controlLead = chooseNoTrumpsDeclarerControlLead(seat, state, validCards)
+    if (controlLead) {
+      return controlLead
+    }
+  }
 
+  if (contract === 'all-trumps') {
     if (botTeamDeclared) {
+      const longSuitUnlock = chooseAllTrumpsDeclarerLongSuitUnlock(state, validCards)
+      if (longSuitUnlock) {
+        return longSuitUnlock
+      }
+
       // ── А-СИГНАЛ: Ако имаме А + нещо друго в боя (без Вале) и противникът има Вале
       //    → Тръгваме с А за да го принудим да изиграе Валето.
       //    Останалите карти от боята стават властни след излизането на Валето.
@@ -1377,12 +1538,32 @@ function chooseNonTrumpDiscardToPreserveLastTrumps(
   if (hand.some(c => c.suit === ledSuit)) return null
 
   const ownTrumps = hand.filter(c => c.suit === trumpSuit)
-  if (ownTrumps.length === 0 || ownTrumps.length > 2) return null
+  if (ownTrumps.length === 0) return null
 
   const nonTrumps = validCards.filter(c => c.suit !== trumpSuit)
   if (nonTrumps.length === 0) return null
 
   return safeDiscard(nonTrumps, hand, trumpSuit, contract)
+}
+
+function chooseDeclarerJackOnPartnerTrumpLead(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  if (contract !== 'suit' || !trumpSuit) return null
+
+  const partner = getPartnerSeat(seat)
+  const winningBid = state.bidding.winningBid
+  if (winningBid?.seat !== seat && winningBid?.seat !== partner) return null
+
+  const plays = state.playing?.currentTrick?.plays ?? []
+  if (plays[0]?.seat !== partner) return null
+  if (plays[0]?.card.suit !== trumpSuit) return null
+
+  return validCards.find(c => c.suit === trumpSuit && c.rank === 'J') ?? null
 }
 
 function chooseFollow(
@@ -1411,6 +1592,17 @@ function chooseFollow(
   //   властните си карти (да трупаме точки) и после да му върнем в неговия цвят.
   const plays = state.playing?.currentTrick?.plays ?? []
   const partnerIsLeader = plays.length > 0 && plays[0]!.seat === getPartnerSeat(seat)
+
+  const declarerJackOnPartnerTrumpLead = chooseDeclarerJackOnPartnerTrumpLead(
+    seat,
+    state,
+    validCards,
+    trumpSuit,
+    contract,
+  )
+  if (declarerJackOnPartnerTrumpLead) {
+    return declarerJackOnPartnerTrumpLead
+  }
 
   const lowTrumpToProtectNine = chooseLowTrumpToProtectNineOnPartnerTrumpLead(
     seat,

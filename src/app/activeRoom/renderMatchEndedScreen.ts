@@ -63,8 +63,8 @@ function renderPlayerTile(seat: RoomSeatSnapshot): string {
         min-height:172px;
         padding:18px 14px 14px;
         border-radius:8px;
-        background:rgba(255,255,255,0.055);
-        border:1px solid rgba(255,255,255,0.10);
+        background:rgba(18,18,18,0.92);
+        border:1px solid rgba(250,204,21,0.28);
       "
     >
       <div
@@ -74,7 +74,7 @@ function renderPlayerTile(seat: RoomSeatSnapshot): string {
           flex:0 0 116px;
           border-radius:8px;
           overflow:hidden;
-          background:rgba(15,23,42,0.72);
+          background:rgba(10,10,10,0.86);
           border:1px solid rgba(250,204,21,0.22);
           display:flex;
           align-items:center;
@@ -178,8 +178,8 @@ function renderMatchEndedPanel(
       style="
         width:min(940px, calc(100vw - 44px));
         border-radius:14px;
-        background:linear-gradient(180deg, rgba(15,35,72,0.98) 0%, rgba(11,28,58,0.98) 100%);
-        border:1px solid rgba(250,204,21,0.82);
+        background:linear-gradient(180deg, rgba(22,22,22,0.98) 0%, rgba(8,8,8,0.99) 100%);
+        border:3px solid rgba(250,204,21,0.82);
         box-shadow:0 30px 80px rgba(2,6,23,0.42);
         color:#f8fafc;
         overflow:hidden;
@@ -193,7 +193,7 @@ function renderMatchEndedPanel(
           align-items:end;
           gap:20px;
           border-bottom:1px solid rgba(250,204,21,0.22);
-          background:rgba(2,6,23,0.22);
+          background:rgba(10,10,10,0.66);
         "
       >
         <div style="min-width:0;text-align:right;">
@@ -288,10 +288,10 @@ function renderMatchEndedPanel(
             style="
               height:52px;
               min-width:168px;
-              border:1px solid rgba(250,204,21,0.42);
+              border:1px solid rgba(250,204,21,0.58);
               border-radius:8px;
               padding:0 22px;
-              background:rgba(15,23,42,0.72);
+              background:rgba(10,10,10,0.78);
               color:#f8fafc;
               font-family:Inter, system-ui, sans-serif;
               font-size:16px;
@@ -313,7 +313,7 @@ function renderMatchEndedPanel(
               border-radius:8px;
               padding:0 22px;
               background:linear-gradient(180deg, #facc15 0%, #eab308 100%);
-              color:#172554;
+              color:#101010;
               font-family:Inter, system-ui, sans-serif;
               font-size:16px;
               font-weight:900;

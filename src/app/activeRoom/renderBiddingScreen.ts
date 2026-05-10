@@ -147,8 +147,8 @@ function renderBidTile(options: {
         justify-content:center;
         gap:4px;
         cursor:${enabled ? 'pointer' : 'not-allowed'};
-        background:${enabled ? 'rgba(255,255,255,0.92)' : 'rgba(100,116,139,0.52)'};
-        box-shadow:inset 0 0 0 1px ${enabled ? 'rgba(15,23,42,0.10)' : 'rgba(15,23,42,0.06)'};
+        background:${enabled ? 'rgba(255,255,255,0.92)' : 'rgba(56,56,56,0.58)'};
+        box-shadow:inset 0 0 0 1px ${enabled ? 'rgba(15,23,42,0.10)' : 'rgba(255,255,255,0.04)'};
         transition:filter 120ms ease;
         font-family:inherit;
       "
