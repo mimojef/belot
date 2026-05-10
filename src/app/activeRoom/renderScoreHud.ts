@@ -190,11 +190,12 @@ export function renderScoreHud(options: RenderScoreHudOptions): string {
           style="
             border-radius:12px;
             overflow:hidden;
-            background: linear-gradient(180deg, rgba(13, 41, 73, 0.96) 0%, rgba(9, 31, 58, 0.96) 100%);
-            border:1px solid rgba(255,255,255,0.12);
+            background: linear-gradient(180deg, rgba(29, 29, 29, 0.97) 0%, rgba(10, 10, 10, 0.98) 100%);
+            border:1px solid rgba(220,163,58,0.78);
             box-shadow:
-              0 18px 36px rgba(0,0,0,0.24),
-              inset 0 1px 0 rgba(255,255,255,0.05);
+              0 18px 36px rgba(0,0,0,0.28),
+              0 0 0 1px rgba(220,163,58,0.22),
+              inset 0 1px 0 rgba(255,255,255,0.04);
             backdrop-filter: blur(10px);
           "
         >
@@ -205,8 +206,8 @@ export function renderScoreHud(options: RenderScoreHudOptions): string {
               font-weight:900;
               letter-spacing:0.14em;
               text-transform:uppercase;
-              color:rgba(239,245,255,0.82);
-              border-bottom:1px solid rgba(255,255,255,0.08);
+              color:rgba(244,182,58,0.92);
+              border-bottom:1px solid rgba(220,163,58,0.34);
             "
           >
             Резултат
@@ -224,7 +225,7 @@ export function renderScoreHud(options: RenderScoreHudOptions): string {
               style="
                 text-align:center;
                 padding:12px 10px 16px 10px;
-                border-right:1px solid rgba(255,255,255,0.10);
+                border-right:1px solid rgba(220,163,58,0.28);
               "
             >
               <div
@@ -259,7 +260,7 @@ export function renderScoreHud(options: RenderScoreHudOptions): string {
                 color:#ffffff;
                 font-size:26px;
                 font-weight:700;
-                border-right:1px solid rgba(255,255,255,0.10);
+                border-right:1px solid rgba(220,163,58,0.28);
               "
             >
               :
@@ -303,7 +304,7 @@ export function renderScoreHud(options: RenderScoreHudOptions): string {
               align-items:stretch;
               min-height:56px;
               background: linear-gradient(180deg, rgba(247, 181, 34, 0.98) 0%, rgba(236, 168, 26, 0.98) 100%);
-              border-top:1px solid rgba(255,255,255,0.08);
+              border-top:1px solid rgba(220,163,58,0.48);
             "
           >
             ${

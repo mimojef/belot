@@ -36,6 +36,15 @@ function getOpponentSeats(seat: Seat): [Seat, Seat] {
   return [SEAT_ORDER[(idx + 1) % 4]!, SEAT_ORDER[(idx + 3) % 4]!]
 }
 
+function getPreviousSeat(seat: Seat): Seat {
+  const index = SEAT_ORDER.indexOf(seat)
+  return SEAT_ORDER[(index + SEAT_ORDER.length - 1) % SEAT_ORDER.length]!
+}
+
+function isSeatUnderHandForBot(candidateSeat: Seat, botSeat: Seat): boolean {
+  return getPreviousSeat(botSeat) === candidateSeat
+}
+
 // ─── Colour & danger suit helpers ───────────────────────────────────────────
 
 /** Червени бои: купа и каро. Черни: пика и спатия. */
@@ -574,9 +583,9 @@ function isUnsafeTenLeadInPlainSuit(
   trumpSuit: ServerSuit | null,
   contract: Contract,
 ): boolean {
-  if (contract !== 'suit') return false
+  if (contract !== 'suit' && contract !== 'no-trumps') return false
   if (card.rank !== '10') return false
-  if (card.suit === trumpSuit) return false
+  if (contract === 'suit' && card.suit === trumpSuit) return false
 
   const hand = state.hands[seat] ?? []
   const played = allPlayedCards(state)
@@ -686,11 +695,16 @@ function chooseOwnSuitBidTrumpDraw(
     if (nine) return nine
 
     const remainingTrumps = ourTrumps.filter(c => c.rank !== 'J')
-    const masterTrumps = remainingTrumps.filter(c =>
-      isCardMaster(c, seat, state, trumpSuit, contract)
+    const nineIsPlayed = allPlayedCards(state).some(c =>
+      c.suit === trumpSuit && c.rank === '9'
     )
-    if (masterTrumps.length > 0) {
-      return highestCard(masterTrumps, trumpSuit, contract)
+    if (nineIsPlayed) {
+      const masterTrumps = remainingTrumps.filter(c =>
+        isCardMaster(c, seat, state, trumpSuit, contract)
+      )
+      if (masterTrumps.length > 0) {
+        return highestCard(masterTrumps, trumpSuit, contract)
+      }
     }
 
     if (remainingTrumps.length > 0) {
@@ -707,6 +721,46 @@ function chooseOwnSuitBidTrumpDraw(
   }
 
   return null
+}
+
+function chooseUnderHandAllTrumpsAceNineAttack(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  const winningBid = state.bidding.winningBid
+  if (winningBid?.contract !== 'all-trumps') return null
+  if (winningBid.seat === seat || winningBid.seat === getPartnerSeat(seat)) return null
+  if (!isSeatUnderHandForBot(winningBid.seat, seat)) return null
+
+  const hasJack = validCards.some(c => c.rank === 'J')
+  if (!hasJack) return null
+
+  const played = allPlayedCards(state)
+  const candidateGroups = ALL_SUITS
+    .map(suit => {
+      const cards = bySuit(validCards, suit)
+      return {
+        suit,
+        cards,
+        hasAce: cards.some(c => c.rank === 'A'),
+        hasNine: cards.some(c => c.rank === '9'),
+        hasJack: cards.some(c => c.rank === 'J'),
+        jackIsPlayed: played.some(c => c.suit === suit && c.rank === 'J'),
+      }
+    })
+    .filter(group =>
+      group.hasAce &&
+      group.hasNine &&
+      !group.hasJack &&
+      !group.jackIsPlayed
+    )
+    .sort((left, right) => right.cards.length - left.cards.length)
+
+  const target = candidateGroups[0]
+  if (!target) return null
+
+  return target.cards.find(c => c.rank === 'A') ?? null
 }
 
 // ─── Leading strategy ─────────────────────────────────────────────────────────
@@ -920,6 +974,15 @@ function chooseLead(
       //    3. Ако имаш 9 но J е у противника → води с НАЙ-МАЛКАТА карта от същия цвят
       //       (принуждаваш противника да изиграе J, след което 9-ката става властна)
       //    4. Иначе → най-малка карта изобщо (не даряваме ценни карти)
+
+      const underHandAceNineAttack = chooseUnderHandAllTrumpsAceNineAttack(
+        seat,
+        state,
+        validCards,
+      )
+      if (underHandAceNineAttack) {
+        return underHandAceNineAttack
+      }
 
       // Стъпка 1: имаме ли J? → Задължително J
       const jacksInHand = validCards.filter(c => c.rank === 'J')
@@ -1297,6 +1360,31 @@ function chooseLowTrumpToProtectNineOnPartnerTrumpLead(
   return lowestCard(lowerTrumps, trumpSuit, contract)
 }
 
+function chooseNonTrumpDiscardToPreserveLastTrumps(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  if (contract !== 'suit' || !trumpSuit) return null
+
+  const plays = state.playing?.currentTrick?.plays ?? []
+  const ledSuit = plays[0]?.card.suit ?? null
+  if (!ledSuit || ledSuit === trumpSuit) return null
+
+  const hand = state.hands[seat] ?? []
+  if (hand.some(c => c.suit === ledSuit)) return null
+
+  const ownTrumps = hand.filter(c => c.suit === trumpSuit)
+  if (ownTrumps.length === 0 || ownTrumps.length > 2) return null
+
+  const nonTrumps = validCards.filter(c => c.suit !== trumpSuit)
+  if (nonTrumps.length === 0) return null
+
+  return safeDiscard(nonTrumps, hand, trumpSuit, contract)
+}
+
 function chooseFollow(
   seat: Seat,
   state: ServerAuthoritativeGameState,
@@ -1377,11 +1465,33 @@ function chooseFollow(
   if (isMyTeamCurrentlyWinning(seat, state)) {
     // Последен на ход и отборът печели → чистим безопасно (не оголваме 9)
     if (lastToPlay) {
+      const nonTrumpDiscard = chooseNonTrumpDiscardToPreserveLastTrumps(
+        seat,
+        state,
+        validCards,
+        trumpSuit,
+        contract,
+      )
+      if (nonTrumpDiscard) {
+        return nonTrumpDiscard
+      }
+
       return safeDiscard(validCards, hand, trumpSuit, contract, aSignaledSuit)
     }
 
     // Партньорът ще прибере СИГУРНО?
     if (!canAnyRemainingOpponentBeat(seat, state)) {
+      const nonTrumpDiscard = chooseNonTrumpDiscardToPreserveLastTrumps(
+        seat,
+        state,
+        validCards,
+        trumpSuit,
+        contract,
+      )
+      if (nonTrumpDiscard) {
+        return nonTrumpDiscard
+      }
+
       // ── Набиване: ако сме чисти и имаме 2+ властни в един цвят → хвърляме най-ценната
       const dumpCard = tryDumpHighValueMaster(seat, state, validCards, trumpSuit, contract)
       if (dumpCard) {
@@ -1391,6 +1501,17 @@ function chooseFollow(
       // Иначе → сигнализираме (или чистим ниско в безкоз)
       return discardSignal(seat, state, validCards, trumpSuit, contract)
     } else {
+      const nonTrumpDiscard = chooseNonTrumpDiscardToPreserveLastTrumps(
+        seat,
+        state,
+        validCards,
+        trumpSuit,
+        contract,
+      )
+      if (nonTrumpDiscard) {
+        return nonTrumpDiscard
+      }
+
       // Противник може да бие → чистим безопасно (пазим 9-ките и А-сигналната боя)
       return safeDiscard(validCards, hand, trumpSuit, contract, aSignaledSuit)
     }

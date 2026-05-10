@@ -24,6 +24,7 @@ import {
   type PlayingUiCache,
 } from './activeRoomTypes'
 import {
+  ACTIVE_ROOM_TABLE_BACKGROUND,
   ACTIVE_ROOM_STAGE_HEIGHT,
   ACTIVE_ROOM_STAGE_WIDTH,
   ACTIVE_ROOM_VIEWPORT_HORIZONTAL_PADDING,
@@ -1247,9 +1248,7 @@ export function createActiveRoomFlowController(
             align-items:center;
             justify-content:center;
             overflow:hidden;
-            background:
-              radial-gradient(circle at center, rgba(74,222,128,0.18) 0%, rgba(34,197,94,0.10) 34%, rgba(21,128,61,0.00) 58%),
-              linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%);
+            background:${ACTIVE_ROOM_TABLE_BACKGROUND};
             font-family:Inter, system-ui, sans-serif;
           "
         >
@@ -1514,9 +1513,7 @@ export function createActiveRoomFlowController(
             align-items:center;
             justify-content:center;
             overflow:hidden;
-            background:
-              radial-gradient(circle at center, rgba(74,222,128,0.18) 0%, rgba(34,197,94,0.10) 34%, rgba(21,128,61,0.00) 58%),
-              linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%);
+            background:${ACTIVE_ROOM_TABLE_BACKGROUND};
             font-family:Inter, system-ui, sans-serif;
           "
         >
@@ -1710,9 +1707,7 @@ export function createActiveRoomFlowController(
             align-items:center;
             justify-content:center;
             overflow:hidden;
-            background:
-              radial-gradient(circle at center, rgba(74,222,128,0.18) 0%, rgba(34,197,94,0.10) 34%, rgba(21,128,61,0.00) 58%),
-              linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%);
+            background:${ACTIVE_ROOM_TABLE_BACKGROUND};
             font-family:Inter, system-ui, sans-serif;
           "
         >
@@ -1855,9 +1850,7 @@ export function createActiveRoomFlowController(
             align-items:center;
             justify-content:center;
             overflow:hidden;
-            background:
-              radial-gradient(circle at center, rgba(74,222,128,0.18) 0%, rgba(34,197,94,0.10) 34%, rgba(21,128,61,0.00) 58%),
-              linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%);
+            background:${ACTIVE_ROOM_TABLE_BACKGROUND};
             font-family:Inter, system-ui, sans-serif;
           "
         >

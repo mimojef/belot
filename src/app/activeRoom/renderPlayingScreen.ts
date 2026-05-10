@@ -10,6 +10,8 @@ import type {
 } from '../network/createGameServerClient'
 import { getCardFaceImagePath } from './cardImageAssets'
 import {
+  ACTIVE_ROOM_TABLE_STAGE_BACKGROUND,
+  ACTIVE_ROOM_TABLE_BACKGROUND,
   ACTIVE_ROOM_STAGE_HEIGHT,
   ACTIVE_ROOM_STAGE_WIDTH,
   escapeHtml,
@@ -36,11 +38,6 @@ import {
   removeDeclarationPrompt,
   renderDeclarationPrompt,
 } from './declarations/renderDeclarationPrompt'
-
-const TABLE_BACKGROUND = `
-  radial-gradient(circle at center, rgba(74,222,128,0.18) 0%, rgba(34,197,94,0.10) 34%, rgba(21,128,61,0.00) 58%),
-  linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%)
-`
 
 const PLAY_CARD_ENTRY_ANIMATION_MS = 400
 const COMPLETED_TRICK_PREVIEW_MS = 220
@@ -1132,7 +1129,7 @@ function renderPlayingStage(options: {
         position:relative;
         width:100%;
         height:100%;
-        background:${TABLE_BACKGROUND};
+        background:${ACTIVE_ROOM_TABLE_STAGE_BACKGROUND};
         overflow:visible;
       "
     >
@@ -1567,7 +1564,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         align-items:center;
         justify-content:center;
         overflow:hidden;
-        background:${TABLE_BACKGROUND};
+        background:${ACTIVE_ROOM_TABLE_BACKGROUND};
         font-family:Inter, system-ui, sans-serif;
       "
     >

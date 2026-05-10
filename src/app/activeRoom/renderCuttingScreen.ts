@@ -1,6 +1,7 @@
 import {
   type RoomCuttingSnapshot,
 } from '../network/createGameServerClient'
+import { ACTIVE_ROOM_TABLE_STAGE_BACKGROUND } from './activeRoomShared'
 import { CARD_BACK_IMAGE_PATH } from './cardImageAssets'
 
 type RenderCuttingScreenOptions = {
@@ -453,9 +454,7 @@ function renderVisualDeck(
         display:flex;
         align-items:center;
         justify-content:center;
-        background:
-          radial-gradient(circle at center, rgba(74,222,128,0.22) 0%, rgba(34,197,94,0.12) 32%, rgba(21,128,61,0.00) 58%),
-          linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%);
+        background:${ACTIVE_ROOM_TABLE_STAGE_BACKGROUND};
         overflow:hidden;
       "
     >
@@ -481,7 +480,7 @@ function renderVisualDeck(
           "
         >
           <span style="color:#f5bb37;text-shadow:0 3px 8px rgba(0,0,0,0.18);">Цепи:</span>
-          <span style="color:#020617;text-shadow:0 1px 2px rgba(255,255,255,0.16);">${escapeHtml(cutterDisplayName)}</span>
+          <span style="color:#ffffff;text-shadow:0 3px 8px rgba(0,0,0,0.55);">${escapeHtml(cutterDisplayName)}</span>
         </div>
 
         <div

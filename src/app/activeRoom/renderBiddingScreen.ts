@@ -5,6 +5,7 @@ import type {
   RoomWinningBidSnapshot,
   Seat,
 } from '../network/createGameServerClient'
+import { ACTIVE_ROOM_TABLE_STAGE_BACKGROUND } from './activeRoomShared'
 import { renderPile, getPileVisibleCards } from './renderDealingScreen'
 
 export const BID_HUMAN_TIMEOUT_MS = 15_000
@@ -60,9 +61,7 @@ export function renderBiddingStageHtml(
         position:relative;
         width:100%;
         height:100%;
-        background:
-          radial-gradient(circle at center, rgba(74,222,128,0.22) 0%, rgba(34,197,94,0.12) 32%, rgba(21,128,61,0.00) 58%),
-          linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%);
+        background:${ACTIVE_ROOM_TABLE_STAGE_BACKGROUND};
         overflow:visible;
       "
     >
@@ -76,9 +75,9 @@ export function renderBiddingStageHtml(
           max-width:min(88vw, 520px);
           padding:14px 18px;
           border-radius:18px;
-          background:rgba(6, 22, 40, 0.80);
-          border:1px solid rgba(255,255,255,0.12);
-          box-shadow:0 16px 34px rgba(0,0,0,0.18);
+          background:rgba(10,10,10,0.84);
+          border:1px solid rgba(220,163,58,0.46);
+          box-shadow:0 16px 34px rgba(0,0,0,0.24);
           text-align:center;
           color:#eff6ff;
           z-index:2;
@@ -92,7 +91,7 @@ export function renderBiddingStageHtml(
             font-weight:800;
             letter-spacing:0.10em;
             text-transform:uppercase;
-            color:rgba(191,219,254,0.92);
+            color:rgba(244,182,58,0.92);
           "
         >
           Обявяване
@@ -222,11 +221,11 @@ function renderBidPopup(
         width:min(88vw, 400px);
         padding:5px;
         border-radius:14px;
-        background:rgba(13,34,64,0.88);
+        background:rgba(10,10,10,0.92);
         border:2px solid #f5ad1c;
         box-shadow:
           0 20px 48px rgba(0,0,0,0.36),
-          inset 0 0 0 1px rgba(255,255,255,0.05);
+          inset 0 0 0 1px rgba(244,182,58,0.18);
         z-index:10;
         pointer-events:${disabled ? 'none' : 'auto'};
         opacity:${disabled ? '0.7' : '1'};
@@ -264,14 +263,14 @@ function renderBotTakeoverPopup(): string {
         display:flex;
         align-items:center;
         justify-content:center;
-        background:rgba(2,6,23,0.62);
+        background:rgba(0,0,0,0.66);
         font-family:Inter, system-ui, sans-serif;
       "
     >
       <div style="
         width:min(88vw, 480px);
-        background:rgba(15,23,42,0.98);
-        border:1px solid rgba(148,163,184,0.22);
+        background:rgba(12,12,12,0.98);
+        border:1px solid rgba(220,163,58,0.52);
         border-radius:24px;
         padding:32px 28px;
         box-shadow:0 32px 72px rgba(0,0,0,0.42);
@@ -304,13 +303,13 @@ function renderBotTakeoverPopup(): string {
             border:0;
             border-radius:14px;
             padding:14px 32px;
-            background:linear-gradient(180deg,#3b82f6 0%,#1d4ed8 100%);
-            color:#fff;
+            background:linear-gradient(180deg,#f5ad1c 0%,#d49412 100%);
+            color:#101010;
             font-size:16px;
             font-weight:800;
             cursor:pointer;
             font-family:inherit;
-            box-shadow:0 8px 20px rgba(29,78,216,0.32);
+            box-shadow:0 8px 20px rgba(245,173,28,0.28);
           "
         >
           Върни се

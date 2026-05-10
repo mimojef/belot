@@ -5,15 +5,11 @@ import type {
   Team,
 } from '../network/createGameServerClient'
 import {
+  ACTIVE_ROOM_TABLE_BACKGROUND,
   ACTIVE_ROOM_STAGE_HEIGHT,
   ACTIVE_ROOM_STAGE_WIDTH,
   escapeHtml,
 } from './activeRoomShared'
-
-const TABLE_BACKGROUND = `
-  radial-gradient(circle at center, rgba(250,204,21,0.18) 0%, rgba(34,197,94,0.12) 30%, rgba(21,128,61,0.00) 58%),
-  linear-gradient(180deg, rgba(18,84,62,0.98) 0%, rgba(10,58,48,0.99) 100%)
-`
 
 type RenderMatchEndedScreenOptions = {
   root: HTMLDivElement
@@ -357,7 +353,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
         align-items:center;
         justify-content:center;
         overflow:hidden;
-        background:${TABLE_BACKGROUND};
+        background:${ACTIVE_ROOM_TABLE_BACKGROUND};
         font-family:Inter, system-ui, sans-serif;
       "
     >

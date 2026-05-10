@@ -7,16 +7,12 @@ import type {
   Seat,
 } from '../network/createGameServerClient'
 import {
+  ACTIVE_ROOM_TABLE_BACKGROUND,
   ACTIVE_ROOM_STAGE_HEIGHT,
   ACTIVE_ROOM_STAGE_WIDTH,
   escapeHtml,
 } from './activeRoomShared'
 import { renderScoreHud } from './renderScoreHud'
-
-const TABLE_BACKGROUND = `
-  radial-gradient(circle at center, rgba(74,222,128,0.18) 0%, rgba(34,197,94,0.10) 34%, rgba(21,128,61,0.00) 58%),
-  linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%)
-`
 
 const LABEL_COLUMN_WIDTH_PX = 108
 const TABLE_GRID_COLUMNS = `${LABEL_COLUMN_WIDTH_PX}px minmax(0, 1fr) minmax(0, 1fr)`
@@ -485,7 +481,7 @@ function renderMatrixHeaderRow(): string {
         align-items:end;
         min-height:58px;
         border-bottom:1px solid rgba(232, 178, 78, 0.78);
-        background:rgba(255,255,255,0.025);
+        background:#171717;
       "
     >
       <div></div>
@@ -612,7 +608,7 @@ function renderOutcomeRow(outcomeShortLabel: string): string {
         grid-template-columns:${TABLE_GRID_COLUMNS};
         align-items:center;
         min-height:48px;
-        background:rgba(255,255,255,0.03);
+        background:#121212;
       "
     >
       <div
@@ -851,11 +847,11 @@ function renderScoringPanelHtml(
         width:100%;
         max-width:730px;
         margin:0 auto;
-        background:rgba(34, 70, 92, 0.97);
-        border:2px solid #dca33a;
+        background:#0a0a0a;
+        border:4px solid #dca33a;
         border-radius:14px;
         overflow:hidden;
-        box-shadow:0 18px 40px rgba(0,0,0,0.22);
+        box-shadow:0 18px 40px rgba(0,0,0,0.28), 0 0 0 1px rgba(244,182,58,0.28);
         backdrop-filter:blur(3px);
       "
     >
@@ -961,7 +957,7 @@ function renderScoringPanelHtml(
           color:#f4f7fb;
           font-size:18px;
           font-weight:500;
-          background:rgba(18, 39, 54, 0.72);
+          background:#121212;
           border-top:1px solid rgba(232, 178, 78, 0.52);
         "
       >
@@ -1012,7 +1008,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
         align-items:center;
         justify-content:center;
         overflow:hidden;
-        background:${TABLE_BACKGROUND};
+        background:${ACTIVE_ROOM_TABLE_BACKGROUND};
         font-family:Inter, system-ui, sans-serif;
       "
     >

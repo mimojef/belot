@@ -86,7 +86,7 @@ function renderNav(_isSearching: boolean): string {
           border-bottom:2px solid #d4a520;
           background: rgba(212,165,32,0.06);
         ">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor" style="display:block;"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+          <img src="/assets/lobby/nav-icon-preview/nav-home-gold.svg" alt="" style="width:28px; height:28px; display:block; object-fit:contain;">
           Лоби
         </a>
         <a href="#" style="
@@ -98,7 +98,7 @@ function renderNav(_isSearching: boolean): string {
           border-bottom:2px solid transparent;
           transition:color 0.15s;
         ">
-          <img src="/assets/lobby/icon-tournaments.png" alt="" style="width:32px; height:29px; display:block; object-fit:contain; opacity:0.85;">
+          <img src="/assets/lobby/nav-icon-preview/nav-tournaments-white.png" alt="" style="width:32px; height:29px; display:block; object-fit:contain;">
           Турнири
         </a>
         <a href="#" style="
@@ -109,7 +109,7 @@ function renderNav(_isSearching: boolean): string {
           color:rgba(255,255,255,0.70);
           border-bottom:2px solid transparent;
         ">
-          <img src="/assets/lobby/icon-shop.png" alt="" style="width:31px; height:30px; display:block; object-fit:contain; opacity:0.85;">
+          <img src="/assets/lobby/nav-icon-preview/nav-shop-white.png" alt="" style="width:31px; height:30px; display:block; object-fit:contain;">
           Магазин
         </a>
         <a href="#" style="
@@ -120,7 +120,7 @@ function renderNav(_isSearching: boolean): string {
           color:rgba(255,255,255,0.70);
           border-bottom:2px solid transparent;
         ">
-          <img src="/assets/lobby/icon-leaderboard.png" alt="" style="width:29px; height:30px; display:block; object-fit:contain; opacity:0.85;">
+          <img src="/assets/lobby/nav-icon-preview/nav-leaderboard-white.png" alt="" style="width:29px; height:30px; display:block; object-fit:contain;">
           Класация
         </a>
         <a href="#" style="
@@ -131,7 +131,7 @@ function renderNav(_isSearching: boolean): string {
           color:rgba(255,255,255,0.70);
           border-bottom:2px solid transparent;
         ">
-          <img src="/assets/lobby/icon-profile.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain; opacity:0.85;">
+          <img src="/assets/lobby/nav-icon-preview/nav-profile-white.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain;">
           Профил
         </a>
       </div>
@@ -141,7 +141,7 @@ function renderNav(_isSearching: boolean): string {
           background:none; border:none; cursor:pointer; padding:6px;
           color:rgba(255,255,255,0.65); position:relative;
         ">
-          <img src="/assets/lobby/icon-notifications.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain; opacity:0.85;">
+          <img src="/assets/lobby/nav-icon-preview/nav-notifications-white.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain;">
           <span style="
             position:absolute; top:4px; right:4px;
             width:8px; height:8px; border-radius:50%;
@@ -346,13 +346,13 @@ function renderStakeSection(
         display:flex; align-items:center; justify-content:center; gap:12px;
         margin-bottom:14px;
       ">
-        <div style="flex:1; height:1px; background:linear-gradient(90deg, transparent, rgba(212,165,32,0.4));"></div>
+        <div style="flex:1; height:2px; background:linear-gradient(90deg, #000000 0%, #d4a520 100%);"></div>
         <div style="display:flex; align-items:center; gap:8px;">
-          <span style="color:#d4a520; font-size:13px;">◆</span>
-          <span style="font-size:13px; font-weight:800; letter-spacing:0.12em; text-transform:uppercase; color:#d4a520;">Избери маса</span>
-          <span style="color:#d4a520; font-size:13px;">◆</span>
+          <span style="color:#d4a520; font-size:16px;">◆</span>
+          <span style="font-size:16px; font-weight:800; letter-spacing:0.12em; text-transform:uppercase; color:#d4a520;">Избери маса</span>
+          <span style="color:#d4a520; font-size:16px;">◆</span>
         </div>
-        <div style="flex:1; height:1px; background:linear-gradient(90deg, rgba(212,165,32,0.4), transparent);"></div>
+        <div style="flex:1; height:2px; background:linear-gradient(90deg, #d4a520 0%, #000000 100%);"></div>
       </div>
 
       <div style="

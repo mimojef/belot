@@ -22,6 +22,12 @@ export const ACTIVE_ROOM_MAX_STAGE_SCALE = 1.06
 export const ACTIVE_ROOM_MIN_STAGE_SCALE = 0.46
 export const ACTIVE_ROOM_VIEWPORT_HORIZONTAL_PADDING = 20
 export const ACTIVE_ROOM_VIEWPORT_VERTICAL_PADDING = 20
+export const ACTIVE_ROOM_TABLE_BACKGROUND = `
+  radial-gradient(circle at center, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0.015) 34%, rgba(0,0,0,0.00) 58%),
+  url('/assets/lobby/table-diamond-bg.webp') center / 100% 100% no-repeat,
+  #000000
+`
+export const ACTIVE_ROOM_TABLE_STAGE_BACKGROUND = 'transparent'
 
 export function escapeHtml(value: string): string {
   return value

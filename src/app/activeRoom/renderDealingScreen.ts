@@ -1,4 +1,5 @@
 import type { RoomCardSnapshot, Seat } from "../network/createGameServerClient";
+import { ACTIVE_ROOM_TABLE_STAGE_BACKGROUND } from './activeRoomShared';
 import { CARD_BACK_IMAGE_PATH } from './cardImageAssets';
 import { getVisualSeatForLocalPerspective } from "./cutting/cuttingSeatLayout";
 
@@ -565,9 +566,7 @@ export function renderDealingScreen(
         position:relative;
         width:100%;
         height:100%;
-        background:
-          radial-gradient(circle at center, rgba(74,222,128,0.22) 0%, rgba(34,197,94,0.12) 32%, rgba(21,128,61,0.00) 58%),
-          linear-gradient(180deg, rgba(22,101,52,0.98) 0%, rgba(17,94,39,0.99) 100%);
+        background:${ACTIVE_ROOM_TABLE_STAGE_BACKGROUND};
         overflow:visible;
       "
     >

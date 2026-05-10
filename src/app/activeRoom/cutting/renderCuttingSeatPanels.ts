@@ -132,7 +132,7 @@ export function renderBottomCuttingCountdownBar(
         height:18px;
         border-radius:6px;
         overflow:hidden;
-        background:rgba(6, 22, 40, 0.94);
+        background:rgba(10,10,10,0.94);
         box-shadow:
           inset 0 1px 0 rgba(255,255,255,0.08),
           0 4px 10px rgba(0,0,0,0.18);
@@ -174,8 +174,8 @@ export function renderSideCuttingCountdownFooter(
         right:0;
         bottom:0;
         min-height:52px;
-        background:rgba(6, 22, 40, 0.94);
-        border-top:1px solid rgba(255,255,255,0.12);
+        background:rgba(10,10,10,0.94);
+        border-top:1px solid rgba(220,163,58,0.36);
         overflow:hidden;
       "
     >
@@ -750,8 +750,8 @@ export function createCuttingSeatPanelHtml(
     seat.isOccupied && displayName.trim().length > 0
       ? displayName
       : CUTTING_VISUAL_SEAT_LABELS[visualSeat]
-  const borderColor = isHighlightedSeat ? 'rgba(245, 187, 55, 0.96)' : 'rgba(255,255,255,0.18)'
-  const borderWidthPx = isHighlightedSeat ? 4 : 2
+  const borderColor = isHighlightedSeat ? 'rgba(245, 187, 55, 0.96)' : 'rgba(220,163,58,0.62)'
+  const borderWidthPx = isHighlightedSeat ? 3 : 2
   const shadow = isHighlightedSeat
     ? '0 0 24px rgba(245, 187, 55, 0.24), 0 16px 28px rgba(0,0,0,0.24)'
     : '0 14px 28px rgba(0,0,0,0.24)'
@@ -814,8 +814,8 @@ export function createCuttingSeatPanelHtml(
             border-radius:20px;
             border:${borderWidthPx}px solid ${borderColor};
             background:
-              radial-gradient(circle at 22% 22%, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0.05) 18%, rgba(18, 79, 118, 0.0) 40%),
-              linear-gradient(180deg, rgba(16, 145, 151, 0.96) 0%, rgba(17, 95, 118, 0.96) 54%, rgba(10, 44, 70, 0.98) 100%);
+              radial-gradient(circle at 22% 22%, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.025) 18%, rgba(255,255,255,0.0) 40%),
+              linear-gradient(180deg, rgba(34,34,34,0.97) 0%, rgba(18,18,18,0.98) 54%, rgba(8,8,8,0.99) 100%);
             box-shadow:${shadow};
             overflow:hidden;
             z-index:${dealtHands ? 20 : 2};
@@ -917,8 +917,8 @@ export function createCuttingSeatPanelHtml(
           border-radius:18px;
           border:${borderWidthPx}px solid ${borderColor};
           background:
-            radial-gradient(circle at 35% 30%, rgba(255,255,255,0.22) 0%, rgba(255,255,255,0.06) 18%, rgba(18, 79, 118, 0.0) 40%),
-            linear-gradient(180deg, rgba(18, 154, 160, 0.95) 0%, rgba(19, 104, 121, 0.95) 52%, rgba(12, 55, 82, 0.96) 100%);
+            radial-gradient(circle at 35% 30%, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.025) 18%, rgba(255,255,255,0.0) 40%),
+            linear-gradient(180deg, rgba(34,34,34,0.97) 0%, rgba(18,18,18,0.98) 52%, rgba(8,8,8,0.99) 100%);
           box-shadow:${shadow};
           overflow:hidden;
           z-index:2;
@@ -970,8 +970,8 @@ export function createCuttingSeatPanelHtml(
                     bottom:0;
                     min-height:52px;
                     padding:13px 14px 14px;
-                    background:rgba(6, 22, 40, 0.94);
-                    border-top:1px solid rgba(255,255,255,0.12);
+                    background:rgba(10,10,10,0.94);
+                    border-top:1px solid rgba(220,163,58,0.36);
                     color:#f4f8ff;
                     text-align:center;
                     font-size:18px;
