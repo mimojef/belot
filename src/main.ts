@@ -33,6 +33,15 @@ if (isMatchEndedPreviewRequest()) {
 } else {
 let client: GameServerClient
 const gameAudio = createGameAudioController()
+const SERVER_RESTART_WAIT_MESSAGE = 'Изчаква се рестарт на сървъра.'
+const SERVER_RESUME_WAIT_MESSAGE = 'Възстановяване на играта...'
+const SERVER_CONNECTION_ERROR_MESSAGE = 'Възникна грешка при връзката със сървъра.'
+const SERVER_RECONNECT_DELAY_MS = 1_000
+const SERVER_RECONNECT_MAX_DELAY_MS = 5_000
+
+let reconnectTimerId: number | null = null
+let reconnectAttempt = 0
+let isPageUnloading = false
 
 const lobby = createLobbyFlowController({
   root: rootElement,
@@ -77,10 +86,51 @@ const activeRoom = createActiveRoomFlowController({
   },
 })
 
+function clearReconnectTimer(): void {
+  if (reconnectTimerId === null) {
+    return
+  }
+
+  window.clearTimeout(reconnectTimerId)
+  reconnectTimerId = null
+}
+
+function scheduleServerReconnect(): void {
+  if (isPageUnloading || reconnectTimerId !== null) {
+    return
+  }
+
+  const delayMs = Math.min(
+    SERVER_RECONNECT_DELAY_MS + reconnectAttempt * SERVER_RECONNECT_DELAY_MS,
+    SERVER_RECONNECT_MAX_DELAY_MS,
+  )
+
+  reconnectAttempt += 1
+  reconnectTimerId = window.setTimeout(() => {
+    reconnectTimerId = null
+    client.connect()
+  }, delayMs)
+}
+
+function requestActiveRoomResume(): boolean {
+  const resumeInfo = activeRoom.getResumeInfo()
+
+  if (resumeInfo === null) {
+    return false
+  }
+
+  client.resumeRoom(resumeInfo.roomId, resumeInfo.reconnectToken)
+  return true
+}
+
 client = createGameServerClient({
   onOpen: () => {
+    clearReconnectTimer()
+    reconnectAttempt = 0
+
     if (activeRoom.hasActiveRoom()) {
-      activeRoom.setConnectionState(true, null)
+      activeRoom.setConnectionState(true, SERVER_RESUME_WAIT_MESSAGE)
+      requestActiveRoomResume()
       return
     }
 
@@ -89,20 +139,22 @@ client = createGameServerClient({
   },
   onClose: () => {
     if (activeRoom.hasActiveRoom()) {
-      activeRoom.setConnectionState(false, 'Връзката със сървъра е прекъсната.')
+      activeRoom.setConnectionState(false, SERVER_RESTART_WAIT_MESSAGE)
+      scheduleServerReconnect()
       return
     }
 
     lobby.setConnected(false)
-    lobby.setErrorText('Връзката със сървъра е прекъсната.')
+    lobby.setErrorText(SERVER_RESTART_WAIT_MESSAGE)
+    scheduleServerReconnect()
   },
   onError: () => {
     if (activeRoom.hasActiveRoom()) {
-      activeRoom.setConnectionError('Възникна грешка при връзката със сървъра.')
+      activeRoom.setConnectionError(SERVER_CONNECTION_ERROR_MESSAGE)
       return
     }
 
-    lobby.setErrorText('Възникна грешка при връзката със сървъра.')
+    lobby.setErrorText(SERVER_CONNECTION_ERROR_MESSAGE)
   },
   onMessage: (message) => {
     if (activeRoom.handleServerMessage(message)) {
@@ -123,6 +175,8 @@ const disposeViewportResizeHandler = createViewportResizeHandler(() => {
 })
 
 window.addEventListener('beforeunload', () => {
+  isPageUnloading = true
+  clearReconnectTimer()
   disposeViewportResizeHandler()
   client.disconnect()
 })

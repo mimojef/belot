@@ -2341,6 +2341,13 @@ export function createActiveRoomFlowController(
       return true
     }
 
+    if (message.type === 'room_resumed' && message.roomId === activeRoomState.roomId) {
+      activeRoomState.isConnected = true
+      activeRoomState.errorText = null
+      renderActiveRoomScreen()
+      return true
+    }
+
     if (message.type === 'room_resume_failed' && message.roomId === activeRoomState.roomId) {
       resetCuttingAnimationState()
       clearDealingAnimationState()
@@ -2367,6 +2374,17 @@ export function createActiveRoomFlowController(
     }
 
     return false
+  }
+
+  function getResumeInfo(): { roomId: string; reconnectToken: string } | null {
+    if (!activeRoomState || !activeRoomState.reconnectToken) {
+      return null
+    }
+
+    return {
+      roomId: activeRoomState.roomId,
+      reconnectToken: activeRoomState.reconnectToken,
+    }
   }
 
   function setConnected(value: boolean): void {
@@ -2487,6 +2505,7 @@ export function createActiveRoomFlowController(
     render: renderActiveRoomScreen,
     enterActiveRoom,
     handleServerMessage,
+    getResumeInfo,
     setConnected,
     setConnectionError,
     setConnectionState,

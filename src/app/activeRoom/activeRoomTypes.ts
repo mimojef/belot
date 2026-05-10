@@ -45,6 +45,7 @@ export type ActiveRoomFlowController = {
   render: () => void
   enterActiveRoom: (message: MatchFoundMessage) => void
   handleServerMessage: (message: ServerMessage) => boolean
+  getResumeInfo: () => { roomId: string; reconnectToken: string } | null
   setConnected: (value: boolean) => void
   setConnectionError: (message: string | null) => void
   setConnectionState: (isConnected: boolean, message: string | null) => void

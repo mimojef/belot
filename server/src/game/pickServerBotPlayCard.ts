@@ -742,6 +742,7 @@ function chooseOwnSuitBidTrumpDraw(
     if (remainingTrumps.length > 0) {
       return lowestCard(remainingTrumps, trumpSuit, contract)
     }
+
   }
 
   if (
@@ -904,6 +905,96 @@ function chooseNoTrumpsDeclarerControlLead(
 
 // ─── Leading strategy ─────────────────────────────────────────────────────────
 
+function isDefendingSuitContract(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  contract: Contract,
+): boolean {
+  if (contract !== 'suit') return false
+  const winningBid = state.bidding.winningBid
+  if (!winningBid) return false
+  return winningBid.seat !== seat && winningBid.seat !== getPartnerSeat(seat)
+}
+
+function chooseDefensiveSingletonLead(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  if (!trumpSuit || !isDefendingSuitContract(seat, state, contract)) return null
+  if (trumpCards(validCards, trumpSuit, contract).length === 0) return null
+
+  const singletons = ALL_SUITS
+    .filter(suit => suit !== trumpSuit)
+    .map(suit => bySuit(validCards, suit))
+    .filter(cards => cards.length === 1)
+    .map(cards => cards[0]!)
+
+  if (singletons.length === 0) return null
+  return lowestCard(singletons, trumpSuit, contract)
+}
+
+function chooseDefensiveReturnPartnerLedSuit(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  if (!trumpSuit || !isDefendingSuitContract(seat, state, contract)) return null
+
+  const partner = getPartnerSeat(seat)
+  const completedTricks = state.playing?.completedTricks ?? []
+  for (let i = completedTricks.length - 1; i >= 0; i--) {
+    const trick = completedTricks[i]!
+    if (trick.leaderSeat !== partner || trick.winnerSeat !== seat) continue
+
+    const ledSuit = trick.plays[0]?.card.suit
+    if (!ledSuit || ledSuit === trumpSuit) continue
+
+    const returnCards = bySuit(validCards, ledSuit)
+    if (returnCards.length > 0) {
+      return highestCard(returnCards, trumpSuit, contract)
+    }
+  }
+
+  return null
+}
+
+function chooseDefensiveTrumpOnReturnedSingleton(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  if (!trumpSuit || !isDefendingSuitContract(seat, state, contract)) return null
+
+  const plays = state.playing?.currentTrick?.plays ?? []
+  const ledPlay = plays[0]
+  if (!ledPlay || ledPlay.seat !== getPartnerSeat(seat)) return null
+  const ledSuit = ledPlay.card.suit
+  if (ledSuit === trumpSuit) return null
+
+  const hand = state.hands[seat] ?? []
+  if (hand.some(c => c.suit === ledSuit)) return null
+
+  const partnerWonOurLead = (state.playing?.completedTricks ?? []).some(trick =>
+    trick.leaderSeat === seat &&
+    trick.winnerSeat === getPartnerSeat(seat) &&
+    trick.plays[0]?.card.suit === ledSuit
+  )
+  if (!partnerWonOurLead) return null
+
+  const validTrumps = validCards.filter(c => c.suit === trumpSuit)
+  if (validTrumps.length === 0) return null
+
+  const beatingTrump = lowestBeatingCard(validTrumps, state, trumpSuit, contract)
+  return beatingTrump ?? lowestCard(validTrumps, trumpSuit, contract)
+}
+
 function chooseLead(
   seat: Seat,
   state: ServerAuthoritativeGameState,
@@ -917,6 +1008,28 @@ function chooseLead(
     winningBid?.seat === seat || winningBid?.seat === partner
   const shouldHoldNoTrumpsMasters =
     contract === 'no-trumps' && botTeamDeclared
+
+  const defensiveReturn = chooseDefensiveReturnPartnerLedSuit(
+    seat,
+    state,
+    validCards,
+    trumpSuit,
+    contract,
+  )
+  if (defensiveReturn) {
+    return defensiveReturn
+  }
+
+  const defensiveSingletonLead = chooseDefensiveSingletonLead(
+    seat,
+    state,
+    validCards,
+    trumpSuit,
+    contract,
+  )
+  if (defensiveSingletonLead) {
+    return defensiveSingletonLead
+  }
 
   const ownTrumpDraw = chooseOwnSuitBidTrumpDraw(seat, state, validCards, trumpSuit, contract)
   if (ownTrumpDraw) {
@@ -1626,6 +1739,17 @@ function chooseFollow(
     return returnedBaitFollowUpCard
   }
 
+  const defensiveTrumpOnReturnedSingleton = chooseDefensiveTrumpOnReturnedSingleton(
+    seat,
+    state,
+    validCards,
+    trumpSuit,
+    contract,
+  )
+  if (defensiveTrumpOnReturnedSingleton) {
+    return defensiveTrumpOnReturnedSingleton
+  }
+
   const nonTrumpDiscardWhenCannotOvertrump = chooseNonTrumpDiscardWhenCannotOvertrump(
     seat,
     state,
@@ -1648,6 +1772,11 @@ function chooseFollow(
 
     if (contract === 'no-trumps') {
       // Вземаме с Асо ако имаме Асо в тази боя
+      const aceInSuit = validCards.find(c => c.suit === ledSuit && c.rank === 'A')
+      if (aceInSuit) return aceInSuit
+    }
+
+    if (contract === 'suit' && ledSuit !== trumpSuit) {
       const aceInSuit = validCards.find(c => c.suit === ledSuit && c.rank === 'A')
       if (aceInSuit) return aceInSuit
     }

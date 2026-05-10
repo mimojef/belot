@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 import { WebSocketServer, WebSocket, type RawData } from 'ws'
+import { createActiveRoomSnapshotStore } from './db/activeRoomSnapshotStore.js'
 import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js'
@@ -24,6 +25,7 @@ import type {
   ServerRoom,
   ServerState,
 } from './core/serverTypes.js'
+import { SERVER_SEAT_ORDER } from './core/serverTypes.js'
 import {
   createReconnectedHumanParticipant,
   findHumanParticipantByReconnectToken,
@@ -55,6 +57,8 @@ import {
 import { tryCreatePendingMatchGroup } from './matchmaking/tryCreatePendingMatchGroup.js'
 import { advanceRoomAuthoritativeGame } from './game/advanceRoomAuthoritativeGame.js'
 import { initializeRoomAuthoritativeGameState } from './game/initializeRoomAuthoritativeGameState.js'
+import { rebaseServerStateToEventAt } from './game/rebaseServerStateToEventAt.js'
+import type { ServerAuthoritativeGameState } from './game/serverGameTypes.js'
 import {
   ensureRoomGameRuntime,
   getGameRuntimeCountsByPhase,
@@ -76,6 +80,9 @@ const databaseBootstrap = await ensureServerDatabaseReady()
 const botCatalogImport = await importBotProfilesCatalog(
   databaseBootstrap.databaseFilePath,
 )
+const activeRoomSnapshotStore = await createActiveRoomSnapshotStore(
+  databaseBootstrap.databaseFilePath,
+)
 
 console.log(
   `[db] SQLite ready file=${databaseBootstrap.databaseFilePath} applied=${databaseBootstrap.appliedCount} skipped=${databaseBootstrap.skippedCount}`,
@@ -95,11 +102,128 @@ type ResumeRoomResult =
       message: string
     }
 
-let serverState: ServerState = createInitialServerState()
+function isRuntimeAuthoritativeState(
+  value: ServerRoom['game']['authoritativeState'],
+): value is ServerAuthoritativeGameState {
+  return value !== null && 'phase' in value
+}
+
+function prepareRestoredRoomForServerStart(
+  room: ServerRoom,
+  now: number,
+): ServerRoom {
+  const nextSeats: ServerRoom['seats'] = { ...room.seats }
+
+  for (const seat of SERVER_SEAT_ORDER) {
+    const participant = room.seats[seat].participant
+
+    if (participant === null || participant.kind !== 'human') {
+      continue
+    }
+
+    nextSeats[seat] = {
+      ...room.seats[seat],
+      participant: {
+        ...participant,
+        connectionId: null,
+        isConnected: false,
+        lastSeenAt: now,
+      },
+    }
+  }
+
+  const authoritativeState = room.game.authoritativeState
+
+  if (!isRuntimeAuthoritativeState(authoritativeState)) {
+    return {
+      ...room,
+      updatedAt: now,
+      seats: nextSeats,
+      game: {
+        ...room.game,
+        updatedAt: now,
+      },
+    }
+  }
+
+  const rebasedAuthoritativeState = rebaseServerStateToEventAt(
+    authoritativeState,
+    now,
+  )
+
+  return {
+    ...room,
+    updatedAt: now,
+    seats: nextSeats,
+    game: {
+      ...room.game,
+      updatedAt: now,
+      timerDeadlineAt: rebasedAuthoritativeState.timer.expiresAt,
+      authoritativeState: rebasedAuthoritativeState,
+    },
+  }
+}
+
+function loadPersistedServerState(): ServerState {
+  const restoredRooms = activeRoomSnapshotStore.loadActiveRooms()
+  const now = Date.now()
+  let nextServerState = createInitialServerState()
+
+  for (const room of restoredRooms) {
+    nextServerState = upsertServerRoom(
+      nextServerState,
+      prepareRestoredRoomForServerStart(room, now),
+    )
+  }
+
+  console.log(`[room-snapshot] restored active rooms=${restoredRooms.length}`)
+
+  return nextServerState
+}
+
+function persistRoomSnapshot(room: ServerRoom): void {
+  try {
+    activeRoomSnapshotStore.upsertRoom(room)
+  } catch (error) {
+    console.error(`[room-snapshot] failed to persist room=${room.id}`, error)
+  }
+}
+
+function markRoomSnapshotRemoved(roomId: string): void {
+  try {
+    activeRoomSnapshotStore.markRoomRemoved(roomId)
+  } catch (error) {
+    console.error(`[room-snapshot] failed to remove room=${roomId}`, error)
+  }
+}
+
+function upsertServerRoomWithSnapshot(
+  currentServerState: ServerState,
+  room: ServerRoom,
+): ServerState {
+  persistRoomSnapshot(room)
+  return upsertServerRoom(currentServerState, room)
+}
+
+function updateServerRoomWithSnapshot(
+  currentServerState: ServerState,
+  roomId: string,
+  room: ServerRoom,
+): ServerState {
+  persistRoomSnapshot(room)
+  return updateServerRoomInState(currentServerState, roomId, room)
+}
+
+let serverState: ServerState = loadPersistedServerState()
 let matchmakingState: MatchmakingState = createInitialMatchmakingState()
 
 const socketRegistry = new Map<ConnectionId, WebSocket>()
 const roomGameRuntimeRegistry = new Map<string, ServerGameRuntime>()
+
+for (const room of Object.values(serverState.rooms)) {
+  ensureRoomGameRuntime(roomGameRuntimeRegistry, room)
+  persistRoomSnapshot(room)
+}
 
 function getSocketByConnectionId(connectionId: ConnectionId): WebSocket | null {
   return socketRegistry.get(connectionId) ?? null
@@ -119,6 +243,7 @@ function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): 
   const room = serverState.rooms[roomId] ?? null
 
   if (room === null) {
+    markRoomSnapshotRemoved(roomId)
     removeRoomGameRuntime(roomGameRuntimeRegistry, roomId)
     return true
   }
@@ -135,6 +260,7 @@ function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): 
     rooms: nextRooms,
   }
 
+  markRoomSnapshotRemoved(roomId)
   removeRoomGameRuntime(roomGameRuntimeRegistry, roomId)
   console.log(`[room-cleanup] removed inactive room=${roomId}`)
 
@@ -165,6 +291,7 @@ function tickRoomGameRuntimes(): void {
       }
 
       delete nextRooms[roomId]
+      markRoomSnapshotRemoved(roomId)
       removeRoomGameRuntime(roomGameRuntimeRegistry, roomId)
       console.log(`[room-cleanup] removed inactive room=${roomId}`)
       continue
@@ -182,6 +309,8 @@ function tickRoomGameRuntimes(): void {
     roomGameRuntimeRegistry.set(roomId, nextRuntime)
 
     if (nextRoom !== room) {
+      persistRoomSnapshot(nextRoom)
+
       if (nextRooms === null) {
         nextRooms = {
           ...serverState.rooms,
@@ -262,7 +391,7 @@ function tryResumeRoomForConnection(
     reconnectedParticipant,
   )
 
-  serverState = upsertServerRoom(serverState, nextRoom)
+  serverState = upsertServerRoomWithSnapshot(serverState, nextRoom)
 
   const attachedConnection = attachConnectionToRoomSeat(
     connection,
@@ -460,7 +589,7 @@ function processMatchmaking(): void {
     }
 
     const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
-    let nextServerState = upsertServerRoom(serverState, initializedRoom)
+    let nextServerState = upsertServerRoomWithSnapshot(serverState, initializedRoom)
 
     for (const matchedEntry of result.group.matchedHumans) {
       const connection = getConnectionById(nextServerState, matchedEntry.connectionId)
@@ -664,7 +793,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        serverState = upsertServerRoom(serverState, result.room)
+        serverState = upsertServerRoomWithSnapshot(serverState, result.room)
         ensureRoomGameRuntime(roomGameRuntimeRegistry, result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
         return
@@ -721,7 +850,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        serverState = upsertServerRoom(serverState, result.room)
+        serverState = upsertServerRoomWithSnapshot(serverState, result.room)
         ensureRoomGameRuntime(roomGameRuntimeRegistry, result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
         return
@@ -779,7 +908,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        serverState = upsertServerRoom(serverState, result.room)
+        serverState = upsertServerRoomWithSnapshot(serverState, result.room)
         ensureRoomGameRuntime(roomGameRuntimeRegistry, result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
         return
@@ -832,7 +961,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        serverState = upsertServerRoom(serverState, result.room)
+        serverState = upsertServerRoomWithSnapshot(serverState, result.room)
         ensureRoomGameRuntime(roomGameRuntimeRegistry, result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
         return
@@ -1055,7 +1184,7 @@ wsServer.on('connection', (socket, request) => {
           connection.id,
         )
 
-        serverState = updateServerRoomInState(serverState, room.id, nextRoom)
+        serverState = updateServerRoomWithSnapshot(serverState, room.id, nextRoom)
         serverState = updateServerConnectionInState(
           serverState,
           connection.id,
@@ -1087,7 +1216,7 @@ wsServer.on('connection', (socket, request) => {
 
         const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
 
-        serverState = upsertServerRoom(result.serverState, initializedRoom)
+        serverState = upsertServerRoomWithSnapshot(result.serverState, initializedRoom)
         ensureRoomGameRuntime(roomGameRuntimeRegistry, initializedRoom)
 
         sendJsonMessage(socket, {
@@ -1115,7 +1244,7 @@ wsServer.on('connection', (socket, request) => {
 
         const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
 
-        serverState = upsertServerRoom(result.serverState, initializedRoom)
+        serverState = upsertServerRoomWithSnapshot(result.serverState, initializedRoom)
         ensureRoomGameRuntime(roomGameRuntimeRegistry, initializedRoom)
 
         sendJsonMessage(socket, {
@@ -1161,6 +1290,7 @@ wsServer.on('connection', (socket, request) => {
       }
 
       if (result.room !== null && !roomWasRemoved) {
+        persistRoomSnapshot(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
       }
 
@@ -1191,6 +1321,24 @@ setInterval(() => {
     console.error('[game-runtime] tick error', error)
   }
 }, GAME_RUNTIME_TICK_MS)
+
+function closeActiveRoomSnapshotStore(): void {
+  try {
+    activeRoomSnapshotStore.close()
+  } catch (error) {
+    console.error('[room-snapshot] failed to close store', error)
+  }
+}
+
+process.once('SIGINT', () => {
+  closeActiveRoomSnapshotStore()
+  process.exit(0)
+})
+
+process.once('SIGTERM', () => {
+  closeActiveRoomSnapshotStore()
+  process.exit(0)
+})
 
 httpServer.listen(PORT, HOST, () => {
   console.log(`[http] Belot V2 server is running at http://${HOST}:${PORT}`)
