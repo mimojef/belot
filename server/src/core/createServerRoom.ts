@@ -27,6 +27,7 @@ function createDefaultRoomConfig(): ServerRoomConfig {
     allowBots: true,
     isPrivate: false,
     joinCode: null,
+    stakeAmount: null,
     targetScore: 151,
     turnTimeMs: 20000,
     reconnectGraceMs: 30000,

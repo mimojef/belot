@@ -134,6 +134,216 @@ export function createActiveRoomFlowController(
     return activeRoomState.seats.find((seat) => seat.seat === activeRoomState!.seat) ?? null
   }
 
+  function formatCoinAmount(value: number): string {
+    return value.toLocaleString('bg-BG')
+  }
+
+  function isMatchEndedState(): boolean {
+    if (!activeRoomState) {
+      return false
+    }
+
+    return (
+      activeRoomState.roomStatus === 'finished' ||
+      activeRoomState.game?.authoritativePhase === 'match-ended' ||
+      activeRoomState.game?.matchEnded != null
+    )
+  }
+
+  function shouldWarnBeforeLeavingActiveRoom(): boolean {
+    if (!activeRoomState) {
+      return false
+    }
+
+    return activeRoomState.roomStatus === 'playing' && !isMatchEndedState()
+  }
+
+  function renderFloatingLeaveButton(): string {
+    return `
+      <button
+        type="button"
+        data-active-room-leave-button="1"
+        title="Напусни масата"
+        style="
+          position:fixed;
+          right:18px;
+          top:18px;
+          z-index:9400;
+          border:1px solid rgba(251,191,36,0.45);
+          border-radius:12px;
+          padding:11px 15px;
+          background:linear-gradient(180deg, #f6d36b 0%, #c98b1a 100%);
+          color:#171717;
+          font-size:13px;
+          font-weight:900;
+          cursor:pointer;
+          box-shadow:0 16px 34px rgba(0,0,0,0.28);
+        "
+      >
+        Изход
+      </button>
+    `
+  }
+
+  function renderLeavePenaltyWarning(): string {
+    if (!activeRoomState) {
+      return ''
+    }
+
+    const extraPenaltyAmount = activeRoomState.stake
+    const totalLossAmount = activeRoomState.stake + extraPenaltyAmount
+
+    return `
+      <div
+        data-active-room-leave-warning="1"
+        style="
+          position:fixed;
+          inset:0;
+          z-index:11000;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          padding:22px;
+          box-sizing:border-box;
+          background:rgba(0,0,0,0.68);
+          font-family:Inter, system-ui, sans-serif;
+        "
+      >
+        <div
+          style="
+            width:min(92vw, 460px);
+            border:1px solid rgba(251,191,36,0.34);
+            border-radius:18px;
+            padding:26px;
+            background:linear-gradient(180deg, rgba(24,24,27,0.98) 0%, rgba(9,9,11,0.98) 100%);
+            box-shadow:0 28px 80px rgba(0,0,0,0.54);
+            color:#f8fafc;
+            text-align:left;
+          "
+        >
+          <div
+            style="
+              font-size:12px;
+              font-weight:900;
+              letter-spacing:0.08em;
+              text-transform:uppercase;
+              color:#f6d36b;
+              margin-bottom:10px;
+            "
+          >
+            Предупреждение
+          </div>
+
+          <div
+            style="
+              font-size:24px;
+              line-height:1.18;
+              font-weight:900;
+              color:#f8fafc;
+            "
+          >
+            Напускане на масата
+          </div>
+
+          <div
+            style="
+              margin-top:12px;
+              font-size:15px;
+              line-height:1.55;
+              color:#d4d4d8;
+            "
+          >
+            Залогът вече е платен. Ако напуснеш сега, губиш залога
+            <strong style="color:#f6d36b;">${formatCoinAmount(activeRoomState.stake)}</strong>
+            жълтици плюс още толкова като санкция. Обща загуба:
+            <strong style="color:#f6d36b;">${formatCoinAmount(totalLossAmount)}</strong>
+            жълтици.
+          </div>
+
+          <div
+            style="
+              margin-top:24px;
+              display:flex;
+              justify-content:flex-end;
+              gap:12px;
+              flex-wrap:wrap;
+            "
+          >
+            <button
+              type="button"
+              data-active-room-leave-cancel="1"
+              style="
+                border:1px solid rgba(212,212,216,0.22);
+                border-radius:12px;
+                padding:12px 16px;
+                background:rgba(39,39,42,0.92);
+                color:#f4f4f5;
+                font-size:14px;
+                font-weight:900;
+                cursor:pointer;
+              "
+            >
+              Остани
+            </button>
+
+            <button
+              type="button"
+              data-active-room-leave-confirm="1"
+              style="
+                border:1px solid rgba(251,191,36,0.55);
+                border-radius:12px;
+                padding:12px 16px;
+                background:linear-gradient(180deg, #f6d36b 0%, #c98b1a 100%);
+                color:#171717;
+                font-size:14px;
+                font-weight:900;
+                cursor:pointer;
+                box-shadow:0 14px 30px rgba(0,0,0,0.28);
+              "
+            >
+              Напусни и плати
+            </button>
+          </div>
+        </div>
+      </div>
+    `
+  }
+
+  function appendLeaveControls(): void {
+    if (!activeRoomState || isMatchEndedState()) {
+      return
+    }
+
+    if (!options.root.querySelector('[data-active-room-leave-button="1"]')) {
+      options.root.insertAdjacentHTML('beforeend', renderFloatingLeaveButton())
+    }
+
+    if (activeRoomState.leavePenaltyWarningOpen) {
+      options.root.insertAdjacentHTML('beforeend', renderLeavePenaltyWarning())
+    }
+  }
+
+  function requestActiveRoomLeave(): void {
+    if (!activeRoomState) {
+      return
+    }
+
+    if (!options.isConnected()) {
+      activeRoomState.errorText = 'Няма връзка със сървъра.'
+      activeRoomState.leavePenaltyWarningOpen = false
+      renderActiveRoomScreen()
+      return
+    }
+
+    if (shouldWarnBeforeLeavingActiveRoom()) {
+      activeRoomState.leavePenaltyWarningOpen = true
+      renderActiveRoomScreen()
+      return
+    }
+
+    options.leaveActiveRoom(activeRoomState.roomId)
+  }
+
   function renderPersistentBotTakeoverPopup(): string {
     return `
       <div
@@ -2048,12 +2258,13 @@ export function createActiveRoomFlowController(
                           border:0;
                           border-radius:16px;
                           padding:14px 18px;
-                          background:linear-gradient(180deg, #8b5cf6 0%, #6d28d9 100%);
-                          color:#f5f3ff;
+                          border:1px solid rgba(251,191,36,0.45);
+                          background:linear-gradient(180deg, #f6d36b 0%, #c98b1a 100%);
+                          color:#171717;
                           font-size:14px;
                           font-weight:900;
                           cursor:pointer;
-                          box-shadow:0 14px 32px rgba(76,29,149,0.28);
+                          box-shadow:0 14px 32px rgba(0,0,0,0.28);
                         "
                       >
                         Напусни активната стая
@@ -2201,6 +2412,7 @@ export function createActiveRoomFlowController(
       `
     }
 
+    appendLeaveControls()
     syncPersistentBotTakeoverPopup()
 
     const leaveButton = options.root.querySelector<HTMLButtonElement>(
@@ -2218,8 +2430,37 @@ export function createActiveRoomFlowController(
         return
       }
 
-      options.leaveActiveRoom(activeRoomState.roomId)
+      requestActiveRoomLeave()
     })
+
+    options.root
+      .querySelector<HTMLButtonElement>('[data-active-room-leave-cancel="1"]')
+      ?.addEventListener('click', () => {
+        if (!activeRoomState) {
+          return
+        }
+
+        activeRoomState.leavePenaltyWarningOpen = false
+        renderActiveRoomScreen()
+      })
+
+    options.root
+      .querySelector<HTMLButtonElement>('[data-active-room-leave-confirm="1"]')
+      ?.addEventListener('click', () => {
+        if (!activeRoomState) {
+          return
+        }
+
+        if (!options.isConnected()) {
+          activeRoomState.errorText = 'Няма връзка със сървъра.'
+          activeRoomState.leavePenaltyWarningOpen = false
+          renderActiveRoomScreen()
+          return
+        }
+
+        activeRoomState.leavePenaltyWarningOpen = false
+        options.leaveActiveRoom(activeRoomState.roomId, true)
+      })
 
     options.root
       .querySelectorAll<HTMLButtonElement>('[data-active-room-cut-index]')
@@ -2305,6 +2546,7 @@ export function createActiveRoomFlowController(
       game: null,
       isConnected: options.isConnected(),
       errorText: null,
+      leavePenaltyWarningOpen: false,
     }
 
     const pendingRoomSnapshot = pendingRoomSnapshots.get(message.roomId)
@@ -2344,7 +2586,11 @@ export function createActiveRoomFlowController(
       resetPlayingUiCache(playingCache)
       removePersistentBotTakeoverPopup()
       activeRoomState = null
-      options.showLobby(null)
+      options.showLobby(
+        message.penalty
+          ? `Санкция при напускане: ${formatCoinAmount(message.penalty.chargedAmount)} жълтици.`
+          : null,
+      )
       return true
     }
 
@@ -2444,16 +2690,7 @@ export function createActiveRoomFlowController(
       return
     }
 
-    resetCuttingAnimationState()
-    clearDealingAnimationState()
-    clearDealNextTwoAnimationState()
-    clearDealLastThreeAnimationState()
-    clearScoringCountdownTicker()
-    clearReactionCountdownAudioTicker()
-    clearBiddingUiState()
-    lastKnownWinningBid = null
-    resetPlayingUiCache(playingCache)
-    options.leaveActiveRoom(activeRoomState.roomId)
+    requestActiveRoomLeave()
   }
 
   function returnToLobbyFromMatchEnded(): void {

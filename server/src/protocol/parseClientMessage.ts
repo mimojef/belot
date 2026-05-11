@@ -231,6 +231,7 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return {
         type: 'leave_active_room',
         roomId,
+        acceptPenalty: parsed.acceptPenalty === true,
       }
     }
 

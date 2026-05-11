@@ -26,13 +26,14 @@ export type ActiveRoomState = {
   game: RoomGameSnapshot | null
   isConnected: boolean
   errorText: string | null
+  leavePenaltyWarningOpen: boolean
 }
 
 export type CreateActiveRoomFlowControllerOptions = {
   root: HTMLDivElement
   gameAudio?: GameAudioController
   isConnected: () => boolean
-  leaveActiveRoom: (roomId: string) => void
+  leaveActiveRoom: (roomId: string, acceptPenalty?: boolean) => void
   submitCutIndex: (roomId: string, cutIndex: number) => void
   submitBidAction: (roomId: string, action: ClientBidAction) => void
   submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void

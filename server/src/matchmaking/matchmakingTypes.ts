@@ -31,6 +31,7 @@ export type MatchmakingQueueEntry = {
   displayName: string
   publicProfile: PlayerPublicProfileSnapshot | null
   stake: MatchStake
+  stakePaid: boolean
   joinedAt: number
   expiresAt: number
   status: MatchmakingStatus

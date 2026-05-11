@@ -1,7 +1,19 @@
 import type {
+  AdminSettingsSnapshot,
+  ChatConversationSnapshot,
+  ChatMessageSnapshot,
+  CoinPackageInput,
+  CoinPackageSnapshot,
+  CoinPackageStatus,
+  CoinPurchaseSnapshot,
+  FriendRelationshipSnapshot,
+  FriendshipsSnapshot,
+  LeaderboardCategory,
+  LeaderboardsSnapshot,
   MatchStake,
   PlayerPublicProfileSnapshot,
 } from '../network/createGameServerClient'
+import type { PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
 
 export type LobbyAuthModalMode = 'closed' | 'cta' | 'login' | 'register'
@@ -13,7 +25,7 @@ export type AvatarCropSelection = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin'
   displayName: string
   selectedStake: MatchStake
   isConnected: boolean
@@ -30,9 +42,41 @@ export type LobbyScreenState = {
   players: PlayerPublicProfileSnapshot[]
   playersLoading: boolean
   playersErrorText: string | null
+  leaderboards: LeaderboardsSnapshot | null
+  leaderboardsLoading: boolean
+  leaderboardsErrorText: string | null
+  activeLeaderboardCategory: LeaderboardCategory
+  shopPackages: CoinPackageSnapshot[]
+  shopPackagesLoading: boolean
+  shopPackagesErrorText: string | null
+  shopPurchases: CoinPurchaseSnapshot[]
+  shopPurchasesLoading: boolean
+  shopPurchaseActionPackageId: string | null
+  shopPurchaseMessageText: string | null
+  isAdmin: boolean
+  adminSettings: AdminSettingsSnapshot | null
+  adminSettingsLoading: boolean
+  adminSettingsErrorText: string | null
+  adminCoinPackages: CoinPackageSnapshot[]
+  adminCoinPackagesLoading: boolean
+  adminCoinPackagesErrorText: string | null
+  friendships: FriendshipsSnapshot | null
+  friendsLoading: boolean
+  friendsErrorText: string | null
+  friendshipAction: PlayerProfileFriendshipAction | null
+  giftModalFriendshipId: string | null
+  giftModalFriendName: string
+  giftModalErrorText: string | null
+  chatConversations: ChatConversationSnapshot[]
+  activeChatFriendshipId: string | null
+  chatMessages: ChatMessageSnapshot[]
+  chatLoading: boolean
+  chatMessagesLoading: boolean
+  chatErrorText: string | null
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
   signupBonusYellowCoins: number
+  profileNameChangePrice: number
   profileEditorOpen: boolean
   profileEditorErrorText: string | null
 }
@@ -53,9 +97,35 @@ export type RenderLobbyScreenOptions = {
     galleryFiles: File[],
   ) => void
   onProfileGalleryDelete: (imageId: string) => void
+  onProfileNameChangeSubmit: (displayName: string) => void
   onLobbyClick: () => void
   onPlayersClick: () => void
+  onShopClick: () => void
+  onShopPurchaseClick: (packageId: string) => void
+  onLeaderboardsClick: () => void
+  onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
+  onAdminClick: () => void
+  onAdminSettingsSubmit: (settings: AdminSettingsSnapshot) => void
+  onAdminCoinPackageSubmit: (input: CoinPackageInput) => void
+  onAdminCoinPackageStatusChange: (
+    packageId: string,
+    status: CoinPackageStatus,
+  ) => void
+  onFriendsClick: () => void
+  onChatClick: () => void
+  onChatConversationClick: (friendshipId: string) => void
+  onChatSubmit: (friendshipId: string, body: string) => void
   onPlayerCardClick: (profile: PlayerPublicProfileSnapshot) => void
+  onLeaderboardPlayerClick: (profile: PlayerPublicProfileSnapshot) => void
+  onFriendProfileClick: (profile: PlayerPublicProfileSnapshot) => void
+  onFriendRequestClick: (profileId: string) => void
+  onFriendBlockClick: (profileId: string) => void
+  onFriendAcceptClick: (friendshipId: string) => void
+  onFriendRejectClick: (friendshipId: string) => void
+  onFriendRemoveClick: (friendshipId: string) => void
+  onGiftCoinsClick: (friendshipId: string) => void
+  onGiftCoinsClose: () => void
+  onGiftCoinsSubmit: (friendshipId: string, amount: number) => void
   onAuthModalClose: () => void
   onAuthModeChange: (mode: Exclude<LobbyAuthModalMode, 'closed'>) => void
   onLoginSubmit: (email: string, password: string) => void
@@ -97,6 +167,28 @@ function escapeHtml(value: string): string {
 
 function formatAmount(value: number): string {
   return new Intl.NumberFormat('bg-BG').format(value)
+}
+
+function formatPackagePrice(priceCents: number, currency: string): string {
+  return new Intl.NumberFormat('bg-BG', {
+    style: 'currency',
+    currency,
+  }).format(priceCents / 100)
+}
+
+function formatCompactDateTime(value: string): string {
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+
+  return new Intl.DateTimeFormat('bg-BG', {
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
 }
 
 function renderAuthModal(state: LobbyScreenState): string {
@@ -178,6 +270,7 @@ function renderProfileEditModal(state: LobbyScreenState): string {
     MAX_PROFILE_GALLERY_IMAGES - galleryImages.length,
   )
   const galleryInputDisabled = gallerySlotsLeft <= 0
+  const nameChangePrice = state.profileNameChangePrice
 
   return `
     <div data-lobby-profile-editor-root="1" style="position:fixed;inset:0;z-index:13500;display:flex;align-items:center;justify-content:center;padding:24px;">
@@ -194,6 +287,21 @@ function renderProfileEditModal(state: LobbyScreenState): string {
             Име в играта
             <input value="${escapeHtml(state.profile.displayName)}" disabled style="height:42px;border-radius:8px;border:1px solid rgba(255,255,255,0.10);background:#101010;color:rgba(255,255,255,0.58);padding:0 12px;font-size:15px;font-weight:700;outline:none;">
           </label>
+
+          <div style="display:grid;gap:8px;border:1px solid rgba(212,165,32,0.22);border-radius:8px;background:rgba(255,255,255,0.035);padding:12px;">
+            <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              Ново име
+              <input name="paidDisplayName" maxlength="32" autocomplete="nickname" placeholder="Въведи ново име" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
+            </label>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+              <div style="font-size:12px;line-height:1.35;color:rgba(255,255,255,0.62);font-weight:800;">
+                Цена: <strong style="color:#d4a520;">${formatAmount(nameChangePrice)}</strong> жълтици
+              </div>
+              <button type="button" data-lobby-profile-name-change-submit="1" style="height:38px;padding:0 14px;border:1px solid rgba(212,165,32,0.58);border-radius:8px;background:#080808;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;">
+                Смени име
+              </button>
+            </div>
+          </div>
 
           <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Нов аватар
@@ -263,8 +371,47 @@ function renderProfileEditModal(state: LobbyScreenState): string {
   `
 }
 
-function renderNav(_isSearching: boolean, activeView: LobbyScreenState['view']): string {
+function renderGiftCoinsModal(state: LobbyScreenState): string {
+  if (state.giftModalFriendshipId === null) {
+    return ''
+  }
+
+  return `
+    <div data-lobby-gift-modal-root="1" style="position:fixed;inset:0;z-index:13600;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div data-lobby-gift-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.76);backdrop-filter:blur(4px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,430px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
+        <button type="button" data-lobby-gift-modal-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
+        <form data-lobby-gift-form="${escapeHtml(state.giftModalFriendshipId)}" style="display:grid;gap:14px;">
+          <div>
+            <div style="font-size:24px;line-height:1.1;font-weight:900;color:#f8fafc;">Подари жълтици</div>
+            <div style="margin-top:7px;font-size:13px;line-height:1.45;color:rgba(255,255,255,0.62);font-weight:700;">Към ${escapeHtml(state.giftModalFriendName || 'приятел')}. Сумата трябва да е между 100 и 50 000 жълтици.</div>
+          </div>
+          <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Сума
+            <input name="amount" type="number" min="100" max="50000" step="100" value="1000" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+          </label>
+          ${state.giftModalErrorText ? `<div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;">${escapeHtml(state.giftModalErrorText)}</div>` : ''}
+          <div style="display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;">
+            <button type="button" data-lobby-gift-modal-cancel="1" style="height:42px;padding:0 16px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:#080808;color:#f8fafc;font-size:14px;font-weight:900;cursor:pointer;">Откажи</button>
+            <button type="submit" style="height:42px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;">Изпрати</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `
+}
+
+function renderNav(state: LobbyScreenState): string {
+  const activeView = state.view
   const playersActive = activeView === 'players'
+  const friendsActive = activeView === 'friends'
+  const chatActive = activeView === 'chat'
+  const leaderboardsActive = activeView === 'leaderboards'
+  const shopActive = activeView === 'shop'
+  const adminActive = activeView === 'admin'
+  const lobbyActive = activeView === 'tables'
+  const incomingFriendRequestsCount =
+    state.friendships?.incomingPending.length ?? 0
 
   return `
     <nav style="
@@ -301,14 +448,47 @@ function renderNav(_isSearching: boolean, activeView: LobbyScreenState['view']):
           <span style="font-size:25px;line-height:1;color:currentColor;">◎</span>
           Играчи
         </button>
+        <button type="button" data-lobby-nav-friends="1" style="
+          display:flex; align-items:center; gap:10px;
+          padding:0 18px;
+          border:0;
+          background:${friendsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+          color:${friendsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${friendsActive ? '#d4a520' : 'transparent'};
+          cursor:pointer;
+          height:100%;
+        ">
+          <span style="font-size:23px;line-height:1;color:currentColor;">+</span>
+          Приятели
+          ${incomingFriendRequestsCount > 0 ? `
+            <span style="min-width:20px;height:20px;border-radius:999px;background:#d4a520;color:#080808;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;font-size:11px;font-weight:900;line-height:1;">
+              ${formatAmount(incomingFriendRequestsCount)}
+            </span>
+          ` : ''}
+        </button>
+        <button type="button" data-lobby-nav-chat="1" style="
+          display:flex; align-items:center; gap:10px;
+          padding:0 18px;
+          border:0;
+          background:${chatActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+          color:${chatActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${chatActive ? '#d4a520' : 'transparent'};
+          cursor:pointer;
+          height:100%;
+        ">
+          <span style="font-size:22px;line-height:1;color:currentColor;">▣</span>
+          Чат
+        </button>
         <a href="#" data-lobby-nav-lobby="1" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
           text-decoration:none;
           font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:${playersActive ? 'rgba(255,255,255,0.70)' : '#d4a520'};
-          border-bottom:2px solid ${playersActive ? 'transparent' : '#d4a520'};
-          background:${playersActive ? 'transparent' : 'rgba(212,165,32,0.06)'};
+          color:${lobbyActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${lobbyActive ? '#d4a520' : 'transparent'};
+          background:${lobbyActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
         ">
           <img src="/assets/lobby/nav-icon-preview/nav-home-gold.svg" alt="" style="width:28px; height:28px; display:block; object-fit:contain;">
           Лоби
@@ -325,28 +505,34 @@ function renderNav(_isSearching: boolean, activeView: LobbyScreenState['view']):
           <img src="/assets/lobby/nav-icon-preview/nav-tournaments-white.png" alt="" style="width:32px; height:29px; display:block; object-fit:contain;">
           Турнири
         </a>
-        <a href="#" style="
+        <button type="button" data-lobby-nav-shop="1" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
-          text-decoration:none;
+          border:0;
+          background:${shopActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
           font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:rgba(255,255,255,0.70);
-          border-bottom:2px solid transparent;
+          color:${shopActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${shopActive ? '#d4a520' : 'transparent'};
+          cursor:pointer;
+          height:100%;
         ">
           <img src="/assets/lobby/nav-icon-preview/nav-shop-white.png" alt="" style="width:31px; height:30px; display:block; object-fit:contain;">
           Магазин
-        </a>
-        <a href="#" style="
+        </button>
+        <button type="button" data-lobby-nav-leaderboards="1" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
-          text-decoration:none;
+          border:0;
+          background:${leaderboardsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
           font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:rgba(255,255,255,0.70);
-          border-bottom:2px solid transparent;
+          color:${leaderboardsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${leaderboardsActive ? '#d4a520' : 'transparent'};
+          cursor:pointer;
+          height:100%;
         ">
           <img src="/assets/lobby/nav-icon-preview/nav-leaderboard-white.png" alt="" style="width:29px; height:30px; display:block; object-fit:contain;">
           Класация
-        </a>
+        </button>
         <button
           type="button"
           data-lobby-profile-button="1"
@@ -354,16 +540,35 @@ function renderNav(_isSearching: boolean, activeView: LobbyScreenState['view']):
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
           border:0;
+          background:${shopActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
           background:transparent;
           font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:rgba(255,255,255,0.70);
-          border-bottom:2px solid transparent;
+          color:${shopActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${shopActive ? '#d4a520' : 'transparent'};
+          cursor:pointer;
+          height:100%;
           cursor:pointer;
           height:100%;
         ">
           <img src="/assets/lobby/nav-icon-preview/nav-profile-white.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain;">
           Профил
         </button>
+        ${state.isAdmin ? `
+          <button type="button" data-lobby-nav-admin="1" style="
+            display:flex; align-items:center; gap:10px;
+            padding:0 18px;
+            border:0;
+            background:${adminActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+            font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+            color:${adminActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+            border-bottom:2px solid ${adminActive ? '#d4a520' : 'transparent'};
+            cursor:pointer;
+            height:100%;
+          ">
+            <span style="font-size:22px;line-height:1;color:currentColor;">⚙</span>
+            Админ
+          </button>
+        ` : ''}
       </div>
 
       <div style="display:flex; align-items:center; gap:16px; margin-left:auto;">
@@ -839,6 +1044,217 @@ function renderFooter(): string {
   `
 }
 
+function renderFriendAvatar(profile: PlayerPublicProfileSnapshot): string {
+  const displayName = profile.displayName?.trim() || 'Играч'
+  const avatarUrl = profile.avatarUrl?.trim() ?? ''
+  const fallbackLetter = escapeHtml(displayName.charAt(0).toUpperCase() || '?')
+
+  if (avatarUrl) {
+    return `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">`
+  }
+
+  return fallbackLetter
+}
+
+function renderFriendRelationshipCard(
+  relationship: FriendRelationshipSnapshot,
+  variant: 'incoming' | 'outgoing' | 'friend',
+): string {
+  const profile = relationship.profile
+  const displayName = profile.displayName?.trim() || 'Играч'
+  const profileId = profile.profileId ?? ''
+
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid rgba(212,165,32,0.26);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:12px;">
+      <button type="button" data-lobby-friend-profile="${escapeHtml(profileId)}" style="display:flex;align-items:center;gap:12px;min-width:0;border:0;background:transparent;color:#ffffff;text-align:left;cursor:pointer;padding:0;flex:1;">
+        <div style="width:52px;height:52px;border-radius:8px;border:1px solid rgba(212,165,32,0.54);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:21px;font-weight:900;flex:0 0 auto;">
+          ${renderFriendAvatar(profile)}
+        </div>
+        <div style="min-width:0;">
+          <div style="font-size:15px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
+          <div style="margin-top:4px;font-size:12px;font-weight:800;color:rgba(255,255,255,0.54);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(profile.rankTitle ?? 'Ранг 1')}</div>
+        </div>
+      </button>
+      ${variant === 'incoming' ? `
+        <div style="display:flex;align-items:center;gap:8px;flex:0 0 auto;">
+          <button type="button" data-lobby-friend-accept="${escapeHtml(relationship.friendshipId)}" style="height:36px;padding:0 12px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:pointer;">Приеми</button>
+          <button type="button" data-lobby-friend-reject="${escapeHtml(relationship.friendshipId)}" style="height:36px;padding:0 12px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:#080808;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;">Откажи</button>
+        </div>
+      ` : `
+        <div style="font-size:12px;font-weight:900;color:${variant === 'friend' ? '#fde68a' : 'rgba(255,255,255,0.54)'};white-space:nowrap;">
+          ${variant === 'friend' ? 'Приятел' : 'Изчаква отговор'}
+        </div>
+      `}
+      ${variant === 'friend' ? `
+        <button type="button" data-lobby-friend-remove="${escapeHtml(relationship.friendshipId)}" style="height:34px;padding:0 10px;border:1px solid rgba(248,113,113,0.36);border-radius:8px;background:rgba(127,29,29,0.22);color:#fecaca;font-size:12px;font-weight:900;cursor:pointer;flex:0 0 auto;">Премахни</button>
+      ` : ''}
+    </div>
+  `
+}
+
+function renderFriendSection(
+  title: string,
+  emptyText: string,
+  relationships: FriendRelationshipSnapshot[],
+  variant: 'incoming' | 'outgoing' | 'friend',
+): string {
+  return `
+    <section style="display:grid;gap:10px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(212,165,32,0.20);padding-bottom:8px;">
+        <div style="font-size:17px;font-weight:900;color:#f8fafc;">${escapeHtml(title)}</div>
+        <div style="font-size:12px;font-weight:900;color:#d4a520;">${formatAmount(relationships.length)}</div>
+      </div>
+      ${relationships.length === 0 ? `
+        <div style="border:1px dashed rgba(255,255,255,0.14);border-radius:8px;background:rgba(255,255,255,0.03);padding:18px;color:rgba(255,255,255,0.58);font-size:13px;font-weight:800;text-align:center;">
+          ${escapeHtml(emptyText)}
+        </div>
+      ` : `
+        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;">
+          ${relationships.map((relationship) => renderFriendRelationshipCard(relationship, variant)).join('')}
+        </div>
+      `}
+    </section>
+  `
+}
+
+function renderFriendsDirectory(state: LobbyScreenState): string {
+  if (state.friendsLoading) {
+    return `
+      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.34);background:#050505;border-radius:8px;color:#d4a520;font-size:18px;font-weight:900;">
+        Зареждане на приятели...
+      </div>
+    `
+  }
+
+  if (state.friendsErrorText) {
+    return `
+      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(248,113,113,0.34);background:rgba(127,29,29,0.28);border-radius:8px;color:#fecaca;font-size:15px;font-weight:800;text-align:center;padding:20px;">
+        ${escapeHtml(state.friendsErrorText)}
+      </div>
+    `
+  }
+
+  const friendships = state.friendships ?? {
+    incomingPending: [],
+    outgoingPending: [],
+    friends: [],
+    blocked: [],
+  }
+
+  return `
+    <section style="min-height:520px;display:grid;gap:18px;align-content:start;">
+      <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
+        <div>
+          <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Приятели</div>
+          <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.56);">Покани, чакащи отговори и приети приятелства.</div>
+        </div>
+        <div style="font-size:13px;font-weight:900;color:#d4a520;">${formatAmount(friendships.friends.length)} приятели</div>
+      </div>
+
+      ${renderFriendSection('Покани към теб', 'Няма нови покани.', friendships.incomingPending, 'incoming')}
+      ${renderFriendSection('Изпратени покани', 'Няма изпратени покани.', friendships.outgoingPending, 'outgoing')}
+      ${renderFriendSection('Списък приятели', 'Все още нямаш добавени приятели.', friendships.friends, 'friend')}
+    </section>
+  `
+}
+
+function formatChatTime(value: string): string {
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return ''
+  }
+
+  return new Intl.DateTimeFormat('bg-BG', {
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
+}
+
+function renderChatPanel(state: LobbyScreenState): string {
+  if (state.chatLoading) {
+    return `
+      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.34);background:#050505;border-radius:8px;color:#d4a520;font-size:18px;font-weight:900;">
+        Зареждане на чат...
+      </div>
+    `
+  }
+
+  const activeConversation = state.chatConversations.find(
+    (conversation) => conversation.friendshipId === state.activeChatFriendshipId,
+  ) ?? state.chatConversations[0] ?? null
+
+  return `
+    <section style="min-height:520px;display:grid;grid-template-columns:360px minmax(0,1fr);gap:14px;align-content:start;">
+      <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;overflow:hidden;">
+        <div style="padding:14px 16px;border-bottom:1px solid rgba(212,165,32,0.24);">
+          <div style="font-size:22px;font-weight:900;color:#f8fafc;">Чат</div>
+          <div style="margin-top:5px;font-size:12px;font-weight:800;color:rgba(255,255,255,0.54);">Само между приятели. Недостъпен по време на игра.</div>
+        </div>
+        ${state.chatConversations.length === 0 ? `
+          <div style="padding:24px 16px;color:rgba(255,255,255,0.62);font-size:14px;font-weight:800;text-align:center;">
+            Добави приятели, за да започнеш чат.
+          </div>
+        ` : `
+          <div style="display:grid;max-height:560px;overflow:auto;">
+            ${state.chatConversations.map((conversation) => {
+              const isActive = activeConversation?.friendshipId === conversation.friendshipId
+              const displayName = conversation.friend.displayName?.trim() || 'Играч'
+              const avatarUrl = conversation.friend.avatarUrl?.trim() ?? ''
+              const preview = conversation.lastMessage?.body ?? 'Няма съобщения'
+
+              return `
+                <button type="button" data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}" style="display:flex;align-items:center;gap:12px;border:0;border-bottom:1px solid rgba(255,255,255,0.06);background:${isActive ? 'rgba(212,165,32,0.12)' : 'transparent'};color:#ffffff;text-align:left;padding:12px 14px;cursor:pointer;min-width:0;">
+                  <div style="width:46px;height:46px;border-radius:8px;border:1px solid rgba(212,165,32,0.48);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:19px;font-weight:900;flex:0 0 auto;">
+                    ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}
+                  </div>
+                  <div style="min-width:0;flex:1;">
+                    <div style="font-size:14px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
+                    <div style="margin-top:4px;font-size:12px;font-weight:700;color:rgba(255,255,255,0.54);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(preview)}</div>
+                  </div>
+                </button>
+              `
+            }).join('')}
+          </div>
+        `}
+      </div>
+
+      <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:linear-gradient(180deg,#111 0%,#050505 100%);min-width:0;overflow:hidden;">
+        ${activeConversation === null ? `
+          <div style="min-height:520px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.62);font-size:15px;font-weight:800;text-align:center;padding:20px;">
+            Избери приятел от списъка.
+          </div>
+        ` : `
+          <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid rgba(212,165,32,0.24);">
+            <div style="font-size:19px;font-weight:900;color:#f8fafc;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(activeConversation.friend.displayName ?? 'Играч')}</div>
+            ${state.chatErrorText ? `<div style="margin-left:auto;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.chatErrorText)}</div>` : ''}
+          </div>
+          <div style="height:410px;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:10px;">
+            ${state.chatMessagesLoading ? `
+              <div style="margin:auto;color:#d4a520;font-size:15px;font-weight:900;">Зареждане...</div>
+            ` : state.chatMessages.length === 0 ? `
+              <div style="margin:auto;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;">Няма съобщения. Започни разговора.</div>
+            ` : state.chatMessages.map((message) => `
+              <div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:min(72%,620px);display:grid;gap:4px;">
+                <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:9px 11px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;">
+                  ${escapeHtml(message.body)}
+                </div>
+                <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.42);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div>
+              </div>
+            `).join('')}
+          </div>
+          <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;gap:10px;padding:14px 16px;border-top:1px solid rgba(212,165,32,0.20);">
+            <input name="message" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;">
+            <button type="submit" style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;">Изпрати</button>
+          </form>
+        `}
+      </div>
+    </section>
+  `
+}
+
 function renderPlayersDirectory(state: LobbyScreenState): string {
   const players = state.players
 
@@ -905,6 +1321,363 @@ function renderPlayersDirectory(state: LobbyScreenState): string {
           }).join('')}
         </div>
       `}
+    </section>
+  `
+}
+
+const LEADERBOARD_TABS: Array<{
+  category: LeaderboardCategory
+  label: string
+  metricLabel: string
+}> = [
+  { category: 'balance', label: 'Баланс', metricLabel: 'жълтици' },
+  { category: 'rank', label: 'Ранг', metricLabel: 'игри' },
+  { category: 'wins', label: 'Победи', metricLabel: 'победи' },
+  { category: 'rating', label: 'Рейтинг', metricLabel: 'оценка' },
+]
+
+function getLeaderboardMetric(
+  category: LeaderboardCategory,
+  player: PlayerPublicProfileSnapshot,
+): string {
+  if (category === 'balance') {
+    return formatAmount(player.yellowCoinsBalance ?? 0)
+  }
+
+  if (category === 'rank') {
+    return formatAmount(player.completedGamesCount ?? 0)
+  }
+
+  if (category === 'wins') {
+    return formatAmount(player.wonGamesCount ?? 0)
+  }
+
+  return typeof player.averageRating === 'number'
+    ? player.averageRating.toFixed(2)
+    : '-'
+}
+
+function renderLeaderboardsDirectory(state: LobbyScreenState): string {
+  if (state.leaderboardsLoading) {
+    return `
+      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.34);background:#050505;border-radius:8px;color:#d4a520;font-size:18px;font-weight:900;">
+        Зареждане на класации...
+      </div>
+    `
+  }
+
+  if (state.leaderboardsErrorText) {
+    return `
+      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(248,113,113,0.34);background:rgba(127,29,29,0.28);border-radius:8px;color:#fecaca;font-size:15px;font-weight:800;text-align:center;padding:20px;">
+        ${escapeHtml(state.leaderboardsErrorText)}
+      </div>
+    `
+  }
+
+  const category = state.activeLeaderboardCategory
+  const players = state.leaderboards?.[category] ?? []
+  const activeTab = LEADERBOARD_TABS.find((tab) => tab.category === category) ?? LEADERBOARD_TABS[0]
+
+  return `
+    <section style="min-height:520px;display:grid;gap:14px;align-content:start;">
+      <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
+        <div>
+          <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Класации</div>
+          <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.56);">Топ играчи по баланс, ранг, победи и партньорска оценка.</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+          ${LEADERBOARD_TABS.map((tab) => {
+            const isActive = tab.category === category
+
+            return `
+              <button type="button" data-lobby-leaderboard-tab="${tab.category}" style="height:38px;padding:0 14px;border:1px solid ${isActive ? 'rgba(212,165,32,0.78)' : 'rgba(255,255,255,0.12)'};border-radius:8px;background:${isActive ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : '#080808'};color:${isActive ? '#080808' : '#f8fafc'};font-size:13px;font-weight:900;cursor:pointer;">
+                ${escapeHtml(tab.label)}
+              </button>
+            `
+          }).join('')}
+        </div>
+      </div>
+
+      ${players.length === 0 ? `
+        <div style="min-height:360px;display:flex;align-items:center;justify-content:center;border:1px dashed rgba(255,255,255,0.16);background:rgba(255,255,255,0.03);border-radius:8px;color:rgba(255,255,255,0.62);font-size:15px;font-weight:800;">
+          Все още няма данни за тази класация.
+        </div>
+      ` : `
+        <div style="display:grid;gap:8px;">
+          ${players.map((player, index) => {
+            const displayName = player.displayName?.trim() || 'Играч'
+            const avatarUrl = player.avatarUrl?.trim() ?? ''
+            const fallbackLetter = escapeHtml(displayName.charAt(0).toUpperCase() || '?')
+            const position = index + 1
+            const medalColor =
+              position === 1 ? '#f4c95b' : position === 2 ? '#d4d4d8' : position === 3 ? '#c08457' : 'rgba(255,255,255,0.50)'
+
+            return `
+              <button type="button" data-lobby-leaderboard-player="${escapeHtml(player.profileId ?? '')}" style="display:grid;grid-template-columns:64px minmax(0,1fr) 150px 130px 130px;align-items:center;gap:14px;text-align:left;border:1px solid rgba(212,165,32,0.24);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:12px 14px;color:#ffffff;cursor:pointer;min-width:0;">
+                <div style="font-size:26px;font-weight:900;color:${medalColor};text-align:center;">#${position}</div>
+                <div style="display:flex;align-items:center;gap:12px;min-width:0;">
+                  <div style="width:50px;height:50px;border-radius:8px;border:1px solid rgba(212,165,32,0.56);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:21px;font-weight:900;flex:0 0 auto;">
+                    ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : fallbackLetter}
+                  </div>
+                  <div style="min-width:0;">
+                    <div style="font-size:15px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
+                    <div style="margin-top:4px;font-size:12px;font-weight:800;color:#d4a520;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(player.rankTitle ?? 'Ранг 1')}</div>
+                  </div>
+                </div>
+                <div>
+                  <div style="font-size:10px;font-weight:900;text-transform:uppercase;color:rgba(255,255,255,0.44);">${escapeHtml(activeTab.metricLabel)}</div>
+                  <div style="margin-top:4px;font-size:18px;font-weight:900;color:#f8fafc;">${escapeHtml(getLeaderboardMetric(category, player))}</div>
+                </div>
+                <div>
+                  <div style="font-size:10px;font-weight:900;text-transform:uppercase;color:rgba(255,255,255,0.44);">игри</div>
+                  <div style="margin-top:4px;font-size:15px;font-weight:900;color:#f8fafc;">${formatAmount(player.completedGamesCount ?? 0)}</div>
+                </div>
+                <div>
+                  <div style="font-size:10px;font-weight:900;text-transform:uppercase;color:rgba(255,255,255,0.44);">оценка</div>
+                  <div style="margin-top:4px;font-size:15px;font-weight:900;color:#f8fafc;">${typeof player.averageRating === 'number' ? player.averageRating.toFixed(2) : '-'}</div>
+                </div>
+              </button>
+            `
+          }).join('')}
+        </div>
+      `}
+    </section>
+  `
+}
+
+function renderShopPanel(state: LobbyScreenState): string {
+  if (state.shopPackagesLoading) {
+    return `
+      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.34);background:#050505;border-radius:8px;color:#d4a520;font-size:18px;font-weight:900;">
+        Зареждане на магазина...
+      </div>
+    `
+  }
+
+  if (state.shopPackagesErrorText) {
+    return `
+      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(248,113,113,0.34);background:rgba(127,29,29,0.28);border-radius:8px;color:#fecaca;font-size:15px;font-weight:800;text-align:center;padding:20px;">
+        ${escapeHtml(state.shopPackagesErrorText)}
+      </div>
+    `
+  }
+
+  const packages = state.shopPackages
+  const isLoggedIn = state.profile.profileId !== null
+  const purchaseHistory = `
+    ${state.shopPurchaseMessageText ? `
+      <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:rgba(212,165,32,0.08);padding:12px 14px;color:#f8fafc;font-size:13px;font-weight:800;">
+        ${escapeHtml(state.shopPurchaseMessageText)}
+      </div>
+    ` : ''}
+
+    ${isLoggedIn ? `
+      <div style="display:grid;gap:10px;border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+          <div style="font-size:18px;font-weight:900;color:#f8fafc;">История на покупки</div>
+          ${state.shopPurchasesLoading ? `<div style="font-size:12px;font-weight:900;color:#d4a520;">Зареждане...</div>` : ''}
+        </div>
+        ${state.shopPurchases.length === 0 ? `
+          <div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:14px;color:rgba(255,255,255,0.58);font-size:13px;font-weight:800;">Още няма покупки.</div>
+        ` : `
+          <div style="display:grid;gap:8px;">
+            ${state.shopPurchases.map((purchase) => `
+              <div style="display:grid;grid-template-columns:1.2fr 0.8fr 0.8fr 0.7fr;gap:10px;align-items:center;border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:12px;">
+                <div>
+                  <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(purchase.title)}</div>
+                  <div style="margin-top:3px;font-size:11px;font-weight:800;color:rgba(255,255,255,0.42);">${escapeHtml(formatCompactDateTime(purchase.createdAt))}</div>
+                </div>
+                <div style="font-size:14px;font-weight:900;color:#d4a520;">${formatAmount(purchase.yellowCoinsAmount)}</div>
+                <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(purchase.priceCents, purchase.currency))}</div>
+                <div style="font-size:12px;font-weight:900;color:${purchase.status === 'paid' ? '#86efac' : purchase.status === 'pending' ? '#d4a520' : 'rgba(255,255,255,0.48)'};">${escapeHtml(purchase.status)}</div>
+              </div>
+            `).join('')}
+          </div>
+        `}
+      </div>
+    ` : ''}
+  `
+
+  return `
+    <section style="min-height:520px;display:grid;gap:18px;align-content:start;">
+      <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
+        <div>
+          <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Магазин</div>
+          <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.56);">Пакети жълтици. Плащането ще бъде активирано със Stripe.</div>
+        </div>
+        <div style="border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:#0a0a0a;padding:10px 12px;color:#d4a520;font-size:13px;font-weight:900;">
+          Баланс: ${formatAmount(state.profile.yellowCoinsBalance ?? 0)}
+        </div>
+      </div>
+
+      ${packages.length === 0 ? `
+        <div style="min-height:260px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(255,255,255,0.10);background:#080808;border-radius:8px;color:rgba(255,255,255,0.64);font-size:15px;font-weight:800;text-align:center;padding:20px;">
+          Няма активни пакети в магазина.
+        </div>
+      ` : `
+        <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;">
+          ${packages.map((coinPackage) => `
+            <article style="display:grid;gap:14px;border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:linear-gradient(180deg,#171717 0%,#050505 100%);padding:18px;min-height:250px;">
+              <div style="height:74px;display:flex;align-items:center;justify-content:center;">
+                <img src="/assets/lobby/icon-shop-cart.png" alt="" style="width:58px;height:56px;object-fit:contain;filter:drop-shadow(0 8px 14px rgba(0,0,0,0.45));">
+              </div>
+              <div style="display:grid;gap:6px;">
+                <div style="font-size:20px;line-height:1.15;font-weight:900;color:#f8fafc;">${escapeHtml(coinPackage.title)}</div>
+                <div style="font-size:34px;line-height:1;font-weight:900;color:#d4a520;">${formatAmount(coinPackage.yellowCoinsAmount)}</div>
+                <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.46);">жълтици</div>
+              </div>
+              <div style="min-height:40px;font-size:13px;line-height:1.45;font-weight:700;color:rgba(255,255,255,0.62);">${escapeHtml(coinPackage.description)}</div>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:auto;">
+                <div style="font-size:18px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}</div>
+                <button type="button" data-lobby-shop-package="${escapeHtml(coinPackage.packageId)}" ${state.shopPurchaseActionPackageId === coinPackage.packageId ? 'disabled' : ''} style="height:42px;padding:0 14px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:${state.shopPurchaseActionPackageId === coinPackage.packageId ? 'wait' : 'pointer'};">
+                  ${state.shopPurchaseActionPackageId === coinPackage.packageId ? 'Записване...' : isLoggedIn ? 'Подготви покупка' : 'Влез за покупка'}
+                </button>
+              </div>
+            </article>
+          `).join('')}
+        </div>
+      `}
+
+      ${purchaseHistory}
+    </section>
+  `
+}
+
+function renderAdminPanel(state: LobbyScreenState): string {
+  if (!state.isAdmin) {
+    return `
+      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(248,113,113,0.34);background:rgba(127,29,29,0.28);border-radius:8px;color:#fecaca;font-size:15px;font-weight:800;text-align:center;padding:20px;">
+        Нямаш достъп до админ панела.
+      </div>
+    `
+  }
+
+  if (state.adminSettingsLoading) {
+    return `
+      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.34);background:#050505;border-radius:8px;color:#d4a520;font-size:18px;font-weight:900;">
+        Зареждане на настройки...
+      </div>
+    `
+  }
+
+  const settings = state.adminSettings ?? {
+    signupBonusYellowCoins: state.signupBonusYellowCoins,
+    profileNameChangePrice: 50_000,
+  }
+  const adminPackages = state.adminCoinPackages
+
+  return `
+    <section style="min-height:520px;display:grid;gap:14px;align-content:start;">
+      <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
+        <div>
+          <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Админ панел</div>
+          <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.56);">Настройки за икономика и профили.</div>
+        </div>
+      </div>
+
+      <form data-lobby-admin-settings-form="1" style="width:min(100%,680px);display:grid;gap:14px;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:18px;">
+        <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+          Signup bonus жълтици
+          <input name="signupBonusYellowCoins" type="number" min="0" max="10000000" step="1000" value="${settings.signupBonusYellowCoins}" style="height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+        </label>
+
+        <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+          Цена за смяна на име
+          <input name="profileNameChangePrice" type="number" min="0" max="10000000" step="1000" value="${settings.profileNameChangePrice}" style="height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+        </label>
+
+        ${state.adminSettingsErrorText ? `
+          <div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;">
+            ${escapeHtml(state.adminSettingsErrorText)}
+          </div>
+        ` : ''}
+
+        <div style="display:flex;justify-content:flex-end;">
+          <button type="submit" style="height:44px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;">
+            Запази
+          </button>
+        </div>
+      </form>
+
+      <div style="display:grid;gap:12px;margin-top:8px;">
+        <div style="display:flex;align-items:end;justify-content:space-between;gap:12px;">
+          <div>
+            <div style="font-size:20px;line-height:1.1;font-weight:900;color:#f8fafc;">Пакети жълтици</div>
+            <div style="margin-top:5px;font-size:12px;font-weight:700;color:rgba(255,255,255,0.54);">Активните пакети се показват в магазина.</div>
+          </div>
+          ${state.adminCoinPackagesLoading ? `
+            <div style="font-size:12px;font-weight:900;color:#d4a520;">Зареждане...</div>
+          ` : ''}
+        </div>
+
+        ${state.adminCoinPackagesErrorText ? `
+          <div style="width:min(100%,980px);border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;">
+            ${escapeHtml(state.adminCoinPackagesErrorText)}
+          </div>
+        ` : ''}
+
+        <div style="width:min(100%,980px);display:grid;gap:8px;">
+          ${adminPackages.length === 0 ? `
+            <div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:14px;color:rgba(255,255,255,0.58);font-size:13px;font-weight:800;">Няма създадени пакети.</div>
+          ` : adminPackages.map((coinPackage) => `
+            <div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 0.7fr auto;gap:10px;align-items:center;border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#090909;padding:12px;">
+              <div>
+                <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(coinPackage.title)}</div>
+                <div style="margin-top:3px;font-size:11px;font-weight:800;color:rgba(255,255,255,0.44);">${escapeHtml(coinPackage.packageKey)}</div>
+              </div>
+              <div style="font-size:14px;font-weight:900;color:#d4a520;">${formatAmount(coinPackage.yellowCoinsAmount)}</div>
+              <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}</div>
+              <div style="font-size:12px;font-weight:900;color:${coinPackage.status === 'active' ? '#86efac' : 'rgba(255,255,255,0.46)'};">${coinPackage.status}</div>
+              <button type="button" data-lobby-admin-package-status="${escapeHtml(coinPackage.packageId)}" data-lobby-admin-package-next-status="${coinPackage.status === 'active' ? 'inactive' : 'active'}" style="height:36px;padding:0 12px;border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:#111111;color:#d4a520;font-size:12px;font-weight:900;cursor:pointer;">
+                ${coinPackage.status === 'active' ? 'Скрий' : 'Активирай'}
+              </button>
+            </div>
+          `).join('')}
+        </div>
+
+        <form data-lobby-admin-coin-package-form="1" style="width:min(100%,980px);display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:18px;">
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Ключ
+            <input name="packageKey" type="text" maxlength="48" placeholder="starter" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+          </label>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Име
+            <input name="title" type="text" maxlength="80" placeholder="Starter" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+          </label>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Жълтици
+            <input name="yellowCoinsAmount" type="number" min="1" max="100000000" step="1000" value="100000" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+          </label>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Цена в центове
+            <input name="priceCents" type="number" min="0" max="10000000" step="1" value="499" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+          </label>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Валута
+            <input name="currency" type="text" maxlength="3" value="EUR" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;text-transform:uppercase;">
+          </label>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Подредба
+            <input name="sortOrder" type="number" min="0" max="1000000" step="1" value="50" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+          </label>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Статус
+            <select name="status" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+              <option value="active">active</option>
+              <option value="inactive">inactive</option>
+            </select>
+          </label>
+          <label style="grid-column:1 / -1;display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Описание
+            <input name="description" type="text" maxlength="220" placeholder="Описание за магазина" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+          </label>
+          <div style="grid-column:1 / -1;display:flex;justify-content:flex-end;">
+            <button type="submit" style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:pointer;">
+              Запази пакет
+            </button>
+          </div>
+        </form>
+      </div>
     </section>
   `
 }
@@ -978,12 +1751,22 @@ export function renderLobbyScreen(
       </style>
 
       <div data-lobby-scale-stage="1" style="width:1640px; margin:0 auto; zoom:var(--lobby-scale);">
-        ${renderNav(state.isSearching, state.view)}
+        ${renderNav(state)}
 
         <div style="max-width: 1640px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;">
           ${state.view === 'players'
             ? renderPlayersDirectory(state)
-            : `
+            : state.view === 'leaderboards'
+              ? renderLeaderboardsDirectory(state)
+              : state.view === 'shop'
+                ? renderShopPanel(state)
+              : state.view === 'admin'
+                ? renderAdminPanel(state)
+            : state.view === 'friends'
+              ? renderFriendsDirectory(state)
+              : state.view === 'chat'
+                ? renderChatPanel(state)
+              : `
               ${renderHeroSection(profileName, state.isConnected)}
               ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching)}
               ${renderBottomSection()}
@@ -1058,8 +1841,10 @@ export function renderLobbyScreen(
         seat: 'bottom',
         profile: state.profilePopupProfile ?? state.profile,
         canEdit: state.profilePopupCanEdit,
+        friendshipAction: state.friendshipAction,
       })}
       ${renderProfileEditModal(state)}
+      ${renderGiftCoinsModal(state)}
       ${renderAuthModal(state)}
     </div>
   `
@@ -1108,6 +1893,60 @@ export function renderLobbyScreen(
     .querySelector<HTMLButtonElement>('[data-lobby-nav-players="1"]')
     ?.addEventListener('click', options.onPlayersClick)
 
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-nav-leaderboards="1"]')
+    ?.addEventListener('click', options.onLeaderboardsClick)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-nav-shop="1"]')
+    ?.addEventListener('click', options.onShopClick)
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-shop-package]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const packageId = button.dataset.lobbyShopPackage?.trim() ?? ''
+
+      if (packageId.length > 0) {
+        options.onShopPurchaseClick(packageId)
+      }
+    })
+  })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-nav-admin="1"]')
+    ?.addEventListener('click', options.onAdminClick)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-nav-friends="1"]')
+    ?.addEventListener('click', options.onFriendsClick)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-nav-chat="1"]')
+    ?.addEventListener('click', options.onChatClick)
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-chat-conversation]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const friendshipId = button.dataset.lobbyChatConversation?.trim() ?? ''
+
+      if (friendshipId.length > 0) {
+        options.onChatConversationClick(friendshipId)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLFormElement>('[data-lobby-chat-form]').forEach((form) => {
+    form.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const friendshipId = form.dataset.lobbyChatForm?.trim() ?? ''
+      const data = new FormData(form)
+      const body = String(data.get('message') ?? '').trim()
+
+      if (friendshipId.length > 0 && body.length > 0) {
+        options.onChatSubmit(friendshipId, body)
+        form.reset()
+      }
+    })
+  })
+
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-player-card]').forEach((button) => {
     button.addEventListener('click', () => {
       const profileId = button.dataset.lobbyPlayerCard ?? ''
@@ -1115,6 +1954,141 @@ export function renderLobbyScreen(
 
       if (profile) {
         options.onPlayerCardClick(profile)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-leaderboard-tab]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const category = button.dataset.lobbyLeaderboardTab as LeaderboardCategory | undefined
+
+      if (
+        category === 'balance' ||
+        category === 'rank' ||
+        category === 'wins' ||
+        category === 'rating'
+      ) {
+        options.onLeaderboardCategoryClick(category)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-leaderboard-player]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const profileId = button.dataset.lobbyLeaderboardPlayer ?? ''
+      const leaderboards = state.leaderboards
+      const profile = leaderboards
+        ? [
+            ...leaderboards.balance,
+            ...leaderboards.rank,
+            ...leaderboards.wins,
+            ...leaderboards.rating,
+          ].find((player) => player.profileId === profileId)
+        : null
+
+      if (profile) {
+        options.onLeaderboardPlayerClick(profile)
+      }
+    })
+  })
+
+  root
+    .querySelector<HTMLFormElement>('[data-lobby-admin-settings-form="1"]')
+    ?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const form = event.currentTarget as HTMLFormElement
+      const data = new FormData(form)
+      const signupBonusYellowCoins = Number(data.get('signupBonusYellowCoins'))
+      const profileNameChangePrice = Number(data.get('profileNameChangePrice'))
+
+      options.onAdminSettingsSubmit({
+        signupBonusYellowCoins,
+        profileNameChangePrice,
+      })
+    })
+
+  root
+    .querySelector<HTMLFormElement>('[data-lobby-admin-coin-package-form="1"]')
+    ?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const form = event.currentTarget as HTMLFormElement
+      const data = new FormData(form)
+      const status = String(data.get('status') ?? '')
+
+      if (status !== 'active' && status !== 'inactive') {
+        return
+      }
+
+      options.onAdminCoinPackageSubmit({
+        packageKey: String(data.get('packageKey') ?? '').trim(),
+        title: String(data.get('title') ?? '').trim(),
+        description: String(data.get('description') ?? '').trim(),
+        yellowCoinsAmount: Number(data.get('yellowCoinsAmount')),
+        priceCents: Number(data.get('priceCents')),
+        currency: String(data.get('currency') ?? 'EUR').trim().toUpperCase(),
+        status,
+        sortOrder: Number(data.get('sortOrder')),
+      })
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-admin-package-status]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const packageId = button.dataset.lobbyAdminPackageStatus?.trim() ?? ''
+      const status = button.dataset.lobbyAdminPackageNextStatus ?? ''
+
+      if (packageId.length > 0 && (status === 'active' || status === 'inactive')) {
+        options.onAdminCoinPackageStatusChange(packageId, status)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-friend-profile]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const profileId = button.dataset.lobbyFriendProfile ?? ''
+      const friendshipGroups = state.friendships
+        ? [
+            ...state.friendships.incomingPending,
+            ...state.friendships.outgoingPending,
+            ...state.friendships.friends,
+            ...state.friendships.blocked,
+          ]
+        : []
+      const relationship = friendshipGroups.find(
+        (item) => item.profile.profileId === profileId,
+      )
+
+      if (relationship) {
+        options.onFriendProfileClick(relationship.profile)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-friend-accept]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const friendshipId = button.dataset.lobbyFriendAccept?.trim() ?? ''
+
+      if (friendshipId.length > 0) {
+        options.onFriendAcceptClick(friendshipId)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-friend-reject]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const friendshipId = button.dataset.lobbyFriendReject?.trim() ?? ''
+
+      if (friendshipId.length > 0) {
+        options.onFriendRejectClick(friendshipId)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-friend-remove]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const friendshipId = button.dataset.lobbyFriendRemove?.trim() ?? ''
+
+      if (friendshipId.length > 0) {
+        options.onFriendRemoveClick(friendshipId)
       }
     })
   })
@@ -1130,6 +2104,64 @@ export function renderLobbyScreen(
   root
     .querySelector<HTMLButtonElement>('[data-player-profile-edit="1"]')
     ?.addEventListener('click', options.onProfileEditClick)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-player-profile-friend-request]')
+    ?.addEventListener('click', (event) => {
+      const button = event.currentTarget as HTMLButtonElement
+      const profileId = button.dataset.playerProfileFriendRequest?.trim() ?? ''
+
+      if (profileId.length > 0) {
+        options.onFriendRequestClick(profileId)
+      }
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-player-profile-block]')
+    ?.addEventListener('click', (event) => {
+      const button = event.currentTarget as HTMLButtonElement
+      const profileId = button.dataset.playerProfileBlock?.trim() ?? ''
+
+      if (profileId.length > 0) {
+        options.onFriendBlockClick(profileId)
+      }
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-player-profile-gift-coins]')
+    ?.addEventListener('click', (event) => {
+      const button = event.currentTarget as HTMLButtonElement
+      const friendshipId = button.dataset.playerProfileGiftCoins?.trim() ?? ''
+
+      if (friendshipId.length > 0) {
+        options.onGiftCoinsClick(friendshipId)
+      }
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-gift-modal-close="1"]')
+    ?.addEventListener('click', options.onGiftCoinsClose)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-gift-modal-cancel="1"]')
+    ?.addEventListener('click', options.onGiftCoinsClose)
+
+  root
+    .querySelector<HTMLElement>('[data-lobby-gift-modal-backdrop="1"]')
+    ?.addEventListener('click', options.onGiftCoinsClose)
+
+  root.querySelectorAll<HTMLFormElement>('[data-lobby-gift-form]').forEach((form) => {
+    form.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const friendshipId = form.dataset.lobbyGiftForm?.trim() ?? ''
+      const data = new FormData(form)
+      const amount = Number(data.get('amount') ?? 0)
+
+      if (friendshipId.length > 0) {
+        options.onGiftCoinsSubmit(friendshipId, amount)
+      }
+    })
+  })
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-profile-editor-close="1"]')
@@ -1280,6 +2312,13 @@ export function renderLobbyScreen(
         currentCrop,
         galleryFiles,
       )
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-profile-name-change-submit="1"]')
+    ?.addEventListener('click', () => {
+      const input = root.querySelector<HTMLInputElement>('input[name="paidDisplayName"]')
+      options.onProfileNameChangeSubmit(input?.value.trim() ?? '')
     })
 
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-gallery-delete]').forEach((button) => {

@@ -36,6 +36,95 @@ export type PlayerPublicProfileSnapshot = {
   galleryImages: PlayerGalleryImageSnapshot[]
 }
 
+export type FriendshipStatus = 'pending' | 'accepted' | 'blocked'
+export type FriendshipDirection = 'incoming' | 'outgoing' | 'accepted' | 'blocked'
+
+export type FriendRelationshipSnapshot = {
+  friendshipId: string
+  status: FriendshipStatus
+  direction: FriendshipDirection
+  profile: PlayerPublicProfileSnapshot
+  createdAt: string
+  updatedAt: string
+}
+
+export type FriendshipsSnapshot = {
+  incomingPending: FriendRelationshipSnapshot[]
+  outgoingPending: FriendRelationshipSnapshot[]
+  friends: FriendRelationshipSnapshot[]
+  blocked: FriendRelationshipSnapshot[]
+}
+
+export type ChatMessageSnapshot = {
+  messageId: string
+  friendshipId: string
+  senderProfileId: string
+  body: string
+  createdAt: string
+  isOwnMessage: boolean
+}
+
+export type ChatConversationSnapshot = {
+  friendshipId: string
+  friend: PlayerPublicProfileSnapshot
+  lastMessage: ChatMessageSnapshot | null
+  updatedAt: string
+}
+
+export type LeaderboardCategory = 'balance' | 'rank' | 'wins' | 'rating'
+
+export type LeaderboardsSnapshot = Record<
+  LeaderboardCategory,
+  PlayerPublicProfileSnapshot[]
+>
+
+export type AdminSettingsSnapshot = {
+  signupBonusYellowCoins: number
+  profileNameChangePrice: number
+}
+
+export type CoinPackageStatus = 'active' | 'inactive'
+
+export type CoinPackageSnapshot = {
+  packageId: string
+  packageKey: string
+  title: string
+  description: string
+  yellowCoinsAmount: number
+  priceCents: number
+  currency: string
+  status: CoinPackageStatus
+  sortOrder: number
+}
+
+export type CoinPackageInput = {
+  packageId?: string | null
+  packageKey: string
+  title: string
+  description: string
+  yellowCoinsAmount: number
+  priceCents: number
+  currency: string
+  status: CoinPackageStatus
+  sortOrder: number
+}
+
+export type CoinPurchaseStatus = 'pending' | 'paid' | 'canceled' | 'failed'
+
+export type CoinPurchaseSnapshot = {
+  purchaseId: string
+  packageId: string | null
+  packageKey: string
+  title: string
+  yellowCoinsAmount: number
+  priceCents: number
+  currency: string
+  provider: string
+  status: CoinPurchaseStatus
+  createdAt: string
+  updatedAt: string
+}
+
 export type ClientMessage =
   | {
       type: 'ping'
@@ -70,6 +159,7 @@ export type ClientMessage =
   | {
       type: 'leave_active_room'
       roomId: string
+      acceptPenalty?: boolean
     }
   | {
       type: 'submit_bid_action'
@@ -314,6 +404,11 @@ export type ActiveRoomLeftMessage = {
   type: 'left_active_room'
   roomId: string
   removed: boolean
+  penalty?: {
+    penaltyAmount: number
+    chargedAmount: number
+    balanceAfter: number
+  }
 }
 
 export type PartnerRatingSubmittedMessage = {
@@ -337,6 +432,12 @@ export type PlayerProfileMessage = {
   roomId: string
   seat: Seat
   profile: PlayerPublicProfileSnapshot | null
+}
+
+export type ChatMessageReceivedMessage = {
+  type: 'chat_message_received'
+  friendshipId: string
+  senderProfileId: string
 }
 
 export type MatchmakingJoinedMessage = {
@@ -386,6 +487,7 @@ export type ServerMessage =
   | PartnerRatingSubmittedMessage
   | RoomSnapshotMessage
   | PlayerProfileMessage
+  | ChatMessageReceivedMessage
   | MatchmakingJoinedMessage
   | MatchmakingStatusMessage
   | MatchmakingLeftMessage
@@ -410,7 +512,7 @@ export type GameServerClient = {
   leaveMatchmaking: () => void
   requestPlayerProfile: (roomId: string, seat: Seat) => void
   resumeRoom: (roomId: string, reconnectToken: string) => void
-  leaveActiveRoom: (roomId: string) => void
+  leaveActiveRoom: (roomId: string, acceptPenalty?: boolean) => void
   submitBidAction: (roomId: string, action: ClientBidAction) => void
   submitCutIndex: (roomId: string, cutIndex: number) => void
   submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
@@ -556,10 +658,11 @@ export function createGameServerClient(
     })
   }
 
-  function leaveActiveRoom(roomId: string): void {
+  function leaveActiveRoom(roomId: string, acceptPenalty = false): void {
     send({
       type: 'leave_active_room',
       roomId,
+      acceptPenalty,
     })
   }
 

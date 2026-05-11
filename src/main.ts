@@ -13,7 +13,16 @@ import {
 import type { AvatarCropSelection } from './app/lobby/renderLobbyScreen'
 import {
   createGameServerClient,
+  type AdminSettingsSnapshot,
+  type ChatConversationSnapshot,
+  type ChatMessageSnapshot,
+  type CoinPackageInput,
+  type CoinPackageSnapshot,
+  type CoinPackageStatus,
+  type CoinPurchaseSnapshot,
+  type FriendshipsSnapshot,
   type GameServerClient,
+  type LeaderboardsSnapshot,
   type PlayerPublicProfileSnapshot,
 } from './app/network/createGameServerClient'
 import { createViewportResizeHandler } from './ui/layout/viewportStage'
@@ -54,6 +63,8 @@ let reconnectAttempt = 0
 let isPageUnloading = false
 let isRefreshingAuthConnection = false
 let currentAuthSession: AuthSession | null = null
+let publicSignupBonusYellowCoins = 100000
+let publicProfileNameChangePrice = 50000
 
 type AuthSession = {
   sessionId: string
@@ -78,6 +89,67 @@ type PlayersResponse = {
   message?: string
 }
 
+type LeaderboardsResponse = {
+  ok: boolean
+  leaderboards?: LeaderboardsSnapshot
+  message?: string
+}
+
+type PublicSettingsResponse = {
+  ok: boolean
+  settings?: {
+    signupBonusYellowCoins?: number
+    profileNameChangePrice?: number
+  }
+  message?: string
+}
+
+type AdminSettingsResponse = {
+  ok: boolean
+  settings?: AdminSettingsSnapshot
+  message?: string
+}
+
+type CoinPackagesResponse = {
+  ok: boolean
+  packages?: CoinPackageSnapshot[]
+  package?: CoinPackageSnapshot
+  message?: string
+}
+
+type CoinPurchasesResponse = {
+  ok: boolean
+  purchases?: CoinPurchaseSnapshot[]
+  purchase?: CoinPurchaseSnapshot
+  message?: string
+}
+
+type FriendshipsResponse = {
+  ok: boolean
+  friendships?: FriendshipsSnapshot
+  message?: string
+}
+
+type ChatConversationsResponse = {
+  ok: boolean
+  conversations?: ChatConversationSnapshot[]
+  message?: string
+}
+
+type ChatMessagesResponse = {
+  ok: boolean
+  messages?: ChatMessageSnapshot[]
+  conversation?: ChatConversationSnapshot
+  message?: string
+}
+
+type GiftCoinsResponse = {
+  ok: boolean
+  senderProfile?: PlayerPublicProfileSnapshot
+  recipientProfile?: PlayerPublicProfileSnapshot
+  message?: string
+}
+
 function getApiBaseUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
   const host = window.location.hostname || 'localhost'
@@ -97,11 +169,39 @@ async function readAuthResponse(response: Response): Promise<AuthResponse> {
 
 function syncLobbyWithAuthSession(): void {
   if (currentAuthSession === null) {
+    lobby.setFriendships(null)
+    lobby.setChatConversations([])
     return
   }
 
   lobby.setDisplayName(currentAuthSession.profile.displayName)
   lobby.setLocalAvatarUrl(currentAuthSession.profile.avatarUrl)
+}
+
+async function syncLobbyFriendships(): Promise<void> {
+  if (currentAuthSession === null) {
+    lobby.setFriendships(null)
+    return
+  }
+
+  const result = await loadFriendships()
+
+  if (result.ok) {
+    lobby.setFriendships(result.friendships)
+  }
+}
+
+async function syncLobbyChatConversations(): Promise<void> {
+  if (currentAuthSession === null) {
+    lobby.setChatConversations([])
+    return
+  }
+
+  const result = await loadChatConversations()
+
+  if (result.ok) {
+    lobby.setChatConversations(result.conversations)
+  }
 }
 
 function refreshGameServerConnectionForAuth(): void {
@@ -129,6 +229,8 @@ async function loadAuthSession(): Promise<void> {
     const data = await readAuthResponse(response)
     currentAuthSession = data.ok ? data.session ?? null : null
     syncLobbyWithAuthSession()
+    await syncLobbyFriendships()
+    await syncLobbyChatConversations()
     lobby.render()
   } catch {
     currentAuthSession = null
@@ -156,6 +258,8 @@ async function submitAuthRequest(
 
     currentAuthSession = data.session
     syncLobbyWithAuthSession()
+    await syncLobbyFriendships()
+    await syncLobbyChatConversations()
     refreshGameServerConnectionForAuth()
     return null
   } catch {
@@ -189,6 +293,671 @@ async function loadPlayersDirectory(): Promise<
     return {
       ok: false,
       message: 'Няма връзка със сървъра за играчи.',
+    }
+  }
+}
+
+async function loadLeaderboards(): Promise<
+  | { ok: true; leaderboards: LeaderboardsSnapshot }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/leaderboards`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as LeaderboardsResponse
+
+    if (!response.ok || !data.ok || !data.leaderboards) {
+      return {
+        ok: false,
+        message: data.message ?? 'Класациите не бяха заредени.',
+      }
+    }
+
+    return {
+      ok: true,
+      leaderboards: data.leaderboards,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за класации.',
+    }
+  }
+}
+
+async function loadShopPackages(): Promise<
+  | { ok: true; packages: CoinPackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/shop/packages`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as CoinPackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Магазинът не беше зареден.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за магазина.',
+    }
+  }
+}
+
+async function loadShopPurchases(): Promise<
+  | { ok: true; purchases: CoinPurchaseSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/shop/purchases`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as CoinPurchasesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.purchases)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Историята на покупки не беше заредена.',
+      }
+    }
+
+    return {
+      ok: true,
+      purchases: data.purchases,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за покупки.',
+    }
+  }
+}
+
+async function startShopPurchase(packageId: string): Promise<
+  | { ok: true; purchases: CoinPurchaseSnapshot[]; message: string }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/shop/purchases`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify({ packageId }),
+    })
+    const data = (await response.json()) as CoinPurchasesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.purchases)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Покупката не беше подготвена.',
+      }
+    }
+
+    return {
+      ok: true,
+      purchases: data.purchases,
+      message:
+        data.message ??
+        'Покупката е записана като pending. Stripe checkout ще бъде свързан в следващата стъпка.',
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за покупка.',
+    }
+  }
+}
+
+async function loadPublicSettings(): Promise<void> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/settings/public`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as PublicSettingsResponse
+    const signupBonus = data.settings?.signupBonusYellowCoins
+    const nameChangePrice = data.settings?.profileNameChangePrice
+
+    if (response.ok && data.ok && typeof signupBonus === 'number' && Number.isInteger(signupBonus)) {
+      publicSignupBonusYellowCoins = Math.max(0, signupBonus)
+    }
+
+    if (
+      response.ok &&
+      data.ok &&
+      typeof nameChangePrice === 'number' &&
+      Number.isInteger(nameChangePrice)
+    ) {
+      publicProfileNameChangePrice = Math.max(0, nameChangePrice)
+    }
+
+    if (response.ok && data.ok) {
+      lobby.render()
+    }
+  } catch {
+    // Keep the local fallback.
+  }
+}
+
+async function loadAdminSettings(): Promise<
+  | { ok: true; settings: AdminSettingsSnapshot }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/settings`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as AdminSettingsResponse
+
+    if (!response.ok || !data.ok || !data.settings) {
+      return {
+        ok: false,
+        message: data.message ?? 'Админ настройките не бяха заредени.',
+      }
+    }
+
+    publicSignupBonusYellowCoins = data.settings.signupBonusYellowCoins
+    publicProfileNameChangePrice = data.settings.profileNameChangePrice
+    return {
+      ok: true,
+      settings: data.settings,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за админ настройки.',
+    }
+  }
+}
+
+async function submitAdminSettings(
+  settings: AdminSettingsSnapshot,
+): Promise<
+  | { ok: true; settings: AdminSettingsSnapshot }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/settings`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify(settings),
+    })
+    const data = (await response.json()) as AdminSettingsResponse
+
+    if (!response.ok || !data.ok || !data.settings) {
+      return {
+        ok: false,
+        message: data.message ?? 'Админ настройките не бяха записани.',
+      }
+    }
+
+    publicSignupBonusYellowCoins = data.settings.signupBonusYellowCoins
+    publicProfileNameChangePrice = data.settings.profileNameChangePrice
+    return {
+      ok: true,
+      settings: data.settings,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за админ настройки.',
+    }
+  }
+}
+
+async function loadAdminCoinPackages(): Promise<
+  | { ok: true; packages: CoinPackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/coin-packages`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as CoinPackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Админ пакетите не бяха заредени.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за админ пакетите.',
+    }
+  }
+}
+
+async function submitAdminCoinPackage(
+  input: CoinPackageInput,
+): Promise<
+  | { ok: true; packages: CoinPackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/coin-packages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify(input),
+    })
+    const data = (await response.json()) as CoinPackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Пакетът не беше записан.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за запис на пакет.',
+    }
+  }
+}
+
+async function setAdminCoinPackageStatus(
+  packageId: string,
+  status: CoinPackageStatus,
+): Promise<
+  | { ok: true; packages: CoinPackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/coin-packages/${encodeURIComponent(packageId)}/status`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({ status }),
+      },
+    )
+    const data = (await response.json()) as CoinPackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Статусът на пакета не беше променен.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за промяна на пакет.',
+    }
+  }
+}
+
+async function readFriendshipsResponse(response: Response): Promise<FriendshipsResponse> {
+  try {
+    return (await response.json()) as FriendshipsResponse
+  } catch {
+    return {
+      ok: false,
+      message: 'Невалиден отговор от сървъра.',
+    }
+  }
+}
+
+async function loadFriendships(): Promise<
+  | { ok: true; friendships: FriendshipsSnapshot }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/friends`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = await readFriendshipsResponse(response)
+
+    if (!response.ok || !data.ok || !data.friendships) {
+      return {
+        ok: false,
+        message: data.message ?? 'Приятелите не бяха заредени.',
+      }
+    }
+
+    return {
+      ok: true,
+      friendships: data.friendships,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за приятели.',
+    }
+  }
+}
+
+async function submitFriendRequest(profileId: string): Promise<
+  | { ok: true; friendships: FriendshipsSnapshot }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/friends/request`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify({ profileId }),
+    })
+    const data = await readFriendshipsResponse(response)
+
+    if (!response.ok || !data.ok || !data.friendships) {
+      return {
+        ok: false,
+        message: data.message ?? 'Поканата не беше изпратена.',
+      }
+    }
+
+    return {
+      ok: true,
+      friendships: data.friendships,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за приятели.',
+    }
+  }
+}
+
+async function submitFriendAction(
+  friendshipId: string,
+  action: 'accept' | 'reject' | 'remove',
+): Promise<
+  | { ok: true; friendships: FriendshipsSnapshot }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/friends/${encodeURIComponent(friendshipId)}/${action}`,
+      {
+        method: 'POST',
+        credentials: 'include',
+      },
+    )
+    const data = await readFriendshipsResponse(response)
+
+    if (!response.ok || !data.ok || !data.friendships) {
+      return {
+        ok: false,
+        message: data.message ?? 'Поканата не беше обработена.',
+      }
+    }
+
+    return {
+      ok: true,
+      friendships: data.friendships,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за приятели.',
+    }
+  }
+}
+
+async function submitFriendBlock(profileId: string): Promise<
+  | { ok: true; friendships: FriendshipsSnapshot }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/friends/block`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify({ profileId }),
+    })
+    const data = await readFriendshipsResponse(response)
+
+    if (!response.ok || !data.ok || !data.friendships) {
+      return {
+        ok: false,
+        message: data.message ?? 'Играчът не беше блокиран.',
+      }
+    }
+
+    return {
+      ok: true,
+      friendships: data.friendships,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за приятели.',
+    }
+  }
+}
+
+async function readChatConversationsResponse(
+  response: Response,
+): Promise<ChatConversationsResponse> {
+  try {
+    return (await response.json()) as ChatConversationsResponse
+  } catch {
+    return {
+      ok: false,
+      message: 'Невалиден отговор от сървъра.',
+    }
+  }
+}
+
+async function readChatMessagesResponse(
+  response: Response,
+): Promise<ChatMessagesResponse> {
+  try {
+    return (await response.json()) as ChatMessagesResponse
+  } catch {
+    return {
+      ok: false,
+      message: 'Невалиден отговор от сървъра.',
+    }
+  }
+}
+
+async function loadChatConversations(): Promise<
+  | { ok: true; conversations: ChatConversationSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/chat/conversations`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = await readChatConversationsResponse(response)
+
+    if (!response.ok || !data.ok || !Array.isArray(data.conversations)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Разговорите не бяха заредени.',
+      }
+    }
+
+    return {
+      ok: true,
+      conversations: data.conversations,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за чат.',
+    }
+  }
+}
+
+async function loadChatMessages(friendshipId: string): Promise<
+  | { ok: true; messages: ChatMessageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/chat/${encodeURIComponent(friendshipId)}/messages`,
+      {
+        method: 'GET',
+        credentials: 'include',
+      },
+    )
+    const data = await readChatMessagesResponse(response)
+
+    if (!response.ok || !data.ok || !Array.isArray(data.messages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Съобщенията не бяха заредени.',
+      }
+    }
+
+    return {
+      ok: true,
+      messages: data.messages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за чат.',
+    }
+  }
+}
+
+async function sendChatMessage(friendshipId: string, body: string): Promise<
+  | {
+      ok: true
+      conversation: ChatConversationSnapshot
+      messages: ChatMessageSnapshot[]
+    }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/chat/${encodeURIComponent(friendshipId)}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({ body }),
+      },
+    )
+    const data = await readChatMessagesResponse(response)
+
+    if (
+      !response.ok ||
+      !data.ok ||
+      !data.conversation ||
+      !Array.isArray(data.messages)
+    ) {
+      return {
+        ok: false,
+        message: data.message ?? 'Съобщението не беше изпратено.',
+      }
+    }
+
+    return {
+      ok: true,
+      conversation: data.conversation,
+      messages: data.messages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за чат.',
+    }
+  }
+}
+
+async function submitGiftCoins(friendshipId: string, amount: number): Promise<
+  | {
+      ok: true
+      senderProfile: PlayerPublicProfileSnapshot
+      recipientProfile: PlayerPublicProfileSnapshot
+    }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/friends/${encodeURIComponent(friendshipId)}/gift-coins`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({ amount }),
+      },
+    )
+    const data = (await response.json()) as GiftCoinsResponse
+
+    if (!response.ok || !data.ok || !data.senderProfile || !data.recipientProfile) {
+      return {
+        ok: false,
+        message: data.message ?? 'Подаръкът не беше изпратен.',
+      }
+    }
+
+    if (currentAuthSession !== null) {
+      currentAuthSession = {
+        ...currentAuthSession,
+        profile: data.senderProfile,
+      }
+      syncLobbyWithAuthSession()
+    }
+
+    return {
+      ok: true,
+      senderProfile: data.senderProfile,
+      recipientProfile: data.recipientProfile,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за подарък.',
     }
   }
 }
@@ -287,6 +1056,30 @@ async function deleteProfileGalleryImage(imageId: string): Promise<string | null
   }
 }
 
+async function submitProfileNameChange(displayName: string): Promise<string | null> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/profile/me/display-name`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify({ displayName }),
+    })
+    const data = await readAuthResponse(response)
+
+    if (!response.ok || !data.ok || !data.session) {
+      return data.message ?? 'Името не беше сменено.'
+    }
+
+    currentAuthSession = data.session
+    syncLobbyWithAuthSession()
+    return null
+  } catch {
+    return 'Няма връзка със сървъра за смяна на име.'
+  }
+}
+
 async function submitProfileUpdate(
   avatarFile: File | null,
   avatarCrop: AvatarCropSelection | null,
@@ -360,16 +1153,39 @@ lobby = createLobbyFlowController({
     }),
   onProfileEditSubmit: (avatarFile, avatarCrop, galleryFiles) =>
     submitProfileUpdate(avatarFile, avatarCrop, galleryFiles),
+  getSignupBonusYellowCoins: () => publicSignupBonusYellowCoins,
+  getProfileNameChangePrice: () => publicProfileNameChangePrice,
   onProfileGalleryDelete: (imageId) => deleteProfileGalleryImage(imageId),
+  onProfileNameChangeSubmit: (displayName) => submitProfileNameChange(displayName),
   onPlayersLoad: () => loadPlayersDirectory(),
+  onLeaderboardsLoad: () => loadLeaderboards(),
+  onShopPackagesLoad: () => loadShopPackages(),
+  onShopPurchasesLoad: () => loadShopPurchases(),
+  onShopPurchaseStart: (packageId) => startShopPurchase(packageId),
+  onAdminSettingsLoad: () => loadAdminSettings(),
+  onAdminSettingsSubmit: (settings) => submitAdminSettings(settings),
+  onAdminCoinPackagesLoad: () => loadAdminCoinPackages(),
+  onAdminCoinPackageSubmit: (input) => submitAdminCoinPackage(input),
+  onAdminCoinPackageStatusChange: (packageId, status) =>
+    setAdminCoinPackageStatus(packageId, status),
+  onFriendshipsLoad: () => loadFriendships(),
+  onFriendRequestSubmit: (profileId) => submitFriendRequest(profileId),
+  onFriendAccept: (friendshipId) => submitFriendAction(friendshipId, 'accept'),
+  onFriendReject: (friendshipId) => submitFriendAction(friendshipId, 'reject'),
+  onFriendRemove: (friendshipId) => submitFriendAction(friendshipId, 'remove'),
+  onFriendBlock: (profileId) => submitFriendBlock(profileId),
+  onGiftCoinsSubmit: (friendshipId, amount) => submitGiftCoins(friendshipId, amount),
+  onChatConversationsLoad: () => loadChatConversations(),
+  onChatMessagesLoad: (friendshipId) => loadChatMessages(friendshipId),
+  onChatSend: (friendshipId, body) => sendChatMessage(friendshipId, body),
 })
 
 const activeRoom = createActiveRoomFlowController({
   root: rootElement,
   gameAudio,
   isConnected: () => client.isConnected(),
-  leaveActiveRoom: (roomId) => {
-    client.leaveActiveRoom(roomId)
+  leaveActiveRoom: (roomId, acceptPenalty = false) => {
+    client.leaveActiveRoom(roomId, acceptPenalty)
   },
   submitCutIndex: (roomId, cutIndex) => {
     client.submitCutIndex(roomId, cutIndex)
@@ -390,6 +1206,7 @@ const activeRoom = createActiveRoomFlowController({
     lobby.setConnected(client.isConnected())
     lobby.resetToLobby()
     lobby.setErrorText(errorText)
+    void loadAuthSession()
   },
   startNewGame: (stake, displayName) => {
     lobby.setConnected(client.isConnected())
@@ -500,6 +1317,7 @@ window.addEventListener('beforeunload', () => {
 })
 
 lobby.render()
+void loadPublicSettings()
 void loadAuthSession()
 client.connect()
 }

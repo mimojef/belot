@@ -125,6 +125,7 @@ export function createMatchedRoomFromEntries(
     config: {
       allowBots: true,
       isPrivate: false,
+      stakeAmount: stake,
     },
   })
 

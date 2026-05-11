@@ -6,15 +6,26 @@ import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
 import { WebSocketServer, WebSocket, type RawData } from 'ws'
 import { createActiveRoomSnapshotStore } from './db/activeRoomSnapshotStore.js'
+import { createAdminSettingsStore } from './db/adminSettingsStore.js'
 import {
   createAuthStore,
   createClearSessionCookieHeader,
   createSessionCookieHeader,
   getSessionTokenFromCookieHeader,
 } from './db/authStore.js'
+import { createChatStore } from './db/chatStore.js'
+import {
+  createCoinPackageStore,
+  type CoinPackageStatus,
+} from './db/coinPackageStore.js'
+import { createCoinPurchaseStore } from './db/coinPurchaseStore.js'
 import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
+import { createFriendshipStore } from './db/friendshipStore.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
+import { createMatchEconomyStore } from './db/matchEconomyStore.js'
 import { createPlayerProgressStore } from './db/playerProgressStore.js'
+import { createTableExitPenaltyStore } from './db/tableExitPenaltyStore.js'
+import { createYellowCoinGiftStore } from './db/yellowCoinGiftStore.js'
 import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js'
 import { broadcastRoomSnapshots } from './core/broadcastRoomSnapshots.js'
 import { createInitialServerState } from './core/createInitialServerState.js'
@@ -106,9 +117,41 @@ const activeRoomSnapshotStore = await createActiveRoomSnapshotStore(
 const playerProgressStore = await createPlayerProgressStore(
   databaseBootstrap.databaseFilePath,
 )
+const adminSettingsStore = await createAdminSettingsStore(
+  databaseBootstrap.databaseFilePath,
+)
+const coinPackageStore = await createCoinPackageStore(
+  databaseBootstrap.databaseFilePath,
+)
+const coinPurchaseStore = await createCoinPurchaseStore(
+  databaseBootstrap.databaseFilePath,
+)
 const authStore = await createAuthStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
+  {
+    getSignupBonusYellowCoins: () =>
+      adminSettingsStore.getSettings().signupBonusYellowCoins,
+  },
+)
+const friendshipStore = await createFriendshipStore(
+  databaseBootstrap.databaseFilePath,
+  playerProgressStore,
+)
+const chatStore = await createChatStore(
+  databaseBootstrap.databaseFilePath,
+  playerProgressStore,
+)
+const yellowCoinGiftStore = await createYellowCoinGiftStore(
+  databaseBootstrap.databaseFilePath,
+  playerProgressStore,
+)
+const tableExitPenaltyStore = await createTableExitPenaltyStore(
+  databaseBootstrap.databaseFilePath,
+  playerProgressStore,
+)
+const matchEconomyStore = await createMatchEconomyStore(
+  databaseBootstrap.databaseFilePath,
 )
 
 console.log(
@@ -338,6 +381,13 @@ function tickRoomGameRuntimes(): void {
     if (nextRoom !== room) {
       persistRoomSnapshot(nextRoom)
       playerProgressStore.recordCompletedMatch(nextRoom)
+      const payoutResult = matchEconomyStore.payoutMatchWinners(nextRoom)
+
+      if (!payoutResult.ok) {
+        console.error(
+          `[match-economy] payout failed room=${nextRoom.id}: ${payoutResult.message}`,
+        )
+      }
 
       if (nextRooms === null) {
         nextRooms = {
@@ -519,6 +569,73 @@ function sendPlayerProfileToConnection(
   })
 }
 
+function isProfileInActiveGame(profileId: string): boolean {
+  for (const room of Object.values(serverState.rooms)) {
+    if (room.status !== 'playing') {
+      continue
+    }
+
+    for (const seat of SERVER_SEAT_ORDER) {
+      const participant = room.seats[seat].participant
+      const participantProfileId =
+        participant?.identity.profileId ?? participant?.publicProfile?.profileId ?? null
+
+      if (participant?.kind === 'human' && participantProfileId === profileId) {
+        return true
+      }
+    }
+  }
+
+  return false
+}
+
+function isRoomAtMatchEndedPhase(room: ServerRoom): boolean {
+  const authoritativeState = room.game.authoritativeState
+
+  return (
+    room.status === 'finished' ||
+    (isRuntimeAuthoritativeState(authoritativeState) &&
+      authoritativeState.phase === 'match-ended')
+  )
+}
+
+function shouldApplyTableExitPenalty(room: ServerRoom): boolean {
+  const stakeAmount = room.config.stakeAmount ?? null
+
+  return (
+    room.status === 'playing' &&
+    !isRoomAtMatchEndedPhase(room) &&
+    Number.isInteger(stakeAmount) &&
+    stakeAmount !== null &&
+    stakeAmount > 0
+  )
+}
+
+function sendChatNotificationToProfile(input: {
+  recipientProfileId: string
+  friendshipId: string
+  senderProfileId: string
+}): void {
+  if (isProfileInActiveGame(input.recipientProfileId)) {
+    return
+  }
+
+  for (const connection of Object.values(serverState.connections)) {
+    if (
+      connection.profileId !== input.recipientProfileId ||
+      connection.status !== 'connected'
+    ) {
+      continue
+    }
+
+    safeSendToConnection(connection.id, {
+      type: 'chat_message_received',
+      friendshipId: input.friendshipId,
+      senderProfileId: input.senderProfileId,
+    })
+  }
+}
+
 function getQueueCountsByStake(): Record<string, number> {
   const counts: Record<string, number> = {}
 
@@ -544,6 +661,20 @@ function removeConnectionFromMatchmaking(connectionId: ConnectionId): boolean {
 
   if (existingEntry === null) {
     return false
+  }
+
+  if (existingEntry.stakePaid && existingEntry.profileId !== null) {
+    const refundResult = matchEconomyStore.refundQueueStake(
+      existingEntry.entryId,
+      existingEntry.profileId,
+      existingEntry.stake,
+    )
+
+    if (!refundResult.ok) {
+      console.error(
+        `[match-economy] stake refund failed entry=${existingEntry.entryId}: ${refundResult.message}`,
+      )
+    }
   }
 
   matchmakingState = {
@@ -628,6 +759,43 @@ function processMatchmaking(): void {
     }
 
     const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
+    let stakeCollectionFailed = false
+
+    for (const matchedEntry of result.group.matchedHumans) {
+      if (matchedEntry.stakePaid) {
+        continue
+      }
+
+      if (matchedEntry.profileId === null) {
+        safeSendToConnection(matchedEntry.connectionId, {
+          type: 'error',
+          message: 'Профилът не беше намерен за залога.',
+        })
+        stakeCollectionFailed = true
+        continue
+      }
+
+      const stakeResult = matchEconomyStore.collectQueueStake(
+        matchedEntry.entryId,
+        matchedEntry.profileId,
+        result.group.stake,
+      )
+
+      if (!stakeResult.ok) {
+        safeSendToConnection(matchedEntry.connectionId, {
+          type: 'error',
+          message: stakeResult.message,
+        })
+        stakeCollectionFailed = true
+      }
+    }
+
+    if (stakeCollectionFailed) {
+      cleanupPendingGroup(result.group.groupId)
+      broadcastMatchmakingStatusForStake(result.group.stake)
+      continue
+    }
+
     let nextServerState = upsertServerRoomWithSnapshot(serverState, initializedRoom)
 
     for (const matchedEntry of result.group.matchedHumans) {
@@ -1009,6 +1177,7 @@ async function handleProfileRequest(
   if (
     pathname !== '/api/profile/me' &&
     pathname !== '/api/profile/me/avatar' &&
+    pathname !== '/api/profile/me/display-name' &&
     pathname !== '/api/profile/me/gallery' &&
     !isGalleryImageDeletePath
   ) {
@@ -1032,6 +1201,7 @@ async function handleProfileRequest(
 
   if (
     (pathname === '/api/profile/me/avatar' ||
+      pathname === '/api/profile/me/display-name' ||
       pathname === '/api/profile/me/gallery') &&
     req.method !== 'POST'
   ) {
@@ -1131,6 +1301,29 @@ async function handleProfileRequest(
     const result = playerProgressStore.updateProfileAvatar(
       session.profile.profileId,
       avatarUrl,
+    )
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      session: {
+        ...session,
+        profile: result.profile,
+      },
+    })
+    return true
+  }
+
+  if (pathname === '/api/profile/me/display-name') {
+    const priceAmount = adminSettingsStore.getSettings().profileNameChangePrice
+    const result = playerProgressStore.changeProfileDisplayName(
+      session.profile.profileId,
+      getStringField(body, 'displayName'),
+      priceAmount,
     )
 
     if (!result.ok) {
@@ -1255,6 +1448,639 @@ async function handlePlayersRequest(
   return true
 }
 
+function markMatchmakingEntriesStakePaid(entryIds: string[]): void {
+  const entryIdsSet = new Set(entryIds)
+
+  matchmakingState = {
+    ...matchmakingState,
+    queueEntries: matchmakingState.queueEntries.map((entry) =>
+      entryIdsSet.has(entry.entryId)
+        ? {
+            ...entry,
+            stakePaid: true,
+          }
+        : entry,
+    ),
+  }
+}
+
+function collectReadyMatchmakingStakes(stake: MatchStake): void {
+  let searchingEntries = getSearchingEntriesByStake(
+    matchmakingState.queueEntries,
+    stake,
+  ).sort((a, b) => a.joinedAt - b.joinedAt)
+
+  if (searchingEntries.length < 2) {
+    return
+  }
+
+  for (const entry of searchingEntries) {
+    if (entry.stakePaid) {
+      continue
+    }
+
+    if (
+      entry.profileId === null ||
+      !matchEconomyStore.hasEnoughBalance(entry.profileId, entry.stake)
+    ) {
+      matchmakingState = {
+        ...matchmakingState,
+        queueEntries: removeQueueEntryByConnectionId(
+          matchmakingState.queueEntries,
+          entry.connectionId,
+        ),
+      }
+      safeSendToConnection(entry.connectionId, {
+        type: 'error',
+        message: 'Нямаш достатъчно жълтици за този залог.',
+      })
+    }
+  }
+
+  searchingEntries = getSearchingEntriesByStake(
+    matchmakingState.queueEntries,
+    stake,
+  ).sort((a, b) => a.joinedAt - b.joinedAt)
+
+  if (searchingEntries.length < 2) {
+    broadcastMatchmakingStatusForStake(stake)
+    return
+  }
+
+  const paidEntryIds: string[] = []
+
+  for (const entry of searchingEntries) {
+    if (entry.stakePaid || entry.profileId === null) {
+      continue
+    }
+
+    const result = matchEconomyStore.collectQueueStake(
+      entry.entryId,
+      entry.profileId,
+      entry.stake,
+    )
+
+    if (!result.ok) {
+      matchmakingState = {
+        ...matchmakingState,
+        queueEntries: removeQueueEntryByConnectionId(
+          matchmakingState.queueEntries,
+          entry.connectionId,
+        ),
+      }
+      safeSendToConnection(entry.connectionId, {
+        type: 'error',
+        message: result.message,
+      })
+      continue
+    }
+
+    paidEntryIds.push(entry.entryId)
+  }
+
+  if (paidEntryIds.length > 0) {
+    markMatchmakingEntriesStakePaid(paidEntryIds)
+  }
+
+  broadcastMatchmakingStatusForStake(stake)
+}
+
+async function handleLeaderboardsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/leaderboards' || req.method !== 'GET') {
+    return false
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    leaderboards: playerProgressStore.listLeaderboards(),
+  })
+  return true
+}
+
+async function handlePublicSettingsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/settings/public' || req.method !== 'GET') {
+    return false
+  }
+
+  const settings = adminSettingsStore.getSettings()
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    settings: {
+      signupBonusYellowCoins: settings.signupBonusYellowCoins,
+      profileNameChangePrice: settings.profileNameChangePrice,
+    },
+  })
+  return true
+}
+
+async function handleShopPackagesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/shop/packages' || req.method !== 'GET') {
+    return false
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    packages: coinPackageStore.listPublicPackages(),
+  })
+  return true
+}
+
+async function handleShopPurchasesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/shop/purchases') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си, за да купуваш жълтици.',
+    })
+    return true
+  }
+
+  if (req.method === 'GET') {
+    sendJsonResponse(res, 200, {
+      ok: true,
+      purchases: coinPurchaseStore.listProfilePurchases(session.profile.profileId),
+    })
+    return true
+  }
+
+  if (req.method === 'POST') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Invalid request body.',
+      })
+      return true
+    }
+
+    const result = coinPurchaseStore.createPendingPurchase(
+      session.profile.profileId,
+      getStringField(body, 'packageId'),
+    )
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      purchase: result.purchase,
+      purchases: coinPurchaseStore.listProfilePurchases(session.profile.profileId),
+      message:
+        'Покупката е записана като pending. Stripe checkout ще бъде свързан в следващата стъпка.',
+    })
+    return true
+  }
+
+  return false
+}
+
+async function handleAdminSettingsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/admin/settings') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.account.role !== 'admin') {
+    sendJsonResponse(res, 403, {
+      ok: false,
+      message: 'Нямаш достъп до админ настройките.',
+    })
+    return true
+  }
+
+  if (req.method === 'GET') {
+    sendJsonResponse(res, 200, {
+      ok: true,
+      settings: adminSettingsStore.getSettings(),
+    })
+    return true
+  }
+
+  if (req.method === 'PATCH') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Invalid request body.',
+      })
+      return true
+    }
+
+    const result = adminSettingsStore.updateSettings({
+      signupBonusYellowCoins: getNumberField(body, 'signupBonusYellowCoins') ?? undefined,
+      profileNameChangePrice: getNumberField(body, 'profileNameChangePrice') ?? undefined,
+    })
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      settings: result.settings,
+    })
+    return true
+  }
+
+  return false
+}
+
+async function handleAdminCoinPackagesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const statusMatch = /^\/api\/admin\/coin-packages\/([^/]+)\/status$/.exec(pathname)
+
+  if (pathname !== '/api/admin/coin-packages' && statusMatch === null) {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.account.role !== 'admin') {
+    sendJsonResponse(res, 403, {
+      ok: false,
+      message: 'Нямаш достъп до админ пакетите.',
+    })
+    return true
+  }
+
+  if (pathname === '/api/admin/coin-packages' && req.method === 'GET') {
+    sendJsonResponse(res, 200, {
+      ok: true,
+      packages: coinPackageStore.listAdminPackages(),
+    })
+    return true
+  }
+
+  if (pathname === '/api/admin/coin-packages' && req.method === 'POST') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Invalid request body.',
+      })
+      return true
+    }
+
+    const result = coinPackageStore.upsertPackage({
+      packageId: getStringField(body, 'packageId') || null,
+      packageKey: getStringField(body, 'packageKey'),
+      title: getStringField(body, 'title'),
+      description: getStringField(body, 'description'),
+      yellowCoinsAmount: getNumberField(body, 'yellowCoinsAmount') ?? 0,
+      priceCents: getNumberField(body, 'priceCents') ?? -1,
+      currency: getStringField(body, 'currency') || 'EUR',
+      status: getStringField(body, 'status') as CoinPackageStatus,
+      sortOrder: getNumberField(body, 'sortOrder') ?? 0,
+    })
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      package: result.package,
+      packages: coinPackageStore.listAdminPackages(),
+    })
+    return true
+  }
+
+  if (statusMatch !== null && req.method === 'PATCH') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Invalid request body.',
+      })
+      return true
+    }
+
+    const result = coinPackageStore.setPackageStatus(
+      decodeURIComponent(statusMatch[1] ?? ''),
+      getStringField(body, 'status') as CoinPackageStatus,
+    )
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      package: result.package,
+      packages: coinPackageStore.listAdminPackages(),
+    })
+    return true
+  }
+
+  return false
+}
+
+async function handleFriendsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const friendActionMatch =
+    /^\/api\/friends\/([^/]+)\/(accept|reject|remove)$/.exec(pathname)
+  const friendGiftMatch = /^\/api\/friends\/([^/]+)\/gift-coins$/.exec(pathname)
+
+  if (
+    pathname !== '/api/friends' &&
+    pathname !== '/api/friends/request' &&
+    pathname !== '/api/friends/block' &&
+    friendGiftMatch === null &&
+    friendActionMatch === null
+  ) {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си.',
+    })
+    return true
+  }
+
+  const profileId = session.profile.profileId
+
+  if (pathname === '/api/friends' && req.method === 'GET') {
+    sendJsonResponse(res, 200, {
+      ok: true,
+      friendships: friendshipStore.listForProfile(profileId),
+    })
+    return true
+  }
+
+  if (pathname === '/api/friends/request' && req.method === 'POST') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Invalid request body.',
+      })
+      return true
+    }
+
+    const addresseeProfileId = getStringField(body, 'profileId').trim()
+    const result = friendshipStore.sendRequest(profileId, addresseeProfileId)
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      friendships: result.friendships,
+    })
+    return true
+  }
+
+  if (pathname === '/api/friends/block' && req.method === 'POST') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Invalid request body.',
+      })
+      return true
+    }
+
+    const blockedProfileId = getStringField(body, 'profileId').trim()
+    const result = friendshipStore.blockProfile(profileId, blockedProfileId)
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      friendships: result.friendships,
+    })
+    return true
+  }
+
+  if (friendGiftMatch !== null && req.method === 'POST') {
+    const friendshipId = decodeURIComponent(friendGiftMatch[1]).trim()
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Invalid request body.',
+      })
+      return true
+    }
+
+    const amount = getNumberField(body, 'amount')
+
+    if (amount === null) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Невалидна сума за подарък.',
+      })
+      return true
+    }
+
+    const result = yellowCoinGiftStore.sendGift(profileId, friendshipId, amount)
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      gift: result.gift,
+      senderProfile: result.senderProfile,
+      recipientProfile: result.recipientProfile,
+    })
+    return true
+  }
+
+  if (friendActionMatch !== null && req.method === 'POST') {
+    const friendshipId = decodeURIComponent(friendActionMatch[1]).trim()
+    const action = friendActionMatch[2]
+
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(friendshipId)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Невалидна покана.',
+      })
+      return true
+    }
+
+    const result =
+      action === 'accept'
+        ? friendshipStore.acceptRequest(profileId, friendshipId)
+        : action === 'reject'
+          ? friendshipStore.rejectRequest(profileId, friendshipId)
+          : friendshipStore.removeRelationship(profileId, friendshipId)
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      friendships: result.friendships,
+    })
+    return true
+  }
+
+  return false
+}
+
+async function handleChatRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const messagesMatch = /^\/api\/chat\/([^/]+)\/messages$/.exec(pathname)
+
+  if (pathname !== '/api/chat/conversations' && messagesMatch === null) {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си.',
+    })
+    return true
+  }
+
+  const profileId = session.profile.profileId
+
+  if (isProfileInActiveGame(profileId)) {
+    sendJsonResponse(res, 403, {
+      ok: false,
+      message: 'Чатът не е позволен по време на игра.',
+    })
+    return true
+  }
+
+  if (pathname === '/api/chat/conversations' && req.method === 'GET') {
+    sendJsonResponse(res, 200, {
+      ok: true,
+      conversations: chatStore.listConversations(profileId),
+    })
+    return true
+  }
+
+  if (messagesMatch !== null && req.method === 'GET') {
+    const friendshipId = decodeURIComponent(messagesMatch[1]).trim()
+    const result = chatStore.listMessages(profileId, friendshipId)
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      messages: result.messages,
+    })
+    return true
+  }
+
+  if (messagesMatch !== null && req.method === 'POST') {
+    const friendshipId = decodeURIComponent(messagesMatch[1]).trim()
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Invalid request body.',
+      })
+      return true
+    }
+
+    const result = chatStore.sendMessage(
+      profileId,
+      friendshipId,
+      getStringField(body, 'body'),
+    )
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    const recipientProfileId = result.conversation.friend.profileId
+
+    if (recipientProfileId !== null) {
+      sendChatNotificationToProfile({
+        recipientProfileId,
+        friendshipId,
+        senderProfileId: profileId,
+      })
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      conversation: result.conversation,
+      messages: result.messages,
+    })
+    return true
+  }
+
+  return false
+}
+
 async function handleHttpRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -1306,7 +2132,39 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleFriendsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleChatRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handlePlayersRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleLeaderboardsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handlePublicSettingsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleShopPackagesRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleShopPurchasesRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminSettingsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminCoinPackagesRequest(req, res, requestUrl.pathname)) {
     return
   }
 
@@ -1754,6 +2612,23 @@ wsServer.on('connection', (socket, request) => {
           playerId: latestConnection.playerId ?? profileId,
         }
 
+        if (!matchEconomyStore.hasEnoughBalance(profileId, message.stake)) {
+          const existingEntry = getQueueEntryByConnectionId(
+            matchmakingState.queueEntries,
+            connection.id,
+          )
+
+          if (existingEntry !== null) {
+            removeConnectionFromMatchmaking(connection.id)
+          }
+
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Нямаш достатъчно жълтици за този залог.',
+          })
+          return
+        }
+
         serverState = updateServerConnectionInState(
           serverState,
           connection.id,
@@ -1766,6 +2641,7 @@ wsServer.on('connection', (socket, request) => {
         )
 
         if (existingEntry !== null && existingEntry.stake === message.stake) {
+          collectReadyMatchmakingStakes(existingEntry.stake)
           const searchingEntries = getSearchingEntriesByStake(
             matchmakingState.queueEntries,
             existingEntry.stake,
@@ -1797,15 +2673,7 @@ wsServer.on('connection', (socket, request) => {
         }
 
         if (existingEntry !== null) {
-          matchmakingState = {
-            ...matchmakingState,
-            queueEntries: removeQueueEntryByConnectionId(
-              matchmakingState.queueEntries,
-              connection.id,
-            ),
-          }
-
-          broadcastMatchmakingStatusForStake(existingEntry.stake)
+          removeConnectionFromMatchmaking(connection.id)
         }
 
         const nextEntry = createMatchmakingQueueEntry({
@@ -1822,33 +2690,44 @@ wsServer.on('connection', (socket, request) => {
           queueEntries: addQueueEntry(matchmakingState.queueEntries, nextEntry),
         }
 
+        collectReadyMatchmakingStakes(nextEntry.stake)
+
+        const queuedEntryAfterStakeCollection = getQueueEntryByConnectionId(
+          matchmakingState.queueEntries,
+          connection.id,
+        )
+
+        if (queuedEntryAfterStakeCollection === null) {
+          return
+        }
+
         const searchingEntries = getSearchingEntriesByStake(
           matchmakingState.queueEntries,
-          nextEntry.stake,
+          queuedEntryAfterStakeCollection.stake,
         ).sort((a, b) => a.joinedAt - b.joinedAt)
         const previewBotDisplayNames = selectMatchmakingBotProfiles({
-          stake: nextEntry.stake,
+          stake: queuedEntryAfterStakeCollection.stake,
           count: Math.max(0, MATCH_PLAYERS_REQUIRED - searchingEntries.length),
           selectionSeed: createMatchmakingBotSelectionSeed(
-            nextEntry.stake,
+            queuedEntryAfterStakeCollection.stake,
             searchingEntries,
           ),
         }).map((profile) => profile.identity.displayName)
 
         safeSendToConnection(connection.id, {
           type: 'matchmaking_joined',
-          stake: nextEntry.stake,
+          stake: queuedEntryAfterStakeCollection.stake,
           queuedPlayers: getSearchingEntriesByStake(
             matchmakingState.queueEntries,
-            nextEntry.stake,
+            queuedEntryAfterStakeCollection.stake,
           ).length,
           requiredPlayers: MATCH_PLAYERS_REQUIRED,
-          countdownEndsAt: nextEntry.expiresAt,
-          remainingMs: Math.max(0, nextEntry.expiresAt - Date.now()),
+          countdownEndsAt: queuedEntryAfterStakeCollection.expiresAt,
+          remainingMs: Math.max(0, queuedEntryAfterStakeCollection.expiresAt - Date.now()),
           previewBotDisplayNames,
         })
 
-        broadcastMatchmakingStatusForStake(nextEntry.stake)
+        broadcastMatchmakingStatusForStake(queuedEntryAfterStakeCollection.stake)
         processMatchmaking()
         return
       }
@@ -1915,6 +2794,65 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        const shouldApplyPenalty = shouldApplyTableExitPenalty(room)
+        const stakeAmount = room.config.stakeAmount ?? null
+        let exitPenalty:
+          | {
+              penaltyAmount: number
+              chargedAmount: number
+              balanceAfter: number
+            }
+          | undefined
+
+        if (shouldApplyPenalty) {
+          const participantProfileId =
+            participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+
+          if (participantProfileId === null) {
+            safeSendToConnection(connection.id, {
+              type: 'error',
+              message: 'Само регистриран профил може да напусне активна маса.',
+            })
+            return
+          }
+
+          if (message.acceptPenalty !== true) {
+            safeSendToConnection(connection.id, {
+              type: 'error',
+              message: 'Потвърди санкцията за напускане на активната маса.',
+            })
+            return
+          }
+
+          if (!Number.isInteger(stakeAmount) || stakeAmount === null || stakeAmount <= 0) {
+            safeSendToConnection(connection.id, {
+              type: 'error',
+              message: 'Невалиден залог за санкция при напускане.',
+            })
+            return
+          }
+
+          const penaltyResult = tableExitPenaltyStore.applyPenalty(
+            participantProfileId,
+            room.id,
+            stakeAmount,
+          )
+
+          if (!penaltyResult.ok) {
+            safeSendToConnection(connection.id, {
+              type: 'error',
+              message: penaltyResult.message,
+            })
+            return
+          }
+
+          exitPenalty = {
+            penaltyAmount: penaltyResult.penalty.penaltyAmount,
+            chargedAmount: penaltyResult.penalty.chargedAmount,
+            balanceAfter: penaltyResult.penalty.balanceAfter,
+          }
+        }
+
         const disconnectedParticipant = markHumanParticipantDisconnected(
           participant,
           connection.id,
@@ -1936,12 +2874,14 @@ wsServer.on('connection', (socket, request) => {
           detachedConnection,
         )
 
+        const roomWasRemoved = cleanupInactiveRoomIfNeeded(message.roomId)
+
         safeSendToConnection(connection.id, {
           type: 'left_active_room',
           roomId: message.roomId,
+          removed: roomWasRemoved,
+          penalty: exitPenalty,
         })
-
-        const roomWasRemoved = cleanupInactiveRoomIfNeeded(message.roomId)
 
         if (!roomWasRemoved) {
           broadcastRoomSnapshots(nextRoom, socketRegistry)
@@ -2071,7 +3011,15 @@ function closeActiveRoomSnapshotStore(): void {
   try {
     activeRoomSnapshotStore.close()
     playerProgressStore.close()
+    adminSettingsStore.close()
     authStore.close()
+    friendshipStore.close()
+    chatStore.close()
+    yellowCoinGiftStore.close()
+    tableExitPenaltyStore.close()
+    matchEconomyStore.close()
+    coinPackageStore.close()
+    coinPurchaseStore.close()
   } catch (error) {
     console.error('[room-snapshot] failed to close store', error)
   }

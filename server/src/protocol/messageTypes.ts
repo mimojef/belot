@@ -62,6 +62,7 @@ export type ClientMessage =
   | {
       type: 'leave_active_room'
       roomId: RoomId
+      acceptPenalty?: boolean
     }
   | {
       type: 'submit_bid_action'
@@ -323,6 +324,11 @@ export type ActiveRoomLeftMessage = {
   type: 'left_active_room'
   roomId: RoomId
   removed: boolean
+  penalty?: {
+    penaltyAmount: number
+    chargedAmount: number
+    balanceAfter: number
+  }
 }
 
 export type PartnerRatingSubmittedMessage = {

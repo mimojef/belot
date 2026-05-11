@@ -16,6 +16,13 @@ import { createRankProgressSnapshot } from '../progression/rankProgression.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
+export type LeaderboardCategory = 'balance' | 'rank' | 'wins' | 'rating'
+
+export type LeaderboardsSnapshot = Record<
+  LeaderboardCategory,
+  PlayerPublicProfileSnapshot[]
+>
+
 export type PlayerProgressStore = {
   createTemporaryHumanProfile: (
     displayName: string,
@@ -23,6 +30,12 @@ export type PlayerProgressStore = {
   ) => PlayerPublicProfileSnapshot
   getPublicProfile: (profileId: ProfileId) => PlayerPublicProfileSnapshot | null
   listPublicHumanProfiles: () => PlayerPublicProfileSnapshot[]
+  listLeaderboards: () => LeaderboardsSnapshot
+  changeProfileDisplayName: (
+    profileId: ProfileId,
+    displayName: string,
+    priceAmount: number,
+  ) => { ok: true; profile: PlayerPublicProfileSnapshot } | { ok: false; message: string }
   updateProfileAvatar: (
     profileId: ProfileId,
     avatarUrl: string | null,
@@ -286,6 +299,117 @@ export async function createPlayerProgressStore(
     LIMIT 200;
   `)
 
+  const listLeaderboardByBalanceStatement = database.prepare(`
+    SELECT
+      p.profile_id,
+      p.display_name,
+      p.avatar_url,
+      p.level,
+      p.rank_title,
+      p.skill_rating,
+      p.average_rating,
+      p.total_ratings_count,
+      COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance,
+      pp.completed_games_count,
+      pp.won_games_count
+    FROM profiles p
+    LEFT JOIN profile_wallets pw
+      ON pw.profile_id = p.profile_id
+    LEFT JOIN profile_progress pp
+      ON pp.profile_id = p.profile_id
+    WHERE p.profile_kind = 'human'
+      AND p.status = 'active'
+      AND p.account_id IS NOT NULL
+    ORDER BY COALESCE(pw.yellow_coins_balance, 0) DESC,
+      COALESCE(pp.completed_games_count, 0) DESC,
+      p.display_name ASC
+    LIMIT 50;
+  `)
+
+  const listLeaderboardByRankStatement = database.prepare(`
+    SELECT
+      p.profile_id,
+      p.display_name,
+      p.avatar_url,
+      p.level,
+      p.rank_title,
+      p.skill_rating,
+      p.average_rating,
+      p.total_ratings_count,
+      COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance,
+      pp.completed_games_count,
+      pp.won_games_count
+    FROM profiles p
+    LEFT JOIN profile_wallets pw
+      ON pw.profile_id = p.profile_id
+    LEFT JOIN profile_progress pp
+      ON pp.profile_id = p.profile_id
+    WHERE p.profile_kind = 'human'
+      AND p.status = 'active'
+      AND p.account_id IS NOT NULL
+    ORDER BY COALESCE(pp.completed_games_count, 0) DESC,
+      p.level DESC,
+      COALESCE(pp.won_games_count, 0) DESC,
+      p.display_name ASC
+    LIMIT 50;
+  `)
+
+  const listLeaderboardByWinsStatement = database.prepare(`
+    SELECT
+      p.profile_id,
+      p.display_name,
+      p.avatar_url,
+      p.level,
+      p.rank_title,
+      p.skill_rating,
+      p.average_rating,
+      p.total_ratings_count,
+      COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance,
+      pp.completed_games_count,
+      pp.won_games_count
+    FROM profiles p
+    LEFT JOIN profile_wallets pw
+      ON pw.profile_id = p.profile_id
+    LEFT JOIN profile_progress pp
+      ON pp.profile_id = p.profile_id
+    WHERE p.profile_kind = 'human'
+      AND p.status = 'active'
+      AND p.account_id IS NOT NULL
+    ORDER BY COALESCE(pp.won_games_count, 0) DESC,
+      COALESCE(pp.completed_games_count, 0) DESC,
+      p.display_name ASC
+    LIMIT 50;
+  `)
+
+  const listLeaderboardByRatingStatement = database.prepare(`
+    SELECT
+      p.profile_id,
+      p.display_name,
+      p.avatar_url,
+      p.level,
+      p.rank_title,
+      p.skill_rating,
+      p.average_rating,
+      p.total_ratings_count,
+      COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance,
+      pp.completed_games_count,
+      pp.won_games_count
+    FROM profiles p
+    LEFT JOIN profile_wallets pw
+      ON pw.profile_id = p.profile_id
+    LEFT JOIN profile_progress pp
+      ON pp.profile_id = p.profile_id
+    WHERE p.profile_kind = 'human'
+      AND p.status = 'active'
+      AND p.account_id IS NOT NULL
+      AND p.total_ratings_count > 0
+    ORDER BY p.average_rating DESC,
+      p.total_ratings_count DESC,
+      COALESCE(pp.completed_games_count, 0) DESC,
+      p.display_name ASC
+    LIMIT 50;
+  `)
+
   const updateProfileAvatarStatement = database.prepare(`
     UPDATE profiles
     SET
@@ -294,6 +418,60 @@ export async function createPlayerProgressStore(
     WHERE profile_id = ?
       AND profile_kind = 'human'
       AND status = 'active';
+  `)
+
+  const selectProfileDisplayNameStatement = database.prepare(`
+    SELECT display_name
+    FROM profiles
+    WHERE profile_id = ?
+      AND profile_kind = 'human'
+      AND status = 'active'
+    LIMIT 1;
+  `)
+
+  const selectWalletBalanceStatement = database.prepare(`
+    SELECT yellow_coins_balance
+    FROM profile_wallets
+    WHERE profile_id = ?
+    LIMIT 1;
+  `)
+
+  const debitWalletStatement = database.prepare(`
+    UPDATE profile_wallets
+    SET
+      yellow_coins_balance = yellow_coins_balance - ?,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE profile_id = ?
+      AND yellow_coins_balance >= ?;
+  `)
+
+  const updateProfileDisplayNameStatement = database.prepare(`
+    UPDATE profiles
+    SET
+      display_name = ?,
+      normalized_display_name = ?,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE profile_id = ?
+      AND profile_kind = 'human'
+      AND status = 'active';
+  `)
+
+  const insertNameChangeLedgerStatement = database.prepare(`
+    INSERT INTO profile_name_change_ledger (
+      change_id,
+      profile_id,
+      old_display_name,
+      new_display_name,
+      price_amount,
+      balance_after
+    ) VALUES (
+      ?,
+      ?,
+      ?,
+      ?,
+      ?,
+      ?
+    );
   `)
 
   const selectNextGallerySortOrderStatement = database.prepare(`
@@ -473,6 +651,157 @@ export async function createPlayerProgressStore(
 
       return toPublicProfileSnapshot(row, galleryImages)
     })
+  }
+
+  function listProfilesFromStatement(
+    statement: ReturnType<SqliteDatabase['prepare']>,
+  ): PlayerPublicProfileSnapshot[] {
+    const rows = statement.all() as Array<
+      Parameters<typeof toPublicProfileSnapshot>[0]
+    >
+
+    return rows.map((row) => {
+      const galleryImages = selectProfileGalleryImagesStatement.all(
+        row.profile_id,
+      ) as ProfileGalleryImageRow[]
+
+      return toPublicProfileSnapshot(row, galleryImages)
+    })
+  }
+
+  function listLeaderboards(): LeaderboardsSnapshot {
+    return {
+      balance: listProfilesFromStatement(listLeaderboardByBalanceStatement),
+      rank: listProfilesFromStatement(listLeaderboardByRankStatement),
+      wins: listProfilesFromStatement(listLeaderboardByWinsStatement),
+      rating: listProfilesFromStatement(listLeaderboardByRatingStatement),
+    }
+  }
+
+  function getWalletBalance(profileId: ProfileId): number {
+    const row = selectWalletBalanceStatement.get(profileId) as
+      | { yellow_coins_balance: number }
+      | undefined
+
+    return row?.yellow_coins_balance ?? 0
+  }
+
+  function changeProfileDisplayName(
+    profileId: ProfileId,
+    displayNameRaw: string,
+    priceAmountRaw: number,
+  ): { ok: true; profile: PlayerPublicProfileSnapshot } | { ok: false; message: string } {
+    const displayName = displayNameRaw.trim().replace(/\s+/g, ' ')
+    const normalizedDisplayName = normalizeProfileDisplayName(displayName)
+
+    if (normalizedDisplayName === null || displayName.length < 2 || displayName.length > 32) {
+      return {
+        ok: false,
+        message: 'Името трябва да е между 2 и 32 символа.',
+      }
+    }
+
+    if (!Number.isInteger(priceAmountRaw) || priceAmountRaw < 0) {
+      return {
+        ok: false,
+        message: 'Невалидна цена за смяна на име.',
+      }
+    }
+
+    const existingProfile = selectProfileDisplayNameStatement.get(profileId) as
+      | { display_name: string }
+      | undefined
+
+    if (!existingProfile) {
+      return {
+        ok: false,
+        message: 'Профилът не беше намерен.',
+      }
+    }
+
+    if (normalizeProfileDisplayName(existingProfile.display_name) === normalizedDisplayName) {
+      return {
+        ok: false,
+        message: 'Новото име трябва да е различно от текущото.',
+      }
+    }
+
+    try {
+      database.exec('BEGIN;')
+      ensureWalletStatement.run(profileId)
+
+      const debitResult = debitWalletStatement.run(
+        priceAmountRaw,
+        profileId,
+        priceAmountRaw,
+      ) as { changes?: number }
+
+      if ((debitResult.changes ?? 0) === 0) {
+        database.exec('ROLLBACK;')
+        return {
+          ok: false,
+          message: 'Нямаш достатъчно жълтици за смяна на име.',
+        }
+      }
+
+      const updateResult = updateProfileDisplayNameStatement.run(
+        displayName,
+        normalizedDisplayName,
+        profileId,
+      ) as { changes?: number }
+
+      if ((updateResult.changes ?? 0) === 0) {
+        database.exec('ROLLBACK;')
+        return {
+          ok: false,
+          message: 'Профилът не беше намерен.',
+        }
+      }
+
+      insertNameChangeLedgerStatement.run(
+        randomUUID(),
+        profileId,
+        existingProfile.display_name,
+        displayName,
+        priceAmountRaw,
+        getWalletBalance(profileId),
+      )
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // surface the original failure
+      }
+
+      const message = error instanceof Error ? error.message : String(error)
+
+      if (message.includes('normalized_display_name')) {
+        return {
+          ok: false,
+          message: 'Това име вече е заето.',
+        }
+      }
+
+      return {
+        ok: false,
+        message: 'Името не беше сменено.',
+      }
+    }
+
+    const profile = getPublicProfile(profileId)
+
+    if (profile === null) {
+      return {
+        ok: false,
+        message: 'Профилът не беше намерен след смяната.',
+      }
+    }
+
+    return {
+      ok: true,
+      profile,
+    }
   }
 
   function normalizeAvatarUrl(value: string | null): string | null {
@@ -769,6 +1098,8 @@ export async function createPlayerProgressStore(
     createTemporaryHumanProfile,
     getPublicProfile,
     listPublicHumanProfiles,
+    listLeaderboards,
+    changeProfileDisplayName,
     updateProfileAvatar,
     addProfileGalleryImage,
     deleteProfileGalleryImage,

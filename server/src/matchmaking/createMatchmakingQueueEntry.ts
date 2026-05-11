@@ -43,6 +43,7 @@ export function createMatchmakingQueueEntry(
     displayName: normalizeDisplayName(options.displayName),
     publicProfile: options.publicProfile ?? null,
     stake: options.stake,
+    stakePaid: false,
     joinedAt: now,
     expiresAt: now + MATCHMAKING_WAIT_MS,
     status: 'searching',

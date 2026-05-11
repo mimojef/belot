@@ -33,6 +33,10 @@ export type AuthStore = {
   close: () => void
 }
 
+type CreateAuthStoreOptions = {
+  getSignupBonusYellowCoins?: () => number
+}
+
 type AccountRow = {
   account_id: string
   email: string
@@ -159,6 +163,7 @@ function toAccountSnapshot(row: AccountRow | SessionRow): AuthAccountSnapshot {
 export async function createAuthStore(
   databaseFilePath: string,
   playerProgressStore: PlayerProgressStore,
+  options: CreateAuthStoreOptions = {},
 ): Promise<AuthStore> {
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
@@ -228,7 +233,7 @@ export async function createAuthStore(
       yellow_coins_balance
     ) VALUES (
       ?,
-      0
+      ?
     );
   `)
 
@@ -368,7 +373,10 @@ export async function createAuthStore(
         displayName,
         normalizedDisplayName,
       )
-      insertWalletStatement.run(profileId)
+      insertWalletStatement.run(
+        profileId,
+        Math.max(0, Math.trunc(options.getSignupBonusYellowCoins?.() ?? 0)),
+      )
       insertProgressStatement.run(profileId)
       database.exec('COMMIT;')
 

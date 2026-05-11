@@ -9,6 +9,17 @@ import {
   type LobbyScreenState,
 } from './renderLobbyScreen'
 import type {
+  AdminSettingsSnapshot,
+  ChatConversationSnapshot,
+  ChatMessageSnapshot,
+  CoinPackageInput,
+  CoinPackageSnapshot,
+  CoinPackageStatus,
+  CoinPurchaseSnapshot,
+  FriendRelationshipSnapshot,
+  FriendshipsSnapshot,
+  LeaderboardCategory,
+  LeaderboardsSnapshot,
   MatchFoundMessage,
   MatchStake,
   PlayerPublicProfileSnapshot,
@@ -16,9 +27,19 @@ import type {
   ServerMessage,
 } from '../network/createGameServerClient'
 
-export type LobbyFlowScreen = 'lobby' | 'players' | 'matchmaking-room'
+export type LobbyFlowScreen =
+  | 'lobby'
+  | 'players'
+  | 'leaderboards'
+  | 'shop'
+  | 'admin'
+  | 'matchmaking-room'
+export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
 export type LobbyAuthSession = {
+  account: {
+    role: string
+  }
   profile: PlayerPublicProfileSnapshot
 }
 
@@ -29,6 +50,8 @@ export type CreateLobbyFlowControllerOptions = {
   onMatchFound: (message: MatchFoundMessage) => void
   tryUnlockDocumentAudio?: () => void
   getAuthSession?: () => LobbyAuthSession | null
+  getSignupBonusYellowCoins?: () => number
+  getProfileNameChangePrice?: () => number
   onLoginSubmit?: (email: string, password: string) => Promise<string | null>
   onRegisterSubmit?: (
     displayName: string,
@@ -41,8 +64,100 @@ export type CreateLobbyFlowControllerOptions = {
     galleryFiles: File[],
   ) => Promise<string | null>
   onProfileGalleryDelete?: (imageId: string) => Promise<string | null>
+  onProfileNameChangeSubmit?: (displayName: string) => Promise<string | null>
   onPlayersLoad?: () => Promise<
     | { ok: true; players: PlayerPublicProfileSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onLeaderboardsLoad?: () => Promise<
+    | { ok: true; leaderboards: LeaderboardsSnapshot }
+    | { ok: false; message: string }
+  >
+  onShopPackagesLoad?: () => Promise<
+    | { ok: true; packages: CoinPackageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onShopPurchasesLoad?: () => Promise<
+    | { ok: true; purchases: CoinPurchaseSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onShopPurchaseStart?: (packageId: string) => Promise<
+    | { ok: true; purchases: CoinPurchaseSnapshot[]; message: string }
+    | { ok: false; message: string }
+  >
+  onAdminSettingsLoad?: () => Promise<
+    | { ok: true; settings: AdminSettingsSnapshot }
+    | { ok: false; message: string }
+  >
+  onAdminSettingsSubmit?: (
+    settings: AdminSettingsSnapshot,
+  ) => Promise<
+    | { ok: true; settings: AdminSettingsSnapshot }
+    | { ok: false; message: string }
+  >
+  onAdminCoinPackagesLoad?: () => Promise<
+    | { ok: true; packages: CoinPackageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminCoinPackageSubmit?: (
+    input: CoinPackageInput,
+  ) => Promise<
+    | { ok: true; packages: CoinPackageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminCoinPackageStatusChange?: (
+    packageId: string,
+    status: CoinPackageStatus,
+  ) => Promise<
+    | { ok: true; packages: CoinPackageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onFriendshipsLoad?: () => Promise<
+    | { ok: true; friendships: FriendshipsSnapshot }
+    | { ok: false; message: string }
+  >
+  onFriendRequestSubmit?: (profileId: string) => Promise<
+    | { ok: true; friendships: FriendshipsSnapshot }
+    | { ok: false; message: string }
+  >
+  onFriendAccept?: (friendshipId: string) => Promise<
+    | { ok: true; friendships: FriendshipsSnapshot }
+    | { ok: false; message: string }
+  >
+  onFriendReject?: (friendshipId: string) => Promise<
+    | { ok: true; friendships: FriendshipsSnapshot }
+    | { ok: false; message: string }
+  >
+  onFriendRemove?: (friendshipId: string) => Promise<
+    | { ok: true; friendships: FriendshipsSnapshot }
+    | { ok: false; message: string }
+  >
+  onFriendBlock?: (profileId: string) => Promise<
+    | { ok: true; friendships: FriendshipsSnapshot }
+    | { ok: false; message: string }
+  >
+  onGiftCoinsSubmit?: (friendshipId: string, amount: number) => Promise<
+    | {
+        ok: true
+        senderProfile: PlayerPublicProfileSnapshot
+        recipientProfile: PlayerPublicProfileSnapshot
+      }
+    | { ok: false; message: string }
+  >
+  onChatConversationsLoad?: () => Promise<
+    | { ok: true; conversations: ChatConversationSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onChatMessagesLoad?: (friendshipId: string) => Promise<
+    | { ok: true; messages: ChatMessageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onChatSend?: (friendshipId: string, body: string) => Promise<
+    | {
+        ok: true
+        conversation: ChatConversationSnapshot
+        messages: ChatMessageSnapshot[]
+      }
     | { ok: false; message: string }
   >
 }
@@ -50,18 +165,20 @@ export type CreateLobbyFlowControllerOptions = {
 export type LobbyFlowController = {
   render: () => void
   destroy: () => void
-  getCurrentScreen: () => LobbyFlowScreen
+  getCurrentScreen: () => LobbySocialScreen
   setConnected: (value: boolean) => void
   setDisplayName: (value: string) => void
   setErrorText: (value: string | null) => void
   setLocalAvatarUrl: (value: string | null) => void
+  setFriendships: (value: FriendshipsSnapshot | null) => void
+  setChatConversations: (value: ChatConversationSnapshot[]) => void
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
   resetToLobby: () => void
   handleServerMessage: (message: ServerMessage) => boolean
 }
 
 type InternalLobbyFlowState = {
-  currentScreen: LobbyFlowScreen
+  currentScreen: LobbySocialScreen
   displayName: string
   localAvatarUrl: string | null
   selectedStake: MatchStake
@@ -85,6 +202,38 @@ type InternalLobbyFlowState = {
   players: PlayerPublicProfileSnapshot[]
   playersLoading: boolean
   playersErrorText: string | null
+  leaderboards: LeaderboardsSnapshot | null
+  leaderboardsLoading: boolean
+  leaderboardsErrorText: string | null
+  activeLeaderboardCategory: LeaderboardCategory
+  shopPackages: CoinPackageSnapshot[]
+  shopPackagesLoading: boolean
+  shopPackagesErrorText: string | null
+  shopPurchases: CoinPurchaseSnapshot[]
+  shopPurchasesLoading: boolean
+  shopPurchaseActionPackageId: string | null
+  shopPurchaseMessageText: string | null
+  adminSettings: AdminSettingsSnapshot | null
+  adminSettingsLoading: boolean
+  adminSettingsErrorText: string | null
+  adminCoinPackages: CoinPackageSnapshot[]
+  adminCoinPackagesLoading: boolean
+  adminCoinPackagesErrorText: string | null
+  friendships: FriendshipsSnapshot | null
+  friendsLoading: boolean
+  friendsErrorText: string | null
+  friendActionLoadingProfileId: string | null
+  friendActionMessageProfileId: string | null
+  friendActionMessage: string | null
+  giftModalFriendshipId: string | null
+  giftModalFriendName: string
+  giftModalErrorText: string | null
+  chatConversations: ChatConversationSnapshot[]
+  activeChatFriendshipId: string | null
+  chatMessages: ChatMessageSnapshot[]
+  chatLoading: boolean
+  chatMessagesLoading: boolean
+  chatErrorText: string | null
 }
 
 type StakeCardConfig = {
@@ -143,6 +292,38 @@ function createInitialState(): InternalLobbyFlowState {
     players: [],
     playersLoading: false,
     playersErrorText: null,
+    leaderboards: null,
+    leaderboardsLoading: false,
+    leaderboardsErrorText: null,
+    activeLeaderboardCategory: 'balance',
+    shopPackages: [],
+    shopPackagesLoading: false,
+    shopPackagesErrorText: null,
+    shopPurchases: [],
+    shopPurchasesLoading: false,
+    shopPurchaseActionPackageId: null,
+    shopPurchaseMessageText: null,
+    adminSettings: null,
+    adminSettingsLoading: false,
+    adminSettingsErrorText: null,
+    adminCoinPackages: [],
+    adminCoinPackagesLoading: false,
+    adminCoinPackagesErrorText: null,
+    friendships: null,
+    friendsLoading: false,
+    friendsErrorText: null,
+    friendActionLoadingProfileId: null,
+    friendActionMessageProfileId: null,
+    friendActionMessage: null,
+    giftModalFriendshipId: null,
+    giftModalFriendName: '',
+    giftModalErrorText: null,
+    chatConversations: [],
+    activeChatFriendshipId: null,
+    chatMessages: [],
+    chatLoading: false,
+    chatMessagesLoading: false,
+    chatErrorText: null,
   }
 }
 
@@ -279,6 +460,26 @@ function createAutoFillPreviewPlayer(
     avatarUrl: null,
     isBot: normalizedDisplayName !== WAITING_PLAYER_DISPLAY_NAME,
   }
+}
+
+function findRelationshipByProfileId(
+  friendships: FriendshipsSnapshot | null,
+  profileId: string,
+): FriendRelationshipSnapshot | null {
+  if (friendships === null) {
+    return null
+  }
+
+  const relationships = [
+    ...friendships.incomingPending,
+    ...friendships.outgoingPending,
+    ...friendships.friends,
+    ...friendships.blocked,
+  ]
+
+  return relationships.find((relationship) => {
+    return relationship.profile.profileId === profileId
+  }) ?? null
 }
 
 export function createLobbyFlowController(
@@ -693,14 +894,136 @@ export function createLobbyFlowController(
     return false
   }
 
+  function createProfileFriendshipAction(
+    authSession: LobbyAuthSession | null,
+  ): LobbyScreenState['friendshipAction'] {
+    const profile = state.profilePopupProfile
+    const targetProfileId = profile?.profileId ?? null
+
+    if (!state.profilePopupOpen || state.profilePopupCanEdit || targetProfileId === null) {
+      return null
+    }
+
+    const message =
+      state.friendActionMessageProfileId === targetProfileId
+        ? state.friendActionMessage
+        : null
+
+    if (authSession === null) {
+      return {
+        profileId: targetProfileId,
+        label: 'Влез, за да поканиш',
+        disabled: false,
+        message,
+      }
+    }
+
+    if (authSession.profile.profileId === targetProfileId) {
+      return null
+    }
+
+    if (state.friendActionLoadingProfileId === targetProfileId) {
+      return {
+        profileId: targetProfileId,
+        label: 'Изпращане...',
+        disabled: true,
+        message,
+      }
+    }
+
+    const relationship = findRelationshipByProfileId(
+      state.friendships,
+      targetProfileId,
+    )
+
+    if (relationship === null) {
+      return {
+        profileId: targetProfileId,
+        label: 'Покани за приятел',
+        disabled: false,
+        message,
+      }
+    }
+
+    if (relationship.status === 'accepted') {
+      return {
+        profileId: targetProfileId,
+        label: 'Вече сте приятели',
+        disabled: true,
+        message,
+      }
+    }
+
+    if (relationship.status === 'blocked') {
+      return {
+        profileId: targetProfileId,
+        label: 'Недостъпно',
+        disabled: true,
+        message,
+      }
+    }
+
+    return {
+      profileId: targetProfileId,
+      label:
+        relationship.direction === 'incoming'
+          ? 'Има входяща покана'
+          : 'Поканата е изпратена',
+      disabled: true,
+      message,
+    }
+  }
+
   function renderLobby(): void {
     stopWaitingRoomActivity()
     resetFinalFillSequence()
     clearServerRoomSnapshot()
 
     const authSession = options.getAuthSession?.() ?? null
+    const friendshipAction = createProfileFriendshipAction(authSession)
+    if (
+      friendshipAction !== null &&
+      authSession !== null &&
+      !friendshipAction.disabled
+    ) {
+      friendshipAction.canBlock = true
+    }
+    if (
+      friendshipAction !== null &&
+      authSession !== null &&
+      friendshipAction.disabled &&
+      friendshipAction.label !== 'РќРµРґРѕСЃС‚СЉРїРЅРѕ'
+    ) {
+      friendshipAction.canBlock = true
+    }
+    const acceptedRelationship =
+      state.profilePopupProfile?.profileId
+        ? findRelationshipByProfileId(
+            state.friendships,
+            state.profilePopupProfile.profileId,
+          )
+        : null
+    if (
+      friendshipAction !== null &&
+      acceptedRelationship?.status === 'accepted'
+    ) {
+      friendshipAction.giftFriendshipId = acceptedRelationship.friendshipId
+    }
     const lobbyState: LobbyScreenState = {
-      view: state.currentScreen === 'players' ? 'players' : 'tables',
+      view:
+        state.currentScreen === 'players'
+          ? 'players'
+          : state.currentScreen === 'leaderboards'
+            ? 'leaderboards'
+            : state.currentScreen === 'shop'
+              ? 'shop'
+            : state.currentScreen === 'admin'
+              ? 'admin'
+          : state.currentScreen === 'friends'
+            ? 'friends'
+            : state.currentScreen === 'chat'
+              ? 'chat'
+            : 'tables',
       displayName: state.displayName,
       selectedStake: state.selectedStake,
       isConnected: state.isConnected,
@@ -717,9 +1040,44 @@ export function createLobbyFlowController(
       players: state.players,
       playersLoading: state.playersLoading,
       playersErrorText: state.playersErrorText,
+      leaderboards: state.leaderboards,
+      leaderboardsLoading: state.leaderboardsLoading,
+      leaderboardsErrorText: state.leaderboardsErrorText,
+      activeLeaderboardCategory: state.activeLeaderboardCategory,
+      shopPackages: state.shopPackages,
+      shopPackagesLoading: state.shopPackagesLoading,
+      shopPackagesErrorText: state.shopPackagesErrorText,
+      shopPurchases: state.shopPurchases,
+      shopPurchasesLoading: state.shopPurchasesLoading,
+      shopPurchaseActionPackageId: state.shopPurchaseActionPackageId,
+      shopPurchaseMessageText: state.shopPurchaseMessageText,
+      isAdmin: authSession?.account.role === 'admin',
+      adminSettings: state.adminSettings,
+      adminSettingsLoading: state.adminSettingsLoading,
+      adminSettingsErrorText: state.adminSettingsErrorText,
+      adminCoinPackages: state.adminCoinPackages,
+      adminCoinPackagesLoading: state.adminCoinPackagesLoading,
+      adminCoinPackagesErrorText: state.adminCoinPackagesErrorText,
+      friendships: state.friendships,
+      friendsLoading: state.friendsLoading,
+      friendsErrorText: state.friendsErrorText,
+      friendshipAction,
+      giftModalFriendshipId: state.giftModalFriendshipId,
+      giftModalFriendName: state.giftModalFriendName,
+      giftModalErrorText: state.giftModalErrorText,
+      chatConversations: state.chatConversations,
+      activeChatFriendshipId: state.activeChatFriendshipId,
+      chatMessages: state.chatMessages,
+      chatLoading: state.chatLoading,
+      chatMessagesLoading: state.chatMessagesLoading,
+      chatErrorText: state.chatErrorText,
       authModalMode: state.authModalMode,
       authErrorText: state.authErrorText,
-      signupBonusYellowCoins: 100000,
+      signupBonusYellowCoins: options.getSignupBonusYellowCoins?.() ?? 100000,
+      profileNameChangePrice:
+        state.adminSettings?.profileNameChangePrice ??
+        options.getProfileNameChangePrice?.() ??
+        50000,
       profileEditorOpen: state.profileEditorOpen,
       profileEditorErrorText: state.profileEditorErrorText,
     }
@@ -773,6 +1131,9 @@ export function createLobbyFlowController(
       onProfileGalleryDelete: (imageId) => {
         void deleteProfileGalleryImage(imageId)
       },
+      onProfileNameChangeSubmit: (displayName) => {
+        void submitProfileNameChange(displayName)
+      },
       onLobbyClick: () => {
         switchToLobby()
         render()
@@ -780,11 +1141,86 @@ export function createLobbyFlowController(
       onPlayersClick: () => {
         void showPlayersDirectory()
       },
+      onShopClick: () => {
+        void showShopPanel()
+      },
+      onShopPurchaseClick: (packageId) => {
+        void startShopPurchase(packageId)
+      },
+      onLeaderboardsClick: () => {
+        void showLeaderboardsDirectory()
+      },
+      onLeaderboardCategoryClick: (category) => {
+        state.activeLeaderboardCategory = category
+        render()
+      },
+      onAdminClick: () => {
+        void showAdminPanel()
+      },
+      onAdminSettingsSubmit: (settings) => {
+        void submitAdminSettings(settings)
+      },
+      onAdminCoinPackageSubmit: (input) => {
+        void submitAdminCoinPackage(input)
+      },
+      onAdminCoinPackageStatusChange: (packageId, status) => {
+        void setAdminCoinPackageStatus(packageId, status)
+      },
+      onFriendsClick: () => {
+        void showFriendsDirectory()
+      },
+      onChatClick: () => {
+        void showChatPanel()
+      },
+      onChatConversationClick: (friendshipId) => {
+        void openChatConversation(friendshipId)
+      },
+      onChatSubmit: (friendshipId, body) => {
+        void sendChatMessage(friendshipId, body)
+      },
       onPlayerCardClick: (profile) => {
         state.profilePopupProfile = profile
         state.profilePopupCanEdit = false
         state.profilePopupOpen = true
         render()
+        void ensureFriendshipsLoaded()
+      },
+      onLeaderboardPlayerClick: (profile) => {
+        state.profilePopupProfile = profile
+        state.profilePopupCanEdit = false
+        state.profilePopupOpen = true
+        render()
+        void ensureFriendshipsLoaded()
+      },
+      onFriendProfileClick: (profile) => {
+        state.profilePopupProfile = profile
+        state.profilePopupCanEdit = false
+        state.profilePopupOpen = true
+        render()
+      },
+      onFriendRequestClick: (profileId) => {
+        void submitFriendRequest(profileId)
+      },
+      onFriendBlockClick: (profileId) => {
+        void blockFriendProfile(profileId)
+      },
+      onFriendAcceptClick: (friendshipId) => {
+        void acceptFriendRequest(friendshipId)
+      },
+      onFriendRejectClick: (friendshipId) => {
+        void rejectFriendRequest(friendshipId)
+      },
+      onFriendRemoveClick: (friendshipId) => {
+        void removeFriendRelationship(friendshipId)
+      },
+      onGiftCoinsClick: (friendshipId) => {
+        openGiftModal(friendshipId)
+      },
+      onGiftCoinsClose: () => {
+        closeGiftModal()
+      },
+      onGiftCoinsSubmit: (friendshipId, amount) => {
+        void submitGiftCoins(friendshipId, amount)
       },
       onAuthModalClose: () => {
         state.authModalMode = 'closed'
@@ -829,6 +1265,27 @@ export function createLobbyFlowController(
     state.profileEditorOpen = false
     state.profileEditorErrorText = null
     state.profilePopupOpen = true
+    render()
+  }
+
+  async function submitProfileNameChange(displayName: string): Promise<void> {
+    const errorText = options.onProfileNameChangeSubmit
+      ? await options.onProfileNameChangeSubmit(displayName)
+      : 'Смяната на име временно не е налична.'
+
+    if (errorText !== null) {
+      state.profileEditorErrorText = errorText
+      render()
+      return
+    }
+
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession !== null) {
+      state.displayName = authSession.profile.displayName
+      state.localAvatarUrl = authSession.profile.avatarUrl
+    }
+
+    state.profileEditorErrorText = null
     render()
   }
 
@@ -889,6 +1346,728 @@ export function createLobbyFlowController(
 
     state.players = result.players
     state.playersErrorText = null
+    render()
+  }
+
+  async function showLeaderboardsDirectory(): Promise<void> {
+    state.currentScreen = 'leaderboards'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+
+    if (!options.onLeaderboardsLoad) {
+      state.leaderboardsErrorText = 'Класациите временно не са налични.'
+      render()
+      return
+    }
+
+    state.leaderboardsLoading = true
+    state.leaderboardsErrorText = null
+    render()
+
+    const result = await options.onLeaderboardsLoad()
+
+    if (state.currentScreen !== 'leaderboards') {
+      return
+    }
+
+    state.leaderboardsLoading = false
+
+    if (!result.ok) {
+      state.leaderboardsErrorText = result.message
+      render()
+      return
+    }
+
+    state.leaderboards = result.leaderboards
+    state.leaderboardsErrorText = null
+    render()
+  }
+
+  async function showShopPanel(): Promise<void> {
+    state.currentScreen = 'shop'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+
+    if (!options.onShopPackagesLoad) {
+      state.shopPackagesErrorText = 'Магазинът временно не е наличен.'
+      render()
+      return
+    }
+
+    state.shopPackagesLoading = true
+    state.shopPurchasesLoading =
+      (options.getAuthSession?.() ?? null) !== null && Boolean(options.onShopPurchasesLoad)
+    state.shopPackagesErrorText = null
+    state.shopPurchaseMessageText = null
+    render()
+
+    const result = await options.onShopPackagesLoad()
+
+    if (state.currentScreen !== 'shop') {
+      return
+    }
+
+    state.shopPackagesLoading = false
+
+    if (!result.ok) {
+      state.shopPackagesErrorText = result.message
+      state.shopPurchasesLoading = false
+      render()
+      return
+    }
+
+    state.shopPackages = result.packages
+    state.shopPackagesErrorText = null
+    render()
+
+    await loadShopPurchases()
+  }
+
+  async function loadShopPurchases(): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (state.currentScreen !== 'shop') {
+      return
+    }
+
+    if (authSession === null) {
+      state.shopPurchases = []
+      state.shopPurchasesLoading = false
+      render()
+      return
+    }
+
+    if (!options.onShopPurchasesLoad) {
+      state.shopPurchasesLoading = false
+      render()
+      return
+    }
+
+    state.shopPurchasesLoading = true
+    render()
+
+    const result = await options.onShopPurchasesLoad()
+
+    if (state.currentScreen !== 'shop') {
+      return
+    }
+
+    state.shopPurchasesLoading = false
+
+    if (!result.ok) {
+      state.shopPurchaseMessageText = result.message
+      render()
+      return
+    }
+
+    state.shopPurchases = result.purchases
+    render()
+  }
+
+  async function startShopPurchase(packageId: string): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession === null) {
+      state.authModalMode = 'cta'
+      state.authErrorText = null
+      render()
+      return
+    }
+
+    if (!options.onShopPurchaseStart) {
+      state.shopPurchaseMessageText = 'Покупките временно не са налични.'
+      render()
+      return
+    }
+
+    state.shopPurchaseActionPackageId = packageId
+    state.shopPurchaseMessageText = null
+    render()
+
+    const result = await options.onShopPurchaseStart(packageId)
+
+    state.shopPurchaseActionPackageId = null
+
+    if (!result.ok) {
+      state.shopPurchaseMessageText = result.message
+      render()
+      return
+    }
+
+    state.shopPurchases = result.purchases
+    state.shopPurchaseMessageText = result.message
+    render()
+  }
+
+  async function showAdminPanel(): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession?.account.role !== 'admin') {
+      state.currentScreen = 'lobby'
+      state.errorText = 'Нямаш достъп до админ панела.'
+      render()
+      return
+    }
+
+    state.currentScreen = 'admin'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+
+    if (!options.onAdminSettingsLoad) {
+      state.adminSettingsErrorText = 'Админ настройките временно не са налични.'
+      render()
+      return
+    }
+
+    state.adminSettingsLoading = true
+    state.adminSettingsErrorText = null
+    state.adminCoinPackagesLoading = Boolean(options.onAdminCoinPackagesLoad)
+    state.adminCoinPackagesErrorText = null
+    render()
+
+    const result = await options.onAdminSettingsLoad()
+
+    if (state.currentScreen !== 'admin') {
+      return
+    }
+
+    state.adminSettingsLoading = false
+
+    if (!result.ok) {
+      state.adminSettingsErrorText = result.message
+      state.adminCoinPackagesLoading = false
+      render()
+      return
+    }
+
+    state.adminSettings = result.settings
+    state.adminSettingsErrorText = null
+    render()
+
+    await loadAdminCoinPackages()
+  }
+
+  async function submitAdminSettings(settings: AdminSettingsSnapshot): Promise<void> {
+    if (!options.onAdminSettingsSubmit) {
+      state.adminSettingsErrorText = 'Админ настройките временно не са налични.'
+      render()
+      return
+    }
+
+    state.adminSettingsErrorText = null
+    render()
+
+    const result = await options.onAdminSettingsSubmit(settings)
+
+    if (!result.ok) {
+      state.adminSettingsErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminSettings = result.settings
+    state.adminSettingsErrorText = null
+    render()
+  }
+
+  async function loadAdminCoinPackages(): Promise<void> {
+    if (state.currentScreen !== 'admin') {
+      return
+    }
+
+    if (!options.onAdminCoinPackagesLoad) {
+      state.adminCoinPackagesLoading = false
+      state.adminCoinPackagesErrorText = 'Админ пакетите временно не са налични.'
+      render()
+      return
+    }
+
+    state.adminCoinPackagesLoading = true
+    state.adminCoinPackagesErrorText = null
+    render()
+
+    const result = await options.onAdminCoinPackagesLoad()
+
+    if (state.currentScreen !== 'admin') {
+      return
+    }
+
+    state.adminCoinPackagesLoading = false
+
+    if (!result.ok) {
+      state.adminCoinPackagesErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminCoinPackages = result.packages
+    state.adminCoinPackagesErrorText = null
+    render()
+  }
+
+  async function submitAdminCoinPackage(input: CoinPackageInput): Promise<void> {
+    if (!options.onAdminCoinPackageSubmit) {
+      state.adminCoinPackagesErrorText = 'Записът на пакети временно не е наличен.'
+      render()
+      return
+    }
+
+    state.adminCoinPackagesErrorText = null
+    render()
+
+    const result = await options.onAdminCoinPackageSubmit(input)
+
+    if (!result.ok) {
+      state.adminCoinPackagesErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminCoinPackages = result.packages
+    state.adminCoinPackagesErrorText = null
+    render()
+  }
+
+  async function setAdminCoinPackageStatus(
+    packageId: string,
+    status: CoinPackageStatus,
+  ): Promise<void> {
+    if (!options.onAdminCoinPackageStatusChange) {
+      state.adminCoinPackagesErrorText = 'Промяната на статус временно не е налична.'
+      render()
+      return
+    }
+
+    state.adminCoinPackagesErrorText = null
+    render()
+
+    const result = await options.onAdminCoinPackageStatusChange(packageId, status)
+
+    if (!result.ok) {
+      state.adminCoinPackagesErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminCoinPackages = result.packages
+    state.adminCoinPackagesErrorText = null
+    render()
+  }
+
+  async function ensureFriendshipsLoaded(): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession === null || !options.onFriendshipsLoad) {
+      return
+    }
+
+    const result = await options.onFriendshipsLoad()
+
+    if (!result.ok) {
+      state.friendsErrorText = result.message
+      render()
+      return
+    }
+
+    state.friendships = result.friendships
+    state.friendsErrorText = null
+    render()
+  }
+
+  async function showFriendsDirectory(): Promise<void> {
+    state.currentScreen = 'friends'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession === null) {
+      state.currentScreen = 'lobby'
+      state.authModalMode = 'cta'
+      state.authErrorText = null
+      render()
+      return
+    }
+
+    if (!options.onFriendshipsLoad) {
+      state.friendsErrorText = 'Панелът с приятели временно не е наличен.'
+      render()
+      return
+    }
+
+    state.friendsLoading = true
+    state.friendsErrorText = null
+    render()
+
+    const result = await options.onFriendshipsLoad()
+
+    if (state.currentScreen !== 'friends') {
+      return
+    }
+
+    state.friendsLoading = false
+
+    if (!result.ok) {
+      state.friendsErrorText = result.message
+      render()
+      return
+    }
+
+    state.friendships = result.friendships
+    state.friendsErrorText = null
+    render()
+  }
+
+  async function submitFriendRequest(profileId: string): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession === null) {
+      state.authModalMode = 'cta'
+      state.authErrorText = null
+      state.friendActionMessageProfileId = profileId
+      state.friendActionMessage = null
+      render()
+      return
+    }
+
+    if (!options.onFriendRequestSubmit) {
+      state.friendActionMessageProfileId = profileId
+      state.friendActionMessage = 'Поканите временно не са налични.'
+      render()
+      return
+    }
+
+    state.friendActionLoadingProfileId = profileId
+    state.friendActionMessageProfileId = profileId
+    state.friendActionMessage = null
+    render()
+
+    const result = await options.onFriendRequestSubmit(profileId)
+
+    state.friendActionLoadingProfileId = null
+
+    if (!result.ok) {
+      state.friendActionMessageProfileId = profileId
+      state.friendActionMessage = result.message
+      render()
+      return
+    }
+
+    state.friendships = result.friendships
+    state.friendActionMessageProfileId = profileId
+    state.friendActionMessage = 'Поканата е изпратена.'
+    render()
+  }
+
+  async function acceptFriendRequest(friendshipId: string): Promise<void> {
+    const result = options.onFriendAccept
+      ? await options.onFriendAccept(friendshipId)
+      : { ok: false as const, message: 'Поканите временно не са налични.' }
+
+    if (!result.ok) {
+      state.friendsErrorText = result.message
+      render()
+      return
+    }
+
+    state.friendships = result.friendships
+    state.friendsErrorText = null
+    render()
+  }
+
+  async function rejectFriendRequest(friendshipId: string): Promise<void> {
+    const result = options.onFriendReject
+      ? await options.onFriendReject(friendshipId)
+      : { ok: false as const, message: 'Поканите временно не са налични.' }
+
+    if (!result.ok) {
+      state.friendsErrorText = result.message
+      render()
+      return
+    }
+
+    state.friendships = result.friendships
+    state.friendsErrorText = null
+    render()
+  }
+
+  async function removeFriendRelationship(friendshipId: string): Promise<void> {
+    const result = options.onFriendRemove
+      ? await options.onFriendRemove(friendshipId)
+      : { ok: false as const, message: 'Премахването временно не е налично.' }
+
+    if (!result.ok) {
+      state.friendsErrorText = result.message
+      render()
+      return
+    }
+
+    state.friendships = result.friendships
+    state.friendsErrorText = null
+    render()
+  }
+
+  async function blockFriendProfile(profileId: string): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession === null) {
+      state.authModalMode = 'cta'
+      state.authErrorText = null
+      render()
+      return
+    }
+
+    const result = options.onFriendBlock
+      ? await options.onFriendBlock(profileId)
+      : { ok: false as const, message: 'Блокирането временно не е налично.' }
+
+    if (!result.ok) {
+      state.friendActionMessageProfileId = profileId
+      state.friendActionMessage = result.message
+      render()
+      return
+    }
+
+    state.friendships = result.friendships
+    state.friendActionMessageProfileId = profileId
+    state.friendActionMessage = 'Играчът е блокиран.'
+    render()
+  }
+
+  function openGiftModal(friendshipId: string): void {
+    const relationships = state.friendships
+      ? [
+          ...state.friendships.friends,
+          ...state.friendships.incomingPending,
+          ...state.friendships.outgoingPending,
+        ]
+      : []
+    const relationship = relationships.find((item) => {
+      return item.friendshipId === friendshipId
+    })
+
+    state.giftModalFriendshipId = friendshipId
+    state.giftModalFriendName = relationship?.profile.displayName ?? 'приятел'
+    state.giftModalErrorText = null
+    render()
+  }
+
+  function closeGiftModal(): void {
+    state.giftModalFriendshipId = null
+    state.giftModalFriendName = ''
+    state.giftModalErrorText = null
+    render()
+  }
+
+  async function submitGiftCoins(
+    friendshipId: string,
+    amount: number,
+  ): Promise<void> {
+    if (!options.onGiftCoinsSubmit) {
+      state.giftModalErrorText = 'Подаряването временно не е налично.'
+      render()
+      return
+    }
+
+    const result = await options.onGiftCoinsSubmit(friendshipId, amount)
+
+    if (!result.ok) {
+      state.giftModalErrorText = result.message
+      render()
+      return
+    }
+
+    state.giftModalFriendshipId = null
+    state.giftModalFriendName = ''
+    state.giftModalErrorText = null
+    state.profilePopupProfile = result.recipientProfile
+    state.friendActionMessageProfileId = result.recipientProfile.profileId
+    state.friendActionMessage = `Подаръкът от ${amount} жълтици е изпратен.`
+    render()
+  }
+
+  async function loadChatConversations(): Promise<boolean> {
+    if (!options.onChatConversationsLoad) {
+      state.chatErrorText = 'Чатът временно не е наличен.'
+      return false
+    }
+
+    const result = await options.onChatConversationsLoad()
+
+    if (!result.ok) {
+      state.chatErrorText = result.message
+      return false
+    }
+
+    state.chatConversations = result.conversations
+    state.chatErrorText = null
+
+    if (
+      state.activeChatFriendshipId !== null &&
+      !state.chatConversations.some((conversation) => {
+        return conversation.friendshipId === state.activeChatFriendshipId
+      })
+    ) {
+      state.activeChatFriendshipId = null
+      state.chatMessages = []
+    }
+
+    return true
+  }
+
+  async function showChatPanel(): Promise<void> {
+    state.currentScreen = 'chat'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession === null) {
+      state.currentScreen = 'lobby'
+      state.authModalMode = 'cta'
+      state.authErrorText = null
+      render()
+      return
+    }
+
+    state.chatLoading = true
+    state.chatErrorText = null
+    render()
+
+    const loaded = await loadChatConversations()
+
+    if (state.currentScreen !== 'chat') {
+      return
+    }
+
+    state.chatLoading = false
+
+    if (!loaded) {
+      render()
+      return
+    }
+
+    const firstConversation = state.chatConversations[0] ?? null
+
+    if (firstConversation !== null && state.activeChatFriendshipId === null) {
+      state.activeChatFriendshipId = firstConversation.friendshipId
+      await openChatConversation(firstConversation.friendshipId, false)
+      return
+    }
+
+    render()
+  }
+
+  async function openChatConversation(
+    friendshipId: string,
+    shouldRenderLoading = true,
+  ): Promise<void> {
+    if (!options.onChatMessagesLoad) {
+      state.chatErrorText = 'Чатът временно не е наличен.'
+      render()
+      return
+    }
+
+    state.activeChatFriendshipId = friendshipId
+    state.chatMessagesLoading = true
+    state.chatErrorText = null
+
+    if (shouldRenderLoading) {
+      render()
+    }
+
+    const result = await options.onChatMessagesLoad(friendshipId)
+
+    if (state.activeChatFriendshipId !== friendshipId) {
+      return
+    }
+
+    state.chatMessagesLoading = false
+
+    if (!result.ok) {
+      state.chatErrorText = result.message
+      render()
+      return
+    }
+
+    state.chatMessages = result.messages
+    state.chatErrorText = null
+    render()
+  }
+
+  async function sendChatMessage(
+    friendshipId: string,
+    body: string,
+  ): Promise<void> {
+    if (!options.onChatSend) {
+      state.chatErrorText = 'Чатът временно не е наличен.'
+      render()
+      return
+    }
+
+    const result = await options.onChatSend(friendshipId, body)
+
+    if (!result.ok) {
+      state.chatErrorText = result.message
+      render()
+      return
+    }
+
+    state.chatMessages = result.messages
+    state.chatErrorText = null
+    state.activeChatFriendshipId = friendshipId
+    state.chatConversations = [
+      result.conversation,
+      ...state.chatConversations.filter((conversation) => {
+        return conversation.friendshipId !== result.conversation.friendshipId
+      }),
+    ]
+    render()
+  }
+
+  async function refreshChatAfterNotification(friendshipId: string): Promise<void> {
+    await loadChatConversations()
+
+    if (
+      state.currentScreen === 'chat' &&
+      state.activeChatFriendshipId === friendshipId &&
+      options.onChatMessagesLoad
+    ) {
+      const result = await options.onChatMessagesLoad(friendshipId)
+
+      if (result.ok) {
+        state.chatMessages = result.messages
+        state.chatErrorText = null
+      } else {
+        state.chatErrorText = result.message
+      }
+    }
+
     render()
   }
 
@@ -1169,6 +2348,11 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'chat_message_received') {
+      void refreshChatAfterNotification(message.friendshipId)
+      return true
+    }
+
     return false
   }
 
@@ -1194,6 +2378,25 @@ export function createLobbyFlowController(
     },
     setLocalAvatarUrl: (value) => {
       state.localAvatarUrl = value
+      render()
+    },
+    setFriendships: (value) => {
+      state.friendships = value
+      state.friendsErrorText = null
+      render()
+    },
+    setChatConversations: (value) => {
+      state.chatConversations = value
+      state.chatErrorText = null
+      if (
+        state.activeChatFriendshipId !== null &&
+        !value.some((conversation) => {
+          return conversation.friendshipId === state.activeChatFriendshipId
+        })
+      ) {
+        state.activeChatFriendshipId = null
+        state.chatMessages = []
+      }
       render()
     },
     startMatchmaking,

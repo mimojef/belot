@@ -9,6 +9,16 @@ export type RenderPlayerProfilePopupOptions = {
   profile: PlayerPublicProfileSnapshot | null
   isLoading?: boolean
   canEdit?: boolean
+  friendshipAction?: PlayerProfileFriendshipAction | null
+}
+
+export type PlayerProfileFriendshipAction = {
+  profileId: string
+  label: string
+  disabled: boolean
+  message: string | null
+  canBlock?: boolean
+  giftFriendshipId?: string | null
 }
 
 function escapeHtml(value: string): string {
@@ -345,6 +355,7 @@ function renderProfileContent(
   profile: PlayerPublicProfileSnapshot,
   seat: Seat | null,
   canEdit: boolean,
+  friendshipAction: PlayerProfileFriendshipAction | null,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -418,6 +429,74 @@ function renderProfileContent(
             >
               Редакция
             </button>
+          ` : ''}
+
+          ${!canEdit && friendshipAction ? `
+            <div style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <button
+                  type="button"
+                  data-player-profile-friend-request="${escapeHtml(friendshipAction.profileId)}"
+                  ${friendshipAction.disabled ? 'disabled' : ''}
+                  style="
+                    min-height:38px;
+                    padding:0 14px;
+                    border:1px solid rgba(212,165,32,0.62);
+                    border-radius:8px;
+                    background:${friendshipAction.disabled ? 'rgba(255,255,255,0.07)' : 'linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%)'};
+                    color:${friendshipAction.disabled ? 'rgba(255,255,255,0.70)' : '#080808'};
+                    font-size:13px;
+                    font-weight:900;
+                    cursor:${friendshipAction.disabled ? 'default' : 'pointer'};
+                  "
+                >
+                  ${escapeHtml(friendshipAction.label)}
+                </button>
+                ${friendshipAction.canBlock === true ? `
+                  <button
+                    type="button"
+                    data-player-profile-block="${escapeHtml(friendshipAction.profileId)}"
+                    style="
+                      min-height:38px;
+                      padding:0 12px;
+                      border:1px solid rgba(248,113,113,0.42);
+                      border-radius:8px;
+                      background:rgba(127,29,29,0.22);
+                      color:#fecaca;
+                      font-size:13px;
+                      font-weight:900;
+                      cursor:pointer;
+                    "
+                  >
+                    Блокирай
+                  </button>
+                ` : ''}
+                ${friendshipAction.giftFriendshipId ? `
+                  <button
+                    type="button"
+                    data-player-profile-gift-coins="${escapeHtml(friendshipAction.giftFriendshipId)}"
+                    style="
+                      min-height:38px;
+                      padding:0 12px;
+                      border:1px solid rgba(212,165,32,0.62);
+                      border-radius:8px;
+                      background:rgba(212,165,32,0.14);
+                      color:#fde68a;
+                      font-size:13px;
+                      font-weight:900;
+                      cursor:pointer;
+                    "
+                  >
+                    Подари жълтици
+                  </button>
+                ` : ''}
+              </div>
+              ${friendshipAction.message ? `
+                <div style="font-size:12px;font-weight:800;color:#fde68a;line-height:1.35;">
+                  ${escapeHtml(friendshipAction.message)}
+                </div>
+              ` : ''}
+            </div>
           ` : ''}
 
           <div
@@ -647,7 +726,12 @@ export function renderPlayerProfilePopup(
   const popupBody = options.isLoading
     ? renderLoadingContent(options.seat)
     : options.profile
-      ? renderProfileContent(options.profile, options.seat, options.canEdit ?? false)
+      ? renderProfileContent(
+          options.profile,
+          options.seat,
+          options.canEdit ?? false,
+          options.friendshipAction ?? null,
+        )
       : renderEmptyContent(options.seat)
 
   const safeTitle = escapeHtml(

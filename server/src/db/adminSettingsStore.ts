@@ -1,0 +1,163 @@
+type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
+
+export type AdminSettingsSnapshot = {
+  signupBonusYellowCoins: number
+  profileNameChangePrice: number
+}
+
+export type AdminSettingsStore = {
+  getSettings: () => AdminSettingsSnapshot
+  updateSettings: (
+    input: Partial<AdminSettingsSnapshot>,
+  ) => { ok: true; settings: AdminSettingsSnapshot } | { ok: false; message: string }
+  close: () => void
+}
+
+type SettingRow = {
+  setting_key: string
+  setting_value: string
+}
+
+const DEFAULT_SETTINGS: AdminSettingsSnapshot = {
+  signupBonusYellowCoins: 100_000,
+  profileNameChangePrice: 50_000,
+}
+
+const SETTING_KEYS = {
+  signupBonusYellowCoins: 'signup_bonus_yellow_coins',
+  profileNameChangePrice: 'profile_name_change_price',
+} as const
+
+function normalizeSettingNumber(
+  value: unknown,
+  min: number,
+  max: number,
+): number | null {
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < min ||
+    value > max
+  ) {
+    return null
+  }
+
+  return value
+}
+
+function parseStoredInteger(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value, 10)
+
+  if (!Number.isFinite(parsed)) {
+    return fallback
+  }
+
+  return parsed
+}
+
+export async function createAdminSettingsStore(
+  databaseFilePath: string,
+): Promise<AdminSettingsStore> {
+  const sqliteModule = await import('node:sqlite')
+  const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
+    open: true,
+    enableForeignKeyConstraints: true,
+  })
+
+  database.exec('PRAGMA foreign_keys = ON;')
+  database.exec('PRAGMA journal_mode = WAL;')
+
+  const selectSettingsStatement = database.prepare(`
+    SELECT setting_key, setting_value
+    FROM admin_settings
+    WHERE setting_key IN (
+      'signup_bonus_yellow_coins',
+      'profile_name_change_price'
+    );
+  `)
+
+  const upsertSettingStatement = database.prepare(`
+    INSERT INTO admin_settings (
+      setting_key,
+      setting_value
+    ) VALUES (
+      ?,
+      ?
+    )
+    ON CONFLICT(setting_key) DO UPDATE SET
+      setting_value = excluded.setting_value,
+      updated_at = CURRENT_TIMESTAMP;
+  `)
+
+  function getSettings(): AdminSettingsSnapshot {
+    const rows = selectSettingsStatement.all() as SettingRow[]
+    const values = new Map(rows.map((row) => [row.setting_key, row.setting_value]))
+
+    return {
+      signupBonusYellowCoins: parseStoredInteger(
+        values.get(SETTING_KEYS.signupBonusYellowCoins) ?? '',
+        DEFAULT_SETTINGS.signupBonusYellowCoins,
+      ),
+      profileNameChangePrice: parseStoredInteger(
+        values.get(SETTING_KEYS.profileNameChangePrice) ?? '',
+        DEFAULT_SETTINGS.profileNameChangePrice,
+      ),
+    }
+  }
+
+  function updateSettings(
+    input: Partial<AdminSettingsSnapshot>,
+  ): { ok: true; settings: AdminSettingsSnapshot } | { ok: false; message: string } {
+    const nextSignupBonus =
+      input.signupBonusYellowCoins === undefined
+        ? undefined
+        : normalizeSettingNumber(input.signupBonusYellowCoins, 0, 10_000_000)
+    const nextNameChangePrice =
+      input.profileNameChangePrice === undefined
+        ? undefined
+        : normalizeSettingNumber(input.profileNameChangePrice, 0, 10_000_000)
+
+    if (input.signupBonusYellowCoins !== undefined && nextSignupBonus === null) {
+      return {
+        ok: false,
+        message: 'Signup bonus трябва да е цяло число между 0 и 10 000 000.',
+      }
+    }
+
+    if (input.profileNameChangePrice !== undefined && nextNameChangePrice === null) {
+      return {
+        ok: false,
+        message: 'Цената за смяна на име трябва да е цяло число между 0 и 10 000 000.',
+      }
+    }
+
+    if (nextSignupBonus !== undefined) {
+      upsertSettingStatement.run(
+        SETTING_KEYS.signupBonusYellowCoins,
+        String(nextSignupBonus),
+      )
+    }
+
+    if (nextNameChangePrice !== undefined) {
+      upsertSettingStatement.run(
+        SETTING_KEYS.profileNameChangePrice,
+        String(nextNameChangePrice),
+      )
+    }
+
+    return {
+      ok: true,
+      settings: getSettings(),
+    }
+  }
+
+  function close(): void {
+    database.close()
+  }
+
+  return {
+    getSettings,
+    updateSettings,
+    close,
+  }
+}

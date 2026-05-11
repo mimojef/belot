@@ -111,6 +111,7 @@ export type ServerRoomConfig = {
   allowBots: boolean
   isPrivate: boolean
   joinCode: string | null
+  stakeAmount?: number | null
   targetScore: number
   turnTimeMs: number
   reconnectGraceMs: number
