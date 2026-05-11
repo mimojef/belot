@@ -16,6 +16,7 @@ import {
   type AdminSettingsSnapshot,
   type ChatConversationSnapshot,
   type ChatMessageSnapshot,
+  type CoinCheckoutResponse,
   type CoinPackageInput,
   type CoinPackageSnapshot,
   type CoinPackageStatus,
@@ -392,7 +393,7 @@ async function startShopPurchase(packageId: string): Promise<
   | { ok: false; message: string }
 > {
   try {
-    const response = await fetch(`${getApiBaseUrl()}/api/shop/purchases`, {
+    const response = await fetch(`${getApiBaseUrl()}/api/shop/checkout`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -400,26 +401,35 @@ async function startShopPurchase(packageId: string): Promise<
       credentials: 'include',
       body: JSON.stringify({ packageId }),
     })
-    const data = (await response.json()) as CoinPurchasesResponse
+    const data = (await response.json()) as CoinCheckoutResponse
 
-    if (!response.ok || !data.ok || !Array.isArray(data.purchases)) {
+    if (!response.ok) {
       return {
         ok: false,
-        message: data.message ?? 'Покупката не беше подготвена.',
+        message: data.ok ? 'Stripe плащането не беше стартирано.' : data.message,
       }
     }
 
+    if (!data.ok) {
+      return {
+        ok: false,
+        message: data.message,
+      }
+    }
+
+    window.location.assign(data.checkoutUrl)
+
+    const purchasesResult = await loadShopPurchases()
+
     return {
       ok: true,
-      purchases: data.purchases,
-      message:
-        data.message ??
-        'Покупката е записана като pending. Stripe checkout ще бъде свързан в следващата стъпка.',
+      purchases: purchasesResult.ok ? purchasesResult.purchases : [data.purchase],
+      message: 'Пренасочване към Stripe Checkout...',
     }
   } catch {
     return {
       ok: false,
-      message: 'Няма връзка със сървъра за покупка.',
+      message: 'Няма връзка със сървъра за Stripe плащане.',
     }
   }
 }

@@ -191,6 +191,35 @@ function formatCompactDateTime(value: string): string {
   }).format(date)
 }
 
+function formatPurchaseStatusLabel(status: CoinPurchaseSnapshot['status']): string {
+  switch (status) {
+    case 'pending':
+      return 'Изчаква плащане'
+    case 'paid':
+      return 'Платена'
+    case 'canceled':
+      return 'Отказана'
+    case 'failed':
+      return 'Неуспешна'
+    default:
+      return status
+  }
+}
+
+function getPurchaseStatusColor(status: CoinPurchaseSnapshot['status']): string {
+  switch (status) {
+    case 'paid':
+      return '#86efac'
+    case 'pending':
+      return '#d4a520'
+    case 'failed':
+      return '#fecaca'
+    case 'canceled':
+    default:
+      return 'rgba(255,255,255,0.48)'
+  }
+}
+
 function renderAuthModal(state: LobbyScreenState): string {
   if (state.authModalMode === 'closed') {
     return ''
@@ -1489,7 +1518,7 @@ function renderShopPanel(state: LobbyScreenState): string {
                 </div>
                 <div style="font-size:14px;font-weight:900;color:#d4a520;">${formatAmount(purchase.yellowCoinsAmount)}</div>
                 <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(purchase.priceCents, purchase.currency))}</div>
-                <div style="font-size:12px;font-weight:900;color:${purchase.status === 'paid' ? '#86efac' : purchase.status === 'pending' ? '#d4a520' : 'rgba(255,255,255,0.48)'};">${escapeHtml(purchase.status)}</div>
+                <div style="font-size:12px;font-weight:900;color:${getPurchaseStatusColor(purchase.status)};">${escapeHtml(formatPurchaseStatusLabel(purchase.status))}</div>
               </div>
             `).join('')}
           </div>
@@ -1503,7 +1532,7 @@ function renderShopPanel(state: LobbyScreenState): string {
       <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
         <div>
           <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Магазин</div>
-          <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.56);">Пакети жълтици. Плащането ще бъде активирано със Stripe.</div>
+          <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.56);">Избери пакет и завърши плащането през Stripe. Жълтиците се добавят след потвърждение.</div>
         </div>
         <div style="border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:#0a0a0a;padding:10px 12px;color:#d4a520;font-size:13px;font-weight:900;">
           Баланс: ${formatAmount(state.profile.yellowCoinsBalance ?? 0)}
@@ -1530,7 +1559,7 @@ function renderShopPanel(state: LobbyScreenState): string {
               <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:auto;">
                 <div style="font-size:18px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}</div>
                 <button type="button" data-lobby-shop-package="${escapeHtml(coinPackage.packageId)}" ${state.shopPurchaseActionPackageId === coinPackage.packageId ? 'disabled' : ''} style="height:42px;padding:0 14px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:${state.shopPurchaseActionPackageId === coinPackage.packageId ? 'wait' : 'pointer'};">
-                  ${state.shopPurchaseActionPackageId === coinPackage.packageId ? 'Записване...' : isLoggedIn ? 'Подготви покупка' : 'Влез за покупка'}
+                  ${state.shopPurchaseActionPackageId === coinPackage.packageId ? 'Към плащане...' : isLoggedIn ? 'Купи' : 'Влез за покупка'}
                 </button>
               </div>
             </article>

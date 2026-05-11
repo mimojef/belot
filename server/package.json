@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "stripe": "^22.1.1",
     "ws": "^8.20.0"
   },
   "devDependencies": {

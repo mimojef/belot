@@ -120,10 +120,24 @@ export type CoinPurchaseSnapshot = {
   priceCents: number
   currency: string
   provider: string
+  providerCheckoutSessionId: string | null
   status: CoinPurchaseStatus
+  creditedAt: string | null
   createdAt: string
   updatedAt: string
 }
+
+export type CoinCheckoutResponse =
+  | {
+      ok: true
+      checkoutUrl: string
+      checkoutSessionId: string
+      purchase: CoinPurchaseSnapshot
+    }
+  | {
+      ok: false
+      message: string
+    }
 
 export type ClientMessage =
   | {

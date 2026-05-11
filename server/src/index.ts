@@ -4,6 +4,7 @@ import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
+import Stripe from 'stripe'
 import { WebSocketServer, WebSocket, type RawData } from 'ws'
 import { createActiveRoomSnapshotStore } from './db/activeRoomSnapshotStore.js'
 import { createAdminSettingsStore } from './db/adminSettingsStore.js'
@@ -18,7 +19,10 @@ import {
   createCoinPackageStore,
   type CoinPackageStatus,
 } from './db/coinPackageStore.js'
-import { createCoinPurchaseStore } from './db/coinPurchaseStore.js'
+import {
+  createCoinPurchaseStore,
+  type CoinPurchaseSnapshot,
+} from './db/coinPurchaseStore.js'
 import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
@@ -95,6 +99,17 @@ import { parseClientMessage } from './protocol/parseClientMessage.js'
 
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY?.trim() ?? ''
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET?.trim() ?? ''
+const CLIENT_ORIGIN =
+  process.env.CLIENT_ORIGIN?.trim() || 'http://localhost:5173'
+const STRIPE_SUCCESS_URL =
+  process.env.STRIPE_SUCCESS_URL?.trim() ||
+  `${CLIENT_ORIGIN}/?screen=shop&payment=success&session_id={CHECKOUT_SESSION_ID}`
+const STRIPE_CANCEL_URL =
+  process.env.STRIPE_CANCEL_URL?.trim() ||
+  `${CLIENT_ORIGIN}/?screen=shop&payment=cancel`
+const STRIPE_WEBHOOK_MAX_BODY_BYTES = 1_000_000
 const MATCHMAKING_TICK_MS = 250
 const GAME_RUNTIME_TICK_MS = 250
 const MATCH_PLAYERS_REQUIRED = 4
@@ -160,6 +175,18 @@ console.log(
 console.log(
   `[db] bot catalog import processed=${botCatalogImport.processedCount} inserted=${botCatalogImport.insertedCount} updated=${botCatalogImport.updatedCount}`,
 )
+
+let stripeClient: Stripe | null = null
+
+function getStripeClient(): Stripe | null {
+  if (STRIPE_SECRET_KEY.length === 0) {
+    return null
+  }
+
+  stripeClient ??= new Stripe(STRIPE_SECRET_KEY)
+
+  return stripeClient
+}
 
 type ResumeRoomResult =
   | {
@@ -900,6 +927,35 @@ function readJsonRequestBody(
   })
 }
 
+function readRawRequestBody(
+  req: IncomingMessage,
+  maxBytes: number = 64_000,
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let totalBytes = 0
+
+    req.on('data', (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      totalBytes += buffer.length
+
+      if (totalBytes > maxBytes) {
+        reject(new Error('Request body is too large.'))
+        req.destroy()
+        return
+      }
+
+      chunks.push(buffer)
+    })
+
+    req.on('end', () => {
+      resolve(Buffer.concat(chunks))
+    })
+
+    req.on('error', reject)
+  })
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
@@ -1598,6 +1654,381 @@ async function handleShopPackagesRequest(
   return true
 }
 
+function getStripeMetadataField(
+  metadata: Stripe.Metadata | null | undefined,
+  key: string,
+): string {
+  const value = metadata?.[key]
+
+  return typeof value === 'string' ? value : ''
+}
+
+async function createStripeCheckoutSessionForPurchase(
+  stripe: Stripe,
+  purchase: CoinPurchaseSnapshot,
+  profileId: string,
+): Promise<Stripe.Checkout.Session> {
+  return stripe.checkout.sessions.create({
+    mode: 'payment',
+    success_url: STRIPE_SUCCESS_URL,
+    cancel_url: STRIPE_CANCEL_URL,
+    client_reference_id: purchase.purchaseId,
+    line_items: [
+      {
+        quantity: 1,
+        price_data: {
+          currency: purchase.currency.toLowerCase(),
+          unit_amount: purchase.priceCents,
+          product_data: {
+            name: purchase.title,
+            description: `${purchase.yellowCoinsAmount} жълтици`,
+          },
+        },
+      },
+    ],
+    metadata: {
+      purchaseId: purchase.purchaseId,
+      profileId,
+      packageId: purchase.packageId ?? '',
+      packageKey: purchase.packageKey,
+      coins: String(purchase.yellowCoinsAmount),
+    },
+    payment_intent_data: {
+      metadata: {
+        purchaseId: purchase.purchaseId,
+        profileId,
+        packageId: purchase.packageId ?? '',
+        packageKey: purchase.packageKey,
+        coins: String(purchase.yellowCoinsAmount),
+      },
+    },
+  })
+}
+
+async function handleShopCheckoutRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/shop/checkout') {
+    return false
+  }
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, {
+      ok: false,
+      message: 'Method not allowed',
+    })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си, за да купуваш жълтици.',
+    })
+    return true
+  }
+
+  const stripe = getStripeClient()
+
+  if (stripe === null) {
+    sendJsonResponse(res, 503, {
+      ok: false,
+      message: 'Stripe не е конфигуриран. Липсва STRIPE_SECRET_KEY.',
+    })
+    return true
+  }
+
+  const body = await readJsonRequestBody(req)
+
+  if (!isRecord(body)) {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      message: 'Invalid request body.',
+    })
+    return true
+  }
+
+  let pendingResult = coinPurchaseStore.createPendingPurchase(
+    session.profile.profileId,
+    getStringField(body, 'packageId'),
+  )
+
+  if (!pendingResult.ok) {
+    sendJsonResponse(res, 400, pendingResult)
+    return true
+  }
+
+  let purchase = pendingResult.purchase
+
+  if (purchase.priceCents <= 0) {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      message: 'Този пакет няма цена за Stripe плащане.',
+    })
+    return true
+  }
+
+  if (purchase.providerCheckoutSessionId !== null) {
+    try {
+      const existingSession = await stripe.checkout.sessions.retrieve(
+        purchase.providerCheckoutSessionId,
+      )
+
+      if (
+        existingSession.status === 'open' &&
+        typeof existingSession.url === 'string' &&
+        existingSession.url.length > 0
+      ) {
+        sendJsonResponse(res, 200, {
+          ok: true,
+          checkoutUrl: existingSession.url,
+          checkoutSessionId: existingSession.id,
+          purchase,
+        })
+        return true
+      }
+
+      if (existingSession.status === 'expired') {
+        const canceledResult = coinPurchaseStore.markPurchaseCanceled(
+          purchase.purchaseId,
+          existingSession.id,
+        )
+
+        if (!canceledResult.ok) {
+          sendJsonResponse(res, 400, canceledResult)
+          return true
+        }
+
+        pendingResult = coinPurchaseStore.createPendingPurchase(
+          session.profile.profileId,
+          getStringField(body, 'packageId'),
+        )
+
+        if (!pendingResult.ok) {
+          sendJsonResponse(res, 400, pendingResult)
+          return true
+        }
+
+        purchase = pendingResult.purchase
+      } else {
+        sendJsonResponse(res, 409, {
+          ok: false,
+          message:
+            'Има съществуваща Stripe сесия за тази покупка. Ако плащането е завършено, изчакай webhook потвърждение.',
+        })
+        return true
+      }
+    } catch {
+      sendJsonResponse(res, 409, {
+        ok: false,
+        message:
+          'Не успяхме да проверим съществуващата Stripe сесия. Опитай отново след малко.',
+      })
+      return true
+    }
+  }
+
+  const stripeSession = await createStripeCheckoutSessionForPurchase(
+    stripe,
+    purchase,
+    session.profile.profileId,
+  )
+
+  if (typeof stripeSession.url !== 'string' || stripeSession.url.length === 0) {
+    sendJsonResponse(res, 500, {
+      ok: false,
+      message: 'Stripe checkout сесията не върна адрес за плащане.',
+    })
+    return true
+  }
+
+  const attachResult = coinPurchaseStore.attachCheckoutSessionToPurchase(
+    purchase.purchaseId,
+    stripeSession.id,
+  )
+
+  if (!attachResult.ok) {
+    sendJsonResponse(res, 500, attachResult)
+    return true
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    checkoutUrl: stripeSession.url,
+    checkoutSessionId: stripeSession.id,
+    purchase: attachResult.purchase,
+  })
+  return true
+}
+
+async function handleStripeWebhookRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/stripe/webhook') {
+    return false
+  }
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, {
+      ok: false,
+      message: 'Method not allowed',
+    })
+    return true
+  }
+
+  const stripe = getStripeClient()
+
+  if (stripe === null || STRIPE_WEBHOOK_SECRET.length === 0) {
+    sendJsonResponse(res, 503, {
+      ok: false,
+      message: 'Stripe webhook не е конфигуриран.',
+    })
+    return true
+  }
+
+  const signature = req.headers['stripe-signature']
+
+  if (typeof signature !== 'string') {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      message: 'Missing Stripe signature.',
+    })
+    return true
+  }
+
+  let event: Stripe.Event
+
+  try {
+    const rawBody = await readRawRequestBody(req, STRIPE_WEBHOOK_MAX_BODY_BYTES)
+    event = stripe.webhooks.constructEvent(
+      rawBody,
+      signature,
+      STRIPE_WEBHOOK_SECRET,
+    )
+  } catch (error) {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      message:
+        error instanceof Error ? error.message : 'Invalid Stripe webhook.',
+    })
+    return true
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const checkoutSession = event.data.object as Stripe.Checkout.Session
+    const purchaseId = getStripeMetadataField(
+      checkoutSession.metadata,
+      'purchaseId',
+    )
+
+    if (purchaseId.length === 0) {
+      sendJsonResponse(res, 200, {
+        ok: true,
+        ignored: true,
+        reason: 'missing_purchase_id',
+      })
+      return true
+    }
+
+    if (checkoutSession.payment_status !== 'paid') {
+      sendJsonResponse(res, 200, {
+        ok: true,
+        ignored: true,
+        reason: 'checkout_session_not_paid',
+      })
+      return true
+    }
+
+    if (
+      typeof checkoutSession.amount_total !== 'number' ||
+      typeof checkoutSession.currency !== 'string'
+    ) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Stripe checkout session не съдържа сума или валута.',
+      })
+      return true
+    }
+
+    const fulfillmentResult = coinPurchaseStore.fulfillPaidPurchase({
+      purchaseId,
+      providerCheckoutSessionId: checkoutSession.id,
+      paidPriceCents: checkoutSession.amount_total,
+      paidCurrency: checkoutSession.currency,
+    })
+
+    if (!fulfillmentResult.ok) {
+      sendJsonResponse(res, 500, fulfillmentResult)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      purchase: fulfillmentResult.purchase,
+      alreadyFulfilled: fulfillmentResult.alreadyFulfilled,
+    })
+    return true
+  }
+
+  if (event.type === 'checkout.session.expired') {
+    const checkoutSession = event.data.object as Stripe.Checkout.Session
+    const purchaseId = getStripeMetadataField(
+      checkoutSession.metadata,
+      'purchaseId',
+    )
+
+    if (purchaseId.length > 0) {
+      const result = coinPurchaseStore.markPurchaseCanceled(
+        purchaseId,
+        checkoutSession.id,
+      )
+
+      if (!result.ok) {
+        sendJsonResponse(res, 500, result)
+        return true
+      }
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+    })
+    return true
+  }
+
+  if (event.type === 'payment_intent.payment_failed') {
+    const paymentIntent = event.data.object as Stripe.PaymentIntent
+    const purchaseId = getStripeMetadataField(paymentIntent.metadata, 'purchaseId')
+
+    if (purchaseId.length > 0) {
+      const result = coinPurchaseStore.markPurchaseFailed(purchaseId)
+
+      if (!result.ok) {
+        sendJsonResponse(res, 500, result)
+        return true
+      }
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+    })
+    return true
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    ignored: true,
+    eventType: event.type,
+  })
+  return true
+}
+
 async function handleShopPurchasesRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -2093,7 +2524,7 @@ async function handleHttpRequest(
     res.setHeader('Vary', 'Origin')
   }
 
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Stripe-Signature')
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
 
   if (req.method === 'OPTIONS') {
@@ -2103,6 +2534,10 @@ async function handleHttpRequest(
   }
 
   const requestUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
+
+  if (await handleStripeWebhookRequest(req, res, requestUrl.pathname)) {
+    return
+  }
 
   if (await handleUploadsRequest(req, res, requestUrl.pathname)) {
     return
@@ -2153,6 +2588,10 @@ async function handleHttpRequest(
   }
 
   if (await handleShopPackagesRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleShopCheckoutRequest(req, res, requestUrl.pathname)) {
     return
   }
 
