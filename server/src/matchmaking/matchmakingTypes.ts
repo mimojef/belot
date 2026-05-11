@@ -2,6 +2,8 @@ import type {
   BotRoomParticipant,
   HumanRoomParticipant,
   PlayerId,
+  PlayerPublicProfileSnapshot,
+  ProfileId,
   RoomId,
   Seat,
 } from '../core/serverTypes.js'
@@ -25,7 +27,9 @@ export type MatchmakingQueueEntry = {
   entryId: string
   connectionId: string
   playerId: PlayerId
+  profileId: ProfileId | null
   displayName: string
+  publicProfile: PlayerPublicProfileSnapshot | null
   stake: MatchStake
   joinedAt: number
   expiresAt: number

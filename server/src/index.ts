@@ -1,8 +1,20 @@
-import { createServer } from 'node:http'
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { randomUUID } from 'node:crypto'
+import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import sharp from 'sharp'
 import { WebSocketServer, WebSocket, type RawData } from 'ws'
 import { createActiveRoomSnapshotStore } from './db/activeRoomSnapshotStore.js'
+import {
+  createAuthStore,
+  createClearSessionCookieHeader,
+  createSessionCookieHeader,
+  getSessionTokenFromCookieHeader,
+} from './db/authStore.js'
 import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
+import { createPlayerProgressStore } from './db/playerProgressStore.js'
 import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js'
 import { broadcastRoomSnapshots } from './core/broadcastRoomSnapshots.js'
 import { createInitialServerState } from './core/createInitialServerState.js'
@@ -75,6 +87,14 @@ const PORT = Number(process.env.PORT ?? 3001)
 const MATCHMAKING_TICK_MS = 250
 const GAME_RUNTIME_TICK_MS = 250
 const MATCH_PLAYERS_REQUIRED = 4
+const MAX_JSON_BODY_BYTES = 8_000_000
+const MAX_ORIGINAL_IMAGE_BYTES = 5_000_000
+const MAX_PROFILE_GALLERY_IMAGES = 6
+const UPLOADS_ROUTE_PREFIX = '/uploads/'
+const SERVER_ROOT_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const UPLOADS_ROOT_PATH = join(SERVER_ROOT_PATH, 'uploads')
+const AVATAR_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'avatars')
+const GALLERY_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'profile-gallery')
 
 const databaseBootstrap = await ensureServerDatabaseReady()
 const botCatalogImport = await importBotProfilesCatalog(
@@ -82,6 +102,13 @@ const botCatalogImport = await importBotProfilesCatalog(
 )
 const activeRoomSnapshotStore = await createActiveRoomSnapshotStore(
   databaseBootstrap.databaseFilePath,
+)
+const playerProgressStore = await createPlayerProgressStore(
+  databaseBootstrap.databaseFilePath,
+)
+const authStore = await createAuthStore(
+  databaseBootstrap.databaseFilePath,
+  playerProgressStore,
 )
 
 console.log(
@@ -310,6 +337,7 @@ function tickRoomGameRuntimes(): void {
 
     if (nextRoom !== room) {
       persistRoomSnapshot(nextRoom)
+      playerProgressStore.recordCompletedMatch(nextRoom)
 
       if (nextRooms === null) {
         nextRooms = {
@@ -427,6 +455,12 @@ function createFallbackPublicProfileSnapshot(
     level: identity.level,
     rankTitle: identity.rankTitle,
     skillRating: identity.skillRating,
+    completedGamesCount: null,
+    wonGamesCount: null,
+    currentRankGames: null,
+    nextRankGames: null,
+    gamesUntilNextRank: null,
+    rankProgressRatio: null,
     averageRating: null,
     totalRatingsCount: null,
     yellowCoinsBalance: null,
@@ -468,6 +502,11 @@ function sendPlayerProfileToConnection(
   }
 
   const participant = room.seats[seat]?.participant ?? null
+  const profileId = participant?.identity.profileId ?? participant?.publicProfile?.profileId ?? null
+  const dbProfile =
+    participant?.kind === 'human' && profileId !== null
+      ? playerProgressStore.getPublicProfile(profileId)
+      : null
 
   safeSendToConnection(connectionId, {
     type: 'player_profile',
@@ -476,7 +515,7 @@ function sendPlayerProfileToConnection(
     profile:
       participant === null
         ? null
-        : participant.publicProfile ?? createFallbackPublicProfileSnapshot(participant),
+        : dbProfile ?? participant.publicProfile ?? createFallbackPublicProfileSnapshot(participant),
   })
 }
 
@@ -645,33 +684,652 @@ function processMatchmaking(): void {
   }
 }
 
-const httpServer = createServer((req, res) => {
-  if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
-    res.end(
-      JSON.stringify({
-        ok: true,
-        service: 'belot-v2-server',
-        matchmaking: {
-          waitMs: MATCHMAKING_WAIT_MS,
-          queuedPlayersByStake: getQueueCountsByStake(),
-        },
-        gameRuntime: {
-          activeRooms: roomGameRuntimeRegistry.size,
-          roomsByPhase: getGameRuntimeCountsByPhase(roomGameRuntimeRegistry),
-        },
-      }),
-    )
+function sendJsonResponse(
+  res: ServerResponse,
+  statusCode: number,
+  payload: unknown,
+  headers: Record<string, string> = {},
+): void {
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    ...headers,
+  })
+  res.end(JSON.stringify(payload))
+}
+
+function readJsonRequestBody(
+  req: IncomingMessage,
+  maxBytes: number = 64_000,
+): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let body = ''
+
+    req.setEncoding('utf8')
+
+    req.on('data', (chunk: string) => {
+      body += chunk
+
+      if (Buffer.byteLength(body, 'utf8') > maxBytes) {
+        reject(new Error('Request body is too large.'))
+        req.destroy()
+      }
+    })
+
+    req.on('end', () => {
+      if (!body.trim()) {
+        resolve({})
+        return
+      }
+
+      try {
+        resolve(JSON.parse(body) as unknown)
+      } catch {
+        reject(new Error('Invalid JSON body.'))
+      }
+    })
+
+    req.on('error', reject)
+  })
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function getStringField(
+  value: Record<string, unknown>,
+  key: string,
+): string {
+  const field = value[key]
+
+  return typeof field === 'string' ? field : ''
+}
+
+function getNumberField(
+  value: Record<string, unknown>,
+  key: string,
+): number | null {
+  const field = value[key]
+
+  return typeof field === 'number' && Number.isFinite(field) ? field : null
+}
+
+function decodeImageDataUrl(value: string): Buffer | null {
+  const match = /^data:image\/(png|jpe?g|webp);base64,([a-zA-Z0-9+/=]+)$/.exec(
+    value.trim(),
+  )
+
+  if (!match) {
+    return null
+  }
+
+  const buffer = Buffer.from(match[2], 'base64')
+
+  if (buffer.length === 0 || buffer.length > MAX_ORIGINAL_IMAGE_BYTES) {
+    return null
+  }
+
+  return buffer
+}
+
+function createUploadUrl(...segments: string[]): string {
+  return `${UPLOADS_ROUTE_PREFIX}${segments.map(encodeURIComponent).join('/')}`
+}
+
+async function writeWebpUploadFile(
+  directoryPath: string,
+  filename: string,
+  buffer: Buffer,
+): Promise<string> {
+  await mkdir(directoryPath, { recursive: true })
+  const filePath = join(directoryPath, filename)
+  await writeFile(filePath, buffer)
+
+  return filePath
+}
+
+async function deleteUploadFileByUrl(uploadUrl: string): Promise<void> {
+  const trimmedUrl = uploadUrl.trim()
+
+  if (!trimmedUrl.startsWith(UPLOADS_ROUTE_PREFIX)) {
     return
   }
 
-  res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
-  res.end(
-    JSON.stringify({
-      ok: false,
-      message: 'Not found',
-    }),
+  const filePath = resolveUploadRequestPath(trimmedUrl)
+
+  if (filePath === null) {
+    return
+  }
+
+  try {
+    await unlink(filePath)
+  } catch {
+    // The DB row is the source of truth; a missing upload file is already clean.
+  }
+}
+
+async function createCroppedAvatarWebp(input: {
+  imageBuffer: Buffer
+  cropX: number
+  cropY: number
+  cropSize: number
+}): Promise<Buffer | null> {
+  const metadata = await sharp(input.imageBuffer).metadata()
+  const imageWidth = metadata.width ?? 0
+  const imageHeight = metadata.height ?? 0
+
+  if (imageWidth <= 0 || imageHeight <= 0) {
+    return null
+  }
+
+  const left = Math.round(input.cropX)
+  const top = Math.round(input.cropY)
+  const size = Math.round(input.cropSize)
+
+  if (
+    left < 0 ||
+    top < 0 ||
+    size < 16 ||
+    left + size > imageWidth ||
+    top + size > imageHeight
+  ) {
+    return null
+  }
+
+  return await sharp(input.imageBuffer)
+    .rotate()
+    .extract({
+      left,
+      top,
+      width: size,
+      height: size,
+    })
+    .resize(250, 250, {
+      fit: 'cover',
+      withoutEnlargement: false,
+    })
+    .webp({ quality: 86 })
+    .toBuffer()
+}
+
+async function createGalleryImageWebp(imageBuffer: Buffer): Promise<Buffer | null> {
+  const metadata = await sharp(imageBuffer).metadata()
+  const imageWidth = metadata.width ?? 0
+  const imageHeight = metadata.height ?? 0
+
+  if (imageWidth <= 0 || imageHeight <= 0) {
+    return null
+  }
+
+  return await sharp(imageBuffer)
+    .rotate()
+    .resize(800, 800, {
+      fit: 'cover',
+      position: 'centre',
+      withoutEnlargement: false,
+    })
+    .webp({ quality: 80 })
+    .toBuffer()
+}
+
+function resolveUploadRequestPath(pathname: string): string | null {
+  if (!pathname.startsWith(UPLOADS_ROUTE_PREFIX)) {
+    return null
+  }
+
+  const relativePath = decodeURIComponent(
+    pathname.slice(UPLOADS_ROUTE_PREFIX.length),
   )
+  const resolvedPath = resolve(UPLOADS_ROOT_PATH, relativePath)
+  const uploadsRoot = `${resolve(UPLOADS_ROOT_PATH)}${/[/\\]$/.test(UPLOADS_ROOT_PATH) ? '' : '\\'}`
+
+  if (!resolvedPath.startsWith(uploadsRoot) && resolvedPath !== resolve(UPLOADS_ROOT_PATH)) {
+    return null
+  }
+
+  return resolvedPath
+}
+
+async function handleUploadsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (req.method !== 'GET') {
+    return false
+  }
+
+  const filePath = resolveUploadRequestPath(pathname)
+
+  if (filePath === null) {
+    return false
+  }
+
+  try {
+    const fileStats = await stat(filePath)
+
+    if (!fileStats.isFile()) {
+      return false
+    }
+
+    const fileBuffer = await readFile(filePath)
+    res.writeHead(200, {
+      'Content-Type': 'image/webp',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    })
+    res.end(fileBuffer)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function handleAuthRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname === '/api/auth/me' && req.method === 'GET') {
+    const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+    const session = authStore.getSession(sessionToken)
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      session,
+    })
+    return true
+  }
+
+  if (pathname === '/api/auth/logout' && req.method === 'POST') {
+    const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+    authStore.logout(sessionToken)
+    sendJsonResponse(
+      res,
+      200,
+      { ok: true },
+      { 'Set-Cookie': createClearSessionCookieHeader() },
+    )
+    return true
+  }
+
+  if (
+    (pathname === '/api/auth/register' || pathname === '/api/auth/login') &&
+    req.method === 'POST'
+  ) {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Invalid request body.',
+      })
+      return true
+    }
+
+    const result =
+      pathname === '/api/auth/register'
+        ? authStore.register({
+            email: getStringField(body, 'email'),
+            password: getStringField(body, 'password'),
+            displayName: getStringField(body, 'displayName'),
+          })
+        : authStore.login({
+            email: getStringField(body, 'email'),
+            password: getStringField(body, 'password'),
+          })
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(
+      res,
+      200,
+      {
+        ok: true,
+        session: result.session,
+      },
+      { 'Set-Cookie': createSessionCookieHeader(result.sessionToken) },
+    )
+    return true
+  }
+
+  return false
+}
+
+async function handleProfileRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const galleryImageDeletePrefix = '/api/profile/me/gallery/'
+  const isGalleryImageDeletePath = pathname.startsWith(galleryImageDeletePrefix)
+
+  if (
+    pathname !== '/api/profile/me' &&
+    pathname !== '/api/profile/me/avatar' &&
+    pathname !== '/api/profile/me/gallery' &&
+    !isGalleryImageDeletePath
+  ) {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си.',
+    })
+    return true
+  }
+
+  if (pathname === '/api/profile/me' && req.method !== 'PATCH') {
+    return false
+  }
+
+  if (
+    (pathname === '/api/profile/me/avatar' ||
+      pathname === '/api/profile/me/gallery') &&
+    req.method !== 'POST'
+  ) {
+    return false
+  }
+
+  if (isGalleryImageDeletePath && req.method !== 'DELETE') {
+    return false
+  }
+
+  if (isGalleryImageDeletePath) {
+    const imageId = decodeURIComponent(
+      pathname.slice(galleryImageDeletePrefix.length),
+    ).trim()
+
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(imageId)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Невалидна снимка за изтриване.',
+      })
+      return true
+    }
+
+    const result = playerProgressStore.deleteProfileGalleryImage(
+      session.profile.profileId,
+      imageId,
+    )
+
+    if (!result.ok) {
+      sendJsonResponse(res, 404, result)
+      return true
+    }
+
+    await Promise.all(result.deletedImageUrls.map(deleteUploadFileByUrl))
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      session: {
+        ...session,
+        profile: result.profile,
+      },
+    })
+    return true
+  }
+
+  const body = await readJsonRequestBody(req, MAX_JSON_BODY_BYTES)
+
+  if (!isRecord(body)) {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      message: 'Invalid request body.',
+    })
+    return true
+  }
+
+  if (pathname === '/api/profile/me/avatar') {
+    const imageBuffer = decodeImageDataUrl(getStringField(body, 'imageDataUrl'))
+    const cropX = getNumberField(body, 'cropX')
+    const cropY = getNumberField(body, 'cropY')
+    const cropSize = getNumberField(body, 'cropSize')
+
+    if (
+      imageBuffer === null ||
+      cropX === null ||
+      cropY === null ||
+      cropSize === null
+    ) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Изпрати валидна снимка и избери квадрат за аватар.',
+      })
+      return true
+    }
+
+    const avatarBuffer = await createCroppedAvatarWebp({
+      imageBuffer,
+      cropX,
+      cropY,
+      cropSize,
+    })
+
+    if (avatarBuffer === null) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Избраният квадрат е извън снимката.',
+      })
+      return true
+    }
+
+    await writeWebpUploadFile(
+      AVATAR_UPLOADS_PATH,
+      `${session.profile.profileId}.webp`,
+      avatarBuffer,
+    )
+
+    const avatarUrl = createUploadUrl('avatars', `${session.profile.profileId}.webp`)
+    const result = playerProgressStore.updateProfileAvatar(
+      session.profile.profileId,
+      avatarUrl,
+    )
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      session: {
+        ...session,
+        profile: result.profile,
+      },
+    })
+    return true
+  }
+
+  if (pathname === '/api/profile/me/gallery') {
+    const existingProfile = playerProgressStore.getPublicProfile(
+      session.profile.profileId,
+    )
+
+    if (
+      existingProfile !== null &&
+      existingProfile.galleryImages.length >= MAX_PROFILE_GALLERY_IMAGES
+    ) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: `Галерията може да има най-много ${MAX_PROFILE_GALLERY_IMAGES} снимки.`,
+      })
+      return true
+    }
+
+    const imageBuffer = decodeImageDataUrl(getStringField(body, 'imageDataUrl'))
+
+    if (imageBuffer === null) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Изпрати валидна снимка до 5 MB.',
+      })
+      return true
+    }
+
+    const galleryBuffer = await createGalleryImageWebp(imageBuffer)
+
+    if (galleryBuffer === null) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Снимката не можа да бъде обработена.',
+      })
+      return true
+    }
+
+    const imageId = randomUUID()
+    const profileGalleryPath = join(
+      GALLERY_UPLOADS_PATH,
+      session.profile.profileId,
+    )
+
+    await writeWebpUploadFile(profileGalleryPath, `${imageId}.webp`, galleryBuffer)
+
+    const imageUrl = createUploadUrl(
+      'profile-gallery',
+      session.profile.profileId,
+      `${imageId}.webp`,
+    )
+    const result = playerProgressStore.addProfileGalleryImage({
+      profileId: session.profile.profileId,
+      imageId,
+      imageUrl,
+      thumbnailUrl: imageUrl,
+    })
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      session: {
+        ...session,
+        profile: result.profile,
+      },
+    })
+    return true
+  }
+
+  const result = playerProgressStore.updateProfileAvatar(
+    session.profile.profileId,
+    getStringField(body, 'avatarUrl'),
+  )
+
+  if (!result.ok) {
+    sendJsonResponse(res, 400, result)
+    return true
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    session: {
+      ...session,
+      profile: result.profile,
+    },
+  })
+  return true
+}
+
+async function handlePlayersRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/players' || req.method !== 'GET') {
+    return false
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    players: playerProgressStore.listPublicHumanProfiles(),
+  })
+  return true
+}
+
+async function handleHttpRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const origin = req.headers.origin
+
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin)
+    res.setHeader('Access-Control-Allow-Credentials', 'true')
+    res.setHeader('Vary', 'Origin')
+  }
+
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204)
+    res.end()
+    return
+  }
+
+  const requestUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
+
+  if (await handleUploadsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (requestUrl.pathname === '/health') {
+    sendJsonResponse(res, 200, {
+      ok: true,
+      service: 'belot-v2-server',
+      matchmaking: {
+        waitMs: MATCHMAKING_WAIT_MS,
+        queuedPlayersByStake: getQueueCountsByStake(),
+      },
+      gameRuntime: {
+        activeRooms: roomGameRuntimeRegistry.size,
+        roomsByPhase: getGameRuntimeCountsByPhase(roomGameRuntimeRegistry),
+      },
+    })
+    return
+  }
+
+  if (await handleAuthRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleProfileRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handlePlayersRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  sendJsonResponse(res, 404, {
+    ok: false,
+    message: 'Not found',
+  })
+}
+
+const httpServer = createServer((req, res) => {
+  void handleHttpRequest(req, res).catch((error) => {
+    const message = error instanceof Error ? error.message : 'Unexpected server error.'
+
+    if (!res.headersSent) {
+      sendJsonResponse(res, 500, {
+        ok: false,
+        message,
+      })
+      return
+    }
+
+    res.end()
+  })
 })
 
 const wsServer = new WebSocketServer({
@@ -680,19 +1338,24 @@ const wsServer = new WebSocketServer({
 })
 
 wsServer.on('connection', (socket, request) => {
+  const authSession = authStore.getSession(
+    getSessionTokenFromCookieHeader(request.headers.cookie),
+  )
   const connection = createServerConnection({
     remoteAddress: request.socket.remoteAddress ?? null,
     userAgent:
       typeof request.headers['user-agent'] === 'string'
         ? request.headers['user-agent']
         : null,
+    playerId: authSession?.profile.profileId ?? null,
+    profileId: authSession?.profile.profileId ?? null,
   })
 
   serverState = upsertServerConnection(serverState, connection)
   socketRegistry.set(connection.id, socket)
 
   console.log(
-    `[ws] client connected: ${connection.id} (${connection.remoteAddress ?? 'unknown'})`,
+    `[ws] client connected: ${connection.id} (${connection.remoteAddress ?? 'unknown'}) profile=${connection.profileId ?? 'none'}`,
   )
 
   sendJsonMessage(socket, {
@@ -967,6 +1630,65 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (message.type === 'submit_partner_rating') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Connection was not found.',
+          })
+          return
+        }
+
+        if (latestConnection.currentRoomId !== message.roomId) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'You are not attached to this room.',
+          })
+          return
+        }
+
+        if (!latestConnection.currentSeat) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Your seat was not found.',
+          })
+          return
+        }
+
+        const room = serverState.rooms[message.roomId] ?? null
+
+        if (room === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Room was not found.',
+          })
+          return
+        }
+
+        const result = playerProgressStore.submitPartnerRating(
+          room,
+          latestConnection.currentSeat,
+          message.ratingValue,
+        )
+
+        if (!result.ok) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: result.message,
+          })
+          return
+        }
+
+        safeSendToConnection(connection.id, {
+          type: 'partner_rating_submitted',
+          roomId: message.roomId,
+          ratingValue: message.ratingValue,
+        })
+        return
+      }
+
       if (message.type === 'resume_room') {
         const result = tryResumeRoomForConnection(
           connection.id,
@@ -1006,9 +1728,30 @@ wsServer.on('connection', (socket, request) => {
           )
         }
 
+        if (latestConnection.profileId === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Трябва да влезеш в профила си, за да играеш на маса.',
+          })
+          return
+        }
+
+        const publicProfile = playerProgressStore.getPublicProfile(
+          latestConnection.profileId,
+        )
+
+        if (publicProfile === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Профилът не беше намерен. Влез отново.',
+          })
+          return
+        }
+
+        const profileId = publicProfile.profileId ?? latestConnection.profileId
         const stablePlayerConnection = {
           ...latestConnection,
-          playerId: latestConnection.playerId ?? latestConnection.id,
+          playerId: latestConnection.playerId ?? profileId,
         }
 
         serverState = updateServerConnectionInState(
@@ -1068,7 +1811,9 @@ wsServer.on('connection', (socket, request) => {
         const nextEntry = createMatchmakingQueueEntry({
           connectionId: connection.id,
           playerId: stablePlayerConnection.playerId ?? stablePlayerConnection.id,
-          displayName: message.displayName ?? 'Гост',
+          profileId,
+          publicProfile,
+          displayName: publicProfile.displayName,
           stake: message.stake,
         })
 
@@ -1325,6 +2070,8 @@ setInterval(() => {
 function closeActiveRoomSnapshotStore(): void {
   try {
     activeRoomSnapshotStore.close()
+    playerProgressStore.close()
+    authStore.close()
   } catch (error) {
     console.error('[room-snapshot] failed to close store', error)
   }

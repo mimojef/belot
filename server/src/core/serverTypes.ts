@@ -61,6 +61,12 @@ export type PlayerPublicProfileSnapshot = {
   level: number | null
   rankTitle: string | null
   skillRating: number | null
+  completedGamesCount: number | null
+  wonGamesCount: number | null
+  currentRankGames: number | null
+  nextRankGames: number | null
+  gamesUntilNextRank: number | null
+  rankProgressRatio: number | null
   averageRating: number | null
   totalRatingsCount: number | null
   yellowCoinsBalance: number | null

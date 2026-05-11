@@ -1,0 +1,176 @@
+Работим по D:\Project\Belot-V2. Проектът е Belot V2 игра с Vite/TypeScript frontend и Node/ws backend със SQLite миграции. Отговаряй на български. Внимавай да не чупиш проекта и винаги пускай проверки след промени:
+- npm.cmd run build
+- .\node_modules\.bin\tsc.cmd --noEmit --target ES2023 --module NodeNext --moduleResolution NodeNext --skipLibCheck --strict server\src\index.ts
+
+Важно:
+- Не пускай git reset/checkout.
+- Използвай apply_patch за ръчни редакции.
+- Цветова схема: сиво-черни нюанси със златни акценти.
+- Няма gameplay като guest. Guest може да гледа лобито, но при натискане на маса трябва да излиза registration CTA.
+- Името на профила не трябва да може да се редактира free. По-късно ще е платено с жълтици, цена от admin panel.
+- Оригиналните снимки НЕ се пазят на сървъра. Пазят се само крайни webp файлове.
+
+Какво е направено:
+1. Backend база/прогрес:
+- Добавени миграции:
+  - 20260510_002_create_profile_progress_and_partner_ratings.sql
+  - 20260510_003_create_accounts_and_sessions.sql
+  - 20260510_004_create_profile_gallery_images.sql
+- Добавени store-и:
+  - server/src/db/playerProgressStore.ts
+  - server/src/db/authStore.ts
+- Добавен rank progression:
+  - server/src/progression/rankProgression.ts
+- Рангът е само от брой изиграни игри.
+- Рейтингът е средна оценка от 1 до 6, дадена от партньора след игра.
+- Добавена оценка на партньор в end screen.
+- recordCompletedMatch записва изиграни игри и победи.
+
+2. Auth:
+- Регистрация/вход backend:
+  - POST /api/auth/register
+  - POST /api/auth/login
+  - GET /api/auth/me
+  - POST /api/auth/logout
+- Cookie session belot_session.
+- Lobby зарежда текущата auth session.
+- След login/register websocket се refresh-ва, за да тръгне със session cookie.
+- Server-side matchmaking отказва join_matchmaking без валиден profile/session.
+
+3. Профилен попъп:
+- src/ui/overlays/renderPlayerProfilePopup.ts
+- Показва:
+  - име
+  - аватар
+  - ранг
+  - прогрес до следващ ранг
+  - средна оценка
+  - баланс жълтици
+  - галерия
+  - profile id
+- В лобито navbar бутон „Профил“ отваря попъпа.
+- В собствения профил има бутон „Редакция“.
+- Чуждите профили се отварят без „Редакция“.
+
+4. Редакция на профил:
+- В лобито има modal „Редакция на профил“.
+- Името е заключено.
+- Има upload за нов аватар.
+- Има upload за снимки в галерия.
+- Галерията се записва в таблица profile_gallery_images.
+- Upload файловете се сервират от /uploads/...
+- Добавен sharp като dependency.
+- package.json има dependency sharp ^0.34.5.
+- Vite е обновен в lockfile до 8.0.11 чрез audit fix.
+
+5. Аватар upload/crop:
+- Потребителят избира снимка.
+- В UI се показва цялата снимка.
+- Потребителят чертае квадрат с мишката върху снимката.
+- Frontend изпраща оригиналната снимка + crop координати към server.
+- Server със sharp:
+  - изрязва квадрата
+  - resize до 250x250
+  - convert към webp
+  - записва в server/uploads/avatars/{profileId}.webp
+  - обновява profiles.avatar_url
+- Endpoint:
+  - POST /api/profile/me/avatar
+- Оригиналът не се записва никъде, само временен Buffer по време на заявката.
+
+6. Галерия:
+- Лимит: максимум 6 снимки.
+- Има delete endpoint:
+  - DELETE /api/profile/me/gallery/:imageId
+- Има бутон за изтриване в UI в modal-а „Редакция на профил“.
+- Снимките за галерията вече се обработват server-side със sharp:
+  - frontend изпраща избрания файл като dataUrl
+  - server приема jpg/png/webp до 5 MB
+  - rotate()
+  - квадратен crop/resize до 800x800
+  - convert към webp quality 80
+  - записва само крайния webp файл
+- Endpoint за upload:
+  - POST /api/profile/me/gallery
+- Записва файлове в:
+  - server/uploads/profile-gallery/{profileId}/{imageId}.webp
+- Записва ред в profile_gallery_images.
+- Профилният попъп показва galleryImages.
+- Оригиналните снимки не се пазят.
+
+7. Лоби auth CTA:
+- Ако няма login session и играч натисне маса, не започва matchmaking.
+- Отваря се CTA:
+  - „Регистрирай се и вземи 100 000 безплатни жълтици“
+- Сумата засега е hardcoded 100000, по-късно трябва да идва от admin panel.
+
+8. Страница „Всички играчи“:
+- Добавен backend endpoint:
+  - GET /api/players
+- Връща публични човешки профили, само регистрирани/активни играчи.
+- В lobby navbar има бутон „Играчи“.
+- Има нов lobby екран с grid от играчи:
+  - аватар
+  - име
+  - ранг
+  - средна оценка
+  - изиграни игри
+- Click върху играч отваря съществуващия профилен popup.
+- Чуждите профили са canEdit=false.
+
+Последно проверките минаха успешно:
+- npm.cmd run build
+- .\node_modules\.bin\tsc.cmd --noEmit --target ES2023 --module NodeNext --moduleResolution NodeNext --skipLibCheck --strict server\src\index.ts
+
+Има много uncommitted промени от цялата работа. Не ги връщай. Не използвай git reset/checkout.
+
+Какво остава по плана:
+1. Приятелства:
+- бутон „Покани за приятел“ в чужд профил
+- приемане/отхвърляне
+- статуси pending/accepted/blocked
+- списък приятели
+
+2. Чат:
+- само между приятели
+- да не е позволен по време на игра
+- чат страница/панел
+
+3. Подаряване на жълтици:
+- бутон „Подари жълтици“ в чужд профил
+- проверки за баланс
+- ledger/история на трансакции
+- защити от abuse
+
+4. Изход от масата:
+- бутон „Изход“ на масата
+- warning popup:
+  - ако напусне, губи залога + още толкова жълтици
+- server-side санкция
+
+5. Магазин:
+- Stripe плащане
+- пакети жълтици
+- безплатни жълтици срещу реклами
+
+6. Админ панел:
+- настройка на пакети и цени
+- настройка на signup bonus
+- настройка цена за смяна на име
+- управление на играчи/баланси/санкции
+
+7. Класации:
+- по баланс жълтици
+- евентуално табове за ранг, победи, рейтинг
+
+Следващата добра стъпка:
+Започни с приятелства. Добави DB миграция за friendships, backend store/endpoints и UI:
+- бутон „Покани за приятел“ в чужд профил
+- списък/панел за покани
+- приемане/отхвърляне
+- статуси pending/accepted/blocked
+- не позволявай покана към себе си
+- не позволявай duplicate pending/accepted friendship
+- след промени пусни:
+  npm.cmd run build
+  .\node_modules\.bin\tsc.cmd --noEmit --target ES2023 --module NodeNext --moduleResolution NodeNext --skipLibCheck --strict server\src\index.ts

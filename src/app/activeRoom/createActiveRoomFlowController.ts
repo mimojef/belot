@@ -1802,6 +1802,13 @@ export function createActiveRoomFlowController(
         scaledStageHeight,
         onReturnToLobby: returnToLobbyFromMatchEnded,
         onStartNewGame: startNewGameFromMatchEnded,
+        onSubmitPartnerRating: (ratingValue) => {
+          if (!activeRoomState) {
+            return
+          }
+
+          options.submitPartnerRating(activeRoomState.roomId, ratingValue)
+        },
       })
     } else if (isShowingScoringPhase && activeRoomState.game?.scoring) {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()

@@ -1,6 +1,19 @@
-import type { MatchStake } from '../network/createGameServerClient'
+import type {
+  MatchStake,
+  PlayerPublicProfileSnapshot,
+} from '../network/createGameServerClient'
+import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
+
+export type LobbyAuthModalMode = 'closed' | 'cta' | 'login' | 'register'
+
+export type AvatarCropSelection = {
+  x: number
+  y: number
+  size: number
+}
 
 export type LobbyScreenState = {
+  view: 'tables' | 'players'
   displayName: string
   selectedStake: MatchStake
   isConnected: boolean
@@ -10,6 +23,18 @@ export type LobbyScreenState = {
   remainingMs: number | null
   statusText: string
   errorText: string | null
+  profilePopupOpen: boolean
+  profile: PlayerPublicProfileSnapshot
+  profilePopupProfile: PlayerPublicProfileSnapshot | null
+  profilePopupCanEdit: boolean
+  players: PlayerPublicProfileSnapshot[]
+  playersLoading: boolean
+  playersErrorText: string | null
+  authModalMode: LobbyAuthModalMode
+  authErrorText: string | null
+  signupBonusYellowCoins: number
+  profileEditorOpen: boolean
+  profileEditorErrorText: string | null
 }
 
 export type RenderLobbyScreenOptions = {
@@ -18,6 +43,23 @@ export type RenderLobbyScreenOptions = {
   onStakeChange: (stake: MatchStake) => void
   onSearchClick: () => void
   onCancelClick: () => void
+  onProfileClick: () => void
+  onProfileClose: () => void
+  onProfileEditClick: () => void
+  onProfileEditClose: () => void
+  onProfileEditSubmit: (
+    avatarFile: File | null,
+    avatarCrop: AvatarCropSelection | null,
+    galleryFiles: File[],
+  ) => void
+  onProfileGalleryDelete: (imageId: string) => void
+  onLobbyClick: () => void
+  onPlayersClick: () => void
+  onPlayerCardClick: (profile: PlayerPublicProfileSnapshot) => void
+  onAuthModalClose: () => void
+  onAuthModeChange: (mode: Exclude<LobbyAuthModalMode, 'closed'>) => void
+  onLoginSubmit: (email: string, password: string) => void
+  onRegisterSubmit: (displayName: string, email: string, password: string) => void
 }
 
 type LobbyStakeCard = {
@@ -42,6 +84,8 @@ const COIN_PACKAGES = [
   { amount: 50000, image: '/assets/lobby/coins-50000.png', width: 111, height: 98 },
 ]
 
+const MAX_PROFILE_GALLERY_IMAGES = 6
+
 function escapeHtml(value: string): string {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -55,7 +99,173 @@ function formatAmount(value: number): string {
   return new Intl.NumberFormat('bg-BG').format(value)
 }
 
-function renderNav(_isSearching: boolean): string {
+function renderAuthModal(state: LobbyScreenState): string {
+  if (state.authModalMode === 'closed') {
+    return ''
+  }
+
+  const bonusText = formatAmount(state.signupBonusYellowCoins)
+  const isLogin = state.authModalMode === 'login'
+  const isRegister = state.authModalMode === 'register'
+
+  const body = state.authModalMode === 'cta'
+    ? `
+      <div style="display:grid;gap:16px;text-align:center;">
+        <div style="font-size:28px;line-height:1.12;font-weight:900;color:#f8fafc;">
+          Регистрирай се и вземи ${escapeHtml(bonusText)} безплатни жълтици
+        </div>
+        <div style="font-size:15px;line-height:1.5;color:rgba(255,255,255,0.72);font-weight:700;">
+          Създай профил, избери име и играй белот с други хора. Жълтиците, рангът и рейтингът ти ще се пазят.
+        </div>
+        <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:6px;">
+          <button type="button" data-lobby-auth-register-button="1" style="height:46px;min-width:150px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;">Регистрация</button>
+          <button type="button" data-lobby-auth-login-button="1" style="height:46px;min-width:130px;border:1px solid rgba(212,165,32,0.62);border-radius:8px;background:#080808;color:#f8fafc;font-size:15px;font-weight:900;cursor:pointer;">Вход</button>
+        </div>
+      </div>
+    `
+    : `
+      <form data-lobby-auth-form="${isLogin ? 'login' : 'register'}" style="display:grid;gap:12px;">
+        <div style="font-size:25px;line-height:1.1;font-weight:900;color:#f8fafc;text-align:center;">
+          ${isLogin ? 'Вход в профила' : 'Създай профил'}
+        </div>
+        ${isRegister ? `
+          <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Име в играта
+            <input name="displayName" autocomplete="nickname" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
+          </label>
+        ` : ''}
+        <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+          Email
+          <input name="email" type="email" autocomplete="email" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
+        </label>
+        <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+          Парола
+          <input name="password" type="password" autocomplete="${isLogin ? 'current-password' : 'new-password'}" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
+        </label>
+        <button type="submit" style="height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;margin-top:4px;">
+          ${isLogin ? 'Влез' : 'Регистрирай се'}
+        </button>
+        <button type="button" data-lobby-auth-mode="${isLogin ? 'register' : 'login'}" style="height:34px;border:0;background:transparent;color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;cursor:pointer;">
+          ${isLogin ? 'Нямаш профил? Регистрирай се' : 'Имаш профил? Влез'}
+        </button>
+      </form>
+    `
+
+  return `
+    <div data-lobby-auth-modal-root="1" style="position:fixed;inset:0;z-index:13000;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div data-lobby-auth-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.74);backdrop-filter:blur(4px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,480px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
+        <button type="button" data-lobby-auth-modal-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
+        <div style="display:grid;gap:14px;">
+          ${body}
+          ${state.authErrorText ? `<div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;">${escapeHtml(state.authErrorText)}</div>` : ''}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderProfileEditModal(state: LobbyScreenState): string {
+  if (!state.profileEditorOpen) {
+    return ''
+  }
+
+  const galleryImages = [...state.profile.galleryImages].sort(
+    (left, right) => left.sortOrder - right.sortOrder,
+  )
+  const gallerySlotsLeft = Math.max(
+    0,
+    MAX_PROFILE_GALLERY_IMAGES - galleryImages.length,
+  )
+  const galleryInputDisabled = gallerySlotsLeft <= 0
+
+  return `
+    <div data-lobby-profile-editor-root="1" style="position:fixed;inset:0;z-index:13500;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div data-lobby-profile-editor-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.76);backdrop-filter:blur(4px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,560px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
+        <button type="button" data-lobby-profile-editor-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
+        <form data-lobby-profile-editor-form="1" style="display:grid;gap:16px;">
+          <div>
+            <div style="font-size:25px;line-height:1.1;font-weight:900;color:#f8fafc;">Редакция на профил</div>
+            <div style="margin-top:7px;font-size:13px;line-height:1.45;color:rgba(255,255,255,0.62);font-weight:700;">Името е заключено. Смяната му ще бъде платена с жълтици на следваща стъпка.</div>
+          </div>
+
+          <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Име в играта
+            <input value="${escapeHtml(state.profile.displayName)}" disabled style="height:42px;border-radius:8px;border:1px solid rgba(255,255,255,0.10);background:#101010;color:rgba(255,255,255,0.58);padding:0 12px;font-size:15px;font-weight:700;outline:none;">
+          </label>
+
+          <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Нов аватар
+            <input name="avatarFile" type="file" accept="image/png,image/jpeg,image/webp" style="border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:10px 12px;font-size:13px;font-weight:700;outline:none;">
+          </label>
+
+          <div data-avatar-crop-stage="1" style="display:none;gap:8px;">
+            <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">Избери квадрат за аватар</div>
+            <div data-avatar-crop-box="1" style="position:relative;width:100%;max-height:360px;overflow:hidden;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;user-select:none;touch-action:none;">
+              <img data-avatar-crop-image="1" alt="" style="display:block;max-width:100%;max-height:360px;width:auto;height:auto;margin:0 auto;pointer-events:none;">
+              <div data-avatar-crop-selection="1" style="position:absolute;display:none;border:2px solid #f4c95b;background:rgba(212,165,32,0.18);box-shadow:0 0 0 9999px rgba(0,0,0,0.46);pointer-events:none;"></div>
+            </div>
+            <div style="font-size:12px;line-height:1.4;color:rgba(255,255,255,0.62);font-weight:700;">Натисни и влачи върху снимката. Може да чертаеш нов квадрат, докато не избереш точната част.</div>
+          </div>
+
+          <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Добави снимки в галерия
+            <input name="galleryFiles" type="file" accept="image/png,image/jpeg,image/webp" multiple ${galleryInputDisabled ? 'disabled' : ''} style="border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:${galleryInputDisabled ? 'rgba(255,255,255,0.42)' : '#ffffff'};padding:10px 12px;font-size:13px;font-weight:700;outline:none;">
+            <span style="font-size:12px;line-height:1.35;color:rgba(255,255,255,0.58);font-weight:700;text-transform:none;letter-spacing:0;">
+              ${galleryInputDisabled ? `Достигнат е лимитът от ${MAX_PROFILE_GALLERY_IMAGES} снимки.` : `Можеш да добавиш още ${gallerySlotsLeft} снимки.`}
+            </span>
+          </label>
+
+          <div style="display:grid;gap:8px;">
+            <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              Текуща галерия
+            </div>
+            ${galleryImages.length === 0 ? `
+              <div style="border-radius:8px;border:1px dashed rgba(255,255,255,0.16);background:rgba(255,255,255,0.04);padding:12px;color:rgba(255,255,255,0.62);font-size:13px;font-weight:700;text-align:center;">
+                Няма качени снимки.
+              </div>
+            ` : `
+              <div style="display:grid;grid-template-columns:repeat(6, minmax(0, 1fr));gap:8px;">
+                ${galleryImages
+                  .map((image) => `
+                    <div style="position:relative;aspect-ratio:1/1;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.10);background:#101010;">
+                      <img src="${escapeHtml(image.imageUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">
+                      <button
+                        type="button"
+                        data-lobby-gallery-delete="${escapeHtml(image.imageId)}"
+                        aria-label="Изтрий снимката"
+                        style="position:absolute;top:4px;right:4px;width:26px;height:26px;border:1px solid rgba(248,113,113,0.56);border-radius:999px;background:rgba(12,12,12,0.86);color:#fecaca;font-size:16px;font-weight:900;line-height:1;cursor:pointer;"
+                      >×</button>
+                    </div>
+                  `)
+                  .join('')}
+              </div>
+            `}
+          </div>
+
+          <div style="display:flex;align-items:center;gap:12px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.04);padding:12px;">
+            <div style="width:72px;height:72px;border-radius:8px;border:1px solid rgba(212,165,32,0.44);overflow:hidden;background:#111;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:24px;font-weight:900;flex:0 0 auto;">
+              ${state.profile.avatarUrl ? `<img src="${escapeHtml(state.profile.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : escapeHtml(state.profile.displayName.charAt(0).toUpperCase() || '?')}
+            </div>
+            <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);font-weight:700;">За аватар избери снимка и очертай квадрат върху нея. Сървърът ще изреже избраната част до 250x250 webp. Снимките за галерията се записват като 800x800 webp.</div>
+          </div>
+
+          ${state.profileEditorErrorText ? `<div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;">${escapeHtml(state.profileEditorErrorText)}</div>` : ''}
+
+          <div style="display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;">
+            <button type="button" data-lobby-profile-editor-cancel="1" style="height:42px;padding:0 16px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:#080808;color:#f8fafc;font-size:14px;font-weight:900;cursor:pointer;">Откажи</button>
+            <button type="submit" style="height:42px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;">Запази</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `
+}
+
+function renderNav(_isSearching: boolean, activeView: LobbyScreenState['view']): string {
+  const playersActive = activeView === 'players'
+
   return `
     <nav style="
       background: #0a0a0a;
@@ -77,14 +287,28 @@ function renderNav(_isSearching: boolean): string {
       </a>
 
       <div style="display:flex; align-items:stretch; gap:0; height:100%; flex:1;">
-        <a href="#" style="
+        <button type="button" data-lobby-nav-players="1" style="
+          display:flex; align-items:center; gap:10px;
+          padding:0 18px;
+          border:0;
+          background:${playersActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+          color:${playersActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${playersActive ? '#d4a520' : 'transparent'};
+          cursor:pointer;
+          height:100%;
+        ">
+          <span style="font-size:25px;line-height:1;color:currentColor;">◎</span>
+          Играчи
+        </button>
+        <a href="#" data-lobby-nav-lobby="1" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
           text-decoration:none;
           font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:#d4a520;
-          border-bottom:2px solid #d4a520;
-          background: rgba(212,165,32,0.06);
+          color:${playersActive ? 'rgba(255,255,255,0.70)' : '#d4a520'};
+          border-bottom:2px solid ${playersActive ? 'transparent' : '#d4a520'};
+          background:${playersActive ? 'transparent' : 'rgba(212,165,32,0.06)'};
         ">
           <img src="/assets/lobby/nav-icon-preview/nav-home-gold.svg" alt="" style="width:28px; height:28px; display:block; object-fit:contain;">
           Лоби
@@ -123,17 +347,23 @@ function renderNav(_isSearching: boolean): string {
           <img src="/assets/lobby/nav-icon-preview/nav-leaderboard-white.png" alt="" style="width:29px; height:30px; display:block; object-fit:contain;">
           Класация
         </a>
-        <a href="#" style="
+        <button
+          type="button"
+          data-lobby-profile-button="1"
+          style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
-          text-decoration:none;
+          border:0;
+          background:transparent;
           font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
           color:rgba(255,255,255,0.70);
           border-bottom:2px solid transparent;
+          cursor:pointer;
+          height:100%;
         ">
           <img src="/assets/lobby/nav-icon-preview/nav-profile-white.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain;">
           Профил
-        </a>
+        </button>
       </div>
 
       <div style="display:flex; align-items:center; gap:16px; margin-left:auto;">
@@ -609,6 +839,76 @@ function renderFooter(): string {
   `
 }
 
+function renderPlayersDirectory(state: LobbyScreenState): string {
+  const players = state.players
+
+  if (state.playersLoading) {
+    return `
+      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.34);background:#050505;border-radius:8px;color:#d4a520;font-size:18px;font-weight:900;">
+        Зареждане на играчи...
+      </div>
+    `
+  }
+
+  if (state.playersErrorText) {
+    return `
+      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(248,113,113,0.34);background:rgba(127,29,29,0.28);border-radius:8px;color:#fecaca;font-size:15px;font-weight:800;text-align:center;padding:20px;">
+        ${escapeHtml(state.playersErrorText)}
+      </div>
+    `
+  }
+
+  return `
+    <section style="min-height:520px;display:grid;gap:14px;align-content:start;">
+      <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
+        <div>
+          <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Всички играчи</div>
+          <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.56);">Профили, ранг, рейтинг и галерия.</div>
+        </div>
+        <div style="font-size:13px;font-weight:900;color:#d4a520;">${formatAmount(players.length)} играчи</div>
+      </div>
+
+      ${players.length === 0 ? `
+        <div style="min-height:360px;display:flex;align-items:center;justify-content:center;border:1px dashed rgba(255,255,255,0.16);background:rgba(255,255,255,0.03);border-radius:8px;color:rgba(255,255,255,0.62);font-size:15px;font-weight:800;">
+          Все още няма регистрирани играчи.
+        </div>
+      ` : `
+        <div style="display:grid;grid-template-columns:repeat(5, minmax(0, 1fr));gap:12px;">
+          ${players.map((player) => {
+            const displayName = player.displayName?.trim() || 'Играч'
+            const avatarUrl = player.avatarUrl?.trim() ?? ''
+            const fallbackLetter = escapeHtml(displayName.charAt(0).toUpperCase() || '?')
+
+            return `
+              <button type="button" data-lobby-player-card="${escapeHtml(player.profileId ?? '')}" style="display:grid;gap:10px;text-align:left;border:1px solid rgba(212,165,32,0.32);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:12px;color:#ffffff;cursor:pointer;min-width:0;">
+                <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+                  <div style="width:54px;height:54px;border-radius:8px;border:1px solid rgba(212,165,32,0.56);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:22px;font-weight:900;flex:0 0 auto;">
+                    ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : fallbackLetter}
+                  </div>
+                  <div style="min-width:0;">
+                    <div style="font-size:15px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
+                    <div style="margin-top:4px;font-size:12px;font-weight:800;color:#d4a520;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(player.rankTitle ?? 'Ранг 1')}</div>
+                  </div>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                  <div style="border-radius:8px;background:rgba(255,255,255,0.05);padding:8px;">
+                    <div style="font-size:10px;font-weight:900;text-transform:uppercase;color:rgba(255,255,255,0.44);">Оценка</div>
+                    <div style="margin-top:4px;font-size:15px;font-weight:900;color:#f8fafc;">${typeof player.averageRating === 'number' ? player.averageRating.toFixed(2) : '-'}</div>
+                  </div>
+                  <div style="border-radius:8px;background:rgba(255,255,255,0.05);padding:8px;">
+                    <div style="font-size:10px;font-weight:900;text-transform:uppercase;color:rgba(255,255,255,0.44);">Игри</div>
+                    <div style="margin-top:4px;font-size:15px;font-weight:900;color:#f8fafc;">${formatAmount(player.completedGamesCount ?? 0)}</div>
+                  </div>
+                </div>
+              </button>
+            `
+          }).join('')}
+        </div>
+      `}
+    </section>
+  `
+}
+
 export function renderLobbyScreen(
   root: HTMLElement,
   options: RenderLobbyScreenOptions,
@@ -678,12 +978,16 @@ export function renderLobbyScreen(
       </style>
 
       <div data-lobby-scale-stage="1" style="width:1640px; margin:0 auto; zoom:var(--lobby-scale);">
-        ${renderNav(state.isSearching)}
+        ${renderNav(state.isSearching, state.view)}
 
         <div style="max-width: 1640px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;">
-          ${renderHeroSection(profileName, state.isConnected)}
-          ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching)}
-          ${renderBottomSection()}
+          ${state.view === 'players'
+            ? renderPlayersDirectory(state)
+            : `
+              ${renderHeroSection(profileName, state.isConnected)}
+              ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching)}
+              ${renderBottomSection()}
+            `}
           ${renderFooter()}
         </div>
       </div>
@@ -748,6 +1052,15 @@ export function renderLobbyScreen(
           ${escapeHtml(state.errorText)}
         </div>
       ` : ''}
+
+      ${renderPlayerProfilePopup({
+        isOpen: state.profilePopupOpen,
+        seat: 'bottom',
+        profile: state.profilePopupProfile ?? state.profile,
+        canEdit: state.profilePopupCanEdit,
+      })}
+      ${renderProfileEditModal(state)}
+      ${renderAuthModal(state)}
     </div>
   `
 
@@ -775,5 +1088,248 @@ export function renderLobbyScreen(
 
   cancelButton?.addEventListener('click', () => {
     options.onCancelClick()
+  })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-profile-button="1"]')
+    ?.addEventListener('click', (event) => {
+      event.preventDefault()
+      options.onProfileClick()
+    })
+
+  root
+    .querySelector<HTMLElement>('[data-lobby-nav-lobby="1"]')
+    ?.addEventListener('click', (event) => {
+      event.preventDefault()
+      options.onLobbyClick()
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-nav-players="1"]')
+    ?.addEventListener('click', options.onPlayersClick)
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-player-card]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const profileId = button.dataset.lobbyPlayerCard ?? ''
+      const profile = state.players.find((player) => player.profileId === profileId)
+
+      if (profile) {
+        options.onPlayerCardClick(profile)
+      }
+    })
+  })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-player-profile-popup-close="1"]')
+    ?.addEventListener('click', options.onProfileClose)
+
+  root
+    .querySelector<HTMLElement>('[data-player-profile-popup-backdrop="1"]')
+    ?.addEventListener('click', options.onProfileClose)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-player-profile-edit="1"]')
+    ?.addEventListener('click', options.onProfileEditClick)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-profile-editor-close="1"]')
+    ?.addEventListener('click', options.onProfileEditClose)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-profile-editor-cancel="1"]')
+    ?.addEventListener('click', options.onProfileEditClose)
+
+  root
+    .querySelector<HTMLElement>('[data-lobby-profile-editor-backdrop="1"]')
+    ?.addEventListener('click', options.onProfileEditClose)
+
+  const avatarInput = root.querySelector<HTMLInputElement>(
+    'input[name="avatarFile"]',
+  )
+  const cropStage = root.querySelector<HTMLElement>('[data-avatar-crop-stage="1"]')
+  const cropBox = root.querySelector<HTMLElement>('[data-avatar-crop-box="1"]')
+  const cropImage = root.querySelector<HTMLImageElement>('[data-avatar-crop-image="1"]')
+  const cropSelection = root.querySelector<HTMLElement>(
+    '[data-avatar-crop-selection="1"]',
+  )
+
+  let cropStartX = 0
+  let cropStartY = 0
+  let currentCrop: AvatarCropSelection | null = null
+
+  function clearCropSelection(): void {
+    currentCrop = null
+    if (cropSelection) {
+      cropSelection.style.display = 'none'
+    }
+  }
+
+  function getImageRelativePoint(event: PointerEvent): { x: number; y: number } | null {
+    if (!cropImage) {
+      return null
+    }
+
+    const rect = cropImage.getBoundingClientRect()
+
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null
+    }
+
+    const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+    const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top))
+
+    return { x, y }
+  }
+
+  function renderCropFromPoints(currentX: number, currentY: number): void {
+    if (!cropImage || !cropSelection) {
+      return
+    }
+
+    const rect = cropImage.getBoundingClientRect()
+    const boxRect = cropBox?.getBoundingClientRect() ?? rect
+    const deltaX = currentX - cropStartX
+    const deltaY = currentY - cropStartY
+    const size = Math.min(Math.abs(deltaX), Math.abs(deltaY))
+
+    if (size < 4) {
+      clearCropSelection()
+      return
+    }
+
+    const directionX = deltaX >= 0 ? 1 : -1
+    const directionY = deltaY >= 0 ? 1 : -1
+    const displayX = directionX > 0 ? cropStartX : cropStartX - size
+    const displayY = directionY > 0 ? cropStartY : cropStartY - size
+    const boundedX = Math.max(0, Math.min(rect.width - size, displayX))
+    const boundedY = Math.max(0, Math.min(rect.height - size, displayY))
+
+    cropSelection.style.display = 'block'
+    cropSelection.style.left = `${rect.left - boxRect.left + boundedX}px`
+    cropSelection.style.top = `${rect.top - boxRect.top + boundedY}px`
+    cropSelection.style.width = `${size}px`
+    cropSelection.style.height = `${size}px`
+
+    currentCrop = {
+      x: (boundedX / rect.width) * cropImage.naturalWidth,
+      y: (boundedY / rect.height) * cropImage.naturalHeight,
+      size: (size / rect.width) * cropImage.naturalWidth,
+    }
+  }
+
+  avatarInput?.addEventListener('change', () => {
+    const file = avatarInput.files?.[0] ?? null
+
+    clearCropSelection()
+
+    if (!file || !cropStage || !cropImage) {
+      return
+    }
+
+    cropStage.style.display = 'grid'
+    cropImage.src = URL.createObjectURL(file)
+  })
+
+  cropBox?.addEventListener('pointerdown', (event) => {
+    const point = getImageRelativePoint(event)
+
+    if (point === null || !cropBox) {
+      return
+    }
+
+    event.preventDefault()
+    cropBox.setPointerCapture(event.pointerId)
+    cropStartX = point.x
+    cropStartY = point.y
+    renderCropFromPoints(point.x, point.y)
+  })
+
+  cropBox?.addEventListener('pointermove', (event) => {
+    if (!cropBox.hasPointerCapture(event.pointerId)) {
+      return
+    }
+
+    const point = getImageRelativePoint(event)
+
+    if (point === null) {
+      return
+    }
+
+    event.preventDefault()
+    renderCropFromPoints(point.x, point.y)
+  })
+
+  cropBox?.addEventListener('pointerup', (event) => {
+    if (cropBox.hasPointerCapture(event.pointerId)) {
+      cropBox.releasePointerCapture(event.pointerId)
+    }
+  })
+
+  root
+    .querySelector<HTMLFormElement>('[data-lobby-profile-editor-form="1"]')
+    ?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const form = event.currentTarget as HTMLFormElement
+      const data = new FormData(form)
+      const avatarFile = data.get('avatarFile')
+      const galleryFiles = data.getAll('galleryFiles').filter(
+        (value): value is File => value instanceof File && value.size > 0,
+      )
+      options.onProfileEditSubmit(
+        avatarFile instanceof File && avatarFile.size > 0 ? avatarFile : null,
+        currentCrop,
+        galleryFiles,
+      )
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-gallery-delete]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const imageId = button.dataset.lobbyGalleryDelete?.trim() ?? ''
+
+      if (imageId.length > 0) {
+        options.onProfileGalleryDelete(imageId)
+      }
+    })
+  })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-auth-modal-close="1"]')
+    ?.addEventListener('click', options.onAuthModalClose)
+
+  root
+    .querySelector<HTMLElement>('[data-lobby-auth-modal-backdrop="1"]')
+    ?.addEventListener('click', options.onAuthModalClose)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-auth-register-button="1"]')
+    ?.addEventListener('click', () => options.onAuthModeChange('register'))
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-auth-login-button="1"]')
+    ?.addEventListener('click', () => options.onAuthModeChange('login'))
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-auth-mode]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const mode = button.dataset.lobbyAuthMode
+      if (mode === 'login' || mode === 'register') {
+        options.onAuthModeChange(mode)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLFormElement>('[data-lobby-auth-form]').forEach((form) => {
+    form.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const data = new FormData(form)
+      const email = String(data.get('email') ?? '')
+      const password = String(data.get('password') ?? '')
+
+      if (form.dataset.lobbyAuthForm === 'register') {
+        options.onRegisterSubmit(String(data.get('displayName') ?? ''), email, password)
+        return
+      }
+
+      options.onLoginSubmit(email, password)
+    })
   })
 }

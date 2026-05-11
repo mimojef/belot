@@ -83,6 +83,11 @@ export type ClientMessage =
       type: 'resume_human_control'
       roomId: RoomId
     }
+  | {
+      type: 'submit_partner_rating'
+      roomId: RoomId
+      ratingValue: number
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -320,6 +325,12 @@ export type ActiveRoomLeftMessage = {
   removed: boolean
 }
 
+export type PartnerRatingSubmittedMessage = {
+  type: 'partner_rating_submitted'
+  roomId: RoomId
+  ratingValue: number
+}
+
 export type MatchmakingJoinedMessage = {
   type: 'matchmaking_joined'
   stake: MatchStake
@@ -365,6 +376,7 @@ export type ServerMessage =
   | RoomResumedMessage
   | RoomResumeFailedMessage
   | ActiveRoomLeftMessage
+  | PartnerRatingSubmittedMessage
   | RoomSnapshotMessage
   | MatchmakingJoinedMessage
   | MatchmakingStatusMessage

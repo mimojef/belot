@@ -4,6 +4,7 @@ import type {
   HumanRoomParticipant,
   PlayerId,
   PlayerIdentitySnapshot,
+  PlayerPublicProfileSnapshot,
 } from './serverTypes.js'
 
 type CreateHumanParticipantOptions = {
@@ -11,6 +12,7 @@ type CreateHumanParticipantOptions = {
   connectionId?: ConnectionId | null
   reconnectToken?: string | null
   identity?: Partial<PlayerIdentitySnapshot>
+  publicProfile?: PlayerPublicProfileSnapshot | null
 }
 
 function createDefaultIdentity(): PlayerIdentitySnapshot {
@@ -43,5 +45,6 @@ export function createHumanParticipant(
       ...createDefaultIdentity(),
       ...options.identity,
     },
+    publicProfile: options.publicProfile ?? null,
   }
 }

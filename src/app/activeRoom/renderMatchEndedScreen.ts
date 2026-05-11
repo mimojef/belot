@@ -21,6 +21,7 @@ type RenderMatchEndedScreenOptions = {
   scaledStageHeight: number
   onReturnToLobby: () => void
   onStartNewGame?: () => void
+  onSubmitPartnerRating?: (ratingValue: number) => void
 }
 
 function getTeamBySeat(seat: Seat): Team {
@@ -29,6 +30,13 @@ function getTeamBySeat(seat: Seat): Team {
 
 function getOpponentTeam(team: Team): Team {
   return team === 'A' ? 'B' : 'A'
+}
+
+function getPartnerSeat(seat: Seat): Seat {
+  if (seat === 'bottom') return 'top'
+  if (seat === 'top') return 'bottom'
+  if (seat === 'left') return 'right'
+  return 'left'
 }
 
 function getTeamScore(
@@ -142,6 +150,75 @@ function renderTeamPlayers(
         "
       >
         ${seats.map(renderPlayerTile).join('')}
+      </div>
+    </div>
+  `
+}
+
+function renderPartnerRating(localSeat: Seat, seats: RoomSeatSnapshot[]): string {
+  const partnerSeat = getPartnerSeat(localSeat)
+  const partner = seats.find((seat) => seat.seat === partnerSeat) ?? null
+
+  if (!partner || !partner.isOccupied || partner.isBot) {
+    return ''
+  }
+
+  return `
+    <div
+      data-partner-rating-panel="1"
+      style="
+        margin-top:22px;
+        border-radius:8px;
+        border:1px solid rgba(250,204,21,0.28);
+        background:rgba(10,10,10,0.52);
+        padding:16px 18px;
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap:18px;
+        flex-wrap:wrap;
+      "
+    >
+      <div style="min-width:0;">
+        <div style="color:#f8fafc;font-size:16px;font-weight:900;">
+          Оцени партньора
+        </div>
+        <div style="margin-top:4px;color:rgba(226,232,240,0.72);font-size:13px;font-weight:700;">
+          ${escapeHtml(partner.displayName)}
+        </div>
+      </div>
+
+      <div
+        style="
+          display:grid;
+          grid-template-columns:repeat(6, 42px);
+          gap:7px;
+          align-items:center;
+        "
+      >
+        ${[1, 2, 3, 4, 5, 6]
+          .map((rating) => `
+            <button
+              type="button"
+              data-partner-rating-value="${rating}"
+              aria-label="Оцени с ${rating}"
+              title="${rating}/6"
+              style="
+                width:42px;
+                height:42px;
+                border:1px solid rgba(250,204,21,0.46);
+                border-radius:8px;
+                background:rgba(250,204,21,0.10);
+                color:#facc15;
+                font-size:18px;
+                font-weight:900;
+                cursor:pointer;
+              "
+            >
+              ${rating}
+            </button>
+          `)
+          .join('')}
       </div>
     </div>
   `
@@ -272,6 +349,8 @@ function renderMatchEndedPanel(
           ${renderTeamPlayers('Вие', theirSeats)}
         </div>
 
+        ${renderPartnerRating(localSeat, seats)}
+
         <div
           style="
             margin-top:24px;
@@ -340,6 +419,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
     scaledStageHeight,
     onReturnToLobby,
     onStartNewGame,
+    onSubmitPartnerRating,
   } = options
 
   root.innerHTML = `
@@ -401,4 +481,33 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
   root
     .querySelector<HTMLButtonElement>('[data-match-ended-new-game-button="1"]')
     ?.addEventListener('click', onStartNewGame ?? onReturnToLobby)
+
+  root
+    .querySelectorAll<HTMLButtonElement>('[data-partner-rating-value]')
+    .forEach((button) => {
+      button.addEventListener('click', () => {
+        const ratingValue = Number(button.dataset.partnerRatingValue)
+
+        if (!Number.isInteger(ratingValue)) {
+          return
+        }
+
+        onSubmitPartnerRating?.(ratingValue)
+
+        root
+          .querySelectorAll<HTMLButtonElement>('[data-partner-rating-value]')
+          .forEach((ratingButton) => {
+            ratingButton.disabled = true
+            ratingButton.style.cursor = 'default'
+            ratingButton.style.opacity = ratingButton === button ? '1' : '0.45'
+          })
+
+        const panel = root.querySelector<HTMLElement>('[data-partner-rating-panel="1"]')
+
+        panel?.insertAdjacentHTML(
+          'beforeend',
+          '<div style="width:100%;color:#bef264;font-size:13px;font-weight:900;text-align:right;">Оценката е изпратена.</div>',
+        )
+      })
+    })
 }

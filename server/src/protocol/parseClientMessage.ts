@@ -117,6 +117,18 @@ function normalizeDeclarationKeys(value: unknown): string[] {
     .slice(0, 8)
 }
 
+function normalizePartnerRatingValue(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    return null
+  }
+
+  if (value < 1 || value > 6) {
+    return null
+  }
+
+  return value
+}
+
 export function parseClientMessage(rawText: string): ClientMessage | null {
   try {
     const parsed = JSON.parse(rawText) as unknown
@@ -279,6 +291,21 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return {
         type: 'resume_human_control',
         roomId,
+      }
+    }
+
+    if (parsed.type === 'submit_partner_rating') {
+      const roomId = normalizeRequiredText(parsed.roomId)
+      const ratingValue = normalizePartnerRatingValue(parsed.ratingValue)
+
+      if (roomId === null || ratingValue === null) {
+        return null
+      }
+
+      return {
+        type: 'submit_partner_rating',
+        roomId,
+        ratingValue,
       }
     }
 

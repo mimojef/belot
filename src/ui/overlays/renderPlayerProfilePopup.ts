@@ -8,6 +8,7 @@ export type RenderPlayerProfilePopupOptions = {
   seat: Seat | null
   profile: PlayerPublicProfileSnapshot | null
   isLoading?: boolean
+  canEdit?: boolean
 }
 
 function escapeHtml(value: string): string {
@@ -45,6 +46,94 @@ function formatAverageRating(value: number | null | undefined): string {
   }
 
   return escapeHtml(value.toFixed(2))
+}
+
+function formatInteger(value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 'вЂ”'
+  }
+
+  return escapeHtml(new Intl.NumberFormat('bg-BG').format(Math.trunc(value)))
+}
+
+function getRankLevel(profile: PlayerPublicProfileSnapshot): number | null {
+  if (typeof profile.level !== 'number' || !Number.isFinite(profile.level)) {
+    return null
+  }
+
+  return Math.max(1, Math.trunc(profile.level))
+}
+
+function renderRankProgress(profile: PlayerPublicProfileSnapshot): string {
+  const rankLevel = getRankLevel(profile)
+  const completedGames = profile.completedGamesCount
+  const nextRankGames = profile.nextRankGames
+  const ratio =
+    typeof profile.rankProgressRatio === 'number' &&
+    Number.isFinite(profile.rankProgressRatio)
+      ? Math.max(0, Math.min(1, profile.rankProgressRatio))
+      : 0
+
+  return `
+    <div
+      style="
+        border-radius:8px;
+        background:linear-gradient(180deg, rgba(22,22,22,0.98) 0%, rgba(8,8,8,0.99) 100%);
+        border:1px solid rgba(212,165,32,0.42);
+        padding:16px;
+        box-shadow:inset 0 0 18px rgba(212,165,32,0.04);
+      "
+    >
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;">
+        <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+          <div
+            style="
+              width:42px;
+              height:42px;
+              border-radius:8px;
+              border:1px solid rgba(212,165,32,0.72);
+              background:rgba(212,165,32,0.10);
+              color:#d4a520;
+              display:flex;
+              align-items:center;
+              justify-content:center;
+              font-size:18px;
+              font-weight:900;
+            "
+          >
+            ${rankLevel ?? 'вЂ”'}
+          </div>
+          <div style="min-width:0;">
+            <div style="font-size:13px;font-weight:900;letter-spacing:0.12em;text-transform:uppercase;color:#d4a520;">
+              Ранг
+            </div>
+            <div style="margin-top:4px;font-size:18px;font-weight:900;color:#f8fafc;">
+              ${escapeHtml(profile.rankTitle ?? (rankLevel ? `Ранг ${rankLevel}` : 'Ранг'))}
+            </div>
+          </div>
+        </div>
+        <div style="font-size:14px;font-weight:900;color:#f8fafc;white-space:nowrap;">
+          ${formatInteger(completedGames)} / ${formatInteger(nextRankGames)}
+        </div>
+      </div>
+
+      <div style="height:12px;border-radius:999px;background:#050505;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">
+        <div
+          style="
+            width:${(ratio * 100).toFixed(2)}%;
+            height:100%;
+            border-radius:999px;
+            background:linear-gradient(90deg, #d4a520 0%, #f4c95b 100%);
+            box-shadow:0 0 12px rgba(212,165,32,0.36);
+          "
+        ></div>
+      </div>
+
+      <div style="margin-top:9px;font-size:12px;font-weight:800;color:rgba(226,232,240,0.70);">
+        Остават ${formatInteger(profile.gamesUntilNextRank)} игри до следващ ранг
+      </div>
+    </div>
+  `
 }
 
 function renderAvatar(profile: PlayerPublicProfileSnapshot | null, seat: Seat | null): string {
@@ -252,7 +341,11 @@ function renderEmptyContent(seat: Seat | null): string {
   `
 }
 
-function renderProfileContent(profile: PlayerPublicProfileSnapshot, seat: Seat | null): string {
+function renderProfileContent(
+  profile: PlayerPublicProfileSnapshot,
+  seat: Seat | null,
+  canEdit: boolean,
+): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
   return `
@@ -303,8 +396,29 @@ function renderProfileContent(profile: PlayerPublicProfileSnapshot, seat: Seat |
               word-break:break-word;
             "
           >
-            ${escapeHtml(displayName)}
+              ${escapeHtml(displayName)}
           </div>
+
+          ${canEdit ? `
+            <button
+              type="button"
+              data-player-profile-edit="1"
+              style="
+                align-self:flex-start;
+                height:36px;
+                padding:0 14px;
+                border:1px solid rgba(212,165,32,0.62);
+                border-radius:8px;
+                background:linear-gradient(180deg, rgba(212,165,32,0.18) 0%, rgba(8,8,8,0.82) 100%);
+                color:#f8fafc;
+                font-size:13px;
+                font-weight:900;
+                cursor:pointer;
+              "
+            >
+              Редакция
+            </button>
+          ` : ''}
 
           <div
             style="
@@ -351,6 +465,8 @@ function renderProfileContent(profile: PlayerPublicProfileSnapshot, seat: Seat |
           </div>
         </div>
       </div>
+
+      ${renderRankProgress(profile)}
 
       <div
         style="
@@ -531,7 +647,7 @@ export function renderPlayerProfilePopup(
   const popupBody = options.isLoading
     ? renderLoadingContent(options.seat)
     : options.profile
-      ? renderProfileContent(options.profile, options.seat)
+      ? renderProfileContent(options.profile, options.seat, options.canEdit ?? false)
       : renderEmptyContent(options.seat)
 
   const safeTitle = escapeHtml(
@@ -572,7 +688,7 @@ export function renderPlayerProfilePopup(
         style="
           position:absolute;
           inset:0;
-          background:rgba(2, 6, 23, 0.68);
+          background:rgba(0, 0, 0, 0.72);
           backdrop-filter:blur(4px);
         "
       ></div>
@@ -597,9 +713,9 @@ export function renderPlayerProfilePopup(
             width:min(92vw, 760px);
             max-height:min(88vh, 860px);
             overflow:auto;
-            border-radius:28px;
-            background:linear-gradient(180deg, rgba(9, 20, 38, 0.98) 0%, rgba(13, 29, 52, 0.98) 100%);
-            border:1px solid rgba(255,255,255,0.12);
+            border-radius:8px;
+            background:linear-gradient(180deg, rgba(32,32,32,0.98) 0%, rgba(8,8,8,0.99) 100%);
+            border:2px solid rgba(212,165,32,0.72);
             box-shadow:0 34px 80px rgba(0,0,0,0.42);
             padding:24px 24px 22px;
             animation:belot-player-profile-fade-in 160ms ease forwards;

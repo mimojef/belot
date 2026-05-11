@@ -4,16 +4,23 @@ import {
 } from './renderMatchmakingRoomScreen'
 import {
   renderLobbyScreen,
+  type AvatarCropSelection,
+  type LobbyAuthModalMode,
   type LobbyScreenState,
 } from './renderLobbyScreen'
 import type {
   MatchFoundMessage,
   MatchStake,
+  PlayerPublicProfileSnapshot,
   RoomSeatSnapshot,
   ServerMessage,
 } from '../network/createGameServerClient'
 
-export type LobbyFlowScreen = 'lobby' | 'matchmaking-room'
+export type LobbyFlowScreen = 'lobby' | 'players' | 'matchmaking-room'
+
+export type LobbyAuthSession = {
+  profile: PlayerPublicProfileSnapshot
+}
 
 export type CreateLobbyFlowControllerOptions = {
   root: HTMLElement
@@ -21,6 +28,23 @@ export type CreateLobbyFlowControllerOptions = {
   leaveMatchmaking: () => void
   onMatchFound: (message: MatchFoundMessage) => void
   tryUnlockDocumentAudio?: () => void
+  getAuthSession?: () => LobbyAuthSession | null
+  onLoginSubmit?: (email: string, password: string) => Promise<string | null>
+  onRegisterSubmit?: (
+    displayName: string,
+    email: string,
+    password: string,
+  ) => Promise<string | null>
+  onProfileEditSubmit?: (
+    avatarFile: File | null,
+    avatarCrop: AvatarCropSelection | null,
+    galleryFiles: File[],
+  ) => Promise<string | null>
+  onProfileGalleryDelete?: (imageId: string) => Promise<string | null>
+  onPlayersLoad?: () => Promise<
+    | { ok: true; players: PlayerPublicProfileSnapshot[] }
+    | { ok: false; message: string }
+  >
 }
 
 export type LobbyFlowController = {
@@ -48,9 +72,19 @@ type InternalLobbyFlowState = {
   remainingMs: number | null
   countdownEndsAt: number | null
   errorText: string | null
+  profilePopupOpen: boolean
+  profilePopupProfile: PlayerPublicProfileSnapshot | null
+  profilePopupCanEdit: boolean
+  profileEditorOpen: boolean
+  profileEditorErrorText: string | null
+  authModalMode: LobbyAuthModalMode
+  authErrorText: string | null
   serverRoomSeats: RoomSeatSnapshot[] | null
   serverYourSeat: RoomSeatSnapshot['seat'] | null
   serverPreviewBotDisplayNames: string[]
+  players: PlayerPublicProfileSnapshot[]
+  playersLoading: boolean
+  playersErrorText: string | null
 }
 
 type StakeCardConfig = {
@@ -96,9 +130,19 @@ function createInitialState(): InternalLobbyFlowState {
     remainingMs: null,
     countdownEndsAt: null,
     errorText: null,
+    profilePopupOpen: false,
+    profilePopupProfile: null,
+    profilePopupCanEdit: true,
+    profileEditorOpen: false,
+    profileEditorErrorText: null,
+    authModalMode: 'closed',
+    authErrorText: null,
     serverRoomSeats: null,
     serverYourSeat: null,
     serverPreviewBotDisplayNames: [],
+    players: [],
+    playersLoading: false,
+    playersErrorText: null,
   }
 }
 
@@ -179,6 +223,49 @@ function getOtherOccupiedSeatSnapshots(
 
 const WAITING_PLAYER_DISPLAY_NAME = 'Чакаме...'
 const LOCAL_PLAYER_FALLBACK_DISPLAY_NAME = 'Гост'
+
+function createLocalProfilePreview(
+  state: InternalLobbyFlowState,
+  authSession: LobbyAuthSession | null,
+): PlayerPublicProfileSnapshot {
+  if (authSession !== null) {
+    return authSession.profile
+  }
+
+  const localSeatSnapshot = getLocalSeatSnapshot(state)
+  const displayName =
+    localSeatSnapshot?.displayName.trim() ||
+    state.displayName.trim() ||
+    LOCAL_PLAYER_FALLBACK_DISPLAY_NAME
+  const avatarUrl = localSeatSnapshot?.avatarUrl ?? state.localAvatarUrl
+
+  return {
+    profileId: null,
+    displayName,
+    avatarUrl,
+    level: 1,
+    rankTitle: 'Ранг 1',
+    skillRating: null,
+    completedGamesCount: 0,
+    wonGamesCount: 0,
+    currentRankGames: 0,
+    nextRankGames: 5,
+    gamesUntilNextRank: 5,
+    rankProgressRatio: 0,
+    averageRating: 0,
+    totalRatingsCount: 0,
+    yellowCoinsBalance: 25430,
+    galleryImages: avatarUrl
+      ? [
+          {
+            imageId: 'local-avatar',
+            imageUrl: avatarUrl,
+            sortOrder: 0,
+          },
+        ]
+      : [],
+  }
+}
 
 function createAutoFillPreviewPlayer(
   index: number,
@@ -611,7 +698,9 @@ export function createLobbyFlowController(
     resetFinalFillSequence()
     clearServerRoomSnapshot()
 
+    const authSession = options.getAuthSession?.() ?? null
     const lobbyState: LobbyScreenState = {
+      view: state.currentScreen === 'players' ? 'players' : 'tables',
       displayName: state.displayName,
       selectedStake: state.selectedStake,
       isConnected: state.isConnected,
@@ -621,6 +710,18 @@ export function createLobbyFlowController(
       remainingMs: getLobbyRemainingMs(state),
       statusText: getLobbyStatusText(state),
       errorText: state.errorText,
+      profilePopupOpen: state.profilePopupOpen,
+      profile: createLocalProfilePreview(state, authSession),
+      profilePopupProfile: state.profilePopupProfile,
+      profilePopupCanEdit: state.profilePopupCanEdit,
+      players: state.players,
+      playersLoading: state.playersLoading,
+      playersErrorText: state.playersErrorText,
+      authModalMode: state.authModalMode,
+      authErrorText: state.authErrorText,
+      signupBonusYellowCoins: 100000,
+      profileEditorOpen: state.profileEditorOpen,
+      profileEditorErrorText: state.profileEditorErrorText,
     }
 
     renderLobbyScreen(options.root, {
@@ -643,7 +744,198 @@ export function createLobbyFlowController(
         options.leaveMatchmaking()
         render()
       },
+      onProfileClick: () => {
+        state.profilePopupProfile = null
+        state.profilePopupCanEdit = true
+        state.profilePopupOpen = true
+        render()
+      },
+      onProfileClose: () => {
+        state.profilePopupOpen = false
+        state.profilePopupProfile = null
+        state.profilePopupCanEdit = true
+        render()
+      },
+      onProfileEditClick: () => {
+        state.profileEditorOpen = true
+        state.profileEditorErrorText = null
+        state.profilePopupOpen = false
+        render()
+      },
+      onProfileEditClose: () => {
+        state.profileEditorOpen = false
+        state.profileEditorErrorText = null
+        render()
+      },
+      onProfileEditSubmit: (avatarFile, avatarCrop, galleryFiles) => {
+        void submitProfileEdit(avatarFile, avatarCrop, galleryFiles)
+      },
+      onProfileGalleryDelete: (imageId) => {
+        void deleteProfileGalleryImage(imageId)
+      },
+      onLobbyClick: () => {
+        switchToLobby()
+        render()
+      },
+      onPlayersClick: () => {
+        void showPlayersDirectory()
+      },
+      onPlayerCardClick: (profile) => {
+        state.profilePopupProfile = profile
+        state.profilePopupCanEdit = false
+        state.profilePopupOpen = true
+        render()
+      },
+      onAuthModalClose: () => {
+        state.authModalMode = 'closed'
+        state.authErrorText = null
+        render()
+      },
+      onAuthModeChange: (mode) => {
+        state.authModalMode = mode
+        state.authErrorText = null
+        render()
+      },
+      onLoginSubmit: (email, password) => {
+        void submitLogin(email, password)
+      },
+      onRegisterSubmit: (displayName, email, password) => {
+        void submitRegister(displayName, email, password)
+      },
     })
+  }
+
+  async function submitProfileEdit(
+    avatarFile: File | null,
+    avatarCrop: AvatarCropSelection | null,
+    galleryFiles: File[],
+  ): Promise<void> {
+    const errorText = options.onProfileEditSubmit
+      ? await options.onProfileEditSubmit(avatarFile, avatarCrop, galleryFiles)
+      : 'Редакцията временно не е налична.'
+
+    if (errorText !== null) {
+      state.profileEditorErrorText = errorText
+      render()
+      return
+    }
+
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession !== null) {
+      state.displayName = authSession.profile.displayName
+      state.localAvatarUrl = authSession.profile.avatarUrl
+    }
+
+    state.profileEditorOpen = false
+    state.profileEditorErrorText = null
+    state.profilePopupOpen = true
+    render()
+  }
+
+  async function deleteProfileGalleryImage(imageId: string): Promise<void> {
+    const errorText = options.onProfileGalleryDelete
+      ? await options.onProfileGalleryDelete(imageId)
+      : 'Изтриването на снимки временно не е налично.'
+
+    if (errorText !== null) {
+      state.profileEditorErrorText = errorText
+      render()
+      return
+    }
+
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession !== null) {
+      state.displayName = authSession.profile.displayName
+      state.localAvatarUrl = authSession.profile.avatarUrl
+    }
+
+    state.profileEditorErrorText = null
+    render()
+  }
+
+  async function showPlayersDirectory(): Promise<void> {
+    state.currentScreen = 'players'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+
+    if (!options.onPlayersLoad) {
+      state.playersErrorText = 'Списъкът с играчи временно не е наличен.'
+      render()
+      return
+    }
+
+    state.playersLoading = true
+    state.playersErrorText = null
+    render()
+
+    const result = await options.onPlayersLoad()
+
+    if (state.currentScreen !== 'players') {
+      return
+    }
+
+    state.playersLoading = false
+
+    if (!result.ok) {
+      state.playersErrorText = result.message
+      render()
+      return
+    }
+
+    state.players = result.players
+    state.playersErrorText = null
+    render()
+  }
+
+  async function submitLogin(email: string, password: string): Promise<void> {
+    const errorText = options.onLoginSubmit
+      ? await options.onLoginSubmit(email.trim(), password)
+      : 'Входът временно не е наличен.'
+
+    if (errorText !== null) {
+      state.authErrorText = errorText
+      render()
+      return
+    }
+
+    state.authModalMode = 'closed'
+    state.authErrorText = null
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession !== null) {
+      state.displayName = authSession.profile.displayName
+      state.localAvatarUrl = authSession.profile.avatarUrl
+    }
+    render()
+  }
+
+  async function submitRegister(
+    displayName: string,
+    email: string,
+    password: string,
+  ): Promise<void> {
+    const errorText = options.onRegisterSubmit
+      ? await options.onRegisterSubmit(displayName.trim(), email.trim(), password)
+      : 'Регистрацията временно не е налична.'
+
+    if (errorText !== null) {
+      state.authErrorText = errorText
+      render()
+      return
+    }
+
+    state.authModalMode = 'closed'
+    state.authErrorText = null
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession !== null) {
+      state.displayName = authSession.profile.displayName
+      state.localAvatarUrl = authSession.profile.avatarUrl
+    }
+    render()
   }
 
   function startMatchmaking(stake: MatchStake, displayName?: string): void {
@@ -652,6 +944,20 @@ export function createLobbyFlowController(
     if (displayName !== undefined) {
       state.displayName = displayName
     }
+
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession === null) {
+      state.currentScreen = 'lobby'
+      state.isSearching = false
+      state.errorText = null
+      state.authModalMode = 'cta'
+      state.authErrorText = null
+      render()
+      return
+    }
+
+    state.displayName = authSession.profile.displayName
 
     if (!state.isConnected) {
       state.currentScreen = 'lobby'

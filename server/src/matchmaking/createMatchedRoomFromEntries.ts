@@ -81,6 +81,12 @@ function createBotParticipantFromSelectedProfile(
       level: selectedProfile.identity.level,
       rankTitle: selectedProfile.identity.rankTitle,
       skillRating: selectedProfile.identity.skillRating,
+      completedGamesCount: null,
+      wonGamesCount: null,
+      currentRankGames: null,
+      nextRankGames: null,
+      gamesUntilNextRank: null,
+      rankProgressRatio: null,
       yellowCoinsBalance: selectedProfile.yellowCoinsBalance,
     },
   })
@@ -136,8 +142,14 @@ export function createMatchedRoomFromEntries(
       connectionId: entry.connectionId,
       playerId: entry.playerId,
       identity: {
+        profileId: entry.profileId,
         displayName: entry.displayName,
+        avatarUrl: entry.publicProfile?.avatarUrl ?? null,
+        level: entry.publicProfile?.level ?? null,
+        rankTitle: entry.publicProfile?.rankTitle ?? null,
+        skillRating: entry.publicProfile?.skillRating ?? null,
       },
+      publicProfile: entry.publicProfile,
     })
 
     nextRoom = seatParticipantInRoom(nextRoom, seat, participant)

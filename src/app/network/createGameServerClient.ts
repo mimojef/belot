@@ -24,6 +24,12 @@ export type PlayerPublicProfileSnapshot = {
   level: number | null
   rankTitle: string | null
   skillRating: number | null
+  completedGamesCount: number | null
+  wonGamesCount: number | null
+  currentRankGames: number | null
+  nextRankGames: number | null
+  gamesUntilNextRank: number | null
+  rankProgressRatio: number | null
   averageRating: number | null
   totalRatingsCount: number | null
   yellowCoinsBalance: number | null
@@ -84,6 +90,11 @@ export type ClientMessage =
   | {
       type: 'resume_human_control'
       roomId: string
+    }
+  | {
+      type: 'submit_partner_rating'
+      roomId: string
+      ratingValue: number
     }
 
 export type RoomSeatSnapshot = {
@@ -305,6 +316,12 @@ export type ActiveRoomLeftMessage = {
   removed: boolean
 }
 
+export type PartnerRatingSubmittedMessage = {
+  type: 'partner_rating_submitted'
+  roomId: string
+  ratingValue: number
+}
+
 export type RoomSnapshotMessage = {
   type: 'room_snapshot'
   roomId: string
@@ -366,6 +383,7 @@ export type ServerMessage =
   | RoomResumedMessage
   | RoomResumeFailedMessage
   | ActiveRoomLeftMessage
+  | PartnerRatingSubmittedMessage
   | RoomSnapshotMessage
   | PlayerProfileMessage
   | MatchmakingJoinedMessage
@@ -397,6 +415,7 @@ export type GameServerClient = {
   submitCutIndex: (roomId: string, cutIndex: number) => void
   submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
   resumeHumanControl: (roomId: string) => void
+  submitPartnerRating: (roomId: string, ratingValue: number) => void
 }
 
 function getDefaultServerUrl(): string {
@@ -580,6 +599,14 @@ export function createGameServerClient(
     })
   }
 
+  function submitPartnerRating(roomId: string, ratingValue: number): void {
+    send({
+      type: 'submit_partner_rating',
+      roomId,
+      ratingValue,
+    })
+  }
+
   return {
     connect,
     disconnect,
@@ -596,5 +623,6 @@ export function createGameServerClient(
     submitCutIndex,
     submitPlayCard,
     resumeHumanControl,
+    submitPartnerRating,
   }
 }
