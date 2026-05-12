@@ -20,11 +20,11 @@ export type CoinPurchaseSnapshot = {
   updatedAt: string
 }
 
-export type CoinPurchaseFulfillmentInput = {
+export type FulfillPaidPurchaseParams = {
+  checkoutSessionId: string
   purchaseId: string
-  providerCheckoutSessionId: string
-  paidPriceCents: number
-  paidCurrency: string
+  amountPaidCents: number
+  currency: string
 }
 
 export type CoinPurchaseStore = {
@@ -34,32 +34,21 @@ export type CoinPurchaseStore = {
     packageId: string,
   ) => { ok: true; purchase: CoinPurchaseSnapshot } | { ok: false; message: string }
   getPurchaseById: (purchaseId: string) => CoinPurchaseSnapshot | null
-  getPurchaseByProviderCheckoutSessionId: (
-    providerCheckoutSessionId: string,
+  attachCheckoutSession: (
+    purchaseId: string,
+    checkoutSessionId: string,
   ) => CoinPurchaseSnapshot | null
-  attachCheckoutSessionToPurchase: (
-    purchaseId: string,
-    providerCheckoutSessionId: string,
-  ) => { ok: true; purchase: CoinPurchaseSnapshot } | { ok: false; message: string }
-  markPurchaseCanceled: (
-    purchaseId: string,
-    providerCheckoutSessionId?: string | null,
-  ) => { ok: true; purchase: CoinPurchaseSnapshot | null } | { ok: false; message: string }
-  markPurchaseFailed: (
-    purchaseId: string,
-    providerCheckoutSessionId?: string | null,
-  ) => { ok: true; purchase: CoinPurchaseSnapshot | null } | { ok: false; message: string }
-  fulfillPaidPurchase: (
-    input: CoinPurchaseFulfillmentInput,
-  ) =>
-    | { ok: true; purchase: CoinPurchaseSnapshot; alreadyFulfilled: boolean }
+  findByCheckoutSessionId: (checkoutSessionId: string) => CoinPurchaseSnapshot | null
+  markPurchaseCanceledByCheckoutSessionId: (checkoutSessionId: string) => void
+  markPurchaseFailedByCheckoutSessionId: (checkoutSessionId: string) => void
+  fulfillPaidPurchase: (params: FulfillPaidPurchaseParams) =>
+    | { ok: true; purchase: CoinPurchaseSnapshot; alreadyCredited: boolean }
     | { ok: false; message: string }
   close: () => void
 }
 
 type CoinPurchaseRow = {
   purchase_id: string
-  profile_id: string
   package_id: string | null
   package_key_snapshot: string
   title_snapshot: string
@@ -74,6 +63,10 @@ type CoinPurchaseRow = {
   updated_at: string
 }
 
+type CoinPurchaseInternalRow = CoinPurchaseRow & {
+  profile_id: string
+}
+
 type ActivePackageRow = {
   package_id: string
   package_key: string
@@ -81,6 +74,10 @@ type ActivePackageRow = {
   yellow_coins_amount: number
   price_cents: number
   currency: string
+}
+
+type WalletRow = {
+  yellow_coins_balance: number
 }
 
 function rowToSnapshot(row: CoinPurchaseRow): CoinPurchaseSnapshot {
@@ -105,18 +102,6 @@ function normalizeId(value: string): string {
   return value.trim().slice(0, 96)
 }
 
-function normalizeProviderId(value: string): string {
-  return value.trim().slice(0, 255)
-}
-
-function normalizeCurrency(value: string): string {
-  return value.trim().toUpperCase().slice(0, 3)
-}
-
-function isFinalStatus(status: CoinPurchaseStatus): boolean {
-  return status === 'paid' || status === 'canceled' || status === 'failed'
-}
-
 export async function createCoinPurchaseStore(
   databaseFilePath: string,
 ): Promise<CoinPurchaseStore> {
@@ -132,7 +117,6 @@ export async function createCoinPurchaseStore(
   const selectProfilePurchasesStatement = database.prepare(`
     SELECT
       purchase_id,
-      profile_id,
       package_id,
       package_key_snapshot,
       title_snapshot,
@@ -167,7 +151,6 @@ export async function createCoinPurchaseStore(
   const selectPendingPurchaseStatement = database.prepare(`
     SELECT
       purchase_id,
-      profile_id,
       package_id,
       package_key_snapshot,
       title_snapshot,
@@ -217,7 +200,6 @@ export async function createCoinPurchaseStore(
   const selectPurchaseStatement = database.prepare(`
     SELECT
       purchase_id,
-      profile_id,
       package_id,
       package_key_snapshot,
       title_snapshot,
@@ -231,10 +213,11 @@ export async function createCoinPurchaseStore(
       created_at,
       updated_at
     FROM coin_purchase_ledger
-    WHERE purchase_id = ?;
+    WHERE purchase_id = ?
+    LIMIT 1;
   `)
 
-  const selectPurchaseByCheckoutSessionStatement = database.prepare(`
+  const selectPurchaseWithProfileStatement = database.prepare(`
     SELECT
       purchase_id,
       profile_id,
@@ -251,7 +234,49 @@ export async function createCoinPurchaseStore(
       created_at,
       updated_at
     FROM coin_purchase_ledger
-    WHERE provider_checkout_session_id = ?;
+    WHERE purchase_id = ?
+    LIMIT 1;
+  `)
+
+  const selectPurchaseBySessionStatement = database.prepare(`
+    SELECT
+      purchase_id,
+      package_id,
+      package_key_snapshot,
+      title_snapshot,
+      yellow_coins_amount,
+      price_cents,
+      currency,
+      provider,
+      provider_checkout_session_id,
+      status,
+      credited_at,
+      created_at,
+      updated_at
+    FROM coin_purchase_ledger
+    WHERE provider_checkout_session_id = ?
+    LIMIT 1;
+  `)
+
+  const selectPurchaseBySessionWithProfileStatement = database.prepare(`
+    SELECT
+      purchase_id,
+      profile_id,
+      package_id,
+      package_key_snapshot,
+      title_snapshot,
+      yellow_coins_amount,
+      price_cents,
+      currency,
+      provider,
+      provider_checkout_session_id,
+      status,
+      credited_at,
+      created_at,
+      updated_at
+    FROM coin_purchase_ledger
+    WHERE provider_checkout_session_id = ?
+    LIMIT 1;
   `)
 
   const attachCheckoutSessionStatement = database.prepare(`
@@ -260,25 +285,35 @@ export async function createCoinPurchaseStore(
       provider_checkout_session_id = ?,
       updated_at = CURRENT_TIMESTAMP
     WHERE purchase_id = ?
-      AND status = 'pending'
-      AND (
-        provider_checkout_session_id IS NULL
-        OR provider_checkout_session_id = ?
-      );
+      AND status = 'pending';
   `)
 
-  const markStatusStatement = database.prepare(`
+  const markCanceledBySessionStatement = database.prepare(`
     UPDATE coin_purchase_ledger
     SET
-      status = ?,
+      status = 'canceled',
+      updated_at = CURRENT_TIMESTAMP
+    WHERE provider_checkout_session_id = ?
+      AND status = 'pending';
+  `)
+
+  const markFailedBySessionStatement = database.prepare(`
+    UPDATE coin_purchase_ledger
+    SET
+      status = 'failed',
+      updated_at = CURRENT_TIMESTAMP
+    WHERE provider_checkout_session_id = ?
+      AND status = 'pending';
+  `)
+
+  const markPaidByPurchaseIdStatement = database.prepare(`
+    UPDATE coin_purchase_ledger
+    SET
+      status = 'paid',
+      credited_at = CURRENT_TIMESTAMP,
       updated_at = CURRENT_TIMESTAMP
     WHERE purchase_id = ?
-      AND status = 'pending'
-      AND (
-        ? IS NULL
-        OR provider_checkout_session_id IS NULL
-        OR provider_checkout_session_id = ?
-      );
+      AND status = 'pending';
   `)
 
   const ensureWalletStatement = database.prepare(`
@@ -300,22 +335,6 @@ export async function createCoinPurchaseStore(
     WHERE profile_id = ?;
   `)
 
-  const markPaidAndCreditedStatement = database.prepare(`
-    UPDATE coin_purchase_ledger
-    SET
-      status = 'paid',
-      provider_checkout_session_id = COALESCE(provider_checkout_session_id, ?),
-      credited_at = COALESCE(credited_at, CURRENT_TIMESTAMP),
-      updated_at = CURRENT_TIMESTAMP
-    WHERE purchase_id = ?
-      AND status = 'pending'
-      AND credited_at IS NULL
-      AND (
-        provider_checkout_session_id IS NULL
-        OR provider_checkout_session_id = ?
-      );
-  `)
-
   function listProfilePurchases(profileId: string): CoinPurchaseSnapshot[] {
     const normalizedProfileId = normalizeId(profileId)
 
@@ -327,40 +346,18 @@ export async function createCoinPurchaseStore(
       .map(rowToSnapshot)
   }
 
-  function getPurchaseRowById(purchaseId: string): CoinPurchaseRow | null {
-    const normalizedPurchaseId = normalizeId(purchaseId)
-
-    if (normalizedPurchaseId.length === 0) {
-      return null
-    }
-
-    const row = selectPurchaseStatement.get(normalizedPurchaseId) as
-      | CoinPurchaseRow
-      | undefined
-
-    return row ?? null
-  }
-
   function getPurchaseById(purchaseId: string): CoinPurchaseSnapshot | null {
-    const row = getPurchaseRowById(purchaseId)
+    const row = selectPurchaseStatement.get(purchaseId) as CoinPurchaseRow | undefined
 
     return row ? rowToSnapshot(row) : null
   }
 
-  function getPurchaseByProviderCheckoutSessionId(
-    providerCheckoutSessionId: string,
-  ): CoinPurchaseSnapshot | null {
-    const normalizedCheckoutSessionId = normalizeProviderId(providerCheckoutSessionId)
+  function getPurchaseWithProfileById(purchaseId: string): CoinPurchaseInternalRow | null {
+    return (selectPurchaseWithProfileStatement.get(purchaseId) as CoinPurchaseInternalRow | undefined) ?? null
+  }
 
-    if (normalizedCheckoutSessionId.length === 0) {
-      return null
-    }
-
-    const row = selectPurchaseByCheckoutSessionStatement.get(
-      normalizedCheckoutSessionId,
-    ) as CoinPurchaseRow | undefined
-
-    return row ? rowToSnapshot(row) : null
+  function getPurchaseWithProfileBySessionId(sessionId: string): CoinPurchaseInternalRow | null {
+    return (selectPurchaseBySessionWithProfileStatement.get(sessionId) as CoinPurchaseInternalRow | undefined) ?? null
   }
 
   function createPendingPurchase(
@@ -428,269 +425,115 @@ export async function createCoinPurchaseStore(
     }
   }
 
-  function attachCheckoutSessionToPurchase(
+  function attachCheckoutSession(
     purchaseId: string,
-    providerCheckoutSessionId: string,
-  ): { ok: true; purchase: CoinPurchaseSnapshot } | { ok: false; message: string } {
-    const normalizedPurchaseId = normalizeId(purchaseId)
-    const normalizedCheckoutSessionId = normalizeProviderId(providerCheckoutSessionId)
+    checkoutSessionId: string,
+  ): CoinPurchaseSnapshot | null {
+    attachCheckoutSessionStatement.run(checkoutSessionId, purchaseId)
 
-    if (normalizedPurchaseId.length === 0 || normalizedCheckoutSessionId.length === 0) {
-      return {
-        ok: false,
-        message: 'Невалидна Stripe checkout сесия.',
-      }
-    }
-
-    const existingBySession = getPurchaseByProviderCheckoutSessionId(
-      normalizedCheckoutSessionId,
-    )
-
-    if (
-      existingBySession !== null &&
-      existingBySession.purchaseId !== normalizedPurchaseId
-    ) {
-      return {
-        ok: false,
-        message: 'Тази Stripe checkout сесия вече е вързана към друга покупка.',
-      }
-    }
-
-    const purchaseBefore = getPurchaseById(normalizedPurchaseId)
-
-    if (purchaseBefore === null) {
-      return {
-        ok: false,
-        message: 'Покупката не беше намерена.',
-      }
-    }
-
-    if (purchaseBefore.status !== 'pending') {
-      return {
-        ok: false,
-        message: 'Покупката вече е приключена.',
-      }
-    }
-
-    if (
-      purchaseBefore.providerCheckoutSessionId !== null &&
-      purchaseBefore.providerCheckoutSessionId !== normalizedCheckoutSessionId
-    ) {
-      return {
-        ok: false,
-        message: 'Покупката вече има друга Stripe checkout сесия.',
-      }
-    }
-
-    attachCheckoutSessionStatement.run(
-      normalizedCheckoutSessionId,
-      normalizedPurchaseId,
-      normalizedCheckoutSessionId,
-    )
-
-    const purchase = getPurchaseById(normalizedPurchaseId)
-
-    if (purchase === null) {
-      return {
-        ok: false,
-        message: 'Покупката не беше намерена след обновяване.',
-      }
-    }
-
-    return {
-      ok: true,
-      purchase,
-    }
+    return getPurchaseById(purchaseId)
   }
 
-  function markPurchaseCanceled(
-    purchaseId: string,
-    providerCheckoutSessionId: string | null = null,
-  ): { ok: true; purchase: CoinPurchaseSnapshot | null } | { ok: false; message: string } {
-    return markPurchaseFinalStatus(purchaseId, 'canceled', providerCheckoutSessionId)
+  function findByCheckoutSessionId(checkoutSessionId: string): CoinPurchaseSnapshot | null {
+    const row = selectPurchaseBySessionStatement.get(checkoutSessionId) as CoinPurchaseRow | undefined
+
+    return row ? rowToSnapshot(row) : null
   }
 
-  function markPurchaseFailed(
-    purchaseId: string,
-    providerCheckoutSessionId: string | null = null,
-  ): { ok: true; purchase: CoinPurchaseSnapshot | null } | { ok: false; message: string } {
-    return markPurchaseFinalStatus(purchaseId, 'failed', providerCheckoutSessionId)
+  function markPurchaseCanceledByCheckoutSessionId(checkoutSessionId: string): void {
+    markCanceledBySessionStatement.run(checkoutSessionId)
   }
 
-  function markPurchaseFinalStatus(
-    purchaseId: string,
-    status: Exclude<CoinPurchaseStatus, 'pending' | 'paid'>,
-    providerCheckoutSessionId: string | null,
-  ): { ok: true; purchase: CoinPurchaseSnapshot | null } | { ok: false; message: string } {
-    const normalizedPurchaseId = normalizeId(purchaseId)
-    const normalizedCheckoutSessionId =
-      providerCheckoutSessionId === null
-        ? null
-        : normalizeProviderId(providerCheckoutSessionId)
-
-    if (
-      normalizedPurchaseId.length === 0 ||
-      (providerCheckoutSessionId !== null && normalizedCheckoutSessionId?.length === 0)
-    ) {
-      return {
-        ok: false,
-        message: 'Невалидна заявка за обновяване на покупка.',
-      }
-    }
-
-    const purchaseBefore = getPurchaseById(normalizedPurchaseId)
-
-    if (purchaseBefore === null) {
-      return { ok: true, purchase: null }
-    }
-
-    if (isFinalStatus(purchaseBefore.status)) {
-      return { ok: true, purchase: purchaseBefore }
-    }
-
-    markStatusStatement.run(
-      status,
-      normalizedPurchaseId,
-      normalizedCheckoutSessionId,
-      normalizedCheckoutSessionId,
-    )
-
-    return {
-      ok: true,
-      purchase: getPurchaseById(normalizedPurchaseId),
-    }
+  function markPurchaseFailedByCheckoutSessionId(checkoutSessionId: string): void {
+    markFailedBySessionStatement.run(checkoutSessionId)
   }
 
   function fulfillPaidPurchase(
-    input: CoinPurchaseFulfillmentInput,
+    params: FulfillPaidPurchaseParams,
   ):
-    | { ok: true; purchase: CoinPurchaseSnapshot; alreadyFulfilled: boolean }
+    | { ok: true; purchase: CoinPurchaseSnapshot; alreadyCredited: boolean }
     | { ok: false; message: string } {
-    const normalizedPurchaseId = normalizeId(input.purchaseId)
-    const normalizedCheckoutSessionId = normalizeProviderId(
-      input.providerCheckoutSessionId,
-    )
-    const normalizedCurrency = normalizeCurrency(input.paidCurrency)
+    const { checkoutSessionId, purchaseId } = params
 
-    if (normalizedPurchaseId.length === 0 || normalizedCheckoutSessionId.length === 0) {
-      return {
-        ok: false,
-        message: 'Невалидна платена покупка.',
+    const internalRow = checkoutSessionId
+      ? getPurchaseWithProfileBySessionId(checkoutSessionId)
+      : purchaseId
+        ? getPurchaseWithProfileById(purchaseId)
+        : null
+
+    if (internalRow === null) {
+      if (purchaseId) {
+        const fallback = getPurchaseWithProfileById(purchaseId)
+        if (fallback === null) {
+          return { ok: false, message: 'Покупката не беше намерена.' }
+        }
+        return fulfillByInternalRow(fallback)
       }
+      return { ok: false, message: 'Покупката не беше намерена.' }
     }
 
-    if (!Number.isInteger(input.paidPriceCents) || input.paidPriceCents < 0) {
-      return {
-        ok: false,
-        message: 'Невалидна сума на платена покупка.',
-      }
+    return fulfillByInternalRow(internalRow)
+  }
+
+  function fulfillByInternalRow(
+    row: CoinPurchaseInternalRow,
+  ):
+    | { ok: true; purchase: CoinPurchaseSnapshot; alreadyCredited: boolean }
+    | { ok: false; message: string } {
+    if (row.status === 'paid' && row.credited_at !== null) {
+      return { ok: true, purchase: rowToSnapshot(row), alreadyCredited: true }
     }
 
-    if (normalizedCurrency.length !== 3) {
+    if (row.status !== 'pending') {
       return {
         ok: false,
-        message: 'Невалидна валута на платена покупка.',
+        message: `Покупката е в статус "${row.status}" и не може да бъде кредитирана.`,
       }
     }
 
     try {
       database.exec('BEGIN;')
 
-      const purchaseRow = getPurchaseRowById(normalizedPurchaseId)
+      ensureWalletStatement.run(row.profile_id)
+      creditWalletStatement.run(row.yellow_coins_amount, row.profile_id)
 
-      if (purchaseRow === null) {
-        database.exec('ROLLBACK;')
-        return {
-          ok: false,
-          message: 'Покупката не беше намерена.',
-        }
+      const updateResult = markPaidByPurchaseIdStatement.run(row.purchase_id) as {
+        changes?: number
       }
 
-      if (
-        purchaseRow.provider_checkout_session_id !== null &&
-        purchaseRow.provider_checkout_session_id !== normalizedCheckoutSessionId
-      ) {
+      if ((updateResult.changes ?? 0) === 0) {
         database.exec('ROLLBACK;')
-        return {
-          ok: false,
-          message: 'Stripe checkout сесията не съвпада с покупката.',
+
+        const fresh = getPurchaseWithProfileById(row.purchase_id)
+
+        if (fresh?.status === 'paid') {
+          return { ok: true, purchase: rowToSnapshot(fresh), alreadyCredited: true }
         }
-      }
 
-      if (purchaseRow.price_cents !== input.paidPriceCents) {
-        database.exec('ROLLBACK;')
-        return {
-          ok: false,
-          message: 'Платената сума не съвпада с пакета.',
-        }
-      }
-
-      if (purchaseRow.currency.toUpperCase() !== normalizedCurrency) {
-        database.exec('ROLLBACK;')
-        return {
-          ok: false,
-          message: 'Платената валута не съвпада с пакета.',
-        }
-      }
-
-      if (purchaseRow.status === 'paid' && purchaseRow.credited_at !== null) {
-        database.exec('COMMIT;')
-        return {
-          ok: true,
-          purchase: rowToSnapshot(purchaseRow),
-          alreadyFulfilled: true,
-        }
-      }
-
-      if (purchaseRow.status !== 'pending') {
-        database.exec('ROLLBACK;')
-        return {
-          ok: false,
-          message: 'Покупката вече е приключена без кредитиране.',
-        }
-      }
-
-      ensureWalletStatement.run(purchaseRow.profile_id)
-      creditWalletStatement.run(
-        purchaseRow.yellow_coins_amount,
-        purchaseRow.profile_id,
-      )
-      markPaidAndCreditedStatement.run(
-        normalizedCheckoutSessionId,
-        normalizedPurchaseId,
-        normalizedCheckoutSessionId,
-      )
-
-      const purchaseAfter = getPurchaseById(normalizedPurchaseId)
-
-      if (purchaseAfter === null) {
-        database.exec('ROLLBACK;')
-        return {
-          ok: false,
-          message: 'Покупката не беше намерена след кредитиране.',
-        }
+        return { ok: false, message: 'Покупката вече беше обработена от друг процес.' }
       }
 
       database.exec('COMMIT;')
-
-      return {
-        ok: true,
-        purchase: purchaseAfter,
-        alreadyFulfilled: false,
-      }
     } catch (error) {
       try {
         database.exec('ROLLBACK;')
       } catch {
-        // surface the original failure
+        // surface the original error
       }
 
       return {
         ok: false,
-        message:
-          error instanceof Error ? error.message : 'Покупката не беше кредитирана.',
+        message: error instanceof Error ? error.message : 'Грешка при кредитиране на жълтици.',
       }
     }
+
+    const fulfilled = getPurchaseById(row.purchase_id)
+
+    if (fulfilled === null) {
+      return { ok: false, message: 'Жълтиците бяха кредитирани, но покупката не може да се прочете.' }
+    }
+
+    return { ok: true, purchase: fulfilled, alreadyCredited: false }
   }
 
   function close(): void {
@@ -701,10 +544,10 @@ export async function createCoinPurchaseStore(
     listProfilePurchases,
     createPendingPurchase,
     getPurchaseById,
-    getPurchaseByProviderCheckoutSessionId,
-    attachCheckoutSessionToPurchase,
-    markPurchaseCanceled,
-    markPurchaseFailed,
+    attachCheckoutSession,
+    findByCheckoutSessionId,
+    markPurchaseCanceledByCheckoutSessionId,
+    markPurchaseFailedByCheckoutSessionId,
     fulfillPaidPurchase,
     close,
   }
