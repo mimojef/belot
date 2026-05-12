@@ -27,3 +27,7 @@ dist-ssr
 server/database/data/*.sqlite
 server/database/data/*.sqlite-shm
 server/database/data/*.sqlite-wal
+
+# Environment variables (never commit real secrets)
+.env
+server/.env
