@@ -18,7 +18,5 @@ export function detachConnectionFromRoomSeat(
     lastSeenAt: Date.now(),
     currentRoomId: null,
     currentSeat: null,
-    playerId: null,
-    profileId: null,
   }
 }
