@@ -69,7 +69,6 @@ function renderCuttingCountdownFillStyle(
 
   return `
     opacity:1;
-    transform:scaleX(1);
     animation: belot-active-room-cutting-countdown ${countdownTotalMs}ms linear forwards;
     animation-delay:-${elapsedMs}ms;
     animation-fill-mode:both;
@@ -121,6 +120,7 @@ export function renderBottomCuttingCountdownBar(
   shouldShowCuttingCountdown: boolean,
   cuttingCountdownRemainingMs: number | null,
   countdownTotalMs: number,
+  seatId: Seat,
 ): string {
   return `
     <div
@@ -139,6 +139,7 @@ export function renderBottomCuttingCountdownBar(
       "
     >
       <div
+        data-seat-countdown-fill="${seatId}"
         style="
           position:absolute;
           inset:0;
@@ -164,6 +165,7 @@ export function renderSideCuttingCountdownFooter(
   shouldShowCuttingCountdown: boolean,
   cuttingCountdownRemainingMs: number | null,
   countdownTotalMs: number,
+  seatId: Seat,
   escapeHtml: EscapeHtml,
 ): string {
   return `
@@ -180,6 +182,7 @@ export function renderSideCuttingCountdownFooter(
       "
     >
       <div
+        data-seat-countdown-fill="${seatId}"
         style="
           position:absolute;
           inset:0;
@@ -803,7 +806,7 @@ export function createCuttingSeatPanelHtml(
         "
       >
         ${bubbleHtml}
-        ${declarationBubbleHtml}
+        <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
         ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
         <div
           style="
@@ -888,6 +891,7 @@ export function createCuttingSeatPanelHtml(
             shouldShowCuttingCountdown,
             displayCountdownRemainingMs,
             countdownTotalMs,
+            seat.seat,
           )}
           ${cutterBadgeHtml}
         </div>
@@ -907,7 +911,7 @@ export function createCuttingSeatPanelHtml(
       "
     >
       ${bubbleHtml}
-      ${declarationBubbleHtml}
+      <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
       ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
       <div
         style="
@@ -952,42 +956,14 @@ export function createCuttingSeatPanelHtml(
           ${renderCuttingSeatAvatar(seat, visualSeat, 16, escapeHtml)}
         </div>
 
-        ${
-          shouldShowCuttingCountdown
-            ? renderSideCuttingCountdownFooter(
-                footerLabel,
-                shouldShowCuttingCountdown,
-                displayCountdownRemainingMs,
-                countdownTotalMs,
-                escapeHtml,
-              )
-            : `
-                <div
-                  style="
-                    position:absolute;
-                    left:0;
-                    right:0;
-                    bottom:0;
-                    min-height:52px;
-                    padding:13px 14px 14px;
-                    background:rgba(10,10,10,0.94);
-                    border-top:1px solid rgba(220,163,58,0.36);
-                    color:#f4f8ff;
-                    text-align:center;
-                    font-size:18px;
-                    font-weight:900;
-                    letter-spacing:0.03em;
-                    line-height:1.1;
-                    text-shadow:0 1px 4px rgba(0,0,0,0.35);
-                    white-space:nowrap;
-                    overflow:hidden;
-                    text-overflow:ellipsis;
-                  "
-                >
-                  ${escapeHtml(footerLabel)}
-                </div>
-              `
-        }
+        ${renderSideCuttingCountdownFooter(
+          footerLabel,
+          shouldShowCuttingCountdown,
+          displayCountdownRemainingMs,
+          countdownTotalMs,
+          seat.seat,
+          escapeHtml,
+        )}
 
         ${cutterBadgeHtml}
       </div>

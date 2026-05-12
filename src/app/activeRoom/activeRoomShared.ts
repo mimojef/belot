@@ -118,6 +118,7 @@ export function createPlayingUiCache(): PlayingUiCache {
     pendingDeclarationPrompt: null,
     submittedDeclarationKeys: [],
     flyingCardPlayKey: null,
+    lastSeatPanelKey: null,
   }
 }
 
@@ -142,6 +143,7 @@ export function resetPlayingUiCache(cache: PlayingUiCache): void {
   cache.pendingDeclarationPrompt = null
   cache.submittedDeclarationKeys = []
   cache.flyingCardPlayKey = null
+  cache.lastSeatPanelKey = null
 }
 
 export function createBiddingUiState(): BiddingUiState {

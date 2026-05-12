@@ -101,6 +101,7 @@ export type PlayingUiCache = {
   pendingDeclarationPrompt: PendingDeclarationPrompt | null
   submittedDeclarationKeys: string[]
   flyingCardPlayKey: string | null
+  lastSeatPanelKey: string | null
 }
 
 export type BiddingUiState = {

@@ -194,8 +194,8 @@ function resolvePlayedCardFlySourceFromSeat(options: {
   fallbackWidth: number
   fallbackHeight: number
 }): PlayedCardFlySource | null {
-  const { root, seat, localSeat, fallbackWidth, fallbackHeight } = options
-  const fanElement = root.querySelector<HTMLElement>(
+  const { seat, localSeat, fallbackWidth, fallbackHeight } = options
+  const fanElement = document.querySelector<HTMLElement>(
     `[data-active-room-seat-card-fan="${seat}"]`,
   )
   const fanCards = fanElement
@@ -225,7 +225,7 @@ function resolvePlayedCardFlySourceFromSeat(options: {
     }
   }
 
-  const seatAnchor = root.querySelector<HTMLElement>(
+  const seatAnchor = document.querySelector<HTMLElement>(
     `[data-active-room-seat-anchor="${seat}"]`,
   )
 
@@ -1202,7 +1202,7 @@ function scheduleCompletedTrickCollection(
       completedTrick.winnerSeat,
       localSeat,
     )
-    const targetElement = root.querySelector<HTMLElement>(
+    const targetElement = document.querySelector<HTMLElement>(
       `[data-active-room-seat-anchor="${completedTrick.winnerSeat}"]`,
     )
     const overlayHost = root.querySelector<HTMLElement>(
@@ -1299,6 +1299,7 @@ export type RenderPlayingScreenOptions = {
   submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
   onDeclarationBubbleShown?: (lines: string[]) => void
   onPlayedCardLanded?: () => void
+  syncSeatPanels?: (html: string) => void
   cache: PlayingUiCache
 }
 
@@ -1316,6 +1317,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     submitPlayCard,
     onDeclarationBubbleShown,
     onPlayedCardLanded,
+    syncSeatPanels,
     cache,
   } = options
 
@@ -1618,21 +1620,6 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
           overflow:visible;
         "
       ></div>
-      ${createCuttingSeatPanelsHtml({
-        seats,
-        localSeat,
-        dealerSeat: game.dealerSeat ?? null,
-        cutterSeat: null,
-        cuttingCountdownRemainingMs: null,
-        countdownSeat: playingCountdownSeat,
-        countdownRemainingMs: playingCountdownRemainingMs,
-        countdownTotalMs: playingCountdownTotalMs,
-        panelScale: stageScale,
-        escapeHtml,
-        dealtHands: dealtHandsForPanels,
-        bidBubbles: null,
-        declarationBubbles,
-      })}
       ${renderBottomHandOverlay({
         cards: sortedHand,
         validCardIds,
@@ -1649,6 +1636,35 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       })}
     </div>
   `
+
+  if (syncSeatPanels) {
+    const seatPanelKey = [
+      game.dealerSeat ?? 'null',
+      playingCountdownSeat ?? 'null',
+      playingCountdownSeat !== null ? (playingCountdownRemainingMs !== null ? '1' : '0') : '0',
+      JSON.stringify(game.handCounts),
+      JSON.stringify(declarationBubbles),
+    ].join('|')
+
+    if (seatPanelKey !== cache.lastSeatPanelKey) {
+      cache.lastSeatPanelKey = seatPanelKey
+      syncSeatPanels(createCuttingSeatPanelsHtml({
+        seats,
+        localSeat,
+        dealerSeat: game.dealerSeat ?? null,
+        cutterSeat: null,
+        cuttingCountdownRemainingMs: null,
+        countdownSeat: playingCountdownSeat,
+        countdownRemainingMs: playingCountdownRemainingMs,
+        countdownTotalMs: playingCountdownTotalMs,
+        panelScale: stageScale,
+        escapeHtml,
+        dealtHands: dealtHandsForPanels,
+        bidBubbles: null,
+        declarationBubbles,
+      }))
+    }
+  }
 
   function submitHandCardFromButton(
     button: HTMLButtonElement,

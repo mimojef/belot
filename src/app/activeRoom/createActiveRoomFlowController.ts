@@ -309,13 +309,33 @@ export function createActiveRoomFlowController(
     `
   }
 
+  function removeLeaveButton(): void {
+    document.body.querySelector('[data-active-room-leave-button="1"]')?.remove()
+  }
+
   function appendLeaveControls(): void {
     if (!activeRoomState || isMatchEndedState()) {
+      removeLeaveButton()
       return
     }
 
-    if (!options.root.querySelector('[data-active-room-leave-button="1"]')) {
-      options.root.insertAdjacentHTML('beforeend', renderFloatingLeaveButton())
+    if (!document.body.querySelector('[data-active-room-leave-button="1"]')) {
+      document.body.insertAdjacentHTML('beforeend', renderFloatingLeaveButton())
+      document.body
+        .querySelector<HTMLButtonElement>('[data-active-room-leave-button="1"]')
+        ?.addEventListener('click', () => {
+          if (!activeRoomState) {
+            return
+          }
+
+          if (!options.isConnected()) {
+            activeRoomState.errorText = 'Няма връзка със сървъра.'
+            renderActiveRoomScreen()
+            return
+          }
+
+          requestActiveRoomLeave()
+        })
     }
 
     if (activeRoomState.leavePenaltyWarningOpen) {
@@ -413,6 +433,76 @@ export function createActiveRoomFlowController(
 
   function removePersistentBotTakeoverPopup(): void {
     document.body.querySelector('[data-bot-takeover-overlay="1"]')?.remove()
+  }
+
+  function removeSeatPanels(): void {
+    document.body.querySelector('[data-seat-panels-host="1"]')?.remove()
+  }
+
+  function syncSeatPanels(html: string): void {
+    let host = document.body.querySelector<HTMLDivElement>('[data-seat-panels-host="1"]')
+
+    if (host && host.innerHTML.length > 0) {
+      const temp = document.createElement('div')
+      temp.innerHTML = html
+      let ok = true
+
+      // Update countdown fill styles (only style attribute — no DOM teardown)
+      for (const fill of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-countdown-fill]'))) {
+        const seat = fill.getAttribute('data-seat-countdown-fill')!
+        const existing = host.querySelector<HTMLElement>(`[data-seat-countdown-fill="${seat}"]`)
+        if (!existing) { ok = false; break }
+        const newStyle = fill.getAttribute('style') ?? ''
+        if (existing.getAttribute('style') !== newStyle) {
+          existing.setAttribute('style', newStyle)
+        }
+      }
+
+      // Update declaration bubble wrappers (innerHTML only)
+      if (ok) {
+        for (const bHost of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-declaration-bubble]'))) {
+          const seat = bHost.getAttribute('data-seat-declaration-bubble')!
+          const existing = host.querySelector<HTMLElement>(`[data-seat-declaration-bubble="${seat}"]`)
+          if (!existing) { ok = false; break }
+          if (existing.innerHTML !== bHost.innerHTML) {
+            existing.innerHTML = bHost.innerHTML
+          }
+        }
+      }
+
+      // Update card fan content (innerHTML only)
+      if (ok) {
+        const newFans = Array.from(temp.querySelectorAll<HTMLElement>('[data-active-room-seat-card-fan]'))
+        const existingFans = Array.from(host.querySelectorAll<HTMLElement>('[data-active-room-seat-card-fan]'))
+        const newSeats = new Set(newFans.map((f) => f.getAttribute('data-active-room-seat-card-fan')!))
+        const existingSeats = new Set(existingFans.map((f) => f.getAttribute('data-active-room-seat-card-fan')!))
+
+        // If fan set differs structurally, fall back to full rebuild
+        const setsEqual = newSeats.size === existingSeats.size && [...newSeats].every((s) => existingSeats.has(s))
+        if (!setsEqual) {
+          ok = false
+        } else {
+          for (const fan of newFans) {
+            const seat = fan.getAttribute('data-active-room-seat-card-fan')!
+            const existing = host.querySelector<HTMLElement>(`[data-active-room-seat-card-fan="${seat}"]`)!
+            if (existing.innerHTML !== fan.innerHTML) {
+              existing.innerHTML = fan.innerHTML
+            }
+          }
+        }
+      }
+
+      if (ok) return
+    }
+
+    // Full rebuild (first render or structural change)
+    if (!host) {
+      const el = document.createElement('div')
+      el.setAttribute('data-seat-panels-host', '1')
+      document.body.appendChild(el)
+      host = el
+    }
+    host.innerHTML = html
   }
 
   function syncPersistentBotTakeoverPopup(): void {
@@ -1323,6 +1413,7 @@ export function createActiveRoomFlowController(
     syncReactionCountdownAudioTicker()
     if (!isShowingPlayingPhase) {
       resetPlayingUiCache(playingCache)
+      removeSeatPanels()
     }
     const shouldSyncBiddingSnapshot =
       isShowingBiddingPhase || authoritativePhase === 'deal-last-3' || isShowingNextRoundPause
@@ -2052,6 +2143,7 @@ export function createActiveRoomFlowController(
         onPlayedCardLanded: () => {
           options.gameAudio?.playCardOnTable()
         },
+        syncSeatPanels,
         cache: playingCache,
       } satisfies RenderPlayingScreenOptions)
     } else if (activeRoomState.game !== null) {
@@ -2415,24 +2507,6 @@ export function createActiveRoomFlowController(
     appendLeaveControls()
     syncPersistentBotTakeoverPopup()
 
-    const leaveButton = options.root.querySelector<HTMLButtonElement>(
-      '[data-active-room-leave-button="1"]',
-    )
-
-    leaveButton?.addEventListener('click', () => {
-      if (!activeRoomState) {
-        return
-      }
-
-      if (!options.isConnected()) {
-        activeRoomState.errorText = 'Няма връзка със сървъра.'
-        renderActiveRoomScreen()
-        return
-      }
-
-      requestActiveRoomLeave()
-    })
-
     options.root
       .querySelector<HTMLButtonElement>('[data-active-room-leave-cancel="1"]')
       ?.addEventListener('click', () => {
@@ -2533,6 +2607,8 @@ export function createActiveRoomFlowController(
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
+    removeSeatPanels()
+    removeLeaveButton()
     activeRoomState = {
       roomId: message.roomId,
       seat: message.seat,
@@ -2585,6 +2661,8 @@ export function createActiveRoomFlowController(
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
       removePersistentBotTakeoverPopup()
+      removeSeatPanels()
+      removeLeaveButton()
       activeRoomState = null
       options.showLobby(
         message.penalty
@@ -2612,6 +2690,8 @@ export function createActiveRoomFlowController(
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
       removePersistentBotTakeoverPopup()
+      removeSeatPanels()
+      removeLeaveButton()
       activeRoomState = null
       options.showLobby(message.message)
       return true
@@ -2710,6 +2790,8 @@ export function createActiveRoomFlowController(
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
+    removeSeatPanels()
+    removeLeaveButton()
     options.leaveActiveRoom(roomId)
     activeRoomState = null
     options.showLobby(null)
@@ -2736,6 +2818,8 @@ export function createActiveRoomFlowController(
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
+    removeSeatPanels()
+    removeLeaveButton()
     options.leaveActiveRoom(roomId)
     activeRoomState = null
     options.startNewGame(stake, displayName || undefined)
