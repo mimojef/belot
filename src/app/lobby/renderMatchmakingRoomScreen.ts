@@ -17,6 +17,7 @@ export type RenderMatchmakingRoomScreenParams = {
   statusText?: string
   titleText?: string
   subtitleText?: string
+  canLeave?: boolean
 }
 
 type MatchmakingRoomSlot = {
@@ -653,6 +654,12 @@ export function renderMatchmakingRoomScreen(
           box-shadow:0 0 20px rgba(214,155,22,0.10);
         }
 
+        .mm-button-cancel.is-disabled {
+          opacity:0.35;
+          cursor:not-allowed;
+          pointer-events:none;
+        }
+
         .mm-button-lobby {
           border:0;
           background:linear-gradient(180deg, #f3c64a 0%, #d99b1c 100%);
@@ -713,7 +720,8 @@ export function renderMatchmakingRoomScreen(
             <button
               type="button"
               data-matchmaking-room-cancel-button="1"
-              class="mm-action-button mm-button-cancel"
+              class="mm-action-button mm-button-cancel${params.canLeave === false ? ' is-disabled' : ''}"
+              ${params.canLeave === false ? 'disabled' : ''}
             >
               Отказ
             </button>

@@ -2180,6 +2180,7 @@ export function createLobbyFlowController(
       countdownRemainingMs: remainingMs,
       countdownTotalMs: DEFAULT_COUNTDOWN_MS,
       statusText: getRoomStatusText(state, displayedQueuedPlayers),
+      canLeave: state.queuedPlayers <= 1,
     })
 
     const cancelButtons = options.root.querySelectorAll<HTMLButtonElement>(
@@ -2188,6 +2189,7 @@ export function createLobbyFlowController(
 
     cancelButtons.forEach((cancelButton) => {
       cancelButton.addEventListener('click', () => {
+        if (state.queuedPlayers > 1) return
         options.tryUnlockDocumentAudio?.()
         state.errorText = null
         switchToLobby()
