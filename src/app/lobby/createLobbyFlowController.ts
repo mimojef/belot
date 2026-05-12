@@ -175,6 +175,7 @@ export type LobbyFlowController = {
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
   resetToLobby: () => void
   handleServerMessage: (message: ServerMessage) => boolean
+  navigateToShop: (noticeText: string | null) => void
 }
 
 type InternalLobbyFlowState = {
@@ -2402,5 +2403,13 @@ export function createLobbyFlowController(
     startMatchmaking,
     resetToLobby,
     handleServerMessage,
+    navigateToShop: (noticeText: string | null) => {
+      void showShopPanel().then(() => {
+        if (noticeText !== null && state.currentScreen === 'shop') {
+          state.shopPurchaseMessageText = noticeText
+          render()
+        }
+      })
+    },
   }
 }

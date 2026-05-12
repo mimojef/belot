@@ -1326,7 +1326,26 @@ window.addEventListener('beforeunload', () => {
   client.disconnect()
 })
 
-lobby.render()
+const stripeReturnParams = new URLSearchParams(window.location.search)
+const stripeReturnScreen = stripeReturnParams.get('screen')
+const stripeReturnPayment = stripeReturnParams.get('payment')
+
+if (stripeReturnScreen === 'shop') {
+  history.replaceState(null, '', window.location.pathname)
+
+  if (stripeReturnPayment === 'success') {
+    lobby.navigateToShop(
+      'Плащането е успешно. Жълтиците ще се появят след потвърждение от Stripe.',
+    )
+  } else if (stripeReturnPayment === 'cancel') {
+    lobby.navigateToShop('Покупката беше отказана.')
+  } else {
+    lobby.render()
+  }
+} else {
+  lobby.render()
+}
+
 void loadPublicSettings()
 void loadAuthSession()
 client.connect()
