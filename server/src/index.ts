@@ -98,6 +98,7 @@ import { parseClientMessage } from './protocol/parseClientMessage.js'
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
 const MATCHMAKING_TICK_MS = 250
+const EARLY_BOT_FILL_DEBIT_MS = 3200
 const GAME_RUNTIME_TICK_MS = 250
 const MATCH_PLAYERS_REQUIRED = 4
 const MAX_JSON_BODY_BYTES = 8_000_000
@@ -694,6 +695,7 @@ function removeConnectionFromMatchmaking(connectionId: ConnectionId): boolean {
 function sendMatchmakingStatusToConnection(
   connectionId: ConnectionId,
   stake: MatchStake,
+  localStakeDeducted?: true,
 ): void {
   const ownEntry = getQueueEntryByConnectionId(matchmakingState.queueEntries, connectionId)
 
@@ -723,6 +725,7 @@ function sendMatchmakingStatusToConnection(
     countdownEndsAt,
     remainingMs: Math.max(0, countdownEndsAt - now),
     previewBotDisplayNames,
+    ...(localStakeDeducted === true ? { localStakeDeducted: true as const } : {}),
   })
 }
 
@@ -747,6 +750,50 @@ function cleanupPendingGroup(groupId: string): void {
 }
 
 function processMatchmaking(): void {
+  const earlyDebitNow = Date.now()
+  const entriesToEarlyDebit = matchmakingState.queueEntries.filter((entry) => {
+    if (entry.stakePaid || entry.profileId === null) return false
+    if (earlyDebitNow < entry.expiresAt - EARLY_BOT_FILL_DEBIT_MS) return false
+    const humanCountForStake = getSearchingEntriesByStake(
+      matchmakingState.queueEntries,
+      entry.stake,
+    ).length
+    return humanCountForStake === 1
+  })
+
+  for (const entry of entriesToEarlyDebit) {
+    const stakeResult = matchEconomyStore.collectQueueStake(
+      entry.entryId,
+      entry.profileId!,
+      entry.stake,
+    )
+
+    if (stakeResult.ok) {
+      markMatchmakingEntriesStakePaid([entry.entryId])
+      safeSendToConnection(entry.connectionId, {
+        type: 'matchmaking_status',
+        stake: entry.stake,
+        queuedPlayers: 1,
+        requiredPlayers: MATCH_PLAYERS_REQUIRED,
+        countdownEndsAt: entry.expiresAt,
+        remainingMs: Math.max(0, entry.expiresAt - earlyDebitNow),
+        localStakeDeducted: true,
+      })
+    } else {
+      matchmakingState = {
+        ...matchmakingState,
+        queueEntries: removeQueueEntryByConnectionId(
+          matchmakingState.queueEntries,
+          entry.connectionId,
+        ),
+      }
+      safeSendToConnection(entry.connectionId, {
+        type: 'error',
+        message: stakeResult.message,
+      })
+    }
+  }
+
   let guard = 0
 
   while (guard < 20) {
@@ -762,6 +809,7 @@ function processMatchmaking(): void {
 
     const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
     let stakeCollectionFailed = false
+    const justDebitedConnectionIds = new Set<ConnectionId>()
 
     for (const matchedEntry of result.group.matchedHumans) {
       if (matchedEntry.stakePaid) {
@@ -789,6 +837,8 @@ function processMatchmaking(): void {
           message: stakeResult.message,
         })
         stakeCollectionFailed = true
+      } else {
+        justDebitedConnectionIds.add(matchedEntry.connectionId)
       }
     }
 
@@ -796,6 +846,19 @@ function processMatchmaking(): void {
       cleanupPendingGroup(result.group.groupId)
       broadcastMatchmakingStatusForStake(result.group.stake)
       continue
+    }
+
+    const debitNotifyNow = Date.now()
+    for (const connectionId of justDebitedConnectionIds) {
+      safeSendToConnection(connectionId, {
+        type: 'matchmaking_status',
+        stake: result.group.stake,
+        queuedPlayers: result.group.matchedHumans.length,
+        requiredPlayers: MATCH_PLAYERS_REQUIRED,
+        countdownEndsAt: debitNotifyNow,
+        remainingMs: 0,
+        localStakeDeducted: true,
+      })
     }
 
     let nextServerState = upsertServerRoomWithSnapshot(serverState, initializedRoom)
@@ -1571,6 +1634,7 @@ function collectReadyMatchmakingStakes(stake: MatchStake): void {
   }
 
   const paidEntryIds: string[] = []
+  const justPaidConnectionIds = new Set<ConnectionId>()
 
   for (const entry of searchingEntries) {
     if (entry.stakePaid || entry.profileId === null) {
@@ -1599,13 +1663,21 @@ function collectReadyMatchmakingStakes(stake: MatchStake): void {
     }
 
     paidEntryIds.push(entry.entryId)
+    justPaidConnectionIds.add(entry.connectionId)
   }
 
   if (paidEntryIds.length > 0) {
     markMatchmakingEntriesStakePaid(paidEntryIds)
   }
 
-  broadcastMatchmakingStatusForStake(stake)
+  const finalEntries = getSearchingEntriesByStake(matchmakingState.queueEntries, stake)
+  for (const entry of finalEntries) {
+    sendMatchmakingStatusToConnection(
+      entry.connectionId,
+      stake,
+      justPaidConnectionIds.has(entry.connectionId) ? true : undefined,
+    )
+  }
 }
 
 async function handleLeaderboardsRequest(

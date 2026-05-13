@@ -678,6 +678,12 @@ export function renderMatchmakingRoomScreen(
         <div class="mm-stage">
           ${positionedSlots.map((slot) => renderSlot(slot)).join('')}
 
+          <div
+            data-matchmaking-stake-center="1"
+            style="position:absolute;left:796px;top:374px;width:0;height:0;pointer-events:none;"
+            aria-hidden="true"
+          ></div>
+
           <div class="mm-countdown-card">
             <div
               data-matchmaking-progress-bar="1"

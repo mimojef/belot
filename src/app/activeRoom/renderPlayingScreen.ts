@@ -1657,6 +1657,11 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         countdownSeat: playingCountdownSeat,
         countdownRemainingMs: playingCountdownRemainingMs,
         countdownTotalMs: playingCountdownTotalMs,
+        countdownKey: playingCountdownSeat !== null && game.timerDeadlineAt !== null
+          ? `p:${playingCountdownSeat}:${game.timerDeadlineAt}`
+          : null,
+        highlightSeat: playingCountdownSeat,
+        highlightBadgeLabel: null,
         panelScale: stageScale,
         escapeHtml,
         dealtHands: dealtHandsForPanels,

@@ -155,7 +155,7 @@ export function createActiveRoomFlowController(
       return false
     }
 
-    return activeRoomState.roomStatus === 'playing' && !isMatchEndedState()
+    return activeRoomState.roomStatus !== null && !isMatchEndedState()
   }
 
   function renderFloatingLeaveButton(): string {
@@ -166,15 +166,15 @@ export function createActiveRoomFlowController(
         title="Напусни масата"
         style="
           position:fixed;
-          right:18px;
-          top:18px;
+          left:18px;
+          bottom:24px;
           z-index:9400;
           border:1px solid rgba(251,191,36,0.45);
           border-radius:12px;
-          padding:11px 15px;
+          padding:14px 22px;
           background:linear-gradient(180deg, #f6d36b 0%, #c98b1a 100%);
           color:#171717;
-          font-size:13px;
+          font-size:15px;
           font-weight:900;
           cursor:pointer;
           box-shadow:0 16px 34px rgba(0,0,0,0.28);
@@ -190,8 +190,36 @@ export function createActiveRoomFlowController(
       return ''
     }
 
+    const isPlayingPhase = activeRoomState.roomStatus === 'playing'
     const extraPenaltyAmount = activeRoomState.stake
     const totalLossAmount = activeRoomState.stake + extraPenaltyAmount
+
+    const bodyHtml = isPlayingPhase
+      ? `
+          <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#f6d36b;margin-bottom:10px;">
+            Предупреждение
+          </div>
+          <div style="font-size:24px;line-height:1.18;font-weight:900;color:#f8fafc;">
+            Напускане на масата
+          </div>
+          <div style="margin-top:12px;font-size:15px;line-height:1.55;color:#d4d4d8;">
+            Залогът вече е платен. Ако напуснеш сега, губиш залога
+            <strong style="color:#f6d36b;">${formatCoinAmount(activeRoomState.stake)}</strong>
+            жълтици плюс още толкова като санкция. Обща загуба:
+            <strong style="color:#f6d36b;">${formatCoinAmount(totalLossAmount)}</strong>
+            жълтици.
+          </div>
+        `
+      : `
+          <div style="font-size:24px;line-height:1.18;font-weight:900;color:#f8fafc;">
+            Напускане на стаята
+          </div>
+          <div style="margin-top:12px;font-size:15px;line-height:1.55;color:#d4d4d8;">
+            Сигурен ли си, че искаш да напуснеш стаята?
+          </div>
+        `
+
+    const confirmLabel = isPlayingPhase ? 'Напусни и плати' : 'Напусни'
 
     return `
       <div
@@ -221,44 +249,7 @@ export function createActiveRoomFlowController(
             text-align:left;
           "
         >
-          <div
-            style="
-              font-size:12px;
-              font-weight:900;
-              letter-spacing:0.08em;
-              text-transform:uppercase;
-              color:#f6d36b;
-              margin-bottom:10px;
-            "
-          >
-            Предупреждение
-          </div>
-
-          <div
-            style="
-              font-size:24px;
-              line-height:1.18;
-              font-weight:900;
-              color:#f8fafc;
-            "
-          >
-            Напускане на масата
-          </div>
-
-          <div
-            style="
-              margin-top:12px;
-              font-size:15px;
-              line-height:1.55;
-              color:#d4d4d8;
-            "
-          >
-            Залогът вече е платен. Ако напуснеш сега, губиш залога
-            <strong style="color:#f6d36b;">${formatCoinAmount(activeRoomState.stake)}</strong>
-            жълтици плюс още толкова като санкция. Обща загуба:
-            <strong style="color:#f6d36b;">${formatCoinAmount(totalLossAmount)}</strong>
-            жълтици.
-          </div>
+          ${bodyHtml}
 
           <div
             style="
@@ -301,7 +292,7 @@ export function createActiveRoomFlowController(
                 box-shadow:0 14px 30px rgba(0,0,0,0.28);
               "
             >
-              Напусни и плати
+              ${confirmLabel}
             </button>
           </div>
         </div>
@@ -447,24 +438,33 @@ export function createActiveRoomFlowController(
       temp.innerHTML = html
       let ok = true
 
-      // Force full rebuild if any seat's avatarUrl changed
+      // Force full rebuild if any seat's avatarUrl or highlighted state changed
       for (const anchor of Array.from(temp.querySelectorAll<HTMLElement>('[data-active-room-seat-anchor]'))) {
         const seatKey = anchor.getAttribute('data-active-room-seat-anchor')!
         const existing = host.querySelector<HTMLElement>(`[data-active-room-seat-anchor="${seatKey}"]`)
-        if (!existing || existing.getAttribute('data-seat-avatar-url') !== anchor.getAttribute('data-seat-avatar-url')) {
+        if (
+          !existing ||
+          existing.getAttribute('data-seat-avatar-url') !== anchor.getAttribute('data-seat-avatar-url') ||
+          existing.getAttribute('data-seat-highlighted') !== anchor.getAttribute('data-seat-highlighted')
+        ) {
           ok = false
           break
         }
       }
 
-      // Update countdown fill styles (only style attribute — no DOM teardown)
+      // Update countdown fill styles — only restart animation when the countdown key changes.
+      // Same key = same turn still running, let CSS animation continue undisturbed.
       for (const fill of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-countdown-fill]'))) {
         const seat = fill.getAttribute('data-seat-countdown-fill')!
         const existing = host.querySelector<HTMLElement>(`[data-seat-countdown-fill="${seat}"]`)
         if (!existing) { ok = false; break }
-        const newStyle = fill.getAttribute('style') ?? ''
-        if (existing.getAttribute('style') !== newStyle) {
-          existing.setAttribute('style', newStyle)
+        const newKey = fill.getAttribute('data-countdown-key') ?? ''
+        const existingKey = existing.getAttribute('data-countdown-key') ?? ''
+        const sameCountdown = newKey !== '' && newKey === existingKey
+        if (!sameCountdown) {
+          if (newKey !== existingKey) existing.setAttribute('data-countdown-key', newKey)
+          const newStyle = fill.getAttribute('style') ?? ''
+          if (existing.getAttribute('style') !== newStyle) existing.setAttribute('style', newStyle)
         }
       }
 
@@ -1625,6 +1625,9 @@ export function createActiveRoomFlowController(
         dealerSeat: dealerSeatForRender,
         cutterSeat: cutterSeatForRender,
         cuttingCountdownRemainingMs: cuttingCountdownRemainingMsForRender,
+        countdownKey: cutterSeatForRender !== null && activeRoomState.game?.timerDeadlineAt != null
+          ? `c:${cutterSeatForRender}:${activeRoomState.game.timerDeadlineAt}`
+          : null,
         panelScale: stageScale,
         escapeHtml,
         dealtHands: null,
@@ -2090,6 +2093,9 @@ export function createActiveRoomFlowController(
         countdownSeat: biddingSnapshot.currentBidderSeat,
         countdownRemainingMs: biddingCountdownRemainingMs,
         countdownTotalMs: biddingCountdownTotalMs,
+        countdownKey: biddingSnapshot.currentBidderSeat !== null && biddingGame.timerDeadlineAt !== null
+          ? `b:${biddingSnapshot.currentBidderSeat}:${biddingGame.timerDeadlineAt}`
+          : null,
         highlightSeat: biddingSnapshot.currentBidderSeat,
         highlightBadgeLabel: null,
         panelScale: stageScale,
@@ -2620,6 +2626,7 @@ export function createActiveRoomFlowController(
     activeRoomState.seats = message.seats
     activeRoomState.game = message.game ?? null
     activeRoomState.errorText = null
+
     renderActiveRoomScreen(
       cuttingAnimation.isAnimating ||
         dealingAnimation.isAnimating ||

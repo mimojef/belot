@@ -42,6 +42,7 @@ export type RenderCuttingSeatPanelsOptions = {
   countdownSeat?: Seat | null
   countdownRemainingMs?: number | null
   countdownTotalMs?: number
+  countdownKey?: string | null
   highlightSeat?: Seat | null
   highlightBadgeLabel?: string | null
   panelScale: number
@@ -121,6 +122,7 @@ export function renderBottomCuttingCountdownBar(
   cuttingCountdownRemainingMs: number | null,
   countdownTotalMs: number,
   seatId: Seat,
+  countdownKey: string,
 ): string {
   return `
     <div
@@ -140,6 +142,7 @@ export function renderBottomCuttingCountdownBar(
     >
       <div
         data-seat-countdown-fill="${seatId}"
+        data-countdown-key="${countdownKey}"
         style="
           position:absolute;
           inset:0;
@@ -167,6 +170,7 @@ export function renderSideCuttingCountdownFooter(
   countdownTotalMs: number,
   seatId: Seat,
   escapeHtml: EscapeHtml,
+  countdownKey: string,
 ): string {
   return `
     <div
@@ -183,6 +187,7 @@ export function renderSideCuttingCountdownFooter(
     >
       <div
         data-seat-countdown-fill="${seatId}"
+        data-countdown-key="${countdownKey}"
         style="
           position:absolute;
           inset:0;
@@ -739,6 +744,7 @@ export function createCuttingSeatPanelHtml(
   dealtHands: DealtHandsData | null,
   bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null,
   declarationBubbles: Partial<Record<Seat, SeatDeclarationBubble>> | null,
+  countdownKey: string,
 ): string {
   const isBottomSeat = visualSeat === 'bottom'
   const isCountdownSeat = seat.seat === countdownSeat
@@ -754,7 +760,7 @@ export function createCuttingSeatPanelHtml(
       ? displayName
       : CUTTING_VISUAL_SEAT_LABELS[visualSeat]
   const borderColor = isHighlightedSeat ? 'rgba(245, 187, 55, 0.96)' : 'rgba(220,163,58,0.62)'
-  const borderWidthPx = isHighlightedSeat ? 3 : 2
+  const borderWidthPx = isHighlightedSeat ? 4 : 2
   const shadow = isHighlightedSeat
     ? '0 0 24px rgba(245, 187, 55, 0.24), 0 16px 28px rgba(0,0,0,0.24)'
     : '0 14px 28px rgba(0,0,0,0.24)'
@@ -799,6 +805,7 @@ export function createCuttingSeatPanelHtml(
       <div
         data-active-room-seat-anchor="${seat.seat}"
         data-seat-avatar-url="${escapeHtml(seat.avatarUrl ?? '')}"
+        data-seat-highlighted="${isHighlightedSeat}"
         style="
           position:absolute;
           ${getCuttingSeatPanelAnchorStyle(visualSeat, panelScale)}
@@ -893,6 +900,7 @@ export function createCuttingSeatPanelHtml(
             displayCountdownRemainingMs,
             countdownTotalMs,
             seat.seat,
+            countdownKey,
           )}
           ${cutterBadgeHtml}
         </div>
@@ -905,6 +913,7 @@ export function createCuttingSeatPanelHtml(
     <div
       data-active-room-seat-anchor="${seat.seat}"
       data-seat-avatar-url="${escapeHtml(seat.avatarUrl ?? '')}"
+      data-seat-highlighted="${isHighlightedSeat}"
       style="
         position:absolute;
         ${getCuttingSeatPanelAnchorStyle(visualSeat, panelScale)}
@@ -965,6 +974,7 @@ export function createCuttingSeatPanelHtml(
           countdownTotalMs,
           seat.seat,
           escapeHtml,
+          countdownKey,
         )}
 
         ${cutterBadgeHtml}
@@ -986,6 +996,7 @@ export function createCuttingSeatPanelsHtml(
     countdownSeat,
     countdownRemainingMs,
     countdownTotalMs,
+    countdownKey,
     highlightSeat,
     highlightBadgeLabel,
     panelScale,
@@ -1040,6 +1051,7 @@ export function createCuttingSeatPanelsHtml(
         dealtHands,
         bidBubbles ?? null,
         declarationBubbles ?? null,
+        countdownKey ?? '',
       )
     })
     .join('')

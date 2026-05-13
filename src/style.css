@@ -42,13 +42,11 @@ body::before {
   min-height: 100vh;
   height: 100vh;
   position: relative;
-  isolation: isolate;
   overflow: hidden;
 }
 
 #app > * {
   position: relative;
-  z-index: 1;
 }
 
 .game-shell {

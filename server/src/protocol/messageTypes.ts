@@ -355,6 +355,7 @@ export type MatchmakingStatusMessage = {
   countdownEndsAt: number
   remainingMs: number
   previewBotDisplayNames?: string[]
+  localStakeDeducted?: true
 }
 
 export type MatchmakingLeftMessage = {

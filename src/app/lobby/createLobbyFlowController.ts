@@ -2,6 +2,7 @@ import {
   renderMatchmakingRoomScreen,
   type MatchmakingRoomPlayer,
 } from './renderMatchmakingRoomScreen'
+import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
   renderLobbyScreen,
   type AvatarCropSelection,
@@ -498,6 +499,8 @@ export function createLobbyFlowController(
   let finalFillAnimatedQueuedPlayers: number | null = null
   let pendingMatchFoundMessage: MatchFoundMessage | null = null
   let pendingMatchFoundTimeoutId: number | null = null
+  let stakeEffectStartedAt: number | null = null
+  let pendingStakeEffect = false
 
   let autoFillPreviewPlayers: MatchmakingRoomPlayer[] = []
   let waitingClockAudio: HTMLAudioElement | null = null
@@ -630,6 +633,7 @@ export function createLobbyFlowController(
     finalFillSequenceStartedAt = null
     finalFillBaseQueuedPlayers = null
     finalFillAnimatedQueuedPlayers = null
+    pendingStakeEffect = false
     resetAutoFillPreviewPlayers()
     resetSeatFillSoundTracking()
   }
@@ -638,6 +642,7 @@ export function createLobbyFlowController(
     clearFinalFillAnimationState()
     pendingMatchFoundMessage = null
     clearPendingMatchFoundTimeout()
+    stakeEffectStartedAt = null
   }
 
   function syncLiveCountdownTargets(): void {
@@ -794,6 +799,12 @@ export function createLobbyFlowController(
     finalFillSequenceStartedAt = Date.now()
     finalFillBaseQueuedPlayers = state.queuedPlayers
     finalFillAnimatedQueuedPlayers = state.queuedPlayers
+
+    if (pendingStakeEffect) {
+      pendingStakeEffect = false
+      stakeEffectStartedAt = Date.now()
+      showStakeDeductionEffect(state.selectedStake)
+    }
   }
 
   function isFinalFillSequenceComplete(): boolean {
@@ -820,7 +831,18 @@ export function createLobbyFlowController(
     stopWaitingRoomActivity()
     clearFinalFillAnimationState()
 
-    options.onMatchFound(matchFoundMessage)
+    const STAKE_EFFECT_VISIBLE_MS = 1600
+    const elapsed = stakeEffectStartedAt !== null ? Date.now() - stakeEffectStartedAt : null
+    const remainingDelay =
+      elapsed !== null ? Math.max(0, STAKE_EFFECT_VISIBLE_MS - elapsed) : 0
+
+    stakeEffectStartedAt = null
+
+    if (remainingDelay > 0) {
+      setTimeout(() => options.onMatchFound(matchFoundMessage), remainingDelay)
+    } else {
+      options.onMatchFound(matchFoundMessage)
+    }
     return true
   }
 
@@ -2293,6 +2315,19 @@ export function createLobbyFlowController(
       state.errorText = null
       state.serverPreviewBotDisplayNames = message.previewBotDisplayNames ?? []
       startWaitingClockAudio()
+
+      if (message.localStakeDeducted === true && stakeEffectStartedAt === null) {
+        if (message.queuedPlayers >= 2) {
+          stakeEffectStartedAt = Date.now()
+          showStakeDeductionEffect(message.stake)
+        } else if (finalFillSequenceStartedAt !== null) {
+          stakeEffectStartedAt = Date.now()
+          showStakeDeductionEffect(message.stake)
+        } else {
+          pendingStakeEffect = true
+        }
+      }
+
       render()
       return true
     }
