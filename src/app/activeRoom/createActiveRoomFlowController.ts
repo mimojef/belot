@@ -447,6 +447,16 @@ export function createActiveRoomFlowController(
       temp.innerHTML = html
       let ok = true
 
+      // Force full rebuild if any seat's avatarUrl changed
+      for (const anchor of Array.from(temp.querySelectorAll<HTMLElement>('[data-active-room-seat-anchor]'))) {
+        const seatKey = anchor.getAttribute('data-active-room-seat-anchor')!
+        const existing = host.querySelector<HTMLElement>(`[data-active-room-seat-anchor="${seatKey}"]`)
+        if (!existing || existing.getAttribute('data-seat-avatar-url') !== anchor.getAttribute('data-seat-avatar-url')) {
+          ok = false
+          break
+        }
+      }
+
       // Update countdown fill styles (only style attribute — no DOM teardown)
       for (const fill of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-countdown-fill]'))) {
         const seat = fill.getAttribute('data-seat-countdown-fill')!
@@ -455,6 +465,18 @@ export function createActiveRoomFlowController(
         const newStyle = fill.getAttribute('style') ?? ''
         if (existing.getAttribute('style') !== newStyle) {
           existing.setAttribute('style', newStyle)
+        }
+      }
+
+      // Update bid bubble wrappers (innerHTML only)
+      if (ok) {
+        for (const bHost of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-bid-bubble]'))) {
+          const seat = bHost.getAttribute('data-seat-bid-bubble')!
+          const existing = host.querySelector<HTMLElement>(`[data-seat-bid-bubble="${seat}"]`)
+          if (!existing) { ok = false; break }
+          if (existing.innerHTML !== bHost.innerHTML) {
+            existing.innerHTML = bHost.innerHTML
+          }
         }
       }
 
@@ -1413,6 +1435,14 @@ export function createActiveRoomFlowController(
     syncReactionCountdownAudioTicker()
     if (!isShowingPlayingPhase) {
       resetPlayingUiCache(playingCache)
+    }
+    const hasSeatPanelPhase =
+      isShowingPlayingPhase ||
+      isShowingAnyDealPhase ||
+      isShowingBiddingPhase ||
+      authoritativePhase === 'cutting' ||
+      authoritativePhase === 'next-round'
+    if (!hasSeatPanelPhase) {
       removeSeatPanels()
     }
     const shouldSyncBiddingSnapshot =
@@ -1585,20 +1615,21 @@ export function createActiveRoomFlowController(
               </div>
             </div>
           </div>
-          ${createCuttingSeatPanelsHtml({
-            seats: activeRoomState.seats,
-            localSeat: activeRoomState.seat,
-            dealerSeat: dealerSeatForRender,
-            cutterSeat: cutterSeatForRender,
-            cuttingCountdownRemainingMs: cuttingCountdownRemainingMsForRender,
-            panelScale: stageScale,
-            escapeHtml,
-            dealtHands: null,
-            bidBubbles: isShowingNextRoundPause ? bidBubblesForRender : null,
-          })}
           ${scoreHudHtml}
         </div>
       `
+
+      syncSeatPanels(createCuttingSeatPanelsHtml({
+        seats: activeRoomState.seats,
+        localSeat: activeRoomState.seat,
+        dealerSeat: dealerSeatForRender,
+        cutterSeat: cutterSeatForRender,
+        cuttingCountdownRemainingMs: cuttingCountdownRemainingMsForRender,
+        panelScale: stageScale,
+        escapeHtml,
+        dealtHands: null,
+        bidBubbles: isShowingNextRoundPause ? bidBubblesForRender : null,
+      }))
 
       if (cutAnimationForRender !== null) {
         cuttingAnimation.renderedSelectionKey = cuttingAnimation.activeSelectionKey
@@ -1850,20 +1881,21 @@ export function createActiveRoomFlowController(
               </div>
             </div>
           </div>
-          ${createCuttingSeatPanelsHtml({
-            seats: activeRoomState.seats,
-            localSeat: activeRoomState.seat,
-            dealerSeat,
-            cutterSeat: null,
-            cuttingCountdownRemainingMs: null,
-            panelScale: stageScale,
-            escapeHtml,
-            dealtHands: dealtHandsForPanels,
-            bidBubbles: getBidBubblesForRender(),
-          })}
           ${scoreHudHtml}
         </div>
       `
+
+      syncSeatPanels(createCuttingSeatPanelsHtml({
+        seats: activeRoomState.seats,
+        localSeat: activeRoomState.seat,
+        dealerSeat,
+        cutterSeat: null,
+        cuttingCountdownRemainingMs: null,
+        panelScale: stageScale,
+        escapeHtml,
+        dealtHands: dealtHandsForPanels,
+        bidBubbles: getBidBubblesForRender(),
+      }))
 
       if (isUsingFirstThreeOverlay && dealingAnimation.activePhaseKey !== null) {
         const overlayHost =
@@ -2043,27 +2075,28 @@ export function createActiveRoomFlowController(
               </div>
             </div>
           </div>
-          ${createCuttingSeatPanelsHtml({
-            seats: activeRoomState.seats,
-            localSeat: activeRoomState.seat,
-            dealerSeat,
-            cutterSeat: null,
-            cuttingCountdownRemainingMs: null,
-            countdownSeat: biddingSnapshot.currentBidderSeat,
-            countdownRemainingMs: biddingCountdownRemainingMs,
-            countdownTotalMs: biddingCountdownTotalMs,
-            highlightSeat: biddingSnapshot.currentBidderSeat,
-            highlightBadgeLabel: null,
-            panelScale: stageScale,
-            escapeHtml,
-            dealtHands: dealtHandsForBidding,
-            bidBubbles,
-          })}
           ${scoreHudHtml}
           ${biddingErrorHtml}
           ${biddingInteractionHtml}
         </div>
       `
+
+      syncSeatPanels(createCuttingSeatPanelsHtml({
+        seats: activeRoomState.seats,
+        localSeat: activeRoomState.seat,
+        dealerSeat,
+        cutterSeat: null,
+        cuttingCountdownRemainingMs: null,
+        countdownSeat: biddingSnapshot.currentBidderSeat,
+        countdownRemainingMs: biddingCountdownRemainingMs,
+        countdownTotalMs: biddingCountdownTotalMs,
+        highlightSeat: biddingSnapshot.currentBidderSeat,
+        highlightBadgeLabel: null,
+        panelScale: stageScale,
+        escapeHtml,
+        dealtHands: dealtHandsForBidding,
+        bidBubbles,
+      }))
 
       // Wire bid popup buttons
       options.root

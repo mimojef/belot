@@ -1336,6 +1336,30 @@ async function handleProfileRequest(
       return true
     }
 
+    // Обновяване на avatarUrl в активните стаи, където профилът участва
+    for (const room of Object.values(serverState.rooms)) {
+      for (const seat of SERVER_SEAT_ORDER) {
+        const p = room.seats[seat].participant
+        if (
+          p?.kind === 'human' &&
+          p.identity.profileId === session.profile.profileId &&
+          p.identity.avatarUrl !== avatarUrl
+        ) {
+          const updatedParticipant = {
+            ...p,
+            identity: { ...p.identity, avatarUrl },
+            publicProfile: p.publicProfile
+              ? { ...p.publicProfile, avatarUrl }
+              : p.publicProfile,
+          }
+          const nextRoom = updateHumanParticipantInRoom(room, seat, updatedParticipant)
+          serverState = updateServerRoomWithSnapshot(serverState, room.id, nextRoom)
+          broadcastRoomSnapshots(nextRoom, socketRegistry)
+          break
+        }
+      }
+    }
+
     sendJsonResponse(res, 200, {
       ok: true,
       session: {

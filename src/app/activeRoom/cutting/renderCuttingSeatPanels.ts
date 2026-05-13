@@ -798,6 +798,7 @@ export function createCuttingSeatPanelHtml(
     return `
       <div
         data-active-room-seat-anchor="${seat.seat}"
+        data-seat-avatar-url="${escapeHtml(seat.avatarUrl ?? '')}"
         style="
           position:absolute;
           ${getCuttingSeatPanelAnchorStyle(visualSeat, panelScale)}
@@ -805,7 +806,7 @@ export function createCuttingSeatPanelHtml(
           pointer-events:none;
         "
       >
-        ${bubbleHtml}
+        <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
         <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
         ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
         <div
@@ -903,6 +904,7 @@ export function createCuttingSeatPanelHtml(
   return `
     <div
       data-active-room-seat-anchor="${seat.seat}"
+      data-seat-avatar-url="${escapeHtml(seat.avatarUrl ?? '')}"
       style="
         position:absolute;
         ${getCuttingSeatPanelAnchorStyle(visualSeat, panelScale)}
@@ -910,7 +912,7 @@ export function createCuttingSeatPanelHtml(
         pointer-events:none;
       "
     >
-      ${bubbleHtml}
+      <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
       <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
       ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
       <div
