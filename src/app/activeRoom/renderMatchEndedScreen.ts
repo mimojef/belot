@@ -479,7 +479,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
 
   const counterEl = root.querySelector<HTMLElement>('[data-prize-counter="1"]')
   if (counterEl && prizeAmount && prizeAmount > 0) {
-    const duration = 1200
+    const duration = 1500
     const startTime = performance.now()
     const target = prizeAmount
 
