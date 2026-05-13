@@ -31,3 +31,13 @@ server/database/data/*.sqlite-wal
 # Environment variables (never commit real secrets)
 .env
 server/.env
+
+# Runtime user uploads - не включвай в git
+server/uploads/*
+!server/uploads/.gitkeep
+!server/uploads/avatars/
+server/uploads/avatars/*
+!server/uploads/avatars/.gitkeep
+!server/uploads/profile-gallery/
+server/uploads/profile-gallery/**
+!server/uploads/profile-gallery/.gitkeep
