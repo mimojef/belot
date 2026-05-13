@@ -604,9 +604,11 @@ function isRoomAtMatchEndedPhase(room: ServerRoom): boolean {
 
 function shouldApplyTableExitPenalty(room: ServerRoom): boolean {
   const stakeAmount = room.config.stakeAmount ?? null
+  const phase = room.game.phase
 
   return (
-    room.status === 'playing' &&
+    phase !== null &&
+    phase !== 'bootstrap' &&
     !isRoomAtMatchEndedPhase(room) &&
     Number.isInteger(stakeAmount) &&
     stakeAmount !== null &&

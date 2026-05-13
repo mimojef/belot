@@ -190,7 +190,15 @@ export function createActiveRoomFlowController(
       return ''
     }
 
-    const isPlayingPhase = activeRoomState.roomStatus === 'playing'
+    const phase = activeRoomState.game?.authoritativePhase ?? null
+    const isPlayingPhase =
+      phase === 'cutting' ||
+      phase === 'deal-first-3' ||
+      phase === 'deal-next-2' ||
+      phase === 'bidding' ||
+      phase === 'deal-last-3' ||
+      phase === 'playing' ||
+      phase === 'scoring'
     const extraPenaltyAmount = activeRoomState.stake
     const totalLossAmount = activeRoomState.stake + extraPenaltyAmount
 

@@ -489,6 +489,8 @@ export function createLobbyFlowController(
 ): LobbyFlowController {
   const state = createInitialState()
 
+  let errorTextTimerId: ReturnType<typeof setTimeout> | null = null
+
   let countdownAnimationFrameId: number | null = null
   let countdownTextElement: HTMLElement | null = null
   let progressBarElement: HTMLElement | null = null
@@ -2411,8 +2413,19 @@ export function createLobbyFlowController(
       render()
     },
     setErrorText: (value) => {
+      if (errorTextTimerId !== null) {
+        clearTimeout(errorTextTimerId)
+        errorTextTimerId = null
+      }
       state.errorText = value
       render()
+      if (value !== null) {
+        errorTextTimerId = setTimeout(() => {
+          errorTextTimerId = null
+          state.errorText = null
+          render()
+        }, 4000)
+      }
     },
     setLocalAvatarUrl: (value) => {
       state.localAvatarUrl = value
