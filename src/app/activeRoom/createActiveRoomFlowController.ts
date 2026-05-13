@@ -1,6 +1,7 @@
 import {
   type ClientBidAction,
   type MatchFoundMessage,
+  type MatchStake,
   type RoomBiddingSnapshot,
   type RoomCuttingSnapshot,
   type RoomGameSnapshot,
@@ -107,6 +108,18 @@ const SEAT_LABELS: Record<Seat, string> = {
 
 const REACTION_COUNTDOWN_WARNING_THRESHOLD_MS = 5_000
 
+const STAKE_PRIZE_MAP: Partial<Record<number, number>> = {
+  5000: 8000,
+  8000: 12000,
+  10000: 15000,
+  15000: 22000,
+  20000: 30000,
+}
+
+function getStakePrizeAmount(stake: number): number {
+  return STAKE_PRIZE_MAP[stake] ?? stake
+}
+
 export function createActiveRoomFlowController(
   options: CreateActiveRoomFlowControllerOptions,
 ): ActiveRoomFlowController {
@@ -125,6 +138,7 @@ export function createActiveRoomFlowController(
   let lastKnownWinningBid: NonNullable<RoomWinningBidSnapshot> | null = null
   let scoringCountdownIntervalId: number | null = null
   let reactionCountdownAudioIntervalId: number | null = null
+  let matchEndedSoundPlayed = false
 
   function getLocalSeatSnapshot(): RoomSeatSnapshot | null {
     if (!activeRoomState) {
@@ -2140,6 +2154,10 @@ export function createActiveRoomFlowController(
       })
     } else if (isShowingMatchEndedPhase && activeRoomState.game) {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
+      if (!matchEndedSoundPlayed) {
+        matchEndedSoundPlayed = true
+        options.gameAudio?.playMatchEnded()
+      }
       renderMatchEndedScreen({
         root: options.root,
         game: activeRoomState.game,
@@ -2148,6 +2166,7 @@ export function createActiveRoomFlowController(
         stageScale,
         scaledStageWidth,
         scaledStageHeight,
+        prizeAmount: getStakePrizeAmount(activeRoomState.stake),
         onReturnToLobby: returnToLobbyFromMatchEnded,
         onStartNewGame: startNewGameFromMatchEnded,
         onSubmitPartnerRating: (ratingValue) => {
@@ -2634,6 +2653,9 @@ export function createActiveRoomFlowController(
     activeRoomState.seats = message.seats
     activeRoomState.game = message.game ?? null
     activeRoomState.errorText = null
+    if (message.stakeAmount !== null && message.stakeAmount > 0) {
+      activeRoomState.stake = message.stakeAmount as MatchStake
+    }
 
     renderActiveRoomScreen(
       cuttingAnimation.isAnimating ||
@@ -2642,6 +2664,45 @@ export function createActiveRoomFlowController(
         dealLastThreeAnimation.isAnimating,
     )
     return true
+  }
+
+  function enterActiveRoomFromResume(roomId: string, seat: Seat, stake: MatchStake): void {
+    resetCuttingAnimationState()
+    clearDealingAnimationState()
+    clearDealNextTwoAnimationState()
+    clearDealLastThreeAnimationState()
+    clearScoringCountdownTicker()
+    clearReactionCountdownAudioTicker()
+    clearBiddingUiState()
+    lastKnownWinningBid = null
+    matchEndedSoundPlayed = false
+    resetPlayingUiCache(playingCache)
+    removePersistentBotTakeoverPopup()
+    removeSeatPanels()
+    removeLeaveButton()
+    activeRoomState = {
+      roomId,
+      seat,
+      stake,
+      humanPlayers: 4,
+      botPlayers: 0,
+      shouldStartImmediately: false,
+      roomStatus: null,
+      reconnectToken: null,
+      seats: [],
+      game: null,
+      isConnected: options.isConnected(),
+      errorText: null,
+      leavePenaltyWarningOpen: false,
+    }
+
+    const pendingRoomSnapshot = pendingRoomSnapshots.get(roomId)
+    if (pendingRoomSnapshot) {
+      applyRoomSnapshotToActiveRoom(pendingRoomSnapshot)
+      return
+    }
+
+    renderActiveRoomScreen()
   }
 
   function enterActiveRoom(message: MatchFoundMessage): void {
@@ -2653,6 +2714,7 @@ export function createActiveRoomFlowController(
     clearReactionCountdownAudioTicker()
     clearBiddingUiState()
     lastKnownWinningBid = null
+    matchEndedSoundPlayed = false
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
     removeSeatPanels()
@@ -2880,6 +2942,7 @@ export function createActiveRoomFlowController(
   return {
     render: renderActiveRoomScreen,
     enterActiveRoom,
+    enterActiveRoomFromResume,
     handleServerMessage,
     getResumeInfo,
     setConnected,

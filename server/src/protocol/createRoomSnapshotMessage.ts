@@ -316,5 +316,6 @@ export function createRoomSnapshotMessage(
     reconnectToken: getReconnectTokenForSeat(room, yourSeat),
     seats: SERVER_SEAT_ORDER.map((seat) => createSeatSnapshot(room, seat)),
     game: createGameSnapshot(room, yourSeat),
+    stakeAmount: room.config.stakeAmount ?? null,
   }
 }

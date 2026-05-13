@@ -439,6 +439,7 @@ export type RoomSnapshotMessage = {
   reconnectToken: string | null
   seats: RoomSeatSnapshot[]
   game?: RoomGameSnapshot | null
+  stakeAmount: number | null
 }
 
 export type PlayerProfileMessage = {
@@ -480,6 +481,16 @@ export type MatchmakingLeftMessage = {
   removed: boolean
 }
 
+export type SessionDisplacedMessage = {
+  type: 'session_displaced'
+}
+
+export type SessionInGameMessage = {
+  type: 'session_in_game'
+  roomId: string
+  reconnectToken: string
+}
+
 export type MatchFoundMessage = {
   type: 'match_found'
   roomId: string
@@ -507,6 +518,8 @@ export type ServerMessage =
   | MatchmakingStatusMessage
   | MatchmakingLeftMessage
   | MatchFoundMessage
+  | SessionDisplacedMessage
+  | SessionInGameMessage
 
 type CreateGameServerClientOptions = {
   url?: string

@@ -269,6 +269,7 @@ export type RoomSnapshotMessage = {
   reconnectToken: string | null
   seats: RoomSeatSnapshot[]
   game?: RoomGameSnapshot | null
+  stakeAmount: number | null
 }
 
 export type ConnectedMessage = {
@@ -373,10 +374,22 @@ export type MatchFoundMessage = {
   shouldStartImmediately: boolean
 }
 
+export type SessionDisplacedMessage = {
+  type: 'session_displaced'
+}
+
+export type SessionInGameMessage = {
+  type: 'session_in_game'
+  roomId: RoomId
+  reconnectToken: string
+}
+
 export type ServerMessage =
   | ConnectedMessage
   | PongMessage
   | ErrorMessage
+  | SessionDisplacedMessage
+  | SessionInGameMessage
   | PlayerProfileMessage
   | RoomCreatedMessage
   | RoomJoinedMessage

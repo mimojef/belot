@@ -592,6 +592,58 @@ function isProfileInActiveGame(profileId: string): boolean {
   return false
 }
 
+function findProfileInGameSession(
+  profileId: string,
+): { roomId: string; reconnectToken: string } | null {
+  for (const room of Object.values(serverState.rooms)) {
+    const phase = room.game.phase
+    if (phase === null || phase === 'finished') continue
+    for (const seat of SERVER_SEAT_ORDER) {
+      const participant = room.seats[seat].participant
+      const participantProfileId =
+        participant?.identity.profileId ?? participant?.publicProfile?.profileId ?? null
+      if (
+        participant?.kind === 'human' &&
+        participantProfileId === profileId &&
+        participant.reconnectToken !== null
+      ) {
+        return { roomId: room.id, reconnectToken: participant.reconnectToken }
+      }
+    }
+  }
+  return null
+}
+
+function displaceProfileConnections(
+  profileId: string,
+  exceptConnectionId: ConnectionId,
+): void {
+  for (const conn of Object.values(serverState.connections)) {
+    if (
+      conn.profileId !== profileId ||
+      conn.id === exceptConnectionId ||
+      conn.status !== 'connected'
+    ) {
+      continue
+    }
+
+    const socket = socketRegistry.get(conn.id)
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      sendJsonMessage(socket, { type: 'session_displaced' })
+      socket.close()
+    }
+
+    removeConnectionFromMatchmaking(conn.id)
+    const result = handleDisconnect(serverState, conn.id)
+    serverState = result.serverState
+
+    if (result.room !== null) {
+      persistRoomSnapshot(result.room)
+      broadcastRoomSnapshots(result.room, socketRegistry)
+    }
+  }
+}
+
 function isRoomAtMatchEndedPhase(room: ServerRoom): boolean {
   const authoritativeState = room.game.authoritativeState
 
@@ -2574,6 +2626,19 @@ wsServer.on('connection', (socket, request) => {
     message: 'Connected to Belot V2 server.',
   })
 
+  if (connection.profileId !== null) {
+    const gameSession = findProfileInGameSession(connection.profileId)
+    if (gameSession !== null) {
+      sendJsonMessage(socket, {
+        type: 'session_in_game',
+        roomId: gameSession.roomId,
+        reconnectToken: gameSession.reconnectToken,
+      })
+    } else {
+      displaceProfileConnections(connection.profileId, connection.id)
+    }
+  }
+
   socket.on('message', (raw: RawData) => {
     try {
       const currentConnection = getConnectionById(serverState, connection.id)
@@ -2900,6 +2965,10 @@ wsServer.on('connection', (socket, request) => {
       }
 
       if (message.type === 'resume_room') {
+        if (connection.profileId !== null) {
+          displaceProfileConnections(connection.profileId, connection.id)
+        }
+
         const result = tryResumeRoomForConnection(
           connection.id,
           message.roomId,

@@ -19,6 +19,7 @@ type RenderMatchEndedScreenOptions = {
   stageScale: number
   scaledStageWidth: number
   scaledStageHeight: number
+  prizeAmount?: number | null
   onReturnToLobby: () => void
   onStartNewGame?: () => void
   onSubmitPartnerRating?: (ratingValue: number) => void
@@ -228,6 +229,7 @@ function renderMatchEndedPanel(
   game: RoomGameSnapshot,
   seats: RoomSeatSnapshot[],
   localSeat: Seat,
+  prizeAmount?: number | null,
 ): string {
   const localTeam = getTeamBySeat(localSeat)
   const opponentTeam = getOpponentTeam(localTeam)
@@ -323,7 +325,7 @@ function renderMatchEndedPanel(
                 letter-spacing:0.04em;
               "
             >
-              ${resultLabel}
+              ${resultLabel}${winnerTeam === localTeam && prizeAmount && prizeAmount > 0 ? `<span data-prize-counter="1" style="margin-left:16px;color:#22c55e;">+0</span>` : ''}
             </div>
             <div
               style="
@@ -417,6 +419,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
     stageScale,
     scaledStageWidth,
     scaledStageHeight,
+    prizeAmount,
     onReturnToLobby,
     onStartNewGame,
     onSubmitPartnerRating,
@@ -467,12 +470,32 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
               box-sizing:border-box;
             "
           >
-            ${renderMatchEndedPanel(game, seats, localSeat)}
+            ${renderMatchEndedPanel(game, seats, localSeat, prizeAmount)}
           </div>
         </div>
       </div>
     </div>
   `
+
+  const counterEl = root.querySelector<HTMLElement>('[data-prize-counter="1"]')
+  if (counterEl && prizeAmount && prizeAmount > 0) {
+    const duration = 1200
+    const startTime = performance.now()
+    const target = prizeAmount
+
+    function tick(now: number): void {
+      const elapsed = now - startTime
+      const t = Math.min(elapsed / duration, 1)
+      const eased = 1 - Math.pow(1 - t, 3)
+      const current = Math.round(eased * target)
+      counterEl.textContent = `+${current.toLocaleString('bg-BG')}`
+      if (t < 1) {
+        requestAnimationFrame(tick)
+      }
+    }
+
+    requestAnimationFrame(tick)
+  }
 
   root
     .querySelector<HTMLButtonElement>('[data-match-ended-lobby-button="1"]')

@@ -3,6 +3,7 @@ export type GameAudioController = {
   playDeclarationBubble(lines: string[]): void
   playCardMove(): void
   playCardOnTable(): void
+  playMatchEnded(): void
   syncReactionCountdownWarning(shouldPlay: boolean): void
   scheduleDealPacketSounds(sequenceKey: string, timing?: DealPacketSoundTiming): void
   clearDealPacketSounds(): void
@@ -382,6 +383,10 @@ export function createGameAudioController(
     playSfx(buildFilePath(sfxBasePath, 'card-on-table.mp3'))
   }
 
+  function playMatchEnded(): void {
+    playSfx(buildFilePath(DEFAULT_GAME_SOUNDS_BASE_PATH, 'EndGame.mp3'))
+  }
+
   function syncReactionCountdownWarning(shouldPlay: boolean): void {
     if (!shouldPlay || !canPlayAudioNow()) {
       stopReactionCountdownWarning()
@@ -520,6 +525,7 @@ export function createGameAudioController(
     playDeclarationBubble,
     playCardMove,
     playCardOnTable,
+    playMatchEnded,
     syncReactionCountdownWarning,
     scheduleDealPacketSounds,
     clearDealPacketSounds,

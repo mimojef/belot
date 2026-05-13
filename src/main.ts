@@ -63,6 +63,7 @@ let reconnectTimerId: number | null = null
 let reconnectAttempt = 0
 let isPageUnloading = false
 let isRefreshingAuthConnection = false
+let isSessionDisplaced = false
 let currentAuthSession: AuthSession | null = null
 let publicSignupBonusYellowCoins = 100000
 let publicProfileNameChangePrice = 50000
@@ -1261,6 +1262,54 @@ function requestActiveRoomResume(): boolean {
   return true
 }
 
+function showSessionDisplacedOverlay(): void {
+  const existing = document.getElementById('session-displaced-overlay')
+  if (existing) return
+
+  const overlay = document.createElement('div')
+  overlay.id = 'session-displaced-overlay'
+  overlay.style.cssText =
+    'position:fixed;inset:0;z-index:20000;background:rgba(0,0,0,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;font-family:Arial,Helvetica,sans-serif;'
+  overlay.innerHTML = `
+    <div style="font-size:48px;">⚠️</div>
+    <div style="font-size:20px;font-weight:900;color:#ffffff;text-align:center;max-width:420px;line-height:1.4;">
+      Вече има отворена сесия с този профил на друго устройство или таб.
+    </div>
+    <div style="font-size:14px;color:rgba(255,255,255,0.55);text-align:center;">
+      Тази сесия е деактивирана.
+    </div>
+  `
+  document.body.appendChild(overlay)
+}
+
+function showSessionInGameOverlay(roomId: string, reconnectToken: string): void {
+  const existing = document.getElementById('session-in-game-overlay')
+  if (existing) return
+
+  const overlay = document.createElement('div')
+  overlay.id = 'session-in-game-overlay'
+  overlay.style.cssText =
+    'position:fixed;inset:0;z-index:20000;background:rgba(0,0,0,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;font-family:Arial,Helvetica,sans-serif;'
+  overlay.innerHTML = `
+    <div style="font-size:48px;">🎮</div>
+    <div style="font-size:20px;font-weight:900;color:#ffffff;text-align:center;max-width:420px;line-height:1.4;">
+      В момента се играе игра с този профил.
+    </div>
+    <div style="font-size:14px;color:rgba(255,255,255,0.55);text-align:center;max-width:380px;">
+      Можеш да се върнеш в играта от това устройство, но другата сесия ще бъде прекратена.
+    </div>
+    <button data-session-rejoin="1" style="margin-top:8px;padding:14px 32px;border:0;border-radius:8px;background:#d4a520;color:#000000;font-size:16px;font-weight:900;cursor:pointer;letter-spacing:0.04em;">
+      Върни ме в играта
+    </button>
+  `
+  document.body.appendChild(overlay)
+
+  overlay.querySelector('[data-session-rejoin="1"]')?.addEventListener('click', () => {
+    overlay.remove()
+    client.resumeRoom(roomId, reconnectToken)
+  })
+}
+
 client = createGameServerClient({
   onOpen: () => {
     clearReconnectTimer()
@@ -1276,6 +1325,10 @@ client = createGameServerClient({
     lobby.setErrorText(null)
   },
   onClose: () => {
+    if (isSessionDisplaced) {
+      return
+    }
+
     if (isRefreshingAuthConnection) {
       isRefreshingAuthConnection = false
       lobby.setConnected(false)
@@ -1302,6 +1355,22 @@ client = createGameServerClient({
     lobby.setErrorText(SERVER_CONNECTION_ERROR_MESSAGE)
   },
   onMessage: (message) => {
+    if (message.type === 'session_displaced') {
+      isSessionDisplaced = true
+      showSessionDisplacedOverlay()
+      return
+    }
+
+    if (message.type === 'session_in_game') {
+      showSessionInGameOverlay(message.roomId, message.reconnectToken)
+      return
+    }
+
+    if (message.type === 'room_resumed' && !activeRoom.hasActiveRoom()) {
+      activeRoom.enterActiveRoomFromResume(message.roomId, message.seat, 5000)
+      return
+    }
+
     if (activeRoom.handleServerMessage(message)) {
       return
     }
