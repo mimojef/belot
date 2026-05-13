@@ -298,13 +298,12 @@ function renderProfileEditModal(state: LobbyScreenState): string {
     0,
     MAX_PROFILE_GALLERY_IMAGES - galleryImages.length,
   )
-  const galleryInputDisabled = gallerySlotsLeft <= 0
   const nameChangePrice = state.profileNameChangePrice
 
   return `
     <div data-lobby-profile-editor-root="1" style="position:fixed;inset:0;z-index:13500;display:flex;align-items:center;justify-content:center;padding:24px;">
       <div data-lobby-profile-editor-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.76);backdrop-filter:blur(4px);"></div>
-      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,560px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
+      <div role="dialog" aria-modal="true" class="gold-scrollbar" style="position:relative;width:min(92vw,560px);max-height:90vh;overflow-y:auto;border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
         <button type="button" data-lobby-profile-editor-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
         <form data-lobby-profile-editor-form="1" style="display:grid;gap:16px;">
           <div>
@@ -332,60 +331,52 @@ function renderProfileEditModal(state: LobbyScreenState): string {
             </div>
           </div>
 
-          <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
-            Нов аватар
-            <input name="avatarFile" type="file" accept="image/png,image/jpeg,image/webp" style="border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:10px 12px;font-size:13px;font-weight:700;outline:none;">
-          </label>
-
-          <div data-avatar-crop-stage="1" style="display:none;gap:8px;">
-            <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">Избери квадрат за аватар</div>
-            <div data-avatar-crop-box="1" style="position:relative;width:100%;max-height:360px;overflow:hidden;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;user-select:none;touch-action:none;">
-              <img data-avatar-crop-image="1" alt="" style="display:block;max-width:100%;max-height:360px;width:auto;height:auto;margin:0 auto;pointer-events:none;">
-              <div data-avatar-crop-selection="1" style="position:absolute;display:none;border:2px solid #f4c95b;background:rgba(212,165,32,0.18);box-shadow:0 0 0 9999px rgba(0,0,0,0.46);pointer-events:none;"></div>
+          <div style="display:grid;gap:8px;">
+            <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">Аватар</div>
+            <div style="display:flex;align-items:center;gap:16px;">
+              <div
+                data-avatar-pick-btn="1"
+                role="button"
+                tabindex="0"
+                style="width:80px;height:80px;border-radius:8px;border:2px dashed rgba(212,165,32,0.50);background:#101010;display:flex;align-items:center;justify-content:center;cursor:pointer;flex:0 0 auto;overflow:hidden;position:relative;"
+              >
+                ${state.profile.avatarUrl
+                  ? `<img src="${escapeHtml(state.profile.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;position:absolute;inset:0;"><div style="position:absolute;inset:0;background:rgba(0,0,0,0.50);display:flex;align-items:center;justify-content:center;"><span style="color:#fff;font-size:12px;font-weight:900;letter-spacing:0.04em;">Смени</span></div>`
+                  : `<span style="color:rgba(212,165,32,0.70);font-size:36px;font-weight:300;line-height:1;">+</span>`}
+              </div>
+              <input name="avatarFile" type="file" accept="image/png,image/jpeg,image/webp" style="display:none;">
+              <div style="font-size:13px;color:rgba(255,255,255,0.62);font-weight:700;line-height:1.5;">
+                ${state.profile.avatarUrl ? 'Натисни квадрата за да смениш аватара.' : 'Натисни квадрата за да добавиш аватар.'}<br>Ще можеш да очертаеш зона от снимката.
+              </div>
             </div>
-            <div style="font-size:12px;line-height:1.4;color:rgba(255,255,255,0.62);font-weight:700;">Натисни и влачи върху снимката. Може да чертаеш нов квадрат, докато не избереш точната част.</div>
           </div>
-
-          <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
-            Добави снимки в галерия
-            <input name="galleryFiles" type="file" accept="image/png,image/jpeg,image/webp" multiple ${galleryInputDisabled ? 'disabled' : ''} style="border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:${galleryInputDisabled ? 'rgba(255,255,255,0.42)' : '#ffffff'};padding:10px 12px;font-size:13px;font-weight:700;outline:none;">
-            <span style="font-size:12px;line-height:1.35;color:rgba(255,255,255,0.58);font-weight:700;text-transform:none;letter-spacing:0;">
-              ${galleryInputDisabled ? `Достигнат е лимитът от ${MAX_PROFILE_GALLERY_IMAGES} снимки.` : `Можеш да добавиш още ${gallerySlotsLeft} снимки.`}
-            </span>
-          </label>
 
           <div style="display:grid;gap:8px;">
-            <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
-              Текуща галерия
+            <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">Галерия</div>
+            <div data-gallery-grid="1" style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;">
+              ${galleryImages.map((image) => `
+                <div style="position:relative;aspect-ratio:1/1;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.10);background:#101010;">
+                  <img src="${escapeHtml(image.imageUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">
+                  <button
+                    type="button"
+                    data-lobby-gallery-delete="${escapeHtml(image.imageId)}"
+                    aria-label="Изтрий снимката"
+                    style="position:absolute;top:4px;right:4px;width:26px;height:26px;border:1px solid rgba(248,113,113,0.56);border-radius:999px;background:rgba(12,12,12,0.86);color:#fecaca;font-size:16px;font-weight:900;line-height:1;cursor:pointer;"
+                  >×</button>
+                </div>
+              `).join('')}
+              ${Array.from({ length: gallerySlotsLeft }, () => `
+                <div
+                  data-gallery-add-slot="1"
+                  role="button"
+                  tabindex="0"
+                  style="aspect-ratio:1/1;border-radius:8px;border:2px dashed rgba(255,255,255,0.20);background:#101010;display:flex;align-items:center;justify-content:center;cursor:pointer;"
+                >
+                  <span style="color:rgba(255,255,255,0.40);font-size:28px;font-weight:300;line-height:1;">+</span>
+                </div>
+              `).join('')}
             </div>
-            ${galleryImages.length === 0 ? `
-              <div style="border-radius:8px;border:1px dashed rgba(255,255,255,0.16);background:rgba(255,255,255,0.04);padding:12px;color:rgba(255,255,255,0.62);font-size:13px;font-weight:700;text-align:center;">
-                Няма качени снимки.
-              </div>
-            ` : `
-              <div style="display:grid;grid-template-columns:repeat(6, minmax(0, 1fr));gap:8px;">
-                ${galleryImages
-                  .map((image) => `
-                    <div style="position:relative;aspect-ratio:1/1;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.10);background:#101010;">
-                      <img src="${escapeHtml(image.imageUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">
-                      <button
-                        type="button"
-                        data-lobby-gallery-delete="${escapeHtml(image.imageId)}"
-                        aria-label="Изтрий снимката"
-                        style="position:absolute;top:4px;right:4px;width:26px;height:26px;border:1px solid rgba(248,113,113,0.56);border-radius:999px;background:rgba(12,12,12,0.86);color:#fecaca;font-size:16px;font-weight:900;line-height:1;cursor:pointer;"
-                      >×</button>
-                    </div>
-                  `)
-                  .join('')}
-              </div>
-            `}
-          </div>
-
-          <div style="display:flex;align-items:center;gap:12px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.04);padding:12px;">
-            <div style="width:72px;height:72px;border-radius:8px;border:1px solid rgba(212,165,32,0.44);overflow:hidden;background:#111;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:24px;font-weight:900;flex:0 0 auto;">
-              ${state.profile.avatarUrl ? `<img src="${escapeHtml(state.profile.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : escapeHtml(state.profile.displayName.charAt(0).toUpperCase() || '?')}
-            </div>
-            <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);font-weight:700;">За аватар избери снимка и очертай квадрат върху нея. Сървърът ще изреже избраната част до 250x250 webp. Снимките за галерията се записват като 800x800 webp.</div>
+            <input data-gallery-file-input="1" type="file" accept="image/png,image/jpeg,image/webp" style="display:none;">
           </div>
 
           ${state.profileEditorErrorText ? `<div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;">${escapeHtml(state.profileEditorErrorText)}</div>` : ''}
@@ -631,7 +622,19 @@ function renderNav(state: LobbyScreenState): string {
   `
 }
 
-function renderHeroSection(profileName: string, isConnected: boolean): string {
+function renderHeroSection(
+  profileName: string,
+  isConnected: boolean,
+  avatarUrl: string | null,
+  yellowCoinsBalance: number | null,
+  wonGamesCount: number | null,
+  completedGamesCount: number | null,
+  rankTitle: string | null,
+): string {
+  const winRate =
+    wonGamesCount !== null && completedGamesCount !== null && completedGamesCount > 0
+      ? Math.round((wonGamesCount / completedGamesCount) * 100)
+      : null
   return `
     <div style="display:flex; gap:16px; align-items:stretch; margin-bottom:16px;">
       <div style="flex:0 1 985px; min-width:0; border:2px solid rgba(212,165,32,0.75); border-radius:14px; overflow:hidden; position:relative; box-sizing:border-box;">
@@ -657,8 +660,9 @@ function renderHeroSection(profileName: string, isConnected: boolean): string {
               box-shadow:0 0 0 2px rgba(0,0,0,0.65), 0 0 22px rgba(212,165,32,0.18);
               box-sizing:border-box;
             ">
-              <img src="/assets/lobby/player-avatar.png" alt="${escapeHtml(profileName)}"
-                style="width:100%; height:100%; object-fit:cover; object-position:center;">
+              ${avatarUrl
+                ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(profileName)}" style="width:100%; height:100%; object-fit:cover; object-position:center;">`
+                : `<span style="font-size:48px;font-weight:900;color:#d4a520;display:flex;align-items:center;justify-content:center;width:100%;height:100%;">${escapeHtml(profileName.charAt(0).toUpperCase() || '?')}</span>`}
             </div>
             <div style="
               position:absolute; right:-6px; bottom:-6px;
@@ -683,7 +687,7 @@ function renderHeroSection(profileName: string, isConnected: boolean): string {
           <div style="width:210px;">
             <div style="font-size:17px; color:rgba(255,255,255,0.78); font-weight:500;">Баланс</div>
             <div style="display:flex; align-items:center; gap:8px; margin-top:8px;">
-              <span style="font-size:34px; line-height:1; font-weight:900; color:#d4a520;">25 430</span>
+              <span style="font-size:34px; line-height:1; font-weight:900; color:#d4a520;">${yellowCoinsBalance !== null ? formatAmount(yellowCoinsBalance) : '—'}</span>
               <img src="/assets/lobby/icon-coin.png" alt="" style="width:33px; height:32px; display:block; object-fit:contain;">
             </div>
             <div style="font-size:16px; color:rgba(255,255,255,0.72); margin-top:8px;">жълтици</div>
@@ -705,28 +709,28 @@ function renderHeroSection(profileName: string, isConnected: boolean): string {
             <img src="/assets/lobby/icon-victories.png" alt="" style="width:36px; height:36px; display:block; object-fit:contain; flex-shrink:0;">
             <div style="min-width:0;">
               <div style="font-size:15px; color:rgba(255,255,255,0.82); font-weight:600;">Победи</div>
-              <div style="font-size:22px; line-height:1.1; font-weight:800; color:#ffffff; margin-top:6px;">1287</div>
+              <div style="font-size:22px; line-height:1.1; font-weight:800; color:#ffffff; margin-top:6px;">${wonGamesCount !== null ? formatAmount(wonGamesCount) : '—'}</div>
             </div>
           </div>
           <div style="display:flex; align-items:center; gap:8px; min-width:0; padding:0 10px; border-left:1px solid rgba(212,165,32,0.35);">
             <img src="/assets/lobby/icon-games-played.png" alt="" style="width:36px; height:38px; display:block; object-fit:contain; flex-shrink:0;">
             <div style="min-width:0;">
               <div style="font-size:14px; line-height:1.1; color:rgba(255,255,255,0.82); font-weight:600;">Изиграни игри</div>
-              <div style="font-size:22px; line-height:1.1; font-weight:800; color:#ffffff; margin-top:6px;">2540</div>
+              <div style="font-size:22px; line-height:1.1; font-weight:800; color:#ffffff; margin-top:6px;">${completedGamesCount !== null ? formatAmount(completedGamesCount) : '—'}</div>
             </div>
           </div>
           <div style="display:flex; align-items:center; gap:8px; min-width:0; padding:0 10px; border-left:1px solid rgba(212,165,32,0.35);">
             <img src="/assets/lobby/icon-success-rate.png" alt="" style="width:36px; height:38px; display:block; object-fit:contain; flex-shrink:0;">
             <div style="min-width:0;">
               <div style="font-size:14px; line-height:1.1; color:rgba(255,255,255,0.82); font-weight:600;">Успеваемост</div>
-              <div style="font-size:22px; line-height:1.1; font-weight:800; color:#ffffff; margin-top:6px;">63%</div>
+              <div style="font-size:22px; line-height:1.1; font-weight:800; color:#ffffff; margin-top:6px;">${winRate !== null ? `${winRate}%` : '—'}</div>
             </div>
           </div>
           <div style="display:flex; align-items:center; gap:10px; min-width:0; padding-left:10px; border-left:1px solid rgba(212,165,32,0.35);">
             <img src="/assets/lobby/icon-rank.png" alt="" style="width:48px; height:62px; display:block; object-fit:contain; flex-shrink:0;">
             <div style="min-width:0;">
               <div style="font-size:15px; color:#d4a520; font-weight:700;">Ранг</div>
-              <div style="font-size:18px; line-height:1.15; font-weight:800; color:#ffffff; margin-top:7px;">Майстор</div>
+              <div style="font-size:18px; line-height:1.15; font-weight:800; color:#ffffff; margin-top:7px;">${rankTitle ? escapeHtml(rankTitle) : '—'}</div>
             </div>
           </div>
         </div>
@@ -1796,7 +1800,7 @@ export function renderLobbyScreen(
               : state.view === 'chat'
                 ? renderChatPanel(state)
               : `
-              ${renderHeroSection(profileName, state.isConnected)}
+              ${renderHeroSection(profileName, state.isConnected, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle)}
               ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching)}
               ${renderBottomSection()}
             `}
@@ -2207,124 +2211,337 @@ export function renderLobbyScreen(
   const avatarInput = root.querySelector<HTMLInputElement>(
     'input[name="avatarFile"]',
   )
-  const cropStage = root.querySelector<HTMLElement>('[data-avatar-crop-stage="1"]')
-  const cropBox = root.querySelector<HTMLElement>('[data-avatar-crop-box="1"]')
-  const cropImage = root.querySelector<HTMLImageElement>('[data-avatar-crop-image="1"]')
-  const cropSelection = root.querySelector<HTMLElement>(
-    '[data-avatar-crop-selection="1"]',
-  )
 
-  let cropStartX = 0
-  let cropStartY = 0
+  root.querySelector<HTMLElement>('[data-avatar-pick-btn="1"]')?.addEventListener('click', () => {
+    avatarInput?.click()
+  })
+
   let currentCrop: AvatarCropSelection | null = null
 
-  function clearCropSelection(): void {
-    currentCrop = null
-    if (cropSelection) {
-      cropSelection.style.display = 'none'
+  function openCropOverlay(file: File): void {
+    const overlay = document.createElement('div')
+    overlay.setAttribute('data-avatar-crop-overlay', '1')
+    overlay.style.cssText = [
+      'position:fixed;inset:0;z-index:14000;',
+      'background:#0a0a0a;',
+      'display:flex;flex-direction:column;',
+      'font-family:Arial,Helvetica,sans-serif;',
+    ].join('')
+
+    overlay.innerHTML = `
+      <div style="flex:0 0 auto;padding:14px 20px;background:#0a0a0a;border-bottom:1px solid rgba(255,255,255,0.10);display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+        <div style="font-size:14px;font-weight:700;color:rgba(255,255,255,0.80);line-height:1.4;">
+          Очертайте с мишката зона от снимката която искате да използвате за аватар.
+        </div>
+        <div style="display:flex;gap:10px;flex-shrink:0;">
+          <button type="button" data-crop-cancel="1" style="height:40px;padding:0 16px;border:1px solid rgba(255,255,255,0.18);border-radius:8px;background:#080808;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;">Откажи</button>
+          <button type="button" data-crop-confirm="1" style="height:40px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:pointer;">Потвърди избора</button>
+        </div>
+      </div>
+      <div data-crop-box="1" style="flex:1;position:relative;overflow:hidden;user-select:none;touch-action:none;display:flex;align-items:center;justify-content:center;background:#111;cursor:crosshair;">
+        <img data-crop-image="1" alt="" style="max-width:100%;max-height:100%;display:block;object-fit:contain;pointer-events:none;">
+        <div data-crop-selection="1" style="position:absolute;display:none;border:2px solid #f4c95b;background:rgba(212,165,32,0.10);box-shadow:0 0 0 9999px rgba(0,0,0,0.54);pointer-events:none;"></div>
+      </div>
+    `
+
+    document.body.appendChild(overlay)
+
+    const overlayImage = overlay.querySelector<HTMLImageElement>('[data-crop-image="1"]')!
+    const overlayBox = overlay.querySelector<HTMLElement>('[data-crop-box="1"]')!
+    const overlaySelection = overlay.querySelector<HTMLElement>('[data-crop-selection="1"]')!
+
+    overlayImage.src = URL.createObjectURL(file)
+
+    let startX = 0
+    let startY = 0
+    let pendingCrop: AvatarCropSelection | null = null
+
+    function clearOverlayCrop(): void {
+      pendingCrop = null
+      overlaySelection.style.display = 'none'
     }
-  }
 
-  function getImageRelativePoint(event: PointerEvent): { x: number; y: number } | null {
-    if (!cropImage) {
-      return null
+    function getOverlayPoint(event: PointerEvent): { x: number; y: number } | null {
+      const rect = overlayImage.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) return null
+      const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+      const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top))
+      return { x, y }
     }
 
-    const rect = cropImage.getBoundingClientRect()
-
-    if (rect.width <= 0 || rect.height <= 0) {
-      return null
+    function drawOverlayCrop(currentX: number, currentY: number): void {
+      const rect = overlayImage.getBoundingClientRect()
+      const boxRect = overlayBox.getBoundingClientRect()
+      const deltaX = currentX - startX
+      const deltaY = currentY - startY
+      const size = Math.min(Math.abs(deltaX), Math.abs(deltaY))
+      if (size < 4) { clearOverlayCrop(); return }
+      const dirX = deltaX >= 0 ? 1 : -1
+      const dirY = deltaY >= 0 ? 1 : -1
+      const displayX = dirX > 0 ? startX : startX - size
+      const displayY = dirY > 0 ? startY : startY - size
+      const boundedX = Math.max(0, Math.min(rect.width - size, displayX))
+      const boundedY = Math.max(0, Math.min(rect.height - size, displayY))
+      overlaySelection.style.display = 'block'
+      overlaySelection.style.left = `${rect.left - boxRect.left + boundedX}px`
+      overlaySelection.style.top = `${rect.top - boxRect.top + boundedY}px`
+      overlaySelection.style.width = `${size}px`
+      overlaySelection.style.height = `${size}px`
+      pendingCrop = {
+        x: (boundedX / rect.width) * overlayImage.naturalWidth,
+        y: (boundedY / rect.height) * overlayImage.naturalHeight,
+        size: (size / rect.width) * overlayImage.naturalWidth,
+      }
     }
 
-    const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
-    const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top))
+    overlayBox.addEventListener('pointerdown', (event) => {
+      const point = getOverlayPoint(event)
+      if (point === null) return
+      event.preventDefault()
+      overlayBox.setPointerCapture(event.pointerId)
+      startX = point.x
+      startY = point.y
+      drawOverlayCrop(point.x, point.y)
+    })
 
-    return { x, y }
-  }
+    overlayBox.addEventListener('pointermove', (event) => {
+      if (!overlayBox.hasPointerCapture(event.pointerId)) return
+      const point = getOverlayPoint(event)
+      if (point === null) return
+      event.preventDefault()
+      drawOverlayCrop(point.x, point.y)
+    })
 
-  function renderCropFromPoints(currentX: number, currentY: number): void {
-    if (!cropImage || !cropSelection) {
-      return
-    }
+    overlayBox.addEventListener('pointerup', (event) => {
+      if (overlayBox.hasPointerCapture(event.pointerId)) {
+        overlayBox.releasePointerCapture(event.pointerId)
+      }
+    })
 
-    const rect = cropImage.getBoundingClientRect()
-    const boxRect = cropBox?.getBoundingClientRect() ?? rect
-    const deltaX = currentX - cropStartX
-    const deltaY = currentY - cropStartY
-    const size = Math.min(Math.abs(deltaX), Math.abs(deltaY))
+    overlay.querySelector('[data-crop-confirm="1"]')?.addEventListener('click', () => {
+      currentCrop = pendingCrop
+      overlay.remove()
 
-    if (size < 4) {
-      clearCropSelection()
-      return
-    }
+      if (currentCrop !== null && avatarInput?.files?.[0]) {
+        const crop = currentCrop
+        const canvas = document.createElement('canvas')
+        canvas.width = 250
+        canvas.height = 250
+        const ctx = canvas.getContext('2d')
+        if (ctx) {
+          const img = new Image()
+          const objectUrl = URL.createObjectURL(avatarInput.files[0])
+          img.onload = () => {
+            ctx.drawImage(img, crop.x, crop.y, crop.size, crop.size, 0, 0, 250, 250)
+            const pickBtn = root.querySelector<HTMLElement>('[data-avatar-pick-btn="1"]')
+            if (pickBtn) {
+              const dataUrl = canvas.toDataURL('image/webp')
+              pickBtn.innerHTML = `<img src="${dataUrl}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;position:absolute;inset:0;"><div style="position:absolute;inset:0;background:rgba(0,0,0,0.50);display:flex;align-items:center;justify-content:center;"><span style="color:#fff;font-size:12px;font-weight:900;letter-spacing:0.04em;">Смени</span></div>`
+            }
+            URL.revokeObjectURL(objectUrl)
+          }
+          img.src = objectUrl
+        }
+      }
+    })
 
-    const directionX = deltaX >= 0 ? 1 : -1
-    const directionY = deltaY >= 0 ? 1 : -1
-    const displayX = directionX > 0 ? cropStartX : cropStartX - size
-    const displayY = directionY > 0 ? cropStartY : cropStartY - size
-    const boundedX = Math.max(0, Math.min(rect.width - size, displayX))
-    const boundedY = Math.max(0, Math.min(rect.height - size, displayY))
-
-    cropSelection.style.display = 'block'
-    cropSelection.style.left = `${rect.left - boxRect.left + boundedX}px`
-    cropSelection.style.top = `${rect.top - boxRect.top + boundedY}px`
-    cropSelection.style.width = `${size}px`
-    cropSelection.style.height = `${size}px`
-
-    currentCrop = {
-      x: (boundedX / rect.width) * cropImage.naturalWidth,
-      y: (boundedY / rect.height) * cropImage.naturalHeight,
-      size: (size / rect.width) * cropImage.naturalWidth,
-    }
+    overlay.querySelector('[data-crop-cancel="1"]')?.addEventListener('click', () => {
+      currentCrop = null
+      if (avatarInput) avatarInput.value = ''
+      const pickBtn = root.querySelector<HTMLElement>('[data-avatar-pick-btn="1"]')
+      if (pickBtn) {
+        pickBtn.innerHTML = state.profile.avatarUrl
+          ? `<img src="${escapeHtml(state.profile.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;position:absolute;inset:0;"><div style="position:absolute;inset:0;background:rgba(0,0,0,0.50);display:flex;align-items:center;justify-content:center;"><span style="color:#fff;font-size:12px;font-weight:900;letter-spacing:0.04em;">Смени</span></div>`
+          : `<span style="color:rgba(212,165,32,0.70);font-size:36px;font-weight:300;line-height:1;">+</span>`
+      }
+      overlay.remove()
+    })
   }
 
   avatarInput?.addEventListener('change', () => {
     const file = avatarInput.files?.[0] ?? null
-
-    clearCropSelection()
-
-    if (!file || !cropStage || !cropImage) {
-      return
-    }
-
-    cropStage.style.display = 'grid'
-    cropImage.src = URL.createObjectURL(file)
+    currentCrop = null
+    if (!file) return
+    openCropOverlay(file)
   })
 
-  cropBox?.addEventListener('pointerdown', (event) => {
-    const point = getImageRelativePoint(event)
+  const pendingGalleryItems: Array<{ file: File; crop: AvatarCropSelection; dataUrl: string }> = []
+  const galleryGrid = root.querySelector<HTMLElement>('[data-gallery-grid="1"]')
+  const galleryFileInput = root.querySelector<HTMLInputElement>('[data-gallery-file-input="1"]')
 
-    if (point === null || !cropBox) {
-      return
+  function addGalleryEmptySlot(): void {
+    if (!galleryGrid) return
+    const slot = document.createElement('div')
+    slot.setAttribute('data-gallery-add-slot', '1')
+    slot.setAttribute('role', 'button')
+    slot.setAttribute('tabindex', '0')
+    slot.style.cssText = 'aspect-ratio:1/1;border-radius:8px;border:2px dashed rgba(255,255,255,0.20);background:#101010;display:flex;align-items:center;justify-content:center;cursor:pointer;'
+    slot.innerHTML = '<span style="color:rgba(255,255,255,0.40);font-size:28px;font-weight:300;line-height:1;">+</span>'
+    slot.addEventListener('click', () => galleryFileInput?.click())
+    galleryGrid.appendChild(slot)
+  }
+
+  function openGalleryCropOverlay(file: File): void {
+    const overlay = document.createElement('div')
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:14000;background:#0a0a0a;display:flex;flex-direction:column;font-family:Arial,Helvetica,sans-serif;'
+    overlay.innerHTML = `
+      <div style="flex:0 0 auto;padding:14px 20px;background:#0a0a0a;border-bottom:1px solid rgba(255,255,255,0.10);display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+        <div style="font-size:14px;font-weight:700;color:rgba(255,255,255,0.80);line-height:1.4;">
+          Очертайте с мишката зона от снимката която искате да добавите в галерията.
+        </div>
+        <div style="display:flex;gap:10px;flex-shrink:0;">
+          <button type="button" data-gallery-crop-cancel="1" style="height:40px;padding:0 16px;border:1px solid rgba(255,255,255,0.18);border-radius:8px;background:#080808;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;">Откажи</button>
+          <button type="button" data-gallery-crop-confirm="1" style="height:40px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:pointer;">Добави в галерията</button>
+        </div>
+      </div>
+      <div data-gallery-crop-box="1" style="flex:1;position:relative;overflow:hidden;user-select:none;touch-action:none;display:flex;align-items:center;justify-content:center;background:#111;cursor:crosshair;">
+        <img data-gallery-crop-image="1" alt="" style="max-width:100%;max-height:100%;display:block;object-fit:contain;pointer-events:none;">
+        <div data-gallery-crop-selection="1" style="position:absolute;display:none;border:2px solid #f4c95b;background:rgba(212,165,32,0.10);box-shadow:0 0 0 9999px rgba(0,0,0,0.54);pointer-events:none;"></div>
+      </div>
+    `
+    document.body.appendChild(overlay)
+
+    const overlayImage = overlay.querySelector<HTMLImageElement>('[data-gallery-crop-image="1"]')!
+    const overlayBox = overlay.querySelector<HTMLElement>('[data-gallery-crop-box="1"]')!
+    const overlaySelection = overlay.querySelector<HTMLElement>('[data-gallery-crop-selection="1"]')!
+    overlayImage.src = URL.createObjectURL(file)
+
+    let startX = 0
+    let startY = 0
+    let pendingCrop: AvatarCropSelection | null = null
+
+    function clearGalleryCrop(): void {
+      pendingCrop = null
+      overlaySelection.style.display = 'none'
     }
 
-    event.preventDefault()
-    cropBox.setPointerCapture(event.pointerId)
-    cropStartX = point.x
-    cropStartY = point.y
-    renderCropFromPoints(point.x, point.y)
+    function getGalleryPoint(event: PointerEvent): { x: number; y: number } | null {
+      const rect = overlayImage.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) return null
+      const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+      const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top))
+      return { x, y }
+    }
+
+    function drawGalleryCrop(currentX: number, currentY: number): void {
+      const rect = overlayImage.getBoundingClientRect()
+      const boxRect = overlayBox.getBoundingClientRect()
+      const deltaX = currentX - startX
+      const deltaY = currentY - startY
+      const size = Math.min(Math.abs(deltaX), Math.abs(deltaY))
+      if (size < 4) { clearGalleryCrop(); return }
+      const dirX = deltaX >= 0 ? 1 : -1
+      const dirY = deltaY >= 0 ? 1 : -1
+      const displayX = dirX > 0 ? startX : startX - size
+      const displayY = dirY > 0 ? startY : startY - size
+      const boundedX = Math.max(0, Math.min(rect.width - size, displayX))
+      const boundedY = Math.max(0, Math.min(rect.height - size, displayY))
+      overlaySelection.style.display = 'block'
+      overlaySelection.style.left = `${rect.left - boxRect.left + boundedX}px`
+      overlaySelection.style.top = `${rect.top - boxRect.top + boundedY}px`
+      overlaySelection.style.width = `${size}px`
+      overlaySelection.style.height = `${size}px`
+      pendingCrop = {
+        x: (boundedX / rect.width) * overlayImage.naturalWidth,
+        y: (boundedY / rect.height) * overlayImage.naturalHeight,
+        size: (size / rect.width) * overlayImage.naturalWidth,
+      }
+    }
+
+    overlayBox.addEventListener('pointerdown', (event) => {
+      const point = getGalleryPoint(event)
+      if (point === null) return
+      event.preventDefault()
+      overlayBox.setPointerCapture(event.pointerId)
+      startX = point.x
+      startY = point.y
+      drawGalleryCrop(point.x, point.y)
+    })
+
+    overlayBox.addEventListener('pointermove', (event) => {
+      if (!overlayBox.hasPointerCapture(event.pointerId)) return
+      const point = getGalleryPoint(event)
+      if (point === null) return
+      event.preventDefault()
+      drawGalleryCrop(point.x, point.y)
+    })
+
+    overlayBox.addEventListener('pointerup', (event) => {
+      if (overlayBox.hasPointerCapture(event.pointerId)) overlayBox.releasePointerCapture(event.pointerId)
+    })
+
+    overlay.querySelector('[data-gallery-crop-confirm="1"]')?.addEventListener('click', () => {
+      if (pendingCrop === null) { overlay.remove(); return }
+      const crop = pendingCrop
+      const canvas = document.createElement('canvas')
+      canvas.width = 800
+      canvas.height = 800
+      const ctx = canvas.getContext('2d')
+      if (!ctx) { overlay.remove(); return }
+      const img = new Image()
+      const objectUrl = URL.createObjectURL(file)
+      img.onload = () => {
+        ctx.drawImage(img, crop.x, crop.y, crop.size, crop.size, 0, 0, 800, 800)
+        const dataUrl = canvas.toDataURL('image/webp', 0.92)
+        URL.revokeObjectURL(objectUrl)
+        const item = { file, crop, dataUrl }
+        pendingGalleryItems.push(item)
+        if (galleryGrid) {
+          const div = document.createElement('div')
+          div.style.cssText = 'position:relative;aspect-ratio:1/1;border-radius:8px;overflow:hidden;border:1px solid rgba(212,165,32,0.30);background:#101010;'
+          const previewImg = document.createElement('img')
+          previewImg.src = dataUrl
+          previewImg.alt = ''
+          previewImg.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;'
+          const removeBtn = document.createElement('button')
+          removeBtn.type = 'button'
+          removeBtn.style.cssText = 'position:absolute;top:4px;right:4px;width:26px;height:26px;border:1px solid rgba(248,113,113,0.56);border-radius:999px;background:rgba(12,12,12,0.86);color:#fecaca;font-size:16px;font-weight:900;line-height:1;cursor:pointer;'
+          removeBtn.textContent = '×'
+          removeBtn.addEventListener('click', () => {
+            const idx = pendingGalleryItems.indexOf(item)
+            if (idx !== -1) pendingGalleryItems.splice(idx, 1)
+            div.remove()
+            addGalleryEmptySlot()
+          })
+          div.appendChild(previewImg)
+          div.appendChild(removeBtn)
+          const firstSlot = galleryGrid.querySelector<HTMLElement>('[data-gallery-add-slot]')
+          if (firstSlot) {
+            galleryGrid.insertBefore(div, firstSlot)
+            firstSlot.remove()
+          } else {
+            galleryGrid.appendChild(div)
+          }
+        }
+        overlay.remove()
+      }
+      img.src = objectUrl
+    })
+
+    overlay.querySelector('[data-gallery-crop-cancel="1"]')?.addEventListener('click', () => {
+      overlay.remove()
+    })
+  }
+
+  root.querySelectorAll<HTMLElement>('[data-gallery-add-slot]').forEach((slot) => {
+    slot.addEventListener('click', () => galleryFileInput?.click())
   })
 
-  cropBox?.addEventListener('pointermove', (event) => {
-    if (!cropBox.hasPointerCapture(event.pointerId)) {
-      return
-    }
-
-    const point = getImageRelativePoint(event)
-
-    if (point === null) {
-      return
-    }
-
-    event.preventDefault()
-    renderCropFromPoints(point.x, point.y)
+  galleryFileInput?.addEventListener('change', () => {
+    const file = galleryFileInput?.files?.[0] ?? null
+    if (!file) return
+    if (galleryFileInput) galleryFileInput.value = ''
+    openGalleryCropOverlay(file)
   })
 
-  cropBox?.addEventListener('pointerup', (event) => {
-    if (cropBox.hasPointerCapture(event.pointerId)) {
-      cropBox.releasePointerCapture(event.pointerId)
-    }
-  })
+  function dataUrlToFile(dataUrl: string, filename: string): File {
+    const parts = dataUrl.split(',')
+    const mime = parts[0].match(/:(.*?);/)![1]
+    const binaryStr = atob(parts[1])
+    const bytes = new Uint8Array(binaryStr.length)
+    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
+    return new File([bytes], filename, { type: mime })
+  }
 
   root
     .querySelector<HTMLFormElement>('[data-lobby-profile-editor-form="1"]')
@@ -2333,9 +2550,7 @@ export function renderLobbyScreen(
       const form = event.currentTarget as HTMLFormElement
       const data = new FormData(form)
       const avatarFile = data.get('avatarFile')
-      const galleryFiles = data.getAll('galleryFiles').filter(
-        (value): value is File => value instanceof File && value.size > 0,
-      )
+      const galleryFiles = pendingGalleryItems.map((item, i) => dataUrlToFile(item.dataUrl, `gallery-${i}.webp`))
       options.onProfileEditSubmit(
         avatarFile instanceof File && avatarFile.size > 0 ? avatarFile : null,
         currentCrop,

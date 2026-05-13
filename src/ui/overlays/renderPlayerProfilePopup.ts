@@ -792,6 +792,7 @@ export function renderPlayerProfilePopup(
           role="dialog"
           aria-modal="true"
           aria-label="Профил на играч"
+          class="gold-scrollbar"
           style="
             position:relative;
             width:min(92vw, 760px);

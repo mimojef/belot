@@ -78,3 +78,22 @@ body::before {
   -moz-user-select: none;
   -ms-user-select: none;
 }
+
+.gold-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.gold-scrollbar::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 999px;
+}
+.gold-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(212, 165, 32, 0.55);
+  border-radius: 999px;
+}
+.gold-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(212, 165, 32, 0.85);
+}
+.gold-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(212, 165, 32, 0.55) rgba(255, 255, 255, 0.04);
+}
