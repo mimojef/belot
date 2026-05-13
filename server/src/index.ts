@@ -1319,13 +1319,16 @@ async function handleProfileRequest(
       return true
     }
 
+    const oldAvatarUrl = session.profile.avatarUrl
+    const avatarFilename = `${randomUUID()}.webp`
+
     await writeWebpUploadFile(
       AVATAR_UPLOADS_PATH,
-      `${session.profile.profileId}.webp`,
+      avatarFilename,
       avatarBuffer,
     )
 
-    const avatarUrl = createUploadUrl('avatars', `${session.profile.profileId}.webp`)
+    const avatarUrl = createUploadUrl('avatars', avatarFilename)
     const result = playerProgressStore.updateProfileAvatar(
       session.profile.profileId,
       avatarUrl,
@@ -1334,6 +1337,14 @@ async function handleProfileRequest(
     if (!result.ok) {
       sendJsonResponse(res, 400, result)
       return true
+    }
+
+    if (
+      oldAvatarUrl != null &&
+      oldAvatarUrl.startsWith('/uploads/avatars/') &&
+      oldAvatarUrl !== avatarUrl
+    ) {
+      void deleteUploadFileByUrl(oldAvatarUrl)
     }
 
     // Обновяване на avatarUrl в активните стаи, където профилът участва
@@ -3160,10 +3171,17 @@ wsServer.on('connection', (socket, request) => {
       if (message.type === 'create_room') {
         removeConnectionFromMatchmaking(connection.id)
 
+        const createRoomConnection = getConnectionById(serverState, connection.id)
+        const createRoomPublicProfile =
+          createRoomConnection?.profileId != null
+            ? playerProgressStore.getPublicProfile(createRoomConnection.profileId)
+            : null
+
         const result = handleCreateRoom(
           serverState,
           connection.id,
           message.displayName,
+          createRoomPublicProfile,
         )
 
         const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
@@ -3187,11 +3205,18 @@ wsServer.on('connection', (socket, request) => {
       if (message.type === 'join_room') {
         removeConnectionFromMatchmaking(connection.id)
 
+        const joinRoomConnection = getConnectionById(serverState, connection.id)
+        const joinRoomPublicProfile =
+          joinRoomConnection?.profileId != null
+            ? playerProgressStore.getPublicProfile(joinRoomConnection.profileId)
+            : null
+
         const result = handleJoinRoom(
           serverState,
           connection.id,
           message.roomId,
           message.displayName,
+          joinRoomPublicProfile,
         )
 
         const initializedRoom = initializeRoomAuthoritativeGameState(result.room)

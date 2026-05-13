@@ -7,6 +7,7 @@ import { updateServerConnectionInState } from './updateServerConnectionInState.j
 import { updateServerRoomInState } from './updateServerRoomInState.js'
 import type {
   ConnectionId,
+  PlayerPublicProfileSnapshot,
   RoomId,
   Seat,
   ServerConnection,
@@ -26,6 +27,7 @@ export function handleJoinRoom(
   connectionId: ConnectionId,
   roomId: RoomId,
   displayName?: string,
+  publicProfile?: PlayerPublicProfileSnapshot | null,
 ): HandleJoinRoomResult {
   const connection = getConnectionById(serverState, connectionId)
 
@@ -48,7 +50,17 @@ export function handleJoinRoom(
   const joinResult = addHumanToRoom(room, {
     playerId: connection.playerId ?? undefined,
     connectionId,
-    identity: createDisplayNameIdentityPatch(displayName),
+    identity: {
+      ...createDisplayNameIdentityPatch(displayName),
+      ...(publicProfile != null ? {
+        profileId: publicProfile.profileId ?? null,
+        avatarUrl: publicProfile.avatarUrl ?? null,
+        level: publicProfile.level ?? null,
+        rankTitle: publicProfile.rankTitle ?? null,
+        skillRating: publicProfile.skillRating ?? null,
+      } : {}),
+    },
+    publicProfile: publicProfile ?? null,
   })
 
   let nextServerState = updateServerRoomInState(

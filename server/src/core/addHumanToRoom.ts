@@ -7,6 +7,7 @@ import type {
   HumanRoomParticipant,
   PlayerId,
   PlayerIdentitySnapshot,
+  PlayerPublicProfileSnapshot,
   Seat,
   ServerRoom,
 } from './serverTypes.js'
@@ -16,6 +17,7 @@ type AddHumanToRoomOptions = {
   connectionId?: ConnectionId | null
   reconnectToken?: string | null
   identity?: Partial<PlayerIdentitySnapshot>
+  publicProfile?: PlayerPublicProfileSnapshot | null
 }
 
 export type AddHumanToRoomResult = {
@@ -43,6 +45,7 @@ export function addHumanToRoom(
     connectionId: options.connectionId ?? null,
     reconnectToken: options.reconnectToken ?? null,
     identity: options.identity,
+    publicProfile: options.publicProfile ?? null,
   })
 
   const nextRoom = seatParticipantInRoom(room, seat, participant)

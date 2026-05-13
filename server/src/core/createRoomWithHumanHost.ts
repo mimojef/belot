@@ -6,6 +6,7 @@ import type {
   HumanRoomParticipant,
   PlayerId,
   PlayerIdentitySnapshot,
+  PlayerPublicProfileSnapshot,
   RoomId,
   Seat,
   ServerRoom,
@@ -18,6 +19,7 @@ type CreateRoomWithHumanHostOptions = {
   connectionId?: ConnectionId | null
   reconnectToken?: string | null
   identity?: Partial<PlayerIdentitySnapshot>
+  publicProfile?: PlayerPublicProfileSnapshot | null
   config?: Partial<ServerRoomConfig>
 }
 
@@ -40,6 +42,7 @@ export function createRoomWithHumanHost(
     connectionId: options.connectionId ?? null,
     reconnectToken: options.reconnectToken ?? null,
     identity: options.identity,
+    publicProfile: options.publicProfile ?? null,
   })
 
   const nextRoom = updateRoomHostPlayerId(addHumanResult.room)

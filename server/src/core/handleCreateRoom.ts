@@ -6,6 +6,7 @@ import { updateServerConnectionInState } from './updateServerConnectionInState.j
 import { upsertServerRoom } from './upsertServerRoom.js'
 import type {
   ConnectionId,
+  PlayerPublicProfileSnapshot,
   Seat,
   ServerConnection,
   ServerRoom,
@@ -23,6 +24,7 @@ export function handleCreateRoom(
   serverState: ServerState,
   connectionId: ConnectionId,
   displayName?: string,
+  publicProfile?: PlayerPublicProfileSnapshot | null,
 ): HandleCreateRoomResult {
   const connection = getConnectionById(serverState, connectionId)
 
@@ -39,7 +41,17 @@ export function handleCreateRoom(
   const roomResult = createRoomWithHumanHost({
     playerId: connection.playerId ?? undefined,
     connectionId,
-    identity: createDisplayNameIdentityPatch(displayName),
+    identity: {
+      ...createDisplayNameIdentityPatch(displayName),
+      ...(publicProfile != null ? {
+        profileId: publicProfile.profileId ?? null,
+        avatarUrl: publicProfile.avatarUrl ?? null,
+        level: publicProfile.level ?? null,
+        rankTitle: publicProfile.rankTitle ?? null,
+        skillRating: publicProfile.skillRating ?? null,
+      } : {}),
+    },
+    publicProfile: publicProfile ?? null,
   })
 
   let nextServerState = upsertServerRoom(serverState, roomResult.room)
