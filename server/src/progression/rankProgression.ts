@@ -49,6 +49,18 @@ export function getRankLevelForCompletedGames(completedGamesCount: number): numb
   return rankLevel
 }
 
+const ELO_K = 32
+
+export function computeEloChange(
+  myRating: number,
+  opponentRating: number,
+  didWin: boolean,
+): number {
+  const expected = 1 / (1 + Math.pow(10, (opponentRating - myRating) / 400))
+  const score = didWin ? 1 : 0
+  return Math.round(ELO_K * (score - expected))
+}
+
 const RANK_TIERS: [number, string][] = [
   [50, 'Легенда'],
   [40, 'Гросмайстор'],

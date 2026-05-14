@@ -34,6 +34,7 @@ export type PlayerPublicProfileSnapshot = {
   totalRatingsCount: number | null
   yellowCoinsBalance: number | null
   galleryImages: PlayerGalleryImageSnapshot[]
+  isOnline?: boolean
 }
 
 export type FriendshipStatus = 'pending' | 'accepted' | 'blocked'

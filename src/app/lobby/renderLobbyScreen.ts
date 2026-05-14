@@ -1437,7 +1437,10 @@ function renderPlayersDirectory(state: LobbyScreenState): string {
                   </div>
                   <div style="min-width:0;">
                     <div style="font-size:15px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
-                    <div style="margin-top:4px;font-size:12px;font-weight:800;color:#d4a520;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(player.rankTitle ?? 'Ранг 1')}</div>
+                    <div style="margin-top:3px;display:flex;align-items:center;gap:6px;min-width:0;">
+                      <div style="font-size:12px;font-weight:800;color:#d4a520;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(player.rankTitle ?? 'Ранг 1')}</div>
+                      ${player.isOnline !== undefined ? `<div style="font-size:11px;font-weight:800;color:${player.isOnline ? '#4ade80' : '#f87171'};white-space:nowrap;flex-shrink:0;">${player.isOnline ? 'Онлайн' : 'Офлайн'}</div>` : ''}
+                    </div>
                   </div>
                 </div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">

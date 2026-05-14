@@ -12,7 +12,7 @@ import {
   SERVER_TEAM_A_SEATS,
 } from '../core/serverTypes.js'
 import { normalizeProfileDisplayName } from './normalizeProfileIdentityText.js'
-import { createRankProgressSnapshot, getRankTitleForLevel } from '../progression/rankProgression.js'
+import { createRankProgressSnapshot, getRankTitleForLevel, computeEloChange } from '../progression/rankProgression.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -29,7 +29,7 @@ export type PlayerProgressStore = {
     stableKey: string,
   ) => PlayerPublicProfileSnapshot
   getPublicProfile: (profileId: ProfileId) => PlayerPublicProfileSnapshot | null
-  listPublicHumanProfiles: () => PlayerPublicProfileSnapshot[]
+  listPublicHumanProfiles: (onlineProfileIds?: Set<string>) => PlayerPublicProfileSnapshot[]
   listLeaderboards: () => LeaderboardsSnapshot
   changeProfileDisplayName: (
     profileId: ProfileId,
@@ -552,6 +552,14 @@ export async function createPlayerProgressStore(
     WHERE profile_id = ?;
   `)
 
+  const selectSkillRatingStatement = database.prepare(`
+    SELECT skill_rating FROM profiles WHERE profile_id = ? LIMIT 1;
+  `)
+
+  const updateSkillRatingStatement = database.prepare(`
+    UPDATE profiles SET skill_rating = ?, updated_at = CURRENT_TIMESTAMP WHERE profile_id = ?;
+  `)
+
   const insertPartnerRatingStatement = database.prepare(`
     INSERT INTO profile_partner_ratings (
       rating_id,
@@ -639,7 +647,7 @@ export async function createPlayerProgressStore(
     return toPublicProfileSnapshot(row, galleryImages)
   }
 
-  function listPublicHumanProfiles(): PlayerPublicProfileSnapshot[] {
+  function listPublicHumanProfiles(onlineProfileIds?: Set<string>): PlayerPublicProfileSnapshot[] {
     const rows = listPublicHumanProfilesStatement.all() as Array<
       Parameters<typeof toPublicProfileSnapshot>[0]
     >
@@ -649,7 +657,11 @@ export async function createPlayerProgressStore(
         row.profile_id,
       ) as ProfileGalleryImageRow[]
 
-      return toPublicProfileSnapshot(row, galleryImages)
+      const snapshot = toPublicProfileSnapshot(row, galleryImages)
+      if (onlineProfileIds !== undefined) {
+        snapshot.isOnline = onlineProfileIds.has(row.profile_id)
+      }
+      return snapshot
     })
   }
 
@@ -982,12 +994,32 @@ export async function createPlayerProgressStore(
     updateProfileRankStatement.run(rankLevel, `Ранг ${rankLevel}`, profileId)
   }
 
+  function getParticipantSkillRating(participant: ServerRoom['seats'][Seat]['participant']): number {
+    if (participant === null) return 1000
+    if (participant.kind === 'bot') return participant.identity.skillRating ?? 1000
+    const profileId = getParticipantProfileId(participant)
+    if (profileId === null) return 1000
+    const row = selectSkillRatingStatement.get(profileId) as { skill_rating: number } | undefined
+    return row?.skill_rating ?? 1000
+  }
+
   function recordCompletedMatch(room: ServerRoom): void {
     const matchEnded = getRuntimeMatchEnded(room)
 
     if (matchEnded === null) {
       return
     }
+
+    // Collect ratings per team for ELO calculation
+    const teamRatings: Record<'A' | 'B', number[]> = { A: [], B: [] }
+    for (const seat of SERVER_SEAT_ORDER) {
+      const participant = room.seats[seat].participant
+      if (participant === null) continue
+      const team = getTeamBySeat(seat)
+      teamRatings[team].push(getParticipantSkillRating(participant))
+    }
+    const avgA = teamRatings.A.length > 0 ? teamRatings.A.reduce((s, r) => s + r, 0) / teamRatings.A.length : 1000
+    const avgB = teamRatings.B.length > 0 ? teamRatings.B.reduce((s, r) => s + r, 0) / teamRatings.B.length : 1000
 
     for (const seat of SERVER_SEAT_ORDER) {
       const participant = room.seats[seat].participant
@@ -1013,6 +1045,13 @@ export async function createPlayerProgressStore(
 
       if ((result.changes ?? 0) > 0) {
         incrementCompletedGame(profileId, didWin)
+
+        // Update ELO skill rating: individual vs opponent team average
+        const opponentAvg = team === 'A' ? avgB : avgA
+        const currentRating = getParticipantSkillRating(participant)
+        const change = computeEloChange(currentRating, opponentAvg, didWin)
+        const newRating = Math.max(100, currentRating + change)
+        updateSkillRatingStatement.run(newRating, profileId)
       }
     }
   }

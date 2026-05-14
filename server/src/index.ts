@@ -1621,9 +1621,16 @@ async function handlePlayersRequest(
     return false
   }
 
+  const onlineProfileIds = new Set<string>()
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.profileId && socketRegistry.get(conn.id)?.readyState === WebSocket.OPEN) {
+      onlineProfileIds.add(conn.profileId)
+    }
+  }
+
   sendJsonResponse(res, 200, {
     ok: true,
-    players: playerProgressStore.listPublicHumanProfiles(),
+    players: playerProgressStore.listPublicHumanProfiles(onlineProfileIds),
   })
   return true
 }
