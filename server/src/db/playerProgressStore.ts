@@ -12,7 +12,7 @@ import {
   SERVER_TEAM_A_SEATS,
 } from '../core/serverTypes.js'
 import { normalizeProfileDisplayName } from './normalizeProfileIdentityText.js'
-import { createRankProgressSnapshot } from '../progression/rankProgression.js'
+import { createRankProgressSnapshot, getRankTitleForLevel } from '../progression/rankProgression.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -123,7 +123,7 @@ function toPublicProfileSnapshot(row: {
     displayName: row.display_name,
     avatarUrl: row.avatar_url,
     level: rankProgress.rankLevel || row.level,
-    rankTitle: row.rank_title ?? `Ранг ${rankProgress.rankLevel}`,
+    rankTitle: getRankTitleForLevel(rankProgress.rankLevel),
     skillRating: row.skill_rating,
     completedGamesCount: rankProgress.completedGamesCount,
     wonGamesCount: row.won_games_count ?? 0,

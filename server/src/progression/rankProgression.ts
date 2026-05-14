@@ -49,6 +49,23 @@ export function getRankLevelForCompletedGames(completedGamesCount: number): numb
   return rankLevel
 }
 
+const RANK_TIERS: [number, string][] = [
+  [50, 'Легенда'],
+  [40, 'Гросмайстор'],
+  [30, 'Майстор'],
+  [20, 'Напреднал'],
+  [10, 'Любител'],
+  [5,  'Новак'],
+  [1,  'Начинаещ'],
+]
+
+export function getRankTitleForLevel(rankLevel: number): string {
+  for (const [minLevel, title] of RANK_TIERS) {
+    if (rankLevel >= minLevel) return title
+  }
+  return 'Начинаещ'
+}
+
 export function createRankProgressSnapshot(
   completedGamesCount: number,
 ): RankProgressSnapshot {
