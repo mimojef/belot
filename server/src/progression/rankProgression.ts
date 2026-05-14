@@ -7,36 +7,42 @@ export type RankProgressSnapshot = {
   progressRatio: number
 }
 
-const BASE_GAMES_PER_RANK = 5
-const RANK_GROWTH_POWER = 1.35
-
-function getGamesNeededFromRankToNext(rankLevel: number): number {
-  const safeRankLevel = Math.max(1, Math.trunc(rankLevel))
-
-  return Math.max(
-    BASE_GAMES_PER_RANK,
-    Math.ceil(BASE_GAMES_PER_RANK * safeRankLevel ** RANK_GROWTH_POWER),
-  )
-}
+// [rankLevel, totalGamesRequired] — интерполира се линейно между котвите
+const RANK_ANCHORS: [number, number][] = [
+  [1,   0],
+  [5,   15],
+  [10,  40],
+  [20,  150],
+  [30,  400],
+  [40,  900],
+  [50,  1800],
+]
 
 export function getCompletedGamesRequiredForRank(rankLevel: number): number {
-  const safeRankLevel = Math.max(1, Math.trunc(rankLevel))
-  let total = 0
+  const safeRank = Math.max(1, Math.trunc(rankLevel))
 
-  for (let rank = 1; rank < safeRankLevel; rank += 1) {
-    total += getGamesNeededFromRankToNext(rank)
+  for (let i = 0; i < RANK_ANCHORS.length - 1; i++) {
+    const [r1, g1] = RANK_ANCHORS[i]!
+    const [r2, g2] = RANK_ANCHORS[i + 1]!
+
+    if (safeRank >= r1 && safeRank <= r2) {
+      const t = (safeRank - r1) / (r2 - r1)
+      return Math.round(g1 + t * (g2 - g1))
+    }
   }
 
-  return total
+  // След последната котва — линейна екстраполация
+  const [r1, g1] = RANK_ANCHORS[RANK_ANCHORS.length - 2]!
+  const [r2, g2] = RANK_ANCHORS[RANK_ANCHORS.length - 1]!
+  const step = (g2 - g1) / (r2 - r1)
+  return Math.round(g2 + (safeRank - r2) * step)
 }
 
 export function getRankLevelForCompletedGames(completedGamesCount: number): number {
-  const safeCompletedGamesCount = Math.max(0, Math.trunc(completedGamesCount))
+  const safeCount = Math.max(0, Math.trunc(completedGamesCount))
   let rankLevel = 1
 
-  while (
-    safeCompletedGamesCount >= getCompletedGamesRequiredForRank(rankLevel + 1)
-  ) {
+  while (safeCount >= getCompletedGamesRequiredForRank(rankLevel + 1)) {
     rankLevel += 1
   }
 
@@ -46,20 +52,19 @@ export function getRankLevelForCompletedGames(completedGamesCount: number): numb
 export function createRankProgressSnapshot(
   completedGamesCount: number,
 ): RankProgressSnapshot {
-  const safeCompletedGamesCount = Math.max(0, Math.trunc(completedGamesCount))
-  const rankLevel = getRankLevelForCompletedGames(safeCompletedGamesCount)
+  const safeCount = Math.max(0, Math.trunc(completedGamesCount))
+  const rankLevel = getRankLevelForCompletedGames(safeCount)
   const currentRankGames = getCompletedGamesRequiredForRank(rankLevel)
   const nextRankGames = getCompletedGamesRequiredForRank(rankLevel + 1)
   const rankSpan = Math.max(1, nextRankGames - currentRankGames)
-  const gamesIntoRank = Math.max(0, safeCompletedGamesCount - currentRankGames)
+  const gamesIntoRank = Math.max(0, safeCount - currentRankGames)
 
   return {
     rankLevel,
-    completedGamesCount: safeCompletedGamesCount,
+    completedGamesCount: safeCount,
     currentRankGames,
     nextRankGames,
-    gamesUntilNextRank: Math.max(0, nextRankGames - safeCompletedGamesCount),
+    gamesUntilNextRank: Math.max(0, nextRankGames - safeCount),
     progressRatio: Math.min(1, gamesIntoRank / rankSpan),
   }
 }
-
