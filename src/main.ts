@@ -980,8 +980,8 @@ function validateImageFile(file: File): string | null {
     return 'Позволени са само jpg, png и webp снимки.'
   }
 
-  if (file.size > 5_000_000) {
-    return 'Снимката трябва да е до 5 MB.'
+  if (file.size > 10_000_000) {
+    return 'Снимката трябва да е до 10 МБ.'
   }
 
   return null

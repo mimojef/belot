@@ -96,6 +96,7 @@ export type RenderLobbyScreenOptions = {
     avatarCrop: AvatarCropSelection | null,
     galleryFiles: File[],
   ) => void
+  onProfileEditorFileError: (message: string) => void
   onProfileGalleryDelete: (imageId: string) => void
   onProfileNameChangeSubmit: (displayName: string) => void
   onLobbyClick: () => void
@@ -155,6 +156,106 @@ const COIN_PACKAGES = [
 ]
 
 const MAX_PROFILE_GALLERY_IMAGES = 6
+
+let popupRootEl: HTMLElement | null = null
+
+export type ProfilePopupCallbacks = {
+  onClose: () => void
+  onEditClick: () => void
+  onFriendRequestClick: (profileId: string) => void
+  onFriendBlockClick: (profileId: string) => void
+  onFriendAcceptClick: (friendshipId: string) => void
+  onFriendRejectClick: (friendshipId: string) => void
+  onFriendRemoveClick: (friendshipId: string) => void
+  onGiftCoinsClick: (friendshipId: string) => void
+}
+
+function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks): void {
+  el.querySelector<HTMLButtonElement>('[data-player-profile-popup-close="1"]')
+    ?.addEventListener('click', cb.onClose)
+  el.querySelector<HTMLElement>('[data-player-profile-popup-backdrop="1"]')
+    ?.addEventListener('click', cb.onClose)
+  el.querySelector<HTMLButtonElement>('[data-player-profile-edit="1"]')
+    ?.addEventListener('click', cb.onEditClick)
+  el.querySelector<HTMLButtonElement>('[data-player-profile-friend-request]')
+    ?.addEventListener('click', (e) => {
+      const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileFriendRequest?.trim() ?? ''
+      if (profileId) cb.onFriendRequestClick(profileId)
+    })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-block]')
+    ?.addEventListener('click', (e) => {
+      const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileBlock?.trim() ?? ''
+      if (profileId) cb.onFriendBlockClick(profileId)
+    })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-gift-coins]')
+    ?.addEventListener('click', (e) => {
+      const friendshipId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileGiftCoins?.trim() ?? ''
+      if (friendshipId) cb.onGiftCoinsClick(friendshipId)
+    })
+  el.querySelectorAll<HTMLButtonElement>('[data-player-profile-friend-accept]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.playerProfileFriendAccept?.trim() ?? ''
+      if (id) cb.onFriendAcceptClick(id)
+    })
+  })
+  el.querySelectorAll<HTMLButtonElement>('[data-player-profile-friend-reject]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.playerProfileFriendReject?.trim() ?? ''
+      if (id) cb.onFriendRejectClick(id)
+    })
+  })
+  el.querySelectorAll<HTMLButtonElement>('[data-player-profile-friend-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.playerProfileFriendRemove?.trim() ?? ''
+      if (id) cb.onFriendRemoveClick(id)
+    })
+  })
+  el.querySelectorAll<HTMLElement>('[data-gallery-image-url]').forEach((imgEl) => {
+    imgEl.addEventListener('click', () => {
+      const url = imgEl.getAttribute('data-gallery-image-url') ?? ''
+      if (!url) return
+      const overlay = document.createElement('div')
+      overlay.style.cssText = 'position:fixed;inset:0;z-index:20000;background:rgba(0,0,0,0.92);display:flex;align-items:center;justify-content:center;cursor:zoom-out;'
+      const img = document.createElement('img')
+      img.src = url
+      img.alt = 'Снимка'
+      img.style.cssText = 'max-width:90vw;max-height:90vh;object-fit:contain;border-radius:12px;box-shadow:0 8px 40px rgba(0,0,0,0.7);'
+      overlay.appendChild(img)
+      overlay.addEventListener('click', () => overlay.remove())
+      document.body.appendChild(overlay)
+    })
+  })
+}
+
+export function syncProfilePopup(
+  popupState: {
+    isOpen: boolean
+    profile: PlayerPublicProfileSnapshot | null
+    canEdit: boolean
+    friendshipAction: PlayerProfileFriendshipAction | null
+  },
+  cb: ProfilePopupCallbacks,
+): void {
+  if (!popupState.isOpen) {
+    popupRootEl?.remove()
+    popupRootEl = null
+    return
+  }
+  const isFirstOpen = !popupRootEl
+  if (isFirstOpen) {
+    popupRootEl = document.createElement('div')
+    document.body.appendChild(popupRootEl)
+  }
+  popupRootEl.innerHTML = renderPlayerProfilePopup({
+    isOpen: true,
+    seat: 'bottom',
+    profile: popupState.profile,
+    canEdit: popupState.canEdit,
+    friendshipAction: popupState.friendshipAction,
+    skipAnimation: !isFirstOpen,
+  })
+  attachPopupListeners(popupRootEl, cb)
+}
 
 function escapeHtml(value: string): string {
   return String(value)
@@ -1869,13 +1970,6 @@ export function renderLobbyScreen(
         </div>
       ` : ''}
 
-      ${renderPlayerProfilePopup({
-        isOpen: state.profilePopupOpen,
-        seat: 'bottom',
-        profile: state.profilePopupProfile ?? state.profile,
-        canEdit: state.profilePopupCanEdit,
-        friendshipAction: state.friendshipAction,
-      })}
       ${renderProfileEditModal(state)}
       ${renderGiftCoinsModal(state)}
       ${renderAuthModal(state)}
@@ -2126,50 +2220,25 @@ export function renderLobbyScreen(
     })
   })
 
-  root
-    .querySelector<HTMLButtonElement>('[data-player-profile-popup-close="1"]')
-    ?.addEventListener('click', options.onProfileClose)
-
-  root
-    .querySelector<HTMLElement>('[data-player-profile-popup-backdrop="1"]')
-    ?.addEventListener('click', options.onProfileClose)
-
-  root
-    .querySelector<HTMLButtonElement>('[data-player-profile-edit="1"]')
-    ?.addEventListener('click', options.onProfileEditClick)
-
-  root
-    .querySelector<HTMLButtonElement>('[data-player-profile-friend-request]')
-    ?.addEventListener('click', (event) => {
-      const button = event.currentTarget as HTMLButtonElement
-      const profileId = button.dataset.playerProfileFriendRequest?.trim() ?? ''
-
-      if (profileId.length > 0) {
-        options.onFriendRequestClick(profileId)
-      }
-    })
-
-  root
-    .querySelector<HTMLButtonElement>('[data-player-profile-block]')
-    ?.addEventListener('click', (event) => {
-      const button = event.currentTarget as HTMLButtonElement
-      const profileId = button.dataset.playerProfileBlock?.trim() ?? ''
-
-      if (profileId.length > 0) {
-        options.onFriendBlockClick(profileId)
-      }
-    })
-
-  root
-    .querySelector<HTMLButtonElement>('[data-player-profile-gift-coins]')
-    ?.addEventListener('click', (event) => {
-      const button = event.currentTarget as HTMLButtonElement
-      const friendshipId = button.dataset.playerProfileGiftCoins?.trim() ?? ''
-
-      if (friendshipId.length > 0) {
-        options.onGiftCoinsClick(friendshipId)
-      }
-    })
+  // Управление на профил попъпа директно на document.body (без участие в root.innerHTML)
+  syncProfilePopup(
+    {
+      isOpen: state.profilePopupOpen,
+      profile: state.profilePopupProfile ?? state.profile,
+      canEdit: state.profilePopupCanEdit,
+      friendshipAction: state.friendshipAction,
+    },
+    {
+      onClose: options.onProfileClose,
+      onEditClick: options.onProfileEditClick,
+      onFriendRequestClick: options.onFriendRequestClick,
+      onFriendBlockClick: options.onFriendBlockClick,
+      onFriendAcceptClick: options.onFriendAcceptClick,
+      onFriendRejectClick: options.onFriendRejectClick,
+      onFriendRemoveClick: options.onFriendRemoveClick,
+      onGiftCoinsClick: options.onGiftCoinsClick,
+    },
+  )
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-gift-modal-close="1"]')
@@ -2362,6 +2431,11 @@ export function renderLobbyScreen(
     const file = avatarInput.files?.[0] ?? null
     currentCrop = null
     if (!file) return
+    if (file.size > 10_000_000) {
+      avatarInput.value = ''
+      options.onProfileEditorFileError('Снимката трябва да е до 10 МБ.')
+      return
+    }
     openCropOverlay(file)
   })
 
@@ -2531,6 +2605,10 @@ export function renderLobbyScreen(
     const file = galleryFileInput?.files?.[0] ?? null
     if (!file) return
     if (galleryFileInput) galleryFileInput.value = ''
+    if (file.size > 10_000_000) {
+      options.onProfileEditorFileError('Снимката трябва да е до 10 МБ.')
+      return
+    }
     openGalleryCropOverlay(file)
   })
 

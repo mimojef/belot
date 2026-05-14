@@ -5,9 +5,11 @@ import {
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
   renderLobbyScreen,
+  syncProfilePopup,
   type AvatarCropSelection,
   type LobbyAuthModalMode,
   type LobbyScreenState,
+  type ProfilePopupCallbacks,
 } from './renderLobbyScreen'
 import type {
   AdminSettingsSnapshot,
@@ -1137,7 +1139,7 @@ export function createLobbyFlowController(
         state.profilePopupOpen = false
         state.profilePopupProfile = null
         state.profilePopupCanEdit = true
-        render()
+        renderPopupOnly()
       },
       onProfileEditClick: () => {
         state.profileEditorOpen = true
@@ -1148,6 +1150,10 @@ export function createLobbyFlowController(
       onProfileEditClose: () => {
         state.profileEditorOpen = false
         state.profileEditorErrorText = null
+        render()
+      },
+      onProfileEditorFileError: (message) => {
+        state.profileEditorErrorText = message
         render()
       },
       onProfileEditSubmit: (avatarFile, avatarCrop, galleryFiles) => {
@@ -1207,21 +1213,21 @@ export function createLobbyFlowController(
         state.profilePopupProfile = profile
         state.profilePopupCanEdit = false
         state.profilePopupOpen = true
-        render()
+        renderPopupOnly()
         void ensureFriendshipsLoaded()
       },
       onLeaderboardPlayerClick: (profile) => {
         state.profilePopupProfile = profile
         state.profilePopupCanEdit = false
         state.profilePopupOpen = true
-        render()
+        renderPopupOnly()
         void ensureFriendshipsLoaded()
       },
       onFriendProfileClick: (profile) => {
         state.profilePopupProfile = profile
         state.profilePopupCanEdit = false
         state.profilePopupOpen = true
-        render()
+        renderPopupOnly()
       },
       onFriendRequestClick: (profileId) => {
         void submitFriendRequest(profileId)
@@ -1695,6 +1701,10 @@ export function createLobbyFlowController(
   }
 
   async function ensureFriendshipsLoaded(): Promise<void> {
+    if (state.friendships !== null) {
+      return
+    }
+
     const authSession = options.getAuthSession?.() ?? null
 
     if (authSession === null || !options.onFriendshipsLoad) {
@@ -1705,13 +1715,21 @@ export function createLobbyFlowController(
 
     if (!result.ok) {
       state.friendsErrorText = result.message
-      render()
+      if (state.profilePopupOpen) {
+        renderPopupOnly()
+      } else {
+        render()
+      }
       return
     }
 
     state.friendships = result.friendships
     state.friendsErrorText = null
-    render()
+    if (state.profilePopupOpen) {
+      renderPopupOnly()
+    } else {
+      render()
+    }
   }
 
   async function showFriendsDirectory(): Promise<void> {
@@ -2271,6 +2289,61 @@ export function createLobbyFlowController(
     }
 
     renderLobby()
+  }
+
+  function buildPopupFriendshipAction() {
+    const authSession = options.getAuthSession?.() ?? null
+    const friendshipAction = createProfileFriendshipAction(authSession)
+    if (friendshipAction !== null && authSession !== null) {
+      if (!friendshipAction.disabled || friendshipAction.label !== 'Недостъпно') {
+        friendshipAction.canBlock = true
+      }
+    }
+    const acceptedRelationship =
+      state.profilePopupProfile?.profileId
+        ? findRelationshipByProfileId(state.friendships, state.profilePopupProfile.profileId)
+        : null
+    if (friendshipAction !== null && acceptedRelationship?.status === 'accepted') {
+      friendshipAction.giftFriendshipId = acceptedRelationship.friendshipId
+    }
+    return friendshipAction
+  }
+
+  function getPopupCallbacks(): ProfilePopupCallbacks {
+    return {
+      onClose: () => {
+        state.profilePopupOpen = false
+        state.profilePopupProfile = null
+        state.profilePopupCanEdit = true
+        syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+      },
+      onEditClick: () => {
+        state.profileEditorOpen = true
+        state.profileEditorErrorText = null
+        state.profilePopupOpen = false
+        syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+        render()
+      },
+      onFriendRequestClick: (profileId) => { void submitFriendRequest(profileId) },
+      onFriendBlockClick: (profileId) => { void blockFriendProfile(profileId) },
+      onFriendAcceptClick: (friendshipId) => { void acceptFriendRequest(friendshipId) },
+      onFriendRejectClick: (friendshipId) => { void rejectFriendRequest(friendshipId) },
+      onFriendRemoveClick: (friendshipId) => { void removeFriendRelationship(friendshipId) },
+      onGiftCoinsClick: (friendshipId) => { openGiftModal(friendshipId) },
+    }
+  }
+
+  function renderPopupOnly(): void {
+    const authSession = options.getAuthSession?.() ?? null
+    syncProfilePopup(
+      {
+        isOpen: state.profilePopupOpen,
+        profile: state.profilePopupProfile ?? createLocalProfilePreview(state, authSession),
+        canEdit: state.profilePopupCanEdit,
+        friendshipAction: buildPopupFriendshipAction(),
+      },
+      getPopupCallbacks(),
+    )
   }
 
   function resetToLobby(): void {

@@ -10,6 +10,7 @@ export type RenderPlayerProfilePopupOptions = {
   isLoading?: boolean
   canEdit?: boolean
   friendshipAction?: PlayerProfileFriendshipAction | null
+  skipAnimation?: boolean
 }
 
 export type PlayerProfileFriendshipAction = {
@@ -237,6 +238,7 @@ function renderGallery(profile: PlayerPublicProfileSnapshot | null): string {
 
           return `
             <div
+              data-gallery-image-url="${escapeHtml(safeUrl)}"
               style="
                 position:relative;
                 border-radius:16px;
@@ -244,6 +246,7 @@ function renderGallery(profile: PlayerPublicProfileSnapshot | null): string {
                 aspect-ratio:1/1;
                 background:rgba(255,255,255,0.06);
                 border:1px solid rgba(255,255,255,0.08);
+                cursor:pointer;
               "
             >
               <img
@@ -751,6 +754,11 @@ export function renderPlayerProfilePopup(
         }
       }
 
+      @keyframes belot-player-profile-backdrop-in {
+        0% { opacity:0; }
+        100% { opacity:1; }
+      }
+
       @keyframes belot-player-profile-spin {
         100% {
           transform:rotate(360deg);
@@ -774,6 +782,7 @@ export function renderPlayerProfilePopup(
           inset:0;
           background:rgba(0, 0, 0, 0.72);
           backdrop-filter:blur(4px);
+          animation:${options.skipAnimation ? 'none' : 'belot-player-profile-backdrop-in 140ms ease both'};
         "
       ></div>
 
@@ -803,7 +812,7 @@ export function renderPlayerProfilePopup(
             border:2px solid rgba(212,165,32,0.72);
             box-shadow:0 34px 80px rgba(0,0,0,0.42);
             padding:24px 24px 22px;
-            animation:belot-player-profile-fade-in 160ms ease forwards;
+            animation:${options.skipAnimation ? 'none' : 'belot-player-profile-fade-in 160ms ease both'};
           "
         >
           <div
