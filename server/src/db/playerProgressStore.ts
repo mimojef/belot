@@ -1040,7 +1040,7 @@ export async function createPlayerProgressStore(
       rankLevel,
       profileId,
     )
-    updateProfileRankStatement.run(rankLevel, `Ранг ${rankLevel}`, profileId)
+    updateProfileRankStatement.run(rankLevel, getRankTitleForLevel(rankLevel), profileId)
   }
 
   function getParticipantSkillRating(participant: ServerRoom['seats'][Seat]['participant']): number {
@@ -1073,11 +1073,14 @@ export async function createPlayerProgressStore(
     for (const seat of SERVER_SEAT_ORDER) {
       const participant = room.seats[seat].participant
 
-      if (participant?.kind !== 'human') {
+      if (participant === null) {
         continue
       }
 
-      const profileId = getParticipantProfileId(participant)
+      const profileId =
+        participant.kind === 'human'
+          ? getParticipantProfileId(participant)
+          : (participant.botProfileId ?? null)
 
       if (profileId === null) {
         continue
@@ -1095,12 +1098,14 @@ export async function createPlayerProgressStore(
       if ((result.changes ?? 0) > 0) {
         incrementCompletedGame(profileId, didWin)
 
-        // Update ELO skill rating: individual vs opponent team average
-        const opponentAvg = team === 'A' ? avgB : avgA
-        const currentRating = getParticipantSkillRating(participant)
-        const change = computeEloChange(currentRating, opponentAvg, didWin)
-        const newRating = Math.max(100, currentRating + change)
-        updateSkillRatingStatement.run(newRating, profileId)
+        if (participant.kind === 'human') {
+          // Update ELO skill rating: individual vs opponent team average
+          const opponentAvg = team === 'A' ? avgB : avgA
+          const currentRating = getParticipantSkillRating(participant)
+          const change = computeEloChange(currentRating, opponentAvg, didWin)
+          const newRating = Math.max(100, currentRating + change)
+          updateSkillRatingStatement.run(newRating, profileId)
+        }
       }
     }
   }
