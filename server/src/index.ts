@@ -1658,9 +1658,28 @@ async function handlePlayersRequest(
     }
   }
 
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+  const currentProfileId = session?.profile.profileId ?? null
+
+  const all = playerProgressStore.listPublicHumanProfiles(onlineProfileIds)
+
+  const me = currentProfileId ? all.filter((p) => p.profileId === currentProfileId) : []
+  const humans = all.filter((p) => !p.isBot && p.profileId !== currentProfileId)
+  const bots = all.filter((p) => p.isBot === true)
+
+  // Fisher-Yates shuffle
+  function shuffle<T>(arr: T[]): T[] {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[arr[i], arr[j]] = [arr[j], arr[i]]
+    }
+    return arr
+  }
+
   sendJsonResponse(res, 200, {
     ok: true,
-    players: playerProgressStore.listPublicHumanProfiles(onlineProfileIds),
+    players: [...me, ...shuffle(humans), ...shuffle(bots)],
   })
   return true
 }
