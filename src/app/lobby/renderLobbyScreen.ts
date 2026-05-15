@@ -1608,30 +1608,31 @@ function renderPlayersDirectory(state: LobbyScreenState): string {
             const fallbackLetter = escapeHtml(displayName.charAt(0).toUpperCase() || '?')
 
             return `
-              <button type="button" data-lobby-player-card="${escapeHtml(player.profileId ?? '')}" style="display:grid;gap:10px;text-align:left;border:1px solid rgba(212,165,32,0.32);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:12px;color:#ffffff;cursor:pointer;min-width:0;">
+              <button type="button" data-lobby-player-card="${escapeHtml(player.profileId ?? '')}" style="display:flex;flex-direction:column;gap:10px;text-align:left;border:1px solid rgba(212,165,32,0.32);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:12px;color:#ffffff;cursor:pointer;min-width:0;">
                 <div style="display:flex;align-items:center;gap:10px;min-width:0;">
-                  <div style="position:relative;width:54px;height:54px;flex:0 0 auto;">
-                    <div style="width:100%;height:100%;border-radius:8px;border:1px solid rgba(212,165,32,0.56);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:22px;font-weight:900;">
+                  <div style="position:relative;width:72px;height:72px;flex:0 0 auto;">
+                    <div style="width:100%;height:100%;border-radius:10px;border:1px solid rgba(212,165,32,0.56);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:28px;font-weight:900;">
                       ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : fallbackLetter}
                     </div>
                     ${renderLevelBadge(player.level, 'sm')}
                   </div>
-                  <div style="min-width:0;">
+                  <div style="min-width:0;flex:1;">
                     <div style="font-size:15px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
                     <div style="margin-top:3px;display:flex;align-items:center;gap:6px;min-width:0;">
                       <div style="font-size:12px;font-weight:800;color:#d4a520;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(player.rankTitle ?? 'Ранг 1')}</div>
                       ${player.isOnline !== undefined ? `<div style="font-size:11px;font-weight:800;color:${player.isOnline ? '#4ade80' : '#f87171'};white-space:nowrap;flex-shrink:0;">${player.isOnline ? 'Онлайн' : 'Офлайн'}</div>` : ''}
                     </div>
-                  </div>
-                </div>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-                  <div style="border-radius:8px;background:rgba(255,255,255,0.05);padding:8px;">
-                    <div style="font-size:10px;font-weight:900;text-transform:uppercase;color:rgba(255,255,255,0.44);">Оценка</div>
-                    <div style="margin-top:4px;font-size:15px;font-weight:900;color:#f8fafc;">${typeof player.averageRating === 'number' ? player.averageRating.toFixed(2) : '-'}</div>
-                  </div>
-                  <div style="border-radius:8px;background:rgba(255,255,255,0.05);padding:8px;">
-                    <div style="font-size:10px;font-weight:900;text-transform:uppercase;color:rgba(255,255,255,0.44);">Игри</div>
-                    <div style="margin-top:4px;font-size:15px;font-weight:900;color:#f8fafc;">${formatAmount(player.completedGamesCount ?? 0)}</div>
+                    <div style="margin-top:8px;display:flex;align-items:center;gap:12px;">
+                      <div>
+                        <div style="font-size:10px;font-weight:900;text-transform:uppercase;color:rgba(255,255,255,0.44);">Оценка</div>
+                        <div style="font-size:14px;font-weight:900;color:#f8fafc;">${typeof player.averageRating === 'number' ? player.averageRating.toFixed(2) : '-'}</div>
+                      </div>
+                      <div style="width:1px;height:28px;background:rgba(255,255,255,0.10);"></div>
+                      <div>
+                        <div style="font-size:10px;font-weight:900;text-transform:uppercase;color:rgba(255,255,255,0.44);">Игри</div>
+                        <div style="font-size:14px;font-weight:900;color:#f8fafc;">${formatAmount(player.completedGamesCount ?? 0)}</div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </button>
