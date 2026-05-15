@@ -57,6 +57,11 @@ function getSeatInitial(displayName: string): string {
   return trimmedName.slice(0, 1).toUpperCase()
 }
 
+function renderLevelBadge(level: number | null | undefined): string {
+  if (typeof level !== 'number' || !Number.isFinite(level) || level < 1) return ''
+  return `<div style="position:absolute;right:0;bottom:0;min-width:18px;height:18px;border-radius:3px;background:#111111;border:1px solid rgba(255,255,255,0.22);color:#ffffff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;z-index:1;">${Math.trunc(level)}</div>`
+}
+
 function renderPlayerTile(seat: RoomSeatSnapshot): string {
   const displayName = seat.isOccupied ? seat.displayName : 'Свободно място'
 
@@ -76,33 +81,35 @@ function renderPlayerTile(seat: RoomSeatSnapshot): string {
         border:1px solid rgba(250,204,21,0.28);
       "
     >
-      <div
-        style="
-          width:116px;
-          height:116px;
-          flex:0 0 116px;
-          border-radius:8px;
-          overflow:hidden;
-          background:rgba(10,10,10,0.86);
-          border:1px solid rgba(250,204,21,0.22);
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          color:#facc15;
-          font-size:42px;
-          font-weight:900;
-        "
-      >
-        ${
-          seat.avatarUrl
-            ? `<img
-                src="${escapeHtml(seat.avatarUrl)}"
-                alt="${escapeHtml(displayName)}"
-                draggable="false"
-                style="width:100%;height:100%;object-fit:cover;display:block;"
-              />`
-            : escapeHtml(getSeatInitial(displayName))
-        }
+      <div style="position:relative;width:116px;height:116px;flex:0 0 116px;">
+        <div
+          style="
+            width:100%;
+            height:100%;
+            border-radius:8px;
+            overflow:hidden;
+            background:rgba(10,10,10,0.86);
+            border:1px solid rgba(250,204,21,0.22);
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            color:#facc15;
+            font-size:42px;
+            font-weight:900;
+          "
+        >
+          ${
+            seat.avatarUrl
+              ? `<img
+                  src="${escapeHtml(seat.avatarUrl)}"
+                  alt="${escapeHtml(displayName)}"
+                  draggable="false"
+                  style="width:100%;height:100%;object-fit:cover;display:block;"
+                />`
+              : escapeHtml(getSeatInitial(displayName))
+          }
+        </div>
+        ${renderLevelBadge(seat.level)}
       </div>
 
       <div style="min-width:0;width:100%;text-align:center;">

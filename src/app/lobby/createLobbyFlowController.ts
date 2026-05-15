@@ -68,6 +68,7 @@ export type CreateLobbyFlowControllerOptions = {
     avatarCrop: AvatarCropSelection | null,
     galleryFiles: File[],
   ) => Promise<string | null>
+  onPresetAvatarApply?: (avatarUrl: string) => Promise<string | null>
   onProfileGalleryDelete?: (imageId: string) => Promise<string | null>
   onProfileNameChangeSubmit?: (displayName: string) => Promise<string | null>
   onPlayersLoad?: () => Promise<
@@ -1174,6 +1175,9 @@ export function createLobbyFlowController(
       onProfileEditSubmit: (avatarFile, avatarCrop, galleryFiles) => {
         void submitProfileEdit(avatarFile, avatarCrop, galleryFiles)
       },
+      onPresetAvatarApply: (avatarUrl) => {
+        void submitPresetAvatar(avatarUrl)
+      },
       onProfileGalleryDelete: (imageId) => {
         void deleteProfileGalleryImage(imageId)
       },
@@ -1295,6 +1299,27 @@ export function createLobbyFlowController(
         void options.onLogout?.()
       },
     })
+  }
+
+  async function submitPresetAvatar(avatarUrl: string): Promise<void> {
+    const errorText = options.onPresetAvatarApply
+      ? await options.onPresetAvatarApply(avatarUrl)
+      : 'Функцията временно не е налична.'
+
+    if (errorText !== null) {
+      state.profileEditorErrorText = errorText
+      render()
+      return
+    }
+
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession !== null) {
+      state.displayName = authSession.profile.displayName
+      state.localAvatarUrl = authSession.profile.avatarUrl
+    }
+
+    state.profileEditorErrorText = null
+    render()
   }
 
   async function submitProfileEdit(

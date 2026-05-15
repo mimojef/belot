@@ -100,6 +100,7 @@ export type RenderLobbyScreenOptions = {
     galleryFiles: File[],
   ) => void
   onProfileEditorFileError: (message: string) => void
+  onPresetAvatarApply: (avatarUrl: string) => void
   onProfileGalleryDelete: (imageId: string) => void
   onProfileNameChangeSubmit: (displayName: string) => void
   onLobbyClick: () => void
@@ -180,8 +181,12 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks): void 
     ?.addEventListener('click', cb.onClose)
   el.querySelector<HTMLElement>('[data-player-profile-popup-backdrop="1"]')
     ?.addEventListener('click', cb.onClose)
-  el.querySelector<HTMLButtonElement>('[data-player-profile-edit="1"]')
-    ?.addEventListener('click', cb.onEditClick)
+  const editEl = el.querySelector<HTMLElement>('[data-player-profile-edit="1"]')
+  if (editEl) {
+    editEl.addEventListener('click', cb.onEditClick)
+    editEl.addEventListener('mouseenter', () => { editEl.style.textDecoration = 'underline' })
+    editEl.addEventListener('mouseleave', () => { editEl.style.textDecoration = 'none' })
+  }
   el.querySelector<HTMLButtonElement>('[data-player-profile-friend-request]')
     ?.addEventListener('click', (e) => {
       const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileFriendRequest?.trim() ?? ''
@@ -274,6 +279,14 @@ function escapeHtml(value: string): string {
 
 function formatAmount(value: number): string {
   return new Intl.NumberFormat('bg-BG').format(value)
+}
+
+function renderLevelBadge(level: number | null | undefined, size: 'sm' | 'md' = 'md'): string {
+  if (typeof level !== 'number' || !Number.isFinite(level) || level < 1) return ''
+  const h = size === 'sm' ? '16px' : '18px'
+  const fs = size === 'sm' ? '9px' : '10px'
+  const px = size === 'sm' ? '2px' : '3px'
+  return `<div style="position:absolute;right:0;bottom:0;min-width:${h};height:${h};border-radius:3px;background:#111111;border:1px solid rgba(255,255,255,0.22);color:#ffffff;font-size:${fs};font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 ${px};line-height:1;z-index:1;">${Math.trunc(level)}</div>`
 }
 
 function formatPackagePrice(priceCents: number, currency: string): string {
@@ -473,18 +486,31 @@ function renderProfileEditModal(state: LobbyScreenState): string {
             <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">Аватар</div>
             <div style="display:flex;align-items:center;gap:16px;">
               <div
-                data-avatar-pick-btn="1"
-                role="button"
-                tabindex="0"
-                style="width:80px;height:80px;border-radius:8px;border:2px dashed rgba(212,165,32,0.50);background:#101010;display:flex;align-items:center;justify-content:center;cursor:pointer;flex:0 0 auto;overflow:hidden;position:relative;"
+                data-avatar-preview="1"
+                style="width:80px;height:80px;border-radius:8px;border:1px solid rgba(212,165,32,0.35);background:#101010;flex:0 0 auto;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#facc15;font-size:28px;font-weight:900;position:relative;"
               >
                 ${state.profile.avatarUrl
-                  ? `<img src="${escapeHtml(state.profile.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;position:absolute;inset:0;"><div style="position:absolute;inset:0;background:rgba(0,0,0,0.50);display:flex;align-items:center;justify-content:center;"><span style="color:#fff;font-size:12px;font-weight:900;letter-spacing:0.04em;">Смени</span></div>`
-                  : `<span style="color:rgba(212,165,32,0.70);font-size:36px;font-weight:300;line-height:1;">+</span>`}
+                  ? `<img src="${escapeHtml(state.profile.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">`
+                  : `<span style="opacity:0.4;">?</span>`}
               </div>
               <input name="avatarFile" type="file" accept="image/png,image/jpeg,image/webp" style="display:none;">
-              <div style="font-size:13px;color:rgba(255,255,255,0.62);font-weight:700;line-height:1.5;">
-                ${state.profile.avatarUrl ? 'Натисни квадрата за да смениш аватара.' : 'Натисни квадрата за да добавиш аватар.'}<br>Ще можеш да очертаеш зона от снимката.
+              <div style="display:flex;flex-direction:column;gap:8px;flex:1;">
+                <button
+                  type="button"
+                  data-avatar-from-device-btn="1"
+                  class="avatar-source-btn"
+                  style="height:38px;padding:0 14px;border:1px solid rgba(212,165,32,0.50);border-radius:8px;background:#101010;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;text-align:left;"
+                >
+                  От устройството
+                </button>
+                <button
+                  type="button"
+                  data-avatar-preset-btn="1"
+                  class="avatar-source-btn"
+                  style="height:38px;padding:0 14px;border:1px solid rgba(212,165,32,0.50);border-radius:8px;background:#101010;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;text-align:left;"
+                >
+                  Наши предложения
+                </button>
               </div>
             </div>
           </div>
@@ -878,6 +904,7 @@ function renderHeroSection(
   wonGamesCount: number | null,
   completedGamesCount: number | null,
   rankTitle: string | null,
+  level: number | null,
 ): string {
   const winRate =
     wonGamesCount !== null && completedGamesCount !== null && completedGamesCount > 0
@@ -918,6 +945,7 @@ function renderHeroSection(
               background:${isConnected ? '#22c55e' : '#ef4444'};
               border:2px solid #050505;
             "></div>
+            ${renderLevelBadge(level, 'md')}
           </div>
           <div style="flex:1; min-width:0;">
             <div style="font-size:30px; line-height:1; font-weight:800; color:#ffffff;">${escapeHtml(profileName)}</div>
@@ -1348,8 +1376,11 @@ function renderFriendRelationshipCard(
   return `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid rgba(212,165,32,0.26);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:12px;">
       <button type="button" data-lobby-friend-profile="${escapeHtml(profileId)}" style="display:flex;align-items:center;gap:12px;min-width:0;border:0;background:transparent;color:#ffffff;text-align:left;cursor:pointer;padding:0;flex:1;">
-        <div style="width:52px;height:52px;border-radius:8px;border:1px solid rgba(212,165,32,0.54);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:21px;font-weight:900;flex:0 0 auto;">
-          ${renderFriendAvatar(profile)}
+        <div style="position:relative;width:52px;height:52px;flex:0 0 auto;">
+          <div style="width:100%;height:100%;border-radius:8px;border:1px solid rgba(212,165,32,0.54);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:21px;font-weight:900;">
+            ${renderFriendAvatar(profile)}
+          </div>
+          ${renderLevelBadge(profile.level, 'sm')}
         </div>
         <div style="min-width:0;">
           <div style="font-size:15px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
@@ -1579,8 +1610,11 @@ function renderPlayersDirectory(state: LobbyScreenState): string {
             return `
               <button type="button" data-lobby-player-card="${escapeHtml(player.profileId ?? '')}" style="display:grid;gap:10px;text-align:left;border:1px solid rgba(212,165,32,0.32);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:12px;color:#ffffff;cursor:pointer;min-width:0;">
                 <div style="display:flex;align-items:center;gap:10px;min-width:0;">
-                  <div style="width:54px;height:54px;border-radius:8px;border:1px solid rgba(212,165,32,0.56);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:22px;font-weight:900;flex:0 0 auto;">
-                    ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : fallbackLetter}
+                  <div style="position:relative;width:54px;height:54px;flex:0 0 auto;">
+                    <div style="width:100%;height:100%;border-radius:8px;border:1px solid rgba(212,165,32,0.56);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:22px;font-weight:900;">
+                      ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : fallbackLetter}
+                    </div>
+                    ${renderLevelBadge(player.level, 'sm')}
                   </div>
                   <div style="min-width:0;">
                     <div style="font-size:15px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
@@ -1700,8 +1734,11 @@ function renderLeaderboardsDirectory(state: LobbyScreenState): string {
               <button type="button" data-lobby-leaderboard-player="${escapeHtml(player.profileId ?? '')}" style="display:grid;grid-template-columns:64px minmax(0,1fr) 150px 130px 130px;align-items:center;gap:14px;text-align:left;border:1px solid rgba(212,165,32,0.24);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:12px 14px;color:#ffffff;cursor:pointer;min-width:0;">
                 <div style="font-size:26px;font-weight:900;color:${medalColor};text-align:center;">#${position}</div>
                 <div style="display:flex;align-items:center;gap:12px;min-width:0;">
-                  <div style="width:50px;height:50px;border-radius:8px;border:1px solid rgba(212,165,32,0.56);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:21px;font-weight:900;flex:0 0 auto;">
-                    ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : fallbackLetter}
+                  <div style="position:relative;width:50px;height:50px;flex:0 0 auto;">
+                    <div style="width:100%;height:100%;border-radius:8px;border:1px solid rgba(212,165,32,0.56);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:21px;font-weight:900;">
+                      ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : fallbackLetter}
+                    </div>
+                    ${renderLevelBadge(player.level, 'sm')}
                   </div>
                   <div style="min-width:0;">
                     <div style="font-size:15px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
@@ -2052,7 +2089,7 @@ export function renderLobbyScreen(
                 ? renderChatPanel(state)
               : `
               ${state.profile.profileId !== null
-                ? renderHeroSection(profileName, state.isConnected, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle)
+                ? renderHeroSection(profileName, state.isConnected, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level)
                 : renderGuestHeroCard(state.signupBonusYellowCoins ?? 0)}
               ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching)}
               ${renderBottomSection()}
@@ -2437,8 +2474,76 @@ export function renderLobbyScreen(
     'input[name="avatarFile"]',
   )
 
-  root.querySelector<HTMLElement>('[data-avatar-pick-btn="1"]')?.addEventListener('click', () => {
+  root.querySelectorAll<HTMLButtonElement>('.avatar-source-btn').forEach((btn) => {
+    btn.addEventListener('mouseenter', () => { btn.style.borderWidth = '2px' })
+    btn.addEventListener('mouseleave', () => { btn.style.borderWidth = '1px' })
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-avatar-from-device-btn="1"]')?.addEventListener('click', () => {
     avatarInput?.click()
+  })
+
+  const avatarGender = options.state.profile.gender ?? 'male'
+  const avatarFolder = avatarGender === 'female' ? 'female' : 'male'
+  const avatarPrefix = avatarGender === 'female' ? 'female-avatar' : 'male-avatar'
+  const PRESET_AVATAR_COUNT = 30
+
+  function openPresetAvatarGallery(): void {
+    let selectedUrl: string | null = null
+
+    const overlay = document.createElement('div')
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:14500;background:rgba(0,0,0,0.88);display:flex;flex-direction:column;font-family:Inter,system-ui,sans-serif;'
+
+    overlay.innerHTML = `
+      <div style="flex:0 0 auto;padding:16px 20px;background:#0a0a0a;border-bottom:1px solid rgba(255,255,255,0.10);display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+        <div style="font-size:16px;font-weight:900;color:#f8fafc;">Избери аватар</div>
+        <div style="display:flex;gap:10px;flex-shrink:0;">
+          <button type="button" data-preset-cancel="1" style="height:40px;padding:0 16px;border:1px solid rgba(255,255,255,0.18);border-radius:8px;background:#080808;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;">Откажи</button>
+          <button type="button" data-preset-apply="1" style="height:40px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:pointer;opacity:0.45;pointer-events:none;">Приложи</button>
+        </div>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:24px;" class="gold-scrollbar">
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:12px;max-width:900px;margin:0 auto;">
+          ${Array.from({ length: PRESET_AVATAR_COUNT }, (_, i) => {
+            const num = String(i + 1).padStart(2, '0')
+            const url = `/assets/avatars/${avatarFolder}/${avatarPrefix}-${num}.webp`
+            return `<div data-preset-avatar="${url}" style="aspect-ratio:1/1;border-radius:10px;overflow:hidden;border:2px solid rgba(255,255,255,0.10);cursor:pointer;transition:border-color 0.15s;background:#101010;">
+              <img src="${url}" alt="" draggable="false" style="width:100%;height:100%;object-fit:cover;display:block;pointer-events:none;">
+            </div>`
+          }).join('')}
+        </div>
+      </div>
+    `
+
+    document.body.appendChild(overlay)
+
+    const applyBtn = overlay.querySelector<HTMLButtonElement>('[data-preset-apply="1"]')!
+
+    overlay.querySelectorAll<HTMLElement>('[data-preset-avatar]').forEach((tile) => {
+      tile.addEventListener('click', () => {
+        overlay.querySelectorAll<HTMLElement>('[data-preset-avatar]').forEach((t) => {
+          t.style.borderColor = 'rgba(255,255,255,0.10)'
+        })
+        tile.style.borderColor = '#f4c95b'
+        selectedUrl = tile.dataset.presetAvatar ?? null
+        applyBtn.style.opacity = '1'
+        applyBtn.style.pointerEvents = 'auto'
+      })
+    })
+
+    overlay.querySelector('[data-preset-cancel="1"]')?.addEventListener('click', () => {
+      overlay.remove()
+    })
+
+    applyBtn.addEventListener('click', () => {
+      if (selectedUrl === null) return
+      overlay.remove()
+      options.onPresetAvatarApply(selectedUrl)
+    })
+  }
+
+  root.querySelector<HTMLButtonElement>('[data-avatar-preset-btn="1"]')?.addEventListener('click', () => {
+    openPresetAvatarGallery()
   })
 
   let currentCrop: AvatarCropSelection | null = null
@@ -2558,10 +2663,10 @@ export function renderLobbyScreen(
           const objectUrl = URL.createObjectURL(avatarInput.files[0])
           img.onload = () => {
             ctx.drawImage(img, crop.x, crop.y, crop.size, crop.size, 0, 0, 250, 250)
-            const pickBtn = root.querySelector<HTMLElement>('[data-avatar-pick-btn="1"]')
-            if (pickBtn) {
+            const preview = root.querySelector<HTMLElement>('[data-avatar-preview="1"]')
+            if (preview) {
               const dataUrl = canvas.toDataURL('image/webp')
-              pickBtn.innerHTML = `<img src="${dataUrl}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;position:absolute;inset:0;"><div style="position:absolute;inset:0;background:rgba(0,0,0,0.50);display:flex;align-items:center;justify-content:center;"><span style="color:#fff;font-size:12px;font-weight:900;letter-spacing:0.04em;">Смени</span></div>`
+              preview.innerHTML = `<img src="${dataUrl}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">`
             }
             URL.revokeObjectURL(objectUrl)
           }
@@ -2573,11 +2678,11 @@ export function renderLobbyScreen(
     overlay.querySelector('[data-crop-cancel="1"]')?.addEventListener('click', () => {
       currentCrop = null
       if (avatarInput) avatarInput.value = ''
-      const pickBtn = root.querySelector<HTMLElement>('[data-avatar-pick-btn="1"]')
-      if (pickBtn) {
-        pickBtn.innerHTML = state.profile.avatarUrl
-          ? `<img src="${escapeHtml(state.profile.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;position:absolute;inset:0;"><div style="position:absolute;inset:0;background:rgba(0,0,0,0.50);display:flex;align-items:center;justify-content:center;"><span style="color:#fff;font-size:12px;font-weight:900;letter-spacing:0.04em;">Смени</span></div>`
-          : `<span style="color:rgba(212,165,32,0.70);font-size:36px;font-weight:300;line-height:1;">+</span>`
+      const preview = root.querySelector<HTMLElement>('[data-avatar-preview="1"]')
+      if (preview) {
+        preview.innerHTML = state.profile.avatarUrl
+          ? `<img src="${escapeHtml(state.profile.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">`
+          : `<span style="opacity:0.4;">?</span>`
       }
       overlay.remove()
     })

@@ -1611,9 +1611,20 @@ async function handleProfileRequest(
     return true
   }
 
+  const avatarUrl = getStringField(body, 'avatarUrl')
+
+  if (
+    avatarUrl === null ||
+    (!avatarUrl.startsWith('/assets/avatars/male/') &&
+      !avatarUrl.startsWith('/assets/avatars/female/'))
+  ) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден URL за аватар.' })
+    return true
+  }
+
   const result = playerProgressStore.updateProfileAvatar(
     session.profile.profileId,
-    getStringField(body, 'avatarUrl'),
+    avatarUrl,
   )
 
   if (!result.ok) {

@@ -12,6 +12,11 @@ import { CUTTING_COUNTDOWN_MS } from './cuttingVisualCountdown'
 
 type EscapeHtml = (value: string) => string
 
+function renderLevelBadge(level: number | null | undefined): string {
+  if (typeof level !== 'number' || !Number.isFinite(level) || level < 1) return ''
+  return `<div style="position:absolute;right:0;bottom:0;min-width:18px;height:18px;border-radius:3px;background:#111111;border:1px solid rgba(255,255,255,0.22);color:#ffffff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;z-index:10;">${Math.trunc(level)}</div>`
+}
+
 export type DealtHandsData = {
   handCounts: Record<Seat, number>
   ownHand: RoomCardSnapshot[]
@@ -854,10 +859,10 @@ export function createCuttingSeatPanelHtml(
               font-size:45px;
               font-weight:900;
               letter-spacing:0.04em;
-              overflow:hidden;
             "
           >
             ${renderCuttingSeatAvatar(seat, visualSeat, 18, escapeHtml)}
+            ${renderLevelBadge(seat.level)}
           </div>
 
           <div
@@ -961,10 +966,10 @@ export function createCuttingSeatPanelHtml(
             font-size:56px;
             font-weight:900;
             letter-spacing:0.04em;
-            overflow:hidden;
           "
         >
           ${renderCuttingSeatAvatar(seat, visualSeat, 16, escapeHtml)}
+          ${renderLevelBadge(seat.level)}
         </div>
 
         ${renderSideCuttingCountdownFooter(

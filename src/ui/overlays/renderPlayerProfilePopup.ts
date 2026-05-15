@@ -51,6 +51,14 @@ function formatNullableText(
   return text.length > 0 ? escapeHtml(text) : fallback
 }
 
+function renderLevelBadge(level: number | null | undefined, size: 'sm' | 'md' = 'md'): string {
+  if (typeof level !== 'number' || !Number.isFinite(level) || level < 1) return ''
+  const h = size === 'sm' ? '16px' : '18px'
+  const fs = size === 'sm' ? '9px' : '10px'
+  const px = size === 'sm' ? '2px' : '3px'
+  return `<div style="position:absolute;right:0;bottom:0;min-width:${h};height:${h};border-radius:3px;background:#111111;border:1px solid rgba(255,255,255,0.22);color:#ffffff;font-size:${fs};font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 ${px};line-height:1;z-index:1;">${Math.trunc(level)}</div>`
+}
+
 function formatAverageRating(value: number | null | undefined): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return '—'
@@ -378,18 +386,21 @@ function renderProfileContent(
           align-items:start;
         "
       >
-        <div
-          style="
-            width:124px;
-            height:124px;
-            border-radius:20px;
-            overflow:hidden;
-            background:rgba(255,255,255,0.06);
-            border:1px solid rgba(255,255,255,0.10);
-            box-shadow:0 14px 28px rgba(0,0,0,0.22);
-          "
-        >
-          ${renderAvatar(profile, seat)}
+        <div style="position:relative;width:124px;height:124px;flex:0 0 124px;">
+          <div
+            style="
+              width:100%;
+              height:100%;
+              border-radius:20px;
+              overflow:hidden;
+              background:rgba(255,255,255,0.06);
+              border:1px solid rgba(255,255,255,0.10);
+              box-shadow:0 14px 28px rgba(0,0,0,0.22);
+            "
+          >
+            ${renderAvatar(profile, seat)}
+          </div>
+          ${renderLevelBadge(profile.level)}
         </div>
 
         <div
@@ -401,37 +412,45 @@ function renderProfileContent(
             padding-top:4px;
           "
         >
-          <div
-            style="
-              font-size:30px;
-              line-height:1.05;
-              font-weight:900;
-              color:#f8fafc;
-              word-break:break-word;
-            "
-          >
+          <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+            <div
+              style="
+                font-size:30px;
+                line-height:1.05;
+                font-weight:900;
+                color:#f8fafc;
+                word-break:break-word;
+              "
+            >
               ${escapeHtml(displayName)}
+            </div>
+
+            ${canEdit ? `
+              <span
+                data-player-profile-edit="1"
+                style="
+                  display:inline-flex;
+                  align-items:center;
+                  gap:5px;
+                  color:#22c55e;
+                  font-size:13px;
+                  font-weight:900;
+                  cursor:pointer;
+                  white-space:nowrap;
+                  padding-bottom:1px;
+                "
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                Редакция
+              </span>
+            ` : ''}
           </div>
 
           ${canEdit ? `
-            <button
-              type="button"
-              data-player-profile-edit="1"
-              style="
-                align-self:flex-start;
-                height:36px;
-                padding:0 14px;
-                border:1px solid rgba(212,165,32,0.62);
-                border-radius:8px;
-                background:linear-gradient(180deg, rgba(212,165,32,0.18) 0%, rgba(8,8,8,0.82) 100%);
-                color:#f8fafc;
-                font-size:13px;
-                font-weight:900;
-                cursor:pointer;
-              "
-            >
-              Редакция
-            </button>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <div style="font-size:12px;font-weight:800;letter-spacing:0.10em;text-transform:uppercase;color:rgba(148,163,184,0.80);">Рейтинг</div>
+              <div style="font-size:20px;font-weight:900;color:#d4a520;">${formatNullableText(profile.skillRating)}</div>
+            </div>
           ` : ''}
 
           ${!canEdit && friendshipAction ? `
@@ -575,78 +594,6 @@ function renderProfileContent(
               margin-bottom:8px;
             "
           >
-            Рейтинг
-          </div>
-          <div
-            style="
-              font-size:26px;
-              font-weight:900;
-              color:#f8fafc;
-            "
-          >
-            ${formatNullableText(profile.skillRating)}
-          </div>
-        </div>
-
-        <div
-          style="
-            border-radius:16px;
-            background:rgba(255,255,255,0.05);
-            border:1px solid rgba(255,255,255,0.08);
-            padding:14px;
-          "
-        >
-          <div
-            style="
-              font-size:12px;
-              font-weight:800;
-              letter-spacing:0.12em;
-              text-transform:uppercase;
-              color:rgba(148,163,184,0.92);
-              margin-bottom:8px;
-            "
-          >
-            Средна оценка
-          </div>
-          <div
-            style="
-              font-size:26px;
-              font-weight:900;
-              color:#f8fafc;
-            "
-          >
-            ${formatAverageRating(profile.averageRating)}
-          </div>
-          <div
-            style="
-              margin-top:6px;
-              font-size:12px;
-              color:rgba(226,232,240,0.72);
-              font-weight:700;
-            "
-          >
-            Оценки: ${formatNullableText(profile.totalRatingsCount)}
-          </div>
-        </div>
-
-        <div
-          style="
-            border-radius:16px;
-            background:rgba(255,255,255,0.05);
-            border:1px solid rgba(255,255,255,0.08);
-            padding:14px;
-          "
-        >
-          <div
-            style="
-              font-size:12px;
-              font-weight:800;
-              letter-spacing:0.12em;
-              text-transform:uppercase;
-              color:rgba(148,163,184,0.92);
-              margin-bottom:8px;
-            "
-          >
             Жълтици
           </div>
           <div
@@ -678,18 +625,34 @@ function renderProfileContent(
               margin-bottom:8px;
             "
           >
-            Профил
+            Средна оценка
           </div>
           <div
             style="
-              font-size:14px;
-              font-weight:800;
-              color:#f8fafc;
-              line-height:1.4;
-              word-break:break-word;
+              display:flex;
+              align-items:baseline;
+              gap:8px;
+              flex-wrap:wrap;
             "
           >
-            ${formatNullableText(profile.profileId)}
+            <div
+              style="
+                font-size:26px;
+                font-weight:900;
+                color:#f8fafc;
+              "
+            >
+              ${formatAverageRating(profile.averageRating)}
+            </div>
+            <div
+              style="
+                font-size:15px;
+                color:rgba(226,232,240,0.72);
+                font-weight:700;
+              "
+            >
+              Оценки: ${formatNullableText(profile.totalRatingsCount)}
+            </div>
           </div>
         </div>
       </div>

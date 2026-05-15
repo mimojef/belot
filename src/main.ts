@@ -1081,6 +1081,28 @@ async function deleteProfileGalleryImage(imageId: string): Promise<string | null
   }
 }
 
+async function submitPresetAvatarUrl(avatarUrl: string): Promise<string | null> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/profile/me`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ avatarUrl }),
+    })
+    const data = await readAuthResponse(response)
+
+    if (!response.ok || !data.ok || !data.session) {
+      return data.message ?? 'Аватарът не беше обновен.'
+    }
+
+    currentAuthSession = data.session
+    syncLobbyWithAuthSession()
+    return null
+  } catch {
+    return 'Няма връзка със сървъра.'
+  }
+}
+
 async function submitProfileNameChange(displayName: string): Promise<string | null> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/profile/me/display-name`, {
@@ -1111,7 +1133,7 @@ async function submitProfileUpdate(
   galleryFiles: File[],
 ): Promise<string | null> {
   if (avatarFile === null && galleryFiles.length === 0) {
-    return 'Избери снимка за аватар или галерия.'
+    return null
   }
 
   try {
@@ -1179,6 +1201,7 @@ lobby = createLobbyFlowController({
     }),
   onProfileEditSubmit: (avatarFile, avatarCrop, galleryFiles) =>
     submitProfileUpdate(avatarFile, avatarCrop, galleryFiles),
+  onPresetAvatarApply: (avatarUrl) => submitPresetAvatarUrl(avatarUrl),
   getSignupBonusYellowCoins: () => publicSignupBonusYellowCoins,
   getProfileNameChangePrice: () => publicProfileNameChangePrice,
   getApiBaseUrl: () => getApiBaseUrl(),

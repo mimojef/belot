@@ -650,41 +650,43 @@ export function createActiveRoomFlowController(
             gap:12px;
           "
         >
-          <div
-            style="
-              width:56px;
-              height:56px;
-              border-radius:16px;
-              background:linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
-              border:1px solid rgba(148,163,184,0.24);
-              overflow:hidden;
-              flex:0 0 56px;
-            "
-          >
-            ${
-              seat.avatarUrl
-                ? `<img
-                    src="${escapeHtml(seat.avatarUrl)}"
-                    alt="${escapeHtml(displayName)}"
-                    style="width:100%;height:100%;object-fit:cover;display:block;"
-                  />`
-                : `<div
-                    style="
-                      width:100%;
-                      height:100%;
-                      display:flex;
-                      align-items:center;
-                      justify-content:center;
-                      color:#94a3b8;
-                      font-size:11px;
-                      font-weight:800;
-                      letter-spacing:0.06em;
-                      text-transform:uppercase;
-                    "
-                  >
-                    Аватар
-                  </div>`
-            }
+          <div style="position:relative;width:56px;height:56px;flex:0 0 56px;">
+            <div
+              style="
+                width:100%;
+                height:100%;
+                border-radius:16px;
+                background:linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+                border:1px solid rgba(148,163,184,0.24);
+                overflow:hidden;
+              "
+            >
+              ${
+                seat.avatarUrl
+                  ? `<img
+                      src="${escapeHtml(seat.avatarUrl)}"
+                      alt="${escapeHtml(displayName)}"
+                      style="width:100%;height:100%;object-fit:cover;display:block;"
+                    />`
+                  : `<div
+                      style="
+                        width:100%;
+                        height:100%;
+                        display:flex;
+                        align-items:center;
+                        justify-content:center;
+                        color:#94a3b8;
+                        font-size:11px;
+                        font-weight:800;
+                        letter-spacing:0.06em;
+                        text-transform:uppercase;
+                      "
+                    >
+                      Аватар
+                    </div>`
+              }
+            </div>
+            ${typeof seat.level === 'number' && seat.level >= 1 ? `<div style="position:absolute;right:0;bottom:0;min-width:16px;height:16px;border-radius:3px;background:#111111;border:1px solid rgba(255,255,255,0.22);color:#ffffff;font-size:9px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 2px;line-height:1;z-index:1;">${Math.trunc(seat.level)}</div>` : ''}
           </div>
 
           <div style="min-width:0;flex:1 1 auto;">
