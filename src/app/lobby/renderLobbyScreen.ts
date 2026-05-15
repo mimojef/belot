@@ -1610,8 +1610,8 @@ function renderPlayersDirectory(state: LobbyScreenState): string {
             return `
               <button type="button" data-lobby-player-card="${escapeHtml(player.profileId ?? '')}" style="display:flex;flex-direction:column;gap:10px;text-align:left;border:1px solid rgba(212,165,32,0.32);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:12px;color:#ffffff;cursor:pointer;min-width:0;">
                 <div style="display:flex;align-items:center;gap:10px;min-width:0;">
-                  <div style="position:relative;width:72px;height:72px;flex:0 0 auto;">
-                    <div style="width:100%;height:100%;border-radius:10px;border:1px solid rgba(212,165,32,0.56);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:28px;font-weight:900;">
+                  <div style="position:relative;width:100px;height:100px;flex:0 0 auto;">
+                    <div style="width:100%;height:100%;border-radius:10px;border:1px solid rgba(212,165,32,0.56);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:38px;font-weight:900;">
                       ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : fallbackLetter}
                     </div>
                     ${renderLevelBadge(player.level, 'sm')}
