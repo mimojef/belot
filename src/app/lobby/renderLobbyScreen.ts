@@ -85,6 +85,7 @@ export type LobbyScreenState = {
 
 export type RenderLobbyScreenOptions = {
   state: LobbyScreenState
+  apiBaseUrl: string
   onDisplayNameChange: (value: string) => void
   onStakeChange: (stake: MatchStake) => void
   onSearchClick: () => void
@@ -358,8 +359,11 @@ function renderAuthModal(state: LobbyScreenState): string {
         ${isRegister ? `
           <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Име в играта
-            <input name="displayName" autocomplete="nickname" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
-            <span style="font-size:11px;font-weight:700;letter-spacing:0;text-transform:none;color:rgba(255,255,255,0.45);">Само букви на кирилица, латиница, цифри и интервал.</span>
+            <span style="position:relative;display:block;">
+              <input name="displayName" autocomplete="nickname" data-name-check-input="register" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 90px 0 12px;font-size:15px;font-weight:700;outline:none;">
+              <span data-name-hint="register" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:800;letter-spacing:0;text-transform:none;pointer-events:none;white-space:nowrap;"></span>
+            </span>
+            <span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:#ffffff;">Мин. 3 символа. Само букви на кирилица, латиница, цифри и интервал.</span>
           </label>
           <div style="display:grid;gap:6px;">
             <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">Пол</div>
@@ -451,8 +455,11 @@ function renderProfileEditModal(state: LobbyScreenState): string {
               </div>
             </div>
             <label style="display:grid;gap:6px;">
-              <input name="paidDisplayName" maxlength="32" autocomplete="nickname" placeholder="Въведи ново име" style="height:42px;border-radius:8px;border:1px solid ${state.profileNameChangeErrorText ? 'rgba(248,113,113,0.60)' : 'rgba(212,165,32,0.34)'};background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
-              <span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.45);">Само букви на кирилица, латиница, цифри и интервал.</span>
+              <span style="position:relative;display:block;">
+                <input name="paidDisplayName" maxlength="32" autocomplete="nickname" placeholder="Въведи ново име" data-name-check-input="namechange" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid ${state.profileNameChangeErrorText ? 'rgba(248,113,113,0.60)' : 'rgba(212,165,32,0.34)'};background:#050505;color:#ffffff;padding:0 90px 0 12px;font-size:15px;font-weight:700;outline:none;">
+                <span data-name-hint="namechange" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:800;pointer-events:none;white-space:nowrap;"></span>
+              </span>
+              <span style="font-size:11px;font-weight:400;color:#ffffff;">Мин. 3 символа. Само букви на кирилица, латиница, цифри и интервал.</span>
             </label>
             ${state.profileNameChangeErrorText ? `<div style="border-radius:6px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:8px 10px;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.profileNameChangeErrorText)}</div>` : ''}
             <div style="display:flex;justify-content:flex-end;">
@@ -2817,6 +2824,49 @@ export function renderLobbyScreen(
     })
   })
 
+  function attachNameAvailabilityCheck(
+    input: HTMLInputElement,
+    hintEl: HTMLElement,
+  ): void {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let lastChecked = ''
+
+    input.addEventListener('input', () => {
+      const value = input.value.trim()
+
+      if (timer !== null) clearTimeout(timer)
+
+      if (value.length < 3) {
+        hintEl.textContent = ''
+        hintEl.style.color = ''
+        lastChecked = ''
+        return
+      }
+
+      if (value === lastChecked) return
+
+      timer = setTimeout(async () => {
+        lastChecked = value
+        try {
+          const res = await fetch(
+            `${options.apiBaseUrl}/api/profile/check-name?name=${encodeURIComponent(value)}`,
+          )
+          const data = await res.json() as { available: boolean }
+          if (input.value.trim() !== value) return
+          if (data.available) {
+            hintEl.textContent = '✓ Свободно'
+            hintEl.style.color = '#4ade80'
+          } else {
+            hintEl.textContent = '✕ Заето'
+            hintEl.style.color = '#f87171'
+          }
+        } catch {
+          // ignore network errors silently
+        }
+      }, 200)
+    })
+  }
+
   function showAuthError(message: string): void {
     const el = root.querySelector<HTMLElement>('[data-lobby-auth-error="1"]')
     if (el) {
@@ -2824,6 +2874,12 @@ export function renderLobbyScreen(
       el.style.display = ''
     }
   }
+
+  ;(['register', 'namechange'] as const).forEach((key) => {
+    const input = root.querySelector<HTMLInputElement>(`[data-name-check-input="${key}"]`)
+    const hint = root.querySelector<HTMLElement>(`[data-name-hint="${key}"]`)
+    if (input && hint) attachNameAvailabilityCheck(input, hint)
+  })
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-auth-modal-close="1"]')

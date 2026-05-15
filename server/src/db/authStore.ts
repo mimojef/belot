@@ -357,6 +357,10 @@ export async function createAuthStore(
       return { ok: false, message: 'Името може да съдържа само букви на кирилица, латиница, цифри и интервал.' }
     }
 
+    if (displayName.length < 3 || displayName.length > 32) {
+      return { ok: false, message: 'Името трябва да е между 3 и 32 символа.' }
+    }
+
     const existingAccount = selectAccountByEmailStatement.get(email) as AccountRow | undefined
 
     if (existingAccount) {

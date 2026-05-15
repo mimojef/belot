@@ -1181,6 +1181,7 @@ lobby = createLobbyFlowController({
     submitProfileUpdate(avatarFile, avatarCrop, galleryFiles),
   getSignupBonusYellowCoins: () => publicSignupBonusYellowCoins,
   getProfileNameChangePrice: () => publicProfileNameChangePrice,
+  getApiBaseUrl: () => getApiBaseUrl(),
   onProfileGalleryDelete: (imageId) => deleteProfileGalleryImage(imageId),
   onProfileNameChangeSubmit: (displayName) => submitProfileNameChange(displayName),
   onPlayersLoad: () => loadPlayersDirectory(),

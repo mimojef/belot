@@ -56,6 +56,7 @@ export type PlayerProgressStore = {
         deletedImageUrls: string[]
       }
     | { ok: false; message: string }
+  isDisplayNameAvailable: (displayName: string) => boolean
   recordCompletedMatch: (room: ServerRoom) => void
   submitPartnerRating: (
     room: ServerRoom,
@@ -436,6 +437,14 @@ export async function createPlayerProgressStore(
     LIMIT 1;
   `)
 
+  const selectProfileByNormalizedDisplayNameStatement = database.prepare(`
+    SELECT profile_id
+    FROM profiles
+    WHERE normalized_display_name = ?
+      AND status = 'active'
+    LIMIT 1;
+  `)
+
   const selectWalletBalanceStatement = database.prepare(`
     SELECT yellow_coins_balance
     FROM profile_wallets
@@ -720,10 +729,10 @@ export async function createPlayerProgressStore(
       }
     }
 
-    if (displayName.length < 2 || displayName.length > 32) {
+    if (displayName.length < 3 || displayName.length > 32) {
       return {
         ok: false,
-        message: 'Името трябва да е между 2 и 32 символа.',
+        message: 'Името трябва да е между 3 и 32 символа.',
       }
     }
 
@@ -1143,6 +1152,13 @@ export async function createPlayerProgressStore(
     return { ok: true }
   }
 
+  function isDisplayNameAvailable(displayName: string): boolean {
+    const normalized = normalizeProfileDisplayName(displayName)
+    if (normalized === null) return false
+    const row = selectProfileByNormalizedDisplayNameStatement.get(normalized)
+    return row === undefined
+  }
+
   function close(): void {
     database.close()
   }
@@ -1153,6 +1169,7 @@ export async function createPlayerProgressStore(
     listPublicHumanProfiles,
     listLeaderboards,
     changeProfileDisplayName,
+    isDisplayNameAvailable,
     updateProfileAvatar,
     addProfileGalleryImage,
     deleteProfileGalleryImage,

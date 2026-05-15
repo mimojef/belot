@@ -55,6 +55,7 @@ export type CreateLobbyFlowControllerOptions = {
   getAuthSession?: () => LobbyAuthSession | null
   getSignupBonusYellowCoins?: () => number
   getProfileNameChangePrice?: () => number
+  getApiBaseUrl?: () => string
   onLoginSubmit?: (email: string, password: string) => Promise<string | null>
   onRegisterSubmit?: (
     displayName: string,
@@ -1120,6 +1121,7 @@ export function createLobbyFlowController(
 
     renderLobbyScreen(options.root, {
       state: lobbyState,
+      apiBaseUrl: options.getApiBaseUrl?.() ?? '',
       onDisplayNameChange: (value) => {
         state.displayName = value
       },

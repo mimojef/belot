@@ -1316,6 +1316,18 @@ async function handleAuthRequest(
   return false
 }
 
+function handleCheckNameRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  requestUrl: URL,
+): boolean {
+  if (requestUrl.pathname !== '/api/profile/check-name') return false
+  const name = requestUrl.searchParams.get('name') ?? ''
+  const available = name.trim().length >= 3 && playerProgressStore.isDisplayNameAvailable(name)
+  sendJsonResponse(res, 200, { available })
+  return true
+}
+
 async function handleProfileRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -2533,6 +2545,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAuthRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (handleCheckNameRequest(req, res, requestUrl)) {
     return
   }
 
