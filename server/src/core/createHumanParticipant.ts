@@ -25,6 +25,7 @@ function createDefaultIdentity(): PlayerIdentitySnapshot {
     level: null,
     rankTitle: null,
     skillRating: null,
+    gender: null,
   }
 }
 

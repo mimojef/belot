@@ -60,6 +60,7 @@ export type CreateLobbyFlowControllerOptions = {
     displayName: string,
     email: string,
     password: string,
+    gender: 'male' | 'female' | null,
   ) => Promise<string | null>
   onProfileEditSubmit?: (
     avatarFile: File | null,
@@ -163,6 +164,7 @@ export type CreateLobbyFlowControllerOptions = {
       }
     | { ok: false; message: string }
   >
+  onLogout?: () => Promise<void>
 }
 
 export type LobbyFlowController = {
@@ -440,6 +442,7 @@ function createLocalProfilePreview(
     averageRating: 0,
     totalRatingsCount: 0,
     yellowCoinsBalance: 25430,
+    gender: null,
     galleryImages: avatarUrl
       ? [
           {
@@ -1266,8 +1269,11 @@ export function createLobbyFlowController(
       onLoginSubmit: (email, password) => {
         void submitLogin(email, password)
       },
-      onRegisterSubmit: (displayName, email, password) => {
-        void submitRegister(displayName, email, password)
+      onRegisterSubmit: (displayName, email, password, gender) => {
+        void submitRegister(displayName, email, password, gender)
+      },
+      onLogoutClick: () => {
+        void options.onLogout?.()
       },
     })
   }
@@ -2139,9 +2145,10 @@ export function createLobbyFlowController(
     displayName: string,
     email: string,
     password: string,
+    gender: 'male' | 'female' | null,
   ): Promise<void> {
     const errorText = options.onRegisterSubmit
-      ? await options.onRegisterSubmit(displayName.trim(), email.trim(), password)
+      ? await options.onRegisterSubmit(displayName.trim(), email.trim(), password, gender)
       : 'Регистрацията временно не е налична.'
 
     if (errorText !== null) {

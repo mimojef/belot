@@ -115,8 +115,10 @@ function toPublicProfileSnapshot(row: {
   yellow_coins_balance: number
   completed_games_count: number | null
   won_games_count: number | null
+  gender: string | null
 }, galleryImages: ProfileGalleryImageRow[] = []): PlayerPublicProfileSnapshot {
   const rankProgress = createRankProgressSnapshot(row.completed_games_count ?? 0)
+  const gender = row.gender === 'male' || row.gender === 'female' ? row.gender : null
 
   return {
     profileId: row.profile_id,
@@ -134,6 +136,7 @@ function toPublicProfileSnapshot(row: {
     averageRating: row.average_rating,
     totalRatingsCount: row.total_ratings_count,
     yellowCoinsBalance: row.yellow_coins_balance,
+    gender,
     galleryImages: galleryImages.map((image) => ({
       imageId: image.image_id,
       imageUrl: image.thumbnail_url || image.image_url,
@@ -249,10 +252,10 @@ export async function createPlayerProgressStore(
       p.skill_rating,
       p.average_rating,
       p.total_ratings_count,
-      COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance
-      ,
+      COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance,
       pp.completed_games_count,
-      pp.won_games_count
+      pp.won_games_count,
+      p.gender
     FROM profiles p
     LEFT JOIN profile_wallets pw
       ON pw.profile_id = p.profile_id
@@ -283,10 +286,10 @@ export async function createPlayerProgressStore(
       p.skill_rating,
       p.average_rating,
       p.total_ratings_count,
-      COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance
-      ,
+      COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance,
       pp.completed_games_count,
-      pp.won_games_count
+      pp.won_games_count,
+      p.gender
     FROM profiles p
     LEFT JOIN profile_wallets pw
       ON pw.profile_id = p.profile_id
@@ -311,7 +314,8 @@ export async function createPlayerProgressStore(
       p.total_ratings_count,
       COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance,
       pp.completed_games_count,
-      pp.won_games_count
+      pp.won_games_count,
+      p.gender
     FROM profiles p
     LEFT JOIN profile_wallets pw
       ON pw.profile_id = p.profile_id
@@ -338,7 +342,8 @@ export async function createPlayerProgressStore(
       p.total_ratings_count,
       COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance,
       pp.completed_games_count,
-      pp.won_games_count
+      pp.won_games_count,
+      p.gender
     FROM profiles p
     LEFT JOIN profile_wallets pw
       ON pw.profile_id = p.profile_id
@@ -366,7 +371,8 @@ export async function createPlayerProgressStore(
       p.total_ratings_count,
       COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance,
       pp.completed_games_count,
-      pp.won_games_count
+      pp.won_games_count,
+      p.gender
     FROM profiles p
     LEFT JOIN profile_wallets pw
       ON pw.profile_id = p.profile_id
@@ -393,7 +399,8 @@ export async function createPlayerProgressStore(
       p.total_ratings_count,
       COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance,
       pp.completed_games_count,
-      pp.won_games_count
+      pp.won_games_count,
+      p.gender
     FROM profiles p
     LEFT JOIN profile_wallets pw
       ON pw.profile_id = p.profile_id

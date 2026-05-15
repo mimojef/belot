@@ -23,6 +23,7 @@ export type AuthStore = {
     email: string
     password: string
     displayName: string
+    gender?: 'male' | 'female' | null
   }) => { ok: true; sessionToken: string; session: AuthSessionSnapshot } | { ok: false; message: string }
   login: (input: {
     email: string
@@ -210,6 +211,7 @@ export async function createAuthStore(
       level,
       rank_title,
       skill_rating,
+      gender,
       status
     ) VALUES (
       ?,
@@ -223,6 +225,7 @@ export async function createAuthStore(
       1,
       'Ранг 1',
       1000,
+      ?,
       'active'
     );
   `)
@@ -334,6 +337,7 @@ export async function createAuthStore(
     email: string
     password: string
     displayName: string
+    gender?: 'male' | 'female' | null
   }): { ok: true; sessionToken: string; session: AuthSessionSnapshot } | { ok: false; message: string } {
     const email = normalizeEmail(input.email)
     const displayName = input.displayName.trim()
@@ -365,6 +369,7 @@ export async function createAuthStore(
     try {
       database.exec('BEGIN;')
       insertAccountStatement.run(accountId, email, passwordHash)
+      const gender = input.gender === 'male' || input.gender === 'female' ? input.gender : null
       insertProfileStatement.run(
         profileId,
         accountId,
@@ -372,6 +377,7 @@ export async function createAuthStore(
         normalizedUsername,
         displayName,
         normalizedDisplayName,
+        gender,
       )
       insertWalletStatement.run(
         profileId,

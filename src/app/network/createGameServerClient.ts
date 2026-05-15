@@ -17,6 +17,8 @@ export type PlayerGalleryImageSnapshot = {
   sortOrder: number
 }
 
+export type PlayerGender = 'male' | 'female'
+
 export type PlayerPublicProfileSnapshot = {
   profileId: string | null
   displayName: string
@@ -34,6 +36,7 @@ export type PlayerPublicProfileSnapshot = {
   totalRatingsCount: number | null
   yellowCoinsBalance: number | null
   galleryImages: PlayerGalleryImageSnapshot[]
+  gender: PlayerGender | null
   isOnline?: boolean
 }
 

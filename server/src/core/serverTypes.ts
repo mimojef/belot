@@ -37,6 +37,8 @@ export type ServerGamePhase =
   | 'scoring'
   | 'finished'
 
+export type PlayerGender = 'male' | 'female'
+
 export type PlayerIdentitySnapshot = {
   accountId: AccountId | null
   profileId: ProfileId | null
@@ -46,6 +48,7 @@ export type PlayerIdentitySnapshot = {
   level: number | null
   rankTitle: string | null
   skillRating: number | null
+  gender: PlayerGender | null
 }
 
 export type PlayerGalleryImageSnapshot = {
@@ -71,6 +74,7 @@ export type PlayerPublicProfileSnapshot = {
   totalRatingsCount: number | null
   yellowCoinsBalance: number | null
   galleryImages: PlayerGalleryImageSnapshot[]
+  gender: PlayerGender | null
   isOnline?: boolean
 }
 

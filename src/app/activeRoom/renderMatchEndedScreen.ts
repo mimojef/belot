@@ -479,6 +479,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
 
   const counterEl = root.querySelector<HTMLElement>('[data-prize-counter="1"]')
   if (counterEl && prizeAmount && prizeAmount > 0) {
+    const el = counterEl
     const duration = 1500
     const startTime = performance.now()
     const target = prizeAmount
@@ -488,7 +489,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
       const t = Math.min(elapsed / duration, 1)
       const eased = 1 - Math.pow(1 - t, 3)
       const current = Math.round(eased * target)
-      counterEl.textContent = `+${current.toLocaleString('bg-BG')}`
+      el.textContent = `+${current.toLocaleString('bg-BG')}`
       if (t < 1) {
         requestAnimationFrame(tick)
       }

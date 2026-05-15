@@ -269,6 +269,20 @@ async function submitAuthRequest(
   }
 }
 
+async function submitLogout(): Promise<void> {
+  try {
+    await fetch(`${getApiBaseUrl()}/api/auth/logout`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+  } catch {
+    // ignore network errors — proceed with local logout
+  }
+  currentAuthSession = null
+  syncLobbyWithAuthSession()
+  lobby.render()
+}
+
 async function loadPlayersDirectory(): Promise<
   | { ok: true; players: PlayerPublicProfileSnapshot[] }
   | { ok: false; message: string }
@@ -1156,11 +1170,12 @@ lobby = createLobbyFlowController({
       email,
       password,
     }),
-  onRegisterSubmit: (displayName, email, password) =>
+  onRegisterSubmit: (displayName, email, password, gender) =>
     submitAuthRequest('register', {
       displayName,
       email,
       password,
+      ...(gender !== null ? { gender } : {}),
     }),
   onProfileEditSubmit: (avatarFile, avatarCrop, galleryFiles) =>
     submitProfileUpdate(avatarFile, avatarCrop, galleryFiles),
@@ -1189,6 +1204,7 @@ lobby = createLobbyFlowController({
   onChatConversationsLoad: () => loadChatConversations(),
   onChatMessagesLoad: (friendshipId) => loadChatMessages(friendshipId),
   onChatSend: (friendshipId, body) => sendChatMessage(friendshipId, body),
+  onLogout: () => submitLogout(),
 })
 
 const activeRoom = createActiveRoomFlowController({

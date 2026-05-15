@@ -49,6 +49,7 @@ function createDefaultBotIdentity(botCode: string): PlayerIdentitySnapshot {
     level: null,
     rankTitle: null,
     skillRating: null,
+    gender: null,
   }
 }
 

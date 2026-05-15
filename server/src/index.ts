@@ -517,6 +517,7 @@ function createFallbackPublicProfileSnapshot(
     averageRating: null,
     totalRatingsCount: null,
     yellowCoinsBalance: null,
+    gender: identity.gender ?? null,
     galleryImages: [],
   }
 }
@@ -1279,12 +1280,16 @@ async function handleAuthRequest(
       return true
     }
 
+    const rawGender = getStringField(body, 'gender')
+    const gender = rawGender === 'male' || rawGender === 'female' ? rawGender : null
+
     const result =
       pathname === '/api/auth/register'
         ? authStore.register({
             email: getStringField(body, 'email'),
             password: getStringField(body, 'password'),
             displayName: getStringField(body, 'displayName'),
+            gender,
           })
         : authStore.login({
             email: getStringField(body, 'email'),

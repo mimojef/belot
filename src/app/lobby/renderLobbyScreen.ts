@@ -130,7 +130,8 @@ export type RenderLobbyScreenOptions = {
   onAuthModalClose: () => void
   onAuthModeChange: (mode: Exclude<LobbyAuthModalMode, 'closed'>) => void
   onLoginSubmit: (email: string, password: string) => void
-  onRegisterSubmit: (displayName: string, email: string, password: string) => void
+  onRegisterSubmit: (displayName: string, email: string, password: string, gender: 'male' | 'female' | null) => void
+  onLogoutClick: () => void
 }
 
 type LobbyStakeCard = {
@@ -246,7 +247,8 @@ export function syncProfilePopup(
     popupRootEl = document.createElement('div')
     document.body.appendChild(popupRootEl)
   }
-  popupRootEl.innerHTML = renderPlayerProfilePopup({
+  const el = popupRootEl!
+  el.innerHTML = renderPlayerProfilePopup({
     isOpen: true,
     seat: 'bottom',
     profile: popupState.profile,
@@ -254,7 +256,7 @@ export function syncProfilePopup(
     friendshipAction: popupState.friendshipAction,
     skipAnimation: !isFirstOpen,
   })
-  attachPopupListeners(popupRootEl, cb)
+  attachPopupListeners(el, cb)
 }
 
 function escapeHtml(value: string): string {
@@ -334,7 +336,7 @@ function renderAuthModal(state: LobbyScreenState): string {
     ? `
       <div style="display:grid;gap:16px;text-align:center;">
         <div style="font-size:28px;line-height:1.12;font-weight:900;color:#f8fafc;">
-          Регистрирай се и вземи ${escapeHtml(bonusText)} безплатни жълтици
+          Регистрирай се и вземи <span style="color:#d4a520;">${escapeHtml(bonusText)}</span> безплатни жълтици
         </div>
         <div style="font-size:15px;line-height:1.5;color:rgba(255,255,255,0.72);font-weight:700;">
           Създай профил, избери име и играй белот с други хора. Жълтиците, рангът и рейтингът ти ще се пазят.
@@ -355,6 +357,23 @@ function renderAuthModal(state: LobbyScreenState): string {
             Име в играта
             <input name="displayName" autocomplete="nickname" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
           </label>
+          <div style="display:grid;gap:6px;">
+            <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">Пол</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+              <label style="cursor:pointer;">
+                <input type="radio" name="gender" value="male" style="display:none;" class="belot-gender-radio">
+                <div data-gender-option="male" style="display:flex;align-items:center;gap:8px;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;padding:0 14px;font-size:14px;font-weight:700;color:rgba(255,255,255,0.72);transition:border-color 0.15s,background 0.15s;">
+                  <span style="font-size:18px;">♂</span> Мъж
+                </div>
+              </label>
+              <label style="cursor:pointer;">
+                <input type="radio" name="gender" value="female" style="display:none;" class="belot-gender-radio">
+                <div data-gender-option="female" style="display:flex;align-items:center;gap:8px;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;padding:0 14px;font-size:14px;font-weight:700;color:rgba(255,255,255,0.72);transition:border-color 0.15s,background 0.15s;">
+                  <span style="font-size:18px;">♀</span> Жена
+                </div>
+              </label>
+            </div>
+          </div>
         ` : ''}
         <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
           Email
@@ -377,7 +396,7 @@ function renderAuthModal(state: LobbyScreenState): string {
     <div data-lobby-auth-modal-root="1" style="position:fixed;inset:0;z-index:13000;display:flex;align-items:center;justify-content:center;padding:24px;">
       <div data-lobby-auth-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.74);backdrop-filter:blur(4px);"></div>
       <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,480px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
-        <button type="button" data-lobby-auth-modal-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
+        <button type="button" data-lobby-auth-modal-close="1" aria-label="Затвори" style="position:absolute;right:4px;top:4px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
         <div style="display:grid;gap:14px;">
           ${body}
           ${state.authErrorText ? `<div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;">${escapeHtml(state.authErrorText)}</div>` : ''}
@@ -654,26 +673,25 @@ function renderNav(state: LobbyScreenState): string {
           <img src="/assets/lobby/nav-icon-preview/nav-leaderboard-white.png" alt="" style="width:29px; height:30px; display:block; object-fit:contain;">
           Класация
         </button>
-        <button
-          type="button"
-          data-lobby-profile-button="1"
-          style="
-          display:flex; align-items:center; gap:10px;
-          padding:0 18px;
-          border:0;
-          background:${shopActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
-          background:transparent;
-          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:${shopActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
-          border-bottom:2px solid ${shopActive ? '#d4a520' : 'transparent'};
-          cursor:pointer;
-          height:100%;
-          cursor:pointer;
-          height:100%;
-        ">
-          <img src="/assets/lobby/nav-icon-preview/nav-profile-white.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain;">
-          Профил
-        </button>
+        ${state.profile.profileId !== null ? `
+          <button
+            type="button"
+            data-lobby-profile-button="1"
+            style="
+            display:flex; align-items:center; gap:10px;
+            padding:0 18px;
+            border:0;
+            background:transparent;
+            font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+            color:rgba(255,255,255,0.70);
+            border-bottom:2px solid transparent;
+            cursor:pointer;
+            height:100%;
+          ">
+            <img src="/assets/lobby/nav-icon-preview/nav-profile-white.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain;">
+            Профил
+          </button>
+        ` : ''}
         ${state.isAdmin ? `
           <button type="button" data-lobby-nav-admin="1" style="
             display:flex; align-items:center; gap:10px;
@@ -692,34 +710,145 @@ function renderNav(state: LobbyScreenState): string {
         ` : ''}
       </div>
 
-      <div style="display:flex; align-items:center; gap:16px; margin-left:auto;">
-        <button style="
-          background:none; border:none; cursor:pointer; padding:6px;
-          color:rgba(255,255,255,0.65); position:relative;
-        ">
-          <img src="/assets/lobby/nav-icon-preview/nav-notifications-white.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain;">
-          <span style="
-            position:absolute; top:4px; right:4px;
-            width:8px; height:8px; border-radius:50%;
-            background:#ef4444; border:1.5px solid #0a0a0a;
-          "></span>
-        </button>
-        <button style="
-          display:flex; align-items:center; gap:8px;
-          background: linear-gradient(135deg, #d4a520 0%, #b8891a 100%);
-          border: none; border-radius:8px;
-          padding:9px 16px;
-          cursor:pointer;
-          font-size:13px; font-weight:800; letter-spacing:0.05em; text-transform:uppercase;
-          color:#000000;
-          box-shadow: 0 2px 12px rgba(212,165,32,0.35);
-        ">
-          <span style="font-size:16px; font-weight:900;">+</span>
-          Купи Жълтици
-        </button>
-        <img src="/assets/lobby/icon-coin.png" alt="" style="width:33px; height:32px; display:block; object-fit:contain;">
+      <div style="display:flex; align-items:center; gap:12px; margin-left:auto;">
+        ${state.profile.profileId !== null ? `
+          <button style="
+            background:none; border:none; cursor:pointer; padding:6px;
+            color:rgba(255,255,255,0.65); position:relative;
+          ">
+            <img src="/assets/lobby/nav-icon-preview/nav-notifications-white.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain;">
+            <span style="
+              position:absolute; top:4px; right:4px;
+              width:8px; height:8px; border-radius:50%;
+              background:#ef4444; border:1.5px solid #0a0a0a;
+            "></span>
+          </button>
+          <button data-lobby-nav-logout="1" style="
+            display:flex; align-items:center; gap:8px;
+            background: none; border: none; border-radius:8px;
+            padding:9px 14px;
+            cursor:pointer;
+            font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+            color:rgba(255,255,255,0.75);
+          ">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+              <polyline points="16 17 21 12 16 7"/>
+              <line x1="21" y1="12" x2="9" y2="12"/>
+            </svg>
+            Изход
+          </button>
+        ` : `
+          <button data-lobby-auth-login="1" style="
+            display:flex; align-items:center; gap:8px;
+            background: transparent;
+            border: 1px solid rgba(212,165,32,0.55); border-radius:8px;
+            padding:9px 20px;
+            cursor:pointer;
+            font-size:13px; font-weight:800; letter-spacing:0.05em; text-transform:uppercase;
+            color:#d4a520;
+          ">
+            Вход
+          </button>
+          <button data-lobby-auth-register="1" style="
+            display:flex; align-items:center; gap:8px;
+            background: linear-gradient(135deg, #d4a520 0%, #b8891a 100%);
+            border: none; border-radius:8px;
+            padding:9px 20px;
+            cursor:pointer;
+            font-size:13px; font-weight:800; letter-spacing:0.05em; text-transform:uppercase;
+            color:#000000;
+            box-shadow: 0 2px 12px rgba(212,165,32,0.35);
+          ">
+            Регистрация
+          </button>
+        `}
       </div>
     </nav>
+  `
+}
+
+function renderGuestHeroCard(signupBonus: number): string {
+  const bonusText = formatAmount(signupBonus)
+  return `
+    <div style="display:flex; gap:16px; align-items:stretch; margin-bottom:16px;">
+      <div style="flex:0 1 985px; min-width:0; border:2px solid rgba(212,165,32,0.75); border-radius:14px; overflow:hidden; position:relative; box-sizing:border-box;">
+        <img src="/assets/lobby/hero-banner.png" alt="Добре дошъл в лобито"
+          style="width:100%; height:254px; max-width:100%; display:block; object-fit:contain;">
+      </div>
+
+      <div style="
+        flex:1 1 620px; min-width:580px; height:258px;
+        background: linear-gradient(160deg, #050505 0%, #0d0d0d 100%);
+        border: 2px solid rgba(212,165,32,0.75);
+        border-radius:14px;
+        padding:16px 28px;
+        box-sizing:border-box;
+      ">
+        <!-- top row: avatar + name/online + divider + bonus -->
+        <div style="display:flex; align-items:center; gap:24px; height:120px;">
+          <div style="position:relative; width:120px; height:120px; flex-shrink:0;">
+            <div style="
+              width:120px; height:120px; border-radius:12px;
+              border:3px solid rgba(212,165,32,0.55);
+              overflow:hidden; background:#111111;
+              box-shadow:0 0 0 2px rgba(0,0,0,0.65), 0 0 22px rgba(212,165,32,0.10);
+              box-sizing:border-box;
+              display:flex; align-items:center; justify-content:center;
+            ">
+              <span style="font-size:48px;font-weight:900;color:#d4a520;">Г</span>
+            </div>
+            <div style="
+              position:absolute; right:-6px; bottom:-6px;
+              width:18px; height:18px; border-radius:50%;
+              background:#22c55e; border:2px solid #050505;
+            "></div>
+          </div>
+
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:30px; line-height:1; font-weight:800; color:#ffffff;">Гост</div>
+            <div style="display:flex; align-items:center; gap:8px; margin-top:12px;">
+              <div style="width:14px; height:14px; border-radius:50%; background:#22c55e;"></div>
+              <span style="font-size:16px; color:rgba(255,255,255,0.88); font-weight:600;">Онлайн</span>
+            </div>
+          </div>
+
+          <div style="width:1px; height:92px; background:rgba(212,165,32,0.35);"></div>
+
+          <div style="width:210px;">
+            <div style="
+              display:flex; align-items:center; gap:10px;
+              background:rgba(212,165,32,0.07);
+              border:1px solid rgba(212,165,32,0.35);
+              border-radius:10px;
+              padding:14px 16px;
+            ">
+              <img src="/assets/lobby/icon-coin.png" alt="" style="width:28px;height:28px;object-fit:contain;flex-shrink:0;">
+              <div style="font-size:15px;font-weight:400;color:rgba(255,255,255,0.80);line-height:1.4;">
+                Регистрирай се и вземи <span style="color:#d4a520;font-weight:700;">${bonusText} жълтици</span> безплатно
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- divider -->
+        <div style="
+          height:1px;
+          background:linear-gradient(90deg, transparent 0%, rgba(212,165,32,0.55) 12%, rgba(212,165,32,0.55) 88%, transparent 100%);
+          margin:10px 0 12px;
+        "></div>
+
+        <!-- bottom: cta text -->
+        <div style="display:flex; align-items:center; justify-content:center; height:52px;">
+          <div style="font-size:14px;font-weight:600;color:rgba(255,255,255,0.50);line-height:1.5;text-align:center;">
+            <button data-lobby-auth-login="1" style="background:none;border:none;padding:0;cursor:pointer;color:#d4a520;font-size:20px;font-weight:400;">Влез</button>
+            <span style="color:#ffffff;font-size:20px;font-weight:400;"> или се </span>
+            <button data-lobby-auth-register="1" style="background:none;border:none;padding:0;cursor:pointer;color:#d4a520;font-size:20px;font-weight:400;">Регистрирай</button>
+            <span style="color:#ffffff;font-size:20px;font-weight:400;">, за да започнеш преживяването.</span>
+          </div>
+        </div>
+      </div>
+    </div>
   `
 }
 
@@ -1904,7 +2033,9 @@ export function renderLobbyScreen(
               : state.view === 'chat'
                 ? renderChatPanel(state)
               : `
-              ${renderHeroSection(profileName, state.isConnected, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle)}
+              ${state.profile.profileId !== null
+                ? renderHeroSection(profileName, state.isConnected, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle)
+                : renderGuestHeroCard(state.signupBonusYellowCoins ?? 0)}
               ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching)}
               ${renderBottomSection()}
             `}
@@ -2040,6 +2171,10 @@ export function renderLobbyScreen(
       }
     })
   })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-nav-logout="1"]')
+    ?.addEventListener('click', options.onLogoutClick)
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-nav-admin="1"]')
@@ -2672,6 +2807,12 @@ export function renderLobbyScreen(
     .querySelector<HTMLButtonElement>('[data-lobby-auth-login-button="1"]')
     ?.addEventListener('click', () => options.onAuthModeChange('login'))
 
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-auth-login="1"]')
+    .forEach((btn) => btn.addEventListener('click', () => options.onAuthModeChange('login')))
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-auth-register="1"]')
+    .forEach((btn) => btn.addEventListener('click', () => options.onAuthModeChange('register')))
+
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-auth-mode]').forEach((button) => {
     button.addEventListener('click', () => {
       const mode = button.dataset.lobbyAuthMode
@@ -2682,6 +2823,17 @@ export function renderLobbyScreen(
   })
 
   root.querySelectorAll<HTMLFormElement>('[data-lobby-auth-form]').forEach((form) => {
+    form.querySelectorAll<HTMLInputElement>('.belot-gender-radio').forEach((radio) => {
+      radio.addEventListener('change', () => {
+        form.querySelectorAll<HTMLElement>('[data-gender-option]').forEach((opt) => {
+          const isSelected = opt.dataset.genderOption === radio.value && radio.checked
+          opt.style.borderColor = isSelected ? '#d4a520' : 'rgba(212,165,32,0.34)'
+          opt.style.background = isSelected ? 'rgba(212,165,32,0.10)' : '#050505'
+          opt.style.color = isSelected ? '#f8fafc' : 'rgba(255,255,255,0.72)'
+        })
+      })
+    })
+
     form.addEventListener('submit', (event) => {
       event.preventDefault()
       const data = new FormData(form)
@@ -2689,7 +2841,9 @@ export function renderLobbyScreen(
       const password = String(data.get('password') ?? '')
 
       if (form.dataset.lobbyAuthForm === 'register') {
-        options.onRegisterSubmit(String(data.get('displayName') ?? ''), email, password)
+        const rawGender = String(data.get('gender') ?? '')
+        const gender = rawGender === 'male' || rawGender === 'female' ? rawGender : null
+        options.onRegisterSubmit(String(data.get('displayName') ?? ''), email, password, gender)
         return
       }
 
