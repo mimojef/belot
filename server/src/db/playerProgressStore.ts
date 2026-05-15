@@ -57,6 +57,8 @@ export type PlayerProgressStore = {
       }
     | { ok: false; message: string }
   isDisplayNameAvailable: (displayName: string) => boolean
+  seedCatalogBotsIfNeeded: () => void
+  refillCatalogBotWallets: () => void
   recordCompletedMatch: (room: ServerRoom) => void
   submitPartnerRating: (
     room: ServerRoom,
@@ -280,6 +282,7 @@ export async function createPlayerProgressStore(
   const listPublicHumanProfilesStatement = database.prepare(`
     SELECT
       p.profile_id,
+      p.profile_kind,
       p.display_name,
       p.avatar_url,
       p.level,
@@ -296,11 +299,13 @@ export async function createPlayerProgressStore(
       ON pw.profile_id = p.profile_id
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
-    WHERE p.profile_kind = 'human'
-      AND p.status = 'active'
-      AND p.account_id IS NOT NULL
+    WHERE p.status = 'active'
+      AND (
+        (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
+        OR p.profile_kind = 'bot'
+      )
     ORDER BY p.updated_at DESC, p.created_at DESC
-    LIMIT 200;
+    LIMIT 500;
   `)
 
   const listLeaderboardByBalanceStatement = database.prepare(`
@@ -322,9 +327,11 @@ export async function createPlayerProgressStore(
       ON pw.profile_id = p.profile_id
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
-    WHERE p.profile_kind = 'human'
-      AND p.status = 'active'
-      AND p.account_id IS NOT NULL
+    WHERE p.status = 'active'
+      AND (
+        (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
+        OR p.profile_kind = 'bot'
+      )
     ORDER BY COALESCE(pw.yellow_coins_balance, 0) DESC,
       COALESCE(pp.completed_games_count, 0) DESC,
       p.display_name ASC
@@ -350,9 +357,11 @@ export async function createPlayerProgressStore(
       ON pw.profile_id = p.profile_id
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
-    WHERE p.profile_kind = 'human'
-      AND p.status = 'active'
-      AND p.account_id IS NOT NULL
+    WHERE p.status = 'active'
+      AND (
+        (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
+        OR p.profile_kind = 'bot'
+      )
     ORDER BY COALESCE(pp.completed_games_count, 0) DESC,
       p.level DESC,
       COALESCE(pp.won_games_count, 0) DESC,
@@ -379,9 +388,11 @@ export async function createPlayerProgressStore(
       ON pw.profile_id = p.profile_id
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
-    WHERE p.profile_kind = 'human'
-      AND p.status = 'active'
-      AND p.account_id IS NOT NULL
+    WHERE p.status = 'active'
+      AND (
+        (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
+        OR p.profile_kind = 'bot'
+      )
     ORDER BY COALESCE(pp.won_games_count, 0) DESC,
       COALESCE(pp.completed_games_count, 0) DESC,
       p.display_name ASC
@@ -407,15 +418,29 @@ export async function createPlayerProgressStore(
       ON pw.profile_id = p.profile_id
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
-    WHERE p.profile_kind = 'human'
-      AND p.status = 'active'
-      AND p.account_id IS NOT NULL
+    WHERE p.status = 'active'
+      AND (
+        (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
+        OR p.profile_kind = 'bot'
+      )
       AND p.total_ratings_count > 0
     ORDER BY p.average_rating DESC,
       p.total_ratings_count DESC,
       COALESCE(pp.completed_games_count, 0) DESC,
       p.display_name ASC
     LIMIT 50;
+  `)
+
+  const refillCatalogBotWalletsStatement = database.prepare(`
+    UPDATE profile_wallets
+    SET
+      yellow_coins_balance = 50000,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE profile_id IN (
+      SELECT profile_id FROM profiles
+      WHERE profile_kind = 'bot' AND status = 'active'
+    )
+    AND yellow_coins_balance < 5000;
   `)
 
   const updateProfileAvatarStatement = database.prepare(`
@@ -665,7 +690,7 @@ export async function createPlayerProgressStore(
 
   function listPublicHumanProfiles(onlineProfileIds?: Set<string>): PlayerPublicProfileSnapshot[] {
     const rows = listPublicHumanProfilesStatement.all() as Array<
-      Parameters<typeof toPublicProfileSnapshot>[0]
+      Parameters<typeof toPublicProfileSnapshot>[0] & { profile_kind: string }
     >
 
     return rows.map((row) => {
@@ -674,8 +699,9 @@ export async function createPlayerProgressStore(
       ) as ProfileGalleryImageRow[]
 
       const snapshot = toPublicProfileSnapshot(row, galleryImages)
-      if (onlineProfileIds !== undefined) {
-        snapshot.isOnline = onlineProfileIds.has(row.profile_id)
+      const isCatalogBot = row.profile_kind === 'bot'
+      if (onlineProfileIds !== undefined || isCatalogBot) {
+        snapshot.isOnline = isCatalogBot || (onlineProfileIds?.has(row.profile_id) ?? false)
       }
       return snapshot
     })
@@ -1125,7 +1151,7 @@ export async function createPlayerProgressStore(
       }
     }
 
-    if (partner?.kind !== 'human' || partnerProfileId === null) {
+    if (partnerProfileId === null) {
       return {
         ok: false,
         message: 'Партньорът няма профил за оценяване.',
@@ -1152,6 +1178,84 @@ export async function createPlayerProgressStore(
     return { ok: true }
   }
 
+  function seedCatalogBotsIfNeeded(): void {
+    const countRow = database.prepare(
+      `SELECT COUNT(*) AS count FROM profiles WHERE profile_kind = 'bot'`,
+    ).get() as { count: number }
+
+    if (countRow.count >= 300) return
+
+    const maleNames = ['Иван','Петър','Георги','Стефан','Антон','Борис','Мартин','Калин','Симон','Кирил','Радо','Веско','Митко','Христо','Тодор','Алекс','Виктор','Тошко','Данко','Ивайло']
+    const femaleNames = ['Мария','Елена','Надя','Соня','Вера','Нора','Лора','Яна','Деси','Поли','Катя','Таня','Сара','Ева','Диана','Стела','Ани','Ина','Силвия','Биляна']
+
+    const insertBotProfile = database.prepare(`
+      INSERT OR IGNORE INTO profiles (
+        profile_id, account_id, profile_kind, username, normalized_username,
+        display_name, normalized_display_name, avatar_url,
+        level, rank_title, skill_rating, gender, status
+      ) VALUES (?, NULL, 'bot', NULL, NULL, ?, ?, NULL, 1, 'Ранг 1', 1000, ?, 'active')
+    `)
+
+    const insertBotWallet = database.prepare(`
+      INSERT OR IGNORE INTO profile_wallets (profile_id, yellow_coins_balance) VALUES (?, 50000)
+    `)
+
+    const insertBotProgress = database.prepare(`
+      INSERT OR IGNORE INTO profile_progress (
+        profile_id, completed_games_count, won_games_count, rank_level
+      ) VALUES (?, 0, 0, 1)
+    `)
+
+    const insertBotMetadata = database.prepare(`
+      INSERT OR IGNORE INTO bot_metadata (
+        profile_id, bot_code, logic_source, selection_weight,
+        auto_refill_threshold, auto_refill_target_balance
+      ) VALUES (?, ?, 'existing-core-v1', 10, 5000, 50000)
+    `)
+
+    function suffix(globalIndex: number): string {
+      return String(10000 + ((globalIndex * 7919 + 11111) % 90000))
+    }
+
+    function generateBots(
+      names: string[],
+      gender: 'male' | 'female',
+      profileIdPrefix: string,
+      globalOffset: number,
+    ): void {
+      let botIndex = 0
+      for (let nameIdx = 0; nameIdx < names.length; nameIdx++) {
+        const count = nameIdx < 10 ? 8 : 7
+        for (let variant = 0; variant < count; variant++) {
+          const displayName = `${names[nameIdx]}${suffix(globalOffset + botIndex)}`
+          const normalizedDisplayName = displayName.toLocaleLowerCase('bg-BG')
+          const profileId = `${profileIdPrefix}${String(botIndex).padStart(3, '0')}`
+          const botCode = `CATALOG_${profileId.toUpperCase().replace(/-/g, '_')}`
+          insertBotProfile.run(profileId, displayName, normalizedDisplayName, gender)
+          insertBotWallet.run(profileId)
+          insertBotProgress.run(profileId)
+          insertBotMetadata.run(profileId, botCode)
+          botIndex++
+        }
+      }
+    }
+
+    database.exec('BEGIN;')
+    try {
+      generateBots(maleNames, 'male', 'bot-m-', 0)
+      generateBots(femaleNames, 'female', 'bot-f-', 150)
+      database.exec('COMMIT;')
+      console.log('[catalog-bots] Seeded 300 catalog bot profiles.')
+    } catch (error) {
+      try { database.exec('ROLLBACK;') } catch { /* ignore */ }
+      console.error('[catalog-bots] Seeding failed:', error)
+    }
+  }
+
+  function refillCatalogBotWallets(): void {
+    refillCatalogBotWalletsStatement.run()
+  }
+
   function isDisplayNameAvailable(displayName: string): boolean {
     const normalized = normalizeProfileDisplayName(displayName)
     if (normalized === null) return false
@@ -1173,6 +1277,8 @@ export async function createPlayerProgressStore(
     updateProfileAvatar,
     addProfileGalleryImage,
     deleteProfileGalleryImage,
+    seedCatalogBotsIfNeeded,
+    refillCatalogBotWallets,
     recordCompletedMatch,
     submitPartnerRating,
     close,

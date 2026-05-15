@@ -142,6 +142,7 @@ function createBotPublicProfileSnapshot(
     averageRating: normalizeNullableNumber(source?.averageRating),
     totalRatingsCount: normalizeNullableCount(source?.totalRatingsCount),
     yellowCoinsBalance: normalizeNullableCount(source?.yellowCoinsBalance),
+    gender: null,
     galleryImages: normalizeGalleryImages(source),
   }
 }

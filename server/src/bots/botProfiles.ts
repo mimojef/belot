@@ -228,6 +228,7 @@ export function createBotIdentitySnapshot(
     level: profile.identity.level,
     rankTitle: profile.identity.rankTitle,
     skillRating: profile.identity.skillRating,
+    gender: null,
   }
 }
 

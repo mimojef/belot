@@ -120,6 +120,8 @@ const activeRoomSnapshotStore = await createActiveRoomSnapshotStore(
 const playerProgressStore = await createPlayerProgressStore(
   databaseBootstrap.databaseFilePath,
 )
+playerProgressStore.seedCatalogBotsIfNeeded()
+setInterval(() => playerProgressStore.refillCatalogBotWallets(), 5 * 60 * 1000)
 const adminSettingsStore = await createAdminSettingsStore(
   databaseBootstrap.databaseFilePath,
 )

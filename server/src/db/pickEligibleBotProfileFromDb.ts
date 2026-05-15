@@ -116,6 +116,7 @@ function mapCandidateToEligibleBotProfile(
       level: candidate.level,
       rankTitle: candidate.rank_title,
       skillRating: candidate.skill_rating,
+      gender: null,
     },
   }
 }
