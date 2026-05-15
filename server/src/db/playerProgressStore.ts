@@ -108,6 +108,7 @@ function toUniqueGuestNormalizedDisplayName(
 
 function toPublicProfileSnapshot(row: {
   profile_id: string
+  profile_kind?: string
   display_name: string
   avatar_url: string | null
   level: number
@@ -140,6 +141,7 @@ function toPublicProfileSnapshot(row: {
     totalRatingsCount: row.total_ratings_count,
     yellowCoinsBalance: row.yellow_coins_balance,
     gender,
+    isBot: row.profile_kind === 'bot',
     galleryImages: galleryImages.map((image) => ({
       imageId: image.image_id,
       imageUrl: image.thumbnail_url || image.image_url,
@@ -248,6 +250,7 @@ export async function createPlayerProgressStore(
   const selectPublicProfileStatement = database.prepare(`
     SELECT
       p.profile_id,
+      p.profile_kind,
       p.display_name,
       p.avatar_url,
       p.level,

@@ -1856,18 +1856,25 @@ export function createLobbyFlowController(
       return
     }
 
+    const targetIsBot = state.profilePopupProfile?.profileId === profileId && state.profilePopupProfile?.isBot === true
+
     state.friendActionLoadingProfileId = profileId
     state.friendActionMessageProfileId = profileId
-    state.friendActionMessage = null
+    state.friendActionMessage = targetIsBot ? 'Чака се отговор за покана за приятелство...' : null
     render()
 
-    const result = await options.onFriendRequestSubmit(profileId)
+    const [result] = await Promise.all([
+      options.onFriendRequestSubmit(profileId),
+      targetIsBot ? new Promise<void>((resolve) => setTimeout(resolve, 3000)) : Promise.resolve(),
+    ])
 
     state.friendActionLoadingProfileId = null
 
     if (!result.ok) {
       state.friendActionMessageProfileId = profileId
-      state.friendActionMessage = result.message
+      state.friendActionMessage = targetIsBot
+        ? 'Поканата беше отхвърлена от играча.'
+        : result.message
       render()
       return
     }

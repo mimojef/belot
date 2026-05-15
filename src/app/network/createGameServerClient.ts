@@ -38,6 +38,7 @@ export type PlayerPublicProfileSnapshot = {
   galleryImages: PlayerGalleryImageSnapshot[]
   gender: PlayerGender | null
   isOnline?: boolean
+  isBot?: boolean
 }
 
 export type FriendshipStatus = 'pending' | 'accepted' | 'blocked'
