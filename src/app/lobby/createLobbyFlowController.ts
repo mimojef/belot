@@ -200,6 +200,8 @@ type InternalLobbyFlowState = {
   profilePopupCanEdit: boolean
   profileEditorOpen: boolean
   profileEditorErrorText: string | null
+  profileNameChangeErrorText: string | null
+  profileNameChangeSuccessAmount: number | null
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
   serverRoomSeats: RoomSeatSnapshot[] | null
@@ -290,6 +292,8 @@ function createInitialState(): InternalLobbyFlowState {
     profilePopupCanEdit: true,
     profileEditorOpen: false,
     profileEditorErrorText: null,
+    profileNameChangeErrorText: null,
+    profileNameChangeSuccessAmount: null,
     authModalMode: 'closed',
     authErrorText: null,
     serverRoomSeats: null,
@@ -1110,6 +1114,8 @@ export function createLobbyFlowController(
         50000,
       profileEditorOpen: state.profileEditorOpen,
       profileEditorErrorText: state.profileEditorErrorText,
+      profileNameChangeErrorText: state.profileNameChangeErrorText,
+      profileNameChangeSuccessAmount: state.profileNameChangeSuccessAmount,
     }
 
     renderLobbyScreen(options.root, {
@@ -1147,12 +1153,16 @@ export function createLobbyFlowController(
       onProfileEditClick: () => {
         state.profileEditorOpen = true
         state.profileEditorErrorText = null
+        state.profileNameChangeErrorText = null
+        state.profileNameChangeSuccessAmount = null
         state.profilePopupOpen = false
         render()
       },
       onProfileEditClose: () => {
         state.profileEditorOpen = false
         state.profileEditorErrorText = null
+        state.profileNameChangeErrorText = null
+        state.profileNameChangeSuccessAmount = null
         render()
       },
       onProfileEditorFileError: (message) => {
@@ -1266,6 +1276,13 @@ export function createLobbyFlowController(
         state.authErrorText = null
         render()
       },
+      onAuthError: (message) => {
+        const el = options.root.querySelector<HTMLElement>('[data-lobby-auth-error="1"]')
+        if (el) {
+          el.textContent = message
+          el.style.display = ''
+        }
+      },
       onLoginSubmit: (email, password) => {
         void submitLogin(email, password)
       },
@@ -1311,7 +1328,8 @@ export function createLobbyFlowController(
       : 'Смяната на име временно не е налична.'
 
     if (errorText !== null) {
-      state.profileEditorErrorText = errorText
+      state.profileNameChangeErrorText = errorText
+      state.profileNameChangeSuccessAmount = null
       render()
       return
     }
@@ -1322,7 +1340,12 @@ export function createLobbyFlowController(
       state.localAvatarUrl = authSession.profile.avatarUrl
     }
 
-    state.profileEditorErrorText = null
+    state.profileNameChangeErrorText = null
+    state.profileNameChangeSuccessAmount =
+      state.adminSettings?.profileNameChangePrice ??
+      options.getProfileNameChangePrice?.() ??
+      50000
+    void new Audio('/audio/game-sounds/coins.mp3').play().catch(() => undefined)
     render()
   }
 
@@ -2126,8 +2149,8 @@ export function createLobbyFlowController(
       : 'Входът временно не е наличен.'
 
     if (errorText !== null) {
-      state.authErrorText = errorText
-      render()
+      const el = options.root.querySelector<HTMLElement>('[data-lobby-auth-error="1"]')
+      if (el) { el.textContent = errorText; el.style.display = '' }
       return
     }
 
@@ -2152,8 +2175,8 @@ export function createLobbyFlowController(
       : 'Регистрацията временно не е налична.'
 
     if (errorText !== null) {
-      state.authErrorText = errorText
-      render()
+      const el = options.root.querySelector<HTMLElement>('[data-lobby-auth-error="1"]')
+      if (el) { el.textContent = errorText; el.style.display = '' }
       return
     }
 

@@ -1,3 +1,5 @@
+const ALLOWED_DISPLAY_NAME_RE = /^[a-zA-Z0-9Ѐ-ӿ ]+$/
+
 function normalizeProfileIdentityText(
   value: string | null | undefined,
 ): string | null {
@@ -5,13 +7,17 @@ function normalizeProfileIdentityText(
     return null
   }
 
-  const trimmed = value.trim()
+  const trimmed = value.trim().replace(/\s+/g, ' ').normalize('NFKC')
 
   if (trimmed.length === 0) {
     return null
   }
 
-  return trimmed.replace(/\s+/g, ' ').normalize('NFKC').toLocaleLowerCase('bg-BG')
+  if (!ALLOWED_DISPLAY_NAME_RE.test(trimmed)) {
+    return null
+  }
+
+  return trimmed.toLocaleLowerCase('bg-BG')
 }
 
 export function normalizeProfileDisplayName(

@@ -79,6 +79,8 @@ export type LobbyScreenState = {
   profileNameChangePrice: number
   profileEditorOpen: boolean
   profileEditorErrorText: string | null
+  profileNameChangeErrorText: string | null
+  profileNameChangeSuccessAmount: number | null
 }
 
 export type RenderLobbyScreenOptions = {
@@ -129,6 +131,7 @@ export type RenderLobbyScreenOptions = {
   onGiftCoinsSubmit: (friendshipId: string, amount: number) => void
   onAuthModalClose: () => void
   onAuthModeChange: (mode: Exclude<LobbyAuthModalMode, 'closed'>) => void
+  onAuthError: (message: string) => void
   onLoginSubmit: (email: string, password: string) => void
   onRegisterSubmit: (displayName: string, email: string, password: string, gender: 'male' | 'female' | null) => void
   onLogoutClick: () => void
@@ -356,6 +359,7 @@ function renderAuthModal(state: LobbyScreenState): string {
           <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Име в играта
             <input name="displayName" autocomplete="nickname" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
+            <span style="font-size:11px;font-weight:700;letter-spacing:0;text-transform:none;color:rgba(255,255,255,0.45);">Само букви на кирилица, латиница, цифри и интервал.</span>
           </label>
           <div style="display:grid;gap:6px;">
             <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">Пол</div>
@@ -399,7 +403,7 @@ function renderAuthModal(state: LobbyScreenState): string {
         <button type="button" data-lobby-auth-modal-close="1" aria-label="Затвори" style="position:absolute;right:4px;top:4px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
         <div style="display:grid;gap:14px;">
           ${body}
-          ${state.authErrorText ? `<div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;">${escapeHtml(state.authErrorText)}</div>` : ''}
+          <div data-lobby-auth-error="1" style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;${state.authErrorText ? '' : 'display:none;'}">${state.authErrorText ? escapeHtml(state.authErrorText) : ''}</div>
         </div>
       </div>
     </div>
@@ -426,25 +430,32 @@ function renderProfileEditModal(state: LobbyScreenState): string {
       <div role="dialog" aria-modal="true" class="gold-scrollbar" style="position:relative;width:min(92vw,560px);max-height:90vh;overflow-y:auto;border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
         <button type="button" data-lobby-profile-editor-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
         <form data-lobby-profile-editor-form="1" style="display:grid;gap:16px;">
-          <div>
-            <div style="font-size:25px;line-height:1.1;font-weight:900;color:#f8fafc;">Редакция на профил</div>
-            <div style="margin-top:7px;font-size:13px;line-height:1.45;color:rgba(255,255,255,0.62);font-weight:700;">Името е заключено. Смяната му ще бъде платена с жълтици на следваща стъпка.</div>
-          </div>
+          <div style="font-size:25px;line-height:1.1;font-weight:900;color:#f8fafc;">Редакция на профил</div>
 
           <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Име в играта
             <input value="${escapeHtml(state.profile.displayName)}" disabled style="height:42px;border-radius:8px;border:1px solid rgba(255,255,255,0.10);background:#101010;color:rgba(255,255,255,0.58);padding:0 12px;font-size:15px;font-weight:700;outline:none;">
           </label>
+          ${state.profileNameChangeSuccessAmount !== null ? `
+            <div style="font-size:13px;font-weight:800;color:#4ade80;">
+              Успешно сменихте името на профила.
+              <span data-name-change-cost="1" style="color:#4ade80;">-0</span> жълтици
+            </div>
+          ` : ''}
 
           <div style="display:grid;gap:8px;border:1px solid rgba(212,165,32,0.22);border-radius:8px;background:rgba(255,255,255,0.035);padding:12px;">
-            <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
-              Ново име
-              <input name="paidDisplayName" maxlength="32" autocomplete="nickname" placeholder="Въведи ново име" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
-            </label>
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-              <div style="font-size:12px;line-height:1.35;color:rgba(255,255,255,0.62);font-weight:800;">
-                Цена: <strong style="color:#d4a520;">${formatAmount(nameChangePrice)}</strong> жълтици
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+              <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">Смяна на име</div>
+              <div style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.62);">
+                <strong style="color:#d4a520;">${formatAmount(nameChangePrice)}</strong> жълтици
               </div>
+            </div>
+            <label style="display:grid;gap:6px;">
+              <input name="paidDisplayName" maxlength="32" autocomplete="nickname" placeholder="Въведи ново име" style="height:42px;border-radius:8px;border:1px solid ${state.profileNameChangeErrorText ? 'rgba(248,113,113,0.60)' : 'rgba(212,165,32,0.34)'};background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
+              <span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.45);">Само букви на кирилица, латиница, цифри и интервал.</span>
+            </label>
+            ${state.profileNameChangeErrorText ? `<div style="border-radius:6px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:8px 10px;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.profileNameChangeErrorText)}</div>` : ''}
+            <div style="display:flex;justify-content:flex-end;">
               <button type="button" data-lobby-profile-name-change-submit="1" style="height:38px;padding:0 14px;border:1px solid rgba(212,165,32,0.58);border-radius:8px;background:#080808;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;">
                 Смени име
               </button>
@@ -2781,6 +2792,21 @@ export function renderLobbyScreen(
       options.onProfileNameChangeSubmit(input?.value.trim() ?? '')
     })
 
+  const costEl = root.querySelector<HTMLElement>('[data-name-change-cost="1"]')
+  if (costEl !== null && state.profileNameChangeSuccessAmount !== null) {
+    const target = state.profileNameChangeSuccessAmount
+    const duration = 900
+    const startTime = performance.now()
+    const el = costEl
+    function tickNameChangeCost(now: number): void {
+      const t = Math.min((now - startTime) / duration, 1)
+      const eased = 1 - Math.pow(1 - t, 3)
+      el.textContent = `-${Math.round(eased * target).toLocaleString('bg-BG')}`
+      if (t < 1) requestAnimationFrame(tickNameChangeCost)
+    }
+    requestAnimationFrame(tickNameChangeCost)
+  }
+
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-gallery-delete]').forEach((button) => {
     button.addEventListener('click', () => {
       const imageId = button.dataset.lobbyGalleryDelete?.trim() ?? ''
@@ -2790,6 +2816,14 @@ export function renderLobbyScreen(
       }
     })
   })
+
+  function showAuthError(message: string): void {
+    const el = root.querySelector<HTMLElement>('[data-lobby-auth-error="1"]')
+    if (el) {
+      el.textContent = message
+      el.style.display = ''
+    }
+  }
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-auth-modal-close="1"]')
@@ -2823,6 +2857,16 @@ export function renderLobbyScreen(
   })
 
   root.querySelectorAll<HTMLFormElement>('[data-lobby-auth-form]').forEach((form) => {
+    const emailInput = form.querySelector<HTMLInputElement>('input[type="email"]')
+    if (emailInput) {
+      emailInput.addEventListener('invalid', () => {
+        emailInput.setCustomValidity('Моля въведете валиден e-mail.')
+      })
+      emailInput.addEventListener('input', () => {
+        emailInput.setCustomValidity('')
+      })
+    }
+
     form.querySelectorAll<HTMLInputElement>('.belot-gender-radio').forEach((radio) => {
       radio.addEventListener('change', () => {
         form.querySelectorAll<HTMLElement>('[data-gender-option]').forEach((opt) => {
@@ -2843,6 +2887,10 @@ export function renderLobbyScreen(
       if (form.dataset.lobbyAuthForm === 'register') {
         const rawGender = String(data.get('gender') ?? '')
         const gender = rawGender === 'male' || rawGender === 'female' ? rawGender : null
+        if (gender === null) {
+          showAuthError('Моля избери пол.')
+          return
+        }
         options.onRegisterSubmit(String(data.get('displayName') ?? ''), email, password, gender)
         return
       }

@@ -713,7 +713,14 @@ export async function createPlayerProgressStore(
     const displayName = displayNameRaw.trim().replace(/\s+/g, ' ')
     const normalizedDisplayName = normalizeProfileDisplayName(displayName)
 
-    if (normalizedDisplayName === null || displayName.length < 2 || displayName.length > 32) {
+    if (normalizedDisplayName === null) {
+      return {
+        ok: false,
+        message: 'Името може да съдържа само букви на кирилица, латиница, цифри и интервал.',
+      }
+    }
+
+    if (displayName.length < 2 || displayName.length > 32) {
       return {
         ok: false,
         message: 'Името трябва да е между 2 и 32 символа.',

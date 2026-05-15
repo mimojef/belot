@@ -60,10 +60,12 @@ const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30
 const PASSWORD_MIN_LENGTH = 6
 const SCRYPT_KEY_LENGTH = 64
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
+
 function normalizeEmail(value: string): string | null {
   const trimmed = value.trim().toLocaleLowerCase('en-US')
 
-  if (!trimmed || !trimmed.includes('@') || trimmed.length > 254) {
+  if (!trimmed || trimmed.length > 254 || !EMAIL_RE.test(trimmed)) {
     return null
   }
 
@@ -352,7 +354,7 @@ export async function createAuthStore(
     }
 
     if (normalizedDisplayName === null) {
-      return { ok: false, message: 'Въведи име в играта.' }
+      return { ok: false, message: 'Името може да съдържа само букви на кирилица, латиница, цифри и интервал.' }
     }
 
     const existingAccount = selectAccountByEmailStatement.get(email) as AccountRow | undefined
