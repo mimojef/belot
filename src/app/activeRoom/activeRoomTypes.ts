@@ -39,6 +39,9 @@ export type CreateActiveRoomFlowControllerOptions = {
   submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
   resumeHumanControl: (roomId: string) => void
   submitPartnerRating: (roomId: string, ratingValue: number) => void
+  sendReplayVote: (roomId: string) => void
+  sendLeaveMatchVote: (roomId: string) => void
+  requestPlayerProfile: (roomId: string, seat: Seat) => void
   showLobby: (errorText?: string | null) => void
   startNewGame: (stake: MatchStake, displayName?: string) => void
 }

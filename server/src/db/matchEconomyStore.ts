@@ -7,8 +7,12 @@ import {
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
+const BOT_WALLET_REFILL_THRESHOLD = 5_000
+const BOT_WALLET_REFILL_AMOUNT = 50_000
+
 export type MatchEconomyStore = {
   hasEnoughBalance: (profileId: ProfileId, amount: number) => boolean
+  topUpDepletedBotWallets: (room: ServerRoom) => void
   collectQueueStake: (
     queueEntryId: string,
     profileId: ProfileId,
@@ -20,6 +24,10 @@ export type MatchEconomyStore = {
     stakeAmount: number,
   ) => { ok: true } | { ok: false; message: string }
   collectRoomStakes: (
+    room: ServerRoom,
+    stakeAmount: number,
+  ) => { ok: true } | { ok: false; message: string }
+  collectBotStakes: (
     room: ServerRoom,
     stakeAmount: number,
   ) => { ok: true } | { ok: false; message: string }
@@ -80,7 +88,22 @@ function getHumanProfileIds(room: ServerRoom): ProfileId[] {
   return profileIds
 }
 
-function getWinningHumanProfileIds(room: ServerRoom, winnerTeam: Team): ProfileId[] {
+function getBotProfileIds(room: ServerRoom): ProfileId[] {
+  const profileIds: ProfileId[] = []
+
+  for (const seat of SERVER_SEAT_ORDER) {
+    const participant = room.seats[seat].participant
+    const profileId = participant?.kind === 'bot' ? (participant.botProfileId ?? null) : null
+
+    if (profileId !== null) {
+      profileIds.push(profileId)
+    }
+  }
+
+  return profileIds
+}
+
+function getWinningProfileIds(room: ServerRoom, winnerTeam: Team): ProfileId[] {
   const profileIds: ProfileId[] = []
 
   for (const seat of SERVER_SEAT_ORDER) {
@@ -89,11 +112,14 @@ function getWinningHumanProfileIds(room: ServerRoom, winnerTeam: Team): ProfileI
     }
 
     const participant = room.seats[seat].participant
-    const profileId =
-      participant?.identity.profileId ?? participant?.publicProfile?.profileId ?? null
 
-    if (participant?.kind === 'human' && profileId !== null) {
-      profileIds.push(profileId)
+    if (participant?.kind === 'human') {
+      const profileId =
+        participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+      if (profileId !== null) profileIds.push(profileId)
+    } else if (participant?.kind === 'bot') {
+      const profileId = participant.botProfileId ?? null
+      if (profileId !== null) profileIds.push(profileId)
     }
   }
 
@@ -323,6 +349,7 @@ export async function createMatchEconomyStore(
       }
     }
 
+    const scope = `${room.id}:v${room.game.stateVersion}`
     const profileIds = getHumanProfileIds(room)
 
     try {
@@ -331,7 +358,7 @@ export async function createMatchEconomyStore(
       for (const profileId of profileIds) {
         ensureWalletStatement.run(profileId)
 
-        if (hasLedgerEntry(room.id, profileId, 'stake_debit')) {
+        if (hasLedgerEntry(scope, profileId, 'stake_debit')) {
           continue
         }
 
@@ -351,7 +378,7 @@ export async function createMatchEconomyStore(
 
         insertLedgerStatement.run(
           randomUUID(),
-          room.id,
+          scope,
           profileId,
           'stake_debit',
           stakeAmount,
@@ -377,6 +404,84 @@ export async function createMatchEconomyStore(
     return { ok: true }
   }
 
+  function topUpDepletedBotWallets(room: ServerRoom): void {
+    const botProfileIds = getBotProfileIds(room)
+    if (botProfileIds.length === 0) return
+
+    try {
+      database.exec('BEGIN;')
+      for (const profileId of botProfileIds) {
+        ensureWalletStatement.run(profileId)
+        const balance = getWalletBalance(profileId)
+        if (balance < BOT_WALLET_REFILL_THRESHOLD) {
+          creditWalletStatement.run(BOT_WALLET_REFILL_AMOUNT - balance, profileId)
+        }
+      }
+      database.exec('COMMIT;')
+    } catch (error) {
+      try { database.exec('ROLLBACK;') } catch {}
+      console.error('[match-economy] bot wallet top-up failed:', error)
+    }
+  }
+
+  function collectBotStakes(
+    room: ServerRoom,
+    stakeAmount: number,
+  ): { ok: true } | { ok: false; message: string } {
+    if (!Number.isInteger(stakeAmount) || stakeAmount <= 0) {
+      return { ok: false, message: 'Невалиден залог за бот.' }
+    }
+
+    const scope = `${room.id}:v${room.game.stateVersion}`
+    const botProfileIds = getBotProfileIds(room)
+
+    if (botProfileIds.length === 0) {
+      return { ok: true }
+    }
+
+    try {
+      database.exec('BEGIN;')
+
+      for (const profileId of botProfileIds) {
+        ensureWalletStatement.run(profileId)
+
+        if (hasLedgerEntry(scope, profileId, 'stake_debit')) {
+          continue
+        }
+
+        const debitResult = debitWalletStatement.run(
+          stakeAmount,
+          profileId,
+          stakeAmount,
+        ) as { changes?: number }
+
+        if ((debitResult.changes ?? 0) === 0) {
+          database.exec('ROLLBACK;')
+          return { ok: false, message: 'Бот няма достатъчно баланс за залога.' }
+        }
+
+        insertLedgerStatement.run(
+          randomUUID(),
+          scope,
+          profileId,
+          'stake_debit',
+          stakeAmount,
+          getWalletBalance(profileId),
+        )
+      }
+
+      database.exec('COMMIT;')
+    } catch (error) {
+      try { database.exec('ROLLBACK;') } catch {}
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : 'Залозите за ботовете не бяха начислени.',
+      }
+    }
+
+    return { ok: true }
+  }
+
   function payoutMatchWinners(room: ServerRoom): { ok: true } | { ok: false; message: string } {
     const stakeAmount = room.config.stakeAmount ?? null
     const winnerTeam = getMatchWinnerTeam(room)
@@ -393,7 +498,8 @@ export async function createMatchEconomyStore(
     }
 
     const prizeAmount = getPrizeAmount(stakeAmount)
-    const winnerProfileIds = getWinningHumanProfileIds(room, winnerTeam)
+    const winnerProfileIds = getWinningProfileIds(room, winnerTeam)
+    const scope = `${room.id}:v${room.game.stateVersion}`
 
     try {
       database.exec('BEGIN;')
@@ -401,14 +507,14 @@ export async function createMatchEconomyStore(
       for (const profileId of winnerProfileIds) {
         ensureWalletStatement.run(profileId)
 
-        if (hasLedgerEntry(room.id, profileId, 'winner_payout')) {
+        if (hasLedgerEntry(scope, profileId, 'winner_payout')) {
           continue
         }
 
         creditWalletStatement.run(prizeAmount, profileId)
         insertLedgerStatement.run(
           randomUUID(),
-          room.id,
+          scope,
           profileId,
           'winner_payout',
           prizeAmount,
@@ -440,9 +546,11 @@ export async function createMatchEconomyStore(
 
   return {
     hasEnoughBalance,
+    topUpDepletedBotWallets,
     collectQueueStake,
     refundQueueStake,
     collectRoomStakes,
+    collectBotStakes,
     payoutMatchWinners,
     close,
   }

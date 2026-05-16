@@ -840,6 +840,7 @@ export function createCuttingSeatPanelHtml(
           "
         >
           <div
+            data-profile-seat-btn="${seat.seat}"
             style="
               position:absolute;
               left:4px;
@@ -859,6 +860,8 @@ export function createCuttingSeatPanelHtml(
               font-size:45px;
               font-weight:900;
               letter-spacing:0.04em;
+              cursor:pointer;
+              pointer-events:auto;
             "
           >
             ${renderCuttingSeatAvatar(seat, visualSeat, 18, escapeHtml)}
@@ -947,6 +950,7 @@ export function createCuttingSeatPanelHtml(
         "
       >
         <div
+          data-profile-seat-btn="${seat.seat}"
           style="
             position:absolute;
             top:8px;
@@ -966,6 +970,8 @@ export function createCuttingSeatPanelHtml(
             font-size:56px;
             font-weight:900;
             letter-spacing:0.04em;
+            cursor:pointer;
+            pointer-events:auto;
           "
         >
           ${renderCuttingSeatAvatar(seat, visualSeat, 16, escapeHtml)}

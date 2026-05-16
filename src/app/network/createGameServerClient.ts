@@ -205,6 +205,14 @@ export type ClientMessage =
       roomId: string
       ratingValue: number
     }
+  | {
+      type: 'request_replay'
+      roomId: string
+    }
+  | {
+      type: 'request_leave_match'
+      roomId: string
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -354,6 +362,8 @@ export type RoomMatchEndedSnapshot = {
   targetScore: number
   finalScore: RoomTeamPointsSnapshot
   endedAt: number
+  replayVotes: Seat[]
+  leaveVotes: Seat[]
 }
 
 export type RoomScoreSnapshot = {
@@ -551,6 +561,8 @@ export type GameServerClient = {
   submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
   resumeHumanControl: (roomId: string) => void
   submitPartnerRating: (roomId: string, ratingValue: number) => void
+  sendReplayVote: (roomId: string) => void
+  sendLeaveMatchVote: (roomId: string) => void
 }
 
 function getDefaultServerUrl(): string {
@@ -743,6 +755,20 @@ export function createGameServerClient(
     })
   }
 
+  function sendReplayVote(roomId: string): void {
+    send({
+      type: 'request_replay',
+      roomId,
+    })
+  }
+
+  function sendLeaveMatchVote(roomId: string): void {
+    send({
+      type: 'request_leave_match',
+      roomId,
+    })
+  }
+
   return {
     connect,
     disconnect,
@@ -760,5 +786,7 @@ export function createGameServerClient(
     submitPlayCard,
     resumeHumanControl,
     submitPartnerRating,
+    sendReplayVote,
+    sendLeaveMatchVote,
   }
 }

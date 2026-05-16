@@ -140,39 +140,6 @@ export function listEligibleBotProfilesFromDb(
     database.exec('PRAGMA foreign_keys = ON;')
 
     const excludedProfilesClause = createExcludedProfilesClause(excludedProfileIds)
-    const eligibleBaseSql = `
-      FROM profiles p
-      JOIN profile_wallets pw
-        ON pw.profile_id = p.profile_id
-      JOIN bot_metadata bm
-        ON bm.profile_id = p.profile_id
-      JOIN bot_allowed_stakes bas
-        ON bas.profile_id = p.profile_id
-      WHERE p.profile_kind = 'bot'
-        AND p.status = 'active'
-        AND bas.stake_amount = ?
-        ${excludedProfilesClause.sql}
-    `
-    const refillCandidateParams = [stake, ...excludedProfilesClause.params]
-    const refillSql = `
-      UPDATE profile_wallets
-      SET
-        yellow_coins_balance = (
-          SELECT bm.auto_refill_target_balance
-          FROM bot_metadata bm
-          WHERE bm.profile_id = profile_wallets.profile_id
-        ),
-        updated_at = CURRENT_TIMESTAMP
-      WHERE profile_id IN (
-        SELECT p.profile_id
-        ${eligibleBaseSql}
-      )
-      AND yellow_coins_balance < (
-        SELECT bm.auto_refill_threshold
-        FROM bot_metadata bm
-        WHERE bm.profile_id = profile_wallets.profile_id
-      );
-    `
     const candidateSql = `
       SELECT
         p.profile_id,
@@ -188,30 +155,29 @@ export function listEligibleBotProfilesFromDb(
         p.rank_title,
         p.skill_rating,
         pw.yellow_coins_balance
-      ${eligibleBaseSql}
+      FROM profiles p
+      JOIN profile_wallets pw
+        ON pw.profile_id = p.profile_id
+      JOIN bot_metadata bm
+        ON bm.profile_id = p.profile_id
+      JOIN bot_allowed_stakes bas
+        ON bas.profile_id = p.profile_id
+      WHERE p.profile_kind = 'bot'
+        AND p.status = 'active'
+        AND bas.stake_amount = ?
         AND pw.yellow_coins_balance >= ?
+        ${excludedProfilesClause.sql}
       ORDER BY p.profile_id ASC;
     `
-    const candidateParams = [stake, ...excludedProfilesClause.params, stake]
-
-    database.exec('BEGIN;')
+    const candidateParams = [stake, stake, ...excludedProfilesClause.params]
 
     try {
-      database.prepare(refillSql).run(...refillCandidateParams)
-
       const candidates = database.prepare(candidateSql).all(
         ...candidateParams,
       ) as CandidateRow[]
 
-      database.exec('COMMIT;')
       return candidates.map(mapCandidateToEligibleBotProfile)
     } catch {
-      try {
-        database.exec('ROLLBACK;')
-      } catch {
-        // ignore rollback failure and preserve the safe fallback path
-      }
-
       return null
     }
   } finally {

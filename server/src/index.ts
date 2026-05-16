@@ -394,6 +394,8 @@ function tickRoomGameRuntimes(): void {
         )
       }
 
+      matchEconomyStore.topUpDepletedBotWallets(nextRoom)
+
       if (nextRooms === null) {
         nextRooms = {
           ...serverState.rooms,
@@ -560,7 +562,7 @@ function sendPlayerProfileToConnection(
   const participant = room.seats[seat]?.participant ?? null
   const profileId = participant?.identity.profileId ?? participant?.publicProfile?.profileId ?? null
   const dbProfile =
-    participant?.kind === 'human' && profileId !== null
+    profileId !== null
       ? playerProgressStore.getPublicProfile(profileId)
       : null
 
@@ -903,6 +905,11 @@ function processMatchmaking(): void {
       cleanupPendingGroup(result.group.groupId)
       broadcastMatchmakingStatusForStake(result.group.stake)
       continue
+    }
+
+    const botStakeResult = matchEconomyStore.collectBotStakes(initializedRoom, result.group.stake)
+    if (!botStakeResult.ok) {
+      console.error(`[match-economy] bot stake collection failed room=${initializedRoom.id}: ${botStakeResult.message}`)
     }
 
     const debitNotifyNow = Date.now()
@@ -3021,6 +3028,147 @@ wsServer.on('connection', (socket, request) => {
           roomId: message.roomId,
           ratingValue: message.ratingValue,
         })
+        return
+      }
+
+      if (message.type === 'request_replay') {
+        const replayConnection = getConnectionById(serverState, connection.id)
+        const replaySeat = replayConnection?.currentSeat ?? null
+        const replayRoom = replayConnection?.currentRoomId
+          ? (serverState.rooms[replayConnection.currentRoomId] ?? null)
+          : null
+
+        if (!replayRoom || replaySeat === null || replayConnection?.currentRoomId !== message.roomId) {
+          return
+        }
+
+        const authState = replayRoom.game.authoritativeState
+        if (!authState || 'kind' in authState || authState.phase !== 'match-ended') {
+          return
+        }
+
+        const currentVotes = replayRoom.replayVotes ?? []
+        if (currentVotes.includes(replaySeat)) {
+          return
+        }
+
+        const updatedVotes = [...currentVotes, replaySeat]
+
+        const occupiedSeats = SERVER_SEAT_ORDER.filter((s) => replayRoom.seats[s].participant !== null)
+        const allVoted = occupiedSeats.every((s) => updatedVotes.includes(s))
+
+        function applyReplayRestart(room: ServerRoom): void {
+          const now = Date.now()
+          const resetRoom: ServerRoom = {
+            ...room,
+            replayVotes: [],
+            leaveVotes: [],
+            updatedAt: now,
+            game: {
+              ...room.game,
+              phase: null,
+              stateVersion: room.game.stateVersion + 1,
+              startedAt: null,
+              updatedAt: now,
+              activeTimerId: null,
+              timerDeadlineAt: null,
+              authoritativeState: null,
+            },
+          }
+          const restartedRoom = initializeRoomAuthoritativeGameState(resetRoom)
+          const stakeAmount = restartedRoom.config.stakeAmount ?? 0
+          if (stakeAmount > 0) {
+            const stakeResult = matchEconomyStore.collectRoomStakes(restartedRoom, stakeAmount)
+            if (!stakeResult.ok) {
+              console.error(`[match-economy] replay stake collection failed room=${restartedRoom.id}: ${stakeResult.message}`)
+            }
+            const botReplayStakeResult = matchEconomyStore.collectBotStakes(restartedRoom, stakeAmount)
+            if (!botReplayStakeResult.ok) {
+              console.error(`[match-economy] replay bot stake collection failed room=${restartedRoom.id}: ${botReplayStakeResult.message}`)
+            }
+          }
+          serverState = upsertServerRoomWithSnapshot(serverState, restartedRoom)
+          ensureRoomGameRuntime(roomGameRuntimeRegistry, restartedRoom)
+          broadcastRoomSnapshots(restartedRoom, socketRegistry)
+        }
+
+        if (allVoted) {
+          applyReplayRestart(replayRoom)
+        } else {
+          const votedRoom: ServerRoom = { ...replayRoom, replayVotes: updatedVotes }
+          serverState = upsertServerRoom(serverState, votedRoom)
+          broadcastRoomSnapshots(votedRoom, socketRegistry)
+
+          // Ако това е първото гласуване от човек — ботовете гласуват автоматично по 1 сек.
+          const wasFirstHumanVote = !currentVotes.some(
+            (s) => replayRoom.seats[s].participant?.kind === 'human',
+          )
+          if (wasFirstHumanVote) {
+            const botSeats = SERVER_SEAT_ORDER.filter(
+              (s) => replayRoom.seats[s].participant?.kind === 'bot',
+            )
+            botSeats.forEach((botSeat, index) => {
+              setTimeout(() => {
+                const latestRoom = serverState.rooms[message.roomId] ?? null
+                if (!latestRoom) return
+                const latestAuth = latestRoom.game.authoritativeState
+                if (!latestAuth || 'kind' in latestAuth || latestAuth.phase !== 'match-ended') return
+                if (latestRoom.replayVotes.includes(botSeat)) return
+                if (latestRoom.leaveVotes?.includes(botSeat)) return
+
+                const botParticipant = latestRoom.seats[botSeat].participant
+                const botProfileId = botParticipant?.kind === 'bot' ? (botParticipant.botProfileId ?? null) : null
+                const stake = latestRoom.config.stakeAmount ?? 0
+                const canAffordReplay = botProfileId !== null && stake > 0
+                  ? matchEconomyStore.hasEnoughBalance(botProfileId, stake)
+                  : true
+
+                if (!canAffordReplay) {
+                  const botLeaveRoom: ServerRoom = {
+                    ...latestRoom,
+                    leaveVotes: [...(latestRoom.leaveVotes ?? []), botSeat],
+                  }
+                  serverState = upsertServerRoom(serverState, botLeaveRoom)
+                  broadcastRoomSnapshots(botLeaveRoom, socketRegistry)
+                  return
+                }
+
+                const botVotes = [...latestRoom.replayVotes, botSeat]
+                const allSeats = SERVER_SEAT_ORDER.filter((s) => latestRoom.seats[s].participant !== null)
+                if (allSeats.every((s) => botVotes.includes(s))) {
+                  applyReplayRestart(latestRoom)
+                } else {
+                  const botVotedRoom: ServerRoom = { ...latestRoom, replayVotes: botVotes }
+                  serverState = upsertServerRoom(serverState, botVotedRoom)
+                  broadcastRoomSnapshots(botVotedRoom, socketRegistry)
+                }
+              }, (index + 1) * 1000)
+            })
+          }
+        }
+        return
+      }
+
+      if (message.type === 'request_leave_match') {
+        const leaveConn = getConnectionById(serverState, connection.id)
+        const leaveSeat = leaveConn?.currentSeat ?? null
+        const leaveRoom = leaveConn?.currentRoomId
+          ? (serverState.rooms[leaveConn.currentRoomId] ?? null)
+          : null
+
+        if (leaveRoom && leaveSeat !== null && leaveConn?.currentRoomId === message.roomId) {
+          const leaveAuth = leaveRoom.game.authoritativeState
+          if (leaveAuth && !('kind' in leaveAuth) && leaveAuth.phase === 'match-ended') {
+            if (!leaveRoom.leaveVotes.includes(leaveSeat)) {
+              const updatedLeaveRoom: ServerRoom = {
+                ...leaveRoom,
+                leaveVotes: [...(leaveRoom.leaveVotes ?? []), leaveSeat],
+              }
+              serverState = upsertServerRoom(serverState, updatedLeaveRoom)
+              broadcastRoomSnapshots(updatedLeaveRoom, socketRegistry)
+            }
+          }
+        }
         return
       }
 

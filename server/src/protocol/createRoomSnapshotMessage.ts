@@ -231,6 +231,8 @@ function createScoringSnapshot(
 
 function createMatchEndedSnapshot(
   authoritativeState: ServerAuthoritativeGameState,
+  replayVotes: import('../core/serverTypes.js').Seat[],
+  leaveVotes: import('../core/serverTypes.js').Seat[],
 ): RoomMatchEndedSnapshot | null {
   const matchEnded = authoritativeState.matchEnded
 
@@ -243,6 +245,8 @@ function createMatchEndedSnapshot(
     targetScore: matchEnded.targetScore,
     finalScore: createTeamPointsSnapshot(matchEnded.finalScore),
     endedAt: matchEnded.endedAt,
+    replayVotes,
+    leaveVotes,
   }
 }
 
@@ -286,7 +290,7 @@ function createGameSnapshot(
     bidding: createBiddingSnapshot(authoritativeState, yourSeat),
     playing: createPlayingSnapshot(authoritativeState, yourSeat),
     scoring: createScoringSnapshot(authoritativeState),
-    matchEnded: createMatchEndedSnapshot(authoritativeState),
+    matchEnded: createMatchEndedSnapshot(authoritativeState, room.replayVotes ?? [], room.leaveVotes ?? []),
     declarations: authoritativeState.declarations.map(createDeclarationSnapshot),
     score: {
       match: createTeamPointsSnapshot(authoritativeState.score.match),

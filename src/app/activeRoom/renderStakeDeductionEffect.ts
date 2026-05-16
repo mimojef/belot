@@ -19,12 +19,15 @@ function getEffectCenter(): { x: number; y: number } {
   return { x: window.innerWidth / 2, y: window.innerHeight / 2 }
 }
 
-export function showStakeDeductionEffect(stakeAmount: number): void {
+export function showStakeDeductionEffect(
+  stakeAmount: number,
+  centerOverride?: { x: number; y: number },
+): void {
   const audio = new Audio('/audio/game-sounds/coins.mp3')
   audio.volume = 0.9
   void audio.play().catch(() => {})
 
-  const center = getEffectCenter()
+  const center = centerOverride ?? getEffectCenter()
 
   const label = document.createElement('div')
   label.style.position = 'fixed'

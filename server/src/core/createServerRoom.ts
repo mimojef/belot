@@ -78,5 +78,7 @@ export function createServerRoom(options: CreateServerRoomOptions = {}): ServerR
       timerDeadlineAt: null,
       authoritativeState: createInitialAuthoritativeRoomState(roomId, now, config),
     },
+    replayVotes: [],
+    leaveVotes: [],
   }
 }

@@ -98,6 +98,12 @@ import { renderPlayingScreen, type RenderPlayingScreenOptions } from './renderPl
 import { renderScoringScreen } from './renderScoringPanel'
 import { renderMatchEndedScreen } from './renderMatchEndedScreen'
 import { renderScoreHud } from './renderScoreHud'
+import { showStakeDeductionEffect } from './renderStakeDeductionEffect'
+import {
+  removeSeatProfileOverlay,
+  showSeatProfileOverlay,
+  updateSeatProfileOverlay,
+} from './renderSeatProfileOverlay'
 
 const SEAT_LABELS: Record<Seat, string> = {
   bottom: 'Долу',
@@ -139,6 +145,39 @@ export function createActiveRoomFlowController(
   let scoringCountdownIntervalId: number | null = null
   let reactionCountdownAudioIntervalId: number | null = null
   let matchEndedSoundPlayed = false
+  let matchEndedPrizeAnimated = false
+  let matchEndedPrizeAnimatedTimerId: number | null = null
+  let replayStakeEffectShown = false
+  let matchEndedCountdownSeconds = 120
+  let matchEndedCountdownIntervalId: number | null = null
+
+  function clearMatchEndedCountdown(): void {
+    if (matchEndedCountdownIntervalId !== null) {
+      clearInterval(matchEndedCountdownIntervalId)
+      matchEndedCountdownIntervalId = null
+    }
+    if (matchEndedPrizeAnimatedTimerId !== null) {
+      clearTimeout(matchEndedPrizeAnimatedTimerId)
+      matchEndedPrizeAnimatedTimerId = null
+    }
+  }
+
+  function startMatchEndedCountdown(): void {
+    clearMatchEndedCountdown()
+    matchEndedCountdownSeconds = 120
+    matchEndedCountdownIntervalId = window.setInterval(() => {
+      matchEndedCountdownSeconds = Math.max(0, matchEndedCountdownSeconds - 1)
+      const el = options.root.querySelector<HTMLElement>('[data-match-ended-countdown="1"]')
+      if (el) {
+        el.textContent = `${matchEndedCountdownSeconds}с`
+        el.style.color = matchEndedCountdownSeconds <= 30 ? '#f87171' : 'rgba(226,232,240,0.44)'
+      }
+      if (matchEndedCountdownSeconds <= 0) {
+        clearMatchEndedCountdown()
+        returnToLobbyFromMatchEnded()
+      }
+    }, 1000)
+  }
 
   function getLocalSeatSnapshot(): RoomSeatSnapshot | null {
     if (!activeRoomState) {
@@ -1453,6 +1492,10 @@ export function createActiveRoomFlowController(
     const isShowingMatchEndedPhase = authoritativePhase === 'match-ended'
     const isShowingPlayingPhase =
       !isShowingAnyDealPhase && authoritativePhase === 'playing'
+    if (!isShowingMatchEndedPhase && matchEndedCountdownIntervalId !== null) {
+      clearMatchEndedCountdown()
+      matchEndedCountdownSeconds = 120
+    }
     if (!isShowingScoringPhase) {
       clearScoringCountdownTicker()
     }
@@ -1546,6 +1589,14 @@ export function createActiveRoomFlowController(
       : ''
 
     if (cuttingSnapshotForRender) {
+      if (matchEndedSoundPlayed && !replayStakeEffectShown) {
+        replayStakeEffectShown = true
+        showStakeDeductionEffect(activeRoomState.stake, {
+          x: window.innerWidth / 2,
+          y: window.innerHeight / 2,
+        })
+      }
+
       const cuttingVisualCountdownContext = {
         roomId: activeRoomState.roomId,
         game: activeRoomState.game,
@@ -2159,7 +2210,15 @@ export function createActiveRoomFlowController(
       if (!matchEndedSoundPlayed) {
         matchEndedSoundPlayed = true
         options.gameAudio?.playMatchEnded()
+        startMatchEndedCountdown()
       }
+
+      // Ако някой е гласувал за изход → скочи на 30 сек.
+      const leaveVotes = activeRoomState.game.matchEnded?.leaveVotes ?? []
+      if (leaveVotes.length > 0 && matchEndedCountdownSeconds > 30) {
+        matchEndedCountdownSeconds = 30
+      }
+
       renderMatchEndedScreen({
         root: options.root,
         game: activeRoomState.game,
@@ -2169,6 +2228,8 @@ export function createActiveRoomFlowController(
         scaledStageWidth,
         scaledStageHeight,
         prizeAmount: getStakePrizeAmount(activeRoomState.stake),
+        skipPrizeAnimation: matchEndedPrizeAnimated,
+        countdownSeconds: matchEndedCountdownSeconds,
         onReturnToLobby: returnToLobbyFromMatchEnded,
         onStartNewGame: startNewGameFromMatchEnded,
         onSubmitPartnerRating: (ratingValue) => {
@@ -2178,7 +2239,28 @@ export function createActiveRoomFlowController(
 
           options.submitPartnerRating(activeRoomState.roomId, ratingValue)
         },
+        onReplayVote: () => {
+          if (!activeRoomState) {
+            return
+          }
+
+          options.sendReplayVote(activeRoomState.roomId)
+        },
+        onLeaveVote: () => {
+          if (!activeRoomState) {
+            return
+          }
+
+          options.sendLeaveMatchVote(activeRoomState.roomId)
+        },
       })
+
+      if (!matchEndedPrizeAnimated && matchEndedPrizeAnimatedTimerId === null) {
+        matchEndedPrizeAnimatedTimerId = window.setTimeout(() => {
+          matchEndedPrizeAnimated = true
+          matchEndedPrizeAnimatedTimerId = null
+        }, 1700)
+      }
     } else if (isShowingScoringPhase && activeRoomState.game?.scoring) {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
       renderScoringScreen({
@@ -2678,8 +2760,13 @@ export function createActiveRoomFlowController(
     clearBiddingUiState()
     lastKnownWinningBid = null
     matchEndedSoundPlayed = false
+    matchEndedPrizeAnimated = false
+    replayStakeEffectShown = false
+    clearMatchEndedCountdown()
+    matchEndedCountdownSeconds = 120
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
+    removeSeatProfileOverlay()
     removeSeatPanels()
     removeLeaveButton()
     activeRoomState = {
@@ -2717,8 +2804,13 @@ export function createActiveRoomFlowController(
     clearBiddingUiState()
     lastKnownWinningBid = null
     matchEndedSoundPlayed = false
+    matchEndedPrizeAnimated = false
+    replayStakeEffectShown = false
+    clearMatchEndedCountdown()
+    matchEndedCountdownSeconds = 120
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
+    removeSeatProfileOverlay()
     removeSeatPanels()
     removeLeaveButton()
     activeRoomState = {
@@ -2773,6 +2865,7 @@ export function createActiveRoomFlowController(
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
       removePersistentBotTakeoverPopup()
+      removeSeatProfileOverlay()
       removeSeatPanels()
       removeLeaveButton()
       activeRoomState = null
@@ -2802,10 +2895,19 @@ export function createActiveRoomFlowController(
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
       removePersistentBotTakeoverPopup()
+      removeSeatProfileOverlay()
       removeSeatPanels()
       removeLeaveButton()
       activeRoomState = null
       options.showLobby(message.message)
+      return true
+    }
+
+    if (message.type === 'player_profile' && message.roomId === activeRoomState.roomId) {
+      const seatSnapshot = activeRoomState.seats.find((s) => s.seat === message.seat) ?? null
+      if (seatSnapshot) {
+        updateSeatProfileOverlay(seatSnapshot, message.profile)
+      }
       return true
     }
 
@@ -2902,6 +3004,7 @@ export function createActiveRoomFlowController(
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
+    removeSeatProfileOverlay()
     removeSeatPanels()
     removeLeaveButton()
     options.leaveActiveRoom(roomId)
@@ -2930,6 +3033,7 @@ export function createActiveRoomFlowController(
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
+    removeSeatProfileOverlay()
     removeSeatPanels()
     removeLeaveButton()
     options.leaveActiveRoom(roomId)
@@ -2940,6 +3044,17 @@ export function createActiveRoomFlowController(
   function hasActiveRoom(): boolean {
     return activeRoomState !== null
   }
+
+  document.body.addEventListener('click', (e) => {
+    const btn = (e.target as Element).closest<HTMLElement>('[data-profile-seat-btn]')
+    if (!btn || !activeRoomState) return
+    const seatAttr = btn.getAttribute('data-profile-seat-btn') as Seat | null
+    if (!seatAttr) return
+    const seatSnapshot = activeRoomState.seats.find((s) => s.seat === seatAttr)
+    if (!seatSnapshot) return
+    showSeatProfileOverlay(seatSnapshot, () => removeSeatProfileOverlay())
+    options.requestPlayerProfile(activeRoomState.roomId, seatAttr)
+  })
 
   return {
     render: renderActiveRoomScreen,

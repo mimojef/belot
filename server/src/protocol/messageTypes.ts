@@ -89,6 +89,14 @@ export type ClientMessage =
       roomId: RoomId
       ratingValue: number
     }
+  | {
+      type: 'request_replay'
+      roomId: RoomId
+    }
+  | {
+      type: 'request_leave_match'
+      roomId: RoomId
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -238,6 +246,8 @@ export type RoomMatchEndedSnapshot = {
   targetScore: number
   finalScore: RoomTeamPointsSnapshot
   endedAt: number
+  replayVotes: Seat[]
+  leaveVotes: Seat[]
 }
 
 export type RoomScoreSnapshot = {

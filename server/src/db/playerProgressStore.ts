@@ -1166,10 +1166,12 @@ export async function createPlayerProgressStore(
       }
     }
 
+    const ratingRoomScope = `${room.id}:v${room.game.stateVersion}`
+
     try {
       insertPartnerRatingStatement.run(
         randomUUID(),
-        room.id,
+        ratingRoomScope,
         partnerProfileId,
         raterProfileId,
         ratingValue,

@@ -160,6 +160,8 @@ export type ServerRoom = {
   config: ServerRoomConfig
   seats: ServerSeatMap<RoomSeatSlot>
   game: ServerRoomGameSnapshot
+  replayVotes: Seat[]
+  leaveVotes: Seat[]
 }
 
 export type ServerConnection = {

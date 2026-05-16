@@ -1253,6 +1253,15 @@ const activeRoom = createActiveRoomFlowController({
   submitPartnerRating: (roomId, ratingValue) => {
     client.submitPartnerRating(roomId, ratingValue)
   },
+  sendReplayVote: (roomId) => {
+    client.sendReplayVote(roomId)
+  },
+  sendLeaveMatchVote: (roomId) => {
+    client.sendLeaveMatchVote(roomId)
+  },
+  requestPlayerProfile: (roomId, seat) => {
+    client.requestPlayerProfile(roomId, seat)
+  },
   showLobby: (errorText = null) => {
     lobby.setConnected(client.isConnected())
     lobby.resetToLobby()

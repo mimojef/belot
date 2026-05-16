@@ -310,6 +310,32 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       }
     }
 
+    if (parsed.type === 'request_replay') {
+      const roomId = normalizeRequiredText(parsed.roomId)
+
+      if (roomId === null) {
+        return null
+      }
+
+      return {
+        type: 'request_replay',
+        roomId,
+      }
+    }
+
+    if (parsed.type === 'request_leave_match') {
+      const roomId = normalizeRequiredText(parsed.roomId)
+
+      if (roomId === null) {
+        return null
+      }
+
+      return {
+        type: 'request_leave_match',
+        roomId,
+      }
+    }
+
     return null
   } catch {
     return null

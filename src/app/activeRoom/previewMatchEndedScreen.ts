@@ -37,7 +37,7 @@ const previewSeats: RoomSeatSnapshot[] = [
     seat: 'top',
     displayName: 'A6456655',
     isOccupied: true,
-    isBot: true,
+    isBot: false,
     isControlledByBot: false,
     isConnected: true,
     avatarUrl: null,
@@ -77,6 +77,8 @@ const previewGame: RoomGameSnapshot = {
       teamB: 134,
     },
     endedAt: Date.now(),
+    replayVotes: ['bottom'],
+    leaveVotes: ['right'],
   },
   declarations: [],
   score: {
@@ -113,6 +115,7 @@ export function renderMatchEndedPreview(root: HTMLDivElement): void {
     stageScale,
     scaledStageWidth,
     scaledStageHeight,
+    countdownSeconds: 87,
     onReturnToLobby: () => {
       console.info('[preview] Return to lobby clicked.')
     },
