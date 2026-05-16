@@ -53,10 +53,8 @@ function formatNullableText(
 
 function renderLevelBadge(level: number | null | undefined, size: 'sm' | 'md' = 'md'): string {
   if (typeof level !== 'number' || !Number.isFinite(level) || level < 1) return ''
-  const h = size === 'sm' ? '16px' : '18px'
-  const fs = size === 'sm' ? '9px' : '10px'
   const px = size === 'sm' ? '2px' : '3px'
-  return `<div style="position:absolute;right:0;bottom:0;min-width:${h};height:${h};border-radius:3px;background:#111111;border:1px solid rgba(255,255,255,0.22);color:#ffffff;font-size:${fs};font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 ${px};line-height:1;z-index:1;">${Math.trunc(level)}</div>`
+  return `<div style="position:absolute;right:5px;bottom:5px;display:flex;align-items:center;justify-content:center;padding:0 ${px};line-height:1;z-index:1;color:#ffffff;font-size:14px;font-weight:400;text-shadow:-2px -2px 0 #000,0 -2px 0 #000,2px -2px 0 #000,-2px 0 0 #000,2px 0 0 #000,-2px 2px 0 #000,0 2px 0 #000,2px 2px 0 #000;">${Math.trunc(level)}</div>`
 }
 
 function formatAverageRating(value: number | null | undefined): string {

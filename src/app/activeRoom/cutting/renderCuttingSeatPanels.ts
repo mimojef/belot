@@ -14,7 +14,7 @@ type EscapeHtml = (value: string) => string
 
 function renderLevelBadge(level: number | null | undefined): string {
   if (typeof level !== 'number' || !Number.isFinite(level) || level < 1) return ''
-  return `<div style="position:absolute;right:0;bottom:0;min-width:18px;height:18px;border-radius:3px;background:#111111;border:1px solid rgba(255,255,255,0.22);color:#ffffff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;z-index:10;">${Math.trunc(level)}</div>`
+  return `<div style="position:absolute;right:5px;bottom:5px;min-width:18px;height:18px;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;z-index:10;color:#ffffff;font-size:18px;font-weight:400;text-shadow:-2px -2px 0 #000,0 -2px 0 #000,2px -2px 0 #000,-2px 0 0 #000,2px 0 0 #000,-2px 2px 0 #000,0 2px 0 #000,2px 2px 0 #000;">${Math.trunc(level)}</div>`
 }
 
 export type DealtHandsData = {
@@ -765,9 +765,9 @@ export function createCuttingSeatPanelHtml(
       ? displayName
       : CUTTING_VISUAL_SEAT_LABELS[visualSeat]
   const borderColor = isHighlightedSeat ? 'rgba(245, 187, 55, 0.96)' : 'rgba(220,163,58,0.62)'
-  const borderWidthPx = isHighlightedSeat ? 4 : 2
+  const borderWidthPx = 2
   const shadow = isHighlightedSeat
-    ? '0 0 24px rgba(245, 187, 55, 0.24), 0 16px 28px rgba(0,0,0,0.24)'
+    ? '0 0 0 2px rgba(245, 187, 55, 0.96), 0 0 24px rgba(245, 187, 55, 0.36), 0 16px 28px rgba(0,0,0,0.24)'
     : '0 14px 28px rgba(0,0,0,0.24)'
   const cutterBadgeHtml = isHighlightedSeat && highlightBadgeLabel
     ? `

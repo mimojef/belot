@@ -284,9 +284,8 @@ function formatAmount(value: number): string {
 function renderLevelBadge(level: number | null | undefined, size: 'sm' | 'md' = 'md'): string {
   if (typeof level !== 'number' || !Number.isFinite(level) || level < 1) return ''
   const h = size === 'sm' ? '16px' : '18px'
-  const fs = size === 'sm' ? '9px' : '10px'
   const px = size === 'sm' ? '2px' : '3px'
-  return `<div style="position:absolute;right:0;bottom:0;min-width:${h};height:${h};border-radius:3px;background:#111111;border:1px solid rgba(255,255,255,0.22);color:#ffffff;font-size:${fs};font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 ${px};line-height:1;z-index:1;">${Math.trunc(level)}</div>`
+  return `<div style="position:absolute;right:5px;bottom:5px;min-width:${h};height:${h};display:flex;align-items:center;justify-content:center;padding:0 ${px};line-height:1;z-index:1;color:#ffffff;font-size:14px;font-weight:400;text-shadow:-2px -2px 0 #000,0 -2px 0 #000,2px -2px 0 #000,-2px 0 0 #000,2px 0 0 #000,-2px 2px 0 #000,0 2px 0 #000,2px 2px 0 #000;">${Math.trunc(level)}</div>`
 }
 
 function formatPackagePrice(priceCents: number, currency: string): string {
@@ -842,11 +841,6 @@ function renderGuestHeroCard(signupBonus: number): string {
             ">
               <span style="font-size:48px;font-weight:900;color:#d4a520;">Г</span>
             </div>
-            <div style="
-              position:absolute; right:-6px; bottom:-6px;
-              width:18px; height:18px; border-radius:50%;
-              background:#22c55e; border:2px solid #050505;
-            "></div>
           </div>
 
           <div style="flex:1; min-width:0;">
@@ -939,12 +933,6 @@ function renderHeroSection(
                 ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(profileName)}" style="width:100%; height:100%; object-fit:cover; object-position:center;">`
                 : `<span style="font-size:48px;font-weight:900;color:#d4a520;display:flex;align-items:center;justify-content:center;width:100%;height:100%;">${escapeHtml(profileName.charAt(0).toUpperCase() || '?')}</span>`}
             </div>
-            <div style="
-              position:absolute; right:-6px; bottom:-6px;
-              width:18px; height:18px; border-radius:50%;
-              background:${isConnected ? '#22c55e' : '#ef4444'};
-              border:2px solid #050505;
-            "></div>
             ${renderLevelBadge(level, 'md')}
           </div>
           <div style="flex:1; min-width:0;">
@@ -1735,8 +1723,8 @@ function renderLeaderboardsDirectory(state: LobbyScreenState): string {
               <button type="button" data-lobby-leaderboard-player="${escapeHtml(player.profileId ?? '')}" style="display:grid;grid-template-columns:64px minmax(0,1fr) 150px 130px 130px;align-items:center;gap:14px;text-align:left;border:1px solid rgba(212,165,32,0.24);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:12px 14px;color:#ffffff;cursor:pointer;min-width:0;">
                 <div style="font-size:26px;font-weight:900;color:${medalColor};text-align:center;">#${position}</div>
                 <div style="display:flex;align-items:center;gap:12px;min-width:0;">
-                  <div style="position:relative;width:50px;height:50px;flex:0 0 auto;">
-                    <div style="width:100%;height:100%;border-radius:8px;border:1px solid rgba(212,165,32,0.56);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:21px;font-weight:900;">
+                  <div style="position:relative;width:72px;height:72px;flex:0 0 auto;">
+                    <div style="width:100%;height:100%;border-radius:10px;border:1px solid rgba(212,165,32,0.56);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:30px;font-weight:900;">
                       ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : fallbackLetter}
                     </div>
                     ${renderLevelBadge(player.level, 'sm')}

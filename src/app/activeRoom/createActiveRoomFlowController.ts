@@ -725,7 +725,7 @@ export function createActiveRoomFlowController(
                     </div>`
               }
             </div>
-            ${typeof seat.level === 'number' && seat.level >= 1 ? `<div style="position:absolute;right:0;bottom:0;min-width:16px;height:16px;border-radius:3px;background:#111111;border:1px solid rgba(255,255,255,0.22);color:#ffffff;font-size:9px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 2px;line-height:1;z-index:1;">${Math.trunc(seat.level)}</div>` : ''}
+            ${typeof seat.level === 'number' && seat.level >= 1 ? `<div style="position:absolute;right:5px;bottom:5px;display:flex;align-items:center;justify-content:center;padding:0 2px;line-height:1;z-index:1;color:#ffffff;font-size:14px;font-weight:400;text-shadow:-2px -2px 0 #000,0 -2px 0 #000,2px -2px 0 #000,-2px 0 0 #000,2px 0 0 #000,-2px 2px 0 #000,0 2px 0 #000,2px 2px 0 #000;">${Math.trunc(seat.level)}</div>` : ''}
           </div>
 
           <div style="min-width:0;flex:1 1 auto;">
