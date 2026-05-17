@@ -1,6 +1,6 @@
 PRAGMA foreign_keys = ON;
 
--- Изтриваме старите пакети и вмъкваме новите 10
+-- Заменяме пакетите с финалните 10
 DELETE FROM coin_packages;
 
 INSERT INTO coin_packages (

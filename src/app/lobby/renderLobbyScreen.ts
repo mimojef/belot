@@ -302,6 +302,24 @@ function formatPackagePrice(priceCents: number, currency: string): string {
   }).format(priceCents / 100)
 }
 
+const EUR_TO_BGN = 1.95583
+
+function formatPackagePriceBgn(priceCents: number): string {
+  const bgn = Math.round((priceCents / 100) * EUR_TO_BGN * 100) / 100
+  return new Intl.NumberFormat('bg-BG', {
+    style: 'currency',
+    currency: 'BGN',
+  }).format(bgn)
+}
+
+function getCoinPackageImage(sortOrder: number): string {
+  if (sortOrder <= 20) return '/assets/lobby/coins-1000.png'
+  if (sortOrder <= 40) return '/assets/lobby/coins-5000.png'
+  if (sortOrder <= 60) return '/assets/lobby/coins-10000.png'
+  if (sortOrder <= 80) return '/assets/lobby/coins-25000.png'
+  return '/assets/lobby/coins-50000.png'
+}
+
 function formatCompactDateTime(value: string): string {
   const date = new Date(value)
 
@@ -1863,27 +1881,42 @@ function renderShopPanel(state: LobbyScreenState): string {
           Няма активни пакети в магазина.
         </div>
       ` : `
-        <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;">
-          ${packages.map((coinPackage) => `
-            <article style="display:grid;gap:14px;border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:linear-gradient(180deg,#171717 0%,#050505 100%);padding:18px;min-height:250px;">
-              <div style="height:74px;display:flex;align-items:center;justify-content:center;">
-                <img src="/assets/lobby/icon-shop-cart.png" alt="" style="width:58px;height:56px;object-fit:contain;filter:drop-shadow(0 8px 14px rgba(0,0,0,0.45));">
-              </div>
-              <div style="display:grid;gap:6px;">
-                <div style="font-size:20px;line-height:1.15;font-weight:900;color:#f8fafc;">${escapeHtml(coinPackage.title)}</div>
-                <div style="font-size:34px;line-height:1;font-weight:900;color:#d4a520;">${formatAmount(coinPackage.yellowCoinsAmount)}</div>
-                <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.46);">жълтици</div>
-              </div>
-              <div style="min-height:40px;font-size:13px;line-height:1.45;font-weight:700;color:rgba(255,255,255,0.62);">${escapeHtml(coinPackage.description)}</div>
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:auto;">
-                <div style="font-size:18px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}</div>
-                <button type="button" data-lobby-shop-package="${escapeHtml(coinPackage.packageId)}" ${state.shopPurchaseActionPackageId === coinPackage.packageId ? 'disabled' : ''} style="height:42px;padding:0 14px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:${state.shopPurchaseActionPackageId === coinPackage.packageId ? 'wait' : 'pointer'};">
-                  ${state.shopPurchaseActionPackageId === coinPackage.packageId ? 'Към плащане...' : isLoggedIn ? 'Купи' : 'Влез за покупка'}
-                </button>
-              </div>
+        <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;">
+          ${packages.map((coinPackage) => {
+            const isPurchasing = state.shopPurchaseActionPackageId === coinPackage.packageId
+            return `
+            <article style="
+              position:relative;
+              background:#000000;
+              border:1px solid rgba(212,165,32,0.72);
+              border-radius:12px;
+              padding:16px 14px 14px;
+              overflow:hidden;
+              box-shadow:0 4px 16px rgba(0,0,0,0.3);
+            ">
+              <img src="${getCoinPackageImage(coinPackage.sortOrder)}" alt="" style="position:absolute;bottom:10px;right:10px;width:76px;height:76px;object-fit:contain;opacity:0.88;pointer-events:none;">
+
+              <button type="button" data-lobby-shop-package="${escapeHtml(coinPackage.packageId)}" ${isPurchasing ? 'disabled' : ''} style="position:absolute;top:14px;right:14px;height:34px;padding:0 14px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:12px;font-weight:900;cursor:${isPurchasing ? 'wait' : 'pointer'};transition:filter 0.15s,transform 0.1s;">
+                ${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи пакет' : 'Влез за покупка'}
+              </button>
+
+              <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:5px;">Жълтици</div>
+              <div style="font-size:22px;font-weight:900;color:#d4a520;line-height:1;margin-bottom:12px;">${formatAmount(coinPackage.yellowCoinsAmount)}</div>
+
+              <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Пакет</div>
+              <div style="font-size:15px;font-weight:900;color:#ffffff;margin-bottom:14px;">${escapeHtml(coinPackage.title)}</div>
+
+              <div style="font-size:17px;font-weight:900;color:#ffffff;">${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}</div>
+              <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.5);margin-top:2px;">${escapeHtml(formatPackagePriceBgn(coinPackage.priceCents))}</div>
             </article>
-          `).join('')}
+          `}).join('')}
         </div>
+        <style>
+          [data-lobby-shop-package]:not(:disabled):hover {
+            filter:brightness(1.15);
+            transform:scale(1.06);
+          }
+        </style>
       `}
 
       ${purchaseHistory}
