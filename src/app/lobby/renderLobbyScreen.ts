@@ -380,7 +380,7 @@ function renderAuthModal(state: LobbyScreenState): string {
           Регистрирай се и вземи <span style="color:#d4a520;">${escapeHtml(bonusText)}</span> безплатни жълтици
         </div>
         <div style="font-size:15px;line-height:1.5;color:rgba(255,255,255,0.72);font-weight:700;">
-          Създай профил, избери име и играй белот с други хора. Жълтиците, рангът и рейтингът ти ще се пазят.
+          Създай профил, избери име и играй белот с други хора. Използвай чат с приятели, изпращай подаръци, печели жълтици и трупай рейтинг.
         </div>
         <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:6px;">
           <button type="button" data-lobby-auth-register-button="1" style="height:46px;min-width:150px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;">Регистрация</button>
