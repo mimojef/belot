@@ -60,6 +60,7 @@ export type LobbyScreenState = {
   adminCoinPackages: CoinPackageSnapshot[]
   adminCoinPackagesLoading: boolean
   adminCoinPackagesErrorText: string | null
+  adminCoinPackageEditId: string | null
   friendships: FriendshipsSnapshot | null
   friendsLoading: boolean
   friendsErrorText: string | null
@@ -75,6 +76,8 @@ export type LobbyScreenState = {
   chatErrorText: string | null
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
+  lowCoinsModalOpen: boolean
+  onlinePlayersCount: number
   signupBonusYellowCoins: number
   profileNameChangePrice: number
   profileEditorOpen: boolean
@@ -116,6 +119,8 @@ export type RenderLobbyScreenOptions = {
     packageId: string,
     status: CoinPackageStatus,
   ) => void
+  onAdminCoinPackageEdit: (packageId: string) => void
+  onAdminCoinPackageDelete: (packageId: string) => void
   onFriendsClick: () => void
   onChatClick: () => void
   onChatConversationClick: (friendshipId: string) => void
@@ -131,6 +136,8 @@ export type RenderLobbyScreenOptions = {
   onGiftCoinsClick: (friendshipId: string) => void
   onGiftCoinsClose: () => void
   onGiftCoinsSubmit: (friendshipId: string, amount: number) => void
+  onLowCoinsModalClose: () => void
+  onLowCoinsShopClick: () => void
   onAuthModalClose: () => void
   onAuthModeChange: (mode: Exclude<LobbyAuthModalMode, 'closed'>) => void
   onAuthError: (message: string) => void
@@ -554,6 +561,34 @@ function renderProfileEditModal(state: LobbyScreenState): string {
   `
 }
 
+function renderLowCoinsModal(state: LobbyScreenState): string {
+  if (!state.lowCoinsModalOpen) {
+    return ''
+  }
+
+  return `
+    <div data-lobby-low-coins-modal-root="1" style="position:fixed;inset:0;z-index:13700;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div data-lobby-low-coins-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.80);backdrop-filter:blur(5px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,460px);border-radius:12px;border:2px solid rgba(212,165,32,0.65);background:linear-gradient(180deg,rgba(28,28,28,0.99) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 40px 90px rgba(0,0,0,0.55);padding:32px 28px 26px;">
+        <button type="button" data-lobby-low-coins-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
+        <div style="text-align:center;margin-bottom:16px;"><img src="/assets/lobby/coins-popup.png" alt="" style="width:80px;height:80px;object-fit:contain;display:inline-block;"></div>
+        <div style="font-size:22px;font-weight:900;color:#f8fafc;text-align:center;line-height:1.2;">Нямаш достатъчно жълтици за тази стая</div>
+        <div style="margin-top:14px;font-size:15px;line-height:1.6;color:rgba(255,255,255,0.65);font-weight:500;text-align:center;">
+          Купи жълтици и се върни да им покажеш колко си добър.
+        </div>
+        <div style="display:flex;flex-direction:column;gap:10px;margin-top:24px;">
+          <button type="button" data-lobby-low-coins-shop="1" style="height:48px;border:0;border-radius:10px;background:linear-gradient(135deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;letter-spacing:0.02em;">
+            Купи жълтици
+          </button>
+          <button type="button" data-lobby-low-coins-close="1" style="height:44px;border:1px solid rgba(255,255,255,0.14);border-radius:10px;background:transparent;color:rgba(255,255,255,0.65);font-size:14px;font-weight:800;cursor:pointer;">
+            Затвори
+          </button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
 function renderGiftCoinsModal(state: LobbyScreenState): string {
   if (state.giftModalFriendshipId === null) {
     return ''
@@ -597,6 +632,13 @@ function renderNav(state: LobbyScreenState): string {
     state.friendships?.incomingPending.length ?? 0
 
   return `
+    <style>
+      .lobby-nav-btn:not([data-active]):hover {
+        border-bottom-color: rgba(212,165,32,0.50) !important;
+        color: rgba(255,255,255,0.95) !important;
+        background: rgba(212,165,32,0.04) !important;
+      }
+    </style>
     <nav style="
       background: #0a0a0a;
       border-bottom: 1px solid rgba(255,255,255,0.10);
@@ -612,12 +654,87 @@ function renderNav(state: LobbyScreenState): string {
       top: 0;
       z-index: 100;
     ">
-      <a href="#" style="display:flex; align-items:center; gap:8px; text-decoration:none; margin-right:16px;">
+      <a href="#" data-lobby-nav-lobby="1" style="display:flex; align-items:center; gap:8px; text-decoration:none; margin-right:16px;">
         <img src="/assets/lobby/logo.png" alt="Pika.bg" style="width:192px; height:52px; display:block; object-fit:contain;">
       </a>
 
       <div style="display:flex; align-items:stretch; gap:0; height:100%; flex:1;">
-        <button type="button" data-lobby-nav-players="1" style="
+        <a href="#" data-lobby-nav-lobby="1" ${lobbyActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+          display:flex; align-items:center; gap:10px;
+          padding:0 18px;
+          text-decoration:none;
+          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+          color:${lobbyActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${lobbyActive ? '#d4a520' : 'transparent'};
+          background:${lobbyActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+        ">
+          <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+            <polyline points="9 22 9 12 15 12 15 22"/>
+          </svg>
+          Лоби
+        </a>
+        <button type="button" data-lobby-nav-shop="1" ${shopActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+          display:flex; align-items:center; gap:10px;
+          padding:0 18px;
+          border:0;
+          background:${shopActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+          color:${shopActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${shopActive ? '#d4a520' : 'transparent'};
+          cursor:pointer;
+          height:100%;
+        ">
+          <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+            <circle cx="9" cy="21" r="1"/>
+            <circle cx="20" cy="21" r="1"/>
+            <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>
+          </svg>
+          Магазин
+        </button>
+        <button type="button" data-lobby-nav-friends="1" ${friendsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+          display:flex; align-items:center; gap:10px;
+          padding:0 18px;
+          border:0;
+          background:${friendsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+          color:${friendsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${friendsActive ? '#d4a520' : 'transparent'};
+          cursor:pointer;
+          height:100%;
+        ">
+          <svg xmlns="http://www.w3.org/2000/svg" width="26" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+          Приятели
+          ${incomingFriendRequestsCount > 0 ? `
+            <span style="min-width:20px;height:20px;border-radius:999px;background:#d4a520;color:#080808;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;font-size:11px;font-weight:900;line-height:1;">
+              ${formatAmount(incomingFriendRequestsCount)}
+            </span>
+          ` : ''}
+        </button>
+        <button type="button" data-lobby-nav-leaderboards="1" ${leaderboardsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+          display:flex; align-items:center; gap:10px;
+          padding:0 18px;
+          border:0;
+          background:${leaderboardsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+          color:${leaderboardsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${leaderboardsActive ? '#d4a520' : 'transparent'};
+          cursor:pointer;
+          height:100%;
+        ">
+          <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+            <line x1="18" y1="20" x2="18" y2="10"/>
+            <line x1="12" y1="20" x2="12" y2="4"/>
+            <line x1="6" y1="20" x2="6" y2="14"/>
+          </svg>
+          Класация
+        </button>
+        <button type="button" data-lobby-nav-players="1" ${playersActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
           border:0;
@@ -631,112 +748,8 @@ function renderNav(state: LobbyScreenState): string {
           <span style="font-size:25px;line-height:1;color:currentColor;">◎</span>
           Играчи
         </button>
-        <button type="button" data-lobby-nav-friends="1" style="
-          display:flex; align-items:center; gap:10px;
-          padding:0 18px;
-          border:0;
-          background:${friendsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
-          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:${friendsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
-          border-bottom:2px solid ${friendsActive ? '#d4a520' : 'transparent'};
-          cursor:pointer;
-          height:100%;
-        ">
-          <span style="font-size:23px;line-height:1;color:currentColor;">+</span>
-          Приятели
-          ${incomingFriendRequestsCount > 0 ? `
-            <span style="min-width:20px;height:20px;border-radius:999px;background:#d4a520;color:#080808;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;font-size:11px;font-weight:900;line-height:1;">
-              ${formatAmount(incomingFriendRequestsCount)}
-            </span>
-          ` : ''}
-        </button>
-        <button type="button" data-lobby-nav-chat="1" style="
-          display:flex; align-items:center; gap:10px;
-          padding:0 18px;
-          border:0;
-          background:${chatActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
-          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:${chatActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
-          border-bottom:2px solid ${chatActive ? '#d4a520' : 'transparent'};
-          cursor:pointer;
-          height:100%;
-        ">
-          <span style="font-size:22px;line-height:1;color:currentColor;">▣</span>
-          Чат
-        </button>
-        <a href="#" data-lobby-nav-lobby="1" style="
-          display:flex; align-items:center; gap:10px;
-          padding:0 18px;
-          text-decoration:none;
-          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:${lobbyActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
-          border-bottom:2px solid ${lobbyActive ? '#d4a520' : 'transparent'};
-          background:${lobbyActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
-        ">
-          <img src="/assets/lobby/nav-icon-preview/nav-home-gold.svg" alt="" style="width:28px; height:28px; display:block; object-fit:contain;">
-          Лоби
-        </a>
-        <a href="#" style="
-          display:flex; align-items:center; gap:10px;
-          padding:0 18px;
-          text-decoration:none;
-          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:rgba(255,255,255,0.70);
-          border-bottom:2px solid transparent;
-          transition:color 0.15s;
-        ">
-          <img src="/assets/lobby/nav-icon-preview/nav-tournaments-white.png" alt="" style="width:32px; height:29px; display:block; object-fit:contain;">
-          Турнири
-        </a>
-        <button type="button" data-lobby-nav-shop="1" style="
-          display:flex; align-items:center; gap:10px;
-          padding:0 18px;
-          border:0;
-          background:${shopActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
-          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:${shopActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
-          border-bottom:2px solid ${shopActive ? '#d4a520' : 'transparent'};
-          cursor:pointer;
-          height:100%;
-        ">
-          <img src="/assets/lobby/nav-icon-preview/nav-shop-white.png" alt="" style="width:31px; height:30px; display:block; object-fit:contain;">
-          Магазин
-        </button>
-        <button type="button" data-lobby-nav-leaderboards="1" style="
-          display:flex; align-items:center; gap:10px;
-          padding:0 18px;
-          border:0;
-          background:${leaderboardsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
-          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:${leaderboardsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
-          border-bottom:2px solid ${leaderboardsActive ? '#d4a520' : 'transparent'};
-          cursor:pointer;
-          height:100%;
-        ">
-          <img src="/assets/lobby/nav-icon-preview/nav-leaderboard-white.png" alt="" style="width:29px; height:30px; display:block; object-fit:contain;">
-          Класация
-        </button>
-        ${state.profile.profileId !== null ? `
-          <button
-            type="button"
-            data-lobby-profile-button="1"
-            style="
-            display:flex; align-items:center; gap:10px;
-            padding:0 18px;
-            border:0;
-            background:transparent;
-            font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-            color:rgba(255,255,255,0.70);
-            border-bottom:2px solid transparent;
-            cursor:pointer;
-            height:100%;
-          ">
-            <img src="/assets/lobby/nav-icon-preview/nav-profile-white.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain;">
-            Профил
-          </button>
-        ` : ''}
         ${state.isAdmin ? `
-          <button type="button" data-lobby-nav-admin="1" style="
+          <button type="button" data-lobby-nav-admin="1" ${adminActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
             display:flex; align-items:center; gap:10px;
             padding:0 18px;
             border:0;
@@ -753,8 +766,33 @@ function renderNav(state: LobbyScreenState): string {
         ` : ''}
       </div>
 
-      <div style="display:flex; align-items:center; gap:12px; margin-left:auto;">
+      <div style="display:flex; align-items:center; gap:4px; margin-left:auto;">
         ${state.profile.profileId !== null ? `
+          <button type="button" data-lobby-nav-chat="1" style="
+            display:flex; align-items:center; gap:8px;
+            background:none; border:none; border-radius:8px;
+            padding:9px 14px;
+            cursor:pointer;
+            font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+            color:${chatActive ? '#d4a520' : 'rgba(255,255,255,0.75)'};
+          ">
+            <span style="font-size:20px;line-height:1;color:currentColor;">▣</span>
+            Чат
+          </button>
+          <button
+            type="button"
+            data-lobby-profile-button="1"
+            style="
+            display:flex; align-items:center; gap:8px;
+            background:none; border:none; border-radius:8px;
+            padding:9px 14px;
+            cursor:pointer;
+            font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+            color:rgba(255,255,255,0.75);
+          ">
+            <img src="/assets/lobby/nav-icon-preview/nav-profile-white.png" alt="" style="width:22px; height:24px; display:block; object-fit:contain;">
+            Профил
+          </button>
           <button style="
             background:none; border:none; cursor:pointer; padding:6px;
             color:rgba(255,255,255,0.65); position:relative;
@@ -1279,7 +1317,7 @@ function renderBottomSection(): string {
   `
 }
 
-function renderFooter(): string {
+function renderFooter(onlinePlayersCount: number): string {
   return `
     <footer style="
       margin-top:16px;
@@ -1316,7 +1354,7 @@ function renderFooter(): string {
           <img src="/assets/lobby/icon-users.png" alt="" style="display:none;">
           <div>
             <div style="font-size:12px; font-weight:700; color:rgba(255,255,255,0.75);">Онлайн играчи</div>
-            <div style="font-size:10px; color:rgba(255,255,255,0.4); font-weight:600;">2 456</div>
+            <div style="font-size:13px; color:rgba(255,255,255,0.4); font-weight:600;">${formatAmount(onlinePlayersCount)}</div>
           </div>
         </div>
         <div style="display:flex; align-items:center; gap:10px;">
@@ -1929,8 +1967,10 @@ function renderAdminPanel(state: LobbyScreenState): string {
         <div style="width:min(100%,980px);display:grid;gap:8px;">
           ${adminPackages.length === 0 ? `
             <div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:14px;color:rgba(255,255,255,0.58);font-size:13px;font-weight:800;">Няма създадени пакети.</div>
-          ` : adminPackages.map((coinPackage) => `
-            <div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 0.7fr auto;gap:10px;align-items:center;border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#090909;padding:12px;">
+          ` : adminPackages.map((coinPackage) => {
+            const isEditing = state.adminCoinPackageEditId === coinPackage.packageId
+            return `
+            <div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 0.7fr auto;gap:10px;align-items:center;border:1px solid ${isEditing ? 'rgba(212,165,32,0.55)' : 'rgba(255,255,255,0.10)'};border-radius:8px;background:${isEditing ? 'rgba(212,165,32,0.06)' : '#090909'};padding:12px;">
               <div>
                 <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(coinPackage.title)}</div>
                 <div style="margin-top:3px;font-size:11px;font-weight:800;color:rgba(255,255,255,0.44);">${escapeHtml(coinPackage.packageKey)}</div>
@@ -1938,55 +1978,79 @@ function renderAdminPanel(state: LobbyScreenState): string {
               <div style="font-size:14px;font-weight:900;color:#d4a520;">${formatAmount(coinPackage.yellowCoinsAmount)}</div>
               <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}</div>
               <div style="font-size:12px;font-weight:900;color:${coinPackage.status === 'active' ? '#86efac' : 'rgba(255,255,255,0.46)'};">${coinPackage.status}</div>
-              <button type="button" data-lobby-admin-package-status="${escapeHtml(coinPackage.packageId)}" data-lobby-admin-package-next-status="${coinPackage.status === 'active' ? 'inactive' : 'active'}" style="height:36px;padding:0 12px;border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:#111111;color:#d4a520;font-size:12px;font-weight:900;cursor:pointer;">
-                ${coinPackage.status === 'active' ? 'Скрий' : 'Активирай'}
-              </button>
+              <div style="display:flex;gap:6px;">
+                <button type="button" data-lobby-admin-package-edit="${escapeHtml(coinPackage.packageId)}" style="height:36px;padding:0 12px;border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:${isEditing ? 'rgba(212,165,32,0.18)' : '#111111'};color:#d4a520;font-size:12px;font-weight:900;cursor:pointer;">
+                  ${isEditing ? 'Редактира се' : 'Редактирай'}
+                </button>
+                <button type="button" data-lobby-admin-package-status="${escapeHtml(coinPackage.packageId)}" data-lobby-admin-package-next-status="${coinPackage.status === 'active' ? 'inactive' : 'active'}" style="height:36px;padding:0 12px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:#111111;color:rgba(255,255,255,0.65);font-size:12px;font-weight:900;cursor:pointer;">
+                  ${coinPackage.status === 'active' ? 'Скрий' : 'Активирай'}
+                </button>
+                <button type="button" data-lobby-admin-package-delete="${escapeHtml(coinPackage.packageId)}" style="height:36px;padding:0 10px;border:1px solid rgba(248,113,113,0.28);border-radius:8px;background:#111111;color:#f87171;font-size:12px;font-weight:900;cursor:pointer;">
+                  Изтрий
+                </button>
+              </div>
             </div>
-          `).join('')}
+          `}).join('')}
         </div>
 
-        <form data-lobby-admin-coin-package-form="1" style="width:min(100%,980px);display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:18px;">
+        ${(() => {
+          const editPackage = state.adminCoinPackageEditId
+            ? adminPackages.find((p) => p.packageId === state.adminCoinPackageEditId) ?? null
+            : null
+          return `
+        <form data-lobby-admin-coin-package-form="1" style="width:min(100%,980px);display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;border:1px solid ${editPackage ? 'rgba(212,165,32,0.55)' : 'rgba(212,165,32,0.30)'};border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:18px;">
+          <input type="hidden" name="packageId" value="${escapeHtml(editPackage?.packageId ?? '')}">
+          <div style="grid-column:1 / -1;font-size:15px;font-weight:900;color:${editPackage ? '#d4a520' : '#f8fafc'};">
+            ${editPackage ? `Редактирай: ${escapeHtml(editPackage.title)}` : 'Нова оферта'}
+          </div>
           <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Ключ
-            <input name="packageKey" type="text" maxlength="48" placeholder="starter" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+            <input name="packageKey" type="text" maxlength="48" placeholder="starter" value="${escapeHtml(editPackage?.packageKey ?? '')}" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
           </label>
           <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Име
-            <input name="title" type="text" maxlength="80" placeholder="Starter" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+            <input name="title" type="text" maxlength="80" placeholder="Starter" value="${escapeHtml(editPackage?.title ?? '')}" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
           </label>
           <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Жълтици
-            <input name="yellowCoinsAmount" type="number" min="1" max="100000000" step="1000" value="100000" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+            <input name="yellowCoinsAmount" type="number" min="1" max="100000000" step="1000" value="${editPackage?.yellowCoinsAmount ?? 100000}" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
           </label>
           <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Цена в центове
-            <input name="priceCents" type="number" min="0" max="10000000" step="1" value="499" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+            <input name="priceCents" type="number" min="0" max="10000000" step="1" value="${editPackage?.priceCents ?? 499}" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
           </label>
           <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Валута
-            <input name="currency" type="text" maxlength="3" value="EUR" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;text-transform:uppercase;">
+            <input name="currency" type="text" maxlength="3" value="${escapeHtml(editPackage?.currency ?? 'EUR')}" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;text-transform:uppercase;">
           </label>
           <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Подредба
-            <input name="sortOrder" type="number" min="0" max="1000000" step="1" value="50" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+            <input name="sortOrder" type="number" min="0" max="1000000" step="1" value="${editPackage?.sortOrder ?? 50}" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
           </label>
           <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Статус
             <select name="status" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
-              <option value="active">active</option>
-              <option value="inactive">inactive</option>
+              <option value="active" ${(editPackage?.status ?? 'active') === 'active' ? 'selected' : ''}>active</option>
+              <option value="inactive" ${editPackage?.status === 'inactive' ? 'selected' : ''}>inactive</option>
             </select>
           </label>
           <label style="grid-column:1 / -1;display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Описание
-            <input name="description" type="text" maxlength="220" placeholder="Описание за магазина" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+            <input name="description" type="text" maxlength="220" placeholder="Описание за магазина" value="${escapeHtml(editPackage?.description ?? '')}" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
           </label>
-          <div style="grid-column:1 / -1;display:flex;justify-content:flex-end;">
+          <div style="grid-column:1 / -1;display:flex;justify-content:flex-end;gap:8px;">
+            ${editPackage ? `
+              <button type="button" data-lobby-admin-package-edit-cancel="1" style="height:42px;padding:0 16px;border:1px solid rgba(255,255,255,0.18);border-radius:8px;background:transparent;color:rgba(255,255,255,0.65);font-size:13px;font-weight:900;cursor:pointer;">
+                Отказ
+              </button>
+            ` : ''}
             <button type="submit" style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:pointer;">
-              Запази пакет
+              ${editPackage ? 'Запази промените' : 'Добави оферта'}
             </button>
           </div>
         </form>
+          `
+        })()}
       </div>
     </section>
   `
@@ -2083,7 +2147,7 @@ export function renderLobbyScreen(
               ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching)}
               ${renderBottomSection()}
             `}
-          ${renderFooter()}
+          ${renderFooter(state.onlinePlayersCount)}
         </div>
       </div>
 
@@ -2148,6 +2212,7 @@ export function renderLobbyScreen(
         </div>
       ` : ''}
 
+      ${renderLowCoinsModal(state)}
       ${renderProfileEditModal(state)}
       ${renderGiftCoinsModal(state)}
       ${renderAuthModal(state)}
@@ -2187,12 +2252,12 @@ export function renderLobbyScreen(
       options.onProfileClick()
     })
 
-  root
-    .querySelector<HTMLElement>('[data-lobby-nav-lobby="1"]')
-    ?.addEventListener('click', (event) => {
+  root.querySelectorAll<HTMLElement>('[data-lobby-nav-lobby="1"]').forEach((el) => {
+    el.addEventListener('click', (event) => {
       event.preventDefault()
       options.onLobbyClick()
     })
+  })
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-nav-players="1"]')
@@ -2329,6 +2394,7 @@ export function renderLobbyScreen(
       }
 
       options.onAdminCoinPackageSubmit({
+        packageId: String(data.get('packageId') ?? '').trim() || null,
         packageKey: String(data.get('packageKey') ?? '').trim(),
         title: String(data.get('title') ?? '').trim(),
         description: String(data.get('description') ?? '').trim(),
@@ -2347,6 +2413,29 @@ export function renderLobbyScreen(
 
       if (packageId.length > 0 && (status === 'active' || status === 'inactive')) {
         options.onAdminCoinPackageStatusChange(packageId, status)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-admin-package-edit]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const packageId = button.dataset.lobbyAdminPackageEdit?.trim() ?? ''
+      if (packageId.length > 0) {
+        options.onAdminCoinPackageEdit(packageId)
+      }
+    })
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-lobby-admin-package-edit-cancel="1"]')
+    ?.addEventListener('click', () => {
+      options.onAdminCoinPackageEdit('')
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-admin-package-delete]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const packageId = button.dataset.lobbyAdminPackageDelete?.trim() ?? ''
+      if (packageId.length > 0 && confirm('Сигурен ли си, че искаш да изтриеш тази оферта?')) {
+        options.onAdminCoinPackageDelete(packageId)
       }
     })
   })
@@ -2421,6 +2510,18 @@ export function renderLobbyScreen(
       onGiftCoinsClick: options.onGiftCoinsClick,
     },
   )
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-low-coins-close="1"]').forEach((btn) => {
+    btn.addEventListener('click', options.onLowCoinsModalClose)
+  })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-low-coins-shop="1"]')
+    ?.addEventListener('click', options.onLowCoinsShopClick)
+
+  root
+    .querySelector<HTMLElement>('[data-lobby-low-coins-backdrop="1"]')
+    ?.addEventListener('click', options.onLowCoinsModalClose)
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-gift-modal-close="1"]')

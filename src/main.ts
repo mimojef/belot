@@ -67,6 +67,7 @@ let isSessionDisplaced = false
 let currentAuthSession: AuthSession | null = null
 let publicSignupBonusYellowCoins = 100000
 let publicProfileNameChangePrice = 50000
+let publicOnlinePlayersCount = 0
 
 type AuthSession = {
   sessionId: string
@@ -99,6 +100,7 @@ type LeaderboardsResponse = {
 
 type PublicSettingsResponse = {
   ok: boolean
+  onlinePlayersCount?: number
   settings?: {
     signupBonusYellowCoins?: number
     profileNameChangePrice?: number
@@ -473,6 +475,9 @@ async function loadPublicSettings(): Promise<void> {
     }
 
     if (response.ok && data.ok) {
+      if (typeof data.onlinePlayersCount === 'number') {
+        publicOnlinePlayersCount = data.onlinePlayersCount
+      }
       lobby.render()
     }
   } catch {
@@ -652,6 +657,39 @@ async function setAdminCoinPackageStatus(
     return {
       ok: false,
       message: 'Няма връзка със сървъра за промяна на пакет.',
+    }
+  }
+}
+
+async function deleteAdminCoinPackage(packageId: string): Promise<
+  | { ok: true; packages: CoinPackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/coin-packages/${encodeURIComponent(packageId)}`,
+      {
+        method: 'DELETE',
+        credentials: 'include',
+      },
+    )
+    const data = (await response.json()) as CoinPackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Пакетът не беше изтрит.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за изтриване на пакет.',
     }
   }
 }
@@ -1203,6 +1241,7 @@ lobby = createLobbyFlowController({
     submitProfileUpdate(avatarFile, avatarCrop, galleryFiles),
   onPresetAvatarApply: (avatarUrl) => submitPresetAvatarUrl(avatarUrl),
   getSignupBonusYellowCoins: () => publicSignupBonusYellowCoins,
+  getOnlinePlayersCount: () => publicOnlinePlayersCount,
   getProfileNameChangePrice: () => publicProfileNameChangePrice,
   getApiBaseUrl: () => getApiBaseUrl(),
   onProfileGalleryDelete: (imageId) => deleteProfileGalleryImage(imageId),
@@ -1218,6 +1257,7 @@ lobby = createLobbyFlowController({
   onAdminCoinPackageSubmit: (input) => submitAdminCoinPackage(input),
   onAdminCoinPackageStatusChange: (packageId, status) =>
     setAdminCoinPackageStatus(packageId, status),
+  onAdminCoinPackageDelete: (packageId) => deleteAdminCoinPackage(packageId),
   onFriendshipsLoad: () => loadFriendships(),
   onFriendRequestSubmit: (profileId) => submitFriendRequest(profileId),
   onFriendAccept: (friendshipId) => submitFriendAction(friendshipId, 'accept'),

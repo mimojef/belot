@@ -55,6 +55,7 @@ export type CreateLobbyFlowControllerOptions = {
   getAuthSession?: () => LobbyAuthSession | null
   getSignupBonusYellowCoins?: () => number
   getProfileNameChangePrice?: () => number
+  getOnlinePlayersCount?: () => number
   getApiBaseUrl?: () => string
   onLoginSubmit?: (email: string, password: string) => Promise<string | null>
   onRegisterSubmit?: (
@@ -115,6 +116,10 @@ export type CreateLobbyFlowControllerOptions = {
     packageId: string,
     status: CoinPackageStatus,
   ) => Promise<
+    | { ok: true; packages: CoinPackageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminCoinPackageDelete?: (packageId: string) => Promise<
     | { ok: true; packages: CoinPackageSnapshot[] }
     | { ok: false; message: string }
   >
@@ -206,6 +211,7 @@ type InternalLobbyFlowState = {
   profileNameChangeSuccessAmount: number | null
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
+  lowCoinsModalOpen: boolean
   serverRoomSeats: RoomSeatSnapshot[] | null
   serverYourSeat: RoomSeatSnapshot['seat'] | null
   serverPreviewBotDisplayNames: string[]
@@ -229,6 +235,7 @@ type InternalLobbyFlowState = {
   adminCoinPackages: CoinPackageSnapshot[]
   adminCoinPackagesLoading: boolean
   adminCoinPackagesErrorText: string | null
+  adminCoinPackageEditId: string | null
   friendships: FriendshipsSnapshot | null
   friendsLoading: boolean
   friendsErrorText: string | null
@@ -298,6 +305,7 @@ function createInitialState(): InternalLobbyFlowState {
     profileNameChangeSuccessAmount: null,
     authModalMode: 'closed',
     authErrorText: null,
+    lowCoinsModalOpen: false,
     serverRoomSeats: null,
     serverYourSeat: null,
     serverPreviewBotDisplayNames: [],
@@ -321,6 +329,7 @@ function createInitialState(): InternalLobbyFlowState {
     adminCoinPackages: [],
     adminCoinPackagesLoading: false,
     adminCoinPackagesErrorText: null,
+    adminCoinPackageEditId: null,
     friendships: null,
     friendsLoading: false,
     friendsErrorText: null,
@@ -1094,6 +1103,7 @@ export function createLobbyFlowController(
       adminCoinPackages: state.adminCoinPackages,
       adminCoinPackagesLoading: state.adminCoinPackagesLoading,
       adminCoinPackagesErrorText: state.adminCoinPackagesErrorText,
+      adminCoinPackageEditId: state.adminCoinPackageEditId,
       friendships: state.friendships,
       friendsLoading: state.friendsLoading,
       friendsErrorText: state.friendsErrorText,
@@ -1109,6 +1119,8 @@ export function createLobbyFlowController(
       chatErrorText: state.chatErrorText,
       authModalMode: state.authModalMode,
       authErrorText: state.authErrorText,
+      lowCoinsModalOpen: state.lowCoinsModalOpen,
+      onlinePlayersCount: options.getOnlinePlayersCount?.() ?? 0,
       signupBonusYellowCoins: options.getSignupBonusYellowCoins?.() ?? 100000,
       profileNameChangePrice:
         state.adminSettings?.profileNameChangePrice ??
@@ -1216,6 +1228,12 @@ export function createLobbyFlowController(
       onAdminCoinPackageStatusChange: (packageId, status) => {
         void setAdminCoinPackageStatus(packageId, status)
       },
+      onAdminCoinPackageEdit: (packageId) => {
+        editAdminCoinPackage(packageId)
+      },
+      onAdminCoinPackageDelete: (packageId) => {
+        void deleteAdminCoinPackage(packageId)
+      },
       onFriendsClick: () => {
         void showFriendsDirectory()
       },
@@ -1271,6 +1289,14 @@ export function createLobbyFlowController(
       },
       onGiftCoinsSubmit: (friendshipId, amount) => {
         void submitGiftCoins(friendshipId, amount)
+      },
+      onLowCoinsModalClose: () => {
+        state.lowCoinsModalOpen = false
+        render()
+      },
+      onLowCoinsShopClick: () => {
+        state.lowCoinsModalOpen = false
+        void showShopPanel()
       },
       onAuthModalClose: () => {
         state.authModalMode = 'closed'
@@ -1726,6 +1752,38 @@ export function createLobbyFlowController(
     }
 
     state.adminCoinPackages = result.packages
+    state.adminCoinPackagesErrorText = null
+    state.adminCoinPackageEditId = null
+    render()
+  }
+
+  function editAdminCoinPackage(packageId: string): void {
+    state.adminCoinPackageEditId = packageId.length > 0 ? packageId : null
+    render()
+  }
+
+  async function deleteAdminCoinPackage(packageId: string): Promise<void> {
+    if (!options.onAdminCoinPackageDelete) {
+      state.adminCoinPackagesErrorText = 'Изтриването на пакети временно не е налично.'
+      render()
+      return
+    }
+
+    state.adminCoinPackagesErrorText = null
+    render()
+
+    const result = await options.onAdminCoinPackageDelete(packageId)
+
+    if (!result.ok) {
+      state.adminCoinPackagesErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminCoinPackages = result.packages
+    if (state.adminCoinPackageEditId === packageId) {
+      state.adminCoinPackageEditId = null
+    }
     state.adminCoinPackagesErrorText = null
     render()
   }
@@ -2244,6 +2302,13 @@ export function createLobbyFlowController(
     }
 
     state.displayName = authSession.profile.displayName
+
+    const balance = authSession.profile.yellowCoinsBalance ?? 0
+    if (balance < stake) {
+      state.lowCoinsModalOpen = true
+      render()
+      return
+    }
 
     if (!state.isConnected) {
       state.currentScreen = 'lobby'

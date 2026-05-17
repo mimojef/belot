@@ -1824,8 +1824,25 @@ async function handlePublicSettingsRequest(
 
   const settings = adminSettingsStore.getSettings()
 
+  const onlineProfileIds = new Set<string>()
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.profileId && socketRegistry.get(conn.id)?.readyState === WebSocket.OPEN) {
+      onlineProfileIds.add(conn.profileId)
+    }
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+  if (session?.profile.profileId) {
+    onlineProfileIds.add(session.profile.profileId)
+  }
+
+  const allProfiles = playerProgressStore.listPublicHumanProfiles(onlineProfileIds)
+  const onlinePlayersCount = allProfiles.filter((p) => p.isOnline).length
+
   sendJsonResponse(res, 200, {
     ok: true,
+    onlinePlayersCount,
     settings: {
       signupBonusYellowCoins: settings.signupBonusYellowCoins,
       profileNameChangePrice: settings.profileNameChangePrice,
@@ -2184,8 +2201,9 @@ async function handleAdminCoinPackagesRequest(
   pathname: string,
 ): Promise<boolean> {
   const statusMatch = /^\/api\/admin\/coin-packages\/([^/]+)\/status$/.exec(pathname)
+  const deleteMatch = /^\/api\/admin\/coin-packages\/([^/]+)$/.exec(pathname)
 
-  if (pathname !== '/api/admin/coin-packages' && statusMatch === null) {
+  if (pathname !== '/api/admin/coin-packages' && statusMatch === null && deleteMatch === null) {
     return false
   }
 
@@ -2241,6 +2259,18 @@ async function handleAdminCoinPackagesRequest(
       package: result.package,
       packages: coinPackageStore.listAdminPackages(),
     })
+    return true
+  }
+
+  if (deleteMatch !== null && req.method === 'DELETE') {
+    const result = coinPackageStore.deletePackage(decodeURIComponent(deleteMatch[1] ?? ''))
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, { ok: true, packages: result.packages })
     return true
   }
 

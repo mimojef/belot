@@ -38,6 +38,9 @@ export type CoinPackageStore = {
     packageId: string,
     status: CoinPackageStatus,
   ) => { ok: true; package: CoinPackageSnapshot } | { ok: false; message: string }
+  deletePackage: (
+    packageId: string,
+  ) => { ok: true; packages: CoinPackageSnapshot[] } | { ok: false; message: string }
   close: () => void
 }
 
@@ -195,6 +198,10 @@ export async function createCoinPackageStore(
     WHERE package_id = ?;
   `)
 
+  const deletePackageStatement = database.prepare(`
+    DELETE FROM coin_packages WHERE package_id = ?;
+  `)
+
   function listPublicPackages(): CoinPackageSnapshot[] {
     return (selectPublicPackagesStatement.all() as CoinPackageRow[]).map(rowToSnapshot)
   }
@@ -331,6 +338,26 @@ export async function createCoinPackageStore(
     }
   }
 
+  function deletePackage(
+    packageId: string,
+  ): { ok: true; packages: CoinPackageSnapshot[] } | { ok: false; message: string } {
+    const normalizedPackageId = normalizeText(packageId, 96)
+
+    if (normalizedPackageId.length === 0) {
+      return { ok: false, message: 'Невалиден ID на пакет.' }
+    }
+
+    const existing = getPackageById(normalizedPackageId)
+
+    if (existing === null) {
+      return { ok: false, message: 'Пакетът не беше намерен.' }
+    }
+
+    deletePackageStatement.run(normalizedPackageId)
+
+    return { ok: true, packages: listAdminPackages() }
+  }
+
   function close(): void {
     database.close()
   }
@@ -340,6 +367,7 @@ export async function createCoinPackageStore(
     listAdminPackages,
     upsertPackage,
     setPackageStatus,
+    deletePackage,
     close,
   }
 }

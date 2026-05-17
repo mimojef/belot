@@ -38,7 +38,6 @@ const CARD_HEIGHT = CUTTING_CARD_HEIGHT
 const CARD_STEP = CUTTING_CARD_STEP
 const CARD_TOP = CUTTING_CARD_TOP
 const DECK_PADDING_X = CUTTING_DECK_PADDING_X
-const CUT_HOTSPOT_WIDTH = CARD_WIDTH
 const SELECTED_GAP = CUTTING_SELECTED_GAP
 const CARD_HOVER_LIFT_PX = 14
 export const CUTTING_VISUAL_ANIMATION_TOTAL_MS = 860
@@ -120,25 +119,6 @@ function getCardLeft(cardNumber: number, selectedCutIndex: number | null): numbe
   return DECK_PADDING_X + (cardNumber - 1) * CARD_STEP + afterSelectedShift
 }
 
-function getCutSlotCenter(cutIndex: number, selectedCutIndex: number | null): number {
-  if (selectedCutIndex === null) {
-    return DECK_PADDING_X + cutIndex * CARD_STEP
-  }
-
-  if (cutIndex < selectedCutIndex) {
-    return DECK_PADDING_X + cutIndex * CARD_STEP
-  }
-
-  if (cutIndex === selectedCutIndex) {
-    return DECK_PADDING_X + cutIndex * CARD_STEP + SELECTED_GAP / 2
-  }
-
-  return DECK_PADDING_X + cutIndex * CARD_STEP + SELECTED_GAP
-}
-
-function buildCutHotspotInteractionHandler(): string {
-  return ''
-}
 
 function buildCutDeckHoverMoveHandler(
   selectedCutIndex: number | null,
@@ -358,71 +338,28 @@ function renderVisualDeck(
     `
   }).join('')
 
-  const cutButtonsHtml = isInteractive
-    ? Array.from({ length: validCutCount }, (_, index) => {
-        const cutIndex = index + 1
-        const slotCenter = getCutSlotCenter(cutIndex, selectedCutIndex)
-        const activateHoverHandler = buildCutHotspotInteractionHandler()
-        const deactivateHoverHandler = buildCutHotspotInteractionHandler()
-
-        return `
-          <button
-            type="button"
-            data-active-room-cut-index="${cutIndex}"
-            aria-label="Избери място за цепене след карта ${cutIndex}"
-            style="
-              position:absolute;
-              left:${slotCenter - CUT_HOTSPOT_WIDTH / 2}px;
-              top:${CARD_TOP - CARD_HOVER_LIFT_PX}px;
-              width:${CUT_HOTSPOT_WIDTH}px;
-              height:${CARD_HEIGHT + CARD_HOVER_LIFT_PX}px;
-              padding:0;
-              border:none;
-              background:transparent;
-              cursor:pointer;
-              z-index:${VISUAL_CARD_COUNT + 12};
-            "
-            onmouseenter="${activateHoverHandler}"
-            onmouseleave="${deactivateHoverHandler}"
-            onfocus="${activateHoverHandler}"
-            onblur="${deactivateHoverHandler}"
-          >
-            <span
-              aria-hidden="true"
-              style="
-                position:absolute;
-                left:50%;
-                top:14px;
-                bottom:14px;
-                width:3px;
-                border-radius:999px;
-                transform:translateX(-50%) scaleY(0.72);
-                transform-origin:center;
-                background:
-                  linear-gradient(180deg, rgba(254,240,138,0.00) 0%, rgba(254,240,138,0.90) 22%, rgba(250,204,21,0.90) 78%, rgba(254,240,138,0.00) 100%);
-                opacity:0;
-                transition:opacity 120ms ease, transform 120ms ease, box-shadow 120ms ease;
-              "
-            ></span>
-
-            <span
-              aria-hidden="true"
-              style="
-                position:absolute;
-                left:50%;
-                top:50%;
-                width:22px;
-                height:${CARD_HEIGHT - 36}px;
-                transform:translate(-50%, -50%) scale(0.9);
-                border-radius:999px;
-                background:radial-gradient(circle, rgba(250,204,21,0.10) 0%, rgba(250,204,21,0.05) 46%, rgba(250,204,21,0.00) 72%);
-                opacity:0;
-                transition:opacity 120ms ease, transform 120ms ease;
-              "
-            ></span>
-          </button>
-        `
-      }).join('')
+  const defaultCutIndex = Math.ceil(validCutCount / 2)
+  const cutButtonsHtml = isInteractive && validCutCount > 0
+    ? `
+        <button
+          type="button"
+          data-active-room-cut-hit-area="1"
+          data-active-room-cut-index="${defaultCutIndex}"
+          aria-label="Избери място за цепене"
+          style="
+            position:absolute;
+            left:${DECK_PADDING_X}px;
+            top:${CARD_TOP - CARD_HOVER_LIFT_PX}px;
+            width:${deckTrackWidth - DECK_PADDING_X}px;
+            height:${CARD_HEIGHT + CARD_HOVER_LIFT_PX}px;
+            padding:0;
+            border:none;
+            background:transparent;
+            cursor:pointer;
+            z-index:${VISUAL_CARD_COUNT + 12};
+          "
+        ></button>
+      `
     : ''
 
   const selectedMarkerHtml = ''
