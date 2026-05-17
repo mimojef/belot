@@ -38,6 +38,11 @@ export type SeatDeclarationBubble = {
   lines: string[]
 }
 
+export type SeatEmojiBubble = {
+  emojiId: string
+  elapsedMs: number
+}
+
 export type RenderCuttingSeatPanelsOptions = {
   seats: RoomSeatSnapshot[]
   localSeat: Seat
@@ -55,6 +60,7 @@ export type RenderCuttingSeatPanelsOptions = {
   dealtHands: DealtHandsData | null
   bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null
   declarationBubbles?: Partial<Record<Seat, SeatDeclarationBubble>> | null
+  emojiBubbles?: Partial<Record<Seat, SeatEmojiBubble>> | null
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -735,6 +741,63 @@ function renderDeclarationBubble(
   `
 }
 
+const EMOJI_BUBBLE_TOTAL_MS = 4000
+
+function renderEmojiBubble(
+  visualSeat: Seat,
+  bubble: SeatEmojiBubble,
+  offsetIndex: number,
+): string {
+  const totalMs = EMOJI_BUBBLE_TOTAL_MS
+  const fadeInEnd = Math.round((200 / totalMs) * 100)
+  const fadeOutStart = Math.round(((totalMs - 400) / totalMs) * 100)
+  const keyframes = `@keyframes emb-${visualSeat}-${offsetIndex}{0%{opacity:0}${fadeInEnd}%{opacity:1}${fadeOutStart}%{opacity:1}100%{opacity:0}}`
+
+  const { wrapperStyle, tailStyle } = getBubblePlacement(visualSeat, offsetIndex)
+  const elapsed = Math.min(bubble.elapsedMs, totalMs)
+  const delay = -elapsed / 1000
+
+  return `
+    <style>${keyframes}</style>
+    <div
+      style="
+        position:absolute;
+        ${wrapperStyle}
+        z-index:30;
+        pointer-events:none;
+        animation:emb-${visualSeat}-${offsetIndex} ${totalMs}ms linear both;
+        animation-delay:${delay}s;
+      "
+    >
+      <div
+        style="
+          position:relative;
+          width:90px;
+          height:90px;
+          border-radius:50%;
+          background:rgba(255,255,255,0.95);
+          box-shadow:0 4px 16px rgba(0,0,0,0.22);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+        "
+      >
+        <img
+          src="/assets/animated-emoji/emoji-${bubble.emojiId}.webp"
+          alt=""
+          style="width:85px;height:85px;object-fit:contain;"
+        >
+        <div style="
+          position:absolute;
+          background:rgba(255,255,255,0.95);
+          box-shadow:0 4px 10px rgba(15,23,42,0.06);
+          ${tailStyle}
+        "></div>
+      </div>
+    </div>
+  `
+}
+
 export function createCuttingSeatPanelHtml(
   seat: RoomSeatSnapshot,
   visualSeat: Seat,
@@ -750,6 +813,7 @@ export function createCuttingSeatPanelHtml(
   bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null,
   declarationBubbles: Partial<Record<Seat, SeatDeclarationBubble>> | null,
   countdownKey: string,
+  emojiBubbles: Partial<Record<Seat, SeatEmojiBubble>> | null,
 ): string {
   const isBottomSeat = visualSeat === 'bottom'
   const isCountdownSeat = seat.seat === countdownSeat
@@ -796,6 +860,7 @@ export function createCuttingSeatPanelHtml(
   const bubbleHtml = bidBubbles?.[seat.seat]
     ? renderBidBubble(visualSeat, bidBubbles[seat.seat]!, escapeHtml)
     : ''
+  const hasDeclarationBubble = Boolean(declarationBubbles?.[seat.seat]?.lines.length)
   const declarationBubbleHtml = declarationBubbles?.[seat.seat]
     ? renderDeclarationBubble(
         visualSeat,
@@ -803,6 +868,10 @@ export function createCuttingSeatPanelHtml(
         hasBidBubble,
         escapeHtml,
       )
+    : ''
+  const emojiOffsetIndex = (hasBidBubble ? 1 : 0) + (hasDeclarationBubble ? 1 : 0)
+  const emojiBubbleHtml = emojiBubbles?.[seat.seat]
+    ? renderEmojiBubble(visualSeat, emojiBubbles[seat.seat]!, emojiOffsetIndex)
     : ''
 
   if (isBottomSeat) {
@@ -820,6 +889,7 @@ export function createCuttingSeatPanelHtml(
       >
         <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
         <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
+        <div data-seat-emoji-bubble="${seat.seat}">${emojiBubbleHtml}</div>
         ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
         <div
           style="
@@ -931,6 +1001,7 @@ export function createCuttingSeatPanelHtml(
     >
       <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
       <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
+      <div data-seat-emoji-bubble="${seat.seat}">${emojiBubbleHtml}</div>
       ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
       <div
         style="
@@ -1015,6 +1086,7 @@ export function createCuttingSeatPanelsHtml(
     dealtHands,
     bidBubbles,
     declarationBubbles,
+    emojiBubbles,
   } = options
   const effectiveCountdownSeat =
     countdownSeat === undefined ? cutterSeat : countdownSeat
@@ -1063,6 +1135,7 @@ export function createCuttingSeatPanelsHtml(
         bidBubbles ?? null,
         declarationBubbles ?? null,
         countdownKey ?? '',
+        emojiBubbles ?? null,
       )
     })
     .join('')

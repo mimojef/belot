@@ -2000,13 +2000,10 @@ function renderAdminPanel(state: LobbyScreenState): string {
           return `
         <form data-lobby-admin-coin-package-form="1" style="width:min(100%,980px);display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;border:1px solid ${editPackage ? 'rgba(212,165,32,0.55)' : 'rgba(212,165,32,0.30)'};border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:18px;">
           <input type="hidden" name="packageId" value="${escapeHtml(editPackage?.packageId ?? '')}">
+          <input type="hidden" name="packageKey" value="${escapeHtml(editPackage?.packageKey ?? '')}">
           <div style="grid-column:1 / -1;font-size:15px;font-weight:900;color:${editPackage ? '#d4a520' : '#f8fafc'};">
             ${editPackage ? `Редактирай: ${escapeHtml(editPackage.title)}` : 'Нова оферта'}
           </div>
-          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
-            Ключ
-            <input name="packageKey" type="text" maxlength="48" placeholder="starter" value="${escapeHtml(editPackage?.packageKey ?? '')}" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
-          </label>
           <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Име
             <input name="title" type="text" maxlength="80" placeholder="Starter" value="${escapeHtml(editPackage?.title ?? '')}" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
@@ -2393,10 +2390,15 @@ export function renderLobbyScreen(
         return
       }
 
+      const title = String(data.get('title') ?? '').trim()
+      const existingKey = String(data.get('packageKey') ?? '').trim()
+      const packageKey = existingKey ||
+        title.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48)
+
       options.onAdminCoinPackageSubmit({
         packageId: String(data.get('packageId') ?? '').trim() || null,
-        packageKey: String(data.get('packageKey') ?? '').trim(),
-        title: String(data.get('title') ?? '').trim(),
+        packageKey,
+        title,
         description: String(data.get('description') ?? '').trim(),
         yellowCoinsAmount: Number(data.get('yellowCoinsAmount')),
         priceCents: Number(data.get('priceCents')),

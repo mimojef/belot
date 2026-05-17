@@ -20,6 +20,7 @@ import {
   createCuttingSeatPanelsHtml,
   type DealtHandsData,
   type SeatDeclarationBubble,
+  type SeatEmojiBubble,
 } from './cutting/renderCuttingSeatPanels'
 import {
   getCuttingSeatPanelAnchorStyle,
@@ -1300,6 +1301,7 @@ export type RenderPlayingScreenOptions = {
   onDeclarationBubbleShown?: (lines: string[]) => void
   onPlayedCardLanded?: () => void
   syncSeatPanels?: (html: string) => void
+  emojiBubbles?: Partial<Record<Seat, SeatEmojiBubble>> | null
   cache: PlayingUiCache
 }
 
@@ -1318,6 +1320,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     onDeclarationBubbleShown,
     onPlayedCardLanded,
     syncSeatPanels,
+    emojiBubbles,
     cache,
   } = options
 
@@ -1646,8 +1649,11 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       JSON.stringify(declarationBubbles),
     ].join('|')
 
-    if (seatPanelKey !== cache.lastSeatPanelKey) {
-      cache.lastSeatPanelKey = seatPanelKey
+    const emojiKey = emojiBubbles ? JSON.stringify(Object.keys(emojiBubbles).sort()) : 'null'
+    const fullSeatPanelKey = seatPanelKey + '|emoji:' + emojiKey
+
+    if (fullSeatPanelKey !== cache.lastSeatPanelKey) {
+      cache.lastSeatPanelKey = fullSeatPanelKey
       syncSeatPanels(createCuttingSeatPanelsHtml({
         seats,
         localSeat,
@@ -1667,6 +1673,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         dealtHands: dealtHandsForPanels,
         bidBubbles: null,
         declarationBubbles,
+        emojiBubbles: emojiBubbles ?? null,
       }))
     }
   }

@@ -14,6 +14,7 @@ import {
 import {
   createCuttingSeatPanelsHtml,
   type DealtHandsData,
+  type SeatEmojiBubble,
 } from './cutting/renderCuttingSeatPanels'
 import {
   type ActiveRoomFlowController,
@@ -22,6 +23,7 @@ import {
   type CreateActiveRoomFlowControllerOptions,
   type CuttingAnimationCache,
   type DealingAnimationCache,
+  type EmojiReactionUiState,
   type PlayingUiCache,
 } from './activeRoomTypes'
 import {
@@ -34,6 +36,7 @@ import {
   createBiddingUiState,
   createCuttingAnimationCache,
   createDealingAnimationCache,
+  createEmojiReactionUiState,
   createPlayingUiCache,
   escapeHtml,
   getActiveRoomStageMetrics,
@@ -140,6 +143,10 @@ export function createActiveRoomFlowController(
   const nextTwoOverlay: DealPacketOverlayState = createDealPacketOverlayState()
   const lastThreeOverlay: DealPacketOverlayState = createDealPacketOverlayState()
   const biddingUiState: BiddingUiState = createBiddingUiState()
+  const emojiReactionUiState: EmojiReactionUiState = createEmojiReactionUiState()
+  let emojiPickerOpen = false
+  const EMOJI_BUBBLE_DURATION_MS = 4000
+  const EMOJI_COUNT = 21
   const playingCache: PlayingUiCache = createPlayingUiCache()
   let lastKnownWinningBid: NonNullable<RoomWinningBidSnapshot> | null = null
   let scoringCountdownIntervalId: number | null = null
@@ -546,6 +553,18 @@ export function createActiveRoomFlowController(
         for (const bHost of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-declaration-bubble]'))) {
           const seat = bHost.getAttribute('data-seat-declaration-bubble')!
           const existing = host.querySelector<HTMLElement>(`[data-seat-declaration-bubble="${seat}"]`)
+          if (!existing) { ok = false; break }
+          if (existing.innerHTML !== bHost.innerHTML) {
+            existing.innerHTML = bHost.innerHTML
+          }
+        }
+      }
+
+      // Update emoji bubble wrappers (innerHTML only)
+      if (ok) {
+        for (const bHost of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-emoji-bubble]'))) {
+          const seat = bHost.getAttribute('data-seat-emoji-bubble')!
+          const existing = host.querySelector<HTMLElement>(`[data-seat-emoji-bubble="${seat}"]`)
           if (!existing) { ok = false; break }
           if (existing.innerHTML !== bHost.innerHTML) {
             existing.innerHTML = bHost.innerHTML
@@ -1095,6 +1114,143 @@ export function createActiveRoomFlowController(
 
   function getBidBubblesForRender() {
     return getBidBubblesForRenderFromStore(biddingUiState)
+  }
+
+  function addEmojiBubble(seat: Seat, emojiId: string): void {
+    const existing = emojiReactionUiState.timerIds[seat]
+    if (existing !== undefined) {
+      window.clearTimeout(existing)
+    }
+    emojiReactionUiState.activeBubbles[seat] = { emojiId, startedAt: performance.now() }
+    emojiReactionUiState.timerIds[seat] = window.setTimeout(() => {
+      delete emojiReactionUiState.activeBubbles[seat]
+      delete emojiReactionUiState.timerIds[seat]
+      renderActiveRoomScreen()
+    }, EMOJI_BUBBLE_DURATION_MS)
+  }
+
+  function clearEmojiReactionUiState(): void {
+    for (const timerId of Object.values(emojiReactionUiState.timerIds)) {
+      if (timerId !== undefined) window.clearTimeout(timerId)
+    }
+    emojiReactionUiState.activeBubbles = {}
+    emojiReactionUiState.timerIds = {}
+  }
+
+  function getEmojiBubblesForRender(): Partial<Record<Seat, SeatEmojiBubble>> | null {
+    const result: Partial<Record<Seat, SeatEmojiBubble>> = {}
+    for (const [seat, bubble] of Object.entries(emojiReactionUiState.activeBubbles) as [Seat, { emojiId: string; startedAt: number }][]) {
+      result[seat] = {
+        emojiId: bubble.emojiId,
+        elapsedMs: Math.round(performance.now() - bubble.startedAt),
+      }
+    }
+    return Object.keys(result).length > 0 ? result : null
+  }
+
+  function renderEmojiPickerHtml(): string {
+    const rows: string[] = []
+    for (let i = 1; i <= EMOJI_COUNT; i++) {
+      const id = String(i).padStart(2, '0')
+      rows.push(`
+        <button
+          type="button"
+          data-emoji-pick="${id}"
+          style="
+            width:52px;height:52px;border:0;background:transparent;cursor:pointer;
+            border-radius:10px;padding:2px;
+            display:flex;align-items:center;justify-content:center;
+            transition:background 0.12s;
+          "
+          onmouseenter="this.style.background='rgba(255,255,255,0.15)'"
+          onmouseleave="this.style.background='transparent'"
+        >
+          <img src="/assets/animated-emoji/preview/preview-emoji-${id}.png" alt="" style="width:44px;height:44px;object-fit:contain;">
+        </button>
+      `)
+    }
+    return `
+      <div
+        data-emoji-picker="1"
+        style="
+          position:fixed;
+          bottom:76px;
+          right:16px;
+          z-index:9999;
+          background:rgba(20,20,24,0.96);
+          border:1px solid rgba(255,255,255,0.12);
+          border-radius:16px;
+          padding:12px;
+          display:grid;
+          grid-template-columns:repeat(7,52px);
+          gap:4px;
+          box-shadow:0 8px 32px rgba(0,0,0,0.5);
+          backdrop-filter:blur(12px);
+        "
+      >
+        ${rows.join('')}
+      </div>
+    `
+  }
+
+  function ensureEmojiButton(isScoring: boolean): void {
+    if (isScoring || !activeRoomState) {
+      removeEmojiButton()
+      return
+    }
+
+    if (!document.body.querySelector('[data-emoji-toggle="1"]')) {
+      document.body.insertAdjacentHTML('beforeend', `
+        <button
+          type="button"
+          data-emoji-toggle="1"
+          style="
+            position:fixed;
+            bottom:16px;
+            right:16px;
+            z-index:9998;
+            width:80px;height:80px;
+            border:0;border-radius:50%;
+            background:rgba(20,20,24,0.92);
+            border:2px solid rgba(212,165,32,0.80);
+            box-shadow:0 0 12px rgba(212,165,32,0.25), 0 6px 20px rgba(0,0,0,0.50);
+            cursor:pointer;
+            display:flex;align-items:center;justify-content:center;
+            backdrop-filter:blur(8px);
+          "
+        >
+          <img src="/assets/animated-emoji/preview/preview-emoji-08.png" alt="" style="width:56px;height:56px;object-fit:contain;">
+        </button>
+      `)
+      document.body.querySelector('[data-emoji-toggle="1"]')?.addEventListener('click', () => {
+        emojiPickerOpen = !emojiPickerOpen
+        syncEmojiPickerPanel()
+      })
+    }
+  }
+
+  function removeEmojiButton(): void {
+    document.body.querySelector('[data-emoji-toggle="1"]')?.remove()
+    document.body.querySelector('[data-emoji-picker="1"]')?.remove()
+    emojiPickerOpen = false
+  }
+
+  function syncEmojiPickerPanel(): void {
+    const existing = document.body.querySelector('[data-emoji-picker="1"]')
+    if (emojiPickerOpen && !existing) {
+      document.body.insertAdjacentHTML('beforeend', renderEmojiPickerHtml())
+      document.body.querySelectorAll<HTMLButtonElement>('[data-emoji-pick]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const emojiId = btn.getAttribute('data-emoji-pick')
+          if (!activeRoomState || !emojiId) return
+          options.sendEmojiReaction(activeRoomState.roomId, emojiId)
+          emojiPickerOpen = false
+          document.body.querySelector('[data-emoji-picker="1"]')?.remove()
+        })
+      })
+    } else if (!emojiPickerOpen && existing) {
+      existing.remove()
+    }
   }
 
   function getBidActionAudioLabel(action: RoomBiddingSnapshot['entries'][number]['action']): string {
@@ -1707,6 +1863,7 @@ export function createActiveRoomFlowController(
         escapeHtml,
         dealtHands: null,
         bidBubbles: isShowingNextRoundPause ? bidBubblesForRender : null,
+        emojiBubbles: getEmojiBubblesForRender(),
       }))
 
       if (cutAnimationForRender !== null) {
@@ -1973,6 +2130,7 @@ export function createActiveRoomFlowController(
         escapeHtml,
         dealtHands: dealtHandsForPanels,
         bidBubbles: getBidBubblesForRender(),
+        emojiBubbles: getEmojiBubblesForRender(),
       }))
 
       if (isUsingFirstThreeOverlay && dealingAnimation.activePhaseKey !== null) {
@@ -2177,6 +2335,7 @@ export function createActiveRoomFlowController(
         escapeHtml,
         dealtHands: dealtHandsForBidding,
         bidBubbles,
+        emojiBubbles: getEmojiBubblesForRender(),
       }))
 
       // Wire bid popup buttons
@@ -2294,6 +2453,7 @@ export function createActiveRoomFlowController(
           options.gameAudio?.playCardOnTable()
         },
         syncSeatPanels,
+        emojiBubbles: getEmojiBubblesForRender(),
         cache: playingCache,
       } satisfies RenderPlayingScreenOptions)
     } else if (activeRoomState.game !== null) {
@@ -2654,6 +2814,8 @@ export function createActiveRoomFlowController(
       `
     }
 
+    ensureEmojiButton(Boolean(isShowingScoringPhase || isShowingMatchEndedPhase))
+    syncEmojiPickerPanel()
     appendLeaveControls()
     syncPersistentBotTakeoverPopup()
 
@@ -2862,6 +3024,8 @@ export function createActiveRoomFlowController(
       clearScoringCountdownTicker()
       clearReactionCountdownAudioTicker()
       clearBiddingUiState()
+      clearEmojiReactionUiState()
+      removeEmojiButton()
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
       removePersistentBotTakeoverPopup()
@@ -2892,6 +3056,8 @@ export function createActiveRoomFlowController(
       clearScoringCountdownTicker()
       clearReactionCountdownAudioTicker()
       clearBiddingUiState()
+      clearEmojiReactionUiState()
+      removeEmojiButton()
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
       removePersistentBotTakeoverPopup()
@@ -2916,6 +3082,12 @@ export function createActiveRoomFlowController(
       clearPendingBidSubmission()
       playingCache.pendingPlayCardSent = false
       activeRoomState.errorText = message.message
+      renderActiveRoomScreen()
+      return true
+    }
+
+    if (message.type === 'emoji_reaction' && message.roomId === activeRoomState.roomId) {
+      addEmojiBubble(message.seat as Seat, message.emojiId)
       renderActiveRoomScreen()
       return true
     }

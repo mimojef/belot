@@ -336,6 +336,25 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       }
     }
 
+    if (parsed.type === 'send_emoji_reaction') {
+      const roomId = normalizeRequiredText(parsed.roomId)
+      const emojiId = normalizeRequiredText(parsed.emojiId)
+
+      if (roomId === null || emojiId === null) {
+        return null
+      }
+
+      if (!/^(?:0[1-9]|1[0-9]|2[01])$/.test(emojiId)) {
+        return null
+      }
+
+      return {
+        type: 'send_emoji_reaction',
+        roomId,
+        emojiId,
+      }
+    }
+
     return null
   } catch {
     return null

@@ -1299,6 +1299,9 @@ const activeRoom = createActiveRoomFlowController({
   sendLeaveMatchVote: (roomId) => {
     client.sendLeaveMatchVote(roomId)
   },
+  sendEmojiReaction: (roomId, emojiId) => {
+    client.sendEmojiReaction(roomId, emojiId)
+  },
   requestPlayerProfile: (roomId, seat) => {
     client.requestPlayerProfile(roomId, seat)
   },

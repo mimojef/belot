@@ -97,6 +97,11 @@ export type ClientMessage =
       type: 'request_leave_match'
       roomId: RoomId
     }
+  | {
+      type: 'send_emoji_reaction'
+      roomId: RoomId
+      emojiId: string
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -394,6 +399,13 @@ export type SessionInGameMessage = {
   reconnectToken: string
 }
 
+export type EmojiReactionMessage = {
+  type: 'emoji_reaction'
+  roomId: RoomId
+  seat: Seat
+  emojiId: string
+}
+
 export type ServerMessage =
   | ConnectedMessage
   | PongMessage
@@ -412,6 +424,7 @@ export type ServerMessage =
   | MatchmakingStatusMessage
   | MatchmakingLeftMessage
   | MatchFoundMessage
+  | EmojiReactionMessage
 
 export function getDisplayNameFromIdentity(
   identity: PlayerIdentitySnapshot | null | undefined,

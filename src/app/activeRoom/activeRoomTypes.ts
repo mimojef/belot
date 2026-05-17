@@ -41,6 +41,7 @@ export type CreateActiveRoomFlowControllerOptions = {
   submitPartnerRating: (roomId: string, ratingValue: number) => void
   sendReplayVote: (roomId: string) => void
   sendLeaveMatchVote: (roomId: string) => void
+  sendEmojiReaction: (roomId: string, emojiId: string) => void
   requestPlayerProfile: (roomId: string, seat: Seat) => void
   showLobby: (errorText?: string | null) => void
   startNewGame: (stake: MatchStake, displayName?: string) => void
@@ -116,4 +117,9 @@ export type BiddingUiState = {
   bubbleTimerIds: Partial<Record<Seat, number>>
   showBotTakeover: boolean
   botTakeoverTimerId: number | null
+}
+
+export type EmojiReactionUiState = {
+  activeBubbles: Partial<Record<Seat, { emojiId: string; startedAt: number }>>
+  timerIds: Partial<Record<Seat, number>>
 }

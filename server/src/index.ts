@@ -3202,6 +3202,34 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (message.type === 'send_emoji_reaction') {
+        const emojiConn = getConnectionById(serverState, connection.id)
+        const emojiSeat = emojiConn?.currentSeat ?? null
+        const emojiRoom = emojiConn?.currentRoomId === message.roomId
+          ? (serverState.rooms[message.roomId] ?? null)
+          : null
+
+        if (emojiRoom !== null && emojiSeat !== null) {
+          const emojiMsg = {
+            type: 'emoji_reaction' as const,
+            roomId: message.roomId,
+            seat: emojiSeat,
+            emojiId: message.emojiId,
+          }
+          for (const s of SERVER_SEAT_ORDER) {
+            const participant = emojiRoom.seats[s].participant
+            if (participant === null || participant.kind !== 'human' || !participant.isConnected || participant.connectionId === null) {
+              continue
+            }
+            const sock = socketRegistry.get(participant.connectionId)
+            if (sock && sock.readyState === WebSocket.OPEN) {
+              sendJsonMessage(sock, emojiMsg)
+            }
+          }
+        }
+        return
+      }
+
       if (message.type === 'resume_room') {
         if (connection.profileId !== null) {
           displaceProfileConnections(connection.profileId, connection.id)

@@ -213,6 +213,11 @@ export type ClientMessage =
       type: 'request_leave_match'
       roomId: string
     }
+  | {
+      type: 'send_emoji_reaction'
+      roomId: string
+      emojiId: string
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -516,6 +521,13 @@ export type MatchFoundMessage = {
   shouldStartImmediately: boolean
 }
 
+export type EmojiReactionMessage = {
+  type: 'emoji_reaction'
+  roomId: string
+  seat: Seat
+  emojiId: string
+}
+
 export type ServerMessage =
   | ConnectedMessage
   | PongMessage
@@ -535,6 +547,7 @@ export type ServerMessage =
   | MatchFoundMessage
   | SessionDisplacedMessage
   | SessionInGameMessage
+  | EmojiReactionMessage
 
 type CreateGameServerClientOptions = {
   url?: string
@@ -563,6 +576,7 @@ export type GameServerClient = {
   submitPartnerRating: (roomId: string, ratingValue: number) => void
   sendReplayVote: (roomId: string) => void
   sendLeaveMatchVote: (roomId: string) => void
+  sendEmojiReaction: (roomId: string, emojiId: string) => void
 }
 
 function getDefaultServerUrl(): string {
@@ -769,6 +783,14 @@ export function createGameServerClient(
     })
   }
 
+  function sendEmojiReaction(roomId: string, emojiId: string): void {
+    send({
+      type: 'send_emoji_reaction',
+      roomId,
+      emojiId,
+    })
+  }
+
   return {
     connect,
     disconnect,
@@ -788,5 +810,6 @@ export function createGameServerClient(
     submitPartnerRating,
     sendReplayVote,
     sendLeaveMatchVote,
+    sendEmojiReaction,
   }
 }
