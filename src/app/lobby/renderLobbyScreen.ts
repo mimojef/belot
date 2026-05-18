@@ -313,9 +313,9 @@ function formatAmount(value: number): string {
 
 function renderLevelBadge(level: number | null | undefined, size: 'sm' | 'md' = 'md'): string {
   if (typeof level !== 'number' || !Number.isFinite(level) || level < 1) return ''
-  const h = size === 'sm' ? '16px' : '18px'
-  const px = size === 'sm' ? '2px' : '3px'
-  return `<div style="position:absolute;right:5px;bottom:5px;min-width:${h};height:${h};display:flex;align-items:center;justify-content:center;padding:0 ${px};line-height:1;z-index:1;color:#ffffff;font-size:14px;font-weight:400;text-shadow:-2px -2px 0 #000,0 -2px 0 #000,2px -2px 0 #000,-2px 0 0 #000,2px 0 0 #000,-2px 2px 0 #000,0 2px 0 #000,2px 2px 0 #000;">${Math.trunc(level)}</div>`
+  const sz = size === 'sm' ? '16px' : '20px'
+  const fs = size === 'sm' ? '9px' : '11px'
+  return `<div style="position:absolute;right:4px;bottom:4px;min-width:${sz};height:${sz};border-radius:999px;background:#000000;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;z-index:1;color:#ffffff;font-size:${fs};font-weight:700;">${Math.trunc(level)}</div>`
 }
 
 function formatPackagePrice(priceCents: number, currency: string): string {
@@ -797,51 +797,42 @@ function renderNav(state: LobbyScreenState): string {
           <span style="font-size:25px;line-height:1;color:currentColor;">◎</span>
           Играчи
         </button>
-        ${state.isAdmin ? `
-          <button type="button" data-lobby-nav-admin="1" ${adminActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+        ${state.profile.profileId !== null ? `
+          <button type="button" data-lobby-nav-chat="1" ${chatActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
             display:flex; align-items:center; gap:10px;
             padding:0 18px;
             border:0;
-            background:${adminActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+            background:${chatActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
             font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-            color:${adminActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
-            border-bottom:2px solid ${adminActive ? '#d4a520' : 'transparent'};
+            color:${chatActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+            border-bottom:2px solid ${chatActive ? '#d4a520' : 'transparent'};
             cursor:pointer;
             height:100%;
           ">
-            <span style="font-size:22px;line-height:1;color:currentColor;">⚙</span>
-            Админ
+            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            Чат
           </button>
         ` : ''}
       </div>
 
       <div style="display:flex; align-items:center; gap:4px; margin-left:auto;">
         ${state.profile.profileId !== null ? `
-          <button type="button" data-lobby-nav-chat="1" style="
-            display:flex; align-items:center; gap:8px;
-            background:none; border:none; border-radius:8px;
-            padding:9px 14px;
-            cursor:pointer;
-            font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-            color:${chatActive ? '#d4a520' : 'rgba(255,255,255,0.75)'};
-          ">
-            <span style="font-size:20px;line-height:1;color:currentColor;">▣</span>
-            Чат
-          </button>
-          <button
-            type="button"
-            data-lobby-profile-button="1"
-            style="
-            display:flex; align-items:center; gap:8px;
-            background:none; border:none; border-radius:8px;
-            padding:9px 14px;
-            cursor:pointer;
-            font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-            color:rgba(255,255,255,0.75);
-          ">
-            <img src="/assets/lobby/nav-icon-preview/nav-profile-white.png" alt="" style="width:22px; height:24px; display:block; object-fit:contain;">
-            Профил
-          </button>
+          ${state.isAdmin ? `
+            <button type="button" data-lobby-nav-admin="1" ${adminActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+              display:flex; align-items:center; gap:8px;
+              background:${adminActive ? 'rgba(212,165,32,0.06)' : 'none'};
+              border:0;
+              padding:0 14px;
+              cursor:pointer;
+              font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+              color:${adminActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+              border-bottom:2px solid ${adminActive ? '#d4a520' : 'transparent'};
+              height:100%;
+            ">
+              <span style="font-size:22px;line-height:1;color:currentColor;">⚙</span>
+              Админ
+            </button>
+          ` : ''}
           <button data-lobby-nav-bell="1" style="
             background:none; border:none; cursor:pointer; padding:6px;
             color:rgba(255,255,255,0.65); position:relative;
@@ -1013,18 +1004,26 @@ function renderHeroSection(
       ">
         <div style="display:flex; align-items:center; gap:24px; height:120px;">
           <div style="position:relative; width:120px; height:120px; flex-shrink:0;">
-            <div style="
-              width:120px; height:120px; border-radius:12px;
-              border:3px solid #d4a520;
-              overflow:hidden;
-              background:#111111;
-              box-shadow:0 0 0 2px rgba(0,0,0,0.65), 0 0 22px rgba(212,165,32,0.18);
-              box-sizing:border-box;
-            ">
+            <button
+              type="button"
+              data-lobby-profile-button="1"
+              style="
+                display:block; width:120px; height:120px; border-radius:12px;
+                border:3px solid #d4a520;
+                overflow:hidden;
+                background:#111111;
+                box-shadow:0 0 0 2px rgba(0,0,0,0.65), 0 0 22px rgba(212,165,32,0.18);
+                box-sizing:border-box;
+                cursor:pointer; padding:0;
+                transition:filter 0.15s, box-shadow 0.15s;
+              "
+              onmouseenter="this.style.filter='brightness(1.2)';this.style.boxShadow='0 0 0 2px rgba(0,0,0,0.65), 0 0 28px rgba(212,165,32,0.45)'"
+              onmouseleave="this.style.filter='';this.style.boxShadow='0 0 0 2px rgba(0,0,0,0.65), 0 0 22px rgba(212,165,32,0.18)'"
+            >
               ${avatarUrl
                 ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(profileName)}" style="width:100%; height:100%; object-fit:cover; object-position:center;">`
                 : `<span style="font-size:48px;font-weight:900;color:#d4a520;display:flex;align-items:center;justify-content:center;width:100%;height:100%;">${escapeHtml(profileName.charAt(0).toUpperCase() || '?')}</span>`}
-            </div>
+            </button>
             ${renderLevelBadge(level, 'md')}
           </div>
           <div style="flex:1; min-width:0;">
@@ -1038,6 +1037,26 @@ function renderHeroSection(
                 ${isConnected ? 'Онлайн' : 'Офлайн'}
               </span>
             </div>
+            <button
+              type="button"
+              data-lobby-profile-button="1"
+              class="lobby-profile-link-btn"
+              style="
+                display:inline-flex; align-items:center; gap:7px;
+                margin-top:10px;
+                background:none; border:none; border-radius:6px;
+                padding:4px 2px;
+                cursor:pointer;
+                font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+                color:rgba(255,255,255,0.75);
+                transition:color 0.15s;
+              "
+              onmouseenter="this.style.color='#d4a520'"
+              onmouseleave="this.style.color='rgba(255,255,255,0.75)'"
+            >
+              <img src="/assets/lobby/nav-icon-preview/nav-profile-white.png" alt="" style="width:18px; height:20px; display:block; object-fit:contain; opacity:0.85;">
+              Профил
+            </button>
           </div>
           <div style="width:1px; height:92px; background:rgba(212,165,32,0.35);"></div>
           <div style="width:210px;">
@@ -1443,11 +1462,7 @@ function renderBottomSection(lobbyPackages: CoinPackageSnapshot[], isLoggedIn: b
   `
   }).join('')
 
-  if (lobbyPackages.length === 0) {
-    return ''
-  }
-
-  return `
+  const packagesSection = lobbyPackages.length === 0 ? '' : `
     <div style="
       display:grid;
       grid-template-columns:310px repeat(${lobbyPackages.length}, minmax(0, 1fr));
@@ -1514,6 +1529,10 @@ function renderBottomSection(lobbyPackages: CoinPackageSnapshot[], isLoggedIn: b
         }
       </style>
     </div>
+  `
+
+  return `
+    ${packagesSection}
 
     <div style="
       display:grid;
@@ -2660,10 +2679,12 @@ export function renderLobbyScreen(
   })
 
   root
-    .querySelector<HTMLButtonElement>('[data-lobby-profile-button="1"]')
-    ?.addEventListener('click', (event) => {
-      event.preventDefault()
-      options.onProfileClick()
+    .querySelectorAll<HTMLButtonElement>('[data-lobby-profile-button="1"]')
+    .forEach((el) => {
+      el.addEventListener('click', (event) => {
+        event.preventDefault()
+        options.onProfileClick()
+      })
     })
 
   root.querySelectorAll<HTMLElement>('[data-lobby-nav-lobby="1"]').forEach((el) => {

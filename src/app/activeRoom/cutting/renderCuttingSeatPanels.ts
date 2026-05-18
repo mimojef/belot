@@ -14,7 +14,7 @@ type EscapeHtml = (value: string) => string
 
 function renderLevelBadge(level: number | null | undefined): string {
   if (typeof level !== 'number' || !Number.isFinite(level) || level < 1) return ''
-  return `<div style="position:absolute;right:5px;bottom:5px;min-width:18px;height:18px;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;z-index:10;color:#ffffff;font-size:18px;font-weight:400;text-shadow:-2px -2px 0 #000,0 -2px 0 #000,2px -2px 0 #000,-2px 0 0 #000,2px 0 0 #000,-2px 2px 0 #000,0 2px 0 #000,2px 2px 0 #000;">${Math.trunc(level)}</div>`
+  return `<div style="position:absolute;right:4px;bottom:4px;min-width:20px;height:20px;border-radius:999px;background:#000000;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;z-index:10;color:#ffffff;font-size:11px;font-weight:700;">${Math.trunc(level)}</div>`
 }
 
 export type DealtHandsData = {

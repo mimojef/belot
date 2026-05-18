@@ -53,8 +53,9 @@ function formatNullableText(
 
 function renderLevelBadge(level: number | null | undefined, size: 'sm' | 'md' = 'md'): string {
   if (typeof level !== 'number' || !Number.isFinite(level) || level < 1) return ''
-  const px = size === 'sm' ? '2px' : '3px'
-  return `<div style="position:absolute;right:5px;bottom:5px;display:flex;align-items:center;justify-content:center;padding:0 ${px};line-height:1;z-index:1;color:#ffffff;font-size:14px;font-weight:400;text-shadow:-2px -2px 0 #000,0 -2px 0 #000,2px -2px 0 #000,-2px 0 0 #000,2px 0 0 #000,-2px 2px 0 #000,0 2px 0 #000,2px 2px 0 #000;">${Math.trunc(level)}</div>`
+  const sz = size === 'sm' ? '16px' : '20px'
+  const fs = size === 'sm' ? '9px' : '11px'
+  return `<div style="position:absolute;right:4px;bottom:4px;min-width:${sz};height:${sz};border-radius:999px;background:#000000;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;z-index:1;color:#ffffff;font-size:${fs};font-weight:700;">${Math.trunc(level)}</div>`
 }
 
 function formatAverageRating(value: number | null | undefined): string {
@@ -429,16 +430,16 @@ function renderProfileContent(
                 style="
                   display:inline-flex;
                   align-items:center;
-                  gap:5px;
+                  gap:7px;
                   color:#22c55e;
-                  font-size:13px;
+                  font-size:16px;
                   font-weight:900;
                   cursor:pointer;
                   white-space:nowrap;
                   padding-bottom:1px;
                 "
               >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                 Редакция
               </span>
             ` : ''}
@@ -596,12 +597,16 @@ function renderProfileContent(
           </div>
           <div
             style="
+              display:flex; align-items:center; gap:8px;
               font-size:26px;
               font-weight:900;
-              color:#f8fafc;
+              color:#d4a520;
             "
           >
-            ${formatNullableText(profile.yellowCoinsBalance)}
+            <img src="/assets/lobby/icon-coin.png" alt="" style="width:26px; height:26px; display:block; object-fit:contain; flex-shrink:0;">
+            ${profile.yellowCoinsBalance != null
+              ? escapeHtml(Number(profile.yellowCoinsBalance).toLocaleString('bg-BG'))
+              : '—'}
           </div>
         </div>
 
