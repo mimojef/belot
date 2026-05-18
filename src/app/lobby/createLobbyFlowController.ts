@@ -1517,6 +1517,12 @@ export function createLobbyFlowController(
       return
     }
 
+    if (state.shopPackages.length > 0 && state.shopPackagesErrorText === null) {
+      render()
+      await loadShopPurchases()
+      return
+    }
+
     state.shopPackagesLoading = true
     state.shopPurchasesLoading =
       (options.getAuthSession?.() ?? null) !== null && Boolean(options.onShopPurchasesLoad)
