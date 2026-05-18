@@ -339,8 +339,16 @@ function getCoinPackageImage(sortOrder: number): string {
   return '/assets/lobby/coins-50000.png'
 }
 
+function parseUtcString(value: string): Date {
+  // SQLite CURRENT_TIMESTAMP gives '2026-05-18 09:39:00' — UTC but no 'Z' suffix.
+  // Without normalization, browsers parse it as local time.
+  const hasOffset = value.endsWith('Z') || value.includes('+') || /\d-\d{2}:\d{2}$/.test(value)
+  const normalized = hasOffset ? value : value.replace(' ', 'T') + 'Z'
+  return new Date(normalized)
+}
+
 function formatCompactDateTime(value: string): string {
-  const date = new Date(value)
+  const date = parseUtcString(value)
 
   if (Number.isNaN(date.getTime())) {
     return value
