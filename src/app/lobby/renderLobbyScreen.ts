@@ -1100,25 +1100,33 @@ function renderStakeSection(
           ">ИЗБРАНО ★</div>
         ` : ''}
 
-        <div style="font-size:10px; font-weight:700; color:rgba(255,255,255,0.5); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">Награда</div>
-        <div style="display:flex; align-items:center; gap:5px; margin-bottom:12px;">
-          <span style="font-size:22px; font-weight:900; color:#d4a520; line-height:1;">${formatAmount(card.prizeAmount)}</span>
-          <img src="/assets/lobby/icon-coin.png" alt="" style="height:18px;">
+        <div style="display:flex; align-items:center; justify-content:flex-start; gap:16px; position:relative; z-index:1;">
+          <div>
+            <div style="font-size:10px; font-weight:700; color:rgba(255,255,255,0.5); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">Награда</div>
+            <div style="display:flex; align-items:center; gap:5px; margin-bottom:12px;">
+              <span style="font-size:22px; font-weight:900; color:#d4a520; line-height:1;">${formatAmount(card.prizeAmount)}</span>
+              <img src="/assets/lobby/icon-coin.png" alt="" style="height:18px;">
+            </div>
+
+            <div style="font-size:10px; font-weight:700; color:rgba(255,255,255,0.5); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">Вход</div>
+            <div style="display:flex; align-items:center; gap:5px;">
+              <span style="font-size:18px; font-weight:400; color:#ffffff; line-height:1;">${formatAmount(card.stake)}</span>
+              <img src="/assets/lobby/icon-coin.png" alt="" style="height:15px;">
+            </div>
+          </div>
+
+          <div style="
+            flex-shrink:0;
+            width:58px; height:58px;
+            border-radius:10px;
+            background:linear-gradient(135deg, #f4c95b 0%, #c98f13 100%);
+            display:flex; align-items:center; justify-content:center;
+            font-size:11px; font-weight:900; color:#000000;
+            text-transform:uppercase; letter-spacing:0.05em;
+            pointer-events:none;
+          ">Играй</div>
         </div>
 
-        <div style="font-size:10px; font-weight:700; color:rgba(255,255,255,0.5); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">Вход</div>
-        <div style="display:flex; align-items:center; gap:5px; margin-bottom:14px;">
-          <span style="font-size:18px; font-weight:400; color:#ffffff; line-height:1;">${formatAmount(card.stake)}</span>
-          <img src="/assets/lobby/icon-coin.png" alt="" style="height:15px;">
-        </div>
-
-        <div style="
-          display:flex; align-items:center; gap:5px;
-          font-size:11px; font-weight:600; color:rgba(255,255,255,0.45);
-        ">
-          <img src="/assets/lobby/icon-users.png" alt="" style="height:12px; opacity:0.6;">
-          Играчи онлайн: ${card.onlinePlayers}
-        </div>
       </button>
     `
   }).join('')
