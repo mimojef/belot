@@ -54,6 +54,7 @@ export type LobbyScreenState = {
   shopPackagesLoading: boolean
   shopPackagesErrorText: string | null
   shopPurchases: CoinPurchaseSnapshot[]
+  shopPurchasesVisible: boolean
   shopPurchasesLoading: boolean
   shopPurchaseActionPackageId: string | null
   shopPurchaseMessageText: string | null
@@ -126,6 +127,7 @@ export type RenderLobbyScreenOptions = {
   onPlayersClick: () => void
   onShopClick: () => void
   onShopPurchaseClick: (packageId: string) => void
+  onShopHistoryToggle: () => void
   onLeaderboardsClick: () => void
   onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
   onAdminClick: () => void
@@ -2086,27 +2088,35 @@ function renderShopPanel(state: LobbyScreenState): string {
 
     ${isLoggedIn ? `
       <div style="display:grid;gap:10px;border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <div style="display:flex;align-items:center;gap:12px;">
           <div style="font-size:18px;font-weight:900;color:#f8fafc;">История на покупки</div>
+          <button data-shop-history-toggle="1" style="
+            background:none; border:1px solid rgba(255,255,255,0.15); border-radius:6px;
+            padding:5px 10px; cursor:pointer;
+            font-size:11px; font-weight:700; color:rgba(255,255,255,0.45);
+            letter-spacing:0.03em;
+          ">${state.shopPurchasesVisible ? 'Скрий' : 'Покажи'}</button>
           ${state.shopPurchasesLoading ? `<div style="font-size:12px;font-weight:900;color:#d4a520;">Зареждане...</div>` : ''}
         </div>
-        ${state.shopPurchases.length === 0 ? `
-          <div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:14px;color:rgba(255,255,255,0.58);font-size:13px;font-weight:800;">Още няма покупки.</div>
-        ` : `
-          <div style="display:grid;gap:8px;">
-            ${state.shopPurchases.map((purchase) => `
-              <div style="display:grid;grid-template-columns:1.2fr 0.8fr 0.8fr 0.7fr;gap:10px;align-items:center;border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:12px;">
-                <div>
-                  <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(purchase.title)}</div>
-                  <div style="margin-top:3px;font-size:11px;font-weight:800;color:rgba(255,255,255,0.42);">${escapeHtml(formatCompactDateTime(purchase.createdAt))}</div>
+        ${state.shopPurchasesVisible ? `
+          ${state.shopPurchases.length === 0 ? `
+            <div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:14px;color:rgba(255,255,255,0.58);font-size:13px;font-weight:800;">Още няма покупки.</div>
+          ` : `
+            <div style="display:grid;gap:8px;">
+              ${state.shopPurchases.map((purchase) => `
+                <div style="display:grid;grid-template-columns:1.2fr 0.8fr 0.8fr 0.7fr;gap:10px;align-items:center;border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:12px;">
+                  <div>
+                    <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(purchase.title)}</div>
+                    <div style="margin-top:3px;font-size:11px;font-weight:800;color:rgba(255,255,255,0.42);">${escapeHtml(formatCompactDateTime(purchase.createdAt))}</div>
+                  </div>
+                  <div style="font-size:14px;font-weight:900;color:#d4a520;">${formatAmount(purchase.yellowCoinsAmount)}</div>
+                  <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(purchase.priceCents, purchase.currency))}</div>
+                  <div style="font-size:12px;font-weight:900;color:${getPurchaseStatusColor(purchase.status)};">${escapeHtml(formatPurchaseStatusLabel(purchase.status))}</div>
                 </div>
-                <div style="font-size:14px;font-weight:900;color:#d4a520;">${formatAmount(purchase.yellowCoinsAmount)}</div>
-                <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(purchase.priceCents, purchase.currency))}</div>
-                <div style="font-size:12px;font-weight:900;color:${getPurchaseStatusColor(purchase.status)};">${escapeHtml(formatPurchaseStatusLabel(purchase.status))}</div>
-              </div>
-            `).join('')}
-          </div>
-        `}
+              `).join('')}
+            </div>
+          `}
+        ` : ''}
       </div>
     ` : ''}
   `
@@ -2965,6 +2975,9 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLElement>('[data-lobby-missions-card="1"]')
     ?.addEventListener('click', options.onMissionsCardClick)
+
+  root.querySelector<HTMLButtonElement>('[data-shop-history-toggle="1"]')
+    ?.addEventListener('click', options.onShopHistoryToggle)
 
   syncNotificationsDropdown(state, {
     onClose: options.onBellClick,

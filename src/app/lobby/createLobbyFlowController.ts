@@ -265,6 +265,7 @@ type InternalLobbyFlowState = {
   shopPackagesLoading: boolean
   shopPackagesErrorText: string | null
   shopPurchases: CoinPurchaseSnapshot[]
+  shopPurchasesVisible: boolean
   shopPurchasesLoading: boolean
   shopPurchaseActionPackageId: string | null
   shopPurchaseMessageText: string | null
@@ -372,6 +373,7 @@ function createInitialState(): InternalLobbyFlowState {
     shopPackagesLoading: false,
     shopPackagesErrorText: null,
     shopPurchases: [],
+    shopPurchasesVisible: false,
     shopPurchasesLoading: false,
     shopPurchaseActionPackageId: null,
     shopPurchaseMessageText: null,
@@ -1158,6 +1160,7 @@ export function createLobbyFlowController(
       shopPackagesLoading: state.shopPackagesLoading,
       shopPackagesErrorText: state.shopPackagesErrorText,
       shopPurchases: state.shopPurchases,
+      shopPurchasesVisible: state.shopPurchasesVisible,
       shopPurchasesLoading: state.shopPurchasesLoading,
       shopPurchaseActionPackageId: state.shopPurchaseActionPackageId,
       shopPurchaseMessageText: state.shopPurchaseMessageText,
@@ -1285,6 +1288,10 @@ export function createLobbyFlowController(
       },
       onShopPurchaseClick: (packageId) => {
         void startShopPurchase(packageId)
+      },
+      onShopHistoryToggle: () => {
+        state.shopPurchasesVisible = !state.shopPurchasesVisible
+        render()
       },
       onLeaderboardsClick: () => {
         void showLeaderboardsDirectory()
@@ -3058,6 +3065,19 @@ export function createLobbyFlowController(
         if (noticeText !== null && state.currentScreen === 'shop') {
           state.shopPurchaseMessageText = noticeText
           render()
+
+          window.setTimeout(() => {
+            if (state.shopPurchaseMessageText === noticeText) {
+              state.shopPurchaseMessageText = null
+              render()
+            }
+          }, 6000)
+
+          window.setTimeout(() => {
+            if (state.currentScreen === 'shop') {
+              void loadShopPurchases()
+            }
+          }, 3000)
         }
       })
     },
