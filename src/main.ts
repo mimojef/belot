@@ -63,6 +63,7 @@ const SERVER_RECONNECT_MAX_DELAY_MS = 5_000
 const MAX_PROFILE_GALLERY_IMAGES = 6
 
 let reconnectTimerId: number | null = null
+let connectionErrorTimerId: number | null = null
 let reconnectAttempt = 0
 let isPageUnloading = false
 let isRefreshingAuthConnection = false
@@ -1655,6 +1656,11 @@ client = createGameServerClient({
     clearReconnectTimer()
     reconnectAttempt = 0
 
+    if (connectionErrorTimerId !== null) {
+      clearTimeout(connectionErrorTimerId)
+      connectionErrorTimerId = null
+    }
+
     if (activeRoom.hasActiveRoom()) {
       activeRoom.setConnectionState(true, SERVER_RESUME_WAIT_MESSAGE)
       requestActiveRoomResume()
@@ -1665,7 +1671,7 @@ client = createGameServerClient({
     lobby.setErrorText(null)
   },
   onClose: () => {
-    if (isSessionDisplaced) {
+    if (isSessionDisplaced || isPageUnloading) {
       return
     }
 
@@ -1683,8 +1689,12 @@ client = createGameServerClient({
     }
 
     lobby.setConnected(false)
-    lobby.setErrorText(SERVER_RESTART_WAIT_MESSAGE)
     scheduleServerReconnect()
+
+    connectionErrorTimerId = window.setTimeout(() => {
+      connectionErrorTimerId = null
+      lobby.setErrorText(SERVER_RESTART_WAIT_MESSAGE)
+    }, 1500)
   },
   onError: () => {
     if (activeRoom.hasActiveRoom()) {

@@ -2584,6 +2584,49 @@ export function createLobbyFlowController(
     countdownAnimationFrameId = window.requestAnimationFrame(frameStep)
   }
 
+  const SCREEN_TO_HASH: Partial<Record<LobbySocialScreen, string>> = {
+    players: 'играчи',
+    leaderboards: 'класация',
+    shop: 'магазин',
+    admin: 'админ',
+    friends: 'приятели',
+    chat: 'чат',
+  }
+
+  const HASH_TO_SCREEN: Record<string, LobbySocialScreen> = {
+    'играчи': 'players',
+    'класация': 'leaderboards',
+    'магазин': 'shop',
+    'админ': 'admin',
+    'приятели': 'friends',
+    'чат': 'chat',
+  }
+
+  function syncUrlHash(): void {
+    const hash = SCREEN_TO_HASH[state.currentScreen] ?? ''
+    const currentHash = window.location.hash.slice(1)
+    if (currentHash !== hash) {
+      history.replaceState(null, '', hash ? `#${hash}` : window.location.pathname)
+    }
+  }
+
+  function navigateFromHash(hash: string): void {
+    const screen = HASH_TO_SCREEN[hash] ?? null
+    if (screen === null) {
+      switchToLobby()
+      render()
+      return
+    }
+    switch (screen) {
+      case 'players': void showPlayersDirectory(); break
+      case 'leaderboards': void showLeaderboardsDirectory(); break
+      case 'shop': void showShopPanel(); break
+      case 'admin': void showAdminPanel(); break
+      case 'friends': void showFriendsDirectory(); break
+      case 'chat': void showChatPanel(); break
+    }
+  }
+
   function renderMatchmakingRoom(): void {
     paintMatchmakingRoom()
     startLiveCountdownLoop()
@@ -2596,6 +2639,7 @@ export function createLobbyFlowController(
     }
 
     renderLobby()
+    syncUrlHash()
   }
 
   function buildPopupFriendshipAction() {
@@ -2941,6 +2985,15 @@ export function createLobbyFlowController(
 
   void loadLobbyPackages()
   void loadPlayerUnclaimedCount()
+
+  const initialHash = decodeURIComponent(window.location.hash.slice(1))
+  if (initialHash && HASH_TO_SCREEN[initialHash]) {
+    navigateFromHash(initialHash)
+  }
+
+  window.addEventListener('hashchange', () => {
+    navigateFromHash(decodeURIComponent(window.location.hash.slice(1)))
+  })
 
   return {
     render,
