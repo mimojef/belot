@@ -134,6 +134,7 @@ export type MissionTemplateSnapshot = {
   targetCount: number
   rewardYellowCoins: number
   isActive: boolean
+  isStaged: boolean
   sortOrder: number
 }
 
@@ -143,8 +144,14 @@ export type MissionTemplateInput = {
   title: string
   targetCount: number
   rewardYellowCoins: number
-  isActive?: boolean
+  isStaged?: boolean
   sortOrder?: number
+}
+
+export type AdminMissionsResponse = {
+  ok: true
+  activeMissions: MissionTemplateSnapshot[]
+  stagedMissions: MissionTemplateSnapshot[]
 }
 
 export type PlayerMissionProgressSnapshot = {

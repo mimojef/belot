@@ -169,7 +169,8 @@ type DailyMissionsApiResponse = {
 
 type AdminMissionsApiResponse = {
   ok: boolean
-  missions?: MissionTemplateSnapshot[]
+  activeMissions?: MissionTemplateSnapshot[]
+  stagedMissions?: MissionTemplateSnapshot[]
   mission?: MissionTemplateSnapshot
   message?: string
 }
@@ -1364,8 +1365,10 @@ async function claimMissionReward(missionId: string): Promise<
   }
 }
 
+type AdminMissionsBothLists = { activeMissions: MissionTemplateSnapshot[]; stagedMissions: MissionTemplateSnapshot[] }
+
 async function loadAdminMissions(): Promise<
-  | { ok: true; missions: MissionTemplateSnapshot[] }
+  | ({ ok: true } & AdminMissionsBothLists)
   | { ok: false; message: string }
 > {
   try {
@@ -1375,11 +1378,11 @@ async function loadAdminMissions(): Promise<
     })
     const data = (await response.json()) as AdminMissionsApiResponse
 
-    if (!response.ok || !data.ok || !Array.isArray(data.missions)) {
+    if (!response.ok || !data.ok || !Array.isArray(data.activeMissions) || !Array.isArray(data.stagedMissions)) {
       return { ok: false, message: data.message ?? 'Мисиите не бяха заредени.' }
     }
 
-    return { ok: true, missions: data.missions }
+    return { ok: true, activeMissions: data.activeMissions, stagedMissions: data.stagedMissions }
   } catch {
     return { ok: false, message: 'Няма връзка.' }
   }
@@ -1387,7 +1390,7 @@ async function loadAdminMissions(): Promise<
 
 async function submitAdminMission(
   input: MissionTemplateInput,
-): Promise<{ ok: true; missions: MissionTemplateSnapshot[] } | { ok: false; message: string }> {
+): Promise<({ ok: true } & AdminMissionsBothLists) | { ok: false; message: string }> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/admin/missions`, {
       method: 'POST',
@@ -1397,11 +1400,11 @@ async function submitAdminMission(
     })
     const data = (await response.json()) as AdminMissionsApiResponse
 
-    if (!response.ok || !data.ok || !Array.isArray(data.missions)) {
+    if (!response.ok || !data.ok || !Array.isArray(data.activeMissions) || !Array.isArray(data.stagedMissions)) {
       return { ok: false, message: data.message ?? 'Мисията не беше записана.' }
     }
 
-    return { ok: true, missions: data.missions }
+    return { ok: true, activeMissions: data.activeMissions, stagedMissions: data.stagedMissions }
   } catch {
     return { ok: false, message: 'Няма връзка.' }
   }
@@ -1410,7 +1413,7 @@ async function submitAdminMission(
 async function setAdminMissionActive(
   missionId: string,
   isActive: boolean,
-): Promise<{ ok: true; missions: MissionTemplateSnapshot[] } | { ok: false; message: string }> {
+): Promise<({ ok: true } & AdminMissionsBothLists) | { ok: false; message: string }> {
   try {
     const response = await fetch(
       `${getApiBaseUrl()}/api/admin/missions/${encodeURIComponent(missionId)}/active`,
@@ -1423,11 +1426,11 @@ async function setAdminMissionActive(
     )
     const data = (await response.json()) as AdminMissionsApiResponse
 
-    if (!response.ok || !data.ok || !Array.isArray(data.missions)) {
+    if (!response.ok || !data.ok || !Array.isArray(data.activeMissions) || !Array.isArray(data.stagedMissions)) {
       return { ok: false, message: data.message ?? 'Активността не беше променена.' }
     }
 
-    return { ok: true, missions: data.missions }
+    return { ok: true, activeMissions: data.activeMissions, stagedMissions: data.stagedMissions }
   } catch {
     return { ok: false, message: 'Няма връзка.' }
   }
@@ -1435,7 +1438,7 @@ async function setAdminMissionActive(
 
 async function deleteAdminMission(
   missionId: string,
-): Promise<{ ok: true; missions: MissionTemplateSnapshot[] } | { ok: false; message: string }> {
+): Promise<({ ok: true } & AdminMissionsBothLists) | { ok: false; message: string }> {
   try {
     const response = await fetch(
       `${getApiBaseUrl()}/api/admin/missions/${encodeURIComponent(missionId)}`,
@@ -1443,11 +1446,11 @@ async function deleteAdminMission(
     )
     const data = (await response.json()) as AdminMissionsApiResponse
 
-    if (!response.ok || !data.ok || !Array.isArray(data.missions)) {
+    if (!response.ok || !data.ok || !Array.isArray(data.activeMissions) || !Array.isArray(data.stagedMissions)) {
       return { ok: false, message: data.message ?? 'Мисията не беше изтрита.' }
     }
 
-    return { ok: true, missions: data.missions }
+    return { ok: true, activeMissions: data.activeMissions, stagedMissions: data.stagedMissions }
   } catch {
     return { ok: false, message: 'Няма връзка.' }
   }

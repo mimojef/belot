@@ -195,18 +195,18 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onAdminMissionsLoad?: () => Promise<
-    | { ok: true; missions: MissionTemplateSnapshot[] }
+    | { ok: true; activeMissions: MissionTemplateSnapshot[]; stagedMissions: MissionTemplateSnapshot[] }
     | { ok: false; message: string }
   >
   onAdminMissionSubmit?: (
     input: MissionTemplateInput,
-  ) => Promise<{ ok: true; missions: MissionTemplateSnapshot[] } | { ok: false; message: string }>
+  ) => Promise<{ ok: true; activeMissions: MissionTemplateSnapshot[]; stagedMissions: MissionTemplateSnapshot[] } | { ok: false; message: string }>
   onAdminMissionActiveToggle?: (
     missionId: string,
     isActive: boolean,
-  ) => Promise<{ ok: true; missions: MissionTemplateSnapshot[] } | { ok: false; message: string }>
+  ) => Promise<{ ok: true; activeMissions: MissionTemplateSnapshot[]; stagedMissions: MissionTemplateSnapshot[] } | { ok: false; message: string }>
   onAdminMissionDelete?: (missionId: string) => Promise<
-    | { ok: true; missions: MissionTemplateSnapshot[] }
+    | { ok: true; activeMissions: MissionTemplateSnapshot[]; stagedMissions: MissionTemplateSnapshot[] }
     | { ok: false; message: string }
   >
 }
@@ -299,10 +299,12 @@ type InternalLobbyFlowState = {
   dailyMissionsUnclaimedCount: number
   missionClaimingId: string | null
   missionClaimErrorText: string | null
-  adminMissions: MissionTemplateSnapshot[]
+  adminActiveMissions: MissionTemplateSnapshot[]
+  adminStagedMissions: MissionTemplateSnapshot[]
   adminMissionsLoading: boolean
   adminMissionsErrorText: string | null
   adminMissionEditId: string | null
+  adminMissionEditIsStaged: boolean
 }
 
 type StakeCardConfig = {
@@ -407,10 +409,12 @@ function createInitialState(): InternalLobbyFlowState {
     dailyMissionsUnclaimedCount: 0,
     missionClaimingId: null,
     missionClaimErrorText: null,
-    adminMissions: [],
+    adminActiveMissions: [],
+    adminStagedMissions: [],
     adminMissionsLoading: false,
     adminMissionsErrorText: null,
     adminMissionEditId: null,
+    adminMissionEditIsStaged: false,
   }
 }
 
@@ -1206,10 +1210,12 @@ export function createLobbyFlowController(
       dailyMissionsUnclaimedCount: state.dailyMissionsUnclaimedCount,
       missionClaimingId: state.missionClaimingId,
       missionClaimErrorText: state.missionClaimErrorText,
-      adminMissions: state.adminMissions,
+      adminActiveMissions: state.adminActiveMissions,
+      adminStagedMissions: state.adminStagedMissions,
       adminMissionsLoading: state.adminMissionsLoading,
       adminMissionsErrorText: state.adminMissionsErrorText,
       adminMissionEditId: state.adminMissionEditId,
+      adminMissionEditIsStaged: state.adminMissionEditIsStaged,
     }
 
     renderLobbyScreen(options.root, {
@@ -1439,8 +1445,9 @@ export function createLobbyFlowController(
       onAdminMissionDelete: (missionId) => {
         void deleteAdminMission(missionId)
       },
-      onAdminMissionEdit: (missionId) => {
+      onAdminMissionEdit: (missionId, isStaged) => {
         state.adminMissionEditId = missionId.length > 0 && missionId !== 'new' ? missionId : missionId === 'new' ? 'new' : null
+        state.adminMissionEditIsStaged = isStaged ?? false
         render()
       },
     })
@@ -2908,7 +2915,8 @@ export function createLobbyFlowController(
       return
     }
 
-    state.adminMissions = result.missions
+    state.adminActiveMissions = result.activeMissions
+    state.adminStagedMissions = result.stagedMissions
     state.adminMissionsErrorText = null
     render()
   }
@@ -2931,7 +2939,8 @@ export function createLobbyFlowController(
       return
     }
 
-    state.adminMissions = result.missions
+    state.adminActiveMissions = result.activeMissions
+    state.adminStagedMissions = result.stagedMissions
     state.adminMissionsErrorText = null
     state.adminMissionEditId = null
     render()
@@ -2952,7 +2961,8 @@ export function createLobbyFlowController(
       return
     }
 
-    state.adminMissions = result.missions
+    state.adminActiveMissions = result.activeMissions
+    state.adminStagedMissions = result.stagedMissions
     state.adminMissionsErrorText = null
     render()
   }
@@ -2972,7 +2982,8 @@ export function createLobbyFlowController(
       return
     }
 
-    state.adminMissions = result.missions
+    state.adminActiveMissions = result.activeMissions
+    state.adminStagedMissions = result.stagedMissions
     if (state.adminMissionEditId === missionId) state.adminMissionEditId = null
     state.adminMissionsErrorText = null
     render()

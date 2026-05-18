@@ -97,10 +97,12 @@ export type LobbyScreenState = {
   dailyMissionsUnclaimedCount: number
   missionClaimingId: string | null
   missionClaimErrorText: string | null
-  adminMissions: MissionTemplateSnapshot[]
+  adminActiveMissions: MissionTemplateSnapshot[]
+  adminStagedMissions: MissionTemplateSnapshot[]
   adminMissionsLoading: boolean
   adminMissionsErrorText: string | null
   adminMissionEditId: string | null
+  adminMissionEditIsStaged: boolean
 }
 
 export type RenderLobbyScreenOptions = {
@@ -171,7 +173,7 @@ export type RenderLobbyScreenOptions = {
   onAdminMissionSubmit: (input: MissionTemplateInput) => void
   onAdminMissionActiveToggle: (missionId: string, isActive: boolean) => void
   onAdminMissionDelete: (missionId: string) => void
-  onAdminMissionEdit: (missionId: string) => void
+  onAdminMissionEdit: (missionId: string, isStaged?: boolean) => void
 }
 
 type LobbyStakeCard = {
@@ -2223,16 +2225,18 @@ function renderAdminPanel(state: LobbyScreenState): string {
         </div>
       </div>
 
-      <form data-lobby-admin-settings-form="1" style="width:min(100%,680px);display:grid;gap:14px;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:18px;">
-        <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
-          Signup bonus жълтици
-          <input name="signupBonusYellowCoins" type="number" min="0" max="10000000" step="1000" value="${settings.signupBonusYellowCoins}" style="height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
-        </label>
+      <form data-lobby-admin-settings-form="1" style="display:grid;gap:14px;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:18px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+          <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Signup bonus жълтици
+            <input name="signupBonusYellowCoins" type="number" min="0" max="10000000" step="1000" value="${settings.signupBonusYellowCoins}" style="height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+          </label>
 
-        <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
-          Цена за смяна на име
-          <input name="profileNameChangePrice" type="number" min="0" max="10000000" step="1000" value="${settings.profileNameChangePrice}" style="height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
-        </label>
+          <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Цена за смяна на име
+            <input name="profileNameChangePrice" type="number" min="0" max="10000000" step="1000" value="${settings.profileNameChangePrice}" style="height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+          </label>
+        </div>
 
         ${state.adminSettingsErrorText ? `
           <div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;">
@@ -2354,94 +2358,111 @@ function renderAdminPanel(state: LobbyScreenState): string {
         })()}
       </div>
 
-      <div style="display:grid;gap:12px;margin-top:8px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(96,165,250,0.22);padding-bottom:10px;">
-          <div style="font-size:18px;font-weight:900;color:#60a5fa;">Дневни мисии</div>
-        </div>
+      <div style="display:grid;gap:20px;margin-top:8px;">
+        <div style="display:grid;gap:12px;">
+          <div style="font-size:18px;font-weight:900;color:#60a5fa;border-bottom:1px solid rgba(96,165,250,0.22);padding-bottom:10px;">Текущи мисии</div>
 
-        ${state.adminMissionsLoading ? `
-          <div style="color:#60a5fa;font-size:13px;font-weight:800;">Зареждане на мисии...</div>
-        ` : state.adminMissionsErrorText ? `
-          <div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;">${escapeHtml(state.adminMissionsErrorText)}</div>
-        ` : ''}
+          ${state.adminMissionsLoading ? `
+            <div style="color:#60a5fa;font-size:13px;font-weight:800;">Зареждане на мисии...</div>
+          ` : state.adminMissionsErrorText ? `
+            <div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;">${escapeHtml(state.adminMissionsErrorText)}</div>
+          ` : ''}
 
-        <div style="display:grid;gap:8px;">
-          ${state.adminMissions.map((mission) => `
-            <div style="display:flex;align-items:center;gap:10px;border:1px solid ${mission.isActive ? 'rgba(96,165,250,0.4)' : 'rgba(255,255,255,0.10)'};border-radius:8px;background:${mission.isActive ? 'rgba(10,20,40,0.5)' : 'rgba(255,255,255,0.03)'};padding:10px 14px;">
-              <input type="checkbox"
-                data-admin-mission-active="${escapeHtml(mission.missionId)}"
-                ${mission.isActive ? 'checked' : ''}
-                style="width:16px;height:16px;accent-color:#60a5fa;cursor:pointer;flex-shrink:0;">
-              <div style="flex:1;min-width:0;">
-                <div style="font-size:13px;font-weight:800;color:#f8fafc;">${escapeHtml(mission.title)}</div>
-                <div style="font-size:11px;color:rgba(255,255,255,0.45);">Цел: ${mission.targetCount} · Награда: ${formatAmount(mission.rewardYellowCoins)} жълтици</div>
+          <div style="display:grid;gap:8px;">
+            ${state.adminActiveMissions.length === 0 ? `
+              <div style="color:rgba(255,255,255,0.35);font-size:13px;font-weight:700;padding:8px 0;">Няма текущи мисии.</div>
+            ` : state.adminActiveMissions.map((mission) => `
+              <div style="display:flex;align-items:center;gap:10px;border:1px solid rgba(96,165,250,0.4);border-radius:8px;background:rgba(10,20,40,0.5);padding:10px 14px;">
+                <div style="flex:1;min-width:0;">
+                  <div style="font-size:13px;font-weight:800;color:#f8fafc;">${escapeHtml(mission.title)}</div>
+                  <div style="font-size:11px;color:rgba(255,255,255,0.45);">Цел: ${mission.targetCount} · Награда: ${formatAmount(mission.rewardYellowCoins)} жълтици · <span style="color:rgba(255,255,255,0.35);">${mission.missionType}</span></div>
+                </div>
+                <button type="button" data-admin-mission-delete="${escapeHtml(mission.missionId)}" style="height:30px;padding:0 10px;border:1px solid rgba(248,113,113,0.28);border-radius:6px;background:rgba(127,29,29,0.28);color:#fca5a5;font-size:11px;font-weight:800;cursor:pointer;">Изтрий</button>
               </div>
-              <button type="button" data-admin-mission-edit="${escapeHtml(mission.missionId)}" style="height:30px;padding:0 10px;border:1px solid rgba(255,255,255,0.18);border-radius:6px;background:transparent;color:rgba(255,255,255,0.72);font-size:11px;font-weight:800;cursor:pointer;">Редакция</button>
-              <button type="button" data-admin-mission-delete="${escapeHtml(mission.missionId)}" style="height:30px;padding:0 10px;border:1px solid rgba(248,113,113,0.28);border-radius:6px;background:rgba(127,29,29,0.28);color:#fca5a5;font-size:11px;font-weight:800;cursor:pointer;">Изтрий</button>
-            </div>
-          `).join('')}
+            `).join('')}
+          </div>
         </div>
 
-        ${(() => {
-          const editId = state.adminMissionEditId
-          const editing = editId ? state.adminMissions.find((m) => m.missionId === editId) ?? null : null
-          const shouldShowForm = editId !== null
+        <div style="display:grid;gap:12px;">
+          <div style="font-size:18px;font-weight:900;color:#a78bfa;border-bottom:1px solid rgba(167,139,250,0.22);padding-bottom:10px;">Мисии за утре</div>
 
-          if (!shouldShowForm) {
+          <div style="display:grid;gap:8px;">
+            ${state.adminStagedMissions.length === 0 && state.adminMissionEditId === null ? `
+              <div style="color:rgba(255,255,255,0.35);font-size:13px;font-weight:700;padding:8px 0;">Няма зададени мисии за утре.</div>
+            ` : state.adminStagedMissions.map((mission) => `
+              <div style="display:flex;align-items:center;gap:10px;border:1px solid rgba(167,139,250,0.4);border-radius:8px;background:rgba(20,10,40,0.5);padding:10px 14px;">
+                <div style="flex:1;min-width:0;">
+                  <div style="font-size:13px;font-weight:800;color:#f8fafc;">${escapeHtml(mission.title)}</div>
+                  <div style="font-size:11px;color:rgba(255,255,255,0.45);">Цел: ${mission.targetCount} · Награда: ${formatAmount(mission.rewardYellowCoins)} жълтици · <span style="color:rgba(255,255,255,0.35);">${mission.missionType}</span></div>
+                </div>
+                <button type="button" data-admin-mission-edit="${escapeHtml(mission.missionId)}" data-admin-mission-edit-staged="1" style="height:30px;padding:0 10px;border:1px solid rgba(167,139,250,0.35);border-radius:6px;background:transparent;color:rgba(167,139,250,0.9);font-size:11px;font-weight:800;cursor:pointer;">Редакция</button>
+                <button type="button" data-admin-mission-delete="${escapeHtml(mission.missionId)}" style="height:30px;padding:0 10px;border:1px solid rgba(248,113,113,0.28);border-radius:6px;background:rgba(127,29,29,0.28);color:#fca5a5;font-size:11px;font-weight:800;cursor:pointer;">Изтрий</button>
+              </div>
+            `).join('')}
+          </div>
+
+          ${(() => {
+            const editId = state.adminMissionEditId
+            const isStaged = state.adminMissionEditIsStaged
+            if (editId === null || !isStaged) {
+              return `
+                <div>
+                  <button type="button" data-admin-mission-edit-start="1" data-admin-mission-edit-start-staged="1" style="height:38px;padding:0 14px;border:1px solid rgba(167,139,250,0.48);border-radius:8px;background:#050505;color:#a78bfa;font-size:13px;font-weight:900;cursor:pointer;">+ Добави мисия за утре</button>
+                </div>
+              `
+            }
+
+            const editing = editId !== 'new' ? state.adminStagedMissions.find((m) => m.missionId === editId) ?? null : null
+
+            const MISSION_TYPES: Array<[string, string]> = [
+              ['win_games', 'Спечели N игри'],
+              ['win_capot_games', 'Спечели N игри с капо'],
+              ['win_contra_games', 'Спечели N игри с контра'],
+              ['play_games', 'Изиграй N игри'],
+              ['announce_tersa', 'Обяви N терци'],
+              ['announce_50', 'Обяви N 50-ки'],
+              ['announce_100', 'Обяви N 100-ки'],
+              ['announce_kare', 'Обяви N карета'],
+              ['announce_belot', 'Обяви N белота'],
+            ]
+
             return `
-              <div>
-                <button type="button" data-admin-mission-edit-start="1" style="height:38px;padding:0 14px;border:1px solid rgba(96,165,250,0.48);border-radius:8px;background:#050505;color:#60a5fa;font-size:13px;font-weight:900;cursor:pointer;">+ Нова мисия</button>
-              </div>
+              <form data-admin-mission-form="1" style="border:1px solid rgba(167,139,250,0.30);border-radius:8px;background:#050505;padding:16px;display:grid;gap:12px;">
+                <div style="font-size:15px;font-weight:900;color:#a78bfa;">${editing ? 'Редакция на утрешна мисия' : 'Нова мисия за утре'}</div>
+                <input type="hidden" name="missionId" value="${editing ? escapeHtml(editing.missionId) : ''}">
+                <input type="hidden" name="isStaged" value="true">
+
+                <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(167,139,250,0.8);">
+                  Тип
+                  <select name="missionType" style="height:40px;border-radius:8px;border:1px solid rgba(167,139,250,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
+                    ${MISSION_TYPES.map(([value, label]) => `<option value="${value}" ${editing?.missionType === value ? 'selected' : ''}>${label}</option>`).join('')}
+                  </select>
+                </label>
+
+                <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(167,139,250,0.8);">
+                  Заглавие
+                  <input name="title" value="${editing ? escapeHtml(editing.title) : ''}" placeholder="Напр. Спечели 5 игри" style="height:40px;border-radius:8px;border:1px solid rgba(167,139,250,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
+                </label>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                  <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(167,139,250,0.8);">
+                    Цел
+                    <input name="targetCount" type="number" min="1" value="${editing?.targetCount ?? 5}" style="height:40px;border-radius:8px;border:1px solid rgba(167,139,250,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
+                  </label>
+                  <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(167,139,250,0.8);">
+                    Награда (жълтици)
+                    <input name="rewardYellowCoins" type="number" min="1" value="${editing?.rewardYellowCoins ?? 5000}" style="height:40px;border-radius:8px;border:1px solid rgba(167,139,250,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
+                  </label>
+                </div>
+
+                <div style="display:flex;gap:10px;">
+                  <button type="submit" style="height:40px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#a78bfa 0%,#7c3aed 100%);color:#ffffff;font-size:13px;font-weight:900;cursor:pointer;">Запази</button>
+                  <button type="button" data-admin-mission-form-cancel="1" style="height:40px;padding:0 14px;border:1px solid rgba(255,255,255,0.18);border-radius:8px;background:transparent;color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;cursor:pointer;">Откажи</button>
+                </div>
+              </form>
             `
-          }
-
-          const MISSION_TYPES: Array<[string, string]> = [
-            ['win_games', 'Спечели N игри'],
-            ['win_capot_games', 'Спечели N игри с капо'],
-            ['win_contra_games', 'Спечели N игри с контра'],
-            ['play_games', 'Изиграй N игри'],
-            ['announce_tersa', 'Обяви N терци'],
-            ['announce_50', 'Обяви N 50-ки'],
-            ['announce_100', 'Обяви N 100-ки'],
-            ['announce_kare', 'Обяви N карета'],
-            ['announce_belot', 'Обяви N белота'],
-          ]
-
-          return `
-            <form data-admin-mission-form="1" style="border:1px solid rgba(96,165,250,0.30);border-radius:8px;background:#050505;padding:16px;display:grid;gap:12px;">
-              <div style="font-size:15px;font-weight:900;color:#60a5fa;">${editing ? 'Редакция на мисия' : 'Нова мисия'}</div>
-              <input type="hidden" name="missionId" value="${editing ? escapeHtml(editing.missionId) : ''}">
-
-              <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(96,165,250,0.8);">
-                Тип
-                <select name="missionType" style="height:40px;border-radius:8px;border:1px solid rgba(96,165,250,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
-                  ${MISSION_TYPES.map(([value, label]) => `<option value="${value}" ${editing?.missionType === value ? 'selected' : ''}>${label}</option>`).join('')}
-                </select>
-              </label>
-
-              <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(96,165,250,0.8);">
-                Заглавие
-                <input name="title" value="${editing ? escapeHtml(editing.title) : ''}" placeholder="Напр. Спечели 5 игри" style="height:40px;border-radius:8px;border:1px solid rgba(96,165,250,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
-              </label>
-
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-                <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(96,165,250,0.8);">
-                  Цел
-                  <input name="targetCount" type="number" min="1" value="${editing?.targetCount ?? 5}" style="height:40px;border-radius:8px;border:1px solid rgba(96,165,250,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
-                </label>
-                <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(96,165,250,0.8);">
-                  Награда (жълтици)
-                  <input name="rewardYellowCoins" type="number" min="1" value="${editing?.rewardYellowCoins ?? 5000}" style="height:40px;border-radius:8px;border:1px solid rgba(96,165,250,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
-                </label>
-              </div>
-
-              <div style="display:flex;gap:10px;">
-                <button type="submit" style="height:40px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#60a5fa 0%,#2563eb 100%);color:#ffffff;font-size:13px;font-weight:900;cursor:pointer;">Запази</button>
-                <button type="button" data-admin-mission-form-cancel="1" style="height:40px;padding:0 14px;border:1px solid rgba(255,255,255,0.18);border-radius:8px;background:transparent;color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;cursor:pointer;">Откажи</button>
-              </div>
-            </form>
-          `
-        })()}
+          })()}
+        </div>
       </div>
     </section>
   `
@@ -2454,6 +2475,8 @@ export function renderLobbyScreen(
   const { state } = options
   const canStartSearch = state.isConnected && !state.isSearching
   const profileName = state.displayName.trim() || 'Играч'
+
+  const savedScrollTop = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')?.scrollTop ?? 0
 
   root.innerHTML = `
     <div
@@ -2855,23 +2878,17 @@ export function renderLobbyScreen(
       options.onAdminCoinPackageEdit('')
     })
 
-  root.querySelectorAll<HTMLInputElement>('[data-admin-mission-active]').forEach((checkbox) => {
-    checkbox.addEventListener('change', () => {
-      const missionId = checkbox.dataset.adminMissionActive?.trim() ?? ''
-      if (missionId) options.onAdminMissionActiveToggle(missionId, checkbox.checked)
-    })
-  })
-
   root.querySelectorAll<HTMLButtonElement>('[data-admin-mission-edit]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const missionId = btn.dataset.adminMissionEdit?.trim() ?? ''
-      if (missionId) options.onAdminMissionEdit(missionId)
+      const isStaged = btn.dataset.adminMissionEditStaged === '1'
+      if (missionId) options.onAdminMissionEdit(missionId, isStaged)
     })
   })
 
-  root.querySelector<HTMLButtonElement>('[data-admin-mission-edit-start="1"]')
+  root.querySelector<HTMLButtonElement>('[data-admin-mission-edit-start][data-admin-mission-edit-start-staged]')
     ?.addEventListener('click', () => {
-      options.onAdminMissionEdit('new')
+      options.onAdminMissionEdit('new', true)
     })
 
   root.querySelector<HTMLButtonElement>('[data-admin-mission-form-cancel="1"]')
@@ -2898,6 +2915,7 @@ export function renderLobbyScreen(
       const targetCount = Number(data.get('targetCount') ?? 1)
       const rewardYellowCoins = Number(data.get('rewardYellowCoins') ?? 1000)
       const missionId = String(data.get('missionId') ?? '').trim() || null
+      const isStaged = String(data.get('isStaged') ?? '') === 'true'
 
       if (!missionType || !title || targetCount < 1 || rewardYellowCoins < 1) return
 
@@ -2907,6 +2925,7 @@ export function renderLobbyScreen(
         title,
         targetCount,
         rewardYellowCoins,
+        isStaged,
       })
     })
 
@@ -3647,4 +3666,9 @@ export function renderLobbyScreen(
       options.onLoginSubmit(email, password)
     })
   })
+
+  const newScrollEl = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')
+  if (newScrollEl && savedScrollTop > 0) {
+    newScrollEl.scrollTop = savedScrollTop
+  }
 }

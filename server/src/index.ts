@@ -2647,6 +2647,7 @@ async function handleMissionsRequest(
   const today = new Date().toISOString().slice(0, 10)
 
   if (pathname === '/api/missions/daily' && req.method === 'GET') {
+    missionStore.maybePromoteStaged()
     const missions = missionStore.getPlayerDailyMissions(profileId, today)
     const unclaimedCount = missionStore.getUnclaimedCompletedCount(profileId, today)
     sendJsonResponse(res, 200, { ok: true, missions, unclaimedCount, date: today })
@@ -2696,7 +2697,11 @@ async function handleAdminMissionsRequest(
   }
 
   if (pathname === '/api/admin/missions' && req.method === 'GET') {
-    sendJsonResponse(res, 200, { ok: true, missions: missionStore.listAllMissions() })
+    sendJsonResponse(res, 200, {
+      ok: true,
+      activeMissions: missionStore.listActiveMissions(),
+      stagedMissions: missionStore.listStagedMissions(),
+    })
     return true
   }
 
@@ -2708,13 +2713,15 @@ async function handleAdminMissionsRequest(
       return true
     }
 
+    const isStaged = body['isStaged'] === true
     const result = missionStore.upsertMission({
       missionId: getStringField(body, 'missionId') || null,
       missionType: getStringField(body, 'missionType') as MissionType,
       title: getStringField(body, 'title'),
       targetCount: getNumberField(body, 'targetCount') ?? 1,
       rewardYellowCoins: getNumberField(body, 'rewardYellowCoins') ?? 1000,
-      isActive: body['isActive'] === true,
+      isActive: true,
+      isStaged,
       sortOrder: getNumberField(body, 'sortOrder') ?? 0,
     })
 
@@ -2723,7 +2730,12 @@ async function handleAdminMissionsRequest(
       return true
     }
 
-    sendJsonResponse(res, 200, { ok: true, mission: result.mission, missions: missionStore.listAllMissions() })
+    sendJsonResponse(res, 200, {
+      ok: true,
+      mission: result.mission,
+      activeMissions: missionStore.listActiveMissions(),
+      stagedMissions: missionStore.listStagedMissions(),
+    })
     return true
   }
 
@@ -2745,7 +2757,12 @@ async function handleAdminMissionsRequest(
       return true
     }
 
-    sendJsonResponse(res, 200, { ok: true, mission: result.mission, missions: missionStore.listAllMissions() })
+    sendJsonResponse(res, 200, {
+      ok: true,
+      mission: result.mission,
+      activeMissions: missionStore.listActiveMissions(),
+      stagedMissions: missionStore.listStagedMissions(),
+    })
     return true
   }
 
@@ -2757,7 +2774,11 @@ async function handleAdminMissionsRequest(
       return true
     }
 
-    sendJsonResponse(res, 200, { ok: true, missions: missionStore.listAllMissions() })
+    sendJsonResponse(res, 200, {
+      ok: true,
+      activeMissions: missionStore.listActiveMissions(),
+      stagedMissions: missionStore.listStagedMissions(),
+    })
     return true
   }
 

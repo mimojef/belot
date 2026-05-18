@@ -23,6 +23,7 @@ export type MissionTemplateSnapshot = {
   targetCount: number
   rewardYellowCoins: number
   isActive: boolean
+  isStaged: boolean
   sortOrder: number
 }
 
@@ -33,6 +34,7 @@ export type MissionTemplateInput = {
   targetCount: number
   rewardYellowCoins: number
   isActive?: boolean
+  isStaged?: boolean
   sortOrder?: number
 }
 
@@ -51,6 +53,8 @@ export type PlayerMissionProgressSnapshot = {
 export type MissionStore = {
   listAllMissions: () => MissionTemplateSnapshot[]
   listActiveMissions: () => MissionTemplateSnapshot[]
+  listStagedMissions: () => MissionTemplateSnapshot[]
+  maybePromoteStaged: () => void
   upsertMission: (
     input: MissionTemplateInput,
   ) => { ok: true; mission: MissionTemplateSnapshot } | { ok: false; message: string }
@@ -82,6 +86,7 @@ type MissionTemplateRow = {
   target_count: number
   reward_yellow_coins: number
   is_active: number
+  is_staged: number
   sort_order: number
 }
 
@@ -107,6 +112,7 @@ function rowToMissionTemplate(row: MissionTemplateRow): MissionTemplateSnapshot 
     targetCount: row.target_count,
     rewardYellowCoins: row.reward_yellow_coins,
     isActive: row.is_active === 1,
+    isStaged: row.is_staged === 1,
     sortOrder: row.sort_order,
   }
 }
@@ -233,32 +239,56 @@ export async function createMissionStore(
   database.exec('PRAGMA journal_mode = WAL;')
 
   const listAllMissionsStatement = database.prepare(`
-    SELECT mission_id, mission_type, title, target_count, reward_yellow_coins, is_active, sort_order
+    SELECT mission_id, mission_type, title, target_count, reward_yellow_coins, is_active, is_staged, sort_order
     FROM mission_templates
     ORDER BY sort_order ASC, created_at ASC
   `)
 
   const listActiveMissionsStatement = database.prepare(`
-    SELECT mission_id, mission_type, title, target_count, reward_yellow_coins, is_active, sort_order
+    SELECT mission_id, mission_type, title, target_count, reward_yellow_coins, is_active, is_staged, sort_order
     FROM mission_templates
-    WHERE is_active = 1
+    WHERE is_active = 1 AND is_staged = 0
+    ORDER BY sort_order ASC, created_at ASC
+  `)
+
+  const listStagedMissionsStatement = database.prepare(`
+    SELECT mission_id, mission_type, title, target_count, reward_yellow_coins, is_active, is_staged, sort_order
+    FROM mission_templates
+    WHERE is_staged = 1
     ORDER BY sort_order ASC, created_at ASC
   `)
 
   const getMissionByIdStatement = database.prepare(`
-    SELECT mission_id, mission_type, title, target_count, reward_yellow_coins, is_active, sort_order
+    SELECT mission_id, mission_type, title, target_count, reward_yellow_coins, is_active, is_staged, sort_order
     FROM mission_templates
     WHERE mission_id = ?
   `)
 
+  const getAdminSettingStatement = database.prepare(`
+    SELECT setting_value FROM admin_settings WHERE setting_key = ?
+  `)
+
+  const setAdminSettingStatement = database.prepare(`
+    INSERT INTO admin_settings (setting_key, setting_value) VALUES (?, ?)
+    ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value
+  `)
+
+  const deleteActiveMissionsStatement = database.prepare(`
+    DELETE FROM mission_templates WHERE is_staged = 0
+  `)
+
+  const promoteAllStagedStatement = database.prepare(`
+    UPDATE mission_templates SET is_staged = 0 WHERE is_staged = 1
+  `)
+
   const insertMissionStatement = database.prepare(`
-    INSERT INTO mission_templates (mission_id, mission_type, title, target_count, reward_yellow_coins, is_active, sort_order)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO mission_templates (mission_id, mission_type, title, target_count, reward_yellow_coins, is_active, is_staged, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `)
 
   const updateMissionStatement = database.prepare(`
     UPDATE mission_templates
-    SET mission_type = ?, title = ?, target_count = ?, reward_yellow_coins = ?, is_active = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP
+    SET mission_type = ?, title = ?, target_count = ?, reward_yellow_coins = ?, is_active = ?, is_staged = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP
     WHERE mission_id = ?
   `)
 
@@ -290,7 +320,7 @@ export async function createMissionStore(
       ON p.mission_id = m.mission_id
       AND p.profile_id = ?
       AND p.date = ?
-    WHERE m.is_active = 1
+    WHERE m.is_active = 1 AND m.is_staged = 0
     ORDER BY m.sort_order ASC, m.created_at ASC
   `)
 
@@ -339,12 +369,38 @@ export async function createMissionStore(
     return (listActiveMissionsStatement.all() as MissionTemplateRow[]).map(rowToMissionTemplate)
   }
 
+  function listStagedMissions(): MissionTemplateSnapshot[] {
+    return (listStagedMissionsStatement.all() as MissionTemplateRow[]).map(rowToMissionTemplate)
+  }
+
+  function maybePromoteStaged(): void {
+    const today = getTodayDate()
+    const row = getAdminSettingStatement.get('last_mission_reset_date') as { setting_value: string } | undefined
+    const lastResetDate = row?.setting_value ?? ''
+    if (lastResetDate === today) return
+
+    const staged = listStagedMissions()
+    if (staged.length === 0) return
+
+    database.exec('BEGIN')
+    try {
+      deleteActiveMissionsStatement.run()
+      promoteAllStagedStatement.run()
+      setAdminSettingStatement.run('last_mission_reset_date', today)
+      database.exec('COMMIT')
+    } catch (err) {
+      database.exec('ROLLBACK')
+      throw err
+    }
+  }
+
   function upsertMission(
     input: MissionTemplateInput,
   ): { ok: true; mission: MissionTemplateSnapshot } | { ok: false; message: string } {
     try {
       const missionId = input.missionId ?? randomUUID()
-      const isActive = input.isActive ?? false
+      const isActive = input.isActive ?? true
+      const isStaged = input.isStaged ?? false
       const sortOrder = input.sortOrder ?? 0
 
       const existing = getMissionByIdStatement.get(missionId) as MissionTemplateRow | undefined
@@ -355,6 +411,7 @@ export async function createMissionStore(
           input.targetCount,
           input.rewardYellowCoins,
           isActive ? 1 : 0,
+          isStaged ? 1 : 0,
           sortOrder,
           missionId,
         )
@@ -366,6 +423,7 @@ export async function createMissionStore(
           input.targetCount,
           input.rewardYellowCoins,
           isActive ? 1 : 0,
+          isStaged ? 1 : 0,
           sortOrder,
         )
       }
@@ -487,6 +545,8 @@ export async function createMissionStore(
   return {
     listAllMissions,
     listActiveMissions,
+    listStagedMissions,
+    maybePromoteStaged,
     upsertMission,
     deleteMission,
     setMissionActive,
