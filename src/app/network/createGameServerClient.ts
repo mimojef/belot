@@ -83,9 +83,33 @@ export type LeaderboardsSnapshot = Record<
   PlayerPublicProfileSnapshot[]
 >
 
+export type DailyRewardTierSnapshot = {
+  tierId: string
+  sortOrder: number
+  yellowCoinsAmount: number
+  claimedToday?: boolean
+}
+
 export type AdminSettingsSnapshot = {
   signupBonusYellowCoins: number
   profileNameChangePrice: number
+}
+
+export type AdminPaymentPeriodStats = {
+  count: number
+  totalCents: number
+}
+
+export type AdminStatsSnapshot = {
+  onlineCount: number
+  totalProfiles: number
+  payments: {
+    today: AdminPaymentPeriodStats
+    yesterday: AdminPaymentPeriodStats
+    last7days: AdminPaymentPeriodStats
+    thisMonth: AdminPaymentPeriodStats
+    allTime: AdminPaymentPeriodStats
+  }
 }
 
 export type CoinPackageStatus = 'active' | 'inactive'

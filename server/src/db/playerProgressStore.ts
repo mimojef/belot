@@ -57,6 +57,7 @@ export type PlayerProgressStore = {
       }
     | { ok: false; message: string }
   isDisplayNameAvailable: (displayName: string) => boolean
+  countHumanProfiles: () => number
   seedCatalogBotsIfNeeded: () => void
   refillCatalogBotWallets: () => void
   recordCompletedMatch: (room: ServerRoom) => void
@@ -1188,6 +1189,13 @@ export async function createPlayerProgressStore(
     return { ok: true }
   }
 
+  function countHumanProfiles(): number {
+    const row = database.prepare(
+      `SELECT COUNT(*) AS count FROM profiles WHERE profile_kind = 'human'`,
+    ).get() as { count: number }
+    return row.count
+  }
+
   function seedCatalogBotsIfNeeded(): void {
     const countRow = database.prepare(
       `SELECT COUNT(*) AS count FROM profiles WHERE profile_kind = 'bot'`,
@@ -1284,6 +1292,7 @@ export async function createPlayerProgressStore(
     listLeaderboards,
     changeProfileDisplayName,
     isDisplayNameAvailable,
+    countHumanProfiles,
     updateProfileAvatar,
     addProfileGalleryImage,
     deleteProfileGalleryImage,

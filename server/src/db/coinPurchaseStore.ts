@@ -27,8 +27,22 @@ export type FulfillPaidPurchaseParams = {
   currency: string
 }
 
+export type PaymentPeriodStats = {
+  count: number
+  totalCents: number
+}
+
+export type AdminPaymentStats = {
+  today: PaymentPeriodStats
+  yesterday: PaymentPeriodStats
+  last7days: PaymentPeriodStats
+  thisMonth: PaymentPeriodStats
+  allTime: PaymentPeriodStats
+}
+
 export type CoinPurchaseStore = {
   listProfilePurchases: (profileId: string) => CoinPurchaseSnapshot[]
+  getAdminPaymentStats: () => AdminPaymentStats
   createPendingPurchase: (
     profileId: string,
     packageId: string,
@@ -536,12 +550,32 @@ export async function createCoinPurchaseStore(
     return { ok: true, purchase: fulfilled, alreadyCredited: false }
   }
 
+  function getAdminPaymentStats(): AdminPaymentStats {
+    function query(whereClause: string): PaymentPeriodStats {
+      const row = database.prepare(`
+        SELECT COUNT(*) AS count, COALESCE(SUM(price_cents), 0) AS total_cents
+        FROM coin_purchase_ledger
+        WHERE status = 'paid' AND ${whereClause}
+      `).get() as { count: number; total_cents: number }
+      return { count: row.count, totalCents: row.total_cents }
+    }
+
+    return {
+      today:     query(`DATE(credited_at) = DATE('now')`),
+      yesterday: query(`DATE(credited_at) = DATE('now', '-1 day')`),
+      last7days: query(`credited_at >= DATETIME('now', '-7 days')`),
+      thisMonth: query(`strftime('%Y-%m', credited_at) = strftime('%Y-%m', 'now')`),
+      allTime:   query(`1=1`),
+    }
+  }
+
   function close(): void {
     database.close()
   }
 
   return {
     listProfilePurchases,
+    getAdminPaymentStats,
     createPendingPurchase,
     getPurchaseById,
     attachCheckoutSession,

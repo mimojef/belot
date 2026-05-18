@@ -22,6 +22,7 @@ import {
 } from './db/coinPackageStore.js'
 import { createMissionStore, type MissionType } from './db/missionStore.js'
 import { createCoinPurchaseStore } from './db/coinPurchaseStore.js'
+import { createDailyRewardsStore } from './db/dailyRewardsStore.js'
 import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
@@ -130,6 +131,9 @@ const coinPackageStore = await createCoinPackageStore(
   databaseBootstrap.databaseFilePath,
 )
 const coinPurchaseStore = await createCoinPurchaseStore(
+  databaseBootstrap.databaseFilePath,
+)
+const dailyRewardsStore = await createDailyRewardsStore(
   databaseBootstrap.databaseFilePath,
 )
 const authStore = await createAuthStore(
@@ -982,6 +986,10 @@ function processMatchmaking(): void {
 
     broadcastMatchmakingStatusForStake(result.group.stake)
   }
+}
+
+function sofiaDateString(): string {
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Sofia' }).format(new Date())
 }
 
 function sendJsonResponse(
@@ -2644,7 +2652,7 @@ async function handleMissionsRequest(
   }
 
   const profileId = session.profile.profileId
-  const today = new Date().toISOString().slice(0, 10)
+  const today = sofiaDateString()
 
   if (pathname === '/api/missions/daily' && req.method === 'GET') {
     missionStore.maybePromoteStaged()
@@ -2785,6 +2793,174 @@ async function handleAdminMissionsRequest(
   return false
 }
 
+async function handleAdminStatsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/admin/stats') {
+    return false
+  }
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session?.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
+    return true
+  }
+
+  const onlineCount = Object.values(serverState.connections).filter(
+    (c) => c.status === 'connected' && socketRegistry.get(c.id)?.readyState === WebSocket.OPEN,
+  ).length
+
+  const totalProfiles = playerProgressStore.countHumanProfiles()
+
+  const paymentStats = coinPurchaseStore.getAdminPaymentStats()
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    stats: {
+      onlineCount,
+      totalProfiles,
+      payments: paymentStats,
+    },
+  })
+  return true
+}
+
+async function handleAdminDailyRewardsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const deleteMatch = /^\/api\/admin\/daily-rewards\/([^/]+)$/.exec(pathname)
+
+  if (pathname !== '/api/admin/daily-rewards' && deleteMatch === null) {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session?.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
+    return true
+  }
+
+  if (pathname === '/api/admin/daily-rewards' && req.method === 'GET') {
+    sendJsonResponse(res, 200, {
+      ok: true,
+      activeTiers: dailyRewardsStore.listActiveTiers(),
+      stagedTiers: dailyRewardsStore.listStagedTiers(),
+    })
+    return true
+  }
+
+  if (pathname === '/api/admin/daily-rewards' && req.method === 'POST') {
+    const body = await readJsonRequestBody(req)
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+      return true
+    }
+    const amount = getNumberField(body, 'yellowCoinsAmount')
+    if (amount === null) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Липсва yellowCoinsAmount.' })
+      return true
+    }
+    const result = dailyRewardsStore.addStagedTier(amount)
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+    sendJsonResponse(res, 200, {
+      ok: true,
+      activeTiers: dailyRewardsStore.listActiveTiers(),
+      stagedTiers: dailyRewardsStore.listStagedTiers(),
+    })
+    return true
+  }
+
+  if (deleteMatch !== null && req.method === 'DELETE') {
+    const tierId = decodeURIComponent(deleteMatch[1] ?? '')
+    const result = dailyRewardsStore.removeStagedTier(tierId)
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+    sendJsonResponse(res, 200, {
+      ok: true,
+      activeTiers: dailyRewardsStore.listActiveTiers(),
+      stagedTiers: dailyRewardsStore.listStagedTiers(),
+    })
+    return true
+  }
+
+  sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+  return true
+}
+
+async function handleDailyRewardsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/daily-rewards' && pathname !== '/api/daily-rewards/claim') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!session?.profile.profileId) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Не си влязъл в профила си.' })
+    return true
+  }
+
+  const profileId = session.profile.profileId
+
+  if (pathname === '/api/daily-rewards' && req.method === 'GET') {
+    const tiers = dailyRewardsStore.listTiersWithClaimStatus(profileId)
+    sendJsonResponse(res, 200, { ok: true, tiers })
+    return true
+  }
+
+  if (pathname === '/api/daily-rewards/claim' && req.method === 'POST') {
+    const body = await readJsonRequestBody(req)
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+      return true
+    }
+    const tierId = typeof body['tierId'] === 'string' ? body['tierId'].trim() : null
+    if (!tierId) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Липсва tierId.' })
+      return true
+    }
+    const result = dailyRewardsStore.claimReward(profileId, tierId)
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+    const tiers = dailyRewardsStore.listTiersWithClaimStatus(profileId)
+    const updatedProfile = playerProgressStore.getPublicProfile(profileId)
+    sendJsonResponse(res, 200, {
+      ok: true,
+      yellowCoinsAwarded: result.yellowCoinsAwarded,
+      newBalance: updatedProfile?.yellowCoinsBalance ?? null,
+      tiers,
+    })
+    return true
+  }
+
+  sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+  return true
+}
+
 async function handleHttpRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -2893,6 +3069,18 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminMissionsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminStatsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminDailyRewardsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleDailyRewardsRequest(req, res, requestUrl.pathname)) {
     return
   }
 
@@ -3948,6 +4136,7 @@ function closeActiveRoomSnapshotStore(): void {
     matchEconomyStore.close()
     coinPackageStore.close()
     coinPurchaseStore.close()
+    dailyRewardsStore.close()
   } catch (error) {
     console.error('[room-snapshot] failed to close store', error)
   }

@@ -1,5 +1,7 @@
 import type {
   AdminSettingsSnapshot,
+  AdminStatsSnapshot,
+  DailyRewardTierSnapshot,
   ChatConversationSnapshot,
   ChatMessageSnapshot,
   CoinPackageInput,
@@ -28,7 +30,7 @@ export type AvatarCropSelection = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info'
   displayName: string
   selectedStake: MatchStake
   isConnected: boolean
@@ -59,6 +61,22 @@ export type LobbyScreenState = {
   shopPurchaseActionPackageId: string | null
   shopPurchaseMessageText: string | null
   isAdmin: boolean
+  adminStats: AdminStatsSnapshot | null
+  adminStatsLoading: boolean
+  adminStatsErrorText: string | null
+  adminActiveDailyRewardTiers: DailyRewardTierSnapshot[]
+  adminStagedDailyRewardTiers: DailyRewardTierSnapshot[]
+  adminDailyRewardsLoading: boolean
+  adminDailyRewardsErrorText: string | null
+  adminDailyRewardAddLoading: boolean
+  adminDailyRewardAddErrorText: string | null
+  dailyRewardTiers: DailyRewardTierSnapshot[]
+  dailyRewardsPopupOpen: boolean
+  dailyRewardsLoading: boolean
+  dailyRewardsErrorText: string | null
+  dailyRewardClaimingId: string | null
+  dailyRewardClaimErrorText: string | null
+  dailyRewardLastAwarded: number | null
   adminSettings: AdminSettingsSnapshot | null
   adminSettingsLoading: boolean
   adminSettingsErrorText: string | null
@@ -133,6 +151,12 @@ export type RenderLobbyScreenOptions = {
   onLeaderboardsClick: () => void
   onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
   onAdminClick: () => void
+  onAdminInfoClick: () => void
+  onAdminDailyRewardAdd: (amount: number) => void
+  onAdminDailyRewardRemove: (tierId: string) => void
+  onDailyRewardsOpen: () => void
+  onDailyRewardsClose: () => void
+  onDailyRewardClaim: (tierId: string) => void
   onAdminSettingsSubmit: (settings: AdminSettingsSnapshot) => void
   onAdminCoinPackageSubmit: (input: CoinPackageInput) => void
   onAdminCoinPackageStatusChange: (
@@ -675,7 +699,7 @@ function renderNav(state: LobbyScreenState): string {
   const chatActive = activeView === 'chat'
   const leaderboardsActive = activeView === 'leaderboards'
   const shopActive = activeView === 'shop'
-  const adminActive = activeView === 'admin'
+  const adminActive = activeView === 'admin' || activeView === 'admin-info'
   const lobbyActive = activeView === 'tables'
   const incomingFriendRequestsCount =
     state.friendships?.incomingPending.length ?? 0
@@ -818,20 +842,64 @@ function renderNav(state: LobbyScreenState): string {
       <div style="display:flex; align-items:center; gap:4px; margin-left:auto;">
         ${state.profile.profileId !== null ? `
           ${state.isAdmin ? `
-            <button type="button" data-lobby-nav-admin="1" ${adminActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
-              display:flex; align-items:center; gap:8px;
-              background:${adminActive ? 'rgba(212,165,32,0.06)' : 'none'};
-              border:0;
-              padding:0 14px;
-              cursor:pointer;
-              font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-              color:${adminActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
-              border-bottom:2px solid ${adminActive ? '#d4a520' : 'transparent'};
-              height:100%;
-            ">
-              <span style="font-size:22px;line-height:1;color:currentColor;">⚙</span>
-              Админ
-            </button>
+            <div style="position:relative; height:100%; display:flex; align-items:center;" data-admin-dropdown-wrap="1">
+              <button type="button" data-lobby-nav-admin-toggle="1" class="lobby-nav-btn" style="
+                display:flex; align-items:center; gap:8px;
+                background:${adminActive ? 'rgba(212,165,32,0.06)' : 'none'};
+                border:0;
+                padding:0 14px;
+                cursor:pointer;
+                font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+                color:${adminActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+                border-bottom:2px solid ${adminActive ? '#d4a520' : 'transparent'};
+                height:100%;
+              ">
+                <span style="font-size:22px;line-height:1;color:currentColor;">⚙</span>
+                Админ
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div data-admin-dropdown="1" style="
+                display:none;
+                position:absolute; top:100%; right:0;
+                min-width:180px;
+                background:#111111;
+                border:1px solid rgba(212,165,32,0.35);
+                border-radius:8px;
+                box-shadow:0 8px 32px rgba(0,0,0,0.7);
+                z-index:999;
+                overflow:hidden;
+              ">
+                <button type="button" data-lobby-nav-admin="1" style="
+                  display:flex; align-items:center; gap:10px;
+                  width:100%; background:none; border:none;
+                  padding:13px 18px; cursor:pointer; text-align:left;
+                  font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+                  color:rgba(255,255,255,0.82);
+                  transition:background 0.12s, color 0.12s;
+                "
+                onmouseenter="this.style.background='rgba(212,165,32,0.09)';this.style.color='#d4a520'"
+                onmouseleave="this.style.background='none';this.style.color='rgba(255,255,255,0.82)'"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/><path d="M1 12h2M21 12h2M12 1v2M12 21v2"/></svg>
+                  Настройки
+                </button>
+                <div style="height:1px;background:rgba(212,165,32,0.2);margin:0 12px;"></div>
+                <button type="button" data-lobby-nav-admin-info="1" style="
+                  display:flex; align-items:center; gap:10px;
+                  width:100%; background:none; border:none;
+                  padding:13px 18px; cursor:pointer; text-align:left;
+                  font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+                  color:rgba(255,255,255,0.82);
+                  transition:background 0.12s, color 0.12s;
+                "
+                onmouseenter="this.style.background='rgba(212,165,32,0.09)';this.style.color='#d4a520'"
+                onmouseleave="this.style.background='none';this.style.color='rgba(255,255,255,0.82)'"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+                  Информация
+                </button>
+              </div>
+            </div>
           ` : ''}
           <button data-lobby-nav-bell="1" style="
             background:none; border:none; cursor:pointer; padding:6px;
@@ -1548,7 +1616,11 @@ function renderBottomSection(lobbyPackages: CoinPackageSnapshot[], isLoggedIn: b
         display:flex; align-items:center; gap:14px;
         cursor:pointer;
         min-height:137px;
-      ">
+        transition:border-color 0.15s, box-shadow 0.15s;
+      "
+      onmouseenter="this.style.borderColor='rgba(167,139,250,1)';this.style.boxShadow='0 0 0 1px rgba(167,139,250,0.5)'"
+      onmouseleave="this.style.borderColor='rgba(167,139,250,0.62)';this.style.boxShadow='none'"
+      >
         <img src="/assets/lobby/icon-private-table.png" alt="" style="width:76px; height:75px; display:block; object-fit:contain; flex-shrink:0;">
         <div style="flex:1; min-width:0;">
           <div style="font-size:15px; font-weight:800; color:#a78bfa; text-transform:uppercase; letter-spacing:0.05em;">Частни маси</div>
@@ -1556,7 +1628,7 @@ function renderBottomSection(lobbyPackages: CoinPackageSnapshot[], isLoggedIn: b
         </div>
       </div>
 
-      <div style="
+      <div data-lobby-daily-rewards-card="1" style="
         background:#000000;
         border:1px solid rgba(212,165,32,0.68);
         border-radius:12px;
@@ -1565,7 +1637,11 @@ function renderBottomSection(lobbyPackages: CoinPackageSnapshot[], isLoggedIn: b
         cursor:pointer;
         position:relative;
         min-height:137px;
-      ">
+        transition:border-color 0.15s, box-shadow 0.15s;
+      "
+      onmouseenter="this.style.borderColor='rgba(212,165,32,1)';this.style.boxShadow='0 0 0 1px rgba(212,165,32,0.5)'"
+      onmouseleave="this.style.borderColor='rgba(212,165,32,0.68)';this.style.boxShadow='none'"
+      >
         <img src="/assets/lobby/icon-daily-rewards.png" alt="" style="width:74px; height:75px; display:block; object-fit:contain; flex-shrink:0;">
         <div style="flex:1; min-width:0;">
           <div style="font-size:15px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Ежедневни награди</div>
@@ -1582,7 +1658,11 @@ function renderBottomSection(lobbyPackages: CoinPackageSnapshot[], isLoggedIn: b
         cursor:pointer;
         min-height:137px;
         position:relative;
-      ">
+        transition:border-color 0.15s, box-shadow 0.15s;
+      "
+      onmouseenter="this.style.borderColor='rgba(96,165,250,1)';this.style.boxShadow='0 0 0 1px rgba(96,165,250,0.5)'"
+      onmouseleave="this.style.borderColor='rgba(96,165,250,0.62)';this.style.boxShadow='none'"
+      >
         ${unclaimedMissionsCount > 0 ? `<div style="position:absolute;top:10px;right:12px;width:10px;height:10px;border-radius:50%;background:#ef4444;box-shadow:0 0 6px rgba(239,68,68,0.7);"></div>` : ''}
         <img src="/assets/lobby/icon-missions.png" alt="" style="width:73px; height:76px; display:block; object-fit:contain; flex-shrink:0;">
         <div style="flex:1; min-width:0;">
@@ -2212,6 +2292,83 @@ function renderShopPanel(state: LobbyScreenState): string {
   `
 }
 
+function renderAdminInfoPanel(state: LobbyScreenState): string {
+  if (!state.isAdmin) {
+    return `<div style="min-height:520px;display:flex;align-items:center;justify-content:center;color:#fecaca;font-size:15px;font-weight:800;">Нямаш достъп.</div>`
+  }
+
+  if (state.adminStatsLoading) {
+    return `<div style="min-height:520px;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:18px;font-weight:900;">Зареждане...</div>`
+  }
+
+  if (state.adminStatsErrorText) {
+    return `<div style="min-height:520px;display:flex;align-items:center;justify-content:center;color:#fecaca;font-size:14px;font-weight:800;">${escapeHtml(state.adminStatsErrorText)}</div>`
+  }
+
+  const stats = state.adminStats
+  if (!stats) return ''
+
+  function fmtMoney(cents: number): string {
+    return (cents / 100).toFixed(2)
+  }
+
+  function statCard(label: string, count: number, cents: number): string {
+    return `
+      <div style="
+        background:#0d0d0d; border:1px solid rgba(212,165,32,0.28); border-radius:12px;
+        padding:18px 22px; display:flex; flex-direction:column; gap:10px;
+      ">
+        <div style="font-size:11px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.5);">${label}</div>
+        <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">
+          <div>
+            <span style="font-size:28px;font-weight:900;color:#ffffff;">${count}</span>
+            <span style="font-size:12px;color:rgba(255,255,255,0.45);margin-left:4px;">плащания</span>
+          </div>
+          <div>
+            <span style="font-size:22px;font-weight:800;color:#d4a520;">${fmtMoney(cents)}</span>
+            <span style="font-size:12px;color:rgba(212,165,32,0.6);margin-left:4px;">EUR</span>
+          </div>
+        </div>
+      </div>
+    `
+  }
+
+  return `
+    <section style="padding:0 4px;">
+      <h2 style="font-size:18px;font-weight:800;color:#d4a520;margin:0 0 20px;letter-spacing:0.04em;text-transform:uppercase;">Информация</h2>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:24px;">
+        <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:12px;padding:18px 22px;">
+          <div style="font-size:11px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin-bottom:10px;">Онлайн сега</div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <div style="width:10px;height:10px;border-radius:50%;background:#22c55e;flex-shrink:0;"></div>
+            <span style="font-size:32px;font-weight:900;color:#ffffff;">${stats.onlineCount}</span>
+            <span style="font-size:13px;color:rgba(255,255,255,0.45);">потребители</span>
+          </div>
+        </div>
+        <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:12px;padding:18px 22px;">
+          <div style="font-size:11px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin-bottom:10px;">Регистрирани</div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span style="font-size:32px;font-weight:900;color:#ffffff;">${stats.totalProfiles.toLocaleString('bg-BG')}</span>
+            <span style="font-size:13px;color:rgba(255,255,255,0.45);">профила</span>
+          </div>
+        </div>
+      </div>
+
+      <h3 style="font-size:13px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin:0 0 12px;">Плащания</h3>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+        ${statCard('Днес', stats.payments.today.count, stats.payments.today.totalCents)}
+        ${statCard('Вчера', stats.payments.yesterday.count, stats.payments.yesterday.totalCents)}
+        ${statCard('Последните 7 дни', stats.payments.last7days.count, stats.payments.last7days.totalCents)}
+        ${statCard('Този месец', stats.payments.thisMonth.count, stats.payments.thisMonth.totalCents)}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr;gap:12px;">
+        ${statCard('Общо (всички времена)', stats.payments.allTime.count, stats.payments.allTime.totalCents)}
+      </div>
+    </section>
+  `
+}
+
 function renderAdminPanel(state: LobbyScreenState): string {
   if (!state.isAdmin) {
     return `
@@ -2484,6 +2641,197 @@ function renderAdminPanel(state: LobbyScreenState): string {
         </div>
       </div>
     </section>
+
+    <section style="margin-top:28px;">
+      <div style="display:flex;align-items:center;gap:12px;border-bottom:1px solid rgba(212,165,32,0.2);padding-bottom:10px;margin-bottom:20px;">
+        <div style="font-size:16px;font-weight:900;color:#d4a520;letter-spacing:0.04em;text-transform:uppercase;">Ежедневни награди</div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.45);font-weight:500;">Играчите вземат по 1 на ден · рестартира в 00:00</div>
+      </div>
+
+      ${state.adminDailyRewardsLoading ? `
+        <div style="color:#d4a520;font-size:13px;font-weight:800;margin-bottom:16px;">Зареждане...</div>
+      ` : state.adminDailyRewardsErrorText ? `
+        <div style="color:#fecaca;font-size:13px;font-weight:800;margin-bottom:16px;">${escapeHtml(state.adminDailyRewardsErrorText)}</div>
+      ` : `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start;">
+
+          <!-- Активни днес (само четене) -->
+          <div>
+            <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin-bottom:10px;">
+              Активни днес
+            </div>
+            ${state.adminActiveDailyRewardTiers.length === 0 ? `
+              <div style="color:rgba(255,255,255,0.3);font-size:13px;padding:10px 0;">Няма активни награди.</div>
+            ` : `
+              <div style="display:grid;gap:7px;">
+                ${state.adminActiveDailyRewardTiers.map((tier, i) => `
+                  <div style="display:flex;align-items:center;gap:10px;background:#0a0a0a;border:1px solid rgba(212,165,32,0.15);border-radius:8px;padding:9px 12px;opacity:0.75;">
+                    <div style="width:20px;height:20px;border-radius:50%;background:rgba(212,165,32,0.12);border:1px solid rgba(212,165,32,0.3);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;color:#d4a520;flex-shrink:0;">${i + 1}</div>
+                    <img src="/assets/lobby/icon-coin.png" alt="" style="width:18px;height:18px;object-fit:contain;flex-shrink:0;">
+                    <span style="font-size:14px;font-weight:800;color:rgba(255,255,255,0.7);flex:1;">${formatAmount(tier.yellowCoinsAmount)} жълтици</span>
+                  </div>
+                `).join('')}
+              </div>
+            `}
+          </div>
+
+          <!-- Промени за утре (редактируеми) -->
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+              <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.5);">
+                Промени за утре
+              </div>
+              ${state.adminStagedDailyRewardTiers.length > 0 ? `
+                <div style="font-size:10px;font-weight:800;color:#d4a520;background:rgba(212,165,32,0.12);border:1px solid rgba(212,165,32,0.3);border-radius:4px;padding:2px 7px;white-space:nowrap;">
+                  влизат в сила в 00:00
+                </div>
+              ` : ''}
+            </div>
+
+            ${state.adminStagedDailyRewardTiers.length === 0 ? `
+              <div style="border:1px dashed rgba(255,255,255,0.12);border-radius:8px;padding:12px;margin-bottom:10px;">
+                <div style="font-size:12px;color:rgba(255,255,255,0.35);">Без зададени промени — днешните ще се повторят утре.</div>
+              </div>
+            ` : `
+              <div style="display:grid;gap:7px;margin-bottom:10px;">
+                ${state.adminStagedDailyRewardTiers.map((tier, i) => `
+                  <div style="display:flex;align-items:center;gap:10px;background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:8px;padding:9px 12px;">
+                    <div style="width:20px;height:20px;border-radius:50%;background:rgba(212,165,32,0.15);border:1px solid rgba(212,165,32,0.4);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;color:#d4a520;flex-shrink:0;">${i + 1}</div>
+                    <img src="/assets/lobby/icon-coin.png" alt="" style="width:18px;height:18px;object-fit:contain;flex-shrink:0;">
+                    <span style="font-size:14px;font-weight:800;color:#ffffff;flex:1;">${formatAmount(tier.yellowCoinsAmount)} жълтици</span>
+                    <button type="button" data-admin-daily-reward-remove="${escapeHtml(tier.tierId)}" style="
+                      background:rgba(239,68,68,0.10);border:1px solid rgba(239,68,68,0.3);border-radius:6px;
+                      padding:4px 10px;cursor:pointer;font-size:11px;font-weight:800;color:#fca5a5;flex-shrink:0;
+                    ">×</button>
+                  </div>
+                `).join('')}
+              </div>
+            `}
+
+            <form data-admin-daily-reward-form="1" style="display:flex;gap:8px;align-items:flex-end;">
+              <label style="display:grid;gap:4px;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(212,165,32,0.7);flex:1;">
+                Жълтици
+                <input
+                  name="amount"
+                  type="number"
+                  min="1"
+                  placeholder="напр. 5000"
+                  style="height:38px;border-radius:8px;border:1px solid rgba(212,165,32,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;"
+                >
+              </label>
+              <button type="submit" ${state.adminDailyRewardAddLoading ? 'disabled' : ''} style="
+                height:38px;padding:0 14px;border:0;border-radius:8px;
+                background:linear-gradient(180deg,#d4a520 0%,#92700e 100%);
+                color:#000000;font-size:12px;font-weight:900;cursor:pointer;white-space:nowrap;
+                opacity:${state.adminDailyRewardAddLoading ? '0.6' : '1'};flex-shrink:0;
+              ">${state.adminDailyRewardAddLoading ? '...' : '+ Добави'}</button>
+            </form>
+            ${state.adminDailyRewardAddErrorText ? `
+              <div style="margin-top:6px;color:#fca5a5;font-size:11px;font-weight:800;">${escapeHtml(state.adminDailyRewardAddErrorText)}</div>
+            ` : ''}
+          </div>
+
+        </div>
+      `}
+    </section>
+  `
+}
+
+function renderDailyRewardsPopup(state: LobbyScreenState): string {
+  if (!state.dailyRewardsPopupOpen) return ''
+
+  const tiers = state.dailyRewardTiers
+
+  return `
+    <div data-daily-rewards-backdrop="1" style="
+      position:fixed;inset:0;z-index:8000;
+      background:rgba(0,0,0,0.75);
+      display:flex;align-items:center;justify-content:center;
+    ">
+      <div style="
+        background:linear-gradient(180deg,#141414 0%,#080808 100%);
+        border:1px solid rgba(212,165,32,0.4);
+        border-radius:16px;
+        width:420px;max-width:calc(100vw - 32px);
+        max-height:80vh;
+        display:flex;flex-direction:column;
+        box-shadow:0 24px 64px rgba(0,0,0,0.7);
+        font-family:Arial,Helvetica,sans-serif;
+        overflow:hidden;
+      ">
+        <div style="
+          display:flex;align-items:center;justify-content:space-between;
+          padding:18px 20px 14px;
+          border-bottom:1px solid rgba(212,165,32,0.2);
+          flex-shrink:0;
+        ">
+          <div>
+            <div style="font-size:18px;font-weight:900;color:#d4a520;letter-spacing:0.04em;">Ежедневни награди</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.45);margin-top:3px;">Вземи по 1 награда на ден. Рестартира се в полунощ.</div>
+          </div>
+          <button type="button" data-daily-rewards-close="1" style="
+            width:32px;height:32px;border:none;background:rgba(255,255,255,0.08);
+            border-radius:8px;color:rgba(255,255,255,0.6);font-size:18px;font-weight:700;
+            cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;
+          ">×</button>
+        </div>
+
+        <div style="overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:10px;">
+          ${state.dailyRewardsLoading ? `
+            <div style="text-align:center;padding:32px 0;color:#d4a520;font-size:14px;font-weight:800;">Зареждане...</div>
+          ` : state.dailyRewardsErrorText ? `
+            <div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:12px;color:#fecaca;font-size:13px;font-weight:800;">${escapeHtml(state.dailyRewardsErrorText)}</div>
+          ` : tiers.length === 0 ? `
+            <div style="text-align:center;padding:32px 0;color:rgba(255,255,255,0.4);font-size:14px;">Все още няма добавени награди.</div>
+          ` : tiers.map((tier) => {
+            const claimed = tier.claimedToday === true
+            const isClaiming = state.dailyRewardClaimingId === tier.tierId
+            return `
+              <div style="
+                display:flex;align-items:center;gap:12px;
+                background:#0d0d0d;border:1px solid ${claimed ? 'rgba(255,255,255,0.10)' : 'rgba(212,165,32,0.25)'};
+                border-radius:10px;padding:12px 14px;
+                opacity:${claimed ? '0.55' : '1'};
+              ">
+                <img src="/assets/lobby/icon-coin.png" alt="" style="width:36px;height:36px;object-fit:contain;flex-shrink:0;${claimed ? 'filter:grayscale(1);' : ''}">
+                <div style="flex:1;min-width:0;">
+                  <div style="font-size:17px;font-weight:900;color:${claimed ? 'rgba(255,255,255,0.45)' : '#d4a520'};">${formatAmount(tier.yellowCoinsAmount)}</div>
+                  <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:2px;">жълтици</div>
+                </div>
+                ${claimed ? `
+                  <div style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.35);letter-spacing:0.05em;">✓ Взета</div>
+                ` : `
+                  <button type="button" data-daily-reward-claim="${escapeHtml(tier.tierId)}" ${isClaiming ? 'disabled' : ''} style="
+                    height:38px;padding:0 18px;border:0;border-radius:8px;
+                    background:${isClaiming ? 'rgba(212,165,32,0.4)' : 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)'};
+                    color:#000000;font-size:13px;font-weight:900;cursor:${isClaiming ? 'default' : 'pointer'};
+                    white-space:nowrap;flex-shrink:0;
+                  ">${isClaiming ? 'Вземане...' : 'Вземи'}</button>
+                `}
+              </div>
+            `
+          }).join('')}
+
+          ${state.dailyRewardLastAwarded !== null ? `
+            <div style="
+              margin-top:4px;border-radius:10px;
+              border:1px solid rgba(74,222,128,0.3);background:rgba(21,128,61,0.18);
+              padding:12px 14px;display:flex;align-items:center;gap:10px;
+            ">
+              <span style="font-size:20px;">🎉</span>
+              <div>
+                <div style="font-size:14px;font-weight:900;color:#4ade80;">Получихте наградата!</div>
+                <div style="font-size:12px;color:rgba(255,255,255,0.55);margin-top:2px;">+${formatAmount(state.dailyRewardLastAwarded)} жълтици са добавени към вашия портфейл.</div>
+              </div>
+            </div>
+          ` : ''}
+
+          ${state.dailyRewardClaimErrorText ? `
+            <div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;">${escapeHtml(state.dailyRewardClaimErrorText)}</div>
+          ` : ''}
+        </div>
+      </div>
+    </div>
   `
 }
 
@@ -2569,6 +2917,8 @@ export function renderLobbyScreen(
                 ? renderShopPanel(state)
               : state.view === 'admin'
                 ? renderAdminPanel(state)
+              : state.view === 'admin-info'
+                ? renderAdminInfoPanel(state)
             : state.view === 'friends'
               ? renderFriendsDirectory(state)
               : state.view === 'chat'
@@ -2649,6 +2999,7 @@ export function renderLobbyScreen(
       ${renderProfileEditModal(state)}
       ${renderGiftCoinsModal(state)}
       ${renderAuthModal(state)}
+      ${renderDailyRewardsPopup(state)}
     </div>
   `
 
@@ -2747,9 +3098,33 @@ export function renderLobbyScreen(
     .querySelector<HTMLButtonElement>('[data-lobby-nav-logout="1"]')
     ?.addEventListener('click', options.onLogoutClick)
 
+  const adminDropdown = root.querySelector<HTMLElement>('[data-admin-dropdown="1"]')
+  const adminToggle = root.querySelector<HTMLButtonElement>('[data-lobby-nav-admin-toggle="1"]')
+
+  if (adminToggle && adminDropdown) {
+    adminToggle.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const isOpen = adminDropdown.style.display !== 'none'
+      adminDropdown.style.display = isOpen ? 'none' : 'block'
+    })
+    document.addEventListener('click', () => {
+      adminDropdown.style.display = 'none'
+    }, { once: false, capture: true })
+  }
+
   root
     .querySelector<HTMLButtonElement>('[data-lobby-nav-admin="1"]')
-    ?.addEventListener('click', options.onAdminClick)
+    ?.addEventListener('click', () => {
+      if (adminDropdown) adminDropdown.style.display = 'none'
+      options.onAdminClick()
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-nav-admin-info="1"]')
+    ?.addEventListener('click', () => {
+      if (adminDropdown) adminDropdown.style.display = 'none'
+      options.onAdminInfoClick()
+    })
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-nav-friends="1"]')
@@ -3685,6 +4060,43 @@ export function renderLobbyScreen(
       }
 
       options.onLoginSubmit(email, password)
+    })
+  })
+
+  root.querySelector<HTMLElement>('[data-lobby-daily-rewards-card="1"]')
+    ?.addEventListener('click', options.onDailyRewardsOpen)
+
+  root.querySelector<HTMLButtonElement>('[data-daily-rewards-close="1"]')
+    ?.addEventListener('click', options.onDailyRewardsClose)
+
+  root.querySelector<HTMLElement>('[data-daily-rewards-backdrop="1"]')
+    ?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) options.onDailyRewardsClose()
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-daily-reward-claim]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const tierId = btn.dataset.dailyRewardClaim?.trim() ?? ''
+      if (tierId) options.onDailyRewardClaim(tierId)
+    })
+  })
+
+  root.querySelector<HTMLFormElement>('[data-admin-daily-reward-form="1"]')
+    ?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const form = event.currentTarget as HTMLFormElement
+      const data = new FormData(form)
+      const amount = Number(data.get('amount') ?? 0)
+      if (amount > 0) {
+        form.reset()
+        options.onAdminDailyRewardAdd(amount)
+      }
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-daily-reward-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const tierId = btn.dataset.adminDailyRewardRemove?.trim() ?? ''
+      if (tierId) options.onAdminDailyRewardRemove(tierId)
     })
   })
 

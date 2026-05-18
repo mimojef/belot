@@ -14,6 +14,8 @@ import type { AvatarCropSelection } from './app/lobby/renderLobbyScreen'
 import {
   createGameServerClient,
   type AdminSettingsSnapshot,
+  type AdminStatsSnapshot,
+  type DailyRewardTierSnapshot,
   type ChatConversationSnapshot,
   type ChatMessageSnapshot,
   type CoinCheckoutResponse,
@@ -506,6 +508,145 @@ async function loadPublicSettings(): Promise<void> {
     }
   } catch {
     // Keep the local fallback.
+  }
+}
+
+type DailyRewardsApiResponse = {
+  ok: boolean
+  activeTiers?: DailyRewardTierSnapshot[]
+  stagedTiers?: DailyRewardTierSnapshot[]
+  tiers?: DailyRewardTierSnapshot[]
+  yellowCoinsAwarded?: number
+  newBalance?: number | null
+  message?: string
+}
+
+async function loadAdminDailyRewards(): Promise<
+  | { ok: true; activeTiers: DailyRewardTierSnapshot[]; stagedTiers: DailyRewardTierSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/daily-rewards`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as DailyRewardsApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.activeTiers) || !Array.isArray(data.stagedTiers)) {
+      return { ok: false, message: data.message ?? 'Наградите не бяха заредени.' }
+    }
+    return { ok: true, activeTiers: data.activeTiers, stagedTiers: data.stagedTiers }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function addAdminDailyReward(yellowCoinsAmount: number): Promise<
+  | { ok: true; activeTiers: DailyRewardTierSnapshot[]; stagedTiers: DailyRewardTierSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/daily-rewards`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ yellowCoinsAmount }),
+    })
+    const data = (await response.json()) as DailyRewardsApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.activeTiers) || !Array.isArray(data.stagedTiers)) {
+      return { ok: false, message: data.message ?? 'Наградата не беше добавена.' }
+    }
+    return { ok: true, activeTiers: data.activeTiers, stagedTiers: data.stagedTiers }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function removeAdminDailyReward(tierId: string): Promise<
+  | { ok: true; activeTiers: DailyRewardTierSnapshot[]; stagedTiers: DailyRewardTierSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/daily-rewards/${encodeURIComponent(tierId)}`,
+      { method: 'DELETE', credentials: 'include' },
+    )
+    const data = (await response.json()) as DailyRewardsApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.activeTiers) || !Array.isArray(data.stagedTiers)) {
+      return { ok: false, message: data.message ?? 'Наградата не беше премахната.' }
+    }
+    return { ok: true, activeTiers: data.activeTiers, stagedTiers: data.stagedTiers }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadDailyRewards(): Promise<
+  | { ok: true; tiers: DailyRewardTierSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/daily-rewards`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as DailyRewardsApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.tiers)) {
+      return { ok: false, message: data.message ?? 'Наградите не бяха заредени.' }
+    }
+    return { ok: true, tiers: data.tiers }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function claimDailyReward(tierId: string): Promise<
+  | { ok: true; yellowCoinsAwarded: number; newBalance: number | null; tiers: DailyRewardTierSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/daily-rewards/claim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ tierId }),
+    })
+    const data = (await response.json()) as DailyRewardsApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.tiers)) {
+      return { ok: false, message: data.message ?? 'Наградата не беше взета.' }
+    }
+    const awarded = data.yellowCoinsAwarded ?? 0
+    if (currentAuthSession !== null && typeof data.newBalance === 'number') {
+      currentAuthSession = {
+        ...currentAuthSession,
+        profile: {
+          ...currentAuthSession.profile,
+          yellowCoinsBalance: data.newBalance,
+        },
+      }
+      syncLobbyWithAuthSession()
+    }
+    return { ok: true, yellowCoinsAwarded: awarded, newBalance: data.newBalance ?? null, tiers: data.tiers }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadAdminStats(): Promise<
+  | { ok: true; stats: AdminStatsSnapshot }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/stats`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as { ok: boolean; stats?: AdminStatsSnapshot; message?: string }
+    if (!response.ok || !data.ok || !data.stats) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на статистиките.' }
+    }
+    return { ok: true, stats: data.stats }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
   }
 }
 
@@ -1495,6 +1636,12 @@ lobby = createLobbyFlowController({
   onShopPackagesLoad: () => loadShopPackages(),
   onShopPurchasesLoad: () => loadShopPurchases(),
   onShopPurchaseStart: (packageId) => startShopPurchase(packageId),
+  onAdminDailyRewardsLoad: () => loadAdminDailyRewards(),
+  onAdminDailyRewardAdd: (amount) => addAdminDailyReward(amount),
+  onAdminDailyRewardRemove: (tierId) => removeAdminDailyReward(tierId),
+  onDailyRewardsLoad: () => loadDailyRewards(),
+  onDailyRewardClaim: (tierId) => claimDailyReward(tierId),
+  onAdminStatsLoad: () => loadAdminStats(),
   onAdminSettingsLoad: () => loadAdminSettings(),
   onAdminSettingsSubmit: (settings) => submitAdminSettings(settings),
   onAdminCoinPackagesLoad: () => loadAdminCoinPackages(),

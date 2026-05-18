@@ -13,6 +13,8 @@ import {
 } from './renderLobbyScreen'
 import type {
   AdminSettingsSnapshot,
+  AdminStatsSnapshot,
+  DailyRewardTierSnapshot,
   ChatConversationSnapshot,
   ChatMessageSnapshot,
   CoinPackageInput,
@@ -39,6 +41,7 @@ export type LobbyFlowScreen =
   | 'leaderboards'
   | 'shop'
   | 'admin'
+  | 'admin-info'
   | 'matchmaking-room'
 export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
@@ -97,6 +100,30 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onShopPurchaseStart?: (packageId: string) => Promise<
     | { ok: true; purchases: CoinPurchaseSnapshot[]; message: string }
+    | { ok: false; message: string }
+  >
+  onAdminStatsLoad?: () => Promise<
+    | { ok: true; stats: AdminStatsSnapshot }
+    | { ok: false; message: string }
+  >
+  onAdminDailyRewardsLoad?: () => Promise<
+    | { ok: true; activeTiers: DailyRewardTierSnapshot[]; stagedTiers: DailyRewardTierSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminDailyRewardAdd?: (yellowCoinsAmount: number) => Promise<
+    | { ok: true; activeTiers: DailyRewardTierSnapshot[]; stagedTiers: DailyRewardTierSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminDailyRewardRemove?: (tierId: string) => Promise<
+    | { ok: true; activeTiers: DailyRewardTierSnapshot[]; stagedTiers: DailyRewardTierSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onDailyRewardsLoad?: () => Promise<
+    | { ok: true; tiers: DailyRewardTierSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onDailyRewardClaim?: (tierId: string) => Promise<
+    | { ok: true; yellowCoinsAwarded: number; newBalance: number | null; tiers: DailyRewardTierSnapshot[] }
     | { ok: false; message: string }
   >
   onAdminSettingsLoad?: () => Promise<
@@ -269,6 +296,22 @@ type InternalLobbyFlowState = {
   shopPurchasesLoading: boolean
   shopPurchaseActionPackageId: string | null
   shopPurchaseMessageText: string | null
+  adminStats: AdminStatsSnapshot | null
+  adminStatsLoading: boolean
+  adminStatsErrorText: string | null
+  adminActiveDailyRewardTiers: DailyRewardTierSnapshot[]
+  adminStagedDailyRewardTiers: DailyRewardTierSnapshot[]
+  adminDailyRewardsLoading: boolean
+  adminDailyRewardsErrorText: string | null
+  adminDailyRewardAddLoading: boolean
+  adminDailyRewardAddErrorText: string | null
+  dailyRewardTiers: DailyRewardTierSnapshot[]
+  dailyRewardsPopupOpen: boolean
+  dailyRewardsLoading: boolean
+  dailyRewardsErrorText: string | null
+  dailyRewardClaimingId: string | null
+  dailyRewardClaimErrorText: string | null
+  dailyRewardLastAwarded: number | null
   adminSettings: AdminSettingsSnapshot | null
   adminSettingsLoading: boolean
   adminSettingsErrorText: string | null
@@ -379,6 +422,22 @@ function createInitialState(): InternalLobbyFlowState {
     shopPurchasesLoading: false,
     shopPurchaseActionPackageId: null,
     shopPurchaseMessageText: null,
+    adminStats: null,
+    adminStatsLoading: false,
+    adminStatsErrorText: null,
+    adminActiveDailyRewardTiers: [],
+    adminStagedDailyRewardTiers: [],
+    adminDailyRewardsLoading: false,
+    adminDailyRewardsErrorText: null,
+    adminDailyRewardAddLoading: false,
+    adminDailyRewardAddErrorText: null,
+    dailyRewardTiers: [],
+    dailyRewardsPopupOpen: false,
+    dailyRewardsLoading: false,
+    dailyRewardsErrorText: null,
+    dailyRewardClaimingId: null,
+    dailyRewardClaimErrorText: null,
+    dailyRewardLastAwarded: null,
     adminSettings: null,
     adminSettingsLoading: false,
     adminSettingsErrorText: null,
@@ -1134,6 +1193,8 @@ export function createLobbyFlowController(
               ? 'shop'
             : state.currentScreen === 'admin'
               ? 'admin'
+            : state.currentScreen === 'admin-info'
+              ? 'admin-info'
           : state.currentScreen === 'friends'
             ? 'friends'
             : state.currentScreen === 'chat'
@@ -1169,6 +1230,22 @@ export function createLobbyFlowController(
       shopPurchaseActionPackageId: state.shopPurchaseActionPackageId,
       shopPurchaseMessageText: state.shopPurchaseMessageText,
       isAdmin: authSession?.account.role === 'admin',
+      adminStats: state.adminStats,
+      adminStatsLoading: state.adminStatsLoading,
+      adminStatsErrorText: state.adminStatsErrorText,
+      adminActiveDailyRewardTiers: state.adminActiveDailyRewardTiers,
+      adminStagedDailyRewardTiers: state.adminStagedDailyRewardTiers,
+      adminDailyRewardsLoading: state.adminDailyRewardsLoading,
+      adminDailyRewardsErrorText: state.adminDailyRewardsErrorText,
+      adminDailyRewardAddLoading: state.adminDailyRewardAddLoading,
+      adminDailyRewardAddErrorText: state.adminDailyRewardAddErrorText,
+      dailyRewardTiers: state.dailyRewardTiers,
+      dailyRewardsPopupOpen: state.dailyRewardsPopupOpen,
+      dailyRewardsLoading: state.dailyRewardsLoading,
+      dailyRewardsErrorText: state.dailyRewardsErrorText,
+      dailyRewardClaimingId: state.dailyRewardClaimingId,
+      dailyRewardClaimErrorText: state.dailyRewardClaimErrorText,
+      dailyRewardLastAwarded: state.dailyRewardLastAwarded,
       adminSettings: state.adminSettings,
       adminSettingsLoading: state.adminSettingsLoading,
       adminSettingsErrorText: state.adminSettingsErrorText,
@@ -1308,6 +1385,27 @@ export function createLobbyFlowController(
       },
       onAdminClick: () => {
         void showAdminPanel()
+      },
+      onAdminInfoClick: () => {
+        void showAdminInfoPanel()
+      },
+      onAdminDailyRewardAdd: (amount) => {
+        void addAdminDailyReward(amount)
+      },
+      onAdminDailyRewardRemove: (tierId) => {
+        void removeAdminDailyReward(tierId)
+      },
+      onDailyRewardsOpen: () => {
+        void openDailyRewardsPopup()
+      },
+      onDailyRewardsClose: () => {
+        state.dailyRewardsPopupOpen = false
+        state.dailyRewardClaimErrorText = null
+        state.dailyRewardLastAwarded = null
+        render()
+      },
+      onDailyRewardClaim: (tierId) => {
+        void claimDailyReward(tierId)
       },
       onAdminSettingsSubmit: (settings) => {
         void submitAdminSettings(settings)
@@ -1754,6 +1852,132 @@ export function createLobbyFlowController(
     render()
   }
 
+  async function loadAdminDailyRewards(): Promise<void> {
+    if (!options.onAdminDailyRewardsLoad) return
+    state.adminDailyRewardsLoading = true
+    state.adminDailyRewardsErrorText = null
+    render()
+    const result = await options.onAdminDailyRewardsLoad()
+    state.adminDailyRewardsLoading = false
+    if (!result.ok) {
+      state.adminDailyRewardsErrorText = result.message
+    } else {
+      state.adminActiveDailyRewardTiers = result.activeTiers
+      state.adminStagedDailyRewardTiers = result.stagedTiers
+    }
+    render()
+  }
+
+  async function addAdminDailyReward(amount: number): Promise<void> {
+    if (!options.onAdminDailyRewardAdd) return
+    state.adminDailyRewardAddLoading = true
+    state.adminDailyRewardAddErrorText = null
+    render()
+    const result = await options.onAdminDailyRewardAdd(amount)
+    state.adminDailyRewardAddLoading = false
+    if (!result.ok) {
+      state.adminDailyRewardAddErrorText = result.message
+    } else {
+      state.adminActiveDailyRewardTiers = result.activeTiers
+      state.adminStagedDailyRewardTiers = result.stagedTiers
+      state.adminDailyRewardAddErrorText = null
+    }
+    render()
+  }
+
+  async function removeAdminDailyReward(tierId: string): Promise<void> {
+    if (!options.onAdminDailyRewardRemove) return
+    const result = await options.onAdminDailyRewardRemove(tierId)
+    if (result.ok) {
+      state.adminActiveDailyRewardTiers = result.activeTiers
+      state.adminStagedDailyRewardTiers = result.stagedTiers
+      render()
+    }
+  }
+
+  async function openDailyRewardsPopup(): Promise<void> {
+    state.dailyRewardsPopupOpen = true
+    state.dailyRewardClaimErrorText = null
+    state.dailyRewardLastAwarded = null
+    state.dailyRewardsLoading = true
+    state.dailyRewardsErrorText = null
+    render()
+    if (!options.onDailyRewardsLoad) {
+      state.dailyRewardsLoading = false
+      state.dailyRewardsErrorText = 'Системата не е налична.'
+      render()
+      return
+    }
+    const result = await options.onDailyRewardsLoad()
+    state.dailyRewardsLoading = false
+    if (!result.ok) {
+      state.dailyRewardsErrorText = result.message
+    } else {
+      state.dailyRewardTiers = result.tiers
+    }
+    render()
+  }
+
+  async function claimDailyReward(tierId: string): Promise<void> {
+    if (!options.onDailyRewardClaim) return
+    state.dailyRewardClaimingId = tierId
+    state.dailyRewardClaimErrorText = null
+    render()
+    const result = await options.onDailyRewardClaim(tierId)
+    state.dailyRewardClaimingId = null
+    if (!result.ok) {
+      state.dailyRewardClaimErrorText = result.message
+    } else {
+      state.dailyRewardTiers = result.tiers
+      state.dailyRewardLastAwarded = result.yellowCoinsAwarded
+    }
+    render()
+  }
+
+  async function showAdminInfoPanel(): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession?.account.role !== 'admin') {
+      state.currentScreen = 'lobby'
+      state.errorText = 'Нямаш достъп до admin панела.'
+      render()
+      return
+    }
+
+    state.currentScreen = 'admin-info'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+
+    state.adminStats = null
+    state.adminStatsLoading = true
+    state.adminStatsErrorText = null
+    render()
+
+    if (!options.onAdminStatsLoad) {
+      state.adminStatsLoading = false
+      state.adminStatsErrorText = 'Статистиките не са налични.'
+      render()
+      return
+    }
+
+    const result = await options.onAdminStatsLoad()
+    state.adminStatsLoading = false
+
+    if (!result.ok) {
+      state.adminStatsErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminStats = result.stats
+    render()
+  }
+
   async function showAdminPanel(): Promise<void> {
     const authSession = options.getAuthSession?.() ?? null
 
@@ -1783,7 +2007,13 @@ export function createLobbyFlowController(
     state.adminSettingsErrorText = null
     state.adminCoinPackagesLoading = Boolean(options.onAdminCoinPackagesLoad)
     state.adminCoinPackagesErrorText = null
+    state.adminActiveDailyRewardTiers = []
+    state.adminStagedDailyRewardTiers = []
+    state.adminDailyRewardsLoading = true
+    state.adminDailyRewardsErrorText = null
     render()
+
+    void loadAdminDailyRewards()
 
     const result = await options.onAdminSettingsLoad()
 
@@ -2636,6 +2866,7 @@ export function createLobbyFlowController(
       case 'leaderboards': void showLeaderboardsDirectory(); break
       case 'shop': void showShopPanel(); break
       case 'admin': void showAdminPanel(); break
+      case 'admin-info': void showAdminInfoPanel(); break
       case 'friends': void showFriendsDirectory(); break
       case 'chat': void showChatPanel(); break
     }
