@@ -14,6 +14,7 @@ export type CoinPackageSnapshot = {
   currency: string
   status: CoinPackageStatus
   sortOrder: number
+  showInLobby: boolean
 }
 
 export type CoinPackageInput = {
@@ -26,10 +27,12 @@ export type CoinPackageInput = {
   currency: string
   status: CoinPackageStatus
   sortOrder: number
+  showInLobby: boolean
 }
 
 export type CoinPackageStore = {
   listPublicPackages: () => CoinPackageSnapshot[]
+  listLobbyPackages: () => CoinPackageSnapshot[]
   listAdminPackages: () => CoinPackageSnapshot[]
   upsertPackage: (
     input: CoinPackageInput,
@@ -37,6 +40,10 @@ export type CoinPackageStore = {
   setPackageStatus: (
     packageId: string,
     status: CoinPackageStatus,
+  ) => { ok: true; package: CoinPackageSnapshot } | { ok: false; message: string }
+  setPackageLobbyVisibility: (
+    packageId: string,
+    showInLobby: boolean,
   ) => { ok: true; package: CoinPackageSnapshot } | { ok: false; message: string }
   deletePackage: (
     packageId: string,
@@ -54,6 +61,7 @@ type CoinPackageRow = {
   currency: string
   status: CoinPackageStatus
   sort_order: number
+  show_in_lobby: number
 }
 
 function rowToSnapshot(row: CoinPackageRow): CoinPackageSnapshot {
@@ -67,6 +75,7 @@ function rowToSnapshot(row: CoinPackageRow): CoinPackageSnapshot {
     currency: row.currency,
     status: row.status,
     sortOrder: row.sort_order,
+    showInLobby: row.show_in_lobby !== 0,
   }
 }
 
@@ -121,10 +130,28 @@ export async function createCoinPackageStore(
       price_cents,
       currency,
       status,
-      sort_order
+      sort_order,
+      show_in_lobby
     FROM coin_packages
     WHERE status = 'active'
     ORDER BY sort_order ASC, yellow_coins_amount ASC;
+  `)
+
+  const selectLobbyPackagesStatement = database.prepare(`
+    SELECT
+      package_id,
+      package_key,
+      title,
+      description,
+      yellow_coins_amount,
+      price_cents,
+      currency,
+      status,
+      sort_order,
+      show_in_lobby
+    FROM coin_packages
+    WHERE status = 'active' AND show_in_lobby = 1
+    ORDER BY yellow_coins_amount ASC;
   `)
 
   const selectAdminPackagesStatement = database.prepare(`
@@ -137,7 +164,8 @@ export async function createCoinPackageStore(
       price_cents,
       currency,
       status,
-      sort_order
+      sort_order,
+      show_in_lobby
     FROM coin_packages
     ORDER BY sort_order ASC, yellow_coins_amount ASC;
   `)
@@ -152,7 +180,8 @@ export async function createCoinPackageStore(
       price_cents,
       currency,
       status,
-      sort_order
+      sort_order,
+      show_in_lobby
     FROM coin_packages
     WHERE package_id = ?;
   `)
@@ -167,8 +196,10 @@ export async function createCoinPackageStore(
       price_cents,
       currency,
       status,
-      sort_order
+      sort_order,
+      show_in_lobby
     ) VALUES (
+      ?,
       ?,
       ?,
       ?,
@@ -198,12 +229,24 @@ export async function createCoinPackageStore(
     WHERE package_id = ?;
   `)
 
+  const updateLobbyVisibilityStatement = database.prepare(`
+    UPDATE coin_packages
+    SET
+      show_in_lobby = ?,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE package_id = ?;
+  `)
+
   const deletePackageStatement = database.prepare(`
     DELETE FROM coin_packages WHERE package_id = ?;
   `)
 
   function listPublicPackages(): CoinPackageSnapshot[] {
     return (selectPublicPackagesStatement.all() as CoinPackageRow[]).map(rowToSnapshot)
+  }
+
+  function listLobbyPackages(): CoinPackageSnapshot[] {
+    return (selectLobbyPackagesStatement.all() as CoinPackageRow[]).map(rowToSnapshot)
   }
 
   function listAdminPackages(): CoinPackageSnapshot[] {
@@ -288,6 +331,7 @@ export async function createCoinPackageStore(
       currency,
       status,
       sortOrder,
+      input.showInLobby ? 1 : 0,
     )
 
     const savedPackage =
@@ -338,6 +382,27 @@ export async function createCoinPackageStore(
     }
   }
 
+  function setPackageLobbyVisibility(
+    packageId: string,
+    showInLobby: boolean,
+  ): { ok: true; package: CoinPackageSnapshot } | { ok: false; message: string } {
+    const normalizedPackageId = normalizeText(packageId, 96)
+
+    if (normalizedPackageId.length === 0) {
+      return { ok: false, message: 'Невалиден ID на пакет.' }
+    }
+
+    updateLobbyVisibilityStatement.run(showInLobby ? 1 : 0, normalizedPackageId)
+
+    const updatedPackage = getPackageById(normalizedPackageId)
+
+    if (updatedPackage === null) {
+      return { ok: false, message: 'Пакетът не беше намерен.' }
+    }
+
+    return { ok: true, package: updatedPackage }
+  }
+
   function deletePackage(
     packageId: string,
   ): { ok: true; packages: CoinPackageSnapshot[] } | { ok: false; message: string } {
@@ -364,9 +429,11 @@ export async function createCoinPackageStore(
 
   return {
     listPublicPackages,
+    listLobbyPackages,
     listAdminPackages,
     upsertPackage,
     setPackageStatus,
+    setPackageLobbyVisibility,
     deletePackage,
     close,
   }

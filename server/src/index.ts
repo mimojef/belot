@@ -1867,6 +1867,22 @@ async function handleShopPackagesRequest(
   return true
 }
 
+async function handleLobbyPackagesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/lobby/packages' || req.method !== 'GET') {
+    return false
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    packages: coinPackageStore.listLobbyPackages(),
+  })
+  return true
+}
+
 async function handleShopPurchasesRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -2201,9 +2217,15 @@ async function handleAdminCoinPackagesRequest(
   pathname: string,
 ): Promise<boolean> {
   const statusMatch = /^\/api\/admin\/coin-packages\/([^/]+)\/status$/.exec(pathname)
+  const lobbyMatch = /^\/api\/admin\/coin-packages\/([^/]+)\/lobby$/.exec(pathname)
   const deleteMatch = /^\/api\/admin\/coin-packages\/([^/]+)$/.exec(pathname)
 
-  if (pathname !== '/api/admin/coin-packages' && statusMatch === null && deleteMatch === null) {
+  if (
+    pathname !== '/api/admin/coin-packages' &&
+    statusMatch === null &&
+    lobbyMatch === null &&
+    deleteMatch === null
+  ) {
     return false
   }
 
@@ -2247,6 +2269,7 @@ async function handleAdminCoinPackagesRequest(
       currency: getStringField(body, 'currency') || 'EUR',
       status: getStringField(body, 'status') as CoinPackageStatus,
       sortOrder: getNumberField(body, 'sortOrder') ?? 0,
+      showInLobby: body['showInLobby'] === true,
     })
 
     if (!result.ok) {
@@ -2288,6 +2311,34 @@ async function handleAdminCoinPackagesRequest(
     const result = coinPackageStore.setPackageStatus(
       decodeURIComponent(statusMatch[1] ?? ''),
       getStringField(body, 'status') as CoinPackageStatus,
+    )
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      package: result.package,
+      packages: coinPackageStore.listAdminPackages(),
+    })
+    return true
+  }
+
+  if (lobbyMatch !== null && req.method === 'PATCH') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
+      return true
+    }
+
+    const showInLobby = body['showInLobby'] === true
+
+    const result = coinPackageStore.setPackageLobbyVisibility(
+      decodeURIComponent(lobbyMatch[1] ?? ''),
+      showInLobby,
     )
 
     if (!result.ok) {
@@ -2646,6 +2697,10 @@ async function handleHttpRequest(
   }
 
   if (await handleShopPackagesRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleLobbyPackagesRequest(req, res, requestUrl.pathname)) {
     return
   }
 

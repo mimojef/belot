@@ -80,6 +80,10 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; leaderboards: LeaderboardsSnapshot }
     | { ok: false; message: string }
   >
+  onLobbyPackagesLoad?: () => Promise<
+    | { ok: true; packages: CoinPackageSnapshot[] }
+    | { ok: false; message: string }
+  >
   onShopPackagesLoad?: () => Promise<
     | { ok: true; packages: CoinPackageSnapshot[] }
     | { ok: false; message: string }
@@ -120,6 +124,13 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onAdminCoinPackageDelete?: (packageId: string) => Promise<
+    | { ok: true; packages: CoinPackageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminCoinPackageLobbyToggle?: (
+    packageId: string,
+    showInLobby: boolean,
+  ) => Promise<
     | { ok: true; packages: CoinPackageSnapshot[] }
     | { ok: false; message: string }
   >
@@ -222,6 +233,7 @@ type InternalLobbyFlowState = {
   leaderboardsLoading: boolean
   leaderboardsErrorText: string | null
   activeLeaderboardCategory: LeaderboardCategory
+  lobbyPackages: CoinPackageSnapshot[]
   shopPackages: CoinPackageSnapshot[]
   shopPackagesLoading: boolean
   shopPackagesErrorText: string | null
@@ -316,6 +328,7 @@ function createInitialState(): InternalLobbyFlowState {
     leaderboardsLoading: false,
     leaderboardsErrorText: null,
     activeLeaderboardCategory: 'balance',
+    lobbyPackages: [],
     shopPackages: [],
     shopPackagesLoading: false,
     shopPackagesErrorText: null,
@@ -1089,6 +1102,7 @@ export function createLobbyFlowController(
       leaderboardsLoading: state.leaderboardsLoading,
       leaderboardsErrorText: state.leaderboardsErrorText,
       activeLeaderboardCategory: state.activeLeaderboardCategory,
+      lobbyPackages: state.lobbyPackages,
       shopPackages: state.shopPackages,
       shopPackagesLoading: state.shopPackagesLoading,
       shopPackagesErrorText: state.shopPackagesErrorText,
@@ -1233,6 +1247,9 @@ export function createLobbyFlowController(
       },
       onAdminCoinPackageDelete: (packageId) => {
         void deleteAdminCoinPackage(packageId)
+      },
+      onAdminCoinPackageLobbyToggle: (packageId, showInLobby) => {
+        void toggleAdminCoinPackageLobbyVisibility(packageId, showInLobby)
       },
       onFriendsClick: () => {
         void showFriendsDirectory()
@@ -1816,6 +1833,66 @@ export function createLobbyFlowController(
     }
 
     state.adminCoinPackages = result.packages
+    state.adminCoinPackagesErrorText = null
+    render()
+  }
+
+  async function loadLobbyPackages(): Promise<void> {
+    if (!options.onLobbyPackagesLoad) {
+      return
+    }
+
+    const result = await options.onLobbyPackagesLoad()
+
+    if (result.ok) {
+      state.lobbyPackages = result.packages
+      render()
+    }
+  }
+
+  async function toggleAdminCoinPackageLobbyVisibility(
+    packageId: string,
+    showInLobby: boolean,
+  ): Promise<void> {
+    // Optimistic update — checkbox appears in correct state immediately
+    state.shopPackages = state.shopPackages.map((p) =>
+      p.packageId === packageId ? { ...p, showInLobby } : p
+    )
+    state.lobbyPackages = state.shopPackages.filter((p) => p.showInLobby && p.status === 'active')
+    state.adminCoinPackagesErrorText = null
+    render()
+
+    if (!options.onAdminCoinPackageLobbyToggle) {
+      // Revert optimistic update
+      state.shopPackages = state.shopPackages.map((p) =>
+        p.packageId === packageId ? { ...p, showInLobby: !showInLobby } : p
+      )
+      state.lobbyPackages = state.shopPackages.filter((p) => p.showInLobby && p.status === 'active')
+      state.adminCoinPackagesErrorText = 'Промяната на лоби видимост временно не е налична.'
+      render()
+      return
+    }
+
+    const result = await options.onAdminCoinPackageLobbyToggle(packageId, showInLobby)
+
+    if (!result.ok) {
+      // Revert optimistic update on API error
+      state.shopPackages = state.shopPackages.map((p) =>
+        p.packageId === packageId ? { ...p, showInLobby: !showInLobby } : p
+      )
+      state.lobbyPackages = state.shopPackages.filter((p) => p.showInLobby && p.status === 'active')
+      state.adminCoinPackagesErrorText = result.message
+      render()
+      return
+    }
+
+    // Sync showInLobby from server response into shopPackages
+    state.adminCoinPackages = result.packages
+    state.shopPackages = state.shopPackages.map((p) => {
+      const updated = result.packages.find((r) => r.packageId === p.packageId)
+      return updated !== undefined ? { ...p, showInLobby: updated.showInLobby } : p
+    })
+    state.lobbyPackages = state.shopPackages.filter((p) => p.showInLobby && p.status === 'active')
     state.adminCoinPackagesErrorText = null
     render()
   }
@@ -2603,6 +2680,8 @@ export function createLobbyFlowController(
 
     return false
   }
+
+  void loadLobbyPackages()
 
   return {
     render,

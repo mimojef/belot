@@ -100,6 +100,7 @@ export type CoinPackageSnapshot = {
   currency: string
   status: CoinPackageStatus
   sortOrder: number
+  showInLobby: boolean
 }
 
 export type CoinPackageInput = {
@@ -112,6 +113,7 @@ export type CoinPackageInput = {
   currency: string
   status: CoinPackageStatus
   sortOrder: number
+  showInLobby: boolean
 }
 
 export type CoinPurchaseStatus = 'pending' | 'paid' | 'canceled' | 'failed'

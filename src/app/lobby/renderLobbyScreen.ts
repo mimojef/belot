@@ -46,6 +46,7 @@ export type LobbyScreenState = {
   leaderboardsLoading: boolean
   leaderboardsErrorText: string | null
   activeLeaderboardCategory: LeaderboardCategory
+  lobbyPackages: CoinPackageSnapshot[]
   shopPackages: CoinPackageSnapshot[]
   shopPackagesLoading: boolean
   shopPackagesErrorText: string | null
@@ -121,6 +122,7 @@ export type RenderLobbyScreenOptions = {
   ) => void
   onAdminCoinPackageEdit: (packageId: string) => void
   onAdminCoinPackageDelete: (packageId: string) => void
+  onAdminCoinPackageLobbyToggle: (packageId: string, showInLobby: boolean) => void
   onFriendsClick: () => void
   onChatClick: () => void
   onChatConversationClick: (friendshipId: string) => void
@@ -160,13 +162,6 @@ const MATCH_STAKE_CARDS: LobbyStakeCard[] = [
   { stake: 20000, prizeAmount: 30000, onlinePlayers: 45 },
 ]
 
-const COIN_PACKAGES = [
-  { amount: 1000, image: '/assets/lobby/coins-1000.png', width: 60, height: 53 },
-  { amount: 5000, image: '/assets/lobby/coins-5000.png', width: 82, height: 74 },
-  { amount: 10000, image: '/assets/lobby/coins-10000.png', width: 89, height: 85 },
-  { amount: 25000, image: '/assets/lobby/coins-25000.png', width: 106, height: 93 },
-  { amount: 50000, image: '/assets/lobby/coins-50000.png', width: 111, height: 98 },
-]
 
 const MAX_PROFILE_GALLERY_IMAGES = 6
 
@@ -1161,9 +1156,10 @@ function renderStakeSection(
   `
 }
 
-function renderBottomSection(): string {
-  const coinPackages = COIN_PACKAGES.map((pkg, index) => {
+function renderBottomSection(lobbyPackages: CoinPackageSnapshot[], isLoggedIn: boolean): string {
+  const coinPackages = lobbyPackages.map((pkg, index) => {
     const isFirstPackage = index === 0
+    const imgSrc = getCoinPackageImage(pkg.sortOrder)
 
     return `
     <div style="
@@ -1172,21 +1168,24 @@ function renderBottomSection(): string {
       border-radius:12px;
       padding:10px 12px;
       margin-left:${isFirstPackage ? '-8px' : '0'};
-      display:grid; grid-template-columns:${pkg.width}px minmax(0, 1fr); align-items:center; gap:10px;
+      display:grid; grid-template-columns:80px minmax(0, 1fr); align-items:center; gap:10px;
       flex:1; min-width:0;
       overflow:hidden;
       box-shadow:inset 0 0 18px rgba(212,165,32,0.035);
     ">
       <div style="height:98px; display:flex; align-items:center; justify-content:center;">
-        <img src="${pkg.image}" alt="${formatAmount(pkg.amount)} жълтици"
-          style="width:${pkg.width}px; height:${pkg.height}px; display:block; object-fit:contain;">
+        <img src="${imgSrc}" alt="${formatAmount(pkg.yellowCoinsAmount)} жълтици"
+          style="width:80px; height:80px; display:block; object-fit:contain;">
       </div>
       <div style="display:flex; flex-direction:column; justify-content:center; align-items:flex-start; min-width:0;">
         <div style="font-size:21px; line-height:1; font-weight:800; color:#d4a520; white-space:nowrap;">
-          ${formatAmount(pkg.amount)}
+          ${formatAmount(pkg.yellowCoinsAmount)}
         </div>
-        <div style="font-size:12px; line-height:1; color:rgba(255,255,255,0.82); margin-top:6px; margin-bottom:9px; font-weight:400;">жълтици</div>
-        <button data-lobby-buy-coins-button="1" style="
+        <div style="font-size:12px; line-height:1; color:rgba(255,255,255,0.82); margin-top:4px; font-weight:400;">жълтици</div>
+        <div style="font-size:13px; line-height:1; font-weight:900; color:#ffffff; margin-top:6px; margin-bottom:7px; white-space:nowrap;">
+          ${escapeHtml(formatPackagePrice(pkg.priceCents, pkg.currency))}<span style="font-weight:400; color:rgba(255,255,255,0.45);"> / ${escapeHtml(formatPackagePriceBgn(pkg.priceCents))}</span>
+        </div>
+        <button data-lobby-buy-coins-button="1" data-lobby-buy-coins-package="${escapeHtml(pkg.packageId)}" data-lobby-buy-coins-logged="${isLoggedIn ? '1' : '0'}" style="
           background:linear-gradient(135deg, #f4c95b 0%, #c98f13 100%);
           border:none; border-radius:6px;
           padding:0 14px;
@@ -1195,16 +1194,20 @@ function renderBottomSection(): string {
           color:#000000; cursor:pointer;
           min-width:84px;
           transition:transform 0.14s ease, box-shadow 0.14s ease, filter 0.14s ease;
-        ">Купи</button>
+        ">${isLoggedIn ? 'Купи' : 'Влез и купи'}</button>
       </div>
     </div>
   `
   }).join('')
 
+  if (lobbyPackages.length === 0) {
+    return ''
+  }
+
   return `
     <div style="
       display:grid;
-      grid-template-columns:310px repeat(5, minmax(0, 1fr));
+      grid-template-columns:310px repeat(${lobbyPackages.length}, minmax(0, 1fr));
       gap:8px;
       align-items:stretch;
       margin-bottom:16px;
@@ -1231,15 +1234,15 @@ function renderBottomSection(): string {
             <div style="font-size:11px; color:rgba(255,255,255,0.5); font-weight:400; line-height:1.35; margin-top:5px;">
               Купи жълтици и се върни в играта
             </div>
-            <button data-lobby-buy-coins-button="1" style="
+            <button data-lobby-nav-shop="1" class="lobby-bottom-shop-btn" style="
               margin-top:9px;
-              height:28px;
-              padding:0 14px;
+              height:32px;
+              padding:0 16px;
               border:none;
               border-radius:6px;
               background:linear-gradient(135deg, #f4c95b 0%, #c98f13 100%);
               color:#000000;
-              font-size:10px;
+              font-size:13px;
               font-weight:800;
               text-transform:uppercase;
               letter-spacing:0.03em;
@@ -1254,13 +1257,15 @@ function renderBottomSection(): string {
       ${coinPackages}
 
       <style>
-        [data-lobby-buy-coins-button="1"]:hover {
+        [data-lobby-buy-coins-button="1"]:hover,
+        .lobby-bottom-shop-btn:hover {
           filter:brightness(1.12);
           transform:translateY(-1px);
           box-shadow:0 4px 12px rgba(212,165,32,0.26);
         }
 
-        [data-lobby-buy-coins-button="1"]:active {
+        [data-lobby-buy-coins-button="1"]:active,
+        .lobby-bottom-shop-btn:active {
           filter:brightness(0.98);
           transform:translateY(0);
         }
@@ -1830,6 +1835,7 @@ function renderShopPanel(state: LobbyScreenState): string {
 
   const packages = state.shopPackages
   const isLoggedIn = state.profile.profileId !== null
+  const isAdmin = state.isAdmin
   const purchaseHistory = `
     ${state.shopPurchaseMessageText ? `
       <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:rgba(212,165,32,0.08);padding:12px 14px;color:#f8fafc;font-size:13px;font-weight:800;">
@@ -1908,6 +1914,16 @@ function renderShopPanel(state: LobbyScreenState): string {
 
               <div style="font-size:17px;font-weight:900;color:#ffffff;">${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}</div>
               <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.5);margin-top:2px;">${escapeHtml(formatPackagePriceBgn(coinPackage.priceCents))}</div>
+
+              ${isAdmin ? `
+                <label style="display:flex;align-items:center;gap:7px;margin-top:12px;padding-top:10px;border-top:1px solid rgba(212,165,32,0.22);cursor:pointer;user-select:none;">
+                  <input type="checkbox"
+                    data-lobby-shop-package-lobby="${escapeHtml(coinPackage.packageId)}"
+                    ${coinPackage.showInLobby ? 'checked' : ''}
+                    style="width:15px;height:15px;accent-color:#d4a520;cursor:pointer;flex-shrink:0;">
+                  <span style="font-size:11px;font-weight:800;color:rgba(212,165,32,0.85);text-transform:uppercase;letter-spacing:0.05em;">Видима в лобито</span>
+                </label>
+              ` : ''}
             </article>
           `}).join('')}
         </div>
@@ -2068,6 +2084,10 @@ function renderAdminPanel(state: LobbyScreenState): string {
             Описание
             <input name="description" type="text" maxlength="220" placeholder="Описание за магазина" value="${escapeHtml(editPackage?.description ?? '')}" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
           </label>
+          <label style="grid-column:1 / -1;display:flex;align-items:center;gap:10px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;cursor:pointer;">
+            <input name="showInLobby" type="checkbox" ${editPackage?.showInLobby ? 'checked' : ''} style="width:16px;height:16px;accent-color:#d4a520;cursor:pointer;flex-shrink:0;">
+            Видима в лобито
+          </label>
           <div style="grid-column:1 / -1;display:flex;justify-content:flex-end;gap:8px;">
             ${editPackage ? `
               <button type="button" data-lobby-admin-package-edit-cancel="1" style="height:42px;padding:0 16px;border:1px solid rgba(255,255,255,0.18);border-radius:8px;background:transparent;color:rgba(255,255,255,0.65);font-size:13px;font-weight:900;cursor:pointer;">
@@ -2175,7 +2195,7 @@ export function renderLobbyScreen(
                 ? renderHeroSection(profileName, state.isConnected, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level)
                 : renderGuestHeroCard(state.signupBonusYellowCoins ?? 0)}
               ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching)}
-              ${renderBottomSection()}
+              ${renderBottomSection(state.lobbyPackages, state.profile.profileId !== null)}
             `}
           ${renderFooter(state.onlinePlayersCount)}
         </div>
@@ -2298,8 +2318,8 @@ export function renderLobbyScreen(
     ?.addEventListener('click', options.onLeaderboardsClick)
 
   root
-    .querySelector<HTMLButtonElement>('[data-lobby-nav-shop="1"]')
-    ?.addEventListener('click', options.onShopClick)
+    .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-shop="1"]')
+    .forEach((btn) => btn.addEventListener('click', options.onShopClick))
 
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-shop-package]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -2307,6 +2327,33 @@ export function renderLobbyScreen(
 
       if (packageId.length > 0) {
         options.onShopPurchaseClick(packageId)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLInputElement>('[data-lobby-shop-package-lobby]').forEach((checkbox) => {
+    checkbox.addEventListener('change', () => {
+      const packageId = checkbox.dataset.lobbyShopPackageLobby?.trim() ?? ''
+
+      if (packageId.length > 0) {
+        options.onAdminCoinPackageLobbyToggle(packageId, checkbox.checked)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-buy-coins-package]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const packageId = button.dataset.lobbyBuyCoinsPackage?.trim() ?? ''
+      const isLoggedIn = button.dataset.lobbyBuyCoinsLogged === '1'
+
+      if (packageId.length === 0) {
+        return
+      }
+
+      if (isLoggedIn) {
+        options.onShopPurchaseClick(packageId)
+      } else {
+        options.onAuthModeChange('login')
       }
     })
   })
@@ -2438,6 +2485,7 @@ export function renderLobbyScreen(
         currency: String(data.get('currency') ?? 'EUR').trim().toUpperCase(),
         status,
         sortOrder: Number(data.get('sortOrder')),
+        showInLobby: data.get('showInLobby') === 'on',
       })
     })
 

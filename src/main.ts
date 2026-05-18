@@ -694,6 +694,75 @@ async function deleteAdminCoinPackage(packageId: string): Promise<
   }
 }
 
+async function loadLobbyPackages(): Promise<
+  | { ok: true; packages: CoinPackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/lobby/packages`, {
+      method: 'GET',
+    })
+    const data = (await response.json()) as CoinPackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Лоби офертите не бяха заредени.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за лоби оферти.',
+    }
+  }
+}
+
+async function setAdminCoinPackageLobbyVisibility(
+  packageId: string,
+  showInLobby: boolean,
+): Promise<
+  | { ok: true; packages: CoinPackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/coin-packages/${encodeURIComponent(packageId)}/lobby`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({ showInLobby }),
+      },
+    )
+    const data = (await response.json()) as CoinPackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Лоби видимостта не беше променена.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за промяна на лоби видимост.',
+    }
+  }
+}
+
 async function readFriendshipsResponse(response: Response): Promise<FriendshipsResponse> {
   try {
     return (await response.json()) as FriendshipsResponse
@@ -1248,6 +1317,7 @@ lobby = createLobbyFlowController({
   onProfileNameChangeSubmit: (displayName) => submitProfileNameChange(displayName),
   onPlayersLoad: () => loadPlayersDirectory(),
   onLeaderboardsLoad: () => loadLeaderboards(),
+  onLobbyPackagesLoad: () => loadLobbyPackages(),
   onShopPackagesLoad: () => loadShopPackages(),
   onShopPurchasesLoad: () => loadShopPurchases(),
   onShopPurchaseStart: (packageId) => startShopPurchase(packageId),
@@ -1258,6 +1328,8 @@ lobby = createLobbyFlowController({
   onAdminCoinPackageStatusChange: (packageId, status) =>
     setAdminCoinPackageStatus(packageId, status),
   onAdminCoinPackageDelete: (packageId) => deleteAdminCoinPackage(packageId),
+  onAdminCoinPackageLobbyToggle: (packageId, showInLobby) =>
+    setAdminCoinPackageLobbyVisibility(packageId, showInLobby),
   onFriendshipsLoad: () => loadFriendships(),
   onFriendRequestSubmit: (profileId) => submitFriendRequest(profileId),
   onFriendAccept: (friendshipId) => submitFriendAction(friendshipId, 'accept'),

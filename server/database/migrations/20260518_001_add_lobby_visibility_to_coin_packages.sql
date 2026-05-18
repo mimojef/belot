@@ -1,0 +1,1 @@
+ALTER TABLE coin_packages ADD COLUMN show_in_lobby INTEGER NOT NULL DEFAULT 0;
