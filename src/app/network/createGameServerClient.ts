@@ -116,6 +116,56 @@ export type CoinPackageInput = {
   showInLobby: boolean
 }
 
+export type MissionType =
+  | 'win_games'
+  | 'win_capot_games'
+  | 'win_contra_games'
+  | 'play_games'
+  | 'announce_tersa'
+  | 'announce_50'
+  | 'announce_100'
+  | 'announce_kare'
+  | 'announce_belot'
+
+export type MissionTemplateSnapshot = {
+  missionId: string
+  missionType: MissionType
+  title: string
+  targetCount: number
+  rewardYellowCoins: number
+  isActive: boolean
+  sortOrder: number
+}
+
+export type MissionTemplateInput = {
+  missionId?: string | null
+  missionType: MissionType
+  title: string
+  targetCount: number
+  rewardYellowCoins: number
+  isActive?: boolean
+  sortOrder?: number
+}
+
+export type PlayerMissionProgressSnapshot = {
+  progressId: string
+  missionId: string
+  missionType: MissionType
+  title: string
+  targetCount: number
+  rewardYellowCoins: number
+  progressCount: number
+  isClaimed: boolean
+  isCompleted: boolean
+}
+
+export type DailyMissionsResponse = {
+  ok: true
+  missions: PlayerMissionProgressSnapshot[]
+  unclaimedCount: number
+  date: string
+}
+
 export type CoinPurchaseStatus = 'pending' | 'paid' | 'canceled' | 'failed'
 
 export type CoinPurchaseSnapshot = {

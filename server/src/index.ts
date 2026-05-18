@@ -20,6 +20,7 @@ import {
   createCoinPackageStore,
   type CoinPackageStatus,
 } from './db/coinPackageStore.js'
+import { createMissionStore, type MissionType } from './db/missionStore.js'
 import { createCoinPurchaseStore } from './db/coinPurchaseStore.js'
 import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
@@ -158,6 +159,7 @@ const tableExitPenaltyStore = await createTableExitPenaltyStore(
 const matchEconomyStore = await createMatchEconomyStore(
   databaseBootstrap.databaseFilePath,
 )
+const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
 
 console.log(
   `[db] SQLite ready file=${databaseBootstrap.databaseFilePath} applied=${databaseBootstrap.appliedCount} skipped=${databaseBootstrap.skippedCount}`,
@@ -386,6 +388,7 @@ function tickRoomGameRuntimes(): void {
     if (nextRoom !== room) {
       persistRoomSnapshot(nextRoom)
       playerProgressStore.recordCompletedMatch(nextRoom)
+      missionStore.recordMatchCompletion(nextRoom)
       const payoutResult = matchEconomyStore.payoutMatchWinners(nextRoom)
 
       if (!payoutResult.ok) {
@@ -2621,6 +2624,146 @@ async function handleChatRequest(
   return false
 }
 
+async function handleMissionsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const claimMatch = /^\/api\/missions\/([^/]+)\/claim$/.exec(pathname)
+
+  if (pathname !== '/api/missions/daily' && claimMatch === null) {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  const profileId = session.profile.profileId
+  const today = new Date().toISOString().slice(0, 10)
+
+  if (pathname === '/api/missions/daily' && req.method === 'GET') {
+    const missions = missionStore.getPlayerDailyMissions(profileId, today)
+    const unclaimedCount = missionStore.getUnclaimedCompletedCount(profileId, today)
+    sendJsonResponse(res, 200, { ok: true, missions, unclaimedCount, date: today })
+    return true
+  }
+
+  if (claimMatch !== null && req.method === 'POST') {
+    const missionId = decodeURIComponent(claimMatch[1] ?? '')
+    const result = missionStore.claimMissionReward(profileId, missionId, today)
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    const missions = missionStore.getPlayerDailyMissions(profileId, today)
+    const unclaimedCount = missionStore.getUnclaimedCompletedCount(profileId, today)
+    sendJsonResponse(res, 200, { ok: true, rewardYellowCoins: result.rewardYellowCoins, missions, unclaimedCount })
+    return true
+  }
+
+  return false
+}
+
+async function handleAdminMissionsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const activeMatch = /^\/api\/admin\/missions\/([^/]+)\/active$/.exec(pathname)
+  const deleteMatch = /^\/api\/admin\/missions\/([^/]+)$/.exec(pathname)
+
+  if (
+    pathname !== '/api/admin/missions' &&
+    activeMatch === null &&
+    deleteMatch === null
+  ) {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш достъп до админ мисиите.' })
+    return true
+  }
+
+  if (pathname === '/api/admin/missions' && req.method === 'GET') {
+    sendJsonResponse(res, 200, { ok: true, missions: missionStore.listAllMissions() })
+    return true
+  }
+
+  if (pathname === '/api/admin/missions' && req.method === 'POST') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
+      return true
+    }
+
+    const result = missionStore.upsertMission({
+      missionId: getStringField(body, 'missionId') || null,
+      missionType: getStringField(body, 'missionType') as MissionType,
+      title: getStringField(body, 'title'),
+      targetCount: getNumberField(body, 'targetCount') ?? 1,
+      rewardYellowCoins: getNumberField(body, 'rewardYellowCoins') ?? 1000,
+      isActive: body['isActive'] === true,
+      sortOrder: getNumberField(body, 'sortOrder') ?? 0,
+    })
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, { ok: true, mission: result.mission, missions: missionStore.listAllMissions() })
+    return true
+  }
+
+  if (activeMatch !== null && req.method === 'PATCH') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
+      return true
+    }
+
+    const result = missionStore.setMissionActive(
+      decodeURIComponent(activeMatch[1] ?? ''),
+      body['isActive'] === true,
+    )
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, { ok: true, mission: result.mission, missions: missionStore.listAllMissions() })
+    return true
+  }
+
+  if (deleteMatch !== null && req.method === 'DELETE') {
+    const result = missionStore.deleteMission(decodeURIComponent(deleteMatch[1] ?? ''))
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, { ok: true, missions: missionStore.listAllMissions() })
+    return true
+  }
+
+  return false
+}
+
 async function handleHttpRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -2721,6 +2864,14 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminCoinPackagesRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleMissionsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminMissionsRequest(req, res, requestUrl.pathname)) {
     return
   }
 

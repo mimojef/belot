@@ -24,6 +24,9 @@ import {
   type FriendshipsSnapshot,
   type GameServerClient,
   type LeaderboardsSnapshot,
+  type MissionTemplateInput,
+  type MissionTemplateSnapshot,
+  type PlayerMissionProgressSnapshot,
   type PlayerPublicProfileSnapshot,
 } from './app/network/createGameServerClient'
 import { createViewportResizeHandler } from './ui/layout/viewportStage'
@@ -154,6 +157,22 @@ type GiftCoinsResponse = {
   message?: string
 }
 
+type DailyMissionsApiResponse = {
+  ok: boolean
+  missions?: PlayerMissionProgressSnapshot[]
+  unclaimedCount?: number
+  date?: string
+  rewardYellowCoins?: number
+  message?: string
+}
+
+type AdminMissionsApiResponse = {
+  ok: boolean
+  missions?: MissionTemplateSnapshot[]
+  mission?: MissionTemplateSnapshot
+  message?: string
+}
+
 function getApiBaseUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
   const host = window.location.hostname || 'localhost'
@@ -233,6 +252,9 @@ async function loadAuthSession(): Promise<void> {
     const data = await readAuthResponse(response)
     currentAuthSession = data.ok ? data.session ?? null : null
     syncLobbyWithAuthSession()
+    if (currentAuthSession !== null) {
+      lobby.refreshMissionsCount()
+    }
     await syncLobbyFriendships()
     await syncLobbyChatConversations()
     lobby.render()
@@ -1282,6 +1304,154 @@ async function submitProfileUpdate(
   }
 }
 
+async function loadDailyMissions(): Promise<
+  | { ok: true; missions: PlayerMissionProgressSnapshot[]; unclaimedCount: number; date: string }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/missions/daily`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as DailyMissionsApiResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.missions)) {
+      return { ok: false, message: data.message ?? 'Мисиите не бяха заредени.' }
+    }
+
+    return { ok: true, missions: data.missions, unclaimedCount: data.unclaimedCount ?? 0, date: data.date ?? '' }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра за мисии.' }
+  }
+}
+
+async function claimMissionReward(missionId: string): Promise<
+  | { ok: true; rewardYellowCoins: number; missions: PlayerMissionProgressSnapshot[]; unclaimedCount: number }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/missions/${encodeURIComponent(missionId)}/claim`,
+      { method: 'POST', credentials: 'include' },
+    )
+    const data = (await response.json()) as DailyMissionsApiResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.missions)) {
+      return { ok: false, message: data.message ?? 'Наградата не беше взета.' }
+    }
+
+    if (currentAuthSession !== null && typeof data.rewardYellowCoins === 'number') {
+      currentAuthSession = {
+        ...currentAuthSession,
+        profile: {
+          ...currentAuthSession.profile,
+          yellowCoinsBalance:
+            (currentAuthSession.profile.yellowCoinsBalance ?? 0) + data.rewardYellowCoins,
+        },
+      }
+      syncLobbyWithAuthSession()
+    }
+
+    return {
+      ok: true,
+      rewardYellowCoins: data.rewardYellowCoins ?? 0,
+      missions: data.missions,
+      unclaimedCount: data.unclaimedCount ?? 0,
+    }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра за вземане на награда.' }
+  }
+}
+
+async function loadAdminMissions(): Promise<
+  | { ok: true; missions: MissionTemplateSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/missions`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as AdminMissionsApiResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.missions)) {
+      return { ok: false, message: data.message ?? 'Мисиите не бяха заредени.' }
+    }
+
+    return { ok: true, missions: data.missions }
+  } catch {
+    return { ok: false, message: 'Няма връзка.' }
+  }
+}
+
+async function submitAdminMission(
+  input: MissionTemplateInput,
+): Promise<{ ok: true; missions: MissionTemplateSnapshot[] } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/missions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(input),
+    })
+    const data = (await response.json()) as AdminMissionsApiResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.missions)) {
+      return { ok: false, message: data.message ?? 'Мисията не беше записана.' }
+    }
+
+    return { ok: true, missions: data.missions }
+  } catch {
+    return { ok: false, message: 'Няма връзка.' }
+  }
+}
+
+async function setAdminMissionActive(
+  missionId: string,
+  isActive: boolean,
+): Promise<{ ok: true; missions: MissionTemplateSnapshot[] } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/missions/${encodeURIComponent(missionId)}/active`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ isActive }),
+      },
+    )
+    const data = (await response.json()) as AdminMissionsApiResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.missions)) {
+      return { ok: false, message: data.message ?? 'Активността не беше променена.' }
+    }
+
+    return { ok: true, missions: data.missions }
+  } catch {
+    return { ok: false, message: 'Няма връзка.' }
+  }
+}
+
+async function deleteAdminMission(
+  missionId: string,
+): Promise<{ ok: true; missions: MissionTemplateSnapshot[] } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/missions/${encodeURIComponent(missionId)}`,
+      { method: 'DELETE', credentials: 'include' },
+    )
+    const data = (await response.json()) as AdminMissionsApiResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.missions)) {
+      return { ok: false, message: data.message ?? 'Мисията не беше изтрита.' }
+    }
+
+    return { ok: true, missions: data.missions }
+  } catch {
+    return { ok: false, message: 'Няма връзка.' }
+  }
+}
+
 lobby = createLobbyFlowController({
   root: rootElement,
   joinMatchmaking: (stake, displayName) => {
@@ -1341,6 +1511,12 @@ lobby = createLobbyFlowController({
   onChatMessagesLoad: (friendshipId) => loadChatMessages(friendshipId),
   onChatSend: (friendshipId, body) => sendChatMessage(friendshipId, body),
   onLogout: () => submitLogout(),
+  onDailyMissionsLoad: () => loadDailyMissions(),
+  onMissionClaim: (missionId) => claimMissionReward(missionId),
+  onAdminMissionsLoad: () => loadAdminMissions(),
+  onAdminMissionSubmit: (input) => submitAdminMission(input),
+  onAdminMissionActiveToggle: (missionId, isActive) => setAdminMissionActive(missionId, isActive),
+  onAdminMissionDelete: (missionId) => deleteAdminMission(missionId),
 })
 
 const activeRoom = createActiveRoomFlowController({

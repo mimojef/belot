@@ -25,6 +25,9 @@ import type {
   LeaderboardsSnapshot,
   MatchFoundMessage,
   MatchStake,
+  MissionTemplateInput,
+  MissionTemplateSnapshot,
+  PlayerMissionProgressSnapshot,
   PlayerPublicProfileSnapshot,
   RoomSeatSnapshot,
   ServerMessage,
@@ -183,6 +186,29 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onLogout?: () => Promise<void>
+  onDailyMissionsLoad?: () => Promise<
+    | { ok: true; missions: PlayerMissionProgressSnapshot[]; unclaimedCount: number; date: string }
+    | { ok: false; message: string }
+  >
+  onMissionClaim?: (missionId: string) => Promise<
+    | { ok: true; rewardYellowCoins: number; missions: PlayerMissionProgressSnapshot[]; unclaimedCount: number }
+    | { ok: false; message: string }
+  >
+  onAdminMissionsLoad?: () => Promise<
+    | { ok: true; missions: MissionTemplateSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminMissionSubmit?: (
+    input: MissionTemplateInput,
+  ) => Promise<{ ok: true; missions: MissionTemplateSnapshot[] } | { ok: false; message: string }>
+  onAdminMissionActiveToggle?: (
+    missionId: string,
+    isActive: boolean,
+  ) => Promise<{ ok: true; missions: MissionTemplateSnapshot[] } | { ok: false; message: string }>
+  onAdminMissionDelete?: (missionId: string) => Promise<
+    | { ok: true; missions: MissionTemplateSnapshot[] }
+    | { ok: false; message: string }
+  >
 }
 
 export type LobbyFlowController = {
@@ -197,6 +223,7 @@ export type LobbyFlowController = {
   setChatConversations: (value: ChatConversationSnapshot[]) => void
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
   resetToLobby: () => void
+  refreshMissionsCount: () => void
   handleServerMessage: (message: ServerMessage) => boolean
   navigateToShop: (noticeText: string | null) => void
 }
@@ -263,6 +290,18 @@ type InternalLobbyFlowState = {
   chatLoading: boolean
   chatMessagesLoading: boolean
   chatErrorText: string | null
+  notificationsOpen: boolean
+  missionsPopupOpen: boolean
+  dailyMissions: PlayerMissionProgressSnapshot[]
+  dailyMissionsLoading: boolean
+  dailyMissionsErrorText: string | null
+  dailyMissionsUnclaimedCount: number
+  missionClaimingId: string | null
+  missionClaimErrorText: string | null
+  adminMissions: MissionTemplateSnapshot[]
+  adminMissionsLoading: boolean
+  adminMissionsErrorText: string | null
+  adminMissionEditId: string | null
 }
 
 type StakeCardConfig = {
@@ -358,6 +397,18 @@ function createInitialState(): InternalLobbyFlowState {
     chatLoading: false,
     chatMessagesLoading: false,
     chatErrorText: null,
+    notificationsOpen: false,
+    missionsPopupOpen: false,
+    dailyMissions: [],
+    dailyMissionsLoading: false,
+    dailyMissionsErrorText: null,
+    dailyMissionsUnclaimedCount: 0,
+    missionClaimingId: null,
+    missionClaimErrorText: null,
+    adminMissions: [],
+    adminMissionsLoading: false,
+    adminMissionsErrorText: null,
+    adminMissionEditId: null,
   }
 }
 
@@ -1144,6 +1195,18 @@ export function createLobbyFlowController(
       profileEditorErrorText: state.profileEditorErrorText,
       profileNameChangeErrorText: state.profileNameChangeErrorText,
       profileNameChangeSuccessAmount: state.profileNameChangeSuccessAmount,
+      notificationsOpen: state.notificationsOpen,
+      missionsPopupOpen: state.missionsPopupOpen,
+      dailyMissions: state.dailyMissions,
+      dailyMissionsLoading: state.dailyMissionsLoading,
+      dailyMissionsErrorText: state.dailyMissionsErrorText,
+      dailyMissionsUnclaimedCount: state.dailyMissionsUnclaimedCount,
+      missionClaimingId: state.missionClaimingId,
+      missionClaimErrorText: state.missionClaimErrorText,
+      adminMissions: state.adminMissions,
+      adminMissionsLoading: state.adminMissionsLoading,
+      adminMissionsErrorText: state.adminMissionsErrorText,
+      adminMissionEditId: state.adminMissionEditId,
     }
 
     renderLobbyScreen(options.root, {
@@ -1340,6 +1403,38 @@ export function createLobbyFlowController(
       },
       onLogoutClick: () => {
         void options.onLogout?.()
+      },
+      onBellClick: () => {
+        state.notificationsOpen = !state.notificationsOpen
+        render()
+      },
+      onNotificationMissionsClick: () => {
+        state.notificationsOpen = false
+        void openMissionsPopup()
+      },
+      onMissionsCardClick: () => {
+        void openMissionsPopup()
+      },
+      onMissionsPopupClose: () => {
+        state.missionsPopupOpen = false
+        state.missionClaimErrorText = null
+        render()
+      },
+      onMissionClaimClick: (missionId) => {
+        void claimMission(missionId)
+      },
+      onAdminMissionSubmit: (input) => {
+        void submitAdminMission(input)
+      },
+      onAdminMissionActiveToggle: (missionId, isActive) => {
+        void toggleAdminMissionActive(missionId, isActive)
+      },
+      onAdminMissionDelete: (missionId) => {
+        void deleteAdminMission(missionId)
+      },
+      onAdminMissionEdit: (missionId) => {
+        state.adminMissionEditId = missionId.length > 0 && missionId !== 'new' ? missionId : missionId === 'new' ? 'new' : null
+        render()
       },
     })
   }
@@ -1695,7 +1790,7 @@ export function createLobbyFlowController(
     state.adminSettingsErrorText = null
     render()
 
-    await loadAdminCoinPackages()
+    await Promise.all([loadAdminCoinPackages(), loadAdminMissions()])
   }
 
   async function submitAdminSettings(settings: AdminSettingsSnapshot): Promise<void> {
@@ -2561,6 +2656,7 @@ export function createLobbyFlowController(
   function resetToLobby(): void {
     switchToLobby()
     render()
+    void loadPlayerUnclaimedCount()
   }
 
   function handleServerMessage(message: ServerMessage): boolean {
@@ -2681,7 +2777,170 @@ export function createLobbyFlowController(
     return false
   }
 
+  async function openMissionsPopup(): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+    state.missionsPopupOpen = true
+    state.missionClaimErrorText = null
+
+    if (authSession === null || !options.onDailyMissionsLoad) {
+      state.dailyMissions = []
+      state.dailyMissionsLoading = false
+      state.dailyMissionsErrorText = null
+      render()
+      return
+    }
+
+    state.dailyMissionsLoading = true
+    state.dailyMissionsErrorText = null
+    render()
+
+    const result = await options.onDailyMissionsLoad()
+
+    state.dailyMissionsLoading = false
+
+    if (!result.ok) {
+      state.dailyMissionsErrorText = result.message
+      render()
+      return
+    }
+
+    state.dailyMissions = result.missions
+    state.dailyMissionsUnclaimedCount = result.unclaimedCount
+    state.dailyMissionsErrorText = null
+    render()
+  }
+
+  async function claimMission(missionId: string): Promise<void> {
+    if (!options.onMissionClaim) {
+      state.missionClaimErrorText = 'Вземането на награди временно не е налично.'
+      render()
+      return
+    }
+
+    state.missionClaimingId = missionId
+    state.missionClaimErrorText = null
+    render()
+
+    const result = await options.onMissionClaim(missionId)
+
+    state.missionClaimingId = null
+
+    if (!result.ok) {
+      state.missionClaimErrorText = result.message
+      render()
+      return
+    }
+
+    state.dailyMissions = result.missions
+    state.dailyMissionsUnclaimedCount = result.unclaimedCount
+    state.missionClaimErrorText = null
+    render()
+  }
+
+  async function loadAdminMissions(): Promise<void> {
+    if (state.currentScreen !== 'admin') return
+    if (!options.onAdminMissionsLoad) return
+
+    state.adminMissionsLoading = true
+    state.adminMissionsErrorText = null
+    render()
+
+    const result = await options.onAdminMissionsLoad()
+
+    if (state.currentScreen !== 'admin') return
+
+    state.adminMissionsLoading = false
+
+    if (!result.ok) {
+      state.adminMissionsErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminMissions = result.missions
+    state.adminMissionsErrorText = null
+    render()
+  }
+
+  async function submitAdminMission(input: MissionTemplateInput): Promise<void> {
+    if (!options.onAdminMissionSubmit) {
+      state.adminMissionsErrorText = 'Записът на мисии временно не е наличен.'
+      render()
+      return
+    }
+
+    state.adminMissionsErrorText = null
+    render()
+
+    const result = await options.onAdminMissionSubmit(input)
+
+    if (!result.ok) {
+      state.adminMissionsErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminMissions = result.missions
+    state.adminMissionsErrorText = null
+    state.adminMissionEditId = null
+    render()
+  }
+
+  async function toggleAdminMissionActive(missionId: string, isActive: boolean): Promise<void> {
+    if (!options.onAdminMissionActiveToggle) {
+      state.adminMissionsErrorText = 'Промяната временно не е налична.'
+      render()
+      return
+    }
+
+    const result = await options.onAdminMissionActiveToggle(missionId, isActive)
+
+    if (!result.ok) {
+      state.adminMissionsErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminMissions = result.missions
+    state.adminMissionsErrorText = null
+    render()
+  }
+
+  async function deleteAdminMission(missionId: string): Promise<void> {
+    if (!options.onAdminMissionDelete) {
+      state.adminMissionsErrorText = 'Изтриването временно не е налично.'
+      render()
+      return
+    }
+
+    const result = await options.onAdminMissionDelete(missionId)
+
+    if (!result.ok) {
+      state.adminMissionsErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminMissions = result.missions
+    if (state.adminMissionEditId === missionId) state.adminMissionEditId = null
+    state.adminMissionsErrorText = null
+    render()
+  }
+
+  async function loadPlayerUnclaimedCount(): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession === null || !options.onDailyMissionsLoad) return
+
+    const result = await options.onDailyMissionsLoad()
+    if (result.ok) {
+      state.dailyMissions = result.missions
+      state.dailyMissionsUnclaimedCount = result.unclaimedCount
+      render()
+    }
+  }
+
   void loadLobbyPackages()
+  void loadPlayerUnclaimedCount()
 
   return {
     render,
@@ -2739,6 +2998,7 @@ export function createLobbyFlowController(
     },
     startMatchmaking,
     resetToLobby,
+    refreshMissionsCount: () => { void loadPlayerUnclaimedCount() },
     handleServerMessage,
     navigateToShop: (noticeText: string | null) => {
       void showShopPanel().then(() => {
