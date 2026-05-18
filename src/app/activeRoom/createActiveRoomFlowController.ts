@@ -607,6 +607,28 @@ export function createActiveRoomFlowController(
     host.innerHTML = html
   }
 
+  function patchEmojiOnlyInPanels(html: string): void {
+    const host = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
+    if (!host) return
+    const temp = document.createElement('div')
+    temp.innerHTML = html
+    for (const bHost of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-emoji-bubble]'))) {
+      const seat = bHost.getAttribute('data-seat-emoji-bubble')!
+      const existing = host.querySelector<HTMLElement>(`[data-seat-emoji-bubble="${seat}"]`)
+      if (!existing) continue
+      if (existing.innerHTML !== bHost.innerHTML) {
+        existing.innerHTML = bHost.innerHTML
+      }
+    }
+  }
+
+  function clearEmojiInPanels(seat: Seat): void {
+    const host = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
+    if (!host) return
+    const el = host.querySelector<HTMLElement>(`[data-seat-emoji-bubble="${seat}"]`)
+    if (el) el.innerHTML = ''
+  }
+
   function syncPersistentBotTakeoverPopup(): void {
     const localSeatSnapshot = getLocalSeatSnapshot()
 
@@ -1125,7 +1147,7 @@ export function createActiveRoomFlowController(
     emojiReactionUiState.timerIds[seat] = window.setTimeout(() => {
       delete emojiReactionUiState.activeBubbles[seat]
       delete emojiReactionUiState.timerIds[seat]
-      renderActiveRoomScreen()
+      clearEmojiInPanels(seat)
     }, EMOJI_BUBBLE_DURATION_MS)
   }
 
@@ -1785,16 +1807,34 @@ export function createActiveRoomFlowController(
         )
 
         if (cuttingVisualRoot) {
+          const cuttingPanelsHtml = createCuttingSeatPanelsHtml({
+            seats: activeRoomState.seats,
+            localSeat: activeRoomState.seat,
+            dealerSeat: dealerSeatForRender,
+            cutterSeat: cutterSeatForRender,
+            cuttingCountdownRemainingMs: cuttingCountdownRemainingMsForRender,
+            countdownKey: cutterSeatForRender !== null && activeRoomState.game?.timerDeadlineAt != null
+              ? `c:${cutterSeatForRender}:${activeRoomState.game.timerDeadlineAt}`
+              : null,
+            panelScale: stageScale,
+            escapeHtml,
+            dealtHands: null,
+            bidBubbles: isShowingNextRoundPause ? bidBubblesForRender : null,
+            emojiBubbles: getEmojiBubblesForRender(),
+          })
+
           if (
             cuttingAnimation.isAnimating &&
             cuttingAnimation.activeSelectionKey !== null &&
             cuttingAnimation.renderedSelectionKey === cuttingAnimation.activeSelectionKey
           ) {
+            patchEmojiOnlyInPanels(cuttingPanelsHtml)
             return
           }
 
           cuttingVisualRoot.innerHTML = cuttingScreenHtml
           cuttingAnimation.renderedSelectionKey = cuttingAnimation.activeSelectionKey
+          syncSeatPanels(cuttingPanelsHtml)
           return
         }
       }
@@ -2044,12 +2084,26 @@ export function createActiveRoomFlowController(
           return
         }
       }
+      const dealOverlayEarlyReturnPanelsHtml = (): string => createCuttingSeatPanelsHtml({
+        seats: activeRoomState!.seats,
+        localSeat: activeRoomState!.seat,
+        dealerSeat,
+        cutterSeat: null,
+        cuttingCountdownRemainingMs: null,
+        panelScale: stageScale,
+        escapeHtml,
+        dealtHands: dealtHandsForPanels,
+        bidBubbles: getBidBubblesForRender(),
+        emojiBubbles: getEmojiBubblesForRender(),
+      })
+
       if (
         isUsingFirstThreeOverlay &&
         firstThreeOverlay.phaseKey === dealingAnimation.activePhaseKey &&
         firstThreeOverlay.element !== null &&
         firstThreeOverlay.element.isConnected
       ) {
+        patchEmojiOnlyInPanels(dealOverlayEarlyReturnPanelsHtml())
         return
       }
       if (
@@ -2058,6 +2112,7 @@ export function createActiveRoomFlowController(
         nextTwoOverlay.element !== null &&
         nextTwoOverlay.element.isConnected
       ) {
+        patchEmojiOnlyInPanels(dealOverlayEarlyReturnPanelsHtml())
         return
       }
       if (
@@ -2066,6 +2121,7 @@ export function createActiveRoomFlowController(
         lastThreeOverlay.element !== null &&
         lastThreeOverlay.element.isConnected
       ) {
+        patchEmojiOnlyInPanels(dealOverlayEarlyReturnPanelsHtml())
         return
       }
 
