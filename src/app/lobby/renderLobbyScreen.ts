@@ -832,10 +832,11 @@ function renderNav(state: LobbyScreenState): string {
           height:100%;
         ">
           <svg xmlns="http://www.w3.org/2000/svg" width="26" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
-            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-            <circle cx="9" cy="7" r="4"/>
-            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+            <path d="m11 17 2 2a1 1 0 1 0 3-3"/>
+            <path d="m14 14 2.5 2.5a1 1 0 1 0 3-3l-3.88-3.88a3 3 0 0 0-4.24 0l-.88.88a1 1 0 1 1-3-3l2.81-2.81a5.79 5.79 0 0 1 7.06-.87l.47.28a2 2 0 0 0 1.42.25L21 4"/>
+            <path d="m21 3 1 11h-1"/>
+            <path d="M3 3 2 14l6.5 6.5a1 1 0 1 0 3-3"/>
+            <path d="M3 4h8"/>
           </svg>
           Приятели
           ${incomingFriendRequestsCount > 0 ? `
@@ -890,7 +891,12 @@ function renderNav(state: LobbyScreenState): string {
           cursor:pointer;
           height:100%;
         ">
-          <span style="font-size:25px;line-height:1;color:currentColor;">◎</span>
+          <svg xmlns="http://www.w3.org/2000/svg" width="26" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
           Играчи
         </button>
         ${state.profile.profileId !== null ? `
@@ -1580,12 +1586,12 @@ function renderBottomSection(lobbyPackages: CoinPackageSnapshot[], isLoggedIn: b
           style="width:80px; height:80px; display:block; object-fit:contain;">
       </div>
       <div style="display:flex; flex-direction:column; justify-content:center; align-items:flex-start; min-width:0;">
-        <div style="font-size:21px; line-height:1; font-weight:800; color:#d4a520; white-space:nowrap;">
+        <div style="font-size:21px; line-height:1; font-weight:800; color:#d4a520; white-space:nowrap; display:flex; align-items:center; gap:5px;">
+          <img src="/assets/lobby/icon-coin.png" alt="" style="width:20px; height:20px; object-fit:contain; display:block;">
           ${formatAmount(pkg.yellowCoinsAmount)}
         </div>
-        <div style="font-size:12px; line-height:1; color:rgba(255,255,255,0.82); margin-top:4px; font-weight:400;">жълтици</div>
-        <div style="font-size:13px; line-height:1; font-weight:900; color:#ffffff; margin-top:6px; margin-bottom:7px; white-space:nowrap;">
-          ${escapeHtml(formatPackagePrice(pkg.priceCents, pkg.currency))}<span style="font-weight:400; color:rgba(255,255,255,0.45);"> / ${escapeHtml(formatPackagePriceBgn(pkg.priceCents))}</span>
+        <div style="font-size:16px; line-height:1; font-weight:400; color:#ffffff; margin-top:6px; margin-bottom:7px; white-space:nowrap;">
+          ${escapeHtml(formatPackagePrice(pkg.priceCents, pkg.currency))}<span style="font-size:12px; font-weight:400; color:rgba(255,255,255,0.45);"> / ${escapeHtml(formatPackagePriceBgn(pkg.priceCents))}</span>
         </div>
         <button data-lobby-buy-coins-button="1" data-lobby-buy-coins-package="${escapeHtml(pkg.packageId)}" data-lobby-buy-coins-logged="${isLoggedIn ? '1' : '0'}" style="
           background:linear-gradient(135deg, #f4c95b 0%, #c98f13 100%);
@@ -2916,7 +2922,12 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
             </div>
           </div>
           ${isLocked
-            ? `<div style="font-size:12px;color:rgba(239,68,68,0.7);font-weight:600;padding:5px 12px;border:1px solid rgba(239,68,68,0.25);border-radius:8px;">Заключена</div>`
+            ? (state.myPrivateRoom?.id === room.id && room.members.length < 4
+                ? `<button type="button" id="invite-friends-open" style="
+                    padding:7px 16px;border:1px solid rgba(167,139,250,0.5);background:rgba(167,139,250,0.15);
+                    border-radius:9px;color:#a78bfa;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;
+                  ">+ Покани приятели</button>`
+                : `<div style="font-size:12px;color:rgba(239,68,68,0.7);font-weight:600;padding:5px 12px;border:1px solid rgba(239,68,68,0.25);border-radius:8px;">Заключена</div>`)
             : `<button type="button" data-private-room-join="${room.id}" style="
                 padding:7px 16px;border:1px solid rgba(167,139,250,0.5);background:rgba(167,139,250,0.12);
                 border-radius:9px;color:#a78bfa;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;
@@ -2930,7 +2941,12 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
     `
   }
 
-  const allRooms = [...state.privateRooms.filter(r => r.kind === 'open'), ...state.privateRooms.filter(r => r.kind === 'locked')]
+  const myRoomId = state.myPrivateRoom?.id ?? null
+  const allRooms = [
+    ...state.privateRooms.filter(r => r.id === myRoomId),
+    ...state.privateRooms.filter(r => r.id !== myRoomId && r.kind === 'open'),
+    ...state.privateRooms.filter(r => r.id !== myRoomId && r.kind === 'locked'),
+  ]
   const allRoomsHtml = allRooms.map(roomRowHtml).join('')
 
   const createBtnHtml = hasMyRoom
