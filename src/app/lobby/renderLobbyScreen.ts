@@ -18,6 +18,8 @@ import type {
   PlayerMissionProgressSnapshot,
   PlayerPublicProfileSnapshot,
   PrivateRoomSnapshot,
+  SupportMessageSnapshot,
+  SupportConversationSnapshot,
 } from '../network/createGameServerClient'
 import type { PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
@@ -31,7 +33,7 @@ export type AvatarCropSelection = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'private-rooms'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'private-rooms' | 'support'
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -146,6 +148,23 @@ export type LobbyScreenState = {
   leavePrivateRoomForMatchmakingOpen: boolean
   leavePrivateRoomForMatchmakingIsHost: boolean
   inviteFriendsPopupOpen: boolean
+  supportPopupOpen: boolean
+  supportMessages: SupportMessageSnapshot[]
+  supportUnreadCount: number
+  supportLoading: boolean
+  supportSendingLoading: boolean
+  supportErrorText: string | null
+  supportAccountTooNewMinutes: number | null
+  adminSupportConversations: SupportConversationSnapshot[]
+  adminSupportConversationsLoading: boolean
+  adminSupportSelectedProfileId: string | null
+  adminSupportMessages: SupportMessageSnapshot[]
+  adminSupportMessagesLoading: boolean
+  adminSupportReplyLoading: boolean
+  adminSupportDeleteConfirmProfileId: string | null
+  adminSupportDeleteLoading: boolean
+  supportDeleteConfirm: boolean
+  supportDeleteLoading: boolean
 }
 
 export type RenderLobbyScreenOptions = {
@@ -245,6 +264,17 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomInfoDismiss: () => void
   onLeavePrivateRoomAndMatchmakeConfirm: () => void
   onLeavePrivateRoomAndMatchmakeCancel: () => void
+  onSupportClick: () => void
+  onSupportClose: () => void
+  onSupportSend: (body: string) => void
+  onAdminSupportConversationClick: (profileId: string) => void
+  onAdminSupportReply: (profileId: string, body: string) => void
+  onAdminSupportDeleteClick: (profileId: string) => void
+  onAdminSupportDeleteCancel: () => void
+  onAdminSupportDeleteConfirm: (profileId: string) => void
+  onSupportDeleteClick: () => void
+  onSupportDeleteCancel: () => void
+  onSupportDeleteConfirm: () => void
 }
 
 type LobbyStakeCard = {
@@ -979,6 +1009,22 @@ function renderNav(state: LobbyScreenState): string {
               </div>
             </div>
           ` : ''}
+          <button data-lobby-nav-support="1" title="Връзка с екипа на Pika.bg" style="
+            background:none; border:none; cursor:pointer; padding:6px;
+            color:rgba(255,255,255,0.65); position:relative;
+          ">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+            ${state.supportUnreadCount > 0 ? `<span style="
+              position:absolute; top:2px; right:0px;
+              min-width:18px; height:18px; border-radius:9px;
+              background:#ef4444; border:1.5px solid #0a0a0a;
+              display:flex; align-items:center; justify-content:center;
+              font-size:10px; font-weight:800; color:#fff;
+              padding:0 4px; box-sizing:border-box;
+              font-family:Inter,system-ui,sans-serif;
+              pointer-events:none;
+            ">${state.supportUnreadCount}</span>` : ''}
+          </button>
           <button data-lobby-nav-bell="1" style="
             background:none; border:none; cursor:pointer; padding:6px;
             color:rgba(255,255,255,0.65); position:relative;
@@ -2874,6 +2920,369 @@ function renderMyRoomPanel(room: PrivateRoomSnapshot): string {
   `
 }
 
+function formatSupportTime(isoString: string): string {
+  try {
+    const d = new Date(isoString)
+    const now = new Date()
+    const diffMs = now.getTime() - d.getTime()
+    const diffMin = Math.floor(diffMs / 60000)
+    if (diffMin < 1) return 'Сега'
+    if (diffMin < 60) return `${diffMin} мин`
+    const diffH = Math.floor(diffMin / 60)
+    if (diffH < 24) return `${diffH} ч`
+    return d.toLocaleDateString('bg-BG', { day: '2-digit', month: '2-digit' })
+  } catch {
+    return ''
+  }
+}
+
+function renderSupportMessagesBubbles(messages: SupportMessageSnapshot[], loading: boolean): string {
+  if (loading) {
+    return `<div style="flex:1;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:14px;font-weight:800;">Зареждане...</div>`
+  }
+  if (messages.length === 0) {
+    return `<div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.38);font-size:14px;font-weight:700;text-align:center;padding:24px;">Все още няма съобщения.<br>Изпрати ни запитване.</div>`
+  }
+  return messages.map((msg) => `
+    <div style="display:flex;flex-direction:column;align-items:${msg.isFromAdmin ? 'flex-start' : 'flex-end'};gap:3px;">
+      <div style="
+        max-width:75%;padding:10px 14px;
+        border-radius:${msg.isFromAdmin ? '4px 14px 14px 14px' : '14px 4px 14px 14px'};
+        background:${msg.isFromAdmin ? 'rgba(212,165,32,0.14)' : '#1e1e1e'};
+        border:1px solid ${msg.isFromAdmin ? 'rgba(212,165,32,0.30)' : 'rgba(255,255,255,0.10)'};
+        color:#f8fafc;font-size:14px;font-weight:600;line-height:1.55;word-break:break-word;
+      ">${escapeHtml(msg.body)}</div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.35);font-weight:600;padding:0 4px;">
+        ${msg.isFromAdmin ? '<span style="color:rgba(212,165,32,0.7);">Екип Pika.bg</span> · ' : ''}${formatSupportTime(msg.createdAt)}
+      </div>
+    </div>
+  `).join('')
+}
+
+function renderSupportPopup(state: LobbyScreenState): string {
+  if (!state.supportPopupOpen) return ''
+  return `
+    <div data-support-popup-backdrop="1" style="
+      position:fixed;inset:0;z-index:12000;
+      background:rgba(0,0,0,0.72);
+      display:flex;align-items:center;justify-content:center;
+      padding:20px;box-sizing:border-box;
+    ">
+      <div style="
+        width:520px;max-width:100%;max-height:80vh;
+        background:#0d0d0d;border:1px solid rgba(212,165,32,0.35);border-radius:16px;
+        display:flex;flex-direction:column;overflow:hidden;
+        box-shadow:0 16px 64px rgba(0,0,0,0.8);
+      " onclick="event.stopPropagation()">
+        <div style="
+          display:flex;align-items:center;justify-content:space-between;
+          padding:16px 20px;border-bottom:1px solid rgba(255,255,255,0.10);
+          flex-shrink:0;
+        ">
+          <div>
+            <div style="font-size:15px;font-weight:900;color:#f8fafc;">Връзка с екипа на Pika.bg</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.45);font-weight:600;margin-top:2px;">Запитвания · Предложения · Докладване на проблеми</div>
+          </div>
+          <button data-support-popup-close="1" style="
+            background:none;border:none;cursor:pointer;padding:6px;
+            color:rgba(255,255,255,0.5);border-radius:6px;
+            display:flex;align-items:center;justify-content:center;
+          ">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
+        <div style="
+          display:flex;align-items:center;gap:8px;
+          padding:8px 16px;background:rgba(212,165,32,0.08);
+          border-bottom:1px solid rgba(212,165,32,0.15);flex-shrink:0;
+        ">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#d4a520" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          <span style="font-size:11px;font-weight:700;color:rgba(212,165,32,0.85);">Чатовете с отговор от екипа се изтриват автоматично след 5 дни неактивност.</span>
+        </div>
+
+        <div id="support-popup-messages-scroll" style="
+          flex:1;overflow-y:auto;padding:20px;
+          display:flex;flex-direction:column;gap:12px;
+          min-height:220px;max-height:400px;
+        ">
+          ${renderSupportMessagesBubbles(state.supportMessages, state.supportLoading)}
+        </div>
+
+        ${state.supportErrorText ? `
+          <div style="padding:8px 16px;background:rgba(127,29,29,0.42);border-top:1px solid rgba(248,113,113,0.22);color:#fecaca;font-size:12px;font-weight:800;flex-shrink:0;">
+            ${escapeHtml(state.supportErrorText)}
+          </div>
+        ` : ''}
+
+        ${state.supportDeleteConfirm ? `
+          <div style="
+            padding:14px 16px;flex-shrink:0;
+            background:rgba(239,68,68,0.10);
+            border-top:1px solid rgba(239,68,68,0.30);
+          ">
+            <div style="font-size:13px;font-weight:700;color:#ef4444;margin-bottom:10px;">Сигурни ли сте, че искате да изтриете целия чат? Това действие е необратимо.</div>
+            <div style="display:flex;gap:8px;">
+              <button data-support-delete-confirm="1"
+                ${state.supportDeleteLoading ? 'disabled' : ''}
+                style="
+                  height:34px;padding:0 16px;border:0;border-radius:7px;
+                  background:#ef4444;color:#fff;font-size:13px;font-weight:900;cursor:pointer;
+                  opacity:${state.supportDeleteLoading ? '0.6' : '1'};
+                ">${state.supportDeleteLoading ? 'Изтриване...' : 'Да, изтрий'}</button>
+              <button data-support-delete-cancel="1" style="
+                height:34px;padding:0 16px;border:1px solid rgba(255,255,255,0.15);border-radius:7px;
+                background:transparent;color:rgba(255,255,255,0.70);font-size:13px;font-weight:800;cursor:pointer;
+              ">Откажи</button>
+            </div>
+          </div>
+        ` : state.supportMessages.length > 0 ? `
+          <div style="padding:8px 16px;border-top:1px solid rgba(255,255,255,0.07);flex-shrink:0;display:flex;justify-content:flex-end;">
+            <button data-support-delete-click="1" style="
+              display:flex;align-items:center;gap:5px;
+              background:none;border:none;cursor:pointer;
+              color:rgba(255,255,255,0.35);font-size:11px;font-weight:700;padding:4px 6px;
+            ">
+              <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+              Изтрий чата
+            </button>
+          </div>
+        ` : ''}
+
+        ${state.supportAccountTooNewMinutes !== null ? `
+          <div style="
+            display:flex;align-items:center;gap:8px;
+            padding:12px 16px;border-top:1px solid rgba(255,255,255,0.10);
+            background:#080808;flex-shrink:0;
+          ">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#d4a520" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            <span style="font-size:12px;font-weight:700;color:rgba(212,165,32,0.9);">За защита от злонамерени съобщения ще можете да пишете след ${state.supportAccountTooNewMinutes} ${state.supportAccountTooNewMinutes === 1 ? 'минута' : 'минути'}.</span>
+          </div>
+        ` : `
+        <form data-support-send-form="1" style="
+          display:flex;gap:10px;padding:14px 16px;
+          border-top:1px solid rgba(255,255,255,0.10);
+          background:#080808;flex-shrink:0;
+        ">
+          <input name="website" tabindex="-1" autocomplete="off" style="display:none;position:absolute;left:-9999px;">
+          <textarea name="body" placeholder="Напиши съобщение..." rows="2" maxlength="2000" style="
+            flex:1;border-radius:8px;border:1px solid rgba(255,255,255,0.15);
+            background:#141414;color:#f8fafc;
+            padding:10px 12px;font-size:14px;font-weight:600;
+            outline:none;resize:none;font-family:inherit;line-height:1.4;
+          "></textarea>
+          <button type="submit" ${state.supportSendingLoading ? 'disabled' : ''} style="
+            align-self:flex-end;height:44px;padding:0 20px;border:0;border-radius:8px;
+            background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+            color:#080808;font-size:14px;font-weight:900;cursor:pointer;white-space:nowrap;
+            opacity:${state.supportSendingLoading ? '0.6' : '1'};
+          ">Изпрати</button>
+        </form>
+        `}
+      </div>
+    </div>
+  `
+}
+
+function renderAdminSupportPage(state: LobbyScreenState): string {
+  const sorted = [...state.adminSupportConversations].sort((a, b) => {
+    if (a.unreadByAdmin > 0 && b.unreadByAdmin === 0) return -1
+    if (a.unreadByAdmin === 0 && b.unreadByAdmin > 0) return 1
+    return b.updatedAt.localeCompare(a.updatedAt)
+  })
+
+  const convListHtml = state.adminSupportConversationsLoading ? `
+    <div style="padding:20px;color:#d4a520;font-size:13px;font-weight:800;text-align:center;">Зареждане...</div>
+  ` : sorted.length === 0 ? `
+    <div style="padding:20px;color:rgba(255,255,255,0.35);font-size:13px;font-weight:700;text-align:center;">Няма разговори</div>
+  ` : sorted.map((conv) => {
+    const isSelected = state.adminSupportSelectedProfileId === conv.profileId
+    const statusColor = conv.unreadByAdmin > 0
+      ? '#ef4444'
+      : conv.lastMessageIsFromAdmin
+        ? '#22c55e'
+        : '#3b82f6'
+    const avatarHtml = conv.avatarUrl
+      ? `<img src="${conv.avatarUrl}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;flex-shrink:0;">`
+      : `<div style="width:40px;height:40px;border-radius:50%;background:rgba(212,165,32,0.15);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">👤</div>`
+    return `
+      <button type="button" data-admin-support-conv="${escapeHtml(conv.profileId)}" style="
+        display:flex;align-items:center;gap:10px;padding:10px 12px;
+        border-radius:0;border:none;border-bottom:1px solid rgba(255,255,255,0.06);
+        cursor:pointer;text-align:left;width:100%;
+        background:${isSelected ? 'rgba(212,165,32,0.10)' : 'transparent'};
+        border-left:3px solid ${isSelected ? '#d4a520' : 'transparent'};
+        transition:background 0.1s;
+      ">
+        <div style="position:relative;flex-shrink:0;">
+          ${avatarHtml}
+          ${conv.unreadByAdmin > 0 ? `<span style="
+            position:absolute;top:-3px;right:-4px;
+            min-width:16px;height:16px;border-radius:8px;
+            background:#ef4444;border:1.5px solid #0d0d0d;
+            display:flex;align-items:center;justify-content:center;
+            font-size:9px;font-weight:900;color:#fff;
+            padding:0 3px;box-sizing:border-box;
+          ">${conv.unreadByAdmin}</span>` : ''}
+        </div>
+        <div style="flex:1;min-width:0;">
+          <div style="
+            font-size:16px;font-weight:${conv.unreadByAdmin > 0 ? '900' : '700'};
+            color:${conv.unreadByAdmin > 0 ? '#ffffff' : 'rgba(255,255,255,0.72)'};
+            overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+          ">${escapeHtml(conv.displayName)}</div>
+          <div style="
+            font-size:11px;color:rgba(255,255,255,0.38);
+            overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+            margin-top:2px;font-style:${conv.lastMessageIsFromAdmin ? 'italic' : 'normal'};
+          ">${conv.lastMessageIsFromAdmin ? '↩ ' : ''}${escapeHtml(conv.lastMessageBody)}</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;">
+          <div style="font-size:10px;color:rgba(255,255,255,0.30);">${formatSupportTime(conv.updatedAt)}</div>
+          <span style="width:10px;height:10px;border-radius:50%;background:${statusColor};box-shadow:0 0 4px ${statusColor};flex-shrink:0;"></span>
+        </div>
+      </button>
+    `
+  }).join('')
+
+  const selectedConv = state.adminSupportConversations.find(c => c.profileId === state.adminSupportSelectedProfileId) ?? null
+  const isDeleteConfirming = state.adminSupportDeleteConfirmProfileId === state.adminSupportSelectedProfileId && state.adminSupportSelectedProfileId !== null
+  const deleteWarning = isDeleteConfirming && selectedConv !== null && !selectedConv.lastMessageIsFromAdmin
+
+  const rightPanelHtml = state.adminSupportSelectedProfileId === null ? `
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:rgba(255,255,255,0.28);">
+      <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.4;"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+      <div style="font-size:14px;font-weight:700;">Избери разговор</div>
+    </div>
+  ` : `
+    <div style="
+      display:flex;align-items:center;justify-content:space-between;
+      padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.08);
+      flex-shrink:0;background:#0a0a0a;
+    ">
+      <div style="font-size:14px;font-weight:800;color:#f8fafc;">
+        ${escapeHtml(selectedConv?.displayName ?? '')}
+      </div>
+      <button data-admin-support-delete="${escapeHtml(state.adminSupportSelectedProfileId)}" style="
+        display:flex;align-items:center;gap:6px;
+        background:rgba(212,165,32,0.10);border:1px solid rgba(212,165,32,0.30);
+        border-radius:7px;padding:6px 12px;cursor:pointer;
+        color:#d4a520;font-size:12px;font-weight:800;
+      ">
+        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
+        Архивирай
+      </button>
+    </div>
+
+    ${isDeleteConfirming ? `
+    <div style="
+      flex-shrink:0;padding:14px 18px;
+      background:${deleteWarning ? 'rgba(239,68,68,0.10)' : 'rgba(255,255,255,0.05)'};
+      border-bottom:1px solid ${deleteWarning ? 'rgba(239,68,68,0.30)' : 'rgba(255,255,255,0.10)'};
+    ">
+      ${deleteWarning ? `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <span style="font-size:13px;font-weight:700;color:#ef4444;">Още не сте отговорили на този потребител. Сигурни ли сте, че искате да архивирате чата?</span>
+      </div>
+      ` : `
+      <div style="font-size:13px;font-weight:700;color:rgba(255,255,255,0.70);margin-bottom:10px;">Разговорът ще бъде скрит от списъка. Ако потребителят изпрати ново съобщение, ще се появи отново.</div>
+      `}
+      <div style="display:flex;gap:8px;">
+        <button data-admin-support-delete-confirm="${escapeHtml(state.adminSupportSelectedProfileId)}"
+          ${state.adminSupportDeleteLoading ? 'disabled' : ''}
+          style="
+            height:34px;padding:0 16px;border:0;border-radius:7px;
+            background:#d4a520;color:#000;font-size:13px;font-weight:900;cursor:pointer;
+            opacity:${state.adminSupportDeleteLoading ? '0.6' : '1'};
+          ">${state.adminSupportDeleteLoading ? 'Архивиране...' : 'Да, архивирай'}</button>
+        <button data-admin-support-delete-cancel="1" style="
+          height:34px;padding:0 16px;border:1px solid rgba(255,255,255,0.15);border-radius:7px;
+          background:transparent;color:rgba(255,255,255,0.70);font-size:13px;font-weight:800;cursor:pointer;
+        ">Откажи</button>
+      </div>
+    </div>
+    ` : ''}
+
+    <div id="support-admin-messages-scroll" style="
+      flex:1;min-height:0;overflow-y:auto;padding:20px;
+      display:flex;flex-direction:column;gap:10px;
+    ">
+      ${renderSupportMessagesBubbles(state.adminSupportMessages, state.adminSupportMessagesLoading)}
+    </div>
+    <form data-admin-support-reply-form="${escapeHtml(state.adminSupportSelectedProfileId)}" style="
+      display:flex;gap:10px;padding:14px 16px;
+      border-top:1px solid rgba(255,255,255,0.10);
+      background:#080808;flex-shrink:0;
+    ">
+      <textarea name="body" placeholder="Отговор от екипа..." rows="2" maxlength="2000" style="
+        flex:1;border-radius:8px;border:1px solid rgba(255,255,255,0.15);
+        background:#141414;color:#f8fafc;
+        padding:10px 12px;font-size:14px;font-weight:600;
+        outline:none;resize:none;font-family:inherit;line-height:1.4;
+      "></textarea>
+      <button type="submit" ${state.adminSupportReplyLoading ? 'disabled' : ''} style="
+        align-self:flex-end;height:44px;padding:0 20px;border:0;border-radius:8px;
+        background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+        color:#080808;font-size:14px;font-weight:900;cursor:pointer;white-space:nowrap;
+        opacity:${state.adminSupportReplyLoading ? '0.6' : '1'};
+      ">Изпрати</button>
+    </form>
+  `
+
+  const totalUnread = state.adminSupportConversations.reduce((s, c) => s + c.unreadByAdmin, 0)
+
+  return `
+    <section style="height:calc(100vh - 160px);display:flex;flex-direction:column;gap:0;min-height:500px;">
+      <div style="
+        display:flex;align-items:center;gap:12px;
+        border-bottom:1px solid rgba(212,165,32,0.28);
+        padding-bottom:14px;margin-bottom:20px;flex-shrink:0;
+      ">
+        <button data-lobby-nav-back="1" style="
+          display:flex;align-items:center;gap:6px;background:none;border:none;
+          cursor:pointer;padding:8px 12px;border-radius:8px;
+          color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;letter-spacing:0.03em;
+        ">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          Назад
+        </button>
+        <div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <div style="font-size:22px;font-weight:900;color:#f8fafc;line-height:1.1;">Поддръжка</div>
+            ${totalUnread > 0 ? `<span style="
+              min-width:22px;height:22px;border-radius:11px;
+              background:#ef4444;
+              display:flex;align-items:center;justify-content:center;
+              font-size:11px;font-weight:900;color:#fff;padding:0 6px;box-sizing:border-box;
+            ">${totalUnread}</span>` : ''}
+          </div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.45);font-weight:700;margin-top:3px;">Запитвания от потребители</div>
+        </div>
+      </div>
+
+      <div style="
+        flex:1;min-height:0;display:grid;grid-template-columns:300px 1fr;gap:0;
+        background:#080808;border:1px solid rgba(255,255,255,0.10);
+        border-radius:12px;overflow:hidden;
+      ">
+        <div style="
+          display:flex;flex-direction:column;
+          border-right:1px solid rgba(255,255,255,0.10);
+          overflow-y:auto;
+          min-height:0;
+        ">
+          ${convListHtml}
+        </div>
+
+        <div style="display:flex;flex-direction:column;min-height:0;overflow:hidden;">
+          ${rightPanelHtml}
+        </div>
+      </div>
+    </section>
+  `
+}
+
 function renderPrivateRoomsPage(state: LobbyScreenState): string {
   const hasMyRoom = state.myPrivateRoom !== null
 
@@ -3633,7 +4042,9 @@ export function renderLobbyScreen(
         ${renderNav(state)}
 
         <div style="max-width: 1640px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;">
-          ${state.view === 'private-rooms'
+          ${state.view === 'support'
+            ? renderAdminSupportPage(state)
+            : state.view === 'private-rooms'
             ? renderPrivateRoomsPage(state)
             : state.view === 'players'
             ? renderPlayersDirectory(state)
@@ -3732,6 +4143,7 @@ export function renderLobbyScreen(
       ${renderLeavePrivateRoomConfirmPopup(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
+      ${renderSupportPopup(state)}
     </div>
   `
 
@@ -4149,6 +4561,18 @@ export function renderLobbyScreen(
       }
     })
   })
+
+  root.querySelector<HTMLElement>('[data-lobby-nav-support="1"]')
+    ?.addEventListener('click', options.onSupportClick)
+
+  root.querySelector<HTMLButtonElement>('[data-support-popup-close="1"]')
+    ?.addEventListener('click', options.onSupportClose)
+
+  root.querySelector<HTMLElement>('[data-support-popup-backdrop="1"]')
+    ?.addEventListener('click', options.onSupportClose)
+
+  root.querySelector<HTMLButtonElement>('[data-lobby-nav-back="1"]')
+    ?.addEventListener('click', options.onLobbyClick)
 
   root.querySelector<HTMLElement>('[data-lobby-nav-bell="1"]')
     ?.addEventListener('click', options.onBellClick)
@@ -4993,5 +5417,68 @@ export function renderLobbyScreen(
   const newScrollEl = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')
   if (newScrollEl && savedScrollTop > 0) {
     newScrollEl.scrollTop = savedScrollTop
+  }
+
+  root.querySelector<HTMLFormElement>('[data-support-send-form="1"]')
+    ?.addEventListener('submit', (e) => {
+      e.preventDefault()
+      const form = e.currentTarget as HTMLFormElement
+      const data = new FormData(form)
+      const body = String(data.get('body') ?? '').trim()
+      if (body.length > 0) {
+        options.onSupportSend(body)
+        form.reset()
+      }
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-support-conv]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const profileId = btn.dataset.adminSupportConv?.trim() ?? ''
+      if (profileId) options.onAdminSupportConversationClick(profileId)
+    })
+  })
+
+  root.querySelectorAll<HTMLFormElement>('[data-admin-support-reply-form]').forEach((form) => {
+    form.addEventListener('submit', (e) => {
+      e.preventDefault()
+      const profileId = form.dataset.adminSupportReplyForm?.trim() ?? ''
+      const data = new FormData(form)
+      const body = String(data.get('body') ?? '').trim()
+      if (profileId && body.length > 0) {
+        options.onAdminSupportReply(profileId, body)
+        form.reset()
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-support-delete]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const profileId = btn.dataset.adminSupportDelete?.trim() ?? ''
+      if (profileId) options.onAdminSupportDeleteClick(profileId)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-support-delete-confirm]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const profileId = btn.dataset.adminSupportDeleteConfirm?.trim() ?? ''
+      if (profileId) options.onAdminSupportDeleteConfirm(profileId)
+    })
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-admin-support-delete-cancel="1"]')
+    ?.addEventListener('click', () => options.onAdminSupportDeleteCancel())
+
+  root.querySelector<HTMLButtonElement>('[data-support-delete-click="1"]')
+    ?.addEventListener('click', () => options.onSupportDeleteClick())
+
+  root.querySelector<HTMLButtonElement>('[data-support-delete-confirm="1"]')
+    ?.addEventListener('click', () => options.onSupportDeleteConfirm())
+
+  root.querySelector<HTMLButtonElement>('[data-support-delete-cancel="1"]')
+    ?.addEventListener('click', () => options.onSupportDeleteCancel())
+
+  for (const id of ['support-popup-messages-scroll', 'support-admin-messages-scroll']) {
+    const el = document.getElementById(id)
+    if (el) el.scrollTop = el.scrollHeight
   }
 }

@@ -10,6 +10,7 @@ export type AuthAccountSnapshot = {
   email: string
   role: 'player' | 'admin'
   status: 'active' | 'disabled'
+  createdAt: string
 }
 
 export type AuthSessionSnapshot = {
@@ -44,6 +45,7 @@ type AccountRow = {
   password_hash: string
   role: 'player' | 'admin'
   status: 'active' | 'disabled'
+  created_at: string
 }
 
 type SessionRow = {
@@ -53,6 +55,7 @@ type SessionRow = {
   email: string
   role: 'player' | 'admin'
   status: 'active' | 'disabled'
+  account_created_at: string
 }
 
 const SESSION_COOKIE_NAME = 'belot_session'
@@ -155,11 +158,13 @@ export function getSessionTokenFromCookieHeader(cookieHeader: string | undefined
 }
 
 function toAccountSnapshot(row: AccountRow | SessionRow): AuthAccountSnapshot {
+  const createdAt = 'account_created_at' in row ? row.account_created_at : row.created_at
   return {
     accountId: row.account_id,
     email: row.email,
     role: row.role,
     status: row.status,
+    createdAt,
   }
 }
 
@@ -279,7 +284,8 @@ export async function createAuthStore(
       s.profile_id,
       a.email,
       a.role,
-      a.status
+      a.status,
+      a.created_at AS account_created_at
     FROM account_sessions s
     JOIN accounts a
       ON a.account_id = s.account_id
@@ -398,6 +404,7 @@ export async function createAuthStore(
         password_hash: passwordHash,
         role: 'player',
         status: 'active',
+        created_at: new Date().toISOString(),
       }
       const session = createSession(accountRow, profileId)
 

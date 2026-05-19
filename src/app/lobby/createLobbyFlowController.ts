@@ -34,6 +34,8 @@ import type {
   PrivateRoomSnapshot,
   RoomSeatSnapshot,
   ServerMessage,
+  SupportMessageSnapshot,
+  SupportConversationSnapshot,
 } from '../network/createGameServerClient'
 
 export type LobbyFlowScreen =
@@ -45,6 +47,7 @@ export type LobbyFlowScreen =
   | 'admin-info'
   | 'matchmaking-room'
   | 'private-rooms'
+  | 'support'
 export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
 export type LobbyAuthSession = {
@@ -248,6 +251,29 @@ export type CreateLobbyFlowControllerOptions = {
   onPrivateRoomInvite?: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
   onCancelPrivateRoomInvite?: (inviteId: string) => void
   onPrivateRoomInviteRespond?: (inviteId: string, accept: boolean) => void
+  onSupportMessagesLoad?: () => Promise<
+    | { ok: true; messages: SupportMessageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onSupportSend?: (body: string) => Promise<
+    | { ok: true; messages: SupportMessageSnapshot[] }
+    | { ok: false; code?: string; remainingMinutes?: number; message?: string }
+  >
+  onSupportUnreadLoad?: () => Promise<{ ok: true; unreadCount: number } | { ok: false }>
+  onAdminSupportConversationsLoad?: () => Promise<
+    | { ok: true; conversations: SupportConversationSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminSupportMessagesLoad?: (profileId: string) => Promise<
+    | { ok: true; messages: SupportMessageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminSupportReply?: (profileId: string, body: string) => Promise<
+    | { ok: true; messages: SupportMessageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminSupportDeleteConversation?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
+  onSupportDeleteConversation?: () => Promise<{ ok: true } | { ok: false; message: string }>
 }
 
 
@@ -264,6 +290,7 @@ export type LobbyFlowController = {
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
   resetToLobby: () => void
   refreshMissionsCount: () => void
+  refreshSupportUnread: () => void
   handleServerMessage: (message: ServerMessage) => boolean
   navigateToShop: (noticeText: string | null) => void
 }
@@ -392,6 +419,23 @@ type InternalLobbyFlowState = {
   blockedPlayersErrorText: string | null
   blockedPlayersLimit: number
   blockLimitPopupOpen: boolean
+  supportPopupOpen: boolean
+  supportMessages: SupportMessageSnapshot[]
+  supportUnreadCount: number
+  supportLoading: boolean
+  supportSendingLoading: boolean
+  supportErrorText: string | null
+  adminSupportConversations: SupportConversationSnapshot[]
+  adminSupportConversationsLoading: boolean
+  adminSupportSelectedProfileId: string | null
+  adminSupportMessages: SupportMessageSnapshot[]
+  adminSupportMessagesLoading: boolean
+  adminSupportReplyLoading: boolean
+  adminSupportDeleteConfirmProfileId: string | null
+  adminSupportDeleteLoading: boolean
+  supportDeleteConfirm: boolean
+  supportDeleteLoading: boolean
+  supportAccountTooNewMinutes: number | null
 }
 
 type StakeCardConfig = {
@@ -533,6 +577,23 @@ function createInitialState(): InternalLobbyFlowState {
     blockedPlayersErrorText: null,
     blockedPlayersLimit: 50,
     blockLimitPopupOpen: false,
+    supportPopupOpen: false,
+    supportMessages: [],
+    supportUnreadCount: 0,
+    supportLoading: false,
+    supportSendingLoading: false,
+    supportErrorText: null,
+    adminSupportConversations: [],
+    adminSupportConversationsLoading: false,
+    adminSupportSelectedProfileId: null,
+    adminSupportMessages: [],
+    adminSupportMessagesLoading: false,
+    adminSupportReplyLoading: false,
+    adminSupportDeleteConfirmProfileId: null,
+    adminSupportDeleteLoading: false,
+    supportDeleteConfirm: false,
+    supportDeleteLoading: false,
+    supportAccountTooNewMinutes: null,
   }
 }
 
@@ -1238,6 +1299,8 @@ export function createLobbyFlowController(
               ? 'chat'
             : state.currentScreen === 'private-rooms'
               ? 'private-rooms'
+            : state.currentScreen === 'support'
+              ? 'support'
             : 'tables',
       displayName: state.displayName,
       selectedStake: state.selectedStake,
@@ -1351,6 +1414,23 @@ export function createLobbyFlowController(
       blockedPlayersErrorText: state.blockedPlayersErrorText,
       blockedPlayersLimit: state.blockedPlayersLimit,
       blockLimitPopupOpen: state.blockLimitPopupOpen,
+      supportPopupOpen: state.supportPopupOpen,
+      supportMessages: state.supportMessages,
+      supportUnreadCount: state.supportUnreadCount,
+      supportLoading: state.supportLoading,
+      supportSendingLoading: state.supportSendingLoading,
+      supportErrorText: state.supportErrorText,
+      adminSupportConversations: state.adminSupportConversations,
+      adminSupportConversationsLoading: state.adminSupportConversationsLoading,
+      adminSupportSelectedProfileId: state.adminSupportSelectedProfileId,
+      adminSupportMessages: state.adminSupportMessages,
+      adminSupportMessagesLoading: state.adminSupportMessagesLoading,
+      adminSupportReplyLoading: state.adminSupportReplyLoading,
+      adminSupportDeleteConfirmProfileId: state.adminSupportDeleteConfirmProfileId,
+      adminSupportDeleteLoading: state.adminSupportDeleteLoading,
+      supportDeleteConfirm: state.supportDeleteConfirm,
+      supportDeleteLoading: state.supportDeleteLoading,
+      supportAccountTooNewMinutes: state.supportAccountTooNewMinutes,
     }
 
     renderLobbyScreen(options.root, {
@@ -1706,6 +1786,151 @@ export function createLobbyFlowController(
       onLeavePrivateRoomAndMatchmakeCancel: () => {
         state.leavePrivateRoomForMatchmakingOpen = false
         render()
+      },
+      onSupportClick: () => {
+        const authSession = options.getAuthSession?.() ?? null
+        if (authSession === null) return
+        if (authSession.account.role === 'admin') {
+          state.currentScreen = 'support'
+          state.adminSupportSelectedProfileId = null
+          state.adminSupportConversations = []
+          state.adminSupportConversationsLoading = true
+          render()
+          void loadAdminSupportConversations()
+          return
+        }
+        state.supportPopupOpen = true
+        state.supportErrorText = null
+        state.supportMessages = []
+        state.supportLoading = true
+        render()
+        void (async () => {
+          const result = await options.onSupportMessagesLoad?.()
+          state.supportLoading = false
+          if (result?.ok) {
+            state.supportMessages = result.messages
+            state.supportUnreadCount = 0
+          } else {
+            state.supportErrorText = result?.message ?? 'Грешка при зареждане.'
+          }
+          render()
+        })()
+      },
+      onSupportClose: () => {
+        state.supportPopupOpen = false
+        state.supportDeleteConfirm = false
+        render()
+      },
+      onSupportDeleteClick: () => {
+        state.supportDeleteConfirm = true
+        render()
+      },
+      onSupportDeleteCancel: () => {
+        state.supportDeleteConfirm = false
+        render()
+      },
+      onSupportDeleteConfirm: () => {
+        if (state.supportDeleteLoading) return
+        state.supportDeleteLoading = true
+        render()
+        void (async () => {
+          const result = await options.onSupportDeleteConversation?.()
+          state.supportDeleteLoading = false
+          if (result?.ok) {
+            state.supportMessages = []
+            state.supportUnreadCount = 0
+            state.supportDeleteConfirm = false
+            state.supportPopupOpen = false
+          }
+          render()
+        })()
+      },
+      onSupportSend: (body) => {
+        if (state.supportSendingLoading) return
+        state.supportSendingLoading = true
+        state.supportErrorText = null
+        render()
+        void (async () => {
+          const result = await options.onSupportSend?.(body)
+          state.supportSendingLoading = false
+          if (result?.ok) {
+            state.supportMessages = result.messages
+            state.supportAccountTooNewMinutes = null
+          } else if (result?.code === 'account_too_new' && result.remainingMinutes) {
+            state.supportAccountTooNewMinutes = result.remainingMinutes
+          } else {
+            state.supportErrorText = result?.message ?? 'Грешка при изпращане.'
+          }
+          render()
+        })()
+      },
+      onAdminSupportConversationClick: (profileId) => {
+        state.adminSupportSelectedProfileId = profileId
+        state.adminSupportMessages = []
+        state.adminSupportMessagesLoading = true
+        render()
+        void (async () => {
+          const result = await options.onAdminSupportMessagesLoad?.(profileId)
+          state.adminSupportMessagesLoading = false
+          if (result?.ok) {
+            state.adminSupportMessages = result.messages
+            const conv = state.adminSupportConversations.find(c => c.profileId === profileId)
+            if (conv) {
+              state.supportUnreadCount = Math.max(0, state.supportUnreadCount - conv.unreadByAdmin)
+              conv.unreadByAdmin = 0
+            }
+          }
+          render()
+        })()
+      },
+      onAdminSupportReply: (profileId, body) => {
+        if (state.adminSupportReplyLoading) return
+        state.adminSupportReplyLoading = true
+        render()
+        void (async () => {
+          const result = await options.onAdminSupportReply?.(profileId, body)
+          state.adminSupportReplyLoading = false
+          if (result?.ok) {
+            state.adminSupportMessages = result.messages
+            const conv = state.adminSupportConversations.find(c => c.profileId === profileId)
+            if (conv) {
+              conv.lastMessageIsFromAdmin = true
+              conv.lastMessageBody = body
+              conv.updatedAt = new Date().toISOString()
+            }
+          }
+          render()
+        })()
+      },
+      onAdminSupportDeleteClick: (profileId) => {
+        state.adminSupportDeleteConfirmProfileId = profileId
+        render()
+      },
+      onAdminSupportDeleteCancel: () => {
+        state.adminSupportDeleteConfirmProfileId = null
+        render()
+      },
+      onAdminSupportDeleteConfirm: (profileId) => {
+        if (state.adminSupportDeleteLoading) return
+        state.adminSupportDeleteLoading = true
+        render()
+        void (async () => {
+          const result = await options.onAdminSupportDeleteConversation?.(profileId)
+          state.adminSupportDeleteLoading = false
+          if (result?.ok) {
+            const conv = state.adminSupportConversations.find(c => c.profileId === profileId)
+            if (conv) {
+              state.supportUnreadCount = Math.max(0, state.supportUnreadCount - conv.unreadByAdmin)
+            }
+            state.adminSupportConversations = state.adminSupportConversations.filter(c => c.profileId !== profileId)
+            if (state.adminSupportSelectedProfileId === profileId) {
+              state.adminSupportSelectedProfileId = null
+              state.adminSupportMessages = []
+            }
+            state.adminSupportDeleteConfirmProfileId = null
+          }
+          render()
+        })()
       },
     })
   }
@@ -2193,7 +2418,21 @@ export function createLobbyFlowController(
     state.adminSettingsErrorText = null
     render()
 
-    await Promise.all([loadAdminCoinPackages(), loadAdminMissions()])
+    await Promise.all([loadAdminCoinPackages(), loadAdminMissions(), loadAdminSupportConversations()])
+  }
+
+  async function loadAdminSupportConversations(): Promise<void> {
+    if (state.currentScreen !== 'admin' && state.currentScreen !== 'support') return
+    if (!options.onAdminSupportConversationsLoad) return
+    state.adminSupportConversationsLoading = true
+    render()
+    const result = await options.onAdminSupportConversationsLoad()
+    if (state.currentScreen !== 'admin' && state.currentScreen !== 'support') return
+    state.adminSupportConversationsLoading = false
+    if (result.ok) {
+      state.adminSupportConversations = result.conversations
+    }
+    render()
   }
 
   async function submitAdminSettings(settings: AdminSettingsSnapshot): Promise<void> {
@@ -3690,6 +3929,15 @@ export function createLobbyFlowController(
     startMatchmaking,
     resetToLobby,
     refreshMissionsCount: () => { void loadPlayerUnclaimedCount() },
+    refreshSupportUnread: () => {
+      void (async () => {
+        const result = await options.onSupportUnreadLoad?.()
+        if (result?.ok) {
+          state.supportUnreadCount = result.unreadCount
+          render()
+        }
+      })()
+    },
     handleServerMessage,
     navigateToShop: (noticeText: string | null) => {
       void showShopPanel().then(() => {

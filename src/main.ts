@@ -30,6 +30,8 @@ import {
   type MissionTemplateSnapshot,
   type PlayerMissionProgressSnapshot,
   type PlayerPublicProfileSnapshot,
+  type SupportMessageSnapshot,
+  type SupportConversationSnapshot,
 } from './app/network/createGameServerClient'
 import { createViewportResizeHandler } from './ui/layout/viewportStage'
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
@@ -99,6 +101,7 @@ let isPageUnloading = false
 let isRefreshingAuthConnection = false
 let isSessionDisplaced = false
 let currentAuthSession: AuthSession | null = null
+let supportUnreadIntervalId: ReturnType<typeof setInterval> | null = null
 let publicSignupBonusYellowCoins = 100000
 let publicProfileNameChangePrice = 50000
 let publicOnlinePlayersCount = 0
@@ -222,6 +225,21 @@ async function readAuthResponse(response: Response): Promise<AuthResponse> {
   }
 }
 
+function startSupportUnreadPolling(): void {
+  if (supportUnreadIntervalId !== null) return
+  supportUnreadIntervalId = setInterval(() => {
+    if (currentAuthSession !== null) {
+      lobby.refreshSupportUnread()
+    }
+  }, 30_000)
+}
+
+function stopSupportUnreadPolling(): void {
+  if (supportUnreadIntervalId === null) return
+  clearInterval(supportUnreadIntervalId)
+  supportUnreadIntervalId = null
+}
+
 function syncLobbyWithAuthSession(): void {
   if (currentAuthSession === null) {
     lobby.setFriendships(null)
@@ -286,6 +304,10 @@ async function loadAuthSession(): Promise<void> {
     syncLobbyWithAuthSession()
     if (currentAuthSession !== null) {
       lobby.refreshMissionsCount()
+      lobby.refreshSupportUnread()
+      startSupportUnreadPolling()
+    } else {
+      stopSupportUnreadPolling()
     }
     await syncLobbyFriendships()
     await syncLobbyChatConversations()
@@ -316,6 +338,8 @@ async function submitAuthRequest(
 
     currentAuthSession = data.session
     syncLobbyWithAuthSession()
+    lobby.refreshSupportUnread()
+    startSupportUnreadPolling()
     await syncLobbyFriendships()
     await syncLobbyChatConversations()
     refreshGameServerConnectionForAuth()
@@ -335,6 +359,7 @@ async function submitLogout(): Promise<void> {
     // ignore network errors — proceed with local logout
   }
   currentAuthSession = null
+  stopSupportUnreadPolling()
   syncLobbyWithAuthSession()
   lobby.render()
 }
@@ -1221,6 +1246,153 @@ async function sendChatMessage(friendshipId: string, body: string): Promise<
   }
 }
 
+type SupportMessagesApiResponse = {
+  ok: boolean
+  messages?: SupportMessageSnapshot[]
+  unreadCount?: number
+  message?: string
+}
+
+type SupportConversationsApiResponse = {
+  ok: boolean
+  conversations?: SupportConversationSnapshot[]
+  message?: string
+}
+
+async function loadSupportMessages(): Promise<
+  | { ok: true; messages: SupportMessageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/support/messages`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as SupportMessagesApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.messages)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане.' }
+    }
+    return { ok: true, messages: data.messages }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function sendSupportMessage(body: string): Promise<
+  | { ok: true; messages: SupportMessageSnapshot[] }
+  | { ok: false; code?: string; remainingMinutes?: number; message?: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/support/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ body, website: '' }),
+    })
+    const data = (await response.json()) as SupportMessagesApiResponse & { code?: string; remainingMinutes?: number }
+    if (!response.ok || !data.ok) {
+      return { ok: false, code: data.code, remainingMinutes: data.remainingMinutes, message: data.message }
+    }
+    if (!Array.isArray(data.messages)) {
+      return { ok: false, message: 'Грешка при изпращане.' }
+    }
+    return { ok: true, messages: data.messages }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadAdminSupportConversations(): Promise<
+  | { ok: true; conversations: SupportConversationSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/support/admin/conversations`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as SupportConversationsApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.conversations)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане.' }
+    }
+    return { ok: true, conversations: data.conversations }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadAdminSupportMessages(profileId: string): Promise<
+  | { ok: true; messages: SupportMessageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/support/admin/messages/${encodeURIComponent(profileId)}`,
+      { method: 'GET', credentials: 'include' },
+    )
+    const data = (await response.json()) as SupportMessagesApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.messages)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане.' }
+    }
+    return { ok: true, messages: data.messages }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function sendAdminSupportReply(profileId: string, body: string): Promise<
+  | { ok: true; messages: SupportMessageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/support/admin/reply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ profileId, body }),
+    })
+    const data = (await response.json()) as SupportMessagesApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.messages)) {
+      return { ok: false, message: data.message ?? 'Грешка при изпращане.' }
+    }
+    return { ok: true, messages: data.messages }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function deleteUserSupportConversation(): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/support/messages`, {
+      method: 'DELETE',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as { ok: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Грешка при изтриване.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function archiveAdminSupportConversation(profileId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/support/admin/conversations/${encodeURIComponent(profileId)}/archive`,
+      { method: 'POST', credentials: 'include' },
+    )
+    const data = (await response.json()) as { ok: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Грешка при архивиране.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function submitProfileLike(
   profileId: string,
 ): Promise<{ ok: true; liked: boolean; likesCount: number } | { ok: false }> {
@@ -1731,6 +1903,28 @@ lobby = createLobbyFlowController({
   onPrivateRoomInvite: (toProfiles) => { client.inviteToPrivateRoom(toProfiles) },
   onCancelPrivateRoomInvite: (inviteId) => { client.cancelPrivateRoomInvite(inviteId) },
   onPrivateRoomInviteRespond: (inviteId, accept) => { client.respondPrivateRoomInvite(inviteId, accept) },
+  onSupportMessagesLoad: () => loadSupportMessages(),
+  onSupportSend: (body) => sendSupportMessage(body),
+  onSupportUnreadLoad: async () => {
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/support/unread`, {
+        method: 'GET',
+        credentials: 'include',
+      })
+      const data = (await response.json()) as { ok: boolean; unreadCount?: number }
+      if (response.ok && data.ok && typeof data.unreadCount === 'number') {
+        return { ok: true, unreadCount: data.unreadCount }
+      }
+      return { ok: false }
+    } catch {
+      return { ok: false }
+    }
+  },
+  onAdminSupportConversationsLoad: () => loadAdminSupportConversations(),
+  onAdminSupportMessagesLoad: (profileId) => loadAdminSupportMessages(profileId),
+  onAdminSupportReply: (profileId, body) => sendAdminSupportReply(profileId, body),
+  onAdminSupportDeleteConversation: (profileId) => archiveAdminSupportConversation(profileId),
+  onSupportDeleteConversation: () => deleteUserSupportConversation(),
 })
 
 const activeRoom = createActiveRoomFlowController({

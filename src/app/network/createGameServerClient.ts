@@ -94,6 +94,24 @@ export type DailyRewardTierSnapshot = {
   claimedToday?: boolean
 }
 
+export type SupportMessageSnapshot = {
+  messageId: string
+  profileId: string
+  body: string
+  isFromAdmin: boolean
+  createdAt: string
+}
+
+export type SupportConversationSnapshot = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  lastMessageBody: string
+  lastMessageIsFromAdmin: boolean
+  unreadByAdmin: number
+  updatedAt: string
+}
+
 export type AdminSettingsSnapshot = {
   signupBonusYellowCoins: number
   profileNameChangePrice: number

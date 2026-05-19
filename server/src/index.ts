@@ -16,6 +16,7 @@ import {
   getSessionTokenFromCookieHeader,
 } from './db/authStore.js'
 import { createChatStore } from './db/chatStore.js'
+import { createSupportStore, type SupportMessageSnapshot, type SupportConversationSnapshot } from './db/supportStore.js'
 import {
   createCoinPackageStore,
   type CoinPackageStatus,
@@ -173,6 +174,16 @@ const matchEconomyStore = await createMatchEconomyStore(
   databaseBootstrap.databaseFilePath,
 )
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
+const supportStore = await createSupportStore(databaseBootstrap.databaseFilePath)
+
+function runSupportCleanup(): void {
+  const deleted = supportStore.cleanupInactiveConversations()
+  if (deleted > 0) {
+    console.log(`[support] Cleanup: deleted ${deleted} messages from inactive resolved conversations`)
+  }
+}
+runSupportCleanup()
+setInterval(runSupportCleanup, 24 * 60 * 60 * 1000)
 
 console.log(
   `[db] SQLite ready file=${databaseBootstrap.databaseFilePath} applied=${databaseBootstrap.appliedCount} skipped=${databaseBootstrap.skippedCount}`,
@@ -3304,6 +3315,188 @@ async function handleAdminDailyRewardsRequest(
   return true
 }
 
+async function handleSupportRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (!pathname.startsWith('/api/support')) return false
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  // GET /api/support/messages — user gets own conversation
+  if (pathname === '/api/support/messages' && req.method === 'GET') {
+    if (!session || session.profile.profileId === null) {
+      sendJsonResponse(res, 401, { ok: false, message: 'Не си влязъл в профила си.' })
+      return true
+    }
+    const profileId = session.profile.profileId
+    const messages = supportStore.getMessages(profileId)
+    supportStore.markReadByUser(profileId)
+    const unreadCount = 0
+    sendJsonResponse(res, 200, { ok: true, messages, unreadCount })
+    return true
+  }
+
+  // POST /api/support/messages — user sends message
+  if (pathname === '/api/support/messages' && req.method === 'POST') {
+    if (!session || session.profile.profileId === null) {
+      sendJsonResponse(res, 401, { ok: false, message: 'Не си влязъл в профила си.' })
+      return true
+    }
+    const profileId = session.profile.profileId
+    const rawBody = await readRawRequestBody(req)
+    const parsed = JSON.parse(rawBody.toString()) as { body?: string; website?: string }
+
+    // Honeypot — bots fill hidden fields
+    if (parsed.website) {
+      sendJsonResponse(res, 200, { ok: true })
+      return true
+    }
+
+    // Account age — must be at least 10 minutes old
+    const accountAgeMs = Date.now() - new Date(session.account.createdAt).getTime()
+    const ACCOUNT_AGE_REQUIRED_MS = 10 * 60 * 1000
+    if (accountAgeMs < ACCOUNT_AGE_REQUIRED_MS) {
+      const remainingMs = ACCOUNT_AGE_REQUIRED_MS - accountAgeMs
+      const remainingMinutes = Math.ceil(remainingMs / 60000)
+      sendJsonResponse(res, 403, { ok: false, code: 'account_too_new', remainingMinutes })
+      return true
+    }
+
+    // Rate limit — max 5 user messages per hour, only if admin hasn't replied yet
+    if (!supportStore.hasAdminReply(profileId)) {
+      const recentCount = supportStore.countRecentMessages(profileId, 60)
+      if (recentCount >= 5) {
+        sendJsonResponse(res, 429, { ok: false, code: 'rate_limited', message: 'Достигнахте лимита от 5 съобщения на час. Изчакайте отговор от екипа.' })
+        return true
+      }
+    }
+
+    const text = typeof parsed.body === 'string' ? parsed.body.trim() : ''
+    if (text.length === 0 || text.length > 2000) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидно съобщение.' })
+      return true
+    }
+    const message = supportStore.sendUserMessage(profileId, text)
+    const messages = supportStore.getMessages(profileId)
+    sendJsonResponse(res, 200, { ok: true, message, messages })
+    return true
+  }
+
+  // GET /api/support/unread — unread count (admin gets total, user gets own)
+  if (pathname === '/api/support/unread' && req.method === 'GET') {
+    if (!session || session.profile.profileId === null) {
+      sendJsonResponse(res, 200, { ok: true, unreadCount: 0 })
+      return true
+    }
+    const unreadCount = session.account.role === 'admin'
+      ? supportStore.getTotalUnreadForAdmin()
+      : supportStore.getUnreadCountForUser(session.profile.profileId)
+    sendJsonResponse(res, 200, { ok: true, unreadCount })
+    return true
+  }
+
+  // GET /api/support/admin/conversations — admin sees all
+  if (pathname === '/api/support/admin/conversations' && req.method === 'GET') {
+    if (session?.account.role !== 'admin') {
+      sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+      return true
+    }
+    const conversations = supportStore.getAllConversations((profileId) => {
+      const p = playerProgressStore.getPublicProfile(profileId)
+      if (!p) return null
+      return { displayName: p.displayName, avatarUrl: p.avatarUrl }
+    })
+    const totalUnread = supportStore.getTotalUnreadForAdmin()
+    sendJsonResponse(res, 200, { ok: true, conversations, totalUnread })
+    return true
+  }
+
+  // GET /api/support/admin/messages/:profileId — admin reads thread
+  if (pathname.startsWith('/api/support/admin/messages/') && req.method === 'GET') {
+    if (session?.account.role !== 'admin') {
+      sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+      return true
+    }
+    const profileId = pathname.replace('/api/support/admin/messages/', '')
+    const messages = supportStore.getMessages(profileId)
+    supportStore.markReadByAdmin(profileId)
+    sendJsonResponse(res, 200, { ok: true, messages })
+    return true
+  }
+
+  // POST /api/support/admin/reply — admin replies
+  if (pathname === '/api/support/admin/reply' && req.method === 'POST') {
+    if (session?.account.role !== 'admin') {
+      sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+      return true
+    }
+    const rawBody = await readRawRequestBody(req)
+    const parsed = JSON.parse(rawBody.toString()) as { profileId?: string; body?: string }
+    const profileId = typeof parsed.profileId === 'string' ? parsed.profileId.trim() : ''
+    const text = typeof parsed.body === 'string' ? parsed.body.trim() : ''
+    if (!profileId || text.length === 0 || text.length > 2000) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидни данни.' })
+      return true
+    }
+    const message = supportStore.sendAdminReply(profileId, text)
+    if (!message) {
+      sendJsonResponse(res, 404, { ok: false, message: 'Потребителят няма съобщения.' })
+      return true
+    }
+    const messages = supportStore.getMessages(profileId)
+    sendJsonResponse(res, 200, { ok: true, message, messages })
+    return true
+  }
+
+  // POST /api/support/admin/conversations/:profileId/archive — admin archives thread
+  if (pathname.match(/^\/api\/support\/admin\/conversations\/[^/]+\/archive$/) && req.method === 'POST') {
+    if (session?.account.role !== 'admin') {
+      sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+      return true
+    }
+    const profileId = pathname.replace('/api/support/admin/conversations/', '').replace('/archive', '')
+    if (!profileId) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден profileId.' })
+      return true
+    }
+    supportStore.archiveConversation(profileId)
+    sendJsonResponse(res, 200, { ok: true })
+    return true
+  }
+
+  // DELETE /api/support/admin/conversations/:profileId — admin hard-deletes thread
+  if (pathname.startsWith('/api/support/admin/conversations/') && req.method === 'DELETE') {
+    if (session?.account.role !== 'admin') {
+      sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+      return true
+    }
+    const profileId = pathname.replace('/api/support/admin/conversations/', '')
+    if (!profileId) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден profileId.' })
+      return true
+    }
+    supportStore.deleteConversation(profileId)
+    sendJsonResponse(res, 200, { ok: true })
+    return true
+  }
+
+  // DELETE /api/support/messages — user deletes own conversation
+  if (pathname === '/api/support/messages' && req.method === 'DELETE') {
+    if (!session || session.profile.profileId === null) {
+      sendJsonResponse(res, 401, { ok: false, message: 'Не си влязъл в профила си.' })
+      return true
+    }
+    supportStore.deleteConversation(session.profile.profileId)
+    sendJsonResponse(res, 200, { ok: true })
+    return true
+  }
+
+  return false
+}
+
 async function handleDailyRewardsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -3488,6 +3681,10 @@ async function handleHttpRequest(
   }
 
   if (await handleDailyRewardsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleSupportRequest(req, res, requestUrl.pathname)) {
     return
   }
 
