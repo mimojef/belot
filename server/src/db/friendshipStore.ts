@@ -7,8 +7,8 @@ import type { PlayerProgressStore } from './playerProgressStore.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
-export type FriendshipStatus = 'pending' | 'accepted' | 'blocked'
-export type FriendshipDirection = 'incoming' | 'outgoing' | 'accepted' | 'blocked'
+export type FriendshipStatus = 'pending' | 'accepted'
+export type FriendshipDirection = 'incoming' | 'outgoing' | 'accepted'
 
 export type FriendRelationshipSnapshot = {
   friendshipId: string
@@ -23,7 +23,6 @@ export type FriendshipsSnapshot = {
   incomingPending: FriendRelationshipSnapshot[]
   outgoingPending: FriendRelationshipSnapshot[]
   friends: FriendRelationshipSnapshot[]
-  blocked: FriendRelationshipSnapshot[]
 }
 
 export type FriendshipStore = {
@@ -52,12 +51,6 @@ export type FriendshipStore = {
   ) =>
     | { ok: true; friendships: FriendshipsSnapshot }
     | { ok: false; message: string }
-  blockProfile: (
-    blockerProfileId: ProfileId,
-    blockedProfileId: ProfileId,
-  ) =>
-    | { ok: true; friendships: FriendshipsSnapshot }
-    | { ok: false; message: string }
   close: () => void
 }
 
@@ -65,8 +58,7 @@ type FriendshipRow = {
   friendship_id: string
   requester_profile_id: string
   addressee_profile_id: string
-  blocker_profile_id: string | null
-  status: FriendshipStatus
+  status: string
   created_at: string
   updated_at: string
 }
@@ -91,7 +83,6 @@ function createEmptyFriendshipsSnapshot(): FriendshipsSnapshot {
     incomingPending: [],
     outgoingPending: [],
     friends: [],
-    blocked: [],
   }
 }
 
@@ -101,10 +92,6 @@ function getFriendshipDirection(
 ): FriendshipDirection {
   if (row.status === 'accepted') {
     return 'accepted'
-  }
-
-  if (row.status === 'blocked') {
-    return 'blocked'
   }
 
   return row.addressee_profile_id === ownProfileId ? 'incoming' : 'outgoing'
@@ -126,7 +113,7 @@ function toRelationshipSnapshot(input: {
 }): FriendRelationshipSnapshot {
   return {
     friendshipId: input.row.friendship_id,
-    status: input.row.status,
+    status: input.row.status as FriendshipStatus,
     direction: getFriendshipDirection(input.row, input.ownProfileId),
     profile: input.profile,
     createdAt: input.row.created_at,
@@ -162,13 +149,13 @@ export async function createFriendshipStore(
       friendship_id,
       requester_profile_id,
       addressee_profile_id,
-      blocker_profile_id,
       status,
       created_at,
       updated_at
     FROM profile_friendships
     WHERE lower_profile_id = ?
       AND higher_profile_id = ?
+      AND status != 'blocked'
     LIMIT 1;
   `)
 
@@ -177,13 +164,12 @@ export async function createFriendshipStore(
       friendship_id,
       requester_profile_id,
       addressee_profile_id,
-      blocker_profile_id,
       status,
       created_at,
       updated_at
     FROM profile_friendships
-    WHERE requester_profile_id = ?
-       OR addressee_profile_id = ?
+    WHERE (requester_profile_id = ? OR addressee_profile_id = ?)
+      AND status != 'blocked'
     ORDER BY updated_at DESC, created_at DESC;
   `)
 
@@ -194,46 +180,14 @@ export async function createFriendshipStore(
       addressee_profile_id,
       lower_profile_id,
       higher_profile_id,
-      blocker_profile_id,
       status
-    ) VALUES (
-      ?,
-      ?,
-      ?,
-      ?,
-      ?,
-      NULL,
-      'pending'
-    );
-  `)
-
-  const insertBlockedFriendshipStatement = database.prepare(`
-    INSERT INTO profile_friendships (
-      friendship_id,
-      requester_profile_id,
-      addressee_profile_id,
-      lower_profile_id,
-      higher_profile_id,
-      blocker_profile_id,
-      status,
-      responded_at
-    ) VALUES (
-      ?,
-      ?,
-      ?,
-      ?,
-      ?,
-      ?,
-      'blocked',
-      CURRENT_TIMESTAMP
-    );
+    ) VALUES (?, ?, ?, ?, ?, 'pending');
   `)
 
   const acceptFriendshipStatement = database.prepare(`
     UPDATE profile_friendships
     SET
       status = 'accepted',
-      blocker_profile_id = NULL,
       updated_at = CURRENT_TIMESTAMP,
       responded_at = CURRENT_TIMESTAMP
     WHERE friendship_id = ?
@@ -258,22 +212,6 @@ export async function createFriendshipStore(
       );
   `)
 
-  const updateFriendshipBlockedStatement = database.prepare(`
-    UPDATE profile_friendships
-    SET
-      requester_profile_id = ?,
-      addressee_profile_id = ?,
-      blocker_profile_id = ?,
-      status = 'blocked',
-      updated_at = CURRENT_TIMESTAMP,
-      responded_at = CURRENT_TIMESTAMP
-    WHERE friendship_id = ?
-      AND (
-        requester_profile_id = ?
-        OR addressee_profile_id = ?
-      );
-  `)
-
   function isRegisteredHumanProfile(profileId: ProfileId): boolean {
     const row = selectRegisteredHumanProfileStatement.get(profileId) as
       | { profile_id: string }
@@ -290,10 +228,6 @@ export async function createFriendshipStore(
     const snapshot = createEmptyFriendshipsSnapshot()
 
     for (const row of rows) {
-      if (row.status === 'blocked' && row.blocker_profile_id !== profileId) {
-        continue
-      }
-
       const counterpartProfileId = getCounterpartProfileId(row, profileId)
       const profile = playerProgressStore.getPublicProfile(counterpartProfileId)
 
@@ -311,10 +245,8 @@ export async function createFriendshipStore(
         snapshot.incomingPending.push(relationship)
       } else if (relationship.direction === 'outgoing') {
         snapshot.outgoingPending.push(relationship)
-      } else if (relationship.direction === 'accepted') {
-        snapshot.friends.push(relationship)
       } else {
-        snapshot.blocked.push(relationship)
+        snapshot.friends.push(relationship)
       }
     }
 
@@ -359,13 +291,6 @@ export async function createFriendshipStore(
         return {
           ok: false,
           message: 'Вече сте приятели.',
-        }
-      }
-
-      if (existingRow.status === 'blocked') {
-        return {
-          ok: false,
-          message: 'Не може да изпратиш покана към този играч.',
         }
       }
 
@@ -469,70 +394,6 @@ export async function createFriendshipStore(
     }
   }
 
-  function blockProfile(
-    blockerProfileId: ProfileId,
-    blockedProfileId: ProfileId,
-  ):
-    | { ok: true; friendships: FriendshipsSnapshot }
-    | { ok: false; message: string } {
-    if (blockerProfileId === blockedProfileId) {
-      return {
-        ok: false,
-        message: 'Не можеш да блокираш себе си.',
-      }
-    }
-
-    if (!isRegisteredHumanProfile(blockerProfileId)) {
-      return {
-        ok: false,
-        message: 'Трябва да влезеш в профила си.',
-      }
-    }
-
-    if (!isRegisteredHumanProfile(blockedProfileId)) {
-      return {
-        ok: false,
-        message: 'Играчът не беше намерен.',
-      }
-    }
-
-    const pair = createProfilePair(blockerProfileId, blockedProfileId)
-    const existingRow = selectFriendshipByPairStatement.get(
-      pair.lowerProfileId,
-      pair.higherProfileId,
-    ) as FriendshipRow | undefined
-
-    if (existingRow) {
-      updateFriendshipBlockedStatement.run(
-        blockerProfileId,
-        blockedProfileId,
-        blockerProfileId,
-        existingRow.friendship_id,
-        blockerProfileId,
-        blockerProfileId,
-      )
-
-      return {
-        ok: true,
-        friendships: listForProfile(blockerProfileId),
-      }
-    }
-
-    insertBlockedFriendshipStatement.run(
-      randomUUID(),
-      blockerProfileId,
-      blockedProfileId,
-      pair.lowerProfileId,
-      pair.higherProfileId,
-      blockerProfileId,
-    )
-
-    return {
-      ok: true,
-      friendships: listForProfile(blockerProfileId),
-    }
-  }
-
   function close(): void {
     database.close()
   }
@@ -543,7 +404,6 @@ export async function createFriendshipStore(
     acceptRequest,
     rejectRequest,
     removeRelationship,
-    blockProfile,
     close,
   }
 }

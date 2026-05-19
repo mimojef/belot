@@ -20,6 +20,8 @@ import {
   createCoinPackageStore,
   type CoinPackageStatus,
 } from './db/coinPackageStore.js'
+import { createBlockStore, BLOCK_LIMIT } from './db/blockStore.js'
+import { createLikeStore } from './db/likeStore.js'
 import { createMissionStore, type MissionType } from './db/missionStore.js'
 import { createCoinPurchaseStore } from './db/coinPurchaseStore.js'
 import { createDailyRewardsStore } from './db/dailyRewardsStore.js'
@@ -127,6 +129,8 @@ const activeRoomSnapshotStore = await createActiveRoomSnapshotStore(
 const playerProgressStore = await createPlayerProgressStore(
   databaseBootstrap.databaseFilePath,
 )
+const likeStore = await createLikeStore(databaseBootstrap.databaseFilePath)
+const blockStore = await createBlockStore(databaseBootstrap.databaseFilePath)
 playerProgressStore.seedCatalogBotsIfNeeded()
 setInterval(() => playerProgressStore.refillCatalogBotWallets(), 5 * 60 * 1000)
 const adminSettingsStore = await createAdminSettingsStore(
@@ -675,6 +679,9 @@ function createFallbackPublicProfileSnapshot(
     yellowCoinsBalance: null,
     gender: identity.gender ?? null,
     galleryImages: [],
+    likesCount: null,
+    hasLikedByMe: null,
+    isBlockedByMe: null,
   }
 }
 
@@ -718,14 +725,25 @@ function sendPlayerProfileToConnection(
       ? playerProgressStore.getPublicProfile(profileId)
       : null
 
+  const viewerProfileId = serverState.connections[connectionId]?.profileId ?? null
+  const baseProfile = participant === null
+    ? null
+    : dbProfile ?? participant.publicProfile ?? createFallbackPublicProfileSnapshot(participant)
+
+  const enrichedProfile = baseProfile && profileId
+    ? {
+        ...baseProfile,
+        likesCount: likeStore.getLikesCount(profileId),
+        hasLikedByMe: viewerProfileId ? likeStore.hasLikedRecently(viewerProfileId, profileId) : null,
+        isBlockedByMe: viewerProfileId ? blockStore.isBlocked(viewerProfileId, profileId) : null,
+      }
+    : baseProfile
+
   safeSendToConnection(connectionId, {
     type: 'player_profile',
     roomId,
     seat,
-    profile:
-      participant === null
-        ? null
-        : dbProfile ?? participant.publicProfile ?? createFallbackPublicProfileSnapshot(participant),
+    profile: enrichedProfile,
   })
 }
 
@@ -1010,7 +1028,10 @@ function processMatchmaking(): void {
   while (guard < 20) {
     guard += 1
 
-    const result = tryCreatePendingMatchGroup(matchmakingState)
+    const result = tryCreatePendingMatchGroup(
+      matchmakingState,
+      (a, b) => blockStore.isBlocked(a, b),
+    )
 
     matchmakingState = result.matchmakingState
 
@@ -1805,6 +1826,102 @@ async function handleProfileRequest(
   return true
 }
 
+async function handleProfileBlockRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const blockMatch = pathname.match(/^\/api\/profiles\/([^/]+)\/block$/)
+  const isBlocksList = pathname === '/api/blocks'
+
+  if (!blockMatch && !isBlocksList) return false
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  const myProfileId = session.profile.profileId
+
+  if (isBlocksList && req.method === 'GET') {
+    const profileIds = blockStore.getBlockedProfileIds(myProfileId)
+    const profiles = profileIds.flatMap((id) => {
+      const p = playerProgressStore.getPublicProfile(id)
+      return p ? [p] : []
+    })
+    sendJsonResponse(res, 200, {
+      ok: true,
+      profiles,
+      count: profiles.length,
+      limit: BLOCK_LIMIT,
+    })
+    return true
+  }
+
+  if (blockMatch && req.method === 'POST') {
+    const targetProfileId = decodeURIComponent(blockMatch[1])
+
+    if (myProfileId === targetProfileId) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Не можеш да блокираш себе си.' })
+      return true
+    }
+
+    const result = blockStore.toggleBlock(myProfileId, targetProfileId)
+
+    if (result.limitReached) {
+      sendJsonResponse(res, 429, {
+        ok: false,
+        limitReached: true,
+        message: `Достигнахте лимита от ${BLOCK_LIMIT} блокирани играча. Освободете място, за да блокирате нов.`,
+      })
+      return true
+    }
+
+    sendJsonResponse(res, 200, { ok: true, blocked: result.blocked })
+    return true
+  }
+
+  return false
+}
+
+async function handleProfileLikeRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = pathname.match(/^\/api\/profiles\/([^/]+)\/like$/)
+  if (!match || req.method !== 'POST') return false
+
+  const likedProfileId = decodeURIComponent(match[1])
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+  if (!session) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Не си влязъл.' })
+    return true
+  }
+
+  const likerProfileId = session.profile.profileId
+  if (!likerProfileId) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Не си влязъл.' })
+    return true
+  }
+  if (likerProfileId === likedProfileId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Не може да харесаш себе си.' })
+    return true
+  }
+
+  const result = likeStore.addLike(likerProfileId, likedProfileId)
+  if (!result.ok) {
+    sendJsonResponse(res, 429, { ok: false, message: 'Вече харесано. Опитай след 4 часа.' })
+    return true
+  }
+  sendJsonResponse(res, 200, { ok: true, liked: true, likesCount: result.likesCount })
+  return true
+}
+
 async function handlePlayersRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -1840,10 +1957,18 @@ async function handlePlayersRequest(
     return arr
   }
 
-  sendJsonResponse(res, 200, {
-    ok: true,
-    players: [...me, ...shuffle(humans), ...shuffle(bots)],
-  })
+  const allPlayers = [...me, ...shuffle(humans), ...shuffle(bots)].map((p) => ({
+    ...p,
+    likesCount: p.profileId ? likeStore.getLikesCount(p.profileId) : null,
+    hasLikedByMe: p.profileId && currentProfileId
+      ? likeStore.hasLikedRecently(currentProfileId, p.profileId)
+      : null,
+    isBlockedByMe: p.profileId && currentProfileId
+      ? blockStore.isBlocked(currentProfileId, p.profileId)
+      : null,
+  }))
+
+  sendJsonResponse(res, 200, { ok: true, players: allPlayers })
   return true
 }
 
@@ -1962,9 +2087,28 @@ async function handleLeaderboardsRequest(
     return false
   }
 
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+  const currentProfileId = session?.profile.profileId ?? null
+
+  const rawLeaderboards = playerProgressStore.listLeaderboards()
+  const enrichLeaderboard = (profiles: typeof rawLeaderboards[keyof typeof rawLeaderboards]) =>
+    profiles.map((p) => ({
+      ...p,
+      likesCount: p.profileId ? likeStore.getLikesCount(p.profileId) : null,
+      hasLikedByMe: p.profileId && currentProfileId
+        ? likeStore.hasLikedRecently(currentProfileId, p.profileId)
+        : null,
+      isBlockedByMe: p.profileId && currentProfileId
+        ? blockStore.isBlocked(currentProfileId, p.profileId)
+        : null,
+    }))
+
   sendJsonResponse(res, 200, {
     ok: true,
-    leaderboards: playerProgressStore.listLeaderboards(),
+    leaderboards: Object.fromEntries(
+      Object.entries(rawLeaderboards).map(([key, val]) => [key, enrichLeaderboard(val)])
+    ),
   })
   return true
 }
@@ -2525,7 +2669,6 @@ async function handleFriendsRequest(
   if (
     pathname !== '/api/friends' &&
     pathname !== '/api/friends/request' &&
-    pathname !== '/api/friends/block' &&
     friendGiftMatch === null &&
     friendActionMatch === null
   ) {
@@ -2566,32 +2709,6 @@ async function handleFriendsRequest(
 
     const addresseeProfileId = getStringField(body, 'profileId').trim()
     const result = friendshipStore.sendRequest(profileId, addresseeProfileId)
-
-    if (!result.ok) {
-      sendJsonResponse(res, 400, result)
-      return true
-    }
-
-    sendJsonResponse(res, 200, {
-      ok: true,
-      friendships: result.friendships,
-    })
-    return true
-  }
-
-  if (pathname === '/api/friends/block' && req.method === 'POST') {
-    const body = await readJsonRequestBody(req)
-
-    if (!isRecord(body)) {
-      sendJsonResponse(res, 400, {
-        ok: false,
-        message: 'Invalid request body.',
-      })
-      return true
-    }
-
-    const blockedProfileId = getStringField(body, 'profileId').trim()
-    const result = friendshipStore.blockProfile(profileId, blockedProfileId)
 
     if (!result.ok) {
       sendJsonResponse(res, 400, result)
@@ -3166,6 +3283,14 @@ async function handleHttpRequest(
   }
 
   if (await handleChatRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleProfileLikeRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleProfileBlockRequest(req, res, requestUrl.pathname)) {
     return
   }
 
@@ -4272,6 +4397,38 @@ wsServer.on('connection', (socket, request) => {
         if (publicProfile === null) {
           safeSendToConnection(connection.id, { type: 'error', message: 'Профилът не беше намерен.' })
           return
+        }
+
+        const targetPrivateRoom = privateRoomsStore
+          .listRooms()
+          .find((r) => r.id === message.privateRoomId)
+
+        if (targetPrivateRoom?.kind === 'open') {
+          const memberCount = targetPrivateRoom.members.length
+          // Seats assigned in order: bottom(0), right(1), top(2), left(3)
+          // Team A = bottom+top, Team B = right+left
+          // 3rd joiner (top) partners with member[0] (bottom)
+          // 4th joiner (left) partners with member[1] (right)
+          const futurePartnerProfileId =
+            memberCount === 2
+              ? (targetPrivateRoom.members[0]?.profileId ?? null)
+              : memberCount === 3
+                ? (targetPrivateRoom.members[1]?.profileId ?? null)
+                : null
+
+          if (futurePartnerProfileId !== null) {
+            const joiningId = latestConnection.profileId
+            if (
+              blockStore.isBlocked(joiningId, futurePartnerProfileId) ||
+              blockStore.isBlocked(futurePartnerProfileId, joiningId)
+            ) {
+              safeSendToConnection(connection.id, {
+                type: 'error',
+                message: 'Не можеш да влезеш в тази маса поради блокиране.',
+              })
+              return
+            }
+          }
         }
 
         const joinResult = privateRoomsStore.joinRoom({

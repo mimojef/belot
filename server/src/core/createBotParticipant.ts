@@ -144,6 +144,9 @@ function createBotPublicProfileSnapshot(
     yellowCoinsBalance: normalizeNullableCount(source?.yellowCoinsBalance),
     gender: null,
     galleryImages: normalizeGalleryImages(source),
+    likesCount: null,
+    hasLikedByMe: null,
+    isBlockedByMe: null,
   }
 }
 

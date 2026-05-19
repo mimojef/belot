@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
 
-export const PRIVATE_ROOM_OPEN_TIMEOUT_MS = 3 * 60 * 1000
+export const PRIVATE_ROOM_OPEN_TIMEOUT_MS = 10 * 60 * 1000
 export const PRIVATE_ROOM_LOCKED_TIMEOUT_MS = 20 * 60 * 1000
 const MAX_MEMBERS = 4
 
@@ -142,13 +142,13 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
 
   function createRoom(input: CreateRoomInput): CreateRoomResult {
     if (connectionToRoom.has(input.connectionId)) {
-      return { ok: false, message: 'Вече си в частна маса.' }
+      return { ok: false, message: 'Вече си влязъл в тази маса.' }
     }
 
     if (input.profileId !== null) {
       for (const room of rooms.values()) {
         if (room.members.some((m) => m.profileId === input.profileId)) {
-          return { ok: false, message: 'Вече си в частна маса.' }
+          return { ok: false, message: 'Вече си влязъл в тази маса.' }
         }
       }
     }
@@ -187,7 +187,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
 
   function joinRoom(input: JoinRoomInput): JoinRoomResult {
     if (connectionToRoom.has(input.connectionId)) {
-      return { ok: false, message: 'Вече си в частна маса.' }
+      return { ok: false, message: 'Вече си влязъл в тази маса.' }
     }
 
     const room = rooms.get(input.privateRoomId) ?? null

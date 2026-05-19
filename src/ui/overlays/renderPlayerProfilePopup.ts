@@ -18,7 +18,6 @@ export type PlayerProfileFriendshipAction = {
   label: string
   disabled: boolean
   message: string | null
-  canBlock?: boolean
   giftFriendshipId?: string | null
 }
 
@@ -382,7 +381,7 @@ function renderProfileContent(
           display:grid;
           grid-template-columns:124px minmax(0, 1fr);
           gap:18px;
-          align-items:start;
+          align-items:stretch;
         "
       >
         <div style="position:relative;width:124px;height:124px;flex:0 0 124px;">
@@ -452,67 +451,94 @@ function renderProfileContent(
             </div>
           ` : ''}
 
-          ${!canEdit && friendshipAction ? `
+          ${!canEdit ? `
             <div style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;">
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                <button
-                  type="button"
-                  data-player-profile-friend-request="${escapeHtml(friendshipAction.profileId)}"
-                  ${friendshipAction.disabled ? 'disabled' : ''}
-                  style="
-                    min-height:38px;
-                    padding:0 14px;
-                    border:1px solid rgba(212,165,32,0.62);
-                    border-radius:8px;
-                    background:${friendshipAction.disabled ? 'rgba(255,255,255,0.07)' : 'linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%)'};
-                    color:${friendshipAction.disabled ? 'rgba(255,255,255,0.70)' : '#080808'};
-                    font-size:13px;
-                    font-weight:900;
-                    cursor:${friendshipAction.disabled ? 'default' : 'pointer'};
-                  "
-                >
-                  ${escapeHtml(friendshipAction.label)}
-                </button>
-                ${friendshipAction.canBlock === true ? `
+                ${profile.profileId ? `
                   <button
                     type="button"
-                    data-player-profile-block="${escapeHtml(friendshipAction.profileId)}"
+                    data-player-profile-like="${escapeHtml(profile.profileId)}"
+                    ${profile.hasLikedByMe ? 'disabled' : ''}
                     style="
                       min-height:38px;
-                      padding:0 12px;
-                      border:1px solid rgba(248,113,113,0.42);
-                      border-radius:8px;
-                      background:rgba(127,29,29,0.22);
-                      color:#fecaca;
-                      font-size:13px;
-                      font-weight:900;
-                      cursor:pointer;
-                    "
-                  >
-                    Блокирай
-                  </button>
-                ` : ''}
-                ${friendshipAction.giftFriendshipId ? `
-                  <button
-                    type="button"
-                    data-player-profile-gift-coins="${escapeHtml(friendshipAction.giftFriendshipId)}"
-                    style="
-                      min-height:38px;
-                      padding:0 12px;
+                      padding:0 14px;
                       border:1px solid rgba(212,165,32,0.62);
                       border-radius:8px;
-                      background:rgba(212,165,32,0.14);
-                      color:#fde68a;
+                      background:${profile.hasLikedByMe ? 'rgba(212,165,32,0.12)' : 'linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%)'};
+                      color:${profile.hasLikedByMe ? '#f4c95b' : '#080808'};
+                      font-size:13px;
+                      font-weight:900;
+                      cursor:${profile.hasLikedByMe ? 'default' : 'pointer'};
+                      display:flex;
+                      align-items:center;
+                      gap:5px;
+                    "
+                  >
+                    <span style="color:#ef4444;font-size:22px;line-height:1;">♥</span>${profile.hasLikedByMe ? 'Харесан' : 'Харесай'}
+                  </button>
+                ` : ''}
+                ${friendshipAction ? `
+                  <button
+                    type="button"
+                    data-player-profile-friend-request="${escapeHtml(friendshipAction.profileId)}"
+                    ${friendshipAction.disabled ? 'disabled' : ''}
+                    style="
+                      min-height:38px;
+                      padding:0 14px;
+                      border:1px solid rgba(212,165,32,0.62);
+                      border-radius:8px;
+                      background:${friendshipAction.disabled ? 'rgba(255,255,255,0.07)' : 'linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%)'};
+                      color:${friendshipAction.disabled ? 'rgba(255,255,255,0.70)' : '#080808'};
+                      font-size:13px;
+                      font-weight:900;
+                      cursor:${friendshipAction.disabled ? 'default' : 'pointer'};
+                    "
+                  >
+                    ${escapeHtml(friendshipAction.label)}
+                  </button>
+                  ${friendshipAction.giftFriendshipId ? `
+                    <button
+                      type="button"
+                      data-player-profile-gift-coins="${escapeHtml(friendshipAction.giftFriendshipId)}"
+                      style="
+                        min-height:38px;
+                        padding:0 12px;
+                        border:1px solid rgba(212,165,32,0.62);
+                        border-radius:8px;
+                        background:rgba(212,165,32,0.14);
+                        color:#fde68a;
+                        font-size:13px;
+                        font-weight:900;
+                        cursor:pointer;
+                      "
+                    >
+                      Подари жълтици
+                    </button>
+                  ` : ''}
+                ` : ''}
+                ${profile.profileId && profile.isBlockedByMe !== null ? `
+                  <button
+                    type="button"
+                    data-player-profile-block="${escapeHtml(profile.profileId)}"
+                    style="
+                      min-height:38px;
+                      padding:0 12px;
+                      border:1px solid rgba(248,113,113,0.60);
+                      border-radius:8px;
+                      background:${profile.isBlockedByMe
+                        ? 'rgba(255,255,255,0.07)'
+                        : 'linear-gradient(180deg, rgba(220,38,38,0.88) 0%, rgba(185,28,28,0.92) 100%)'};
+                      color:${profile.isBlockedByMe ? 'rgba(255,255,255,0.50)' : '#fff1f2'};
                       font-size:13px;
                       font-weight:900;
                       cursor:pointer;
                     "
                   >
-                    Подари жълтици
+                    ${profile.isBlockedByMe ? 'Деблокирай' : 'Блокирай'}
                   </button>
                 ` : ''}
               </div>
-              ${friendshipAction.message ? `
+              ${friendshipAction?.message ? `
                 <div style="font-size:12px;font-weight:800;color:#fde68a;line-height:1.35;">
                   ${escapeHtml(friendshipAction.message)}
                 </div>
@@ -520,48 +546,20 @@ function renderProfileContent(
             </div>
           ` : ''}
 
-          <div
-            style="
-              display:flex;
-              flex-wrap:wrap;
-              gap:8px;
-            "
-          >
-            <div
-              style="
-                display:inline-flex;
-                align-items:center;
-                min-height:32px;
-                padding:0 12px;
-                border-radius:999px;
-                background:rgba(245,187,55,0.16);
-                border:1px solid rgba(245,187,55,0.24);
-                color:#fde68a;
-                font-size:13px;
-                font-weight:900;
-                letter-spacing:0.03em;
-              "
-            >
-              Ниво: ${formatNullableText(profile.level)}
+          <div style="display:flex;align-items:center;margin-top:auto;padding-bottom:2px;">
+            <div style="font-size:13px;color:rgba(255,255,255,0.55);padding-right:12px;">
+              Ниво: <span style="color:#fde68a;font-weight:700;">${formatNullableText(profile.level)}</span>
             </div>
-
-            <div
-              style="
-                display:inline-flex;
-                align-items:center;
-                min-height:32px;
-                padding:0 12px;
-                border-radius:999px;
-                background:rgba(59,130,246,0.16);
-                border:1px solid rgba(59,130,246,0.24);
-                color:#bfdbfe;
-                font-size:13px;
-                font-weight:900;
-                letter-spacing:0.03em;
-              "
-            >
-              Ранг: ${formatNullableText(profile.rankTitle)}
+            <div style="width:1px;align-self:stretch;background:rgba(212,165,32,0.45);"></div>
+            <div style="font-size:13px;color:rgba(255,255,255,0.55);padding:0 12px;">
+              Ранг: <span style="color:#fde68a;font-weight:700;">${formatNullableText(profile.rankTitle)}</span>
             </div>
+            ${typeof profile.likesCount === 'number' ? `
+            <div style="width:1px;align-self:stretch;background:rgba(212,165,32,0.45);"></div>
+            <div style="font-size:13px;color:rgba(255,255,255,0.55);padding:0 12px;">
+              <span style="color:#ef4444;font-size:22px;line-height:1;vertical-align:middle;">♥</span> Харесвания: <span style="color:#fde68a;font-weight:700;">${profile.likesCount.toLocaleString('bg-BG')}</span>
+            </div>
+            ` : ''}
           </div>
         </div>
       </div>
@@ -709,6 +707,30 @@ export function renderPlayerProfilePopup(
 
   return `
     <style>
+      [data-player-profile-like]:not([disabled]):hover {
+        filter: brightness(1.12);
+        transform: translateY(-1px);
+      }
+      [data-player-profile-friend-request]:not([disabled]):hover {
+        filter: brightness(1.12);
+        transform: translateY(-1px);
+      }
+      [data-player-profile-block]:hover {
+        filter: brightness(1.12);
+        transform: translateY(-1px);
+      }
+      [data-player-profile-gift-coins]:hover {
+        background: rgba(212,165,32,0.28) !important;
+        filter: brightness(1.1);
+        transform: translateY(-1px);
+      }
+      [data-player-profile-like],
+      [data-player-profile-friend-request],
+      [data-player-profile-block],
+      [data-player-profile-gift-coins] {
+        transition: filter 120ms ease, transform 120ms ease, background 120ms ease, border-color 120ms ease;
+      }
+
       @keyframes belot-player-profile-fade-in {
         0% {
           opacity:0;

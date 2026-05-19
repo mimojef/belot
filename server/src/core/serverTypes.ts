@@ -77,6 +77,9 @@ export type PlayerPublicProfileSnapshot = {
   gender: PlayerGender | null
   isOnline?: boolean
   isBot?: boolean
+  likesCount: number | null
+  hasLikedByMe: boolean | null
+  isBlockedByMe: boolean | null
 }
 
 export type HumanRoomParticipant = {

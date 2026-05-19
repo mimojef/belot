@@ -39,10 +39,13 @@ export type PlayerPublicProfileSnapshot = {
   gender: PlayerGender | null
   isOnline?: boolean
   isBot?: boolean
+  likesCount: number | null
+  hasLikedByMe: boolean | null
+  isBlockedByMe: boolean | null
 }
 
-export type FriendshipStatus = 'pending' | 'accepted' | 'blocked'
-export type FriendshipDirection = 'incoming' | 'outgoing' | 'accepted' | 'blocked'
+export type FriendshipStatus = 'pending' | 'accepted'
+export type FriendshipDirection = 'incoming' | 'outgoing' | 'accepted'
 
 export type FriendRelationshipSnapshot = {
   friendshipId: string
@@ -57,7 +60,6 @@ export type FriendshipsSnapshot = {
   incomingPending: FriendRelationshipSnapshot[]
   outgoingPending: FriendRelationshipSnapshot[]
   friends: FriendRelationshipSnapshot[]
-  blocked: FriendRelationshipSnapshot[]
 }
 
 export type ChatMessageSnapshot = {

@@ -148,6 +148,9 @@ function toPublicProfileSnapshot(row: {
       imageUrl: image.thumbnail_url || image.image_url,
       sortOrder: image.sort_order,
     })),
+    likesCount: null,
+    hasLikedByMe: null,
+    isBlockedByMe: null,
   }
 }
 

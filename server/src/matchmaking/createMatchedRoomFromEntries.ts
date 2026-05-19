@@ -28,6 +28,31 @@ export type CreateMatchedRoomFromEntriesResult = {
   group: PendingMatchGroup
 }
 
+type BlockCheck = (profileIdA: string, profileIdB: string) => boolean
+
+const TEAM_A_SEATS = new Set<Seat>(['bottom', 'top'])
+
+function hasBlockedPartnership(
+  entries: MatchmakingQueueEntry[],
+  shuffled: Seat[],
+  isBlocked: BlockCheck,
+): boolean {
+  for (let i = 0; i < entries.length; i++) {
+    for (let j = i + 1; j < entries.length; j++) {
+      const seatI = shuffled[i]
+      const seatJ = shuffled[j]
+      if (!seatI || !seatJ) continue
+      const sameTeam = TEAM_A_SEATS.has(seatI) === TEAM_A_SEATS.has(seatJ)
+      if (!sameTeam) continue
+      const a = entries[i].profileId
+      const b = entries[j].profileId
+      if (!a || !b) continue
+      if (isBlocked(a, b) || isBlocked(b, a)) return true
+    }
+  }
+  return false
+}
+
 function shuffleSeats(seats: Seat[]): Seat[] {
   const nextSeats = [...seats]
 
@@ -117,10 +142,18 @@ function createBotParticipantFromFallbackSelection(
 export function createMatchedRoomFromEntries(
   entries: MatchmakingQueueEntry[],
   shouldStartImmediately: boolean,
+  blockCheck?: BlockCheck,
 ): CreateMatchedRoomFromEntriesResult {
   const createdAt = Date.now()
   const stake = assertSingleStake(entries)
-  const shuffledSeats = shuffleSeats(SERVER_SEAT_ORDER)
+
+  let shuffledSeats = shuffleSeats(SERVER_SEAT_ORDER)
+  if (blockCheck) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (!hasBlockedPartnership(entries, shuffledSeats, blockCheck)) break
+      if (attempt < 19) shuffledSeats = shuffleSeats(SERVER_SEAT_ORDER)
+    }
+  }
   let nextRoom = createServerRoom({
     config: {
       allowBots: true,

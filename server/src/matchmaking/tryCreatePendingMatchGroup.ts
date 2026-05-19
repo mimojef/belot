@@ -17,6 +17,7 @@ export type TryCreatePendingMatchGroupResult = {
 
 export function tryCreatePendingMatchGroup(
   matchmakingState: MatchmakingState,
+  blockCheck?: (profileIdA: string, profileIdB: string) => boolean,
   now: number = Date.now(),
 ): TryCreatePendingMatchGroupResult {
   for (const stake of SUPPORTED_MATCH_STAKES) {
@@ -44,6 +45,7 @@ export function tryCreatePendingMatchGroup(
     const { room, group } = createMatchedRoomFromEntries(
       readyResult.entries,
       readyResult.shouldStartImmediately,
+      blockCheck,
     )
 
     return {

@@ -32,6 +32,12 @@ export type AvatarCropSelection = {
 
 export type LobbyScreenState = {
   view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'private-rooms'
+  blockedPlayersPopupOpen: boolean
+  blockedPlayers: PlayerPublicProfileSnapshot[] | null
+  blockedPlayersLoading: boolean
+  blockedPlayersErrorText: string | null
+  blockedPlayersLimit: number
+  blockLimitPopupOpen: boolean
   displayName: string
   selectedStake: MatchStake
   isConnected: boolean
@@ -128,6 +134,8 @@ export type LobbyScreenState = {
   myPrivateRoom: PrivateRoomSnapshot | null
   privateRoomInvite: { inviteId: string; fromDisplayName: string; privateRoomId: string; stake: MatchStake } | null
   privateRoomInfoText: string | null
+  leavePrivateRoomForMatchmakingOpen: boolean
+  leavePrivateRoomForMatchmakingIsHost: boolean
 }
 
 export type RenderLobbyScreenOptions = {
@@ -174,6 +182,10 @@ export type RenderLobbyScreenOptions = {
   onAdminCoinPackageDelete: (packageId: string) => void
   onAdminCoinPackageLobbyToggle: (packageId: string, showInLobby: boolean) => void
   onFriendsClick: () => void
+  onBlockedPlayersClick: () => void
+  onBlockedPlayersClose: () => void
+  onUnblockClick: (profileId: string) => void
+  onBlockLimitPopupClose: () => void
   onChatClick: () => void
   onChatConversationClick: (friendshipId: string) => void
   onChatSubmit: (friendshipId: string, body: string) => void
@@ -181,11 +193,12 @@ export type RenderLobbyScreenOptions = {
   onLeaderboardPlayerClick: (profile: PlayerPublicProfileSnapshot) => void
   onFriendProfileClick: (profile: PlayerPublicProfileSnapshot) => void
   onFriendRequestClick: (profileId: string) => void
-  onFriendBlockClick: (profileId: string) => void
+  onBlockClick: (profileId: string) => void
   onFriendAcceptClick: (friendshipId: string) => void
   onFriendRejectClick: (friendshipId: string) => void
   onFriendRemoveClick: (friendshipId: string) => void
   onGiftCoinsClick: (friendshipId: string) => void
+  onLikeClick: (profileId: string) => void
   onGiftCoinsClose: () => void
   onGiftCoinsSubmit: (friendshipId: string, amount: number) => void
   onLowCoinsModalClose: () => void
@@ -217,6 +230,8 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomInviteAccept: (inviteId: string) => void
   onPrivateRoomInviteDecline: (inviteId: string) => void
   onPrivateRoomInfoDismiss: () => void
+  onLeavePrivateRoomAndMatchmakeConfirm: () => void
+  onLeavePrivateRoomAndMatchmakeCancel: () => void
 }
 
 type LobbyStakeCard = {
@@ -243,11 +258,12 @@ export type ProfilePopupCallbacks = {
   onClose: () => void
   onEditClick: () => void
   onFriendRequestClick: (profileId: string) => void
-  onFriendBlockClick: (profileId: string) => void
+  onBlockClick: (profileId: string) => void
   onFriendAcceptClick: (friendshipId: string) => void
   onFriendRejectClick: (friendshipId: string) => void
   onFriendRemoveClick: (friendshipId: string) => void
   onGiftCoinsClick: (friendshipId: string) => void
+  onLikeClick: (profileId: string) => void
 }
 
 function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks): void {
@@ -261,6 +277,11 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks): void 
     editEl.addEventListener('mouseenter', () => { editEl.style.textDecoration = 'underline' })
     editEl.addEventListener('mouseleave', () => { editEl.style.textDecoration = 'none' })
   }
+  el.querySelector<HTMLButtonElement>('[data-player-profile-like]')
+    ?.addEventListener('click', (e) => {
+      const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileLike?.trim() ?? ''
+      if (profileId) cb.onLikeClick(profileId)
+    })
   el.querySelector<HTMLButtonElement>('[data-player-profile-friend-request]')
     ?.addEventListener('click', (e) => {
       const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileFriendRequest?.trim() ?? ''
@@ -269,7 +290,7 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks): void 
   el.querySelector<HTMLButtonElement>('[data-player-profile-block]')
     ?.addEventListener('click', (e) => {
       const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileBlock?.trim() ?? ''
-      if (profileId) cb.onFriendBlockClick(profileId)
+      if (profileId) cb.onBlockClick(profileId)
     })
   el.querySelector<HTMLButtonElement>('[data-player-profile-gift-coins]')
     ?.addEventListener('click', (e) => {
@@ -808,6 +829,23 @@ function renderNav(state: LobbyScreenState): string {
               ${formatAmount(incomingFriendRequestsCount)}
             </span>
           ` : ''}
+        </button>
+        <button type="button" data-lobby-nav-blocked-players="1" class="lobby-nav-btn" style="
+          display:flex; align-items:center; gap:10px;
+          padding:0 18px;
+          border:0;
+          background:transparent;
+          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+          color:rgba(255,255,255,0.70);
+          border-bottom:2px solid transparent;
+          cursor:pointer;
+          height:100%;
+        ">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+          </svg>
+          Блокирани
         </button>
         <button type="button" data-lobby-nav-leaderboards="1" ${leaderboardsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
           display:flex; align-items:center; gap:10px;
@@ -1863,7 +1901,6 @@ function renderFriendsDirectory(state: LobbyScreenState): string {
     incomingPending: [],
     outgoingPending: [],
     friends: [],
-    blocked: [],
   }
 
   return `
@@ -2816,25 +2853,57 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
     const timeLeft = Math.max(0, room.expiresAt - Date.now())
     const minutesLeft = Math.ceil(timeLeft / 60000)
     const isLocked = room.kind === 'locked'
+
+    const memberSlotsHtml = Array.from({ length: 4 }, (_, i) => {
+      const member = room.members[i]
+      if (member) {
+        const avatarInner = member.avatarUrl
+          ? `<img src="${member.avatarUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:10px;" />`
+          : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:22px;color:rgba(255,255,255,0.5);">👤</div>`
+        const hostBadge = member.isHost
+          ? `<div style="position:absolute;top:-5px;right:-5px;background:#f59e0b;border-radius:50%;width:16px;height:16px;display:flex;align-items:center;justify-content:center;font-size:9px;">★</div>`
+          : ''
+        return `
+          <div style="display:flex;flex-direction:column;align-items:center;gap:5px;min-width:0;">
+            <div style="position:relative;width:84px;height:84px;border-radius:10px;overflow:visible;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);">
+              <div style="width:84px;height:84px;border-radius:10px;overflow:hidden;">${avatarInner}</div>
+              ${hostBadge}
+            </div>
+            <div style="font-size:10px;color:rgba(255,255,255,0.6);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:92px;text-align:center;">
+              ${member.displayName}
+            </div>
+          </div>`
+      }
+      return `
+        <div style="display:flex;flex-direction:column;align-items:center;gap:5px;">
+          <div style="width:84px;height:84px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px dashed rgba(255,255,255,0.12);"></div>
+          <div style="height:14px;"></div>
+        </div>`
+    }).join('')
+
     return `
-      <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;background:rgba(255,255,255,0.04);border-radius:12px;border:1px solid rgba(255,255,255,0.08);">
-        <div style="flex:1;min-width:0;">
-          <div style="font-size:14px;font-weight:700;color:#fff;">
-            ${room.members[0]?.displayName ?? 'Неизвестен'}
-            ${room.members.length > 1 ? `<span style="font-size:11px;color:rgba(255,255,255,0.4);font-weight:400;"> и ${room.members.length - 1} др.</span>` : ''}
+      <div style="padding:12px 16px;background:rgba(255,255,255,0.04);border-radius:12px;border:1px solid rgba(255,255,255,0.08);">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:14px;font-weight:700;color:#fff;">
+              ${room.members[0]?.displayName ?? 'Неизвестен'}
+            </div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:3px;">
+              Вход ${formatStake(room.stake)} жълт. · ${room.members.length}/4 играча · ~${minutesLeft} мин.
+              ${isLocked ? ' · <span style="color:rgba(239,68,68,0.8);">Заключена</span>' : ''}
+            </div>
           </div>
-          <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:3px;">
-            Вход ${formatStake(room.stake)} жълт. · ${room.members.length}/4 играча · ~${minutesLeft} мин.
-            ${isLocked ? ' · <span style="color:rgba(239,68,68,0.8);">Заключена</span>' : ''}
-          </div>
+          ${isLocked
+            ? `<div style="font-size:12px;color:rgba(239,68,68,0.7);font-weight:600;padding:5px 12px;border:1px solid rgba(239,68,68,0.25);border-radius:8px;">Заключена</div>`
+            : `<button type="button" data-private-room-join="${room.id}" style="
+                padding:7px 16px;border:1px solid rgba(167,139,250,0.5);background:rgba(167,139,250,0.12);
+                border-radius:9px;color:#a78bfa;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;
+              ">Влез в масата</button>`
+          }
         </div>
-        ${isLocked
-          ? `<div style="font-size:12px;color:rgba(239,68,68,0.7);font-weight:600;padding:5px 12px;border:1px solid rgba(239,68,68,0.25);border-radius:8px;">Заключена</div>`
-          : `<button type="button" data-private-room-join="${room.id}" style="
-              padding:7px 16px;border:1px solid rgba(167,139,250,0.5);background:rgba(167,139,250,0.12);
-              border-radius:9px;color:#a78bfa;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;
-            ">Присъедини</button>`
-        }
+        <div style="display:flex;gap:12px;">
+          ${memberSlotsHtml}
+        </div>
       </div>
     `
   }
@@ -2999,6 +3068,39 @@ function renderPrivateRoomInvitePopup(state: LobbyScreenState): string {
   `
 }
 
+function renderLeavePrivateRoomConfirmPopup(state: LobbyScreenState): string {
+  if (!state.leavePrivateRoomForMatchmakingOpen) return ''
+  const message = state.leavePrivateRoomForMatchmakingIsHost
+    ? 'Ти си домакин на частна маса. Ако продължиш, масата ще бъде затворена и всички участници ще бъдат изхвърлени.'
+    : 'Участваш в изчакване на частна маса. Ако продължиш, ще напуснеш масата.'
+  return `
+    <div style="
+      position:fixed;inset:0;z-index:9600;
+      display:flex;align-items:center;justify-content:center;
+      background:rgba(0,0,0,0.7);
+    ">
+      <div style="
+        background:#1a1a2e;border:1px solid rgba(255,255,255,0.12);
+        border-radius:16px;padding:28px 28px 24px;max-width:380px;width:90%;
+        box-shadow:0 20px 60px rgba(0,0,0,0.6);
+      ">
+        <div style="font-size:18px;font-weight:900;color:#fff;margin-bottom:14px;">⚠️ Напускане на маса</div>
+        <div style="font-size:14px;color:rgba(255,255,255,0.7);line-height:1.5;margin-bottom:24px;">${message}</div>
+        <div style="display:flex;gap:12px;">
+          <button type="button" data-leave-pr-cancel="1" style="
+            flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
+            border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;cursor:pointer;
+          ">Отказ</button>
+          <button type="button" data-leave-pr-confirm="1" style="
+            flex:1;padding:11px;border:1px solid rgba(239,68,68,0.5);background:rgba(239,68,68,0.15);
+            border-radius:10px;color:#f87171;font-size:14px;font-weight:700;cursor:pointer;
+          ">Продължи</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
 function renderPrivateRoomInfoPopup(state: LobbyScreenState): string {
   if (!state.privateRoomInfoText) return ''
   return `
@@ -3123,6 +3225,172 @@ function renderDailyRewardsPopup(state: LobbyScreenState): string {
           ${state.dailyRewardClaimErrorText ? `
             <div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;">${escapeHtml(state.dailyRewardClaimErrorText)}</div>
           ` : ''}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderBlockedPlayersPopup(state: LobbyScreenState): string {
+  if (!state.blockedPlayersPopupOpen) return ''
+
+  const count = state.blockedPlayers?.length ?? 0
+  const limit = state.blockedPlayersLimit
+
+  const listHtml = state.blockedPlayersLoading
+    ? `<div style="display:flex;align-items:center;justify-content:center;min-height:120px;color:rgba(255,255,255,0.56);font-size:14px;font-weight:700;">Зареждане...</div>`
+    : state.blockedPlayersErrorText
+      ? `<div style="display:flex;align-items:center;justify-content:center;min-height:120px;color:#fca5a5;font-size:14px;font-weight:700;">${escapeHtml(state.blockedPlayersErrorText)}</div>`
+      : count === 0
+        ? `<div style="display:flex;align-items:center;justify-content:center;min-height:120px;color:rgba(255,255,255,0.42);font-size:14px;font-weight:700;">Нямаш блокирани играчи.</div>`
+        : (state.blockedPlayers ?? []).map((p) => {
+            const name = escapeHtml(p.displayName?.trim() || '—')
+            const avatar = p.avatarUrl?.trim() ?? ''
+            const profileId = escapeHtml(p.profileId ?? '')
+            const avatarHtml = avatar
+              ? `<img src="${escapeHtml(avatar)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;border-radius:12px;">`
+              : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;border-radius:12px;background:rgba(255,255,255,0.08);color:#f8fafc;font-size:22px;font-weight:900;">${escapeHtml(name.charAt(0).toUpperCase())}</div>`
+
+            return `
+              <div style="display:flex;align-items:center;gap:14px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);">
+                <div style="flex:0 0 48px;height:48px;border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,0.10);">
+                  ${avatarHtml}
+                </div>
+                <div style="flex:1;min-width:0;font-size:15px;font-weight:800;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                  ${name}
+                </div>
+                <button
+                  type="button"
+                  data-unblock-profile="${profileId}"
+                  style="
+                    flex:0 0 auto;
+                    min-height:34px;
+                    padding:0 14px;
+                    border:1px solid rgba(212,165,32,0.50);
+                    border-radius:8px;
+                    background:rgba(212,165,32,0.10);
+                    color:#fde68a;
+                    font-size:12px;
+                    font-weight:900;
+                    cursor:pointer;
+                    white-space:nowrap;
+                    transition:background 120ms,filter 120ms;
+                  "
+                  onmouseenter="this.style.background='rgba(212,165,32,0.22)'"
+                  onmouseleave="this.style.background='rgba(212,165,32,0.10)'"
+                >
+                  Смъкни блокадата
+                </button>
+              </div>
+            `
+          }).join('')
+
+  return `
+    <div
+      data-blocked-players-popup-root="1"
+      style="position:fixed;inset:0;z-index:12000;pointer-events:auto;"
+    >
+      <div
+        data-blocked-players-popup-backdrop="1"
+        style="position:absolute;inset:0;background:rgba(0,0,0,0.72);backdrop-filter:blur(4px);"
+      ></div>
+      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;">
+        <div
+          class="gold-scrollbar"
+          style="
+            position:relative;
+            width:min(92vw,560px);
+            max-height:min(88vh,680px);
+            overflow:auto;
+            border-radius:8px;
+            background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);
+            border:2px solid rgba(212,165,32,0.72);
+            box-shadow:0 34px 80px rgba(0,0,0,0.42);
+            padding:24px;
+          "
+        >
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px;">
+            <div>
+              <div style="font-size:13px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:rgba(148,163,184,0.92);">Списък</div>
+              <div style="font-size:22px;font-weight:900;color:#f8fafc;margin-top:4px;">Блокирани играчи</div>
+              <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.50);">
+                ${count} от ${limit} места заети
+              </div>
+            </div>
+            <button
+              type="button"
+              data-blocked-players-popup-close="1"
+              aria-label="Затвори"
+              style="width:42px;height:42px;border:none;border-radius:999px;background:rgba(255,255,255,0.08);color:#f8fafc;font-size:22px;font-weight:900;cursor:pointer;flex:0 0 auto;"
+            >×</button>
+          </div>
+
+          <div style="height:6px;border-radius:999px;background:#050505;border:1px solid rgba(255,255,255,0.08);overflow:hidden;margin-bottom:20px;">
+            <div style="
+              width:${limit > 0 ? ((count / limit) * 100).toFixed(1) : 0}%;
+              height:100%;
+              border-radius:999px;
+              background:${count >= limit ? 'linear-gradient(90deg,#dc2626,#ef4444)' : 'linear-gradient(90deg,#d4a520,#f4c95b)'};
+            "></div>
+          </div>
+
+          <div>${listHtml}</div>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderBlockLimitPopup(state: LobbyScreenState): string {
+  if (!state.blockLimitPopupOpen) return ''
+
+  return `
+    <div
+      data-block-limit-popup-root="1"
+      style="position:fixed;inset:0;z-index:13000;pointer-events:auto;"
+    >
+      <div
+        data-block-limit-popup-backdrop="1"
+        style="position:absolute;inset:0;background:rgba(0,0,0,0.72);backdrop-filter:blur(4px);"
+      ></div>
+      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;">
+        <div style="
+          position:relative;
+          width:min(92vw,440px);
+          border-radius:8px;
+          background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);
+          border:2px solid rgba(239,68,68,0.72);
+          box-shadow:0 34px 80px rgba(0,0,0,0.42);
+          padding:28px 24px;
+          text-align:center;
+        ">
+          <div style="font-size:36px;margin-bottom:12px;">🚫</div>
+          <div style="font-size:18px;font-weight:900;color:#f8fafc;margin-bottom:10px;">Достигнат лимит</div>
+          <div style="font-size:14px;font-weight:700;color:rgba(255,255,255,0.65);line-height:1.55;margin-bottom:22px;">
+            Достигнахте лимита си за блокиране от 50 играча.<br>Освободете място от списъка с блокирани, за да блокирате нов играч.
+          </div>
+          <div style="display:flex;gap:10px;justify-content:center;">
+            <button
+              type="button"
+              data-block-limit-popup-close="1"
+              style="
+                min-height:40px;padding:0 18px;
+                border:1px solid rgba(255,255,255,0.18);border-radius:8px;
+                background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.80);
+                font-size:13px;font-weight:900;cursor:pointer;
+              "
+            >Затвори</button>
+            <button
+              type="button"
+              data-block-limit-open-list="1"
+              style="
+                min-height:40px;padding:0 18px;
+                border:1px solid rgba(212,165,32,0.55);border-radius:8px;
+                background:linear-gradient(180deg,rgba(244,201,91,0.96) 0%,rgba(201,143,19,0.96) 100%);
+                color:#080808;font-size:13px;font-weight:900;cursor:pointer;
+              "
+            >Виж блокираните</button>
+          </div>
         </div>
       </div>
     </div>
@@ -3298,6 +3566,9 @@ export function renderLobbyScreen(
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
       ${renderPrivateRoomInfoPopup(state)}
+      ${renderLeavePrivateRoomConfirmPopup(state)}
+      ${renderBlockedPlayersPopup(state)}
+      ${renderBlockLimitPopup(state)}
     </div>
   `
 
@@ -3346,6 +3617,40 @@ export function renderLobbyScreen(
   root
     .querySelector<HTMLButtonElement>('[data-lobby-nav-players="1"]')
     ?.addEventListener('click', options.onPlayersClick)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-nav-blocked-players="1"]')
+    ?.addEventListener('click', options.onBlockedPlayersClick)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-blocked-players-popup-close="1"]')
+    ?.addEventListener('click', options.onBlockedPlayersClose)
+
+  root
+    .querySelector<HTMLElement>('[data-blocked-players-popup-backdrop="1"]')
+    ?.addEventListener('click', options.onBlockedPlayersClose)
+
+  root.querySelectorAll<HTMLButtonElement>('[data-unblock-profile]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const profileId = btn.dataset.unblockProfile?.trim() ?? ''
+      if (profileId) options.onUnblockClick(profileId)
+    })
+  })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-block-limit-popup-close="1"]')
+    ?.addEventListener('click', options.onBlockLimitPopupClose)
+
+  root
+    .querySelector<HTMLElement>('[data-block-limit-popup-backdrop="1"]')
+    ?.addEventListener('click', options.onBlockLimitPopupClose)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-block-limit-open-list="1"]')
+    ?.addEventListener('click', () => {
+      options.onBlockLimitPopupClose()
+      options.onBlockedPlayersClick()
+    })
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-nav-leaderboards="1"]')
@@ -3640,7 +3945,6 @@ export function renderLobbyScreen(
             ...state.friendships.incomingPending,
             ...state.friendships.outgoingPending,
             ...state.friendships.friends,
-            ...state.friendships.blocked,
           ]
         : []
       const relationship = friendshipGroups.find(
@@ -3714,11 +4018,12 @@ export function renderLobbyScreen(
       onClose: options.onProfileClose,
       onEditClick: options.onProfileEditClick,
       onFriendRequestClick: options.onFriendRequestClick,
-      onFriendBlockClick: options.onFriendBlockClick,
+      onBlockClick: options.onBlockClick,
       onFriendAcceptClick: options.onFriendAcceptClick,
       onFriendRejectClick: options.onFriendRejectClick,
       onFriendRemoveClick: options.onFriendRemoveClick,
       onGiftCoinsClick: options.onGiftCoinsClick,
+      onLikeClick: options.onLikeClick,
     },
   )
 
@@ -4455,6 +4760,12 @@ export function renderLobbyScreen(
       if (inviteId) options.onPrivateRoomInviteDecline(inviteId)
     })
   })
+
+  root.querySelector<HTMLButtonElement>('[data-leave-pr-confirm="1"]')
+    ?.addEventListener('click', options.onLeavePrivateRoomAndMatchmakeConfirm)
+
+  root.querySelector<HTMLButtonElement>('[data-leave-pr-cancel="1"]')
+    ?.addEventListener('click', options.onLeavePrivateRoomAndMatchmakeCancel)
 
   if (root.querySelector('[data-private-room-info-toast="1"]')) {
     if (privateRoomInfoDismissTimer !== null) clearTimeout(privateRoomInfoDismissTimer)

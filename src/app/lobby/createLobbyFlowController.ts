@@ -186,9 +186,11 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; friendships: FriendshipsSnapshot }
     | { ok: false; message: string }
   >
-  onFriendBlock?: (profileId: string) => Promise<
-    | { ok: true; friendships: FriendshipsSnapshot }
-    | { ok: false; message: string }
+  onBlockProfile?: (profileId: string) => Promise<{ blocked: boolean; limitReached?: true } | { ok: false; message: string }>
+  onLoadBlockedPlayers?: () => Promise<{ ok: true; profiles: PlayerPublicProfileSnapshot[]; count: number; limit: number } | { ok: false; message: string }>
+  onLikeProfile?: (profileId: string) => Promise<
+    | { ok: true; liked: boolean; likesCount: number }
+    | { ok: false }
   >
   onGiftCoinsSubmit?: (friendshipId: string, amount: number) => Promise<
     | {
@@ -364,6 +366,13 @@ type InternalLobbyFlowState = {
   myPrivateRoom: PrivateRoomSnapshot | null
   privateRoomInvite: { inviteId: string; fromDisplayName: string; privateRoomId: string; stake: MatchStake } | null
   privateRoomInfoText: string | null
+  leavePrivateRoomForMatchmakingOpen: boolean
+  blockedPlayersPopupOpen: boolean
+  blockedPlayers: PlayerPublicProfileSnapshot[] | null
+  blockedPlayersLoading: boolean
+  blockedPlayersErrorText: string | null
+  blockedPlayersLimit: number
+  blockLimitPopupOpen: boolean
 }
 
 type StakeCardConfig = {
@@ -496,6 +505,13 @@ function createInitialState(): InternalLobbyFlowState {
     myPrivateRoom: null,
     privateRoomInvite: null,
     privateRoomInfoText: null,
+    leavePrivateRoomForMatchmakingOpen: false,
+    blockedPlayersPopupOpen: false,
+    blockedPlayers: null,
+    blockedPlayersLoading: false,
+    blockedPlayersErrorText: null,
+    blockedPlayersLimit: 50,
+    blockLimitPopupOpen: false,
   }
 }
 
@@ -618,6 +634,9 @@ function createLocalProfilePreview(
           },
         ]
       : [],
+    likesCount: null,
+    hasLikedByMe: null,
+    isBlockedByMe: null,
   }
 }
 
@@ -647,7 +666,6 @@ function findRelationshipByProfileId(
     ...friendships.incomingPending,
     ...friendships.outgoingPending,
     ...friendships.friends,
-    ...friendships.blocked,
   ]
 
   return relationships.find((relationship) => {
@@ -1150,15 +1168,6 @@ export function createLobbyFlowController(
       }
     }
 
-    if (relationship.status === 'blocked') {
-      return {
-        profileId: targetProfileId,
-        label: 'Недостъпно',
-        disabled: true,
-        message,
-      }
-    }
-
     return {
       profileId: targetProfileId,
       label:
@@ -1177,21 +1186,6 @@ export function createLobbyFlowController(
 
     const authSession = options.getAuthSession?.() ?? null
     const friendshipAction = createProfileFriendshipAction(authSession)
-    if (
-      friendshipAction !== null &&
-      authSession !== null &&
-      !friendshipAction.disabled
-    ) {
-      friendshipAction.canBlock = true
-    }
-    if (
-      friendshipAction !== null &&
-      authSession !== null &&
-      friendshipAction.disabled &&
-      friendshipAction.label !== 'РќРµРґРѕСЃС‚СЉРїРЅРѕ'
-    ) {
-      friendshipAction.canBlock = true
-    }
     const acceptedRelationship =
       state.profilePopupProfile?.profileId
         ? findRelationshipByProfileId(
@@ -1323,6 +1317,17 @@ export function createLobbyFlowController(
       myPrivateRoom: state.myPrivateRoom,
       privateRoomInvite: state.privateRoomInvite,
       privateRoomInfoText: state.privateRoomInfoText,
+      leavePrivateRoomForMatchmakingOpen: state.leavePrivateRoomForMatchmakingOpen,
+      leavePrivateRoomForMatchmakingIsHost: state.myPrivateRoom !== null &&
+        (authSession?.profile.profileId
+          ? (state.myPrivateRoom.members.find(m => m.profileId === authSession.profile.profileId)?.isHost ?? false)
+          : false),
+      blockedPlayersPopupOpen: state.blockedPlayersPopupOpen,
+      blockedPlayers: state.blockedPlayers,
+      blockedPlayersLoading: state.blockedPlayersLoading,
+      blockedPlayersErrorText: state.blockedPlayersErrorText,
+      blockedPlayersLimit: state.blockedPlayersLimit,
+      blockLimitPopupOpen: state.blockLimitPopupOpen,
     }
 
     renderLobbyScreen(options.root, {
@@ -1337,6 +1342,11 @@ export function createLobbyFlowController(
       },
       onSearchClick: () => {
         options.tryUnlockDocumentAudio?.()
+        if (state.myPrivateRoom !== null) {
+          state.leavePrivateRoomForMatchmakingOpen = true
+          render()
+          return
+        }
         startMatchmaking(state.selectedStake, state.displayName.trim() || undefined)
       },
       onCancelClick: () => {
@@ -1458,6 +1468,20 @@ export function createLobbyFlowController(
       onFriendsClick: () => {
         void showFriendsDirectory()
       },
+      onBlockedPlayersClick: () => {
+        void openBlockedPlayersPopup()
+      },
+      onBlockedPlayersClose: () => {
+        state.blockedPlayersPopupOpen = false
+        render()
+      },
+      onUnblockClick: (profileId) => {
+        void unblockPlayer(profileId)
+      },
+      onBlockLimitPopupClose: () => {
+        state.blockLimitPopupOpen = false
+        render()
+      },
       onChatClick: () => {
         void showChatPanel()
       },
@@ -1468,21 +1492,21 @@ export function createLobbyFlowController(
         void sendChatMessage(friendshipId, body)
       },
       onPlayerCardClick: (profile) => {
-        state.profilePopupProfile = profile
+        state.profilePopupProfile = state.players.find(p => p.profileId === profile.profileId) ?? profile
         state.profilePopupCanEdit = false
         state.profilePopupOpen = true
         renderPopupOnly()
         void ensureFriendshipsLoaded()
       },
       onLeaderboardPlayerClick: (profile) => {
-        state.profilePopupProfile = profile
+        state.profilePopupProfile = state.players.find(p => p.profileId === profile.profileId) ?? profile
         state.profilePopupCanEdit = false
         state.profilePopupOpen = true
         renderPopupOnly()
         void ensureFriendshipsLoaded()
       },
       onFriendProfileClick: (profile) => {
-        state.profilePopupProfile = profile
+        state.profilePopupProfile = state.players.find(p => p.profileId === profile.profileId) ?? profile
         state.profilePopupCanEdit = false
         state.profilePopupOpen = true
         renderPopupOnly()
@@ -1490,8 +1514,8 @@ export function createLobbyFlowController(
       onFriendRequestClick: (profileId) => {
         void submitFriendRequest(profileId)
       },
-      onFriendBlockClick: (profileId) => {
-        void blockFriendProfile(profileId)
+      onBlockClick: (profileId) => {
+        void blockProfile(profileId)
       },
       onFriendAcceptClick: (friendshipId) => {
         void acceptFriendRequest(friendshipId)
@@ -1505,6 +1529,7 @@ export function createLobbyFlowController(
       onGiftCoinsClick: (friendshipId) => {
         openGiftModal(friendshipId)
       },
+      onLikeClick: (profileId) => { void likeProfile(profileId) },
       onGiftCoinsClose: () => {
         closeGiftModal()
       },
@@ -1632,6 +1657,16 @@ export function createLobbyFlowController(
       },
       onPrivateRoomInfoDismiss: () => {
         state.privateRoomInfoText = null
+        render()
+      },
+      onLeavePrivateRoomAndMatchmakeConfirm: () => {
+        state.leavePrivateRoomForMatchmakingOpen = false
+        state.myPrivateRoom = null
+        options.onPrivateRoomLeave?.()
+        startMatchmaking(state.selectedStake, state.displayName.trim() || undefined)
+      },
+      onLeavePrivateRoomAndMatchmakeCancel: () => {
+        state.leavePrivateRoomForMatchmakingOpen = false
         render()
       },
     })
@@ -2403,6 +2438,32 @@ export function createLobbyFlowController(
     render()
   }
 
+  async function likeProfile(profileId: string): Promise<void> {
+    const result = await options.onLikeProfile?.(profileId)
+    if (!result?.ok) return
+
+    const applyLike = (p: PlayerPublicProfileSnapshot): PlayerPublicProfileSnapshot =>
+      p.profileId === profileId
+        ? { ...p, hasLikedByMe: result.liked, likesCount: result.likesCount }
+        : p
+
+    state.players = state.players.map(applyLike)
+
+    if (state.leaderboards) {
+      const updated: LeaderboardsSnapshot = {} as LeaderboardsSnapshot
+      for (const key of Object.keys(state.leaderboards) as (keyof LeaderboardsSnapshot)[]) {
+        updated[key] = state.leaderboards[key].map(applyLike)
+      }
+      state.leaderboards = updated
+    }
+
+    if (state.profilePopupProfile?.profileId === profileId) {
+      state.profilePopupProfile = applyLike(state.profilePopupProfile)
+    }
+
+    renderPopupOnly()
+  }
+
   async function submitFriendRequest(profileId: string): Promise<void> {
     const authSession = options.getAuthSession?.() ?? null
 
@@ -2499,7 +2560,7 @@ export function createLobbyFlowController(
     render()
   }
 
-  async function blockFriendProfile(profileId: string): Promise<void> {
+  async function blockProfile(profileId: string): Promise<void> {
     const authSession = options.getAuthSession?.() ?? null
 
     if (authSession === null) {
@@ -2509,20 +2570,99 @@ export function createLobbyFlowController(
       return
     }
 
-    const result = options.onFriendBlock
-      ? await options.onFriendBlock(profileId)
-      : { ok: false as const, message: 'Блокирането временно не е налично.' }
+    if (!options.onBlockProfile) return
 
-    if (!result.ok) {
+    const result = await options.onBlockProfile(profileId)
+
+    if ('ok' in result && !result.ok) {
+      const asLimitError = result as unknown as { ok: false; limitReached?: true; message: string }
+      if (asLimitError.limitReached) {
+        state.blockLimitPopupOpen = true
+        render()
+        return
+      }
       state.friendActionMessageProfileId = profileId
-      state.friendActionMessage = result.message
+      state.friendActionMessage = asLimitError.message
       render()
       return
     }
 
-    state.friendships = result.friendships
+    const { blocked } = result as { blocked: boolean }
+
+    const updateProfile = (p: PlayerPublicProfileSnapshot) =>
+      p.profileId === profileId ? { ...p, isBlockedByMe: blocked } : p
+
+    state.players = state.players.map(updateProfile)
+    state.leaderboards = state.leaderboards
+      ? {
+          balance: state.leaderboards.balance.map(updateProfile),
+          rank: state.leaderboards.rank.map(updateProfile),
+          wins: state.leaderboards.wins.map(updateProfile),
+          rating: state.leaderboards.rating.map(updateProfile),
+        }
+      : state.leaderboards
+    if (state.profilePopupProfile?.profileId === profileId) {
+      state.profilePopupProfile = { ...state.profilePopupProfile, isBlockedByMe: blocked }
+    }
+    if (blocked && state.blockedPlayers !== null) {
+      const existing = state.blockedPlayers.find((p) => p.profileId === profileId)
+      if (!existing && state.profilePopupProfile) {
+        state.blockedPlayers = [state.profilePopupProfile, ...state.blockedPlayers]
+      }
+    } else if (!blocked && state.blockedPlayers !== null) {
+      state.blockedPlayers = state.blockedPlayers.filter((p) => p.profileId !== profileId)
+    }
+
     state.friendActionMessageProfileId = profileId
-    state.friendActionMessage = 'Играчът е блокиран.'
+    state.friendActionMessage = blocked ? 'Играчът е блокиран.' : 'Играчът е деблокиран.'
+    renderPopupOnly()
+  }
+
+  async function openBlockedPlayersPopup(): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession === null) {
+      state.authModalMode = 'cta'
+      state.authErrorText = null
+      render()
+      return
+    }
+
+    state.blockedPlayersPopupOpen = true
+    if (state.blockedPlayers === null) {
+      state.blockedPlayersLoading = true
+      state.blockedPlayersErrorText = null
+    }
+    render()
+
+    if (!options.onLoadBlockedPlayers) return
+
+    const result = await options.onLoadBlockedPlayers()
+    if (!result.ok) {
+      state.blockedPlayersLoading = false
+      state.blockedPlayersErrorText = result.message
+    } else {
+      state.blockedPlayers = result.profiles
+      state.blockedPlayersLimit = result.limit
+      state.blockedPlayersLoading = false
+      state.blockedPlayersErrorText = null
+    }
+    render()
+  }
+
+  async function unblockPlayer(profileId: string): Promise<void> {
+    if (!options.onBlockProfile) return
+
+    const result = await options.onBlockProfile(profileId)
+    if ('ok' in result && !result.ok) return
+
+    state.blockedPlayers = (state.blockedPlayers ?? []).filter((p) => p.profileId !== profileId)
+
+    const updateProfile = (p: PlayerPublicProfileSnapshot) =>
+      p.profileId === profileId ? { ...p, isBlockedByMe: false } : p
+    state.players = state.players.map(updateProfile)
+    if (state.profilePopupProfile?.profileId === profileId) {
+      state.profilePopupProfile = { ...state.profilePopupProfile, isBlockedByMe: false }
+    }
     render()
   }
 
@@ -2976,11 +3116,6 @@ export function createLobbyFlowController(
   function buildPopupFriendshipAction() {
     const authSession = options.getAuthSession?.() ?? null
     const friendshipAction = createProfileFriendshipAction(authSession)
-    if (friendshipAction !== null && authSession !== null) {
-      if (!friendshipAction.disabled || friendshipAction.label !== 'Недостъпно') {
-        friendshipAction.canBlock = true
-      }
-    }
     const acceptedRelationship =
       state.profilePopupProfile?.profileId
         ? findRelationshipByProfileId(state.friendships, state.profilePopupProfile.profileId)
@@ -3007,11 +3142,12 @@ export function createLobbyFlowController(
         render()
       },
       onFriendRequestClick: (profileId) => { void submitFriendRequest(profileId) },
-      onFriendBlockClick: (profileId) => { void blockFriendProfile(profileId) },
+      onBlockClick: (profileId) => { void blockProfile(profileId) },
       onFriendAcceptClick: (friendshipId) => { void acceptFriendRequest(friendshipId) },
       onFriendRejectClick: (friendshipId) => { void rejectFriendRequest(friendshipId) },
       onFriendRemoveClick: (friendshipId) => { void removeFriendRelationship(friendshipId) },
       onGiftCoinsClick: (friendshipId) => { openGiftModal(friendshipId) },
+      onLikeClick: (profileId) => { void likeProfile(profileId) },
     }
   }
 

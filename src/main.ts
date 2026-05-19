@@ -1039,37 +1039,21 @@ async function submitFriendAction(
   }
 }
 
-async function submitFriendBlock(profileId: string): Promise<
-  | { ok: true; friendships: FriendshipsSnapshot }
-  | { ok: false; message: string }
-> {
+async function submitProfileBlock(profileId: string): Promise<{ blocked: boolean } | { ok: false; message: string }> {
   try {
-    const response = await fetch(`${getApiBaseUrl()}/api/friends/block`, {
+    const response = await fetch(`${getApiBaseUrl()}/api/profiles/${encodeURIComponent(profileId)}/block`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
       credentials: 'include',
-      body: JSON.stringify({ profileId }),
     })
-    const data = await readFriendshipsResponse(response)
+    const data = await response.json() as { ok?: boolean; blocked?: boolean; message?: string }
 
-    if (!response.ok || !data.ok || !data.friendships) {
-      return {
-        ok: false,
-        message: data.message ?? 'Играчът не беше блокиран.',
-      }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Операцията не успя.' }
     }
 
-    return {
-      ok: true,
-      friendships: data.friendships,
-    }
+    return { blocked: data.blocked ?? false }
   } catch {
-    return {
-      ok: false,
-      message: 'Няма връзка със сървъра за приятели.',
-    }
+    return { ok: false, message: 'Няма връзка със сървъра.' }
   }
 }
 
@@ -1206,6 +1190,24 @@ async function sendChatMessage(friendshipId: string, body: string): Promise<
       ok: false,
       message: 'Няма връзка със сървъра за чат.',
     }
+  }
+}
+
+async function submitProfileLike(
+  profileId: string,
+): Promise<{ ok: true; liked: boolean; likesCount: number } | { ok: false }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/profiles/${encodeURIComponent(profileId)}/like`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as { ok: boolean; liked?: boolean; likesCount?: number }
+    if (data.ok && typeof data.liked === 'boolean' && typeof data.likesCount === 'number') {
+      return { ok: true, liked: data.liked, likesCount: data.likesCount }
+    }
+    return { ok: false }
+  } catch {
+    return { ok: false }
   }
 }
 
@@ -1656,7 +1658,18 @@ lobby = createLobbyFlowController({
   onFriendAccept: (friendshipId) => submitFriendAction(friendshipId, 'accept'),
   onFriendReject: (friendshipId) => submitFriendAction(friendshipId, 'reject'),
   onFriendRemove: (friendshipId) => submitFriendAction(friendshipId, 'remove'),
-  onFriendBlock: (profileId) => submitFriendBlock(profileId),
+  onBlockProfile: (profileId) => submitProfileBlock(profileId),
+  onLoadBlockedPlayers: async () => {
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/blocks`, { credentials: 'include' })
+      const data = await response.json() as { ok?: boolean; profiles?: PlayerPublicProfileSnapshot[]; count?: number; limit?: number; message?: string }
+      if (!response.ok || !data.ok) return { ok: false, message: data.message ?? 'Грешка при зареждане.' }
+      return { ok: true, profiles: data.profiles ?? [], count: data.count ?? 0, limit: data.limit ?? 50 }
+    } catch {
+      return { ok: false, message: 'Няма връзка със сървъра.' }
+    }
+  },
+  onLikeProfile: (profileId) => submitProfileLike(profileId),
   onGiftCoinsSubmit: (friendshipId, amount) => submitGiftCoins(friendshipId, amount),
   onChatConversationsLoad: () => loadChatConversations(),
   onChatMessagesLoad: (friendshipId) => loadChatMessages(friendshipId),
