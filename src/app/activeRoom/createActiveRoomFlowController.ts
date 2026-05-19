@@ -155,6 +155,7 @@ export function createActiveRoomFlowController(
   let matchEndedPrizeAnimated = false
   let matchEndedPrizeAnimatedTimerId: number | null = null
   let replayStakeEffectShown = false
+  let initialStakeEffectShown = false
   let matchEndedCountdownSeconds = 120
   let matchEndedCountdownIntervalId: number | null = null
 
@@ -1767,6 +1768,14 @@ export function createActiveRoomFlowController(
       : ''
 
     if (cuttingSnapshotForRender) {
+      if (!initialStakeEffectShown) {
+        initialStakeEffectShown = true
+        showStakeDeductionEffect(activeRoomState.stake, {
+          x: window.innerWidth / 2,
+          y: window.innerHeight / 2,
+        })
+      }
+
       if (matchEndedSoundPlayed && !replayStakeEffectShown) {
         replayStakeEffectShown = true
         showStakeDeductionEffect(activeRoomState.stake, {
@@ -2980,6 +2989,7 @@ export function createActiveRoomFlowController(
     matchEndedSoundPlayed = false
     matchEndedPrizeAnimated = false
     replayStakeEffectShown = false
+    initialStakeEffectShown = false
     clearMatchEndedCountdown()
     matchEndedCountdownSeconds = 120
     resetPlayingUiCache(playingCache)
@@ -3024,6 +3034,7 @@ export function createActiveRoomFlowController(
     matchEndedSoundPlayed = false
     matchEndedPrizeAnimated = false
     replayStakeEffectShown = false
+    initialStakeEffectShown = false
     clearMatchEndedCountdown()
     matchEndedCountdownSeconds = 120
     resetPlayingUiCache(playingCache)
