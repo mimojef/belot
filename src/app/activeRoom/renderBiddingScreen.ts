@@ -8,7 +8,7 @@ import type {
 import { ACTIVE_ROOM_TABLE_STAGE_BACKGROUND } from './activeRoomShared'
 import { renderPile, getPileVisibleCards } from './renderDealingScreen'
 
-export const BID_HUMAN_TIMEOUT_MS = 15_000
+export const BID_HUMAN_TIMEOUT_MS = 20_000
 export const BID_BOT_DELAY_MS = 800
 
 export type RenderBiddingScreenOptions = {

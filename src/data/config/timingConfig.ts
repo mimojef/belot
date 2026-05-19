@@ -1,11 +1,11 @@
 export const TIMING_CONFIG = {
-  cutHumanTimeoutMs: 15000,
+  cutHumanTimeoutMs: 20000,
   cutBotDelayMs: 800,
 
-  bidHumanTimeoutMs: 15000,
+  bidHumanTimeoutMs: 20000,
   bidBotDelayMs: 800,
 
-  playHumanTimeoutMs: 15000,
+  playHumanTimeoutMs: 20000,
   playBotDelayMs: 800,
 
   summaryVisibleMs: 5000,

@@ -13,13 +13,13 @@ const PLAY_AFTER_TRICK_COLLECTION_DELAY_MS =
   TRICK_COLLECTION_CARD_STAGGER_MS * (TRICK_COLLECTION_CARD_COUNT - 1)
 
 export const SERVER_TIMING_CONFIG = {
-  cutHumanTimeoutMs: 15000,
+  cutHumanTimeoutMs: 20000,
   cutBotDelayMs: 800,
 
-  bidHumanTimeoutMs: 15000,
+  bidHumanTimeoutMs: 20000,
   bidBotDelayMs: 800,
 
-  playHumanTimeoutMs: 15000,
+  playHumanTimeoutMs: 20000,
   playBotDelayMs: 800,
   playAfterTrickCollectionDelayMs: PLAY_AFTER_TRICK_COLLECTION_DELAY_MS,
 

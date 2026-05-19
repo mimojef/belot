@@ -1,6 +1,6 @@
 import type { RoomGameSnapshot } from '../../network/createGameServerClient'
 
-export const CUTTING_COUNTDOWN_MS = 15000
+export const CUTTING_COUNTDOWN_MS = 20000
 const SHORT_CUTTING_VISUAL_TIMER_THRESHOLD_MS = 1500
 
 type CuttingVisualCountdownContext = {
