@@ -54,6 +54,8 @@ export type FriendRelationshipSnapshot = {
   profile: PlayerPublicProfileSnapshot
   createdAt: string
   updatedAt: string
+  isOnline?: boolean
+  isInGame?: boolean
 }
 
 export type FriendshipsSnapshot = {
@@ -319,8 +321,11 @@ export type ClientMessage =
     }
   | {
       type: 'invite_to_private_room'
-      toProfileId: string
-      toDisplayName: string
+      toProfiles: Array<{ profileId: string; displayName: string }>
+    }
+  | {
+      type: 'cancel_private_room_invite'
+      inviteId: string
     }
   | {
       type: 'respond_private_room_invite'
@@ -683,8 +688,10 @@ export type PrivateRoomInviteReceivedMessage = {
   inviteId: string
   fromProfileId: string
   fromDisplayName: string
+  fromAvatarUrl: string | null
   privateRoomId: string
   stake: MatchStake
+  expiresAt: number
 }
 
 export type PrivateRoomInviteAcceptedMessage = {
@@ -697,9 +704,29 @@ export type PrivateRoomInviteDeclinedMessage = {
   toDisplayName: string
 }
 
+export type PrivateRoomInviteExpiredMessage = {
+  type: 'private_room_invite_expired'
+  inviteId: string
+}
+
+export type PrivateRoomInviteCancelledMessage = {
+  type: 'private_room_invite_cancelled'
+  inviteId: string
+}
+
 export type PrivateRoomFriendBusyMessage = {
   type: 'private_room_friend_busy'
-  friendDisplayName: string
+  busyFriends: Array<{ displayName: string }>
+}
+
+export type PrivateRoomMemberLeftMessage = {
+  type: 'private_room_member_left'
+  displayName: string
+}
+
+export type PrivateRoomClosedMessage = {
+  type: 'private_room_closed'
+  privateRoomId: string
 }
 
 export type PrivateRoomFullMessage = {
@@ -707,6 +734,28 @@ export type PrivateRoomFullMessage = {
   roomId: string
   seat: Seat
   stake: MatchStake
+}
+
+export type ProfileLikedMessage = {
+  type: 'profile_liked'
+  fromProfileId: string
+  fromDisplayName: string
+  fromAvatarUrl: string | null
+}
+
+export type FriendRequestReceivedMessage = {
+  type: 'friend_request_received'
+  friendshipId: string
+  fromProfileId: string
+  fromDisplayName: string
+  fromAvatarUrl: string | null
+}
+
+export type FriendRequestAcceptedMessage = {
+  type: 'friend_request_accepted'
+  fromProfileId: string
+  fromDisplayName: string
+  fromAvatarUrl: string | null
 }
 
 export type ServerMessage =
@@ -736,8 +785,15 @@ export type ServerMessage =
   | PrivateRoomInviteReceivedMessage
   | PrivateRoomInviteAcceptedMessage
   | PrivateRoomInviteDeclinedMessage
+  | PrivateRoomInviteExpiredMessage
+  | PrivateRoomInviteCancelledMessage
   | PrivateRoomFriendBusyMessage
+  | PrivateRoomMemberLeftMessage
+  | PrivateRoomClosedMessage
   | PrivateRoomFullMessage
+  | ProfileLikedMessage
+  | FriendRequestReceivedMessage
+  | FriendRequestAcceptedMessage
 
 type CreateGameServerClientOptions = {
   url?: string
@@ -771,7 +827,8 @@ export type GameServerClient = {
   createPrivateRoom: (stake: MatchStake, isLocked: boolean) => void
   joinPrivateRoom: (privateRoomId: string) => void
   leavePrivateRoom: () => void
-  inviteToPrivateRoom: (toProfileId: string, toDisplayName: string) => void
+  inviteToPrivateRoom: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
+  cancelPrivateRoomInvite: (inviteId: string) => void
   respondPrivateRoomInvite: (inviteId: string, accept: boolean) => void
 }
 
@@ -1003,8 +1060,12 @@ export function createGameServerClient(
     send({ type: 'leave_private_room' })
   }
 
-  function inviteToPrivateRoom(toProfileId: string, toDisplayName: string): void {
-    send({ type: 'invite_to_private_room', toProfileId, toDisplayName })
+  function inviteToPrivateRoom(toProfiles: Array<{ profileId: string; displayName: string }>): void {
+    send({ type: 'invite_to_private_room', toProfiles })
+  }
+
+  function cancelPrivateRoomInvite(inviteId: string): void {
+    send({ type: 'cancel_private_room_invite', inviteId })
   }
 
   function respondPrivateRoomInvite(inviteId: string, accept: boolean): void {
@@ -1036,6 +1097,7 @@ export function createGameServerClient(
     joinPrivateRoom,
     leavePrivateRoom,
     inviteToPrivateRoom,
+    cancelPrivateRoomInvite,
     respondPrivateRoomInvite,
   }
 }

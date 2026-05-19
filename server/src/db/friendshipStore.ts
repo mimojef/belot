@@ -31,7 +31,7 @@ export type FriendshipStore = {
     requesterProfileId: ProfileId,
     addresseeProfileId: ProfileId,
   ) =>
-    | { ok: true; friendships: FriendshipsSnapshot }
+    | { ok: true; friendships: FriendshipsSnapshot; friendshipId: string }
     | { ok: false; message: string }
   acceptRequest: (
     profileId: ProfileId,
@@ -257,7 +257,7 @@ export async function createFriendshipStore(
     requesterProfileId: ProfileId,
     addresseeProfileId: ProfileId,
   ):
-    | { ok: true; friendships: FriendshipsSnapshot }
+    | { ok: true; friendships: FriendshipsSnapshot; friendshipId: string }
     | { ok: false; message: string } {
     if (requesterProfileId === addresseeProfileId) {
       return {
@@ -307,8 +307,9 @@ export async function createFriendshipStore(
       }
     }
 
+    const newFriendshipId = randomUUID()
     insertFriendshipStatement.run(
-      randomUUID(),
+      newFriendshipId,
       requesterProfileId,
       addresseeProfileId,
       pair.lowerProfileId,
@@ -318,6 +319,7 @@ export async function createFriendshipStore(
     return {
       ok: true,
       friendships: listForProfile(requesterProfileId),
+      friendshipId: newFriendshipId,
     }
   }
 

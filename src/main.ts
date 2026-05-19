@@ -32,6 +32,8 @@ import {
   type PlayerPublicProfileSnapshot,
 } from './app/network/createGameServerClient'
 import { createViewportResizeHandler } from './ui/layout/viewportStage'
+import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
+import { createFriendRequestNotification } from './ui/notifications/friendRequestNotification'
 
 const rootElementCandidate = document.querySelector<HTMLDivElement>('#app')
 
@@ -57,6 +59,32 @@ if (isMatchEndedPreviewRequest()) {
 let client: GameServerClient
 let lobby: LobbyFlowController
 const gameAudio = createGameAudioController()
+
+const likeNotifContainer = document.createElement('div')
+likeNotifContainer.id = 'global-like-notifications'
+document.body.appendChild(likeNotifContainer)
+
+const likeNotification = createProfileLikeNotification({
+  container: likeNotifContainer,
+  onLike: async (profileId) => {
+    await submitProfileLike(profileId)
+  },
+})
+
+const friendReqNotifContainer = document.createElement('div')
+friendReqNotifContainer.id = 'global-friend-request-notifications'
+document.body.appendChild(friendReqNotifContainer)
+
+const friendRequestNotification = createFriendRequestNotification({
+  container: friendReqNotifContainer,
+  onAccept: async (friendshipId) => {
+    await submitFriendRequestAction(friendshipId, 'accept')
+  },
+  onReject: async (friendshipId) => {
+    await submitFriendRequestAction(friendshipId, 'reject')
+  },
+})
+
 const SERVER_RESTART_WAIT_MESSAGE = 'Изчаква се рестарт на сървъра.'
 const SERVER_RESUME_WAIT_MESSAGE = 'Възстановяване на играта...'
 const SERVER_CONNECTION_ERROR_MESSAGE = 'Възникна грешка при връзката със сървъра.'
@@ -1211,6 +1239,20 @@ async function submitProfileLike(
   }
 }
 
+async function submitFriendRequestAction(
+  friendshipId: string,
+  action: 'accept' | 'reject',
+): Promise<void> {
+  try {
+    await fetch(`${getApiBaseUrl()}/api/friends/${encodeURIComponent(friendshipId)}/${action}`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+  } catch {
+    // ignore
+  }
+}
+
 async function submitGiftCoins(friendshipId: string, amount: number): Promise<
   | {
       ok: true
@@ -1686,7 +1728,8 @@ lobby = createLobbyFlowController({
   onPrivateRoomCreate: (stake, isLocked) => { client.createPrivateRoom(stake, isLocked) },
   onPrivateRoomJoin: (privateRoomId) => { client.joinPrivateRoom(privateRoomId) },
   onPrivateRoomLeave: () => { client.leavePrivateRoom() },
-  onPrivateRoomInvite: (toProfileId, toDisplayName) => { client.inviteToPrivateRoom(toProfileId, toDisplayName) },
+  onPrivateRoomInvite: (toProfiles) => { client.inviteToPrivateRoom(toProfiles) },
+  onCancelPrivateRoomInvite: (inviteId) => { client.cancelPrivateRoomInvite(inviteId) },
   onPrivateRoomInviteRespond: (inviteId, accept) => { client.respondPrivateRoomInvite(inviteId, accept) },
 })
 
@@ -1883,6 +1926,33 @@ client = createGameServerClient({
 
     if (message.type === 'session_in_game') {
       showSessionInGameOverlay(message.roomId, message.reconnectToken)
+      return
+    }
+
+    if (message.type === 'profile_liked') {
+      likeNotification.show({
+        fromProfileId: message.fromProfileId,
+        fromDisplayName: message.fromDisplayName,
+        fromAvatarUrl: message.fromAvatarUrl,
+      })
+      return
+    }
+
+    if (message.type === 'friend_request_received') {
+      friendRequestNotification.showRequest({
+        friendshipId: message.friendshipId,
+        fromProfileId: message.fromProfileId,
+        fromDisplayName: message.fromDisplayName,
+        fromAvatarUrl: message.fromAvatarUrl,
+      })
+      return
+    }
+
+    if (message.type === 'friend_request_accepted') {
+      friendRequestNotification.showAccepted({
+        fromDisplayName: message.fromDisplayName,
+        fromAvatarUrl: message.fromAvatarUrl,
+      })
       return
     }
 

@@ -132,10 +132,20 @@ export type LobbyScreenState = {
   privateRoomsTab: 'all' | 'mine'
   privateRooms: PrivateRoomSnapshot[]
   myPrivateRoom: PrivateRoomSnapshot | null
-  privateRoomInvite: { inviteId: string; fromDisplayName: string; privateRoomId: string; stake: MatchStake } | null
+  privateRoomInvite: {
+    inviteId: string
+    fromProfileId: string
+    fromDisplayName: string
+    fromAvatarUrl: string | null
+    privateRoomId: string
+    stake: MatchStake
+    expiresAt: number
+  } | null
+  privateRoomInviteQueue: Array<{ inviteId: string }>
   privateRoomInfoText: string | null
   leavePrivateRoomForMatchmakingOpen: boolean
   leavePrivateRoomForMatchmakingIsHost: boolean
+  inviteFriendsPopupOpen: boolean
 }
 
 export type RenderLobbyScreenOptions = {
@@ -226,7 +236,10 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean) => void
   onPrivateRoomJoin: (privateRoomId: string) => void
   onPrivateRoomLeave: () => void
-  onPrivateRoomInvite: (toProfileId: string, toDisplayName: string) => void
+  onPrivateRoomInvite: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
+  onCancelPrivateRoomInvite: (inviteId: string) => void
+  onInviteFriendsOpen: () => void
+  onInviteFriendsClose: () => void
   onPrivateRoomInviteAccept: (inviteId: string) => void
   onPrivateRoomInviteDecline: (inviteId: string) => void
   onPrivateRoomInfoDismiss: () => void
@@ -253,6 +266,7 @@ const MAX_PROFILE_GALLERY_IMAGES = 6
 
 let popupRootEl: HTMLElement | null = null
 let privateRoomInfoDismissTimer: ReturnType<typeof setTimeout> | null = null
+let inviteCountdownTimer: ReturnType<typeof setInterval> | null = null
 
 export type ProfilePopupCallbacks = {
   onClose: () => void
@@ -2836,10 +2850,18 @@ function renderMyRoomPanel(room: PrivateRoomSnapshot): string {
             ${isLocked ? 'Заключена' : 'Отворена'} · Залог ${formatStake(room.stake)} · ~${minutesLeft} мин. оставащи
           </div>
         </div>
-        <button type="button" data-private-room-leave="1" style="
-          padding:6px 14px;border:1px solid rgba(239,68,68,0.5);background:rgba(239,68,68,0.1);
-          border-radius:8px;color:#f87171;font-size:13px;font-weight:700;cursor:pointer;
-        ">Напусни</button>
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${isLocked && room.members.length < 4 ? `
+            <button type="button" id="invite-friends-open" style="
+              padding:6px 14px;border:1px solid rgba(167,139,250,0.5);background:rgba(167,139,250,0.15);
+              border-radius:8px;color:#a78bfa;font-size:13px;font-weight:700;cursor:pointer;
+            ">+ Покани</button>
+          ` : ''}
+          <button type="button" data-private-room-leave="1" style="
+            padding:6px 14px;border:1px solid rgba(239,68,68,0.5);background:rgba(239,68,68,0.1);
+            border-radius:8px;color:#f87171;font-size:13px;font-weight:700;cursor:pointer;
+          ">Напусни</button>
+        </div>
       </div>
       <div style="display:flex;flex-direction:column;gap:8px;">${membersHtml}</div>
     </div>
@@ -3032,36 +3054,160 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState): string {
 function renderPrivateRoomInvitePopup(state: LobbyScreenState): string {
   if (!state.privateRoomInvite) return ''
   const inv = state.privateRoomInvite
+  const secondsLeft = Math.max(0, Math.ceil((inv.expiresAt - Date.now()) / 1000))
+  const progressPct = Math.round((secondsLeft / 60) * 100)
+  const avatarHtml = inv.fromAvatarUrl
+    ? `<img src="${inv.fromAvatarUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`
+    : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:28px;">👤</div>`
+  const queueCount = state.privateRoomInviteQueue.length
+
   return `
     <div style="
       position:fixed;inset:0;z-index:9000;
       display:flex;align-items:center;justify-content:center;
-      background:rgba(0,0,0,0.6);
+      background:rgba(0,0,0,0.65);
     ">
       <div style="
-        background:#1a1a2e;
-        border:1px solid rgba(167,139,250,0.5);
-        border-radius:16px;
-        width:360px;
+        background:linear-gradient(160deg,#1a1a2e,#13132a);
+        border:1px solid rgba(167,139,250,0.45);
+        border-radius:20px;
+        width:340px;
         max-width:calc(100vw - 32px);
-        padding:28px;
+        padding:28px 24px 22px;
         text-align:center;
-        box-shadow:0 8px 40px rgba(0,0,0,0.8);
+        box-shadow:0 12px 48px rgba(0,0,0,0.8);
       ">
-        <div style="font-size:20px;margin-bottom:12px;">🎮</div>
-        <div style="font-size:16px;font-weight:800;color:#fff;margin-bottom:8px;">Покана за частна маса</div>
-        <div style="font-size:14px;color:rgba(255,255,255,0.6);margin-bottom:20px;">
-          <strong style="color:#a78bfa;">${inv.fromDisplayName}</strong> те кани на частна маса с залог ${formatStake(inv.stake)} жълтици.
+        <div style="font-size:12px;font-weight:700;color:rgba(167,139,250,0.7);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:18px;">
+          Покана за частна маса
         </div>
-        <div style="display:flex;gap:12px;">
+
+        <div style="display:flex;flex-direction:column;align-items:center;gap:10px;margin-bottom:18px;">
+          <div style="width:64px;height:64px;border-radius:50%;border:2px solid rgba(167,139,250,0.6);overflow:hidden;flex-shrink:0;">
+            ${avatarHtml}
+          </div>
+          <div style="font-size:17px;font-weight:800;color:#fff;">${inv.fromDisplayName}</div>
+          <div style="font-size:13px;color:rgba(255,255,255,0.5);">Залог: <span style="color:#fde68a;font-weight:700;">${formatStake(inv.stake)} жълтици</span></div>
+        </div>
+
+        <div style="margin-bottom:20px;">
+          <div style="display:flex;justify-content:flex-end;margin-bottom:5px;">
+            <span id="pr-invite-countdown" style="font-size:12px;color:rgba(255,255,255,0.4);">${secondsLeft}с</span>
+          </div>
+          <div style="height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden;">
+            <div id="pr-invite-progress" style="
+              height:100%;width:${progressPct}%;
+              background:linear-gradient(90deg,#7c3aed,#a78bfa);
+              border-radius:2px;
+              transition:width 1s linear;
+            "></div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:10px;margin-bottom:${queueCount > 0 ? '14px' : '0'};">
           <button type="button" data-private-room-invite-decline="${inv.inviteId}" style="
-            flex:1;padding:11px;border:1px solid rgba(239,68,68,0.5);background:rgba(239,68,68,0.12);
-            border-radius:10px;color:#ef4444;font-size:14px;font-weight:700;cursor:pointer;
+            flex:1;padding:11px;border:1px solid rgba(239,68,68,0.4);background:rgba(239,68,68,0.1);
+            border-radius:10px;color:#f87171;font-size:14px;font-weight:700;cursor:pointer;
           ">Откажи</button>
           <button type="button" data-private-room-invite-accept="${inv.inviteId}" style="
-            flex:1;padding:11px;border:1px solid rgba(167,139,250,0.5);background:rgba(167,139,250,0.2);
-            border-radius:10px;color:#a78bfa;font-size:14px;font-weight:700;cursor:pointer;
+            flex:1;padding:11px;border:none;
+            background:linear-gradient(135deg,#7c3aed,#a78bfa);
+            border-radius:10px;color:#fff;font-size:14px;font-weight:700;cursor:pointer;
           ">Приеми</button>
+        </div>
+
+        ${queueCount > 0 ? `<div style="font-size:11px;color:rgba(255,255,255,0.3);">+${queueCount} ${queueCount === 1 ? 'още покана' : 'още покани'} чакат</div>` : ''}
+      </div>
+    </div>
+  `
+}
+
+function renderInviteFriendsPopup(state: LobbyScreenState, _options: RenderLobbyScreenOptions): string {
+  if (!state.inviteFriendsPopupOpen || !state.myPrivateRoom) return ''
+
+  const room = state.myPrivateRoom
+  const freeSeats = 4 - room.members.length
+  if (freeSeats <= 0) return ''
+
+  const onlineFriends = state.friendships?.friends.filter((f) => f.isOnline) ?? null
+
+  return `
+    <div style="
+      position:fixed;inset:0;z-index:9100;
+      display:flex;align-items:center;justify-content:center;
+      background:rgba(0,0,0,0.65);
+    " id="invite-friends-overlay">
+      <div style="
+        background:linear-gradient(160deg,#1a1a2e,#13132a);
+        border:1px solid rgba(167,139,250,0.35);
+        border-radius:20px;
+        width:400px;
+        max-width:calc(100vw - 32px);
+        max-height:80vh;
+        display:flex;flex-direction:column;
+        box-shadow:0 12px 48px rgba(0,0,0,0.8);
+        overflow:hidden;
+      ">
+        <div style="padding:20px 20px 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,0.07);">
+          <div>
+            <div style="font-size:15px;font-weight:800;color:#fff;">Покани приятели</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:2px;">Свободни места: ${freeSeats}</div>
+          </div>
+          <button type="button" id="invite-friends-close" style="
+            width:30px;height:30px;border-radius:50%;border:none;
+            background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.6);
+            font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;
+          ">✕</button>
+        </div>
+
+        <div style="flex:1;overflow-y:auto;padding:12px 16px;" id="invite-friends-list">
+          ${
+            onlineFriends === null
+              ? `<div style="text-align:center;padding:32px 0;color:rgba(255,255,255,0.4);font-size:14px;">Зарежда...</div>`
+              : onlineFriends.length === 0
+                ? `<div style="text-align:center;padding:32px 0;color:rgba(255,255,255,0.4);font-size:14px;">Нямаш онлайн приятели в момента.</div>`
+                : onlineFriends
+                    .map((f) => {
+                      const profileId = f.profile.profileId ?? ''
+                      const displayName = f.profile.displayName
+                      const avatarUrl = f.profile.avatarUrl
+                      const isInGame = f.isInGame === true
+                      const avatarHtml = avatarUrl
+                        ? `<img src="${avatarUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`
+                        : `<div style="font-size:20px;line-height:42px;text-align:center;">👤</div>`
+                      return `
+                        <label style="
+                          display:flex;align-items:center;gap:12px;
+                          padding:10px;border-radius:12px;cursor:${isInGame ? 'not-allowed' : 'pointer'};
+                          opacity:${isInGame ? '0.5' : '1'};
+                          background:rgba(255,255,255,0.03);
+                          margin-bottom:6px;
+                        ">
+                          <div style="width:42px;height:42px;border-radius:50%;border:1.5px solid rgba(167,139,250,0.4);overflow:hidden;flex-shrink:0;">
+                            ${avatarHtml}
+                          </div>
+                          <div style="flex:1;min-width:0;">
+                            <div style="font-size:14px;font-weight:700;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${displayName}</div>
+                            <div style="font-size:11px;color:${isInGame ? '#f87171' : '#4ade80'};margin-top:1px;">${isInGame ? 'В игра' : 'Онлайн'}</div>
+                          </div>
+                          <input type="checkbox"
+                            data-invite-friend-id="${profileId}"
+                            data-invite-friend-name="${displayName}"
+                            ${isInGame ? 'disabled' : ''}
+                            style="width:18px;height:18px;accent-color:#a78bfa;flex-shrink:0;"
+                          >
+                        </label>
+                      `
+                    })
+                    .join('')
+          }
+        </div>
+
+        <div style="padding:14px 16px;border-top:1px solid rgba(255,255,255,0.07);">
+          <button type="button" id="invite-friends-submit" style="
+            width:100%;padding:12px;border:none;
+            background:linear-gradient(135deg,#7c3aed,#a78bfa);
+            border-radius:12px;color:#fff;font-size:14px;font-weight:800;cursor:pointer;
+          ">Покани избраните</button>
         </div>
       </div>
     </div>
@@ -3565,6 +3711,7 @@ export function renderLobbyScreen(
       ${renderAuthModal(state)}
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
+      ${renderInviteFriendsPopup(state, options)}
       ${renderPrivateRoomInfoPopup(state)}
       ${renderLeavePrivateRoomConfirmPopup(state)}
       ${renderBlockedPlayersPopup(state)}
@@ -4747,6 +4894,32 @@ export function renderLobbyScreen(
   root.querySelector<HTMLButtonElement>('[data-private-room-leave="1"]')
     ?.addEventListener('click', options.onPrivateRoomLeave)
 
+  root.querySelector<HTMLButtonElement>('#invite-friends-open')
+    ?.addEventListener('click', options.onInviteFriendsOpen)
+
+  root.querySelector<HTMLButtonElement>('#invite-friends-close')
+    ?.addEventListener('click', options.onInviteFriendsClose)
+
+  root.querySelector<HTMLButtonElement>('#invite-friends-overlay')
+    ?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) options.onInviteFriendsClose()
+    })
+
+  root.querySelector<HTMLButtonElement>('#invite-friends-submit')
+    ?.addEventListener('click', () => {
+      const checkboxes = root.querySelectorAll<HTMLInputElement>('[data-invite-friend-id]:checked')
+      const toProfiles: Array<{ profileId: string; displayName: string }> = []
+      checkboxes.forEach((cb) => {
+        const profileId = cb.dataset.inviteFriendId?.trim() ?? ''
+        const displayName = cb.dataset.inviteFriendName?.trim() ?? ''
+        if (profileId && displayName) toProfiles.push({ profileId, displayName })
+      })
+      if (toProfiles.length > 0) {
+        options.onPrivateRoomInvite(toProfiles)
+        options.onInviteFriendsClose()
+      }
+    })
+
   root.querySelectorAll<HTMLButtonElement>('[data-private-room-invite-accept]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const inviteId = btn.dataset.privateRoomInviteAccept?.trim() ?? ''
@@ -4778,6 +4951,27 @@ export function renderLobbyScreen(
       clearTimeout(privateRoomInfoDismissTimer)
       privateRoomInfoDismissTimer = null
     }
+  }
+
+  if (inviteCountdownTimer !== null) {
+    clearInterval(inviteCountdownTimer)
+    inviteCountdownTimer = null
+  }
+  if (state.privateRoomInvite) {
+    inviteCountdownTimer = setInterval(() => {
+      const countdownEl = document.getElementById('pr-invite-countdown')
+      const progressEl = document.getElementById('pr-invite-progress')
+      if (!countdownEl || !progressEl || !state.privateRoomInvite) {
+        if (inviteCountdownTimer !== null) {
+          clearInterval(inviteCountdownTimer)
+          inviteCountdownTimer = null
+        }
+        return
+      }
+      const secs = Math.max(0, Math.ceil((state.privateRoomInvite.expiresAt - Date.now()) / 1000))
+      countdownEl.textContent = `${secs}с`
+      progressEl.style.width = `${Math.round((secs / 60) * 100)}%`
+    }, 1000)
   }
 
   const newScrollEl = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')

@@ -99,7 +99,7 @@ import { submitHumanPlayCardForRoom } from './game/submitHumanPlayCardForRoom.js
 import { resumeHumanControlForRoom } from './game/resumeHumanControlForRoom.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
 import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
-import type { PrivateRoom } from './game/privateRoomsStore.js'
+import type { PrivateRoom, PrivateRoomMember } from './game/privateRoomsStore.js'
 import { addHumanToRoom } from './core/addHumanToRoom.js'
 import { createRoomWithHumanHost } from './core/createRoomWithHumanHost.js'
 import type { PrivateRoomSnapshot } from './protocol/messageTypes.js'
@@ -436,6 +436,18 @@ function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
 }
 
 function handlePrivateRoomExpired(room: PrivateRoom): void {
+  for (const invite of room.pendingInvites) {
+    cancelPrivateRoomInviteTimer(invite.inviteId)
+    const inviteeConn = Object.values(serverState.connections).find(
+      (c) => c.profileId === invite.toProfileId && c.status === 'connected',
+    )
+    if (inviteeConn) {
+      safeSendToConnection(inviteeConn.id, {
+        type: 'private_room_invite_cancelled',
+        inviteId: invite.inviteId,
+      })
+    }
+  }
   for (const member of room.members) {
     safeSendToConnection(member.connectionId, {
       type: 'private_room_expired',
@@ -444,10 +456,71 @@ function handlePrivateRoomExpired(room: PrivateRoom): void {
   }
 }
 
+const privateRoomInviteTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function cancelPrivateRoomInviteTimer(inviteId: string): void {
+  const timer = privateRoomInviteTimers.get(inviteId)
+  if (timer !== undefined) {
+    clearTimeout(timer)
+    privateRoomInviteTimers.delete(inviteId)
+  }
+}
+
+function schedulePrivateRoomInviteExpiry(
+  inviteId: string,
+  toProfileId: string,
+  expiresAt: number,
+): void {
+  const delay = Math.max(0, expiresAt - Date.now())
+  const timer = setTimeout(() => {
+    privateRoomInviteTimers.delete(inviteId)
+    privateRoomsStore.removeInviteById(inviteId)
+    const targetConn = Object.values(serverState.connections).find(
+      (c) => c.profileId === toProfileId && c.status === 'connected',
+    )
+    if (targetConn) {
+      safeSendToConnection(targetConn.id, { type: 'private_room_invite_expired', inviteId })
+    }
+  }, delay)
+  privateRoomInviteTimers.set(inviteId, timer)
+}
+
+function handlePrivateRoomClosed(room: PrivateRoom): void {
+  for (const invite of room.pendingInvites) {
+    cancelPrivateRoomInviteTimer(invite.inviteId)
+    const inviteeConn = Object.values(serverState.connections).find(
+      (c) => c.profileId === invite.toProfileId && c.status === 'connected',
+    )
+    if (inviteeConn) {
+      safeSendToConnection(inviteeConn.id, {
+        type: 'private_room_invite_cancelled',
+        inviteId: invite.inviteId,
+      })
+    }
+  }
+  for (const member of room.members) {
+    if (member.connectionId !== room.hostConnectionId) {
+      safeSendToConnection(member.connectionId, {
+        type: 'private_room_closed',
+        privateRoomId: room.id,
+      })
+    }
+  }
+}
+
+function handlePrivateRoomMemberLeft(room: PrivateRoom, member: PrivateRoomMember): void {
+  safeSendToConnection(room.hostConnectionId, {
+    type: 'private_room_member_left',
+    displayName: member.displayName,
+  })
+}
+
 const privateRoomsStore = createPrivateRoomsStore({
   onRoomsChanged: () => broadcastPrivateRoomsListToLobbyConnections(),
   onRoomFull: (room) => handlePrivateRoomFull(room),
   onRoomExpired: (room) => handlePrivateRoomExpired(room),
+  onRoomClosed: (room) => handlePrivateRoomClosed(room),
+  onMemberLeft: (room, member) => handlePrivateRoomMemberLeft(room, member),
 })
 
 for (const room of Object.values(serverState.rooms)) {
@@ -1918,6 +1991,20 @@ async function handleProfileLikeRequest(
     sendJsonResponse(res, 429, { ok: false, message: 'Вече харесано. Опитай след 4 часа.' })
     return true
   }
+
+  const likerProfile = playerProgressStore.getPublicProfile(likerProfileId)
+  const recipientConn = Object.values(serverState.connections).find(
+    (c) => c.profileId === likedProfileId && c.status === 'connected',
+  )
+  if (recipientConn && likerProfile) {
+    safeSendToConnection(recipientConn.id, {
+      type: 'profile_liked',
+      fromProfileId: likerProfileId,
+      fromDisplayName: likerProfile.displayName,
+      fromAvatarUrl: likerProfile.avatarUrl,
+    })
+  }
+
   sendJsonResponse(res, 200, { ok: true, liked: true, likesCount: result.likesCount })
   return true
 }
@@ -2689,9 +2776,26 @@ async function handleFriendsRequest(
   const profileId = session.profile.profileId
 
   if (pathname === '/api/friends' && req.method === 'GET') {
+    const rawFriendships = friendshipStore.listForProfile(profileId)
+    const enrichOnlineStatus = <T extends { profile: { profileId: string | null } }>(rel: T) => {
+      const conn = rel.profile.profileId
+        ? Object.values(serverState.connections).find(
+            (c) => c.profileId === rel.profile.profileId && c.status === 'connected',
+          )
+        : null
+      return {
+        ...rel,
+        isOnline: conn != null,
+        isInGame: conn?.currentRoomId != null,
+      }
+    }
     sendJsonResponse(res, 200, {
       ok: true,
-      friendships: friendshipStore.listForProfile(profileId),
+      friendships: {
+        incomingPending: rawFriendships.incomingPending.map(enrichOnlineStatus),
+        outgoingPending: rawFriendships.outgoingPending.map(enrichOnlineStatus),
+        friends: rawFriendships.friends.map(enrichOnlineStatus),
+      },
     })
     return true
   }
@@ -2713,6 +2817,20 @@ async function handleFriendsRequest(
     if (!result.ok) {
       sendJsonResponse(res, 400, result)
       return true
+    }
+
+    const addresseeConn = Object.values(serverState.connections).find(
+      (c) => c.profileId === addresseeProfileId && c.status === 'connected',
+    )
+    const requesterProfile = playerProgressStore.getPublicProfile(profileId)
+    if (addresseeConn && requesterProfile) {
+      safeSendToConnection(addresseeConn.id, {
+        type: 'friend_request_received',
+        friendshipId: result.friendshipId,
+        fromProfileId: profileId,
+        fromDisplayName: requesterProfile.displayName,
+        fromAvatarUrl: requesterProfile.avatarUrl,
+      })
     }
 
     sendJsonResponse(res, 200, {
@@ -2782,6 +2900,25 @@ async function handleFriendsRequest(
     if (!result.ok) {
       sendJsonResponse(res, 400, result)
       return true
+    }
+
+    if (action === 'accept') {
+      const newFriend = result.friendships.friends.find((f) => f.friendshipId === friendshipId)
+      const requesterProfileId = newFriend?.profile.profileId ?? null
+      if (requesterProfileId) {
+        const requesterConn = Object.values(serverState.connections).find(
+          (c) => c.profileId === requesterProfileId && c.status === 'connected',
+        )
+        const accepterProfile = playerProgressStore.getPublicProfile(profileId)
+        if (requesterConn && accepterProfile) {
+          safeSendToConnection(requesterConn.id, {
+            type: 'friend_request_accepted',
+            fromProfileId: profileId,
+            fromDisplayName: accepterProfile.displayName,
+            fromAvatarUrl: accepterProfile.avatarUrl,
+          })
+        }
+      }
     }
 
     sendJsonResponse(res, 200, {
@@ -4452,8 +4589,14 @@ wsServer.on('connection', (socket, request) => {
 
       if (message.type === 'leave_private_room') {
         const privateRoom = privateRoomsStore.getRoomByConnectionId(connection.id)
+        const isHost = privateRoom?.hostConnectionId === connection.id
+        const hasOtherMembers = (privateRoom?.members.length ?? 0) > 1
 
-        privateRoomsStore.leaveRoom(connection.id)
+        if (isHost && hasOtherMembers) {
+          privateRoomsStore.closeRoom(connection.id)
+        } else {
+          privateRoomsStore.leaveRoom(connection.id)
+        }
 
         safeSendToConnection(connection.id, {
           type: 'private_room_left',
@@ -4470,39 +4613,73 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        if (isProfileInActiveGame(message.toProfileId)) {
-          safeSendToConnection(connection.id, {
-            type: 'private_room_friend_busy',
-            friendDisplayName: message.toDisplayName,
+        const hostPublicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
+        const busyFriends: Array<{ displayName: string }> = []
+
+        for (const toProfile of message.toProfiles) {
+          if (isProfileInActiveGame(toProfile.profileId)) {
+            busyFriends.push({ displayName: toProfile.displayName })
+            continue
+          }
+
+          const inviteResult = privateRoomsStore.inviteFriend({
+            senderConnectionId: connection.id,
+            toProfileId: toProfile.profileId,
+            toDisplayName: toProfile.displayName,
           })
-          return
+
+          if (!inviteResult.ok) continue
+
+          const expiresAt = Date.now() + 60_000
+          schedulePrivateRoomInviteExpiry(inviteResult.invite.inviteId, toProfile.profileId, expiresAt)
+
+          const targetConn = Object.values(serverState.connections).find(
+            (c) => c.profileId === toProfile.profileId && c.status === 'connected',
+          )
+          if (targetConn) {
+            safeSendToConnection(targetConn.id, {
+              type: 'private_room_invite_received',
+              inviteId: inviteResult.invite.inviteId,
+              fromProfileId: inviteResult.invite.fromProfileId,
+              fromDisplayName: inviteResult.invite.fromDisplayName,
+              fromAvatarUrl: hostPublicProfile?.avatarUrl ?? null,
+              privateRoomId: inviteResult.invite.privateRoomId,
+              stake: inviteResult.room.stake,
+              expiresAt,
+            })
+          }
         }
 
-        const inviteResult = privateRoomsStore.inviteFriend({
-          senderConnectionId: connection.id,
-          toProfileId: message.toProfileId,
-          toDisplayName: message.toDisplayName,
-        })
-
-        if (!inviteResult.ok) {
-          safeSendToConnection(connection.id, { type: 'error', message: inviteResult.message })
-          return
+        if (busyFriends.length > 0) {
+          safeSendToConnection(connection.id, { type: 'private_room_friend_busy', busyFriends })
         }
 
-        const targetConn = Object.values(serverState.connections).find(
-          (c) => c.profileId === message.toProfileId && c.status === 'connected',
+        const updatedRoom = privateRoomsStore.getRoomByConnectionId(connection.id)
+        if (updatedRoom) sendPrivateRoomUpdateToMembers(updatedRoom)
+        return
+      }
+
+      if (message.type === 'cancel_private_room_invite') {
+        const room = privateRoomsStore.getRoomByConnectionId(connection.id)
+        if (!room) return
+
+        const cancelResult = privateRoomsStore.cancelInvite(message.inviteId, connection.id)
+        if (!cancelResult.ok) return
+
+        cancelPrivateRoomInviteTimer(message.inviteId)
+
+        const inviteeConn = Object.values(serverState.connections).find(
+          (c) => c.profileId === cancelResult.invite.toProfileId && c.status === 'connected',
         )
-
-        if (targetConn) {
-          safeSendToConnection(targetConn.id, {
-            type: 'private_room_invite_received',
-            inviteId: inviteResult.invite.inviteId,
-            fromProfileId: inviteResult.invite.fromProfileId,
-            fromDisplayName: inviteResult.invite.fromDisplayName,
-            privateRoomId: inviteResult.invite.privateRoomId,
-            stake: inviteResult.room.stake,
+        if (inviteeConn) {
+          safeSendToConnection(inviteeConn.id, {
+            type: 'private_room_invite_cancelled',
+            inviteId: message.inviteId,
           })
         }
+
+        const updatedRoom = privateRoomsStore.getRoomByConnectionId(connection.id)
+        if (updatedRoom) sendPrivateRoomUpdateToMembers(updatedRoom)
         return
       }
 

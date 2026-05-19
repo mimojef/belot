@@ -35,11 +35,22 @@ export type PrivateRoom = {
   expiresAt: number
 }
 
+export type CancelInviteResult =
+  | { ok: true; invite: PrivateRoomInvite }
+  | { ok: false; message: string }
+
+export type CloseRoomResult =
+  | { ok: true; room: PrivateRoom }
+  | { ok: false; message: string }
+
 export type PrivateRoomsStore = {
   createRoom: (input: CreateRoomInput) => CreateRoomResult
   joinRoom: (input: JoinRoomInput) => JoinRoomResult
   leaveRoom: (connectionId: string) => void
+  closeRoom: (hostConnectionId: string) => CloseRoomResult
   inviteFriend: (input: InviteFriendInput) => InviteFriendResult
+  cancelInvite: (inviteId: string, senderConnectionId: string) => CancelInviteResult
+  removeInviteById: (inviteId: string) => PrivateRoomInvite | null
   respondToInvite: (input: RespondToInviteInput) => RespondToInviteResult
   listRooms: () => PrivateRoom[]
   getRoomByConnectionId: (connectionId: string) => PrivateRoom | null
@@ -106,6 +117,8 @@ type StoreCallbacks = {
   onRoomsChanged: () => void
   onRoomFull: (room: PrivateRoom) => void
   onRoomExpired: (room: PrivateRoom) => void
+  onRoomClosed: (room: PrivateRoom) => void
+  onMemberLeft: (room: PrivateRoom, member: PrivateRoomMember) => void
 }
 
 export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRoomsStore {
@@ -245,6 +258,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
       return
     }
 
+    const leavingMember = room.members.find((m) => m.connectionId === connectionId)
     connectionToRoom.delete(connectionId)
 
     const remaining = room.members.filter((m) => m.connectionId !== connectionId)
@@ -269,7 +283,76 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     }
 
     rooms.set(roomId, nextRoom)
+
+    if (leavingMember) {
+      callbacks.onMemberLeft(nextRoom, leavingMember)
+    }
     callbacks.onRoomsChanged()
+  }
+
+  function closeRoom(hostConnectionId: string): CloseRoomResult {
+    const roomId = connectionToRoom.get(hostConnectionId)
+    if (roomId === undefined) {
+      return { ok: false, message: 'Не си в частна маса.' }
+    }
+
+    const room = rooms.get(roomId)
+    if (room === undefined) {
+      connectionToRoom.delete(hostConnectionId)
+      return { ok: false, message: 'Масата не съществува.' }
+    }
+
+    cancelExpiry(roomId)
+    rooms.delete(roomId)
+    for (const m of room.members) {
+      connectionToRoom.delete(m.connectionId)
+    }
+
+    callbacks.onRoomClosed(room)
+    callbacks.onRoomsChanged()
+
+    return { ok: true, room }
+  }
+
+  function cancelInvite(inviteId: string, senderConnectionId: string): CancelInviteResult {
+    const roomId = connectionToRoom.get(senderConnectionId)
+    if (roomId === undefined) {
+      return { ok: false, message: 'Не си в частна маса.' }
+    }
+
+    const room = rooms.get(roomId)
+    if (room === undefined) {
+      return { ok: false, message: 'Масата не съществува.' }
+    }
+
+    const invite = room.pendingInvites.find((i) => i.inviteId === inviteId)
+    if (!invite) {
+      return { ok: false, message: 'Поканата не съществува.' }
+    }
+
+    const nextRoom: PrivateRoom = {
+      ...room,
+      pendingInvites: room.pendingInvites.filter((i) => i.inviteId !== inviteId),
+    }
+    rooms.set(roomId, nextRoom)
+    callbacks.onRoomsChanged()
+
+    return { ok: true, invite }
+  }
+
+  function removeInviteById(inviteId: string): PrivateRoomInvite | null {
+    for (const [roomId, room] of rooms.entries()) {
+      const invite = room.pendingInvites.find((i) => i.inviteId === inviteId)
+      if (!invite) continue
+
+      const nextRoom: PrivateRoom = {
+        ...room,
+        pendingInvites: room.pendingInvites.filter((i) => i.inviteId !== inviteId),
+      }
+      rooms.set(roomId, nextRoom)
+      return invite
+    }
+    return null
   }
 
   function inviteFriend(input: InviteFriendInput): InviteFriendResult {
@@ -453,7 +536,10 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     createRoom,
     joinRoom,
     leaveRoom,
+    closeRoom,
     inviteFriend,
+    cancelInvite,
+    removeInviteById,
     respondToInvite,
     listRooms,
     getRoomByConnectionId,

@@ -245,7 +245,8 @@ export type CreateLobbyFlowControllerOptions = {
   onPrivateRoomCreate?: (stake: MatchStake, isLocked: boolean) => void
   onPrivateRoomJoin?: (privateRoomId: string) => void
   onPrivateRoomLeave?: () => void
-  onPrivateRoomInvite?: (toProfileId: string, toDisplayName: string) => void
+  onPrivateRoomInvite?: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
+  onCancelPrivateRoomInvite?: (inviteId: string) => void
   onPrivateRoomInviteRespond?: (inviteId: string, accept: boolean) => void
 }
 
@@ -364,9 +365,27 @@ type InternalLobbyFlowState = {
   privateRoomsTab: 'all' | 'mine'
   privateRooms: PrivateRoomSnapshot[]
   myPrivateRoom: PrivateRoomSnapshot | null
-  privateRoomInvite: { inviteId: string; fromDisplayName: string; privateRoomId: string; stake: MatchStake } | null
+  privateRoomInvite: {
+    inviteId: string
+    fromProfileId: string
+    fromDisplayName: string
+    fromAvatarUrl: string | null
+    privateRoomId: string
+    stake: MatchStake
+    expiresAt: number
+  } | null
+  privateRoomInviteQueue: Array<{
+    inviteId: string
+    fromProfileId: string
+    fromDisplayName: string
+    fromAvatarUrl: string | null
+    privateRoomId: string
+    stake: MatchStake
+    expiresAt: number
+  }>
   privateRoomInfoText: string | null
   leavePrivateRoomForMatchmakingOpen: boolean
+  inviteFriendsPopupOpen: boolean
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -504,8 +523,10 @@ function createInitialState(): InternalLobbyFlowState {
     privateRooms: [],
     myPrivateRoom: null,
     privateRoomInvite: null,
+    privateRoomInviteQueue: [],
     privateRoomInfoText: null,
     leavePrivateRoomForMatchmakingOpen: false,
+    inviteFriendsPopupOpen: false,
     blockedPlayersPopupOpen: false,
     blockedPlayers: null,
     blockedPlayersLoading: false,
@@ -1316,8 +1337,10 @@ export function createLobbyFlowController(
       privateRooms: state.privateRooms,
       myPrivateRoom: state.myPrivateRoom,
       privateRoomInvite: state.privateRoomInvite,
+      privateRoomInviteQueue: state.privateRoomInviteQueue,
       privateRoomInfoText: state.privateRoomInfoText,
       leavePrivateRoomForMatchmakingOpen: state.leavePrivateRoomForMatchmakingOpen,
+      inviteFriendsPopupOpen: state.inviteFriendsPopupOpen,
       leavePrivateRoomForMatchmakingIsHost: state.myPrivateRoom !== null &&
         (authSession?.profile.profileId
           ? (state.myPrivateRoom.members.find(m => m.profileId === authSession.profile.profileId)?.isHost ?? false)
@@ -1641,17 +1664,32 @@ export function createLobbyFlowController(
         options.onPrivateRoomLeave?.()
         render()
       },
-      onPrivateRoomInvite: (toProfileId, toDisplayName) => {
+      onPrivateRoomInvite: (toProfiles) => {
         state.privateRoomInfoText = null
-        options.onPrivateRoomInvite?.(toProfileId, toDisplayName)
+        options.onPrivateRoomInvite?.(toProfiles)
+      },
+      onCancelPrivateRoomInvite: (inviteId) => {
+        options.onCancelPrivateRoomInvite?.(inviteId)
+      },
+      onInviteFriendsOpen: () => {
+        state.inviteFriendsPopupOpen = true
+        state.friendships = null
+        render()
+        void ensureFriendshipsLoaded()
+      },
+      onInviteFriendsClose: () => {
+        state.inviteFriendsPopupOpen = false
+        render()
       },
       onPrivateRoomInviteAccept: (inviteId) => {
-        state.privateRoomInvite = null
+        state.privateRoomInvite = state.privateRoomInviteQueue[0] ?? null
+        state.privateRoomInviteQueue = state.privateRoomInviteQueue.slice(1)
         options.onPrivateRoomInviteRespond?.(inviteId, true)
         render()
       },
       onPrivateRoomInviteDecline: (inviteId) => {
-        state.privateRoomInvite = null
+        state.privateRoomInvite = state.privateRoomInviteQueue[0] ?? null
+        state.privateRoomInviteQueue = state.privateRoomInviteQueue.slice(1)
         options.onPrivateRoomInviteRespond?.(inviteId, false)
         render()
       },
@@ -3317,13 +3355,47 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'private_room_invite_received') {
-      state.privateRoomInvite = {
+      const invite = {
         inviteId: message.inviteId,
+        fromProfileId: message.fromProfileId,
         fromDisplayName: message.fromDisplayName,
+        fromAvatarUrl: message.fromAvatarUrl,
         privateRoomId: message.privateRoomId,
         stake: message.stake,
+        expiresAt: message.expiresAt,
+      }
+      if (state.privateRoomInvite === null) {
+        state.privateRoomInvite = invite
+      } else {
+        state.privateRoomInviteQueue = [...state.privateRoomInviteQueue, invite]
       }
       render()
+      return true
+    }
+
+    if (message.type === 'private_room_invite_expired') {
+      if (state.privateRoomInvite?.inviteId === message.inviteId) {
+        state.privateRoomInvite = state.privateRoomInviteQueue[0] ?? null
+        state.privateRoomInviteQueue = state.privateRoomInviteQueue.slice(1)
+        render()
+      } else {
+        state.privateRoomInviteQueue = state.privateRoomInviteQueue.filter(
+          (i) => i.inviteId !== message.inviteId,
+        )
+      }
+      return true
+    }
+
+    if (message.type === 'private_room_invite_cancelled') {
+      if (state.privateRoomInvite?.inviteId === message.inviteId) {
+        state.privateRoomInvite = state.privateRoomInviteQueue[0] ?? null
+        state.privateRoomInviteQueue = state.privateRoomInviteQueue.slice(1)
+        render()
+      } else {
+        state.privateRoomInviteQueue = state.privateRoomInviteQueue.filter(
+          (i) => i.inviteId !== message.inviteId,
+        )
+      }
       return true
     }
 
@@ -3339,8 +3411,27 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'private_room_member_left') {
+      state.privateRoomInfoText = `${message.displayName} излезе от масата.`
+      render()
+      return true
+    }
+
+    if (message.type === 'private_room_closed') {
+      if (state.myPrivateRoom?.id === message.privateRoomId) {
+        state.myPrivateRoom = null
+        state.privateRoomInfoText = 'Домакинът затвори масата.'
+        render()
+      }
+      return true
+    }
+
     if (message.type === 'private_room_friend_busy') {
-      state.privateRoomInfoText = `${message.friendDisplayName} в момента е в игра — опитай по-късно.`
+      const names = message.busyFriends.map((f) => f.displayName)
+      state.privateRoomInfoText =
+        names.length === 1
+          ? `${names[0]} в момента е в игра — опитай с друг.`
+          : `${names.join(' и ')} в момента са в игра — опитай с други.`
       render()
       return true
     }

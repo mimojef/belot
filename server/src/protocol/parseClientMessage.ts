@@ -391,18 +391,22 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
     }
 
     if (parsed.type === 'invite_to_private_room') {
-      const toProfileId = normalizeRequiredText(parsed.toProfileId)
-      const toDisplayName = normalizeRequiredText(parsed.toDisplayName)
-
-      if (toProfileId === null || toDisplayName === null) {
-        return null
+      if (!Array.isArray(parsed.toProfiles)) return null
+      const toProfiles: Array<{ profileId: string; displayName: string }> = []
+      for (const item of parsed.toProfiles) {
+        const profileId = normalizeRequiredText(item?.profileId)
+        const displayName = normalizeRequiredText(item?.displayName)
+        if (profileId === null || displayName === null) return null
+        toProfiles.push({ profileId, displayName })
       }
+      if (toProfiles.length === 0) return null
+      return { type: 'invite_to_private_room', toProfiles }
+    }
 
-      return {
-        type: 'invite_to_private_room',
-        toProfileId,
-        toDisplayName,
-      }
+    if (parsed.type === 'cancel_private_room_invite') {
+      const inviteId = normalizeRequiredText(parsed.inviteId)
+      if (inviteId === null) return null
+      return { type: 'cancel_private_room_invite', inviteId }
     }
 
     if (parsed.type === 'respond_private_room_invite') {
