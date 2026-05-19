@@ -1668,6 +1668,13 @@ lobby = createLobbyFlowController({
   onAdminMissionSubmit: (input) => submitAdminMission(input),
   onAdminMissionActiveToggle: (missionId, isActive) => setAdminMissionActive(missionId, isActive),
   onAdminMissionDelete: (missionId) => deleteAdminMission(missionId),
+  onPrivateRoomsOpen: () => { client.requestPrivateRoomsList() },
+  onPrivateRoomsClose: () => {},
+  onPrivateRoomCreate: (stake, isLocked) => { client.createPrivateRoom(stake, isLocked) },
+  onPrivateRoomJoin: (privateRoomId) => { client.joinPrivateRoom(privateRoomId) },
+  onPrivateRoomLeave: () => { client.leavePrivateRoom() },
+  onPrivateRoomInvite: (toProfileId, toDisplayName) => { client.inviteToPrivateRoom(toProfileId, toDisplayName) },
+  onPrivateRoomInviteRespond: (inviteId, accept) => { client.respondPrivateRoomInvite(inviteId, accept) },
 })
 
 const activeRoom = createActiveRoomFlowController({

@@ -17,6 +17,7 @@ import type {
   MissionTemplateSnapshot,
   PlayerMissionProgressSnapshot,
   PlayerPublicProfileSnapshot,
+  PrivateRoomSnapshot,
 } from '../network/createGameServerClient'
 import type { PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
@@ -30,7 +31,7 @@ export type AvatarCropSelection = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'private-rooms'
   displayName: string
   selectedStake: MatchStake
   isConnected: boolean
@@ -121,6 +122,12 @@ export type LobbyScreenState = {
   adminMissionsErrorText: string | null
   adminMissionEditId: string | null
   adminMissionEditIsStaged: boolean
+  privateRoomsCreatePopupOpen: boolean
+  privateRoomsTab: 'all' | 'mine'
+  privateRooms: PrivateRoomSnapshot[]
+  myPrivateRoom: PrivateRoomSnapshot | null
+  privateRoomInvite: { inviteId: string; fromDisplayName: string; privateRoomId: string; stake: MatchStake } | null
+  privateRoomInfoText: string | null
 }
 
 export type RenderLobbyScreenOptions = {
@@ -198,6 +205,18 @@ export type RenderLobbyScreenOptions = {
   onAdminMissionActiveToggle: (missionId: string, isActive: boolean) => void
   onAdminMissionDelete: (missionId: string) => void
   onAdminMissionEdit: (missionId: string, isStaged?: boolean) => void
+  onPrivateRoomsOpen: () => void
+  onPrivateRoomsClose: () => void
+  onPrivateRoomsTabChange: (tab: 'all' | 'mine') => void
+  onPrivateRoomsCreateOpen: () => void
+  onPrivateRoomsCreateClose: () => void
+  onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean) => void
+  onPrivateRoomJoin: (privateRoomId: string) => void
+  onPrivateRoomLeave: () => void
+  onPrivateRoomInvite: (toProfileId: string, toDisplayName: string) => void
+  onPrivateRoomInviteAccept: (inviteId: string) => void
+  onPrivateRoomInviteDecline: (inviteId: string) => void
+  onPrivateRoomInfoDismiss: () => void
 }
 
 type LobbyStakeCard = {
@@ -218,6 +237,7 @@ const MATCH_STAKE_CARDS: LobbyStakeCard[] = [
 const MAX_PROFILE_GALLERY_IMAGES = 6
 
 let popupRootEl: HTMLElement | null = null
+let privateRoomInfoDismissTimer: ReturnType<typeof setTimeout> | null = null
 
 export type ProfilePopupCallbacks = {
   onClose: () => void
@@ -1608,7 +1628,7 @@ function renderBottomSection(lobbyPackages: CoinPackageSnapshot[], isLoggedIn: b
       gap:12px;
       align-items:stretch;
     ">
-      <div style="
+      <div data-lobby-private-rooms-card="1" style="
         background:#000000;
         border:1px solid rgba(167,139,250,0.62);
         border-radius:12px;
@@ -2737,6 +2757,280 @@ function renderAdminPanel(state: LobbyScreenState): string {
   `
 }
 
+function formatStake(stake: MatchStake): string {
+  return stake.toLocaleString('bg-BG')
+}
+
+function renderMyRoomPanel(room: PrivateRoomSnapshot): string {
+  const timeLeft = Math.max(0, room.expiresAt - Date.now())
+  const minutesLeft = Math.ceil(timeLeft / 60000)
+  const isLocked = room.kind === 'locked'
+  const membersHtml = Array.from({ length: 4 }, (_, i) => {
+    const member = room.members[i]
+    if (member) {
+      return `
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(255,255,255,0.05);border-radius:10px;">
+          <div style="width:36px;height:36px;border-radius:50%;background:rgba(167,139,250,0.2);border:2px solid rgba(167,139,250,0.5);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;overflow:hidden;">
+            ${member.avatarUrl ? `<img src="${member.avatarUrl}" style="width:100%;height:100%;object-fit:cover;">` : '👤'}
+          </div>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:14px;font-weight:700;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+              ${member.displayName}${member.isHost ? ' <span style="font-size:10px;color:#a78bfa;font-weight:600;">ДОМАКИН</span>' : ''}
+            </div>
+            ${member.rankTitle ? `<div style="font-size:11px;color:rgba(255,255,255,0.4);">${member.rankTitle}</div>` : ''}
+          </div>
+        </div>
+      `
+    }
+    return `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(255,255,255,0.03);border-radius:10px;border:1px dashed rgba(255,255,255,0.1);">
+        <div style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,0.05);flex-shrink:0;"></div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.25);font-style:italic;">Чака играч...</div>
+      </div>
+    `
+  }).join('')
+
+  return `
+    <div style="background:rgba(167,139,250,0.06);border:1px solid rgba(167,139,250,0.25);border-radius:14px;padding:20px 24px;margin-bottom:24px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+        <div>
+          <div style="font-size:15px;font-weight:800;color:#a78bfa;">Моята маса</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:2px;">
+            ${isLocked ? 'Заключена' : 'Отворена'} · Залог ${formatStake(room.stake)} · ~${minutesLeft} мин. оставащи
+          </div>
+        </div>
+        <button type="button" data-private-room-leave="1" style="
+          padding:6px 14px;border:1px solid rgba(239,68,68,0.5);background:rgba(239,68,68,0.1);
+          border-radius:8px;color:#f87171;font-size:13px;font-weight:700;cursor:pointer;
+        ">Напусни</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px;">${membersHtml}</div>
+    </div>
+  `
+}
+
+function renderPrivateRoomsPage(state: LobbyScreenState): string {
+  const hasMyRoom = state.myPrivateRoom !== null
+
+  const roomRowHtml = (room: PrivateRoomSnapshot): string => {
+    const timeLeft = Math.max(0, room.expiresAt - Date.now())
+    const minutesLeft = Math.ceil(timeLeft / 60000)
+    const isLocked = room.kind === 'locked'
+    return `
+      <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;background:rgba(255,255,255,0.04);border-radius:12px;border:1px solid rgba(255,255,255,0.08);">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:14px;font-weight:700;color:#fff;">
+            ${room.members[0]?.displayName ?? 'Неизвестен'}
+            ${room.members.length > 1 ? `<span style="font-size:11px;color:rgba(255,255,255,0.4);font-weight:400;"> и ${room.members.length - 1} др.</span>` : ''}
+          </div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:3px;">
+            Вход ${formatStake(room.stake)} жълт. · ${room.members.length}/4 играча · ~${minutesLeft} мин.
+            ${isLocked ? ' · <span style="color:rgba(239,68,68,0.8);">Заключена</span>' : ''}
+          </div>
+        </div>
+        ${isLocked
+          ? `<div style="font-size:12px;color:rgba(239,68,68,0.7);font-weight:600;padding:5px 12px;border:1px solid rgba(239,68,68,0.25);border-radius:8px;">Заключена</div>`
+          : `<button type="button" data-private-room-join="${room.id}" style="
+              padding:7px 16px;border:1px solid rgba(167,139,250,0.5);background:rgba(167,139,250,0.12);
+              border-radius:9px;color:#a78bfa;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;
+            ">Присъедини</button>`
+        }
+      </div>
+    `
+  }
+
+  const allRooms = [...state.privateRooms.filter(r => r.kind === 'open'), ...state.privateRooms.filter(r => r.kind === 'locked')]
+  const allRoomsHtml = allRooms.map(roomRowHtml).join('')
+
+  const createBtnHtml = hasMyRoom
+    ? `
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div style="font-size:13px;color:rgba(255,165,0,0.9);font-weight:600;">Вече имате създадена маса</div>
+        <button type="button" data-private-rooms-tab="mine" style="
+          padding:7px 14px;background:rgba(167,139,250,0.15);border:1px solid rgba(167,139,250,0.4);
+          border-radius:9px;color:#a78bfa;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;
+        ">Виж масата</button>
+      </div>
+    `
+    : `
+      <button type="button" data-private-rooms-create-open="1" style="
+        padding:8px 20px;background:rgba(167,139,250,0.18);border:1px solid rgba(167,139,250,0.55);
+        border-radius:10px;color:#a78bfa;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;
+      ">+ Създай маса</button>
+    `
+
+  const activeTab = state.privateRoomsTab
+  const tabStyle = (tab: 'all' | 'mine'): string => {
+    const isActive = activeTab === tab
+    return `
+      padding:8px 20px;font-size:13px;font-weight:700;cursor:pointer;border:none;border-radius:9px;
+      background:${isActive ? 'rgba(167,139,250,0.25)' : 'transparent'};
+      color:${isActive ? '#a78bfa' : 'rgba(255,255,255,0.4)'};
+    `
+  }
+
+  const mineTabContent = state.myPrivateRoom
+    ? renderMyRoomPanel(state.myPrivateRoom)
+    : `<div style="text-align:center;color:rgba(255,255,255,0.3);font-size:14px;padding:40px 0;">Нямате създадена маса.</div>`
+
+  const allTabContent = allRooms.length > 0
+    ? `<div style="display:flex;flex-direction:column;gap:8px;">${allRoomsHtml}</div>`
+    : `<div style="text-align:center;color:rgba(255,255,255,0.3);font-size:14px;padding:40px 0;">Няма активни маси в момента.</div>`
+
+  return `
+    <div style="max-width:760px;margin:0 auto;padding:24px 0 40px;">
+      <!-- Хедър -->
+      <div style="display:flex;align-items:center;margin-bottom:24px;gap:16px;flex-wrap:wrap;">
+        <button type="button" data-private-rooms-close="1" style="
+          display:flex;align-items:center;gap:6px;
+          padding:7px 14px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);
+          border-radius:9px;color:rgba(255,255,255,0.7);font-size:13px;font-weight:600;cursor:pointer;flex-shrink:0;
+        ">← Назад</button>
+        <div style="font-size:22px;font-weight:900;color:#a78bfa;flex-shrink:0;">Частни маси</div>
+        ${createBtnHtml}
+      </div>
+
+      <!-- Табове -->
+      <div style="display:flex;gap:4px;margin-bottom:20px;background:rgba(255,255,255,0.05);border-radius:11px;padding:4px;width:fit-content;">
+        <button type="button" data-private-rooms-tab="all" style="${tabStyle('all')}">Всички маси</button>
+        <button type="button" data-private-rooms-tab="mine" style="${tabStyle('mine')}">Моята маса</button>
+      </div>
+
+      <!-- Съдържание -->
+      ${activeTab === 'mine' ? mineTabContent : allTabContent}
+    </div>
+
+    ${renderPrivateRoomsCreatePopup(state)}
+  `
+}
+
+function renderPrivateRoomsCreatePopup(state: LobbyScreenState): string {
+  if (!state.privateRoomsCreatePopupOpen) return ''
+
+  const SUPPORTED_STAKES: MatchStake[] = [5000, 8000, 10000, 15000, 20000]
+
+  return `
+    <div data-private-rooms-create-backdrop="1" style="
+      position:fixed;inset:0;z-index:9500;
+      background:rgba(0,0,0,0.7);
+      display:flex;align-items:center;justify-content:center;
+      padding:16px;
+    ">
+      <div style="
+        background:#1a1a2e;
+        border:1px solid rgba(167,139,250,0.4);
+        border-radius:16px;
+        width:380px;
+        max-width:100%;
+        padding:28px;
+        box-shadow:0 8px 40px rgba(0,0,0,0.7);
+      ">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+          <div style="font-size:17px;font-weight:900;color:#a78bfa;">Нова маса</div>
+          <button type="button" data-private-rooms-create-close="1" style="
+            width:30px;height:30px;border:none;background:rgba(255,255,255,0.08);
+            border-radius:7px;color:rgba(255,255,255,0.6);font-size:18px;font-weight:700;
+            cursor:pointer;display:flex;align-items:center;justify-content:center;
+          ">×</button>
+        </div>
+        <form data-private-room-create-form="1" style="display:flex;flex-direction:column;gap:14px;">
+          <div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Вход</div>
+            <select name="stake" style="
+              width:100%;padding:10px 12px;background:#2a2a3e;
+              border:1px solid rgba(255,255,255,0.2);border-radius:9px;color:#fff;font-size:14px;
+              color-scheme:dark;
+            ">
+              ${SUPPORTED_STAKES.map((s) => `<option value="${s}">${formatStake(s)} жълтици</option>`).join('')}
+            </select>
+          </div>
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
+            <input type="checkbox" name="isLocked" style="width:17px;height:17px;cursor:pointer;accent-color:#a78bfa;">
+            <span style="font-size:13px;color:rgba(255,255,255,0.7);">Заключена маса <span style="color:rgba(255,255,255,0.4);">(само с покана)</span></span>
+          </label>
+          <button type="submit" style="
+            padding:11px;background:rgba(167,139,250,0.2);
+            border:1px solid rgba(167,139,250,0.5);border-radius:10px;
+            color:#a78bfa;font-size:15px;font-weight:700;cursor:pointer;margin-top:4px;
+          ">Създай маса</button>
+        </form>
+      </div>
+    </div>
+  `
+}
+
+
+function renderPrivateRoomInvitePopup(state: LobbyScreenState): string {
+  if (!state.privateRoomInvite) return ''
+  const inv = state.privateRoomInvite
+  return `
+    <div style="
+      position:fixed;inset:0;z-index:9000;
+      display:flex;align-items:center;justify-content:center;
+      background:rgba(0,0,0,0.6);
+    ">
+      <div style="
+        background:#1a1a2e;
+        border:1px solid rgba(167,139,250,0.5);
+        border-radius:16px;
+        width:360px;
+        max-width:calc(100vw - 32px);
+        padding:28px;
+        text-align:center;
+        box-shadow:0 8px 40px rgba(0,0,0,0.8);
+      ">
+        <div style="font-size:20px;margin-bottom:12px;">🎮</div>
+        <div style="font-size:16px;font-weight:800;color:#fff;margin-bottom:8px;">Покана за частна маса</div>
+        <div style="font-size:14px;color:rgba(255,255,255,0.6);margin-bottom:20px;">
+          <strong style="color:#a78bfa;">${inv.fromDisplayName}</strong> те кани на частна маса с залог ${formatStake(inv.stake)} жълтици.
+        </div>
+        <div style="display:flex;gap:12px;">
+          <button type="button" data-private-room-invite-decline="${inv.inviteId}" style="
+            flex:1;padding:11px;border:1px solid rgba(239,68,68,0.5);background:rgba(239,68,68,0.12);
+            border-radius:10px;color:#ef4444;font-size:14px;font-weight:700;cursor:pointer;
+          ">Откажи</button>
+          <button type="button" data-private-room-invite-accept="${inv.inviteId}" style="
+            flex:1;padding:11px;border:1px solid rgba(167,139,250,0.5);background:rgba(167,139,250,0.2);
+            border-radius:10px;color:#a78bfa;font-size:14px;font-weight:700;cursor:pointer;
+          ">Приеми</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderPrivateRoomInfoPopup(state: LobbyScreenState): string {
+  if (!state.privateRoomInfoText) return ''
+  return `
+    <div data-private-room-info-toast="1" style="
+      position:fixed;inset:0;z-index:9500;
+      display:flex;align-items:center;justify-content:center;
+      pointer-events:none;
+    ">
+      <div style="
+        pointer-events:auto;
+        background:#1a1a2e;
+        border:1px solid rgba(167,139,250,0.5);
+        border-radius:16px;
+        padding:22px 36px;
+        text-align:center;
+        box-shadow:0 8px 48px rgba(0,0,0,0.8);
+        min-width:260px;
+        max-width:calc(100vw - 48px);
+        animation:prInfoIn 0.18s ease both;
+      ">
+        <style>
+          @keyframes prInfoIn {
+            from { opacity:0; transform:scale(0.92); }
+            to   { opacity:1; transform:scale(1); }
+          }
+        </style>
+        <div style="font-size:15px;font-weight:600;color:rgba(255,255,255,0.9);">${state.privateRoomInfoText}</div>
+      </div>
+    </div>
+  `
+}
+
 function renderDailyRewardsPopup(state: LobbyScreenState): string {
   if (!state.dailyRewardsPopupOpen) return ''
 
@@ -2909,7 +3203,9 @@ export function renderLobbyScreen(
         ${renderNav(state)}
 
         <div style="max-width: 1640px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;">
-          ${state.view === 'players'
+          ${state.view === 'private-rooms'
+            ? renderPrivateRoomsPage(state)
+            : state.view === 'players'
             ? renderPlayersDirectory(state)
             : state.view === 'leaderboards'
               ? renderLeaderboardsDirectory(state)
@@ -3000,6 +3296,8 @@ export function renderLobbyScreen(
       ${renderGiftCoinsModal(state)}
       ${renderAuthModal(state)}
       ${renderDailyRewardsPopup(state)}
+      ${renderPrivateRoomInvitePopup(state)}
+      ${renderPrivateRoomInfoPopup(state)}
     </div>
   `
 
@@ -4099,6 +4397,77 @@ export function renderLobbyScreen(
       if (tierId) options.onAdminDailyRewardRemove(tierId)
     })
   })
+
+  root.querySelector<HTMLElement>('[data-lobby-private-rooms-card="1"]')
+    ?.addEventListener('click', options.onPrivateRoomsOpen)
+
+  root.querySelector<HTMLButtonElement>('[data-private-rooms-close="1"]')
+    ?.addEventListener('click', options.onPrivateRoomsClose)
+
+  root.querySelector<HTMLButtonElement>('[data-private-rooms-create-open="1"]')
+    ?.addEventListener('click', options.onPrivateRoomsCreateOpen)
+
+  root.querySelector<HTMLButtonElement>('[data-private-rooms-create-close="1"]')
+    ?.addEventListener('click', options.onPrivateRoomsCreateClose)
+
+  root.querySelector<HTMLElement>('[data-private-rooms-create-backdrop="1"]')
+    ?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) options.onPrivateRoomsCreateClose()
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-private-rooms-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const tab = btn.dataset.privateRoomsTab as 'all' | 'mine'
+      if (tab === 'all' || tab === 'mine') options.onPrivateRoomsTabChange(tab)
+    })
+  })
+
+  root.querySelector<HTMLFormElement>('[data-private-room-create-form="1"]')
+    ?.addEventListener('submit', (e) => {
+      e.preventDefault()
+      const form = e.currentTarget as HTMLFormElement
+      const data = new FormData(form)
+      const stake = Number(data.get('stake') ?? 5000) as MatchStake
+      const isLocked = (data.get('isLocked') ?? null) !== null
+      options.onPrivateRoomCreate(stake, isLocked)
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-private-room-join]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.privateRoomJoin?.trim() ?? ''
+      if (id) options.onPrivateRoomJoin(id)
+    })
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-private-room-leave="1"]')
+    ?.addEventListener('click', options.onPrivateRoomLeave)
+
+  root.querySelectorAll<HTMLButtonElement>('[data-private-room-invite-accept]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const inviteId = btn.dataset.privateRoomInviteAccept?.trim() ?? ''
+      if (inviteId) options.onPrivateRoomInviteAccept(inviteId)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-private-room-invite-decline]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const inviteId = btn.dataset.privateRoomInviteDecline?.trim() ?? ''
+      if (inviteId) options.onPrivateRoomInviteDecline(inviteId)
+    })
+  })
+
+  if (root.querySelector('[data-private-room-info-toast="1"]')) {
+    if (privateRoomInfoDismissTimer !== null) clearTimeout(privateRoomInfoDismissTimer)
+    privateRoomInfoDismissTimer = setTimeout(() => {
+      privateRoomInfoDismissTimer = null
+      options.onPrivateRoomInfoDismiss()
+    }, 3000)
+  } else {
+    if (privateRoomInfoDismissTimer !== null) {
+      clearTimeout(privateRoomInfoDismissTimer)
+      privateRoomInfoDismissTimer = null
+    }
+  }
 
   const newScrollEl = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')
   if (newScrollEl && savedScrollTop > 0) {

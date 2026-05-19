@@ -355,6 +355,70 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       }
     }
 
+    if (parsed.type === 'request_private_rooms_list') {
+      return { type: 'request_private_rooms_list' }
+    }
+
+    if (parsed.type === 'create_private_room') {
+      if (!isSupportedStake(parsed.stake)) {
+        return null
+      }
+
+      return {
+        type: 'create_private_room',
+        stake: parsed.stake,
+        isLocked: parsed.isLocked === true,
+        displayName: normalizeOptionalDisplayName(parsed.displayName),
+      }
+    }
+
+    if (parsed.type === 'join_private_room') {
+      const privateRoomId = normalizeRequiredText(parsed.privateRoomId)
+
+      if (privateRoomId === null) {
+        return null
+      }
+
+      return {
+        type: 'join_private_room',
+        privateRoomId,
+        displayName: normalizeOptionalDisplayName(parsed.displayName),
+      }
+    }
+
+    if (parsed.type === 'leave_private_room') {
+      return { type: 'leave_private_room' }
+    }
+
+    if (parsed.type === 'invite_to_private_room') {
+      const toProfileId = normalizeRequiredText(parsed.toProfileId)
+      const toDisplayName = normalizeRequiredText(parsed.toDisplayName)
+
+      if (toProfileId === null || toDisplayName === null) {
+        return null
+      }
+
+      return {
+        type: 'invite_to_private_room',
+        toProfileId,
+        toDisplayName,
+      }
+    }
+
+    if (parsed.type === 'respond_private_room_invite') {
+      const inviteId = normalizeRequiredText(parsed.inviteId)
+
+      if (inviteId === null) {
+        return null
+      }
+
+      return {
+        type: 'respond_private_room_invite',
+        inviteId,
+        accept: parsed.accept === true,
+      }
+    }
+
     return null
   } catch {
     return null

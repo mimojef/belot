@@ -301,6 +301,51 @@ export type ClientMessage =
       roomId: string
       emojiId: string
     }
+  | {
+      type: 'create_private_room'
+      stake: MatchStake
+      isLocked: boolean
+      displayName?: string
+    }
+  | {
+      type: 'join_private_room'
+      privateRoomId: string
+      displayName?: string
+    }
+  | {
+      type: 'leave_private_room'
+    }
+  | {
+      type: 'invite_to_private_room'
+      toProfileId: string
+      toDisplayName: string
+    }
+  | {
+      type: 'respond_private_room_invite'
+      inviteId: string
+      accept: boolean
+    }
+  | {
+      type: 'request_private_rooms_list'
+    }
+
+export type PrivateRoomMemberSnapshot = {
+  profileId: string | null
+  displayName: string
+  avatarUrl: string | null
+  level: number | null
+  rankTitle: string | null
+  isHost: boolean
+}
+
+export type PrivateRoomSnapshot = {
+  id: string
+  kind: 'open' | 'locked'
+  stake: MatchStake
+  members: PrivateRoomMemberSnapshot[]
+  createdAt: number
+  expiresAt: number
+}
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -611,6 +656,57 @@ export type EmojiReactionMessage = {
   emojiId: string
 }
 
+export type PrivateRoomsListMessage = {
+  type: 'private_rooms_list'
+  rooms: PrivateRoomSnapshot[]
+}
+
+export type PrivateRoomUpdatedMessage = {
+  type: 'private_room_updated'
+  room: PrivateRoomSnapshot
+}
+
+export type PrivateRoomLeftMessage = {
+  type: 'private_room_left'
+  privateRoomId: string
+}
+
+export type PrivateRoomExpiredMessage = {
+  type: 'private_room_expired'
+  privateRoomId: string
+}
+
+export type PrivateRoomInviteReceivedMessage = {
+  type: 'private_room_invite_received'
+  inviteId: string
+  fromProfileId: string
+  fromDisplayName: string
+  privateRoomId: string
+  stake: MatchStake
+}
+
+export type PrivateRoomInviteAcceptedMessage = {
+  type: 'private_room_invite_accepted'
+  toDisplayName: string
+}
+
+export type PrivateRoomInviteDeclinedMessage = {
+  type: 'private_room_invite_declined'
+  toDisplayName: string
+}
+
+export type PrivateRoomFriendBusyMessage = {
+  type: 'private_room_friend_busy'
+  friendDisplayName: string
+}
+
+export type PrivateRoomFullMessage = {
+  type: 'private_room_full'
+  roomId: string
+  seat: Seat
+  stake: MatchStake
+}
+
 export type ServerMessage =
   | ConnectedMessage
   | PongMessage
@@ -631,6 +727,15 @@ export type ServerMessage =
   | SessionDisplacedMessage
   | SessionInGameMessage
   | EmojiReactionMessage
+  | PrivateRoomsListMessage
+  | PrivateRoomUpdatedMessage
+  | PrivateRoomLeftMessage
+  | PrivateRoomExpiredMessage
+  | PrivateRoomInviteReceivedMessage
+  | PrivateRoomInviteAcceptedMessage
+  | PrivateRoomInviteDeclinedMessage
+  | PrivateRoomFriendBusyMessage
+  | PrivateRoomFullMessage
 
 type CreateGameServerClientOptions = {
   url?: string
@@ -660,6 +765,12 @@ export type GameServerClient = {
   sendReplayVote: (roomId: string) => void
   sendLeaveMatchVote: (roomId: string) => void
   sendEmojiReaction: (roomId: string, emojiId: string) => void
+  requestPrivateRoomsList: () => void
+  createPrivateRoom: (stake: MatchStake, isLocked: boolean) => void
+  joinPrivateRoom: (privateRoomId: string) => void
+  leavePrivateRoom: () => void
+  inviteToPrivateRoom: (toProfileId: string, toDisplayName: string) => void
+  respondPrivateRoomInvite: (inviteId: string, accept: boolean) => void
 }
 
 function getDefaultServerUrl(): string {
@@ -874,6 +985,30 @@ export function createGameServerClient(
     })
   }
 
+  function requestPrivateRoomsList(): void {
+    send({ type: 'request_private_rooms_list' })
+  }
+
+  function createPrivateRoom(stake: MatchStake, isLocked: boolean): void {
+    send({ type: 'create_private_room', stake, isLocked })
+  }
+
+  function joinPrivateRoom(privateRoomId: string): void {
+    send({ type: 'join_private_room', privateRoomId })
+  }
+
+  function leavePrivateRoom(): void {
+    send({ type: 'leave_private_room' })
+  }
+
+  function inviteToPrivateRoom(toProfileId: string, toDisplayName: string): void {
+    send({ type: 'invite_to_private_room', toProfileId, toDisplayName })
+  }
+
+  function respondPrivateRoomInvite(inviteId: string, accept: boolean): void {
+    send({ type: 'respond_private_room_invite', inviteId, accept })
+  }
+
   return {
     connect,
     disconnect,
@@ -894,5 +1029,11 @@ export function createGameServerClient(
     sendReplayVote,
     sendLeaveMatchVote,
     sendEmojiReaction,
+    requestPrivateRoomsList,
+    createPrivateRoom,
+    joinPrivateRoom,
+    leavePrivateRoom,
+    inviteToPrivateRoom,
+    respondPrivateRoomInvite,
   }
 }

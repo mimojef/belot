@@ -102,6 +102,33 @@ export type ClientMessage =
       roomId: RoomId
       emojiId: string
     }
+  | {
+      type: 'create_private_room'
+      stake: MatchStake
+      isLocked: boolean
+      displayName?: string
+    }
+  | {
+      type: 'join_private_room'
+      privateRoomId: string
+      displayName?: string
+    }
+  | {
+      type: 'leave_private_room'
+    }
+  | {
+      type: 'invite_to_private_room'
+      toProfileId: string
+      toDisplayName: string
+    }
+  | {
+      type: 'respond_private_room_invite'
+      inviteId: string
+      accept: boolean
+    }
+  | {
+      type: 'request_private_rooms_list'
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -406,6 +433,80 @@ export type EmojiReactionMessage = {
   emojiId: string
 }
 
+// --- Private rooms ---
+
+export type PrivateRoomMemberSnapshot = {
+  profileId: string | null
+  displayName: string
+  avatarUrl: string | null
+  level: number | null
+  rankTitle: string | null
+  isHost: boolean
+}
+
+export type PrivateRoomSnapshot = {
+  id: string
+  kind: 'open' | 'locked'
+  stake: MatchStake
+  members: PrivateRoomMemberSnapshot[]
+  createdAt: number
+  expiresAt: number
+}
+
+export type PrivateRoomsListMessage = {
+  type: 'private_rooms_list'
+  rooms: PrivateRoomSnapshot[]
+}
+
+export type PrivateRoomUpdatedMessage = {
+  type: 'private_room_updated'
+  room: PrivateRoomSnapshot
+}
+
+export type PrivateRoomLeftMessage = {
+  type: 'private_room_left'
+  privateRoomId: string
+}
+
+export type PrivateRoomExpiredMessage = {
+  type: 'private_room_expired'
+  privateRoomId: string
+}
+
+export type PrivateRoomInviteReceivedMessage = {
+  type: 'private_room_invite_received'
+  inviteId: string
+  fromProfileId: string
+  fromDisplayName: string
+  privateRoomId: string
+  stake: MatchStake
+}
+
+export type PrivateRoomInviteAcceptedMessage = {
+  type: 'private_room_invite_accepted'
+  toDisplayName: string
+}
+
+export type PrivateRoomInviteDeclinedMessage = {
+  type: 'private_room_invite_declined'
+  toDisplayName: string
+}
+
+export type PrivateRoomFriendBusyMessage = {
+  type: 'private_room_friend_busy'
+  friendDisplayName: string
+}
+
+export type PrivateRoomFullMessage = {
+  type: 'private_room_full'
+  roomId: RoomId
+  seat: Seat
+  stake: MatchStake
+}
+
+// --- Client messages for private rooms ---
+// (extends ClientMessage union below)
+
 export type ServerMessage =
   | ConnectedMessage
   | PongMessage
@@ -425,6 +526,15 @@ export type ServerMessage =
   | MatchmakingLeftMessage
   | MatchFoundMessage
   | EmojiReactionMessage
+  | PrivateRoomsListMessage
+  | PrivateRoomUpdatedMessage
+  | PrivateRoomLeftMessage
+  | PrivateRoomExpiredMessage
+  | PrivateRoomInviteReceivedMessage
+  | PrivateRoomInviteAcceptedMessage
+  | PrivateRoomInviteDeclinedMessage
+  | PrivateRoomFriendBusyMessage
+  | PrivateRoomFullMessage
 
 export function getDisplayNameFromIdentity(
   identity: PlayerIdentitySnapshot | null | undefined,

@@ -31,6 +31,7 @@ import type {
   MissionTemplateSnapshot,
   PlayerMissionProgressSnapshot,
   PlayerPublicProfileSnapshot,
+  PrivateRoomSnapshot,
   RoomSeatSnapshot,
   ServerMessage,
 } from '../network/createGameServerClient'
@@ -43,6 +44,7 @@ export type LobbyFlowScreen =
   | 'admin'
   | 'admin-info'
   | 'matchmaking-room'
+  | 'private-rooms'
 export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
 export type LobbyAuthSession = {
@@ -236,7 +238,15 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; activeMissions: MissionTemplateSnapshot[]; stagedMissions: MissionTemplateSnapshot[] }
     | { ok: false; message: string }
   >
+  onPrivateRoomsOpen?: () => void
+  onPrivateRoomsClose?: () => void
+  onPrivateRoomCreate?: (stake: MatchStake, isLocked: boolean) => void
+  onPrivateRoomJoin?: (privateRoomId: string) => void
+  onPrivateRoomLeave?: () => void
+  onPrivateRoomInvite?: (toProfileId: string, toDisplayName: string) => void
+  onPrivateRoomInviteRespond?: (inviteId: string, accept: boolean) => void
 }
+
 
 export type LobbyFlowController = {
   render: () => void
@@ -348,6 +358,12 @@ type InternalLobbyFlowState = {
   adminMissionsErrorText: string | null
   adminMissionEditId: string | null
   adminMissionEditIsStaged: boolean
+  privateRoomsCreatePopupOpen: boolean
+  privateRoomsTab: 'all' | 'mine'
+  privateRooms: PrivateRoomSnapshot[]
+  myPrivateRoom: PrivateRoomSnapshot | null
+  privateRoomInvite: { inviteId: string; fromDisplayName: string; privateRoomId: string; stake: MatchStake } | null
+  privateRoomInfoText: string | null
 }
 
 type StakeCardConfig = {
@@ -474,6 +490,12 @@ function createInitialState(): InternalLobbyFlowState {
     adminMissionsErrorText: null,
     adminMissionEditId: null,
     adminMissionEditIsStaged: false,
+    privateRoomsCreatePopupOpen: false,
+    privateRoomsTab: 'all',
+    privateRooms: [],
+    myPrivateRoom: null,
+    privateRoomInvite: null,
+    privateRoomInfoText: null,
   }
 }
 
@@ -1199,6 +1221,8 @@ export function createLobbyFlowController(
             ? 'friends'
             : state.currentScreen === 'chat'
               ? 'chat'
+            : state.currentScreen === 'private-rooms'
+              ? 'private-rooms'
             : 'tables',
       displayName: state.displayName,
       selectedStake: state.selectedStake,
@@ -1293,6 +1317,12 @@ export function createLobbyFlowController(
       adminMissionsErrorText: state.adminMissionsErrorText,
       adminMissionEditId: state.adminMissionEditId,
       adminMissionEditIsStaged: state.adminMissionEditIsStaged,
+      privateRoomsCreatePopupOpen: state.privateRoomsCreatePopupOpen,
+      privateRoomsTab: state.privateRoomsTab,
+      privateRooms: state.privateRooms,
+      myPrivateRoom: state.myPrivateRoom,
+      privateRoomInvite: state.privateRoomInvite,
+      privateRoomInfoText: state.privateRoomInfoText,
     }
 
     renderLobbyScreen(options.root, {
@@ -1546,6 +1576,62 @@ export function createLobbyFlowController(
       onAdminMissionEdit: (missionId, isStaged) => {
         state.adminMissionEditId = missionId.length > 0 && missionId !== 'new' ? missionId : missionId === 'new' ? 'new' : null
         state.adminMissionEditIsStaged = isStaged ?? false
+        render()
+      },
+      onPrivateRoomsOpen: () => {
+        state.currentScreen = 'private-rooms'
+        state.privateRoomInfoText = null
+        state.privateRoomsTab = 'all'
+        options.onPrivateRoomsOpen?.()
+        render()
+      },
+      onPrivateRoomsClose: () => {
+        state.currentScreen = 'lobby'
+        state.privateRoomInfoText = null
+        state.privateRoomsCreatePopupOpen = false
+        options.onPrivateRoomsClose?.()
+        render()
+      },
+      onPrivateRoomsTabChange: (tab) => {
+        state.privateRoomsTab = tab
+        render()
+      },
+      onPrivateRoomsCreateOpen: () => {
+        state.privateRoomsCreatePopupOpen = true
+        render()
+      },
+      onPrivateRoomsCreateClose: () => {
+        state.privateRoomsCreatePopupOpen = false
+        render()
+      },
+      onPrivateRoomCreate: (stake, isLocked) => {
+        state.privateRoomsCreatePopupOpen = false
+        options.onPrivateRoomCreate?.(stake, isLocked)
+      },
+      onPrivateRoomJoin: (privateRoomId) => {
+        options.onPrivateRoomJoin?.(privateRoomId)
+      },
+      onPrivateRoomLeave: () => {
+        state.myPrivateRoom = null
+        options.onPrivateRoomLeave?.()
+        render()
+      },
+      onPrivateRoomInvite: (toProfileId, toDisplayName) => {
+        state.privateRoomInfoText = null
+        options.onPrivateRoomInvite?.(toProfileId, toDisplayName)
+      },
+      onPrivateRoomInviteAccept: (inviteId) => {
+        state.privateRoomInvite = null
+        options.onPrivateRoomInviteRespond?.(inviteId, true)
+        render()
+      },
+      onPrivateRoomInviteDecline: (inviteId) => {
+        state.privateRoomInvite = null
+        options.onPrivateRoomInviteRespond?.(inviteId, false)
+        render()
+      },
+      onPrivateRoomInfoDismiss: () => {
+        state.privateRoomInfoText = null
         render()
       },
     })
@@ -2956,7 +3042,11 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'error') {
-      state.errorText = message.message
+      if (state.currentScreen === 'private-rooms') {
+        state.privateRoomInfoText = message.message
+      } else {
+        state.errorText = message.message
+      }
       render()
       return true
     }
@@ -3060,6 +3150,78 @@ export function createLobbyFlowController(
 
     if (message.type === 'chat_message_received') {
       void refreshChatAfterNotification(message.friendshipId)
+      return true
+    }
+
+    if (message.type === 'private_rooms_list') {
+      state.privateRooms = message.rooms
+      render()
+      return true
+    }
+
+    if (message.type === 'private_room_updated') {
+      state.myPrivateRoom = message.room
+      render()
+      return true
+    }
+
+    if (message.type === 'private_room_left') {
+      state.myPrivateRoom = null
+      render()
+      return true
+    }
+
+    if (message.type === 'private_room_expired') {
+      if (state.myPrivateRoom?.id === message.privateRoomId) {
+        state.myPrivateRoom = null
+        state.privateRoomInfoText = 'Частната маса изтече — не беше напълнена навреме.'
+        render()
+      }
+      return true
+    }
+
+    if (message.type === 'private_room_invite_received') {
+      state.privateRoomInvite = {
+        inviteId: message.inviteId,
+        fromDisplayName: message.fromDisplayName,
+        privateRoomId: message.privateRoomId,
+        stake: message.stake,
+      }
+      render()
+      return true
+    }
+
+    if (message.type === 'private_room_invite_accepted') {
+      state.privateRoomInfoText = `${message.toDisplayName} прие поканата и се присъедини към масата.`
+      render()
+      return true
+    }
+
+    if (message.type === 'private_room_invite_declined') {
+      state.privateRoomInfoText = `${message.toDisplayName} отказа поканата за частна игра.`
+      render()
+      return true
+    }
+
+    if (message.type === 'private_room_friend_busy') {
+      state.privateRoomInfoText = `${message.friendDisplayName} в момента е в игра — опитай по-късно.`
+      render()
+      return true
+    }
+
+    if (message.type === 'private_room_full') {
+      state.myPrivateRoom = null
+      state.currentScreen = 'lobby'
+      state.privateRoomsCreatePopupOpen = false
+      options.onMatchFound({
+        type: 'match_found',
+        roomId: message.roomId,
+        seat: message.seat,
+        stake: message.stake,
+        humanPlayers: 4,
+        botPlayers: 0,
+        shouldStartImmediately: true,
+      })
       return true
     }
 

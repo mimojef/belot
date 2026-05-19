@@ -96,6 +96,11 @@ import { submitHumanCutIndexForRoom } from './game/submitHumanCutIndexForRoom.js
 import { submitHumanPlayCardForRoom } from './game/submitHumanPlayCardForRoom.js'
 import { resumeHumanControlForRoom } from './game/resumeHumanControlForRoom.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
+import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
+import type { PrivateRoom } from './game/privateRoomsStore.js'
+import { addHumanToRoom } from './core/addHumanToRoom.js'
+import { createRoomWithHumanHost } from './core/createRoomWithHumanHost.js'
+import type { PrivateRoomSnapshot } from './protocol/messageTypes.js'
 
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
@@ -300,6 +305,146 @@ let matchmakingState: MatchmakingState = createInitialMatchmakingState()
 
 const socketRegistry = new Map<ConnectionId, WebSocket>()
 const roomGameRuntimeRegistry = new Map<string, ServerGameRuntime>()
+
+function buildPrivateRoomSnapshot(room: PrivateRoom): PrivateRoomSnapshot {
+  return {
+    id: room.id,
+    kind: room.kind,
+    stake: room.stake,
+    members: room.members.map((m) => ({
+      profileId: m.profileId,
+      displayName: m.displayName,
+      avatarUrl: m.avatarUrl,
+      level: m.level,
+      rankTitle: m.rankTitle,
+      isHost: m.connectionId === room.hostConnectionId,
+    })),
+    createdAt: room.createdAt,
+    expiresAt: room.expiresAt,
+  }
+}
+
+function broadcastPrivateRoomsListToLobbyConnections(): void {
+  const snapshots = privateRoomsStore.listRooms().map(buildPrivateRoomSnapshot)
+
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.status !== 'connected' || conn.currentRoomId !== null) {
+      continue
+    }
+    safeSendToConnection(conn.id, { type: 'private_rooms_list', rooms: snapshots })
+  }
+}
+
+function sendPrivateRoomUpdateToMembers(room: PrivateRoom): void {
+  const snapshot = buildPrivateRoomSnapshot(room)
+  for (const member of room.members) {
+    safeSendToConnection(member.connectionId, { type: 'private_room_updated', room: snapshot })
+  }
+}
+
+function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
+  const [hostMember, ...restMembers] = privateRoom.members
+
+  const hostPublicProfile = hostMember.profileId
+    ? playerProgressStore.getPublicProfile(hostMember.profileId)
+    : null
+
+  const roomResult = createRoomWithHumanHost({
+    connectionId: hostMember.connectionId,
+    identity: {
+      profileId: hostMember.profileId,
+      displayName: hostMember.displayName,
+      avatarUrl: hostMember.avatarUrl,
+      level: hostMember.level,
+      rankTitle: hostMember.rankTitle,
+    },
+    publicProfile: hostPublicProfile,
+    config: {
+      allowBots: false,
+      isPrivate: true,
+      stakeAmount: privateRoom.stake,
+    },
+  })
+
+  let currentRoom = roomResult.room
+  let nextServerState = upsertServerRoom(serverState, currentRoom)
+
+  const hostConn = getConnectionById(nextServerState, hostMember.connectionId)
+  if (hostConn) {
+    const nextHostConn = attachConnectionToRoomSeat(hostConn, hostMember.connectionId, currentRoom, roomResult.seat)
+    nextServerState = updateServerConnectionInState(nextServerState, hostMember.connectionId, nextHostConn)
+  }
+
+  const seatAssignments: Array<{ connectionId: string; seat: Seat }> = [
+    { connectionId: hostMember.connectionId, seat: roomResult.seat },
+  ]
+
+  for (const member of restMembers) {
+    const publicProfile = member.profileId
+      ? playerProgressStore.getPublicProfile(member.profileId)
+      : null
+
+    const addResult = addHumanToRoom(currentRoom, {
+      connectionId: member.connectionId,
+      identity: {
+        profileId: member.profileId,
+        displayName: member.displayName,
+        avatarUrl: member.avatarUrl,
+        level: member.level,
+        rankTitle: member.rankTitle,
+      },
+      publicProfile,
+    })
+
+    currentRoom = addResult.room
+    nextServerState = updateServerRoomInState(nextServerState, currentRoom.id, currentRoom)
+
+    const memberConn = getConnectionById(nextServerState, member.connectionId)
+    if (memberConn) {
+      const nextMemberConn = attachConnectionToRoomSeat(memberConn, member.connectionId, currentRoom, addResult.seat)
+      nextServerState = updateServerConnectionInState(nextServerState, member.connectionId, nextMemberConn)
+      seatAssignments.push({ connectionId: member.connectionId, seat: addResult.seat })
+    }
+  }
+
+  const initializedRoom = initializeRoomAuthoritativeGameState(currentRoom)
+  nextServerState = upsertServerRoomWithSnapshot(nextServerState, initializedRoom)
+  ensureRoomGameRuntime(roomGameRuntimeRegistry, initializedRoom)
+  serverState = nextServerState
+
+  if (privateRoom.stake > 0) {
+    const stakeResult = matchEconomyStore.collectRoomStakes(initializedRoom, privateRoom.stake)
+    if (!stakeResult.ok) {
+      console.error(`[private-room] stake collection failed room=${initializedRoom.id}: ${stakeResult.message}`)
+    }
+  }
+
+  for (const { connectionId, seat } of seatAssignments) {
+    safeSendToConnection(connectionId, {
+      type: 'private_room_full',
+      roomId: initializedRoom.id,
+      seat,
+      stake: privateRoom.stake,
+    })
+  }
+
+  broadcastRoomSnapshots(initializedRoom, socketRegistry)
+}
+
+function handlePrivateRoomExpired(room: PrivateRoom): void {
+  for (const member of room.members) {
+    safeSendToConnection(member.connectionId, {
+      type: 'private_room_expired',
+      privateRoomId: room.id,
+    })
+  }
+}
+
+const privateRoomsStore = createPrivateRoomsStore({
+  onRoomsChanged: () => broadcastPrivateRoomsListToLobbyConnections(),
+  onRoomFull: (room) => handlePrivateRoomFull(room),
+  onRoomExpired: (room) => handlePrivateRoomExpired(room),
+})
 
 for (const room of Object.values(serverState.rooms)) {
   ensureRoomGameRuntime(roomGameRuntimeRegistry, room)
@@ -4060,6 +4205,206 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (message.type === 'request_private_rooms_list') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (latestConnection?.profileId != null) {
+          const reconnected = privateRoomsStore.reconnectMember(connection.id, latestConnection.profileId)
+          if (reconnected !== null) {
+            safeSendToConnection(connection.id, {
+              type: 'private_room_updated',
+              room: buildPrivateRoomSnapshot(reconnected),
+            })
+          }
+        }
+        const snapshots = privateRoomsStore.listRooms().map(buildPrivateRoomSnapshot)
+        safeSendToConnection(connection.id, { type: 'private_rooms_list', rooms: snapshots })
+        return
+      }
+
+      if (message.type === 'create_private_room') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection?.profileId == null) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+
+        const publicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
+
+        if (publicProfile === null) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Профилът не беше намерен.' })
+          return
+        }
+
+        const createResult = privateRoomsStore.createRoom({
+          connectionId: connection.id,
+          profileId: latestConnection.profileId,
+          displayName: publicProfile.displayName,
+          avatarUrl: publicProfile.avatarUrl,
+          level: publicProfile.level,
+          rankTitle: publicProfile.rankTitle,
+          stake: message.stake,
+          isLocked: message.isLocked,
+        })
+
+        if (!createResult.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: createResult.message })
+          return
+        }
+
+        safeSendToConnection(connection.id, {
+          type: 'private_room_updated',
+          room: buildPrivateRoomSnapshot(createResult.room),
+        })
+        return
+      }
+
+      if (message.type === 'join_private_room') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection?.profileId == null) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+
+        const publicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
+
+        if (publicProfile === null) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Профилът не беше намерен.' })
+          return
+        }
+
+        const joinResult = privateRoomsStore.joinRoom({
+          privateRoomId: message.privateRoomId,
+          connectionId: connection.id,
+          profileId: latestConnection.profileId,
+          displayName: publicProfile.displayName,
+          avatarUrl: publicProfile.avatarUrl,
+          level: publicProfile.level,
+          rankTitle: publicProfile.rankTitle,
+        })
+
+        if (!joinResult.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: joinResult.message })
+          return
+        }
+
+        sendPrivateRoomUpdateToMembers(joinResult.room)
+        return
+      }
+
+      if (message.type === 'leave_private_room') {
+        const privateRoom = privateRoomsStore.getRoomByConnectionId(connection.id)
+
+        privateRoomsStore.leaveRoom(connection.id)
+
+        safeSendToConnection(connection.id, {
+          type: 'private_room_left',
+          privateRoomId: privateRoom?.id ?? '',
+        })
+        return
+      }
+
+      if (message.type === 'invite_to_private_room') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection?.profileId == null) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+
+        if (isProfileInActiveGame(message.toProfileId)) {
+          safeSendToConnection(connection.id, {
+            type: 'private_room_friend_busy',
+            friendDisplayName: message.toDisplayName,
+          })
+          return
+        }
+
+        const inviteResult = privateRoomsStore.inviteFriend({
+          senderConnectionId: connection.id,
+          toProfileId: message.toProfileId,
+          toDisplayName: message.toDisplayName,
+        })
+
+        if (!inviteResult.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: inviteResult.message })
+          return
+        }
+
+        const targetConn = Object.values(serverState.connections).find(
+          (c) => c.profileId === message.toProfileId && c.status === 'connected',
+        )
+
+        if (targetConn) {
+          safeSendToConnection(targetConn.id, {
+            type: 'private_room_invite_received',
+            inviteId: inviteResult.invite.inviteId,
+            fromProfileId: inviteResult.invite.fromProfileId,
+            fromDisplayName: inviteResult.invite.fromDisplayName,
+            privateRoomId: inviteResult.invite.privateRoomId,
+            stake: inviteResult.room.stake,
+          })
+        }
+        return
+      }
+
+      if (message.type === 'respond_private_room_invite') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection?.profileId == null) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+
+        const publicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
+
+        if (publicProfile === null) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Профилът не беше намерен.' })
+          return
+        }
+
+        const respondResult = privateRoomsStore.respondToInvite({
+          inviteId: message.inviteId,
+          connectionId: connection.id,
+          profileId: latestConnection.profileId,
+          displayName: publicProfile.displayName,
+          avatarUrl: publicProfile.avatarUrl,
+          level: publicProfile.level,
+          rankTitle: publicProfile.rankTitle,
+          accept: message.accept,
+        })
+
+        if (!respondResult.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: respondResult.message })
+          return
+        }
+
+        const hostConn = Object.values(serverState.connections).find(
+          (c) => c.profileId === respondResult.room.hostProfileId && c.status === 'connected',
+        )
+
+        if (message.accept) {
+          if (respondResult.joined) {
+            sendPrivateRoomUpdateToMembers(respondResult.room)
+          }
+          if (hostConn) {
+            safeSendToConnection(hostConn.id, {
+              type: 'private_room_invite_accepted',
+              toDisplayName: publicProfile.displayName,
+            })
+          }
+        } else {
+          if (hostConn) {
+            safeSendToConnection(hostConn.id, {
+              type: 'private_room_invite_declined',
+              toDisplayName: publicProfile.displayName,
+            })
+          }
+        }
+        return
+      }
+
       sendJsonMessage(socket, {
         type: 'error',
         message: 'Unsupported message type.',
@@ -4078,6 +4423,7 @@ wsServer.on('connection', (socket, request) => {
   socket.on('close', () => {
     try {
       removeConnectionFromMatchmaking(connection.id)
+      privateRoomsStore.removeConnection(connection.id)
 
       const result = handleDisconnect(serverState, connection.id)
 
