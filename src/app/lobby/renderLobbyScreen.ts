@@ -1315,16 +1315,7 @@ function renderHeroSection(
             ${renderLevelBadge(level, 'md')}
           </div>
           <div style="flex:1; min-width:0;">
-            <div style="font-size:30px; line-height:1; font-weight:800; color:#ffffff;">${escapeHtml(profileName)}</div>
-            <div style="display:flex; align-items:center; gap:8px; margin-top:12px;">
-              <div style="
-                width:14px; height:14px; border-radius:50%;
-                background:${isConnected ? '#22c55e' : '#ef4444'};
-              "></div>
-              <span style="font-size:16px; color:rgba(255,255,255,0.88); font-weight:600;">
-                ${isConnected ? 'Онлайн' : 'Офлайн'}
-              </span>
-            </div>
+            <div style="font-size:30px; line-height:1; font-weight:800; color:#22c55e; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(profileName)}</div>
             <button
               type="button"
               data-lobby-profile-button="1"
@@ -1342,7 +1333,7 @@ function renderHeroSection(
               onmouseenter="this.style.color='#d4a520'"
               onmouseleave="this.style.color='rgba(255,255,255,0.75)'"
             >
-              <img src="/assets/lobby/nav-icon-preview/nav-profile-white.png" alt="" style="width:18px; height:20px; display:block; object-fit:contain; opacity:0.85;">
+              <img src="/assets/lobby/nav-icon-preview/nav-profile-gold.png" alt="" style="width:18px; height:20px; display:block; object-fit:contain;">
               Профил
             </button>
           </div>
@@ -1350,7 +1341,7 @@ function renderHeroSection(
           <div style="width:210px;">
             <div style="font-size:17px; color:rgba(255,255,255,0.78); font-weight:500;">Баланс</div>
             <div style="display:flex; align-items:center; gap:8px; margin-top:8px;">
-              <span style="font-size:34px; line-height:1; font-weight:900; color:#d4a520;">${yellowCoinsBalance !== null ? formatAmount(yellowCoinsBalance) : '—'}</span>
+              <span style="font-size:clamp(18px, 2.2vw, 34px); line-height:1; font-weight:900; color:#d4a520; white-space:nowrap;">${yellowCoinsBalance !== null ? formatAmount(yellowCoinsBalance) : '—'}</span>
               <img src="/assets/lobby/icon-coin.png" alt="" style="width:33px; height:32px; display:block; object-fit:contain;">
             </div>
             <div style="font-size:16px; color:rgba(255,255,255,0.72); margin-top:8px;">жълтици</div>
