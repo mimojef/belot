@@ -103,6 +103,27 @@ let isPageUnloading = false
 let isRefreshingAuthConnection = false
 let isSessionDisplaced = false
 let currentAuthSession: AuthSession | null = null
+
+const SESSION_CACHE_KEY = 'pika_session_cache'
+
+function saveSessionCache(session: AuthSession): void {
+  try {
+    localStorage.setItem(SESSION_CACHE_KEY, JSON.stringify(session))
+  } catch { /* ignore */ }
+}
+
+function loadSessionCache(): AuthSession | null {
+  try {
+    const raw = localStorage.getItem(SESSION_CACHE_KEY)
+    return raw ? (JSON.parse(raw) as AuthSession) : null
+  } catch {
+    return null
+  }
+}
+
+function clearSessionCache(): void {
+  try { localStorage.removeItem(SESSION_CACHE_KEY) } catch { /* ignore */ }
+}
 let supportUnreadIntervalId: ReturnType<typeof setInterval> | null = null
 let publicSignupBonusYellowCoins = 100000
 let publicProfileNameChangePrice = 50000
@@ -249,6 +270,7 @@ function syncLobbyWithAuthSession(): void {
     return
   }
 
+  saveSessionCache(currentAuthSession)
   lobby.setDisplayName(currentAuthSession.profile.displayName)
   lobby.setLocalAvatarUrl(currentAuthSession.profile.avatarUrl)
 }
@@ -296,6 +318,13 @@ function refreshGameServerConnectionForAuth(): void {
 }
 
 async function loadAuthSession(): Promise<void> {
+  const cached = loadSessionCache()
+  if (cached !== null) {
+    currentAuthSession = cached
+    syncLobbyWithAuthSession()
+    if (!activeRoom.hasActiveRoom()) lobby.render()
+  }
+
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/auth/me`, {
       method: 'GET',
@@ -303,6 +332,11 @@ async function loadAuthSession(): Promise<void> {
     })
     const data = await readAuthResponse(response)
     currentAuthSession = data.ok ? data.session ?? null : null
+    if (currentAuthSession !== null) {
+      saveSessionCache(currentAuthSession)
+    } else {
+      clearSessionCache()
+    }
     syncLobbyWithAuthSession()
     if (currentAuthSession !== null) {
       lobby.refreshMissionsCount()
@@ -315,7 +349,7 @@ async function loadAuthSession(): Promise<void> {
     await syncLobbyChatConversations()
     if (!activeRoom.hasActiveRoom()) lobby.render()
   } catch {
-    currentAuthSession = null
+    if (currentAuthSession === null) currentAuthSession = null
   }
 }
 
@@ -339,6 +373,7 @@ async function submitAuthRequest(
     }
 
     currentAuthSession = data.session
+    saveSessionCache(currentAuthSession)
     syncLobbyWithAuthSession()
     lobby.resetToLobby()
     lobby.refreshSupportUnread()
@@ -362,6 +397,7 @@ async function submitLogout(): Promise<void> {
     // ignore network errors — proceed with local logout
   }
   currentAuthSession = null
+  clearSessionCache()
   stopSupportUnreadPolling()
   syncLobbyWithAuthSession()
   lobby.resetToLobby()
