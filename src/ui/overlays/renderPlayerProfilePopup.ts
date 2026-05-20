@@ -9,6 +9,7 @@ export type RenderPlayerProfilePopupOptions = {
   profile: PlayerPublicProfileSnapshot | null
   isLoading?: boolean
   canEdit?: boolean
+  isOwnProfile?: boolean
   friendshipAction?: PlayerProfileFriendshipAction | null
   skipAnimation?: boolean
 }
@@ -364,6 +365,7 @@ function renderProfileContent(
   profile: PlayerPublicProfileSnapshot,
   seat: Seat | null,
   canEdit: boolean,
+  isOwnProfile: boolean,
   friendshipAction: PlayerProfileFriendshipAction | null,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
@@ -423,7 +425,7 @@ function renderProfileContent(
               ${escapeHtml(displayName)}
             </div>
 
-            ${canEdit ? `
+            ${canEdit && !isOwnProfile ? `
               <span
                 data-player-profile-edit="1"
                 style="
@@ -451,7 +453,7 @@ function renderProfileContent(
             </div>
           ` : ''}
 
-          ${!canEdit ? `
+          ${!canEdit && !isOwnProfile ? `
             <div style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;">
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 ${profile.profileId ? `
@@ -697,6 +699,7 @@ export function renderPlayerProfilePopup(
           options.profile,
           options.seat,
           options.canEdit ?? false,
+          options.isOwnProfile ?? false,
           options.friendshipAction ?? null,
         )
       : renderEmptyContent(options.seat)

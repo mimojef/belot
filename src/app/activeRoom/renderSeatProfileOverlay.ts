@@ -7,8 +7,7 @@ import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfileP
 
 const HOST_ID = 'active-room-profile-overlay-host'
 
-let _overlayCanEdit = false
-let _overlayOnEditClick: (() => void) | undefined
+let _overlayIsOwnProfile = false
 
 function getHost(): HTMLDivElement | null {
   return document.getElementById(HOST_ID) as HTMLDivElement | null
@@ -29,42 +28,35 @@ function renderIntoHost(
   seat: Seat,
   profile: PlayerPublicProfileSnapshot | null,
   isLoading: boolean,
-  canEdit: boolean,
+  isOwnProfile: boolean,
   onClose: () => void,
-  onEditClick?: () => void,
 ): void {
   host.innerHTML = renderPlayerProfilePopup({
     isOpen: true,
     seat,
     profile,
     isLoading,
-    canEdit,
+    canEdit: false,
+    isOwnProfile,
     friendshipAction: null,
     skipAnimation: !isLoading,
   })
   attachListeners(host, onClose)
-  if (canEdit && onEditClick) {
-    host
-      .querySelector<HTMLElement>('[data-player-profile-edit="1"]')
-      ?.addEventListener('click', onEditClick)
-  }
 }
 
 export function showSeatProfileOverlay(
   seatSnapshot: RoomSeatSnapshot,
   onClose: () => void,
-  canEdit = false,
-  onEditClick?: () => void,
+  isOwnProfile = false,
 ): void {
-  _overlayCanEdit = canEdit
-  _overlayOnEditClick = onEditClick
   removeSeatProfileOverlay()
+  _overlayIsOwnProfile = isOwnProfile
 
   const host = document.createElement('div')
   host.id = HOST_ID
   host.style.cssText = 'position:fixed;inset:0;z-index:99998;'
 
-  renderIntoHost(host, seatSnapshot.seat, null, true, canEdit, onClose, onEditClick)
+  renderIntoHost(host, seatSnapshot.seat, null, true, isOwnProfile, onClose)
   document.body.appendChild(host)
 }
 
@@ -76,11 +68,10 @@ export function updateSeatProfileOverlay(
   if (!host) return
 
   const onClose = (): void => removeSeatProfileOverlay()
-  renderIntoHost(host, seatSnapshot.seat, profile, false, _overlayCanEdit, onClose, _overlayOnEditClick)
+  renderIntoHost(host, seatSnapshot.seat, profile, false, _overlayIsOwnProfile, onClose)
 }
 
 export function removeSeatProfileOverlay(): void {
-  _overlayCanEdit = false
-  _overlayOnEditClick = undefined
+  _overlayIsOwnProfile = false
   document.getElementById(HOST_ID)?.remove()
 }

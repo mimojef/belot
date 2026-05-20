@@ -3296,7 +3296,6 @@ export function createActiveRoomFlowController(
       seatSnapshot,
       () => removeSeatProfileOverlay(),
       isOwnSeat,
-      isOwnSeat ? () => removeSeatProfileOverlay() : undefined,
     )
     options.requestPlayerProfile(activeRoomState.roomId, seatAttr)
   })
