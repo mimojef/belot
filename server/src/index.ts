@@ -1613,6 +1613,45 @@ async function handleAuthRequest(
   return false
 }
 
+async function handleAccountRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/account/change-password' || req.method !== 'POST') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  const body = await readJsonRequestBody(req)
+
+  if (!isRecord(body)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло на заявката.' })
+    return true
+  }
+
+  const result = authStore.changePassword({
+    accountId: session.account.accountId,
+    currentPassword: getStringField(body, 'currentPassword'),
+    newPassword: getStringField(body, 'newPassword'),
+  })
+
+  if (!result.ok) {
+    sendJsonResponse(res, 400, result)
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true })
+  return true
+}
+
 function handleCheckNameRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -3624,6 +3663,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAuthRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAccountRequest(req, res, requestUrl.pathname)) {
     return
   }
 

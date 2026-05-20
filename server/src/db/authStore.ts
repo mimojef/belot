@@ -30,6 +30,11 @@ export type AuthStore = {
     email: string
     password: string
   }) => { ok: true; sessionToken: string; session: AuthSessionSnapshot } | { ok: false; message: string }
+  changePassword: (input: {
+    accountId: string
+    currentPassword: string
+    newPassword: string
+  }) => { ok: true } | { ok: false; message: string }
   getSession: (sessionToken: string | null) => AuthSessionSnapshot | null
   logout: (sessionToken: string | null) => void
   close: () => void
@@ -295,6 +300,19 @@ export async function createAuthStore(
     LIMIT 1;
   `)
 
+  const selectAccountByIdStatement = database.prepare(`
+    SELECT account_id, email, password_hash, role, status, created_at
+    FROM accounts
+    WHERE account_id = ?
+    LIMIT 1;
+  `)
+
+  const updatePasswordHashStatement = database.prepare(`
+    UPDATE accounts
+    SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE account_id = ?;
+  `)
+
   const revokeSessionStatement = database.prepare(`
     UPDATE account_sessions
     SET revoked_at = CURRENT_TIMESTAMP
@@ -492,6 +510,31 @@ export async function createAuthStore(
     }
   }
 
+  function changePassword(input: {
+    accountId: string
+    currentPassword: string
+    newPassword: string
+  }): { ok: true } | { ok: false; message: string } {
+    const account = selectAccountByIdStatement.get(input.accountId) as AccountRow | undefined
+
+    if (!account) {
+      return { ok: false, message: 'Профилът не беше намерен.' }
+    }
+
+    if (!verifyPassword(input.currentPassword, account.password_hash)) {
+      return { ok: false, message: 'Грешна текуща парола.' }
+    }
+
+    if (!validatePassword(input.newPassword)) {
+      return { ok: false, message: 'Новата парола трябва да е поне 6 символа.' }
+    }
+
+    const newHash = createPasswordHash(input.newPassword)
+    updatePasswordHashStatement.run(newHash, input.accountId)
+
+    return { ok: true }
+  }
+
   function logout(sessionToken: string | null): void {
     if (sessionToken === null) {
       return
@@ -507,6 +550,7 @@ export async function createAuthStore(
   return {
     register,
     login,
+    changePassword,
     getSession,
     logout,
     close,

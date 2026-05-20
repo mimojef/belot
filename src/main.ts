@@ -1615,6 +1615,27 @@ async function submitProfileNameChange(displayName: string): Promise<string | nu
   }
 }
 
+async function submitChangePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<string | null> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/account/change-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ currentPassword, newPassword }),
+    })
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return data.message ?? 'Паролата не беше сменена.'
+    }
+    return null
+  } catch {
+    return 'Няма връзка със сървъра.'
+  }
+}
+
 async function submitProfileUpdate(
   avatarFile: File | null,
   avatarCrop: AvatarCropSelection | null,
@@ -1846,6 +1867,7 @@ lobby = createLobbyFlowController({
   getApiBaseUrl: () => getApiBaseUrl(),
   onProfileGalleryDelete: (imageId) => deleteProfileGalleryImage(imageId),
   onProfileNameChangeSubmit: (displayName) => submitProfileNameChange(displayName),
+  onChangePasswordSubmit: (currentPassword, newPassword) => submitChangePassword(currentPassword, newPassword),
   onPlayersLoad: () => loadPlayersDirectory(),
   onLeaderboardsLoad: () => loadLeaderboards(),
   onLobbyPackagesLoad: () => loadLobbyPackages(),

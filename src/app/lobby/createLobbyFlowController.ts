@@ -83,6 +83,7 @@ export type CreateLobbyFlowControllerOptions = {
   onPresetAvatarApply?: (avatarUrl: string) => Promise<string | null>
   onProfileGalleryDelete?: (imageId: string) => Promise<string | null>
   onProfileNameChangeSubmit?: (displayName: string) => Promise<string | null>
+  onChangePasswordSubmit?: (currentPassword: string, newPassword: string) => Promise<string | null>
   onPlayersLoad?: () => Promise<
     | { ok: true; players: PlayerPublicProfileSnapshot[] }
     | { ok: false; message: string }
@@ -314,6 +315,8 @@ type InternalLobbyFlowState = {
   profileEditorErrorText: string | null
   profileNameChangeErrorText: string | null
   profileNameChangeSuccessAmount: number | null
+  changePasswordPopupOpen: boolean
+  changePasswordErrorText: string | null
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
   lowCoinsModalOpen: boolean
@@ -488,6 +491,8 @@ function createInitialState(): InternalLobbyFlowState {
     profileEditorErrorText: null,
     profileNameChangeErrorText: null,
     profileNameChangeSuccessAmount: null,
+    changePasswordPopupOpen: false,
+    changePasswordErrorText: null,
     authModalMode: 'closed',
     authErrorText: null,
     lowCoinsModalOpen: false,
@@ -1381,6 +1386,8 @@ export function createLobbyFlowController(
       profileEditorErrorText: state.profileEditorErrorText,
       profileNameChangeErrorText: state.profileNameChangeErrorText,
       profileNameChangeSuccessAmount: state.profileNameChangeSuccessAmount,
+      changePasswordPopupOpen: state.changePasswordPopupOpen,
+      changePasswordErrorText: state.changePasswordErrorText,
       notificationsOpen: state.notificationsOpen,
       missionsPopupOpen: state.missionsPopupOpen,
       dailyMissions: state.dailyMissions,
@@ -1501,6 +1508,19 @@ export function createLobbyFlowController(
       },
       onProfileNameChangeSubmit: (displayName) => {
         void submitProfileNameChange(displayName)
+      },
+      onChangePasswordOpen: () => {
+        state.changePasswordPopupOpen = true
+        state.changePasswordErrorText = null
+        render()
+      },
+      onChangePasswordClose: () => {
+        state.changePasswordPopupOpen = false
+        state.changePasswordErrorText = null
+        render()
+      },
+      onChangePasswordSubmit: (currentPassword, newPassword, confirmPassword) => {
+        void submitChangePassword(currentPassword, newPassword, confirmPassword)
       },
       onLobbyClick: () => {
         switchToLobby()
@@ -2007,6 +2027,38 @@ export function createLobbyFlowController(
       options.getProfileNameChangePrice?.() ??
       50000
     void new Audio('/audio/game-sounds/coins.mp3').play().catch(() => undefined)
+    render()
+  }
+
+  async function submitChangePassword(
+    currentPassword: string,
+    newPassword: string,
+    confirmPassword: string,
+  ): Promise<void> {
+    if (newPassword !== confirmPassword) {
+      state.changePasswordErrorText = 'Новите пароли не съвпадат.'
+      render()
+      return
+    }
+
+    if (newPassword.length < 6) {
+      state.changePasswordErrorText = 'Новата парола трябва да е поне 6 символа.'
+      render()
+      return
+    }
+
+    const errorText = options.onChangePasswordSubmit
+      ? await options.onChangePasswordSubmit(currentPassword, newPassword)
+      : 'Смяната на парола временно не е налична.'
+
+    if (errorText !== null) {
+      state.changePasswordErrorText = errorText
+      render()
+      return
+    }
+
+    state.changePasswordPopupOpen = false
+    state.changePasswordErrorText = null
     render()
   }
 

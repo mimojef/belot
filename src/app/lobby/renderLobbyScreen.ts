@@ -128,6 +128,8 @@ export type LobbyScreenState = {
   profileEditorErrorText: string | null
   profileNameChangeErrorText: string | null
   profileNameChangeSuccessAmount: number | null
+  changePasswordPopupOpen: boolean
+  changePasswordErrorText: string | null
   notificationsOpen: boolean
   missionsPopupOpen: boolean
   dailyMissions: PlayerMissionProgressSnapshot[]
@@ -199,6 +201,9 @@ export type RenderLobbyScreenOptions = {
   onPresetAvatarApply: (avatarUrl: string) => void
   onProfileGalleryDelete: (imageId: string) => void
   onProfileNameChangeSubmit: (displayName: string) => void
+  onChangePasswordOpen: () => void
+  onChangePasswordClose: () => void
+  onChangePasswordSubmit: (currentPassword: string, newPassword: string, confirmPassword: string) => void
   onLobbyClick: () => void
   onPlayersClick: () => void
   onShopClick: () => void
@@ -578,8 +583,24 @@ function renderAuthModal(state: LobbyScreenState): string {
         </label>
         <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
           Парола
-          <input name="password" type="password" autocomplete="${isLogin ? 'current-password' : 'new-password'}" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
+          <span style="position:relative;display:block;">
+            <input name="password" type="password" autocomplete="${isLogin ? 'current-password' : 'new-password'}" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
+            <button type="button" data-toggle-password="password" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.4);padding:4px;display:flex;align-items:center;justify-content:center;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </span>
         </label>
+        ${isRegister ? `
+        <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+          Повтори паролата
+          <span style="position:relative;display:block;">
+            <input name="confirmPassword" type="password" autocomplete="new-password" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
+            <button type="button" data-toggle-password="confirmPassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.4);padding:4px;display:flex;align-items:center;justify-content:center;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </span>
+        </label>
+        ` : ''}
         <button type="submit" style="height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;margin-top:4px;">
           ${isLogin ? 'Влез' : 'Регистрирай се'}
         </button>
@@ -625,10 +646,17 @@ function renderProfileEditModal(state: LobbyScreenState): string {
         <form data-lobby-profile-editor-form="1" style="display:grid;gap:16px;">
           <div style="font-size:25px;line-height:1.1;font-weight:900;color:#f8fafc;">Редакция на профил</div>
 
-          <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
-            Име в играта
-            <input value="${escapeHtml(state.profile.displayName)}" disabled style="height:42px;border-radius:8px;border:1px solid rgba(255,255,255,0.10);background:#101010;color:rgba(255,255,255,0.58);padding:0 12px;font-size:15px;font-weight:700;outline:none;">
-          </label>
+          <div style="display:grid;grid-template-columns:1fr auto;align-items:end;gap:10px;">
+            <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              Ime в играта
+              <input value="${escapeHtml(state.profile.displayName)}" disabled style="height:42px;border-radius:8px;border:1px solid rgba(255,255,255,0.10);background:#101010;color:rgba(255,255,255,0.58);padding:0 12px;font-size:15px;font-weight:700;outline:none;width:100%;box-sizing:border-box;">
+            </label>
+            <button
+              type="button"
+              data-change-password-open="1"
+              style="height:42px;padding:0 14px;white-space:nowrap;border:1px solid rgba(212,165,32,0.58);border-radius:8px;background:#080808;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;flex-shrink:0;"
+            >Смяна на парола</button>
+          </div>
           ${state.profileNameChangeSuccessAmount !== null ? `
             <div style="font-size:13px;font-weight:800;color:#4ade80;">
               Успешно сменихте името на профила.
@@ -724,6 +752,59 @@ function renderProfileEditModal(state: LobbyScreenState): string {
           <div style="display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;">
             <button type="button" data-lobby-profile-editor-cancel="1" style="height:42px;padding:0 16px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:#080808;color:#f8fafc;font-size:14px;font-weight:900;cursor:pointer;">Откажи</button>
             <button type="submit" style="height:42px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;">Запази</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `
+}
+
+function renderPasswordField(name: string, label: string): string {
+  return `
+    <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+      ${label}
+      <span style="position:relative;display:block;">
+        <input
+          type="password"
+          name="${name}"
+          autocomplete="${name === 'currentPassword' ? 'current-password' : 'new-password'}"
+          style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 44px 0 12px;font-size:15px;outline:none;"
+        >
+        <button
+          type="button"
+          data-toggle-password="${name}"
+          style="position:absolute;right:10px;top:50%;transform:translateY(-50%);border:0;background:none;padding:4px;cursor:pointer;color:rgba(255,255,255,0.4);line-height:1;"
+          aria-label="Покажи/скрий парола"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+      </span>
+    </label>
+  `
+}
+
+function renderChangePasswordModal(state: LobbyScreenState): string {
+  if (!state.changePasswordPopupOpen) {
+    return ''
+  }
+
+  return `
+    <div data-change-password-modal-root="1" style="position:fixed;inset:0;z-index:14000;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div data-change-password-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.72);backdrop-filter:blur(4px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,400px);border-radius:12px;border:2px solid rgba(212,165,32,0.65);background:linear-gradient(180deg,rgba(32,32,32,0.99) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.52);padding:24px;">
+        <button type="button" data-change-password-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
+        <div style="font-size:20px;font-weight:900;color:#f8fafc;margin-bottom:18px;">Смяна на парола</div>
+        <form data-change-password-form="1" style="display:grid;gap:14px;">
+          ${renderPasswordField('currentPassword', 'Текуща парола')}
+          ${renderPasswordField('newPassword', 'Нова парола')}
+          ${renderPasswordField('confirmPassword', 'Повтори новата парола')}
+          ${state.changePasswordErrorText ? `<div style="border-radius:6px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:8px 10px;color:#fecaca;font-size:13px;font-weight:800;">${escapeHtml(state.changePasswordErrorText)}</div>` : ''}
+          <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:4px;">
+            <button type="button" data-change-password-close="1" style="height:40px;padding:0 16px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:#080808;color:#f8fafc;font-size:14px;font-weight:900;cursor:pointer;">Откажи</button>
+            <button type="submit" style="height:40px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;">Смени</button>
           </div>
         </form>
       </div>
@@ -4173,6 +4254,7 @@ export function renderLobbyScreen(
 
       ${renderLowCoinsModal(state)}
       ${renderProfileEditModal(state)}
+      ${renderChangePasswordModal(state)}
       ${renderGiftCoinsModal(state)}
       ${renderAuthModal(state)}
       ${renderDailyRewardsPopup(state)}
@@ -4706,6 +4788,41 @@ export function renderLobbyScreen(
   root
     .querySelector<HTMLElement>('[data-lobby-profile-editor-backdrop="1"]')
     ?.addEventListener('click', options.onProfileEditClose)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-change-password-open="1"]')
+    ?.addEventListener('click', options.onChangePasswordOpen)
+
+  root.querySelectorAll<HTMLButtonElement>('[data-change-password-close="1"]').forEach((btn) => {
+    btn.addEventListener('click', options.onChangePasswordClose)
+  })
+
+  root
+    .querySelector<HTMLElement>('[data-change-password-backdrop="1"]')
+    ?.addEventListener('click', options.onChangePasswordClose)
+
+  const changePasswordForm = root.querySelector<HTMLFormElement>('[data-change-password-form="1"]')
+  if (changePasswordForm) {
+    changePasswordForm.querySelectorAll<HTMLButtonElement>('[data-toggle-password]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const fieldName = btn.dataset.togglePassword ?? ''
+        const input = changePasswordForm.querySelector<HTMLInputElement>(`input[name="${fieldName}"]`)
+        if (!input) return
+        const isHidden = input.type === 'password'
+        input.type = isHidden ? 'text' : 'password'
+        btn.style.color = isHidden ? 'rgba(212,165,32,0.8)' : 'rgba(255,255,255,0.4)'
+      })
+    })
+
+    changePasswordForm.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const data = new FormData(changePasswordForm)
+      const currentPassword = String(data.get('currentPassword') ?? '')
+      const newPassword = String(data.get('newPassword') ?? '')
+      const confirmPassword = String(data.get('confirmPassword') ?? '')
+      options.onChangePasswordSubmit(currentPassword, newPassword, confirmPassword)
+    })
+  }
 
   const avatarInput = root.querySelector<HTMLInputElement>(
     'input[name="avatarFile"]',
@@ -5265,6 +5382,17 @@ export function renderLobbyScreen(
       })
     }
 
+    form.querySelectorAll<HTMLButtonElement>('[data-toggle-password]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const fieldName = btn.dataset.togglePassword ?? ''
+        const input = form.querySelector<HTMLInputElement>(`input[name="${fieldName}"]`)
+        if (!input) return
+        const isHidden = input.type === 'password'
+        input.type = isHidden ? 'text' : 'password'
+        btn.style.color = isHidden ? 'rgba(212,165,32,0.8)' : 'rgba(255,255,255,0.4)'
+      })
+    })
+
     form.querySelectorAll<HTMLInputElement>('.belot-gender-radio').forEach((radio) => {
       radio.addEventListener('change', () => {
         form.querySelectorAll<HTMLElement>('[data-gender-option]').forEach((opt) => {
@@ -5283,6 +5411,11 @@ export function renderLobbyScreen(
       const password = String(data.get('password') ?? '')
 
       if (form.dataset.lobbyAuthForm === 'register') {
+        const confirmPassword = String(data.get('confirmPassword') ?? '')
+        if (password !== confirmPassword) {
+          showAuthError('Паролите не съвпадат.')
+          return
+        }
         const rawGender = String(data.get('gender') ?? '')
         const gender = rawGender === 'male' || rawGender === 'female' ? rawGender : null
         if (gender === null) {
