@@ -326,6 +326,8 @@ const MAX_PROFILE_GALLERY_IMAGES = 6
 
 let popupRootEl: HTMLElement | null = null
 let privateRoomInfoDismissTimer: ReturnType<typeof setTimeout> | null = null
+let stakesFirstCardIndex = -1
+let stakesAnimFrame = 0
 let inviteCountdownTimer: ReturnType<typeof setInterval> | null = null
 
 export type ProfilePopupCallbacks = {
@@ -1536,10 +1538,44 @@ function renderStakeSection(
         display:flex;
         flex-wrap:nowrap;
         gap:12px;
-        overflow-x:auto;
-        padding-bottom:6px;
+        overflow-x:scroll;
+        position:relative;
       ">
         ${stakeCards}
+      </div>
+
+      <div style="display:flex; align-items:stretch; height:30px; margin-top:6px; gap:0;">
+        <button data-stakes-prev="1" style="
+          flex:0 0 42px; background:linear-gradient(180deg, rgba(65,44,6,0.98) 0%, rgba(18,12,2,0.98) 100%);
+          border:1px solid rgba(244,201,91,0.76); border-right:none;
+          border-radius:7px 0 0 7px; color:#ffd45a; font-size:28px; line-height:1;
+          text-shadow:0 0 10px rgba(244,201,91,0.45);
+          box-shadow:inset 0 1px 0 rgba(255,255,255,0.12), 0 0 12px rgba(212,165,32,0.10);
+          cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0;
+          transition:background 0.15s, color 0.15s, box-shadow 0.15s, transform 0.12s;
+        ">&#8249;</button>
+        <div data-stakes-track="1" style="
+          flex:1; position:relative;
+          background:rgba(255,255,255,0.07);
+          border-top:1px solid rgba(212,165,32,0.45);
+          border-bottom:1px solid rgba(212,165,32,0.45);
+          overflow:hidden;
+        ">
+          <div data-stakes-thumb="1" style="
+            position:absolute; top:4px; bottom:4px; left:0;
+            background:rgba(212,165,32,0.72); border-radius:4px;
+            cursor:grab; min-width:24px; transition:background 0.15s;
+          "></div>
+        </div>
+        <button data-stakes-next="1" style="
+          flex:0 0 42px; background:linear-gradient(180deg, rgba(65,44,6,0.98) 0%, rgba(18,12,2,0.98) 100%);
+          border:1px solid rgba(244,201,91,0.76); border-left:none;
+          border-radius:0 7px 7px 0; color:#ffd45a; font-size:28px; line-height:1;
+          text-shadow:0 0 10px rgba(244,201,91,0.45);
+          box-shadow:inset 0 1px 0 rgba(255,255,255,0.12), 0 0 12px rgba(212,165,32,0.10);
+          cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0;
+          transition:background 0.15s, color 0.15s, box-shadow 0.15s, transform 0.12s;
+        ">&#8250;</button>
       </div>
 
       <style>
@@ -1547,6 +1583,15 @@ function renderStakeSection(
           border-color:#c8940e !important;
           box-shadow:0 0 0 2px rgba(200,148,14,0.42), 0 8px 24px rgba(212,165,32,0.18) !important;
         }
+        [data-stakes-prev]:hover, [data-stakes-next]:hover {
+          background:linear-gradient(180deg, rgba(112,76,10,1) 0%, rgba(42,29,5,1) 100%) !important;
+          color:#fff2a8 !important;
+          box-shadow:inset 0 1px 0 rgba(255,255,255,0.18), 0 0 18px rgba(212,165,32,0.28) !important;
+        }
+        [data-stakes-prev]:active, [data-stakes-next]:active {
+          transform:translateY(1px);
+        }
+        [data-stakes-thumb]:hover { background:rgba(212,165,32,0.95) !important; }
       </style>
     </div>
   `
@@ -4291,7 +4336,7 @@ export function renderLobbyScreen(
   const profileName = state.displayName.trim() || 'Играч'
 
   const savedScrollTop = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')?.scrollTop ?? 0
-  const savedStakesScrollLeft = root.querySelector<HTMLElement>('[data-lobby-stakes-scroll="1"]')?.scrollLeft ?? -1
+  // stakesFirstCardIndex се пази като модулна променлива — не се чете от scrollLeft
 
   root.innerHTML = `
     <div
@@ -4462,6 +4507,107 @@ export function renderLobbyScreen(
       ${renderSupportPopup(state)}
     </div>
   `
+
+  const scrollEl = root.querySelector<HTMLElement>('[data-lobby-stakes-scroll="1"]')
+  const track = root.querySelector<HTMLElement>('[data-stakes-track="1"]')
+  const thumb = root.querySelector<HTMLElement>('[data-stakes-thumb="1"]')
+
+  if (scrollEl && track && thumb) {
+    const syncThumb = () => {
+      const maxScroll = scrollEl.scrollWidth - scrollEl.clientWidth
+      if (maxScroll <= 0) { thumb.style.display = 'none'; return }
+      thumb.style.display = 'block'
+      const trackW = track.clientWidth
+      const thumbW = Math.max(28, (scrollEl.clientWidth / scrollEl.scrollWidth) * trackW)
+      const thumbLeft = (scrollEl.scrollLeft / maxScroll) * (trackW - thumbW)
+      thumb.style.width = thumbW + 'px'
+      thumb.style.left = thumbLeft + 'px'
+    }
+
+    const animateTo = (targetLeft: number) => {
+      cancelAnimationFrame(stakesAnimFrame)
+      const startLeft = scrollEl.scrollLeft
+      const diff = targetLeft - startLeft
+      if (Math.abs(diff) < 1) return
+      const duration = 320
+      const startTime = performance.now()
+      const ease = (t: number) => t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t
+      const step = (now: number) => {
+        const t = Math.min((now - startTime) / duration, 1)
+        scrollEl.scrollLeft = startLeft + diff * ease(t)
+        if (t < 1) stakesAnimFrame = requestAnimationFrame(step)
+        else scrollEl.scrollLeft = targetLeft
+      }
+      stakesAnimFrame = requestAnimationFrame(step)
+    }
+
+    scrollEl.addEventListener('scroll', syncThumb)
+    syncThumb()
+
+    const getCards = () => Array.from(scrollEl.querySelectorAll<HTMLElement>('[data-lobby-stake-card]'))
+
+    const clampStakeScrollLeft = (value: number): number => {
+      const maxScroll = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth)
+      return Math.max(0, Math.min(value, maxScroll))
+    }
+
+    const getCardScrollLeft = (card: HTMLElement): number => {
+      return clampStakeScrollLeft(card.offsetLeft - 2)
+    }
+
+    const getNearestCardIndex = (cards: HTMLElement[]): number => {
+      if (cards.length === 0) return 0
+
+      let nearestIndex = 0
+      let nearestDistance = Number.POSITIVE_INFINITY
+
+      cards.forEach((card, index) => {
+        const distance = Math.abs(getCardScrollLeft(card) - scrollEl.scrollLeft)
+        if (distance < nearestDistance) {
+          nearestDistance = distance
+          nearestIndex = index
+        }
+      })
+
+      return nearestIndex
+    }
+
+    root.querySelector('[data-stakes-prev="1"]')?.addEventListener('click', () => {
+      const cards = getCards()
+      stakesFirstCardIndex = Math.max(0, getNearestCardIndex(cards) - 1)
+      const target = cards[stakesFirstCardIndex]
+      if (target) animateTo(getCardScrollLeft(target))
+    })
+    root.querySelector('[data-stakes-next="1"]')?.addEventListener('click', () => {
+      const cards = getCards()
+      stakesFirstCardIndex = Math.min(cards.length - 1, getNearestCardIndex(cards) + 1)
+      const target = cards[stakesFirstCardIndex]
+      if (target) animateTo(getCardScrollLeft(target))
+    })
+
+    // Drag на плъзгача
+    thumb.addEventListener('mousedown', (e) => {
+      const startX = e.clientX
+      const startScroll = scrollEl.scrollLeft
+      const maxScroll = scrollEl.scrollWidth - scrollEl.clientWidth
+      const trackW = track.clientWidth
+      const thumbW = thumb.offsetWidth
+      thumb.style.cursor = 'grabbing'
+      const onMove = (ev: MouseEvent) => {
+        const dx = ev.clientX - startX
+        scrollEl.scrollLeft = startScroll + (dx / (trackW - thumbW)) * maxScroll
+      }
+      const onUp = () => {
+        thumb.style.cursor = 'grab'
+        stakesFirstCardIndex = getNearestCardIndex(getCards())
+        document.removeEventListener('mousemove', onMove)
+        document.removeEventListener('mouseup', onUp)
+      }
+      document.addEventListener('mousemove', onMove)
+      document.addEventListener('mouseup', onUp)
+      e.preventDefault()
+    })
+  }
 
   const stakeButtons = root.querySelectorAll<HTMLButtonElement>('[data-lobby-stake-card]')
 
@@ -5853,23 +5999,25 @@ export function renderLobbyScreen(
     newScrollEl.scrollTop = savedScrollTop
   }
 
+  cancelAnimationFrame(stakesAnimFrame)
+
   const stakesScrollEl = root.querySelector<HTMLElement>('[data-lobby-stakes-scroll="1"]')
   if (stakesScrollEl) {
-    if (savedStakesScrollLeft >= 0) {
-      stakesScrollEl.scrollLeft = savedStakesScrollLeft
-    } else {
+    const allStakeCards = Array.from(stakesScrollEl.querySelectorAll<HTMLElement>('[data-lobby-stake-card]'))
+    if (allStakeCards.length > 0) {
       const playerLevel = state.profile.level ?? 1
       const enabledRooms = state.matchRooms.filter((r) => r.isEnabled)
-      const lastAccessibleIndex = enabledRooms.reduce((best, room, i) => playerLevel >= room.minLevel ? i : best, -1)
-      if (lastAccessibleIndex >= 4) {
-        const cards = stakesScrollEl.querySelectorAll<HTMLElement>('[data-lobby-stake-card]')
-        const targetCard = cards[lastAccessibleIndex - 4]
-        if (targetCard) {
-          const containerRect = stakesScrollEl.getBoundingClientRect()
-          const cardRect = targetCard.getBoundingClientRect()
-          stakesScrollEl.scrollLeft = cardRect.left - containerRect.left
+      const highestUnlockedIndex = enabledRooms.reduce((best, room, i) => {
+        if (playerLevel < room.minLevel) {
+          return best
         }
-      }
+
+        return best < 0 || room.stakeAmount > enabledRooms[best].stakeAmount ? i : best
+      }, -1)
+      stakesFirstCardIndex = highestUnlockedIndex >= 4 ? highestUnlockedIndex - 4 : 0
+      const idx = Math.max(0, Math.min(stakesFirstCardIndex, allStakeCards.length - 1))
+      const maxScroll = Math.max(0, stakesScrollEl.scrollWidth - stakesScrollEl.clientWidth)
+      stakesScrollEl.scrollLeft = Math.max(0, Math.min(allStakeCards[idx].offsetLeft - 2, maxScroll))
     }
   }
 
