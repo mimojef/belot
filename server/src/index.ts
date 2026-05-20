@@ -185,6 +185,33 @@ function runSupportCleanup(): void {
 runSupportCleanup()
 setInterval(runSupportCleanup, 24 * 60 * 60 * 1000)
 
+function msUntilNextSofiaMidnight(): number {
+  const now = new Date()
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Sofia',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(now)
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? '0')
+  const elapsedMs =
+    ((get('hour') % 24) * 3600 + get('minute') * 60 + get('second')) * 1000 +
+    now.getMilliseconds()
+  return 24 * 60 * 60 * 1000 - elapsedMs + 1000
+}
+
+function scheduleMidnightMissionRotation(): void {
+  const delay = msUntilNextSofiaMidnight()
+  console.log(`[missions] Next midnight rotation in ${Math.round(delay / 60000)} min`)
+  setTimeout(() => {
+    console.log('[missions] Midnight rotation: running')
+    missionStore.maybePromoteStaged()
+    scheduleMidnightMissionRotation()
+  }, delay)
+}
+scheduleMidnightMissionRotation()
+
 console.log(
   `[db] SQLite ready file=${databaseBootstrap.databaseFilePath} applied=${databaseBootstrap.appliedCount} skipped=${databaseBootstrap.skippedCount}`,
 )

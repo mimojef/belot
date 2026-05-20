@@ -24,6 +24,18 @@ import type {
 import type { PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
 
+const MISSION_TYPE_LABELS: Record<string, string> = {
+  win_games: 'Спечели N игри',
+  win_capot_games: 'Спечели N игри с капо',
+  win_contra_games: 'Спечели N игри с контра',
+  play_games: 'Изиграй N игри',
+  announce_tersa: 'Обяви N терци',
+  announce_50: 'Обяви N 50-ки',
+  announce_100: 'Обяви N 100-ки',
+  announce_kare: 'Обяви N карета',
+  announce_belot: 'Обяви N белота',
+}
+
 export type LobbyAuthModalMode = 'closed' | 'cta' | 'login' | 'register'
 
 export type AvatarCropSelection = {
@@ -1014,16 +1026,16 @@ function renderNav(state: LobbyScreenState): string {
             color:rgba(255,255,255,0.65); position:relative;
           ">
             <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
-            ${state.supportUnreadCount > 0 ? `<span style="
+            <span data-support-unread-badge="1" style="
               position:absolute; top:2px; right:0px;
               min-width:18px; height:18px; border-radius:9px;
               background:#ef4444; border:1.5px solid #0a0a0a;
-              display:flex; align-items:center; justify-content:center;
+              display:${state.supportUnreadCount > 0 ? 'flex' : 'none'}; align-items:center; justify-content:center;
               font-size:10px; font-weight:800; color:#fff;
               padding:0 4px; box-sizing:border-box;
               font-family:Inter,system-ui,sans-serif;
               pointer-events:none;
-            ">${state.supportUnreadCount}</span>` : ''}
+            ">${state.supportUnreadCount > 0 ? state.supportUnreadCount : ''}</span>
           </button>
           <button data-lobby-nav-bell="1" style="
             background:none; border:none; cursor:pointer; padding:6px;
@@ -2680,6 +2692,50 @@ function renderAdminPanel(state: LobbyScreenState): string {
               </div>
             `).join('')}
           </div>
+
+          ${(() => {
+            const editId = state.adminMissionEditId
+            const isEditingToday = editId !== null && !state.adminMissionEditIsStaged
+
+            if (!isEditingToday) {
+              return `
+                <div>
+                  <button type="button" data-admin-mission-edit-start="today" style="height:38px;padding:0 14px;border:1px solid rgba(96,165,250,0.48);border-radius:8px;background:#050505;color:#60a5fa;font-size:13px;font-weight:900;cursor:pointer;">+ Добави мисия за днес</button>
+                </div>
+              `
+            }
+
+            return `
+              <form data-admin-mission-form="1" style="border:1px solid rgba(96,165,250,0.30);border-radius:8px;background:#050505;padding:16px;display:grid;gap:12px;">
+                <div style="font-size:15px;font-weight:900;color:#60a5fa;">Нова мисия за днес</div>
+                <input type="hidden" name="missionId" value="">
+                <input type="hidden" name="isStaged" value="false">
+
+                <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(96,165,250,0.8);">
+                  Тип
+                  <select name="missionType" style="height:40px;border-radius:8px;border:1px solid rgba(96,165,250,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
+                    ${Object.entries(MISSION_TYPE_LABELS).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}
+                  </select>
+                </label>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                  <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(96,165,250,0.8);">
+                    Цел
+                    <input name="targetCount" type="number" min="1" value="5" style="height:40px;border-radius:8px;border:1px solid rgba(96,165,250,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
+                  </label>
+                  <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(96,165,250,0.8);">
+                    Награда (жълтици)
+                    <input name="rewardYellowCoins" type="number" min="1" value="5000" style="height:40px;border-radius:8px;border:1px solid rgba(96,165,250,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
+                  </label>
+                </div>
+
+                <div style="display:flex;gap:10px;">
+                  <button type="submit" style="height:40px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#60a5fa 0%,#2563eb 100%);color:#ffffff;font-size:13px;font-weight:900;cursor:pointer;">Запази</button>
+                  <button type="button" data-admin-mission-form-cancel="1" style="height:40px;padding:0 14px;border:1px solid rgba(255,255,255,0.18);border-radius:8px;background:transparent;color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;cursor:pointer;">Откажи</button>
+                </div>
+              </form>
+            `
+          })()}
         </div>
 
         <div style="display:grid;gap:12px;">
@@ -2713,18 +2769,6 @@ function renderAdminPanel(state: LobbyScreenState): string {
 
             const editing = editId !== 'new' ? state.adminStagedMissions.find((m) => m.missionId === editId) ?? null : null
 
-            const MISSION_TYPES: Array<[string, string]> = [
-              ['win_games', 'Спечели N игри'],
-              ['win_capot_games', 'Спечели N игри с капо'],
-              ['win_contra_games', 'Спечели N игри с контра'],
-              ['play_games', 'Изиграй N игри'],
-              ['announce_tersa', 'Обяви N терци'],
-              ['announce_50', 'Обяви N 50-ки'],
-              ['announce_100', 'Обяви N 100-ки'],
-              ['announce_kare', 'Обяви N карета'],
-              ['announce_belot', 'Обяви N белота'],
-            ]
-
             return `
               <form data-admin-mission-form="1" style="border:1px solid rgba(167,139,250,0.30);border-radius:8px;background:#050505;padding:16px;display:grid;gap:12px;">
                 <div style="font-size:15px;font-weight:900;color:#a78bfa;">${editing ? 'Редакция на утрешна мисия' : 'Нова мисия за утре'}</div>
@@ -2734,13 +2778,8 @@ function renderAdminPanel(state: LobbyScreenState): string {
                 <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(167,139,250,0.8);">
                   Тип
                   <select name="missionType" style="height:40px;border-radius:8px;border:1px solid rgba(167,139,250,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
-                    ${MISSION_TYPES.map(([value, label]) => `<option value="${value}" ${editing?.missionType === value ? 'selected' : ''}>${label}</option>`).join('')}
+                    ${Object.entries(MISSION_TYPE_LABELS).map(([value, label]) => `<option value="${value}" ${editing?.missionType === value ? 'selected' : ''}>${label}</option>`).join('')}
                   </select>
-                </label>
-
-                <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(167,139,250,0.8);">
-                  Заглавие
-                  <input name="title" value="${editing ? escapeHtml(editing.title) : ''}" placeholder="Напр. Спечели 5 игри" style="height:40px;border-radius:8px;border:1px solid rgba(167,139,250,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
                 </label>
 
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
@@ -4460,6 +4499,11 @@ export function renderLobbyScreen(
     })
   })
 
+  root.querySelector<HTMLButtonElement>('[data-admin-mission-edit-start="today"]')
+    ?.addEventListener('click', () => {
+      options.onAdminMissionEdit('new', false)
+    })
+
   root.querySelector<HTMLButtonElement>('[data-admin-mission-edit-start][data-admin-mission-edit-start-staged]')
     ?.addEventListener('click', () => {
       options.onAdminMissionEdit('new', true)
@@ -4485,11 +4529,11 @@ export function renderLobbyScreen(
       const form = event.currentTarget as HTMLFormElement
       const data = new FormData(form)
       const missionType = String(data.get('missionType') ?? '').trim()
-      const title = String(data.get('title') ?? '').trim()
       const targetCount = Number(data.get('targetCount') ?? 1)
       const rewardYellowCoins = Number(data.get('rewardYellowCoins') ?? 1000)
       const missionId = String(data.get('missionId') ?? '').trim() || null
       const isStaged = String(data.get('isStaged') ?? '') === 'true'
+      const title = (MISSION_TYPE_LABELS[missionType] ?? missionType).replace('N', String(targetCount))
 
       if (!missionType || !title || targetCount < 1 || rewardYellowCoins < 1) return
 

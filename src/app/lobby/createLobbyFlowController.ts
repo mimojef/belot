@@ -3872,6 +3872,31 @@ export function createLobbyFlowController(
     navigateFromHash(decodeURIComponent(window.location.hash.slice(1)))
   })
 
+  function msUntilNextSofiaMidnight(): number {
+    const now = new Date()
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Europe/Sofia',
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).formatToParts(now)
+    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? '0')
+    const elapsedMs =
+      ((get('hour') % 24) * 3600 + get('minute') * 60 + get('second')) * 1000 +
+      now.getMilliseconds()
+    // +2s buffer so server has time to complete rotation before we reload
+    return 24 * 60 * 60 * 1000 - elapsedMs + 2000
+  }
+
+  function scheduleMidnightAdminRefresh(): void {
+    window.setTimeout(() => {
+      void loadAdminMissions()
+      scheduleMidnightAdminRefresh()
+    }, msUntilNextSofiaMidnight())
+  }
+  scheduleMidnightAdminRefresh()
+
   return {
     render,
     destroy: () => {
@@ -3934,7 +3959,13 @@ export function createLobbyFlowController(
         const result = await options.onSupportUnreadLoad?.()
         if (result?.ok) {
           state.supportUnreadCount = result.unreadCount
-          render()
+          const badge = options.root.querySelector<HTMLElement>('[data-support-unread-badge="1"]')
+          if (badge) {
+            badge.style.display = result.unreadCount > 0 ? 'flex' : 'none'
+            badge.textContent = result.unreadCount > 0 ? String(result.unreadCount) : ''
+          } else {
+            render()
+          }
         }
       })()
     },

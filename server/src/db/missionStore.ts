@@ -380,12 +380,15 @@ export async function createMissionStore(
     if (lastResetDate === today) return
 
     const staged = listStagedMissions()
-    if (staged.length === 0) return
 
     database.exec('BEGIN')
     try {
-      deleteActiveMissionsStatement.run()
-      promoteAllStagedStatement.run()
+      if (staged.length > 0) {
+        deleteActiveMissionsStatement.run()
+        promoteAllStagedStatement.run()
+      }
+      // Always mark today as rotated — prevents mid-day promotion if admin
+      // stages new missions between midnight and the first lazy call.
       setAdminSettingStatement.run('last_mission_reset_date', today)
       database.exec('COMMIT')
     } catch (err) {
