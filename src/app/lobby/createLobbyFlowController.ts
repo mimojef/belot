@@ -26,6 +26,7 @@ import type {
   LeaderboardCategory,
   LeaderboardsSnapshot,
   MatchFoundMessage,
+  MatchRoomSnapshot,
   MatchStake,
   MissionTemplateInput,
   MissionTemplateSnapshot,
@@ -247,6 +248,14 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; activeMissions: MissionTemplateSnapshot[]; stagedMissions: MissionTemplateSnapshot[] }
     | { ok: false; message: string }
   >
+  onMatchRoomsLoad?: () => Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }>
+  onAdminMatchRoomUpsert?: (room: {
+    stakeAmount: number
+    minLevel: number
+    prizeAmount: number
+    isEnabled: boolean
+  }) => Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }>
+  onAdminMatchRoomDelete?: (stakeAmount: number) => Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }>
   onPrivateRoomsOpen?: () => void
   onPrivateRoomsClose?: () => void
   onPrivateRoomCreate?: (stake: MatchStake, isLocked: boolean) => void
@@ -398,6 +407,10 @@ type InternalLobbyFlowState = {
   adminMissionsErrorText: string | null
   adminMissionEditId: string | null
   adminMissionEditIsStaged: boolean
+  matchRooms: MatchRoomSnapshot[]
+  matchRoomsLoading: boolean
+  matchRoomsErrorText: string | null
+  adminMatchRoomEdit: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean } | 'new' | null
   privateRoomsCreatePopupOpen: boolean
   privateRoomsTab: 'all' | 'mine'
   privateRooms: PrivateRoomSnapshot[]
@@ -576,6 +589,10 @@ function createInitialState(): InternalLobbyFlowState {
     adminMissionsErrorText: null,
     adminMissionEditId: null,
     adminMissionEditIsStaged: false,
+    matchRooms: [],
+    matchRoomsLoading: false,
+    matchRoomsErrorText: null,
+    adminMatchRoomEdit: null,
     privateRoomsCreatePopupOpen: false,
     privateRoomsTab: 'all',
     privateRooms: [],
@@ -1417,6 +1434,10 @@ export function createLobbyFlowController(
       adminMissionsErrorText: state.adminMissionsErrorText,
       adminMissionEditId: state.adminMissionEditId,
       adminMissionEditIsStaged: state.adminMissionEditIsStaged,
+      matchRooms: state.matchRooms,
+      matchRoomsLoading: state.matchRoomsLoading,
+      matchRoomsErrorText: state.matchRoomsErrorText,
+      adminMatchRoomEdit: state.adminMatchRoomEdit,
       privateRoomsCreatePopupOpen: state.privateRoomsCreatePopupOpen,
       privateRoomsTab: state.privateRoomsTab,
       privateRooms: state.privateRooms,
@@ -1761,6 +1782,43 @@ export function createLobbyFlowController(
         state.adminMissionEditId = missionId.length > 0 && missionId !== 'new' ? missionId : missionId === 'new' ? 'new' : null
         state.adminMissionEditIsStaged = isStaged ?? false
         render()
+      },
+      onAdminMatchRoomEditStart: (room) => {
+        state.adminMatchRoomEdit = room ?? 'new'
+        render()
+      },
+      onAdminMatchRoomEditCancel: () => {
+        state.adminMatchRoomEdit = null
+        render()
+      },
+      onAdminMatchRoomSubmit: (room) => {
+        void (async () => {
+          if (!options.onAdminMatchRoomUpsert) return
+          const result = await options.onAdminMatchRoomUpsert(room)
+          if (!result.ok) {
+            state.matchRoomsErrorText = result.message
+            render()
+            return
+          }
+          state.matchRooms = result.rooms
+          state.adminMatchRoomEdit = null
+          state.matchRoomsErrorText = null
+          render()
+        })()
+      },
+      onAdminMatchRoomDelete: (stakeAmount) => {
+        void (async () => {
+          if (!options.onAdminMatchRoomDelete) return
+          const result = await options.onAdminMatchRoomDelete(stakeAmount)
+          if (!result.ok) {
+            state.matchRoomsErrorText = result.message
+            render()
+            return
+          }
+          state.matchRooms = result.rooms
+          state.matchRoomsErrorText = null
+          render()
+        })()
       },
       onPrivateRoomsOpen: () => {
         state.currentScreen = 'private-rooms'
@@ -2526,7 +2584,7 @@ export function createLobbyFlowController(
     state.adminSettingsErrorText = null
     render()
 
-    await Promise.all([loadAdminCoinPackages(), loadAdminMissions(), loadAdminSupportConversations()])
+    await Promise.all([loadAdminCoinPackages(), loadAdminMissions(), loadAdminSupportConversations(), loadMatchRooms()])
   }
 
   async function loadAdminSupportConversations(): Promise<void> {
@@ -3500,6 +3558,15 @@ export function createLobbyFlowController(
       return
     }
 
+    if (
+      state.currentScreen === 'lobby' &&
+      state.matchRooms.length === 0 &&
+      !state.matchRoomsLoading &&
+      state.matchRoomsErrorText === null
+    ) {
+      void loadMatchRooms()
+    }
+
     renderLobby()
     syncUrlHash()
   }
@@ -3918,6 +3985,23 @@ export function createLobbyFlowController(
     state.adminActiveMissions = result.activeMissions
     state.adminStagedMissions = result.stagedMissions
     state.adminMissionsErrorText = null
+    render()
+  }
+
+  async function loadMatchRooms(): Promise<void> {
+    if (!options.onMatchRoomsLoad) return
+    state.matchRoomsLoading = true
+    state.matchRoomsErrorText = null
+    render()
+    const result = await options.onMatchRoomsLoad()
+    state.matchRoomsLoading = false
+    if (!result.ok) {
+      state.matchRoomsErrorText = result.message
+      render()
+      return
+    }
+    state.matchRooms = result.rooms
+    state.matchRoomsErrorText = null
     render()
   }
 

@@ -14,6 +14,7 @@ import type {
   LeaderboardsSnapshot,
   MatchStake,
   MissionTemplateInput,
+  MatchRoomSnapshot,
   MissionTemplateSnapshot,
   PlayerMissionProgressSnapshot,
   PlayerPublicProfileSnapshot,
@@ -146,6 +147,10 @@ export type LobbyScreenState = {
   adminMissionsErrorText: string | null
   adminMissionEditId: string | null
   adminMissionEditIsStaged: boolean
+  matchRooms: MatchRoomSnapshot[]
+  matchRoomsLoading: boolean
+  matchRoomsErrorText: string | null
+  adminMatchRoomEdit: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean } | 'new' | null
   privateRoomsCreatePopupOpen: boolean
   privateRoomsTab: 'all' | 'mine'
   privateRooms: PrivateRoomSnapshot[]
@@ -268,6 +273,10 @@ export type RenderLobbyScreenOptions = {
   onAdminMissionActiveToggle: (missionId: string, isActive: boolean) => void
   onAdminMissionDelete: (missionId: string) => void
   onAdminMissionEdit: (missionId: string, isStaged?: boolean) => void
+  onAdminMatchRoomEditStart: (room: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean } | null) => void
+  onAdminMatchRoomEditCancel: () => void
+  onAdminMatchRoomSubmit: (room: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean }) => void
+  onAdminMatchRoomDelete: (stakeAmount: number) => void
   onPrivateRoomsOpen: () => void
   onPrivateRoomsClose: () => void
   onPrivateRoomsTabChange: (tab: 'all' | 'mine') => void
@@ -1400,20 +1409,44 @@ function renderStakeSection(
   selectedStake: MatchStake,
   canStartSearch: boolean,
   isSearching: boolean,
+  matchRooms: MatchRoomSnapshot[],
+  playerLevel: number,
+  matchRoomsLoading: boolean,
 ): string {
-  const stakeCards = MATCH_STAKE_CARDS.map((card) => {
-    const isSelected = isSearching && card.stake === selectedStake
-    const isDisabled = !canStartSearch
+  const rooms = matchRooms.filter((r) => r.isEnabled)
+
+  if (matchRoomsLoading) {
+    return `
+      <div style="margin-bottom:16px;text-align:center;color:rgba(255,255,255,0.35);font-size:14px;padding:32px 0;">
+        Зареждане на масите...
+      </div>
+    `
+  }
+
+  if (rooms.length === 0) {
+    return `
+      <div style="margin-bottom:16px;text-align:center;color:rgba(255,255,255,0.35);font-size:14px;padding:32px 0;">
+        Няма активни стаи в момента.
+      </div>
+    `
+  }
+
+  const stakeCards = rooms.map((room) => {
+    const isLocked = playerLevel < room.minLevel
+    const isSelected = isSearching && room.stakeAmount === selectedStake
+    const isDisabled = !canStartSearch || isLocked
 
     return `
       <button
         type="button"
-        data-lobby-stake-card="${card.stake}"
+        data-lobby-stake-card="${room.stakeAmount}"
         ${isDisabled ? 'disabled' : ''}
         style="
+          flex: 0 0 calc(20% - 10px);
+          min-width:180px;
           position:relative;
           background:#000000;
-          border: 1px solid ${isSelected ? '#c8940e' : 'rgba(212,165,32,0.72)'};
+          border: 1px solid ${isSelected ? '#c8940e' : isLocked ? 'rgba(255,255,255,0.35)' : 'rgba(212,165,32,0.72)'};
           border-radius:12px;
           padding:16px 14px 14px;
           cursor:${isDisabled ? 'default' : 'pointer'};
@@ -1421,16 +1454,17 @@ function renderStakeSection(
           overflow:hidden;
           transition:border-color 0.15s, background 0.15s, box-shadow 0.15s;
           box-shadow: ${isSelected ? '0 0 0 1px rgba(200,148,14,0.3), 0 8px 24px rgba(0,0,0,0.4)' : '0 4px 16px rgba(0,0,0,0.3)'};
-          opacity:${isDisabled && !isSelected ? '0.7' : '1'};
+          opacity:${isLocked ? '0.72' : isDisabled && !isSelected ? '0.7' : '1'};
         "
       >
-        <img src="/assets/lobby/spade-watermark.png" alt=""
-          style="
-            position:absolute; bottom:8px; right:18px;
-            width:82px; height:97px; display:block; object-fit:contain;
-            opacity:1;
-            pointer-events:none;
-          ">
+        ${!isLocked ? `
+          <img src="/assets/lobby/spade-watermark.png" alt=""
+            style="
+              position:absolute; bottom:8px; right:18px;
+              width:82px; height:97px; display:block; object-fit:contain;
+              opacity:1; pointer-events:none;
+            ">
+        ` : ''}
 
         ${isSelected ? `
           <div style="
@@ -1440,33 +1474,43 @@ function renderStakeSection(
             font-size:9px; font-weight:900; text-transform:uppercase; letter-spacing:0.06em;
             color:#000000;
           ">ИЗБРАНО ★</div>
+        ` : isLocked ? `
+          <div style="position:absolute; top:10px; right:10px; font-size:20px; pointer-events:none; z-index:2; line-height:1;">🔒</div>
+          <div style="
+            position:absolute; bottom:10px; right:10px;
+            background:linear-gradient(135deg, #d4a520 0%, #a07010 100%);
+            border-radius:8px; padding:8px 14px;
+            text-align:center; pointer-events:none; z-index:2;
+          ">
+            <div style="font-size:9px; font-weight:900; text-transform:uppercase; letter-spacing:0.1em; color:rgba(0,0,0,0.65); margin-bottom:3px;">Ниво за вход</div>
+            <div style="font-size:22px; font-weight:900; color:#000000; line-height:1;">${room.minLevel}</div>
+          </div>
         ` : ''}
 
         <div style="display:flex; align-items:center; justify-content:flex-start; gap:16px; position:relative; z-index:1;">
           <div>
             <div style="font-size:10px; font-weight:700; color:rgba(255,255,255,0.5); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">Награда</div>
             <div style="display:flex; align-items:center; gap:5px; margin-bottom:12px;">
-              <span style="font-size:22px; font-weight:900; color:#d4a520; line-height:1;">${formatAmount(card.prizeAmount)}</span>
-              <img src="/assets/lobby/icon-coin.png" alt="" style="height:18px;">
+              <span style="font-size:22px; font-weight:900; color:${isLocked ? 'rgba(255,255,255,0.55)' : '#d4a520'}; line-height:1;">${formatAmount(room.prizeAmount)}</span>
+              <img src="/assets/lobby/icon-coin.png" alt="" style="height:18px;${isLocked ? 'filter:grayscale(1);opacity:0.55;' : ''}">
             </div>
 
             <div style="font-size:10px; font-weight:700; color:rgba(255,255,255,0.5); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">Вход</div>
             <div style="display:flex; align-items:center; gap:5px;">
-              <span style="font-size:18px; font-weight:400; color:#ffffff; line-height:1;">${formatAmount(card.stake)}</span>
-              <img src="/assets/lobby/icon-coin.png" alt="" style="height:15px;">
+              <span style="font-size:18px; font-weight:400; color:${isLocked ? 'rgba(255,255,255,0.55)' : '#ffffff'}; line-height:1;">${formatAmount(room.stakeAmount)}</span>
+              <img src="/assets/lobby/icon-coin.png" alt="" style="height:15px;${isLocked ? 'filter:grayscale(1);opacity:0.55;' : ''}">
             </div>
           </div>
 
-          <div style="
-            flex-shrink:0;
-            width:58px; height:58px;
-            border-radius:10px;
-            background:linear-gradient(135deg, #f4c95b 0%, #c98f13 100%);
-            display:flex; align-items:center; justify-content:center;
-            font-size:11px; font-weight:900; color:#000000;
-            text-transform:uppercase; letter-spacing:0.05em;
-            pointer-events:none;
-          ">Играй</div>
+          ${!isLocked ? `
+            <div style="
+              flex-shrink:0; width:58px; height:58px; border-radius:10px;
+              background:linear-gradient(135deg, #f4c95b 0%, #c98f13 100%);
+              display:flex; align-items:center; justify-content:center;
+              font-size:11px; font-weight:900; color:#000000;
+              text-transform:uppercase; letter-spacing:0.05em; pointer-events:none;
+            ">Играй</div>
+          ` : ''}
         </div>
 
       </button>
@@ -1488,10 +1532,12 @@ function renderStakeSection(
         <div style="flex:1; height:2px; background:linear-gradient(90deg, #d4a520 0%, #000000 100%);"></div>
       </div>
 
-      <div style="
-        display:grid;
-        grid-template-columns:repeat(5, minmax(0, 1fr));
+      <div data-lobby-stakes-scroll="1" style="
+        display:flex;
+        flex-wrap:nowrap;
         gap:12px;
+        overflow-x:auto;
+        padding-bottom:6px;
       ">
         ${stakeCards}
       </div>
@@ -2959,6 +3005,80 @@ function renderAdminPanel(state: LobbyScreenState): string {
     </section>
 
     <section style="margin-top:28px;">
+      <div style="display:flex;align-items:center;gap:12px;border-bottom:1px solid rgba(52,211,153,0.2);padding-bottom:10px;margin-bottom:20px;">
+        <div style="font-size:16px;font-weight:900;color:#34d399;letter-spacing:0.04em;text-transform:uppercase;">Стаи за мач</div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.45);font-weight:500;">Вход, награда и минимално ниво за влизане.</div>
+      </div>
+
+      ${state.matchRoomsLoading ? `
+        <div style="color:#34d399;font-size:13px;font-weight:800;margin-bottom:16px;">Зареждане...</div>
+      ` : state.matchRoomsErrorText ? `
+        <div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;margin-bottom:14px;">${escapeHtml(state.matchRoomsErrorText)}</div>
+      ` : ''}
+
+      <div style="display:grid;gap:8px;margin-bottom:14px;max-width:720px;">
+        ${state.matchRooms.length === 0 && !state.matchRoomsLoading ? `
+          <div style="color:rgba(255,255,255,0.35);font-size:13px;font-weight:700;padding:8px 0;">Няма създадени стаи.</div>
+        ` : state.matchRooms.map((room) => `
+          <div style="display:flex;align-items:center;gap:10px;border:1px solid rgba(52,211,153,${room.isEnabled ? '0.4' : '0.12'});border-radius:8px;background:rgba(10,30,20,${room.isEnabled ? '0.5' : '0.2'});padding:10px 14px;">
+            <div style="flex:1;min-width:0;display:flex;align-items:center;gap:20px;flex-wrap:wrap;">
+              <div style="font-size:13px;font-weight:800;color:${room.isEnabled ? '#f8fafc' : 'rgba(255,255,255,0.45)'};">
+                Вход: ${formatAmount(room.stakeAmount)}
+              </div>
+              <div style="font-size:12px;color:rgba(255,255,255,0.6);">Награда: ${formatAmount(room.prizeAmount)}</div>
+              <div style="font-size:12px;color:rgba(255,255,255,0.6);">Мин. ниво: ${room.minLevel}</div>
+              ${!room.isEnabled ? `<span style="font-size:10px;font-weight:900;color:rgba(255,255,255,0.35);background:rgba(255,255,255,0.06);border-radius:4px;padding:2px 7px;letter-spacing:0.06em;">ИЗКЛЮЧЕНА</span>` : ''}
+            </div>
+            <button type="button" data-admin-room-edit="${room.stakeAmount}" style="height:30px;padding:0 10px;border:1px solid rgba(52,211,153,0.35);border-radius:6px;background:transparent;color:rgba(52,211,153,0.9);font-size:11px;font-weight:800;cursor:pointer;">Редакция</button>
+            <button type="button" data-admin-room-delete="${room.stakeAmount}" style="height:30px;padding:0 10px;border:1px solid rgba(248,113,113,0.28);border-radius:6px;background:rgba(127,29,29,0.28);color:#fca5a5;font-size:11px;font-weight:800;cursor:pointer;">Изтрий</button>
+          </div>
+        `).join('')}
+      </div>
+
+      ${state.adminMatchRoomEdit === null ? `
+        <div>
+          <button type="button" data-admin-room-new="1" style="height:38px;padding:0 14px;border:1px solid rgba(52,211,153,0.48);border-radius:8px;background:#050505;color:#34d399;font-size:13px;font-weight:900;cursor:pointer;">+ Добави стая</button>
+        </div>
+      ` : (() => {
+        const edit = state.adminMatchRoomEdit
+        const isNew = edit === 'new'
+        const room = isNew ? null : edit
+        return `
+          <form data-admin-room-form="1" style="border:1px solid rgba(52,211,153,0.30);border-radius:8px;background:#050505;padding:16px;display:grid;gap:12px;max-width:720px;">
+            <div style="font-size:15px;font-weight:900;color:#34d399;">${isNew ? 'Нова стая' : `Редакция — вход: ${formatAmount(room!.stakeAmount)}`}</div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+              <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(52,211,153,0.8);">
+                Вход (жълтици)
+                <input name="stakeAmount" type="number" min="1" value="${room?.stakeAmount ?? ''}" ${!isNew ? 'readonly' : 'data-admin-room-stake-input="1"'} style="height:40px;border-radius:8px;border:1px solid rgba(52,211,153,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;${!isNew ? 'opacity:0.55;cursor:not-allowed;' : ''}">
+              </label>
+              <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(52,211,153,0.8);">
+                Награда (жълтици)
+                <input name="prizeAmount" type="number" min="1" value="${room?.prizeAmount ?? ''}" ${isNew ? 'data-admin-room-prize-input="1"' : ''} style="height:40px;border-radius:8px;border:1px solid rgba(52,211,153,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
+              </label>
+              <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(52,211,153,0.8);">
+                Мин. ниво
+                <input name="minLevel" type="number" min="1" max="100" value="${room?.minLevel ?? 1}" style="height:40px;border-radius:8px;border:1px solid rgba(52,211,153,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
+              </label>
+              <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(52,211,153,0.8);">
+                Активна
+                <select name="isEnabled" style="height:40px;border-radius:8px;border:1px solid rgba(52,211,153,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
+                  <option value="1" ${(room?.isEnabled ?? true) ? 'selected' : ''}>Да</option>
+                  <option value="0" ${!(room?.isEnabled ?? true) ? 'selected' : ''}>Не</option>
+                </select>
+              </label>
+            </div>
+
+            <div style="display:flex;gap:10px;">
+              <button type="submit" style="height:40px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#34d399 0%,#059669 100%);color:#000000;font-size:13px;font-weight:900;cursor:pointer;">Запази</button>
+              <button type="button" data-admin-room-form-cancel="1" style="height:40px;padding:0 14px;border:1px solid rgba(255,255,255,0.18);border-radius:8px;background:transparent;color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;cursor:pointer;">Откажи</button>
+            </div>
+          </form>
+        `
+      })()}
+    </section>
+
+    <section style="margin-top:28px;">
       <div style="display:flex;align-items:center;gap:12px;border-bottom:1px solid rgba(212,165,32,0.2);padding-bottom:10px;margin-bottom:20px;">
         <div style="font-size:16px;font-weight:900;color:#d4a520;letter-spacing:0.04em;text-transform:uppercase;">Ежедневни награди</div>
         <div style="font-size:12px;color:rgba(255,255,255,0.45);font-weight:500;">Играчите вземат по 1 на ден · рестартира в 00:00</div>
@@ -4171,6 +4291,7 @@ export function renderLobbyScreen(
   const profileName = state.displayName.trim() || 'Играч'
 
   const savedScrollTop = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')?.scrollTop ?? 0
+  const savedStakesScrollLeft = root.querySelector<HTMLElement>('[data-lobby-stakes-scroll="1"]')?.scrollLeft ?? -1
 
   root.innerHTML = `
     <div
@@ -4258,7 +4379,7 @@ export function renderLobbyScreen(
               ${state.profile.profileId !== null
                 ? renderHeroSection(profileName, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level)
                 : renderGuestHeroCard(state.signupBonusYellowCoins ?? 0)}
-              ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching)}
+              ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading)}
               ${renderBottomSection(state.lobbyPackages, state.profile.profileId !== null, state.dailyMissionsUnclaimedCount)}
             `}
           ${renderFooter(state.onlinePlayersCount)}
@@ -4713,6 +4834,55 @@ export function renderLobbyScreen(
         rewardYellowCoins,
         isStaged,
       })
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-room-edit]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const stakeAmount = Number(btn.dataset.adminRoomEdit ?? 0)
+      const room = state.matchRooms.find((r) => r.stakeAmount === stakeAmount)
+      if (room) options.onAdminMatchRoomEditStart({ stakeAmount: room.stakeAmount, minLevel: room.minLevel, prizeAmount: room.prizeAmount, isEnabled: room.isEnabled })
+    })
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-admin-room-new="1"]')
+    ?.addEventListener('click', () => {
+      options.onAdminMatchRoomEditStart(null)
+    })
+
+  root.querySelector<HTMLButtonElement>('[data-admin-room-form-cancel="1"]')
+    ?.addEventListener('click', () => {
+      options.onAdminMatchRoomEditCancel()
+    })
+
+  root.querySelector<HTMLInputElement>('[data-admin-room-stake-input="1"]')
+    ?.addEventListener('input', (e) => {
+      const stake = Number((e.currentTarget as HTMLInputElement).value)
+      const prizeInput = root.querySelector<HTMLInputElement>('[data-admin-room-prize-input="1"]')
+      if (!prizeInput || stake <= 0) return
+      const multiplier = stake >= 100_000 ? 1.8 : stake >= 50_000 ? 1.7 : 1.6
+      prizeInput.value = String(Math.round((stake * multiplier) / 1000) * 1000)
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-room-delete]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const stakeAmount = Number(btn.dataset.adminRoomDelete ?? 0)
+      if (stakeAmount > 0 && confirm(`Сигурен ли си, че искаш да изтриеш стаята с вход ${formatAmount(stakeAmount)}?`)) {
+        options.onAdminMatchRoomDelete(stakeAmount)
+      }
+    })
+  })
+
+  root.querySelector<HTMLFormElement>('[data-admin-room-form="1"]')
+    ?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const form = event.currentTarget as HTMLFormElement
+      const data = new FormData(form)
+      const stakeAmount = Number(data.get('stakeAmount') ?? 0)
+      const prizeAmount = Number(data.get('prizeAmount') ?? 0)
+      const minLevel = Number(data.get('minLevel') ?? 1)
+      const isEnabled = String(data.get('isEnabled') ?? '1') === '1'
+      if (stakeAmount <= 0 || prizeAmount <= 0 || minLevel < 1) return
+      options.onAdminMatchRoomSubmit({ stakeAmount, minLevel, prizeAmount, isEnabled })
     })
 
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-admin-package-delete]').forEach((button) => {
@@ -5681,6 +5851,26 @@ export function renderLobbyScreen(
   const newScrollEl = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')
   if (newScrollEl && savedScrollTop > 0) {
     newScrollEl.scrollTop = savedScrollTop
+  }
+
+  const stakesScrollEl = root.querySelector<HTMLElement>('[data-lobby-stakes-scroll="1"]')
+  if (stakesScrollEl) {
+    if (savedStakesScrollLeft >= 0) {
+      stakesScrollEl.scrollLeft = savedStakesScrollLeft
+    } else {
+      const playerLevel = state.profile.level ?? 1
+      const enabledRooms = state.matchRooms.filter((r) => r.isEnabled)
+      const lastAccessibleIndex = enabledRooms.reduce((best, room, i) => playerLevel >= room.minLevel ? i : best, -1)
+      if (lastAccessibleIndex >= 4) {
+        const cards = stakesScrollEl.querySelectorAll<HTMLElement>('[data-lobby-stake-card]')
+        const targetCard = cards[lastAccessibleIndex - 4]
+        if (targetCard) {
+          const containerRect = stakesScrollEl.getBoundingClientRect()
+          const cardRect = targetCard.getBoundingClientRect()
+          stakesScrollEl.scrollLeft = cardRect.left - containerRect.left
+        }
+      }
+    }
   }
 
   root.querySelector<HTMLFormElement>('[data-support-send-form="1"]')

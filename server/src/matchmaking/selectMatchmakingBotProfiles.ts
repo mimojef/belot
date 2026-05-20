@@ -36,6 +36,7 @@ type SelectMatchmakingBotProfilesOptions = {
   count: number
   selectionSeed: string
   excludedProfileIds?: readonly ProfileId[]
+  minLevel?: number
 }
 
 function hashStringToUint32(value: string): number {
@@ -160,6 +161,7 @@ export function selectMatchmakingBotProfiles(
     count,
     selectionSeed,
     excludedProfileIds = [],
+    minLevel = 1,
   } = options
   const targetCount = Math.max(0, Math.trunc(count))
 
@@ -170,7 +172,7 @@ export function selectMatchmakingBotProfiles(
   const nextRandom = createSeededRandom(selectionSeed)
   const normalizedExcludedProfileIds = [...excludedProfileIds]
   const dbCandidates =
-    listEligibleBotProfilesFromDb(stake, normalizedExcludedProfileIds)?.map(mapDbProfile) ?? []
+    listEligibleBotProfilesFromDb(stake, normalizedExcludedProfileIds, minLevel)?.map(mapDbProfile) ?? []
   const selectedDbProfiles = selectWithoutReplacement(
     dbCandidates,
     targetCount,

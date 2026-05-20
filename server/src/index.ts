@@ -29,7 +29,8 @@ import { createDailyRewardsStore } from './db/dailyRewardsStore.js'
 import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
-import { createMatchEconomyStore } from './db/matchEconomyStore.js'
+import { createMatchEconomyStore, setMatchPrizeResolver } from './db/matchEconomyStore.js'
+import { createMatchRoomsStore } from './db/matchRoomsStore.js'
 import { createPlayerProgressStore } from './db/playerProgressStore.js'
 import { createTableExitPenaltyStore } from './db/tableExitPenaltyStore.js'
 import { createYellowCoinGiftStore } from './db/yellowCoinGiftStore.js'
@@ -77,6 +78,7 @@ import type { MatchmakingState } from './matchmaking/matchmakingState.js'
 import {
   MATCHMAKING_WAIT_MS,
   SUPPORTED_MATCH_STAKES,
+  setSupportedMatchStakes,
   type MatchStake,
 } from './matchmaking/matchmakingTypes.js'
 import { removeQueueEntryByConnectionId } from './matchmaking/removeQueueEntryByConnectionId.js'
@@ -170,9 +172,11 @@ const tableExitPenaltyStore = await createTableExitPenaltyStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
 )
-const matchEconomyStore = await createMatchEconomyStore(
-  databaseBootstrap.databaseFilePath,
-)
+const matchRoomsStore = await createMatchRoomsStore(databaseBootstrap.databaseFilePath)
+setSupportedMatchStakes(matchRoomsStore.getEnabledStakes())
+setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
+
+const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databaseFilePath)
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
 const supportStore = await createSupportStore(databaseBootstrap.databaseFilePath)
 
@@ -1062,6 +1066,7 @@ function sendMatchmakingStatusToConnection(
     stake,
     count: Math.max(0, MATCH_PLAYERS_REQUIRED - searchingEntries.length),
     selectionSeed: createMatchmakingBotSelectionSeed(stake, searchingEntries),
+    minLevel: matchRoomsStore.getRoom(stake)?.minLevel ?? 1,
   }).map((profile) => profile.identity.displayName)
 
   safeSendToConnection(connectionId, {
@@ -3421,6 +3426,72 @@ async function handleAdminDailyRewardsRequest(
   return true
 }
 
+async function handlePublicRoomsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/rooms' || req.method !== 'GET') return false
+  sendJsonResponse(res, 200, { ok: true, rooms: matchRoomsStore.listRooms() })
+  return true
+}
+
+async function handleAdminMatchRoomsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const deleteMatch = /^\/api\/admin\/rooms\/(\d+)$/.exec(pathname)
+
+  if (pathname !== '/api/admin/rooms' && deleteMatch === null) return false
+
+  const session = authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))
+  if (!session || session.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
+    return true
+  }
+
+  if (pathname === '/api/admin/rooms' && req.method === 'GET') {
+    sendJsonResponse(res, 200, { ok: true, rooms: matchRoomsStore.listRooms() })
+    return true
+  }
+
+  if (pathname === '/api/admin/rooms' && req.method === 'POST') {
+    const body = await readJsonRequestBody(req)
+    const stakeAmount = getNumberField(body, 'stakeAmount') ?? 0
+    const minLevel = getNumberField(body, 'minLevel') ?? 1
+    const prizeAmount = getNumberField(body, 'prizeAmount') ?? 0
+    const isEnabled = body['isEnabled'] !== false
+
+    const result = matchRoomsStore.upsertRoom({ stakeAmount, minLevel, prizeAmount, isEnabled })
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    setSupportedMatchStakes(matchRoomsStore.getEnabledStakes())
+    setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
+    sendJsonResponse(res, 200, { ok: true, room: result.room, rooms: matchRoomsStore.listRooms() })
+    return true
+  }
+
+  if (deleteMatch !== null && req.method === 'DELETE') {
+    const stakeAmount = Number(deleteMatch[1])
+    const deleted = matchRoomsStore.deleteRoom(stakeAmount)
+    if (!deleted) {
+      sendJsonResponse(res, 404, { ok: false, message: 'Стаята не беше намерена.' })
+      return true
+    }
+    setSupportedMatchStakes(matchRoomsStore.getEnabledStakes())
+    setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
+    sendJsonResponse(res, 200, { ok: true, rooms: matchRoomsStore.listRooms() })
+    return true
+  }
+
+  sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+  return true
+}
+
 async function handleSupportRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -3787,6 +3858,14 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminDailyRewardsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handlePublicRoomsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminMatchRoomsRequest(req, res, requestUrl.pathname)) {
     return
   }
 
@@ -4443,6 +4522,23 @@ wsServer.on('connection', (socket, request) => {
           playerId: latestConnection.playerId ?? profileId,
         }
 
+        const room = matchRoomsStore.getRoom(message.stake)
+        if (!room || !room.isEnabled) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Тази стая не е достъпна.',
+          })
+          return
+        }
+
+        if (publicProfile.level < room.minLevel) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: `Тази стая изисква минимално ниво ${room.minLevel}. Твоето ниво е ${publicProfile.level}.`,
+          })
+          return
+        }
+
         if (!matchEconomyStore.hasEnoughBalance(profileId, message.stake)) {
           const existingEntry = getQueueEntryByConnectionId(
             matchmakingState.queueEntries,
@@ -4484,6 +4580,7 @@ wsServer.on('connection', (socket, request) => {
               existingEntry.stake,
               searchingEntries,
             ),
+            minLevel: matchRoomsStore.getRoom(existingEntry.stake)?.minLevel ?? 1,
           }).map((profile) => profile.identity.displayName)
 
           safeSendToConnection(connection.id, {
@@ -4543,6 +4640,7 @@ wsServer.on('connection', (socket, request) => {
             queuedEntryAfterStakeCollection.stake,
             searchingEntries,
           ),
+          minLevel: matchRoomsStore.getRoom(queuedEntryAfterStakeCollection.stake)?.minLevel ?? 1,
         }).map((profile) => profile.identity.displayName)
 
         safeSendToConnection(connection.id, {

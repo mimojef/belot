@@ -1,7 +1,14 @@
 export type Seat = 'bottom' | 'right' | 'top' | 'left'
 export type Team = 'A' | 'B'
 export type RoomStatus = 'waiting' | 'playing' | 'finished'
-export type MatchStake = 5000 | 8000 | 10000 | 15000 | 20000
+export type MatchStake = number
+
+export type MatchRoomSnapshot = {
+  stakeAmount: number
+  minLevel: number
+  prizeAmount: number
+  isEnabled: boolean
+}
 
 export type ClientBidAction =
   | { type: 'pass' }

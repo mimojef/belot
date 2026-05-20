@@ -28,6 +28,7 @@ import {
   type LeaderboardsSnapshot,
   type MissionTemplateInput,
   type MissionTemplateSnapshot,
+  type MatchRoomSnapshot,
   type PlayerMissionProgressSnapshot,
   type PlayerPublicProfileSnapshot,
   type SupportMessageSnapshot,
@@ -1873,6 +1874,59 @@ async function deleteAdminMission(
   }
 }
 
+type MatchRoomsApiResponse = { ok: boolean; rooms?: MatchRoomSnapshot[]; message?: string }
+
+async function loadMatchRooms(): Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/rooms`, { credentials: 'include' })
+    const data = (await response.json()) as MatchRoomsApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.rooms)) {
+      return { ok: false, message: data.message ?? 'Стаите не бяха заредени.' }
+    }
+    return { ok: true, rooms: data.rooms }
+  } catch {
+    return { ok: false, message: 'Няма връзка.' }
+  }
+}
+
+async function upsertAdminMatchRoom(
+  room: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean },
+): Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/rooms`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(room),
+    })
+    const data = (await response.json()) as MatchRoomsApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.rooms)) {
+      return { ok: false, message: data.message ?? 'Записът не беше успешен.' }
+    }
+    return { ok: true, rooms: data.rooms }
+  } catch {
+    return { ok: false, message: 'Няма връзка.' }
+  }
+}
+
+async function deleteAdminMatchRoom(
+  stakeAmount: number,
+): Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/rooms/${stakeAmount}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as MatchRoomsApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.rooms)) {
+      return { ok: false, message: data.message ?? 'Изтриването не беше успешно.' }
+    }
+    return { ok: true, rooms: data.rooms }
+  } catch {
+    return { ok: false, message: 'Няма връзка.' }
+  }
+}
+
 lobby = createLobbyFlowController({
   root: rootElement,
   joinMatchmaking: (stake, displayName) => {
@@ -1963,6 +2017,9 @@ lobby = createLobbyFlowController({
   onAdminMissionSubmit: (input) => submitAdminMission(input),
   onAdminMissionActiveToggle: (missionId, isActive) => setAdminMissionActive(missionId, isActive),
   onAdminMissionDelete: (missionId) => deleteAdminMission(missionId),
+  onMatchRoomsLoad: () => loadMatchRooms(),
+  onAdminMatchRoomUpsert: (room) => upsertAdminMatchRoom(room),
+  onAdminMatchRoomDelete: (stakeAmount) => deleteAdminMatchRoom(stakeAmount),
   onPrivateRoomsOpen: () => { client.requestPrivateRoomsList() },
   onPrivateRoomsClose: () => {},
   onPrivateRoomCreate: (stake, isLocked) => { client.createPrivateRoom(stake, isLocked) },

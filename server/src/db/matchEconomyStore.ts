@@ -39,16 +39,14 @@ type WalletRow = {
   yellow_coins_balance: number
 }
 
-const MATCH_PRIZE_BY_STAKE = new Map<number, number>([
-  [5_000, 8_000],
-  [8_000, 12_000],
-  [10_000, 15_000],
-  [15_000, 22_000],
-  [20_000, 30_000],
-])
+let getPrizeForStake: (stakeAmount: number) => number | null = () => null
+
+export function setMatchPrizeResolver(resolver: (stakeAmount: number) => number | null): void {
+  getPrizeForStake = resolver
+}
 
 function getPrizeAmount(stakeAmount: number): number {
-  return MATCH_PRIZE_BY_STAKE.get(stakeAmount) ?? stakeAmount
+  return getPrizeForStake(stakeAmount) ?? stakeAmount
 }
 
 type MatchEconomyEntryType = 'stake_debit' | 'stake_refund' | 'winner_payout'
@@ -128,7 +126,11 @@ function getWinningProfileIds(room: ServerRoom, winnerTeam: Team): ProfileId[] {
 
 export async function createMatchEconomyStore(
   databaseFilePath: string,
+  options: { getPrize?: (stakeAmount: number) => number | null } = {},
 ): Promise<MatchEconomyStore> {
+  if (options.getPrize) {
+    setMatchPrizeResolver(options.getPrize)
+  }
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
     open: true,

@@ -8,7 +8,7 @@ import type {
   Seat,
 } from '../core/serverTypes.js'
 
-export type MatchStake = 5000 | 8000 | 10000 | 15000 | 20000
+export type MatchStake = number
 
 export type MatchmakingStatus =
   | 'searching'
@@ -62,10 +62,9 @@ export type PendingMatchGroup = {
 
 export const MATCHMAKING_WAIT_MS = 15000
 
-export const SUPPORTED_MATCH_STAKES: MatchStake[] = [
-  5000,
-  8000,
-  10000,
-  15000,
-  20000,
-]
+// Populated at runtime from matchRoomsStore — do not rely on this at import time.
+export let SUPPORTED_MATCH_STAKES: MatchStake[] = []
+
+export function setSupportedMatchStakes(stakes: MatchStake[]): void {
+  SUPPORTED_MATCH_STAKES = stakes
+}

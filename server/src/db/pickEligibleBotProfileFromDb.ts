@@ -124,6 +124,7 @@ function mapCandidateToEligibleBotProfile(
 export function listEligibleBotProfilesFromDb(
   stake: MatchStake,
   excludedProfileIds: readonly ProfileId[] = [],
+  minLevel: number = 1,
 ): DbEligibleBotProfile[] | null {
   const sqliteModule = loadSqliteModule()
 
@@ -166,10 +167,11 @@ export function listEligibleBotProfilesFromDb(
         AND p.status = 'active'
         AND bas.stake_amount = ?
         AND pw.yellow_coins_balance >= ?
+        AND p.level >= ?
         ${excludedProfilesClause.sql}
       ORDER BY p.profile_id ASC;
     `
-    const candidateParams = [stake, stake, ...excludedProfilesClause.params]
+    const candidateParams = [stake, stake, minLevel, ...excludedProfilesClause.params]
 
     try {
       const candidates = database.prepare(candidateSql).all(
@@ -188,8 +190,9 @@ export function listEligibleBotProfilesFromDb(
 export function pickEligibleBotProfileFromDb(
   stake: MatchStake,
   excludedProfileIds: readonly ProfileId[] = [],
+  minLevel: number = 1,
 ): DbEligibleBotProfile | null {
-  const candidates = listEligibleBotProfilesFromDb(stake, excludedProfileIds)
+  const candidates = listEligibleBotProfilesFromDb(stake, excludedProfileIds, minLevel)
 
   if (!candidates) {
     return null
