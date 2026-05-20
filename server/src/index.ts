@@ -3042,8 +3042,9 @@ async function handleChatRequest(
   pathname: string,
 ): Promise<boolean> {
   const messagesMatch = /^\/api\/chat\/([^/]+)\/messages$/.exec(pathname)
+  const readMatch = /^\/api\/chat\/([^/]+)\/read$/.exec(pathname)
 
-  if (pathname !== '/api/chat/conversations' && messagesMatch === null) {
+  if (pathname !== '/api/chat/conversations' && messagesMatch === null && readMatch === null) {
     return false
   }
 
@@ -3077,6 +3078,13 @@ async function handleChatRequest(
       ok: true,
       conversations: chatStore.listConversations(profileId, onlineProfileIds),
     })
+    return true
+  }
+
+  if (readMatch !== null && req.method === 'POST') {
+    const friendshipId = decodeURIComponent(readMatch[1]).trim()
+    chatStore.markConversationRead(profileId, friendshipId)
+    sendJsonResponse(res, 200, { ok: true })
     return true
   }
 

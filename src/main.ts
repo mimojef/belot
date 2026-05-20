@@ -1949,6 +1949,12 @@ lobby = createLobbyFlowController({
   onGiftCoinsSubmit: (friendshipId, amount) => submitGiftCoins(friendshipId, amount),
   onChatConversationsLoad: () => loadChatConversations(),
   onChatMessagesLoad: (friendshipId) => loadChatMessages(friendshipId),
+  onChatMarkRead: async (friendshipId) => {
+    await fetch(`${getApiBaseUrl()}/api/chat/${encodeURIComponent(friendshipId)}/read`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+  },
   onChatSend: (friendshipId, body) => sendChatMessage(friendshipId, body),
   onLogout: () => submitLogout(),
   onDailyMissionsLoad: () => loadDailyMissions(),

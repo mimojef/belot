@@ -78,6 +78,7 @@ export type ChatConversationSnapshot = {
   friend: PlayerPublicProfileSnapshot
   lastMessage: ChatMessageSnapshot | null
   updatedAt: string
+  unreadCount: number
 }
 
 export type LeaderboardCategory = 'balance' | 'rank' | 'wins' | 'rating'

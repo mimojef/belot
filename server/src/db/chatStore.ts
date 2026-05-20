@@ -22,6 +22,7 @@ export type ChatConversationSnapshot = {
   friend: PlayerPublicProfileSnapshot
   lastMessage: ChatMessageSnapshot | null
   updatedAt: string
+  unreadCount: number
 }
 
 export type ChatStore = {
@@ -43,6 +44,7 @@ export type ChatStore = {
         messages: ChatMessageSnapshot[]
       }
     | { ok: false; message: string }
+  markConversationRead: (profileId: ProfileId, friendshipId: string) => void
   close: () => void
 }
 
@@ -186,6 +188,35 @@ export async function createChatStore(
     WHERE friendship_id = ?;
   `)
 
+  const selectUnreadCountStatement = database.prepare(`
+    SELECT COUNT(*) as cnt
+    FROM friend_chat_messages
+    WHERE friendship_id = ?
+      AND sender_profile_id != ?
+      AND deleted_at IS NULL
+      AND created_at > COALESCE(
+        (SELECT last_read_at FROM chat_conversation_reads WHERE profile_id = ? AND friendship_id = ?),
+        '1970-01-01'
+      );
+  `)
+
+  const upsertReadStatement = database.prepare(`
+    INSERT INTO chat_conversation_reads (profile_id, friendship_id, last_read_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT (profile_id, friendship_id)
+    DO UPDATE SET last_read_at = CURRENT_TIMESTAMP;
+  `)
+
+  function getUnreadCount(profileId: ProfileId, friendshipId: string): number {
+    const row = selectUnreadCountStatement.get(
+      friendshipId,
+      profileId,
+      profileId,
+      friendshipId,
+    ) as { cnt: number } | undefined
+    return row?.cnt ?? 0
+  }
+
   function createConversationSnapshot(
     friendship: FriendshipRow,
     ownProfileId: ProfileId,
@@ -214,6 +245,7 @@ export async function createChatStore(
         ? toMessageSnapshot(lastMessageRow, ownProfileId)
         : null,
       updatedAt: dbDateToUtc(lastMessageRow?.created_at ?? friendship.updated_at),
+      unreadCount: getUnreadCount(ownProfileId, friendship.friendship_id),
     }
   }
 
@@ -303,6 +335,7 @@ export async function createChatStore(
       normalizedBody,
     )
     touchFriendshipStatement.run(friendshipId)
+    upsertReadStatement.run(profileId, friendshipId)
 
     const conversation = createConversationSnapshot(friendship, profileId)
     const messagesResult = listMessages(profileId, friendshipId)
@@ -321,6 +354,10 @@ export async function createChatStore(
     }
   }
 
+  function markConversationRead(profileId: ProfileId, friendshipId: string): void {
+    upsertReadStatement.run(profileId, friendshipId)
+  }
+
   function close(): void {
     database.close()
   }
@@ -329,6 +366,7 @@ export async function createChatStore(
     listConversations,
     listMessages,
     sendMessage,
+    markConversationRead,
     close,
   }
 }

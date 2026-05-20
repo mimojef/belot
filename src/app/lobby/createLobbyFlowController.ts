@@ -214,6 +214,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; messages: ChatMessageSnapshot[] }
     | { ok: false; message: string }
   >
+  onChatMarkRead?: (friendshipId: string) => Promise<void>
   onChatSend?: (friendshipId: string, body: string) => Promise<
     | {
         ok: true
@@ -1626,6 +1627,13 @@ export function createLobbyFlowController(
       },
       onChatConversationClick: (friendshipId) => {
         void openChatConversation(friendshipId)
+      },
+      onChatMarkRead: (friendshipId) => {
+        state.chatConversations = state.chatConversations.map((c) =>
+          c.friendshipId === friendshipId ? { ...c, unreadCount: 0 } : c,
+        )
+        render()
+        void options.onChatMarkRead?.(friendshipId)
       },
       onChatSubmit: (friendshipId, body) => {
         void sendChatMessage(friendshipId, body)
@@ -3688,6 +3696,13 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'chat_message_received') {
+      const isActiveConversation = state.currentScreen === 'chat' && state.activeChatFriendshipId === message.friendshipId
+      if (!isActiveConversation) {
+        state.chatConversations = state.chatConversations.map((c) =>
+          c.friendshipId === message.friendshipId ? { ...c, unreadCount: c.unreadCount + 1 } : c,
+        )
+        render()
+      }
       void refreshChatAfterNotification(message.friendshipId)
       return true
     }

@@ -236,6 +236,7 @@ export type RenderLobbyScreenOptions = {
   onBlockLimitPopupClose: () => void
   onChatClick: () => void
   onChatConversationClick: (friendshipId: string) => void
+  onChatMarkRead: (friendshipId: string) => void
   onChatSubmit: (friendshipId: string, body: string) => void
   onPlayerCardClick: (profile: PlayerPublicProfileSnapshot) => void
   onLeaderboardPlayerClick: (profile: PlayerPublicProfileSnapshot) => void
@@ -1037,7 +1038,10 @@ function renderNav(state: LobbyScreenState): string {
             cursor:pointer;
             height:100%;
           ">
-            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <span style="position:relative;display:flex;align-items:center;flex-shrink:0;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              ${(() => { const unread = state.chatConversations.filter(c => c.unreadCount > 0).length; return unread > 0 ? `<span style="position:absolute;top:-6px;right:-8px;min-width:16px;height:16px;border-radius:8px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;">${unread}</span>` : '' })()}
+            </span>
             Чат
           </button>
         ` : ''}
@@ -2181,8 +2185,12 @@ function renderChatPanel(state: LobbyScreenState): string {
                     ${isOnline !== undefined ? `<div style="position:absolute;bottom:-2px;right:-2px;width:11px;height:11px;border-radius:50%;background:${isOnline ? '#22c55e' : '#ef4444'};border:2px solid #050505;"></div>` : ''}
                   </div>
                   <div style="min-width:0;flex:1;">
-                    <div style="font-size:14px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
-                    <div style="margin-top:4px;font-size:12px;font-weight:700;color:rgba(255,255,255,0.54);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(preview)}</div>
+                    <div style="display:flex;align-items:center;gap:6px;">
+                      <div style="font-size:14px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">${escapeHtml(displayName)}</div>
+                      ${isOnline !== undefined ? '' : ''}
+                      ${conversation.unreadCount > 0 ? `<span style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 4px;flex-shrink:0;">${conversation.unreadCount}</span>` : ''}
+                    </div>
+                    <div style="margin-top:4px;font-size:12px;font-weight:700;color:${conversation.unreadCount > 0 ? '#ffffff' : 'rgba(255,255,255,0.54)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(preview)}</div>
                   </div>
                 </button>
               `
@@ -4505,6 +4513,7 @@ export function renderLobbyScreen(
 
       if (friendshipId.length > 0) {
         options.onChatConversationClick(friendshipId)
+        options.onChatMarkRead(friendshipId)
       }
     })
   })
@@ -4519,6 +4528,7 @@ export function renderLobbyScreen(
       if (friendshipId.length > 0 && body.length > 0) {
         options.onChatSubmit(friendshipId, body)
         form.reset()
+        form.querySelector<HTMLInputElement>('input[name="message"]')?.focus()
       }
     })
   })
