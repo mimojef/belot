@@ -80,9 +80,11 @@ document.body.appendChild(friendReqNotifContainer)
 const friendRequestNotification = createFriendRequestNotification({
   container: friendReqNotifContainer,
   onAccept: async (friendshipId) => {
+    lobby?.removePendingFriendRequest(friendshipId)
     await submitFriendRequestAction(friendshipId, 'accept')
   },
   onReject: async (friendshipId) => {
+    lobby?.removePendingFriendRequest(friendshipId)
     await submitFriendRequestAction(friendshipId, 'reject')
   },
 })
@@ -1948,6 +1950,16 @@ lobby = createLobbyFlowController({
   onAdminSupportReply: (profileId, body) => sendAdminSupportReply(profileId, body),
   onAdminSupportDeleteConversation: (profileId) => archiveAdminSupportConversation(profileId),
   onSupportDeleteConversation: () => deleteUserSupportConversation(),
+  onNotifFriendRequestClick: (friendshipId) => {
+    const req = lobby?.getPendingFriendRequest(friendshipId)
+    if (!req) return
+    friendRequestNotification.showRequest({
+      friendshipId: req.friendshipId,
+      fromProfileId: req.fromProfileId,
+      fromDisplayName: req.fromDisplayName,
+      fromAvatarUrl: req.fromAvatarUrl,
+    })
+  },
 })
 
 const activeRoom = createActiveRoomFlowController({
@@ -2155,7 +2167,13 @@ client = createGameServerClient({
       return
     }
 
+    if (message.type === 'pending_friend_requests') {
+      lobby.handleServerMessage(message)
+      return
+    }
+
     if (message.type === 'friend_request_received') {
+      lobby.handleServerMessage(message)
       friendRequestNotification.showRequest({
         friendshipId: message.friendshipId,
         fromProfileId: message.fromProfileId,

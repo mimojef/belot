@@ -776,6 +776,16 @@ export type FriendRequestAcceptedMessage = {
   fromAvatarUrl: string | null
 }
 
+export type PendingFriendRequestsMessage = {
+  type: 'pending_friend_requests'
+  requests: Array<{
+    friendshipId: string
+    fromProfileId: string
+    fromDisplayName: string
+    fromAvatarUrl: string | null
+  }>
+}
+
 export type ServerMessage =
   | ConnectedMessage
   | PongMessage
@@ -812,6 +822,7 @@ export type ServerMessage =
   | ProfileLikedMessage
   | FriendRequestReceivedMessage
   | FriendRequestAcceptedMessage
+  | PendingFriendRequestsMessage
 
 type CreateGameServerClientOptions = {
   url?: string

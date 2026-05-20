@@ -567,6 +567,7 @@ export type ServerMessage =
   | ProfileLikedMessage
   | FriendRequestReceivedMessage
   | FriendRequestAcceptedMessage
+  | PendingFriendRequestsMessage
 
 export type ProfileLikedMessage = {
   type: 'profile_liked'
@@ -588,6 +589,16 @@ export type FriendRequestAcceptedMessage = {
   fromProfileId: string
   fromDisplayName: string
   fromAvatarUrl: string | null
+}
+
+export type PendingFriendRequestsMessage = {
+  type: 'pending_friend_requests'
+  requests: Array<{
+    friendshipId: string
+    fromProfileId: string
+    fromDisplayName: string
+    fromAvatarUrl: string | null
+  }>
 }
 
 export function getDisplayNameFromIdentity(

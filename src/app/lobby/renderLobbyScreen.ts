@@ -132,6 +132,7 @@ export type LobbyScreenState = {
   changePasswordPopupOpen: boolean
   changePasswordErrorText: string | null
   notificationsOpen: boolean
+  pendingFriendRequests: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   missionsPopupOpen: boolean
   dailyMissions: PlayerMissionProgressSnapshot[]
   dailyMissionsLoading: boolean
@@ -258,6 +259,7 @@ export type RenderLobbyScreenOptions = {
   onLogoutClick: () => void
   onBellClick: () => void
   onNotificationMissionsClick: () => void
+  onNotifFriendRequestClick: (friendshipId: string) => void
   onMissionsCardClick: () => void
   onMissionsPopupClose: () => void
   onMissionClaimClick: (missionId: string) => void
@@ -1124,7 +1126,7 @@ function renderNav(state: LobbyScreenState): string {
             color:rgba(255,255,255,0.65); position:relative;
           ">
             <img src="/assets/lobby/nav-icon-preview/nav-notifications-white.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain;">
-            ${state.dailyMissionsUnclaimedCount > 0 ? `<span style="
+            ${(state.dailyMissionsUnclaimedCount + state.pendingFriendRequests.length) > 0 ? `<span style="
               position:absolute; top:2px; right:0px;
               min-width:18px; height:18px; border-radius:9px;
               background:#ef4444; border:1.5px solid #0a0a0a;
@@ -1133,7 +1135,7 @@ function renderNav(state: LobbyScreenState): string {
               padding:0 4px; box-sizing:border-box;
               font-family:Inter,system-ui,sans-serif;
               pointer-events:none;
-            ">${state.dailyMissionsUnclaimedCount}</span>` : ''}
+            ">${state.dailyMissionsUnclaimedCount + state.pendingFriendRequests.length}</span>` : ''}
           </button>
           <button data-lobby-nav-logout="1" style="
             display:flex; align-items:center; gap:8px;
@@ -1597,6 +1599,8 @@ let notificationsDropdownRootEl: HTMLElement | null = null
 
 function renderNotificationsDropdown(state: LobbyScreenState): string {
   const hasMissions = state.dailyMissionsUnclaimedCount > 0
+  const hasFriendRequests = state.pendingFriendRequests.length > 0
+  const hasAny = hasMissions || hasFriendRequests
   return `
     <div data-notifications-backdrop="1" style="position:fixed;inset:0;z-index:11000;" aria-hidden="true"></div>
     <div style="
@@ -1631,11 +1635,32 @@ function renderNotificationsDropdown(state: LobbyScreenState): string {
             </div>
           </div>
         </button>
-      ` : `
+      ` : ''}
+      ${hasFriendRequests ? state.pendingFriendRequests.map((req) => `
+        <button data-notif-friend-request="${req.friendshipId}" type="button" style="
+          width:100%; background:none; border:none; cursor:pointer;
+          display:flex; align-items:center; gap:12px;
+          padding:14px 16px; text-align:left;
+          border-bottom:1px solid rgba(255,255,255,0.06);
+          transition:background 0.15s;
+        " onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background='none'">
+          <div style="
+            width:36px; height:36px; border-radius:50%; flex-shrink:0;
+            background:rgba(212,175,55,0.12); border:1.5px solid rgba(212,175,55,0.35);
+            display:flex; align-items:center; justify-content:center;
+            font-size:16px;
+          ">🤝</div>
+          <div>
+            <div style="font-size:13px; font-weight:700; color:#f8fafc; margin-bottom:2px;">Имате покана за приятелство</div>
+            <div style="font-size:12px; color:rgba(255,255,255,0.55); line-height:1.4;">${req.fromDisplayName}</div>
+          </div>
+        </button>
+      `).join('') : ''}
+      ${!hasAny ? `
         <div style="padding:24px 16px; text-align:center; color:rgba(255,255,255,0.35); font-size:13px;">
           Няма нови известия
         </div>
-      `}
+      ` : ''}
     </div>
   `
 }
@@ -1645,6 +1670,7 @@ function syncNotificationsDropdown(
   callbacks: {
     onClose: () => void
     onMissionsClick: () => void
+    onFriendRequestClick: (friendshipId: string) => void
   },
 ): void {
   if (!state.notificationsOpen) {
@@ -1667,6 +1693,11 @@ function syncNotificationsDropdown(
   notificationsDropdownRootEl
     .querySelector('[data-notifications-missions="1"]')
     ?.addEventListener('click', callbacks.onMissionsClick)
+
+  for (const btn of Array.from(notificationsDropdownRootEl.querySelectorAll<HTMLButtonElement>('[data-notif-friend-request]'))) {
+    const id = btn.getAttribute('data-notif-friend-request')!
+    btn.addEventListener('click', () => { callbacks.onFriendRequestClick(id); callbacks.onClose() })
+  }
 }
 
 let missionsPopupRootEl: HTMLElement | null = null
@@ -4714,6 +4745,7 @@ export function renderLobbyScreen(
   syncNotificationsDropdown(state, {
     onClose: options.onBellClick,
     onMissionsClick: options.onNotificationMissionsClick,
+    onFriendRequestClick: options.onNotifFriendRequestClick,
   })
 
   syncMissionsPopup(state, {

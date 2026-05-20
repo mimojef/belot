@@ -171,6 +171,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; packages: CoinPackageSnapshot[] }
     | { ok: false; message: string }
   >
+  onNotifFriendRequestClick?: (friendshipId: string) => void
   onFriendshipsLoad?: () => Promise<
     | { ok: true; friendships: FriendshipsSnapshot }
     | { ok: false; message: string }
@@ -293,6 +294,8 @@ export type LobbyFlowController = {
   resetToLobby: () => void
   refreshMissionsCount: () => void
   refreshSupportUnread: () => void
+  removePendingFriendRequest: (friendshipId: string) => void
+  getPendingFriendRequest: (friendshipId: string) => { friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null } | undefined
   handleServerMessage: (message: ServerMessage) => boolean
   navigateToShop: (noticeText: string | null) => void
 }
@@ -380,6 +383,7 @@ type InternalLobbyFlowState = {
   chatMessagesLoading: boolean
   chatErrorText: string | null
   notificationsOpen: boolean
+  pendingFriendRequests: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   missionsPopupOpen: boolean
   dailyMissions: PlayerMissionProgressSnapshot[]
   dailyMissionsLoading: boolean
@@ -557,6 +561,7 @@ function createInitialState(): InternalLobbyFlowState {
     chatMessagesLoading: false,
     chatErrorText: null,
     notificationsOpen: false,
+    pendingFriendRequests: [],
     missionsPopupOpen: false,
     dailyMissions: [],
     dailyMissionsLoading: false,
@@ -1397,6 +1402,7 @@ export function createLobbyFlowController(
       changePasswordPopupOpen: state.changePasswordPopupOpen,
       changePasswordErrorText: state.changePasswordErrorText,
       notificationsOpen: state.notificationsOpen,
+      pendingFriendRequests: state.pendingFriendRequests,
       missionsPopupOpen: state.missionsPopupOpen,
       dailyMissions: state.dailyMissions,
       dailyMissionsLoading: state.dailyMissionsLoading,
@@ -1719,6 +1725,9 @@ export function createLobbyFlowController(
       onNotificationMissionsClick: () => {
         state.notificationsOpen = false
         void openMissionsPopup()
+      },
+      onNotifFriendRequestClick: (friendshipId) => {
+        options.onNotifFriendRequestClick?.(friendshipId)
       },
       onMissionsCardClick: () => {
         void openMissionsPopup()
@@ -3545,6 +3554,26 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'pending_friend_requests') {
+      state.pendingFriendRequests = message.requests
+      render()
+      return true
+    }
+
+    if (message.type === 'friend_request_received') {
+      const alreadyExists = state.pendingFriendRequests.some((r) => r.friendshipId === message.friendshipId)
+      if (!alreadyExists) {
+        state.pendingFriendRequests = [...state.pendingFriendRequests, {
+          friendshipId: message.friendshipId,
+          fromProfileId: message.fromProfileId,
+          fromDisplayName: message.fromDisplayName,
+          fromAvatarUrl: message.fromAvatarUrl,
+        }]
+        render()
+      }
+      return false // let main.ts also handle it (show popup)
+    }
+
     if (message.type === 'error') {
       if (state.currentScreen === 'private-rooms') {
         state.privateRoomInfoText = message.message
@@ -4045,6 +4074,13 @@ export function createLobbyFlowController(
     startMatchmaking,
     resetToLobby,
     refreshMissionsCount: () => { void loadPlayerUnclaimedCount() },
+    removePendingFriendRequest: (friendshipId: string) => {
+      state.pendingFriendRequests = state.pendingFriendRequests.filter((r) => r.friendshipId !== friendshipId)
+      render()
+    },
+    getPendingFriendRequest: (friendshipId: string) => {
+      return state.pendingFriendRequests.find((r) => r.friendshipId === friendshipId)
+    },
     refreshSupportUnread: () => {
       void (async () => {
         const result = await options.onSupportUnreadLoad?.()

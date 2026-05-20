@@ -3851,6 +3851,19 @@ wsServer.on('connection', (socket, request) => {
     } else {
       displaceProfileConnections(connection.profileId, connection.id)
     }
+
+    const pendingFriendships = friendshipStore.listForProfile(connection.profileId)
+    if (pendingFriendships.incomingPending.length > 0) {
+      sendJsonMessage(socket, {
+        type: 'pending_friend_requests',
+        requests: pendingFriendships.incomingPending.map((r) => ({
+          friendshipId: r.friendshipId,
+          fromProfileId: r.profile.profileId ?? '',
+          fromDisplayName: r.profile.displayName,
+          fromAvatarUrl: r.profile.avatarUrl,
+        })),
+      })
+    }
   }
 
   socket.on('message', (raw: RawData) => {
