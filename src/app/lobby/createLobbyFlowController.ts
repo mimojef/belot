@@ -61,13 +61,14 @@ export type CreateLobbyFlowControllerOptions = {
   root: HTMLElement
   joinMatchmaking: (stake: MatchStake, displayName?: string) => void
   leaveMatchmaking: () => void
-  onMatchFound: (message: MatchFoundMessage) => void
+  onMatchFound: (message: MatchFoundMessage, stakeAlreadyShown: boolean) => void
   tryUnlockDocumentAudio?: () => void
   getAuthSession?: () => LobbyAuthSession | null
   getSignupBonusYellowCoins?: () => number
   getProfileNameChangePrice?: () => number
   getOnlinePlayersCount?: () => number
   getApiBaseUrl?: () => string
+  getIsInGame?: () => boolean
   onLoginSubmit?: (email: string, password: string) => Promise<string | null>
   onRegisterSubmit?: (
     displayName: string,
@@ -317,6 +318,7 @@ type InternalLobbyFlowState = {
   profileNameChangeSuccessAmount: number | null
   changePasswordPopupOpen: boolean
   changePasswordErrorText: string | null
+  ownLikesCount: number | null
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
   lowCoinsModalOpen: boolean
@@ -493,6 +495,7 @@ function createInitialState(): InternalLobbyFlowState {
     profileNameChangeSuccessAmount: null,
     changePasswordPopupOpen: false,
     changePasswordErrorText: null,
+    ownLikesCount: null,
     authModalMode: 'closed',
     authErrorText: null,
     lowCoinsModalOpen: false,
@@ -685,7 +688,10 @@ function createLocalProfilePreview(
   authSession: LobbyAuthSession | null,
 ): PlayerPublicProfileSnapshot {
   if (authSession !== null) {
-    return authSession.profile
+    return {
+      ...authSession.profile,
+      likesCount: state.ownLikesCount,
+    }
   }
 
   const localSeatSnapshot = getLocalSeatSnapshot(state)
@@ -1099,6 +1105,7 @@ export function createLobbyFlowController(
     pendingMatchFoundMessage = null
     clearPendingMatchFoundTimeout()
 
+    state.currentScreen = 'lobby'
     state.isSearching = false
     state.queuedPlayers = 0
     state.requiredPlayers = DEFAULT_REQUIRED_PLAYERS
@@ -1113,13 +1120,14 @@ export function createLobbyFlowController(
     const elapsed = stakeEffectStartedAt !== null ? Date.now() - stakeEffectStartedAt : null
     const remainingDelay =
       elapsed !== null ? Math.max(0, STAKE_EFFECT_VISIBLE_MS - elapsed) : 0
+    const stakeAlreadyShown = stakeEffectStartedAt !== null
 
     stakeEffectStartedAt = null
 
     if (remainingDelay > 0) {
-      setTimeout(() => options.onMatchFound(matchFoundMessage), remainingDelay)
+      setTimeout(() => options.onMatchFound(matchFoundMessage, stakeAlreadyShown), remainingDelay)
     } else {
-      options.onMatchFound(matchFoundMessage)
+      options.onMatchFound(matchFoundMessage, stakeAlreadyShown)
     }
     return true
   }
@@ -1421,6 +1429,7 @@ export function createLobbyFlowController(
       blockedPlayersErrorText: state.blockedPlayersErrorText,
       blockedPlayersLimit: state.blockedPlayersLimit,
       blockLimitPopupOpen: state.blockLimitPopupOpen,
+      isInGame: options.getIsInGame?.() ?? false,
       supportPopupOpen: state.supportPopupOpen,
       supportMessages: state.supportMessages,
       supportUnreadCount: state.supportUnreadCount,
@@ -1471,6 +1480,7 @@ export function createLobbyFlowController(
         state.profilePopupCanEdit = true
         state.profilePopupOpen = true
         render()
+        void fetchOwnLikesCount()
       },
       onProfileClose: () => {
         state.profilePopupOpen = false
@@ -1615,24 +1625,33 @@ export function createLobbyFlowController(
         void sendChatMessage(friendshipId, body)
       },
       onPlayerCardClick: (profile) => {
-        state.profilePopupProfile = state.players.find(p => p.profileId === profile.profileId) ?? profile
-        state.profilePopupCanEdit = false
+        const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId
+        const isOwn = Boolean(ownProfileId && profile.profileId === ownProfileId)
+        state.profilePopupProfile = isOwn ? null : (state.players.find(p => p.profileId === profile.profileId) ?? profile)
+        state.profilePopupCanEdit = isOwn
         state.profilePopupOpen = true
         renderPopupOnly()
-        void ensureFriendshipsLoaded()
+        if (isOwn) void fetchOwnLikesCount()
+        else void ensureFriendshipsLoaded()
       },
       onLeaderboardPlayerClick: (profile) => {
-        state.profilePopupProfile = state.players.find(p => p.profileId === profile.profileId) ?? profile
-        state.profilePopupCanEdit = false
+        const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId
+        const isOwn = Boolean(ownProfileId && profile.profileId === ownProfileId)
+        state.profilePopupProfile = isOwn ? null : (state.players.find(p => p.profileId === profile.profileId) ?? profile)
+        state.profilePopupCanEdit = isOwn
         state.profilePopupOpen = true
         renderPopupOnly()
-        void ensureFriendshipsLoaded()
+        if (isOwn) void fetchOwnLikesCount()
+        else void ensureFriendshipsLoaded()
       },
       onFriendProfileClick: (profile) => {
-        state.profilePopupProfile = state.players.find(p => p.profileId === profile.profileId) ?? profile
-        state.profilePopupCanEdit = false
+        const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId
+        const isOwn = Boolean(ownProfileId && profile.profileId === ownProfileId)
+        state.profilePopupProfile = isOwn ? null : (state.players.find(p => p.profileId === profile.profileId) ?? profile)
+        state.profilePopupCanEdit = isOwn
         state.profilePopupOpen = true
         renderPopupOnly()
+        if (isOwn) void fetchOwnLikesCount()
       },
       onFriendRequestClick: (profileId) => {
         void submitFriendRequest(profileId)
@@ -2028,6 +2047,26 @@ export function createLobbyFlowController(
       50000
     void new Audio('/audio/game-sounds/coins.mp3').play().catch(() => undefined)
     render()
+  }
+
+  async function fetchOwnLikesCount(): Promise<void> {
+    const apiBaseUrl = options.getApiBaseUrl?.() ?? ''
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/profile/me`, {
+        method: 'GET',
+        credentials: 'include',
+      })
+      if (!response.ok) return
+      const data = (await response.json()) as { ok?: boolean; profile?: { likesCount?: number | null } }
+      if (data.ok && typeof data.profile?.likesCount === 'number') {
+        state.ownLikesCount = data.profile.likesCount
+        if (state.profilePopupOpen && state.profilePopupProfile === null) {
+          render()
+        }
+      }
+    } catch {
+      // silent
+    }
   }
 
   async function submitChangePassword(
@@ -3739,7 +3778,7 @@ export function createLobbyFlowController(
         humanPlayers: 4,
         botPlayers: 0,
         shouldStartImmediately: true,
-      })
+      }, false)
       return true
     }
 

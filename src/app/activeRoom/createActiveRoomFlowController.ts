@@ -3022,7 +3022,7 @@ export function createActiveRoomFlowController(
     renderActiveRoomScreen()
   }
 
-  function enterActiveRoom(message: MatchFoundMessage): void {
+  function enterActiveRoom(message: MatchFoundMessage, stakeAlreadyShown = false): void {
     resetCuttingAnimationState()
     clearDealingAnimationState()
     clearDealNextTwoAnimationState()
@@ -3034,7 +3034,7 @@ export function createActiveRoomFlowController(
     matchEndedSoundPlayed = false
     matchEndedPrizeAnimated = false
     replayStakeEffectShown = false
-    initialStakeEffectShown = false
+    initialStakeEffectShown = stakeAlreadyShown
     clearMatchEndedCountdown()
     matchEndedCountdownSeconds = 120
     resetPlayingUiCache(playingCache)
@@ -3291,7 +3291,13 @@ export function createActiveRoomFlowController(
     if (!seatAttr) return
     const seatSnapshot = activeRoomState.seats.find((s) => s.seat === seatAttr)
     if (!seatSnapshot) return
-    showSeatProfileOverlay(seatSnapshot, () => removeSeatProfileOverlay())
+    const isOwnSeat = seatAttr === activeRoomState.seat
+    showSeatProfileOverlay(
+      seatSnapshot,
+      () => removeSeatProfileOverlay(),
+      isOwnSeat,
+      isOwnSeat ? () => removeSeatProfileOverlay() : undefined,
+    )
     options.requestPlayerProfile(activeRoomState.roomId, seatAttr)
   })
 

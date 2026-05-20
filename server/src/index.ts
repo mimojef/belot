@@ -697,6 +697,13 @@ function tryResumeRoomForConnection(
   }
 
   if (connection.currentRoomId !== null) {
+    if (connection.currentRoomId === roomId) {
+      const room = serverState.rooms[roomId] ?? null
+      const match = room ? findHumanParticipantByReconnectToken(room, reconnectToken) : null
+      if (match !== null) {
+        return { ok: true, room, seat: match.seat }
+      }
+    }
     return {
       ok: false,
       message: `Connection "${connection.id}" is already attached to room "${connection.currentRoomId}".`,
@@ -1689,6 +1696,27 @@ async function handleProfileRequest(
     sendJsonResponse(res, 401, {
       ok: false,
       message: 'Трябва да влезеш в профила си.',
+    })
+    return true
+  }
+
+  if (pathname === '/api/profile/me' && req.method === 'GET') {
+    const profileId = session.profile.profileId
+    if (!profileId) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Профилът не беше намерен.' })
+      return true
+    }
+    const fullProfile = playerProgressStore.getPublicProfile(profileId)
+    if (!fullProfile) {
+      sendJsonResponse(res, 404, { ok: false, message: 'Профилът не беше намерен.' })
+      return true
+    }
+    sendJsonResponse(res, 200, {
+      ok: true,
+      profile: {
+        ...fullProfile,
+        likesCount: likeStore.getLikesCount(profileId),
+      },
     })
     return true
   }
@@ -4357,9 +4385,11 @@ wsServer.on('connection', (socket, request) => {
         }
 
         if (latestConnection.currentRoomId !== null) {
-          throw new Error(
-            `Connection "${connection.id}" is already attached to room "${latestConnection.currentRoomId}".`,
-          )
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Вече си в активна игра.',
+          })
+          return
         }
 
         if (latestConnection.profileId === null) {

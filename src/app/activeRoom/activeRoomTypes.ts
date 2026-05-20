@@ -49,7 +49,7 @@ export type CreateActiveRoomFlowControllerOptions = {
 
 export type ActiveRoomFlowController = {
   render: () => void
-  enterActiveRoom: (message: MatchFoundMessage) => void
+  enterActiveRoom: (message: MatchFoundMessage, stakeAlreadyShown?: boolean) => void
   enterActiveRoomFromResume: (roomId: string, seat: Seat, stake: MatchStake) => void
   handleServerMessage: (message: ServerMessage) => boolean
   getResumeInfo: () => { roomId: string; reconnectToken: string } | null

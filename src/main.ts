@@ -228,7 +228,7 @@ async function readAuthResponse(response: Response): Promise<AuthResponse> {
 function startSupportUnreadPolling(): void {
   if (supportUnreadIntervalId !== null) return
   supportUnreadIntervalId = setInterval(() => {
-    if (currentAuthSession !== null) {
+    if (currentAuthSession !== null && !activeRoom.hasActiveRoom()) {
       lobby.refreshSupportUnread()
     }
   }, 30_000)
@@ -311,7 +311,7 @@ async function loadAuthSession(): Promise<void> {
     }
     await syncLobbyFriendships()
     await syncLobbyChatConversations()
-    lobby.render()
+    if (!activeRoom.hasActiveRoom()) lobby.render()
   } catch {
     currentAuthSession = null
   }
@@ -557,7 +557,7 @@ async function loadPublicSettings(): Promise<void> {
       if (typeof data.onlinePlayersCount === 'number') {
         publicOnlinePlayersCount = data.onlinePlayersCount
       }
-      lobby.render()
+      if (!activeRoom.hasActiveRoom()) lobby.render()
     }
   } catch {
     // Keep the local fallback.
@@ -1842,10 +1842,11 @@ lobby = createLobbyFlowController({
   leaveMatchmaking: () => {
     client.leaveMatchmaking()
   },
-  onMatchFound: (message) => {
-    activeRoom.enterActiveRoom(message)
+  onMatchFound: (message, stakeAlreadyShown) => {
+    activeRoom.enterActiveRoom(message, stakeAlreadyShown)
   },
   getAuthSession: () => currentAuthSession,
+  getIsInGame: () => activeRoom.hasActiveRoom(),
   onLoginSubmit: (email, password) =>
     submitAuthRequest('login', {
       email,
@@ -2181,7 +2182,9 @@ client = createGameServerClient({
       return
     }
 
-    lobby.handleServerMessage(message)
+    if (!activeRoom.hasActiveRoom()) {
+      lobby.handleServerMessage(message)
+    }
   },
 })
 

@@ -52,6 +52,7 @@ export type LobbyScreenState = {
   blockedPlayersErrorText: string | null
   blockedPlayersLimit: number
   blockLimitPopupOpen: boolean
+  isInGame: boolean
   displayName: string
   selectedStake: MatchStake
   isConnected: boolean
@@ -4071,6 +4072,7 @@ function renderBlockLimitPopup(state: LobbyScreenState): string {
                 font-size:13px;font-weight:900;cursor:pointer;
               "
             >Затвори</button>
+            ${!state.isInGame ? `
             <button
               type="button"
               data-block-limit-open-list="1"
@@ -4081,7 +4083,7 @@ function renderBlockLimitPopup(state: LobbyScreenState): string {
                 color:#080808;font-size:13px;font-weight:900;cursor:pointer;
               "
             >Виж блокираните</button>
-          </div>
+            ` : ''}</div>
         </div>
       </div>
     </div>
