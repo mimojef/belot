@@ -340,6 +340,7 @@ async function submitAuthRequest(
 
     currentAuthSession = data.session
     syncLobbyWithAuthSession()
+    lobby.resetToLobby()
     lobby.refreshSupportUnread()
     startSupportUnreadPolling()
     await syncLobbyFriendships()
@@ -363,7 +364,7 @@ async function submitLogout(): Promise<void> {
   currentAuthSession = null
   stopSupportUnreadPolling()
   syncLobbyWithAuthSession()
-  lobby.render()
+  lobby.resetToLobby()
 }
 
 async function loadPlayersDirectory(): Promise<
