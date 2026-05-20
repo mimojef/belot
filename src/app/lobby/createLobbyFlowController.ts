@@ -3230,8 +3230,14 @@ export function createLobbyFlowController(
     state.chatMessages = result.messages
     state.chatErrorText = null
     state.activeChatFriendshipId = friendshipId
+    const existingConversation = state.chatConversations.find(
+      (c) => c.friendshipId === result.conversation.friendshipId,
+    )
+    const updatedConversation = existingConversation?.friend.isOnline !== undefined
+      ? { ...result.conversation, friend: { ...result.conversation.friend, isOnline: existingConversation.friend.isOnline } }
+      : result.conversation
     state.chatConversations = [
-      result.conversation,
+      updatedConversation,
       ...state.chatConversations.filter((conversation) => {
         return conversation.friendshipId !== result.conversation.friendshipId
       }),

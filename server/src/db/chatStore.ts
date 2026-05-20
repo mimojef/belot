@@ -4,6 +4,7 @@ import type {
   ProfileId,
 } from '../core/serverTypes.js'
 import type { PlayerProgressStore } from './playerProgressStore.js'
+import { dbDateToUtc } from './dbDate.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -24,7 +25,7 @@ export type ChatConversationSnapshot = {
 }
 
 export type ChatStore = {
-  listConversations: (profileId: ProfileId) => ChatConversationSnapshot[]
+  listConversations: (profileId: ProfileId, onlineProfileIds?: Set<string>) => ChatConversationSnapshot[]
   listMessages: (
     profileId: ProfileId,
     friendshipId: string,
@@ -88,7 +89,7 @@ function toMessageSnapshot(
     friendshipId: row.friendship_id,
     senderProfileId: row.sender_profile_id,
     body: row.body,
-    createdAt: row.created_at,
+    createdAt: dbDateToUtc(row.created_at),
     isOwnMessage: row.sender_profile_id === ownProfileId,
   }
 }
@@ -188,6 +189,7 @@ export async function createChatStore(
   function createConversationSnapshot(
     friendship: FriendshipRow,
     ownProfileId: ProfileId,
+    onlineProfileIds?: Set<string>,
   ): ChatConversationSnapshot | null {
     const friendProfile = playerProgressStore.getPublicProfile(
       getFriendProfileId(friendship, ownProfileId),
@@ -195,6 +197,10 @@ export async function createChatStore(
 
     if (friendProfile === null) {
       return null
+    }
+
+    if (onlineProfileIds !== undefined && friendProfile.profileId !== null) {
+      friendProfile.isOnline = onlineProfileIds.has(friendProfile.profileId)
     }
 
     const lastMessageRow = selectLatestMessageStatement.get(
@@ -207,7 +213,7 @@ export async function createChatStore(
       lastMessage: lastMessageRow
         ? toMessageSnapshot(lastMessageRow, ownProfileId)
         : null,
-      updatedAt: lastMessageRow?.created_at ?? friendship.updated_at,
+      updatedAt: dbDateToUtc(lastMessageRow?.created_at ?? friendship.updated_at),
     }
   }
 
@@ -224,14 +230,14 @@ export async function createChatStore(
     return row ?? null
   }
 
-  function listConversations(profileId: ProfileId): ChatConversationSnapshot[] {
+  function listConversations(profileId: ProfileId, onlineProfileIds?: Set<string>): ChatConversationSnapshot[] {
     const friendships = selectAcceptedFriendshipsStatement.all(
       profileId,
       profileId,
     ) as FriendshipRow[]
 
     return friendships
-      .map((friendship) => createConversationSnapshot(friendship, profileId))
+      .map((friendship) => createConversationSnapshot(friendship, profileId, onlineProfileIds))
       .filter((conversation): conversation is ChatConversationSnapshot => {
         return conversation !== null
       })

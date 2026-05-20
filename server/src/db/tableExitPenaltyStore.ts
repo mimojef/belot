@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { PlayerPublicProfileSnapshot, ProfileId } from '../core/serverTypes.js'
 import type { PlayerProgressStore } from './playerProgressStore.js'
+import { dbDateToUtc } from './dbDate.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -54,7 +55,7 @@ function toPenaltySnapshot(row: PenaltyRow): TableExitPenaltySnapshot {
     penaltyAmount: row.penalty_amount,
     chargedAmount: row.charged_amount,
     balanceAfter: row.balance_after,
-    createdAt: row.created_at,
+    createdAt: dbDateToUtc(row.created_at),
   }
 }
 

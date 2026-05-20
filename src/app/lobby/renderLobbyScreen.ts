@@ -1263,7 +1263,6 @@ function renderGuestHeroCard(signupBonus: number): string {
 
 function renderHeroSection(
   profileName: string,
-  isConnected: boolean,
   avatarUrl: string | null,
   yellowCoinsBalance: number | null,
   wonGamesCount: number | null,
@@ -2102,6 +2101,25 @@ function renderFriendsDirectory(state: LobbyScreenState): string {
   `
 }
 
+const CHAT_EMOJIS = Array.from({ length: 21 }, (_, i) => {
+  const n = String(i + 1).padStart(2, '0')
+  return {
+    code: `[e:${n}]`,
+    preview: `/assets/animated-emoji/preview/preview-emoji-${n}.png`,
+    animated: `/assets/animated-emoji/emoji-${n}.webp`,
+  }
+})
+
+function renderMessageBody(body: string): string {
+  return body.split(/(\[e:\d{2}\])/).map((part) => {
+    const match = /^\[e:(\d{2})\]$/.exec(part)
+    if (match) {
+      return `<img src="/assets/animated-emoji/emoji-${match[1]}.webp" alt="" style="width:28px;height:28px;vertical-align:middle;display:inline-block;">`
+    }
+    return escapeHtml(part)
+  }).join('')
+}
+
 function formatChatTime(value: string): string {
   const date = new Date(value)
 
@@ -2126,33 +2144,41 @@ function renderChatPanel(state: LobbyScreenState): string {
     `
   }
 
-  const activeConversation = state.chatConversations.find(
+  const sortedConversations = [...state.chatConversations].sort(
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+  )
+
+  const activeConversation = sortedConversations.find(
     (conversation) => conversation.friendshipId === state.activeChatFriendshipId,
-  ) ?? state.chatConversations[0] ?? null
+  ) ?? sortedConversations[0] ?? null
 
   return `
-    <section style="min-height:520px;display:grid;grid-template-columns:360px minmax(0,1fr);gap:14px;align-content:start;">
-      <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;overflow:hidden;">
-        <div style="padding:14px 16px;border-bottom:1px solid rgba(212,165,32,0.24);">
+    <section style="min-height:520px;display:grid;grid-template-columns:300px minmax(0,1fr) 250px;gap:14px;align-content:start;">
+      <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;overflow:hidden;display:flex;flex-direction:column;max-height:560px;">
+        <div style="padding:14px 16px;border-bottom:1px solid rgba(212,165,32,0.24);flex-shrink:0;">
           <div style="font-size:22px;font-weight:900;color:#f8fafc;">Чат</div>
           <div style="margin-top:5px;font-size:12px;font-weight:800;color:rgba(255,255,255,0.54);">Само между приятели. Недостъпен по време на игра.</div>
         </div>
-        ${state.chatConversations.length === 0 ? `
+        ${sortedConversations.length === 0 ? `
           <div style="padding:24px 16px;color:rgba(255,255,255,0.62);font-size:14px;font-weight:800;text-align:center;">
             Добави приятели, за да започнеш чат.
           </div>
         ` : `
-          <div style="display:grid;max-height:560px;overflow:auto;">
-            ${state.chatConversations.map((conversation) => {
+          <div style="overflow-y:auto;flex:1;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
+            ${sortedConversations.map((conversation) => {
               const isActive = activeConversation?.friendshipId === conversation.friendshipId
               const displayName = conversation.friend.displayName?.trim() || 'Играч'
               const avatarUrl = conversation.friend.avatarUrl?.trim() ?? ''
               const preview = conversation.lastMessage?.body ?? 'Няма съобщения'
+              const isOnline = conversation.friend.isOnline
 
               return `
-                <button type="button" data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}" style="display:flex;align-items:center;gap:12px;border:0;border-bottom:1px solid rgba(255,255,255,0.06);background:${isActive ? 'rgba(212,165,32,0.12)' : 'transparent'};color:#ffffff;text-align:left;padding:12px 14px;cursor:pointer;min-width:0;">
-                  <div style="width:46px;height:46px;border-radius:8px;border:1px solid rgba(212,165,32,0.48);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:19px;font-weight:900;flex:0 0 auto;">
-                    ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}
+                <button type="button" data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}" style="display:flex;align-items:center;gap:12px;width:100%;border:0;border-bottom:1px solid rgba(255,255,255,0.06);background:${isActive ? 'rgba(212,165,32,0.12)' : 'transparent'};color:#ffffff;text-align:left;padding:12px 14px;cursor:pointer;min-width:0;box-sizing:border-box;">
+                  <div style="position:relative;width:46px;height:46px;flex:0 0 auto;">
+                    <div style="width:46px;height:46px;border-radius:8px;border:1px solid rgba(212,165,32,0.48);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:19px;font-weight:900;">
+                      ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}
+                    </div>
+                    ${isOnline !== undefined ? `<div style="position:absolute;bottom:-2px;right:-2px;width:11px;height:11px;border-radius:50%;background:${isOnline ? '#22c55e' : '#ef4444'};border:2px solid #050505;"></div>` : ''}
                   </div>
                   <div style="min-width:0;flex:1;">
                     <div style="font-size:14px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
@@ -2175,25 +2201,41 @@ function renderChatPanel(state: LobbyScreenState): string {
             <div style="font-size:19px;font-weight:900;color:#f8fafc;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(activeConversation.friend.displayName ?? 'Играч')}</div>
             ${state.chatErrorText ? `<div style="margin-left:auto;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.chatErrorText)}</div>` : ''}
           </div>
-          <div style="height:410px;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:10px;">
+          <div data-chat-messages-scroll="1" style="height:350px;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
             ${state.chatMessagesLoading ? `
               <div style="margin:auto;color:#d4a520;font-size:15px;font-weight:900;">Зареждане...</div>
             ` : state.chatMessages.length === 0 ? `
               <div style="margin:auto;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;">Няма съобщения. Започни разговора.</div>
-            ` : state.chatMessages.map((message) => `
-              <div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:min(72%,620px);display:grid;gap:4px;">
-                <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:9px 11px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;">
-                  ${escapeHtml(message.body)}
+            ` : state.chatMessages.map((message) => {
+              const isEmojiOnly = /^(\[e:\d{2}\])+$/.test(message.body.trim())
+              return `
+              <div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:min(72%,620px);display:grid;gap:3px;">
+                <div style="${isEmojiOnly
+                  ? 'padding:2px;line-height:1;'
+                  : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;`}">
+                  ${isEmojiOnly
+                    ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="/assets/animated-emoji/emoji-${n}.webp" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
+                    : renderMessageBody(message.body)}
                 </div>
                 <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.42);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div>
               </div>
-            `).join('')}
+            `}).join('')}
           </div>
           <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;gap:10px;padding:14px 16px;border-top:1px solid rgba(212,165,32,0.20);">
             <input name="message" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;">
             <button type="submit" style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;">Изпрати</button>
           </form>
         `}
+      </div>
+
+      <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;overflow-y:auto;padding:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:2px;">
+          ${CHAT_EMOJIS.map((emoji) => `
+            <button type="button" data-chat-emoji="${escapeHtml(emoji.code)}" style="border:0;background:#0a0a0a;padding:2px;cursor:pointer;border-radius:6px;display:flex;align-items:center;justify-content:center;" onmouseenter="this.style.background='rgba(212,165,32,0.15)'" onmouseleave="this.style.background='#0a0a0a'">
+              <img src="${escapeHtml(emoji.preview)}" alt="" style="width:58px;height:58px;object-fit:contain;display:block;">
+            </button>
+          `).join('')}
+        </div>
       </div>
     </section>
   `
@@ -4206,7 +4248,7 @@ export function renderLobbyScreen(
                 ? renderChatPanel(state)
               : `
               ${state.profile.profileId !== null
-                ? renderHeroSection(profileName, state.isConnected, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level)
+                ? renderHeroSection(profileName, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level)
                 : renderGuestHeroCard(state.signupBonusYellowCoins ?? 0)}
               ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching)}
               ${renderBottomSection(state.lobbyPackages, state.profile.profileId !== null, state.dailyMissionsUnclaimedCount)}
@@ -4478,6 +4520,16 @@ export function renderLobbyScreen(
         options.onChatSubmit(friendshipId, body)
         form.reset()
       }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-chat-emoji]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const code = btn.dataset.chatEmoji ?? ''
+      const form = root.querySelector<HTMLFormElement>('[data-lobby-chat-form]')
+      const friendshipId = form?.dataset.lobbyChatForm?.trim() ?? ''
+      if (!code || !friendshipId) return
+      options.onChatSubmit(friendshipId, code)
     })
   })
 
@@ -5683,4 +5735,7 @@ export function renderLobbyScreen(
     const el = document.getElementById(id)
     if (el) el.scrollTop = el.scrollHeight
   }
+
+  const chatScroll = root.querySelector<HTMLElement>('[data-chat-messages-scroll="1"]')
+  if (chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight
 }

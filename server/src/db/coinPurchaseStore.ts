@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { dbDateToUtc } from './dbDate.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -107,8 +108,8 @@ function rowToSnapshot(row: CoinPurchaseRow): CoinPurchaseSnapshot {
     providerCheckoutSessionId: row.provider_checkout_session_id,
     status: row.status,
     creditedAt: row.credited_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdAt: dbDateToUtc(row.created_at),
+    updatedAt: dbDateToUtc(row.updated_at),
   }
 }
 

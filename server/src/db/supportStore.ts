@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { dbDateToUtc } from './dbDate.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -63,7 +64,7 @@ export async function createSupportStore(databaseFilePath: string): Promise<Supp
       profileId: row.profile_id,
       body: row.body,
       isFromAdmin: row.is_from_admin === 1,
-      createdAt: row.created_at,
+      createdAt: dbDateToUtc(row.created_at),
     }
   }
 
@@ -161,7 +162,7 @@ export async function createSupportStore(databaseFilePath: string): Promise<Supp
         lastMessageBody: lastRow.body,
         lastMessageIsFromAdmin: lastRow.is_from_admin === 1,
         unreadByAdmin: row.unread_by_admin,
-        updatedAt: row.updated_at,
+        updatedAt: dbDateToUtc(row.updated_at),
       })
     }
 

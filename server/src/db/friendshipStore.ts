@@ -4,6 +4,7 @@ import type {
   ProfileId,
 } from '../core/serverTypes.js'
 import type { PlayerProgressStore } from './playerProgressStore.js'
+import { dbDateToUtc } from './dbDate.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -116,8 +117,8 @@ function toRelationshipSnapshot(input: {
     status: input.row.status as FriendshipStatus,
     direction: getFriendshipDirection(input.row, input.ownProfileId),
     profile: input.profile,
-    createdAt: input.row.created_at,
-    updatedAt: input.row.updated_at,
+    createdAt: dbDateToUtc(input.row.created_at),
+    updatedAt: dbDateToUtc(input.row.updated_at),
   }
 }
 

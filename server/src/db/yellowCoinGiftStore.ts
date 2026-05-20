@@ -4,6 +4,7 @@ import type {
   ProfileId,
 } from '../core/serverTypes.js'
 import type { PlayerProgressStore } from './playerProgressStore.js'
+import { dbDateToUtc } from './dbDate.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -85,7 +86,7 @@ function toGiftSnapshot(row: GiftRow): YellowCoinGiftSnapshot {
     amount: row.amount,
     senderBalanceAfter: row.sender_balance_after,
     recipientBalanceAfter: row.recipient_balance_after,
-    createdAt: row.created_at,
+    createdAt: dbDateToUtc(row.created_at),
   }
 }
 

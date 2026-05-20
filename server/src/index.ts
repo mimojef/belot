@@ -3069,9 +3069,13 @@ async function handleChatRequest(
   }
 
   if (pathname === '/api/chat/conversations' && req.method === 'GET') {
+    const onlineProfileIds = new Set<string>()
+    for (const conn of Object.values(serverState.connections)) {
+      if (conn.profileId !== null && conn.status === 'connected') onlineProfileIds.add(conn.profileId)
+    }
     sendJsonResponse(res, 200, {
       ok: true,
-      conversations: chatStore.listConversations(profileId),
+      conversations: chatStore.listConversations(profileId, onlineProfileIds),
     })
     return true
   }
