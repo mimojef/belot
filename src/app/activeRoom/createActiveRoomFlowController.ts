@@ -2989,7 +2989,7 @@ export function createActiveRoomFlowController(
     matchEndedSoundPlayed = false
     matchEndedPrizeAnimated = false
     replayStakeEffectShown = false
-    initialStakeEffectShown = false
+    initialStakeEffectShown = true
     clearMatchEndedCountdown()
     matchEndedCountdownSeconds = 120
     resetPlayingUiCache(playingCache)

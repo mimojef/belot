@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="bg">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#d4a520" />
+    <title>Пика — Няма връзка</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        background: #0a0a0a;
+        color: #f8fafc;
+        font-family: system-ui, -apple-system, sans-serif;
+        min-height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        padding: 24px;
+        text-align: center;
+      }
+      .icon {
+        font-size: 64px;
+        line-height: 1;
+        opacity: 0.6;
+      }
+      h1 {
+        font-size: 22px;
+        font-weight: 900;
+        color: #f8fafc;
+      }
+      p {
+        font-size: 15px;
+        font-weight: 600;
+        color: rgba(255,255,255,0.54);
+        max-width: 300px;
+        line-height: 1.5;
+      }
+      button {
+        margin-top: 8px;
+        height: 48px;
+        padding: 0 28px;
+        border: 0;
+        border-radius: 10px;
+        background: linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+        color: #080808;
+        font-size: 15px;
+        font-weight: 900;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="icon">📡</div>
+    <h1>Няма връзка с интернет</h1>
+    <p>Белот онлайн изисква активна интернет връзка. Провери свързаността и опитай отново.</p>
+    <button onclick="location.reload()">Опитай отново</button>
+  </body>
+</html>

@@ -308,6 +308,7 @@ export type LobbyFlowController = {
   getPendingFriendRequest: (friendshipId: string) => { friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null } | undefined
   handleServerMessage: (message: ServerMessage) => boolean
   navigateToShop: (noticeText: string | null) => void
+  setPwaUpdatePending: (pending: boolean, applyFn: (() => void) | null) => void
 }
 
 type InternalLobbyFlowState = {
@@ -459,6 +460,8 @@ type InternalLobbyFlowState = {
   supportDeleteConfirm: boolean
   supportDeleteLoading: boolean
   supportAccountTooNewMinutes: number | null
+  pwaUpdatePending: boolean
+  pwaUpdateApplyFn: (() => void) | null
 }
 
 type StakeCardConfig = {
@@ -625,6 +628,8 @@ function createInitialState(): InternalLobbyFlowState {
     supportDeleteConfirm: false,
     supportDeleteLoading: false,
     supportAccountTooNewMinutes: null,
+    pwaUpdatePending: false,
+    pwaUpdateApplyFn: null,
   }
 }
 
@@ -1475,6 +1480,7 @@ export function createLobbyFlowController(
       supportDeleteConfirm: state.supportDeleteConfirm,
       supportDeleteLoading: state.supportDeleteLoading,
       supportAccountTooNewMinutes: state.supportAccountTooNewMinutes,
+      pwaUpdatePending: state.pwaUpdatePending,
     }
 
     renderLobbyScreen(options.root, {
@@ -2045,6 +2051,9 @@ export function createLobbyFlowController(
           }
           render()
         })()
+      },
+      onPwaUpdateApply: () => {
+        state.pwaUpdateApplyFn?.()
       },
     })
   }
@@ -4202,6 +4211,11 @@ export function createLobbyFlowController(
       })()
     },
     handleServerMessage,
+    setPwaUpdatePending: (pending: boolean, applyFn: (() => void) | null) => {
+      state.pwaUpdatePending = pending
+      state.pwaUpdateApplyFn = applyFn
+      render()
+    },
     navigateToShop: (noticeText: string | null) => {
       void showShopPanel().then(() => {
         if (noticeText !== null && state.currentScreen === 'shop') {

@@ -1,5 +1,11 @@
 import './style.css'
 
+import {
+  initPwa,
+  isRunningAsStandalone,
+  canInstallPwa,
+  triggerPwaInstall,
+} from './pwa'
 import { createActiveRoomFlowController } from './app/activeRoom/createActiveRoomFlowController'
 import {
   isMatchEndedPreviewRequest,
@@ -2342,7 +2348,90 @@ if (stripeReturnScreen === 'shop') {
   lobby.render()
 }
 
+// PWA — регистрира service worker и следи за нови версии
+initPwa((applyFn) => {
+  lobby.setPwaUpdatePending(true, applyFn)
+})
+
+// Landing страница — показва се само в браузър (не в standalone режим)
+if (!isRunningAsStandalone()) {
+  showLandingOverlay()
+}
+
 void loadPublicSettings()
 void loadAuthSession()
 client.connect()
+}
+
+function showLandingOverlay(): void {
+  const overlay = document.createElement('div')
+  overlay.id = 'pwa-landing-overlay'
+  overlay.style.cssText = [
+    'position:fixed;inset:0;z-index:99999;background:#0a0a0a',
+    'display:flex;align-items:center;justify-content:center',
+    'font-family:system-ui,-apple-system,sans-serif',
+    'transition:opacity 0.35s ease',
+  ].join(';')
+
+  overlay.innerHTML = `
+    <div style="position:relative;width:min(100vw,calc(100vh * (1672/941)));aspect-ratio:1672/941;">
+      <img src="/assets/landing-page/landing-page.webp" style="width:100%;height:100%;display:block;">
+      <div style="position:absolute;left:22%;top:63%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;">
+        <div style="
+          margin-bottom:2.8%;
+          font-size:1.5vw;font-weight:400;
+          color:rgba(255,255,255,0.82);
+          text-align:center;
+          text-shadow:0 2px 8px rgba(0,0,0,0.8);
+          max-width:30vw;line-height:1.5;
+        ">Влез в играта и изпробвай уменията си срещу най-добрите.</div>
+        <button id="pwa-install-btn" style="
+          height:3.6vw;padding:0 4vw;border:0;border-radius:0.8vw;
+          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+          color:#080808;font-size:1.5vw;font-weight:900;cursor:pointer;
+          box-shadow:0 6px 32px rgba(212,165,32,0.45);
+          letter-spacing:0.01em;white-space:nowrap;
+        ">Играй Белот Сега</button>
+      </div>
+    </div>
+  `
+
+  document.body.style.overflow = 'hidden'
+  document.body.appendChild(overlay)
+
+  const btn = overlay.querySelector<HTMLButtonElement>('#pwa-install-btn')!
+
+  btn.addEventListener('mouseenter', () => {
+    btn.style.filter = 'brightness(1.15)'
+    btn.style.transform = 'translateY(-2px)'
+    btn.style.boxShadow = '0 10px 40px rgba(212,165,32,0.65)'
+  })
+  btn.addEventListener('mouseleave', () => {
+    btn.style.filter = ''
+    btn.style.transform = ''
+    btn.style.boxShadow = '0 6px 32px rgba(212,165,32,0.45)'
+  })
+
+  function dismissOverlay(): void {
+    document.body.style.overflow = ''
+    overlay.style.opacity = '0'
+    setTimeout(() => overlay.remove(), 360)
+  }
+
+  btn.addEventListener('click', async () => {
+    if (canInstallPwa()) {
+      btn.disabled = true
+      btn.textContent = 'Инсталиране...'
+      const outcome = await triggerPwaInstall()
+      if (outcome === 'accepted') {
+        dismissOverlay()
+      } else {
+        btn.disabled = false
+        btn.textContent = 'Играй Белот Сега'
+        setTimeout(dismissOverlay, 2000)
+      }
+    } else {
+      dismissOverlay()
+    }
+  })
 }
