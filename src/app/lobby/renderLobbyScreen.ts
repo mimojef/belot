@@ -1544,11 +1544,11 @@ function renderStakeSection(
         ${stakeCards}
       </div>
 
-      <div style="display:flex; align-items:stretch; height:30px; margin-top:6px; gap:0;">
+      <div style="display:flex; align-items:stretch; height:30px; margin-top:6px; gap:6px;">
         <button data-stakes-prev="1" style="
           flex:0 0 42px; background:linear-gradient(180deg, rgba(65,44,6,0.98) 0%, rgba(18,12,2,0.98) 100%);
-          border:1px solid rgba(244,201,91,0.76); border-right:none;
-          border-radius:7px 0 0 7px; color:#ffd45a; font-size:28px; line-height:1;
+          border:1px solid rgba(244,201,91,0.76);
+          border-radius:7px; color:#ffd45a; font-size:28px; line-height:1;
           text-shadow:0 0 10px rgba(244,201,91,0.45);
           box-shadow:inset 0 1px 0 rgba(255,255,255,0.12), 0 0 12px rgba(212,165,32,0.10);
           cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0;
@@ -1557,20 +1557,20 @@ function renderStakeSection(
         <div data-stakes-track="1" style="
           flex:1; position:relative;
           background:rgba(255,255,255,0.07);
-          border-top:1px solid rgba(212,165,32,0.45);
-          border-bottom:1px solid rgba(212,165,32,0.45);
+          border:1px solid rgba(212,165,32,0.45);
+          border-radius:7px;
           overflow:hidden;
         ">
           <div data-stakes-thumb="1" style="
-            position:absolute; top:4px; bottom:4px; left:0;
+            position:absolute; top:4px; bottom:4px; left:4px;
             background:rgba(212,165,32,0.72); border-radius:4px;
             cursor:grab; min-width:24px; transition:background 0.15s;
           "></div>
         </div>
         <button data-stakes-next="1" style="
           flex:0 0 42px; background:linear-gradient(180deg, rgba(65,44,6,0.98) 0%, rgba(18,12,2,0.98) 100%);
-          border:1px solid rgba(244,201,91,0.76); border-left:none;
-          border-radius:0 7px 7px 0; color:#ffd45a; font-size:28px; line-height:1;
+          border:1px solid rgba(244,201,91,0.76);
+          border-radius:7px; color:#ffd45a; font-size:28px; line-height:1;
           text-shadow:0 0 10px rgba(244,201,91,0.45);
           box-shadow:inset 0 1px 0 rgba(255,255,255,0.12), 0 0 12px rgba(212,165,32,0.10);
           cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0;
@@ -4518,8 +4518,10 @@ export function renderLobbyScreen(
       if (maxScroll <= 0) { thumb.style.display = 'none'; return }
       thumb.style.display = 'block'
       const trackW = track.clientWidth
-      const thumbW = Math.max(28, (scrollEl.clientWidth / scrollEl.scrollWidth) * trackW)
-      const thumbLeft = (scrollEl.scrollLeft / maxScroll) * (trackW - thumbW)
+      const trackPadding = 4
+      const usableTrackW = Math.max(0, trackW - trackPadding * 2)
+      const thumbW = Math.max(28, (scrollEl.clientWidth / scrollEl.scrollWidth) * usableTrackW)
+      const thumbLeft = trackPadding + (scrollEl.scrollLeft / maxScroll) * (usableTrackW - thumbW)
       thumb.style.width = thumbW + 'px'
       thumb.style.left = thumbLeft + 'px'
     }
@@ -4592,10 +4594,12 @@ export function renderLobbyScreen(
       const maxScroll = scrollEl.scrollWidth - scrollEl.clientWidth
       const trackW = track.clientWidth
       const thumbW = thumb.offsetWidth
+      const trackPadding = 4
+      const usableTrackW = Math.max(1, trackW - trackPadding * 2)
       thumb.style.cursor = 'grabbing'
       const onMove = (ev: MouseEvent) => {
         const dx = ev.clientX - startX
-        scrollEl.scrollLeft = startScroll + (dx / (trackW - thumbW)) * maxScroll
+        scrollEl.scrollLeft = startScroll + (dx / (usableTrackW - thumbW)) * maxScroll
       }
       const onUp = () => {
         thumb.style.cursor = 'grab'
