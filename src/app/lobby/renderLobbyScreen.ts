@@ -4513,12 +4513,14 @@ export function renderLobbyScreen(
   const thumb = root.querySelector<HTMLElement>('[data-stakes-thumb="1"]')
 
   if (scrollEl && track && thumb) {
+    const getTrackPadding = () => 4
+
     const syncThumb = () => {
       const maxScroll = scrollEl.scrollWidth - scrollEl.clientWidth
       if (maxScroll <= 0) { thumb.style.display = 'none'; return }
       thumb.style.display = 'block'
       const trackW = track.clientWidth
-      const trackPadding = 4
+      const trackPadding = getTrackPadding()
       const usableTrackW = Math.max(0, trackW - trackPadding * 2)
       const thumbW = Math.max(28, (scrollEl.clientWidth / scrollEl.scrollWidth) * usableTrackW)
       const thumbLeft = trackPadding + (scrollEl.scrollLeft / maxScroll) * (usableTrackW - thumbW)
@@ -4594,12 +4596,13 @@ export function renderLobbyScreen(
       const maxScroll = scrollEl.scrollWidth - scrollEl.clientWidth
       const trackW = track.clientWidth
       const thumbW = thumb.offsetWidth
-      const trackPadding = 4
+      const trackPadding = getTrackPadding()
       const usableTrackW = Math.max(1, trackW - trackPadding * 2)
       thumb.style.cursor = 'grabbing'
       const onMove = (ev: MouseEvent) => {
         const dx = ev.clientX - startX
-        scrollEl.scrollLeft = startScroll + (dx / (usableTrackW - thumbW)) * maxScroll
+        const scrollRange = Math.max(1, usableTrackW - thumbW)
+        scrollEl.scrollLeft = startScroll + (dx / scrollRange) * maxScroll
       }
       const onUp = () => {
         thumb.style.cursor = 'grab'
@@ -4609,6 +4612,28 @@ export function renderLobbyScreen(
       }
       document.addEventListener('mousemove', onMove)
       document.addEventListener('mouseup', onUp)
+      e.preventDefault()
+    })
+
+    track.addEventListener('mousedown', (e) => {
+      if (e.target === thumb) {
+        return
+      }
+
+      const maxScroll = scrollEl.scrollWidth - scrollEl.clientWidth
+      if (maxScroll <= 0) {
+        return
+      }
+
+      const trackRect = track.getBoundingClientRect()
+      const trackPadding = getTrackPadding()
+      const usableTrackW = Math.max(1, track.clientWidth - trackPadding * 2)
+      const thumbW = thumb.offsetWidth
+      const scrollRange = Math.max(1, usableTrackW - thumbW)
+      const clickX = e.clientX - trackRect.left
+      const targetRatio = Math.max(0, Math.min(1, (clickX - trackPadding - thumbW / 2) / scrollRange))
+
+      animateTo(targetRatio * maxScroll)
       e.preventDefault()
     })
   }
