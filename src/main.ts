@@ -2102,6 +2102,21 @@ const activeRoom = createActiveRoomFlowController({
   requestPlayerProfile: (roomId, seat) => {
     client.requestPlayerProfile(roomId, seat)
   },
+  getFriendshipAction: (profileId) => lobby?.getFriendshipActionForProfile(profileId) ?? null,
+  onSendFriendRequest: async (profileId) => {
+    const result = await submitFriendRequest(profileId)
+    if (result.ok) {
+      lobby?.setFriendships(result.friendships)
+      return { ok: true, newLabel: 'Поканата е изпратена' }
+    }
+    return { ok: false, message: result.message }
+  },
+  onLikeProfile: (profileId) => submitProfileLike(profileId),
+  onBlockProfile: async (profileId) => {
+    const result = await submitProfileBlock(profileId)
+    if ('ok' in result && !result.ok) return { message: result.message }
+    return { message: 'blocked' in result && result.blocked ? 'Играчът е блокиран.' : 'Операцията не успя.' }
+  },
   showLobby: (errorText = null) => {
     lobby.setConnected(client.isConnected())
     lobby.resetToLobby()
@@ -2351,6 +2366,39 @@ if (stripeReturnScreen === 'shop') {
 // PWA — регистрира service worker и следи за нови версии
 initPwa((applyFn) => {
   lobby.setPwaUpdatePending(true, applyFn)
+
+  if (!activeRoom.hasActiveRoom() && !document.getElementById('pwa-update-banner')) {
+    const banner = document.createElement('div')
+    banner.id = 'pwa-update-banner'
+    banner.style.cssText = 'position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);font-family:system-ui,-apple-system,sans-serif;'
+    banner.innerHTML = `
+      <div style="
+        width:min(92vw,420px);
+        background:linear-gradient(180deg,#1a1100 0%,#0d0900 100%);
+        border:1.5px solid rgba(212,165,32,0.55);
+        border-radius:16px;
+        padding:32px 28px;
+        text-align:center;
+        box-shadow:0 24px 64px rgba(0,0,0,0.6);
+      ">
+        <div style="font-size:36px;margin-bottom:12px;">🔄</div>
+        <div style="font-size:17px;font-weight:900;color:#f4c95b;margin-bottom:8px;">Нова версия</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.72);margin-bottom:24px;line-height:1.5;">
+          Налична е нова версия на играта.<br>Приложи я преди следващата игра.
+        </div>
+        <button id="pwa-update-apply-btn" style="
+          width:100%;height:44px;border:0;border-radius:10px;
+          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+          color:#080808;font-size:14px;font-weight:900;cursor:pointer;
+          box-shadow:0 4px 16px rgba(212,165,32,0.35);
+        ">Приложи сега</button>
+      </div>
+    `
+    document.body.appendChild(banner)
+    document.getElementById('pwa-update-apply-btn')?.addEventListener('click', () => {
+      applyFn()
+    })
+  }
 })
 
 // Landing страница — показва се само в браузър (не в standalone режим)

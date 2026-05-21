@@ -306,6 +306,7 @@ export type LobbyFlowController = {
   refreshSupportUnread: () => void
   removePendingFriendRequest: (friendshipId: string) => void
   getPendingFriendRequest: (friendshipId: string) => { friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null } | undefined
+  getFriendshipActionForProfile: (profileId: string) => import('../../ui/overlays/renderPlayerProfilePopup').PlayerProfileFriendshipAction | null
   handleServerMessage: (message: ServerMessage) => boolean
   navigateToShop: (noticeText: string | null) => void
   setPwaUpdatePending: (pending: boolean, applyFn: (() => void) | null) => void
@@ -4195,6 +4196,23 @@ export function createLobbyFlowController(
     getPendingFriendRequest: (friendshipId: string) => {
       return state.pendingFriendRequests.find((r) => r.friendshipId === friendshipId)
     },
+    getFriendshipActionForProfile: (profileId: string) => {
+      const authSession = options.getAuthSession?.() ?? null
+      if (authSession === null || authSession.profile.profileId === profileId) return null
+      const relationship = findRelationshipByProfileId(state.friendships, profileId)
+      if (relationship === null) {
+        return { profileId, label: 'Покани за приятел', disabled: false, message: null }
+      }
+      if (relationship.status === 'accepted') {
+        return { profileId, label: 'Вече сте приятели', disabled: true, message: null, giftFriendshipId: relationship.friendshipId }
+      }
+      return {
+        profileId,
+        label: relationship.direction === 'incoming' ? 'Има входяща покана' : 'Поканата е изпратена',
+        disabled: true,
+        message: null,
+      }
+    },
     refreshSupportUnread: () => {
       void (async () => {
         const result = await options.onSupportUnreadLoad?.()
@@ -4214,7 +4232,7 @@ export function createLobbyFlowController(
     setPwaUpdatePending: (pending: boolean, applyFn: (() => void) | null) => {
       state.pwaUpdatePending = pending
       state.pwaUpdateApplyFn = applyFn
-      render()
+      if (!(options.getIsInGame?.() ?? false)) render()
     },
     navigateToShop: (noticeText: string | null) => {
       void showShopPanel().then(() => {

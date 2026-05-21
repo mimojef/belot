@@ -43,6 +43,10 @@ export type CreateActiveRoomFlowControllerOptions = {
   sendLeaveMatchVote: (roomId: string) => void
   sendEmojiReaction: (roomId: string, emojiId: string) => void
   requestPlayerProfile: (roomId: string, seat: Seat) => void
+  getFriendshipAction: (profileId: string) => import('../../ui/overlays/renderPlayerProfilePopup').PlayerProfileFriendshipAction | null
+  onSendFriendRequest: (profileId: string) => Promise<{ ok: true; newLabel: string } | { ok: false; message: string }>
+  onLikeProfile: (profileId: string) => Promise<{ ok: true; liked: boolean; likesCount: number } | { ok: false }>
+  onBlockProfile: (profileId: string) => Promise<{ message: string }>
   showLobby: (errorText?: string | null) => void
   startNewGame: (stake: MatchStake, displayName?: string) => void
 }

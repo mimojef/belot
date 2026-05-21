@@ -3296,6 +3296,10 @@ export function createActiveRoomFlowController(
       seatSnapshot,
       () => removeSeatProfileOverlay(),
       isOwnSeat,
+      isOwnSeat ? null : options.getFriendshipAction,
+      isOwnSeat ? null : options.onSendFriendRequest,
+      isOwnSeat ? null : options.onLikeProfile,
+      isOwnSeat ? null : options.onBlockProfile,
     )
     options.requestPlayerProfile(activeRoomState.roomId, seatAttr)
   })
