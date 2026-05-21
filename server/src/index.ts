@@ -3458,10 +3458,11 @@ async function handleAdminMatchRoomsRequest(
 
   if (pathname === '/api/admin/rooms' && req.method === 'POST') {
     const body = await readJsonRequestBody(req)
-    const stakeAmount = getNumberField(body, 'stakeAmount') ?? 0
-    const minLevel = getNumberField(body, 'minLevel') ?? 1
-    const prizeAmount = getNumberField(body, 'prizeAmount') ?? 0
-    const isEnabled = body['isEnabled'] !== false
+    const bodyRecord = isRecord(body) ? body : {}
+    const stakeAmount = getNumberField(bodyRecord, 'stakeAmount') ?? 0
+    const minLevel = getNumberField(bodyRecord, 'minLevel') ?? 1
+    const prizeAmount = getNumberField(bodyRecord, 'prizeAmount') ?? 0
+    const isEnabled = bodyRecord['isEnabled'] !== false
 
     const result = matchRoomsStore.upsertRoom({ stakeAmount, minLevel, prizeAmount, isEnabled })
     if (!result.ok) {
@@ -4531,10 +4532,10 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        if (publicProfile.level < room.minLevel) {
+        if ((publicProfile.level ?? 1) < room.minLevel) {
           safeSendToConnection(connection.id, {
             type: 'error',
-            message: `Тази стая изисква минимално ниво ${room.minLevel}. Твоето ниво е ${publicProfile.level}.`,
+            message: `Тази стая изисква минимално ниво ${room.minLevel}. Твоето ниво е ${publicProfile.level ?? 1}.`,
           })
           return
         }
