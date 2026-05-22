@@ -239,9 +239,12 @@ type AdminMissionsApiResponse = {
 }
 
 function getApiBaseUrl(): string {
-  const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
-  const host = window.location.hostname || 'localhost'
-  return `${protocol}//${host}:3001`
+  const hostname = window.location.hostname
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
+    return `${protocol}//${hostname}:3001`
+  }
+  return ''
 }
 
 async function readAuthResponse(response: Response): Promise<AuthResponse> {

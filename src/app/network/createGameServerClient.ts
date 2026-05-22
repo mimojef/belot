@@ -871,9 +871,11 @@ export type GameServerClient = {
 
 function getDefaultServerUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const host = window.location.hostname || 'localhost'
-
-  return `${protocol}//${host}:3001/ws`
+  const hostname = window.location.hostname
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    return `${protocol}//${hostname}:3001/ws`
+  }
+  return `${protocol}//${window.location.host}/ws`
 }
 
 function isServerMessage(value: unknown): value is ServerMessage {
