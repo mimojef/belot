@@ -1561,7 +1561,7 @@ async function resizeImageToDataUrl(
   file: File,
   maxSize: number,
   quality: number,
-): Promise<string> {
+): Promise<{ dataUrl: string; scale: number }> {
   const rawDataUrl = await fileToDataUrl(file)
 
   return await new Promise((resolve, reject) => {
@@ -1577,11 +1577,11 @@ async function resizeImageToDataUrl(
       canvas.height = h
       const ctx = canvas.getContext('2d')
       if (!ctx) {
-        resolve(rawDataUrl)
+        resolve({ dataUrl: rawDataUrl, scale: 1 })
         return
       }
       ctx.drawImage(img, 0, 0, w, h)
-      resolve(canvas.toDataURL('image/jpeg', quality))
+      resolve({ dataUrl: canvas.toDataURL('image/jpeg', quality), scale })
     })
     img.src = rawDataUrl
   })
@@ -1589,12 +1589,10 @@ async function resizeImageToDataUrl(
 
 async function imageFileToServerUploadDataUrl(
   file: File,
-  options: { mode: 'avatar' | 'gallery' },
+  _options: { mode: 'gallery' },
 ): Promise<string> {
-  if (options.mode === 'avatar') {
-    return resizeImageToDataUrl(file, 1200, 0.88)
-  }
-  return resizeImageToDataUrl(file, 1600, 0.85)
+  const { dataUrl } = await resizeImageToDataUrl(file, 1600, 0.85)
+  return dataUrl
 }
 
 async function submitProfileImageData(
@@ -1744,8 +1742,13 @@ async function submitProfileUpdate(
         return 'Очертай квадрат върху снимката за аватар.'
       }
 
-      const imageDataUrl = await imageFileToServerUploadDataUrl(avatarFile, { mode: 'avatar' })
-      const data = await submitProfileImageData('avatar', imageDataUrl, avatarCrop)
+      const { dataUrl: avatarDataUrl, scale: avatarScale } = await resizeImageToDataUrl(avatarFile, 1200, 0.88)
+      const scaledCrop: AvatarCropSelection = {
+        x: Math.round(avatarCrop.x * avatarScale),
+        y: Math.round(avatarCrop.y * avatarScale),
+        size: Math.round(avatarCrop.size * avatarScale),
+      }
+      const data = await submitProfileImageData('avatar', avatarDataUrl, scaledCrop)
       currentAuthSession = data.session ?? currentAuthSession
     }
 
