@@ -410,6 +410,7 @@ type InternalLobbyFlowState = {
   adminMissionEditId: string | null
   adminMissionEditIsStaged: boolean
   matchRooms: MatchRoomSnapshot[]
+  matchRoomsLoaded: boolean
   matchRoomsLoading: boolean
   matchRoomsErrorText: string | null
   adminMatchRoomEdit: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean } | 'new' | null
@@ -594,6 +595,7 @@ function createInitialState(): InternalLobbyFlowState {
     adminMissionEditId: null,
     adminMissionEditIsStaged: false,
     matchRooms: [],
+    matchRoomsLoaded: false,
     matchRoomsLoading: false,
     matchRoomsErrorText: null,
     adminMatchRoomEdit: null,
@@ -1046,6 +1048,7 @@ export function createLobbyFlowController(
     state.remainingMs = null
     state.countdownEndsAt = null
     state.serverPreviewBotDisplayNames = []
+    state.matchRoomsLoaded = false
     clearServerRoomSnapshot()
     stopWaitingRoomActivity()
     resetFinalFillSequence()
@@ -3570,7 +3573,7 @@ export function createLobbyFlowController(
 
     if (
       state.currentScreen === 'lobby' &&
-      state.matchRooms.length === 0 &&
+      !state.matchRoomsLoaded &&
       !state.matchRoomsLoading &&
       state.matchRoomsErrorText === null
     ) {
@@ -4005,6 +4008,7 @@ export function createLobbyFlowController(
     render()
     const result = await options.onMatchRoomsLoad()
     state.matchRoomsLoading = false
+    state.matchRoomsLoaded = true
     if (!result.ok) {
       state.matchRoomsErrorText = result.message
       render()

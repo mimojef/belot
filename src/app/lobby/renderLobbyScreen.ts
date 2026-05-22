@@ -309,19 +309,6 @@ export type RenderLobbyScreenOptions = {
   onPwaUpdateApply: () => void
 }
 
-type LobbyStakeCard = {
-  stake: MatchStake
-  prizeAmount: number
-  onlinePlayers: number
-}
-
-const MATCH_STAKE_CARDS: LobbyStakeCard[] = [
-  { stake: 5000, prizeAmount: 8000, onlinePlayers: 124 },
-  { stake: 8000, prizeAmount: 12000, onlinePlayers: 98 },
-  { stake: 10000, prizeAmount: 15000, onlinePlayers: 87 },
-  { stake: 15000, prizeAmount: 22000, onlinePlayers: 63 },
-  { stake: 20000, prizeAmount: 30000, onlinePlayers: 45 },
-]
 
 
 const MAX_PROFILE_GALLERY_IMAGES = 6
@@ -4659,13 +4646,9 @@ export function renderLobbyScreen(
       }
 
       const rawStake = Number(button.dataset.lobbyStakeCard)
-      const selectedCard = MATCH_STAKE_CARDS.find((card) => card.stake === rawStake)
+      if (!rawStake || rawStake <= 0) return
 
-      if (!selectedCard) {
-        return
-      }
-
-      options.onStakeChange(selectedCard.stake)
+      options.onStakeChange(rawStake)
       options.onSearchClick()
     })
   })
