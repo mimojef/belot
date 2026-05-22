@@ -2386,6 +2386,14 @@ const stripeReturnParams = new URLSearchParams(window.location.search)
 const stripeReturnScreen = stripeReturnParams.get('screen')
 const stripeReturnPayment = stripeReturnParams.get('payment')
 
+// Landing страница — показва се само в браузър и без валиден path (не в standalone режим)
+// Трябва да е ПРЕДИ lobby.render() за да може syncUrlPath() да я засече
+const _initialPath = window.location.pathname
+const _VALID_PATHS = new Set(['/lobby', '/players', '/ranking', '/shop', '/friends', '/chat', '/admin'])
+if (!isRunningAsStandalone() && !_VALID_PATHS.has(_initialPath)) {
+  showLandingOverlay()
+}
+
 if (stripeReturnScreen === 'shop') {
   history.replaceState(null, '', window.location.pathname)
 
@@ -2440,13 +2448,8 @@ initPwa((applyFn) => {
   }
 })
 
-// Landing страница — показва се само в браузър (не в standalone режим)
-if (!isRunningAsStandalone()) {
-  showLandingOverlay()
-}
-
 void loadPublicSettings()
-void loadAuthSession()
+void loadAuthSession().then(() => { lobby.navigateInitialPath() })
 client.connect()
 }
 
@@ -2502,7 +2505,10 @@ function showLandingOverlay(): void {
   function dismissOverlay(): void {
     document.body.style.overflow = ''
     overlay.style.opacity = '0'
-    setTimeout(() => overlay.remove(), 360)
+    setTimeout(() => {
+      overlay.remove()
+      history.replaceState(null, '', '/lobby')
+    }, 360)
   }
 
   btn.addEventListener('click', async () => {

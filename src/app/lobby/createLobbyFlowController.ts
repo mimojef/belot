@@ -310,6 +310,7 @@ export type LobbyFlowController = {
   handleServerMessage: (message: ServerMessage) => boolean
   navigateToShop: (noticeText: string | null) => void
   setPwaUpdatePending: (pending: boolean, applyFn: (() => void) | null) => void
+  navigateInitialPath: () => void
 }
 
 type InternalLobbyFlowState = {
@@ -3524,40 +3525,47 @@ export function createLobbyFlowController(
     countdownAnimationFrameId = window.requestAnimationFrame(frameStep)
   }
 
-  const SCREEN_TO_HASH: Partial<Record<LobbySocialScreen, string>> = {
-    players: 'играчи',
-    leaderboards: 'класация',
-    shop: 'магазин',
-    admin: 'админ',
-    friends: 'приятели',
-    chat: 'чат',
+  const SCREEN_TO_PATH: Partial<Record<LobbySocialScreen, string>> = {
+    lobby: '/lobby',
+    players: '/players',
+    leaderboards: '/ranking',
+    shop: '/shop',
+    admin: '/admin',
+    friends: '/friends',
+    chat: '/chat',
   }
 
-  const HASH_TO_SCREEN: Record<string, LobbySocialScreen> = {
-    'играчи': 'players',
-    'класация': 'leaderboards',
-    'магазин': 'shop',
-    'админ': 'admin',
-    'приятели': 'friends',
-    'чат': 'chat',
+  const PATH_TO_SCREEN: Record<string, LobbySocialScreen> = {
+    '/lobby': 'lobby',
+    '/players': 'players',
+    '/ranking': 'leaderboards',
+    '/shop': 'shop',
+    '/admin': 'admin',
+    '/friends': 'friends',
+    '/chat': 'chat',
   }
 
-  function syncUrlHash(): void {
-    const hash = SCREEN_TO_HASH[state.currentScreen] ?? ''
-    const currentHash = window.location.hash.slice(1)
-    if (currentHash !== hash) {
-      history.replaceState(null, '', hash ? `#${hash}` : window.location.pathname)
-    }
+  const _loadPath = window.location.pathname
+  let _pendingInitialNav = false
+  let _navigationReady = false
+
+  function syncUrlPath(): void {
+    if (!_navigationReady || _pendingInitialNav) return
+    if (document.getElementById('pwa-landing-overlay') !== null) return
+    const path = SCREEN_TO_PATH[state.currentScreen] ?? '/lobby'
+    if (path === window.location.pathname) return
+    history.pushState(null, '', path)
   }
 
-  function navigateFromHash(hash: string): void {
-    const screen = HASH_TO_SCREEN[hash] ?? null
+  function navigateFromPath(path: string): void {
+    const screen = PATH_TO_SCREEN[path] ?? null
     if (screen === null) {
       switchToLobby()
       render()
       return
     }
     switch (screen) {
+      case 'lobby': switchToLobby(); render(); break
       case 'players': void showPlayersDirectory(); break
       case 'leaderboards': void showLeaderboardsDirectory(); break
       case 'shop': void showShopPanel(); break
@@ -3589,7 +3597,7 @@ export function createLobbyFlowController(
     }
 
     renderLobby()
-    syncUrlHash()
+    syncUrlPath()
   }
 
   function buildPopupFriendshipAction() {
@@ -3652,7 +3660,12 @@ export function createLobbyFlowController(
   function handleServerMessage(message: ServerMessage): boolean {
     if (message.type === 'connected') {
       state.errorText = null
-      render()
+      if (_pendingInitialNav) {
+        _pendingInitialNav = false
+        navigateFromPath(_loadPath)
+      } else {
+        render()
+      }
       return true
     }
 
@@ -4110,13 +4123,8 @@ export function createLobbyFlowController(
   void loadLobbyPackages()
   void loadPlayerUnclaimedCount()
 
-  const initialHash = decodeURIComponent(window.location.hash.slice(1))
-  if (initialHash && HASH_TO_SCREEN[initialHash]) {
-    navigateFromHash(initialHash)
-  }
-
-  window.addEventListener('hashchange', () => {
-    navigateFromHash(decodeURIComponent(window.location.hash.slice(1)))
+  window.addEventListener('popstate', () => {
+    navigateFromPath(window.location.pathname)
   })
 
   function msUntilNextSofiaMidnight(): number {
@@ -4245,6 +4253,15 @@ export function createLobbyFlowController(
       state.pwaUpdatePending = pending
       state.pwaUpdateApplyFn = applyFn
       if (!(options.getIsInGame?.() ?? false)) render()
+    },
+    navigateInitialPath: () => {
+      _navigationReady = true
+      if (!_loadPath || !PATH_TO_SCREEN[_loadPath]) return
+      if (state.isConnected) {
+        navigateFromPath(_loadPath)
+      } else {
+        _pendingInitialNav = true
+      }
     },
     navigateToShop: (noticeText: string | null) => {
       void showShopPanel().then(() => {
