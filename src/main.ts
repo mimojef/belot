@@ -1557,11 +1557,44 @@ async function fileToDataUrl(file: File): Promise<string> {
   })
 }
 
+async function resizeImageToDataUrl(
+  file: File,
+  maxSize: number,
+  quality: number,
+): Promise<string> {
+  const rawDataUrl = await fileToDataUrl(file)
+
+  return await new Promise((resolve, reject) => {
+    const img = new Image()
+    img.addEventListener('error', () => reject(new Error('Снимката не можа да бъде заредена.')))
+    img.addEventListener('load', () => {
+      const scale = Math.min(1, maxSize / Math.max(img.naturalWidth, img.naturalHeight))
+      const w = Math.round(img.naturalWidth * scale)
+      const h = Math.round(img.naturalHeight * scale)
+
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        resolve(rawDataUrl)
+        return
+      }
+      ctx.drawImage(img, 0, 0, w, h)
+      resolve(canvas.toDataURL('image/jpeg', quality))
+    })
+    img.src = rawDataUrl
+  })
+}
+
 async function imageFileToServerUploadDataUrl(
   file: File,
-  _options: { mode: 'avatar' | 'gallery' },
+  options: { mode: 'avatar' | 'gallery' },
 ): Promise<string> {
-  return fileToDataUrl(file)
+  if (options.mode === 'avatar') {
+    return resizeImageToDataUrl(file, 1200, 0.88)
+  }
+  return resizeImageToDataUrl(file, 1600, 0.85)
 }
 
 async function submitProfileImageData(
@@ -1711,7 +1744,7 @@ async function submitProfileUpdate(
         return 'Очертай квадрат върху снимката за аватар.'
       }
 
-      const imageDataUrl = await fileToDataUrl(avatarFile)
+      const imageDataUrl = await imageFileToServerUploadDataUrl(avatarFile, { mode: 'avatar' })
       const data = await submitProfileImageData('avatar', imageDataUrl, avatarCrop)
       currentAuthSession = data.session ?? currentAuthSession
     }
