@@ -2770,20 +2770,26 @@ export function createLobbyFlowController(
     packageId: string,
     showInLobby: boolean,
   ): Promise<void> {
-    // Optimistic update — checkbox appears in correct state immediately
+    // Optimistic update using adminCoinPackages as source of truth
+    state.adminCoinPackages = state.adminCoinPackages.map((p) =>
+      p.packageId === packageId ? { ...p, showInLobby } : p
+    )
+    state.lobbyPackages = state.adminCoinPackages.filter((p) => p.showInLobby && p.status === 'active')
     state.shopPackages = state.shopPackages.map((p) =>
       p.packageId === packageId ? { ...p, showInLobby } : p
     )
-    state.lobbyPackages = state.shopPackages.filter((p) => p.showInLobby && p.status === 'active')
     state.adminCoinPackagesErrorText = null
     render()
 
     if (!options.onAdminCoinPackageLobbyToggle) {
       // Revert optimistic update
+      state.adminCoinPackages = state.adminCoinPackages.map((p) =>
+        p.packageId === packageId ? { ...p, showInLobby: !showInLobby } : p
+      )
+      state.lobbyPackages = state.adminCoinPackages.filter((p) => p.showInLobby && p.status === 'active')
       state.shopPackages = state.shopPackages.map((p) =>
         p.packageId === packageId ? { ...p, showInLobby: !showInLobby } : p
       )
-      state.lobbyPackages = state.shopPackages.filter((p) => p.showInLobby && p.status === 'active')
       state.adminCoinPackagesErrorText = 'Промяната на лоби видимост временно не е налична.'
       render()
       return
@@ -2793,24 +2799,26 @@ export function createLobbyFlowController(
 
     if (!result.ok) {
       // Revert optimistic update on API error
+      state.adminCoinPackages = state.adminCoinPackages.map((p) =>
+        p.packageId === packageId ? { ...p, showInLobby: !showInLobby } : p
+      )
+      state.lobbyPackages = state.adminCoinPackages.filter((p) => p.showInLobby && p.status === 'active')
       state.shopPackages = state.shopPackages.map((p) =>
         p.packageId === packageId ? { ...p, showInLobby: !showInLobby } : p
       )
-      state.lobbyPackages = state.shopPackages.filter((p) => p.showInLobby && p.status === 'active')
       state.adminCoinPackagesErrorText = result.message
       render()
       return
     }
 
-    // Sync showInLobby from server response into shopPackages
     state.adminCoinPackages = result.packages
     state.shopPackages = state.shopPackages.map((p) => {
       const updated = result.packages.find((r) => r.packageId === p.packageId)
       return updated !== undefined ? { ...p, showInLobby: updated.showInLobby } : p
     })
-    state.lobbyPackages = state.shopPackages.filter((p) => p.showInLobby && p.status === 'active')
     state.adminCoinPackagesErrorText = null
     render()
+    void loadLobbyPackages()
   }
 
   async function ensureFriendshipsLoaded(): Promise<void> {

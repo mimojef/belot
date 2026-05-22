@@ -2827,7 +2827,14 @@ function renderAdminPanel(state: LobbyScreenState): string {
               <div style="font-size:14px;font-weight:900;color:#d4a520;">${formatAmount(coinPackage.yellowCoinsAmount)}</div>
               <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}</div>
               <div style="font-size:12px;font-weight:900;color:${coinPackage.status === 'active' ? '#86efac' : 'rgba(255,255,255,0.46)'};">${coinPackage.status}</div>
-              <div style="display:flex;gap:6px;">
+              <div style="display:flex;align-items:center;gap:10px;">
+                <label style="display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none;white-space:nowrap;" title="Видима в лобито">
+                  <input type="checkbox"
+                    data-lobby-admin-package-lobby="${escapeHtml(coinPackage.packageId)}"
+                    ${coinPackage.showInLobby ? 'checked' : ''}
+                    style="width:15px;height:15px;accent-color:#d4a520;cursor:pointer;flex-shrink:0;">
+                  <span style="font-size:10px;font-weight:800;color:rgba(212,165,32,0.85);text-transform:uppercase;letter-spacing:0.05em;">Лоби</span>
+                </label>
                 <button type="button" data-lobby-admin-package-edit="${escapeHtml(coinPackage.packageId)}" style="height:36px;padding:0 12px;border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:${isEditing ? 'rgba(212,165,32,0.18)' : '#111111'};color:#d4a520;font-size:12px;font-weight:900;cursor:pointer;">
                   ${isEditing ? 'Редактира се' : 'Редактирай'}
                 </button>
@@ -4734,6 +4741,16 @@ export function renderLobbyScreen(
   root.querySelectorAll<HTMLInputElement>('[data-lobby-shop-package-lobby]').forEach((checkbox) => {
     checkbox.addEventListener('change', () => {
       const packageId = checkbox.dataset.lobbyShopPackageLobby?.trim() ?? ''
+
+      if (packageId.length > 0) {
+        options.onAdminCoinPackageLobbyToggle(packageId, checkbox.checked)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLInputElement>('[data-lobby-admin-package-lobby]').forEach((checkbox) => {
+    checkbox.addEventListener('change', () => {
+      const packageId = checkbox.dataset.lobbyAdminPackageLobby?.trim() ?? ''
 
       if (packageId.length > 0) {
         options.onAdminCoinPackageLobbyToggle(packageId, checkbox.checked)
