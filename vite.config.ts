@@ -11,6 +11,9 @@ export default defineConfig({
     VitePWA({
       registerType: 'prompt',
       injectRegister: null,
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
       manifest: {
         name: 'Pika.bg - Белот Онлайн',
         short_name: 'Пика',
@@ -39,21 +42,9 @@ export default defineConfig({
           },
         ],
       },
-      workbox: {
+      injectManifest: {
         globPatterns: ['**/*.{js,css,html,ico,svg,png,webp,mp3,woff2}'],
-        navigateFallback: '/offline.html',
-        navigateFallbackDenylist: [/^\/api\//, /^\/ws/, /^\/uploads\//, /^\/health/],
-        cleanupOutdatedCaches: true,
-        runtimeCaching: [
-          {
-            urlPattern: /^\/api\//,
-            handler: 'NetworkOnly',
-          },
-          {
-            urlPattern: /^\/uploads\//,
-            handler: 'NetworkOnly',
-          },
-        ],
+        injectionPoint: 'self.__WB_MANIFEST',
       },
       devOptions: {
         enabled: false,
