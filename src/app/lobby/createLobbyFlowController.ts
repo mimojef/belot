@@ -1212,6 +1212,34 @@ export function createLobbyFlowController(
     finalFillAnimatedQueuedPlayers = state.queuedPlayers
   }
 
+  function startFinalFillSequenceNow(): boolean {
+    if (state.serverRoomSeats) {
+      return false
+    }
+
+    if (finalFillSequenceStartedAt !== null) {
+      return true
+    }
+
+    if (state.currentScreen !== 'matchmaking-room' || !state.isSearching) {
+      return false
+    }
+
+    if (state.queuedPlayers >= state.requiredPlayers) {
+      return false
+    }
+
+    if (state.serverPreviewBotDisplayNames.length === 0) {
+      return false
+    }
+
+    finalFillSequenceStartedAt = Date.now()
+    finalFillBaseQueuedPlayers = state.queuedPlayers
+    finalFillAnimatedQueuedPlayers = state.queuedPlayers
+
+    return true
+  }
+
   function isFinalFillSequenceComplete(): boolean {
     return getDisplayedQueuedPlayers() >= state.requiredPlayers
   }
@@ -3874,6 +3902,13 @@ export function createLobbyFlowController(
       state.serverYourSeat = message.yourSeat
 
       if (pendingMatchFoundMessage !== null && occupiedSeatsCount >= requiredPlayers) {
+        if (finalFillSequenceStartedAt !== null && !isFinalFillSequenceComplete()) {
+          state.serverRoomSeats = null
+          state.serverYourSeat = null
+          maybeSchedulePendingMatchFound()
+          return true
+        }
+
         flushPendingMatchFound()
         return true
       }
@@ -3893,6 +3928,15 @@ export function createLobbyFlowController(
 
     if (message.type === 'match_found') {
       pendingMatchFoundMessage = message
+
+      if (startFinalFillSequenceNow()) {
+        state.remainingMs = 0
+        state.countdownEndsAt = Date.now()
+        updateFinalFillSequenceProgress()
+        paintMatchmakingRoom()
+        maybeSchedulePendingMatchFound()
+        return true
+      }
 
       if (finalFillSequenceStartedAt !== null) {
         state.remainingMs = 0
