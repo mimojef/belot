@@ -8,9 +8,8 @@ let onUpdateAvailableCallback: ((applyFn: PwaUpdateCallback) => void) | null = n
 export function initPwa(onUpdateAvailable: (applyFn: PwaUpdateCallback) => void): void {
   onUpdateAvailableCallback = onUpdateAvailable
 
-  registerSW({
+  const updateSW = registerSW({
     onNeedRefresh() {
-      const updateSW = registerSW({ immediate: false })
       pendingUpdate = () => updateSW(true)
       onUpdateAvailableCallback?.(pendingUpdate)
     },
