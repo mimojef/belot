@@ -23,10 +23,8 @@ dist-ssr
 *.sln
 *.sw?
 
-# Local SQLite database
-server/database/data/*.sqlite
-server/database/data/*.sqlite-shm
-server/database/data/*.sqlite-wal
+# Runtime database files
+server/database/data/
 
 # Environment variables (never commit real secrets)
 .env
