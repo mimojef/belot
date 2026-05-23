@@ -74,6 +74,7 @@ import { createInitialMatchmakingState } from './matchmaking/createInitialMatchm
 import { createMatchmakingQueueEntry } from './matchmaking/createMatchmakingQueueEntry.js'
 import { getQueueEntryByConnectionId } from './matchmaking/getQueueEntryByConnectionId.js'
 import { getSearchingEntriesByStake } from './matchmaking/getSearchingEntriesByStake.js'
+import { isQueueEntryExpired } from './matchmaking/isQueueEntryExpired.js'
 import type { MatchmakingState } from './matchmaking/matchmakingState.js'
 import {
   MATCHMAKING_WAIT_MS,
@@ -1080,12 +1081,16 @@ function sendMatchmakingStatusToConnection(
   const oldestEntry = searchingEntries[0]
   const now = Date.now()
   const countdownEndsAt = oldestEntry?.expiresAt ?? ownEntry.expiresAt
-  const previewBotDisplayNames = selectMatchmakingBotProfiles({
-    stake,
-    count: Math.max(0, MATCH_PLAYERS_REQUIRED - searchingEntries.length),
-    selectionSeed: createMatchmakingBotSelectionSeed(stake, searchingEntries),
-    minLevel: matchRoomsStore.getRoom(stake)?.minLevel ?? 1,
-  }).map((profile) => profile.identity.displayName)
+  const stakeMinLevel = matchRoomsStore.getRoom(stake)?.minLevel ?? 1
+  const previewBotDisplayNames = stakeMinLevel > 7
+    ? []
+    : selectMatchmakingBotProfiles({
+        stake,
+        count: Math.max(0, MATCH_PLAYERS_REQUIRED - searchingEntries.length),
+        selectionSeed: createMatchmakingBotSelectionSeed(stake, searchingEntries),
+        minLevel: stakeMinLevel,
+      }).map((profile) => profile.identity.displayName)
+  const totalDurationMs = ownEntry.expiresAt - ownEntry.joinedAt
 
   safeSendToConnection(connectionId, {
     type: 'matchmaking_status',
@@ -1094,6 +1099,7 @@ function sendMatchmakingStatusToConnection(
     requiredPlayers: MATCH_PLAYERS_REQUIRED,
     countdownEndsAt,
     remainingMs: Math.max(0, countdownEndsAt - now),
+    totalDurationMs,
     previewBotDisplayNames,
     ...(localStakeDeducted === true ? { localStakeDeducted: true as const } : {}),
   })
@@ -1132,6 +1138,8 @@ function processMatchmakingUnsafe(): void {
   const entriesToEarlyDebit = matchmakingState.queueEntries.filter((entry) => {
     if (entry.stakePaid || entry.profileId === null) return false
     if (earlyDebitNow < entry.expiresAt - EARLY_BOT_FILL_DEBIT_MS) return false
+    const stakeMinLevel = matchRoomsStore.getRoom(entry.stake)?.minLevel ?? 1
+    if (stakeMinLevel > 7) return false
     const humanCountForStake = getSearchingEntriesByStake(
       matchmakingState.queueEntries,
       entry.stake,
@@ -1177,16 +1185,50 @@ function processMatchmakingUnsafe(): void {
   while (guard < 20) {
     guard += 1
 
-    const result = tryCreatePendingMatchGroup(
-      matchmakingState,
-      (a, b) => blockStore.isBlocked(a, b),
-      (stake, profileId, baseName, completedGamesCount, wonGamesCount) => {
-        const stakeMinLevel = matchRoomsStore.getRoom(stake)?.minLevel ?? 1
-        if (stakeMinLevel > 7) return null
-        const profile = playerProgressStore.createTemporaryBotProfile(profileId, baseName, completedGamesCount, wonGamesCount)
-        return profile.displayName
-      },
-    )
+    let result: ReturnType<typeof tryCreatePendingMatchGroup>
+
+    try {
+      result = tryCreatePendingMatchGroup(
+        matchmakingState,
+        (a, b) => blockStore.isBlocked(a, b),
+        (stake, profileId, baseName, completedGamesCount, wonGamesCount) => {
+          const stakeMinLevel = matchRoomsStore.getRoom(stake)?.minLevel ?? 1
+          if (stakeMinLevel > 7) return null
+          const profile = playerProgressStore.createTemporaryBotProfile(profileId, baseName, completedGamesCount, wonGamesCount)
+          return profile.displayName
+        },
+      )
+    } catch (error) {
+      console.error('[matchmaking] failed to create match group:', error)
+      for (const stake of SUPPORTED_MATCH_STAKES) {
+        const expiredEntries = getSearchingEntriesByStake(matchmakingState.queueEntries, stake)
+          .filter((e) => isQueueEntryExpired(e))
+        for (const entry of expiredEntries) {
+          if (entry.stakePaid && entry.profileId !== null) {
+            const refundResult = matchEconomyStore.refundQueueStake(
+              entry.entryId,
+              entry.profileId,
+              entry.stake,
+            )
+            if (!refundResult.ok) {
+              console.error(`[match-economy] stake refund failed entry=${entry.entryId}: ${refundResult.message}`)
+            }
+          }
+          safeSendToConnection(entry.connectionId, {
+            type: 'matchmaking_expired',
+            stake: entry.stake,
+          })
+        }
+        if (expiredEntries.length > 0) {
+          const expiredIds = new Set(expiredEntries.map((e) => e.entryId))
+          matchmakingState = {
+            ...matchmakingState,
+            queueEntries: matchmakingState.queueEntries.filter((e) => !expiredIds.has(e.entryId)),
+          }
+        }
+      }
+      break
+    }
 
     matchmakingState = result.matchmakingState
 
@@ -4648,6 +4690,7 @@ wsServer.on('connection', (socket, request) => {
           removeConnectionFromMatchmaking(connection.id)
         }
 
+        const stakeMinLevelForEntry = matchRoomsStore.getRoom(message.stake)?.minLevel ?? 1
         const nextEntry = createMatchmakingQueueEntry({
           connectionId: connection.id,
           playerId: stablePlayerConnection.playerId ?? stablePlayerConnection.id,
@@ -4655,6 +4698,7 @@ wsServer.on('connection', (socket, request) => {
           publicProfile,
           displayName: publicProfile.displayName,
           stake: message.stake,
+          waitMs: stakeMinLevelForEntry > 7 ? 60000 : 20000,
         })
 
         matchmakingState = {
@@ -4677,15 +4721,18 @@ wsServer.on('connection', (socket, request) => {
           matchmakingState.queueEntries,
           queuedEntryAfterStakeCollection.stake,
         ).sort((a, b) => a.joinedAt - b.joinedAt)
-        const previewBotDisplayNames = selectMatchmakingBotProfiles({
-          stake: queuedEntryAfterStakeCollection.stake,
-          count: Math.max(0, MATCH_PLAYERS_REQUIRED - searchingEntries.length),
-          selectionSeed: createMatchmakingBotSelectionSeed(
-            queuedEntryAfterStakeCollection.stake,
-            searchingEntries,
-          ),
-          minLevel: matchRoomsStore.getRoom(queuedEntryAfterStakeCollection.stake)?.minLevel ?? 1,
-        }).map((profile) => profile.identity.displayName)
+        const joinedStakeMinLevel = matchRoomsStore.getRoom(queuedEntryAfterStakeCollection.stake)?.minLevel ?? 1
+        const previewBotDisplayNames = joinedStakeMinLevel > 7
+          ? []
+          : selectMatchmakingBotProfiles({
+              stake: queuedEntryAfterStakeCollection.stake,
+              count: Math.max(0, MATCH_PLAYERS_REQUIRED - searchingEntries.length),
+              selectionSeed: createMatchmakingBotSelectionSeed(
+                queuedEntryAfterStakeCollection.stake,
+                searchingEntries,
+              ),
+              minLevel: joinedStakeMinLevel,
+            }).map((profile) => profile.identity.displayName)
 
         safeSendToConnection(connection.id, {
           type: 'matchmaking_joined',
@@ -4697,6 +4744,7 @@ wsServer.on('connection', (socket, request) => {
           requiredPlayers: MATCH_PLAYERS_REQUIRED,
           countdownEndsAt: queuedEntryAfterStakeCollection.expiresAt,
           remainingMs: Math.max(0, queuedEntryAfterStakeCollection.expiresAt - Date.now()),
+          totalDurationMs: queuedEntryAfterStakeCollection.expiresAt - queuedEntryAfterStakeCollection.joinedAt,
           previewBotDisplayNames,
         })
 

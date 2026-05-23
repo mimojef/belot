@@ -324,6 +324,7 @@ type InternalLobbyFlowState = {
   requiredPlayers: number
   remainingMs: number | null
   countdownEndsAt: number | null
+  totalCountdownMs: number
   errorText: string | null
   profilePopupOpen: boolean
   profilePopupProfile: PlayerPublicProfileSnapshot | null
@@ -446,6 +447,7 @@ type InternalLobbyFlowState = {
   blockedPlayersErrorText: string | null
   blockedPlayersLimit: number
   blockLimitPopupOpen: boolean
+  noPlayersModalOpen: boolean
   supportPopupOpen: boolean
   supportMessages: SupportMessageSnapshot[]
   supportUnreadCount: number
@@ -473,7 +475,7 @@ type StakeCardConfig = {
 }
 
 const DEFAULT_REQUIRED_PLAYERS = 4
-const DEFAULT_COUNTDOWN_MS = 15000
+const DEFAULT_COUNTDOWN_MS = 20000
 const FINAL_FILL_START_REMAINING_MS = 3000
 const FINAL_FILL_STAGGER_OFFSETS_MS = [0, 620, 860] as const
 const FINAL_FILL_MATCH_START_DELAY_MS = 1000
@@ -509,6 +511,7 @@ function createInitialState(): InternalLobbyFlowState {
     requiredPlayers: DEFAULT_REQUIRED_PLAYERS,
     remainingMs: null,
     countdownEndsAt: null,
+    totalCountdownMs: DEFAULT_COUNTDOWN_MS,
     errorText: null,
     profilePopupOpen: false,
     profilePopupProfile: null,
@@ -615,6 +618,7 @@ function createInitialState(): InternalLobbyFlowState {
     blockedPlayersErrorText: null,
     blockedPlayersLimit: 50,
     blockLimitPopupOpen: false,
+    noPlayersModalOpen: false,
     supportPopupOpen: false,
     supportMessages: [],
     supportUnreadCount: 0,
@@ -1048,6 +1052,7 @@ export function createLobbyFlowController(
     state.requiredPlayers = DEFAULT_REQUIRED_PLAYERS
     state.remainingMs = null
     state.countdownEndsAt = null
+    state.totalCountdownMs = DEFAULT_COUNTDOWN_MS
     state.serverPreviewBotDisplayNames = []
     state.matchRoomsLoaded = false
     clearServerRoomSnapshot()
@@ -1069,12 +1074,12 @@ export function createLobbyFlowController(
     }
 
     const remainingMs = clamp(
-      getLobbyRemainingMs(state) ?? DEFAULT_COUNTDOWN_MS,
+      getLobbyRemainingMs(state) ?? state.totalCountdownMs,
       0,
-      DEFAULT_COUNTDOWN_MS,
+      state.totalCountdownMs,
     )
     const countdownSeconds = Math.ceil(remainingMs / 1000)
-    const progressDegrees = (remainingMs / DEFAULT_COUNTDOWN_MS) * 360
+    const progressDegrees = (remainingMs / state.totalCountdownMs) * 360
 
     if (lastRenderedCountdownSecond !== countdownSeconds) {
       countdownTextElement.innerHTML = `
@@ -1107,6 +1112,10 @@ export function createLobbyFlowController(
       return
     }
 
+    if (state.serverPreviewBotDisplayNames.length === 0) {
+      return
+    }
+
     const remainingMs = getLobbyRemainingMs(state)
 
     if (remainingMs === null || remainingMs > FINAL_FILL_START_REMAINING_MS) {
@@ -1116,12 +1125,6 @@ export function createLobbyFlowController(
     finalFillSequenceStartedAt = Date.now()
     finalFillBaseQueuedPlayers = state.queuedPlayers
     finalFillAnimatedQueuedPlayers = state.queuedPlayers
-
-    if (pendingStakeEffect) {
-      pendingStakeEffect = false
-      stakeEffectStartedAt = Date.now()
-      showStakeDeductionEffect(state.selectedStake)
-    }
   }
 
   function isFinalFillSequenceComplete(): boolean {
@@ -1149,18 +1152,17 @@ export function createLobbyFlowController(
     stopWaitingRoomActivity()
     clearFinalFillAnimationState()
 
-    const STAKE_EFFECT_VISIBLE_MS = 1600
-    const elapsed = stakeEffectStartedAt !== null ? Date.now() - stakeEffectStartedAt : null
-    const remainingDelay =
-      elapsed !== null ? Math.max(0, STAKE_EFFECT_VISIBLE_MS - elapsed) : 0
-    const stakeAlreadyShown = stakeEffectStartedAt !== null
+    const STAKE_EFFECT_VISIBLE_MS = 1500
 
-    stakeEffectStartedAt = null
-
-    if (remainingDelay > 0) {
-      setTimeout(() => options.onMatchFound(matchFoundMessage, stakeAlreadyShown), remainingDelay)
+    if (stakeEffectStartedAt !== null) {
+      const elapsed = Date.now() - stakeEffectStartedAt
+      const remainingDelay = Math.max(0, STAKE_EFFECT_VISIBLE_MS - elapsed)
+      stakeEffectStartedAt = null
+      setTimeout(() => options.onMatchFound(matchFoundMessage, true), remainingDelay)
     } else {
-      options.onMatchFound(matchFoundMessage, stakeAlreadyShown)
+      stakeEffectStartedAt = null
+      showStakeDeductionEffect(matchFoundMessage.stake)
+      setTimeout(() => options.onMatchFound(matchFoundMessage, true), STAKE_EFFECT_VISIBLE_MS)
     }
     return true
   }
@@ -1228,6 +1230,17 @@ export function createLobbyFlowController(
 
     if (nextAnimatedQueuedPlayers !== finalFillAnimatedQueuedPlayers) {
       finalFillAnimatedQueuedPlayers = nextAnimatedQueuedPlayers
+
+      if (
+        finalFillAnimatedQueuedPlayers >= state.requiredPlayers &&
+        pendingStakeEffect &&
+        stakeEffectStartedAt === null
+      ) {
+        pendingStakeEffect = false
+        stakeEffectStartedAt = Date.now()
+        showStakeDeductionEffect(state.selectedStake)
+      }
+
       maybeSchedulePendingMatchFound()
       return true
     }
@@ -1467,6 +1480,7 @@ export function createLobbyFlowController(
       blockedPlayersErrorText: state.blockedPlayersErrorText,
       blockedPlayersLimit: state.blockedPlayersLimit,
       blockLimitPopupOpen: state.blockLimitPopupOpen,
+      noPlayersModalOpen: state.noPlayersModalOpen,
       isInGame: options.getIsInGame?.() ?? false,
       supportPopupOpen: state.supportPopupOpen,
       supportMessages: state.supportMessages,
@@ -1652,6 +1666,10 @@ export function createLobbyFlowController(
       },
       onBlockLimitPopupClose: () => {
         state.blockLimitPopupOpen = false
+        render()
+      },
+      onNoPlayersModalClose: () => {
+        state.noPlayersModalOpen = false
         render()
       },
       onChatClick: () => {
@@ -3437,13 +3455,17 @@ export function createLobbyFlowController(
       return
     }
 
+    const stakeRoom = state.matchRooms.find((r) => r.stakeAmount === stake)
+    const optimisticCountdownMs = (stakeRoom?.minLevel ?? 1) > 7 ? 60000 : DEFAULT_COUNTDOWN_MS
+
     state.errorText = null
     state.isSearching = true
     state.currentScreen = 'matchmaking-room'
     state.queuedPlayers = 1
     state.requiredPlayers = DEFAULT_REQUIRED_PLAYERS
-    state.remainingMs = DEFAULT_COUNTDOWN_MS
-    state.countdownEndsAt = Date.now() + DEFAULT_COUNTDOWN_MS
+    state.remainingMs = optimisticCountdownMs
+    state.countdownEndsAt = Date.now() + optimisticCountdownMs
+    state.totalCountdownMs = optimisticCountdownMs
     state.serverPreviewBotDisplayNames = []
     clearServerRoomSnapshot()
     resetFinalFillSequence()
@@ -3456,9 +3478,9 @@ export function createLobbyFlowController(
 
   function paintMatchmakingRoom(): void {
     const remainingMs = clamp(
-      getLobbyRemainingMs(state) ?? DEFAULT_COUNTDOWN_MS,
+      getLobbyRemainingMs(state) ?? state.totalCountdownMs,
       0,
-      DEFAULT_COUNTDOWN_MS,
+      state.totalCountdownMs,
     )
     const displayedQueuedPlayers = getDisplayedQueuedPlayers()
 
@@ -3468,9 +3490,9 @@ export function createLobbyFlowController(
       localPlayer: createDisplayedLocalPlayer(),
       joinedPlayers: createDisplayedJoinedPlayers(),
       countdownRemainingMs: remainingMs,
-      countdownTotalMs: DEFAULT_COUNTDOWN_MS,
+      countdownTotalMs: state.totalCountdownMs,
       statusText: getRoomStatusText(state, displayedQueuedPlayers),
-      canLeave: state.queuedPlayers <= 1,
+      canLeave: displayedQueuedPlayers <= 1,
     })
 
     const cancelButtons = options.root.querySelectorAll<HTMLButtonElement>(
@@ -3479,7 +3501,7 @@ export function createLobbyFlowController(
 
     cancelButtons.forEach((cancelButton) => {
       cancelButton.addEventListener('click', () => {
-        if (state.queuedPlayers > 1) return
+        if (getDisplayedQueuedPlayers() > 1) return
         options.tryUnlockDocumentAudio?.()
         state.errorText = null
         switchToLobby()
@@ -3707,6 +3729,7 @@ export function createLobbyFlowController(
       state.requiredPlayers = message.requiredPlayers
       state.remainingMs = message.remainingMs
       state.countdownEndsAt = message.countdownEndsAt
+      state.totalCountdownMs = message.totalDurationMs ?? DEFAULT_COUNTDOWN_MS
       state.errorText = null
       state.serverPreviewBotDisplayNames = message.previewBotDisplayNames ?? []
       startWaitingClockAudio()
@@ -3722,20 +3745,15 @@ export function createLobbyFlowController(
       state.requiredPlayers = message.requiredPlayers
       state.remainingMs = message.remainingMs
       state.countdownEndsAt = message.countdownEndsAt
+      if (message.totalDurationMs !== undefined) {
+        state.totalCountdownMs = message.totalDurationMs
+      }
       state.errorText = null
       state.serverPreviewBotDisplayNames = message.previewBotDisplayNames ?? []
       startWaitingClockAudio()
 
       if (message.localStakeDeducted === true && stakeEffectStartedAt === null) {
-        if (message.queuedPlayers >= 2) {
-          stakeEffectStartedAt = Date.now()
-          showStakeDeductionEffect(message.stake)
-        } else if (finalFillSequenceStartedAt !== null) {
-          stakeEffectStartedAt = Date.now()
-          showStakeDeductionEffect(message.stake)
-        } else {
-          pendingStakeEffect = true
-        }
+        pendingStakeEffect = true
       }
 
       render()
@@ -3745,6 +3763,13 @@ export function createLobbyFlowController(
     if (message.type === 'matchmaking_left') {
       state.errorText = null
       resetToLobby()
+      return true
+    }
+
+    if (message.type === 'matchmaking_expired') {
+      resetToLobby()
+      state.noPlayersModalOpen = true
+      render()
       return true
     }
 

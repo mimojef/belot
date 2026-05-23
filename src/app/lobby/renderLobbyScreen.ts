@@ -53,6 +53,7 @@ export type LobbyScreenState = {
   blockedPlayersErrorText: string | null
   blockedPlayersLimit: number
   blockLimitPopupOpen: boolean
+  noPlayersModalOpen: boolean
   isInGame: boolean
   displayName: string
   selectedStake: MatchStake
@@ -240,6 +241,7 @@ export type RenderLobbyScreenOptions = {
   onBlockedPlayersClose: () => void
   onUnblockClick: (profileId: string) => void
   onBlockLimitPopupClose: () => void
+  onNoPlayersModalClose: () => void
   onChatClick: () => void
   onChatConversationClick: (friendshipId: string) => void
   onChatMarkRead: (friendshipId: string) => void
@@ -4323,6 +4325,51 @@ function renderBlockLimitPopup(state: LobbyScreenState): string {
   `
 }
 
+function renderNoPlayersModal(state: LobbyScreenState): string {
+  if (!state.noPlayersModalOpen) return ''
+
+  return `
+    <div
+      data-no-players-modal-root="1"
+      style="position:fixed;inset:0;z-index:13800;display:flex;align-items:center;justify-content:center;padding:24px;"
+    >
+      <div
+        data-no-players-modal-backdrop="1"
+        style="position:absolute;inset:0;background:rgba(0,0,0,0.80);backdrop-filter:blur(5px);"
+      ></div>
+      <div role="dialog" aria-modal="true" style="
+        position:relative;
+        width:min(92vw,440px);
+        border-radius:12px;
+        border:2px solid rgba(255,255,255,0.12);
+        background:linear-gradient(180deg,rgba(28,28,28,0.99) 0%,rgba(8,8,8,0.99) 100%);
+        box-shadow:0 40px 90px rgba(0,0,0,0.55);
+        padding:32px 28px 26px;
+        text-align:center;
+      ">
+        <div style="font-size:42px;margin-bottom:16px;">⏳</div>
+        <div style="font-size:20px;font-weight:900;color:#f8fafc;line-height:1.2;margin-bottom:12px;">
+          Няма достатъчно свободни играчи
+        </div>
+        <div style="font-size:14px;line-height:1.65;color:rgba(255,255,255,0.60);font-weight:500;margin-bottom:24px;">
+          В момента няма достатъчно играчи за тази маса.<br>Пробвай отново малко по-късно.
+        </div>
+        <button
+          type="button"
+          data-no-players-modal-close="1"
+          style="
+            width:100%;height:46px;
+            border:0;border-radius:10px;
+            background:linear-gradient(135deg,rgba(255,255,255,0.14) 0%,rgba(255,255,255,0.06) 100%);
+            border:1px solid rgba(255,255,255,0.14);
+            color:#f8fafc;font-size:15px;font-weight:900;cursor:pointer;
+          "
+        >Към лобито</button>
+      </div>
+    </div>
+  `
+}
+
 export function renderLobbyScreen(
   root: HTMLElement,
   options: RenderLobbyScreenOptions,
@@ -4510,6 +4557,7 @@ export function renderLobbyScreen(
       ${renderLeavePrivateRoomConfirmPopup(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
+      ${renderNoPlayersModal(state)}
       ${renderSupportPopup(state)}
     </div>
   `
@@ -4712,6 +4760,14 @@ export function renderLobbyScreen(
   root
     .querySelector<HTMLElement>('[data-block-limit-popup-backdrop="1"]')
     ?.addEventListener('click', options.onBlockLimitPopupClose)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-no-players-modal-close="1"]')
+    ?.addEventListener('click', options.onNoPlayersModalClose)
+
+  root
+    .querySelector<HTMLElement>('[data-no-players-modal-backdrop="1"]')
+    ?.addEventListener('click', options.onNoPlayersModalClose)
 
   root
     .querySelector<HTMLButtonElement>('[data-block-limit-open-list="1"]')

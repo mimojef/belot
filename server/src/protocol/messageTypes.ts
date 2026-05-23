@@ -390,6 +390,7 @@ export type MatchmakingJoinedMessage = {
   requiredPlayers: number
   countdownEndsAt: number
   remainingMs: number
+  totalDurationMs?: number
   previewBotDisplayNames?: string[]
 }
 
@@ -400,6 +401,7 @@ export type MatchmakingStatusMessage = {
   requiredPlayers: number
   countdownEndsAt: number
   remainingMs: number
+  totalDurationMs?: number
   previewBotDisplayNames?: string[]
   localStakeDeducted?: true
 }
@@ -407,6 +409,11 @@ export type MatchmakingStatusMessage = {
 export type MatchmakingLeftMessage = {
   type: 'matchmaking_left'
   removed: boolean
+}
+
+export type MatchmakingExpiredMessage = {
+  type: 'matchmaking_expired'
+  stake: MatchStake
 }
 
 export type MatchFoundMessage = {
@@ -549,6 +556,7 @@ export type ServerMessage =
   | MatchmakingJoinedMessage
   | MatchmakingStatusMessage
   | MatchmakingLeftMessage
+  | MatchmakingExpiredMessage
   | MatchFoundMessage
   | EmojiReactionMessage
   | PrivateRoomsListMessage

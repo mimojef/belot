@@ -18,6 +18,7 @@ type CreateMatchmakingQueueEntryOptions = {
   displayName: string
   publicProfile?: PlayerPublicProfileSnapshot | null
   stake: MatchStake
+  waitMs?: number
 }
 
 function normalizeDisplayName(value: string): string {
@@ -45,7 +46,7 @@ export function createMatchmakingQueueEntry(
     stake: options.stake,
     stakePaid: false,
     joinedAt: now,
-    expiresAt: now + MATCHMAKING_WAIT_MS,
+    expiresAt: now + (options.waitMs ?? MATCHMAKING_WAIT_MS),
     status: 'searching',
   }
 }

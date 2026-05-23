@@ -60,7 +60,7 @@ export type PendingMatchGroup = {
   seatAssignments: MatchSeatAssignment[]
 }
 
-export const MATCHMAKING_WAIT_MS = 15000
+export const MATCHMAKING_WAIT_MS = 20000
 
 // Populated at runtime from matchRoomsStore — do not rely on this at import time.
 export let SUPPORTED_MATCH_STAKES: MatchStake[] = []
