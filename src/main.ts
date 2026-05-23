@@ -2455,8 +2455,10 @@ client.connect()
 // Offline overlay — показва се при реална загуба на интернет връзка
 ;(function initOfflineOverlay() {
   let overlayEl: HTMLElement | null = null
+  let wentOffline = !navigator.onLine
 
   function showOfflineOverlay(): void {
+    wentOffline = true
     if (overlayEl) return
     const el = document.createElement('div')
     el.style.cssText = [
@@ -2485,7 +2487,7 @@ client.connect()
   }
 
   function hideOfflineOverlay(): void {
-    if (!overlayEl) return
+    if (!wentOffline) return
     location.reload()
   }
 
