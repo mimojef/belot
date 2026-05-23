@@ -2479,7 +2479,7 @@ client.connect()
         color:#080808;font-size:15px;font-weight:900;cursor:pointer;
       ">Опитай отново</button>
     `
-    el.querySelector('#offline-retry-btn')?.addEventListener('click', () => { location.reload() })
+    el.querySelector('#offline-retry-btn')?.addEventListener('click', () => { location.replace('/lobby') })
     document.body.appendChild(el)
     overlayEl = el
   }
@@ -2487,9 +2487,9 @@ client.connect()
   function hardReload(): void {
     // Изчисти navigation кеша на SW за да се вземе свеж index.html от мрежата
     if ('caches' in window) {
-      caches.delete('navigation-cache').finally(() => location.reload())
+      caches.delete('navigation-cache').finally(() => location.replace('/lobby'))
     } else {
-      location.reload()
+      location.replace('/lobby')
     }
   }
 
