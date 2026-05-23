@@ -111,6 +111,9 @@ let isRefreshingAuthConnection = false
 let isSessionDisplaced = false
 let shouldReloadLobbyOnReconnect = false
 let offlineLobbyReloadScheduled = false
+let showOfflineConnectionOverlay: () => void = () => {
+  shouldReloadLobbyOnReconnect = true
+}
 let currentAuthSession: AuthSession | null = null
 
 const SESSION_CACHE_KEY = 'pika_session_cache'
@@ -2308,6 +2311,8 @@ client = createGameServerClient({
       return
     }
 
+    showOfflineConnectionOverlay()
+
     if (activeRoom.hasActiveRoom()) {
       shouldReloadLobbyOnReconnect = true
       activeRoom.setConnectionState(false, SERVER_RESTART_WAIT_MESSAGE)
@@ -2486,6 +2491,9 @@ client.connect()
 // Offline overlay — показва се при реална загуба на интернет връзка
 ;(function initOfflineOverlay() {
   let overlayEl: HTMLElement | null = null
+  let networkMonitorInFlight = false
+  let consecutiveNetworkFailures = 0
+
   function showOfflineOverlay(): void {
     shouldReloadLobbyOnReconnect = true
     if (overlayEl) return
@@ -2515,6 +2523,38 @@ client.connect()
     overlayEl = el
   }
 
+  showOfflineConnectionOverlay = showOfflineOverlay
+
+  async function checkNetworkHealth(): Promise<void> {
+    if (networkMonitorInFlight || offlineLobbyReloadScheduled || isPageUnloading) return
+    networkMonitorInFlight = true
+
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/health`, {
+        method: 'GET',
+        cache: 'no-store',
+      })
+
+      if (response.ok) {
+        consecutiveNetworkFailures = 0
+        if (overlayEl !== null && shouldReloadLobbyOnReconnect) {
+          forceOfflineLobbyReload()
+        }
+        return
+      }
+
+      consecutiveNetworkFailures += 1
+    } catch {
+      consecutiveNetworkFailures += 1
+    } finally {
+      networkMonitorInFlight = false
+    }
+
+    if (consecutiveNetworkFailures >= 2) {
+      showOfflineOverlay()
+    }
+  }
+
   function hardReload(): void {
     forceOfflineLobbyReload()
     // Изчисти navigation кеша на SW за да се вземе свеж index.html от мрежата
@@ -2523,6 +2563,9 @@ client.connect()
   if (!navigator.onLine) showOfflineOverlay()
   window.addEventListener('offline', showOfflineOverlay)
   window.addEventListener('online', hardReload)
+  window.setInterval(() => {
+    void checkNetworkHealth()
+  }, 3000)
 })()
 }
 
