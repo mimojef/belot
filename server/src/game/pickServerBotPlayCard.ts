@@ -524,17 +524,35 @@ function partnerMandatoryRequestedSuit(
   if (card.suit === leadSuit) return null
 
   if (contract === 'all-trumps') {
-    return card.rank === 'J' ? card.suit : null
+    const partnerHand = state.hands[partner] ?? []
+    const partnerStillHasSuit = partnerHand.some(c => c.suit === card.suit)
+    const partnerHandIsReady = partnerHand.every(c =>
+      isCardMaster(c, partner, state, trumpSuit, contract)
+    )
+
+    return partnerStillHasSuit && partnerHandIsReady ? card.suit : null
   }
 
   if (contract === 'no-trumps') {
-    return card.rank === 'A' ? card.suit : null
+    const partnerHand = state.hands[partner] ?? []
+    const partnerStillHasSuit = partnerHand.some(c => c.suit === card.suit)
+    const partnerHandIsReady = partnerHand.every(c =>
+      isCardMaster(c, partner, state, trumpSuit, contract)
+    )
+
+    return partnerStillHasSuit && partnerHandIsReady ? card.suit : null
   }
 
-  // При коз боя оставяме досегашното J/A правило.
-  if (card.rank === 'J' || card.rank === 'A') {
-    if (card.suit === trumpSuit) return trumpSuit
-    return resolveColorSignal(card.suit, seat, state)
+  if (contract === 'suit') {
+    if (card.suit === trumpSuit) return null
+
+    const partnerHand = state.hands[partner] ?? []
+    const partnerStillHasSuit = partnerHand.some(c => c.suit === card.suit)
+    const partnerHandIsReady = partnerHand.every(c =>
+      isCardMaster(c, partner, state, trumpSuit, contract)
+    )
+
+    return partnerStillHasSuit && partnerHandIsReady ? card.suit : null
   }
 
   return null
@@ -685,6 +703,77 @@ function didBothOpponentsVoidOnTeamTrumpLead(
     return opponentPlays.length === 2 &&
       opponentPlays.every(play => play.card.suit !== trumpSuit)
   })
+}
+
+function doOpponentsStillHaveTrump(
+  state: ServerAuthoritativeGameState,
+  seat: Seat,
+  trumpSuit: ServerSuit | null,
+): boolean {
+  if (!trumpSuit) return false
+
+  const [opp1, opp2] = getOpponentSeats(seat)
+  return [...(state.hands[opp1] ?? []), ...(state.hands[opp2] ?? [])].some(
+    c => c.suit === trumpSuit,
+  )
+}
+
+function hasUnplayedHigherTrumpOutsideHand(
+  state: ServerAuthoritativeGameState,
+  seat: Seat,
+  trumpSuit: ServerSuit,
+  card: ServerCard,
+): boolean {
+  const played = allPlayedCards(state)
+  const hand = state.hands[seat] ?? []
+
+  for (const rank of Object.keys(TRUMP_POWER) as ServerRank[]) {
+    if (TRUMP_POWER[rank] <= TRUMP_POWER[card.rank]) continue
+
+    const isPlayed = played.some(c => c.suit === trumpSuit && c.rank === rank)
+    const isInHand = hand.some(c => c.suit === trumpSuit && c.rank === rank)
+    if (!isPlayed && !isInHand) return true
+  }
+
+  return false
+}
+
+function chooseTrumpAfterPartnerFedDeclarer(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  if (contract !== 'suit' || !trumpSuit) return null
+  if (state.bidding.winningBid?.seat !== seat) return null
+  if (!doOpponentsStillHaveTrump(state, seat, trumpSuit)) return null
+
+  const completedTricks = state.playing?.completedTricks ?? []
+  const lastTrick = completedTricks[completedTricks.length - 1] ?? null
+  if (!lastTrick) return null
+
+  const partner = getPartnerSeat(seat)
+  if (lastTrick.leaderSeat !== partner || lastTrick.winnerSeat !== seat) return null
+  if (lastTrick.plays[0]?.card.suit !== trumpSuit) return null
+
+  const winnerPlay = lastTrick.plays.find(play => play.seat === seat)
+  if (!winnerPlay || winnerPlay.card.suit !== trumpSuit) return null
+
+  const ourTrumps = trumpCards(validCards, trumpSuit, contract)
+  if (ourTrumps.length === 0) return null
+
+  const nine = ourTrumps.find(c => c.rank === '9') ?? null
+  if (winnerPlay.card.rank === 'J' && nine) {
+    return nine
+  }
+
+  const strongestTrump = highestCard(ourTrumps, trumpSuit, contract)
+  if (hasUnplayedHigherTrumpOutsideHand(state, seat, trumpSuit, strongestTrump)) {
+    return lowestCard(ourTrumps, trumpSuit, contract)
+  }
+
+  return strongestTrump
 }
 
 function chooseOwnSuitBidTrumpDraw(
@@ -1031,6 +1120,17 @@ function chooseLead(
     return defensiveSingletonLead
   }
 
+  const partnerFedDeclarerTrump = chooseTrumpAfterPartnerFedDeclarer(
+    seat,
+    state,
+    validCards,
+    trumpSuit,
+    contract,
+  )
+  if (partnerFedDeclarerTrump) {
+    return partnerFedDeclarerTrump
+  }
+
   const ownTrumpDraw = chooseOwnSuitBidTrumpDraw(seat, state, validCards, trumpSuit, contract)
   if (ownTrumpDraw) {
     return ownTrumpDraw
@@ -1117,7 +1217,7 @@ function chooseLead(
     }
 
     // ── Rule 4: Сигнализирана боя (висока карта на партньора на наша взятка)
-    const signaled = partnerSignaledSuit(seat, state, trumpSuit)
+    const signaled = null
     if (signaled) {
       const signaledCards = bySuit(validCards, signaled)
       if (signaledCards.length > 0) {
@@ -1225,7 +1325,12 @@ function chooseLead(
         }
       }
 
-      const signaledSuit = partnerSignaledSuit(seat, state, trumpSuit)
+      const signaledSuit = partnerMandatoryRequestedSuit(
+        seat,
+        state,
+        trumpSuit,
+        contract,
+      )
       if (signaledSuit) {
         const signaledCards = bySuit(validCards, signaledSuit)
         if (signaledCards.length > 0) {
@@ -1679,6 +1784,26 @@ function chooseDeclarerJackOnPartnerTrumpLead(
   return validCards.find(c => c.suit === trumpSuit && c.rank === 'J') ?? null
 }
 
+function chooseDeclarerTakePartnerTrumpLead(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  if (contract !== 'suit' || !trumpSuit) return null
+  if (state.bidding.winningBid?.seat !== seat) return null
+
+  const plays = state.playing?.currentTrick?.plays ?? []
+  if (plays[0]?.seat !== getPartnerSeat(seat)) return null
+  if (plays[0]?.card.suit !== trumpSuit) return null
+
+  const validTrumps = validCards.filter(c => c.suit === trumpSuit)
+  if (validTrumps.length === 0) return null
+
+  return highestCard(validTrumps, trumpSuit, contract)
+}
+
 function chooseFollow(
   seat: Seat,
   state: ServerAuthoritativeGameState,
@@ -1705,6 +1830,17 @@ function chooseFollow(
   //   властните си карти (да трупаме точки) и после да му върнем в неговия цвят.
   const plays = state.playing?.currentTrick?.plays ?? []
   const partnerIsLeader = plays.length > 0 && plays[0]!.seat === getPartnerSeat(seat)
+
+  const declarerTakePartnerTrumpLead = chooseDeclarerTakePartnerTrumpLead(
+    seat,
+    state,
+    validCards,
+    trumpSuit,
+    contract,
+  )
+  if (declarerTakePartnerTrumpLead) {
+    return declarerTakePartnerTrumpLead
+  }
 
   const declarerJackOnPartnerTrumpLead = chooseDeclarerJackOnPartnerTrumpLead(
     seat,
@@ -1975,6 +2111,81 @@ function isAllTrumpsControlledSuit(
   return jPlayed && suitHand.some(c => c.rank === '9')
 }
 
+function chooseAllTrumpsSignalDiscard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  const hand = state.hands[seat] ?? []
+  const leadSuit = state.playing?.currentTrick?.plays[0]?.card.suit ?? null
+  const candidates = validCards.filter(card => {
+    if (!leadSuit || card.suit === leadSuit) return false
+
+    const remaining = hand.filter(c => c.id !== card.id)
+    const keepsRequestedSuit = remaining.some(c => c.suit === card.suit)
+
+    return (
+      keepsRequestedSuit &&
+      areRemainingCardsAllMasters(seat, state, card, null, 'all-trumps')
+    )
+  })
+
+  if (candidates.length === 0) return null
+
+  return highestCard(candidates, null, 'all-trumps')
+}
+
+function chooseNoTrumpsSignalDiscard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  const hand = state.hands[seat] ?? []
+  const leadSuit = state.playing?.currentTrick?.plays[0]?.card.suit ?? null
+  const candidates = validCards.filter(card => {
+    if (!leadSuit || card.suit === leadSuit) return false
+
+    const remaining = hand.filter(c => c.id !== card.id)
+    const keepsRequestedSuit = remaining.some(c => c.suit === card.suit)
+
+    return (
+      keepsRequestedSuit &&
+      areRemainingCardsAllMasters(seat, state, card, null, 'no-trumps')
+    )
+  })
+
+  if (candidates.length === 0) return null
+
+  return highestCard(candidates, null, 'no-trumps')
+}
+
+function chooseSuitPlainSignalDiscard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+): ServerCard | null {
+  if (!trumpSuit) return null
+
+  const hand = state.hands[seat] ?? []
+  const leadSuit = state.playing?.currentTrick?.plays[0]?.card.suit ?? null
+  const candidates = validCards.filter(card => {
+    if (!leadSuit || card.suit === leadSuit || card.suit === trumpSuit) return false
+
+    const remaining = hand.filter(c => c.id !== card.id)
+    const keepsRequestedSuit = remaining.some(c => c.suit === card.suit)
+
+    return (
+      keepsRequestedSuit &&
+      areRemainingCardsAllMasters(seat, state, card, trumpSuit, 'suit')
+    )
+  })
+
+  if (candidates.length === 0) return null
+
+  return highestCard(candidates, trumpSuit, 'suit')
+}
+
 function discardSignal(
   seat: Seat,
   state: ServerAuthoritativeGameState,
@@ -1987,11 +2198,39 @@ function discardSignal(
   // ── В БЕЗКОЗ: пазим всичко ценно, чистим с най-ниската безполезна карта
   if (contract === 'no-trumps') {
     const hand = state.hands[seat] ?? []
+    const signalCard = chooseNoTrumpsSignalDiscard(seat, state, validCards)
+    if (signalCard) {
+      return signalCard
+    }
+
     const useless = validCards.filter(c => NO_TRUMP_POWER[c.rank] <= 2 && !wouldBareNine(c, hand))
     if (useless.length > 0) {
       return lowestCard(useless, trumpSuit, contract)
     }
     return safeDiscard(validCards, hand, trumpSuit, contract)
+  }
+
+  if (contract === 'all-trumps') {
+    const signalCard = chooseAllTrumpsSignalDiscard(seat, state, validCards)
+    if (signalCard) {
+      return signalCard
+    }
+
+    return safeDiscard(validCards, state.hands[seat] ?? [], trumpSuit, contract)
+  }
+
+  if (contract === 'suit') {
+    const signalCard = chooseSuitPlainSignalDiscard(
+      seat,
+      state,
+      validCards,
+      trumpSuit,
+    )
+    if (signalCard) {
+      return signalCard
+    }
+
+    return safeDiscard(validCards, state.hands[seat] ?? [], trumpSuit, contract)
   }
 
   // ── ПРИ БОЯ / ВСИЧКО КОЗ:
