@@ -115,7 +115,7 @@ const SEAT_LABELS: Record<Seat, string> = {
   left: 'Ляво',
 }
 
-const REACTION_COUNTDOWN_WARNING_THRESHOLD_MS = 5_000
+const REACTION_COUNTDOWN_WARNING_THRESHOLD_MS = 7_000
 
 const STAKE_PRIZE_MAP: Partial<Record<number, number>> = {
   5000: 8000,
