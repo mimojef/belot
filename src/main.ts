@@ -2486,8 +2486,7 @@ client.connect()
 
   function hideOfflineOverlay(): void {
     if (!overlayEl) return
-    overlayEl.remove()
-    overlayEl = null
+    location.reload()
   }
 
   if (!navigator.onLine) showOfflineOverlay()
