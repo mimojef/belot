@@ -2455,10 +2455,8 @@ client.connect()
 // Offline overlay — показва се при реална загуба на интернет връзка
 ;(function initOfflineOverlay() {
   let overlayEl: HTMLElement | null = null
-  let wentOffline = !navigator.onLine
 
   function showOfflineOverlay(): void {
-    wentOffline = true
     if (overlayEl) return
     const el = document.createElement('div')
     el.style.cssText = [
@@ -2486,14 +2484,18 @@ client.connect()
     overlayEl = el
   }
 
-  function hideOfflineOverlay(): void {
-    if (!wentOffline) return
-    location.reload()
+  function hardReload(): void {
+    // Изчисти navigation кеша на SW за да се вземе свеж index.html от мрежата
+    if ('caches' in window) {
+      caches.delete('navigation-cache').finally(() => location.reload())
+    } else {
+      location.reload()
+    }
   }
 
   if (!navigator.onLine) showOfflineOverlay()
   window.addEventListener('offline', showOfflineOverlay)
-  window.addEventListener('online', hideOfflineOverlay)
+  window.addEventListener('online', hardReload)
 })()
 }
 
