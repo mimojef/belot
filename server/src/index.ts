@@ -136,6 +136,11 @@ const likeStore = await createLikeStore(databaseBootstrap.databaseFilePath)
 const blockStore = await createBlockStore(databaseBootstrap.databaseFilePath)
 playerProgressStore.seedCatalogBotsIfNeeded()
 setInterval(() => playerProgressStore.refillCatalogBotWallets(), 5 * 60 * 1000)
+
+const cleanedUpTempBots = playerProgressStore.cleanupAllTemporaryBotProfiles()
+if (cleanedUpTempBots > 0) {
+  console.log(`[startup] Cleaned up ${cleanedUpTempBots} leftover temporary bot profile(s) from previous session.`)
+}
 const adminSettingsStore = await createAdminSettingsStore(
   databaseBootstrap.databaseFilePath,
 )
@@ -584,6 +589,17 @@ function safeSendToConnection(connectionId: ConnectionId, payload: unknown): voi
   sendJsonMessage(socket, payload)
 }
 
+function cleanupTempBotsFromRoom(room: ServerRoom): void {
+  for (const seat of SERVER_SEAT_ORDER) {
+    const participant = room.seats[seat].participant
+    if (participant?.kind !== 'bot') continue
+    const profileId = participant.botProfileId ?? null
+    if (profileId && profileId.startsWith('temp-bot-')) {
+      playerProgressStore.deleteTemporaryBotProfile(profileId)
+    }
+  }
+}
+
 function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): boolean {
   const room = serverState.rooms[roomId] ?? null
 
@@ -605,6 +621,7 @@ function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): 
     rooms: nextRooms,
   }
 
+  cleanupTempBotsFromRoom(room)
   markRoomSnapshotRemoved(roomId)
   removeRoomGameRuntime(roomGameRuntimeRegistry, roomId)
   console.log(`[room-cleanup] removed inactive room=${roomId}`)
@@ -636,6 +653,7 @@ function tickRoomGameRuntimes(): void {
       }
 
       delete nextRooms[roomId]
+      cleanupTempBotsFromRoom(room)
       markRoomSnapshotRemoved(roomId)
       removeRoomGameRuntime(roomGameRuntimeRegistry, roomId)
       console.log(`[room-cleanup] removed inactive room=${roomId}`)
@@ -1102,6 +1120,14 @@ function cleanupPendingGroup(groupId: string): void {
 }
 
 function processMatchmaking(): void {
+  try {
+    processMatchmakingUnsafe()
+  } catch (error) {
+    console.error('[matchmaking] processing error', error)
+  }
+}
+
+function processMatchmakingUnsafe(): void {
   const earlyDebitNow = Date.now()
   const entriesToEarlyDebit = matchmakingState.queueEntries.filter((entry) => {
     if (entry.stakePaid || entry.profileId === null) return false
@@ -1154,6 +1180,12 @@ function processMatchmaking(): void {
     const result = tryCreatePendingMatchGroup(
       matchmakingState,
       (a, b) => blockStore.isBlocked(a, b),
+      (stake, profileId, baseName, completedGamesCount, wonGamesCount) => {
+        const stakeMinLevel = matchRoomsStore.getRoom(stake)?.minLevel ?? 1
+        if (stakeMinLevel > 7) return null
+        const profile = playerProgressStore.createTemporaryBotProfile(profileId, baseName, completedGamesCount, wonGamesCount)
+        return profile.displayName
+      },
     )
 
     matchmakingState = result.matchmakingState
@@ -2052,6 +2084,11 @@ async function handleProfileBlockRequest(
       return true
     }
 
+    if (playerProgressStore.isTemporaryProfile(targetProfileId)) {
+      sendJsonResponse(res, 200, { ok: true, blocked: false })
+      return true
+    }
+
     const result = blockStore.toggleBlock(myProfileId, targetProfileId)
 
     if (result.limitReached) {
@@ -2922,6 +2959,12 @@ async function handleFriendsRequest(
     }
 
     const addresseeProfileId = getStringField(body, 'profileId').trim()
+
+    if (playerProgressStore.isTemporaryProfile(addresseeProfileId)) {
+      sendJsonResponse(res, 200, { ok: false, message: 'Поканата беше отхвърлена.' })
+      return true
+    }
+
     const result = friendshipStore.sendRequest(profileId, addresseeProfileId)
 
     if (!result.ok) {
@@ -5209,11 +5252,7 @@ wsServer.on('connection', (socket, request) => {
 })
 
 setInterval(() => {
-  try {
-    processMatchmaking()
-  } catch (error) {
-    console.error('[matchmaking] processing error', error)
-  }
+  processMatchmaking()
 }, MATCHMAKING_TICK_MS)
 
 setInterval(() => {

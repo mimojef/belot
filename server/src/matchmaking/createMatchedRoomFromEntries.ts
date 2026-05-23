@@ -21,6 +21,7 @@ import {
   createMatchmakingBotSelectionSeed,
   selectMatchmakingBotProfiles,
   type MatchmakingBotSelectionProfile,
+  type TempBotFactory,
 } from './selectMatchmakingBotProfiles.js'
 
 export type CreateMatchedRoomFromEntriesResult = {
@@ -143,6 +144,7 @@ export function createMatchedRoomFromEntries(
   entries: MatchmakingQueueEntry[],
   shouldStartImmediately: boolean,
   blockCheck?: BlockCheck,
+  createTempBot?: TempBotFactory,
 ): CreateMatchedRoomFromEntriesResult {
   const createdAt = Date.now()
   const stake = assertSingleStake(entries)
@@ -199,6 +201,7 @@ export function createMatchedRoomFromEntries(
     stake,
     count: shuffledSeats.length,
     selectionSeed: createMatchmakingBotSelectionSeed(stake, entries),
+    createTempBot,
   })
 
   while (shuffledSeats.length > 0) {
@@ -210,11 +213,20 @@ export function createMatchedRoomFromEntries(
 
     const participant =
       createBotParticipantFromSelectedProfile(selectedBotProfiles[addedBots.length]) ??
-      createBotParticipantFromFallbackSelection(
-        stake,
-        addedBots.flatMap((bot) => (bot.botProfileId ? [bot.botProfileId] : [])),
-        addedBots.length + 1,
+      (process.env.BELOT_ALLOW_CATALOG_BOT_FALLBACK === '1'
+        ? createBotParticipantFromFallbackSelection(
+            stake,
+            addedBots.flatMap((bot) => (bot.botProfileId ? [bot.botProfileId] : [])),
+            addedBots.length + 1,
+          )
+        : null)
+
+    if (!participant) {
+      throw new Error(
+        `[matchmaking] No bot available for stake ${stake}, slot ${addedBots.length + 1}. ` +
+        `Set BELOT_ALLOW_CATALOG_BOT_FALLBACK=1 or add DB bots for this stake.`,
       )
+    }
 
     nextRoom = seatParticipantInRoom(nextRoom, seat, participant)
     addedBots.push(participant)

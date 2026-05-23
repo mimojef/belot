@@ -28,6 +28,15 @@ export type PlayerProgressStore = {
     displayName: string,
     stableKey: string,
   ) => PlayerPublicProfileSnapshot
+  createTemporaryBotProfile: (
+    profileId: string,
+    baseName: string,
+    completedGamesCount: number,
+    wonGamesCount: number,
+  ) => PlayerPublicProfileSnapshot
+  deleteTemporaryBotProfile: (profileId: string) => void
+  cleanupAllTemporaryBotProfiles: () => number
+  isTemporaryProfile: (profileId: string) => boolean
   getPublicProfile: (profileId: ProfileId) => PlayerPublicProfileSnapshot | null
   listPublicHumanProfiles: (onlineProfileIds?: Set<string>) => PlayerPublicProfileSnapshot[]
   listLeaderboards: () => LeaderboardsSnapshot
@@ -251,6 +260,40 @@ export async function createPlayerProgressStore(
     ON CONFLICT(profile_id) DO NOTHING;
   `)
 
+  const insertTemporaryBotProfileStatement = database.prepare(`
+    INSERT OR IGNORE INTO profiles (
+      profile_id, account_id, profile_kind, username, normalized_username,
+      display_name, normalized_display_name, avatar_url,
+      level, rank_title, skill_rating, status, is_temporary
+    ) VALUES (
+      ?, NULL, 'bot', NULL, NULL,
+      ?, ?, NULL,
+      7, 'Новак', 1000, 'active', 1
+    )
+  `)
+
+  const insertTemporaryBotWalletStatement = database.prepare(`
+    INSERT OR IGNORE INTO profile_wallets (profile_id, yellow_coins_balance) VALUES (?, 55000)
+  `)
+
+  const insertTemporaryBotProgressStatement = database.prepare(`
+    INSERT OR IGNORE INTO profile_progress (
+      profile_id, completed_games_count, won_games_count, rank_level
+    ) VALUES (?, ?, ?, 7)
+  `)
+
+  const deleteTemporaryBotStatement = database.prepare(`
+    DELETE FROM profiles WHERE profile_id = ? AND is_temporary = 1
+  `)
+
+  const cleanupAllTemporaryBotsStatement = database.prepare(`
+    DELETE FROM profiles WHERE is_temporary = 1
+  `)
+
+  const isTemporaryProfileStatement = database.prepare(`
+    SELECT is_temporary FROM profiles WHERE profile_id = ? LIMIT 1
+  `)
+
   const selectPublicProfileStatement = database.prepare(`
     SELECT
       p.profile_id,
@@ -307,6 +350,7 @@ export async function createPlayerProgressStore(
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
     WHERE p.status = 'active'
+      AND p.is_temporary = 0
       AND (
         (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
         OR p.profile_kind = 'bot'
@@ -335,6 +379,7 @@ export async function createPlayerProgressStore(
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
     WHERE p.status = 'active'
+      AND p.is_temporary = 0
       AND (
         (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
         OR p.profile_kind = 'bot'
@@ -365,6 +410,7 @@ export async function createPlayerProgressStore(
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
     WHERE p.status = 'active'
+      AND p.is_temporary = 0
       AND (
         (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
         OR p.profile_kind = 'bot'
@@ -396,6 +442,7 @@ export async function createPlayerProgressStore(
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
     WHERE p.status = 'active'
+      AND p.is_temporary = 0
       AND (
         (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
         OR p.profile_kind = 'bot'
@@ -426,6 +473,7 @@ export async function createPlayerProgressStore(
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
     WHERE p.status = 'active'
+      AND p.is_temporary = 0
       AND (
         (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
         OR p.profile_kind = 'bot'
@@ -445,7 +493,7 @@ export async function createPlayerProgressStore(
       updated_at = CURRENT_TIMESTAMP
     WHERE profile_id IN (
       SELECT profile_id FROM profiles
-      WHERE profile_kind = 'bot' AND status = 'active'
+      WHERE profile_kind = 'bot' AND status = 'active' AND is_temporary = 0
     )
     AND yellow_coins_balance < 5000;
   `)
@@ -678,6 +726,51 @@ export async function createPlayerProgressStore(
       ProfileGalleryImageRow[]
 
     return toPublicProfileSnapshot(row, galleryImages)
+  }
+
+  function createTemporaryBotProfile(
+    profileId: string,
+    baseName: string,
+    completedGamesCount: number,
+    wonGamesCount: number,
+  ): PlayerPublicProfileSnapshot {
+    let displayName: string
+    let normalizedDisplayName: string
+    let attempts = 0
+    do {
+      const suffix = 100000 + Math.floor(Math.random() * 900000)
+      displayName = `${baseName} ${suffix}`
+      normalizedDisplayName = displayName.toLocaleLowerCase('bg-BG')
+      attempts++
+    } while (!isDisplayNameAvailable(displayName) && attempts < 20)
+
+    insertTemporaryBotProfileStatement.run(profileId, displayName, normalizedDisplayName)
+    insertTemporaryBotWalletStatement.run(profileId)
+    insertTemporaryBotProgressStatement.run(profileId, completedGamesCount, wonGamesCount)
+
+    const row = selectPublicProfileStatement.get(profileId) as
+      | Parameters<typeof toPublicProfileSnapshot>[0]
+      | undefined
+
+    if (!row) {
+      throw new Error(`Temporary bot profile "${profileId}" was not created.`)
+    }
+
+    return toPublicProfileSnapshot(row, [])
+  }
+
+  function deleteTemporaryBotProfile(profileId: string): void {
+    deleteTemporaryBotStatement.run(profileId)
+  }
+
+  function cleanupAllTemporaryBotProfiles(): number {
+    const result = cleanupAllTemporaryBotsStatement.run()
+    return result.changes as number
+  }
+
+  function isTemporaryProfile(profileId: string): boolean {
+    const row = isTemporaryProfileStatement.get(profileId) as { is_temporary: number } | undefined
+    return (row?.is_temporary ?? 0) === 1
   }
 
   function getPublicProfile(profileId: ProfileId): PlayerPublicProfileSnapshot | null {
@@ -1066,11 +1159,12 @@ export async function createPlayerProgressStore(
       return
     }
 
-    // Collect ratings per team for ELO calculation
+    // Collect ratings per team for ELO — exclude temporary bots (fake rating)
     const teamRatings: Record<'A' | 'B', number[]> = { A: [], B: [] }
     for (const seat of SERVER_SEAT_ORDER) {
       const participant = room.seats[seat].participant
       if (participant === null) continue
+      if (participant.kind === 'bot' && participant.botProfileId?.startsWith('temp-bot-')) continue
       const team = getTeamBySeat(seat)
       teamRatings[team].push(getParticipantSkillRating(participant))
     }
@@ -1090,6 +1184,10 @@ export async function createPlayerProgressStore(
           : (participant.botProfileId ?? null)
 
       if (profileId === null) {
+        continue
+      }
+
+      if (profileId.startsWith('temp-bot-')) {
         continue
       }
 
@@ -1290,6 +1388,10 @@ export async function createPlayerProgressStore(
 
   return {
     createTemporaryHumanProfile,
+    createTemporaryBotProfile,
+    deleteTemporaryBotProfile,
+    cleanupAllTemporaryBotProfiles,
+    isTemporaryProfile,
     getPublicProfile,
     listPublicHumanProfiles,
     listLeaderboards,

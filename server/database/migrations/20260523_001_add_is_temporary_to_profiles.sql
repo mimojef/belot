@@ -1,0 +1,1 @@
+ALTER TABLE profiles ADD COLUMN is_temporary INTEGER NOT NULL DEFAULT 0;

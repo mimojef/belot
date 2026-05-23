@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import {
   createBotIdentitySnapshot,
   getEligibleBotProfiles,
@@ -15,6 +16,7 @@ import {
   type DbEligibleBotProfile,
 } from '../db/pickEligibleBotProfileFromDb.js'
 import type { MatchStake, MatchmakingQueueEntry } from './matchmakingTypes.js'
+import { pickRandomTempBotName } from './temporaryBotNames.js'
 
 type WeightedSelectionCandidate = {
   selectionWeight: number
@@ -31,12 +33,15 @@ export type MatchmakingBotSelectionProfile = {
   identity: PlayerIdentitySnapshot
 }
 
+export type TempBotFactory = (stake: MatchStake, profileId: string, baseName: string, completedGamesCount: number, wonGamesCount: number) => string | null
+
 type SelectMatchmakingBotProfilesOptions = {
   stake: MatchStake
   count: number
   selectionSeed: string
   excludedProfileIds?: readonly ProfileId[]
   minLevel?: number
+  createTempBot?: TempBotFactory
 }
 
 function hashStringToUint32(value: string): number {
@@ -181,6 +186,55 @@ export function selectMatchmakingBotProfiles(
 
   if (selectedDbProfiles.length >= targetCount) {
     return selectedDbProfiles
+  }
+
+  if (process.env.BELOT_ALLOW_CATALOG_BOT_FALLBACK !== '1') {
+    const needed = targetCount - selectedDbProfiles.length
+    const tempProfiles: MatchmakingBotSelectionProfile[] = []
+
+    if (options.createTempBot) {
+      for (let i = 0; i < needed; i++) {
+        const profileId = `temp-bot-${randomUUID()}`
+        const baseName = pickRandomTempBotName(nextRandom)
+        const completedGamesCount = 25 + Math.floor(nextRandom() * 5)
+        const wonGamesCount = Math.round(completedGamesCount * (0.40 + nextRandom() * 0.10))
+        const actualDisplayName = options.createTempBot(stake, profileId, baseName, completedGamesCount, wonGamesCount)
+
+        if (!actualDisplayName) {
+          continue
+        }
+
+        tempProfiles.push({
+          profileId,
+          code: 'TEMP_BOT',
+          difficulty: 'normal',
+          behaviorPreset: 'balanced',
+          logicSource: 'existing-core-v1',
+          selectionWeight: 10,
+          yellowCoinsBalance: 55000,
+          identity: {
+            accountId: null,
+            profileId,
+            username: null,
+            displayName: actualDisplayName,
+            avatarUrl: null,
+            level: 7,
+            rankTitle: 'Новак',
+            skillRating: 1000,
+            gender: null,
+          },
+        })
+      }
+    }
+
+    console.warn(
+      `[matchmaking] Insufficient DB bots for stake ${stake}: ` +
+      `requested ${targetCount}, got ${selectedDbProfiles.length}. ` +
+      `Created ${tempProfiles.length} temporary bot(s).` +
+      (tempProfiles.length < needed ? ` WARNING: ${needed - tempProfiles.length} slot(s) still unfilled.` : ''),
+    )
+
+    return [...selectedDbProfiles, ...tempProfiles]
   }
 
   const selectedProfileIds = new Set<ProfileId>(

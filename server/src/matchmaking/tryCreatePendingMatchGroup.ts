@@ -1,5 +1,6 @@
 import type { ServerRoom } from '../core/serverTypes.js'
 import { createMatchedRoomFromEntries } from './createMatchedRoomFromEntries.js'
+import type { TempBotFactory } from './selectMatchmakingBotProfiles.js'
 import { getReadyEntriesForStake } from './getReadyEntriesForStake.js'
 import { markQueueEntriesMatched } from './markQueueEntriesMatched.js'
 import type { MatchmakingState } from './matchmakingState.js'
@@ -18,6 +19,7 @@ export type TryCreatePendingMatchGroupResult = {
 export function tryCreatePendingMatchGroup(
   matchmakingState: MatchmakingState,
   blockCheck?: (profileIdA: string, profileIdB: string) => boolean,
+  createTempBot?: TempBotFactory,
   now: number = Date.now(),
 ): TryCreatePendingMatchGroupResult {
   for (const stake of SUPPORTED_MATCH_STAKES) {
@@ -46,6 +48,7 @@ export function tryCreatePendingMatchGroup(
       readyResult.entries,
       readyResult.shouldStartImmediately,
       blockCheck,
+      createTempBot,
     )
 
     return {

@@ -55,6 +55,10 @@ function getTeamBySeat(seat: (typeof SERVER_SEAT_ORDER)[number]): Team {
   return SERVER_TEAM_A_SEATS.includes(seat) ? 'A' : 'B'
 }
 
+function isTemporaryBotProfileId(profileId: ProfileId): boolean {
+  return profileId.startsWith('temp-bot-')
+}
+
 function getMatchWinnerTeam(room: ServerRoom): Team | null {
   const authoritativeState = room.game.authoritativeState
 
@@ -93,7 +97,7 @@ function getBotProfileIds(room: ServerRoom): ProfileId[] {
     const participant = room.seats[seat].participant
     const profileId = participant?.kind === 'bot' ? (participant.botProfileId ?? null) : null
 
-    if (profileId !== null) {
+    if (profileId !== null && !isTemporaryBotProfileId(profileId)) {
       profileIds.push(profileId)
     }
   }
@@ -117,7 +121,7 @@ function getWinningProfileIds(room: ServerRoom, winnerTeam: Team): ProfileId[] {
       if (profileId !== null) profileIds.push(profileId)
     } else if (participant?.kind === 'bot') {
       const profileId = participant.botProfileId ?? null
-      if (profileId !== null) profileIds.push(profileId)
+      if (profileId !== null && !isTemporaryBotProfileId(profileId)) profileIds.push(profileId)
     }
   }
 
