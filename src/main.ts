@@ -2451,6 +2451,49 @@ initPwa((applyFn) => {
 void loadPublicSettings()
 void loadAuthSession().then(() => { lobby.navigateInitialPath() })
 client.connect()
+
+// Offline overlay — показва се при реална загуба на интернет връзка
+;(function initOfflineOverlay() {
+  let overlayEl: HTMLElement | null = null
+
+  function showOfflineOverlay(): void {
+    if (overlayEl) return
+    const el = document.createElement('div')
+    el.style.cssText = [
+      'position:fixed;inset:0;z-index:99998;',
+      'background:#0a0a0a;',
+      'color:#f8fafc;',
+      'font-family:system-ui,-apple-system,sans-serif;',
+      'display:flex;flex-direction:column;align-items:center;justify-content:center;',
+      'gap:20px;padding:24px;text-align:center;',
+    ].join('')
+    el.innerHTML = `
+      <div style="font-size:64px;line-height:1;opacity:0.6;">📡</div>
+      <h1 style="font-size:22px;font-weight:900;margin:0;">Няма връзка с интернет</h1>
+      <p style="font-size:15px;font-weight:600;color:rgba(255,255,255,0.54);max-width:300px;line-height:1.5;margin:0;">
+        Белот онлайн изисква активна интернет връзка. Провери свързаността и опитай отново.
+      </p>
+      <button id="offline-retry-btn" style="
+        margin-top:8px;height:48px;padding:0 28px;border:0;border-radius:10px;
+        background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+        color:#080808;font-size:15px;font-weight:900;cursor:pointer;
+      ">Опитай отново</button>
+    `
+    el.querySelector('#offline-retry-btn')?.addEventListener('click', () => { location.reload() })
+    document.body.appendChild(el)
+    overlayEl = el
+  }
+
+  function hideOfflineOverlay(): void {
+    if (!overlayEl) return
+    overlayEl.remove()
+    overlayEl = null
+  }
+
+  if (!navigator.onLine) showOfflineOverlay()
+  window.addEventListener('offline', showOfflineOverlay)
+  window.addEventListener('online', hideOfflineOverlay)
+})()
 }
 
 function showLandingOverlay(): void {
