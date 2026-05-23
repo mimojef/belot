@@ -600,7 +600,7 @@ function createInitialState(): InternalLobbyFlowState {
     adminMissionEditIsStaged: false,
     matchRooms: [],
     matchRoomsLoaded: false,
-    matchRoomsLoading: false,
+    matchRoomsLoading: true,
     matchRoomsErrorText: null,
     adminMatchRoomEdit: null,
     privateRoomsCreatePopupOpen: false,
@@ -802,10 +802,89 @@ function findRelationshipByProfileId(
   }) ?? null
 }
 
+const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
+  '/lobby': 'lobby',
+  '/players': 'players',
+  '/ranking': 'leaderboards',
+  '/shop': 'shop',
+  '/admin': 'admin',
+  '/friends': 'friends',
+  '/chat': 'chat',
+}
+
 export function createLobbyFlowController(
   options: CreateLobbyFlowControllerOptions,
 ): LobbyFlowController {
   const state = createInitialState()
+  const _initialScreen = LOBBY_PATH_TO_SCREEN[window.location.pathname]
+  if (_initialScreen) {
+    state.currentScreen = _initialScreen
+  }
+
+  let _renderTimerId: ReturnType<typeof setTimeout> | null = null
+
+  function scheduleRender(): void {
+    if (_renderTimerId !== null) clearTimeout(_renderTimerId)
+    _renderTimerId = setTimeout(() => {
+      _renderTimerId = null
+      render()
+    }, 50)
+  }
+
+  // --- Initial loading overlay ---
+  let _initMatchRoomsDone = !options.onMatchRoomsLoad
+  let _initPackagesDone = !options.onLobbyPackagesLoad
+  let _initConnected = false
+  let _initOverlayEl: HTMLElement | null = null
+  let _initBarEl: HTMLElement | null = null
+  let _initOverlayHidden = false
+  let _initOverlayFallbackId: ReturnType<typeof setTimeout> | null = null
+
+  function createInitialOverlay(): void {
+    const overlay = document.createElement('div')
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#242424;transition:opacity 0.3s ease;'
+    const track = document.createElement('div')
+    track.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:350px;height:8px;background:rgba(244,201,91,0.15);border-radius:4px;overflow:hidden;'
+    const bar = document.createElement('div')
+    bar.style.cssText = 'height:100%;background:linear-gradient(90deg,#f4c95b,#c98f13);width:0%;transition:width 0.6s cubic-bezier(0.4,0,0.2,1);border-radius:4px;'
+    track.appendChild(bar)
+    overlay.appendChild(track)
+    document.body.appendChild(overlay)
+    _initOverlayEl = overlay
+    _initBarEl = bar
+    requestAnimationFrame(() => {
+      if (_initBarEl) _initBarEl.style.width = '40%'
+      setTimeout(() => { if (_initBarEl && !_initOverlayHidden) _initBarEl.style.width = '72%' }, 700)
+    })
+    _initOverlayFallbackId = setTimeout(() => {
+      _initOverlayFallbackId = null
+      doHideInitialOverlay()
+    }, 4000)
+  }
+
+  function doHideInitialOverlay(): void {
+    if (_initOverlayHidden) return
+    _initOverlayHidden = true
+    if (_initOverlayFallbackId !== null) {
+      clearTimeout(_initOverlayFallbackId)
+      _initOverlayFallbackId = null
+    }
+    const bar = _initBarEl
+    const overlay = _initOverlayEl
+    if (!bar || !overlay) return
+    bar.style.transition = 'width 0.2s ease'
+    bar.style.width = '100%'
+    setTimeout(() => {
+      overlay.style.opacity = '0'
+      setTimeout(() => { overlay.remove(); _initOverlayEl = null; _initBarEl = null }, 320)
+    }, 220)
+  }
+
+  function maybeHideInitialOverlay(): void {
+    if (_initMatchRoomsDone && _initPackagesDone && _initConnected) {
+      doHideInitialOverlay()
+    }
+  }
 
   let errorTextTimerId: ReturnType<typeof setTimeout> | null = null
 
@@ -1046,6 +1125,7 @@ export function createLobbyFlowController(
   }
 
   function switchToLobby(): void {
+    const wasOnDifferentScreen = state.currentScreen !== 'lobby'
     state.currentScreen = 'lobby'
     state.isSearching = false
     state.queuedPlayers = 0
@@ -1054,10 +1134,15 @@ export function createLobbyFlowController(
     state.countdownEndsAt = null
     state.totalCountdownMs = DEFAULT_COUNTDOWN_MS
     state.serverPreviewBotDisplayNames = []
-    state.matchRoomsLoaded = false
     clearServerRoomSnapshot()
     stopWaitingRoomActivity()
     resetFinalFillSequence()
+    const shouldLoad = wasOnDifferentScreen || (!state.matchRoomsLoading && !state.matchRoomsLoaded)
+    if (shouldLoad) {
+      state.matchRoomsLoaded = false
+      state.matchRoomsLoading = true
+      void loadMatchRooms()
+    }
   }
 
   function updateMatchmakingRoomLiveUi(): boolean {
@@ -2774,14 +2859,18 @@ export function createLobbyFlowController(
 
   async function loadLobbyPackages(): Promise<void> {
     if (!options.onLobbyPackagesLoad) {
+      _initPackagesDone = true
+      maybeHideInitialOverlay()
       return
     }
 
     const result = await options.onLobbyPackagesLoad()
+    _initPackagesDone = true
+    maybeHideInitialOverlay()
 
     if (result.ok) {
       state.lobbyPackages = result.packages
-      render()
+      scheduleRender()
     }
   }
 
@@ -3604,18 +3693,13 @@ export function createLobbyFlowController(
   }
 
   function render(): void {
+    if (_renderTimerId !== null) {
+      clearTimeout(_renderTimerId)
+      _renderTimerId = null
+    }
     if (state.currentScreen === 'matchmaking-room') {
       renderMatchmakingRoom()
       return
-    }
-
-    if (
-      state.currentScreen === 'lobby' &&
-      !state.matchRoomsLoaded &&
-      !state.matchRoomsLoading &&
-      state.matchRoomsErrorText === null
-    ) {
-      void loadMatchRooms()
     }
 
     renderLobby()
@@ -4051,18 +4135,19 @@ export function createLobbyFlowController(
     if (!options.onMatchRoomsLoad) return
     state.matchRoomsLoading = true
     state.matchRoomsErrorText = null
-    render()
     const result = await options.onMatchRoomsLoad()
     state.matchRoomsLoading = false
     state.matchRoomsLoaded = true
+    _initMatchRoomsDone = true
+    maybeHideInitialOverlay()
     if (!result.ok) {
       state.matchRoomsErrorText = result.message
-      render()
+      scheduleRender()
       return
     }
     state.matchRooms = result.rooms
     state.matchRoomsErrorText = null
-    render()
+    scheduleRender()
   }
 
   async function submitAdminMission(input: MissionTemplateInput): Promise<void> {
@@ -4141,10 +4226,12 @@ export function createLobbyFlowController(
     if (result.ok) {
       state.dailyMissions = result.missions
       state.dailyMissionsUnclaimedCount = result.unclaimedCount
-      render()
+      scheduleRender()
     }
   }
 
+  createInitialOverlay()
+  void loadMatchRooms()
   void loadLobbyPackages()
   void loadPlayerUnclaimedCount()
 
@@ -4183,10 +4270,15 @@ export function createLobbyFlowController(
       stopWaitingRoomActivity()
       clearServerRoomSnapshot()
       resetFinalFillSequence()
+      doHideInitialOverlay()
     },
     getCurrentScreen: () => state.currentScreen,
     setConnected: (value) => {
       state.isConnected = value
+      if (value) {
+        _initConnected = true
+        maybeHideInitialOverlay()
+      }
       render()
     },
     setDisplayName: (value) => {
