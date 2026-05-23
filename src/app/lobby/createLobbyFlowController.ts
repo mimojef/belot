@@ -477,7 +477,7 @@ type StakeCardConfig = {
 const DEFAULT_REQUIRED_PLAYERS = 4
 const DEFAULT_COUNTDOWN_MS = 20000
 const FINAL_FILL_START_REMAINING_MS = 3000
-const FINAL_FILL_STAGGER_OFFSETS_MS = [0, 620, 860] as const
+const FINAL_FILL_STAGGER_OFFSETS_MS = [0, 720, 1120] as const
 const FINAL_FILL_MATCH_START_DELAY_MS = 1000
 
 const WAITING_CLOCK_AUDIO_SRC = '/audio/ui/waiting-clock.mp3'
@@ -655,6 +655,10 @@ function getLobbyRemainingMs(state: InternalLobbyFlowState): number | null {
   }
 
   return state.remainingMs
+}
+
+function getLocalCountdownEndsAt(remainingMs: number): number {
+  return Date.now() + Math.max(0, remainingMs)
 }
 
 function getLobbyStatusText(state: InternalLobbyFlowState): string {
@@ -1241,7 +1245,25 @@ export function createLobbyFlowController(
   }
 
   function isFinalFillSequenceComplete(): boolean {
+    if (finalFillAnimatedQueuedPlayers !== null) {
+      return finalFillAnimatedQueuedPlayers >= state.requiredPlayers
+    }
+
     return getDisplayedQueuedPlayers() >= state.requiredPlayers
+  }
+
+  function maybeShowPendingStakeEffect(): void {
+    if (
+      !pendingStakeEffect ||
+      stakeEffectStartedAt !== null ||
+      !isFinalFillSequenceComplete()
+    ) {
+      return
+    }
+
+    pendingStakeEffect = false
+    stakeEffectStartedAt = Date.now()
+    showStakeDeductionEffect(state.selectedStake)
   }
 
   function flushPendingMatchFound(): boolean {
@@ -1344,20 +1366,13 @@ export function createLobbyFlowController(
     if (nextAnimatedQueuedPlayers !== finalFillAnimatedQueuedPlayers) {
       finalFillAnimatedQueuedPlayers = nextAnimatedQueuedPlayers
 
-      if (
-        finalFillAnimatedQueuedPlayers >= state.requiredPlayers &&
-        pendingStakeEffect &&
-        stakeEffectStartedAt === null
-      ) {
-        pendingStakeEffect = false
-        stakeEffectStartedAt = Date.now()
-        showStakeDeductionEffect(state.selectedStake)
-      }
+      maybeShowPendingStakeEffect()
 
       maybeSchedulePendingMatchFound()
       return true
     }
 
+    maybeShowPendingStakeEffect()
     maybeSchedulePendingMatchFound()
     return false
   }
@@ -3840,7 +3855,7 @@ export function createLobbyFlowController(
       state.queuedPlayers = message.queuedPlayers
       state.requiredPlayers = message.requiredPlayers
       state.remainingMs = message.remainingMs
-      state.countdownEndsAt = message.countdownEndsAt
+      state.countdownEndsAt = getLocalCountdownEndsAt(message.remainingMs)
       state.totalCountdownMs = message.totalDurationMs ?? DEFAULT_COUNTDOWN_MS
       state.errorText = null
       state.serverPreviewBotDisplayNames = message.previewBotDisplayNames ?? []
@@ -3856,16 +3871,19 @@ export function createLobbyFlowController(
       state.queuedPlayers = message.queuedPlayers
       state.requiredPlayers = message.requiredPlayers
       state.remainingMs = message.remainingMs
-      state.countdownEndsAt = message.countdownEndsAt
+      state.countdownEndsAt = getLocalCountdownEndsAt(message.remainingMs)
       if (message.totalDurationMs !== undefined) {
         state.totalCountdownMs = message.totalDurationMs
       }
       state.errorText = null
-      state.serverPreviewBotDisplayNames = message.previewBotDisplayNames ?? []
+      if (message.previewBotDisplayNames !== undefined) {
+        state.serverPreviewBotDisplayNames = message.previewBotDisplayNames
+      }
       startWaitingClockAudio()
 
       if (message.localStakeDeducted === true && stakeEffectStartedAt === null) {
         pendingStakeEffect = true
+        maybeShowPendingStakeEffect()
       }
 
       render()
@@ -3903,6 +3921,7 @@ export function createLobbyFlowController(
 
       if (pendingMatchFoundMessage !== null && occupiedSeatsCount >= requiredPlayers) {
         if (finalFillSequenceStartedAt !== null && !isFinalFillSequenceComplete()) {
+          state.queuedPlayers = finalFillBaseQueuedPlayers ?? state.queuedPlayers
           state.serverRoomSeats = null
           state.serverYourSeat = null
           maybeSchedulePendingMatchFound()

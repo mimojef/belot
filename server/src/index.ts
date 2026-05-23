@@ -111,7 +111,7 @@ import type { PrivateRoomSnapshot } from './protocol/messageTypes.js'
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
 const MATCHMAKING_TICK_MS = 250
-const EARLY_BOT_FILL_DEBIT_MS = 3200
+const EARLY_BOT_FILL_DEBIT_MS = 1700
 const GAME_RUNTIME_TICK_MS = 250
 const MATCH_PLAYERS_REQUIRED = 4
 const MAX_JSON_BODY_BYTES = 15_000_000
