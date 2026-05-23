@@ -1,7 +1,6 @@
 import type { RoomGameSnapshot } from '../../network/createGameServerClient'
 
 export const CUTTING_COUNTDOWN_MS = 20000
-const SHORT_CUTTING_VISUAL_TIMER_THRESHOLD_MS = 1500
 
 type CuttingVisualCountdownContext = {
   roomId: string
@@ -51,28 +50,6 @@ function getServerTimerDeadlineAt(context: CuttingVisualCountdownContext | null)
   return parseTimerDeadlineAt(context?.game?.timerDeadlineAt)
 }
 
-function resolveCuttingVisualStartedAt(
-  context: CuttingVisualCountdownContext | null,
-): number {
-  const serverTimerDeadlineAt = getServerTimerDeadlineAt(context)
-  const now = Date.now()
-
-  if (serverTimerDeadlineAt === null) {
-    return now
-  }
-
-  const remainingMs = serverTimerDeadlineAt - now
-
-  if (
-    !Number.isFinite(remainingMs) ||
-    remainingMs <= SHORT_CUTTING_VISUAL_TIMER_THRESHOLD_MS
-  ) {
-    return now
-  }
-
-  return serverTimerDeadlineAt - CUTTING_COUNTDOWN_MS
-}
-
 export function createCuttingVisualCountdownTracker(): CuttingVisualCountdownTracker {
   let activeCuttingVisualTurnKey: string | null = null
   let activeCuttingVisualStartedAt = 0
@@ -118,7 +95,7 @@ export function createCuttingVisualCountdownTracker(): CuttingVisualCountdownTra
     }
 
     activeCuttingVisualTurnKey = turnKey
-    activeCuttingVisualStartedAt = resolveCuttingVisualStartedAt(context)
+    activeCuttingVisualStartedAt = performance.now()
   }
 
   function getCuttingVisualCountdownRemainingMs(
@@ -138,7 +115,7 @@ export function createCuttingVisualCountdownTracker(): CuttingVisualCountdownTra
       return CUTTING_COUNTDOWN_MS
     }
 
-    const elapsedMs = Math.max(0, Date.now() - activeCuttingVisualStartedAt)
+    const elapsedMs = Math.max(0, performance.now() - activeCuttingVisualStartedAt)
 
     return Math.max(0, CUTTING_COUNTDOWN_MS - elapsedMs)
   }
