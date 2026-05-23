@@ -56,5 +56,20 @@
     <h1>Няма връзка с интернет</h1>
     <p>Белот онлайн изисква активна интернет връзка. Провери свързаността и опитай отново.</p>
     <button onclick="location.reload()">Опитай отново</button>
+    <script>
+      ;(function () {
+        var RETRY_KEY = '_pika_sw_retried'
+        // Ако браузърът е онлайн, но SW е сервирал offline.html (race condition при update)
+        // — опитваме веднъж автоматично. Флагът в sessionStorage предотвратява infinite loop.
+        if (navigator.onLine && !sessionStorage.getItem(RETRY_KEY)) {
+          sessionStorage.setItem(RETRY_KEY, '1')
+          setTimeout(function () { location.replace(location.href) }, 400)
+          return
+        }
+        // При истински offline — изчистваме флага и чакаме връзката да се върне
+        sessionStorage.removeItem(RETRY_KEY)
+        window.addEventListener('online', function () { location.reload() })
+      })()
+    </script>
   </body>
 </html>
