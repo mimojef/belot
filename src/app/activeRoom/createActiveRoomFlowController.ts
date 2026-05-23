@@ -147,9 +147,12 @@ export function createActiveRoomFlowController(
   let emojiPickerOpen = false
   const EMOJI_BUBBLE_DURATION_MS = 4000
   const EMOJI_COUNT = 21
+  const SCORING_VISUAL_COUNTDOWN_MS = 5000
   const playingCache: PlayingUiCache = createPlayingUiCache()
   let lastKnownWinningBid: NonNullable<RoomWinningBidSnapshot> | null = null
   let scoringCountdownIntervalId: number | null = null
+  let scoringVisualCountdownKey: string | null = null
+  let scoringVisualCountdownStartedAt = 0
   let reactionCountdownAudioIntervalId: number | null = null
   let matchEndedSoundPlayed = false
   let matchEndedPrizeAnimated = false
@@ -804,22 +807,68 @@ export function createActiveRoomFlowController(
 
   function clearScoringCountdownTicker(): void {
     if (scoringCountdownIntervalId === null) {
+      scoringVisualCountdownKey = null
+      scoringVisualCountdownStartedAt = 0
       return
     }
 
     window.clearInterval(scoringCountdownIntervalId)
     scoringCountdownIntervalId = null
+    scoringVisualCountdownKey = null
+    scoringVisualCountdownStartedAt = 0
+  }
+
+  function getScoringVisualCountdownKey(): string | null {
+    if (
+      !activeRoomState ||
+      activeRoomState.game?.authoritativePhase !== 'scoring' ||
+      !activeRoomState.game.scoring
+    ) {
+      return null
+    }
+
+    return [
+      activeRoomState.roomId,
+      'scoring',
+    ].join(':')
+  }
+
+  function syncScoringVisualCountdownState(): void {
+    const countdownKey = getScoringVisualCountdownKey()
+
+    if (countdownKey === null) {
+      scoringVisualCountdownKey = null
+      scoringVisualCountdownStartedAt = 0
+      return
+    }
+
+    if (scoringVisualCountdownKey === countdownKey) {
+      return
+    }
+
+    scoringVisualCountdownKey = countdownKey
+    scoringVisualCountdownStartedAt = performance.now()
+  }
+
+  function getScoringVisualCountdownSeconds(): number {
+    syncScoringVisualCountdownState()
+
+    if (
+      scoringVisualCountdownKey === null ||
+      !Number.isFinite(scoringVisualCountdownStartedAt) ||
+      scoringVisualCountdownStartedAt <= 0
+    ) {
+      return 5
+    }
+
+    const elapsedMs = Math.max(0, performance.now() - scoringVisualCountdownStartedAt)
+    const remainingMs = Math.max(0, SCORING_VISUAL_COUNTDOWN_MS - elapsedMs)
+
+    return Math.max(1, Math.ceil(remainingMs / 1000))
   }
 
   function getScoringCountdownText(): string {
-    const timerDeadlineAt = activeRoomState?.game?.timerDeadlineAt ?? null
-
-    if (timerDeadlineAt === null) {
-      return '5 сек.'
-    }
-
-    const countdownSeconds = Math.max(0, Math.ceil((timerDeadlineAt - Date.now()) / 1000))
-    return `${countdownSeconds} сек.`
+    return `${getScoringVisualCountdownSeconds()} сек.`
   }
 
   function updateScoringCountdownText(): void {
@@ -2500,6 +2549,7 @@ export function createActiveRoomFlowController(
         seats: activeRoomState.seats,
         localSeat: activeRoomState.seat,
         winningBid: lastKnownWinningBid,
+        countdownSeconds: getScoringVisualCountdownSeconds(),
         stageScale,
         scaledStageWidth,
         scaledStageHeight,

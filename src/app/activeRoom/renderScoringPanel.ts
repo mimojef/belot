@@ -47,6 +47,7 @@ type RenderScoringScreenOptions = {
   seats: RoomSeatSnapshot[]
   localSeat: Seat
   winningBid: NonNullable<RoomWinningBidSnapshot> | null
+  countdownSeconds: number
   stageScale: number
   scaledStageWidth: number
   scaledStageHeight: number
@@ -464,14 +465,6 @@ function formatRawHandValue(points: number, tricksWon: number): string {
   return String(points)
 }
 
-function getCountdownSeconds(timerDeadlineAt: number | null): number {
-  if (timerDeadlineAt === null) {
-    return 5
-  }
-
-  return Math.max(0, Math.ceil((timerDeadlineAt - Date.now()) / 1000))
-}
-
 function renderMatrixHeaderRow(): string {
   return `
     <div
@@ -792,6 +785,7 @@ function renderScoringPanelHtml(
   game: RoomGameSnapshot,
   localSeat: Seat,
   fallbackWinningBid: NonNullable<RoomWinningBidSnapshot> | null,
+  countdownSeconds: number,
 ): string {
   const scoring = game.scoring
 
@@ -804,7 +798,6 @@ function renderScoringPanelHtml(
   const bidLabel = formatBidLabel(winningBid)
   const bidOwnerLabel = getBidOwnerLabel(winningBid, localSeat)
   const bidMultiplierLabel = getBidMultiplierLabel(winningBid)
-  const countdownSeconds = getCountdownSeconds(game.timerDeadlineAt)
   const rawHands = getPerspectivePoints(scoring.rawHandPoints, localSeat)
   const rawHandTricksWon = getPerspectivePoints(scoring.rawHandTricksWon, localSeat)
   const sumPoints = getPerspectivePoints(scoring.sumPoints, localSeat)
@@ -992,6 +985,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
     seats,
     localSeat,
     winningBid,
+    countdownSeconds,
     stageScale,
     scaledStageWidth,
     scaledStageHeight,
@@ -1050,7 +1044,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
                 box-sizing:border-box;
               "
             >
-              ${renderScoringPanelHtml(game, localSeat, winningBid)}
+              ${renderScoringPanelHtml(game, localSeat, winningBid, countdownSeconds)}
             </div>
           </div>
         </div>
