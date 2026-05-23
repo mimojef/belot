@@ -60,8 +60,7 @@
       ;(function () {
         var RETRY_KEY = '_pika_sw_retried'
         window.reloadLobby = function () {
-          history.replaceState(null, '', '/lobby')
-          setTimeout(function () { location.reload() }, 300)
+          setTimeout(function () { location.replace('/lobby?offlineReload=' + Date.now()) }, 300)
         }
         var reloadScheduled = false
         var recoveryCheckInFlight = false

@@ -109,9 +109,28 @@ let reconnectAttempt = 0
 let isPageUnloading = false
 let isRefreshingAuthConnection = false
 let isSessionDisplaced = false
+let shouldReloadLobbyOnReconnect = false
+let offlineLobbyReloadScheduled = false
 let currentAuthSession: AuthSession | null = null
 
 const SESSION_CACHE_KEY = 'pika_session_cache'
+
+function forceOfflineLobbyReload(): void {
+  if (offlineLobbyReloadScheduled || isPageUnloading) return
+  offlineLobbyReloadScheduled = true
+
+  const navigateToFreshLobby = (): void => {
+    window.setTimeout(() => {
+      window.location.replace(`/lobby?offlineReload=${Date.now()}`)
+    }, 300)
+  }
+
+  if ('caches' in window) {
+    caches.delete('navigation-cache').finally(navigateToFreshLobby)
+  } else {
+    navigateToFreshLobby()
+  }
+}
 
 function saveSessionCache(session: AuthSession): void {
   try {
@@ -2263,6 +2282,11 @@ client = createGameServerClient({
       connectionErrorTimerId = null
     }
 
+    if (shouldReloadLobbyOnReconnect) {
+      forceOfflineLobbyReload()
+      return
+    }
+
     if (activeRoom.hasActiveRoom()) {
       activeRoom.setConnectionState(true, SERVER_RESUME_WAIT_MESSAGE)
       requestActiveRoomResume()
@@ -2285,11 +2309,13 @@ client = createGameServerClient({
     }
 
     if (activeRoom.hasActiveRoom()) {
+      shouldReloadLobbyOnReconnect = true
       activeRoom.setConnectionState(false, SERVER_RESTART_WAIT_MESSAGE)
       scheduleServerReconnect()
       return
     }
 
+    shouldReloadLobbyOnReconnect = true
     lobby.setConnected(false)
     scheduleServerReconnect()
 
@@ -2385,6 +2411,11 @@ window.addEventListener('beforeunload', () => {
 const stripeReturnParams = new URLSearchParams(window.location.search)
 const stripeReturnScreen = stripeReturnParams.get('screen')
 const stripeReturnPayment = stripeReturnParams.get('payment')
+const offlineReloadParam = stripeReturnParams.get('offlineReload')
+
+if (offlineReloadParam !== null && window.location.pathname === '/lobby') {
+  history.replaceState(null, '', '/lobby')
+}
 
 // Landing страница — показва се само в браузър и без валиден path (не в standalone режим)
 // Трябва да е ПРЕДИ lobby.render() за да може syncUrlPath() да я засече
@@ -2455,11 +2486,8 @@ client.connect()
 // Offline overlay — показва се при реална загуба на интернет връзка
 ;(function initOfflineOverlay() {
   let overlayEl: HTMLElement | null = null
-  let recoveryPollTimerId: number | null = null
-  let recoveryCheckInFlight = false
-  let reloadScheduled = false
-
   function showOfflineOverlay(): void {
+    shouldReloadLobbyOnReconnect = true
     if (overlayEl) return
     const el = document.createElement('div')
     el.style.cssText = [
@@ -2485,71 +2513,16 @@ client.connect()
     el.querySelector('#offline-retry-btn')?.addEventListener('click', hardReload)
     document.body.appendChild(el)
     overlayEl = el
-    startRecoveryPolling()
   }
 
   function hardReload(): void {
-    if (reloadScheduled) return
-    reloadScheduled = true
-
-    const reloadLobby = (): void => {
-      history.replaceState(null, '', '/lobby')
-      window.setTimeout(() => location.reload(), 300)
-    }
-
+    forceOfflineLobbyReload()
     // Изчисти navigation кеша на SW за да се вземе свеж index.html от мрежата
-    if ('caches' in window) {
-      caches.delete('navigation-cache').finally(reloadLobby)
-    } else {
-      reloadLobby()
-    }
-  }
-
-  async function canReachServer(): Promise<boolean> {
-    const abortController = new AbortController()
-    const timeoutId = window.setTimeout(() => abortController.abort(), 2500)
-
-    try {
-      const response = await fetch(`${getApiBaseUrl()}/health`, {
-        method: 'GET',
-        cache: 'no-store',
-        signal: abortController.signal,
-      })
-      return response.ok
-    } catch {
-      return false
-    } finally {
-      window.clearTimeout(timeoutId)
-    }
-  }
-
-  async function checkRecoveryAndReload(): Promise<void> {
-    if (recoveryCheckInFlight || reloadScheduled) return
-    recoveryCheckInFlight = true
-
-    try {
-      if (await canReachServer()) {
-        hardReload()
-      }
-    } finally {
-      recoveryCheckInFlight = false
-    }
-  }
-
-  function startRecoveryPolling(): void {
-    if (recoveryPollTimerId !== null || reloadScheduled) return
-
-    void checkRecoveryAndReload()
-    recoveryPollTimerId = window.setInterval(() => {
-      void checkRecoveryAndReload()
-    }, 1000)
   }
 
   if (!navigator.onLine) showOfflineOverlay()
   window.addEventListener('offline', showOfflineOverlay)
-  window.addEventListener('online', () => {
-    startRecoveryPolling()
-  })
+  window.addEventListener('online', hardReload)
 })()
 }
 
