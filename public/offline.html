@@ -63,16 +63,47 @@
           history.replaceState(null, '', '/lobby')
           setTimeout(function () { location.reload() }, 300)
         }
+        var reloadScheduled = false
+        var recoveryCheckInFlight = false
+        var recoveryPollTimer = null
+
+        function scheduleReloadLobby() {
+          if (reloadScheduled) return
+          reloadScheduled = true
+          window.reloadLobby()
+        }
+
+        function checkRecovery() {
+          if (recoveryCheckInFlight || reloadScheduled) return
+          recoveryCheckInFlight = true
+
+          fetch('/health', { cache: 'no-store' })
+            .then(function (response) {
+              if (response.ok) scheduleReloadLobby()
+            })
+            .catch(function () {})
+            .finally(function () {
+              recoveryCheckInFlight = false
+            })
+        }
+
+        function startRecoveryPolling() {
+          if (recoveryPollTimer !== null || reloadScheduled) return
+          checkRecovery()
+          recoveryPollTimer = setInterval(checkRecovery, 1000)
+        }
+
         // Ако браузърът е онлайн, но SW е сервирал offline.html (race condition при update)
         // — опитваме веднъж автоматично. Флагът в sessionStorage предотвратява infinite loop.
         if (navigator.onLine && !sessionStorage.getItem(RETRY_KEY)) {
           sessionStorage.setItem(RETRY_KEY, '1')
-          setTimeout(function () { window.reloadLobby() }, 400)
+          setTimeout(scheduleReloadLobby, 400)
           return
         }
         // При истински offline — изчистваме флага и чакаме връзката да се върне
         sessionStorage.removeItem(RETRY_KEY)
-        window.addEventListener('online', function () { window.reloadLobby() })
+        startRecoveryPolling()
+        window.addEventListener('online', startRecoveryPolling)
       })()
     </script>
   </body>

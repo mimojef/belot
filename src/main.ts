@@ -2455,6 +2455,9 @@ client.connect()
 // Offline overlay — показва се при реална загуба на интернет връзка
 ;(function initOfflineOverlay() {
   let overlayEl: HTMLElement | null = null
+  let recoveryPollTimerId: number | null = null
+  let recoveryCheckInFlight = false
+  let reloadScheduled = false
 
   function showOfflineOverlay(): void {
     if (overlayEl) return
@@ -2482,9 +2485,13 @@ client.connect()
     el.querySelector('#offline-retry-btn')?.addEventListener('click', hardReload)
     document.body.appendChild(el)
     overlayEl = el
+    startRecoveryPolling()
   }
 
   function hardReload(): void {
+    if (reloadScheduled) return
+    reloadScheduled = true
+
     const reloadLobby = (): void => {
       history.replaceState(null, '', '/lobby')
       window.setTimeout(() => location.reload(), 300)
@@ -2498,9 +2505,51 @@ client.connect()
     }
   }
 
+  async function canReachServer(): Promise<boolean> {
+    const abortController = new AbortController()
+    const timeoutId = window.setTimeout(() => abortController.abort(), 2500)
+
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/health`, {
+        method: 'GET',
+        cache: 'no-store',
+        signal: abortController.signal,
+      })
+      return response.ok
+    } catch {
+      return false
+    } finally {
+      window.clearTimeout(timeoutId)
+    }
+  }
+
+  async function checkRecoveryAndReload(): Promise<void> {
+    if (recoveryCheckInFlight || reloadScheduled) return
+    recoveryCheckInFlight = true
+
+    try {
+      if (await canReachServer()) {
+        hardReload()
+      }
+    } finally {
+      recoveryCheckInFlight = false
+    }
+  }
+
+  function startRecoveryPolling(): void {
+    if (recoveryPollTimerId !== null || reloadScheduled) return
+
+    void checkRecoveryAndReload()
+    recoveryPollTimerId = window.setInterval(() => {
+      void checkRecoveryAndReload()
+    }, 1000)
+  }
+
   if (!navigator.onLine) showOfflineOverlay()
   window.addEventListener('offline', showOfflineOverlay)
-  window.addEventListener('online', hardReload)
+  window.addEventListener('online', () => {
+    startRecoveryPolling()
+  })
 })()
 }
 
