@@ -87,6 +87,13 @@ function renderCuttingCountdownFillStyle(
   `
 }
 
+function getCountdownActiveFlag(
+  shouldShowCuttingCountdown: boolean,
+  cuttingCountdownRemainingMs: number | null,
+): string {
+  return shouldShowCuttingCountdown && cuttingCountdownRemainingMs !== null ? '1' : '0'
+}
+
 export function renderCuttingDealerBadge(
   visualSeat: Seat,
   dealerSeat: Seat | null,
@@ -154,6 +161,10 @@ export function renderBottomCuttingCountdownBar(
       <div
         data-seat-countdown-fill="${seatId}"
         data-countdown-key="${countdownKey}"
+        data-countdown-active="${getCountdownActiveFlag(
+          shouldShowCuttingCountdown,
+          cuttingCountdownRemainingMs,
+        )}"
         style="
           position:absolute;
           inset:0;
@@ -199,6 +210,10 @@ export function renderSideCuttingCountdownFooter(
       <div
         data-seat-countdown-fill="${seatId}"
         data-countdown-key="${countdownKey}"
+        data-countdown-active="${getCountdownActiveFlag(
+          shouldShowCuttingCountdown,
+          cuttingCountdownRemainingMs,
+        )}"
         style="
           position:absolute;
           inset:0;

@@ -529,9 +529,12 @@ export function createActiveRoomFlowController(
         if (!existing) { ok = false; break }
         const newKey = fill.getAttribute('data-countdown-key') ?? ''
         const existingKey = existing.getAttribute('data-countdown-key') ?? ''
+        const newActive = fill.getAttribute('data-countdown-active') ?? '0'
+        const existingActive = existing.getAttribute('data-countdown-active') ?? '0'
         const sameCountdown = newKey !== '' && newKey === existingKey
-        if (!sameCountdown) {
+        if (!sameCountdown || newActive !== existingActive) {
           if (newKey !== existingKey) existing.setAttribute('data-countdown-key', newKey)
+          if (newActive !== existingActive) existing.setAttribute('data-countdown-active', newActive)
           const newStyle = fill.getAttribute('style') ?? ''
           if (existing.getAttribute('style') !== newStyle) existing.setAttribute('style', newStyle)
         }
@@ -1822,7 +1825,9 @@ export function createActiveRoomFlowController(
             dealerSeat: dealerSeatForRender,
             cutterSeat: cutterSeatForRender,
             cuttingCountdownRemainingMs: cuttingCountdownRemainingMsForRender,
-            countdownKey: cutterSeatForRender !== null && activeRoomState.game?.timerDeadlineAt != null
+            countdownKey: cutterSeatForRender !== null &&
+              cuttingCountdownRemainingMsForRender !== null &&
+              activeRoomState.game?.timerDeadlineAt != null
               ? `c:${cutterSeatForRender}:${activeRoomState.game.timerDeadlineAt}`
               : null,
             panelScale: stageScale,
@@ -1905,7 +1910,9 @@ export function createActiveRoomFlowController(
         dealerSeat: dealerSeatForRender,
         cutterSeat: cutterSeatForRender,
         cuttingCountdownRemainingMs: cuttingCountdownRemainingMsForRender,
-        countdownKey: cutterSeatForRender !== null && activeRoomState.game?.timerDeadlineAt != null
+        countdownKey: cutterSeatForRender !== null &&
+          cuttingCountdownRemainingMsForRender !== null &&
+          activeRoomState.game?.timerDeadlineAt != null
           ? `c:${cutterSeatForRender}:${activeRoomState.game.timerDeadlineAt}`
           : null,
         panelScale: stageScale,
