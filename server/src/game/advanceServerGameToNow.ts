@@ -5,6 +5,15 @@ import { getServerTimerExpiry } from './getServerTimerExpiry.js'
 import { resolveServerNow } from './resolveServerNow.js'
 
 const MAX_SERVER_CATCH_UP_STEPS = 256
+const DEAL_VISUAL_PHASES = new Set<ServerAuthoritativeGameState['phase']>([
+  'deal-first-3',
+  'deal-next-2',
+  'deal-last-3',
+])
+
+function isDealVisualPhase(phase: ServerAuthoritativeGameState['phase']): boolean {
+  return DEAL_VISUAL_PHASES.has(phase)
+}
 
 export function advanceServerGameToNow(
   state: ServerAuthoritativeGameState,
@@ -18,6 +27,7 @@ export function advanceServerGameToNow(
     resolvedNow
 
   for (let step = 0; step < MAX_SERVER_CATCH_UP_STEPS; step += 1) {
+    const previousPhase = currentState.phase
     const result = advanceOneServerStep(currentState, resolvedNow, lastEventAt)
 
     if (!result.advanced) {
@@ -27,7 +37,11 @@ export function advanceServerGameToNow(
     currentState = result.state
     lastEventAt = result.eventAt
 
-    if (result.stopCatchUpAfterStep === true) {
+    if (
+      result.stopCatchUpAfterStep === true ||
+      isDealVisualPhase(previousPhase) ||
+      isDealVisualPhase(currentState.phase)
+    ) {
       return currentState
     }
   }
