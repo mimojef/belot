@@ -560,6 +560,46 @@ function partnerMandatoryRequestedSuit(
 
 // ─── Suit scoring: how attractive is a suit to lead? ─────────────────────────
 
+function partnerAllTrumpsColorSignaledSuit(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+): ServerSuit | null {
+  const partner = getPartnerSeat(seat)
+  const tricks = state.playing?.completedTricks ?? []
+  const ourWonTricks = tricks.filter(
+    t => t.winnerSeat === seat || t.winnerSeat === partner
+  )
+  const lastOurTrick = ourWonTricks[ourWonTricks.length - 1]
+  if (!lastOurTrick) return null
+
+  const leadSuit = lastOurTrick.plays[0]?.card.suit
+  if (!leadSuit) return null
+
+  const partnerPlay = lastOurTrick.plays.find(p => p.seat === partner)
+  if (!partnerPlay) return null
+
+  const card = partnerPlay.card
+  if (card.suit === leadSuit || card.rank === 'J' || card.rank === '9') {
+    return null
+  }
+
+  const partnerHand = state.hands[partner] ?? []
+  const discardedSuitStillHasPotential = partnerHand.some(c =>
+    c.suit === card.suit && (c.rank === 'J' || c.rank === '9')
+  )
+  if (discardedSuitStillHasPotential) return null
+
+  const targetSuit = resolveColorSignal(card.suit, seat, state)
+  if (!targetSuit) return null
+
+  const targetCards = bySuit(partnerHand, targetSuit)
+  const targetHasPotential = targetCards.some(c =>
+    c.rank === 'J' || c.rank === '9'
+  )
+
+  return targetHasPotential ? targetSuit : null
+}
+
 /**
  * Score how attractive a suit is to lead into:
  * - +++ if both opponents are void (we make the trick for sure)
@@ -1172,6 +1212,24 @@ function chooseLead(
   // ── Rule 2: Властни некозови карти — ВИНАГИ с приоритет пред сигналите.
   //   Правило: "Първо изиграй властните си карти, след това търси партньора."
   //   Козовите карти пазим за контрол (не ги включваме тук).
+  if (contract !== 'all-trumps') {
+    const mandatorySuit = partnerMandatoryRequestedSuit(seat, state, trumpSuit, contract)
+    if (mandatorySuit) {
+      const mandatoryCards = bySuit(validCards, mandatorySuit)
+      if (mandatoryCards.length > 0) {
+        return highestCard(mandatoryCards, trumpSuit, contract)
+      }
+    }
+
+    const signaled = partnerSignaledSuit(seat, state, trumpSuit)
+    if (signaled) {
+      const signaledCards = bySuit(validCards, signaled)
+      if (signaledCards.length > 0) {
+        return highestCard(signaledCards, trumpSuit, contract)
+      }
+    }
+  }
+
   if (contract !== 'all-trumps' && !shouldHoldNoTrumpsMasters) {
     const nonTrumpMasters = validCards.filter(c =>
       c.suit !== trumpSuit &&
@@ -1217,7 +1275,10 @@ function chooseLead(
     }
 
     // ── Rule 4: Сигнализирана боя (висока карта на партньора на наша взятка)
-    const signaled = null
+    const signaled =
+      contract === 'no-trumps' || contract === 'suit'
+        ? partnerSignaledSuit(seat, state, trumpSuit)
+        : null
     if (signaled) {
       const signaledCards = bySuit(validCards, signaled)
       if (signaledCards.length > 0) {
@@ -1270,6 +1331,27 @@ function chooseLead(
 
   if (contract === 'all-trumps') {
     if (botTeamDeclared) {
+      const earlySignaledSuit = partnerMandatoryRequestedSuit(
+        seat,
+        state,
+        trumpSuit,
+        contract,
+      )
+      if (earlySignaledSuit) {
+        const signaledCards = bySuit(validCards, earlySignaledSuit)
+        if (signaledCards.length > 0) {
+          return highestCard(signaledCards, trumpSuit, contract)
+        }
+      }
+
+      const earlyColorSignaledSuit = partnerAllTrumpsColorSignaledSuit(seat, state)
+      if (earlyColorSignaledSuit) {
+        const colorSignaledCards = bySuit(validCards, earlyColorSignaledSuit)
+        if (colorSignaledCards.length > 0) {
+          return highestCard(colorSignaledCards, trumpSuit, contract)
+        }
+      }
+
       const longSuitUnlock = chooseAllTrumpsDeclarerLongSuitUnlock(state, validCards)
       if (longSuitUnlock) {
         return longSuitUnlock
@@ -1339,6 +1421,14 @@ function chooseLead(
       }
 
       // Никой цвят не е безопасен → най-ниската карта (не даряваме 9-ки)
+      const colorSignaledSuit = partnerAllTrumpsColorSignaledSuit(seat, state)
+      if (colorSignaledSuit) {
+        const colorSignaledCards = bySuit(validCards, colorSignaledSuit)
+        if (colorSignaledCards.length > 0) {
+          return highestCard(colorSignaledCards, trumpSuit, contract)
+        }
+      }
+
       return lowestCard(validCards, trumpSuit, contract)
 
     } else {
@@ -2222,6 +2312,38 @@ function chooseAllTrumpsSignalDiscard(
   return highestCard(candidates, null, 'all-trumps')
 }
 
+function chooseAllTrumpsColorSignalDiscard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  const hand = state.hands[seat] ?? []
+  const leadSuit = state.playing?.currentTrick?.plays[0]?.card.suit ?? null
+  if (!leadSuit) return null
+
+  const candidates = validCards.filter(card => {
+    if (card.suit === leadSuit || card.rank === 'J' || card.rank === '9') {
+      return false
+    }
+
+    const remaining = hand.filter(c => c.id !== card.id)
+    const discardedSuitIsSafe = !remaining.some(c =>
+      c.suit === card.suit && (c.rank === 'J' || c.rank === '9')
+    )
+    if (!discardedSuitIsSafe) return false
+
+    const targetSuit = resolveColorSignal(card.suit, seat, state)
+    if (!targetSuit) return false
+
+    const targetCards = bySuit(hand, targetSuit)
+    return targetCards.some(c => c.rank === 'J' || c.rank === '9')
+  })
+
+  return candidates.length > 0
+    ? chooseAllTrumpsHighestDumpValueCard(candidates)
+    : null
+}
+
 function chooseNoTrumpsSignalDiscard(
   seat: Seat,
   state: ServerAuthoritativeGameState,
@@ -2673,6 +2795,11 @@ function discardSignal(
     const signalCard = chooseAllTrumpsSignalDiscard(seat, state, validCards)
     if (signalCard) {
       return signalCard
+    }
+
+    const colorSignalCard = chooseAllTrumpsColorSignalDiscard(seat, state, validCards)
+    if (colorSignalCard) {
+      return colorSignalCard
     }
 
     const smartDiscard = chooseAllTrumpsSmartDiscard(seat, state, validCards)
