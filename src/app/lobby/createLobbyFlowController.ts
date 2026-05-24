@@ -827,7 +827,12 @@ export function createLobbyFlowController(
 
   let _renderTimerId: ReturnType<typeof setTimeout> | null = null
 
+  function shouldSuppressLobbyRender(): boolean {
+    return options.getIsInGame?.() ?? false
+  }
+
   function scheduleRender(): void {
+    if (shouldSuppressLobbyRender()) return
     if (_renderTimerId !== null) clearTimeout(_renderTimerId)
     _renderTimerId = setTimeout(() => {
       _renderTimerId = null
@@ -3739,6 +3744,9 @@ export function createLobbyFlowController(
     if (_renderTimerId !== null) {
       clearTimeout(_renderTimerId)
       _renderTimerId = null
+    }
+    if (shouldSuppressLobbyRender()) {
+      return
     }
     if (state.currentScreen === 'matchmaking-room') {
       renderMatchmakingRoom()
