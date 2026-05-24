@@ -10,6 +10,7 @@ export type AdvanceOneServerStepResult = {
   state: ServerAuthoritativeGameState
   advanced: boolean
   eventAt: number
+  stopCatchUpAfterStep?: boolean
 }
 
 export function advanceOneServerStep(

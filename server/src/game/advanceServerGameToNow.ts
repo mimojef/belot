@@ -26,6 +26,10 @@ export function advanceServerGameToNow(
 
     currentState = result.state
     lastEventAt = result.eventAt
+
+    if (result.stopCatchUpAfterStep === true) {
+      return currentState
+    }
   }
 
   return currentState

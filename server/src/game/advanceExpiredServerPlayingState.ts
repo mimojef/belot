@@ -11,6 +11,7 @@ export type AdvanceExpiredServerPlayingStateResult = {
   state: ServerAuthoritativeGameState
   advanced: boolean
   eventAt: number
+  stopCatchUpAfterStep?: boolean
 }
 
 function canDeclareBotBeloteForCard(
@@ -126,5 +127,6 @@ export function advanceExpiredServerPlayingState(
     state: nextState,
     advanced: true,
     eventAt,
+    stopCatchUpAfterStep: true,
   }
 }
