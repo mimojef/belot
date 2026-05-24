@@ -1632,6 +1632,13 @@ function tryDumpHighValueMaster(
   const candidateCards = validCards.filter(c => {
     if (c.suit === ledSuit) return false
     if (contract === 'suit' && c.suit === trumpSuit && (c.rank === 'J' || c.rank === '9')) return false
+    if (
+      contract === 'all-trumps' &&
+      c.rank === 'J' &&
+      !areRemainingCardsAllMasters(seat, state, c, null, 'all-trumps')
+    ) {
+      return false
+    }
     return true
   })
 
