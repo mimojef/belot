@@ -1804,6 +1804,74 @@ function chooseDeclarerTakePartnerTrumpLead(
   return highestCard(validTrumps, trumpSuit, contract)
 }
 
+function chooseThirdHandNoTrumpsHighCard(
+  validCards: ServerCard[],
+  plays: ServerTrickPlay[],
+  contract: Contract,
+): ServerCard | null {
+  if (contract !== 'no-trumps') return null
+  if (plays.length !== 2) return null
+
+  const leadSuit = plays[0]?.card.suit ?? null
+  if (!leadSuit) return null
+
+  const suitedCards = validCards.filter(c => c.suit === leadSuit)
+  if (suitedCards.length === 0) return null
+
+  const highestSuitedCard = highestCard(suitedCards, null, contract)
+  const highestPlayedInSuit = plays
+    .map(play => play.card)
+    .filter(card => card.suit === leadSuit)
+    .reduce<ServerCard | null>((best, card) => {
+      if (!best) return card
+      return NO_TRUMP_POWER[card.rank] > NO_TRUMP_POWER[best.rank] ? card : best
+    }, null)
+
+  if (
+    highestPlayedInSuit &&
+    NO_TRUMP_POWER[highestSuitedCard.rank] <= NO_TRUMP_POWER[highestPlayedInSuit.rank]
+  ) {
+    return null
+  }
+
+  return highestSuitedCard
+}
+
+function chooseThirdHandSuitPlainHighCard(
+  validCards: ServerCard[],
+  plays: ServerTrickPlay[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  if (contract !== 'suit' || !trumpSuit) return null
+  if (plays.length !== 2) return null
+
+  const leadSuit = plays[0]?.card.suit ?? null
+  if (!leadSuit || leadSuit === trumpSuit) return null
+  if (plays.some(play => play.card.suit === trumpSuit)) return null
+
+  const suitedCards = validCards.filter(c => c.suit === leadSuit)
+  if (suitedCards.length === 0) return null
+
+  const highestSuitedCard = highestCard(suitedCards, trumpSuit, contract)
+  const highestPlayedInSuit = plays
+    .map(play => play.card)
+    .filter(card => card.suit === leadSuit)
+    .reduce<ServerCard | null>((best, card) => {
+      if (!best) return card
+      return NO_TRUMP_POWER[card.rank] > NO_TRUMP_POWER[best.rank] ? card : best
+    }, null)
+
+  if (
+    highestPlayedInSuit &&
+    NO_TRUMP_POWER[highestSuitedCard.rank] <= NO_TRUMP_POWER[highestPlayedInSuit.rank]
+  ) {
+    return null
+  }
+
+  return highestSuitedCard
+}
+
 function chooseFollow(
   seat: Seat,
   state: ServerAuthoritativeGameState,
@@ -1830,6 +1898,25 @@ function chooseFollow(
   //   властните си карти (да трупаме точки) и после да му върнем в неговия цвят.
   const plays = state.playing?.currentTrick?.plays ?? []
   const partnerIsLeader = plays.length > 0 && plays[0]!.seat === getPartnerSeat(seat)
+
+  const thirdHandNoTrumpsHighCard = chooseThirdHandNoTrumpsHighCard(
+    validCards,
+    plays,
+    contract,
+  )
+  if (thirdHandNoTrumpsHighCard) {
+    return thirdHandNoTrumpsHighCard
+  }
+
+  const thirdHandSuitPlainHighCard = chooseThirdHandSuitPlainHighCard(
+    validCards,
+    plays,
+    trumpSuit,
+    contract,
+  )
+  if (thirdHandSuitPlainHighCard) {
+    return thirdHandSuitPlainHighCard
+  }
 
   const declarerTakePartnerTrumpLead = chooseDeclarerTakePartnerTrumpLead(
     seat,
@@ -2159,6 +2246,373 @@ function chooseNoTrumpsSignalDiscard(
   return highestCard(candidates, null, 'no-trumps')
 }
 
+function chooseHighestDumpValueCard(cards: ServerCard[]): ServerCard {
+  return cards.reduce((best, card) => {
+    const cardValue = dumpValue(card, null, 'no-trumps')
+    const bestValue = dumpValue(best, null, 'no-trumps')
+
+    if (cardValue !== bestValue) {
+      return cardValue > bestValue ? card : best
+    }
+
+    return NO_TRUMP_POWER[card.rank] > NO_TRUMP_POWER[best.rank] ? card : best
+  })
+}
+
+function chooseNoTrumpsDeadSuitDiscard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  const hand = state.hands[seat] ?? []
+  const leadSuit = state.playing?.currentTrick?.plays[0]?.card.suit ?? null
+  const discardableCards = validCards.filter(card => card.suit !== leadSuit)
+  const previousDiscardSuit = [...(state.playing?.completedTricks ?? [])]
+    .reverse()
+    .map(trick => {
+      const trickLeadSuit = trick.plays[0]?.card.suit ?? null
+      const play = trick.plays.find(trickPlay => trickPlay.seat === seat)
+      if (!trickLeadSuit || !play || play.card.suit === trickLeadSuit) return null
+      return play.card.suit
+    })
+    .find((suit): suit is ServerSuit => suit !== null)
+
+  const deadSuitGroups = ALL_SUITS
+    .map(suit => {
+      const suitHand = bySuit(hand, suit)
+      const cards = bySuit(discardableCards, suit)
+      const hasAce = suitHand.some(card => card.rank === 'A')
+      const hasTen = suitHand.some(card => card.rank === '10')
+
+      return {
+        suit,
+        cards,
+        handCount: suitHand.length,
+        pointValue: cards.reduce(
+          (sum, card) => sum + dumpValue(card, null, 'no-trumps'),
+          0,
+        ),
+        isDead: suitHand.length > 0 && !hasAce && !hasTen,
+      }
+    })
+    .filter(group => group.isDead && group.cards.length > 0)
+    .sort((left, right) => {
+      if (left.suit === previousDiscardSuit && right.suit !== previousDiscardSuit) return -1
+      if (right.suit === previousDiscardSuit && left.suit !== previousDiscardSuit) return 1
+      if (right.handCount !== left.handCount) return right.handCount - left.handCount
+      return right.pointValue - left.pointValue
+    })
+
+  const target = deadSuitGroups[0]
+  return target ? chooseHighestDumpValueCard(target.cards) : null
+}
+
+function chooseNoTrumpsPotentialPreservingDiscard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  const hand = state.hands[seat] ?? []
+  const leadSuit = state.playing?.currentTrick?.plays[0]?.card.suit ?? null
+  const discardableCards = validCards.filter(card => card.suit !== leadSuit)
+
+  const tenKingCandidates = ALL_SUITS.flatMap(suit => {
+    const suitHand = bySuit(hand, suit)
+    const hasTen = suitHand.some(card => card.rank === '10')
+    const hasKing = suitHand.some(card => card.rank === 'K')
+    if (!hasTen || !hasKing) return []
+
+    return bySuit(discardableCards, suit).filter(card => card.rank === '10')
+  })
+  if (tenKingCandidates.length > 0) {
+    return chooseHighestDumpValueCard(tenKingCandidates)
+  }
+
+  const coveredTenCandidates = ALL_SUITS.flatMap(suit => {
+    const suitHand = bySuit(hand, suit)
+    const hasTen = suitHand.some(card => card.rank === '10')
+    const hasKing = suitHand.some(card => card.rank === 'K')
+    if (!hasTen || hasKing || suitHand.length < 2) return []
+
+    return bySuit(discardableCards, suit).filter(card => card.rank !== '10')
+  })
+  if (coveredTenCandidates.length > 0) {
+    return chooseHighestDumpValueCard(coveredTenCandidates)
+  }
+
+  const aceSuitSideCards = ALL_SUITS.flatMap(suit => {
+    const suitHand = bySuit(hand, suit)
+    const hasAce = suitHand.some(card => card.rank === 'A')
+    if (!hasAce || suitHand.length < 2) return []
+
+    return bySuit(discardableCards, suit).filter(card => card.rank !== 'A')
+  })
+  if (aceSuitSideCards.length > 0) {
+    return chooseHighestDumpValueCard(aceSuitSideCards)
+  }
+
+  return null
+}
+
+function chooseNoTrumpsSmartDiscard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  return (
+    chooseNoTrumpsDeadSuitDiscard(seat, state, validCards) ??
+    chooseNoTrumpsPotentialPreservingDiscard(seat, state, validCards)
+  )
+}
+
+function chooseAllTrumpsHighestDumpValueCard(cards: ServerCard[]): ServerCard {
+  return cards.reduce((best, card) => {
+    const cardValue = dumpValue(card, null, 'all-trumps')
+    const bestValue = dumpValue(best, null, 'all-trumps')
+
+    if (cardValue !== bestValue) {
+      return cardValue > bestValue ? card : best
+    }
+
+    return TRUMP_POWER[card.rank] > TRUMP_POWER[best.rank] ? card : best
+  })
+}
+
+function chooseAllTrumpsDeadSuitDiscard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  const hand = state.hands[seat] ?? []
+  const leadSuit = state.playing?.currentTrick?.plays[0]?.card.suit ?? null
+  const discardableCards = validCards.filter(card => card.suit !== leadSuit)
+  const previousDiscardSuit = [...(state.playing?.completedTricks ?? [])]
+    .reverse()
+    .map(trick => {
+      const trickLeadSuit = trick.plays[0]?.card.suit ?? null
+      const play = trick.plays.find(trickPlay => trickPlay.seat === seat)
+      if (!trickLeadSuit || !play || play.card.suit === trickLeadSuit) return null
+      return play.card.suit
+    })
+    .find((suit): suit is ServerSuit => suit !== null)
+
+  const deadSuitGroups = ALL_SUITS
+    .map(suit => {
+      const suitHand = bySuit(hand, suit)
+      const cards = bySuit(discardableCards, suit)
+      const hasJack = suitHand.some(card => card.rank === 'J')
+      const hasNine = suitHand.some(card => card.rank === '9')
+
+      return {
+        suit,
+        cards,
+        handCount: suitHand.length,
+        pointValue: cards.reduce(
+          (sum, card) => sum + dumpValue(card, null, 'all-trumps'),
+          0,
+        ),
+        isDead: suitHand.length > 0 && !hasJack && !hasNine,
+      }
+    })
+    .filter(group => group.isDead && group.cards.length > 0)
+    .sort((left, right) => {
+      if (left.suit === previousDiscardSuit && right.suit !== previousDiscardSuit) return -1
+      if (right.suit === previousDiscardSuit && left.suit !== previousDiscardSuit) return 1
+      if (right.handCount !== left.handCount) return right.handCount - left.handCount
+      return right.pointValue - left.pointValue
+    })
+
+  const target = deadSuitGroups[0]
+  return target ? chooseAllTrumpsHighestDumpValueCard(target.cards) : null
+}
+
+function chooseAllTrumpsPotentialPreservingDiscard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  const hand = state.hands[seat] ?? []
+  const leadSuit = state.playing?.currentTrick?.plays[0]?.card.suit ?? null
+  const discardableCards = validCards.filter(card => card.suit !== leadSuit)
+
+  const protectedNineCards = ALL_SUITS.flatMap(suit => {
+    const suitHand = bySuit(hand, suit)
+    const hasJack = suitHand.some(card => card.rank === 'J')
+    const hasNine = suitHand.some(card => card.rank === '9')
+    if (!hasNine || hasJack || suitHand.length < 2) return []
+
+    return bySuit(discardableCards, suit).filter(card => card.rank !== '9')
+  })
+  if (protectedNineCards.length > 0) {
+    return chooseAllTrumpsHighestDumpValueCard(protectedNineCards)
+  }
+
+  const jackSuitSideCards = ALL_SUITS.flatMap(suit => {
+    const suitHand = bySuit(hand, suit)
+    const hasJack = suitHand.some(card => card.rank === 'J')
+    if (!hasJack || suitHand.length < 2) return []
+
+    return bySuit(discardableCards, suit).filter(card => card.rank !== 'J')
+  })
+  if (jackSuitSideCards.length > 0) {
+    return chooseAllTrumpsHighestDumpValueCard(jackSuitSideCards)
+  }
+
+  return null
+}
+
+function chooseAllTrumpsSmartDiscard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  return (
+    chooseAllTrumpsDeadSuitDiscard(seat, state, validCards) ??
+    chooseAllTrumpsPotentialPreservingDiscard(seat, state, validCards)
+  )
+}
+
+function chooseSuitPlainHighestDumpValueCard(
+  cards: ServerCard[],
+  trumpSuit: ServerSuit,
+): ServerCard {
+  return cards.reduce((best, card) => {
+    const cardValue = dumpValue(card, trumpSuit, 'suit')
+    const bestValue = dumpValue(best, trumpSuit, 'suit')
+
+    if (cardValue !== bestValue) {
+      return cardValue > bestValue ? card : best
+    }
+
+    return NO_TRUMP_POWER[card.rank] > NO_TRUMP_POWER[best.rank] ? card : best
+  })
+}
+
+function chooseSuitPlainDeadSuitDiscard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+): ServerCard | null {
+  if (!trumpSuit) return null
+
+  const hand = state.hands[seat] ?? []
+  const leadSuit = state.playing?.currentTrick?.plays[0]?.card.suit ?? null
+  const discardableCards = validCards.filter(
+    card => card.suit !== leadSuit && card.suit !== trumpSuit,
+  )
+  const previousDiscardSuit = [...(state.playing?.completedTricks ?? [])]
+    .reverse()
+    .map(trick => {
+      const trickLeadSuit = trick.plays[0]?.card.suit ?? null
+      const play = trick.plays.find(trickPlay => trickPlay.seat === seat)
+      if (!trickLeadSuit || !play || play.card.suit === trickLeadSuit) return null
+      if (play.card.suit === trumpSuit) return null
+      return play.card.suit
+    })
+    .find((suit): suit is ServerSuit => suit !== null)
+
+  const deadSuitGroups = ALL_SUITS
+    .filter(suit => suit !== trumpSuit)
+    .map(suit => {
+      const suitHand = bySuit(hand, suit)
+      const cards = bySuit(discardableCards, suit)
+      const hasAce = suitHand.some(card => card.rank === 'A')
+      const hasTen = suitHand.some(card => card.rank === '10')
+
+      return {
+        suit,
+        cards,
+        handCount: suitHand.length,
+        pointValue: cards.reduce(
+          (sum, card) => sum + dumpValue(card, trumpSuit, 'suit'),
+          0,
+        ),
+        isDead: suitHand.length > 0 && !hasAce && !hasTen,
+      }
+    })
+    .filter(group => group.isDead && group.cards.length > 0)
+    .sort((left, right) => {
+      if (left.suit === previousDiscardSuit && right.suit !== previousDiscardSuit) return -1
+      if (right.suit === previousDiscardSuit && left.suit !== previousDiscardSuit) return 1
+      if (right.handCount !== left.handCount) return right.handCount - left.handCount
+      return right.pointValue - left.pointValue
+    })
+
+  const target = deadSuitGroups[0]
+  return target ? chooseSuitPlainHighestDumpValueCard(target.cards, trumpSuit) : null
+}
+
+function chooseSuitPlainPotentialPreservingDiscard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+): ServerCard | null {
+  if (!trumpSuit) return null
+
+  const hand = state.hands[seat] ?? []
+  const leadSuit = state.playing?.currentTrick?.plays[0]?.card.suit ?? null
+  const discardableCards = validCards.filter(
+    card => card.suit !== leadSuit && card.suit !== trumpSuit,
+  )
+
+  const tenKingCandidates = ALL_SUITS.flatMap(suit => {
+    if (suit === trumpSuit) return []
+
+    const suitHand = bySuit(hand, suit)
+    const hasTen = suitHand.some(card => card.rank === '10')
+    const hasKing = suitHand.some(card => card.rank === 'K')
+    if (!hasTen || !hasKing) return []
+
+    return bySuit(discardableCards, suit).filter(card => card.rank === '10')
+  })
+  if (tenKingCandidates.length > 0) {
+    return chooseSuitPlainHighestDumpValueCard(tenKingCandidates, trumpSuit)
+  }
+
+  const coveredTenCandidates = ALL_SUITS.flatMap(suit => {
+    if (suit === trumpSuit) return []
+
+    const suitHand = bySuit(hand, suit)
+    const hasTen = suitHand.some(card => card.rank === '10')
+    const hasKing = suitHand.some(card => card.rank === 'K')
+    if (!hasTen || hasKing || suitHand.length < 2) return []
+
+    return bySuit(discardableCards, suit).filter(card => card.rank !== '10')
+  })
+  if (coveredTenCandidates.length > 0) {
+    return chooseSuitPlainHighestDumpValueCard(coveredTenCandidates, trumpSuit)
+  }
+
+  const aceSuitSideCards = ALL_SUITS.flatMap(suit => {
+    if (suit === trumpSuit) return []
+
+    const suitHand = bySuit(hand, suit)
+    const hasAce = suitHand.some(card => card.rank === 'A')
+    if (!hasAce || suitHand.length < 2) return []
+
+    return bySuit(discardableCards, suit).filter(card => card.rank !== 'A')
+  })
+  if (aceSuitSideCards.length > 0) {
+    return chooseSuitPlainHighestDumpValueCard(aceSuitSideCards, trumpSuit)
+  }
+
+  return null
+}
+
+function chooseSuitPlainSmartDiscard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+): ServerCard | null {
+  return (
+    chooseSuitPlainDeadSuitDiscard(seat, state, validCards, trumpSuit) ??
+    chooseSuitPlainPotentialPreservingDiscard(seat, state, validCards, trumpSuit)
+  )
+}
+
 function chooseSuitPlainSignalDiscard(
   seat: Seat,
   state: ServerAuthoritativeGameState,
@@ -2203,6 +2657,11 @@ function discardSignal(
       return signalCard
     }
 
+    const smartDiscard = chooseNoTrumpsSmartDiscard(seat, state, validCards)
+    if (smartDiscard) {
+      return smartDiscard
+    }
+
     const useless = validCards.filter(c => NO_TRUMP_POWER[c.rank] <= 2 && !wouldBareNine(c, hand))
     if (useless.length > 0) {
       return lowestCard(useless, trumpSuit, contract)
@@ -2214,6 +2673,11 @@ function discardSignal(
     const signalCard = chooseAllTrumpsSignalDiscard(seat, state, validCards)
     if (signalCard) {
       return signalCard
+    }
+
+    const smartDiscard = chooseAllTrumpsSmartDiscard(seat, state, validCards)
+    if (smartDiscard) {
+      return smartDiscard
     }
 
     return safeDiscard(validCards, state.hands[seat] ?? [], trumpSuit, contract)
@@ -2228,6 +2692,16 @@ function discardSignal(
     )
     if (signalCard) {
       return signalCard
+    }
+
+    const smartDiscard = chooseSuitPlainSmartDiscard(
+      seat,
+      state,
+      validCards,
+      trumpSuit,
+    )
+    if (smartDiscard) {
+      return smartDiscard
     }
 
     return safeDiscard(validCards, state.hands[seat] ?? [], trumpSuit, contract)
