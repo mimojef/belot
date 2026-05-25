@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   RoomCardSnapshot,
   RoomCompletedTrickSnapshot,
   RoomDeclarationSnapshot,
@@ -10,10 +10,16 @@ import type {
 } from '../network/createGameServerClient'
 import { getCardFaceImagePath } from './cardImageAssets'
 import {
+  ACTIVE_ROOM_MAX_STAGE_SCALE,
+  ACTIVE_ROOM_MIN_STAGE_SCALE,
+  ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT,
+  ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND,
   ACTIVE_ROOM_TABLE_STAGE_BACKGROUND,
   ACTIVE_ROOM_TABLE_BACKGROUND,
   ACTIVE_ROOM_STAGE_HEIGHT,
   ACTIVE_ROOM_STAGE_WIDTH,
+  ACTIVE_ROOM_VIEWPORT_HORIZONTAL_PADDING,
+  ACTIVE_ROOM_VIEWPORT_VERTICAL_PADDING,
   escapeHtml,
 } from './activeRoomShared'
 import {
@@ -39,6 +45,7 @@ import {
   removeDeclarationPrompt,
   renderDeclarationPrompt,
 } from './declarations/renderDeclarationPrompt'
+import { getViewportStageMetrics, isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 
 const PLAY_CARD_ENTRY_ANIMATION_MS = 400
 const COMPLETED_TRICK_PREVIEW_MS = 220
@@ -123,6 +130,7 @@ type DeclarationBubbleUiState = {
 const latestRenderOptionsByCache = new WeakMap<PlayingUiCache, RenderPlayingScreenOptions>()
 const playedCardFlySourceByCache = new WeakMap<PlayingUiCache, PlayedCardFlySource>()
 const declarationBubbleStateByCache = new WeakMap<PlayingUiCache, DeclarationBubbleUiState>()
+const mobileOptimisticDeclarationAudioByCache = new WeakMap<PlayingUiCache, Set<string>>()
 
 function getScaledPhysicalElementSize(
   element: HTMLElement,
@@ -450,18 +458,14 @@ function formatDeclarationBubbleLabel(label: string, count: number): string {
   return label
 }
 
-function buildDeclarationBubbleLines(
-  declarations: RoomDeclarationSnapshot[],
-): string[] {
+function getDeclarationLinesKey(lines: string[]): string {
+  return lines.join('\u001f')
+}
+
+function buildDeclarationBubbleLinesFromLabels(labels: string[]): string[] {
   const counts = new Map<string, number>()
 
-  for (const declaration of declarations) {
-    const label = getDeclarationBubbleLabel(declaration)
-
-    if (label === null) {
-      continue
-    }
-
+  for (const label of labels) {
     counts.set(label, (counts.get(label) ?? 0) + 1)
   }
 
@@ -474,6 +478,80 @@ function buildDeclarationBubbleLines(
 
     return [formatDeclarationBubbleLabel(label, count)]
   })
+}
+
+function buildDeclarationBubbleLines(
+  declarations: RoomDeclarationSnapshot[],
+): string[] {
+  const labels: string[] = []
+
+  for (const declaration of declarations) {
+    const label = getDeclarationBubbleLabel(declaration)
+
+    if (label === null) {
+      continue
+    }
+
+    labels.push(label)
+  }
+
+  return buildDeclarationBubbleLinesFromLabels(labels)
+}
+
+function markMobileOptimisticDeclarationAudio(cache: PlayingUiCache, lines: string[]): void {
+  if (lines.length === 0) {
+    return
+  }
+
+  const key = getDeclarationLinesKey(lines)
+  let keys = mobileOptimisticDeclarationAudioByCache.get(cache)
+
+  if (!keys) {
+    keys = new Set<string>()
+    mobileOptimisticDeclarationAudioByCache.set(cache, keys)
+  }
+
+  keys.add(key)
+  window.setTimeout(() => {
+    const latestKeys = mobileOptimisticDeclarationAudioByCache.get(cache)
+
+    if (!latestKeys) {
+      return
+    }
+
+    latestKeys.delete(key)
+
+    if (latestKeys.size === 0) {
+      mobileOptimisticDeclarationAudioByCache.delete(cache)
+    }
+  }, DECLARATION_BUBBLE_VISIBLE_MS + 900)
+}
+
+function notifyDeclarationBubbleShown(
+  cache: PlayingUiCache,
+  lines: string[],
+  onBubbleShown?: (lines: string[]) => void,
+): void {
+  if (!onBubbleShown) {
+    return
+  }
+
+  if (isPhoneLayoutViewport()) {
+    const key = getDeclarationLinesKey(lines)
+    const optimisticKeys = mobileOptimisticDeclarationAudioByCache.get(cache)
+
+    if (optimisticKeys?.has(key)) {
+      optimisticKeys.delete(key)
+
+      if (optimisticKeys.size === 0) {
+        mobileOptimisticDeclarationAudioByCache.delete(cache)
+      }
+
+      return
+    }
+  }
+
+  onBubbleShown(lines)
 }
 
 function getDeclarationBubbleUiState(cache: PlayingUiCache): DeclarationBubbleUiState {
@@ -621,7 +699,7 @@ function scheduleDeclarationBubbleHide(options: {
         lines: nextBubble.lines,
         needsTimerStart: true,
       }
-      onBubbleShown?.(nextBubble.lines)
+      notifyDeclarationBubbleShown(cache, nextBubble.lines, onBubbleShown)
     }
 
     const latestOptions = latestRenderOptionsByCache.get(cache)
@@ -662,7 +740,7 @@ function showOrQueueDeclarationBubble(options: {
     lines: bubble.lines,
     needsTimerStart: false,
   }
-  onBubbleShown?.(bubble.lines)
+  notifyDeclarationBubbleShown(cache, bubble.lines, onBubbleShown)
 
   scheduleDeclarationBubbleHide({
     cache,
@@ -980,6 +1058,7 @@ function renderBottomHandOverlay(options: {
   hoveredHandCardId: string | null
 }): string {
   const { cards, validCardIds, isMyTurn, stageScale, hoveredHandCardId } = options
+  const bottomInset = isPhoneLayoutViewport() ? ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT : 0
 
   if (cards.length === 0) {
     return ''
@@ -1076,7 +1155,10 @@ function renderBottomHandOverlay(options: {
       data-playing-bottom-hand-overlay="1"
       style="
         position:fixed;
-        inset:0;
+        left:0;
+        right:0;
+        top:0;
+        bottom:${bottomInset}px;
         z-index:2;
         pointer-events:none;
       "
@@ -1313,9 +1395,9 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     localSeat,
     roomId,
     winningBid,
-    stageScale,
-    scaledStageWidth,
-    scaledStageHeight,
+    stageScale: sourceStageScale,
+    scaledStageWidth: sourceScaledStageWidth,
+    scaledStageHeight: sourceScaledStageHeight,
     submitPlayCard,
     onDeclarationBubbleShown,
     onPlayedCardLanded,
@@ -1557,19 +1639,45 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     seats,
     isShowingBufferedCompletedTrick || shouldStartCollection,
   )
+  const isPhoneLayout = isPhoneLayoutViewport()
+  const mobileLayoutAttribute = isPhoneLayout ? 'data-mobile-layout="1"' : ''
+  const tableBackground = isPhoneLayout
+    ? ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND
+    : ACTIVE_ROOM_TABLE_BACKGROUND
+  const mobileStageMetrics = isPhoneLayout
+    ? getViewportStageMetrics({
+        baseWidth: ACTIVE_ROOM_STAGE_WIDTH,
+        baseHeight: ACTIVE_ROOM_STAGE_HEIGHT,
+        minScale: ACTIVE_ROOM_MIN_STAGE_SCALE,
+        maxScale: ACTIVE_ROOM_MAX_STAGE_SCALE,
+        viewportHorizontalPadding: ACTIVE_ROOM_VIEWPORT_HORIZONTAL_PADDING,
+        viewportVerticalPadding: ACTIVE_ROOM_VIEWPORT_VERTICAL_PADDING,
+        reservedTopSpace: ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT,
+      })
+    : null
+  const stageScale = mobileStageMetrics?.stageScale ?? sourceStageScale
+  const scaledStageWidth = mobileStageMetrics?.scaledStageWidth ?? sourceScaledStageWidth
+  const scaledStageHeight = mobileStageMetrics?.scaledStageHeight ?? sourceScaledStageHeight
+  const screenHeightStyle = isPhoneLayout
+    ? `height:calc(100dvh - ${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT}px);min-height:calc(100dvh - ${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT}px);`
+    : 'min-height:100vh;'
+  const fixedLayerInsetStyle = isPhoneLayout
+    ? `left:0;right:0;top:0;bottom:${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT}px;`
+    : 'inset:0;'
 
   root.innerHTML = `
     <div
+      ${mobileLayoutAttribute}
       style="
         position:relative;
-        min-height:100vh;
+        ${screenHeightStyle}
         width:100%;
         box-sizing:border-box;
         display:flex;
         align-items:center;
         justify-content:center;
         overflow:hidden;
-        background:${ACTIVE_ROOM_TABLE_BACKGROUND};
+        background:${tableBackground};
         font-family:Inter, system-ui, sans-serif;
       "
     >
@@ -1617,7 +1725,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         data-playing-collect-layer-host="1"
         style="
           position:fixed;
-          inset:0;
+          ${fixedLayerInsetStyle}
           z-index:2;
           pointer-events:none;
           overflow:visible;
@@ -1760,6 +1868,21 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
           currentPrompt.options,
           selectedKeys,
         )
+
+        if (isPhoneLayoutViewport() && finalSelectedKeys.length > 0) {
+          const selectedKeySet = new Set(finalSelectedKeys)
+          const optimisticLines = buildDeclarationBubbleLinesFromLabels(
+            currentPrompt.options
+              .filter((option) => selectedKeySet.has(option.key))
+              .map((option) => option.publicLabel),
+          )
+
+          if (optimisticLines.length > 0) {
+            onDeclarationBubbleShown?.(optimisticLines)
+            markMobileOptimisticDeclarationAudio(cache, optimisticLines)
+          }
+        }
+
         submitHandCardFromButton(button, cardId, finalSelectedKeys)
       },
     })

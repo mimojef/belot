@@ -303,6 +303,7 @@ export type LobbyFlowController = {
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
   resetToLobby: () => void
   refreshMissionsCount: () => void
+  refreshDailyRewardsStatus: () => void
   refreshSupportUnread: () => void
   removePendingFriendRequest: (friendshipId: string) => void
   getPendingFriendRequest: (friendshipId: string) => { friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null } | undefined
@@ -2633,6 +2634,21 @@ export function createLobbyFlowController(
     render()
   }
 
+  async function loadDailyRewardsStatus(): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession === null || !options.onDailyRewardsLoad) {
+      state.dailyRewardTiers = []
+      scheduleRender()
+      return
+    }
+
+    const result = await options.onDailyRewardsLoad()
+    if (result.ok) {
+      state.dailyRewardTiers = result.tiers
+      scheduleRender()
+    }
+  }
+
   async function claimDailyReward(tierId: string): Promise<void> {
     if (!options.onDailyRewardClaim) return
     state.dailyRewardClaimingId = tierId
@@ -4397,6 +4413,7 @@ export function createLobbyFlowController(
     startMatchmaking,
     resetToLobby,
     refreshMissionsCount: () => { void loadPlayerUnclaimedCount() },
+    refreshDailyRewardsStatus: () => { void loadDailyRewardsStatus() },
     removePendingFriendRequest: (friendshipId: string) => {
       state.pendingFriendRequests = state.pendingFriendRequests.filter((r) => r.friendshipId !== friendshipId)
       render()

@@ -7,12 +7,14 @@ import type {
   Seat,
 } from '../network/createGameServerClient'
 import {
+  ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND,
   ACTIVE_ROOM_TABLE_BACKGROUND,
   ACTIVE_ROOM_STAGE_HEIGHT,
   ACTIVE_ROOM_STAGE_WIDTH,
   escapeHtml,
 } from './activeRoomShared'
 import { renderScoreHud } from './renderScoreHud'
+import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 
 const LABEL_COLUMN_WIDTH_PX = 108
 const TABLE_GRID_COLUMNS = `${LABEL_COLUMN_WIDTH_PX}px minmax(0, 1fr) minmax(0, 1fr)`
@@ -990,9 +992,15 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
     scaledStageWidth,
     scaledStageHeight,
   } = options
+  const isPhoneLayout = isPhoneLayoutViewport()
+  const mobileLayoutAttribute = isPhoneLayout ? 'data-mobile-layout="1"' : ''
+  const tableBackground = isPhoneLayout
+    ? ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND
+    : ACTIVE_ROOM_TABLE_BACKGROUND
 
   root.innerHTML = `
     <div
+      ${mobileLayoutAttribute}
       style="
         position:relative;
         min-height:100vh;
@@ -1002,7 +1010,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
         align-items:center;
         justify-content:center;
         overflow:hidden;
-        background:${ACTIVE_ROOM_TABLE_BACKGROUND};
+        background:${tableBackground};
         font-family:Inter, system-ui, sans-serif;
       "
     >

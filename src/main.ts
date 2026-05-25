@@ -354,6 +354,7 @@ async function loadAuthSession(): Promise<void> {
   if (cached !== null) {
     currentAuthSession = cached
     syncLobbyWithAuthSession()
+    lobby.refreshDailyRewardsStatus()
     if (!activeRoom.hasActiveRoom()) lobby.render()
   }
 
@@ -372,9 +373,11 @@ async function loadAuthSession(): Promise<void> {
     syncLobbyWithAuthSession()
     if (currentAuthSession !== null) {
       lobby.refreshMissionsCount()
+      lobby.refreshDailyRewardsStatus()
       lobby.refreshSupportUnread()
       startSupportUnreadPolling()
     } else {
+      lobby.refreshDailyRewardsStatus()
       stopSupportUnreadPolling()
     }
     await syncLobbyFriendships()
@@ -408,6 +411,7 @@ async function submitAuthRequest(
     saveSessionCache(currentAuthSession)
     syncLobbyWithAuthSession()
     lobby.resetToLobby()
+    lobby.refreshDailyRewardsStatus()
     lobby.refreshSupportUnread()
     startSupportUnreadPolling()
     await syncLobbyFriendships()
@@ -433,6 +437,7 @@ async function submitLogout(): Promise<void> {
   stopSupportUnreadPolling()
   syncLobbyWithAuthSession()
   lobby.resetToLobby()
+  lobby.refreshDailyRewardsStatus()
 }
 
 async function loadPlayersDirectory(): Promise<

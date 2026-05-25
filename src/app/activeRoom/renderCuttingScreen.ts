@@ -3,6 +3,7 @@ import {
 } from '../network/createGameServerClient'
 import { ACTIVE_ROOM_TABLE_STAGE_BACKGROUND } from './activeRoomShared'
 import { CARD_BACK_IMAGE_PATH } from './cardImageAssets'
+import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 
 type RenderCuttingScreenOptions = {
   cuttingSnapshot: RoomCuttingSnapshot
@@ -244,6 +245,7 @@ function renderVisualDeck(
   const tableWidth = CUTTING_TABLE_WIDTH
   const pileLeft = CUTTING_PILE_LEFT
   const pileTop = CUTTING_PILE_TOP
+  const mobileCuttingDeckOffsetY = isPhoneLayoutViewport() ? 210 : 0
   const animationElapsedMs =
     cutAnimation !== null
       ? Math.max(0, Math.min(cutAnimation.elapsedMs, cutAnimation.totalDurationMs))
@@ -425,6 +427,7 @@ function renderVisualDeck(
             min-width:${tableWidth}px;
             height:${CUTTING_TABLE_HEIGHT}px;
             position:relative;
+            transform:translateY(${mobileCuttingDeckOffsetY}px);
           "
           ${isInteractive ? `onmousemove="${deckHoverMoveHandler}" onmouseleave="${deckHoverLeaveHandler}"` : ''}
         >

@@ -1,4 +1,4 @@
-import { getViewportStageMetrics } from '../../ui/layout/viewportStage'
+import { getViewportStageMetrics, isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 
 export type MatchmakingRoomPlayer = {
   id: string
@@ -37,6 +37,10 @@ const DEFAULT_COUNTDOWN_TOTAL_MS = 15000
 const ROOM_SIZE = 4
 
 const BACKGROUND_IMAGE_SRC = '/assets/lobby/matchmaking-room-bg.webp'
+const MOBILE_BACKGROUND = `
+  radial-gradient(circle at 50% 38%, rgba(39,174,96,0.22) 0%, rgba(13,72,38,0.15) 38%, rgba(0,0,0,0) 70%),
+  linear-gradient(180deg, #080b09 0%, #010302 100%)
+`
 const COIN_ICON_SRC = '/assets/lobby/icon-coin.png'
 
 const BASE_STAGE_WIDTH = 1671
@@ -194,6 +198,581 @@ function renderSlot(positionedSlot: PositionedMatchmakingRoomSlot): string {
   `
 }
 
+function renderMobileSlot(positionedSlot: PositionedMatchmakingRoomSlot): string {
+  const { slot } = positionedSlot
+  const isEmpty = slot.kind === 'empty'
+  const title = getSlotTitle(slot)
+  const subtitle = getSlotSubtitle(slot)
+
+  return `
+    <article class="mm-mobile-slot${isEmpty ? ' is-empty' : ''}">
+      <div class="mm-mobile-slot-icon">
+        ${renderSlotIcon(slot)}
+      </div>
+      <div class="mm-mobile-slot-copy">
+        <div class="mm-mobile-slot-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+        <div class="mm-mobile-slot-subtitle">${escapeHtml(subtitle)}</div>
+      </div>
+      ${isEmpty ? '' : '<div class="mm-mobile-ready" aria-hidden="true">✓</div>'}
+    </article>
+  `
+}
+
+function renderMobileMatchmakingRoomScreen(
+  params: RenderMatchmakingRoomScreenParams,
+  positionedSlots: PositionedMatchmakingRoomSlot[],
+  occupiedSlots: number,
+  countdownSeconds: number,
+  progressDegrees: number,
+): string {
+  return `
+    <section
+      data-mobile-layout="1"
+      data-matchmaking-room-screen="1"
+      data-matchmaking-room-stage-scale="1.0000"
+      class="mm-mobile-screen"
+    >
+      <style>
+        [data-matchmaking-room-screen="1"] {
+          --mm-gold:#d4a520;
+          --mm-gold-bright:#f4c95b;
+          --mm-green:#22c55e;
+          --mm-text:#f8fafc;
+          --mm-muted:rgba(255,255,255,0.56);
+        }
+
+        .mm-mobile-screen {
+          min-height:100dvh;
+          width:100%;
+          box-sizing:border-box;
+          padding:12px;
+          background:
+            radial-gradient(circle at 50% 18%, rgba(212,165,32,0.12), transparent 34%),
+            #000000;
+          color:var(--mm-text);
+          font-family:Arial, Helvetica, sans-serif;
+          overflow-y:auto;
+          -webkit-overflow-scrolling:touch;
+        }
+
+        .mm-mobile-shell {
+          width:min(100%, 430px);
+          margin:0 auto;
+          display:grid;
+          gap:12px;
+        }
+
+        .mm-mobile-header {
+          height:58px;
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          border-bottom:1px solid rgba(212,165,32,0.28);
+        }
+
+        .mm-mobile-logo {
+          width:142px;
+          height:38px;
+          display:block;
+          object-fit:contain;
+        }
+
+        .mm-mobile-status-card,
+        .mm-mobile-stake-card,
+        .mm-mobile-slots-card {
+          border:1px solid rgba(212,165,32,0.48);
+          border-radius:8px;
+          background:#050505;
+          box-sizing:border-box;
+        }
+
+        .mm-mobile-status-card {
+          padding:14px;
+          display:grid;
+          gap:12px;
+        }
+
+        .mm-mobile-title-row {
+          display:flex;
+          align-items:flex-start;
+          justify-content:space-between;
+          gap:12px;
+        }
+
+        .mm-mobile-title {
+          margin:0;
+          color:var(--mm-gold);
+          font-size:24px;
+          line-height:1.05;
+          font-weight:900;
+          letter-spacing:0.03em;
+          text-transform:uppercase;
+        }
+
+        .mm-mobile-subtitle {
+          margin-top:6px;
+          color:var(--mm-muted);
+          font-size:13px;
+          line-height:1.3;
+          font-weight:700;
+        }
+
+        .mm-mobile-count {
+          min-width:62px;
+          color:#ffffff;
+          font-size:22px;
+          line-height:1;
+          font-weight:900;
+          text-align:right;
+          font-variant-numeric:tabular-nums;
+          white-space:nowrap;
+        }
+
+        .mm-mobile-timer {
+          display:grid;
+          grid-template-columns:auto 1fr;
+          align-items:center;
+          gap:14px;
+        }
+
+        .mm-mobile-ring {
+          position:relative;
+          width:82px;
+          height:82px;
+          border-radius:50%;
+          background:
+            conic-gradient(var(--mm-gold-bright) var(--matchmaking-progress), rgba(212,165,32,0.12) 0);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          box-shadow:0 0 20px rgba(212,165,32,0.15);
+        }
+
+        .mm-mobile-ring::before {
+          content:'';
+          position:absolute;
+          width:66px;
+          height:66px;
+          border-radius:50%;
+          background:#050505;
+          border:1px solid rgba(212,165,32,0.24);
+        }
+
+        .mm-mobile-ring-text {
+          position:relative;
+          z-index:1;
+          display:flex;
+          align-items:baseline;
+          justify-content:center;
+          color:var(--mm-gold-bright);
+          font-variant-numeric:tabular-nums;
+        }
+
+        .mm-countdown-number {
+          font-size:30px;
+          line-height:1;
+          font-weight:900;
+          letter-spacing:0;
+        }
+
+        .mm-countdown-unit {
+          margin-left:3px;
+          font-size:11px;
+          line-height:1;
+          font-weight:900;
+        }
+
+        .mm-mobile-search-copy {
+          min-width:0;
+          display:grid;
+          gap:6px;
+        }
+
+        .mm-mobile-search-label {
+          color:#ffffff;
+          font-size:18px;
+          line-height:1.1;
+          font-weight:900;
+        }
+
+        .mm-mobile-search-note {
+          color:var(--mm-muted);
+          font-size:13px;
+          line-height:1.3;
+          font-weight:700;
+        }
+
+        .mm-mobile-stake-card {
+          padding:10px;
+          display:grid;
+          grid-template-columns:1fr 1fr;
+          gap:8px;
+        }
+
+        .mm-mobile-stake-item {
+          min-width:0;
+          border:1px solid rgba(212,165,32,0.22);
+          border-radius:8px;
+          background:#000000;
+          padding:10px;
+          display:grid;
+          gap:6px;
+        }
+
+        .mm-mobile-stake-label {
+          color:rgba(255,255,255,0.54);
+          font-size:11px;
+          line-height:1;
+          font-weight:900;
+          letter-spacing:0.07em;
+          text-transform:uppercase;
+        }
+
+        .mm-mobile-stake-value {
+          display:flex;
+          align-items:center;
+          gap:6px;
+          color:#ffffff;
+          font-size:21px;
+          line-height:1;
+          font-weight:400;
+          font-variant-numeric:tabular-nums;
+          white-space:nowrap;
+        }
+
+        .mm-mobile-stake-value img {
+          width:22px;
+          height:22px;
+          object-fit:contain;
+          flex-shrink:0;
+        }
+
+        .mm-mobile-slots-card {
+          position:relative;
+          padding:8px;
+          display:grid;
+          grid-template-columns:1fr 1fr;
+          gap:8px;
+        }
+
+        .mm-mobile-stake-center {
+          position:absolute;
+          left:50%;
+          top:50%;
+          width:0;
+          height:0;
+          pointer-events:none;
+        }
+
+        .mm-mobile-slot {
+          min-height:96px;
+          border:1px solid rgba(212,165,32,0.32);
+          border-radius:8px;
+          background:#000000;
+          padding:9px;
+          display:grid;
+          justify-items:center;
+          align-content:center;
+          gap:7px;
+          box-sizing:border-box;
+          position:relative;
+          text-align:center;
+        }
+
+        .mm-mobile-slot.is-empty {
+          border-color:rgba(255,255,255,0.12);
+        }
+
+        .mm-mobile-slot-icon {
+          width:42px;
+          height:42px;
+          flex:0 0 42px;
+          border:1px solid rgba(212,165,32,0.48);
+          border-radius:50%;
+          background:#080808;
+          color:var(--mm-gold);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          overflow:hidden;
+        }
+
+        .mm-mobile-slot-icon .mm-avatar-image {
+          width:100%;
+          height:100%;
+          object-fit:cover;
+          border-radius:50%;
+        }
+
+        .mm-mobile-slot-icon .mm-spinner {
+          width:26px;
+          height:26px;
+        }
+
+        .mm-mobile-slot-icon .mm-spade-icon {
+          font-size:34px;
+          line-height:1;
+          transform:translateY(2px);
+        }
+
+        .mm-mobile-slot-icon .mm-person-icon,
+        .mm-mobile-slot-icon .mm-bot-icon {
+          transform:scale(0.72);
+        }
+
+        .mm-mobile-slot-copy {
+          min-width:0;
+          width:100%;
+        }
+
+        .mm-mobile-slot-title {
+          color:#ffffff;
+          font-size:13px;
+          line-height:1.1;
+          font-weight:900;
+          overflow:hidden;
+          text-overflow:ellipsis;
+          white-space:nowrap;
+        }
+
+        .mm-mobile-slot-subtitle {
+          margin-top:4px;
+          color:var(--mm-green);
+          font-size:11px;
+          line-height:1;
+          font-weight:800;
+        }
+
+        .mm-mobile-slot.is-empty .mm-mobile-slot-subtitle {
+          color:rgba(255,255,255,0.48);
+        }
+
+        .mm-mobile-ready {
+          position:absolute;
+          right:6px;
+          top:6px;
+          width:24px;
+          height:24px;
+          border-radius:50%;
+          background:rgba(34,197,94,0.14);
+          border:1px solid rgba(34,197,94,0.45);
+          color:#22c55e;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          font-size:14px;
+          font-weight:900;
+          flex-shrink:0;
+        }
+
+        .mm-mobile-actions {
+          position:sticky;
+          bottom:0;
+          padding:4px 0 2px;
+          background:linear-gradient(180deg, rgba(0,0,0,0), #000000 34%);
+        }
+
+        .mm-action-button {
+          width:100%;
+          height:50px;
+          border-radius:8px;
+          border:1px solid rgba(212,165,32,0.68);
+          background:#050505;
+          color:var(--mm-gold);
+          font-size:15px;
+          line-height:1;
+          font-weight:900;
+          letter-spacing:0.05em;
+          text-transform:uppercase;
+          cursor:pointer;
+        }
+
+        .mm-action-button.is-disabled {
+          opacity:0.35;
+          cursor:not-allowed;
+        }
+
+        @keyframes mm-spin {
+          to { transform:rotate(360deg); }
+        }
+
+        .mm-spinner {
+          border-radius:50%;
+          background:
+            repeating-conic-gradient(from 0deg, var(--mm-gold) 0deg 18deg, transparent 18deg 38deg);
+          mask:radial-gradient(farthest-side, transparent calc(100% - 6px), #000 0);
+          -webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 6px), #000 0);
+          animation:mm-spin 1.05s linear infinite;
+        }
+
+        .mm-spade-icon {
+          display:block;
+          color:var(--mm-gold);
+          text-shadow:0 2px 10px rgba(212,165,32,0.28);
+        }
+
+        .mm-person-icon {
+          position:relative;
+          width:48px;
+          height:48px;
+          display:block;
+        }
+
+        .mm-person-icon span:first-child {
+          position:absolute;
+          left:50%;
+          top:2px;
+          width:24px;
+          height:24px;
+          border-radius:50%;
+          background:linear-gradient(180deg, #ffe08c, #c9951d);
+          transform:translateX(-50%);
+        }
+
+        .mm-person-icon span:last-child {
+          position:absolute;
+          left:5px;
+          right:5px;
+          bottom:0;
+          height:24px;
+          border-radius:22px 22px 8px 8px;
+          background:linear-gradient(180deg, #e4b442, #a97813);
+        }
+
+        .mm-bot-icon {
+          position:relative;
+          width:46px;
+          height:42px;
+          display:block;
+        }
+
+        .mm-bot-antenna {
+          position:absolute;
+          left:50%;
+          top:0;
+          width:8px;
+          height:8px;
+          border-radius:50%;
+          background:linear-gradient(180deg, #ffe78f, #d49a14);
+          transform:translateX(-50%);
+        }
+
+        .mm-bot-antenna::after {
+          content:'';
+          position:absolute;
+          left:3px;
+          top:7px;
+          width:2px;
+          height:10px;
+          background:#d49a14;
+        }
+
+        .mm-bot-head {
+          position:absolute;
+          left:0;
+          right:0;
+          bottom:0;
+          height:31px;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          gap:10px;
+          border-radius:9px;
+          background:linear-gradient(180deg, #f1c65a, #b98416);
+        }
+
+        .mm-bot-head span {
+          width:6px;
+          height:6px;
+          border-radius:50%;
+          background:#171717;
+        }
+
+        .mm-bot-mouth {
+          position:absolute;
+          left:18px;
+          bottom:7px;
+          width:10px;
+          height:2px;
+          border-radius:999px;
+          background:#171717;
+        }
+      </style>
+
+      <div class="mm-mobile-shell">
+        <header class="mm-mobile-header">
+          <img class="mm-mobile-logo" src="/assets/lobby/logo.png" alt="Pika.bg">
+          <div class="mm-mobile-count">${occupiedSlots} / ${ROOM_SIZE}</div>
+        </header>
+
+        <section class="mm-mobile-status-card">
+          <div class="mm-mobile-title-row">
+            <div>
+              <h1 class="mm-mobile-title">Търсим игра</h1>
+              <div class="mm-mobile-subtitle">${escapeHtml(params.statusText ?? 'Изчакваме още играчи.')}</div>
+            </div>
+          </div>
+
+          <div class="mm-mobile-timer">
+            <div
+              data-matchmaking-progress-bar="1"
+              class="mm-mobile-ring"
+              style="--matchmaking-progress:${progressDegrees}deg;"
+              aria-hidden="true"
+            >
+              <div data-matchmaking-countdown-text="1" class="mm-mobile-ring-text">
+                <span class="mm-countdown-number">${countdownSeconds}</span>
+                <span class="mm-countdown-unit">сек</span>
+              </div>
+            </div>
+            <div class="mm-mobile-search-copy">
+              <div class="mm-mobile-search-label">Подготвяме масата</div>
+              <div class="mm-mobile-search-note">Играта започва автоматично, когато се съберат 4 играчи.</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="mm-mobile-stake-card" aria-label="Залог">
+          <div class="mm-mobile-stake-item">
+            <div class="mm-mobile-stake-label">Вход</div>
+            <div class="mm-mobile-stake-value">
+              <span>${escapeHtml(formatAmount(params.entryAmount))}</span>
+              <img src="${COIN_ICON_SRC}" alt="" draggable="false">
+            </div>
+          </div>
+          <div class="mm-mobile-stake-item">
+            <div class="mm-mobile-stake-label">Награда</div>
+            <div class="mm-mobile-stake-value">
+              <span>${escapeHtml(formatAmount(params.prizeAmount))}</span>
+              <img src="${COIN_ICON_SRC}" alt="" draggable="false">
+            </div>
+          </div>
+        </section>
+
+        <section class="mm-mobile-slots-card" aria-label="Играчите">
+          <div
+            data-matchmaking-stake-center="1"
+            class="mm-mobile-stake-center"
+            aria-hidden="true"
+          ></div>
+          ${positionedSlots.map((slot) => renderMobileSlot(slot)).join('')}
+        </section>
+
+        <div class="mm-mobile-actions">
+          <button
+            type="button"
+            data-matchmaking-room-cancel-button="1"
+            class="mm-action-button${params.canLeave === false ? ' is-disabled' : ''}"
+            ${params.canLeave === false ? 'disabled' : ''}
+          >
+            Откажи
+          </button>
+        </div>
+      </div>
+    </section>
+  `
+}
+
 export function renderMatchmakingRoomScreen(
   params: RenderMatchmakingRoomScreenParams,
 ): string {
@@ -206,6 +785,20 @@ export function renderMatchmakingRoomScreen(
   const progressDegrees = (countdownRemainingMs / countdownTotalMs) * 360
   const positionedSlots = createPositionedSlots(params)
   const occupiedSlots = positionedSlots.filter(({ slot }) => slot.kind !== 'empty').length
+  const isPhoneLayout = isPhoneLayoutViewport()
+  if (isPhoneLayout) {
+    return renderMobileMatchmakingRoomScreen(
+      params,
+      positionedSlots,
+      occupiedSlots,
+      countdownSeconds,
+      progressDegrees,
+    )
+  }
+  const mobileLayoutAttribute = isPhoneLayout ? 'data-mobile-layout="1"' : ''
+  const stageBackground = isPhoneLayout
+    ? MOBILE_BACKGROUND
+    : `#000 url('${BACKGROUND_IMAGE_SRC}') center / 100% 100% no-repeat`
   const { stageScale, scaledStageWidth, scaledStageHeight } =
     getViewportStageMetrics({
       baseWidth: BASE_STAGE_WIDTH,
@@ -218,6 +811,7 @@ export function renderMatchmakingRoomScreen(
 
   return `
     <section
+      ${mobileLayoutAttribute}
       data-matchmaking-room-screen="1"
       data-matchmaking-room-stage-scale="${stageScale.toFixed(4)}"
       class="mm-screen"
@@ -260,7 +854,7 @@ export function renderMatchmakingRoomScreen(
           transform:translate(-50%, -50%) scale(${stageScale});
           transform-origin:center center;
           overflow:hidden;
-          background:#000 url('${BACKGROUND_IMAGE_SRC}') center / 100% 100% no-repeat;
+          background:${stageBackground};
           color:var(--mm-text);
         }
 

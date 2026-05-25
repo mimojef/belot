@@ -148,7 +148,7 @@ function renderRankProgress(profile: PlayerPublicProfileSnapshot): string {
       </div>
 
       <div style="margin-top:9px;font-size:12px;font-weight:800;color:rgba(226,232,240,0.70);">
-        Остават ${formatInteger(profile.gamesUntilNextRank)} игри до следващ ранг
+        Остават ${formatInteger(profile.gamesUntilNextRank)} игри до следващо ниво
       </div>
     </div>
   `
@@ -379,6 +379,7 @@ function renderProfileContent(
       "
     >
       <div
+        data-player-profile-summary-grid="1"
         style="
           display:grid;
           grid-template-columns:124px minmax(0, 1fr);
@@ -386,7 +387,7 @@ function renderProfileContent(
           align-items:stretch;
         "
       >
-        <div style="position:relative;width:124px;height:124px;flex:0 0 124px;">
+        <div data-player-profile-avatar="1" style="position:relative;width:124px;height:124px;flex:0 0 124px;">
           <div
             style="
               width:100%;
@@ -404,6 +405,7 @@ function renderProfileContent(
         </div>
 
         <div
+          data-player-profile-info="1"
           style="
             min-width:0;
             display:flex;
@@ -412,7 +414,7 @@ function renderProfileContent(
             padding-top:4px;
           "
         >
-          <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+          <div data-player-profile-title="1" style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
             <div
               style="
                 font-size:30px;
@@ -447,14 +449,14 @@ function renderProfileContent(
           </div>
 
           ${canEdit ? `
-            <div style="display:flex;align-items:center;gap:6px;">
+            <div data-player-profile-rating="1" style="display:flex;align-items:center;gap:6px;">
               <div style="font-size:12px;font-weight:800;letter-spacing:0.10em;text-transform:uppercase;color:rgba(148,163,184,0.80);">Рейтинг</div>
               <div style="font-size:20px;font-weight:900;color:#d4a520;">${formatNullableText(profile.skillRating)}</div>
             </div>
           ` : ''}
 
           ${!canEdit && !isOwnProfile ? `
-            <div style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;">
+            <div data-player-profile-actions="1" style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;">
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 ${profile.profileId ? `
                   <button
@@ -548,18 +550,18 @@ function renderProfileContent(
             </div>
           ` : ''}
 
-          <div style="display:flex;align-items:center;margin-top:auto;padding-bottom:2px;">
-            <div style="font-size:13px;color:rgba(255,255,255,0.55);padding-right:12px;">
-              Ниво: <span style="color:#fde68a;font-weight:700;">${formatNullableText(profile.level)}</span>
+          <div data-player-profile-stats="1" style="display:flex;align-items:center;margin-top:auto;padding-bottom:2px;">
+            <div data-player-profile-stat="1" style="font-size:13px;color:rgba(255,255,255,0.55);padding-right:12px;">
+              Ниво: <span data-player-profile-stat-value="1" style="color:#fde68a;font-weight:700;">${formatNullableText(profile.level)}</span>
             </div>
-            <div style="width:1px;align-self:stretch;background:rgba(212,165,32,0.45);"></div>
-            <div style="font-size:13px;color:rgba(255,255,255,0.55);padding:0 12px;">
-              Ранг: <span style="color:#fde68a;font-weight:700;">${formatNullableText(profile.rankTitle)}</span>
+            <div data-player-profile-stat-divider="1" style="width:1px;align-self:stretch;background:rgba(212,165,32,0.45);"></div>
+            <div data-player-profile-stat="1" style="font-size:13px;color:rgba(255,255,255,0.55);padding:0 12px;">
+              Ранг: <span data-player-profile-stat-value="1" style="color:#fde68a;font-weight:700;">${formatNullableText(profile.rankTitle)}</span>
             </div>
             ${typeof profile.likesCount === 'number' ? `
-            <div style="width:1px;align-self:stretch;background:rgba(212,165,32,0.45);"></div>
-            <div style="font-size:13px;color:rgba(255,255,255,0.55);padding:0 12px;">
-              <span style="color:#ef4444;font-size:22px;line-height:1;vertical-align:middle;">♥</span> Харесвания: <span style="color:#fde68a;font-weight:700;">${profile.likesCount.toLocaleString('bg-BG')}</span>
+            <div data-player-profile-stat-divider="1" style="width:1px;align-self:stretch;background:rgba(212,165,32,0.45);"></div>
+            <div data-player-profile-stat="1" style="font-size:13px;color:rgba(255,255,255,0.55);padding:0 12px;">
+              <span style="color:#ef4444;font-size:22px;line-height:1;vertical-align:middle;">♥</span> Харесвания: <span data-player-profile-stat-value="1" style="color:#fde68a;font-weight:700;">${profile.likesCount.toLocaleString('bg-BG')}</span>
             </div>
             ` : ''}
           </div>
@@ -569,6 +571,7 @@ function renderProfileContent(
       ${renderRankProgress(profile)}
 
       <div
+        data-player-profile-metric-grid="1"
         style="
           display:grid;
           grid-template-columns:repeat(2, minmax(0, 1fr));
@@ -576,6 +579,7 @@ function renderProfileContent(
         "
       >
         <div
+          data-player-profile-metric-card="1"
           style="
             border-radius:16px;
             background:rgba(255,255,255,0.05);
@@ -584,6 +588,7 @@ function renderProfileContent(
           "
         >
           <div
+            data-player-profile-metric-label="1"
             style="
               font-size:12px;
               font-weight:800;
@@ -596,6 +601,7 @@ function renderProfileContent(
             Жълтици
           </div>
           <div
+            data-player-profile-metric-value="1"
             style="
               display:flex; align-items:center; gap:8px;
               font-size:26px;
@@ -611,6 +617,7 @@ function renderProfileContent(
         </div>
 
         <div
+          data-player-profile-metric-card="1"
           style="
             border-radius:16px;
             background:rgba(255,255,255,0.05);
@@ -619,6 +626,7 @@ function renderProfileContent(
           "
         >
           <div
+            data-player-profile-metric-label="1"
             style="
               font-size:12px;
               font-weight:800;
@@ -631,6 +639,7 @@ function renderProfileContent(
             Средна оценка
           </div>
           <div
+            data-player-profile-rating-value-row="1"
             style="
               display:flex;
               align-items:baseline;
@@ -639,6 +648,7 @@ function renderProfileContent(
             "
           >
             <div
+              data-player-profile-metric-value="1"
               style="
                 font-size:26px;
                 font-weight:900;
@@ -648,6 +658,7 @@ function renderProfileContent(
               ${formatAverageRating(profile.averageRating)}
             </div>
             <div
+              data-player-profile-rating-count="1"
               style="
                 font-size:15px;
                 color:rgba(226,232,240,0.72);
@@ -753,6 +764,120 @@ export function renderPlayerProfilePopup(
       @keyframes belot-player-profile-spin {
         100% {
           transform:rotate(360deg);
+        }
+      }
+
+      @media (max-width: 640px) {
+        [data-player-profile-summary-grid="1"] {
+          grid-template-columns:124px minmax(0, 1fr) !important;
+          gap:14px !important;
+        }
+
+        [data-player-profile-avatar="1"] {
+          grid-column:1;
+          grid-row:1 / span 3;
+          order:1;
+          justify-self:start !important;
+        }
+
+        [data-player-profile-info="1"] {
+          display:contents !important;
+        }
+
+        [data-player-profile-stats="1"] {
+          order:5;
+          grid-column:1 / -1;
+          display:grid !important;
+          grid-template-columns:repeat(3, minmax(0, 1fr));
+          gap:0;
+          width:100%;
+          margin-top:0 !important;
+          padding:2px 0 0 !important;
+        }
+
+        [data-player-profile-title="1"] {
+          order:2;
+          grid-column:2;
+        }
+
+        [data-player-profile-rating="1"] {
+          order:3;
+          grid-column:2;
+        }
+
+        [data-player-profile-actions="1"] {
+          order:4;
+          grid-column:2;
+        }
+
+        [data-player-profile-stat="1"] {
+          padding:0 3px !important;
+          text-align:center;
+          font-size:11px !important;
+          min-width:0;
+          overflow:hidden;
+          white-space:nowrap;
+          text-overflow:ellipsis;
+        }
+
+        [data-player-profile-stat-value="1"] {
+          display:inline;
+          margin-top:0;
+          overflow:hidden;
+          text-overflow:ellipsis;
+          white-space:nowrap;
+        }
+
+        [data-player-profile-stat="1"] > span:not([data-player-profile-stat-value]) {
+          font-size:14px !important;
+        }
+
+        [data-player-profile-stat-divider="1"] {
+          display:none !important;
+        }
+
+        [data-player-profile-metric-grid="1"] {
+          gap:8px !important;
+        }
+
+        [data-player-profile-metric-card="1"] {
+          border-radius:10px !important;
+          padding:10px !important;
+          min-height:74px;
+          display:flex;
+          flex-direction:column;
+          justify-content:center;
+        }
+
+        [data-player-profile-metric-label="1"] {
+          font-size:10px !important;
+          line-height:1.15 !important;
+          letter-spacing:0.08em !important;
+          margin-bottom:6px !important;
+        }
+
+        [data-player-profile-metric-value="1"] {
+          font-size:20px !important;
+          line-height:1 !important;
+          gap:5px !important;
+          flex-wrap:nowrap !important;
+          white-space:nowrap;
+        }
+
+        [data-player-profile-metric-value="1"] img {
+          width:21px !important;
+          height:21px !important;
+        }
+
+        [data-player-profile-rating-value-row="1"] {
+          display:grid !important;
+          gap:5px !important;
+          align-items:start !important;
+        }
+
+        [data-player-profile-rating-count="1"] {
+          font-size:12px !important;
+          line-height:1.1 !important;
         }
       }
     </style>

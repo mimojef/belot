@@ -5,11 +5,13 @@ import type {
   Team,
 } from '../network/createGameServerClient'
 import {
+  ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND,
   ACTIVE_ROOM_TABLE_BACKGROUND,
   ACTIVE_ROOM_STAGE_HEIGHT,
   ACTIVE_ROOM_STAGE_WIDTH,
   escapeHtml,
 } from './activeRoomShared'
+import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 
 type RenderMatchEndedScreenOptions = {
   root: HTMLDivElement
@@ -235,6 +237,301 @@ function renderPartnerRating(localSeat: Seat, seats: RoomSeatSnapshot[]): string
   `
 }
 
+function renderMobilePlayerTile(
+  seat: RoomSeatSnapshot,
+  hasVotedReplay = false,
+  hasVotedLeave = false,
+): string {
+  const displayName = seat.isOccupied ? seat.displayName : 'Свободно място'
+
+  return `
+    <div
+      style="
+        position:relative;
+        min-width:0;
+        display:flex;
+        align-items:center;
+        gap:8px;
+        min-height:62px;
+        padding:8px;
+        border-radius:8px;
+        background:rgba(18,18,18,0.94);
+        border:1px solid rgba(250,204,21,0.30);
+        box-sizing:border-box;
+      "
+    >
+      ${hasVotedReplay ? `<div style="position:absolute;top:5px;left:5px;width:19px;height:19px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;color:#ffffff;z-index:2;">${REPLAY_ICON_SVG}</div>` : ''}
+      ${hasVotedLeave ? `<div style="position:absolute;top:5px;left:5px;width:19px;height:19px;border-radius:50%;background:#ef4444;display:flex;align-items:center;justify-content:center;color:#ffffff;z-index:2;">${LEAVE_ICON_SVG}</div>` : ''}
+      <div style="position:relative;width:46px;height:46px;flex:0 0 46px;">
+        <div
+          style="
+            width:100%;
+            height:100%;
+            border-radius:7px;
+            overflow:hidden;
+            background:rgba(10,10,10,0.86);
+            border:1px solid rgba(250,204,21,0.24);
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            color:#d4a520;
+            font-size:22px;
+            font-weight:900;
+          "
+        >
+          ${
+            seat.avatarUrl
+              ? `<img
+                  src="${escapeHtml(seat.avatarUrl)}"
+                  alt="${escapeHtml(displayName)}"
+                  draggable="false"
+                  style="width:100%;height:100%;object-fit:cover;display:block;"
+                />`
+              : escapeHtml(getSeatInitial(displayName))
+          }
+        </div>
+        ${renderLevelBadge(seat.level)}
+      </div>
+      <div style="min-width:0;display:flex;flex-direction:column;gap:3px;">
+        <div
+          style="
+            color:#f8fafc;
+            font-size:13px;
+            line-height:1.15;
+            font-weight:900;
+            white-space:nowrap;
+            overflow:hidden;
+            text-overflow:ellipsis;
+          "
+          title="${escapeHtml(displayName)}"
+        >
+          ${escapeHtml(displayName)}
+        </div>
+        <div style="color:rgba(226,232,240,0.56);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:0.05em;">
+          ${escapeHtml(getTeamBySeat(seat.seat) === 'A' ? 'Отбор A' : 'Отбор B')}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderMobilePartnerRating(localSeat: Seat, seats: RoomSeatSnapshot[]): string {
+  const partnerSeat = getPartnerSeat(localSeat)
+  const partner = seats.find((seat) => seat.seat === partnerSeat) ?? null
+
+  if (!partner || !partner.isOccupied) {
+    return ''
+  }
+
+  return `
+    <div data-partner-rating-panel="1" style="display:grid;gap:8px;">
+      <div style="font-size:11px;font-weight:900;color:rgba(226,232,240,0.62);text-transform:uppercase;letter-spacing:0.06em;">
+        Оцени партньор
+      </div>
+      <div style="display:flex;gap:7px;justify-content:center;">
+        ${[1, 2, 3, 4, 5, 6]
+          .map((rating) => `
+            <button
+              type="button"
+              data-partner-rating-value="${rating}"
+              aria-label="Оцени с ${rating}"
+              title="${rating}/6"
+              style="
+                width:30px;
+                height:30px;
+                border-radius:50%;
+                border:0;
+                background:#d4a520;
+                color:#101010;
+                font-size:13px;
+                font-weight:900;
+                cursor:pointer;
+                display:flex;
+                align-items:center;
+                justify-content:center;
+                flex-shrink:0;
+              "
+            >
+              ${rating}
+            </button>
+          `)
+          .join('')}
+      </div>
+    </div>
+  `
+}
+
+function renderMobileMatchEndedPanel(
+  game: RoomGameSnapshot,
+  seats: RoomSeatSnapshot[],
+  localSeat: Seat,
+  prizeAmount?: number | null,
+  countdownSeconds = 120,
+  skipPrizeAnimation = false,
+): string {
+  const localTeam = getTeamBySeat(localSeat)
+  const opponentTeam = getOpponentTeam(localTeam)
+  const matchEnded = game.matchEnded
+  const finalScore = matchEnded?.finalScore ?? game.score.match
+  const ourScore = getTeamScore(finalScore, localTeam)
+  const theirScore = getTeamScore(finalScore, opponentTeam)
+  const winnerTeam = matchEnded?.winnerTeam ?? null
+  const resultLabel =
+    winnerTeam === null
+      ? 'КРАЙ НА ИГРАТА'
+      : winnerTeam === localTeam
+        ? 'ПОБЕДИТЕЛ'
+        : 'ГУБЕЩ'
+  const resultColor = winnerTeam === null
+    ? '#e2e8f0'
+    : winnerTeam === localTeam
+      ? '#d4a520'
+      : '#cbd5e1'
+  const replayVotes = game.matchEnded?.replayVotes ?? []
+  const leaveVotes = game.matchEnded?.leaveVotes ?? []
+  const sortedSeats = seats.slice().sort((a, b) => {
+    const order: Record<Seat, number> = { bottom: 0, top: 1, left: 2, right: 3 }
+    return order[a.seat] - order[b.seat]
+  })
+
+  return `
+    <section
+      style="
+        width:min(100%, 390px);
+        border-radius:10px;
+        background:linear-gradient(180deg, rgba(22,22,22,0.98) 0%, rgba(8,8,8,0.99) 100%);
+        border:2px solid rgba(212,165,32,0.88);
+        box-shadow:0 18px 52px rgba(2,6,23,0.46);
+        color:#f8fafc;
+        overflow:hidden;
+      "
+    >
+      <div style="padding:14px;display:grid;gap:12px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+          <div
+            style="
+              color:${resultColor};
+              font-size:24px;
+              line-height:1;
+              font-weight:900;
+              letter-spacing:0.03em;
+              white-space:nowrap;
+            "
+          >
+            ${resultLabel}
+          </div>
+          ${winnerTeam === localTeam && prizeAmount && prizeAmount > 0 ? `<div data-prize-counter="1" style="color:#22c55e;font-size:20px;font-weight:900;white-space:nowrap;">${skipPrizeAnimation ? `+${prizeAmount.toLocaleString('bg-BG')}` : '+0'}</div>` : ''}
+        </div>
+
+        <div
+          style="
+            display:grid;
+            grid-template-columns:1fr 1fr;
+            gap:8px;
+          "
+        >
+          <div style="border:1px solid rgba(212,165,32,0.34);border-radius:8px;padding:8px 10px;background:rgba(10,10,10,0.76);">
+            <div style="color:rgba(226,232,240,0.62);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.08em;">Ние</div>
+            <div style="color:#f8fafc;font-size:28px;line-height:1;font-weight:900;">${ourScore}</div>
+          </div>
+          <div style="border:1px solid rgba(212,165,32,0.34);border-radius:8px;padding:8px 10px;background:rgba(10,10,10,0.76);">
+            <div style="color:rgba(226,232,240,0.62);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.08em;">Вие</div>
+            <div style="color:#f8fafc;font-size:28px;line-height:1;font-weight:900;">${theirScore}</div>
+          </div>
+        </div>
+
+        <div
+          style="
+            display:grid;
+            grid-template-columns:repeat(2, minmax(0, 1fr));
+            gap:8px;
+          "
+        >
+          ${sortedSeats.map((s) => renderMobilePlayerTile(s, replayVotes.includes(s.seat), leaveVotes.includes(s.seat))).join('')}
+        </div>
+
+        ${renderMobilePartnerRating(localSeat, seats)}
+
+        <div style="display:grid;gap:8px;">
+          <button
+            type="button"
+            data-match-ended-lobby-button="1"
+            style="
+              height:40px;
+              border:1px solid rgba(212,165,32,0.58);
+              border-radius:8px;
+              padding:0 14px;
+              background:rgba(10,10,10,0.78);
+              color:#f8fafc;
+              font-family:Inter, system-ui, sans-serif;
+              font-size:14px;
+              font-weight:900;
+              cursor:pointer;
+            "
+          >
+            Към лобито
+          </button>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            <button
+              type="button"
+              data-match-ended-replay-button="1"
+              style="
+                height:40px;
+                border:1px solid rgba(212,165,32,0.58);
+                border-radius:8px;
+                padding:0 10px;
+                background:rgba(10,10,10,0.78);
+                color:#f8fafc;
+                font-family:Inter, system-ui, sans-serif;
+                font-size:13px;
+                font-weight:900;
+                cursor:pointer;
+                display:flex;
+                align-items:center;
+                justify-content:center;
+                gap:6px;
+              "
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+              Преиграй
+            </button>
+            <button
+              type="button"
+              data-match-ended-new-game-button="1"
+              style="
+                height:40px;
+                border:0;
+                border-radius:8px;
+                padding:0 10px;
+                background:linear-gradient(180deg, #f6d36b 0%, #c98b1a 100%);
+                color:#101010;
+                font-family:Inter, system-ui, sans-serif;
+                font-size:13px;
+                font-weight:900;
+                cursor:pointer;
+              "
+            >
+              Нова игра
+            </button>
+          </div>
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;">
+          <div
+            data-match-ended-countdown="1"
+            style="
+              font-size:11px;
+              font-weight:900;
+              color:${countdownSeconds <= 30 ? '#f87171' : 'rgba(226,232,240,0.44)'};
+              font-variant-numeric:tabular-nums;
+            "
+          >${countdownSeconds}с</div>
+        </div>
+      </div>
+    </section>
+  `
+}
+
 function renderMatchEndedPanel(
   game: RoomGameSnapshot,
   seats: RoomSeatSnapshot[],
@@ -429,9 +726,38 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
     onReplayVote,
     onLeaveVote,
   } = options
+  const isPhoneLayout = isPhoneLayoutViewport()
+  const mobileLayoutAttribute = isPhoneLayout ? 'data-mobile-layout="1"' : ''
+  const tableBackground = isPhoneLayout
+    ? ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND
+    : ACTIVE_ROOM_TABLE_BACKGROUND
 
+  if (isPhoneLayout) {
+    root.innerHTML = `
+      <div
+        data-mobile-layout="1"
+        style="
+          position:relative;
+          min-height:100dvh;
+          width:100%;
+          box-sizing:border-box;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          overflow-y:auto;
+          overflow-x:hidden;
+          padding:14px;
+          background:${tableBackground};
+          font-family:Inter, system-ui, sans-serif;
+        "
+      >
+        ${renderMobileMatchEndedPanel(game, seats, localSeat, prizeAmount, countdownSeconds, skipPrizeAnimation)}
+      </div>
+    `
+  } else {
   root.innerHTML = `
     <div
+      ${mobileLayoutAttribute}
       style="
         position:relative;
         min-height:100vh;
@@ -441,7 +767,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
         align-items:center;
         justify-content:center;
         overflow:hidden;
-        background:${ACTIVE_ROOM_TABLE_BACKGROUND};
+        background:${tableBackground};
         font-family:Inter, system-ui, sans-serif;
       "
     >
@@ -481,6 +807,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
       </div>
     </div>
   `
+  }
 
   if (!skipPrizeAnimation) {
     const counterEl = root.querySelector<HTMLElement>('[data-prize-counter="1"]')

@@ -9,6 +9,8 @@ import {
   getVisualSeatForLocalPerspective,
 } from './cuttingSeatLayout'
 import { CUTTING_COUNTDOWN_MS } from './cuttingVisualCountdown'
+import { ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT } from '../activeRoomShared'
+import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
 
 type EscapeHtml = (value: string) => string
 
@@ -377,16 +379,20 @@ function renderPanelDealtCard(
 function getFanOffset(
   index: number,
   count: number,
+  compact = false,
 ): { x: number; y: number; rotate: number } {
   const centered = index - (count - 1) / 2
   const maxCentered = Math.max(1, (count - 1) / 2)
   const edgeProgress = Math.abs(centered) / maxCentered
   const countProgress = Math.min(1, Math.max(0, (count - 1) / 7))
-  const edgeDrop = edgeProgress * edgeProgress * 34 * countProgress
+  const spacing = compact ? 42 : 62
+  const edgeDropMax = compact ? 20 : 34
+  const rotationStep = compact ? 3.4 : 5
+  const edgeDrop = edgeProgress * edgeProgress * edgeDropMax * countProgress
   return {
-    x: centered * 62,
+    x: centered * spacing,
     y: edgeDrop,
-    rotate: centered * 5,
+    rotate: centered * rotationStep,
   }
 }
 
@@ -399,6 +405,7 @@ function renderPanelCardFanWrapper(
   let fanCenterY: number
 
   let fanRotateDeg = 0
+  const mobileSideFanOutset = isPhoneLayoutViewport() ? 34 : 0
 
   if (visualSeat === 'bottom') {
     fanCenterX = 180
@@ -409,11 +416,11 @@ function renderPanelCardFanWrapper(
     fanCenterY = 234 + PANEL_CARD_HEIGHT / 2 + 8 - 300
     fanRotateDeg = 180
   } else if (visualSeat === 'left') {
-    fanCenterX = 186 + PANEL_CARD_WIDTH / 2 + 12 - 200
+    fanCenterX = 186 + PANEL_CARD_WIDTH / 2 + 12 - 200 - mobileSideFanOutset
     fanCenterY = 117
     fanRotateDeg = 90
   } else {
-    fanCenterX = -(PANEL_CARD_WIDTH / 2 + 12) + 200
+    fanCenterX = -(PANEL_CARD_WIDTH / 2 + 12) + 200 + mobileSideFanOutset
     fanCenterY = 117
     fanRotateDeg = -90
   }
@@ -454,6 +461,7 @@ function renderDealtCardFanInPanel(
     dealtHands.hideNewCardsUntilAnimDelaySeats?.[actualSeat] === true
   const shouldReplaceLocalHandAtReveal =
     dealtHands.replaceLocalHandAtRevealSeats?.[actualSeat] === true
+  const compactFan = isPhoneLayoutViewport() && visualSeat !== 'bottom'
 
   const previousCards = isLocalSeat && dealtHands.previousOwnHand ? dealtHands.previousOwnHand : []
   const previousIndexById = new Map(previousCards.map((c, idx) => [c.id, idx]))
@@ -465,12 +473,12 @@ function renderDealtCardFanInPanel(
     previousCards.length > 0
   ) {
     const previousCardElements = previousCards.map((card, i) => {
-      const fan = getFanOffset(i, previousCards.length)
+      const fan = getFanOffset(i, previousCards.length, compactFan)
       const animStyle = `animation: belot-panel-card-hide-at-reveal 1ms linear ${animDelay}ms both;`
       return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle)
     }).join('')
     const finalCardElements = cards.map((card, i) => {
-      const fan = getFanOffset(i, count)
+      const fan = getFanOffset(i, count, compactFan)
       const isNewCard = !previousIndexById.has(card.id)
       const animStyle = isNewCard
         ? `opacity:0; visibility:hidden; animation: belot-panel-card-hidden-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
@@ -486,7 +494,7 @@ function renderDealtCardFanInPanel(
   }
 
   const cardElements = Array.from({ length: count }, (_, i) => {
-    const fanTo = getFanOffset(i, count)
+    const fanTo = getFanOffset(i, count, compactFan)
     const card = isLocalSeat ? (cards[i] ?? null) : null
 
     let animStyle = ''
@@ -500,7 +508,7 @@ function renderDealtCardFanInPanel(
             : `animation: belot-panel-card-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
         } else {
           // Existing card — repositions from its old sorted position to its new sorted position
-          const fanFrom = getFanOffset(prevIdx, previousCards.length)
+          const fanFrom = getFanOffset(prevIdx, previousCards.length, compactFan)
           animStyle = `
             --px-from:${fanFrom.x}px; --py-from:${fanFrom.y}px; --pr-from:${fanFrom.rotate}deg;
             --px-to:${fanTo.x}px; --py-to:${fanTo.y}px; --pr-to:${fanTo.rotate}deg;
@@ -514,7 +522,7 @@ function renderDealtCardFanInPanel(
             ? `opacity:0; visibility:hidden; animation: belot-panel-card-hidden-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
             : `animation: belot-panel-card-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
         } else {
-          const fanFrom = getFanOffset(i, dealtHands.animStartIndex)
+          const fanFrom = getFanOffset(i, dealtHands.animStartIndex, compactFan)
           animStyle = `
             --px-from:${fanFrom.x}px; --py-from:${fanFrom.y}px; --pr-from:${fanFrom.rotate}deg;
             --px-to:${fanTo.x}px; --py-to:${fanTo.y}px; --pr-to:${fanTo.rotate}deg;
@@ -535,6 +543,7 @@ function renderDealtCardFanInPanel(
   let fanCenterY: number
 
   let fanRotateDeg = 0
+  const mobileSideFanOutset = isPhoneLayoutViewport() ? 34 : 0
 
   if (visualSeat === 'bottom') {
     fanCenterX = 180
@@ -545,11 +554,11 @@ function renderDealtCardFanInPanel(
     fanCenterY = 234 + PANEL_CARD_HEIGHT / 2 + 8 - 300
     fanRotateDeg = 180
   } else if (visualSeat === 'left') {
-    fanCenterX = 186 + PANEL_CARD_WIDTH / 2 + 12 - 200
+    fanCenterX = 186 + PANEL_CARD_WIDTH / 2 + 12 - 200 - mobileSideFanOutset
     fanCenterY = 117
     fanRotateDeg = 90
   } else {
-    fanCenterX = -(PANEL_CARD_WIDTH / 2 + 12) + 200
+    fanCenterX = -(PANEL_CARD_WIDTH / 2 + 12) + 200 + mobileSideFanOutset
     fanCenterY = 117
     fanRotateDeg = -90
   }
@@ -1154,6 +1163,9 @@ export function createCuttingSeatPanelsHtml(
       )
     })
     .join('')
+  const fixedLayerInsetStyle = isPhoneLayoutViewport()
+    ? `left:0;right:0;top:0;bottom:${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT}px;`
+    : 'inset:0;'
 
   return `
     <style>
@@ -1189,7 +1201,7 @@ export function createCuttingSeatPanelsHtml(
     <div
       style="
         position:fixed;
-        inset:0;
+        ${fixedLayerInsetStyle}
         z-index:3;
         pointer-events:none;
       "

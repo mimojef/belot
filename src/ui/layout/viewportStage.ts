@@ -101,3 +101,15 @@ export function createViewportResizeHandler(onResize: () => void): () => void {
     window.removeEventListener('orientationchange', scheduleResize)
   }
 }
+
+export function isPhoneLayoutViewport(): boolean {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  const shortSide = Math.min(window.innerWidth, window.innerHeight)
+  const longSide = Math.max(window.innerWidth, window.innerHeight)
+  const isCoarseTouch = window.matchMedia('(hover: none) and (pointer: coarse)').matches
+
+  return isCoarseTouch && shortSide <= 480 && longSide <= 1050
+}

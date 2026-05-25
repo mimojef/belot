@@ -27,6 +27,8 @@ import {
   type PlayingUiCache,
 } from './activeRoomTypes'
 import {
+  ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT,
+  ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND,
   ACTIVE_ROOM_TABLE_BACKGROUND,
   ACTIVE_ROOM_STAGE_HEIGHT,
   ACTIVE_ROOM_STAGE_WIDTH,
@@ -43,6 +45,7 @@ import {
   getSeatAfterDealerForDealFallback,
   resetPlayingUiCache,
 } from './activeRoomShared'
+import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import {
   getCuttingCycleKey,
   getDealFirstThreePhaseKey,
@@ -223,6 +226,50 @@ export function createActiveRoomFlowController(
   }
 
   function renderFloatingLeaveButton(): string {
+    if (isPhoneLayoutViewport()) {
+      return `
+        <div
+          data-active-room-mobile-action-bar="1"
+          style="
+            position:fixed;
+            left:0;
+            right:0;
+            bottom:0;
+            z-index:9399;
+            height:${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT}px;
+            background:#000000;
+            pointer-events:none;
+          "
+        >
+          <button
+            type="button"
+            data-active-room-leave-button="1"
+            title="Напусни масата"
+            style="
+              position:absolute;
+              left:16px;
+              top:50%;
+              transform:translateY(-50%);
+              height:40px;
+              min-width:104px;
+              border:0;
+              border-radius:8px;
+              padding:0 16px;
+              background:linear-gradient(180deg, #f6d36b 0%, #c98b1a 100%);
+              color:#171717;
+              font-size:14px;
+              font-weight:900;
+              cursor:pointer;
+              box-shadow:0 10px 22px rgba(0,0,0,0.30);
+              pointer-events:auto;
+            "
+          >
+            Изход
+          </button>
+        </div>
+      `
+    }
+
     return `
       <button
         type="button"
@@ -374,6 +421,7 @@ export function createActiveRoomFlowController(
 
   function removeLeaveButton(): void {
     document.body.querySelector('[data-active-room-leave-button="1"]')?.remove()
+    document.body.querySelector('[data-active-room-mobile-action-bar="1"]')?.remove()
   }
 
   function appendLeaveControls(): void {
@@ -1224,6 +1272,7 @@ export function createActiveRoomFlowController(
   }
 
   function renderEmojiPickerHtml(): string {
+    const isPhoneLayout = isPhoneLayoutViewport()
     const rows: string[] = []
     for (let i = 1; i <= EMOJI_COUNT; i++) {
       const id = String(i).padStart(2, '0')
@@ -1249,15 +1298,15 @@ export function createActiveRoomFlowController(
         data-emoji-picker="1"
         style="
           position:fixed;
-          bottom:76px;
-          right:16px;
+          bottom:${isPhoneLayout ? `${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT + 8}px` : '76px'};
+          right:${isPhoneLayout ? '14px' : '16px'};
           z-index:9999;
           background:rgba(20,20,24,0.96);
           border:1px solid rgba(255,255,255,0.12);
           border-radius:16px;
           padding:12px;
           display:grid;
-          grid-template-columns:repeat(7,52px);
+          grid-template-columns:${isPhoneLayout ? 'repeat(4,52px)' : 'repeat(7,52px)'};
           gap:4px;
           box-shadow:0 8px 32px rgba(0,0,0,0.5);
           backdrop-filter:blur(12px);
@@ -1275,16 +1324,17 @@ export function createActiveRoomFlowController(
     }
 
     if (!document.body.querySelector('[data-emoji-toggle="1"]')) {
+      const isPhoneLayout = isPhoneLayoutViewport()
       document.body.insertAdjacentHTML('beforeend', `
         <button
           type="button"
           data-emoji-toggle="1"
           style="
             position:fixed;
-            bottom:16px;
-            right:16px;
+            bottom:${isPhoneLayout ? '5px' : '16px'};
+            right:${isPhoneLayout ? '18px' : '16px'};
             z-index:9998;
-            width:80px;height:80px;
+            width:${isPhoneLayout ? '40px' : '80px'};height:${isPhoneLayout ? '40px' : '80px'};
             border:0;border-radius:50%;
             background:rgba(20,20,24,0.92);
             border:2px solid rgba(212,165,32,0.80);
@@ -1294,7 +1344,7 @@ export function createActiveRoomFlowController(
             backdrop-filter:blur(8px);
           "
         >
-          <img src="/assets/animated-emoji/preview/preview-emoji-08.png" alt="" style="width:56px;height:56px;object-fit:contain;">
+          <img src="/assets/animated-emoji/preview/preview-emoji-08.png" alt="" style="width:${isPhoneLayout ? '30px' : '56px'};height:${isPhoneLayout ? '30px' : '56px'};object-fit:contain;">
         </button>
       `)
       document.body.querySelector('[data-emoji-toggle="1"]')?.addEventListener('click', () => {
@@ -1613,6 +1663,12 @@ export function createActiveRoomFlowController(
       return
     }
 
+    const isPhoneLayout = isPhoneLayoutViewport()
+    const mobileLayoutAttribute = isPhoneLayout ? 'data-mobile-layout="1"' : ''
+    const tableBackground = isPhoneLayout
+      ? ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND
+      : ACTIVE_ROOM_TABLE_BACKGROUND
+
     const freshWinningBid =
       activeRoomState.game?.bidding?.winningBid ??
       activeRoomState.game?.scoring?.winningBid ??
@@ -1904,6 +1960,7 @@ export function createActiveRoomFlowController(
 
       options.root.innerHTML = `
         <div
+          ${mobileLayoutAttribute}
           style="
             position:relative;
             min-height:100vh;
@@ -1913,7 +1970,7 @@ export function createActiveRoomFlowController(
             align-items:center;
             justify-content:center;
             overflow:hidden;
-            background:${ACTIVE_ROOM_TABLE_BACKGROUND};
+            background:${tableBackground};
             font-family:Inter, system-ui, sans-serif;
           "
         >
@@ -2192,6 +2249,7 @@ export function createActiveRoomFlowController(
 
       options.root.innerHTML = `
         <div
+          ${mobileLayoutAttribute}
           style="
             position:relative;
             min-height:100vh;
@@ -2201,7 +2259,7 @@ export function createActiveRoomFlowController(
             align-items:center;
             justify-content:center;
             overflow:hidden;
-            background:${ACTIVE_ROOM_TABLE_BACKGROUND};
+            background:${tableBackground};
             font-family:Inter, system-ui, sans-serif;
           "
         >
@@ -2388,6 +2446,7 @@ export function createActiveRoomFlowController(
 
       options.root.innerHTML = `
         <div
+          ${mobileLayoutAttribute}
           style="
             position:relative;
             min-height:100vh;
@@ -2397,7 +2456,7 @@ export function createActiveRoomFlowController(
             align-items:center;
             justify-content:center;
             overflow:hidden;
-            background:${ACTIVE_ROOM_TABLE_BACKGROUND};
+            background:${tableBackground};
             font-family:Inter, system-ui, sans-serif;
           "
         >
@@ -2582,6 +2641,7 @@ export function createActiveRoomFlowController(
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
       options.root.innerHTML = `
         <div
+          ${mobileLayoutAttribute}
           style="
             position:relative;
             min-height:100vh;
@@ -2591,7 +2651,7 @@ export function createActiveRoomFlowController(
             align-items:center;
             justify-content:center;
             overflow:hidden;
-            background:${ACTIVE_ROOM_TABLE_BACKGROUND};
+            background:${tableBackground};
             font-family:Inter, system-ui, sans-serif;
           "
         >
@@ -2666,6 +2726,7 @@ export function createActiveRoomFlowController(
 
       options.root.innerHTML = `
         <div
+          ${mobileLayoutAttribute}
           style="
             min-height:100vh;
             box-sizing:border-box;
