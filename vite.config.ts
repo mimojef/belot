@@ -1,5 +1,23 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type InlineConfig } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
+
+function disableServiceWorkerCodeSplitting(options: InlineConfig): void {
+  const output = options.build?.rollupOptions?.output
+  if (!output) {
+    return
+  }
+
+  const outputs = Array.isArray(output) ? output : [output]
+  for (const swOutput of outputs) {
+    if (!swOutput || typeof swOutput !== 'object') {
+      continue
+    }
+
+    const mutableOutput = swOutput as Record<string, unknown>
+    delete mutableOutput.inlineDynamicImports
+    mutableOutput.codeSplitting = false
+  }
+}
 
 export default defineConfig({
   server: {
@@ -45,6 +63,9 @@ export default defineConfig({
       injectManifest: {
         globPatterns: ['**/*.{js,css,html,ico,svg,png,webp,mp3,woff2}'],
         injectionPoint: 'self.__WB_MANIFEST',
+      },
+      integration: {
+        configureCustomSWViteBuild: disableServiceWorkerCodeSplitting,
       },
       devOptions: {
         enabled: true,
