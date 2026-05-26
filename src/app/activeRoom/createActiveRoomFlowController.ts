@@ -162,14 +162,38 @@ export function createActiveRoomFlowController(
   let matchEndedPrizeAnimatedTimerId: number | null = null
   let replayStakeEffectShown = false
   let initialStakeEffectShown = false
+  let matchEndedCountdownDeadlineAt: number | null = null
   let matchEndedCountdownSeconds = 120
   let matchEndedCountdownIntervalId: number | null = null
+
+  function getMatchEndedCountdownSeconds(): number {
+    if (matchEndedCountdownDeadlineAt === null) {
+      return matchEndedCountdownSeconds
+    }
+
+    return Math.max(0, Math.ceil((matchEndedCountdownDeadlineAt - Date.now()) / 1000))
+  }
+
+  function syncMatchEndedCountdownDisplay(): void {
+    matchEndedCountdownSeconds = getMatchEndedCountdownSeconds()
+    const el = options.root.querySelector<HTMLElement>('[data-match-ended-countdown="1"]')
+    if (el) {
+      el.textContent = `${matchEndedCountdownSeconds}с`
+      el.style.color = matchEndedCountdownSeconds <= 30 ? '#f87171' : 'rgba(226,232,240,0.44)'
+    }
+
+    if (matchEndedCountdownSeconds <= 0) {
+      clearMatchEndedCountdown()
+      returnToLobbyFromMatchEnded()
+    }
+  }
 
   function clearMatchEndedCountdown(): void {
     if (matchEndedCountdownIntervalId !== null) {
       clearInterval(matchEndedCountdownIntervalId)
       matchEndedCountdownIntervalId = null
     }
+    matchEndedCountdownDeadlineAt = null
     if (matchEndedPrizeAnimatedTimerId !== null) {
       clearTimeout(matchEndedPrizeAnimatedTimerId)
       matchEndedPrizeAnimatedTimerId = null
@@ -178,18 +202,10 @@ export function createActiveRoomFlowController(
 
   function startMatchEndedCountdown(): void {
     clearMatchEndedCountdown()
+    matchEndedCountdownDeadlineAt = Date.now() + 120_000
     matchEndedCountdownSeconds = 120
     matchEndedCountdownIntervalId = window.setInterval(() => {
-      matchEndedCountdownSeconds = Math.max(0, matchEndedCountdownSeconds - 1)
-      const el = options.root.querySelector<HTMLElement>('[data-match-ended-countdown="1"]')
-      if (el) {
-        el.textContent = `${matchEndedCountdownSeconds}с`
-        el.style.color = matchEndedCountdownSeconds <= 30 ? '#f87171' : 'rgba(226,232,240,0.44)'
-      }
-      if (matchEndedCountdownSeconds <= 0) {
-        clearMatchEndedCountdown()
-        returnToLobbyFromMatchEnded()
-      }
+      syncMatchEndedCountdownDisplay()
     }, 1000)
   }
 
@@ -687,7 +703,7 @@ export function createActiveRoomFlowController(
   function syncPersistentBotTakeoverPopup(): void {
     const localSeatSnapshot = getLocalSeatSnapshot()
 
-    if (!activeRoomState || !localSeatSnapshot?.isControlledByBot) {
+    if (!activeRoomState || isMatchEndedState() || !localSeatSnapshot?.isControlledByBot) {
       removePersistentBotTakeoverPopup()
       return
     }
@@ -2554,8 +2570,20 @@ export function createActiveRoomFlowController(
 
       // Ако някой е гласувал за изход → скочи на 30 сек.
       const leaveVotes = activeRoomState.game.matchEnded?.leaveVotes ?? []
-      if (leaveVotes.length > 0 && matchEndedCountdownSeconds > 30) {
-        matchEndedCountdownSeconds = 30
+      const currentCountdownSeconds = getMatchEndedCountdownSeconds()
+      if (leaveVotes.length > 0 && currentCountdownSeconds > 30) {
+        const shortenedDeadlineAt = Date.now() + 30_000
+        matchEndedCountdownDeadlineAt =
+          matchEndedCountdownDeadlineAt === null
+            ? shortenedDeadlineAt
+            : Math.min(matchEndedCountdownDeadlineAt, shortenedDeadlineAt)
+      }
+
+      matchEndedCountdownSeconds = getMatchEndedCountdownSeconds()
+      if (matchEndedCountdownSeconds <= 0) {
+        clearMatchEndedCountdown()
+        returnToLobbyFromMatchEnded()
+        return
       }
 
       renderMatchEndedScreen({
