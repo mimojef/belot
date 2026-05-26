@@ -229,7 +229,102 @@ function renderCuttingAnimationStyles(): string {
           box-shadow: 0 3px 6px rgba(0,0,0,0.08);
         }
       }
+
+      @keyframes belot-active-room-mobile-cut-pile {
+        0% {
+          transform: var(--mobile-cut-from-transform);
+          opacity: 1;
+        }
+        44% {
+          transform: var(--mobile-cut-split-transform);
+          opacity: 1;
+        }
+        100% {
+          transform: var(--mobile-cut-final-transform);
+          opacity: 1;
+        }
+      }
     </style>
+  `
+}
+
+function renderMobileCutPileCards(): string {
+  return Array.from({ length: 5 }, (_, index) => {
+    const offset = index * 3
+    const rotate = (index - 2) * 0.9
+    return `
+      <div
+        style="
+          position:absolute;
+          left:${offset}px;
+          top:${offset * 0.72}px;
+          width:${CARD_WIDTH}px;
+          height:${CARD_HEIGHT}px;
+          border:1px solid rgba(255,255,255,0.24);
+          border-radius:16px;
+          overflow:hidden;
+          transform:rotate(${rotate.toFixed(2)}deg);
+          box-shadow:0 8px 14px rgba(0,0,0,0.13);
+          backface-visibility:hidden;
+        "
+      >
+        ${renderCardFace()}
+      </div>
+    `
+  }).join('')
+}
+
+function renderMobileLightCutAnimation(
+  selectedCutIndex: number,
+  animationDelayMs: number,
+): string {
+  const leftCardNumber = Math.max(1, selectedCutIndex)
+  const rightCardNumber = Math.min(VISUAL_CARD_COUNT, selectedCutIndex + 1)
+  const leftPileStartLeft = getCardLeft(leftCardNumber, null)
+  const rightPileStartLeft = getCardLeft(rightCardNumber, null)
+  const leftFinalX = CUTTING_PILE_LEFT - leftPileStartLeft + 2
+  const rightFinalX = CUTTING_PILE_LEFT - rightPileStartLeft + 14
+  const finalY = CUTTING_PILE_TOP - CARD_TOP + 10
+
+  return `
+    <div
+      aria-hidden="true"
+      style="
+        position:absolute;
+        left:${leftPileStartLeft}px;
+        top:${CARD_TOP}px;
+        width:${CARD_WIDTH + 18}px;
+        height:${CARD_HEIGHT + 18}px;
+        z-index:${VISUAL_CARD_COUNT + 2};
+        transform-origin:center bottom;
+        will-change:transform;
+        --mobile-cut-from-transform:translate(0px, 0px) rotate(-1deg);
+        --mobile-cut-split-transform:translate(-122px, -12px) rotate(-7deg);
+        --mobile-cut-final-transform:translate(${leftFinalX.toFixed(2)}px, ${finalY.toFixed(2)}px) rotate(-4deg);
+        animation:belot-active-room-mobile-cut-pile ${CUTTING_VISUAL_ANIMATION_TOTAL_MS}ms cubic-bezier(0.25, 0.8, 0.25, 1) ${animationDelayMs.toFixed(2)}ms forwards;
+      "
+    >
+      ${renderMobileCutPileCards()}
+    </div>
+    <div
+      aria-hidden="true"
+      style="
+        position:absolute;
+        left:${rightPileStartLeft}px;
+        top:${CARD_TOP}px;
+        width:${CARD_WIDTH + 18}px;
+        height:${CARD_HEIGHT + 18}px;
+        z-index:${VISUAL_CARD_COUNT + 3};
+        transform-origin:center bottom;
+        will-change:transform;
+        --mobile-cut-from-transform:translate(0px, 0px) rotate(1deg);
+        --mobile-cut-split-transform:translate(122px, 12px) rotate(7deg);
+        --mobile-cut-final-transform:translate(${rightFinalX.toFixed(2)}px, ${finalY.toFixed(2)}px) rotate(-2deg);
+        animation:belot-active-room-mobile-cut-pile ${CUTTING_VISUAL_ANIMATION_TOTAL_MS}ms cubic-bezier(0.25, 0.8, 0.25, 1) ${animationDelayMs.toFixed(2)}ms forwards;
+      "
+    >
+      ${renderMobileCutPileCards()}
+    </div>
   `
 }
 
@@ -245,7 +340,8 @@ function renderVisualDeck(
   const tableWidth = CUTTING_TABLE_WIDTH
   const pileLeft = CUTTING_PILE_LEFT
   const pileTop = CUTTING_PILE_TOP
-  const mobileCuttingDeckOffsetY = isPhoneLayoutViewport() ? 210 : 0
+  const isPhoneLayout = isPhoneLayoutViewport()
+  const mobileCuttingDeckOffsetY = isPhoneLayout ? 210 : 0
   const animationElapsedMs =
     cutAnimation !== null
       ? Math.max(0, Math.min(cutAnimation.elapsedMs, cutAnimation.totalDurationMs))
@@ -256,8 +352,13 @@ function renderVisualDeck(
   const cardPositionSelectedCutIndex =
     selectedCutIndex !== null && !isCutAnimationVisible ? selectedCutIndex : null
   const animationDelayMs = shouldAnimateCut ? -Math.max(0, animationElapsedMs) : 0
+  const shouldUseMobileLightCutAnimation =
+    isPhoneLayout && shouldAnimateCut && selectedCutIndex !== null
+  const mobileLightCutAnimationHtml = shouldUseMobileLightCutAnimation
+    ? renderMobileLightCutAnimation(selectedCutIndex, animationDelayMs)
+    : ''
 
-  const cardsHtml = Array.from({ length: VISUAL_CARD_COUNT }, (_, index) => {
+  const cardsHtml = shouldUseMobileLightCutAnimation ? '' : Array.from({ length: VISUAL_CARD_COUNT }, (_, index) => {
     const cardNumber = index + 1
     const left = getCardLeft(cardNumber, cardPositionSelectedCutIndex)
     const borderColor = 'rgba(255,255,255,0.28)'
@@ -450,6 +551,7 @@ function renderVisualDeck(
           ></div>
 
           ${cardsHtml}
+          ${mobileLightCutAnimationHtml}
           ${selectedMarkerHtml}
           ${cutButtonsHtml}
         </div>
