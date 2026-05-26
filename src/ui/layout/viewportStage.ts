@@ -110,6 +110,12 @@ export function isPhoneLayoutViewport(): boolean {
   const shortSide = Math.min(window.innerWidth, window.innerHeight)
   const longSide = Math.max(window.innerWidth, window.innerHeight)
   const isCoarseTouch = window.matchMedia('(hover: none) and (pointer: coarse)').matches
+  const isNarrowPortrait = window.innerHeight > window.innerWidth &&
+    shortSide <= 640 &&
+    longSide <= 1200
 
-  return isCoarseTouch && shortSide <= 480 && longSide <= 1050
+  return (
+    isCoarseTouch && shortSide <= 480 && longSide <= 1050 ||
+    isNarrowPortrait
+  )
 }
