@@ -40,7 +40,7 @@ import {
   type SupportMessageSnapshot,
   type SupportConversationSnapshot,
 } from './app/network/createGameServerClient'
-import { createViewportResizeHandler } from './ui/layout/viewportStage'
+import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
 import { createFriendRequestNotification } from './ui/notifications/friendRequestNotification'
 
@@ -2584,7 +2584,103 @@ function showLandingOverlay(): void {
     'transition:opacity 0.35s ease',
   ].join(';')
 
-  overlay.innerHTML = `
+  const isNarrowPortraitLanding =
+    window.innerWidth <= 640 &&
+    window.innerHeight > window.innerWidth
+  const isMobileLanding = isPhoneLayoutViewport() || isNarrowPortraitLanding
+
+  overlay.innerHTML = isMobileLanding ? `
+    <section style="
+      width:100%;height:100dvh;overflow-y:auto;-webkit-overflow-scrolling:touch;
+      background:
+        radial-gradient(circle at 50% 0%, rgba(212,165,32,0.18), rgba(0,0,0,0) 34%),
+        radial-gradient(circle at 50% 30%, rgba(22,101,52,0.22), rgba(0,0,0,0) 42%),
+        #000000;
+      color:#ffffff;font-family:Arial, Helvetica, sans-serif;
+    ">
+      <div style="min-height:100dvh;display:flex;flex-direction:column;">
+        <header style="
+          height:62px;padding:12px;display:flex;align-items:center;justify-content:space-between;
+          border-bottom:1px solid rgba(212,165,32,0.22);
+        ">
+          <img src="/assets/lobby/logo.png" alt="Pika.bg" style="width:142px;height:38px;display:block;object-fit:contain;">
+          <div style="
+            height:30px;padding:0 10px;border:1px solid rgba(212,165,32,0.42);border-radius:8px;
+            display:flex;align-items:center;color:#d4a520;font-size:11px;font-weight:900;
+            letter-spacing:0.08em;text-transform:uppercase;background:#050505;
+          ">Белот онлайн</div>
+        </header>
+
+        <main style="flex:1;display:flex;flex-direction:column;">
+          <section style="padding:18px 12px 12px;text-align:center;display:grid;gap:12px;justify-items:center;">
+            <div style="
+              color:#d4a520;font-size:12px;font-weight:900;letter-spacing:0.12em;
+              text-transform:uppercase;
+            ">№1 платформа за белот</div>
+            <h1 style="
+              margin:0;max-width:330px;color:#ffffff;font-size:34px;line-height:1.04;
+              font-weight:900;letter-spacing:0;text-wrap:balance;
+            ">Играй Белот Онлайн</h1>
+            <p style="
+              margin:0;max-width:310px;color:rgba(255,255,255,0.62);
+              font-size:14px;line-height:1.45;font-weight:700;
+            ">Влез в играта, събери приятели и покажи уменията си на масата.</p>
+          </section>
+
+          <section style="position:relative;margin:2px 12px 0;min-height:228px;display:flex;align-items:center;justify-content:center;">
+            <div style="
+              position:absolute;left:50%;top:52%;width:min(84vw,330px);aspect-ratio:1/0.68;
+              transform:translate(-50%,-50%);border:1px solid rgba(212,165,32,0.42);border-radius:8px;
+              background:
+                radial-gradient(circle at 50% 42%, rgba(212,165,32,0.16), rgba(0,0,0,0) 48%),
+                #050505;
+              box-shadow:0 18px 50px rgba(0,0,0,0.48);
+            "></div>
+            <img src="/assets/lobby/hero-cards.png" alt="Белот карти" draggable="false" style="
+              position:relative;z-index:1;width:min(94vw,390px);height:auto;display:block;object-fit:contain;
+              filter:drop-shadow(0 18px 28px rgba(0,0,0,0.55));
+            ">
+          </section>
+
+          <section style="margin:8px 12px 0;display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            <article style="border:1px solid rgba(212,165,32,0.38);border-radius:8px;background:#080808;padding:11px;min-height:82px;">
+              <img src="/assets/lobby/icon-users.png" alt="" style="width:30px;height:30px;object-fit:contain;display:block;margin-bottom:8px;">
+              <div style="color:#ffffff;font-size:14px;font-weight:900;">Общество</div>
+              <div style="margin-top:4px;color:rgba(255,255,255,0.48);font-size:12px;line-height:1.25;font-weight:700;">Активни играчи и приятелска среда.</div>
+            </article>
+            <article style="border:1px solid rgba(212,165,32,0.38);border-radius:8px;background:#080808;padding:11px;min-height:82px;">
+              <img src="/assets/lobby/icon-daily-rewards.png" alt="" style="width:30px;height:30px;object-fit:contain;display:block;margin-bottom:8px;">
+              <div style="color:#ffffff;font-size:14px;font-weight:900;">Награди</div>
+              <div style="margin-top:4px;color:rgba(255,255,255,0.48);font-size:12px;line-height:1.25;font-weight:700;">Бонуси, мисии и класации всеки ден.</div>
+            </article>
+            <article style="border:1px solid rgba(212,165,32,0.38);border-radius:8px;background:#080808;padding:11px;min-height:82px;">
+              <img src="/assets/lobby/icon-fair-play.png" alt="" style="width:30px;height:30px;object-fit:contain;display:block;margin-bottom:8px;">
+              <div style="color:#ffffff;font-size:14px;font-weight:900;">Честна игра</div>
+              <div style="margin-top:4px;color:rgba(255,255,255,0.48);font-size:12px;line-height:1.25;font-weight:700;">Сигурна и коректна маса за всички.</div>
+            </article>
+            <article style="border:1px solid rgba(212,165,32,0.38);border-radius:8px;background:#080808;padding:11px;min-height:82px;">
+              <img src="/assets/lobby/icon-quick-game.png" alt="" style="width:30px;height:30px;object-fit:contain;display:block;margin-bottom:8px;">
+              <div style="color:#ffffff;font-size:14px;font-weight:900;">Бърза игра</div>
+              <div style="margin-top:4px;color:rgba(255,255,255,0.48);font-size:12px;line-height:1.25;font-weight:700;">Влизаш и сядаш на маса за секунди.</div>
+            </article>
+          </section>
+
+          <div style="
+            position:sticky;bottom:0;margin-top:auto;padding:14px 12px 12px;
+            background:linear-gradient(180deg, rgba(0,0,0,0), #000000 28%);
+          ">
+            <button id="pwa-install-btn" style="
+              width:100%;height:50px;border:0;border-radius:8px;
+              background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+              color:#080808;font-size:15px;font-weight:900;cursor:pointer;
+              box-shadow:0 8px 26px rgba(212,165,32,0.32);
+              letter-spacing:0.01em;white-space:nowrap;
+            ">Играй Белот Сега</button>
+          </div>
+        </main>
+      </div>
+    </section>
+  ` : `
     <div style="position:relative;width:min(100vw,calc(100vh * (1672/941)));aspect-ratio:1672/941;">
       <img src="/assets/landing-page/landing-page.webp" style="width:100%;height:100%;display:block;">
       <div style="position:absolute;left:22%;top:63%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;">
@@ -2645,7 +2741,9 @@ function showLandingOverlay(): void {
         setTimeout(dismissOverlay, 2000)
       }
     } else {
-      dismissOverlay()
+      if (!isMobileLanding) {
+        dismissOverlay()
+      }
     }
   })
 }
