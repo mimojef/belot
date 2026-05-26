@@ -1427,6 +1427,44 @@ export function createActiveRoomFlowController(
     })
   }
 
+  function markBiddingPopupPending(): void {
+    const popup = options.root.querySelector<HTMLElement>('[data-bidding-popup="1"]')
+    if (!popup) {
+      return
+    }
+
+    popup.style.pointerEvents = 'none'
+    popup.style.opacity = '0.72'
+    popup.style.transform = 'translateX(-50%) scale(0.985)'
+    popup.style.filter = 'saturate(0.9)'
+
+    popup.querySelectorAll<HTMLButtonElement>('button').forEach((button) => {
+      button.disabled = true
+    })
+  }
+
+  function activateBiddingPopupEnter(turnKey: string | null): void {
+    if (turnKey === null || biddingUiState.popupAnimatedTurnKey === turnKey) {
+      return
+    }
+
+    const popup = options.root.querySelector<HTMLElement>('[data-bidding-popup="1"]')
+    if (!popup || popup.dataset.biddingPopupEnter !== '1') {
+      return
+    }
+
+    biddingUiState.popupAnimatedTurnKey = turnKey
+    window.requestAnimationFrame(() => {
+      if (!popup.isConnected) {
+        return
+      }
+
+      popup.style.opacity = popup.dataset.biddingPopupFinalOpacity ?? '1'
+      popup.style.transform = 'translateX(-50%) scale(1)'
+      popup.style.filter = popup.dataset.biddingPopupFinalFilter ?? 'none'
+    })
+  }
+
   function submitBidActionFromUi(action: ClientBidAction): void {
     if (!activeRoomState || biddingUiState.pendingBidSent) {
       return
@@ -1441,7 +1479,7 @@ export function createActiveRoomFlowController(
 
     biddingUiState.pendingBidSent = true
     activeRoomState.errorText = null
-    renderActiveRoomScreen()
+    markBiddingPopupPending()
     options.submitBidAction(activeRoomState.roomId, action)
   }
 
@@ -2426,9 +2464,23 @@ export function createActiveRoomFlowController(
               )
             : rawBiddingCountdownRemainingMs
 
+      const biddingPopupTurnKey =
+        biddingSnapshot.canSubmitBid &&
+        biddingSnapshot.currentBidderSeat === activeRoomState.seat &&
+        !biddingUiState.pendingBidSent
+          ? `${activeRoomState.roomId}:${biddingSnapshot.currentBidderSeat}:${biddingSnapshot.entries.length}:${biddingGame.timerDeadlineAt ?? 'none'}`
+          : null
+      const showBidPopup = biddingPopupTurnKey !== null
+      const animateBidPopup =
+        showBidPopup &&
+        biddingPopupTurnKey !== null &&
+        biddingUiState.popupAnimatedTurnKey !== biddingPopupTurnKey
+
       const biddingInteractionHtml = createBiddingInteractionHtml({
         biddingSnapshot,
         isPendingSubmission: biddingUiState.pendingBidSent,
+        showBidPopup,
+        animateBidPopup,
         showBotTakeover: false,
       })
 
@@ -2512,6 +2564,7 @@ export function createActiveRoomFlowController(
           ${biddingInteractionHtml}
         </div>
       `
+      activateBiddingPopupEnter(animateBidPopup ? biddingPopupTurnKey : null)
 
       syncSeatPanels(createCuttingSeatPanelsHtml({
         seats: activeRoomState.seats,

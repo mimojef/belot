@@ -117,6 +117,7 @@ export type BiddingUiState = {
   lastKnownEntriesCount: number
   pendingBidSent: boolean
   wasMyTurn: boolean
+  popupAnimatedTurnKey: string | null
   recentBubbles: Partial<Record<Seat, { label: string; startedAt: number }>>
   bubbleTimerIds: Partial<Record<Seat, number>>
   showBotTakeover: boolean

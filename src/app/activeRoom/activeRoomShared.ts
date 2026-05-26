@@ -157,6 +157,7 @@ export function createBiddingUiState(): BiddingUiState {
     lastKnownEntriesCount: 0,
     pendingBidSent: false,
     wasMyTurn: false,
+    popupAnimatedTurnKey: null,
     recentBubbles: {},
     bubbleTimerIds: {},
     showBotTakeover: false,

@@ -14,6 +14,8 @@ export const BID_BOT_DELAY_MS = 800
 export type RenderBiddingScreenOptions = {
   biddingSnapshot: RoomBiddingSnapshot
   isPendingSubmission: boolean
+  showBidPopup: boolean
+  animateBidPopup: boolean
   showBotTakeover: boolean
 }
 
@@ -205,19 +207,25 @@ function renderPassButton(enabled: boolean): string {
 function renderBidPopup(
   validActions: RoomValidBidActionsSnapshot,
   isPendingSubmission: boolean,
+  shouldAnimateEnter: boolean,
 ): string {
   const disabled = isPendingSubmission
+  const opacity = disabled ? '0.7' : '1'
+  const filter = disabled ? 'saturate(0.92)' : 'none'
 
   const suits = validActions.suits
 
   return `
     <div
       data-bidding-popup="1"
+      data-bidding-popup-enter="${shouldAnimateEnter ? '1' : '0'}"
+      data-bidding-popup-final-opacity="${opacity}"
+      data-bidding-popup-final-filter="${filter}"
       style="
         position:fixed;
         bottom:260px;
         left:50%;
-        transform:translateX(-50%);
+        transform:translateX(-50%) scale(${shouldAnimateEnter ? '0.96' : '1'});
         width:min(88vw, 400px);
         padding:5px;
         border-radius:14px;
@@ -228,7 +236,10 @@ function renderBidPopup(
           inset 0 0 0 1px rgba(244,182,58,0.18);
         z-index:10;
         pointer-events:${disabled ? 'none' : 'auto'};
-        opacity:${disabled ? '0.7' : '1'};
+        opacity:${shouldAnimateEnter ? '0' : opacity};
+        transition:opacity 280ms ease, transform 280ms ease, filter 280ms ease;
+        will-change:opacity, transform, filter;
+        filter:${shouldAnimateEnter ? 'saturate(0.9)' : filter};
         font-family:Inter, system-ui, sans-serif;
       "
     >
@@ -320,11 +331,11 @@ function renderBotTakeoverPopup(): string {
 }
 
 export function createBiddingInteractionHtml(options: RenderBiddingScreenOptions): string {
-  const { biddingSnapshot, isPendingSubmission, showBotTakeover } = options
+  const { biddingSnapshot, isPendingSubmission, showBidPopup, animateBidPopup, showBotTakeover } = options
 
   const popupHtml =
-    biddingSnapshot.canSubmitBid && biddingSnapshot.validActions
-      ? renderBidPopup(biddingSnapshot.validActions, isPendingSubmission)
+    showBidPopup && biddingSnapshot.canSubmitBid && biddingSnapshot.validActions
+      ? renderBidPopup(biddingSnapshot.validActions, isPendingSubmission, animateBidPopup)
       : ''
 
   const botTakeoverHtml = showBotTakeover ? renderBotTakeoverPopup() : ''

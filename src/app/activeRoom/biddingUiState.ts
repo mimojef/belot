@@ -18,6 +18,7 @@ export function clearBiddingUiState(state: BiddingUiState): void {
   state.lastKnownEntriesCount = 0
   state.pendingBidSent = false
   state.wasMyTurn = false
+  state.popupAnimatedTurnKey = null
   state.recentBubbles = {}
   state.bubbleTimerIds = {}
   state.showBotTakeover = false
