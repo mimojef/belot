@@ -78,6 +78,14 @@ export function shouldKeepRoomAlive(
   room: ServerRoom,
   now: number = Date.now(),
 ): boolean {
+  if (
+    room.game.phase !== null &&
+    room.game.phase !== 'bootstrap' &&
+    room.game.phase !== 'finished'
+  ) {
+    return true
+  }
+
   if (roomHasConnectedHumanParticipants(room)) {
     return true
   }

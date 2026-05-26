@@ -2383,7 +2383,7 @@ function showSessionDisplacedOverlay(): void {
   const overlay = document.createElement('div')
   overlay.id = 'session-displaced-overlay'
   overlay.style.cssText =
-    'position:fixed;inset:0;z-index:20000;background:rgba(0,0,0,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;font-family:Arial,Helvetica,sans-serif;'
+    'position:fixed;inset:0;z-index:200000;background:rgba(0,0,0,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;font-family:Arial,Helvetica,sans-serif;'
   overlay.innerHTML = `
     <div style="font-size:48px;">⚠️</div>
     <div style="font-size:20px;font-weight:900;color:#ffffff;text-align:center;max-width:420px;line-height:1.4;">
@@ -2396,6 +2396,11 @@ function showSessionDisplacedOverlay(): void {
   document.body.appendChild(overlay)
 }
 
+function removeLandingOverlay(): void {
+  document.getElementById('pwa-landing-overlay')?.remove()
+  document.body.style.overflow = ''
+}
+
 function showSessionInGameOverlay(roomId: string, reconnectToken: string): void {
   const existing = document.getElementById('session-in-game-overlay')
   if (existing) return
@@ -2403,7 +2408,7 @@ function showSessionInGameOverlay(roomId: string, reconnectToken: string): void 
   const overlay = document.createElement('div')
   overlay.id = 'session-in-game-overlay'
   overlay.style.cssText =
-    'position:fixed;inset:0;z-index:20000;background:rgba(0,0,0,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;font-family:Arial,Helvetica,sans-serif;'
+    'position:fixed;inset:0;z-index:200000;background:rgba(0,0,0,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;font-family:Arial,Helvetica,sans-serif;'
   overlay.innerHTML = `
     <div style="font-size:48px;">🎮</div>
     <div style="font-size:20px;font-weight:900;color:#ffffff;text-align:center;max-width:420px;line-height:1.4;">
@@ -2419,6 +2424,7 @@ function showSessionInGameOverlay(roomId: string, reconnectToken: string): void 
   document.body.appendChild(overlay)
 
   overlay.querySelector('[data-session-rejoin="1"]')?.addEventListener('click', () => {
+    removeLandingOverlay()
     overlay.remove()
     client.resumeRoom(roomId, reconnectToken)
   })
@@ -2532,6 +2538,7 @@ client = createGameServerClient({
     }
 
     if (message.type === 'room_resumed' && !activeRoom.hasActiveRoom()) {
+      removeLandingOverlay()
       activeRoom.enterActiveRoomFromResume(message.roomId, message.seat, 5000)
       return
     }

@@ -930,6 +930,24 @@ function findProfileInGameSession(
   return null
 }
 
+function sendSessionInGameIfNeeded(
+  connectionId: ConnectionId,
+  profileId: string,
+): boolean {
+  const gameSession = findProfileInGameSession(profileId)
+  if (gameSession === null) {
+    return false
+  }
+
+  removeConnectionFromMatchmaking(connectionId)
+  safeSendToConnection(connectionId, {
+    type: 'session_in_game',
+    roomId: gameSession.roomId,
+    reconnectToken: gameSession.reconnectToken,
+  })
+  return true
+}
+
 function displaceProfileConnections(
   profileId: string,
   exceptConnectionId: ConnectionId,
@@ -4018,14 +4036,7 @@ wsServer.on('connection', (socket, request) => {
   })
 
   if (connection.profileId !== null) {
-    const gameSession = findProfileInGameSession(connection.profileId)
-    if (gameSession !== null) {
-      sendJsonMessage(socket, {
-        type: 'session_in_game',
-        roomId: gameSession.roomId,
-        reconnectToken: gameSession.reconnectToken,
-      })
-    } else {
+    if (!sendSessionInGameIfNeeded(connection.id, connection.profileId)) {
       displaceProfileConnections(connection.profileId, connection.id)
     }
 
@@ -4603,6 +4614,10 @@ wsServer.on('connection', (socket, request) => {
         }
 
         const profileId = publicProfile.profileId ?? latestConnection.profileId
+        if (sendSessionInGameIfNeeded(connection.id, profileId)) {
+          return
+        }
+
         const stablePlayerConnection = {
           ...latestConnection,
           playerId: latestConnection.playerId ?? profileId,
@@ -4920,6 +4935,13 @@ wsServer.on('connection', (socket, request) => {
             ? playerProgressStore.getPublicProfile(createRoomConnection.profileId)
             : null
 
+        if (
+          createRoomConnection?.profileId != null &&
+          sendSessionInGameIfNeeded(connection.id, createRoomConnection.profileId)
+        ) {
+          return
+        }
+
         const result = handleCreateRoom(
           serverState,
           connection.id,
@@ -4953,6 +4975,13 @@ wsServer.on('connection', (socket, request) => {
           joinRoomConnection?.profileId != null
             ? playerProgressStore.getPublicProfile(joinRoomConnection.profileId)
             : null
+
+        if (
+          joinRoomConnection?.profileId != null &&
+          sendSessionInGameIfNeeded(connection.id, joinRoomConnection.profileId)
+        ) {
+          return
+        }
 
         const result = handleJoinRoom(
           serverState,
@@ -5003,6 +5032,10 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        if (sendSessionInGameIfNeeded(connection.id, latestConnection.profileId)) {
+          return
+        }
+
         const publicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
 
         if (publicProfile === null) {
@@ -5038,6 +5071,10 @@ wsServer.on('connection', (socket, request) => {
 
         if (latestConnection?.profileId == null) {
           safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+
+        if (sendSessionInGameIfNeeded(connection.id, latestConnection.profileId)) {
           return
         }
 
@@ -5200,6 +5237,10 @@ wsServer.on('connection', (socket, request) => {
 
         if (latestConnection?.profileId == null) {
           safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+
+        if (sendSessionInGameIfNeeded(connection.id, latestConnection.profileId)) {
           return
         }
 
