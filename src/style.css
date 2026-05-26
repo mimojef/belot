@@ -79,6 +79,24 @@ body::before {
   -ms-user-select: none;
 }
 
+@media (hover: none) and (pointer: coarse) {
+  #app * {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  #app button,
+  #app a,
+  #app [role='button'] {
+    touch-action: manipulation;
+  }
+
+  #app button:focus:not(:focus-visible),
+  #app a:focus:not(:focus-visible),
+  #app [role='button']:focus:not(:focus-visible) {
+    outline: none;
+  }
+}
+
 [data-lobby-stakes-scroll]::-webkit-scrollbar { display: none; }
 [data-lobby-stakes-scroll] { scrollbar-width: none; }
 
