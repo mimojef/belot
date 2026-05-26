@@ -2578,9 +2578,9 @@ async function handleShopCheckoutRequest(
   const clientOrigin = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173'
   const successUrl =
     process.env.STRIPE_SUCCESS_URL ??
-    `${clientOrigin}/?screen=shop&payment=success&session_id={CHECKOUT_SESSION_ID}`
+    `${clientOrigin}/lobby?payment=success&session_id={CHECKOUT_SESSION_ID}`
   const cancelUrl =
-    process.env.STRIPE_CANCEL_URL ?? `${clientOrigin}/?screen=shop&payment=cancel`
+    process.env.STRIPE_CANCEL_URL ?? `${clientOrigin}/lobby?payment=cancel`
 
   const stripe = new Stripe(stripeSecretKey)
 

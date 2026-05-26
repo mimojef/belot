@@ -606,6 +606,150 @@ async function startShopPurchase(packageId: string): Promise<
   }
 }
 
+function formatRewardAmount(value: number): string {
+  return new Intl.NumberFormat('bg-BG').format(Math.max(0, Math.trunc(value)))
+}
+
+function playStripeRewardSound(): void {
+  try {
+    const audio = new Audio('/audio/game-sounds/coins.mp3')
+    audio.volume = 0.75
+    void audio.play().catch(() => {})
+  } catch {
+    // Browser audio policies can block playback after a redirect.
+  }
+}
+
+function showStripeCoinRewardOverlay(amount: number): void {
+  const safeAmount = Math.max(0, Math.trunc(amount))
+  if (safeAmount <= 0) return
+
+  document.getElementById('stripe-coin-reward-overlay')?.remove()
+
+  const overlay = document.createElement('div')
+  overlay.id = 'stripe-coin-reward-overlay'
+  overlay.style.cssText = [
+    'position:fixed',
+    'inset:0',
+    'z-index:1000000',
+    'display:flex',
+    'align-items:center',
+    'justify-content:center',
+    'pointer-events:none',
+    'font-family:Arial, Helvetica, sans-serif',
+  ].join(';')
+
+  const numberEl = document.createElement('div')
+  numberEl.textContent = '+0'
+  numberEl.style.cssText = [
+    'font-size:clamp(58px, 11vw, 138px)',
+    'line-height:1',
+    'font-weight:900',
+    'letter-spacing:0',
+    'color:#22c55e',
+    'text-shadow:0 0 18px rgba(34,197,94,0.7),0 0 46px rgba(34,197,94,0.42),0 10px 24px rgba(0,0,0,0.78)',
+    'transform:scale(0.72)',
+    'opacity:0',
+    'filter:drop-shadow(0 0 18px rgba(34,197,94,0.58))',
+    'will-change:transform,opacity',
+  ].join(';')
+
+  overlay.appendChild(numberEl)
+  document.body.appendChild(overlay)
+  playStripeRewardSound()
+
+  const durationMs = 1500
+  const start = performance.now()
+
+  const tick = (now: number): void => {
+    const progress = Math.min(1, (now - start) / durationMs)
+    const eased = 1 - Math.pow(1 - progress, 3)
+    const currentAmount = Math.round(safeAmount * eased)
+    const introProgress = Math.min(1, progress / 0.22)
+    const pulse = Math.sin(progress * Math.PI) * 0.08
+
+    numberEl.textContent = `+${formatRewardAmount(currentAmount)}`
+    numberEl.style.opacity = String(introProgress)
+    numberEl.style.transform = `scale(${0.72 + introProgress * 0.28 + pulse})`
+
+    if (progress < 1) {
+      requestAnimationFrame(tick)
+      return
+    }
+
+    numberEl.textContent = `+${formatRewardAmount(safeAmount)}`
+    numberEl.style.transform = 'scale(1.03)'
+
+    window.setTimeout(() => {
+      overlay.style.transition = 'opacity 0.45s ease, transform 0.45s ease'
+      overlay.style.opacity = '0'
+      overlay.style.transform = 'scale(1.03)'
+      window.setTimeout(() => overlay.remove(), 480)
+    }, 850)
+  }
+
+  requestAnimationFrame(tick)
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms)
+  })
+}
+
+async function waitForPaidStripePurchase(
+  checkoutSessionId: string,
+): Promise<CoinPurchaseSnapshot | null> {
+  const normalizedSessionId = checkoutSessionId.trim()
+  if (!normalizedSessionId) return null
+
+  const startedAt = Date.now()
+  const timeoutMs = 8500
+
+  while (Date.now() - startedAt <= timeoutMs) {
+    const result = await loadShopPurchases()
+
+    if (result.ok) {
+      const purchase = result.purchases.find((item) => {
+        return item.providerCheckoutSessionId === normalizedSessionId
+      })
+
+      if (purchase?.status === 'paid') {
+        return purchase
+      }
+    }
+
+    await delay(700)
+  }
+
+  return null
+}
+
+async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null): Promise<void> {
+  const normalizedSessionId = checkoutSessionId?.trim() ?? ''
+  if (!normalizedSessionId || currentAuthSession === null) return
+
+  const seenKey = `stripe_reward_seen_${normalizedSessionId}`
+  try {
+    if (sessionStorage.getItem(seenKey) === '1') return
+  } catch {
+    // Ignore storage failures; the backend remains the source of truth.
+  }
+
+  const purchase = await waitForPaidStripePurchase(normalizedSessionId)
+  if (purchase === null) return
+
+  try {
+    sessionStorage.setItem(seenKey, '1')
+  } catch {
+    // Ignore storage failures.
+  }
+
+  await loadAuthSession()
+  lobby.resetToLobby()
+  showStripeCoinRewardOverlay(purchase.yellowCoinsAmount)
+}
+
 async function loadPublicSettings(): Promise<void> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/settings/public`, {
@@ -2421,6 +2565,11 @@ window.addEventListener('beforeunload', () => {
 const stripeReturnParams = new URLSearchParams(window.location.search)
 const stripeReturnScreen = stripeReturnParams.get('screen')
 const stripeReturnPayment = stripeReturnParams.get('payment')
+const stripeReturnCheckoutSessionId = stripeReturnParams.get('session_id')
+const isStripePaymentReturn =
+  stripeReturnPayment === 'success' ||
+  stripeReturnPayment === 'cancel' ||
+  stripeReturnScreen === 'shop'
 const offlineReloadParam = stripeReturnParams.get('offlineReload')
 
 if (offlineReloadParam !== null && window.location.pathname === '/lobby') {
@@ -2431,22 +2580,13 @@ if (offlineReloadParam !== null && window.location.pathname === '/lobby') {
 // Трябва да е ПРЕДИ lobby.render() за да може syncUrlPath() да я засече
 const _initialPath = window.location.pathname
 const _VALID_PATHS = new Set(['/lobby', '/players', '/ranking', '/shop', '/friends', '/chat', '/admin'])
-if (!isRunningAsStandalone() && !_VALID_PATHS.has(_initialPath)) {
+if (!isStripePaymentReturn && !isRunningAsStandalone() && !_VALID_PATHS.has(_initialPath)) {
   showLandingOverlay()
 }
 
-if (stripeReturnScreen === 'shop') {
-  history.replaceState(null, '', window.location.pathname)
-
-  if (stripeReturnPayment === 'success') {
-    lobby.navigateToShop(
-      'Плащането е успешно. Жълтиците ще се появят след потвърждение от Stripe.',
-    )
-  } else if (stripeReturnPayment === 'cancel') {
-    lobby.navigateToShop('Покупката беше отказана.')
-  } else {
-    lobby.render()
-  }
+if (isStripePaymentReturn) {
+  history.replaceState(null, '', '/lobby')
+  lobby.resetToLobby()
 } else {
   lobby.render()
 }
@@ -2490,7 +2630,12 @@ initPwa((applyFn) => {
 })
 
 void loadPublicSettings()
-void loadAuthSession().then(() => { lobby.navigateInitialPath() })
+void loadAuthSession().then(() => {
+  lobby.navigateInitialPath()
+  if (stripeReturnPayment === 'success') {
+    void handleStripePaymentSuccessReturn(stripeReturnCheckoutSessionId)
+  }
+})
 client.connect()
 
 // Offline overlay — показва се при реална загуба на интернет връзка
