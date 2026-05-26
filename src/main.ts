@@ -2554,6 +2554,17 @@ client = createGameServerClient({
 })
 
 const disposeViewportResizeHandler = createViewportResizeHandler(() => {
+  const activeElement = document.activeElement
+  const isTextInputFocused =
+    activeElement instanceof HTMLInputElement ||
+    activeElement instanceof HTMLTextAreaElement ||
+    activeElement instanceof HTMLSelectElement ||
+    activeElement instanceof HTMLElement && activeElement.isContentEditable
+
+  if (isPhoneLayoutViewport() && isTextInputFocused) {
+    return
+  }
+
   if (activeRoom.hasActiveRoom()) {
     activeRoom.render()
     return
