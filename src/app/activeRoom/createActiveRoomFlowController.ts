@@ -3062,7 +3062,9 @@ export function createActiveRoomFlowController(
           }
 
           cuttingAnimation.pendingCycleKey = currentCycleKey
-          renderActiveRoomScreen()
+          if (!isPhoneLayoutViewport()) {
+            renderActiveRoomScreen()
+          }
           options.submitCutIndex(activeRoomState.roomId, cutIndex)
         })
       })
