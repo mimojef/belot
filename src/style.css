@@ -49,6 +49,27 @@ body::before {
   position: relative;
 }
 
+#app,
+#app * {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+#app img {
+  -webkit-user-drag: none;
+}
+
+#app input,
+#app textarea,
+#app [contenteditable='true'] {
+  user-select: text;
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
+}
+
 .game-shell {
   position: relative;
   width: 100%;

@@ -2738,7 +2738,7 @@ function showLandingOverlay(): void {
       } else {
         btn.disabled = false
         btn.textContent = 'Играй Белот Сега'
-        setTimeout(dismissOverlay, 2000)
+        dismissOverlay()
       }
     } else {
       if (!isMobileLanding) {
