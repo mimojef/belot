@@ -339,6 +339,7 @@ type InternalLobbyFlowState = {
   ownLikesCount: number | null
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
+  authSubmitInFlight: boolean
   lowCoinsModalOpen: boolean
   serverRoomSeats: RoomSeatSnapshot[] | null
   serverYourSeat: RoomSeatSnapshot['seat'] | null
@@ -526,6 +527,7 @@ function createInitialState(): InternalLobbyFlowState {
     ownLikesCount: null,
     authModalMode: 'closed',
     authErrorText: null,
+    authSubmitInFlight: false,
     lowCoinsModalOpen: false,
     serverRoomSeats: null,
     serverYourSeat: null,
@@ -3526,16 +3528,23 @@ export function createLobbyFlowController(
   }
 
   async function submitLogin(email: string, password: string): Promise<void> {
+    if (state.authSubmitInFlight) {
+      return
+    }
+
+    state.authSubmitInFlight = true
     const errorText = options.onLoginSubmit
       ? await options.onLoginSubmit(email.trim(), password)
       : 'Входът временно не е наличен.'
 
     if (errorText !== null) {
+      state.authSubmitInFlight = false
       const el = options.root.querySelector<HTMLElement>('[data-lobby-auth-error="1"]')
       if (el) { el.textContent = errorText; el.style.display = '' }
       return
     }
 
+    state.authSubmitInFlight = false
     state.authModalMode = 'closed'
     state.authErrorText = null
     const authSession = options.getAuthSession?.() ?? null
@@ -3552,16 +3561,23 @@ export function createLobbyFlowController(
     password: string,
     gender: 'male' | 'female' | null,
   ): Promise<void> {
+    if (state.authSubmitInFlight) {
+      return
+    }
+
+    state.authSubmitInFlight = true
     const errorText = options.onRegisterSubmit
       ? await options.onRegisterSubmit(displayName.trim(), email.trim(), password, gender)
       : 'Регистрацията временно не е налична.'
 
     if (errorText !== null) {
+      state.authSubmitInFlight = false
       const el = options.root.querySelector<HTMLElement>('[data-lobby-auth-error="1"]')
       if (el) { el.textContent = errorText; el.style.display = '' }
       return
     }
 
+    state.authSubmitInFlight = false
     state.authModalMode = 'closed'
     state.authErrorText = null
     const authSession = options.getAuthSession?.() ?? null
@@ -3765,6 +3781,10 @@ export function createLobbyFlowController(
       return
     }
     if (state.authModalMode !== 'closed') {
+      if (state.authSubmitInFlight) {
+        return
+      }
+
       const activeElement = document.activeElement
       const authModal = options.root.querySelector<HTMLElement>('[data-lobby-auth-modal-root="1"]')
       const isTextFieldFocused =
