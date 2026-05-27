@@ -10,6 +10,7 @@ export type RenderPlayerProfilePopupOptions = {
   isLoading?: boolean
   canEdit?: boolean
   isOwnProfile?: boolean
+  isAdmin?: boolean
   friendshipAction?: PlayerProfileFriendshipAction | null
   skipAnimation?: boolean
 }
@@ -150,6 +151,102 @@ function renderRankProgress(profile: PlayerPublicProfileSnapshot): string {
       <div style="margin-top:9px;font-size:12px;font-weight:800;color:rgba(226,232,240,0.70);">
         Остават ${formatInteger(profile.gamesUntilNextRank)} игри до следващо ниво
       </div>
+    </div>
+  `
+}
+
+function renderGameStats(profile: PlayerPublicProfileSnapshot): string {
+  const completedGames = profile.completedGamesCount
+  const wonGames = profile.wonGamesCount
+  const successRate =
+    typeof completedGames === 'number' &&
+    Number.isFinite(completedGames) &&
+    completedGames > 0 &&
+    typeof wonGames === 'number' &&
+    Number.isFinite(wonGames)
+      ? `${Math.round((wonGames / completedGames) * 100)}%`
+      : '—'
+
+  const statItem = (label: string, value: string, accent = '#f8fafc') => `
+    <span style="white-space:nowrap;color:rgba(148,163,184,0.80);font-size:13px;font-weight:400;">
+      ${escapeHtml(label)}:&nbsp;<span style="color:${accent};font-weight:500;">${value}</span>
+    </span>
+  `
+
+  const divider = `<span style="display:inline-block;width:1px;height:13px;background:rgba(212,165,32,0.35);vertical-align:middle;flex:0 0 auto;"></span>`
+
+  return `
+    <div
+      data-player-profile-game-stats="1"
+      style="
+        display:flex;
+        align-items:center;
+        gap:10px;
+        flex-wrap:nowrap;
+        overflow:hidden;
+      "
+    >
+      ${statItem('Изиграни игри', formatInteger(completedGames))}
+      ${divider}
+      ${statItem('Спечелени игри', formatInteger(wonGames), '#fde68a')}
+      ${divider}
+      ${statItem('Успеваемост', escapeHtml(successRate), '#86efac')}
+    </div>
+  `
+}
+
+function renderCoinBalanceInline(profile: PlayerPublicProfileSnapshot): string {
+  if (profile.yellowCoinsBalance === null || profile.yellowCoinsBalance === undefined) {
+    return ''
+  }
+
+  return `
+    <div
+      data-player-profile-balance-inline="1"
+      style="
+        margin-left:auto;
+        display:inline-flex;
+        align-items:center;
+        justify-content:flex-end;
+        gap:7px;
+        min-width:0;
+        max-width:220px;
+        color:#d4a520;
+        font-size:20px;
+        line-height:1;
+        font-weight:900;
+        white-space:nowrap;
+      "
+    >
+      <img src="/assets/lobby/icon-coin.png" alt="" style="width:24px;height:24px;display:block;object-fit:contain;flex:0 0 auto;">
+      <span style="overflow:hidden;text-overflow:ellipsis;">${escapeHtml(Number(profile.yellowCoinsBalance).toLocaleString('bg-BG'))}</span>
+    </div>
+  `
+}
+
+function renderRatingInline(profile: PlayerPublicProfileSnapshot): string {
+  return `
+    <div
+      data-player-profile-inline-rating="1"
+      style="
+        display:inline-flex;
+        align-items:center;
+        gap:8px;
+        min-width:0;
+        color:rgba(226,232,240,0.78);
+        font-size:14px;
+        font-weight:800;
+        white-space:nowrap;
+      "
+    >
+      <span
+        data-player-profile-inline-rating-divider="1"
+        style="width:1px;height:18px;background:rgba(212,165,32,0.45);display:inline-block;flex:0 0 auto;"
+      ></span>
+      <span style="overflow:hidden;text-overflow:ellipsis;">
+        Оценка: <span style="color:#f8fafc;font-weight:900;">${formatAverageRating(profile.averageRating)}</span>
+        от <span style="color:#fde68a;font-weight:900;">${formatNullableText(profile.totalRatingsCount)}</span>
+      </span>
     </div>
   `
 }
@@ -366,6 +463,7 @@ function renderProfileContent(
   seat: Seat | null,
   canEdit: boolean,
   isOwnProfile: boolean,
+  isAdmin: boolean,
   friendshipAction: PlayerProfileFriendshipAction | null,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
@@ -414,7 +512,7 @@ function renderProfileContent(
             padding-top:4px;
           "
         >
-          <div data-player-profile-title="1" style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+          <div data-player-profile-title="1" style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;width:100%;">
             <div
               style="
                 font-size:30px;
@@ -427,7 +525,7 @@ function renderProfileContent(
               ${escapeHtml(displayName)}
             </div>
 
-            ${canEdit && !isOwnProfile ? `
+            ${(canEdit || isAdmin) && !isOwnProfile ? `
               <span
                 data-player-profile-edit="1"
                 style="
@@ -446,12 +544,14 @@ function renderProfileContent(
                 Редакция
               </span>
             ` : ''}
+            ${renderCoinBalanceInline(profile)}
           </div>
 
           ${canEdit ? `
             <div data-player-profile-rating="1" style="display:flex;align-items:center;gap:6px;">
               <div style="font-size:12px;font-weight:800;letter-spacing:0.10em;text-transform:uppercase;color:rgba(148,163,184,0.80);">Рейтинг</div>
               <div style="font-size:20px;font-weight:900;color:#d4a520;">${formatNullableText(profile.skillRating)}</div>
+              ${renderRatingInline(profile)}
             </div>
           ` : ''}
 
@@ -570,16 +670,20 @@ function renderProfileContent(
 
       ${renderRankProgress(profile)}
 
+      ${renderGameStats(profile)}
+
       <div
         data-player-profile-metric-grid="1"
         style="
           display:grid;
-          grid-template-columns:repeat(2, minmax(0, 1fr));
+          grid-template-columns:1fr;
           gap:12px;
         "
       >
         <div
+          data-player-profile-balance-card="1"
           data-player-profile-metric-card="1"
+          hidden
           style="
             border-radius:16px;
             background:rgba(255,255,255,0.05);
@@ -617,7 +721,9 @@ function renderProfileContent(
         </div>
 
         <div
+          data-player-profile-rating-card="1"
           data-player-profile-metric-card="1"
+          hidden
           style="
             border-radius:16px;
             background:rgba(255,255,255,0.05);
@@ -711,6 +817,7 @@ export function renderPlayerProfilePopup(
           options.seat,
           options.canEdit ?? false,
           options.isOwnProfile ?? false,
+          options.isAdmin ?? false,
           options.friendshipAction ?? null,
         )
       : renderEmptyContent(options.seat)
@@ -800,9 +907,31 @@ export function renderPlayerProfilePopup(
           grid-column:2;
         }
 
+        [data-player-profile-balance-inline="1"] {
+          max-width:100% !important;
+          font-size:16px !important;
+          gap:5px !important;
+        }
+
+        [data-player-profile-balance-inline="1"] img {
+          width:20px !important;
+          height:20px !important;
+        }
+
         [data-player-profile-rating="1"] {
           order:3;
           grid-column:2;
+          flex-wrap:wrap;
+        }
+
+        [data-player-profile-inline-rating="1"] {
+          width:100%;
+          gap:6px !important;
+          font-size:12px !important;
+        }
+
+        [data-player-profile-inline-rating-divider="1"] {
+          display:none !important;
         }
 
         [data-player-profile-actions="1"] {
@@ -838,6 +967,10 @@ export function renderPlayerProfilePopup(
 
         [data-player-profile-metric-grid="1"] {
           gap:8px !important;
+        }
+
+        [data-player-profile-game-stats="1"] {
+          gap:7px !important;
         }
 
         [data-player-profile-metric-card="1"] {

@@ -3851,6 +3851,7 @@ export function createLobbyFlowController(
         isOpen: state.profilePopupOpen,
         profile: state.profilePopupProfile ?? createLocalProfilePreview(state, authSession),
         canEdit: state.profilePopupCanEdit,
+        isAdmin: authSession?.account.role === 'admin',
         friendshipAction: buildPopupFriendshipAction(),
       },
       getPopupCallbacks(),

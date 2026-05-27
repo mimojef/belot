@@ -407,6 +407,7 @@ export function syncProfilePopup(
     isOpen: boolean
     profile: PlayerPublicProfileSnapshot | null
     canEdit: boolean
+    isAdmin?: boolean
     friendshipAction: PlayerProfileFriendshipAction | null
   },
   cb: ProfilePopupCallbacks,
@@ -427,6 +428,7 @@ export function syncProfilePopup(
     seat: 'bottom',
     profile: popupState.profile,
     canEdit: popupState.canEdit,
+    isAdmin: popupState.isAdmin ?? false,
     friendshipAction: popupState.friendshipAction,
     skipAnimation: !isFirstOpen,
   })
@@ -6156,6 +6158,7 @@ export function renderLobbyScreen(
       isOpen: state.profilePopupOpen,
       profile: state.profilePopupProfile ?? state.profile,
       canEdit: state.profilePopupCanEdit,
+      isAdmin: state.isAdmin,
       friendshipAction: state.friendshipAction,
     },
     {
