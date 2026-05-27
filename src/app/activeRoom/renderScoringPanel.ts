@@ -310,7 +310,7 @@ function renderDeclarationItemsCell(
       <span
         style="
           color:${pointsColor};
-          font-size:19px;
+          font-size:24px;
           font-weight:700;
           white-space:nowrap;
         "
@@ -334,7 +334,7 @@ function renderDeclarationItemsCell(
       <span
         style="
           color:${pointsColor};
-          font-size:19px;
+          font-size:24px;
           font-weight:700;
           white-space:nowrap;
         "
@@ -568,7 +568,7 @@ function renderMatrixRow(
           padding:0 10px;
           text-align:center;
           color:${valueColor};
-          font-size:18px;
+          font-size:24px;
           font-weight:700;
           overflow:visible;
         "
@@ -584,7 +584,7 @@ function renderMatrixRow(
           padding:0 10px;
           text-align:center;
           color:${valueColor};
-          font-size:18px;
+          font-size:24px;
           font-weight:700;
           overflow:visible;
         "
@@ -667,7 +667,7 @@ function renderResultRow(ourPoints: number, theirPoints: number): string {
           display:flex;
           align-items:center;
           justify-content:center;
-          font-size:26px;
+          font-size:34px;
         "
       >
         ${escapeHtml(String(ourPoints))}
@@ -678,7 +678,7 @@ function renderResultRow(ourPoints: number, theirPoints: number): string {
           display:flex;
           align-items:center;
           justify-content:center;
-          font-size:26px;
+          font-size:34px;
         "
       >
         ${escapeHtml(String(theirPoints))}
@@ -967,7 +967,7 @@ function renderScoringPanelHtml(
             right:18px;
             bottom:12px;
             color:#f4b63a;
-            font-size:16px;
+            font-size:20px;
             font-weight:800;
             letter-spacing:0.02em;
             white-space:nowrap;
