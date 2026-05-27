@@ -3764,6 +3764,19 @@ export function createLobbyFlowController(
     if (shouldSuppressLobbyRender()) {
       return
     }
+    if (state.authModalMode !== 'closed') {
+      const activeElement = document.activeElement
+      const authModal = options.root.querySelector<HTMLElement>('[data-lobby-auth-modal-root="1"]')
+      const isTextFieldFocused =
+        activeElement instanceof HTMLInputElement ||
+        activeElement instanceof HTMLTextAreaElement ||
+        activeElement instanceof HTMLSelectElement ||
+        (activeElement instanceof HTMLElement && activeElement.isContentEditable)
+
+      if (authModal !== null && activeElement !== null && isTextFieldFocused && authModal.contains(activeElement)) {
+        return
+      }
+    }
     if (state.currentScreen === 'matchmaking-room') {
       renderMatchmakingRoom()
       return
