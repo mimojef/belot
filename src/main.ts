@@ -2589,8 +2589,9 @@ const isStripePaymentReturn =
   stripeReturnPayment === 'cancel' ||
   stripeReturnScreen === 'shop'
 const offlineReloadParam = stripeReturnParams.get('offlineReload')
+const recoveryReloadParam = stripeReturnParams.get('recoveryReload')
 
-if (offlineReloadParam !== null && window.location.pathname === '/lobby') {
+if ((offlineReloadParam !== null || recoveryReloadParam !== null) && window.location.pathname === '/lobby') {
   history.replaceState(null, '', '/lobby')
 }
 
@@ -2642,7 +2643,16 @@ initPwa((applyFn) => {
     `
     document.body.appendChild(banner)
     document.getElementById('pwa-update-apply-btn')?.addEventListener('click', () => {
-      applyFn()
+      const button = document.getElementById('pwa-update-apply-btn') as HTMLButtonElement | null
+      if (button) {
+        button.disabled = true
+        button.textContent = 'Обновяване...'
+        button.style.cursor = 'wait'
+      }
+
+      void Promise.resolve(applyFn()).catch(() => {
+        window.location.reload()
+      })
     })
   }
 })

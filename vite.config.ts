@@ -62,6 +62,7 @@ export default defineConfig({
       },
       injectManifest: {
         globPatterns: ['**/*.{js,css,html,ico,svg,png,webp,mp3,woff2}'],
+        globIgnores: ['index.html'],
         injectionPoint: 'self.__WB_MANIFEST',
       },
       integration: {

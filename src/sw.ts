@@ -1,8 +1,7 @@
 /// <reference lib="webworker" />
 import { precacheAndRoute, cleanupOutdatedCaches } from 'workbox-precaching'
 import { NavigationRoute, registerRoute } from 'workbox-routing'
-import { NetworkFirst, NetworkOnly } from 'workbox-strategies'
-import { CacheableResponsePlugin } from 'workbox-cacheable-response'
+import { NetworkOnly } from 'workbox-strategies'
 
 declare let self: ServiceWorkerGlobalScope & { __WB_MANIFEST: Array<{ url: string; revision: string | null }> }
 
@@ -15,16 +14,14 @@ self.addEventListener('message', (event) => {
 precacheAndRoute(self.__WB_MANIFEST)
 cleanupOutdatedCaches()
 
-// API и uploads — само мрежа, без кеш
+// API and uploads must never be served from an old cache.
 registerRoute(/^\/api\//, new NetworkOnly())
 registerRoute(/^\/uploads\//, new NetworkOnly())
 
-// Navigation requests: опитай мрежата (сървърът връща index.html за всички SPA routes).
-// Ако мрежата се провали (реален offline) — сервирай offline.html от precache.
-const navigationHandler = new NetworkFirst({
-  cacheName: 'navigation-cache',
+// Navigation requests always use the network so a stale app shell cannot outlive a deploy.
+// If the network is truly unavailable, serve the precached offline page.
+const navigationHandler = new NetworkOnly({
   plugins: [
-    new CacheableResponsePlugin({ statuses: [200] }),
     {
       handlerDidError: async () => {
         return (await caches.match('/offline.html')) ?? Response.error()

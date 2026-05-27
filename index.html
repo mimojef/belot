@@ -16,6 +16,48 @@
   </head>
   <body>
     <div id="app" class="notranslate"></div>
+    <script>
+      ;(function () {
+        window.setTimeout(function () {
+          var app = document.getElementById('app')
+          if (!app || app.children.length > 0 || document.getElementById('pika-bootstrap-recovery')) return
+
+          var recovery = document.createElement('div')
+          recovery.id = 'pika-bootstrap-recovery'
+          recovery.style.cssText = [
+            'position:fixed;inset:0;z-index:2147483647',
+            'display:flex;align-items:center;justify-content:center',
+            'padding:24px;background:rgba(0,0,0,0.78)',
+            'font-family:Arial,Helvetica,sans-serif;color:#fff;text-align:center',
+          ].join(';')
+          recovery.innerHTML = [
+            '<div style="width:min(92vw,420px);border:1px solid rgba(212,165,32,0.55);border-radius:10px;background:#080808;padding:24px;box-shadow:0 24px 64px rgba(0,0,0,0.55);">',
+            '<div style="font-size:22px;font-weight:900;color:#f4c95b;margin-bottom:10px;">Нужно е презареждане</div>',
+            '<div style="font-size:14px;line-height:1.45;color:rgba(255,255,255,0.72);margin-bottom:18px;">Играта не успя да зареди новата версия. Натисни бутона, за да изчистим стария кеш и да заредим отново.</div>',
+            '<button id="pika-bootstrap-recovery-btn" style="height:44px;width:100%;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;">Презареди</button>',
+            '</div>',
+          ].join('')
+          document.body.appendChild(recovery)
+
+          document.getElementById('pika-bootstrap-recovery-btn').addEventListener('click', function () {
+            var clearWorkers = 'serviceWorker' in navigator
+              ? navigator.serviceWorker.getRegistrations().then(function (registrations) {
+                return Promise.all(registrations.map(function (registration) { return registration.unregister() }))
+              })
+              : Promise.resolve()
+            var clearCaches = 'caches' in window
+              ? caches.keys().then(function (keys) {
+                return Promise.all(keys.map(function (key) { return caches.delete(key) }))
+              })
+              : Promise.resolve()
+
+            Promise.all([clearWorkers, clearCaches]).finally(function () {
+              window.location.replace('/lobby?recoveryReload=' + Date.now())
+            })
+          })
+        }, 5000)
+      })()
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
