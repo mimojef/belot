@@ -196,7 +196,7 @@ export function renderScoreHud(options: RenderScoreHudOptions): string {
               0 18px 36px rgba(0,0,0,0.28),
               0 0 0 1px rgba(220,163,58,0.22),
               inset 0 1px 0 rgba(255,255,255,0.04);
-            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);backdrop-filter: blur(10px);
           "
         >
           <div

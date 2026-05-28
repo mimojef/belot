@@ -174,6 +174,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onNotifFriendRequestClick?: (friendshipId: string) => void
+  onMarkGiftNotificationRead?: (giftId: string) => Promise<void>
   onFriendshipsLoad?: () => Promise<
     | { ok: true; friendships: FriendshipsSnapshot }
     | { ok: false; message: string }
@@ -393,6 +394,8 @@ type InternalLobbyFlowState = {
   giftModalFriendshipId: string | null
   giftModalFriendName: string
   giftModalErrorText: string | null
+  giftSuccessModal: { amount: number; friendName: string } | null
+  pendingGiftNotifications: Array<{ giftId: string; amount: number; fromDisplayName: string }>
   chatConversations: ChatConversationSnapshot[]
   activeChatFriendshipId: string | null
   chatMessages: ChatMessageSnapshot[]
@@ -581,6 +584,8 @@ function createInitialState(): InternalLobbyFlowState {
     giftModalFriendshipId: null,
     giftModalFriendName: '',
     giftModalErrorText: null,
+    giftSuccessModal: null,
+    pendingGiftNotifications: [],
     chatConversations: [],
     activeChatFriendshipId: null,
     chatMessages: [],
@@ -1558,6 +1563,8 @@ export function createLobbyFlowController(
       giftModalFriendshipId: state.giftModalFriendshipId,
       giftModalFriendName: state.giftModalFriendName,
       giftModalErrorText: state.giftModalErrorText,
+      giftSuccessModal: state.giftSuccessModal,
+      pendingGiftNotifications: state.pendingGiftNotifications,
       chatConversations: state.chatConversations,
       activeChatFriendshipId: state.activeChatFriendshipId,
       chatMessages: state.chatMessages,
@@ -1880,6 +1887,10 @@ export function createLobbyFlowController(
       onGiftCoinsSubmit: (friendshipId, amount) => {
         void submitGiftCoins(friendshipId, amount)
       },
+      onGiftSuccessClose: () => {
+        state.giftSuccessModal = null
+        render()
+      },
       onLowCoinsModalClose: () => {
         state.lowCoinsModalOpen = false
         render()
@@ -1924,6 +1935,12 @@ export function createLobbyFlowController(
       },
       onNotifFriendRequestClick: (friendshipId) => {
         options.onNotifFriendRequestClick?.(friendshipId)
+      },
+      onNotifGiftClick: (giftId, amount, fromDisplayName) => {
+        state.pendingGiftNotifications = state.pendingGiftNotifications.filter((g) => g.giftId !== giftId)
+        state.giftSuccessModal = { amount, friendName: fromDisplayName }
+        void options.onMarkGiftNotificationRead?.(giftId)
+        render()
       },
       onMissionsCardClick: () => {
         void openMissionsPopup()
@@ -3350,9 +3367,11 @@ export function createLobbyFlowController(
       return
     }
 
+    const friendName = state.giftModalFriendName
     state.giftModalFriendshipId = null
     state.giftModalFriendName = ''
     state.giftModalErrorText = null
+    state.giftSuccessModal = { amount, friendName }
     state.profilePopupProfile = result.recipientProfile
     state.friendActionMessageProfileId = result.recipientProfile.profileId
     state.friendActionMessage = `Подаръкът от ${amount} жълтици е изпратен.`
@@ -3881,6 +3900,12 @@ export function createLobbyFlowController(
 
     if (message.type === 'pending_friend_requests') {
       state.pendingFriendRequests = message.requests
+      render()
+      return true
+    }
+
+    if (message.type === 'pending_gift_notifications') {
+      state.pendingGiftNotifications = message.gifts
       render()
       return true
     }

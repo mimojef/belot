@@ -2960,12 +2960,14 @@ async function handleFriendsRequest(
   const friendActionMatch =
     /^\/api\/friends\/([^/]+)\/(accept|reject|remove)$/.exec(pathname)
   const friendGiftMatch = /^\/api\/friends\/([^/]+)\/gift-coins$/.exec(pathname)
+  const giftNotifReadMatch = /^\/api\/gifts\/([^/]+)\/read-notification$/.exec(pathname)
 
   if (
     pathname !== '/api/friends' &&
     pathname !== '/api/friends/request' &&
     friendGiftMatch === null &&
-    friendActionMatch === null
+    friendActionMatch === null &&
+    giftNotifReadMatch === null
   ) {
     return false
   }
@@ -3083,12 +3085,46 @@ async function handleFriendsRequest(
       return true
     }
 
+    const recipientProfileId = result.recipientProfile.profileId
+    if (recipientProfileId) {
+      const recipientConn = Object.values(serverState.connections).find(
+        (c) => c.profileId === recipientProfileId && c.status === 'connected' && c.currentRoomId == null,
+      )
+      const senderName = result.senderProfile.displayName ?? 'Играч'
+      if (recipientConn) {
+        safeSendToConnection(recipientConn.id, {
+          type: 'coins_gifted',
+          amount: result.gift.amount,
+          fromDisplayName: senderName,
+          recipientNewBalance: result.recipientProfile.yellowCoinsBalance ?? 0,
+        })
+      } else {
+        yellowCoinGiftStore.createGiftNotification(
+          result.gift.giftId,
+          recipientProfileId,
+          senderName,
+          result.gift.amount,
+        )
+      }
+    }
+
     sendJsonResponse(res, 200, {
       ok: true,
       gift: result.gift,
       senderProfile: result.senderProfile,
       recipientProfile: result.recipientProfile,
     })
+    return true
+  }
+
+  if (giftNotifReadMatch !== null && req.method === 'POST') {
+    const giftId = decodeURIComponent(giftNotifReadMatch[1]).trim()
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(giftId)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден gift ID.' })
+      return true
+    }
+    yellowCoinGiftStore.markGiftNotificationRead(giftId, profileId)
+    sendJsonResponse(res, 200, { ok: true })
     return true
   }
 
@@ -4051,6 +4087,14 @@ wsServer.on('connection', (socket, request) => {
           fromDisplayName: r.profile.displayName,
           fromAvatarUrl: r.profile.avatarUrl,
         })),
+      })
+    }
+
+    const pendingGifts = yellowCoinGiftStore.getPendingGiftNotifications(connection.profileId)
+    if (pendingGifts.length > 0) {
+      sendJsonMessage(socket, {
+        type: 'pending_gift_notifications',
+        gifts: pendingGifts,
       })
     }
   }

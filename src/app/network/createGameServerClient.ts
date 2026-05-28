@@ -801,6 +801,18 @@ export type PendingFriendRequestsMessage = {
   }>
 }
 
+export type CoinsGiftedMessage = {
+  type: 'coins_gifted'
+  amount: number
+  fromDisplayName: string
+  recipientNewBalance: number
+}
+
+export type PendingGiftNotificationsMessage = {
+  type: 'pending_gift_notifications'
+  gifts: Array<{ giftId: string; amount: number; fromDisplayName: string }>
+}
+
 export type ServerMessage =
   | ConnectedMessage
   | PongMessage
@@ -839,6 +851,8 @@ export type ServerMessage =
   | FriendRequestReceivedMessage
   | FriendRequestAcceptedMessage
   | PendingFriendRequestsMessage
+  | CoinsGiftedMessage
+  | PendingGiftNotificationsMessage
 
 type CreateGameServerClientOptions = {
   url?: string

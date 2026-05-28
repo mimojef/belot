@@ -1067,7 +1067,7 @@ export function renderPlayerProfilePopup(
           position:absolute;
           inset:0;
           background:rgba(0, 0, 0, 0.72);
-          backdrop-filter:blur(4px);
+          -webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
           animation:${options.skipAnimation ? 'none' : 'belot-player-profile-backdrop-in 140ms ease both'};
         "
       ></div>

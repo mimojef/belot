@@ -19,6 +19,12 @@ export type YellowCoinGiftSnapshot = {
   createdAt: string
 }
 
+export type PendingGiftNotification = {
+  giftId: string
+  amount: number
+  fromDisplayName: string
+}
+
 export type YellowCoinGiftStore = {
   sendGift: (
     senderProfileId: ProfileId,
@@ -32,6 +38,9 @@ export type YellowCoinGiftStore = {
         recipientProfile: PlayerPublicProfileSnapshot
       }
     | { ok: false; message: string }
+  createGiftNotification: (giftId: string, recipientProfileId: ProfileId, fromDisplayName: string, amount: number) => void
+  getPendingGiftNotifications: (profileId: ProfileId) => PendingGiftNotification[]
+  markGiftNotificationRead: (giftId: string, profileId: ProfileId) => void
   close: () => void
 }
 
@@ -102,6 +111,35 @@ export async function createYellowCoinGiftStore(
 
   database.exec('PRAGMA foreign_keys = ON;')
   database.exec('PRAGMA journal_mode = WAL;')
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS gift_notification_log (
+      gift_id TEXT PRIMARY KEY,
+      recipient_profile_id TEXT NOT NULL,
+      from_display_name TEXT NOT NULL,
+      amount INTEGER NOT NULL,
+      read_at TEXT DEFAULT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+  `)
+
+  const insertGiftNotificationStatement = database.prepare(`
+    INSERT OR IGNORE INTO gift_notification_log (gift_id, recipient_profile_id, from_display_name, amount)
+    VALUES (?, ?, ?, ?);
+  `)
+
+  const selectPendingGiftNotificationsStatement = database.prepare(`
+    SELECT gift_id, amount, from_display_name
+    FROM gift_notification_log
+    WHERE recipient_profile_id = ? AND read_at IS NULL
+    ORDER BY created_at ASC;
+  `)
+
+  const markGiftNotificationReadStatement = database.prepare(`
+    UPDATE gift_notification_log
+    SET read_at = CURRENT_TIMESTAMP
+    WHERE gift_id = ? AND recipient_profile_id = ?;
+  `)
 
   const selectAcceptedFriendshipStatement = database.prepare(`
     SELECT
@@ -323,12 +361,32 @@ export async function createYellowCoinGiftStore(
     }
   }
 
+  function createGiftNotification(giftId: string, recipientProfileId: ProfileId, fromDisplayName: string, amount: number): void {
+    insertGiftNotificationStatement.run(giftId, recipientProfileId, fromDisplayName, amount)
+  }
+
+  function getPendingGiftNotifications(profileId: ProfileId): PendingGiftNotification[] {
+    const rows = selectPendingGiftNotificationsStatement.all(profileId) as Array<{
+      gift_id: string
+      amount: number
+      from_display_name: string
+    }>
+    return rows.map((r) => ({ giftId: r.gift_id, amount: r.amount, fromDisplayName: r.from_display_name }))
+  }
+
+  function markGiftNotificationRead(giftId: string, profileId: ProfileId): void {
+    markGiftNotificationReadStatement.run(giftId, profileId)
+  }
+
   function close(): void {
     database.close()
   }
 
   return {
     sendGift,
+    createGiftNotification,
+    getPendingGiftNotifications,
+    markGiftNotificationRead,
     close,
   }
 }

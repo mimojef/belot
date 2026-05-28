@@ -1325,7 +1325,7 @@ export function createActiveRoomFlowController(
           grid-template-columns:${isPhoneLayout ? 'repeat(4,52px)' : 'repeat(7,52px)'};
           gap:4px;
           box-shadow:0 8px 32px rgba(0,0,0,0.5);
-          backdrop-filter:blur(12px);
+          -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
         "
       >
         ${rows.join('')}
@@ -1357,7 +1357,7 @@ export function createActiveRoomFlowController(
             box-shadow:0 0 12px rgba(212,165,32,0.25), 0 6px 20px rgba(0,0,0,0.50);
             cursor:pointer;
             display:flex;align-items:center;justify-content:center;
-            backdrop-filter:blur(8px);
+            -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
           "
         >
           <img src="/assets/animated-emoji/preview/preview-emoji-08.png" alt="" style="width:${isPhoneLayout ? '30px' : '56px'};height:${isPhoneLayout ? '30px' : '56px'};object-fit:contain;">

@@ -151,6 +151,8 @@ export type LobbyScreenState = {
   giftModalFriendshipId: string | null
   giftModalFriendName: string
   giftModalErrorText: string | null
+  giftSuccessModal: { amount: number; friendName: string } | null
+  pendingGiftNotifications: Array<{ giftId: string; amount: number; fromDisplayName: string }>
   chatConversations: ChatConversationSnapshot[]
   activeChatFriendshipId: string | null
   chatMessages: ChatMessageSnapshot[]
@@ -294,6 +296,7 @@ export type RenderLobbyScreenOptions = {
   onLikeClick: (profileId: string) => void
   onGiftCoinsClose: () => void
   onGiftCoinsSubmit: (friendshipId: string, amount: number) => void
+  onGiftSuccessClose: () => void
   onLowCoinsModalClose: () => void
   onLowCoinsShopClick: () => void
   onAuthModalClose: () => void
@@ -305,6 +308,7 @@ export type RenderLobbyScreenOptions = {
   onBellClick: () => void
   onNotificationMissionsClick: () => void
   onNotifFriendRequestClick: (friendshipId: string) => void
+  onNotifGiftClick: (giftId: string, amount: number, fromDisplayName: string) => void
   onMissionsCardClick: () => void
   onMissionsPopupClose: () => void
   onMissionClaimClick: (missionId: string) => void
@@ -658,7 +662,7 @@ function renderAuthModal(state: LobbyScreenState): string {
 
   return `
     <div data-lobby-auth-modal-root="1" style="position:fixed;inset:0;z-index:13000;display:flex;align-items:center;justify-content:center;padding:24px;">
-      <div data-lobby-auth-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.74);backdrop-filter:blur(4px);"></div>
+      <div data-lobby-auth-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.74);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
       <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,480px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
         <button type="button" data-lobby-auth-modal-close="1" aria-label="Затвори" style="position:absolute;right:4px;top:4px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
         <div style="display:grid;gap:14px;">
@@ -703,7 +707,7 @@ function renderProfileEditModal(state: LobbyScreenState): string {
 
   return `
     <div data-lobby-profile-editor-root="1" style="position:fixed;inset:0;z-index:13500;display:flex;align-items:center;justify-content:center;padding:24px;">
-      <div data-lobby-profile-editor-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.76);backdrop-filter:blur(4px);"></div>
+      <div data-lobby-profile-editor-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
       <div role="dialog" aria-modal="true" class="gold-scrollbar" style="position:relative;width:min(92vw,560px);max-height:90vh;overflow-y:auto;border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
         <button type="button" data-lobby-profile-editor-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
         <form data-lobby-profile-editor-form="1" style="display:grid;gap:16px;">
@@ -856,7 +860,7 @@ function renderChangePasswordModal(state: LobbyScreenState): string {
 
   return `
     <div data-change-password-modal-root="1" style="position:fixed;inset:0;z-index:14000;display:flex;align-items:center;justify-content:center;padding:24px;">
-      <div data-change-password-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.72);backdrop-filter:blur(4px);"></div>
+      <div data-change-password-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.72);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
       <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,400px);border-radius:12px;border:2px solid rgba(212,165,32,0.65);background:linear-gradient(180deg,rgba(32,32,32,0.99) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.52);padding:24px;">
         <button type="button" data-change-password-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
         <div style="font-size:20px;font-weight:900;color:#f8fafc;margin-bottom:18px;">Смяна на парола</div>
@@ -882,7 +886,7 @@ function renderLowCoinsModal(state: LobbyScreenState): string {
 
   return `
     <div data-lobby-low-coins-modal-root="1" style="position:fixed;inset:0;z-index:13700;display:flex;align-items:center;justify-content:center;padding:24px;">
-      <div data-lobby-low-coins-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.80);backdrop-filter:blur(5px);"></div>
+      <div data-lobby-low-coins-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.80);-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px);"></div>
       <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,460px);border-radius:12px;border:2px solid rgba(212,165,32,0.65);background:linear-gradient(180deg,rgba(28,28,28,0.99) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 40px 90px rgba(0,0,0,0.55);padding:32px 28px 26px;">
         <button type="button" data-lobby-low-coins-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
         <div style="text-align:center;margin-bottom:16px;"><img src="/assets/lobby/coins-popup.png" alt="" style="width:80px;height:80px;object-fit:contain;display:inline-block;"></div>
@@ -910,7 +914,7 @@ function renderGiftCoinsModal(state: LobbyScreenState): string {
 
   return `
     <div data-lobby-gift-modal-root="1" style="position:fixed;inset:0;z-index:13600;display:flex;align-items:center;justify-content:center;padding:24px;">
-      <div data-lobby-gift-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.76);backdrop-filter:blur(4px);"></div>
+      <div data-lobby-gift-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
       <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,430px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
         <button type="button" data-lobby-gift-modal-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
         <form data-lobby-gift-form="${escapeHtml(state.giftModalFriendshipId)}" style="display:grid;gap:14px;">
@@ -928,6 +932,38 @@ function renderGiftCoinsModal(state: LobbyScreenState): string {
             <button type="submit" style="height:42px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;">Изпрати</button>
           </div>
         </form>
+      </div>
+    </div>
+  `
+}
+
+function renderGiftSuccessModal(state: LobbyScreenState): string {
+  if (!state.giftSuccessModal) return ''
+  const { amount, friendName } = state.giftSuccessModal
+  return `
+    <div data-lobby-gift-success-root="1" style="position:fixed;inset:0;z-index:13600;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div style="position:absolute;inset:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,400px);border-radius:12px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:32px 28px;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center;">
+        <div style="width:56px;height:56px;border-radius:999px;background:linear-gradient(180deg,rgba(212,165,32,0.18) 0%,rgba(212,165,32,0.08) 100%);border:2px solid rgba(212,165,32,0.50);display:flex;align-items:center;justify-content:center;font-size:28px;">🪙</div>
+        <div>
+          <div style="font-size:20px;font-weight:900;color:#f8fafc;line-height:1.2;">Подарихте ${escapeHtml(String(amount.toLocaleString('bg-BG')))} жълтици</div>
+          <div style="margin-top:8px;font-size:14px;font-weight:700;color:rgba(255,255,255,0.62);">на ${escapeHtml(friendName)}</div>
+        </div>
+        <button
+          type="button"
+          data-lobby-gift-success-ok="1"
+          style="
+            width:100%;
+            height:44px;
+            border:0;
+            border-radius:8px;
+            background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+            color:#080808;
+            font-size:15px;
+            font-weight:900;
+            cursor:pointer;
+          "
+        >OK</button>
       </div>
     </div>
   `
@@ -1189,7 +1225,7 @@ function renderNav(state: LobbyScreenState): string {
             color:rgba(255,255,255,0.65); position:relative;
           ">
             <img src="/assets/lobby/nav-icon-preview/nav-notifications-white.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain;">
-            ${(state.dailyMissionsUnclaimedCount + state.pendingFriendRequests.length + getUnclaimedDailyRewardsBadgeCount(state)) > 0 ? `<span style="
+            ${(state.dailyMissionsUnclaimedCount + state.pendingFriendRequests.length + getUnclaimedDailyRewardsBadgeCount(state) + state.pendingGiftNotifications.length) > 0 ? `<span style="
               position:absolute; top:2px; right:0px;
               min-width:18px; height:18px; border-radius:9px;
               background:#ef4444; border:1.5px solid #0a0a0a;
@@ -1198,7 +1234,7 @@ function renderNav(state: LobbyScreenState): string {
               padding:0 4px; box-sizing:border-box;
               font-family:Inter,system-ui,sans-serif;
               pointer-events:none;
-            ">${state.dailyMissionsUnclaimedCount + state.pendingFriendRequests.length + getUnclaimedDailyRewardsBadgeCount(state)}</span>` : ''}
+            ">${state.dailyMissionsUnclaimedCount + state.pendingFriendRequests.length + getUnclaimedDailyRewardsBadgeCount(state) + state.pendingGiftNotifications.length}</span>` : ''}
           </button>
           <button data-lobby-nav-logout="1" style="
             display:flex; align-items:center; gap:8px;
@@ -1724,7 +1760,7 @@ function renderMissionsPopup(state: LobbyScreenState): string {
 
   return `
     <div data-missions-popup-root="1" style="position:fixed;inset:0;z-index:14000;display:flex;align-items:center;justify-content:center;padding:24px;">
-      <div data-missions-popup-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.76);backdrop-filter:blur(4px);"></div>
+      <div data-missions-popup-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
       <div role="dialog" aria-modal="true" class="gold-scrollbar" style="position:relative;width:min(92vw,520px);max-height:80vh;overflow-y:auto;border-radius:12px;border:2px solid rgba(96,165,250,0.6);background:linear-gradient(180deg,rgba(20,20,32,0.99) 0%,rgba(8,8,16,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.6);padding:24px;">
         <button type="button" data-missions-popup-close="1" aria-label="Затвори" style="position:absolute;right:10px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
@@ -1750,7 +1786,8 @@ function renderNotificationsDropdown(state: LobbyScreenState): string {
   const hasMissions = state.dailyMissionsUnclaimedCount > 0
   const hasFriendRequests = state.pendingFriendRequests.length > 0
   const hasDailyRewards = getUnclaimedDailyRewardsBadgeCount(state) > 0
-  const hasAny = hasMissions || hasFriendRequests || hasDailyRewards
+  const hasGiftNotifications = state.pendingGiftNotifications.length > 0
+  const hasAny = hasMissions || hasFriendRequests || hasDailyRewards || hasGiftNotifications
   return `
     <div data-notifications-backdrop="1" style="position:fixed;inset:0;z-index:11000;" aria-hidden="true"></div>
     <div style="
@@ -1829,6 +1866,26 @@ function renderNotificationsDropdown(state: LobbyScreenState): string {
           </div>
         </button>
       `).join('') : ''}
+      ${hasGiftNotifications ? state.pendingGiftNotifications.map((g) => `
+        <button data-notif-gift="${escapeHtml(g.giftId)}" type="button" style="
+          width:100%; background:none; border:none; cursor:pointer;
+          display:flex; align-items:center; gap:12px;
+          padding:14px 16px; text-align:left;
+          border-bottom:1px solid rgba(255,255,255,0.06);
+          transition:background 0.15s;
+        " onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background='none'">
+          <div style="
+            width:36px; height:36px; border-radius:50%; flex-shrink:0;
+            background:rgba(212,165,32,0.12); border:1.5px solid rgba(212,165,32,0.35);
+            display:flex; align-items:center; justify-content:center;
+            font-size:18px;
+          ">🪙</div>
+          <div>
+            <div style="font-size:13px; font-weight:700; color:#f8fafc; margin-bottom:2px;">Имате подарени жълтици</div>
+            <div style="font-size:12px; color:rgba(255,255,255,0.55); line-height:1.4;">${escapeHtml(g.fromDisplayName)} ви подари ${g.amount.toLocaleString('bg-BG')} жълтици</div>
+          </div>
+        </button>
+      `).join('') : ''}
       ${!hasAny ? `
         <div style="padding:24px 16px; text-align:center; color:rgba(255,255,255,0.35); font-size:13px;">
           Няма нови известия
@@ -1845,6 +1902,7 @@ function syncNotificationsDropdown(
     onMissionsClick: () => void
     onDailyRewardsClick: () => void
     onFriendRequestClick: (friendshipId: string) => void
+    onGiftNotificationClick: (giftId: string, amount: number, fromDisplayName: string) => void
   },
 ): void {
   if (!state.notificationsOpen) {
@@ -1874,6 +1932,17 @@ function syncNotificationsDropdown(
   for (const btn of Array.from(notificationsDropdownRootEl.querySelectorAll<HTMLButtonElement>('[data-notif-friend-request]'))) {
     const id = btn.getAttribute('data-notif-friend-request')!
     btn.addEventListener('click', () => { callbacks.onFriendRequestClick(id); callbacks.onClose() })
+  }
+
+  for (const btn of Array.from(notificationsDropdownRootEl.querySelectorAll<HTMLButtonElement>('[data-notif-gift]'))) {
+    const giftId = btn.getAttribute('data-notif-gift')!
+    const gift = state.pendingGiftNotifications.find((g) => g.giftId === giftId)
+    if (gift) {
+      btn.addEventListener('click', () => {
+        callbacks.onClose()
+        callbacks.onGiftNotificationClick(gift.giftId, gift.amount, gift.fromDisplayName)
+      })
+    }
   }
 }
 
@@ -2121,7 +2190,7 @@ function renderBottomSection(
 }
 
 function renderMobileMenu(state: LobbyScreenState): string {
-  const pendingCount = state.dailyMissionsUnclaimedCount + state.pendingFriendRequests.length + getUnclaimedDailyRewardsBadgeCount(state)
+  const pendingCount = state.dailyMissionsUnclaimedCount + state.pendingFriendRequests.length + getUnclaimedDailyRewardsBadgeCount(state) + state.pendingGiftNotifications.length
   const unreadChatCount = state.chatConversations.filter((conversation) => conversation.unreadCount > 0).length
 
   return `
@@ -5053,7 +5122,7 @@ function renderBlockedPlayersPopup(state: LobbyScreenState): string {
     >
       <div
         data-blocked-players-popup-backdrop="1"
-        style="position:absolute;inset:0;background:rgba(0,0,0,0.72);backdrop-filter:blur(4px);"
+        style="position:absolute;inset:0;background:rgba(0,0,0,0.72);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"
       ></div>
       <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;">
         <div
@@ -5112,7 +5181,7 @@ function renderBlockLimitPopup(state: LobbyScreenState): string {
     >
       <div
         data-block-limit-popup-backdrop="1"
-        style="position:absolute;inset:0;background:rgba(0,0,0,0.72);backdrop-filter:blur(4px);"
+        style="position:absolute;inset:0;background:rgba(0,0,0,0.72);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"
       ></div>
       <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;">
         <div style="
@@ -5169,7 +5238,7 @@ function renderNoPlayersModal(state: LobbyScreenState): string {
     >
       <div
         data-no-players-modal-backdrop="1"
-        style="position:absolute;inset:0;background:rgba(0,0,0,0.80);backdrop-filter:blur(5px);"
+        style="position:absolute;inset:0;background:rgba(0,0,0,0.80);-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px);"
       ></div>
       <div role="dialog" aria-modal="true" style="
         position:relative;
@@ -5275,6 +5344,7 @@ export function renderLobbyScreen(
       ${renderSupportPopup(state)}
     </div>
     ${renderGiftCoinsModal(state)}
+    ${renderGiftSuccessModal(state)}
   ` : `
     <div
       ${mobileLayoutAttribute}
@@ -5461,6 +5531,7 @@ export function renderLobbyScreen(
       ${renderSupportPopup(state)}
     </div>
     ${renderGiftCoinsModal(state)}
+    ${renderGiftSuccessModal(state)}
   `
 
   const mobileMenuEl = root.querySelector<HTMLDetailsElement>('[data-lobby-mobile-menu="1"]')
@@ -6180,6 +6251,7 @@ export function renderLobbyScreen(
       options.onDailyRewardsOpen()
     },
     onFriendRequestClick: options.onNotifFriendRequestClick,
+    onGiftNotificationClick: options.onNotifGiftClick,
   })
 
   syncMissionsPopup(state, {
@@ -6245,6 +6317,10 @@ export function renderLobbyScreen(
       }
     })
   })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-gift-success-ok="1"]')
+    ?.addEventListener('click', options.onGiftSuccessClose)
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-profile-editor-close="1"]')

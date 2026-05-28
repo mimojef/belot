@@ -2276,6 +2276,16 @@ lobby = createLobbyFlowController({
       fromAvatarUrl: req.fromAvatarUrl,
     })
   },
+  onMarkGiftNotificationRead: async (giftId) => {
+    try {
+      await fetch(`${getApiBaseUrl()}/api/gifts/${encodeURIComponent(giftId)}/read-notification`, {
+        method: 'POST',
+        credentials: 'include',
+      })
+    } catch {
+      // best-effort — notification already removed from UI
+    }
+  },
 })
 
 const activeRoom = createActiveRoomFlowController({
@@ -2399,6 +2409,37 @@ function showSessionDisplacedOverlay(): void {
 function removeLandingOverlay(): void {
   document.getElementById('pwa-landing-overlay')?.remove()
   document.body.style.overflow = ''
+}
+
+function showCoinsGiftedPopup(amount: number, fromDisplayName: string): void {
+  const existing = document.getElementById('coins-gifted-popup')
+  existing?.remove()
+
+  const host = document.createElement('div')
+  host.id = 'coins-gifted-popup'
+  host.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,0.72);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);font-family:Arial,Helvetica,sans-serif;'
+
+  host.innerHTML = `
+    <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,400px);border-radius:12px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:32px 28px;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center;">
+      <div style="width:56px;height:56px;border-radius:999px;background:linear-gradient(180deg,rgba(212,165,32,0.18) 0%,rgba(212,165,32,0.08) 100%);border:2px solid rgba(212,165,32,0.50);display:flex;align-items:center;justify-content:center;font-size:28px;">🪙</div>
+      <div>
+        <div style="font-size:20px;font-weight:900;color:#f8fafc;line-height:1.2;">${escapeHtmlMain(fromDisplayName)} ви подари</div>
+        <div style="font-size:26px;font-weight:900;color:#f4c95b;margin-top:6px;">${amount.toLocaleString('bg-BG')} жълтици</div>
+      </div>
+      <button id="coins-gifted-ok" type="button" style="width:100%;height:44px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;font-family:inherit;">OK</button>
+    </div>
+  `
+
+  document.body.appendChild(host)
+  host.querySelector<HTMLButtonElement>('#coins-gifted-ok')?.addEventListener('click', () => host.remove())
+}
+
+function escapeHtmlMain(value: string): string {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
 }
 
 function showSessionInGameOverlay(roomId: string, reconnectToken: string): void {
@@ -2534,6 +2575,21 @@ client = createGameServerClient({
         fromDisplayName: message.fromDisplayName,
         fromAvatarUrl: message.fromAvatarUrl,
       })
+      return
+    }
+
+    if (message.type === 'coins_gifted') {
+      if (currentAuthSession !== null) {
+        currentAuthSession = {
+          ...currentAuthSession,
+          profile: {
+            ...currentAuthSession.profile,
+            yellowCoinsBalance: message.recipientNewBalance,
+          },
+        }
+        syncLobbyWithAuthSession()
+      }
+      showCoinsGiftedPopup(message.amount, message.fromDisplayName)
       return
     }
 

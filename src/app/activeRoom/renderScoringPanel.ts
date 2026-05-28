@@ -847,7 +847,7 @@ function renderScoringPanelHtml(
         border-radius:14px;
         overflow:hidden;
         box-shadow:0 18px 40px rgba(0,0,0,0.28), 0 0 0 1px rgba(244,182,58,0.28);
-        backdrop-filter:blur(3px);
+        -webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);
       "
     >
       <div

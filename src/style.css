@@ -100,6 +100,18 @@ body::before {
   -ms-user-select: none;
 }
 
+/* iOS Safari: prevent page zoom when focusing inputs with font-size < 16px */
+@supports (-webkit-touch-callout: none) {
+  #app input,
+  #app textarea,
+  #app select,
+  body input,
+  body textarea,
+  body select {
+    font-size: max(16px, 1em) !important;
+  }
+}
+
 @media (hover: none) and (pointer: coarse) {
   #app * {
     -webkit-tap-highlight-color: transparent;
