@@ -186,11 +186,11 @@ function renderGameStats(profile: PlayerPublicProfileSnapshot): string {
         overflow:hidden;
       "
     >
-      ${statItem('Изиграни игри', formatInteger(completedGames))}
+      ${statItem('Игри', formatInteger(completedGames))}
       ${divider}
-      ${statItem('Спечелени игри', formatInteger(wonGames), '#fde68a')}
+      ${statItem('Победи', formatInteger(wonGames), '#fde68a')}
       ${divider}
-      ${statItem('Успеваемост', escapeHtml(successRate), '#86efac')}
+      ${statItem('Успех', escapeHtml(successRate), '#86efac')}
     </div>
   `
 }
@@ -233,9 +233,9 @@ function renderRatingInline(profile: PlayerPublicProfileSnapshot): string {
         align-items:center;
         gap:8px;
         min-width:0;
-        color:rgba(226,232,240,0.78);
-        font-size:14px;
-        font-weight:800;
+        color:rgba(148,163,184,0.80);
+        font-size:13px;
+        font-weight:400;
         white-space:nowrap;
       "
     >
@@ -244,8 +244,8 @@ function renderRatingInline(profile: PlayerPublicProfileSnapshot): string {
         style="width:1px;height:18px;background:rgba(212,165,32,0.45);display:inline-block;flex:0 0 auto;"
       ></span>
       <span style="overflow:hidden;text-overflow:ellipsis;">
-        Оценка: <span style="color:#f8fafc;font-weight:900;">${formatAverageRating(profile.averageRating)}</span>
-        от <span style="color:#fde68a;font-weight:900;">${formatNullableText(profile.totalRatingsCount)}</span>
+        Оценка: <span style="color:#d4a520;font-weight:400;">${formatAverageRating(profile.averageRating)}</span>
+        от <span style="color:#fde68a;font-weight:400;">${formatNullableText(profile.totalRatingsCount)}</span>
       </span>
     </div>
   `
@@ -500,6 +500,23 @@ function renderProfileContent(
             ${renderAvatar(profile, seat)}
           </div>
           ${renderLevelBadge(profile.level)}
+          ${friendshipAction?.giftFriendshipId ? `
+            <div style="
+              position:absolute;
+              bottom:-11px;
+              left:50%;
+              transform:translateX(-50%);
+              background:linear-gradient(180deg,#22c55e 0%,#16a34a 100%);
+              color:#fff;
+              font-size:11px;
+              font-weight:900;
+              white-space:nowrap;
+              padding:3px 10px;
+              border-radius:999px;
+              border:2px solid #0a0a0a;
+              letter-spacing:0.3px;
+            ">✓ Приятел</div>
+          ` : ''}
         </div>
 
         <div
@@ -547,13 +564,11 @@ function renderProfileContent(
             ${renderCoinBalanceInline(profile)}
           </div>
 
-          ${canEdit ? `
-            <div data-player-profile-rating="1" style="display:flex;align-items:center;gap:6px;">
-              <div style="font-size:12px;font-weight:800;letter-spacing:0.10em;text-transform:uppercase;color:rgba(148,163,184,0.80);">Рейтинг</div>
-              <div style="font-size:20px;font-weight:900;color:#d4a520;">${formatNullableText(profile.skillRating)}</div>
-              ${renderRatingInline(profile)}
-            </div>
-          ` : ''}
+          <div data-player-profile-rating="1" style="display:flex;align-items:center;gap:6px;">
+            <div style="font-size:13px;font-weight:400;color:rgba(148,163,184,0.80);">Рейтинг:</div>
+            <div style="font-size:13px;font-weight:400;color:#d4a520;">${formatNullableText(profile.skillRating)}</div>
+            ${renderRatingInline(profile)}
+          </div>
 
           ${!canEdit && !isOwnProfile ? `
             <div data-player-profile-actions="1" style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;">
@@ -581,7 +596,7 @@ function renderProfileContent(
                     <span style="color:#ef4444;font-size:22px;line-height:1;">♥</span>${profile.hasLikedByMe ? 'Харесан' : 'Харесай'}
                   </button>
                 ` : ''}
-                ${friendshipAction ? `
+                ${friendshipAction && !friendshipAction.giftFriendshipId ? `
                   <button
                     type="button"
                     data-player-profile-friend-request="${escapeHtml(friendshipAction.profileId)}"
@@ -600,7 +615,8 @@ function renderProfileContent(
                   >
                     ${escapeHtml(friendshipAction.label)}
                   </button>
-                  ${friendshipAction.giftFriendshipId ? `
+                ` : ''}
+                ${friendshipAction?.giftFriendshipId ? `
                     <button
                       type="button"
                       data-player-profile-gift-coins="${escapeHtml(friendshipAction.giftFriendshipId)}"
@@ -619,7 +635,6 @@ function renderProfileContent(
                       Подари жълтици
                     </button>
                   ` : ''}
-                ` : ''}
                 ${profile.profileId && profile.isBlockedByMe !== null ? `
                   <button
                     type="button"
@@ -661,7 +676,7 @@ function renderProfileContent(
             ${typeof profile.likesCount === 'number' ? `
             <div data-player-profile-stat-divider="1" style="width:1px;align-self:stretch;background:rgba(212,165,32,0.45);"></div>
             <div data-player-profile-stat="1" style="font-size:13px;color:rgba(255,255,255,0.55);padding:0 12px;">
-              <span style="color:#ef4444;font-size:22px;line-height:1;vertical-align:middle;">♥</span> Харесвания: <span data-player-profile-stat-value="1" style="color:#fde68a;font-weight:700;">${profile.likesCount.toLocaleString('bg-BG')}</span>
+              <span style="color:#ef4444;font-size:22px;line-height:1;vertical-align:middle;">♥</span> Харесан: <span data-player-profile-stat-value="1" style="color:#fde68a;font-weight:700;">${profile.likesCount.toLocaleString('bg-BG')}</span>
             </div>
             ` : ''}
           </div>
@@ -822,10 +837,6 @@ export function renderPlayerProfilePopup(
         )
       : renderEmptyContent(options.seat)
 
-  const safeTitle = escapeHtml(
-    options.profile?.displayName?.trim() || formatSeatLabel(options.seat)
-  )
-
   return `
     <style>
       [data-player-profile-like]:not([disabled]):hover {
@@ -920,8 +931,8 @@ export function renderPlayerProfilePopup(
 
         [data-player-profile-rating="1"] {
           order:3;
-          grid-column:2;
-          flex-wrap:wrap;
+          grid-column:1 / -1;
+          flex-wrap:nowrap;
         }
 
         [data-player-profile-inline-rating="1"] {
@@ -931,12 +942,25 @@ export function renderPlayerProfilePopup(
         }
 
         [data-player-profile-inline-rating-divider="1"] {
-          display:none !important;
+          display:inline-block !important;
         }
 
         [data-player-profile-actions="1"] {
           order:4;
-          grid-column:2;
+          grid-column:1 / -1;
+        }
+
+        [data-player-profile-actions="1"] > div:first-child {
+          width:100%;
+          flex-wrap:nowrap !important;
+        }
+
+        [data-player-profile-actions="1"] button {
+          flex:1 !important;
+          min-width:0 !important;
+          padding:0 8px !important;
+          font-size:12px !important;
+          justify-content:center;
         }
 
         [data-player-profile-stat="1"] {
@@ -966,7 +990,7 @@ export function renderPlayerProfilePopup(
         }
 
         [data-player-profile-metric-grid="1"] {
-          gap:8px !important;
+          display:none !important;
         }
 
         [data-player-profile-game-stats="1"] {
@@ -1011,6 +1035,19 @@ export function renderPlayerProfilePopup(
         [data-player-profile-rating-count="1"] {
           font-size:12px !important;
           line-height:1.1 !important;
+        }
+
+        [data-player-profile-popup-card="1"] {
+          position:fixed !important;
+          inset:0 !important;
+          width:100% !important;
+          max-height:100% !important;
+          height:100% !important;
+          border-radius:0 !important;
+          border-left:none !important;
+          border-right:none !important;
+          border-top:none !important;
+          border-bottom:none !important;
         }
       }
     </style>
@@ -1093,17 +1130,6 @@ export function renderPlayerProfilePopup(
                 Профил на играч
               </div>
 
-              <div
-                style="
-                  font-size:26px;
-                  font-weight:900;
-                  line-height:1.08;
-                  color:#f8fafc;
-                  word-break:break-word;
-                "
-              >
-                ${safeTitle}
-              </div>
             </div>
 
             <button

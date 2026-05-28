@@ -6,6 +6,7 @@ import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffe
 import {
   renderLobbyScreen,
   syncProfilePopup,
+  clearProfileEditorPendingState,
   type AvatarCropSelection,
   type LobbyAuthModalMode,
   type LobbyScreenState,
@@ -1690,6 +1691,7 @@ export function createLobbyFlowController(
         state.profileEditorErrorText = null
         state.profileNameChangeErrorText = null
         state.profileNameChangeSuccessAmount = null
+        clearProfileEditorPendingState()
         render()
       },
       onProfileEditorFileError: (message) => {
@@ -2262,6 +2264,7 @@ export function createLobbyFlowController(
     state.profileEditorOpen = false
     state.profileEditorErrorText = null
     state.profilePopupOpen = true
+    clearProfileEditorPendingState()
     render()
   }
 

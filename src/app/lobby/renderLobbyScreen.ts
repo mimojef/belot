@@ -40,6 +40,41 @@ const MISSION_TYPE_LABELS: Record<string, string> = {
 
 export type LobbyAuthModalMode = 'closed' | 'cta' | 'login' | 'register'
 
+let _persistentAvatarInput: HTMLInputElement | null = null
+let _persistentGalleryInput: HTMLInputElement | null = null
+let _pendingGalleryItems: Array<{ file: File; crop: AvatarCropSelection; dataUrl: string }> = []
+let _pendingAvatarFile: File | null = null
+
+export function clearProfileEditorPendingState(): void {
+  _pendingGalleryItems = []
+  _pendingAvatarFile = null
+  if (_persistentAvatarInput) _persistentAvatarInput.value = ''
+  if (_persistentGalleryInput) _persistentGalleryInput.value = ''
+}
+
+function ensurePersistentAvatarInput(): HTMLInputElement {
+  if (!_persistentAvatarInput || !document.body.contains(_persistentAvatarInput)) {
+    _persistentAvatarInput = document.createElement('input')
+    _persistentAvatarInput.type = 'file'
+    _persistentAvatarInput.name = 'avatarFile'
+    _persistentAvatarInput.accept = 'image/*'
+    _persistentAvatarInput.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;pointer-events:none;'
+    document.body.appendChild(_persistentAvatarInput)
+  }
+  return _persistentAvatarInput
+}
+
+function ensurePersistentGalleryInput(): HTMLInputElement {
+  if (!_persistentGalleryInput || !document.body.contains(_persistentGalleryInput)) {
+    _persistentGalleryInput = document.createElement('input')
+    _persistentGalleryInput.type = 'file'
+    _persistentGalleryInput.accept = 'image/*'
+    _persistentGalleryInput.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;pointer-events:none;'
+    document.body.appendChild(_persistentGalleryInput)
+  }
+  return _persistentGalleryInput
+}
+
 export type AvatarCropSelection = {
   x: number
   y: number
@@ -5228,7 +5263,6 @@ export function renderLobbyScreen(
       ${renderLowCoinsModal(state)}
       ${renderProfileEditModal(state)}
       ${renderChangePasswordModal(state)}
-      ${renderGiftCoinsModal(state)}
       ${renderAuthModal(state)}
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
@@ -5240,6 +5274,7 @@ export function renderLobbyScreen(
       ${renderNoPlayersModal(state)}
       ${renderSupportPopup(state)}
     </div>
+    ${renderGiftCoinsModal(state)}
   ` : `
     <div
       ${mobileLayoutAttribute}
@@ -5414,7 +5449,6 @@ export function renderLobbyScreen(
       ${renderLowCoinsModal(state)}
       ${renderProfileEditModal(state)}
       ${renderChangePasswordModal(state)}
-      ${renderGiftCoinsModal(state)}
       ${renderAuthModal(state)}
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
@@ -5426,6 +5460,7 @@ export function renderLobbyScreen(
       ${renderNoPlayersModal(state)}
       ${renderSupportPopup(state)}
     </div>
+    ${renderGiftCoinsModal(state)}
   `
 
   const mobileMenuEl = root.querySelector<HTMLDetailsElement>('[data-lobby-mobile-menu="1"]')
@@ -6258,9 +6293,7 @@ export function renderLobbyScreen(
     })
   }
 
-  const avatarInput = root.querySelector<HTMLInputElement>(
-    'input[name="avatarFile"]',
-  )
+  const avatarInput = ensurePersistentAvatarInput()
 
   root.querySelectorAll<HTMLButtonElement>('.avatar-source-btn').forEach((btn) => {
     btn.addEventListener('mouseenter', () => { btn.style.borderWidth = '2px' })
@@ -6440,7 +6473,8 @@ export function renderLobbyScreen(
       currentCrop = pendingCrop
       overlay.remove()
 
-      if (currentCrop !== null && avatarInput?.files?.[0]) {
+      if (currentCrop !== null) {
+        _pendingAvatarFile = file
         const crop = currentCrop
         const canvas = document.createElement('canvas')
         canvas.width = 250
@@ -6448,7 +6482,7 @@ export function renderLobbyScreen(
         const ctx = canvas.getContext('2d')
         if (ctx) {
           const img = new Image()
-          const objectUrl = URL.createObjectURL(avatarInput.files[0])
+          const objectUrl = URL.createObjectURL(file)
           img.onload = () => {
             ctx.drawImage(img, crop.x, crop.y, crop.size, crop.size, 0, 0, 250, 250)
             const preview = root.querySelector<HTMLElement>('[data-avatar-preview="1"]')
@@ -6465,7 +6499,8 @@ export function renderLobbyScreen(
 
     overlay.querySelector('[data-crop-cancel="1"]')?.addEventListener('click', () => {
       currentCrop = null
-      if (avatarInput) avatarInput.value = ''
+      _pendingAvatarFile = null
+      avatarInput.value = ''
       const preview = root.querySelector<HTMLElement>('[data-avatar-preview="1"]')
       if (preview) {
         preview.innerHTML = state.profile.avatarUrl
@@ -6476,7 +6511,7 @@ export function renderLobbyScreen(
     })
   }
 
-  avatarInput?.addEventListener('change', () => {
+  avatarInput.onchange = () => {
     const file = avatarInput.files?.[0] ?? null
     currentCrop = null
     if (!file) return
@@ -6486,22 +6521,25 @@ export function renderLobbyScreen(
       return
     }
     openCropOverlay(file)
-  })
+  }
 
-  const pendingGalleryItems: Array<{ file: File; crop: AvatarCropSelection; dataUrl: string }> = []
-  const galleryGrid = root.querySelector<HTMLElement>('[data-gallery-grid="1"]')
-  const galleryFileInput = root.querySelector<HTMLInputElement>('[data-gallery-file-input="1"]')
+  const galleryFileInput = ensurePersistentGalleryInput()
+
+  function getGalleryGrid(): HTMLElement | null {
+    return root.querySelector<HTMLElement>('[data-gallery-grid="1"]')
+  }
 
   function addGalleryEmptySlot(): void {
-    if (!galleryGrid) return
+    const grid = getGalleryGrid()
+    if (!grid) return
     const slot = document.createElement('div')
     slot.setAttribute('data-gallery-add-slot', '1')
     slot.setAttribute('role', 'button')
     slot.setAttribute('tabindex', '0')
     slot.style.cssText = 'aspect-ratio:1/1;border-radius:8px;border:2px dashed rgba(255,255,255,0.20);background:#101010;display:flex;align-items:center;justify-content:center;cursor:pointer;'
     slot.innerHTML = '<span style="color:rgba(255,255,255,0.40);font-size:28px;font-weight:300;line-height:1;">+</span>'
-    slot.addEventListener('click', () => galleryFileInput?.click())
-    galleryGrid.appendChild(slot)
+    slot.addEventListener('click', () => galleryFileInput.click())
+    grid.appendChild(slot)
   }
 
   function openGalleryCropOverlay(file: File): void {
@@ -6608,8 +6646,9 @@ export function renderLobbyScreen(
         const dataUrl = canvas.toDataURL('image/webp', 0.92)
         URL.revokeObjectURL(objectUrl)
         const item = { file, crop, dataUrl }
-        pendingGalleryItems.push(item)
-        if (galleryGrid) {
+        _pendingGalleryItems.push(item)
+        const grid = getGalleryGrid()
+        if (grid) {
           const div = document.createElement('div')
           div.style.cssText = 'position:relative;aspect-ratio:1/1;border-radius:8px;overflow:hidden;border:1px solid rgba(212,165,32,0.30);background:#101010;'
           const previewImg = document.createElement('img')
@@ -6621,19 +6660,19 @@ export function renderLobbyScreen(
           removeBtn.style.cssText = 'position:absolute;top:4px;right:4px;width:26px;height:26px;border:1px solid rgba(248,113,113,0.56);border-radius:999px;background:rgba(12,12,12,0.86);color:#fecaca;font-size:16px;font-weight:900;line-height:1;cursor:pointer;'
           removeBtn.textContent = '×'
           removeBtn.addEventListener('click', () => {
-            const idx = pendingGalleryItems.indexOf(item)
-            if (idx !== -1) pendingGalleryItems.splice(idx, 1)
+            const idx = _pendingGalleryItems.indexOf(item)
+            if (idx !== -1) _pendingGalleryItems.splice(idx, 1)
             div.remove()
             addGalleryEmptySlot()
           })
           div.appendChild(previewImg)
           div.appendChild(removeBtn)
-          const firstSlot = galleryGrid.querySelector<HTMLElement>('[data-gallery-add-slot]')
+          const firstSlot = grid.querySelector<HTMLElement>('[data-gallery-add-slot]')
           if (firstSlot) {
-            galleryGrid.insertBefore(div, firstSlot)
+            grid.insertBefore(div, firstSlot)
             firstSlot.remove()
           } else {
-            galleryGrid.appendChild(div)
+            grid.appendChild(div)
           }
         }
         overlay.remove()
@@ -6647,19 +6686,50 @@ export function renderLobbyScreen(
   }
 
   root.querySelectorAll<HTMLElement>('[data-gallery-add-slot]').forEach((slot) => {
-    slot.addEventListener('click', () => galleryFileInput?.click())
+    slot.addEventListener('click', () => galleryFileInput.click())
   })
 
-  galleryFileInput?.addEventListener('change', () => {
-    const file = galleryFileInput?.files?.[0] ?? null
+  galleryFileInput.onchange = () => {
+    const file = galleryFileInput.files?.[0] ?? null
     if (!file) return
-    if (galleryFileInput) galleryFileInput.value = ''
+    galleryFileInput.value = ''
     if (file.size > 10_000_000) {
       options.onProfileEditorFileError('Снимката трябва да е до 10 МБ.')
       return
     }
     openGalleryCropOverlay(file)
-  })
+  }
+
+  // Repopulate gallery previews from module-level state after re-render
+  if (_pendingGalleryItems.length > 0) {
+    const grid = getGalleryGrid()
+    if (grid) {
+      grid.querySelectorAll<HTMLElement>('[data-gallery-add-slot]').forEach((s) => s.remove())
+      for (const item of _pendingGalleryItems) {
+        const div = document.createElement('div')
+        div.style.cssText = 'position:relative;aspect-ratio:1/1;border-radius:8px;overflow:hidden;border:1px solid rgba(212,165,32,0.30);background:#101010;'
+        const previewImg = document.createElement('img')
+        previewImg.src = item.dataUrl
+        previewImg.alt = ''
+        previewImg.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;'
+        const removeBtn = document.createElement('button')
+        removeBtn.type = 'button'
+        removeBtn.style.cssText = 'position:absolute;top:4px;right:4px;width:26px;height:26px;border:1px solid rgba(248,113,113,0.56);border-radius:999px;background:rgba(12,12,12,0.86);color:#fecaca;font-size:16px;font-weight:900;line-height:1;cursor:pointer;'
+        removeBtn.textContent = '×'
+        const capturedItem = item
+        removeBtn.addEventListener('click', () => {
+          const idx = _pendingGalleryItems.indexOf(capturedItem)
+          if (idx !== -1) _pendingGalleryItems.splice(idx, 1)
+          div.remove()
+          addGalleryEmptySlot()
+        })
+        div.appendChild(previewImg)
+        div.appendChild(removeBtn)
+        grid.appendChild(div)
+      }
+      addGalleryEmptySlot()
+    }
+  }
 
   function dataUrlToFile(dataUrl: string, filename: string): File {
     const parts = dataUrl.split(',')
@@ -6674,12 +6744,9 @@ export function renderLobbyScreen(
     .querySelector<HTMLFormElement>('[data-lobby-profile-editor-form="1"]')
     ?.addEventListener('submit', (event) => {
       event.preventDefault()
-      const form = event.currentTarget as HTMLFormElement
-      const data = new FormData(form)
-      const avatarFile = data.get('avatarFile')
-      const galleryFiles = pendingGalleryItems.map((item, i) => dataUrlToFile(item.dataUrl, `gallery-${i}.webp`))
+      const galleryFiles = _pendingGalleryItems.map((item, i) => dataUrlToFile(item.dataUrl, `gallery-${i}.webp`))
       options.onProfileEditSubmit(
-        avatarFile instanceof File && avatarFile.size > 0 ? avatarFile : null,
+        _pendingAvatarFile ?? null,
         currentCrop,
         galleryFiles,
       )

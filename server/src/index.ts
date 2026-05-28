@@ -1930,6 +1930,7 @@ async function handleProfileRequest(
     )
 
     if (!result.ok) {
+      void deleteUploadFileByUrl(avatarUrl)
       sendJsonResponse(res, 400, result)
       return true
     }
