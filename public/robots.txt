@@ -3,6 +3,7 @@ Allow: /$
 Allow: /lobby
 Allow: /players
 Allow: /shop
+Allow: /ranking
 Disallow: /api/
 Disallow: /uploads/
 Disallow: /ws
