@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /$
+Allow: /lobby
+Allow: /players
+Allow: /shop
+Disallow: /api/
+Disallow: /uploads/
+Disallow: /ws
+
+Sitemap: https://www.pika.bg/sitemap.xml
