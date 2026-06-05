@@ -15,6 +15,7 @@ import { getTeamBySeat } from './serverStateHelpers.js'
 import { getServerTrickWinner } from './getServerTrickWinner.js'
 import { getServerValidPlayCards } from './getServerValidPlayCards.js'
 import { createServerDeclarationRecord } from './serverDeclarationRecordHelpers.js'
+import { addDeclarationsToMatchMissionCounts } from './serverDeclarationMissionCounts.js'
 import {
   clearServerTimerState,
   getServerTimerNow,
@@ -308,6 +309,10 @@ export function submitServerPlayCard(
       ...state.declarations,
       ...declarationValidation.declarations,
     ],
+    matchDeclarationMissionCounts: addDeclarationsToMatchMissionCounts(
+      state.matchDeclarationMissionCounts,
+      declarationValidation.declarations,
+    ),
   }
 
   if (trickComplete) {

@@ -54,6 +54,13 @@ export type ServerBiddingState = {
 
 export type ServerDeclarationType = 'sequence' | 'square' | 'belote'
 
+export type ServerDeclarationMissionType =
+  | 'announce_tersa'
+  | 'announce_50'
+  | 'announce_100'
+  | 'announce_kare'
+  | 'announce_belot'
+
 export type ServerDeclaration = {
   key: string
   seat: Seat
@@ -170,6 +177,7 @@ export type ServerAuthoritativeGameState = {
   hands: Record<Seat, ServerCard[]>
   bidding: ServerBiddingState
   declarations: ServerDeclaration[]
+  matchDeclarationMissionCounts: Record<ServerDeclarationMissionType, ServerRoundScore>
   currentTrick: ServerTrickState
   wonTricks: Record<Team, ServerCard[][]>
   playing: ServerPlayingState | null

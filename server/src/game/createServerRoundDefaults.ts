@@ -4,6 +4,7 @@ import type {
   ServerCard,
   ServerCarryOverPoints,
   ServerDeclaration,
+  ServerDeclarationMissionType,
   ServerPlayingState,
   ServerRoundScore,
   ServerScoreBreakdown,
@@ -78,6 +79,16 @@ export function createEmptyRoundScore(): ServerRoundScore {
   return {
     teamA: 0,
     teamB: 0,
+  }
+}
+
+export function createEmptyMatchDeclarationMissionCounts(): Record<ServerDeclarationMissionType, ServerRoundScore> {
+  return {
+    announce_tersa: createEmptyRoundScore(),
+    announce_50: createEmptyRoundScore(),
+    announce_100: createEmptyRoundScore(),
+    announce_kare: createEmptyRoundScore(),
+    announce_belot: createEmptyRoundScore(),
   }
 }
 

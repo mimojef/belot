@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import type { ProfileId, Seat, ServerRoom, Team } from '../core/serverTypes.js'
 import { SERVER_SEAT_ORDER, SERVER_TEAM_A_SEATS } from '../core/serverTypes.js'
-import type { ServerAuthoritativeGameState } from '../game/serverGameTypes.js'
+import type {
+  ServerAuthoritativeGameState,
+  ServerDeclarationMissionType,
+  ServerRoundScore,
+} from '../game/serverGameTypes.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -161,6 +165,22 @@ type MatchMissionDeltas = {
   deltas: Partial<Record<MissionType, number>>
 }[]
 
+const DECLARATION_MISSION_TYPES: ServerDeclarationMissionType[] = [
+  'announce_tersa',
+  'announce_50',
+  'announce_100',
+  'announce_kare',
+  'announce_belot',
+]
+
+function getTeamMissionCount(score: ServerRoundScore | null | undefined, team: Team): number {
+  if (!score) {
+    return 0
+  }
+
+  return team === 'A' ? score.teamA : score.teamB
+}
+
 function computeMatchMissionDeltas(room: ServerRoom): MatchMissionDeltas {
   const state = room.game.authoritativeState
 
@@ -195,28 +215,41 @@ function computeMatchMissionDeltas(room: ServerRoom): MatchMissionDeltas {
       if (isContra) deltas['win_contra_games'] = 1
     }
 
-    const declarations = (state as ServerAuthoritativeGameState).declarations ?? []
-    for (const decl of declarations) {
-      const declTeam = getTeamBySeat(decl.seat)
-      if (declTeam !== team) continue
-      if (!decl.valid || !decl.announced) continue
+    const matchDeclarationMissionCounts =
+      (state as Partial<ServerAuthoritativeGameState>).matchDeclarationMissionCounts
 
-      switch (decl.publicLabel) {
-        case 'Терца':
-          deltas['announce_tersa'] = (deltas['announce_tersa'] ?? 0) + 1
-          break
-        case '50':
-          deltas['announce_50'] = (deltas['announce_50'] ?? 0) + 1
-          break
-        case '100':
-          deltas['announce_100'] = (deltas['announce_100'] ?? 0) + 1
-          break
-        case 'Каре':
-          deltas['announce_kare'] = (deltas['announce_kare'] ?? 0) + 1
-          break
-        case 'Белот':
-          deltas['announce_belot'] = (deltas['announce_belot'] ?? 0) + 1
-          break
+    if (matchDeclarationMissionCounts) {
+      for (const missionType of DECLARATION_MISSION_TYPES) {
+        const count = getTeamMissionCount(matchDeclarationMissionCounts[missionType], team)
+
+        if (count > 0) {
+          deltas[missionType] = (deltas[missionType] ?? 0) + count
+        }
+      }
+    } else {
+      const declarations = (state as ServerAuthoritativeGameState).declarations ?? []
+      for (const decl of declarations) {
+        const declTeam = getTeamBySeat(decl.seat)
+        if (declTeam !== team) continue
+        if (!decl.valid || !decl.announced) continue
+
+        switch (decl.publicLabel) {
+          case 'Терца':
+            deltas['announce_tersa'] = (deltas['announce_tersa'] ?? 0) + 1
+            break
+          case '50':
+            deltas['announce_50'] = (deltas['announce_50'] ?? 0) + 1
+            break
+          case '100':
+            deltas['announce_100'] = (deltas['announce_100'] ?? 0) + 1
+            break
+          case 'Каре':
+            deltas['announce_kare'] = (deltas['announce_kare'] ?? 0) + 1
+            break
+          case 'Белот':
+            deltas['announce_belot'] = (deltas['announce_belot'] ?? 0) + 1
+            break
+        }
       }
     }
 

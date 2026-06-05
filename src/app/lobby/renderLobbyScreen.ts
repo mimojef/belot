@@ -2149,7 +2149,7 @@ function renderBottomSection(
       onmouseenter="this.style.borderColor='rgba(212,165,32,1)';this.style.boxShadow='0 0 0 1px rgba(212,165,32,0.5)'"
       onmouseleave="this.style.borderColor='rgba(212,165,32,0.68)';this.style.boxShadow='none'"
       >
-        ${hasUnclaimedDailyReward ? `<div style="position:absolute;top:10px;right:12px;min-width:20px;height:20px;border-radius:999px;background:#ef4444;color:#ffffff;border:2px solid #000000;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;line-height:1;box-shadow:0 0 0 2px rgba(239,68,68,0.22),0 0 14px rgba(239,68,68,0.72);">1</div>` : ''}
+        ${renderQuickActionBadge(hasUnclaimedDailyReward ? 1 : 0)}
         <img src="/assets/lobby/icon-daily-rewards.png" alt="" style="width:74px; height:75px; display:block; object-fit:contain; flex-shrink:0;">
         <div style="flex:1; min-width:0;">
           <div style="font-size:15px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Ежедневни награди</div>
@@ -2171,7 +2171,7 @@ function renderBottomSection(
       onmouseenter="this.style.borderColor='rgba(96,165,250,1)';this.style.boxShadow='0 0 0 1px rgba(96,165,250,0.5)'"
       onmouseleave="this.style.borderColor='rgba(96,165,250,0.62)';this.style.boxShadow='none'"
       >
-        ${unclaimedMissionsCount > 0 ? `<div style="position:absolute;top:10px;right:12px;width:10px;height:10px;border-radius:50%;background:#ef4444;box-shadow:0 0 6px rgba(239,68,68,0.7);"></div>` : ''}
+        ${renderQuickActionBadge(unclaimedMissionsCount)}
         <img src="/assets/lobby/icon-missions.png" alt="" style="width:73px; height:76px; display:block; object-fit:contain; flex-shrink:0;">
         <div style="flex:1; min-width:0;">
           <div style="font-size:15px; font-weight:800; color:#60a5fa; text-transform:uppercase; letter-spacing:0.05em;">Дневни мисии</div>
@@ -2190,6 +2190,14 @@ function renderBottomSection(
       </div>
     </div>
   `
+}
+
+function renderQuickActionBadge(count: number): string {
+  if (count <= 0) {
+    return ''
+  }
+
+  return `<span aria-hidden="true" style="position:absolute;top:10px;right:12px;min-width:20px;height:20px;border-radius:999px;background:#ef4444;color:#ffffff;border:2px solid #000000;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;line-height:1;box-shadow:0 0 0 2px rgba(239,68,68,0.22),0 0 14px rgba(239,68,68,0.72);">${count}</span>`
 }
 
 function renderMobileMenu(state: LobbyScreenState): string {
@@ -2514,15 +2522,7 @@ function renderMobileQuickActions(unclaimedMissionsCount: number, hasUnclaimedDa
         </span>
       </button>
       <button type="button" data-lobby-daily-rewards-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.68)')}">
-        ${hasUnclaimedDailyReward ? `
-          <span aria-hidden="true" style="
-            position:absolute;top:8px;right:8px;width:20px;height:20px;border-radius:999px;
-            background:#ef4444;color:#ffffff;border:2px solid #000000;
-            display:flex;align-items:center;justify-content:center;
-            font-size:11px;font-weight:900;line-height:1;
-            box-shadow:0 0 0 2px rgba(239,68,68,0.22),0 0 14px rgba(239,68,68,0.72);
-          ">1</span>
-        ` : ''}
+        ${renderQuickActionBadge(hasUnclaimedDailyReward ? 1 : 0)}
         <img src="/assets/lobby/icon-daily-rewards.png" alt="" style="${mobileActionIconStyle()}">
         <span style="min-width:0;display:grid;gap:3px;">
           <span>Ежедневни награди</span>
@@ -2530,9 +2530,10 @@ function renderMobileQuickActions(unclaimedMissionsCount: number, hasUnclaimedDa
         </span>
       </button>
       <button type="button" data-lobby-missions-card="1" style="${mobileActionCardStyle('#60a5fa', 'rgba(96,165,250,0.62)')}">
+        ${renderQuickActionBadge(unclaimedMissionsCount)}
         <img src="/assets/lobby/icon-missions.png" alt="" style="${mobileActionIconStyle()}">
         <span style="min-width:0;display:grid;gap:3px;">
-          <span>Дневни мисии${unclaimedMissionsCount > 0 ? ` (${unclaimedMissionsCount})` : ''}</span>
+          <span>Дневни мисии</span>
           <span style="${mobileActionSubtitleStyle()}">Изпълнявай дневни мисии и печели жълтици.</span>
         </span>
       </button>
