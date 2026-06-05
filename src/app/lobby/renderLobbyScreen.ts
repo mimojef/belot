@@ -629,10 +629,13 @@ function renderAuthModal(state: LobbyScreenState): string {
         ` : ''}
         <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
           Email
-          <input name="email" type="email" autocomplete="email" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
+          <input name="email" type="email" autocomplete="email" placeholder="Реален e-mail" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;" placeholder-color="rgba(255,255,255,0.35)">
         </label>
         <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
-          Парола
+          <span style="display:flex;align-items:baseline;gap:6px;">
+            Парола
+            ${isRegister ? `<span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:#ffffff;">Мин. 6 символа</span>` : ''}
+          </span>
           <span style="position:relative;display:block;">
             <input name="password" type="password" autocomplete="${isLogin ? 'current-password' : 'new-password'}" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
             <button type="button" data-toggle-password="password" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.4);padding:4px;display:flex;align-items:center;justify-content:center;">
