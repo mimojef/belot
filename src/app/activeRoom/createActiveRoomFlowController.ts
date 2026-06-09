@@ -163,6 +163,10 @@ export function createActiveRoomFlowController(
   let replayStakeEffectShown = false
   let initialStakeEffectShown = false
   let matchEndedCountdownDeadlineAt: number | null = null
+
+  function getSeatGender(seat: Seat): RoomSeatSnapshot['gender'] {
+    return activeRoomState?.seats.find((entry) => entry.seat === seat)?.gender ?? null
+  }
   let matchEndedCountdownSeconds = 120
   let matchEndedCountdownIntervalId: number | null = null
 
@@ -1501,7 +1505,7 @@ export function createActiveRoomFlowController(
         if (entry) {
           const bidLabel = getBidActionLabel(entry.action)
           addBidBubble(entry.seat, bidLabel)
-          options.gameAudio?.playBidBubble(getBidActionAudioLabel(entry.action))
+          options.gameAudio?.playBidBubble(getBidActionAudioLabel(entry.action), getSeatGender(entry.seat))
           // If this entry is for the local seat and we didn't send it → bot takeover
           if (entry.seat === localSeat && !biddingUiState.pendingBidSent && biddingUiState.wasMyTurn) {
             biddingUiState.showBotTakeover = true
@@ -2708,8 +2712,8 @@ export function createActiveRoomFlowController(
         scaledStageWidth,
         scaledStageHeight,
         submitPlayCard: options.submitPlayCard,
-        onDeclarationBubbleShown: (lines) => {
-          options.gameAudio?.playDeclarationBubble(lines)
+        onDeclarationBubbleShown: (seat, lines) => {
+          options.gameAudio?.playDeclarationBubble(lines, getSeatGender(seat))
         },
         onPlayedCardLanded: () => {
           options.gameAudio?.playCardOnTable()

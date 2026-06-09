@@ -20,6 +20,7 @@ const previewSeats: RoomSeatSnapshot[] = [
     level: 14,
     rankTitle: 'Майстор',
     skillRating: 1260,
+    gender: null,
   },
   {
     seat: 'right',
@@ -32,6 +33,7 @@ const previewSeats: RoomSeatSnapshot[] = [
     level: 9,
     rankTitle: null,
     skillRating: 980,
+    gender: null,
   },
   {
     seat: 'top',
@@ -44,6 +46,7 @@ const previewSeats: RoomSeatSnapshot[] = [
     level: 11,
     rankTitle: null,
     skillRating: 1040,
+    gender: null,
   },
   {
     seat: 'left',
@@ -56,6 +59,7 @@ const previewSeats: RoomSeatSnapshot[] = [
     level: 7,
     rankTitle: null,
     skillRating: 910,
+    gender: null,
   },
 ]
 

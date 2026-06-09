@@ -1,5 +1,6 @@
 import type {
   PlayerIdentitySnapshot,
+  PlayerGender,
   PlayerPublicProfileSnapshot,
   RoomId,
   RoomStatus,
@@ -144,6 +145,7 @@ export type RoomSeatSnapshot = {
   level: number | null
   rankTitle: string | null
   skillRating: number | null
+  gender: PlayerGender | null
 }
 
 export type RoomGamePhaseSnapshot =

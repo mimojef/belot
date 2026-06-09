@@ -25,6 +25,7 @@ type CandidateRow = {
   level: number
   rank_title: string | null
   skill_rating: number
+  gender: 'male' | 'female' | null
   yellow_coins_balance: number
 }
 
@@ -116,7 +117,7 @@ function mapCandidateToEligibleBotProfile(
       level: candidate.level,
       rankTitle: candidate.rank_title,
       skillRating: candidate.skill_rating,
-      gender: null,
+      gender: candidate.gender,
     },
   }
 }
@@ -155,6 +156,7 @@ export function listEligibleBotProfilesFromDb(
         p.level,
         p.rank_title,
         p.skill_rating,
+        p.gender,
         pw.yellow_coins_balance
       FROM profiles p
       JOIN profile_wallets pw

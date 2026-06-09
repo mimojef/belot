@@ -391,6 +391,7 @@ export type RoomSeatSnapshot = {
   level: number | null
   rankTitle: string | null
   skillRating: number | null
+  gender: PlayerGender | null
 }
 
 export type RoomGamePhaseSnapshot =

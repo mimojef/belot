@@ -1,6 +1,6 @@
 export type GameAudioController = {
-  playBidBubble(label: string): void
-  playDeclarationBubble(lines: string[]): void
+  playBidBubble(label: string, gender?: VoiceGender | null): void
+  playDeclarationBubble(lines: string[], gender?: VoiceGender | null): void
   playCardMove(): void
   playCardOnTable(): void
   playMatchEnded(): void
@@ -20,6 +20,8 @@ export type DealPacketSoundTiming = {
 type CreateGameAudioControllerOptions = {
   bidBasePath?: string
   declarationBasePath?: string
+  femaleBidBasePath?: string
+  femaleDeclarationBasePath?: string
   sfxBasePath?: string
   dealPacketCount?: number
   dealPacketStartDelayMs?: number
@@ -27,8 +29,12 @@ type CreateGameAudioControllerOptions = {
   dealPacketLiftOffsetMs?: number
 }
 
+type VoiceGender = 'male' | 'female'
+
 const DEFAULT_BID_BASE_PATH = '/audio/table-calls'
 const DEFAULT_DECLARATION_BASE_PATH = '/audio/table-calls'
+const DEFAULT_FEMALE_BID_BASE_PATH = '/audio/table-calls-women'
+const DEFAULT_FEMALE_DECLARATION_BASE_PATH = '/audio/table-calls-women'
 const DEFAULT_SFX_BASE_PATH = '/audio/card-sfx'
 const DEFAULT_GAME_SOUNDS_BASE_PATH = '/audio/game-sounds'
 const REACTION_COUNTDOWN_WARNING_FILE = 'counter.mp3'
@@ -147,6 +153,10 @@ export function createGameAudioController(
   const bidBasePath = options.bidBasePath ?? DEFAULT_BID_BASE_PATH
   const declarationBasePath =
     options.declarationBasePath ?? DEFAULT_DECLARATION_BASE_PATH
+  const femaleBidBasePath =
+    options.femaleBidBasePath ?? DEFAULT_FEMALE_BID_BASE_PATH
+  const femaleDeclarationBasePath =
+    options.femaleDeclarationBasePath ?? DEFAULT_FEMALE_DECLARATION_BASE_PATH
   const sfxBasePath = options.sfxBasePath ?? DEFAULT_SFX_BASE_PATH
 
   const dealPacketCount = options.dealPacketCount ?? DEFAULT_DEAL_PACKET_COUNT
@@ -300,7 +310,15 @@ export function createGameAudioController(
     return options[nextIndex]
   }
 
-  function resolveBidAudioFiles(label: string): string[] {
+  function getBidBasePath(gender?: VoiceGender | null): string {
+    return gender === 'female' ? femaleBidBasePath : bidBasePath
+  }
+
+  function getDeclarationBasePath(gender?: VoiceGender | null): string {
+    return gender === 'female' ? femaleDeclarationBasePath : declarationBasePath
+  }
+
+  function resolveBidAudioFiles(label: string, gender?: VoiceGender | null): string[] {
     const entry = BID_AUDIO_BY_LABEL[label]
 
     if (!entry) {
@@ -308,14 +326,14 @@ export function createGameAudioController(
     }
 
     if (label === 'Пас') {
-      return [buildFilePath(bidBasePath, pickPassVariant())]
+      return [buildFilePath(getBidBasePath(gender), pickPassVariant())]
     }
 
     const fileNames = Array.isArray(entry) ? entry : [entry]
-    return fileNames.map((fileName) => buildFilePath(bidBasePath, fileName))
+    return fileNames.map((fileName) => buildFilePath(getBidBasePath(gender), fileName))
   }
 
-  function resolveDeclarationSpeechSources(lines: string[]): string[] {
+  function resolveDeclarationSpeechSources(lines: string[], gender?: VoiceGender | null): string[] {
     const normalizedLines = normalizeDeclarationLines(lines)
     const slugs = normalizedLines
       .map(mapDeclarationLineToSlug)
@@ -347,16 +365,16 @@ export function createGameAudioController(
     ])
 
     if (comboFilesThatExist.has(comboFileBaseName)) {
-      return [buildFilePath(declarationBasePath, `${comboFileBaseName}.mp3`)]
+      return [buildFilePath(getDeclarationBasePath(gender), `${comboFileBaseName}.mp3`)]
     }
 
     return sortedSlugs.map((slug) =>
-      buildFilePath(declarationBasePath, `${slug}.mp3`),
+      buildFilePath(getDeclarationBasePath(gender), `${slug}.mp3`),
     )
   }
 
-  function playBidBubble(label: string): void {
-    const sources = resolveBidAudioFiles(label)
+  function playBidBubble(label: string, gender?: VoiceGender | null): void {
+    const sources = resolveBidAudioFiles(label, gender)
 
     if (sources.length === 0) {
       return
@@ -365,8 +383,8 @@ export function createGameAudioController(
     enqueueSpeechSequence(sources)
   }
 
-  function playDeclarationBubble(lines: string[]): void {
-    const sources = resolveDeclarationSpeechSources(lines)
+  function playDeclarationBubble(lines: string[], gender?: VoiceGender | null): void {
+    const sources = resolveDeclarationSpeechSources(lines, gender)
 
     if (sources.length === 0) {
       return

@@ -28,6 +28,7 @@ export function createEmptySeatSnapshot(seat: Seat): RoomSeatSnapshot {
     level: null,
     rankTitle: null,
     skillRating: null,
+    gender: null,
   }
 }
 

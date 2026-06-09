@@ -35,6 +35,7 @@ function createSeatSnapshot(room: ServerRoom, seat: Seat): RoomSeatSnapshot {
       level: null,
       rankTitle: null,
       skillRating: null,
+      gender: null,
     }
   }
 
@@ -52,6 +53,7 @@ function createSeatSnapshot(room: ServerRoom, seat: Seat): RoomSeatSnapshot {
     level: participant.identity.level,
     rankTitle: participant.identity.rankTitle,
     skillRating: participant.identity.skillRating,
+    gender: participant.identity.gender ?? participant.publicProfile?.gender ?? null,
   }
 }
 

@@ -529,8 +529,9 @@ function markMobileOptimisticDeclarationAudio(cache: PlayingUiCache, lines: stri
 
 function notifyDeclarationBubbleShown(
   cache: PlayingUiCache,
+  seat: Seat,
   lines: string[],
-  onBubbleShown?: (lines: string[]) => void,
+  onBubbleShown?: (seat: Seat, lines: string[]) => void,
 ): void {
   if (!onBubbleShown) {
     return
@@ -551,7 +552,7 @@ function notifyDeclarationBubbleShown(
     }
   }
 
-  onBubbleShown(lines)
+  onBubbleShown(seat, lines)
 }
 
 function getDeclarationBubbleUiState(cache: PlayingUiCache): DeclarationBubbleUiState {
@@ -664,7 +665,7 @@ function scheduleDeclarationBubbleHide(options: {
   state: DeclarationBubbleUiState
   seat: Seat
   entryKey: string
-  onBubbleShown?: (lines: string[]) => void
+  onBubbleShown?: (seat: Seat, lines: string[]) => void
 }): void {
   const { cache, state, seat, entryKey, onBubbleShown } = options
 
@@ -699,7 +700,7 @@ function scheduleDeclarationBubbleHide(options: {
         lines: nextBubble.lines,
         needsTimerStart: true,
       }
-      notifyDeclarationBubbleShown(cache, nextBubble.lines, onBubbleShown)
+      notifyDeclarationBubbleShown(cache, seat, nextBubble.lines, onBubbleShown)
     }
 
     const latestOptions = latestRenderOptionsByCache.get(cache)
@@ -718,7 +719,7 @@ function showOrQueueDeclarationBubble(options: {
     signatures: string[]
     lines: string[]
   }
-  onBubbleShown?: (lines: string[]) => void
+  onBubbleShown?: (seat: Seat, lines: string[]) => void
 }): void {
   const { cache, state, trigger, bubble, onBubbleShown } = options
   const activeBubble = state.activeBubbles[trigger.seat]
@@ -740,7 +741,7 @@ function showOrQueueDeclarationBubble(options: {
     lines: bubble.lines,
     needsTimerStart: false,
   }
-  notifyDeclarationBubbleShown(cache, bubble.lines, onBubbleShown)
+  notifyDeclarationBubbleShown(cache, trigger.seat, bubble.lines, onBubbleShown)
 
   scheduleDeclarationBubbleHide({
     cache,
@@ -755,7 +756,7 @@ function syncTransientDeclarationBubbles(options: {
   cache: PlayingUiCache
   game: RoomGameSnapshot
   triggers: DeclarationBubbleTrigger[]
-  onBubbleShown?: (lines: string[]) => void
+  onBubbleShown?: (seat: Seat, lines: string[]) => void
 }): Partial<Record<Seat, SeatDeclarationBubble>> | null {
   const { cache, game, triggers, onBubbleShown } = options
   const state = getDeclarationBubbleUiState(cache)
@@ -1380,7 +1381,7 @@ export type RenderPlayingScreenOptions = {
   scaledStageWidth: number
   scaledStageHeight: number
   submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
-  onDeclarationBubbleShown?: (lines: string[]) => void
+  onDeclarationBubbleShown?: (seat: Seat, lines: string[]) => void
   onPlayedCardLanded?: () => void
   syncSeatPanels?: (html: string) => void
   emojiBubbles?: Partial<Record<Seat, SeatEmojiBubble>> | null
@@ -1878,7 +1879,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
           )
 
           if (optimisticLines.length > 0) {
-            onDeclarationBubbleShown?.(optimisticLines)
+            onDeclarationBubbleShown?.(localSeat, optimisticLines)
             markMobileOptimisticDeclarationAudio(cache, optimisticLines)
           }
         }
