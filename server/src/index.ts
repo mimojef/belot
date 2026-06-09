@@ -100,6 +100,7 @@ import {
 import { submitHumanBidActionForRoom } from './game/submitHumanBidActionForRoom.js'
 import { submitHumanCutIndexForRoom } from './game/submitHumanCutIndexForRoom.js'
 import { submitHumanPlayCardForRoom } from './game/submitHumanPlayCardForRoom.js'
+import { abandonHumanControlForRoom } from './game/abandonHumanControlForRoom.js'
 import { resumeHumanControlForRoom } from './game/resumeHumanControlForRoom.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
 import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
@@ -4934,15 +4935,27 @@ wsServer.on('connection', (socket, request) => {
           }
         }
 
-        const disconnectedParticipant = markHumanParticipantDisconnected(
-          participant,
-          connection.id,
-        )
-        const nextRoom = updateHumanParticipantInRoom(
+        const disconnectedParticipant = {
+          ...markHumanParticipantDisconnected(
+            participant,
+            connection.id,
+          ),
+          reconnectToken: null,
+        }
+        const disconnectedRoom = updateHumanParticipantInRoom(
           room,
           seat,
           disconnectedParticipant,
         )
+        const abandonResult = abandonHumanControlForRoom(disconnectedRoom, seat)
+        const nextRoom = abandonResult.ok ? abandonResult.room : disconnectedRoom
+
+        if (!abandonResult.ok) {
+          console.error(
+            `[leave-active-room] failed to hand seat to bot room=${room.id} seat=${seat}: ${abandonResult.message}`,
+          )
+        }
+
         const detachedConnection = detachConnectionFromRoomSeat(
           latestConnection,
           connection.id,
