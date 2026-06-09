@@ -3990,7 +3990,7 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'room_snapshot') {
-      if (message.roomStatus !== 'waiting') {
+      if (message.roomStatus !== 'waiting' || message.game != null) {
         return false
       }
 

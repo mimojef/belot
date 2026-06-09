@@ -2,6 +2,12 @@ import type { ServerRoom } from '../core/serverTypes.js'
 import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
 import { mapAuthoritativePhaseToRuntimePhase } from './mapAuthoritativePhaseToRuntimePhase.js'
 
+function mapAuthoritativePhaseToRoomStatus(
+  phase: ServerAuthoritativeGameState['phase'],
+): ServerRoom['status'] {
+  return phase === 'match-ended' ? 'finished' : 'playing'
+}
+
 export function syncRoomWithAuthoritativeState(
   room: ServerRoom,
   authoritativeState: ServerAuthoritativeGameState,
@@ -9,6 +15,7 @@ export function syncRoomWithAuthoritativeState(
 ): ServerRoom {
   return {
     ...room,
+    status: mapAuthoritativePhaseToRoomStatus(authoritativeState.phase),
     updatedAt: now,
     game: {
       ...room.game,
