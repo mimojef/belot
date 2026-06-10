@@ -3771,7 +3771,7 @@ function renderAdminPanel(state: LobbyScreenState, isMobile = false): string {
           </label>
           <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Жълтици
-            <input name="yellowCoinsAmount" type="number" min="1" max="100000000" step="1000" value="${editPackage?.yellowCoinsAmount ?? 100000}" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+            <input name="yellowCoinsAmount" type="number" min="1" max="100000000" step="1" value="${editPackage?.yellowCoinsAmount ?? 100000}" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
           </label>
           <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Цена в центове
