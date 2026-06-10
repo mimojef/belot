@@ -2654,7 +2654,18 @@ if ((offlineReloadParam !== null || recoveryReloadParam !== null) && window.loca
 // Landing страница — показва се само в браузър и без валиден path (не в standalone режим)
 // Трябва да е ПРЕДИ lobby.render() за да може syncUrlPath() да я засече
 const _initialPath = window.location.pathname
-const _VALID_PATHS = new Set(['/lobby', '/players', '/ranking', '/shop', '/friends', '/chat', '/admin'])
+const _VALID_PATHS = new Set([
+  '/lobby',
+  '/players',
+  '/ranking',
+  '/shop',
+  '/friends',
+  '/chat',
+  '/admin',
+  '/terms',
+  '/privacy',
+  '/contact',
+])
 if (!isStripePaymentReturn && !isRunningAsStandalone() && !_VALID_PATHS.has(_initialPath)) {
   showLandingOverlay()
 }

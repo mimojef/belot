@@ -47,6 +47,9 @@ export type LobbyFlowScreen =
   | 'shop'
   | 'admin'
   | 'admin-info'
+  | 'terms'
+  | 'privacy'
+  | 'contact'
   | 'matchmaking-room'
   | 'private-rooms'
   | 'support'
@@ -823,6 +826,9 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/admin': 'admin',
   '/friends': 'friends',
   '/chat': 'chat',
+  '/terms': 'terms',
+  '/privacy': 'privacy',
+  '/contact': 'contact',
 }
 
 export function createLobbyFlowController(
@@ -1494,6 +1500,12 @@ export function createLobbyFlowController(
               ? 'admin'
             : state.currentScreen === 'admin-info'
               ? 'admin-info'
+            : state.currentScreen === 'terms'
+              ? 'terms'
+            : state.currentScreen === 'privacy'
+              ? 'privacy'
+            : state.currentScreen === 'contact'
+              ? 'contact'
           : state.currentScreen === 'friends'
             ? 'friends'
             : state.currentScreen === 'chat'
@@ -3455,6 +3467,18 @@ export function createLobbyFlowController(
     render()
   }
 
+  function showPublicLegalPage(screen: 'terms' | 'privacy' | 'contact'): void {
+    state.currentScreen = screen
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+  }
+
   async function openChatConversation(
     friendshipId: string,
     shouldRenderLoading = true,
@@ -3746,6 +3770,9 @@ export function createLobbyFlowController(
     admin: '/admin',
     friends: '/friends',
     chat: '/chat',
+    terms: '/terms',
+    privacy: '/privacy',
+    contact: '/contact',
   }
 
   const PATH_TO_SCREEN: Record<string, LobbySocialScreen> = {
@@ -3756,6 +3783,9 @@ export function createLobbyFlowController(
     '/admin': 'admin',
     '/friends': 'friends',
     '/chat': 'chat',
+    '/terms': 'terms',
+    '/privacy': 'privacy',
+    '/contact': 'contact',
   }
 
   const _loadPath = window.location.pathname
@@ -3786,6 +3816,9 @@ export function createLobbyFlowController(
       case 'admin-info': void showAdminInfoPanel(); break
       case 'friends': void showFriendsDirectory(); break
       case 'chat': void showChatPanel(); break
+      case 'terms': showPublicLegalPage('terms'); break
+      case 'privacy': showPublicLegalPage('privacy'); break
+      case 'contact': showPublicLegalPage('contact'); break
     }
   }
 

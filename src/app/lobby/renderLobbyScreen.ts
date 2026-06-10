@@ -25,6 +25,7 @@ import type {
 import type { PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
+import { PUBLIC_LEGAL_PAGES, type PublicLegalPageKey } from './publicLegalPages'
 
 const MISSION_TYPE_LABELS: Record<string, string> = {
   win_games: 'Спечели N игри',
@@ -82,7 +83,7 @@ export type AvatarCropSelection = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'private-rooms' | 'support'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'private-rooms' | 'support' | PublicLegalPageKey
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -2815,6 +2816,47 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
   `
 }
 
+function renderPublicLegalPage(pageKey: PublicLegalPageKey, isMobile = false): string {
+  const page = PUBLIC_LEGAL_PAGES[pageKey]
+  const blocks = page.body
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter((block) => block.length > 0)
+
+  const contentHtml = blocks.map((block, index) => {
+    const isDocumentTitle = index === 0
+    const isSectionTitle = /^\d+\.\s/.test(block)
+    const style = isDocumentTitle
+      ? `margin:0 0 18px;color:#f8fafc;font-size:${isMobile ? '18px' : '22px'};line-height:1.22;font-weight:900;`
+      : isSectionTitle
+        ? `margin:${isMobile ? '22px' : '28px'} 0 8px;color:#d4a520;font-size:${isMobile ? '15px' : '17px'};line-height:1.35;font-weight:900;`
+        : `margin:0 0 12px;color:rgba(255,255,255,0.72);font-size:${isMobile ? '13px' : '15px'};line-height:${isMobile ? '1.58' : '1.68'};font-weight:600;`
+
+    return `<p style="${style}">${escapeHtml(block).replace(/\n/g, '<br>')}</p>`
+  }).join('')
+
+  return `
+    <section style="
+      min-height:${isMobile ? 'auto' : '560px'};
+      border:1px solid rgba(212,165,32,0.26);
+      border-radius:8px;
+      background:linear-gradient(180deg,#0b0b0b 0%,#050505 100%);
+      padding:${isMobile ? '18px 14px' : '34px 42px'};
+      box-sizing:border-box;
+    ">
+      <div style="max-width:980px;margin:0 auto;">
+        <div style="border-bottom:1px solid rgba(212,165,32,0.22);padding-bottom:${isMobile ? '14px' : '18px'};margin-bottom:${isMobile ? '18px' : '26px'};">
+          <h1 style="margin:0;color:#ffffff;font-size:${isMobile ? '24px' : '34px'};line-height:1.05;font-weight:900;">${escapeHtml(page.title)}</h1>
+          <div style="margin-top:8px;color:rgba(255,255,255,0.48);font-size:${isMobile ? '12px' : '13px'};font-weight:800;">Pika.bg</div>
+        </div>
+        <article style="overflow-wrap:anywhere;">
+          ${contentHtml}
+        </article>
+      </div>
+    </section>
+  `
+}
+
 function renderMobileLobbyScreenContent(
   state: LobbyScreenState,
   profileName: string,
@@ -2841,6 +2883,8 @@ function renderMobileLobbyScreenContent(
             ? renderMobileFriendsDirectory(state)
           : state.view === 'chat'
             ? renderMobileChatPanel(state)
+          : state.view === 'terms' || state.view === 'privacy' || state.view === 'contact'
+            ? renderPublicLegalPage(state.view, true)
           : ''}
       </main>
     `
@@ -2864,11 +2908,19 @@ function renderFooter(onlinePlayersCount: number): string {
       margin-top:16px;
       border-top:1px solid rgba(255,255,255,0.07);
       padding:16px 0;
-      display:flex;
+      display:grid;
+      grid-template-columns:1fr auto 1fr;
       align-items:center;
-      gap:0;
+      gap:18px;
     ">
-      <div data-lobby-footer-items="1" style="display:flex; align-items:center; gap:30px; flex:1;">
+      <style>
+        [data-lobby-footer-legal-link="1"]:hover {
+          color:#f4c95b !important;
+          text-decoration:underline !important;
+          text-underline-offset:3px;
+        }
+      </style>
+      <div data-lobby-footer-items="1" style="display:flex; align-items:center; gap:30px; justify-self:start;">
         <div style="display:flex; align-items:center; gap:10px;">
           <img src="/assets/lobby/icon-fair-play.png" alt="" style="height:28px; opacity:0.7;">
           <div>
@@ -2908,7 +2960,16 @@ function renderFooter(onlinePlayersCount: number): string {
           </div>
         </div>
       </div>
-      <img src="/assets/lobby/copyright-pika-2026.png" alt="© Pika.bg 2026 Всички права запазени" style="width:360px; height:31px; display:block; object-fit:contain;">
+      <nav aria-label="Правни връзки" style="display:flex;align-items:center;justify-content:center;gap:0;flex-wrap:wrap;text-align:center;justify-self:center;">
+        <a data-lobby-footer-legal-link="1" href="/terms" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Общи условия</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-footer-legal-link="1" href="/privacy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Политика за поверителност</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-footer-legal-link="1" href="/contact" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Контакти</a>
+      </nav>
+      <div style="justify-self:end;color:rgba(255,255,255,0.52);font-size:13px;font-weight:700;white-space:nowrap;">
+        © Pika.bg 2026 · Всички права запазени
+      </div>
       <style>
         [data-lobby-footer-items="1"] > div:nth-child(1),
         [data-lobby-footer-items="1"] > div:nth-child(2),
@@ -5440,8 +5501,10 @@ export function renderLobbyScreen(
                 ? renderAdminInfoPanel(state)
             : state.view === 'friends'
               ? renderFriendsDirectory(state)
-              : state.view === 'chat'
+            : state.view === 'chat'
                 ? renderChatPanel(state)
+              : state.view === 'terms' || state.view === 'privacy' || state.view === 'contact'
+                ? renderPublicLegalPage(state.view)
               : `
               ${state.profile.profileId !== null
                 ? renderHeroSection(profileName, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level, isPhoneLayout)
