@@ -108,6 +108,8 @@ import type { PrivateRoom, PrivateRoomMember } from './game/privateRoomsStore.js
 import { addHumanToRoom } from './core/addHumanToRoom.js'
 import { createRoomWithHumanHost } from './core/createRoomWithHumanHost.js'
 import type { PrivateRoomSnapshot } from './protocol/messageTypes.js'
+import { validateGuestContactPayload } from './contact/guestContactValidation.js'
+import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
 
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
@@ -116,6 +118,9 @@ const EARLY_BOT_FILL_DEBIT_MS = 1700
 const GAME_RUNTIME_TICK_MS = 250
 const MATCH_PLAYERS_REQUIRED = 4
 const MAX_JSON_BODY_BYTES = 15_000_000
+const GUEST_CONTACT_MAX_JSON_BODY_BYTES = 20_000
+const GUEST_CONTACT_RATE_LIMIT_WINDOW_MS = 30 * 60 * 1000
+const GUEST_CONTACT_RATE_LIMIT_MAX_MESSAGES = 3
 const MAX_ORIGINAL_IMAGE_BYTES = 10_000_000
 const MAX_PROFILE_GALLERY_IMAGES = 6
 const UPLOADS_ROUTE_PREFIX = '/uploads/'
@@ -123,6 +128,7 @@ const SERVER_ROOT_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const UPLOADS_ROOT_PATH = join(SERVER_ROOT_PATH, 'uploads')
 const AVATAR_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'avatars')
 const GALLERY_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'profile-gallery')
+const guestContactRateLimitByIp = new Map<string, { windowStartedAt: number; count: number }>()
 
 const databaseBootstrap = await ensureServerDatabaseReady()
 const botCatalogImport = await importBotProfilesCatalog(
@@ -1470,6 +1476,57 @@ function getNumberField(
   return typeof field === 'number' && Number.isFinite(field) ? field : null
 }
 
+function getFirstHeaderValue(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) {
+    return value[0]?.trim() || null
+  }
+
+  return value?.trim() || null
+}
+
+function getRequestIp(req: IncomingMessage): string {
+  const forwardedFor = getFirstHeaderValue(req.headers['x-forwarded-for'])
+  const forwardedIp = forwardedFor?.split(',')[0]?.trim()
+
+  if (forwardedIp) {
+    return forwardedIp
+  }
+
+  return (
+    getFirstHeaderValue(req.headers['cf-connecting-ip']) ??
+    getFirstHeaderValue(req.headers['x-real-ip']) ??
+    req.socket.remoteAddress ??
+    'unknown'
+  )
+}
+
+function isGuestContactRateLimited(ip: string, now: number = Date.now()): boolean {
+  for (const [entryIp, entry] of guestContactRateLimitByIp.entries()) {
+    if (now - entry.windowStartedAt >= GUEST_CONTACT_RATE_LIMIT_WINDOW_MS) {
+      guestContactRateLimitByIp.delete(entryIp)
+    }
+  }
+
+  const entry = guestContactRateLimitByIp.get(ip)
+
+  if (!entry) {
+    guestContactRateLimitByIp.set(ip, { windowStartedAt: now, count: 1 })
+    return false
+  }
+
+  if (now - entry.windowStartedAt >= GUEST_CONTACT_RATE_LIMIT_WINDOW_MS) {
+    guestContactRateLimitByIp.set(ip, { windowStartedAt: now, count: 1 })
+    return false
+  }
+
+  if (entry.count >= GUEST_CONTACT_RATE_LIMIT_MAX_MESSAGES) {
+    return true
+  }
+
+  entry.count += 1
+  return false
+}
+
 function decodeImageDataUrl(value: string): Buffer | null {
   const match = /^data:image\/(png|jpe?g|webp);base64,([a-zA-Z0-9+/=]+)$/.exec(
     value.trim(),
@@ -1638,6 +1695,87 @@ async function handleUploadsRequest(
   } catch {
     return false
   }
+}
+
+async function handleGuestContactRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/contact/guest') {
+    return false
+  }
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Методът не е позволен.' })
+    return true
+  }
+
+  let body: unknown
+
+  try {
+    body = await readJsonRequestBody(req, GUEST_CONTACT_MAX_JSON_BODY_BYTES)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    const isTooLarge = message.includes('too large')
+
+    sendJsonResponse(res, isTooLarge ? 413 : 400, {
+      ok: false,
+      message: isTooLarge ? 'Заявката е твърде голяма.' : 'Невалидна JSON заявка.',
+    })
+    return true
+  }
+
+  const validation = validateGuestContactPayload(body)
+
+  if (!validation.ok) {
+    if (validation.code === 'honeypot') {
+      sendJsonResponse(res, 200, {
+        ok: true,
+        message: 'Благодарим! Съобщението беше изпратено.',
+      })
+      return true
+    }
+
+    sendJsonResponse(res, 400, { ok: false, message: validation.message })
+    return true
+  }
+
+  const requestIp = getRequestIp(req)
+
+  if (isGuestContactRateLimited(requestIp)) {
+    sendJsonResponse(res, 429, {
+      ok: false,
+      message: 'Достигнахте лимита от 3 съобщения за 30 минути. Моля, опитайте по-късно.',
+    })
+    return true
+  }
+
+  try {
+    const result = await sendGuestContactEmail(validation.value)
+
+    if (!result.ok) {
+      console.error('[contact] Brevo send failed:', result.message)
+      sendJsonResponse(res, 500, {
+        ok: false,
+        message: 'Съобщението не беше изпратено. Моля, опитайте по-късно.',
+      })
+      return true
+    }
+  } catch (error) {
+    console.error('[contact] Unexpected Brevo send error:', error)
+    sendJsonResponse(res, 500, {
+      ok: false,
+      message: 'Съобщението не беше изпратено. Моля, опитайте по-късно.',
+    })
+    return true
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    message: 'Благодарим! Съобщението беше изпратено.',
+  })
+  return true
 }
 
 async function handleAuthRequest(
@@ -3912,6 +4050,10 @@ async function handleHttpRequest(
         roomsByPhase: getGameRuntimeCountsByPhase(roomGameRuntimeRegistry),
       },
     })
+    return
+  }
+
+  if (await handleGuestContactRequest(req, res, requestUrl.pathname)) {
     return
   }
 
