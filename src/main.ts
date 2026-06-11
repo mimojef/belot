@@ -2282,7 +2282,25 @@ lobby = createLobbyFlowController({
       })
       const data = (await response.json()) as { ok: boolean; unreadCount?: number }
       if (response.ok && data.ok && typeof data.unreadCount === 'number') {
-        return { ok: true, unreadCount: data.unreadCount }
+        let unreadCount = data.unreadCount
+
+        if (currentAuthSession?.account.role === 'admin') {
+          try {
+            const guestResponse = await fetch(`${getApiBaseUrl()}/api/admin/guest-contact/messages/unread-count`, {
+              method: 'GET',
+              credentials: 'include',
+            })
+            const guestData = (await guestResponse.json()) as { ok: boolean; unreadCount?: number }
+
+            if (guestResponse.ok && guestData.ok && typeof guestData.unreadCount === 'number') {
+              unreadCount += guestData.unreadCount
+            }
+          } catch {
+            // Keep the existing support unread badge behavior if guest count cannot be loaded.
+          }
+        }
+
+        return { ok: true, unreadCount }
       }
       return { ok: false }
     } catch {
