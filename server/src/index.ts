@@ -17,6 +17,7 @@ import {
 } from './db/authStore.js'
 import { createChatStore } from './db/chatStore.js'
 import { createSupportStore, type SupportMessageSnapshot, type SupportConversationSnapshot } from './db/supportStore.js'
+import { createGuestContactStore } from './db/guestContactStore.js'
 import {
   createCoinPackageStore,
   type CoinPackageStatus,
@@ -192,6 +193,7 @@ setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
 const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databaseFilePath)
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
 const supportStore = await createSupportStore(databaseBootstrap.databaseFilePath)
+const guestContactStore = await createGuestContactStore(databaseBootstrap.databaseFilePath)
 
 function runSupportCleanup(): void {
   const deleted = supportStore.cleanupInactiveConversations()
@@ -1751,10 +1753,17 @@ async function handleGuestContactRequest(
     return true
   }
 
+  const storedMessage = guestContactStore.createGuestContactMessage({
+    ...validation.value,
+    ipAddress: requestIp === 'unknown' ? null : requestIp,
+    userAgent: getFirstHeaderValue(req.headers['user-agent']),
+  })
+
   try {
     const result = await sendGuestContactEmail(validation.value)
 
     if (!result.ok) {
+      guestContactStore.markGuestContactEmailFailed(storedMessage.messageId, result.message)
       console.error('[contact] Brevo send failed:', result.message)
       sendJsonResponse(res, 500, {
         ok: false,
@@ -1762,7 +1771,11 @@ async function handleGuestContactRequest(
       })
       return true
     }
+
+    guestContactStore.markGuestContactEmailSent(storedMessage.messageId)
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    guestContactStore.markGuestContactEmailFailed(storedMessage.messageId, message)
     console.error('[contact] Unexpected Brevo send error:', error)
     sendJsonResponse(res, 500, {
       ok: false,
