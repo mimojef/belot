@@ -37,6 +37,7 @@ import type {
   PrivateRoomSnapshot,
   RoomSeatSnapshot,
   ServerMessage,
+  GuestContactMessageListItem,
   SupportMessageSnapshot,
   SupportConversationSnapshot,
 } from '../network/createGameServerClient'
@@ -54,6 +55,7 @@ export type LobbyFlowScreen =
   | 'matchmaking-room'
   | 'private-rooms'
   | 'support'
+  | 'guest-contact-messages'
 export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
 export type LobbyAuthSession = {
@@ -282,11 +284,21 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; message: string }
     | { ok: false; message: string }
   >
-  onSupportUnreadLoad?: () => Promise<{ ok: true; unreadCount: number } | { ok: false }>
+  onSupportUnreadLoad?: () => Promise<{
+    ok: true
+    unreadCount: number
+    supportUnreadCount?: number
+    guestUnreadCount?: number
+  } | { ok: false }>
   onAdminSupportConversationsLoad?: () => Promise<
     | { ok: true; conversations: SupportConversationSnapshot[] }
     | { ok: false; message: string }
   >
+  onAdminGuestContactMessagesLoad?: () => Promise<
+    | { ok: true; messages: GuestContactMessageListItem[] }
+    | { ok: false; message: string }
+  >
+  onAdminGuestContactMessageRead?: (messageId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminSupportMessagesLoad?: (profileId: string) => Promise<
     | { ok: true; messages: SupportMessageSnapshot[] }
     | { ok: false; message: string }
@@ -480,6 +492,10 @@ type InternalLobbyFlowState = {
   adminSupportReplyLoading: boolean
   adminSupportDeleteConfirmProfileId: string | null
   adminSupportDeleteLoading: boolean
+  adminGuestContactMessages: GuestContactMessageListItem[]
+  adminGuestContactMessagesLoading: boolean
+  adminGuestContactMessagesErrorText: string | null
+  adminGuestContactUnreadCount: number
   supportDeleteConfirm: boolean
   supportDeleteLoading: boolean
   supportAccountTooNewMinutes: number | null
@@ -658,6 +674,10 @@ function createInitialState(): InternalLobbyFlowState {
     adminSupportReplyLoading: false,
     adminSupportDeleteConfirmProfileId: null,
     adminSupportDeleteLoading: false,
+    adminGuestContactMessages: [],
+    adminGuestContactMessagesLoading: false,
+    adminGuestContactMessagesErrorText: null,
+    adminGuestContactUnreadCount: 0,
     supportDeleteConfirm: false,
     supportDeleteLoading: false,
     supportAccountTooNewMinutes: null,
@@ -837,6 +857,7 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/ranking': 'leaderboards',
   '/shop': 'shop',
   '/admin': 'admin',
+  '/admin/guest-contact': 'guest-contact-messages',
   '/friends': 'friends',
   '/chat': 'chat',
   '/terms': 'terms',
@@ -1513,6 +1534,8 @@ export function createLobbyFlowController(
               ? 'admin'
             : state.currentScreen === 'admin-info'
               ? 'admin-info'
+            : state.currentScreen === 'guest-contact-messages'
+              ? 'guest-contact-messages'
             : state.currentScreen === 'terms'
               ? 'terms'
             : state.currentScreen === 'privacy'
@@ -1669,6 +1692,10 @@ export function createLobbyFlowController(
       adminSupportReplyLoading: state.adminSupportReplyLoading,
       adminSupportDeleteConfirmProfileId: state.adminSupportDeleteConfirmProfileId,
       adminSupportDeleteLoading: state.adminSupportDeleteLoading,
+      adminGuestContactMessages: state.adminGuestContactMessages,
+      adminGuestContactMessagesLoading: state.adminGuestContactMessagesLoading,
+      adminGuestContactMessagesErrorText: state.adminGuestContactMessagesErrorText,
+      adminGuestContactUnreadCount: state.adminGuestContactUnreadCount,
       supportDeleteConfirm: state.supportDeleteConfirm,
       supportDeleteLoading: state.supportDeleteLoading,
       supportAccountTooNewMinutes: state.supportAccountTooNewMinutes,
@@ -1788,6 +1815,12 @@ export function createLobbyFlowController(
       },
       onAdminInfoClick: () => {
         void showAdminInfoPanel()
+      },
+      onAdminGuestContactMessagesClick: () => {
+        void showAdminGuestContactMessages()
+      },
+      onAdminGuestContactMessageRead: (messageId) => {
+        void markAdminGuestContactMessageRead(messageId)
       },
       onAdminDailyRewardAdd: (amount) => {
         void addAdminDailyReward(amount)
@@ -2746,6 +2779,52 @@ export function createLobbyFlowController(
       state.dailyRewardTiers = result.tiers
       state.dailyRewardLastAwarded = result.yellowCoinsAwarded
     }
+    render()
+  }
+
+  async function showAdminGuestContactMessages(): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession?.account.role !== 'admin') {
+      state.currentScreen = 'lobby'
+      state.errorText = 'Нямаш достъп до admin панела.'
+      render()
+      return
+    }
+
+    state.currentScreen = 'guest-contact-messages'
+    state.adminGuestContactMessages = []
+    state.adminGuestContactMessagesLoading = true
+    state.adminGuestContactMessagesErrorText = null
+    render()
+
+    const result = await options.onAdminGuestContactMessagesLoad?.()
+
+    if (state.currentScreen !== 'guest-contact-messages') return
+
+    state.adminGuestContactMessagesLoading = false
+    if (result?.ok) {
+      state.adminGuestContactMessages = result.messages
+    } else {
+      state.adminGuestContactMessagesErrorText = result?.message ?? 'Съобщенията от гости временно не са налични.'
+    }
+    render()
+  }
+
+  async function markAdminGuestContactMessageRead(messageId: string): Promise<void> {
+    const message = state.adminGuestContactMessages.find((item) => item.messageId === messageId)
+    if (!message || message.readByAdmin) return
+
+    const result = await options.onAdminGuestContactMessageRead?.(messageId)
+    if (!result?.ok) {
+      state.adminGuestContactMessagesErrorText = result?.message ?? 'Съобщението не беше маркирано като прочетено.'
+      render()
+      return
+    }
+
+    message.readByAdmin = true
+    state.adminGuestContactUnreadCount = Math.max(0, state.adminGuestContactUnreadCount - 1)
+    state.adminGuestContactMessagesErrorText = null
     render()
   }
 
@@ -3818,6 +3897,7 @@ export function createLobbyFlowController(
     leaderboards: '/ranking',
     shop: '/shop',
     admin: '/admin',
+    'guest-contact-messages': '/admin/guest-contact',
     friends: '/friends',
     chat: '/chat',
     terms: '/terms',
@@ -3831,6 +3911,7 @@ export function createLobbyFlowController(
     '/ranking': 'leaderboards',
     '/shop': 'shop',
     '/admin': 'admin',
+    '/admin/guest-contact': 'guest-contact-messages',
     '/friends': 'friends',
     '/chat': 'chat',
     '/terms': 'terms',
@@ -3863,6 +3944,7 @@ export function createLobbyFlowController(
       case 'leaderboards': void showLeaderboardsDirectory(); break
       case 'shop': void showShopPanel(); break
       case 'admin': void showAdminPanel(); break
+      case 'guest-contact-messages': void showAdminGuestContactMessages(); break
       case 'admin-info': void showAdminInfoPanel(); break
       case 'friends': void showFriendsDirectory(); break
       case 'chat': void showChatPanel(); break
@@ -4587,11 +4669,13 @@ export function createLobbyFlowController(
       void (async () => {
         const result = await options.onSupportUnreadLoad?.()
         if (result?.ok) {
-          state.supportUnreadCount = result.unreadCount
+          state.supportUnreadCount = result.supportUnreadCount ?? result.unreadCount
+          state.adminGuestContactUnreadCount = result.guestUnreadCount ?? 0
+          const totalUnread = state.supportUnreadCount + state.adminGuestContactUnreadCount
           const badge = options.root.querySelector<HTMLElement>('[data-support-unread-badge="1"]')
           if (badge) {
-            badge.style.display = result.unreadCount > 0 ? 'flex' : 'none'
-            badge.textContent = result.unreadCount > 0 ? String(result.unreadCount) : ''
+            badge.style.display = totalUnread > 0 ? 'flex' : 'none'
+            badge.textContent = totalUnread > 0 ? String(totalUnread) : ''
           } else {
             render()
           }

@@ -120,6 +120,17 @@ export type SupportConversationSnapshot = {
   updatedAt: string
 }
 
+export type GuestContactMessageListItem = {
+  messageId: string
+  name: string
+  email: string
+  subject: string
+  createdAt: string
+  readByAdmin: boolean
+  emailDeliveryStatus: 'pending' | 'sent' | 'failed'
+  preview: string
+}
+
 export type AdminSettingsSnapshot = {
   signupBonusYellowCoins: number
   profileNameChangePrice: number

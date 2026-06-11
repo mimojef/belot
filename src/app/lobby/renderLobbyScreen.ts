@@ -19,6 +19,7 @@ import type {
   PlayerMissionProgressSnapshot,
   PlayerPublicProfileSnapshot,
   PrivateRoomSnapshot,
+  GuestContactMessageListItem,
   SupportMessageSnapshot,
   SupportConversationSnapshot,
 } from '../network/createGameServerClient'
@@ -91,7 +92,7 @@ export type GuestContactFormInput = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'private-rooms' | 'support' | PublicLegalPageKey
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -236,6 +237,10 @@ export type LobbyScreenState = {
   adminSupportReplyLoading: boolean
   adminSupportDeleteConfirmProfileId: string | null
   adminSupportDeleteLoading: boolean
+  adminGuestContactMessages: GuestContactMessageListItem[]
+  adminGuestContactMessagesLoading: boolean
+  adminGuestContactMessagesErrorText: string | null
+  adminGuestContactUnreadCount: number
   supportDeleteConfirm: boolean
   supportDeleteLoading: boolean
   pwaUpdatePending: boolean
@@ -273,6 +278,7 @@ export type RenderLobbyScreenOptions = {
   onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
   onAdminClick: () => void
   onAdminInfoClick: () => void
+  onAdminGuestContactMessagesClick: () => void
   onAdminDailyRewardAdd: (amount: number) => void
   onAdminDailyRewardRemove: (tierId: string) => void
   onDailyRewardsOpen: () => void
@@ -361,6 +367,7 @@ export type RenderLobbyScreenOptions = {
   onAdminSupportDeleteClick: (profileId: string) => void
   onAdminSupportDeleteCancel: () => void
   onAdminSupportDeleteConfirm: (profileId: string) => void
+  onAdminGuestContactMessageRead: (messageId: string) => void
   onSupportDeleteClick: () => void
   onSupportDeleteCancel: () => void
   onSupportDeleteConfirm: () => void
@@ -995,8 +1002,9 @@ function renderNav(state: LobbyScreenState): string {
   const chatActive = activeView === 'chat'
   const leaderboardsActive = activeView === 'leaderboards'
   const shopActive = activeView === 'shop'
-  const adminActive = activeView === 'admin' || activeView === 'admin-info'
+  const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'guest-contact-messages'
   const lobbyActive = activeView === 'tables'
+  const mailUnreadCount = state.supportUnreadCount + (state.isAdmin ? state.adminGuestContactUnreadCount : 0)
   const incomingFriendRequestsCount =
     state.friendships?.incomingPending.length ?? 0
 
@@ -1205,7 +1213,6 @@ function renderNav(state: LobbyScreenState): string {
                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/><path d="M1 12h2M21 12h2M12 1v2M12 21v2"/></svg>
                   Настройки
                 </button>
-                <div style="height:1px;background:rgba(212,165,32,0.2);margin:0 12px;"></div>
                 <button type="button" data-lobby-nav-admin-info="1" style="
                   display:flex; align-items:center; gap:10px;
                   width:100%; background:none; border:none;
@@ -1223,22 +1230,50 @@ function renderNav(state: LobbyScreenState): string {
               </div>
             </div>
           ` : ''}
-          <button data-lobby-nav-support="1" title="Връзка с екипа на Pika.bg" style="
-            background:none; border:none; cursor:pointer; padding:6px;
-            color:rgba(255,255,255,0.65); position:relative;
-          ">
-            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
-            <span data-support-unread-badge="1" style="
-              position:absolute; top:2px; right:0px;
-              min-width:18px; height:18px; border-radius:9px;
-              background:#ef4444; border:1.5px solid #0a0a0a;
-              display:${state.supportUnreadCount > 0 ? 'flex' : 'none'}; align-items:center; justify-content:center;
-              font-size:10px; font-weight:800; color:#fff;
-              padding:0 4px; box-sizing:border-box;
-              font-family:Inter,system-ui,sans-serif;
-              pointer-events:none;
-            ">${state.supportUnreadCount > 0 ? state.supportUnreadCount : ''}</span>
-          </button>
+          <div style="position:relative;display:flex;align-items:center;" data-admin-mail-wrap="1">
+            <button data-lobby-nav-support="1" title="Връзка с екипа на Pika.bg" style="
+              background:none; border:none; cursor:pointer; padding:6px;
+              color:rgba(255,255,255,0.65); position:relative;
+            ">
+              <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+              <span data-support-unread-badge="1" style="
+                position:absolute; top:2px; right:0px;
+                min-width:18px; height:18px; border-radius:9px;
+                background:#ef4444; border:1.5px solid #0a0a0a;
+                display:${mailUnreadCount > 0 ? 'flex' : 'none'}; align-items:center; justify-content:center;
+                font-size:10px; font-weight:800; color:#fff;
+                padding:0 4px; box-sizing:border-box;
+                font-family:Inter,system-ui,sans-serif;
+                pointer-events:none;
+              ">${mailUnreadCount > 0 ? mailUnreadCount : ''}</span>
+            </button>
+            ${state.isAdmin ? `
+              <div data-admin-mail-dropdown="1" style="
+                display:none;position:absolute;top:100%;right:0;min-width:250px;
+                background:#111111;border:1px solid rgba(212,165,32,0.35);
+                border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,0.72);
+                z-index:1000;overflow:hidden;
+              ">
+                <button type="button" data-lobby-nav-support-users="1" style="
+                  width:100%;display:flex;align-items:center;justify-content:space-between;gap:14px;
+                  border:0;background:none;color:rgba(255,255,255,0.84);padding:13px 14px;
+                  cursor:pointer;text-align:left;font-size:13px;font-weight:800;
+                " onmouseenter="this.style.background='rgba(212,165,32,0.09)';this.style.color='#d4a520'" onmouseleave="this.style.background='none';this.style.color='rgba(255,255,255,0.84)'">
+                  <span>Съобщения от потребители</span>
+                  <span style="min-width:22px;height:22px;border-radius:999px;background:${state.supportUnreadCount > 0 ? '#ef4444' : 'rgba(255,255,255,0.10)'};color:#fff;display:inline-flex;align-items:center;justify-content:center;padding:0 7px;font-size:11px;font-weight:900;">${state.supportUnreadCount}</span>
+                </button>
+                <div style="height:1px;background:rgba(212,165,32,0.18);margin:0 10px;"></div>
+                <button type="button" data-lobby-nav-admin-guest-contact="1" style="
+                  width:100%;display:flex;align-items:center;justify-content:space-between;gap:14px;
+                  border:0;background:none;color:rgba(255,255,255,0.84);padding:13px 14px;
+                  cursor:pointer;text-align:left;font-size:13px;font-weight:800;
+                " onmouseenter="this.style.background='rgba(212,165,32,0.09)';this.style.color='#d4a520'" onmouseleave="this.style.background='none';this.style.color='rgba(255,255,255,0.84)'">
+                  <span>Съобщения от гости</span>
+                  <span style="min-width:22px;height:22px;border-radius:999px;background:${state.adminGuestContactUnreadCount > 0 ? '#ef4444' : 'rgba(255,255,255,0.10)'};color:#fff;display:inline-flex;align-items:center;justify-content:center;padding:0 7px;font-size:11px;font-weight:900;">${state.adminGuestContactUnreadCount}</span>
+                </button>
+              </div>
+            ` : ''}
+          </div>
           <button data-lobby-nav-bell="1" style="
             background:none; border:none; cursor:pointer; padding:6px;
             color:rgba(255,255,255,0.65); position:relative;
@@ -2229,6 +2264,7 @@ function renderQuickActionBadge(count: number): string {
 function renderMobileMenu(state: LobbyScreenState): string {
   const pendingCount = state.dailyMissionsUnclaimedCount + state.pendingFriendRequests.length + getUnclaimedDailyRewardsBadgeCount(state) + state.pendingGiftNotifications.length
   const unreadChatCount = state.chatConversations.filter((conversation) => conversation.unreadCount > 0).length
+  const mailUnreadCount = state.supportUnreadCount + (state.isAdmin ? state.adminGuestContactUnreadCount : 0)
 
   return `
     <header style="
@@ -2297,7 +2333,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
               <button type="button" data-lobby-nav-friends="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('friends', `Приятели${(state.friendships?.incomingPending.length ?? 0) > 0 ? ` (${state.friendships?.incomingPending.length ?? 0})` : ''}`)}</button>
               <button type="button" data-lobby-nav-chat="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('chat', `Чат${unreadChatCount > 0 ? ` (${unreadChatCount})` : ''}`)}</button>
               <button type="button" data-lobby-nav-blocked-players="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('blocked', 'Блокирани')}</button>
-              <button type="button" data-lobby-nav-support="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('support', `Поддръжка${state.supportUnreadCount > 0 ? ` (${state.supportUnreadCount})` : ''}`)}</button>
+              <button type="button" data-lobby-nav-support="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('support', `Поддръжка${mailUnreadCount > 0 ? ` (${mailUnreadCount})` : ''}`)}</button>
               ${state.isAdmin ? `
                 <button type="button" data-lobby-nav-admin="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ настройки')}</button>
                 <button type="button" data-lobby-nav-admin-info="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ информация')}</button>
@@ -2936,6 +2972,8 @@ function renderMobileLobbyScreenContent(
       <main style="padding:12px;">
         ${state.view === 'support'
           ? renderAdminSupportPage(state)
+          : state.view === 'guest-contact-messages'
+          ? renderAdminGuestContactMessagesPage(state, true)
           : state.view === 'private-rooms'
           ? renderPrivateRoomsPage(state)
           : state.view === 'players'
@@ -4800,6 +4838,70 @@ function renderAdminSupportPage(state: LobbyScreenState): string {
   `
 }
 
+function renderAdminGuestContactMessagesPage(state: LobbyScreenState, isMobile = false): string {
+  if (!state.isAdmin) {
+    return `<div style="min-height:520px;display:flex;align-items:center;justify-content:center;color:#fecaca;font-size:15px;font-weight:800;">Нямаш достъп.</div>`
+  }
+
+  const messagesHtml = state.adminGuestContactMessagesLoading ? `
+    <div style="padding:24px;color:#d4a520;font-size:14px;font-weight:900;text-align:center;">Зареждане...</div>
+  ` : state.adminGuestContactMessages.length === 0 ? `
+    <div style="padding:24px;color:rgba(255,255,255,0.56);font-size:14px;font-weight:800;text-align:center;">Няма съобщения от гости.</div>
+  ` : state.adminGuestContactMessages.map((message) => {
+    const subject = message.subject.trim()
+    const statusText = message.readByAdmin ? 'Прочетено' : 'Непрочетено'
+    const statusColor = message.readByAdmin ? '#22c55e' : '#ef4444'
+    return `
+      <article style="
+        display:grid;gap:8px;padding:${isMobile ? '12px' : '14px 16px'};
+        border:1px solid ${message.readByAdmin ? 'rgba(255,255,255,0.08)' : 'rgba(239,68,68,0.34)'};
+        border-radius:8px;background:${message.readByAdmin ? 'rgba(255,255,255,0.035)' : 'rgba(239,68,68,0.075)'};
+      ">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+          <div style="display:grid;gap:3px;min-width:0;">
+            <div style="font-size:15px;font-weight:900;color:#f8fafc;word-break:break-word;">${escapeHtml(message.name)}</div>
+            <div style="font-size:12px;font-weight:800;color:rgba(212,165,32,0.90);word-break:break-all;">${escapeHtml(message.email)}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+            <span style="font-size:11px;font-weight:900;color:${statusColor};border:1px solid ${statusColor};border-radius:999px;padding:4px 8px;">${statusText}</span>
+            <span style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.48);">${formatSupportTime(message.createdAt)}</span>
+            ${message.readByAdmin ? '' : `
+              <button type="button" data-admin-guest-contact-read="${escapeHtml(message.messageId)}" style="
+                height:28px;border:1px solid rgba(212,165,32,0.42);border-radius:999px;
+                background:rgba(212,165,32,0.10);color:#d4a520;
+                padding:0 10px;font-size:11px;font-weight:900;cursor:pointer;
+              ">Маркирай като прочетено</button>
+            `}
+          </div>
+        </div>
+        ${subject ? `<div style="font-size:13px;font-weight:900;color:#ffffff;word-break:break-word;">${escapeHtml(subject)}</div>` : ''}
+        <div style="font-size:13px;font-weight:700;line-height:1.45;color:rgba(255,255,255,0.72);word-break:break-word;">${escapeHtml(message.preview)}</div>
+      </article>
+    `
+  }).join('')
+
+  return `
+    <section style="min-height:520px;display:grid;gap:14px;align-content:start;">
+      <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
+        <div>
+          <div style="font-size:${isMobile ? '22px' : '26px'};line-height:1.05;font-weight:900;color:#f8fafc;">Съобщения от гости</div>
+          <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.56);">Съобщения, изпратени през публичната контактна форма.</div>
+        </div>
+      </div>
+
+      ${state.adminGuestContactMessagesErrorText ? `
+        <div style="border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.22);border-radius:8px;padding:12px;color:#fecaca;font-size:13px;font-weight:800;">
+          ${escapeHtml(state.adminGuestContactMessagesErrorText)}
+        </div>
+      ` : ''}
+
+      <div style="display:grid;gap:10px;">
+        ${messagesHtml}
+      </div>
+    </section>
+  `
+}
+
 function renderPrivateRoomsPage(state: LobbyScreenState): string {
   const hasMyRoom = state.myPrivateRoom !== null
 
@@ -5682,6 +5784,8 @@ export function renderLobbyScreen(
         <div style="max-width: 1640px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;">
           ${state.view === 'support'
             ? renderAdminSupportPage(state)
+            : state.view === 'guest-contact-messages'
+            ? renderAdminGuestContactMessagesPage(state)
             : state.view === 'private-rooms'
             ? renderPrivateRoomsPage(state)
             : state.view === 'players'
@@ -6129,6 +6233,7 @@ export function renderLobbyScreen(
 
   const adminDropdown = root.querySelector<HTMLElement>('[data-admin-dropdown="1"]')
   const adminToggle = root.querySelector<HTMLButtonElement>('[data-lobby-nav-admin-toggle="1"]')
+  const adminMailDropdown = root.querySelector<HTMLElement>('[data-admin-mail-dropdown="1"]')
 
   if (adminToggle && adminDropdown) {
     adminToggle.addEventListener('click', (e) => {
@@ -6154,6 +6259,37 @@ export function renderLobbyScreen(
       if (adminDropdown) adminDropdown.style.display = 'none'
       options.onAdminInfoClick()
     })
+
+  root
+    .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-admin-guest-contact="1"]')
+    .forEach((button) => button.addEventListener('click', () => {
+      if (adminDropdown) adminDropdown.style.display = 'none'
+      if (adminMailDropdown) adminMailDropdown.style.display = 'none'
+      options.onAdminGuestContactMessagesClick()
+    }))
+
+  root
+    .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-support-users="1"]')
+    .forEach((button) => button.addEventListener('click', () => {
+      if (adminMailDropdown) adminMailDropdown.style.display = 'none'
+      options.onSupportClick()
+    }))
+
+  if (adminMailDropdown) {
+    root
+      .querySelector<HTMLButtonElement>('[data-lobby-nav-support="1"]')
+      ?.addEventListener('click', (event) => {
+        event.stopPropagation()
+        const isOpen = adminMailDropdown.style.display !== 'none'
+        adminMailDropdown.style.display = isOpen ? 'none' : 'block'
+      })
+    document.addEventListener('click', () => {
+      adminMailDropdown.style.display = 'none'
+    }, { once: false, capture: true })
+  } else {
+    root.querySelector<HTMLElement>('[data-lobby-nav-support="1"]')
+      ?.addEventListener('click', options.onSupportClick)
+  }
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-nav-friends="1"]')
@@ -6484,9 +6620,6 @@ export function renderLobbyScreen(
       }
     })
   })
-
-  root.querySelector<HTMLElement>('[data-lobby-nav-support="1"]')
-    ?.addEventListener('click', options.onSupportClick)
 
   root.querySelectorAll<HTMLElement>('[data-lobby-nav-guest-contact="1"]')
     .forEach((el) => el.addEventListener('click', options.onGuestContactClick))
@@ -7541,6 +7674,13 @@ export function renderLobbyScreen(
     btn.addEventListener('click', () => {
       const profileId = btn.dataset.adminSupportDeleteConfirm?.trim() ?? ''
       if (profileId) options.onAdminSupportDeleteConfirm(profileId)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-guest-contact-read]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const messageId = btn.dataset.adminGuestContactRead?.trim() ?? ''
+      if (messageId) options.onAdminGuestContactMessageRead(messageId)
     })
   })
 

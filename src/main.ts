@@ -37,6 +37,7 @@ import {
   type MatchRoomSnapshot,
   type PlayerMissionProgressSnapshot,
   type PlayerPublicProfileSnapshot,
+  type GuestContactMessageListItem,
   type SupportMessageSnapshot,
   type SupportConversationSnapshot,
 } from './app/network/createGameServerClient'
@@ -1479,6 +1480,12 @@ type SupportConversationsApiResponse = {
   message?: string
 }
 
+type AdminGuestContactMessagesApiResponse = {
+  ok: boolean
+  messages?: GuestContactMessageListItem[]
+  message?: string
+}
+
 type GuestContactApiResponse = {
   ok: boolean
   message?: string
@@ -1563,6 +1570,41 @@ async function loadAdminSupportConversations(): Promise<
       return { ok: false, message: data.message ?? 'Грешка при зареждане.' }
     }
     return { ok: true, conversations: data.conversations }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadAdminGuestContactMessages(): Promise<
+  | { ok: true; messages: GuestContactMessageListItem[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/guest-contact/messages`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as AdminGuestContactMessagesApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.messages)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане.' }
+    }
+    return { ok: true, messages: data.messages }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function markAdminGuestContactMessageRead(messageId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/guest-contact/messages/${encodeURIComponent(messageId)}/read`,
+      { method: 'PATCH', credentials: 'include' },
+    )
+    const data = (await response.json()) as { ok: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Съобщението не беше маркирано като прочетено.' }
+    }
+    return { ok: true }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
   }
@@ -2282,7 +2324,8 @@ lobby = createLobbyFlowController({
       })
       const data = (await response.json()) as { ok: boolean; unreadCount?: number }
       if (response.ok && data.ok && typeof data.unreadCount === 'number') {
-        let unreadCount = data.unreadCount
+        const supportUnreadCount = data.unreadCount
+        let guestUnreadCount = 0
 
         if (currentAuthSession?.account.role === 'admin') {
           try {
@@ -2293,14 +2336,19 @@ lobby = createLobbyFlowController({
             const guestData = (await guestResponse.json()) as { ok: boolean; unreadCount?: number }
 
             if (guestResponse.ok && guestData.ok && typeof guestData.unreadCount === 'number') {
-              unreadCount += guestData.unreadCount
+              guestUnreadCount = guestData.unreadCount
             }
           } catch {
             // Keep the existing support unread badge behavior if guest count cannot be loaded.
           }
         }
 
-        return { ok: true, unreadCount }
+        return {
+          ok: true,
+          unreadCount: supportUnreadCount + guestUnreadCount,
+          supportUnreadCount,
+          guestUnreadCount,
+        }
       }
       return { ok: false }
     } catch {
@@ -2308,6 +2356,8 @@ lobby = createLobbyFlowController({
     }
   },
   onAdminSupportConversationsLoad: () => loadAdminSupportConversations(),
+  onAdminGuestContactMessagesLoad: () => loadAdminGuestContactMessages(),
+  onAdminGuestContactMessageRead: (messageId) => markAdminGuestContactMessageRead(messageId),
   onAdminSupportMessagesLoad: (profileId) => loadAdminSupportMessages(profileId),
   onAdminSupportReply: (profileId, body) => sendAdminSupportReply(profileId, body),
   onAdminSupportDeleteConversation: (profileId) => archiveAdminSupportConversation(profileId),
@@ -2708,6 +2758,7 @@ const _VALID_PATHS = new Set([
   '/friends',
   '/chat',
   '/admin',
+  '/admin/guest-contact',
   '/terms',
   '/privacy',
   '/contact',
