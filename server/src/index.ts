@@ -599,6 +599,26 @@ function safeSendToConnection(connectionId: ConnectionId, payload: unknown): voi
   sendJsonMessage(socket, payload)
 }
 
+function sendToOpenProfileConnections(profileId: string, payload: unknown): number {
+  let sentCount = 0
+
+  for (const connection of Object.values(serverState.connections)) {
+    if (connection.profileId !== profileId || connection.status !== 'connected') {
+      continue
+    }
+
+    const socket = getSocketByConnectionId(connection.id)
+    if (socket === null || socket.readyState !== WebSocket.OPEN) {
+      continue
+    }
+
+    sendJsonMessage(socket, payload)
+    sentCount += 1
+  }
+
+  return sentCount
+}
+
 function cleanupTempBotsFromRoom(room: ServerRoom): void {
   for (const seat of SERVER_SEAT_ORDER) {
     const participant = room.seats[seat].participant
@@ -2458,11 +2478,8 @@ async function handleProfileLikeRequest(
   }
 
   const likerProfile = playerProgressStore.getPublicProfile(likerProfileId)
-  const recipientConn = Object.values(serverState.connections).find(
-    (c) => c.profileId === likedProfileId && c.status === 'connected',
-  )
-  if (recipientConn && likerProfile) {
-    safeSendToConnection(recipientConn.id, {
+  if (likerProfile) {
+    sendToOpenProfileConnections(likedProfileId, {
       type: 'profile_liked',
       fromProfileId: likerProfileId,
       fromDisplayName: likerProfile.displayName,
@@ -3292,12 +3309,9 @@ async function handleFriendsRequest(
       return true
     }
 
-    const addresseeConn = Object.values(serverState.connections).find(
-      (c) => c.profileId === addresseeProfileId && c.status === 'connected',
-    )
     const requesterProfile = playerProgressStore.getPublicProfile(profileId)
-    if (addresseeConn && requesterProfile) {
-      safeSendToConnection(addresseeConn.id, {
+    if (requesterProfile) {
+      sendToOpenProfileConnections(addresseeProfileId, {
         type: 'friend_request_received',
         friendshipId: result.friendshipId,
         fromProfileId: profileId,
@@ -3413,12 +3427,9 @@ async function handleFriendsRequest(
       const newFriend = result.friendships.friends.find((f) => f.friendshipId === friendshipId)
       const requesterProfileId = newFriend?.profile.profileId ?? null
       if (requesterProfileId) {
-        const requesterConn = Object.values(serverState.connections).find(
-          (c) => c.profileId === requesterProfileId && c.status === 'connected',
-        )
         const accepterProfile = playerProgressStore.getPublicProfile(profileId)
-        if (requesterConn && accepterProfile) {
-          safeSendToConnection(requesterConn.id, {
+        if (accepterProfile) {
+          sendToOpenProfileConnections(requesterProfileId, {
             type: 'friend_request_accepted',
             fromProfileId: profileId,
             fromDisplayName: accepterProfile.displayName,
@@ -4687,14 +4698,9 @@ wsServer.on('connection', (socket, request) => {
         const partnerParticipant = room.seats[partnerSeat]?.participant ?? null
         const partnerProfileId =
           partnerParticipant?.identity.profileId ?? partnerParticipant?.publicProfile?.profileId ?? null
-        const partnerConnection = partnerProfileId
-          ? Object.values(serverState.connections).find(
-              (candidate) => candidate.profileId === partnerProfileId && candidate.status === 'connected',
-            ) ?? null
-          : null
 
-        if (partnerConnection !== null) {
-          safeSendToConnection(partnerConnection.id, {
+        if (partnerProfileId !== null) {
+          sendToOpenProfileConnections(partnerProfileId, {
             type: 'partner_rating_submitted',
             roomId: message.roomId,
             ratingValue: message.ratingValue,
