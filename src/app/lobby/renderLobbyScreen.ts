@@ -2867,6 +2867,41 @@ function renderPublicLegalPage(pageKey: PublicLegalPageKey, isMobile = false): s
 
     return `<p style="${style}">${escapeHtml(block).replace(/\n/g, '<br>')}</p>`
   }).join('')
+  const contactActionHtml = pageKey === 'contact'
+    ? `
+      <button type="button" data-public-contact-mail="1" style="
+        margin-top:${isMobile ? '12px' : '18px'};
+        min-height:${isMobile ? '44px' : '48px'};
+        padding:0 ${isMobile ? '16px' : '20px'};
+        border:1px solid rgba(244,201,91,0.72);
+        border-radius:8px;
+        background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+        color:#080808;
+        font-size:${isMobile ? '13px' : '14px'};
+        font-weight:900;
+        cursor:pointer;
+        display:inline-flex;
+        align-items:center;
+        justify-content:center;
+        gap:10px;
+        box-shadow:0 8px 22px rgba(212,165,32,0.16);
+      ">
+        <svg xmlns="http://www.w3.org/2000/svg" width="${isMobile ? '19' : '21'}" height="${isMobile ? '19' : '21'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+        Пиши на екипа
+      </button>
+      <style>
+        [data-public-contact-mail="1"]:hover {
+          border-color:#ffe08a !important;
+          background:linear-gradient(180deg,#ffe08a 0%,#d9a11d 100%) !important;
+          box-shadow:0 10px 28px rgba(244,201,91,0.26) !important;
+          transform:translateY(-1px);
+        }
+        [data-public-contact-mail="1"]:active {
+          transform:translateY(0);
+        }
+      </style>
+    `
+    : ''
 
   return `
     <section style="
@@ -2885,6 +2920,7 @@ function renderPublicLegalPage(pageKey: PublicLegalPageKey, isMobile = false): s
         <article style="overflow-wrap:anywhere;">
           ${contentHtml}
         </article>
+        ${contactActionHtml}
       </div>
     </section>
   `
@@ -3010,6 +3046,35 @@ function renderFooter(onlinePlayersCount: number): string {
           display:none !important;
         }
       </style>
+    </footer>
+  `
+}
+
+function renderMobileFooter(): string {
+  return `
+    <footer style="
+      margin:18px 12px 24px;
+      border-top:1px solid rgba(255,255,255,0.07);
+      padding-top:14px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      text-align:center;
+    ">
+      <style>
+        [data-lobby-mobile-footer-legal-link="1"]:hover {
+          color:#f4c95b !important;
+          text-decoration:underline !important;
+          text-underline-offset:3px;
+        }
+      </style>
+      <nav aria-label="Правни връзки" style="display:flex;align-items:center;justify-content:center;gap:0;flex-wrap:wrap;">
+        <a data-lobby-mobile-footer-legal-link="1" href="/terms" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Общи условия</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/privacy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Политика за поверителност</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/contact" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Контакти</a>
+      </nav>
     </footer>
   `
 }
@@ -5500,6 +5565,7 @@ export function renderLobbyScreen(
         </div>
       ` : ''}
       ${renderMobileLobbyScreenContent(state, profileName, canStartSearch)}
+      ${renderMobileFooter()}
 
       ${state.isSearching ? `
         <div style="
@@ -6424,6 +6490,18 @@ export function renderLobbyScreen(
 
   root.querySelectorAll<HTMLElement>('[data-lobby-nav-guest-contact="1"]')
     .forEach((el) => el.addEventListener('click', options.onGuestContactClick))
+
+  root.querySelectorAll<HTMLButtonElement>('[data-public-contact-mail="1"]')
+    .forEach((button) => {
+      button.addEventListener('click', () => {
+        if (state.profile.profileId !== null) {
+          options.onSupportClick()
+          return
+        }
+
+        options.onGuestContactClick()
+      })
+    })
 
   root.querySelector<HTMLButtonElement>('[data-support-popup-close="1"]')
     ?.addEventListener('click', options.onSupportClose)
