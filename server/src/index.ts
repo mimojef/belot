@@ -1791,6 +1791,104 @@ async function handleGuestContactRequest(
   return true
 }
 
+function decodeGuestContactMessageId(value: string): string | null {
+  try {
+    const messageId = decodeURIComponent(value).trim()
+    return messageId || null
+  } catch {
+    return null
+  }
+}
+
+async function handleAdminGuestContactMessagesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const messageMatch = /^\/api\/admin\/guest-contact\/messages\/([^/]+)$/.exec(pathname)
+  const readMatch = /^\/api\/admin\/guest-contact\/messages\/([^/]+)\/read$/.exec(pathname)
+
+  if (
+    pathname !== '/api/admin/guest-contact/messages/unread-count' &&
+    pathname !== '/api/admin/guest-contact/messages' &&
+    messageMatch === null &&
+    readMatch === null
+  ) {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session?.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+    return true
+  }
+
+  if (pathname === '/api/admin/guest-contact/messages/unread-count') {
+    if (req.method !== 'GET') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      unreadCount: guestContactStore.getUnreadCount(),
+    })
+    return true
+  }
+
+  if (pathname === '/api/admin/guest-contact/messages') {
+    if (req.method !== 'GET') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      messages: guestContactStore.listMessages(),
+    })
+    return true
+  }
+
+  if (messageMatch !== null && req.method === 'GET') {
+    const messageId = decodeGuestContactMessageId(messageMatch[1])
+    if (messageId === null) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден messageId.' })
+      return true
+    }
+
+    const message = guestContactStore.getMessageById(messageId)
+    if (message === null) {
+      sendJsonResponse(res, 404, { ok: false, message: 'Съобщението не беше намерено.' })
+      return true
+    }
+
+    sendJsonResponse(res, 200, { ok: true, message })
+    return true
+  }
+
+  if (readMatch !== null && req.method === 'PATCH') {
+    const messageId = decodeGuestContactMessageId(readMatch[1])
+    if (messageId === null) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден messageId.' })
+      return true
+    }
+
+    const message = guestContactStore.markMessageRead(messageId)
+    if (message === null) {
+      sendJsonResponse(res, 404, { ok: false, message: 'Съобщението не беше намерено.' })
+      return true
+    }
+
+    sendJsonResponse(res, 200, { ok: true, message })
+    return true
+  }
+
+  sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+  return true
+}
+
 async function handleAuthRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -4163,6 +4261,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminMatchRoomsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminGuestContactMessagesRequest(req, res, requestUrl.pathname)) {
     return
   }
 
