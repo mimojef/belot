@@ -16,7 +16,7 @@ import {
   createLobbyFlowController,
   type LobbyFlowController,
 } from './app/lobby/createLobbyFlowController'
-import type { AvatarCropSelection } from './app/lobby/renderLobbyScreen'
+import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
 import {
   createGameServerClient,
   type AdminSettingsSnapshot,
@@ -1479,6 +1479,11 @@ type SupportConversationsApiResponse = {
   message?: string
 }
 
+type GuestContactApiResponse = {
+  ok: boolean
+  message?: string
+}
+
 async function loadSupportMessages(): Promise<
   | { ok: true; messages: SupportMessageSnapshot[] }
   | { ok: false; message: string }
@@ -1517,6 +1522,28 @@ async function sendSupportMessage(body: string): Promise<
       return { ok: false, message: 'Грешка при изпращане.' }
     }
     return { ok: true, messages: data.messages }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function sendGuestContactMessage(input: GuestContactFormInput): Promise<
+  | { ok: true; message: string }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/contact/guest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    const data = (await response.json()) as GuestContactApiResponse
+
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Съобщението не беше изпратено.' }
+    }
+
+    return { ok: true, message: data.message ?? 'Благодарим! Съобщението беше изпратено.' }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
   }
@@ -2246,6 +2273,7 @@ lobby = createLobbyFlowController({
   onPrivateRoomInviteRespond: (inviteId, accept) => { client.respondPrivateRoomInvite(inviteId, accept) },
   onSupportMessagesLoad: () => loadSupportMessages(),
   onSupportSend: (body) => sendSupportMessage(body),
+  onGuestContactSend: (input) => sendGuestContactMessage(input),
   onSupportUnreadLoad: async () => {
     try {
       const response = await fetch(`${getApiBaseUrl()}/api/support/unread`, {

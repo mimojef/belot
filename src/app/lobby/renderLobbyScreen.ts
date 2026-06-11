@@ -82,6 +82,14 @@ export type AvatarCropSelection = {
   size: number
 }
 
+export type GuestContactFormInput = {
+  name: string
+  email: string
+  subject: string
+  message: string
+  website: string
+}
+
 export type LobbyScreenState = {
   view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'private-rooms' | 'support' | PublicLegalPageKey
   blockedPlayersPopupOpen: boolean
@@ -216,6 +224,10 @@ export type LobbyScreenState = {
   supportSendingLoading: boolean
   supportErrorText: string | null
   supportAccountTooNewMinutes: number | null
+  guestContactPopupOpen: boolean
+  guestContactSending: boolean
+  guestContactErrorText: string | null
+  guestContactSuccessText: string | null
   adminSupportConversations: SupportConversationSnapshot[]
   adminSupportConversationsLoading: boolean
   adminSupportSelectedProfileId: string | null
@@ -341,6 +353,9 @@ export type RenderLobbyScreenOptions = {
   onSupportClick: () => void
   onSupportClose: () => void
   onSupportSend: (body: string) => void
+  onGuestContactClick: () => void
+  onGuestContactClose: () => void
+  onGuestContactSubmit: (input: GuestContactFormInput) => void
   onAdminSupportConversationClick: (profileId: string) => void
   onAdminSupportReply: (profileId: string, body: string) => void
   onAdminSupportDeleteClick: (profileId: string) => void
@@ -1256,6 +1271,16 @@ function renderNav(state: LobbyScreenState): string {
             Изход
           </button>
         ` : `
+          <button data-lobby-nav-guest-contact="1" title="Връзка с екипа на Pika.bg" style="
+            background:none; border:none; cursor:pointer; padding:6px;
+            color:rgba(255,255,255,0.65); position:relative;
+            display:flex;align-items:center;justify-content:center;
+          "
+          onmouseenter="this.style.color='#d4a520'"
+          onmouseleave="this.style.color='rgba(255,255,255,0.65)'"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+          </button>
           <button data-lobby-auth-login="1" style="
             display:flex; align-items:center; gap:8px;
             background: transparent;
@@ -2236,7 +2261,14 @@ function renderMobileMenu(state: LobbyScreenState): string {
             <img src="/assets/lobby/nav-icon-preview/nav-notifications-white.png" alt="" style="width:22px;height:24px;display:block;object-fit:contain;">
             ${pendingCount > 0 ? `<span style="position:absolute;right:4px;top:4px;min-width:16px;height:16px;border-radius:8px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;">${pendingCount}</span>` : ''}
           </button>
-        ` : ''}
+        ` : `
+          <button data-lobby-nav-guest-contact="1" aria-label="Контакти" style="
+            width:42px;height:42px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;
+            background:#0b0b0b;color:rgba(255,255,255,0.78);position:relative;display:flex;align-items:center;justify-content:center;
+          ">
+            <svg xmlns="http://www.w3.org/2000/svg" width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+          </button>
+        `}
 
         <details data-lobby-mobile-menu="1" ${mobileMenuOpen ? 'open' : ''} style="position:relative;z-index:160;">
           <summary data-lobby-mobile-menu-summary="1" style="
@@ -2272,6 +2304,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
               ` : ''}
               <button type="button" data-lobby-nav-logout="1" style="${mobileMenuButtonStyle('rgba(248,113,113,0.16)', '#fecaca')}">${mobileMenuSvgItemContent('logout', 'Изход')}</button>
             ` : `
+              <button type="button" data-lobby-nav-guest-contact="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('support', 'Контакти')}</button>
               <button type="button" data-lobby-auth-login="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('login', 'Вход')}</button>
               <button type="button" data-lobby-auth-register="1" style="${mobileMenuButtonStyle('linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)', '#080808')}">${mobileMenuSvgItemContent('login', 'Регистрация')}</button>
             `}
@@ -4408,6 +4441,101 @@ function renderSupportPopup(state: LobbyScreenState): string {
   `
 }
 
+function renderGuestContactPopup(state: LobbyScreenState): string {
+  if (!state.guestContactPopupOpen) return ''
+
+  const inputStyle = `
+    width:100%;box-sizing:border-box;border-radius:8px;border:1px solid rgba(255,255,255,0.14);
+    background:#141414;color:#f8fafc;padding:10px 12px;font-size:14px;font-weight:700;
+    outline:none;font-family:inherit;
+  `
+
+  const labelStyle = 'display:grid;gap:6px;font-size:12px;font-weight:900;color:rgba(212,165,32,0.92);letter-spacing:0.04em;text-transform:uppercase;'
+
+  return `
+    <div data-guest-contact-popup-backdrop="1" style="
+      position:fixed;inset:0;z-index:12000;
+      background:rgba(0,0,0,0.72);
+      display:flex;align-items:center;justify-content:center;
+      padding:20px;box-sizing:border-box;
+    ">
+      <div style="
+        width:520px;max-width:100%;
+        background:#0d0d0d;border:1px solid rgba(212,165,32,0.35);border-radius:16px;
+        display:flex;flex-direction:column;overflow:hidden;
+        box-shadow:0 16px 64px rgba(0,0,0,0.8);
+      " onclick="event.stopPropagation()">
+        <div style="
+          display:flex;align-items:center;justify-content:space-between;
+          padding:16px 20px;border-bottom:1px solid rgba(255,255,255,0.10);
+          flex-shrink:0;
+        ">
+          <div>
+            <div style="font-size:15px;font-weight:900;color:#f8fafc;">Контакти</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.45);font-weight:600;margin-top:2px;">Пиши до екипа на Pika.bg</div>
+          </div>
+          <button type="button" data-guest-contact-popup-close="1" style="
+            background:none;border:none;cursor:pointer;padding:6px;
+            color:rgba(255,255,255,0.5);border-radius:6px;
+            display:flex;align-items:center;justify-content:center;
+          ">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
+        <div style="padding:18px 20px;display:grid;gap:14px;">
+          ${state.guestContactSuccessText ? `
+            <div style="border:1px solid rgba(34,197,94,0.34);border-radius:10px;background:rgba(20,83,45,0.30);padding:14px;color:#bbf7d0;font-size:14px;font-weight:800;line-height:1.45;text-align:center;">
+              ${escapeHtml(state.guestContactSuccessText)}
+            </div>
+            <button type="button" data-guest-contact-popup-close="1" style="
+              height:44px;border:0;border-radius:8px;
+              background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+              color:#080808;font-size:14px;font-weight:900;cursor:pointer;
+            ">Затвори</button>
+          ` : `
+            <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.58);font-weight:700;">
+              Опиши накратко въпроса или проблема. Ще използваме имейла само за обратна връзка.
+            </div>
+
+            ${state.guestContactErrorText ? `
+              <div style="border:1px solid rgba(248,113,113,0.34);border-radius:8px;background:rgba(127,29,29,0.34);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;">
+                ${escapeHtml(state.guestContactErrorText)}
+              </div>
+            ` : ''}
+
+            <form data-guest-contact-form="1" style="display:grid;gap:12px;">
+              <input name="website" tabindex="-1" autocomplete="off" style="display:none;position:absolute;left:-9999px;">
+              <label style="${labelStyle}">
+                Име
+                <input name="name" type="text" maxlength="80" required autocomplete="name" style="${inputStyle}">
+              </label>
+              <label style="${labelStyle}">
+                Имейл за отговор
+                <input name="email" type="email" maxlength="160" required autocomplete="email" style="${inputStyle}">
+              </label>
+              <label style="${labelStyle}">
+                Тема
+                <input name="subject" type="text" maxlength="120" autocomplete="off" style="${inputStyle}">
+              </label>
+              <label style="${labelStyle}">
+                Съобщение
+                <textarea name="message" rows="5" minlength="10" maxlength="3000" required style="${inputStyle}resize:vertical;min-height:118px;line-height:1.45;"></textarea>
+              </label>
+              <button type="submit" ${state.guestContactSending ? 'disabled' : ''} style="
+                height:46px;border:0;border-radius:8px;
+                background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+                color:#080808;font-size:14px;font-weight:900;cursor:pointer;
+                opacity:${state.guestContactSending ? '0.62' : '1'};
+              ">${state.guestContactSending ? 'Изпращане...' : 'Изпрати съобщение'}</button>
+            </form>
+          `}
+        </div>
+      </div>
+    </div>
+  `
+}
+
 function renderAdminSupportPage(state: LobbyScreenState): string {
   const sorted = [...state.adminSupportConversations].sort((a, b) => {
     if (a.unreadByAdmin > 0 && b.unreadByAdmin === 0) return -1
@@ -5407,6 +5535,7 @@ export function renderLobbyScreen(
       ${renderBlockLimitPopup(state)}
       ${renderNoPlayersModal(state)}
       ${renderSupportPopup(state)}
+      ${renderGuestContactPopup(state)}
     </div>
     ${renderGiftCoinsModal(state)}
     ${renderGiftSuccessModal(state)}
@@ -5596,6 +5725,7 @@ export function renderLobbyScreen(
       ${renderBlockLimitPopup(state)}
       ${renderNoPlayersModal(state)}
       ${renderSupportPopup(state)}
+      ${renderGuestContactPopup(state)}
     </div>
     ${renderGiftCoinsModal(state)}
     ${renderGiftSuccessModal(state)}
@@ -6292,11 +6422,20 @@ export function renderLobbyScreen(
   root.querySelector<HTMLElement>('[data-lobby-nav-support="1"]')
     ?.addEventListener('click', options.onSupportClick)
 
+  root.querySelectorAll<HTMLElement>('[data-lobby-nav-guest-contact="1"]')
+    .forEach((el) => el.addEventListener('click', options.onGuestContactClick))
+
   root.querySelector<HTMLButtonElement>('[data-support-popup-close="1"]')
     ?.addEventListener('click', options.onSupportClose)
 
   root.querySelector<HTMLElement>('[data-support-popup-backdrop="1"]')
     ?.addEventListener('click', options.onSupportClose)
+
+  root.querySelectorAll<HTMLButtonElement>('[data-guest-contact-popup-close="1"]')
+    .forEach((btn) => btn.addEventListener('click', options.onGuestContactClose))
+
+  root.querySelector<HTMLElement>('[data-guest-contact-popup-backdrop="1"]')
+    ?.addEventListener('click', options.onGuestContactClose)
 
   root.querySelector<HTMLButtonElement>('[data-lobby-nav-back="1"]')
     ?.addEventListener('click', options.onLobbyClick)
@@ -7276,6 +7415,21 @@ export function renderLobbyScreen(
         options.onSupportSend(body)
         form.reset()
       }
+    })
+
+  root.querySelector<HTMLFormElement>('[data-guest-contact-form="1"]')
+    ?.addEventListener('submit', (e) => {
+      e.preventDefault()
+      const form = e.currentTarget as HTMLFormElement
+      const data = new FormData(form)
+
+      options.onGuestContactSubmit({
+        name: String(data.get('name') ?? '').trim(),
+        email: String(data.get('email') ?? '').trim(),
+        subject: String(data.get('subject') ?? '').trim(),
+        message: String(data.get('message') ?? '').trim(),
+        website: String(data.get('website') ?? '').trim(),
+      })
     })
 
   root.querySelectorAll<HTMLButtonElement>('[data-admin-support-conv]').forEach((btn) => {

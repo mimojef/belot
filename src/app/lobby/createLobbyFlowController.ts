@@ -8,6 +8,7 @@ import {
   syncProfilePopup,
   clearProfileEditorPendingState,
   type AvatarCropSelection,
+  type GuestContactFormInput,
   type LobbyAuthModalMode,
   type LobbyScreenState,
   type ProfilePopupCallbacks,
@@ -277,6 +278,10 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; messages: SupportMessageSnapshot[] }
     | { ok: false; code?: string; remainingMinutes?: number; message?: string }
   >
+  onGuestContactSend?: (input: GuestContactFormInput) => Promise<
+    | { ok: true; message: string }
+    | { ok: false; message: string }
+  >
   onSupportUnreadLoad?: () => Promise<{ ok: true; unreadCount: number } | { ok: false }>
   onAdminSupportConversationsLoad?: () => Promise<
     | { ok: true; conversations: SupportConversationSnapshot[] }
@@ -463,6 +468,10 @@ type InternalLobbyFlowState = {
   supportLoading: boolean
   supportSendingLoading: boolean
   supportErrorText: string | null
+  guestContactPopupOpen: boolean
+  guestContactSending: boolean
+  guestContactErrorText: string | null
+  guestContactSuccessText: string | null
   adminSupportConversations: SupportConversationSnapshot[]
   adminSupportConversationsLoading: boolean
   adminSupportSelectedProfileId: string | null
@@ -637,6 +646,10 @@ function createInitialState(): InternalLobbyFlowState {
     supportLoading: false,
     supportSendingLoading: false,
     supportErrorText: null,
+    guestContactPopupOpen: false,
+    guestContactSending: false,
+    guestContactErrorText: null,
+    guestContactSuccessText: null,
     adminSupportConversations: [],
     adminSupportConversationsLoading: false,
     adminSupportSelectedProfileId: null,
@@ -1644,6 +1657,10 @@ export function createLobbyFlowController(
       supportLoading: state.supportLoading,
       supportSendingLoading: state.supportSendingLoading,
       supportErrorText: state.supportErrorText,
+      guestContactPopupOpen: state.guestContactPopupOpen,
+      guestContactSending: state.guestContactSending,
+      guestContactErrorText: state.guestContactErrorText,
+      guestContactSuccessText: state.guestContactSuccessText,
       adminSupportConversations: state.adminSupportConversations,
       adminSupportConversationsLoading: state.adminSupportConversationsLoading,
       adminSupportSelectedProfileId: state.adminSupportSelectedProfileId,
@@ -2171,6 +2188,39 @@ export function createLobbyFlowController(
           } else {
             state.supportErrorText = result?.message ?? 'Грешка при изпращане.'
           }
+          render()
+        })()
+      },
+      onGuestContactClick: () => {
+        state.guestContactPopupOpen = true
+        state.guestContactErrorText = null
+        state.guestContactSuccessText = null
+        render()
+      },
+      onGuestContactClose: () => {
+        state.guestContactPopupOpen = false
+        state.guestContactSending = false
+        state.guestContactErrorText = null
+        state.guestContactSuccessText = null
+        render()
+      },
+      onGuestContactSubmit: (input) => {
+        if (state.guestContactSending) return
+        state.guestContactSending = true
+        state.guestContactErrorText = null
+        state.guestContactSuccessText = null
+        render()
+        void (async () => {
+          const result = await options.onGuestContactSend?.(input)
+          state.guestContactSending = false
+
+          if (result?.ok) {
+            state.guestContactSuccessText = result.message || 'Благодарим! Съобщението беше изпратено.'
+            state.guestContactErrorText = null
+          } else {
+            state.guestContactErrorText = result?.message ?? 'Съобщението не беше изпратено. Моля, опитайте по-късно.'
+          }
+
           render()
         })()
       },
