@@ -383,6 +383,7 @@ export type PartnerRatingSubmittedMessage = {
   type: 'partner_rating_submitted'
   roomId: RoomId
   ratingValue: number
+  raterDisplayName: string
 }
 
 export type MatchmakingJoinedMessage = {

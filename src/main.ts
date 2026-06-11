@@ -44,6 +44,7 @@ import {
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
 import { createFriendRequestNotification } from './ui/notifications/friendRequestNotification'
+import { createPartnerRatingNotification } from './ui/notifications/partnerRatingNotification'
 
 const rootElementCandidate = document.querySelector<HTMLDivElement>('#app')
 
@@ -95,6 +96,14 @@ const friendRequestNotification = createFriendRequestNotification({
     lobby?.removePendingFriendRequest(friendshipId)
     await submitFriendRequestAction(friendshipId, 'reject')
   },
+})
+
+const partnerRatingNotifContainer = document.createElement('div')
+partnerRatingNotifContainer.id = 'global-partner-rating-notifications'
+document.body.appendChild(partnerRatingNotifContainer)
+
+const partnerRatingNotification = createPartnerRatingNotification({
+  container: partnerRatingNotifContainer,
 })
 
 const SERVER_RESTART_WAIT_MESSAGE = 'Изчаква се рестарт на сървъра.'
@@ -2507,9 +2516,16 @@ function removeLandingOverlay(): void {
   document.body.style.overflow = ''
 }
 
+function playPlayerSeatFillSound(): void {
+  const audio = new Audio('/audio/ui/player-seat-fill.mp3')
+  audio.volume = 0.6
+  void audio.play().catch(() => {/* autoplay policy */})
+}
+
 function showCoinsGiftedPopup(amount: number, fromDisplayName: string): void {
   const existing = document.getElementById('coins-gifted-popup')
   existing?.remove()
+  playPlayerSeatFillSound()
 
   const host = document.createElement('div')
   host.id = 'coins-gifted-popup'
@@ -2646,6 +2662,14 @@ client = createGameServerClient({
         fromProfileId: message.fromProfileId,
         fromDisplayName: message.fromDisplayName,
         fromAvatarUrl: message.fromAvatarUrl,
+      })
+      return
+    }
+
+    if (message.type === 'partner_rating_submitted') {
+      partnerRatingNotification.show({
+        raterDisplayName: message.raterDisplayName,
+        ratingValue: message.ratingValue,
       })
       return
     }

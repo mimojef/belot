@@ -622,6 +622,7 @@ export type PartnerRatingSubmittedMessage = {
   type: 'partner_rating_submitted'
   roomId: string
   ratingValue: number
+  raterDisplayName: string
 }
 
 export type RoomSnapshotMessage = {

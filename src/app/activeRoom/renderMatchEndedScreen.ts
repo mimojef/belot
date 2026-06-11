@@ -93,7 +93,10 @@ function renderPlayerTile(seat: RoomSeatSnapshot, hasVotedReplay = false, hasVot
     >
       ${hasVotedReplay ? `<div style="position:absolute;top:7px;left:7px;width:22px;height:22px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;color:#ffffff;z-index:2;">${REPLAY_ICON_SVG}</div>` : ''}
       ${hasVotedLeave ? `<div style="position:absolute;top:7px;left:7px;width:22px;height:22px;border-radius:50%;background:#ef4444;display:flex;align-items:center;justify-content:center;color:#ffffff;z-index:2;">${LEAVE_ICON_SVG}</div>` : ''}
-      <div style="position:relative;width:116px;height:116px;flex:0 0 116px;">
+      <div
+        ${seat.isOccupied ? `data-profile-seat-btn="${seat.seat}" title="Виж профила на ${escapeHtml(displayName)}"` : ''}
+        style="position:relative;width:116px;height:116px;flex:0 0 116px;${seat.isOccupied ? 'cursor:pointer;' : ''}"
+      >
         <div
           style="
             width:100%;
@@ -262,7 +265,10 @@ function renderMobilePlayerTile(
     >
       ${hasVotedReplay ? `<div style="position:absolute;top:5px;left:5px;width:19px;height:19px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;color:#ffffff;z-index:2;">${REPLAY_ICON_SVG}</div>` : ''}
       ${hasVotedLeave ? `<div style="position:absolute;top:5px;left:5px;width:19px;height:19px;border-radius:50%;background:#ef4444;display:flex;align-items:center;justify-content:center;color:#ffffff;z-index:2;">${LEAVE_ICON_SVG}</div>` : ''}
-      <div style="position:relative;width:46px;height:46px;flex:0 0 46px;">
+      <div
+        ${seat.isOccupied ? `data-profile-seat-btn="${seat.seat}" title="Виж профила на ${escapeHtml(displayName)}"` : ''}
+        style="position:relative;width:46px;height:46px;flex:0 0 46px;${seat.isOccupied ? 'cursor:pointer;' : ''}"
+      >
         <div
           style="
             width:100%;

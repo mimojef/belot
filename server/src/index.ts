@@ -997,6 +997,13 @@ function isRoomAtMatchEndedPhase(room: ServerRoom): boolean {
   )
 }
 
+function getPartnerSeat(seat: Seat): Seat {
+  if (seat === 'bottom') return 'top'
+  if (seat === 'top') return 'bottom'
+  if (seat === 'left') return 'right'
+  return 'left'
+}
+
 function shouldApplyTableExitPenalty(room: ServerRoom): boolean {
   const stakeAmount = room.config.stakeAmount ?? null
   const phase = room.game.phase
@@ -4674,11 +4681,27 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        safeSendToConnection(connection.id, {
-          type: 'partner_rating_submitted',
-          roomId: message.roomId,
-          ratingValue: message.ratingValue,
-        })
+        const raterSeat = latestConnection.currentSeat
+        const partnerSeat = getPartnerSeat(raterSeat)
+        const raterParticipant = room.seats[raterSeat]?.participant ?? null
+        const partnerParticipant = room.seats[partnerSeat]?.participant ?? null
+        const partnerProfileId =
+          partnerParticipant?.identity.profileId ?? partnerParticipant?.publicProfile?.profileId ?? null
+        const partnerConnection = partnerProfileId
+          ? Object.values(serverState.connections).find(
+              (candidate) => candidate.profileId === partnerProfileId && candidate.status === 'connected',
+            ) ?? null
+          : null
+
+        if (partnerConnection !== null) {
+          safeSendToConnection(partnerConnection.id, {
+            type: 'partner_rating_submitted',
+            roomId: message.roomId,
+            ratingValue: message.ratingValue,
+            raterDisplayName:
+              raterParticipant?.identity.displayName?.trim() || 'Партньорът ти',
+          })
+        }
         return
       }
 
