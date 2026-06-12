@@ -17,6 +17,7 @@ export type RenderBiddingScreenOptions = {
   showBidPopup: boolean
   animateBidPopup: boolean
   showBotTakeover: boolean
+  stageScale: number
 }
 
 export function getBidActionLabel(action: RoomBidActionSnapshot): string {
@@ -208,10 +209,12 @@ function renderBidPopup(
   validActions: RoomValidBidActionsSnapshot,
   isPendingSubmission: boolean,
   shouldAnimateEnter: boolean,
+  stageScale: number,
 ): string {
   const disabled = isPendingSubmission
   const opacity = disabled ? '0.7' : '1'
   const filter = disabled ? 'saturate(0.92)' : 'none'
+  const enterScale = stageScale * (shouldAnimateEnter ? 0.96 : 1)
 
   const suits = validActions.suits
 
@@ -221,12 +224,14 @@ function renderBidPopup(
       data-bidding-popup-enter="${shouldAnimateEnter ? '1' : '0'}"
       data-bidding-popup-final-opacity="${opacity}"
       data-bidding-popup-final-filter="${filter}"
+      data-bidding-popup-stage-scale="${stageScale}"
       style="
         position:fixed;
-        bottom:260px;
+        bottom:${260 * stageScale}px;
         left:50%;
-        transform:translateX(-50%) scale(${shouldAnimateEnter ? '0.96' : '1'});
-        width:min(88vw, 400px);
+        transform:translateX(-50%) scale(${enterScale});
+        transform-origin:bottom center;
+        width:400px;
         padding:5px;
         border-radius:14px;
         background:rgba(10,10,10,0.92);
@@ -331,11 +336,11 @@ function renderBotTakeoverPopup(): string {
 }
 
 export function createBiddingInteractionHtml(options: RenderBiddingScreenOptions): string {
-  const { biddingSnapshot, isPendingSubmission, showBidPopup, animateBidPopup, showBotTakeover } = options
+  const { biddingSnapshot, isPendingSubmission, showBidPopup, animateBidPopup, showBotTakeover, stageScale } = options
 
   const popupHtml =
     showBidPopup && biddingSnapshot.canSubmitBid && biddingSnapshot.validActions
-      ? renderBidPopup(biddingSnapshot.validActions, isPendingSubmission, animateBidPopup)
+      ? renderBidPopup(biddingSnapshot.validActions, isPendingSubmission, animateBidPopup, stageScale)
       : ''
 
   const botTakeoverHtml = showBotTakeover ? renderBotTakeoverPopup() : ''

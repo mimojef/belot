@@ -1361,8 +1361,10 @@ export function createActiveRoomFlowController(
     return Object.keys(result).length > 0 ? result : null
   }
 
-  function renderEmojiPickerHtml(): string {
+  function renderEmojiPickerHtml(stageScale: number): string {
     const isPhoneLayout = isPhoneLayoutViewport()
+    const uiScale = isPhoneLayout ? 1 : stageScale
+    const uiScaleKey = `${isPhoneLayout ? 'phone' : 'desktop'}:${uiScale.toFixed(3)}`
     const rows: string[] = []
     for (let i = 1; i <= EMOJI_COUNT; i++) {
       const id = String(i).padStart(2, '0')
@@ -1386,10 +1388,13 @@ export function createActiveRoomFlowController(
     return `
       <div
         data-emoji-picker="1"
+        data-reaction-ui-scale="${uiScaleKey}"
         style="
           position:fixed;
           bottom:${isPhoneLayout ? `${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT + 8}px` : '76px'};
           right:${isPhoneLayout ? '14px' : '16px'};
+          transform:scale(${uiScale});
+          transform-origin:bottom right;
           z-index:9999;
           background:rgba(20,20,24,0.96);
           border:1px solid rgba(255,255,255,0.12);
@@ -1407,8 +1412,10 @@ export function createActiveRoomFlowController(
     `
   }
 
-  function renderPhrasePickerHtml(): string {
+  function renderPhrasePickerHtml(stageScale: number): string {
     const isPhoneLayout = isPhoneLayoutViewport()
+    const uiScale = isPhoneLayout ? 1 : stageScale
+    const uiScaleKey = `${isPhoneLayout ? 'phone' : 'desktop'}:${uiScale.toFixed(3)}`
     const rows = PHRASE_REACTIONS.map((phrase) => `
       <button
         type="button"
@@ -1438,11 +1445,13 @@ export function createActiveRoomFlowController(
     return `
       <div
         data-phrase-picker="1"
+        data-reaction-ui-scale="${uiScaleKey}"
         style="
           position:fixed;
           bottom:${isPhoneLayout ? `${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT + 8}px` : '76px'};
           right:${isPhoneLayout ? '14px' : '16px'};
-          transform:none;
+          transform:scale(${uiScale});
+          transform-origin:bottom right;
           z-index:9999;
           width:${isPhoneLayout ? 'min(360px, calc(100vw - 28px))' : '420px'};
           max-height:${isPhoneLayout ? '52vh' : 'none'};
@@ -1463,24 +1472,42 @@ export function createActiveRoomFlowController(
     `
   }
 
-  function ensureEmojiButton(isScoring: boolean): void {
+  function ensureEmojiButton(isScoring: boolean, stageScale: number): void {
     if (isScoring || !activeRoomState) {
       removeEmojiButton()
       return
     }
 
+    const isPhoneLayout = isPhoneLayoutViewport()
+    const uiScale = isPhoneLayout ? 1 : stageScale
+    const uiScaleKey = `${isPhoneLayout ? 'phone' : 'desktop'}:${uiScale.toFixed(3)}`
+    const emojiToggle = document.body.querySelector<HTMLButtonElement>('[data-emoji-toggle="1"]')
+    const phraseToggle = document.body.querySelector<HTMLButtonElement>('[data-phrase-toggle="1"]')
+
+    if (emojiToggle && emojiToggle.dataset.reactionUiScale !== uiScaleKey) {
+      emojiToggle.remove()
+      document.body.querySelector('[data-emoji-picker="1"]')?.remove()
+    }
+
+    if (phraseToggle && phraseToggle.dataset.reactionUiScale !== uiScaleKey) {
+      phraseToggle.remove()
+      document.body.querySelector('[data-phrase-picker="1"]')?.remove()
+    }
+
     if (!document.body.querySelector('[data-emoji-toggle="1"]')) {
-      const isPhoneLayout = isPhoneLayoutViewport()
       document.body.insertAdjacentHTML('beforeend', `
         <button
           type="button"
           data-emoji-toggle="1"
+          data-reaction-ui-scale="${uiScaleKey}"
           style="
             position:fixed;
             bottom:${isPhoneLayout ? '5px' : '16px'};
             right:${isPhoneLayout ? '18px' : '16px'};
             z-index:9998;
             width:${isPhoneLayout ? '40px' : '80px'};height:${isPhoneLayout ? '40px' : '80px'};
+            transform:scale(${uiScale});
+            transform-origin:bottom right;
             border:0;border-radius:50%;
             background:rgba(20,20,24,0.92);
             border:2px solid rgba(212,165,32,0.80);
@@ -1499,16 +1526,16 @@ export function createActiveRoomFlowController(
           phrasePickerOpen = false
           document.body.querySelector('[data-phrase-picker="1"]')?.remove()
         }
-        syncEmojiPickerPanel()
+        syncEmojiPickerPanel(stageScale)
       })
     }
 
     if (!document.body.querySelector('[data-phrase-toggle="1"]')) {
-      const isPhoneLayout = isPhoneLayoutViewport()
       document.body.insertAdjacentHTML('beforeend', `
         <button
           type="button"
           data-phrase-toggle="1"
+          data-reaction-ui-scale="${uiScaleKey}"
           aria-label="Фрази"
           style="
             position:fixed;
@@ -1516,6 +1543,8 @@ export function createActiveRoomFlowController(
             right:${isPhoneLayout ? '64px' : '108px'};
             z-index:9998;
             width:${isPhoneLayout ? '40px' : '80px'};height:${isPhoneLayout ? '40px' : '80px'};
+            transform:scale(${uiScale});
+            transform-origin:bottom right;
             border:0;border-radius:50%;
             background:rgba(20,20,24,0.92);
             border:2px solid rgba(212,165,32,0.80);
@@ -1566,7 +1595,7 @@ export function createActiveRoomFlowController(
           emojiPickerOpen = false
           document.body.querySelector('[data-emoji-picker="1"]')?.remove()
         }
-        syncPhrasePickerPanel()
+        syncPhrasePickerPanel(stageScale)
       })
     }
   }
@@ -1580,10 +1609,17 @@ export function createActiveRoomFlowController(
     phrasePickerOpen = false
   }
 
-  function syncEmojiPickerPanel(): void {
-    const existing = document.body.querySelector('[data-emoji-picker="1"]')
+  function syncEmojiPickerPanel(stageScale: number): void {
+    let existing = document.body.querySelector('[data-emoji-picker="1"]')
+    const isPhoneLayout = isPhoneLayoutViewport()
+    const uiScale = isPhoneLayout ? 1 : stageScale
+    const uiScaleKey = `${isPhoneLayout ? 'phone' : 'desktop'}:${uiScale.toFixed(3)}`
+    if (emojiPickerOpen && existing && existing.getAttribute('data-reaction-ui-scale') !== uiScaleKey) {
+      existing.remove()
+      existing = null
+    }
     if (emojiPickerOpen && !existing) {
-      document.body.insertAdjacentHTML('beforeend', renderEmojiPickerHtml())
+      document.body.insertAdjacentHTML('beforeend', renderEmojiPickerHtml(stageScale))
       document.body.querySelectorAll<HTMLButtonElement>('[data-emoji-pick]').forEach((btn) => {
         btn.addEventListener('click', () => {
           const emojiId = btn.getAttribute('data-emoji-pick')
@@ -1598,10 +1634,17 @@ export function createActiveRoomFlowController(
     }
   }
 
-  function syncPhrasePickerPanel(): void {
-    const existing = document.body.querySelector('[data-phrase-picker="1"]')
+  function syncPhrasePickerPanel(stageScale: number): void {
+    let existing = document.body.querySelector('[data-phrase-picker="1"]')
+    const isPhoneLayout = isPhoneLayoutViewport()
+    const uiScale = isPhoneLayout ? 1 : stageScale
+    const uiScaleKey = `${isPhoneLayout ? 'phone' : 'desktop'}:${uiScale.toFixed(3)}`
+    if (phrasePickerOpen && existing && existing.getAttribute('data-reaction-ui-scale') !== uiScaleKey) {
+      existing.remove()
+      existing = null
+    }
     if (phrasePickerOpen && !existing) {
-      document.body.insertAdjacentHTML('beforeend', renderPhrasePickerHtml())
+      document.body.insertAdjacentHTML('beforeend', renderPhrasePickerHtml(stageScale))
       document.body.querySelectorAll<HTMLButtonElement>('[data-phrase-pick]').forEach((btn) => {
         btn.addEventListener('click', () => {
           const phraseId = btn.getAttribute('data-phrase-pick')
@@ -1655,9 +1698,10 @@ export function createActiveRoomFlowController(
       return
     }
 
+    const stageScale = Number.parseFloat(popup.dataset.biddingPopupStageScale ?? '1') || 1
     popup.style.pointerEvents = 'none'
     popup.style.opacity = '0.72'
-    popup.style.transform = 'translateX(-50%) scale(0.985)'
+    popup.style.transform = `translateX(-50%) scale(${stageScale * 0.985})`
     popup.style.filter = 'saturate(0.9)'
 
     popup.querySelectorAll<HTMLButtonElement>('button').forEach((button) => {
@@ -1682,7 +1726,8 @@ export function createActiveRoomFlowController(
       }
 
       popup.style.opacity = popup.dataset.biddingPopupFinalOpacity ?? '1'
-      popup.style.transform = 'translateX(-50%) scale(1)'
+      const stageScale = Number.parseFloat(popup.dataset.biddingPopupStageScale ?? '1') || 1
+      popup.style.transform = `translateX(-50%) scale(${stageScale})`
       popup.style.filter = popup.dataset.biddingPopupFinalFilter ?? 'none'
     })
   }
@@ -2218,18 +2263,21 @@ export function createActiveRoomFlowController(
             emojiBubbles: getEmojiBubblesForRender(),
             phraseBubbles: getPhraseBubblesForRender(),
           })
+          const cuttingRenderSelectionKey = cuttingAnimation.activeSelectionKey !== null
+            ? `${cuttingAnimation.activeSelectionKey}|scale:${stageScale.toFixed(3)}`
+            : null
 
           if (
             cuttingAnimation.isAnimating &&
             cuttingAnimation.activeSelectionKey !== null &&
-            cuttingAnimation.renderedSelectionKey === cuttingAnimation.activeSelectionKey
+            cuttingAnimation.renderedSelectionKey === cuttingRenderSelectionKey
           ) {
             patchEmojiOnlyInPanels(cuttingPanelsHtml)
             return
           }
 
           cuttingVisualRoot.innerHTML = cuttingScreenHtml
-          cuttingAnimation.renderedSelectionKey = cuttingAnimation.activeSelectionKey
+          cuttingAnimation.renderedSelectionKey = cuttingRenderSelectionKey
           syncSeatPanels(cuttingPanelsHtml)
           return
         }
@@ -2307,7 +2355,9 @@ export function createActiveRoomFlowController(
       }))
 
       if (cutAnimationForRender !== null) {
-        cuttingAnimation.renderedSelectionKey = cuttingAnimation.activeSelectionKey
+        cuttingAnimation.renderedSelectionKey = cuttingAnimation.activeSelectionKey !== null
+          ? `${cuttingAnimation.activeSelectionKey}|scale:${stageScale.toFixed(3)}`
+          : null
       }
     } else if (isShowingAnyDealPhase) {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
@@ -2501,6 +2551,7 @@ export function createActiveRoomFlowController(
       if (
         isUsingFirstThreeOverlay &&
         firstThreeOverlay.phaseKey === dealingAnimation.activePhaseKey &&
+        firstThreeOverlay.stageScale === stageScale &&
         firstThreeOverlay.element !== null &&
         firstThreeOverlay.element.isConnected
       ) {
@@ -2510,6 +2561,7 @@ export function createActiveRoomFlowController(
       if (
         isUsingNextTwoOverlay &&
         nextTwoOverlay.phaseKey === dealNextTwoAnimation.activePhaseKey &&
+        nextTwoOverlay.stageScale === stageScale &&
         nextTwoOverlay.element !== null &&
         nextTwoOverlay.element.isConnected
       ) {
@@ -2519,6 +2571,7 @@ export function createActiveRoomFlowController(
       if (
         isUsingLastThreeOverlay &&
         lastThreeOverlay.phaseKey === dealLastThreeAnimation.activePhaseKey &&
+        lastThreeOverlay.stageScale === stageScale &&
         lastThreeOverlay.element !== null &&
         lastThreeOverlay.element.isConnected
       ) {
@@ -2708,6 +2761,7 @@ export function createActiveRoomFlowController(
         showBidPopup,
         animateBidPopup,
         showBotTakeover: false,
+        stageScale,
       })
 
       const biddingErrorHtml = activeRoomState.errorText
@@ -3306,9 +3360,9 @@ export function createActiveRoomFlowController(
       `
     }
 
-    ensureEmojiButton(Boolean(isShowingScoringPhase || isShowingMatchEndedPhase))
-    syncEmojiPickerPanel()
-    syncPhrasePickerPanel()
+    ensureEmojiButton(Boolean(isShowingScoringPhase || isShowingMatchEndedPhase), stageScale)
+    syncEmojiPickerPanel(stageScale)
+    syncPhrasePickerPanel(stageScale)
     appendLeaveControls()
     syncPersistentBotTakeoverPopup()
 

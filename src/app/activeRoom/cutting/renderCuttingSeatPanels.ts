@@ -657,6 +657,18 @@ function getBubblePlacement(
   }
 }
 
+function getPhraseBubblePlacement(
+  visualSeat: Seat,
+  offsetIndex: number,
+): string {
+  if (visualSeat === 'bottom') {
+    const bottomPx = 22 + offsetIndex * 72
+    return `left:380px;bottom:${bottomPx}px;transform:none;`
+  }
+
+  return getBubblePlacement(visualSeat, offsetIndex).wrapperStyle
+}
+
 function renderBidBubble(
   visualSeat: Seat,
   bubble: SeatBidBubble,
@@ -841,7 +853,7 @@ function renderPhraseBubble(
   const fadeOutStart = Math.round(((totalMs - 420) / totalMs) * 100)
   const keyframes = `@keyframes phb-${visualSeat}-${offsetIndex}{0%{opacity:0;transform:translateY(4px) scale(0.98)}${fadeInEnd}%{opacity:1;transform:translateY(0) scale(1)}${fadeOutStart}%{opacity:1;transform:translateY(0) scale(1)}100%{opacity:0;transform:translateY(-3px) scale(0.98)}}`
 
-  const { wrapperStyle } = getBubblePlacement(visualSeat, offsetIndex)
+  const wrapperStyle = getPhraseBubblePlacement(visualSeat, offsetIndex)
   const elapsed = Math.min(bubble.elapsedMs, totalMs)
   const delay = -elapsed / 1000
 

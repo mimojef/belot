@@ -1,11 +1,12 @@
 export type DealPacketOverlayState = {
   element: HTMLDivElement | null
   phaseKey: string | null
+  stageScale: number | null
   startedAt: number
 }
 
 export function createDealPacketOverlayState(): DealPacketOverlayState {
-  return { element: null, phaseKey: null, startedAt: 0 }
+  return { element: null, phaseKey: null, stageScale: null, startedAt: 0 }
 }
 
 export function mountDealPacketOverlay(
@@ -17,7 +18,12 @@ export function mountDealPacketOverlay(
   stageHeight: number,
   host: HTMLElement = document.body,
 ): void {
-  if (state.phaseKey === phaseKey && state.element !== null && state.element.isConnected) return
+  if (
+    state.phaseKey === phaseKey &&
+    state.stageScale === stageScale &&
+    state.element !== null &&
+    state.element.isConnected
+  ) return
   unmountDealPacketOverlay(state)
 
   const wrapper = document.createElement('div')
@@ -36,6 +42,7 @@ export function mountDealPacketOverlay(
 
   state.element = wrapper as HTMLDivElement
   state.phaseKey = phaseKey
+  state.stageScale = stageScale
   state.startedAt = performance.now()
 }
 
@@ -43,6 +50,7 @@ export function unmountDealPacketOverlay(state: DealPacketOverlayState): void {
   state.element?.remove()
   state.element = null
   state.phaseKey = null
+  state.stageScale = null
   state.startedAt = 0
 }
 

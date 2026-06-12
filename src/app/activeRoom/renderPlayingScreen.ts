@@ -1763,7 +1763,11 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
 
     const emojiKey = emojiBubbles ? JSON.stringify(Object.keys(emojiBubbles).sort()) : 'null'
     const phraseKey = phraseBubbles ? JSON.stringify(Object.keys(phraseBubbles).sort()) : 'null'
-    const fullSeatPanelKey = seatPanelKey + '|emoji:' + emojiKey + '|phrase:' + phraseKey
+    const fullSeatPanelKey =
+      seatPanelKey +
+      `|scale:${stageScale.toFixed(3)}` +
+      '|emoji:' + emojiKey +
+      '|phrase:' + phraseKey
 
     if (fullSeatPanelKey !== cache.lastSeatPanelKey) {
       cache.lastSeatPanelKey = fullSeatPanelKey
