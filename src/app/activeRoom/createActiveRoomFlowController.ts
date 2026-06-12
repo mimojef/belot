@@ -162,6 +162,7 @@ export function createActiveRoomFlowController(
   let matchEndedPrizeAnimatedTimerId: number | null = null
   let replayStakeEffectShown = false
   let initialStakeEffectShown = false
+  let shouldSilenceNextBiddingSnapshot = false
   let matchEndedCountdownDeadlineAt: number | null = null
 
   function getSeatGender(seat: Seat): RoomSeatSnapshot['gender'] {
@@ -3173,6 +3174,16 @@ export function createActiveRoomFlowController(
       activeRoomState.stake = message.stakeAmount as MatchStake
     }
 
+    if (shouldSilenceNextBiddingSnapshot) {
+      const biddingSnapshot = activeRoomState.game?.bidding ?? null
+      if (biddingSnapshot) {
+        biddingUiState.lastKnownEntriesCount = biddingSnapshot.entries.length
+        biddingUiState.wasMyTurn = biddingSnapshot.canSubmitBid
+        biddingUiState.pendingBidSent = false
+      }
+      shouldSilenceNextBiddingSnapshot = false
+    }
+
     renderActiveRoomScreen(
       cuttingAnimation.isAnimating ||
         dealingAnimation.isAnimating ||
@@ -3190,6 +3201,7 @@ export function createActiveRoomFlowController(
     clearScoringCountdownTicker()
     clearReactionCountdownAudioTicker()
     clearBiddingUiState()
+    shouldSilenceNextBiddingSnapshot = true
     lastKnownWinningBid = null
     matchEndedSoundPlayed = false
     matchEndedPrizeAnimated = false
