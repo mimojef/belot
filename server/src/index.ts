@@ -82,6 +82,7 @@ import {
   SUPPORTED_MATCH_STAKES,
   setSupportedMatchStakes,
   type MatchStake,
+  type MatchmakingQueueEntry,
 } from './matchmaking/matchmakingTypes.js'
 import { removeQueueEntryByConnectionId } from './matchmaking/removeQueueEntryByConnectionId.js'
 import {
@@ -1080,6 +1081,29 @@ function getQueueCountsByStake(): Record<string, number> {
   return counts
 }
 
+function createQueuedPlayerPreview(entry: MatchmakingQueueEntry): {
+  id: string
+  name: string
+  avatarUrl: string | null
+  isBot?: boolean
+} {
+  return {
+    id: `queued-${entry.entryId}`,
+    name: entry.displayName.trim() || 'Играч',
+    avatarUrl: entry.publicProfile?.avatarUrl ?? null,
+    isBot: false,
+  }
+}
+
+function createQueuedPlayerPreviews(
+  entries: MatchmakingQueueEntry[],
+  exceptConnectionId: ConnectionId,
+): Array<{ id: string; name: string; avatarUrl: string | null; isBot?: boolean }> {
+  return entries
+    .filter((entry) => entry.connectionId !== exceptConnectionId)
+    .map(createQueuedPlayerPreview)
+}
+
 function removeConnectionFromMatchmaking(connectionId: ConnectionId): boolean {
   const existingEntry = getQueueEntryByConnectionId(
     matchmakingState.queueEntries,
@@ -1155,6 +1179,7 @@ function sendMatchmakingStatusToConnection(
     remainingMs: Math.max(0, countdownEndsAt - now),
     totalDurationMs,
     previewBotDisplayNames,
+    queuedPlayerPreviews: createQueuedPlayerPreviews(searchingEntries, connectionId),
     ...(localStakeDeducted === true ? { localStakeDeducted: true as const } : {}),
   })
 }
@@ -1210,6 +1235,10 @@ function processMatchmakingUnsafe(): void {
 
     if (stakeResult.ok) {
       markMatchmakingEntriesStakePaid([entry.entryId])
+      const searchingEntries = getSearchingEntriesByStake(
+        matchmakingState.queueEntries,
+        entry.stake,
+      ).sort((a, b) => a.joinedAt - b.joinedAt)
       safeSendToConnection(entry.connectionId, {
         type: 'matchmaking_status',
         stake: entry.stake,
@@ -1217,6 +1246,7 @@ function processMatchmakingUnsafe(): void {
         requiredPlayers: MATCH_PLAYERS_REQUIRED,
         countdownEndsAt: entry.expiresAt,
         remainingMs: Math.max(0, entry.expiresAt - earlyDebitNow),
+        queuedPlayerPreviews: createQueuedPlayerPreviews(searchingEntries, entry.connectionId),
         localStakeDeducted: true,
       })
     } else {
@@ -5020,14 +5050,12 @@ wsServer.on('connection', (socket, request) => {
           safeSendToConnection(connection.id, {
             type: 'matchmaking_joined',
             stake: existingEntry.stake,
-            queuedPlayers: getSearchingEntriesByStake(
-              matchmakingState.queueEntries,
-              existingEntry.stake,
-            ).length,
+            queuedPlayers: searchingEntries.length,
             requiredPlayers: MATCH_PLAYERS_REQUIRED,
             countdownEndsAt: existingEntry.expiresAt,
             remainingMs: Math.max(0, existingEntry.expiresAt - Date.now()),
             previewBotDisplayNames,
+            queuedPlayerPreviews: createQueuedPlayerPreviews(searchingEntries, connection.id),
           })
 
           sendMatchmakingStatusToConnection(connection.id, existingEntry.stake)
@@ -5085,15 +5113,13 @@ wsServer.on('connection', (socket, request) => {
         safeSendToConnection(connection.id, {
           type: 'matchmaking_joined',
           stake: queuedEntryAfterStakeCollection.stake,
-          queuedPlayers: getSearchingEntriesByStake(
-            matchmakingState.queueEntries,
-            queuedEntryAfterStakeCollection.stake,
-          ).length,
+          queuedPlayers: searchingEntries.length,
           requiredPlayers: MATCH_PLAYERS_REQUIRED,
           countdownEndsAt: queuedEntryAfterStakeCollection.expiresAt,
           remainingMs: Math.max(0, queuedEntryAfterStakeCollection.expiresAt - Date.now()),
           totalDurationMs: queuedEntryAfterStakeCollection.expiresAt - queuedEntryAfterStakeCollection.joinedAt,
           previewBotDisplayNames,
+          queuedPlayerPreviews: createQueuedPlayerPreviews(searchingEntries, connection.id),
         })
 
         broadcastMatchmakingStatusForStake(queuedEntryAfterStakeCollection.stake)

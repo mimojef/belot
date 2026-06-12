@@ -649,6 +649,13 @@ export type ChatMessageReceivedMessage = {
   senderProfileId: string
 }
 
+export type MatchmakingQueuedPlayerPreview = {
+  id: string
+  name: string
+  avatarUrl: string | null
+  isBot?: boolean
+}
+
 export type MatchmakingJoinedMessage = {
   type: 'matchmaking_joined'
   stake: MatchStake
@@ -658,6 +665,7 @@ export type MatchmakingJoinedMessage = {
   remainingMs: number
   totalDurationMs?: number
   previewBotDisplayNames?: string[]
+  queuedPlayerPreviews?: MatchmakingQueuedPlayerPreview[]
 }
 
 export type MatchmakingStatusMessage = {
@@ -669,6 +677,7 @@ export type MatchmakingStatusMessage = {
   remainingMs: number
   totalDurationMs?: number
   previewBotDisplayNames?: string[]
+  queuedPlayerPreviews?: MatchmakingQueuedPlayerPreview[]
   localStakeDeducted?: true
 }
 

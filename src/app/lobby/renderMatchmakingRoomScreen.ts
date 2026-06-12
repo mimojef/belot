@@ -27,6 +27,7 @@ type MatchmakingRoomSlot = {
 }
 
 type MatchmakingRoomSlotPosition = 'top' | 'right' | 'bottom' | 'left'
+type OtherMatchmakingRoomSlotPosition = Exclude<MatchmakingRoomSlotPosition, 'bottom'>
 
 type PositionedMatchmakingRoomSlot = {
   position: MatchmakingRoomSlotPosition
@@ -35,6 +36,7 @@ type PositionedMatchmakingRoomSlot = {
 
 const DEFAULT_COUNTDOWN_TOTAL_MS = 15000
 const ROOM_SIZE = 4
+const OTHER_SLOT_POSITIONS: OtherMatchmakingRoomSlotPosition[] = ['top', 'right', 'left']
 
 const BACKGROUND_IMAGE_SRC = '/assets/lobby/matchmaking-room-bg.webp'
 const MOBILE_BACKGROUND = `
@@ -73,12 +75,39 @@ function formatAmount(value: number): string {
   return new Intl.NumberFormat('bg-BG').format(value)
 }
 
+function getInitialLetter(value: string): string {
+  return value.trim().charAt(0).toUpperCase() || '?'
+}
+
 function createEmptySlot(): MatchmakingRoomSlot {
   return {
     kind: 'empty',
     name: 'Чакаме...',
     avatarUrl: null,
   }
+}
+
+function hashText(value: string): number {
+  let hash = 0
+
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash * 31 + value.charCodeAt(i)) >>> 0
+  }
+
+  return hash
+}
+
+function getStableOtherSlotOrder(
+  localPlayerId: string,
+  joinedPlayers: MatchmakingRoomPlayer[],
+): OtherMatchmakingRoomSlotPosition[] {
+  const hashSource = [localPlayerId, ...joinedPlayers.map((player) => player.id)].join('|')
+  const startIndex = hashText(hashSource) % OTHER_SLOT_POSITIONS.length
+
+  return [
+    ...OTHER_SLOT_POSITIONS.slice(startIndex),
+    ...OTHER_SLOT_POSITIONS.slice(0, startIndex),
+  ]
 }
 
 function createPositionedSlots(
@@ -93,6 +122,15 @@ function createPositionedSlots(
     name: player.name,
     avatarUrl: player.avatarUrl ?? null,
   }))
+  const otherSlotOrder = getStableOtherSlotOrder(params.localPlayer.id, joinedPlayers)
+  const assignedOtherSlots = new Map<OtherMatchmakingRoomSlotPosition, MatchmakingRoomSlot>()
+
+  otherSlots.forEach((slot, index) => {
+    const position = otherSlotOrder[index]
+    if (position) {
+      assignedOtherSlots.set(position, slot)
+    }
+  })
 
   const localSlot: MatchmakingRoomSlot = {
     kind: 'local',
@@ -101,10 +139,10 @@ function createPositionedSlots(
   }
 
   return [
-    { position: 'top', slot: otherSlots[0] ?? createEmptySlot() },
-    { position: 'right', slot: otherSlots[1] ?? createEmptySlot() },
+    { position: 'top', slot: assignedOtherSlots.get('top') ?? createEmptySlot() },
+    { position: 'right', slot: assignedOtherSlots.get('right') ?? createEmptySlot() },
     { position: 'bottom', slot: localSlot },
-    { position: 'left', slot: otherSlots[2] ?? createEmptySlot() },
+    { position: 'left', slot: assignedOtherSlots.get('left') ?? createEmptySlot() },
   ]
 }
 
@@ -124,29 +162,11 @@ function renderSlotIcon(slot: MatchmakingRoomSlot): string {
     `
   }
 
-  if (slot.kind === 'bot') {
-    return `
-      <span class="mm-bot-icon" aria-hidden="true">
-        <span class="mm-bot-antenna"></span>
-        <span class="mm-bot-head">
-          <span></span>
-          <span></span>
-        </span>
-        <span class="mm-bot-mouth"></span>
-      </span>
-    `
-  }
-
   if (slot.kind === 'local') {
     return '<span class="mm-spade-icon" aria-hidden="true">♠</span>'
   }
 
-  return `
-    <span class="mm-person-icon" aria-hidden="true">
-      <span></span>
-      <span></span>
-    </span>
-  `
+  return `<span class="mm-initial-avatar" aria-hidden="true">${escapeHtml(getInitialLetter(slot.name))}</span>`
 }
 
 function getSlotTitle(slot: MatchmakingRoomSlot): string {
@@ -515,6 +535,12 @@ function renderMobileMatchmakingRoomScreen(
           transform:translateY(2px);
         }
 
+        .mm-mobile-slot-icon .mm-initial-avatar {
+          width:100%;
+          height:100%;
+          font-size:23px;
+        }
+
         .mm-mobile-slot-icon .mm-person-icon,
         .mm-mobile-slot-icon .mm-bot-icon {
           transform:scale(0.72);
@@ -609,6 +635,24 @@ function renderMobileMatchmakingRoomScreen(
           display:block;
           color:var(--mm-gold);
           text-shadow:0 2px 10px rgba(212,165,32,0.28);
+        }
+
+        .mm-initial-avatar {
+          width:58px;
+          height:58px;
+          border-radius:50%;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          background:
+            radial-gradient(circle at 35% 26%, rgba(255,244,196,0.92), rgba(212,165,32,0.92) 36%, rgba(86,59,10,0.94) 100%);
+          border:1px solid rgba(250,204,21,0.48);
+          box-shadow:inset 0 0 18px rgba(0,0,0,0.36), 0 0 18px rgba(212,165,32,0.18);
+          color:#111827;
+          font-size:28px;
+          line-height:1;
+          font-weight:950;
+          text-shadow:0 1px 0 rgba(255,255,255,0.35);
         }
 
         .mm-person-icon {

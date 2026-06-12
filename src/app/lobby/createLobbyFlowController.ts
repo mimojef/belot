@@ -365,6 +365,7 @@ type InternalLobbyFlowState = {
   lowCoinsModalOpen: boolean
   serverRoomSeats: RoomSeatSnapshot[] | null
   serverYourSeat: RoomSeatSnapshot['seat'] | null
+  serverQueuedPlayerPreviews: MatchmakingRoomPlayer[]
   serverPreviewBotDisplayNames: string[]
   players: PlayerPublicProfileSnapshot[]
   playersLoading: boolean
@@ -563,6 +564,7 @@ function createInitialState(): InternalLobbyFlowState {
     lowCoinsModalOpen: false,
     serverRoomSeats: null,
     serverYourSeat: null,
+    serverQueuedPlayerPreviews: [],
     serverPreviewBotDisplayNames: [],
     players: [],
     playersLoading: false,
@@ -830,6 +832,17 @@ function createAutoFillPreviewPlayer(
     avatarUrl: null,
     isBot: normalizedDisplayName !== WAITING_PLAYER_DISPLAY_NAME,
   }
+}
+
+function normalizeQueuedPlayerPreviews(
+  previews: Array<{ id: string; name: string; avatarUrl?: string | null; isBot?: boolean }> | undefined,
+): MatchmakingRoomPlayer[] {
+  return (previews ?? []).map((player, index) => ({
+    id: player.id.trim() || `queued-player-${index + 1}`,
+    name: player.name.trim() || WAITING_PLAYER_DISPLAY_NAME,
+    avatarUrl: player.avatarUrl ?? null,
+    isBot: player.isBot === true,
+  }))
 }
 
 function findRelationshipByProfileId(
@@ -1141,14 +1154,16 @@ export function createLobbyFlowController(
 
     ensureAutoFillPreviewPlayersCount(autoFillCount)
 
-    const actualPlayers = Array.from({ length: actualOtherPlayers }, (_, index) => ({
+    const previewPlayers = state.serverQueuedPlayerPreviews.slice(0, actualOtherPlayers)
+    const placeholderCount = Math.max(0, actualOtherPlayers - previewPlayers.length)
+    const placeholderPlayers = Array.from({ length: placeholderCount }, (_, index) => ({
       id: `queued-preview-${index + 1}`,
       name: WAITING_PLAYER_DISPLAY_NAME,
       avatarUrl: null,
       isBot: false,
     }))
 
-    return [...actualPlayers, ...autoFillPreviewPlayers.slice(0, autoFillCount)]
+    return [...previewPlayers, ...placeholderPlayers, ...autoFillPreviewPlayers.slice(0, autoFillCount)]
   }
 
   function createDisplayedLocalPlayer(): MatchmakingRoomPlayer {
@@ -1192,6 +1207,7 @@ export function createLobbyFlowController(
     state.countdownEndsAt = null
     state.totalCountdownMs = DEFAULT_COUNTDOWN_MS
     state.serverPreviewBotDisplayNames = []
+    state.serverQueuedPlayerPreviews = []
     clearServerRoomSnapshot()
     stopWaitingRoomActivity()
     resetFinalFillSequence()
@@ -3811,6 +3827,7 @@ export function createLobbyFlowController(
     state.countdownEndsAt = Date.now() + optimisticCountdownMs
     state.totalCountdownMs = optimisticCountdownMs
     state.serverPreviewBotDisplayNames = []
+    state.serverQueuedPlayerPreviews = []
     clearServerRoomSnapshot()
     resetFinalFillSequence()
 
@@ -4110,6 +4127,7 @@ export function createLobbyFlowController(
       state.totalCountdownMs = message.totalDurationMs ?? DEFAULT_COUNTDOWN_MS
       state.errorText = null
       state.serverPreviewBotDisplayNames = message.previewBotDisplayNames ?? []
+      state.serverQueuedPlayerPreviews = normalizeQueuedPlayerPreviews(message.queuedPlayerPreviews)
       startWaitingClockAudio()
       render()
       return true
@@ -4129,6 +4147,9 @@ export function createLobbyFlowController(
       state.errorText = null
       if (message.previewBotDisplayNames !== undefined) {
         state.serverPreviewBotDisplayNames = message.previewBotDisplayNames
+      }
+      if (message.queuedPlayerPreviews !== undefined) {
+        state.serverQueuedPlayerPreviews = normalizeQueuedPlayerPreviews(message.queuedPlayerPreviews)
       }
       startWaitingClockAudio()
 
@@ -4169,6 +4190,7 @@ export function createLobbyFlowController(
       state.errorText = null
       state.serverRoomSeats = message.seats
       state.serverYourSeat = message.yourSeat
+      state.serverQueuedPlayerPreviews = []
 
       if (pendingMatchFoundMessage !== null && occupiedSeatsCount >= requiredPlayers) {
         if (finalFillSequenceStartedAt !== null && !isFinalFillSequenceComplete()) {
