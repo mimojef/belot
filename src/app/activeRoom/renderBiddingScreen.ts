@@ -7,6 +7,7 @@ import type {
 } from '../network/createGameServerClient'
 import { ACTIVE_ROOM_TABLE_STAGE_BACKGROUND } from './activeRoomShared'
 import { renderPile, getPileVisibleCards } from './renderDealingScreen'
+import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 
 export const BID_HUMAN_TIMEOUT_MS = 20_000
 export const BID_BOT_DELAY_MS = 800
@@ -215,6 +216,7 @@ function renderBidPopup(
   const opacity = disabled ? '0.7' : '1'
   const filter = disabled ? 'saturate(0.92)' : 'none'
   const enterScale = stageScale * (shouldAnimateEnter ? 0.96 : 1)
+  const bottomPx = isPhoneLayoutViewport() ? 260 : 260 * stageScale
 
   const suits = validActions.suits
 
@@ -227,7 +229,7 @@ function renderBidPopup(
       data-bidding-popup-stage-scale="${stageScale}"
       style="
         position:fixed;
-        bottom:${260 * stageScale}px;
+        bottom:${bottomPx}px;
         left:50%;
         transform:translateX(-50%) scale(${enterScale});
         transform-origin:bottom center;
