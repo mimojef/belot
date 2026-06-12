@@ -56,10 +56,10 @@ const SLOT_LAYOUT: Record<
   MatchmakingRoomSlotPosition,
   { left: number; top: number; width: number; height: number }
 > = {
-  top: { left: 630, top: 169, width: 332, height: 97 },
-  right: { left: 951, top: 326, width: 314, height: 92 },
-  bottom: { left: 642, top: 481, width: 332, height: 97 },
-  left: { left: 326, top: 326, width: 314, height: 92 },
+  top: { left: 442, top: 247, width: 332, height: 97 },
+  right: { left: 824, top: 247, width: 332, height: 97 },
+  bottom: { left: 442, top: 403, width: 332, height: 97 },
+  left: { left: 824, top: 403, width: 332, height: 97 },
 }
 
 function escapeHtml(value: string): string {
