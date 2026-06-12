@@ -104,6 +104,11 @@ export type ClientMessage =
       emojiId: string
     }
   | {
+      type: 'send_phrase_reaction'
+      roomId: RoomId
+      phraseId: string
+    }
+  | {
       type: 'create_private_room'
       stake: MatchStake
       isLocked: boolean
@@ -455,6 +460,13 @@ export type EmojiReactionMessage = {
   emojiId: string
 }
 
+export type PhraseReactionMessage = {
+  type: 'phrase_reaction'
+  roomId: RoomId
+  seat: Seat
+  phraseId: string
+}
+
 // --- Private rooms ---
 
 export type PrivateRoomMemberSnapshot = {
@@ -571,6 +583,7 @@ export type ServerMessage =
   | MatchmakingExpiredMessage
   | MatchFoundMessage
   | EmojiReactionMessage
+  | PhraseReactionMessage
   | PrivateRoomsListMessage
   | PrivateRoomUpdatedMessage
   | PrivateRoomLeftMessage

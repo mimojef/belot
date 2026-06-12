@@ -2424,6 +2424,9 @@ const activeRoom = createActiveRoomFlowController({
   sendEmojiReaction: (roomId, emojiId) => {
     client.sendEmojiReaction(roomId, emojiId)
   },
+  sendPhraseReaction: (roomId, phraseId) => {
+    client.sendPhraseReaction(roomId, phraseId)
+  },
   requestPlayerProfile: (roomId, seat) => {
     client.requestPlayerProfile(roomId, seat)
   },

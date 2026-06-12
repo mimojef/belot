@@ -4911,6 +4911,34 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (message.type === 'send_phrase_reaction') {
+        const phraseConn = getConnectionById(serverState, connection.id)
+        const phraseSeat = phraseConn?.currentSeat ?? null
+        const phraseRoom = phraseConn?.currentRoomId === message.roomId
+          ? (serverState.rooms[message.roomId] ?? null)
+          : null
+
+        if (phraseRoom !== null && phraseSeat !== null) {
+          const phraseMsg = {
+            type: 'phrase_reaction' as const,
+            roomId: message.roomId,
+            seat: phraseSeat,
+            phraseId: message.phraseId,
+          }
+          for (const s of SERVER_SEAT_ORDER) {
+            const participant = phraseRoom.seats[s].participant
+            if (participant === null || participant.kind !== 'human' || !participant.isConnected || participant.connectionId === null) {
+              continue
+            }
+            const sock = socketRegistry.get(participant.connectionId)
+            if (sock && sock.readyState === WebSocket.OPEN) {
+              sendJsonMessage(sock, phraseMsg)
+            }
+          }
+        }
+        return
+      }
+
       if (message.type === 'resume_room') {
         if (connection.profileId !== null) {
           displaceProfileConnections(connection.profileId, connection.id)

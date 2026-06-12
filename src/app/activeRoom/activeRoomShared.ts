@@ -3,6 +3,7 @@ import type {
   CuttingAnimationCache,
   DealingAnimationCache,
   EmojiReactionUiState,
+  PhraseReactionUiState,
   PlayingUiCache,
 } from './activeRoomTypes'
 import type { Seat } from '../network/createGameServerClient'
@@ -166,6 +167,13 @@ export function createBiddingUiState(): BiddingUiState {
 }
 
 export function createEmojiReactionUiState(): EmojiReactionUiState {
+  return {
+    activeBubbles: {},
+    timerIds: {},
+  }
+}
+
+export function createPhraseReactionUiState(): PhraseReactionUiState {
   return {
     activeBubbles: {},
     timerIds: {},

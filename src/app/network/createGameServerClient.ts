@@ -343,6 +343,11 @@ export type ClientMessage =
       emojiId: string
     }
   | {
+      type: 'send_phrase_reaction'
+      roomId: string
+      phraseId: string
+    }
+  | {
       type: 'create_private_room'
       stake: MatchStake
       isLocked: boolean
@@ -718,6 +723,13 @@ export type EmojiReactionMessage = {
   emojiId: string
 }
 
+export type PhraseReactionMessage = {
+  type: 'phrase_reaction'
+  roomId: string
+  seat: Seat
+  phraseId: string
+}
+
 export type PrivateRoomsListMessage = {
   type: 'private_rooms_list'
   rooms: PrivateRoomSnapshot[]
@@ -856,6 +868,7 @@ export type ServerMessage =
   | SessionDisplacedMessage
   | SessionInGameMessage
   | EmojiReactionMessage
+  | PhraseReactionMessage
   | PrivateRoomsListMessage
   | PrivateRoomUpdatedMessage
   | PrivateRoomLeftMessage
@@ -904,6 +917,7 @@ export type GameServerClient = {
   sendReplayVote: (roomId: string) => void
   sendLeaveMatchVote: (roomId: string) => void
   sendEmojiReaction: (roomId: string, emojiId: string) => void
+  sendPhraseReaction: (roomId: string, phraseId: string) => void
   requestPrivateRoomsList: () => void
   createPrivateRoom: (stake: MatchStake, isLocked: boolean) => void
   joinPrivateRoom: (privateRoomId: string) => void
@@ -1127,6 +1141,14 @@ export function createGameServerClient(
     })
   }
 
+  function sendPhraseReaction(roomId: string, phraseId: string): void {
+    send({
+      type: 'send_phrase_reaction',
+      roomId,
+      phraseId,
+    })
+  }
+
   function requestPrivateRoomsList(): void {
     send({ type: 'request_private_rooms_list' })
   }
@@ -1175,6 +1197,7 @@ export function createGameServerClient(
     sendReplayVote,
     sendLeaveMatchVote,
     sendEmojiReaction,
+    sendPhraseReaction,
     requestPrivateRoomsList,
     createPrivateRoom,
     joinPrivateRoom,

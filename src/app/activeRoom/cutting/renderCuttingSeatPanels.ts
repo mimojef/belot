@@ -45,6 +45,11 @@ export type SeatEmojiBubble = {
   elapsedMs: number
 }
 
+export type SeatPhraseBubble = {
+  text: string
+  elapsedMs: number
+}
+
 export type RenderCuttingSeatPanelsOptions = {
   seats: RoomSeatSnapshot[]
   localSeat: Seat
@@ -63,6 +68,7 @@ export type RenderCuttingSeatPanelsOptions = {
   bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null
   declarationBubbles?: Partial<Record<Seat, SeatDeclarationBubble>> | null
   emojiBubbles?: Partial<Record<Seat, SeatEmojiBubble>> | null
+  phraseBubbles?: Partial<Record<Seat, SeatPhraseBubble>> | null
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -822,6 +828,59 @@ function renderEmojiBubble(
   `
 }
 
+const PHRASE_BUBBLE_TOTAL_MS = 4500
+
+function renderPhraseBubble(
+  visualSeat: Seat,
+  bubble: SeatPhraseBubble,
+  offsetIndex: number,
+  escapeHtml: EscapeHtml,
+): string {
+  const totalMs = PHRASE_BUBBLE_TOTAL_MS
+  const fadeInEnd = Math.round((180 / totalMs) * 100)
+  const fadeOutStart = Math.round(((totalMs - 420) / totalMs) * 100)
+  const keyframes = `@keyframes phb-${visualSeat}-${offsetIndex}{0%{opacity:0;transform:translateY(4px) scale(0.98)}${fadeInEnd}%{opacity:1;transform:translateY(0) scale(1)}${fadeOutStart}%{opacity:1;transform:translateY(0) scale(1)}100%{opacity:0;transform:translateY(-3px) scale(0.98)}}`
+
+  const { wrapperStyle } = getBubblePlacement(visualSeat, offsetIndex)
+  const elapsed = Math.min(bubble.elapsedMs, totalMs)
+  const delay = -elapsed / 1000
+
+  return `
+    <style>${keyframes}</style>
+    <div
+      style="
+        position:absolute;
+        ${wrapperStyle}
+        z-index:31;
+        pointer-events:none;
+        animation:phb-${visualSeat}-${offsetIndex} ${totalMs}ms linear both;
+        animation-delay:${delay}s;
+      "
+    >
+      <div
+        style="
+          position:relative;
+          max-width:230px;
+          min-width:138px;
+          box-sizing:border-box;
+          padding:12px 16px;
+          border-radius:14px;
+          border:2px solid #111111;
+          background:#ffffff;
+          box-shadow:0 8px 20px rgba(0,0,0,0.24);
+          color:#111111;
+          font-size:18px;
+          line-height:1.18;
+          font-weight:900;
+          text-align:center;
+        "
+      >
+        ${escapeHtml(bubble.text)}
+      </div>
+    </div>
+  `
+}
+
 export function createCuttingSeatPanelHtml(
   seat: RoomSeatSnapshot,
   visualSeat: Seat,
@@ -838,6 +897,7 @@ export function createCuttingSeatPanelHtml(
   declarationBubbles: Partial<Record<Seat, SeatDeclarationBubble>> | null,
   countdownKey: string,
   emojiBubbles: Partial<Record<Seat, SeatEmojiBubble>> | null,
+  phraseBubbles: Partial<Record<Seat, SeatPhraseBubble>> | null,
 ): string {
   const isBottomSeat = visualSeat === 'bottom'
   const isCountdownSeat = seat.seat === countdownSeat
@@ -897,6 +957,10 @@ export function createCuttingSeatPanelHtml(
   const emojiBubbleHtml = emojiBubbles?.[seat.seat]
     ? renderEmojiBubble(visualSeat, emojiBubbles[seat.seat]!, emojiOffsetIndex)
     : ''
+  const phraseOffsetIndex = emojiOffsetIndex + (emojiBubbles?.[seat.seat] ? 1 : 0)
+  const phraseBubbleHtml = phraseBubbles?.[seat.seat]
+    ? renderPhraseBubble(visualSeat, phraseBubbles[seat.seat]!, phraseOffsetIndex, escapeHtml)
+    : ''
 
   if (isBottomSeat) {
     return `
@@ -914,6 +978,7 @@ export function createCuttingSeatPanelHtml(
         <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
         <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
         <div data-seat-emoji-bubble="${seat.seat}">${emojiBubbleHtml}</div>
+        <div data-seat-phrase-bubble="${seat.seat}">${phraseBubbleHtml}</div>
         ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
         <div
           style="
@@ -1026,6 +1091,7 @@ export function createCuttingSeatPanelHtml(
       <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
       <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
       <div data-seat-emoji-bubble="${seat.seat}">${emojiBubbleHtml}</div>
+      <div data-seat-phrase-bubble="${seat.seat}">${phraseBubbleHtml}</div>
       ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
       <div
         style="
@@ -1111,6 +1177,7 @@ export function createCuttingSeatPanelsHtml(
     bidBubbles,
     declarationBubbles,
     emojiBubbles,
+    phraseBubbles,
   } = options
   const effectiveCountdownSeat =
     countdownSeat === undefined ? cutterSeat : countdownSeat
@@ -1160,6 +1227,7 @@ export function createCuttingSeatPanelsHtml(
         declarationBubbles ?? null,
         countdownKey ?? '',
         emojiBubbles ?? null,
+        phraseBubbles ?? null,
       )
     })
     .join('')

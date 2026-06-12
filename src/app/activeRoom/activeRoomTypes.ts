@@ -42,6 +42,7 @@ export type CreateActiveRoomFlowControllerOptions = {
   sendReplayVote: (roomId: string) => void
   sendLeaveMatchVote: (roomId: string) => void
   sendEmojiReaction: (roomId: string, emojiId: string) => void
+  sendPhraseReaction: (roomId: string, phraseId: string) => void
   requestPlayerProfile: (roomId: string, seat: Seat) => void
   getFriendshipAction: (profileId: string) => import('../../ui/overlays/renderPlayerProfilePopup').PlayerProfileFriendshipAction | null
   onSendFriendRequest: (profileId: string) => Promise<{ ok: true; newLabel: string } | { ok: false; message: string }>
@@ -126,5 +127,10 @@ export type BiddingUiState = {
 
 export type EmojiReactionUiState = {
   activeBubbles: Partial<Record<Seat, { emojiId: string; startedAt: number }>>
+  timerIds: Partial<Record<Seat, number>>
+}
+
+export type PhraseReactionUiState = {
+  activeBubbles: Partial<Record<Seat, { phraseId: string; startedAt: number }>>
   timerIds: Partial<Record<Seat, number>>
 }

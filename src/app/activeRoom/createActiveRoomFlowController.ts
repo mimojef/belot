@@ -15,6 +15,7 @@ import {
   createCuttingSeatPanelsHtml,
   type DealtHandsData,
   type SeatEmojiBubble,
+  type SeatPhraseBubble,
 } from './cutting/renderCuttingSeatPanels'
 import {
   type ActiveRoomFlowController,
@@ -24,6 +25,7 @@ import {
   type CuttingAnimationCache,
   type DealingAnimationCache,
   type EmojiReactionUiState,
+  type PhraseReactionUiState,
   type PlayingUiCache,
 } from './activeRoomTypes'
 import {
@@ -39,6 +41,7 @@ import {
   createCuttingAnimationCache,
   createDealingAnimationCache,
   createEmojiReactionUiState,
+  createPhraseReactionUiState,
   createPlayingUiCache,
   escapeHtml,
   getActiveRoomStageMetrics,
@@ -105,6 +108,7 @@ import { renderScoringScreen } from './renderScoringPanel'
 import { renderMatchEndedScreen } from './renderMatchEndedScreen'
 import { renderScoreHud } from './renderScoreHud'
 import { showStakeDeductionEffect } from './renderStakeDeductionEffect'
+import { PHRASE_REACTIONS, getPhraseReactionText } from './phraseReactions'
 import {
   removeSeatProfileOverlay,
   showSeatProfileOverlay,
@@ -147,8 +151,11 @@ export function createActiveRoomFlowController(
   const lastThreeOverlay: DealPacketOverlayState = createDealPacketOverlayState()
   const biddingUiState: BiddingUiState = createBiddingUiState()
   const emojiReactionUiState: EmojiReactionUiState = createEmojiReactionUiState()
+  const phraseReactionUiState: PhraseReactionUiState = createPhraseReactionUiState()
   let emojiPickerOpen = false
+  let phrasePickerOpen = false
   const EMOJI_BUBBLE_DURATION_MS = 4000
+  const PHRASE_BUBBLE_DURATION_MS = 4500
   const EMOJI_COUNT = 21
   const SCORING_VISUAL_COUNTDOWN_MS = 5000
   const playingCache: PlayingUiCache = createPlayingUiCache()
@@ -648,6 +655,17 @@ export function createActiveRoomFlowController(
         }
       }
 
+      if (ok) {
+        for (const bHost of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-phrase-bubble]'))) {
+          const seat = bHost.getAttribute('data-seat-phrase-bubble')!
+          const existing = host.querySelector<HTMLElement>(`[data-seat-phrase-bubble="${seat}"]`)
+          if (!existing) { ok = false; break }
+          if (existing.innerHTML !== bHost.innerHTML) {
+            existing.innerHTML = bHost.innerHTML
+          }
+        }
+      }
+
       // Update card fan content (innerHTML only)
       if (ok) {
         const newFans = Array.from(temp.querySelectorAll<HTMLElement>('[data-active-room-seat-card-fan]'))
@@ -696,6 +714,21 @@ export function createActiveRoomFlowController(
         existing.innerHTML = bHost.innerHTML
       }
     }
+    for (const bHost of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-phrase-bubble]'))) {
+      const seat = bHost.getAttribute('data-seat-phrase-bubble')!
+      const existing = host.querySelector<HTMLElement>(`[data-seat-phrase-bubble="${seat}"]`)
+      if (!existing) continue
+      if (existing.innerHTML !== bHost.innerHTML) {
+        existing.innerHTML = bHost.innerHTML
+      }
+    }
+  }
+
+  function clearPhraseInPanels(seat: Seat): void {
+    const host = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
+    if (!host) return
+    const el = host.querySelector<HTMLElement>(`[data-seat-phrase-bubble="${seat}"]`)
+    if (el) el.innerHTML = ''
   }
 
   function clearEmojiInPanels(seat: Seat): void {
@@ -1273,6 +1306,19 @@ export function createActiveRoomFlowController(
     }, EMOJI_BUBBLE_DURATION_MS)
   }
 
+  function addPhraseBubble(seat: Seat, phraseId: string): void {
+    const existing = phraseReactionUiState.timerIds[seat]
+    if (existing !== undefined) {
+      window.clearTimeout(existing)
+    }
+    phraseReactionUiState.activeBubbles[seat] = { phraseId, startedAt: performance.now() }
+    phraseReactionUiState.timerIds[seat] = window.setTimeout(() => {
+      delete phraseReactionUiState.activeBubbles[seat]
+      delete phraseReactionUiState.timerIds[seat]
+      clearPhraseInPanels(seat)
+    }, PHRASE_BUBBLE_DURATION_MS)
+  }
+
   function clearEmojiReactionUiState(): void {
     for (const timerId of Object.values(emojiReactionUiState.timerIds)) {
       if (timerId !== undefined) window.clearTimeout(timerId)
@@ -1281,11 +1327,34 @@ export function createActiveRoomFlowController(
     emojiReactionUiState.timerIds = {}
   }
 
+  function clearPhraseReactionUiState(): void {
+    for (const timerId of Object.values(phraseReactionUiState.timerIds)) {
+      if (timerId !== undefined) window.clearTimeout(timerId)
+    }
+    phraseReactionUiState.activeBubbles = {}
+    phraseReactionUiState.timerIds = {}
+  }
+
   function getEmojiBubblesForRender(): Partial<Record<Seat, SeatEmojiBubble>> | null {
     const result: Partial<Record<Seat, SeatEmojiBubble>> = {}
     for (const [seat, bubble] of Object.entries(emojiReactionUiState.activeBubbles) as [Seat, { emojiId: string; startedAt: number }][]) {
       result[seat] = {
         emojiId: bubble.emojiId,
+        elapsedMs: Math.round(performance.now() - bubble.startedAt),
+      }
+    }
+    return Object.keys(result).length > 0 ? result : null
+  }
+
+  function getPhraseBubblesForRender(): Partial<Record<Seat, SeatPhraseBubble>> | null {
+    const result: Partial<Record<Seat, SeatPhraseBubble>> = {}
+    for (const [seat, bubble] of Object.entries(phraseReactionUiState.activeBubbles) as [Seat, { phraseId: string; startedAt: number }][]) {
+      const text = getPhraseReactionText(bubble.phraseId)
+      if (text === null) {
+        continue
+      }
+      result[seat] = {
+        text,
         elapsedMs: Math.round(performance.now() - bubble.startedAt),
       }
     }
@@ -1338,6 +1407,62 @@ export function createActiveRoomFlowController(
     `
   }
 
+  function renderPhrasePickerHtml(): string {
+    const isPhoneLayout = isPhoneLayoutViewport()
+    const rows = PHRASE_REACTIONS.map((phrase) => `
+      <button
+        type="button"
+        data-phrase-pick="${escapeHtml(phrase.id)}"
+        style="
+          border:1px solid rgba(212,165,32,0.36);
+          background:rgba(255,255,255,0.055);
+          color:#ffffff;
+          border-radius:10px;
+          padding:10px 12px;
+          cursor:pointer;
+          font:${isPhoneLayout ? '800' : '400'} ${isPhoneLayout ? '13px' : '14px'}/1.15 Arial, Helvetica, sans-serif;
+          text-align:left;
+          min-height:42px;
+          transition:background 0.12s,border-color 0.12s,color 0.12s;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+        "
+        onmouseenter="this.style.background='rgba(212,165,32,0.16)';this.style.borderColor='rgba(212,165,32,0.72)'"
+        onmouseleave="this.style.background='rgba(255,255,255,0.055)';this.style.borderColor='rgba(212,165,32,0.36)'"
+      >
+        ${escapeHtml(phrase.text)}
+      </button>
+    `)
+
+    return `
+      <div
+        data-phrase-picker="1"
+        style="
+          position:fixed;
+          bottom:${isPhoneLayout ? `${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT + 8}px` : '76px'};
+          right:${isPhoneLayout ? '14px' : '16px'};
+          transform:none;
+          z-index:9999;
+          width:${isPhoneLayout ? 'min(360px, calc(100vw - 28px))' : '420px'};
+          max-height:${isPhoneLayout ? '52vh' : 'none'};
+          overflow:${isPhoneLayout ? 'auto' : 'visible'};
+          background:rgba(20,20,24,0.96);
+          border:1px solid rgba(255,255,255,0.12);
+          border-radius:16px;
+          padding:12px;
+          display:grid;
+          grid-template-columns:${isPhoneLayout ? '1fr' : '1fr 1fr'};
+          gap:7px;
+          box-shadow:0 8px 32px rgba(0,0,0,0.5);
+          -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
+        "
+      >
+        ${rows.join('')}
+      </div>
+    `
+  }
+
   function ensureEmojiButton(isScoring: boolean): void {
     if (isScoring || !activeRoomState) {
       removeEmojiButton()
@@ -1370,7 +1495,78 @@ export function createActiveRoomFlowController(
       `)
       document.body.querySelector('[data-emoji-toggle="1"]')?.addEventListener('click', () => {
         emojiPickerOpen = !emojiPickerOpen
+        if (emojiPickerOpen) {
+          phrasePickerOpen = false
+          document.body.querySelector('[data-phrase-picker="1"]')?.remove()
+        }
         syncEmojiPickerPanel()
+      })
+    }
+
+    if (!document.body.querySelector('[data-phrase-toggle="1"]')) {
+      const isPhoneLayout = isPhoneLayoutViewport()
+      document.body.insertAdjacentHTML('beforeend', `
+        <button
+          type="button"
+          data-phrase-toggle="1"
+          aria-label="Фрази"
+          style="
+            position:fixed;
+            bottom:${isPhoneLayout ? '5px' : '16px'};
+            right:${isPhoneLayout ? '64px' : '108px'};
+            z-index:9998;
+            width:${isPhoneLayout ? '40px' : '80px'};height:${isPhoneLayout ? '40px' : '80px'};
+            border:0;border-radius:50%;
+            background:rgba(20,20,24,0.92);
+            border:2px solid rgba(212,165,32,0.80);
+            box-shadow:0 0 12px rgba(212,165,32,0.25), 0 6px 20px rgba(0,0,0,0.50);
+            cursor:pointer;
+            display:flex;align-items:center;justify-content:center;
+            -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+            color:#f4c432;
+            font-size:${isPhoneLayout ? '22px' : '42px'};
+            font-weight:900;
+            line-height:1;
+          "
+        >
+          <span
+            aria-hidden="true"
+            style="
+              position:relative;
+              width:${isPhoneLayout ? '25px' : '50px'};
+              height:${isPhoneLayout ? '18px' : '36px'};
+              display:flex;
+              align-items:center;
+              justify-content:center;
+              gap:${isPhoneLayout ? '4px' : '8px'};
+              border-radius:50%;
+              background:#d4a520;
+            "
+          >
+            <span
+              style="
+                position:absolute;
+                left:${isPhoneLayout ? '0px' : '0px'};
+                bottom:${isPhoneLayout ? '-4px' : '-8px'};
+                width:${isPhoneLayout ? '13px' : '26px'};
+                height:${isPhoneLayout ? '10px' : '20px'};
+                background:#d4a520;
+                clip-path:polygon(0 100%, 42% 0, 100% 18%);
+              "
+            ></span>
+            <span style="width:${isPhoneLayout ? '4px' : '8px'};height:${isPhoneLayout ? '4px' : '8px'};border-radius:50%;background:#2a2018;z-index:1;"></span>
+            <span style="width:${isPhoneLayout ? '4px' : '8px'};height:${isPhoneLayout ? '4px' : '8px'};border-radius:50%;background:#2a2018;z-index:1;"></span>
+            <span style="width:${isPhoneLayout ? '4px' : '8px'};height:${isPhoneLayout ? '4px' : '8px'};border-radius:50%;background:#2a2018;z-index:1;"></span>
+          </span>
+        </button>
+      `)
+      document.body.querySelector('[data-phrase-toggle="1"]')?.addEventListener('click', () => {
+        phrasePickerOpen = !phrasePickerOpen
+        if (phrasePickerOpen) {
+          emojiPickerOpen = false
+          document.body.querySelector('[data-emoji-picker="1"]')?.remove()
+        }
+        syncPhrasePickerPanel()
       })
     }
   }
@@ -1378,7 +1574,10 @@ export function createActiveRoomFlowController(
   function removeEmojiButton(): void {
     document.body.querySelector('[data-emoji-toggle="1"]')?.remove()
     document.body.querySelector('[data-emoji-picker="1"]')?.remove()
+    document.body.querySelector('[data-phrase-toggle="1"]')?.remove()
+    document.body.querySelector('[data-phrase-picker="1"]')?.remove()
     emojiPickerOpen = false
+    phrasePickerOpen = false
   }
 
   function syncEmojiPickerPanel(): void {
@@ -1395,6 +1594,24 @@ export function createActiveRoomFlowController(
         })
       })
     } else if (!emojiPickerOpen && existing) {
+      existing.remove()
+    }
+  }
+
+  function syncPhrasePickerPanel(): void {
+    const existing = document.body.querySelector('[data-phrase-picker="1"]')
+    if (phrasePickerOpen && !existing) {
+      document.body.insertAdjacentHTML('beforeend', renderPhrasePickerHtml())
+      document.body.querySelectorAll<HTMLButtonElement>('[data-phrase-pick]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const phraseId = btn.getAttribute('data-phrase-pick')
+          if (!activeRoomState || !phraseId) return
+          options.sendPhraseReaction(activeRoomState.roomId, phraseId)
+          phrasePickerOpen = false
+          document.body.querySelector('[data-phrase-picker="1"]')?.remove()
+        })
+      })
+    } else if (!phrasePickerOpen && existing) {
       existing.remove()
     }
   }
@@ -1999,6 +2216,7 @@ export function createActiveRoomFlowController(
             dealtHands: null,
             bidBubbles: isShowingNextRoundPause ? bidBubblesForRender : null,
             emojiBubbles: getEmojiBubblesForRender(),
+            phraseBubbles: getPhraseBubblesForRender(),
           })
 
           if (
@@ -2085,6 +2303,7 @@ export function createActiveRoomFlowController(
         dealtHands: null,
         bidBubbles: isShowingNextRoundPause ? bidBubblesForRender : null,
         emojiBubbles: getEmojiBubblesForRender(),
+        phraseBubbles: getPhraseBubblesForRender(),
       }))
 
       if (cutAnimationForRender !== null) {
@@ -2276,6 +2495,7 @@ export function createActiveRoomFlowController(
         dealtHands: dealtHandsForPanels,
         bidBubbles: getBidBubblesForRender(),
         emojiBubbles: getEmojiBubblesForRender(),
+        phraseBubbles: getPhraseBubblesForRender(),
       })
 
       if (
@@ -2369,6 +2589,7 @@ export function createActiveRoomFlowController(
         dealtHands: dealtHandsForPanels,
         bidBubbles: getBidBubblesForRender(),
         emojiBubbles: getEmojiBubblesForRender(),
+        phraseBubbles: getPhraseBubblesForRender(),
       }))
 
       if (isUsingFirstThreeOverlay && dealingAnimation.activePhaseKey !== null) {
@@ -2590,6 +2811,7 @@ export function createActiveRoomFlowController(
         dealtHands: dealtHandsForBidding,
         bidBubbles,
         emojiBubbles: getEmojiBubblesForRender(),
+        phraseBubbles: getPhraseBubblesForRender(),
       }))
 
       // Wire bid popup buttons
@@ -2721,6 +2943,7 @@ export function createActiveRoomFlowController(
         },
         syncSeatPanels,
         emojiBubbles: getEmojiBubblesForRender(),
+        phraseBubbles: getPhraseBubblesForRender(),
         cache: playingCache,
       } satisfies RenderPlayingScreenOptions)
     } else if (activeRoomState.game !== null) {
@@ -3085,6 +3308,7 @@ export function createActiveRoomFlowController(
 
     ensureEmojiButton(Boolean(isShowingScoringPhase || isShowingMatchEndedPhase))
     syncEmojiPickerPanel()
+    syncPhrasePickerPanel()
     appendLeaveControls()
     syncPersistentBotTakeoverPopup()
 
@@ -3201,6 +3425,8 @@ export function createActiveRoomFlowController(
     clearScoringCountdownTicker()
     clearReactionCountdownAudioTicker()
     clearBiddingUiState()
+    clearEmojiReactionUiState()
+    clearPhraseReactionUiState()
     shouldSilenceNextBiddingSnapshot = true
     lastKnownWinningBid = null
     matchEndedSoundPlayed = false
@@ -3247,6 +3473,8 @@ export function createActiveRoomFlowController(
     clearScoringCountdownTicker()
     clearReactionCountdownAudioTicker()
     clearBiddingUiState()
+    clearEmojiReactionUiState()
+    clearPhraseReactionUiState()
     lastKnownWinningBid = null
     matchEndedSoundPlayed = false
     matchEndedPrizeAnimated = false
@@ -3309,6 +3537,7 @@ export function createActiveRoomFlowController(
       clearReactionCountdownAudioTicker()
       clearBiddingUiState()
       clearEmojiReactionUiState()
+      clearPhraseReactionUiState()
       removeEmojiButton()
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
@@ -3341,6 +3570,7 @@ export function createActiveRoomFlowController(
       clearReactionCountdownAudioTicker()
       clearBiddingUiState()
       clearEmojiReactionUiState()
+      clearPhraseReactionUiState()
       removeEmojiButton()
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
@@ -3372,6 +3602,12 @@ export function createActiveRoomFlowController(
 
     if (message.type === 'emoji_reaction' && message.roomId === activeRoomState.roomId) {
       addEmojiBubble(message.seat as Seat, message.emojiId)
+      renderActiveRoomScreen()
+      return true
+    }
+
+    if (message.type === 'phrase_reaction' && message.roomId === activeRoomState.roomId) {
+      addPhraseBubble(message.seat as Seat, message.phraseId)
       renderActiveRoomScreen()
       return true
     }
@@ -3457,6 +3693,8 @@ export function createActiveRoomFlowController(
     clearScoringCountdownTicker()
     clearReactionCountdownAudioTicker()
     clearBiddingUiState()
+    clearEmojiReactionUiState()
+    clearPhraseReactionUiState()
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
@@ -3486,6 +3724,8 @@ export function createActiveRoomFlowController(
     clearScoringCountdownTicker()
     clearReactionCountdownAudioTicker()
     clearBiddingUiState()
+    clearEmojiReactionUiState()
+    clearPhraseReactionUiState()
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()

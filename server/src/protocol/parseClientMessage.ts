@@ -355,6 +355,25 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       }
     }
 
+    if (parsed.type === 'send_phrase_reaction') {
+      const roomId = normalizeRequiredText(parsed.roomId)
+      const phraseId = normalizeRequiredText(parsed.phraseId)
+
+      if (roomId === null || phraseId === null) {
+        return null
+      }
+
+      if (!/^phrase_(?:0[1-9]|1[0-9]|2[0-2])$/.test(phraseId)) {
+        return null
+      }
+
+      return {
+        type: 'send_phrase_reaction',
+        roomId,
+        phraseId,
+      }
+    }
+
     if (parsed.type === 'request_private_rooms_list') {
       return { type: 'request_private_rooms_list' }
     }
