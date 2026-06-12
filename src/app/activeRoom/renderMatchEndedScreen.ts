@@ -69,7 +69,40 @@ function renderLevelBadge(level: number | null | undefined): string {
 }
 
 const REPLAY_ICON_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>`
-const LEAVE_ICON_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>`
+const LEAVE_ICON_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`
+
+function renderVoteBadge(hasVotedReplay: boolean, hasVotedLeave: boolean, size = 22, top = 7, right = 7): string {
+  if (!hasVotedReplay && !hasVotedLeave) return ''
+
+  const background = hasVotedLeave ? '#ef4444' : '#22c55e'
+  const icon = hasVotedLeave ? LEAVE_ICON_SVG : REPLAY_ICON_SVG
+  const label = hasVotedLeave ? 'Гласувал за излизане' : 'Гласувал за преиграване'
+
+  return `
+    <div
+      title="${label}"
+      aria-label="${label}"
+      style="
+        position:absolute;
+        top:${top}px;
+        right:${right}px;
+        width:${size}px;
+        height:${size}px;
+        border-radius:50%;
+        background:${background};
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        color:#ffffff;
+        z-index:2;
+        box-shadow:0 0 0 2px rgba(0,0,0,0.72), 0 6px 14px rgba(0,0,0,0.38);
+        pointer-events:none;
+      "
+    >
+      ${icon}
+    </div>
+  `
+}
 
 function renderPlayerTile(seat: RoomSeatSnapshot, hasVotedReplay = false, hasVotedLeave = false): string {
   const displayName = seat.isOccupied ? seat.displayName : 'Свободно място'
@@ -91,8 +124,7 @@ function renderPlayerTile(seat: RoomSeatSnapshot, hasVotedReplay = false, hasVot
         border:1px solid rgba(250,204,21,0.28);
       "
     >
-      ${hasVotedReplay ? `<div style="position:absolute;top:7px;left:7px;width:22px;height:22px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;color:#ffffff;z-index:2;">${REPLAY_ICON_SVG}</div>` : ''}
-      ${hasVotedLeave ? `<div style="position:absolute;top:7px;left:7px;width:22px;height:22px;border-radius:50%;background:#ef4444;display:flex;align-items:center;justify-content:center;color:#ffffff;z-index:2;">${LEAVE_ICON_SVG}</div>` : ''}
+      ${renderVoteBadge(hasVotedReplay, hasVotedLeave)}
       <div
         ${seat.isOccupied ? `data-profile-seat-btn="${seat.seat}" title="Виж профила на ${escapeHtml(displayName)}"` : ''}
         style="position:relative;width:116px;height:116px;flex:0 0 116px;${seat.isOccupied ? 'cursor:pointer;' : ''}"
@@ -263,8 +295,7 @@ function renderMobilePlayerTile(
         box-sizing:border-box;
       "
     >
-      ${hasVotedReplay ? `<div style="position:absolute;top:5px;left:5px;width:19px;height:19px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;color:#ffffff;z-index:2;">${REPLAY_ICON_SVG}</div>` : ''}
-      ${hasVotedLeave ? `<div style="position:absolute;top:5px;left:5px;width:19px;height:19px;border-radius:50%;background:#ef4444;display:flex;align-items:center;justify-content:center;color:#ffffff;z-index:2;">${LEAVE_ICON_SVG}</div>` : ''}
+      ${renderVoteBadge(hasVotedReplay, hasVotedLeave, 19, 5, 5)}
       <div
         ${seat.isOccupied ? `data-profile-seat-btn="${seat.seat}" title="Виж профила на ${escapeHtml(displayName)}"` : ''}
         style="position:relative;width:46px;height:46px;flex:0 0 46px;${seat.isOccupied ? 'cursor:pointer;' : ''}"
@@ -840,7 +871,10 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
 
   root
     .querySelector<HTMLButtonElement>('[data-match-ended-lobby-button="1"]')
-    ?.addEventListener('click', onReturnToLobby)
+    ?.addEventListener('click', () => {
+      onLeaveVote?.()
+      onReturnToLobby()
+    })
 
   root
     .querySelector<HTMLButtonElement>('[data-match-ended-replay-button="1"]')

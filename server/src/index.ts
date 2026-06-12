@@ -4839,10 +4839,11 @@ wsServer.on('connection', (socket, request) => {
         if (leaveRoom && leaveSeat !== null && leaveConn?.currentRoomId === message.roomId) {
           const leaveAuth = leaveRoom.game.authoritativeState
           if (leaveAuth && !('kind' in leaveAuth) && leaveAuth.phase === 'match-ended') {
-            if (!leaveRoom.leaveVotes.includes(leaveSeat)) {
+            const currentLeaveVotes = leaveRoom.leaveVotes ?? []
+            if (!currentLeaveVotes.includes(leaveSeat)) {
               const updatedLeaveRoom: ServerRoom = {
                 ...leaveRoom,
-                leaveVotes: [...(leaveRoom.leaveVotes ?? []), leaveSeat],
+                leaveVotes: [...currentLeaveVotes, leaveSeat],
               }
               serverState = upsertServerRoom(serverState, updatedLeaveRoom)
               broadcastRoomSnapshots(updatedLeaveRoom, socketRegistry)
@@ -5221,6 +5222,16 @@ wsServer.on('connection', (socket, request) => {
           }
         }
 
+        const currentLeaveVotes = room.leaveVotes ?? []
+        const roomWithLeaveVote =
+          isRoomAtMatchEndedPhase(room) && !currentLeaveVotes.includes(seat)
+            ? {
+                ...room,
+                leaveVotes: [...currentLeaveVotes, seat],
+                updatedAt: Date.now(),
+              }
+            : room
+
         const disconnectedParticipant = {
           ...markHumanParticipantDisconnected(
             participant,
@@ -5229,7 +5240,7 @@ wsServer.on('connection', (socket, request) => {
           reconnectToken: null,
         }
         const disconnectedRoom = updateHumanParticipantInRoom(
-          room,
+          roomWithLeaveVote,
           seat,
           disconnectedParticipant,
         )
