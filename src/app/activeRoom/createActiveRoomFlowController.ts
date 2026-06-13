@@ -1659,6 +1659,23 @@ export function createActiveRoomFlowController(
     }
   }
 
+  function closeReactionPickersOnOutsideClick(target: Element): void {
+    const isInsideEmojiPicker = target.closest('[data-emoji-picker="1"]') !== null
+    const isEmojiToggle = target.closest('[data-emoji-toggle="1"]') !== null
+    const isInsidePhrasePicker = target.closest('[data-phrase-picker="1"]') !== null
+    const isPhraseToggle = target.closest('[data-phrase-toggle="1"]') !== null
+
+    if (emojiPickerOpen && !isInsideEmojiPicker && !isEmojiToggle) {
+      emojiPickerOpen = false
+      document.body.querySelector('[data-emoji-picker="1"]')?.remove()
+    }
+
+    if (phrasePickerOpen && !isInsidePhrasePicker && !isPhraseToggle) {
+      phrasePickerOpen = false
+      document.body.querySelector('[data-phrase-picker="1"]')?.remove()
+    }
+  }
+
   function getBidActionAudioLabel(action: RoomBiddingSnapshot['entries'][number]['action']): string {
     if (action.type === 'pass') return 'Пас'
     if (action.type === 'no-trumps') return 'Без коз'
@@ -3796,7 +3813,12 @@ export function createActiveRoomFlowController(
   }
 
   document.body.addEventListener('click', (e) => {
-    const btn = (e.target as Element).closest<HTMLElement>('[data-profile-seat-btn]')
+    const target = e.target
+    if (!(target instanceof Element)) return
+
+    closeReactionPickersOnOutsideClick(target)
+
+    const btn = target.closest<HTMLElement>('[data-profile-seat-btn]')
     if (!btn || !activeRoomState) return
     const seatAttr = btn.getAttribute('data-profile-seat-btn') as Seat | null
     if (!seatAttr) return
