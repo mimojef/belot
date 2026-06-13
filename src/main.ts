@@ -1322,16 +1322,27 @@ async function submitFriendAction(
   }
 }
 
-async function submitProfileBlock(profileId: string): Promise<{ blocked: boolean } | { ok: false; message: string }> {
+async function submitProfileBlock(
+  profileId: string,
+): Promise<{ blocked: boolean } | { ok: false; message: string; limitReached?: true }> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/profiles/${encodeURIComponent(profileId)}/block`, {
       method: 'POST',
       credentials: 'include',
     })
-    const data = await response.json() as { ok?: boolean; blocked?: boolean; message?: string }
+    const data = await response.json() as {
+      ok?: boolean
+      blocked?: boolean
+      message?: string
+      limitReached?: boolean
+    }
 
     if (!response.ok || !data.ok) {
-      return { ok: false, message: data.message ?? 'Операцията не успя.' }
+      return {
+        ok: false,
+        message: data.message ?? 'Операцията не успя.',
+        ...(data.limitReached ? { limitReached: true as const } : {}),
+      }
     }
 
     return { blocked: data.blocked ?? false }

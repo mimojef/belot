@@ -201,7 +201,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; friendships: FriendshipsSnapshot }
     | { ok: false; message: string }
   >
-  onBlockProfile?: (profileId: string) => Promise<{ blocked: boolean; limitReached?: true } | { ok: false; message: string }>
+  onBlockProfile?: (profileId: string) => Promise<{ blocked: boolean } | { ok: false; message: string; limitReached?: true }>
   onLoadBlockedPlayers?: () => Promise<{ ok: true; profiles: PlayerPublicProfileSnapshot[]; count: number; limit: number } | { ok: false; message: string }>
   onLikeProfile?: (profileId: string) => Promise<
     | { ok: true; liked: boolean; likesCount: number }
@@ -3390,14 +3390,13 @@ export function createLobbyFlowController(
     const result = await options.onBlockProfile(profileId)
 
     if ('ok' in result && !result.ok) {
-      const asLimitError = result as unknown as { ok: false; limitReached?: true; message: string }
-      if (asLimitError.limitReached) {
+      if (result.limitReached) {
         state.blockLimitPopupOpen = true
         render()
         return
       }
       state.friendActionMessageProfileId = profileId
-      state.friendActionMessage = asLimitError.message
+      state.friendActionMessage = result.message
       render()
       return
     }
