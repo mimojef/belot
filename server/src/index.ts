@@ -3262,7 +3262,7 @@ async function handleFriendsRequest(
   pathname: string,
 ): Promise<boolean> {
   const friendActionMatch =
-    /^\/api\/friends\/([^/]+)\/(accept|reject|remove)$/.exec(pathname)
+    /^\/api\/friends\/([^/]+)\/(accept|reject|cancel|remove)$/.exec(pathname)
   const friendGiftMatch = /^\/api\/friends\/([^/]+)\/gift-coins$/.exec(pathname)
   const giftNotifReadMatch = /^\/api\/gifts\/([^/]+)\/read-notification$/.exec(pathname)
 
@@ -3446,7 +3446,9 @@ async function handleFriendsRequest(
         ? friendshipStore.acceptRequest(profileId, friendshipId)
         : action === 'reject'
           ? friendshipStore.rejectRequest(profileId, friendshipId)
-          : friendshipStore.removeRelationship(profileId, friendshipId)
+          : action === 'cancel'
+            ? friendshipStore.cancelRequest(profileId, friendshipId)
+            : friendshipStore.removeRelationship(profileId, friendshipId)
 
     if (!result.ok) {
       sendJsonResponse(res, 400, result)
@@ -3467,6 +3469,14 @@ async function handleFriendsRequest(
           })
         }
       }
+    }
+
+    if (action === 'cancel' && 'addresseeProfileId' in result) {
+      sendToOpenProfileConnections(result.addresseeProfileId, {
+        type: 'friend_request_cancelled',
+        friendshipId,
+        fromProfileId: profileId,
+      })
     }
 
     sendJsonResponse(res, 200, {

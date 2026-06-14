@@ -599,6 +599,7 @@ export type ServerMessage =
   | PrivateRoomFullMessage
   | ProfileLikedMessage
   | FriendRequestReceivedMessage
+  | FriendRequestCancelledMessage
   | FriendRequestAcceptedMessage
   | PendingFriendRequestsMessage
 
@@ -615,6 +616,12 @@ export type FriendRequestReceivedMessage = {
   fromProfileId: string
   fromDisplayName: string
   fromAvatarUrl: string | null
+}
+
+export type FriendRequestCancelledMessage = {
+  type: 'friend_request_cancelled'
+  friendshipId: string
+  fromProfileId: string
 }
 
 export type FriendRequestAcceptedMessage = {

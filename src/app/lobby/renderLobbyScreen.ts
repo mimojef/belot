@@ -310,6 +310,7 @@ export type RenderLobbyScreenOptions = {
   onBlockClick: (profileId: string) => void
   onFriendAcceptClick: (friendshipId: string) => void
   onFriendRejectClick: (friendshipId: string) => void
+  onFriendCancelClick: (friendshipId: string) => void
   onFriendRemoveClick: (friendshipId: string) => void
   onGiftCoinsClick: (friendshipId: string) => void
   onLikeClick: (profileId: string) => void
@@ -393,6 +394,7 @@ export type ProfilePopupCallbacks = {
   onBlockClick: (profileId: string) => void
   onFriendAcceptClick: (friendshipId: string) => void
   onFriendRejectClick: (friendshipId: string) => void
+  onFriendCancelClick: (friendshipId: string) => void
   onFriendRemoveClick: (friendshipId: string) => void
   onGiftCoinsClick: (friendshipId: string) => void
   onLikeClick: (profileId: string) => void
@@ -439,6 +441,12 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks): void 
     btn.addEventListener('click', () => {
       const id = btn.dataset.playerProfileFriendReject?.trim() ?? ''
       if (id) cb.onFriendRejectClick(id)
+    })
+  })
+  el.querySelectorAll<HTMLButtonElement>('[data-player-profile-friend-cancel]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.playerProfileFriendCancel?.trim() ?? ''
+      if (id) cb.onFriendCancelClick(id)
     })
   })
   el.querySelectorAll<HTMLButtonElement>('[data-player-profile-friend-remove]').forEach((btn) => {
@@ -1005,6 +1013,7 @@ function renderNav(state: LobbyScreenState): string {
   const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'guest-contact-messages'
   const lobbyActive = activeView === 'tables'
   const mailUnreadCount = state.supportUnreadCount + (state.isAdmin ? state.adminGuestContactUnreadCount : 0)
+  const notificationsBadgeCount = getNotificationsBadgeCount(state)
   const incomingFriendRequestsCount =
     state.friendships?.incomingPending.length ?? 0
 
@@ -1279,7 +1288,7 @@ function renderNav(state: LobbyScreenState): string {
             color:rgba(255,255,255,0.65); position:relative;
           ">
             <img src="/assets/lobby/nav-icon-preview/nav-notifications-white.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain;">
-            ${(state.dailyMissionsUnclaimedCount + state.pendingFriendRequests.length + getUnclaimedDailyRewardsBadgeCount(state) + state.pendingGiftNotifications.length) > 0 ? `<span style="
+            ${notificationsBadgeCount > 0 ? `<span style="
               position:absolute; top:2px; right:0px;
               min-width:18px; height:18px; border-radius:9px;
               background:#ef4444; border:1.5px solid #0a0a0a;
@@ -1288,7 +1297,7 @@ function renderNav(state: LobbyScreenState): string {
               padding:0 4px; box-sizing:border-box;
               font-family:Inter,system-ui,sans-serif;
               pointer-events:none;
-            ">${state.dailyMissionsUnclaimedCount + state.pendingFriendRequests.length + getUnclaimedDailyRewardsBadgeCount(state) + state.pendingGiftNotifications.length}</span>` : ''}
+            ">${notificationsBadgeCount}</span>` : ''}
           </button>
           <button data-lobby-nav-logout="1" style="
             display:flex; align-items:center; gap:8px;
@@ -1846,9 +1855,46 @@ function getUnclaimedDailyRewardsBadgeCount(state: LobbyScreenState): number {
   return state.dailyRewardTiers.some((tier) => tier.claimedToday !== true) ? 1 : 0
 }
 
+function getPendingFriendRequestNotifications(state: LobbyScreenState): LobbyScreenState['pendingFriendRequests'] {
+  const byId = new Map<string, LobbyScreenState['pendingFriendRequests'][number]>()
+
+  for (const request of state.pendingFriendRequests) {
+    byId.set(request.friendshipId, request)
+  }
+
+  for (const relationship of state.friendships?.incomingPending ?? []) {
+    if (byId.has(relationship.friendshipId)) {
+      continue
+    }
+
+    byId.set(relationship.friendshipId, {
+      friendshipId: relationship.friendshipId,
+      fromProfileId: relationship.profile.profileId ?? '',
+      fromDisplayName: relationship.profile.displayName,
+      fromAvatarUrl: relationship.profile.avatarUrl,
+    })
+  }
+
+  return Array.from(byId.values())
+}
+
+function getPendingFriendRequestBadgeCount(state: LobbyScreenState): number {
+  return getPendingFriendRequestNotifications(state).length
+}
+
+function getNotificationsBadgeCount(state: LobbyScreenState): number {
+  return (
+    state.dailyMissionsUnclaimedCount +
+    getPendingFriendRequestBadgeCount(state) +
+    getUnclaimedDailyRewardsBadgeCount(state) +
+    state.pendingGiftNotifications.length
+  )
+}
+
 function renderNotificationsDropdown(state: LobbyScreenState): string {
   const hasMissions = state.dailyMissionsUnclaimedCount > 0
-  const hasFriendRequests = state.pendingFriendRequests.length > 0
+  const pendingFriendRequests = getPendingFriendRequestNotifications(state)
+  const hasFriendRequests = pendingFriendRequests.length > 0
   const hasDailyRewards = getUnclaimedDailyRewardsBadgeCount(state) > 0
   const hasGiftNotifications = state.pendingGiftNotifications.length > 0
   const hasAny = hasMissions || hasFriendRequests || hasDailyRewards || hasGiftNotifications
@@ -1910,7 +1956,7 @@ function renderNotificationsDropdown(state: LobbyScreenState): string {
           </div>
         </button>
       ` : ''}
-      ${hasFriendRequests ? state.pendingFriendRequests.map((req) => `
+      ${hasFriendRequests ? pendingFriendRequests.map((req) => `
         <button data-notif-friend-request="${req.friendshipId}" type="button" style="
           width:100%; background:none; border:none; cursor:pointer;
           display:flex; align-items:center; gap:12px;
@@ -2262,7 +2308,7 @@ function renderQuickActionBadge(count: number): string {
 }
 
 function renderMobileMenu(state: LobbyScreenState): string {
-  const pendingCount = state.dailyMissionsUnclaimedCount + state.pendingFriendRequests.length + getUnclaimedDailyRewardsBadgeCount(state) + state.pendingGiftNotifications.length
+  const pendingCount = getNotificationsBadgeCount(state)
   const unreadChatCount = state.chatConversations.filter((conversation) => conversation.unreadCount > 0).length
   const mailUnreadCount = state.supportUnreadCount + (state.isAdmin ? state.adminGuestContactUnreadCount : 0)
 
@@ -2843,6 +2889,9 @@ function renderMobileFriendCard(
       ` : variant === 'friend' ? `
         <button type="button" data-lobby-friend-remove="${escapeHtml(relationship.friendshipId)}" style="height:36px;border:1px solid rgba(248,113,113,0.36);border-radius:8px;background:rgba(127,29,29,0.22);color:#fecaca;font-size:12px;font-weight:900;">Премахни</button>
       ` : `<div style="font-size:12px;font-weight:900;color:rgba(255,255,255,0.54);">Изчаква отговор</div>`}
+      ${variant === 'outgoing' ? `
+        <button type="button" data-lobby-friend-cancel="${escapeHtml(relationship.friendshipId)}" style="height:36px;border:1px solid rgba(248,113,113,0.36);border-radius:8px;background:rgba(127,29,29,0.22);color:#fecaca;font-size:12px;font-weight:900;">Отмени покана</button>
+      ` : ''}
     </div>
   `
 }
@@ -3163,6 +3212,9 @@ function renderFriendRelationshipCard(
       `}
       ${variant === 'friend' ? `
         <button type="button" data-lobby-friend-remove="${escapeHtml(relationship.friendshipId)}" style="height:34px;padding:0 10px;border:1px solid rgba(248,113,113,0.36);border-radius:8px;background:rgba(127,29,29,0.22);color:#fecaca;font-size:12px;font-weight:900;cursor:pointer;flex:0 0 auto;">Премахни</button>
+      ` : ''}
+      ${variant === 'outgoing' ? `
+        <button type="button" data-lobby-friend-cancel="${escapeHtml(relationship.friendshipId)}" style="height:34px;padding:0 10px;border:1px solid rgba(248,113,113,0.36);border-radius:8px;background:rgba(127,29,29,0.22);color:#fecaca;font-size:12px;font-weight:900;cursor:pointer;flex:0 0 auto;">Отмени покана</button>
       ` : ''}
     </div>
   `
@@ -6611,6 +6663,16 @@ export function renderLobbyScreen(
     })
   })
 
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-friend-cancel]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const friendshipId = button.dataset.lobbyFriendCancel?.trim() ?? ''
+
+      if (friendshipId.length > 0) {
+        options.onFriendCancelClick(friendshipId)
+      }
+    })
+  })
+
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-friend-remove]').forEach((button) => {
     button.addEventListener('click', () => {
       const friendshipId = button.dataset.lobbyFriendRemove?.trim() ?? ''
@@ -6692,6 +6754,7 @@ export function renderLobbyScreen(
       onBlockClick: options.onBlockClick,
       onFriendAcceptClick: options.onFriendAcceptClick,
       onFriendRejectClick: options.onFriendRejectClick,
+      onFriendCancelClick: options.onFriendCancelClick,
       onFriendRemoveClick: options.onFriendRemoveClick,
       onGiftCoinsClick: options.onGiftCoinsClick,
       onLikeClick: options.onLikeClick,

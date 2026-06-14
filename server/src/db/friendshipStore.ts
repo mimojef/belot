@@ -46,6 +46,12 @@ export type FriendshipStore = {
   ) =>
     | { ok: true; friendships: FriendshipsSnapshot }
     | { ok: false; message: string }
+  cancelRequest: (
+    profileId: ProfileId,
+    friendshipId: string,
+  ) =>
+    | { ok: true; friendships: FriendshipsSnapshot; addresseeProfileId: ProfileId }
+    | { ok: false; message: string }
   removeRelationship: (
     profileId: ProfileId,
     friendshipId: string,
@@ -200,6 +206,28 @@ export async function createFriendshipStore(
     DELETE FROM profile_friendships
     WHERE friendship_id = ?
       AND addressee_profile_id = ?
+      AND status = 'pending';
+  `)
+
+  const selectOutgoingPendingFriendshipStatement = database.prepare(`
+    SELECT
+      friendship_id,
+      requester_profile_id,
+      addressee_profile_id,
+      status,
+      created_at,
+      updated_at
+    FROM profile_friendships
+    WHERE friendship_id = ?
+      AND requester_profile_id = ?
+      AND status = 'pending'
+    LIMIT 1;
+  `)
+
+  const deleteOutgoingPendingFriendshipStatement = database.prepare(`
+    DELETE FROM profile_friendships
+    WHERE friendship_id = ?
+      AND requester_profile_id = ?
       AND status = 'pending';
   `)
 
@@ -372,6 +400,43 @@ export async function createFriendshipStore(
     }
   }
 
+  function cancelRequest(
+    profileId: ProfileId,
+    friendshipId: string,
+  ):
+    | { ok: true; friendships: FriendshipsSnapshot; addresseeProfileId: ProfileId }
+    | { ok: false; message: string } {
+    const row = selectOutgoingPendingFriendshipStatement.get(
+      friendshipId,
+      profileId,
+    ) as FriendshipRow | undefined
+
+    if (row === undefined) {
+      return {
+        ok: false,
+        message: 'Поканата не беше намерена или вече е обработена.',
+      }
+    }
+
+    const result = deleteOutgoingPendingFriendshipStatement.run(
+      friendshipId,
+      profileId,
+    ) as { changes?: number }
+
+    if ((result.changes ?? 0) === 0) {
+      return {
+        ok: false,
+        message: 'Поканата не беше намерена или вече е обработена.',
+      }
+    }
+
+    return {
+      ok: true,
+      friendships: listForProfile(profileId),
+      addresseeProfileId: row.addressee_profile_id,
+    }
+  }
+
   function removeRelationship(
     profileId: ProfileId,
     friendshipId: string,
@@ -406,6 +471,7 @@ export async function createFriendshipStore(
     sendRequest,
     acceptRequest,
     rejectRequest,
+    cancelRequest,
     removeRelationship,
     close,
   }

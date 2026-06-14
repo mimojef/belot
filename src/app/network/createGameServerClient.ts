@@ -818,6 +818,12 @@ export type FriendRequestReceivedMessage = {
   fromAvatarUrl: string | null
 }
 
+export type FriendRequestCancelledMessage = {
+  type: 'friend_request_cancelled'
+  friendshipId: string
+  fromProfileId: string
+}
+
 export type FriendRequestAcceptedMessage = {
   type: 'friend_request_accepted'
   fromProfileId: string
@@ -884,6 +890,7 @@ export type ServerMessage =
   | PrivateRoomFullMessage
   | ProfileLikedMessage
   | FriendRequestReceivedMessage
+  | FriendRequestCancelledMessage
   | FriendRequestAcceptedMessage
   | PendingFriendRequestsMessage
   | CoinsGiftedMessage

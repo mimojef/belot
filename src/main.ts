@@ -1288,7 +1288,7 @@ async function submitFriendRequest(profileId: string): Promise<
 
 async function submitFriendAction(
   friendshipId: string,
-  action: 'accept' | 'reject' | 'remove',
+  action: 'accept' | 'reject' | 'cancel' | 'remove',
 ): Promise<
   | { ok: true; friendships: FriendshipsSnapshot }
   | { ok: false; message: string }
@@ -2292,6 +2292,7 @@ lobby = createLobbyFlowController({
   onFriendRequestSubmit: (profileId) => submitFriendRequest(profileId),
   onFriendAccept: (friendshipId) => submitFriendAction(friendshipId, 'accept'),
   onFriendReject: (friendshipId) => submitFriendAction(friendshipId, 'reject'),
+  onFriendCancel: (friendshipId) => submitFriendAction(friendshipId, 'cancel'),
   onFriendRemove: (friendshipId) => submitFriendAction(friendshipId, 'remove'),
   onBlockProfile: (profileId) => submitProfileBlock(profileId),
   onLoadBlockedPlayers: async () => {
@@ -2701,6 +2702,11 @@ client = createGameServerClient({
         fromDisplayName: message.fromDisplayName,
         fromAvatarUrl: message.fromAvatarUrl,
       })
+      return
+    }
+
+    if (message.type === 'friend_request_cancelled') {
+      lobby.handleServerMessage(message)
       return
     }
 

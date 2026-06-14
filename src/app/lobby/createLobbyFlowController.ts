@@ -197,6 +197,10 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; friendships: FriendshipsSnapshot }
     | { ok: false; message: string }
   >
+  onFriendCancel?: (friendshipId: string) => Promise<
+    | { ok: true; friendships: FriendshipsSnapshot }
+    | { ok: false; message: string }
+  >
   onFriendRemove?: (friendshipId: string) => Promise<
     | { ok: true; friendships: FriendshipsSnapshot }
     | { ok: false; message: string }
@@ -1952,6 +1956,9 @@ export function createLobbyFlowController(
       onFriendRejectClick: (friendshipId) => {
         void rejectFriendRequest(friendshipId)
       },
+      onFriendCancelClick: (friendshipId) => {
+        void cancelFriendRequest(friendshipId)
+      },
       onFriendRemoveClick: (friendshipId) => {
         void removeFriendRelationship(friendshipId)
       },
@@ -3339,6 +3346,7 @@ export function createLobbyFlowController(
     }
 
     state.friendships = result.friendships
+    state.pendingFriendRequests = state.pendingFriendRequests.filter((request) => request.friendshipId !== friendshipId)
     state.friendsErrorText = null
     render()
   }
@@ -3347,6 +3355,23 @@ export function createLobbyFlowController(
     const result = options.onFriendReject
       ? await options.onFriendReject(friendshipId)
       : { ok: false as const, message: 'Поканите временно не са налични.' }
+
+    if (!result.ok) {
+      state.friendsErrorText = result.message
+      render()
+      return
+    }
+
+    state.friendships = result.friendships
+    state.pendingFriendRequests = state.pendingFriendRequests.filter((request) => request.friendshipId !== friendshipId)
+    state.friendsErrorText = null
+    render()
+  }
+
+  async function cancelFriendRequest(friendshipId: string): Promise<void> {
+    const result = options.onFriendCancel
+      ? await options.onFriendCancel(friendshipId)
+      : { ok: false as const, message: 'Отмяната на поканата временно не е налична.' }
 
     if (!result.ok) {
       state.friendsErrorText = result.message
@@ -4041,6 +4066,7 @@ export function createLobbyFlowController(
       onBlockClick: (profileId) => { void blockProfile(profileId) },
       onFriendAcceptClick: (friendshipId) => { void acceptFriendRequest(friendshipId) },
       onFriendRejectClick: (friendshipId) => { void rejectFriendRequest(friendshipId) },
+      onFriendCancelClick: (friendshipId) => { void cancelFriendRequest(friendshipId) },
       onFriendRemoveClick: (friendshipId) => { void removeFriendRelationship(friendshipId) },
       onGiftCoinsClick: (friendshipId) => { openGiftModal(friendshipId) },
       onLikeClick: (profileId) => { void likeProfile(profileId) },
@@ -4103,6 +4129,18 @@ export function createLobbyFlowController(
         render()
       }
       return false // let main.ts also handle it (show popup)
+    }
+
+    if (message.type === 'friend_request_cancelled') {
+      state.pendingFriendRequests = state.pendingFriendRequests.filter((r) => r.friendshipId !== message.friendshipId)
+      if (state.friendships !== null) {
+        state.friendships = {
+          ...state.friendships,
+          incomingPending: state.friendships.incomingPending.filter((r) => r.friendshipId !== message.friendshipId),
+        }
+      }
+      render()
+      return true
     }
 
     if (message.type === 'error') {
@@ -4667,7 +4705,22 @@ export function createLobbyFlowController(
       render()
     },
     getPendingFriendRequest: (friendshipId: string) => {
-      return state.pendingFriendRequests.find((r) => r.friendshipId === friendshipId)
+      const pendingRequest = state.pendingFriendRequests.find((r) => r.friendshipId === friendshipId)
+      if (pendingRequest) {
+        return pendingRequest
+      }
+
+      const incomingRelationship = state.friendships?.incomingPending.find((r) => r.friendshipId === friendshipId)
+      if (!incomingRelationship) {
+        return undefined
+      }
+
+      return {
+        friendshipId: incomingRelationship.friendshipId,
+        fromProfileId: incomingRelationship.profile.profileId ?? '',
+        fromDisplayName: incomingRelationship.profile.displayName,
+        fromAvatarUrl: incomingRelationship.profile.avatarUrl,
+      }
     },
     getFriendshipActionForProfile: (profileId: string) => {
       const authSession = options.getAuthSession?.() ?? null
