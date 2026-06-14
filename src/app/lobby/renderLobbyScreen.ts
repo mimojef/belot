@@ -2311,6 +2311,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
   const pendingCount = getNotificationsBadgeCount(state)
   const unreadChatCount = state.chatConversations.filter((conversation) => conversation.unreadCount > 0).length
   const mailUnreadCount = state.supportUnreadCount + (state.isAdmin ? state.adminGuestContactUnreadCount : 0)
+  const mobileMenuBadgeCount = (state.friendships?.incomingPending.length ?? 0) + unreadChatCount + mailUnreadCount
 
   return `
     <header style="
@@ -2360,7 +2361,10 @@ function renderMobileMenu(state: LobbyScreenState): string {
             color:#d4a520;font-size:13px;font-weight:900;letter-spacing:0.04em;
             display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;
             position:relative;z-index:3;
-          ">Меню</summary>
+          ">
+            Меню
+            ${mobileMenuBadgeCount > 0 ? `<span style="position:absolute;right:-6px;top:-6px;min-width:18px;height:18px;border-radius:999px;background:#ef4444;color:#fff;border:2px solid #050505;font-size:10px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;padding:0 4px;box-sizing:border-box;">${mobileMenuBadgeCount}</span>` : ''}
+          </summary>
           <button type="button" data-lobby-mobile-menu-backdrop="1" aria-label="Затвори менюто" style="
             position:fixed;inset:0;z-index:1;border:0;background:rgba(0,0,0,0.01);
             padding:0;margin:0;cursor:default;animation:mobile-menu-backdrop-in 120ms ease both;
