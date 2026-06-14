@@ -3471,7 +3471,12 @@ async function handleFriendsRequest(
       }
     }
 
-    if (action === 'cancel' && 'addresseeProfileId' in result) {
+    if (
+      action === 'cancel' &&
+      'addresseeProfileId' in result &&
+      typeof result.addresseeProfileId === 'string' &&
+      result.addresseeProfileId.length > 0
+    ) {
       sendToOpenProfileConnections(result.addresseeProfileId, {
         type: 'friend_request_cancelled',
         friendshipId,
