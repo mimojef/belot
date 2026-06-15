@@ -1,11 +1,21 @@
 import http from 'k6/http';
 import { check, fail } from 'k6';
 import { Counter } from 'k6/metrics';
+import { sleep } from 'k6';
 import { WebSocket } from 'k6/websockets';
 
 const TABLES = parseTables(__ENV.TABLES);
 const REQUIRED_USERS = TABLES * 4;
 const USERS = loadUsers();
+const LOGIN_SPREAD_SECONDS = parseSeconds(__ENV.LOGIN_SPREAD_SECONDS || '60', 'LOGIN_SPREAD_SECONDS');
+const MATCHMAKING_BARRIER_SECONDS = parseSeconds(
+  __ENV.MATCHMAKING_BARRIER_SECONDS || '120',
+  'MATCHMAKING_BARRIER_SECONDS',
+);
+const TABLE_START_SPREAD_SECONDS = parseSeconds(
+  __ENV.TABLE_START_SPREAD_SECONDS || '10',
+  'TABLE_START_SPREAD_SECONDS',
+);
 
 export const options = {
   scenarios: createScenarios(),
@@ -49,12 +59,19 @@ if (!WS_URL.startsWith('ws://') && !WS_URL.startsWith('wss://')) {
   throw new Error('WS_URL must start with ws:// or wss://');
 }
 
-export default function () {
+export function setup() {
+  return {
+    matchmakingBarrierAtMs: Date.now() + (MATCHMAKING_BARRIER_SECONDS * 1000),
+  };
+}
+
+export default function (setupData) {
   const account = accountForVu(__VU);
   const jar = http.cookieJar();
 
   login(account, jar);
   validateStake(jar);
+  waitForMatchmakingStart(setupData);
   connectAndPlay(jar);
 }
 
@@ -495,12 +512,22 @@ function parseTables(value) {
   return parsed;
 }
 
+function parseSeconds(value, name) {
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative number`);
+  }
+
+  return parsed;
+}
+
 function createScenarios() {
   const scenarios = {};
 
   for (let index = 0; index < REQUIRED_USERS; index += 1) {
     const tableIndex = Math.floor(index / 4);
-    const startDelayMs = Math.floor((tableIndex * 60_000) / TABLES);
+    const startDelayMs = Math.floor((tableIndex * LOGIN_SPREAD_SECONDS * 1000) / TABLES);
     const name = `table_${String(tableIndex + 1).padStart(3, '0')}_vu_${String((index % 4) + 1)}`;
 
     scenarios[name] = {
@@ -517,6 +544,18 @@ function createScenarios() {
   }
 
   return scenarios;
+}
+
+function waitForMatchmakingStart(setupData) {
+  const userIndex = Number(__ENV.USER_INDEX);
+  const tableIndex = Math.floor(userIndex / 4);
+  const tableOffsetMs = Math.floor((tableIndex * TABLE_START_SPREAD_SECONDS * 1000) / TABLES);
+  const startsAtMs = setupData.matchmakingBarrierAtMs + tableOffsetMs;
+  const waitMs = startsAtMs - Date.now();
+
+  if (waitMs > 0) {
+    sleep(waitMs / 1000);
+  }
 }
 
 function loadUsers() {
