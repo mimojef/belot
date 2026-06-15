@@ -128,6 +128,7 @@ export type LobbyScreenState = {
   shopPurchases: CoinPurchaseSnapshot[]
   shopPurchasesVisible: boolean
   shopPurchasesLoading: boolean
+  shopPurchaseConfirmPackageId: string | null
   shopPurchaseActionPackageId: string | null
   shopPurchaseMessageText: string | null
   isAdmin: boolean
@@ -273,6 +274,8 @@ export type RenderLobbyScreenOptions = {
   onPlayersClick: () => void
   onShopClick: () => void
   onShopPurchaseClick: (packageId: string) => void
+  onShopPurchaseConfirm: () => void
+  onShopPurchaseCancel: () => void
   onShopHistoryToggle: () => void
   onLeaderboardsClick: () => void
   onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
@@ -540,6 +543,109 @@ function formatPackagePriceBgn(priceCents: number): string {
     style: 'currency',
     currency: 'BGN',
   }).format(bgn)
+}
+
+function renderPublicLegalBodyHtml(pageKey: PublicLegalPageKey, isMobile = false): string {
+  const page = PUBLIC_LEGAL_PAGES[pageKey]
+  const blocks = page.body
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter((block) => block.length > 0)
+
+  return blocks.map((block, index) => {
+    const isDocumentTitle = index === 0
+    const isSectionTitle = /^\d+\.\s/.test(block)
+    const style = isDocumentTitle
+      ? `margin:0 0 18px;color:#f8fafc;font-size:${isMobile ? '18px' : '22px'};line-height:1.22;font-weight:900;`
+      : isSectionTitle
+        ? `margin:${isMobile ? '22px' : '28px'} 0 8px;color:#d4a520;font-size:${isMobile ? '15px' : '17px'};line-height:1.35;font-weight:900;`
+        : `margin:0 0 12px;color:rgba(255,255,255,0.72);font-size:${isMobile ? '13px' : '15px'};line-height:${isMobile ? '1.58' : '1.68'};font-weight:600;`
+
+    return `<p style="${style}">${escapeHtml(block).replace(/\n/g, '<br>')}</p>`
+  }).join('')
+}
+
+function renderShopPurchaseLegalPreview(pageKey: 'terms' | 'privacy'): string {
+  const page = PUBLIC_LEGAL_PAGES[pageKey]
+
+  return `
+    <div data-shop-purchase-legal-preview="${pageKey}" style="display:none;position:fixed;inset:0;z-index:13800;align-items:center;justify-content:center;padding:18px;">
+      <div data-shop-purchase-legal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);"></div>
+      <div role="dialog" aria-modal="true" aria-label="${escapeHtml(page.title)}" class="gold-scrollbar" style="position:relative;width:min(94vw,720px);max-height:88vh;overflow:hidden;border-radius:10px;border:2px solid rgba(212,165,32,0.78);background:linear-gradient(180deg,rgba(20,20,20,0.99) 0%,rgba(5,5,5,0.99) 100%);box-shadow:0 28px 80px rgba(0,0,0,0.60);padding:18px;display:grid;grid-template-rows:auto minmax(0,1fr);gap:12px;">
+        <button type="button" data-shop-purchase-legal-close="1" aria-label="Затвори" style="position:absolute;right:10px;top:8px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
+        <div style="border-bottom:1px solid rgba(212,165,32,0.28);padding:0 44px 12px 0;">
+          <div style="font-size:22px;line-height:1.15;font-weight:900;color:#f8fafc;">${escapeHtml(page.title)}</div>
+          <div style="margin-top:4px;font-size:12px;font-weight:800;color:rgba(255,255,255,0.48);">Преглед в прозореца за покупка</div>
+        </div>
+        <div class="gold-scrollbar" style="min-height:0;overflow-y:auto;padding-right:8px;">
+          ${renderPublicLegalBodyHtml(pageKey, true)}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderShopPurchaseConfirmModal(state: LobbyScreenState): string {
+  const packageId = state.shopPurchaseConfirmPackageId
+  if (packageId === null) return ''
+
+  const coinPackage =
+    state.shopPackages.find((item) => item.packageId === packageId) ??
+    state.lobbyPackages.find((item) => item.packageId === packageId)
+  if (!coinPackage) return ''
+
+  const isProcessing = state.shopPurchaseActionPackageId === packageId
+  const priceLabel = formatPackagePrice(coinPackage.priceCents, coinPackage.currency)
+  const priceBgnLabel = formatPackagePriceBgn(coinPackage.priceCents)
+
+  return `
+    <div data-shop-purchase-confirm-root="1" style="position:fixed;inset:0;z-index:13700;display:flex;align-items:center;justify-content:center;padding:18px;">
+      <div data-shop-purchase-confirm-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.78);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
+      <div role="dialog" aria-modal="true" aria-labelledby="shop-purchase-confirm-title" class="gold-scrollbar" style="position:relative;width:min(94vw,500px);max-height:92vh;overflow-y:auto;border-radius:10px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.99) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 90px rgba(0,0,0,0.56);padding:22px;">
+        <button type="button" data-shop-purchase-confirm-close="1" aria-label="Затвори" ${isProcessing ? 'disabled' : ''} style="position:absolute;right:10px;top:8px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:${isProcessing ? 'default' : 'pointer'};opacity:${isProcessing ? '0.45' : '1'};">×</button>
+
+        <div style="display:grid;gap:16px;">
+          <div>
+            <div id="shop-purchase-confirm-title" style="font-size:24px;line-height:1.1;font-weight:900;color:#f8fafc;">Потвърждение на покупка</div>
+            <div style="margin-top:7px;font-size:13px;line-height:1.45;color:rgba(255,255,255,0.60);font-weight:700;">Прегледайте избрания пакет преди продължаване към Stripe Checkout.</div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:84px minmax(0,1fr);gap:14px;align-items:center;border:1px solid rgba(212,165,32,0.34);border-radius:10px;background:#080808;padding:14px;">
+            <img src="${getCoinPackageImage(coinPackage.sortOrder)}" alt="" style="width:82px;height:82px;object-fit:contain;">
+            <div style="display:grid;gap:7px;min-width:0;">
+              <div style="font-size:12px;font-weight:900;color:rgba(255,255,255,0.48);text-transform:uppercase;letter-spacing:0.08em;">${escapeHtml(coinPackage.title)}</div>
+              <div style="font-size:24px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(coinPackage.yellowCoinsAmount)} жълтици</div>
+              <div style="font-size:16px;font-weight:900;color:#ffffff;">Крайна цена: ${escapeHtml(priceLabel)}</div>
+              <div style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.48);">Приблизително ${escapeHtml(priceBgnLabel)}</div>
+            </div>
+          </div>
+
+          <div style="display:grid;gap:8px;border:1px solid rgba(255,255,255,0.10);border-radius:10px;background:rgba(255,255,255,0.035);padding:13px 14px;">
+            <div style="font-size:13px;line-height:1.45;font-weight:800;color:rgba(255,255,255,0.78);">Жълтиците са виртуална игрова валута и не могат да се обменят за реални пари.</div>
+            <div style="font-size:13px;line-height:1.45;font-weight:800;color:rgba(255,255,255,0.78);">След успешно плащане жълтиците ще бъдат добавени автоматично към профила ви.</div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;align-items:start;border:1px solid rgba(212,165,32,0.28);border-radius:10px;background:rgba(212,165,32,0.08);padding:12px;">
+            <input type="checkbox" data-shop-purchase-confirm-check="1" ${isProcessing ? 'disabled' : ''} style="width:18px;height:18px;margin-top:2px;accent-color:#d4a520;cursor:${isProcessing ? 'default' : 'pointer'};flex-shrink:0;">
+            <div style="font-size:13px;line-height:1.45;font-weight:800;color:rgba(255,255,255,0.82);">
+              Декларирам, че съм запознат и съм съгласен с
+              <a data-shop-confirm-legal-link="terms" href="/terms" style="color:#f4c95b;text-decoration:underline;text-underline-offset:3px;">Общите условия</a>
+              и
+              <a data-shop-confirm-legal-link="privacy" href="/privacy" style="color:#f4c95b;text-decoration:underline;text-underline-offset:3px;">Политиката за поверителност</a>
+              на Pika.bg.
+            </div>
+          </div>
+
+          <div style="display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;">
+            <button type="button" data-shop-purchase-confirm-cancel="1" ${isProcessing ? 'disabled' : ''} style="height:42px;padding:0 16px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:#080808;color:#f8fafc;font-size:14px;font-weight:900;cursor:${isProcessing ? 'default' : 'pointer'};opacity:${isProcessing ? '0.5' : '1'};">Отказ</button>
+            <button type="button" data-shop-purchase-confirm-submit="1" disabled style="height:42px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:not-allowed;opacity:0.55;">${isProcessing ? 'Пренасочване...' : 'Продължи към плащане'}</button>
+          </div>
+        </div>
+        ${renderShopPurchaseLegalPreview('terms')}
+        ${renderShopPurchaseLegalPreview('privacy')}
+      </div>
+    </div>
+  `
 }
 
 function getCoinPackageImage(sortOrder: number): string {
@@ -2940,22 +3046,7 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
 
 function renderPublicLegalPage(pageKey: PublicLegalPageKey, isMobile = false): string {
   const page = PUBLIC_LEGAL_PAGES[pageKey]
-  const blocks = page.body
-    .split(/\n{2,}/)
-    .map((block) => block.trim())
-    .filter((block) => block.length > 0)
-
-  const contentHtml = blocks.map((block, index) => {
-    const isDocumentTitle = index === 0
-    const isSectionTitle = /^\d+\.\s/.test(block)
-    const style = isDocumentTitle
-      ? `margin:0 0 18px;color:#f8fafc;font-size:${isMobile ? '18px' : '22px'};line-height:1.22;font-weight:900;`
-      : isSectionTitle
-        ? `margin:${isMobile ? '22px' : '28px'} 0 8px;color:#d4a520;font-size:${isMobile ? '15px' : '17px'};line-height:1.35;font-weight:900;`
-        : `margin:0 0 12px;color:rgba(255,255,255,0.72);font-size:${isMobile ? '13px' : '15px'};line-height:${isMobile ? '1.58' : '1.68'};font-weight:600;`
-
-    return `<p style="${style}">${escapeHtml(block).replace(/\n/g, '<br>')}</p>`
-  }).join('')
+  const contentHtml = renderPublicLegalBodyHtml(pageKey, isMobile)
   const contactActionHtml = pageKey === 'contact'
     ? `
       <button type="button" data-public-contact-mail="1" style="
@@ -5750,6 +5841,7 @@ export function renderLobbyScreen(
       ${renderProfileEditModal(state)}
       ${renderChangePasswordModal(state)}
       ${renderAuthModal(state)}
+      ${renderShopPurchaseConfirmModal(state)}
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
       ${renderInviteFriendsPopup(state, options)}
@@ -5942,6 +6034,7 @@ export function renderLobbyScreen(
       ${renderProfileEditModal(state)}
       ${renderChangePasswordModal(state)}
       ${renderAuthModal(state)}
+      ${renderShopPurchaseConfirmModal(state)}
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
       ${renderInviteFriendsPopup(state, options)}
@@ -6244,6 +6337,61 @@ export function renderLobbyScreen(
         options.onShopPurchaseClick(packageId)
       }
     })
+  })
+
+  root.querySelectorAll<HTMLElement>('[data-shop-purchase-confirm-close="1"], [data-shop-purchase-confirm-cancel="1"]')
+    .forEach((element) => {
+      element.addEventListener('click', options.onShopPurchaseCancel)
+    })
+
+  root.querySelector<HTMLElement>('[data-shop-purchase-confirm-backdrop="1"]')
+    ?.addEventListener('click', options.onShopPurchaseCancel)
+
+  const hideShopPurchaseLegalPreviews = () => {
+    root.querySelectorAll<HTMLElement>('[data-shop-purchase-legal-preview]').forEach((preview) => {
+      preview.style.display = 'none'
+    })
+  }
+
+  root.querySelectorAll<HTMLAnchorElement>('[data-shop-confirm-legal-link]').forEach((link) => {
+    link.addEventListener('click', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      const pageKey = link.dataset.shopConfirmLegalLink
+      const preview = pageKey === 'terms' || pageKey === 'privacy'
+        ? root.querySelector<HTMLElement>(`[data-shop-purchase-legal-preview="${pageKey}"]`)
+        : null
+
+      hideShopPurchaseLegalPreviews()
+      if (preview) preview.style.display = 'flex'
+    })
+  })
+
+  root.querySelectorAll<HTMLElement>('[data-shop-purchase-legal-close="1"], [data-shop-purchase-legal-backdrop="1"]').forEach((element) => {
+    element.addEventListener('click', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      hideShopPurchaseLegalPreviews()
+    })
+  })
+
+  const shopConfirmCheck = root.querySelector<HTMLInputElement>('[data-shop-purchase-confirm-check="1"]')
+  const shopConfirmSubmit = root.querySelector<HTMLButtonElement>('[data-shop-purchase-confirm-submit="1"]')
+  if (shopConfirmCheck && shopConfirmSubmit && state.shopPurchaseActionPackageId === null) {
+    shopConfirmCheck.addEventListener('change', () => {
+      const enabled = shopConfirmCheck.checked
+      shopConfirmSubmit.disabled = !enabled
+      shopConfirmSubmit.style.cursor = enabled ? 'pointer' : 'not-allowed'
+      shopConfirmSubmit.style.opacity = enabled ? '1' : '0.55'
+    })
+  }
+
+  shopConfirmSubmit?.addEventListener('click', () => {
+    if (shopConfirmSubmit.disabled) return
+    shopConfirmSubmit.disabled = true
+    shopConfirmSubmit.style.cursor = 'wait'
+    shopConfirmSubmit.style.opacity = '0.72'
+    options.onShopPurchaseConfirm()
   })
 
   root.querySelectorAll<HTMLInputElement>('[data-lobby-shop-package-lobby]').forEach((checkbox) => {

@@ -385,6 +385,7 @@ type InternalLobbyFlowState = {
   shopPurchases: CoinPurchaseSnapshot[]
   shopPurchasesVisible: boolean
   shopPurchasesLoading: boolean
+  shopPurchaseConfirmPackageId: string | null
   shopPurchaseActionPackageId: string | null
   shopPurchaseMessageText: string | null
   adminStats: AdminStatsSnapshot | null
@@ -584,6 +585,7 @@ function createInitialState(): InternalLobbyFlowState {
     shopPurchases: [],
     shopPurchasesVisible: false,
     shopPurchasesLoading: false,
+    shopPurchaseConfirmPackageId: null,
     shopPurchaseActionPackageId: null,
     shopPurchaseMessageText: null,
     adminStats: null,
@@ -1598,6 +1600,7 @@ export function createLobbyFlowController(
       shopPurchases: state.shopPurchases,
       shopPurchasesVisible: state.shopPurchasesVisible,
       shopPurchasesLoading: state.shopPurchasesLoading,
+      shopPurchaseConfirmPackageId: state.shopPurchaseConfirmPackageId,
       shopPurchaseActionPackageId: state.shopPurchaseActionPackageId,
       shopPurchaseMessageText: state.shopPurchaseMessageText,
       isAdmin: authSession?.account.role === 'admin',
@@ -1817,7 +1820,18 @@ export function createLobbyFlowController(
         void showShopPanel()
       },
       onShopPurchaseClick: (packageId) => {
-        void startShopPurchase(packageId)
+        openShopPurchaseConfirm(packageId)
+      },
+      onShopPurchaseConfirm: () => {
+        const packageId = state.shopPurchaseConfirmPackageId
+        if (packageId !== null) {
+          void startShopPurchase(packageId)
+        }
+      },
+      onShopPurchaseCancel: () => {
+        if (state.shopPurchaseActionPackageId !== null) return
+        state.shopPurchaseConfirmPackageId = null
+        render()
       },
       onShopHistoryToggle: () => {
         state.shopPurchasesVisible = !state.shopPurchasesVisible
@@ -2673,8 +2687,40 @@ export function createLobbyFlowController(
     render()
   }
 
+  function openShopPurchaseConfirm(packageId: string): void {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession === null) {
+      state.authModalMode = 'cta'
+      state.authErrorText = null
+      render()
+      return
+    }
+
+    if (state.shopPurchaseActionPackageId !== null) {
+      return
+    }
+
+    const coinPackage =
+      state.shopPackages.find((item) => item.packageId === packageId) ??
+      state.lobbyPackages.find((item) => item.packageId === packageId)
+    if (!coinPackage) {
+      state.shopPurchaseMessageText = 'Избраният пакет не е наличен.'
+      render()
+      return
+    }
+
+    state.shopPurchaseConfirmPackageId = packageId
+    state.shopPurchaseMessageText = null
+    render()
+  }
+
   async function startShopPurchase(packageId: string): Promise<void> {
     const authSession = options.getAuthSession?.() ?? null
+
+    if (state.shopPurchaseActionPackageId !== null) {
+      return
+    }
 
     if (authSession === null) {
       state.authModalMode = 'cta'
@@ -2696,6 +2742,7 @@ export function createLobbyFlowController(
     const result = await options.onShopPurchaseStart(packageId)
 
     state.shopPurchaseActionPackageId = null
+    state.shopPurchaseConfirmPackageId = null
 
     if (!result.ok) {
       state.shopPurchaseMessageText = result.message
