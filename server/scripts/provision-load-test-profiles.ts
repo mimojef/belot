@@ -13,7 +13,7 @@ const CONFIRM_VALUE = 'CREATE-LOADTEST-PROFILES'
 const EMAIL_DOMAIN = 'loadtest.pika.bg'
 const PROFILE_PREFIX = 'loadtest'
 const MIN_BALANCE = 100_000
-const MAX_COUNT = 400
+const MAX_COUNT = 800
 const PASSWORD_SEED_MIN_LENGTH = 24
 const SCRYPT_KEY_LENGTH = 64
 

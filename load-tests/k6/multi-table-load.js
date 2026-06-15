@@ -8,15 +8,7 @@ const REQUIRED_USERS = TABLES * 4;
 const USERS = loadUsers();
 
 export const options = {
-  scenarios: {
-    multi_table_load: {
-      executor: 'per-vu-iterations',
-      vus: REQUIRED_USERS,
-      iterations: 1,
-      maxDuration: '30m',
-      gracefulStop: '5s',
-    },
-  },
+  scenarios: createScenarios(),
   thresholds: {
     login_failures: ['count==0'],
     websocket_errors: ['count==0'],
@@ -67,10 +59,10 @@ export default function () {
 }
 
 function accountForVu(vu) {
-  const index = vu - 1;
+  const index = Number(__ENV.USER_INDEX);
 
-  if (index < 0 || index >= REQUIRED_USERS) {
-    fail(`Unexpected VU number ${vu}; expected VUs 1..${REQUIRED_USERS}`);
+  if (!Number.isInteger(index) || index < 0 || index >= REQUIRED_USERS) {
+    fail(`VU ${vu}: invalid scenario USER_INDEX; expected 0..${REQUIRED_USERS - 1}`);
   }
 
   const user = USERS[index];
@@ -496,11 +488,35 @@ function safeClose(ws, state) {
 function parseTables(value) {
   const parsed = Number(value);
 
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
-    throw new Error('TABLES must be an integer between 1 and 100');
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 200) {
+    throw new Error('TABLES must be an integer between 1 and 200');
   }
 
   return parsed;
+}
+
+function createScenarios() {
+  const scenarios = {};
+
+  for (let index = 0; index < REQUIRED_USERS; index += 1) {
+    const tableIndex = Math.floor(index / 4);
+    const startDelayMs = Math.floor((tableIndex * 60_000) / TABLES);
+    const name = `table_${String(tableIndex + 1).padStart(3, '0')}_vu_${String((index % 4) + 1)}`;
+
+    scenarios[name] = {
+      executor: 'per-vu-iterations',
+      vus: 1,
+      iterations: 1,
+      startTime: `${startDelayMs}ms`,
+      maxDuration: '30m',
+      gracefulStop: '5s',
+      env: {
+        USER_INDEX: String(index),
+      },
+    };
+  }
+
+  return scenarios;
 }
 
 function loadUsers() {
