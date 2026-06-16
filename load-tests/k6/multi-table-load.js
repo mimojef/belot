@@ -13,7 +13,8 @@ const MATCHMAKING_BARRIER_SECONDS = parseSeconds(
   __ENV.MATCHMAKING_BARRIER_SECONDS || '120',
   'MATCHMAKING_BARRIER_SECONDS',
 );
-const WS_PRECONNECT_SECONDS = parseSeconds(__ENV.WS_PRECONNECT_SECONDS || '60', 'WS_PRECONNECT_SECONDS');
+const WS_CONNECT_SPREAD_SECONDS = parseSeconds(__ENV.WS_CONNECT_SPREAD_SECONDS || '180', 'WS_CONNECT_SPREAD_SECONDS');
+const WS_READY_BUFFER_SECONDS = parseSeconds(__ENV.WS_READY_BUFFER_SECONDS || '30', 'WS_READY_BUFFER_SECONDS');
 const HEALTH_BARRIER_TIMEOUT_SECONDS = parseSeconds(
   __ENV.HEALTH_BARRIER_TIMEOUT_SECONDS || '15',
   'HEALTH_BARRIER_TIMEOUT_SECONDS',
@@ -34,7 +35,7 @@ export const options = {
     tables_missing_websockets_at_join_barrier: ['count==0'],
     health_barrier_reached: [`count==${TABLES}`],
     health_barrier_timeout: ['count==0'],
-    tables_with_four_players_ready: [`count==${TABLES}`],
+    controllers_with_four_players_ready: [`count==${TABLES}`],
     matchmaking_success: [`count==${REQUIRED_USERS}`],
     full_human_match_success: [`count==${REQUIRED_USERS}`],
     rooms_joined: [`count==${REQUIRED_USERS}`],
@@ -58,14 +59,19 @@ const matchmakingJoinMessagesSent = new Counter('matchmaking_join_messages_sent'
 const tablesMissingWebsocketsAtJoinBarrier = new Counter('tables_missing_websockets_at_join_barrier');
 const healthBarrierReached = new Counter('health_barrier_reached');
 const healthBarrierTimeout = new Counter('health_barrier_timeout');
-const tablesWithFourPlayersReady = new Counter('tables_with_four_players_ready');
+const controllersWithFourPlayersReady = new Counter('controllers_with_four_players_ready');
 const healthActiveRoomsObserved = new Gauge('health_active_rooms_observed');
 
 const BASE_URL = trimTrailingSlashes(__ENV.BASE_URL || 'https://www.pika.bg');
 const WS_URL = __ENV.WS_URL || 'wss://www.pika.bg/ws';
 const ORIGIN = BASE_URL;
 const STAKE = Number(__ENV.STAKE || '5000');
-const RUN_TIMEOUT_MS = ((29 * 60) + WS_PRECONNECT_SECONDS + HEALTH_BARRIER_TIMEOUT_SECONDS) * 1000;
+const RUN_TIMEOUT_MS = (
+  (29 * 60)
+  + WS_CONNECT_SPREAD_SECONDS
+  + WS_READY_BUFFER_SECONDS
+  + HEALTH_BARRIER_TIMEOUT_SECONDS
+) * 1000;
 const PING_INTERVAL_MS = 20 * 1000;
 const HEALTH_POLL_INTERVAL_MS = 1000;
 const WS_OPEN = 1;
@@ -80,11 +86,13 @@ if (!WS_URL.startsWith('ws://') && !WS_URL.startsWith('wss://')) {
 }
 
 export function setup() {
-  const wsConnectAtMs = Date.now() + (MATCHMAKING_BARRIER_SECONDS * 1000);
+  const wsConnectWindowStartAtMs = Date.now() + (MATCHMAKING_BARRIER_SECONDS * 1000);
 
   return {
-    wsConnectAtMs,
-    matchmakingJoinAtMs: wsConnectAtMs + (WS_PRECONNECT_SECONDS * 1000),
+    wsConnectWindowStartAtMs,
+    matchmakingJoinAtMs: wsConnectWindowStartAtMs
+      + (WS_CONNECT_SPREAD_SECONDS * 1000)
+      + (WS_READY_BUFFER_SECONDS * 1000),
   };
 }
 
@@ -102,7 +110,7 @@ export default function (setupData) {
     players.push(createPlayerState(tableIndex, playerIndex, account, jar));
   }
 
-  waitForWebSocketConnect(setupData);
+  waitForWebSocketConnect(tableIndex, setupData);
   connectTableAndPlay(tableIndex, players, setupData);
 }
 
@@ -132,7 +140,7 @@ function formatTextSummary(data) {
     'health_barrier_reached',
     'health_barrier_timeout',
     'health_active_rooms_observed',
-    'tables_with_four_players_ready',
+    'controllers_with_four_players_ready',
     'matchmaking_success',
     'full_human_match_success',
     'rooms_joined',
@@ -334,8 +342,7 @@ function connectTableAndPlay(tableIndex, players, setupData) {
     barrierFailed: false,
     websocketReadyCounted: false,
     missingWebsocketsAtJoinCounted: false,
-    tableReadyCounted: false,
-    tableMismatchReported: false,
+    controllerReadyCounted: false,
     matchmakingJoinTimerId: null,
     healthPollTimerId: null,
     matchmakingJoinAtMs: setupData.matchmakingJoinAtMs,
@@ -583,12 +590,12 @@ function handleMatchFound(tableState, state, message) {
   }
   if (state.latestSnapshot && state.latestSnapshot.roomId !== state.matchFoundRoomId) {
     protocolErrors.add(1);
-    logSafe(state, 'match_found roomId does not match latest room_snapshot roomId');
+    logSafe(state, 'match_found roomId does not match this player room_snapshot roomId');
     closeTable(tableState);
     return;
   }
   logSafe(state, 'match found');
-  maybeCountTableReady(tableState);
+  maybeCountControllerReady(tableState);
   maybeReleaseGameplay(tableState, 'match_found');
 }
 
@@ -603,7 +610,7 @@ function handleRoomSnapshot(ws, tableState, state, message) {
 
   if (state.matchFoundRoomId && message.roomId !== state.matchFoundRoomId) {
     protocolErrors.add(1);
-    logSafe(state, 'room_snapshot roomId does not match match_found roomId');
+    logSafe(state, 'room_snapshot roomId does not match this player match_found roomId');
     closeTable(tableState);
     return;
   }
@@ -626,7 +633,7 @@ function handleRoomSnapshot(ws, tableState, state, message) {
 
   const game = message.game;
   if (!game) {
-    maybeCountTableReady(tableState);
+    maybeCountControllerReady(tableState);
     maybeReleaseGameplay(tableState, 'room_snapshot_without_game');
     return;
   }
@@ -638,7 +645,7 @@ function handleRoomSnapshot(ws, tableState, state, message) {
   }
 
   const wasReleased = tableState.gameplayReleased;
-  maybeCountTableReady(tableState);
+  maybeCountControllerReady(tableState);
   maybeReleaseGameplay(tableState, 'room_snapshot');
 
   if (!wasReleased) {
@@ -788,28 +795,17 @@ function handleMatchEnded(ws, state, message, game) {
   }
 }
 
-function maybeCountTableReady(tableState) {
-  if (tableState.tableReadyCounted || !tableHasFourLocalPlayersReady(tableState)) {
+function maybeCountControllerReady(tableState) {
+  if (tableState.controllerReadyCounted || !controllerHasFourPlayersReady(tableState)) {
     return;
   }
 
-  const roomIds = uniqueReadyRoomIds(tableState);
-  if (roomIds.length !== 1) {
-    if (!tableState.tableMismatchReported) {
-      protocolErrors.add(1);
-      tableState.tableMismatchReported = true;
-      logTableSafe(tableState, `local players were matched into different rooms: ${roomIds.join(',')}`);
-      closeTable(tableState);
-    }
-    return;
-  }
-
-  tablesWithFourPlayersReady.add(1);
-  tableState.tableReadyCounted = true;
-  logTableSafe(tableState, `four local full-human players ready in room ${roomIds[0]}`);
+  controllersWithFourPlayersReady.add(1);
+  tableState.controllerReadyCounted = true;
+  logTableSafe(tableState, 'four local full-human players have match_found and room_snapshot');
 }
 
-function tableHasFourLocalPlayersReady(tableState) {
+function controllerHasFourPlayersReady(tableState) {
   return tableState.players.every((player) => (
     player.fullHumanMatchCounted
     && player.roomJoinedCounted
@@ -821,19 +817,6 @@ function tableHasFourLocalPlayersReady(tableState) {
     && player.latestSnapshot.yourSeat
     && player.latestSnapshot.roomId === player.matchFoundRoomId
   ));
-}
-
-function uniqueReadyRoomIds(tableState) {
-  const roomIds = [];
-
-  for (const player of tableState.players) {
-    const roomId = player.latestSnapshot && player.latestSnapshot.roomId;
-    if (roomId && roomIds.indexOf(roomId) === -1) {
-      roomIds.push(roomId);
-    }
-  }
-
-  return roomIds;
 }
 
 function scheduleHealthBarrierPoll(tableState) {
@@ -886,7 +869,7 @@ function maybeReleaseGameplay(tableState, reason) {
     return;
   }
 
-  if (!tableState.tableReadyCounted) {
+  if (!tableState.controllerReadyCounted) {
     return;
   }
 
@@ -928,7 +911,7 @@ function failHealthBarrier(tableState) {
   logTableSafe(
     tableState,
     `health barrier timeout; lastActiveRooms=${tableState.lastHealthActiveRooms === null ? 'unknown' : tableState.lastHealthActiveRooms}; `
-    + `requiredActiveRooms=${REQUIRED_ACTIVE_ROOMS}; tableReady=${tableState.tableReadyCounted}`,
+    + `requiredActiveRooms=${REQUIRED_ACTIVE_ROOMS}; controllerReady=${tableState.controllerReadyCounted}`,
   );
   closeTable(tableState);
 }
@@ -1039,7 +1022,7 @@ function createScenarios() {
       vus: 1,
       iterations: 1,
       startTime: `${startDelayMs}ms`,
-      maxDuration: '35m',
+      maxDuration: '40m',
       gracefulStop: '5s',
       env: {
         TABLE_INDEX: String(tableIndex),
@@ -1050,8 +1033,11 @@ function createScenarios() {
   return scenarios;
 }
 
-function waitForWebSocketConnect(setupData) {
-  const waitMs = setupData.wsConnectAtMs - Date.now();
+function waitForWebSocketConnect(tableIndex, setupData) {
+  const connectOffsetMs = TABLES > 1
+    ? Math.floor((tableIndex * WS_CONNECT_SPREAD_SECONDS * 1000) / (TABLES - 1))
+    : 0;
+  const waitMs = (setupData.wsConnectWindowStartAtMs + connectOffsetMs) - Date.now();
 
   if (waitMs > 0) {
     sleep(waitMs / 1000);
