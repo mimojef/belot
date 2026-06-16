@@ -253,6 +253,7 @@ function createPlayerState(tableIndex, playerIndex, account, jar) {
     seat: null,
     reconnectToken: null,
     lastPhase: null,
+    phaseSequence: 0,
     lastRoomStatus: null,
     wsConnected: false,
     wsConnectedAtMs: null,
@@ -639,6 +640,7 @@ function handleRoomSnapshot(ws, tableState, state, message) {
 
   const phase = game.authoritativePhase || game.phase || 'unknown';
   if (phase !== state.lastPhase) {
+    state.phaseSequence += 1;
     state.lastPhase = phase;
     logSafe(state, `phase ${phase}`, true);
   }
@@ -687,7 +689,7 @@ function maybeSubmitCut(ws, state, message, game) {
   const key = [
     message.roomId,
     'cutting',
-    game.timerDeadlineAt || '',
+    state.phaseSequence,
     cutting.cutterSeat || '',
     cutting.deckCount,
   ].join('|');
@@ -725,7 +727,7 @@ function maybeSubmitBid(ws, state, message, game) {
   const key = [
     message.roomId,
     'bidding',
-    game.timerDeadlineAt || '',
+    state.phaseSequence,
     bidding.currentBidderSeat || '',
     Array.isArray(bidding.entries) ? bidding.entries.length : 0,
     stableStringify(bidding.winningBid),
@@ -755,7 +757,7 @@ function maybeSubmitPlay(ws, state, message, game) {
   const key = [
     message.roomId,
     'playing',
-    game.timerDeadlineAt || '',
+    state.phaseSequence,
     playing.currentTurnSeat || '',
     playing.completedTricksCount,
     Array.isArray(playing.currentTrickPlays) ? playing.currentTrickPlays.length : 0,
