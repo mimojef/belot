@@ -35,7 +35,6 @@ export const options = {
     tables_missing_websockets_at_join_barrier: ['count==0'],
     health_barrier_reached: [`count==${TABLES}`],
     health_barrier_timeout: ['count==0'],
-    controllers_with_four_players_ready: [`count==${TABLES}`],
     matchmaking_success: [`count==${REQUIRED_USERS}`],
     full_human_match_success: [`count==${REQUIRED_USERS}`],
     rooms_joined: [`count==${REQUIRED_USERS}`],
@@ -648,7 +647,7 @@ function handleRoomSnapshot(ws, tableState, state, message) {
   maybeCountControllerReady(tableState);
   maybeReleaseGameplay(tableState, 'room_snapshot');
 
-  if (!wasReleased) {
+  if (!tableState.gameplayReleased || !wasReleased) {
     return;
   }
 
@@ -866,10 +865,6 @@ function pollHealthBarrier(tableState) {
 
 function maybeReleaseGameplay(tableState, reason) {
   if (tableState.gameplayReleased || tableState.barrierFailed) {
-    return;
-  }
-
-  if (!tableState.controllerReadyCounted) {
     return;
   }
 
