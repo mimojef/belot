@@ -1,21 +1,25 @@
 import http from 'k6/http';
 import { check, fail } from 'k6';
-import { Counter } from 'k6/metrics';
+import { Counter, Gauge } from 'k6/metrics';
 import { sleep } from 'k6';
 import { WebSocket } from 'k6/websockets';
 
 const TABLES = parseTables(__ENV.TABLES);
-const REQUIRED_USERS = TABLES * 4;
+const PLAYERS_PER_TABLE = 4;
+const REQUIRED_USERS = TABLES * PLAYERS_PER_TABLE;
 const USERS = loadUsers();
 const LOGIN_SPREAD_SECONDS = parseSeconds(__ENV.LOGIN_SPREAD_SECONDS || '60', 'LOGIN_SPREAD_SECONDS');
 const MATCHMAKING_BARRIER_SECONDS = parseSeconds(
   __ENV.MATCHMAKING_BARRIER_SECONDS || '120',
   'MATCHMAKING_BARRIER_SECONDS',
 );
-const TABLE_START_SPREAD_SECONDS = parseSeconds(
-  __ENV.TABLE_START_SPREAD_SECONDS || '10',
-  'TABLE_START_SPREAD_SECONDS',
+const WS_PRECONNECT_SECONDS = parseSeconds(__ENV.WS_PRECONNECT_SECONDS || '60', 'WS_PRECONNECT_SECONDS');
+const HEALTH_BARRIER_TIMEOUT_SECONDS = parseSeconds(
+  __ENV.HEALTH_BARRIER_TIMEOUT_SECONDS || '15',
+  'HEALTH_BARRIER_TIMEOUT_SECONDS',
 );
+const REQUIRED_ACTIVE_ROOMS = parseRequiredActiveRooms(__ENV.REQUIRED_ACTIVE_ROOMS || String(TABLES));
+const SUMMARY_JSON_PATH = __ENV.SUMMARY_JSON_PATH || 'multi-table-load-summary.json';
 
 export const options = {
   scenarios: createScenarios(),
@@ -24,6 +28,13 @@ export const options = {
     websocket_errors: ['count==0'],
     protocol_errors: ['count==0'],
     rejected_actions: ['count==0'],
+    websocket_connections_ready: [`count==${REQUIRED_USERS}`],
+    tables_with_four_websockets_ready: [`count==${TABLES}`],
+    matchmaking_join_messages_sent: [`count==${REQUIRED_USERS}`],
+    tables_missing_websockets_at_join_barrier: ['count==0'],
+    health_barrier_reached: [`count==${TABLES}`],
+    health_barrier_timeout: ['count==0'],
+    tables_with_four_players_ready: [`count==${TABLES}`],
     matchmaking_success: [`count==${REQUIRED_USERS}`],
     full_human_match_success: [`count==${REQUIRED_USERS}`],
     rooms_joined: [`count==${REQUIRED_USERS}`],
@@ -41,13 +52,22 @@ const rejectedActions = new Counter('rejected_actions');
 const matchesCompleted = new Counter('matches_completed');
 const roomSnapshotsReceived = new Counter('room_snapshots_received');
 const gameplayActionsSent = new Counter('gameplay_actions_sent');
+const websocketConnectionsReady = new Counter('websocket_connections_ready');
+const tablesWithFourWebsocketsReady = new Counter('tables_with_four_websockets_ready');
+const matchmakingJoinMessagesSent = new Counter('matchmaking_join_messages_sent');
+const tablesMissingWebsocketsAtJoinBarrier = new Counter('tables_missing_websockets_at_join_barrier');
+const healthBarrierReached = new Counter('health_barrier_reached');
+const healthBarrierTimeout = new Counter('health_barrier_timeout');
+const tablesWithFourPlayersReady = new Counter('tables_with_four_players_ready');
+const healthActiveRoomsObserved = new Gauge('health_active_rooms_observed');
 
 const BASE_URL = trimTrailingSlashes(__ENV.BASE_URL || 'https://www.pika.bg');
 const WS_URL = __ENV.WS_URL || 'wss://www.pika.bg/ws';
 const ORIGIN = BASE_URL;
 const STAKE = Number(__ENV.STAKE || '5000');
-const RUN_TIMEOUT_MS = 29 * 60 * 1000;
+const RUN_TIMEOUT_MS = ((29 * 60) + WS_PRECONNECT_SECONDS + HEALTH_BARRIER_TIMEOUT_SECONDS) * 1000;
 const PING_INTERVAL_MS = 20 * 1000;
+const HEALTH_POLL_INTERVAL_MS = 1000;
 const WS_OPEN = 1;
 const LOG_PHASE_TRANSITIONS = TABLES <= 5;
 
@@ -60,36 +80,186 @@ if (!WS_URL.startsWith('ws://') && !WS_URL.startsWith('wss://')) {
 }
 
 export function setup() {
+  const wsConnectAtMs = Date.now() + (MATCHMAKING_BARRIER_SECONDS * 1000);
+
   return {
-    matchmakingBarrierAtMs: Date.now() + (MATCHMAKING_BARRIER_SECONDS * 1000),
+    wsConnectAtMs,
+    matchmakingJoinAtMs: wsConnectAtMs + (WS_PRECONNECT_SECONDS * 1000),
   };
 }
 
 export default function (setupData) {
-  const account = accountForVu(__VU);
-  const jar = http.cookieJar();
+  const tableIndex = tableIndexForVu(__VU);
+  const players = [];
 
-  login(account, jar);
-  validateStake(jar);
-  waitForMatchmakingStart(setupData);
-  connectAndPlay(jar);
-}
+  for (let playerIndex = 0; playerIndex < PLAYERS_PER_TABLE; playerIndex += 1) {
+    const account = accountForTablePlayer(tableIndex, playerIndex);
+    const jar = new http.CookieJar();
 
-function accountForVu(vu) {
-  const index = Number(__ENV.USER_INDEX);
+    login(account, jar);
+    validateStake(jar);
 
-  if (!Number.isInteger(index) || index < 0 || index >= REQUIRED_USERS) {
-    fail(`VU ${vu}: invalid scenario USER_INDEX; expected 0..${REQUIRED_USERS - 1}`);
+    players.push(createPlayerState(tableIndex, playerIndex, account, jar));
   }
 
-  const user = USERS[index];
+  waitForWebSocketConnect(setupData);
+  connectTableAndPlay(tableIndex, players, setupData);
+}
+
+export function handleSummary(data) {
+  return {
+    [SUMMARY_JSON_PATH]: JSON.stringify(data, null, 2),
+    stdout: formatTextSummary(data),
+  };
+}
+
+function formatTextSummary(data) {
+  const metrics = data && data.metrics ? data.metrics : {};
+  const metricNames = Object.keys(metrics).sort();
+  const thresholdNames = metricNames.filter((name) => metrics[name].thresholds);
+  const importantNames = [
+    'checks',
+    'http_req_failed',
+    'http_req_duration',
+    'login_failures',
+    'websocket_errors',
+    'protocol_errors',
+    'rejected_actions',
+    'websocket_connections_ready',
+    'tables_with_four_websockets_ready',
+    'matchmaking_join_messages_sent',
+    'tables_missing_websockets_at_join_barrier',
+    'health_barrier_reached',
+    'health_barrier_timeout',
+    'health_active_rooms_observed',
+    'tables_with_four_players_ready',
+    'matchmaking_success',
+    'full_human_match_success',
+    'rooms_joined',
+    'matches_completed',
+    'gameplay_actions_sent',
+  ].filter((name) => metrics[name]);
+  const names = uniqueStrings(importantNames.concat(thresholdNames));
+  const lines = [''];
+
+  lines.push('k6 summary');
+  lines.push('');
+
+  for (const name of names) {
+    lines.push(`${name}: ${formatMetricValues(metrics[name].values || {})}`);
+  }
+
+  if (thresholdNames.length > 0) {
+    lines.push('');
+    lines.push('thresholds:');
+    for (const name of thresholdNames) {
+      const thresholds = metrics[name].thresholds || {};
+      for (const expression of Object.keys(thresholds).sort()) {
+        const threshold = thresholds[expression];
+        const ok = threshold && threshold.ok === true ? 'ok' : 'failed';
+        lines.push(`  ${name} ${expression}: ${ok}`);
+      }
+    }
+  }
+
+  lines.push('');
+  return `${lines.join('\n')}\n`;
+}
+
+function formatMetricValues(values) {
+  const preferredOrder = ['count', 'rate', 'value', 'avg', 'min', 'med', 'p(90)', 'p(95)', 'max'];
+  const parts = [];
+
+  for (const key of preferredOrder) {
+    if (values[key] !== undefined) {
+      parts.push(`${key}=${formatMetricNumber(values[key])}`);
+    }
+  }
+
+  for (const key of Object.keys(values).sort()) {
+    if (preferredOrder.indexOf(key) === -1) {
+      parts.push(`${key}=${formatMetricNumber(values[key])}`);
+    }
+  }
+
+  return parts.length > 0 ? parts.join(' ') : '-';
+}
+
+function formatMetricNumber(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return String(value);
+  }
+
+  if (Number.isInteger(value)) {
+    return String(value);
+  }
+
+  return String(Math.round(value * 1000) / 1000);
+}
+
+function uniqueStrings(values) {
+  const result = [];
+
+  for (const value of values) {
+    if (result.indexOf(value) === -1) {
+      result.push(value);
+    }
+  }
+
+  return result;
+}
+
+function tableIndexForVu(vu) {
+  const index = Number(__ENV.TABLE_INDEX);
+
+  if (!Number.isInteger(index) || index < 0 || index >= TABLES) {
+    fail(`VU ${vu}: invalid scenario TABLE_INDEX; expected 0..${TABLES - 1}`);
+  }
+
+  return index;
+}
+
+function accountForTablePlayer(tableIndex, playerIndex) {
+  const userIndex = (tableIndex * PLAYERS_PER_TABLE) + playerIndex;
+  const user = USERS[userIndex];
+
   if (!user || !user.email || !user.password) {
-    fail(`VU ${vu}: missing email or password in credentials file`);
+    fail(`VU ${__VU}: missing email or password in credentials file for user index ${userIndex}`);
   }
 
   return {
+    userIndex,
     email: user.email,
     password: user.password,
+  };
+}
+
+function createPlayerState(tableIndex, playerIndex, account, jar) {
+  return {
+    vu: __VU,
+    tableIndex,
+    playerIndex,
+    userIndex: account.userIndex,
+    jar,
+    roomId: null,
+    matchFoundRoomId: null,
+    seat: null,
+    reconnectToken: null,
+    lastPhase: null,
+    lastRoomStatus: null,
+    wsConnected: false,
+    wsConnectedAtMs: null,
+    wsReadyCounted: false,
+    matchmakingJoinSent: false,
+    matchmakingCounted: false,
+    fullHumanMatchCounted: false,
+    roomJoinedCounted: false,
+    leaveVoteSent: false,
+    completionCounted: false,
+    closed: false,
+    closeRequested: false,
+    latestSnapshot: null,
+    sentActionKeys: {},
   };
 }
 
@@ -116,14 +286,17 @@ function login(account, jar) {
 
   if (!ok) {
     loginFailures.add(1);
-    fail(`VU ${__VU}: login failed; WebSocket connection was not opened`);
+    fail(`VU ${__VU}: login failed for user index ${account.userIndex}; WebSocket connection was not opened`);
   }
 
   const cookies = jar.cookiesForURL(BASE_URL);
   const sessionCookies = cookies ? cookies.belot_session : null;
   if (!sessionCookies || sessionCookies.length === 0) {
     loginFailures.add(1);
-    fail(`VU ${__VU}: login succeeded but belot_session cookie is missing; WebSocket connection was not opened`);
+    fail(
+      `VU ${__VU}: login succeeded for user index ${account.userIndex} but belot_session cookie is missing; `
+      + 'WebSocket connection was not opened',
+    );
   }
 }
 
@@ -151,31 +324,42 @@ function validateStake(jar) {
   }
 }
 
-function connectAndPlay(jar) {
-  const state = {
+function connectTableAndPlay(tableIndex, players, setupData) {
+  const tableState = {
     vu: __VU,
-    roomId: null,
-    seat: null,
-    reconnectToken: null,
-    lastPhase: null,
-    lastRoomStatus: null,
-    matchmakingCounted: false,
-    fullHumanMatchCounted: false,
-    roomJoinedCounted: false,
-    leaveVoteSent: false,
-    completionCounted: false,
-    closed: false,
-    closeRequested: false,
-    sentActionKeys: {},
+    tableIndex,
+    players,
+    sockets: [],
+    gameplayReleased: false,
+    barrierFailed: false,
+    websocketReadyCounted: false,
+    missingWebsocketsAtJoinCounted: false,
+    tableReadyCounted: false,
+    tableMismatchReported: false,
+    matchmakingJoinTimerId: null,
+    healthPollTimerId: null,
+    matchmakingJoinAtMs: setupData.matchmakingJoinAtMs,
+    barrierDeadlineMs: setupData.matchmakingJoinAtMs + (HEALTH_BARRIER_TIMEOUT_SECONDS * 1000),
+    lastHealthActiveRooms: null,
   };
 
+  for (const player of players) {
+    connectPlayerSocket(tableState, player);
+  }
+
+  scheduleMatchmakingJoin(tableState, setupData);
+}
+
+function connectPlayerSocket(tableState, state) {
   const ws = new WebSocket(WS_URL, null, {
-    jar,
+    jar: state.jar,
     headers: {
       Origin: ORIGIN,
     },
     tags: { name: 'game_ws' },
   });
+
+  tableState.sockets[state.playerIndex] = ws;
 
   const timeoutId = setTimeout(() => {
     if (state.completionCounted || state.closed) {
@@ -194,7 +378,7 @@ function connectAndPlay(jar) {
   }, PING_INTERVAL_MS);
 
   ws.addEventListener('message', (event) => {
-    handleMessage(ws, state, event.data);
+    handleMessage(ws, tableState, state, event.data);
   });
 
   ws.addEventListener('error', () => {
@@ -215,7 +399,7 @@ function connectAndPlay(jar) {
   });
 }
 
-function handleMessage(ws, state, rawData) {
+function handleMessage(ws, tableState, state, rawData) {
   if (typeof rawData !== 'string') {
     protocolErrors.add(1);
     logSafe(state, 'non-text WebSocket message received');
@@ -231,7 +415,7 @@ function handleMessage(ws, state, rawData) {
 
   switch (message.type) {
     case 'connected':
-      sendProtocol(ws, state, { type: 'join_matchmaking', stake: STAKE });
+      handleConnected(ws, tableState, state);
       break;
 
     case 'matchmaking_joined':
@@ -239,30 +423,11 @@ function handleMessage(ws, state, rawData) {
       break;
 
     case 'match_found':
-      state.roomId = message.roomId || state.roomId;
-      state.seat = message.seat || state.seat;
-      if (message.humanPlayers !== 4 || message.botPlayers !== 0) {
-        protocolErrors.add(1);
-        logSafe(
-          state,
-          `match_found is not full human match humanPlayers=${message.humanPlayers} botPlayers=${message.botPlayers}`,
-        );
-        safeClose(ws, state);
-        break;
-      }
-      if (!state.matchmakingCounted) {
-        matchmakingSuccess.add(1);
-        state.matchmakingCounted = true;
-      }
-      if (!state.fullHumanMatchCounted) {
-        fullHumanMatchSuccess.add(1);
-        state.fullHumanMatchCounted = true;
-      }
-      logSafe(state, 'match found');
+      handleMatchFound(tableState, state, message);
       break;
 
     case 'room_snapshot':
-      handleRoomSnapshot(ws, state, message);
+      handleRoomSnapshot(ws, tableState, state, message);
       break;
 
     case 'error':
@@ -295,11 +460,157 @@ function handleMessage(ws, state, rawData) {
   }
 }
 
-function handleRoomSnapshot(ws, state, message) {
+function handleConnected(ws, tableState, state) {
+  if (state.closeRequested || tableState.missingWebsocketsAtJoinCounted || tableState.barrierFailed) {
+    safeClose(ws, state);
+    return;
+  }
+
+  const now = Date.now();
+  state.wsConnected = true;
+  state.wsConnectedAtMs = now;
+
+  if (!state.wsReadyCounted && now <= tableState.matchmakingJoinAtMs) {
+    websocketConnectionsReady.add(1);
+    state.wsReadyCounted = true;
+  }
+
+  logSafe(state, 'WebSocket connected');
+  maybeCountTableWebsocketsReady(tableState);
+
+  if (Date.now() >= tableState.barrierDeadlineMs) {
+    safeClose(ws, state);
+  }
+}
+
+function maybeCountTableWebsocketsReady(tableState) {
+  if (tableState.websocketReadyCounted || !tableHasFourWebsocketsReady(tableState)) {
+    return;
+  }
+
+  tablesWithFourWebsocketsReady.add(1);
+  tableState.websocketReadyCounted = true;
+  logTableSafe(tableState, 'four WebSockets connected and ready');
+}
+
+function tableHasFourWebsocketsReady(tableState) {
+  return tableState.players.every((player) => {
+    const ws = tableState.sockets[player.playerIndex];
+    return (
+      player.wsConnected
+      && player.wsConnectedAtMs !== null
+      && player.wsConnectedAtMs <= tableState.matchmakingJoinAtMs
+      && ws
+      && ws.readyState === WS_OPEN
+    );
+  });
+}
+
+function scheduleMatchmakingJoin(tableState, setupData) {
+  const waitMs = setupData.matchmakingJoinAtMs - Date.now();
+
+  tableState.matchmakingJoinTimerId = setTimeout(() => {
+    tableState.matchmakingJoinTimerId = null;
+    handleMatchmakingJoinBarrier(tableState);
+  }, Math.max(0, waitMs));
+}
+
+function handleMatchmakingJoinBarrier(tableState) {
+  maybeCountTableWebsocketsReady(tableState);
+
+  if (!tableHasFourWebsocketsReady(tableState)) {
+    if (!tableState.missingWebsocketsAtJoinCounted) {
+      tablesMissingWebsocketsAtJoinBarrier.add(1);
+      tableState.missingWebsocketsAtJoinCounted = true;
+    }
+    logTableSafe(tableState, 'matchmaking join barrier reached with missing WebSocket connections');
+    closeTable(tableState);
+    return;
+  }
+
+  let sentAll = true;
+
+  for (const player of tableState.players) {
+    const ws = tableState.sockets[player.playerIndex];
+    const sent = sendProtocol(ws, player, { type: 'join_matchmaking', stake: STAKE });
+
+    if (sent) {
+      player.matchmakingJoinSent = true;
+      matchmakingJoinMessagesSent.add(1);
+    } else {
+      sentAll = false;
+      protocolErrors.add(1);
+      logSafe(player, 'failed to send join_matchmaking at join barrier');
+    }
+  }
+
+  if (!sentAll) {
+    closeTable(tableState);
+    return;
+  }
+
+  logTableSafe(tableState, 'sent four join_matchmaking messages');
+  scheduleHealthBarrierPoll(tableState);
+}
+
+function handleMatchFound(tableState, state, message) {
+  if (!message.roomId || !message.seat) {
+    protocolErrors.add(1);
+    logSafe(state, 'match_found is missing roomId or seat');
+    closeTable(tableState);
+    return;
+  }
+
+  state.matchFoundRoomId = message.roomId;
+  state.roomId = message.roomId;
+  state.seat = message.seat;
+  if (message.humanPlayers !== PLAYERS_PER_TABLE || message.botPlayers !== 0) {
+    protocolErrors.add(1);
+    logSafe(
+      state,
+      `match_found is not full human match humanPlayers=${message.humanPlayers} botPlayers=${message.botPlayers}`,
+    );
+    closeTable(tableState);
+    return;
+  }
+  if (!state.matchmakingCounted) {
+    matchmakingSuccess.add(1);
+    state.matchmakingCounted = true;
+  }
+  if (!state.fullHumanMatchCounted) {
+    fullHumanMatchSuccess.add(1);
+    state.fullHumanMatchCounted = true;
+  }
+  if (state.latestSnapshot && state.latestSnapshot.roomId !== state.matchFoundRoomId) {
+    protocolErrors.add(1);
+    logSafe(state, 'match_found roomId does not match latest room_snapshot roomId');
+    closeTable(tableState);
+    return;
+  }
+  logSafe(state, 'match found');
+  maybeCountTableReady(tableState);
+  maybeReleaseGameplay(tableState, 'match_found');
+}
+
+function handleRoomSnapshot(ws, tableState, state, message) {
   roomSnapshotsReceived.add(1);
 
-  state.roomId = message.roomId || state.roomId;
-  state.seat = message.yourSeat || state.seat;
+  if (!message.roomId || !message.yourSeat) {
+    protocolErrors.add(1);
+    logSafe(state, 'room_snapshot is missing roomId or yourSeat');
+    return;
+  }
+
+  if (state.matchFoundRoomId && message.roomId !== state.matchFoundRoomId) {
+    protocolErrors.add(1);
+    logSafe(state, 'room_snapshot roomId does not match match_found roomId');
+    closeTable(tableState);
+    return;
+  }
+
+  state.latestSnapshot = message;
+  state.roomId = message.roomId;
+  state.seat = message.yourSeat;
   state.reconnectToken = message.reconnectToken || state.reconnectToken;
 
   if (!state.roomJoinedCounted && state.roomId && state.seat) {
@@ -315,6 +626,8 @@ function handleRoomSnapshot(ws, state, message) {
 
   const game = message.game;
   if (!game) {
+    maybeCountTableReady(tableState);
+    maybeReleaseGameplay(tableState, 'room_snapshot_without_game');
     return;
   }
 
@@ -324,7 +637,19 @@ function handleRoomSnapshot(ws, state, message) {
     logSafe(state, `phase ${phase}`, true);
   }
 
-  if (phase === 'match-ended') {
+  const wasReleased = tableState.gameplayReleased;
+  maybeCountTableReady(tableState);
+  maybeReleaseGameplay(tableState, 'room_snapshot');
+
+  if (!wasReleased) {
+    return;
+  }
+
+  processGameplaySnapshot(ws, state, message, game);
+}
+
+function processGameplaySnapshot(ws, state, message, game) {
+  if (game.authoritativePhase === 'match-ended' || game.phase === 'match-ended') {
     if (!game.matchEnded || typeof game.matchEnded !== 'object') {
       protocolErrors.add(1);
       logSafe(state, 'match-ended phase is missing game.matchEnded snapshot');
@@ -463,6 +788,176 @@ function handleMatchEnded(ws, state, message, game) {
   }
 }
 
+function maybeCountTableReady(tableState) {
+  if (tableState.tableReadyCounted || !tableHasFourLocalPlayersReady(tableState)) {
+    return;
+  }
+
+  const roomIds = uniqueReadyRoomIds(tableState);
+  if (roomIds.length !== 1) {
+    if (!tableState.tableMismatchReported) {
+      protocolErrors.add(1);
+      tableState.tableMismatchReported = true;
+      logTableSafe(tableState, `local players were matched into different rooms: ${roomIds.join(',')}`);
+      closeTable(tableState);
+    }
+    return;
+  }
+
+  tablesWithFourPlayersReady.add(1);
+  tableState.tableReadyCounted = true;
+  logTableSafe(tableState, `four local full-human players ready in room ${roomIds[0]}`);
+}
+
+function tableHasFourLocalPlayersReady(tableState) {
+  return tableState.players.every((player) => (
+    player.fullHumanMatchCounted
+    && player.roomJoinedCounted
+    && player.matchFoundRoomId
+    && player.roomId
+    && player.seat
+    && player.latestSnapshot
+    && player.latestSnapshot.roomId
+    && player.latestSnapshot.yourSeat
+    && player.latestSnapshot.roomId === player.matchFoundRoomId
+  ));
+}
+
+function uniqueReadyRoomIds(tableState) {
+  const roomIds = [];
+
+  for (const player of tableState.players) {
+    const roomId = player.latestSnapshot && player.latestSnapshot.roomId;
+    if (roomId && roomIds.indexOf(roomId) === -1) {
+      roomIds.push(roomId);
+    }
+  }
+
+  return roomIds;
+}
+
+function scheduleHealthBarrierPoll(tableState) {
+  const jitterMs = (tableState.tableIndex * 37) % 250;
+
+  const poll = () => {
+    if (tableState.gameplayReleased || tableState.barrierFailed) {
+      return;
+    }
+
+    pollHealthBarrier(tableState);
+
+    if (tableState.gameplayReleased || tableState.barrierFailed) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now >= tableState.barrierDeadlineMs) {
+      failHealthBarrier(tableState);
+      return;
+    }
+
+    tableState.healthPollTimerId = setTimeout(poll, HEALTH_POLL_INTERVAL_MS + jitterMs);
+  };
+
+  tableState.healthPollTimerId = setTimeout(poll, jitterMs);
+}
+
+function pollHealthBarrier(tableState) {
+  const res = http.get(`${BASE_URL}/health`, {
+    headers: { Accept: 'application/json' },
+    tags: { name: 'health' },
+    timeout: '2s',
+  });
+  const body = parseJson(res.body);
+  const activeRooms = body && body.gameRuntime ? Number(body.gameRuntime.activeRooms) : NaN;
+
+  if (res.status !== 200 || !Number.isFinite(activeRooms)) {
+    logTableSafe(tableState, `health poll did not return gameRuntime.activeRooms status=${res.status}`);
+    return;
+  }
+
+  tableState.lastHealthActiveRooms = activeRooms;
+  healthActiveRoomsObserved.add(activeRooms);
+  maybeReleaseGameplay(tableState, 'health');
+}
+
+function maybeReleaseGameplay(tableState, reason) {
+  if (tableState.gameplayReleased || tableState.barrierFailed) {
+    return;
+  }
+
+  if (!tableState.tableReadyCounted) {
+    return;
+  }
+
+  if (Date.now() >= tableState.barrierDeadlineMs) {
+    failHealthBarrier(tableState);
+    return;
+  }
+
+  if (tableState.lastHealthActiveRooms === null || tableState.lastHealthActiveRooms < REQUIRED_ACTIVE_ROOMS) {
+    return;
+  }
+
+  tableState.gameplayReleased = true;
+  healthBarrierReached.add(1);
+  clearHealthPoll(tableState);
+  logTableSafe(
+    tableState,
+    `gameplay barrier released by ${reason}; activeRooms=${tableState.lastHealthActiveRooms}`,
+  );
+
+  for (const player of tableState.players) {
+    const ws = tableState.sockets[player.playerIndex];
+    const snapshot = player.latestSnapshot;
+    if (!ws || !snapshot || !snapshot.game) {
+      continue;
+    }
+    processGameplaySnapshot(ws, player, snapshot, snapshot.game);
+  }
+}
+
+function failHealthBarrier(tableState) {
+  if (tableState.gameplayReleased || tableState.barrierFailed) {
+    return;
+  }
+
+  tableState.barrierFailed = true;
+  healthBarrierTimeout.add(1);
+  clearHealthPoll(tableState);
+  logTableSafe(
+    tableState,
+    `health barrier timeout; lastActiveRooms=${tableState.lastHealthActiveRooms === null ? 'unknown' : tableState.lastHealthActiveRooms}; `
+    + `requiredActiveRooms=${REQUIRED_ACTIVE_ROOMS}; tableReady=${tableState.tableReadyCounted}`,
+  );
+  closeTable(tableState);
+}
+
+function clearHealthPoll(tableState) {
+  if (tableState.healthPollTimerId !== null) {
+    clearTimeout(tableState.healthPollTimerId);
+    tableState.healthPollTimerId = null;
+  }
+}
+
+function clearMatchmakingJoinTimer(tableState) {
+  if (tableState.matchmakingJoinTimerId !== null) {
+    clearTimeout(tableState.matchmakingJoinTimerId);
+    tableState.matchmakingJoinTimerId = null;
+  }
+}
+
+function closeTable(tableState) {
+  clearMatchmakingJoinTimer(tableState);
+  clearHealthPoll(tableState);
+  for (const player of tableState.players) {
+    const ws = tableState.sockets[player.playerIndex];
+    if (ws) {
+      safeClose(ws, player);
+    }
+  }
+}
+
 function sendOnce(ws, state, key, payload) {
   if (state.sentActionKeys[key]) {
     return false;
@@ -512,6 +1007,16 @@ function parseTables(value) {
   return parsed;
 }
 
+function parseRequiredActiveRooms(value) {
+  const parsed = Number(value);
+
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error('REQUIRED_ACTIVE_ROOMS must be a positive integer');
+  }
+
+  return parsed;
+}
+
 function parseSeconds(value, name) {
   const parsed = Number(value);
 
@@ -525,20 +1030,19 @@ function parseSeconds(value, name) {
 function createScenarios() {
   const scenarios = {};
 
-  for (let index = 0; index < REQUIRED_USERS; index += 1) {
-    const tableIndex = Math.floor(index / 4);
+  for (let tableIndex = 0; tableIndex < TABLES; tableIndex += 1) {
     const startDelayMs = Math.floor((tableIndex * LOGIN_SPREAD_SECONDS * 1000) / TABLES);
-    const name = `table_${String(tableIndex + 1).padStart(3, '0')}_vu_${String((index % 4) + 1)}`;
+    const name = `table_${String(tableIndex + 1).padStart(3, '0')}`;
 
     scenarios[name] = {
       executor: 'per-vu-iterations',
       vus: 1,
       iterations: 1,
       startTime: `${startDelayMs}ms`,
-      maxDuration: '30m',
+      maxDuration: '35m',
       gracefulStop: '5s',
       env: {
-        USER_INDEX: String(index),
+        TABLE_INDEX: String(tableIndex),
       },
     };
   }
@@ -546,12 +1050,8 @@ function createScenarios() {
   return scenarios;
 }
 
-function waitForMatchmakingStart(setupData) {
-  const userIndex = Number(__ENV.USER_INDEX);
-  const tableIndex = Math.floor(userIndex / 4);
-  const tableOffsetMs = Math.floor((tableIndex * TABLE_START_SPREAD_SECONDS * 1000) / TABLES);
-  const startsAtMs = setupData.matchmakingBarrierAtMs + tableOffsetMs;
-  const waitMs = startsAtMs - Date.now();
+function waitForWebSocketConnect(setupData) {
+  const waitMs = setupData.wsConnectAtMs - Date.now();
 
   if (waitMs > 0) {
     sleep(waitMs / 1000);
@@ -649,5 +1149,12 @@ function logSafe(state, message, isPhaseTransition = false) {
   const room = state.roomId || '-';
   const seat = state.seat || '-';
   const phase = state.lastPhase || '-';
-  console.log(`VU ${state.vu}: room=${room} seat=${seat} phase=${phase} ${message}`);
+  console.log(
+    `VU ${state.vu}: table=${state.tableIndex + 1} player=${state.playerIndex + 1} `
+    + `room=${room} seat=${seat} phase=${phase} ${message}`,
+  );
+}
+
+function logTableSafe(tableState, message) {
+  console.log(`VU ${tableState.vu}: table=${tableState.tableIndex + 1} ${message}`);
 }
