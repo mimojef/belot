@@ -33,7 +33,7 @@ export const options = {
     tables_with_four_websockets_ready: [`count==${TABLES}`],
     matchmaking_join_messages_sent: [`count==${REQUIRED_USERS}`],
     tables_missing_websockets_at_join_barrier: ['count==0'],
-    health_barrier_reached: [`count==${TABLES}`],
+    health_barrier_reached: ['count==1'],
     health_barrier_timeout: ['count==0'],
     matchmaking_success: [`count==${REQUIRED_USERS}`],
     full_human_match_success: [`count==${REQUIRED_USERS}`],
@@ -75,6 +75,7 @@ const PING_INTERVAL_MS = 20 * 1000;
 const HEALTH_POLL_INTERVAL_MS = 1000;
 const WS_OPEN = 1;
 const LOG_PHASE_TRANSITIONS = TABLES <= 5;
+const REJECTED_ACTION_DIAGNOSTICS = __ENV.REJECTED_ACTION_DIAGNOSTICS === '1';
 
 if (!Number.isInteger(STAKE) || STAKE <= 0) {
   throw new Error('STAKE must be a positive integer');
@@ -111,6 +112,36 @@ export default function (setupData) {
 
   waitForWebSocketConnect(tableIndex, setupData);
   connectTableAndPlay(tableIndex, players, setupData);
+}
+
+export function healthMonitor(setupData) {
+  const waitMs = setupData.matchmakingJoinAtMs - Date.now();
+  if (waitMs > 0) {
+    sleep(waitMs / 1000);
+  }
+
+  const deadlineMs = setupData.matchmakingJoinAtMs + (HEALTH_BARRIER_TIMEOUT_SECONDS * 1000);
+
+  while (Date.now() < deadlineMs) {
+    const activeRooms = pollHealthActiveRooms();
+    if (activeRooms !== null && activeRooms >= REQUIRED_ACTIVE_ROOMS) {
+      healthBarrierReached.add(1);
+      return;
+    }
+
+    const sleepMs = Math.min(HEALTH_POLL_INTERVAL_MS, Math.max(0, deadlineMs - Date.now()));
+    if (sleepMs > 0) {
+      sleep(sleepMs / 1000);
+    }
+  }
+
+  const activeRooms = pollHealthActiveRooms();
+  if (activeRooms !== null && activeRooms >= REQUIRED_ACTIVE_ROOMS) {
+    healthBarrierReached.add(1);
+    return;
+  }
+
+  healthBarrierTimeout.add(1);
 }
 
 export function handleSummary(data) {
@@ -267,7 +298,7 @@ function createPlayerState(tableIndex, playerIndex, account, jar) {
     closed: false,
     closeRequested: false,
     latestSnapshot: null,
-    recentGameplayActions: [],
+    recentGameplayActions: REJECTED_ACTION_DIAGNOSTICS ? [] : null,
     sentActionKeys: {},
   };
 }
@@ -339,16 +370,12 @@ function connectTableAndPlay(tableIndex, players, setupData) {
     tableIndex,
     players,
     sockets: [],
-    gameplayReleased: false,
-    barrierFailed: false,
+    gameplayStarted: false,
     websocketReadyCounted: false,
     missingWebsocketsAtJoinCounted: false,
     controllerReadyCounted: false,
     matchmakingJoinTimerId: null,
-    healthPollTimerId: null,
     matchmakingJoinAtMs: setupData.matchmakingJoinAtMs,
-    barrierDeadlineMs: setupData.matchmakingJoinAtMs + (HEALTH_BARRIER_TIMEOUT_SECONDS * 1000),
-    lastHealthActiveRooms: null,
   };
 
   for (const player of players) {
@@ -440,7 +467,9 @@ function handleMessage(ws, tableState, state, rawData) {
 
     case 'error':
       rejectedActions.add(1);
-      logRejectedActionDiagnostic(state, message);
+      if (REJECTED_ACTION_DIAGNOSTICS) {
+        logRejectedActionDiagnostic(state, message);
+      }
       logSafe(state, `server error: ${safeString(message.message || message.code || 'unknown')}`);
       break;
 
@@ -470,7 +499,7 @@ function handleMessage(ws, tableState, state, rawData) {
 }
 
 function handleConnected(ws, tableState, state) {
-  if (state.closeRequested || tableState.missingWebsocketsAtJoinCounted || tableState.barrierFailed) {
+  if (state.closeRequested || tableState.missingWebsocketsAtJoinCounted) {
     safeClose(ws, state);
     return;
   }
@@ -486,10 +515,6 @@ function handleConnected(ws, tableState, state) {
 
   logSafe(state, 'WebSocket connected');
   maybeCountTableWebsocketsReady(tableState);
-
-  if (Date.now() >= tableState.barrierDeadlineMs) {
-    safeClose(ws, state);
-  }
 }
 
 function maybeCountTableWebsocketsReady(tableState) {
@@ -559,7 +584,6 @@ function handleMatchmakingJoinBarrier(tableState) {
   }
 
   logTableSafe(tableState, 'sent four join_matchmaking messages');
-  scheduleHealthBarrierPoll(tableState);
 }
 
 function handleMatchFound(tableState, state, message) {
@@ -598,7 +622,7 @@ function handleMatchFound(tableState, state, message) {
   }
   logSafe(state, 'match found');
   maybeCountControllerReady(tableState);
-  maybeReleaseGameplay(tableState, 'match_found');
+  maybeStartTableGameplay(tableState, 'match_found');
 }
 
 function handleRoomSnapshot(ws, tableState, state, message) {
@@ -636,7 +660,7 @@ function handleRoomSnapshot(ws, tableState, state, message) {
   const game = message.game;
   if (!game) {
     maybeCountControllerReady(tableState);
-    maybeReleaseGameplay(tableState, 'room_snapshot_without_game');
+    maybeStartTableGameplay(tableState, 'room_snapshot_without_game');
     return;
   }
 
@@ -647,11 +671,11 @@ function handleRoomSnapshot(ws, tableState, state, message) {
     logSafe(state, `phase ${phase}`, true);
   }
 
-  const wasReleased = tableState.gameplayReleased;
+  const wasStarted = tableState.gameplayStarted;
   maybeCountControllerReady(tableState);
-  maybeReleaseGameplay(tableState, 'room_snapshot');
+  maybeStartTableGameplay(tableState, 'room_snapshot');
 
-  if (!tableState.gameplayReleased || !wasReleased) {
+  if (!tableState.gameplayStarted || !wasStarted) {
     return;
   }
 
@@ -701,7 +725,7 @@ function maybeSubmitCut(ws, state, message, game) {
     roomId: message.roomId,
     cutIndex,
   });
-  if (sent) {
+  if (sent && REJECTED_ACTION_DIAGNOSTICS) {
     recordGameplayAction(state, {
       actionType: 'cut',
       roomId: message.roomId,
@@ -750,7 +774,7 @@ function maybeSubmitBid(ws, state, message, game) {
     roomId: message.roomId,
     action,
   });
-  if (sent) {
+  if (sent && REJECTED_ACTION_DIAGNOSTICS) {
     recordGameplayAction(state, {
       actionType: 'bid',
       roomId: message.roomId,
@@ -792,7 +816,7 @@ function maybeSubmitPlay(ws, state, message, game) {
     cardId,
     declarationKeys: [],
   });
-  if (sent) {
+  if (sent && REJECTED_ACTION_DIAGNOSTICS) {
     recordGameplayAction(state, {
       actionType: 'play',
       roomId: message.roomId,
@@ -852,92 +876,13 @@ function controllerHasFourPlayersReady(tableState) {
   ));
 }
 
-function scheduleHealthBarrierPoll(tableState) {
-  const jitterMs = (tableState.tableIndex * 37) % 250;
-
-  const poll = () => {
-    if (tableState.gameplayReleased || tableState.barrierFailed) {
-      return;
-    }
-
-    if (Date.now() >= tableState.barrierDeadlineMs) {
-      pollHealthBarrier(tableState, false);
-      maybeReleaseGameplay(tableState, 'health_deadline', true);
-      return;
-    }
-
-    pollHealthBarrier(tableState);
-
-    if (tableState.gameplayReleased || tableState.barrierFailed) {
-      return;
-    }
-
-    const now = Date.now();
-    if (now >= tableState.barrierDeadlineMs) {
-      pollHealthBarrier(tableState, false);
-      maybeReleaseGameplay(tableState, 'health_deadline', true);
-      return;
-    }
-
-    tableState.healthPollTimerId = setTimeout(poll, HEALTH_POLL_INTERVAL_MS + jitterMs);
-  };
-
-  tableState.healthPollTimerId = setTimeout(poll, jitterMs);
-}
-
-function pollHealthBarrier(tableState, shouldTryRelease = true) {
-  const res = http.get(`${BASE_URL}/health`, {
-    headers: { Accept: 'application/json' },
-    tags: { name: 'health' },
-    timeout: '2s',
-  });
-  const body = parseJson(res.body);
-  const activeRooms = body && body.gameRuntime ? Number(body.gameRuntime.activeRooms) : NaN;
-
-  if (res.status !== 200 || !Number.isFinite(activeRooms)) {
-    logTableSafe(tableState, `health poll did not return gameRuntime.activeRooms status=${res.status}`);
-    return false;
-  }
-
-  tableState.lastHealthActiveRooms = activeRooms;
-  healthActiveRoomsObserved.add(activeRooms);
-  if (shouldTryRelease) {
-    maybeReleaseGameplay(tableState, 'health');
-  }
-  return activeRooms >= REQUIRED_ACTIVE_ROOMS;
-}
-
-function maybeReleaseGameplay(tableState, reason, finalPollCompleted = false) {
-  if (tableState.gameplayReleased || tableState.barrierFailed) {
+function maybeStartTableGameplay(tableState, reason) {
+  if (tableState.gameplayStarted || !controllerHasFourPlayersReady(tableState)) {
     return;
   }
 
-  const hasEnoughActiveRooms = () => (
-    tableState.lastHealthActiveRooms !== null
-    && tableState.lastHealthActiveRooms >= REQUIRED_ACTIVE_ROOMS
-  );
-
-  if (!hasEnoughActiveRooms()) {
-    if (Date.now() < tableState.barrierDeadlineMs) {
-      return;
-    }
-
-    if (!finalPollCompleted) {
-      pollHealthBarrier(tableState, false);
-    }
-    if (!hasEnoughActiveRooms()) {
-      failHealthBarrier(tableState);
-      return;
-    }
-  }
-
-  tableState.gameplayReleased = true;
-  healthBarrierReached.add(1);
-  clearHealthPoll(tableState);
-  logTableSafe(
-    tableState,
-    `gameplay barrier released by ${reason}; activeRooms=${tableState.lastHealthActiveRooms}`,
-  );
+  tableState.gameplayStarted = true;
+  logTableSafe(tableState, `local gameplay started by ${reason}`);
 
   for (const player of tableState.players) {
     const ws = tableState.sockets[player.playerIndex];
@@ -949,27 +894,22 @@ function maybeReleaseGameplay(tableState, reason, finalPollCompleted = false) {
   }
 }
 
-function failHealthBarrier(tableState) {
-  if (tableState.gameplayReleased || tableState.barrierFailed) {
-    return;
+function pollHealthActiveRooms() {
+  const res = http.get(`${BASE_URL}/health`, {
+    headers: { Accept: 'application/json' },
+    tags: { name: 'health' },
+    timeout: '2s',
+  });
+  const body = parseJson(res.body);
+  const activeRooms = body && body.gameRuntime ? Number(body.gameRuntime.activeRooms) : NaN;
+
+  if (res.status !== 200 || !Number.isFinite(activeRooms)) {
+    console.log(`health monitor poll did not return gameRuntime.activeRooms status=${res.status}`);
+    return null;
   }
 
-  tableState.barrierFailed = true;
-  healthBarrierTimeout.add(1);
-  clearHealthPoll(tableState);
-  logTableSafe(
-    tableState,
-    `health barrier timeout; lastActiveRooms=${tableState.lastHealthActiveRooms === null ? 'unknown' : tableState.lastHealthActiveRooms}; `
-    + `requiredActiveRooms=${REQUIRED_ACTIVE_ROOMS}; controllerReady=${tableState.controllerReadyCounted}`,
-  );
-  closeTable(tableState);
-}
-
-function clearHealthPoll(tableState) {
-  if (tableState.healthPollTimerId !== null) {
-    clearTimeout(tableState.healthPollTimerId);
-    tableState.healthPollTimerId = null;
-  }
+  healthActiveRoomsObserved.add(activeRooms);
+  return activeRooms;
 }
 
 function clearMatchmakingJoinTimer(tableState) {
@@ -981,7 +921,6 @@ function clearMatchmakingJoinTimer(tableState) {
 
 function closeTable(tableState) {
   clearMatchmakingJoinTimer(tableState);
-  clearHealthPoll(tableState);
   for (const player of tableState.players) {
     const ws = tableState.sockets[player.playerIndex];
     if (ws) {
@@ -1005,6 +944,10 @@ function sendOnce(ws, state, key, payload) {
 }
 
 function recordGameplayAction(state, details) {
+  if (!REJECTED_ACTION_DIAGNOSTICS) {
+    return;
+  }
+
   const sentAtMs = Date.now();
   const timerDeadlineAt = numericOrNull(details.timerDeadlineAt);
   state.recentGameplayActions.push({
@@ -1029,7 +972,7 @@ function recordGameplayAction(state, details) {
 
 function logRejectedActionDiagnostic(state, message) {
   const now = Date.now();
-  const recentActions = state.recentGameplayActions
+  const recentActions = (state.recentGameplayActions || [])
     .slice()
     .reverse()
     .map((action) => {
@@ -1126,7 +1069,23 @@ function parseSeconds(value, name) {
 }
 
 function createScenarios() {
-  const scenarios = {};
+  const scenarios = {
+    health_monitor: {
+      executor: 'per-vu-iterations',
+      vus: 1,
+      iterations: 1,
+      exec: 'healthMonitor',
+      startTime: '0s',
+      maxDuration: `${Math.ceil(
+        MATCHMAKING_BARRIER_SECONDS
+        + WS_CONNECT_SPREAD_SECONDS
+        + WS_READY_BUFFER_SECONDS
+        + HEALTH_BARRIER_TIMEOUT_SECONDS
+        + 30,
+      )}s`,
+      gracefulStop: '5s',
+    },
+  };
 
   for (let tableIndex = 0; tableIndex < TABLES; tableIndex += 1) {
     const startDelayMs = Math.floor((tableIndex * LOGIN_SPREAD_SECONDS * 1000) / TABLES);
