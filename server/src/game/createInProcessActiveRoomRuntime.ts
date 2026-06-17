@@ -3,6 +3,7 @@ import type { ServerGameRuntime } from '../core/serverGameRuntimeHelpers.js'
 import type {
   ActiveRoomRuntime,
   ActiveRoomRuntimeHealth,
+  RuntimeRoomTickResult,
 } from './activeRoomRuntime.js'
 import { abandonHumanControlForRoom } from './abandonHumanControlForRoom.js'
 import { advanceRoomAuthoritativeGame } from './advanceRoomAuthoritativeGame.js'
@@ -43,21 +44,25 @@ export function createInProcessActiveRoomRuntime(
       return Array.from(roomGameRuntimeRegistry.keys())
     },
 
-    recordRoomTick(input): void {
+    tickRoom(input): RuntimeRoomTickResult {
+      const nextRoom = advanceRoomAuthoritativeGame(input.room, input.now)
+
       const runtime = roomGameRuntimeRegistry.get(input.room.id) ?? null
 
-      if (runtime === null) {
-        return
+      if (runtime !== null) {
+        roomGameRuntimeRegistry.set(input.room.id, {
+          ...runtime,
+          phase: nextRoom.game.phase ?? runtime.phase,
+          updatedAt: input.now,
+          tickCount: runtime.tickCount + 1,
+        })
       }
 
-      const nextRuntime: ServerGameRuntime = {
-        ...runtime,
-        phase: input.room.game.phase ?? runtime.phase,
-        updatedAt: input.now,
-        tickCount: runtime.tickCount + 1,
+      if (nextRoom === input.room) {
+        return { kind: 'unchanged', roomId: input.room.id }
       }
 
-      roomGameRuntimeRegistry.set(input.room.id, nextRuntime)
+      return { kind: 'advanced', roomId: input.room.id, room: nextRoom }
     },
 
     submitBid(input) {
@@ -91,10 +96,6 @@ export function createInProcessActiveRoomRuntime(
 
     abandonHumanControl(input) {
       return abandonHumanControlForRoom(input.room, input.seat)
-    },
-
-    advanceRoom(input) {
-      return advanceRoomAuthoritativeGame(input.room, input.now)
     },
   }
 }

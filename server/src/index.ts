@@ -684,17 +684,14 @@ function tickRoomGameRuntimes(): void {
       continue
     }
 
-    const nextRoom = activeRoomRuntime.advanceRoom({
+    const tickResult = activeRoomRuntime.tickRoom({
       room,
       now,
     })
 
-    activeRoomRuntime.recordRoomTick({
-      room: nextRoom,
-      now,
-    })
+    if (tickResult.kind === 'advanced') {
+      const nextRoom = tickResult.room
 
-    if (nextRoom !== room) {
       persistRoomSnapshot(nextRoom)
       playerProgressStore.recordCompletedMatch(nextRoom)
       missionStore.recordMatchCompletion(nextRoom)
