@@ -95,9 +95,6 @@ import { createInProcessActiveRoomRuntime } from './game/createInProcessActiveRo
 import { initializeRoomAuthoritativeGameState } from './game/initializeRoomAuthoritativeGameState.js'
 import { rebaseServerStateToEventAt } from './game/rebaseServerStateToEventAt.js'
 import type { ServerAuthoritativeGameState } from './game/serverGameTypes.js'
-import { submitHumanBidActionForRoom } from './game/submitHumanBidActionForRoom.js'
-import { submitHumanCutIndexForRoom } from './game/submitHumanCutIndexForRoom.js'
-import { submitHumanPlayCardForRoom } from './game/submitHumanPlayCardForRoom.js'
 import { abandonHumanControlForRoom } from './game/abandonHumanControlForRoom.js'
 import { resumeHumanControlForRoom } from './game/resumeHumanControlForRoom.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
@@ -4494,11 +4491,11 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        const result = submitHumanBidActionForRoom(
+        const result = activeRoomRuntime.submitBid({
           room,
-          latestConnection.currentSeat,
-          message.action,
-        )
+          seat: latestConnection.currentSeat,
+          action: message.action,
+        })
 
         if (!result.ok) {
           safeSendToConnection(connection.id, {
@@ -4551,11 +4548,11 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        const result = submitHumanCutIndexForRoom(
+        const result = activeRoomRuntime.submitCut({
           room,
-          latestConnection.currentSeat,
-          message.cutIndex,
-        )
+          seat: latestConnection.currentSeat,
+          cutIndex: message.cutIndex,
+        })
 
         if (!result.ok) {
           safeSendToConnection(connection.id, {
@@ -4608,12 +4605,12 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        const result = submitHumanPlayCardForRoom(
+        const result = activeRoomRuntime.submitPlay({
           room,
-          latestConnection.currentSeat,
-          message.cardId,
-          message.declarationKeys,
-        )
+          seat: latestConnection.currentSeat,
+          cardId: message.cardId,
+          declarationKeys: message.declarationKeys,
+        })
 
         if (!result.ok) {
           safeSendToConnection(connection.id, {

@@ -4,6 +4,9 @@ import type {
   ActiveRoomRuntime,
   ActiveRoomRuntimeHealth,
 } from './activeRoomRuntime.js'
+import { submitHumanBidActionForRoom } from './submitHumanBidActionForRoom.js'
+import { submitHumanCutIndexForRoom } from './submitHumanCutIndexForRoom.js'
+import { submitHumanPlayCardForRoom } from './submitHumanPlayCardForRoom.js'
 import {
   ensureRoomGameRuntime,
   getGameRuntimeCountsByPhase,
@@ -31,6 +34,31 @@ export function createInProcessActiveRoomRuntime(
         activeRooms: roomGameRuntimeRegistry.size,
         roomsByPhase: getGameRuntimeCountsByPhase(roomGameRuntimeRegistry),
       }
+    },
+
+    submitBid(input) {
+      return submitHumanBidActionForRoom(
+        input.room,
+        input.seat,
+        input.action,
+      )
+    },
+
+    submitCut(input) {
+      return submitHumanCutIndexForRoom(
+        input.room,
+        input.seat,
+        input.cutIndex,
+      )
+    },
+
+    submitPlay(input) {
+      return submitHumanPlayCardForRoom(
+        input.room,
+        input.seat,
+        input.cardId,
+        input.declarationKeys,
+      )
     },
   }
 }
