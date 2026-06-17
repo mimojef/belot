@@ -59,8 +59,17 @@ export type TickRoomsResult = {
   results: readonly RuntimeRoomTickResult[]
 }
 
+export type EnsureRoomResult =
+  | {
+      ok: true
+    }
+  | {
+      ok: false
+      reason: 'no_capacity'
+    }
+
 export interface ActiveRoomRuntime {
-  ensureRoom(room: ServerRoom): void
+  ensureRoom(room: ServerRoom): EnsureRoomResult
   removeRoom(roomId: string): void
   hasRoom(roomId: string): boolean
   getHealth(): ActiveRoomRuntimeHealth

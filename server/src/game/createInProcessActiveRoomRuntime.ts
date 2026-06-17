@@ -3,6 +3,7 @@ import type { ServerGameRuntime } from '../core/serverGameRuntimeHelpers.js'
 import type {
   ActiveRoomRuntime,
   ActiveRoomRuntimeHealth,
+  EnsureRoomResult,
   RuntimeRoomTickResult,
   TickRoomsResult,
 } from './activeRoomRuntime.js'
@@ -22,8 +23,15 @@ export function createInProcessActiveRoomRuntime(
   roomGameRuntimeRegistry: Map<string, ServerGameRuntime>,
 ): ActiveRoomRuntime {
   return {
-    ensureRoom(room: ServerRoom): void {
-      ensureRoomGameRuntime(roomGameRuntimeRegistry, room)
+    ensureRoom(room: ServerRoom): EnsureRoomResult {
+      ensureRoomGameRuntime(
+        roomGameRuntimeRegistry,
+        room,
+      )
+
+      return {
+        ok: true,
+      }
     },
 
     removeRoom(roomId: string): void {
