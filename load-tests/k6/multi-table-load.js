@@ -267,6 +267,7 @@ function createPlayerState(tableIndex, playerIndex, account, jar) {
     closed: false,
     closeRequested: false,
     latestSnapshot: null,
+    recentGameplayActions: [],
     sentActionKeys: {},
   };
 }
@@ -439,6 +440,7 @@ function handleMessage(ws, tableState, state, rawData) {
 
     case 'error':
       rejectedActions.add(1);
+      logRejectedActionDiagnostic(state, message);
       logSafe(state, `server error: ${safeString(message.message || message.code || 'unknown')}`);
       break;
 
@@ -694,11 +696,21 @@ function maybeSubmitCut(ws, state, message, game) {
     cutting.deckCount,
   ].join('|');
 
-  sendOnce(ws, state, key, {
+  const sent = sendOnce(ws, state, key, {
     type: 'submit_cut_index',
     roomId: message.roomId,
     cutIndex,
   });
+  if (sent) {
+    recordGameplayAction(state, {
+      actionType: 'cut',
+      roomId: message.roomId,
+      key,
+      timerDeadlineAt: game.timerDeadlineAt,
+      phase: game.authoritativePhase || game.phase || state.lastPhase,
+      cutIndex,
+    });
+  }
 }
 
 function maybeSubmitBid(ws, state, message, game) {
@@ -733,11 +745,21 @@ function maybeSubmitBid(ws, state, message, game) {
     stableStringify(bidding.winningBid),
   ].join('|');
 
-  sendOnce(ws, state, key, {
+  const sent = sendOnce(ws, state, key, {
     type: 'submit_bid_action',
     roomId: message.roomId,
     action,
   });
+  if (sent) {
+    recordGameplayAction(state, {
+      actionType: 'bid',
+      roomId: message.roomId,
+      key,
+      timerDeadlineAt: game.timerDeadlineAt,
+      phase: game.authoritativePhase || game.phase || state.lastPhase,
+      bidActionType: action.type,
+    });
+  }
 }
 
 function maybeSubmitPlay(ws, state, message, game) {
@@ -764,12 +786,22 @@ function maybeSubmitPlay(ws, state, message, game) {
     validCardIds.join(','),
   ].join('|');
 
-  sendOnce(ws, state, key, {
+  const sent = sendOnce(ws, state, key, {
     type: 'submit_play_card',
     roomId: message.roomId,
     cardId,
     declarationKeys: [],
   });
+  if (sent) {
+    recordGameplayAction(state, {
+      actionType: 'play',
+      roomId: message.roomId,
+      key,
+      timerDeadlineAt: game.timerDeadlineAt,
+      phase: game.authoritativePhase || game.phase || state.lastPhase,
+      cardId,
+    });
+  }
 }
 
 function handleMatchEnded(ws, state, message, game) {
@@ -828,6 +860,12 @@ function scheduleHealthBarrierPoll(tableState) {
       return;
     }
 
+    if (Date.now() >= tableState.barrierDeadlineMs) {
+      pollHealthBarrier(tableState, false);
+      maybeReleaseGameplay(tableState, 'health_deadline', true);
+      return;
+    }
+
     pollHealthBarrier(tableState);
 
     if (tableState.gameplayReleased || tableState.barrierFailed) {
@@ -836,7 +874,8 @@ function scheduleHealthBarrierPoll(tableState) {
 
     const now = Date.now();
     if (now >= tableState.barrierDeadlineMs) {
-      failHealthBarrier(tableState);
+      pollHealthBarrier(tableState, false);
+      maybeReleaseGameplay(tableState, 'health_deadline', true);
       return;
     }
 
@@ -846,7 +885,7 @@ function scheduleHealthBarrierPoll(tableState) {
   tableState.healthPollTimerId = setTimeout(poll, jitterMs);
 }
 
-function pollHealthBarrier(tableState) {
+function pollHealthBarrier(tableState, shouldTryRelease = true) {
   const res = http.get(`${BASE_URL}/health`, {
     headers: { Accept: 'application/json' },
     tags: { name: 'health' },
@@ -857,26 +896,39 @@ function pollHealthBarrier(tableState) {
 
   if (res.status !== 200 || !Number.isFinite(activeRooms)) {
     logTableSafe(tableState, `health poll did not return gameRuntime.activeRooms status=${res.status}`);
-    return;
+    return false;
   }
 
   tableState.lastHealthActiveRooms = activeRooms;
   healthActiveRoomsObserved.add(activeRooms);
-  maybeReleaseGameplay(tableState, 'health');
+  if (shouldTryRelease) {
+    maybeReleaseGameplay(tableState, 'health');
+  }
+  return activeRooms >= REQUIRED_ACTIVE_ROOMS;
 }
 
-function maybeReleaseGameplay(tableState, reason) {
+function maybeReleaseGameplay(tableState, reason, finalPollCompleted = false) {
   if (tableState.gameplayReleased || tableState.barrierFailed) {
     return;
   }
 
-  if (Date.now() >= tableState.barrierDeadlineMs) {
-    failHealthBarrier(tableState);
-    return;
-  }
+  const hasEnoughActiveRooms = () => (
+    tableState.lastHealthActiveRooms !== null
+    && tableState.lastHealthActiveRooms >= REQUIRED_ACTIVE_ROOMS
+  );
 
-  if (tableState.lastHealthActiveRooms === null || tableState.lastHealthActiveRooms < REQUIRED_ACTIVE_ROOMS) {
-    return;
+  if (!hasEnoughActiveRooms()) {
+    if (Date.now() < tableState.barrierDeadlineMs) {
+      return;
+    }
+
+    if (!finalPollCompleted) {
+      pollHealthBarrier(tableState, false);
+    }
+    if (!hasEnoughActiveRooms()) {
+      failHealthBarrier(tableState);
+      return;
+    }
   }
 
   tableState.gameplayReleased = true;
@@ -950,6 +1002,72 @@ function sendOnce(ws, state, key, payload) {
   }
 
   return sent;
+}
+
+function recordGameplayAction(state, details) {
+  const sentAtMs = Date.now();
+  const timerDeadlineAt = numericOrNull(details.timerDeadlineAt);
+  state.recentGameplayActions.push({
+    actionType: details.actionType,
+    roomId: details.roomId,
+    seat: state.seat,
+    player: state.playerIndex + 1,
+    key: details.key,
+    sentAtMs,
+    timerDeadlineAt,
+    msBeforeDeadlineAtSend: timerDeadlineAt === null ? null : timerDeadlineAt - sentAtMs,
+    phase: details.phase || state.lastPhase || '-',
+    cardId: details.cardId || null,
+    bidActionType: details.bidActionType || null,
+    cutIndex: Number.isInteger(details.cutIndex) ? details.cutIndex : null,
+  });
+
+  if (state.recentGameplayActions.length > 6) {
+    state.recentGameplayActions.shift();
+  }
+}
+
+function logRejectedActionDiagnostic(state, message) {
+  const now = Date.now();
+  const recentActions = state.recentGameplayActions
+    .slice()
+    .reverse()
+    .map((action) => {
+      const timerDeadlineAt = numericOrNull(action.timerDeadlineAt);
+      return {
+        actionType: action.actionType || null,
+        roomId: action.roomId || null,
+        phase: action.phase || null,
+        key: action.key || null,
+        sentAtMs: numericOrNull(action.sentAtMs),
+        actionAgeMs: Number.isFinite(action.sentAtMs) ? now - action.sentAtMs : null,
+        timerDeadlineAt,
+        msBeforeDeadlineAtSend: numericOrNull(action.msBeforeDeadlineAtSend),
+        msAfterDeadlineAtError: timerDeadlineAt === null ? null : now - timerDeadlineAt,
+        cardId: action.cardId || null,
+        bidActionType: action.bidActionType || null,
+        cutIndex: numericOrNull(action.cutIndex),
+      };
+    });
+
+  console.log(
+    `rejected-action-diagnostic ${JSON.stringify({
+      error: String(message.message || message.code || 'unknown'),
+      now,
+      room: state.roomId || null,
+      seat: state.seat || null,
+      phase: state.lastPhase || null,
+      vu: state.vu,
+      table: state.tableIndex + 1,
+      player: state.playerIndex + 1,
+      recentActions,
+    })}`,
+  );
+}
+
+function numericOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function sendProtocol(ws, state, payload) {
