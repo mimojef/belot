@@ -91,14 +91,10 @@ import {
 } from './matchmaking/selectMatchmakingBotProfiles.js'
 import { tryCreatePendingMatchGroup } from './matchmaking/tryCreatePendingMatchGroup.js'
 import { advanceRoomAuthoritativeGame } from './game/advanceRoomAuthoritativeGame.js'
+import { createInProcessActiveRoomRuntime } from './game/createInProcessActiveRoomRuntime.js'
 import { initializeRoomAuthoritativeGameState } from './game/initializeRoomAuthoritativeGameState.js'
 import { rebaseServerStateToEventAt } from './game/rebaseServerStateToEventAt.js'
 import type { ServerAuthoritativeGameState } from './game/serverGameTypes.js'
-import {
-  ensureRoomGameRuntime,
-  getGameRuntimeCountsByPhase,
-  removeRoomGameRuntime,
-} from './game/roomGameRuntimeRegistry.js'
 import { submitHumanBidActionForRoom } from './game/submitHumanBidActionForRoom.js'
 import { submitHumanCutIndexForRoom } from './game/submitHumanCutIndexForRoom.js'
 import { submitHumanPlayCardForRoom } from './game/submitHumanPlayCardForRoom.js'
@@ -367,6 +363,7 @@ let matchmakingState: MatchmakingState = createInitialMatchmakingState()
 
 const socketRegistry = new Map<ConnectionId, WebSocket>()
 const roomGameRuntimeRegistry = new Map<string, ServerGameRuntime>()
+const activeRoomRuntime = createInProcessActiveRoomRuntime(roomGameRuntimeRegistry)
 
 function buildPrivateRoomSnapshot(room: PrivateRoom): PrivateRoomSnapshot {
   return {
@@ -471,7 +468,7 @@ function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
 
   const initializedRoom = initializeRoomAuthoritativeGameState(currentRoom)
   nextServerState = upsertServerRoomWithSnapshot(nextServerState, initializedRoom)
-  ensureRoomGameRuntime(roomGameRuntimeRegistry, initializedRoom)
+  activeRoomRuntime.ensureRoom(initializedRoom)
   serverState = nextServerState
 
   if (privateRoom.stake > 0) {
@@ -582,7 +579,7 @@ const privateRoomsStore = createPrivateRoomsStore({
 })
 
 for (const room of Object.values(serverState.rooms)) {
-  ensureRoomGameRuntime(roomGameRuntimeRegistry, room)
+  activeRoomRuntime.ensureRoom(room)
   persistRoomSnapshot(room)
 }
 
@@ -636,7 +633,7 @@ function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): 
 
   if (room === null) {
     markRoomSnapshotRemoved(roomId)
-    removeRoomGameRuntime(roomGameRuntimeRegistry, roomId)
+    activeRoomRuntime.removeRoom(roomId)
     return true
   }
 
@@ -654,7 +651,7 @@ function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): 
 
   cleanupTempBotsFromRoom(room)
   markRoomSnapshotRemoved(roomId)
-  removeRoomGameRuntime(roomGameRuntimeRegistry, roomId)
+  activeRoomRuntime.removeRoom(roomId)
   console.log(`[room-cleanup] removed inactive room=${roomId}`)
 
   return true
@@ -672,7 +669,7 @@ function tickRoomGameRuntimes(): void {
     const room = serverState.rooms[roomId] ?? null
 
     if (room === null) {
-      removeRoomGameRuntime(roomGameRuntimeRegistry, roomId)
+      activeRoomRuntime.removeRoom(roomId)
       continue
     }
 
@@ -686,7 +683,7 @@ function tickRoomGameRuntimes(): void {
       delete nextRooms[roomId]
       cleanupTempBotsFromRoom(room)
       markRoomSnapshotRemoved(roomId)
-      removeRoomGameRuntime(roomGameRuntimeRegistry, roomId)
+      activeRoomRuntime.removeRoom(roomId)
       console.log(`[room-cleanup] removed inactive room=${roomId}`)
       continue
     }
@@ -818,7 +815,7 @@ function tryResumeRoomForConnection(
     attachedConnection,
   )
 
-  ensureRoomGameRuntime(roomGameRuntimeRegistry, nextRoom)
+  activeRoomRuntime.ensureRoom(nextRoom)
 
   return {
     ok: true,
@@ -1422,7 +1419,7 @@ function processMatchmakingUnsafe(): void {
     }
 
     serverState = nextServerState
-    ensureRoomGameRuntime(roomGameRuntimeRegistry, initializedRoom)
+    activeRoomRuntime.ensureRoom(initializedRoom)
 
     broadcastRoomSnapshots(initializedRoom, socketRegistry)
     cleanupPendingGroup(result.group.groupId)
@@ -4212,6 +4209,8 @@ async function handleHttpRequest(
   }
 
   if (requestUrl.pathname === '/health') {
+    const gameRuntimeHealth = activeRoomRuntime.getHealth()
+
     sendJsonResponse(res, 200, {
       ok: true,
       service: 'belot-v2-server',
@@ -4219,10 +4218,7 @@ async function handleHttpRequest(
         waitMs: MATCHMAKING_WAIT_MS,
         queuedPlayersByStake: getQueueCountsByStake(),
       },
-      gameRuntime: {
-        activeRooms: roomGameRuntimeRegistry.size,
-        roomsByPhase: getGameRuntimeCountsByPhase(roomGameRuntimeRegistry),
-      },
+      gameRuntime: gameRuntimeHealth,
     })
     return
   }
@@ -4513,7 +4509,7 @@ wsServer.on('connection', (socket, request) => {
         }
 
         serverState = upsertServerRoomWithSnapshot(serverState, result.room)
-        ensureRoomGameRuntime(roomGameRuntimeRegistry, result.room)
+        activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
         return
       }
@@ -4570,7 +4566,7 @@ wsServer.on('connection', (socket, request) => {
         }
 
         serverState = upsertServerRoomWithSnapshot(serverState, result.room)
-        ensureRoomGameRuntime(roomGameRuntimeRegistry, result.room)
+        activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
         return
       }
@@ -4628,7 +4624,7 @@ wsServer.on('connection', (socket, request) => {
         }
 
         serverState = upsertServerRoomWithSnapshot(serverState, result.room)
-        ensureRoomGameRuntime(roomGameRuntimeRegistry, result.room)
+        activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
         return
       }
@@ -4681,7 +4677,7 @@ wsServer.on('connection', (socket, request) => {
         }
 
         serverState = upsertServerRoomWithSnapshot(serverState, result.room)
-        ensureRoomGameRuntime(roomGameRuntimeRegistry, result.room)
+        activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
         return
       }
@@ -4813,7 +4809,7 @@ wsServer.on('connection', (socket, request) => {
             }
           }
           serverState = upsertServerRoomWithSnapshot(serverState, restartedRoom)
-          ensureRoomGameRuntime(roomGameRuntimeRegistry, restartedRoom)
+          activeRoomRuntime.ensureRoom(restartedRoom)
           broadcastRoomSnapshots(restartedRoom, socketRegistry)
         }
 
@@ -5376,7 +5372,7 @@ wsServer.on('connection', (socket, request) => {
         const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
 
         serverState = upsertServerRoomWithSnapshot(result.serverState, initializedRoom)
-        ensureRoomGameRuntime(roomGameRuntimeRegistry, initializedRoom)
+        activeRoomRuntime.ensureRoom(initializedRoom)
 
         sendJsonMessage(socket, {
           type: 'room_created',
@@ -5418,7 +5414,7 @@ wsServer.on('connection', (socket, request) => {
         const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
 
         serverState = upsertServerRoomWithSnapshot(result.serverState, initializedRoom)
-        ensureRoomGameRuntime(roomGameRuntimeRegistry, initializedRoom)
+        activeRoomRuntime.ensureRoom(initializedRoom)
 
         sendJsonMessage(socket, {
           type: 'room_joined',
