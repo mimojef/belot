@@ -90,7 +90,6 @@ import {
   selectMatchmakingBotProfiles,
 } from './matchmaking/selectMatchmakingBotProfiles.js'
 import { tryCreatePendingMatchGroup } from './matchmaking/tryCreatePendingMatchGroup.js'
-import { advanceRoomAuthoritativeGame } from './game/advanceRoomAuthoritativeGame.js'
 import { createInProcessActiveRoomRuntime } from './game/createInProcessActiveRoomRuntime.js'
 import { initializeRoomAuthoritativeGameState } from './game/initializeRoomAuthoritativeGameState.js'
 import { rebaseServerStateToEventAt } from './game/rebaseServerStateToEventAt.js'
@@ -683,7 +682,10 @@ function tickRoomGameRuntimes(): void {
       continue
     }
 
-    const nextRoom = advanceRoomAuthoritativeGame(room, now)
+    const nextRoom = activeRoomRuntime.advanceRoom({
+      room,
+      now,
+    })
 
     const nextRuntime: ServerGameRuntime = {
       ...runtime,

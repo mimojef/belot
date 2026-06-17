@@ -5,6 +5,7 @@ import type {
   ActiveRoomRuntimeHealth,
 } from './activeRoomRuntime.js'
 import { abandonHumanControlForRoom } from './abandonHumanControlForRoom.js'
+import { advanceRoomAuthoritativeGame } from './advanceRoomAuthoritativeGame.js'
 import { resumeHumanControlForRoom } from './resumeHumanControlForRoom.js'
 import { submitHumanBidActionForRoom } from './submitHumanBidActionForRoom.js'
 import { submitHumanCutIndexForRoom } from './submitHumanCutIndexForRoom.js'
@@ -69,6 +70,10 @@ export function createInProcessActiveRoomRuntime(
 
     abandonHumanControl(input) {
       return abandonHumanControlForRoom(input.room, input.seat)
+    },
+
+    advanceRoom(input) {
+      return advanceRoomAuthoritativeGame(input.room, input.now)
     },
   }
 }

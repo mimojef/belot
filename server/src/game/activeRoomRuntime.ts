@@ -39,6 +39,11 @@ export type AbandonHumanControlInput = {
   seat: Seat
 }
 
+export type AdvanceRoomInput = {
+  room: ServerRoom
+  now: number
+}
+
 export interface ActiveRoomRuntime {
   ensureRoom(room: ServerRoom): void
   removeRoom(roomId: string): void
@@ -49,4 +54,5 @@ export interface ActiveRoomRuntime {
   submitPlay(input: SubmitPlayInput): RuntimeCommandResult
   resumeHumanControl(input: ResumeHumanControlInput): RuntimeCommandResult
   abandonHumanControl(input: AbandonHumanControlInput): RuntimeCommandResult
+  advanceRoom(input: AdvanceRoomInput): ServerRoom
 }
