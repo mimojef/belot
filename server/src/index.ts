@@ -95,8 +95,6 @@ import { createInProcessActiveRoomRuntime } from './game/createInProcessActiveRo
 import { initializeRoomAuthoritativeGameState } from './game/initializeRoomAuthoritativeGameState.js'
 import { rebaseServerStateToEventAt } from './game/rebaseServerStateToEventAt.js'
 import type { ServerAuthoritativeGameState } from './game/serverGameTypes.js'
-import { abandonHumanControlForRoom } from './game/abandonHumanControlForRoom.js'
-import { resumeHumanControlForRoom } from './game/resumeHumanControlForRoom.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
 import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
 import type { PrivateRoom, PrivateRoomMember } from './game/privateRoomsStore.js'
@@ -4663,7 +4661,10 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        const result = resumeHumanControlForRoom(room, latestConnection.currentSeat)
+        const result = activeRoomRuntime.resumeHumanControl({
+          room,
+          seat: latestConnection.currentSeat,
+        })
 
         if (!result.ok) {
           safeSendToConnection(connection.id, {
@@ -5306,7 +5307,10 @@ wsServer.on('connection', (socket, request) => {
           seat,
           disconnectedParticipant,
         )
-        const abandonResult = abandonHumanControlForRoom(disconnectedRoom, seat)
+        const abandonResult = activeRoomRuntime.abandonHumanControl({
+          room: disconnectedRoom,
+          seat,
+        })
         const nextRoom = abandonResult.ok ? abandonResult.room : disconnectedRoom
 
         if (!abandonResult.ok) {

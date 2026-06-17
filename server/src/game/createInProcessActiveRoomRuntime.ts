@@ -4,6 +4,8 @@ import type {
   ActiveRoomRuntime,
   ActiveRoomRuntimeHealth,
 } from './activeRoomRuntime.js'
+import { abandonHumanControlForRoom } from './abandonHumanControlForRoom.js'
+import { resumeHumanControlForRoom } from './resumeHumanControlForRoom.js'
 import { submitHumanBidActionForRoom } from './submitHumanBidActionForRoom.js'
 import { submitHumanCutIndexForRoom } from './submitHumanCutIndexForRoom.js'
 import { submitHumanPlayCardForRoom } from './submitHumanPlayCardForRoom.js'
@@ -59,6 +61,14 @@ export function createInProcessActiveRoomRuntime(
         input.cardId,
         input.declarationKeys,
       )
+    },
+
+    resumeHumanControl(input) {
+      return resumeHumanControlForRoom(input.room, input.seat)
+    },
+
+    abandonHumanControl(input) {
+      return abandonHumanControlForRoom(input.room, input.seat)
     },
   }
 }

@@ -29,6 +29,16 @@ export type SubmitPlayInput = {
   declarationKeys?: string[]
 }
 
+export type ResumeHumanControlInput = {
+  room: ServerRoom
+  seat: Seat
+}
+
+export type AbandonHumanControlInput = {
+  room: ServerRoom
+  seat: Seat
+}
+
 export interface ActiveRoomRuntime {
   ensureRoom(room: ServerRoom): void
   removeRoom(roomId: string): void
@@ -37,4 +47,6 @@ export interface ActiveRoomRuntime {
   submitBid(input: SubmitBidInput): RuntimeCommandResult
   submitCut(input: SubmitCutInput): RuntimeCommandResult
   submitPlay(input: SubmitPlayInput): RuntimeCommandResult
+  resumeHumanControl(input: ResumeHumanControlInput): RuntimeCommandResult
+  abandonHumanControl(input: AbandonHumanControlInput): RuntimeCommandResult
 }
