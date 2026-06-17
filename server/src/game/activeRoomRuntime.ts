@@ -44,11 +44,18 @@ export type AdvanceRoomInput = {
   now: number
 }
 
+export type RecordRoomTickInput = {
+  room: ServerRoom
+  now: number
+}
+
 export interface ActiveRoomRuntime {
   ensureRoom(room: ServerRoom): void
   removeRoom(roomId: string): void
   hasRoom(roomId: string): boolean
   getHealth(): ActiveRoomRuntimeHealth
+  listTrackedRoomIds(): string[]
+  recordRoomTick(input: RecordRoomTickInput): void
   submitBid(input: SubmitBidInput): RuntimeCommandResult
   submitCut(input: SubmitCutInput): RuntimeCommandResult
   submitPlay(input: SubmitPlayInput): RuntimeCommandResult

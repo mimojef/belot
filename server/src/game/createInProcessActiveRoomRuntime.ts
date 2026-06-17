@@ -39,6 +39,27 @@ export function createInProcessActiveRoomRuntime(
       }
     },
 
+    listTrackedRoomIds(): string[] {
+      return Array.from(roomGameRuntimeRegistry.keys())
+    },
+
+    recordRoomTick(input): void {
+      const runtime = roomGameRuntimeRegistry.get(input.room.id) ?? null
+
+      if (runtime === null) {
+        return
+      }
+
+      const nextRuntime: ServerGameRuntime = {
+        ...runtime,
+        phase: input.room.game.phase ?? runtime.phase,
+        updatedAt: input.now,
+        tickCount: runtime.tickCount + 1,
+      }
+
+      roomGameRuntimeRegistry.set(input.room.id, nextRuntime)
+    },
+
     submitBid(input) {
       return submitHumanBidActionForRoom(
         input.room,

@@ -652,14 +652,16 @@ function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): 
 }
 
 function tickRoomGameRuntimes(): void {
-  if (roomGameRuntimeRegistry.size === 0) {
+  const trackedRoomIds = activeRoomRuntime.listTrackedRoomIds()
+
+  if (trackedRoomIds.length === 0) {
     return
   }
 
   const now = Date.now()
   let nextRooms: ServerState['rooms'] | null = null
 
-  for (const [roomId, runtime] of roomGameRuntimeRegistry.entries()) {
+  for (const roomId of trackedRoomIds) {
     const room = serverState.rooms[roomId] ?? null
 
     if (room === null) {
@@ -687,14 +689,10 @@ function tickRoomGameRuntimes(): void {
       now,
     })
 
-    const nextRuntime: ServerGameRuntime = {
-      ...runtime,
-      phase: nextRoom.game.phase ?? runtime.phase,
-      updatedAt: now,
-      tickCount: runtime.tickCount + 1,
-    }
-
-    roomGameRuntimeRegistry.set(roomId, nextRuntime)
+    activeRoomRuntime.recordRoomTick({
+      room: nextRoom,
+      now,
+    })
 
     if (nextRoom !== room) {
       persistRoomSnapshot(nextRoom)
