@@ -4,6 +4,7 @@ import type {
   ActiveRoomRuntime,
   ActiveRoomRuntimeHealth,
   RuntimeRoomTickResult,
+  TickRoomsResult,
 } from './activeRoomRuntime.js'
 import { abandonHumanControlForRoom } from './abandonHumanControlForRoom.js'
 import { advanceRoomAuthoritativeGame } from './advanceRoomAuthoritativeGame.js'
@@ -44,25 +45,31 @@ export function createInProcessActiveRoomRuntime(
       return Array.from(roomGameRuntimeRegistry.keys())
     },
 
-    tickRoom(input): RuntimeRoomTickResult {
-      const nextRoom = advanceRoomAuthoritativeGame(input.room, input.now)
+    tickRooms(input): TickRoomsResult {
+      const results: RuntimeRoomTickResult[] = []
 
-      const runtime = roomGameRuntimeRegistry.get(input.room.id) ?? null
+      for (const room of input.rooms) {
+        const nextRoom = advanceRoomAuthoritativeGame(room, input.now)
 
-      if (runtime !== null) {
-        roomGameRuntimeRegistry.set(input.room.id, {
-          ...runtime,
-          phase: nextRoom.game.phase ?? runtime.phase,
-          updatedAt: input.now,
-          tickCount: runtime.tickCount + 1,
-        })
+        const runtime = roomGameRuntimeRegistry.get(room.id) ?? null
+
+        if (runtime !== null) {
+          roomGameRuntimeRegistry.set(room.id, {
+            ...runtime,
+            phase: nextRoom.game.phase ?? runtime.phase,
+            updatedAt: input.now,
+            tickCount: runtime.tickCount + 1,
+          })
+        }
+
+        if (nextRoom === room) {
+          results.push({ kind: 'unchanged', roomId: room.id })
+        } else {
+          results.push({ kind: 'advanced', roomId: room.id, room: nextRoom })
+        }
       }
 
-      if (nextRoom === input.room) {
-        return { kind: 'unchanged', roomId: input.room.id }
-      }
-
-      return { kind: 'advanced', roomId: input.room.id, room: nextRoom }
+      return { results }
     },
 
     submitBid(input) {

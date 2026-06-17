@@ -659,6 +659,7 @@ function tickRoomGameRuntimes(): void {
   }
 
   const now = Date.now()
+  const roomsToTick: ServerRoom[] = []
   let nextRooms: ServerState['rooms'] | null = null
 
   for (const roomId of trackedRoomIds) {
@@ -684,35 +685,42 @@ function tickRoomGameRuntimes(): void {
       continue
     }
 
-    const tickResult = activeRoomRuntime.tickRoom({
-      room,
+    roomsToTick.push(room)
+  }
+
+  if (roomsToTick.length > 0) {
+    const { results } = activeRoomRuntime.tickRooms({
       now,
+      rooms: roomsToTick,
     })
 
-    if (tickResult.kind === 'advanced') {
-      const nextRoom = tickResult.room
+    for (const tickResult of results) {
+      if (tickResult.kind === 'advanced') {
+        const nextRoom = tickResult.room
+        const roomId = tickResult.roomId
 
-      persistRoomSnapshot(nextRoom)
-      playerProgressStore.recordCompletedMatch(nextRoom)
-      missionStore.recordMatchCompletion(nextRoom)
-      const payoutResult = matchEconomyStore.payoutMatchWinners(nextRoom)
+        persistRoomSnapshot(nextRoom)
+        playerProgressStore.recordCompletedMatch(nextRoom)
+        missionStore.recordMatchCompletion(nextRoom)
+        const payoutResult = matchEconomyStore.payoutMatchWinners(nextRoom)
 
-      if (!payoutResult.ok) {
-        console.error(
-          `[match-economy] payout failed room=${nextRoom.id}: ${payoutResult.message}`,
-        )
-      }
-
-      matchEconomyStore.topUpDepletedBotWallets(nextRoom)
-
-      if (nextRooms === null) {
-        nextRooms = {
-          ...serverState.rooms,
+        if (!payoutResult.ok) {
+          console.error(
+            `[match-economy] payout failed room=${nextRoom.id}: ${payoutResult.message}`,
+          )
         }
-      }
 
-      nextRooms[roomId] = nextRoom
-      broadcastRoomSnapshots(nextRoom, socketRegistry)
+        matchEconomyStore.topUpDepletedBotWallets(nextRoom)
+
+        if (nextRooms === null) {
+          nextRooms = {
+            ...serverState.rooms,
+          }
+        }
+
+        nextRooms[roomId] = nextRoom
+        broadcastRoomSnapshots(nextRoom, socketRegistry)
+      }
     }
   }
 

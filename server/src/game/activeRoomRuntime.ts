@@ -39,11 +39,6 @@ export type AbandonHumanControlInput = {
   seat: Seat
 }
 
-export type TickRoomInput = {
-  room: ServerRoom
-  now: number
-}
-
 export type RuntimeRoomTickResult =
   | {
       kind: 'unchanged'
@@ -55,13 +50,22 @@ export type RuntimeRoomTickResult =
       room: ServerRoom
     }
 
+export type TickRoomsInput = {
+  now: number
+  rooms: readonly ServerRoom[]
+}
+
+export type TickRoomsResult = {
+  results: readonly RuntimeRoomTickResult[]
+}
+
 export interface ActiveRoomRuntime {
   ensureRoom(room: ServerRoom): void
   removeRoom(roomId: string): void
   hasRoom(roomId: string): boolean
   getHealth(): ActiveRoomRuntimeHealth
   listTrackedRoomIds(): string[]
-  tickRoom(input: TickRoomInput): RuntimeRoomTickResult
+  tickRooms(input: TickRoomsInput): TickRoomsResult
   submitBid(input: SubmitBidInput): RuntimeCommandResult
   submitCut(input: SubmitCutInput): RuntimeCommandResult
   submitPlay(input: SubmitPlayInput): RuntimeCommandResult
