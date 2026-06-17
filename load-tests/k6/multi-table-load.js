@@ -15,11 +15,19 @@ const MATCHMAKING_BARRIER_SECONDS = parseSeconds(
 );
 const WS_CONNECT_SPREAD_SECONDS = parseSeconds(__ENV.WS_CONNECT_SPREAD_SECONDS || '180', 'WS_CONNECT_SPREAD_SECONDS');
 const WS_READY_BUFFER_SECONDS = parseSeconds(__ENV.WS_READY_BUFFER_SECONDS || '30', 'WS_READY_BUFFER_SECONDS');
+const MATCHMAKING_SPREAD_SECONDS = parseSeconds(
+  __ENV.MATCHMAKING_SPREAD_SECONDS || '60',
+  'MATCHMAKING_SPREAD_SECONDS',
+);
 const HEALTH_BARRIER_TIMEOUT_SECONDS = parseSeconds(
   __ENV.HEALTH_BARRIER_TIMEOUT_SECONDS || '15',
   'HEALTH_BARRIER_TIMEOUT_SECONDS',
 );
 const REQUIRED_ACTIVE_ROOMS = parseRequiredActiveRooms(__ENV.REQUIRED_ACTIVE_ROOMS || String(TABLES));
+const MATCH_RUNTIME_TIMEOUT_SECONDS = parseSeconds(
+  __ENV.MATCH_RUNTIME_TIMEOUT_SECONDS || '2100',
+  'MATCH_RUNTIME_TIMEOUT_SECONDS',
+);
 const SUMMARY_JSON_PATH = __ENV.SUMMARY_JSON_PATH || 'multi-table-load-summary.json';
 
 export const options = {
@@ -29,12 +37,11 @@ export const options = {
     websocket_errors: ['count==0'],
     protocol_errors: ['count==0'],
     rejected_actions: ['count==0'],
+    human_seat_takeovers: ['count==0'],
     websocket_connections_ready: [`count==${REQUIRED_USERS}`],
     tables_with_four_websockets_ready: [`count==${TABLES}`],
     matchmaking_join_messages_sent: [`count==${REQUIRED_USERS}`],
     tables_missing_websockets_at_join_barrier: ['count==0'],
-    health_barrier_reached: ['count==1'],
-    health_barrier_timeout: ['count==0'],
     matchmaking_success: [`count==${REQUIRED_USERS}`],
     full_human_match_success: [`count==${REQUIRED_USERS}`],
     rooms_joined: [`count==${REQUIRED_USERS}`],
@@ -49,6 +56,7 @@ const matchmakingSuccess = new Counter('matchmaking_success');
 const fullHumanMatchSuccess = new Counter('full_human_match_success');
 const roomsJoined = new Counter('rooms_joined');
 const rejectedActions = new Counter('rejected_actions');
+const humanSeatTakeovers = new Counter('human_seat_takeovers');
 const matchesCompleted = new Counter('matches_completed');
 const roomSnapshotsReceived = new Counter('room_snapshots_received');
 const gameplayActionsSent = new Counter('gameplay_actions_sent');
@@ -65,12 +73,17 @@ const BASE_URL = trimTrailingSlashes(__ENV.BASE_URL || 'https://www.pika.bg');
 const WS_URL = __ENV.WS_URL || 'wss://www.pika.bg/ws';
 const ORIGIN = BASE_URL;
 const STAKE = Number(__ENV.STAKE || '5000');
-const RUN_TIMEOUT_MS = (
-  (29 * 60)
-  + WS_CONNECT_SPREAD_SECONDS
-  + WS_READY_BUFFER_SECONDS
-  + HEALTH_BARRIER_TIMEOUT_SECONDS
-) * 1000;
+const CUT_DELAY_MIN_MS = parseMilliseconds(__ENV.CUT_DELAY_MIN_MS || '1000', 'CUT_DELAY_MIN_MS');
+const CUT_DELAY_MAX_MS = parseMilliseconds(__ENV.CUT_DELAY_MAX_MS || '3000', 'CUT_DELAY_MAX_MS');
+const BID_DELAY_MIN_MS = parseMilliseconds(__ENV.BID_DELAY_MIN_MS || '1000', 'BID_DELAY_MIN_MS');
+const BID_DELAY_MAX_MS = parseMilliseconds(__ENV.BID_DELAY_MAX_MS || '4000', 'BID_DELAY_MAX_MS');
+const PLAY_DELAY_MIN_MS = parseMilliseconds(__ENV.PLAY_DELAY_MIN_MS || '700', 'PLAY_DELAY_MIN_MS');
+const PLAY_DELAY_MAX_MS = parseMilliseconds(__ENV.PLAY_DELAY_MAX_MS || '3000', 'PLAY_DELAY_MAX_MS');
+const ACTION_DEADLINE_SAFETY_MS = parseMilliseconds(
+  __ENV.ACTION_DEADLINE_SAFETY_MS || '500',
+  'ACTION_DEADLINE_SAFETY_MS',
+);
+const RUN_TIMEOUT_MS = MATCH_RUNTIME_TIMEOUT_SECONDS * 1000;
 const PING_INTERVAL_MS = 20 * 1000;
 const HEALTH_POLL_INTERVAL_MS = 1000;
 const WS_OPEN = 1;
@@ -80,6 +93,10 @@ const REJECTED_ACTION_DIAGNOSTICS = __ENV.REJECTED_ACTION_DIAGNOSTICS === '1';
 if (!Number.isInteger(STAKE) || STAKE <= 0) {
   throw new Error('STAKE must be a positive integer');
 }
+
+validateDelayRange('CUT_DELAY', CUT_DELAY_MIN_MS, CUT_DELAY_MAX_MS);
+validateDelayRange('BID_DELAY', BID_DELAY_MIN_MS, BID_DELAY_MAX_MS);
+validateDelayRange('PLAY_DELAY', PLAY_DELAY_MIN_MS, PLAY_DELAY_MAX_MS);
 
 if (!WS_URL.startsWith('ws://') && !WS_URL.startsWith('wss://')) {
   throw new Error('WS_URL must start with ws:// or wss://');
@@ -120,7 +137,9 @@ export function healthMonitor(setupData) {
     sleep(waitMs / 1000);
   }
 
-  const deadlineMs = setupData.matchmakingJoinAtMs + (HEALTH_BARRIER_TIMEOUT_SECONDS * 1000);
+  const deadlineMs = setupData.matchmakingJoinAtMs
+    + (MATCHMAKING_SPREAD_SECONDS * 1000)
+    + (HEALTH_BARRIER_TIMEOUT_SECONDS * 1000);
 
   while (Date.now() < deadlineMs) {
     const activeRooms = pollHealthActiveRooms();
@@ -163,6 +182,7 @@ function formatTextSummary(data) {
     'websocket_errors',
     'protocol_errors',
     'rejected_actions',
+    'human_seat_takeovers',
     'websocket_connections_ready',
     'tables_with_four_websockets_ready',
     'matchmaking_join_messages_sent',
@@ -295,9 +315,11 @@ function createPlayerState(tableIndex, playerIndex, account, jar) {
     roomJoinedCounted: false,
     leaveVoteSent: false,
     completionCounted: false,
+    takeoverCounted: false,
     closed: false,
     closeRequested: false,
     latestSnapshot: null,
+    actionInFlight: null,
     recentGameplayActions: REJECTED_ACTION_DIAGNOSTICS ? [] : null,
     sentActionKeys: {},
   };
@@ -375,14 +397,14 @@ function connectTableAndPlay(tableIndex, players, setupData) {
     missingWebsocketsAtJoinCounted: false,
     controllerReadyCounted: false,
     matchmakingJoinTimerId: null,
-    matchmakingJoinAtMs: setupData.matchmakingJoinAtMs,
+    matchmakingJoinAtMs: matchmakingJoinAtMsForTable(setupData, tableIndex),
   };
 
   for (const player of players) {
     connectPlayerSocket(tableState, player);
   }
 
-  scheduleMatchmakingJoin(tableState, setupData);
+  scheduleMatchmakingJoin(tableState);
 }
 
 function connectPlayerSocket(tableState, state) {
@@ -426,6 +448,7 @@ function connectPlayerSocket(tableState, state) {
       websocketErrors.add(1);
     }
     state.closed = true;
+    clearActionInFlight(state);
     clearTimeout(timeoutId);
     clearInterval(pingId);
     const code = event && event.code !== undefined ? event.code : 'unknown';
@@ -470,6 +493,7 @@ function handleMessage(ws, tableState, state, rawData) {
       if (REJECTED_ACTION_DIAGNOSTICS) {
         logRejectedActionDiagnostic(state, message);
       }
+      clearActionInFlight(state);
       logSafe(state, `server error: ${safeString(message.message || message.code || 'unknown')}`);
       break;
 
@@ -540,8 +564,8 @@ function tableHasFourWebsocketsReady(tableState) {
   });
 }
 
-function scheduleMatchmakingJoin(tableState, setupData) {
-  const waitMs = setupData.matchmakingJoinAtMs - Date.now();
+function scheduleMatchmakingJoin(tableState) {
+  const waitMs = tableState.matchmakingJoinAtMs - Date.now();
 
   tableState.matchmakingJoinTimerId = setTimeout(() => {
     tableState.matchmakingJoinTimerId = null;
@@ -645,6 +669,7 @@ function handleRoomSnapshot(ws, tableState, state, message) {
   state.roomId = message.roomId;
   state.seat = message.yourSeat;
   state.reconnectToken = message.reconnectToken || state.reconnectToken;
+  maybeCountHumanSeatTakeover(state, message);
 
   if (!state.roomJoinedCounted && state.roomId && state.seat) {
     roomsJoined.add(1);
@@ -684,6 +709,7 @@ function handleRoomSnapshot(ws, tableState, state, message) {
 
 function processGameplaySnapshot(ws, state, message, game) {
   if (game.authoritativePhase === 'match-ended' || game.phase === 'match-ended') {
+    clearActionInFlight(state);
     if (!game.matchEnded || typeof game.matchEnded !== 'object') {
       protocolErrors.add(1);
       logSafe(state, 'match-ended phase is missing game.matchEnded snapshot');
@@ -694,6 +720,7 @@ function processGameplaySnapshot(ws, state, message, game) {
     return;
   }
 
+  updateActionInFlightFromSnapshot(state);
   maybeSubmitCut(ws, state, message, game);
   maybeSubmitBid(ws, state, message, game);
   maybeSubmitPlay(ws, state, message, game);
@@ -712,29 +739,21 @@ function maybeSubmitCut(ws, state, message, game) {
     return;
   }
 
-  const key = [
-    message.roomId,
-    'cutting',
-    state.phaseSequence,
-    cutting.cutterSeat || '',
-    cutting.deckCount,
-  ].join('|');
-
-  const sent = sendOnce(ws, state, key, {
-    type: 'submit_cut_index',
+  const key = cutActionKey(state, message, cutting);
+  scheduleGameplayAction(ws, state, {
+    actionType: 'cut',
     roomId: message.roomId,
-    cutIndex,
-  });
-  if (sent && REJECTED_ACTION_DIAGNOSTICS) {
-    recordGameplayAction(state, {
-      actionType: 'cut',
+    key,
+    payload: {
+      type: 'submit_cut_index',
       roomId: message.roomId,
-      key,
-      timerDeadlineAt: game.timerDeadlineAt,
-      phase: game.authoritativePhase || game.phase || state.lastPhase,
       cutIndex,
-    });
-  }
+    },
+    timerDeadlineAt: game.timerDeadlineAt,
+    phase: game.authoritativePhase || game.phase || state.lastPhase,
+    cutIndex,
+    delayMs: randomDelayMs(CUT_DELAY_MIN_MS, CUT_DELAY_MAX_MS),
+  });
 }
 
 function maybeSubmitBid(ws, state, message, game) {
@@ -743,47 +762,26 @@ function maybeSubmitBid(ws, state, message, game) {
     return;
   }
 
-  const validActions = bidding.validActions || {};
-  const hasNonPassBid = bidding.winningBid != null || hasNonPassBidEntry(bidding.entries);
-  let action = null;
-
-  if (!hasNonPassBid) {
-    action = firstValidSuitAction(validActions.suits);
-    if (action === null) {
-      protocolErrors.add(1);
-      logSafe(state, 'no valid suit bid available before first non-pass bid');
-      return;
-    }
-  } else if (validActions.pass === true) {
-    action = { type: 'pass' };
-  } else {
+  const action = chooseBidAction(state, bidding, true);
+  if (action === null) {
     return;
   }
 
-  const key = [
-    message.roomId,
-    'bidding',
-    state.phaseSequence,
-    bidding.currentBidderSeat || '',
-    Array.isArray(bidding.entries) ? bidding.entries.length : 0,
-    stableStringify(bidding.winningBid),
-  ].join('|');
-
-  const sent = sendOnce(ws, state, key, {
-    type: 'submit_bid_action',
+  const key = bidActionKey(state, message, bidding);
+  scheduleGameplayAction(ws, state, {
+    actionType: 'bid',
     roomId: message.roomId,
-    action,
-  });
-  if (sent && REJECTED_ACTION_DIAGNOSTICS) {
-    recordGameplayAction(state, {
-      actionType: 'bid',
+    key,
+    payload: {
+      type: 'submit_bid_action',
       roomId: message.roomId,
-      key,
-      timerDeadlineAt: game.timerDeadlineAt,
-      phase: game.authoritativePhase || game.phase || state.lastPhase,
-      bidActionType: action.type,
-    });
-  }
+      action,
+    },
+    timerDeadlineAt: game.timerDeadlineAt,
+    phase: game.authoritativePhase || game.phase || state.lastPhase,
+    bidActionType: action.type,
+    delayMs: randomDelayMs(BID_DELAY_MIN_MS, BID_DELAY_MAX_MS),
+  });
 }
 
 function maybeSubmitPlay(ws, state, message, game) {
@@ -800,7 +798,192 @@ function maybeSubmitPlay(ws, state, message, game) {
   }
 
   const cardId = validCardIds[0];
-  const key = [
+  const key = playActionKey(state, message, playing, validCardIds);
+  scheduleGameplayAction(ws, state, {
+    actionType: 'play',
+    roomId: message.roomId,
+    key,
+    payload: {
+      type: 'submit_play_card',
+      roomId: message.roomId,
+      cardId,
+      declarationKeys: [],
+    },
+    timerDeadlineAt: game.timerDeadlineAt,
+    phase: game.authoritativePhase || game.phase || state.lastPhase,
+    cardId,
+    delayMs: randomDelayMs(PLAY_DELAY_MIN_MS, PLAY_DELAY_MAX_MS),
+  });
+}
+
+function scheduleGameplayAction(ws, state, action) {
+  if (state.actionInFlight !== null || state.sentActionKeys[action.key]) {
+    return;
+  }
+
+  const effectiveDelayMs = clampDelayToTimerDeadline(action.delayMs, action.timerDeadlineAt);
+  const scheduledAction = {
+    actionType: action.actionType,
+    roomId: action.roomId,
+    key: action.key,
+    payload: action.payload,
+    timerDeadlineAt: action.timerDeadlineAt,
+    phase: action.phase,
+    cutIndex: Number.isInteger(action.cutIndex) ? action.cutIndex : null,
+    bidActionType: action.bidActionType || null,
+    cardId: action.cardId || null,
+    timeoutId: null,
+    sent: false,
+    sentAtMs: null,
+  };
+
+  scheduledAction.timeoutId = setTimeout(() => {
+    executeScheduledGameplayAction(ws, state, scheduledAction);
+  }, effectiveDelayMs);
+
+  state.actionInFlight = scheduledAction;
+}
+
+function executeScheduledGameplayAction(ws, state, action) {
+  if (state.actionInFlight !== action) {
+    return;
+  }
+
+  action.timeoutId = null;
+
+  if (!isScheduledActionStillValid(state, action)) {
+    state.actionInFlight = null;
+    return;
+  }
+
+  const sent = sendOnce(ws, state, action.key, action.payload);
+  if (!sent) {
+    state.actionInFlight = null;
+    return;
+  }
+
+  action.sent = true;
+  action.sentAtMs = Date.now();
+
+  if (REJECTED_ACTION_DIAGNOSTICS) {
+    recordGameplayAction(state, action);
+  }
+}
+
+function updateActionInFlightFromSnapshot(state) {
+  const action = state.actionInFlight;
+  if (action === null || isScheduledActionStillValid(state, action)) {
+    return;
+  }
+
+  clearActionInFlight(state);
+}
+
+function clearActionInFlight(state) {
+  const action = state.actionInFlight;
+  if (action && action.timeoutId !== null) {
+    clearTimeout(action.timeoutId);
+  }
+  state.actionInFlight = null;
+}
+
+function isScheduledActionStillValid(state, action) {
+  const message = state.latestSnapshot;
+  const game = message && message.game;
+  if (!message || !game || message.roomId !== action.roomId) {
+    return false;
+  }
+
+  const phase = game.authoritativePhase || game.phase || 'unknown';
+  if (phase !== action.phase) {
+    return false;
+  }
+
+  const latestTimerDeadlineAt = numericOrNull(game.timerDeadlineAt);
+  const scheduledTimerDeadlineAt = numericOrNull(action.timerDeadlineAt);
+  const timerDeadlineAt = latestTimerDeadlineAt === null
+    ? scheduledTimerDeadlineAt
+    : latestTimerDeadlineAt;
+  if (timerDeadlineAt !== null && Date.now() >= timerDeadlineAt) {
+    return false;
+  }
+
+  if (action.actionType === 'cut') {
+    return isCutActionStillValid(state, action, message, game);
+  }
+
+  if (action.actionType === 'bid') {
+    return isBidActionStillValid(state, action, message, game);
+  }
+
+  if (action.actionType === 'play') {
+    return isPlayActionStillValid(state, action, message, game);
+  }
+
+  return false;
+}
+
+function isCutActionStillValid(state, action, message, game) {
+  const cutting = game.cutting;
+  if (!cutting || cutting.canSubmitCut !== true || cutting.selectedCutIndex != null) {
+    return false;
+  }
+
+  const cutIndex = chooseCutIndex(cutting.deckCount);
+  return cutIndex === action.cutIndex && cutActionKey(state, message, cutting) === action.key;
+}
+
+function isBidActionStillValid(state, action, message, game) {
+  const bidding = game.bidding;
+  if (!bidding || bidding.canSubmitBid !== true || bidding.currentBidderSeat !== message.yourSeat) {
+    return false;
+  }
+
+  const bidAction = chooseBidAction(state, bidding, false);
+  return (
+    bidAction !== null
+    && bidAction.type === action.bidActionType
+    && stableStringify(bidAction) === stableStringify(action.payload.action)
+    && bidActionKey(state, message, bidding) === action.key
+  );
+}
+
+function isPlayActionStillValid(state, action, message, game) {
+  const playing = game.playing;
+  if (!playing || playing.currentTurnSeat !== message.yourSeat) {
+    return false;
+  }
+
+  const validCardIds = Array.isArray(playing.validCardIds) ? playing.validCardIds : [];
+  return (
+    validCardIds.indexOf(action.cardId) !== -1
+    && playActionKey(state, message, playing, validCardIds) === action.key
+  );
+}
+
+function cutActionKey(state, message, cutting) {
+  return [
+    message.roomId,
+    'cutting',
+    state.phaseSequence,
+    cutting.cutterSeat || '',
+    cutting.deckCount,
+  ].join('|');
+}
+
+function bidActionKey(state, message, bidding) {
+  return [
+    message.roomId,
+    'bidding',
+    state.phaseSequence,
+    bidding.currentBidderSeat || '',
+    Array.isArray(bidding.entries) ? bidding.entries.length : 0,
+    stableStringify(bidding.winningBid),
+  ].join('|');
+}
+
+function playActionKey(state, message, playing, validCardIds) {
+  return [
     message.roomId,
     'playing',
     state.phaseSequence,
@@ -809,23 +992,48 @@ function maybeSubmitPlay(ws, state, message, game) {
     Array.isArray(playing.currentTrickPlays) ? playing.currentTrickPlays.length : 0,
     validCardIds.join(','),
   ].join('|');
+}
 
-  const sent = sendOnce(ws, state, key, {
-    type: 'submit_play_card',
-    roomId: message.roomId,
-    cardId,
-    declarationKeys: [],
-  });
-  if (sent && REJECTED_ACTION_DIAGNOSTICS) {
-    recordGameplayAction(state, {
-      actionType: 'play',
-      roomId: message.roomId,
-      key,
-      timerDeadlineAt: game.timerDeadlineAt,
-      phase: game.authoritativePhase || game.phase || state.lastPhase,
-      cardId,
-    });
+function chooseBidAction(state, bidding, logMissingSuit) {
+  const validActions = bidding.validActions || {};
+  const hasNonPassBid = bidding.winningBid != null || hasNonPassBidEntry(bidding.entries);
+
+  if (!hasNonPassBid) {
+    const action = firstValidSuitAction(validActions.suits);
+    if (action === null && logMissingSuit) {
+      protocolErrors.add(1);
+      logSafe(state, 'no valid suit bid available before first non-pass bid');
+    }
+    return action;
   }
+
+  if (validActions.pass === true) {
+    return { type: 'pass' };
+  }
+
+  return null;
+}
+
+function randomDelayMs(minMs, maxMs) {
+  if (minMs === maxMs) {
+    return minMs;
+  }
+
+  return minMs + Math.floor(Math.random() * ((maxMs - minMs) + 1));
+}
+
+function clampDelayToTimerDeadline(requestedDelayMs, timerDeadlineAtValue) {
+  const timerDeadlineAt = numericOrNull(timerDeadlineAtValue);
+  if (timerDeadlineAt === null) {
+    return Math.max(0, requestedDelayMs);
+  }
+
+  const maximumSafeDelayMs = timerDeadlineAt - Date.now() - ACTION_DEADLINE_SAFETY_MS;
+  if (maximumSafeDelayMs <= 0) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(requestedDelayMs, maximumSafeDelayMs));
 }
 
 function handleMatchEnded(ws, state, message, game) {
@@ -850,6 +1058,54 @@ function handleMatchEnded(ws, state, message, game) {
     logSafe(state, 'match completion confirmed');
     setTimeout(() => safeClose(ws, state), 250);
   }
+}
+
+function maybeCountHumanSeatTakeover(state, message) {
+  if (state.takeoverCounted || !message || !message.yourSeat) {
+    return;
+  }
+
+  const seatSnapshot = findSeatSnapshot(message.seats, message.yourSeat);
+  if (!seatSnapshot || seatSnapshot.isControlledByBot !== true) {
+    return;
+  }
+
+  state.takeoverCounted = true;
+  humanSeatTakeovers.add(1);
+  logSafe(state, 'human seat was taken over by server bot control');
+}
+
+function findSeatSnapshot(seats, seat) {
+  if (!seats || !seat) {
+    return null;
+  }
+
+  if (Array.isArray(seats)) {
+    return seats.find((entry) => (
+      entry
+      && typeof entry === 'object'
+      && (entry.seat === seat || entry.position === seat || entry.id === seat)
+    )) || null;
+  }
+
+  if (typeof seats === 'object') {
+    const directSeat = seats[seat];
+    if (directSeat && typeof directSeat === 'object') {
+      return directSeat;
+    }
+
+    for (const value of Object.values(seats)) {
+      if (
+        value
+        && typeof value === 'object'
+        && (value.seat === seat || value.position === seat || value.id === seat)
+      ) {
+        return value;
+      }
+    }
+  }
+
+  return null;
 }
 
 function maybeCountControllerReady(tableState) {
@@ -1030,6 +1286,7 @@ function sendProtocol(ws, state, payload) {
 
 function safeClose(ws, state) {
   state.closeRequested = true;
+  clearActionInFlight(state);
 
   if (state.closed || ws.readyState !== WS_OPEN) {
     return;
@@ -1041,8 +1298,8 @@ function safeClose(ws, state) {
 function parseTables(value) {
   const parsed = Number(value);
 
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 200) {
-    throw new Error('TABLES must be an integer between 1 and 200');
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 600) {
+    throw new Error('TABLES must be an integer between 1 and 600');
   }
 
   return parsed;
@@ -1068,6 +1325,22 @@ function parseSeconds(value, name) {
   return parsed;
 }
 
+function parseMilliseconds(value, name) {
+  const parsed = Number(value);
+
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer number of milliseconds`);
+  }
+
+  return parsed;
+}
+
+function validateDelayRange(name, minMs, maxMs) {
+  if (minMs > maxMs) {
+    throw new Error(`${name}_MIN_MS must be less than or equal to ${name}_MAX_MS`);
+  }
+}
+
 function createScenarios() {
   const scenarios = {
     health_monitor: {
@@ -1080,6 +1353,7 @@ function createScenarios() {
         MATCHMAKING_BARRIER_SECONDS
         + WS_CONNECT_SPREAD_SECONDS
         + WS_READY_BUFFER_SECONDS
+        + MATCHMAKING_SPREAD_SECONDS
         + HEALTH_BARRIER_TIMEOUT_SECONDS
         + 30,
       )}s`,
@@ -1096,7 +1370,14 @@ function createScenarios() {
       vus: 1,
       iterations: 1,
       startTime: `${startDelayMs}ms`,
-      maxDuration: '40m',
+      maxDuration: `${Math.ceil(
+        MATCHMAKING_BARRIER_SECONDS
+        + WS_CONNECT_SPREAD_SECONDS
+        + WS_READY_BUFFER_SECONDS
+        + MATCHMAKING_SPREAD_SECONDS
+        + MATCH_RUNTIME_TIMEOUT_SECONDS
+        + 60,
+      )}s`,
       gracefulStop: '5s',
       env: {
         TABLE_INDEX: String(tableIndex),
@@ -1116,6 +1397,15 @@ function waitForWebSocketConnect(tableIndex, setupData) {
   if (waitMs > 0) {
     sleep(waitMs / 1000);
   }
+}
+
+function matchmakingJoinAtMsForTable(setupData, tableIndex) {
+  const spreadMs = MATCHMAKING_SPREAD_SECONDS * 1000;
+  const offsetMs = TABLES > 1
+    ? Math.floor((tableIndex * spreadMs) / (TABLES - 1))
+    : 0;
+
+  return setupData.matchmakingJoinAtMs + offsetMs;
 }
 
 function loadUsers() {
