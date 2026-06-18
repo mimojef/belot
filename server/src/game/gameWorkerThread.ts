@@ -28,6 +28,10 @@ if (typeof data?.workerId !== 'string' || data.workerId.trim() === '') {
 const workerId = data.workerId
 const startedAt = Date.now()
 
+// ─── Shadow room registry ─────────────────────────────────────────────────────
+
+const roomIds = new Set<string>()
+
 // ─── Message sender ───────────────────────────────────────────────────────────
 
 function sendMessage(message: GameWorkerToGatewayMessage): void {
@@ -61,6 +65,24 @@ function isGatewayToGameWorkerMessage(
     return typeof msg['requestId'] === 'string'
   }
 
+  if (msg['type'] === 'assign_room') {
+    return (
+      typeof msg['requestId'] === 'string' &&
+      msg['requestId'].trim() !== '' &&
+      typeof msg['roomId'] === 'string' &&
+      msg['roomId'].trim() !== ''
+    )
+  }
+
+  if (msg['type'] === 'release_room') {
+    return (
+      typeof msg['requestId'] === 'string' &&
+      msg['requestId'].trim() !== '' &&
+      typeof msg['roomId'] === 'string' &&
+      msg['roomId'].trim() !== ''
+    )
+  }
+
   return false
 }
 
@@ -68,8 +90,23 @@ function isGatewayToGameWorkerMessage(
 
 parentPort.on('message', (raw: unknown) => {
   if (!isGatewayToGameWorkerMessage(raw)) {
+    let maybeRequestId: string | undefined = undefined
+
+    if (raw !== null && typeof raw === 'object') {
+      const msg = raw as Record<string, unknown>
+      const isRoomCommand = msg['type'] === 'assign_room' || msg['type'] === 'release_room'
+      if (
+        isRoomCommand &&
+        typeof msg['requestId'] === 'string' &&
+        msg['requestId'].trim() !== ''
+      ) {
+        maybeRequestId = msg['requestId'] as string
+      }
+    }
+
     sendMessage({
       type: 'worker_error',
+      requestId: maybeRequestId,
       message: 'Invalid game worker message.',
     })
     return
@@ -93,12 +130,40 @@ parentPort.on('message', (raw: unknown) => {
       workerId,
       startedAt,
       uptimeMs: Math.max(0, Date.now() - startedAt),
-      activeRooms: 0,
+      activeRooms: roomIds.size,
+    })
+    return
+  }
+
+  if (message.type === 'assign_room') {
+    const alreadyPresent = roomIds.has(message.roomId)
+    if (!alreadyPresent) {
+      roomIds.add(message.roomId)
+    }
+    sendMessage({
+      type: 'assign_room_ack',
+      requestId: message.requestId,
+      roomId: message.roomId,
+      result: alreadyPresent ? 'already_assigned' : 'assigned',
+      activeRooms: roomIds.size,
+    })
+    return
+  }
+
+  if (message.type === 'release_room') {
+    const wasPresent = roomIds.delete(message.roomId)
+    sendMessage({
+      type: 'release_room_ack',
+      requestId: message.requestId,
+      roomId: message.roomId,
+      result: wasPresent ? 'released' : 'not_assigned',
+      activeRooms: roomIds.size,
     })
     return
   }
 
   if (message.type === 'shutdown') {
+    roomIds.clear()
     sendMessage({
       type: 'shutdown_complete',
       requestId: message.requestId,
