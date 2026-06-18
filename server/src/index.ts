@@ -479,16 +479,37 @@ function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
   }
 
   const initializedRoom = initializeRoomAuthoritativeGameState(currentRoom)
-  nextServerState = upsertServerRoomWithSnapshot(nextServerState, initializedRoom)
-  activeRoomRuntime.ensureRoom(initializedRoom)
-  serverState = nextServerState
+
+  function notifyMembersExpired(): void {
+    for (const member of privateRoom.members) {
+      safeSendToConnection(member.connectionId, {
+        type: 'private_room_expired',
+        privateRoomId: privateRoom.id,
+      })
+    }
+  }
+
+  const ensureResult = activeRoomRuntime.ensureRoom(initializedRoom)
+  if (!ensureResult.ok) {
+    console.error(
+      `[private-room] no runtime capacity for room=${initializedRoom.id}: ${ensureResult.reason}`,
+    )
+    notifyMembersExpired()
+    return
+  }
 
   if (privateRoom.stake > 0) {
     const stakeResult = matchEconomyStore.collectRoomStakes(initializedRoom, privateRoom.stake)
     if (!stakeResult.ok) {
       console.error(`[private-room] stake collection failed room=${initializedRoom.id}: ${stakeResult.message}`)
+      activeRoomRuntime.removeRoom(initializedRoom.id)
+      notifyMembersExpired()
+      return
     }
   }
+
+  nextServerState = upsertServerRoomWithSnapshot(nextServerState, initializedRoom)
+  serverState = nextServerState
 
   for (const { connectionId, seat } of seatAssignments) {
     safeSendToConnection(connectionId, {
