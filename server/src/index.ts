@@ -96,6 +96,12 @@ import { createWorkerBackedActiveRoomRuntime } from './game/createWorkerBackedAc
 import { initializeRoomAuthoritativeGameState } from './game/initializeRoomAuthoritativeGameState.js'
 import { rebaseServerStateToEventAt } from './game/rebaseServerStateToEventAt.js'
 import type { ServerAuthoritativeGameState } from './game/serverGameTypes.js'
+import {
+  createGameWorkerLifecycleClient,
+  type GameWorkerLifecycleClient,
+  type GameWorkerLifecycleHealth,
+} from './game/createGameWorkerLifecycleClient.js'
+import { resolveGameWorkerEntryUrl } from './game/resolveGameWorkerEntryUrl.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
 import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
 import type { PrivateRoom, PrivateRoomMember } from './game/privateRoomsStore.js'
@@ -4292,6 +4298,14 @@ async function handleHttpRequest(
         queuedPlayersByStake: getQueueCountsByStake(),
       },
       gameRuntime: gameRuntimeHealth,
+      gameWorkerLifecycle: {
+        ok: gameWorkerLifecycleClient.getState() === 'ready',
+        state: gameWorkerLifecycleClient.getState(),
+        workerId: startupWorkerHealth.workerId,
+        startupPingMs: startupWorkerPingMs,
+        startedAt: startupWorkerHealth.startedAt,
+        activeRooms: startupWorkerHealth.activeRooms,
+      },
     })
     return
   }
@@ -5850,6 +5864,57 @@ wsServer.on('connection', (socket, request) => {
   })
 })
 
+// ─── Game worker lifecycle ────────────────────────────────────────────────────
+
+let gameWorkerLifecycleClient: GameWorkerLifecycleClient
+let startupWorkerPingMs: number
+let startupWorkerHealth: GameWorkerLifecycleHealth
+
+try {
+  const workerEntryUrl = await resolveGameWorkerEntryUrl()
+
+  gameWorkerLifecycleClient = createGameWorkerLifecycleClient({
+    workerId: 'game-worker-1',
+    workerEntryUrl,
+    readyTimeoutMs: 5000,
+    requestTimeoutMs: 5000,
+  })
+
+  await gameWorkerLifecycleClient.start()
+  startupWorkerPingMs = await gameWorkerLifecycleClient.ping()
+  startupWorkerHealth = await gameWorkerLifecycleClient.getHealth()
+
+  const workerState = gameWorkerLifecycleClient.getState()
+
+  if (workerState !== 'ready') {
+    throw new Error(
+      `[startup] Game worker state expected=ready got=${workerState}`,
+    )
+  }
+
+  if (startupWorkerHealth.workerId !== 'game-worker-1') {
+    throw new Error(
+      `[startup] Game worker health workerId mismatch: expected=game-worker-1 got=${startupWorkerHealth.workerId}`,
+    )
+  }
+
+  if (startupWorkerHealth.activeRooms !== 0) {
+    throw new Error(
+      `[startup] Game worker health activeRooms expected=0 got=${startupWorkerHealth.activeRooms}`,
+    )
+  }
+
+  console.log(
+    `[game-worker] workerId=${startupWorkerHealth.workerId} state=${workerState} ping=${startupWorkerPingMs}ms activeRooms=${startupWorkerHealth.activeRooms}`,
+  )
+} catch (error) {
+  console.error('[startup] Game worker lifecycle failed:', error)
+  closeActiveRoomSnapshotStore()
+  throw error
+}
+
+// ─── Matchmaking and game tick intervals ──────────────────────────────────────
+
 setInterval(() => {
   processMatchmaking()
 }, MATCHMAKING_TICK_MS)
@@ -5862,33 +5927,82 @@ setInterval(() => {
   }
 }, GAME_RUNTIME_TICK_MS)
 
-function closeActiveRoomSnapshotStore(): void {
-  try {
-    activeRoomSnapshotStore.close()
-    playerProgressStore.close()
-    adminSettingsStore.close()
-    authStore.close()
-    friendshipStore.close()
-    chatStore.close()
-    yellowCoinGiftStore.close()
-    tableExitPenaltyStore.close()
-    matchEconomyStore.close()
-    coinPackageStore.close()
-    coinPurchaseStore.close()
-    dailyRewardsStore.close()
-  } catch (error) {
-    console.error('[room-snapshot] failed to close store', error)
+function closeActiveRoomSnapshotStore(): boolean {
+  let allClosedSuccessfully = true
+
+  function closeStore(name: string, close: () => void): void {
+    try {
+      close()
+    } catch (error) {
+      allClosedSuccessfully = false
+      console.error(`[shutdown] Failed to close ${name}:`, error)
+    }
   }
+
+  closeStore('activeRoomSnapshotStore', () => activeRoomSnapshotStore.close())
+  closeStore('playerProgressStore', () => playerProgressStore.close())
+  closeStore('adminSettingsStore', () => adminSettingsStore.close())
+  closeStore('authStore', () => authStore.close())
+  closeStore('friendshipStore', () => friendshipStore.close())
+  closeStore('chatStore', () => chatStore.close())
+  closeStore('yellowCoinGiftStore', () => yellowCoinGiftStore.close())
+  closeStore('tableExitPenaltyStore', () => tableExitPenaltyStore.close())
+  closeStore('matchEconomyStore', () => matchEconomyStore.close())
+  closeStore('coinPackageStore', () => coinPackageStore.close())
+  closeStore('coinPurchaseStore', () => coinPurchaseStore.close())
+  closeStore('dailyRewardsStore', () => dailyRewardsStore.close())
+
+  return allClosedSuccessfully
+}
+
+// ─── Graceful shutdown ────────────────────────────────────────────────────────
+
+let serverShutdownPromise: Promise<void> | null = null
+
+function shutdownServer(signal: NodeJS.Signals): Promise<void> {
+  if (serverShutdownPromise !== null) {
+    return serverShutdownPromise
+  }
+
+  serverShutdownPromise = (async () => {
+    console.log(`[shutdown] signal=${signal}`)
+
+    let exitCode = 0
+
+    try {
+      await gameWorkerLifecycleClient.shutdown()
+
+      const finalState = gameWorkerLifecycleClient.getState()
+
+      if (finalState !== 'stopped') {
+        console.error(
+          `[shutdown] Game worker final state expected=stopped got=${finalState}`,
+        )
+        exitCode = 1
+      }
+    } catch (error) {
+      console.error('[shutdown] Game worker shutdown error:', error)
+      exitCode = 1
+    }
+
+    const storesClosedSuccessfully = closeActiveRoomSnapshotStore()
+
+    if (!storesClosedSuccessfully) {
+      exitCode = 1
+    }
+
+    process.exit(exitCode)
+  })()
+
+  return serverShutdownPromise
 }
 
 process.once('SIGINT', () => {
-  closeActiveRoomSnapshotStore()
-  process.exit(0)
+  void shutdownServer('SIGINT')
 })
 
 process.once('SIGTERM', () => {
-  closeActiveRoomSnapshotStore()
-  process.exit(0)
+  void shutdownServer('SIGTERM')
 })
 
 httpServer.listen(PORT, HOST, () => {
