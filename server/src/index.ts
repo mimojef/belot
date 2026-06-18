@@ -5450,8 +5450,19 @@ wsServer.on('connection', (socket, request) => {
 
         const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
 
+        const ensureResult = activeRoomRuntime.ensureRoom(initializedRoom)
+        if (!ensureResult.ok) {
+          console.error(
+            `[create-room] no runtime capacity for room=${initializedRoom.id}: ${ensureResult.reason}`,
+          )
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Не може да се създаде маса в момента.',
+          })
+          return
+        }
+
         serverState = upsertServerRoomWithSnapshot(result.serverState, initializedRoom)
-        activeRoomRuntime.ensureRoom(initializedRoom)
 
         sendJsonMessage(socket, {
           type: 'room_created',
