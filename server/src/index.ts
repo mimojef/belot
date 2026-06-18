@@ -109,6 +109,7 @@ const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
 const MATCHMAKING_TICK_MS = 250
 const EARLY_BOT_FILL_DEBIT_MS = 1700
+const MATCHMAKING_NO_CAPACITY_COOLDOWN_MS = 2_000
 const GAME_RUNTIME_TICK_MS = 250
 const MATCH_PLAYERS_REQUIRED = 4
 const MAX_JSON_BODY_BYTES = 15_000_000
@@ -356,6 +357,7 @@ function updateServerRoomWithSnapshot(
 
 let serverState: ServerState = loadPersistedServerState()
 let matchmakingState: MatchmakingState = createInitialMatchmakingState()
+let matchmakingCapacityRetryAt = 0
 
 const socketRegistry = new Map<ConnectionId, WebSocket>()
 const roomGameRuntimeRegistry = new Map<string, ServerGameRuntime>()
@@ -1284,6 +1286,12 @@ function processMatchmakingUnsafe(): void {
     }
   }
 
+  const now = earlyDebitNow
+
+  if (now < matchmakingCapacityRetryAt) {
+    return
+  }
+
   let guard = 0
 
   while (guard < 20) {
@@ -1334,15 +1342,23 @@ function processMatchmakingUnsafe(): void {
       break
     }
 
-    matchmakingState = result.matchmakingState
-
     if (result.room === null || result.group === null) {
       return
     }
 
     const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
+
+    const ensureResult = activeRoomRuntime.ensureRoom(initializedRoom)
+
+    if (!ensureResult.ok) {
+      cleanupTempBotsFromRoom(initializedRoom)
+      matchmakingCapacityRetryAt = now + MATCHMAKING_NO_CAPACITY_COOLDOWN_MS
+      return
+    }
+
     let stakeCollectionFailed = false
     const justDebitedConnectionIds = new Set<ConnectionId>()
+    const justDebitedEntries: (typeof result.group.matchedHumans)[number][] = []
 
     for (const matchedEntry of result.group.matchedHumans) {
       if (matchedEntry.stakePaid) {
@@ -1372,19 +1388,33 @@ function processMatchmakingUnsafe(): void {
         stakeCollectionFailed = true
       } else {
         justDebitedConnectionIds.add(matchedEntry.connectionId)
+        justDebitedEntries.push(matchedEntry)
       }
     }
 
     if (stakeCollectionFailed) {
-      cleanupPendingGroup(result.group.groupId)
+      for (const entry of justDebitedEntries) {
+        const refundResult = matchEconomyStore.refundQueueStake(
+          entry.entryId,
+          entry.profileId!,
+          result.group.stake,
+        )
+        if (!refundResult.ok) {
+          console.error(`[match-economy] stake refund failed entry=${entry.entryId}: ${refundResult.message}`)
+        }
+      }
+      activeRoomRuntime.removeRoom(initializedRoom.id)
+      cleanupTempBotsFromRoom(initializedRoom)
       broadcastMatchmakingStatusForStake(result.group.stake)
-      continue
+      return
     }
 
     const botStakeResult = matchEconomyStore.collectBotStakes(initializedRoom, result.group.stake)
     if (!botStakeResult.ok) {
       console.error(`[match-economy] bot stake collection failed room=${initializedRoom.id}: ${botStakeResult.message}`)
     }
+
+    matchmakingState = result.matchmakingState
 
     const debitNotifyNow = Date.now()
     for (const connectionId of justDebitedConnectionIds) {
@@ -1442,7 +1472,6 @@ function processMatchmakingUnsafe(): void {
     }
 
     serverState = nextServerState
-    activeRoomRuntime.ensureRoom(initializedRoom)
 
     broadcastRoomSnapshots(initializedRoom, socketRegistry)
     cleanupPendingGroup(result.group.groupId)
