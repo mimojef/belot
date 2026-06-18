@@ -91,6 +91,8 @@ import {
 } from './matchmaking/selectMatchmakingBotProfiles.js'
 import { tryCreatePendingMatchGroup } from './matchmaking/tryCreatePendingMatchGroup.js'
 import { createInProcessActiveRoomRuntime } from './game/createInProcessActiveRoomRuntime.js'
+import { createInProcessGameWorkerManager } from './game/createInProcessGameWorkerManager.js'
+import { createWorkerBackedActiveRoomRuntime } from './game/createWorkerBackedActiveRoomRuntime.js'
 import { initializeRoomAuthoritativeGameState } from './game/initializeRoomAuthoritativeGameState.js'
 import { rebaseServerStateToEventAt } from './game/rebaseServerStateToEventAt.js'
 import type { ServerAuthoritativeGameState } from './game/serverGameTypes.js'
@@ -357,7 +359,21 @@ let matchmakingState: MatchmakingState = createInitialMatchmakingState()
 
 const socketRegistry = new Map<ConnectionId, WebSocket>()
 const roomGameRuntimeRegistry = new Map<string, ServerGameRuntime>()
-const activeRoomRuntime = createInProcessActiveRoomRuntime(roomGameRuntimeRegistry)
+
+const inProcessActiveRoomRuntime =
+  createInProcessActiveRoomRuntime(roomGameRuntimeRegistry)
+
+const gameWorkerManager =
+  createInProcessGameWorkerManager({
+    workerCount: 1,
+    maxRoomsPerWorker: 1000,
+  })
+
+const activeRoomRuntime =
+  createWorkerBackedActiveRoomRuntime({
+    workerManager: gameWorkerManager,
+    delegate: inProcessActiveRoomRuntime,
+  })
 
 function buildPrivateRoomSnapshot(room: PrivateRoom): PrivateRoomSnapshot {
   return {
