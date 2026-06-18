@@ -573,7 +573,14 @@ const privateRoomsStore = createPrivateRoomsStore({
 })
 
 for (const room of Object.values(serverState.rooms)) {
-  activeRoomRuntime.ensureRoom(room)
+  const ensureResult = activeRoomRuntime.ensureRoom(room)
+
+  if (!ensureResult.ok) {
+    throw new Error(
+      `[startup] Unable to restore active room=${room.id}: ${ensureResult.reason}`,
+    )
+  }
+
   persistRoomSnapshot(room)
 }
 
