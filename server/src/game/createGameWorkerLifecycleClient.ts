@@ -3,6 +3,8 @@ import {
   GAME_WORKER_PROTOCOL_VERSION,
   type WorkerRequestId,
   type GameWorkerToGatewayMessage,
+  type GameWorkerAssignRoomAckMessage,
+  type GameWorkerReleaseRoomAckMessage,
 } from './workerProtocol.js'
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -33,6 +35,8 @@ export type GameWorkerLifecycleClient = {
   start(): Promise<void>
   ping(): Promise<number>
   getHealth(): Promise<GameWorkerLifecycleHealth>
+  assignRoom(roomId: string): Promise<GameWorkerAssignRoomAckMessage>
+  releaseRoom(roomId: string): Promise<GameWorkerReleaseRoomAckMessage>
   shutdown(): Promise<void>
   getState(): GameWorkerLifecycleState
 }
@@ -40,7 +44,7 @@ export type GameWorkerLifecycleClient = {
 // ─── Internal types ───────────────────────────────────────────────────────────
 
 type PendingRequest = {
-  expectedType: 'pong' | 'health_response' | 'shutdown_complete'
+  expectedType: 'pong' | 'health_response' | 'shutdown_complete' | 'assign_room_ack' | 'release_room_ack'
   resolve: (message: GameWorkerToGatewayMessage) => void
   reject: (error: Error) => void
   timeout: ReturnType<typeof setTimeout>
@@ -90,6 +94,32 @@ function isGameWorkerToGatewayMessage(
     return (
       typeof msg['message'] === 'string' &&
       (msg['requestId'] === undefined || typeof msg['requestId'] === 'string')
+    )
+  }
+
+  if (msg['type'] === 'assign_room_ack') {
+    return (
+      typeof msg['requestId'] === 'string' &&
+      msg['requestId'].trim() !== '' &&
+      typeof msg['roomId'] === 'string' &&
+      msg['roomId'].trim() !== '' &&
+      (msg['result'] === 'assigned' || msg['result'] === 'already_assigned') &&
+      typeof msg['activeRooms'] === 'number' &&
+      Number.isInteger(msg['activeRooms']) &&
+      (msg['activeRooms'] as number) >= 0
+    )
+  }
+
+  if (msg['type'] === 'release_room_ack') {
+    return (
+      typeof msg['requestId'] === 'string' &&
+      msg['requestId'].trim() !== '' &&
+      typeof msg['roomId'] === 'string' &&
+      msg['roomId'].trim() !== '' &&
+      (msg['result'] === 'released' || msg['result'] === 'not_assigned') &&
+      typeof msg['activeRooms'] === 'number' &&
+      Number.isInteger(msg['activeRooms']) &&
+      (msg['activeRooms'] as number) >= 0
     )
   }
 
@@ -528,6 +558,76 @@ export function createGameWorkerLifecycleClient(
     })
   }
 
+  // ─── assignRoom() ─────────────────────────────────────────────────────────────
+
+  function assignRoom(roomId: string): Promise<GameWorkerAssignRoomAckMessage> {
+    if (state !== 'ready') {
+      return Promise.reject(
+        new Error(
+          `[lifecycle-client] assignRoom() requires state=ready, got state=${state}.`,
+        ),
+      )
+    }
+
+    if (typeof roomId !== 'string' || roomId.trim() === '') {
+      return Promise.reject(
+        new Error(
+          `[lifecycle-client] assignRoom() requires a non-empty roomId.`,
+        ),
+      )
+    }
+
+    const requestId = nextRequestId()
+
+    return sendRequest<GameWorkerAssignRoomAckMessage>(
+      { type: 'assign_room', requestId, roomId },
+      'assign_room_ack',
+      requestTimeoutMs,
+    ).then((msg) => {
+      if (msg.roomId !== roomId) {
+        throw new Error(
+          `[lifecycle-client] assign_room_ack roomId mismatch: expected=${roomId} got=${msg.roomId}`,
+        )
+      }
+      return msg
+    })
+  }
+
+  // ─── releaseRoom() ────────────────────────────────────────────────────────────
+
+  function releaseRoom(roomId: string): Promise<GameWorkerReleaseRoomAckMessage> {
+    if (state !== 'ready') {
+      return Promise.reject(
+        new Error(
+          `[lifecycle-client] releaseRoom() requires state=ready, got state=${state}.`,
+        ),
+      )
+    }
+
+    if (typeof roomId !== 'string' || roomId.trim() === '') {
+      return Promise.reject(
+        new Error(
+          `[lifecycle-client] releaseRoom() requires a non-empty roomId.`,
+        ),
+      )
+    }
+
+    const requestId = nextRequestId()
+
+    return sendRequest<GameWorkerReleaseRoomAckMessage>(
+      { type: 'release_room', requestId, roomId },
+      'release_room_ack',
+      requestTimeoutMs,
+    ).then((msg) => {
+      if (msg.roomId !== roomId) {
+        throw new Error(
+          `[lifecycle-client] release_room_ack roomId mismatch: expected=${roomId} got=${msg.roomId}`,
+        )
+      }
+      return msg
+    })
+  }
+
   // ─── shutdown() ───────────────────────────────────────────────────────────────
 
   function shutdown(): Promise<void> {
@@ -632,6 +732,8 @@ export function createGameWorkerLifecycleClient(
     start,
     ping,
     getHealth,
+    assignRoom,
+    releaseRoom,
     shutdown,
     getState(): GameWorkerLifecycleState {
       return state
