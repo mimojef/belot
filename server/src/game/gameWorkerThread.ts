@@ -3,7 +3,10 @@ import {
   GAME_WORKER_PROTOCOL_VERSION,
   type GatewayToGameWorkerMessage,
   type GameWorkerToGatewayMessage,
+  type GameWorkerComputeTickRoomsRequestMessage,
+  type GameWorkerTickRoomResult,
 } from './workerProtocol.js'
+import { advanceRoomAuthoritativeGame } from './advanceRoomAuthoritativeGame.js'
 
 // ─── Startup validation ───────────────────────────────────────────────────────
 
@@ -83,7 +86,50 @@ function isGatewayToGameWorkerMessage(
     )
   }
 
+  if (msg['type'] === 'compute_tick_rooms') {
+    return isValidComputeTickRoomsMessage(msg)
+  }
+
   return false
+}
+
+function isValidComputeTickRoomsMessage(
+  msg: Record<string, unknown>,
+): msg is GameWorkerComputeTickRoomsRequestMessage {
+  if (msg['protocolVersion'] !== GAME_WORKER_PROTOCOL_VERSION) return false
+  if (typeof msg['requestId'] !== 'string' || (msg['requestId'] as string).trim() === '') return false
+  if (typeof msg['now'] !== 'number' || !Number.isFinite(msg['now'])) return false
+  if (!Array.isArray(msg['rooms'])) return false
+
+  const seenIds = new Set<string>()
+
+  for (const item of msg['rooms'] as unknown[]) {
+    if (item === null || typeof item !== 'object') return false
+    const r = item as Record<string, unknown>
+
+    if (typeof r['roomId'] !== 'string' || (r['roomId'] as string).trim() === '') return false
+    if (seenIds.has(r['roomId'] as string)) return false
+    seenIds.add(r['roomId'] as string)
+
+    if (
+      typeof r['baseRevision'] !== 'number' ||
+      !Number.isInteger(r['baseRevision']) ||
+      (r['baseRevision'] as number) < 0 ||
+      !Number.isSafeInteger(r['baseRevision'])
+    ) return false
+
+    if (r['room'] === null || typeof r['room'] !== 'object') return false
+
+    const room = r['room'] as Record<string, unknown>
+    if (room['id'] !== r['roomId']) return false
+  }
+
+  return true
+}
+
+function normalizeWorkerErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  return String(error)
 }
 
 // ─── Message handler ──────────────────────────────────────────────────────────
@@ -94,9 +140,12 @@ parentPort.on('message', (raw: unknown) => {
 
     if (raw !== null && typeof raw === 'object') {
       const msg = raw as Record<string, unknown>
-      const isRoomCommand = msg['type'] === 'assign_room' || msg['type'] === 'release_room'
+      const isCorrelatedCommand =
+        msg['type'] === 'assign_room' ||
+        msg['type'] === 'release_room' ||
+        msg['type'] === 'compute_tick_rooms'
       if (
-        isRoomCommand &&
+        isCorrelatedCommand &&
         typeof msg['requestId'] === 'string' &&
         msg['requestId'].trim() !== ''
       ) {
@@ -158,6 +207,50 @@ parentPort.on('message', (raw: unknown) => {
       roomId: message.roomId,
       result: wasPresent ? 'released' : 'not_assigned',
       activeRooms: roomIds.size,
+    })
+    return
+  }
+
+  if (message.type === 'compute_tick_rooms') {
+    const results: GameWorkerTickRoomResult[] = []
+
+    for (const input of message.rooms) {
+      const { roomId, baseRevision, room } = input
+
+      if (!roomIds.has(roomId)) {
+        results.push({
+          roomId,
+          baseRevision,
+          result: 'error',
+          code: 'not_assigned',
+          message: 'Room is not assigned to this worker.',
+        })
+        continue
+      }
+
+      try {
+        const nextRoom = advanceRoomAuthoritativeGame(room, message.now)
+        if (nextRoom === room) {
+          results.push({ roomId, baseRevision, result: 'unchanged' })
+        } else {
+          results.push({ roomId, baseRevision, result: 'advanced', room: nextRoom })
+        }
+      } catch (error: unknown) {
+        results.push({
+          roomId,
+          baseRevision,
+          result: 'error',
+          code: 'compute_failed',
+          message: normalizeWorkerErrorMessage(error),
+        })
+      }
+    }
+
+    sendMessage({
+      type: 'compute_tick_rooms_response',
+      protocolVersion: GAME_WORKER_PROTOCOL_VERSION,
+      requestId: message.requestId,
+      results,
     })
     return
   }
