@@ -1,4 +1,4 @@
-import type { WebSocket } from 'ws'
+import { WebSocket } from 'ws'
 import { createRoomSnapshotMessage } from '../protocol/createRoomSnapshotMessage.js'
 import { sendJsonMessage } from './sendJsonMessage.js'
 import {
@@ -25,10 +25,17 @@ export function broadcastRoomSnapshots(
 
     const socket = socketRegistry.get(participant.connectionId)
 
-    if (!socket) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
       continue
     }
 
-    sendJsonMessage(socket, createRoomSnapshotMessage(room, seat))
+    try {
+      sendJsonMessage(socket, createRoomSnapshotMessage(room, seat))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(
+        `[room-snapshot] broadcast failed room=${room.id} connection=${participant.connectionId}: ${message}`,
+      )
+    }
   }
 }

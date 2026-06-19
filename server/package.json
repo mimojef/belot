@@ -7,6 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc -p tsconfig.json",
+    "check:worker-candidate-apply": "tsx scripts/checkGameWorkerCandidateApply.ts && tsx scripts/checkGameWorkerCandidateApplyIntegration.ts",
     "make-admin": "tsx scripts/make-admin.ts"
   },
   "dependencies": {

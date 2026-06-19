@@ -37,6 +37,7 @@ import { createTableExitPenaltyStore } from './db/tableExitPenaltyStore.js'
 import { createYellowCoinGiftStore } from './db/yellowCoinGiftStore.js'
 import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js'
 import { broadcastRoomSnapshots } from './core/broadcastRoomSnapshots.js'
+import { countServerRoomsByPhase } from './core/countServerRoomsByPhase.js'
 import { createInitialServerState } from './core/createInitialServerState.js'
 import { createServerConnection } from './core/createServerConnection.js'
 import { detachConnectionFromRoomSeat } from './core/detachConnectionFromRoomSeat.js'
@@ -109,6 +110,7 @@ import {
   createGameWorkerTickOrchestrator,
   type GameWorkerTickOrchestrator,
 } from './game/createGameWorkerTickOrchestrator.js'
+import { applyAcceptedGameWorkerCandidate } from './game/applyAcceptedGameWorkerCandidate.js'
 import type {
   GameWorkerManager,
   GameWorkerManagerHealth,
@@ -501,18 +503,6 @@ function persistRoomSnapshot(room: ServerRoom): void {
     activeRoomSnapshotStore.upsertRoom(room)
   } catch (error) {
     console.error(`[room-snapshot] failed to persist room=${room.id}`, error)
-  }
-}
-
-function persistRoomSnapshotStrict(room: ServerRoom): boolean {
-  try {
-    activeRoomSnapshotStore.upsertRoom(room)
-    return true
-  } catch (error) {
-    console.error(
-      `[game-worker-tick] Failed to persist candidate roomId=${room.id}: ${formatErrorMessage(error)}`,
-    )
-    return false
   }
 }
 
@@ -1052,66 +1042,84 @@ async function tickRoomGameRuntimes(): Promise<void> {
       const nextRoom = tickResult.room
       const roomId = tickResult.roomId
 
-      if (nextRoom.id !== roomId) {
-        console.error(
-          `[game-worker-tick] Candidate room id mismatch room=${roomId} candidate=${nextRoom.id}`,
-        )
-        continue
-      }
-
       const currentRoom = serverState.rooms[roomId] ?? null
       if (currentRoom === null) {
         continue
       }
 
-      const currentRevision = roomRevisionRegistry.get(roomId)
-      if (currentRevision !== tickResult.baseRevision) {
+      const applyResult = applyAcceptedGameWorkerCandidate({
+        serverState,
+        roomId,
+        baseRevision: tickResult.baseRevision,
+        candidate: nextRoom,
+        revisionRegistry: roomRevisionRegistry,
+        commitCanonicalRoom: (room) => {
+          serverState = upsertServerRoom(serverState, room)
+        },
+        persist: (room) => {
+          activeRoomSnapshotStore.upsertRoom(room)
+        },
+        broadcast: (room) => {
+          broadcastRoomSnapshots(room, socketRegistry)
+        },
+        onApplied: (previousRoom, room) => {
+          if (!shouldRunMatchCompletionSideEffects(previousRoom, room)) {
+            return
+          }
+
+          runMatchCompletionSideEffect(
+            'record-completed-match',
+            room.id,
+            () => {
+              playerProgressStore.recordCompletedMatch(room)
+            },
+          )
+          runMatchCompletionSideEffect(
+            'record-match-completion',
+            room.id,
+            () => {
+              missionStore.recordMatchCompletion(room)
+            },
+          )
+          runMatchCompletionSideEffect(
+            'payout-match-winners',
+            room.id,
+            () => {
+              const payoutResult = matchEconomyStore.payoutMatchWinners(room)
+
+              if (!payoutResult.ok) {
+                console.error(
+                  `[match-economy] payout failed room=${room.id}: ${payoutResult.message}`,
+                )
+              }
+            },
+          )
+          runMatchCompletionSideEffect(
+            'top-up-depleted-bot-wallets',
+            room.id,
+            () => {
+              matchEconomyStore.topUpDepletedBotWallets(room)
+            },
+          )
+        },
+      })
+
+      if (applyResult.kind === 'persist_failed') {
+        console.error(
+          `[game-worker-tick] Failed to persist candidate roomId=${roomId}: ${formatErrorMessage(applyResult.error)}`,
+        )
         continue
       }
 
-      if (!persistRoomSnapshotStrict(nextRoom)) {
+      if (applyResult.kind === 'invalid') {
+        console.error(`[game-worker-tick] ${applyResult.message}`)
         continue
       }
 
-      if (shouldRunMatchCompletionSideEffects(currentRoom, nextRoom)) {
-        runMatchCompletionSideEffect(
-          'record-completed-match',
-          nextRoom.id,
-          () => {
-            playerProgressStore.recordCompletedMatch(nextRoom)
-          },
-        )
-        runMatchCompletionSideEffect(
-          'record-match-completion',
-          nextRoom.id,
-          () => {
-            missionStore.recordMatchCompletion(nextRoom)
-          },
-        )
-        runMatchCompletionSideEffect(
-          'payout-match-winners',
-          nextRoom.id,
-          () => {
-            const payoutResult = matchEconomyStore.payoutMatchWinners(nextRoom)
-
-            if (!payoutResult.ok) {
-              console.error(
-                `[match-economy] payout failed room=${nextRoom.id}: ${payoutResult.message}`,
-              )
-            }
-          },
-        )
-        runMatchCompletionSideEffect(
-          'top-up-depleted-bot-wallets',
-          nextRoom.id,
-          () => {
-            matchEconomyStore.topUpDepletedBotWallets(nextRoom)
-          },
-        )
+      if (applyResult.kind !== 'applied') {
+        continue
       }
 
-      serverState = commitServerRoomReplacement(nextRoom)
-      broadcastRoomSnapshots(nextRoom, socketRegistry)
     }
   }
 }
@@ -4633,7 +4641,10 @@ async function handleHttpRequest(
   }
 
   if (requestUrl.pathname === '/health') {
-    const gameRuntimeHealth = activeRoomRuntime.getHealth()
+    const gameRuntimeHealth = {
+      activeRooms: Object.keys(serverState.rooms).length,
+      roomsByPhase: countServerRoomsByPhase(serverState.rooms),
+    }
     const tickHealth = gameWorkerTickOrchestrator.getHealth()
     const poolHealth = gameWorkerPool?.getHealth() ?? null
     const lifecycleState =
