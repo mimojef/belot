@@ -102,13 +102,18 @@ import {
   type GameWorkerLifecycleHealth,
 } from './game/createGameWorkerLifecycleClient.js'
 import {
-  createGameWorkerTickClient,
-  type GameWorkerTickClient,
-} from './game/createGameWorkerTickClient.js'
+  createGameWorkerPool,
+  type GameWorkerPool,
+} from './game/createGameWorkerPool.js'
 import {
   createGameWorkerTickOrchestrator,
   type GameWorkerTickOrchestrator,
 } from './game/createGameWorkerTickOrchestrator.js'
+import type {
+  GameWorkerManager,
+  GameWorkerManagerHealth,
+  GameWorkerSnapshot,
+} from './game/gameWorkerManager.js'
 import { createRoomRevisionRegistry } from './game/createRoomRevisionRegistry.js'
 import {
   createRoomShadowSynchronizer,
@@ -162,9 +167,45 @@ function parseGameWorkerTickMode(value: string | undefined): GameWorkerTickMode 
   )
 }
 
+function parsePositiveIntegerEnv(
+  envName: string,
+  value: string | undefined,
+  defaultValue: number,
+): number {
+  if (value === undefined || value.trim() === '') {
+    return defaultValue
+  }
+
+  const parsed = Number(value)
+
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(
+      `[startup] Invalid ${envName}=${JSON.stringify(value)}. Expected a positive integer.`,
+    )
+  }
+
+  return parsed
+}
+
 const gameWorkerTickMode = parseGameWorkerTickMode(
   process.env.BELOT_GAME_WORKER_TICK_MODE,
 )
+const gameWorkerPoolWorkerCount =
+  gameWorkerTickMode === 'worker-candidate'
+    ? parsePositiveIntegerEnv(
+        'BELOT_GAME_WORKER_COUNT',
+        process.env.BELOT_GAME_WORKER_COUNT,
+        1,
+      )
+    : 1
+const gameWorkerPoolMaxRoomsPerWorker =
+  gameWorkerTickMode === 'worker-candidate'
+    ? parsePositiveIntegerEnv(
+        'BELOT_GAME_WORKER_MAX_ROOMS_PER_WORKER',
+        process.env.BELOT_GAME_WORKER_MAX_ROOMS_PER_WORKER,
+        1000,
+      )
+    : 1000
 let isServerShuttingDown = false
 let lastGameWorkerTickFailureLogAt = 0
 let catalogBotRefillInterval: ReturnType<typeof setInterval> | null = null
@@ -530,13 +571,69 @@ const roomGameRuntimeRegistry = new Map<string, ServerGameRuntime>()
 const inProcessActiveRoomRuntime =
   createInProcessActiveRoomRuntime(roomGameRuntimeRegistry)
 
-const gameWorkerManager =
+let activeRoomWorkerManager: GameWorkerManager =
   createInProcessGameWorkerManager({
     workerCount: 1,
     maxRoomsPerWorker: 1000,
   })
 
 let roomShadowSynchronizer: RoomShadowSynchronizer | null = null
+
+function createGameWorkerPoolManagerAdapter(
+  pool: GameWorkerPool,
+): GameWorkerManager {
+  function getWorkers(): readonly GameWorkerSnapshot[] {
+    return pool.getHealth().workers.map((worker) => ({
+      workerId: worker.workerId,
+      status: worker.state === 'ready' ? 'ready' : 'stopped',
+      activeRooms: worker.assignedRooms,
+      maxRooms: worker.maxRooms,
+    }))
+  }
+
+  return {
+    ensureRoom(roomId: string): string | null {
+      const result = pool.ensureRoom(roomId)
+      return result.ok ? result.workerId : null
+    },
+    getWorkerIdForRoom(roomId: string): string | null {
+      return pool.getWorkerIdForRoom(roomId)
+    },
+    removeRoom(roomId: string): void {
+      void pool.releaseRoom(roomId).catch((error: unknown) => {
+        console.error('[game-worker-pool] Room release failed:', error)
+      })
+    },
+    getWorkers,
+    getHealth(): GameWorkerManagerHealth {
+      const health = pool.getHealth()
+      return {
+        configuredWorkers: health.workerCount,
+        readyWorkers: health.readyWorkers,
+        totalActiveRooms: health.totalAssignedRooms,
+        workers: getWorkers(),
+      }
+    },
+  }
+}
+
+const activeRoomWorkerManagerProxy: GameWorkerManager = {
+  ensureRoom(roomId: string): string | null {
+    return activeRoomWorkerManager.ensureRoom(roomId)
+  },
+  getWorkerIdForRoom(roomId: string): string | null {
+    return activeRoomWorkerManager.getWorkerIdForRoom(roomId)
+  },
+  removeRoom(roomId: string): void {
+    activeRoomWorkerManager.removeRoom(roomId)
+  },
+  getWorkers(): readonly GameWorkerSnapshot[] {
+    return activeRoomWorkerManager.getWorkers()
+  },
+  getHealth(): GameWorkerManagerHealth {
+    return activeRoomWorkerManager.getHealth()
+  },
+}
 
 const roomShadowNotificationTarget = {
   desireRoom(roomId: string): void {
@@ -549,7 +646,7 @@ const roomShadowNotificationTarget = {
 
 const activeRoomRuntime =
   createWorkerBackedActiveRoomRuntime({
-    workerManager: gameWorkerManager,
+    workerManager: activeRoomWorkerManagerProxy,
     delegate: inProcessActiveRoomRuntime,
     roomShadowSynchronizer: roomShadowNotificationTarget,
   })
@@ -4538,7 +4635,13 @@ async function handleHttpRequest(
   if (requestUrl.pathname === '/health') {
     const gameRuntimeHealth = activeRoomRuntime.getHealth()
     const tickHealth = gameWorkerTickOrchestrator.getHealth()
-    const lifecycleState = gameWorkerLifecycleClient?.getState() ?? 'failed'
+    const poolHealth = gameWorkerPool?.getHealth() ?? null
+    const lifecycleState =
+      gameWorkerLifecycleClient?.getState() ?? poolHealth?.state ?? 'failed'
+    const lifecycleOk =
+      gameWorkerLifecycleClient !== null
+        ? lifecycleState === 'ready'
+        : poolHealth?.state === 'ready'
 
     sendJsonResponse(res, 200, {
       ok: true,
@@ -4555,7 +4658,7 @@ async function handleHttpRequest(
         trackedRevisionRooms: roomRevisionRegistry.getTrackedRoomCount(),
       },
       gameWorkerLifecycle: {
-        ok: lifecycleState === 'ready',
+        ok: lifecycleOk,
         state: lifecycleState,
         workerId: startupWorkerHealth?.workerId ?? null,
         startupPingMs: startupWorkerPingMs,
@@ -4563,6 +4666,7 @@ async function handleHttpRequest(
         activeRooms: startupWorkerHealth?.activeRooms ?? null,
       },
       roomShadowSync: roomShadowSynchronizer?.getHealth() ?? null,
+      gameWorkerPool: poolHealth,
     })
     return
   }
@@ -6149,86 +6253,118 @@ wsServer.on('connection', (socket, request) => {
 let gameWorkerLifecycleClient: GameWorkerLifecycleClient | null = null
 let startupWorkerPingMs: number | null = null
 let startupWorkerHealth: GameWorkerLifecycleHealth | null = null
-let gameWorkerTickClient: GameWorkerTickClient | null = null
+let gameWorkerPool: GameWorkerPool | null = null
 let gameWorkerTickOrchestrator: GameWorkerTickOrchestrator
+
+function seedRestoredActiveRooms(): number {
+  const restoredRoomIds = activeRoomRuntime.listTrackedRoomIds()
+
+  for (const roomId of restoredRoomIds) {
+    const room = serverState.rooms[roomId] ?? null
+
+    if (room === null) {
+      activeRoomRuntime.removeRoom(roomId)
+      continue
+    }
+
+    const result = activeRoomRuntime.ensureRoom(room)
+
+    if (!result.ok) {
+      throw new Error(
+        `[startup] Failed to assign restored room=${roomId}: ${result.reason}`,
+      )
+    }
+  }
+
+  return restoredRoomIds.length
+}
 
 try {
   const workerEntryUrl = await resolveGameWorkerEntryUrl()
 
-  gameWorkerLifecycleClient = createGameWorkerLifecycleClient({
-    workerId: 'game-worker-1',
-    workerEntryUrl,
-    readyTimeoutMs: 5000,
-    requestTimeoutMs: 5000,
-  })
-
-  await gameWorkerLifecycleClient.start()
-  startupWorkerPingMs = await gameWorkerLifecycleClient.ping()
-  startupWorkerHealth = await gameWorkerLifecycleClient.getHealth()
-
-  const workerState = gameWorkerLifecycleClient.getState()
-
-  if (workerState !== 'ready') {
-    throw new Error(
-      `[startup] Game worker state expected=ready got=${workerState}`,
-    )
-  }
-
-  if (startupWorkerHealth.workerId !== 'game-worker-1') {
-    throw new Error(
-      `[startup] Game worker health workerId mismatch: expected=game-worker-1 got=${startupWorkerHealth.workerId}`,
-    )
-  }
-
-  if (startupWorkerHealth.activeRooms !== 0) {
-    throw new Error(
-      `[startup] Game worker health activeRooms expected=0 got=${startupWorkerHealth.activeRooms}`,
-    )
-  }
-
-  console.log(
-    `[game-worker] workerId=${startupWorkerHealth.workerId} state=${workerState} ping=${startupWorkerPingMs}ms activeRooms=${startupWorkerHealth.activeRooms}`,
-  )
-
-  roomShadowSynchronizer = createRoomShadowSynchronizer({
-    client: gameWorkerLifecycleClient,
-  })
-
   if (gameWorkerTickMode === 'worker-candidate') {
-    gameWorkerTickClient = createGameWorkerTickClient({
-      endpoint: gameWorkerLifecycleClient.getMessageEndpoint(),
+    gameWorkerPool = createGameWorkerPool({
+      workerCount: gameWorkerPoolWorkerCount,
+      maxRoomsPerWorker: gameWorkerPoolMaxRoomsPerWorker,
+      workerEntryUrl,
+      requestTimeoutMs: 5000,
     })
+
+    await gameWorkerPool.start()
+    activeRoomWorkerManager = createGameWorkerPoolManagerAdapter(gameWorkerPool)
 
     gameWorkerTickOrchestrator = createGameWorkerTickOrchestrator({
       mode: 'worker-candidate',
       revisionRegistry: roomRevisionRegistry,
-      tickClient: gameWorkerTickClient,
+      tickClient: gameWorkerPool,
     })
+
+    const restoredRoomCount = seedRestoredActiveRooms()
+
+    console.log(
+      `[game-worker-pool] workers=${gameWorkerPoolWorkerCount} maxRoomsPerWorker=${gameWorkerPoolMaxRoomsPerWorker} seededRooms=${restoredRoomCount}`,
+    )
   } else {
+    gameWorkerLifecycleClient = createGameWorkerLifecycleClient({
+      workerId: 'game-worker-1',
+      workerEntryUrl,
+      readyTimeoutMs: 5000,
+      requestTimeoutMs: 5000,
+    })
+
+    await gameWorkerLifecycleClient.start()
+    startupWorkerPingMs = await gameWorkerLifecycleClient.ping()
+    startupWorkerHealth = await gameWorkerLifecycleClient.getHealth()
+
+    const workerState = gameWorkerLifecycleClient.getState()
+
+    if (workerState !== 'ready') {
+      throw new Error(
+        `[startup] Game worker state expected=ready got=${workerState}`,
+      )
+    }
+
+    if (startupWorkerHealth.workerId !== 'game-worker-1') {
+      throw new Error(
+        `[startup] Game worker health workerId mismatch: expected=game-worker-1 got=${startupWorkerHealth.workerId}`,
+      )
+    }
+
+    if (startupWorkerHealth.activeRooms !== 0) {
+      throw new Error(
+        `[startup] Game worker health activeRooms expected=0 got=${startupWorkerHealth.activeRooms}`,
+      )
+    }
+
+    console.log(
+      `[game-worker] workerId=${startupWorkerHealth.workerId} state=${workerState} ping=${startupWorkerPingMs}ms activeRooms=${startupWorkerHealth.activeRooms}`,
+    )
+
+    roomShadowSynchronizer = createRoomShadowSynchronizer({
+      client: gameWorkerLifecycleClient,
+    })
+
     gameWorkerTickOrchestrator = createGameWorkerTickOrchestrator({
       mode: 'in-process',
       revisionRegistry: roomRevisionRegistry,
       syncTickTarget: activeRoomRuntime,
     })
+
+    const restoredRoomCount = seedRestoredActiveRooms()
+
+    console.log(
+      `[room-shadow-sync] created seededRooms=${restoredRoomCount}`,
+    )
   }
 
-  const restoredRoomIds = activeRoomRuntime.listTrackedRoomIds()
-
-  for (const roomId of restoredRoomIds) {
-    roomShadowSynchronizer.desireRoom(roomId)
-  }
-
-  console.log(
-    `[room-shadow-sync] created seededRooms=${restoredRoomIds.length}`,
-  )
   console.log(`[game-worker-tick] mode=${gameWorkerTickMode}`)
 } catch (error) {
   console.error('[startup] Game worker lifecycle failed:', error)
-  if (gameWorkerTickClient !== null) {
+  if (gameWorkerPool !== null) {
     try {
-      await gameWorkerTickClient.shutdown()
+      await gameWorkerPool.shutdown()
     } catch (shutdownError) {
-      console.error('[startup] Game worker tick client cleanup failed:', shutdownError)
+      console.error('[startup] Game worker pool cleanup failed:', shutdownError)
     }
   }
   if (roomShadowSynchronizer !== null) {
@@ -6367,11 +6503,11 @@ function shutdownServer(signal: NodeJS.Signals): Promise<void> {
       exitCode = 1
     }
 
-    if (gameWorkerTickClient !== null) {
+    if (gameWorkerPool !== null) {
       try {
-        await gameWorkerTickClient.shutdown()
+        await gameWorkerPool.shutdown()
       } catch (error) {
-        console.error('[shutdown] Game worker tick client shutdown error:', error)
+        console.error('[shutdown] Game worker pool shutdown error:', error)
         exitCode = 1
       }
     }
