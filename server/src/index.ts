@@ -102,6 +102,15 @@ import {
   type GameWorkerLifecycleHealth,
 } from './game/createGameWorkerLifecycleClient.js'
 import {
+  createGameWorkerTickClient,
+  type GameWorkerTickClient,
+} from './game/createGameWorkerTickClient.js'
+import {
+  createGameWorkerTickOrchestrator,
+  type GameWorkerTickOrchestrator,
+} from './game/createGameWorkerTickOrchestrator.js'
+import { createRoomRevisionRegistry } from './game/createRoomRevisionRegistry.js'
+import {
   createRoomShadowSynchronizer,
   type RoomShadowSynchronizer,
 } from './game/createRoomShadowSynchronizer.js'
@@ -111,7 +120,7 @@ import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
 import type { PrivateRoom, PrivateRoomMember } from './game/privateRoomsStore.js'
 import { addHumanToRoom } from './core/addHumanToRoom.js'
 import { createRoomWithHumanHost } from './core/createRoomWithHumanHost.js'
-import type { PrivateRoomSnapshot } from './protocol/messageTypes.js'
+import type { ClientMessage, PrivateRoomSnapshot } from './protocol/messageTypes.js'
 import { validateGuestContactPayload } from './contact/guestContactValidation.js'
 import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
 
@@ -121,6 +130,7 @@ const MATCHMAKING_TICK_MS = 250
 const EARLY_BOT_FILL_DEBIT_MS = 1700
 const MATCHMAKING_NO_CAPACITY_COOLDOWN_MS = 2_000
 const GAME_RUNTIME_TICK_MS = 250
+const GAME_WORKER_TICK_FAILURE_LOG_INTERVAL_MS = 5_000
 const MATCH_PLAYERS_REQUIRED = 4
 const MAX_JSON_BODY_BYTES = 15_000_000
 const GUEST_CONTACT_MAX_JSON_BODY_BYTES = 20_000
@@ -135,6 +145,99 @@ const AVATAR_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'avatars')
 const GALLERY_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'profile-gallery')
 const guestContactRateLimitByIp = new Map<string, { windowStartedAt: number; count: number }>()
 
+type GameWorkerTickMode = 'in-process' | 'worker-candidate'
+
+function parseGameWorkerTickMode(value: string | undefined): GameWorkerTickMode {
+  if (value === undefined || value.trim() === '') {
+    return 'in-process'
+  }
+
+  if (value === 'in-process' || value === 'worker-candidate') {
+    return value
+  }
+
+  throw new Error(
+    `[startup] Invalid BELOT_GAME_WORKER_TICK_MODE=${JSON.stringify(value)}. ` +
+      'Expected "in-process" or "worker-candidate".',
+  )
+}
+
+const gameWorkerTickMode = parseGameWorkerTickMode(
+  process.env.BELOT_GAME_WORKER_TICK_MODE,
+)
+let isServerShuttingDown = false
+let lastGameWorkerTickFailureLogAt = 0
+let catalogBotRefillInterval: ReturnType<typeof setInterval> | null = null
+let supportCleanupInterval: ReturnType<typeof setInterval> | null = null
+let missionRotationTimeout: ReturnType<typeof setTimeout> | null = null
+
+function logGameWorkerTickFailure(message: string): void {
+  const now = Date.now()
+  if (
+    lastGameWorkerTickFailureLogAt !== 0 &&
+    now - lastGameWorkerTickFailureLogAt < GAME_WORKER_TICK_FAILURE_LOG_INTERVAL_MS
+  ) {
+    return
+  }
+
+  lastGameWorkerTickFailureLogAt = now
+  console.error(`[game-worker-tick] ${message}`)
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function runMatchCompletionSideEffect(
+  label: string,
+  roomId: string,
+  effect: () => void,
+): boolean {
+  try {
+    effect()
+    return true
+  } catch (error) {
+    console.error(
+      `[game-worker-tick] Completion side effect failed label=${label} roomId=${roomId}: ${formatErrorMessage(error)}`,
+    )
+    return false
+  }
+}
+
+function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
+  switch (message.type) {
+    case 'create_room':
+    case 'join_room':
+    case 'join_matchmaking':
+    case 'leave_matchmaking':
+    case 'resume_room':
+    case 'leave_active_room':
+    case 'submit_bid_action':
+    case 'submit_cut_index':
+    case 'submit_play_card':
+    case 'resume_human_control':
+    case 'submit_partner_rating':
+    case 'request_replay':
+    case 'request_leave_match':
+    case 'create_private_room':
+    case 'join_private_room':
+    case 'leave_private_room':
+    case 'invite_to_private_room':
+    case 'cancel_private_room_invite':
+    case 'respond_private_room_invite':
+    case 'request_private_rooms_list':
+      return true
+    case 'ping':
+    case 'request_player_profile':
+    case 'send_emoji_reaction':
+    case 'send_phrase_reaction':
+      return false
+  }
+
+  const exhaustiveCheck: never = message
+  return exhaustiveCheck
+}
+
 const databaseBootstrap = await ensureServerDatabaseReady()
 const botCatalogImport = await importBotProfilesCatalog(
   databaseBootstrap.databaseFilePath,
@@ -148,7 +251,13 @@ const playerProgressStore = await createPlayerProgressStore(
 const likeStore = await createLikeStore(databaseBootstrap.databaseFilePath)
 const blockStore = await createBlockStore(databaseBootstrap.databaseFilePath)
 playerProgressStore.seedCatalogBotsIfNeeded()
-setInterval(() => playerProgressStore.refillCatalogBotWallets(), 5 * 60 * 1000)
+catalogBotRefillInterval = setInterval(() => {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  playerProgressStore.refillCatalogBotWallets()
+}, 5 * 60 * 1000)
 
 const cleanedUpTempBots = playerProgressStore.cleanupAllTemporaryBotProfiles()
 if (cleanedUpTempBots > 0) {
@@ -200,13 +309,17 @@ const supportStore = await createSupportStore(databaseBootstrap.databaseFilePath
 const guestContactStore = await createGuestContactStore(databaseBootstrap.databaseFilePath)
 
 function runSupportCleanup(): void {
+  if (isServerShuttingDown) {
+    return
+  }
+
   const deleted = supportStore.cleanupInactiveConversations()
   if (deleted > 0) {
     console.log(`[support] Cleanup: deleted ${deleted} messages from inactive resolved conversations`)
   }
 }
 runSupportCleanup()
-setInterval(runSupportCleanup, 24 * 60 * 60 * 1000)
+supportCleanupInterval = setInterval(runSupportCleanup, 24 * 60 * 60 * 1000)
 
 function msUntilNextSofiaMidnight(): number {
   const now = new Date()
@@ -225,9 +338,19 @@ function msUntilNextSofiaMidnight(): number {
 }
 
 function scheduleMidnightMissionRotation(): void {
+  if (isServerShuttingDown) {
+    return
+  }
+
   const delay = msUntilNextSofiaMidnight()
   console.log(`[missions] Next midnight rotation in ${Math.round(delay / 60000)} min`)
-  setTimeout(() => {
+  missionRotationTimeout = setTimeout(() => {
+    missionRotationTimeout = null
+
+    if (isServerShuttingDown) {
+      return
+    }
+
     console.log('[missions] Midnight rotation: running')
     missionStore.maybePromoteStaged()
     scheduleMidnightMissionRotation()
@@ -340,6 +463,18 @@ function persistRoomSnapshot(room: ServerRoom): void {
   }
 }
 
+function persistRoomSnapshotStrict(room: ServerRoom): boolean {
+  try {
+    activeRoomSnapshotStore.upsertRoom(room)
+    return true
+  } catch (error) {
+    console.error(
+      `[game-worker-tick] Failed to persist candidate roomId=${room.id}: ${formatErrorMessage(error)}`,
+    )
+    return false
+  }
+}
+
 function markRoomSnapshotRemoved(roomId: string): void {
   try {
     activeRoomSnapshotStore.markRoomRemoved(roomId)
@@ -348,24 +483,44 @@ function markRoomSnapshotRemoved(roomId: string): void {
   }
 }
 
-function upsertServerRoomWithSnapshot(
-  currentServerState: ServerState,
+function commitServerRoomReplacement(
   room: ServerRoom,
+  currentServerState: ServerState = serverState,
 ): ServerState {
-  persistRoomSnapshot(room)
-  return upsertServerRoom(currentServerState, room)
+  roomRevisionRegistry.ensure(room.id)
+  const nextServerState = upsertServerRoom(currentServerState, room)
+  roomRevisionRegistry.bump(room.id)
+  return nextServerState
 }
 
-function updateServerRoomWithSnapshot(
-  currentServerState: ServerState,
-  roomId: string,
+function commitServerRoomWithSnapshot(
   room: ServerRoom,
+  currentServerState: ServerState = serverState,
 ): ServerState {
   persistRoomSnapshot(room)
-  return updateServerRoomInState(currentServerState, roomId, room)
+  return commitServerRoomReplacement(room, currentServerState)
+}
+
+function removeCommittedServerRoom(
+  roomId: string,
+  currentServerState: ServerState = serverState,
+): ServerState {
+  const nextRooms = { ...currentServerState.rooms }
+  delete nextRooms[roomId]
+  roomRevisionRegistry.remove(roomId)
+  return {
+    ...currentServerState,
+    rooms: nextRooms,
+  }
 }
 
 let serverState: ServerState = loadPersistedServerState()
+const roomRevisionRegistry = createRoomRevisionRegistry()
+
+for (const room of Object.values(serverState.rooms)) {
+  roomRevisionRegistry.ensure(room.id)
+}
+
 let matchmakingState: MatchmakingState = createInitialMatchmakingState()
 let matchmakingCapacityRetryAt = 0
 
@@ -530,7 +685,7 @@ function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
     }
   }
 
-  nextServerState = upsertServerRoomWithSnapshot(nextServerState, initializedRoom)
+  nextServerState = commitServerRoomWithSnapshot(initializedRoom, nextServerState)
   serverState = nextServerState
 
   for (const { connectionId, seat } of seatAssignments) {
@@ -576,6 +731,14 @@ function cancelPrivateRoomInviteTimer(inviteId: string): void {
   }
 }
 
+function clearPrivateRoomInviteTimers(): void {
+  for (const timer of privateRoomInviteTimers.values()) {
+    clearTimeout(timer)
+  }
+
+  privateRoomInviteTimers.clear()
+}
+
 function schedulePrivateRoomInviteExpiry(
   inviteId: string,
   toProfileId: string,
@@ -584,6 +747,11 @@ function schedulePrivateRoomInviteExpiry(
   const delay = Math.max(0, expiresAt - Date.now())
   const timer = setTimeout(() => {
     privateRoomInviteTimers.delete(inviteId)
+
+    if (isServerShuttingDown) {
+      return
+    }
+
     privateRoomsStore.removeInviteById(inviteId)
     const targetConn = Object.values(serverState.connections).find(
       (c) => c.profileId === toProfileId && c.status === 'connected',
@@ -696,6 +864,7 @@ function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): 
   if (room === null) {
     markRoomSnapshotRemoved(roomId)
     activeRoomRuntime.removeRoom(roomId)
+    roomRevisionRegistry.remove(roomId)
     return true
   }
 
@@ -703,13 +872,7 @@ function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): 
     return false
   }
 
-  const nextRooms = { ...serverState.rooms }
-  delete nextRooms[roomId]
-
-  serverState = {
-    ...serverState,
-    rooms: nextRooms,
-  }
+  serverState = removeCommittedServerRoom(roomId)
 
   cleanupTempBotsFromRoom(room)
   markRoomSnapshotRemoved(roomId)
@@ -719,7 +882,11 @@ function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): 
   return true
 }
 
-function tickRoomGameRuntimes(): void {
+async function tickRoomGameRuntimes(): Promise<void> {
+  if (isServerShuttingDown) {
+    return
+  }
+
   const trackedRoomIds = activeRoomRuntime.listTrackedRoomIds()
 
   if (trackedRoomIds.length === 0) {
@@ -728,24 +895,18 @@ function tickRoomGameRuntimes(): void {
 
   const now = Date.now()
   const roomsToTick: ServerRoom[] = []
-  let nextRooms: ServerState['rooms'] | null = null
 
   for (const roomId of trackedRoomIds) {
     const room = serverState.rooms[roomId] ?? null
 
     if (room === null) {
       activeRoomRuntime.removeRoom(roomId)
+      roomRevisionRegistry.remove(roomId)
       continue
     }
 
     if (!shouldKeepRoomAlive(room, now)) {
-      if (nextRooms === null) {
-        nextRooms = {
-          ...serverState.rooms,
-        }
-      }
-
-      delete nextRooms[roomId]
+      serverState = removeCommittedServerRoom(roomId)
       cleanupTempBotsFromRoom(room)
       markRoomSnapshotRemoved(roomId)
       activeRoomRuntime.removeRoom(roomId)
@@ -757,45 +918,103 @@ function tickRoomGameRuntimes(): void {
   }
 
   if (roomsToTick.length > 0) {
-    const { results } = activeRoomRuntime.tickRooms({
+    const batchResult = await gameWorkerTickOrchestrator.computeCandidates({
       now,
       rooms: roomsToTick,
     })
 
-    for (const tickResult of results) {
-      if (tickResult.kind === 'advanced') {
-        const nextRoom = tickResult.room
-        const roomId = tickResult.roomId
-
-        persistRoomSnapshot(nextRoom)
-        playerProgressStore.recordCompletedMatch(nextRoom)
-        missionStore.recordMatchCompletion(nextRoom)
-        const payoutResult = matchEconomyStore.payoutMatchWinners(nextRoom)
-
-        if (!payoutResult.ok) {
-          console.error(
-            `[match-economy] payout failed room=${nextRoom.id}: ${payoutResult.message}`,
-          )
-        }
-
-        matchEconomyStore.topUpDepletedBotWallets(nextRoom)
-
-        if (nextRooms === null) {
-          nextRooms = {
-            ...serverState.rooms,
-          }
-        }
-
-        nextRooms[roomId] = nextRoom
-        broadcastRoomSnapshots(nextRoom, socketRegistry)
-      }
+    if (isServerShuttingDown) {
+      return
     }
-  }
 
-  if (nextRooms !== null) {
-    serverState = {
-      ...serverState,
-      rooms: nextRooms,
+    if (batchResult.status === 'busy') {
+      return
+    }
+
+    if (batchResult.status === 'failed') {
+      logGameWorkerTickFailure(`Candidate batch failed: ${batchResult.message}`)
+      return
+    }
+
+    for (const tickResult of batchResult.results) {
+      if (tickResult.kind === 'unchanged' || tickResult.kind === 'stale') {
+        continue
+      }
+
+      if (tickResult.kind === 'not_assigned') {
+        continue
+      }
+
+      if (tickResult.kind === 'compute_failed') {
+        logGameWorkerTickFailure(
+          `Candidate compute failed room=${tickResult.roomId}: ${tickResult.message}`,
+        )
+        continue
+      }
+
+      const nextRoom = tickResult.room
+      const roomId = tickResult.roomId
+
+      if (nextRoom.id !== roomId) {
+        console.error(
+          `[game-worker-tick] Candidate room id mismatch room=${roomId} candidate=${nextRoom.id}`,
+        )
+        continue
+      }
+
+      const currentRoom = serverState.rooms[roomId] ?? null
+      if (currentRoom === null) {
+        continue
+      }
+
+      const currentRevision = roomRevisionRegistry.get(roomId)
+      if (currentRevision !== tickResult.baseRevision) {
+        continue
+      }
+
+      if (!persistRoomSnapshotStrict(nextRoom)) {
+        continue
+      }
+
+      if (shouldRunMatchCompletionSideEffects(currentRoom, nextRoom)) {
+        runMatchCompletionSideEffect(
+          'record-completed-match',
+          nextRoom.id,
+          () => {
+            playerProgressStore.recordCompletedMatch(nextRoom)
+          },
+        )
+        runMatchCompletionSideEffect(
+          'record-match-completion',
+          nextRoom.id,
+          () => {
+            missionStore.recordMatchCompletion(nextRoom)
+          },
+        )
+        runMatchCompletionSideEffect(
+          'payout-match-winners',
+          nextRoom.id,
+          () => {
+            const payoutResult = matchEconomyStore.payoutMatchWinners(nextRoom)
+
+            if (!payoutResult.ok) {
+              console.error(
+                `[match-economy] payout failed room=${nextRoom.id}: ${payoutResult.message}`,
+              )
+            }
+          },
+        )
+        runMatchCompletionSideEffect(
+          'top-up-depleted-bot-wallets',
+          nextRoom.id,
+          () => {
+            matchEconomyStore.topUpDepletedBotWallets(nextRoom)
+          },
+        )
+      }
+
+      serverState = commitServerRoomReplacement(nextRoom)
+      broadcastRoomSnapshots(nextRoom, socketRegistry)
     }
   }
 }
@@ -868,7 +1087,7 @@ function tryResumeRoomForConnection(
     reconnectedParticipant,
   )
 
-  serverState = upsertServerRoomWithSnapshot(serverState, nextRoom)
+  serverState = commitServerRoomWithSnapshot(nextRoom)
 
   const attachedConnection = attachConnectionToRoomSeat(
     connection,
@@ -1064,10 +1283,11 @@ function displaceProfileConnections(
 
     removeConnectionFromMatchmaking(conn.id)
     const result = handleDisconnect(serverState, conn.id)
-    serverState = result.serverState
+    serverState = result.room === null
+      ? result.serverState
+      : commitServerRoomWithSnapshot(result.room, result.serverState)
 
     if (result.room !== null) {
-      persistRoomSnapshot(result.room)
       broadcastRoomSnapshots(result.room, socketRegistry)
     }
   }
@@ -1080,6 +1300,16 @@ function isRoomAtMatchEndedPhase(room: ServerRoom): boolean {
     room.status === 'finished' ||
     (isRuntimeAuthoritativeState(authoritativeState) &&
       authoritativeState.phase === 'match-ended')
+  )
+}
+
+function shouldRunMatchCompletionSideEffects(
+  currentRoom: ServerRoom,
+  nextRoom: ServerRoom,
+): boolean {
+  return (
+    !isRoomAtMatchEndedPhase(currentRoom) &&
+    isRoomAtMatchEndedPhase(nextRoom)
   )
 }
 
@@ -1472,7 +1702,7 @@ function processMatchmakingUnsafe(): void {
       })
     }
 
-    let nextServerState = upsertServerRoomWithSnapshot(serverState, initializedRoom)
+    let nextServerState = commitServerRoomWithSnapshot(initializedRoom)
 
     for (const matchedEntry of result.group.matchedHumans) {
       const connection = getConnectionById(nextServerState, matchedEntry.connectionId)
@@ -2343,25 +2573,27 @@ async function handleProfileRequest(
     }
 
     // Обновяване на avatarUrl в активните стаи, където профилът участва
-    for (const room of Object.values(serverState.rooms)) {
-      for (const seat of SERVER_SEAT_ORDER) {
-        const p = room.seats[seat].participant
-        if (
-          p?.kind === 'human' &&
-          p.identity.profileId === session.profile.profileId &&
-          p.identity.avatarUrl !== avatarUrl
-        ) {
-          const updatedParticipant = {
-            ...p,
-            identity: { ...p.identity, avatarUrl },
-            publicProfile: p.publicProfile
-              ? { ...p.publicProfile, avatarUrl }
-              : p.publicProfile,
+    if (!isServerShuttingDown) {
+      for (const room of Object.values(serverState.rooms)) {
+        for (const seat of SERVER_SEAT_ORDER) {
+          const p = room.seats[seat].participant
+          if (
+            p?.kind === 'human' &&
+            p.identity.profileId === session.profile.profileId &&
+            p.identity.avatarUrl !== avatarUrl
+          ) {
+            const updatedParticipant = {
+              ...p,
+              identity: { ...p.identity, avatarUrl },
+              publicProfile: p.publicProfile
+                ? { ...p.publicProfile, avatarUrl }
+                : p.publicProfile,
+            }
+            const nextRoom = updateHumanParticipantInRoom(room, seat, updatedParticipant)
+            serverState = commitServerRoomWithSnapshot(nextRoom)
+            broadcastRoomSnapshots(nextRoom, socketRegistry)
+            break
           }
-          const nextRoom = updateHumanParticipantInRoom(room, seat, updatedParticipant)
-          serverState = updateServerRoomWithSnapshot(serverState, room.id, nextRoom)
-          broadcastRoomSnapshots(nextRoom, socketRegistry)
-          break
         }
       }
     }
@@ -4305,6 +4537,8 @@ async function handleHttpRequest(
 
   if (requestUrl.pathname === '/health') {
     const gameRuntimeHealth = activeRoomRuntime.getHealth()
+    const tickHealth = gameWorkerTickOrchestrator.getHealth()
+    const lifecycleState = gameWorkerLifecycleClient?.getState() ?? 'failed'
 
     sendJsonResponse(res, 200, {
       ok: true,
@@ -4314,13 +4548,19 @@ async function handleHttpRequest(
         queuedPlayersByStake: getQueueCountsByStake(),
       },
       gameRuntime: gameRuntimeHealth,
+      gameWorkerTick: {
+        mode: tickHealth.mode,
+        inFlight: tickHealth.inFlight,
+        isShuttingDown: tickHealth.isShuttingDown,
+        trackedRevisionRooms: roomRevisionRegistry.getTrackedRoomCount(),
+      },
       gameWorkerLifecycle: {
-        ok: gameWorkerLifecycleClient.getState() === 'ready',
-        state: gameWorkerLifecycleClient.getState(),
-        workerId: startupWorkerHealth.workerId,
+        ok: lifecycleState === 'ready',
+        state: lifecycleState,
+        workerId: startupWorkerHealth?.workerId ?? null,
         startupPingMs: startupWorkerPingMs,
-        startedAt: startupWorkerHealth.startedAt,
-        activeRooms: startupWorkerHealth.activeRooms,
+        startedAt: startupWorkerHealth?.startedAt ?? null,
+        activeRooms: startupWorkerHealth?.activeRooms ?? null,
       },
       roomShadowSync: roomShadowSynchronizer?.getHealth() ?? null,
     })
@@ -4467,6 +4707,11 @@ const wsServer = new WebSocketServer({
 })
 
 wsServer.on('connection', (socket, request) => {
+  if (isServerShuttingDown) {
+    socket.close()
+    return
+  }
+
   const authSession = authStore.getSession(
     getSessionTokenFromCookieHeader(request.headers.cookie),
   )
@@ -4548,6 +4793,10 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (isServerShuttingDown && isShutdownGuardedClientMessage(message)) {
+        return
+      }
+
       if (message.type === 'ping') {
         sendJsonMessage(socket, {
           type: 'pong',
@@ -4612,7 +4861,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        serverState = upsertServerRoomWithSnapshot(serverState, result.room)
+        serverState = commitServerRoomWithSnapshot(result.room)
         activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
         return
@@ -4669,7 +4918,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        serverState = upsertServerRoomWithSnapshot(serverState, result.room)
+        serverState = commitServerRoomWithSnapshot(result.room)
         activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
         return
@@ -4727,7 +4976,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        serverState = upsertServerRoomWithSnapshot(serverState, result.room)
+        serverState = commitServerRoomWithSnapshot(result.room)
         activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
         return
@@ -4783,7 +5032,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        serverState = upsertServerRoomWithSnapshot(serverState, result.room)
+        serverState = commitServerRoomWithSnapshot(result.room)
         activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
         return
@@ -4915,7 +5164,7 @@ wsServer.on('connection', (socket, request) => {
               console.error(`[match-economy] replay bot stake collection failed room=${restartedRoom.id}: ${botReplayStakeResult.message}`)
             }
           }
-          serverState = upsertServerRoomWithSnapshot(serverState, restartedRoom)
+          serverState = commitServerRoomWithSnapshot(restartedRoom)
           activeRoomRuntime.ensureRoom(restartedRoom)
           broadcastRoomSnapshots(restartedRoom, socketRegistry)
         }
@@ -4924,7 +5173,7 @@ wsServer.on('connection', (socket, request) => {
           applyReplayRestart(replayRoom)
         } else {
           const votedRoom: ServerRoom = { ...replayRoom, replayVotes: updatedVotes }
-          serverState = upsertServerRoom(serverState, votedRoom)
+          serverState = commitServerRoomReplacement(votedRoom)
           broadcastRoomSnapshots(votedRoom, socketRegistry)
 
           // Ако това е първото гласуване от човек — ботовете гласуват автоматично по 1 сек.
@@ -4937,6 +5186,8 @@ wsServer.on('connection', (socket, request) => {
             )
             botSeats.forEach((botSeat, index) => {
               setTimeout(() => {
+                if (isServerShuttingDown) return
+
                 const latestRoom = serverState.rooms[message.roomId] ?? null
                 if (!latestRoom) return
                 const latestAuth = latestRoom.game.authoritativeState
@@ -4956,7 +5207,7 @@ wsServer.on('connection', (socket, request) => {
                     ...latestRoom,
                     leaveVotes: [...(latestRoom.leaveVotes ?? []), botSeat],
                   }
-                  serverState = upsertServerRoom(serverState, botLeaveRoom)
+                  serverState = commitServerRoomReplacement(botLeaveRoom)
                   broadcastRoomSnapshots(botLeaveRoom, socketRegistry)
                   return
                 }
@@ -4967,7 +5218,7 @@ wsServer.on('connection', (socket, request) => {
                   applyReplayRestart(latestRoom)
                 } else {
                   const botVotedRoom: ServerRoom = { ...latestRoom, replayVotes: botVotes }
-                  serverState = upsertServerRoom(serverState, botVotedRoom)
+                  serverState = commitServerRoomReplacement(botVotedRoom)
                   broadcastRoomSnapshots(botVotedRoom, socketRegistry)
                 }
               }, (index + 1) * 1000)
@@ -4993,7 +5244,7 @@ wsServer.on('connection', (socket, request) => {
                 ...leaveRoom,
                 leaveVotes: [...currentLeaveVotes, leaveSeat],
               }
-              serverState = upsertServerRoom(serverState, updatedLeaveRoom)
+              serverState = commitServerRoomReplacement(updatedLeaveRoom)
               broadcastRoomSnapshots(updatedLeaveRoom, socketRegistry)
             }
           }
@@ -5433,7 +5684,7 @@ wsServer.on('connection', (socket, request) => {
           connection.id,
         )
 
-        serverState = updateServerRoomWithSnapshot(serverState, room.id, nextRoom)
+        serverState = commitServerRoomWithSnapshot(nextRoom)
         serverState = updateServerConnectionInState(
           serverState,
           connection.id,
@@ -5493,7 +5744,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        serverState = upsertServerRoomWithSnapshot(result.serverState, initializedRoom)
+        serverState = commitServerRoomWithSnapshot(initializedRoom, result.serverState)
 
         sendJsonMessage(socket, {
           type: 'room_created',
@@ -5534,7 +5785,7 @@ wsServer.on('connection', (socket, request) => {
 
         const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
 
-        serverState = upsertServerRoomWithSnapshot(result.serverState, initializedRoom)
+        serverState = commitServerRoomWithSnapshot(initializedRoom, result.serverState)
         activeRoomRuntime.ensureRoom(initializedRoom)
 
         sendJsonMessage(socket, {
@@ -5850,25 +6101,37 @@ wsServer.on('connection', (socket, request) => {
 
   socket.on('close', () => {
     try {
+      if (isServerShuttingDown) {
+        socketRegistry.delete(connection.id)
+        return
+      }
+
       removeConnectionFromMatchmaking(connection.id)
       privateRoomsStore.removeConnection(connection.id)
 
       const result = handleDisconnect(serverState, connection.id)
+      const disconnectState = result.serverState
 
-      serverState = result.serverState
       socketRegistry.delete(connection.id)
 
-      let roomWasRemoved = false
-
-      if (result.room !== null) {
-        roomWasRemoved = cleanupInactiveRoomIfNeeded(result.room.id)
+      if (result.room === null) {
+        serverState = disconnectState
+        console.log(`[ws] client disconnected: ${connection.id}`)
+        return
       }
 
-      if (result.room !== null && !roomWasRemoved) {
-        persistRoomSnapshot(result.room)
-        broadcastRoomSnapshots(result.room, socketRegistry)
+      if (!shouldKeepRoomAlive(result.room)) {
+        serverState = removeCommittedServerRoom(result.room.id, disconnectState)
+        cleanupTempBotsFromRoom(result.room)
+        markRoomSnapshotRemoved(result.room.id)
+        activeRoomRuntime.removeRoom(result.room.id)
+        console.log(`[room-cleanup] removed inactive room=${result.room.id}`)
+        console.log(`[ws] client disconnected: ${connection.id}`)
+        return
       }
 
+      serverState = commitServerRoomWithSnapshot(result.room, disconnectState)
+      broadcastRoomSnapshots(result.room, socketRegistry)
       console.log(`[ws] client disconnected: ${connection.id}`)
     } catch (error) {
       socketRegistry.delete(connection.id)
@@ -5883,9 +6146,11 @@ wsServer.on('connection', (socket, request) => {
 
 // ─── Game worker lifecycle ────────────────────────────────────────────────────
 
-let gameWorkerLifecycleClient: GameWorkerLifecycleClient
-let startupWorkerPingMs: number
-let startupWorkerHealth: GameWorkerLifecycleHealth
+let gameWorkerLifecycleClient: GameWorkerLifecycleClient | null = null
+let startupWorkerPingMs: number | null = null
+let startupWorkerHealth: GameWorkerLifecycleHealth | null = null
+let gameWorkerTickClient: GameWorkerTickClient | null = null
+let gameWorkerTickOrchestrator: GameWorkerTickOrchestrator
 
 try {
   const workerEntryUrl = await resolveGameWorkerEntryUrl()
@@ -5929,6 +6194,24 @@ try {
     client: gameWorkerLifecycleClient,
   })
 
+  if (gameWorkerTickMode === 'worker-candidate') {
+    gameWorkerTickClient = createGameWorkerTickClient({
+      endpoint: gameWorkerLifecycleClient.getMessageEndpoint(),
+    })
+
+    gameWorkerTickOrchestrator = createGameWorkerTickOrchestrator({
+      mode: 'worker-candidate',
+      revisionRegistry: roomRevisionRegistry,
+      tickClient: gameWorkerTickClient,
+    })
+  } else {
+    gameWorkerTickOrchestrator = createGameWorkerTickOrchestrator({
+      mode: 'in-process',
+      revisionRegistry: roomRevisionRegistry,
+      syncTickTarget: activeRoomRuntime,
+    })
+  }
+
   const restoredRoomIds = activeRoomRuntime.listTrackedRoomIds()
 
   for (const roomId of restoredRoomIds) {
@@ -5938,25 +6221,77 @@ try {
   console.log(
     `[room-shadow-sync] created seededRooms=${restoredRoomIds.length}`,
   )
+  console.log(`[game-worker-tick] mode=${gameWorkerTickMode}`)
 } catch (error) {
   console.error('[startup] Game worker lifecycle failed:', error)
+  if (gameWorkerTickClient !== null) {
+    try {
+      await gameWorkerTickClient.shutdown()
+    } catch (shutdownError) {
+      console.error('[startup] Game worker tick client cleanup failed:', shutdownError)
+    }
+  }
+  if (roomShadowSynchronizer !== null) {
+    try {
+      await roomShadowSynchronizer.shutdown()
+    } catch (shutdownError) {
+      console.error('[startup] Room shadow synchronizer cleanup failed:', shutdownError)
+    }
+  }
+  if (gameWorkerLifecycleClient !== null) {
+    try {
+      await gameWorkerLifecycleClient.shutdown()
+    } catch (shutdownError) {
+      console.error('[startup] Game worker lifecycle cleanup failed:', shutdownError)
+    }
+  }
   closeActiveRoomSnapshotStore()
   throw error
 }
 
 // ─── Matchmaking and game tick intervals ──────────────────────────────────────
 
-setInterval(() => {
+const matchmakingTickInterval = setInterval(() => {
+  if (isServerShuttingDown) {
+    return
+  }
+
   processMatchmaking()
 }, MATCHMAKING_TICK_MS)
 
-setInterval(() => {
-  try {
-    tickRoomGameRuntimes()
-  } catch (error) {
-    console.error('[game-runtime] tick error', error)
+const gameRuntimeTickInterval = setInterval(() => {
+  if (isServerShuttingDown) {
+    return
   }
+
+  void tickRoomGameRuntimes().catch((error) => {
+    const safeErrorMessage =
+      error instanceof Error ? error.message : String(error)
+    console.error('[game-worker-tick] Tick loop failed.', safeErrorMessage)
+  })
 }, GAME_RUNTIME_TICK_MS)
+
+function clearMutationTimersForShutdown(): void {
+  clearInterval(gameRuntimeTickInterval)
+  clearInterval(matchmakingTickInterval)
+
+  if (catalogBotRefillInterval !== null) {
+    clearInterval(catalogBotRefillInterval)
+    catalogBotRefillInterval = null
+  }
+
+  if (supportCleanupInterval !== null) {
+    clearInterval(supportCleanupInterval)
+    supportCleanupInterval = null
+  }
+
+  if (missionRotationTimeout !== null) {
+    clearTimeout(missionRotationTimeout)
+    missionRotationTimeout = null
+  }
+
+  clearPrivateRoomInviteTimers()
+}
 
 function closeActiveRoomSnapshotStore(): boolean {
   let allClosedSuccessfully = true
@@ -5999,6 +6334,47 @@ function shutdownServer(signal: NodeJS.Signals): Promise<void> {
     console.log(`[shutdown] signal=${signal}`)
 
     let exitCode = 0
+    isServerShuttingDown = true
+
+    try {
+      wsServer.close((error) => {
+        if (error) {
+          console.error('[shutdown] WebSocket server close error:', error)
+        }
+      })
+    } catch (error) {
+      console.error('[shutdown] WebSocket server close error:', error)
+      exitCode = 1
+    }
+
+    try {
+      httpServer.close((error) => {
+        if (error) {
+          console.error('[shutdown] HTTP server close error:', error)
+        }
+      })
+    } catch (error) {
+      console.error('[shutdown] HTTP server close error:', error)
+      exitCode = 1
+    }
+
+    clearMutationTimersForShutdown()
+
+    try {
+      await gameWorkerTickOrchestrator.shutdown()
+    } catch (error) {
+      console.error('[shutdown] Game worker tick orchestrator shutdown error:', error)
+      exitCode = 1
+    }
+
+    if (gameWorkerTickClient !== null) {
+      try {
+        await gameWorkerTickClient.shutdown()
+      } catch (error) {
+        console.error('[shutdown] Game worker tick client shutdown error:', error)
+        exitCode = 1
+      }
+    }
 
     if (roomShadowSynchronizer !== null) {
       try {
@@ -6009,20 +6385,22 @@ function shutdownServer(signal: NodeJS.Signals): Promise<void> {
       }
     }
 
-    try {
-      await gameWorkerLifecycleClient.shutdown()
+    if (gameWorkerLifecycleClient !== null) {
+      try {
+        await gameWorkerLifecycleClient.shutdown()
 
-      const finalState = gameWorkerLifecycleClient.getState()
+        const finalState = gameWorkerLifecycleClient.getState()
 
-      if (finalState !== 'stopped') {
-        console.error(
-          `[shutdown] Game worker final state expected=stopped got=${finalState}`,
-        )
+        if (finalState !== 'stopped') {
+          console.error(
+            `[shutdown] Game worker final state expected=stopped got=${finalState}`,
+          )
+          exitCode = 1
+        }
+      } catch (error) {
+        console.error('[shutdown] Game worker shutdown error:', error)
         exitCode = 1
       }
-    } catch (error) {
-      console.error('[shutdown] Game worker shutdown error:', error)
-      exitCode = 1
     }
 
     const storesClosedSuccessfully = closeActiveRoomSnapshotStore()
