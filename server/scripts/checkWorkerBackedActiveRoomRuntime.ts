@@ -816,6 +816,439 @@ function makeFakeDelegate(
   }
 }
 
+// ─── Shadow synchronizer helpers ─────────────────────────────────────────────
+
+type FakeSynchronizerConfig = {
+  throwOnDesire?: boolean
+  throwOnForget?: boolean
+}
+
+type FakeSynchronizer = {
+  desireCalls: string[]
+  forgetCalls: string[]
+  desireRoom(roomId: string): void
+  forgetRoom(roomId: string): void
+}
+
+function makeFakeSynchronizer(
+  config: FakeSynchronizerConfig = {},
+): FakeSynchronizer {
+  const desireCalls: string[] = []
+  const forgetCalls: string[] = []
+
+  return {
+    desireCalls,
+    forgetCalls,
+
+    desireRoom(roomId: string): void {
+      desireCalls.push(roomId)
+      if (config.throwOnDesire === true) {
+        throw new Error('desireRoom hook threw')
+      }
+    },
+
+    forgetRoom(roomId: string): void {
+      forgetCalls.push(roomId)
+      if (config.throwOnForget === true) {
+        throw new Error('forgetRoom hook threw')
+      }
+    },
+  }
+}
+
+// ─── L. Shadow synchronizer — successful ensure ───────────────────────────────
+
+{
+  const manager = createInProcessGameWorkerManager({
+    workerCount: 1,
+    maxRoomsPerWorker: 5,
+  })
+  const delegate = makeFakeDelegate()
+  const sync = makeFakeSynchronizer()
+  const runtime = createWorkerBackedActiveRoomRuntime({
+    workerManager: manager,
+    delegate,
+    roomShadowSynchronizer: sync,
+  })
+
+  const room = makeRoom('sync-ensure-1')
+  const result = runtime.ensureRoom(room)
+
+  assert.equal(result.ok, true, 'L1: ensure трябва да е success')
+  assert.equal(
+    sync.desireCalls.length,
+    1,
+    'L1: desireRoom трябва да е извикан точно веднъж',
+  )
+  assert.equal(
+    sync.desireCalls[0],
+    'sync-ensure-1',
+    'L1: desireRoom трябва да получи правилния roomId',
+  )
+  assert.equal(
+    sync.forgetCalls.length,
+    0,
+    'L1: forgetRoom не трябва да е извикан',
+  )
+}
+
+// ─── M. Shadow synchronizer — duplicate successful ensure ─────────────────────
+
+{
+  const manager = createInProcessGameWorkerManager({
+    workerCount: 1,
+    maxRoomsPerWorker: 5,
+  })
+  const delegate = makeFakeDelegate()
+  const sync = makeFakeSynchronizer()
+  const runtime = createWorkerBackedActiveRoomRuntime({
+    workerManager: manager,
+    delegate,
+    roomShadowSynchronizer: sync,
+  })
+
+  const room = makeRoom('sync-dup-ensure')
+  const r1 = runtime.ensureRoom(room)
+  const r2 = runtime.ensureRoom(room)
+
+  assert.equal(r1.ok, true, 'M: първи ensure трябва да е success')
+  assert.equal(r2.ok, true, 'M: втори ensure трябва да е success')
+  assert.equal(
+    sync.desireCalls.length,
+    2,
+    'M: desireRoom трябва да е извикан два пъти (manual retry семантика)',
+  )
+  assert.equal(
+    sync.desireCalls[0],
+    'sync-dup-ensure',
+    'M: първи desireRoom с правилен roomId',
+  )
+  assert.equal(
+    sync.desireCalls[1],
+    'sync-dup-ensure',
+    'M: втори desireRoom с правилен roomId',
+  )
+}
+
+// ─── N. Shadow synchronizer — no capacity ────────────────────────────────────
+
+{
+  const manager = createInProcessGameWorkerManager({
+    workerCount: 1,
+    maxRoomsPerWorker: 1,
+  })
+  const delegate = makeFakeDelegate()
+  const sync = makeFakeSynchronizer()
+  const runtime = createWorkerBackedActiveRoomRuntime({
+    workerManager: manager,
+    delegate,
+    roomShadowSynchronizer: sync,
+  })
+
+  runtime.ensureRoom(makeRoom('sync-cap-1'))
+  sync.desireCalls.length = 0
+
+  const result = runtime.ensureRoom(makeRoom('sync-cap-2'))
+
+  assert.equal(result.ok, false, 'N: трябва да върне failure')
+  if (!result.ok) {
+    assert.equal(result.reason, 'no_capacity', 'N: reason трябва да е no_capacity')
+  }
+  assert.equal(
+    sync.desireCalls.length,
+    0,
+    'N: desireRoom не трябва да е извикан при no_capacity',
+  )
+}
+
+// ─── O. Shadow synchronizer — delegate soft failure ──────────────────────────
+
+{
+  const manager = createInProcessGameWorkerManager({
+    workerCount: 1,
+    maxRoomsPerWorker: 5,
+  })
+  const delegate = makeFakeDelegate({ ensureFailure: true })
+  const sync = makeFakeSynchronizer()
+  const runtime = createWorkerBackedActiveRoomRuntime({
+    workerManager: manager,
+    delegate,
+    roomShadowSynchronizer: sync,
+  })
+
+  const result = runtime.ensureRoom(makeRoom('sync-delegate-fail'))
+
+  assert.equal(result.ok, false, 'O: трябва да върне failure')
+  assert.equal(
+    manager.getWorkerIdForRoom('sync-delegate-fail'),
+    null,
+    'O: assignment трябва да е rollback-нат',
+  )
+  assert.equal(
+    sync.desireCalls.length,
+    0,
+    'O: desireRoom не трябва да е извикан при delegate failure',
+  )
+}
+
+// ─── P. Shadow synchronizer — delegate throw ─────────────────────────────────
+
+{
+  const manager = createInProcessGameWorkerManager({
+    workerCount: 1,
+    maxRoomsPerWorker: 5,
+  })
+  const thrownError = new Error('delegate threw')
+  const delegate = makeFakeDelegate({ ensureThrow: thrownError })
+  const sync = makeFakeSynchronizer()
+  const runtime = createWorkerBackedActiveRoomRuntime({
+    workerManager: manager,
+    delegate,
+    roomShadowSynchronizer: sync,
+  })
+
+  assert.throws(
+    () => runtime.ensureRoom(makeRoom('sync-delegate-throw')),
+    (err) => err === thrownError,
+    'P: грешката трябва да се запази',
+  )
+  assert.equal(
+    manager.getWorkerIdForRoom('sync-delegate-throw'),
+    null,
+    'P: assignment трябва да е rollback-нат',
+  )
+  assert.equal(
+    sync.desireCalls.length,
+    0,
+    'P: desireRoom не трябва да е извикан при delegate throw',
+  )
+}
+
+// ─── Q. Shadow synchronizer — throwing desire hook ───────────────────────────
+
+{
+  const manager = createInProcessGameWorkerManager({
+    workerCount: 1,
+    maxRoomsPerWorker: 5,
+  })
+  const delegate = makeFakeDelegate()
+  const sync = makeFakeSynchronizer({ throwOnDesire: true })
+  const runtime = createWorkerBackedActiveRoomRuntime({
+    workerManager: manager,
+    delegate,
+    roomShadowSynchronizer: sync,
+  })
+
+  const room = makeRoom('sync-desire-throw')
+  let result: ReturnType<typeof runtime.ensureRoom>
+
+  assert.doesNotThrow(
+    () => { result = runtime.ensureRoom(room) },
+    'Q: ensureRoom не трябва да хвърля при throwing hook',
+  )
+  assert.equal(result!.ok, true, 'Q: ensureRoom трябва да е success въпреки throwing hook')
+  assert.equal(
+    manager.getWorkerIdForRoom('sync-desire-throw') !== null,
+    true,
+    'Q: worker assignment трябва да остане активен',
+  )
+  assert.equal(
+    delegate.hasRoom('sync-desire-throw'),
+    true,
+    'Q: delegate room трябва да остане активен',
+  )
+  assert.equal(
+    sync.desireCalls.length,
+    1,
+    'Q: desireRoom трябва да е бил извикан (и хвърлил)',
+  )
+}
+
+// ─── R. Shadow synchronizer — successful remove ──────────────────────────────
+
+{
+  const manager = createInProcessGameWorkerManager({
+    workerCount: 1,
+    maxRoomsPerWorker: 5,
+  })
+  const delegate = makeFakeDelegate()
+  const sync = makeFakeSynchronizer()
+  const runtime = createWorkerBackedActiveRoomRuntime({
+    workerManager: manager,
+    delegate,
+    roomShadowSynchronizer: sync,
+  })
+
+  const room = makeRoom('sync-remove-1')
+  runtime.ensureRoom(room)
+  sync.desireCalls.length = 0
+
+  runtime.removeRoom('sync-remove-1')
+
+  assert.equal(
+    delegate.hasRoom('sync-remove-1'),
+    false,
+    'R: delegate room трябва да е премахнат',
+  )
+  assert.equal(
+    manager.getWorkerIdForRoom('sync-remove-1'),
+    null,
+    'R: worker slot трябва да е освободен',
+  )
+  assert.equal(
+    sync.forgetCalls.length,
+    1,
+    'R: forgetRoom трябва да е извикан точно веднъж',
+  )
+  assert.equal(
+    sync.forgetCalls[0],
+    'sync-remove-1',
+    'R: forgetRoom трябва да получи правилния roomId',
+  )
+}
+
+// ─── S. Shadow synchronizer — duplicate remove ────────────────────────────────
+
+{
+  const manager = createInProcessGameWorkerManager({
+    workerCount: 1,
+    maxRoomsPerWorker: 5,
+  })
+  const delegate = makeFakeDelegate()
+  const sync = makeFakeSynchronizer()
+  const runtime = createWorkerBackedActiveRoomRuntime({
+    workerManager: manager,
+    delegate,
+    roomShadowSynchronizer: sync,
+  })
+
+  const room = makeRoom('sync-dup-remove')
+  runtime.ensureRoom(room)
+
+  assert.doesNotThrow(
+    () => { runtime.removeRoom('sync-dup-remove') },
+    'S: първи removeRoom не трябва да хвърля',
+  )
+  assert.doesNotThrow(
+    () => { runtime.removeRoom('sync-dup-remove') },
+    'S: втори removeRoom не трябва да хвърля',
+  )
+  assert.equal(
+    sync.forgetCalls.length,
+    2,
+    'S: forgetRoom трябва да е извикан два пъти (manual retry семантика)',
+  )
+  assert.equal(sync.forgetCalls[0], 'sync-dup-remove', 'S: първи forgetRoom с правилен roomId')
+  assert.equal(sync.forgetCalls[1], 'sync-dup-remove', 'S: втори forgetRoom с правилен roomId')
+}
+
+// ─── T. Shadow synchronizer — throwing forget hook ───────────────────────────
+
+{
+  const manager = createInProcessGameWorkerManager({
+    workerCount: 1,
+    maxRoomsPerWorker: 5,
+  })
+  const delegate = makeFakeDelegate()
+  const sync = makeFakeSynchronizer({ throwOnForget: true })
+  const runtime = createWorkerBackedActiveRoomRuntime({
+    workerManager: manager,
+    delegate,
+    roomShadowSynchronizer: sync,
+  })
+
+  const room = makeRoom('sync-forget-throw')
+  runtime.ensureRoom(room)
+
+  assert.doesNotThrow(
+    () => { runtime.removeRoom('sync-forget-throw') },
+    'T: removeRoom не трябва да хвърля заради throwing hook',
+  )
+  assert.equal(
+    delegate.hasRoom('sync-forget-throw'),
+    false,
+    'T: delegate cleanup трябва да е завършен',
+  )
+  assert.equal(
+    manager.getWorkerIdForRoom('sync-forget-throw'),
+    null,
+    'T: manager cleanup трябва да е завършен',
+  )
+  assert.equal(
+    sync.forgetCalls.length,
+    1,
+    'T: forgetRoom трябва да е бил извикан (и хвърлил)',
+  )
+}
+
+// ─── U. Undefined synchronizer — съществуващите тестове остават валидни ───────
+
+{
+  const manager = createInProcessGameWorkerManager({
+    workerCount: 1,
+    maxRoomsPerWorker: 5,
+  })
+  const delegate = makeFakeDelegate()
+  // Без roomShadowSynchronizer
+  const runtime = createWorkerBackedActiveRoomRuntime({
+    workerManager: manager,
+    delegate,
+  })
+
+  const room = makeRoom('no-sync-room')
+  const ensureResult = runtime.ensureRoom(room)
+  assert.equal(ensureResult.ok, true, 'U: ensure без synchronizer трябва да е success')
+  assert.equal(runtime.hasRoom('no-sync-room'), true, 'U: hasRoom трябва да е true')
+
+  assert.doesNotThrow(
+    () => { runtime.removeRoom('no-sync-room') },
+    'U: removeRoom без synchronizer не трябва да хвърля',
+  )
+  assert.equal(runtime.hasRoom('no-sync-room'), false, 'U: hasRoom трябва да е false след remove')
+}
+
+// ─── V. Unrelated methods — не извикват synchronizer ─────────────────────────
+
+{
+  const manager = createInProcessGameWorkerManager({
+    workerCount: 1,
+    maxRoomsPerWorker: 5,
+  })
+  const delegate = makeFakeDelegate()
+  const sync = makeFakeSynchronizer()
+  const runtime = createWorkerBackedActiveRoomRuntime({
+    workerManager: manager,
+    delegate,
+    roomShadowSynchronizer: sync,
+  })
+
+  const room = makeRoom('unrelated-room')
+  runtime.ensureRoom(room)
+  // Нулираме след ensure
+  sync.desireCalls.length = 0
+  sync.forgetCalls.length = 0
+
+  // tick
+  runtime.tickRooms({ now: 1000, rooms: [room] })
+  // hasRoom
+  runtime.hasRoom('unrelated-room')
+  // listTrackedRoomIds
+  runtime.listTrackedRoomIds()
+  // getHealth
+  runtime.getHealth()
+
+  assert.equal(
+    sync.desireCalls.length,
+    0,
+    'V: tick/hasRoom/list/health не трябва да извикват desireRoom',
+  )
+  assert.equal(
+    sync.forgetCalls.length,
+    0,
+    'V: tick/hasRoom/list/health не трябва да извикват forgetRoom',
+  )
+}
+
 // ─── Финал ───────────────────────────────────────────────────────────────────
 
 console.log('WorkerBackedActiveRoomRuntime checks passed.')

@@ -14,16 +14,39 @@ import type {
   TickRoomsResult,
 } from './activeRoomRuntime.js'
 import type { GameWorkerManager } from './gameWorkerManager.js'
+import type { RoomShadowSynchronizer } from './createRoomShadowSynchronizer.js'
+
+type RoomShadowNotificationTarget = Pick<
+  RoomShadowSynchronizer,
+  'desireRoom' | 'forgetRoom'
+>
 
 export type WorkerBackedActiveRoomRuntimeDependencies = {
   workerManager: GameWorkerManager
   delegate: ActiveRoomRuntime
+  roomShadowSynchronizer?: RoomShadowNotificationTarget
 }
 
 export function createWorkerBackedActiveRoomRuntime(
   dependencies: WorkerBackedActiveRoomRuntimeDependencies,
 ): ActiveRoomRuntime {
-  const { workerManager, delegate } = dependencies
+  const { workerManager, delegate, roomShadowSynchronizer } = dependencies
+
+  function notifyRoomDesired(roomId: string): void {
+    try {
+      roomShadowSynchronizer?.desireRoom(roomId)
+    } catch {
+      // Best-effort shadow notification.
+    }
+  }
+
+  function notifyRoomForgotten(roomId: string): void {
+    try {
+      roomShadowSynchronizer?.forgetRoom(roomId)
+    } catch {
+      // Best-effort shadow notification.
+    }
+  }
 
   return {
     ensureRoom(room: ServerRoom): EnsureRoomResult {
@@ -31,7 +54,11 @@ export function createWorkerBackedActiveRoomRuntime(
         workerManager.getWorkerIdForRoom(room.id)
 
       if (existingWorkerId !== null) {
-        return delegate.ensureRoom(room)
+        const existingResult = delegate.ensureRoom(room)
+        if (existingResult.ok) {
+          notifyRoomDesired(room.id)
+        }
+        return existingResult
       }
 
       const newWorkerId = workerManager.ensureRoom(room.id)
@@ -57,6 +84,8 @@ export function createWorkerBackedActiveRoomRuntime(
         return delegateResult
       }
 
+      notifyRoomDesired(room.id)
+
       return {
         ok: true,
       }
@@ -65,6 +94,7 @@ export function createWorkerBackedActiveRoomRuntime(
     removeRoom(roomId: string): void {
       delegate.removeRoom(roomId)
       workerManager.removeRoom(roomId)
+      notifyRoomForgotten(roomId)
     },
 
     hasRoom(roomId: string): boolean {
