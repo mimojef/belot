@@ -6,6 +6,7 @@ import {
   type GameWorkerAssignRoomAckMessage,
   type GameWorkerReleaseRoomAckMessage,
 } from './workerProtocol.js'
+import type { GameWorkerTickMessageEndpoint } from './createGameWorkerTickClient.js'
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -39,6 +40,7 @@ export type GameWorkerLifecycleClient = {
   releaseRoom(roomId: string): Promise<GameWorkerReleaseRoomAckMessage>
   shutdown(): Promise<void>
   getState(): GameWorkerLifecycleState
+  getMessageEndpoint(): GameWorkerTickMessageEndpoint
 }
 
 // ─── Internal types ───────────────────────────────────────────────────────────
@@ -726,6 +728,22 @@ export function createGameWorkerLifecycleClient(
     return shutdownPromise
   }
 
+  // ─── getMessageEndpoint() ─────────────────────────────────────────────────────
+
+  function getMessageEndpoint(): GameWorkerTickMessageEndpoint {
+    if (state !== 'ready') {
+      throw new Error(
+        `[lifecycle-client] getMessageEndpoint() requires state=ready, got state=${state}`,
+      )
+    }
+    if (worker === null) {
+      throw new Error(
+        '[lifecycle-client] getMessageEndpoint() called with state=ready but worker is null (internal invariant violated)',
+      )
+    }
+    return worker
+  }
+
   // ─── Public interface ─────────────────────────────────────────────────────────
 
   return {
@@ -738,5 +756,6 @@ export function createGameWorkerLifecycleClient(
     getState(): GameWorkerLifecycleState {
       return state
     },
+    getMessageEndpoint,
   }
 }

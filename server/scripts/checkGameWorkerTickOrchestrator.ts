@@ -14,6 +14,7 @@ import { createRoomRevisionRegistry } from '../src/game/createRoomRevisionRegist
 import {
   createGameWorkerTickOrchestrator,
   type GameWorkerTickOrchestratorConfig,
+  type GameWorkerTickOrchestratorHealth,
 } from '../src/game/createGameWorkerTickOrchestrator.js'
 import { createGameWorkerTickClient } from '../src/game/createGameWorkerTickClient.js'
 import type { GameWorkerTickMessageEndpoint } from '../src/game/createGameWorkerTickClient.js'
@@ -334,6 +335,44 @@ await check('R10: bump() on unregistered room throws', () => {
 console.log(
   '  ℹ R11: overflow guard confirmed via code review — no public API for artificial overflow',
 )
+
+// ─── Registry getTrackedRoomCount ────────────────────────────────────────────
+
+await check('RC1: getTrackedRoomCount() initial === 0', () => {
+  const reg = createRoomRevisionRegistry()
+  assert.strictEqual(reg.getTrackedRoomCount(), 0)
+})
+
+await check('RC2: getTrackedRoomCount() after two ensure() calls === 2', () => {
+  const reg = createRoomRevisionRegistry()
+  reg.ensure('rc2-a')
+  reg.ensure('rc2-b')
+  assert.strictEqual(reg.getTrackedRoomCount(), 2)
+})
+
+await check('RC3: repeated ensure() does not increase count', () => {
+  const reg = createRoomRevisionRegistry()
+  reg.ensure('rc3')
+  reg.ensure('rc3')
+  reg.ensure('rc3')
+  assert.strictEqual(reg.getTrackedRoomCount(), 1)
+})
+
+await check('RC4: getTrackedRoomCount() after remove() === 1', () => {
+  const reg = createRoomRevisionRegistry()
+  reg.ensure('rc4-a')
+  reg.ensure('rc4-b')
+  reg.remove('rc4-a')
+  assert.strictEqual(reg.getTrackedRoomCount(), 1)
+})
+
+await check('RC5: bump() does not change getTrackedRoomCount()', () => {
+  const reg = createRoomRevisionRegistry()
+  reg.ensure('rc5')
+  reg.bump('rc5')
+  reg.bump('rc5')
+  assert.strictEqual(reg.getTrackedRoomCount(), 1)
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 2: Fake tick client tests
@@ -829,6 +868,125 @@ await check('F19: invalid now (NaN) → failed', async () => {
   assert.strictEqual(result.status, 'failed')
   if (result.status === 'failed') {
     assert.ok(result.message.includes('now'))
+  }
+  await orch.shutdown()
+})
+
+// ─── Orchestrator health (worker-candidate mode) ──────────────────────────────
+
+console.log('\n═══ Section 2b: Orchestrator health ═══')
+
+await check('OH1: initial health — correct mode, inFlight=false, isShuttingDown=false (worker-candidate)', () => {
+  const reg = createRoomRevisionRegistry()
+  const orch = createGameWorkerTickOrchestrator({
+    mode: 'worker-candidate',
+    revisionRegistry: reg,
+    tickClient: makeFakeTickClient(),
+  })
+  const h = orch.getHealth()
+  assert.strictEqual(h.mode, 'worker-candidate')
+  assert.strictEqual(h.inFlight, false)
+  assert.strictEqual(h.isShuttingDown, false)
+})
+
+await check('OH2: initial health — correct mode, inFlight=false, isShuttingDown=false (in-process)', () => {
+  const reg = createRoomRevisionRegistry()
+  const orch = createGameWorkerTickOrchestrator({
+    mode: 'in-process',
+    revisionRegistry: reg,
+    syncTickTarget: makeFakeSyncTarget(),
+  })
+  const h = orch.getHealth()
+  assert.strictEqual(h.mode, 'in-process')
+  assert.strictEqual(h.inFlight, false)
+  assert.strictEqual(h.isShuttingDown, false)
+})
+
+await check('OH3: inFlight=true while batch pending', async () => {
+  const reg = createRoomRevisionRegistry()
+  reg.ensure('oh3')
+
+  let resolveCompute!: () => void
+  const orch = createGameWorkerTickOrchestrator({
+    mode: 'worker-candidate',
+    revisionRegistry: reg,
+    tickClient: {
+      computeTickRooms(rooms, _now) {
+        return new Promise<GameWorkerTickRoomResult[]>((resolve) => {
+          resolveCompute = () => resolve(rooms.map((r) => ({
+            roomId: r.roomId,
+            baseRevision: r.baseRevision,
+            result: 'unchanged' as const,
+          })))
+        })
+      },
+    },
+  })
+
+  const batchPromise = orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('oh3')] })
+
+  // At this point the batch is pending — inFlight should be true
+  assert.strictEqual(orch.getHealth().inFlight, true)
+  assert.strictEqual(orch.getHealth().isShuttingDown, false)
+
+  resolveCompute()
+  await batchPromise
+
+  assert.strictEqual(orch.getHealth().inFlight, false)
+  await orch.shutdown()
+})
+
+await check('OH4: inFlight=false after success', async () => {
+  const reg = createRoomRevisionRegistry()
+  reg.ensure('oh4')
+  const orch = createGameWorkerTickOrchestrator({
+    mode: 'worker-candidate',
+    revisionRegistry: reg,
+    tickClient: makeFakeTickClient(),
+  })
+  await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('oh4')] })
+  assert.strictEqual(orch.getHealth().inFlight, false)
+  await orch.shutdown()
+})
+
+await check('OH5: inFlight=false after failed request', async () => {
+  const reg = createRoomRevisionRegistry()
+  reg.ensure('oh5')
+  const orch = createGameWorkerTickOrchestrator({
+    mode: 'worker-candidate',
+    revisionRegistry: reg,
+    tickClient: makeFakeTickClient({ throwOnCompute: true }),
+  })
+  await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('oh5')] })
+  assert.strictEqual(orch.getHealth().inFlight, false)
+  await orch.shutdown()
+})
+
+await check('OH6: isShuttingDown=true after shutdown()', async () => {
+  const reg = createRoomRevisionRegistry()
+  const orch = createGameWorkerTickOrchestrator({
+    mode: 'worker-candidate',
+    revisionRegistry: reg,
+    tickClient: makeFakeTickClient(),
+  })
+  void orch.shutdown()
+  assert.strictEqual(orch.getHealth().isShuttingDown, true)
+  await orch.shutdown()
+})
+
+await check('OH7: repeated getHealth() has no side effects', async () => {
+  const reg = createRoomRevisionRegistry()
+  reg.ensure('oh7')
+  const orch = createGameWorkerTickOrchestrator({
+    mode: 'worker-candidate',
+    revisionRegistry: reg,
+    tickClient: makeFakeTickClient(),
+  })
+  for (let i = 0; i < 5; i++) {
+    const h: GameWorkerTickOrchestratorHealth = orch.getHealth()
+    assert.strictEqual(h.mode, 'worker-candidate')
+    assert.strictEqual(h.inFlight, false)
+    assert.strictEqual(h.isShuttingDown, false)
   }
   await orch.shutdown()
 })

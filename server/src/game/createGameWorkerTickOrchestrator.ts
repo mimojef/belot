@@ -74,11 +74,19 @@ export type GameWorkerTickOrchestratorConfig =
 
 // ─── Public interface ─────────────────────────────────────────────────────────
 
+export type GameWorkerTickOrchestratorHealth = {
+  mode: 'worker-candidate' | 'in-process'
+  inFlight: boolean
+  isShuttingDown: boolean
+}
+
 export type GameWorkerTickOrchestrator = {
   computeCandidates(input: {
     now: number
     rooms: ServerRoom[]
   }): Promise<GameWorkerTickBatchResult>
+
+  getHealth(): GameWorkerTickOrchestratorHealth
 
   shutdown(): Promise<void>
 }
@@ -304,10 +312,21 @@ export function createGameWorkerTickOrchestrator(
     return shutdownPromise
   }
 
+  // ─── getHealth ─────────────────────────────────────────────────────────────
+
+  function getHealth(): GameWorkerTickOrchestratorHealth {
+    return {
+      mode: config.mode,
+      inFlight: inFlightBatch !== null,
+      isShuttingDown,
+    }
+  }
+
   // ─── Public interface ──────────────────────────────────────────────────────
 
   return {
     computeCandidates,
+    getHealth,
     shutdown,
   }
 }

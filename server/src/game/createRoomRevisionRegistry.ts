@@ -6,6 +6,7 @@ export type RoomRevisionRegistry = {
   bump(roomId: string): number
   remove(roomId: string): void
   has(roomId: string): boolean
+  getTrackedRoomCount(): number
 }
 
 // ─── Factory ──────────────────────────────────────────────────────────────────
@@ -62,6 +63,10 @@ export function createRoomRevisionRegistry(): RoomRevisionRegistry {
     has(roomId: string): boolean {
       validateRoomId(roomId)
       return revisions.has(roomId)
+    },
+
+    getTrackedRoomCount(): number {
+      return revisions.size
     },
   }
 }
