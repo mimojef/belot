@@ -101,6 +101,10 @@ import {
   type GameWorkerLifecycleClient,
   type GameWorkerLifecycleHealth,
 } from './game/createGameWorkerLifecycleClient.js'
+import {
+  createRoomShadowSynchronizer,
+  type RoomShadowSynchronizer,
+} from './game/createRoomShadowSynchronizer.js'
 import { resolveGameWorkerEntryUrl } from './game/resolveGameWorkerEntryUrl.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
 import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
@@ -377,10 +381,22 @@ const gameWorkerManager =
     maxRoomsPerWorker: 1000,
   })
 
+let roomShadowSynchronizer: RoomShadowSynchronizer | null = null
+
+const roomShadowNotificationTarget = {
+  desireRoom(roomId: string): void {
+    roomShadowSynchronizer?.desireRoom(roomId)
+  },
+  forgetRoom(roomId: string): void {
+    roomShadowSynchronizer?.forgetRoom(roomId)
+  },
+}
+
 const activeRoomRuntime =
   createWorkerBackedActiveRoomRuntime({
     workerManager: gameWorkerManager,
     delegate: inProcessActiveRoomRuntime,
+    roomShadowSynchronizer: roomShadowNotificationTarget,
   })
 
 function buildPrivateRoomSnapshot(room: PrivateRoom): PrivateRoomSnapshot {
@@ -4306,6 +4322,7 @@ async function handleHttpRequest(
         startedAt: startupWorkerHealth.startedAt,
         activeRooms: startupWorkerHealth.activeRooms,
       },
+      roomShadowSync: roomShadowSynchronizer?.getHealth() ?? null,
     })
     return
   }
@@ -5907,6 +5924,20 @@ try {
   console.log(
     `[game-worker] workerId=${startupWorkerHealth.workerId} state=${workerState} ping=${startupWorkerPingMs}ms activeRooms=${startupWorkerHealth.activeRooms}`,
   )
+
+  roomShadowSynchronizer = createRoomShadowSynchronizer({
+    client: gameWorkerLifecycleClient,
+  })
+
+  const restoredRoomIds = activeRoomRuntime.listTrackedRoomIds()
+
+  for (const roomId of restoredRoomIds) {
+    roomShadowSynchronizer.desireRoom(roomId)
+  }
+
+  console.log(
+    `[room-shadow-sync] created seededRooms=${restoredRoomIds.length}`,
+  )
 } catch (error) {
   console.error('[startup] Game worker lifecycle failed:', error)
   closeActiveRoomSnapshotStore()
@@ -5968,6 +5999,15 @@ function shutdownServer(signal: NodeJS.Signals): Promise<void> {
     console.log(`[shutdown] signal=${signal}`)
 
     let exitCode = 0
+
+    if (roomShadowSynchronizer !== null) {
+      try {
+        await roomShadowSynchronizer.shutdown()
+      } catch (error) {
+        console.error('[shutdown] Room shadow synchronizer shutdown error:', error)
+        exitCode = 1
+      }
+    }
 
     try {
       await gameWorkerLifecycleClient.shutdown()
