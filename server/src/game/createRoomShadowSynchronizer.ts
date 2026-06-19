@@ -23,6 +23,7 @@ export type RoomShadowSynchronizerHealth = {
 export type RoomShadowSynchronizer = {
   desireRoom(roomId: string): void
   forgetRoom(roomId: string): void
+  forgetRoomAndWait(roomId: string): Promise<void>
   getHealth(): RoomShadowSynchronizerHealth
   shutdown(): Promise<void>
 }
@@ -30,6 +31,12 @@ export type RoomShadowSynchronizer = {
 export type RoomShadowSynchronizerConfig = {
   client: RoomShadowWorkerClient
   shutdownTimeoutMs?: number
+}
+
+type ReleaseWaiter = {
+  roomId: string
+  resolve: () => void
+  reject: (error: Error) => void
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -80,10 +87,35 @@ export function createRoomShadowSynchronizer(
 
   const pendingByRoomId = new Map<string, 'assign' | 'release'>()
   const inFlightPromises = new Set<Promise<void>>()
+  const releaseWaiters = new Set<ReleaseWaiter>()
 
   let lastError: Error | null = null
   let isShuttingDown = false
   let shutdownPromise: Promise<void> | null = null
+
+  function resolveReleaseWaiters(roomId: string): void {
+    for (const waiter of [...releaseWaiters]) {
+      if (waiter.roomId === roomId) {
+        releaseWaiters.delete(waiter)
+        waiter.resolve()
+      }
+    }
+  }
+
+  function rejectReleaseWaiters(roomId: string, error: Error): void {
+    for (const waiter of [...releaseWaiters]) {
+      if (waiter.roomId === roomId) {
+        releaseWaiters.delete(waiter)
+        waiter.reject(error)
+      }
+    }
+  }
+
+  function settleReleasedIfConfirmed(roomId: string): void {
+    if (!confirmedRoomIds.has(roomId) && !pendingByRoomId.has(roomId)) {
+      resolveReleaseWaiters(roomId)
+    }
+  }
 
   // ─── reconcileRoom ───────────────────────────────────────────────────────────
 
@@ -100,9 +132,13 @@ export function createRoomShadowSynchronizer(
 
       // [4] Worker трябва да е ready
       if (workerState !== 'ready') {
-        lastError = new Error(
+        const error = new Error(
           `[room-shadow-sync] Cannot reconcile room=${roomId}: worker state=${workerState}`,
         )
+        lastError = error
+        if (!desiredRoomIds.has(roomId) && confirmedRoomIds.has(roomId)) {
+          rejectReleaseWaiters(roomId, error)
+        }
         return
       }
 
@@ -129,15 +165,23 @@ export function createRoomShadowSynchronizer(
               }
             },
             (error: unknown) => {
-              lastError = normalizeError(error)
+              const err = normalizeError(error)
+              lastError = err
               pendingByRoomId.delete(roomId)
+              if (!desiredRoomIds.has(roomId)) {
+                settleReleasedIfConfirmed(roomId)
+              }
               // Без reconcileRoom — без автоматичен retry
             },
           )
           .catch((error: unknown) => {
             // Defensive catch за неочаквана грешка в нашите handlers
-            lastError = normalizeError(error)
+            const err = normalizeError(error)
+            lastError = err
             pendingByRoomId.delete(roomId)
+            if (!desiredRoomIds.has(roomId)) {
+              settleReleasedIfConfirmed(roomId)
+            }
           })
 
         inFlightPromises.add(operation)
@@ -160,21 +204,26 @@ export function createRoomShadowSynchronizer(
             confirmedRoomIds.delete(roomId)
             lastError = null
             pendingByRoomId.delete(roomId)
+            settleReleasedIfConfirmed(roomId)
 
             if (!isShuttingDown) {
               reconcileRoom(roomId)
             }
           },
           (error: unknown) => {
-            lastError = normalizeError(error)
+            const err = normalizeError(error)
+            lastError = err
             pendingByRoomId.delete(roomId)
+            rejectReleaseWaiters(roomId, err)
             // Без reconcileRoom — без автоматичен retry
           },
         )
         .catch((error: unknown) => {
           // Defensive catch за неочаквана грешка в нашите handlers
-          lastError = normalizeError(error)
+          const err = normalizeError(error)
+          lastError = err
           pendingByRoomId.delete(roomId)
+          rejectReleaseWaiters(roomId, err)
         })
 
       inFlightPromises.add(operation)
@@ -220,6 +269,37 @@ export function createRoomShadowSynchronizer(
     reconcileRoom(roomId)
   }
 
+  function forgetRoomAndWait(roomId: string): Promise<void> {
+    if (isShuttingDown) {
+      return Promise.reject(
+        new Error('[room-shadow-sync] forgetRoomAndWait() called after shutdown.'),
+      )
+    }
+
+    if (!isValidRoomId(roomId)) {
+      const error = new Error(
+        `[room-shadow-sync] forgetRoomAndWait() received invalid roomId: ${String(roomId)}`,
+      )
+      lastError = error
+      return Promise.reject(error)
+    }
+
+    desiredRoomIds.delete(roomId)
+
+    if (!confirmedRoomIds.has(roomId) && !pendingByRoomId.has(roomId)) {
+      return Promise.resolve()
+    }
+
+    const promise = new Promise<void>((resolve, reject) => {
+      releaseWaiters.add({ roomId, resolve, reject })
+    })
+
+    reconcileRoom(roomId)
+    settleReleasedIfConfirmed(roomId)
+
+    return promise
+  }
+
   // ─── getHealth ───────────────────────────────────────────────────────────────
 
   function getHealth(): RoomShadowSynchronizerHealth {
@@ -248,6 +328,14 @@ export function createRoomShadowSynchronizer(
     if (shutdownPromise !== null) return shutdownPromise
 
     isShuttingDown = true
+
+    const shutdownError = new Error(
+      '[room-shadow-sync] Shutting down before release acknowledgement.',
+    )
+    for (const waiter of [...releaseWaiters]) {
+      releaseWaiters.delete(waiter)
+      waiter.reject(shutdownError)
+    }
 
     // Snapshot на текущите in-flight promises.
     // isShuttingDown е вече true — follow-up reconcile след успешен ack
@@ -302,6 +390,7 @@ export function createRoomShadowSynchronizer(
   return {
     desireRoom,
     forgetRoom,
+    forgetRoomAndWait,
     getHealth,
     shutdown,
   }
