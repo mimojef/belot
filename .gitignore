@@ -39,3 +39,4 @@ server/uploads/avatars/*
 !server/uploads/profile-gallery/
 server/uploads/profile-gallery/**
 !server/uploads/profile-gallery/.gitkeep
+load-tests/k6/multi-table-load-summary-*.json
