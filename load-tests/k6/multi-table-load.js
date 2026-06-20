@@ -86,6 +86,8 @@ const ACTION_DEADLINE_SAFETY_MS = parseMilliseconds(
 const RUN_TIMEOUT_MS = MATCH_RUNTIME_TIMEOUT_SECONDS * 1000;
 const PING_INTERVAL_MS = 20 * 1000;
 const HEALTH_POLL_INTERVAL_MS = 1000;
+const LEAVE_RETRY_INTERVAL_MS = 3000;
+const LEAVE_MAX_RETRIES = 5;
 const WS_OPEN = 1;
 const LOG_PHASE_TRANSITIONS = TABLES <= 5;
 const REJECTED_ACTION_DIAGNOSTICS = __ENV.REJECTED_ACTION_DIAGNOSTICS === '1';
@@ -314,6 +316,8 @@ function createPlayerState(tableIndex, playerIndex, account, jar) {
     fullHumanMatchCounted: false,
     roomJoinedCounted: false,
     leaveVoteSent: false,
+    leaveRetryTimerId: null,
+    leaveRetryCount: 0,
     completionCounted: false,
     takeoverCounted: false,
     closed: false,
@@ -449,6 +453,7 @@ function connectPlayerSocket(tableState, state) {
     }
     state.closed = true;
     clearActionInFlight(state);
+    cancelLeaveRetry(state);
     clearTimeout(timeoutId);
     clearInterval(pingId);
     const code = event && event.code !== undefined ? event.code : 'unknown';
@@ -887,6 +892,38 @@ function clearActionInFlight(state) {
   state.actionInFlight = null;
 }
 
+function cancelLeaveRetry(state) {
+  if (state.leaveRetryTimerId !== null) {
+    clearTimeout(state.leaveRetryTimerId);
+    state.leaveRetryTimerId = null;
+  }
+}
+
+function scheduleLeaveRetry(ws, state, roomId) {
+  if (state.closed || state.completionCounted) {
+    return;
+  }
+  const isGiveUp = state.leaveRetryCount >= LEAVE_MAX_RETRIES;
+  state.leaveRetryTimerId = setTimeout(() => {
+    state.leaveRetryTimerId = null;
+    if (state.closed || state.completionCounted) {
+      return;
+    }
+    if (isGiveUp) {
+      protocolErrors.add(1);
+      logSafe(state, `leave vote not confirmed after ${LEAVE_MAX_RETRIES} retries; closing`);
+      safeClose(ws, state);
+      return;
+    }
+    state.leaveRetryCount += 1;
+    const sent = sendProtocol(ws, state, { type: 'request_leave_match', roomId });
+    if (sent) {
+      logSafe(state, `leave retry ${state.leaveRetryCount}/${LEAVE_MAX_RETRIES}`);
+    }
+    scheduleLeaveRetry(ws, state, roomId);
+  }, LEAVE_RETRY_INTERVAL_MS);
+}
+
 function isScheduledActionStillValid(state, action) {
   const message = state.latestSnapshot;
   const game = message && message.game;
@@ -1037,26 +1074,29 @@ function clampDelayToTimerDeadline(requestedDelayMs, timerDeadlineAtValue) {
 }
 
 function handleMatchEnded(ws, state, message, game) {
-  if (!state.leaveVoteSent) {
-    const leaveSent = sendOnce(ws, state, `${message.roomId}|match-ended|leave`, {
-      type: 'request_leave_match',
-      roomId: message.roomId,
-    });
-    if (leaveSent) {
-      state.leaveVoteSent = true;
-      logSafe(state, 'normal leave requested after match-ended');
-    }
-  }
-
   const leaveVotes = game.matchEnded && Array.isArray(game.matchEnded.leaveVotes)
     ? game.matchEnded.leaveVotes
     : [];
 
   if (!state.completionCounted && state.seat && leaveVotes.indexOf(state.seat) !== -1) {
+    cancelLeaveRetry(state);
     matchesCompleted.add(1);
     state.completionCounted = true;
     logSafe(state, 'match completion confirmed');
     setTimeout(() => safeClose(ws, state), 250);
+    return;
+  }
+
+  if (!state.leaveVoteSent) {
+    const sent = sendProtocol(ws, state, {
+      type: 'request_leave_match',
+      roomId: message.roomId,
+    });
+    if (sent) {
+      state.leaveVoteSent = true;
+      logSafe(state, 'leave requested after match-ended');
+      scheduleLeaveRetry(ws, state, message.roomId);
+    }
   }
 }
 
@@ -1287,6 +1327,7 @@ function sendProtocol(ws, state, payload) {
 function safeClose(ws, state) {
   state.closeRequested = true;
   clearActionInFlight(state);
+  cancelLeaveRetry(state);
 
   if (state.closed || ws.readyState !== WS_OPEN) {
     return;
