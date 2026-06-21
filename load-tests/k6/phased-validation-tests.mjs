@@ -42,7 +42,7 @@ function assert(label, condition, detail = '') {
 
 // ── HTTP helpers for coordinator ───────────────────────────────────────────────
 
-function httpPost(url, body) {
+function httpPost(url, body, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const data = Buffer.from(body, 'utf8');
@@ -51,7 +51,7 @@ function httpPost(url, body) {
       port: Number(u.port),
       path: u.pathname + u.search,
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': data.length },
+      headers: { 'Content-Type': 'application/json', 'Content-Length': data.length, ...extraHeaders },
     }, (res) => {
       let raw = '';
       res.on('data', (c) => { raw += c; });
@@ -66,7 +66,7 @@ function httpPost(url, body) {
   });
 }
 
-function httpGet(url) {
+function httpGet(url, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = http.request({
@@ -74,6 +74,7 @@ function httpGet(url) {
       port: Number(u.port),
       path: u.pathname + u.search,
       method: 'GET',
+      headers: extraHeaders,
     }, (res) => {
       let raw = '';
       res.on('data', (c) => { raw += c; });
@@ -621,6 +622,7 @@ function createProductionLifecycleHarness(options = {}) {
   }
 
   const functionNames = [
+    'coordQs',
     'createTableConnectState', 'waitForWsConnectSpread', 'connectTableAndPlay',
     'connectPlayerSocket', 'isCurrentAttempt', 'handleConnectAttemptFailure',
     'scheduleConnectDeadlineTimer', 'clearPlayerConnectTimers', 'findSocketAttempt',
@@ -656,6 +658,7 @@ function createProductionLifecycleHarness(options = {}) {
     } = deps;
     const COORDINATOR_URL = coordinatorUrl;
     const RUN_ID = runId;
+    const COORDINATOR_TOKEN = '';
     ${productionSource}
     return { ${functionNames.join(', ')} };
   `);
@@ -1859,6 +1862,736 @@ Write-AtomicJson $config.resultPath $result
   }
 }
 
+// ── Test 12: Distributed shard mode ───────────────────────────────────────────
+
+async function testDistributedShardMode() {
+  console.log('\n── Test 12: Distributed shard mode ──────────────────────────────');
+
+  const coordSrc = readFileSync(resolvePath(__dirname, 'phased-load-coordinator.mjs'), 'utf8');
+  const k6Src = readFileSync(resolvePath(__dirname, 'phased-multi-table-load.js'), 'utf8');
+  const shardSrc = readFileSync(resolvePath(__dirname, 'run-phased-shard-load.ps1'), 'utf8');
+
+  // ── 12a: Coordinator source — header-based token auth + shard endpoints ───
+  assert('coordinator: tokenOk(req) reads X-Belot-Load-Token header',
+    coordSrc.includes('function tokenOk(req)') &&
+    coordSrc.includes("req.headers['x-belot-load-token']"));
+  assert('coordinator: token never read from URL query string',
+    !coordSrc.includes("searchParams.get('token')"));
+  assert('coordinator: /health endpoint is before auth checks',
+    coordSrc.indexOf("path === '/health'") < coordSrc.indexOf('!tokenOk(req)'));
+  assert('coordinator: 401 returned for invalid token',
+    coordSrc.includes("json(res, 401, { error: 'invalid or missing token' })"));
+  assert('coordinator: /shard-register endpoint defined',
+    coordSrc.includes("'/shard-register'"));
+  assert('coordinator: /shard-heartbeat endpoint defined',
+    coordSrc.includes("'/shard-heartbeat'"));
+  assert('coordinator: /global-failure endpoint defined',
+    coordSrc.includes("'/global-failure'"));
+  assert('coordinator: /shard-complete endpoint defined',
+    coordSrc.includes("'/shard-complete'"));
+  assert('coordinator: recordGlobalFailure function defined',
+    coordSrc.includes('function recordGlobalFailure('));
+  assert('coordinator: heartbeat watchdog defined with unref()',
+    coordSrc.includes('heartbeatWatchdog') && coordSrc.includes('.unref()'));
+  assert('coordinator: loopback safety check present',
+    coordSrc.includes('isLoopback') && coordSrc.includes('non-loopback'));
+  assert('coordinator: /status response includes shards array',
+    coordSrc.includes('shards: shardList'));
+
+  // ── 12b: k6 source — COORDINATOR_TOKEN via header, coordQs() runId-only ──
+  assert('k6 script: COORDINATOR_TOKEN env parsed',
+    k6Src.includes("COORDINATOR_TOKEN = __ENV.COORDINATOR_TOKEN || ''"));
+  assert('k6 script: coordQs() helper defined',
+    k6Src.includes('function coordQs()'));
+  assert('k6 script: coordQs() returns only runId (no token in URL)',
+    k6Src.includes('return `?runId=${RUN_ID}`'));
+  assert('k6 script: coordinatorPost sends X-Belot-Load-Token header',
+    k6Src.includes("headers['X-Belot-Load-Token'] = COORDINATOR_TOKEN"));
+  assert('k6 script: coordinatorGet sends X-Belot-Load-Token header',
+    k6Src.includes("params.headers = { 'X-Belot-Load-Token': COORDINATOR_TOKEN }"));
+  assert('k6 script: /login-ready uses coordQs()',
+    k6Src.includes('/login-ready${coordQs()}'));
+  assert('k6 script: /failure uses coordQs()',
+    k6Src.includes('/failure${coordQs()}'));
+  assert('k6 script: /ws-ready uses coordQs()',
+    k6Src.includes('/ws-ready${coordQs()}'));
+  assert('k6 script: /ws-barrier uses coordQs()',
+    k6Src.includes('/ws-barrier${coordQs()}'));
+
+  // ── 12c: Credential math — non-overlapping ranges for 400-table run ───────
+  // expectedTables=400: PC A TABLE_OFFSET=0 TABLES=200, PC B TABLE_OFFSET=200 TABLES=200
+  function credRange(offset, tables) {
+    return { start: offset * 4, end: offset * 4 + tables * 4 - 1 };
+  }
+  const shardA = credRange(0, 200);
+  const shardB = credRange(200, 200);
+  assert('400-table run: shard A and B do not overlap',
+    shardA.end < shardB.start,
+    `A=[${shardA.start}..${shardA.end}] B=[${shardB.start}..${shardB.end}]`);
+  assert('400-table run: shard ranges are contiguous',
+    shardB.start === shardA.end + 1);
+  assert('400-table run: combined range covers all 1600 users',
+    shardA.start === 0 && shardB.end === 1599);
+
+  // ── 12d: Shard runner source checks ──────────────────────────────────────
+  assert('shard runner: Token validated as non-empty',
+    shardSrc.includes('IsNullOrWhiteSpace($Token)'));
+  assert('shard runner: RunId validated as non-empty',
+    shardSrc.includes('IsNullOrWhiteSpace($RunId)'));
+  assert('shard runner: target allowlist (185.203.117.14:3101) present',
+    shardSrc.includes('185.203.117.14:3101') && shardSrc.includes('allowedPairs'));
+  assert('shard runner: pika.bg URL and :3001 port never in allowlist',
+    !shardSrc.includes('//pika.bg') && !shardSrc.includes(':3001'));
+  assert('shard runner: ShardId defaults to shard-offset${TableOffset}',
+    shardSrc.includes('shard-offset${TableOffset}'));
+  assert('shard runner: Invoke-CoordPost helper with X-Belot-Load-Token header',
+    shardSrc.includes('function Invoke-CoordPost(') &&
+    shardSrc.includes("'X-Belot-Load-Token'"));
+  assert('shard runner: Invoke-CoordPostStrict helper defined (throws on 4xx/5xx)',
+    shardSrc.includes('function Invoke-CoordPostStrict(') &&
+    shardSrc.includes('-ErrorAction Stop'));
+  assert('shard runner: strict registration uses Invoke-CoordPostStrict',
+    shardSrc.includes('Invoke-CoordPostStrict') &&
+    shardSrc.includes('shard-register') &&
+    shardSrc.includes('Fail "Shard registration failed'));
+  assert('shard runner: token length check present (>= 32 chars)',
+    shardSrc.includes('$Token.Length -lt 32'));
+  assert('shard runner: token never in URL (?token= or &token=)',
+    !shardSrc.includes('?token=') && !shardSrc.includes('&token='));
+  assert('shard runner: token not printed or logged (no Substring)',
+    !shardSrc.includes('.Substring(0,'));
+  assert('shard runner: /shard-register call present',
+    shardSrc.includes('/shard-register'));
+  assert('shard runner: /shard-heartbeat call present',
+    shardSrc.includes('/shard-heartbeat'));
+  assert('shard runner: /global-failure call on crash',
+    shardSrc.includes('/global-failure'));
+  assert('shard runner: /shard-complete call on success',
+    shardSrc.includes('/shard-complete'));
+  assert('shard runner: HeartbeatIntervalPolls parameter defined',
+    shardSrc.includes('HeartbeatIntervalPolls'));
+  assert('shard runner: Invoke-K6Supervisor has HeartbeatAction parameter',
+    shardSrc.includes('HeartbeatAction'));
+  assert('shard runner: inlines Invoke-K6Supervisor',
+    shardSrc.includes('function Invoke-K6Supervisor'));
+  assert('shard runner: inlines Stop-VerifiedProcessTree (PID+StartTime kill)',
+    shardSrc.includes('function Stop-VerifiedProcessTree') &&
+    shardSrc.includes('StartTime.ToUniversalTime().Ticks'));
+  assert('shard runner: runner result includes shardId field',
+    shardSrc.includes('shardId = $Context.ShardId'));
+  assert('shard runner: writes schemaVersion=1',
+    shardSrc.includes('schemaVersion = 1'));
+  assert('shard runner: COORDINATOR_TOKEN and TABLE_OFFSET passed to k6',
+    shardSrc.includes("COORDINATOR_TOKEN=$Token") &&
+    shardSrc.includes("TABLE_OFFSET=$TableOffset"));
+  assert('shard runner: does not start its own local coordinator',
+    !shardSrc.includes('phased-load-coordinator.mjs'));
+
+  // ── 12e: Runtime — coordinator with header-based token auth ──────────────
+  const testToken = 'distributed-test-token-xk2m9q-abc';
+  const authHeader = { 'X-Belot-Load-Token': testToken };
+  let proc12e = null;
+  try {
+    const coordScript = new URL('./phased-load-coordinator.mjs', import.meta.url).pathname
+      .replace(/^\/([A-Z]:)/, '$1');
+    const testRunId = 'test-token-auth-' + Date.now();
+    const tmpServer = http.createServer();
+    await new Promise((resolve) => tmpServer.listen(0, '127.0.0.1', resolve));
+    const coordPort = tmpServer.address().port;
+    await new Promise((resolve) => tmpServer.close(resolve));
+
+    proc12e = spawn('node', [coordScript, testRunId, '3', String(coordPort), testToken], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const coordBase = `http://127.0.0.1:${coordPort}`;
+    const deadline = Date.now() + 8000;
+    await new Promise((resolve, reject) => {
+      function poll() {
+        if (Date.now() > deadline) { proc12e.kill(); reject(new Error('coordinator with token did not start')); return; }
+        httpGet(`${coordBase}/health`).then((r) => {
+          if (r.status === 200) resolve(); else setTimeout(poll, 150);
+        }).catch(() => setTimeout(poll, 150));
+      }
+      proc12e.on('error', reject);
+      setTimeout(poll, 200);
+    });
+
+    const health = await httpGet(`${coordBase}/health`);
+    assert('12e: /health returns 200 without any token',
+      health.status === 200 && health.body.ok === true);
+
+    const wrongHeaderToken = await httpGet(
+      `${coordBase}/status?runId=${testRunId}`,
+      { 'X-Belot-Load-Token': 'wrong-value' },
+    );
+    assert('12e: /status with wrong X-Belot-Load-Token header → 401',
+      wrongHeaderToken.status === 401);
+
+    const noHeaderToken = await httpGet(`${coordBase}/status?runId=${testRunId}`);
+    assert('12e: /status without token header → 401',
+      noHeaderToken.status === 401);
+
+    // Token in URL query string must NOT work (header-only auth)
+    const tokenInUrl = await httpGet(`${coordBase}/status?runId=${testRunId}&token=${testToken}`);
+    assert('12e: /status with token in URL query string (not header) → 401',
+      tokenInUrl.status === 401);
+
+    const correct = await httpGet(
+      `${coordBase}/status?runId=${testRunId}`,
+      authHeader,
+    );
+    assert('12e: /status with correct X-Belot-Load-Token header → 200',
+      correct.status === 200);
+
+    const loginOk = await httpPost(
+      `${coordBase}/login-ready?runId=${testRunId}`,
+      JSON.stringify({ tableIndex: 0 }),
+      authHeader,
+    );
+    assert('12e: /login-ready with correct token header → 200',
+      loginOk.status === 200);
+
+    const loginBad = await httpPost(
+      `${coordBase}/login-ready?runId=${testRunId}`,
+      JSON.stringify({ tableIndex: 1 }),
+      { 'X-Belot-Load-Token': 'bad-token' },
+    );
+    assert('12e: /login-ready with wrong token header → 401',
+      loginBad.status === 401);
+  } finally {
+    if (proc12e) await stopCoordinator(proc12e);
+  }
+
+  // ── 12f: Integration — shard register, heartbeat, global-failure, complete ─
+  const shardToken = 'shard-integration-token-9rz4-abcd';
+  const shardAuth = { 'X-Belot-Load-Token': shardToken };
+  let proc12f = null;
+  try {
+    const coordScript = new URL('./phased-load-coordinator.mjs', import.meta.url).pathname
+      .replace(/^\/([A-Z]:)/, '$1');
+    const shardRunId = 'test-shard-integration-' + Date.now();
+    const tmpSrv = http.createServer();
+    await new Promise((resolve) => tmpSrv.listen(0, '127.0.0.1', resolve));
+    const shardPort = tmpSrv.address().port;
+    await new Promise((resolve) => tmpSrv.close(resolve));
+
+    proc12f = spawn('node', [coordScript, shardRunId, '4', String(shardPort), shardToken], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const shardBase = `http://127.0.0.1:${shardPort}`;
+    const dl = Date.now() + 8000;
+    await new Promise((resolve, reject) => {
+      function poll() {
+        if (Date.now() > dl) { proc12f.kill(); reject(new Error('shard coordinator did not start')); return; }
+        httpGet(`${shardBase}/health`).then((r) => {
+          if (r.status === 200) resolve(); else setTimeout(poll, 150);
+        }).catch(() => setTimeout(poll, 150));
+      }
+      proc12f.on('error', reject);
+      setTimeout(poll, 200);
+    });
+
+    // Register shard A
+    const regA = await httpPost(
+      `${shardBase}/shard-register?runId=${shardRunId}`,
+      JSON.stringify({ shardId: 'shard-A', tableOffset: 0, tables: 2 }),
+      shardAuth,
+    );
+    assert('12f: /shard-register with valid token → 200',
+      regA.status === 200 && regA.body.ok === true);
+
+    // Register shard B
+    await httpPost(
+      `${shardBase}/shard-register?runId=${shardRunId}`,
+      JSON.stringify({ shardId: 'shard-B', tableOffset: 2, tables: 2 }),
+      shardAuth,
+    );
+
+    // /status should show both shards
+    const statusAfterReg = await httpGet(
+      `${shardBase}/status?runId=${shardRunId}`,
+      shardAuth,
+    );
+    assert('12f: /status shows registered shards',
+      statusAfterReg.status === 200 &&
+      Array.isArray(statusAfterReg.body.shards) &&
+      statusAfterReg.body.shards.length === 2);
+    const shardAEntry = statusAfterReg.body.shards.find((s) => s.shardId === 'shard-A');
+    assert('12f: registered shard has correct tableOffset and tables',
+      shardAEntry?.tableOffset === 0 && shardAEntry?.tables === 2 && shardAEntry?.status === 'online');
+
+    // Heartbeat
+    const hb = await httpPost(
+      `${shardBase}/shard-heartbeat?runId=${shardRunId}`,
+      JSON.stringify({ shardId: 'shard-A' }),
+      shardAuth,
+    );
+    assert('12f: /shard-heartbeat with valid token → 200',
+      hb.status === 200 && hb.body.ok === true);
+
+    // Global failure from shard B
+    const gf = await httpPost(
+      `${shardBase}/global-failure?runId=${shardRunId}`,
+      JSON.stringify({ shardId: 'shard-B', reason: 'k6 exited with code 1' }),
+      shardAuth,
+    );
+    assert('12f: /global-failure with valid token → 200',
+      gf.status === 200 && gf.body.ok === true);
+
+    // /status must now show wsBarrierFailed=true
+    const statusAfterFail = await httpGet(
+      `${shardBase}/status?runId=${shardRunId}`,
+      shardAuth,
+    );
+    assert('12f: /status shows wsBarrierFailed=true after global-failure',
+      statusAfterFail.body.wsBarrierFailed === true);
+    assert('12f: /status shows globalFailure reason preserved',
+      statusAfterFail.body.globalFailure?.reason === 'k6 exited with code 1');
+
+    // /shard-complete (different coordinator instance — first one has global failure state)
+  } finally {
+    if (proc12f) await stopCoordinator(proc12f);
+  }
+
+  // ── 12h: Coordinator /shard-register range + conflict validation ──────────
+  const rangeToken = 'shard-range-validation-token-0001ab';
+  const rangeAuth = { 'X-Belot-Load-Token': rangeToken };
+  let proc12h = null;
+  try {
+    const coordScript = new URL('./phased-load-coordinator.mjs', import.meta.url).pathname
+      .replace(/^\/([A-Z]:)/, '$1');
+    const rangeRunId = 'test-shard-range-' + Date.now();
+    const tmpSrvR = http.createServer();
+    await new Promise((resolve) => tmpSrvR.listen(0, '127.0.0.1', resolve));
+    const rangePort = tmpSrvR.address().port;
+    await new Promise((resolve) => tmpSrvR.close(resolve));
+    proc12h = spawn('node', [coordScript, rangeRunId, '4', String(rangePort), rangeToken], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const rangeBase = `http://127.0.0.1:${rangePort}`;
+    const dlr = Date.now() + 8000;
+    await new Promise((resolve, reject) => {
+      function poll() {
+        if (Date.now() > dlr) { proc12h.kill(); reject(new Error('range coordinator did not start')); return; }
+        httpGet(`${rangeBase}/health`).then((r) => {
+          if (r.status === 200) resolve(); else setTimeout(poll, 150);
+        }).catch(() => setTimeout(poll, 150));
+      }
+      proc12h.on('error', reject);
+      setTimeout(poll, 200);
+    });
+
+    // Range overflow: tableOffset(2) + tables(3) = 5 > expectedTables(4) → 400
+    const overflow = await httpPost(
+      `${rangeBase}/shard-register?runId=${rangeRunId}`,
+      JSON.stringify({ shardId: 'shard-overflow', tableOffset: 2, tables: 3 }),
+      rangeAuth,
+    );
+    assert('12h: tableOffset+tables exceeds expectedTables → 400',
+      overflow.status === 400 && typeof overflow.body.error === 'string');
+
+    // Register shard-X successfully
+    await httpPost(
+      `${rangeBase}/shard-register?runId=${rangeRunId}`,
+      JSON.stringify({ shardId: 'shard-X', tableOffset: 0, tables: 2 }),
+      rangeAuth,
+    );
+
+    // Idempotent: same shardId + same params → 200 + idempotent:true
+    const idempotent = await httpPost(
+      `${rangeBase}/shard-register?runId=${rangeRunId}`,
+      JSON.stringify({ shardId: 'shard-X', tableOffset: 0, tables: 2 }),
+      rangeAuth,
+    );
+    assert('12h: same shardId + same params (idempotent) → 200',
+      idempotent.status === 200 && idempotent.body.ok === true);
+    assert('12h: idempotent re-registration returns idempotent:true',
+      idempotent.body.idempotent === true);
+
+    // Conflict: same shardId + different tables → 409
+    const conflict = await httpPost(
+      `${rangeBase}/shard-register?runId=${rangeRunId}`,
+      JSON.stringify({ shardId: 'shard-X', tableOffset: 0, tables: 1 }),
+      rangeAuth,
+    );
+    assert('12h: same shardId + different params → 409',
+      conflict.status === 409 && typeof conflict.body.error === 'string');
+
+    // Overlap: shard-Y [1..2] overlaps shard-X [0..1] → 409
+    const overlap = await httpPost(
+      `${rangeBase}/shard-register?runId=${rangeRunId}`,
+      JSON.stringify({ shardId: 'shard-Y', tableOffset: 1, tables: 2 }),
+      rangeAuth,
+    );
+    assert('12h: overlapping range → 409',
+      overlap.status === 409 && overlap.body.error?.includes('overlaps'));
+  } finally {
+    if (proc12h) await stopCoordinator(proc12h);
+  }
+
+  // ── 12g: /shard-complete integration ──────────────────────────────────────
+  const compToken = 'shard-complete-token-7vw1-abcdefg';
+  const compAuth = { 'X-Belot-Load-Token': compToken };
+  let proc12g = null;
+  try {
+    const coordScript = new URL('./phased-load-coordinator.mjs', import.meta.url).pathname
+      .replace(/^\/([A-Z]:)/, '$1');
+    const compRunId = 'test-shard-complete-' + Date.now();
+    const tmpSrv2 = http.createServer();
+    await new Promise((resolve) => tmpSrv2.listen(0, '127.0.0.1', resolve));
+    const compPort = tmpSrv2.address().port;
+    await new Promise((resolve) => tmpSrv2.close(resolve));
+
+    proc12g = spawn('node', [coordScript, compRunId, '2', String(compPort), compToken], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const compBase = `http://127.0.0.1:${compPort}`;
+    const dl2 = Date.now() + 8000;
+    await new Promise((resolve, reject) => {
+      function poll() {
+        if (Date.now() > dl2) { proc12g.kill(); reject(new Error('complete coordinator did not start')); return; }
+        httpGet(`${compBase}/health`).then((r) => {
+          if (r.status === 200) resolve(); else setTimeout(poll, 150);
+        }).catch(() => setTimeout(poll, 150));
+      }
+      proc12g.on('error', reject);
+      setTimeout(poll, 200);
+    });
+
+    await httpPost(
+      `${compBase}/shard-register?runId=${compRunId}`,
+      JSON.stringify({ shardId: 'shard-X', tableOffset: 0, tables: 1 }),
+      compAuth,
+    );
+    const sc = await httpPost(
+      `${compBase}/shard-complete?runId=${compRunId}`,
+      JSON.stringify({ shardId: 'shard-X' }),
+      compAuth,
+    );
+    assert('12g: /shard-complete with valid token → 200',
+      sc.status === 200 && sc.body.ok === true);
+
+    const statusAfterComplete = await httpGet(
+      `${compBase}/status?runId=${compRunId}`,
+      compAuth,
+    );
+    const shardX = statusAfterComplete.body.shards?.find((s) => s.shardId === 'shard-X');
+    assert('12g: completed shard shows status=completed in /status',
+      shardX?.status === 'completed');
+
+    const scWrongToken = await httpPost(
+      `${compBase}/shard-complete?runId=${compRunId}`,
+      JSON.stringify({ shardId: 'shard-X' }),
+      { 'X-Belot-Load-Token': 'wrong' },
+    );
+    assert('12g: /shard-complete with wrong token → 401',
+      scWrongToken.status === 401);
+  } finally {
+    if (proc12g) await stopCoordinator(proc12g);
+  }
+}
+
+// ── Test 13: Distributed shard integration ────────────────────────────────────
+
+async function testDistributedShardIntegration() {
+  console.log('\n── Test 13: Distributed shard integration ───────────────────────');
+
+  const shardRunnerSource = readFileSync(resolvePath(__dirname, 'run-phased-shard-load.ps1'), 'utf8');
+  const shardFunctionNames = [
+    'ConvertTo-NativeArgument', 'Start-K6Async', 'Drain-K6Output',
+    'Stop-VerifiedProcessTree', 'Get-MetricsNdjsonStats', 'Write-AtomicJson',
+    'New-RunnerResult', 'Invoke-K6Supervisor',
+    'Invoke-CoordPost', 'Invoke-CoordGet', 'Invoke-CoordPostStrict',
+  ];
+
+  const tempDir13 = mkdtempSync(joinPath(tmpdir(), 'belot-shard-dist-'));
+  const shardFunctionsPath = joinPath(tempDir13, 'shard-functions.ps1');
+  const shardWrapperPath = joinPath(tempDir13, 'shard-wrapper.ps1');
+
+  writeFileSync(
+    shardFunctionsPath,
+    shardFunctionNames.map((name) => extractPowerShellFunction(shardRunnerSource, name)).join('\r\n\r\n'),
+    'utf8',
+  );
+
+  writeFileSync(shardWrapperPath, `
+param([string]$ConfigPath)
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'shard-functions.ps1')
+$config = Get-Content -Raw -Encoding UTF8 -LiteralPath $ConfigPath | ConvertFrom-Json
+
+# Variables for coordinator helpers (dynamic scope lookup from dot-sourced functions)
+$Token    = $config.token
+$RunId    = $config.runId
+$ShardId  = $config.shardId
+$coordUrl = $config.coordUrl
+
+# ── Strict registration ───────────────────────────────────────────────────────
+$regBody = ConvertTo-Json @{ shardId = $ShardId; tableOffset = [int]$config.tableOffset; tables = [int]$config.tables } -Compress
+$regResp = Invoke-CoordPostStrict "$coordUrl/shard-register?runId=$RunId" $regBody
+if ($regResp.idempotent) { Write-Host "Shard '$ShardId' re-registered (idempotent)." }
+else { Write-Host "Shard '$ShardId' registered." }
+
+# ── First heartbeat (strict) ──────────────────────────────────────────────────
+Invoke-CoordPostStrict "$coordUrl/shard-heartbeat?runId=$RunId" (ConvertTo-Json @{ shardId = $ShardId } -Compress) | Out-Null
+
+# ── Build supervisor arguments ────────────────────────────────────────────────
+$arguments = @('run', '--out', "json=$($config.metricsPath)", '-e', "SUMMARY_PATH=$($config.summaryPath)", $config.scriptPath)
+
+$statusUrl = "$coordUrl/status?runId=$RunId"
+$statusProvider = { Invoke-CoordGet $statusUrl }
+
+$hbIntervalPolls = if ($config.heartbeatIntervalPolls -and [int]$config.heartbeatIntervalPolls -gt 0) { [int]$config.heartbeatIntervalPolls } else { 5 }
+$heartbeatAction = if ($config.disableHeartbeat) { $null } else {
+  { try { Invoke-CoordPost "$coordUrl/shard-heartbeat?runId=$RunId" (ConvertTo-Json @{ shardId = $ShardId } -Compress) } catch {} }
+}
+$logAction = { param($l, $e) }
+$grace = if ($config.graceSeconds -and [int]$config.graceSeconds -gt 0) { [int]$config.graceSeconds } else { 1 }
+
+# ── Run supervisor ────────────────────────────────────────────────────────────
+$supervisorResult = $null; $runnerError = $null
+try {
+  $exe = $config.k6Path
+  $supervisorResult = Invoke-K6Supervisor $exe $arguments $statusProvider $logAction $heartbeatAction $hbIntervalPolls $grace 50
+} catch { $runnerError = $_.Exception.ToString() }
+
+# ── Notify coordinator ────────────────────────────────────────────────────────
+try {
+  if (-not [string]::IsNullOrEmpty($runnerError)) {
+    Invoke-CoordPost "$coordUrl/global-failure?runId=$RunId" (ConvertTo-Json @{ shardId = $ShardId; reason = 'runner-exception' } -Compress)
+  } elseif ($null -ne $supervisorResult -and $supervisorResult.ExitCode -ne 0 -and $null -eq $supervisorResult.CoordinatorFailure) {
+    Invoke-CoordPost "$coordUrl/global-failure?runId=$RunId" (ConvertTo-Json @{ shardId = $ShardId; reason = "k6 exited with code $($supervisorResult.ExitCode)" } -Compress)
+  } elseif ($null -ne $supervisorResult -and $supervisorResult.ExitCode -eq 0) {
+    Invoke-CoordPost "$coordUrl/shard-complete?runId=$RunId" (ConvertTo-Json @{ shardId = $ShardId } -Compress)
+  }
+} catch { }
+
+# ── Write result ──────────────────────────────────────────────────────────────
+$stats = Get-MetricsNdjsonStats $config.metricsPath
+$ctx = [pscustomobject]@{
+  RunId = $RunId; Mode = 'websocket-only'; Tables = [int]$config.tables; TableOffset = [int]$config.tableOffset
+  ShardId = $ShardId; StartedAt = [DateTime]::UtcNow
+  LogPath = ''; MetricsPath = $config.metricsPath; SummaryPath = $config.summaryPath
+}
+$result = New-RunnerResult $ctx $supervisorResult $stats $runnerError
+Write-AtomicJson $config.resultPath $result
+[pscustomobject]@{
+  supervisor = $supervisorResult; runnerResult = $result; runnerError = $runnerError
+  resultExists = Test-Path -LiteralPath $config.resultPath
+} | ConvertTo-Json -Depth 20
+`, 'utf8');
+
+  const k6Candidates = [
+    process.env.ProgramFiles ? joinPath(process.env.ProgramFiles, 'k6', 'k6.exe') : null,
+    'k6',
+  ].filter(Boolean);
+  let k6Path13 = null;
+  for (const candidate of k6Candidates) {
+    if (candidate !== 'k6' && !existsSync(candidate)) continue;
+    const v = await runChild(candidate, ['version'], 3000);
+    if (!v.error && v.code === 0) { k6Path13 = candidate; break; }
+  }
+  assert('local k6 binary is available for distributed integration probes', k6Path13 !== null);
+  if (k6Path13 === null) { rmSync(tempDir13, { recursive: true, force: true }); return; }
+
+  // Helper: start coordinator with optional token + heartbeat timeout
+  function startShardCoordinator(expectedTables, token, heartbeatTimeoutSec = 30) {
+    return new Promise((resolve, reject) => {
+      const coordScript = new URL('./phased-load-coordinator.mjs', import.meta.url).pathname
+        .replace(/^\/([A-Z]:)/, '$1');
+      const runId = 'dist-test-' + Date.now();
+      const srv = http.createServer();
+      srv.listen(0, '127.0.0.1', () => {
+        const port = srv.address().port;
+        srv.close(() => {
+          const args = [coordScript, runId, String(expectedTables), String(port),
+            token, '127.0.0.1', String(heartbeatTimeoutSec)];
+          const proc = spawn('node', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+          const baseUrl = `http://127.0.0.1:${port}`;
+          const deadline = Date.now() + 8000;
+          function poll() {
+            if (Date.now() > deadline) { proc.kill(); reject(new Error('coordinator did not start')); return; }
+            httpGet(`${baseUrl}/health`).then((r) => {
+              if (r.status === 200) resolve({ proc, baseUrl, runId, port, token });
+              else setTimeout(poll, 150);
+            }).catch(() => setTimeout(poll, 150));
+          }
+          proc.on('error', reject);
+          setTimeout(poll, 200);
+        });
+      });
+    });
+  }
+
+  function makeDistScript(body, options = '{vus:1,iterations:1}') {
+    return `${body}\nexport const options=${options};\n`
+      + 'export function handleSummary(d){return{[__ENV.SUMMARY_PATH]:JSON.stringify(d)}}\n';
+  }
+
+  // Run two shard wrappers in parallel; returns { resultA, resultB }
+  async function runShardPair(testName, coord, settingsA, settingsB) {
+    const dirA = joinPath(tempDir13, testName + '-A');
+    const dirB = joinPath(tempDir13, testName + '-B');
+    mkdirSync(dirA);
+    mkdirSync(dirB);
+
+    function makeShardConfig(dir, shard, settings) {
+      const scriptPath = joinPath(dir, 'probe.js');
+      writeFileSync(scriptPath, settings.script ?? makeDistScript('export default function(){}'));
+      const configPath = joinPath(dir, 'config.json');
+      writeFileSync(configPath, JSON.stringify({
+        token: coord.token,
+        runId: coord.runId,
+        shardId: shard.shardId,
+        coordUrl: coord.baseUrl,
+        tableOffset: shard.tableOffset,
+        tables: shard.tables,
+        k6Path: k6Path13,
+        scriptPath,
+        metricsPath: joinPath(dir, 'metrics.ndjson'),
+        summaryPath: joinPath(dir, 'summary.json'),
+        resultPath: joinPath(dir, 'runner-result.json'),
+        heartbeatIntervalPolls: settings.heartbeatIntervalPolls ?? 5,
+        graceSeconds: settings.graceSeconds ?? 1,
+        disableHeartbeat: settings.disableHeartbeat ?? false,
+      }));
+      return configPath;
+    }
+
+    const configA = makeShardConfig(dirA, { shardId: 'shard-A', tableOffset: 0, tables: 1 }, settingsA);
+    const configB = makeShardConfig(dirB, { shardId: 'shard-B', tableOffset: 1, tables: 1 }, settingsB);
+    const timeoutMs = settingsA.timeoutMs ?? 30000;
+
+    const [execA, execB] = await Promise.all([
+      runPowerShellTree(shardWrapperPath, configA, timeoutMs),
+      runPowerShellTree(shardWrapperPath, configB, timeoutMs),
+    ]);
+
+    const resultPathA = joinPath(dirA, 'runner-result.json');
+    const resultPathB = joinPath(dirB, 'runner-result.json');
+    const resultA = existsSync(resultPathA) ? JSON.parse(readFileSync(resultPathA, 'utf8')) : null;
+    const resultB = existsSync(resultPathB) ? JSON.parse(readFileSync(resultPathB, 'utf8')) : null;
+    return { execA, execB, resultA, resultB };
+  }
+
+  const distToken = 'shard-dist-integration-00001-abcdefg';
+
+  // ── 13a: Both shards succeed ──────────────────────────────────────────────
+  {
+    const coord = await startShardCoordinator(2, distToken, 30);
+    try {
+      const { resultA, resultB } = await runShardPair('13a', coord,
+        { script: makeDistScript('export default function(){}') },
+        { script: makeDistScript('export default function(){}') },
+      );
+      assert('13a: shard A result file created', resultA !== null);
+      assert('13a: shard B result file created', resultB !== null);
+      assert('13a: shard A outcome = success', resultA?.outcome === 'success');
+      assert('13a: shard B outcome = success', resultB?.outcome === 'success');
+    } finally { await stopCoordinator(coord.proc); }
+  }
+
+  // ── 13b: A crash → B forced; first failure reason preserved ──────────────
+  {
+    const coord = await startShardCoordinator(2, distToken, 30);
+    try {
+      const crashScript = makeDistScript(
+        "export default function(){throw new Error('deliberate crash');}",
+        "{vus:1,iterations:1,thresholds:{iterations:['count>99']}}",
+      );
+      const sleepScript = makeDistScript(
+        "import{sleep}from'k6';export default function(){sleep(20);}",
+        '{vus:1,duration:"20s"}',
+      );
+      const { resultA, resultB } = await runShardPair('13b', coord,
+        { script: crashScript, timeoutMs: 35000 },
+        { script: sleepScript, timeoutMs: 35000 },
+      );
+      assert('13b: shard A outcome = k6-error (crash)', resultA?.outcome === 'k6-error');
+      assert('13b: shard B outcome = coordinator-failure (forced)', resultB?.outcome === 'coordinator-failure');
+      assert('13b: shard B was force-killed', resultB?.k6?.forcedTermination === true);
+      assert('13b: first failure reason preserved in coordinator status',
+        resultB?.coordinatorFailure != null);
+    } finally { await stopCoordinator(coord.proc); }
+  }
+
+  // ── 13c: B crash → A forced ───────────────────────────────────────────────
+  {
+    const coord = await startShardCoordinator(2, distToken, 30);
+    try {
+      const crashScript = makeDistScript(
+        "export default function(){throw new Error('deliberate crash');}",
+        "{vus:1,iterations:1,thresholds:{iterations:['count>99']}}",
+      );
+      const sleepScript = makeDistScript(
+        "import{sleep}from'k6';export default function(){sleep(20);}",
+        '{vus:1,duration:"20s"}',
+      );
+      const { resultA, resultB } = await runShardPair('13c', coord,
+        { script: sleepScript, timeoutMs: 35000 },
+        { script: crashScript, timeoutMs: 35000 },
+      );
+      assert('13c: shard B outcome = k6-error (crash)', resultB?.outcome === 'k6-error');
+      assert('13c: shard A outcome = coordinator-failure (forced)', resultA?.outcome === 'coordinator-failure');
+      assert('13c: shard A was force-killed', resultA?.k6?.forcedTermination === true);
+    } finally { await stopCoordinator(coord.proc); }
+  }
+
+  // ── 13d: Stale heartbeat of B → both forced ───────────────────────────────
+  {
+    const coord = await startShardCoordinator(2, distToken, 5);  // 5s heartbeat timeout
+    try {
+      const sleepScript = makeDistScript(
+        "import{sleep}from'k6';export default function(){sleep(30);}",
+        '{vus:1,duration:"30s"}',
+      );
+      const { resultA, resultB } = await runShardPair('13d', coord,
+        { script: sleepScript, heartbeatIntervalPolls: 5, timeoutMs: 30000 },    // A: heartbeats every 5×50ms=250ms
+        { script: sleepScript, disableHeartbeat: true, timeoutMs: 30000 },       // B: no heartbeats → stale after 5s
+      );
+      assert('13d: shard A outcome = coordinator-failure (stale B triggers global failure)',
+        resultA?.outcome === 'coordinator-failure');
+      assert('13d: shard B outcome = coordinator-failure (its own stale triggered it)',
+        resultB?.outcome === 'coordinator-failure');
+      assert('13d: shard A was force-killed', resultA?.k6?.forcedTermination === true);
+      assert('13d: shard B was force-killed', resultB?.k6?.forcedTermination === true);
+    } finally { await stopCoordinator(coord.proc); }
+  }
+
+  // ── 13e: Sentinel process survives cross-shard kill (PID+StartTime guard) ─
+  {
+    const sentinel = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], {
+      stdio: 'ignore',
+      detached: false,
+    });
+    const sentinelPid = sentinel.pid;
+    let sentinelAlive = true;
+    sentinel.on('exit', () => { sentinelAlive = false; });
+
+    const coord = await startShardCoordinator(2, distToken, 30);
+    try {
+      const crashScript = makeDistScript(
+        "export default function(){throw new Error('deliberate crash');}",
+        "{vus:1,iterations:1,thresholds:{iterations:['count>99']}}",
+      );
+      const sleepScript = makeDistScript(
+        "import{sleep}from'k6';export default function(){sleep(20);}",
+        '{vus:1,duration:"20s"}',
+      );
+      await runShardPair('13e', coord,
+        { script: crashScript, timeoutMs: 35000 },
+        { script: sleepScript, timeoutMs: 35000 },
+      );
+    } finally { await stopCoordinator(coord.proc); }
+
+    await new Promise((r) => setTimeout(r, 200));
+    assert('13e: sentinel process (unrelated PID) survived cross-shard kill', sentinelAlive === true);
+    if (sentinelAlive) sentinel.kill();
+  }
+
+  rmSync(tempDir13, { recursive: true, force: true });
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -1880,6 +2613,8 @@ async function main() {
   testTableOffsetSourceInspection();
   await testFastMetricsStats();
   await testDualK6Supervisor();
+  await testDistributedShardMode();
+  await testDistributedShardIntegration();
 
   console.log(`\n══════════════════════════════════════`);
   if (failed === 0) {

@@ -50,7 +50,18 @@ param(
   #   B: TABLE_OFFSET=Tables/2,   TABLES=Tables/2  (credentials Tables*2 .. Tables*4-1)
   # Coordinator uses expectedTables=Tables (full count). Both processes share one
   # coordinator, runId and login/WS barriers. One runner-result JSON (schemaVersion=2).
-  [switch]$Dual
+  [switch]$Dual,
+
+  # ─── Optional: table offset and auth token ────────────────────────────────────
+  # TableOffset: starting global table index for this runner's VUs (default 0).
+  #   In single-process mode, use TableOffset to run a portion of the total tables
+  #   while pointing at a remote coordinator (see run-phased-shard-load.ps1).
+  #   In Dual mode, A and B offsets are computed automatically from TableOffset.
+  # Token: optional high-entropy token to protect coordinator endpoints.
+  #   When non-empty, the coordinator is started with this token and k6 sends it
+  #   with every coordinator request. Use for remote/internet-exposed coordinators.
+  [int]$TableOffset = 0,
+  [string]$Token    = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -70,9 +81,12 @@ if ($Mode -ne 'websocket-only' -and $Mode -ne 'full') {
   Fail "Mode must be 'websocket-only' or 'full', got '$Mode'."
 }
 
-# ── 2. Validate Tables ────────────────────────────────────────────────────────
+# ── 2. Validate Tables and TableOffset ───────────────────────────────────────
 if ($Tables -lt 1) {
   Fail "Tables must be >= 1, got $Tables."
+}
+if ($TableOffset -lt 0) {
+  Fail "TableOffset must be >= 0, got $TableOffset."
 }
 if ($Dual -and ($Tables % 2 -ne 0)) {
   Fail "Dual mode requires Tables to be even (two equal-size processes), got Tables=$Tables."
@@ -133,10 +147,15 @@ if ($FailureCleanupGraceSeconds -lt 1 -or $SupervisorPollMilliseconds -lt 50) {
   Fail 'FailureCleanupGraceSeconds must be >= 1 and SupervisorPollMilliseconds must be >= 50.'
 }
 
-# ── 7. Strip trailing slashes from BaseUrl ───────────────────────────────────
+# ── 7. Validate Token length ──────────────────────────────────────────────────
+if (-not [string]::IsNullOrWhiteSpace($Token) -and $Token.Length -lt 32) {
+  Fail 'When provided, Token must be at least 32 characters. Use: openssl rand -hex 32'
+}
+
+# ── 8. Strip trailing slashes from BaseUrl ───────────────────────────────────
 $BaseUrl = $BaseUrl.TrimEnd('/')
 
-# ── 8. Basic URL scheme check ─────────────────────────────────────────────────
+# ── 9. Basic URL scheme check ─────────────────────────────────────────────────
 if ($BaseUrl -notmatch '^http://') {
   Fail "BaseUrl must start with http://, got: $BaseUrl"
 }
@@ -144,7 +163,7 @@ if ($WsUrl -notmatch '^ws://') {
   Fail "WsUrl must start with ws://, got: $WsUrl"
 }
 
-# ── 9. Target safety guard — exact pair allowlist ─────────────────────────────
+# ── 10. Target safety guard — exact pair allowlist ────────────────────────────
 # Идентичен guard с run-multi-table-load.ps1.
 # Разрешени са само двете точни комбинации. Всичко останало е блокирано:
 # https/wss, port 3001, pika.bg, друг host, друг path, query string, fragment.
@@ -190,17 +209,19 @@ if ($null -eq $credentials.users -or -not ($credentials.users -is [array])) {
   Fail 'Credentials file must have the structure: { "users": [...] }'
 }
 
-$requiredUsers = $Tables * 4
+$credentialStart = $TableOffset * 4
+$requiredUsers   = $credentialStart + $Tables * 4
 if ($credentials.users.Count -lt $requiredUsers) {
   Fail ("Credentials file has $($credentials.users.Count) users; " +
-    "Tables=$Tables requires $requiredUsers (Tables x 4).")
+    "TableOffset=$TableOffset Tables=$Tables requires users " +
+    "$credentialStart..$($requiredUsers - 1) (total >= $requiredUsers).")
 }
 
-for ($i = 0; $i -lt $requiredUsers; $i++) {
+for ($i = $credentialStart; $i -lt $requiredUsers; $i++) {
   $u         = $credentials.users[$i]
   $email     = if ($null -ne $u.email)    { [string]$u.email }    else { '' }
   $password  = if ($null -ne $u.password) { [string]$u.password } else { '' }
-  $tableNum  = [int][Math]::Floor($i / 4) + 1
+  $tableNum  = [int][Math]::Floor(($i - $credentialStart) / 4) + 1 + $TableOffset
   $playerNum = ($i % 4) + 1
 
   if ([string]::IsNullOrWhiteSpace($email)) {
@@ -315,7 +336,8 @@ $k6EnvArgs = @(
   '-e', "STAKE=$Stake",
   '-e', "REJECTED_ACTION_DIAGNOSTICS=$diagFlag",
   '-e', "COORDINATOR_URL=$coordUrl",
-  '-e', "RUN_ID=$runId"
+  '-e', "RUN_ID=$runId",
+  '-e', "COORDINATOR_TOKEN=$Token"
 )
 
 if ($Dual) {
@@ -329,7 +351,7 @@ if ($Dual) {
     '-e', "SUMMARY_JSON_PATH=$summaryPathB") + $k6EnvArgs + @($k6ScriptPath)
 } else {
   $k6Args = @('run', '--out', "json=$metricsPath",
-    '-e', "TABLES=$Tables", '-e', 'TABLE_OFFSET=0',
+    '-e', "TABLES=$Tables", '-e', "TABLE_OFFSET=$TableOffset",
     '-e', "SUMMARY_JSON_PATH=$summaryPath") + $k6EnvArgs + @($k6ScriptPath)
 }
 
@@ -726,7 +748,8 @@ try {
   # ── 17a. Start coordinator process ─────────────────────────────────────────
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName        = 'node'
-  $psi.Arguments       = "`"$coordScript`" $runId $Tables $coordPort"
+  $coordArgToken       = if ($Token) { " $Token" } else { '' }
+  $psi.Arguments       = "`"$coordScript`" $runId $Tables $coordPort$coordArgToken"
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow  = $true
   $coordProcess = [System.Diagnostics.Process]::Start($psi)
@@ -810,9 +833,10 @@ try {
   Log ''
 
   # ── 17d. Run k6 asynchronously under the external failure supervisor ─────────
-  $statusUrl = "$coordUrl/status?runId=$runId"
+  $statusUrl     = "$coordUrl/status?runId=$runId"
+  $statusHeaders = if ($Token) { @{'X-Belot-Load-Token' = $Token} } else { @{} }
   $statusProvider = {
-    Invoke-RestMethod -Uri $statusUrl -Method Get -TimeoutSec 2 -ErrorAction Stop
+    Invoke-RestMethod -Uri $statusUrl -Method Get -Headers $statusHeaders -TimeoutSec 2 -ErrorAction Stop
   }
   $logAction = {
     param([string]$line, [bool]$isError)

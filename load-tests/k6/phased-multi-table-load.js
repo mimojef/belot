@@ -54,6 +54,7 @@ const SUMMARY_JSON_PATH = __ENV.SUMMARY_JSON_PATH || 'phased-multi-table-load-su
 
 const COORDINATOR_URL = trimTrailingSlashes(__ENV.COORDINATOR_URL || '');
 const RUN_ID = __ENV.RUN_ID || '';
+const COORDINATOR_TOKEN = __ENV.COORDINATOR_TOKEN || '';
 
 if (!COORDINATOR_URL) {
   throw new Error('COORDINATOR_URL env var is required');
@@ -190,7 +191,7 @@ export default function () {
     try { login(account, jar); } catch (e) { loginErr = e; }
     if (loginErr !== null) {
       coordinatorPost(
-        `${COORDINATOR_URL}/failure?runId=${RUN_ID}`,
+        `${COORDINATOR_URL}/failure${coordQs()}`,
         JSON.stringify({ tableIndex: globalTableIndex, playerIndex, phase: 'login', reason: 'login failed' }),
       );
       return;
@@ -200,7 +201,7 @@ export default function () {
     try { validateStake(jar); } catch (e) { stakeErr = e; }
     if (stakeErr !== null) {
       coordinatorPost(
-        `${COORDINATOR_URL}/failure?runId=${RUN_ID}`,
+        `${COORDINATOR_URL}/failure${coordQs()}`,
         JSON.stringify({ tableIndex: globalTableIndex, playerIndex, phase: 'login', reason: 'stake validation failed' }),
       );
       return;
@@ -236,7 +237,7 @@ export function handleSummary(data) {
 
 function pollLoginBarrier(tableIndex, globalTableIndex) {
   const reportResp = coordinatorPost(
-    `${COORDINATOR_URL}/login-ready?runId=${RUN_ID}`,
+    `${COORDINATOR_URL}/login-ready${coordQs()}`,
     JSON.stringify({ tableIndex: globalTableIndex }),
   );
 
@@ -251,7 +252,7 @@ function pollLoginBarrier(tableIndex, globalTableIndex) {
   const deadlineMs = Date.now() + (LOGIN_BARRIER_TIMEOUT_SECONDS * 1000);
 
   while (true) {
-    const pollResp = coordinatorGet(`${COORDINATOR_URL}/login-barrier?runId=${RUN_ID}`);
+    const pollResp = coordinatorGet(`${COORDINATOR_URL}/login-barrier${coordQs()}`);
 
     if (pollResp.status !== 200 || !pollResp.body) {
       phasedLoginBarrierFailed.add(1);
@@ -550,7 +551,7 @@ function markTableWsUnready(tableState) {
   tableState.wsReadyReported = false;
   clearWsBarrierTimer(tableState);
   coordinatorPost(
-    `${COORDINATOR_URL}/ws-unready?runId=${RUN_ID}`,
+    `${COORDINATOR_URL}/ws-unready${coordQs()}`,
     JSON.stringify({ tableIndex: tableState.globalTableIndex }),
   );
 }
@@ -576,7 +577,7 @@ function scheduleGlobalFailurePoll(tableState) {
 
 function observeGlobalWsFailure(tableState) {
   if (tableState.terminal) return true;
-  const response = coordinatorGet(`${COORDINATOR_URL}/ws-barrier?runId=${RUN_ID}`);
+  const response = coordinatorGet(`${COORDINATOR_URL}/ws-barrier${coordQs()}`);
   if (response.status !== 200 || !response.body || !response.body.failed) return false;
   terminateTableLifecycle(
     tableState,
@@ -732,7 +733,7 @@ function maybeReportWsReady(tableState) {
 function reportWsReadyAndStartPolling(tableState) {
   if (tableState.terminal) return;
   const reportResp = coordinatorPost(
-    `${COORDINATOR_URL}/ws-ready?runId=${RUN_ID}`,
+    `${COORDINATOR_URL}/ws-ready${coordQs()}`,
     JSON.stringify({ tableIndex: tableState.globalTableIndex }),
   );
 
@@ -752,7 +753,7 @@ function reportWsReadyAndStartPolling(tableState) {
 
 function pollWsBarrier(tableState, deadlineMs) {
   if (tableState.terminal) return;
-  const pollResp = coordinatorGet(`${COORDINATOR_URL}/ws-barrier?runId=${RUN_ID}`);
+  const pollResp = coordinatorGet(`${COORDINATOR_URL}/ws-barrier${coordQs()}`);
 
   if (pollResp.status !== 200 || !pollResp.body) {
     phasedWebsocketBarrierFailed.add(1);
@@ -869,7 +870,7 @@ function reportTableFailureOnce(tableState, playerIndex, phase, reason) {
   }
   tableState.failureReported = true;
   coordinatorPost(
-    `${COORDINATOR_URL}/failure?runId=${RUN_ID}`,
+    `${COORDINATOR_URL}/failure${coordQs()}`,
     JSON.stringify({ tableIndex: tableState.globalTableIndex, playerIndex, phase, reason }),
   );
 }
@@ -1591,9 +1592,15 @@ function closeSocket(ws) {
 
 // ── Coordinator HTTP helpers ───────────────────────────────────────────────────
 
+function coordQs() {
+  return `?runId=${RUN_ID}`;
+}
+
 function coordinatorPost(url, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (COORDINATOR_TOKEN) headers['X-Belot-Load-Token'] = COORDINATOR_TOKEN;
   const resp = http.post(url, body, {
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     timeout: '10s',
     tags: { name: 'coordinator' },
   });
@@ -1601,10 +1608,9 @@ function coordinatorPost(url, body) {
 }
 
 function coordinatorGet(url) {
-  const resp = http.get(url, {
-    timeout: '5s',
-    tags: { name: 'coordinator' },
-  });
+  const params = { timeout: '5s', tags: { name: 'coordinator' } };
+  if (COORDINATOR_TOKEN) params.headers = { 'X-Belot-Load-Token': COORDINATOR_TOKEN };
+  const resp = http.get(url, params);
   return { status: resp.status, body: parseJson(resp.body) };
 }
 
