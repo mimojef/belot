@@ -1,0 +1,11 @@
+{
+  "name": "belot-multi-process-ws-load",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "validate": "node multi-process-ws-validation.mjs"
+  },
+  "dependencies": {
+    "ws": "8.21.0"
+  }
+}
