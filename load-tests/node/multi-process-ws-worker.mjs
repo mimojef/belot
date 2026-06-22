@@ -253,7 +253,7 @@ export class WsWorker {
     this.failedProfileIndexes.add(player.index);
     incrementMetric(this.metrics, 'terminalProfileFailures');
     if (player.wsStarted) incrementMetric(this.metrics, 'wsTerminalFailures');
-    this.emitProgress('failed');
+    this.emitProgress('progress');
   }
 
   settleAttempt(attempt, error, clearPing = true) {

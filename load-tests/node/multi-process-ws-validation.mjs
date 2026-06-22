@@ -170,15 +170,30 @@ async function main() {
 
     await test('one terminal profile failure does not stop successful profiles', async () => {
       const phases = config();
+      const messages = [];
       const worker = new WsWorker(phases, [
         fake('isolated-failure', 'missing-cookie'), fake('isolated-success'),
-      ]);
+      ], (message) => messages.push(message));
       const results = await worker.start();
       assert.equal(results[0].status, 'rejected');
       assert.equal(results[1].status, 'fulfilled');
+      assert.ok(messages.some((message) => message.type === 'progress'
+        && message.failedProfileIndexes.includes(0)));
+      assert.equal(messages.some((message) => message.type === 'failed'), false);
+      assert.equal(worker.metrics.loginAttempts, 2);
+      assert.equal(worker.metrics.loginFailures, 1);
+      assert.equal(worker.metrics.loginSuccesses, 1);
       assert.equal(worker.metrics.terminalProfileFailures, 1);
+      assert.equal(worker.metrics.wsTerminalFailures, 0);
+      assert.equal(worker.metrics.holdFailures, 0);
       assert.equal(worker.metrics.peakReadyProfiles, 1);
       assert.equal(worker.metrics.stableProfilesAtRelease, 1);
+      const final = messages.find((message) => message.type === 'shutdown-complete');
+      assert.deepEqual(final.failedProfileIndexes, [0]);
+      assert.equal(final.metrics.loginFailures, 1);
+      assert.equal(final.metrics.terminalProfileFailures, 1);
+      assert.equal(final.metrics.wsTerminalFailures, 0);
+      assert.equal(final.metrics.holdFailures, 0);
       assert.ok(Date.now() >= phases.releaseAtMs - 5);
     });
 
