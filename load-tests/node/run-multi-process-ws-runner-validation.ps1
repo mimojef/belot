@@ -44,7 +44,8 @@ function Invoke-Runner {
         [double]$TimeoutSeconds = 20,
         [double]$ControllerTimeoutSeconds = 5,
         [string]$WorkingDirectory = $tempRoot,
-        [string]$Controller = $script:fakeControllerPath
+        [string]$Controller = $script:fakeControllerPath,
+        [string[]]$ExtraArguments = @()
     )
     $arguments = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runnerPath,
@@ -57,6 +58,7 @@ function Invoke-Runner {
         '-HeartbeatTimeoutSeconds', '2', '-ControllerHardTimeoutSeconds', "$ControllerTimeoutSeconds",
         '-HardTimeoutSeconds', "$TimeoutSeconds"
     )
+    $arguments += $ExtraArguments
     $captureId = [Guid]::NewGuid().ToString('N')
     $stdoutPath = Join-Path $tempRoot "$captureId.stdout.txt"
     $stderrPath = Join-Path $tempRoot "$captureId.stderr.txt"
@@ -83,16 +85,54 @@ function Get-RunLogs {
     return @(Get-ChildItem -LiteralPath $Results -Recurse -File -Filter '*.log')
 }
 
+function Get-RunFile {
+    param([string]$Results, [string]$Filter)
+    if (-not (Test-Path -LiteralPath $Results)) { return $null }
+    return Get-ChildItem -LiteralPath $Results -Recurse -File -Filter $Filter |
+        Select-Object -First 1
+}
+
+function Get-ControllerArgs {
+    param([string]$Results)
+    $file = Get-RunFile -Results $Results -Filter 'controller-args.json'
+    if ($null -eq $file) { return @() }
+    return @((Get-Content -Raw -LiteralPath $file.FullName | ConvertFrom-Json).args)
+}
+
+function Get-ControllerArgValue {
+    param([object[]]$ControllerArgs, [string]$Name)
+    for ($index = 0; $index -lt $ControllerArgs.Count - 1; $index += 1) {
+        if ([string]$ControllerArgs[$index] -ceq $Name) {
+            return [string]$ControllerArgs[$index + 1]
+        }
+    }
+    return $null
+}
+
+function Test-ControllerNotStarted {
+    param([string]$Results)
+    return $null -eq (Get-RunFile -Results $Results -Filter 'controller.pid')
+}
+
 try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     $otherDirectory = Join-Path $tempRoot 'other-current-directory'
     New-Item -ItemType Directory -Path $otherDirectory -Force | Out-Null
     $credentials4 = Join-Path $tempRoot 'credentials-4.json'
+    $credentials8 = Join-Path $tempRoot 'credentials-8.json'
     $credentials3 = Join-Path $tempRoot 'credentials-3.json'
     $credentials1600 = Join-Path $tempRoot 'credentials-1600.json'
     Write-FakeCredentials -Path $credentials4 -Count 4
+    Write-FakeCredentials -Path $credentials8 -Count 8
     Write-FakeCredentials -Path $credentials3 -Count 3
     Write-FakeCredentials -Path $credentials1600 -Count 1600
+    $matchmakingArgs = @(
+        '-MatchmakingEnabled',
+        '-MatchmakingStake', '5000',
+        '-MatchmakingReadinessTimeoutMs', '12000',
+        '-MatchmakingTableTimeoutMs', '6000',
+        '-MatchmakingAdmissionPauseMs', '25'
+    )
 
     $script:fakeControllerPath = Join-Path $tempRoot 'fake-controller.mjs'
     @'
@@ -104,6 +144,7 @@ const value = (name) => args[args.indexOf(name) + 1];
 const outputDirectory = value('--output-directory');
 fs.mkdirSync(outputDirectory, { recursive: true });
 fs.writeFileSync(path.join(outputDirectory, 'controller.pid'), String(process.pid));
+fs.writeFileSync(path.join(outputDirectory, 'controller-args.json'), JSON.stringify({ args }));
 const writeFinal = (exitCode) => fs.writeFileSync(
   path.join(outputDirectory, 'multi-process-ws-final.json'),
   JSON.stringify({ status: 'final', exitCode }),
@@ -156,6 +197,78 @@ if (outputDirectory.includes('timeout-case')) {
     $differentCwd = Invoke-Runner -Credentials $credentials4 `
         -Results (Join-Path $tempRoot 'different-cwd') -WorkingDirectory $otherDirectory
     Assert-True 'runner works from a different current directory' ($differentCwd.ExitCode -eq 0)
+    $defaultArgs = Get-ControllerArgs -Results $differentCwd.Results
+    Assert-True 'matchmaking is disabled by default and old controller command remains valid' `
+        ($differentCwd.ExitCode -eq 0 -and
+            $defaultArgs -notcontains '--matchmaking-enabled' -and
+            $defaultArgs -notcontains '--matchmaking-table-timeout-ms' -and
+            (Get-ControllerArgValue -ControllerArgs $defaultArgs -Name '--readiness-duration-ms') -eq '1000')
+
+    $matchmakingEnabled = Invoke-Runner -Credentials $credentials4 `
+        -Results (Join-Path $tempRoot 'matchmaking-enabled') -ExtraArguments $matchmakingArgs
+    $matchmakingControllerArgs = Get-ControllerArgs -Results $matchmakingEnabled.Results
+    Assert-True 'matchmaking enabled passes the real controller parameters' `
+        ($matchmakingEnabled.ExitCode -eq 0 -and
+            (Get-ControllerArgValue -ControllerArgs $matchmakingControllerArgs -Name '--matchmaking-enabled') -eq 'true' -and
+            (Get-ControllerArgValue -ControllerArgs $matchmakingControllerArgs -Name '--readiness-duration-ms') -eq '12000' -and
+            (Get-ControllerArgValue -ControllerArgs $matchmakingControllerArgs -Name '--matchmaking-table-timeout-ms') -eq '6000' -and
+            (Get-ControllerArgValue -ControllerArgs $matchmakingControllerArgs -Name '--matchmaking-admission-pause-ms') -eq '25' -and
+            (Get-ControllerArgValue -ControllerArgs $matchmakingControllerArgs -Name '--tables') -eq '1')
+    Assert-True 'matchmaking stake 5000 is accepted' ($matchmakingEnabled.ExitCode -eq 0)
+
+    $wrongStake = Invoke-Runner -Credentials $credentials4 `
+        -Results (Join-Path $tempRoot 'matchmaking-wrong-stake') `
+        -ExtraArguments @('-MatchmakingEnabled', '-MatchmakingStake', '4999',
+            '-MatchmakingReadinessTimeoutMs', '12000',
+            '-MatchmakingTableTimeoutMs', '6000',
+            '-MatchmakingAdmissionPauseMs', '25')
+    Assert-True 'matchmaking rejects unsupported stake before child process' `
+        ($wrongStake.ExitCode -eq 2 -and (Test-ControllerNotStarted -Results $wrongStake.Results))
+
+    $missingStake = Invoke-Runner -Credentials $credentials4 `
+        -Results (Join-Path $tempRoot 'matchmaking-missing-stake') `
+        -ExtraArguments @('-MatchmakingEnabled',
+            '-MatchmakingReadinessTimeoutMs', '12000',
+            '-MatchmakingTableTimeoutMs', '6000',
+            '-MatchmakingAdmissionPauseMs', '25')
+    Assert-True 'matchmaking rejects missing stake before child process' `
+        ($missingStake.ExitCode -eq 2 -and (Test-ControllerNotStarted -Results $missingStake.Results))
+
+    $invalidStake = Invoke-Runner -Credentials $credentials4 `
+        -Results (Join-Path $tempRoot 'matchmaking-invalid-stake') `
+        -ExtraArguments @('-MatchmakingEnabled', '-MatchmakingStake', 'not-a-number',
+            '-MatchmakingReadinessTimeoutMs', '12000',
+            '-MatchmakingTableTimeoutMs', '6000',
+            '-MatchmakingAdmissionPauseMs', '25')
+    Assert-True 'matchmaking rejects invalid stake before child process' `
+        ($invalidStake.ExitCode -eq 2 -and (Test-ControllerNotStarted -Results $invalidStake.Results))
+
+    $zeroTiming = Invoke-Runner -Credentials $credentials4 `
+        -Results (Join-Path $tempRoot 'matchmaking-zero-timing') `
+        -ExtraArguments @('-MatchmakingEnabled', '-MatchmakingStake', '5000',
+            '-MatchmakingReadinessTimeoutMs', '0',
+            '-MatchmakingTableTimeoutMs', '6000',
+            '-MatchmakingAdmissionPauseMs', '25')
+    Assert-True 'matchmaking rejects zero timing values before child process' `
+        ($zeroTiming.ExitCode -eq 2 -and (Test-ControllerNotStarted -Results $zeroTiming.Results))
+
+    $negativeTiming = Invoke-Runner -Credentials $credentials4 `
+        -Results (Join-Path $tempRoot 'matchmaking-negative-timing') `
+        -ExtraArguments @('-MatchmakingEnabled', '-MatchmakingStake', '5000',
+            '-MatchmakingReadinessTimeoutMs', '12000',
+            '-MatchmakingTableTimeoutMs', '-1',
+            '-MatchmakingAdmissionPauseMs', '25')
+    Assert-True 'matchmaking rejects negative timing values before child process' `
+        ($negativeTiming.ExitCode -eq 2 -and (Test-ControllerNotStarted -Results $negativeTiming.Results))
+
+    $nonNumericTiming = Invoke-Runner -Credentials $credentials4 `
+        -Results (Join-Path $tempRoot 'matchmaking-nonnumeric-timing') `
+        -ExtraArguments @('-MatchmakingEnabled', '-MatchmakingStake', '5000',
+            '-MatchmakingReadinessTimeoutMs', '12000',
+            '-MatchmakingTableTimeoutMs', '6000',
+            '-MatchmakingAdmissionPauseMs', 'soon')
+    Assert-True 'matchmaking rejects nonnumeric timing values before child process' `
+        ($nonNumericTiming.ExitCode -eq 2 -and (Test-ControllerNotStarted -Results $nonNumericTiming.Results))
 
     $missingNode = Invoke-Runner -Credentials $credentials4 `
         -Results (Join-Path $tempRoot 'missing-node') -Node 'definitely-missing-node.exe'
@@ -167,6 +280,13 @@ if (outputDirectory.includes('timeout-case')) {
 
     $tooFew = Invoke-Runner -Credentials $credentials3 -Results (Join-Path $tempRoot 'too-few')
     Assert-True 'insufficient credentials count is rejected' ($tooFew.ExitCode -eq 2)
+
+    $matchmakingTooManyCredentials = Invoke-Runner -Credentials $credentials8 `
+        -Results (Join-Path $tempRoot 'matchmaking-too-many-credentials') `
+        -ExtraArguments $matchmakingArgs
+    Assert-True 'matchmaking requires credential count to equal Tables times four' `
+        ($matchmakingTooManyCredentials.ExitCode -eq 2 -and
+            (Test-ControllerNotStarted -Results $matchmakingTooManyCredentials.Results))
 
     $production = Invoke-Runner -Credentials $credentials4 `
         -Results (Join-Path $tempRoot 'pika-rejected') `
@@ -181,6 +301,16 @@ if (outputDirectory.includes('timeout-case')) {
     $tables400 = Invoke-Runner -Credentials $credentials1600 `
         -Results (Join-Path $tempRoot 'tables-400') -Tables 400 -Workers 8
     Assert-True '400 tables and 1600 profiles are accepted with fake controller' ($tables400.ExitCode -eq 0)
+
+    $matchmakingTables400 = Invoke-Runner -Credentials $credentials1600 `
+        -Results (Join-Path $tempRoot 'matchmaking-tables-400') -Tables 400 -Workers 8 `
+        -ExtraArguments $matchmakingArgs
+    $matchmakingTables400Args = Get-ControllerArgs -Results $matchmakingTables400.Results
+    Assert-True 'matchmaking builds 400 tables across 8 workers for 50 local tables each' `
+        ($matchmakingTables400.ExitCode -eq 0 -and
+            (Get-ControllerArgValue -ControllerArgs $matchmakingTables400Args -Name '--tables') -eq '400' -and
+            (Get-ControllerArgValue -ControllerArgs $matchmakingTables400Args -Name '--workers') -eq '8' -and
+            (Get-ControllerArgValue -ControllerArgs $matchmakingTables400Args -Name '--matchmaking-enabled') -eq 'true')
 
     $tables401 = Invoke-Runner -Credentials $credentials1600 `
         -Results (Join-Path $tempRoot 'tables-401') -Tables 401 -Workers 8
@@ -217,6 +347,16 @@ setTimeout(() => process.exit($code), 30);
     Assert-True 'valid final summaries preserve controller exit codes 0, 1, 2 and 3' $codesPreserved `
         ($observedCodes -join ',')
 
+    $matchmakingFailureExit = Invoke-Runner -Credentials $credentials4 `
+        -Results (Join-Path $tempRoot 'matchmaking-exit-1') -ExtraArguments $matchmakingArgs
+    Assert-True 'matchmaking workload failures preserve exit code 1' `
+        ($matchmakingFailureExit.ExitCode -eq 1)
+
+    $matchmakingFatalExit = Invoke-Runner -Credentials $credentials4 `
+        -Results (Join-Path $tempRoot 'matchmaking-exit-3') -ExtraArguments $matchmakingArgs
+    Assert-True 'matchmaking fatal orchestration failures preserve exit code 3' `
+        ($matchmakingFatalExit.ExitCode -eq 3)
+
     $missingSummary = Invoke-Runner -Credentials $credentials4 `
         -Results (Join-Path $tempRoot 'missing-summary-case')
     Assert-True 'missing final summary returns exit code 3' ($missingSummary.ExitCode -eq 3)
@@ -250,7 +390,14 @@ setTimeout(() => process.exit($code), 30);
     $timeoutResults = Join-Path $tempRoot 'timeout-case'
     $timeout = Invoke-Runner -Credentials $credentials4 -Results $timeoutResults `
         -ControllerTimeoutSeconds 1 -TimeoutSeconds 11
-    Assert-True 'independent hard timeout returns 124' ($timeout.ExitCode -eq 124)
+    Assert-True 'independent hard timeout returns 124' ($timeout.ExitCode -eq 124) `
+        "exit=$($timeout.ExitCode)"
+
+    $matchmakingTimeout = Invoke-Runner -Credentials $credentials4 `
+        -Results (Join-Path $tempRoot 'matchmaking-timeout-case') `
+        -ControllerTimeoutSeconds 1 -TimeoutSeconds 11 -ExtraArguments $matchmakingArgs
+    Assert-True 'matchmaking mode preserves outer watchdog exit code 124' `
+        ($matchmakingTimeout.ExitCode -eq 124) "exit=$($matchmakingTimeout.ExitCode)"
 
     $controllerPidFile = Get-ChildItem -LiteralPath $timeoutResults -Recurse -File `
         -Filter 'controller.pid' | Select-Object -First 1
@@ -286,6 +433,22 @@ setTimeout(() => process.exit($code), 30);
     foreach ($log in $logs) { $allText += "`n" + (Get-Content -Raw -LiteralPath $log.FullName) }
     Assert-True 'output and logs contain no passwords, cookies, or sessions' `
         ($allText -notmatch 'DO_NOT_LEAK_PASSWORD|belot_session|cookie|session')
+
+    $matchmakingFinalFile = Get-RunFile -Results $matchmakingEnabled.Results `
+        -Filter 'multi-process-ws-final.json'
+    $matchmakingFinalText = if ($matchmakingFinalFile) {
+        Get-Content -Raw -LiteralPath $matchmakingFinalFile.FullName
+    } else {
+        ''
+    }
+    $matchmakingText = @(
+        $matchmakingEnabled.Output,
+        (Get-ControllerArgs -Results $matchmakingEnabled.Results) -join ' ',
+        $matchmakingFinalText
+    ) -join "`n"
+    Assert-True 'matchmaking command capture and summary contain no credential values or secrets' `
+        ($matchmakingText -notmatch
+            'fake-0@example\.test|DO_NOT_LEAK_PASSWORD|belot_session|cookie|session|roomId')
 
     $normalPids = Get-ChildItem -LiteralPath (Join-Path $tempRoot 'exit-0') -Recurse -File `
         -Filter 'controller.pid' | ForEach-Object { [int](Get-Content -Raw $_.FullName) }

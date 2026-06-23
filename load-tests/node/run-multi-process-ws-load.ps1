@@ -22,6 +22,11 @@ param(
     [double]$HeartbeatTimeoutSeconds = 10,
     [double]$ControllerHardTimeoutSeconds = 120,
     [double]$HardTimeoutSeconds = 150,
+    [switch]$MatchmakingEnabled,
+    [object]$MatchmakingStake = $null,
+    [object]$MatchmakingReadinessTimeoutMs = $null,
+    [object]$MatchmakingTableTimeoutMs = $null,
+    [object]$MatchmakingAdmissionPauseMs = $null,
     [string]$NodeExecutable = 'node',
     [string]$ControllerPath = (Join-Path $PSScriptRoot 'multi-process-ws-controller.mjs')
 )
@@ -68,6 +73,32 @@ function Assert-NumberRange {
     if ([double]::IsNaN($Value) -or [double]::IsInfinity($Value) -or
         $Value -lt $Minimum -or $Value -gt $Maximum) {
         throw "$Name must be between $Minimum and $Maximum."
+    }
+}
+
+function Convert-ToRequiredPositiveMilliseconds {
+    param([string]$Name, $Value)
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        throw "$Name must be provided."
+    }
+    try {
+        $parsed = [int64]::Parse([string]$Value, [System.Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+        throw "$Name must be a positive integer millisecond value."
+    }
+    if ($parsed -le 0) { throw "$Name must be positive." }
+    return $parsed
+}
+
+function Convert-ToRequiredStake {
+    param($Value)
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        throw 'MatchmakingStake must be provided.'
+    }
+    try {
+        return [int64]::Parse([string]$Value, [System.Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+        throw 'MatchmakingStake must be an integer.'
     }
 }
 
@@ -124,6 +155,20 @@ try {
     }
     $requiredProfiles = $Tables * 4
     if ($requiredProfiles -gt 1600) { throw 'Requested profile count exceeds 1600.' }
+    $controllerReadinessMs = Convert-ToMilliseconds $WsReadinessSeconds
+    $matchmakingStakeValue = $null
+    $matchmakingTableTimeoutMsValue = $null
+    $matchmakingAdmissionPauseMsValue = $null
+    if ($MatchmakingEnabled) {
+        $matchmakingStakeValue = Convert-ToRequiredStake $MatchmakingStake
+        if ($matchmakingStakeValue -ne 5000) { throw 'MatchmakingStake must be exactly 5000.' }
+        $controllerReadinessMs = Convert-ToRequiredPositiveMilliseconds `
+            'MatchmakingReadinessTimeoutMs' $MatchmakingReadinessTimeoutMs
+        $matchmakingTableTimeoutMsValue = Convert-ToRequiredPositiveMilliseconds `
+            'MatchmakingTableTimeoutMs' $MatchmakingTableTimeoutMs
+        $matchmakingAdmissionPauseMsValue = Convert-ToRequiredPositiveMilliseconds `
+            'MatchmakingAdmissionPauseMs' $MatchmakingAdmissionPauseMs
+    }
 
     $allowedPair = (
         ($HttpBaseUrl -ceq 'http://185.203.117.14:3101' -and
@@ -157,6 +202,9 @@ try {
     if ($credentialsDocument.users.Count -lt $requiredProfiles) {
         throw "Credentials file contains fewer than the required $requiredProfiles profiles."
     }
+    if ($MatchmakingEnabled -and $credentialsDocument.users.Count -ne $requiredProfiles) {
+        throw "Matchmaking requires exactly $requiredProfiles credentials."
+    }
     $credentialsDocument = $null
 
     $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
@@ -181,11 +229,18 @@ try {
         '--credentials', (Quote-ProcessArgument $resolvedCredentials),
         '--output-directory', (Quote-ProcessArgument $runDirectory),
         '--login-spread-ms', "$(Convert-ToMilliseconds $LoginSpreadSeconds)",
-        '--readiness-duration-ms', "$(Convert-ToMilliseconds $WsReadinessSeconds)",
+        '--readiness-duration-ms', "$controllerReadinessMs",
         '--hold-duration-ms', "$(Convert-ToMilliseconds $HoldSeconds)",
         '--heartbeat-timeout-ms', "$(Convert-ToMilliseconds $HeartbeatTimeoutSeconds)",
         '--hard-timeout-ms', "$(Convert-ToMilliseconds $ControllerHardTimeoutSeconds)"
     )
+    if ($MatchmakingEnabled) {
+        $arguments += @(
+            '--matchmaking-enabled', 'true',
+            '--matchmaking-table-timeout-ms', "$matchmakingTableTimeoutMsValue",
+            '--matchmaking-admission-pause-ms', "$matchmakingAdmissionPauseMsValue"
+        )
+    }
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $nodePath
@@ -211,7 +266,11 @@ try {
     while (-not $controller.HasExited) {
         if ($stopwatch.Elapsed.TotalSeconds -ge $HardTimeoutSeconds) {
             $timedOut = $true
-            Stop-ControllerProcess -Process $controller
+            try {
+                Stop-ControllerProcess -Process $controller
+            } catch {
+                Stop-Process -Id $controller.Id -Force -ErrorAction SilentlyContinue
+            }
             break
         }
         if ($stopwatch.Elapsed.TotalSeconds -ge $nextProgressAtSeconds) {
