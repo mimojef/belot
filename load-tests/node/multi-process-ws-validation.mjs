@@ -109,6 +109,100 @@ async function runWorker(credentials, overrides = {}, inspect = () => {}) {
   return { worker, messages, results };
 }
 
+const SERVER_SEATS = ['bottom', 'right', 'top', 'left'];
+
+function fullHumanSnapshot(roomId, yourSeat, overrides = {}) {
+  return {
+    type: 'room_snapshot',
+    roomId,
+    yourSeat,
+    seats: SERVER_SEATS.map((seat) => ({
+      seat, isOccupied: true, isBot: false, isControlledByBot: false, isConnected: true,
+    })),
+    game: { authoritativePhase: 'cutting' },
+    stakeAmount: 5000,
+    ...overrides,
+  };
+}
+
+async function startLocalFakeWorker(credentials, overrides = {}) {
+  const sockets = [];
+  const messages = [];
+  class FakeSocket extends EventEmitter {
+    static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
+    constructor(_url, options) {
+      super();
+      this.options = options;
+      this.readyState = FakeSocket.CONNECTING;
+      this.sent = [];
+      sockets.push(this);
+      setTimeout(() => {
+        if (this.readyState === FakeSocket.CLOSED) return;
+        this.readyState = FakeSocket.OPEN;
+        this.emit('open');
+      }, 0);
+    }
+    send(data) {
+      if (this.readyState !== FakeSocket.OPEN) throw new Error('fake socket not open');
+      this.sent.push(JSON.parse(data.toString()));
+    }
+    serverSend(message) {
+      this.emit('message', Buffer.from(JSON.stringify(message)));
+    }
+    close() { this.terminate(); }
+    terminate() {
+      if (this.readyState === FakeSocket.CLOSED) return;
+      this.readyState = FakeSocket.CLOSED;
+      this.emit('close');
+    }
+  }
+  const now = Date.now();
+  const worker = new WsWorker(config({
+    loginStartAtMs: now, wsStartAtMs: now, readinessDeadlineAtMs: now + 1_000,
+    releaseAtMs: now + 2_000, loginSpreadMs: 0, attemptTimeoutMs: 700,
+    pingIntervalMs: 10_000, heartbeatIntervalMs: 20, ...overrides,
+  }), credentials, (message) => messages.push(message), {
+    WebSocket: FakeSocket,
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const id = body.email.match(/^fake-(.+)@example\.test$/)?.[1] ?? 'local';
+      return { status: 200, headers: new Headers({
+        'set-cookie': `belot_session=${id}; HttpOnly`,
+      }), json: async () => ({ ok: true, session: {} }) };
+    },
+  });
+  const startPromise = worker.start();
+  await waitFor(() => sockets.length === credentials.length, 500, 'fake sockets were not created');
+  await waitFor(() => worker.metrics.wsOpens === credentials.length, 500, 'fake sockets did not open');
+  return {
+    worker,
+    sockets,
+    messages,
+    startPromise,
+    connect(count = sockets.length) {
+      for (let index = 0; index < count; index += 1) {
+        sockets[index].serverSend({ type: 'connected' });
+      }
+    },
+    async stop() {
+      await worker.shutdown();
+      await startPromise;
+    },
+  };
+}
+
+async function startJoinedLocalTable(overrides = {}) {
+  const harness = await startLocalFakeWorker([
+    fake('local-a', 'secret-a'), fake('local-b', 'secret-b'),
+    fake('local-c', 'secret-c'), fake('local-d', 'secret-d'),
+  ], overrides);
+  harness.worker.allowMatchmakingTable(0);
+  harness.connect();
+  await waitFor(() => harness.sockets.every((socket) => socket.sent.length === 1),
+    500, 'join_matchmaking was not sent for all local sockets');
+  return harness;
+}
+
 async function main() {
   await test('target validation is allowlisted and fail-closed', () => {
     validateTargetPair('http://185.203.117.14:3101', 'ws://185.203.117.14:3101/ws');
@@ -391,6 +485,722 @@ async function main() {
   } finally {
     await servers.close();
   }
+
+  await test('matchmaking sends exact join payload with numeric stake', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      for (const socket of harness.sockets) {
+        assert.deepEqual(socket.sent, [{ type: 'join_matchmaking', stake: 5000 }]);
+        assert.equal(typeof socket.sent[0].stake, 'number');
+      }
+      assert.equal(harness.worker.metrics.matchmakingJoinAttempts, 4);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking join waits for all four connected sockets', async () => {
+    const harness = await startLocalFakeWorker([
+      fake('wait-a'), fake('wait-b'), fake('wait-c'), fake('wait-d'),
+    ]);
+    try {
+      harness.worker.allowMatchmakingTable(0);
+      harness.connect(3);
+      await sleep(40);
+      assert.equal(harness.sockets.some((socket) => socket.sent.length > 0), false);
+      harness.sockets[3].serverSend({ type: 'connected' });
+      await waitFor(() => harness.sockets.every((socket) => socket.sent.length === 1),
+        500, 'join was not sent after the fourth socket connected');
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('safe matchmaking state reports worker-local table indexes for two local tables', async () => {
+    const harness = await startLocalFakeWorker([
+      fake('two-table-0a'), fake('two-table-0b'), fake('two-table-0c'), fake('two-table-0d'),
+      fake('two-table-1a'), fake('two-table-1b'), fake('two-table-1c'), fake('two-table-1d'),
+    ]);
+    try {
+      harness.connect();
+      await waitFor(() => harness.worker.ready.size === 8, 500, 'fake sockets did not connect');
+      const accepted = harness.worker.allowMatchmakingTable(1);
+      assert.equal(accepted, true);
+      await waitFor(() => harness.sockets.slice(4, 8).every((socket) => socket.sent.length === 1),
+        500, 'table 1 did not send joins');
+      assert.deepEqual(harness.sockets.slice(0, 4).map((socket) => socket.sent.length), [0, 0, 0, 0]);
+
+      SERVER_SEATS.forEach((seat, offset) => {
+        const socket = harness.sockets[4 + offset];
+        socket.serverSend({
+          type: 'match_found', roomId: 'room-local-table-1', seat, stake: 5000,
+          humanPlayers: 4, botPlayers: 0,
+        });
+        socket.serverSend(fullHumanSnapshot('room-local-table-1', seat));
+      });
+      let state = harness.worker.safeMatchmakingState();
+      assert.deepEqual(state.admittedTableIndexes, [1]);
+      assert.deepEqual(state.joinStartedTableIndexes, [1]);
+      assert.deepEqual(state.confirmedTableIndexes, [1]);
+      assert.deepEqual(state.startedTableIndexes, [1]);
+      assert.deepEqual(state.readyTableIndexes, [1]);
+      assert.equal(state.admittedTables, 1);
+      assert.equal(state.joinStartedTables, 1);
+      assert.equal(state.confirmedTables, 1);
+      assert.equal(state.startedTables, 1);
+      assert.equal(state.readyTables, 1);
+
+      harness.worker.allowMatchmakingTable(1);
+      await sleep(30);
+      assert.deepEqual(harness.sockets.slice(4, 8).map((socket) => socket.sent.length), [1, 1, 1, 1]);
+
+      harness.worker.allowMatchmakingTable(0);
+      harness.sockets[0].serverSend({ type: 'matchmaking_left' });
+      await waitFor(() => harness.worker.tables[0].failureCode === 'matchmaking_left',
+        500, 'table 0 did not fail');
+      state = harness.worker.safeMatchmakingState();
+      assert.deepEqual(state.failures, [
+        { tableIndex: 0, failureCode: 'matchmaking_left' },
+      ]);
+      assert.deepEqual(state.readyTableIndexes, [1]);
+      assert.deepEqual(state.startedTableIndexes, [1]);
+      assert.equal(state.failedTables, 1);
+      assert.equal(state.readyTables, 1);
+      assert.equal(state.startedTables, 1);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('profile failure before admission rejects admission and sends no joins', async () => {
+    const harness = await startLocalFakeWorker([
+      fake('pre-admit-a'), fake('pre-admit-b'), fake('pre-admit-c'), fake('pre-admit-d'),
+    ]);
+    try {
+      harness.worker.failProfile(harness.worker.players[0], new Error('synthetic pre-admission'), false);
+      const accepted = harness.worker.allowMatchmakingTable(0);
+      assert.equal(accepted, false);
+      assert.equal(harness.worker.tables[0].failureCode, 'profile_failed_before_join');
+      assert.equal(harness.worker.metrics.matchmakingAdmittedTables, 0);
+      assert.equal(harness.worker.metrics.matchmakingJoinAttempts, 0);
+      assert.deepEqual(harness.sockets.map((socket) => socket.sent.length), [0, 0, 0, 0]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('admitted table fails immediately on profile failure before join', async () => {
+    const harness = await startLocalFakeWorker([
+      fake('admitted-fail-a'), fake('admitted-fail-b'),
+      fake('admitted-fail-c'), fake('admitted-fail-d'),
+    ]);
+    try {
+      const accepted = harness.worker.allowMatchmakingTable(0);
+      assert.equal(accepted, true);
+      harness.worker.failProfile(harness.worker.players[1], new Error('synthetic admitted failure'), false);
+      assert.equal(harness.worker.tables[0].failureCode, 'profile_failed_before_join');
+      assert.equal(harness.worker.metrics.matchmakingJoinAttempts, 0);
+      assert.deepEqual(harness.sockets.map((socket) => socket.sent.length), [0, 0, 0, 0]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking sends at most one join per profile', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.worker.allowMatchmakingTable(0);
+      harness.connect();
+      await sleep(30);
+      assert.deepEqual(harness.sockets.map((socket) => socket.sent.length), [1, 1, 1, 1]);
+      assert.equal(harness.worker.metrics.matchmakingJoinAttempts, 4);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking records joined and status acknowledgements', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      for (const socket of harness.sockets) {
+        socket.serverSend({ type: 'matchmaking_joined', stake: 5000, requiredPlayers: 4 });
+        socket.serverSend({ type: 'matchmaking_status', stake: 5000, requiredPlayers: 4 });
+      }
+      assert.equal(harness.worker.metrics.matchmakingJoinAcks, 4);
+      assert.equal(harness.worker.metrics.matchmakingStatusAcks, 4);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('wrong-stake matchmaking_joined fails without ack counter', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({ type: 'matchmaking_joined', stake: 4999, requiredPlayers: 4 });
+      assert.equal(harness.worker.tables[0].failureCode, 'stake_mismatch');
+      assert.equal(harness.worker.metrics.matchmakingJoinAcks, 0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('wrong-stake matchmaking_status fails without status counter', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({ type: 'matchmaking_status', stake: '5000', requiredPlayers: 4 });
+      assert.equal(harness.worker.tables[0].failureCode, 'stake_mismatch');
+      assert.equal(harness.worker.metrics.matchmakingStatusAcks, 0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('wrong requiredPlayers matchmaking_joined fails without ack counter', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({ type: 'matchmaking_joined', stake: 5000, requiredPlayers: 3 });
+      assert.equal(harness.worker.tables[0].failureCode, 'required_players_mismatch');
+      assert.equal(harness.worker.metrics.matchmakingJoinAcks, 0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('missing or wrong requiredPlayers matchmaking_status fails without status counter', async () => {
+    const missing = await startJoinedLocalTable();
+    try {
+      missing.sockets[0].serverSend({ type: 'matchmaking_status', stake: 5000 });
+      assert.equal(missing.worker.tables[0].failureCode, 'required_players_mismatch');
+      assert.equal(missing.worker.metrics.matchmakingStatusAcks, 0);
+    } finally {
+      await missing.stop();
+    }
+
+    const wrong = await startJoinedLocalTable();
+    try {
+      wrong.sockets[0].serverSend({ type: 'matchmaking_status', stake: 5000, requiredPlayers: '4' });
+      assert.equal(wrong.worker.tables[0].failureCode, 'required_players_mismatch');
+      assert.equal(wrong.worker.metrics.matchmakingStatusAcks, 0);
+    } finally {
+      await wrong.stop();
+    }
+  });
+
+  await test('wrong-stake match_found fails without match-found counter', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({
+        type: 'match_found', roomId: 'room-wrong-stake', seat: 'bottom', stake: 10,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      assert.equal(harness.worker.tables[0].failureCode, 'stake_mismatch');
+      assert.equal(harness.worker.metrics.matchmakingMatchFounds, 0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('unknown match_found seat fails without match-found counter', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({
+        type: 'match_found', roomId: 'room-unknown-match-seat', seat: 'north', stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      assert.equal(harness.worker.tables[0].failureCode, 'unknown_seat');
+      assert.equal(harness.worker.metrics.matchmakingMatchFounds, 0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('server error after join fails the table without leaking details', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({
+        type: 'error', message: 'secret room room-123 belot_session=leak',
+      });
+      assert.equal(harness.worker.tables[0].failureCode, 'server_error');
+      await harness.stop();
+      const final = harness.messages.find((message) => message.type === 'shutdown-complete');
+      assert.deepEqual(final.matchmaking.failures, [
+        { tableIndex: 0, failureCode: 'server_error' },
+      ]);
+      assert.doesNotMatch(JSON.stringify(harness.messages), /room-123|belot_session|leak/i);
+    } finally {
+      if (harness.worker.metrics.cleanupCompleted === 0) await harness.stop();
+    }
+  });
+
+  await test('matchmaking_expired after join fails immediately', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({ type: 'matchmaking_expired', stake: 5000 });
+      assert.equal(harness.worker.tables[0].failureCode, 'matchmaking_expired');
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('wrong-stake matchmaking_expired fails with stake_mismatch', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({ type: 'matchmaking_expired', stake: null });
+      assert.equal(harness.worker.tables[0].failureCode, 'stake_mismatch');
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking_left after join fails immediately', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({ type: 'matchmaking_left' });
+      assert.equal(harness.worker.tables[0].failureCode, 'matchmaking_left');
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('session_displaced before admission rejects future admission', async () => {
+    const harness = await startLocalFakeWorker([
+      fake('displaced-a'), fake('displaced-b'), fake('displaced-c'), fake('displaced-d'),
+    ]);
+    try {
+      harness.connect();
+      await waitFor(() => harness.worker.ready.size === 4, 500, 'fake sockets did not connect');
+      harness.sockets[0].serverSend({ type: 'session_displaced' });
+      const accepted = harness.worker.allowMatchmakingTable(0);
+      assert.equal(accepted, false);
+      assert.equal(harness.worker.tables[0].failureCode, 'profile_failed_before_join');
+      assert.equal(harness.worker.metrics.matchmakingJoinAttempts, 0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('session_in_game before admission rejects future admission', async () => {
+    const harness = await startLocalFakeWorker([
+      fake('in-game-a'), fake('in-game-b'), fake('in-game-c'), fake('in-game-d'),
+    ]);
+    try {
+      harness.connect();
+      await waitFor(() => harness.worker.ready.size === 4, 500, 'fake sockets did not connect');
+      harness.sockets[0].serverSend({ type: 'session_in_game', roomId: 'secret-room' });
+      const accepted = harness.worker.allowMatchmakingTable(0);
+      assert.equal(accepted, false);
+      assert.equal(harness.worker.tables[0].failureCode, 'profile_failed_before_join');
+      assert.equal(harness.worker.metrics.matchmakingJoinAttempts, 0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking accepts one room id with four distinct seats and snapshots', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      SERVER_SEATS.forEach((seat, index) => {
+        harness.sockets[index].serverSend({
+          type: 'match_found', roomId: 'room-ok', seat, stake: 5000,
+          humanPlayers: 4, botPlayers: 0,
+        });
+        harness.sockets[index].serverSend(fullHumanSnapshot('room-ok', seat));
+      });
+      assert.equal(harness.worker.metrics.matchmakingMatchFounds, 4);
+      assert.equal(harness.worker.metrics.matchmakingSnapshots, 4);
+      assert.equal(harness.worker.metrics.matchmakingConfirmedTables, 1);
+      assert.equal(harness.worker.metrics.matchmakingStartedTables, 1);
+      assert.equal(harness.worker.metrics.matchmakingReadyTables, 1);
+      assert.equal(harness.worker.tables[0].ready, true);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking rejects snapshot before match_found with different seat', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend(fullHumanSnapshot('room-order', 'right'));
+      harness.sockets[0].serverSend({
+        type: 'match_found', roomId: 'room-order', seat: 'bottom', stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      assert.equal(harness.worker.tables[0].failureCode, 'snapshot_seat_mismatch');
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('duplicate match_found for the same profile is idempotent', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      const message = {
+        type: 'match_found', roomId: 'room-dupe-ok', seat: 'bottom', stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      };
+      harness.sockets[0].serverSend(message);
+      harness.sockets[0].serverSend(message);
+      assert.equal(harness.worker.metrics.matchmakingMatchFounds, 1);
+      assert.equal(harness.worker.tables[0].failureCode, null);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('duplicate snapshot for the same profile is idempotent', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      const snapshot = fullHumanSnapshot('room-snap-dupe-ok', 'bottom');
+      harness.sockets[0].serverSend(snapshot);
+      harness.sockets[0].serverSend(snapshot);
+      assert.equal(harness.worker.metrics.matchmakingSnapshots, 1);
+      assert.equal(harness.worker.tables[0].failureCode, null);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('conflicting duplicate match_found fails the table', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({
+        type: 'match_found', roomId: 'room-conflict', seat: 'bottom', stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      harness.sockets[0].serverSend({
+        type: 'match_found', roomId: 'room-conflict', seat: 'right', stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      assert.equal(harness.worker.tables[0].failureCode, 'conflicting_match_found');
+      assert.equal(harness.worker.metrics.matchmakingTableFailures, 1);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking rejects mixed room ids', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({
+        type: 'match_found', roomId: 'room-a', seat: 'bottom', stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      harness.sockets[1].serverSend({
+        type: 'match_found', roomId: 'room-b', seat: 'right', stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      assert.equal(harness.worker.tables[0].failureCode, 'mixed_room_id');
+      assert.equal(harness.worker.metrics.matchmakingTableFailures, 1);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking rejects duplicate seats', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({
+        type: 'match_found', roomId: 'room-dupe', seat: 'bottom', stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      harness.sockets[1].serverSend({
+        type: 'match_found', roomId: 'room-dupe', seat: 'bottom', stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      assert.equal(harness.worker.tables[0].failureCode, 'duplicate_seat');
+      assert.equal(harness.worker.metrics.matchmakingTableFailures, 1);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking rejects bot-occupied snapshots', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({
+        type: 'match_found', roomId: 'room-bot', seat: 'bottom', stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      harness.sockets[0].serverSend(fullHumanSnapshot('room-bot', 'bottom', {
+        seats: SERVER_SEATS.map((seat, index) => ({
+          seat, isOccupied: true, isBot: index === 3, isControlledByBot: false, isConnected: true,
+        })),
+      }));
+      assert.equal(harness.worker.tables[0].failureCode, 'bot_detected');
+      assert.equal(harness.worker.metrics.matchmakingTableFailures, 1);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking rejects duplicate seat in snapshot roster', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend(fullHumanSnapshot('room-roster-dupe', 'bottom', {
+        seats: ['bottom', 'bottom', 'top', 'left'].map((seat) => ({
+          seat, isOccupied: true, isBot: false, isControlledByBot: false, isConnected: true,
+        })),
+      }));
+      assert.equal(harness.worker.tables[0].failureCode, 'duplicate_seat');
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking rejects snapshot when yourSeat is missing from roster', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend(fullHumanSnapshot('room-missing-your-seat', 'north'));
+      assert.equal(harness.worker.tables[0].failureCode, 'snapshot_your_seat_missing');
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking rejects unknown seat id in snapshot roster', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend(fullHumanSnapshot('room-unknown-seat', 'bottom', {
+        seats: ['bottom', 'right', 'top', 'north'].map((seat) => ({
+          seat, isOccupied: true, isBot: false, isControlledByBot: false, isConnected: true,
+        })),
+      }));
+      assert.equal(harness.worker.tables[0].failureCode, 'unknown_seat');
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking rejects snapshot roster with extra unoccupied seat', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend(fullHumanSnapshot('room-extra-seat', 'bottom', {
+        seats: [
+          ...SERVER_SEATS.map((seat) => ({
+            seat, isOccupied: true, isBot: false,
+            isControlledByBot: false, isConnected: true,
+          })),
+          {
+            seat: 'spare', isOccupied: false, isBot: false,
+            isControlledByBot: false, isConnected: false,
+          },
+        ],
+      }));
+      assert.equal(harness.worker.tables[0].failureCode, 'snapshot_roster_invalid');
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking rejects snapshot roster with fewer or more than four seats', async () => {
+    const fewer = await startJoinedLocalTable();
+    try {
+      fewer.sockets[0].serverSend(fullHumanSnapshot('room-fewer-seats', 'bottom', {
+        seats: SERVER_SEATS.slice(0, 3).map((seat) => ({
+          seat, isOccupied: true, isBot: false,
+          isControlledByBot: false, isConnected: true,
+        })),
+      }));
+      assert.equal(fewer.worker.tables[0].failureCode, 'snapshot_roster_invalid');
+    } finally {
+      await fewer.stop();
+    }
+
+    const more = await startJoinedLocalTable();
+    try {
+      more.sockets[0].serverSend(fullHumanSnapshot('room-more-seats', 'bottom', {
+        seats: [...SERVER_SEATS, 'extra'].map((seat) => ({
+          seat, isOccupied: true, isBot: false,
+          isControlledByBot: false, isConnected: true,
+        })),
+      }));
+      assert.equal(more.worker.tables[0].failureCode, 'snapshot_roster_invalid');
+    } finally {
+      await more.stop();
+    }
+  });
+
+  await test('matchmaking rejects controlled-by-bot snapshot roster seats', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend(fullHumanSnapshot('room-controlled-seat', 'bottom', {
+        seats: SERVER_SEATS.map((seat, index) => ({
+          seat, isOccupied: true, isBot: false,
+          isControlledByBot: index === 1, isConnected: true,
+        })),
+      }));
+      assert.equal(harness.worker.tables[0].failureCode, 'seat_controlled_by_bot');
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking rejects disconnected snapshot roster seats', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend(fullHumanSnapshot('room-disconnected-seat', 'bottom', {
+        seats: SERVER_SEATS.map((seat, index) => ({
+          seat, isOccupied: true, isBot: false,
+          isControlledByBot: false, isConnected: index !== 2,
+        })),
+      }));
+      assert.equal(harness.worker.tables[0].failureCode, 'seat_not_connected');
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking rejects wrong or missing snapshot stakeAmount', async () => {
+    const wrongStake = await startJoinedLocalTable();
+    try {
+      wrongStake.sockets[0].serverSend(fullHumanSnapshot('room-wrong-snapshot-stake', 'bottom', {
+        stakeAmount: 4999,
+      }));
+      assert.equal(wrongStake.worker.tables[0].failureCode, 'stake_mismatch');
+      assert.equal(wrongStake.worker.metrics.matchmakingSnapshots, 0);
+    } finally {
+      await wrongStake.stop();
+    }
+
+    const missingStake = await startJoinedLocalTable();
+    try {
+      missingStake.sockets[0].serverSend(fullHumanSnapshot('room-missing-snapshot-stake', 'bottom', {
+        stakeAmount: undefined,
+      }));
+      assert.equal(missingStake.worker.tables[0].failureCode, 'stake_mismatch');
+      assert.equal(missingStake.worker.metrics.matchmakingSnapshots, 0);
+    } finally {
+      await missingStake.stop();
+    }
+  });
+
+  await test('matchmaking rejects invalid authoritative phase values', async () => {
+    for (const [label, value] of [
+      ['object', { phase: 'cutting' }],
+      ['number', 7],
+      ['unknown', 'bogus-phase'],
+    ]) {
+      const harness = await startJoinedLocalTable();
+      try {
+        harness.sockets[0].serverSend(fullHumanSnapshot(`room-invalid-phase-${label}`, 'bottom', {
+          game: { authoritativePhase: value },
+        }));
+        assert.equal(harness.worker.tables[0].failureCode, 'invalid_authoritative_phase');
+        assert.equal(harness.worker.metrics.matchmakingStartedTables, 0);
+      } finally {
+        await harness.stop();
+      }
+    }
+  });
+
+  await test('matchmaking rejects snapshot seat mismatch', async () => {
+    const mismatch = await startJoinedLocalTable();
+    try {
+      mismatch.sockets[0].serverSend({
+        type: 'match_found', roomId: 'room-snap', seat: 'bottom', stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      mismatch.sockets[0].serverSend(fullHumanSnapshot('room-snap', 'right'));
+      assert.equal(mismatch.worker.tables[0].failureCode, 'snapshot_seat_mismatch');
+    } finally {
+      await mismatch.stop();
+    }
+  });
+
+  await test('null phase snapshots confirm before later phase snapshots start the table', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      SERVER_SEATS.forEach((seat, index) => {
+        harness.sockets[index].serverSend({
+          type: 'match_found', roomId: 'room-null-phase', seat, stake: 5000,
+          humanPlayers: 4, botPlayers: 0,
+        });
+        harness.sockets[index].serverSend(fullHumanSnapshot('room-null-phase', seat, {
+          game: { authoritativePhase: null },
+        }));
+      });
+      assert.equal(harness.worker.metrics.matchmakingSnapshots, 4);
+      assert.equal(harness.worker.metrics.matchmakingConfirmedTables, 1);
+      assert.equal(harness.worker.metrics.matchmakingStartedTables, 0);
+      assert.equal(harness.worker.metrics.matchmakingReadyTables, 0);
+
+      SERVER_SEATS.forEach((seat, index) => {
+        harness.sockets[index].serverSend(fullHumanSnapshot('room-null-phase', seat, {
+          game: { authoritativePhase: 'cutting' },
+        }));
+      });
+      assert.equal(harness.worker.metrics.matchmakingSnapshots, 4);
+      assert.equal(harness.worker.metrics.matchmakingConfirmedTables, 1);
+      assert.equal(harness.worker.metrics.matchmakingStartedTables, 1);
+      assert.equal(harness.worker.metrics.matchmakingReadyTables, 1);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('socket close after matchmaking join is terminal and does not rejoin', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].terminate();
+      await waitFor(() => harness.worker.tables[0].failureCode === 'socket_lost_after_join',
+        500, 'socket close after join was not terminal');
+      await sleep(40);
+      assert.deepEqual(harness.sockets.map((socket) => socket.sent.length), [1, 1, 1, 1]);
+      assert.equal(harness.sockets.length, 4);
+      assert.equal(harness.worker.metrics.holdFailures, 1);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('ready matchmaking table becomes failed after socket loss', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      SERVER_SEATS.forEach((seat, index) => {
+        harness.sockets[index].serverSend({
+          type: 'match_found', roomId: 'room-loss-ready', seat, stake: 5000,
+          humanPlayers: 4, botPlayers: 0,
+        });
+        harness.sockets[index].serverSend(fullHumanSnapshot('room-loss-ready', seat));
+      });
+      assert.equal(harness.worker.metrics.matchmakingReadyTables, 1);
+      assert.equal(harness.worker.metrics.matchmakingStartedTables, 1);
+      harness.sockets[0].terminate();
+      await waitFor(() => harness.worker.tables[0].failureCode === 'socket_lost_after_join',
+        500, 'socket close after ready was not terminal');
+      assert.equal(harness.worker.tables[0].ready, false);
+      assert.equal(harness.worker.metrics.matchmakingReadyTables, 0);
+      assert.equal(harness.worker.metrics.matchmakingStartedTables, 0);
+      assert.equal(harness.worker.metrics.matchmakingFailedTables, 1);
+      assert.equal(harness.worker.metrics.holdFailures, 1);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  await test('matchmaking cleanup reports safe failure codes without secrets', async () => {
+    const harness = await startJoinedLocalTable();
+    try {
+      harness.sockets[0].serverSend({
+        type: 'match_found', roomId: 'room-secret', seat: 'bottom', stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      harness.sockets[1].serverSend({
+        type: 'match_found', roomId: 'room-secret-2', seat: 'right', stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      await harness.stop();
+      const final = harness.messages.find((message) => message.type === 'shutdown-complete');
+      assert.equal(final.matchmaking.failedTables, 1);
+      assert.deepEqual(final.matchmaking.failures, [
+        { tableIndex: 0, failureCode: 'mixed_room_id' },
+      ]);
+      assert.doesNotMatch(JSON.stringify(harness.messages),
+        /local-a|secret-a|belot_session|room-secret/i);
+    } finally {
+      if (harness.worker.metrics.cleanupCompleted === 0) await harness.stop();
+    }
+  });
 
   await test('callback from old generation cannot mark readiness after retry starts', async () => {
     const sockets = [];

@@ -5,6 +5,10 @@ const COUNTERS = Object.freeze([
   'peakReadyProfiles', 'peakReadyTables',
   'stableProfilesAtRelease', 'stableTablesAtRelease', 'wsPings',
   'wsPongs', 'wsTerminalFailures', 'terminalProfileFailures', 'holdFailures',
+  'matchmakingAdmittedTables', 'matchmakingJoinAttempts',
+  'matchmakingJoinAcks', 'matchmakingStatusAcks', 'matchmakingMatchFounds',
+  'matchmakingSnapshots', 'matchmakingConfirmedTables', 'matchmakingStartedTables',
+  'matchmakingReadyTables', 'matchmakingFailedTables', 'matchmakingTableFailures',
   'heartbeats', 'cleanupCompleted',
 ]);
 
