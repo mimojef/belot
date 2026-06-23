@@ -130,6 +130,10 @@ import { createRoomWithHumanHost } from './core/createRoomWithHumanHost.js'
 import type { ClientMessage, PrivateRoomSnapshot } from './protocol/messageTypes.js'
 import { validateGuestContactPayload } from './contact/guestContactValidation.js'
 import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
+import { createMonitoringSampler } from './monitoring/createMonitoringSampler.js'
+import type { MonitoringSampler } from './monitoring/monitoringTypes.js'
+import { countOpenWebSockets, countUniqueOnlineRealPlayers } from './monitoring/monitoringHelpers.js'
+import { sanitizeErrorMessage } from './monitoring/systemMetrics.js'
 
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
@@ -208,6 +212,8 @@ const gameWorkerPoolMaxRoomsPerWorker =
         1000,
       )
     : 1000
+const backendStartedAtMs = Date.now()
+let monitoringSampler: MonitoringSampler | null = null
 let isServerShuttingDown = false
 let lastGameWorkerTickFailureLogAt = 0
 let catalogBotRefillInterval: ReturnType<typeof setInterval> | null = null
@@ -2282,6 +2288,37 @@ function decodeGuestContactMessageId(value: string): string | null {
   } catch {
     return null
   }
+}
+
+function handleAdminMonitoringCurrentRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): boolean {
+  if (pathname !== '/api/admin/monitoring/current') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session?.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+    return true
+  }
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (monitoringSampler === null) {
+    sendJsonResponse(res, 503, { ok: false, message: 'Monitoring sampler not running.' })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, snapshot: monitoringSampler.getSnapshot() })
+  return true
 }
 
 async function handleAdminGuestContactMessagesRequest(
@@ -4782,6 +4819,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (handleAdminMonitoringCurrentRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleAdminGuestContactMessagesRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -6418,6 +6459,23 @@ const gameRuntimeTickInterval = setInterval(() => {
   })
 }, GAME_RUNTIME_TICK_MS)
 
+// ─── Monitoring sampler ───────────────────────────────────────────────────────
+
+try {
+  monitoringSampler = createMonitoringSampler({
+    backendStartedAtMs,
+    getWsConnectionCount: () => countOpenWebSockets(socketRegistry),
+    getUniqueOnlineRealPlayers: () => countUniqueOnlineRealPlayers(serverState.connections),
+    getMatchmakingWaitersByStake: () => getQueueCountsByStake(),
+    getActiveRoomCount: () => Object.keys(serverState.rooms).length,
+    getRoomsByPhase: () => countServerRoomsByPhase(serverState.rooms),
+    getWorkerPoolHealth: () => gameWorkerPool?.getHealth() ?? null,
+  })
+  console.log('[monitoring] Sampler started')
+} catch (error) {
+  console.error('[monitoring] Failed to start sampler:', sanitizeErrorMessage(error))
+}
+
 function clearMutationTimersForShutdown(): void {
   clearInterval(gameRuntimeTickInterval)
   clearInterval(matchmakingTickInterval)
@@ -6438,6 +6496,8 @@ function clearMutationTimersForShutdown(): void {
   }
 
   clearPrivateRoomInviteTimers()
+  monitoringSampler?.stop()
+  monitoringSampler = null
 }
 
 function closeActiveRoomSnapshotStore(): boolean {
