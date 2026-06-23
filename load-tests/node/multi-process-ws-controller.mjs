@@ -11,6 +11,8 @@ export const EXIT_CODES = Object.freeze({
   success: 0, workload: 1, configuration: 2, orchestration: 3, hardTimeout: 124,
 });
 
+const PLAYERS_PER_TABLE = 4;
+
 const SUM_METRICS = Object.freeze([
   'loginAttempts', 'loginSuccesses', 'loginFailures', 'wsAttempts', 'wsOpens',
   'wsRetries', 'peakReadyProfiles', 'peakReadyTables', 'stableProfilesAtRelease',
@@ -60,6 +62,10 @@ export function determineExitCode(summary) {
   if (summary.metrics.workerCrashes > 0 || summary.metrics.heartbeatTimeouts > 0
       || summary.cleanup.forcedWorkers > 0 || summary.cleanup.incompleteWorkers > 0) {
     return EXIT_CODES.orchestration;
+  }
+  if (summary.matchmaking?.enabled === true
+      && summary.matchmaking.completionStatus !== 'complete') {
+    return EXIT_CODES.workload;
   }
   const expected = summary.expected;
   const metrics = summary.metrics;
@@ -130,6 +136,15 @@ export class MultiProcessWsController {
     if (retryBaseMs > retryMaxMs) {
       throw new ControllerConfigError('retryBaseMs must not exceed retryMaxMs');
     }
+    const matchmakingEnabled = parseBoolean(this.input.matchmakingEnabled ?? false, 'matchmakingEnabled');
+    const matchmakingTableTimeoutMs = positive(
+      this.input.matchmakingTableTimeoutMs ?? Math.max(1_000, readinessDurationMs),
+      'matchmakingTableTimeoutMs',
+    );
+    const matchmakingAdmissionPauseMs = nonnegative(
+      this.input.matchmakingAdmissionPauseMs ?? 0,
+      'matchmakingAdmissionPauseMs',
+    );
     return {
       ...target, tables, workerCount, credentialsPath: resolve(credentialsPath), outputDirectory,
       slices, profiles: tables * 4, loginSpreadMs, readinessDurationMs, holdDurationMs,
@@ -142,6 +157,7 @@ export class MultiProcessWsController {
       heartbeatIntervalMs,
       cleanupTimeoutMs: positive(this.input.cleanupTimeoutMs ?? 1_000, 'cleanupTimeoutMs'),
       jitter: typeof this.input.jitter === 'number' ? this.input.jitter : 0.2,
+      matchmakingEnabled, matchmakingTableTimeoutMs, matchmakingAdmissionPauseMs,
     };
   }
 
@@ -190,7 +206,8 @@ export class MultiProcessWsController {
       child, slice, ready: false, started: false, shutdownComplete: false,
       exited: false, disconnected: false, forced: false, lastHeartbeatAtMs: this.now(),
       lastProgressAtMs: null, phase: 'boot', exitCode: null, signalCode: null,
-      exitedAtMs: null, metrics: safeMetrics(), memory: null, eventLoopDelay: null,
+      exitedAtMs: null, metrics: safeMetrics(), matchmaking: safeMatchmakingSnapshot(),
+      memory: null, eventLoopDelay: null,
     };
     this.workers.push(state);
     child.on('message', (message) => this.handleMessage(state, message));
@@ -234,11 +251,17 @@ export class MultiProcessWsController {
     }
     if (message.type === 'heartbeat' || message.type === 'progress') {
       this.updateWorkerSnapshot(state, message);
+      this.driveMatchmaking();
+      return;
+    }
+    if (message.type === 'matchmaking-admission') {
+      this.handleMatchmakingAdmissionAck(state, message);
       return;
     }
     if (message.type === 'shutdown-complete') {
       const failedMetrics = state.failed ? state.metrics : null;
       this.updateWorkerSnapshot(state, message);
+      this.driveMatchmaking();
       if (failedMetrics) state.metrics = failedMetrics;
       state.shutdownComplete = true;
       this.safeSend(state, { type: 'shutdown' });
@@ -255,6 +278,7 @@ export class MultiProcessWsController {
     const readinessDeadlineAtMs = wsStartAtMs + this.config.readinessDurationMs;
     const releaseAtMs = readinessDeadlineAtMs + this.config.holdDurationMs;
     this.timestamps = { loginStartAtMs, wsStartAtMs, readinessDeadlineAtMs, releaseAtMs };
+    this.initializeMatchmakingState();
     for (const state of this.workers) {
       state.started = this.safeSend(state, { type: 'start', config: {
         baseUrl: this.config.baseUrl, wsUrl: this.config.wsUrl, ...this.timestamps,
@@ -271,6 +295,9 @@ export class MultiProcessWsController {
 
   updateWorkerSnapshot(state, message) {
     state.metrics = safeMetrics(message.metrics);
+    state.matchmaking = safeMatchmakingSnapshot(message.matchmaking);
+    this.scanWorkerMatchmakingFailures(state);
+    this.scanWorkerTerminalProfileFailures(state);
     if (typeof message.phase === 'string') state.phase = message.phase;
     if (Number.isFinite(message.lastProgressAtMs)) {
       state.lastProgressAtMs = message.lastProgressAtMs;
@@ -296,6 +323,292 @@ export class MultiProcessWsController {
         return;
       }
     }
+    this.checkMatchmakingReadinessDeadline(now);
+    this.checkMatchmakingTimeout(now);
+  }
+
+  initializeMatchmakingState() {
+    if (!this.config.matchmakingEnabled) {
+      this.matchmaking = this.safeInitialMatchmakingState('disabled');
+      return;
+    }
+    this.matchmaking = {
+      enabled: true,
+      status: 'waiting-ready',
+      expectedTables: this.config.tables,
+      admittedGlobalTableIndexes: new Set(),
+      startedGlobalTableIndexes: new Set(),
+      processedWorkerFailures: new Set(),
+      processedTerminalFailureWorkers: new Set(),
+      failedTables: [],
+      failureCode: null,
+      failureWorkerIndex: null,
+      currentGlobalTableIndex: null,
+      nextGlobalTableIndex: 0,
+      tableStartedAtMs: null,
+      completionStatus: 'pending',
+    };
+  }
+
+  safeInitialMatchmakingState(status) {
+    return {
+      enabled: false,
+      status,
+      expectedTables: this.config?.tables ?? 0,
+      admittedGlobalTableIndexes: new Set(),
+      startedGlobalTableIndexes: new Set(),
+      processedWorkerFailures: new Set(),
+      processedTerminalFailureWorkers: new Set(),
+      failedTables: [],
+      failureCode: null,
+      failureWorkerIndex: null,
+      currentGlobalTableIndex: null,
+      nextGlobalTableIndex: 0,
+      tableStartedAtMs: null,
+      completionStatus: status,
+    };
+  }
+
+  driveMatchmaking() {
+    if (!this.config?.matchmakingEnabled || this.stopping) return;
+    if (!this.matchmaking) this.initializeMatchmakingState();
+    if (this.matchmaking.completionStatus !== 'pending') return;
+    this.updateCurrentMatchmakingTable();
+    if (this.matchmaking.currentGlobalTableIndex !== null) return;
+    if (!this.allExpectedProfilesReady()) {
+      this.matchmaking.status = 'waiting-ready';
+      return;
+    }
+    if (this.matchmaking.nextGlobalTableIndex >= this.config.tables) {
+      this.matchmaking.status = 'complete';
+      this.matchmaking.completionStatus = 'complete';
+      this.clearMatchmakingTimer();
+      this.queueSummaryWrite(false);
+      return;
+    }
+    this.scheduleOrAdmitNextMatchmakingTable();
+  }
+
+  scheduleOrAdmitNextMatchmakingTable() {
+    if (this.matchmakingPauseTimer) return;
+    const pauseMs = this.matchmaking.lastStartedAtMs === undefined
+      ? 0 : this.config.matchmakingAdmissionPauseMs;
+    if (pauseMs > 0) {
+      this.matchmaking.status = 'paused';
+      this.matchmakingPauseTimer = setTimeout(() => {
+        this.matchmakingPauseTimer = null;
+        this.admitNextMatchmakingTable();
+      }, pauseMs);
+      return;
+    }
+    this.admitNextMatchmakingTable();
+  }
+
+  admitNextMatchmakingTable() {
+    if (this.stopping || this.matchmaking.currentGlobalTableIndex !== null
+        || this.matchmaking.nextGlobalTableIndex >= this.config.tables) {
+      return;
+    }
+    const globalTableIndex = this.matchmaking.nextGlobalTableIndex;
+    if (this.matchmaking.admittedGlobalTableIndexes.has(globalTableIndex)) return;
+    const target = this.workerForGlobalTable(globalTableIndex);
+    if (!target) {
+      this.requestShutdown('matchmaking mapping failed', EXIT_CODES.orchestration);
+      return;
+    }
+    const sent = this.safeSend(target.state, {
+      type: 'allow-matchmaking',
+      tableIndex: target.localTableIndex,
+    });
+    if (!sent) {
+      this.handleWorkerFailure(target.state, 'failed to send matchmaking admission');
+      return;
+    }
+    this.matchmaking.currentGlobalTableIndex = globalTableIndex;
+    this.matchmaking.nextGlobalTableIndex += 1;
+    this.matchmaking.admittedGlobalTableIndexes.add(globalTableIndex);
+    this.matchmaking.tableStartedAtMs = this.now();
+    this.matchmaking.status = 'admitted';
+    this.clearMatchmakingTimer();
+    this.matchmakingTimer = setTimeout(() => this.handleMatchmakingTimeout(globalTableIndex),
+      this.config.matchmakingTableTimeoutMs);
+    this.queueSummaryWrite(false);
+  }
+
+  handleMatchmakingAdmissionAck(state, message) {
+    if (!this.config?.matchmakingEnabled || this.stopping) return;
+    if (!Number.isInteger(message.tableIndex) || message.tableIndex < 0) return;
+    const globalTableIndex = state.slice.tableOffset + message.tableIndex;
+    if (globalTableIndex !== this.matchmaking?.currentGlobalTableIndex) return;
+    if (message.accepted !== true) {
+      this.failCurrentMatchmakingTable('admission_rejected');
+    }
+  }
+
+  updateCurrentMatchmakingTable() {
+    const globalTableIndex = this.matchmaking.currentGlobalTableIndex;
+    if (globalTableIndex === null) return;
+    const target = this.workerForGlobalTable(globalTableIndex);
+    if (!target) {
+      this.requestShutdown('matchmaking mapping failed', EXIT_CODES.orchestration);
+      return;
+    }
+    const matchmaking = target.state.matchmaking;
+    const started = matchmaking.startedTableIndexes.includes(target.localTableIndex)
+      || matchmaking.readyTableIndexes.includes(target.localTableIndex);
+    if (!started) return;
+    if (!this.matchmaking.startedGlobalTableIndexes.has(globalTableIndex)) {
+      this.matchmaking.startedGlobalTableIndexes.add(globalTableIndex);
+      this.matchmaking.lastStartedAtMs = this.now();
+    }
+    this.matchmaking.currentGlobalTableIndex = null;
+    this.matchmaking.tableStartedAtMs = null;
+    this.matchmaking.status = 'started';
+    this.clearMatchmakingTimer();
+    this.queueSummaryWrite(false);
+  }
+
+  failCurrentMatchmakingTable(reason) {
+    if (!this.matchmaking || this.matchmaking.completionStatus !== 'pending') return;
+    const globalTableIndex = this.matchmaking.currentGlobalTableIndex;
+    this.matchmaking.status = 'failed';
+    this.matchmaking.completionStatus = 'failed';
+    if (globalTableIndex !== null
+        && !this.matchmaking.failedTables.some((item) => item.globalTableIndex === globalTableIndex)) {
+      this.matchmaking.failedTables.push({ globalTableIndex, failureCode: reason });
+    }
+    this.clearMatchmakingTimer();
+    clearTimeout(this.matchmakingPauseTimer);
+    this.matchmakingPauseTimer = null;
+    this.requestShutdown('matchmaking table failed', EXIT_CODES.workload);
+  }
+
+  scanWorkerMatchmakingFailures(state) {
+    if (!this.config?.matchmakingEnabled) return;
+    if (!this.matchmaking) this.initializeMatchmakingState();
+    for (const failure of state.matchmaking.failures) {
+      if (!Number.isInteger(failure.tableIndex)
+          || failure.tableIndex < 0
+          || failure.tableIndex >= state.slice.tableCount) {
+        this.requestedExitCode = EXIT_CODES.orchestration;
+        this.exitReason = 'invalid matchmaking failure index';
+        this.requestShutdown('invalid matchmaking failure index', EXIT_CODES.orchestration);
+        return;
+      }
+      const key = `${state.slice.workerIndex}:${failure.tableIndex}`;
+      if (this.matchmaking.processedWorkerFailures.has(key)) continue;
+      this.matchmaking.processedWorkerFailures.add(key);
+      const globalTableIndex = state.slice.tableOffset + failure.tableIndex;
+      this.recordMatchmakingTableFailure(globalTableIndex, failure.failureCode);
+      return;
+    }
+  }
+
+  scanWorkerTerminalProfileFailures(state) {
+    if (!this.config?.matchmakingEnabled || !this.matchmaking) return;
+    if ((state.metrics.terminalProfileFailures ?? 0) <= 0) return;
+    const key = String(state.slice.workerIndex);
+    if (this.matchmaking.processedTerminalFailureWorkers.has(key)) return;
+    this.matchmaking.processedTerminalFailureWorkers.add(key);
+    if (this.matchmaking.failedTables.length > 0 || this.hasStrongerFailure()) return;
+    this.recordGenericMatchmakingFailure('profile_failure_before_admission',
+      state.slice.workerIndex, 'matchmaking readiness failed');
+  }
+
+  recordMatchmakingTableFailure(globalTableIndex, failureCode) {
+    if (!this.matchmaking.failedTables.some((item) => item.globalTableIndex === globalTableIndex)) {
+      this.matchmaking.failedTables.push({ globalTableIndex, failureCode });
+    }
+    this.matchmaking.status = 'failed';
+    this.matchmaking.completionStatus = 'failed';
+    this.matchmaking.failureCode = failureCode;
+    this.matchmaking.failureWorkerIndex = null;
+    this.clearMatchmakingTimer();
+    clearTimeout(this.matchmakingPauseTimer);
+    this.matchmakingPauseTimer = null;
+    if (this.requestedExitCode !== EXIT_CODES.orchestration
+        && this.requestedExitCode !== EXIT_CODES.hardTimeout) {
+      this.requestedExitCode = EXIT_CODES.workload;
+      this.exitReason = 'matchmaking table failed';
+    }
+    if (!this.stopping) this.requestShutdown('matchmaking table failed', EXIT_CODES.workload);
+  }
+
+  recordGenericMatchmakingFailure(failureCode, workerIndex, exitReason) {
+    if (!this.config?.matchmakingEnabled || !this.matchmaking || this.hasStrongerFailure()) return;
+    if (this.matchmaking.failedTables.length > 0) return;
+    this.matchmaking.status = 'failed';
+    this.matchmaking.completionStatus = 'failed';
+    this.matchmaking.failureCode = failureCode;
+    this.matchmaking.failureWorkerIndex = Number.isInteger(workerIndex) ? workerIndex : null;
+    this.clearMatchmakingTimer();
+    clearTimeout(this.matchmakingPauseTimer);
+    this.matchmakingPauseTimer = null;
+    this.requestedExitCode = EXIT_CODES.workload;
+    this.exitReason = exitReason;
+    if (!this.stopping) this.requestShutdown(exitReason, EXIT_CODES.workload);
+  }
+
+  hasStrongerFailure() {
+    return this.requestedExitCode === EXIT_CODES.orchestration
+      || this.requestedExitCode === EXIT_CODES.hardTimeout;
+  }
+
+  checkMatchmakingReadinessDeadline(now) {
+    if (!this.config?.matchmakingEnabled || !this.matchmaking
+        || this.matchmaking.completionStatus !== 'pending'
+        || !this.timestamps
+        || now < this.timestamps.readinessDeadlineAtMs
+        || this.allExpectedProfilesReady()) {
+      return;
+    }
+    this.recordGenericMatchmakingFailure('readiness_timeout', null,
+      'matchmaking readiness failed');
+  }
+
+  checkMatchmakingTimeout(now) {
+    if (!this.config?.matchmakingEnabled || !this.matchmaking
+        || this.matchmaking.currentGlobalTableIndex === null
+        || this.matchmaking.completionStatus !== 'pending') {
+      return;
+    }
+    if (now - this.matchmaking.tableStartedAtMs >= this.config.matchmakingTableTimeoutMs) {
+      this.handleMatchmakingTimeout(this.matchmaking.currentGlobalTableIndex);
+    }
+  }
+
+  handleMatchmakingTimeout(globalTableIndex) {
+    if (this.stopping || !this.matchmaking || this.matchmaking.currentGlobalTableIndex !== globalTableIndex
+        || this.matchmaking.completionStatus !== 'pending') {
+      return;
+    }
+    this.matchmaking.status = 'timeout';
+    this.matchmaking.completionStatus = 'timeout';
+    this.matchmaking.failedTables.push({ globalTableIndex, failureCode: 'table_timeout' });
+    this.clearMatchmakingTimer();
+    this.requestShutdown('matchmaking table timeout', EXIT_CODES.workload);
+  }
+
+  clearMatchmakingTimer() {
+    clearTimeout(this.matchmakingTimer);
+    this.matchmakingTimer = null;
+  }
+
+  allExpectedProfilesReady() {
+    if (this.workers.length !== this.config.workerCount) return false;
+    return this.workers.every((state) => (
+      (state.metrics.wsReadyProfiles ?? 0) >= state.slice.profileCount
+    ));
+  }
+
+  workerForGlobalTable(globalTableIndex) {
+    return this.workers.reduce((found, state) => {
+      if (found) return found;
+      const first = state.slice.tableOffset;
+      const last = first + state.slice.tableCount;
+      if (globalTableIndex < first || globalTableIndex >= last) return null;
+      return { state, localTableIndex: globalTableIndex - first };
+    }, null);
   }
 
   handleWorkerFailure(state, reason) {
@@ -337,6 +650,12 @@ export class MultiProcessWsController {
 
   beginGracefulExit() {
     if (!this.stopping) {
+      if (this.config?.matchmakingEnabled
+          && this.matchmaking?.completionStatus !== 'complete') {
+        this.recordGenericMatchmakingFailure('matchmaking_incomplete_at_release',
+          null, 'matchmaking incomplete at release');
+        return;
+      }
       this.stopping = true;
       this.exitReason = 'release completed';
       for (const state of this.workers) this.safeSend(state, { type: 'shutdown' });
@@ -365,6 +684,8 @@ export class MultiProcessWsController {
     clearInterval(this.monitorTimer);
     clearTimeout(this.hardTimer);
     clearTimeout(this.graceTimer);
+    this.clearMatchmakingTimer();
+    clearTimeout(this.matchmakingPauseTimer);
     this.completedAtMs = this.now();
     const summary = this.buildSummary('final');
     summary.exitCode = this.requestedExitCode ?? determineExitCode(summary);
@@ -398,6 +719,7 @@ export class MultiProcessWsController {
       phase: state.phase, lastHeartbeatAtMs: state.lastHeartbeatAtMs,
       lastProgressAtMs: state.lastProgressAtMs,
       metrics: state.metrics, memory: state.memory, eventLoopDelay: state.eventLoopDelay,
+      matchmaking: state.matchmaking,
     }));
     return {
       schemaVersion: 1, status, generatedAtMs: this.now(),
@@ -406,7 +728,8 @@ export class MultiProcessWsController {
       safeConfig: this.safeConfig(), timestamps: this.timestamps ?? null,
       expected: { tables: this.config.tables, profiles: this.config.profiles,
         workers: this.config.workerCount },
-      metrics: this.aggregateMetrics(), workers: workerSummaries,
+      metrics: this.aggregateMetrics(), matchmaking: this.safeControllerMatchmakingState(),
+      workers: workerSummaries,
       cleanup: { completedWorkers: workerSummaries.filter((item) => item.shutdownComplete).length,
         incompleteWorkers: workerSummaries.filter((item) => !item.shutdownComplete).length
           + (this.config.workerCount - workerSummaries.length),
@@ -422,7 +745,41 @@ export class MultiProcessWsController {
       readinessDurationMs: this.config.readinessDurationMs,
       holdDurationMs: this.config.holdDurationMs,
       heartbeatTimeoutMs: this.config.heartbeatTimeoutMs,
-      hardTimeoutMs: this.config.hardTimeoutMs };
+      hardTimeoutMs: this.config.hardTimeoutMs,
+      matchmakingEnabled: this.config.matchmakingEnabled,
+      matchmakingTableTimeoutMs: this.config.matchmakingTableTimeoutMs,
+      matchmakingAdmissionPauseMs: this.config.matchmakingAdmissionPauseMs };
+  }
+
+  safeControllerMatchmakingState() {
+    if (!this.matchmaking) return { enabled: false, status: 'disabled',
+      completionStatus: 'disabled', expectedTables: this.config?.tables ?? 0,
+      currentGlobalTableIndex: null, admittedTables: 0, startedTables: 0,
+      failedTables: 0, failureCode: null, failureWorkerIndex: null,
+      admittedTableIndexes: [], startedTableIndexes: [], failures: [] };
+    const admittedTableIndexes = sortedIndexes(this.matchmaking.admittedGlobalTableIndexes);
+    const startedTableIndexes = sortedIndexes(this.matchmaking.startedGlobalTableIndexes);
+    const failures = [...this.matchmaking.failedTables]
+      .sort((left, right) => left.globalTableIndex - right.globalTableIndex)
+      .map((item) => ({
+        globalTableIndex: item.globalTableIndex,
+        failureCode: item.failureCode,
+      }));
+    return {
+      enabled: this.matchmaking.enabled,
+      status: this.matchmaking.status,
+      completionStatus: this.matchmaking.completionStatus,
+      expectedTables: this.matchmaking.expectedTables,
+      currentGlobalTableIndex: this.matchmaking.currentGlobalTableIndex,
+      admittedTables: admittedTableIndexes.length,
+      startedTables: startedTableIndexes.length,
+      failedTables: failures.length,
+      failureCode: this.matchmaking.failureCode,
+      failureWorkerIndex: this.matchmaking.failureWorkerIndex,
+      admittedTableIndexes,
+      startedTableIndexes,
+      failures,
+    };
   }
 
   queueSummaryWrite(final, summary = null) {
@@ -489,6 +846,49 @@ function nonnegative(value, name) {
   if (!Number.isFinite(value) || value < 0) throw new ControllerConfigError(`${name} must be non-negative`);
   return value;
 }
+function parseBoolean(value, name) {
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new ControllerConfigError(`${name} must be true or false`);
+}
+
+function safeMatchmakingSnapshot(value = null) {
+  const admittedTableIndexes = safeIndexArray(value?.admittedTableIndexes);
+  const joinStartedTableIndexes = safeIndexArray(value?.joinStartedTableIndexes);
+  const confirmedTableIndexes = safeIndexArray(value?.confirmedTableIndexes);
+  const startedTableIndexes = safeIndexArray(value?.startedTableIndexes);
+  const readyTableIndexes = safeIndexArray(value?.readyTableIndexes);
+  const failures = Array.isArray(value?.failures) ? value.failures
+    .filter((item) => Number.isInteger(item?.tableIndex) && item.tableIndex >= 0
+      && typeof item.failureCode === 'string')
+    .map((item) => ({ tableIndex: item.tableIndex, failureCode: item.failureCode }))
+    .sort((left, right) => left.tableIndex - right.tableIndex) : [];
+  return {
+    admittedTables: admittedTableIndexes.length,
+    joinStartedTables: joinStartedTableIndexes.length,
+    confirmedTables: confirmedTableIndexes.length,
+    startedTables: startedTableIndexes.length,
+    readyTables: readyTableIndexes.length,
+    failedTables: failures.length,
+    admittedTableIndexes,
+    joinStartedTableIndexes,
+    confirmedTableIndexes,
+    startedTableIndexes,
+    readyTableIndexes,
+    failures,
+  };
+}
+
+function safeIndexArray(value) {
+  return Array.isArray(value) ? [...new Set(value
+    .filter((item) => Number.isInteger(item) && item >= 0))]
+    .sort((left, right) => left - right) : [];
+}
+
+function sortedIndexes(set) {
+  return [...set].sort((left, right) => left - right);
+}
 
 export function parseControllerArgs(args) {
   const values = {};
@@ -503,7 +903,10 @@ export function parseControllerArgs(args) {
     wsUrl: values['ws-url'], credentialsPath: values.credentials,
     outputDirectory: values['output-directory'], loginSpreadMs: number('login-spread-ms'),
     readinessDurationMs: number('readiness-duration-ms'), holdDurationMs: number('hold-duration-ms'),
-    heartbeatTimeoutMs: number('heartbeat-timeout-ms'), hardTimeoutMs: number('hard-timeout-ms') };
+    heartbeatTimeoutMs: number('heartbeat-timeout-ms'), hardTimeoutMs: number('hard-timeout-ms'),
+    matchmakingEnabled: values['matchmaking-enabled'],
+    matchmakingTableTimeoutMs: number('matchmaking-table-timeout-ms'),
+    matchmakingAdmissionPauseMs: number('matchmaking-admission-pause-ms') };
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

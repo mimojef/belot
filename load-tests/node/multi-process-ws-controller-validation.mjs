@@ -37,6 +37,14 @@ let heartbeat;
 let completed = false;
 let mode = 'normal';
 let profileCount = 0;
+let currentReadyProfiles = 0;
+let terminalFailures = 0;
+let releaseAtMs = 0;
+let finishTimer = null;
+const admittedTables = new Set();
+const startedTables = new Set();
+const readyTables = new Set();
+const failures = [];
 const send = (message) => {
   if (!process.connected) return;
   try { process.send(message, () => {}); } catch {}
@@ -44,16 +52,48 @@ const send = (message) => {
 const metrics = (profiles, overrides = {}) => ({
   loginAttempts: profiles, loginSuccesses: profiles, loginFailures: 0,
   wsAttempts: profiles, wsOpens: profiles, wsRetries: 0,
+  wsReadyProfiles: profiles, wsReadyTables: profiles / 4,
   peakReadyProfiles: profiles, peakReadyTables: profiles / 4,
   stableProfilesAtRelease: profiles, stableTablesAtRelease: profiles / 4,
   currentActiveSockets: 0, peakActiveSockets: profiles,
-  terminalProfileFailures: 0, wsTerminalFailures: 0, holdFailures: 0,
+  terminalProfileFailures: terminalFailures, wsTerminalFailures: 0, holdFailures: 0,
   wsPings: profiles, wsPongs: profiles, cleanupCompleted: 1, ...overrides,
 });
+const indexes = (set) => [...set].sort((left, right) => left - right);
+const matchmaking = () => ({
+  admittedTables: admittedTables.size,
+  joinStartedTables: admittedTables.size,
+  confirmedTables: startedTables.size,
+  startedTables: startedTables.size,
+  readyTables: readyTables.size,
+  failedTables: failures.length,
+  admittedTableIndexes: indexes(admittedTables),
+  joinStartedTableIndexes: indexes(admittedTables),
+  confirmedTableIndexes: indexes(startedTables),
+  startedTableIndexes: indexes(startedTables),
+  readyTableIndexes: indexes(readyTables),
+  failures: failures.slice(),
+});
+const progress = (phase = 'readiness', overrides = {}) => send({
+  type: 'progress',
+  phase,
+  lastProgressAtMs: Date.now(),
+  metrics: metrics(profileCount, {
+    wsReadyProfiles: currentReadyProfiles,
+    wsReadyTables: currentReadyProfiles / 4,
+    ...overrides,
+  }),
+  matchmaking: matchmaking(),
+});
+const failTable = (tableIndex, failureCode = 'synthetic_failure') => {
+  failures.push({ tableIndex, failureCode });
+  progress('hold');
+};
 const finish = (profiles, overrides = {}) => {
   if (completed) return;
   completed = true;
   clearInterval(heartbeat);
+  clearTimeout(finishTimer);
   send({ type: 'shutdown-complete', metrics: metrics(profiles, overrides) });
 };
 setTimeout(() => send({ type: 'worker-ready' }), index * 12);
@@ -62,12 +102,32 @@ process.on('message', (message) => {
     const profiles = message.credentials.length;
     profileCount = profiles;
     mode = message.credentials[0]?.email.split('-')[0] ?? 'normal';
+    currentReadyProfiles = ((mode === 'mmdelayedready' || mode === 'mmreadinesstimeout') && index === 1)
+      || ((mode === 'mmterminalbefore' || mode === 'mmduplicateterminal') && index === 0)
+      ? 0 : profiles;
+    terminalFailures = 0;
+    releaseAtMs = message.config.releaseAtMs;
     send({ type: 'progress', phase: 'readiness', lastProgressAtMs: Date.now(),
-      metrics: metrics(profiles), observedTimestamps: {
+      metrics: metrics(profiles, {
+        wsReadyProfiles: currentReadyProfiles,
+        wsReadyTables: currentReadyProfiles / 4,
+      }), matchmaking: matchmaking(), observedTimestamps: {
       loginStartAtMs: message.config.loginStartAtMs, wsStartAtMs: message.config.wsStartAtMs,
       readinessDeadlineAtMs: message.config.readinessDeadlineAtMs,
       releaseAtMs: message.config.releaseAtMs,
     }});
+    if (mode === 'mmdelayedready' && index === 1) {
+      setTimeout(() => {
+        currentReadyProfiles = profiles;
+        progress('readiness');
+      }, 80);
+    }
+    if ((mode === 'mmterminalbefore' || mode === 'mmduplicateterminal') && index === 0) {
+      currentReadyProfiles = 0;
+      terminalFailures = 1;
+      progress('readiness');
+      if (mode === 'mmduplicateterminal') progress('readiness');
+    }
     if (mode === 'failedipc') {
       send({ type: 'failed', phase: 'readiness', lastProgressAtMs: Date.now(),
         metrics: metrics(profiles, { wsTerminalFailures: 1, terminalProfileFailures: 1 }) });
@@ -76,16 +136,61 @@ process.on('message', (message) => {
     if (mode === 'crash') return setTimeout(() => process.exit(9), 25);
     if (mode === 'disconnect') return setTimeout(() => process.disconnect(), 25);
     if (mode !== 'no' && mode !== 'hang') {
-      setTimeout(() => finish(profiles, mode === 'failure' ? {
+      const delay = mode.startsWith('mm') ? Math.max(30, releaseAtMs - Date.now() + 5) : 90;
+      finishTimer = setTimeout(() => finish(profiles, mode === 'failure' ? {
         stableProfilesAtRelease: 0, stableTablesAtRelease: 0,
         terminalProfileFailures: profiles, wsTerminalFailures: profiles,
-      } : {}), 90);
+      } : {}), delay);
     }
     if (mode !== 'no') heartbeat = setInterval(() => send({ type: 'heartbeat',
       phase: 'hold', lastProgressAtMs: Date.now(),
       rssBytes: 1000 + index, heapUsedBytes: 500 + index,
       eventLoopDelayMeanMs: 1 + index, eventLoopDelayMaxMs: 2 + index,
-      metrics: metrics(profiles) }), 15);
+      metrics: metrics(profiles, {
+        wsReadyProfiles: currentReadyProfiles,
+        wsReadyTables: currentReadyProfiles / 4,
+      }), matchmaking: matchmaking() }), 15);
+  }
+  if (message?.type === 'allow-matchmaking') {
+    const tableIndex = message.tableIndex;
+    admittedTables.add(tableIndex);
+    send({ type: 'matchmaking-admission', tableIndex, accepted: true });
+    progress('hold');
+    if (mode === 'mmfailure') {
+      failTable(tableIndex);
+      return;
+    }
+    if (mode === 'mmspecificpriority') {
+      terminalFailures = 1;
+      failTable(tableIndex, 'specific_table_failure');
+      return;
+    }
+    if (mode === 'mminvalidfailure') {
+      failTable(Math.ceil(profileCount / 4), 'invalid_local_index');
+      return;
+    }
+    if (mode === 'mmlatefailure' && tableIndex === 1) {
+      failTable(0, 'late_socket_loss');
+      return;
+    }
+    if (mode === 'mmduplicatefailure' && tableIndex === 1) {
+      failTable(0, 'duplicate_socket_loss');
+      failTable(0, 'duplicate_socket_loss');
+      return;
+    }
+    if (mode === 'mmtimeout') return;
+    setTimeout(() => {
+      startedTables.add(tableIndex);
+      readyTables.add(tableIndex);
+      if (mode === 'mmterminalafterstarted' && tableIndex === 0) {
+        terminalFailures = 1;
+      }
+      progress('hold');
+      progress('hold');
+      if (mode === 'mmaftercompletefailure' && startedTables.size === Math.ceil(profileCount / 4)) {
+        setTimeout(() => failTable(0, 'post_complete_socket_loss'), 30);
+      }
+    }, 35);
   }
   if (message?.type === 'shutdown') {
     if (mode === 'hang') return;
@@ -156,19 +261,118 @@ async function startRealWorkerServers() {
   } };
 }
 
+async function startRealMatchmakingServers(options = {}) {
+  const observed = { loginAttempts: 0, joins: 0, rooms: new Set(), activeSockets: 0 };
+  const pending = [];
+  let roomSequence = 0;
+  const seats = ['bottom', 'right', 'top', 'left'];
+  const http = createServer(async (request, response) => {
+    if (request.method !== 'POST' || request.url !== '/api/auth/login') {
+      response.writeHead(404).end();
+      return;
+    }
+    let raw = '';
+    for await (const chunk of request) raw += chunk;
+    const body = JSON.parse(raw);
+    observed.loginAttempts += 1;
+    const sessionId = body.email.match(/^real-mm-(\d+)@example\.test$/)?.[1] ?? String(observed.loginAttempts);
+    response.writeHead(200, { 'content-type': 'application/json',
+      'set-cookie': `belot_session=real-mm-${sessionId}; HttpOnly; Path=/` });
+    response.end(JSON.stringify({ ok: true, session: { profile: true } }));
+  });
+  const ws = new WebSocketServer({ server: http, path: '/ws' });
+  const send = (socket, message) => {
+    if (socket.readyState === 1) socket.send(JSON.stringify(message));
+  };
+  const maybeCreateRoom = () => {
+    if (pending.length < 4) return;
+    const entries = pending.splice(0, 4);
+    const roomIndex = roomSequence;
+    const roomId = `real-room-${roomSequence}`;
+    roomSequence += 1;
+    observed.rooms.add(roomId);
+    const roster = seats.map((seat) => ({
+      seat, isOccupied: true, isBot: false, isControlledByBot: false, isConnected: true,
+    }));
+    entries.forEach((entry, index) => {
+      const seat = seats[index];
+      send(entry.socket, {
+        type: 'match_found', roomId, seat, stake: 5000,
+        humanPlayers: 4, botPlayers: 0,
+      });
+      send(entry.socket, {
+        type: 'room_snapshot', roomId, yourSeat: seat, seats: roster,
+        game: { authoritativePhase: 'cutting' }, stakeAmount: 5000,
+      });
+    });
+    if (options.closeFirstRoomSocket && roomIndex === 0) {
+      setTimeout(() => {
+        try { entries[0].socket.close(1011, 'synthetic post-start loss'); } catch {}
+      }, 80);
+    }
+  };
+  ws.on('connection', (socket) => {
+    observed.activeSockets += 1;
+    socket.once('close', () => { observed.activeSockets -= 1; });
+    send(socket, { type: 'connected' });
+    socket.on('message', (data) => {
+      const message = JSON.parse(data.toString());
+      if (message.type === 'ping') {
+        send(socket, { type: 'pong' });
+        return;
+      }
+      if (message.type !== 'join_matchmaking') return;
+      observed.joins += 1;
+      send(socket, {
+        type: 'matchmaking_joined', stake: 5000, requiredPlayers: 4,
+      });
+      send(socket, {
+        type: 'matchmaking_status', stake: 5000, requiredPlayers: 4,
+      });
+      pending.push({ socket });
+      maybeCreateRoom();
+    });
+  });
+  http.listen(3101, '127.0.0.1');
+  await once(http, 'listening');
+  return { observed, async close() {
+    for (const socket of ws.clients) socket.terminate();
+    await new Promise((resolveClose) => ws.close(resolveClose));
+    await new Promise((resolveClose) => http.close(resolveClose));
+  } };
+}
+
 function trackedFork(workerPath, observation) {
   return (modulePath, args, options) => {
     const child = fork(workerPath ?? modulePath, args, options);
+    const workerIndex = Number(args?.[0]);
     observation.children.push(child);
     child.on('message', (message) => {
       if (message?.type === 'worker-ready') observation.readyTimes.push(Date.now());
       if (message?.observedTimestamps) observation.observedTimestamps.push(message.observedTimestamps);
+      if (Number.isFinite(message?.metrics?.wsReadyProfiles)) observation.readyProfileProgress.push({
+        workerIndex,
+        atMs: Date.now(),
+        readyProfiles: message.metrics.wsReadyProfiles,
+      });
+      if (message?.matchmaking) observation.matchmakingProgress.push({
+        workerIndex,
+        atMs: Date.now(),
+        matchmaking: message.matchmaking,
+      });
     });
     const originalSend = child.send.bind(child);
     child.send = (message, ...rest) => {
       if (message?.type === 'start') {
         observation.startTimes.push(Date.now());
         observation.startMessages.push(message);
+      }
+      if (message?.type === 'allow-matchmaking') {
+        observation.admissionMessages.push({
+          workerIndex,
+          tableIndex: message.tableIndex,
+          atMs: Date.now(),
+        });
       }
       return originalSend(message, ...rest);
     };
@@ -181,7 +385,8 @@ async function runScenario(root, fixture, mode, overrides = {}) {
   const credentialsPath = join(root, `credentials-${mode}-${Date.now()}-${Math.random()}.json`);
   await writeCredentials(credentialsPath, 16, mode);
   const observation = { children: [], readyTimes: [], startTimes: [],
-    startMessages: [], observedTimestamps: [] };
+    startMessages: [], observedTimestamps: [], readyProfileProgress: [], admissionMessages: [],
+    matchmakingProgress: [] };
   const controller = new MultiProcessWsController(
     baseConfig(credentialsPath, directory, overrides),
     { workerPath: fixture, fork: trackedFork(fixture, observation) },
@@ -253,6 +458,7 @@ async function main() {
       assert.equal(normal.summary.exitCode, EXIT_CODES.success);
       assert.equal(normal.summary.cleanup.completedWorkers, 4);
       assert.equal(normal.summary.cleanup.forcedWorkers, 0);
+      assert.equal(normal.observation.admissionMessages.length, 0);
       assert.ok(normal.observation.children.every((child) => child.exitCode !== null));
     });
 
@@ -293,6 +499,206 @@ async function main() {
         rename: async (from, to) => { calls.push('rename'); assert.match(from, /\.tmp-/); assert.match(to, /summary\.json$/); },
       });
       assert.deepEqual(calls, ['mkdir', 'write', 'rename']);
+    });
+
+    await test('matchmaking barrier waits for readiness and maps global tables sequentially', async () => {
+      const result = await runScenario(root, fixture, 'mmdelayedready', {
+        tables: 4, workerCount: 2, matchmakingEnabled: true,
+        matchmakingTableTimeoutMs: 800, matchmakingAdmissionPauseMs: 5,
+        readinessDurationMs: 40, holdDurationMs: 400, hardTimeoutMs: 4_000,
+      });
+      assert.equal(result.summary.exitCode, EXIT_CODES.success);
+      assert.deepEqual(result.observation.admissionMessages.map((item) => ({
+        workerIndex: item.workerIndex,
+        tableIndex: item.tableIndex,
+      })), [
+        { workerIndex: 0, tableIndex: 0 },
+        { workerIndex: 0, tableIndex: 1 },
+        { workerIndex: 1, tableIndex: 0 },
+        { workerIndex: 1, tableIndex: 1 },
+      ]);
+      const fullReadyAt = Math.max(...[0, 1].map((workerIndex) => result.observation.readyProfileProgress
+        .find((item) => item.workerIndex === workerIndex && item.readyProfiles === 8)?.atMs ?? 0));
+      assert.ok(result.observation.admissionMessages[0].atMs >= fullReadyAt);
+      const worker0Local0Started = result.observation.matchmakingProgress.find((item) => (
+        item.workerIndex === 0 && item.matchmaking.startedTableIndexes.includes(0)
+      ));
+      const worker0Local1Started = result.observation.matchmakingProgress.find((item) => (
+        item.workerIndex === 0 && item.matchmaking.startedTableIndexes.includes(1)
+      ));
+      assert.ok(result.observation.admissionMessages[1].atMs >= worker0Local0Started.atMs);
+      assert.ok(result.observation.admissionMessages[2].atMs >= worker0Local1Started.atMs);
+      assert.equal(new Set(result.observation.admissionMessages
+        .map((item) => `${item.workerIndex}:${item.tableIndex}`)).size, 4);
+      assert.equal(result.summary.matchmaking.completionStatus, 'complete');
+      assert.equal(result.summary.exitReason, 'release completed');
+      assert.deepEqual(result.summary.matchmaking.admittedTableIndexes, [0, 1, 2, 3]);
+      assert.deepEqual(result.summary.matchmaking.startedTableIndexes, [0, 1, 2, 3]);
+      assert.equal(result.summary.matchmaking.currentGlobalTableIndex, null);
+      assert.equal(result.summary.matchmaking.expectedTables, 4);
+      assert.ok(result.summary.completedAtMs >= result.summary.timestamps.releaseAtMs);
+      assert.ok(result.observation.children.every((child) => child.exitCode !== null));
+      assert.doesNotMatch(JSON.stringify(result.summary), /fake-password|example\.test|belot_session/i);
+    });
+
+    await test('matchmaking current table failure returns workload exit and stops sequence', async () => {
+      const result = await runScenario(root, fixture, 'mmfailure', {
+        tables: 4, workerCount: 2, matchmakingEnabled: true,
+        matchmakingTableTimeoutMs: 500, hardTimeoutMs: 2_000,
+      });
+      assert.equal(result.summary.exitCode, EXIT_CODES.workload);
+      assert.equal(result.observation.admissionMessages.length, 1);
+      assert.equal(result.summary.matchmaking.completionStatus, 'failed');
+      assert.deepEqual(result.summary.matchmaking.failures, [
+        { globalTableIndex: 0, failureCode: 'synthetic_failure' },
+      ]);
+      assert.ok(result.observation.children.every((child) => child.exitCode !== null));
+    });
+
+    await test('matchmaking table timeout returns workload exit without retry', async () => {
+      const result = await runScenario(root, fixture, 'mmtimeout', {
+        tables: 4, workerCount: 2, matchmakingEnabled: true,
+        matchmakingTableTimeoutMs: 80, holdDurationMs: 300, hardTimeoutMs: 2_000,
+      });
+      assert.equal(result.summary.exitCode, EXIT_CODES.workload);
+      assert.equal(result.observation.admissionMessages.length, 1);
+      assert.deepEqual(result.summary.matchmaking.failures, [
+        { globalTableIndex: 0, failureCode: 'table_timeout' },
+      ]);
+    });
+
+    await test('matchmaking failure from started table stops current admission sequence', async () => {
+      const result = await runScenario(root, fixture, 'mmlatefailure', {
+        tables: 4, workerCount: 2, matchmakingEnabled: true,
+        matchmakingTableTimeoutMs: 800, holdDurationMs: 400, hardTimeoutMs: 3_000,
+      });
+      assert.equal(result.summary.exitCode, EXIT_CODES.workload);
+      assert.deepEqual(result.observation.admissionMessages.map((item) => ({
+        workerIndex: item.workerIndex,
+        tableIndex: item.tableIndex,
+      })), [
+        { workerIndex: 0, tableIndex: 0 },
+        { workerIndex: 0, tableIndex: 1 },
+      ]);
+      assert.equal(result.summary.matchmaking.completionStatus, 'failed');
+      assert.equal(result.summary.matchmaking.failedTables, 1);
+      assert.deepEqual(result.summary.matchmaking.failures, [
+        { globalTableIndex: 0, failureCode: 'late_socket_loss' },
+      ]);
+    });
+
+    await test('terminal profile failure before readiness fails matchmaking without admission', async () => {
+      const result = await runScenario(root, fixture, 'mmterminalbefore', {
+        tables: 4, workerCount: 2, matchmakingEnabled: true,
+        matchmakingTableTimeoutMs: 800, holdDurationMs: 400, hardTimeoutMs: 3_000,
+      });
+      assert.equal(result.summary.exitCode, EXIT_CODES.workload);
+      assert.equal(result.summary.matchmaking.completionStatus, 'failed');
+      assert.equal(result.summary.matchmaking.failureCode, 'profile_failure_before_admission');
+      assert.equal(result.summary.matchmaking.failureWorkerIndex, 0);
+      assert.equal(result.observation.admissionMessages.length, 0);
+      assert.notEqual(result.summary.exitReason, 'release completed');
+    });
+
+    await test('terminal profile failure from unadmitted table stops after first started table', async () => {
+      const result = await runScenario(root, fixture, 'mmterminalafterstarted', {
+        tables: 4, workerCount: 2, matchmakingEnabled: true,
+        matchmakingTableTimeoutMs: 800, holdDurationMs: 400, hardTimeoutMs: 3_000,
+      });
+      assert.equal(result.summary.exitCode, EXIT_CODES.workload);
+      assert.deepEqual(result.observation.admissionMessages.map((item) => ({
+        workerIndex: item.workerIndex,
+        tableIndex: item.tableIndex,
+      })), [{ workerIndex: 0, tableIndex: 0 }]);
+      assert.equal(result.summary.matchmaking.completionStatus, 'failed');
+      assert.equal(result.summary.matchmaking.failureCode, 'profile_failure_before_admission');
+      assert.equal(result.summary.matchmaking.failureWorkerIndex, 0);
+    });
+
+    await test('readiness deadline timeout fails matchmaking without terminal metric', async () => {
+      const result = await runScenario(root, fixture, 'mmreadinesstimeout', {
+        tables: 4, workerCount: 2, matchmakingEnabled: true,
+        readinessDurationMs: 40, holdDurationMs: 400,
+        heartbeatTimeoutMs: 1_000, heartbeatIntervalMs: 15,
+        matchmakingTableTimeoutMs: 800, hardTimeoutMs: 3_000,
+      });
+      assert.equal(result.summary.exitCode, EXIT_CODES.workload);
+      assert.equal(result.summary.metrics.heartbeatTimeouts, 0);
+      assert.equal(result.summary.exitReason, 'matchmaking readiness failed');
+      assert.equal(result.summary.matchmaking.completionStatus, 'failed');
+      assert.equal(result.summary.matchmaking.failureCode, 'readiness_timeout');
+      assert.equal(result.summary.matchmaking.failureWorkerIndex, null);
+      assert.equal(result.observation.admissionMessages.length, 0);
+    });
+
+    await test('duplicate terminal failure snapshots are idempotent', async () => {
+      const result = await runScenario(root, fixture, 'mmduplicateterminal', {
+        tables: 4, workerCount: 2, matchmakingEnabled: true,
+        matchmakingTableTimeoutMs: 800, holdDurationMs: 400, hardTimeoutMs: 3_000,
+      });
+      assert.equal(result.summary.exitCode, EXIT_CODES.workload);
+      assert.equal(result.summary.matchmaking.failedTables, 0);
+      assert.equal(result.summary.matchmaking.failureCode, 'profile_failure_before_admission');
+      assert.equal(result.summary.matchmaking.failureWorkerIndex, 0);
+      assert.equal(result.summary.exitReason, 'matchmaking readiness failed');
+    });
+
+    await test('specific table failure takes priority over generic terminal failure', async () => {
+      const result = await runScenario(root, fixture, 'mmspecificpriority', {
+        tables: 4, workerCount: 2, matchmakingEnabled: true,
+        matchmakingTableTimeoutMs: 800, holdDurationMs: 400, hardTimeoutMs: 3_000,
+      });
+      assert.equal(result.summary.exitCode, EXIT_CODES.workload);
+      assert.equal(result.summary.matchmaking.failureCode, 'specific_table_failure');
+      assert.equal(result.summary.matchmaking.failureWorkerIndex, null);
+      assert.deepEqual(result.summary.matchmaking.failures, [
+        { globalTableIndex: 0, failureCode: 'specific_table_failure' },
+      ]);
+    });
+
+    await test('matchmaking failure after completion overrides release success', async () => {
+      const result = await runScenario(root, fixture, 'mmaftercompletefailure', {
+        tables: 2, workerCount: 1, matchmakingEnabled: true,
+        matchmakingTableTimeoutMs: 800, holdDurationMs: 500, hardTimeoutMs: 3_000,
+      });
+      assert.equal(result.summary.exitCode, EXIT_CODES.workload);
+      assert.equal(result.summary.exitReason, 'matchmaking table failed');
+      assert.equal(result.summary.matchmaking.completionStatus, 'failed');
+      assert.equal(result.summary.matchmaking.failedTables, 1);
+      assert.notEqual(result.summary.exitReason, 'release completed');
+      assert.deepEqual(result.summary.matchmaking.failures, [
+        { globalTableIndex: 0, failureCode: 'post_complete_socket_loss' },
+      ]);
+    });
+
+    await test('duplicate matchmaking failure snapshots are counted once', async () => {
+      const result = await runScenario(root, fixture, 'mmduplicatefailure', {
+        tables: 4, workerCount: 2, matchmakingEnabled: true,
+        matchmakingTableTimeoutMs: 800, holdDurationMs: 400, hardTimeoutMs: 3_000,
+      });
+      assert.equal(result.summary.exitCode, EXIT_CODES.workload);
+      assert.equal(result.summary.matchmaking.failedTables, 1);
+      assert.deepEqual(result.summary.matchmaking.failures, [
+        { globalTableIndex: 0, failureCode: 'duplicate_socket_loss' },
+      ]);
+      assert.equal(result.summary.exitReason, 'matchmaking table failed');
+    });
+
+    await test('invalid worker-local matchmaking failure index is orchestration', async () => {
+      const result = await runScenario(root, fixture, 'mminvalidfailure', {
+        tables: 4, workerCount: 2, matchmakingEnabled: true,
+        matchmakingTableTimeoutMs: 800, holdDurationMs: 400, hardTimeoutMs: 3_000,
+      });
+      assert.equal(result.summary.exitCode, EXIT_CODES.orchestration);
+      assert.equal(result.summary.exitReason, 'invalid matchmaking failure index');
+    });
+
+    await test('fatal worker failure stays orchestration exit with matchmaking enabled', async () => {
+      const result = await runScenario(root, fixture, 'failedipc', {
+        matchmakingEnabled: true, matchmakingTableTimeoutMs: 500,
+      });
+      assert.equal(result.summary.exitCode, EXIT_CODES.orchestration);
+      assert.equal(result.summary.workers.some((worker) => worker.failed), true);
     });
 
     await test('heartbeat timeout returns orchestration exit code', async () => {
@@ -338,7 +744,8 @@ async function main() {
           { email: 'real-3@example.test', password: 'fake-password' },
         ] }), 'utf8');
         const observation = { children: [], readyTimes: [], startTimes: [],
-          startMessages: [], observedTimestamps: [] };
+          startMessages: [], observedTimestamps: [], readyProfileProgress: [], admissionMessages: [],
+          matchmakingProgress: [] };
         const workerPath = new URL('./multi-process-ws-worker.mjs', import.meta.url);
         const controller = new MultiProcessWsController(baseConfig(
           credentialsPath, directory, {
@@ -369,6 +776,132 @@ async function main() {
       }
     });
 
+    await test('real worker matchmaking login failure fails readiness without admission', async () => {
+      const servers = await startRealWorkerServers();
+      try {
+        const credentialsPath = join(root, 'credentials-real-matchmaking-login-failure.json');
+        const directory = join(root, 'out-real-matchmaking-login-failure');
+        await writeFile(credentialsPath, JSON.stringify({ users: [
+          { email: 'real-fail@example.test', password: 'fake-password' },
+          { email: 'real-1@example.test', password: 'fake-password' },
+          { email: 'real-2@example.test', password: 'fake-password' },
+          { email: 'real-3@example.test', password: 'fake-password' },
+        ] }), 'utf8');
+        const observation = { children: [], readyTimes: [], startTimes: [],
+          startMessages: [], observedTimestamps: [], readyProfileProgress: [], admissionMessages: [],
+          matchmakingProgress: [] };
+        const workerPath = new URL('./multi-process-ws-worker.mjs', import.meta.url);
+        const controller = new MultiProcessWsController(baseConfig(
+          credentialsPath, directory, {
+            tables: 1, workerCount: 1, loginSpreadMs: 30, wsStartDelayMs: 80,
+            readinessDurationMs: 500, holdDurationMs: 200,
+            heartbeatTimeoutMs: 1_000, hardTimeoutMs: 3_000,
+            shutdownGraceMs: 300, partialIntervalMs: 50,
+            heartbeatIntervalMs: 25, loginTimeoutMs: 500,
+            attemptTimeoutMs: 120, maxAttempts: 2, pingIntervalMs: 25,
+            cleanupTimeoutMs: 100, matchmakingEnabled: true,
+            matchmakingTableTimeoutMs: 500,
+          },
+        ), { workerPath, fork: trackedFork(workerPath, observation) });
+        const summary = await controller.run();
+        assert.equal(summary.exitCode, EXIT_CODES.workload);
+        assert.equal(summary.matchmaking.completionStatus, 'failed');
+        assert.equal(summary.matchmaking.failureCode, 'profile_failure_before_admission');
+        assert.equal(observation.admissionMessages.length, 0);
+        assert.ok(observation.children.every((child) => child.exitCode !== null));
+        assert.doesNotMatch(JSON.stringify(summary),
+          /fake-password|real-(?:fail|\d+)@example\.test|belot_session/i);
+        await waitFor(() => servers.observed.activeSockets === 0,
+          500, 'real matchmaking login failure left active sockets');
+      } finally {
+        await servers.close();
+      }
+    });
+
+    await test('real worker matchmaking happy path admits two local tables', async () => {
+      const servers = await startRealMatchmakingServers();
+      try {
+        const credentialsPath = join(root, 'credentials-real-matchmaking-happy.json');
+        const directory = join(root, 'out-real-matchmaking-happy');
+        await writeFile(credentialsPath, JSON.stringify({ users: Array.from(
+          { length: 8 },
+          (_, index) => ({ email: `real-mm-${index}@example.test`, password: `fake-password-${index}` }),
+        ) }), 'utf8');
+        const observation = { children: [], readyTimes: [], startTimes: [],
+          startMessages: [], observedTimestamps: [], readyProfileProgress: [],
+          admissionMessages: [], matchmakingProgress: [] };
+        const workerPath = new URL('./multi-process-ws-worker.mjs', import.meta.url);
+        const controller = new MultiProcessWsController(baseConfig(
+          credentialsPath, directory, {
+            tables: 2, workerCount: 1, loginSpreadMs: 0, wsStartDelayMs: 30,
+            readinessDurationMs: 700, holdDurationMs: 300,
+            heartbeatTimeoutMs: 1_000, hardTimeoutMs: 4_000,
+            shutdownGraceMs: 400, partialIntervalMs: 50,
+            heartbeatIntervalMs: 25, loginTimeoutMs: 500,
+            attemptTimeoutMs: 250, maxAttempts: 2, pingIntervalMs: 40,
+            cleanupTimeoutMs: 150, matchmakingEnabled: true,
+            matchmakingTableTimeoutMs: 1_000,
+          },
+        ), { workerPath, fork: trackedFork(workerPath, observation) });
+        const summary = await controller.run();
+        assert.equal(summary.exitCode, EXIT_CODES.success);
+        assert.equal(servers.observed.loginAttempts, 8);
+        assert.equal(servers.observed.joins, 8);
+        assert.equal(servers.observed.rooms.size, 2);
+        assert.equal(summary.matchmaking.completionStatus, 'complete');
+        assert.deepEqual(summary.matchmaking.startedTableIndexes, [0, 1]);
+        assert.ok(observation.children.every((child) => child.exitCode !== null));
+        await waitFor(() => servers.observed.activeSockets === 0,
+          500, 'real matchmaking happy path left active sockets');
+        assert.doesNotMatch(JSON.stringify(summary),
+          /fake-password|real-mm-\d+@example\.test|belot_session|real-room-/i);
+      } finally {
+        await servers.close();
+      }
+    });
+
+    await test('real worker matchmaking post-start socket loss fails global table zero', async () => {
+      const servers = await startRealMatchmakingServers({ closeFirstRoomSocket: true });
+      try {
+        const credentialsPath = join(root, 'credentials-real-matchmaking-failure.json');
+        const directory = join(root, 'out-real-matchmaking-failure');
+        await writeFile(credentialsPath, JSON.stringify({ users: Array.from(
+          { length: 8 },
+          (_, index) => ({ email: `real-mm-${index}@example.test`, password: `fake-password-${index}` }),
+        ) }), 'utf8');
+        const observation = { children: [], readyTimes: [], startTimes: [],
+          startMessages: [], observedTimestamps: [], readyProfileProgress: [],
+          admissionMessages: [], matchmakingProgress: [] };
+        const workerPath = new URL('./multi-process-ws-worker.mjs', import.meta.url);
+        const controller = new MultiProcessWsController(baseConfig(
+          credentialsPath, directory, {
+            tables: 2, workerCount: 1, loginSpreadMs: 0, wsStartDelayMs: 30,
+            readinessDurationMs: 700, holdDurationMs: 600,
+            heartbeatTimeoutMs: 1_000, hardTimeoutMs: 4_000,
+            shutdownGraceMs: 400, partialIntervalMs: 50,
+            heartbeatIntervalMs: 25, loginTimeoutMs: 500,
+            attemptTimeoutMs: 250, maxAttempts: 2, pingIntervalMs: 40,
+            cleanupTimeoutMs: 150, matchmakingEnabled: true,
+            matchmakingTableTimeoutMs: 1_000,
+          },
+        ), { workerPath, fork: trackedFork(workerPath, observation) });
+        const summary = await controller.run();
+        assert.equal(summary.exitCode, EXIT_CODES.workload);
+        assert.equal(summary.matchmaking.completionStatus, 'failed');
+        assert.equal(summary.matchmaking.failedTables, 1);
+        assert.deepEqual(summary.matchmaking.failures, [
+          { globalTableIndex: 0, failureCode: 'socket_lost_after_join' },
+        ]);
+        assert.ok(observation.children.every((child) => child.exitCode !== null));
+        await waitFor(() => servers.observed.activeSockets === 0,
+          500, 'real matchmaking failure path left active sockets');
+        assert.doesNotMatch(JSON.stringify(summary),
+          /fake-password|real-mm-\d+@example\.test|belot_session|real-room-/i);
+      } finally {
+        await servers.close();
+      }
+    });
+
     await test('shutdown-complete followed by exit 9 cannot report success', async () => {
       const result = await runScenario(root, fixture, 'postcomplete9');
       assert.equal(result.summary.exitCode, EXIT_CODES.orchestration);
@@ -381,7 +914,8 @@ async function main() {
       const directory = join(root, 'out-forced');
       await writeCredentials(credentialsPath, 16, 'hang');
       const observation = { children: [], readyTimes: [], startTimes: [],
-        startMessages: [], observedTimestamps: [] };
+        startMessages: [], observedTimestamps: [], readyProfileProgress: [], admissionMessages: [],
+        matchmakingProgress: [] };
       const controller = new MultiProcessWsController(
         baseConfig(credentialsPath, directory, { shutdownGraceMs: 40, hardTimeoutMs: 2_000 }),
         { workerPath: fixture, fork: trackedFork(fixture, observation) },
@@ -407,7 +941,8 @@ async function main() {
       const directory = join(root, 'out-final-write');
       await writeCredentials(credentialsPath, 16, 'normal');
       const observation = { children: [], readyTimes: [], startTimes: [],
-        startMessages: [], observedTimestamps: [] };
+        startMessages: [], observedTimestamps: [], readyProfileProgress: [], admissionMessages: [],
+        matchmakingProgress: [] };
       let finalAttempts = 0;
       const errors = [];
       const originalError = console.error;
