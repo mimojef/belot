@@ -320,6 +320,24 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminHistoryWindowChange?: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
+  onAdminVisitorsTypeChange?: (type: import('../network/createGameServerClient.js').VisitorListType) => void
+  onAdminVisitorsPageChange?: (offset: number) => void
+  onAdminVisitorsViewChange?: (view: import('../network/createGameServerClient.js').AdminVisitorsView) => void
+  onAdminVisitorsLoad?: (params: {
+    period: import('../network/createGameServerClient.js').VisitorListPeriod
+    type: import('../network/createGameServerClient.js').VisitorListType
+    limit: number
+    offset: number
+  }) => Promise<
+    | { ok: true; rows: import('../network/createGameServerClient.js').AdminVisitorRow[]; total: number }
+    | { ok: false; message: string }
+  >
+  onAdminVisitorSourcesLoad?: (params: {
+    period: import('../network/createGameServerClient.js').VisitorListPeriod
+  }) => Promise<
+    | { ok: true; rows: import('../network/createGameServerClient.js').AdminVisitorSourceRow[]; total: number }
+    | { ok: false; message: string }
+  >
 }
 
 
@@ -350,7 +368,7 @@ export type LobbyFlowController = {
   setAdminHistoryResult: (result: import('../adminServer/adminServerTypes.js').MonitoringHistoryResult) => void
   setAdminHistoryError: (message: string) => void
   navigateInitialPath: () => void
-  navigateAdminVisitors: () => void
+  navigateAdminVisitors: (period?: string) => void
   navigateAdminInfo: () => void
 }
 
@@ -525,6 +543,19 @@ type InternalLobbyFlowState = {
   adminHistoryResult: import('../adminServer/adminServerTypes.js').MonitoringHistoryResult | null
   adminHistoryLoading: boolean
   adminHistoryErrorText: string | null
+  adminVisitorsLoading: boolean
+  adminVisitorsRows: import('../network/createGameServerClient.js').AdminVisitorRow[]
+  adminVisitorsTotal: number
+  adminVisitorsErrorText: string | null
+  adminVisitorsPeriod: import('../network/createGameServerClient.js').VisitorListPeriod
+  adminVisitorsType: import('../network/createGameServerClient.js').VisitorListType
+  adminVisitorsOffset: number
+  adminVisitorsLimit: number
+  adminVisitorsView: import('../network/createGameServerClient.js').AdminVisitorsView
+  adminVisitorsSourcesLoading: boolean
+  adminVisitorsSourcesRows: import('../network/createGameServerClient.js').AdminVisitorSourceRow[]
+  adminVisitorsSourcesTotal: number
+  adminVisitorsSourcesErrorText: string | null
   pwaUpdatePending: boolean
   pwaUpdateApplyFn: (() => void) | null
 }
@@ -715,6 +746,19 @@ function createInitialState(): InternalLobbyFlowState {
     adminHistoryResult: null,
     adminHistoryLoading: false,
     adminHistoryErrorText: null,
+    adminVisitorsLoading: false,
+    adminVisitorsRows: [],
+    adminVisitorsTotal: 0,
+    adminVisitorsErrorText: null,
+    adminVisitorsPeriod: 'today',
+    adminVisitorsType: 'all',
+    adminVisitorsOffset: 0,
+    adminVisitorsLimit: 50,
+    adminVisitorsView: 'visitors',
+    adminVisitorsSourcesLoading: false,
+    adminVisitorsSourcesRows: [],
+    adminVisitorsSourcesTotal: 0,
+    adminVisitorsSourcesErrorText: null,
     pwaUpdatePending: false,
     pwaUpdateApplyFn: null,
   }
@@ -1766,6 +1810,19 @@ export function createLobbyFlowController(
       adminHistoryResult: state.adminHistoryResult,
       adminHistoryLoading: state.adminHistoryLoading,
       adminHistoryErrorText: state.adminHistoryErrorText,
+      adminVisitorsLoading: state.adminVisitorsLoading,
+      adminVisitorsRows: state.adminVisitorsRows,
+      adminVisitorsTotal: state.adminVisitorsTotal,
+      adminVisitorsErrorText: state.adminVisitorsErrorText,
+      adminVisitorsPeriod: state.adminVisitorsPeriod,
+      adminVisitorsType: state.adminVisitorsType,
+      adminVisitorsOffset: state.adminVisitorsOffset,
+      adminVisitorsLimit: state.adminVisitorsLimit,
+      adminVisitorsView: state.adminVisitorsView,
+      adminVisitorsSourcesLoading: state.adminVisitorsSourcesLoading,
+      adminVisitorsSourcesRows: state.adminVisitorsSourcesRows,
+      adminVisitorsSourcesTotal: state.adminVisitorsSourcesTotal,
+      adminVisitorsSourcesErrorText: state.adminVisitorsSourcesErrorText,
       pwaUpdatePending: state.pwaUpdatePending,
     }
 
@@ -2422,10 +2479,53 @@ export function createLobbyFlowController(
         options.onAdminHistoryWindowChange?.(window)
       },
       onAdminVisitorsPeriodClick: (period) => {
+        if (period === 'today' || period === 'yesterday' || period === '7d' || period === '30d') {
+          state.adminVisitorsPeriod = period
+          syncAdminVisitorsUrl()
+          if (state.adminVisitorsView === 'sources') {
+            state.adminVisitorsSourcesRows = []
+            state.adminVisitorsSourcesLoading = true
+            render()
+            void fetchAdminVisitorSources()
+          } else {
+            state.adminVisitorsOffset = 0
+            state.adminVisitorsRows = []
+            state.adminVisitorsLoading = true
+            render()
+            void fetchAdminVisitors()
+          }
+        }
         options.onAdminVisitorsPeriodClick?.(period)
       },
       onAdminVisitorsBackClick: () => {
         options.onAdminVisitorsBackClick?.()
+      },
+      onAdminVisitorsTypeChange: (type) => {
+        state.adminVisitorsType = type
+        state.adminVisitorsOffset = 0
+        state.adminVisitorsRows = []
+        state.adminVisitorsLoading = true
+        render()
+        void fetchAdminVisitors()
+      },
+      onAdminVisitorsPageChange: (offset) => {
+        state.adminVisitorsOffset = offset
+        state.adminVisitorsRows = []
+        state.adminVisitorsLoading = true
+        render()
+        void fetchAdminVisitors()
+      },
+      onAdminVisitorsViewChange: (view) => {
+        state.adminVisitorsView = view
+        syncAdminVisitorsUrl()
+        if (view === 'sources') {
+          state.adminVisitorsSourcesRows = []
+          state.adminVisitorsSourcesLoading = true
+          render()
+          void fetchAdminVisitorSources()
+        } else {
+          render()
+        }
       },
     })
   }
@@ -3008,7 +3108,7 @@ export function createLobbyFlowController(
     render()
   }
 
-  function showAdminVisitorsPanel(): void {
+  function showAdminVisitorsPanel(overridePeriod?: string, overrideView?: string): void {
     const authSession = options.getAuthSession?.() ?? null
 
     if (authSession?.account.role !== 'admin') {
@@ -3026,7 +3126,73 @@ export function createLobbyFlowController(
     state.profilePopupProfile = null
     stopWaitingRoomActivity()
     resetFinalFillSequence()
-    render()
+
+    if (overridePeriod && (overridePeriod === 'today' || overridePeriod === 'yesterday' || overridePeriod === '7d' || overridePeriod === '30d')) {
+      state.adminVisitorsPeriod = overridePeriod
+    }
+    state.adminVisitorsView = (overrideView === 'sources') ? 'sources' : 'visitors'
+    state.adminVisitorsOffset = 0
+    state.adminVisitorsRows = []
+    state.adminVisitorsTotal = 0
+    state.adminVisitorsErrorText = null
+    state.adminVisitorsSourcesRows = []
+    state.adminVisitorsSourcesTotal = 0
+    state.adminVisitorsSourcesErrorText = null
+
+    if (state.adminVisitorsView === 'sources') {
+      state.adminVisitorsSourcesLoading = true
+      state.adminVisitorsLoading = false
+      render()
+      void fetchAdminVisitorSources()
+    } else {
+      state.adminVisitorsLoading = true
+      state.adminVisitorsSourcesLoading = false
+      render()
+      void fetchAdminVisitors()
+    }
+  }
+
+  async function fetchAdminVisitors(): Promise<void> {
+    if (!options.onAdminVisitorsLoad) {
+      state.adminVisitorsLoading = false
+      state.adminVisitorsErrorText = 'Зареждането не е конфигурирано.'
+      render()
+      return
+    }
+    const result = await options.onAdminVisitorsLoad({
+      period: state.adminVisitorsPeriod,
+      type: state.adminVisitorsType,
+      limit: state.adminVisitorsLimit,
+      offset: state.adminVisitorsOffset,
+    })
+    state.adminVisitorsLoading = false
+    if (!result.ok) {
+      state.adminVisitorsErrorText = result.message
+    } else {
+      state.adminVisitorsRows = result.rows
+      state.adminVisitorsTotal = result.total
+      state.adminVisitorsErrorText = null
+    }
+    if (state.currentScreen === 'admin-visitors') render()
+  }
+
+  async function fetchAdminVisitorSources(): Promise<void> {
+    if (!options.onAdminVisitorSourcesLoad) {
+      state.adminVisitorsSourcesLoading = false
+      state.adminVisitorsSourcesErrorText = 'Зареждането не е конфигурирано.'
+      render()
+      return
+    }
+    const result = await options.onAdminVisitorSourcesLoad({ period: state.adminVisitorsPeriod })
+    state.adminVisitorsSourcesLoading = false
+    if (!result.ok) {
+      state.adminVisitorsSourcesErrorText = result.message
+    } else {
+      state.adminVisitorsSourcesRows = result.rows
+      state.adminVisitorsSourcesTotal = result.total
+      state.adminVisitorsSourcesErrorText = null
+    }
+    if (state.currentScreen === 'admin-visitors') render()
   }
 
   function showAdminServerPanel(): void {
@@ -4134,6 +4300,14 @@ export function createLobbyFlowController(
   let _pendingInitialNav = false
   let _navigationReady = false
 
+  function syncAdminVisitorsUrl(): void {
+    if (state.currentScreen !== 'admin-visitors') return
+    const qs = new URLSearchParams()
+    qs.set('period', state.adminVisitorsPeriod)
+    if (state.adminVisitorsView !== 'visitors') qs.set('view', state.adminVisitorsView)
+    history.replaceState(null, '', `/admin/visitors?${qs}`)
+  }
+
   function syncUrlPath(): void {
     if (!_navigationReady || _pendingInitialNav) return
     if (document.getElementById('pwa-landing-overlay') !== null) return
@@ -4158,7 +4332,11 @@ export function createLobbyFlowController(
       case 'guest-contact-messages': void showAdminGuestContactMessages(); break
       case 'admin-info': void showAdminInfoPanel(); break
       case 'admin-server': showAdminServerPanel(); break
-      case 'admin-visitors': showAdminVisitorsPanel(); break
+      case 'admin-visitors': {
+        const _qs = new URLSearchParams(window.location.search)
+        showAdminVisitorsPanel(_qs.get('period') ?? undefined, _qs.get('view') ?? undefined)
+        break
+      }
       case 'friends': void showFriendsDirectory(); break
       case 'chat': void showChatPanel(); break
       case 'terms': showPublicLegalPage('terms'); break
@@ -4968,8 +5146,11 @@ export function createLobbyFlowController(
         _pendingInitialNav = true
       }
     },
-    navigateAdminVisitors: () => {
-      showAdminVisitorsPanel()
+    navigateAdminVisitors: (period?: string) => {
+      const qs = new URLSearchParams(window.location.search)
+      const p = period ?? qs.get('period') ?? undefined
+      const v = qs.get('view') ?? undefined
+      showAdminVisitorsPanel(p, v)
     },
     navigateAdminInfo: () => {
       void showAdminInfoPanel()

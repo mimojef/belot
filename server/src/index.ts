@@ -4856,6 +4856,86 @@ async function handleAdminStatsRequest(
   return true
 }
 
+async function handleAdminVisitorSourcesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  if (pathname !== '/api/admin/visitor-sources') {
+    return false
+  }
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session?.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
+    return true
+  }
+
+  const VALID_PERIODS = ['today', 'yesterday', '7d', '30d'] as const
+  const rawPeriod = requestUrl.searchParams.get('period') ?? 'today'
+  const period = (VALID_PERIODS as readonly string[]).includes(rawPeriod)
+    ? (rawPeriod as typeof VALID_PERIODS[number])
+    : 'today'
+
+  const result = siteVisitStore.getVisitorSources({ period })
+  sendJsonResponse(res, 200, { ok: true, ...result })
+  return true
+}
+
+async function handleAdminVisitorsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  if (pathname !== '/api/admin/visitors') {
+    return false
+  }
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session?.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
+    return true
+  }
+
+  const VALID_PERIODS = ['today', 'yesterday', '7d', '30d'] as const
+  const VALID_TYPES = ['all', 'guest', 'registered'] as const
+
+  const rawPeriod = requestUrl.searchParams.get('period') ?? 'today'
+  const rawType = requestUrl.searchParams.get('type') ?? 'all'
+  const rawLimit = parseInt(requestUrl.searchParams.get('limit') ?? '50', 10)
+  const rawOffset = parseInt(requestUrl.searchParams.get('offset') ?? '0', 10)
+
+  const period = (VALID_PERIODS as readonly string[]).includes(rawPeriod)
+    ? (rawPeriod as typeof VALID_PERIODS[number])
+    : 'today'
+  const type = (VALID_TYPES as readonly string[]).includes(rawType)
+    ? (rawType as typeof VALID_TYPES[number])
+    : 'all'
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50
+  const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0
+
+  const result = siteVisitStore.getVisitorList({ period, type, limit, offset })
+
+  sendJsonResponse(res, 200, { ok: true, ...result })
+  return true
+}
+
 async function handleAdminDailyRewardsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -5390,6 +5470,14 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminStatsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminVisitorSourcesRequest(req, res, requestUrl.pathname, requestUrl)) {
+    return
+  }
+
+  if (await handleAdminVisitorsRequest(req, res, requestUrl.pathname, requestUrl)) {
     return
   }
 

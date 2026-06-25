@@ -12,6 +12,8 @@
     "check:monitoring-history-endpoint": "tsx scripts/checkAdminMonitoringHistoryEndpoint.ts",
     "check:visitor-tracking": "tsx scripts/checkVisitorTracking.ts",
     "check:visitor-summary": "tsx scripts/checkVisitorSummary.ts",
+    "check:admin-visitors": "tsx scripts/checkAdminVisitors.ts",
+    "check:admin-visitor-sources": "tsx scripts/checkAdminVisitorSources.ts --server-root=.",
     "make-admin": "tsx scripts/make-admin.ts"
   },
   "dependencies": {

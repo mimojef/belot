@@ -252,6 +252,19 @@ export type LobbyScreenState = {
   adminHistoryResult: MonitoringHistoryResult | null
   adminHistoryLoading: boolean
   adminHistoryErrorText: string | null
+  adminVisitorsLoading: boolean
+  adminVisitorsRows: import('../network/createGameServerClient').AdminVisitorRow[]
+  adminVisitorsTotal: number
+  adminVisitorsErrorText: string | null
+  adminVisitorsPeriod: import('../network/createGameServerClient').VisitorListPeriod
+  adminVisitorsType: import('../network/createGameServerClient').VisitorListType
+  adminVisitorsOffset: number
+  adminVisitorsLimit: number
+  adminVisitorsView: import('../network/createGameServerClient').AdminVisitorsView
+  adminVisitorsSourcesLoading: boolean
+  adminVisitorsSourcesRows: import('../network/createGameServerClient').AdminVisitorSourceRow[]
+  adminVisitorsSourcesTotal: number
+  adminVisitorsSourcesErrorText: string | null
   pwaUpdatePending: boolean
 }
 
@@ -388,6 +401,9 @@ export type RenderLobbyScreenOptions = {
   onAdminHistoryWindowChange: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
+  onAdminVisitorsTypeChange?: (type: import('../network/createGameServerClient').VisitorListType) => void
+  onAdminVisitorsPageChange?: (offset: number) => void
+  onAdminVisitorsViewChange?: (view: import('../network/createGameServerClient').AdminVisitorsView) => void
 }
 
 
@@ -3989,36 +4005,251 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
   `
 }
 
-const VISITOR_PERIOD_LABELS: Record<string, string> = {
-  today: 'Днес',
-  yesterday: 'Вчера',
-  '7d': 'Последните 7 дни',
-  '30d': 'Последните 30 дни',
-}
 
 function renderAdminVisitorsPanel(state: LobbyScreenState): string {
   if (!state.isAdmin) {
     return `<div style="min-height:520px;display:flex;align-items:center;justify-content:center;color:#fecaca;font-size:15px;font-weight:800;">Нямаш достъп.</div>`
   }
 
-  const rawPeriod = new URLSearchParams(window.location.search).get('period') ?? ''
-  const periodLabel = VISITOR_PERIOD_LABELS[rawPeriod] ?? rawPeriod
+  const period = state.adminVisitorsPeriod
+  const activeView = state.adminVisitorsView
+
+  const periodBtn = (p: string, label: string) => {
+    const active = p === period
+    return `<button type="button" data-admin-visitors-period="${escapeHtml(p)}" style="
+      height:32px;padding:0 14px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;letter-spacing:0.03em;
+      border:1px solid ${active ? 'rgba(212,165,32,0.6)' : 'rgba(255,255,255,0.15)'};
+      background:${active ? 'rgba(212,165,32,0.12)' : 'transparent'};
+      color:${active ? '#d4a520' : 'rgba(255,255,255,0.6)'};
+    ">${label}</button>`
+  }
+
+  const viewBtn = (v: string, label: string) => {
+    const active = v === activeView
+    return `<button type="button" data-admin-visitors-view="${escapeHtml(v)}" style="
+      height:34px;padding:0 18px;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;letter-spacing:0.03em;
+      border:1px solid ${active ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.15)'};
+      background:${active ? 'rgba(255,255,255,0.1)' : 'transparent'};
+      color:${active ? '#fff' : 'rgba(255,255,255,0.5)'};
+    ">${label}</button>`
+  }
+
+  const periodControls = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px;">
+      ${periodBtn('today', 'Днес')}
+      ${periodBtn('yesterday', 'Вчера')}
+      ${periodBtn('7d', '7 дни')}
+      ${periodBtn('30d', '30 дни')}
+    </div>
+  `
+
+  const viewSwitcher = `
+    <div style="display:flex;gap:6px;margin-bottom:20px;">
+      ${viewBtn('visitors', 'Посетители')}
+      ${viewBtn('sources', 'Източници')}
+    </div>
+  `
+
+  let bodyHtml: string
+  let paginationHtml = ''
+
+  if (activeView === 'sources') {
+    bodyHtml = renderSourcesBody(state)
+  } else {
+    const result = renderVisitorsBody(state)
+    bodyHtml = result.body
+    paginationHtml = result.pagination
+  }
 
   return `
     <section style="padding:0 4px;">
+      <style>
+        @media(max-width:700px){.admin-visitors-desktop{display:none!important;}}
+        @media(min-width:701px){.admin-visitors-mobile{display:none!important;}}
+      </style>
       <div style="display:flex;align-items:center;gap:14px;margin-bottom:20px;flex-wrap:wrap;">
         <h2 style="font-size:18px;font-weight:800;color:#d4a520;margin:0;letter-spacing:0.04em;text-transform:uppercase;">Посетители</h2>
-        ${periodLabel ? `<span style="font-size:13px;font-weight:700;color:rgba(96,165,250,0.85);background:rgba(96,165,250,0.1);border:1px solid rgba(96,165,250,0.25);border-radius:6px;padding:3px 10px;">${escapeHtml(periodLabel)}</span>` : ''}
       </div>
-      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin:0 0 28px;line-height:1.6;">
-        Подробната статистика ще бъде добавена в следващата стъпка.
-      </p>
-      <button type="button" data-admin-visitors-back="1" style="
-        height:40px;padding:0 20px;border:1px solid rgba(212,165,32,0.45);border-radius:8px;
-        background:rgba(212,165,32,0.08);color:#d4a520;font-size:13px;font-weight:800;
-        cursor:pointer;letter-spacing:0.04em;
-      ">← Назад към Информация</button>
+
+      ${periodControls}
+      ${viewSwitcher}
+      ${bodyHtml}
+
+      <div style="display:flex;align-items:center;gap:16px;margin-top:16px;flex-wrap:wrap;">
+        ${paginationHtml}
+        <button type="button" data-admin-visitors-back="1" style="
+          height:34px;padding:0 16px;border:1px solid rgba(212,165,32,0.45);border-radius:6px;
+          background:rgba(212,165,32,0.08);color:#d4a520;font-size:12px;font-weight:800;
+          cursor:pointer;letter-spacing:0.04em;margin-left:auto;
+        ">← Назад към Информация</button>
+      </div>
     </section>
+  `
+}
+
+function renderVisitorsBody(state: LobbyScreenState): { body: string; pagination: string } {
+  const type = state.adminVisitorsType
+  const offset = state.adminVisitorsOffset
+  const limit = state.adminVisitorsLimit
+  const rows = state.adminVisitorsRows
+  const total = state.adminVisitorsTotal
+  const loading = state.adminVisitorsLoading
+  const errorText = state.adminVisitorsErrorText
+
+  const typeBtn = (t: string, label: string) => {
+    const active = t === type
+    return `<button type="button" data-admin-visitors-type="${escapeHtml(t)}" style="
+      height:32px;padding:0 14px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;letter-spacing:0.03em;
+      border:1px solid ${active ? 'rgba(96,165,250,0.5)' : 'rgba(255,255,255,0.15)'};
+      background:${active ? 'rgba(96,165,250,0.1)' : 'transparent'};
+      color:${active ? 'rgba(96,165,250,0.9)' : 'rgba(255,255,255,0.6)'};
+    ">${label}</button>`
+  }
+
+  const fmtDate = (s: string) => {
+    const d = new Date(s.includes('T') ? s : s + 'Z')
+    return isNaN(d.getTime()) ? s : d.toLocaleString('bg-BG', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' })
+  }
+
+  const truncate = (s: string | null, n: number) =>
+    s ? (s.length > n ? escapeHtml(s.slice(0, n)) + '…' : escapeHtml(s)) : '—'
+
+  let bodyHtml: string
+  if (loading) {
+    bodyHtml = `<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.4);font-size:14px;">Зареждане…</div>`
+  } else if (errorText) {
+    bodyHtml = `<div style="padding:24px;color:#fecaca;font-size:14px;">${escapeHtml(errorText)}</div>`
+  } else if (rows.length === 0) {
+    bodyHtml = `<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.35);font-size:14px;">Няма посетители за избрания период.</div>`
+  } else {
+    const tableRows = rows.map((r) => `
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.06);">
+        <td style="padding:8px 10px;white-space:nowrap;">
+          ${r.isRegistered
+            ? `<span style="font-size:10px;font-weight:800;color:rgba(96,165,250,0.85);background:rgba(96,165,250,0.1);border:1px solid rgba(96,165,250,0.25);border-radius:4px;padding:1px 6px;">РЕГ</span>`
+            : `<span style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.4);background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:1px 6px;">ГОСТ</span>`}
+        </td>
+        <td style="padding:8px 10px;max-width:160px;">
+          ${r.displayName ? `<div style="font-size:13px;color:#fff;font-weight:700;">${truncate(r.displayName, 24)}</div>` : ''}
+          ${r.email ? `<div style="font-size:11px;color:rgba(255,255,255,0.45);">${truncate(r.email, 32)}</div>` : '<div style="font-size:11px;color:rgba(255,255,255,0.25);">—</div>'}
+        </td>
+        <td style="padding:8px 10px;font-size:12px;color:rgba(255,255,255,0.5);font-family:monospace;">${truncate(r.lastIpAddress, 20)}</td>
+        <td style="padding:8px 10px;font-size:12px;color:rgba(255,255,255,0.5);max-width:140px;">${truncate(r.firstSource ?? r.firstReferrer, 28)}</td>
+        <td style="padding:8px 10px;font-size:11px;color:rgba(255,255,255,0.45);white-space:nowrap;">${fmtDate(r.firstSeenAt)}</td>
+        <td style="padding:8px 10px;font-size:11px;color:rgba(255,255,255,0.7);white-space:nowrap;">${fmtDate(r.lastSeenAt)}</td>
+        <td style="padding:8px 10px;text-align:center;font-size:13px;color:rgba(96,165,250,0.85);font-weight:700;">${r.pageViews}</td>
+      </tr>
+    `).join('')
+
+    const desktopTable = `
+      <div class="admin-visitors-desktop" style="overflow-x:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead>
+            <tr style="border-bottom:1px solid rgba(255,255,255,0.12);">
+              <th style="padding:8px 10px;text-align:left;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">Тип</th>
+              <th style="padding:8px 10px;text-align:left;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">Потребител</th>
+              <th style="padding:8px 10px;text-align:left;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">IP</th>
+              <th style="padding:8px 10px;text-align:left;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">Източник</th>
+              <th style="padding:8px 10px;text-align:left;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">Първо посещение</th>
+              <th style="padding:8px 10px;text-align:left;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">Последно посещение</th>
+              <th style="padding:8px 10px;text-align:center;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">Отваряния</th>
+            </tr>
+          </thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+      </div>
+    `
+
+    const mobileCards = rows.map((r) => `
+      <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px;margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          ${r.isRegistered
+            ? `<span style="font-size:10px;font-weight:800;color:rgba(96,165,250,0.85);background:rgba(96,165,250,0.1);border:1px solid rgba(96,165,250,0.25);border-radius:4px;padding:1px 6px;">РЕГ</span>`
+            : `<span style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.4);background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:1px 6px;">ГОСТ</span>`}
+          <span style="font-size:11px;color:rgba(255,255,255,0.35);">${fmtDate(r.lastSeenAt)}</span>
+        </div>
+        ${r.displayName ? `<div style="font-size:14px;font-weight:700;color:#fff;margin-bottom:2px;">${truncate(r.displayName, 30)}</div>` : ''}
+        ${r.email ? `<div style="font-size:11px;color:rgba(255,255,255,0.45);margin-bottom:4px;">${truncate(r.email, 36)}</div>` : ''}
+        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;">
+          ${r.lastIpAddress ? `<span style="font-size:11px;color:rgba(255,255,255,0.4);font-family:monospace;">${truncate(r.lastIpAddress, 20)}</span>` : ''}
+          ${(r.firstSource ?? r.firstReferrer) ? `<span style="font-size:11px;color:rgba(255,255,255,0.4);">src: ${truncate(r.firstSource ?? r.firstReferrer, 24)}</span>` : ''}
+          <span style="font-size:11px;color:rgba(96,165,250,0.75);">Отваряния: ${r.pageViews}</span>
+        </div>
+      </div>
+    `).join('')
+
+    bodyHtml = desktopTable + `<div class="admin-visitors-mobile">${mobileCards}</div>`
+  }
+
+  const hasPrev = offset > 0
+  const hasNext = offset + limit < total
+  const pageInfo = total > 0
+    ? `<span style="font-size:12px;color:rgba(255,255,255,0.4);">${offset + 1}–${Math.min(offset + limit, total)} от ${total}</span>`
+    : ''
+  const pagination = `
+    ${pageInfo}
+    ${hasPrev ? `<button type="button" data-admin-visitors-page="${offset - limit}" style="height:34px;padding:0 16px;border-radius:6px;border:1px solid rgba(255,255,255,0.2);background:transparent;color:rgba(255,255,255,0.7);font-size:12px;font-weight:700;cursor:pointer;">← Назад</button>` : ''}
+    ${hasNext ? `<button type="button" data-admin-visitors-page="${offset + limit}" style="height:34px;padding:0 16px;border-radius:6px;border:1px solid rgba(255,255,255,0.2);background:transparent;color:rgba(255,255,255,0.7);font-size:12px;font-weight:700;cursor:pointer;">Напред →</button>` : ''}
+  `
+
+  return {
+    body: `
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
+        ${typeBtn('all', 'Всички')}
+        ${typeBtn('guest', 'Гости')}
+        ${typeBtn('registered', 'Регистрирани')}
+      </div>
+      ${bodyHtml}
+    `,
+    pagination,
+  }
+}
+
+function renderSourcesBody(state: LobbyScreenState): string {
+  const loading = state.adminVisitorsSourcesLoading
+  const errorText = state.adminVisitorsSourcesErrorText
+  const rows = state.adminVisitorsSourcesRows
+  const total = state.adminVisitorsSourcesTotal
+
+  if (loading) {
+    return `<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.4);font-size:14px;">Зареждане…</div>`
+  }
+  if (errorText) {
+    return `<div style="padding:24px;color:#fecaca;font-size:14px;">${escapeHtml(errorText)}</div>`
+  }
+
+  const dataRows = [...rows, { label: '__total__', visitors: total, percent: 100 }]
+
+  const tableRows = dataRows.map((r) => {
+    const isTotal = r.label === '__total__'
+    const label = isTotal ? 'Общо' : r.label
+    const barWidth = r.percent
+    return `
+      <tr style="border-bottom:1px solid rgba(255,255,255,${isTotal ? '0.15' : '0.06'});">
+        <td style="padding:10px 12px;font-size:13px;font-weight:${isTotal ? '800' : '600'};color:${isTotal ? '#fff' : 'rgba(255,255,255,0.8)'};">${label}</td>
+        <td style="padding:10px 12px;text-align:right;font-size:13px;font-weight:${isTotal ? '800' : '600'};color:rgba(96,165,250,0.9);white-space:nowrap;">${r.visitors}</td>
+        <td style="padding:10px 12px;text-align:right;font-size:12px;color:rgba(255,255,255,0.45);white-space:nowrap;">${isTotal ? '' : r.percent + '%'}</td>
+        <td style="padding:10px 12px;width:160px;">
+          ${!isTotal && barWidth > 0 ? `<div style="height:6px;border-radius:3px;background:rgba(96,165,250,0.25);overflow:hidden;"><div style="height:100%;width:${barWidth}%;background:rgba(96,165,250,0.7);border-radius:3px;"></div></div>` : ''}
+        </td>
+      </tr>
+    `
+  }).join('')
+
+  return `
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="border-bottom:1px solid rgba(255,255,255,0.12);">
+            <th style="padding:8px 12px;text-align:left;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">Източник</th>
+            <th style="padding:8px 12px;text-align:right;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">Посетители</th>
+            <th style="padding:8px 12px;text-align:right;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">%</th>
+            <th style="padding:8px 12px;width:160px;"></th>
+          </tr>
+        </thead>
+        <tbody>${tableRows}</tbody>
+      </table>
+    </div>
   `
 }
 
@@ -8323,6 +8554,27 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-admin-visitors-back="1"]')?.addEventListener('click', () => {
     options.onAdminVisitorsBackClick?.()
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-visitors-type]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const t = btn.dataset.adminVisitorsType ?? 'all'
+      options.onAdminVisitorsTypeChange?.(t as import('../network/createGameServerClient').VisitorListType)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-visitors-page]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const pg = parseInt(btn.dataset.adminVisitorsPage ?? '0', 10)
+      options.onAdminVisitorsPageChange?.(isNaN(pg) ? 0 : pg)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-visitors-view]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const v = btn.dataset.adminVisitorsView ?? 'visitors'
+      options.onAdminVisitorsViewChange?.(v as import('../network/createGameServerClient').AdminVisitorsView)
+    })
   })
 
   for (const id of ['support-popup-messages-scroll', 'support-admin-messages-scroll']) {

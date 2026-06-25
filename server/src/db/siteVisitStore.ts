@@ -36,9 +36,49 @@ export type VisitorSummary = {
   last30days: number
 }
 
+export type VisitorListPeriod = 'today' | 'yesterday' | '7d' | '30d'
+export type VisitorListType = 'all' | 'guest' | 'registered'
+
+export type VisitorListRow = {
+  anonymousVisitorId: string
+  isRegistered: boolean
+  displayName: string | null
+  email: string | null
+  lastIpAddress: string | null
+  firstSource: string | null
+  firstReferrer: string | null
+  firstSeenAt: string
+  lastSeenAt: string
+  pageViews: number
+  reloads: number
+}
+
+export type VisitorListResult = {
+  rows: VisitorListRow[]
+  total: number
+}
+
+export type VisitorSourceRow = {
+  label: string
+  visitors: number
+  percent: number
+}
+
+export type VisitorSourcesResult = {
+  rows: VisitorSourceRow[]
+  total: number
+}
+
 export type SiteVisitStore = {
   recordPageView: (input: RecordSitePageViewInput) => RecordSitePageViewResult
   getVisitorSummary: () => VisitorSummary
+  getVisitorList: (params: {
+    period: VisitorListPeriod
+    type: VisitorListType
+    limit: number
+    offset: number
+  }) => VisitorListResult
+  getVisitorSources: (params: { period: VisitorListPeriod }) => VisitorSourcesResult
   purgeOlderThanDays: (days: number) => { deletedEvents: number; deletedVisitors: number }
   close: () => void
 }
@@ -246,6 +286,200 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     }
   }
 
+  function getVisitorList(params: {
+    period: VisitorListPeriod
+    type: VisitorListType
+    limit: number
+    offset: number
+  }): VisitorListResult {
+    const periodModifiers: Record<VisitorListPeriod, string> = {
+      today:     "start of day",
+      yesterday: "-1 days, start of day",
+      '7d':      "-7 days",
+      '30d':     "-30 days",
+    }
+    const periodEndModifiers: Record<VisitorListPeriod, string | null> = {
+      today:     null,
+      yesterday: "start of day",
+      '7d':      null,
+      '30d':     null,
+    }
+    const sinceExpr = `datetime('now', '${periodModifiers[params.period]}')`
+    const untilExpr = periodEndModifiers[params.period]
+      ? `datetime('now', '${periodEndModifiers[params.period]}')`
+      : null
+
+    const timeFilter = untilExpr
+      ? `e.occurred_at >= ${sinceExpr} AND e.occurred_at < ${untilExpr}`
+      : `e.occurred_at >= ${sinceExpr}`
+
+    const typeFilter =
+      params.type === 'guest'      ? 'AND v.last_profile_id IS NULL' :
+      params.type === 'registered' ? 'AND v.last_profile_id IS NOT NULL' :
+      ''
+
+    const baseQuery = `
+      FROM site_visitors v
+      LEFT JOIN profiles p ON p.profile_id = v.last_profile_id
+      LEFT JOIN accounts a ON a.account_id = p.account_id
+      WHERE EXISTS (
+        SELECT 1 FROM site_visit_events e
+        WHERE e.anonymous_visitor_id = v.anonymous_visitor_id
+          AND ${timeFilter}
+      )
+      ${typeFilter}
+    `
+
+    const countRow = database.prepare(`SELECT COUNT(*) AS n ${baseQuery}`).get() as { n: number }
+    const total = countRow?.n ?? 0
+
+    type RawRow = {
+      anonymous_visitor_id: string
+      last_profile_id: string | null
+      display_name: string | null
+      email: string | null
+      last_ip_address: string | null
+      first_source: string | null
+      first_referrer: string | null
+      first_seen_at: string
+      last_seen_at: string
+      page_views: number
+      reloads: number
+    }
+
+    const safeLimit = Math.max(1, Math.min(200, params.limit))
+    const safeOffset = Math.max(0, params.offset)
+
+    const rows = database.prepare(`
+      SELECT
+        v.anonymous_visitor_id,
+        v.last_profile_id,
+        p.display_name,
+        a.email,
+        v.last_ip_address,
+        v.first_source,
+        v.first_referrer,
+        v.first_seen_at,
+        v.last_seen_at,
+        (SELECT COUNT(*) FROM site_visit_events e
+          WHERE e.anonymous_visitor_id = v.anonymous_visitor_id
+            AND ${timeFilter}) AS page_views,
+        (SELECT COUNT(*) FROM site_visit_events e
+          WHERE e.anonymous_visitor_id = v.anonymous_visitor_id
+            AND e.navigation_type = 'reload'
+            AND ${timeFilter}) AS reloads
+      ${baseQuery}
+      ORDER BY v.last_seen_at DESC
+      LIMIT ${safeLimit} OFFSET ${safeOffset}
+    `).all() as RawRow[]
+
+    return {
+      total,
+      rows: rows.map((r) => ({
+        anonymousVisitorId: r.anonymous_visitor_id,
+        isRegistered: r.last_profile_id !== null,
+        displayName: r.display_name,
+        email: r.email,
+        lastIpAddress: r.last_ip_address,
+        firstSource: r.first_source,
+        firstReferrer: r.first_referrer,
+        firstSeenAt: r.first_seen_at,
+        lastSeenAt: r.last_seen_at,
+        pageViews: r.page_views,
+        reloads: r.reloads,
+      })),
+    }
+  }
+
+  function getVisitorSources(params: { period: VisitorListPeriod }): VisitorSourcesResult {
+    const periodModifiers: Record<VisitorListPeriod, string> = {
+      today:     "start of day",
+      yesterday: "-1 days, start of day",
+      '7d':      "-7 days",
+      '30d':     "-30 days",
+    }
+    const periodEndModifiers: Record<VisitorListPeriod, string | null> = {
+      today:     null,
+      yesterday: "start of day",
+      '7d':      null,
+      '30d':     null,
+    }
+    const sinceExpr = `datetime('now', '${periodModifiers[params.period]}')`
+    const untilExpr = periodEndModifiers[params.period]
+      ? `datetime('now', '${periodEndModifiers[params.period]}')`
+      : null
+    const timeFilter = untilExpr
+      ? `e.occurred_at >= ${sinceExpr} AND e.occurred_at < ${untilExpr}`
+      : `e.occurred_at >= ${sinceExpr}`
+
+    type RawRow = { referrer: string | null; source: string | null; n: number }
+    const raw = database.prepare(`
+      SELECT
+        v.first_referrer AS referrer,
+        v.first_source   AS source,
+        COUNT(DISTINCT v.anonymous_visitor_id) AS n
+      FROM site_visitors v
+      WHERE EXISTS (
+        SELECT 1 FROM site_visit_events e
+        WHERE e.anonymous_visitor_id = v.anonymous_visitor_id
+          AND ${timeFilter}
+      )
+      GROUP BY v.first_referrer, v.first_source
+    `).all() as RawRow[]
+
+    // Normalizes source/referrer to a human-readable label.
+    // Priority: first_source (UTM/explicit) → hostname from first_referrer → 'Директно'.
+    // Known aliases are collapsed to canonical names; unknown values shown as-is.
+    function normalize(referrer: string | null, source: string | null): string {
+      const raw = (source ?? extractHostname(referrer) ?? '').toLowerCase().trim()
+      if (!raw || raw === 'direct') return 'Директно'
+      if (raw === 'pika.bg' || raw === 'localhost') return 'Pika.bg'
+      if (raw === 'facebook' || raw === 'fb' || raw === 'facebook_ads' ||
+          /(?:^|\.)facebook\.com$/.test(raw)) return 'Facebook'
+      if (raw === 'instagram' || raw === 'ig' ||
+          /(?:^|\.)instagram\.com$/.test(raw)) return 'Instagram'
+      if (raw === 'google' || raw === 'google_ads' || raw === 'googleadservices' ||
+          /(?:^|\.)google\.[a-z]{2,}$/.test(raw)) return 'Google'
+      // Unknown UTM source or domain — show as-is but title-cased if it looks like a keyword.
+      return source != null ? source : (extractHostname(referrer) ?? 'Директно')
+    }
+
+    function extractHostname(referrer: string | null): string | null {
+      if (!referrer) return null
+      try {
+        const url = referrer.includes('://') ? referrer : `https://${referrer}`
+        return new URL(url).hostname.replace(/^www\./, '')
+      } catch {
+        return referrer
+      }
+    }
+
+    // Aggregate by normalized label. Each visitor counted once.
+    const labelCounts = new Map<string, number>()
+    for (const row of raw) {
+      const label = normalize(row.referrer, row.source)
+      labelCounts.set(label, (labelCounts.get(label) ?? 0) + row.n)
+    }
+
+    const total = [...labelCounts.values()].reduce((a, b) => a + b, 0)
+
+    // Sort by visitors DESC; 'Директно' always last among equals (stable tie-break).
+    const sorted = [...labelCounts.entries()].sort(([aLabel, aCount], [bLabel, bCount]) => {
+      if (bCount !== aCount) return bCount - aCount
+      if (aLabel === 'Директно') return 1
+      if (bLabel === 'Директно') return -1
+      return aLabel.localeCompare(bLabel, 'bg')
+    })
+
+    const rows: VisitorSourceRow[] = sorted.map(([label, visitors]) => ({
+      label,
+      visitors,
+      percent: total > 0 ? Math.round((visitors / total) * 100) : 0,
+    }))
+
+    return { rows, total }
+  }
+
   function purgeOlderThanDays(days: number): { deletedEvents: number; deletedVisitors: number } {
     const normalizedDays = Number.isInteger(days) && days > 0 ? days : 90
     const cutoffModifier = `-${normalizedDays} days`
@@ -272,6 +506,8 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
   return {
     recordPageView,
     getVisitorSummary,
+    getVisitorList,
+    getVisitorSources,
     purgeOlderThanDays,
     close,
   }

@@ -161,6 +161,40 @@ export type AdminStatsSnapshot = {
   visitors: AdminVisitorSummary
 }
 
+export type VisitorListPeriod = 'today' | 'yesterday' | '7d' | '30d'
+export type VisitorListType = 'all' | 'guest' | 'registered'
+export type AdminVisitorsView = 'visitors' | 'sources'
+
+export type AdminVisitorSourceRow = {
+  label: string
+  visitors: number
+  percent: number
+}
+
+export type AdminVisitorSourcesResult = {
+  rows: AdminVisitorSourceRow[]
+  total: number
+}
+
+export type AdminVisitorRow = {
+  anonymousVisitorId: string
+  isRegistered: boolean
+  displayName: string | null
+  email: string | null
+  lastIpAddress: string | null
+  firstSource: string | null
+  firstReferrer: string | null
+  firstSeenAt: string
+  lastSeenAt: string
+  pageViews: number
+  reloads: number
+}
+
+export type AdminVisitorListResult = {
+  rows: AdminVisitorRow[]
+  total: number
+}
+
 export type CoinPackageStatus = 'active' | 'inactive'
 
 export type CoinPackageSnapshot = {
