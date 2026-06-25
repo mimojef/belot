@@ -94,7 +94,7 @@ export type GuestContactFormInput = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -386,6 +386,8 @@ export type RenderLobbyScreenOptions = {
   onSupportDeleteConfirm: () => void
   onPwaUpdateApply: () => void
   onAdminHistoryWindowChange: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
+  onAdminVisitorsPeriodClick?: (period: string) => void
+  onAdminVisitorsBackClick?: () => void
 }
 
 
@@ -3157,6 +3159,8 @@ function renderMobileLobbyScreenContent(
             ? renderAdminInfoPanel(state)
           : state.view === 'admin-server'
             ? renderAdminServerPanel(state)
+          : state.view === 'admin-visitors'
+            ? renderAdminVisitorsPanel(state)
           : state.view === 'friends'
             ? renderMobileFriendsDirectory(state)
           : state.view === 'chat'
@@ -3903,6 +3907,23 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
     return (cents / 100).toFixed(2)
   }
 
+  function visitorCard(label: string, count: number, period: string): string {
+    return `
+      <button type="button" data-admin-visitors-period="${escapeHtml(period)}" style="
+        display:flex; flex-direction:column; gap:8px; text-align:left;
+        background:#0d0d0d; border:1px solid rgba(96,165,250,0.25); border-radius:12px;
+        padding:16px 18px; cursor:pointer; width:100%;
+        transition:border-color 0.15s;
+      " onmouseover="this.style.borderColor='rgba(96,165,250,0.55)'" onmouseout="this.style.borderColor='rgba(96,165,250,0.25)'">
+        <div style="font-size:10px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.45);">${escapeHtml(label)}</div>
+        <div style="display:flex;align-items:baseline;gap:6px;">
+          <span style="font-size:30px;font-weight:900;color:#60a5fa;">${count.toLocaleString('bg-BG')}</span>
+          <span style="font-size:12px;color:rgba(96,165,250,0.6);">посетители</span>
+        </div>
+      </button>
+    `
+  }
+
   function statCard(label: string, count: number, cents: number): string {
     return `
       <div style="
@@ -3946,6 +3967,14 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
         </div>
       </div>
 
+      <h3 style="font-size:13px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin:0 0 12px;">Посетители</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:24px;">
+        ${visitorCard('Днес', stats.visitors.today, 'today')}
+        ${visitorCard('Вчера', stats.visitors.yesterday, 'yesterday')}
+        ${visitorCard('Последните 7 дни', stats.visitors.last7days, '7d')}
+        ${visitorCard('Последните 30 дни', stats.visitors.last30days, '30d')}
+      </div>
+
       <h3 style="font-size:13px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin:0 0 12px;">Плащания</h3>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
         ${statCard('Днес', stats.payments.today.count, stats.payments.today.totalCents)}
@@ -3956,6 +3985,39 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
       <div style="display:grid;grid-template-columns:1fr;gap:12px;">
         ${statCard('Общо (всички времена)', stats.payments.allTime.count, stats.payments.allTime.totalCents)}
       </div>
+    </section>
+  `
+}
+
+const VISITOR_PERIOD_LABELS: Record<string, string> = {
+  today: 'Днес',
+  yesterday: 'Вчера',
+  '7d': 'Последните 7 дни',
+  '30d': 'Последните 30 дни',
+}
+
+function renderAdminVisitorsPanel(state: LobbyScreenState): string {
+  if (!state.isAdmin) {
+    return `<div style="min-height:520px;display:flex;align-items:center;justify-content:center;color:#fecaca;font-size:15px;font-weight:800;">Нямаш достъп.</div>`
+  }
+
+  const rawPeriod = new URLSearchParams(window.location.search).get('period') ?? ''
+  const periodLabel = VISITOR_PERIOD_LABELS[rawPeriod] ?? rawPeriod
+
+  return `
+    <section style="padding:0 4px;">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:20px;flex-wrap:wrap;">
+        <h2 style="font-size:18px;font-weight:800;color:#d4a520;margin:0;letter-spacing:0.04em;text-transform:uppercase;">Посетители</h2>
+        ${periodLabel ? `<span style="font-size:13px;font-weight:700;color:rgba(96,165,250,0.85);background:rgba(96,165,250,0.1);border:1px solid rgba(96,165,250,0.25);border-radius:6px;padding:3px 10px;">${escapeHtml(periodLabel)}</span>` : ''}
+      </div>
+      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin:0 0 28px;line-height:1.6;">
+        Подробната статистика ще бъде добавена в следващата стъпка.
+      </p>
+      <button type="button" data-admin-visitors-back="1" style="
+        height:40px;padding:0 20px;border:1px solid rgba(212,165,32,0.45);border-radius:8px;
+        background:rgba(212,165,32,0.08);color:#d4a520;font-size:13px;font-weight:800;
+        cursor:pointer;letter-spacing:0.04em;
+      ">← Назад към Информация</button>
     </section>
   `
 }
@@ -6268,6 +6330,8 @@ export function renderLobbyScreen(
                 ? renderAdminInfoPanel(state)
               : state.view === 'admin-server'
                 ? renderAdminServerPanel(state)
+              : state.view === 'admin-visitors'
+                ? renderAdminVisitorsPanel(state)
             : state.view === 'friends'
               ? renderFriendsDirectory(state)
             : state.view === 'chat'
@@ -8247,6 +8311,18 @@ export function renderLobbyScreen(
         options.onAdminHistoryWindowChange(w)
       }
     })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-visitors-period]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const period = btn.dataset.adminVisitorsPeriod ?? ''
+      history.pushState(null, '', `/admin/visitors?period=${encodeURIComponent(period)}`)
+      options.onAdminVisitorsPeriodClick?.(period)
+    })
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-admin-visitors-back="1"]')?.addEventListener('click', () => {
+    options.onAdminVisitorsBackClick?.()
   })
 
   for (const id of ['support-popup-messages-scroll', 'support-admin-messages-scroll']) {

@@ -4842,12 +4842,15 @@ async function handleAdminStatsRequest(
 
   const paymentStats = coinPurchaseStore.getAdminPaymentStats()
 
+  const visitors = siteVisitStore.getVisitorSummary()
+
   sendJsonResponse(res, 200, {
     ok: true,
     stats: {
       onlineCount,
       totalProfiles,
       payments: paymentStats,
+      visitors,
     },
   })
   return true

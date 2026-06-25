@@ -141,6 +141,13 @@ export type AdminPaymentPeriodStats = {
   totalCents: number
 }
 
+export type AdminVisitorSummary = {
+  today: number
+  yesterday: number
+  last7days: number
+  last30days: number
+}
+
 export type AdminStatsSnapshot = {
   onlineCount: number
   totalProfiles: number
@@ -151,6 +158,7 @@ export type AdminStatsSnapshot = {
     thisMonth: AdminPaymentPeriodStats
     allTime: AdminPaymentPeriodStats
   }
+  visitors: AdminVisitorSummary
 }
 
 export type CoinPackageStatus = 'active' | 'inactive'

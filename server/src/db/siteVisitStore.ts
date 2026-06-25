@@ -29,8 +29,16 @@ export type RecordSitePageViewResult =
   | { ok: true; recorded: true }
   | { ok: true; recorded: false; duplicate: true }
 
+export type VisitorSummary = {
+  today: number
+  yesterday: number
+  last7days: number
+  last30days: number
+}
+
 export type SiteVisitStore = {
   recordPageView: (input: RecordSitePageViewInput) => RecordSitePageViewResult
+  getVisitorSummary: () => VisitorSummary
   purgeOlderThanDays: (days: number) => { deletedEvents: number; deletedVisitors: number }
   close: () => void
 }
@@ -127,6 +135,12 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     WHERE anonymous_visitor_id = ?;
   `)
 
+  const visitorCountStatement = database.prepare(`
+    SELECT COUNT(DISTINCT anonymous_visitor_id) AS n
+    FROM site_visit_events
+    WHERE occurred_at >= datetime('now', ?);
+  `)
+
   const purgeEventsStatement = database.prepare(`
     DELETE FROM site_visit_events
     WHERE occurred_at < datetime('now', ?);
@@ -218,6 +232,20 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     }
   }
 
+  function countVisitors(modifier: string): number {
+    const row = visitorCountStatement.get(modifier) as { n: number } | undefined
+    return row?.n ?? 0
+  }
+
+  function getVisitorSummary(): VisitorSummary {
+    return {
+      today:     countVisitors('start of day'),
+      yesterday: countVisitors('-1 days, start of day'),
+      last7days:  countVisitors('-7 days'),
+      last30days: countVisitors('-30 days'),
+    }
+  }
+
   function purgeOlderThanDays(days: number): { deletedEvents: number; deletedVisitors: number } {
     const normalizedDays = Number.isInteger(days) && days > 0 ? days : 90
     const cutoffModifier = `-${normalizedDays} days`
@@ -243,6 +271,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
 
   return {
     recordPageView,
+    getVisitorSummary,
     purgeOlderThanDays,
     close,
   }

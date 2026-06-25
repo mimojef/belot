@@ -2622,6 +2622,12 @@ lobby = createLobbyFlowController({
     invalidateHistoryGeneration()
     fetchAdminHistory(window)
   },
+  onAdminVisitorsPeriodClick: (_period: string) => {
+    lobby.navigateAdminVisitors()
+  },
+  onAdminVisitorsBackClick: () => {
+    lobby.navigateAdminInfo()
+  },
   onNotifFriendRequestClick: (friendshipId) => {
     const req = lobby?.getPendingFriendRequest(friendshipId)
     if (!req) return
@@ -3043,6 +3049,7 @@ const _VALID_PATHS = new Set([
   '/admin',
   '/admin/server',
   '/admin/guest-contact',
+  '/admin/visitors',
   '/terms',
   '/privacy',
   '/contact',

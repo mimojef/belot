@@ -50,6 +50,7 @@ export type LobbyFlowScreen =
   | 'admin'
   | 'admin-info'
   | 'admin-server'
+  | 'admin-visitors'
   | 'terms'
   | 'privacy'
   | 'contact'
@@ -317,6 +318,8 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminServerScreenEnter?: () => void
   onAdminServerScreenLeave?: () => void
   onAdminHistoryWindowChange?: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
+  onAdminVisitorsPeriodClick?: (period: string) => void
+  onAdminVisitorsBackClick?: () => void
 }
 
 
@@ -347,6 +350,8 @@ export type LobbyFlowController = {
   setAdminHistoryResult: (result: import('../adminServer/adminServerTypes.js').MonitoringHistoryResult) => void
   setAdminHistoryError: (message: string) => void
   navigateInitialPath: () => void
+  navigateAdminVisitors: () => void
+  navigateAdminInfo: () => void
 }
 
 type InternalLobbyFlowState = {
@@ -898,6 +903,7 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/shop': 'shop',
   '/admin': 'admin',
   '/admin/guest-contact': 'guest-contact-messages',
+  '/admin/visitors': 'admin-visitors',
   '/friends': 'friends',
   '/chat': 'chat',
   '/terms': 'terms',
@@ -1586,6 +1592,8 @@ export function createLobbyFlowController(
               ? 'admin-info'
             : state.currentScreen === 'admin-server'
               ? 'admin-server'
+            : state.currentScreen === 'admin-visitors'
+              ? 'admin-visitors'
             : state.currentScreen === 'guest-contact-messages'
               ? 'guest-contact-messages'
             : state.currentScreen === 'terms'
@@ -2413,6 +2421,12 @@ export function createLobbyFlowController(
         render()
         options.onAdminHistoryWindowChange?.(window)
       },
+      onAdminVisitorsPeriodClick: (period) => {
+        options.onAdminVisitorsPeriodClick?.(period)
+      },
+      onAdminVisitorsBackClick: () => {
+        options.onAdminVisitorsBackClick?.()
+      },
     })
   }
 
@@ -2991,6 +3005,27 @@ export function createLobbyFlowController(
     }
 
     state.adminStats = result.stats
+    render()
+  }
+
+  function showAdminVisitorsPanel(): void {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession?.account.role !== 'admin') {
+      state.currentScreen = 'lobby'
+      state.errorText = 'Нямаш достъп до admin панела.'
+      render()
+      return
+    }
+
+    leaveAdminServerIfActive()
+    state.currentScreen = 'admin-visitors'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
     render()
   }
 
@@ -4071,6 +4106,7 @@ export function createLobbyFlowController(
     admin: '/admin',
     'admin-server': '/admin/server',
     'guest-contact-messages': '/admin/guest-contact',
+    'admin-visitors': '/admin/visitors',
     friends: '/friends',
     chat: '/chat',
     terms: '/terms',
@@ -4086,6 +4122,7 @@ export function createLobbyFlowController(
     '/admin': 'admin',
     '/admin/server': 'admin-server',
     '/admin/guest-contact': 'guest-contact-messages',
+    '/admin/visitors': 'admin-visitors',
     '/friends': 'friends',
     '/chat': 'chat',
     '/terms': 'terms',
@@ -4121,6 +4158,7 @@ export function createLobbyFlowController(
       case 'guest-contact-messages': void showAdminGuestContactMessages(); break
       case 'admin-info': void showAdminInfoPanel(); break
       case 'admin-server': showAdminServerPanel(); break
+      case 'admin-visitors': showAdminVisitorsPanel(); break
       case 'friends': void showFriendsDirectory(); break
       case 'chat': void showChatPanel(); break
       case 'terms': showPublicLegalPage('terms'); break
@@ -4929,6 +4967,12 @@ export function createLobbyFlowController(
       } else {
         _pendingInitialNav = true
       }
+    },
+    navigateAdminVisitors: () => {
+      showAdminVisitorsPanel()
+    },
+    navigateAdminInfo: () => {
+      void showAdminInfoPanel()
     },
     navigateToShop: (noticeText: string | null) => {
       void showShopPanel().then(() => {
