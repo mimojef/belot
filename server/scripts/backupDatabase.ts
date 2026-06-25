@@ -35,8 +35,9 @@ function todayIso(): string {
 }
 
 async function main(): Promise<void> {
-  const sourceFile = getServerDatabaseFilePath()
-  const backupDir  = join(serverRoot(), 'database', 'backups', 'daily')
+  const root       = serverRoot()
+  const sourceFile = getServerDatabaseFilePath(root)
+  const backupDir  = join(root, 'database', 'backups', 'daily')
   const dateStr    = todayIso()
 
   const { finalPath, log } = await runDatabaseBackup({ sourceFile, backupDir, dateStr })

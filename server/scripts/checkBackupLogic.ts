@@ -5,6 +5,7 @@
  * Извиква реалните функции от `src/db/backupHelpers.ts` — без дублиране.
  *
  * Покрива:
+ * [0] Path resolution: dist-scripts layout → source DB под server/, не под dist-scripts/
  * [1] Валиден backup: tmp → verify → rename, без остатъчен .tmp
  * [2] Повторно изпълнение в същия ден: валиден файл → SKIP, retention пак се вика
  * [3] Невалиден съществуващ backup: заменя се с нов валиден
@@ -18,7 +19,7 @@
 
 import { DatabaseSync } from 'node:sqlite'
 import { copyFile, mkdir, mkdtemp, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   BACKUP_DAILY_NAME_RE,
@@ -27,6 +28,7 @@ import {
   verifyBackupFile,
   verifyIsolatedDb,
 } from '../src/db/backupHelpers.js'
+import { getServerDatabaseFilePath } from '../src/db/ensureServerDatabaseReady.js'
 
 let passed = 0
 let failed = 0
@@ -88,6 +90,41 @@ async function withTmpDir(fn: (dir: string) => Promise<void>): Promise<void> {
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// [0] Path resolution: dist-scripts layout → database под server/, не под dist-scripts/
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('\n[0] Path resolution за dist-scripts layout')
+{
+  // Симулираме serverRoot() при compiled скрипт в dist-scripts/scripts/:
+  //   __file__  = server/dist-scripts/scripts/backupDatabase.js
+  //   dirname() = server/dist-scripts/scripts
+  //   two levels up = server/
+  const fakeDistScriptsDir = resolve('dist-scripts', 'scripts')
+  const simulatedRoot = resolve(fakeDistScriptsDir, '..', '..')
+
+  const dbPath = getServerDatabaseFilePath(simulatedRoot)
+  const normalised = dbPath.replace(/\\/g, '/')
+
+  await check('[0.1] Пътят не минава през dist-scripts/', () => {
+    if (normalised.includes('/dist-scripts/')) {
+      throw new Error(`source DB е под dist-scripts: ${dbPath}`)
+    }
+  })
+  await check('[0.2] Пътят завършва с database/data/belot-v2.sqlite', () => {
+    if (!normalised.endsWith('database/data/belot-v2.sqlite')) {
+      throw new Error(`Неочакван суфикс: ${dbPath}`)
+    }
+  })
+  await check('[0.3] Без override → пътят от runtime import.meta.url е различен от dist-scripts', () => {
+    const runtimePath = getServerDatabaseFilePath().replace(/\\/g, '/')
+    if (runtimePath.includes('/dist-scripts/')) {
+      // При tsx (dev) import.meta.url сочи към src/, така или иначе не минава
+      // Ако мине — реален проблем
+      throw new Error(`Runtime DB path е под dist-scripts: ${runtimePath}`)
+    }
+  })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

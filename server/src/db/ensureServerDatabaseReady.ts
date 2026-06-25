@@ -42,8 +42,8 @@ function getDatabaseFilePath(databaseStorageDirectoryPath: string): string {
   return join(databaseStorageDirectoryPath, DATABASE_FILENAME)
 }
 
-export function getServerDatabaseFilePath(): string {
-  const serverRootPath = getServerRootPath()
+export function getServerDatabaseFilePath(serverRootOverride?: string): string {
+  const serverRootPath = serverRootOverride ?? getServerRootPath()
   const databaseDirectoryPath = getDatabaseDirectoryPath(serverRootPath)
   const databaseStorageDirectoryPath =
     getDatabaseStorageDirectoryPath(databaseDirectoryPath)
