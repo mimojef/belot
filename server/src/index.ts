@@ -134,6 +134,12 @@ import { createMonitoringSampler } from './monitoring/createMonitoringSampler.js
 import type { MonitoringSampler } from './monitoring/monitoringTypes.js'
 import { countOpenWebSockets, countUniqueOnlineRealPlayers } from './monitoring/monitoringHelpers.js'
 import { sanitizeErrorMessage } from './monitoring/systemMetrics.js'
+import {
+  createMonitoringHistoryStore,
+  getDefaultRetentionCutoffMs,
+  isValidHistoryWindow,
+  type MonitoringHistoryStore,
+} from './monitoring/monitoringHistoryStore.js'
 
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
@@ -214,6 +220,9 @@ const gameWorkerPoolMaxRoomsPerWorker =
     : 1000
 const backendStartedAtMs = Date.now()
 let monitoringSampler: MonitoringSampler | null = null
+let monitoringHistoryStore: MonitoringHistoryStore | null = null
+let monitoringHistoryIntervalId: ReturnType<typeof setInterval> | null = null
+let monitoringHistoryPurgeIntervalId: ReturnType<typeof setInterval> | null = null
 let isServerShuttingDown = false
 let lastGameWorkerTickFailureLogAt = 0
 let catalogBotRefillInterval: ReturnType<typeof setInterval> | null = null
@@ -2318,6 +2327,45 @@ function handleAdminMonitoringCurrentRequest(
   }
 
   sendJsonResponse(res, 200, { ok: true, snapshot: monitoringSampler.getSnapshot() })
+  return true
+}
+
+function handleAdminMonitoringHistoryRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): boolean {
+  if (pathname !== '/api/admin/monitoring/history') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session?.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+    return true
+  }
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const windowParam = new URLSearchParams(req.url?.split('?')[1] ?? '').get('window') ?? ''
+
+  if (!isValidHistoryWindow(windowParam)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден параметър window. Използвай: 1h, 24h, 7d.' })
+    return true
+  }
+
+  if (monitoringHistoryStore === null) {
+    sendJsonResponse(res, 503, { ok: false, message: 'Monitoring history не е наличен.' })
+    return true
+  }
+
+  const result = monitoringHistoryStore.queryHistory(windowParam)
+  sendJsonResponse(res, 200, { ok: true, ...result })
   return true
 }
 
@@ -4823,6 +4871,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (handleAdminMonitoringHistoryRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleAdminGuestContactMessagesRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -6476,6 +6528,28 @@ try {
   console.error('[monitoring] Failed to start sampler:', sanitizeErrorMessage(error))
 }
 
+// ─── Monitoring history ───────────────────────────────────────────────────────
+
+try {
+  monitoringHistoryStore = await createMonitoringHistoryStore(databaseBootstrap.databaseFilePath)
+  console.log('[monitoring] History store ready')
+
+  monitoringHistoryStore.purgeOlderThan(getDefaultRetentionCutoffMs())
+
+  monitoringHistoryIntervalId = setInterval(() => {
+    if (monitoringSampler === null || monitoringHistoryStore === null) return
+    monitoringHistoryStore.record(monitoringSampler.getSnapshot())
+  }, 60_000)
+
+  monitoringHistoryPurgeIntervalId = setInterval(() => {
+    monitoringHistoryStore?.purgeOlderThan(getDefaultRetentionCutoffMs())
+  }, 60 * 60 * 1000)
+
+  console.log('[monitoring] History recording started (60s interval, 30d retention)')
+} catch (error) {
+  console.error('[monitoring] Failed to start history store:', sanitizeErrorMessage(error))
+}
+
 function clearMutationTimersForShutdown(): void {
   clearInterval(gameRuntimeTickInterval)
   clearInterval(matchmakingTickInterval)
@@ -6498,6 +6572,16 @@ function clearMutationTimersForShutdown(): void {
   clearPrivateRoomInviteTimers()
   monitoringSampler?.stop()
   monitoringSampler = null
+
+  if (monitoringHistoryIntervalId !== null) {
+    clearInterval(monitoringHistoryIntervalId)
+    monitoringHistoryIntervalId = null
+  }
+
+  if (monitoringHistoryPurgeIntervalId !== null) {
+    clearInterval(monitoringHistoryPurgeIntervalId)
+    monitoringHistoryPurgeIntervalId = null
+  }
 }
 
 function closeActiveRoomSnapshotStore(): boolean {
@@ -6524,6 +6608,11 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('coinPackageStore', () => coinPackageStore.close())
   closeStore('coinPurchaseStore', () => coinPurchaseStore.close())
   closeStore('dailyRewardsStore', () => dailyRewardsStore.close())
+
+  if (monitoringHistoryStore !== null) {
+    closeStore('monitoringHistoryStore', () => monitoringHistoryStore!.close())
+    monitoringHistoryStore = null
+  }
 
   return allClosedSuccessfully
 }

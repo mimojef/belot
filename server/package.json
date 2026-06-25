@@ -8,6 +8,8 @@
     "start": "node dist/index.js",
     "build": "tsc -p tsconfig.json",
     "check:worker-candidate-apply": "tsx scripts/checkGameWorkerCandidateApply.ts && tsx scripts/checkGameWorkerCandidateApplyIntegration.ts",
+    "check:monitoring-history": "tsx scripts/checkMonitoringHistory.ts",
+    "check:monitoring-history-endpoint": "tsx scripts/checkAdminMonitoringHistoryEndpoint.ts",
     "make-admin": "tsx scripts/make-admin.ts"
   },
   "dependencies": {
