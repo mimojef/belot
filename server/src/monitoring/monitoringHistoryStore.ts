@@ -29,10 +29,23 @@ export type MonitoringPeaks = {
   mmWaiters: number
 }
 
+export type MonitoringPeakMoment = {
+  value: number
+  sampledAt: number | null
+}
+
+export type MonitoringPeakMoments = {
+  wsConns: MonitoringPeakMoment
+  onlinePlayers: MonitoringPeakMoment
+  activeRooms: MonitoringPeakMoment
+  mmWaiters: MonitoringPeakMoment
+}
+
 export type MonitoringHistoryResult = {
   window: HistoryWindow
   points: MonitoringHistoryPoint[]
   peaks: MonitoringPeaks
+  peakMoments: MonitoringPeakMoments
 }
 
 export type MonitoringHistoryStore = {
@@ -83,6 +96,11 @@ type PeakRow = {
   online_players: number
   active_rooms: number
   mm_waiters: number
+}
+
+type PeakMomentRow = {
+  value: number
+  sampled_at: number
 }
 
 export async function createMonitoringHistoryStore(
@@ -161,6 +179,30 @@ export async function createMonitoringHistoryStore(
       WHERE sampled_at >= ?
     `).all(fromMs) as PeakRow[]
 
+    // Peak moments: surow record giving the highest value, tie-broken by newest sampled_at.
+    // Each metric gets its own query so the timestamp is from the exact raw row, not an aggregate.
+    const peakMomentStmt = (col: string) =>
+      db.prepare(
+        `SELECT ${col} AS value, sampled_at FROM monitoring_history WHERE sampled_at >= ? ORDER BY ${col} DESC, sampled_at DESC LIMIT 1`,
+      )
+
+    const pmWs     = peakMomentStmt('ws_conns').get(fromMs) as PeakMomentRow | undefined
+    const pmPlayers = peakMomentStmt('online_players').get(fromMs) as PeakMomentRow | undefined
+    const pmRooms  = peakMomentStmt('active_rooms').get(fromMs) as PeakMomentRow | undefined
+    const pmMm     = peakMomentStmt('mm_waiters').get(fromMs) as PeakMomentRow | undefined
+
+    const toPeakMoment = (row: PeakMomentRow | undefined): MonitoringPeakMoment => ({
+      value: row?.value ?? 0,
+      sampledAt: row !== undefined ? row.sampled_at : null,
+    })
+
+    const peakMoments: MonitoringPeakMoments = {
+      wsConns:       toPeakMoment(pmWs),
+      onlinePlayers: toPeakMoment(pmPlayers),
+      activeRooms:   toPeakMoment(pmRooms),
+      mmWaiters:     toPeakMoment(pmMm),
+    }
+
     const pr = peakRows[0] ?? null
 
     const peaks: MonitoringPeaks = pr !== null
@@ -189,6 +231,7 @@ export async function createMonitoringHistoryStore(
 
     return {
       window,
+      peakMoments,
       points: points.map((row) => ({
         t: row.t,
         serverCpu: row.server_cpu ?? null,

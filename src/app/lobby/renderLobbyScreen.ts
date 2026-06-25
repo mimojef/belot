@@ -23,7 +23,8 @@ import type {
   SupportMessageSnapshot,
   SupportConversationSnapshot,
 } from '../network/createGameServerClient'
-import type { MonitoringSnapshot } from '../adminServer/adminServerTypes'
+import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow } from '../adminServer/adminServerTypes'
+import { renderPeakCards, renderPeakMoments, renderHistoryInfoRow, getWindowLabel } from '../adminServer/renderAdminHistory'
 import type { PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
@@ -247,6 +248,10 @@ export type LobbyScreenState = {
   supportDeleteLoading: boolean
   adminMonitoringSnapshot: MonitoringSnapshot | null
   adminMonitoringErrorText: string | null
+  adminHistoryWindow: HistoryWindow
+  adminHistoryResult: MonitoringHistoryResult | null
+  adminHistoryLoading: boolean
+  adminHistoryErrorText: string | null
   pwaUpdatePending: boolean
 }
 
@@ -380,6 +385,7 @@ export type RenderLobbyScreenOptions = {
   onSupportDeleteCancel: () => void
   onSupportDeleteConfirm: () => void
   onPwaUpdateApply: () => void
+  onAdminHistoryWindowChange: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
 }
 
 
@@ -4132,6 +4138,39 @@ function renderAdminServerPanel(state: LobbyScreenState): string {
     `
   }
 
+  // ── История section ──
+  const historyResult = state.adminHistoryResult
+  const historyLoading = state.adminHistoryLoading
+  const historyErrorText = state.adminHistoryErrorText
+  const activeWindow = state.adminHistoryWindow
+
+  const windowBtn = (w: HistoryWindow) => {
+    const isActive = w === activeWindow
+    return `<button type="button" data-history-window="${w}" style="height:30px;padding:0 12px;border:1px solid ${isActive ? 'rgba(212,165,32,0.7)' : 'rgba(255,255,255,0.14)'};border-radius:6px;background:${isActive ? 'rgba(212,165,32,0.14)' : 'transparent'};color:${isActive ? '#d4a520' : 'rgba(255,255,255,0.55)'};font-size:12px;font-weight:800;cursor:${isActive ? 'default' : 'pointer'};white-space:nowrap;">${getWindowLabel(w)}</button>`
+  }
+
+  let historyHtml = ''
+  if (historyLoading) {
+    historyHtml = `<div style="height:60px;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:13px;font-weight:800;">Зареждане...</div>`
+  } else if (historyErrorText) {
+    historyHtml = `<div style="background:rgba(127,29,29,0.3);border:1px solid rgba(248,113,113,0.3);border-radius:8px;padding:10px 14px;color:#fca5a5;font-size:12px;font-weight:700;">${escapeHtml(historyErrorText)}</div>`
+  } else if (historyResult) {
+    const hasData = historyResult.points.length > 0
+    const emptyMsg = !hasData ? `<p style="color:rgba(255,255,255,0.35);font-size:12px;font-style:italic;margin:0 0 12px;">Още няма записи за избрания период.</p>` : ''
+    historyHtml = `
+      ${emptyMsg}
+      <div style="margin-bottom:14px;">
+        ${sectionLabel('Пикови стойности за периода')}
+        ${renderPeakCards(historyResult.peaks, escapeHtml)}
+      </div>
+      <div style="margin-bottom:6px;">
+        ${sectionLabel('Пикова активност')}
+        ${renderPeakMoments(historyResult.peakMoments, activeWindow, escapeHtml)}
+      </div>
+      ${renderHistoryInfoRow(historyResult, activeWindow, escapeHtml)}
+    `
+  }
+
   return `
     <section style="padding:0 4px;">
 
@@ -4196,6 +4235,18 @@ function renderAdminServerPanel(state: LobbyScreenState): string {
       <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:14px 18px;">
         ${sectionLabel('Worker pool')}
         ${workerPoolHtml}
+      </div>
+
+      <div style="margin-top:28px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:14px;">
+          <h3 style="font-size:14px;font-weight:800;color:#d4a520;margin:0;letter-spacing:0.06em;text-transform:uppercase;">История</h3>
+          <div style="display:flex;gap:6px;">
+            ${windowBtn('1h')}
+            ${windowBtn('24h')}
+            ${windowBtn('7d')}
+          </div>
+        </div>
+        ${historyHtml}
       </div>
 
     </section>
@@ -8188,6 +8239,15 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-support-delete-cancel="1"]')
     ?.addEventListener('click', () => options.onSupportDeleteCancel())
+
+  root.querySelectorAll<HTMLButtonElement>('[data-history-window]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const w = btn.dataset.historyWindow
+      if (w === '1h' || w === '24h' || w === '7d') {
+        options.onAdminHistoryWindowChange(w)
+      }
+    })
+  })
 
   for (const id of ['support-popup-messages-scroll', 'support-admin-messages-scroll']) {
     const el = document.getElementById(id)

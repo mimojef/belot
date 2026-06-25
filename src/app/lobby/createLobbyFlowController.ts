@@ -316,6 +316,7 @@ export type CreateLobbyFlowControllerOptions = {
   onSupportDeleteConversation?: () => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminServerScreenEnter?: () => void
   onAdminServerScreenLeave?: () => void
+  onAdminHistoryWindowChange?: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
 }
 
 
@@ -342,6 +343,9 @@ export type LobbyFlowController = {
   setPwaUpdatePending: (pending: boolean, applyFn: (() => void) | null) => void
   setAdminMonitoringSnapshot: (snapshot: import('../adminServer/adminServerTypes.js').MonitoringSnapshot) => void
   setAdminMonitoringError: (message: string) => void
+  setAdminHistoryLoading: (loading: boolean) => void
+  setAdminHistoryResult: (result: import('../adminServer/adminServerTypes.js').MonitoringHistoryResult) => void
+  setAdminHistoryError: (message: string) => void
   navigateInitialPath: () => void
 }
 
@@ -512,6 +516,10 @@ type InternalLobbyFlowState = {
   supportAccountTooNewMinutes: number | null
   adminMonitoringSnapshot: import('../adminServer/adminServerTypes.js').MonitoringSnapshot | null
   adminMonitoringErrorText: string | null
+  adminHistoryWindow: import('../adminServer/adminServerTypes.js').HistoryWindow
+  adminHistoryResult: import('../adminServer/adminServerTypes.js').MonitoringHistoryResult | null
+  adminHistoryLoading: boolean
+  adminHistoryErrorText: string | null
   pwaUpdatePending: boolean
   pwaUpdateApplyFn: (() => void) | null
 }
@@ -698,6 +706,10 @@ function createInitialState(): InternalLobbyFlowState {
     supportAccountTooNewMinutes: null,
     adminMonitoringSnapshot: null,
     adminMonitoringErrorText: null,
+    adminHistoryWindow: '1h',
+    adminHistoryResult: null,
+    adminHistoryLoading: false,
+    adminHistoryErrorText: null,
     pwaUpdatePending: false,
     pwaUpdateApplyFn: null,
   }
@@ -1742,6 +1754,10 @@ export function createLobbyFlowController(
       supportAccountTooNewMinutes: state.supportAccountTooNewMinutes,
       adminMonitoringSnapshot: state.adminMonitoringSnapshot,
       adminMonitoringErrorText: state.adminMonitoringErrorText,
+      adminHistoryWindow: state.adminHistoryWindow,
+      adminHistoryResult: state.adminHistoryResult,
+      adminHistoryLoading: state.adminHistoryLoading,
+      adminHistoryErrorText: state.adminHistoryErrorText,
       pwaUpdatePending: state.pwaUpdatePending,
     }
 
@@ -2389,6 +2405,14 @@ export function createLobbyFlowController(
       onPwaUpdateApply: () => {
         state.pwaUpdateApplyFn?.()
       },
+      onAdminHistoryWindowChange: (window) => {
+        state.adminHistoryWindow = window
+        state.adminHistoryResult = null
+        state.adminHistoryLoading = true
+        state.adminHistoryErrorText = null
+        render()
+        options.onAdminHistoryWindowChange?.(window)
+      },
     })
   }
 
@@ -2988,6 +3012,10 @@ export function createLobbyFlowController(
     state.profilePopupCanEdit = true
     state.adminMonitoringSnapshot = null
     state.adminMonitoringErrorText = null
+    state.adminHistoryWindow = '1h'
+    state.adminHistoryResult = null
+    state.adminHistoryLoading = false
+    state.adminHistoryErrorText = null
     stopWaitingRoomActivity()
     resetFinalFillSequence()
     render()
@@ -4875,6 +4903,22 @@ export function createLobbyFlowController(
     },
     setAdminMonitoringError: (message) => {
       state.adminMonitoringErrorText = message
+      if (state.currentScreen === 'admin-server') render()
+    },
+    setAdminHistoryLoading: (loading) => {
+      state.adminHistoryLoading = loading
+      if (state.currentScreen === 'admin-server') render()
+    },
+    setAdminHistoryResult: (result) => {
+      state.adminHistoryWindow = result.window
+      state.adminHistoryResult = result
+      state.adminHistoryLoading = false
+      state.adminHistoryErrorText = null
+      if (state.currentScreen === 'admin-server') render()
+    },
+    setAdminHistoryError: (message) => {
+      state.adminHistoryErrorText = message
+      state.adminHistoryLoading = false
       if (state.currentScreen === 'admin-server') render()
     },
     navigateInitialPath: () => {

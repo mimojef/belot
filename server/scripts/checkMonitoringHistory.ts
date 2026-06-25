@@ -368,6 +368,172 @@ console.log('\n[11] getDefaultRetentionCutoffMs() — 30-дневен праг')
   assert(cutoff >= after - thirtyDaysMs - 100, `cutoff ≥ now - 30d - margin (got ${cutoff})`)
 }
 
+// ─── [12] peakMoments — timestamp на пиковия момент ─────────────────────────
+
+console.log('\n[12] peakMoments — стойност и timestamp на пиков момент')
+await withTempDb(async (dbPath) => {
+  const store = await createMonitoringHistoryStore(dbPath)
+  const nowMs = Date.now()
+
+  const t1 = nowMs - 45 * 60 * 1000  // преди 45 мин — по-висока стойност
+  const t2 = nowMs - 15 * 60 * 1000  // преди 15 мин — по-ниска стойност
+
+  store.record(makeRunningSnapshot({
+    sampledAtMs: t1,
+    activeWsConnections: 50,
+    uniqueOnlineRealPlayers: 40,
+    activeRooms: 10,
+    totalMatchmakingWaiters: 8,
+  }))
+  store.record(makeRunningSnapshot({
+    sampledAtMs: t2,
+    activeWsConnections: 20,
+    uniqueOnlineRealPlayers: 12,
+    activeRooms: 4,
+    totalMatchmakingWaiters: 2,
+  }))
+
+  const result = store.queryHistory('1h')
+  const pm = result.peakMoments
+
+  assertEqual(pm.wsConns.value, 50, 'wsConns.value = 50 (пиковата)')
+  assertEqual(pm.wsConns.sampledAt, t1, 'wsConns.sampledAt = t1 (timestamp на пика)')
+  assertEqual(pm.onlinePlayers.value, 40, 'onlinePlayers.value = 40')
+  assertEqual(pm.onlinePlayers.sampledAt, t1, 'onlinePlayers.sampledAt = t1')
+  assertEqual(pm.activeRooms.value, 10, 'activeRooms.value = 10')
+  assertEqual(pm.activeRooms.sampledAt, t1, 'activeRooms.sampledAt = t1')
+  assertEqual(pm.mmWaiters.value, 8, 'mmWaiters.value = 8')
+  assertEqual(pm.mmWaiters.sampledAt, t1, 'mmWaiters.sampledAt = t1')
+
+  store.close()
+})
+
+// ─── [13] peakMoments — tie-breaking: при равни стойности печели по-нов запис
+
+console.log('\n[13] peakMoments — tie-breaking при равна стойност')
+await withTempDb(async (dbPath) => {
+  const store = await createMonitoringHistoryStore(dbPath)
+  const nowMs = Date.now()
+
+  const tOld = nowMs - 50 * 60 * 1000  // по-стар
+  const tNew = nowMs - 10 * 60 * 1000  // по-нов
+
+  store.record(makeRunningSnapshot({
+    sampledAtMs: tOld,
+    activeWsConnections: 30,
+    uniqueOnlineRealPlayers: 20,
+    activeRooms: 5,
+    totalMatchmakingWaiters: 4,
+  }))
+  store.record(makeRunningSnapshot({
+    sampledAtMs: tNew,
+    activeWsConnections: 30,
+    uniqueOnlineRealPlayers: 20,
+    activeRooms: 5,
+    totalMatchmakingWaiters: 4,
+  }))
+
+  const result = store.queryHistory('1h')
+  const pm = result.peakMoments
+
+  assertEqual(pm.wsConns.sampledAt, tNew, 'wsConns tie-break: по-нов timestamp печели')
+  assertEqual(pm.onlinePlayers.sampledAt, tNew, 'onlinePlayers tie-break: по-нов timestamp')
+  assertEqual(pm.activeRooms.sampledAt, tNew, 'activeRooms tie-break: по-нов timestamp')
+  assertEqual(pm.mmWaiters.sampledAt, tNew, 'mmWaiters tie-break: по-нов timestamp')
+
+  store.close()
+})
+
+// ─── [14] peakMoments — запис извън прозореца не се брои ─────────────────────
+
+console.log('\n[14] peakMoments — запис извън window не е пиков момент')
+await withTempDb(async (dbPath) => {
+  const store = await createMonitoringHistoryStore(dbPath)
+  const nowMs = Date.now()
+
+  const tOutside = nowMs - 2 * 60 * 60 * 1000  // преди 2ч — извън 1h прозорец
+  const tInside  = nowMs - 30 * 60 * 1000       // преди 30мин — вътре в 1h прозорец
+
+  store.record(makeRunningSnapshot({
+    sampledAtMs: tOutside,
+    activeWsConnections: 999,  // много висока стойност извън прозореца
+    uniqueOnlineRealPlayers: 888,
+    activeRooms: 77,
+    totalMatchmakingWaiters: 66,
+  }))
+  store.record(makeRunningSnapshot({
+    sampledAtMs: tInside,
+    activeWsConnections: 10,
+    uniqueOnlineRealPlayers: 5,
+    activeRooms: 2,
+    totalMatchmakingWaiters: 1,
+  }))
+
+  const result = store.queryHistory('1h')
+  const pm = result.peakMoments
+
+  assertEqual(pm.wsConns.value, 10, 'wsConns.value е от записа в прозореца (10), не от 999')
+  assertEqual(pm.wsConns.sampledAt, tInside, 'wsConns.sampledAt = tInside')
+  assertEqual(pm.onlinePlayers.value, 5, 'onlinePlayers.value = 5, не 888')
+  assertEqual(pm.activeRooms.value, 2, 'activeRooms.value = 2, не 77')
+  assertEqual(pm.mmWaiters.value, 1, 'mmWaiters.value = 1, не 66')
+
+  store.close()
+})
+
+// ─── [15] peakMoments — празна история дава value:0, sampledAt:null ──────────
+
+console.log('\n[15] peakMoments — празна таблица → нулеви стойности, null timestamp')
+await withTempDb(async (dbPath) => {
+  const store = await createMonitoringHistoryStore(dbPath)
+  const result = store.queryHistory('1h')
+  const pm = result.peakMoments
+
+  assertEqual(pm.wsConns.value, 0, 'wsConns.value = 0 при празна история')
+  assert(pm.wsConns.sampledAt === null, 'wsConns.sampledAt = null при празна история')
+  assertEqual(pm.onlinePlayers.value, 0, 'onlinePlayers.value = 0')
+  assert(pm.onlinePlayers.sampledAt === null, 'onlinePlayers.sampledAt = null')
+  assertEqual(pm.activeRooms.value, 0, 'activeRooms.value = 0')
+  assert(pm.activeRooms.sampledAt === null, 'activeRooms.sampledAt = null')
+  assertEqual(pm.mmWaiters.value, 0, 'mmWaiters.value = 0')
+  assert(pm.mmWaiters.sampledAt === null, 'mmWaiters.sampledAt = null')
+
+  store.close()
+})
+
+// ─── [16] peakMoments.value съответства на peaks ──────────────────────────────
+
+console.log('\n[16] peakMoments.value съвпада с peaks за activity метрики')
+await withTempDb(async (dbPath) => {
+  const store = await createMonitoringHistoryStore(dbPath)
+  const nowMs = Date.now()
+
+  store.record(makeRunningSnapshot({
+    sampledAtMs: nowMs - 20 * 60 * 1000,
+    activeWsConnections: 77,
+    uniqueOnlineRealPlayers: 55,
+    activeRooms: 13,
+    totalMatchmakingWaiters: 9,
+  }))
+  store.record(makeRunningSnapshot({
+    sampledAtMs: nowMs - 10 * 60 * 1000,
+    activeWsConnections: 40,
+    uniqueOnlineRealPlayers: 30,
+    activeRooms: 8,
+    totalMatchmakingWaiters: 3,
+  }))
+
+  const result = store.queryHistory('1h')
+  const { peaks, peakMoments: pm } = result
+
+  assertEqual(pm.wsConns.value, peaks.wsConns, 'wsConns: peakMoments.value === peaks.wsConns')
+  assertEqual(pm.onlinePlayers.value, peaks.onlinePlayers, 'onlinePlayers: peakMoments.value === peaks.onlinePlayers')
+  assertEqual(pm.activeRooms.value, peaks.activeRooms, 'activeRooms: peakMoments.value === peaks.activeRooms')
+  assertEqual(pm.mmWaiters.value, peaks.mmWaiters, 'mmWaiters: peakMoments.value === peaks.mmWaiters')
+
+  store.close()
+})
+
 // ─── Резюме ───────────────────────────────────────────────────────────────────
 
 console.log(`\n${'─'.repeat(60)}`)

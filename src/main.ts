@@ -17,7 +17,8 @@ import {
   type LobbyFlowController,
 } from './app/lobby/createLobbyFlowController'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
-import type { MonitoringSnapshot } from './app/adminServer/adminServerTypes'
+import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow } from './app/adminServer/adminServerTypes'
+import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
 import {
   createGameServerClient,
   type AdminSettingsSnapshot,
@@ -1687,6 +1688,158 @@ function stopMonitoringPolling(): void {
   monitoringFetchInFlightGeneration = null
 }
 
+function isFiniteNonNegative(v: unknown): v is number {
+  return typeof v === 'number' && isFinite(v) && v >= 0
+}
+
+function isFinitePositive(v: unknown): v is number {
+  return typeof v === 'number' && isFinite(v) && v > 0
+}
+
+function isFiniteNumberOrNull(v: unknown): v is number | null {
+  return v === null || (typeof v === 'number' && isFinite(v))
+}
+
+function validateHistoryPoint(p: unknown): p is MonitoringHistoryResult['points'][number] {
+  if (p === null || typeof p !== 'object') return false
+  const r = p as Record<string, unknown>
+  return (
+    isFinitePositive(r.t) &&
+    isFiniteNumberOrNull(r.serverCpu) &&
+    isFiniteNumberOrNull(r.nodeCpu) &&
+    isFiniteNonNegative(r.ramUsedMb) &&
+    isFiniteNonNegative(r.ramPercent) &&
+    isFiniteNonNegative(r.rssMb) &&
+    isFiniteNonNegative(r.wsConns) &&
+    isFiniteNonNegative(r.onlinePlayers) &&
+    isFiniteNonNegative(r.activeRooms) &&
+    isFiniteNonNegative(r.mmWaiters)
+  )
+}
+
+function validateHistoryPeaks(pk: unknown): pk is MonitoringHistoryResult['peaks'] {
+  if (pk === null || typeof pk !== 'object') return false
+  const r = pk as Record<string, unknown>
+  return (
+    isFiniteNumberOrNull(r.serverCpu) &&
+    isFiniteNumberOrNull(r.nodeCpu) &&
+    isFiniteNonNegative(r.ramUsedMb) &&
+    isFiniteNonNegative(r.ramPercent) &&
+    isFiniteNonNegative(r.rssMb) &&
+    isFiniteNonNegative(r.wsConns) &&
+    isFiniteNonNegative(r.onlinePlayers) &&
+    isFiniteNonNegative(r.activeRooms) &&
+    isFiniteNonNegative(r.mmWaiters)
+  )
+}
+
+function validatePeakMoment(m: unknown): m is MonitoringHistoryResult['peakMoments']['wsConns'] {
+  if (m === null || typeof m !== 'object') return false
+  const r = m as Record<string, unknown>
+  return (
+    isFiniteNonNegative(r.value) &&
+    (r.sampledAt === null || isFinitePositive(r.sampledAt))
+  )
+}
+
+function validatePeakMoments(pm: unknown): pm is MonitoringHistoryResult['peakMoments'] {
+  if (pm === null || typeof pm !== 'object') return false
+  const r = pm as Record<string, unknown>
+  return (
+    validatePeakMoment(r.wsConns) &&
+    validatePeakMoment(r.onlinePlayers) &&
+    validatePeakMoment(r.activeRooms) &&
+    validatePeakMoment(r.mmWaiters)
+  )
+}
+
+async function loadAdminMonitoringHistory(
+  window: HistoryWindow,
+  signal: AbortSignal,
+): Promise<{ ok: true; result: MonitoringHistoryResult } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/monitoring/history?window=${encodeURIComponent(window)}`,
+      { method: 'GET', credentials: 'include', signal },
+    )
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп до мониторинга.' }
+    }
+    if (response.status === 503) {
+      return { ok: false, message: 'Историята временно не е налична.' }
+    }
+    const data = (await response.json()) as Record<string, unknown>
+    if (!response.ok || data.ok !== true) {
+      const msg = typeof data.message === 'string' ? data.message : 'Грешка при зареждане на историята.'
+      return { ok: false, message: msg }
+    }
+    if (!isValidHistoryWindow(data.window)) {
+      return { ok: false, message: 'Невалиден формат на историята.' }
+    }
+    if (!Array.isArray(data.points)) {
+      return { ok: false, message: 'Невалиден формат на историята.' }
+    }
+    for (const pt of data.points) {
+      if (!validateHistoryPoint(pt)) {
+        return { ok: false, message: 'Невалиден формат на историята.' }
+      }
+    }
+    if (!validateHistoryPeaks(data.peaks)) {
+      return { ok: false, message: 'Невалиден формат на историята.' }
+    }
+    if (!validatePeakMoments(data.peakMoments)) {
+      return { ok: false, message: 'Невалиден формат на историята.' }
+    }
+    const result: MonitoringHistoryResult = {
+      window: data.window,
+      points: data.points,
+      peaks: data.peaks as MonitoringHistoryResult['peaks'],
+      peakMoments: data.peakMoments as MonitoringHistoryResult['peakMoments'],
+    }
+    return { ok: true, result }
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      return { ok: false, message: '__aborted__' }
+    }
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+let historyGeneration = 0
+let historyAbortController: AbortController | null = null
+
+function fetchAdminHistory(window: HistoryWindow): void {
+  const gen = historyGeneration
+  // set loading synchronously before the first render — no blank intermediate frame
+  lobby.setAdminHistoryLoading(true)
+  const controller = new AbortController()
+  historyAbortController = controller
+  void (async () => {
+    try {
+      const result = await loadAdminMonitoringHistory(window, controller.signal)
+      if (gen !== historyGeneration) return
+      if (!result.ok && result.message === '__aborted__') return
+      if (result.ok) {
+        lobby.setAdminHistoryResult(result.result)
+      } else {
+        lobby.setAdminHistoryError(result.message)
+      }
+    } finally {
+      if (historyAbortController === controller) {
+        historyAbortController = null
+      }
+    }
+  })()
+}
+
+function invalidateHistoryGeneration(): void {
+  historyGeneration++
+  if (historyAbortController !== null) {
+    historyAbortController.abort()
+    historyAbortController = null
+  }
+}
+
 async function markAdminGuestContactMessageRead(messageId: string): Promise<{ ok: true } | { ok: false; message: string }> {
   try {
     const response = await fetch(
@@ -2456,8 +2609,18 @@ lobby = createLobbyFlowController({
   onAdminSupportReply: (profileId, body) => sendAdminSupportReply(profileId, body),
   onAdminSupportDeleteConversation: (profileId) => archiveAdminSupportConversation(profileId),
   onSupportDeleteConversation: () => deleteUserSupportConversation(),
-  onAdminServerScreenEnter: () => { startMonitoringPolling() },
-  onAdminServerScreenLeave: () => { stopMonitoringPolling() },
+  onAdminServerScreenEnter: () => {
+    startMonitoringPolling()
+    fetchAdminHistory('1h')
+  },
+  onAdminServerScreenLeave: () => {
+    stopMonitoringPolling()
+    invalidateHistoryGeneration()
+  },
+  onAdminHistoryWindowChange: (window: HistoryWindow) => {
+    invalidateHistoryGeneration()
+    fetchAdminHistory(window)
+  },
   onNotifFriendRequestClick: (friendshipId) => {
     const req = lobby?.getPendingFriendRequest(friendshipId)
     if (!req) return

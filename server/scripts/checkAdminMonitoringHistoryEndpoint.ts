@@ -244,11 +244,24 @@ type HistoryPoint = {
   mmWaiters: number
 }
 
+type PeakMoment = {
+  value: number
+  sampledAt: number | null
+}
+
+type PeakMoments = {
+  wsConns: PeakMoment
+  onlinePlayers: PeakMoment
+  activeRooms: PeakMoment
+  mmWaiters: PeakMoment
+}
+
 type HistoryResponse = {
   ok: boolean
   window: string
   points: HistoryPoint[]
   peaks: HistoryPeaks
+  peakMoments: PeakMoments
 }
 
 // ─── Главна функция ───────────────────────────────────────────────────────────
@@ -428,6 +441,44 @@ try {
     fail('[3b] peaks проверка пропусната — [3] не е минал', 'skip')
   }
 
+  // ─── [3c] peakMoments форма ───────────────────────────────────────────────
+
+  console.log('\n[3c] peakMoments форма при window=1h (нов сървър)')
+  {
+    const r = await httpRequest(port, `${ENDPOINT}?window=1h`, 'GET', adminCookie)
+    const b = r.body as Record<string, unknown>
+
+    await check('[3c.1] peakMoments е обект', () => {
+      const pm = b['peakMoments']
+      if (!pm || typeof pm !== 'object' || Array.isArray(pm)) {
+        throw new Error(`peakMoments=${String(pm)}`)
+      }
+    })
+
+    const pm = b['peakMoments'] as Record<string, unknown>
+
+    const checkMomentField = async (field: string, checkN: string) => {
+      await check(`[3c.${checkN}] peakMoments.${field} е { value: number, sampledAt: number|null }`, () => {
+        const m = pm[field] as Record<string, unknown> | undefined
+        if (!m || typeof m !== 'object') throw new Error(`${field} не е обект`)
+        if (typeof m['value'] !== 'number') throw new Error(`${field}.value не е number: ${String(m['value'])}`)
+        if (m['sampledAt'] !== null && typeof m['sampledAt'] !== 'number') {
+          throw new Error(`${field}.sampledAt не е number|null: ${String(m['sampledAt'])}`)
+        }
+      })
+      await check(`[3c.${checkN}b] peakMoments.${field}.value ≥ 0`, () => {
+        const m = pm[field] as Record<string, unknown> | undefined
+        const v = typeof m?.['value'] === 'number' ? m['value'] : -1
+        if (v < 0) throw new Error(`${field}.value=${v}`)
+      })
+    }
+
+    await checkMomentField('wsConns', '2')
+    await checkMomentField('onlinePlayers', '3')
+    await checkMomentField('activeRooms', '4')
+    await checkMomentField('mmWaiters', '5')
+  }
+
   // ─── [4] window=24h и window=7d → 200 + правилен window ───────────────────
 
   console.log('\n[4] window=24h и window=7d → 200 + правилен window')
@@ -448,6 +499,12 @@ try {
     })
     await check(`[4.${w}.5] peaks е обект за window=${w}`, () => {
       if (!b['peaks'] || typeof b['peaks'] !== 'object') throw new Error('peaks не е обект')
+    })
+    await check(`[4.${w}.6] peakMoments е обект за window=${w}`, () => {
+      const pm = b['peakMoments']
+      if (!pm || typeof pm !== 'object' || Array.isArray(pm)) {
+        throw new Error(`peakMoments не е обект: ${String(pm)}`)
+      }
     })
   }
 

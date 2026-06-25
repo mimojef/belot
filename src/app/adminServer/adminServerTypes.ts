@@ -1,3 +1,53 @@
+export type HistoryWindow = '1h' | '24h' | '7d'
+
+export type MonitoringHistoryPoint = {
+  t: number
+  serverCpu: number | null
+  nodeCpu: number | null
+  ramUsedMb: number
+  ramPercent: number
+  rssMb: number
+  wsConns: number
+  onlinePlayers: number
+  activeRooms: number
+  mmWaiters: number
+}
+
+export type MonitoringPeaks = {
+  serverCpu: number | null
+  nodeCpu: number | null
+  ramUsedMb: number
+  ramPercent: number
+  rssMb: number
+  wsConns: number
+  onlinePlayers: number
+  activeRooms: number
+  mmWaiters: number
+}
+
+export type MonitoringPeakMoment = {
+  value: number
+  sampledAt: number | null
+}
+
+export type MonitoringPeakMoments = {
+  wsConns: MonitoringPeakMoment
+  onlinePlayers: MonitoringPeakMoment
+  activeRooms: MonitoringPeakMoment
+  mmWaiters: MonitoringPeakMoment
+}
+
+export type MonitoringHistoryResult = {
+  window: HistoryWindow
+  points: MonitoringHistoryPoint[]
+  peaks: MonitoringPeaks
+  peakMoments: MonitoringPeakMoments
+}
+
+export function isValidHistoryWindow(value: unknown): value is HistoryWindow {
+  return value === '1h' || value === '24h' || value === '7d'
+}
+
 export type MonitoringWorkerSnapshot = {
   workerId: string
   state: string
