@@ -17,6 +17,7 @@ import {
   type LobbyFlowController,
 } from './app/lobby/createLobbyFlowController'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
+import type { MonitoringSnapshot } from './app/adminServer/adminServerTypes'
 import {
   createGameServerClient,
   type AdminSettingsSnapshot,
@@ -389,6 +390,7 @@ async function loadAuthSession(): Promise<void> {
     } else {
       lobby.refreshDailyRewardsStatus()
       stopSupportUnreadPolling()
+      stopMonitoringPolling()
     }
     await syncLobbyFriendships()
     await syncLobbyChatConversations()
@@ -445,6 +447,7 @@ async function submitLogout(): Promise<void> {
   currentAuthSession = null
   clearSessionCache()
   stopSupportUnreadPolling()
+  stopMonitoringPolling()
   syncLobbyWithAuthSession()
   lobby.resetToLobby()
   lobby.refreshDailyRewardsStatus()
@@ -1614,6 +1617,76 @@ async function loadAdminGuestContactMessages(): Promise<
   }
 }
 
+type AdminMonitoringApiResponse = {
+  ok: boolean
+  snapshot?: MonitoringSnapshot
+  message?: string
+}
+
+async function loadAdminMonitoring(): Promise<
+  | { ok: true; snapshot: MonitoringSnapshot }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/monitoring/current`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп до мониторинга.' }
+    }
+    if (response.status === 503) {
+      return { ok: false, message: 'Мониторингът временно не е наличен.' }
+    }
+    const data = (await response.json()) as AdminMonitoringApiResponse
+    if (!response.ok || !data.ok || !data.snapshot) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на мониторинга.' }
+    }
+    return { ok: true, snapshot: data.snapshot }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+let monitoringIntervalId: ReturnType<typeof setInterval> | null = null
+let monitoringGeneration = 0
+let monitoringFetchInFlightGeneration: number | null = null
+
+function startMonitoringPolling(): void {
+  if (monitoringIntervalId !== null) return
+  const runOnePoll = (gen: number): void => {
+    if (monitoringFetchInFlightGeneration === gen) return
+    monitoringFetchInFlightGeneration = gen
+    void (async () => {
+      try {
+        const result = await loadAdminMonitoring()
+        if (gen !== monitoringGeneration) return
+        if (result.ok) {
+          lobby.setAdminMonitoringSnapshot(result.snapshot)
+        } else {
+          lobby.setAdminMonitoringError(result.message)
+        }
+      } finally {
+        if (monitoringFetchInFlightGeneration === gen) {
+          monitoringFetchInFlightGeneration = null
+        }
+      }
+    })()
+  }
+  runOnePoll(monitoringGeneration)
+  monitoringIntervalId = setInterval(() => {
+    runOnePoll(monitoringGeneration)
+  }, 5_000)
+}
+
+function stopMonitoringPolling(): void {
+  if (monitoringIntervalId === null) return
+  clearInterval(monitoringIntervalId)
+  monitoringIntervalId = null
+  monitoringGeneration++
+  monitoringFetchInFlightGeneration = null
+}
+
 async function markAdminGuestContactMessageRead(messageId: string): Promise<{ ok: true } | { ok: false; message: string }> {
   try {
     const response = await fetch(
@@ -2383,6 +2456,8 @@ lobby = createLobbyFlowController({
   onAdminSupportReply: (profileId, body) => sendAdminSupportReply(profileId, body),
   onAdminSupportDeleteConversation: (profileId) => archiveAdminSupportConversation(profileId),
   onSupportDeleteConversation: () => deleteUserSupportConversation(),
+  onAdminServerScreenEnter: () => { startMonitoringPolling() },
+  onAdminServerScreenLeave: () => { stopMonitoringPolling() },
   onNotifFriendRequestClick: (friendshipId) => {
     const req = lobby?.getPendingFriendRequest(friendshipId)
     if (!req) return
@@ -2802,6 +2877,7 @@ const _VALID_PATHS = new Set([
   '/friends',
   '/chat',
   '/admin',
+  '/admin/server',
   '/admin/guest-contact',
   '/terms',
   '/privacy',

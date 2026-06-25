@@ -23,6 +23,7 @@ import type {
   SupportMessageSnapshot,
   SupportConversationSnapshot,
 } from '../network/createGameServerClient'
+import type { MonitoringSnapshot } from '../adminServer/adminServerTypes'
 import type { PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
@@ -92,7 +93,7 @@ export type GuestContactFormInput = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -244,6 +245,8 @@ export type LobbyScreenState = {
   adminGuestContactUnreadCount: number
   supportDeleteConfirm: boolean
   supportDeleteLoading: boolean
+  adminMonitoringSnapshot: MonitoringSnapshot | null
+  adminMonitoringErrorText: string | null
   pwaUpdatePending: boolean
 }
 
@@ -281,6 +284,7 @@ export type RenderLobbyScreenOptions = {
   onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
   onAdminClick: () => void
   onAdminInfoClick: () => void
+  onAdminServerClick: () => void
   onAdminGuestContactMessagesClick: () => void
   onAdminDailyRewardAdd: (amount: number) => void
   onAdminDailyRewardRemove: (tierId: string) => void
@@ -1116,7 +1120,7 @@ function renderNav(state: LobbyScreenState): string {
   const chatActive = activeView === 'chat'
   const leaderboardsActive = activeView === 'leaderboards'
   const shopActive = activeView === 'shop'
-  const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'guest-contact-messages'
+  const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'guest-contact-messages'
   const lobbyActive = activeView === 'tables'
   const mailUnreadCount = state.supportUnreadCount + (state.isAdmin ? state.adminGuestContactUnreadCount : 0)
   const notificationsBadgeCount = getNotificationsBadgeCount(state)
@@ -1341,6 +1345,20 @@ function renderNav(state: LobbyScreenState): string {
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
                   Информация
+                </button>
+                <button type="button" data-lobby-nav-admin-server="1" style="
+                  display:flex; align-items:center; gap:10px;
+                  width:100%; background:none; border:none;
+                  padding:13px 18px; cursor:pointer; text-align:left;
+                  font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+                  color:rgba(255,255,255,0.82);
+                  transition:background 0.12s, color 0.12s;
+                "
+                onmouseenter="this.style.background='rgba(212,165,32,0.09)';this.style.color='#d4a520'"
+                onmouseleave="this.style.background='none';this.style.color='rgba(255,255,255,0.82)'"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                  Сървър
                 </button>
               </div>
             </div>
@@ -2493,6 +2511,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
               ${state.isAdmin ? `
                 <button type="button" data-lobby-nav-admin="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ настройки')}</button>
                 <button type="button" data-lobby-nav-admin-info="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ информация')}</button>
+                <button type="button" data-lobby-nav-admin-server="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Сървър')}</button>
               ` : ''}
               <button type="button" data-lobby-nav-logout="1" style="${mobileMenuButtonStyle('rgba(248,113,113,0.16)', '#fecaca')}">${mobileMenuSvgItemContent('logout', 'Изход')}</button>
             ` : `
@@ -3130,6 +3149,8 @@ function renderMobileLobbyScreenContent(
             ? renderAdminPanel(state, true)
           : state.view === 'admin-info'
             ? renderAdminInfoPanel(state)
+          : state.view === 'admin-server'
+            ? renderAdminServerPanel(state)
           : state.view === 'friends'
             ? renderMobileFriendsDirectory(state)
           : state.view === 'chat'
@@ -3929,6 +3950,254 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
       <div style="display:grid;grid-template-columns:1fr;gap:12px;">
         ${statCard('Общо (всички времена)', stats.payments.allTime.count, stats.payments.allTime.totalCents)}
       </div>
+    </section>
+  `
+}
+
+function renderAdminServerPanel(state: LobbyScreenState): string {
+  if (!state.isAdmin) {
+    return `<div style="min-height:520px;display:flex;align-items:center;justify-content:center;color:#fecaca;font-size:15px;font-weight:800;">Нямаш достъп.</div>`
+  }
+
+  const snap = state.adminMonitoringSnapshot
+  const errorText = state.adminMonitoringErrorText
+
+  const PHASE_LABELS: Record<string, string> = {
+    'cutting': 'Разрязване',
+    'deal-first-3': 'Раздаване 1-3',
+    'deal-next-2': 'Раздаване 4-5',
+    'bidding': 'Обявяване',
+    'deal-last-3': 'Раздаване 6-8',
+    'playing': 'Игра',
+    'scoring': 'Резултати',
+  }
+
+  const WORKER_STATE_LABELS: Record<string, string> = {
+    ready: 'Работи',
+    starting: 'Стартира',
+    failed: 'Грешка',
+    stopped: 'Спрян',
+    shutting_down: 'Спира',
+  }
+  const fmtWorkerState = (s: string): string => WORKER_STATE_LABELS[s] ?? s
+
+  const sectionLabel = (text: string) =>
+    `<div style="font-size:10px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.45);margin-bottom:10px;">${text}</div>`
+
+  if (!snap) {
+    return `
+      <section style="padding:0 4px;">
+        <h2 style="font-size:18px;font-weight:800;color:#d4a520;margin:0 0 6px;letter-spacing:0.04em;text-transform:uppercase;">Сървър</h2>
+        <p style="font-size:12px;color:rgba(255,255,255,0.4);margin:0 0 24px;">Наблюдение в реално време</p>
+        ${errorText ? `
+          <div style="background:rgba(127,29,29,0.3);border:1px solid rgba(248,113,113,0.3);border-radius:8px;padding:12px 16px;color:#fca5a5;font-size:13px;font-weight:700;">${escapeHtml(errorText)}</div>
+        ` : `
+          <div style="min-height:200px;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:16px;font-weight:800;">Зареждане...</div>
+        `}
+      </section>
+    `
+  }
+
+  const statusLabel = snap.samplerStatus === 'running' ? 'Работи'
+    : snap.samplerStatus === 'warming_up' ? 'Загрява'
+    : 'Проблем'
+  const statusColor = snap.samplerStatus === 'running' ? '#22c55e'
+    : snap.samplerStatus === 'warming_up' ? '#f59e0b'
+    : '#ef4444'
+
+  const fmt1 = (n: number) => n.toFixed(1)
+  const fmt0 = (n: number) => n.toFixed(0)
+
+  // ── RAM: над 1024 MB → GB ──
+  const fmtMb = (mb: number): { value: string; unit: string } => {
+    if (mb >= 1024) return { value: (mb / 1024).toFixed(1), unit: 'GB' }
+    return { value: fmt0(mb), unit: 'MB' }
+  }
+  const ramUsed = fmtMb(snap.ramUsedMb)
+  const ramTotal = fmtMb(snap.ramTotalMb)
+  const ramUnit = ramUsed.unit === ramTotal.unit ? ramUsed.unit : `${ramUsed.unit}/${ramTotal.unit}`
+  const rssFormatted = fmtMb(snap.processRssMb)
+
+  // ── Uptime ──
+  const fmtUptime = (sec: number): string => {
+    const d = Math.floor(sec / 86400)
+    const h = Math.floor((sec % 86400) / 3600)
+    const m = Math.floor((sec % 3600) / 60)
+    if (d > 0) return `${d}д ${h}ч ${m}мин`
+    if (h > 0) return `${h}ч ${m}мин`
+    return `${m}мин`
+  }
+
+  // ── Форматиране на час/дата ──
+  const fmtLocalTime = (iso: string): string => {
+    try {
+      return new Date(iso).toLocaleTimeString('bg-BG', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    } catch { return iso }
+  }
+  const fmtLocalDateTime = (iso: string): string => {
+    try {
+      return new Date(iso).toLocaleString('bg-BG', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    } catch { return iso }
+  }
+
+  const sampledAgo = Math.max(0, Math.round((Date.now() - snap.sampledAtMs) / 1000))
+  const sampleWindowSec = (snap.sampleWindowMs / 1000).toFixed(1)
+
+  // ── Метрична карта (стандартна — 1 ред стойност) ──
+  const card = (label: string, value: string, unit: string) => `
+    <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:14px 16px;min-height:76px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:space-between;">
+      <div style="font-size:10px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.45);margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${label}</div>
+      <div style="display:flex;align-items:baseline;gap:4px;min-width:0;">
+        <span style="font-size:22px;font-weight:900;color:#ffffff;white-space:nowrap;">${value}</span>
+        ${unit ? `<span style="font-size:11px;color:rgba(255,255,255,0.38);white-space:nowrap;">${unit}</span>` : ''}
+      </div>
+    </div>
+  `
+
+  // ── RAM карта (2 реда: стойност + процент) ──
+  const ramCard = () => `
+    <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:14px 16px;min-height:76px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:space-between;">
+      <div style="font-size:10px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.45);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">RAM</div>
+      <div style="font-size:18px;font-weight:900;color:#ffffff;line-height:1.2;word-break:break-word;">${ramUsed.value} / ${ramTotal.value} <span style="font-size:11px;color:rgba(255,255,255,0.38);font-weight:700;">${ramUnit}</span></div>
+      <div style="font-size:12px;font-weight:700;color:rgba(255,255,255,0.5);margin-top:2px;">${fmt1(snap.ramPercent)}%</div>
+    </div>
+  `
+
+  const matchmakingRows = Object.entries(snap.matchmakingWaitersByStake)
+    .filter(([, count]) => count > 0)
+    .map(([stake, count]) => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06);">
+        <span style="font-size:12px;color:rgba(255,255,255,0.65);font-weight:700;">${escapeHtml(stake)}</span>
+        <span style="font-size:13px;color:#ffffff;font-weight:800;">${count}</span>
+      </div>
+    `).join('')
+
+  const phaseRows = Object.entries(snap.roomsByPhase)
+    .filter(([, count]) => count > 0)
+    .map(([phase, count]) => {
+      const label = PHASE_LABELS[phase] ?? phase
+      return `<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(212,165,32,0.12);border:1px solid rgba(212,165,32,0.28);border-radius:20px;padding:3px 10px;font-size:11px;font-weight:800;color:#d4a520;">${escapeHtml(label)}<span style="color:rgba(255,255,255,0.8);">${count}</span></span>`
+    }).join('')
+
+  // ── Worker pool ──
+  let workerPoolHtml = ''
+  if (snap.workerPool === null) {
+    workerPoolHtml = `<p style="color:rgba(255,255,255,0.45);font-size:13px;font-style:italic;margin:0;">Worker pool не е активен в текущия режим.</p>`
+  } else {
+    const wp = snap.workerPool
+    const poolOk = wp.failedWorkers === 0
+    const poolColor = poolOk ? '#22c55e' : '#ef4444'
+    const totalCapacity = wp.workerCount * wp.maxRoomsPerWorker
+    const capacityPct = totalCapacity > 0 ? Math.round((wp.totalAssignedRooms / totalCapacity) * 100) : 0
+
+    const workerCards = wp.workers.map((w) => {
+      const hasPending = w.shadow.pendingOperations > 0
+      const hasError = w.lastError !== null || w.shadow.lastError !== null
+      const inconsistent = !w.shadow.isConsistent
+      const rowColor = hasError || inconsistent ? '#ef4444' : hasPending ? '#f59e0b' : '#22c55e'
+      const errMsg = w.lastError ?? w.shadow.lastError
+      const wCapPct = w.maxRooms > 0 ? Math.round((w.assignedRooms / w.maxRooms) * 100) : 0
+      const desiredMatch = w.shadow.desiredRooms === w.shadow.confirmedRooms
+      const borderColor = hasError || inconsistent ? 'rgba(239,68,68,0.35)' : hasPending ? 'rgba(245,158,11,0.3)' : 'rgba(255,255,255,0.08)'
+
+      return `
+        <div style="background:#111111;border:1px solid ${borderColor};border-radius:8px;padding:12px 14px;min-width:0;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            <div style="width:8px;height:8px;border-radius:50%;background:${rowColor};flex-shrink:0;"></div>
+            <span style="font-size:12px;font-weight:800;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(w.workerId)}</span>
+            <span style="margin-left:auto;font-size:12px;font-weight:700;color:rgba(255,255,255,0.55);white-space:nowrap;">${fmtWorkerState(w.state)}${w.shadow.isShuttingDown ? ' · Спира' : ''}</span>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:5px 14px;line-height:1.5;">
+            <span style="font-size:12px;color:rgba(255,255,255,0.65);">Стаи: <strong style="color:#fff;">${w.assignedRooms}/${w.maxRooms}</strong> <span style="color:rgba(255,255,255,0.4);">(${wCapPct}%)</span></span>
+            <span style="font-size:12px;color:rgba(255,255,255,0.65);">Жел./Потв.: <strong style="color:${desiredMatch ? 'rgba(255,255,255,0.75)' : '#f59e0b'};">${w.shadow.desiredRooms}/${w.shadow.confirmedRooms}</strong></span>
+            ${hasPending ? `<span style="font-size:12px;color:#f59e0b;font-weight:700;">Чакащи: ${w.shadow.pendingOperations}</span>` : ''}
+            <span style="font-size:12px;color:${w.shadow.isConsistent ? 'rgba(255,255,255,0.4)' : '#ef4444'};font-weight:${w.shadow.isConsistent ? '400' : '700'};">${w.shadow.isConsistent ? 'Синхронизиран' : 'Несинхронизиран'}</span>
+          </div>
+          ${errMsg ? `<div style="margin-top:7px;font-size:11px;color:#fca5a5;border-top:1px solid rgba(239,68,68,0.2);padding-top:6px;line-height:1.4;">${escapeHtml(errMsg)}</div>` : ''}
+        </div>
+      `
+    }).join('')
+
+    workerPoolHtml = `
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 20px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid rgba(255,255,255,0.07);">
+        <div style="display:flex;align-items:center;gap:7px;">
+          <div style="width:10px;height:10px;border-radius:50%;background:${poolColor};flex-shrink:0;"></div>
+          <span style="font-size:14px;font-weight:800;color:#ffffff;">${wp.readyWorkers} / ${wp.workerCount} работят</span>
+          ${wp.failedWorkers > 0 ? `<span style="font-size:12px;color:#ef4444;font-weight:700;">· ${wp.failedWorkers} неуспешни</span>` : ''}
+        </div>
+        <span style="font-size:12px;color:rgba(255,255,255,0.5);">${fmtWorkerState(wp.state)}</span>
+        <span style="font-size:12px;color:rgba(255,255,255,0.5);">Стаи: ${wp.totalAssignedRooms} / ${totalCapacity} <span style="color:rgba(255,255,255,0.35);">(${capacityPct}%)</span></span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px;">${workerCards}</div>
+    `
+  }
+
+  return `
+    <section style="padding:0 4px;">
+
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+        <h2 style="font-size:18px;font-weight:800;color:#d4a520;margin:0;letter-spacing:0.04em;text-transform:uppercase;">Сървър</h2>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <div style="width:8px;height:8px;border-radius:50%;background:${statusColor};flex-shrink:0;"></div>
+          <span style="font-size:13px;font-weight:800;color:${statusColor};">${statusLabel}</span>
+        </div>
+        <span style="font-size:11px;color:rgba(255,255,255,0.3);margin-left:4px;">Наблюдение в реално време</span>
+      </div>
+
+      <div style="background:#0a0a0a;border:1px solid rgba(212,165,32,0.18);border-radius:10px;padding:12px 16px;margin-bottom:20px;display:flex;flex-wrap:wrap;gap:6px 28px;">
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:11px;color:rgba(255,255,255,0.38);text-transform:uppercase;letter-spacing:0.08em;">Последна проба</span>
+          <span style="font-size:12px;font-weight:700;color:rgba(255,255,255,0.75);">${fmtLocalTime(snap.sampledAtIso)}</span>
+          <span style="font-size:11px;color:rgba(255,255,255,0.3);">· преди ${sampledAgo} сек.</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:11px;color:rgba(255,255,255,0.38);text-transform:uppercase;letter-spacing:0.08em;">Интервал</span>
+          <span style="font-size:12px;font-weight:700;color:rgba(255,255,255,0.75);">${sampleWindowSec} сек.</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:11px;color:rgba(255,255,255,0.38);text-transform:uppercase;letter-spacing:0.08em;">Работи от</span>
+          <span style="font-size:12px;font-weight:700;color:rgba(255,255,255,0.75);">${fmtLocalDateTime(snap.backendStartedAtIso)}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:11px;color:rgba(255,255,255,0.38);text-transform:uppercase;letter-spacing:0.08em;">Uptime</span>
+          <span style="font-size:12px;font-weight:700;color:rgba(255,255,255,0.75);">${fmtUptime(snap.processUptimeSec)}</span>
+        </div>
+      </div>
+
+      ${errorText ? `
+        <div style="background:rgba(127,29,29,0.3);border:1px solid rgba(248,113,113,0.3);border-radius:8px;padding:10px 14px;color:#fca5a5;font-size:12px;font-weight:700;margin-bottom:16px;">${escapeHtml(errorText)}</div>
+      ` : ''}
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin-bottom:20px;">
+        ${card('VPS CPU', snap.serverCpuNowPercent !== null ? fmt1(snap.serverCpuNowPercent) : '—', '%')}
+        ${card('Node CPU', snap.nodeCpuNowPercent !== null ? fmt1(snap.nodeCpuNowPercent) : '—', '%')}
+        ${ramCard()}
+        ${card('RSS процес', rssFormatted.value, rssFormatted.unit)}
+        ${card('WS връзки', String(snap.activeWsConnections), '')}
+        ${card('Играчи онлайн', String(snap.uniqueOnlineRealPlayers), '')}
+        ${card('Активни стаи', String(snap.activeRooms), '')}
+        ${card('Опашка', String(snap.totalMatchmakingWaiters), '')}
+      </div>
+
+      ${snap.totalMatchmakingWaiters > 0 ? `
+        <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:14px 18px;margin-bottom:20px;">
+          ${sectionLabel('Опашка по залог')}
+          ${matchmakingRows}
+        </div>
+      ` : ''}
+
+      ${phaseRows ? `
+        <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:14px 18px;margin-bottom:20px;">
+          ${sectionLabel('Стаи по фаза')}
+          <div style="display:flex;flex-wrap:wrap;gap:6px;">${phaseRows}</div>
+        </div>
+      ` : ''}
+
+      <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:14px 18px;">
+        ${sectionLabel('Worker pool')}
+        ${workerPoolHtml}
+      </div>
+
     </section>
   `
 }
@@ -5946,6 +6215,8 @@ export function renderLobbyScreen(
                 ? renderAdminPanel(state)
               : state.view === 'admin-info'
                 ? renderAdminInfoPanel(state)
+              : state.view === 'admin-server'
+                ? renderAdminServerPanel(state)
             : state.view === 'friends'
               ? renderFriendsDirectory(state)
             : state.view === 'chat'
@@ -6462,6 +6733,13 @@ export function renderLobbyScreen(
     ?.addEventListener('click', () => {
       if (adminDropdown) adminDropdown.style.display = 'none'
       options.onAdminInfoClick()
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-nav-admin-server="1"]')
+    ?.addEventListener('click', () => {
+      if (adminDropdown) adminDropdown.style.display = 'none'
+      options.onAdminServerClick()
     })
 
   root

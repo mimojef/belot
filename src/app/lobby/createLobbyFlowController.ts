@@ -49,6 +49,7 @@ export type LobbyFlowScreen =
   | 'shop'
   | 'admin'
   | 'admin-info'
+  | 'admin-server'
   | 'terms'
   | 'privacy'
   | 'contact'
@@ -313,6 +314,8 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onAdminSupportDeleteConversation?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onSupportDeleteConversation?: () => Promise<{ ok: true } | { ok: false; message: string }>
+  onAdminServerScreenEnter?: () => void
+  onAdminServerScreenLeave?: () => void
 }
 
 
@@ -337,6 +340,8 @@ export type LobbyFlowController = {
   handleServerMessage: (message: ServerMessage) => boolean
   navigateToShop: (noticeText: string | null) => void
   setPwaUpdatePending: (pending: boolean, applyFn: (() => void) | null) => void
+  setAdminMonitoringSnapshot: (snapshot: import('../adminServer/adminServerTypes.js').MonitoringSnapshot) => void
+  setAdminMonitoringError: (message: string) => void
   navigateInitialPath: () => void
 }
 
@@ -505,6 +510,8 @@ type InternalLobbyFlowState = {
   supportDeleteConfirm: boolean
   supportDeleteLoading: boolean
   supportAccountTooNewMinutes: number | null
+  adminMonitoringSnapshot: import('../adminServer/adminServerTypes.js').MonitoringSnapshot | null
+  adminMonitoringErrorText: string | null
   pwaUpdatePending: boolean
   pwaUpdateApplyFn: (() => void) | null
 }
@@ -689,6 +696,8 @@ function createInitialState(): InternalLobbyFlowState {
     supportDeleteConfirm: false,
     supportDeleteLoading: false,
     supportAccountTooNewMinutes: null,
+    adminMonitoringSnapshot: null,
+    adminMonitoringErrorText: null,
     pwaUpdatePending: false,
     pwaUpdateApplyFn: null,
   }
@@ -1203,7 +1212,14 @@ export function createLobbyFlowController(
     clearSeatFillSoundTimeouts()
   }
 
+  function leaveAdminServerIfActive(): void {
+    if (state.currentScreen === 'admin-server') {
+      options.onAdminServerScreenLeave?.()
+    }
+  }
+
   function switchToLobby(): void {
+    leaveAdminServerIfActive()
     const wasOnDifferentScreen = state.currentScreen !== 'lobby'
     state.currentScreen = 'lobby'
     state.isSearching = false
@@ -1556,6 +1572,8 @@ export function createLobbyFlowController(
               ? 'admin'
             : state.currentScreen === 'admin-info'
               ? 'admin-info'
+            : state.currentScreen === 'admin-server'
+              ? 'admin-server'
             : state.currentScreen === 'guest-contact-messages'
               ? 'guest-contact-messages'
             : state.currentScreen === 'terms'
@@ -1722,6 +1740,8 @@ export function createLobbyFlowController(
       supportDeleteConfirm: state.supportDeleteConfirm,
       supportDeleteLoading: state.supportDeleteLoading,
       supportAccountTooNewMinutes: state.supportAccountTooNewMinutes,
+      adminMonitoringSnapshot: state.adminMonitoringSnapshot,
+      adminMonitoringErrorText: state.adminMonitoringErrorText,
       pwaUpdatePending: state.pwaUpdatePending,
     }
 
@@ -1849,6 +1869,9 @@ export function createLobbyFlowController(
       },
       onAdminInfoClick: () => {
         void showAdminInfoPanel()
+      },
+      onAdminServerClick: () => {
+        showAdminServerPanel()
       },
       onAdminGuestContactMessagesClick: () => {
         void showAdminGuestContactMessages()
@@ -2187,6 +2210,7 @@ export function createLobbyFlowController(
       onSupportClick: () => {
         const authSession = options.getAuthSession?.() ?? null
         if (authSession === null) return
+        leaveAdminServerIfActive()
         if (authSession.account.role === 'admin') {
           state.currentScreen = 'support'
           state.adminSupportSelectedProfileId = null
@@ -2518,6 +2542,7 @@ export function createLobbyFlowController(
   }
 
   async function showPlayersDirectory(): Promise<void> {
+    leaveAdminServerIfActive()
     state.currentScreen = 'players'
     state.isSearching = false
     state.errorText = null
@@ -2557,6 +2582,7 @@ export function createLobbyFlowController(
   }
 
   async function showLeaderboardsDirectory(): Promise<void> {
+    leaveAdminServerIfActive()
     state.currentScreen = 'leaderboards'
     state.isSearching = false
     state.errorText = null
@@ -2596,6 +2622,7 @@ export function createLobbyFlowController(
   }
 
   async function showShopPanel(): Promise<void> {
+    leaveAdminServerIfActive()
     state.currentScreen = 'shop'
     state.isSearching = false
     state.errorText = null
@@ -2899,6 +2926,7 @@ export function createLobbyFlowController(
   }
 
   async function showAdminInfoPanel(): Promise<void> {
+    leaveAdminServerIfActive()
     const authSession = options.getAuthSession?.() ?? null
 
     if (authSession?.account.role !== 'admin') {
@@ -2942,7 +2970,32 @@ export function createLobbyFlowController(
     render()
   }
 
+  function showAdminServerPanel(): void {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession?.account.role !== 'admin') {
+      state.currentScreen = 'lobby'
+      state.errorText = 'Нямаш достъп до admin панела.'
+      render()
+      return
+    }
+
+    state.currentScreen = 'admin-server'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    state.adminMonitoringSnapshot = null
+    state.adminMonitoringErrorText = null
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+    options.onAdminServerScreenEnter?.()
+  }
+
   async function showAdminPanel(): Promise<void> {
+    leaveAdminServerIfActive()
     const authSession = options.getAuthSession?.() ?? null
 
     if (authSession?.account.role !== 'admin') {
@@ -3259,6 +3312,7 @@ export function createLobbyFlowController(
   }
 
   async function showFriendsDirectory(): Promise<void> {
+    leaveAdminServerIfActive()
     state.currentScreen = 'friends'
     state.isSearching = false
     state.errorText = null
@@ -3636,6 +3690,7 @@ export function createLobbyFlowController(
   }
 
   async function showChatPanel(): Promise<void> {
+    leaveAdminServerIfActive()
     state.currentScreen = 'chat'
     state.isSearching = false
     state.errorText = null
@@ -3684,6 +3739,7 @@ export function createLobbyFlowController(
   }
 
   function showPublicLegalPage(screen: 'terms' | 'privacy' | 'contact'): void {
+    leaveAdminServerIfActive()
     state.currentScreen = screen
     state.isSearching = false
     state.errorText = null
@@ -3985,6 +4041,7 @@ export function createLobbyFlowController(
     leaderboards: '/ranking',
     shop: '/shop',
     admin: '/admin',
+    'admin-server': '/admin/server',
     'guest-contact-messages': '/admin/guest-contact',
     friends: '/friends',
     chat: '/chat',
@@ -3999,6 +4056,7 @@ export function createLobbyFlowController(
     '/ranking': 'leaderboards',
     '/shop': 'shop',
     '/admin': 'admin',
+    '/admin/server': 'admin-server',
     '/admin/guest-contact': 'guest-contact-messages',
     '/friends': 'friends',
     '/chat': 'chat',
@@ -4034,6 +4092,7 @@ export function createLobbyFlowController(
       case 'admin': void showAdminPanel(); break
       case 'guest-contact-messages': void showAdminGuestContactMessages(); break
       case 'admin-info': void showAdminInfoPanel(); break
+      case 'admin-server': showAdminServerPanel(); break
       case 'friends': void showFriendsDirectory(); break
       case 'chat': void showChatPanel(); break
       case 'terms': showPublicLegalPage('terms'); break
@@ -4808,6 +4867,15 @@ export function createLobbyFlowController(
       state.pwaUpdatePending = pending
       state.pwaUpdateApplyFn = applyFn
       if (!(options.getIsInGame?.() ?? false)) render()
+    },
+    setAdminMonitoringSnapshot: (snapshot) => {
+      state.adminMonitoringSnapshot = snapshot
+      state.adminMonitoringErrorText = null
+      if (state.currentScreen === 'admin-server') render()
+    },
+    setAdminMonitoringError: (message) => {
+      state.adminMonitoringErrorText = message
+      if (state.currentScreen === 'admin-server') render()
     },
     navigateInitialPath: () => {
       _navigationReady = true
