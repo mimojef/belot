@@ -47,6 +47,7 @@ import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
 import { createFriendRequestNotification } from './ui/notifications/friendRequestNotification'
 import { createPartnerRatingNotification } from './ui/notifications/partnerRatingNotification'
+import { createVisitorPageViewTracker } from './app/visitors/createVisitorPageViewTracker'
 
 const rootElementCandidate = document.querySelector<HTMLDivElement>('#app')
 
@@ -3056,6 +3057,11 @@ if (isStripePaymentReturn) {
 } else {
   lobby.render()
 }
+
+const visitorPageViewTracker = createVisitorPageViewTracker({
+  endpointUrl: `${getApiBaseUrl()}/api/visits/page-view`,
+})
+visitorPageViewTracker.start()
 
 // PWA — регистрира service worker и следи за нови версии
 initPwa((applyFn) => {

@@ -27,6 +27,11 @@ import { createLikeStore } from './db/likeStore.js'
 import { createMissionStore, type MissionType } from './db/missionStore.js'
 import { createCoinPurchaseStore } from './db/coinPurchaseStore.js'
 import { createDailyRewardsStore } from './db/dailyRewardsStore.js'
+import {
+  createSiteVisitStore,
+  type SiteVisitNavigationType,
+  type SiteVisitUtmParams,
+} from './db/siteVisitStore.js'
 import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
@@ -227,7 +232,12 @@ let isServerShuttingDown = false
 let lastGameWorkerTickFailureLogAt = 0
 let catalogBotRefillInterval: ReturnType<typeof setInterval> | null = null
 let supportCleanupInterval: ReturnType<typeof setInterval> | null = null
+let siteVisitRetentionInterval: ReturnType<typeof setInterval> | null = null
+let siteVisitRetentionStartupTimeout: ReturnType<typeof setTimeout> | null = null
 let missionRotationTimeout: ReturnType<typeof setTimeout> | null = null
+const SITE_VISIT_RETENTION_DAYS = 90
+const SITE_VISIT_RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000
+const SITE_VISIT_RETENTION_STARTUP_DELAY_MS = 30 * 1000
 
 function logGameWorkerTickFailure(message: string): void {
   const now = Date.now()
@@ -365,6 +375,33 @@ const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databa
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
 const supportStore = await createSupportStore(databaseBootstrap.databaseFilePath)
 const guestContactStore = await createGuestContactStore(databaseBootstrap.databaseFilePath)
+const siteVisitStore = await createSiteVisitStore(databaseBootstrap.databaseFilePath)
+
+function runSiteVisitRetentionCleanup(): void {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  try {
+    const result = siteVisitStore.purgeOlderThanDays(SITE_VISIT_RETENTION_DAYS)
+    if (result.deletedEvents > 0 || result.deletedVisitors > 0) {
+      console.log(
+        `[visits] Retention cleanup: deleted events=${result.deletedEvents} orphanVisitors=${result.deletedVisitors}`,
+      )
+    }
+  } catch (error) {
+    console.error('[visits] Retention cleanup failed:', error)
+  }
+}
+
+siteVisitRetentionStartupTimeout = setTimeout(
+  runSiteVisitRetentionCleanup,
+  SITE_VISIT_RETENTION_STARTUP_DELAY_MS,
+)
+siteVisitRetentionInterval = setInterval(
+  runSiteVisitRetentionCleanup,
+  SITE_VISIT_RETENTION_INTERVAL_MS,
+)
 
 function runSupportCleanup(): void {
   if (isServerShuttingDown) {
@@ -1977,6 +2014,433 @@ function getNumberField(
   return typeof field === 'number' && Number.isFinite(field) ? field : null
 }
 
+const VISITOR_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const VISITOR_INTERNAL_PATH_RE = /^\/[A-Za-z0-9/_\-.%]*$/
+const VISITOR_NAVIGATION_TYPES = new Set<SiteVisitNavigationType>([
+  'navigate',
+  'reload',
+  'back_forward',
+  'spa',
+])
+const VISITOR_PAGE_VIEW_BODY_KEYS = new Set([
+  'anonymousVisitorId',
+  'pageViewId',
+  'path',
+  'navigationType',
+  'referrer',
+  'utm',
+])
+const VISITOR_UTM_KEYS = new Set([
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_term',
+  'utm_content',
+])
+const VISITOR_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000
+const VISITOR_RATE_LIMIT_MAX_PER_IP = 120
+const VISITOR_RATE_LIMIT_MAX_PER_VISITOR = 60
+const VISITOR_RATE_LIMIT_CLEANUP_INTERVAL_MS = 60 * 1000
+const VISITOR_RATE_LIMIT_MAX_KEYS = 5000
+
+type VisitorRateLimitEntry = {
+  count: number
+  windowStartedAt: number
+  lastSeenAt: number
+}
+
+const visitorRateLimitByIp = new Map<string, VisitorRateLimitEntry>()
+const visitorRateLimitByVisitorId = new Map<string, VisitorRateLimitEntry>()
+let visitorRateLimitLastCleanupAt = 0
+
+type VisitorPageViewPayload = {
+  anonymousVisitorId: string
+  pageViewId: string
+  path: string
+  navigationType: SiteVisitNavigationType
+  referrer: string | null
+  source: string
+  attributionReferrer: string | null
+  attributionSource: string | null
+  utm: SiteVisitUtmParams
+}
+
+function hasControlChars(value: string): boolean {
+  return /[\u0000-\u001f\u007f]/.test(value)
+}
+
+function cleanupVisitorRateLimitState(now: number = Date.now()): void {
+  if (
+    now - visitorRateLimitLastCleanupAt < VISITOR_RATE_LIMIT_CLEANUP_INTERVAL_MS &&
+    visitorRateLimitByIp.size <= VISITOR_RATE_LIMIT_MAX_KEYS &&
+    visitorRateLimitByVisitorId.size <= VISITOR_RATE_LIMIT_MAX_KEYS
+  ) {
+    return
+  }
+
+  visitorRateLimitLastCleanupAt = now
+
+  const cleanupMap = (entries: Map<string, VisitorRateLimitEntry>): void => {
+    for (const [key, entry] of entries.entries()) {
+      if (now - entry.windowStartedAt >= VISITOR_RATE_LIMIT_WINDOW_MS) {
+        entries.delete(key)
+      }
+    }
+
+    if (entries.size <= VISITOR_RATE_LIMIT_MAX_KEYS) {
+      return
+    }
+
+    const sortedKeys = [...entries.entries()]
+      .sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt)
+      .map(([key]) => key)
+    const deleteCount = entries.size - VISITOR_RATE_LIMIT_MAX_KEYS
+    for (let i = 0; i < deleteCount; i++) {
+      entries.delete(sortedKeys[i]!)
+    }
+  }
+
+  cleanupMap(visitorRateLimitByIp)
+  cleanupMap(visitorRateLimitByVisitorId)
+}
+
+function checkVisitorRateLimit(
+  entries: Map<string, VisitorRateLimitEntry>,
+  key: string,
+  limit: number,
+  now: number = Date.now(),
+): boolean {
+  cleanupVisitorRateLimitState(now)
+
+  const existing = entries.get(key)
+  if (!existing || now - existing.windowStartedAt >= VISITOR_RATE_LIMIT_WINDOW_MS) {
+    entries.set(key, { count: 1, windowStartedAt: now, lastSeenAt: now })
+    return true
+  }
+
+  existing.count += 1
+  existing.lastSeenAt = now
+  return existing.count <= limit
+}
+
+function normalizeRequestHostname(value: string | null): string | null {
+  if (value === null) {
+    return null
+  }
+
+  const trimmed = value.trim().toLowerCase()
+  if (!trimmed) {
+    return null
+  }
+
+  if (trimmed.startsWith('[')) {
+    const closingIndex = trimmed.indexOf(']')
+    return closingIndex > 0 ? trimmed.slice(1, closingIndex) : null
+  }
+
+  return trimmed.split(':')[0] || null
+}
+
+function isLocalDevelopmentHostname(hostname: string | null): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1'
+}
+
+function isPikaHostname(hostname: string | null): boolean {
+  return hostname === 'pika.bg' || hostname?.endsWith('.pika.bg') === true
+}
+
+function getRequestHostname(req: IncomingMessage): string | null {
+  return normalizeRequestHostname(getFirstHeaderValue(req.headers.host))
+}
+
+function isInternalVisitorReferrer(referrer: string, req: IncomingMessage): boolean {
+  let referrerHostname: string | null
+  try {
+    referrerHostname = new URL(referrer).hostname.toLowerCase()
+  } catch {
+    return false
+  }
+
+  const requestHostname = getRequestHostname(req)
+  if (referrerHostname === requestHostname) {
+    return true
+  }
+
+  if (isLocalDevelopmentHostname(referrerHostname) && isLocalDevelopmentHostname(requestHostname)) {
+    return true
+  }
+
+  return isPikaHostname(referrerHostname) && isPikaHostname(requestHostname)
+}
+
+function isAllowedVisitorRequestOrigin(req: IncomingMessage): boolean {
+  const fetchSite = getFirstHeaderValue(req.headers['sec-fetch-site'])?.toLowerCase() ?? null
+  if (fetchSite === 'cross-site') {
+    return false
+  }
+
+  const origin = getFirstHeaderValue(req.headers.origin)
+  if (origin === null) {
+    return true
+  }
+
+  let originHostname: string | null
+  try {
+    originHostname = new URL(origin).hostname.toLowerCase()
+  } catch {
+    return false
+  }
+
+  const requestHostname = getRequestHostname(req)
+  if (originHostname === requestHostname) {
+    return true
+  }
+
+  if (isLocalDevelopmentHostname(originHostname) && isLocalDevelopmentHostname(requestHostname)) {
+    return true
+  }
+
+  return isPikaHostname(originHostname) && isPikaHostname(requestHostname)
+}
+
+function validateVisitorId(value: unknown, fieldName: string): string | { error: string } {
+  if (typeof value !== 'string' || !VISITOR_UUID_RE.test(value)) {
+    return { error: `${fieldName} трябва да е валиден UUID.` }
+  }
+  return value.toLowerCase()
+}
+
+function validateVisitorPath(value: unknown): string | { error: string } {
+  if (typeof value !== 'string') {
+    return { error: 'path трябва да е текст.' }
+  }
+
+  if (
+    value.length === 0 ||
+    value.length > 160 ||
+    !value.startsWith('/') ||
+    value.startsWith('//') ||
+    value.includes('?') ||
+    value.includes('#') ||
+    value.includes('\\') ||
+    hasControlChars(value) ||
+    !VISITOR_INTERNAL_PATH_RE.test(value)
+  ) {
+    return { error: 'path трябва да е вътрешен Pika.bg path без query string.' }
+  }
+
+  return value
+}
+
+function validateNavigationType(value: unknown): SiteVisitNavigationType | { error: string } {
+  if (typeof value !== 'string' || !VISITOR_NAVIGATION_TYPES.has(value as SiteVisitNavigationType)) {
+    return { error: 'navigationType е невалиден.' }
+  }
+
+  return value as SiteVisitNavigationType
+}
+
+function normalizeVisitorUtmValue(
+  value: unknown,
+  maxLength: number,
+  fieldName: string,
+): string | null | { error: string } {
+  if (value === undefined || value === null) {
+    return null
+  }
+
+  if (typeof value !== 'string') {
+    return { error: `${fieldName} трябва да е текст.` }
+  }
+
+  const trimmed = value.trim()
+  if (trimmed.length === 0) {
+    return null
+  }
+
+  if (trimmed.length > maxLength || hasControlChars(trimmed)) {
+    return { error: `${fieldName} е прекалено дълъг или невалиден.` }
+  }
+
+  return trimmed
+}
+
+function normalizeVisitorUtm(value: unknown): SiteVisitUtmParams | { error: string } {
+  if (value === undefined || value === null) {
+    return {
+      utmSource: null,
+      utmMedium: null,
+      utmCampaign: null,
+      utmTerm: null,
+      utmContent: null,
+    }
+  }
+
+  if (!isRecord(value)) {
+    return { error: 'utm трябва да е обект.' }
+  }
+
+  for (const key of Object.keys(value)) {
+    if (!VISITOR_UTM_KEYS.has(key)) {
+      return { error: `Непозволен UTM параметър: ${key}.` }
+    }
+  }
+
+  const utmSource = normalizeVisitorUtmValue(value.utm_source, 64, 'utm_source')
+  if (typeof utmSource === 'object' && utmSource !== null) return utmSource
+  const utmMedium = normalizeVisitorUtmValue(value.utm_medium, 64, 'utm_medium')
+  if (typeof utmMedium === 'object' && utmMedium !== null) return utmMedium
+  const utmCampaign = normalizeVisitorUtmValue(value.utm_campaign, 128, 'utm_campaign')
+  if (typeof utmCampaign === 'object' && utmCampaign !== null) return utmCampaign
+  const utmTerm = normalizeVisitorUtmValue(value.utm_term, 128, 'utm_term')
+  if (typeof utmTerm === 'object' && utmTerm !== null) return utmTerm
+  const utmContent = normalizeVisitorUtmValue(value.utm_content, 128, 'utm_content')
+  if (typeof utmContent === 'object' && utmContent !== null) return utmContent
+
+  return {
+    utmSource,
+    utmMedium,
+    utmCampaign,
+    utmTerm,
+    utmContent,
+  }
+}
+
+function normalizeVisitorReferrer(value: unknown): string | null | { error: string } {
+  if (value === undefined || value === null) {
+    return null
+  }
+
+  if (typeof value !== 'string') {
+    return { error: 'referrer трябва да е текст.' }
+  }
+
+  const trimmed = value.trim()
+  if (trimmed.length === 0) {
+    return null
+  }
+
+  if (trimmed.length > 500 || hasControlChars(trimmed)) {
+    return { error: 'referrer е прекалено дълъг или невалиден.' }
+  }
+
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    return { error: 'referrer трябва да е валиден http/https URL.' }
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { error: 'referrer трябва да е валиден http/https URL.' }
+  }
+
+  const normalized = `${parsed.origin}${parsed.pathname}`
+  if (normalized.length > 500 || hasControlChars(normalized)) {
+    return { error: 'referrer е прекалено дълъг или невалиден.' }
+  }
+
+  return normalized
+}
+
+function hasVisitorUtm(utm: SiteVisitUtmParams): boolean {
+  return (
+    utm.utmSource !== null ||
+    utm.utmMedium !== null ||
+    utm.utmCampaign !== null ||
+    utm.utmTerm !== null ||
+    utm.utmContent !== null
+  )
+}
+
+function deriveVisitorSource(utm: SiteVisitUtmParams, referrer: string | null, req: IncomingMessage): string {
+  if (utm.utmSource !== null) {
+    return utm.utmSource
+  }
+
+  if (referrer !== null) {
+    if (isInternalVisitorReferrer(referrer, req)) {
+      return 'internal'
+    }
+
+    try {
+      return new URL(referrer).hostname || 'referral'
+    } catch {
+      return 'referral'
+    }
+  }
+
+  return 'direct'
+}
+
+function deriveVisitorAttribution(
+  utm: SiteVisitUtmParams,
+  referrer: string | null,
+  req: IncomingMessage,
+): { attributionReferrer: string | null; attributionSource: string | null } {
+  const hasUtm = hasVisitorUtm(utm)
+  const externalReferrer = referrer !== null && !isInternalVisitorReferrer(referrer, req)
+    ? referrer
+    : null
+
+  if (hasUtm) {
+    return {
+      attributionReferrer: externalReferrer,
+      attributionSource: utm.utmSource ?? 'utm',
+    }
+  }
+
+  if (externalReferrer !== null) {
+    return {
+      attributionReferrer: externalReferrer,
+      attributionSource: deriveVisitorSource(utm, externalReferrer, req),
+    }
+  }
+
+  return {
+    attributionReferrer: null,
+    attributionSource: null,
+  }
+}
+
+function parseVisitorPageViewPayload(body: unknown, req: IncomingMessage): VisitorPageViewPayload | { error: string } {
+  if (!isRecord(body)) {
+    return { error: 'Невалидно тяло.' }
+  }
+
+  for (const key of Object.keys(body)) {
+    if (!VISITOR_PAGE_VIEW_BODY_KEYS.has(key)) {
+      return { error: `Непозволено поле: ${key}.` }
+    }
+  }
+
+  const anonymousVisitorId = validateVisitorId(body.anonymousVisitorId, 'anonymousVisitorId')
+  if (typeof anonymousVisitorId !== 'string') return anonymousVisitorId
+  const pageViewId = validateVisitorId(body.pageViewId, 'pageViewId')
+  if (typeof pageViewId !== 'string') return pageViewId
+  const path = validateVisitorPath(body.path)
+  if (typeof path !== 'string') return path
+  const navigationType = validateNavigationType(body.navigationType)
+  if (typeof navigationType !== 'string') return navigationType
+  const referrer = normalizeVisitorReferrer(body.referrer)
+  if (typeof referrer === 'object' && referrer !== null) return referrer
+  const utm = normalizeVisitorUtm(body.utm)
+  if ('error' in utm) return utm
+  const attribution = deriveVisitorAttribution(utm, referrer, req)
+
+  return {
+    anonymousVisitorId,
+    pageViewId,
+    path,
+    navigationType,
+    referrer,
+    source: deriveVisitorSource(utm, referrer, req),
+    attributionReferrer: attribution.attributionReferrer,
+    attributionSource: attribution.attributionSource,
+    utm,
+  }
+}
+
 function getFirstHeaderValue(value: string | string[] | undefined): string | null {
   if (Array.isArray(value)) {
     return value[0]?.trim() || null
@@ -2286,6 +2750,73 @@ async function handleGuestContactRequest(
   sendJsonResponse(res, 200, {
     ok: true,
     message: 'Благодарим! Съобщението беше изпратено.',
+  })
+  return true
+}
+
+async function handleSiteVisitPageViewRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/visits/page-view') {
+    return false
+  }
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (!isAllowedVisitorRequestOrigin(req)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Cross-site visitor tracking request rejected.' })
+    return true
+  }
+
+  const requestIp = getRequestIp(req)
+  const rateLimitIp = requestIp === 'unknown' ? req.socket.remoteAddress ?? 'unknown' : requestIp
+  if (!checkVisitorRateLimit(visitorRateLimitByIp, rateLimitIp, VISITOR_RATE_LIMIT_MAX_PER_IP)) {
+    sendJsonResponse(res, 429, { ok: false, message: 'Too many visitor tracking requests.' })
+    return true
+  }
+
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req, 8_000)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно JSON тяло.' })
+    return true
+  }
+
+  const payload = parseVisitorPageViewPayload(body, req)
+  if ('error' in payload) {
+    sendJsonResponse(res, 400, { ok: false, message: payload.error })
+    return true
+  }
+
+  if (!checkVisitorRateLimit(
+    visitorRateLimitByVisitorId,
+    payload.anonymousVisitorId,
+    VISITOR_RATE_LIMIT_MAX_PER_VISITOR,
+  )) {
+    sendJsonResponse(res, 429, { ok: false, message: 'Too many visitor tracking requests.' })
+    return true
+  }
+
+  const session = authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))
+  const profileId = session?.profile.profileId ?? null
+  const userAgent = getFirstHeaderValue(req.headers['user-agent'])
+  const result = siteVisitStore.recordPageView({
+    ...payload,
+    profileId,
+    ipAddress: requestIp === 'unknown' ? null : requestIp,
+    userAgent,
+  })
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    recorded: result.recorded,
+    duplicate: result.recorded ? false : result.duplicate,
   })
   return true
 }
@@ -4767,6 +5298,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleSiteVisitPageViewRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleGuestContactRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -6564,6 +7099,16 @@ function clearMutationTimersForShutdown(): void {
     supportCleanupInterval = null
   }
 
+  if (siteVisitRetentionInterval !== null) {
+    clearInterval(siteVisitRetentionInterval)
+    siteVisitRetentionInterval = null
+  }
+
+  if (siteVisitRetentionStartupTimeout !== null) {
+    clearTimeout(siteVisitRetentionStartupTimeout)
+    siteVisitRetentionStartupTimeout = null
+  }
+
   if (missionRotationTimeout !== null) {
     clearTimeout(missionRotationTimeout)
     missionRotationTimeout = null
@@ -6608,6 +7153,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('coinPackageStore', () => coinPackageStore.close())
   closeStore('coinPurchaseStore', () => coinPurchaseStore.close())
   closeStore('dailyRewardsStore', () => dailyRewardsStore.close())
+  closeStore('siteVisitStore', () => siteVisitStore.close())
 
   if (monitoringHistoryStore !== null) {
     closeStore('monitoringHistoryStore', () => monitoringHistoryStore!.close())
