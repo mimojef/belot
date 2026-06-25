@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "rootDir": ".",
+    "outDir": "./dist-scripts",
+    "strict": true,
+    "noEmitOnError": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["scripts/backupDatabase.ts", "scripts/checkDbBackupVerify.ts", "scripts/checkBackupLogic.ts", "src/**/*.ts"],
+  "exclude": ["dist", "dist-scripts", "node_modules"]
+}

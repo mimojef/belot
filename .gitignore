@@ -26,6 +26,12 @@ dist-ssr
 # Runtime database files
 server/database/data/
 
+# Database backups — генерирани на сървъра, не в git
+server/database/backups/
+
+# Компилирани backup/verify скриптове
+server/dist-scripts/
+
 # Environment variables (never commit real secrets)
 .env
 server/.env
