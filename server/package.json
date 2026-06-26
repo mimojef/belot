@@ -16,6 +16,7 @@
     "check:admin-visitor-sources": "tsx scripts/checkAdminVisitorSources.ts --server-root=.",
     "check:db-backup-verify": "tsx scripts/checkDbBackupVerify.ts",
     "check:backup-logic": "tsx scripts/checkBackupLogic.ts",
+    "check:shop-purchase-flow": "tsx scripts/checkShopPurchaseFlow.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",
     "verify:db:prod": "node dist-scripts/scripts/checkDbBackupVerify.js",

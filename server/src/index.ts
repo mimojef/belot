@@ -145,6 +145,7 @@ import {
   isValidHistoryWindow,
   type MonitoringHistoryStore,
 } from './monitoring/monitoringHistoryStore.js'
+import { resumeCoinPurchaseCheckout } from './shop/resumeCoinPurchaseCheckout.js'
 
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
@@ -4013,6 +4014,108 @@ async function handleShopCheckoutRequest(
   return true
 }
 
+async function handleShopResumeCheckoutRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = pathname.match(/^\/api\/shop\/purchases\/([^/]+)\/resume-checkout$/)
+
+  if (!match || req.method !== 'POST') {
+    return false
+  }
+
+  const stripeSecretKey = process.env.STRIPE_SECRET_KEY
+
+  if (!stripeSecretKey) {
+    sendJsonResponse(res, 500, {
+      ok: false,
+      message: 'Stripe не е конфигуриран на сървъра. Моля, свържи се с администратор.',
+    })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си.',
+    })
+    return true
+  }
+
+  const purchaseId = match[1]
+  const profileId = session.profile.profileId
+
+  const stripe = new Stripe(stripeSecretKey)
+
+  const clientOrigin = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173'
+  const successUrl =
+    process.env.STRIPE_SUCCESS_URL ??
+    `${clientOrigin}/lobby?payment=success&session_id={CHECKOUT_SESSION_ID}`
+  const cancelUrl =
+    process.env.STRIPE_CANCEL_URL ?? `${clientOrigin}/lobby?payment=cancel`
+
+  const result = await resumeCoinPurchaseCheckout({
+    store: coinPurchaseStore,
+    stripe,
+    purchaseId,
+    profileId,
+    successUrl,
+    cancelUrl,
+  })
+
+  if (!result.ok) {
+    sendJsonResponse(res, result.status, { ok: false, message: result.message })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, checkoutUrl: result.checkoutUrl, purchase: result.purchase })
+  return true
+}
+
+async function handleShopHidePurchaseRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = pathname.match(/^\/api\/shop\/purchases\/([^/]+)\/hide$/)
+
+  if (!match || req.method !== 'PATCH') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си.',
+    })
+    return true
+  }
+
+  const purchaseId = match[1]
+  const profileId = session.profile.profileId
+
+  const result = coinPurchaseStore.hidePurchaseForUser(purchaseId, profileId)
+
+  if (!result.ok) {
+    sendJsonResponse(res, 404, result)
+    return true
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    purchases: coinPurchaseStore.listProfilePurchases(profileId),
+  })
+
+  return true
+}
+
 async function handleStripeWebhookRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -5446,6 +5549,14 @@ async function handleHttpRequest(
   }
 
   if (await handleShopCheckoutRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleShopResumeCheckoutRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleShopHidePurchaseRequest(req, res, requestUrl.pathname)) {
     return
   }
 

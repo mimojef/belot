@@ -294,6 +294,7 @@ export type CoinPurchaseSnapshot = {
   providerCheckoutSessionId: string | null
   status: CoinPurchaseStatus
   creditedAt: string | null
+  hiddenAt: string | null
   createdAt: string
   updatedAt: string
 }
@@ -304,6 +305,27 @@ export type CoinCheckoutResponse =
       checkoutUrl: string
       checkoutSessionId: string
       purchase: CoinPurchaseSnapshot
+    }
+  | {
+      ok: false
+      message: string
+    }
+
+export type CoinResumeCheckoutResponse =
+  | {
+      ok: true
+      checkoutUrl: string
+      purchase: CoinPurchaseSnapshot
+    }
+  | {
+      ok: false
+      message: string
+    }
+
+export type CoinHidePurchaseResponse =
+  | {
+      ok: true
+      purchases: CoinPurchaseSnapshot[]
     }
   | {
       ok: false

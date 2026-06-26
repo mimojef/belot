@@ -13,6 +13,10 @@ import {
   type LobbyScreenState,
   type ProfilePopupCallbacks,
 } from './renderLobbyScreen'
+import {
+  computeShopResumeConfirmOpen,
+  computeShopPurchaseConfirmDispatch,
+} from './shopResumeConfirmState'
 import type {
   AdminSettingsSnapshot,
   AdminStatsSnapshot,
@@ -117,6 +121,14 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onShopPurchaseStart?: (packageId: string) => Promise<
     | { ok: true; purchases: CoinPurchaseSnapshot[]; message: string }
+    | { ok: false; message: string }
+  >
+  onShopPurchaseResume?: (purchaseId: string) => Promise<
+    | { ok: true; checkoutUrl: string }
+    | { ok: false; message: string }
+  >
+  onShopPurchaseHide?: (purchaseId: string) => Promise<
+    | { ok: true; purchases: CoinPurchaseSnapshot[] }
     | { ok: false; message: string }
   >
   onAdminStatsLoad?: () => Promise<
@@ -420,6 +432,9 @@ type InternalLobbyFlowState = {
   shopPurchaseConfirmPackageId: string | null
   shopPurchaseActionPackageId: string | null
   shopPurchaseMessageText: string | null
+  shopPurchaseResumeId: string | null
+  shopPurchaseHideConfirmId: string | null
+  shopPurchaseActionPurchaseId: string | null
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
@@ -639,6 +654,9 @@ function createInitialState(): InternalLobbyFlowState {
     shopPurchaseConfirmPackageId: null,
     shopPurchaseActionPackageId: null,
     shopPurchaseMessageText: null,
+    shopPurchaseResumeId: null,
+    shopPurchaseHideConfirmId: null,
+    shopPurchaseActionPurchaseId: null,
     adminStats: null,
     adminStatsLoading: false,
     adminStatsErrorText: null,
@@ -1824,6 +1842,9 @@ export function createLobbyFlowController(
       adminVisitorsSourcesTotal: state.adminVisitorsSourcesTotal,
       adminVisitorsSourcesErrorText: state.adminVisitorsSourcesErrorText,
       pwaUpdatePending: state.pwaUpdatePending,
+      shopPurchaseResumeId: state.shopPurchaseResumeId,
+      shopPurchaseHideConfirmId: state.shopPurchaseHideConfirmId,
+      shopPurchaseActionPurchaseId: state.shopPurchaseActionPurchaseId,
     }
 
     renderLobbyScreen(options.root, {
@@ -1924,14 +1945,36 @@ export function createLobbyFlowController(
         openShopPurchaseConfirm(packageId)
       },
       onShopPurchaseConfirm: () => {
-        const packageId = state.shopPurchaseConfirmPackageId
-        if (packageId !== null) {
-          void startShopPurchase(packageId)
-        }
+        const dispatch = computeShopPurchaseConfirmDispatch(
+          state.shopPurchaseResumeId,
+          state.shopPurchaseConfirmPackageId,
+        )
+        if (dispatch.action === 'resume') void resumeShopPurchase(dispatch.purchaseId)
+        else if (dispatch.action === 'new-purchase') void startShopPurchase(dispatch.packageId)
       },
       onShopPurchaseCancel: () => {
         if (state.shopPurchaseActionPackageId !== null) return
+        if (state.shopPurchaseActionPurchaseId !== null) return
         state.shopPurchaseConfirmPackageId = null
+        state.shopPurchaseResumeId = null
+        render()
+      },
+      onShopPurchaseResumePay: (purchaseId: string) => {
+        void openShopResumeConfirm(purchaseId)
+      },
+      onShopPurchaseHideRequest: (purchaseId: string) => {
+        state.shopPurchaseHideConfirmId = purchaseId
+        render()
+      },
+      onShopPurchaseHideConfirm: () => {
+        const purchaseId = state.shopPurchaseHideConfirmId
+        if (purchaseId !== null) {
+          state.shopPurchaseHideConfirmId = null
+          void hideShopPurchase(purchaseId)
+        }
+      },
+      onShopPurchaseHideCancel: () => {
+        state.shopPurchaseHideConfirmId = null
         render()
       },
       onShopHistoryToggle: () => {
@@ -2917,6 +2960,86 @@ export function createLobbyFlowController(
 
     state.shopPurchases = result.purchases
     state.shopPurchaseMessageText = result.message
+    render()
+  }
+
+  async function openShopResumeConfirm(purchaseId: string): Promise<void> {
+    const result = computeShopResumeConfirmOpen(purchaseId, {
+      purchases: state.shopPurchases,
+      shopPackages: state.shopPackages,
+      lobbyPackages: state.lobbyPackages,
+    })
+
+    if (!result.ok) {
+      if (result.reason === 'no-package-id' || result.reason === 'package-unavailable') {
+        state.shopPurchaseMessageText =
+          result.reason === 'package-unavailable' ? 'Пакетът не е наличен.' : 'Не може да се продължи тази покупка.'
+        render()
+      }
+      return
+    }
+
+    state.shopPurchaseResumeId = result.resumeId
+    state.shopPurchaseConfirmPackageId = result.packageId
+    state.shopPurchaseMessageText = null
+    render()
+  }
+
+  async function resumeShopPurchase(purchaseId: string): Promise<void> {
+    if (state.shopPurchaseActionPurchaseId !== null) return
+
+    if (!options.onShopPurchaseResume) {
+      state.shopPurchaseMessageText = 'Продължаването на покупки временно не е налично.'
+      state.shopPurchaseResumeId = null
+      state.shopPurchaseConfirmPackageId = null
+      render()
+      return
+    }
+
+    state.shopPurchaseActionPurchaseId = purchaseId
+    state.shopPurchaseMessageText = null
+    render()
+
+    const result = await options.onShopPurchaseResume(purchaseId)
+
+    state.shopPurchaseActionPurchaseId = null
+    state.shopPurchaseResumeId = null
+    state.shopPurchaseConfirmPackageId = null
+
+    if (!result.ok) {
+      state.shopPurchaseMessageText = result.message
+      render()
+      return
+    }
+
+    // Пренасочване към Stripe — render не е нужен
+    window.location.assign(result.checkoutUrl)
+  }
+
+  async function hideShopPurchase(purchaseId: string): Promise<void> {
+    if (state.shopPurchaseActionPurchaseId !== null) return
+
+    if (!options.onShopPurchaseHide) {
+      state.shopPurchaseMessageText = 'Скриването на покупки временно не е налично.'
+      render()
+      return
+    }
+
+    state.shopPurchaseActionPurchaseId = purchaseId
+    state.shopPurchaseMessageText = null
+    render()
+
+    const result = await options.onShopPurchaseHide(purchaseId)
+
+    state.shopPurchaseActionPurchaseId = null
+
+    if (!result.ok) {
+      state.shopPurchaseMessageText = result.message
+      render()
+      return
+    }
+
+    state.shopPurchases = result.purchases
     render()
   }
 

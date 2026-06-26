@@ -133,6 +133,9 @@ export type LobbyScreenState = {
   shopPurchaseConfirmPackageId: string | null
   shopPurchaseActionPackageId: string | null
   shopPurchaseMessageText: string | null
+  shopPurchaseResumeId: string | null
+  shopPurchaseHideConfirmId: string | null
+  shopPurchaseActionPurchaseId: string | null
   isAdmin: boolean
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
@@ -297,6 +300,10 @@ export type RenderLobbyScreenOptions = {
   onShopPurchaseClick: (packageId: string) => void
   onShopPurchaseConfirm: () => void
   onShopPurchaseCancel: () => void
+  onShopPurchaseResumePay: (purchaseId: string) => void
+  onShopPurchaseHideRequest: (purchaseId: string) => void
+  onShopPurchaseHideConfirm: () => void
+  onShopPurchaseHideCancel: () => void
   onShopHistoryToggle: () => void
   onLeaderboardsClick: () => void
   onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
@@ -613,7 +620,7 @@ function renderShopPurchaseLegalPreview(pageKey: 'terms' | 'privacy'): string {
   `
 }
 
-function renderShopPurchaseConfirmModal(state: LobbyScreenState): string {
+export function renderShopPurchaseConfirmModal(state: LobbyScreenState): string {
   const packageId = state.shopPurchaseConfirmPackageId
   if (packageId === null) return ''
 
@@ -2975,7 +2982,13 @@ function renderMobileShopPanel(state: LobbyScreenState): string {
     ${isLoggedIn ? `
       <section style="margin:0 12px 16px;border-top:1px solid rgba(212,165,32,0.20);padding-top:12px;">
         <button type="button" data-shop-history-toggle="1" style="height:40px;width:100%;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:#080808;color:#f8fafc;font-size:13px;font-weight:900;">${state.shopPurchasesVisible ? 'Скрий историята' : 'Покажи историята'}</button>
-        ${state.shopPurchasesVisible ? `<div style="margin-top:10px;display:grid;gap:8px;">${state.shopPurchases.length === 0 ? renderMobileStateMessage('Още няма покупки.') : state.shopPurchases.map((purchase) => `<div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:10px;"><div style="font-size:13px;font-weight:900;color:#ffffff;">${escapeHtml(purchase.title)}</div><div style="margin-top:4px;font-size:12px;font-weight:800;color:#d4a520;">${formatAmount(purchase.yellowCoinsAmount)} · ${escapeHtml(formatPurchaseStatusLabel(purchase.status))}</div></div>`).join('')}</div>` : ''}
+        ${state.shopPurchasesVisible ? `<div style="margin-top:10px;display:grid;gap:8px;">${state.shopPurchases.length === 0 ? renderMobileStateMessage('Още няма покупки.') : state.shopPurchases.map((purchase) => {
+          const isActionPurchase = state.shopPurchaseActionPurchaseId === purchase.purchaseId
+          const isHideConfirm = state.shopPurchaseHideConfirmId === purchase.purchaseId
+          const canPay = purchase.status === 'pending'
+          const disableButtons = isActionPurchase || state.shopPurchaseActionPurchaseId !== null
+          return `<div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:10px;"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;"><div style="min-width:0;"><div style="font-size:13px;font-weight:900;color:#ffffff;">${escapeHtml(purchase.title)}</div><div style="margin-top:4px;font-size:12px;font-weight:800;color:${getPurchaseStatusColor(purchase.status)};">${formatAmount(purchase.yellowCoinsAmount)} · ${escapeHtml(formatPurchaseStatusLabel(purchase.status))}</div></div><div style="display:flex;align-items:center;gap:5px;flex-shrink:0;">${canPay ? `<button type="button" data-shop-purchase-resume="${escapeHtml(purchase.purchaseId)}" ${disableButtons ? 'disabled' : ''} style="height:28px;padding:0 8px;border:0;border-radius:5px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:11px;font-weight:900;cursor:${disableButtons ? 'wait' : 'pointer'};opacity:${disableButtons ? '0.6' : '1'};">${isActionPurchase ? '...' : 'Плати'}</button>` : ''}${isHideConfirm ? `<button type="button" data-shop-purchase-hide-confirm="${escapeHtml(purchase.purchaseId)}" style="height:26px;padding:0 7px;border:1px solid rgba(255,80,80,0.5);border-radius:5px;background:rgba(255,80,80,0.12);color:#fca5a5;font-size:11px;font-weight:900;cursor:pointer;">Скрий</button><button type="button" data-shop-purchase-hide-cancel="1" style="height:26px;padding:0 7px;border:1px solid rgba(255,255,255,0.14);border-radius:5px;background:transparent;color:rgba(255,255,255,0.45);font-size:11px;font-weight:900;cursor:pointer;">Не</button>` : `<button type="button" data-shop-purchase-hide="${escapeHtml(purchase.purchaseId)}" ${disableButtons ? 'disabled' : ''} style="width:26px;height:26px;border:1px solid rgba(255,255,255,0.14);border-radius:5px;background:transparent;color:rgba(255,255,255,0.38);font-size:14px;font-weight:700;cursor:${disableButtons ? 'default' : 'pointer'};display:flex;align-items:center;justify-content:center;line-height:1;opacity:${disableButtons ? '0.4' : '1'};" title="Скрий от историята">×</button>`}</div></div></div>`
+        }).join('')}</div>` : ''}
       </section>
     ` : ''}
   `
@@ -3815,8 +3828,14 @@ function renderShopPanel(state: LobbyScreenState): string {
             <div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:14px;color:rgba(255,255,255,0.58);font-size:13px;font-weight:800;">Още няма покупки.</div>
           ` : `
             <div style="display:grid;gap:8px;">
-              ${state.shopPurchases.map((purchase) => `
-                <div style="display:grid;grid-template-columns:1.2fr 0.8fr 0.8fr 0.7fr;gap:10px;align-items:center;border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:12px;">
+              ${state.shopPurchases.map((purchase) => {
+                const isActionPurchase = state.shopPurchaseActionPurchaseId === purchase.purchaseId
+                const isHideConfirm = state.shopPurchaseHideConfirmId === purchase.purchaseId
+                const canPay = purchase.status === 'pending'
+                const disableButtons = isActionPurchase || state.shopPurchaseActionPurchaseId !== null
+
+                return `
+                <div style="display:grid;grid-template-columns:1.2fr 0.8fr 0.8fr 0.7fr auto;gap:10px;align-items:center;border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:12px;">
                   <div>
                     <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(purchase.title)}</div>
                     <div style="margin-top:3px;font-size:11px;font-weight:800;color:rgba(255,255,255,0.42);">${escapeHtml(formatCompactDateTime(purchase.createdAt))}</div>
@@ -3824,8 +3843,32 @@ function renderShopPanel(state: LobbyScreenState): string {
                   <div style="font-size:14px;font-weight:900;color:#d4a520;">${formatAmount(purchase.yellowCoinsAmount)}</div>
                   <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(purchase.priceCents, purchase.currency))}</div>
                   <div style="font-size:12px;font-weight:900;color:${getPurchaseStatusColor(purchase.status)};">${escapeHtml(formatPurchaseStatusLabel(purchase.status))}</div>
+                  <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                    ${canPay ? `
+                      <button
+                        type="button"
+                        data-shop-purchase-resume="${escapeHtml(purchase.purchaseId)}"
+                        ${disableButtons ? 'disabled' : ''}
+                        style="height:30px;padding:0 10px;border:0;border-radius:6px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:11px;font-weight:900;cursor:${disableButtons ? 'wait' : 'pointer'};opacity:${disableButtons ? '0.6' : '1'};white-space:nowrap;"
+                      >${isActionPurchase ? 'Зареждане...' : 'Плати'}</button>
+                    ` : ''}
+                    ${isHideConfirm ? `
+                      <span style="font-size:11px;font-weight:800;color:rgba(255,255,255,0.65);">Скрий?</span>
+                      <button type="button" data-shop-purchase-hide-confirm="${escapeHtml(purchase.purchaseId)}" style="height:26px;padding:0 8px;border:1px solid rgba(255,80,80,0.5);border-radius:5px;background:rgba(255,80,80,0.12);color:#fca5a5;font-size:11px;font-weight:900;cursor:pointer;">Да</button>
+                      <button type="button" data-shop-purchase-hide-cancel="1" style="height:26px;padding:0 8px;border:1px solid rgba(255,255,255,0.14);border-radius:5px;background:transparent;color:rgba(255,255,255,0.45);font-size:11px;font-weight:900;cursor:pointer;">Не</button>
+                    ` : `
+                      <button
+                        type="button"
+                        data-shop-purchase-hide="${escapeHtml(purchase.purchaseId)}"
+                        ${disableButtons ? 'disabled' : ''}
+                        style="width:26px;height:26px;border:1px solid rgba(255,255,255,0.14);border-radius:5px;background:transparent;color:rgba(255,255,255,0.38);font-size:14px;font-weight:700;cursor:${disableButtons ? 'default' : 'pointer'};display:flex;align-items:center;justify-content:center;line-height:1;opacity:${disableButtons ? '0.4' : '1'};"
+                        title="Скрий от историята"
+                      >×</button>
+                    `}
+                  </div>
                 </div>
-              `).join('')}
+                `
+              }).join('')}
             </div>
           `}
         ` : ''}
@@ -7495,8 +7538,38 @@ export function renderLobbyScreen(
   root.querySelector<HTMLElement>('[data-lobby-missions-card="1"]')
     ?.addEventListener('click', options.onMissionsCardClick)
 
-  root.querySelector<HTMLButtonElement>('[data-shop-history-toggle="1"]')
-    ?.addEventListener('click', options.onShopHistoryToggle)
+  root.querySelectorAll<HTMLButtonElement>('[data-shop-history-toggle="1"]')
+    .forEach((btn) => btn.addEventListener('click', options.onShopHistoryToggle))
+
+  root.querySelectorAll<HTMLButtonElement>('[data-shop-purchase-resume]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const purchaseId = btn.dataset.shopPurchaseResume?.trim() ?? ''
+      if (purchaseId.length > 0) {
+        options.onShopPurchaseResumePay(purchaseId)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-shop-purchase-hide]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const purchaseId = btn.dataset.shopPurchaseHide?.trim() ?? ''
+      if (purchaseId.length > 0) {
+        options.onShopPurchaseHideRequest(purchaseId)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-shop-purchase-hide-confirm]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      options.onShopPurchaseHideConfirm()
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-shop-purchase-hide-cancel]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      options.onShopPurchaseHideCancel()
+    })
+  })
 
   syncNotificationsDropdown(state, {
     onClose: options.onBellClick,

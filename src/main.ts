@@ -27,6 +27,8 @@ import {
   type ChatConversationSnapshot,
   type ChatMessageSnapshot,
   type CoinCheckoutResponse,
+  type CoinResumeCheckoutResponse,
+  type CoinHidePurchaseResponse,
   type CoinPackageInput,
   type CoinPackageSnapshot,
   type CoinPackageStatus,
@@ -622,6 +624,61 @@ async function startShopPurchase(packageId: string): Promise<
       ok: false,
       message: 'Няма връзка със сървъра за Stripe плащане.',
     }
+  }
+}
+
+async function resumeShopPurchase(purchaseId: string): Promise<
+  | { ok: true; checkoutUrl: string }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/shop/purchases/${encodeURIComponent(purchaseId)}/resume-checkout`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+      },
+    )
+    const data = (await response.json()) as CoinResumeCheckoutResponse
+
+    if (!response.ok || !data.ok) {
+      return {
+        ok: false,
+        message: data.ok ? 'Checkout не беше стартиран.' : data.message,
+      }
+    }
+
+    return { ok: true, checkoutUrl: data.checkoutUrl }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function hideShopPurchase(purchaseId: string): Promise<
+  | { ok: true; purchases: CoinPurchaseSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/shop/purchases/${encodeURIComponent(purchaseId)}/hide`,
+      {
+        method: 'PATCH',
+        credentials: 'include',
+      },
+    )
+    const data = (await response.json()) as CoinHidePurchaseResponse
+
+    if (!response.ok || !data.ok) {
+      return {
+        ok: false,
+        message: data.ok ? 'Скриването не беше успешно.' : data.message,
+      }
+    }
+
+    return { ok: true, purchases: data.purchases }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
   }
 }
 
@@ -2550,6 +2607,8 @@ lobby = createLobbyFlowController({
   onShopPackagesLoad: () => loadShopPackages(),
   onShopPurchasesLoad: () => loadShopPurchases(),
   onShopPurchaseStart: (packageId) => startShopPurchase(packageId),
+  onShopPurchaseResume: (purchaseId) => resumeShopPurchase(purchaseId),
+  onShopPurchaseHide: (purchaseId) => hideShopPurchase(purchaseId),
   onAdminDailyRewardsLoad: () => loadAdminDailyRewards(),
   onAdminDailyRewardAdd: (amount) => addAdminDailyReward(amount),
   onAdminDailyRewardRemove: (tierId) => removeAdminDailyReward(tierId),

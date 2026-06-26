@@ -17,6 +17,7 @@ export type CoinPurchaseSnapshot = {
   providerCheckoutSessionId: string | null
   status: CoinPurchaseStatus
   creditedAt: string | null
+  hiddenAt: string | null
   createdAt: string
   updatedAt: string
 }
@@ -49,6 +50,10 @@ export type CoinPurchaseStore = {
     packageId: string,
   ) => { ok: true; purchase: CoinPurchaseSnapshot } | { ok: false; message: string }
   getPurchaseById: (purchaseId: string) => CoinPurchaseSnapshot | null
+  getPurchaseWithOwnerCheck: (
+    purchaseId: string,
+    profileId: string,
+  ) => CoinPurchaseSnapshot | null
   attachCheckoutSession: (
     purchaseId: string,
     checkoutSessionId: string,
@@ -59,6 +64,10 @@ export type CoinPurchaseStore = {
   fulfillPaidPurchase: (params: FulfillPaidPurchaseParams) =>
     | { ok: true; purchase: CoinPurchaseSnapshot; alreadyCredited: boolean }
     | { ok: false; message: string }
+  hidePurchaseForUser: (
+    purchaseId: string,
+    profileId: string,
+  ) => { ok: true; purchase: CoinPurchaseSnapshot } | { ok: false; message: string }
   close: () => void
 }
 
@@ -74,6 +83,7 @@ type CoinPurchaseRow = {
   provider_checkout_session_id: string | null
   status: CoinPurchaseStatus
   credited_at: string | null
+  hidden_at: string | null
   created_at: string
   updated_at: string
 }
@@ -108,6 +118,7 @@ function rowToSnapshot(row: CoinPurchaseRow): CoinPurchaseSnapshot {
     providerCheckoutSessionId: row.provider_checkout_session_id,
     status: row.status,
     creditedAt: row.credited_at,
+    hiddenAt: row.hidden_at ?? null,
     createdAt: dbDateToUtc(row.created_at),
     updatedAt: dbDateToUtc(row.updated_at),
   }
@@ -142,10 +153,12 @@ export async function createCoinPurchaseStore(
       provider_checkout_session_id,
       status,
       credited_at,
+      hidden_at,
       created_at,
       updated_at
     FROM coin_purchase_ledger
     WHERE profile_id = ?
+      AND hidden_at IS NULL
     ORDER BY created_at DESC
     LIMIT 30;
   `)
@@ -176,6 +189,7 @@ export async function createCoinPurchaseStore(
       provider_checkout_session_id,
       status,
       credited_at,
+      hidden_at,
       created_at,
       updated_at
     FROM coin_purchase_ledger
@@ -225,6 +239,7 @@ export async function createCoinPurchaseStore(
       provider_checkout_session_id,
       status,
       credited_at,
+      hidden_at,
       created_at,
       updated_at
     FROM coin_purchase_ledger
@@ -246,10 +261,33 @@ export async function createCoinPurchaseStore(
       provider_checkout_session_id,
       status,
       credited_at,
+      hidden_at,
       created_at,
       updated_at
     FROM coin_purchase_ledger
     WHERE purchase_id = ?
+    LIMIT 1;
+  `)
+
+  const selectPurchaseByOwnerStatement = database.prepare(`
+    SELECT
+      purchase_id,
+      package_id,
+      package_key_snapshot,
+      title_snapshot,
+      yellow_coins_amount,
+      price_cents,
+      currency,
+      provider,
+      provider_checkout_session_id,
+      status,
+      credited_at,
+      hidden_at,
+      created_at,
+      updated_at
+    FROM coin_purchase_ledger
+    WHERE purchase_id = ?
+      AND profile_id = ?
     LIMIT 1;
   `)
 
@@ -266,6 +304,7 @@ export async function createCoinPurchaseStore(
       provider_checkout_session_id,
       status,
       credited_at,
+      hidden_at,
       created_at,
       updated_at
     FROM coin_purchase_ledger
@@ -287,6 +326,7 @@ export async function createCoinPurchaseStore(
       provider_checkout_session_id,
       status,
       credited_at,
+      hidden_at,
       created_at,
       updated_at
     FROM coin_purchase_ledger
@@ -301,6 +341,16 @@ export async function createCoinPurchaseStore(
       updated_at = CURRENT_TIMESTAMP
     WHERE purchase_id = ?
       AND status = 'pending';
+  `)
+
+  const hidePurchaseStatement = database.prepare(`
+    UPDATE coin_purchase_ledger
+    SET
+      hidden_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE purchase_id = ?
+      AND profile_id = ?
+      AND hidden_at IS NULL;
   `)
 
   const markCanceledBySessionStatement = database.prepare(`
@@ -363,6 +413,19 @@ export async function createCoinPurchaseStore(
 
   function getPurchaseById(purchaseId: string): CoinPurchaseSnapshot | null {
     const row = selectPurchaseStatement.get(purchaseId) as CoinPurchaseRow | undefined
+
+    return row ? rowToSnapshot(row) : null
+  }
+
+  function getPurchaseWithOwnerCheck(purchaseId: string, profileId: string): CoinPurchaseSnapshot | null {
+    const normalizedPurchaseId = normalizeId(purchaseId)
+    const normalizedProfileId = normalizeId(profileId)
+
+    if (normalizedPurchaseId.length === 0 || normalizedProfileId.length === 0) {
+      return null
+    }
+
+    const row = selectPurchaseByOwnerStatement.get(normalizedPurchaseId, normalizedProfileId) as CoinPurchaseRow | undefined
 
     return row ? rowToSnapshot(row) : null
   }
@@ -551,6 +614,38 @@ export async function createCoinPurchaseStore(
     return { ok: true, purchase: fulfilled, alreadyCredited: false }
   }
 
+  function hidePurchaseForUser(
+    purchaseId: string,
+    profileId: string,
+  ): { ok: true; purchase: CoinPurchaseSnapshot } | { ok: false; message: string } {
+    const normalizedPurchaseId = normalizeId(purchaseId)
+    const normalizedProfileId = normalizeId(profileId)
+
+    if (normalizedPurchaseId.length === 0 || normalizedProfileId.length === 0) {
+      return { ok: false, message: 'Невалидна заявка.' }
+    }
+
+    const existing = getPurchaseWithOwnerCheck(normalizedPurchaseId, normalizedProfileId)
+
+    if (existing === null) {
+      return { ok: false, message: 'Покупката не беше намерена.' }
+    }
+
+    if (existing.hiddenAt !== null) {
+      return { ok: true, purchase: existing }
+    }
+
+    hidePurchaseStatement.run(normalizedPurchaseId, normalizedProfileId)
+
+    const updated = getPurchaseWithOwnerCheck(normalizedPurchaseId, normalizedProfileId)
+
+    if (updated === null) {
+      return { ok: false, message: 'Покупката не може да се прочете след скриване.' }
+    }
+
+    return { ok: true, purchase: updated }
+  }
+
   function getAdminPaymentStats(): AdminPaymentStats {
     function query(whereClause: string): PaymentPeriodStats {
       const row = database.prepare(`
@@ -579,11 +674,13 @@ export async function createCoinPurchaseStore(
     getAdminPaymentStats,
     createPendingPurchase,
     getPurchaseById,
+    getPurchaseWithOwnerCheck,
     attachCheckoutSession,
     findByCheckoutSessionId,
     markPurchaseCanceledByCheckoutSessionId,
     markPurchaseFailedByCheckoutSessionId,
     fulfillPaidPurchase,
+    hidePurchaseForUser,
     close,
   }
 }
