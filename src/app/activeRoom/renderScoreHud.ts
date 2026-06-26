@@ -6,10 +6,9 @@ import type {
 } from '../network/createGameServerClient'
 import { escapeHtml } from './activeRoomShared'
 import { getVisualSeatForLocalPerspective } from './cutting/cuttingSeatLayout'
+import { formatBidType, getBidMultiplierLabel } from './winningBidHelpers'
 
 const SCORE_HUD_INTERNAL_OFFSET = 18
-
-type Suit = 'clubs' | 'diamonds' | 'hearts' | 'spades'
 
 type RenderScoreHudOptions = {
   game: RoomGameSnapshot
@@ -49,31 +48,6 @@ function formatBidOwnerLabel(
     : formatSeatForLocalPerspective(seat, localSeat)
 }
 
-function formatSuit(suit: Suit | null): string {
-  if (suit === 'clubs') return 'Спатия'
-  if (suit === 'diamonds') return 'Каро'
-  if (suit === 'hearts') return 'Купа'
-  if (suit === 'spades') return 'Пика'
-  return '—'
-}
-
-function formatBidType(
-  winningBid: NonNullable<RoomWinningBidSnapshot> | null,
-): string {
-  if (winningBid === null) return 'Няма обява'
-  if (winningBid.contract === 'all-trumps') return 'Всичко коз'
-  if (winningBid.contract === 'no-trumps') return 'Без коз'
-  if (winningBid.contract === 'suit') return formatSuit(winningBid.trumpSuit)
-  return 'Няма обява'
-}
-
-function getBidMultiplierLabel(
-  winningBid: NonNullable<RoomWinningBidSnapshot> | null,
-): string {
-  if (winningBid?.redoubled) return ' x4'
-  if (winningBid?.doubled) return ' x2'
-  return ''
-}
 
 function getBidIconMarkup(
   winningBid: NonNullable<RoomWinningBidSnapshot> | null,

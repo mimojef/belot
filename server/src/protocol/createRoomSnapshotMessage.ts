@@ -194,6 +194,7 @@ function createPlayingSnapshot(
       : null
 
   return {
+    winningBid: authoritativeState.bidding.winningBid ?? null,
     currentTurnSeat: playing.currentTurnSeat,
     currentTrickPlays,
     completedTricksCount: playing.completedTricks.length,

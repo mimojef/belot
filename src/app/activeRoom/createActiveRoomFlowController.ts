@@ -47,6 +47,7 @@ import {
   getActiveRoomStageMetrics,
   getSeatAfterDealerForDealFallback,
   resetPlayingUiCache,
+  computeNextLastKnownWinningBid,
 } from './activeRoomShared'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import {
@@ -2007,22 +2008,7 @@ export function createActiveRoomFlowController(
       ? ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND
       : ACTIVE_ROOM_TABLE_BACKGROUND
 
-    const freshWinningBid =
-      activeRoomState.game?.bidding?.winningBid ??
-      activeRoomState.game?.scoring?.winningBid ??
-      null
-    const activeAuthoritativePhase = activeRoomState.game?.authoritativePhase ?? null
-    if (freshWinningBid !== null) {
-      lastKnownWinningBid = freshWinningBid
-    } else if (
-      activeAuthoritativePhase === 'cutting' ||
-      activeAuthoritativePhase === 'cut-resolve' ||
-      activeAuthoritativePhase === 'deal-first-3' ||
-      activeAuthoritativePhase === 'deal-next-2' ||
-      activeAuthoritativePhase === 'bidding'
-    ) {
-      lastKnownWinningBid = null
-    }
+    lastKnownWinningBid = computeNextLastKnownWinningBid(lastKnownWinningBid, activeRoomState.game)
 
     const cuttingSnapshot = activeRoomState.game?.cutting ?? null
     const dealerSeat = activeRoomState.game?.dealerSeat ?? null

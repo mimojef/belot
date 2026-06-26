@@ -575,6 +575,7 @@ export type RoomDeclarationSnapshot = {
 }
 
 export type RoomPlayingSnapshot = {
+  winningBid: RoomWinningBidSnapshot
   currentTurnSeat: Seat | null
   currentTrickPlays: RoomPlayCardSnapshot[]
   completedTricksCount: number

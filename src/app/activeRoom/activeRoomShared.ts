@@ -8,6 +8,7 @@ import type {
 } from './activeRoomTypes'
 import type { Seat } from '../network/createGameServerClient'
 import { getViewportStageMetrics } from '../../ui/layout/viewportStage'
+export { computeNextLastKnownWinningBid, selectWinningBidFromGame } from './winningBidHelpers'
 
 export const SEAT_LABELS: Record<Seat, string> = {
   bottom: 'Долу',
@@ -35,6 +36,7 @@ export const ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND = `
   linear-gradient(180deg, #07130a 0%, #020503 100%)
 `
 export const ACTIVE_ROOM_TABLE_STAGE_BACKGROUND = 'transparent'
+
 
 export function escapeHtml(value: string): string {
   return value
