@@ -45,6 +45,17 @@
  * [33] скритата покупка не се връща в listProfilePurchases
  * [34] frontend confirmation текст: pending → "незавършено плащане"; paid → "история"
  * [35] frontend: редът остава видим при backend грешка (shopPurchaseMessageText се задава)
+ *
+ * createPendingPurchase hidden_at fix checks:
+ * [36] hidden pending → createPendingPurchase за същия profile/pkg → нов purchase_id
+ * [37] новият ред е hiddenAt === null
+ * [38] старият ред остава hidden и providerCheckoutSessionId непроменен
+ * [39] attachCheckoutSession обновява само новия ред
+ * [40] listProfilePurchases: само новият ред, не старият
+ * [41] втори createPendingPurchase при вече видим pending → same purchase_id (reuse)
+ * [42] webhook за стар скрит ред кредитира точно веднъж след нов pending
+ * [43] unique index позволява множество скрити pending за profile/package
+ * [44] migration се прилага върху DB с вече съществуващи скрити pending записи
  */
 
 import { DatabaseSync } from 'node:sqlite'
@@ -1317,6 +1328,193 @@ async function main(): Promise<void> {
 
     } finally {
       hideStore.close()
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // createPendingPurchase hidden_at fix checks [36]-[44]
+    // ══════════════════════════════════════════════════════════════════════════
+
+    const bugDbPath = join(tmpDir, 'bugfix.sqlite')
+    buildTestDb(bugDbPath)
+
+    // Прилагаме migration 002: нов unique index с hidden_at IS NULL
+    seedDb(bugDbPath, `
+      DROP INDEX IF EXISTS idx_coin_purchase_ledger_pending_package;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_coin_purchase_ledger_pending_package
+        ON coin_purchase_ledger(profile_id, package_id, status)
+        WHERE status = 'pending'
+          AND package_id IS NOT NULL
+          AND hidden_at IS NULL;
+    `)
+
+    // Допълнителни пакети за bug fix checks
+    seedDb(bugDbPath, `
+      INSERT INTO coin_packages (package_id,package_key,title,yellow_coins_amount,price_cents,currency,status,sort_order)
+        VALUES ('pkg-mini','mini','Мини пакет',5000,49,'EUR','active',20);
+    `)
+
+    const bugStore = await createCoinPurchaseStore(bugDbPath)
+
+    // Seed: скрит pending ред за prof-1 / pkg-mini (reproduction на production бъга)
+    seedDb(bugDbPath, `
+      INSERT INTO coin_purchase_ledger
+        (purchase_id,profile_id,package_id,package_key_snapshot,title_snapshot,
+         yellow_coins_amount,price_cents,currency,provider,provider_checkout_session_id,
+         status,hidden_at,created_at,updated_at)
+      VALUES (
+        'p-old-hidden','prof-1','pkg-mini','mini','Мини пакет',
+        5000,49,'EUR','stripe','cs_old_hidden',
+        'pending','2026-06-26 08:57:31',
+        '2026-06-25 04:10:30','2026-06-26 08:57:31'
+      )
+    `)
+
+    try {
+      // ── [36] ───────────────────────────────────────────────────────────────
+      await check('[36] hidden pending → createPendingPurchase → нов purchase_id', () => {
+        const result = bugStore.createPendingPurchase('prof-1', 'pkg-mini')
+        assert(result.ok === true, `очакван ok:true, получен: ${JSON.stringify(result)}`)
+        assert(
+          result.ok && result.purchase.purchaseId !== 'p-old-hidden',
+          `трябва нов purchase_id, получен: ${result.ok ? result.purchase.purchaseId : ''}`,
+        )
+      })
+
+      // ── [37] ───────────────────────────────────────────────────────────────
+      await check('[37] новият ред е hiddenAt === null', () => {
+        const result = bugStore.createPendingPurchase('prof-1', 'pkg-mini')
+        assert(result.ok === true, `очакван ok:true`)
+        assert(
+          result.ok && result.purchase.hiddenAt === null,
+          `новият ред трябва да е visible (hiddenAt=null), получен: ${result.ok ? result.purchase.hiddenAt : ''}`,
+        )
+      })
+
+      // Запомняме новия purchase_id за следващите checks
+      const newPurchaseResult = bugStore.createPendingPurchase('prof-1', 'pkg-mini')
+      assert(newPurchaseResult.ok === true, 'трябва нов ред')
+      const newPurchaseId = newPurchaseResult.ok ? newPurchaseResult.purchase.purchaseId : ''
+
+      // ── [38] ───────────────────────────────────────────────────────────────
+      await check('[38] старият ред остава hidden и providerCheckoutSessionId непроменен', () => {
+        const oldRow = bugStore.getPurchaseWithOwnerCheck('p-old-hidden', 'prof-1')
+        assert(oldRow !== null, 'старият ред трябва да съществува физически')
+        assert(
+          oldRow !== null && oldRow.hiddenAt !== null,
+          'старият ред трябва да остане hidden',
+        )
+        assert(
+          oldRow !== null && oldRow.providerCheckoutSessionId === 'cs_old_hidden',
+          `старият providerCheckoutSessionId трябва да е 'cs_old_hidden', получен: ${oldRow?.providerCheckoutSessionId}`,
+        )
+      })
+
+      // ── [39] ───────────────────────────────────────────────────────────────
+      await check('[39] attachCheckoutSession обновява само новия ред', () => {
+        const attached = bugStore.attachCheckoutSession(newPurchaseId, 'cs_new_session')
+        assert(attached !== null, 'attachCheckoutSession трябва да върне snapshot')
+        assert(
+          attached !== null && attached.purchaseId === newPurchaseId,
+          `attachCheckoutSession трябва да обнови новия ред, не стария`,
+        )
+        assert(
+          attached !== null && attached.providerCheckoutSessionId === 'cs_new_session',
+          `новият ред трябва да има 'cs_new_session', получен: ${attached?.providerCheckoutSessionId}`,
+        )
+        // Старият ред не трябва да е засегнат
+        const oldRow = bugStore.getPurchaseWithOwnerCheck('p-old-hidden', 'prof-1')
+        assert(
+          oldRow !== null && oldRow.providerCheckoutSessionId === 'cs_old_hidden',
+          `старият providerCheckoutSessionId не трябва да се е променил`,
+        )
+      })
+
+      // ── [40] ───────────────────────────────────────────────────────────────
+      await check('[40] listProfilePurchases: само новият ред, не старият', () => {
+        const purchases = bugStore.listProfilePurchases('prof-1')
+        const oldFound = purchases.find((p) => p.purchaseId === 'p-old-hidden')
+        const newFound = purchases.find((p) => p.purchaseId === newPurchaseId)
+        assert(oldFound === undefined, 'скритият ред не трябва да е в историята')
+        assert(newFound !== undefined, 'новият ред трябва да е в историята')
+      })
+
+      // ── [41] ───────────────────────────────────────────────────────────────
+      await check('[41] втори createPendingPurchase при вече видим pending → reuse същия purchase_id', () => {
+        const result = bugStore.createPendingPurchase('prof-1', 'pkg-mini')
+        assert(result.ok === true, `очакван ok:true`)
+        assert(
+          result.ok && result.purchase.purchaseId === newPurchaseId,
+          `трябва да е reuse на видимия pending (${newPurchaseId}), получен: ${result.ok ? result.purchase.purchaseId : ''}`,
+        )
+      })
+
+      // ── [42] ───────────────────────────────────────────────────────────────
+      await check('[42] webhook за стар скрит ред кредитира точно веднъж', () => {
+        const r1 = bugStore.fulfillPaidPurchase({
+          checkoutSessionId: 'cs_old_hidden',
+          purchaseId: 'p-old-hidden',
+          amountPaidCents: 49,
+          currency: 'EUR',
+        })
+        assert(r1.ok === true, `webhook трябва да кредитира скрития ред: ${JSON.stringify(r1)}`)
+        if (r1.ok) {
+          assert(r1.alreadyCredited === false, 'alreadyCredited трябва да е false при първи fulfill')
+        }
+        // Idempotent
+        const r2 = bugStore.fulfillPaidPurchase({
+          checkoutSessionId: 'cs_old_hidden',
+          purchaseId: 'p-old-hidden',
+          amountPaidCents: 49,
+          currency: 'EUR',
+        })
+        assert(r2.ok === true, 'втори webhook трябва да е ok (idempotent)')
+        if (r2.ok) {
+          assert(r2.alreadyCredited === true, 'alreadyCredited трябва да е true при втори fulfill')
+        }
+      })
+
+      // ── [43] ───────────────────────────────────────────────────────────────
+      await check('[43] unique index позволява множество скрити pending за profile/package', () => {
+        // Скриваме новия ред и правим трети
+        seedDb(bugDbPath, `
+          UPDATE coin_purchase_ledger
+          SET hidden_at = CURRENT_TIMESTAMP
+          WHERE purchase_id = '${newPurchaseId}'
+        `)
+        const r3 = bugStore.createPendingPurchase('prof-1', 'pkg-mini')
+        assert(r3.ok === true, `третото createPendingPurchase трябва да е ok: ${JSON.stringify(r3)}`)
+        assert(
+          r3.ok && r3.purchase.purchaseId !== 'p-old-hidden' && r3.purchase.purchaseId !== newPurchaseId,
+          `трябва изцяло нов purchase_id (трети ред), получен: ${r3.ok ? r3.purchase.purchaseId : ''}`,
+        )
+        assert(r3.ok && r3.purchase.hiddenAt === null, 'третият ред трябва да е visible')
+        // И двата стари редове трябва да са скрити в DB
+        const old1 = bugStore.getPurchaseWithOwnerCheck('p-old-hidden', 'prof-1')
+        const old2 = bugStore.getPurchaseWithOwnerCheck(newPurchaseId, 'prof-1')
+        assert(old1 !== null && old1.hiddenAt !== null, 'p-old-hidden трябва да е скрит')
+        assert(old2 !== null && old2.hiddenAt !== null, 'вторият ред трябва да е скрит')
+      })
+
+      // ── [44] ───────────────────────────────────────────────────────────────
+      await check('[44] migration се прилага върху DB с вече съществуващи скрити pending записи', () => {
+        // Прилагаме migration 002 върху bugDbPath
+        seedDb(bugDbPath, `
+          DROP INDEX IF EXISTS idx_coin_purchase_ledger_pending_package;
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_coin_purchase_ledger_pending_package
+            ON coin_purchase_ledger(profile_id, package_id, status)
+            WHERE status = 'pending'
+              AND package_id IS NOT NULL
+              AND hidden_at IS NULL;
+        `)
+        // След migration: createPendingPurchase трябва да работи нормално
+        // (вече тествахме в [36]-[43] с новата логика)
+        const r = bugStore.createPendingPurchase('prof-1', 'pkg-mini')
+        assert(r.ok === true, `createPendingPurchase след migration трябва да е ok: ${JSON.stringify(r)}`)
+        assert(r.ok && r.purchase.hiddenAt === null, 'върнатият ред трябва да е visible')
+      })
+
+    } finally {
+      bugStore.close()
     }
 
     // ── [19] ─────────────────────────────────────────────────────────────────

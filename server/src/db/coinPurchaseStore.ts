@@ -196,6 +196,7 @@ export async function createCoinPurchaseStore(
     WHERE profile_id = ?
       AND package_id = ?
       AND status = 'pending'
+      AND hidden_at IS NULL
     ORDER BY created_at DESC
     LIMIT 1;
   `)
