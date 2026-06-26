@@ -146,6 +146,7 @@ import {
   type MonitoringHistoryStore,
 } from './monitoring/monitoringHistoryStore.js'
 import { resumeCoinPurchaseCheckout } from './shop/resumeCoinPurchaseCheckout.js'
+import { hideCoinPurchase } from './shop/hideCoinPurchase.js'
 
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
@@ -4098,13 +4099,29 @@ async function handleShopHidePurchaseRequest(
     return true
   }
 
+  const stripeSecretKey = process.env.STRIPE_SECRET_KEY
+
+  if (!stripeSecretKey) {
+    sendJsonResponse(res, 500, {
+      ok: false,
+      message: 'Stripe не е конфигуриран на сървъра. Моля, свържи се с администратор.',
+    })
+    return true
+  }
+
+  const stripe = new Stripe(stripeSecretKey)
   const purchaseId = match[1]
   const profileId = session.profile.profileId
 
-  const result = coinPurchaseStore.hidePurchaseForUser(purchaseId, profileId)
+  const result = await hideCoinPurchase({
+    store: coinPurchaseStore,
+    stripe,
+    purchaseId,
+    profileId,
+  })
 
   if (!result.ok) {
-    sendJsonResponse(res, 404, result)
+    sendJsonResponse(res, result.status, { ok: false, message: result.message })
     return true
   }
 
