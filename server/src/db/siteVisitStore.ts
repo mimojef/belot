@@ -1,3 +1,5 @@
+import { getSofiaDayBoundsUtc, toSqliteUtc } from './sofiaDayBounds.js'
+
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
 export type SiteVisitNavigationType = 'navigate' | 'reload' | 'back_forward' | 'spa'
@@ -71,14 +73,14 @@ export type VisitorSourcesResult = {
 
 export type SiteVisitStore = {
   recordPageView: (input: RecordSitePageViewInput) => RecordSitePageViewResult
-  getVisitorSummary: () => VisitorSummary
+  getVisitorSummary: (now?: Date) => VisitorSummary
   getVisitorList: (params: {
     period: VisitorListPeriod
     type: VisitorListType
     limit: number
     offset: number
-  }) => VisitorListResult
-  getVisitorSources: (params: { period: VisitorListPeriod }) => VisitorSourcesResult
+  }, now?: Date) => VisitorListResult
+  getVisitorSources: (params: { period: VisitorListPeriod }, now?: Date) => VisitorSourcesResult
   purgeOlderThanDays: (days: number) => { deletedEvents: number; deletedVisitors: number }
   close: () => void
 }
@@ -175,10 +177,18 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     WHERE anonymous_visitor_id = ?;
   `)
 
-  const visitorCountStatement = database.prepare(`
+  // Counts distinct visitors in a half-open UTC interval [since, until).
+  const countInRangeStmt = database.prepare(`
     SELECT COUNT(DISTINCT anonymous_visitor_id) AS n
     FROM site_visit_events
-    WHERE occurred_at >= datetime('now', ?);
+    WHERE occurred_at >= ? AND occurred_at < ?;
+  `)
+
+  // Counts distinct visitors from a rolling UTC start to the present (no upper bound).
+  const countSinceStmt = database.prepare(`
+    SELECT COUNT(DISTINCT anonymous_visitor_id) AS n
+    FROM site_visit_events
+    WHERE occurred_at >= ?;
   `)
 
   const purgeEventsStatement = database.prepare(`
@@ -272,17 +282,49 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     }
   }
 
-  function countVisitors(modifier: string): number {
-    const row = visitorCountStatement.get(modifier) as { n: number } | undefined
+  // Builds a parameterized WHERE clause fragment for the given period.
+  // 'today'/'yesterday' use Sofia calendar day boundaries (half-open [start, end)).
+  // '7d'/'30d' are rolling from the given `now` — never the SQLite real clock.
+  // Returns { sql: fragment with ? placeholders, params: values in order }.
+  type TimeFilter = { sql: string; params: string[] }
+  function buildSofiaTimeFilter(alias: string, period: VisitorListPeriod, now: Date): TimeFilter {
+    const bounds = getSofiaDayBoundsUtc(now)
+    const col = `${alias}.occurred_at`
+    switch (period) {
+      case 'today':
+        return { sql: `${col} >= ? AND ${col} < ?`, params: [bounds.todayStart, bounds.tomorrowStart] }
+      case 'yesterday':
+        return { sql: `${col} >= ? AND ${col} < ?`, params: [bounds.yesterdayStart, bounds.todayStart] }
+      case '7d': {
+        const since = toSqliteUtc(new Date(now.getTime() - 7 * 86_400_000))
+        return { sql: `${col} >= ?`, params: [since] }
+      }
+      case '30d': {
+        const since = toSqliteUtc(new Date(now.getTime() - 30 * 86_400_000))
+        return { sql: `${col} >= ?`, params: [since] }
+      }
+    }
+  }
+
+  function countInRange(since: string, until: string): number {
+    const row = countInRangeStmt.get(since, until) as { n: number } | undefined
     return row?.n ?? 0
   }
 
-  function getVisitorSummary(): VisitorSummary {
+  function countSince(since: string): number {
+    const row = countSinceStmt.get(since) as { n: number } | undefined
+    return row?.n ?? 0
+  }
+
+  function getVisitorSummary(now: Date = new Date()): VisitorSummary {
+    const bounds = getSofiaDayBoundsUtc(now)
+    const last7Start  = toSqliteUtc(new Date(now.getTime() - 7  * 86_400_000))
+    const last30Start = toSqliteUtc(new Date(now.getTime() - 30 * 86_400_000))
     return {
-      today:     countVisitors('start of day'),
-      yesterday: countVisitors('-1 days, start of day'),
-      last7days:  countVisitors('-7 days'),
-      last30days: countVisitors('-30 days'),
+      today:      countInRange(bounds.todayStart,     bounds.tomorrowStart),
+      yesterday:  countInRange(bounds.yesterdayStart, bounds.todayStart),
+      last7days:  countSince(last7Start),
+      last30days: countSince(last30Start),
     }
   }
 
@@ -291,27 +333,8 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     type: VisitorListType
     limit: number
     offset: number
-  }): VisitorListResult {
-    const periodModifiers: Record<VisitorListPeriod, string> = {
-      today:     "start of day",
-      yesterday: "-1 days, start of day",
-      '7d':      "-7 days",
-      '30d':     "-30 days",
-    }
-    const periodEndModifiers: Record<VisitorListPeriod, string | null> = {
-      today:     null,
-      yesterday: "start of day",
-      '7d':      null,
-      '30d':     null,
-    }
-    const sinceExpr = `datetime('now', '${periodModifiers[params.period]}')`
-    const untilExpr = periodEndModifiers[params.period]
-      ? `datetime('now', '${periodEndModifiers[params.period]}')`
-      : null
-
-    const timeFilter = untilExpr
-      ? `e.occurred_at >= ${sinceExpr} AND e.occurred_at < ${untilExpr}`
-      : `e.occurred_at >= ${sinceExpr}`
+  }, now: Date = new Date()): VisitorListResult {
+    const filter = buildSofiaTimeFilter('e', params.period, now)
 
     const typeFilter =
       params.type === 'guest'      ? 'AND v.last_profile_id IS NULL' :
@@ -325,12 +348,13 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       WHERE EXISTS (
         SELECT 1 FROM site_visit_events e
         WHERE e.anonymous_visitor_id = v.anonymous_visitor_id
-          AND ${timeFilter}
+          AND ${filter.sql}
       )
       ${typeFilter}
     `
 
-    const countRow = database.prepare(`SELECT COUNT(*) AS n ${baseQuery}`).get() as { n: number }
+    // filter.sql appears once in baseQuery → 1× params
+    const countRow = database.prepare(`SELECT COUNT(*) AS n ${baseQuery}`).get(...filter.params) as { n: number }
     const total = countRow?.n ?? 0
 
     type RawRow = {
@@ -350,6 +374,9 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     const safeLimit = Math.max(1, Math.min(200, params.limit))
     const safeOffset = Math.max(0, params.offset)
 
+    // filter.sql appears 3×: page_views subquery, reloads subquery, baseQuery WHERE EXISTS
+    const tripleParams = [...filter.params, ...filter.params, ...filter.params]
+
     const rows = database.prepare(`
       SELECT
         v.anonymous_visitor_id,
@@ -363,15 +390,15 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
         v.last_seen_at,
         (SELECT COUNT(*) FROM site_visit_events e
           WHERE e.anonymous_visitor_id = v.anonymous_visitor_id
-            AND ${timeFilter}) AS page_views,
+            AND ${filter.sql}) AS page_views,
         (SELECT COUNT(*) FROM site_visit_events e
           WHERE e.anonymous_visitor_id = v.anonymous_visitor_id
             AND e.navigation_type = 'reload'
-            AND ${timeFilter}) AS reloads
+            AND ${filter.sql}) AS reloads
       ${baseQuery}
       ORDER BY v.last_seen_at DESC
       LIMIT ${safeLimit} OFFSET ${safeOffset}
-    `).all() as RawRow[]
+    `).all(...tripleParams) as RawRow[]
 
     return {
       total,
@@ -391,28 +418,11 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     }
   }
 
-  function getVisitorSources(params: { period: VisitorListPeriod }): VisitorSourcesResult {
-    const periodModifiers: Record<VisitorListPeriod, string> = {
-      today:     "start of day",
-      yesterday: "-1 days, start of day",
-      '7d':      "-7 days",
-      '30d':     "-30 days",
-    }
-    const periodEndModifiers: Record<VisitorListPeriod, string | null> = {
-      today:     null,
-      yesterday: "start of day",
-      '7d':      null,
-      '30d':     null,
-    }
-    const sinceExpr = `datetime('now', '${periodModifiers[params.period]}')`
-    const untilExpr = periodEndModifiers[params.period]
-      ? `datetime('now', '${periodEndModifiers[params.period]}')`
-      : null
-    const timeFilter = untilExpr
-      ? `e.occurred_at >= ${sinceExpr} AND e.occurred_at < ${untilExpr}`
-      : `e.occurred_at >= ${sinceExpr}`
+  function getVisitorSources(params: { period: VisitorListPeriod }, now: Date = new Date()): VisitorSourcesResult {
+    const filter = buildSofiaTimeFilter('e', params.period, now)
 
     type RawRow = { referrer: string | null; source: string | null; n: number }
+    // filter.sql appears once → 1× params
     const raw = database.prepare(`
       SELECT
         v.first_referrer AS referrer,
@@ -422,10 +432,10 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       WHERE EXISTS (
         SELECT 1 FROM site_visit_events e
         WHERE e.anonymous_visitor_id = v.anonymous_visitor_id
-          AND ${timeFilter}
+          AND ${filter.sql}
       )
       GROUP BY v.first_referrer, v.first_source
-    `).all() as RawRow[]
+    `).all(...filter.params) as RawRow[]
 
     // Normalizes source/referrer to a human-readable label.
     // Priority: first_source (UTM/explicit) → hostname from first_referrer → 'Директно'.

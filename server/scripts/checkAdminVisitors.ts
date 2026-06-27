@@ -214,6 +214,80 @@ await withDb(async (dbPath, db) => {
   } finally { store.close() }
 })
 
+// ─── [4b] Period filter — yesterday (fixed clock) ─────────────────────────────
+
+console.log('\n[4b] Period filter — yesterday (fixed clock)')
+{
+  // Import here to avoid hoisting issues with top-level imports
+  const { getSofiaDayBoundsUtc: getBounds, toSqliteUtc: toUtc } = await import('../src/db/sofiaDayBounds.js')
+
+  await withDb(async (dbPath, db) => {
+    const fixedNow = new Date('2026-06-27T10:00:00Z')
+    const bounds   = getBounds(fixedNow)
+
+    // Visitor inside yesterday Sofia window (yesterdayStart + 2h)
+    const tsYest = toUtc(new Date(new Date(bounds.yesterdayStart + 'Z').getTime() + 2 * 3_600_000))
+    // Visitor inside today Sofia window (todayStart + 2h)
+    const tsToday = toUtc(new Date(new Date(bounds.todayStart + 'Z').getTime() + 2 * 3_600_000))
+
+    iv(db, 'vy', null, null, `'${tsYest}'`,  `'${tsYest}'`)
+    iv(db, 'vt', null, null, `'${tsToday}'`, `'${tsToday}'`)
+    ie(db, 'ey', 'vy', null, 'navigate', `'${tsYest}'`)
+    ie(db, 'et', 'vt', null, 'navigate', `'${tsToday}'`)
+    db.close()
+
+    const store = await createSiteVisitStore(dbPath)
+    try {
+      const yest  = store.getVisitorList({ period: 'yesterday', type: 'all', limit: 50, offset: 0 }, fixedNow)
+      const today = store.getVisitorList({ period: 'today',     type: 'all', limit: 50, offset: 0 }, fixedNow)
+      await check('[4b.1] yesterday: total=1', () => { if (yest.total !== 1) throw new Error(`yesterday.total=${yest.total}`) })
+      await check('[4b.2] today: total=1', () => { if (today.total !== 1) throw new Error(`today.total=${today.total}`) })
+      await check('[4b.3] yesterday row is vy', () => {
+        if (yest.rows[0]?.anonymousVisitorId !== 'vy') throw new Error(`row=${yest.rows[0]?.anonymousVisitorId}`)
+      })
+    } finally { store.close() }
+  })
+}
+
+// ─── [4c] Rolling periods — детерминистичен clock (фиксирана дата 2024-01-15) ─
+
+console.log('\n[4c] Rolling periods — детерминистичен clock (2024-01-15, далеч от реалното)')
+{
+  const { toSqliteUtc: toUtc } = await import('../src/db/sofiaDayBounds.js')
+
+  await withDb(async (dbPath, db) => {
+    // fixed clock ~2.5 years before real date — proves code uses `now`, not SQLite datetime('now')
+    const fixedNow = new Date('2024-01-15T12:00:00Z')
+
+    const ts5d  = toUtc(new Date(fixedNow.getTime() -  5 * 86_400_000)) // inside 7d
+    const ts20d = toUtc(new Date(fixedNow.getTime() - 20 * 86_400_000)) // inside 30d only
+    const ts40d = toUtc(new Date(fixedNow.getTime() - 40 * 86_400_000)) // outside both
+
+    iv(db, 'v5d',  null, null, `'${ts5d}'`,  `'${ts5d}'`)
+    iv(db, 'v20d', null, null, `'${ts20d}'`, `'${ts20d}'`)
+    iv(db, 'v40d', null, null, `'${ts40d}'`, `'${ts40d}'`)
+    ie(db, 'e5d',  'v5d',  null, 'navigate', `'${ts5d}'`)
+    ie(db, 'e20d', 'v20d', null, 'navigate', `'${ts20d}'`)
+    ie(db, 'e40d', 'v40d', null, 'navigate', `'${ts40d}'`)
+    db.close()
+
+    const store = await createSiteVisitStore(dbPath)
+    try {
+      const r7d  = store.getVisitorList({ period: '7d',  type: 'all', limit: 50, offset: 0 }, fixedNow)
+      const r30d = store.getVisitorList({ period: '30d', type: 'all', limit: 50, offset: 0 }, fixedNow)
+      await check('[4c.1] 7d: total=1 (само v5d)', () => {
+        if (r7d.total !== 1) throw new Error(`7d.total=${r7d.total}`)
+      })
+      await check('[4c.2] 30d: total=2 (v5d + v20d, без v40d)', () => {
+        if (r30d.total !== 2) throw new Error(`30d.total=${r30d.total}`)
+      })
+      await check('[4c.3] 7d единственият ред е v5d', () => {
+        if (r7d.rows[0]?.anonymousVisitorId !== 'v5d') throw new Error(`row=${r7d.rows[0]?.anonymousVisitorId}`)
+      })
+    } finally { store.close() }
+  })
+}
+
 // ─── [5] Type filter ──────────────────────────────────────────────────────────
 
 console.log('\n[5] Type filter: all/guest/registered')
@@ -355,6 +429,15 @@ function httpGet(port: number, pathname: string, cookie?: string): Promise<HttpR
 const sourceRoot = resolve(process.argv.slice(2).find(a => a.startsWith('--server-root='))?.slice('--server-root='.length) ?? process.cwd())
 console.log(`  Server root: ${sourceRoot}`)
 
+// On Windows, SQLite WAL files can briefly remain locked after the child process exits.
+// Retry rm up to 4 times with short delays rather than propagating EBUSY/EPERM.
+async function retryRm(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try { await rm(path, { recursive: true, force: true }); return } catch { /* retry */ }
+    await new Promise<void>(r => setTimeout(r, 250))
+  }
+}
+
 async function makeIsolated(root: string) {
   const tmp = await mkdtemp(join(tmpdir(), 'belot-admin-visitors-http-'))
   const serverDir = join(tmp, 'server')
@@ -370,7 +453,7 @@ async function makeIsolated(root: string) {
   return {
     serverDir,
     dbFile: join(serverDir, 'database', 'data', 'belot-v2.sqlite'),
-    cleanup: async () => rm(tmp, { recursive: true, force: true }),
+    cleanup: () => retryRm(tmp),
   }
 }
 

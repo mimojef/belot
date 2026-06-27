@@ -236,6 +236,38 @@ await withDb(async (dbPath, db) => {
   } finally { store.close() }
 })
 
+// ─── [6b] Period filter — yesterday (fixed clock) ────────────────────────────
+console.log('\n[6b] Period filter: yesterday (fixed clock)')
+{
+  const { getSofiaDayBoundsUtc: getBounds, toSqliteUtc: toUtc } = await import('../src/db/sofiaDayBounds.js')
+
+  await withDb(async (dbPath, db) => {
+    const fixedNow = new Date('2026-06-27T10:00:00Z')
+    const bounds   = getBounds(fixedNow)
+
+    const tsYest  = `'${toUtc(new Date(new Date(bounds.yesterdayStart + 'Z').getTime() + 2 * 3_600_000))}'`
+    const tsToday = `'${toUtc(new Date(new Date(bounds.todayStart     + 'Z').getTime() + 2 * 3_600_000))}'`
+
+    iv(db, 'sy', 'google',   null, tsYest)   // yesterday Sofia, source=google
+    iv(db, 'st', 'facebook', null, tsToday)  // today Sofia, source=facebook
+    db.close()
+
+    const store = await createSiteVisitStore(dbPath)
+    try {
+      const yest  = store.getVisitorSources({ period: 'yesterday' }, fixedNow)
+      const today = store.getVisitorSources({ period: 'today'     }, fixedNow)
+      await check('[6b.1] yesterday: total=1', () => { if (yest.total !== 1) throw new Error(`total=${yest.total}`) })
+      await check('[6b.2] yesterday: Google', () => {
+        if (yest.rows[0]?.label !== 'Google') throw new Error(`label=${yest.rows[0]?.label}`)
+      })
+      await check('[6b.3] today: total=1', () => { if (today.total !== 1) throw new Error(`total=${today.total}`) })
+      await check('[6b.4] today: Facebook', () => {
+        if (today.rows[0]?.label !== 'Facebook') throw new Error(`label=${today.rows[0]?.label}`)
+      })
+    } finally { store.close() }
+  })
+}
+
 // ─── [7] Sort order ───────────────────────────────────────────────────────────
 console.log('\n[7] Sort by visitors DESC; Директно last on equal count')
 await withDb(async (dbPath, db) => {
