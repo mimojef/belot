@@ -3485,9 +3485,7 @@ function showLandingOverlay(): void {
         dismissOverlay()
       }
     } else {
-      if (!isMobileLanding) {
-        dismissOverlay()
-      }
+      dismissOverlay()
     }
   })
 }
