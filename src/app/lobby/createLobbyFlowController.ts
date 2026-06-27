@@ -1001,6 +1001,7 @@ export function createLobbyFlowController(
   let _initMatchRoomsDone = !options.onMatchRoomsLoad
   let _initPackagesDone = !options.onLobbyPackagesLoad
   let _initConnected = false
+  let _guestCtaShown = false
   let _initOverlayEl: HTMLElement | null = null
   let _initBarEl: HTMLElement | null = null
   let _initOverlayHidden = false
@@ -5124,6 +5125,15 @@ export function createLobbyFlowController(
       if (value) {
         _initConnected = true
         maybeHideInitialOverlay()
+        if (!_guestCtaShown && options.getAuthSession?.() === null && state.authModalMode === 'closed') {
+          _guestCtaShown = true
+          window.setTimeout(() => {
+            if (state.isConnected && state.authModalMode === 'closed' && options.getAuthSession?.() === null) {
+              state.authModalMode = 'cta'
+              render()
+            }
+          }, 1500)
+        }
       }
       render()
     },

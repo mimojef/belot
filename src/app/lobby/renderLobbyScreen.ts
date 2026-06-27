@@ -756,7 +756,7 @@ function renderAuthModal(state: LobbyScreenState): string {
     ? `
       <div style="display:grid;gap:16px;text-align:center;">
         <div style="font-size:28px;line-height:1.12;font-weight:900;color:#f8fafc;">
-          Регистрирай се и вземи <span style="color:#d4a520;">${escapeHtml(bonusText)}</span> безплатни жълтици
+          Регистрирай се и вземи <span style="white-space:nowrap"><img src="/assets/lobby/icon-coin.png" alt="" style="width:28px;height:28px;vertical-align:middle;margin:0 2px 3px 0;"><span style="color:#d4a520;">${escapeHtml(bonusText)}</span></span> жълтици
         </div>
         <div style="font-size:15px;line-height:1.5;color:rgba(255,255,255,0.72);font-weight:700;">
           Създай профил, избери име и играй белот с други хора. Използвай чат с приятели, изпращай подаръци, печели жълтици и трупай рейтинг.
@@ -837,7 +837,7 @@ function renderAuthModal(state: LobbyScreenState): string {
 
   return `
     <div data-lobby-auth-modal-root="1" style="position:fixed;inset:0;z-index:13000;display:flex;align-items:center;justify-content:center;padding:24px;">
-      <div data-lobby-auth-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.74);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
+      <div data-lobby-auth-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.45);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);"></div>
       <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,480px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
         <button type="button" data-lobby-auth-modal-close="1" aria-label="Затвори" style="position:absolute;right:4px;top:4px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
         <div style="display:grid;gap:14px;">
@@ -8253,6 +8253,15 @@ export function renderLobbyScreen(
   root
     .querySelector<HTMLElement>('[data-lobby-auth-modal-backdrop="1"]')
     ?.addEventListener('click', options.onAuthModalClose)
+
+  // Click anywhere outside the dialog panel closes the modal.
+  // stopPropagation on the dialog prevents clicks inside it from bubbling up.
+  root
+    .querySelector<HTMLElement>('[data-lobby-auth-modal-root="1"]')
+    ?.addEventListener('click', options.onAuthModalClose)
+  root
+    .querySelector<HTMLElement>('[data-lobby-auth-modal-root="1"] [role="dialog"]')
+    ?.addEventListener('click', (e) => e.stopPropagation())
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-auth-register-button="1"]')
