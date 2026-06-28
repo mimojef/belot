@@ -23,7 +23,7 @@ import type {
   SupportMessageSnapshot,
   SupportConversationSnapshot,
 } from '../network/createGameServerClient'
-import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow } from '../adminServer/adminServerTypes'
+import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult } from '../adminServer/adminServerTypes'
 import { renderPeakCards, renderPeakMoments, renderHistoryInfoRow, getWindowLabel } from '../adminServer/renderAdminHistory'
 import type { PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
@@ -255,6 +255,7 @@ export type LobbyScreenState = {
   adminHistoryResult: MonitoringHistoryResult | null
   adminHistoryLoading: boolean
   adminHistoryErrorText: string | null
+  adminWsConnections: WsConnectionsResult | null
   adminVisitorsLoading: boolean
   adminVisitorsRows: import('../network/createGameServerClient').AdminVisitorRow[]
   adminVisitorsTotal: number
@@ -4507,6 +4508,110 @@ function renderAdminServerPanel(state: LobbyScreenState): string {
     `
   }
 
+  // ── WS Connections section ──
+  const wsConns = state.adminWsConnections
+  let wsConnectionsHtml = ''
+  if (wsConns === null) {
+    wsConnectionsHtml = `<div style="height:40px;display:flex;align-items:center;color:rgba(255,255,255,0.35);font-size:12px;font-style:italic;">Зареждане...</div>`
+  } else {
+    const sm = wsConns.summary
+
+    const smChip = (label: string, value: number, warn = false) => {
+      const color = warn && value > 0 ? '#f59e0b' : 'rgba(255,255,255,0.75)'
+      return `<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700;color:rgba(255,255,255,0.45);">${escapeHtml(label)}<span style="color:${color};font-weight:900;">${value}</span></span>`
+    }
+
+    const fmtAgo = (ms: number): string => {
+      if (ms === 0) return '—'
+      const sec = Math.max(0, Math.round((Date.now() - ms) / 1000))
+      if (sec < 60) return `${sec} сек.`
+      const min = Math.floor(sec / 60)
+      if (min < 60) return `${min} мин.`
+      return `${Math.floor(min / 60)} ч.`
+    }
+
+    const connTypeLabel = (e: WsConnectionsResult['entries'][number]): string => {
+      if (e.profileId === null) return 'Гост'
+      if (e.currentRoomId !== null) return 'Игрова'
+      if (e.probablePendingSessionInGame) return 'Чака поемане'
+      return 'Обикновена'
+    }
+
+    const connTypeColor = (e: WsConnectionsResult['entries'][number]): string => {
+      if (e.profileId === null) return 'rgba(255,255,255,0.4)'
+      if (e.currentRoomId !== null) return '#22c55e'
+      if (e.probablePendingSessionInGame) return '#f59e0b'
+      return 'rgba(255,255,255,0.65)'
+    }
+
+    const rsColor = (label: string): string => {
+      if (label === 'OPEN') return '#22c55e'
+      if (label === 'CONNECTING') return '#f59e0b'
+      if (label === 'CLOSING') return '#f59e0b'
+      return 'rgba(255,255,255,0.28)'
+    }
+
+    const rows = wsConns.entries.map((e) => {
+      const rsLabel = escapeHtml(e.readyStateLabel ?? (e.isOpen ? 'OPEN' : 'CLOSED'))
+      const rsDotColor = rsColor(e.readyStateLabel ?? (e.isOpen ? 'OPEN' : 'CLOSED'))
+      const dot = `<div style="width:7px;height:7px;border-radius:50%;background:${rsDotColor};flex-shrink:0;"></div>`
+      const name = escapeHtml(e.displayName ?? (e.profileId === null ? 'Гост' : e.profileId.slice(0, 8)))
+      const connIdShort = escapeHtml(e.connectionId.slice(0, 8))
+      const connIdFull = escapeHtml(e.connectionId)
+      const roomShort = e.currentRoomId ? escapeHtml(e.currentRoomId.slice(0, 8)) : '—'
+      const typeLabel = connTypeLabel(e)
+      const typeColor = connTypeColor(e)
+      return `
+        <tr>
+          <td style="padding:7px 10px 7px 0;white-space:nowrap;">
+            <div style="display:flex;align-items:center;gap:6px;">${dot}<span style="font-size:12px;font-weight:700;color:#fff;">${name}</span></div>
+          </td>
+          <td style="padding:7px 10px;white-space:nowrap;">
+            <span title="${connIdFull}" style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.45);font-family:monospace;cursor:default;">${connIdShort}</span>
+            <span style="font-size:10px;color:${rsDotColor};font-weight:800;margin-left:4px;">${rsLabel}</span>
+          </td>
+          <td style="padding:7px 10px;white-space:nowrap;">
+            <span style="font-size:11px;font-weight:800;color:${typeColor};">${escapeHtml(typeLabel)}</span>
+          </td>
+          <td style="padding:7px 10px;white-space:nowrap;font-size:11px;color:rgba(255,255,255,0.5);">${roomShort}</td>
+          <td style="padding:7px 10px;white-space:nowrap;font-size:11px;color:rgba(255,255,255,0.4);font-family:monospace;">${escapeHtml(e.maskedIp ?? '—')}</td>
+          <td style="padding:7px 10px;white-space:nowrap;font-size:11px;color:rgba(255,255,255,0.4);">${fmtAgo(e.connectedAtMs)}</td>
+          <td style="padding:7px 0 7px 10px;white-space:nowrap;font-size:11px;color:rgba(255,255,255,0.4);">${fmtAgo(e.lastSeenAtMs)}</td>
+        </tr>
+      `
+    }).join('')
+
+    const tableHtml = wsConns.entries.length === 0
+      ? `<p style="font-size:12px;color:rgba(255,255,255,0.35);font-style:italic;margin:8px 0 0;">Няма активни WS връзки.</p>`
+      : `<div style="overflow-x:auto;margin-top:10px;">
+          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+            <thead>
+              <tr style="border-bottom:1px solid rgba(255,255,255,0.08);">
+                <th style="text-align:left;padding:5px 10px 5px 0;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.3);">Профил</th>
+                <th style="text-align:left;padding:5px 10px;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.3);">ID / Стат.</th>
+                <th style="text-align:left;padding:5px 10px;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.3);">Тип</th>
+                <th style="text-align:left;padding:5px 10px;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.3);">Стая</th>
+                <th style="text-align:left;padding:5px 10px;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.3);">IP</th>
+                <th style="text-align:left;padding:5px 10px;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.3);">Свързан</th>
+                <th style="text-align:left;padding:5px 0 5px 10px;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.3);">Последна акт.</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`
+
+    wsConnectionsHtml = `
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">
+        ${smChip('OPEN', sm.openSocketCount)}
+        ${smChip('Авт.', sm.authenticatedOpenSockets)}
+        ${smChip('Гости', sm.guestOpenSockets)}
+        ${smChip('>1 връзка', sm.profilesWithMultipleOpenSockets, true)}
+        ${smChip('Registry', sm.registrySize)}
+      </div>
+      ${tableHtml}
+    `
+  }
+
   return `
     <section style="padding:0 4px;">
 
@@ -4571,6 +4676,11 @@ function renderAdminServerPanel(state: LobbyScreenState): string {
       <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:14px 18px;">
         ${sectionLabel('Worker pool')}
         ${workerPoolHtml}
+      </div>
+
+      <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:14px 18px;margin-top:20px;">
+        ${sectionLabel('WEB SOCKET ВРЪЗКИ')}
+        ${wsConnectionsHtml}
       </div>
 
       <div style="margin-top:28px;">

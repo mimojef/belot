@@ -48,6 +48,36 @@ export function isValidHistoryWindow(value: unknown): value is HistoryWindow {
   return value === '1h' || value === '24h' || value === '7d'
 }
 
+export type WsConnectionEntry = {
+  connectionId: string
+  readyStateLabel: string
+  isOpen: boolean
+  profileId: string | null
+  displayName: string | null
+  connectedAtMs: number
+  lastSeenAtMs: number
+  maskedIp: string | null
+  userAgent: string | null
+  currentRoomId: string | null
+  hasActiveGameSession: boolean
+  probablePendingSessionInGame: boolean
+}
+
+export type WsConnectionsSummary = {
+  registrySize: number
+  openSocketCount: number
+  connectedStateCount: number
+  uniqueOnlineProfiles: number
+  guestOpenSockets: number
+  authenticatedOpenSockets: number
+  profilesWithMultipleOpenSockets: number
+}
+
+export type WsConnectionsResult = {
+  entries: WsConnectionEntry[]
+  summary: WsConnectionsSummary
+}
+
 export type MonitoringWorkerSnapshot = {
   workerId: string
   state: string

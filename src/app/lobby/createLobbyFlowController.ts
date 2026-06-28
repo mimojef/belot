@@ -379,6 +379,7 @@ export type LobbyFlowController = {
   setAdminHistoryLoading: (loading: boolean) => void
   setAdminHistoryResult: (result: import('../adminServer/adminServerTypes.js').MonitoringHistoryResult) => void
   setAdminHistoryError: (message: string) => void
+  setAdminWsConnections: (result: import('../adminServer/adminServerTypes.js').WsConnectionsResult) => void
   navigateInitialPath: () => void
   navigateAdminVisitors: (period?: string) => void
   navigateAdminInfo: () => void
@@ -558,6 +559,7 @@ type InternalLobbyFlowState = {
   adminHistoryResult: import('../adminServer/adminServerTypes.js').MonitoringHistoryResult | null
   adminHistoryLoading: boolean
   adminHistoryErrorText: string | null
+  adminWsConnections: import('../adminServer/adminServerTypes.js').WsConnectionsResult | null
   adminVisitorsLoading: boolean
   adminVisitorsRows: import('../network/createGameServerClient.js').AdminVisitorRow[]
   adminVisitorsTotal: number
@@ -764,6 +766,7 @@ function createInitialState(): InternalLobbyFlowState {
     adminHistoryResult: null,
     adminHistoryLoading: false,
     adminHistoryErrorText: null,
+    adminWsConnections: null,
     adminVisitorsLoading: false,
     adminVisitorsRows: [],
     adminVisitorsTotal: 0,
@@ -1829,6 +1832,7 @@ export function createLobbyFlowController(
       adminHistoryResult: state.adminHistoryResult,
       adminHistoryLoading: state.adminHistoryLoading,
       adminHistoryErrorText: state.adminHistoryErrorText,
+      adminWsConnections: state.adminWsConnections,
       adminVisitorsLoading: state.adminVisitorsLoading,
       adminVisitorsRows: state.adminVisitorsRows,
       adminVisitorsTotal: state.adminVisitorsTotal,
@@ -5268,6 +5272,10 @@ export function createLobbyFlowController(
     setAdminHistoryError: (message) => {
       state.adminHistoryErrorText = message
       state.adminHistoryLoading = false
+      if (state.currentScreen === 'admin-server') render()
+    },
+    setAdminWsConnections: (result) => {
+      state.adminWsConnections = result
       if (state.currentScreen === 'admin-server') render()
     },
     navigateInitialPath: () => {

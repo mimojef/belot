@@ -17,7 +17,7 @@ import {
   type LobbyFlowController,
 } from './app/lobby/createLobbyFlowController'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
-import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow } from './app/adminServer/adminServerTypes'
+import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult } from './app/adminServer/adminServerTypes'
 import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
 import {
   createGameServerClient,
@@ -1757,6 +1757,49 @@ async function loadAdminMonitoring(): Promise<
   }
 }
 
+function isWsConnectionsResult(data: unknown): data is WsConnectionsResult {
+  if (data === null || typeof data !== 'object') return false
+  const d = data as Record<string, unknown>
+  if (!Array.isArray(d['entries'])) return false
+  const sm = d['summary']
+  if (sm === null || typeof sm !== 'object') return false
+  const s = sm as Record<string, unknown>
+  return (
+    typeof s['registrySize'] === 'number' &&
+    typeof s['openSocketCount'] === 'number' &&
+    typeof s['connectedStateCount'] === 'number' &&
+    typeof s['uniqueOnlineProfiles'] === 'number' &&
+    typeof s['guestOpenSockets'] === 'number' &&
+    typeof s['authenticatedOpenSockets'] === 'number' &&
+    typeof s['profilesWithMultipleOpenSockets'] === 'number'
+  )
+}
+
+async function loadAdminConnections(): Promise<
+  | { ok: true; result: WsConnectionsResult }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/monitoring/connections`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп.' }
+    }
+    const data = await response.json() as { ok?: boolean; message?: string } & Record<string, unknown>
+    if (!response.ok || data['ok'] !== true) {
+      return { ok: false, message: (data['message'] as string | undefined) ?? 'Грешка при зареждане на връзките.' }
+    }
+    if (!isWsConnectionsResult(data)) {
+      return { ok: false, message: 'Невалиден формат на отговора за WS връзки.' }
+    }
+    return { ok: true, result: data }
+  } catch {
+    return { ok: false, message: 'Няма връзка.' }
+  }
+}
+
 let monitoringIntervalId: ReturnType<typeof setInterval> | null = null
 let monitoringGeneration = 0
 let monitoringFetchInFlightGeneration: number | null = null
@@ -1768,12 +1811,18 @@ function startMonitoringPolling(): void {
     monitoringFetchInFlightGeneration = gen
     void (async () => {
       try {
-        const result = await loadAdminMonitoring()
+        const [monResult, connResult] = await Promise.all([
+          loadAdminMonitoring(),
+          loadAdminConnections(),
+        ])
         if (gen !== monitoringGeneration) return
-        if (result.ok) {
-          lobby.setAdminMonitoringSnapshot(result.snapshot)
+        if (monResult.ok) {
+          lobby.setAdminMonitoringSnapshot(monResult.snapshot)
         } else {
-          lobby.setAdminMonitoringError(result.message)
+          lobby.setAdminMonitoringError(monResult.message)
+        }
+        if (connResult.ok) {
+          lobby.setAdminWsConnections(connResult.result)
         }
       } finally {
         if (monitoringFetchInFlightGeneration === gen) {

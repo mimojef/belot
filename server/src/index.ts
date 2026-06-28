@@ -138,6 +138,7 @@ import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
 import { createMonitoringSampler } from './monitoring/createMonitoringSampler.js'
 import type { MonitoringSampler } from './monitoring/monitoringTypes.js'
 import { countOpenWebSockets, countUniqueOnlineRealPlayers } from './monitoring/monitoringHelpers.js'
+import { buildWsConnectionsDiagnostic } from './monitoring/wsConnectionsHelper.js'
 import { sanitizeErrorMessage } from './monitoring/systemMetrics.js'
 import {
   createMonitoringHistoryStore,
@@ -2902,6 +2903,39 @@ function handleAdminMonitoringHistoryRequest(
   return true
 }
 
+function handleAdminMonitoringConnectionsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): boolean {
+  if (pathname !== '/api/admin/monitoring/connections') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session?.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+    return true
+  }
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const diagnostic = buildWsConnectionsDiagnostic(
+    socketRegistry,
+    serverState.connections,
+    (profileId) => findProfileInGameSession(profileId) !== null,
+    (profileId) => playerProgressStore.getPublicProfile(profileId)?.displayName ?? null,
+  )
+
+  sendJsonResponse(res, 200, { ok: true, ...diagnostic })
+  return true
+}
+
 async function handleAdminGuestContactMessagesRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -5626,6 +5660,10 @@ async function handleHttpRequest(
   }
 
   if (handleAdminMonitoringHistoryRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (handleAdminMonitoringConnectionsRequest(req, res, requestUrl.pathname)) {
     return
   }
 
