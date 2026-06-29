@@ -4122,6 +4122,11 @@ export function createLobbyFlowController(
     render()
   }
 
+  function scrollLobbyRootToTop(): void {
+    const el = options.root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')
+    if (el) el.scrollTop = 0
+  }
+
   function showRulesPage(): void {
     leaveAdminServerIfActive()
     state.currentScreen = 'rules'
@@ -4133,7 +4138,7 @@ export function createLobbyFlowController(
     stopWaitingRoomActivity()
     resetFinalFillSequence()
     render()
-    requestAnimationFrame(() => { window.scrollTo({ top: 0, left: 0, behavior: 'auto' }) })
+    scrollLobbyRootToTop()
   }
 
   function showStrategyPage(): void {
@@ -4147,7 +4152,7 @@ export function createLobbyFlowController(
     stopWaitingRoomActivity()
     resetFinalFillSequence()
     render()
-    requestAnimationFrame(() => { window.scrollTo({ top: 0, left: 0, behavior: 'auto' }) })
+    scrollLobbyRootToTop()
   }
 
   async function openChatConversation(
