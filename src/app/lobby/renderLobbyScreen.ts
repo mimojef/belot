@@ -1186,12 +1186,12 @@ function renderNav(state: LobbyScreenState): string {
       top: 0;
       z-index: 100;
     ">
-      <a href="#" data-lobby-nav-lobby="1" style="display:flex; align-items:center; gap:8px; text-decoration:none; margin-right:16px;">
+      <a href="/lobby" data-lobby-nav-lobby="1" style="display:flex; align-items:center; gap:8px; text-decoration:none; margin-right:16px;">
         <img src="/assets/lobby/logo.png" alt="Pika.bg" style="width:192px; height:52px; display:block; object-fit:contain;">
       </a>
 
       <div style="display:flex; align-items:stretch; gap:0; height:100%; flex:1;">
-        <a href="#" data-lobby-nav-lobby="1" ${lobbyActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+        <a href="/lobby" data-lobby-nav-lobby="1" ${lobbyActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
           text-decoration:none;
@@ -1266,16 +1266,14 @@ function renderNav(state: LobbyScreenState): string {
           </svg>
           Блокирани
         </button>
-        <button type="button" data-lobby-nav-leaderboards="1" ${leaderboardsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+        <a href="/ranking" data-lobby-nav-leaderboards="1" ${leaderboardsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
-          border:0;
           background:${leaderboardsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
           font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
           color:${leaderboardsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
           border-bottom:2px solid ${leaderboardsActive ? '#d4a520' : 'transparent'};
-          cursor:pointer;
-          height:100%;
+          text-decoration:none; height:100%;
         ">
           <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
             <line x1="18" y1="20" x2="18" y2="10"/>
@@ -1283,17 +1281,15 @@ function renderNav(state: LobbyScreenState): string {
             <line x1="6" y1="20" x2="6" y2="14"/>
           </svg>
           Класация
-        </button>
-        <button type="button" data-lobby-nav-players="1" ${playersActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+        </a>
+        <a href="/players" data-lobby-nav-players="1" ${playersActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
-          border:0;
           background:${playersActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
           font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
           color:${playersActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
           border-bottom:2px solid ${playersActive ? '#d4a520' : 'transparent'};
-          cursor:pointer;
-          height:100%;
+          text-decoration:none; height:100%;
         ">
           <svg xmlns="http://www.w3.org/2000/svg" width="26" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
             <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
@@ -1302,7 +1298,7 @@ function renderNav(state: LobbyScreenState): string {
             <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
           </svg>
           Играчи
-        </button>
+        </a>
         ${state.profile.profileId !== null ? `
           <button type="button" data-lobby-nav-chat="1" ${chatActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
             display:flex; align-items:center; gap:10px;
@@ -2463,7 +2459,7 @@ function renderBottomSection(
       gap:12px;
       margin-top:12px;
     ">
-      <div data-lobby-rules-card="1" style="
+      <a href="/rules" data-lobby-rules-card="1" style="
         background:#000000;
         border:1px solid rgba(212,165,32,0.40);
         border-radius:12px;
@@ -2472,6 +2468,7 @@ function renderBottomSection(
         cursor:pointer;
         min-height:80px;
         transition:border-color 0.15s, box-shadow 0.15s;
+        text-decoration:none; color:inherit;
       "
       onmouseenter="this.style.borderColor='rgba(212,165,32,0.85)';this.style.boxShadow='0 0 0 1px rgba(212,165,32,0.35)'"
       onmouseleave="this.style.borderColor='rgba(212,165,32,0.40)';this.style.boxShadow='none'"
@@ -2481,9 +2478,9 @@ function renderBottomSection(
           <div style="font-size:15px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Правила на белота</div>
           <div style="font-size:13px; color:rgba(255,255,255,0.5); margin-top:4px; font-weight:400;">Виж правилата, анонсите и точкуването.</div>
         </div>
-      </div>
+      </a>
 
-      <div data-lobby-strategy-card="1" style="
+      <a href="/strategy" data-lobby-strategy-card="1" style="
         background:#000000;
         border:1px solid rgba(212,165,32,0.40);
         border-radius:12px;
@@ -2492,6 +2489,7 @@ function renderBottomSection(
         cursor:pointer;
         min-height:80px;
         transition:border-color 0.15s, box-shadow 0.15s;
+        text-decoration:none; color:inherit;
       "
       onmouseenter="this.style.borderColor='rgba(212,165,32,0.85)';this.style.boxShadow='0 0 0 1px rgba(212,165,32,0.35)'"
       onmouseleave="this.style.borderColor='rgba(212,165,32,0.40)';this.style.boxShadow='none'"
@@ -2501,7 +2499,7 @@ function renderBottomSection(
           <div style="font-size:15px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Съвети и стратегии</div>
           <div style="font-size:13px; color:rgba(255,255,255,0.5); margin-top:4px; font-weight:400;">Научи полезни тактики и стани по-добър.</div>
         </div>
-      </div>
+      </a>
     </div>
   `
 }
@@ -2538,9 +2536,9 @@ function renderMobileMenu(state: LobbyScreenState): string {
           to { opacity:0; transform:translateY(-8px) scaleY(0.88); }
         }
       </style>
-      <button type="button" data-lobby-nav-lobby="1" style="border:0;background:transparent;padding:0;display:flex;align-items:center;cursor:pointer;">
+      <a href="/lobby" data-lobby-nav-lobby="1" style="border:0;background:transparent;padding:0;display:flex;align-items:center;text-decoration:none;">
         <img src="/assets/lobby/logo.png" alt="Pika.bg" style="width:142px;height:38px;display:block;object-fit:contain;">
-      </button>
+      </a>
 
       <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
         ${state.profile.profileId !== null ? `
@@ -2865,20 +2863,20 @@ function renderMobileQuickActions(unclaimedMissionsCount: number, hasUnclaimedDa
           <span style="${mobileActionSubtitleStyle()}">Изпълнявай дневни мисии и печели жълтици.</span>
         </span>
       </button>
-      <button type="button" data-lobby-rules-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.40)')}">
+      <a href="/rules" data-lobby-rules-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.40)')}text-decoration:none;">
         <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="9" y1="7" x2="15" y2="7"/><line x1="9" y1="11" x2="15" y2="11"/><line x1="9" y1="15" x2="12" y2="15"/></svg>
         <span style="min-width:0;display:grid;gap:3px;">
           <span>Правила на белота</span>
           <span style="${mobileActionSubtitleStyle()}">Виж правилата, анонсите и точкуването.</span>
         </span>
-      </button>
-      <button type="button" data-lobby-strategy-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.40)')}">
+      </a>
+      <a href="/strategy" data-lobby-strategy-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.40)')}text-decoration:none;">
         <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
         <span style="min-width:0;display:grid;gap:3px;">
           <span>Съвети и стратегии</span>
           <span style="${mobileActionSubtitleStyle()}">Научи полезни тактики и стани по-добър.</span>
         </span>
-      </button>
+      </a>
     </section>
   `
 }
@@ -6638,6 +6636,16 @@ function renderNoPlayersModal(state: LobbyScreenState): string {
   `
 }
 
+function shouldHandleSpaLinkClick(event: MouseEvent): boolean {
+  return (
+    event.button === 0 &&
+    !event.ctrlKey &&
+    !event.shiftKey &&
+    !event.altKey &&
+    !event.metaKey
+  )
+}
+
 export function renderLobbyScreen(
   root: HTMLElement,
   options: RenderLobbyScreenOptions,
@@ -7136,14 +7144,22 @@ export function renderLobbyScreen(
 
   root.querySelectorAll<HTMLElement>('[data-lobby-nav-lobby="1"]').forEach((el) => {
     el.addEventListener('click', (event) => {
-      event.preventDefault()
-      options.onLobbyClick()
+      if (shouldHandleSpaLinkClick(event as MouseEvent)) {
+        event.preventDefault()
+        options.onLobbyClick()
+      }
     })
   })
 
   root
-    .querySelector<HTMLButtonElement>('[data-lobby-nav-players="1"]')
-    ?.addEventListener('click', options.onPlayersClick)
+    .querySelectorAll<HTMLElement>('[data-lobby-nav-players="1"]')
+    .forEach((element) => {
+      element.addEventListener('click', (e) => {
+        if (!shouldHandleSpaLinkClick(e as MouseEvent)) return
+        e.preventDefault()
+        options.onPlayersClick()
+      })
+    })
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-nav-blocked-players="1"]')
@@ -7188,8 +7204,14 @@ export function renderLobbyScreen(
     })
 
   root
-    .querySelector<HTMLButtonElement>('[data-lobby-nav-leaderboards="1"]')
-    ?.addEventListener('click', options.onLeaderboardsClick)
+    .querySelectorAll<HTMLElement>('[data-lobby-nav-leaderboards="1"]')
+    .forEach((element) => {
+      element.addEventListener('click', (e) => {
+        if (!shouldHandleSpaLinkClick(e as MouseEvent)) return
+        e.preventDefault()
+        options.onLeaderboardsClick()
+      })
+    })
 
   root
     .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-shop="1"]')
@@ -8592,10 +8614,20 @@ export function renderLobbyScreen(
     ?.addEventListener('click', options.onPrivateRoomsOpen)
 
   root.querySelector<HTMLElement>('[data-lobby-rules-card="1"]')
-    ?.addEventListener('click', options.onRulesOpen)
+    ?.addEventListener('click', (e) => {
+      if (shouldHandleSpaLinkClick(e as MouseEvent)) {
+        e.preventDefault()
+        options.onRulesOpen()
+      }
+    })
 
   root.querySelector<HTMLElement>('[data-lobby-strategy-card="1"]')
-    ?.addEventListener('click', options.onStrategyOpen)
+    ?.addEventListener('click', (e) => {
+      if (shouldHandleSpaLinkClick(e as MouseEvent)) {
+        e.preventDefault()
+        options.onStrategyOpen()
+      }
+    })
 
   root.querySelector<HTMLButtonElement>('[data-private-rooms-close="1"]')
     ?.addEventListener('click', options.onPrivateRoomsClose)

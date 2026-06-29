@@ -1,14 +1,8 @@
 User-agent: *
-Allow: /$
-Allow: /lobby
-Allow: /players
-Allow: /shop
-Allow: /ranking
+Allow: /
+Disallow: /admin
 Disallow: /api/
 Disallow: /uploads/
 Disallow: /ws
-
-User-agent: Googlebot-Image
-Disallow: /uploads/
 
 Sitemap: https://www.pika.bg/sitemap.xml

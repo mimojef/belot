@@ -1,3 +1,4 @@
+import { applyRouteSeo } from '../seo/applyRouteSeo'
 import {
   renderMatchmakingRoomScreen,
   type MatchmakingRoomPlayer,
@@ -4491,8 +4492,10 @@ export function createLobbyFlowController(
     if (!_navigationReady || _pendingInitialNav) return
     if (document.getElementById('pwa-landing-overlay') !== null) return
     const path = SCREEN_TO_PATH[state.currentScreen] ?? '/lobby'
-    if (path === window.location.pathname) return
-    history.pushState(null, '', path)
+    if (path !== window.location.pathname) {
+      history.pushState(null, '', path)
+      applyRouteSeo(path)
+    }
   }
 
   function navigateFromPath(path: string): void {
@@ -5140,7 +5143,9 @@ export function createLobbyFlowController(
   void loadPlayerUnclaimedCount()
 
   window.addEventListener('popstate', () => {
-    navigateFromPath(window.location.pathname)
+    const path = window.location.pathname
+    applyRouteSeo(path)
+    navigateFromPath(path)
   })
 
   function msUntilNextSofiaMidnight(): number {
@@ -5333,6 +5338,7 @@ export function createLobbyFlowController(
     },
     navigateInitialPath: () => {
       _navigationReady = true
+      applyRouteSeo(_loadPath || '/lobby')
       if (!_loadPath || !PATH_TO_SCREEN[_loadPath]) return
       if (state.isConnected) {
         navigateFromPath(_loadPath)
