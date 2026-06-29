@@ -12,6 +12,8 @@ export type SiteVisitUtmParams = {
   utmContent: string | null
 }
 
+export type SiteVisitViewLayout = 'mobile' | 'desktop'
+
 export type RecordSitePageViewInput = {
   pageViewId: string
   anonymousVisitorId: string
@@ -25,6 +27,7 @@ export type RecordSitePageViewInput = {
   utm: SiteVisitUtmParams
   ipAddress: string | null
   userAgent: string | null
+  viewLayout: SiteVisitViewLayout | null
 }
 
 export type RecordSitePageViewResult =
@@ -36,6 +39,18 @@ export type VisitorSummary = {
   yesterday: number
   last7days: number
   last30days: number
+}
+
+export type ViewLayoutPeriodCounts = {
+  mobile: number
+  desktop: number
+}
+
+export type ViewLayoutSummary = {
+  today: ViewLayoutPeriodCounts
+  yesterday: ViewLayoutPeriodCounts
+  last7days: ViewLayoutPeriodCounts
+  last30days: ViewLayoutPeriodCounts
 }
 
 export type VisitorListPeriod = 'today' | 'yesterday' | '7d' | '30d'
@@ -74,6 +89,7 @@ export type VisitorSourcesResult = {
 export type SiteVisitStore = {
   recordPageView: (input: RecordSitePageViewInput) => RecordSitePageViewResult
   getVisitorSummary: (now?: Date) => VisitorSummary
+  getViewLayoutSummary: (now?: Date) => ViewLayoutSummary
   getVisitorList: (params: {
     period: VisitorListPeriod
     type: VisitorListType
@@ -138,8 +154,10 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       utm_term,
       utm_content,
       ip_address,
-      user_agent
+      user_agent,
+      view_layout
     ) VALUES (
+      ?,
       ?,
       ?,
       ?,
@@ -189,6 +207,28 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     SELECT COUNT(DISTINCT anonymous_visitor_id) AS n
     FROM site_visit_events
     WHERE occurred_at >= ?;
+  `)
+
+  // Counts entry page-views (navigate/reload/back_forward) by view_layout in a half-open UTC interval.
+  // NULL view_layout rows (old records without layout data) are excluded by the WHERE clause.
+  const countLayoutInRangeStmt = database.prepare(`
+    SELECT view_layout, COUNT(*) AS n
+    FROM site_visit_events
+    WHERE view_layout IS NOT NULL
+      AND navigation_type IN ('navigate', 'reload', 'back_forward')
+      AND occurred_at >= ?
+      AND occurred_at < ?
+    GROUP BY view_layout;
+  `)
+
+  // Same as above but without an upper bound (for rolling 7d/30d periods).
+  const countLayoutSinceStmt = database.prepare(`
+    SELECT view_layout, COUNT(*) AS n
+    FROM site_visit_events
+    WHERE view_layout IS NOT NULL
+      AND navigation_type IN ('navigate', 'reload', 'back_forward')
+      AND occurred_at >= ?
+    GROUP BY view_layout;
   `)
 
   const purgeEventsStatement = database.prepare(`
@@ -245,6 +285,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
         input.utm.utmContent,
         input.ipAddress,
         input.userAgent,
+        input.viewLayout,
       )
 
       if (getChanges(insertEventResult) === 0) {
@@ -325,6 +366,31 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       yesterday:  countInRange(bounds.yesterdayStart, bounds.todayStart),
       last7days:  countSince(last7Start),
       last30days: countSince(last30Start),
+    }
+  }
+
+  function getViewLayoutSummary(now: Date = new Date()): ViewLayoutSummary {
+    const bounds = getSofiaDayBoundsUtc(now)
+    const last7Start  = toSqliteUtc(new Date(now.getTime() - 7  * 86_400_000))
+    const last30Start = toSqliteUtc(new Date(now.getTime() - 30 * 86_400_000))
+
+    type LayoutRow = { view_layout: string; n: number }
+
+    function toCounts(rows: LayoutRow[]): ViewLayoutPeriodCounts {
+      let mobile = 0
+      let desktop = 0
+      for (const row of rows) {
+        if (row.view_layout === 'mobile') mobile = row.n
+        else if (row.view_layout === 'desktop') desktop = row.n
+      }
+      return { mobile, desktop }
+    }
+
+    return {
+      today:     toCounts(countLayoutInRangeStmt.all(bounds.todayStart,     bounds.tomorrowStart) as LayoutRow[]),
+      yesterday: toCounts(countLayoutInRangeStmt.all(bounds.yesterdayStart, bounds.todayStart)    as LayoutRow[]),
+      last7days:  toCounts(countLayoutSinceStmt.all(last7Start)  as LayoutRow[]),
+      last30days: toCounts(countLayoutSinceStmt.all(last30Start) as LayoutRow[]),
     }
   }
 
@@ -516,6 +582,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
   return {
     recordPageView,
     getVisitorSummary,
+    getViewLayoutSummary,
     getVisitorList,
     getVisitorSources,
     purgeOlderThanDays,

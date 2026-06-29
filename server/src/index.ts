@@ -31,6 +31,7 @@ import {
   createSiteVisitStore,
   type SiteVisitNavigationType,
   type SiteVisitUtmParams,
+  type SiteVisitViewLayout,
 } from './db/siteVisitStore.js'
 import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
@@ -2032,6 +2033,7 @@ const VISITOR_PAGE_VIEW_BODY_KEYS = new Set([
   'navigationType',
   'referrer',
   'utm',
+  'viewLayout',
 ])
 const VISITOR_UTM_KEYS = new Set([
   'utm_source',
@@ -2066,6 +2068,7 @@ type VisitorPageViewPayload = {
   attributionReferrer: string | null
   attributionSource: string | null
   utm: SiteVisitUtmParams
+  viewLayout: SiteVisitViewLayout | null
 }
 
 function hasControlChars(value: string): boolean {
@@ -2430,6 +2433,9 @@ function parseVisitorPageViewPayload(body: unknown, req: IncomingMessage): Visit
   const utm = normalizeVisitorUtm(body.utm)
   if ('error' in utm) return utm
   const attribution = deriveVisitorAttribution(utm, referrer, req)
+  const rawLayout = body.viewLayout
+  const viewLayout: SiteVisitViewLayout | null =
+    rawLayout === 'mobile' || rawLayout === 'desktop' ? rawLayout : null
 
   return {
     anonymousVisitorId,
@@ -2441,6 +2447,7 @@ function parseVisitorPageViewPayload(body: unknown, req: IncomingMessage): Visit
     attributionReferrer: attribution.attributionReferrer,
     attributionSource: attribution.attributionSource,
     utm,
+    viewLayout,
   }
 }
 
@@ -4997,6 +5004,7 @@ async function handleAdminStatsRequest(
   const paymentStats = coinPurchaseStore.getAdminPaymentStats()
 
   const visitors = siteVisitStore.getVisitorSummary()
+  const viewLayout = siteVisitStore.getViewLayoutSummary()
 
   sendJsonResponse(res, 200, {
     ok: true,
@@ -5005,6 +5013,7 @@ async function handleAdminStatsRequest(
       totalProfiles,
       payments: paymentStats,
       visitors,
+      viewLayout,
     },
   })
   return true
