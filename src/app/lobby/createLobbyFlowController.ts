@@ -62,6 +62,8 @@ export type LobbyFlowScreen =
   | 'private-rooms'
   | 'support'
   | 'guest-contact-messages'
+  | 'rules'
+  | 'strategy'
 export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
 export type LobbyAuthSession = {
@@ -974,6 +976,8 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/terms': 'terms',
   '/privacy': 'privacy',
   '/contact': 'contact',
+  '/rules': 'rules',
+  '/strategy': 'strategy',
 }
 
 export function createLobbyFlowController(
@@ -1668,6 +1672,10 @@ export function createLobbyFlowController(
               ? 'privacy'
             : state.currentScreen === 'contact'
               ? 'contact'
+            : state.currentScreen === 'rules'
+              ? 'rules'
+            : state.currentScreen === 'strategy'
+              ? 'strategy'
           : state.currentScreen === 'friends'
             ? 'friends'
             : state.currentScreen === 'chat'
@@ -2261,6 +2269,12 @@ export function createLobbyFlowController(
         state.privateRoomsTab = 'all'
         options.onPrivateRoomsOpen?.()
         render()
+      },
+      onRulesOpen: () => {
+        showRulesPage()
+      },
+      onStrategyOpen: () => {
+        showStrategyPage()
       },
       onPrivateRoomsClose: () => {
         state.currentScreen = 'lobby'
@@ -4108,6 +4122,32 @@ export function createLobbyFlowController(
     render()
   }
 
+  function showRulesPage(): void {
+    leaveAdminServerIfActive()
+    state.currentScreen = 'rules'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+  }
+
+  function showStrategyPage(): void {
+    leaveAdminServerIfActive()
+    state.currentScreen = 'strategy'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+  }
+
   async function openChatConversation(
     friendshipId: string,
     shouldRenderLoading = true,
@@ -4406,6 +4446,8 @@ export function createLobbyFlowController(
     terms: '/terms',
     privacy: '/privacy',
     contact: '/contact',
+    rules: '/rules',
+    strategy: '/strategy',
   }
 
   const PATH_TO_SCREEN: Record<string, LobbySocialScreen> = {
@@ -4422,6 +4464,8 @@ export function createLobbyFlowController(
     '/terms': 'terms',
     '/privacy': 'privacy',
     '/contact': 'contact',
+    '/rules': 'rules',
+    '/strategy': 'strategy',
   }
 
   const _loadPath = window.location.pathname
@@ -4470,6 +4514,8 @@ export function createLobbyFlowController(
       case 'terms': showPublicLegalPage('terms'); break
       case 'privacy': showPublicLegalPage('privacy'); break
       case 'contact': showPublicLegalPage('contact'); break
+      case 'rules': showRulesPage(); break
+      case 'strategy': showStrategyPage(); break
     }
   }
 

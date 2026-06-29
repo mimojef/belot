@@ -3213,6 +3213,8 @@ const _VALID_PATHS = new Set([
   '/terms',
   '/privacy',
   '/contact',
+  '/rules',
+  '/strategy',
 ])
 if (!isStripePaymentReturn && !isRunningAsStandalone() && !_VALID_PATHS.has(_initialPath)) {
   showLandingOverlay()

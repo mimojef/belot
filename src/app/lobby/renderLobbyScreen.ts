@@ -29,6 +29,8 @@ import type { PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlay
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import { PUBLIC_LEGAL_PAGES, type PublicLegalPageKey } from './publicLegalPages'
+import { renderRulesPage } from './renderRulesPage'
+import { renderStrategyPage } from './renderStrategyPage'
 
 const MISSION_TYPE_LABELS: Record<string, string> = {
   win_games: 'Спечели N игри',
@@ -94,7 +96,7 @@ export type GuestContactFormInput = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy'
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -412,6 +414,8 @@ export type RenderLobbyScreenOptions = {
   onAdminVisitorsTypeChange?: (type: import('../network/createGameServerClient').VisitorListType) => void
   onAdminVisitorsPageChange?: (offset: number) => void
   onAdminVisitorsViewChange?: (view: import('../network/createGameServerClient').AdminVisitorsView) => void
+  onRulesOpen: () => void
+  onStrategyOpen: () => void
 }
 
 
@@ -2452,6 +2456,53 @@ function renderBottomSection(
         ${footerDecorHtml}
       </div>
     </div>
+
+    <div style="
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0, 1fr));
+      gap:12px;
+      margin-top:12px;
+    ">
+      <div data-lobby-rules-card="1" style="
+        background:#000000;
+        border:1px solid rgba(212,165,32,0.40);
+        border-radius:12px;
+        padding:16px;
+        display:flex; align-items:center; gap:14px;
+        cursor:pointer;
+        min-height:80px;
+        transition:border-color 0.15s, box-shadow 0.15s;
+      "
+      onmouseenter="this.style.borderColor='rgba(212,165,32,0.85)';this.style.boxShadow='0 0 0 1px rgba(212,165,32,0.35)'"
+      onmouseleave="this.style.borderColor='rgba(212,165,32,0.40)';this.style.boxShadow='none'"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="rgba(212,165,32,0.90)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="9" y1="7" x2="15" y2="7"/><line x1="9" y1="11" x2="15" y2="11"/><line x1="9" y1="15" x2="12" y2="15"/></svg>
+        <div style="flex:1; min-width:0;">
+          <div style="font-size:15px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Правила на белота</div>
+          <div style="font-size:13px; color:rgba(255,255,255,0.5); margin-top:4px; font-weight:400;">Виж правилата, анонсите и точкуването.</div>
+        </div>
+      </div>
+
+      <div data-lobby-strategy-card="1" style="
+        background:#000000;
+        border:1px solid rgba(212,165,32,0.40);
+        border-radius:12px;
+        padding:16px;
+        display:flex; align-items:center; gap:14px;
+        cursor:pointer;
+        min-height:80px;
+        transition:border-color 0.15s, box-shadow 0.15s;
+      "
+      onmouseenter="this.style.borderColor='rgba(212,165,32,0.85)';this.style.boxShadow='0 0 0 1px rgba(212,165,32,0.35)'"
+      onmouseleave="this.style.borderColor='rgba(212,165,32,0.40)';this.style.boxShadow='none'"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="rgba(212,165,32,0.90)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <div style="flex:1; min-width:0;">
+          <div style="font-size:15px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Съвети и стратегии</div>
+          <div style="font-size:13px; color:rgba(255,255,255,0.5); margin-top:4px; font-weight:400;">Научи полезни тактики и стани по-добър.</div>
+        </div>
+      </div>
+    </div>
   `
 }
 
@@ -2812,6 +2863,20 @@ function renderMobileQuickActions(unclaimedMissionsCount: number, hasUnclaimedDa
         <span style="min-width:0;display:grid;gap:3px;">
           <span>Дневни мисии</span>
           <span style="${mobileActionSubtitleStyle()}">Изпълнявай дневни мисии и печели жълтици.</span>
+        </span>
+      </button>
+      <button type="button" data-lobby-rules-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.40)')}">
+        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="9" y1="7" x2="15" y2="7"/><line x1="9" y1="11" x2="15" y2="11"/><line x1="9" y1="15" x2="12" y2="15"/></svg>
+        <span style="min-width:0;display:grid;gap:3px;">
+          <span>Правила на белота</span>
+          <span style="${mobileActionSubtitleStyle()}">Виж правилата, анонсите и точкуването.</span>
+        </span>
+      </button>
+      <button type="button" data-lobby-strategy-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.40)')}">
+        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <span style="min-width:0;display:grid;gap:3px;">
+          <span>Съвети и стратегии</span>
+          <span style="${mobileActionSubtitleStyle()}">Научи полезни тактики и стани по-добър.</span>
         </span>
       </button>
     </section>
@@ -3197,6 +3262,10 @@ function renderMobileLobbyScreenContent(
             ? renderMobileChatPanel(state)
           : state.view === 'terms' || state.view === 'privacy' || state.view === 'contact'
             ? renderPublicLegalPage(state.view, true)
+          : state.view === 'rules'
+            ? renderRulesPage(true)
+          : state.view === 'strategy'
+            ? renderStrategyPage(true)
           : ''}
       </main>
     `
@@ -6745,6 +6814,10 @@ export function renderLobbyScreen(
                 ? renderChatPanel(state)
               : state.view === 'terms' || state.view === 'privacy' || state.view === 'contact'
                 ? renderPublicLegalPage(state.view)
+              : state.view === 'rules'
+                ? renderRulesPage()
+              : state.view === 'strategy'
+                ? renderStrategyPage()
               : `
               ${state.profile.profileId !== null
                 ? renderHeroSection(profileName, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level, isPhoneLayout)
@@ -8517,6 +8590,12 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLElement>('[data-lobby-private-rooms-card="1"]')
     ?.addEventListener('click', options.onPrivateRoomsOpen)
+
+  root.querySelector<HTMLElement>('[data-lobby-rules-card="1"]')
+    ?.addEventListener('click', options.onRulesOpen)
+
+  root.querySelector<HTMLElement>('[data-lobby-strategy-card="1"]')
+    ?.addEventListener('click', options.onStrategyOpen)
 
   root.querySelector<HTMLButtonElement>('[data-private-rooms-close="1"]')
     ?.addEventListener('click', options.onPrivateRoomsClose)
