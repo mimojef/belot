@@ -28,6 +28,7 @@ export type RecordSitePageViewInput = {
   ipAddress: string | null
   userAgent: string | null
   viewLayout: SiteVisitViewLayout | null
+  isEntry: boolean
 }
 
 export type RecordSitePageViewResult =
@@ -155,8 +156,10 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       utm_content,
       ip_address,
       user_agent,
-      view_layout
+      view_layout,
+      is_entry
     ) VALUES (
+      ?,
       ?,
       ?,
       ?,
@@ -209,13 +212,15 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     WHERE occurred_at >= ?;
   `)
 
-  // Counts entry page-views (navigate/reload/back_forward) by view_layout in a half-open UTC interval.
-  // NULL view_layout rows (old records without layout data) are excluded by the WHERE clause.
+  // Counts app-entry page-views by view_layout in a half-open UTC interval.
+  // is_entry = 1 means the initial load (navigate/reload at startup, or
+  // back_forward as the very first event). SPA pushState and in-app popstate
+  // events are stored with is_entry = 0. Old rows default to 0 and are excluded.
   const countLayoutInRangeStmt = database.prepare(`
     SELECT view_layout, COUNT(*) AS n
     FROM site_visit_events
-    WHERE view_layout IS NOT NULL
-      AND navigation_type IN ('navigate', 'reload', 'back_forward')
+    WHERE view_layout IN ('mobile', 'desktop')
+      AND is_entry = 1
       AND occurred_at >= ?
       AND occurred_at < ?
     GROUP BY view_layout;
@@ -225,8 +230,8 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
   const countLayoutSinceStmt = database.prepare(`
     SELECT view_layout, COUNT(*) AS n
     FROM site_visit_events
-    WHERE view_layout IS NOT NULL
-      AND navigation_type IN ('navigate', 'reload', 'back_forward')
+    WHERE view_layout IN ('mobile', 'desktop')
+      AND is_entry = 1
       AND occurred_at >= ?
     GROUP BY view_layout;
   `)
@@ -286,6 +291,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
         input.ipAddress,
         input.userAgent,
         input.viewLayout,
+        input.isEntry ? 1 : 0,
       )
 
       if (getChanges(insertEventResult) === 0) {

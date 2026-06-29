@@ -76,12 +76,13 @@ async function withTempDb(fn: (dbPath: string) => Promise<void>): Promise<void> 
         ip_address TEXT NULL,
         user_agent TEXT NULL,
         view_layout TEXT NULL CHECK (view_layout IN ('mobile', 'desktop')),
+        is_entry INTEGER NOT NULL DEFAULT 0 CHECK (is_entry IN (0, 1)),
         occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (anonymous_visitor_id) REFERENCES site_visitors(anonymous_visitor_id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_site_visit_events_occurred_at ON site_visit_events(occurred_at);
-      CREATE INDEX IF NOT EXISTS idx_site_visit_events_layout_navtype_time
-        ON site_visit_events(view_layout, navigation_type, occurred_at);
+      CREATE INDEX IF NOT EXISTS idx_site_visit_events_layout_entry_time
+        ON site_visit_events(view_layout, is_entry, occurred_at);
     `)
     db.close()
     await fn(dbPath)
@@ -96,6 +97,7 @@ function insertEvent(
   navType: string,
   layout: string | null,
   utcTs: string,
+  isEntry: 0 | 1 = 0,
 ): void {
   db.prepare(`
     INSERT OR IGNORE INTO site_visitors (anonymous_visitor_id, first_seen_at, last_seen_at)
@@ -103,9 +105,9 @@ function insertEvent(
   `).run(visitorId, utcTs, utcTs)
   db.prepare(`
     INSERT INTO site_visit_events
-      (page_view_id, anonymous_visitor_id, path, navigation_type, view_layout, occurred_at)
-    VALUES (?, ?, '/lobby', ?, ?, ?)
-  `).run(randomUUID(), visitorId, navType, layout, utcTs)
+      (page_view_id, anonymous_visitor_id, path, navigation_type, view_layout, is_entry, occurred_at)
+    VALUES (?, ?, '/lobby', ?, ?, ?, ?)
+  `).run(randomUUID(), visitorId, navType, layout, isEntry, utcTs)
 }
 
 // ─── [1] Таблицата приема mobile, desktop и NULL ───────────────────────────
@@ -158,26 +160,27 @@ await withTempDb(async (dbPath) => {
       navigationType: 'navigate', referrer: null, source: 'direct',
       attributionReferrer: null, attributionSource: null,
       utm: { utmSource: null, utmMedium: null, utmCampaign: null, utmTerm: null, utmContent: null },
-      ipAddress: null, userAgent: null, viewLayout: 'mobile',
+      ipAddress: null, userAgent: null, viewLayout: 'mobile', isEntry: true,
     })
     store.recordPageView({
       pageViewId: pid2, anonymousVisitorId: vid, profileId: null, path: '/lobby',
       navigationType: 'reload', referrer: null, source: 'direct',
       attributionReferrer: null, attributionSource: null,
       utm: { utmSource: null, utmMedium: null, utmCampaign: null, utmTerm: null, utmContent: null },
-      ipAddress: null, userAgent: null, viewLayout: 'desktop',
+      ipAddress: null, userAgent: null, viewLayout: 'desktop', isEntry: true,
     })
     store.recordPageView({
       pageViewId: pid3, anonymousVisitorId: vid, profileId: null, path: '/lobby',
       navigationType: 'navigate', referrer: null, source: 'direct',
       attributionReferrer: null, attributionSource: null,
       utm: { utmSource: null, utmMedium: null, utmCampaign: null, utmTerm: null, utmContent: null },
-      ipAddress: null, userAgent: null, viewLayout: null,
+      ipAddress: null, userAgent: null, viewLayout: null, isEntry: false,
     })
 
-    const r1 = db.prepare(`SELECT view_layout FROM site_visit_events WHERE page_view_id = ?`).get(pid1) as { view_layout: string | null }
-    const r2 = db.prepare(`SELECT view_layout FROM site_visit_events WHERE page_view_id = ?`).get(pid2) as { view_layout: string | null }
-    const r3 = db.prepare(`SELECT view_layout FROM site_visit_events WHERE page_view_id = ?`).get(pid3) as { view_layout: string | null }
+    type EventRow = { view_layout: string | null; is_entry: number }
+    const r1 = db.prepare(`SELECT view_layout, is_entry FROM site_visit_events WHERE page_view_id = ?`).get(pid1) as EventRow
+    const r2 = db.prepare(`SELECT view_layout, is_entry FROM site_visit_events WHERE page_view_id = ?`).get(pid2) as EventRow
+    const r3 = db.prepare(`SELECT view_layout, is_entry FROM site_visit_events WHERE page_view_id = ?`).get(pid3) as EventRow
 
     await check('[2.1] view_layout = "mobile" е записан', () => {
       if (r1.view_layout !== 'mobile') throw new Error(`view_layout=${String(r1.view_layout)}`)
@@ -187,6 +190,15 @@ await withTempDb(async (dbPath) => {
     })
     await check('[2.3] view_layout = NULL е записан', () => {
       if (r3.view_layout !== null) throw new Error(`view_layout=${String(r3.view_layout)}`)
+    })
+    await check('[2.4] is_entry = 1 при isEntry: true', () => {
+      if (r1.is_entry !== 1) throw new Error(`is_entry=${r1.is_entry}`)
+    })
+    await check('[2.5] is_entry = 1 при isEntry: true (reload)', () => {
+      if (r2.is_entry !== 1) throw new Error(`is_entry=${r2.is_entry}`)
+    })
+    await check('[2.6] is_entry = 0 при isEntry: false', () => {
+      if (r3.is_entry !== 0) throw new Error(`is_entry=${r3.is_entry}`)
     })
   } finally {
     db.close()
@@ -209,30 +221,30 @@ await withTempDb(async (dbPath) => {
   const db = new DatabaseSync(dbPath)
   db.exec('PRAGMA journal_mode = WAL;')
 
-  // today: 2 mobile navigate, 1 desktop navigate, 1 mobile reload
+  // today: 2 mobile navigate, 1 desktop navigate, 1 mobile reload — all entries
   const todayTs = toSqliteUtc(new Date(new Date(bounds.todayStart + 'Z').getTime() + 2 * 3_600_000))
-  insertEvent(db, randomUUID(), 'navigate', 'mobile',  todayTs)
-  insertEvent(db, randomUUID(), 'navigate', 'mobile',  todayTs)
-  insertEvent(db, randomUUID(), 'navigate', 'desktop', todayTs)
-  insertEvent(db, randomUUID(), 'reload',   'mobile',  todayTs)
+  insertEvent(db, randomUUID(), 'navigate', 'mobile',  todayTs, 1)
+  insertEvent(db, randomUUID(), 'navigate', 'mobile',  todayTs, 1)
+  insertEvent(db, randomUUID(), 'navigate', 'desktop', todayTs, 1)
+  insertEvent(db, randomUUID(), 'reload',   'mobile',  todayTs, 1)
 
-  // yesterday: 1 desktop navigate
+  // yesterday: 1 desktop navigate — entry
   const yesterdayTs = toSqliteUtc(new Date(new Date(bounds.yesterdayStart + 'Z').getTime() + 2 * 3_600_000))
-  insertEvent(db, randomUUID(), 'navigate', 'desktop', yesterdayTs)
+  insertEvent(db, randomUUID(), 'navigate', 'desktop', yesterdayTs, 1)
 
-  // 5 days ago (within 7d and 30d): 1 mobile navigate
+  // 5 days ago (within 7d and 30d): 1 mobile navigate — entry
   const fiveDaysAgo = toSqliteUtc(new Date(fixedNow.getTime() - 5 * 86_400_000))
-  insertEvent(db, randomUUID(), 'navigate', 'mobile', fiveDaysAgo)
+  insertEvent(db, randomUUID(), 'navigate', 'mobile', fiveDaysAgo, 1)
 
-  // 20 days ago (within 30d only): 1 desktop navigate
+  // 20 days ago (within 30d only): 1 desktop navigate — entry
   const twentyDaysAgo = toSqliteUtc(new Date(fixedNow.getTime() - 20 * 86_400_000))
-  insertEvent(db, randomUUID(), 'navigate', 'desktop', twentyDaysAgo)
+  insertEvent(db, randomUUID(), 'navigate', 'desktop', twentyDaysAgo, 1)
 
-  // spa events — must NOT be counted
+  // spa events — is_entry=0 (default), must NOT be counted
   insertEvent(db, randomUUID(), 'spa', 'mobile',  todayTs)
   insertEvent(db, randomUUID(), 'spa', 'desktop', todayTs)
 
-  // NULL layout — must NOT be counted
+  // NULL layout — must NOT be counted (is_entry=0 by default)
   insertEvent(db, randomUUID(), 'navigate', null, todayTs)
 
   db.close()
@@ -338,9 +350,9 @@ await withTempDb(async (dbPath) => {
   db.exec('PRAGMA journal_mode = WAL;')
   const vid = randomUUID()
   // Same visitor, 3 separate entry events (new tab, reload, back_forward)
-  insertEvent(db, vid, 'navigate',     'desktop', ts)
-  insertEvent(db, vid, 'reload',       'desktop', ts)
-  insertEvent(db, vid, 'back_forward', 'desktop', ts)
+  insertEvent(db, vid, 'navigate',     'desktop', ts, 1)
+  insertEvent(db, vid, 'reload',       'desktop', ts, 1)
+  insertEvent(db, vid, 'back_forward', 'desktop', ts, 1)
   db.close()
 
   const store = await createSiteVisitStore(dbPath)
@@ -370,15 +382,15 @@ await withTempDb(async (dbPath) => {
 
   const db = new DatabaseSync(dbPath)
   db.exec('PRAGMA journal_mode = WAL;')
-  insertEvent(db, randomUUID(), 'navigate',     'mobile', ts)
-  insertEvent(db, randomUUID(), 'reload',       'mobile', ts)
-  insertEvent(db, randomUUID(), 'back_forward', 'mobile', ts)
+  insertEvent(db, randomUUID(), 'navigate',     'mobile', ts, 1)
+  insertEvent(db, randomUUID(), 'reload',       'mobile', ts, 1)
+  insertEvent(db, randomUUID(), 'back_forward', 'mobile', ts, 1)
   db.close()
 
   const store = await createSiteVisitStore(dbPath)
   try {
     const summary = store.getViewLayoutSummary(fixedNow)
-    await check('[7.1] today.mobile = 3 (navigate + reload + back_forward)', () => {
+    await check('[7.1] today.mobile = 3 (navigate + reload + back_forward — all entries)', () => {
       if (summary.today.mobile !== 3) throw new Error(`today.mobile=${summary.today.mobile}`)
     })
   } finally {
@@ -400,9 +412,9 @@ await withTempDb(async (dbPath) => {
   const db = new DatabaseSync(dbPath)
   db.exec('PRAGMA journal_mode = WAL;')
   // Event exactly at yesterdayStart → in yesterday
-  insertEvent(db, randomUUID(), 'navigate', 'mobile', bounds.yesterdayStart)
+  insertEvent(db, randomUUID(), 'navigate', 'mobile', bounds.yesterdayStart, 1)
   // Event exactly at todayStart → in today
-  insertEvent(db, randomUUID(), 'navigate', 'desktop', bounds.todayStart)
+  insertEvent(db, randomUUID(), 'navigate', 'desktop', bounds.todayStart, 1)
   db.close()
 
   const store = await createSiteVisitStore(dbPath)
@@ -439,7 +451,7 @@ await withTempDb(async (dbPath) => {
   const db = new DatabaseSync(dbPath)
   db.exec('PRAGMA journal_mode = WAL;')
   const ts = toSqliteUtc(new Date(new Date(bounds.todayStart + 'Z').getTime() + 2 * 3_600_000))
-  insertEvent(db, randomUUID(), 'navigate', 'mobile', ts)
+  insertEvent(db, randomUUID(), 'navigate', 'mobile', ts, 1)
   db.close()
 
   const store = await createSiteVisitStore(dbPath)
@@ -467,7 +479,7 @@ await withTempDb(async (dbPath) => {
   const db = new DatabaseSync(dbPath)
   db.exec('PRAGMA journal_mode = WAL;')
   const ts = toSqliteUtc(new Date(new Date(bounds.todayStart + 'Z').getTime() + 2 * 3_600_000))
-  insertEvent(db, randomUUID(), 'navigate', 'desktop', ts)
+  insertEvent(db, randomUUID(), 'navigate', 'desktop', ts, 1)
   db.close()
 
   const store = await createSiteVisitStore(dbPath)
@@ -475,6 +487,63 @@ await withTempDb(async (dbPath) => {
     const summary = store.getViewLayoutSummary(fixedNow)
     await check('[10.2] today.desktop = 1 (зимен ден)', () => {
       if (summary.today.desktop !== 1) throw new Error(`today.desktop=${summary.today.desktop}`)
+    })
+  } finally {
+    store.close()
+  }
+})
+
+// ─── [13] isEntry семантика — само entry events се броят ─────────────────────
+//
+// Тества, че is_entry = 0 (SPA pushState и in-app popstate) не влизат
+// в getViewLayoutSummary(), докато is_entry = 1 (startup load) влиза.
+
+console.log('\n[13] isEntry семантика')
+await withTempDb(async (dbPath) => {
+  const fixedNow = new Date('2026-06-27T10:00:00Z')
+  const bounds = getSofiaDayBoundsUtc(fixedNow)
+  const ts = toSqliteUtc(new Date(new Date(bounds.todayStart + 'Z').getTime() + 3_600_000))
+
+  const db = new DatabaseSync(dbPath)
+  db.exec('PRAGMA journal_mode = WAL;')
+
+  // 1 startup load (isEntry=1) → трябва да се брои
+  insertEvent(db, randomUUID(), 'navigate', 'mobile', ts, 1)
+
+  // in-app popstate (back_forward, isEntry=0) → не трябва да се брои
+  insertEvent(db, randomUUID(), 'back_forward', 'mobile', ts, 0)
+
+  // SPA pushState (spa, isEntry=0) → не трябва да се брои
+  insertEvent(db, randomUUID(), 'spa', 'mobile', ts, 0)
+
+  // reload at startup (isEntry=1) → трябва да се брои
+  insertEvent(db, randomUUID(), 'reload', 'desktop', ts, 1)
+
+  // back_forward at startup (isEntry=1) → трябва да се брои (browser restored session)
+  insertEvent(db, randomUUID(), 'back_forward', 'desktop', ts, 1)
+
+  db.close()
+
+  const store = await createSiteVisitStore(dbPath)
+  try {
+    const summary = store.getViewLayoutSummary(fixedNow)
+    await check('[13.1] navigate isEntry=1 се брои (today.mobile ≥ 1)', () => {
+      if (summary.today.mobile < 1) throw new Error(`today.mobile=${summary.today.mobile}`)
+    })
+    await check('[13.2] in-app popstate isEntry=0 НЕ се брои (today.mobile = 1)', () => {
+      if (summary.today.mobile !== 1) throw new Error(`today.mobile=${summary.today.mobile} (очаква се 1, в-app popstate не трябва да влиза)`)
+    })
+    await check('[13.3] SPA pushState isEntry=0 НЕ се брои в mobile', () => {
+      if (summary.today.mobile !== 1) throw new Error(`today.mobile=${summary.today.mobile} (spa трябва да е изключен)`)
+    })
+    await check('[13.4] reload isEntry=1 се брои в desktop', () => {
+      if (summary.today.desktop < 1) throw new Error(`today.desktop=${summary.today.desktop}`)
+    })
+    await check('[13.5] back_forward при startup (isEntry=1) се брои в desktop', () => {
+      if (summary.today.desktop < 2) throw new Error(`today.desktop=${summary.today.desktop} (трябва reload + back_forward = 2)`)
+    })
+    await check('[13.6] today.desktop = 2 (reload + back_forward startup, без SPA)', () => {
+      if (summary.today.desktop !== 2) throw new Error(`today.desktop=${summary.today.desktop}`)
     })
   } finally {
     store.close()

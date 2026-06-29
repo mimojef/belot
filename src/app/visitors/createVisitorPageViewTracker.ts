@@ -87,7 +87,7 @@ export function createVisitorPageViewTracker(options: VisitorTrackerOptions): { 
   let lastPageUrl = getPageUrlWithoutQuery()
   const anonymousVisitorId = getAnonymousVisitorId()
 
-  function sendPageView(navigationType: VisitorNavigationType, referrer: string | null, viewLayout: VisitorViewLayout): void {
+  function sendPageView(navigationType: VisitorNavigationType, referrer: string | null, viewLayout: VisitorViewLayout, isEntry: boolean): void {
     const body = {
       anonymousVisitorId,
       pageViewId: createUuid(),
@@ -96,6 +96,7 @@ export function createVisitorPageViewTracker(options: VisitorTrackerOptions): { 
       referrer,
       utm: getUtmPayload(),
       viewLayout,
+      isEntry,
     }
 
     void fetch(options.endpointUrl, {
@@ -109,8 +110,8 @@ export function createVisitorPageViewTracker(options: VisitorTrackerOptions): { 
     })
   }
 
-  function trackCurrentPage(navigationType: VisitorNavigationType, referrer: string | null, viewLayout: VisitorViewLayout): void {
-    sendPageView(navigationType, referrer, viewLayout)
+  function trackCurrentPage(navigationType: VisitorNavigationType, referrer: string | null, viewLayout: VisitorViewLayout, isEntry: boolean): void {
+    sendPageView(navigationType, referrer, viewLayout, isEntry)
     lastPageUrl = getPageUrlWithoutQuery()
   }
 
@@ -121,7 +122,7 @@ export function createVisitorPageViewTracker(options: VisitorTrackerOptions): { 
       const result = originalPushState(data, unused, url)
       const after = getPageUrlWithoutQuery()
       if (after !== before) {
-        trackCurrentPage('spa', before, viewLayout)
+        trackCurrentPage('spa', before, viewLayout, false)
       }
       return result
     }) as History['pushState']
@@ -135,11 +136,13 @@ export function createVisitorPageViewTracker(options: VisitorTrackerOptions): { 
     const viewLayout = options.getViewLayout()
 
     patchPushState(viewLayout)
-    trackCurrentPage(getNavigationType(), document.referrer || null, viewLayout)
+    // The initial page load is always an entry, regardless of navigation type.
+    trackCurrentPage(getNavigationType(), document.referrer || null, viewLayout, true)
 
     window.addEventListener('popstate', () => {
       const previousPageUrl = lastPageUrl
-      trackCurrentPage('back_forward', previousPageUrl, viewLayout)
+      // In-app back/forward is not a new entry — the app is already running.
+      trackCurrentPage('back_forward', previousPageUrl, viewLayout, false)
     })
   }
 

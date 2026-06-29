@@ -82,6 +82,24 @@ await check('[1.7] popstate listener предава viewLayout', () => {
     throw new Error("back_forward не предава viewLayout")
   }
 })
+await check('[1.8] isEntry: true е подаден само в start() initial call', () => {
+  if (!trackerSource.includes('viewLayout, true)')) {
+    throw new Error('Липсва isEntry: true в initial trackCurrentPage call')
+  }
+})
+await check('[1.9] pushState patch подава isEntry: false', () => {
+  if (!trackerSource.includes("trackCurrentPage('spa'") || !trackerSource.includes('viewLayout, false)')) {
+    throw new Error("SPA trackCurrentPage не подава isEntry: false")
+  }
+})
+await check('[1.10] popstate listener подава isEntry: false', () => {
+  // Проверяваме, че в popstate addEventListener блока има isEntry false
+  const popstateMatch = trackerSource.match(/addEventListener\('popstate'[\s\S]*?\}\)/)
+  const popstateBody = popstateMatch?.[0] ?? ''
+  if (!popstateBody.includes('viewLayout, false)')) {
+    throw new Error("popstate listener не подава isEntry: false")
+  }
+})
 
 // ─── [2] main.ts wiring ──────────────────────────────────────────────────────
 
@@ -143,15 +161,29 @@ await check('[3.5] visitors (AdminVisitorSummary) не е премахнат о�
   }
 })
 
-// ─── [4] Tracker не съдържа visibilitychange ──────────────────────────────────
+// ─── [4] isEntry в payload и tracker ─────────────────────────────────────────
 
-console.log('\n[4] Tracker не добавя нежелано tracking')
-await check('[4.1] visibilitychange НЕ е в tracker-а', () => {
+console.log('\n[4] isEntry поле в tracker payload')
+await check('[4.1] isEntry присъства в fetch body на sendPageView', () => {
+  if (!trackerSource.includes('isEntry,')) {
+    throw new Error('isEntry не е в тялото на fetch body')
+  }
+})
+await check('[4.2] sendPageView приема isEntry: boolean параметър', () => {
+  if (!trackerSource.includes('isEntry: boolean')) {
+    throw new Error('Липсва isEntry: boolean в sendPageView signature')
+  }
+})
+
+// ─── [5] Tracker не съдържа нежелано tracking ────────────────────────────────
+
+console.log('\n[5] Tracker не добавя нежелано tracking')
+await check('[5.1] visibilitychange НЕ е в tracker-а', () => {
   if (trackerSource.includes('visibilitychange')) {
     throw new Error('Tracker съдържа visibilitychange listener — не трябва!')
   }
 })
-await check('[4.2] resize НЕ предизвиква ново sendPageView', () => {
+await check('[5.2] resize НЕ предизвиква ново sendPageView', () => {
   // Проверяваме, че tracker-ът не listen-ва resize за tracking цели
   if (trackerSource.includes("addEventListener('resize'") || trackerSource.includes('addEventListener("resize"')) {
     throw new Error('Tracker има resize listener')

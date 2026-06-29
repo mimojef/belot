@@ -2034,6 +2034,7 @@ const VISITOR_PAGE_VIEW_BODY_KEYS = new Set([
   'referrer',
   'utm',
   'viewLayout',
+  'isEntry',
 ])
 const VISITOR_UTM_KEYS = new Set([
   'utm_source',
@@ -2069,6 +2070,7 @@ type VisitorPageViewPayload = {
   attributionSource: string | null
   utm: SiteVisitUtmParams
   viewLayout: SiteVisitViewLayout | null
+  isEntry: boolean
 }
 
 function hasControlChars(value: string): boolean {
@@ -2437,6 +2439,10 @@ function parseVisitorPageViewPayload(body: unknown, req: IncomingMessage): Visit
   const viewLayout: SiteVisitViewLayout | null =
     rawLayout === 'mobile' || rawLayout === 'desktop' ? rawLayout : null
 
+  // Old clients without isEntry field default to false (not counted as entries).
+  // Any non-boolean or missing value is treated as false.
+  const isEntry: boolean = body.isEntry === true
+
   return {
     anonymousVisitorId,
     pageViewId,
@@ -2448,6 +2454,7 @@ function parseVisitorPageViewPayload(body: unknown, req: IncomingMessage): Visit
     attributionSource: attribution.attributionSource,
     utm,
     viewLayout,
+    isEntry,
   }
 }
 
