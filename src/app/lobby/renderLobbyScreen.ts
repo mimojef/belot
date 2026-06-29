@@ -3441,7 +3441,7 @@ function renderFriendsDirectory(state: LobbyScreenState): string {
   `
 }
 
-const CHAT_EMOJIS = Array.from({ length: 21 }, (_, i) => {
+const CHAT_EMOJIS = Array.from({ length: 24 }, (_, i) => {
   const n = String(i + 1).padStart(2, '0')
   return {
     code: `[e:${n}]`,
@@ -3573,7 +3573,7 @@ function renderChatPanel(state: LobbyScreenState): string {
       </div>
 
       <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;overflow-y:auto;padding:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:2px;">
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(8,1fr);gap:2px;">
           ${CHAT_EMOJIS.map((emoji) => `
             <button type="button" data-chat-emoji="${escapeHtml(emoji.code)}" style="border:0;background:#0a0a0a;padding:2px;cursor:pointer;border-radius:6px;display:flex;align-items:center;justify-content:center;" onmouseenter="this.style.background='rgba(212,165,32,0.15)'" onmouseleave="this.style.background='#0a0a0a'">
               <img src="${escapeHtml(emoji.preview)}" alt="" style="width:58px;height:58px;object-fit:contain;display:block;">

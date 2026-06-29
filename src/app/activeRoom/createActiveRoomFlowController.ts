@@ -157,7 +157,7 @@ export function createActiveRoomFlowController(
   let phrasePickerOpen = false
   const EMOJI_BUBBLE_DURATION_MS = 4000
   const PHRASE_BUBBLE_DURATION_MS = 4500
-  const EMOJI_COUNT = 21
+  const EMOJI_COUNT = 24
   const SCORING_VISUAL_COUNTDOWN_MS = 5000
   const playingCache: PlayingUiCache = createPlayingUiCache()
   let lastKnownWinningBid: NonNullable<RoomWinningBidSnapshot> | null = null
@@ -1402,7 +1402,8 @@ export function createActiveRoomFlowController(
           border-radius:16px;
           padding:12px;
           display:grid;
-          grid-template-columns:${isPhoneLayout ? 'repeat(4,52px)' : 'repeat(7,52px)'};
+          grid-template-columns:repeat(8,52px);
+          grid-template-rows:repeat(3,52px);
           gap:4px;
           box-shadow:0 8px 32px rgba(0,0,0,0.5);
           -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
