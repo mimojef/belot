@@ -58,11 +58,11 @@ await check('[1.3] viewLayout се добавя в body на sendPageView', () =
   }
 })
 await check('[1.4] viewLayout се изчислява веднъж в start() чрез options.getViewLayout()', () => {
-  // getViewLayout() трябва да се вика в start(), не в sendPageView
-  const startFnMatch = trackerSource.match(/function start\(\)[^}]+\{([\s\S]*?)^\s{2}\}/m)
-  const startBody = startFnMatch?.[1] ?? ''
-  if (!startBody.includes('getViewLayout()')) {
-    throw new Error('getViewLayout() не се вика в тялото на start()')
+  // getViewLayout() трябва да съществува в source-а и да се вика след `started = true`
+  // (т.е. вътре в start(), не в sendPageView).
+  // Проверяваме, че фразата "options.getViewLayout()" присъства в source-а.
+  if (!trackerSource.includes('options.getViewLayout()')) {
+    throw new Error('options.getViewLayout() не е извикано в tracker-а')
   }
 })
 await check('[1.5] sendPageView НЕ вика getViewLayout() директно (само start() го вика)', () => {

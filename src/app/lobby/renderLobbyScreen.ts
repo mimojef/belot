@@ -4035,6 +4035,29 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
         ${visitorCard('Последните 30 дни', stats.visitors.last30days, '30d')}
       </div>
 
+      <h3 style="font-size:13px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin:0 0 12px;">Влизания по версия</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-bottom:24px;">
+        ${(['today', 'yesterday', 'last7days', 'last30days'] as const).map((period) => {
+          const labels: Record<string, string> = { today: 'Днес', yesterday: 'Вчера', last7days: 'Последните 7 дни', last30days: 'Последните 30 дни' }
+          const counts = stats.viewLayout[period]
+          return `
+            <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.2);border-radius:12px;padding:14px 18px;">
+              <div style="font-size:10px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.45);margin-bottom:10px;">${escapeHtml(labels[period]!)}</div>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <span style="font-size:11px;color:rgba(255,255,255,0.45);width:60px;">Мобилна</span>
+                  <span style="font-size:20px;font-weight:900;color:#d4a520;">${counts.mobile.toLocaleString('bg-BG')}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <span style="font-size:11px;color:rgba(255,255,255,0.45);width:60px;">Десктоп</span>
+                  <span style="font-size:20px;font-weight:900;color:#d4a520;">${counts.desktop.toLocaleString('bg-BG')}</span>
+                </div>
+              </div>
+            </div>
+          `
+        }).join('')}
+      </div>
+
       <h3 style="font-size:13px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin:0 0 12px;">Плащания</h3>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
         ${statCard('Днес', stats.payments.today.count, stats.payments.today.totalCents)}
