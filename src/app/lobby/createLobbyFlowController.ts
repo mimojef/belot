@@ -4133,6 +4133,7 @@ export function createLobbyFlowController(
     stopWaitingRoomActivity()
     resetFinalFillSequence()
     render()
+    requestAnimationFrame(() => { window.scrollTo({ top: 0, left: 0, behavior: 'auto' }) })
   }
 
   function showStrategyPage(): void {
@@ -4146,6 +4147,7 @@ export function createLobbyFlowController(
     stopWaitingRoomActivity()
     resetFinalFillSequence()
     render()
+    requestAnimationFrame(() => { window.scrollTo({ top: 0, left: 0, behavior: 'auto' }) })
   }
 
   async function openChatConversation(
