@@ -12,6 +12,7 @@
     "check:monitoring-history-endpoint": "tsx scripts/checkAdminMonitoringHistoryEndpoint.ts",
     "check:visitor-tracking": "tsx scripts/checkVisitorTracking.ts",
     "check:view-layout-tracking": "tsx scripts/checkViewLayoutTracking.ts",
+    "check:view-layout-frontend": "tsx scripts/checkViewLayoutFrontend.ts --project-root=..",
     "check:visitor-summary": "tsx scripts/checkVisitorSummary.ts",
     "check:admin-visitors": "tsx scripts/checkAdminVisitors.ts",
     "check:admin-visitor-sources": "tsx scripts/checkAdminVisitorSources.ts --server-root=.",

@@ -148,6 +148,18 @@ export type AdminVisitorSummary = {
   last30days: number
 }
 
+export type AdminViewLayoutPeriodCounts = {
+  mobile: number
+  desktop: number
+}
+
+export type AdminViewLayoutSummary = {
+  today: AdminViewLayoutPeriodCounts
+  yesterday: AdminViewLayoutPeriodCounts
+  last7days: AdminViewLayoutPeriodCounts
+  last30days: AdminViewLayoutPeriodCounts
+}
+
 export type AdminStatsSnapshot = {
   onlineCount: number
   totalProfiles: number
@@ -159,6 +171,7 @@ export type AdminStatsSnapshot = {
     allTime: AdminPaymentPeriodStats
   }
   visitors: AdminVisitorSummary
+  viewLayout: AdminViewLayoutSummary
 }
 
 export type VisitorListPeriod = 'today' | 'yesterday' | '7d' | '30d'

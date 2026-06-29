@@ -1,7 +1,10 @@
 export type VisitorNavigationType = 'navigate' | 'reload' | 'back_forward' | 'spa'
 
+export type VisitorViewLayout = 'mobile' | 'desktop'
+
 type VisitorTrackerOptions = {
   endpointUrl: string
+  getViewLayout: () => VisitorViewLayout
 }
 
 type VisitorUtmPayload = Partial<Record<'utm_source' | 'utm_medium' | 'utm_campaign' | 'utm_term' | 'utm_content', string>>
@@ -84,7 +87,7 @@ export function createVisitorPageViewTracker(options: VisitorTrackerOptions): { 
   let lastPageUrl = getPageUrlWithoutQuery()
   const anonymousVisitorId = getAnonymousVisitorId()
 
-  function sendPageView(navigationType: VisitorNavigationType, referrer: string | null): void {
+  function sendPageView(navigationType: VisitorNavigationType, referrer: string | null, viewLayout: VisitorViewLayout): void {
     const body = {
       anonymousVisitorId,
       pageViewId: createUuid(),
@@ -92,6 +95,7 @@ export function createVisitorPageViewTracker(options: VisitorTrackerOptions): { 
       navigationType,
       referrer,
       utm: getUtmPayload(),
+      viewLayout,
     }
 
     void fetch(options.endpointUrl, {
@@ -105,19 +109,19 @@ export function createVisitorPageViewTracker(options: VisitorTrackerOptions): { 
     })
   }
 
-  function trackCurrentPage(navigationType: VisitorNavigationType, referrer: string | null): void {
-    sendPageView(navigationType, referrer)
+  function trackCurrentPage(navigationType: VisitorNavigationType, referrer: string | null, viewLayout: VisitorViewLayout): void {
+    sendPageView(navigationType, referrer, viewLayout)
     lastPageUrl = getPageUrlWithoutQuery()
   }
 
-  function patchPushState(): void {
+  function patchPushState(viewLayout: VisitorViewLayout): void {
     const originalPushState = history.pushState.bind(history)
     history.pushState = ((data: unknown, unused: string, url?: string | URL | null) => {
       const before = getPageUrlWithoutQuery()
       const result = originalPushState(data, unused, url)
       const after = getPageUrlWithoutQuery()
       if (after !== before) {
-        trackCurrentPage('spa', before)
+        trackCurrentPage('spa', before, viewLayout)
       }
       return result
     }) as History['pushState']
@@ -127,12 +131,15 @@ export function createVisitorPageViewTracker(options: VisitorTrackerOptions): { 
     if (started) return
     started = true
 
-    patchPushState()
-    trackCurrentPage(getNavigationType(), document.referrer || null)
+    // viewLayout is captured once at startup and never changes on resize/rotation.
+    const viewLayout = options.getViewLayout()
+
+    patchPushState(viewLayout)
+    trackCurrentPage(getNavigationType(), document.referrer || null, viewLayout)
 
     window.addEventListener('popstate', () => {
       const previousPageUrl = lastPageUrl
-      trackCurrentPage('back_forward', previousPageUrl)
+      trackCurrentPage('back_forward', previousPageUrl, viewLayout)
     })
   }
 

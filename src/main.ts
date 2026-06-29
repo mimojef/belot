@@ -3227,6 +3227,7 @@ if (isStripePaymentReturn) {
 
 const visitorPageViewTracker = createVisitorPageViewTracker({
   endpointUrl: `${getApiBaseUrl()}/api/visits/page-view`,
+  getViewLayout: () => isPhoneLayoutViewport() ? 'mobile' : 'desktop',
 })
 visitorPageViewTracker.start()
 
