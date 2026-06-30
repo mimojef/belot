@@ -32,7 +32,9 @@ import {
   type SiteVisitNavigationType,
   type SiteVisitUtmParams,
   type SiteVisitViewLayout,
+  type VisitorDeviceFilter,
 } from './db/siteVisitStore.js'
+import { detectDeviceType } from './utils/detectDeviceType.js'
 import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
@@ -2823,11 +2825,17 @@ async function handleSiteVisitPageViewRequest(
   const session = authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))
   const profileId = session?.profile.profileId ?? null
   const userAgent = getFirstHeaderValue(req.headers['user-agent'])
+  const lastDeviceType = detectDeviceType({
+    userAgent,
+    secChUaMobile: getFirstHeaderValue(req.headers['sec-ch-ua-mobile']),
+    secChUaPlatform: getFirstHeaderValue(req.headers['sec-ch-ua-platform']),
+  })
   const result = siteVisitStore.recordPageView({
     ...payload,
     profileId,
     ipAddress: requestIp === 'unknown' ? null : requestIp,
     userAgent,
+    lastDeviceType,
   })
 
   sendJsonResponse(res, 200, {
@@ -5063,12 +5071,24 @@ async function handleAdminVisitorSourcesRequest(
   }
 
   const VALID_PERIODS = ['today', 'yesterday', '7d', '30d'] as const
+  const VALID_TYPES   = ['all', 'guest', 'registered'] as const
+  const VALID_DEVICES = ['all', 'mobile', 'desktop', 'tablet', 'unknown'] as const
+
   const rawPeriod = requestUrl.searchParams.get('period') ?? 'today'
+  const rawType   = requestUrl.searchParams.get('type')   ?? 'all'
+  const rawDevice = requestUrl.searchParams.get('device') ?? 'all'
+
   const period = (VALID_PERIODS as readonly string[]).includes(rawPeriod)
     ? (rawPeriod as typeof VALID_PERIODS[number])
     : 'today'
+  const type = (VALID_TYPES as readonly string[]).includes(rawType)
+    ? (rawType as typeof VALID_TYPES[number])
+    : 'all'
+  const device = (VALID_DEVICES as readonly string[]).includes(rawDevice)
+    ? (rawDevice as VisitorDeviceFilter)
+    : 'all'
 
-  const result = siteVisitStore.getVisitorSources({ period })
+  const result = siteVisitStore.getVisitorSources({ period, type, device })
   sendJsonResponse(res, 200, { ok: true, ...result })
   return true
 }
@@ -5098,9 +5118,11 @@ async function handleAdminVisitorsRequest(
 
   const VALID_PERIODS = ['today', 'yesterday', '7d', '30d'] as const
   const VALID_TYPES = ['all', 'guest', 'registered'] as const
+  const VALID_DEVICES = ['all', 'mobile', 'desktop', 'tablet', 'unknown'] as const
 
   const rawPeriod = requestUrl.searchParams.get('period') ?? 'today'
   const rawType = requestUrl.searchParams.get('type') ?? 'all'
+  const rawDevice = requestUrl.searchParams.get('device') ?? 'all'
   const rawLimit = parseInt(requestUrl.searchParams.get('limit') ?? '50', 10)
   const rawOffset = parseInt(requestUrl.searchParams.get('offset') ?? '0', 10)
 
@@ -5110,10 +5132,13 @@ async function handleAdminVisitorsRequest(
   const type = (VALID_TYPES as readonly string[]).includes(rawType)
     ? (rawType as typeof VALID_TYPES[number])
     : 'all'
+  const device = (VALID_DEVICES as readonly string[]).includes(rawDevice)
+    ? (rawDevice as VisitorDeviceFilter)
+    : 'all'
   const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50
   const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0
 
-  const result = siteVisitStore.getVisitorList({ period, type, limit, offset })
+  const result = siteVisitStore.getVisitorList({ period, type, device, limit, offset })
 
   sendJsonResponse(res, 200, { ok: true, ...result })
   return true

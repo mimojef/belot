@@ -647,6 +647,85 @@ try {
       }
     })
   }
+
+  console.log('\n[15] Device type recorded on new page-view')
+  {
+    const mobileUa = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+    const visitorId = randomUUID()
+    const r = await httpJson(port, ENDPOINT, 'POST', payload({ anonymousVisitorId: visitorId }), undefined, {
+      'X-Forwarded-For': '203.0.113.60',
+      'User-Agent': mobileUa,
+    })
+    await check('[15.1] page-view with iPhone UA → 200 recorded', () => {
+      const b = r.body as { ok?: boolean; recorded?: boolean }
+      if (r.status !== 200 || b.ok !== true || b.recorded !== true) throw new Error(`${r.status} ${JSON.stringify(b)}`)
+    })
+    const db = getDb(isolated.databaseFile)
+    try {
+      const row = db.prepare(`SELECT last_device_type FROM site_visitors WHERE anonymous_visitor_id = ?`).get(visitorId) as { last_device_type: string | null } | undefined
+      await check('[15.2] last_device_type = mobile for iPhone UA', () => {
+        if (row?.last_device_type !== 'mobile') throw new Error(`last_device_type=${String(row?.last_device_type)}`)
+      })
+    } finally { db.close() }
+  }
+
+  console.log('\n[16] Device type updates when UA changes')
+  {
+    const desktopUa = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36'
+    const tabletUa  = 'Mozilla/5.0 (Linux; Android 12; SM-T870) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36'
+    const visitorId = randomUUID()
+    // First page-view: desktop
+    await httpJson(port, ENDPOINT, 'POST', payload({ anonymousVisitorId: visitorId }), undefined, {
+      'X-Forwarded-For': '203.0.113.61',
+      'User-Agent': desktopUa,
+    })
+    const db1 = getDb(isolated.databaseFile)
+    const after1 = db1.prepare(`SELECT last_device_type FROM site_visitors WHERE anonymous_visitor_id = ?`).get(visitorId) as { last_device_type: string | null } | undefined
+    db1.close()
+    await check('[16.1] first visit = desktop', () => {
+      if (after1?.last_device_type !== 'desktop') throw new Error(`device=${String(after1?.last_device_type)}`)
+    })
+    // Second page-view from different device (tablet UA)
+    await httpJson(port, ENDPOINT, 'POST', payload({ anonymousVisitorId: visitorId }), undefined, {
+      'X-Forwarded-For': '203.0.113.61',
+      'User-Agent': tabletUa,
+    })
+    const db2 = getDb(isolated.databaseFile)
+    const after2 = db2.prepare(`SELECT last_device_type FROM site_visitors WHERE anonymous_visitor_id = ?`).get(visitorId) as { last_device_type: string | null } | undefined
+    db2.close()
+    await check('[16.2] second visit (tablet UA) updates device type to tablet', () => {
+      if (after2?.last_device_type !== 'tablet') throw new Error(`device=${String(after2?.last_device_type)}`)
+    })
+  }
+
+  console.log('\n[17] Duplicate does not change device type')
+  {
+    const mobileUa  = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+    const desktopUa = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36'
+    const visitorId = randomUUID()
+    const pageViewId = randomUUID()
+    // First page-view: mobile
+    await httpJson(port, ENDPOINT, 'POST', payload({ anonymousVisitorId: visitorId, pageViewId }), undefined, {
+      'X-Forwarded-For': '203.0.113.62',
+      'User-Agent': mobileUa,
+    })
+    // Duplicate page-view with different (desktop) UA — must NOT update device
+    const r = await httpJson(port, ENDPOINT, 'POST', payload({ anonymousVisitorId: visitorId, pageViewId }), undefined, {
+      'X-Forwarded-For': '203.0.113.62',
+      'User-Agent': desktopUa,
+    })
+    await check('[17.1] duplicate recognised', () => {
+      const b = r.body as { recorded?: boolean; duplicate?: boolean }
+      if (r.status !== 200 || b.recorded !== false || b.duplicate !== true) throw new Error(`${r.status} ${JSON.stringify(b)}`)
+    })
+    const db = getDb(isolated.databaseFile)
+    try {
+      const row = db.prepare(`SELECT last_device_type FROM site_visitors WHERE anonymous_visitor_id = ?`).get(visitorId) as { last_device_type: string | null } | undefined
+      await check('[17.2] device type unchanged after duplicate (still mobile)', () => {
+        if (row?.last_device_type !== 'mobile') throw new Error(`last_device_type=${String(row?.last_device_type)}`)
+      })
+    } finally { db.close() }
+  }
 } finally {
   if (server) {
     await stopServer(server)

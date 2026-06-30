@@ -267,6 +267,7 @@ export type LobbyScreenState = {
   adminVisitorsErrorText: string | null
   adminVisitorsPeriod: import('../network/createGameServerClient').VisitorListPeriod
   adminVisitorsType: import('../network/createGameServerClient').VisitorListType
+  adminVisitorsDevice: import('../network/createGameServerClient').VisitorDeviceFilter
   adminVisitorsOffset: number
   adminVisitorsLimit: number
   adminVisitorsView: import('../network/createGameServerClient').AdminVisitorsView
@@ -418,6 +419,7 @@ export type RenderLobbyScreenOptions = {
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
   onAdminVisitorsTypeChange?: (type: import('../network/createGameServerClient').VisitorListType) => void
+  onAdminVisitorsDeviceChange?: (device: import('../network/createGameServerClient').VisitorDeviceFilter) => void
   onAdminVisitorsPageChange?: (offset: number) => void
   onAdminVisitorsViewChange?: (view: import('../network/createGameServerClient').AdminVisitorsView) => void
   onRulesOpen: () => void
@@ -4278,8 +4280,16 @@ function renderAdminVisitorsPanel(state: LobbyScreenState): string {
   `
 }
 
+function deviceLabel(d: string | null): string {
+  if (d === 'mobile')  return 'Мобилно'
+  if (d === 'desktop') return 'Десктоп'
+  if (d === 'tablet')  return 'Таблет'
+  return 'Неизвестно'
+}
+
 function renderVisitorsBody(state: LobbyScreenState): { body: string; pagination: string } {
   const type = state.adminVisitorsType
+  const device = state.adminVisitorsDevice
   const offset = state.adminVisitorsOffset
   const limit = state.adminVisitorsLimit
   const rows = state.adminVisitorsRows
@@ -4294,6 +4304,16 @@ function renderVisitorsBody(state: LobbyScreenState): { body: string; pagination
       border:1px solid ${active ? 'rgba(96,165,250,0.5)' : 'rgba(255,255,255,0.15)'};
       background:${active ? 'rgba(96,165,250,0.1)' : 'transparent'};
       color:${active ? 'rgba(96,165,250,0.9)' : 'rgba(255,255,255,0.6)'};
+    ">${label}</button>`
+  }
+
+  const deviceBtn = (d: string, label: string) => {
+    const active = d === device
+    return `<button type="button" data-admin-visitors-device="${escapeHtml(d)}" style="
+      height:32px;padding:0 14px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;letter-spacing:0.03em;
+      border:1px solid ${active ? 'rgba(167,139,250,0.5)' : 'rgba(255,255,255,0.15)'};
+      background:${active ? 'rgba(167,139,250,0.1)' : 'transparent'};
+      color:${active ? 'rgba(167,139,250,0.9)' : 'rgba(255,255,255,0.6)'};
     ">${label}</button>`
   }
 
@@ -4326,6 +4346,7 @@ function renderVisitorsBody(state: LobbyScreenState): { body: string; pagination
         </td>
         <td style="padding:8px 10px;font-size:12px;color:rgba(255,255,255,0.5);font-family:monospace;">${truncate(r.lastIpAddress, 20)}</td>
         <td style="padding:8px 10px;font-size:12px;color:rgba(255,255,255,0.5);max-width:140px;">${truncate(r.firstSource ?? r.firstReferrer, 28)}</td>
+        <td style="padding:8px 10px;font-size:11px;color:rgba(167,139,250,0.8);white-space:nowrap;">${escapeHtml(deviceLabel(r.lastDeviceType))}</td>
         <td style="padding:8px 10px;font-size:11px;color:rgba(255,255,255,0.45);white-space:nowrap;">${fmtDate(r.firstSeenAt)}</td>
         <td style="padding:8px 10px;font-size:11px;color:rgba(255,255,255,0.7);white-space:nowrap;">${fmtDate(r.lastSeenAt)}</td>
         <td style="padding:8px 10px;text-align:center;font-size:13px;color:rgba(96,165,250,0.85);font-weight:700;">${r.pageViews}</td>
@@ -4341,6 +4362,7 @@ function renderVisitorsBody(state: LobbyScreenState): { body: string; pagination
               <th style="padding:8px 10px;text-align:left;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">Потребител</th>
               <th style="padding:8px 10px;text-align:left;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">IP</th>
               <th style="padding:8px 10px;text-align:left;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">Източник</th>
+              <th style="padding:8px 10px;text-align:left;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(167,139,250,0.6);">Последно устройство</th>
               <th style="padding:8px 10px;text-align:left;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">Първо посещение</th>
               <th style="padding:8px 10px;text-align:left;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">Последно посещение</th>
               <th style="padding:8px 10px;text-align:center;font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);">Отваряния</th>
@@ -4364,6 +4386,7 @@ function renderVisitorsBody(state: LobbyScreenState): { body: string; pagination
         <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;">
           ${r.lastIpAddress ? `<span style="font-size:11px;color:rgba(255,255,255,0.4);font-family:monospace;">${truncate(r.lastIpAddress, 20)}</span>` : ''}
           ${(r.firstSource ?? r.firstReferrer) ? `<span style="font-size:11px;color:rgba(255,255,255,0.4);">src: ${truncate(r.firstSource ?? r.firstReferrer, 24)}</span>` : ''}
+          <span style="font-size:11px;color:rgba(167,139,250,0.75);">${escapeHtml(deviceLabel(r.lastDeviceType))}</span>
           <span style="font-size:11px;color:rgba(96,165,250,0.75);">Отваряния: ${r.pageViews}</span>
         </div>
       </div>
@@ -4385,10 +4408,17 @@ function renderVisitorsBody(state: LobbyScreenState): { body: string; pagination
 
   return {
     body: `
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
         ${typeBtn('all', 'Всички')}
         ${typeBtn('guest', 'Гости')}
         ${typeBtn('registered', 'Регистрирани')}
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
+        ${deviceBtn('all', 'Всички устройства')}
+        ${deviceBtn('mobile', 'Мобилни')}
+        ${deviceBtn('desktop', 'Десктоп')}
+        ${deviceBtn('tablet', 'Таблети')}
+        ${deviceBtn('unknown', 'Неизвестни')}
       </div>
       ${bodyHtml}
     `,
@@ -4397,16 +4427,37 @@ function renderVisitorsBody(state: LobbyScreenState): { body: string; pagination
 }
 
 function renderSourcesBody(state: LobbyScreenState): string {
+  const device = state.adminVisitorsDevice
   const loading = state.adminVisitorsSourcesLoading
   const errorText = state.adminVisitorsSourcesErrorText
   const rows = state.adminVisitorsSourcesRows
   const total = state.adminVisitorsSourcesTotal
 
+  const deviceBtn = (d: string, label: string) => {
+    const active = d === device
+    return `<button type="button" data-admin-visitors-device="${escapeHtml(d)}" style="
+      height:32px;padding:0 14px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;letter-spacing:0.03em;
+      border:1px solid ${active ? 'rgba(167,139,250,0.5)' : 'rgba(255,255,255,0.15)'};
+      background:${active ? 'rgba(167,139,250,0.1)' : 'transparent'};
+      color:${active ? 'rgba(167,139,250,0.9)' : 'rgba(255,255,255,0.6)'};
+    ">${label}</button>`
+  }
+
+  const deviceFilterHtml = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
+      ${deviceBtn('all', 'Всички устройства')}
+      ${deviceBtn('mobile', 'Мобилни')}
+      ${deviceBtn('desktop', 'Десктоп')}
+      ${deviceBtn('tablet', 'Таблети')}
+      ${deviceBtn('unknown', 'Неизвестни')}
+    </div>
+  `
+
   if (loading) {
-    return `<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.4);font-size:14px;">Зареждане…</div>`
+    return deviceFilterHtml + `<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.4);font-size:14px;">Зареждане…</div>`
   }
   if (errorText) {
-    return `<div style="padding:24px;color:#fecaca;font-size:14px;">${escapeHtml(errorText)}</div>`
+    return deviceFilterHtml + `<div style="padding:24px;color:#fecaca;font-size:14px;">${escapeHtml(errorText)}</div>`
   }
 
   const dataRows = [...rows, { label: '__total__', visitors: total, percent: 100 }]
@@ -4427,7 +4478,7 @@ function renderSourcesBody(state: LobbyScreenState): string {
     `
   }).join('')
 
-  return `
+  return deviceFilterHtml + `
     <div style="overflow-x:auto;">
       <table style="width:100%;border-collapse:collapse;font-size:13px;">
         <thead>
@@ -8977,6 +9028,13 @@ export function renderLobbyScreen(
     btn.addEventListener('click', () => {
       const t = btn.dataset.adminVisitorsType ?? 'all'
       options.onAdminVisitorsTypeChange?.(t as import('../network/createGameServerClient').VisitorListType)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-visitors-device]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const d = btn.dataset.adminVisitorsDevice ?? 'all'
+      options.onAdminVisitorsDeviceChange?.(d as import('../network/createGameServerClient').VisitorDeviceFilter)
     })
   })
 

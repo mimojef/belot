@@ -14,6 +14,8 @@
     "check:view-layout-tracking": "tsx scripts/checkViewLayoutTracking.ts",
     "check:view-layout-frontend": "tsx scripts/checkViewLayoutFrontend.ts --project-root=..",
     "check:visitor-summary": "tsx scripts/checkVisitorSummary.ts",
+    "check:device-type": "tsx scripts/checkDeviceType.ts",
+    "check:device-migration": "tsx scripts/checkDeviceMigration.ts --server-root=.",
     "check:admin-visitors": "tsx scripts/checkAdminVisitors.ts",
     "check:admin-visitor-sources": "tsx scripts/checkAdminVisitorSources.ts --server-root=.",
     "check:db-backup-verify": "tsx scripts/checkDbBackupVerify.ts",

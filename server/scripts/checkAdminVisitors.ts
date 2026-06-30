@@ -78,6 +78,7 @@ function makeSchema(db: DatabaseSync): void {
       first_profile_id TEXT NULL, last_profile_id TEXT NULL,
       first_ip_address TEXT NULL, last_ip_address TEXT NULL,
       first_user_agent TEXT NULL, last_user_agent TEXT NULL,
+      last_device_type TEXT NULL CHECK (last_device_type IN ('mobile', 'desktop', 'tablet', 'unknown')),
       first_referrer TEXT NULL, last_referrer TEXT NULL,
       first_source TEXT NULL, last_source TEXT NULL
     );
@@ -91,6 +92,8 @@ function makeSchema(db: DatabaseSync): void {
       utm_source TEXT NULL, utm_medium TEXT NULL, utm_campaign TEXT NULL,
       utm_term TEXT NULL, utm_content TEXT NULL,
       ip_address TEXT NULL, user_agent TEXT NULL,
+      view_layout TEXT NULL CHECK (view_layout IN ('mobile', 'desktop')),
+      is_entry INTEGER NOT NULL DEFAULT 0,
       occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (anonymous_visitor_id) REFERENCES site_visitors(anonymous_visitor_id) ON DELETE CASCADE
     );
@@ -99,14 +102,15 @@ function makeSchema(db: DatabaseSync): void {
   `)
 }
 
-function iv(db: DatabaseSync, id: string, profileId: string | null, ip: string | null, firstSeen: string, lastSeen: string, source: string | null = null): void {
+function iv(db: DatabaseSync, id: string, profileId: string | null, ip: string | null, firstSeen: string, lastSeen: string, source: string | null = null, device: string | null = null): void {
   const pid = profileId ? `'${profileId}'` : 'NULL'
   const pip = ip ? `'${ip}'` : 'NULL'
   const psrc = source ? `'${source}'` : 'NULL'
+  const pdev = device ? `'${device}'` : 'NULL'
   db.exec(`INSERT OR IGNORE INTO site_visitors
     (anonymous_visitor_id, first_profile_id, last_profile_id, first_ip_address, last_ip_address,
-     first_seen_at, last_seen_at, first_source, last_source)
-    VALUES ('${id}', ${pid}, ${pid}, ${pip}, ${pip}, ${firstSeen}, ${lastSeen}, ${psrc}, ${psrc})`)
+     first_seen_at, last_seen_at, first_source, last_source, last_device_type)
+    VALUES ('${id}', ${pid}, ${pid}, ${pip}, ${pip}, ${firstSeen}, ${lastSeen}, ${psrc}, ${psrc}, ${pdev})`)
 }
 
 function ie(db: DatabaseSync, pvId: string, visId: string, profileId: string | null, navType: string, at: string): void {
@@ -114,6 +118,13 @@ function ie(db: DatabaseSync, pvId: string, visId: string, profileId: string | n
   db.exec(`INSERT OR IGNORE INTO site_visit_events
     (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at)
     VALUES ('${pvId}', '${visId}', ${pid}, '/', '${navType}', ${at})`)
+}
+
+async function retryRmDir(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try { await rm(path, { recursive: true, force: true }); return } catch { /* retry */ }
+    await new Promise<void>(r => setTimeout(r, 200))
+  }
 }
 
 async function withDb(fn: (dbPath: string, db: DatabaseSync) => Promise<void>): Promise<void> {
@@ -126,7 +137,7 @@ async function withDb(fn: (dbPath: string, db: DatabaseSync) => Promise<void>): 
     await fn(dbPath, db)
   } finally {
     try { db.close() } catch { /* already closed */ }
-    await rm(dir, { recursive: true, force: true })
+    await retryRmDir(dir)
   }
 }
 
@@ -137,7 +148,7 @@ await withDb(async (dbPath, db) => {
   db.close()
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorList({ period: 'today', type: 'all', limit: 50, offset: 0 })
+    const r = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 50, offset: 0 })
     await check('[1.1] total=0', () => { if (r.total !== 0) throw new Error(`total=${r.total}`) })
     await check('[1.2] rows=[]', () => { if (r.rows.length !== 0) throw new Error(`rows.length=${r.rows.length}`) })
   } finally { store.close() }
@@ -157,7 +168,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorList({ period: 'today', type: 'all', limit: 50, offset: 0 })
+    const r = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 50, offset: 0 })
     await check('[2.1] total=1', () => { if (r.total !== 1) throw new Error(`total=${r.total}`) })
     const row = r.rows[0]!
     await check('[2.2] isRegistered=true', () => { if (!row.isRegistered) throw new Error('isRegistered=false') })
@@ -180,7 +191,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorList({ period: 'today', type: 'all', limit: 50, offset: 0 })
+    const r = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 50, offset: 0 })
     await check('[3.1] total=1', () => { if (r.total !== 1) throw new Error(`total=${r.total}`) })
     const row = r.rows[0]!
     await check('[3.2] isRegistered=false', () => { if (row.isRegistered) throw new Error('isRegistered=true') })
@@ -205,9 +216,9 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const today = store.getVisitorList({ period: 'today', type: 'all', limit: 50, offset: 0 })
-    const d7    = store.getVisitorList({ period: '7d',    type: 'all', limit: 50, offset: 0 })
-    const d30   = store.getVisitorList({ period: '30d',   type: 'all', limit: 50, offset: 0 })
+    const today = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 50, offset: 0 })
+    const d7    = store.getVisitorList({ period: '7d',    type: 'all', device: 'all', limit: 50, offset: 0 })
+    const d30   = store.getVisitorList({ period: '30d',   type: 'all', device: 'all', limit: 50, offset: 0 })
     await check('[4.1] today: only v-now', () => { if (today.total !== 1) throw new Error(`today.total=${today.total}`) })
     await check('[4.2] 7d: v-now + v-3d = 2', () => { if (d7.total !== 2) throw new Error(`7d.total=${d7.total}`) })
     await check('[4.3] 30d: v-now + v-3d + v-15d = 3', () => { if (d30.total !== 3) throw new Error(`30d.total=${d30.total}`) })
@@ -238,8 +249,8 @@ console.log('\n[4b] Period filter — yesterday (fixed clock)')
 
     const store = await createSiteVisitStore(dbPath)
     try {
-      const yest  = store.getVisitorList({ period: 'yesterday', type: 'all', limit: 50, offset: 0 }, fixedNow)
-      const today = store.getVisitorList({ period: 'today',     type: 'all', limit: 50, offset: 0 }, fixedNow)
+      const yest  = store.getVisitorList({ period: 'yesterday', type: 'all', device: 'all', limit: 50, offset: 0 }, fixedNow)
+      const today = store.getVisitorList({ period: 'today',     type: 'all', device: 'all', limit: 50, offset: 0 }, fixedNow)
       await check('[4b.1] yesterday: total=1', () => { if (yest.total !== 1) throw new Error(`yesterday.total=${yest.total}`) })
       await check('[4b.2] today: total=1', () => { if (today.total !== 1) throw new Error(`today.total=${today.total}`) })
       await check('[4b.3] yesterday row is vy', () => {
@@ -273,8 +284,8 @@ console.log('\n[4c] Rolling periods — детерминистичен clock (20
 
     const store = await createSiteVisitStore(dbPath)
     try {
-      const r7d  = store.getVisitorList({ period: '7d',  type: 'all', limit: 50, offset: 0 }, fixedNow)
-      const r30d = store.getVisitorList({ period: '30d', type: 'all', limit: 50, offset: 0 }, fixedNow)
+      const r7d  = store.getVisitorList({ period: '7d',  type: 'all', device: 'all', limit: 50, offset: 0 }, fixedNow)
+      const r30d = store.getVisitorList({ period: '30d', type: 'all', device: 'all', limit: 50, offset: 0 }, fixedNow)
       await check('[4c.1] 7d: total=1 (само v5d)', () => {
         if (r7d.total !== 1) throw new Error(`7d.total=${r7d.total}`)
       })
@@ -304,9 +315,9 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const all  = store.getVisitorList({ period: 'today', type: 'all',        limit: 50, offset: 0 })
-    const g    = store.getVisitorList({ period: 'today', type: 'guest',       limit: 50, offset: 0 })
-    const reg  = store.getVisitorList({ period: 'today', type: 'registered',  limit: 50, offset: 0 })
+    const all  = store.getVisitorList({ period: 'today', type: 'all',        device: 'all', limit: 50, offset: 0 })
+    const g    = store.getVisitorList({ period: 'today', type: 'guest',       device: 'all', limit: 50, offset: 0 })
+    const reg  = store.getVisitorList({ period: 'today', type: 'registered',  device: 'all', limit: 50, offset: 0 })
     await check('[5.1] all: total=3', () => { if (all.total !== 3) throw new Error(`all.total=${all.total}`) })
     await check('[5.2] guest: total=2', () => { if (g.total !== 2) throw new Error(`guest.total=${g.total}`) })
     await check('[5.3] guest rows: all isRegistered=false', () => { if (g.rows.some(r => r.isRegistered)) throw new Error('has registered') })
@@ -328,9 +339,9 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const p1 = store.getVisitorList({ period: 'today', type: 'all', limit: 2, offset: 0 })
-    const p2 = store.getVisitorList({ period: 'today', type: 'all', limit: 2, offset: 2 })
-    const p3 = store.getVisitorList({ period: 'today', type: 'all', limit: 2, offset: 4 })
+    const p1 = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 2, offset: 0 })
+    const p2 = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 2, offset: 2 })
+    const p3 = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 2, offset: 4 })
     await check('[6.1] total=6 on all pages', () => { if (p1.total !== 6) throw new Error(`total=${p1.total}`) })
     await check('[6.2] page1: 2 rows', () => { if (p1.rows.length !== 2) throw new Error(`len=${p1.rows.length}`) })
     await check('[6.3] page2: 2 rows', () => { if (p2.rows.length !== 2) throw new Error(`len=${p2.rows.length}`) })
@@ -358,7 +369,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorList({ period: 'today', type: 'all', limit: 50, offset: 0 })
+    const r = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 50, offset: 0 })
     await check('[7.1] first row is vsort-new (newest)', () => {
       if (r.rows[0]?.anonymousVisitorId !== 'vsort-new') throw new Error(`first=${r.rows[0]?.anonymousVisitorId}`)
     })
@@ -369,9 +380,141 @@ await withDb(async (dbPath, db) => {
   } finally { store.close() }
 })
 
-// ─── [8-10] HTTP endpoint ─────────────────────────────────────────────────────
+// ─── [8] Device filter ────────────────────────────────────────────────────────
 
-console.log('\n[8-10] HTTP: GET /api/admin/visitors')
+console.log('\n[8] Device filter: mobile / desktop / tablet / unknown / all')
+await withDb(async (dbPath, db) => {
+  // 4 visitors with different device types + 1 with NULL (treated as unknown)
+  const now = "datetime('now', '-1 hour')"
+  ;[
+    ['vd-mob',   'mobile'],
+    ['vd-desk',  'desktop'],
+    ['vd-tab',   'tablet'],
+    ['vd-unk',   'unknown'],
+    ['vd-null',  null],
+  ].forEach(([id, device], i) => {
+    iv(db, id as string, null, null, now, now, null, device)
+    ie(db, `ed${i}`, id as string, null, 'navigate', now)
+  })
+  db.close()
+
+  const store = await createSiteVisitStore(dbPath)
+  try {
+    const all     = store.getVisitorList({ period: 'today', type: 'all', device: 'all',     limit: 50, offset: 0 })
+    const mobile  = store.getVisitorList({ period: 'today', type: 'all', device: 'mobile',  limit: 50, offset: 0 })
+    const desktop = store.getVisitorList({ period: 'today', type: 'all', device: 'desktop', limit: 50, offset: 0 })
+    const tablet  = store.getVisitorList({ period: 'today', type: 'all', device: 'tablet',  limit: 50, offset: 0 })
+    const unknown = store.getVisitorList({ period: 'today', type: 'all', device: 'unknown', limit: 50, offset: 0 })
+    await check('[8.1] all: total=5', () => { if (all.total !== 5) throw new Error(`all.total=${all.total}`) })
+    await check('[8.2] mobile: total=1', () => { if (mobile.total !== 1) throw new Error(`mobile.total=${mobile.total}`) })
+    await check('[8.3] mobile row device', () => {
+      if (mobile.rows[0]?.lastDeviceType !== 'mobile') throw new Error(`device=${mobile.rows[0]?.lastDeviceType}`)
+    })
+    await check('[8.4] desktop: total=1', () => { if (desktop.total !== 1) throw new Error(`desktop.total=${desktop.total}`) })
+    await check('[8.5] tablet: total=1', () => { if (tablet.total !== 1) throw new Error(`tablet.total=${tablet.total}`) })
+    await check('[8.6] unknown: total=2 (explicit unknown + NULL)', () => {
+      if (unknown.total !== 2) throw new Error(`unknown.total=${unknown.total}`)
+    })
+    await check('[8.7] device field returned in rows', () => {
+      if (!all.rows.some(r => r.lastDeviceType === 'mobile')) throw new Error('mobile not in rows')
+      if (!all.rows.some(r => r.lastDeviceType === 'desktop')) throw new Error('desktop not in rows')
+      if (!all.rows.some(r => r.lastDeviceType === 'tablet')) throw new Error('tablet not in rows')
+    })
+  } finally { store.close() }
+})
+
+// ─── [8b] Device filter combines with type filter ─────────────────────────────
+
+console.log('\n[8b] Device filter combines with type filter (registered mobile)')
+await withDb(async (dbPath, db) => {
+  db.exec(`INSERT INTO accounts (account_id, email, password_hash, role) VALUES ('accdb', 'db@db.com', 'x', 'player')`)
+  db.exec(`INSERT INTO profiles (profile_id, account_id, display_name, normalized_display_name) VALUES ('pdb', 'accdb', 'DbUser', 'dbuser')`)
+  const now = "datetime('now', '-1 hour')"
+  iv(db, 'vdb-reg-mob',  'pdb',  null, now, now, null, 'mobile')
+  iv(db, 'vdb-guest-mob', null,  null, now, now, null, 'mobile')
+  iv(db, 'vdb-reg-desk', 'pdb',  null, now, now, null, 'desktop')
+  ie(db, 'edb1', 'vdb-reg-mob',   'pdb', 'navigate', now)
+  ie(db, 'edb2', 'vdb-guest-mob', null,  'navigate', now)
+  ie(db, 'edb3', 'vdb-reg-desk',  'pdb', 'navigate', now)
+  db.close()
+
+  const store = await createSiteVisitStore(dbPath)
+  try {
+    const regMob = store.getVisitorList({ period: 'today', type: 'registered', device: 'mobile', limit: 50, offset: 0 })
+    await check('[8b.1] registered+mobile: total=1', () => { if (regMob.total !== 1) throw new Error(`total=${regMob.total}`) })
+    await check('[8b.2] registered+mobile: isRegistered=true', () => {
+      if (!regMob.rows[0]?.isRegistered) throw new Error('isRegistered=false')
+    })
+    await check('[8b.3] registered+mobile: device=mobile', () => {
+      if (regMob.rows[0]?.lastDeviceType !== 'mobile') throw new Error(`device=${regMob.rows[0]?.lastDeviceType}`)
+    })
+  } finally { store.close() }
+})
+
+// ─── [8c] Device filter: pagination with device ───────────────────────────────
+
+console.log('\n[8c] Pagination kombinirана с device filter')
+await withDb(async (dbPath, db) => {
+  const now = "datetime('now', '-1 hour')"
+  for (let i = 0; i < 5; i++) {
+    iv(db, `vpgm${i}`, null, null, now, now, null, 'mobile')
+    ie(db, `epgm${i}`, `vpgm${i}`, null, 'navigate', now)
+  }
+  iv(db, 'vpgd', null, null, now, now, null, 'desktop')
+  ie(db, 'epgd', 'vpgd', null, 'navigate', now)
+  db.close()
+
+  const store = await createSiteVisitStore(dbPath)
+  try {
+    const p1 = store.getVisitorList({ period: 'today', type: 'all', device: 'mobile', limit: 3, offset: 0 })
+    const p2 = store.getVisitorList({ period: 'today', type: 'all', device: 'mobile', limit: 3, offset: 3 })
+    await check('[8c.1] mobile total=5 on both pages', () => { if (p1.total !== 5) throw new Error(`p1.total=${p1.total}`) })
+    await check('[8c.2] p1 has 3 rows', () => { if (p1.rows.length !== 3) throw new Error(`p1.rows.length=${p1.rows.length}`) })
+    await check('[8c.3] p2 has 2 rows', () => { if (p2.rows.length !== 2) throw new Error(`p2.rows.length=${p2.rows.length}`) })
+    await check('[8c.4] desktop not in mobile results', () => {
+      const hasDesk = [...p1.rows, ...p2.rows].some(r => r.anonymousVisitorId === 'vpgd')
+      if (hasDesk) throw new Error('desktop visitor appeared in mobile filter')
+    })
+  } finally { store.close() }
+})
+
+// ─── [8d] getVisitorSources: device filter ────────────────────────────────────
+
+console.log('\n[8d] getVisitorSources: device filter isolates sources')
+await withDb(async (dbPath, db) => {
+  const now = "datetime('now', '-1 hour')"
+  iv(db, 'vs-mob-goog', null, null, now, now, 'google', 'mobile')
+  iv(db, 'vs-desk-fb',  null, null, now, now, 'facebook', 'desktop')
+  iv(db, 'vs-tab-dir',  null, null, now, now, null, 'tablet')
+  ie(db, 'es1', 'vs-mob-goog', null, 'navigate', now)
+  ie(db, 'es2', 'vs-desk-fb',  null, 'navigate', now)
+  ie(db, 'es3', 'vs-tab-dir',  null, 'navigate', now)
+  db.close()
+
+  const store = await createSiteVisitStore(dbPath)
+  try {
+    const allSrc    = store.getVisitorSources({ period: 'today', device: 'all' })
+    const mobSrc    = store.getVisitorSources({ period: 'today', device: 'mobile' })
+    const deskSrc   = store.getVisitorSources({ period: 'today', device: 'desktop' })
+    await check('[8d.1] all sources: total=3', () => { if (allSrc.total !== 3) throw new Error(`total=${allSrc.total}`) })
+    await check('[8d.2] mobile sources: total=1 (google)', () => {
+      if (mobSrc.total !== 1) throw new Error(`mobile total=${mobSrc.total}`)
+    })
+    await check('[8d.3] mobile source label=Google', () => {
+      if (mobSrc.rows[0]?.label !== 'Google') throw new Error(`label=${mobSrc.rows[0]?.label}`)
+    })
+    await check('[8d.4] desktop sources: total=1 (facebook)', () => {
+      if (deskSrc.total !== 1) throw new Error(`desktop total=${deskSrc.total}`)
+    })
+    await check('[8d.5] desktop source label=Facebook', () => {
+      if (deskSrc.rows[0]?.label !== 'Facebook') throw new Error(`label=${deskSrc.rows[0]?.label}`)
+    })
+  } finally { store.close() }
+})
+
+// ─── [9-11] HTTP endpoint ─────────────────────────────────────────────────────
+
+console.log('\n[9-12] HTTP: GET /api/admin/visitors')
 
 const SERVER_READY_TIMEOUT_MS = 30_000
 const PASSWORD = 'AdminVisitorsCheck1!'
@@ -521,26 +664,48 @@ try {
   const adminCookie = (h2.getSetCookie?.()[0] ?? loginRes.headers.get('set-cookie'))?.split(';')[0]
   if (!adminCookie) throw new Error('No Set-Cookie on admin login')
 
-  // [8] 403 без cookie
-  await check('[8] 403 без admin cookie', async () => {
+  // [9] 403 без cookie
+  await check('[9] 403 без admin cookie', async () => {
     const r = await httpGet(port, '/api/admin/visitors?period=today')
     if (r.status !== 403) throw new Error(`status=${r.status}`)
     if ((r.body as { ok: boolean }).ok !== false) throw new Error('ok should be false')
   })
 
-  // [9] 200 + shape
-  await check('[9] 200 + correct shape', async () => {
-    const r = await httpGet(port, '/api/admin/visitors?period=today&type=all&limit=50&offset=0', adminCookie)
+  // [10] 200 + shape с device field
+  await check('[10] 200 + correct shape (with lastDeviceType field)', async () => {
+    const r = await httpGet(port, '/api/admin/visitors?period=today&type=all&device=all&limit=50&offset=0', adminCookie)
     if (r.status !== 200) throw new Error(`status=${r.status}`)
-    const b = r.body as { ok: boolean; rows: unknown[]; total: number }
+    const b = r.body as { ok: boolean; rows: { lastDeviceType?: unknown }[]; total: number }
     if (!b.ok) throw new Error('ok=false')
     if (!Array.isArray(b.rows)) throw new Error('rows not array')
     if (typeof b.total !== 'number') throw new Error(`total type=${typeof b.total}`)
     if (b.total < 0) throw new Error(`total=${b.total}`)
+    // lastDeviceType field must be present in each row (may be null)
+    if (b.rows.length > 0 && !('lastDeviceType' in b.rows[0]!)) {
+      throw new Error('lastDeviceType missing from row shape')
+    }
   })
 
-  // [10] Invalid period → 200 ok
-  await check('[10] invalid period → 200 ok (defaults to today)', async () => {
+  // [11] Device filter: valid values accepted
+  for (const deviceVal of ['all', 'mobile', 'desktop', 'tablet', 'unknown'] as const) {
+    await check(`[11] device=${deviceVal} → 200`, async () => {
+      const r = await httpGet(port, `/api/admin/visitors?period=today&device=${deviceVal}`, adminCookie)
+      if (r.status !== 200) throw new Error(`status=${r.status}`)
+      const b = r.body as { ok: boolean }
+      if (!b.ok) throw new Error('ok=false')
+    })
+  }
+
+  // [12] Device filter: invalid value → 200 ok (defaults to all)
+  await check('[12] invalid device → 200 ok (defaults to all)', async () => {
+    const r = await httpGet(port, '/api/admin/visitors?period=today&device=HACKER', adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}`)
+    const b = r.body as { ok: boolean }
+    if (!b.ok) throw new Error('ok=false')
+  })
+
+  // invalid period still defaults
+  await check('[12b] invalid period → 200 ok (defaults to today)', async () => {
     const r = await httpGet(port, '/api/admin/visitors?period=BOGUS&type=BOGUS', adminCookie)
     if (r.status !== 200) throw new Error(`status=${r.status}`)
     const b = r.body as { ok: boolean }

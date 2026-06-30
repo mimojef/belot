@@ -176,6 +176,7 @@ export type AdminStatsSnapshot = {
 
 export type VisitorListPeriod = 'today' | 'yesterday' | '7d' | '30d'
 export type VisitorListType = 'all' | 'guest' | 'registered'
+export type VisitorDeviceFilter = 'all' | 'mobile' | 'desktop' | 'tablet' | 'unknown'
 export type AdminVisitorsView = 'visitors' | 'sources'
 
 export type AdminVisitorSourceRow = {
@@ -195,6 +196,7 @@ export type AdminVisitorRow = {
   displayName: string | null
   email: string | null
   lastIpAddress: string | null
+  lastDeviceType: string | null
   firstSource: string | null
   firstReferrer: string | null
   firstSeenAt: string

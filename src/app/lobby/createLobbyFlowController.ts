@@ -339,11 +339,13 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
   onAdminVisitorsTypeChange?: (type: import('../network/createGameServerClient.js').VisitorListType) => void
+  onAdminVisitorsDeviceChange?: (device: import('../network/createGameServerClient.js').VisitorDeviceFilter) => void
   onAdminVisitorsPageChange?: (offset: number) => void
   onAdminVisitorsViewChange?: (view: import('../network/createGameServerClient.js').AdminVisitorsView) => void
   onAdminVisitorsLoad?: (params: {
     period: import('../network/createGameServerClient.js').VisitorListPeriod
     type: import('../network/createGameServerClient.js').VisitorListType
+    device: import('../network/createGameServerClient.js').VisitorDeviceFilter
     limit: number
     offset: number
   }) => Promise<
@@ -352,6 +354,8 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onAdminVisitorSourcesLoad?: (params: {
     period: import('../network/createGameServerClient.js').VisitorListPeriod
+    type: import('../network/createGameServerClient.js').VisitorListType
+    device: import('../network/createGameServerClient.js').VisitorDeviceFilter
   }) => Promise<
     | { ok: true; rows: import('../network/createGameServerClient.js').AdminVisitorSourceRow[]; total: number }
     | { ok: false; message: string }
@@ -574,6 +578,7 @@ type InternalLobbyFlowState = {
   adminVisitorsErrorText: string | null
   adminVisitorsPeriod: import('../network/createGameServerClient.js').VisitorListPeriod
   adminVisitorsType: import('../network/createGameServerClient.js').VisitorListType
+  adminVisitorsDevice: import('../network/createGameServerClient.js').VisitorDeviceFilter
   adminVisitorsOffset: number
   adminVisitorsLimit: number
   adminVisitorsView: import('../network/createGameServerClient.js').AdminVisitorsView
@@ -783,6 +788,7 @@ function createInitialState(): InternalLobbyFlowState {
     adminVisitorsErrorText: null,
     adminVisitorsPeriod: 'today',
     adminVisitorsType: 'all',
+    adminVisitorsDevice: 'all',
     adminVisitorsOffset: 0,
     adminVisitorsLimit: 50,
     adminVisitorsView: 'visitors',
@@ -1857,6 +1863,7 @@ export function createLobbyFlowController(
       adminVisitorsErrorText: state.adminVisitorsErrorText,
       adminVisitorsPeriod: state.adminVisitorsPeriod,
       adminVisitorsType: state.adminVisitorsType,
+      adminVisitorsDevice: state.adminVisitorsDevice,
       adminVisitorsOffset: state.adminVisitorsOffset,
       adminVisitorsLimit: state.adminVisitorsLimit,
       adminVisitorsView: state.adminVisitorsView,
@@ -2591,10 +2598,35 @@ export function createLobbyFlowController(
       onAdminVisitorsTypeChange: (type) => {
         state.adminVisitorsType = type
         state.adminVisitorsOffset = 0
-        state.adminVisitorsRows = []
-        state.adminVisitorsLoading = true
-        render()
-        void fetchAdminVisitors()
+        syncAdminVisitorsUrl()
+        if (state.adminVisitorsView === 'sources') {
+          state.adminVisitorsSourcesRows = []
+          state.adminVisitorsSourcesLoading = true
+          render()
+          void fetchAdminVisitorSources()
+        } else {
+          state.adminVisitorsRows = []
+          state.adminVisitorsLoading = true
+          render()
+          void fetchAdminVisitors()
+        }
+        options.onAdminVisitorsTypeChange?.(type)
+      },
+      onAdminVisitorsDeviceChange: (device) => {
+        state.adminVisitorsDevice = device
+        state.adminVisitorsOffset = 0
+        syncAdminVisitorsUrl()
+        if (state.adminVisitorsView === 'sources') {
+          state.adminVisitorsSourcesRows = []
+          state.adminVisitorsSourcesLoading = true
+          render()
+          void fetchAdminVisitorSources()
+        } else {
+          state.adminVisitorsRows = []
+          state.adminVisitorsLoading = true
+          render()
+          void fetchAdminVisitors()
+        }
       },
       onAdminVisitorsPageChange: (offset) => {
         state.adminVisitorsOffset = offset
@@ -3278,7 +3310,7 @@ export function createLobbyFlowController(
     render()
   }
 
-  function showAdminVisitorsPanel(overridePeriod?: string, overrideView?: string): void {
+  function showAdminVisitorsPanel(overridePeriod?: string, overrideView?: string, overrideDevice?: string, overrideType?: string): void {
     const authSession = options.getAuthSession?.() ?? null
 
     if (authSession?.account.role !== 'admin') {
@@ -3301,6 +3333,12 @@ export function createLobbyFlowController(
       state.adminVisitorsPeriod = overridePeriod
     }
     state.adminVisitorsView = (overrideView === 'sources') ? 'sources' : 'visitors'
+    if (overrideType && (overrideType === 'all' || overrideType === 'guest' || overrideType === 'registered')) {
+      state.adminVisitorsType = overrideType as import('../network/createGameServerClient.js').VisitorListType
+    }
+    if (overrideDevice && (overrideDevice === 'all' || overrideDevice === 'mobile' || overrideDevice === 'desktop' || overrideDevice === 'tablet' || overrideDevice === 'unknown')) {
+      state.adminVisitorsDevice = overrideDevice as import('../network/createGameServerClient.js').VisitorDeviceFilter
+    }
     state.adminVisitorsOffset = 0
     state.adminVisitorsRows = []
     state.adminVisitorsTotal = 0
@@ -3332,6 +3370,7 @@ export function createLobbyFlowController(
     const result = await options.onAdminVisitorsLoad({
       period: state.adminVisitorsPeriod,
       type: state.adminVisitorsType,
+      device: state.adminVisitorsDevice,
       limit: state.adminVisitorsLimit,
       offset: state.adminVisitorsOffset,
     })
@@ -3353,7 +3392,7 @@ export function createLobbyFlowController(
       render()
       return
     }
-    const result = await options.onAdminVisitorSourcesLoad({ period: state.adminVisitorsPeriod })
+    const result = await options.onAdminVisitorSourcesLoad({ period: state.adminVisitorsPeriod, type: state.adminVisitorsType, device: state.adminVisitorsDevice })
     state.adminVisitorsSourcesLoading = false
     if (!result.ok) {
       state.adminVisitorsSourcesErrorText = result.message
@@ -4516,6 +4555,8 @@ export function createLobbyFlowController(
     const qs = new URLSearchParams()
     qs.set('period', state.adminVisitorsPeriod)
     if (state.adminVisitorsView !== 'visitors') qs.set('view', state.adminVisitorsView)
+    if (state.adminVisitorsType !== 'all') qs.set('type', state.adminVisitorsType)
+    if (state.adminVisitorsDevice !== 'all') qs.set('device', state.adminVisitorsDevice)
     history.replaceState(null, '', `/admin/visitors?${qs}`)
   }
 
@@ -4547,7 +4588,7 @@ export function createLobbyFlowController(
       case 'admin-server': showAdminServerPanel(); break
       case 'admin-visitors': {
         const _qs = new URLSearchParams(window.location.search)
-        showAdminVisitorsPanel(_qs.get('period') ?? undefined, _qs.get('view') ?? undefined)
+        showAdminVisitorsPanel(_qs.get('period') ?? undefined, _qs.get('view') ?? undefined, _qs.get('device') ?? undefined, _qs.get('type') ?? undefined)
         break
       }
       case 'friends': void showFriendsDirectory(); break
@@ -5381,7 +5422,9 @@ export function createLobbyFlowController(
       const qs = new URLSearchParams(window.location.search)
       const p = period ?? qs.get('period') ?? undefined
       const v = qs.get('view') ?? undefined
-      showAdminVisitorsPanel(p, v)
+      const d = qs.get('device') ?? undefined
+      const t = qs.get('type') ?? undefined
+      showAdminVisitorsPanel(p, v, d, t)
     },
     navigateAdminInfo: () => {
       void showAdminInfoPanel()

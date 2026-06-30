@@ -53,6 +53,7 @@ async function withTempDb(fn: (dbPath: string) => Promise<void>): Promise<void> 
         last_ip_address TEXT NULL,
         first_user_agent TEXT NULL,
         last_user_agent TEXT NULL,
+        last_device_type TEXT NULL CHECK (last_device_type IN ('mobile', 'desktop', 'tablet', 'unknown')),
         first_referrer TEXT NULL,
         last_referrer TEXT NULL,
         first_source TEXT NULL,
@@ -75,6 +76,8 @@ async function withTempDb(fn: (dbPath: string) => Promise<void>): Promise<void> 
         utm_content TEXT NULL,
         ip_address TEXT NULL,
         user_agent TEXT NULL,
+        view_layout TEXT NULL CHECK (view_layout IN ('mobile', 'desktop')),
+        is_entry INTEGER NOT NULL DEFAULT 0 CHECK (is_entry IN (0, 1)),
         occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (anonymous_visitor_id) REFERENCES site_visitors(anonymous_visitor_id) ON DELETE CASCADE
       );
@@ -83,7 +86,7 @@ async function withTempDb(fn: (dbPath: string) => Promise<void>): Promise<void> 
     db.close()
     await fn(dbPath)
   } finally {
-    await rm(dir, { recursive: true, force: true })
+    await retryRm(dir)
   }
 }
 
