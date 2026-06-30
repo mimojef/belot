@@ -31,6 +31,7 @@ import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import { PUBLIC_LEGAL_PAGES, type PublicLegalPageKey } from './publicLegalPages'
 import { renderRulesPage } from './renderRulesPage'
 import { renderStrategyPage } from './renderStrategyPage'
+import { orderPlayersForViewer } from './orderPlayersForViewer'
 
 const MISSION_TYPE_LABELS: Record<string, string> = {
   win_games: 'Спечели N игри',
@@ -2964,7 +2965,7 @@ function renderMobilePlayersDirectory(state: LobbyScreenState): string {
   if (state.playersLoading) return `${renderMobilePageTitle('Играчите')}${renderMobileStateMessage('Зареждане на играчи...')}`
   if (state.playersErrorText) return `${renderMobilePageTitle('Играчите')}${renderMobileStateMessage(state.playersErrorText, 'error')}`
 
-  const allPlayers = state.players
+  const allPlayers = orderPlayersForViewer(state.players, { isAdmin: state.isAdmin, ownProfileId: state.profile.profileId })
   const applied = state.playersSearchQuery.trim().toLocaleLowerCase()
   const players = applied
     ? allPlayers.filter((p) => (p.displayName ?? '').toLocaleLowerCase().includes(applied))
@@ -3688,7 +3689,7 @@ function renderChatPanel(state: LobbyScreenState): string {
 }
 
 function renderPlayersDirectory(state: LobbyScreenState): string {
-  const allPlayers = state.players
+  const allPlayers = orderPlayersForViewer(state.players, { isAdmin: state.isAdmin, ownProfileId: state.profile.profileId })
   const query = state.playersSearchQuery.trim().toLocaleLowerCase()
   const players = query
     ? allPlayers.filter((p) => (p.displayName ?? '').toLocaleLowerCase().includes(query))
