@@ -18,6 +18,7 @@
     "check:admin-visitor-sources": "tsx scripts/checkAdminVisitorSources.ts --server-root=.",
     "check:db-backup-verify": "tsx scripts/checkDbBackupVerify.ts",
     "check:backup-logic": "tsx scripts/checkBackupLogic.ts",
+    "check:gift-limit": "tsx scripts/checkYellowCoinGiftLimit.ts",
     "check:shop-purchase-flow": "tsx scripts/checkShopPurchaseFlow.ts",
     "check:reconnect-contract": "tsx scripts/checkReconnectContractDisplay.ts",
     "check:client-winning-bid": "tsx scripts/checkClientWinningBidHelpers.ts",

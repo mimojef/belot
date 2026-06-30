@@ -6,11 +6,17 @@ import type {
 import type { PlayerProgressStore } from './playerProgressStore.js'
 import { dbDateToUtc } from './dbDate.js'
 
+// Преобразува SQLite "YYYY-MM-DD HH:MM:SS" в строг ISO 8601 UTC "YYYY-MM-DDTHH:MM:SS.000Z"
+// Използва се само за nextReleaseAt — не засяга глобалното dbDateToUtc поведение.
+function sqliteDateToIso(value: string): string {
+  return value.replace(' ', 'T') + '.000Z'
+}
+
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
 export type YellowCoinGiftSnapshot = {
   giftId: string
-  friendshipId: string
+  friendshipId: string | null
   senderProfileId: ProfileId
   recipientProfileId: ProfileId
   amount: number
@@ -25,6 +31,17 @@ export type PendingGiftNotification = {
   fromDisplayName: string
 }
 
+export type GiftLimitError = {
+  ok: false
+  code: 'RECIPIENT_WINDOW_LIMIT_PARTIAL' | 'RECIPIENT_WINDOW_LIMIT_FULL'
+  message: string
+  receivedInWindow: number
+  remainingAllowance: number
+  attemptedAmount: number
+  nextReleaseAt: string | null
+  nextReleaseAmount: number
+}
+
 export type YellowCoinGiftStore = {
   sendGift: (
     senderProfileId: ProfileId,
@@ -37,6 +54,7 @@ export type YellowCoinGiftStore = {
         senderProfile: PlayerPublicProfileSnapshot
         recipientProfile: PlayerPublicProfileSnapshot
       }
+    | GiftLimitError
     | { ok: false; message: string }
   createGiftNotification: (giftId: string, recipientProfileId: ProfileId, fromDisplayName: string, amount: number) => void
   getPendingGiftNotifications: (profileId: ProfileId) => PendingGiftNotification[]
@@ -56,7 +74,7 @@ type WalletRow = {
 
 type GiftRow = {
   gift_id: string
-  friendship_id: string
+  friendship_id: string | null
   sender_profile_id: string
   recipient_profile_id: string
   amount: number
@@ -65,9 +83,17 @@ type GiftRow = {
   created_at: string
 }
 
+type RecipientWindowRow = {
+  received_in_window: number
+  next_release_at: string | null
+  next_release_amount: number
+}
+
 const MIN_GIFT_AMOUNT = 100
 const MAX_GIFT_AMOUNT = 50_000
 const DAILY_GIFT_LIMIT = 200_000
+const RECIPIENT_GIFT_WINDOW_LIMIT = 30_000
+const RECIPIENT_GIFT_WINDOW_DAYS = 60
 
 function normalizeGiftAmount(value: number): number | null {
   if (!Number.isInteger(value) || value < MIN_GIFT_AMOUNT || value > MAX_GIFT_AMOUNT) {
@@ -99,6 +125,10 @@ function toGiftSnapshot(row: GiftRow): YellowCoinGiftSnapshot {
   }
 }
 
+function formatBgNumber(value: number): string {
+  return value.toLocaleString('bg-BG')
+}
+
 export async function createYellowCoinGiftStore(
   databaseFilePath: string,
   playerProgressStore: PlayerProgressStore,
@@ -111,6 +141,7 @@ export async function createYellowCoinGiftStore(
 
   database.exec('PRAGMA foreign_keys = ON;')
   database.exec('PRAGMA journal_mode = WAL;')
+  database.exec('PRAGMA busy_timeout = 5000;')
 
   database.exec(`
     CREATE TABLE IF NOT EXISTS gift_notification_log (
@@ -181,6 +212,34 @@ export async function createYellowCoinGiftStore(
       AND created_at >= datetime('now', '-24 hours');
   `)
 
+  // Единична заявка за съгласуван snapshot на 60-дневния прозорец по получател
+  const selectRecipientWindowStatement = database.prepare(`
+    WITH window_gifts AS (
+      SELECT amount, created_at
+      FROM yellow_coin_gift_ledger
+      WHERE recipient_profile_id = ?
+        AND created_at > datetime('now', '-${RECIPIENT_GIFT_WINDOW_DAYS} days')
+    ),
+    oldest AS (
+      SELECT MIN(created_at) AS oldest_created_at
+      FROM window_gifts
+    )
+    SELECT
+      COALESCE((SELECT SUM(amount) FROM window_gifts), 0) AS received_in_window,
+      datetime(
+        (SELECT oldest_created_at FROM oldest),
+        '+${RECIPIENT_GIFT_WINDOW_DAYS} days'
+      ) AS next_release_at,
+      COALESCE(
+        (
+          SELECT SUM(amount)
+          FROM window_gifts
+          WHERE created_at = (SELECT oldest_created_at FROM oldest)
+        ),
+        0
+      ) AS next_release_amount;
+  `)
+
   const debitSenderStatement = database.prepare(`
     UPDATE profile_wallets
     SET
@@ -249,7 +308,9 @@ export async function createYellowCoinGiftStore(
         senderProfile: PlayerPublicProfileSnapshot
         recipientProfile: PlayerPublicProfileSnapshot
       }
+    | GiftLimitError
     | { ok: false; message: string } {
+    // Чиста TypeScript валидация преди базата
     const amount = normalizeGiftAmount(amountRaw)
 
     if (amount === null) {
@@ -259,47 +320,97 @@ export async function createYellowCoinGiftStore(
       }
     }
 
-    const friendship = selectAcceptedFriendshipStatement.get(
-      friendshipId,
-      senderProfileId,
-      senderProfileId,
-    ) as FriendshipRow | undefined
-
-    if (!friendship) {
-      return {
-        ok: false,
-        message: 'Можеш да подаряваш жълтици само на приятели.',
-      }
-    }
-
-    const recipientProfileId = getRecipientProfileId(friendship, senderProfileId)
-
-    if (recipientProfileId === senderProfileId) {
-      return {
-        ok: false,
-        message: 'Не можеш да подариш жълтици на себе си.',
-      }
-    }
-
-    const sentTodayRow = selectSentTodayStatement.get(senderProfileId) as
-      | { sent_amount: number }
-      | undefined
-    const sentToday = sentTodayRow?.sent_amount ?? 0
-
-    if (sentToday + amount > DAILY_GIFT_LIMIT) {
-      return {
-        ok: false,
-        message: `Дневният лимит за подаръци е ${DAILY_GIFT_LIMIT} жълтици.`,
-      }
-    }
-
     const giftId = randomUUID()
+    let recipientProfileId: ProfileId = '' as ProfileId
 
     try {
-      database.exec('BEGIN;')
+      database.exec('BEGIN IMMEDIATE;')
+
+      // 1. Проверка за прието приятелство
+      const friendship = selectAcceptedFriendshipStatement.get(
+        friendshipId,
+        senderProfileId,
+        senderProfileId,
+      ) as FriendshipRow | undefined
+
+      if (!friendship) {
+        database.exec('ROLLBACK;')
+        return {
+          ok: false,
+          message: 'Можеш да подаряваш жълтици само на приятели.',
+        }
+      }
+
+      // 2. Определяне на получателя
+      recipientProfileId = getRecipientProfileId(friendship, senderProfileId)
+
+      // 3. Защита срещу подарък към себе си
+      if (recipientProfileId === senderProfileId) {
+        database.exec('ROLLBACK;')
+        return {
+          ok: false,
+          message: 'Не можеш да подариш жълтици на себе си.',
+        }
+      }
+
+      // 4. Sender 24-часов лимит
+      const sentTodayRow = selectSentTodayStatement.get(senderProfileId) as
+        | { sent_amount: number }
+        | undefined
+      const sentToday = sentTodayRow?.sent_amount ?? 0
+
+      if (sentToday + amount > DAILY_GIFT_LIMIT) {
+        database.exec('ROLLBACK;')
+        return {
+          ok: false,
+          message: `Дневният лимит за подаръци е ${DAILY_GIFT_LIMIT} жълтици.`,
+        }
+      }
+
+      // 5. Recipient 60-дневен лимит
+      const windowRow = selectRecipientWindowStatement.get(recipientProfileId) as
+        | RecipientWindowRow
+        | undefined
+      const receivedInWindow = windowRow?.received_in_window ?? 0
+      const nextReleaseAtRaw = windowRow?.next_release_at ?? null
+      const nextReleaseAmount = windowRow?.next_release_amount ?? 0
+      const nextReleaseAt = nextReleaseAtRaw !== null ? sqliteDateToIso(nextReleaseAtRaw) : null
+
+      const remainingAllowance = Math.max(0, RECIPIENT_GIFT_WINDOW_LIMIT - receivedInWindow)
+
+      if (amount > remainingAllowance) {
+        database.exec('ROLLBACK;')
+
+        if (remainingAllowance === 0) {
+          return {
+            ok: false,
+            code: 'RECIPIENT_WINDOW_LIMIT_FULL',
+            message: `Този играч вече е получил максималния размер от ${formatBgNumber(RECIPIENT_GIFT_WINDOW_LIMIT)} подарени жълтици за последните ${RECIPIENT_GIFT_WINDOW_DAYS} дни.`,
+            receivedInWindow,
+            remainingAllowance: 0,
+            attemptedAmount: amount,
+            nextReleaseAt,
+            nextReleaseAmount,
+          }
+        }
+
+        return {
+          ok: false,
+          code: 'RECIPIENT_WINDOW_LIMIT_PARTIAL',
+          message: `Този играч може да получи още най-много ${formatBgNumber(remainingAllowance)} жълтици в текущия ${RECIPIENT_GIFT_WINDOW_DAYS}-дневен период.`,
+          receivedInWindow,
+          remainingAllowance,
+          attemptedAmount: amount,
+          nextReleaseAt,
+          nextReleaseAmount,
+        }
+      }
+
+      // 6. Ensure wallet и за двамата
       ensureWalletStatement.run(senderProfileId)
       ensureWalletStatement.run(recipientProfileId)
 
+      // 7. Атомарен debit на изпращача
       const debitResult = debitSenderStatement.run(
         amount,
         senderProfileId,
@@ -314,11 +425,14 @@ export async function createYellowCoinGiftStore(
         }
       }
 
+      // 8. Credit на получателя
       creditRecipientStatement.run(amount, recipientProfileId)
 
+      // 9. Четене на новите баланси
       const senderBalanceAfter = getWalletBalance(senderProfileId)
       const recipientBalanceAfter = getWalletBalance(recipientProfileId)
 
+      // 10. Insert в yellow_coin_gift_ledger
       insertGiftStatement.run(
         giftId,
         friendshipId,
@@ -328,6 +442,8 @@ export async function createYellowCoinGiftStore(
         senderBalanceAfter,
         recipientBalanceAfter,
       )
+
+      // 11. COMMIT
       database.exec('COMMIT;')
     } catch (error) {
       try {

@@ -4595,7 +4595,20 @@ async function handleFriendsRequest(
     const result = yellowCoinGiftStore.sendGift(profileId, friendshipId, amount)
 
     if (!result.ok) {
-      sendJsonResponse(res, 400, result)
+      if ('code' in result) {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          code: result.code,
+          message: result.message,
+          receivedInWindow: result.receivedInWindow,
+          remainingAllowance: result.remainingAllowance,
+          attemptedAmount: result.attemptedAmount,
+          nextReleaseAt: result.nextReleaseAt,
+          nextReleaseAmount: result.nextReleaseAmount,
+        })
+      } else {
+        sendJsonResponse(res, 400, { ok: false, message: result.message })
+      }
       return true
     }
 
