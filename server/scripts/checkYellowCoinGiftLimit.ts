@@ -7,7 +7,7 @@
  * [1]  Реалният migration файл: след DELETE на приятелство ledger остава, friendship_id → NULL
  * [2]  Получател с 0 получени — подарък 30 000 се приема
  * [3]  Получател с 25 000 получени — подарък 5 000 се приема (точно на лимита)
- * [4]  Получател с 25 000 получени — подарък 5 001 се отказва (PARTIAL)
+ * [4]  Получател с 25 000 получени — подарък 6 000 се отказва (PARTIAL, кратно на 1 000)
  *        sender balance непроменен, recipient balance непроменен, без ledger ред
  * [5]  Подаръци от различни изпращачи се сумират по получателя
  * [6]  Подарък на повече от 60 дни не участва в лимита
@@ -20,6 +20,11 @@
  * [13] Insufficient balance — няма частични промени
  * [14] Concurrency: два едновременни подаръка — точно един минава, един се отказва с FULL
  * [15] Точна 60-дневна граница: created_at = datetime('now','-60 days') не участва в прозореца
+ * [16] amount = 999 → отказ (под минимума)
+ * [17] amount = 1 000 → приема се (минималната допустима сума)
+ * [18] amount = 30 000 → приема се (максималната допустима сума)
+ * [19] amount = 30 001 → отказ (над максимума)
+ * [20] amount = 1 500 → отказ (некратно на 1 000)
  */
 
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
@@ -404,8 +409,8 @@ await withTempDir(async (dir) => {
     assert(result.ok === true, `Очаква се ok:true (точно на лимита), но: ${JSON.stringify(result)}`)
   })
 
-  // ── [4] Получател с 25 000 → подарък 5 001 се отказва ──────────────────
-  await check('[4] Получател с 25 000 — подарък 5 001 се отказва (PARTIAL)', async () => {
+  // ── [4] Получател с 25 000 → подарък 6 000 се отказва ──────────────────
+  await check('[4] Получател с 25 000 — подарък 6 000 се отказва (PARTIAL)', async () => {
     const dbPath = join(dir, 'test4.sqlite')
     const db = new DatabaseSync(dbPath, { open: true })
     db.exec('PRAGMA foreign_keys = ON;')
@@ -424,7 +429,7 @@ await withTempDir(async (dir) => {
     db2.close()
 
     const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
-    const result = store.sendGift('sender-4', 'fs-4', 5_001)
+    const result = store.sendGift('sender-4', 'fs-4', 6_000)
     store.close()
 
     const db3 = new DatabaseSync(dbPath, { open: true })
@@ -505,7 +510,7 @@ await withTempDir(async (dir) => {
     db.close()
 
     const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
-    const result = store.sendGift('sender-7', 'fs-7', 100)
+    const result = store.sendGift('sender-7', 'fs-7', 1_000)
     store.close()
 
     assert(result.ok === false, 'Подарък от 59 дни трябва да участва (лимитът е достигнат)')
@@ -534,7 +539,7 @@ await withTempDir(async (dir) => {
     db.close()
 
     const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
-    const result = store.sendGift('sender-8', 'fs-8', 500)
+    const result = store.sendGift('sender-8', 'fs-8', 1_000)
     store.close()
 
     assert(result.ok === false && 'nextReleaseAt' in result, 'Очаква се error с nextReleaseAt')
@@ -572,7 +577,7 @@ await withTempDir(async (dir) => {
     db.close()
 
     const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
-    const result = store.sendGift('sender-9a', 'fs-9a', 100)
+    const result = store.sendGift('sender-9a', 'fs-9a', 1_000)
     store.close()
 
     assert(result.ok === false && 'nextReleaseAmount' in result, 'Очаква се error с nextReleaseAmount')
@@ -595,7 +600,7 @@ await withTempDir(async (dir) => {
     db.close()
 
     const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
-    const result = store.sendGift('sender-10', 'fs-10', 100)
+    const result = store.sendGift('sender-10', 'fs-10', 1_000)
     store.close()
 
     assert(result.ok === false, 'Очаква се отказ')
@@ -796,6 +801,108 @@ await withTempDir(async (dir) => {
       result.ok === true,
       `Подарък точно на 60-дневната граница не трябва да участва (строго >); got: ${JSON.stringify(result)}`,
     )
+  })
+
+  // ── [16]–[20] normalizeGiftAmount граници и стъпка ──────────────────────
+  //
+  // Тези тестове използват самостоятелна DB без ledger данни.
+  // При amount = 999, 30 001, 1 500 — normalizeGiftAmount трябва да върне null
+  // преди изобщо да се стигне до recipient limit логиката.
+
+  await check('[16] amount = 999 → отказ (под минимума)', async () => {
+    const dbPath = join(dir, 'test16.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'sender-16', 100_000)
+    seedProfile(db, 'recipient-16', 0)
+    seedFriendship(db, 'fs-16', 'sender-16', 'recipient-16')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const result = store.sendGift('sender-16', 'fs-16', 999)
+    store.close()
+
+    assert(result.ok === false, 'Очаква се отказ за 999')
+    assert(!('code' in result), 'Невалидна сума не трябва да дава limit code')
+    assertEqual((result as { message: string }).message, 'Сумата трябва да е между 1 000 и 30 000 жълтици.', 'message [16]')
+  })
+
+  await check('[17] amount = 1 000 → приема се (минималната допустима сума)', async () => {
+    const dbPath = join(dir, 'test17.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'sender-17', 100_000)
+    seedProfile(db, 'recipient-17', 0)
+    seedFriendship(db, 'fs-17', 'sender-17', 'recipient-17')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const result = store.sendGift('sender-17', 'fs-17', 1_000)
+    store.close()
+
+    assert(result.ok === true, `Очаква се ok:true за 1 000, но: ${JSON.stringify(result)}`)
+  })
+
+  await check('[18] amount = 30 000 → приема се (максималната допустима сума)', async () => {
+    const dbPath = join(dir, 'test18.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'sender-18', 100_000)
+    seedProfile(db, 'recipient-18', 0)
+    seedFriendship(db, 'fs-18', 'sender-18', 'recipient-18')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const result = store.sendGift('sender-18', 'fs-18', 30_000)
+    store.close()
+
+    assert(result.ok === true, `Очаква се ok:true за 30 000, но: ${JSON.stringify(result)}`)
+  })
+
+  await check('[19] amount = 30 001 → отказ (над максимума)', async () => {
+    const dbPath = join(dir, 'test19.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'sender-19', 100_000)
+    seedProfile(db, 'recipient-19', 0)
+    seedFriendship(db, 'fs-19', 'sender-19', 'recipient-19')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const result = store.sendGift('sender-19', 'fs-19', 30_001)
+    store.close()
+
+    assert(result.ok === false, 'Очаква се отказ за 30 001')
+    assert(!('code' in result), 'Невалидна сума не трябва да дава limit code')
+    assertEqual((result as { message: string }).message, 'Сумата трябва да е между 1 000 и 30 000 жълтици.', 'message [19]')
+  })
+
+  await check('[20] amount = 1 500 → отказ (некратно на 1 000)', async () => {
+    const dbPath = join(dir, 'test20.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'sender-20', 100_000)
+    seedProfile(db, 'recipient-20', 0)
+    seedFriendship(db, 'fs-20', 'sender-20', 'recipient-20')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const result = store.sendGift('sender-20', 'fs-20', 1_500)
+    store.close()
+
+    assert(result.ok === false, 'Очаква се отказ за 1 500 (некратно на 1 000)')
+    assert(!('code' in result), 'Некратна сума не трябва да дава limit code')
+    assertEqual((result as { message: string }).message, 'Сумата трябва да е между 1 000 и 30 000 жълтици.', 'message [20]')
   })
 })
 

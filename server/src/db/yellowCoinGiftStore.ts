@@ -89,14 +89,20 @@ type RecipientWindowRow = {
   next_release_amount: number
 }
 
-const MIN_GIFT_AMOUNT = 100
-const MAX_GIFT_AMOUNT = 50_000
+const MIN_GIFT_AMOUNT = 1_000
+const MAX_GIFT_AMOUNT = 30_000
+const GIFT_AMOUNT_STEP = 1_000
 const DAILY_GIFT_LIMIT = 200_000
 const RECIPIENT_GIFT_WINDOW_LIMIT = 30_000
 const RECIPIENT_GIFT_WINDOW_DAYS = 60
 
 function normalizeGiftAmount(value: number): number | null {
-  if (!Number.isInteger(value) || value < MIN_GIFT_AMOUNT || value > MAX_GIFT_AMOUNT) {
+  if (
+    !Number.isInteger(value) ||
+    value < MIN_GIFT_AMOUNT ||
+    value > MAX_GIFT_AMOUNT ||
+    value % GIFT_AMOUNT_STEP !== 0
+  ) {
     return null
   }
 
@@ -316,7 +322,7 @@ export async function createYellowCoinGiftStore(
     if (amount === null) {
       return {
         ok: false,
-        message: `Сумата трябва да е между ${MIN_GIFT_AMOUNT} и ${MAX_GIFT_AMOUNT} жълтици.`,
+        message: 'Сумата трябва да е между 1 000 и 30 000 жълтици.',
       }
     }
 

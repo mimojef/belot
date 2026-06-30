@@ -153,17 +153,23 @@ check(
   controllerSrc.includes('state.giftModalErrorText = result.message'),
 )
 
-// [11] renderLobbyScreen.ts: input атрибути
+// [11] renderLobbyScreen.ts: gift modal input атрибути
 const renderSrc = readFileSync(
   resolve(PROJECT_ROOT, 'src/app/lobby/renderLobbyScreen.ts'),
   'utf8',
 )
-check('[11] renderLobbyScreen: min="100"', renderSrc.includes('min="100"'))
-check('[11] renderLobbyScreen: max="30000"', renderSrc.includes('max="30000"'))
-check('[11] renderLobbyScreen: step="100"', renderSrc.includes('step="100"'))
+// Изолираме gift modal секцията за да избегнем влияние от други number inputs
+const giftModalMatch = renderSrc.match(/data-lobby-gift-form[\s\S]*?<\/form>/)
+const giftModalSrc = giftModalMatch ? giftModalMatch[0] : ''
+check('[11] renderLobbyScreen gift modal: min="1000"', giftModalSrc.includes('min="1000"'))
+check('[11] renderLobbyScreen gift modal: max="30000"', giftModalSrc.includes('max="30000"'))
+check('[11] renderLobbyScreen gift modal: step="1000"', giftModalSrc.includes('step="1000"'))
+check('[11] renderLobbyScreen gift modal: value="1000"', giftModalSrc.includes('value="1000"'))
+check('[11] renderLobbyScreen gift modal: не съдържа min="100"', !giftModalSrc.includes('min="100"'))
+check('[11] renderLobbyScreen gift modal: не съдържа step="100"', !giftModalSrc.includes('step="100"'))
 
 // [12] renderLobbyScreen.ts: видим текст
-check('[12] renderLobbyScreen: "между 100 и 30 000 жълтици"', renderSrc.includes('между 100 и 30 000 жълтици'))
+check('[12] renderLobbyScreen: "между 1 000 и 30 000 жълтици"', renderSrc.includes('между 1 000 и 30 000 жълтици'))
 
 // [13] main.ts: API обработка запазва всички limit error полета
 const mainSrc = readFileSync(resolve(PROJECT_ROOT, 'src/main.ts'), 'utf8')
