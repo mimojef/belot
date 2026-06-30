@@ -423,6 +423,8 @@ type InternalLobbyFlowState = {
   serverQueuedPlayerPreviews: MatchmakingRoomPlayer[]
   serverPreviewBotDisplayNames: string[]
   players: PlayerPublicProfileSnapshot[]
+  playersSearchQuery: string
+  playersSearchDraft: string
   playersLoading: boolean
   playersErrorText: string | null
   leaderboards: LeaderboardsSnapshot | null
@@ -646,6 +648,8 @@ function createInitialState(): InternalLobbyFlowState {
     serverQueuedPlayerPreviews: [],
     serverPreviewBotDisplayNames: [],
     players: [],
+    playersSearchQuery: '',
+    playersSearchDraft: '',
     playersLoading: false,
     playersErrorText: null,
     leaderboards: null,
@@ -1703,6 +1707,8 @@ export function createLobbyFlowController(
       profilePopupProfile: state.profilePopupProfile,
       profilePopupCanEdit: state.profilePopupCanEdit,
       players: state.players,
+      playersSearchQuery: state.playersSearchQuery,
+      playersSearchDraft: state.playersSearchDraft,
       playersLoading: state.playersLoading,
       playersErrorText: state.playersErrorText,
       leaderboards: state.leaderboards,
@@ -2102,6 +2108,22 @@ export function createLobbyFlowController(
         renderPopupOnly()
         if (isOwn) void fetchOwnLikesCount()
         else void ensureFriendshipsLoaded()
+      },
+      onPlayersSearchChange: (query) => {
+        // Desktop: обновява и draft, и applied → live filter
+        state.playersSearchDraft = query
+        state.playersSearchQuery = query
+        render()
+      },
+      onPlayersSearchDraftChange: (draft) => {
+        // Mobile: само draft — без render, браузърът пази input стойността
+        state.playersSearchDraft = draft
+      },
+      onPlayersSearchSubmit: (query) => {
+        // Mobile: използва реалната DOM стойност — надеждно при composition и гласово въвеждане
+        state.playersSearchDraft = query
+        state.playersSearchQuery = query
+        render()
       },
       onLeaderboardPlayerClick: (profile) => {
         const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId
@@ -2753,6 +2775,8 @@ export function createLobbyFlowController(
     state.profilePopupOpen = false
     state.profilePopupProfile = null
     state.profilePopupCanEdit = true
+    state.playersSearchQuery = ''
+    state.playersSearchDraft = ''
     stopWaitingRoomActivity()
     resetFinalFillSequence()
 

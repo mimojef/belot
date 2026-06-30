@@ -119,6 +119,8 @@ export type LobbyScreenState = {
   profilePopupProfile: PlayerPublicProfileSnapshot | null
   profilePopupCanEdit: boolean
   players: PlayerPublicProfileSnapshot[]
+  playersSearchQuery: string
+  playersSearchDraft: string
   playersLoading: boolean
   playersErrorText: string | null
   leaderboards: LeaderboardsSnapshot | null
@@ -339,6 +341,9 @@ export type RenderLobbyScreenOptions = {
   onChatMarkRead: (friendshipId: string) => void
   onChatSubmit: (friendshipId: string, body: string) => void
   onPlayerCardClick: (profile: PlayerPublicProfileSnapshot) => void
+  onPlayersSearchChange: (query: string) => void
+  onPlayersSearchDraftChange: (draft: string) => void
+  onPlayersSearchSubmit: (query: string) => void
   onLeaderboardPlayerClick: (profile: PlayerPublicProfileSnapshot) => void
   onFriendProfileClick: (profile: PlayerPublicProfileSnapshot) => void
   onFriendRequestClick: (profileId: string) => void
@@ -2959,12 +2964,42 @@ function renderMobilePlayersDirectory(state: LobbyScreenState): string {
   if (state.playersLoading) return `${renderMobilePageTitle('Играчите')}${renderMobileStateMessage('Зареждане на играчи...')}`
   if (state.playersErrorText) return `${renderMobilePageTitle('Играчите')}${renderMobileStateMessage(state.playersErrorText, 'error')}`
 
+  const allPlayers = state.players
+  const applied = state.playersSearchQuery.trim().toLocaleLowerCase()
+  const players = applied
+    ? allPlayers.filter((p) => (p.displayName ?? '').toLocaleLowerCase().includes(applied))
+    : allPlayers
+
   return `
-    ${renderMobilePageTitle('Играчите', `${formatAmount(state.players.length)} профила`)}
-    <section style="padding:12px;display:grid;gap:9px;">
-      ${state.players.length === 0
+    ${renderMobilePageTitle('Играчите', `${formatAmount(allPlayers.length)} профила`)}
+    <div style="padding:12px 12px 8px;">
+      <form data-lobby-players-search-form="1" style="display:grid;gap:8px;">
+        <label style="display:flex;align-items:center;gap:10px;background:#0d0d0d;border:1px solid rgba(212,165,32,0.44);border-radius:8px;padding:0 14px;height:46px;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d4a520" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input
+            data-lobby-players-search-mobile="1"
+            type="search"
+            placeholder="Намери играч"
+            aria-label="Намери играч"
+            value="${escapeHtml(state.playersSearchDraft)}"
+            autocomplete="off"
+            spellcheck="false"
+            enterkeyhint="search"
+            style="flex:1;min-width:0;background:transparent;border:0;outline:none;color:#f8fafc;font-size:15px;font-weight:700;font-family:inherit;"
+          >
+        </label>
+        <button
+          type="submit"
+          style="width:100%;height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:16px;font-weight:900;cursor:pointer;letter-spacing:0.01em;"
+        >Намери</button>
+      </form>
+    </div>
+    <section style="padding:4px 12px 12px;display:grid;gap:9px;">
+      ${allPlayers.length === 0
         ? renderMobileStateMessage('Все още няма регистрирани играчи.')
-        : state.players.map((player) => renderMobilePlayerListCard(player, 'data-lobby-player-card')).join('')}
+        : players.length === 0 && applied !== ''
+          ? renderMobileStateMessage('Няма намерени играчи.')
+          : players.map((player) => renderMobilePlayerListCard(player, 'data-lobby-player-card')).join('')}
     </section>
   `
 }
@@ -3653,7 +3688,11 @@ function renderChatPanel(state: LobbyScreenState): string {
 }
 
 function renderPlayersDirectory(state: LobbyScreenState): string {
-  const players = state.players
+  const allPlayers = state.players
+  const query = state.playersSearchQuery.trim().toLocaleLowerCase()
+  const players = query
+    ? allPlayers.filter((p) => (p.displayName ?? '').toLocaleLowerCase().includes(query))
+    : allPlayers
 
   if (state.playersLoading) {
     return `
@@ -3673,17 +3712,34 @@ function renderPlayersDirectory(state: LobbyScreenState): string {
 
   return `
     <section style="min-height:520px;display:grid;gap:14px;align-content:start;">
-      <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;flex-wrap:wrap;">
         <div>
           <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Всички играчи</div>
           <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.56);">Профили, ранг, рейтинг и галерия.</div>
         </div>
-        <div style="font-size:13px;font-weight:900;color:#d4a520;">${formatAmount(players.length)} играчи</div>
+        <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+          <label style="display:flex;align-items:center;gap:10px;background:#0d0d0d;border:1px solid rgba(212,165,32,0.44);border-radius:8px;padding:0 14px;height:44px;min-width:240px;max-width:340px;flex:1 1 240px;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d4a520" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input
+              data-lobby-players-search="1"
+              type="text"
+              placeholder="Намери играч"
+              value="${escapeHtml(state.playersSearchQuery)}"
+              autocomplete="off"
+              style="flex:1;min-width:0;background:transparent;border:0;outline:none;color:#f8fafc;font-size:15px;font-weight:700;font-family:inherit;"
+            >
+          </label>
+          <div style="font-size:13px;font-weight:900;color:#d4a520;white-space:nowrap;">${formatAmount(allPlayers.length)} играчи</div>
+        </div>
       </div>
 
-      ${players.length === 0 ? `
+      ${allPlayers.length === 0 ? `
         <div style="min-height:360px;display:flex;align-items:center;justify-content:center;border:1px dashed rgba(255,255,255,0.16);background:rgba(255,255,255,0.03);border-radius:8px;color:rgba(255,255,255,0.62);font-size:15px;font-weight:800;">
           Все още няма регистрирани играчи.
+        </div>
+      ` : players.length === 0 ? `
+        <div style="min-height:360px;display:flex;align-items:center;justify-content:center;border:1px dashed rgba(255,255,255,0.16);background:rgba(255,255,255,0.03);border-radius:8px;color:rgba(255,255,255,0.62);font-size:15px;font-weight:800;">
+          Няма намерени играчи.
         </div>
       ` : `
         <div style="display:grid;grid-template-columns:repeat(5, minmax(0, 1fr));gap:12px;">
@@ -6658,6 +6714,9 @@ export function renderLobbyScreen(
 
   const savedScrollTop = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')?.scrollTop ?? 0
   // stakesFirstCardIndex се пази като модулна променлива — не се чете от scrollLeft
+  const prevSearchEl = root.querySelector<HTMLInputElement>('[data-lobby-players-search="1"]')
+  const wasSearchFocused = prevSearchEl !== null && document.activeElement === prevSearchEl
+  const savedSearchCaret = wasSearchFocused ? prevSearchEl.selectionStart : null
 
   root.innerHTML = isPhoneLayout ? `
     <div
@@ -7444,6 +7503,27 @@ export function renderLobbyScreen(
       }
     })
   })
+
+  // Desktop: live filter на всяка буква
+  root.querySelector<HTMLInputElement>('[data-lobby-players-search="1"]')
+    ?.addEventListener('input', (event) => {
+      options.onPlayersSearchChange((event.currentTarget as HTMLInputElement).value)
+    })
+
+  // Mobile: само обновява draft при писане — без render
+  root.querySelector<HTMLInputElement>('[data-lobby-players-search-mobile="1"]')
+    ?.addEventListener('input', (event) => {
+      options.onPlayersSearchDraftChange((event.currentTarget as HTMLInputElement).value)
+    })
+
+  // Mobile: submit при бутон или Enter/Search от клавиатурата
+  root.querySelector<HTMLFormElement>('[data-lobby-players-search-form="1"]')
+    ?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const form = event.currentTarget as HTMLFormElement
+      const input = form.querySelector<HTMLInputElement>('[data-lobby-players-search-mobile="1"]')
+      options.onPlayersSearchSubmit(input?.value ?? '')
+    })
 
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-leaderboard-tab]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -8753,6 +8833,16 @@ export function renderLobbyScreen(
   const newScrollEl = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')
   if (newScrollEl && savedScrollTop > 0) {
     newScrollEl.scrollTop = savedScrollTop
+  }
+
+  if (wasSearchFocused) {
+    const newSearchEl = root.querySelector<HTMLInputElement>('[data-lobby-players-search="1"]')
+    if (newSearchEl) {
+      newSearchEl.focus()
+      if (savedSearchCaret !== null) {
+        newSearchEl.setSelectionRange(savedSearchCaret, savedSearchCaret)
+      }
+    }
   }
 
   cancelAnimationFrame(stakesAnimFrame)
