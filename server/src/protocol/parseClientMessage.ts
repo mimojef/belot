@@ -344,7 +344,7 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         return null
       }
 
-      if (!/^(?:0[1-9]|1[0-9]|2[01])$/.test(emojiId)) {
+      if (!/^(?:0[1-9]|1[0-9]|2[0-4])$/.test(emojiId)) {
         return null
       }
 
