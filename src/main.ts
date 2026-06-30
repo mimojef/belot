@@ -16,6 +16,7 @@ import {
   createLobbyFlowController,
   type LobbyFlowController,
 } from './app/lobby/createLobbyFlowController'
+import type { GiftLimitErrorPayload } from './app/lobby/formatGiftLimitError'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult } from './app/adminServer/adminServerTypes'
 import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
@@ -260,6 +261,12 @@ type GiftCoinsResponse = {
   senderProfile?: PlayerPublicProfileSnapshot
   recipientProfile?: PlayerPublicProfileSnapshot
   message?: string
+  code?: 'RECIPIENT_WINDOW_LIMIT_PARTIAL' | 'RECIPIENT_WINDOW_LIMIT_FULL'
+  receivedInWindow?: number
+  remainingAllowance?: number
+  attemptedAmount?: number
+  nextReleaseAt?: string | null
+  nextReleaseAmount?: number
 }
 
 type DailyMissionsApiResponse = {
@@ -2123,6 +2130,7 @@ async function submitGiftCoins(friendshipId: string, amount: number): Promise<
       senderProfile: PlayerPublicProfileSnapshot
       recipientProfile: PlayerPublicProfileSnapshot
     }
+  | ({ ok: false; message: string } & GiftLimitErrorPayload)
   | { ok: false; message: string }
 > {
   try {
@@ -2140,6 +2148,21 @@ async function submitGiftCoins(friendshipId: string, amount: number): Promise<
     const data = (await response.json()) as GiftCoinsResponse
 
     if (!response.ok || !data.ok || !data.senderProfile || !data.recipientProfile) {
+      if (
+        data.code === 'RECIPIENT_WINDOW_LIMIT_PARTIAL' ||
+        data.code === 'RECIPIENT_WINDOW_LIMIT_FULL'
+      ) {
+        return {
+          ok: false,
+          message: data.message ?? 'Лимитът е достигнат.',
+          code: data.code,
+          receivedInWindow: data.receivedInWindow ?? 0,
+          remainingAllowance: data.remainingAllowance ?? 0,
+          attemptedAmount: data.attemptedAmount ?? amount,
+          nextReleaseAt: data.nextReleaseAt ?? null,
+          nextReleaseAmount: data.nextReleaseAmount ?? 0,
+        }
+      }
       return {
         ok: false,
         message: data.message ?? 'Подаръкът не беше изпратен.',

@@ -1,3 +1,5 @@
+import { formatGiftLimitError } from './formatGiftLimitError'
+import type { GiftLimitErrorPayload } from './formatGiftLimitError'
 import { applyRouteSeo } from '../seo/applyRouteSeo'
 import {
   renderMatchmakingRoomScreen,
@@ -234,6 +236,7 @@ export type CreateLobbyFlowControllerOptions = {
         senderProfile: PlayerPublicProfileSnapshot
         recipientProfile: PlayerPublicProfileSnapshot
       }
+    | ({ ok: false; message: string } & GiftLimitErrorPayload)
     | { ok: false; message: string }
   >
   onChatConversationsLoad?: () => Promise<
@@ -4016,7 +4019,11 @@ export function createLobbyFlowController(
     const result = await options.onGiftCoinsSubmit(friendshipId, amount)
 
     if (!result.ok) {
-      state.giftModalErrorText = result.message
+      if ('code' in result) {
+        state.giftModalErrorText = formatGiftLimitError(result)
+      } else {
+        state.giftModalErrorText = result.message
+      }
       render()
       return
     }
