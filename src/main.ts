@@ -70,6 +70,9 @@ if (!rootElementCandidate) {
 
 const rootElement: HTMLDivElement = rootElementCandidate
 
+// Определя се веднага — преди lobby/client bootstrap — за да guard-ва всички async callbacks.
+const _isResetPasswordPath = window.location.pathname === '/reset-password'
+
 if (isMatchEndedPreviewRequest()) {
   const renderPreview = (): void => {
     renderMatchEndedPreview(rootElement)
@@ -387,7 +390,7 @@ async function loadAuthSession(): Promise<void> {
     currentAuthSession = cached
     syncLobbyWithAuthSession()
     lobby.refreshDailyRewardsStatus()
-    if (!activeRoom.hasActiveRoom()) lobby.render()
+    if (!activeRoom.hasActiveRoom() && !_isResetPasswordPath) lobby.render()
   }
 
   try {
@@ -415,7 +418,7 @@ async function loadAuthSession(): Promise<void> {
     }
     await syncLobbyFriendships()
     await syncLobbyChatConversations()
-    if (!activeRoom.hasActiveRoom()) lobby.render()
+    if (!activeRoom.hasActiveRoom() && !_isResetPasswordPath) lobby.render()
   } catch {
     if (currentAuthSession === null) currentAuthSession = null
   }
@@ -3057,8 +3060,10 @@ client = createGameServerClient({
       return
     }
 
-    lobby.setConnected(true)
-    lobby.setErrorText(null)
+    if (!_isResetPasswordPath) {
+      lobby.setConnected(true)
+      lobby.setErrorText(null)
+    }
   },
   onClose: () => {
     if (isSessionDisplaced || isPageUnloading) {
@@ -3082,13 +3087,15 @@ client = createGameServerClient({
     }
 
     shouldReloadLobbyOnReconnect = true
-    lobby.setConnected(false)
-    scheduleServerReconnect()
+    if (!_isResetPasswordPath) {
+      lobby.setConnected(false)
+      scheduleServerReconnect()
 
-    connectionErrorTimerId = window.setTimeout(() => {
-      connectionErrorTimerId = null
-      lobby.setErrorText(SERVER_RESTART_WAIT_MESSAGE)
-    }, 1500)
+      connectionErrorTimerId = window.setTimeout(() => {
+        connectionErrorTimerId = null
+        lobby.setErrorText(SERVER_RESTART_WAIT_MESSAGE)
+      }, 1500)
+    }
   },
   onError: () => {
     if (activeRoom.hasActiveRoom()) {
@@ -3096,7 +3103,9 @@ client = createGameServerClient({
       return
     }
 
-    lobby.setErrorText(SERVER_CONNECTION_ERROR_MESSAGE)
+    if (!_isResetPasswordPath) {
+      lobby.setErrorText(SERVER_CONNECTION_ERROR_MESSAGE)
+    }
   },
   onMessage: (message) => {
     if (message.type === 'session_displaced') {
@@ -3181,7 +3190,7 @@ client = createGameServerClient({
       return
     }
 
-    if (!activeRoom.hasActiveRoom()) {
+    if (!activeRoom.hasActiveRoom() && !_isResetPasswordPath) {
       lobby.handleServerMessage(message)
     }
   },
@@ -3204,7 +3213,9 @@ const disposeViewportResizeHandler = createViewportResizeHandler(() => {
     return
   }
 
-  lobby.render()
+  if (!_isResetPasswordPath) {
+    lobby.render()
+  }
 })
 
 window.addEventListener('beforeunload', () => {
@@ -3254,8 +3265,6 @@ if (!isStripePaymentReturn && !isRunningAsStandalone() && !_VALID_PATHS.has(_ini
   showLandingOverlay()
 }
 
-const _isResetPasswordPath = _initialPath === '/reset-password'
-
 if (_isResetPasswordPath) {
   // Читаме token от hash веднага — fragment се изчиства от address bar.
   // Token се пази само в локалната state променлива — никъде другаде.
@@ -3268,10 +3277,7 @@ if (_isResetPasswordPath) {
   function _renderReset(): void {
     renderResetPasswordScreen(rootElement, _resetState, {
       onGoToLogin: () => {
-        history.pushState(null, '', '/lobby')
-        _resetState = { phase: 'no-token' } // изчистваме state-а
-        lobby.resetToLobby()
-        lobby.openAuthModal('login')
+        window.location.assign('/lobby')
       },
       onSubmit: (token, newPassword) => {
         if (_resetState.phase !== 'form' || _resetState.submitting) return

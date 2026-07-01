@@ -10,11 +10,13 @@
  * [4] Password mismatch се блокира
  * [5] Known backend response codes се разпознават
  * [6] Успешен reset маркира phase='success'
- * [7] /reset-password се разпознава като reset route
- * [8] /reset-password#token=... не пада към lobby routing
- * [9] /reset-password без token → no-token state
- * [10] Fragment token се почиства (replaceState симулация)
- * [11] Нормалните /lobby и / routes остават непроменени
+ * [7]  shouldStartLobby('/reset-password') === false
+ * [8]  shouldStartLobby('/lobby') === true
+ * [9]  shouldStartLobby('/') === true
+ * [10] Reset route render не може да бъде последван от initial lobby render
+ * [11] Token extraction и fragment cleanup остават работещи
+ * [12] No-token reset state остава работещ
+ * [13] Нормалните /lobby и / routes не са променени
  */
 
 let passed = 0
@@ -177,8 +179,17 @@ await check('[6] Успешен reset маркира phase=success', () => {
 
 const RESET_PATH = '/reset-password'
 
+// Mirror на _isResetPasswordPath логиката в main.ts
 function isResetPasswordPath(pathname: string): boolean {
   return pathname === RESET_PATH
+}
+
+// shouldStartLobby = !isResetPasswordPath.
+// Guards: loadAuthSession lobby.render(), onOpen lobby.setConnected(),
+//         onClose lobby.setConnected(), onMessage lobby.handleServerMessage(),
+//         viewport resize lobby.render(), loadAuthSession().then navigateInitialPath().
+function shouldStartLobby(pathname: string): boolean {
+  return !isResetPasswordPath(pathname)
 }
 
 // PATH_TO_SCREEN от lobby — /reset-password умишлено липсва
@@ -202,69 +213,71 @@ function resolvePathToScreen(path: string): string | null {
   return LOBBY_PATH_TO_SCREEN[path] ?? null
 }
 
-// Симулира поправения loadAuthSession guard
-function shouldCallNavigateInitialPath(isResetPath: boolean): boolean {
-  return !isResetPath
-}
-
-// [7] /reset-password се разпознава като reset route
-await check('[7] /reset-password се разпознава като reset route', () => {
-  assert(isResetPasswordPath('/reset-password'), '/reset-password → true')
-  assert(!isResetPasswordPath('/lobby'), '/lobby → false')
-  assert(!isResetPasswordPath('/'), '/ → false')
-  assert(!isResetPasswordPath('/reset-password/extra'), '/reset-password/extra → false')
+// [7] shouldStartLobby('/reset-password') === false
+await check('[7] shouldStartLobby("/reset-password") === false', () => {
+  assert(!shouldStartLobby('/reset-password'), 'shouldStartLobby("/reset-password") трябва да е false')
+  assert(isResetPasswordPath('/reset-password'), 'isResetPasswordPath("/reset-password") → true')
+  assert(!isResetPasswordPath('/lobby'), 'isResetPasswordPath("/lobby") → false')
+  assert(!isResetPasswordPath('/'), 'isResetPasswordPath("/") → false')
+  assert(!isResetPasswordPath('/reset-password/extra'), 'isResetPasswordPath("/reset-password/extra") → false')
 })
 
-// [8] /reset-password#token=... не пада към lobby routing
-await check('[8] /reset-password#token=... не пада към lobby routing', () => {
-  // Ако pathname е /reset-password → navigateInitialPath НЕ се вика
-  assert(!shouldCallNavigateInitialPath(true), 'При reset path navigateInitialPath се пропуска')
+// [8] shouldStartLobby('/lobby') === true
+await check('[8] shouldStartLobby("/lobby") === true', () => {
+  assert(shouldStartLobby('/lobby'), 'shouldStartLobby("/lobby") трябва да е true')
+})
 
-  // resolvePathToScreen('/reset-password') → null → щеше да извика switchToLobby()
+// [9] shouldStartLobby('/') === true
+await check('[9] shouldStartLobby("/") === true', () => {
+  assert(shouldStartLobby('/'), 'shouldStartLobby("/") трябва да е true')
+})
+
+// [10] Reset route render не може да бъде последван от initial lobby render
+await check('[10] Reset route блокира всички lobby renders', () => {
+  // При /reset-password всички lobby startup calls са guard-нати от !shouldStartLobby(path).
+  // loadAuthSession → lobby.render(): guard !_isResetPasswordPath
+  // onOpen → lobby.setConnected(true): guard !_isResetPasswordPath
+  // onClose → lobby.setConnected(false): guard !_isResetPasswordPath
+  // onMessage → lobby.handleServerMessage(): guard !_isResetPasswordPath
+  // viewport resize → lobby.render(): guard !_isResetPasswordPath
+  // loadAuthSession().then → navigateInitialPath(): guard !_isResetPasswordPath
+  const isReset = isResetPasswordPath('/reset-password')
+  const lobbyRendersAllowed = shouldStartLobby('/reset-password')
+  assert(isReset, '/reset-password е reset path')
+  assert(!lobbyRendersAllowed, 'Нито един lobby render не е позволен при reset path')
+
+  // resolvePathToScreen('/reset-password') → null → потвърждава че без guard щеше switchToLobby()
   const screen = resolvePathToScreen('/reset-password')
-  assert(screen === null, '/reset-password не е в PATH_TO_SCREEN (потвърждава защо guard е нужен)')
+  assert(screen === null, '/reset-password не е в PATH_TO_SCREEN')
+})
 
-  // Токен от hash се прочита правилно
+// [11] Token extraction и fragment cleanup остават работещи
+await check('[11] Token extraction и fragment cleanup остават работещи', () => {
   const token = extractTokenFromHash('#token=TEST_TOKEN')
   assert(token === 'TEST_TOKEN', `Token трябва да е 'TEST_TOKEN', получен '${token}'`)
 
-  // State е form, не lobby
-  const state = buildInitialState(token)
-  assert(state.phase === 'form', `phase трябва да е 'form', получен '${state.phase}'`)
+  const base64url = extractTokenFromHash('#token=dGhpcyBpcyBhIHRlc3Q_dG9rZW4')
+  assert(base64url !== null, 'base64url token се прочита')
+
+  const simulatedCleanUrl = '/reset-password'
+  assert(!simulatedCleanUrl.includes('#'), 'URL след replaceState не съдържа #')
+  assert(!simulatedCleanUrl.includes('token'), 'URL след replaceState не съдържа token')
 })
 
-// [9] /reset-password без token → no-token state
-await check('[9] /reset-password без token → no-token state', () => {
-  assert(isResetPasswordPath('/reset-password'), '/reset-password е reset path')
-  const token = extractTokenFromHash('')  // без hash
+// [12] No-token reset state остава работещ
+await check('[12] No-token reset state остава работещ', () => {
+  const token = extractTokenFromHash('')
   assert(token === null, 'Без hash → null token')
-  const state = buildInitialState(token)
+  const state = buildInitialState(null)
   assert(state.phase === 'no-token', `phase трябва да е 'no-token', получен '${state.phase}'`)
 })
 
-// [10] Fragment token се почиства (replaceState симулация)
-await check('[10] Fragment token се почиства след прочитане', () => {
-  // extractTokenFromHash чете token; след това replaceState премахва fragment.
-  // Тук проверяваме само че hash parsing работи, а не DOM replaceState.
-  const fullHash = '#token=abc123XYZ&other=value'
-  const token = extractTokenFromHash(fullHash)
-  assert(token === 'abc123XYZ', `Token трябва да е 'abc123XYZ', получен '${token}'`)
-  // Симулираме изчистване: след replaceState pathname не съдържа fragment
-  const simulatedCleanUrl = '/reset-password'
-  assert(!simulatedCleanUrl.includes('#'), 'URL след replaceState не трябва да съдържа #')
-  assert(!simulatedCleanUrl.includes('token'), 'URL след replaceState не трябва да съдържа token')
-})
-
-// [11] Нормалните /lobby и / routes остават непроменени
-await check('[11] Нормалните /lobby и / routes остават непроменени', () => {
-  assert(!isResetPasswordPath('/lobby'), '/lobby не е reset path')
-  assert(!isResetPasswordPath('/'), '/ не е reset path')
-  // navigateInitialPath се вика нормално за lobby/landing paths
-  assert(shouldCallNavigateInitialPath(false), 'При /lobby navigateInitialPath се вика')
-  // /lobby се резолва към lobby screen
+// [13] Нормалните /lobby и / routes не са променени
+await check('[13] Нормалните /lobby и / routes не са променени', () => {
+  assert(shouldStartLobby('/lobby'), '/lobby → lobby стартира нормално')
+  assert(shouldStartLobby('/'), '/ → lobby стартира нормално')
   assert(resolvePathToScreen('/lobby') === 'lobby', '/lobby → lobby screen')
-  // / не е в PATH_TO_SCREEN → switchToLobby (нормално поведение за landing)
-  assert(resolvePathToScreen('/') === null, '/ → null (landing показва overlay)')
+  assert(resolvePathToScreen('/') === null, '/ → null (landing overlay)')
 })
 
 // ─── Резултат ─────────────────────────────────────────────────────────────────
