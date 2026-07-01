@@ -14,6 +14,7 @@ export type SiteVisitUtmParams = {
 
 export type SiteVisitViewLayout = 'mobile' | 'desktop'
 export type VisitorDeviceFilter = 'all' | 'mobile' | 'desktop' | 'tablet' | 'unknown'
+export type VisitorOsFilter = 'all' | 'android' | 'ios' | 'windows' | 'macos' | 'linux' | 'chromeos' | 'unknown'
 
 export type RecordSitePageViewInput = {
   pageViewId: string
@@ -31,6 +32,7 @@ export type RecordSitePageViewInput = {
   viewLayout: SiteVisitViewLayout | null
   isEntry: boolean
   lastDeviceType: string | null
+  lastOsType: string | null
 }
 
 export type RecordSitePageViewResult =
@@ -66,6 +68,7 @@ export type VisitorListRow = {
   email: string | null
   lastIpAddress: string | null
   lastDeviceType: string | null
+  lastOsType: string | null
   firstSource: string | null
   firstReferrer: string | null
   firstSeenAt: string
@@ -98,10 +101,11 @@ export type SiteVisitStore = {
     period: VisitorListPeriod
     type: VisitorListType
     device: VisitorDeviceFilter
+    os: VisitorOsFilter
     limit: number
     offset: number
   }, now?: Date) => VisitorListResult
-  getVisitorSources: (params: { period: VisitorListPeriod; type: VisitorListType; device: VisitorDeviceFilter }, now?: Date) => VisitorSourcesResult
+  getVisitorSources: (params: { period: VisitorListPeriod; type: VisitorListType; device: VisitorDeviceFilter; os: VisitorOsFilter }, now?: Date) => VisitorSourcesResult
   purgeOlderThanDays: (days: number) => { deletedEvents: number; deletedVisitors: number }
   close: () => void
 }
@@ -129,8 +133,10 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       last_referrer,
       first_source,
       last_source,
-      last_device_type
+      last_device_type,
+      last_os_type
     ) VALUES (
+      ?,
       ?,
       ?,
       ?,
@@ -190,7 +196,8 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
         last_profile_id = ?,
         last_ip_address = ?,
         last_user_agent = ?,
-        last_device_type = ?
+        last_device_type = ?,
+        last_os_type = ?
     WHERE anonymous_visitor_id = ?;
   `)
 
@@ -201,6 +208,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
         last_ip_address = ?,
         last_user_agent = ?,
         last_device_type = ?,
+        last_os_type = ?,
         last_referrer = ?,
         last_source = ?
     WHERE anonymous_visitor_id = ?;
@@ -282,6 +290,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
         input.attributionSource ?? input.source,
         input.attributionSource ?? input.source,
         input.lastDeviceType,
+        input.lastOsType,
       )
 
       const insertEventResult = insertEventStatement.run(
@@ -314,6 +323,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
           input.ipAddress,
           input.userAgent,
           input.lastDeviceType,
+          input.lastOsType,
           input.attributionReferrer,
           input.attributionSource,
           input.anonymousVisitorId,
@@ -324,6 +334,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
           input.ipAddress,
           input.userAgent,
           input.lastDeviceType,
+          input.lastOsType,
           input.anonymousVisitorId,
         )
       }
@@ -415,6 +426,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     period: VisitorListPeriod
     type: VisitorListType
     device: VisitorDeviceFilter
+    os: VisitorOsFilter
     limit: number
     offset: number
   }, now: Date = new Date()): VisitorListResult {
@@ -432,6 +444,16 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       params.device === 'unknown'  ? 'AND (v.last_device_type = \'unknown\' OR v.last_device_type IS NULL)' :
       ''
 
+    const osFilter =
+      params.os === 'android'  ? 'AND v.last_os_type = \'android\'' :
+      params.os === 'ios'      ? 'AND v.last_os_type = \'ios\'' :
+      params.os === 'windows'  ? 'AND v.last_os_type = \'windows\'' :
+      params.os === 'macos'    ? 'AND v.last_os_type = \'macos\'' :
+      params.os === 'linux'    ? 'AND v.last_os_type = \'linux\'' :
+      params.os === 'chromeos' ? 'AND v.last_os_type = \'chromeos\'' :
+      params.os === 'unknown'  ? 'AND (v.last_os_type = \'unknown\' OR v.last_os_type IS NULL)' :
+      ''
+
     const baseQuery = `
       FROM site_visitors v
       LEFT JOIN profiles p ON p.profile_id = v.last_profile_id
@@ -443,6 +465,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       )
       ${typeFilter}
       ${deviceFilter}
+      ${osFilter}
     `
 
     // filter.sql appears once in baseQuery → 1× params
@@ -456,6 +479,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       email: string | null
       last_ip_address: string | null
       last_device_type: string | null
+      last_os_type: string | null
       first_source: string | null
       first_referrer: string | null
       first_seen_at: string
@@ -478,6 +502,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
         a.email,
         v.last_ip_address,
         v.last_device_type,
+        v.last_os_type,
         v.first_source,
         v.first_referrer,
         v.first_seen_at,
@@ -503,6 +528,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
         email: r.email,
         lastIpAddress: r.last_ip_address,
         lastDeviceType: r.last_device_type,
+        lastOsType: r.last_os_type,
         firstSource: r.first_source,
         firstReferrer: r.first_referrer,
         firstSeenAt: r.first_seen_at,
@@ -513,7 +539,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     }
   }
 
-  function getVisitorSources(params: { period: VisitorListPeriod; type: VisitorListType; device: VisitorDeviceFilter }, now: Date = new Date()): VisitorSourcesResult {
+  function getVisitorSources(params: { period: VisitorListPeriod; type: VisitorListType; device: VisitorDeviceFilter; os: VisitorOsFilter }, now: Date = new Date()): VisitorSourcesResult {
     const filter = buildSofiaTimeFilter('e', params.period, now)
 
     const typeFilter =
@@ -526,6 +552,16 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       params.device === 'desktop'  ? 'AND v.last_device_type = \'desktop\'' :
       params.device === 'tablet'   ? 'AND v.last_device_type = \'tablet\'' :
       params.device === 'unknown'  ? 'AND (v.last_device_type = \'unknown\' OR v.last_device_type IS NULL)' :
+      ''
+
+    const osFilter =
+      params.os === 'android'  ? 'AND v.last_os_type = \'android\'' :
+      params.os === 'ios'      ? 'AND v.last_os_type = \'ios\'' :
+      params.os === 'windows'  ? 'AND v.last_os_type = \'windows\'' :
+      params.os === 'macos'    ? 'AND v.last_os_type = \'macos\'' :
+      params.os === 'linux'    ? 'AND v.last_os_type = \'linux\'' :
+      params.os === 'chromeos' ? 'AND v.last_os_type = \'chromeos\'' :
+      params.os === 'unknown'  ? 'AND (v.last_os_type = \'unknown\' OR v.last_os_type IS NULL)' :
       ''
 
     type RawRow = { referrer: string | null; source: string | null; n: number }
@@ -543,6 +579,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       )
       ${typeFilter}
       ${deviceFilter}
+      ${osFilter}
       GROUP BY v.first_referrer, v.first_source
     `).all(...filter.params) as RawRow[]
 

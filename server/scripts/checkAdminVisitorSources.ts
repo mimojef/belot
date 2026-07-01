@@ -120,7 +120,7 @@ await withDb(async (dbPath, db) => {
   db.close()
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all' })
+    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all', os: 'all' })
     await check('[1.1] total=0', () => { if (r.total !== 0) throw new Error(`total=${r.total}`) })
     await check('[1.2] rows is empty array', () => { if (r.rows.length !== 0) throw new Error(`rows.length=${r.rows.length}`) })
   } finally { store.close() }
@@ -157,7 +157,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all' })
+    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all', os: 'all' })
     const byLabel = Object.fromEntries(r.rows.map(row => [row.label, row.visitors]))
 
     await check('[2.1] Facebook=6', () => { if (byLabel['Facebook'] !== 6) throw new Error(`Facebook=${byLabel['Facebook']}`) })
@@ -182,7 +182,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all' })
+    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all', os: 'all' })
     const byLabel = Object.fromEntries(r.rows.map(row => [row.label, row.visitors]))
     await check('[3.1] tiktok=2', () => { if (byLabel['tiktok'] !== 2) throw new Error(`tiktok=${byLabel['tiktok']}`) })
     await check('[3.2] linkedin=1', () => { if (byLabel['linkedin'] !== 1) throw new Error(`linkedin=${byLabel['linkedin']}`) })
@@ -202,7 +202,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all' })
+    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all', os: 'all' })
     const labels = r.rows.map(row => row.label)
     await check('[4.1] twitter.com in labels', () => {
       if (!labels.includes('twitter.com')) throw new Error(`labels=${JSON.stringify(labels)}`)
@@ -235,7 +235,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all' })
+    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all', os: 'all' })
     await check('[5.1] total=1', () => { if (r.total !== 1) throw new Error(`total=${r.total}`) })
     const sum = r.rows.reduce((a, b) => a + b.visitors, 0)
     await check('[5.2] sum of rows = total', () => { if (sum !== r.total) throw new Error(`sum=${sum}`) })
@@ -254,8 +254,8 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const today = store.getVisitorSources({ period: 'today', type: 'all', device: 'all' })
-    const d7    = store.getVisitorSources({ period: '7d', type: 'all', device: 'all' })
+    const today = store.getVisitorSources({ period: 'today', type: 'all', device: 'all', os: 'all' })
+    const d7    = store.getVisitorSources({ period: '7d', type: 'all', device: 'all', os: 'all' })
     await check('[6.1] today: total=1', () => { if (today.total !== 1) throw new Error(`total=${today.total}`) })
     await check('[6.2] 7d: total=2', () => { if (d7.total !== 2) throw new Error(`total=${d7.total}`) })
   } finally { store.close() }
@@ -279,8 +279,8 @@ console.log('\n[6b] Period filter: yesterday (fixed clock)')
 
     const store = await createSiteVisitStore(dbPath)
     try {
-      const yest  = store.getVisitorSources({ period: 'yesterday', type: 'all', device: 'all' }, fixedNow)
-      const today = store.getVisitorSources({ period: 'today',     type: 'all', device: 'all' }, fixedNow)
+      const yest  = store.getVisitorSources({ period: 'yesterday', type: 'all', device: 'all', os: 'all' }, fixedNow)
+      const today = store.getVisitorSources({ period: 'today',     type: 'all', device: 'all', os: 'all' }, fixedNow)
       await check('[6b.1] yesterday: total=1', () => { if (yest.total !== 1) throw new Error(`total=${yest.total}`) })
       await check('[6b.2] yesterday: Google', () => {
         if (yest.rows[0]?.label !== 'Google') throw new Error(`label=${yest.rows[0]?.label}`)
@@ -305,7 +305,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all' })
+    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all', os: 'all' })
     await check('[7.1] first row is tiktok (5)', () => {
       if (r.rows[0]!.label !== 'tiktok') throw new Error(`first=${r.rows[0]?.label}`)
     })
@@ -333,7 +333,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all' })
+    const r = store.getVisitorSources({ period: 'today', type: 'all', device: 'all', os: 'all' })
     const sum = r.rows.reduce((a, b) => a + b.visitors, 0)
     await check('[8.1] sum=total', () => { if (sum !== r.total) throw new Error(`sum=${sum} total=${r.total}`) })
     await check('[8.2] total=5', () => { if (r.total !== 5) throw new Error(`total=${r.total}`) })
@@ -357,10 +357,10 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const guestMob  = store.getVisitorSources({ period: 'today', type: 'guest',      device: 'mobile' })
-    const regDesk   = store.getVisitorSources({ period: 'today', type: 'registered', device: 'desktop' })
-    const guestDesk = store.getVisitorSources({ period: 'today', type: 'guest',      device: 'desktop' })
-    const allAll    = store.getVisitorSources({ period: 'today', type: 'all',        device: 'all' })
+    const guestMob  = store.getVisitorSources({ period: 'today', type: 'guest',      device: 'mobile', os: 'all' })
+    const regDesk   = store.getVisitorSources({ period: 'today', type: 'registered', device: 'desktop', os: 'all' })
+    const guestDesk = store.getVisitorSources({ period: 'today', type: 'guest',      device: 'desktop', os: 'all' })
+    const allAll    = store.getVisitorSources({ period: 'today', type: 'all',        device: 'all', os: 'all' })
 
     await check('[9.1] guest+mobile: total=1 (only Facebook)', () => {
       if (guestMob.total !== 1) throw new Error(`total=${guestMob.total}`)
@@ -407,7 +407,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorSources({ period: 'today', type: 'guest', device: 'mobile' })
+    const r = store.getVisitorSources({ period: 'today', type: 'guest', device: 'mobile', os: 'all' })
     await check('[9b.1] total=3 (only today+guest+mobile)', () => {
       if (r.total !== 3) throw new Error(`total=${r.total}`)
     })

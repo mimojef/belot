@@ -50,6 +50,7 @@ import {
   type VisitorListPeriod,
   type VisitorListType,
   type VisitorDeviceFilter,
+  type VisitorOsFilter,
 } from './app/network/createGameServerClient'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
@@ -1025,6 +1026,7 @@ async function loadAdminVisitors(params: {
   period: VisitorListPeriod
   type: VisitorListType
   device: VisitorDeviceFilter
+  os: VisitorOsFilter
   limit: number
   offset: number
 }): Promise<{ ok: true } & AdminVisitorListResult | { ok: false; message: string }> {
@@ -1033,6 +1035,7 @@ async function loadAdminVisitors(params: {
       period: params.period,
       type: params.type,
       device: params.device,
+      os: params.os,
       limit: String(params.limit),
       offset: String(params.offset),
     })
@@ -1054,9 +1057,10 @@ async function loadAdminVisitorSources(params: {
   period: VisitorListPeriod
   type: VisitorListType
   device: VisitorDeviceFilter
+  os: VisitorOsFilter
 }): Promise<{ ok: true } & AdminVisitorSourcesResult | { ok: false; message: string }> {
   try {
-    const qs = new URLSearchParams({ period: params.period, type: params.type, device: params.device })
+    const qs = new URLSearchParams({ period: params.period, type: params.type, device: params.device, os: params.os })
     const response = await fetch(`${getApiBaseUrl()}/api/admin/visitor-sources?${qs}`, {
       method: 'GET',
       credentials: 'include',

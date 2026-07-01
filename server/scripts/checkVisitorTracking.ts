@@ -155,7 +155,16 @@ async function createIsolatedServerRoot(originalServerRoot: string): Promise<{
     serverDir,
     databaseFile: join(serverDir, 'database', 'data', 'belot-v2.sqlite'),
     cleanup: async () => {
-      await rm(root, { recursive: true, force: true })
+      // On Windows, SQLite WAL files can briefly remain locked after the
+      // server process exits. Retry a few times rather than propagating EBUSY.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          await rm(root, { recursive: true, force: true })
+          return
+        } catch {
+          await new Promise<void>((r) => setTimeout(r, 250))
+        }
+      }
     },
   }
 }
@@ -723,6 +732,85 @@ try {
       const row = db.prepare(`SELECT last_device_type FROM site_visitors WHERE anonymous_visitor_id = ?`).get(visitorId) as { last_device_type: string | null } | undefined
       await check('[17.2] device type unchanged after duplicate (still mobile)', () => {
         if (row?.last_device_type !== 'mobile') throw new Error(`last_device_type=${String(row?.last_device_type)}`)
+      })
+    } finally { db.close() }
+  }
+
+  console.log('\n[18] OS type recorded on new page-view')
+  {
+    const androidUa = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36'
+    const visitorId = randomUUID()
+    const r = await httpJson(port, ENDPOINT, 'POST', payload({ anonymousVisitorId: visitorId }), undefined, {
+      'X-Forwarded-For': '203.0.113.63',
+      'User-Agent': androidUa,
+    })
+    await check('[18.1] page-view with Android UA → 200 recorded', () => {
+      const b = r.body as { ok?: boolean; recorded?: boolean }
+      if (r.status !== 200 || b.ok !== true || b.recorded !== true) throw new Error(`${r.status} ${JSON.stringify(b)}`)
+    })
+    const db = getDb(isolated.databaseFile)
+    try {
+      const row = db.prepare(`SELECT last_os_type FROM site_visitors WHERE anonymous_visitor_id = ?`).get(visitorId) as { last_os_type: string | null } | undefined
+      await check('[18.2] last_os_type = android for Android UA', () => {
+        if (row?.last_os_type !== 'android') throw new Error(`last_os_type=${String(row?.last_os_type)}`)
+      })
+    } finally { db.close() }
+  }
+
+  console.log('\n[19] OS type updates when UA changes')
+  {
+    const windowsUa = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36'
+    const macUa     = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15'
+    const visitorId = randomUUID()
+    // First page-view: windows
+    await httpJson(port, ENDPOINT, 'POST', payload({ anonymousVisitorId: visitorId }), undefined, {
+      'X-Forwarded-For': '203.0.113.64',
+      'User-Agent': windowsUa,
+    })
+    const db1 = getDb(isolated.databaseFile)
+    const after1 = db1.prepare(`SELECT last_os_type FROM site_visitors WHERE anonymous_visitor_id = ?`).get(visitorId) as { last_os_type: string | null } | undefined
+    db1.close()
+    await check('[19.1] first visit = windows', () => {
+      if (after1?.last_os_type !== 'windows') throw new Error(`os=${String(after1?.last_os_type)}`)
+    })
+    // Second page-view from a different OS (macOS UA)
+    await httpJson(port, ENDPOINT, 'POST', payload({ anonymousVisitorId: visitorId }), undefined, {
+      'X-Forwarded-For': '203.0.113.64',
+      'User-Agent': macUa,
+    })
+    const db2 = getDb(isolated.databaseFile)
+    const after2 = db2.prepare(`SELECT last_os_type FROM site_visitors WHERE anonymous_visitor_id = ?`).get(visitorId) as { last_os_type: string | null } | undefined
+    db2.close()
+    await check('[19.2] second visit (macOS UA) updates os type to macos', () => {
+      if (after2?.last_os_type !== 'macos') throw new Error(`os=${String(after2?.last_os_type)}`)
+    })
+  }
+
+  console.log('\n[20] Duplicate does not change OS type')
+  {
+    const iosUa     = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+    const windowsUa = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36'
+    const visitorId = randomUUID()
+    const pageViewId = randomUUID()
+    // First page-view: ios
+    await httpJson(port, ENDPOINT, 'POST', payload({ anonymousVisitorId: visitorId, pageViewId }), undefined, {
+      'X-Forwarded-For': '203.0.113.65',
+      'User-Agent': iosUa,
+    })
+    // Duplicate page-view with different (windows) UA — must NOT update os
+    const r = await httpJson(port, ENDPOINT, 'POST', payload({ anonymousVisitorId: visitorId, pageViewId }), undefined, {
+      'X-Forwarded-For': '203.0.113.65',
+      'User-Agent': windowsUa,
+    })
+    await check('[20.1] duplicate recognised', () => {
+      const b = r.body as { recorded?: boolean; duplicate?: boolean }
+      if (r.status !== 200 || b.recorded !== false || b.duplicate !== true) throw new Error(`${r.status} ${JSON.stringify(b)}`)
+    })
+    const db = getDb(isolated.databaseFile)
+    try {
+      const row = db.prepare(`SELECT last_os_type FROM site_visitors WHERE anonymous_visitor_id = ?`).get(visitorId) as { last_os_type: string | null } | undefined
+      await check('[20.2] os type unchanged after duplicate (still ios)', () => {
+        if (row?.last_os_type !== 'ios') throw new Error(`last_os_type=${String(row?.last_os_type)}`)
       })
     } finally { db.close() }
   }

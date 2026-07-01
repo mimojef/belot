@@ -54,6 +54,7 @@ async function withTempDb(fn: (dbPath: string) => Promise<void>): Promise<void> 
         first_user_agent TEXT NULL,
         last_user_agent TEXT NULL,
         last_device_type TEXT NULL CHECK (last_device_type IN ('mobile', 'desktop', 'tablet', 'unknown')),
+        last_os_type TEXT NULL CHECK (last_os_type IN ('android', 'ios', 'windows', 'macos', 'linux', 'chromeos', 'unknown')),
         first_referrer TEXT NULL,
         last_referrer TEXT NULL,
         first_source TEXT NULL,

@@ -54,6 +54,7 @@ async function withTempDb(fn: (dbPath: string) => Promise<void>): Promise<void> 
         first_user_agent TEXT NULL,
         last_user_agent TEXT NULL,
         last_device_type TEXT NULL CHECK (last_device_type IN ('mobile', 'desktop', 'tablet', 'unknown')),
+        last_os_type TEXT NULL CHECK (last_os_type IN ('android', 'ios', 'windows', 'macos', 'linux', 'chromeos', 'unknown')),
         first_referrer TEXT NULL,
         last_referrer TEXT NULL,
         first_source TEXT NULL,
@@ -161,21 +162,21 @@ await withTempDb(async (dbPath) => {
       navigationType: 'navigate', referrer: null, source: 'direct',
       attributionReferrer: null, attributionSource: null,
       utm: { utmSource: null, utmMedium: null, utmCampaign: null, utmTerm: null, utmContent: null },
-      ipAddress: null, userAgent: null, viewLayout: 'mobile', isEntry: true, lastDeviceType: null,
+      ipAddress: null, userAgent: null, viewLayout: 'mobile', isEntry: true, lastDeviceType: null, lastOsType: null,
     })
     store.recordPageView({
       pageViewId: pid2, anonymousVisitorId: vid, profileId: null, path: '/lobby',
       navigationType: 'reload', referrer: null, source: 'direct',
       attributionReferrer: null, attributionSource: null,
       utm: { utmSource: null, utmMedium: null, utmCampaign: null, utmTerm: null, utmContent: null },
-      ipAddress: null, userAgent: null, viewLayout: 'desktop', isEntry: true, lastDeviceType: null,
+      ipAddress: null, userAgent: null, viewLayout: 'desktop', isEntry: true, lastDeviceType: null, lastOsType: null,
     })
     store.recordPageView({
       pageViewId: pid3, anonymousVisitorId: vid, profileId: null, path: '/lobby',
       navigationType: 'navigate', referrer: null, source: 'direct',
       attributionReferrer: null, attributionSource: null,
       utm: { utmSource: null, utmMedium: null, utmCampaign: null, utmTerm: null, utmContent: null },
-      ipAddress: null, userAgent: null, viewLayout: null, isEntry: false, lastDeviceType: null,
+      ipAddress: null, userAgent: null, viewLayout: null, isEntry: false, lastDeviceType: null, lastOsType: null,
     })
 
     type EventRow = { view_layout: string | null; is_entry: number }

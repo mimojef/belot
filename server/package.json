@@ -16,6 +16,8 @@
     "check:visitor-summary": "tsx scripts/checkVisitorSummary.ts",
     "check:device-type": "tsx scripts/checkDeviceType.ts",
     "check:device-migration": "tsx scripts/checkDeviceMigration.ts --server-root=.",
+    "check:os-type": "tsx scripts/checkOsType.ts",
+    "check:os-migration": "tsx scripts/checkOsMigration.ts --server-root=.",
     "check:admin-visitors": "tsx scripts/checkAdminVisitors.ts",
     "check:admin-visitor-sources": "tsx scripts/checkAdminVisitorSources.ts --server-root=.",
     "check:db-backup-verify": "tsx scripts/checkDbBackupVerify.ts",

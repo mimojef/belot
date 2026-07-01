@@ -79,6 +79,7 @@ function makeSchema(db: DatabaseSync): void {
       first_ip_address TEXT NULL, last_ip_address TEXT NULL,
       first_user_agent TEXT NULL, last_user_agent TEXT NULL,
       last_device_type TEXT NULL CHECK (last_device_type IN ('mobile', 'desktop', 'tablet', 'unknown')),
+      last_os_type TEXT NULL CHECK (last_os_type IN ('android', 'ios', 'windows', 'macos', 'linux', 'chromeos', 'unknown')),
       first_referrer TEXT NULL, last_referrer TEXT NULL,
       first_source TEXT NULL, last_source TEXT NULL
     );
@@ -102,15 +103,16 @@ function makeSchema(db: DatabaseSync): void {
   `)
 }
 
-function iv(db: DatabaseSync, id: string, profileId: string | null, ip: string | null, firstSeen: string, lastSeen: string, source: string | null = null, device: string | null = null): void {
+function iv(db: DatabaseSync, id: string, profileId: string | null, ip: string | null, firstSeen: string, lastSeen: string, source: string | null = null, device: string | null = null, os: string | null = null): void {
   const pid = profileId ? `'${profileId}'` : 'NULL'
   const pip = ip ? `'${ip}'` : 'NULL'
   const psrc = source ? `'${source}'` : 'NULL'
   const pdev = device ? `'${device}'` : 'NULL'
+  const pos = os ? `'${os}'` : 'NULL'
   db.exec(`INSERT OR IGNORE INTO site_visitors
     (anonymous_visitor_id, first_profile_id, last_profile_id, first_ip_address, last_ip_address,
-     first_seen_at, last_seen_at, first_source, last_source, last_device_type)
-    VALUES ('${id}', ${pid}, ${pid}, ${pip}, ${pip}, ${firstSeen}, ${lastSeen}, ${psrc}, ${psrc}, ${pdev})`)
+     first_seen_at, last_seen_at, first_source, last_source, last_device_type, last_os_type)
+    VALUES ('${id}', ${pid}, ${pid}, ${pip}, ${pip}, ${firstSeen}, ${lastSeen}, ${psrc}, ${psrc}, ${pdev}, ${pos})`)
 }
 
 function ie(db: DatabaseSync, pvId: string, visId: string, profileId: string | null, navType: string, at: string): void {
@@ -148,7 +150,7 @@ await withDb(async (dbPath, db) => {
   db.close()
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 50, offset: 0 })
+    const r = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'all', limit: 50, offset: 0 })
     await check('[1.1] total=0', () => { if (r.total !== 0) throw new Error(`total=${r.total}`) })
     await check('[1.2] rows=[]', () => { if (r.rows.length !== 0) throw new Error(`rows.length=${r.rows.length}`) })
   } finally { store.close() }
@@ -168,7 +170,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 50, offset: 0 })
+    const r = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'all', limit: 50, offset: 0 })
     await check('[2.1] total=1', () => { if (r.total !== 1) throw new Error(`total=${r.total}`) })
     const row = r.rows[0]!
     await check('[2.2] isRegistered=true', () => { if (!row.isRegistered) throw new Error('isRegistered=false') })
@@ -191,7 +193,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 50, offset: 0 })
+    const r = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'all', limit: 50, offset: 0 })
     await check('[3.1] total=1', () => { if (r.total !== 1) throw new Error(`total=${r.total}`) })
     const row = r.rows[0]!
     await check('[3.2] isRegistered=false', () => { if (row.isRegistered) throw new Error('isRegistered=true') })
@@ -216,9 +218,9 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const today = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 50, offset: 0 })
-    const d7    = store.getVisitorList({ period: '7d',    type: 'all', device: 'all', limit: 50, offset: 0 })
-    const d30   = store.getVisitorList({ period: '30d',   type: 'all', device: 'all', limit: 50, offset: 0 })
+    const today = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'all', limit: 50, offset: 0 })
+    const d7    = store.getVisitorList({ period: '7d',    type: 'all', device: 'all', os: 'all', limit: 50, offset: 0 })
+    const d30   = store.getVisitorList({ period: '30d',   type: 'all', device: 'all', os: 'all', limit: 50, offset: 0 })
     await check('[4.1] today: only v-now', () => { if (today.total !== 1) throw new Error(`today.total=${today.total}`) })
     await check('[4.2] 7d: v-now + v-3d = 2', () => { if (d7.total !== 2) throw new Error(`7d.total=${d7.total}`) })
     await check('[4.3] 30d: v-now + v-3d + v-15d = 3', () => { if (d30.total !== 3) throw new Error(`30d.total=${d30.total}`) })
@@ -249,8 +251,8 @@ console.log('\n[4b] Period filter — yesterday (fixed clock)')
 
     const store = await createSiteVisitStore(dbPath)
     try {
-      const yest  = store.getVisitorList({ period: 'yesterday', type: 'all', device: 'all', limit: 50, offset: 0 }, fixedNow)
-      const today = store.getVisitorList({ period: 'today',     type: 'all', device: 'all', limit: 50, offset: 0 }, fixedNow)
+      const yest  = store.getVisitorList({ period: 'yesterday', type: 'all', device: 'all', os: 'all', limit: 50, offset: 0 }, fixedNow)
+      const today = store.getVisitorList({ period: 'today',     type: 'all', device: 'all', os: 'all', limit: 50, offset: 0 }, fixedNow)
       await check('[4b.1] yesterday: total=1', () => { if (yest.total !== 1) throw new Error(`yesterday.total=${yest.total}`) })
       await check('[4b.2] today: total=1', () => { if (today.total !== 1) throw new Error(`today.total=${today.total}`) })
       await check('[4b.3] yesterday row is vy', () => {
@@ -284,8 +286,8 @@ console.log('\n[4c] Rolling periods — детерминистичен clock (20
 
     const store = await createSiteVisitStore(dbPath)
     try {
-      const r7d  = store.getVisitorList({ period: '7d',  type: 'all', device: 'all', limit: 50, offset: 0 }, fixedNow)
-      const r30d = store.getVisitorList({ period: '30d', type: 'all', device: 'all', limit: 50, offset: 0 }, fixedNow)
+      const r7d  = store.getVisitorList({ period: '7d',  type: 'all', device: 'all', os: 'all', limit: 50, offset: 0 }, fixedNow)
+      const r30d = store.getVisitorList({ period: '30d', type: 'all', device: 'all', os: 'all', limit: 50, offset: 0 }, fixedNow)
       await check('[4c.1] 7d: total=1 (само v5d)', () => {
         if (r7d.total !== 1) throw new Error(`7d.total=${r7d.total}`)
       })
@@ -315,9 +317,9 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const all  = store.getVisitorList({ period: 'today', type: 'all',        device: 'all', limit: 50, offset: 0 })
-    const g    = store.getVisitorList({ period: 'today', type: 'guest',       device: 'all', limit: 50, offset: 0 })
-    const reg  = store.getVisitorList({ period: 'today', type: 'registered',  device: 'all', limit: 50, offset: 0 })
+    const all  = store.getVisitorList({ period: 'today', type: 'all',        device: 'all', os: 'all', limit: 50, offset: 0 })
+    const g    = store.getVisitorList({ period: 'today', type: 'guest',       device: 'all', os: 'all', limit: 50, offset: 0 })
+    const reg  = store.getVisitorList({ period: 'today', type: 'registered',  device: 'all', os: 'all', limit: 50, offset: 0 })
     await check('[5.1] all: total=3', () => { if (all.total !== 3) throw new Error(`all.total=${all.total}`) })
     await check('[5.2] guest: total=2', () => { if (g.total !== 2) throw new Error(`guest.total=${g.total}`) })
     await check('[5.3] guest rows: all isRegistered=false', () => { if (g.rows.some(r => r.isRegistered)) throw new Error('has registered') })
@@ -339,9 +341,9 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const p1 = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 2, offset: 0 })
-    const p2 = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 2, offset: 2 })
-    const p3 = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 2, offset: 4 })
+    const p1 = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'all', limit: 2, offset: 0 })
+    const p2 = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'all', limit: 2, offset: 2 })
+    const p3 = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'all', limit: 2, offset: 4 })
     await check('[6.1] total=6 on all pages', () => { if (p1.total !== 6) throw new Error(`total=${p1.total}`) })
     await check('[6.2] page1: 2 rows', () => { if (p1.rows.length !== 2) throw new Error(`len=${p1.rows.length}`) })
     await check('[6.3] page2: 2 rows', () => { if (p2.rows.length !== 2) throw new Error(`len=${p2.rows.length}`) })
@@ -369,7 +371,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const r = store.getVisitorList({ period: 'today', type: 'all', device: 'all', limit: 50, offset: 0 })
+    const r = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'all', limit: 50, offset: 0 })
     await check('[7.1] first row is vsort-new (newest)', () => {
       if (r.rows[0]?.anonymousVisitorId !== 'vsort-new') throw new Error(`first=${r.rows[0]?.anonymousVisitorId}`)
     })
@@ -400,11 +402,11 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const all     = store.getVisitorList({ period: 'today', type: 'all', device: 'all',     limit: 50, offset: 0 })
-    const mobile  = store.getVisitorList({ period: 'today', type: 'all', device: 'mobile',  limit: 50, offset: 0 })
-    const desktop = store.getVisitorList({ period: 'today', type: 'all', device: 'desktop', limit: 50, offset: 0 })
-    const tablet  = store.getVisitorList({ period: 'today', type: 'all', device: 'tablet',  limit: 50, offset: 0 })
-    const unknown = store.getVisitorList({ period: 'today', type: 'all', device: 'unknown', limit: 50, offset: 0 })
+    const all     = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'all',     limit: 50, offset: 0 })
+    const mobile  = store.getVisitorList({ period: 'today', type: 'all', device: 'mobile', os: 'all',  limit: 50, offset: 0 })
+    const desktop = store.getVisitorList({ period: 'today', type: 'all', device: 'desktop', os: 'all', limit: 50, offset: 0 })
+    const tablet  = store.getVisitorList({ period: 'today', type: 'all', device: 'tablet', os: 'all',  limit: 50, offset: 0 })
+    const unknown = store.getVisitorList({ period: 'today', type: 'all', device: 'unknown', os: 'all', limit: 50, offset: 0 })
     await check('[8.1] all: total=5', () => { if (all.total !== 5) throw new Error(`all.total=${all.total}`) })
     await check('[8.2] mobile: total=1', () => { if (mobile.total !== 1) throw new Error(`mobile.total=${mobile.total}`) })
     await check('[8.3] mobile row device', () => {
@@ -440,7 +442,7 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const regMob = store.getVisitorList({ period: 'today', type: 'registered', device: 'mobile', limit: 50, offset: 0 })
+    const regMob = store.getVisitorList({ period: 'today', type: 'registered', device: 'mobile', os: 'all', limit: 50, offset: 0 })
     await check('[8b.1] registered+mobile: total=1', () => { if (regMob.total !== 1) throw new Error(`total=${regMob.total}`) })
     await check('[8b.2] registered+mobile: isRegistered=true', () => {
       if (!regMob.rows[0]?.isRegistered) throw new Error('isRegistered=false')
@@ -466,8 +468,8 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const p1 = store.getVisitorList({ period: 'today', type: 'all', device: 'mobile', limit: 3, offset: 0 })
-    const p2 = store.getVisitorList({ period: 'today', type: 'all', device: 'mobile', limit: 3, offset: 3 })
+    const p1 = store.getVisitorList({ period: 'today', type: 'all', device: 'mobile', os: 'all', limit: 3, offset: 0 })
+    const p2 = store.getVisitorList({ period: 'today', type: 'all', device: 'mobile', os: 'all', limit: 3, offset: 3 })
     await check('[8c.1] mobile total=5 on both pages', () => { if (p1.total !== 5) throw new Error(`p1.total=${p1.total}`) })
     await check('[8c.2] p1 has 3 rows', () => { if (p1.rows.length !== 3) throw new Error(`p1.rows.length=${p1.rows.length}`) })
     await check('[8c.3] p2 has 2 rows', () => { if (p2.rows.length !== 2) throw new Error(`p2.rows.length=${p2.rows.length}`) })
@@ -493,9 +495,9 @@ await withDb(async (dbPath, db) => {
 
   const store = await createSiteVisitStore(dbPath)
   try {
-    const allSrc    = store.getVisitorSources({ period: 'today', device: 'all' })
-    const mobSrc    = store.getVisitorSources({ period: 'today', device: 'mobile' })
-    const deskSrc   = store.getVisitorSources({ period: 'today', device: 'desktop' })
+    const allSrc    = store.getVisitorSources({ period: 'today', device: 'all', os: 'all' })
+    const mobSrc    = store.getVisitorSources({ period: 'today', device: 'mobile', os: 'all' })
+    const deskSrc   = store.getVisitorSources({ period: 'today', device: 'desktop', os: 'all' })
     await check('[8d.1] all sources: total=3', () => { if (allSrc.total !== 3) throw new Error(`total=${allSrc.total}`) })
     await check('[8d.2] mobile sources: total=1 (google)', () => {
       if (mobSrc.total !== 1) throw new Error(`mobile total=${mobSrc.total}`)
@@ -508,6 +510,118 @@ await withDb(async (dbPath, db) => {
     })
     await check('[8d.5] desktop source label=Facebook', () => {
       if (deskSrc.rows[0]?.label !== 'Facebook') throw new Error(`label=${deskSrc.rows[0]?.label}`)
+    })
+  } finally { store.close() }
+})
+
+// ─── [8e] OS filter ────────────────────────────────────────────────────────────
+
+console.log('\n[8e] OS filter: android / ios / windows / macos / linux / chromeos / unknown / all')
+await withDb(async (dbPath, db) => {
+  const now = "datetime('now', '-1 hour')"
+  ;[
+    ['vo-android', 'android'],
+    ['vo-ios',     'ios'],
+    ['vo-windows', 'windows'],
+    ['vo-macos',   'macos'],
+    ['vo-linux',   'linux'],
+    ['vo-chromeos','chromeos'],
+    ['vo-unknown', 'unknown'],
+    ['vo-null',    null],
+  ].forEach(([id, os], i) => {
+    iv(db, id as string, null, null, now, now, null, null, os)
+    ie(db, `eo${i}`, id as string, null, 'navigate', now)
+  })
+  db.close()
+
+  const store = await createSiteVisitStore(dbPath)
+  try {
+    const all      = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'all',      limit: 50, offset: 0 })
+    const android  = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'android',  limit: 50, offset: 0 })
+    const ios      = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'ios',      limit: 50, offset: 0 })
+    const windows  = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'windows',  limit: 50, offset: 0 })
+    const macos    = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'macos',    limit: 50, offset: 0 })
+    const linux    = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'linux',    limit: 50, offset: 0 })
+    const chromeos = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'chromeos', limit: 50, offset: 0 })
+    const unknown  = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'unknown',  limit: 50, offset: 0 })
+    await check('[8e.1] all: total=8', () => { if (all.total !== 8) throw new Error(`all.total=${all.total}`) })
+    await check('[8e.2] android: total=1', () => { if (android.total !== 1) throw new Error(`android.total=${android.total}`) })
+    await check('[8e.3] android row os', () => {
+      if (android.rows[0]?.lastOsType !== 'android') throw new Error(`os=${android.rows[0]?.lastOsType}`)
+    })
+    await check('[8e.4] ios: total=1', () => { if (ios.total !== 1) throw new Error(`ios.total=${ios.total}`) })
+    await check('[8e.5] windows: total=1', () => { if (windows.total !== 1) throw new Error(`windows.total=${windows.total}`) })
+    await check('[8e.6] macos: total=1', () => { if (macos.total !== 1) throw new Error(`macos.total=${macos.total}`) })
+    await check('[8e.7] linux: total=1', () => { if (linux.total !== 1) throw new Error(`linux.total=${linux.total}`) })
+    await check('[8e.8] chromeos: total=1', () => { if (chromeos.total !== 1) throw new Error(`chromeos.total=${chromeos.total}`) })
+    await check('[8e.9] unknown: total=2 (explicit unknown + NULL)', () => {
+      if (unknown.total !== 2) throw new Error(`unknown.total=${unknown.total}`)
+    })
+  } finally { store.close() }
+})
+
+// ─── [8f] Combined filters: type + device + os ─────────────────────────────────
+
+console.log('\n[8f] Combined filters: registered + mobile + android')
+await withDb(async (dbPath, db) => {
+  db.exec(`INSERT INTO accounts (account_id, email, password_hash, role) VALUES ('accf', 'f@f.com', 'x', 'player')`)
+  db.exec(`INSERT INTO profiles (profile_id, account_id, display_name, normalized_display_name) VALUES ('pf', 'accf', 'FUser', 'fuser')`)
+  const now = "datetime('now', '-1 hour')"
+  iv(db, 'vf-reg-mob-android',   'pf',  null, now, now, null, 'mobile',  'android')
+  iv(db, 'vf-guest-mob-android', null,  null, now, now, null, 'mobile',  'android')
+  iv(db, 'vf-reg-mob-ios',       'pf',  null, now, now, null, 'mobile',  'ios')
+  iv(db, 'vf-reg-desk-windows',  'pf',  null, now, now, null, 'desktop', 'windows')
+  ie(db, 'ef1', 'vf-reg-mob-android',   'pf', 'navigate', now)
+  ie(db, 'ef2', 'vf-guest-mob-android', null, 'navigate', now)
+  ie(db, 'ef3', 'vf-reg-mob-ios',       'pf', 'navigate', now)
+  ie(db, 'ef4', 'vf-reg-desk-windows',  'pf', 'navigate', now)
+  db.close()
+
+  const store = await createSiteVisitStore(dbPath)
+  try {
+    const regMobAndroid = store.getVisitorList({ period: 'today', type: 'registered', device: 'mobile', os: 'android', limit: 50, offset: 0 })
+    await check('[8f.1] registered+mobile+android: total=1', () => {
+      if (regMobAndroid.total !== 1) throw new Error(`total=${regMobAndroid.total}`)
+    })
+    await check('[8f.2] registered+mobile+android: correct row', () => {
+      if (regMobAndroid.rows[0]?.anonymousVisitorId !== 'vf-reg-mob-android') {
+        throw new Error(`row=${regMobAndroid.rows[0]?.anonymousVisitorId}`)
+      }
+    })
+
+    const guestMobAndroid = store.getVisitorList({ period: 'today', type: 'guest', device: 'mobile', os: 'android', limit: 50, offset: 0 })
+    await check('[8f.3] guest+mobile+android: total=1 (excludes registered)', () => {
+      if (guestMobAndroid.total !== 1) throw new Error(`total=${guestMobAndroid.total}`)
+    })
+
+    const allDeskWindows = store.getVisitorList({ period: 'today', type: 'all', device: 'desktop', os: 'windows', limit: 50, offset: 0 })
+    await check('[8f.4] all+desktop+windows: total=1', () => {
+      if (allDeskWindows.total !== 1) throw new Error(`total=${allDeskWindows.total}`)
+    })
+  } finally { store.close() }
+})
+
+// ─── [8g] Old record without recognised OS → unknown ────────────────────────────
+
+console.log('\n[8g] Old record (last_os_type NULL) shown/filtered as unknown')
+await withDb(async (dbPath, db) => {
+  const now = "datetime('now', '-1 hour')"
+  iv(db, 'vold-no-os', null, null, now, now, null, 'desktop') // no os passed → NULL
+  ie(db, 'eold', 'vold-no-os', null, 'navigate', now)
+  db.close()
+
+  const store = await createSiteVisitStore(dbPath)
+  try {
+    const r = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'all', limit: 50, offset: 0 })
+    await check('[8g.1] lastOsType is null for old record', () => {
+      const row = r.rows.find(x => x.anonymousVisitorId === 'vold-no-os')
+      if (row?.lastOsType !== null) throw new Error(`lastOsType=${String(row?.lastOsType)}`)
+    })
+    const unknownFiltered = store.getVisitorList({ period: 'today', type: 'all', device: 'all', os: 'unknown', limit: 50, offset: 0 })
+    await check('[8g.2] os=unknown filter includes the NULL record', () => {
+      if (!unknownFiltered.rows.some(x => x.anonymousVisitorId === 'vold-no-os')) {
+        throw new Error('old record missing from unknown filter')
+      }
     })
   } finally { store.close() }
 })
@@ -671,18 +785,21 @@ try {
     if ((r.body as { ok: boolean }).ok !== false) throw new Error('ok should be false')
   })
 
-  // [10] 200 + shape с device field
-  await check('[10] 200 + correct shape (with lastDeviceType field)', async () => {
-    const r = await httpGet(port, '/api/admin/visitors?period=today&type=all&device=all&limit=50&offset=0', adminCookie)
+  // [10] 200 + shape с device/os field
+  await check('[10] 200 + correct shape (with lastDeviceType/lastOsType fields)', async () => {
+    const r = await httpGet(port, '/api/admin/visitors?period=today&type=all&device=all&os=all&limit=50&offset=0', adminCookie)
     if (r.status !== 200) throw new Error(`status=${r.status}`)
-    const b = r.body as { ok: boolean; rows: { lastDeviceType?: unknown }[]; total: number }
+    const b = r.body as { ok: boolean; rows: { lastDeviceType?: unknown; lastOsType?: unknown }[]; total: number }
     if (!b.ok) throw new Error('ok=false')
     if (!Array.isArray(b.rows)) throw new Error('rows not array')
     if (typeof b.total !== 'number') throw new Error(`total type=${typeof b.total}`)
     if (b.total < 0) throw new Error(`total=${b.total}`)
-    // lastDeviceType field must be present in each row (may be null)
+    // lastDeviceType/lastOsType fields must be present in each row (may be null)
     if (b.rows.length > 0 && !('lastDeviceType' in b.rows[0]!)) {
       throw new Error('lastDeviceType missing from row shape')
+    }
+    if (b.rows.length > 0 && !('lastOsType' in b.rows[0]!)) {
+      throw new Error('lastOsType missing from row shape')
     }
   })
 
@@ -707,6 +824,32 @@ try {
   // invalid period still defaults
   await check('[12b] invalid period → 200 ok (defaults to today)', async () => {
     const r = await httpGet(port, '/api/admin/visitors?period=BOGUS&type=BOGUS', adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}`)
+    const b = r.body as { ok: boolean }
+    if (!b.ok) throw new Error('ok=false')
+  })
+
+  // [13] OS filter: valid values accepted
+  for (const osVal of ['all', 'android', 'ios', 'windows', 'macos', 'linux', 'chromeos', 'unknown'] as const) {
+    await check(`[13] os=${osVal} → 200`, async () => {
+      const r = await httpGet(port, `/api/admin/visitors?period=today&os=${osVal}`, adminCookie)
+      if (r.status !== 200) throw new Error(`status=${r.status}`)
+      const b = r.body as { ok: boolean }
+      if (!b.ok) throw new Error('ok=false')
+    })
+  }
+
+  // [14] OS filter: invalid value → 200 ok (defaults to all, no SQL injection)
+  await check("[14] invalid os → 200 ok (defaults to all)", async () => {
+    const r = await httpGet(port, `/api/admin/visitors?period=today&os=${encodeURIComponent("' OR '1'='1")}`, adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}`)
+    const b = r.body as { ok: boolean }
+    if (!b.ok) throw new Error('ok=false')
+  })
+
+  // [15] Combined filters: type + device + os together
+  await check('[15] combined type=registered&device=mobile&os=android → 200', async () => {
+    const r = await httpGet(port, '/api/admin/visitors?period=today&type=registered&device=mobile&os=android', adminCookie)
     if (r.status !== 200) throw new Error(`status=${r.status}`)
     const b = r.body as { ok: boolean }
     if (!b.ok) throw new Error('ok=false')
