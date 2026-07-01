@@ -26,6 +26,7 @@
     "check:reconnect-contract": "tsx scripts/checkReconnectContractDisplay.ts",
     "check:client-winning-bid": "tsx scripts/checkClientWinningBidHelpers.ts",
     "check:password-reset": "tsx scripts/checkPasswordReset.ts",
+    "check:password-reset-http": "tsx scripts/checkPasswordResetHttp.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",
     "verify:db:prod": "node dist-scripts/scripts/checkDbBackupVerify.js",

@@ -138,6 +138,8 @@ import { createRoomWithHumanHost } from './core/createRoomWithHumanHost.js'
 import type { ClientMessage, PrivateRoomSnapshot } from './protocol/messageTypes.js'
 import { validateGuestContactPayload } from './contact/guestContactValidation.js'
 import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
+import { createPasswordResetStore, type PasswordResetStore } from './db/passwordResetStore.js'
+import { handleForgotPassword, handleResetPassword, type PasswordResetHandlerContext } from './auth/passwordResetHandlers.js'
 import { createMonitoringSampler } from './monitoring/createMonitoringSampler.js'
 import type { MonitoringSampler } from './monitoring/monitoringTypes.js'
 import { countOpenWebSockets, countUniqueOnlineRealPlayers } from './monitoring/monitoringHelpers.js'
@@ -382,6 +384,28 @@ const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath
 const supportStore = await createSupportStore(databaseBootstrap.databaseFilePath)
 const guestContactStore = await createGuestContactStore(databaseBootstrap.databaseFilePath)
 const siteVisitStore = await createSiteVisitStore(databaseBootstrap.databaseFilePath)
+
+// Password reset store — optional. Ако env липсва, store-ът е null и само
+// forgot/reset endpoints връщат EMAIL_DELIVERY_FAILED. Останалият server работи.
+let passwordResetStore: PasswordResetStore | null = null
+let passwordResetUrl: string = ''
+{
+  const rateLimitSecret = process.env.PASSWORD_RESET_RATE_LIMIT_SECRET?.trim() ?? ''
+  const resetUrl = process.env.PASSWORD_RESET_URL?.trim() ?? ''
+  if (rateLimitSecret.length >= 32 && resetUrl.length > 0) {
+    try {
+      passwordResetStore = await createPasswordResetStore(databaseBootstrap.databaseFilePath, {
+        rateLimitHashSecret: rateLimitSecret,
+      })
+      passwordResetUrl = resetUrl
+      console.log('[password-reset] Store initialized.')
+    } catch (error) {
+      console.error('[password-reset] Store init failed — forgot/reset endpoints unavailable:', error)
+    }
+  } else {
+    console.warn('[password-reset] PASSWORD_RESET_URL or PASSWORD_RESET_RATE_LIMIT_SECRET not configured — forgot/reset endpoints unavailable.')
+  }
+}
 
 function runSiteVisitRetentionCleanup(): void {
   if (isServerShuttingDown) {
@@ -3047,6 +3071,52 @@ async function handleAdminGuestContactMessagesRequest(
   return true
 }
 
+const SERVICE_UNAVAILABLE_RESET = {
+  ok: false,
+  code: 'EMAIL_DELIVERY_FAILED',
+  message:
+    'В момента не успяхме да изпратим линка за смяна на паролата. Моля, опитайте отново след няколко минути.',
+} as const
+
+async function handlePasswordResetRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (
+    pathname !== '/api/auth/forgot-password' &&
+    pathname !== '/api/auth/reset-password'
+  ) {
+    return false
+  }
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed.' })
+    return true
+  }
+
+  if (passwordResetStore === null) {
+    sendJsonResponse(res, 503, SERVICE_UNAVAILABLE_RESET)
+    return true
+  }
+
+  const ctx: PasswordResetHandlerContext = {
+    store: passwordResetStore,
+    resetUrl: passwordResetUrl,
+    getRequestIp: (r) => getRequestIp(r),
+    sendJson: (r, status, body) => sendJsonResponse(r, status, body),
+    readBody: (r) => readJsonRequestBody(r, 4_096),
+  }
+
+  if (pathname === '/api/auth/forgot-password') {
+    await handleForgotPassword(req, res, ctx)
+    return true
+  }
+
+  await handleResetPassword(req, res, ctx)
+  return true
+}
+
 async function handleAuthRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -5597,6 +5667,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handlePasswordResetRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleAuthRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -7465,6 +7539,11 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('coinPurchaseStore', () => coinPurchaseStore.close())
   closeStore('dailyRewardsStore', () => dailyRewardsStore.close())
   closeStore('siteVisitStore', () => siteVisitStore.close())
+
+  if (passwordResetStore !== null) {
+    closeStore('passwordResetStore', () => passwordResetStore!.close())
+    passwordResetStore = null
+  }
 
   if (monitoringHistoryStore !== null) {
     closeStore('monitoringHistoryStore', () => monitoringHistoryStore!.close())
