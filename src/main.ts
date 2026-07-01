@@ -3372,7 +3372,9 @@ initPwa((applyFn) => {
 
 void loadPublicSettings()
 void loadAuthSession().then(() => {
-  lobby.navigateInitialPath()
+  if (!_isResetPasswordPath) {
+    lobby.navigateInitialPath()
+  }
   if (stripeReturnPayment === 'success') {
     void handleStripePaymentSuccessReturn(stripeReturnCheckoutSessionId)
   }

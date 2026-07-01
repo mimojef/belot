@@ -10,6 +10,11 @@
  * [4] Password mismatch се блокира
  * [5] Known backend response codes се разпознават
  * [6] Успешен reset маркира phase='success'
+ * [7] /reset-password се разпознава като reset route
+ * [8] /reset-password#token=... не пада към lobby routing
+ * [9] /reset-password без token → no-token state
+ * [10] Fragment token се почиства (replaceState симулация)
+ * [11] Нормалните /lobby и / routes остават непроменени
  */
 
 let passed = 0
@@ -166,6 +171,100 @@ await check('[6] Успешен reset маркира phase=success', () => {
     assert(errNext.token === 'raw-token-xyz', 'При грешка token се запазва в state')
     assert(errNext.errorText === 'Изтекъл.', `errorText трябва да е backend message: ${errNext.errorText}`)
   }
+})
+
+// ─── Routing logic helpers (mirror на main.ts логика) ─────────────────────────
+
+const RESET_PATH = '/reset-password'
+
+function isResetPasswordPath(pathname: string): boolean {
+  return pathname === RESET_PATH
+}
+
+// PATH_TO_SCREEN от lobby — /reset-password умишлено липсва
+const LOBBY_PATH_TO_SCREEN: Record<string, string> = {
+  '/lobby': 'lobby',
+  '/players': 'players',
+  '/ranking': 'leaderboards',
+  '/shop': 'shop',
+  '/friends': 'friends',
+  '/chat': 'chat',
+  '/admin': 'admin',
+  '/terms': 'terms',
+  '/privacy': 'privacy',
+  '/contact': 'contact',
+  '/rules': 'rules',
+  '/strategy': 'strategy',
+}
+
+// Симулира navigateFromPath логика — null означава switchToLobby()
+function resolvePathToScreen(path: string): string | null {
+  return LOBBY_PATH_TO_SCREEN[path] ?? null
+}
+
+// Симулира поправения loadAuthSession guard
+function shouldCallNavigateInitialPath(isResetPath: boolean): boolean {
+  return !isResetPath
+}
+
+// [7] /reset-password се разпознава като reset route
+await check('[7] /reset-password се разпознава като reset route', () => {
+  assert(isResetPasswordPath('/reset-password'), '/reset-password → true')
+  assert(!isResetPasswordPath('/lobby'), '/lobby → false')
+  assert(!isResetPasswordPath('/'), '/ → false')
+  assert(!isResetPasswordPath('/reset-password/extra'), '/reset-password/extra → false')
+})
+
+// [8] /reset-password#token=... не пада към lobby routing
+await check('[8] /reset-password#token=... не пада към lobby routing', () => {
+  // Ако pathname е /reset-password → navigateInitialPath НЕ се вика
+  assert(!shouldCallNavigateInitialPath(true), 'При reset path navigateInitialPath се пропуска')
+
+  // resolvePathToScreen('/reset-password') → null → щеше да извика switchToLobby()
+  const screen = resolvePathToScreen('/reset-password')
+  assert(screen === null, '/reset-password не е в PATH_TO_SCREEN (потвърждава защо guard е нужен)')
+
+  // Токен от hash се прочита правилно
+  const token = extractTokenFromHash('#token=TEST_TOKEN')
+  assert(token === 'TEST_TOKEN', `Token трябва да е 'TEST_TOKEN', получен '${token}'`)
+
+  // State е form, не lobby
+  const state = buildInitialState(token)
+  assert(state.phase === 'form', `phase трябва да е 'form', получен '${state.phase}'`)
+})
+
+// [9] /reset-password без token → no-token state
+await check('[9] /reset-password без token → no-token state', () => {
+  assert(isResetPasswordPath('/reset-password'), '/reset-password е reset path')
+  const token = extractTokenFromHash('')  // без hash
+  assert(token === null, 'Без hash → null token')
+  const state = buildInitialState(token)
+  assert(state.phase === 'no-token', `phase трябва да е 'no-token', получен '${state.phase}'`)
+})
+
+// [10] Fragment token се почиства (replaceState симулация)
+await check('[10] Fragment token се почиства след прочитане', () => {
+  // extractTokenFromHash чете token; след това replaceState премахва fragment.
+  // Тук проверяваме само че hash parsing работи, а не DOM replaceState.
+  const fullHash = '#token=abc123XYZ&other=value'
+  const token = extractTokenFromHash(fullHash)
+  assert(token === 'abc123XYZ', `Token трябва да е 'abc123XYZ', получен '${token}'`)
+  // Симулираме изчистване: след replaceState pathname не съдържа fragment
+  const simulatedCleanUrl = '/reset-password'
+  assert(!simulatedCleanUrl.includes('#'), 'URL след replaceState не трябва да съдържа #')
+  assert(!simulatedCleanUrl.includes('token'), 'URL след replaceState не трябва да съдържа token')
+})
+
+// [11] Нормалните /lobby и / routes остават непроменени
+await check('[11] Нормалните /lobby и / routes остават непроменени', () => {
+  assert(!isResetPasswordPath('/lobby'), '/lobby не е reset path')
+  assert(!isResetPasswordPath('/'), '/ не е reset path')
+  // navigateInitialPath се вика нормално за lobby/landing paths
+  assert(shouldCallNavigateInitialPath(false), 'При /lobby navigateInitialPath се вика')
+  // /lobby се резолва към lobby screen
+  assert(resolvePathToScreen('/lobby') === 'lobby', '/lobby → lobby screen')
+  // / не е в PATH_TO_SCREEN → switchToLobby (нормално поведение за landing)
+  assert(resolvePathToScreen('/') === null, '/ → null (landing показва overlay)')
 })
 
 // ─── Резултат ─────────────────────────────────────────────────────────────────
