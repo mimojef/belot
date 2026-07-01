@@ -88,6 +88,7 @@ export type CreateLobbyFlowControllerOptions = {
   getOnlinePlayersCount?: () => number
   getApiBaseUrl?: () => string
   getIsInGame?: () => boolean
+  suppressRendering?: boolean
   onLoginSubmit?: (email: string, password: string) => Promise<string | null>
   onRegisterSubmit?: (
     displayName: string,
@@ -1007,7 +1008,7 @@ export function createLobbyFlowController(
   let _renderTimerId: ReturnType<typeof setTimeout> | null = null
 
   function shouldSuppressLobbyRender(): boolean {
-    return options.getIsInGame?.() ?? false
+    return (options.suppressRendering === true) || (options.getIsInGame?.() ?? false)
   }
 
   function scheduleRender(): void {

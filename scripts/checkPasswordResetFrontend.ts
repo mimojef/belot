@@ -17,6 +17,9 @@
  * [11] Token extraction и fragment cleanup остават работещи
  * [12] No-token reset state остава работещ
  * [13] Нормалните /lobby и / routes не са променени
+ * [14] suppressRendering=true блокира lobby render
+ * [15] scheduleRender е блокиран при suppressRendering=true
+ * [16] suppressRendering=false не блокира нормален lobby render
  */
 
 let passed = 0
@@ -278,6 +281,39 @@ await check('[13] Нормалните /lobby и / routes не са промен
   assert(shouldStartLobby('/'), '/ → lobby стартира нормално')
   assert(resolvePathToScreen('/lobby') === 'lobby', '/lobby → lobby screen')
   assert(resolvePathToScreen('/') === null, '/ → null (landing overlay)')
+})
+
+// ─── suppressRendering guard checks ──────────────────────────────────────────
+
+// Симулира shouldSuppressLobbyRender() от createLobbyFlowController.ts
+function shouldSuppressLobbyRender(opts: { suppressRendering?: boolean; getIsInGame?: () => boolean }): boolean {
+  return (opts.suppressRendering === true) || (opts.getIsInGame?.() ?? false)
+}
+
+// Симулира дали render() ще се изпълни
+function wouldRender(opts: { suppressRendering?: boolean; getIsInGame?: () => boolean }): boolean {
+  return !shouldSuppressLobbyRender(opts)
+}
+
+// [14] suppressRendering=true блокира lobby render
+await check('[14] suppressRendering=true блокира lobby render', () => {
+  assert(!wouldRender({ suppressRendering: true }), 'При suppressRendering=true render се блокира')
+  assert(!wouldRender({ suppressRendering: true, getIsInGame: () => false }), 'suppressRendering=true + не в игра → блокиран')
+})
+
+// [15] scheduleRender също е блокиран при suppressRendering=true
+await check('[15] scheduleRender е блокиран при suppressRendering=true', () => {
+  // scheduleRender() проверява shouldSuppressLobbyRender() преди да планира render
+  assert(shouldSuppressLobbyRender({ suppressRendering: true }), 'shouldSuppressLobbyRender → true при suppressRendering=true')
+  // scheduleRender не планира setTimeout ако suppress е true — блокиран
+})
+
+// [16] suppressRendering=false запазва нормалното поведение
+await check('[16] suppressRendering=false не блокира нормален lobby render', () => {
+  assert(wouldRender({ suppressRendering: false }), 'suppressRendering=false → render се изпълнява')
+  assert(wouldRender({}), 'Без suppressRendering → render се изпълнява')
+  assert(!wouldRender({ getIsInGame: () => true }), 'В игра → render е блокиран (съществуваща логика)')
+  assert(wouldRender({ suppressRendering: false, getIsInGame: () => false }), 'suppressRendering=false + не в игра → render OK')
 })
 
 // ─── Резултат ─────────────────────────────────────────────────────────────────

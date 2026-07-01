@@ -2653,6 +2653,7 @@ async function deleteAdminMatchRoom(
 
 lobby = createLobbyFlowController({
   root: rootElement,
+  suppressRendering: _isResetPasswordPath,
   joinMatchmaking: (stake, displayName) => {
     client.joinMatchmaking(stake, displayName)
   },
