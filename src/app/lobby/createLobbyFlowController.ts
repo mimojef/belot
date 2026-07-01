@@ -3968,6 +3968,17 @@ export function createLobbyFlowController(
       : { ok: false as const, message: 'Отмяната на поканата временно не е налична.' }
 
     if (!result.ok) {
+      const isAlreadyProcessed =
+        result.message.includes('не беше намерена') || result.message.includes('вече е обработена')
+      if (isAlreadyProcessed && state.friendships !== null) {
+        state.friendships = {
+          ...state.friendships,
+          outgoingPending: state.friendships.outgoingPending.filter((r) => r.friendshipId !== friendshipId),
+        }
+        state.friendsErrorText = null
+        render()
+        return
+      }
       state.friendsErrorText = result.message
       render()
       return
@@ -4925,6 +4936,19 @@ export function createLobbyFlowController(
         state.friendships = {
           ...state.friendships,
           incomingPending: state.friendships.incomingPending.filter((r) => r.friendshipId !== message.friendshipId),
+        }
+      }
+      render()
+      return true
+    }
+
+    if (message.type === 'friend_request_rejected') {
+      if (state.friendships !== null) {
+        state.friendships = {
+          ...state.friendships,
+          outgoingPending: state.friendships.outgoingPending.filter(
+            (r) => r.friendshipId !== message.friendshipId,
+          ),
         }
       }
       render()

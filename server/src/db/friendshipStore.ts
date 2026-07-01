@@ -62,7 +62,7 @@ export type FriendshipStore = {
     profileId: ProfileId,
     friendshipId: string,
   ) =>
-    | { ok: true; friendships: FriendshipsSnapshot }
+    | { ok: true; friendships: FriendshipsSnapshot; requesterProfileId: ProfileId | null }
     | { ok: false; message: string }
   cancelRequest: (
     profileId: ProfileId,
@@ -490,8 +490,18 @@ export async function createFriendshipStore(
     profileId: ProfileId,
     friendshipId: string,
   ):
-    | { ok: true; friendships: FriendshipsSnapshot }
+    | { ok: true; friendships: FriendshipsSnapshot; requesterProfileId: ProfileId | null }
     | { ok: false; message: string } {
+    // Read requester before deleting so we can notify them via WS.
+    const existingRow = database.prepare(`
+      SELECT requester_profile_id
+      FROM profile_friendships
+      WHERE friendship_id = ?
+        AND addressee_profile_id = ?
+        AND status = 'pending'
+      LIMIT 1;
+    `).get(friendshipId, profileId) as { requester_profile_id: string } | undefined
+
     const result = deletePendingFriendshipStatement.run(
       friendshipId,
       profileId,
@@ -507,6 +517,7 @@ export async function createFriendshipStore(
     return {
       ok: true,
       friendships: listForProfile(profileId),
+      requesterProfileId: existingRow?.requester_profile_id ?? null,
     }
   }
 

@@ -3159,6 +3159,11 @@ client = createGameServerClient({
       return
     }
 
+    if (message.type === 'friend_request_rejected') {
+      lobby.handleServerMessage(message)
+      return
+    }
+
     if (message.type === 'pending_acceptance_notifications') {
       lobby.handleServerMessage(message)
       return

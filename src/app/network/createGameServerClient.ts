@@ -904,6 +904,11 @@ export type FriendRequestCancelledMessage = {
   fromProfileId: string
 }
 
+export type FriendRequestRejectedMessage = {
+  type: 'friend_request_rejected'
+  friendshipId: string
+}
+
 export type FriendRequestAcceptedMessage = {
   type: 'friend_request_accepted'
   friendshipId: string
@@ -987,6 +992,7 @@ export type ServerMessage =
   | ProfileLikedMessage
   | FriendRequestReceivedMessage
   | FriendRequestCancelledMessage
+  | FriendRequestRejectedMessage
   | FriendRequestAcceptedMessage
   | PendingFriendRequestsMessage
   | PendingAcceptanceNotificationsMessage

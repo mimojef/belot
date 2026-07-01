@@ -4792,6 +4792,18 @@ async function handleFriendsRequest(
       })
     }
 
+    if (action === 'reject') {
+      const rawReqId = 'requesterProfileId' in result ? result.requesterProfileId : null
+      const requesterProfileId: string | null =
+        typeof rawReqId === 'string' && rawReqId.length > 0 ? rawReqId : null
+      if (requesterProfileId) {
+        sendToOpenProfileConnections(requesterProfileId, {
+          type: 'friend_request_rejected',
+          friendshipId,
+        })
+      }
+    }
+
     sendJsonResponse(res, 200, {
       ok: true,
       friendships: result.friendships,

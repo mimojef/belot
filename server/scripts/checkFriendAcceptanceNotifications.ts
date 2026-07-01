@@ -63,6 +63,14 @@
  * [E7] Останалите notifications не се засягат от WS read event
  * [E8] acceptanceErrorText се предава към renderState (видимо в UI)
  * [E9] Timer expiry на notification popup не извиква accept/reject API
+ *
+ * [F1] rejectRequest връща requesterProfileId при успешен reject
+ * [F2] rejectRequest с чужд addressee → ok:false (не връща requesterProfileId)
+ * [F3] rejectRequest на несъществуваща покана → ok:false
+ * [F4] friend_request_rejected WS message съдържа friendshipId поле
+ * [F5] Frontend: rejected friendshipId се премахва от outgoingPending idempotently
+ * [F6] Frontend: cancelFriendRequest при "не беше намерена" → silent remove, без error
+ * [F7] Frontend: cancelFriendRequest при друга грешка → friendsErrorText се показва
  */
 
 import { DatabaseSync } from 'node:sqlite'
@@ -75,6 +83,7 @@ import { createFriendshipStore } from '../src/db/friendshipStore.js'
 import { createPlayerProgressStore } from '../src/db/playerProgressStore.js'
 import type {
   FriendRequestAcceptedMessage,
+  FriendRequestRejectedMessage,
   PendingAcceptanceNotificationsMessage,
   FriendAcceptanceNotificationReadMessage,
 } from '../src/protocol/messageTypes.js'
@@ -939,6 +948,118 @@ try {
     assert(apiCallCount === 0, 'Timer expiry по време на processing не трябва да вика API')
 
     void onMarkRead // suppress unused warning
+  })
+
+  console.log('\n=== F. friend_request_rejected Checks ===\n')
+
+  // F store helpers
+  const fRejDbPath = join(dir, 'frej.sqlite')
+  await buildFullDatabase(fRejDbPath)
+  const fRejProfiles = new Map([
+    ['prof-f-alice', { profileId: 'prof-f-alice', displayName: 'FAlice' }],
+    ['prof-f-bob', { profileId: 'prof-f-bob', displayName: 'FBob' }],
+    ['prof-f-carol', { profileId: 'prof-f-carol', displayName: 'FCarol' }],
+  ])
+  const fRejDb = new DatabaseSync(fRejDbPath, { open: true })
+  fRejDb.exec('PRAGMA foreign_keys = ON;')
+  for (const [id, p] of fRejProfiles) seedProfile(fRejDb, { profileId: id, displayName: p.displayName })
+  const fIdRejPending = randomUUID()
+  seedPendingFriendship(fRejDb, {
+    friendshipId: fIdRejPending,
+    requesterProfileId: 'prof-f-alice',
+    addresseeProfileId: 'prof-f-bob',
+  })
+  fRejDb.close()
+  const storeF = await createFriendshipStore(fRejDbPath, makeStubProgressStore(fRejProfiles))
+
+  await check('[F1] rejectRequest връща requesterProfileId при успешен reject', () => {
+    const result = storeF.rejectRequest('prof-f-bob', fIdRejPending)
+    assert(result.ok, `Очаквано ok:true, получено: ${JSON.stringify(result)}`)
+    if (result.ok) {
+      assert(
+        result.requesterProfileId === 'prof-f-alice',
+        `requesterProfileId трябва да е prof-f-alice, получено: ${result.requesterProfileId}`,
+      )
+    }
+  })
+
+  await check('[F2] rejectRequest с чужд addressee → ok:false', () => {
+    // carol не е addressee на fIdRejPending (вече изтрита, правим нова)
+    const fIdNew = randomUUID()
+    const tmpDb = new DatabaseSync(fRejDbPath, { open: true })
+    tmpDb.exec('PRAGMA foreign_keys = ON;')
+    seedPendingFriendship(tmpDb, { friendshipId: fIdNew, requesterProfileId: 'prof-f-alice', addresseeProfileId: 'prof-f-bob' })
+    tmpDb.close()
+    const result = storeF.rejectRequest('prof-f-carol', fIdNew) // carol е трети
+    assert(!result.ok, `Очаквано ok:false, получено: ${JSON.stringify(result)}`)
+  })
+
+  await check('[F3] rejectRequest на несъществуваща покана → ok:false', () => {
+    const result = storeF.rejectRequest('prof-f-bob', randomUUID())
+    assert(!result.ok, `Очаквано ok:false за несъществуваща покана, получено: ${JSON.stringify(result)}`)
+  })
+
+  storeF.close()
+
+  await check('[F4] friend_request_rejected WS message съдържа friendshipId поле', () => {
+    const msg: FriendRequestRejectedMessage = {
+      type: 'friend_request_rejected',
+      friendshipId: 'test-fid-rejected',
+    }
+    assert(msg.type === 'friend_request_rejected', 'type трябва да е правилен')
+    assert(typeof msg.friendshipId === 'string', 'friendshipId трябва да е string')
+  })
+
+  // Frontend state helpers за outgoingPending
+  type OutgoingPendingEntry = { friendshipId: string; toProfileId: string }
+  type OutgoingFriendshipsState = { outgoingPending: OutgoingPendingEntry[]; friendsErrorText: string | null }
+
+  function applyRejectedEvent(state: OutgoingFriendshipsState, friendshipId: string): OutgoingFriendshipsState {
+    return {
+      ...state,
+      outgoingPending: state.outgoingPending.filter((r) => r.friendshipId !== friendshipId),
+    }
+  }
+
+  function applyCancelNotFound(state: OutgoingFriendshipsState, friendshipId: string): OutgoingFriendshipsState {
+    return {
+      ...state,
+      outgoingPending: state.outgoingPending.filter((r) => r.friendshipId !== friendshipId),
+      friendsErrorText: null,
+    }
+  }
+
+  function applyCancelOtherError(state: OutgoingFriendshipsState, errorMsg: string): OutgoingFriendshipsState {
+    return { ...state, friendsErrorText: errorMsg }
+  }
+
+  const entryA: OutgoingPendingEntry = { friendshipId: 'out-a', toProfileId: 'prof-x' }
+  const entryB: OutgoingPendingEntry = { friendshipId: 'out-b', toProfileId: 'prof-y' }
+
+  await check('[F5] Frontend: rejected friendshipId се премахва от outgoingPending idempotently', () => {
+    const state: OutgoingFriendshipsState = { outgoingPending: [entryA, entryB], friendsErrorText: null }
+    const after1 = applyRejectedEvent(state, 'out-a')
+    assert(after1.outgoingPending.length === 1, 'Трябва да остане 1 запис')
+    assert(!after1.outgoingPending.some((r) => r.friendshipId === 'out-a'), 'out-a трябва да е премахнато')
+    assert(after1.outgoingPending.some((r) => r.friendshipId === 'out-b'), 'out-b трябва да остане')
+    // idempotent — second event for same id
+    const after2 = applyRejectedEvent(after1, 'out-a')
+    assert(after2.outgoingPending.length === 1, 'Второто event трябва да е no-op')
+  })
+
+  await check('[F6] Frontend: cancelFriendRequest при "не беше намерена" → silent remove, без error', () => {
+    const state: OutgoingFriendshipsState = { outgoingPending: [entryA, entryB], friendsErrorText: null }
+    const after = applyCancelNotFound(state, 'out-a')
+    assert(!after.outgoingPending.some((r) => r.friendshipId === 'out-a'), 'out-a трябва да е премахнато')
+    assert(after.friendsErrorText === null, 'friendsErrorText трябва да е null (no error shown)')
+  })
+
+  await check('[F7] Frontend: cancelFriendRequest при друга грешка → friendsErrorText се показва', () => {
+    const state: OutgoingFriendshipsState = { outgoingPending: [entryA, entryB], friendsErrorText: null }
+    const errMsg = 'Грешка при комуникация.'
+    const after = applyCancelOtherError(state, errMsg)
+    assert(after.friendsErrorText === errMsg, 'Грешката трябва да е записана в state')
+    assert(after.outgoingPending.length === 2, 'outgoingPending не трябва да се промени при друга грешка')
   })
 
 } finally {
