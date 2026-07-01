@@ -932,6 +932,11 @@ export type PendingAcceptanceNotificationsMessage = {
   }>
 }
 
+export type FriendAcceptanceNotificationReadMessage = {
+  type: 'friend_acceptance_notification_read'
+  friendshipId: string
+}
+
 export type CoinsGiftedMessage = {
   type: 'coins_gifted'
   amount: number
@@ -985,6 +990,7 @@ export type ServerMessage =
   | FriendRequestAcceptedMessage
   | PendingFriendRequestsMessage
   | PendingAcceptanceNotificationsMessage
+  | FriendAcceptanceNotificationReadMessage
   | CoinsGiftedMessage
   | PendingGiftNotificationsMessage
 

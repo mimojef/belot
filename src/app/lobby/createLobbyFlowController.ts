@@ -486,6 +486,8 @@ type InternalLobbyFlowState = {
   giftSuccessModal: { amount: number; friendName: string } | null
   pendingGiftNotifications: Array<{ giftId: string; amount: number; fromDisplayName: string }>
   acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
+  acceptanceProcessingIds: Set<string>
+  acceptanceErrorText: string | null
   chatConversations: ChatConversationSnapshot[]
   activeChatFriendshipId: string | null
   chatMessages: ChatMessageSnapshot[]
@@ -713,6 +715,8 @@ function createInitialState(): InternalLobbyFlowState {
     giftSuccessModal: null,
     pendingGiftNotifications: [],
     acceptanceNotifications: [],
+    acceptanceProcessingIds: new Set<string>(),
+    acceptanceErrorText: null,
     chatConversations: [],
     activeChatFriendshipId: null,
     chatMessages: [],
@@ -2244,20 +2248,7 @@ export function createLobbyFlowController(
         render()
       },
       onNotifAcceptanceClick: (friendshipId) => {
-        state.acceptanceNotifications = state.acceptanceNotifications.filter(
-          (n) => n.friendshipId !== friendshipId,
-        )
-        void options.onMarkAcceptanceNotificationRead?.(friendshipId)
-        state.currentScreen = 'friends'
-        if (state.friendships === null && options.onFriendshipsLoad) {
-          void options.onFriendshipsLoad().then((result) => {
-            if (result.ok) {
-              state.friendships = result.friendships
-              render()
-            }
-          })
-        }
-        render()
+        void handleAcceptanceNotificationClick(friendshipId)
       },
       onMissionsCardClick: () => {
         void openMissionsPopup()
@@ -3824,6 +3815,44 @@ export function createLobbyFlowController(
     render()
   }
 
+  async function handleAcceptanceNotificationClick(friendshipId: string): Promise<void> {
+    if (state.acceptanceProcessingIds.has(friendshipId)) return
+    state.acceptanceProcessingIds = new Set([...state.acceptanceProcessingIds, friendshipId])
+    state.acceptanceErrorText = null
+    render()
+
+    if (!options.onMarkAcceptanceNotificationRead) {
+      state.acceptanceProcessingIds = new Set(
+        [...state.acceptanceProcessingIds].filter((id) => id !== friendshipId),
+      )
+      render()
+      return
+    }
+
+    try {
+      await options.onMarkAcceptanceNotificationRead(friendshipId)
+    } catch {
+      state.acceptanceProcessingIds = new Set(
+        [...state.acceptanceProcessingIds].filter((id) => id !== friendshipId),
+      )
+      state.acceptanceErrorText = 'Неуспешно отбелязване. Опитай отново.'
+      render()
+      return
+    }
+
+    // Success — now remove from local state and navigate.
+    state.acceptanceNotifications = state.acceptanceNotifications.filter(
+      (n) => n.friendshipId !== friendshipId,
+    )
+    state.acceptanceProcessingIds = new Set(
+      [...state.acceptanceProcessingIds].filter((id) => id !== friendshipId),
+    )
+    state.acceptanceErrorText = null
+    render()
+
+    await showFriendsDirectory()
+  }
+
   async function likeProfile(profileId: string): Promise<void> {
     const result = await options.onLikeProfile?.(profileId)
     if (!result?.ok) return
@@ -4824,6 +4853,15 @@ export function createLobbyFlowController(
         byId.set(n.friendshipId, n)
       }
       state.acceptanceNotifications = Array.from(byId.values())
+      render()
+      return true
+    }
+
+    if (message.type === 'friend_acceptance_notification_read') {
+      // Multi-tab sync: another tab (or same tab) already marked this read — remove idempotently.
+      state.acceptanceNotifications = state.acceptanceNotifications.filter(
+        (n) => n.friendshipId !== message.friendshipId,
+      )
       render()
       return true
     }

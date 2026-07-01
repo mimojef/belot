@@ -2838,13 +2838,12 @@ lobby = createLobbyFlowController({
     }
   },
   onMarkAcceptanceNotificationRead: async (friendshipId) => {
-    try {
-      await fetch(
-        `${getApiBaseUrl()}/api/friends/${encodeURIComponent(friendshipId)}/read-acceptance`,
-        { method: 'POST', credentials: 'include' },
-      )
-    } catch {
-      // best-effort — notification already removed from UI
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/friends/${encodeURIComponent(friendshipId)}/read-acceptance`,
+      { method: 'POST', credentials: 'include' },
+    )
+    if (!response.ok) {
+      throw new Error(`read-acceptance failed: ${response.status}`)
     }
   },
 })
@@ -3161,6 +3160,11 @@ client = createGameServerClient({
     }
 
     if (message.type === 'pending_acceptance_notifications') {
+      lobby.handleServerMessage(message)
+      return
+    }
+
+    if (message.type === 'friend_acceptance_notification_read') {
       lobby.handleServerMessage(message)
       return
     }

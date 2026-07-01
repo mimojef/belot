@@ -4806,6 +4806,11 @@ async function handleFriendsRequest(
       return true
     }
     friendshipStore.markAcceptanceRead(profileId, friendshipId)
+    // Broadcast to all open connections of this profile so other tabs remove the notification.
+    sendToOpenProfileConnections(profileId, {
+      type: 'friend_acceptance_notification_read',
+      friendshipId,
+    })
     sendJsonResponse(res, 200, { ok: true })
     return true
   }
