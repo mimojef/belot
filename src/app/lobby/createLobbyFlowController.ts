@@ -375,6 +375,7 @@ export type LobbyFlowController = {
   setChatConversations: (value: ChatConversationSnapshot[]) => void
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
   resetToLobby: () => void
+  openAuthModal: (mode: Exclude<import('./renderLobbyScreen').LobbyAuthModalMode, 'closed'>) => void
   refreshMissionsCount: () => void
   refreshDailyRewardsStatus: () => void
   refreshSupportUnread: () => void
@@ -2213,6 +2214,9 @@ export function createLobbyFlowController(
       },
       onRegisterSubmit: (displayName, email, password, gender) => {
         void submitRegister(displayName, email, password, gender)
+      },
+      onForgotPasswordSubmit: (email) => {
+        void submitForgotPassword(email)
       },
       onLogoutClick: () => {
         void options.onLogout?.()
@@ -4381,6 +4385,69 @@ export function createLobbyFlowController(
     render()
   }
 
+  async function submitForgotPassword(email: string): Promise<void> {
+    if (state.authSubmitInFlight) return
+
+    state.authSubmitInFlight = true
+
+    const submitBtn = options.root.querySelector<HTMLButtonElement>('[data-lobby-forgot-submit="1"]')
+    if (submitBtn) {
+      submitBtn.disabled = true
+      submitBtn.textContent = 'Изпращане...'
+    }
+
+    const msgEl = options.root.querySelector<HTMLElement>('[data-lobby-forgot-message="1"]')
+
+    let responseBody: { ok: boolean; code?: string; message?: string } | null = null
+    try {
+      const response = await fetch(`${options.getApiBaseUrl?.() ?? ''}/api/auth/forgot-password`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      })
+      responseBody = (await response.json()) as typeof responseBody
+    } catch {
+      responseBody = null
+    }
+
+    state.authSubmitInFlight = false
+
+    const KNOWN_CODES = new Set(['INVALID_EMAIL', 'ACCOUNT_NOT_FOUND', 'RATE_LIMITED', 'EMAIL_DELIVERY_FAILED', 'EMAIL_SENT'])
+    const rb = responseBody as { ok: boolean; code?: string; message?: string } | null
+    const message =
+      rb !== null && rb.message && KNOWN_CODES.has(rb.code ?? '')
+        ? rb.message
+        : 'Възникна грешка при изпращането. Моля, опитайте отново.'
+
+    const isSuccess = rb?.code === 'EMAIL_SENT'
+
+    if (msgEl) {
+      msgEl.textContent = message
+      msgEl.style.display = ''
+      if (isSuccess) {
+        msgEl.style.cssText = msgEl.style.cssText.replace(/border:[^;]+;?/g, '')
+        msgEl.style.border = '1px solid rgba(74,222,128,0.28)'
+        msgEl.style.background = 'rgba(20,83,45,0.42)'
+        msgEl.style.color = '#86efac'
+      } else {
+        msgEl.style.border = '1px solid rgba(248,113,113,0.28)'
+        msgEl.style.background = 'rgba(127,29,29,0.42)'
+        msgEl.style.color = '#fecaca'
+      }
+    }
+
+    if (submitBtn) {
+      // При успех — оставяме бутона disabled (не изпращаме втори линк автоматично).
+      if (!isSuccess) {
+        submitBtn.disabled = false
+        submitBtn.textContent = 'Изпрати линк'
+      } else {
+        submitBtn.textContent = 'Линкът е изпратен'
+      }
+    }
+  }
+
   function startMatchmaking(stake: MatchStake, displayName?: string): void {
     state.selectedStake = stake
 
@@ -4697,6 +4764,12 @@ export function createLobbyFlowController(
     switchToLobby()
     render()
     void loadPlayerUnclaimedCount()
+  }
+
+  function openAuthModal(mode: Exclude<import('./renderLobbyScreen').LobbyAuthModalMode, 'closed'>): void {
+    state.authModalMode = mode
+    state.authErrorText = null
+    render()
   }
 
   function handleServerMessage(message: ServerMessage): boolean {
@@ -5315,6 +5388,7 @@ export function createLobbyFlowController(
     },
     startMatchmaking,
     resetToLobby,
+    openAuthModal,
     refreshMissionsCount: () => { void loadPlayerUnclaimedCount() },
     refreshDailyRewardsStatus: () => { void loadDailyRewardsStatus() },
     removePendingFriendRequest: (friendshipId: string) => {

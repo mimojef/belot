@@ -56,6 +56,11 @@ import { createProfileLikeNotification } from './ui/notifications/profileLikeNot
 import { createFriendRequestNotification } from './ui/notifications/friendRequestNotification'
 import { createPartnerRatingNotification } from './ui/notifications/partnerRatingNotification'
 import { createVisitorPageViewTracker } from './app/visitors/createVisitorPageViewTracker'
+import {
+  extractAndClearResetToken,
+  renderResetPasswordScreen,
+  type ResetPasswordScreenState,
+} from './app/passwordReset/renderResetPasswordScreen'
 
 const rootElementCandidate = document.querySelector<HTMLDivElement>('#app')
 
@@ -3243,12 +3248,69 @@ const _VALID_PATHS = new Set([
   '/contact',
   '/rules',
   '/strategy',
+  '/reset-password',
 ])
 if (!isStripePaymentReturn && !isRunningAsStandalone() && !_VALID_PATHS.has(_initialPath)) {
   showLandingOverlay()
 }
 
-if (isStripePaymentReturn) {
+const _isResetPasswordPath = _initialPath === '/reset-password'
+
+if (_isResetPasswordPath) {
+  // Читаме token от hash веднага — fragment се изчиства от address bar.
+  // Token се пази само в локалната state променлива — никъде другаде.
+  const _resetToken = extractAndClearResetToken()
+
+  let _resetState: ResetPasswordScreenState = _resetToken
+    ? { phase: 'form', token: _resetToken, errorText: null, submitting: false }
+    : { phase: 'no-token' }
+
+  function _renderReset(): void {
+    renderResetPasswordScreen(rootElement, _resetState, {
+      onGoToLogin: () => {
+        history.pushState(null, '', '/lobby')
+        _resetState = { phase: 'no-token' } // изчистваме state-а
+        lobby.resetToLobby()
+        lobby.openAuthModal('login')
+      },
+      onSubmit: (token, newPassword) => {
+        if (_resetState.phase !== 'form' || _resetState.submitting) return
+        _resetState = { phase: 'form', token, errorText: null, submitting: true }
+        _renderReset()
+        void (async () => {
+          const KNOWN_CODES = new Set([
+            'INVALID_PASSWORD', 'INVALID_OR_EXPIRED_TOKEN', 'RATE_LIMITED', 'PASSWORD_CHANGED',
+          ])
+          let responseBody: { ok: boolean; code?: string; message?: string } | null = null
+          try {
+            const response = await fetch(`${getApiBaseUrl()}/api/auth/reset-password`, {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ token, newPassword }),
+            })
+            responseBody = (await response.json()) as typeof responseBody
+          } catch {
+            responseBody = null
+          }
+          const rb = responseBody as { ok: boolean; code?: string; message?: string } | null
+          if (rb?.code === 'PASSWORD_CHANGED') {
+            _resetState = { phase: 'success' }
+          } else {
+            const errorText =
+              rb !== null && rb.message && KNOWN_CODES.has(rb.code ?? '')
+                ? rb.message
+                : 'Възникна грешка при смяната на паролата. Моля, опитайте отново.'
+            _resetState = { phase: 'form', token, errorText, submitting: false }
+          }
+          _renderReset()
+        })()
+      },
+    })
+  }
+
+  _renderReset()
+} else if (isStripePaymentReturn) {
   history.replaceState(null, '', '/lobby')
   lobby.resetToLobby()
 } else {

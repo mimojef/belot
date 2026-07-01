@@ -45,7 +45,7 @@ const MISSION_TYPE_LABELS: Record<string, string> = {
   announce_belot: 'Обяви N белота',
 }
 
-export type LobbyAuthModalMode = 'closed' | 'cta' | 'login' | 'register'
+export type LobbyAuthModalMode = 'closed' | 'cta' | 'login' | 'register' | 'forgot-password'
 
 let _persistentAvatarInput: HTMLInputElement | null = null
 let _persistentGalleryInput: HTMLInputElement | null = null
@@ -366,6 +366,7 @@ export type RenderLobbyScreenOptions = {
   onAuthError: (message: string) => void
   onLoginSubmit: (email: string, password: string) => void
   onRegisterSubmit: (displayName: string, email: string, password: string, gender: 'male' | 'female' | null) => void
+  onForgotPasswordSubmit?: (email: string) => void
   onLogoutClick: () => void
   onBellClick: () => void
   onNotificationMissionsClick: () => void
@@ -764,8 +765,29 @@ function renderAuthModal(state: LobbyScreenState): string {
   const bonusText = formatAmount(state.signupBonusYellowCoins)
   const isLogin = state.authModalMode === 'login'
   const isRegister = state.authModalMode === 'register'
+  const isForgotPassword = state.authModalMode === 'forgot-password'
 
-  const body = state.authModalMode === 'cta'
+  const body = isForgotPassword
+    ? `
+      <form data-lobby-forgot-form="1" style="display:grid;gap:12px;" novalidate>
+        <div style="font-size:25px;line-height:1.1;font-weight:900;color:#f8fafc;text-align:center;">Забравена парола</div>
+        <div style="font-size:14px;line-height:1.55;color:rgba(255,255,255,0.72);text-align:center;">
+          Въведете имейл адреса, с който сте регистрирани.
+        </div>
+        <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+          Имейл адрес
+          <input name="email" type="email" autocomplete="email" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
+        </label>
+        <div data-lobby-forgot-message="1" style="display:none;border-radius:8px;padding:10px 12px;font-size:13px;font-weight:800;text-align:center;"></div>
+        <button type="submit" data-lobby-forgot-submit="1" style="height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;margin-top:4px;">
+          Изпрати линк
+        </button>
+        <button type="button" data-lobby-auth-mode="login" style="height:34px;border:0;background:transparent;color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;cursor:pointer;">
+          Назад към вход
+        </button>
+      </form>
+    `
+    : state.authModalMode === 'cta'
     ? `
       <div style="display:grid;gap:16px;text-align:center;">
         <div style="font-size:28px;line-height:1.12;font-weight:900;color:#f8fafc;">
@@ -842,6 +864,11 @@ function renderAuthModal(state: LobbyScreenState): string {
         <button type="submit" style="height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;margin-top:4px;">
           ${isLogin ? 'Влез' : 'Регистрирай се'}
         </button>
+        ${isLogin ? `
+        <button type="button" data-lobby-auth-mode="forgot-password" style="height:28px;border:0;background:transparent;color:rgba(212,165,32,0.72);font-size:12px;font-weight:700;cursor:pointer;text-decoration:underline;text-underline-offset:2px;">
+          Забравена парола?
+        </button>
+        ` : ''}
         <button type="button" data-lobby-auth-mode="${isLogin ? 'register' : 'login'}" style="height:34px;border:0;background:transparent;color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;cursor:pointer;">
           ${isLogin ? 'Нямаш профил? Регистрирай се' : 'Имаш профил? Влез'}
         </button>
@@ -8640,7 +8667,7 @@ export function renderLobbyScreen(
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-auth-mode]').forEach((button) => {
     button.addEventListener('click', () => {
       const mode = button.dataset.lobbyAuthMode
-      if (mode === 'login' || mode === 'register') {
+      if (mode === 'login' || mode === 'register' || mode === 'forgot-password') {
         options.onAuthModeChange(mode)
       }
     })
@@ -8704,6 +8731,17 @@ export function renderLobbyScreen(
       options.onLoginSubmit(email, password)
     })
   })
+
+  // ─── Forgot-password form ───────────────────────────────────────────────────
+  const forgotForm = root.querySelector<HTMLFormElement>('[data-lobby-forgot-form="1"]')
+  if (forgotForm) {
+    forgotForm.addEventListener('submit', (e) => {
+      e.preventDefault()
+      const data = new FormData(forgotForm)
+      const email = String(data.get('email') ?? '').trim()
+      options.onForgotPasswordSubmit?.(email)
+    })
+  }
 
   root.querySelector<HTMLElement>('[data-lobby-daily-rewards-card="1"]')
     ?.addEventListener('click', options.onDailyRewardsOpen)
