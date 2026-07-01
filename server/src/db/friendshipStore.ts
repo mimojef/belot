@@ -26,8 +26,18 @@ export type FriendshipsSnapshot = {
   friends: FriendRelationshipSnapshot[]
 }
 
+export type UnreadAcceptanceNotification = {
+  friendshipId: string
+  friendProfile: PlayerPublicProfileSnapshot
+}
+
 export type FriendshipStore = {
   listForProfile: (profileId: ProfileId) => FriendshipsSnapshot
+  getUnreadAcceptances: (requesterProfileId: ProfileId) => UnreadAcceptanceNotification[]
+  markAcceptanceRead: (
+    requesterProfileId: ProfileId,
+    friendshipId: string,
+  ) => { ok: true } | { ok: false; message: string }
   sendRequest: (
     requesterProfileId: ProfileId,
     addresseeProfileId: ProfileId,
@@ -38,7 +48,7 @@ export type FriendshipStore = {
     profileId: ProfileId,
     friendshipId: string,
   ) =>
-    | { ok: true; friendships: FriendshipsSnapshot }
+    | { ok: true; friendships: FriendshipsSnapshot; requesterProfileId: ProfileId | null }
     | { ok: false; message: string }
   rejectRequest: (
     profileId: ProfileId,
@@ -241,6 +251,30 @@ export async function createFriendshipStore(
       );
   `)
 
+  const selectUnreadAcceptancesStatement = database.prepare(`
+    SELECT
+      friendship_id,
+      requester_profile_id,
+      addressee_profile_id,
+      status,
+      created_at,
+      updated_at
+    FROM profile_friendships
+    WHERE requester_profile_id = ?
+      AND status = 'accepted'
+      AND requester_acceptance_read_at IS NULL
+    ORDER BY updated_at DESC;
+  `)
+
+  const markAcceptanceReadStatement = database.prepare(`
+    UPDATE profile_friendships
+    SET requester_acceptance_read_at = CURRENT_TIMESTAMP
+    WHERE friendship_id = ?
+      AND requester_profile_id = ?
+      AND status = 'accepted'
+      AND requester_acceptance_read_at IS NULL;
+  `)
+
   function isRegisteredHumanProfile(profileId: ProfileId): boolean {
     const row = selectRegisteredHumanProfileStatement.get(profileId) as
       | { profile_id: string }
@@ -280,6 +314,32 @@ export async function createFriendshipStore(
     }
 
     return snapshot
+  }
+
+  function getUnreadAcceptances(requesterProfileId: ProfileId): UnreadAcceptanceNotification[] {
+    const rows = selectUnreadAcceptancesStatement.all(requesterProfileId) as FriendshipRow[]
+    const result: UnreadAcceptanceNotification[] = []
+
+    for (const row of rows) {
+      const friendProfileId = row.addressee_profile_id
+      const profile = playerProgressStore.getPublicProfile(friendProfileId)
+      if (profile === null) continue
+      result.push({ friendshipId: row.friendship_id, friendProfile: profile })
+    }
+
+    return result
+  }
+
+  function markAcceptanceRead(
+    requesterProfileId: ProfileId,
+    friendshipId: string,
+  ): { ok: true } | { ok: false; message: string } {
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(friendshipId)) {
+      return { ok: false, message: 'Невалиден friendship ID.' }
+    }
+
+    markAcceptanceReadStatement.run(friendshipId, requesterProfileId)
+    return { ok: true }
   }
 
   function sendRequest(
@@ -356,8 +416,18 @@ export async function createFriendshipStore(
     profileId: ProfileId,
     friendshipId: string,
   ):
-    | { ok: true; friendships: FriendshipsSnapshot }
+    | { ok: true; friendships: FriendshipsSnapshot; requesterProfileId: ProfileId | null }
     | { ok: false; message: string } {
+    // Read the row before updating so we know who the requester is.
+    const existingRow = (database.prepare(`
+      SELECT requester_profile_id
+      FROM profile_friendships
+      WHERE friendship_id = ?
+        AND addressee_profile_id = ?
+        AND status = 'pending'
+      LIMIT 1;
+    `).get(friendshipId, profileId)) as { requester_profile_id: string } | undefined
+
     const result = acceptFriendshipStatement.run(
       friendshipId,
       profileId,
@@ -373,6 +443,7 @@ export async function createFriendshipStore(
     return {
       ok: true,
       friendships: listForProfile(profileId),
+      requesterProfileId: existingRow?.requester_profile_id ?? null,
     }
   }
 
@@ -468,6 +539,8 @@ export async function createFriendshipStore(
 
   return {
     listForProfile,
+    getUnreadAcceptances,
+    markAcceptanceRead,
     sendRequest,
     acceptRequest,
     rejectRequest,

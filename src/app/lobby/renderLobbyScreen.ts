@@ -174,6 +174,7 @@ export type LobbyScreenState = {
   giftModalErrorText: string | null
   giftSuccessModal: { amount: number; friendName: string } | null
   pendingGiftNotifications: Array<{ giftId: string; amount: number; fromDisplayName: string }>
+  acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   chatConversations: ChatConversationSnapshot[]
   activeChatFriendshipId: string | null
   chatMessages: ChatMessageSnapshot[]
@@ -372,6 +373,7 @@ export type RenderLobbyScreenOptions = {
   onNotificationMissionsClick: () => void
   onNotifFriendRequestClick: (friendshipId: string) => void
   onNotifGiftClick: (giftId: string, amount: number, fromDisplayName: string) => void
+  onNotifAcceptanceClick: (friendshipId: string) => void
   onMissionsCardClick: () => void
   onMissionsPopupClose: () => void
   onMissionClaimClick: (missionId: string) => void
@@ -2078,7 +2080,8 @@ function getNotificationsBadgeCount(state: LobbyScreenState): number {
     state.dailyMissionsUnclaimedCount +
     getPendingFriendRequestBadgeCount(state) +
     getUnclaimedDailyRewardsBadgeCount(state) +
-    state.pendingGiftNotifications.length
+    state.pendingGiftNotifications.length +
+    state.acceptanceNotifications.length
   )
 }
 
@@ -2088,7 +2091,8 @@ function renderNotificationsDropdown(state: LobbyScreenState): string {
   const hasFriendRequests = pendingFriendRequests.length > 0
   const hasDailyRewards = getUnclaimedDailyRewardsBadgeCount(state) > 0
   const hasGiftNotifications = state.pendingGiftNotifications.length > 0
-  const hasAny = hasMissions || hasFriendRequests || hasDailyRewards || hasGiftNotifications
+  const hasAcceptanceNotifications = state.acceptanceNotifications.length > 0
+  const hasAny = hasMissions || hasFriendRequests || hasDailyRewards || hasGiftNotifications || hasAcceptanceNotifications
   return `
     <div data-notifications-backdrop="1" style="position:fixed;inset:0;z-index:11000;" aria-hidden="true"></div>
     <div style="
@@ -2167,6 +2171,26 @@ function renderNotificationsDropdown(state: LobbyScreenState): string {
           </div>
         </button>
       `).join('') : ''}
+      ${hasAcceptanceNotifications ? state.acceptanceNotifications.map((n) => `
+        <button data-notif-acceptance="${escapeHtml(n.friendshipId)}" type="button" style="
+          width:100%; background:none; border:none; cursor:pointer;
+          display:flex; align-items:center; gap:12px;
+          padding:14px 16px; text-align:left;
+          border-bottom:1px solid rgba(255,255,255,0.06);
+          transition:background 0.15s;
+        " onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background='none'">
+          <div style="
+            width:36px; height:36px; border-radius:50%; flex-shrink:0;
+            background:rgba(34,197,94,0.12); border:1.5px solid rgba(34,197,94,0.35);
+            display:flex; align-items:center; justify-content:center;
+            font-size:16px;
+          ">✅</div>
+          <div>
+            <div style="font-size:13px; font-weight:700; color:#f8fafc; margin-bottom:2px;">Поканата ви беше приета</div>
+            <div style="font-size:12px; color:rgba(255,255,255,0.55); line-height:1.4;">${escapeHtml(n.fromDisplayName)} прие поканата ви за приятелство</div>
+          </div>
+        </button>
+      `).join('') : ''}
       ${hasGiftNotifications ? state.pendingGiftNotifications.map((g) => `
         <button data-notif-gift="${escapeHtml(g.giftId)}" type="button" style="
           width:100%; background:none; border:none; cursor:pointer;
@@ -2204,6 +2228,7 @@ function syncNotificationsDropdown(
     onDailyRewardsClick: () => void
     onFriendRequestClick: (friendshipId: string) => void
     onGiftNotificationClick: (giftId: string, amount: number, fromDisplayName: string) => void
+    onAcceptanceNotificationClick: (friendshipId: string) => void
   },
 ): void {
   if (!state.notificationsOpen) {
@@ -2244,6 +2269,14 @@ function syncNotificationsDropdown(
         callbacks.onGiftNotificationClick(gift.giftId, gift.amount, gift.fromDisplayName)
       })
     }
+  }
+
+  for (const btn of Array.from(notificationsDropdownRootEl.querySelectorAll<HTMLButtonElement>('[data-notif-acceptance]'))) {
+    const friendshipId = btn.getAttribute('data-notif-acceptance')!
+    btn.addEventListener('click', () => {
+      callbacks.onClose()
+      callbacks.onAcceptanceNotificationClick(friendshipId)
+    })
   }
 }
 
@@ -7967,6 +8000,7 @@ export function renderLobbyScreen(
     },
     onFriendRequestClick: options.onNotifFriendRequestClick,
     onGiftNotificationClick: options.onNotifGiftClick,
+    onAcceptanceNotificationClick: options.onNotifAcceptanceClick,
   })
 
   syncMissionsPopup(state, {

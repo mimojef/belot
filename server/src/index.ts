@@ -4556,13 +4556,15 @@ async function handleFriendsRequest(
     /^\/api\/friends\/([^/]+)\/(accept|reject|cancel|remove)$/.exec(pathname)
   const friendGiftMatch = /^\/api\/friends\/([^/]+)\/gift-coins$/.exec(pathname)
   const giftNotifReadMatch = /^\/api\/gifts\/([^/]+)\/read-notification$/.exec(pathname)
+  const friendReadAcceptanceMatch = /^\/api\/friends\/([^/]+)\/read-acceptance$/.exec(pathname)
 
   if (
     pathname !== '/api/friends' &&
     pathname !== '/api/friends/request' &&
     friendGiftMatch === null &&
     friendActionMatch === null &&
-    giftNotifReadMatch === null
+    giftNotifReadMatch === null &&
+    friendReadAcceptanceMatch === null
   ) {
     return false
   }
@@ -4760,13 +4762,15 @@ async function handleFriendsRequest(
     }
 
     if (action === 'accept') {
-      const newFriend = result.friendships.friends.find((f) => f.friendshipId === friendshipId)
-      const requesterProfileId = newFriend?.profile.profileId ?? null
+      const rawReqId = 'requesterProfileId' in result ? result.requesterProfileId : null
+      const requesterProfileId: string | null =
+        typeof rawReqId === 'string' && rawReqId.length > 0 ? rawReqId : null
       if (requesterProfileId) {
         const accepterProfile = playerProgressStore.getPublicProfile(profileId)
         if (accepterProfile) {
           sendToOpenProfileConnections(requesterProfileId, {
             type: 'friend_request_accepted',
+            friendshipId,
             fromProfileId: profileId,
             fromDisplayName: accepterProfile.displayName,
             fromAvatarUrl: accepterProfile.avatarUrl,
@@ -4792,6 +4796,17 @@ async function handleFriendsRequest(
       ok: true,
       friendships: result.friendships,
     })
+    return true
+  }
+
+  if (friendReadAcceptanceMatch !== null && req.method === 'POST') {
+    const friendshipId = decodeURIComponent(friendReadAcceptanceMatch[1]).trim()
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(friendshipId)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден friendship ID.' })
+      return true
+    }
+    friendshipStore.markAcceptanceRead(profileId, friendshipId)
+    sendJsonResponse(res, 200, { ok: true })
     return true
   }
 
@@ -5880,6 +5895,19 @@ wsServer.on('connection', (socket, request) => {
           fromProfileId: r.profile.profileId ?? '',
           fromDisplayName: r.profile.displayName,
           fromAvatarUrl: r.profile.avatarUrl,
+        })),
+      })
+    }
+
+    const unreadAcceptances = friendshipStore.getUnreadAcceptances(connection.profileId)
+    if (unreadAcceptances.length > 0) {
+      sendJsonMessage(socket, {
+        type: 'pending_acceptance_notifications',
+        notifications: unreadAcceptances.map((n) => ({
+          friendshipId: n.friendshipId,
+          fromProfileId: n.friendProfile.profileId ?? '',
+          fromDisplayName: n.friendProfile.displayName,
+          fromAvatarUrl: n.friendProfile.avatarUrl,
         })),
       })
     }

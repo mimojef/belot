@@ -2837,6 +2837,16 @@ lobby = createLobbyFlowController({
       // best-effort — notification already removed from UI
     }
   },
+  onMarkAcceptanceNotificationRead: async (friendshipId) => {
+    try {
+      await fetch(
+        `${getApiBaseUrl()}/api/friends/${encodeURIComponent(friendshipId)}/read-acceptance`,
+        { method: 'POST', credentials: 'include' },
+      )
+    } catch {
+      // best-effort — notification already removed from UI
+    }
+  },
 })
 
 const activeRoom = createActiveRoomFlowController({
@@ -3150,7 +3160,14 @@ client = createGameServerClient({
       return
     }
 
+    if (message.type === 'pending_acceptance_notifications') {
+      lobby.handleServerMessage(message)
+      return
+    }
+
     if (message.type === 'friend_request_accepted') {
+      lobby.handleServerMessage(message)
+      // Also show the live 4-second confirmation popup.
       friendRequestNotification.showAccepted({
         fromDisplayName: message.fromDisplayName,
         fromAvatarUrl: message.fromAvatarUrl,

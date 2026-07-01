@@ -906,6 +906,7 @@ export type FriendRequestCancelledMessage = {
 
 export type FriendRequestAcceptedMessage = {
   type: 'friend_request_accepted'
+  friendshipId: string
   fromProfileId: string
   fromDisplayName: string
   fromAvatarUrl: string | null
@@ -914,6 +915,16 @@ export type FriendRequestAcceptedMessage = {
 export type PendingFriendRequestsMessage = {
   type: 'pending_friend_requests'
   requests: Array<{
+    friendshipId: string
+    fromProfileId: string
+    fromDisplayName: string
+    fromAvatarUrl: string | null
+  }>
+}
+
+export type PendingAcceptanceNotificationsMessage = {
+  type: 'pending_acceptance_notifications'
+  notifications: Array<{
     friendshipId: string
     fromProfileId: string
     fromDisplayName: string
@@ -973,6 +984,7 @@ export type ServerMessage =
   | FriendRequestCancelledMessage
   | FriendRequestAcceptedMessage
   | PendingFriendRequestsMessage
+  | PendingAcceptanceNotificationsMessage
   | CoinsGiftedMessage
   | PendingGiftNotificationsMessage
 

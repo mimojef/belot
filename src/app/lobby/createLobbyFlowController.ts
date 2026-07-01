@@ -201,6 +201,7 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onNotifFriendRequestClick?: (friendshipId: string) => void
   onMarkGiftNotificationRead?: (giftId: string) => Promise<void>
+  onMarkAcceptanceNotificationRead?: (friendshipId: string) => Promise<void>
   onFriendshipsLoad?: () => Promise<
     | { ok: true; friendships: FriendshipsSnapshot }
     | { ok: false; message: string }
@@ -484,6 +485,7 @@ type InternalLobbyFlowState = {
   giftModalErrorText: string | null
   giftSuccessModal: { amount: number; friendName: string } | null
   pendingGiftNotifications: Array<{ giftId: string; amount: number; fromDisplayName: string }>
+  acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   chatConversations: ChatConversationSnapshot[]
   activeChatFriendshipId: string | null
   chatMessages: ChatMessageSnapshot[]
@@ -710,6 +712,7 @@ function createInitialState(): InternalLobbyFlowState {
     giftModalErrorText: null,
     giftSuccessModal: null,
     pendingGiftNotifications: [],
+    acceptanceNotifications: [],
     chatConversations: [],
     activeChatFriendshipId: null,
     chatMessages: [],
@@ -1766,6 +1769,7 @@ export function createLobbyFlowController(
       giftModalErrorText: state.giftModalErrorText,
       giftSuccessModal: state.giftSuccessModal,
       pendingGiftNotifications: state.pendingGiftNotifications,
+      acceptanceNotifications: state.acceptanceNotifications,
       chatConversations: state.chatConversations,
       activeChatFriendshipId: state.activeChatFriendshipId,
       chatMessages: state.chatMessages,
@@ -2237,6 +2241,22 @@ export function createLobbyFlowController(
         state.pendingGiftNotifications = state.pendingGiftNotifications.filter((g) => g.giftId !== giftId)
         state.giftSuccessModal = { amount, friendName: fromDisplayName }
         void options.onMarkGiftNotificationRead?.(giftId)
+        render()
+      },
+      onNotifAcceptanceClick: (friendshipId) => {
+        state.acceptanceNotifications = state.acceptanceNotifications.filter(
+          (n) => n.friendshipId !== friendshipId,
+        )
+        void options.onMarkAcceptanceNotificationRead?.(friendshipId)
+        state.currentScreen = 'friends'
+        if (state.friendships === null && options.onFriendshipsLoad) {
+          void options.onFriendshipsLoad().then((result) => {
+            if (result.ok) {
+              state.friendships = result.friendships
+              render()
+            }
+          })
+        }
         render()
       },
       onMissionsCardClick: () => {
@@ -4795,6 +4815,55 @@ export function createLobbyFlowController(
       state.pendingGiftNotifications = message.gifts
       render()
       return true
+    }
+
+    if (message.type === 'pending_acceptance_notifications') {
+      // Bootstrap on reconnect: replace entire list, dedup by friendshipId.
+      const byId = new Map<string, typeof state.acceptanceNotifications[number]>()
+      for (const n of message.notifications) {
+        byId.set(n.friendshipId, n)
+      }
+      state.acceptanceNotifications = Array.from(byId.values())
+      render()
+      return true
+    }
+
+    if (message.type === 'friend_request_accepted') {
+      // Live accept while online: add persistent notification and refresh friendships.
+      const alreadyExists = state.acceptanceNotifications.some(
+        (n) => n.friendshipId === message.friendshipId,
+      )
+      if (!alreadyExists) {
+        state.acceptanceNotifications = [
+          ...state.acceptanceNotifications,
+          {
+            friendshipId: message.friendshipId,
+            fromProfileId: message.fromProfileId,
+            fromDisplayName: message.fromDisplayName,
+            fromAvatarUrl: message.fromAvatarUrl,
+          },
+        ]
+      }
+      // Update outgoingPending -> friends in local state without a full reload.
+      if (state.friendships !== null) {
+        const movedRelationship = state.friendships.outgoingPending.find(
+          (r) => r.friendshipId === message.friendshipId,
+        )
+        if (movedRelationship) {
+          state.friendships = {
+            ...state.friendships,
+            outgoingPending: state.friendships.outgoingPending.filter(
+              (r) => r.friendshipId !== message.friendshipId,
+            ),
+            friends: [
+              ...state.friendships.friends,
+              { ...movedRelationship, status: 'accepted' as const, direction: 'accepted' as const },
+            ],
+          }
+        }
+      }
+      render()
+      return false // let main.ts also show the 4-second live popup
     }
 
     if (message.type === 'friend_request_received') {
