@@ -1774,6 +1774,7 @@ export function createLobbyFlowController(
       giftSuccessModal: state.giftSuccessModal,
       pendingGiftNotifications: state.pendingGiftNotifications,
       acceptanceNotifications: state.acceptanceNotifications,
+      acceptanceErrorText: state.acceptanceErrorText,
       chatConversations: state.chatConversations,
       activeChatFriendshipId: state.activeChatFriendshipId,
       chatMessages: state.chatMessages,

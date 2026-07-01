@@ -175,6 +175,7 @@ export type LobbyScreenState = {
   giftSuccessModal: { amount: number; friendName: string } | null
   pendingGiftNotifications: Array<{ giftId: string; amount: number; fromDisplayName: string }>
   acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
+  acceptanceErrorText: string | null
   chatConversations: ChatConversationSnapshot[]
   activeChatFriendshipId: string | null
   chatMessages: ChatMessageSnapshot[]
@@ -2211,6 +2212,14 @@ function renderNotificationsDropdown(state: LobbyScreenState): string {
           </div>
         </button>
       `).join('') : ''}
+      ${state.acceptanceErrorText ? `
+        <div style="
+          margin:10px 12px; padding:10px 12px;
+          border-radius:8px; border:1px solid rgba(248,113,113,0.28);
+          background:rgba(127,29,29,0.42); color:#fecaca;
+          font-size:13px; font-weight:600; text-align:center;
+        ">${escapeHtml(state.acceptanceErrorText)}</div>
+      ` : ''}
       ${!hasAny ? `
         <div style="padding:24px 16px; text-align:center; color:rgba(255,255,255,0.35); font-size:13px;">
           Няма нови известия
