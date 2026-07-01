@@ -4801,12 +4801,29 @@ async function handleFriendsRequest(
 
   if (friendReadAcceptanceMatch !== null && req.method === 'POST') {
     const friendshipId = decodeURIComponent(friendReadAcceptanceMatch[1]).trim()
-    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(friendshipId)) {
-      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден friendship ID.' })
-      return true
+    const readResult = friendshipStore.markAcceptanceRead(profileId, friendshipId)
+
+    if (!readResult.ok) {
+      if (readResult.reason === 'invalid_id') {
+        sendJsonResponse(res, 400, { ok: false, message: 'Невалиден friendship ID.' })
+        return true
+      }
+      if (readResult.reason === 'not_found') {
+        sendJsonResponse(res, 404, { ok: false, message: 'Записът не беше намерен.' })
+        return true
+      }
+      if (readResult.reason === 'forbidden') {
+        sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да маркираш това известие.' })
+        return true
+      }
+      if (readResult.reason === 'wrong_status') {
+        sendJsonResponse(res, 409, { ok: false, message: 'Поканата не е в статус accepted.' })
+        return true
+      }
     }
-    friendshipStore.markAcceptanceRead(profileId, friendshipId)
-    // Broadcast to all open connections of this profile so other tabs remove the notification.
+
+    // Broadcast to all open connections of this profile (marked or already_read).
+    // already_read broadcast clears stale state in other tabs.
     sendToOpenProfileConnections(profileId, {
       type: 'friend_acceptance_notification_read',
       friendshipId,

@@ -31,13 +31,21 @@ export type UnreadAcceptanceNotification = {
   friendProfile: PlayerPublicProfileSnapshot
 }
 
+export type MarkAcceptanceReadResult =
+  | { ok: true; status: 'marked' }
+  | { ok: true; status: 'already_read' }
+  | { ok: false; reason: 'invalid_id' }
+  | { ok: false; reason: 'not_found' }
+  | { ok: false; reason: 'forbidden' }
+  | { ok: false; reason: 'wrong_status' }
+
 export type FriendshipStore = {
   listForProfile: (profileId: ProfileId) => FriendshipsSnapshot
   getUnreadAcceptances: (requesterProfileId: ProfileId) => UnreadAcceptanceNotification[]
   markAcceptanceRead: (
     requesterProfileId: ProfileId,
     friendshipId: string,
-  ) => { ok: true } | { ok: false; message: string }
+  ) => MarkAcceptanceReadResult
   sendRequest: (
     requesterProfileId: ProfileId,
     addresseeProfileId: ProfileId,
@@ -266,6 +274,17 @@ export async function createFriendshipStore(
     ORDER BY updated_at DESC;
   `)
 
+  const selectFriendshipForReadStatement = database.prepare(`
+    SELECT
+      friendship_id,
+      requester_profile_id,
+      status,
+      requester_acceptance_read_at
+    FROM profile_friendships
+    WHERE friendship_id = ?
+    LIMIT 1;
+  `)
+
   const markAcceptanceReadStatement = database.prepare(`
     UPDATE profile_friendships
     SET requester_acceptance_read_at = CURRENT_TIMESTAMP
@@ -333,13 +352,33 @@ export async function createFriendshipStore(
   function markAcceptanceRead(
     requesterProfileId: ProfileId,
     friendshipId: string,
-  ): { ok: true } | { ok: false; message: string } {
+  ): MarkAcceptanceReadResult {
     if (!/^[a-zA-Z0-9_-]{1,128}$/.test(friendshipId)) {
-      return { ok: false, message: 'Невалиден friendship ID.' }
+      return { ok: false, reason: 'invalid_id' }
+    }
+
+    const row = selectFriendshipForReadStatement.get(friendshipId) as
+      | { friendship_id: string; requester_profile_id: string; status: string; requester_acceptance_read_at: string | null }
+      | undefined
+
+    if (row === undefined) {
+      return { ok: false, reason: 'not_found' }
+    }
+
+    if (row.requester_profile_id !== requesterProfileId) {
+      return { ok: false, reason: 'forbidden' }
+    }
+
+    if (row.status !== 'accepted') {
+      return { ok: false, reason: 'wrong_status' }
+    }
+
+    if (row.requester_acceptance_read_at !== null) {
+      return { ok: true, status: 'already_read' }
     }
 
     markAcceptanceReadStatement.run(friendshipId, requesterProfileId)
-    return { ok: true }
+    return { ok: true, status: 'marked' }
   }
 
   function sendRequest(

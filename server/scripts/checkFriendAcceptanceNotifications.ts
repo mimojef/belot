@@ -34,15 +34,22 @@
  * [B9] markAcceptanceRead премахва само своето известие, останалите остават
  * [B10] Втори store instance вижда актуалното прочетено известие
  * [B11] requester_acceptance_read_at е реален timestamp (не NULL, не empty string)
- * [C1] Endpoint regex: валиден UUID friendshipId преминава
- * [C2] Endpoint regex: friendshipId с интервали се отхвърля
- * [C3] Endpoint regex: friendshipId > 128 символа се отхвърля
- * [C4] Addressee НЕ може да маркира своето известие (wrong requester guard)
- * [C5] Трети профил НЕ може да маркира чуждо известие
- * [C6] Pending friendship → markAcceptanceRead не маркира нищо
- * [C7] Nonexistent friendship → markAcceptanceRead → ok:true (no-op), DB непроменена
- * [C8] Accepted friendship → markAcceptanceRead succeeds
- * [C9] Повторно извикване е idempotent (ok:true, DB timestamp не се сменя)
+ * [C1]  invalid ID → ok:false, reason: invalid_id
+ * [C2]  nonexistent friendship → ok:false, reason: not_found
+ * [C3]  addressee извиква mark → ok:false, reason: forbidden
+ * [C4]  трети профил → ok:false, reason: forbidden
+ * [C5]  pending friendship → ok:false, reason: wrong_status
+ * [C6]  requester + unread accepted → ok:true, status: marked
+ * [C7]  requester + already read → ok:true, status: already_read
+ * [C8]  failed result не променя DB (forbidden, wrong_status, not_found)
+ * [C9]  idempotent: already_read timestamp не се сменя
+ * [C10] invalid_id → HTTP 400, shouldBroadcast: false
+ * [C11] not_found → HTTP 404, shouldBroadcast: false
+ * [C12] forbidden → HTTP 403, shouldBroadcast: false
+ * [C13] wrong_status → HTTP 409, shouldBroadcast: false
+ * [C14] marked → HTTP 200, shouldBroadcast: true
+ * [C15] already_read → HTTP 200, shouldBroadcast: true
+ * [C16] само marked/already_read позволяват broadcast — всички ok:false не
  * [D1] friend_request_accepted message съдържа friendshipId поле
  * [D2] pending_acceptance_notifications съдържа notifications array
  * [D3] friend_acceptance_notification_read съдържа friendshipId поле
@@ -288,12 +295,33 @@ function makeStubProgressStore(profiles: Map<string, { profileId: string; displa
   } as unknown as Awaited<ReturnType<typeof createPlayerProgressStore>>
 }
 
-// ─── Endpoint ID regex (копиран от index.ts handler) ─────────────────────────
+// ─── Endpoint mapping helpers ─────────────────────────────────────────────────
+//
+// Pure функции, извлечени от бизнес логиката на handler-а в index.ts.
+// Позволяват детерминистично тестване на HTTP status/body и broadcast решение
+// без стартиране на реален HTTP server.
+
+import type { MarkAcceptanceReadResult } from '../src/db/friendshipStore.js'
 
 const ENDPOINT_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/
 
 function isValidFriendshipId(id: string): boolean {
   return ENDPOINT_ID_REGEX.test(id)
+}
+
+type HttpMapping = { status: number; ok: boolean; shouldBroadcast: boolean }
+
+function mapStoreResultToHttp(result: MarkAcceptanceReadResult): HttpMapping {
+  if (!result.ok) {
+    switch (result.reason) {
+      case 'invalid_id':   return { status: 400, ok: false, shouldBroadcast: false }
+      case 'not_found':    return { status: 404, ok: false, shouldBroadcast: false }
+      case 'forbidden':    return { status: 403, ok: false, shouldBroadcast: false }
+      case 'wrong_status': return { status: 409, ok: false, shouldBroadcast: false }
+    }
+  }
+  // Both 'marked' and 'already_read' → 200 + broadcast (clears stale state in other tabs)
+  return { status: 200, ok: true, shouldBroadcast: true }
 }
 
 // ─── Frontend state helpers (детерминистични, не зависят от DOM/WS) ───────────
@@ -598,139 +626,159 @@ try {
 
   console.log('\n=== C. Endpoint Logic Checks ===\n')
 
-  // Handler-ът в index.ts прилага тези правила преди store call:
-  // 1. Auth guard: session required (не се тества тук — вижте MANUAL CHECKS)
-  // 2. ID validation regex: /^[a-zA-Z0-9_-]{1,128}$/
-  // 3. Store call: markAcceptanceRead(profileId, friendshipId)
-  // 4. Broadcast: sendToOpenProfileConnections(profileId, {...})
-  // Store правилата вече са покрити в B секция; тук тестваме само auth/routing логиката.
+  // Тестваме store result contract + HTTP mapping (mapStoreResultToHttp) + broadcast decision.
+  // HTTP routing (401 без сесия) е manual check — вижте MANUAL CHECKS по-горе.
+  // store.markAcceptanceRead е callable директно; mapStoreResultToHttp е чиста функция.
 
-  await check('[C1] Endpoint regex: валиден UUID friendshipId преминава', () => {
-    const id = randomUUID()
-    assert(isValidFriendshipId(id), `UUID трябва да преминава regex: ${id}`)
-  })
-
-  await check('[C2] Endpoint regex: friendshipId с интервали се отхвърля', () => {
-    assert(!isValidFriendshipId('invalid id spaces'), 'Интервали трябва да са отхвърлени')
-  })
-
-  await check('[C3] Endpoint regex: friendshipId > 128 символа се отхвърля', () => {
-    const longId = 'a'.repeat(129)
-    assert(!isValidFriendshipId(longId), 'ID > 128 символа трябва да е отхвърлен')
-  })
-
-  // Endpoint изпраща markAcceptanceRead(profileId, friendshipId) — profileId идва от сесията.
-  // Ако addressee-ят извика endpoint, той подава своя profileId → store не маркира нищо.
   const storeC = await createFriendshipStore(fullDbPath, makeStubProgressStore(profiles))
 
-  await check('[C4] Addressee не може да маркира чуждо известие (wrong requester)', () => {
-    // fIdSecurity е requester=bob, addressee=carol. Carol извиква endpoint.
-    storeC.markAcceptanceRead('prof-carol', fIdSecurity) // carol is addressee, not requester
+  // — Store result checks —
+
+  await check('[C1] invalid_id → ok:false, reason: invalid_id', () => {
+    const result = storeC.markAcceptanceRead('prof-alice', 'bad id with spaces!')
+    assert(!result.ok && result.reason === 'invalid_id', `Очаквано invalid_id, получено: ${JSON.stringify(result)}`)
+  })
+
+  await check('[C2] nonexistent friendship → ok:false, reason: not_found', () => {
+    const result = storeC.markAcceptanceRead('prof-alice', randomUUID())
+    assert(!result.ok && result.reason === 'not_found', `Очаквано not_found, получено: ${JSON.stringify(result)}`)
+  })
+
+  await check('[C3] addressee извиква mark → ok:false, reason: forbidden', () => {
+    // fIdSecurity: requester=bob, addressee=carol. Carol е addressee.
+    const result = storeC.markAcceptanceRead('prof-carol', fIdSecurity)
+    assert(!result.ok && result.reason === 'forbidden', `Очаквано forbidden, получено: ${JSON.stringify(result)}`)
+  })
+
+  await check('[C4] трети профил → ok:false, reason: forbidden', () => {
+    const result = storeC.markAcceptanceRead('prof-dave', fIdSecurity)
+    assert(!result.ok && result.reason === 'forbidden', `Очаквано forbidden, получено: ${JSON.stringify(result)}`)
+  })
+
+  await check('[C5] pending friendship → ok:false, reason: wrong_status', () => {
+    const result = storeC.markAcceptanceRead('prof-alice', fIdPending)
+    assert(!result.ok && result.reason === 'wrong_status', `Очаквано wrong_status, получено: ${JSON.stringify(result)}`)
+  })
+
+  await check('[C6] requester + unread accepted → ok:true, status: marked', () => {
+    const cId = randomUUID()
+    const cDb = new DatabaseSync(fullDbPath, { open: true })
+    cDb.exec('PRAGMA foreign_keys = ON;')
+    seedProfile(cDb, { profileId: 'prof-c6req', displayName: 'C6Req' })
+    seedProfile(cDb, { profileId: 'prof-c6adr', displayName: 'C6Adr' })
+    profiles.set('prof-c6req', { profileId: 'prof-c6req', displayName: 'C6Req' })
+    seedAcceptedFriendship(cDb, { friendshipId: cId, requesterProfileId: 'prof-c6req', addresseeProfileId: 'prof-c6adr', readAt: null })
+    cDb.close()
+    const result = storeC.markAcceptanceRead('prof-c6req', cId)
+    assert(result.ok && result.status === 'marked', `Очаквано marked, получено: ${JSON.stringify(result)}`)
     const rows = dbQuery<{ requester_acceptance_read_at: string | null }>(
+      fullDbPath,
+      `SELECT requester_acceptance_read_at FROM profile_friendships WHERE friendship_id = ?`,
+      [cId],
+    )
+    assert(rows[0]!.requester_acceptance_read_at !== null, 'DB трябва да е маркирана')
+  })
+
+  await check('[C7] requester + already read → ok:true, status: already_read', () => {
+    const cId = randomUUID()
+    const cDb = new DatabaseSync(fullDbPath, { open: true })
+    cDb.exec('PRAGMA foreign_keys = ON;')
+    seedProfile(cDb, { profileId: 'prof-c7req', displayName: 'C7Req' })
+    seedProfile(cDb, { profileId: 'prof-c7adr', displayName: 'C7Adr' })
+    profiles.set('prof-c7req', { profileId: 'prof-c7req', displayName: 'C7Req' })
+    seedAcceptedFriendship(cDb, { friendshipId: cId, requesterProfileId: 'prof-c7req', addresseeProfileId: 'prof-c7adr', readAt: '2026-06-01T10:00:00' })
+    cDb.close()
+    const result = storeC.markAcceptanceRead('prof-c7req', cId)
+    assert(result.ok && result.status === 'already_read', `Очаквано already_read, получено: ${JSON.stringify(result)}`)
+  })
+
+  await check('[C8] failed result не променя DB (forbidden, wrong_status, not_found)', () => {
+    // Проверяваме fIdSecurity (bob's) и fIdPending — и двата трябва да останат непроменени.
+    storeC.markAcceptanceRead('prof-carol', fIdSecurity) // forbidden
+    storeC.markAcceptanceRead('prof-alice', fIdPending)  // wrong_status
+    storeC.markAcceptanceRead('prof-alice', randomUUID()) // not_found
+
+    const secRows = dbQuery<{ requester_acceptance_read_at: string | null }>(
       fullDbPath,
       `SELECT requester_acceptance_read_at FROM profile_friendships WHERE friendship_id = ?`,
       [fIdSecurity],
     )
-    assert(rows[0]!.requester_acceptance_read_at === null, 'Addressee не трябва да маркира записа')
-  })
+    assert(secRows[0]!.requester_acceptance_read_at === null, 'fIdSecurity трябва да остане NULL')
 
-  await check('[C5] Трети профил не може да маркира чуждо известие', () => {
-    storeC.markAcceptanceRead('prof-dave', fIdSecurity) // dave е трети, непознат
-    const rows = dbQuery<{ requester_acceptance_read_at: string | null }>(
-      fullDbPath,
-      `SELECT requester_acceptance_read_at FROM profile_friendships WHERE friendship_id = ?`,
-      [fIdSecurity],
-    )
-    assert(rows[0]!.requester_acceptance_read_at === null, 'Трети профил не трябва да маркира записа')
-  })
-
-  await check('[C6] Pending friendship → markAcceptanceRead не маркира нищо', () => {
-    // fIdPending е pending статус. Requester (alice) извиква endpoint.
-    storeC.markAcceptanceRead('prof-alice', fIdPending)
-    const rows = dbQuery<{ requester_acceptance_read_at: string | null }>(
+    const pendRows = dbQuery<{ requester_acceptance_read_at: string | null }>(
       fullDbPath,
       `SELECT requester_acceptance_read_at FROM profile_friendships WHERE friendship_id = ?`,
       [fIdPending],
     )
-    // pending редове нямат колоната в смисъл на NULL или такава не се маркира
-    assert(
-      rows[0]!.requester_acceptance_read_at === null,
-      'Pending friendship не трябва да се маркира',
-    )
+    assert(pendRows[0]!.requester_acceptance_read_at === null, 'fIdPending трябва да остане NULL')
   })
 
-  await check('[C7] Nonexistent friendship → markAcceptanceRead → ok:true (no-op, DB непроменена)', () => {
-    const nonExistentId = randomUUID()
-    const result = storeC.markAcceptanceRead('prof-alice', nonExistentId)
-    assert(result.ok, 'Несъществуващ friendship → ok:true (UPDATE 0 rows е ok)')
-    const rows = dbQuery<{ friendship_id: string }>(
-      fullDbPath,
-      `SELECT friendship_id FROM profile_friendships WHERE friendship_id = ?`,
-      [nonExistentId],
-    )
-    assert(rows.length === 0, 'Несъществуващ friendship трябва да остане несъществуващ')
-  })
-
-  await check('[C8] Accepted friendship → markAcceptanceRead succeeds', () => {
-    // Seed нова accepted за c8 тест
-    const c8Id = randomUUID()
-    const c8Db = new DatabaseSync(fullDbPath, { open: true })
-    c8Db.exec('PRAGMA foreign_keys = ON;')
-    seedProfile(c8Db, { profileId: 'prof-c8req', displayName: 'C8Req' })
-    seedProfile(c8Db, { profileId: 'prof-c8adr', displayName: 'C8Adr' })
-    profiles.set('prof-c8req', { profileId: 'prof-c8req', displayName: 'C8Req' })
-    seedAcceptedFriendship(c8Db, {
-      friendshipId: c8Id,
-      requesterProfileId: 'prof-c8req',
-      addresseeProfileId: 'prof-c8adr',
-      readAt: null,
-    })
-    c8Db.close()
-
-    const result = storeC.markAcceptanceRead('prof-c8req', c8Id)
-    assert(result.ok, `Accepted friendship → ok:true: ${!result.ok ? result.message : ''}`)
-    const rows = dbQuery<{ requester_acceptance_read_at: string | null }>(
-      fullDbPath,
-      `SELECT requester_acceptance_read_at FROM profile_friendships WHERE friendship_id = ?`,
-      [c8Id],
-    )
-    assert(rows[0]!.requester_acceptance_read_at !== null, 'read_at трябва да е non-NULL')
-  })
-
-  await check('[C9] Повторно извикване е idempotent (ok:true, timestamp не се сменя)', () => {
-    const c9Id = randomUUID()
-    const c9Db = new DatabaseSync(fullDbPath, { open: true })
-    c9Db.exec('PRAGMA foreign_keys = ON;')
-    seedProfile(c9Db, { profileId: 'prof-c9req', displayName: 'C9Req' })
-    seedProfile(c9Db, { profileId: 'prof-c9adr', displayName: 'C9Adr' })
+  await check('[C9] idempotent: already_read timestamp не се сменя', () => {
+    const cId = randomUUID()
+    const cDb = new DatabaseSync(fullDbPath, { open: true })
+    cDb.exec('PRAGMA foreign_keys = ON;')
+    seedProfile(cDb, { profileId: 'prof-c9req', displayName: 'C9Req' })
+    seedProfile(cDb, { profileId: 'prof-c9adr', displayName: 'C9Adr' })
     profiles.set('prof-c9req', { profileId: 'prof-c9req', displayName: 'C9Req' })
-    seedAcceptedFriendship(c9Db, {
-      friendshipId: c9Id,
-      requesterProfileId: 'prof-c9req',
-      addresseeProfileId: 'prof-c9adr',
-      readAt: null,
-    })
-    c9Db.close()
+    seedAcceptedFriendship(cDb, { friendshipId: cId, requesterProfileId: 'prof-c9req', addresseeProfileId: 'prof-c9adr', readAt: null })
+    cDb.close()
 
-    storeC.markAcceptanceRead('prof-c9req', c9Id)
+    storeC.markAcceptanceRead('prof-c9req', cId)
     const rows1 = dbQuery<{ requester_acceptance_read_at: string | null }>(
       fullDbPath,
       `SELECT requester_acceptance_read_at FROM profile_friendships WHERE friendship_id = ?`,
-      [c9Id],
+      [cId],
     )
     const ts1 = rows1[0]!.requester_acceptance_read_at
 
-    // Чакаме 1s за да се провери, че timestamp не се мени (SQLite CURRENT_TIMESTAMP е секунда-точен)
-    // Вместо sleep: директно verify с second call
-    const result2 = storeC.markAcceptanceRead('prof-c9req', c9Id)
-    assert(result2.ok, 'Второто извикване трябва да е ok:true')
+    const result2 = storeC.markAcceptanceRead('prof-c9req', cId)
+    assert(result2.ok && result2.status === 'already_read', 'Второто извикване трябва да е already_read')
     const rows2 = dbQuery<{ requester_acceptance_read_at: string | null }>(
       fullDbPath,
       `SELECT requester_acceptance_read_at FROM profile_friendships WHERE friendship_id = ?`,
-      [c9Id],
+      [cId],
     )
-    const ts2 = rows2[0]!.requester_acceptance_read_at
-    assert(ts1 === ts2, `Timestamp не трябва да се промени при idempotent call: ${ts1} → ${ts2}`)
+    assert(ts1 === rows2[0]!.requester_acceptance_read_at, `Timestamp не трябва да се смени: ${ts1} → ${rows2[0]!.requester_acceptance_read_at}`)
+  })
+
+  // — HTTP mapping checks (чиста функция, без HTTP server) —
+
+  await check('[C10] invalid_id → HTTP 400, shouldBroadcast: false', () => {
+    const r = mapStoreResultToHttp({ ok: false, reason: 'invalid_id' })
+    assert(r.status === 400 && !r.shouldBroadcast, `Очаквано 400/false, получено: ${JSON.stringify(r)}`)
+  })
+
+  await check('[C11] not_found → HTTP 404, shouldBroadcast: false', () => {
+    const r = mapStoreResultToHttp({ ok: false, reason: 'not_found' })
+    assert(r.status === 404 && !r.shouldBroadcast, `Очаквано 404/false, получено: ${JSON.stringify(r)}`)
+  })
+
+  await check('[C12] forbidden → HTTP 403, shouldBroadcast: false', () => {
+    const r = mapStoreResultToHttp({ ok: false, reason: 'forbidden' })
+    assert(r.status === 403 && !r.shouldBroadcast, `Очаквано 403/false, получено: ${JSON.stringify(r)}`)
+  })
+
+  await check('[C13] wrong_status → HTTP 409, shouldBroadcast: false', () => {
+    const r = mapStoreResultToHttp({ ok: false, reason: 'wrong_status' })
+    assert(r.status === 409 && !r.shouldBroadcast, `Очаквано 409/false, получено: ${JSON.stringify(r)}`)
+  })
+
+  await check('[C14] marked → HTTP 200, shouldBroadcast: true', () => {
+    const r = mapStoreResultToHttp({ ok: true, status: 'marked' })
+    assert(r.status === 200 && r.shouldBroadcast, `Очаквано 200/true, получено: ${JSON.stringify(r)}`)
+  })
+
+  await check('[C15] already_read → HTTP 200, shouldBroadcast: true (clears stale state)', () => {
+    const r = mapStoreResultToHttp({ ok: true, status: 'already_read' })
+    assert(r.status === 200 && r.shouldBroadcast, `Очаквано 200/true, получено: ${JSON.stringify(r)}`)
+  })
+
+  await check('[C16] само marked и already_read позволяват broadcast (всички ok:false не)', () => {
+    const failReasons = ['invalid_id', 'not_found', 'forbidden', 'wrong_status'] as const
+    for (const reason of failReasons) {
+      const r = mapStoreResultToHttp({ ok: false, reason })
+      assert(!r.shouldBroadcast, `reason=${reason} не трябва да позволява broadcast`)
+    }
   })
 
   storeC.close()
