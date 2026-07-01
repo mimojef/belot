@@ -1,5 +1,11 @@
-import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
+import { randomBytes, randomUUID, scryptSync } from 'node:crypto'
 import type { AccountId, PlayerPublicProfileSnapshot, ProfileId } from '../core/serverTypes.js'
+import {
+  createPasswordHash,
+  normalizeEmail,
+  validatePassword,
+  verifyPassword,
+} from './authHelpers.js'
 import { normalizeProfileDisplayName, normalizeProfileUsername } from './normalizeProfileIdentityText.js'
 import type { PlayerProgressStore } from './playerProgressStore.js'
 
@@ -65,54 +71,6 @@ type SessionRow = {
 
 const SESSION_COOKIE_NAME = 'belot_session'
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30
-const PASSWORD_MIN_LENGTH = 6
-const SCRYPT_KEY_LENGTH = 64
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
-
-function normalizeEmail(value: string): string | null {
-  const trimmed = value.trim().toLocaleLowerCase('en-US')
-
-  if (!trimmed || trimmed.length > 254 || !EMAIL_RE.test(trimmed)) {
-    return null
-  }
-
-  return trimmed
-}
-
-function validatePassword(value: string): boolean {
-  return value.length >= PASSWORD_MIN_LENGTH && value.length <= 256
-}
-
-function createPasswordHash(password: string): string {
-  const salt = randomBytes(16).toString('hex')
-  const hash = scryptSync(password, salt, SCRYPT_KEY_LENGTH).toString('hex')
-
-  return `scrypt:${salt}:${hash}`
-}
-
-function verifyPassword(password: string, storedHash: string): boolean {
-  const parts = storedHash.split(':')
-
-  if (parts.length !== 3 || parts[0] !== 'scrypt') {
-    return false
-  }
-
-  const [, salt, expectedHashHex] = parts
-
-  if (!salt || !expectedHashHex) {
-    return false
-  }
-
-  const actualHash = scryptSync(password, salt, SCRYPT_KEY_LENGTH)
-  const expectedHash = Buffer.from(expectedHashHex, 'hex')
-
-  if (actualHash.length !== expectedHash.length) {
-    return false
-  }
-
-  return timingSafeEqual(actualHash, expectedHash)
-}
 
 function createSessionToken(): string {
   return randomBytes(32).toString('base64url')
