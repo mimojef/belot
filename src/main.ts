@@ -108,12 +108,18 @@ document.body.appendChild(friendReqNotifContainer)
 const friendRequestNotification = createFriendRequestNotification({
   container: friendReqNotifContainer,
   onAccept: async (friendshipId) => {
+    const result = await submitFriendAction(friendshipId, 'accept')
+    if (!result.ok) return result
+    lobby?.setFriendships(result.friendships)
     lobby?.removePendingFriendRequest(friendshipId)
-    await submitFriendRequestAction(friendshipId, 'accept')
+    return result
   },
   onReject: async (friendshipId) => {
+    const result = await submitFriendAction(friendshipId, 'reject')
+    if (!result.ok) return result
+    lobby?.setFriendships(result.friendships)
     lobby?.removePendingFriendRequest(friendshipId)
-    await submitFriendRequestAction(friendshipId, 'reject')
+    return result
   },
 })
 
@@ -2120,20 +2126,6 @@ async function submitProfileLike(
     return { ok: false }
   } catch {
     return { ok: false }
-  }
-}
-
-async function submitFriendRequestAction(
-  friendshipId: string,
-  action: 'accept' | 'reject',
-): Promise<void> {
-  try {
-    await fetch(`${getApiBaseUrl()}/api/friends/${encodeURIComponent(friendshipId)}/${action}`, {
-      method: 'POST',
-      credentials: 'include',
-    })
-  } catch {
-    // ignore
   }
 }
 

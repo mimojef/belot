@@ -1,3 +1,5 @@
+import type { FriendshipsSnapshot } from '../../app/network/createGameServerClient.js'
+
 type FriendRequestNotif = {
   friendshipId: string
   fromProfileId: string
@@ -16,18 +18,24 @@ type FriendRequestController = {
   destroy: () => void
 }
 
+type ActionResult =
+  | { ok: true; friendships: FriendshipsSnapshot }
+  | { ok: false; message: string }
+
 const AUTO_DISMISS_MS = 12_000
 const CONFIRMATION_DISMISS_MS = 4_000
 
 export function createFriendRequestNotification(options: {
   container: HTMLElement
-  onAccept: (friendshipId: string) => Promise<void>
-  onReject: (friendshipId: string) => Promise<void>
+  onAccept: (friendshipId: string) => Promise<ActionResult>
+  onReject: (friendshipId: string) => Promise<ActionResult>
 }): FriendRequestController {
   let current: FriendRequestNotif | null = null
   let confirmationName: string | null = null
   let dismissTimer: ReturnType<typeof setTimeout> | null = null
   let confirmationTimer: ReturnType<typeof setTimeout> | null = null
+  let isProcessing = false
+  let errorText: string | null = null
 
   function clearDismissTimer(): void {
     if (dismissTimer !== null) {
@@ -61,10 +69,13 @@ export function createFriendRequestNotification(options: {
     setTimeout(afterFade, 420)
   }
 
-  function dismiss(): void {
+  // Called only by the auto-dismiss timer — no API call, just hide.
+  function dismissByTimer(): void {
     clearDismissTimer()
+    if (isProcessing) return
     fadeOutAndClear(() => {
       current = null
+      errorText = null
       render()
     })
   }
@@ -111,6 +122,10 @@ export function createFriendRequestNotification(options: {
       ? `<img src="${notif.fromAvatarUrl}" style="width:80px;height:80px;object-fit:cover;border-radius:10px;display:block;border:2px solid rgba(212,175,55,0.4);">`
       : `<div style="width:80px;height:80px;border-radius:10px;background:rgba(212,175,55,0.12);border:2px solid rgba(212,175,55,0.3);display:flex;align-items:center;justify-content:center;font-size:32px;flex-shrink:0;">👤</div>`
 
+    const btnDisabled = isProcessing ? 'disabled' : ''
+    const btnCursor = isProcessing ? 'not-allowed' : 'pointer'
+    const btnOpacity = isProcessing ? '0.6' : '1'
+
     options.container.innerHTML = `
       <style>
         @keyframes friendReqSlideIn {
@@ -124,8 +139,8 @@ export function createFriendRequestNotification(options: {
           from { width:100%; }
           to   { width:0%; }
         }
-        #freq-accept-btn:hover { filter:brightness(1.15); transform:translateY(-1px); }
-        #freq-reject-btn:hover { filter:brightness(1.15); transform:translateY(-1px); }
+        #freq-accept-btn:not([disabled]):hover { filter:brightness(1.15); transform:translateY(-1px); }
+        #freq-reject-btn:not([disabled]):hover { filter:brightness(1.15); transform:translateY(-1px); }
       </style>
       <div style="
         position:fixed;top:16px;left:50%;transform:translateX(-50%);
@@ -147,22 +162,25 @@ export function createFriendRequestNotification(options: {
             ${notif.fromDisplayName}
           </div>
           <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:2px;">ви кани за приятел</div>
+          ${errorText !== null ? `<div style="font-size:12px;color:#ef4444;margin-top:4px;">${errorText}</div>` : ''}
         </div>
 
         <div style="display:flex;flex-direction:row;align-items:center;gap:8px;flex-shrink:0;">
-          <button id="freq-accept-btn" type="button" style="
+          <button id="freq-accept-btn" type="button" ${btnDisabled} style="
             padding:7px 14px;border:none;
             background:linear-gradient(135deg,#14532d,#22c55e);
-            border-radius:8px;color:#fff;font-size:13px;font-weight:800;cursor:pointer;
+            border-radius:8px;color:#fff;font-size:13px;font-weight:800;cursor:${btnCursor};
             white-space:nowrap;
+            opacity:${btnOpacity};
             transition:filter 0.15s,transform 0.15s;
             box-shadow:0 2px 8px rgba(34,197,94,0.3);
           ">Приеми</button>
-          <button id="freq-reject-btn" type="button" style="
+          <button id="freq-reject-btn" type="button" ${btnDisabled} style="
             padding:7px 14px;border:none;
             background:linear-gradient(135deg,#7f1d1d,#ef4444);
-            border-radius:8px;color:#fff;font-size:13px;font-weight:800;cursor:pointer;
+            border-radius:8px;color:#fff;font-size:13px;font-weight:800;cursor:${btnCursor};
             white-space:nowrap;
+            opacity:${btnOpacity};
             transition:filter 0.15s,transform 0.15s;
             box-shadow:0 2px 8px rgba(239,68,68,0.3);
           ">Откажи</button>
@@ -177,22 +195,59 @@ export function createFriendRequestNotification(options: {
     `
 
     options.container.querySelector('#freq-reject-btn')?.addEventListener('click', () => {
+      if (isProcessing) return
       const friendshipId = notif.friendshipId
-      dismiss()
-      void options.onReject(friendshipId).catch(() => {/* ignore */})
+      isProcessing = true
+      errorText = null
+      render()
+      void options.onReject(friendshipId).then((result) => {
+        if (!result.ok) {
+          isProcessing = false
+          errorText = result.message
+          render()
+          return
+        }
+        isProcessing = false
+        fadeOutAndClear(() => {
+          current = null
+          errorText = null
+          render()
+        })
+      }).catch(() => {
+        isProcessing = false
+        errorText = 'Грешка при обработка. Опитай отново.'
+        render()
+      })
     })
 
     options.container.querySelector('#freq-accept-btn')?.addEventListener('click', () => {
+      if (isProcessing) return
       const friendshipId = notif.friendshipId
       const displayName = notif.fromDisplayName
-      dismiss()
-      void options.onAccept(friendshipId).then(() => {
+      isProcessing = true
+      errorText = null
+      render()
+      void options.onAccept(friendshipId).then((result) => {
+        if (!result.ok) {
+          isProcessing = false
+          errorText = result.message
+          render()
+          return
+        }
+        isProcessing = false
+        clearDismissTimer()
+        current = null
+        errorText = null
         confirmationName = displayName
         render()
         playSound()
         clearConfirmationTimer()
         confirmationTimer = setTimeout(dismissConfirmation, CONFIRMATION_DISMISS_MS)
-      }).catch(() => {/* ignore */})
+      }).catch(() => {
+        isProcessing = false
+        errorText = 'Грешка при обработка. Опитай отново.'
+        render()
+      })
     })
   }
 
@@ -200,15 +255,19 @@ export function createFriendRequestNotification(options: {
     clearDismissTimer()
     clearConfirmationTimer()
     confirmationName = null
+    isProcessing = false
+    errorText = null
     current = notification
     render()
     playSound()
-    dismissTimer = setTimeout(dismiss, AUTO_DISMISS_MS)
+    dismissTimer = setTimeout(dismissByTimer, AUTO_DISMISS_MS)
   }
 
   function showAccepted(notification: AcceptedNotif): void {
     clearDismissTimer()
     current = null
+    isProcessing = false
+    errorText = null
     confirmationName = notification.fromDisplayName
     render()
     playSound()
