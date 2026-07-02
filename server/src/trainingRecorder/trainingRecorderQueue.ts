@@ -29,6 +29,7 @@ export function createTrainingRecorderQueue(
 ): TrainingRecorderQueue {
   const queue: string[] = []
   let writing = false
+  // shutdownRequested blocks new enqueues but must NOT stop drain from flushing existing items
   let shutdownRequested = false
   let shutdownResolve: (() => void) | null = null
 
@@ -36,7 +37,9 @@ export function createTrainingRecorderQueue(
     if (writing) return
     writing = true
 
-    while (queue.length > 0 && !shutdownRequested) {
+    // Continue draining until queue is empty regardless of shutdownRequested.
+    // shutdownRequested only prevents new items from being enqueued.
+    while (queue.length > 0) {
       const payload = queue.shift()!
       try {
         await writer.write(payload)
@@ -47,7 +50,7 @@ export function createTrainingRecorderQueue(
 
     writing = false
 
-    if (shutdownRequested && shutdownResolve !== null) {
+    if (shutdownResolve !== null) {
       shutdownResolve()
       shutdownResolve = null
     }
@@ -79,14 +82,14 @@ export function createTrainingRecorderQueue(
       return
     }
 
-    // Wait for drain to complete within timeout
+    // Wait for drain to flush all remaining items, then resolve
     const drainPromise = new Promise<void>((resolve) => {
       shutdownResolve = resolve
       if (!writing) {
-        resolve()
-      } else {
+        // Drain hasn't started or already finished — kick it off
         void drain()
       }
+      // If writing=true, drain is already running and will call shutdownResolve when done
     })
 
     const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))

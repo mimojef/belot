@@ -15,6 +15,12 @@ export type TrainingActorKind =
   | 'bot_original'
   | 'bot_takeover'
 
+// ─── Action origin (explicit, passed by the submit path) ─────────────────────
+
+export type TrainingActionOrigin =
+  | 'human_manual'   // human submitted voluntarily
+  | 'auto'           // timer expiry or bot tick (determine specifics from state diff)
+
 // ─── Bid action (compact) ─────────────────────────────────────────────────────
 
 export type TrainingBidActionType =
@@ -174,13 +180,19 @@ export type TrainingDealRecord = {
   completedAt: string
   completed: true
 
+  recordKind: 'full' | 'bidding_only'
+
   dealerSeat: Seat
   startingSeat: Seat
 
   scoreBeforeDeal: TrainingScoreSnapshot
   scoreAfterDeal: TrainingScoreSnapshot
 
-  initialHands: Record<Seat, ServerCard[]>
+  // 5 cards per seat captured at deal-next-2 → bidding transition
+  handsAtBiddingStart: Record<Seat, ServerCard[]>
+
+  // 8 cards per seat captured at deal-last-3 → playing transition (null for bidding_only)
+  initialHands: Record<Seat, ServerCard[]> | null
 
   seats: Record<Seat, TrainingSeatMetadata>
 
@@ -190,7 +202,7 @@ export type TrainingDealRecord = {
   cardActions: TrainingCardAction[]
   tricks: TrainingTrickResult[]
 
-  dealResult: TrainingDealResult
+  dealResult: TrainingDealResult | null
 
   integrity: TrainingIntegrity
 }

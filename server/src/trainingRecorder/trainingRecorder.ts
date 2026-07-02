@@ -14,13 +14,16 @@ import {
 import { createTrainingRecorderWriter } from './trainingRecorderWriter.js'
 import { createTrainingRecorderQueue, type TrainingRecorderQueue } from './trainingRecorderQueue.js'
 import {
-  collectorOnDealStart,
+  collectorOnBiddingStart,
+  collectorOnPlayingStart,
   collectorOnBidAction,
   collectorOnCardPlayed,
   collectorOnDealComplete,
+  collectorOnAllPass,
   collectorDropDeal,
   collectorGetActiveDealCount,
 } from './trainingRecorderCollector.js'
+import type { TrainingActionOrigin } from './trainingRecorderTypes.js'
 
 // ─── Rate-limited integrity warning ──────────────────────────────────────────
 
@@ -39,18 +42,27 @@ function warnIntegrity(violations: string[]): void {
 // ─── Recorder interface ───────────────────────────────────────────────────────
 
 export type TrainingRecorder = {
-  onDealStart(
+  // Called at deal-next-2 → bidding (5 cards per seat captured here)
+  onBiddingStart(
     room: { id: string; seats: Record<Seat, { participant: { kind: string; identity: { profileId: string | null } } | null }> },
     state: ServerAuthoritativeGameState,
     dealIndex: number,
   ): void
 
-  onBidAction(
+  // Called at deal-last-3 → playing (8 cards per seat captured here)
+  onPlayingStart(
     roomId: string,
     dealIndex: number,
     state: ServerAuthoritativeGameState,
+  ): void
+
+  onBidAction(
+    roomId: string,
+    dealIndex: number,
+    stateBefore: ServerAuthoritativeGameState,
+    stateAfter: ServerAuthoritativeGameState,
     seat: Seat,
-    wasTimedOut: boolean,
+    actionOrigin: TrainingActionOrigin,
   ): void
 
   onCardPlayed(
@@ -60,7 +72,7 @@ export type TrainingRecorder = {
     stateAfter: ServerAuthoritativeGameState,
     seat: Seat,
     cardId: string,
-    wasTimedOut: boolean,
+    actionOrigin: TrainingActionOrigin,
   ): void
 
   onDealComplete(
@@ -69,6 +81,14 @@ export type TrainingRecorder = {
     state: ServerAuthoritativeGameState,
   ): void
 
+  // Called on bidding → next-round (all pass). Writes a bidding_only record.
+  onAllPass(
+    roomId: string,
+    dealIndex: number,
+    state: ServerAuthoritativeGameState,
+  ): void
+
+  // Legacy: called to explicitly drop a deal without recording (disconnects, etc.)
   onDealAbandoned(roomId: string, dealIndex: number): void
 
   getMetrics(): TrainingRecorderMetrics
@@ -94,10 +114,12 @@ function createNoopRecorder(): TrainingRecorder {
   }
 
   return {
-    onDealStart: () => undefined,
+    onBiddingStart: () => undefined,
+    onPlayingStart: () => undefined,
     onBidAction: () => undefined,
     onCardPlayed: () => undefined,
     onDealComplete: () => undefined,
+    onAllPass: () => undefined,
     onDealAbandoned: () => undefined,
     getMetrics: () => metrics,
     shutdown: async () => undefined,
@@ -122,27 +144,57 @@ function createActiveRecorder(
     }
   }
 
-  function onDealStart(
+  function enqueueRecord(record: import('./trainingRecorderTypes.js').TrainingDealRecord): void {
+    if (!record.integrity.valid) {
+      warnIntegrity(record.integrity.violations)
+    }
+
+    const serialized = JSON.stringify(record)
+    const MAX_BYTES = 500_000
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_BYTES) {
+      console.warn(
+        `[training-recorder] Record payload too large (${Buffer.byteLength(serialized, 'utf8')} bytes) — dropped`,
+      )
+      mutableMetrics.droppedRecords += 1
+      return
+    }
+
+    queue.enqueue(serialized)
+  }
+
+  function onBiddingStart(
     room: { id: string; seats: Record<Seat, { participant: { kind: string; identity: { profileId: string | null } } | null }> },
     state: ServerAuthoritativeGameState,
     dealIndex: number,
   ): void {
     if (shutdownRequested) return
-    safeRun('onDealStart', () => {
-      collectorOnDealStart(room, state, dealIndex, config.hashSecret)
+    safeRun('onBiddingStart', () => {
+      collectorOnBiddingStart(room, state, dealIndex, config.hashSecret)
+    })
+  }
+
+  function onPlayingStart(
+    roomId: string,
+    dealIndex: number,
+    state: ServerAuthoritativeGameState,
+  ): void {
+    if (shutdownRequested) return
+    safeRun('onPlayingStart', () => {
+      collectorOnPlayingStart(roomId, dealIndex, state)
     })
   }
 
   function onBidAction(
     roomId: string,
     dealIndex: number,
-    state: ServerAuthoritativeGameState,
+    stateBefore: ServerAuthoritativeGameState,
+    stateAfter: ServerAuthoritativeGameState,
     seat: Seat,
-    wasTimedOut: boolean,
+    actionOrigin: TrainingActionOrigin,
   ): void {
     if (shutdownRequested) return
     safeRun('onBidAction', () => {
-      collectorOnBidAction(roomId, dealIndex, state, seat, wasTimedOut)
+      collectorOnBidAction(roomId, dealIndex, stateBefore, stateAfter, seat, actionOrigin)
     })
   }
 
@@ -153,11 +205,11 @@ function createActiveRecorder(
     stateAfter: ServerAuthoritativeGameState,
     seat: Seat,
     cardId: string,
-    wasTimedOut: boolean,
+    actionOrigin: TrainingActionOrigin,
   ): void {
     if (shutdownRequested) return
     safeRun('onCardPlayed', () => {
-      collectorOnCardPlayed(roomId, dealIndex, stateBefore, stateAfter, seat, cardId, wasTimedOut)
+      collectorOnCardPlayed(roomId, dealIndex, stateBefore, stateAfter, seat, cardId, actionOrigin)
     })
   }
 
@@ -169,32 +221,40 @@ function createActiveRecorder(
     if (shutdownRequested) return
 
     safeRun('onDealComplete', () => {
-      const record = collectorOnDealComplete(roomId, dealIndex, state)
+      const result = collectorOnDealComplete(roomId, dealIndex, state)
 
-      if (record === null) {
+      if (result.kind === 'duplicate') {
         mutableMetrics.duplicateRecords += 1
         return
       }
-
-      if (!record.integrity.valid) {
-        warnIntegrity(record.integrity.violations)
-        // Still enqueue the record but mark it so downstream can filter
-        // (integrity field is embedded in the record itself)
-      }
-
-      const serialized = JSON.stringify(record)
-
-      // Payload size guard (writer also checks, but fail-open here)
-      const MAX_BYTES = 500_000
-      if (Buffer.byteLength(serialized, 'utf8') > MAX_BYTES) {
-        console.warn(
-          `[training-recorder] Record payload too large (${Buffer.byteLength(serialized, 'utf8')} bytes) — dropped`,
-        )
-        mutableMetrics.droppedRecords += 1
+      if (result.kind !== 'enqueued') {
+        // no_active_deal, not_ready, invalid — silent drop
         return
       }
 
-      queue.enqueue(serialized)
+      enqueueRecord(result.record)
+    })
+  }
+
+  function onAllPass(
+    roomId: string,
+    dealIndex: number,
+    state: ServerAuthoritativeGameState,
+  ): void {
+    if (shutdownRequested) return
+
+    safeRun('onAllPass', () => {
+      const result = collectorOnAllPass(roomId, dealIndex, state)
+
+      if (result.kind === 'duplicate') {
+        mutableMetrics.duplicateRecords += 1
+        return
+      }
+      if (result.kind !== 'enqueued') {
+        return
+      }
+
+      enqueueRecord(result.record)
     })
   }
 
@@ -218,10 +278,12 @@ function createActiveRecorder(
   }
 
   return {
-    onDealStart,
+    onBiddingStart,
+    onPlayingStart,
     onBidAction,
     onCardPlayed,
     onDealComplete,
+    onAllPass,
     onDealAbandoned,
     getMetrics,
     shutdown,

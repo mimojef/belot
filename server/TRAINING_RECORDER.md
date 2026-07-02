@@ -22,7 +22,7 @@ A missing or short secret causes the recorder to stay disabled (logged as a warn
 | Variable | Default | Description |
 |---|---|---|
 | `TRAINING_RECORDER_ENABLED` | `false` | Set to `true` to activate |
-| `TRAINING_RECORDER_HASH_SECRET` | — | Min 16-char secret for HMAC-SHA256 player pseudonymization |
+| `TRAINING_RECORDER_HASH_SECRET` | — | Min 16-char secret for HMAC-SHA256 player/room pseudonymization |
 | `TRAINING_RECORDER_PATH` | `./training-recordings` | Directory for JSONL files |
 | `TRAINING_RECORDER_MAX_FILE_MB` | `100` | Rotate file after this many MB |
 | `TRAINING_RECORDER_MAX_TOTAL_GB` | `10` | Delete oldest files when total exceeds this |
@@ -42,26 +42,48 @@ A missing or short secret causes the recorder to stay disabled (logged as a warn
 
 Each line in a `.jsonl` file is one complete JSON record, newline-terminated. Files rotate when they reach `MAX_FILE_MB` or when the UTC date changes.
 
+## Phase lifecycle
+
+The recorder hooks into these server phase transitions:
+
+| Transition | Event | Cards captured |
+|---|---|---|
+| `deal-next-2 → bidding` | Deal start | 5 per seat (20 total) → `handsAtBiddingStart` |
+| `deal-last-3 → playing` | Playing start | 8 per seat (32 total) → `initialHands` |
+| `bidding` (each bid) | Bid action recorded | — |
+| `bidding → deal-last-3` | Last bid recorded | — |
+| `bidding → next-round` | All-pass: last bid + bidding_only record written | — |
+| `playing` (each card) | Card action recorded | — |
+| `playing → scoring` | Last card + full record written | — |
+
+Human actions (submitBid / submitPlay) are intercepted directly in `index.ts` and pass `actionOrigin: 'human_manual'`. Bot/timeout actions come through the worker `onApplied` callback and pass `actionOrigin: 'auto'`.
+
 ## Record schema (schemaVersion: 1)
 
-### Complete deal (`completed: true`)
+### Full deal (`completed: true, recordKind: 'full'`)
 
 ```jsonc
 {
   "schemaVersion": 1,
-  "recordingId": "roomId::deal-12345::dealer-bottom",
+  "recordingId": "<random-uuid>",
   "recordedAt": "2025-06-01T12:00:00.000Z",
-  "roomKey": "room-uuid",
+  "roomKey": "<hmac-sha256-of-room-id>",
   "dealIndex": 12345,
   "startedAt": "...", "completedAt": "...",
   "completed": true,
+  "recordKind": "full",
   "dealerSeat": "bottom",
   "startingSeat": "right",
   "scoreBeforeDeal": { "team0": 40, "team1": 60 },
   "scoreAfterDeal":  { "team0": 40, "team1": 220 },
-  "initialHands": {
+  "handsAtBiddingStart": {
+    // 5 cards per seat at deal-next-2 → bidding
     "bottom": [{ "id": "hearts-J", "suit": "hearts", "rank": "J" }, ...],
     "right":  [...], "top": [...], "left": [...]
+  },
+  "initialHands": {
+    // 8 cards per seat at deal-last-3 → playing (full hand)
+    "bottom": [...], "right": [...], "top": [...], "left": [...]
   },
   "seats": {
     "bottom": { "playerKey": "abc123...", "isBot": false, "isTakeover": false },
@@ -133,18 +155,31 @@ Each line in a `.jsonl` file is one complete JSON record, newline-terminated. Fi
 }
 ```
 
-### Incomplete deal (`completed: false`)
+### All-pass deal (`completed: true, recordKind: 'bidding_only'`)
 
 ```jsonc
 {
   "schemaVersion": 1,
-  "recordingId": "...",
+  "recordingId": "<random-uuid>",
   "recordedAt": "...",
-  "roomKey": "...",
+  "roomKey": "<hmac-sha256-of-room-id>",
   "dealIndex": 12345,
   "startedAt": "...", "completedAt": "...",
-  "completed": false,
-  "terminationReason": "all-pass"
+  "completed": true,
+  "recordKind": "bidding_only",
+  "dealerSeat": "bottom",
+  "startingSeat": "right",
+  "scoreBeforeDeal": { "team0": 40, "team1": 60 },
+  "scoreAfterDeal":  { "team0": 40, "team1": 60 },
+  "handsAtBiddingStart": { /* 5 cards × 4 seats */ },
+  "initialHands": null,
+  "seats": { ... },
+  "biddingActions": [ /* all bids including the final pass */ ],
+  "finalContract": null,
+  "cardActions": [],
+  "tricks": [],
+  "dealResult": null,
+  "integrity": { "valid": true, "violations": [], ... }
 }
 ```
 
@@ -152,29 +187,30 @@ Each line in a `.jsonl` file is one complete JSON record, newline-terminated. Fi
 
 | Kind | Meaning |
 |---|---|
-| `human_manual` | Human player acted within time limit |
-| `human_timeout` | Human player's seat timed out; the human action was submitted by the timeout handler |
-| `bot_original` | Seat was always a bot |
-| `bot_takeover` | Seat was a human but the bot took over after timeout |
+| `human_manual` | Human player submitted voluntarily within time limit |
+| `human_timeout` | First auto-action on a human seat: timer expired and the timeout handler acted |
+| `bot_original` | Seat was always a bot (participant.kind === 'bot') |
+| `bot_takeover` | Seat was a human but the bot took over after timeout (subsequent auto actions) |
 
 ## Privacy
 
 - **No PII is stored.** Usernames, email addresses, IP addresses, access tokens, refresh tokens, passwords, and chat messages are never written.
 - **Profile IDs are pseudonymized** using HMAC-SHA256 with `TRAINING_RECORDER_HASH_SECRET`. The same profile always produces the same `playerKey` within a deployment, but the original ID cannot be recovered without the secret.
+- **Room IDs are pseudonymized** the same way. The `roomKey` field in every record is `HMAC-SHA256(secret, roomId)`, never the raw room ID.
 - **Bot seats** always have `playerKey: null`.
 
 ## Fail-open design
 
 Any error inside the recorder is caught and logged; the game always continues. Specifically:
 
-- Errors in `onDealStart`, `onBidAction`, `onCardPlayed`, `onDealComplete`, `onDealAbandoned` are swallowed.
+- Errors in `onBiddingStart`, `onPlayingStart`, `onBidAction`, `onCardPlayed`, `onDealComplete`, `onAllPass`, `onDealAbandoned` are swallowed.
 - Queue overflow silently drops the newest record (rate-limited warning log).
 - Disk write errors mark the recorder as unhealthy and log the error, but do not throw.
 - The recorder never rejects a game action, never blocks a game worker, and never modifies the authoritative game state.
 
 ## Deduplication
 
-Each deal gets a stable `recordingId` (`${roomId}::deal-${dealIndex}::dealer-${seat}`). Finalized recording IDs are kept in a per-process `Set` (capped at 10k). If the same deal is completed twice (e.g., due to retry), the second record is silently discarded.
+Each deal gets a random `recordingId` (UUID v4) created when bidding starts. Finalized recording IDs are kept in a per-process `Set` (capped at 10k). If the same deal is completed twice (e.g., due to retry), the second record is silently discarded and `duplicateRecords` metric is incremented.
 
 ## File rotation and retention
 
@@ -182,6 +218,10 @@ Each deal gets a stable `recordingId` (`${roomId}::deal-${dealIndex}::dealer-${s
 - Files also rotate when the UTC date changes (new day → new date subdirectory).
 - Date subdirectories older than `TRAINING_RECORDER_RETENTION_DAYS` are deleted automatically (checked hourly).
 - Total storage is capped at `TRAINING_RECORDER_MAX_TOTAL_GB` — oldest closed files are deleted first.
+
+## Graceful shutdown
+
+On server shutdown, the queue drains all queued records before closing. If shutdown times out, remaining records in queue are lost (acceptable: the game is shutting down).
 
 ## Validating recordings
 
@@ -200,19 +240,6 @@ cat path/to/file.jsonl | npm run validate:training-recordings
 ```
 
 Exit code 0 = all valid. Exit code 1 = errors found. Exit code 2 = file system error.
-
-## Copying recordings safely
-
-The files are append-only JSONL. To safely copy them without risking a partial line at the end of the active file, use:
-
-```sh
-# Copy all CLOSED (non-active) files — safe to copy anytime
-rsync -av --exclude='*-part-active.jsonl' training-recordings/ backup/
-
-# Or wait for graceful shutdown (which flushes the queue) before copying the active file
-```
-
-The active file name ends with the current date part; it is safe to read at any time (each line is atomic) but may be incomplete.
 
 ## Running recorder tests
 

@@ -136,7 +136,8 @@ function processLine(
     stats.contractTypeCounts[ct] = (stats.contractTypeCounts[ct] ?? 0) + 1
 
     if (verbose) {
-      console.log(`  [VALID]   ${filePath}:${lineNum}: ${dealRecord.recordingId} — ${dealRecord.cardActions.length} plays, contract=${ct}`)
+      const rk = (dealRecord as any).recordKind ?? 'full'
+      console.log(`  [VALID]   ${filePath}:${lineNum}: ${dealRecord.recordingId} — ${rk} — ${dealRecord.cardActions.length} plays, contract=${ct}`)
     }
   } else {
     stats.invalid++

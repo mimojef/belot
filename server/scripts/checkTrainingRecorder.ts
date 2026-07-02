@@ -10,7 +10,7 @@
  * [4]  computePlayerKey: bot (null profileId) → null
  * [5]  computePlayerKey: same profileId + same secret → same key
  * [6]  computePlayerKey: different secrets → different keys
- * [7]  Integrity: valid record → valid=true, no violations
+ * [7]  Integrity: valid full record → valid=true, no violations
  * [8]  Integrity: wrong initial card count → violation
  * [9]  Integrity: duplicate initial cards → violation
  * [10] Integrity: played card not in initial hands → violation
@@ -18,37 +18,53 @@
  * [12] Integrity: non-strictly-increasing bid sequence → violation
  * [13] Integrity: non-strictly-increasing card sequence → violation
  * [14] Integrity: payload too large → violation
- * [15] Collector: onDealStart с 32 карти → state се регистрира
- * [16] Collector: onDealStart с по-малко карти → игнорира
- * [17] Collector: дублиран onDealStart след finalize → игнорира
- * [18] Collector: onBidAction → записва action без throw
- * [19] Collector: onDealComplete → връща валиден record
- * [20] Collector: onDealComplete дублиран → null
- * [21] Collector: collectorDropDeal → изтрива active state
- * [22] ActorKind: human_manual
- * [23] ActorKind: human_timeout
- * [24] ActorKind: bot_original (playerKey=null, isBot=true)
- * [25] ActorKind: bot_takeover (isTakeover=true, playerKey не е null)
- * [26] Noop recorder: shutdown resolves без грешка
- * [27] Queue overflow: drop без throw
- * [28] Full deal integration: 32 cards + 6 bids + 32 plays → valid record
+ * [15] Integrity: bidding_only record → valid with 20 bidding cards, 0 card actions, 0 tricks
+ * [16] Integrity: bidding_only with card actions → violation
+ * [17] Collector: onBiddingStart с 20 карти → state се регистрира
+ * [18] Collector: onBiddingStart с грешен брой карти → игнорира
+ * [19] Collector: дублиран onBiddingStart → игнорира
+ * [20] Collector: onBidAction → actorKind=human_manual
+ * [21] Collector: onBidAction auto, first timeout → actorKind=human_timeout
+ * [22] Collector: onBidAction auto, already controlled → actorKind=bot_takeover
+ * [23] Collector: onBidAction auto, bot mode → actorKind=bot_original
+ * [24] Collector: onDealComplete → връща full record с recordKind='full'
+ * [25] Collector: onDealComplete дублиран → duplicate
+ * [26] Collector: onAllPass → bidding_only record с recordKind='bidding_only'
+ * [27] Collector: collectorDropDeal → изтрива active state
+ * [28] roomKey е HMAC, не raw room ID
+ * [29] Noop recorder: shutdown resolves без грешка
+ * [30] Queue overflow: drop без throw
+ * [31] Queue shutdown: дрейнира опашката преди resolve
+ * [32] Full deal integration: 20 bidding cards + 6 bids + 32 card plays → valid record
+ * [33] Full deal: last bid (deal-last-3) detected via prevPhase=bidding
+ * [34] Full deal: all-pass (next-round) writes bidding_only
+ * [35] Human bid: actorKind=human_manual via human_manual origin
+ * [36] Timeout bid: actorKind=human_timeout on first timeout
+ * [37] Bot takeover bid: actorKind=bot_takeover on subsequent auto action
+ * [38] bot_original: seat.mode=bot → actorKind=bot_original
  */
 
 import { validateTrainingRecorderConfig } from '../src/trainingRecorder/trainingRecorderConfig.js'
 import { computePlayerKey } from '../src/trainingRecorder/trainingRecorderHash.js'
 import { validateTrainingRecord } from '../src/trainingRecorder/trainingRecorderIntegrity.js'
 import {
-  collectorOnDealStart,
+  collectorOnBiddingStart,
+  collectorOnPlayingStart,
   collectorOnBidAction,
   collectorOnCardPlayed,
   collectorOnDealComplete,
+  collectorOnAllPass,
   collectorDropDeal,
   collectorGetActiveDealCount,
 } from '../src/trainingRecorder/trainingRecorderCollector.js'
 import { createTrainingRecorder } from '../src/trainingRecorder/trainingRecorder.js'
 import { createTrainingRecorderQueue } from '../src/trainingRecorder/trainingRecorderQueue.js'
 import { createMutableMetrics } from '../src/trainingRecorder/trainingRecorderMetrics.js'
-import type { TrainingDealRecord, TrainingTrickResult } from '../src/trainingRecorder/trainingRecorderTypes.js'
+import type {
+  TrainingDealRecord,
+  TrainingTrickResult,
+  TrainingActionOrigin,
+} from '../src/trainingRecorder/trainingRecorderTypes.js'
 import type {
   ServerAuthoritativeGameState,
   ServerCard,
@@ -123,6 +139,11 @@ function splitHands(deck: ServerCard[]): Record<Seat, ServerCard[]> {
   return { bottom: deck.slice(0, 8), right: deck.slice(8, 16), top: deck.slice(16, 24), left: deck.slice(24, 32) }
 }
 
+// 5 cards per seat (20 total) — bidding start snapshot
+function splitHandsBidding(deck: ServerCard[]): Record<Seat, ServerCard[]> {
+  return { bottom: deck.slice(0, 5), right: deck.slice(8, 13), top: deck.slice(16, 21), left: deck.slice(24, 29) }
+}
+
 function emptyScore() { return { teamA: 0, teamB: 0 } }
 
 function makePlayers(
@@ -161,8 +182,6 @@ function makeScoring(wb: NonNullable<ServerWinningBid>): ServerScoringState {
 }
 
 function makeTricks(hands: Record<Seat, ServerCard[]>): ServerCompletedTrick[] {
-  // Each trick has one card per seat. Seat 'bottom' plays cards from hands.bottom, etc.
-  // Card i (0-based) from each seat's hand is used in trick i.
   return Array.from({ length: 8 }, (_, ti) => ({
     trickIndex: ti,
     leaderSeat: 'bottom' as Seat,
@@ -170,7 +189,7 @@ function makeTricks(hands: Record<Seat, ServerCard[]>): ServerCompletedTrick[] {
     winningTeam: 'A' as Team,
     plays: (['bottom', 'right', 'top', 'left'] as Seat[]).map((s) => ({
       seat: s,
-      card: hands[s][ti]!, // each seat plays their i-th card in trick i
+      card: hands[s][ti]!,
     })),
   }))
 }
@@ -244,7 +263,6 @@ function makeRoom(
 
 function completedState(
   hands: Record<Seat, ServerCard[]>,
-  _deck: ServerCard[],
   wb: NonNullable<ServerWinningBid>,
   matchScore = { teamA: 80, teamB: 0 },
 ): ServerAuthoritativeGameState {
@@ -261,6 +279,7 @@ function completedState(
 function makeDealRecord(overrides: Partial<TrainingDealRecord> = {}): TrainingDealRecord {
   const deck = fullDeck()
   const hands = splitHands(deck)
+  const biddingHands = splitHandsBidding(deck)
   const now = new Date().toISOString()
 
   const cardActions = deck.map((c, i) => ({
@@ -307,10 +326,12 @@ function makeDealRecord(overrides: Partial<TrainingDealRecord> = {}): TrainingDe
     startedAt: now,
     completedAt: now,
     completed: true,
+    recordKind: 'full',
     dealerSeat: 'bottom',
     startingSeat: 'right',
     scoreBeforeDeal: { team0: 0, team1: 0 },
     scoreAfterDeal: { team0: 20, team1: 0 },
+    handsAtBiddingStart: biddingHands,
     initialHands: hands,
     seats: {
       bottom: { playerKey: 'abc', isBot: false, isTakeover: false },
@@ -320,7 +341,7 @@ function makeDealRecord(overrides: Partial<TrainingDealRecord> = {}): TrainingDe
     },
     biddingActions: [{
       sequence: 1, timestamp: now, seat: 'right', actorKind: 'human_manual',
-      visibleBeforeAction: { ownHand: hands.right, dealerSeat: 'bottom', ownSeat: 'right', scoreBeforeDeal: { team0: 0, team1: 0 }, previousBids: [], legalActions: [{ type: 'pass' }] },
+      visibleBeforeAction: { ownHand: biddingHands.right, dealerSeat: 'bottom', ownSeat: 'right', scoreBeforeDeal: { team0: 0, team1: 0 }, previousBids: [], legalActions: [{ type: 'pass' }] },
       chosenAction: { type: 'suit', suit: 'hearts' },
     }],
     finalContract: { bidderSeat: 'right', contract: 'suit', trumpSuit: 'hearts', doubled: false, redoubled: false },
@@ -338,6 +359,47 @@ function makeDealRecord(overrides: Partial<TrainingDealRecord> = {}): TrainingDe
   return { ...base, ...overrides }
 }
 
+function makeBiddingOnlyRecord(overrides: Partial<TrainingDealRecord> = {}): TrainingDealRecord {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const now = new Date().toISOString()
+
+  const base: TrainingDealRecord = {
+    schemaVersion: 1,
+    recordingId: 'test-room::bidding-only',
+    recordedAt: now,
+    roomKey: 'test-room',
+    dealIndex: 0,
+    startedAt: now,
+    completedAt: now,
+    completed: true,
+    recordKind: 'bidding_only',
+    dealerSeat: 'bottom',
+    startingSeat: 'right',
+    scoreBeforeDeal: { team0: 0, team1: 0 },
+    scoreAfterDeal: { team0: 0, team1: 0 },
+    handsAtBiddingStart: biddingHands,
+    initialHands: null,
+    seats: {
+      bottom: { playerKey: 'abc', isBot: false, isTakeover: false },
+      right: { playerKey: 'def', isBot: false, isTakeover: false },
+      top: { playerKey: 'ghi', isBot: false, isTakeover: false },
+      left: { playerKey: null, isBot: true, isTakeover: false },
+    },
+    biddingActions: [{
+      sequence: 1, timestamp: now, seat: 'right', actorKind: 'human_manual',
+      visibleBeforeAction: { ownHand: biddingHands.right, dealerSeat: 'bottom', ownSeat: 'right', scoreBeforeDeal: { team0: 0, team1: 0 }, previousBids: [], legalActions: [{ type: 'pass' }] },
+      chosenAction: { type: 'pass' },
+    }],
+    finalContract: null,
+    cardActions: [],
+    tricks: [],
+    dealResult: null,
+    integrity: { initialCardCount: 0, playedCardCount: 0, uniqueInitialCardCount: 0, uniquePlayedCardCount: 0, valid: true, violations: [] },
+  }
+  return { ...base, ...overrides }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 console.log('\ncheckTrainingRecorder\n')
@@ -349,10 +411,12 @@ checkSync('[1] Recorder disabled → noop, getMetrics enabled=false', () => {
   const m = rec.getMetrics()
   assertEqual(m.enabled, false, 'enabled')
   assertEqual(m.healthy, true, 'healthy')
-  rec.onDealStart({} as any, {} as any, 0)
-  rec.onBidAction('room', 0, {} as any, 'bottom', false)
-  rec.onCardPlayed('room', 0, {} as any, {} as any, 'bottom', 'clubs-A', false)
+  rec.onBiddingStart({} as any, {} as any, 0)
+  rec.onPlayingStart('room', 0, {} as any)
+  rec.onBidAction('room', 0, {} as any, {} as any, 'bottom', 'human_manual')
+  rec.onCardPlayed('room', 0, {} as any, {} as any, 'bottom', 'clubs-A', 'human_manual')
   rec.onDealComplete('room', 0, {} as any)
+  rec.onAllPass('room', 0, {} as any)
   rec.onDealAbandoned('room', 0)
 })
 
@@ -398,8 +462,8 @@ checkSync('[6] computePlayerKey: different secrets → different keys', () => {
   )
 })
 
-// [7-14] Integrity
-checkSync('[7] validateTrainingRecord: valid record → valid=true', () => {
+// [7-16] Integrity
+checkSync('[7] validateTrainingRecord: valid full record → valid=true', () => {
   const rec = makeDealRecord()
   const i = validateTrainingRecord(rec, JSON.stringify(rec))
   assert(i.valid, `expected valid, got: ${i.violations.join('; ')}`)
@@ -451,12 +515,13 @@ checkSync('[11] validateTrainingRecord: 9 tricks → violation', () => {
 })
 checkSync('[12] validateTrainingRecord: bid sequence not strictly increasing → violation', () => {
   const now = new Date().toISOString()
+  const bh = splitHandsBidding(fullDeck())
   const base = makeDealRecord()
   const rec = makeDealRecord({
     biddingActions: [
       base.biddingActions[0]!,
       { sequence: 1, timestamp: now, seat: 'top', actorKind: 'human_manual',
-        visibleBeforeAction: { ownHand: [], dealerSeat: 'bottom', ownSeat: 'top', scoreBeforeDeal: { team0: 0, team1: 0 }, previousBids: [], legalActions: [{ type: 'pass' }] },
+        visibleBeforeAction: { ownHand: bh.top, dealerSeat: 'bottom', ownSeat: 'top', scoreBeforeDeal: { team0: 0, team1: 0 }, previousBids: [], legalActions: [{ type: 'pass' }] },
         chosenAction: { type: 'pass' } },
     ],
   })
@@ -478,169 +543,263 @@ checkSync('[14] validateTrainingRecord: payload > 500KB → violation', () => {
   assert(!i.valid, 'expected invalid')
   assert(i.violations.some((v) => v.includes('too large')), `violations: ${i.violations.join('; ')}`)
 })
-
-// [15-21] Collector
-checkSync('[15] collectorOnDealStart: 32 cards → active deal registered', () => {
-  const deck = fullDeck(); const hands = splitHands(deck)
-  const roomId = `tr-${Date.now()}-15`
-  const before = collectorGetActiveDealCount()
-  collectorOnDealStart(makeRoom(roomId), baseState(hands), 990015, 'secret-key-1234567')
-  assertEqual(collectorGetActiveDealCount(), before + 1, 'count +1')
-  collectorDropDeal(roomId, 990015)
+checkSync('[15] Integrity: bidding_only record → valid with 20 bidding cards', () => {
+  const rec = makeBiddingOnlyRecord()
+  const i = validateTrainingRecord(rec, JSON.stringify(rec))
+  assert(i.valid, `expected valid bidding_only, got: ${i.violations.join('; ')}`)
+  assertEqual(i.playedCardCount, 0, 'playedCardCount must be 0')
 })
-checkSync('[16] collectorOnDealStart: 31 cards → ignored', () => {
-  const deck = fullDeck(); const roomId = `tr-${Date.now()}-16`
-  const hands: Record<Seat, ServerCard[]> = { bottom: deck.slice(0, 7), right: deck.slice(8, 16), top: deck.slice(16, 24), left: deck.slice(24, 32) }
+checkSync('[16] Integrity: bidding_only with card actions → violation', () => {
+  const deck = fullDeck()
+  const now = new Date().toISOString()
+  const rec = makeBiddingOnlyRecord({
+    cardActions: [{
+      sequence: 1, timestamp: now, trickIndex: 0, positionInTrick: 0,
+      seat: 'bottom', actorKind: 'human_manual',
+      visibleBeforeAction: { ownHand: [], legalCards: [], contract: { bidderSeat: 'bottom', contract: 'suit', trumpSuit: null, doubled: false, redoubled: false }, cardsPlayedBeforeAction: [], currentTrick: [], currentWinningSeat: null, currentWinningCard: null, dealerSeat: 'bottom', leaderSeat: 'bottom', scoreBeforeDeal: { team0: 0, team1: 0 } },
+      chosenCard: deck[0]!,
+    }],
+  })
+  const i = validateTrainingRecord(rec, JSON.stringify(rec))
+  assert(!i.valid, 'expected invalid')
+  assert(i.violations.some((v) => v.includes('bidding_only')), `violations: ${i.violations.join('; ')}`)
+})
+
+// [17-28] Collector
+checkSync('[17] collectorOnBiddingStart: 20 карти → active deal registered', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const roomId = `tr-${Date.now()}-17`
   const before = collectorGetActiveDealCount()
-  collectorOnDealStart(makeRoom(roomId), baseState(hands), 990016, 'secret-key-1234567')
+  collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding'), 990017, 'secret-key-1234567')
+  assertEqual(collectorGetActiveDealCount(), before + 1, 'count +1')
+  collectorDropDeal(roomId, 990017)
+})
+checkSync('[18] collectorOnBiddingStart: грешен брой карти → игнорира', () => {
+  const deck = fullDeck()
+  const hands: Record<Seat, ServerCard[]> = { bottom: deck.slice(0, 3), right: deck.slice(8, 13), top: deck.slice(16, 21), left: deck.slice(24, 29) }
+  const roomId = `tr-${Date.now()}-18`
+  const before = collectorGetActiveDealCount()
+  collectorOnBiddingStart(makeRoom(roomId), baseState(hands, 'bidding'), 990018, 'secret-key-1234567')
   assertEqual(collectorGetActiveDealCount(), before, 'count must not change')
 })
-checkSync('[17] collectorOnDealStart: duplicate after finalize → ignored', () => {
-  const deck = fullDeck(); const hands = splitHands(deck)
-  const roomId = `tr-${Date.now()}-17`; const dealIndex = 990017
+checkSync('[19] collectorOnBiddingStart: дублиран → игнорира', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const roomId = `tr-${Date.now()}-19`; const dealIndex = 990019
   const room = makeRoom(roomId)
-  const wb = makeWinningBid()
-  collectorOnDealStart(room, baseState(hands), dealIndex, 'secret-key-1234567')
-  const r1 = collectorOnDealComplete(roomId, dealIndex, completedState(hands, deck, wb))
-  assertNotNull(r1, 'first complete must succeed')
+  const state = baseState(biddingHands, 'bidding')
+  collectorOnBiddingStart(room, state, dealIndex, 'secret-key-1234567')
   const before = collectorGetActiveDealCount()
-  collectorOnDealStart(room, baseState(hands), dealIndex, 'secret-key-1234567')
+  collectorOnBiddingStart(room, state, dealIndex, 'secret-key-1234567')
   assertEqual(collectorGetActiveDealCount(), before, 'duplicate start must be ignored')
-})
-checkSync('[18] collectorOnBidAction: records action without throw', () => {
-  const deck = fullDeck(); const hands = splitHands(deck)
-  const roomId = `tr-${Date.now()}-18`; const dealIndex = 990018
-  collectorOnDealStart(makeRoom(roomId), baseState(hands), dealIndex, 'secret-key-1234567')
-  const stateWithBid = baseState(hands, 'bidding', {
-    bidding: { entries: [{ seat: 'right', action: { type: 'suit', suit: 'hearts' } }], currentSeat: 'top', winningBid: null, hasStarted: true, hasEnded: false, consecutivePasses: 0 },
-    players: makePlayers({ right: 'human' }, { right: false }),
-  })
-  collectorOnBidAction(roomId, dealIndex, stateWithBid, 'right', false)
   collectorDropDeal(roomId, dealIndex)
 })
-checkSync('[19] collectorOnDealComplete: returns complete record with correct structure', () => {
-  const deck = fullDeck(); const hands = splitHands(deck)
-  const roomId = `tr-${Date.now()}-19`; const dealIndex = 990019
-  const wb = makeWinningBid()
-  collectorOnDealStart(makeRoom(roomId), baseState(hands), dealIndex, 'secret-key-1234567')
-  const rec = collectorOnDealComplete(roomId, dealIndex, completedState(hands, deck, wb))
-  assertNotNull(rec, 'record must not be null')
-  assert(rec!.completed === true, 'completed must be true')
-  assertEqual(rec!.roomKey, roomId, 'roomKey')
-  assertEqual(rec!.schemaVersion, 1, 'schemaVersion')
-  assertNotNull(rec!.recordingId, 'recordingId')
-  assertNotNull(rec!.dealResult, 'dealResult')
-  assertNotNull(rec!.finalContract, 'finalContract')
-  assertEqual(rec!.tricks.length, 8, 'tricks count (from completedTricks)')
-  // integrity.initialCardCount should be 32; played cards=0 because we didn't simulate plays
-  assertEqual(rec!.integrity.initialCardCount, 32, 'initialCardCount')
-})
-checkSync('[20] collectorOnDealComplete: duplicate call → null', () => {
-  const deck = fullDeck(); const hands = splitHands(deck)
+
+// [20-23] actorKind
+checkSync('[20] actorKind: human_manual', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
   const roomId = `tr-${Date.now()}-20`; const dealIndex = 990020
-  const wb = makeWinningBid()
-  const room = makeRoom(roomId)
-  collectorOnDealStart(room, baseState(hands), dealIndex, 'secret-key-1234567')
-  const r1 = collectorOnDealComplete(roomId, dealIndex, completedState(hands, deck, wb))
-  assertNotNull(r1, 'first call must succeed')
-  // ds вече е изтрит след finalize → втора извикване без нов onDealStart → null
-  const r2 = collectorOnDealComplete(roomId, dealIndex, completedState(hands, deck, wb))
-  assertNull(r2, 'second call must return null')
+  const playersBefore = makePlayers({ right: 'human' }, { right: false })
+  const playersAfter = makePlayers({ right: 'human' }, { right: false })
+  collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding', { players: playersBefore }), dealIndex, 'secret-key-1234567')
+  const stateBefore = baseState(biddingHands, 'bidding', { players: playersBefore })
+  const stateAfter = baseState(biddingHands, 'bidding', {
+    players: playersAfter,
+    bidding: { entries: [{ seat: 'right', action: { type: 'pass' } }], currentSeat: 'top', winningBid: null, hasStarted: true, hasEnded: false, consecutivePasses: 0 },
+  })
+  collectorOnBidAction(roomId, dealIndex, stateBefore, stateAfter, 'right', 'human_manual')
+  const result = collectorOnDealComplete(roomId, dealIndex, completedState(splitHands(deck), makeWinningBid()))
+  assert(result.kind === 'enqueued', `expected enqueued, got ${result.kind}`)
+  const rec = result.kind === 'enqueued' ? result.record : null
+  assertNotNull(rec, 'record')
+  assertEqual(rec!.biddingActions[0]?.actorKind ?? null, 'human_manual', 'actorKind')
 })
-checkSync('[21] collectorDropDeal: removes active state', () => {
-  const deck = fullDeck(); const hands = splitHands(deck)
+
+checkSync('[21] actorKind: human_timeout (first auto action)', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
   const roomId = `tr-${Date.now()}-21`; const dealIndex = 990021
-  collectorOnDealStart(makeRoom(roomId), baseState(hands), dealIndex, 'secret-key-1234567')
+  const playersBefore = makePlayers({ bottom: 'human' }, { bottom: false })
+  // After timeout: controlledByBot becomes true
+  const playersAfter = makePlayers({ bottom: 'human' }, { bottom: true })
+  collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding', { players: playersBefore }), dealIndex, 'secret-key-1234567')
+  const stateBefore = baseState(biddingHands, 'bidding', { players: playersBefore })
+  const stateAfter = baseState(biddingHands, 'bidding', {
+    players: playersAfter,
+    bidding: { entries: [{ seat: 'bottom', action: { type: 'pass' } }], currentSeat: 'right', winningBid: null, hasStarted: true, hasEnded: false, consecutivePasses: 0 },
+  })
+  collectorOnBidAction(roomId, dealIndex, stateBefore, stateAfter, 'bottom', 'auto')
+  const result = collectorOnDealComplete(roomId, dealIndex, completedState(splitHands(deck), makeWinningBid()))
+  assert(result.kind === 'enqueued', `expected enqueued`)
+  const rec = result.kind === 'enqueued' ? result.record : null
+  assertEqual(rec!.biddingActions[0]?.actorKind ?? null, 'human_timeout', 'actorKind must be human_timeout')
+})
+
+checkSync('[22] actorKind: bot_takeover (subsequent auto, already controlled)', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const roomId = `tr-${Date.now()}-22`; const dealIndex = 990022
+  // Already controlled before this action
+  const playersBefore = makePlayers({ bottom: 'human' }, { bottom: true })
+  const playersAfter = makePlayers({ bottom: 'human' }, { bottom: true })
+  collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding', { players: playersBefore }), dealIndex, 'secret-key-1234567')
+  const stateBefore = baseState(biddingHands, 'bidding', { players: playersBefore })
+  const stateAfter = baseState(biddingHands, 'bidding', {
+    players: playersAfter,
+    bidding: { entries: [{ seat: 'bottom', action: { type: 'pass' } }], currentSeat: 'right', winningBid: null, hasStarted: true, hasEnded: false, consecutivePasses: 0 },
+  })
+  collectorOnBidAction(roomId, dealIndex, stateBefore, stateAfter, 'bottom', 'auto')
+  const result = collectorOnDealComplete(roomId, dealIndex, completedState(splitHands(deck), makeWinningBid()))
+  assert(result.kind === 'enqueued', `expected enqueued`)
+  const rec = result.kind === 'enqueued' ? result.record : null
+  assertEqual(rec!.biddingActions[0]?.actorKind ?? null, 'bot_takeover', 'actorKind must be bot_takeover')
+})
+
+checkSync('[23] actorKind: bot_original (mode=bot)', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const roomId = `tr-${Date.now()}-23`; const dealIndex = 990023
+  const playersBefore = makePlayers({ right: 'bot' }, { right: true })
+  const playersAfter = makePlayers({ right: 'bot' }, { right: true })
+  collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding', { players: playersBefore }), dealIndex, 'secret-key-1234567')
+  const stateBefore = baseState(biddingHands, 'bidding', { players: playersBefore })
+  const stateAfter = baseState(biddingHands, 'bidding', {
+    players: playersAfter,
+    bidding: { entries: [{ seat: 'right', action: { type: 'pass' } }], currentSeat: 'top', winningBid: null, hasStarted: true, hasEnded: false, consecutivePasses: 0 },
+  })
+  collectorOnBidAction(roomId, dealIndex, stateBefore, stateAfter, 'right', 'auto')
+  const result = collectorOnDealComplete(roomId, dealIndex, completedState(splitHands(deck), makeWinningBid()))
+  assert(result.kind === 'enqueued', `expected enqueued`)
+  const rec = result.kind === 'enqueued' ? result.record : null
+  assertEqual(rec!.biddingActions[0]?.actorKind ?? null, 'bot_original', 'actorKind must be bot_original')
+})
+
+checkSync('[24] collectorOnDealComplete: full record, recordKind=full', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const hands = splitHands(deck)
+  const roomId = `tr-${Date.now()}-24`; const dealIndex = 990024
+  const wb = makeWinningBid()
+  collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding'), dealIndex, 'secret-key-1234567')
+  collectorOnPlayingStart(roomId, dealIndex, baseState(hands, 'playing'))
+  const result = collectorOnDealComplete(roomId, dealIndex, completedState(hands, wb))
+  assert(result.kind === 'enqueued', `expected enqueued, got ${result.kind}`)
+  const rec = result.kind === 'enqueued' ? result.record : null
+  assertNotNull(rec, 'record')
+  assertEqual(rec!.recordKind, 'full', 'recordKind')
+  assertEqual(rec!.schemaVersion, 1, 'schemaVersion')
+  assertNotNull(rec!.initialHands, 'initialHands must be non-null for full record')
+  assertNotNull(rec!.handsAtBiddingStart, 'handsAtBiddingStart')
+})
+
+checkSync('[25] collectorOnDealComplete: дублиран → duplicate', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const roomId = `tr-${Date.now()}-25`; const dealIndex = 990025
+  const wb = makeWinningBid()
+  collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding'), dealIndex, 'secret-key-1234567')
+  const r1 = collectorOnDealComplete(roomId, dealIndex, completedState(splitHands(deck), wb))
+  assert(r1.kind === 'enqueued', 'first call must enqueue')
+  const r2 = collectorOnDealComplete(roomId, dealIndex, completedState(splitHands(deck), wb))
+  assert(r2.kind === 'no_active_deal', `second call must be no_active_deal, got ${r2.kind}`)
+})
+
+checkSync('[26] collectorOnAllPass: bidding_only record', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const roomId = `tr-${Date.now()}-26`; const dealIndex = 990026
+  collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding'), dealIndex, 'secret-key-1234567')
+  const nextRoundState = baseState(biddingHands, 'next-round')
+  const result = collectorOnAllPass(roomId, dealIndex, nextRoundState)
+  assert(result.kind === 'enqueued', `expected enqueued, got ${result.kind}`)
+  const rec = result.kind === 'enqueued' ? result.record : null
+  assertNotNull(rec, 'record')
+  assertEqual(rec!.recordKind, 'bidding_only', 'recordKind')
+  assertNull(rec!.initialHands, 'initialHands must be null for bidding_only')
+  assertEqual(rec!.cardActions.length, 0, 'cardActions must be empty')
+  assertEqual(rec!.tricks.length, 0, 'tricks must be empty')
+  assert(rec!.integrity.valid, `integrity must be valid: ${rec!.integrity.violations.join('; ')}`)
+})
+
+checkSync('[27] collectorDropDeal: removes active state', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const roomId = `tr-${Date.now()}-27`; const dealIndex = 990027
+  collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding'), dealIndex, 'secret-key-1234567')
   const before = collectorGetActiveDealCount()
   assert(before > 0, 'must have active deal before drop')
   collectorDropDeal(roomId, dealIndex)
   assertEqual(collectorGetActiveDealCount(), before - 1, 'count -1')
 })
 
-// [22-25] ActorKind
-checkSync('[22] actorKind: human_manual (mode=human, wasTimedOut=false)', () => {
-  const deck = fullDeck(); const hands = splitHands(deck)
-  const roomId = `tr-${Date.now()}-22`; const dealIndex = 990022
-  collectorOnDealStart(makeRoom(roomId), baseState(hands, 'bidding', { players: makePlayers({ right: 'human' }, { right: false }) }), dealIndex, 'secret-key-1234567')
-  collectorOnBidAction(roomId, dealIndex, baseState(hands, 'bidding', {
-    bidding: { entries: [{ seat: 'right', action: { type: 'pass' } }], currentSeat: 'top', winningBid: null, hasStarted: true, hasEnded: false, consecutivePasses: 0 },
-    players: makePlayers({ right: 'human' }, { right: false }),
-  }), 'right', false)
-  collectorDropDeal(roomId, dealIndex)
-})
-checkSync('[23] actorKind: human_timeout (mode=human, wasTimedOut=true)', () => {
-  const deck = fullDeck(); const hands = splitHands(deck)
-  const roomId = `tr-${Date.now()}-23`; const dealIndex = 990023
-  collectorOnDealStart(makeRoom(roomId), baseState(hands, 'bidding', { players: makePlayers({ bottom: 'human' }, { bottom: false }) }), dealIndex, 'secret-key-1234567')
-  collectorOnBidAction(roomId, dealIndex, baseState(hands, 'bidding', {
-    bidding: { entries: [{ seat: 'bottom', action: { type: 'pass' } }], currentSeat: 'right', winningBid: null, hasStarted: true, hasEnded: false, consecutivePasses: 0 },
-    players: makePlayers({ bottom: 'human' }, { bottom: false }),
-  }), 'bottom', true)
-  collectorDropDeal(roomId, dealIndex)
-})
-checkSync('[24] actorKind: bot_original → playerKey=null, isBot=true', () => {
-  const deck = fullDeck(); const hands = splitHands(deck)
-  const roomId = `tr-${Date.now()}-24`; const dealIndex = 990024
-  const wb = makeWinningBid()
-  collectorOnDealStart(
-    makeRoom(roomId, { bottom: { kind: 'bot', profileId: null } }),
-    baseState(hands, 'bidding', { players: makePlayers({ bottom: 'bot' }, { bottom: true }) }),
-    dealIndex, 'secret-key-1234567',
-  )
-  const rec = collectorOnDealComplete(roomId, dealIndex, completedState(hands, deck, wb))
-  assertNotNull(rec, 'record must not be null')
-  assertNull(rec!.seats.bottom.playerKey, 'bot playerKey must be null')
-  assert(rec!.seats.bottom.isBot === true, 'isBot must be true')
-})
-checkSync('[25] actorKind: bot_takeover → isTakeover=true, playerKey non-null', () => {
-  const deck = fullDeck(); const hands = splitHands(deck)
-  const roomId = `tr-${Date.now()}-25`; const dealIndex = 990025
-  const wb = makeWinningBid()
-  // human participant, но controlledByBot=true (takeover)
-  collectorOnDealStart(
-    makeRoom(roomId, { bottom: { kind: 'human', profileId: 'user-99' } }),
-    baseState(hands, 'bidding', { players: makePlayers({ bottom: 'human' }, { bottom: true }) }),
-    dealIndex, 'secret-key-1234567',
-  )
-  const rec = collectorOnDealComplete(roomId, dealIndex, completedState(hands, deck, wb))
-  assertNotNull(rec, 'record must not be null')
-  assert(rec!.seats.bottom.isTakeover === true, 'isTakeover must be true')
-  assert(rec!.seats.bottom.isBot === false, 'isBot must be false for takeover seat')
-  assertNotNull(rec!.seats.bottom.playerKey, 'playerKey must not be null for takeover human')
+checkSync('[28] roomKey е HMAC pseudonym, не raw room ID', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const roomId = `raw-room-id-${Date.now()}`
+  const dealIndex = 990028
+  const secret = 'my-hash-secret-32c'
+  collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding'), dealIndex, secret)
+  const result = collectorOnDealComplete(roomId, dealIndex, completedState(splitHands(deck), makeWinningBid()))
+  assert(result.kind === 'enqueued', 'must enqueue')
+  const rec = result.kind === 'enqueued' ? result.record : null
+  assert(rec!.roomKey !== roomId, `roomKey must NOT equal raw room ID, got: ${rec!.roomKey}`)
+  assertEqual(rec!.roomKey.length, 64, 'roomKey must be 64-char HMAC hex')
 })
 
-// [26] Noop shutdown
-checkAsync('[26] noop recorder: shutdown resolves without error', async () => {
+// [29] Noop shutdown
+checkAsync('[29] noop recorder: shutdown resolves без грешка', async () => {
   delete process.env['TRAINING_RECORDER_ENABLED']
   const rec = createTrainingRecorder('0')
   await rec.shutdown(100)
 })
 
-// [27] Queue overflow
-checkAsync('[27] queue overflow: drops records without throw', async () => {
+// [30] Queue overflow
+checkAsync('[30] queue overflow: drops records without throw', async () => {
   const metrics = createMutableMetrics()
   const slowWriter = {
     write: async (_p: string) => { await new Promise<void>((r) => setTimeout(r, 60_000)) },
+    getCurrentFilePath: () => null,
     shutdown: async () => {},
   }
   const queue = createTrainingRecorderQueue(3, slowWriter as any, metrics)
   for (let i = 0; i < 10; i++) queue.enqueue(`{"seq":${i}}`)
-  // 1 запис е в write (blocked), 2 са в queue → 7 dropped
   assert(metrics.droppedRecords > 0, `expected droppedRecords > 0, got ${metrics.droppedRecords}`)
   await queue.shutdown(20)
 })
 
-// [28] Full deal integration
-checkSync('[28] full deal integration: 32 cards + 6 bids + 32 plays → valid record', () => {
-  const deck = fullDeck(); const hands = splitHands(deck)
-  const roomId = `tr-${Date.now()}-28`; const dealIndex = 990028
+// [31] Queue shutdown flushes
+checkAsync('[31] queue shutdown: дрейнира опашката преди resolve', async () => {
+  const metrics = createMutableMetrics()
+  const written: string[] = []
+  const testWriter = {
+    write: async (p: string) => { written.push(p) },
+    getCurrentFilePath: () => null,
+    shutdown: async () => {},
+  }
+  const queue = createTrainingRecorderQueue(100, testWriter as any, metrics)
+  for (let i = 0; i < 5; i++) queue.enqueue(`{"seq":${i}}`)
+  await queue.shutdown(500)
+  assertEqual(written.length, 5, `expected 5 written records, got ${written.length}`)
+})
+
+// [32] Full deal integration
+checkSync('[32] full deal integration: 20 bidding cards + 6 bids + 32 card plays → valid record', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const fullHands = splitHands(deck)
+  const roomId = `tr-${Date.now()}-32`; const dealIndex = 990032
   const secret = 'secret-key-1234567'
   const wb: NonNullable<ServerWinningBid> = { seat: 'left', contract: 'suit', trumpSuit: 'hearts', doubled: false, redoubled: false }
 
-  // 1. Deal start
-  collectorOnDealStart(makeRoom(roomId), baseState(hands), dealIndex, secret)
+  // 1. Bidding start (deal-next-2 → bidding)
+  collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding'), dealIndex, secret)
 
-  // 2. Bidding actions
+  // 2. Playing start (deal-last-3 → playing)
+  collectorOnPlayingStart(roomId, dealIndex, baseState(fullHands, 'playing'))
+
+  // 3. Bidding actions
   const bids: Array<{ seat: Seat; action: ServerBidEntry['action'] }> = [
     { seat: 'right', action: { type: 'pass' } },
     { seat: 'top', action: { type: 'pass' } },
@@ -651,19 +810,24 @@ checkSync('[28] full deal integration: 32 cards + 6 bids + 32 plays → valid re
   ]
   let entries: typeof bids = []
   for (const bid of bids) {
+    const prevEntries = entries
     entries = [...entries, bid]
     const hasEnded = entries.length === bids.length
-    collectorOnBidAction(roomId, dealIndex, baseState(hands, 'bidding', {
+    const stateBefore = baseState(biddingHands, 'bidding', {
+      bidding: { entries: prevEntries as any, currentSeat: bid.seat, winningBid: null, hasStarted: true, hasEnded: false, consecutivePasses: 0 },
+    })
+    const stateAfter = baseState(biddingHands, 'bidding', {
       bidding: { entries: entries as any, currentSeat: bid.seat, winningBid: hasEnded ? wb : null, hasStarted: true, hasEnded, consecutivePasses: 0 },
-    }), bid.seat, false)
+    })
+    collectorOnBidAction(roomId, dealIndex, stateBefore, stateAfter, bid.seat, 'human_manual')
   }
 
-  // 3. Card playing — simulate 8 tricks × 4 plays
-  const tricks = makeTricks(hands)
-  let prevState: ServerAuthoritativeGameState = baseState(hands, 'playing', {
+  // 4. Card playing — simulate 8 tricks × 4 plays
+  const tricks = makeTricks(fullHands)
+  let prevState: ServerAuthoritativeGameState = baseState(fullHands, 'playing', {
     bidding: { entries: [], currentSeat: null, winningBid: wb, hasStarted: true, hasEnded: true, consecutivePasses: 0 },
     playing: makePlaying(null, []),
-    hands: { ...hands },
+    hands: { ...fullHands },
   })
 
   for (const trick of tricks) {
@@ -694,25 +858,30 @@ checkSync('[28] full deal integration: 32 cards + 6 bids + 32 plays → valid re
         },
       })
 
-      collectorOnCardPlayed(roomId, dealIndex, prevState, nextState, play.seat, play.card.id, false)
+      collectorOnCardPlayed(roomId, dealIndex, prevState, nextState, play.seat, play.card.id, 'human_manual')
       prevState = nextState
     }
   }
 
-  // 4. Deal complete
-  const rec = collectorOnDealComplete(roomId, dealIndex, completedState(hands, deck, wb, { teamA: 0, teamB: 80 }))
+  // 5. Deal complete
+  const result = collectorOnDealComplete(roomId, dealIndex, completedState(fullHands, wb, { teamA: 0, teamB: 80 }))
+  assert(result.kind === 'enqueued', `expected enqueued, got ${result.kind}`)
+  const rec = result.kind === 'enqueued' ? result.record : null
   assertNotNull(rec, 'record must not be null')
   assert(rec!.integrity.valid, `integrity violations: ${rec!.integrity.violations.join('; ')}`)
   assertEqual(rec!.biddingActions.length, bids.length, 'biddingActions count')
   assertEqual(rec!.cardActions.length, 32, 'cardActions count')
   assertEqual(rec!.tricks.length, 8, 'tricks count')
   assertEqual(rec!.finalContract?.trumpSuit ?? null, 'hearts', 'trumpSuit')
+  assertEqual(rec!.recordKind, 'full', 'recordKind')
+  assertNotNull(rec!.handsAtBiddingStart, 'handsAtBiddingStart')
+  assertNotNull(rec!.initialHands, 'initialHands')
 })
 
-// ─── Run async tests and print summary ───────────────────────────────────────
-
-// Import type needed for [28]
+// Import type needed for tests
 import type { ServerBidEntry } from '../src/game/serverGameTypes.js'
+
+// ─── Run async tests and print summary ───────────────────────────────────────
 
 async function main() {
   for (const fn of asyncQueue) await fn()

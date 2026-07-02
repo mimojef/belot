@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHmac } from 'node:crypto'
 import type { Seat } from '../core/serverTypes.js'
 import type {
   ServerAuthoritativeGameState,
@@ -10,6 +10,7 @@ import { getServerValidPlayCards } from '../game/getServerValidPlayCards.js'
 import { getValidServerBidActions } from '../game/getValidServerBidActions.js'
 import { getServerCounterMultiplier } from '../game/serverScoring.js'
 import type {
+  TrainingActionOrigin,
   TrainingActorKind,
   TrainingBiddingAction,
   TrainingCardAction,
@@ -53,32 +54,51 @@ function getSeatProfileInfo(
   }
 }
 
+// ─── Room key pseudonymization ────────────────────────────────────────────────
+
+function pseudonymizeRoomId(hashSecret: string, roomId: string): string {
+  return createHmac('sha256', hashSecret).update(roomId).digest('hex')
+}
+
 // ─── Actor kind determination ─────────────────────────────────────────────────
+//
+// actionOrigin = 'human_manual': voluntarily submitted by a live human.
+// actionOrigin = 'auto': submitted by timer expiry or bot tick.
+//   - If stateBefore.players[seat].controlledByBot is false but stateAfter has it true
+//     → first timeout action for this human seat → human_timeout
+//   - If stateBefore.players[seat].controlledByBot is already true AND seat mode is human
+//     → subsequent bot takeover action → bot_takeover
+//   - If seat.mode === 'bot' (original bot, never human)
+//     → bot_original
 
 function determineActorKind(
   seat: Seat,
-  state: ServerAuthoritativeGameState,
-  wasTimedOut: boolean,
+  stateBefore: ServerAuthoritativeGameState,
+  stateAfter: ServerAuthoritativeGameState,
+  actionOrigin: TrainingActionOrigin,
 ): TrainingActorKind {
-  const player = state.players[seat]
+  const playerBefore = stateBefore.players[seat]
+  const playerAfter = stateAfter.players[seat]
 
-  if (!player) return 'bot_original'
+  // Original bot seat (participant.kind === 'bot', mode === 'bot')
+  if (!playerBefore || playerBefore.mode === 'bot') return 'bot_original'
 
-  if (player.mode === 'bot' && !player.controlledByBot) {
-    return 'bot_original'
+  // Human submitted voluntarily
+  if (actionOrigin === 'human_manual') return 'human_manual'
+
+  // Auto path: timer expiry or bot step
+  // First takeover: was not controlled before, now is
+  if (!playerBefore.controlledByBot && (playerAfter?.controlledByBot ?? false)) {
+    return 'human_timeout'
   }
 
-  if (player.controlledByBot && player.mode !== 'bot') {
-    // Human seat now controlled by bot
-    return wasTimedOut ? 'bot_takeover' : 'bot_takeover'
+  // Subsequent auto actions for already-taken-over seat
+  if (playerBefore.controlledByBot) {
+    return 'bot_takeover'
   }
 
-  if (player.mode === 'bot' && player.controlledByBot) {
-    return 'bot_original'
-  }
-
-  // Human player
-  return wasTimedOut ? 'human_timeout' : 'human_manual'
+  // Fallback: human timed out but controlledByBot wasn't set (shouldn't happen)
+  return 'human_timeout'
 }
 
 // ─── Bid action conversion ────────────────────────────────────────────────────
@@ -168,11 +188,15 @@ type RoomLike = {
 
 type DealCollectorState = {
   recordingId: string
+  // Pseudonymized room key (HMAC of room.id) — never raw room ID
   roomKey: string
   dealIndex: number
   startedAt: string
   scoreBeforeDeal: { team0: number; team1: number }
-  initialHands: Record<Seat, ServerCard[]>
+  // 5 cards per seat at deal-next-2 → bidding
+  handsAtBiddingStart: Record<Seat, ServerCard[]>
+  // 8 cards per seat at deal-last-3 → playing (null until that transition fires)
+  initialPlayingHands: Record<Seat, ServerCard[]> | null
   seats: Record<Seat, TrainingSeatMetadata>
   biddingActions: TrainingBiddingAction[]
   cardActions: TrainingCardAction[]
@@ -185,46 +209,45 @@ type DealCollectorState = {
 
 // ─── Global per-room collector registry ──────────────────────────────────────
 
+// Key: `${roomId}::${dealIndex}`
 const activeDealStates = new Map<string, DealCollectorState>()
 const finalizedRecordingIds = new Set<string>()
 
-// Generate a stable recordingId from room + deal context
-function makeRecordingId(roomId: string, dealIndex: number, dealerSeat: Seat | null): string {
-  return `${roomId}::deal-${dealIndex}::dealer-${dealerSeat ?? 'unknown'}`
-}
-
 // ─── Public collector API ─────────────────────────────────────────────────────
 
-export function collectorOnDealStart(
+// Called at deal-next-2 → bidding. Captures 5 cards per seat.
+export function collectorOnBiddingStart(
   room: RoomLike,
   state: ServerAuthoritativeGameState,
   dealIndex: number,
   hashSecret: string,
 ): void {
-  const roomKey = room.id
-  const key = `${roomKey}::${dealIndex}`
+  const key = `${room.id}::${dealIndex}`
 
-  // Check all 32 initial cards are dealt
-  const allCards = (
-    Object.values(state.hands) as ServerCard[][]
-  ).flat()
-  if (allCards.length !== 32) return
+  // Each seat must have exactly 5 cards at this point
+  const seats: Seat[] = ['bottom', 'right', 'top', 'left']
+  const totalCards = seats.reduce((n, s) => n + (state.hands[s]?.length ?? 0), 0)
+  if (totalCards !== 20) return
 
-  const recordingId = makeRecordingId(roomKey, dealIndex, state.round.dealerSeat)
+  const roomKey = pseudonymizeRoomId(hashSecret, room.id)
+  const recordingId = randomUUID()
 
-  if (finalizedRecordingIds.has(recordingId)) return
+  if (activeDealStates.has(key)) {
+    // Already started — ignore (shouldn't happen in normal flow)
+    return
+  }
 
-  const seats: Record<Seat, TrainingSeatMetadata> = {} as Record<Seat, TrainingSeatMetadata>
-  for (const seat of ['bottom', 'right', 'top', 'left'] as Seat[]) {
+  const seatMeta: Record<Seat, TrainingSeatMetadata> = {} as Record<Seat, TrainingSeatMetadata>
+  for (const seat of seats) {
     const info = getSeatProfileInfo(room, seat, state)
-    seats[seat] = {
+    seatMeta[seat] = {
       playerKey: info.isBot ? null : computePlayerKey(hashSecret, info.profileId),
       isBot: info.isBot,
       isTakeover: info.isTakeover,
     }
   }
 
-  const initialHands: Record<Seat, ServerCard[]> = {
+  const handsAtBiddingStart: Record<Seat, ServerCard[]> = {
     bottom: [...state.hands.bottom],
     right: [...state.hands.right],
     top: [...state.hands.top],
@@ -240,8 +263,9 @@ export function collectorOnDealStart(
       team0: state.score.match.teamA,
       team1: state.score.match.teamB,
     },
-    initialHands,
-    seats,
+    handsAtBiddingStart,
+    initialPlayingHands: null,
+    seats: seatMeta,
     biddingActions: [],
     cardActions: [],
     cardSequence: 0,
@@ -252,26 +276,60 @@ export function collectorOnDealStart(
   })
 }
 
-export function collectorOnBidAction(
+// Called at deal-last-3 → playing. Captures 8 cards per seat.
+export function collectorOnPlayingStart(
   roomId: string,
   dealIndex: number,
   state: ServerAuthoritativeGameState,
+): void {
+  const key = `${roomId}::${dealIndex}`
+  const ds = activeDealStates.get(key)
+  if (!ds || ds.finalized) return
+
+  const seats: Seat[] = ['bottom', 'right', 'top', 'left']
+  const totalCards = seats.reduce((n, s) => n + (state.hands[s]?.length ?? 0), 0)
+  if (totalCards !== 32) return
+
+  ds.initialPlayingHands = {
+    bottom: [...state.hands.bottom],
+    right: [...state.hands.right],
+    top: [...state.hands.top],
+    left: [...state.hands.left],
+  }
+}
+
+export function collectorOnBidAction(
+  roomId: string,
+  dealIndex: number,
+  stateBefore: ServerAuthoritativeGameState,
+  stateAfter: ServerAuthoritativeGameState,
   seat: Seat,
-  wasTimedOut: boolean,
+  actionOrigin: TrainingActionOrigin,
 ): void {
   const key = `${roomId}::${dealIndex}`
   const ds = activeDealStates.get(key)
   if (!ds || ds.finalized) return
 
   // The action was just applied — the LAST entry in bidding is the one we want
-  const lastEntry = state.bidding.entries[state.bidding.entries.length - 1]
+  const lastEntry = stateAfter.bidding.entries[stateAfter.bidding.entries.length - 1]
   if (!lastEntry || lastEntry.seat !== seat) return
 
-  const previousBids = state.bidding.entries
+  // Build stateBefore-equivalent for legalActions: stateAfter without the last entry
+  const stateBeforeForLegal: ServerAuthoritativeGameState = {
+    ...stateAfter,
+    bidding: {
+      ...stateAfter.bidding,
+      entries: stateAfter.bidding.entries.slice(0, -1),
+      hasEnded: false,
+      winningBid: stateBefore.bidding.winningBid,
+    },
+  }
+
+  const previousBids = stateAfter.bidding.entries
     .slice(0, -1)
     .map((e) => toBidCompact(e.action))
 
-  const actorKind = determineActorKind(seat, state, wasTimedOut)
+  const actorKind = determineActorKind(seat, stateBefore, stateAfter, actionOrigin)
 
   const action: TrainingBiddingAction = {
     sequence: ++ds.bidSequence,
@@ -279,15 +337,12 @@ export function collectorOnBidAction(
     seat,
     actorKind,
     visibleBeforeAction: {
-      ownHand: [...ds.initialHands[seat]],
-      dealerSeat: state.round.dealerSeat ?? 'bottom',
+      ownHand: [...ds.handsAtBiddingStart[seat]],
+      dealerSeat: stateAfter.round.dealerSeat ?? 'bottom',
       ownSeat: seat,
       scoreBeforeDeal: ds.scoreBeforeDeal,
       previousBids,
-      legalActions: getLegalBidActions(seat, {
-        ...state,
-        bidding: { ...state.bidding, entries: state.bidding.entries.slice(0, -1) },
-      }),
+      legalActions: getLegalBidActions(seat, stateBeforeForLegal),
     },
     chosenAction: toBidCompact(lastEntry.action),
   }
@@ -295,8 +350,8 @@ export function collectorOnBidAction(
   ds.biddingActions.push(action)
 
   // Capture final contract after bidding ends
-  if (state.bidding.hasEnded && state.bidding.winningBid !== null) {
-    const wb = state.bidding.winningBid
+  if (stateAfter.bidding.hasEnded && stateAfter.bidding.winningBid !== null) {
+    const wb = stateAfter.bidding.winningBid
     ds.finalContract = {
       bidderSeat: wb.seat,
       contract: wb.contract,
@@ -314,7 +369,7 @@ export function collectorOnCardPlayed(
   stateAfter: ServerAuthoritativeGameState,
   seat: Seat,
   cardId: string,
-  wasTimedOut: boolean,
+  actionOrigin: TrainingActionOrigin,
 ): void {
   const key = `${roomId}::${dealIndex}`
   const ds = activeDealStates.get(key)
@@ -323,7 +378,9 @@ export function collectorOnCardPlayed(
   const playing = stateBefore.playing
   if (!playing) return
 
-  const card = ds.initialHands[seat].find((c) => c.id === cardId)
+  // Find the card in the full 8-card hand (initialPlayingHands)
+  const fullHand = ds.initialPlayingHands?.[seat] ?? ds.handsAtBiddingStart[seat]
+  const card = fullHand.find((c) => c.id === cardId)
   if (!card) return
 
   const legalCards = getServerValidPlayCards(stateBefore, seat)
@@ -348,7 +405,7 @@ export function collectorOnCardPlayed(
     redoubled: stateBefore.bidding.winningBid?.redoubled ?? false,
   }
 
-  const actorKind = determineActorKind(seat, stateBefore, wasTimedOut)
+  const actorKind = determineActorKind(seat, stateBefore, stateAfter, actionOrigin)
   const trickIndex = playing.currentTrick.trickIndex
   const positionInTrick = playing.currentTrick.plays.length
 
@@ -376,7 +433,6 @@ export function collectorOnCardPlayed(
 
   ds.cardActions.push(action)
 
-  // Record this card in the played sequence
   ds.playedCardsBefore.push({
     sequence: ds.cardSequence,
     trickIndex,
@@ -385,7 +441,6 @@ export function collectorOnCardPlayed(
     card: { ...card },
   })
 
-  // Update finalContract if it's now set
   if (ds.finalContract === null && stateBefore.bidding.winningBid !== null) {
     const wb = stateBefore.bidding.winningBid
     ds.finalContract = {
@@ -398,29 +453,34 @@ export function collectorOnCardPlayed(
   }
 }
 
+export type CollectorDealCompleteResult =
+  | { kind: 'enqueued'; record: TrainingDealRecord }
+  | { kind: 'duplicate' }
+  | { kind: 'no_active_deal' }
+  | { kind: 'not_ready' }
+  | { kind: 'invalid' }
+
 export function collectorOnDealComplete(
   roomId: string,
   dealIndex: number,
   state: ServerAuthoritativeGameState,
-): TrainingDealRecord | null {
+): CollectorDealCompleteResult {
   const key = `${roomId}::${dealIndex}`
   const ds = activeDealStates.get(key)
-  if (!ds || ds.finalized) return null
+  if (!ds || ds.finalized) return { kind: 'no_active_deal' }
 
-  // Duplicate guard
   if (finalizedRecordingIds.has(ds.recordingId)) {
     ds.finalized = true
     activeDealStates.delete(key)
-    return null
+    return { kind: 'duplicate' }
   }
 
   const scoring = state.scoring
   const playing = state.playing
   const winningBid = state.bidding.winningBid
 
-  if (!scoring || !playing || !winningBid) return null
+  if (!scoring || !playing || !winningBid) return { kind: 'not_ready' }
 
-  // Build tricks from completedTricks
   const tricks: TrainingTrickResult[] = playing.completedTricks.map((trick) => {
     const winnerPlay = getServerTrickWinner(trick.plays, winningBid)
     const winnerSeat: Seat = winnerPlay?.seat ?? trick.winnerSeat
@@ -448,8 +508,11 @@ export function collectorOnDealComplete(
     redoubled: winningBid.redoubled,
   }
 
-  const isMade = scoring.outcomeShortLabel === 'Изкарана'
-  const isTie = scoring.outcomeShortLabel === 'Равна'
+  // Canonical outcome: 'Вътре' and 'Равна' are the two non-made outcomes
+  const outcomeShortLabel = scoring.outcomeShortLabel
+  const isTie = outcomeShortLabel === 'Равна'
+  const isInside = outcomeShortLabel === 'Вътре'
+  const isMade = !isTie && !isInside
   const isCapot = scoring.isCapotRound
 
   const teamA = state.score.match.teamA
@@ -482,16 +545,25 @@ export function collectorOnDealComplete(
     startedAt: ds.startedAt,
     completedAt,
     completed: true,
+    recordKind: 'full',
     dealerSeat: state.round.dealerSeat ?? 'bottom',
     startingSeat: state.round.firstDealSeat ?? 'bottom',
     scoreBeforeDeal: ds.scoreBeforeDeal,
     scoreAfterDeal: { team0: teamA, team1: teamB },
-    initialHands: {
-      bottom: ds.initialHands.bottom.map((c) => ({ ...c })),
-      right: ds.initialHands.right.map((c) => ({ ...c })),
-      top: ds.initialHands.top.map((c) => ({ ...c })),
-      left: ds.initialHands.left.map((c) => ({ ...c })),
+    handsAtBiddingStart: {
+      bottom: ds.handsAtBiddingStart.bottom.map((c) => ({ ...c })),
+      right: ds.handsAtBiddingStart.right.map((c) => ({ ...c })),
+      top: ds.handsAtBiddingStart.top.map((c) => ({ ...c })),
+      left: ds.handsAtBiddingStart.left.map((c) => ({ ...c })),
     },
+    initialHands: ds.initialPlayingHands
+      ? {
+          bottom: ds.initialPlayingHands.bottom.map((c) => ({ ...c })),
+          right: ds.initialPlayingHands.right.map((c) => ({ ...c })),
+          top: ds.initialPlayingHands.top.map((c) => ({ ...c })),
+          left: ds.initialPlayingHands.left.map((c) => ({ ...c })),
+        }
+      : null,
     seats: { ...ds.seats },
     biddingActions: [...ds.biddingActions],
     finalContract,
@@ -508,23 +580,94 @@ export function collectorOnDealComplete(
     },
   }
 
-  // Run integrity check and attach
   const serialized = JSON.stringify(record)
   const integrity = validateTrainingRecord(record, serialized)
   record.integrity = integrity
 
-  // Mark as finalized
   ds.finalized = true
   finalizedRecordingIds.add(ds.recordingId)
   activeDealStates.delete(key)
 
-  // Prevent the finalizedRecordingIds set from growing forever (keep last 10k)
   if (finalizedRecordingIds.size > 10_000) {
     const toDelete = [...finalizedRecordingIds].slice(0, 1000)
     for (const id of toDelete) finalizedRecordingIds.delete(id)
   }
 
-  return record
+  return { kind: 'enqueued', record }
+}
+
+// Called on bidding → next-round (all pass). Writes a bidding_only record.
+export function collectorOnAllPass(
+  roomId: string,
+  dealIndex: number,
+  state: ServerAuthoritativeGameState,
+): CollectorDealCompleteResult {
+  const key = `${roomId}::${dealIndex}`
+  const ds = activeDealStates.get(key)
+  if (!ds || ds.finalized) return { kind: 'no_active_deal' }
+
+  if (finalizedRecordingIds.has(ds.recordingId)) {
+    ds.finalized = true
+    activeDealStates.delete(key)
+    return { kind: 'duplicate' }
+  }
+
+  const completedAt = new Date().toISOString()
+
+  const teamA = state.score.match.teamA
+  const teamB = state.score.match.teamB
+
+  const record: TrainingDealRecord = {
+    schemaVersion: 1,
+    recordingId: ds.recordingId,
+    recordedAt: completedAt,
+    roomKey: ds.roomKey,
+    dealIndex: ds.dealIndex,
+    startedAt: ds.startedAt,
+    completedAt,
+    completed: true,
+    recordKind: 'bidding_only',
+    dealerSeat: state.round.dealerSeat ?? 'bottom',
+    startingSeat: state.round.firstDealSeat ?? 'bottom',
+    scoreBeforeDeal: ds.scoreBeforeDeal,
+    scoreAfterDeal: { team0: teamA, team1: teamB },
+    handsAtBiddingStart: {
+      bottom: ds.handsAtBiddingStart.bottom.map((c) => ({ ...c })),
+      right: ds.handsAtBiddingStart.right.map((c) => ({ ...c })),
+      top: ds.handsAtBiddingStart.top.map((c) => ({ ...c })),
+      left: ds.handsAtBiddingStart.left.map((c) => ({ ...c })),
+    },
+    initialHands: null,
+    seats: { ...ds.seats },
+    biddingActions: [...ds.biddingActions],
+    finalContract: null,
+    cardActions: [],
+    tricks: [],
+    dealResult: null,
+    integrity: {
+      initialCardCount: 0,
+      playedCardCount: 0,
+      uniqueInitialCardCount: 0,
+      uniquePlayedCardCount: 0,
+      valid: false,
+      violations: [],
+    },
+  }
+
+  const serialized = JSON.stringify(record)
+  const integrity = validateTrainingRecord(record, serialized)
+  record.integrity = integrity
+
+  ds.finalized = true
+  finalizedRecordingIds.add(ds.recordingId)
+  activeDealStates.delete(key)
+
+  if (finalizedRecordingIds.size > 10_000) {
+    const toDelete = [...finalizedRecordingIds].slice(0, 1000)
+    for (const id of toDelete) finalizedRecordingIds.delete(id)
+  }
+
+  return { kind: 'enqueued', record }
 }
 
 export function collectorDropDeal(roomId: string, dealIndex: number): void {

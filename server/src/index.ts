@@ -157,7 +157,11 @@ import {
 import { resumeCoinPurchaseCheckout } from './shop/resumeCoinPurchaseCheckout.js'
 import { hideCoinPurchase } from './shop/hideCoinPurchase.js'
 import { createTrainingRecorder } from './trainingRecorder/trainingRecorder.js'
-import { handleTrainingRecorderOnApplied } from './trainingRecorder/trainingRecorderHooks.js'
+import {
+  handleTrainingRecorderOnApplied,
+  handleTrainingRecorderHumanBid,
+  handleTrainingRecorderHumanCard,
+} from './trainingRecorder/trainingRecorderHooks.js'
 import type { TrainingRecorderMetrics } from './trainingRecorder/trainingRecorderMetrics.js'
 
 const trainingRecorder = createTrainingRecorder('0')
@@ -6158,6 +6162,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        handleTrainingRecorderHumanBid(trainingRecorder, room, result.room)
         serverState = commitServerRoomWithSnapshot(result.room)
         activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
@@ -6273,6 +6278,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        handleTrainingRecorderHumanCard(trainingRecorder, room, result.room)
         serverState = commitServerRoomWithSnapshot(result.room)
         activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
