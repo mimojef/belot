@@ -102,7 +102,20 @@ export function pickServerBotBidAction(
   const validActions = getValidServerBidActions(seat, state.bidding.winningBid)
   const hand = state.hands[seat] ?? []
 
-  const bestContract = getBestBotContractCandidate(state, seat, hand, validActions)
+  const botTeam = getTeamBySeat(seat)
+  const botTeamScore = state.score.match[botTeam === 'A' ? 'teamA' : 'teamB']
+  const opponentScore = state.score.match[botTeam === 'A' ? 'teamB' : 'teamA']
+  const strictActive = opponentScore > 140 && opponentScore - botTeamScore > 12
+
+  if (strictActive) {
+    const opponentTeamDeals = getTeamBySeat(state.round.dealerSeat!) !== botTeam
+    if (!opponentTeamDeals) {
+      return { type: 'pass' }
+    }
+  }
+
+  const minimumSecureTricks = strictActive ? 4 : null
+  const bestContract = getBestBotContractCandidate(state, seat, hand, validActions, minimumSecureTricks)
 
   if (!bestContract) {
     return { type: 'pass' }
@@ -120,6 +133,7 @@ function getBestBotContractCandidate(
   seat: Seat,
   hand: ServerCard[],
   validActions: ReturnType<typeof getValidServerBidActions>,
+  minimumSecureTricks: number | null,
 ): BotContractCandidate | null {
   const candidates: BotContractCandidate[] = []
 
@@ -132,6 +146,10 @@ function getBestBotContractCandidate(
       continue
     }
 
+    if (minimumSecureTricks !== null && !passesStrictSuitCheck(hand, suit)) {
+      continue
+    }
+
     candidates.push({
       action: { type: 'suit', suit },
       score:
@@ -141,21 +159,25 @@ function getBestBotContractCandidate(
   }
 
   if (validActions.noTrumps && getNoTrumpsGuaranteedPoints(hand) >= 32) {
-    candidates.push({
-      action: { type: 'no-trumps' },
-      score:
-        getNoTrumpsBidStrength(hand) +
-        getAnnouncementPressureBonus({ type: 'no-trumps' }, hand),
-    })
+    if (minimumSecureTricks === null || countNoTrumpsSecureTricks(hand) >= minimumSecureTricks) {
+      candidates.push({
+        action: { type: 'no-trumps' },
+        score:
+          getNoTrumpsBidStrength(hand) +
+          getAnnouncementPressureBonus({ type: 'no-trumps' }, hand),
+      })
+    }
   }
 
   if (validActions.allTrumps && getAllTrumpsGuaranteedPoints(hand) >= 54) {
-    candidates.push({
-      action: { type: 'all-trumps' },
-      score:
-        getAllTrumpsBidStrength(state, seat, hand) +
-        getAnnouncementPressureBonus({ type: 'all-trumps' }, hand),
-    })
+    if (minimumSecureTricks === null || countAllTrumpsSecureTricks(hand) >= minimumSecureTricks) {
+      candidates.push({
+        action: { type: 'all-trumps' },
+        score:
+          getAllTrumpsBidStrength(state, seat, hand) +
+          getAnnouncementPressureBonus({ type: 'all-trumps' }, hand),
+      })
+    }
   }
 
   if (candidates.length === 0) {
@@ -164,6 +186,48 @@ function getBestBotContractCandidate(
 
   candidates.sort((left, right) => right.score - left.score)
   return candidates[0] ?? null
+}
+
+const ALL_TRUMPS_TOP_CHAIN_ORDER = ['J', '9', 'A', '10', 'K', 'Q', '8', '7'] as const
+const NO_TRUMPS_TOP_CHAIN_ORDER = ['A', '10', 'K', 'Q', 'J', '9', '8', '7'] as const
+
+function countTopChainTricksForSuit(
+  hand: ServerCard[],
+  suit: ServerSuit,
+  order: readonly string[],
+): number {
+  const ranks = new Set(
+    hand.filter((c) => c.suit === suit).map((c) => String(c.rank)),
+  )
+  let tricks = 0
+  for (const rank of order) {
+    if (ranks.has(rank)) tricks++
+    else break
+  }
+  return tricks
+}
+
+function countAllTrumpsSecureTricks(hand: ServerCard[]): number {
+  let total = 0
+  for (const suit of SERVER_SUIT_OPTIONS) {
+    total += countTopChainTricksForSuit(hand, suit, ALL_TRUMPS_TOP_CHAIN_ORDER)
+  }
+  return total
+}
+
+function countNoTrumpsSecureTricks(hand: ServerCard[]): number {
+  let total = 0
+  for (const suit of SERVER_SUIT_OPTIONS) {
+    total += countTopChainTricksForSuit(hand, suit, NO_TRUMPS_TOP_CHAIN_ORDER)
+  }
+  return total
+}
+
+function passesStrictSuitCheck(hand: ServerCard[], suit: ServerSuit): boolean {
+  const suitCards = hand.filter((c) => c.suit === suit)
+  if (suitCards.length < 4) return false
+  const ranks = new Set(suitCards.map((c) => String(c.rank)))
+  return ranks.has('J') && ranks.has('9') && ranks.has('A')
 }
 
 function getMinimumBotBidScore(action: ServerBidAction, hand: ServerCard[]): number {
