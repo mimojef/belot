@@ -1165,6 +1165,7 @@ async function tickRoomGameRuntimes(): Promise<void> {
               missionStore.recordMatchCompletion(room)
             },
           )
+          const hadAwardedPrizeBeforePayout = room.awardedPrizePerSeat !== undefined
           runMatchCompletionSideEffect(
             'payout-match-winners',
             room.id,
@@ -1180,6 +1181,17 @@ async function tickRoomGameRuntimes(): Promise<void> {
               }
             },
           )
+          // The first broadcast happened before payout completed (awardedPrizePerSeat was
+          // undefined). If payout has now populated the field, send one targeted rebroadcast
+          // so clients receive the correct awardedPrizeAmount. The idempotency guard on
+          // shouldRunMatchCompletionSideEffects ensures this path runs only once per match.
+          if (
+            !hadAwardedPrizeBeforePayout &&
+            room.awardedPrizePerSeat !== undefined &&
+            Object.keys(room.awardedPrizePerSeat).length > 0
+          ) {
+            broadcastRoomSnapshots(room, socketRegistry)
+          }
           runMatchCompletionSideEffect(
             'top-up-depleted-bot-wallets',
             room.id,

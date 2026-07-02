@@ -2949,7 +2949,8 @@ export function createActiveRoomFlowController(
         },
       })
 
-      if (!matchEndedPrizeAnimated && matchEndedPrizeAnimatedTimerId === null) {
+      const currentPrizeAmount = activeRoomState.game?.matchEnded?.awardedPrizeAmount ?? null
+      if (!matchEndedPrizeAnimated && matchEndedPrizeAnimatedTimerId === null && currentPrizeAmount !== null && currentPrizeAmount > 0) {
         matchEndedPrizeAnimatedTimerId = window.setTimeout(() => {
           matchEndedPrizeAnimated = true
           matchEndedPrizeAnimatedTimerId = null
