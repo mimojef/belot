@@ -1,5 +1,5 @@
 import type { Seat } from '../core/serverTypes.js'
-import type { ServerAuthoritativeGameState } from '../game/serverGameTypes.js'
+import type { ServerAuthoritativeGameState, ServerBidEntry } from '../game/serverGameTypes.js'
 import {
   loadTrainingRecorderConfig,
   validateTrainingRecorderConfig,
@@ -23,20 +23,28 @@ import {
   collectorDropDeal,
   collectorGetActiveDealCount,
 } from './trainingRecorderCollector.js'
-import type { TrainingActionOrigin } from './trainingRecorderTypes.js'
+import type { TrainingActionOrigin, TrainingCompactPlayedCard } from './trainingRecorderTypes.js'
 
-// ─── Rate-limited integrity warning ──────────────────────────────────────────
+// ─── Rate-limited warnings ────────────────────────────────────────────────────
 
-const INTEGRITY_WARN_RATE_MS = 60_000
+const WARN_RATE_LIMIT_MS = 60_000
 let lastIntegrityWarnAt = 0
+let lastTransitionWarnAt = 0
 
 function warnIntegrity(violations: string[]): void {
   const now = Date.now()
-  if (now - lastIntegrityWarnAt < INTEGRITY_WARN_RATE_MS) return
+  if (now - lastIntegrityWarnAt < WARN_RATE_LIMIT_MS) return
   lastIntegrityWarnAt = now
   console.warn(
     `[training-recorder] Integrity violations in deal record (${violations.length}): ${violations.slice(0, 3).join('; ')}`,
   )
+}
+
+function warnTransition(label: string): void {
+  const now = Date.now()
+  if (now - lastTransitionWarnAt < WARN_RATE_LIMIT_MS) return
+  lastTransitionWarnAt = now
+  console.warn(`[training-recorder] Invalid/unexpected transition: ${label}`)
 }
 
 // ─── Recorder interface ───────────────────────────────────────────────────────
@@ -46,50 +54,47 @@ export type TrainingRecorder = {
   onBiddingStart(
     room: { id: string; seats: Record<Seat, { participant: { kind: string; identity: { profileId: string | null } } | null }> },
     state: ServerAuthoritativeGameState,
-    dealIndex: number,
   ): void
 
   // Called at deal-last-3 → playing (8 cards per seat captured here)
   onPlayingStart(
     roomId: string,
-    dealIndex: number,
     state: ServerAuthoritativeGameState,
   ): void
 
   onBidAction(
     roomId: string,
-    dealIndex: number,
     stateBefore: ServerAuthoritativeGameState,
     stateAfter: ServerAuthoritativeGameState,
-    seat: Seat,
+    addedEntry: ServerBidEntry,
     actionOrigin: TrainingActionOrigin,
   ): void
 
   onCardPlayed(
     roomId: string,
-    dealIndex: number,
     stateBefore: ServerAuthoritativeGameState,
     stateAfter: ServerAuthoritativeGameState,
-    seat: Seat,
-    cardId: string,
+    addedPlay: TrainingCompactPlayedCard,
     actionOrigin: TrainingActionOrigin,
   ): void
 
   onDealComplete(
     roomId: string,
-    dealIndex: number,
     state: ServerAuthoritativeGameState,
   ): void
 
   // Called on bidding → next-round (all pass). Writes a bidding_only record.
   onAllPass(
     roomId: string,
-    dealIndex: number,
     state: ServerAuthoritativeGameState,
   ): void
 
   // Legacy: called to explicitly drop a deal without recording (disconnects, etc.)
-  onDealAbandoned(roomId: string, dealIndex: number): void
+  onDealAbandoned(roomId: string): void
+
+  // Called when a state-diff helper (bid or card) cannot find a clean single
+  // added action. Never throws, never blocks gameplay — observability only.
+  onInvalidTransition(label: string): void
 
   getMetrics(): TrainingRecorderMetrics
 
@@ -106,7 +111,10 @@ function createNoopRecorder(): TrainingRecorder {
     writtenRecords: 0,
     droppedRecords: 0,
     failedRecords: 0,
-    duplicateRecords: 0,
+    duplicateDeals: 0,
+    duplicateActions: 0,
+    noActiveDeal: 0,
+    invalidTransition: 0,
     currentFileBytes: 0,
     totalDirectoryBytes: null,
     lastWriteAt: null,
@@ -121,6 +129,7 @@ function createNoopRecorder(): TrainingRecorder {
     onDealComplete: () => undefined,
     onAllPass: () => undefined,
     onDealAbandoned: () => undefined,
+    onInvalidTransition: () => undefined,
     getMetrics: () => metrics,
     shutdown: async () => undefined,
   }
@@ -165,66 +174,68 @@ function createActiveRecorder(
   function onBiddingStart(
     room: { id: string; seats: Record<Seat, { participant: { kind: string; identity: { profileId: string | null } } | null }> },
     state: ServerAuthoritativeGameState,
-    dealIndex: number,
   ): void {
     if (shutdownRequested) return
     safeRun('onBiddingStart', () => {
-      collectorOnBiddingStart(room, state, dealIndex, config.hashSecret)
+      const result = collectorOnBiddingStart(room, state, config.hashSecret)
+      if (result === 'replaced_stale') {
+        mutableMetrics.invalidTransition += 1
+        warnTransition(`deal-next-2→bidding fired twice for room without finalizing (roomId redacted)`)
+      }
     })
   }
 
   function onPlayingStart(
     roomId: string,
-    dealIndex: number,
     state: ServerAuthoritativeGameState,
   ): void {
     if (shutdownRequested) return
     safeRun('onPlayingStart', () => {
-      collectorOnPlayingStart(roomId, dealIndex, state)
+      collectorOnPlayingStart(roomId, state)
     })
   }
 
   function onBidAction(
     roomId: string,
-    dealIndex: number,
     stateBefore: ServerAuthoritativeGameState,
     stateAfter: ServerAuthoritativeGameState,
-    seat: Seat,
+    addedEntry: ServerBidEntry,
     actionOrigin: TrainingActionOrigin,
   ): void {
     if (shutdownRequested) return
     safeRun('onBidAction', () => {
-      collectorOnBidAction(roomId, dealIndex, stateBefore, stateAfter, seat, actionOrigin)
+      const result = collectorOnBidAction(roomId, stateBefore, stateAfter, addedEntry, actionOrigin)
+      if (result === 'duplicate') mutableMetrics.duplicateActions += 1
+      if (result === 'no_active_deal') mutableMetrics.noActiveDeal += 1
     })
   }
 
   function onCardPlayed(
     roomId: string,
-    dealIndex: number,
     stateBefore: ServerAuthoritativeGameState,
     stateAfter: ServerAuthoritativeGameState,
-    seat: Seat,
-    cardId: string,
+    addedPlay: TrainingCompactPlayedCard,
     actionOrigin: TrainingActionOrigin,
   ): void {
     if (shutdownRequested) return
     safeRun('onCardPlayed', () => {
-      collectorOnCardPlayed(roomId, dealIndex, stateBefore, stateAfter, seat, cardId, actionOrigin)
+      const result = collectorOnCardPlayed(roomId, stateBefore, stateAfter, addedPlay, actionOrigin)
+      if (result === 'duplicate') mutableMetrics.duplicateActions += 1
+      if (result === 'no_active_deal') mutableMetrics.noActiveDeal += 1
     })
   }
 
   function onDealComplete(
     roomId: string,
-    dealIndex: number,
     state: ServerAuthoritativeGameState,
   ): void {
     if (shutdownRequested) return
 
     safeRun('onDealComplete', () => {
-      const result = collectorOnDealComplete(roomId, dealIndex, state)
+      const result = collectorOnDealComplete(roomId, state)
 
       if (result.kind === 'duplicate') {
-        mutableMetrics.duplicateRecords += 1
+        mutableMetrics.duplicateDeals += 1
         return
       }
       if (result.kind !== 'enqueued') {
@@ -238,16 +249,15 @@ function createActiveRecorder(
 
   function onAllPass(
     roomId: string,
-    dealIndex: number,
     state: ServerAuthoritativeGameState,
   ): void {
     if (shutdownRequested) return
 
     safeRun('onAllPass', () => {
-      const result = collectorOnAllPass(roomId, dealIndex, state)
+      const result = collectorOnAllPass(roomId, state)
 
       if (result.kind === 'duplicate') {
-        mutableMetrics.duplicateRecords += 1
+        mutableMetrics.duplicateDeals += 1
         return
       }
       if (result.kind !== 'enqueued') {
@@ -258,10 +268,15 @@ function createActiveRecorder(
     })
   }
 
-  function onDealAbandoned(roomId: string, dealIndex: number): void {
+  function onDealAbandoned(roomId: string): void {
     safeRun('onDealAbandoned', () => {
-      collectorDropDeal(roomId, dealIndex)
+      collectorDropDeal(roomId)
     })
+  }
+
+  function onInvalidTransition(label: string): void {
+    mutableMetrics.invalidTransition += 1
+    warnTransition(label)
   }
 
   function getMetrics(): TrainingRecorderMetrics {
@@ -285,6 +300,7 @@ function createActiveRecorder(
     onDealComplete,
     onAllPass,
     onDealAbandoned,
+    onInvalidTransition,
     getMetrics,
     shutdown,
   }

@@ -5,7 +5,10 @@ export type TrainingRecorderMetrics = {
   writtenRecords: number
   droppedRecords: number
   failedRecords: number
-  duplicateRecords: number
+  duplicateDeals: number
+  duplicateActions: number
+  noActiveDeal: number
+  invalidTransition: number
   currentFileBytes: number
   totalDirectoryBytes: number | null
   lastWriteAt: string | null
@@ -16,7 +19,10 @@ export type MutableTrainingRecorderMetrics = {
   writtenRecords: number
   droppedRecords: number
   failedRecords: number
-  duplicateRecords: number
+  duplicateDeals: number
+  duplicateActions: number
+  noActiveDeal: number
+  invalidTransition: number
   currentFileBytes: number
   totalDirectoryBytes: number | null
   lastWriteAt: number | null
@@ -29,7 +35,10 @@ export function createMutableMetrics(): MutableTrainingRecorderMetrics {
     writtenRecords: 0,
     droppedRecords: 0,
     failedRecords: 0,
-    duplicateRecords: 0,
+    duplicateDeals: 0,
+    duplicateActions: 0,
+    noActiveDeal: 0,
+    invalidTransition: 0,
     currentFileBytes: 0,
     totalDirectoryBytes: null,
     lastWriteAt: null,
@@ -50,7 +59,10 @@ export function snapshotMetrics(
     writtenRecords: mutable.writtenRecords,
     droppedRecords: mutable.droppedRecords,
     failedRecords: mutable.failedRecords,
-    duplicateRecords: mutable.duplicateRecords,
+    duplicateDeals: mutable.duplicateDeals,
+    duplicateActions: mutable.duplicateActions,
+    noActiveDeal: mutable.noActiveDeal,
+    invalidTransition: mutable.invalidTransition,
     currentFileBytes: mutable.currentFileBytes,
     totalDirectoryBytes: mutable.totalDirectoryBytes,
     lastWriteAt: mutable.lastWriteAt !== null ? new Date(mutable.lastWriteAt).toISOString() : null,

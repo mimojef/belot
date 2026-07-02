@@ -246,6 +246,7 @@ console.log('\n[6] scoring snapshot: winningBid се запазва')
       isNonCapotRound: false,
       outcomeLabel: '',
       outcomeShortLabel: '',
+      outcome: 'made',
       counterMultiplier: 1,
     },
   })

@@ -35,28 +35,40 @@ A missing or short secret causes the recorder to stay disabled (logged as a warn
 {TRAINING_RECORDER_PATH}/
   2025-06-01/
     process-1234-worker-0-part-0000.jsonl
-    process-1234-worker-0-part-0001.jsonl
+    process-1234-worker-0-part-0001.active.jsonl
   2025-06-02/
     process-5678-worker-1-part-0000.jsonl
 ```
 
-Each line in a `.jsonl` file is one complete JSON record, newline-terminated. Files rotate when they reach `MAX_FILE_MB` or when the UTC date changes.
+Each line in a `.jsonl` file is one complete JSON record, newline-terminated. While a file is being written it carries an `.active.jsonl` suffix; it is renamed to plain `.jsonl` on rotation (file-size or date change) or graceful shutdown. This makes the in-progress file unambiguous across every PM2 process sharing the storage directory — cleanup, retention, and total-size enforcement never delete or rename a `*.active.jsonl` file, no matter which process owns it. Rename is fail-open: if it fails (e.g. a locked file), the file simply stays `.active.jsonl` until the next rotation/shutdown attempt and is never auto-deleted while active.
 
 ## Phase lifecycle
 
-The recorder hooks into these server phase transitions:
+The recorder hooks into these server phase transitions. Correlation between hook calls is by **roomId only** — a room has at most one active deal in-process at a time (`activeDealStates: Map<roomId, ActiveDealState>`). Nothing is derived from match score: reading the score at bidding-start vs. at scoring-finalize would disagree (the score changes across the deal), so score can never be part of the correlation key.
 
 | Transition | Event | Cards captured |
 |---|---|---|
-| `deal-next-2 → bidding` | Deal start | 5 per seat (20 total) → `handsAtBiddingStart` |
+| `deal-next-2 → bidding` | Deal start — creates the active deal state for this roomId, generates a random `recordingId` | 5 per seat (20 total) → `handsAtBiddingStart` |
 | `deal-last-3 → playing` | Playing start | 8 per seat (32 total) → `initialHands` |
-| `bidding` (each bid) | Bid action recorded | — |
-| `bidding → deal-last-3` | Last bid recorded | — |
+| `bidding` (each bid) | Bid action recorded via `findAddedBidEntry` diff | — |
+| `bidding → deal-last-3` | Last bid recorded via the same diff | — |
 | `bidding → next-round` | All-pass: last bid + bidding_only record written | — |
-| `playing` (each card) | Card action recorded | — |
-| `playing → scoring` | Last card + full record written | — |
+| `playing` (each card) | Card action recorded via `findAddedPlayedCard` diff | — |
+| `playing → scoring` | Last card (if any) + full record written; finalizes purely by roomId | — |
+
+`dealIndex` in the record is a **recorder-owned, per-room sequence number** (metadata only, starts at 1 and increments each time a deal starts recording for that room) — it is never used as a correlation key and never derived from score.
+
+### Diffing bids and cards
+
+- `findAddedBidEntry(previousState, nextState)` compares `bidding.entries` before/after. It works identically for `bidding→bidding`, `bidding→deal-last-3`, and `bidding→next-round` because `ServerBiddingState.entries` is never reset across those transitions — there is no special-casing of "the last bid".
+- `findAddedPlayedCard(previousState, nextState)` compares `flattenPlayedCards(state)` (completed tricks + the trick in progress, chronological) before/after. It works identically for `playing→playing` and `playing→scoring` because `playing` is preserved unchanged when scoring starts. A `playing→scoring` transition with no new card (the 32nd card already recorded on a prior `playing→playing` step) is a valid finalize-only case — no duplicate card is recorded.
+- If a diff doesn't cleanly resolve to "exactly one added entry", nothing is recorded, a rate-limited warning is logged, and the `invalidTransition` metric is incremented. Gameplay is never affected.
 
 Human actions (submitBid / submitPlay) are intercepted directly in `index.ts` and pass `actionOrigin: 'human_manual'`. Bot/timeout actions come through the worker `onApplied` callback and pass `actionOrigin: 'auto'`.
+
+### Action-level deduplication
+
+Human actions are observed via the direct human hooks; the same transition could in principle also be observed later via the worker `onApplied` path. Each bid/card action is fingerprinted (`recordingId` + kind + entry/card count + seat + action/card id) before being appended. A repeat observation of the same transition is dropped (counted in the `duplicateActions` metric) and the first-seen `actorKind` (typically `human_manual`) is preserved — it is never overwritten by a later `auto` observation of the same action.
 
 ## Record schema (schemaVersion: 1)
 
@@ -210,14 +222,17 @@ Any error inside the recorder is caught and logged; the game always continues. S
 
 ## Deduplication
 
-Each deal gets a random `recordingId` (UUID v4) created when bidding starts. Finalized recording IDs are kept in a per-process `Set` (capped at 10k). If the same deal is completed twice (e.g., due to retry), the second record is silently discarded and `duplicateRecords` metric is incremented.
+Each deal gets a random `recordingId` (UUID v4) created when bidding starts. Finalized recording IDs are kept in a per-process `Set` (capped at 10k). If the same deal is completed twice (e.g., due to retry), the second record is silently discarded and the `duplicateDeals` metric is incremented. See "Action-level deduplication" above for the separate per-action dedup guard (`duplicateActions`).
+
+If `deal-next-2 → bidding` fires again for a room whose previous deal never finalized, the stale in-memory state is replaced (never accumulates) and `invalidTransition` is incremented — a room can only ever have one active deal.
 
 ## File rotation and retention
 
 - Files rotate when they reach `TRAINING_RECORDER_MAX_FILE_MB`.
-- Files also rotate when the UTC date changes (new day → new date subdirectory).
-- Date subdirectories older than `TRAINING_RECORDER_RETENTION_DAYS` are deleted automatically (checked hourly).
-- Total storage is capped at `TRAINING_RECORDER_MAX_TOTAL_GB` — oldest closed files are deleted first.
+- Files also rotate when the local date changes (new day → new date subdirectory).
+- The in-progress file is always named `*.active.jsonl` and is renamed to `*.jsonl` at the moment of rotation (before the next file is opened) or on graceful shutdown.
+- Date subdirectories older than `TRAINING_RECORDER_RETENTION_DAYS` are deleted automatically (checked hourly) — `*.active.jsonl` files are never touched, even in an old-looking directory; the directory itself is only removed once fully empty.
+- Total storage is capped at `TRAINING_RECORDER_MAX_TOTAL_GB` — oldest **closed** files are deleted first; `*.active.jsonl` files (this process's or any other's) are never candidates for deletion.
 
 ## Graceful shutdown
 
@@ -261,11 +276,26 @@ When enabled, the recorder exposes metrics via the `/health` endpoint:
     "writtenRecords": 42,
     "droppedRecords": 0,
     "failedRecords": 0,
-    "duplicateRecords": 0,
+    "duplicateDeals": 0,
+    "duplicateActions": 0,
+    "noActiveDeal": 0,
+    "invalidTransition": 0,
     "lastWriteAt": "2025-06-01T12:00:00.000Z",
     "lastErrorAt": null
   }
 }
 ```
 
-`healthy: false` means a disk write error occurred. Records may be lost; check server logs.
+- `healthy: false` means a disk write error occurred. Records may be lost; check server logs.
+- `duplicateDeals` — a completed/all-pass deal was finalized twice (retry).
+- `duplicateActions` — the same bid/card action was observed more than once (see action-level dedup above).
+- `noActiveDeal` — a bid/card/finalize hook fired for a room with no active deal state (e.g. after a stale-deal replacement).
+- `invalidTransition` — a diff helper couldn't resolve a clean single added entry, or a `deal-next-2 → bidding` fired twice without the previous deal finalizing.
+
+The `/health` payload never includes cards, player/room IDs, file paths, or secrets — only counters and timestamps.
+
+## Canonical scoring reuse
+
+Trick card-point values and the raw trick-points formula live in `server/src/game/serverScoring.ts` (`getServerCardPoints`, `getServerTrickCardPoints`) and are exported for reuse — the recorder calls these directly instead of keeping its own copy of the point tables, so gameplay scoring and recorded `tricks[].points` can never drift apart. Gameplay scoring output (`resolveServerScoring`) is unchanged.
+
+`ServerScoringState` also carries a locale-independent `outcome: 'made' | 'inside' | 'tie'` field alongside the existing `outcomeLabel`/`outcomeShortLabel` (unchanged, still used by the UI). The recorder derives `dealResult.contractMade` / `isTie` from `outcome` rather than string-matching the Bulgarian labels.

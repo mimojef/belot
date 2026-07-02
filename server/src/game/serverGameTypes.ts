@@ -157,6 +157,8 @@ export type ServerScoringState = {
   isNonCapotRound: boolean
   outcomeLabel: string
   outcomeShortLabel: string
+  // Locale-independent outcome, for programmatic consumers (e.g. training recorder).
+  outcome: 'made' | 'inside' | 'tie'
   counterMultiplier: number
 }
 

@@ -11,7 +11,7 @@ import type {
 } from './serverGameTypes.js'
 import { scoreServerDeclarations } from './declarations/scoreServerDeclarations.js'
 
-type ServerScoringContract = 'suit' | 'all-trumps' | 'no-trumps'
+export type ServerScoringContract = 'suit' | 'all-trumps' | 'no-trumps'
 
 type ServerTeamBaseScore = {
   team: Team
@@ -114,7 +114,9 @@ function getTrumpCardPoints(rank: string): number {
   return 0
 }
 
-function getCardPoints(
+// Canonical per-card point value for a given contract/trump — the single
+// source of truth shared by gameplay scoring and the training recorder.
+export function getServerCardPoints(
   suit: ServerSuit,
   rank: string,
   contract: ServerScoringContract,
@@ -133,6 +135,21 @@ function getCardPoints(
   }
 
   return getNonTrumpCardPoints(rank)
+}
+
+// Canonical raw trick points (no last-trick or capot bonus) — shared by
+// gameplay scoring and the training recorder so the two never drift apart.
+export function getServerTrickCardPoints(
+  trick: { plays: { card: { suit: ServerSuit; rank: string } }[] },
+  contract: ServerScoringContract,
+  trumpSuit: ServerSuit | null,
+): number {
+  const rawPoints = trick.plays.reduce(
+    (sum, play) => sum + getServerCardPoints(play.card.suit, play.card.rank, contract, trumpSuit),
+    0,
+  )
+
+  return contract === 'no-trumps' ? rawPoints * 2 : rawPoints
 }
 
 function getBaseExpectedTotalPoints(contract: ServerScoringContract): number {
@@ -189,7 +206,7 @@ function calculateBaseRoundScore(input: {
   for (const trick of completedTricks) {
     const winnerTeam = getTeamBySeat(trick.winnerSeat)
     const trickPoints = trick.plays.reduce((sum, play) => {
-      return sum + getCardPoints(
+      return sum + getServerCardPoints(
         play.card.suit,
         play.card.rank,
         input.contract,
@@ -858,6 +875,10 @@ export function resolveServerScoring(
       isNonCapotRound,
       outcomeLabel: getServerOutcomeLabel(roundOutcome.outcome),
       outcomeShortLabel: getServerOutcomeShortLabel(roundOutcome.outcome),
+      // Semantic outcome for programmatic consumers (e.g. training recorder) —
+      // roundOutcome.outcome is never 'unknown' in practice (calculateRoundOutcome
+      // always resolves to one of the three), 'tie' is a defensive fallback only.
+      outcome: roundOutcome.outcome === 'unknown' ? 'tie' : roundOutcome.outcome,
       counterMultiplier,
     },
   }
