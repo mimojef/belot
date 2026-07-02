@@ -33,6 +33,8 @@
     "check:round-capot-mission": "tsx scripts/checkRoundCapotMission.ts",
     "check:partner-suit-all-trumps": "tsx scripts/checkPartnerSuitAllTrumpsLead.ts",
     "check:strict-mode-bidding": "tsx scripts/checkStrictModeBidding.ts",
+    "check:training-recorder": "tsx scripts/checkTrainingRecorder.ts",
+    "validate:training-recordings": "tsx scripts/validateTrainingRecordings.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",
     "verify:db:prod": "node dist-scripts/scripts/checkDbBackupVerify.js",

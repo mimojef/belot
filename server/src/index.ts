@@ -156,6 +156,11 @@ import {
 } from './monitoring/monitoringHistoryStore.js'
 import { resumeCoinPurchaseCheckout } from './shop/resumeCoinPurchaseCheckout.js'
 import { hideCoinPurchase } from './shop/hideCoinPurchase.js'
+import { createTrainingRecorder } from './trainingRecorder/trainingRecorder.js'
+import { handleTrainingRecorderOnApplied } from './trainingRecorder/trainingRecorderHooks.js'
+import type { TrainingRecorderMetrics } from './trainingRecorder/trainingRecorderMetrics.js'
+
+const trainingRecorder = createTrainingRecorder('0')
 
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
@@ -1148,6 +1153,8 @@ async function tickRoomGameRuntimes(): Promise<void> {
           broadcastRoomSnapshots(room, socketRegistry)
         },
         onApplied: (previousRoom, room) => {
+          handleTrainingRecorderOnApplied(trainingRecorder, previousRoom, room)
+
           const roundCapot = getRoundCapotTransition(previousRoom, room)
           if (roundCapot !== null) {
             runMatchCompletionSideEffect(
@@ -5767,6 +5774,8 @@ async function handleHttpRequest(
         ? lifecycleState === 'ready'
         : poolHealth?.state === 'ready'
 
+    const trainingRecorderMetrics = trainingRecorder.getMetrics()
+
     sendJsonResponse(res, 200, {
       ok: true,
       service: 'belot-v2-server',
@@ -5791,6 +5800,17 @@ async function handleHttpRequest(
       },
       roomShadowSync: roomShadowSynchronizer?.getHealth() ?? null,
       gameWorkerPool: poolHealth,
+      trainingRecorder: {
+        enabled: trainingRecorderMetrics.enabled,
+        healthy: trainingRecorderMetrics.healthy,
+        queuedRecords: trainingRecorderMetrics.queuedRecords,
+        writtenRecords: trainingRecorderMetrics.writtenRecords,
+        droppedRecords: trainingRecorderMetrics.droppedRecords,
+        failedRecords: trainingRecorderMetrics.failedRecords,
+        duplicateRecords: trainingRecorderMetrics.duplicateRecords,
+        lastWriteAt: trainingRecorderMetrics.lastWriteAt,
+        lastErrorAt: trainingRecorderMetrics.lastErrorAt,
+      },
     })
     return
   }
@@ -7788,6 +7808,12 @@ function shutdownServer(signal: NodeJS.Signals): Promise<void> {
 
     if (!storesClosedSuccessfully) {
       exitCode = 1
+    }
+
+    try {
+      await trainingRecorder.shutdown(3_000)
+    } catch (error) {
+      console.error('[shutdown] Training recorder shutdown error:', error)
     }
 
     process.exit(exitCode)
