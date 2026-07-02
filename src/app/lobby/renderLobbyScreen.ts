@@ -6569,7 +6569,7 @@ function renderDailyRewardsPopup(state: LobbyScreenState): string {
         ">
           <div>
             <div style="font-size:18px;font-weight:900;color:#d4a520;letter-spacing:0.04em;">Ежедневни награди</div>
-            <div style="font-size:12px;color:rgba(255,255,255,0.45);margin-top:3px;">Вземи по 1 награда на ден. Рестартира се в полунощ.</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.45);margin-top:3px;">Рестартира се в полунощ.</div>
           </div>
           <button type="button" data-daily-rewards-close="1" style="
             width:32px;height:32px;border:none;background:rgba(255,255,255,0.08);
