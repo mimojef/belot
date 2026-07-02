@@ -104,6 +104,15 @@ export function validateTrainingRecord(
             `Trick ${trick.trickIndex} has ${trick.plays.length} plays, expected ${EXPECTED_PLAYS_PER_TRICK}`,
           )
         }
+        for (let i = 0; i < trick.plays.length; i++) {
+          const expectedSequence = trick.trickIndex * EXPECTED_PLAYS_PER_TRICK + i + 1
+          if (trick.plays[i]!.sequence !== expectedSequence) {
+            violations.push(
+              `Trick ${trick.trickIndex} play ${i} sequence expected ${expectedSequence}, got ${trick.plays[i]!.sequence}`,
+            )
+            break
+          }
+        }
       }
     }
   }
@@ -130,10 +139,52 @@ export function validateTrainingRecord(
   }
 
   const cardSeqs = record.cardActions.map((a) => a.sequence)
-  for (let i = 1; i < cardSeqs.length; i++) {
-    if ((cardSeqs[i] ?? 0) <= (cardSeqs[i - 1] ?? -1)) {
-      violations.push(`Card action sequence not strictly increasing at index ${i}`)
+  for (let i = 0; i < cardSeqs.length; i++) {
+    const expected = i + 1
+    if (cardSeqs[i] !== expected) {
+      violations.push(`Card action sequence must be contiguous 1-based; expected ${expected}, got ${cardSeqs[i]}`)
       break
+    }
+  }
+
+  for (const action of record.cardActions) {
+    const expectedPlayedBefore = action.sequence - 1
+    if (action.visibleBeforeAction.playedCardCountBeforeAction !== expectedPlayedBefore) {
+      violations.push(
+        `Card action ${action.sequence} playedCardCountBeforeAction expected ${expectedPlayedBefore}, got ${action.visibleBeforeAction.playedCardCountBeforeAction}`,
+      )
+      break
+    }
+
+    if (action.sequence < 1) {
+      violations.push(`Card action sequence must be >= 1, got ${action.sequence}`)
+      break
+    }
+
+    const expectedCurrentTrickSequences: number[] = []
+    const trickStartSequence = action.trickIndex * EXPECTED_PLAYS_PER_TRICK + 1
+    for (let seq = trickStartSequence; seq < action.sequence; seq++) {
+      expectedCurrentTrickSequences.push(seq)
+    }
+    const actualCurrentTrickSequences = action.visibleBeforeAction.currentTrick.map((p) => p.sequence)
+
+    if (actualCurrentTrickSequences.length !== expectedCurrentTrickSequences.length) {
+      violations.push(
+        `Card action ${action.sequence} currentTrick length expected ${expectedCurrentTrickSequences.length}, got ${actualCurrentTrickSequences.length}`,
+      )
+      break
+    }
+
+    for (let i = 0; i < expectedCurrentTrickSequences.length; i++) {
+      const current = action.visibleBeforeAction.currentTrick[i]
+      if (
+        current === undefined ||
+        current.trickIndex !== action.trickIndex ||
+        current.sequence !== expectedCurrentTrickSequences[i]
+      ) {
+        violations.push(`Card action ${action.sequence} currentTrick has non-current or non-contiguous sequence`)
+        break
+      }
     }
   }
 

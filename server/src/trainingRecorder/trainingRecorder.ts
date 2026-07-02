@@ -238,6 +238,10 @@ function createActiveRecorder(
         mutableMetrics.duplicateDeals += 1
         return
       }
+      if (result.kind === 'no_active_deal') {
+        mutableMetrics.noActiveDeal += 1
+        return
+      }
       if (result.kind !== 'enqueued') {
         // no_active_deal, not_ready, invalid — silent drop
         return
@@ -258,6 +262,10 @@ function createActiveRecorder(
 
       if (result.kind === 'duplicate') {
         mutableMetrics.duplicateDeals += 1
+        return
+      }
+      if (result.kind === 'no_active_deal') {
+        mutableMetrics.noActiveDeal += 1
         return
       }
       if (result.kind !== 'enqueued') {

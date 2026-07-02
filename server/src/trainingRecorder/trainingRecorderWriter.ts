@@ -21,13 +21,21 @@ import type { MutableTrainingRecorderMetrics } from './trainingRecorderMetrics.j
 
 const ACTIVE_SUFFIX = '.active.jsonl'
 const CLOSED_SUFFIX = '.jsonl'
+const RECORDER_FILE_BASE_PATTERN = /^process-[A-Za-z0-9_-]+-worker-[A-Za-z0-9_-]+-part-\d{4}$/
 
 function isActiveFileName(name: string): boolean {
-  return name.endsWith(ACTIVE_SUFFIX)
+  return (
+    name.endsWith(ACTIVE_SUFFIX) &&
+    RECORDER_FILE_BASE_PATTERN.test(name.slice(0, -ACTIVE_SUFFIX.length))
+  )
 }
 
 function isClosedFileName(name: string): boolean {
-  return name.endsWith(CLOSED_SUFFIX) && !name.endsWith(ACTIVE_SUFFIX)
+  return (
+    name.endsWith(CLOSED_SUFFIX) &&
+    !name.endsWith(ACTIVE_SUFFIX) &&
+    RECORDER_FILE_BASE_PATTERN.test(name.slice(0, -CLOSED_SUFFIX.length))
+  )
 }
 
 function activePathFor(basePath: string): string {
@@ -122,7 +130,7 @@ async function purgeOldDateDirs(
         try {
           const files = await readdir(dirPath)
           for (const f of files) {
-            if (isActiveFileName(f)) continue
+            if (!isClosedFileName(f)) continue
             try {
               await unlink(join(dirPath, f))
             } catch {
@@ -234,6 +242,9 @@ export function createTrainingRecorderWriter(
   async function finalizeActiveFile(activePath: string): Promise<void> {
     const closedPath = closedPathFor(activePath.slice(0, -ACTIVE_SUFFIX.length))
     try {
+      if (!(await fileExists(activePath))) {
+        return
+      }
       await rename(activePath, closedPath)
     } catch (error) {
       console.warn(

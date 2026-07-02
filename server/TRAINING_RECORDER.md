@@ -34,10 +34,10 @@ A missing or short secret causes the recorder to stay disabled (logged as a warn
 ```
 {TRAINING_RECORDER_PATH}/
   2025-06-01/
-    process-1234-worker-0-part-0000.jsonl
+    process-1234-worker-0-part-0001.jsonl
     process-1234-worker-0-part-0001.active.jsonl
   2025-06-02/
-    process-5678-worker-1-part-0000.jsonl
+    process-5678-worker-1-part-0001.jsonl
 ```
 
 Each line in a `.jsonl` file is one complete JSON record, newline-terminated. While a file is being written it carries an `.active.jsonl` suffix; it is renamed to plain `.jsonl` on rotation (file-size or date change) or graceful shutdown. This makes the in-progress file unambiguous across every PM2 process sharing the storage directory — cleanup, retention, and total-size enforcement never delete or rename a `*.active.jsonl` file, no matter which process owns it. Rename is fail-open: if it fails (e.g. a locked file), the file simply stays `.active.jsonl` until the next rotation/shutdown attempt and is never auto-deleted while active.
@@ -56,7 +56,7 @@ The recorder hooks into these server phase transitions. Correlation between hook
 | `playing` (each card) | Card action recorded via `findAddedPlayedCard` diff | — |
 | `playing → scoring` | Last card (if any) + full record written; finalizes purely by roomId | — |
 
-`dealIndex` in the record is a **recorder-owned, per-room sequence number** (metadata only, starts at 1 and increments each time a deal starts recording for that room) — it is never used as a correlation key and never derived from score.
+`dealIndex` in the record is a **recorder-owned process-wide monotonic sequence number** (metadata only) — it is never used as a correlation key and never derived from score. Runtime correlation stays bounded to `activeDealStates: Map<roomId, ActiveDealState>` plus a bounded recently-finalized registry used only to distinguish duplicate finalize calls from genuinely unknown rooms.
 
 ### Diffing bids and cards
 
@@ -135,7 +135,7 @@ Human actions are observed via the direct human hooks; the same transition could
         "ownHand": [...],
         "legalCards": [...],
         "contract": { ... },
-        "cardsPlayedBeforeAction": [...],
+        "playedCardCountBeforeAction": 0,
         "currentTrick": [...],
         "currentWinningSeat": null, "currentWinningCard": null,
         "dealerSeat": "bottom", "leaderSeat": "bottom",
@@ -147,7 +147,7 @@ Human actions are observed via the direct human hooks; the same transition could
   "tricks": [
     {
       "trickIndex": 0, "leaderSeat": "bottom",
-      "plays": [{ "sequence": 0, "seat": "bottom", "card": {...} }, ...],
+      "plays": [{ "sequence": 1, "seat": "bottom", "card": {...} }, ...],
       "winnerSeat": "bottom", "winningCard": {...}, "points": 34
     }
   ],
@@ -222,7 +222,7 @@ Any error inside the recorder is caught and logged; the game always continues. S
 
 ## Deduplication
 
-Each deal gets a random `recordingId` (UUID v4) created when bidding starts. Finalized recording IDs are kept in a per-process `Set` (capped at 10k). If the same deal is completed twice (e.g., due to retry), the second record is silently discarded and the `duplicateDeals` metric is incremented. See "Action-level deduplication" above for the separate per-action dedup guard (`duplicateActions`).
+Each deal gets a random `recordingId` (UUID v4) created when bidding starts. Recently finalized deals are kept in a bounded in-process registry keyed by runtime-only `roomId` with the finalized `recordingId` (capped at 10k). If the same just-finalized deal is completed twice (e.g., due to retry), the second record is discarded and the `duplicateDeals` metric is incremented. A finalize for a room that is neither active nor recently finalized increments `noActiveDeal` instead. Raw room IDs remain runtime-only and are never written to JSONL. See "Action-level deduplication" above for the separate per-action dedup guard (`duplicateActions`).
 
 If `deal-next-2 → bidding` fires again for a room whose previous deal never finalized, the stale in-memory state is replaced (never accumulates) and `invalidTransition` is incremented — a room can only ever have one active deal.
 
@@ -231,8 +231,8 @@ If `deal-next-2 → bidding` fires again for a room whose previous deal never fi
 - Files rotate when they reach `TRAINING_RECORDER_MAX_FILE_MB`.
 - Files also rotate when the local date changes (new day → new date subdirectory).
 - The in-progress file is always named `*.active.jsonl` and is renamed to `*.jsonl` at the moment of rotation (before the next file is opened) or on graceful shutdown.
-- Date subdirectories older than `TRAINING_RECORDER_RETENTION_DAYS` are deleted automatically (checked hourly) — `*.active.jsonl` files are never touched, even in an old-looking directory; the directory itself is only removed once fully empty.
-- Total storage is capped at `TRAINING_RECORDER_MAX_TOTAL_GB` — oldest **closed** files are deleted first; `*.active.jsonl` files (this process's or any other's) are never candidates for deletion.
+- Date subdirectories older than `TRAINING_RECORDER_RETENTION_DAYS` are checked hourly. Retention deletes only strict closed recorder files named `process-<processId>-worker-<workerId>-part-<0001>.jsonl`; it never deletes `*.active.jsonl`, `.txt`, `.gz`, `.log`, recovery files, unknown `.jsonl` names, or any other foreign artifact. The date directory itself is removed only if it is completely empty after cleanup.
+- Total storage is capped at `TRAINING_RECORDER_MAX_TOTAL_GB`. Size cleanup counts the directory tree fail-open, but deletion candidates are only strict closed recorder JSONL files. Active files from this or any other process, crash-left `.active.jsonl` files, and unknown files are never candidates.
 
 ## Graceful shutdown
 
@@ -255,6 +255,8 @@ cat path/to/file.jsonl | npm run validate:training-recordings
 ```
 
 Exit code 0 = all valid. Exit code 1 = errors found. Exit code 2 = file system error.
+
+`npm run check:training-recorder` also generates physical full-deal and all-pass JSONL files, then runs the real `scripts/validateTrainingRecordings.ts` validator against the full file, the all-pass file, and a combined directory containing both files. The validator exit codes are asserted directly; no shell pipeline is used.
 
 ## Running recorder tests
 
@@ -299,3 +301,36 @@ The `/health` payload never includes cards, player/room IDs, file paths, or secr
 Trick card-point values and the raw trick-points formula live in `server/src/game/serverScoring.ts` (`getServerCardPoints`, `getServerTrickCardPoints`) and are exported for reuse — the recorder calls these directly instead of keeping its own copy of the point tables, so gameplay scoring and recorded `tricks[].points` can never drift apart. Gameplay scoring output (`resolveServerScoring`) is unchanged.
 
 `ServerScoringState` also carries a locale-independent `outcome: 'made' | 'inside' | 'tie'` field alongside the existing `outcomeLabel`/`outcomeShortLabel` (unchanged, still used by the UI). The recorder derives `dealResult.contractMade` / `isTie` from `outcome` rather than string-matching the Bulgarian labels.
+
+Legacy persisted room snapshots from before this field existed are normalized at the restore boundary in `server/src/game/normalizeRestoredAuthoritativeState.ts`. That helper is the only place that maps legacy Bulgarian `outcomeShortLabel` values (`Изкарана`, `Вътре`, `Равна`) back to semantic outcomes; modern runtime and the recorder consume only the semantic `outcome` field. Unknown legacy labels fail safe and do not crash restore.
+
+## Compact card history
+
+Card actions use global 1-based chronological sequence numbers (`1..32`). `visibleBeforeAction.currentTrick` keeps only the already-played cards in the current trick with those same global sequence numbers. The older O(n²) `cardsPlayedBeforeAction` snapshot is replaced by `playedCardCountBeforeAction`, which must equal `sequence - 1`; downstream dataset builders can reconstruct the full previous history from `cardActions[0..sequence-2]`.
+
+## Current measured sizes
+
+Production deploy has not been performed yet. The recorder is still disabled by default (`TRAINING_RECORDER_ENABLED=false`). The latest measured e2e sizes from `npm run check:training-recorder` are:
+
+| Record | Raw bytes | Gzip bytes |
+|---|---:|---:|
+| Full deal row | 49,831 | 3,073 |
+| Bidding-only row | 4,984 | 1,020 |
+
+Linear full-deal projections:
+
+| Full deals | Raw | Gzip |
+|---:|---:|---:|
+| 1,000 | 47.52 MB | 2.93 MB |
+| 10,000 | 475.23 MB | 29.31 MB |
+| 100,000 | 4,752.25 MB | 293.06 MB |
+| 1,000,000 | 47,522.54 MB | 2,930.64 MB |
+
+Refresh the measurements by running:
+
+```sh
+cd server
+npm run check:training-recorder
+```
+
+The command prints the physical full-deal raw/gzip row size, the bidding-only raw/gzip row size, and linear projections for 1K, 10K, 100K, and 1M full deals.

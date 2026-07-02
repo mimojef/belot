@@ -69,7 +69,7 @@ export type TrainingCardVisibleState = {
   ownHand: ServerCard[]
   legalCards: ServerCard[]
   contract: TrainingFinalContract
-  cardsPlayedBeforeAction: TrainingCompactPlayedCard[]
+  playedCardCountBeforeAction: number
   currentTrick: TrainingCompactPlayedCard[]
   currentWinningSeat: Seat | null
   currentWinningCard: ServerCard | null

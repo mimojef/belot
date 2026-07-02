@@ -24,6 +24,7 @@ import type {
 } from './trainingRecorderTypes.js'
 import { validateTrainingRecord } from './trainingRecorderIntegrity.js'
 import { computePlayerKey } from './trainingRecorderHash.js'
+import { flattenPlayedCards } from './trainingRecorderStateDiff.js'
 
 // ─── Seat profile extraction ──────────────────────────────────────────────────
 
@@ -154,9 +155,7 @@ type DealCollectorState = {
   seats: Record<Seat, TrainingSeatMetadata>
   biddingActions: TrainingBiddingAction[]
   cardActions: TrainingCardAction[]
-  cardSequence: number
   bidSequence: number
-  playedCardsBefore: TrainingCompactPlayedCard[]
   finalContract: TrainingFinalContract | null
   finalized: boolean
   // Action-level dedup guard — see collectorOnBidAction / collectorOnCardPlayed.
@@ -170,13 +169,37 @@ type DealCollectorState = {
 // ever carry the HMAC roomKey).
 
 const activeDealStates = new Map<string, DealCollectorState>()
-const dealSequenceByRoom = new Map<string, number>()
-const finalizedRecordingIds = new Set<string>()
+const recentlyFinalizedDeals = new Map<string, string>()
+const recentlyFinalizedDealOrder: Array<{ roomId: string; recordingId: string }> = []
+let nextDealIndex = 0
 
-function nextDealSequence(roomId: string): number {
-  const next = (dealSequenceByRoom.get(roomId) ?? 0) + 1
-  dealSequenceByRoom.set(roomId, next)
-  return next
+const MAX_RECENTLY_FINALIZED_DEALS = 10_000
+
+function nextDealSequence(): number {
+  nextDealIndex += 1
+  if (nextDealIndex >= Number.MAX_SAFE_INTEGER) {
+    nextDealIndex = 1
+  }
+  return nextDealIndex
+}
+
+function markRecentlyFinalized(roomId: string, recordingId: string): void {
+  recentlyFinalizedDealOrder.push({ roomId, recordingId })
+  recentlyFinalizedDeals.set(roomId, recordingId)
+
+  while (recentlyFinalizedDealOrder.length > MAX_RECENTLY_FINALIZED_DEALS) {
+    const oldest = recentlyFinalizedDealOrder.shift()
+    if (
+      oldest !== undefined &&
+      recentlyFinalizedDeals.get(oldest.roomId) === oldest.recordingId
+    ) {
+      recentlyFinalizedDeals.delete(oldest.roomId)
+    }
+  }
+}
+
+function getRecentlyFinalizedRecordingId(roomId: string): string | null {
+  return recentlyFinalizedDeals.get(roomId) ?? null
 }
 
 // ─── Public collector API ─────────────────────────────────────────────────────
@@ -196,7 +219,8 @@ export function collectorOnBiddingStart(
 
   const roomKey = pseudonymizeRoomId(hashSecret, room.id)
   const recordingId = randomUUID()
-  const dealIndex = nextDealSequence(room.id)
+  const dealIndex = nextDealSequence()
+  recentlyFinalizedDeals.delete(room.id)
 
   const existing = activeDealStates.get(room.id)
   const replacedStale = existing !== undefined && !existing.finalized
@@ -232,9 +256,7 @@ export function collectorOnBiddingStart(
     seats: seatMeta,
     biddingActions: [],
     cardActions: [],
-    cardSequence: 0,
     bidSequence: 0,
-    playedCardsBefore: [],
     finalContract: null,
     finalized: false,
     seenActionFingerprints: new Set(),
@@ -358,13 +380,10 @@ export function collectorOnCardPlayed(
   ds.seenActionFingerprints.add(fingerprint)
 
   const legalCards = getServerValidPlayCards(stateBefore, seat)
-  const currentTrick: TrainingCompactPlayedCard[] = playing.currentTrick.plays.map((p, i) => ({
-    sequence: ds.cardSequence - playing.currentTrick.plays.length + i,
-    trickIndex: playing.currentTrick.trickIndex,
-    positionInTrick: i,
-    seat: p.seat,
-    card: p.card,
-  }))
+  const playedCardsBeforeAction = flattenPlayedCards(stateBefore)
+  const currentTrick = playedCardsBeforeAction.filter(
+    (p) => p.trickIndex === playing.currentTrick.trickIndex,
+  )
 
   const winnerPlay =
     playing.currentTrick.plays.length > 0
@@ -380,9 +399,10 @@ export function collectorOnCardPlayed(
   }
 
   const actorKind = determineActorKind(seat, stateBefore, stateAfter, actionOrigin)
+  const actionSequence = addedPlay.sequence
 
   const action: TrainingCardAction = {
-    sequence: ++ds.cardSequence,
+    sequence: actionSequence,
     timestamp: new Date().toISOString(),
     trickIndex: addedPlay.trickIndex,
     positionInTrick: addedPlay.positionInTrick,
@@ -392,7 +412,7 @@ export function collectorOnCardPlayed(
       ownHand: stateBefore.hands[seat].map((c) => ({ ...c })),
       legalCards: legalCards.map((c) => ({ ...c })),
       contract,
-      cardsPlayedBeforeAction: [...ds.playedCardsBefore],
+      playedCardCountBeforeAction: actionSequence - 1,
       currentTrick,
       currentWinningSeat: winnerPlay?.seat ?? null,
       currentWinningCard: winnerPlay?.card ?? null,
@@ -404,14 +424,6 @@ export function collectorOnCardPlayed(
   }
 
   ds.cardActions.push(action)
-
-  ds.playedCardsBefore.push({
-    sequence: ds.cardSequence,
-    trickIndex: addedPlay.trickIndex,
-    positionInTrick: addedPlay.positionInTrick,
-    seat,
-    card: { ...card },
-  })
 
   if (ds.finalContract === null && stateBefore.bidding.winningBid !== null) {
     const wb = stateBefore.bidding.winningBid
@@ -439,12 +451,10 @@ export function collectorOnDealComplete(
   state: ServerAuthoritativeGameState,
 ): CollectorDealCompleteResult {
   const ds = activeDealStates.get(roomId)
-  if (!ds || ds.finalized) return { kind: 'no_active_deal' }
-
-  if (finalizedRecordingIds.has(ds.recordingId)) {
-    ds.finalized = true
-    activeDealStates.delete(roomId)
-    return { kind: 'duplicate' }
+  if (!ds || ds.finalized) {
+    return getRecentlyFinalizedRecordingId(roomId) !== null
+      ? { kind: 'duplicate' }
+      : { kind: 'no_active_deal' }
   }
 
   const scoring = state.scoring
@@ -462,7 +472,7 @@ export function collectorOnDealComplete(
       trickIndex: trick.trickIndex,
       leaderSeat: trick.leaderSeat,
       plays: trick.plays.map((p, i) => ({
-        sequence: i,
+        sequence: trick.trickIndex * 4 + i + 1,
         seat: p.seat,
         card: { ...p.card },
       })),
@@ -557,13 +567,8 @@ export function collectorOnDealComplete(
   record.integrity = integrity
 
   ds.finalized = true
-  finalizedRecordingIds.add(ds.recordingId)
   activeDealStates.delete(roomId)
-
-  if (finalizedRecordingIds.size > 10_000) {
-    const toDelete = [...finalizedRecordingIds].slice(0, 1000)
-    for (const id of toDelete) finalizedRecordingIds.delete(id)
-  }
+  markRecentlyFinalized(roomId, ds.recordingId)
 
   return { kind: 'enqueued', record }
 }
@@ -574,12 +579,10 @@ export function collectorOnAllPass(
   state: ServerAuthoritativeGameState,
 ): CollectorDealCompleteResult {
   const ds = activeDealStates.get(roomId)
-  if (!ds || ds.finalized) return { kind: 'no_active_deal' }
-
-  if (finalizedRecordingIds.has(ds.recordingId)) {
-    ds.finalized = true
-    activeDealStates.delete(roomId)
-    return { kind: 'duplicate' }
+  if (!ds || ds.finalized) {
+    return getRecentlyFinalizedRecordingId(roomId) !== null
+      ? { kind: 'duplicate' }
+      : { kind: 'no_active_deal' }
   }
 
   const completedAt = new Date().toISOString()
@@ -629,21 +632,21 @@ export function collectorOnAllPass(
   record.integrity = integrity
 
   ds.finalized = true
-  finalizedRecordingIds.add(ds.recordingId)
   activeDealStates.delete(roomId)
-
-  if (finalizedRecordingIds.size > 10_000) {
-    const toDelete = [...finalizedRecordingIds].slice(0, 1000)
-    for (const id of toDelete) finalizedRecordingIds.delete(id)
-  }
+  markRecentlyFinalized(roomId, ds.recordingId)
 
   return { kind: 'enqueued', record }
 }
 
 export function collectorDropDeal(roomId: string): void {
   activeDealStates.delete(roomId)
+  recentlyFinalizedDeals.delete(roomId)
 }
 
 export function collectorGetActiveDealCount(): number {
   return activeDealStates.size
+}
+
+export function collectorGetRecentlyFinalizedDealCount(): number {
+  return recentlyFinalizedDeals.size
 }

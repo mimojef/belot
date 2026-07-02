@@ -1,4 +1,5 @@
 import type { ServerRoom } from '../core/serverTypes.js'
+import { normalizeRestoredAuthoritativeState } from '../game/normalizeRestoredAuthoritativeState.js'
 
 export const ACTIVE_ROOM_SNAPSHOT_VERSION = 1
 
@@ -36,7 +37,24 @@ function parseRoomSnapshot(row: ActiveRoomSnapshotRow): ServerRoom | null {
       return null
     }
 
-    return parsed as ServerRoom
+    const room = parsed as ServerRoom
+    const authoritativeState = room.game?.authoritativeState
+    if (
+      authoritativeState !== null &&
+      typeof authoritativeState === 'object' &&
+      !('kind' in authoritativeState) &&
+      'phase' in authoritativeState
+    ) {
+      return {
+        ...room,
+        game: {
+          ...room.game,
+          authoritativeState: normalizeRestoredAuthoritativeState(authoritativeState),
+        },
+      }
+    }
+
+    return room
   } catch (error) {
     console.warn('[room-snapshot] skipped invalid JSON snapshot', error)
     return null

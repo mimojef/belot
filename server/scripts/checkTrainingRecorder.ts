@@ -57,10 +57,11 @@
  * [51] All-pass end-to-end via real hooks + real writer → physical JSONL row is correct
  */
 
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
+import { spawnSync } from 'node:child_process'
 
 import { validateTrainingRecorderConfig } from '../src/trainingRecorder/trainingRecorderConfig.js'
 import { computePlayerKey } from '../src/trainingRecorder/trainingRecorderHash.js'
@@ -74,6 +75,7 @@ import {
   collectorOnAllPass,
   collectorDropDeal,
   collectorGetActiveDealCount,
+  collectorGetRecentlyFinalizedDealCount,
 } from '../src/trainingRecorder/trainingRecorderCollector.js'
 import { createTrainingRecorder } from '../src/trainingRecorder/trainingRecorder.js'
 import { createTrainingRecorderQueue } from '../src/trainingRecorder/trainingRecorderQueue.js'
@@ -90,6 +92,9 @@ import {
   flattenPlayedCards,
 } from '../src/trainingRecorder/trainingRecorderStateDiff.js'
 import { getServerTrickCardPoints, getServerOutcomeShortLabel } from '../src/game/serverScoring.js'
+import { normalizeServerScoringState } from '../src/game/normalizeRestoredAuthoritativeState.js'
+import { submitHumanBidActionForRoom } from '../src/game/submitHumanBidActionForRoom.js'
+import { submitHumanPlayCardForRoom } from '../src/game/submitHumanPlayCardForRoom.js'
 import type {
   TrainingDealRecord,
   TrainingTrickResult,
@@ -642,33 +647,46 @@ function makeDealRecord(overrides: Partial<TrainingDealRecord> = {}): TrainingDe
   const biddingHands = splitHandsBidding(deck)
   const now = new Date().toISOString()
 
-  const cardActions = deck.map((c, i) => ({
-    sequence: i + 1,
-    timestamp: now,
-    trickIndex: Math.floor(i / 4),
-    positionInTrick: i % 4,
-    seat: (['bottom', 'right', 'top', 'left'] as Seat[])[i % 4]!,
-    actorKind: 'human_manual' as const,
-    visibleBeforeAction: {
-      ownHand: [] as ServerCard[],
-      legalCards: [] as ServerCard[],
-      contract: { bidderSeat: 'bottom' as Seat, contract: 'suit' as const, trumpSuit: 'hearts' as const, doubled: false, redoubled: false },
-      cardsPlayedBeforeAction: [],
-      currentTrick: [],
-      currentWinningSeat: null as Seat | null,
-      currentWinningCard: null as ServerCard | null,
-      dealerSeat: 'bottom' as Seat,
-      leaderSeat: 'bottom' as Seat,
-      scoreBeforeDeal: { team0: 0, team1: 0 },
-    },
-    chosenCard: c,
-  }))
+  const cardActions = deck.map((c, i) => {
+    const trickIndex = Math.floor(i / 4)
+    const positionInTrick = i % 4
+    const trickStartIndex = trickIndex * 4
+    const currentTrick = deck.slice(trickStartIndex, i).map((playedCard, offset) => ({
+      sequence: trickStartIndex + offset + 1,
+      trickIndex,
+      positionInTrick: offset,
+      seat: (['bottom', 'right', 'top', 'left'] as Seat[])[offset]!,
+      card: playedCard,
+    }))
+
+    return {
+      sequence: i + 1,
+      timestamp: now,
+      trickIndex,
+      positionInTrick,
+      seat: (['bottom', 'right', 'top', 'left'] as Seat[])[positionInTrick]!,
+      actorKind: 'human_manual' as const,
+      visibleBeforeAction: {
+        ownHand: [] as ServerCard[],
+        legalCards: [] as ServerCard[],
+        contract: { bidderSeat: 'bottom' as Seat, contract: 'suit' as const, trumpSuit: 'hearts' as const, doubled: false, redoubled: false },
+        playedCardCountBeforeAction: i,
+        currentTrick,
+        currentWinningSeat: null as Seat | null,
+        currentWinningCard: null as ServerCard | null,
+        dealerSeat: 'bottom' as Seat,
+        leaderSeat: 'bottom' as Seat,
+        scoreBeforeDeal: { team0: 0, team1: 0 },
+      },
+      chosenCard: c,
+    }
+  })
 
   const tricks: TrainingTrickResult[] = Array.from({ length: 8 }, (_, ti) => ({
     trickIndex: ti,
     leaderSeat: 'bottom' as Seat,
     plays: (['bottom', 'right', 'top', 'left'] as Seat[]).map((s, pi) => ({
-      sequence: pi,
+      sequence: ti * 4 + pi + 1,
       seat: s,
       card: deck[ti * 4 + pi]!,
     })),
@@ -866,7 +884,7 @@ checkSync('[11] validateTrainingRecord: 9 tricks → violation', () => {
   const base = makeDealRecord()
   const extra: TrainingTrickResult = {
     trickIndex: 8, leaderSeat: 'bottom',
-    plays: (['bottom', 'right', 'top', 'left'] as Seat[]).map((s, i) => ({ sequence: i, seat: s, card: deck[i]! })),
+    plays: (['bottom', 'right', 'top', 'left'] as Seat[]).map((s, i) => ({ sequence: i + 1, seat: s, card: deck[i]! })),
     winnerSeat: 'bottom', winningCard: deck[0]!, points: 0,
   }
   const rec = makeDealRecord({ tricks: [...base.tricks, extra] })
@@ -896,7 +914,7 @@ checkSync('[13] validateTrainingRecord: card sequence not strictly increasing �
   const rec = makeDealRecord({ cardActions })
   const i = validateTrainingRecord(rec, JSON.stringify(rec))
   assert(!i.valid, 'expected invalid')
-  assert(i.violations.some((v) => v.includes('Card action sequence not strictly increasing')), `violations: ${i.violations.join('; ')}`)
+  assert(i.violations.some((v) => v.includes('Card action sequence must be contiguous 1-based')), `violations: ${i.violations.join('; ')}`)
 })
 checkSync('[14] validateTrainingRecord: payload > 500KB → violation', () => {
   const rec = makeDealRecord()
@@ -917,7 +935,7 @@ checkSync('[16] Integrity: bidding_only with card actions → violation', () => 
     cardActions: [{
       sequence: 1, timestamp: now, trickIndex: 0, positionInTrick: 0,
       seat: 'bottom', actorKind: 'human_manual',
-      visibleBeforeAction: { ownHand: [], legalCards: [], contract: { bidderSeat: 'bottom', contract: 'suit', trumpSuit: null, doubled: false, redoubled: false }, cardsPlayedBeforeAction: [], currentTrick: [], currentWinningSeat: null, currentWinningCard: null, dealerSeat: 'bottom', leaderSeat: 'bottom', scoreBeforeDeal: { team0: 0, team1: 0 } },
+      visibleBeforeAction: { ownHand: [], legalCards: [], contract: { bidderSeat: 'bottom', contract: 'suit', trumpSuit: null, doubled: false, redoubled: false }, playedCardCountBeforeAction: 0, currentTrick: [], currentWinningSeat: null, currentWinningCard: null, dealerSeat: 'bottom', leaderSeat: 'bottom', scoreBeforeDeal: { team0: 0, team1: 0 } },
       chosenCard: deck[0]!,
     }],
   })
@@ -1071,7 +1089,10 @@ checkSync('[25] collectorOnDealComplete: дублиран → duplicate', () => 
   const r1 = collectorOnDealComplete(roomId, completedState(splitHands(deck), wb))
   assert(r1.kind === 'enqueued', 'first call must enqueue')
   const r2 = collectorOnDealComplete(roomId, completedState(splitHands(deck), wb))
-  assert(r2.kind === 'no_active_deal', `second call must be no_active_deal, got ${r2.kind}`)
+  assert(r2.kind === 'duplicate', `second call must be duplicate, got ${r2.kind}`)
+  assert(collectorGetRecentlyFinalizedDealCount() > 0, 'recently finalized registry must track the finalized room')
+  const r3 = collectorOnDealComplete(`${roomId}-unknown`, completedState(splitHands(deck), wb))
+  assert(r3.kind === 'no_active_deal', `unknown room must be no_active_deal, got ${r3.kind}`)
 })
 
 checkSync('[26] collectorOnAllPass: bidding_only record', () => {
@@ -1102,6 +1123,19 @@ checkSync('[27] collectorDropDeal: removes active state', () => {
   assertEqual(collectorGetActiveDealCount(), before - 1, 'count -1')
 })
 
+checkSync('[27b] collector state: many room ids do not leave active or per-room sequence state behind', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const beforeActive = collectorGetActiveDealCount()
+  for (let i = 0; i < 250; i++) {
+    const roomId = `tr-${Date.now()}-27b-${i}`
+    const result = collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding'), 'secret-key-1234567')
+    assertEqual(result, 'started', `start result ${i}`)
+    collectorDropDeal(roomId)
+  }
+  assertEqual(collectorGetActiveDealCount(), beforeActive, 'active state count returns to baseline')
+})
+
 checkSync('[28] roomKey е HMAC pseudonym, не raw room ID', () => {
   const deck = fullDeck()
   const biddingHands = splitHandsBidding(deck)
@@ -1115,6 +1149,32 @@ checkSync('[28] roomKey е HMAC pseudonym, не raw room ID', () => {
   assertEqual(rec!.roomKey.length, 64, 'roomKey must be 64-char HMAC hex')
 })
 
+checkAsync('[28b] metrics: duplicateDeals and noActiveDeal are separate counters', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tr-metrics-'))
+  try {
+    process.env['TRAINING_RECORDER_ENABLED'] = 'true'
+    process.env['TRAINING_RECORDER_HASH_SECRET'] = 'metrics-secret-32chars!!!!'
+    process.env['TRAINING_RECORDER_PATH'] = dir
+    const recorder = createTrainingRecorder('metrics')
+    const deck = fullDeck()
+    const roomId = `tr-${Date.now()}-28b`
+    const wb = makeWinningBid()
+    recorder.onBiddingStart(makeRoom(roomId), baseState(splitHandsBidding(deck), 'bidding'))
+    recorder.onDealComplete(roomId, completedState(splitHands(deck), wb))
+    recorder.onDealComplete(roomId, completedState(splitHands(deck), wb))
+    recorder.onDealComplete(`${roomId}-never-started`, completedState(splitHands(deck), wb))
+    const metrics = recorder.getMetrics()
+    assertEqual(metrics.duplicateDeals, 1, 'duplicateDeals increments only for duplicate finalize')
+    assertEqual(metrics.noActiveDeal, 1, 'noActiveDeal increments only for unknown finalize')
+    await recorder.shutdown(500)
+  } finally {
+    delete process.env['TRAINING_RECORDER_ENABLED']
+    delete process.env['TRAINING_RECORDER_HASH_SECRET']
+    delete process.env['TRAINING_RECORDER_PATH']
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 // [29] Noop shutdown
 checkAsync('[29] noop recorder: shutdown resolves без грешка', async () => {
   delete process.env['TRAINING_RECORDER_ENABLED']
@@ -1126,7 +1186,12 @@ checkAsync('[29] noop recorder: shutdown resolves без грешка', async ()
 checkAsync('[30] queue overflow: drops records without throw', async () => {
   const metrics = createMutableMetrics()
   const slowWriter = {
-    write: async (_p: string) => { await new Promise<void>((r) => setTimeout(r, 60_000)) },
+    write: async (_p: string) => {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 60_000)
+        timer.unref()
+      })
+    },
     getCurrentFilePath: () => null,
     shutdown: async () => {},
   }
@@ -1235,7 +1300,28 @@ checkSync('[32] full deal integration: 20 bidding cards + 7 bids + 32 card plays
   assert(rec!.integrity.valid, `integrity violations: ${rec!.integrity.violations.join('; ')}`)
   assertEqual(rec!.biddingActions.length, bids.length, 'biddingActions count')
   assertEqual(rec!.cardActions.length, 32, 'cardActions count')
+  const cardSequences = rec!.cardActions.map((a) => a.sequence)
+  assertEqual(Math.min(...cardSequences), 1, 'minimum card sequence')
+  assertEqual(Math.max(...cardSequences), 32, 'maximum card sequence')
+  assertEqual(new Set(cardSequences).size, 32, 'card sequences unique')
+  for (let i = 0; i < 32; i++) {
+    assertEqual(cardSequences[i], i + 1, `card sequence at index ${i}`)
+    assertEqual(
+      rec!.cardActions[i]!.visibleBeforeAction.playedCardCountBeforeAction,
+      i,
+      `playedCardCountBeforeAction at sequence ${i + 1}`,
+    )
+  }
+  assertEqual(rec!.cardActions[1]!.visibleBeforeAction.currentTrick[0]!.sequence, 1, 'before second card currentTrick sequence')
+  assertEqual(
+    rec!.cardActions[3]!.visibleBeforeAction.currentTrick.map((p) => p.sequence).join(','),
+    '1,2,3',
+    'before fourth card currentTrick sequences',
+  )
+  assertEqual(rec!.cardActions[4]!.sequence, 5, 'first card of second trick continues at sequence 5')
+  assertEqual(rec!.cardActions[31]!.sequence, 32, 'last card sequence')
   assertEqual(rec!.tricks.length, 8, 'tricks count')
+  assertEqual(rec!.tricks[7]!.plays[3]!.sequence, 32, 'last trick play global sequence')
   assertEqual(rec!.finalContract?.trumpSuit ?? null, 'hearts', 'trumpSuit')
   assertEqual(rec!.recordKind, 'full', 'recordKind')
 })
@@ -1463,6 +1549,129 @@ checkSync('[43] Action-level dedup: same card observed twice → one card action
   collectorDropDeal(roomId)
 })
 
+checkSync('[43b] Canonical submitHumanBidActionForRoom success records exactly one human_manual bid', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const roomId = `tr-${Date.now()}-43b`
+  const stateBefore = baseState(biddingHands, 'bidding', {
+    bidding: { entries: [], currentSeat: 'right', winningBid: null, hasStarted: true, hasEnded: false, consecutivePasses: 0 },
+  })
+  collectorOnBiddingStart(makeRoom(roomId), stateBefore, 'secret-key-1234567')
+  const room = makeE2eRoom(roomId, stateBefore, E2E_SEAT_KINDS)
+  const result = submitHumanBidActionForRoom(room, 'right', { type: 'pass' })
+  assert(result.ok, result.ok ? 'ok' : result.message)
+  handleTrainingRecorderHumanBid({
+    onBidAction: (id, before, after, entry, origin) => {
+      const r = collectorOnBidAction(id, before, after, entry, origin)
+      assertEqual(r, 'recorded', 'collectorOnBidAction result')
+    },
+    onBiddingStart: () => undefined,
+    onPlayingStart: () => undefined,
+    onCardPlayed: () => undefined,
+    onDealComplete: () => undefined,
+    onAllPass: () => undefined,
+    onDealAbandoned: () => undefined,
+    onInvalidTransition: () => undefined,
+    getMetrics: () => createTrainingRecorder().getMetrics(),
+    shutdown: async () => undefined,
+  }, room, result.room)
+  const recResult = collectorOnDealComplete(roomId, completedState(splitHands(deck), makeWinningBid()))
+  assert(recResult.kind === 'enqueued', `expected enqueued, got ${recResult.kind}`)
+  assertEqual(recResult.record.biddingActions.length, 1, 'exactly one bid action')
+  assertEqual(recResult.record.biddingActions[0]!.actorKind, 'human_manual', 'actorKind')
+})
+
+checkSync('[43c] Canonical submitHumanBidActionForRoom rejected bid is not recorded', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const roomId = `tr-${Date.now()}-43c`
+  const stateBefore = baseState(biddingHands, 'bidding', {
+    bidding: { entries: [], currentSeat: 'right', winningBid: null, hasStarted: true, hasEnded: false, consecutivePasses: 0 },
+  })
+  collectorOnBiddingStart(makeRoom(roomId), stateBefore, 'secret-key-1234567')
+  const room = makeE2eRoom(roomId, stateBefore, E2E_SEAT_KINDS)
+  const result = submitHumanBidActionForRoom(room, 'top', { type: 'pass' })
+  assert(!result.ok, 'bid from wrong seat must be rejected')
+  const recResult = collectorOnDealComplete(roomId, completedState(splitHands(deck), makeWinningBid()))
+  assert(recResult.kind === 'enqueued', `expected enqueued, got ${recResult.kind}`)
+  assertEqual(recResult.record.biddingActions.length, 0, 'rejected bid must not be recorded')
+})
+
+checkSync('[43d] Canonical submitHumanPlayCardForRoom success records exactly one human_manual card', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const fullHands = splitHands(deck)
+  const roomId = `tr-${Date.now()}-43d`
+  const wb = makeWinningBid('bottom')
+  collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding'), 'secret-key-1234567')
+  collectorOnPlayingStart(roomId, baseState(fullHands, 'playing'))
+  const stateBefore = baseState(fullHands, 'playing', {
+    bidding: { entries: [], currentSeat: null, winningBid: wb, hasStarted: true, hasEnded: true, consecutivePasses: 0 },
+    playing: {
+      hasStarted: true,
+      currentTurnSeat: 'bottom',
+      currentTrick: { leaderSeat: 'bottom', currentSeat: 'bottom', plays: [], winnerSeat: null, trickIndex: 0 },
+      completedTricks: [],
+      lastCompletedTrickWinnerSeat: null,
+      lastCompletedTrickWinnerTeam: null,
+      wonTricksBySeat: emptyWon(),
+      wonTricksByTeam: { A: [], B: [] },
+    },
+  })
+  const room = makeE2eRoom(roomId, stateBefore, E2E_SEAT_KINDS)
+  const cardId = fullHands.bottom[0]!.id
+  const result = submitHumanPlayCardForRoom(room, 'bottom', cardId)
+  assert(result.ok, result.ok ? 'ok' : result.message)
+  handleTrainingRecorderHumanCard({
+    onCardPlayed: (id, before, after, play, origin) => {
+      const r = collectorOnCardPlayed(id, before, after, play, origin)
+      assertEqual(r, 'recorded', 'collectorOnCardPlayed result')
+    },
+    onBiddingStart: () => undefined,
+    onPlayingStart: () => undefined,
+    onBidAction: () => undefined,
+    onDealComplete: () => undefined,
+    onAllPass: () => undefined,
+    onDealAbandoned: () => undefined,
+    onInvalidTransition: () => undefined,
+    getMetrics: () => createTrainingRecorder().getMetrics(),
+    shutdown: async () => undefined,
+  }, room, result.room)
+  const recResult = collectorOnDealComplete(roomId, completedState(fullHands, wb))
+  assert(recResult.kind === 'enqueued', `expected enqueued, got ${recResult.kind}`)
+  assertEqual(recResult.record.cardActions.length, 1, 'exactly one card action')
+  assertEqual(recResult.record.cardActions[0]!.actorKind, 'human_manual', 'actorKind')
+})
+
+checkSync('[43e] Canonical submitHumanPlayCardForRoom rejected card is not recorded', () => {
+  const deck = fullDeck()
+  const biddingHands = splitHandsBidding(deck)
+  const fullHands = splitHands(deck)
+  const roomId = `tr-${Date.now()}-43e`
+  const wb = makeWinningBid('bottom')
+  collectorOnBiddingStart(makeRoom(roomId), baseState(biddingHands, 'bidding'), 'secret-key-1234567')
+  collectorOnPlayingStart(roomId, baseState(fullHands, 'playing'))
+  const stateBefore = baseState(fullHands, 'playing', {
+    bidding: { entries: [], currentSeat: null, winningBid: wb, hasStarted: true, hasEnded: true, consecutivePasses: 0 },
+    playing: {
+      hasStarted: true,
+      currentTurnSeat: 'bottom',
+      currentTrick: { leaderSeat: 'bottom', currentSeat: 'bottom', plays: [], winnerSeat: null, trickIndex: 0 },
+      completedTricks: [],
+      lastCompletedTrickWinnerSeat: null,
+      lastCompletedTrickWinnerTeam: null,
+      wonTricksBySeat: emptyWon(),
+      wonTricksByTeam: { A: [], B: [] },
+    },
+  })
+  const room = makeE2eRoom(roomId, stateBefore, E2E_SEAT_KINDS)
+  const result = submitHumanPlayCardForRoom(room, 'top', fullHands.top[0]!.id)
+  assert(!result.ok, 'card from wrong seat must be rejected')
+  const recResult = collectorOnDealComplete(roomId, completedState(fullHands, wb))
+  assert(recResult.kind === 'enqueued', `expected enqueued, got ${recResult.kind}`)
+  assertEqual(recResult.record.cardActions.length, 0, 'rejected card must not be recorded')
+})
+
 // [44-47] Canonical trick points
 checkSync('[44] Canonical trick points: suit contract (hearts trump)', () => {
   const trick = { plays: [
@@ -1511,27 +1720,67 @@ checkSync('[47] Canonical trick points: double/redouble do not change raw trick 
 
 // [48] Semantic outcome matches legacy label mapping
 checkSync('[48] Semantic outcome: scoring.outcome matches legacy outcomeShortLabel mapping', () => {
-  const madeLabel = getServerOutcomeShortLabel('made')
-  const insideLabel = getServerOutcomeShortLabel('inside')
-  const tieLabel = getServerOutcomeShortLabel('tie')
-  assertEqual(madeLabel, 'Изкарана', 'made label unchanged')
-  assertEqual(insideLabel, 'Вътре', 'inside label unchanged')
-  assertEqual(tieLabel, 'Равна', 'tie label unchanged')
-
   const wb = makeWinningBid()
-  for (const outcome of ['made', 'inside', 'tie'] as const) {
-    const scoring = makeScoring(wb, { outcome, outcomeShortLabel: getServerOutcomeShortLabel(outcome) })
-    const legacyIsTie = scoring.outcomeShortLabel === 'Равна'
-    const legacyIsInside = scoring.outcomeShortLabel === 'Вътре'
-    const legacyIsMade = !legacyIsTie && !legacyIsInside
-    assertEqual(scoring.outcome === 'tie', legacyIsTie, `isTie mismatch for ${outcome}`)
-    assertEqual(scoring.outcome === 'inside', legacyIsInside, `isInside mismatch for ${outcome}`)
-    assertEqual(scoring.outcome === 'made', legacyIsMade, `isMade mismatch for ${outcome}`)
+  const legacyMade = makeScoring(wb, { outcomeShortLabel: getServerOutcomeShortLabel('made') }) as Omit<ServerScoringState, 'outcome'>
+  delete (legacyMade as Partial<ServerScoringState>).outcome
+  assertEqual(normalizeServerScoringState(legacyMade as ServerScoringState)?.outcome, 'made', 'legacy made label')
+
+  const legacyInside = makeScoring(wb, { outcomeShortLabel: getServerOutcomeShortLabel('inside') }) as Omit<ServerScoringState, 'outcome'>
+  delete (legacyInside as Partial<ServerScoringState>).outcome
+  assertEqual(normalizeServerScoringState(legacyInside as ServerScoringState)?.outcome, 'inside', 'legacy inside label')
+
+  const legacyTie = makeScoring(wb, { outcomeShortLabel: getServerOutcomeShortLabel('tie') }) as Omit<ServerScoringState, 'outcome'>
+  delete (legacyTie as Partial<ServerScoringState>).outcome
+  assertEqual(normalizeServerScoringState(legacyTie as ServerScoringState)?.outcome, 'tie', 'legacy tie label')
+
+  const modern = makeScoring(wb, { outcome: 'inside', outcomeShortLabel: getServerOutcomeShortLabel('made') })
+  assertEqual(normalizeServerScoringState(modern)?.outcome, 'inside', 'modern outcome is preserved')
+
+  const unknownLegacy = makeScoring(wb, { outcomeShortLabel: 'unknown legacy label' }) as Omit<ServerScoringState, 'outcome'>
+  delete (unknownLegacy as Partial<ServerScoringState>).outcome
+  assertEqual(normalizeServerScoringState(unknownLegacy as ServerScoringState)?.outcome, 'made', 'unknown legacy label fails safe')
+})
+
+// [49] Retention safety
+checkAsync('[49a] Retention cleanup deletes only strict closed recorder JSONL files', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tr-retention-'))
+  try {
+    const oldDir = join(dir, '2000-01-01')
+    await mkdir(oldDir, { recursive: true })
+    const closedPath = join(oldDir, 'process-old-worker-0-part-0001.jsonl')
+    const keepTxt = join(oldDir, 'keep-me.txt')
+    const crashedActive = join(oldDir, 'crashed.active.jsonl')
+    const archiveGz = join(oldDir, 'archive.gz')
+    await writeFile(closedPath, '{"old":true}\n')
+    await writeFile(keepTxt, 'keep')
+    await writeFile(crashedActive, '{"active":true}\n')
+    await writeFile(archiveGz, 'gz')
+
+    const metrics = createMutableMetrics()
+    const writer = createTrainingRecorderWriter(
+      { enabled: true, storagePath: dir, hashSecret: 'x'.repeat(20), maxFileMb: 100, maxTotalGb: 10, maxQueue: 1000, retentionDays: 1, processId: 'R', workerId: '0' },
+      metrics,
+    )
+    await writer.write('{"trigger":true}')
+
+    const closedGone = await stat(closedPath).then(() => false).catch(() => true)
+    const txtExists = await stat(keepTxt).then(() => true).catch(() => false)
+    const activeExists = await stat(crashedActive).then(() => true).catch(() => false)
+    const gzExists = await stat(archiveGz).then(() => true).catch(() => false)
+    const oldDirExists = await stat(oldDir).then(() => true).catch(() => false)
+    assert(closedGone, 'strict closed recorder .jsonl must be deleted')
+    assert(txtExists, 'keep-me.txt must remain')
+    assert(activeExists, 'crashed.active.jsonl must remain')
+    assert(gzExists, 'archive.gz must remain')
+    assert(oldDirExists, 'non-empty old directory must remain')
+    await writer.shutdown(200)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
   }
 })
 
 // [49] Multi-process writer safety
-checkAsync('[49] Multi-process writer safety: active file of A survives cleanup by B; old closed file is deleted', async () => {
+checkAsync('[49b] Total-size cleanup: active and unknown files survive; old strict closed file is eligible', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'tr-multiproc-'))
   try {
     const metricsA = createMutableMetrics()
@@ -1547,33 +1796,37 @@ checkAsync('[49] Multi-process writer safety: active file of A survives cleanup 
     // Manufacture an old, large, CLOSED file belonging to a different process
     // so writer B's maxTotalGb enforcement has something eligible to delete.
     const oldDir = join(dir, '2000-01-01')
-    const { mkdir: mkdirFs, writeFile, utimes } = await import('node:fs/promises')
-    await mkdirFs(oldDir, { recursive: true })
+    const { utimes } = await import('node:fs/promises')
+    await mkdir(oldDir, { recursive: true })
     const oldClosedPath = join(oldDir, 'process-OLD-worker-0-part-0001.jsonl')
+    const unknownPath = join(oldDir, 'not-a-recorder.jsonl')
     await writeFile(oldClosedPath, 'x'.repeat(2_000_000))
+    await writeFile(unknownPath, 'x'.repeat(2_000_000))
     const oldDate = new Date('2000-01-01T00:00:00Z')
     await utimes(oldClosedPath, oldDate, oldDate)
+    await utimes(unknownPath, oldDate, oldDate)
 
     const metricsB = createMutableMetrics()
     // Tiny maxTotalGb so enforceMaxTotalSize is forced to run and delete something.
     const writerB = createTrainingRecorderWriter(
-      { enabled: true, storagePath: dir, hashSecret: 'x'.repeat(20), maxFileMb: 100, maxTotalGb: 0.000001, maxQueue: 1000, retentionDays: 90, processId: 'B', workerId: '0' },
+      { enabled: true, storagePath: dir, hashSecret: 'x'.repeat(20), maxFileMb: 100, maxTotalGb: 0.000001, maxQueue: 1000, retentionDays: 100_000, processId: 'B', workerId: '0' },
       metricsB,
     )
     await writerB.write('{"b":1}')
 
-    const { stat: statFs } = await import('node:fs/promises')
-    const aStillActive = await statFs(activePathA!).then(() => true).catch(() => false)
+    const aStillActive = await stat(activePathA!).then(() => true).catch(() => false)
     assert(aStillActive, "writer A's active file must survive writer B's cleanup")
 
-    const oldFileGone = await statFs(oldClosedPath).then(() => false).catch(() => true)
+    const oldFileGone = await stat(oldClosedPath).then(() => false).catch(() => true)
     assert(oldFileGone, 'old closed file from another process must be deleted by size enforcement')
+    const unknownStillExists = await stat(unknownPath).then(() => true).catch(() => false)
+    assert(unknownStillExists, 'unknown .jsonl file must not be deleted by size enforcement')
 
     await writerA.shutdown(200)
     await writerB.shutdown(200)
 
     const aClosedPath = activePathA!.replace('.active.jsonl', '.jsonl')
-    const aClosedExists = await statFs(aClosedPath).then(() => true).catch(() => false)
+    const aClosedExists = await stat(aClosedPath).then(() => true).catch(() => false)
     assert(aClosedExists, 'writer A file must be finalized to *.jsonl on shutdown')
   } finally {
     await rm(dir, { recursive: true, force: true })
@@ -1583,6 +1836,7 @@ checkAsync('[49] Multi-process writer safety: active file of A survives cleanup 
 // [50] Full deal end-to-end via real hooks + real writer
 let e2eFullDealBytes = 0
 let e2eFullDealGzipBytes = 0
+let e2eFullJsonlPath: string | null = null
 checkAsync('[50] Full deal end-to-end via real hooks + real writer → physical JSONL row is correct', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'tr-e2e-full-'))
   try {
@@ -1608,6 +1862,7 @@ checkAsync('[50] Full deal end-to-end via real hooks + real writer → physical 
     assertEqual(jsonlFiles.length, 1, `expected exactly one closed .jsonl file, got: ${files.map((f) => f.name).join(', ')}`)
 
     const filePath = join(dir, dateDirs[0]!.name, jsonlFiles[0]!.name)
+    e2eFullJsonlPath = filePath
     const raw = await readFile(filePath, 'utf8')
     const lines = raw.split('\n').filter((l) => l.trim().length > 0)
     assertEqual(lines.length, 1, 'JSONL rows = 1')
@@ -1650,13 +1905,14 @@ checkAsync('[50] Full deal end-to-end via real hooks + real writer → physical 
     assert(botOriginalCardActions.length > 0, 'expected at least one bot_original card action')
     assert(botTakeoverCardActions.length > 0, 'expected at least one bot_takeover card action (left seat, post-timeout)')
   } finally {
-    await rm(dir, { recursive: true, force: true })
+    // Keep the generated physical JSONL long enough for the validator test.
   }
 })
 
 // [51] All-pass end-to-end via real hooks + real writer
 let e2eBiddingOnlyBytes = 0
 let e2eBiddingOnlyGzipBytes = 0
+let e2eBiddingOnlyJsonlPath: string | null = null
 checkAsync('[51] All-pass end-to-end via real hooks + real writer → physical JSONL row is correct', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'tr-e2e-pass-'))
   try {
@@ -1682,6 +1938,7 @@ checkAsync('[51] All-pass end-to-end via real hooks + real writer → physical J
     assertEqual(jsonlFiles.length, 1, `expected exactly one closed .jsonl file, got: ${files.map((f) => f.name).join(', ')}`)
 
     const filePath = join(dir, dateDirs[0]!.name, jsonlFiles[0]!.name)
+    e2eBiddingOnlyJsonlPath = filePath
     const raw = await readFile(filePath, 'utf8')
     const lines = raw.split('\n').filter((l) => l.trim().length > 0)
     assertEqual(lines.length, 1, 'JSONL rows = 1')
@@ -1698,8 +1955,39 @@ checkAsync('[51] All-pass end-to-end via real hooks + real writer → physical J
     assertEqual(rec.tricks.length, 0, 'tricks = 0')
     assert(rec.integrity.valid, `integrity.valid must be true: ${rec.integrity.violations.join('; ')}`)
   } finally {
-    await rm(dir, { recursive: true, force: true })
+    // Keep the generated physical JSONL long enough for the validator test.
   }
+})
+
+function runValidator(targetPath: string): { status: number | null; stdout: string; stderr: string } {
+  const tsxCli = join(process.cwd(), 'node_modules', 'tsx', 'dist', 'cli.mjs')
+  const result = spawnSync(
+    process.execPath,
+    [tsxCli, 'scripts/validateTrainingRecordings.ts', targetPath],
+    { cwd: process.cwd(), encoding: 'utf8' },
+  )
+  return {
+    status: result.status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? (result.error instanceof Error ? result.error.message : ''),
+  }
+}
+
+checkAsync('[52] Physical JSONL validator: full, all-pass, and combined directory exit 0', async () => {
+  assertNotNull(e2eFullJsonlPath, 'full e2e JSONL path')
+  assertNotNull(e2eBiddingOnlyJsonlPath, 'bidding-only e2e JSONL path')
+
+  const fullResult = runValidator(e2eFullJsonlPath!)
+  assertEqual(fullResult.status, 0, `full validator exit code; stdout=${fullResult.stdout}; stderr=${fullResult.stderr}`)
+
+  const passResult = runValidator(e2eBiddingOnlyJsonlPath!)
+  assertEqual(passResult.status, 0, `all-pass validator exit code; stdout=${passResult.stdout}; stderr=${passResult.stderr}`)
+
+  const combinedDir = await mkdtemp(join(tmpdir(), 'tr-e2e-combined-'))
+  await writeFile(join(combinedDir, 'full.jsonl'), await readFile(e2eFullJsonlPath!, 'utf8'))
+  await writeFile(join(combinedDir, 'all-pass.jsonl'), await readFile(e2eBiddingOnlyJsonlPath!, 'utf8'))
+  const combinedResult = runValidator(combinedDir)
+  assertEqual(combinedResult.status, 0, `combined validator exit code; stdout=${combinedResult.stdout}; stderr=${combinedResult.stderr}`)
 })
 
 // ─── Run async tests and print summary ───────────────────────────────────────
