@@ -1173,6 +1173,8 @@ async function tickRoomGameRuntimes(): Promise<void> {
                 console.error(
                   `[match-economy] payout failed room=${room.id}: ${payoutResult.message}`,
                 )
+              } else {
+                room.awardedPrizePerSeat = payoutResult.awardedPerSeat
               }
             },
           )

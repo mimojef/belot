@@ -83,6 +83,7 @@ const previewGame: RoomGameSnapshot = {
     endedAt: Date.now(),
     replayVotes: ['bottom'],
     leaveVotes: ['right'],
+    awardedPrizeAmount: 13000,
   },
   declarations: [],
   score: {

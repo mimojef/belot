@@ -8,7 +8,7 @@ export type MatchmakingRoomPlayer = {
 }
 
 export type RenderMatchmakingRoomScreenParams = {
-  prizeAmount: number
+  prizeAmount: number | null
   entryAmount: number
   localPlayer: MatchmakingRoomPlayer
   joinedPlayers?: MatchmakingRoomPlayer[]
@@ -787,7 +787,7 @@ function renderMobileMatchmakingRoomScreen(
           <div class="mm-mobile-stake-item">
             <div class="mm-mobile-stake-label">Награда</div>
             <div class="mm-mobile-stake-value">
-              <span>${escapeHtml(formatAmount(params.prizeAmount))}</span>
+              <span>${escapeHtml(params.prizeAmount !== null ? formatAmount(params.prizeAmount) : '—')}</span>
               <img src="${COIN_ICON_SRC}" alt="" draggable="false">
             </div>
           </div>
@@ -1348,7 +1348,7 @@ export function renderMatchmakingRoomScreen(
               <div class="mm-stake-item">
                 <div class="mm-stake-label">Награда</div>
                 <div class="mm-stake-amount">
-                  <span>${escapeHtml(formatAmount(params.prizeAmount))}</span>
+                  <span>${escapeHtml(params.prizeAmount !== null ? formatAmount(params.prizeAmount) : '—')}</span>
                   <img src="${COIN_ICON_SRC}" alt="" draggable="false" />
                 </div>
               </div>

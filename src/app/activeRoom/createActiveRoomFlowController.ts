@@ -125,17 +125,6 @@ const SEAT_LABELS: Record<Seat, string> = {
 
 const REACTION_COUNTDOWN_WARNING_THRESHOLD_MS = 7_000
 
-const STAKE_PRIZE_MAP: Partial<Record<number, number>> = {
-  5000: 8000,
-  8000: 12000,
-  10000: 15000,
-  15000: 22000,
-  20000: 30000,
-}
-
-function getStakePrizeAmount(stake: number): number {
-  return STAKE_PRIZE_MAP[stake] ?? stake
-}
 
 export function createActiveRoomFlowController(
   options: CreateActiveRoomFlowControllerOptions,
@@ -2932,7 +2921,7 @@ export function createActiveRoomFlowController(
         stageScale,
         scaledStageWidth,
         scaledStageHeight,
-        prizeAmount: getStakePrizeAmount(activeRoomState.stake),
+        prizeAmount: activeRoomState.game?.matchEnded?.awardedPrizeAmount ?? null,
         skipPrizeAnimation: matchEndedPrizeAnimated,
         countdownSeconds: matchEndedCountdownSeconds,
         onReturnToLobby: returnToLobbyFromMatchEnded,
