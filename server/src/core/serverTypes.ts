@@ -165,6 +165,7 @@ export type ServerRoom = {
   game: ServerRoomGameSnapshot
   replayVotes: Seat[]
   leaveVotes: Seat[]
+  awardedPrizePerSeat?: Partial<Record<Seat, number>>
 }
 
 export type ServerConnection = {

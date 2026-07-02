@@ -236,12 +236,17 @@ function createMatchEndedSnapshot(
   authoritativeState: ServerAuthoritativeGameState,
   replayVotes: import('../core/serverTypes.js').Seat[],
   leaveVotes: import('../core/serverTypes.js').Seat[],
+  awardedPrizePerSeat: Partial<Record<import('../core/serverTypes.js').Seat, number>> | undefined,
+  yourSeat: import('../core/serverTypes.js').Seat | null,
 ): RoomMatchEndedSnapshot | null {
   const matchEnded = authoritativeState.matchEnded
 
   if (matchEnded === null) {
     return null
   }
+
+  const awardedPrizeAmount =
+    yourSeat !== null ? (awardedPrizePerSeat?.[yourSeat] ?? null) : null
 
   return {
     winnerTeam: matchEnded.winnerTeam,
@@ -250,6 +255,7 @@ function createMatchEndedSnapshot(
     endedAt: matchEnded.endedAt,
     replayVotes,
     leaveVotes,
+    awardedPrizeAmount,
   }
 }
 
@@ -293,7 +299,7 @@ function createGameSnapshot(
     bidding: createBiddingSnapshot(authoritativeState, yourSeat),
     playing: createPlayingSnapshot(authoritativeState, yourSeat),
     scoring: createScoringSnapshot(authoritativeState),
-    matchEnded: createMatchEndedSnapshot(authoritativeState, room.replayVotes ?? [], room.leaveVotes ?? []),
+    matchEnded: createMatchEndedSnapshot(authoritativeState, room.replayVotes ?? [], room.leaveVotes ?? [], room.awardedPrizePerSeat, yourSeat),
     declarations: authoritativeState.declarations.map(createDeclarationSnapshot),
     score: {
       match: createTeamPointsSnapshot(authoritativeState.score.match),

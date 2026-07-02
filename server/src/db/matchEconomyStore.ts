@@ -31,7 +31,11 @@ export type MatchEconomyStore = {
     room: ServerRoom,
     stakeAmount: number,
   ) => { ok: true } | { ok: false; message: string }
-  payoutMatchWinners: (room: ServerRoom) => { ok: true } | { ok: false; message: string }
+  payoutMatchWinners: (
+    room: ServerRoom,
+  ) =>
+    | { ok: true; awardedPerSeat: Partial<Record<import('../core/serverTypes.js').Seat, number>> }
+    | { ok: false; message: string }
   close: () => void
 }
 
@@ -105,8 +109,10 @@ function getBotProfileIds(room: ServerRoom): ProfileId[] {
   return profileIds
 }
 
-function getWinningProfileIds(room: ServerRoom, winnerTeam: Team): ProfileId[] {
-  const profileIds: ProfileId[] = []
+type WinningSeatEntry = { seat: (typeof SERVER_SEAT_ORDER)[number]; profileId: ProfileId }
+
+function getWinningSeatEntries(room: ServerRoom, winnerTeam: Team): WinningSeatEntry[] {
+  const entries: WinningSeatEntry[] = []
 
   for (const seat of SERVER_SEAT_ORDER) {
     if (getTeamBySeat(seat) !== winnerTeam) {
@@ -118,14 +124,14 @@ function getWinningProfileIds(room: ServerRoom, winnerTeam: Team): ProfileId[] {
     if (participant?.kind === 'human') {
       const profileId =
         participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
-      if (profileId !== null) profileIds.push(profileId)
+      if (profileId !== null) entries.push({ seat, profileId })
     } else if (participant?.kind === 'bot') {
       const profileId = participant.botProfileId ?? null
-      if (profileId !== null && !isTemporaryBotProfileId(profileId)) profileIds.push(profileId)
+      if (profileId !== null && !isTemporaryBotProfileId(profileId)) entries.push({ seat, profileId })
     }
   }
 
-  return profileIds
+  return entries
 }
 
 export async function createMatchEconomyStore(
@@ -207,6 +213,15 @@ export async function createMatchEconomyStore(
     LIMIT 1;
   `)
 
+  const selectLedgerAmountStatement = database.prepare(`
+    SELECT amount
+    FROM match_economy_ledger
+    WHERE room_id = ?
+      AND profile_id = ?
+      AND entry_type = ?
+    LIMIT 1;
+  `)
+
   function getWalletBalance(profileId: ProfileId): number {
     const row = selectWalletStatement.get(profileId) as WalletRow | undefined
     return row?.yellow_coins_balance ?? 0
@@ -218,6 +233,17 @@ export async function createMatchEconomyStore(
     entryType: MatchEconomyEntryType,
   ): boolean {
     return Boolean(selectLedgerStatement.get(roomId, profileId, entryType))
+  }
+
+  function getLedgerAmount(
+    roomId: string,
+    profileId: ProfileId,
+    entryType: MatchEconomyEntryType,
+  ): number | null {
+    const row = selectLedgerAmountStatement.get(roomId, profileId, entryType) as
+      | { amount: number }
+      | undefined
+    return row?.amount ?? null
   }
 
   function hasEnoughBalance(profileId: ProfileId, amount: number): boolean {
@@ -488,12 +514,16 @@ export async function createMatchEconomyStore(
     return { ok: true }
   }
 
-  function payoutMatchWinners(room: ServerRoom): { ok: true } | { ok: false; message: string } {
+  function payoutMatchWinners(
+    room: ServerRoom,
+  ):
+    | { ok: true; awardedPerSeat: Partial<Record<(typeof SERVER_SEAT_ORDER)[number], number>> }
+    | { ok: false; message: string } {
     const stakeAmount = room.config.stakeAmount ?? null
     const winnerTeam = getMatchWinnerTeam(room)
 
     if (winnerTeam === null || stakeAmount === null) {
-      return { ok: true }
+      return { ok: true, awardedPerSeat: {} }
     }
 
     if (!Number.isInteger(stakeAmount) || stakeAmount <= 0) {
@@ -504,16 +534,26 @@ export async function createMatchEconomyStore(
     }
 
     const prizeAmount = getPrizeAmount(stakeAmount)
-    const winnerProfileIds = getWinningProfileIds(room, winnerTeam)
+    const winningSeatEntries = getWinningSeatEntries(room, winnerTeam)
     const scope = `${room.id}:v${room.game.stateVersion}`
+    const awardedPerSeat: Partial<Record<(typeof SERVER_SEAT_ORDER)[number], number>> = {}
 
     try {
       database.exec('BEGIN;')
 
-      for (const profileId of winnerProfileIds) {
+      for (const { seat, profileId } of winningSeatEntries) {
         ensureWalletStatement.run(profileId)
 
         if (hasLedgerEntry(scope, profileId, 'winner_payout')) {
+          // Already credited — read the historical amount from the ledger, not the current admin prize
+          const historicalAmount = getLedgerAmount(scope, profileId, 'winner_payout')
+          if (historicalAmount !== null) {
+            awardedPerSeat[seat] = historicalAmount
+          } else {
+            console.error(
+              `[match-economy] winner_payout ledger entry exists but amount unreadable room=${scope} profile=${profileId}`,
+            )
+          }
           continue
         }
 
@@ -526,6 +566,7 @@ export async function createMatchEconomyStore(
           prizeAmount,
           getWalletBalance(profileId),
         )
+        awardedPerSeat[seat] = prizeAmount
       }
 
       database.exec('COMMIT;')
@@ -543,7 +584,7 @@ export async function createMatchEconomyStore(
       }
     }
 
-    return { ok: true }
+    return { ok: true, awardedPerSeat }
   }
 
   function close(): void {

@@ -600,11 +600,6 @@ type InternalLobbyFlowState = {
   pwaUpdateApplyFn: (() => void) | null
 }
 
-type StakeCardConfig = {
-  stake: MatchStake
-  prizeAmount: number
-}
-
 const DEFAULT_REQUIRED_PLAYERS = 4
 const DEFAULT_COUNTDOWN_MS = 20000
 const FINAL_FILL_START_REMAINING_MS = 3000
@@ -618,17 +613,6 @@ const SEAT_FILL_AUDIO_SRC = '/audio/ui/player-seat-fill.mp3'
 const SEAT_FILL_AUDIO_VOLUME = 0.9
 const SEAT_FILL_SOUND_STAGGER_MS = 120
 
-const STAKE_CARD_CONFIG: Record<MatchStake, StakeCardConfig> = {
-  5000: { stake: 5000, prizeAmount: 8000 },
-  8000: { stake: 8000, prizeAmount: 12000 },
-  10000: { stake: 10000, prizeAmount: 15000 },
-  15000: { stake: 15000, prizeAmount: 22000 },
-  20000: { stake: 20000, prizeAmount: 30000 },
-}
-
-function getStakePrizeAmount(stake: MatchStake): number {
-  return STAKE_CARD_CONFIG[stake]?.prizeAmount ?? stake
-}
 
 function createInitialState(): InternalLobbyFlowState {
   return {
@@ -4602,8 +4586,9 @@ export function createLobbyFlowController(
     )
     const displayedQueuedPlayers = getDisplayedQueuedPlayers()
 
+    const selectedMatchRoom = state.matchRooms.find((r) => r.stakeAmount === state.selectedStake)
     options.root.innerHTML = renderMatchmakingRoomScreen({
-      prizeAmount: getStakePrizeAmount(state.selectedStake),
+      prizeAmount: selectedMatchRoom?.prizeAmount ?? null,
       entryAmount: state.selectedStake,
       localPlayer: createDisplayedLocalPlayer(),
       joinedPlayers: createDisplayedJoinedPlayers(),

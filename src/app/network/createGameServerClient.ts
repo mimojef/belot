@@ -629,6 +629,7 @@ export type RoomMatchEndedSnapshot = {
   endedAt: number
   replayVotes: Seat[]
   leaveVotes: Seat[]
+  awardedPrizeAmount: number | null
 }
 
 export type RoomScoreSnapshot = {
