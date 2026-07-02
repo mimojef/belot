@@ -67,6 +67,7 @@ import type {
   Seat,
   ServerRoom,
   ServerState,
+  Team,
 } from './core/serverTypes.js'
 import { SERVER_SEAT_ORDER } from './core/serverTypes.js'
 import {
@@ -1147,6 +1148,21 @@ async function tickRoomGameRuntimes(): Promise<void> {
           broadcastRoomSnapshots(room, socketRegistry)
         },
         onApplied: (previousRoom, room) => {
+          const roundCapot = getRoundCapotTransition(previousRoom, room)
+          if (roundCapot !== null) {
+            runMatchCompletionSideEffect(
+              'record-round-capot',
+              room.id,
+              () => {
+                missionStore.recordRoundCapot({
+                  room,
+                  capotTeam: roundCapot.capotTeam,
+                  roundKey: roundCapot.roundKey,
+                })
+              },
+            )
+          }
+
           if (!shouldRunMatchCompletionSideEffects(previousRoom, room)) {
             return
           }
@@ -1514,6 +1530,49 @@ function shouldRunMatchCompletionSideEffects(
     !isRoomAtMatchEndedPhase(currentRoom) &&
     isRoomAtMatchEndedPhase(nextRoom)
   )
+}
+
+type RoundCapotTransition = {
+  capotTeam: Team
+  roundKey: string
+}
+
+function getRoundCapotTransition(
+  previousRoom: ServerRoom,
+  nextRoom: ServerRoom,
+): RoundCapotTransition | null {
+  const prevState = previousRoom.game.authoritativeState
+  const nextState = nextRoom.game.authoritativeState
+
+  if (
+    prevState === null ||
+    !('phase' in prevState) ||
+    prevState.phase !== 'playing'
+  ) {
+    return null
+  }
+
+  if (
+    nextState === null ||
+    !('phase' in nextState) ||
+    nextState.phase !== 'scoring'
+  ) {
+    return null
+  }
+
+  const scoring = nextState.scoring
+  if (scoring === null || !scoring.isCapotRound) {
+    return null
+  }
+
+  const tricksWon = scoring.rawHandTricksWon
+  const capotTeam: Team = tricksWon.teamA === 8 ? 'A' : 'B'
+
+  const prevScore = prevState.score.match
+  const dealerSeat = prevState.round.dealerSeat ?? 'bottom'
+  const roundKey = `${dealerSeat}:${prevScore.teamA}:${prevScore.teamB}`
+
+  return { capotTeam, roundKey }
 }
 
 function getPartnerSeat(seat: Seat): Seat {

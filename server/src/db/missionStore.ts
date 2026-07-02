@@ -79,6 +79,7 @@ export type MissionStore = {
     missionId: string,
     date: string,
   ) => { ok: true; rewardYellowCoins: number } | { ok: false; message: string }
+  recordRoundCapot: (params: { room: ServerRoom; capotTeam: Team; roundKey: string }) => void
   recordMatchCompletion: (room: ServerRoom) => void
   close: () => void
 }
@@ -195,7 +196,6 @@ function computeMatchMissionDeltas(room: ServerRoom): MatchMissionDeltas {
   }
 
   const winnerTeam = state.matchEnded.winnerTeam
-  const isCapot = state.scoring.isCapotRound
   const counterMultiplier = state.scoring.counterMultiplier
   const isContra = counterMultiplier > 1
 
@@ -211,7 +211,6 @@ function computeMatchMissionDeltas(room: ServerRoom): MatchMissionDeltas {
 
     if (didWin) {
       deltas['win_games'] = 1
-      if (isCapot) deltas['win_capot_games'] = 1
       if (isContra) deltas['win_contra_games'] = 1
     }
 
@@ -388,6 +387,11 @@ export async function createMissionStore(
       updated_at = CURRENT_TIMESTAMP
   `)
 
+  const insertCapotLedgerStatement = database.prepare(`
+    INSERT OR IGNORE INTO round_capot_mission_ledger (ledger_id, room_id, round_key, profile_id)
+    VALUES (?, ?, ?, ?)
+  `)
+
   const addToWalletStatement = database.prepare(`
     UPDATE profile_wallets
     SET yellow_coins_balance = yellow_coins_balance + ?, updated_at = CURRENT_TIMESTAMP
@@ -550,6 +554,50 @@ export async function createMissionStore(
     }
   }
 
+  function recordRoundCapot(params: {
+    room: ServerRoom
+    capotTeam: Team
+    roundKey: string
+  }): void {
+    const { room, capotTeam, roundKey } = params
+    const today = getTodayDate()
+    const activeMissions = listActiveMissions()
+    const capotMission = activeMissions.find((m) => m.missionType === 'win_capot_games')
+    if (capotMission === undefined) return
+
+    const humansBySeat = getHumanProfilesBySeat(room)
+    for (const [seat, profileId] of humansBySeat) {
+      const team = getTeamBySeat(seat)
+      if (team !== capotTeam) continue
+
+      database.exec('BEGIN')
+      try {
+        const ledgerResult = insertCapotLedgerStatement.run(
+          randomUUID(),
+          room.id,
+          roundKey,
+          profileId,
+        ) as { changes?: number }
+
+        if ((ledgerResult.changes ?? 0) === 0) {
+          // UNIQUE conflict — this round/profile was already recorded, skip.
+          database.exec('ROLLBACK')
+          continue
+        }
+
+        insertProgressStatement.run(randomUUID(), profileId, capotMission.missionId, today, 1)
+        database.exec('COMMIT')
+      } catch (err) {
+        try {
+          database.exec('ROLLBACK')
+        } catch {
+          // surface the original error
+        }
+        throw err
+      }
+    }
+  }
+
   function recordMatchCompletion(room: ServerRoom): void {
     const deltas = computeMatchMissionDeltas(room)
     if (deltas.length === 0) return
@@ -589,6 +637,7 @@ export async function createMissionStore(
     getPlayerDailyMissions,
     getUnclaimedCompletedCount,
     claimMissionReward,
+    recordRoundCapot,
     recordMatchCompletion,
     close,
   }
