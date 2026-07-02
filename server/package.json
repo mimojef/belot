@@ -31,6 +31,7 @@
     "check:password-reset-http": "tsx scripts/checkPasswordResetHttp.ts",
     "check:friend-acceptance": "tsx scripts/checkFriendAcceptanceNotifications.ts",
     "check:round-capot-mission": "tsx scripts/checkRoundCapotMission.ts",
+    "check:partner-suit-all-trumps": "tsx scripts/checkPartnerSuitAllTrumpsLead.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",
     "verify:db:prod": "node dist-scripts/scripts/checkDbBackupVerify.js",

@@ -1088,7 +1088,61 @@ function chooseAllTrumpsDeclarerLongSuitUnlock(
   return null
 }
 
-function chooseAllTrumpsDeclarerMasterLead(
+/**
+ * Намира последната suit обява на партньора ПРЕДИ печелившото all-trumps на противника.
+ *
+ * Итерира bidding.entries по ред. При среща с all-trumps от противник — спира.
+ * pass, double, redouble и suit обяви на противника се игнорират.
+ * Ако партньорът има повече от една suit обява, се взима последната.
+ */
+function getPartnerLastSuitBidBeforeOpponentAllTrumps(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+): ServerSuit | null {
+  const partner = getPartnerSeat(seat)
+  const winningBid = state.bidding.winningBid
+  if (winningBid?.contract !== 'all-trumps') return null
+
+  const opponentAllTrumpsSeat = winningBid.seat
+  if (opponentAllTrumpsSeat === seat || opponentAllTrumpsSeat === partner) return null
+
+  let lastPartnerSuit: ServerSuit | null = null
+
+  for (const entry of state.bidding.entries) {
+    if (
+      entry.seat === opponentAllTrumpsSeat &&
+      entry.action.type === 'all-trumps'
+    ) {
+      break
+    }
+    if (entry.seat === partner && entry.action.type === 'suit') {
+      lastPartnerSuit = entry.action.suit
+    }
+  }
+
+  return lastPartnerSuit
+}
+
+/**
+ * Проверява дали ботът вече е водил в дадена боя (задължението е изпълнено).
+ *
+ * Търси в completedTricks взятка, в която:
+ *   trick.leaderSeat === bot seat
+ *   trick.plays[0].card.suit === партньорската боя
+ *
+ * Важи независимо дали картата е bila master или специално избрана.
+ */
+function hasLedSuit(
+  seat: Seat,
+  suit: ServerSuit,
+  state: ServerAuthoritativeGameState,
+): boolean {
+  return (state.playing?.completedTricks ?? []).some(trick =>
+    trick.leaderSeat === seat && trick.plays[0]?.card.suit === suit
+  )
+}
+
+function chooseAllTrumpsMasterLead(
   seat: Seat,
   state: ServerAuthoritativeGameState,
   validCards: ServerCard[],
@@ -1520,7 +1574,7 @@ function chooseLead(
   // ── Rule 4а: Всичко коз — различна стратегия за ОБЯВИТЕЛЕН и ЗАЩИТЕН отбор
   if (contract === 'all-trumps') {
     if (botTeamDeclared) {
-      const masterLead = chooseAllTrumpsDeclarerMasterLead(
+      const masterLead = chooseAllTrumpsMasterLead(
         seat,
         state,
         validCards,
@@ -1622,6 +1676,23 @@ function chooseLead(
       //    3. Ако имаш 9 но J е у противника → води с НАЙ-МАЛКАТА карта от същия цвят
       //       (принуждаваш противника да изиграе J, след което 9-ката става властна)
       //    4. Иначе → най-малка карта изобщо (не даряваме ценни карти)
+
+      // ── Partner-suit задължение:
+      //    Партньорът е обявил suit X, противникът е спечелил с all-trumps.
+      //    Докато не сме водили в suit X: приоритет → master карта (ако има), иначе → lowestCard от suit X.
+      //    След като веднъж сме водили в suit X, задължението е изпълнено.
+      const pendingPartnerSuit = getPartnerLastSuitBidBeforeOpponentAllTrumps(seat, state)
+      if (
+        pendingPartnerSuit !== null &&
+        !hasLedSuit(seat, pendingPartnerSuit, state) &&
+        bySuit(validCards, pendingPartnerSuit).length > 0
+      ) {
+        const masterLead = chooseAllTrumpsMasterLead(seat, state, validCards, trumpSuit, contract)
+        if (masterLead) {
+          return masterLead
+        }
+        return lowestCard(bySuit(validCards, pendingPartnerSuit), null, 'all-trumps')
+      }
 
       const underHandAceNineAttack = chooseUnderHandAllTrumpsAceNineAttack(
         seat,
