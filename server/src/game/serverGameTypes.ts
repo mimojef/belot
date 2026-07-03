@@ -169,6 +169,8 @@ export type ServerMatchEndedState = {
   endedAt: number
 }
 
+export type ServerDeclarationMissionCountsBySeat = Partial<Record<Seat, Partial<Record<ServerDeclarationMissionType, number>>>>
+
 export type ServerAuthoritativeGameState = {
   phase: AuthoritativePhaseType
   phaseEnteredAt: number | null
@@ -180,6 +182,7 @@ export type ServerAuthoritativeGameState = {
   bidding: ServerBiddingState
   declarations: ServerDeclaration[]
   matchDeclarationMissionCounts: Record<ServerDeclarationMissionType, ServerRoundScore>
+  matchDeclarationMissionCountsBySeat: ServerDeclarationMissionCountsBySeat
   currentTrick: ServerTrickState
   wonTricks: Record<Team, ServerCard[][]>
   playing: ServerPlayingState | null

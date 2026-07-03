@@ -1174,6 +1174,21 @@ async function tickRoomGameRuntimes(): Promise<void> {
             )
           }
 
+          const roundContra = getRoundContraTransition(previousRoom, room)
+          if (roundContra !== null) {
+            runMatchCompletionSideEffect(
+              'record-round-contra',
+              room.id,
+              () => {
+                missionStore.recordRoundContra({
+                  room,
+                  winnerTeam: roundContra.winnerTeam,
+                  roundKey: roundContra.roundKey,
+                })
+              },
+            )
+          }
+
           if (!shouldRunMatchCompletionSideEffects(previousRoom, room)) {
             return
           }
@@ -1584,6 +1599,52 @@ function getRoundCapotTransition(
   const roundKey = `${dealerSeat}:${prevScore.teamA}:${prevScore.teamB}`
 
   return { capotTeam, roundKey }
+}
+
+type RoundContraTransition = {
+  winnerTeam: Team
+  roundKey: string
+}
+
+function getRoundContraTransition(
+  previousRoom: ServerRoom,
+  nextRoom: ServerRoom,
+): RoundContraTransition | null {
+  const prevState = previousRoom.game.authoritativeState
+  const nextState = nextRoom.game.authoritativeState
+
+  if (
+    prevState === null ||
+    !('phase' in prevState) ||
+    prevState.phase !== 'playing'
+  ) {
+    return null
+  }
+
+  if (
+    nextState === null ||
+    !('phase' in nextState) ||
+    nextState.phase !== 'scoring'
+  ) {
+    return null
+  }
+
+  const scoring = nextState.scoring
+  if (scoring === null || scoring.counterMultiplier <= 1) {
+    return null
+  }
+
+  // Winner is the team with more official round points.
+  // officialRoundPoints already accounts for inside/capot rules.
+  const pts = scoring.officialRoundPoints
+  if (pts.teamA === pts.teamB) return null
+  const winnerTeam: Team = pts.teamA > pts.teamB ? 'A' : 'B'
+
+  const prevScore = prevState.score.match
+  const dealerSeat = prevState.round.dealerSeat ?? 'bottom'
+  const roundKey = `${dealerSeat}:${prevScore.teamA}:${prevScore.teamB}`
+
+  return { winnerTeam, roundKey }
 }
 
 function getPartnerSeat(seat: Seat): Seat {

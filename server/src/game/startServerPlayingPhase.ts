@@ -17,7 +17,10 @@ import {
   createEmptyPlayingState,
   createEmptyTrickState,
 } from './createServerRoundDefaults.js'
-import { addDeclarationsToMatchMissionCounts } from './serverDeclarationMissionCounts.js'
+import {
+  addDeclarationsToMatchMissionCounts,
+  addDeclarationsToMatchMissionCountsBySeat,
+} from './serverDeclarationMissionCounts.js'
 
 function createBotOpeningDeclarations(
   state: ServerAuthoritativeGameState,
@@ -77,6 +80,10 @@ export function startServerPlayingPhase(
         state.matchDeclarationMissionCounts,
         botOpeningDeclarations,
       ),
+      matchDeclarationMissionCountsBySeat: addDeclarationsToMatchMissionCountsBySeat(
+        state.matchDeclarationMissionCountsBySeat,
+        botOpeningDeclarations,
+      ),
       timer: clearServerTimerState(),
     }
   }
@@ -100,6 +107,10 @@ export function startServerPlayingPhase(
     declarations: [...state.declarations, ...botOpeningDeclarations],
     matchDeclarationMissionCounts: addDeclarationsToMatchMissionCounts(
       state.matchDeclarationMissionCounts,
+      botOpeningDeclarations,
+    ),
+    matchDeclarationMissionCountsBySeat: addDeclarationsToMatchMissionCountsBySeat(
+      state.matchDeclarationMissionCountsBySeat,
       botOpeningDeclarations,
     ),
     timer: createServerPlayingTimerState(state, firstPlayerSeat),

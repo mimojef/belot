@@ -3,8 +3,8 @@ import type { ProfileId, Seat, ServerRoom, Team } from '../core/serverTypes.js'
 import { SERVER_SEAT_ORDER, SERVER_TEAM_A_SEATS } from '../core/serverTypes.js'
 import type {
   ServerAuthoritativeGameState,
+  ServerDeclarationMissionCountsBySeat,
   ServerDeclarationMissionType,
-  ServerRoundScore,
 } from '../game/serverGameTypes.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
@@ -80,6 +80,7 @@ export type MissionStore = {
     date: string,
   ) => { ok: true; rewardYellowCoins: number } | { ok: false; message: string }
   recordRoundCapot: (params: { room: ServerRoom; capotTeam: Team; roundKey: string }) => void
+  recordRoundContra: (params: { room: ServerRoom; winnerTeam: Team; roundKey: string }) => void
   recordMatchCompletion: (room: ServerRoom) => void
   close: () => void
 }
@@ -174,12 +175,13 @@ const DECLARATION_MISSION_TYPES: ServerDeclarationMissionType[] = [
   'announce_belot',
 ]
 
-function getTeamMissionCount(score: ServerRoundScore | null | undefined, team: Team): number {
-  if (!score) {
-    return 0
-  }
-
-  return team === 'A' ? score.teamA : score.teamB
+function getSeatDeclarationCount(
+  bySeat: ServerDeclarationMissionCountsBySeat | null | undefined,
+  seat: Seat,
+  missionType: ServerDeclarationMissionType,
+): number {
+  if (!bySeat) return 0
+  return bySeat[seat]?.[missionType] ?? 0
 }
 
 function computeMatchMissionDeltas(room: ServerRoom): MatchMissionDeltas {
@@ -196,11 +198,11 @@ function computeMatchMissionDeltas(room: ServerRoom): MatchMissionDeltas {
   }
 
   const winnerTeam = state.matchEnded.winnerTeam
-  const counterMultiplier = state.scoring.counterMultiplier
-  const isContra = counterMultiplier > 1
 
   const humansBySeat = getHumanProfilesBySeat(room)
   const result: MatchMissionDeltas = []
+
+  const bySeat = (state as Partial<ServerAuthoritativeGameState>).matchDeclarationMissionCountsBySeat ?? null
 
   for (const [seat, profileId] of humansBySeat) {
     const team = getTeamBySeat(seat)
@@ -211,44 +213,12 @@ function computeMatchMissionDeltas(room: ServerRoom): MatchMissionDeltas {
 
     if (didWin) {
       deltas['win_games'] = 1
-      if (isContra) deltas['win_contra_games'] = 1
     }
 
-    const matchDeclarationMissionCounts =
-      (state as Partial<ServerAuthoritativeGameState>).matchDeclarationMissionCounts
-
-    if (matchDeclarationMissionCounts) {
-      for (const missionType of DECLARATION_MISSION_TYPES) {
-        const count = getTeamMissionCount(matchDeclarationMissionCounts[missionType], team)
-
-        if (count > 0) {
-          deltas[missionType] = (deltas[missionType] ?? 0) + count
-        }
-      }
-    } else {
-      const declarations = (state as ServerAuthoritativeGameState).declarations ?? []
-      for (const decl of declarations) {
-        const declTeam = getTeamBySeat(decl.seat)
-        if (declTeam !== team) continue
-        if (!decl.valid || !decl.announced) continue
-
-        switch (decl.publicLabel) {
-          case 'Терца':
-            deltas['announce_tersa'] = (deltas['announce_tersa'] ?? 0) + 1
-            break
-          case '50':
-            deltas['announce_50'] = (deltas['announce_50'] ?? 0) + 1
-            break
-          case '100':
-            deltas['announce_100'] = (deltas['announce_100'] ?? 0) + 1
-            break
-          case 'Каре':
-            deltas['announce_kare'] = (deltas['announce_kare'] ?? 0) + 1
-            break
-          case 'Белот':
-            deltas['announce_belot'] = (deltas['announce_belot'] ?? 0) + 1
-            break
-        }
+    for (const missionType of DECLARATION_MISSION_TYPES) {
+      const count = getSeatDeclarationCount(bySeat, seat, missionType)
+      if (count > 0) {
+        deltas[missionType] = count
       }
     }
 
@@ -389,6 +359,11 @@ export async function createMissionStore(
 
   const insertCapotLedgerStatement = database.prepare(`
     INSERT OR IGNORE INTO round_capot_mission_ledger (ledger_id, room_id, round_key, profile_id)
+    VALUES (?, ?, ?, ?)
+  `)
+
+  const insertContraLedgerStatement = database.prepare(`
+    INSERT OR IGNORE INTO round_contra_mission_ledger (ledger_id, room_id, round_key, profile_id)
     VALUES (?, ?, ?, ?)
   `)
 
@@ -622,6 +597,49 @@ export async function createMissionStore(
     }
   }
 
+  function recordRoundContra(params: {
+    room: ServerRoom
+    winnerTeam: Team
+    roundKey: string
+  }): void {
+    const { room, winnerTeam, roundKey } = params
+    const today = getTodayDate()
+    const activeMissions = listActiveMissions()
+    const contraMission = activeMissions.find((m) => m.missionType === 'win_contra_games')
+    if (contraMission === undefined) return
+
+    const humansBySeat = getHumanProfilesBySeat(room)
+    for (const [seat, profileId] of humansBySeat) {
+      const team = getTeamBySeat(seat)
+      if (team !== winnerTeam) continue
+
+      database.exec('BEGIN')
+      try {
+        const ledgerResult = insertContraLedgerStatement.run(
+          randomUUID(),
+          room.id,
+          roundKey,
+          profileId,
+        ) as { changes?: number }
+
+        if ((ledgerResult.changes ?? 0) === 0) {
+          database.exec('ROLLBACK')
+          continue
+        }
+
+        insertProgressStatement.run(randomUUID(), profileId, contraMission.missionId, today, 1)
+        database.exec('COMMIT')
+      } catch (err) {
+        try {
+          database.exec('ROLLBACK')
+        } catch {
+          // surface the original error
+        }
+        throw err
+      }
+    }
+  }
+
   function close(): void {
     database.close()
   }
@@ -638,6 +656,7 @@ export async function createMissionStore(
     getUnclaimedCompletedCount,
     claimMissionReward,
     recordRoundCapot,
+    recordRoundContra,
     recordMatchCompletion,
     close,
   }
