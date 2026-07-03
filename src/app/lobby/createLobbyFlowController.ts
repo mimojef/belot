@@ -1,5 +1,5 @@
 import { formatGiftLimitError } from './formatGiftLimitError'
-import type { AdminPaymentPeriod, AdminPaymentListRow } from '../adminPayments/adminPaymentsTypes.js'
+import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes.js'
 import { isAdminPaymentPeriod } from '../adminPayments/adminPaymentsTypes.js'
 import type { GiftLimitErrorPayload } from './formatGiftLimitError'
 import { applyRouteSeo } from '../seo/applyRouteSeo'
@@ -61,6 +61,7 @@ export type LobbyFlowScreen =
   | 'admin-server'
   | 'admin-visitors'
   | 'admin-payments'
+  | 'admin-payment-detail'
   | 'terms'
   | 'privacy'
   | 'contact'
@@ -381,6 +382,10 @@ export type CreateLobbyFlowControllerOptions = {
       }
     | { ok: false; message: string }
   >
+  onAdminPaymentDetailLoad?: (purchaseId: string) => Promise<
+    | { ok: true; purchase: AdminPaymentDetailRow }
+    | { ok: false; message: string }
+  >
 }
 
 
@@ -416,6 +421,7 @@ export type LobbyFlowController = {
   navigateAdminVisitors: (period?: string) => void
   navigateAdminInfo: () => void
   navigateAdminPayments: (period?: string) => void
+  navigateAdminPaymentDetail: (purchaseId: string) => void
 }
 
 type InternalLobbyFlowState = {
@@ -621,6 +627,11 @@ type InternalLobbyFlowState = {
   adminPaymentsErrorText: string | null
   adminPaymentsOffset: number
   adminPaymentsLimit: number
+  adminPaymentDetailPurchaseId: string | null
+  adminPaymentDetailLoading: boolean
+  adminPaymentDetailPurchase: AdminPaymentDetailRow | null
+  adminPaymentDetailErrorText: string | null
+  adminPaymentDetailFromPeriod: string | null
   pwaUpdatePending: boolean
   pwaUpdateApplyFn: (() => void) | null
 }
@@ -827,6 +838,11 @@ function createInitialState(): InternalLobbyFlowState {
     adminPaymentsErrorText: null,
     adminPaymentsOffset: 0,
     adminPaymentsLimit: 50,
+    adminPaymentDetailPurchaseId: null,
+    adminPaymentDetailLoading: false,
+    adminPaymentDetailPurchase: null,
+    adminPaymentDetailErrorText: null,
+    adminPaymentDetailFromPeriod: null,
     pwaUpdatePending: false,
     pwaUpdateApplyFn: null,
   }
@@ -1916,6 +1932,10 @@ export function createLobbyFlowController(
       adminPaymentsErrorText: state.adminPaymentsErrorText,
       adminPaymentsOffset: state.adminPaymentsOffset,
       adminPaymentsLimit: state.adminPaymentsLimit,
+      adminPaymentDetailPurchaseId: state.adminPaymentDetailPurchaseId,
+      adminPaymentDetailLoading: state.adminPaymentDetailLoading,
+      adminPaymentDetailPurchase: state.adminPaymentDetailPurchase,
+      adminPaymentDetailErrorText: state.adminPaymentDetailErrorText,
       pwaUpdatePending: state.pwaUpdatePending,
       shopPurchaseResumeId: state.shopPurchaseResumeId,
       shopPurchaseHideConfirmId: state.shopPurchaseHideConfirmId,
@@ -2736,6 +2756,14 @@ export function createLobbyFlowController(
       onAdminPaymentsBackClick: () => {
         void showAdminInfoPanel()
       },
+      onAdminPaymentsDetailOpen: (purchaseId) => {
+        showAdminPaymentDetailPanel(purchaseId)
+      },
+      onAdminPaymentDetailBack: () => {
+        // Return to payments list preserving the period without adding another history entry.
+        const period = state.adminPaymentDetailFromPeriod ?? state.adminPaymentsPeriod
+        showAdminPaymentsPanel(period, 'replace')
+      },
     })
   }
 
@@ -3500,7 +3528,7 @@ export function createLobbyFlowController(
   // Incremented on every new fetch; checked after await to discard stale responses.
   let _adminPaymentsGen = 0
 
-  function showAdminPaymentsPanel(overridePeriod?: string): void {
+  function showAdminPaymentsPanel(overridePeriod?: string, historyMode: 'push' | 'replace' = 'push'): void {
     const authSession = options.getAuthSession?.() ?? null
     if (authSession?.account.role !== 'admin') {
       state.currentScreen = 'lobby'
@@ -3528,7 +3556,11 @@ export function createLobbyFlowController(
     // syncAdminPaymentsUrl (replaceState) is used only for in-screen period/offset changes.
     const targetUrl = `/admin/payments?period=${encodeURIComponent(p)}`
     if (window.location.pathname + window.location.search !== targetUrl) {
-      history.pushState(null, '', targetUrl)
+      if (historyMode === 'replace') {
+        history.replaceState(null, '', targetUrl)
+      } else {
+        history.pushState(null, '', targetUrl)
+      }
     }
     render()
     void fetchAdminPayments()
@@ -3564,6 +3596,56 @@ export function createLobbyFlowController(
       state.adminPaymentsTotal = result.pagination.total
       state.adminPaymentsTotalsByCurrency = result.summary.totalsByCurrency
       state.adminPaymentsErrorText = null
+    }
+    render()
+  }
+
+  function showAdminPaymentDetailPanel(purchaseId: string): void {
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession?.account.role !== 'admin') {
+      state.currentScreen = 'lobby'
+      state.errorText = 'Нямаш достъп до admin панела.'
+      render()
+      return
+    }
+    leaveAdminServerIfActive()
+    // Remember which period we came from so Back can return there
+    state.adminPaymentDetailFromPeriod = state.adminPaymentsPeriod
+    state.currentScreen = 'admin-payment-detail'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    state.adminPaymentDetailPurchaseId = purchaseId
+    state.adminPaymentDetailLoading = true
+    state.adminPaymentDetailPurchase = null
+    state.adminPaymentDetailErrorText = null
+    const targetUrl = `/admin/payments/${encodeURIComponent(purchaseId)}`
+    if (window.location.pathname !== targetUrl) {
+      history.pushState(null, '', targetUrl)
+    }
+    render()
+    void fetchAdminPaymentDetail(purchaseId)
+  }
+
+  async function fetchAdminPaymentDetail(purchaseId: string): Promise<void> {
+    if (!options.onAdminPaymentDetailLoad) {
+      state.adminPaymentDetailLoading = false
+      state.adminPaymentDetailErrorText = 'Зареждането не е конфигурирано.'
+      if (state.currentScreen === 'admin-payment-detail') render()
+      return
+    }
+    const result = await options.onAdminPaymentDetailLoad(purchaseId)
+    if (state.currentScreen !== 'admin-payment-detail') return
+    if (state.adminPaymentDetailPurchaseId !== purchaseId) return
+    state.adminPaymentDetailLoading = false
+    if (!result.ok) {
+      state.adminPaymentDetailErrorText = result.message
+    } else {
+      state.adminPaymentDetailPurchase = result.purchase
+      state.adminPaymentDetailErrorText = null
     }
     render()
   }
@@ -4850,6 +4932,8 @@ export function createLobbyFlowController(
   function syncUrlPath(): void {
     if (!_navigationReady || _pendingInitialNav) return
     if (document.getElementById('pwa-landing-overlay') !== null) return
+    // Dynamic screens manage their own URL via pushState — skip syncUrlPath for them
+    if (state.currentScreen === 'admin-payment-detail') return
     const path = SCREEN_TO_PATH[state.currentScreen] ?? '/lobby'
     if (path !== window.location.pathname) {
       history.pushState(null, '', path)
@@ -4858,6 +4942,13 @@ export function createLobbyFlowController(
   }
 
   function navigateFromPath(path: string): void {
+    // Dynamic route: /admin/payments/:purchaseId
+    const detailMatch = /^\/admin\/payments\/([^/]+)$/.exec(path)
+    if (detailMatch) {
+      showAdminPaymentDetailPanel(decodeURIComponent(detailMatch[1] ?? ''))
+      return
+    }
+
     const screen = PATH_TO_SCREEN[path] ?? null
     if (screen === null) {
       switchToLobby()
@@ -5781,7 +5872,8 @@ export function createLobbyFlowController(
     navigateInitialPath: () => {
       _navigationReady = true
       applyRouteSeo(_loadPath || '/lobby')
-      if (!_loadPath || !PATH_TO_SCREEN[_loadPath]) return
+      const isKnownPath = !!PATH_TO_SCREEN[_loadPath] || /^\/admin\/payments\/[^/]+$/.test(_loadPath)
+      if (!_loadPath || !isKnownPath) return
       if (state.isConnected) {
         navigateFromPath(_loadPath)
       } else {
@@ -5804,6 +5896,9 @@ export function createLobbyFlowController(
       const qs = new URLSearchParams(window.location.search)
       const p = period ?? qs.get('period') ?? undefined
       showAdminPaymentsPanel(p)
+    },
+    navigateAdminPaymentDetail: (purchaseId: string) => {
+      showAdminPaymentDetailPanel(purchaseId)
     },
     navigateToShop: (noticeText: string | null) => {
       void showShopPanel().then(() => {

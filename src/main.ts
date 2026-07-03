@@ -1115,6 +1115,30 @@ async function loadAdminPayments(params: {
   }
 }
 
+async function loadAdminPaymentDetail(purchaseId: string): Promise<
+  | { ok: true; purchase: import('./app/adminPayments/adminPaymentsTypes').AdminPaymentDetailRow }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/payments/${encodeURIComponent(purchaseId)}`,
+      { method: 'GET', credentials: 'include' },
+    )
+    type DetailResponse = {
+      ok: boolean
+      purchase?: import('./app/adminPayments/adminPaymentsTypes').AdminPaymentDetailRow
+      message?: string
+    }
+    const data = (await response.json()) as DetailResponse
+    if (!response.ok || !data.ok || !data.purchase) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на плащането.' }
+    }
+    return { ok: true, purchase: data.purchase }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function loadAdminSettings(): Promise<
   | { ok: true; settings: AdminSettingsSnapshot }
   | { ok: false; message: string }
@@ -2862,6 +2886,7 @@ lobby = createLobbyFlowController({
   onAdminVisitorsLoad: (params) => loadAdminVisitors(params),
   onAdminVisitorSourcesLoad: (params) => loadAdminVisitorSources(params),
   onAdminPaymentsLoad: (params) => loadAdminPayments(params),
+  onAdminPaymentDetailLoad: (purchaseId) => loadAdminPaymentDetail(purchaseId),
   onNotifFriendRequestClick: (friendshipId) => {
     const req = lobby?.getPendingFriendRequest(friendshipId)
     if (!req) return

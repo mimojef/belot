@@ -32,8 +32,9 @@ import { PUBLIC_LEGAL_PAGES, type PublicLegalPageKey } from './publicLegalPages'
 import { renderRulesPage } from './renderRulesPage'
 import { renderStrategyPage } from './renderStrategyPage'
 import { orderPlayersForViewer } from './orderPlayersForViewer'
-import type { AdminPaymentPeriod, AdminPaymentListRow } from '../adminPayments/adminPaymentsTypes'
+import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes'
 import { renderAdminPaymentsPanel, attachAdminPaymentsPanelHandlers } from '../adminPayments/renderAdminPaymentsPanel'
+import { renderAdminPaymentDetailPanel, attachAdminPaymentDetailHandlers } from '../adminPayments/renderAdminPaymentDetailPanel'
 
 const MISSION_TYPE_LABELS: Record<string, string> = {
   win_games: 'Спечели N игри',
@@ -99,7 +100,7 @@ export type GuestContactFormInput = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy'
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -288,6 +289,10 @@ export type LobbyScreenState = {
   adminPaymentsErrorText: string | null
   adminPaymentsOffset: number
   adminPaymentsLimit: number
+  adminPaymentDetailPurchaseId: string | null
+  adminPaymentDetailLoading: boolean
+  adminPaymentDetailPurchase: AdminPaymentDetailRow | null
+  adminPaymentDetailErrorText: string | null
   pwaUpdatePending: boolean
 }
 
@@ -442,6 +447,8 @@ export type RenderLobbyScreenOptions = {
   onAdminPaymentsPeriodChange?: (period: AdminPaymentPeriod) => void
   onAdminPaymentsPageChange?: (offset: number) => void
   onAdminPaymentsBackClick?: () => void
+  onAdminPaymentsDetailOpen?: (purchaseId: string) => void
+  onAdminPaymentDetailBack?: () => void
   onRulesOpen: () => void
   onStrategyOpen: () => void
 }
@@ -3390,11 +3397,17 @@ function renderMobileLobbyScreenContent(
                   offset: state.adminPaymentsOffset,
                   limit: state.adminPaymentsLimit,
                 },
+                { onBack: () => {}, onPeriodChange: () => {}, onPageChange: () => {}, onDetailOpen: () => {} },
+              )
+          : state.view === 'admin-payment-detail'
+            ? renderAdminPaymentDetailPanel(
                 {
-                  onBack: () => {},
-                  onPeriodChange: () => {},
-                  onPageChange: () => {},
+                  isAdmin: state.isAdmin,
+                  loading: state.adminPaymentDetailLoading,
+                  errorText: state.adminPaymentDetailErrorText,
+                  purchase: state.adminPaymentDetailPurchase,
                 },
+                { onBack: () => {} },
               )
           : state.view === 'friends'
             ? renderMobileFriendsDirectory(state)
@@ -7089,11 +7102,17 @@ export function renderLobbyScreen(
                       offset: state.adminPaymentsOffset,
                       limit: state.adminPaymentsLimit,
                     },
+                    { onBack: () => {}, onPeriodChange: () => {}, onPageChange: () => {}, onDetailOpen: () => {} },
+                  )
+              : state.view === 'admin-payment-detail'
+                ? renderAdminPaymentDetailPanel(
                     {
-                      onBack: () => {},
-                      onPeriodChange: () => {},
-                      onPageChange: () => {},
+                      isAdmin: state.isAdmin,
+                      loading: state.adminPaymentDetailLoading,
+                      errorText: state.adminPaymentDetailErrorText,
+                      purchase: state.adminPaymentDetailPurchase,
                     },
+                    { onBack: () => {} },
                   )
             : state.view === 'friends'
               ? renderFriendsDirectory(state)
@@ -9243,6 +9262,11 @@ export function renderLobbyScreen(
     onBack: () => { options.onAdminPaymentsBackClick?.() },
     onPeriodChange: (period) => { options.onAdminPaymentsPeriodChange?.(period) },
     onPageChange: (offset) => { options.onAdminPaymentsPageChange?.(offset) },
+    onDetailOpen: (purchaseId) => { options.onAdminPaymentsDetailOpen?.(purchaseId) },
+  })
+
+  attachAdminPaymentDetailHandlers(root, {
+    onBack: () => { options.onAdminPaymentDetailBack?.() },
   })
 
   root.querySelectorAll<HTMLButtonElement>('[data-admin-payments-open]').forEach((btn) => {

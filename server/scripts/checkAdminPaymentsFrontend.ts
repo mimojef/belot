@@ -21,7 +21,7 @@
  * [18] Pagination: hasMore drives Следваща button state
  * [19] Period change resets offset (via fresh panel state)
  * [20] Admin-only: non-admin renders access denied
- * [21] Disabled "Детайли" button (предстои feature)
+ * [21] Active "Детайли" button opens detail
  * [22] Period tabs: active aria-pressed, correct data attribute
  * [23] Summary totalsByCurrency renders currency rows
  * [24] getPaymentMethodLabel: Google Pay, Apple Pay, card, unknown, null
@@ -36,6 +36,24 @@
  * [33] renderAdminPaymentsPanel: period tab data-admin-payments-tab present
  * [34] period tab has correct aria-pressed for active period
  * [35] stat card buttons render aria-label with period context
+ *
+ * Payment detail page checks:
+ * [36] detail page: loading state
+ * [37] detail page: error state
+ * [38] detail page: not-found state
+ * [39] detail page: non-admin access denied
+ * [40] detail page: full purchase data rendered
+ * [41] detail page: Google Pay method
+ * [42] detail page: standard card (Visa 4242)
+ * [43] detail page: null payment method data
+ * [44] detail page: null profile/account/wallet
+ * [45] detail page: HTML escaping
+ * [46] detail page: copy buttons for IDs
+ * [47] detail page: Bulgarian formatting (date, coins, money)
+ * [48] "Детайли" button in table is enabled with data-payment-detail-open
+ * [49] detail route/history source checks
+ * [50] detail stale-response guards
+ * [51] copy buttons report success only after clipboard success
  */
 
 import {
@@ -45,8 +63,12 @@ import {
   getPaymentMethodLabel,
 } from '../../src/app/adminPayments/renderAdminPaymentsPanel.js'
 import { isAdminPaymentPeriod } from '../../src/app/adminPayments/adminPaymentsTypes.js'
-import type { AdminPaymentListRow } from '../../src/app/adminPayments/adminPaymentsTypes.js'
+import type { AdminPaymentListRow, AdminPaymentDetailRow } from '../../src/app/adminPayments/adminPaymentsTypes.js'
 import type { AdminPaymentsPanelState } from '../../src/app/adminPayments/renderAdminPaymentsPanel.js'
+import {
+  renderAdminPaymentDetailPanel,
+} from '../../src/app/adminPayments/renderAdminPaymentDetailPanel.js'
+import type { AdminPaymentDetailState } from '../../src/app/adminPayments/renderAdminPaymentDetailPanel.js'
 
 let passed = 0
 let failed = 0
@@ -78,7 +100,7 @@ function assertNotContains(html: string, needle: string, msg: string): void {
   if (html.includes(needle)) throw new Error(`${msg}: expected NOT to find "${needle}"`)
 }
 
-const NOOP_CALLBACKS = { onBack: () => {}, onPeriodChange: () => {}, onPageChange: () => {} }
+const NOOP_CALLBACKS = { onBack: () => {}, onPeriodChange: () => {}, onPageChange: () => {}, onDetailOpen: () => {} }
 
 function baseState(overrides: Partial<AdminPaymentsPanelState> = {}): AdminPaymentsPanelState {
   return {
@@ -417,15 +439,14 @@ check('[20.1] isAdmin=false shows access denied', () => {
   assertNotContains(html, 'Плащания', 'Should not show payments title to non-admin')
 })
 
-// ─── [21] Disabled "Детайли" button ──────────────────────────────────────────
-console.log('\n[21] "Детайли" button disabled (feature pending)')
-check('[21.1] Детайли button is disabled', () => {
+// ─── [21] Active "Детайли" button ────────────────────────────────────────────
+console.log('\n[21] "Детайли" button enabled')
+check('[21.1] Детайли button is enabled with purchaseId', () => {
   const html = renderAdminPaymentsPanel(baseState({ rows: [makeRow()], total: 1 }), NOOP_CALLBACKS)
   assertContains(html, 'Детайли', '')
-  const btnIdx = html.indexOf('Детайли')
-  // 'disabled' attr appears before the button text content, search wider
-  const snippet = html.slice(Math.max(0, btnIdx - 400), btnIdx + 50)
-  assert(snippet.includes('disabled'), 'Детайли should be disabled')
+  const btnMatch = html.match(/<button[^>]*data-payment-detail-open="pid-001"[^>]*>/)
+  assert(btnMatch !== null, 'detail button with purchaseId not found')
+  assert(!btnMatch[0].includes(' disabled'), 'Детайли should be enabled')
 })
 
 // ─── [22] Period tab aria-pressed ────────────────────────────────────────────
@@ -713,6 +734,303 @@ check('[34.3] onAdminPaymentsOpen wired in renderActiveRoom options', () => {
 console.log('\n[35] stat card buttons have aria-label="Виж плащания: ..."')
 check('[35.1] aria-label with "Виж плащания" present in source', () => {
   assert(lobbyScreenSrc.includes('aria-label="Виж плащания:'), 'aria-label not found on stat card buttons')
+})
+
+// ─── Helper: make a full AdminPaymentDetailRow ────────────────────────────────
+
+const NOOP_DETAIL = { onBack: () => {} }
+
+function makeDetailRow(overrides: Partial<AdminPaymentDetailRow> = {}): AdminPaymentDetailRow {
+  return {
+    purchaseId: 'pid-detail-001',
+    profileId: 'prof-001',
+    accountId: 'acc-001',
+    username: 'testuser',
+    displayName: 'Тест Потребител',
+    email: 'user@test.com',
+    profileKind: 'human',
+    packageKey: 'starter',
+    packageTitle: 'Starter Pack',
+    yellowCoinsAmount: 500,
+    priceCents: 999,
+    currency: 'EUR',
+    provider: 'stripe',
+    status: 'paid',
+    providerCheckoutSessionId: 'cs_test_abc123',
+    stripePaymentIntentId: 'pi_test_xyz456',
+    stripeChargeId: 'ch_test_789',
+    paymentMethodType: 'card',
+    walletType: null,
+    cardBrand: 'visa',
+    cardLast4: '4242',
+    cardCountry: 'BG',
+    createdAt: '2026-06-15T09:00:00.000Z',
+    creditedAt: '2026-06-15T10:05:00.000Z',
+    updatedAt: '2026-06-15T10:05:01.000Z',
+    hiddenAt: null,
+    currentYellowCoinsBalance: 1500,
+    ...overrides,
+  }
+}
+
+function detailState(overrides: Partial<AdminPaymentDetailState> = {}): AdminPaymentDetailState {
+  return { isAdmin: true, loading: false, errorText: null, purchase: makeDetailRow(), ...overrides }
+}
+
+// ─── [36] detail: loading state ──────────────────────────────────────────────
+console.log('\n[36] detail page: loading state')
+check('[36.1] renders Зареждане', () => {
+  const html = renderAdminPaymentDetailPanel(detailState({ loading: true, purchase: null }), NOOP_DETAIL)
+  assertContains(html, 'Зареждане', 'Loading text not found')
+})
+check('[36.2] ← Назад button present during loading', () => {
+  const html = renderAdminPaymentDetailPanel(detailState({ loading: true, purchase: null }), NOOP_DETAIL)
+  assertContains(html, 'data-payment-detail-back', '← Назад button not found in loading state')
+})
+
+// ─── [37] detail: error state ────────────────────────────────────────────────
+console.log('\n[37] detail page: error state')
+check('[37.1] renders error message', () => {
+  const html = renderAdminPaymentDetailPanel(detailState({ errorText: 'Сървърна грешка', purchase: null }), NOOP_DETAIL)
+  assertContains(html, 'Сървърна грешка', 'Error text not rendered')
+})
+
+// ─── [38] detail: purchase=null (not found) ──────────────────────────────────
+console.log('\n[38] detail page: not-found state')
+check('[38.1] renders not-found message', () => {
+  const html = renderAdminPaymentDetailPanel(detailState({ purchase: null }), NOOP_DETAIL)
+  assertContains(html, 'не е намерено', 'Not-found message not rendered')
+})
+
+// ─── [39] detail: non-admin ──────────────────────────────────────────────────
+console.log('\n[39] detail page: non-admin access denied')
+check('[39.1] isAdmin=false shows access denied', () => {
+  const html = renderAdminPaymentDetailPanel(detailState({ isAdmin: false }), NOOP_DETAIL)
+  assertContains(html, 'достъп', 'Access denied message not found')
+  assertNotContains(html, 'Детайли за плащане', 'Should not show purchase when non-admin')
+})
+
+// ─── [40] detail: full purchase data ─────────────────────────────────────────
+console.log('\n[40] detail page: full purchase data rendered')
+{
+  const html = renderAdminPaymentDetailPanel(detailState(), NOOP_DETAIL)
+  check('[40.1] section А: Покупка title', () => assertContains(html, 'А. Покупка', 'Section А not found'))
+  check('[40.2] section Б: Клиент title', () => assertContains(html, 'Б. Клиент', 'Section Б not found'))
+  check('[40.3] section В: Метод на плащане', () => assertContains(html, 'В. Метод на плащане', 'Section В not found'))
+  check('[40.4] section Г: Системна информация', () => assertContains(html, 'Г. Системна информация', 'Section Г not found'))
+  check('[40.5] purchase status badge', () => assertContains(html, 'paid', 'Status badge not rendered'))
+  check('[40.6] package title', () => assertContains(html, 'Starter Pack', 'Package title not rendered'))
+  check('[40.7] profile display name', () => assertContains(html, 'Тест Потребител', 'Display name not rendered'))
+  check('[40.8] email', () => assertContains(html, 'user@test.com', 'Email not rendered'))
+  check('[40.9] Checkout Session ID', () => assertContains(html, 'cs_test_abc123', 'Session ID not rendered'))
+  check('[40.10] PaymentIntent ID', () => assertContains(html, 'pi_test_xyz456', 'PaymentIntent ID not rendered'))
+  check('[40.11] Charge ID', () => assertContains(html, 'ch_test_789', 'Charge ID not rendered'))
+  check('[40.12] purchase ID', () => assertContains(html, 'pid-detail-001', 'Purchase ID not rendered'))
+}
+
+// ─── [41] detail: Google Pay ─────────────────────────────────────────────────
+console.log('\n[41] detail page: Google Pay method')
+check('[41.1] shows Google Pay label', () => {
+  const html = renderAdminPaymentDetailPanel(
+    detailState({ purchase: makeDetailRow({ walletType: 'google_pay', paymentMethodType: 'card' }) }),
+    NOOP_DETAIL,
+  )
+  assertContains(html, 'Google Pay', 'Google Pay label not rendered')
+})
+
+// ─── [42] detail: standard card ──────────────────────────────────────────────
+console.log('\n[42] detail page: standard Visa card')
+{
+  const html = renderAdminPaymentDetailPanel(detailState(), NOOP_DETAIL)
+  check('[42.1] shows Карта label', () => assertContains(html, 'Карта', '"Карта" method label not rendered'))
+  check('[42.2] shows Visa •••• 4242', () => assertContains(html, 'Visa •••• 4242', 'Card display not rendered'))
+  check('[42.3] shows card country BG', () => assertContains(html, 'BG', 'Card country not rendered'))
+}
+
+// ─── [43] detail: null payment method ────────────────────────────────────────
+console.log('\n[43] detail page: null payment method data')
+check('[43.1] shows Неизвестен when all null', () => {
+  const html = renderAdminPaymentDetailPanel(
+    detailState({ purchase: makeDetailRow({ walletType: null, paymentMethodType: null, cardBrand: null, cardLast4: null }) }),
+    NOOP_DETAIL,
+  )
+  assertContains(html, 'Неизвестен', '"Неизвестен" not shown for null method')
+})
+check('[43.2] card column shows — for null brand+last4', () => {
+  const html = renderAdminPaymentDetailPanel(
+    detailState({ purchase: makeDetailRow({ cardBrand: null, cardLast4: null }) }),
+    NOOP_DETAIL,
+  )
+  assertContains(html, '—', '"—" not shown for null card')
+})
+
+// ─── [44] detail: null profile/account/wallet ────────────────────────────────
+console.log('\n[44] detail page: null profile/account/wallet')
+check('[44.1] null displayName + null username shows Липсващ профил', () => {
+  const html = renderAdminPaymentDetailPanel(
+    detailState({ purchase: makeDetailRow({ displayName: null, username: null, email: null, currentYellowCoinsBalance: null }) }),
+    NOOP_DETAIL,
+  )
+  assertContains(html, 'Липсващ профил', '"Липсващ профил" not shown')
+})
+check('[44.2] null email shows —', () => {
+  const html = renderAdminPaymentDetailPanel(
+    detailState({ purchase: makeDetailRow({ email: null }) }),
+    NOOP_DETAIL,
+  )
+  assertContains(html, '—', '"—" not shown for null email')
+})
+check('[44.3] null balance shows —', () => {
+  const html = renderAdminPaymentDetailPanel(
+    detailState({ purchase: makeDetailRow({ currentYellowCoinsBalance: null }) }),
+    NOOP_DETAIL,
+  )
+  assertContains(html, '—', '"—" not shown for null balance')
+})
+
+// ─── [45] detail: HTML escaping ──────────────────────────────────────────────
+console.log('\n[45] detail page: HTML escaping')
+check('[45.1] displayName XSS escaped', () => {
+  const html = renderAdminPaymentDetailPanel(
+    detailState({ purchase: makeDetailRow({ displayName: '<script>alert(1)</script>' }) }),
+    NOOP_DETAIL,
+  )
+  assertNotContains(html, '<script>', 'XSS in displayName not escaped')
+  assertContains(html, '&lt;script&gt;', 'XSS not properly escaped')
+})
+check('[45.2] email XSS escaped', () => {
+  const html = renderAdminPaymentDetailPanel(
+    detailState({ purchase: makeDetailRow({ email: '<evil@bad.com>' }) }),
+    NOOP_DETAIL,
+  )
+  assertNotContains(html, '<evil', 'XSS in email not escaped')
+})
+check('[45.3] packageTitle XSS escaped', () => {
+  const html = renderAdminPaymentDetailPanel(
+    detailState({ purchase: makeDetailRow({ packageTitle: '<b>XSS</b>' }) }),
+    NOOP_DETAIL,
+  )
+  assertNotContains(html, '<b>', 'XSS in packageTitle not escaped')
+})
+check('[45.4] purchaseId XSS escaped', () => {
+  const html = renderAdminPaymentDetailPanel(
+    detailState({ purchase: makeDetailRow({ purchaseId: '<img src=x>' }) }),
+    NOOP_DETAIL,
+  )
+  assertNotContains(html, '<img', 'XSS in purchaseId not escaped')
+})
+
+// ─── [46] detail: copy buttons for IDs ───────────────────────────────────────
+console.log('\n[46] detail page: copy buttons present')
+{
+  const html = renderAdminPaymentDetailPanel(detailState(), NOOP_DETAIL)
+  check('[46.1] copy button for purchaseId', () => assertContains(html, `data-copy-detail="pid-detail-001"`, 'purchaseId copy btn missing'))
+  check('[46.2] copy button for profileId', () => assertContains(html, `data-copy-detail="prof-001"`, 'profileId copy btn missing'))
+  check('[46.3] copy button for sessionId', () => assertContains(html, `data-copy-detail="cs_test_abc123"`, 'sessionId copy btn missing'))
+  check('[46.4] copy button for paymentIntentId', () => assertContains(html, `data-copy-detail="pi_test_xyz456"`, 'paymentIntentId copy btn missing'))
+  check('[46.5] copy button for chargeId', () => assertContains(html, `data-copy-detail="ch_test_789"`, 'chargeId copy btn missing'))
+}
+
+// ─── [47] detail: Bulgarian date/coins/money formatting ──────────────────────
+console.log('\n[47] detail page: Bulgarian formatting')
+check('[47.1] coins formatted with bg-BG locale (500 = "500")', () => {
+  const html = renderAdminPaymentDetailPanel(detailState(), NOOP_DETAIL)
+  assertContains(html, '500', 'coins not rendered')
+})
+check('[47.2] money formatted (999 cents = ~9,99 EUR region format)', () => {
+  const html = renderAdminPaymentDetailPanel(detailState(), NOOP_DETAIL)
+  // bg-BG locale: "9,99 €" or similar — check for digits only
+  assertContains(html, '9', 'money amount not found')
+  assertContains(html, '99', 'money cents not found')
+})
+check('[47.3] creditedAt renders a date string', () => {
+  const html = renderAdminPaymentDetailPanel(detailState(), NOOP_DETAIL)
+  assertContains(html, '2026', 'year not rendered in date')
+})
+
+// ─── [48] "Детайли" button in table is enabled ───────────────────────────────
+console.log('\n[48] "Детайли" button in list table is enabled with purchaseId')
+{
+  const html = renderAdminPaymentsPanel(
+    baseState({ rows: [makeRow({ purchaseId: 'test-pid-abc' })], total: 1 }),
+    { onBack: () => {}, onPeriodChange: () => {}, onPageChange: () => {}, onDetailOpen: () => {} },
+  )
+  check('[48.1] data-payment-detail-open attribute present', () =>
+    assertContains(html, 'data-payment-detail-open="test-pid-abc"', 'data-payment-detail-open not found'))
+  check('[48.2] button is NOT disabled', () => {
+    const btnMatch = html.match(/<button[^>]*data-payment-detail-open="test-pid-abc"[^>]*>/)
+    assert(btnMatch !== null, 'button not found')
+    assert(!btnMatch[0].includes(' disabled'), 'button should not be disabled')
+  })
+  check('[48.3] button text is "Детайли"', () => {
+    assertContains(html, '>Детайли<', 'Button text not "Детайли"')
+  })
+}
+
+// ─── [49] detail route/history source checks ─────────────────────────────────
+console.log('\n[49] detail route/history source checks')
+check('[49.1] detail route is checked before exact payment list route', () => {
+  const detailIdx = controllerSrc.indexOf('const detailMatch = /^\\/admin\\/payments\\/([^/]+)$/')
+  const pathToScreenIdx = controllerSrc.indexOf('const screen = PATH_TO_SCREEN[path] ?? null')
+  assert(detailIdx !== -1, 'dynamic detail route check not found')
+  assert(pathToScreenIdx !== -1, 'PATH_TO_SCREEN lookup not found')
+  assert(detailIdx < pathToScreenIdx, 'detail route must be checked before exact route lookup')
+})
+check('[49.2] opening detail calls pushState exactly once in detail function', () => {
+  const fnIdx = controllerSrc.indexOf('function showAdminPaymentDetailPanel')
+  const endIdx = controllerSrc.indexOf('async function fetchAdminPaymentDetail', fnIdx)
+  assert(fnIdx !== -1 && endIdx !== -1, 'showAdminPaymentDetailPanel bounds not found')
+  const fnSnippet = controllerSrc.slice(fnIdx, endIdx)
+  const matches = [...fnSnippet.matchAll(/history\.pushState/g)]
+  assert(matches.length === 1, `expected 1 pushState, got ${matches.length}`)
+  assert(fnSnippet.includes('encodeURIComponent(purchaseId)'), 'purchaseId must be URL-encoded')
+})
+check('[49.3] direct detail route is accepted during initial navigation', () => {
+  assert(controllerSrc.includes('/^\\/admin\\/payments\\/[^/]+$/.test(_loadPath)'), 'initial dynamic route check missing')
+})
+check('[49.4] popstate navigates from current browser path', () => {
+  const popIdx = controllerSrc.indexOf("window.addEventListener('popstate'")
+  assert(popIdx !== -1, 'popstate handler missing')
+  const snippet = controllerSrc.slice(popIdx, popIdx + 250)
+  assert(snippet.includes('navigateFromPath(path)'), 'popstate must call navigateFromPath(path)')
+})
+check('[49.5] detail Back replaces URL with payment list preserving period', () => {
+  assert(controllerSrc.includes('showAdminPaymentsPanel(period, \'replace\')'), 'detail Back must replace list URL')
+  const paymentsFnIdx = controllerSrc.indexOf('function showAdminPaymentsPanel')
+  const paymentsSnippet = controllerSrc.slice(paymentsFnIdx, paymentsFnIdx + 1400)
+  assert(paymentsSnippet.includes("historyMode: 'push' | 'replace'"), 'history mode parameter missing')
+  assert(paymentsSnippet.includes('history.replaceState'), 'replaceState branch missing')
+})
+
+// ─── [50] detail stale response guards ───────────────────────────────────────
+console.log('\n[50] detail stale response guards')
+check('[50.1] stale detail response cannot mutate after leaving detail screen', () => {
+  const fnIdx = controllerSrc.indexOf('async function fetchAdminPaymentDetail')
+  assert(fnIdx !== -1, 'fetchAdminPaymentDetail not found')
+  const fnSnippet = controllerSrc.slice(fnIdx, fnIdx + 900)
+  assert(fnSnippet.includes("state.currentScreen !== 'admin-payment-detail'"), 'currentScreen stale guard missing')
+})
+check('[50.2] stale detail response cannot mutate after opening another purchase', () => {
+  const fnIdx = controllerSrc.indexOf('async function fetchAdminPaymentDetail')
+  const fnSnippet = controllerSrc.slice(fnIdx, fnIdx + 900)
+  assert(fnSnippet.includes('state.adminPaymentDetailPurchaseId !== purchaseId'), 'purchaseId stale guard missing')
+})
+
+// ─── [51] copy success/error behavior ────────────────────────────────────────
+console.log('\n[51] detail copy success/error behavior')
+const detailPanelSrc = readFileSync(
+  resolve(import.meta.dirname, '../../src/app/adminPayments/renderAdminPaymentDetailPanel.ts'),
+  'utf8',
+)
+check('[51.1] copy success is set only in clipboard writeText.then', () => {
+  const writeIdx = detailPanelSrc.indexOf('navigator.clipboard.writeText(value).then')
+  const successIdx = detailPanelSrc.indexOf("btn.textContent = '✓'", writeIdx)
+  assert(writeIdx !== -1, 'clipboard writeText(value).then not found')
+  assert(successIdx !== -1, 'success marker not found after writeText.then')
+})
+check('[51.2] copy error marker is used for missing clipboard and rejected writes', () => {
+  const errorMatches = [...detailPanelSrc.matchAll(/btn\.textContent = '✗'/g)]
+  assert(errorMatches.length >= 2, `expected at least two error markers, got ${errorMatches.length}`)
 })
 
 // ─── Резюме ───────────────────────────────────────────────────────────────────

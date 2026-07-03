@@ -52,3 +52,33 @@ export type AdminPaymentListResult = {
     totalsByCurrency: Record<string, number>
   }
 }
+
+export type AdminPaymentDetailRow = {
+  purchaseId: string
+  profileId: string
+  accountId: string | null
+  username: string | null
+  displayName: string | null
+  email: string | null
+  profileKind: string | null
+  packageKey: string
+  packageTitle: string
+  yellowCoinsAmount: number
+  priceCents: number
+  currency: string
+  provider: string
+  status: string
+  providerCheckoutSessionId: string | null
+  stripePaymentIntentId: string | null
+  stripeChargeId: string | null
+  paymentMethodType: string | null
+  walletType: string | null
+  cardBrand: string | null
+  cardLast4: string | null
+  cardCountry: string | null
+  createdAt: string
+  creditedAt: string | null
+  updatedAt: string
+  hiddenAt: string | null
+  currentYellowCoinsBalance: number | null
+}

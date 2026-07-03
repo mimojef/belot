@@ -16,6 +16,7 @@ export type AdminPaymentsPanelCallbacks = {
   onBack: () => void
   onPeriodChange: (period: AdminPaymentPeriod) => void
   onPageChange: (offset: number) => void
+  onDetailOpen: (purchaseId: string) => void
 }
 
 export const ADMIN_PAYMENT_PERIODS: AdminPaymentPeriod[] = [
@@ -110,7 +111,7 @@ export function getPaymentMethodLabel(row: {
   return 'Неизвестен'
 }
 
-const CARD_BRAND_LABELS: Record<string, string> = {
+export const CARD_BRAND_LABELS: Record<string, string> = {
   visa: 'Visa',
   mastercard: 'Mastercard',
   amex: 'Amex',
@@ -174,9 +175,9 @@ function renderRow(row: AdminPaymentListRow): string {
         <span title="${escapeHtml(sessionId ?? '')}">${escapeHtml(sessionShort)}</span>${copyBtn}
       </td>
       <td style="${tdStyle};text-align:center;">
-        <button type="button" disabled title="Детайлна страница предстои" style="
-          background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.15);border-radius:6px;
-          color:rgba(255,255,255,0.35);font-size:11px;font-weight:700;padding:4px 10px;cursor:not-allowed;
+        <button type="button" data-payment-detail-open="${escapeHtml(row.purchaseId)}" style="
+          background:rgba(212,165,32,0.1);border:1px solid rgba(212,165,32,0.35);border-radius:6px;
+          color:#d4a520;font-size:11px;font-weight:700;padding:4px 10px;cursor:pointer;
         ">Детайли</button>
       </td>
     </tr>
@@ -350,6 +351,13 @@ export function attachAdminPaymentsPanelHandlers(
       if (btn.disabled) return
       const pg = parseInt(btn.dataset.adminPaymentsPage ?? '0', 10)
       callbacks.onPageChange(isNaN(pg) ? 0 : pg)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-payment-detail-open]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.paymentDetailOpen ?? ''
+      if (id) callbacks.onDetailOpen(id)
     })
   })
 

@@ -1382,6 +1382,207 @@ try {
     }
   })
 
+  // ─── [31-42] GET /api/admin/payments/:purchaseId ────────────────────────────
+  console.log('\n[31-42] GET /api/admin/payments/:purchaseId')
+
+  // Insert a test purchase directly into the isolated DB for detail checks
+  const detailSeed = Date.now()
+  const detailPurchaseId = `detail-test-${detailSeed}`
+  const missingProfilePurchaseId = `detail-missing-profile-${detailSeed}`
+  const missingAccountPurchaseId = `detail-missing-account-${detailSeed}`
+  const missingWalletPurchaseId = `detail-missing-wallet-${detailSeed}`
+  const googlePayPurchaseId = `detail-google-pay-${detailSeed}`
+  const nullSnapshotPurchaseId = `detail-null-snapshot-${detailSeed}`
+  const detailDb = new DatabaseSync(iso.dbFile)
+  // Get admin profile_id to attach the purchase to
+  const adminRow = detailDb.prepare(`SELECT profile_id FROM profiles JOIN accounts ON profiles.account_id = accounts.account_id WHERE accounts.email = ?`).get(adminEmail) as { profile_id: string } | undefined
+  if (!adminRow) throw new Error('Admin profile not found in detail DB')
+  detailDb.prepare(`INSERT OR REPLACE INTO profile_wallets (profile_id, yellow_coins_balance) VALUES (?, ?)`)
+    .run(adminRow.profile_id, 12345)
+  const missingAccountProfileId = `profile-no-account-${detailSeed}`
+  detailDb.prepare(`
+    INSERT INTO profiles (
+      profile_id, account_id, profile_kind, username, normalized_username,
+      display_name, normalized_display_name
+    ) VALUES (?, NULL, 'human', 'noaccount', 'noaccount', 'No Account', 'no account')
+  `).run(missingAccountProfileId)
+  const missingWalletAccountId = `acc-no-wallet-${detailSeed}`
+  const missingWalletProfileId = `profile-no-wallet-${detailSeed}`
+  detailDb.prepare(`
+    INSERT INTO accounts (account_id, email, password_hash, role, status)
+    VALUES (?, ?, 'hash', 'player', 'active')
+  `).run(missingWalletAccountId, `no-wallet-${detailSeed}@example.test`)
+  detailDb.prepare(`
+    INSERT INTO profiles (
+      profile_id, account_id, profile_kind, username, normalized_username,
+      display_name, normalized_display_name
+    ) VALUES (?, ?, 'human', 'nowallet', 'nowallet', 'No Wallet', 'no wallet')
+  `).run(missingWalletProfileId, missingWalletAccountId)
+  const insertDetailPurchase = detailDb.prepare(`
+    INSERT INTO coin_purchase_ledger (
+      purchase_id, profile_id, package_key_snapshot, title_snapshot,
+      yellow_coins_amount, price_cents, currency, provider, status,
+      credited_at, created_at, updated_at,
+      provider_checkout_session_id,
+      stripe_payment_intent_id, stripe_charge_id,
+      payment_method_type, wallet_type, card_brand, card_last4, card_country
+    ) VALUES (?, ?, ?, ?, ?, ?, 'eur', 'stripe', 'paid',
+      ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  insertDetailPurchase.run(
+    detailPurchaseId, adminRow.profile_id, 'starter', 'Starter Pack', 500, 999,
+    '2026-06-15 10:00:00', '2026-06-15 09:00:00', '2026-06-15 10:05:00',
+    'cs_test_detail123', 'pi_test_detail456', 'ch_test_detail789',
+    'card', null, 'visa', '4242', 'BG',
+  )
+  detailDb.exec('PRAGMA foreign_keys = OFF')
+  try {
+    insertDetailPurchase.run(
+      missingProfilePurchaseId, `missing-profile-${detailSeed}`, 'starter', 'Starter Pack', 500, 999,
+      '2026-06-15 10:00:00', '2026-06-15 09:00:00', '2026-06-15 10:05:00',
+      'cs_test_missing_profile', 'pi_test_missing_profile', 'ch_test_missing_profile',
+      'card', null, 'visa', '4242', 'BG',
+    )
+  } finally {
+    detailDb.exec('PRAGMA foreign_keys = ON')
+  }
+  insertDetailPurchase.run(
+    missingAccountPurchaseId, missingAccountProfileId, 'starter', 'Starter Pack', 500, 999,
+    '2026-06-15 10:00:00', '2026-06-15 09:00:00', '2026-06-15 10:05:00',
+    'cs_test_missing_account', 'pi_test_missing_account', 'ch_test_missing_account',
+    'card', null, 'visa', '4242', 'BG',
+  )
+  insertDetailPurchase.run(
+    missingWalletPurchaseId, missingWalletProfileId, 'starter', 'Starter Pack', 500, 999,
+    '2026-06-15 10:00:00', '2026-06-15 09:00:00', '2026-06-15 10:05:00',
+    'cs_test_missing_wallet', 'pi_test_missing_wallet', 'ch_test_missing_wallet',
+    'card', null, 'visa', '4242', 'BG',
+  )
+  insertDetailPurchase.run(
+    googlePayPurchaseId, adminRow.profile_id, 'starter', 'Starter Pack', 500, 999,
+    '2026-06-15 10:00:00', '2026-06-15 09:00:00', '2026-06-15 10:05:00',
+    'cs_test_google_pay', 'pi_test_google_pay', 'ch_test_google_pay',
+    'card', 'google_pay', 'visa', '1234', 'BG',
+  )
+  insertDetailPurchase.run(
+    nullSnapshotPurchaseId, adminRow.profile_id, 'legacy', 'Legacy Pack', 100, 199,
+    '2026-06-15 10:00:00', '2026-06-15 09:00:00', '2026-06-15 10:05:00',
+    null, null, null, null, null, null, null, null,
+  )
+  detailDb.close()
+
+  await check('[31] 401 without cookie on detail endpoint', async () => {
+    const r = await httpGet(port, `/api/admin/payments/${detailPurchaseId}`)
+    if (r.status !== 401) throw new Error(`status=${r.status}`)
+  })
+
+  await check('[32] 403 with non-admin cookie on detail endpoint', async () => {
+    const r = await httpGet(port, `/api/admin/payments/${detailPurchaseId}`, playerCookie)
+    if (r.status !== 403) throw new Error(`status=${r.status}`)
+  })
+
+  await check('[33] 404 for non-existent purchaseId', async () => {
+    const r = await httpGet(port, `/api/admin/payments/does-not-exist-00000`, adminCookie)
+    if (r.status !== 404) throw new Error(`status=${r.status}`)
+    const b = r.body as { ok: boolean }
+    if (b.ok !== false) throw new Error('ok should be false')
+  })
+
+  await check('[34] 200 + correct purchase shape for existing record', async () => {
+    const r = await httpGet(port, `/api/admin/payments/${detailPurchaseId}`, adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}`)
+    const b = r.body as { ok: boolean; purchase: Record<string, unknown> }
+    if (!b.ok) throw new Error('ok=false')
+    const p = b.purchase
+    if (p['purchaseId'] !== detailPurchaseId) throw new Error(`purchaseId=${p['purchaseId']}`)
+    if (p['status'] !== 'paid') throw new Error(`status=${p['status']}`)
+    if (p['priceCents'] !== 999) throw new Error(`priceCents=${p['priceCents']}`)
+    if (p['currency'] !== 'EUR') throw new Error(`currency=${p['currency']}`)
+    if (p['stripePaymentIntentId'] !== 'pi_test_detail456') throw new Error(`stripePaymentIntentId=${p['stripePaymentIntentId']}`)
+    if (p['stripeChargeId'] !== 'ch_test_detail789') throw new Error(`stripeChargeId=${p['stripeChargeId']}`)
+    if (p['paymentMethodType'] !== 'card') throw new Error(`paymentMethodType=${p['paymentMethodType']}`)
+    if (p['cardBrand'] !== 'visa') throw new Error(`cardBrand=${p['cardBrand']}`)
+    if (p['cardLast4'] !== '4242') throw new Error(`cardLast4=${p['cardLast4']}`)
+    if (p['cardCountry'] !== 'BG') throw new Error(`cardCountry=${p['cardCountry']}`)
+    if (!('updatedAt' in p)) throw new Error('updatedAt field missing')
+    if (!('currentYellowCoinsBalance' in p)) throw new Error('currentYellowCoinsBalance field missing')
+    if (p['currentYellowCoinsBalance'] !== 12345) throw new Error(`currentYellowCoinsBalance=${p['currentYellowCoinsBalance']}`)
+  })
+
+  await check('[35] purchase response does not include raw secrets', async () => {
+    const r = await httpGet(port, `/api/admin/payments/${detailPurchaseId}`, adminCookie)
+    const raw = JSON.stringify(r.body)
+    // No full card number, no CVC, no Stripe secret key patterns
+    if (/password_hash/i.test(raw)) throw new Error('password_hash in response')
+    if (/sk_/.test(raw)) throw new Error('Stripe secret key in response')
+  })
+
+  await check('[36] store-level: getAdminPaymentDetail returns null for unknown id', async () => {
+    const store = await createCoinPurchaseStore(iso.dbFile)
+    try {
+      const result = store.getAdminPaymentDetail('does-not-exist-xyz')
+      if (result !== null) throw new Error(`Expected null, got ${JSON.stringify(result)}`)
+    } finally { store.close() }
+  })
+
+  await check('[37] detail endpoint tolerates missing profile via LEFT JOIN', async () => {
+    const r = await httpGet(port, `/api/admin/payments/${missingProfilePurchaseId}`, adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}`)
+    const p = (r.body as { purchase: Record<string, unknown> }).purchase
+    if (p['profileId'] !== `missing-profile-${detailSeed}`) throw new Error(`profileId=${p['profileId']}`)
+    if (p['accountId'] !== null) throw new Error(`accountId=${p['accountId']}`)
+    if (p['email'] !== null) throw new Error(`email=${p['email']}`)
+    if (p['displayName'] !== null) throw new Error(`displayName=${p['displayName']}`)
+    if (p['currentYellowCoinsBalance'] !== null) throw new Error(`balance=${p['currentYellowCoinsBalance']}`)
+  })
+
+  await check('[38] detail endpoint tolerates missing account via LEFT JOIN', async () => {
+    const r = await httpGet(port, `/api/admin/payments/${missingAccountPurchaseId}`, adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}`)
+    const p = (r.body as { purchase: Record<string, unknown> }).purchase
+    if (p['displayName'] !== 'No Account') throw new Error(`displayName=${p['displayName']}`)
+    if (p['accountId'] !== null) throw new Error(`accountId=${p['accountId']}`)
+    if (p['email'] !== null) throw new Error(`email=${p['email']}`)
+  })
+
+  await check('[39] detail endpoint tolerates missing wallet via LEFT JOIN', async () => {
+    const r = await httpGet(port, `/api/admin/payments/${missingWalletPurchaseId}`, adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}`)
+    const p = (r.body as { purchase: Record<string, unknown> }).purchase
+    if (p['accountId'] !== missingWalletAccountId) throw new Error(`accountId=${p['accountId']}`)
+    if (p['email'] !== `no-wallet-${detailSeed}@example.test`) throw new Error(`email=${p['email']}`)
+    if (p['currentYellowCoinsBalance'] !== null) throw new Error(`balance=${p['currentYellowCoinsBalance']}`)
+  })
+
+  await check('[40] detail endpoint returns Google Pay snapshot', async () => {
+    const r = await httpGet(port, `/api/admin/payments/${googlePayPurchaseId}`, adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}`)
+    const p = (r.body as { purchase: Record<string, unknown> }).purchase
+    if (p['paymentMethodType'] !== 'card') throw new Error(`paymentMethodType=${p['paymentMethodType']}`)
+    if (p['walletType'] !== 'google_pay') throw new Error(`walletType=${p['walletType']}`)
+    if (p['cardLast4'] !== '1234') throw new Error(`cardLast4=${p['cardLast4']}`)
+  })
+
+  await check('[41] detail endpoint returns null payment snapshot', async () => {
+    const r = await httpGet(port, `/api/admin/payments/${nullSnapshotPurchaseId}`, adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}`)
+    const p = (r.body as { purchase: Record<string, unknown> }).purchase
+    if (p['providerCheckoutSessionId'] !== null) throw new Error(`providerCheckoutSessionId=${p['providerCheckoutSessionId']}`)
+    if (p['stripePaymentIntentId'] !== null) throw new Error(`stripePaymentIntentId=${p['stripePaymentIntentId']}`)
+    if (p['stripeChargeId'] !== null) throw new Error(`stripeChargeId=${p['stripeChargeId']}`)
+    if (p['paymentMethodType'] !== null) throw new Error(`paymentMethodType=${p['paymentMethodType']}`)
+    if (p['walletType'] !== null) throw new Error(`walletType=${p['walletType']}`)
+    if (p['cardBrand'] !== null) throw new Error(`cardBrand=${p['cardBrand']}`)
+    if (p['cardLast4'] !== null) throw new Error(`cardLast4=${p['cardLast4']}`)
+    if (p['cardCountry'] !== null) throw new Error(`cardCountry=${p['cardCountry']}`)
+  })
+
+  await check('[42] malformed encoded purchaseId returns 400', async () => {
+    const r = await httpGet(port, '/api/admin/payments/%E0%A4%A', adminCookie)
+    if (r.status !== 400) throw new Error(`status=${r.status}`)
+  })
+
 } catch (err) {
   fail('HTTP test error', err)
   if (srv) console.error('\n[server output]\n' + srv.output().slice(-3000))

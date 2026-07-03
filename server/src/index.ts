@@ -5419,6 +5419,57 @@ async function handleAdminPaymentsListRequest(
   return true
 }
 
+async function handleAdminPaymentDetailRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/admin\/payments\/([^/]+)$/.exec(pathname)
+  if (!match) return false
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!session) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Unauthorized' })
+    return true
+  }
+
+  if (session.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
+    return true
+  }
+
+  const rawPurchaseId = match[1] ?? ''
+  let purchaseId: string
+  try {
+    purchaseId = decodeURIComponent(rawPurchaseId)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Invalid purchaseId.' })
+    return true
+  }
+
+  // purchaseId must be non-empty after path extraction; normalizeId trims+slices inside the store
+  if (!purchaseId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Missing purchaseId.' })
+    return true
+  }
+
+  const detail = coinPurchaseStore.getAdminPaymentDetail(purchaseId)
+  if (!detail) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Плащането не е намерено.' })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, purchase: detail })
+  return true
+}
+
 async function handleAdminVisitorSourcesRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -6088,6 +6139,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminStatsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminPaymentDetailRequest(req, res, requestUrl.pathname)) {
     return
   }
 

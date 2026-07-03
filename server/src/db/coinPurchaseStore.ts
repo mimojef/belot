@@ -82,6 +82,36 @@ export type AdminPaymentListRow = {
   hiddenAt: string | null
 }
 
+export type AdminPaymentDetailRow = {
+  purchaseId: string
+  profileId: string
+  accountId: string | null
+  username: string | null
+  displayName: string | null
+  email: string | null
+  profileKind: string | null
+  packageKey: string
+  packageTitle: string
+  yellowCoinsAmount: number
+  priceCents: number
+  currency: string
+  provider: string
+  status: string
+  providerCheckoutSessionId: string | null
+  stripePaymentIntentId: string | null
+  stripeChargeId: string | null
+  paymentMethodType: string | null
+  walletType: string | null
+  cardBrand: string | null
+  cardLast4: string | null
+  cardCountry: string | null
+  createdAt: string
+  creditedAt: string | null
+  updatedAt: string
+  hiddenAt: string | null
+  currentYellowCoinsBalance: number | null
+}
+
 export type AdminPaymentListResult = {
   rows: AdminPaymentListRow[]
   total: number
@@ -97,6 +127,7 @@ export type CoinPurchaseStore = {
     offset: number
     now?: Date
   }) => AdminPaymentListResult
+  getAdminPaymentDetail: (purchaseId: string) => AdminPaymentDetailRow | null
   createPendingPurchase: (
     profileId: string,
     packageId: string,
@@ -466,6 +497,43 @@ export async function createCoinPurchaseStore(
     SELECT 1 FROM coin_purchase_ledger
     WHERE purchase_id = ?
       AND (stripe_payment_intent_id IS NULL OR payment_method_type IS NULL)
+    LIMIT 1;
+  `)
+
+  const adminPaymentDetailStatement = database.prepare(`
+    SELECT
+      cpl.purchase_id,
+      cpl.profile_id,
+      p.account_id,
+      p.username,
+      p.display_name,
+      a.email,
+      p.profile_kind,
+      cpl.package_key_snapshot,
+      cpl.title_snapshot,
+      cpl.yellow_coins_amount,
+      cpl.price_cents,
+      cpl.currency,
+      cpl.provider,
+      cpl.status,
+      cpl.provider_checkout_session_id,
+      cpl.stripe_payment_intent_id,
+      cpl.stripe_charge_id,
+      cpl.payment_method_type,
+      cpl.wallet_type,
+      cpl.card_brand,
+      cpl.card_last4,
+      cpl.card_country,
+      cpl.created_at,
+      cpl.credited_at,
+      cpl.updated_at,
+      cpl.hidden_at,
+      pw.yellow_coins_balance
+    FROM coin_purchase_ledger cpl
+    LEFT JOIN profiles p ON p.profile_id = cpl.profile_id
+    LEFT JOIN accounts a ON a.account_id = p.account_id
+    LEFT JOIN profile_wallets pw ON pw.profile_id = cpl.profile_id
+    WHERE cpl.purchase_id = ?
     LIMIT 1;
   `)
 
@@ -960,6 +1028,69 @@ export async function createCoinPurchaseStore(
     return { rows, total, totalsByCurrency }
   }
 
+  function getAdminPaymentDetail(purchaseId: string): AdminPaymentDetailRow | null {
+    type DetailRow = {
+      purchase_id: string
+      profile_id: string
+      account_id: string | null
+      username: string | null
+      display_name: string | null
+      email: string | null
+      profile_kind: string | null
+      package_key_snapshot: string
+      title_snapshot: string
+      yellow_coins_amount: number
+      price_cents: number
+      currency: string
+      provider: string
+      status: string
+      provider_checkout_session_id: string | null
+      stripe_payment_intent_id: string | null
+      stripe_charge_id: string | null
+      payment_method_type: string | null
+      wallet_type: string | null
+      card_brand: string | null
+      card_last4: string | null
+      card_country: string | null
+      created_at: string
+      credited_at: string | null
+      updated_at: string
+      hidden_at: string | null
+      yellow_coins_balance: number | null
+    }
+    const r = adminPaymentDetailStatement.get(normalizeId(purchaseId)) as DetailRow | undefined
+    if (!r) return null
+    return {
+      purchaseId:                 r.purchase_id,
+      profileId:                  r.profile_id,
+      accountId:                  r.account_id ?? null,
+      username:                   r.username ?? null,
+      displayName:                r.display_name ?? null,
+      email:                      r.email ?? null,
+      profileKind:                r.profile_kind ?? null,
+      packageKey:                 r.package_key_snapshot,
+      packageTitle:               r.title_snapshot,
+      yellowCoinsAmount:          r.yellow_coins_amount,
+      priceCents:                 r.price_cents,
+      currency:                   r.currency.toUpperCase(),
+      provider:                   r.provider,
+      status:                     r.status,
+      providerCheckoutSessionId:  r.provider_checkout_session_id ?? null,
+      stripePaymentIntentId:      r.stripe_payment_intent_id ?? null,
+      stripeChargeId:             r.stripe_charge_id ?? null,
+      paymentMethodType:          r.payment_method_type ?? null,
+      walletType:                 r.wallet_type ?? null,
+      cardBrand:                  r.card_brand ?? null,
+      cardLast4:                  r.card_last4 ?? null,
+      cardCountry:                r.card_country ?? null,
+      createdAt:                  dbDateToUtc(r.created_at),
+      creditedAt:                 r.credited_at ? dbDateToUtc(r.credited_at) : null,
+      updatedAt:                  dbDateToUtc(r.updated_at),
+      hiddenAt:                   r.hidden_at ? dbDateToUtc(r.hidden_at) : null,
+      currentYellowCoinsBalance:  r.yellow_coins_balance ?? null,
+    }
+  }
+
   function close(): void {
     database.close()
   }
@@ -978,6 +1109,7 @@ export async function createCoinPurchaseStore(
     fulfillPaidPurchase,
     needsPaymentMethodSnapshot,
     updatePaymentMethodSnapshot,
+    getAdminPaymentDetail,
     hidePurchaseForUser,
     close,
   }
