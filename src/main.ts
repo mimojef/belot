@@ -16,6 +16,7 @@ import {
   createLobbyFlowController,
   type LobbyFlowController,
 } from './app/lobby/createLobbyFlowController'
+import { validateProfileDisplayName } from './app/lobby/profileDisplayNameValidation'
 import type { GiftLimitErrorPayload } from './app/lobby/formatGiftLimitError'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult } from './app/adminServer/adminServerTypes'
@@ -2411,6 +2412,11 @@ async function submitPresetAvatarUrl(avatarUrl: string): Promise<string | null> 
 }
 
 async function submitProfileNameChange(displayName: string): Promise<string | null> {
+  const validation = validateProfileDisplayName(displayName)
+  if (!validation.ok) {
+    return validation.message
+  }
+
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/profile/me/display-name`, {
       method: 'POST',
@@ -2418,7 +2424,7 @@ async function submitProfileNameChange(displayName: string): Promise<string | nu
         'Content-Type': 'application/json',
       },
       credentials: 'include',
-      body: JSON.stringify({ displayName }),
+      body: JSON.stringify({ displayName: validation.canonicalDisplayName }),
     })
     const data = await readAuthResponse(response)
 
@@ -2731,12 +2737,16 @@ lobby = createLobbyFlowController({
       password,
     }),
   onRegisterSubmit: (displayName, email, password, gender) =>
-    submitAuthRequest('register', {
-      displayName,
-      email,
-      password,
-      ...(gender !== null ? { gender } : {}),
-    }),
+    {
+      const validation = validateProfileDisplayName(displayName)
+      if (!validation.ok) return Promise.resolve(validation.message)
+      return submitAuthRequest('register', {
+        displayName: validation.canonicalDisplayName,
+        email,
+        password,
+        ...(gender !== null ? { gender } : {}),
+      })
+    },
   onProfileEditSubmit: (avatarFile, avatarCrop, galleryFiles) =>
     submitProfileUpdate(avatarFile, avatarCrop, galleryFiles),
   onPresetAvatarApply: (avatarUrl) => submitPresetAvatarUrl(avatarUrl),

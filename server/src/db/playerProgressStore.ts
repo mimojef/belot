@@ -11,7 +11,10 @@ import {
   SERVER_SEAT_ORDER,
   SERVER_TEAM_A_SEATS,
 } from '../core/serverTypes.js'
-import { normalizeProfileDisplayName } from './normalizeProfileIdentityText.js'
+import {
+  normalizeProfileDisplayName,
+  validateProfileDisplayName,
+} from './normalizeProfileIdentityText.js'
 import { createRankProgressSnapshot, getRankTitleForLevel, computeEloChange } from '../progression/rankProgression.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
@@ -106,14 +109,25 @@ function toSafeProfileId(stableKey: string): ProfileId {
   return `guest_${normalizedKey}`.slice(0, 96)
 }
 
-function toUniqueGuestNormalizedDisplayName(
-  displayName: string,
-  stableKey: string,
-): string {
-  const trimmed = displayName.trim() || 'Гост'
-  const suffix = stableKey.replace(/[^a-zA-Z0-9]/g, '').slice(0, 6) || 'player'
+function hashStableKeyToBase36(value: string): string {
+  let hash = 2166136261
 
-  return `${trimmed} ${suffix}`
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+
+  return (hash >>> 0).toString(36).padStart(7, '0').slice(0, 7)
+}
+
+function createTemporaryGuestFallbackDisplayName(
+  stableKey: string,
+  profileId: string,
+  attempt: number,
+): string {
+  const baseSuffix = hashStableKeyToBase36(`${stableKey}:${profileId}`)
+  const suffix = attempt === 0 ? baseSuffix : `${baseSuffix}${attempt.toString(36)}`
+  return `Гост ${suffix}`
 }
 
 function toPublicProfileSnapshot(row: {
@@ -525,6 +539,18 @@ export async function createPlayerProgressStore(
     LIMIT 1;
   `)
 
+  const selectProfileByReservedIdentityNameStatement = database.prepare(`
+    SELECT profile_id
+    FROM profiles
+    WHERE status = 'active'
+      AND (
+        normalized_display_name = ?
+        OR normalized_username = ?
+      )
+      AND (? IS NULL OR profile_id <> ?)
+    LIMIT 1;
+  `)
+
   const selectWalletBalanceStatement = database.prepare(`
     SELECT yellow_coins_balance
     FROM profile_wallets
@@ -694,13 +720,37 @@ export async function createPlayerProgressStore(
     stableKey: string,
   ): PlayerPublicProfileSnapshot {
     const profileId = toSafeProfileId(stableKey)
-    const publicDisplayName = displayName.trim() || 'Гост'
-    const uniqueDisplayName = toUniqueGuestNormalizedDisplayName(
-      publicDisplayName,
-      stableKey,
-    )
-    const normalizedDisplayName =
-      normalizeProfileDisplayName(uniqueDisplayName) ?? profileId
+    const publicNameResult = validateProfileDisplayName(displayName)
+    let publicDisplayName = publicNameResult.ok ? publicNameResult.canonicalDisplayName : ''
+    let normalizedDisplayName = publicNameResult.ok ? publicNameResult.normalizedKey : null
+
+    if (
+      normalizedDisplayName === null ||
+      !isReservedIdentityNameAvailable(normalizedDisplayName, profileId)
+    ) {
+      publicDisplayName = ''
+      normalizedDisplayName = null
+
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const candidate = validateProfileDisplayName(
+          createTemporaryGuestFallbackDisplayName(stableKey, profileId, attempt),
+        )
+
+        if (
+          candidate.ok &&
+          isReservedIdentityNameAvailable(candidate.normalizedKey, profileId)
+        ) {
+          publicDisplayName = candidate.canonicalDisplayName
+          normalizedDisplayName = candidate.normalizedKey
+          break
+        }
+      }
+    }
+
+    if (normalizedDisplayName === null || publicDisplayName.length === 0) {
+      throw new Error(`Temporary profile "${profileId}" could not reserve a display name.`)
+    }
+
     const username = profileId
     const normalizedUsername = profileId
 
@@ -845,22 +895,17 @@ export async function createPlayerProgressStore(
     displayNameRaw: string,
     priceAmountRaw: number,
   ): { ok: true; profile: PlayerPublicProfileSnapshot } | { ok: false; message: string } {
-    const displayName = displayNameRaw.trim().replace(/\s+/g, ' ')
-    const normalizedDisplayName = normalizeProfileDisplayName(displayName)
+    const displayNameResult = validateProfileDisplayName(displayNameRaw)
 
-    if (normalizedDisplayName === null) {
+    if (!displayNameResult.ok) {
       return {
         ok: false,
-        message: 'Името може да съдържа само букви на кирилица, латиница, цифри и интервал.',
+        message: displayNameResult.message,
       }
     }
 
-    if (displayName.length < 3 || displayName.length > 32) {
-      return {
-        ok: false,
-        message: 'Името трябва да е между 3 и 32 символа.',
-      }
-    }
+    const displayName = displayNameResult.canonicalDisplayName
+    const normalizedDisplayName = displayNameResult.normalizedKey
 
     if (!Number.isInteger(priceAmountRaw) || priceAmountRaw < 0) {
       return {
@@ -888,8 +933,23 @@ export async function createPlayerProgressStore(
     }
 
     try {
-      database.exec('BEGIN;')
+      database.exec('BEGIN IMMEDIATE;')
       ensureWalletStatement.run(profileId)
+
+      const nameConflict = selectProfileByReservedIdentityNameStatement.get(
+        normalizedDisplayName,
+        normalizedDisplayName,
+        profileId,
+        profileId,
+      ) as { profile_id: string } | undefined
+
+      if (nameConflict !== undefined) {
+        database.exec('ROLLBACK;')
+        return {
+          ok: false,
+          message: 'Това име вече е заето.',
+        }
+      }
 
       const debitResult = debitWalletStatement.run(
         priceAmountRaw,
@@ -1375,11 +1435,23 @@ export async function createPlayerProgressStore(
     refillCatalogBotWalletsStatement.run()
   }
 
+  function isReservedIdentityNameAvailable(
+    normalizedName: string,
+    excludedProfileId: ProfileId | null,
+  ): boolean {
+    const row = selectProfileByReservedIdentityNameStatement.get(
+      normalizedName,
+      normalizedName,
+      excludedProfileId,
+      excludedProfileId,
+    )
+    return row === undefined
+  }
+
   function isDisplayNameAvailable(displayName: string): boolean {
     const normalized = normalizeProfileDisplayName(displayName)
     if (normalized === null) return false
-    const row = selectProfileByNormalizedDisplayNameStatement.get(normalized)
-    return row === undefined
+    return isReservedIdentityNameAvailable(normalized, null)
   }
 
   function close(): void {

@@ -32,6 +32,10 @@ import { PUBLIC_LEGAL_PAGES, type PublicLegalPageKey } from './publicLegalPages'
 import { renderRulesPage } from './renderRulesPage'
 import { renderStrategyPage } from './renderStrategyPage'
 import { orderPlayersForViewer } from './orderPlayersForViewer'
+import {
+  getProfileDisplayNameAvailabilityQuery,
+  validateProfileDisplayName,
+} from './profileDisplayNameValidation'
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes'
 import { renderAdminPaymentsPanel, attachAdminPaymentsPanelHandlers } from '../adminPayments/renderAdminPaymentsPanel'
 import { renderAdminPaymentDetailPanel, attachAdminPaymentDetailHandlers } from '../adminPayments/renderAdminPaymentDetailPanel'
@@ -838,9 +842,9 @@ function renderAuthModal(state: LobbyScreenState): string {
             Име в играта
             <span style="position:relative;display:block;">
               <input name="displayName" autocomplete="nickname" data-name-check-input="register" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 90px 0 12px;font-size:15px;font-weight:700;outline:none;">
-              <span data-name-hint="register" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:800;letter-spacing:0;text-transform:none;pointer-events:none;white-space:nowrap;"></span>
+              <span data-name-hint="register" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);max-width:68%;overflow:hidden;text-overflow:ellipsis;font-size:11px;font-weight:800;letter-spacing:0;text-transform:none;pointer-events:none;white-space:nowrap;"></span>
             </span>
-            <span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:#ffffff;">Мин. 3 символа. Само букви на кирилица, латиница, цифри и интервал.</span>
+            <span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:#ffffff;">Мин. 3 символа. Букви на кирилица или латиница, цифри и по един интервал между думите.</span>
           </label>
           <div style="display:grid;gap:6px;">
             <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">Пол</div>
@@ -981,10 +985,10 @@ function renderProfileEditModal(state: LobbyScreenState): string {
             </div>
             <label style="display:grid;gap:6px;">
               <span style="position:relative;display:block;">
-                <input name="paidDisplayName" maxlength="32" autocomplete="nickname" placeholder="Въведи ново име" data-name-check-input="namechange" style="${nameChangeInputStyle}">
-                <span data-name-hint="namechange" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:800;pointer-events:none;white-space:nowrap;"></span>
+                <input name="paidDisplayName" autocomplete="nickname" placeholder="Въведи ново име" data-name-check-input="namechange" style="${nameChangeInputStyle}">
+                <span data-name-hint="namechange" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);max-width:68%;overflow:hidden;text-overflow:ellipsis;font-size:11px;font-weight:800;pointer-events:none;white-space:nowrap;"></span>
               </span>
-              <span style="${nameChangeHelpStyle}">Мин. 3 символа. Само букви на кирилица, латиница, цифри и интервал.</span>
+              <span style="${nameChangeHelpStyle}">Мин. 3 символа. Букви на кирилица или латиница, цифри и по един интервал между думите.</span>
             </label>
             ${state.profileNameChangeErrorText ? `<div style="border-radius:6px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:8px 10px;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.profileNameChangeErrorText)}</div>` : ''}
             <div style="${nameChangeButtonWrapStyle}">
@@ -8709,7 +8713,17 @@ export function renderLobbyScreen(
     .querySelector<HTMLButtonElement>('[data-lobby-profile-name-change-submit="1"]')
     ?.addEventListener('click', () => {
       const input = root.querySelector<HTMLInputElement>('input[name="paidDisplayName"]')
-      options.onProfileNameChangeSubmit(input?.value.trim() ?? '')
+      const validation = validateProfileDisplayName(input?.value ?? '')
+      const hint = root.querySelector<HTMLElement>('[data-name-hint="namechange"]')
+      if (!validation.ok) {
+        if (hint) {
+          hint.textContent = validation.message
+          hint.style.color = '#f87171'
+        }
+        return
+      }
+      if (input) input.value = validation.canonicalDisplayName
+      options.onProfileNameChangeSubmit(validation.canonicalDisplayName)
     })
 
   const costEl = root.querySelector<HTMLElement>('[data-name-change-cost="1"]')
@@ -8744,14 +8758,36 @@ export function renderLobbyScreen(
     let timer: ReturnType<typeof setTimeout> | null = null
     let lastChecked = ''
 
+    const setHint = (text: string, color = ''): void => {
+      hintEl.textContent = text
+      hintEl.title = text
+      hintEl.style.color = color
+    }
+
+    input.addEventListener('blur', () => {
+      const validation = validateProfileDisplayName(input.value)
+      if (validation.ok) {
+        input.value = validation.canonicalDisplayName
+      }
+    })
+
     input.addEventListener('input', () => {
-      const value = input.value.trim()
+      const validation = validateProfileDisplayName(input.value)
 
       if (timer !== null) clearTimeout(timer)
 
-      if (value.length < 3) {
-        hintEl.textContent = ''
-        hintEl.style.color = ''
+      if (!validation.ok) {
+        if (validation.reason === 'length' && validation.canonicalCandidate.length < 3) {
+          setHint('')
+        } else {
+          setHint(validation.message, '#f87171')
+        }
+        lastChecked = ''
+        return
+      }
+
+      const value = getProfileDisplayNameAvailabilityQuery(input.value)
+      if (value === null) {
         lastChecked = ''
         return
       }
@@ -8765,13 +8801,12 @@ export function renderLobbyScreen(
             `${options.apiBaseUrl}/api/profile/check-name?name=${encodeURIComponent(value)}`,
           )
           const data = await res.json() as { available: boolean }
-          if (input.value.trim() !== value) return
+          const currentValidation = validateProfileDisplayName(input.value)
+          if (!currentValidation.ok || currentValidation.canonicalDisplayName !== value) return
           if (data.available) {
-            hintEl.textContent = '✓ Свободно'
-            hintEl.style.color = '#4ade80'
+            setHint('✓ Свободно', '#4ade80')
           } else {
-            hintEl.textContent = '✕ Заето'
-            hintEl.style.color = '#f87171'
+            setHint('✕ Заето', '#f87171')
           }
         } catch {
           // ignore network errors silently
@@ -8874,6 +8909,14 @@ export function renderLobbyScreen(
       const password = String(data.get('password') ?? '')
 
       if (form.dataset.lobbyAuthForm === 'register') {
+        const displayNameInput = form.querySelector<HTMLInputElement>('input[name="displayName"]')
+        const displayNameValidation = validateProfileDisplayName(displayNameInput?.value ?? '')
+        if (!displayNameValidation.ok) {
+          showAuthError(displayNameValidation.message)
+          return
+        }
+        if (displayNameInput) displayNameInput.value = displayNameValidation.canonicalDisplayName
+
         const confirmPassword = String(data.get('confirmPassword') ?? '')
         if (password !== confirmPassword) {
           showAuthError('Паролите не съвпадат.')
@@ -8885,7 +8928,7 @@ export function renderLobbyScreen(
           showAuthError('Моля избери пол.')
           return
         }
-        options.onRegisterSubmit(String(data.get('displayName') ?? ''), email, password, gender)
+        options.onRegisterSubmit(displayNameValidation.canonicalDisplayName, email, password, gender)
         return
       }
 

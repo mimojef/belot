@@ -4657,7 +4657,7 @@ export function createLobbyFlowController(
 
     state.authSubmitInFlight = true
     const errorText = options.onRegisterSubmit
-      ? await options.onRegisterSubmit(displayName.trim(), email.trim(), password, gender)
+      ? await options.onRegisterSubmit(displayName, email.trim(), password, gender)
       : 'Регистрацията временно не е налична.'
 
     if (errorText !== null) {

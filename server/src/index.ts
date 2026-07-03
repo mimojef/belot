@@ -3329,7 +3329,7 @@ function handleCheckNameRequest(
 ): boolean {
   if (requestUrl.pathname !== '/api/profile/check-name') return false
   const name = requestUrl.searchParams.get('name') ?? ''
-  const available = name.trim().length >= 3 && playerProgressStore.isDisplayNameAvailable(name)
+  const available = playerProgressStore.isDisplayNameAvailable(name)
   sendJsonResponse(res, 200, { available })
   return true
 }
