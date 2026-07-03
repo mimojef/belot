@@ -1728,6 +1728,8 @@ export function createLobbyFlowController(
               ? 'admin-visitors'
             : state.currentScreen === 'admin-payments'
               ? 'admin-payments'
+            : state.currentScreen === 'admin-payment-detail'
+              ? 'admin-payment-detail'
             : state.currentScreen === 'guest-contact-messages'
               ? 'guest-contact-messages'
             : state.currentScreen === 'terms'

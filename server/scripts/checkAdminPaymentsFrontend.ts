@@ -54,6 +54,8 @@
  * [49] detail route/history source checks
  * [50] detail stale-response guards
  * [51] copy buttons report success only after clipboard success
+ * [52] behavioral: click from payment list opens detail screen
+ * [53] behavioral: direct detail route renders detail screen
  */
 
 import {
@@ -69,6 +71,8 @@ import {
   renderAdminPaymentDetailPanel,
 } from '../../src/app/adminPayments/renderAdminPaymentDetailPanel.js'
 import type { AdminPaymentDetailState } from '../../src/app/adminPayments/renderAdminPaymentDetailPanel.js'
+import { createLobbyFlowController } from '../../src/app/lobby/createLobbyFlowController.js'
+import type { LobbyAuthSession } from '../../src/app/lobby/createLobbyFlowController.js'
 
 let passed = 0
 let failed = 0
@@ -86,6 +90,10 @@ function fail(label: string, reason: unknown): void {
 
 function check(label: string, fn: () => void): void {
   try { fn(); pass(label) } catch (err) { fail(label, err) }
+}
+
+async function asyncCheck(label: string, fn: () => Promise<void>): Promise<void> {
+  try { await fn(); pass(label) } catch (err) { fail(label, err) }
 }
 
 function assert(cond: boolean, msg: string): void {
@@ -1031,6 +1039,242 @@ check('[51.1] copy success is set only in clipboard writeText.then', () => {
 check('[51.2] copy error marker is used for missing clipboard and rejected writes', () => {
   const errorMatches = [...detailPanelSrc.matchAll(/btn\.textContent = '✗'/g)]
   assert(errorMatches.length >= 2, `expected at least two error markers, got ${errorMatches.length}`)
+})
+
+// ─── [52-53] behavioral routing/render checks ────────────────────────────────
+
+type FakeClickHandler = (event: Event) => void
+
+class FakeDomElement {
+  style: Record<string, string> & { cssText?: string } = {}
+  dataset: Record<string, string> = {}
+  disabled = false
+  scrollTop = 0
+  scrollLeft = 0
+  scrollWidth = 0
+  clientWidth = 0
+  offsetWidth = 0
+  selectionStart: number | null = null
+  textContent: string | null = null
+  name = ''
+  content = ''
+  rel = ''
+  href = ''
+  private listeners: Record<string, FakeClickHandler[]> = {}
+
+  appendChild(_child: unknown): void {}
+  contains(_child: unknown): boolean { return false }
+  remove(): void {}
+  setAttribute(name: string, value: string): void {
+    this[name as keyof FakeDomElement] = value as never
+  }
+  getBoundingClientRect(): DOMRect {
+    return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect
+  }
+  addEventListener(event: string, handler: EventListenerOrEventListenerObject): void {
+    const fn: FakeClickHandler = typeof handler === 'function'
+      ? handler as FakeClickHandler
+      : (ev) => { handler.handleEvent(ev) }
+    this.listeners[event] = [...(this.listeners[event] ?? []), fn]
+  }
+  dispatchClick(): void {
+    for (const handler of this.listeners.click ?? []) {
+      handler({ type: 'click' } as Event)
+    }
+  }
+  querySelector<T extends Element>(_selector: string): T | null {
+    return null
+  }
+  querySelectorAll<T extends Element>(_selector: string): NodeListOf<T> {
+    return [] as unknown as NodeListOf<T>
+  }
+}
+
+class FakeRoot extends FakeDomElement {
+  private html = ''
+  private detailButtons: FakeDomElement[] = []
+
+  set innerHTML(value: string) {
+    this.html = value
+    this.detailButtons = []
+  }
+
+  get innerHTML(): string {
+    return this.html
+  }
+
+  override querySelector<T extends Element>(_selector: string): T | null {
+    return null
+  }
+
+  override querySelectorAll<T extends Element>(selector: string): NodeListOf<T> {
+    if (selector !== '[data-payment-detail-open]') {
+      return [] as unknown as NodeListOf<T>
+    }
+    const buttons = [...this.html.matchAll(/data-payment-detail-open="([^"]+)"/g)].map((match) => {
+      const btn = new FakeDomElement()
+      btn.dataset.paymentDetailOpen = match[1] ?? ''
+      return btn
+    })
+    this.detailButtons = buttons
+    return buttons as unknown as NodeListOf<T>
+  }
+
+  clickFirstPaymentDetail(): void {
+    const btn = this.detailButtons[0]
+    if (!btn) throw new Error('payment detail button was not wired')
+    btn.dispatchClick()
+  }
+}
+
+function makeAdminSession(): LobbyAuthSession {
+  return {
+    account: { role: 'admin' },
+    profile: {
+      profileId: 'admin-profile-001',
+      displayName: 'Admin User',
+      avatarUrl: null,
+      level: 10,
+      rankTitle: 'Admin',
+      skillRating: 1000,
+      completedGamesCount: 0,
+      wonGamesCount: 0,
+      currentRankGames: 0,
+      nextRankGames: 10,
+      gamesUntilNextRank: 10,
+      rankProgressRatio: 0,
+      averageRating: null,
+      totalRatingsCount: 0,
+      yellowCoinsBalance: 1000,
+      galleryImages: [],
+      gender: null,
+      likesCount: 0,
+      hasLikedByMe: null,
+      isBlockedByMe: null,
+    },
+  }
+}
+
+function installFakeBrowser(startPath: string): void {
+  const location = {
+    pathname: '',
+    search: '',
+    assign: (url: string) => { setUrl(url) },
+  }
+  const setUrl = (url: string): void => {
+    const relative = url.startsWith('http') ? new URL(url).pathname + new URL(url).search : url
+    const [pathname, search = ''] = relative.split('?')
+    location.pathname = pathname || '/lobby'
+    location.search = search ? `?${search}` : ''
+  }
+  setUrl(startPath)
+
+  const fakeWindow = {
+    innerWidth: 1440,
+    innerHeight: 900,
+    location,
+    matchMedia: () => ({ matches: false }),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    requestAnimationFrame: () => 0,
+    cancelAnimationFrame: () => {},
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+  }
+  const fakeHistory = {
+    pushState: (_state: unknown, _title: string, url?: string | URL | null) => {
+      if (url) setUrl(String(url))
+    },
+    replaceState: (_state: unknown, _title: string, url?: string | URL | null) => {
+      if (url) setUrl(String(url))
+    },
+  }
+  const fakeDocument = {
+    activeElement: null,
+    title: '',
+    body: new FakeDomElement(),
+    head: new FakeDomElement(),
+    createElement: () => new FakeDomElement(),
+    getElementById: () => null,
+    querySelector: () => null,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }
+
+  Object.assign(globalThis, {
+    window: fakeWindow,
+    document: fakeDocument,
+    history: fakeHistory,
+    requestAnimationFrame: fakeWindow.requestAnimationFrame,
+    cancelAnimationFrame: fakeWindow.cancelAnimationFrame,
+    setTimeout: fakeWindow.setTimeout,
+    clearTimeout: fakeWindow.clearTimeout,
+  })
+}
+
+function makeControllerForDetailBehavior(
+  root: FakeRoot,
+  purchaseId: string,
+  detailFetches: string[],
+) {
+  return createLobbyFlowController({
+    root: root as unknown as HTMLElement,
+    joinMatchmaking: () => {},
+    leaveMatchmaking: () => {},
+    onMatchFound: () => {},
+    getAuthSession: () => makeAdminSession(),
+    onAdminPaymentsLoad: async () => ({
+      ok: true,
+      purchases: [makeRow({ purchaseId })],
+      pagination: { limit: 50, offset: 0, total: 1, hasMore: false },
+      summary: { totalsByCurrency: { EUR: 499 } },
+    }),
+    onAdminPaymentDetailLoad: async (id) => {
+      detailFetches.push(id)
+      return { ok: true, purchase: makeDetailRow({ purchaseId: id }) }
+    },
+  })
+}
+
+console.log('\n[52] behavioral: click from payment list opens detail screen')
+await asyncCheck('[52.1] list click renders admin payment detail, not lobby', async () => {
+  const purchaseId = 'behavior-click-purchase-001'
+  const detailFetches: string[] = []
+  const root = new FakeRoot()
+  installFakeBrowser('/admin/payments?period=last7days')
+  const controller = makeControllerForDetailBehavior(root, purchaseId, detailFetches)
+
+  controller.setConnected(true)
+  controller.navigateAdminPayments('last7days')
+  await Promise.resolve()
+  await Promise.resolve()
+  root.clickFirstPaymentDetail()
+
+  assert(controller.getCurrentScreen() === 'admin-payment-detail', `currentScreen=${controller.getCurrentScreen()}`)
+  assert(window.location.pathname === `/admin/payments/${purchaseId}`, `pathname=${window.location.pathname}`)
+  assert(root.innerHTML.includes('Детайли за плащане'), 'detail heading not rendered')
+  assert(!root.innerHTML.includes('Избери маса'), 'lobby hero/stakes content rendered instead of detail')
+  assert(detailFetches.length === 1, `detail fetch count=${detailFetches.length}`)
+  assert(detailFetches[0] === purchaseId, `detail fetch purchaseId=${detailFetches[0]}`)
+})
+
+console.log('\n[53] behavioral: direct detail route renders detail screen')
+await asyncCheck('[53.1] direct /admin/payments/:purchaseId renders detail, not lobby', async () => {
+  const purchaseId = 'behavior-direct-purchase-001'
+  const detailFetches: string[] = []
+  const root = new FakeRoot()
+  installFakeBrowser(`/admin/payments/${purchaseId}`)
+  const controller = makeControllerForDetailBehavior(root, purchaseId, detailFetches)
+
+  controller.setConnected(true)
+  controller.navigateInitialPath()
+
+  assert(controller.getCurrentScreen() === 'admin-payment-detail', `currentScreen=${controller.getCurrentScreen()}`)
+  assert(window.location.pathname === `/admin/payments/${purchaseId}`, `pathname=${window.location.pathname}`)
+  assert(root.innerHTML.includes('Детайли за плащане'), 'detail heading not rendered')
+  assert(!root.innerHTML.includes('Избери маса'), 'lobby hero/stakes content rendered instead of detail')
+  assert(detailFetches.length === 1, `detail fetch count=${detailFetches.length}`)
+  assert(detailFetches[0] === purchaseId, `detail fetch purchaseId=${detailFetches[0]}`)
 })
 
 // ─── Резюме ───────────────────────────────────────────────────────────────────
