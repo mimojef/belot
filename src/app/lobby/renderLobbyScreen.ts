@@ -32,6 +32,8 @@ import { PUBLIC_LEGAL_PAGES, type PublicLegalPageKey } from './publicLegalPages'
 import { renderRulesPage } from './renderRulesPage'
 import { renderStrategyPage } from './renderStrategyPage'
 import { orderPlayersForViewer } from './orderPlayersForViewer'
+import type { AdminPaymentPeriod, AdminPaymentListRow } from '../adminPayments/adminPaymentsTypes'
+import { renderAdminPaymentsPanel, attachAdminPaymentsPanelHandlers } from '../adminPayments/renderAdminPaymentsPanel'
 
 const MISSION_TYPE_LABELS: Record<string, string> = {
   win_games: 'Спечели N игри',
@@ -97,7 +99,7 @@ export type GuestContactFormInput = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy'
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -278,6 +280,14 @@ export type LobbyScreenState = {
   adminVisitorsSourcesRows: import('../network/createGameServerClient').AdminVisitorSourceRow[]
   adminVisitorsSourcesTotal: number
   adminVisitorsSourcesErrorText: string | null
+  adminPaymentsPeriod: AdminPaymentPeriod
+  adminPaymentsLoading: boolean
+  adminPaymentsRows: AdminPaymentListRow[]
+  adminPaymentsTotal: number
+  adminPaymentsTotalsByCurrency: Record<string, number>
+  adminPaymentsErrorText: string | null
+  adminPaymentsOffset: number
+  adminPaymentsLimit: number
   pwaUpdatePending: boolean
 }
 
@@ -428,6 +438,9 @@ export type RenderLobbyScreenOptions = {
   onAdminVisitorsOsChange?: (os: import('../network/createGameServerClient').VisitorOsFilter) => void
   onAdminVisitorsPageChange?: (offset: number) => void
   onAdminVisitorsViewChange?: (view: import('../network/createGameServerClient').AdminVisitorsView) => void
+  onAdminPaymentsPeriodChange?: (period: AdminPaymentPeriod) => void
+  onAdminPaymentsPageChange?: (offset: number) => void
+  onAdminPaymentsBackClick?: () => void
   onRulesOpen: () => void
   onStrategyOpen: () => void
 }
@@ -3363,6 +3376,25 @@ function renderMobileLobbyScreenContent(
             ? renderAdminServerPanel(state)
           : state.view === 'admin-visitors'
             ? renderAdminVisitorsPanel(state)
+          : state.view === 'admin-payments'
+            ? renderAdminPaymentsPanel(
+                {
+                  isAdmin: state.isAdmin,
+                  period: state.adminPaymentsPeriod,
+                  loading: state.adminPaymentsLoading,
+                  errorText: state.adminPaymentsErrorText,
+                  rows: state.adminPaymentsRows,
+                  total: state.adminPaymentsTotal,
+                  totalsByCurrency: state.adminPaymentsTotalsByCurrency,
+                  offset: state.adminPaymentsOffset,
+                  limit: state.adminPaymentsLimit,
+                },
+                {
+                  onBack: () => {},
+                  onPeriodChange: () => {},
+                  onPageChange: () => {},
+                },
+              )
           : state.view === 'friends'
             ? renderMobileFriendsDirectory(state)
           : state.view === 'chat'
@@ -4181,13 +4213,24 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
     `
   }
 
-  function statCard(label: string, count: number, cents: number): string {
+  function statCard(label: string, count: number, cents: number, period: string): string {
     return `
-      <div style="
-        background:#0d0d0d; border:1px solid rgba(212,165,32,0.28); border-radius:12px;
-        padding:18px 22px; display:flex; flex-direction:column; gap:10px;
-      ">
-        <div style="font-size:11px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.5);">${label}</div>
+      <button type="button" data-admin-payments-period="${escapeHtml(period)}"
+        aria-label="Виж плащания: ${escapeHtml(label)}"
+        style="
+          background:#0d0d0d; border:1px solid rgba(212,165,32,0.28); border-radius:12px;
+          padding:18px 22px; display:flex; flex-direction:column; gap:10px;
+          cursor:pointer; width:100%; text-align:left;
+          transition:border-color 0.15s;
+        "
+        onmouseover="this.style.borderColor='rgba(212,165,32,0.6)'"
+        onmouseout="this.style.borderColor='rgba(212,165,32,0.28)'"
+        onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click()}"
+      >
+        <div style="font-size:11px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.5);">
+          ${escapeHtml(label)}
+          <span style="font-size:10px;color:rgba(212,165,32,0.45);margin-left:6px;">↗ Детайли</span>
+        </div>
         <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">
           <div>
             <span style="font-size:28px;font-weight:900;color:#ffffff;">${count}</span>
@@ -4198,7 +4241,7 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
             <span style="font-size:12px;color:rgba(212,165,32,0.6);margin-left:4px;">EUR</span>
           </div>
         </div>
-      </div>
+      </button>
     `
   }
 
@@ -4257,13 +4300,13 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
 
       <h3 style="font-size:13px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin:0 0 12px;">Плащания</h3>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
-        ${statCard('Днес', stats.payments.today.count, stats.payments.today.totalCents)}
-        ${statCard('Вчера', stats.payments.yesterday.count, stats.payments.yesterday.totalCents)}
-        ${statCard('Последните 7 дни', stats.payments.last7days.count, stats.payments.last7days.totalCents)}
-        ${statCard('Този месец', stats.payments.thisMonth.count, stats.payments.thisMonth.totalCents)}
+        ${statCard('Днес', stats.payments.today.count, stats.payments.today.totalCents, 'today')}
+        ${statCard('Вчера', stats.payments.yesterday.count, stats.payments.yesterday.totalCents, 'yesterday')}
+        ${statCard('Последните 7 дни', stats.payments.last7days.count, stats.payments.last7days.totalCents, 'last7days')}
+        ${statCard('Този месец', stats.payments.thisMonth.count, stats.payments.thisMonth.totalCents, 'thisMonth')}
       </div>
       <div style="display:grid;grid-template-columns:1fr;gap:12px;">
-        ${statCard('Общо (всички времена)', stats.payments.allTime.count, stats.payments.allTime.totalCents)}
+        ${statCard('Общо (всички времена)', stats.payments.allTime.count, stats.payments.allTime.totalCents, 'allTime')}
       </div>
     </section>
   `
@@ -7032,6 +7075,25 @@ export function renderLobbyScreen(
                 ? renderAdminServerPanel(state)
               : state.view === 'admin-visitors'
                 ? renderAdminVisitorsPanel(state)
+              : state.view === 'admin-payments'
+                ? renderAdminPaymentsPanel(
+                    {
+                      isAdmin: state.isAdmin,
+                      period: state.adminPaymentsPeriod,
+                      loading: state.adminPaymentsLoading,
+                      errorText: state.adminPaymentsErrorText,
+                      rows: state.adminPaymentsRows,
+                      total: state.adminPaymentsTotal,
+                      totalsByCurrency: state.adminPaymentsTotalsByCurrency,
+                      offset: state.adminPaymentsOffset,
+                      limit: state.adminPaymentsLimit,
+                    },
+                    {
+                      onBack: () => {},
+                      onPeriodChange: () => {},
+                      onPageChange: () => {},
+                    },
+                  )
             : state.view === 'friends'
               ? renderFriendsDirectory(state)
             : state.view === 'chat'
@@ -9173,6 +9235,20 @@ export function renderLobbyScreen(
     btn.addEventListener('click', () => {
       const v = btn.dataset.adminVisitorsView ?? 'visitors'
       options.onAdminVisitorsViewChange?.(v as import('../network/createGameServerClient').AdminVisitorsView)
+    })
+  })
+
+  attachAdminPaymentsPanelHandlers(root, {
+    onBack: () => { options.onAdminPaymentsBackClick?.() },
+    onPeriodChange: (period) => { options.onAdminPaymentsPeriodChange?.(period) },
+    onPageChange: (offset) => { options.onAdminPaymentsPageChange?.(offset) },
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-payments-period]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const p = btn.dataset.adminPaymentsPeriod ?? 'today'
+      history.pushState(null, '', `/admin/payments?period=${encodeURIComponent(p)}`)
+      options.onAdminPaymentsPeriodChange?.(p as AdminPaymentPeriod)
     })
   })
 

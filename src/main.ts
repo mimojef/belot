@@ -1075,6 +1075,46 @@ async function loadAdminVisitorSources(params: {
   }
 }
 
+async function loadAdminPayments(params: {
+  period: string
+  limit: number
+  offset: number
+}): Promise<
+  | {
+      ok: true
+      purchases: import('./app/adminPayments/adminPaymentsTypes').AdminPaymentListRow[]
+      pagination: { limit: number; offset: number; total: number; hasMore: boolean }
+      summary: { totalsByCurrency: Record<string, number> }
+    }
+  | { ok: false; message: string }
+> {
+  try {
+    const qs = new URLSearchParams({
+      period: params.period,
+      limit: String(params.limit),
+      offset: String(params.offset),
+    })
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/payments?${qs}`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    type PaymentsResponse = {
+      ok: boolean
+      purchases?: import('./app/adminPayments/adminPaymentsTypes').AdminPaymentListRow[]
+      pagination?: { limit: number; offset: number; total: number; hasMore: boolean }
+      summary?: { totalsByCurrency: Record<string, number> }
+      message?: string
+    }
+    const data = (await response.json()) as PaymentsResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.purchases) || !data.pagination || !data.summary) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на плащанията.' }
+    }
+    return { ok: true, purchases: data.purchases, pagination: data.pagination, summary: data.summary }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function loadAdminSettings(): Promise<
   | { ok: true; settings: AdminSettingsSnapshot }
   | { ok: false; message: string }
@@ -2821,6 +2861,7 @@ lobby = createLobbyFlowController({
   },
   onAdminVisitorsLoad: (params) => loadAdminVisitors(params),
   onAdminVisitorSourcesLoad: (params) => loadAdminVisitorSources(params),
+  onAdminPaymentsLoad: (params) => loadAdminPayments(params),
   onNotifFriendRequestClick: (friendshipId) => {
     const req = lobby?.getPendingFriendRequest(friendshipId)
     if (!req) return
