@@ -21,6 +21,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 import { createSiteVisitStore } from '../src/db/siteVisitStore.js'
 
 let passed = 0
@@ -64,6 +65,7 @@ function makeSchema(db: DatabaseSync): void {
       first_ip_address TEXT NULL, last_ip_address TEXT NULL,
       first_user_agent TEXT NULL, last_user_agent TEXT NULL,
       last_device_type TEXT NULL CHECK (last_device_type IN ('mobile', 'desktop', 'tablet', 'unknown')),
+      last_os_type TEXT NULL CHECK (last_os_type IN ('android', 'ios', 'windows', 'macos', 'linux', 'chromeos', 'unknown')),
       first_referrer TEXT NULL, last_referrer TEXT NULL,
       first_source TEXT NULL, last_source TEXT NULL
     );
@@ -93,7 +95,19 @@ async function withDb(fn: (dbPath: string, db: DatabaseSync) => Promise<void>): 
   makeSchema(db)
   try { await fn(dbPath, db) } finally {
     try { db.close() } catch { /* */ }
-    await rm(dir, { recursive: true, force: true })
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        await rm(dir, { recursive: true, force: true })
+        break
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EBUSY') throw error
+        if (attempt === 19) {
+          console.warn(`  WARN  temp DB cleanup skipped because SQLite file is still busy: ${dir}`)
+          break
+        }
+        await delay(100)
+      }
+    }
   }
 }
 
