@@ -20,6 +20,7 @@
     "check:os-migration": "tsx scripts/checkOsMigration.ts --server-root=.",
     "check:admin-visitors": "tsx scripts/checkAdminVisitors.ts",
     "check:admin-visitor-sources": "tsx scripts/checkAdminVisitorSources.ts --server-root=.",
+    "check:admin-payments": "tsx scripts/checkAdminPayments.ts --server-root=.",
     "check:db-backup-verify": "tsx scripts/checkDbBackupVerify.ts",
     "check:backup-logic": "tsx scripts/checkBackupLogic.ts",
     "check:gift-limit": "tsx scripts/checkYellowCoinGiftLimit.ts",

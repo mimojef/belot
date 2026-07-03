@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { dbDateToUtc } from './dbDate.js'
+import { getSofiaDayBoundsUtc, sofiaMidnightUtc, toSqliteUtc } from './sofiaDayBounds.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -42,9 +43,45 @@ export type AdminPaymentStats = {
   allTime: PaymentPeriodStats
 }
 
+export const ADMIN_PAYMENT_PERIODS = ['today', 'yesterday', 'last7days', 'thisMonth', 'allTime'] as const
+export type AdminPaymentPeriod = (typeof ADMIN_PAYMENT_PERIODS)[number]
+
+export type AdminPaymentListRow = {
+  purchaseId: string
+  profileId: string
+  accountId: string | null
+  username: string | null
+  displayName: string | null
+  email: string | null
+  profileKind: string | null
+  packageKey: string
+  packageTitle: string
+  yellowCoinsAmount: number
+  priceCents: number
+  currency: string
+  provider: string
+  status: CoinPurchaseStatus
+  providerCheckoutSessionId: string | null
+  createdAt: string
+  creditedAt: string | null
+  hiddenAt: string | null
+}
+
+export type AdminPaymentListResult = {
+  rows: AdminPaymentListRow[]
+  total: number
+  totalsByCurrency: Record<string, number>
+}
+
 export type CoinPurchaseStore = {
   listProfilePurchases: (profileId: string) => CoinPurchaseSnapshot[]
-  getAdminPaymentStats: () => AdminPaymentStats
+  getAdminPaymentStats: (now?: Date) => AdminPaymentStats
+  getAdminPaymentListByPeriod: (params: {
+    period: AdminPaymentPeriod
+    limit: number
+    offset: number
+    now?: Date
+  }) => AdminPaymentListResult
   createPendingPurchase: (
     profileId: string,
     packageId: string,
@@ -647,23 +684,193 @@ export async function createCoinPurchaseStore(
     return { ok: true, purchase: updated }
   }
 
-  function getAdminPaymentStats(): AdminPaymentStats {
-    function query(whereClause: string): PaymentPeriodStats {
+  // Builds the WHERE clause fragment for credited_at filtering by period using
+  // Europe/Sofia calendar boundaries. `now` is injectable for deterministic tests.
+  // `col` must be a hardcoded column reference — never derived from HTTP input.
+  function buildPeriodWhereClause(
+    period: AdminPaymentPeriod,
+    now: Date,
+    col: 'credited_at' | 'cpl.credited_at',
+  ): { sql: string; params: string[] } {
+    const bounds = getSofiaDayBoundsUtc(now)
+    // Base guard: paid records must have credited_at set.
+    const notNull = `${col} IS NOT NULL`
+
+    switch (period) {
+      case 'today':
+        return {
+          sql: `${notNull} AND ${col} >= ? AND ${col} < ?`,
+          params: [bounds.todayStart, bounds.tomorrowStart],
+        }
+      case 'yesterday':
+        return {
+          sql: `${notNull} AND ${col} >= ? AND ${col} < ?`,
+          params: [bounds.yesterdayStart, bounds.todayStart],
+        }
+      case 'last7days': {
+        // Current Sofia calendar day + previous 6 full days (7 days total).
+        // Start = Sofia midnight 6 days before today; end = tomorrowStart (exclusive).
+        const sofiaToday = new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'Europe/Sofia',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+        }).formatToParts(now)
+        const y = parseInt(sofiaToday.find(p => p.type === 'year')!.value,  10)
+        const m = parseInt(sofiaToday.find(p => p.type === 'month')!.value, 10)
+        const d = parseInt(sofiaToday.find(p => p.type === 'day')!.value,   10)
+        const windowStart = toSqliteUtc(sofiaMidnightUtc(y, m, d - 6))
+        return {
+          sql: `${notNull} AND ${col} >= ? AND ${col} < ?`,
+          params: [windowStart, bounds.tomorrowStart],
+        }
+      }
+      case 'thisMonth': {
+        // Sofia calendar month: from midnight on the 1st of the current Sofia month.
+        const sofiaToday = new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'Europe/Sofia',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+        }).formatToParts(now)
+        const y = parseInt(sofiaToday.find(p => p.type === 'year')!.value,  10)
+        const m = parseInt(sofiaToday.find(p => p.type === 'month')!.value, 10)
+        const monthStart = toSqliteUtc(sofiaMidnightUtc(y, m, 1))
+        return {
+          sql: `${notNull} AND ${col} >= ? AND ${col} < ?`,
+          params: [monthStart, bounds.tomorrowStart],
+        }
+      }
+      case 'allTime':
+        return { sql: notNull, params: [] }
+    }
+  }
+
+  function getAdminPaymentStats(now: Date = new Date()): AdminPaymentStats {
+    function query(period: AdminPaymentPeriod): PaymentPeriodStats {
+      const { sql, params } = buildPeriodWhereClause(period, now, 'credited_at')
       const row = database.prepare(`
         SELECT COUNT(*) AS count, COALESCE(SUM(price_cents), 0) AS total_cents
         FROM coin_purchase_ledger
-        WHERE status = 'paid' AND ${whereClause}
-      `).get() as { count: number; total_cents: number }
+        WHERE status = 'paid' AND ${sql}
+      `).get(...params) as { count: number; total_cents: number }
       return { count: row.count, totalCents: row.total_cents }
     }
 
     return {
-      today:     query(`DATE(credited_at) = DATE('now')`),
-      yesterday: query(`DATE(credited_at) = DATE('now', '-1 day')`),
-      last7days: query(`credited_at >= DATETIME('now', '-7 days')`),
-      thisMonth: query(`strftime('%Y-%m', credited_at) = strftime('%Y-%m', 'now')`),
-      allTime:   query(`1=1`),
+      today:     query('today'),
+      yesterday: query('yesterday'),
+      last7days: query('last7days'),
+      thisMonth: query('thisMonth'),
+      allTime:   query('allTime'),
     }
+  }
+
+  function getAdminPaymentListByPeriod(params: {
+    period: AdminPaymentPeriod
+    limit: number
+    offset: number
+    now?: Date
+  }): AdminPaymentListResult {
+    const { period, limit, offset, now = new Date() } = params
+    // Summary uses unqualified column (no JOIN); list uses cpl.credited_at.
+    const { sql: summarySql, params: summaryParams } = buildPeriodWhereClause(period, now, 'credited_at')
+    const { sql: listSql,    params: listParams }    = buildPeriodWhereClause(period, now, 'cpl.credited_at')
+
+    // Total count + currency totals for the whole period (not just the page)
+    type SummaryRow = { currency: string; cnt: number; total_cents: number }
+    const summaryRows = database.prepare(`
+      SELECT
+        currency,
+        COUNT(*) AS cnt,
+        COALESCE(SUM(price_cents), 0) AS total_cents
+      FROM coin_purchase_ledger
+      WHERE status = 'paid' AND ${summarySql}
+      GROUP BY currency
+    `).all(...summaryParams) as SummaryRow[]
+
+    let total = 0
+    const totalsByCurrency: Record<string, number> = {}
+    for (const sr of summaryRows) {
+      total += sr.cnt
+      totalsByCurrency[sr.currency.toUpperCase()] =
+        (totalsByCurrency[sr.currency.toUpperCase()] ?? 0) + sr.total_cents
+    }
+
+    // Paged rows with JOIN to profiles and accounts.
+    // hidden_at is returned as informational field — admin sees all paid records
+    // regardless of whether the user chose to hide the purchase from their own view.
+    type ListRow = {
+      purchase_id: string
+      profile_id: string
+      account_id: string | null
+      username: string | null
+      display_name: string | null
+      email: string | null
+      profile_kind: string | null
+      package_key_snapshot: string
+      title_snapshot: string
+      yellow_coins_amount: number
+      price_cents: number
+      currency: string
+      provider: string
+      status: CoinPurchaseStatus
+      provider_checkout_session_id: string | null
+      created_at: string
+      credited_at: string | null
+      hidden_at: string | null
+    }
+
+    const listRows = database.prepare(`
+      SELECT
+        cpl.purchase_id,
+        cpl.profile_id,
+        p.account_id,
+        p.username,
+        p.display_name,
+        a.email,
+        p.profile_kind,
+        cpl.package_key_snapshot,
+        cpl.title_snapshot,
+        cpl.yellow_coins_amount,
+        cpl.price_cents,
+        cpl.currency,
+        cpl.provider,
+        cpl.status,
+        cpl.provider_checkout_session_id,
+        cpl.created_at,
+        cpl.credited_at,
+        cpl.hidden_at
+      FROM coin_purchase_ledger cpl
+      LEFT JOIN profiles p ON p.profile_id = cpl.profile_id
+      LEFT JOIN accounts a ON a.account_id = p.account_id
+      WHERE cpl.status = 'paid' AND ${listSql}
+      ORDER BY cpl.credited_at DESC, cpl.purchase_id DESC
+      LIMIT ? OFFSET ?
+    `).all(...listParams, limit, offset) as ListRow[]
+
+    const rows: AdminPaymentListRow[] = listRows.map(r => ({
+      purchaseId:                  r.purchase_id,
+      profileId:                   r.profile_id,
+      accountId:                   r.account_id ?? null,
+      username:                    r.username ?? null,
+      displayName:                 r.display_name ?? null,
+      email:                       r.email ?? null,
+      profileKind:                 r.profile_kind ?? null,
+      packageKey:                  r.package_key_snapshot,
+      packageTitle:                r.title_snapshot,
+      yellowCoinsAmount:           r.yellow_coins_amount,
+      priceCents:                  r.price_cents,
+      currency:                    r.currency.toUpperCase(),
+      provider:                    r.provider,
+      status:                      r.status,
+      providerCheckoutSessionId:   r.provider_checkout_session_id ?? null,
+      createdAt:                   dbDateToUtc(r.created_at),
+      creditedAt:                  r.credited_at ? dbDateToUtc(r.credited_at) : null,
+      hiddenAt:                    r.hidden_at ? dbDateToUtc(r.hidden_at) : null,
+    }))
+
+    return { rows, total, totalsByCurrency }
   }
 
   function close(): void {
@@ -673,6 +880,7 @@ export async function createCoinPurchaseStore(
   return {
     listProfilePurchases,
     getAdminPaymentStats,
+    getAdminPaymentListByPeriod,
     createPendingPurchase,
     getPurchaseById,
     getPurchaseWithOwnerCheck,

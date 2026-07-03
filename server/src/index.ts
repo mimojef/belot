@@ -25,7 +25,7 @@ import {
 import { createBlockStore, BLOCK_LIMIT } from './db/blockStore.js'
 import { createLikeStore } from './db/likeStore.js'
 import { createMissionStore, type MissionType } from './db/missionStore.js'
-import { createCoinPurchaseStore } from './db/coinPurchaseStore.js'
+import { createCoinPurchaseStore, ADMIN_PAYMENT_PERIODS } from './db/coinPurchaseStore.js'
 import { createDailyRewardsStore } from './db/dailyRewardsStore.js'
 import {
   createSiteVisitStore,
@@ -5254,6 +5254,115 @@ async function handleAdminStatsRequest(
   return true
 }
 
+// Parses a query param as a strict non-negative integer (decimal digits only, no
+// leading sign, no decimal point, no trailing garbage). Returns the parsed number
+// or null if the value is absent/empty (caller supplies the default), or 'invalid'
+// if the string is present but malformed.
+function parseStrictQueryInt(raw: string | null): number | null | 'invalid' {
+  if (raw === null || raw === '') return null
+  if (!/^\d+$/.test(raw)) return 'invalid'
+  const n = Number(raw)
+  if (!Number.isSafeInteger(n)) return 'invalid'
+  return n
+}
+
+async function handleAdminPaymentsListRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  if (pathname !== '/api/admin/payments') {
+    return false
+  }
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!session) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Unauthorized' })
+    return true
+  }
+
+  if (session.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
+    return true
+  }
+
+  const rawPeriod = requestUrl.searchParams.get('period') ?? ''
+  if (!(ADMIN_PAYMENT_PERIODS as readonly string[]).includes(rawPeriod)) {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      errorCode: 'INVALID_PERIOD',
+      message: `Invalid period "${rawPeriod}". Valid values: ${ADMIN_PAYMENT_PERIODS.join(', ')}.`,
+    })
+    return true
+  }
+
+  const parsedLimit  = parseStrictQueryInt(requestUrl.searchParams.get('limit'))
+  const parsedOffset = parseStrictQueryInt(requestUrl.searchParams.get('offset'))
+
+  if (parsedLimit === 'invalid') {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      errorCode: 'INVALID_LIMIT',
+      message: 'limit must be a positive integer (1–100).',
+    })
+    return true
+  }
+
+  if (parsedOffset === 'invalid') {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      errorCode: 'INVALID_OFFSET',
+      message: 'offset must be a non-negative integer.',
+    })
+    return true
+  }
+
+  // null → param absent → use default
+  const limitRaw = parsedLimit ?? 50
+
+  if (limitRaw === 0) {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      errorCode: 'INVALID_LIMIT',
+      message: 'limit must be a positive integer (1–100).',
+    })
+    return true
+  }
+
+  const limit  = Math.min(limitRaw, 100)
+  const offset = parsedOffset ?? 0
+
+  const result = coinPurchaseStore.getAdminPaymentListByPeriod({
+    period: rawPeriod as (typeof ADMIN_PAYMENT_PERIODS)[number],
+    limit,
+    offset,
+  })
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    period: rawPeriod,
+    purchases: result.rows,
+    pagination: {
+      limit,
+      offset,
+      total: result.total,
+      hasMore: offset + result.rows.length < result.total,
+    },
+    summary: {
+      totalsByCurrency: result.totalsByCurrency,
+    },
+  })
+  return true
+}
+
 async function handleAdminVisitorSourcesRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -5923,6 +6032,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminStatsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminPaymentsListRequest(req, res, requestUrl.pathname, requestUrl)) {
     return
   }
 
