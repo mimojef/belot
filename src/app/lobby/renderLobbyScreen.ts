@@ -438,6 +438,7 @@ export type RenderLobbyScreenOptions = {
   onAdminVisitorsOsChange?: (os: import('../network/createGameServerClient').VisitorOsFilter) => void
   onAdminVisitorsPageChange?: (offset: number) => void
   onAdminVisitorsViewChange?: (view: import('../network/createGameServerClient').AdminVisitorsView) => void
+  onAdminPaymentsOpen?: (period: AdminPaymentPeriod) => void
   onAdminPaymentsPeriodChange?: (period: AdminPaymentPeriod) => void
   onAdminPaymentsPageChange?: (offset: number) => void
   onAdminPaymentsBackClick?: () => void
@@ -4215,7 +4216,7 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
 
   function statCard(label: string, count: number, cents: number, period: string): string {
     return `
-      <button type="button" data-admin-payments-period="${escapeHtml(period)}"
+      <button type="button" data-admin-payments-open="${escapeHtml(period)}"
         aria-label="Виж плащания: ${escapeHtml(label)}"
         style="
           background:#0d0d0d; border:1px solid rgba(212,165,32,0.28); border-radius:12px;
@@ -9244,11 +9245,10 @@ export function renderLobbyScreen(
     onPageChange: (offset) => { options.onAdminPaymentsPageChange?.(offset) },
   })
 
-  root.querySelectorAll<HTMLButtonElement>('[data-admin-payments-period]').forEach((btn) => {
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-payments-open]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const p = btn.dataset.adminPaymentsPeriod ?? 'today'
-      history.pushState(null, '', `/admin/payments?period=${encodeURIComponent(p)}`)
-      options.onAdminPaymentsPeriodChange?.(p as AdminPaymentPeriod)
+      const p = btn.dataset.adminPaymentsOpen ?? 'today'
+      options.onAdminPaymentsOpen?.(p as AdminPaymentPeriod)
     })
   })
 

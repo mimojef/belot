@@ -2714,6 +2714,9 @@ export function createLobbyFlowController(
           render()
         }
       },
+      onAdminPaymentsOpen: (period) => {
+        showAdminPaymentsPanel(period)
+      },
       onAdminPaymentsPeriodChange: (period) => {
         state.adminPaymentsPeriod = period
         state.adminPaymentsOffset = 0
@@ -3521,7 +3524,12 @@ export function createLobbyFlowController(
     state.adminPaymentsTotalsByCurrency = {}
     state.adminPaymentsErrorText = null
     state.adminPaymentsLoading = true
-    syncAdminPaymentsUrl()
+    // pushState creates a Back entry so the browser can return to the previous screen.
+    // syncAdminPaymentsUrl (replaceState) is used only for in-screen period/offset changes.
+    const targetUrl = `/admin/payments?period=${encodeURIComponent(p)}`
+    if (window.location.pathname + window.location.search !== targetUrl) {
+      history.pushState(null, '', targetUrl)
+    }
     render()
     void fetchAdminPayments()
   }

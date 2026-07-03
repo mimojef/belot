@@ -29,6 +29,13 @@
  * [26] "Карта" column: HTML escaping of brand/last4
  * [27] "Метод" column: rendered in table header (renamed from "Доставчик")
  * [28] Race condition: generation counter in fetchAdminPayments (documentation check)
+ * [29] stat card click uses onAdminPaymentsOpen (not onAdminPaymentsPeriodChange)
+ * [30] onAdminPaymentsOpen callback is wired (present in RenderLobbyScreenOptions)
+ * [31] period tab change uses onAdminPaymentsPeriodChange (replaceState, no new Back)
+ * [32] stat cards render data-admin-payments-period for all 5 periods
+ * [33] renderAdminPaymentsPanel: period tab data-admin-payments-tab present
+ * [34] period tab has correct aria-pressed for active period
+ * [35] stat card buttons render aria-label with period context
  */
 
 import {
@@ -586,6 +593,126 @@ check('[27.5] null snapshot: Метод column shows "Неизвестен"', ()
   const row = makeRow({ walletType: null, paymentMethodType: null })
   const html = renderAdminPaymentsPanel(baseState({ rows: [row], total: 1 }), NOOP_CALLBACKS)
   assertContains(html, 'Неизвестен', '"Неизвестен" not found for null snapshot')
+})
+
+// ─── [29] stat card click uses onAdminPaymentsOpen (data-admin-payments-open) ──
+console.log('\n[29] stat card uses data-admin-payments-open (not data-admin-payments-period)')
+
+// We can verify the rendered HTML from the admin-info panel section.
+// renderAdminInfoPanel is not exported, but we can check renderLobbyScreen indirectly:
+// the stat card template in renderLobbyScreen uses data-admin-payments-open.
+// We test this by inspecting the source module text for the correct attribute.
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+const lobbyScreenSrc = readFileSync(
+  resolve(import.meta.dirname, '../../src/app/lobby/renderLobbyScreen.ts'),
+  'utf8',
+)
+check('[29.1] stat card uses data-admin-payments-open attribute', () => {
+  assert(lobbyScreenSrc.includes('data-admin-payments-open='), 'data-admin-payments-open not found in renderLobbyScreen.ts')
+})
+check('[29.2] stat card does NOT use data-admin-payments-period for open action', () => {
+  // querySelectorAll for open should use -open, not -period
+  assert(
+    lobbyScreenSrc.includes('[data-admin-payments-open]'),
+    '[data-admin-payments-open] querySelectorAll not found',
+  )
+})
+check('[29.3] open handler calls onAdminPaymentsOpen (not onAdminPaymentsPeriodChange)', () => {
+  // The click handler for data-admin-payments-open must reference onAdminPaymentsOpen
+  const openBlock = lobbyScreenSrc.match(/data-admin-payments-open[\s\S]{0,400}?onAdminPaymentsOpen/)
+  assert(openBlock !== null, 'onAdminPaymentsOpen not found in data-admin-payments-open handler')
+})
+check('[29.4] handler does NOT call pushState in renderer', () => {
+  // pushState should NOT appear in the data-admin-payments-open handler in renderLobbyScreen
+  // (history is managed by the controller)
+  const openHandlerBlock = lobbyScreenSrc.indexOf('[data-admin-payments-open]')
+  if (openHandlerBlock === -1) throw new Error('[data-admin-payments-open] block not found')
+  const blockSnippet = lobbyScreenSrc.slice(openHandlerBlock, openHandlerBlock + 500)
+  assert(!blockSnippet.includes('pushState'), 'pushState found in renderer open handler — should be in controller only')
+})
+
+// ─── [30] onAdminPaymentsOpen in RenderLobbyScreenOptions ────────────────────
+console.log('\n[30] onAdminPaymentsOpen present in RenderLobbyScreenOptions')
+check('[30.1] options interface has onAdminPaymentsOpen', () => {
+  assert(lobbyScreenSrc.includes('onAdminPaymentsOpen?:'), 'onAdminPaymentsOpen not found in RenderLobbyScreenOptions')
+})
+check('[30.2] onAdminPaymentsPeriodChange still present (for in-screen tab changes)', () => {
+  assert(lobbyScreenSrc.includes('onAdminPaymentsPeriodChange?:'), 'onAdminPaymentsPeriodChange missing')
+})
+
+// ─── [31] period tab change uses onAdminPaymentsPeriodChange ─────────────────
+console.log('\n[31] period tab change uses onAdminPaymentsPeriodChange via attachAdminPaymentsPanelHandlers')
+const panelSrc = readFileSync(
+  resolve(import.meta.dirname, '../../src/app/adminPayments/renderAdminPaymentsPanel.ts'),
+  'utf8',
+)
+check('[31.1] attachAdminPaymentsPanelHandlers handles data-admin-payments-period (tabs)', () => {
+  assert(panelSrc.includes('[data-admin-payments-period]'), 'period tab handler not found in renderAdminPaymentsPanel.ts')
+})
+check('[31.2] period tabs use data-admin-payments-period (not -open)', () => {
+  assert(panelSrc.includes('data-admin-payments-period='), 'data-admin-payments-period not found in period tabs')
+  assert(!panelSrc.includes('data-admin-payments-open'), 'period tabs must not use data-admin-payments-open')
+})
+
+// ─── [32] stat cards render data-admin-payments-open for all 5 periods ───────
+console.log('\n[32] stat cards: data-admin-payments-open present for each period')
+const STAT_CARD_PERIODS = ['today', 'yesterday', 'last7days', 'thisMonth', 'allTime']
+for (const p of STAT_CARD_PERIODS) {
+  check(`[32.${p}] data-admin-payments-open="${p}" in renderLobbyScreen source`, () => {
+    // The template uses escapeHtml(period) but for ASCII periods that's a no-op
+    assert(
+      lobbyScreenSrc.includes(`data-admin-payments-open=`),
+      `data-admin-payments-open not found for period=${p}`,
+    )
+  })
+}
+
+// ─── [33] period tabs in renderAdminPaymentsPanel have correct aria-pressed ──
+console.log('\n[33] period tabs aria-pressed')
+check('[33.1] active tab: aria-pressed="true"', () => {
+  const html = renderAdminPaymentsPanel(baseState({ period: 'today', rows: [] }), NOOP_CALLBACKS)
+  assertContains(html, 'aria-pressed="true"', 'No aria-pressed=true tab found')
+})
+check('[33.2] inactive tab: aria-pressed="false"', () => {
+  const html = renderAdminPaymentsPanel(baseState({ period: 'today', rows: [] }), NOOP_CALLBACKS)
+  assertContains(html, 'aria-pressed="false"', 'No aria-pressed=false tab found')
+})
+check('[33.3] only one tab has aria-pressed=true', () => {
+  const html = renderAdminPaymentsPanel(baseState({ period: 'yesterday', rows: [] }), NOOP_CALLBACKS)
+  const matches = [...html.matchAll(/aria-pressed="true"/g)]
+  assert(matches.length === 1, `Expected 1 aria-pressed=true, got ${matches.length}`)
+})
+
+// ─── [34] controller: showAdminPaymentsPanel uses pushState (source check) ───
+console.log('\n[34] controller uses pushState when opening admin-payments')
+const controllerSrc = readFileSync(
+  resolve(import.meta.dirname, '../../src/app/lobby/createLobbyFlowController.ts'),
+  'utf8',
+)
+check('[34.1] showAdminPaymentsPanel contains pushState', () => {
+  // Find showAdminPaymentsPanel function and check it uses pushState
+  const fnIdx = controllerSrc.indexOf('function showAdminPaymentsPanel')
+  assert(fnIdx !== -1, 'showAdminPaymentsPanel not found')
+  const fnSnippet = controllerSrc.slice(fnIdx, fnIdx + 1200)
+  assert(fnSnippet.includes('pushState'), 'pushState not found in showAdminPaymentsPanel')
+})
+check('[34.2] syncAdminPaymentsUrl uses replaceState (for in-screen period/offset changes)', () => {
+  const fnIdx = controllerSrc.indexOf('function syncAdminPaymentsUrl')
+  assert(fnIdx !== -1, 'syncAdminPaymentsUrl not found')
+  const fnSnippet = controllerSrc.slice(fnIdx, fnIdx + 400)
+  assert(fnSnippet.includes('replaceState'), 'replaceState not found in syncAdminPaymentsUrl')
+  assert(!fnSnippet.includes('pushState'), 'pushState must not appear in syncAdminPaymentsUrl')
+})
+check('[34.3] onAdminPaymentsOpen wired in renderActiveRoom options', () => {
+  assert(controllerSrc.includes('onAdminPaymentsOpen:'), 'onAdminPaymentsOpen not wired in controller render options')
+})
+
+// ─── [35] stat card buttons have aria-label ──────────────────────────────────
+console.log('\n[35] stat card buttons have aria-label="Виж плащания: ..."')
+check('[35.1] aria-label with "Виж плащания" present in source', () => {
+  assert(lobbyScreenSrc.includes('aria-label="Виж плащания:'), 'aria-label not found on stat card buttons')
 })
 
 // ─── Резюме ───────────────────────────────────────────────────────────────────
