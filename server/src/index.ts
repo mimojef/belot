@@ -4400,6 +4400,7 @@ async function handleStripeWebhookRequest(
       const amountPaidCents = stripeSession.amount_total ?? 0
       const currency = stripeSession.currency ?? ''
 
+      // Step 1: fulfill atomically — this MUST succeed regardless of Stripe enrichment
       const result = coinPurchaseStore.fulfillPaidPurchase({
         checkoutSessionId,
         purchaseId,
@@ -4411,14 +4412,69 @@ async function handleStripeWebhookRequest(
         console.error(
           `[stripe/webhook] fulfillPaidPurchase failed session=${checkoutSessionId} purchaseId=${purchaseId} message=${result.message}`,
         )
-      } else if (result.alreadyCredited) {
-        console.log(
-          `[stripe/webhook] already credited session=${checkoutSessionId} purchaseId=${purchaseId}`,
-        )
       } else {
-        console.log(
-          `[stripe/webhook] fulfilled purchaseId=${result.purchase.purchaseId} coins=${result.purchase.yellowCoinsAmount}`,
-        )
+        if (result.alreadyCredited) {
+          console.log(
+            `[stripe/webhook] already credited session=${checkoutSessionId} purchaseId=${purchaseId}`,
+          )
+        } else {
+          console.log(
+            `[stripe/webhook] fulfilled purchaseId=${result.purchase.purchaseId} coins=${result.purchase.yellowCoinsAmount}`,
+          )
+        }
+
+        // Step 2: enrich payment method snapshot — non-blocking, must not affect credits.
+        // Runs on first webhook AND on repeated webhooks when snapshot is still missing
+        // (alreadyCredited=true but snapshot was never written, e.g. enrichment failed earlier).
+        const fulfilledPurchaseId = result.purchase.purchaseId
+        const paymentIntentId =
+          typeof stripeSession.payment_intent === 'string'
+            ? stripeSession.payment_intent
+            : (stripeSession.payment_intent as { id?: string } | null)?.id ?? null
+
+        if (paymentIntentId && coinPurchaseStore.needsPaymentMethodSnapshot(fulfilledPurchaseId)) {
+          try {
+            const pi = await stripe.paymentIntents.retrieve(paymentIntentId, {
+              expand: ['latest_charge'],
+            })
+
+            // latest_charge may be an expanded Charge object or a bare string ID
+            let charge: Stripe.Charge | null = null
+            if (pi.latest_charge && typeof pi.latest_charge === 'object') {
+              charge = pi.latest_charge as Stripe.Charge
+            } else if (pi.latest_charge && typeof pi.latest_charge === 'string') {
+              charge = await stripe.charges.retrieve(pi.latest_charge)
+            }
+            // charge remains null if latest_charge is null
+
+            const pmd = charge?.payment_method_details ?? null
+            const cardDetails = pmd?.card ?? null
+            const walletDetails = cardDetails?.wallet ?? null
+
+            coinPurchaseStore.updatePaymentMethodSnapshot(fulfilledPurchaseId, {
+              stripePaymentIntentId: paymentIntentId,
+              stripeChargeId: charge?.id ?? null,
+              paymentMethodType: pmd?.type ?? null,
+              walletType: walletDetails?.type ?? null,
+              cardBrand: cardDetails?.brand ?? null,
+              cardLast4: cardDetails?.last4 ?? null,
+              cardCountry: cardDetails?.country ?? null,
+            })
+            console.log(
+              `[stripe/webhook] enriched purchaseId=${fulfilledPurchaseId} method=${pmd?.type ?? 'null'} wallet=${walletDetails?.type ?? 'null'}`,
+            )
+          } catch (enrichErr) {
+            // Log and continue — enrichment failure must never risk double-credit
+            console.warn(
+              `[stripe/webhook] payment method enrichment failed purchaseId=${fulfilledPurchaseId}:`,
+              enrichErr instanceof Error ? enrichErr.message : String(enrichErr),
+            )
+          }
+        } else if (paymentIntentId) {
+          console.log(
+            `[stripe/webhook] snapshot already complete purchaseId=${fulfilledPurchaseId}, skipping enrichment`,
+          )
+        }
       }
     }
   } else if (event.type === 'checkout.session.expired') {

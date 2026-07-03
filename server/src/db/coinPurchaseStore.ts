@@ -30,6 +30,16 @@ export type FulfillPaidPurchaseParams = {
   currency: string
 }
 
+export type PaymentMethodSnapshot = {
+  stripePaymentIntentId: string | null
+  stripeChargeId: string | null
+  paymentMethodType: string | null
+  walletType: string | null
+  cardBrand: string | null
+  cardLast4: string | null
+  cardCountry: string | null
+}
+
 export type PaymentPeriodStats = {
   count: number
   totalCents: number
@@ -62,6 +72,11 @@ export type AdminPaymentListRow = {
   provider: string
   status: CoinPurchaseStatus
   providerCheckoutSessionId: string | null
+  paymentMethodType: string | null
+  walletType: string | null
+  cardBrand: string | null
+  cardLast4: string | null
+  cardCountry: string | null
   createdAt: string
   creditedAt: string | null
   hiddenAt: string | null
@@ -101,6 +116,11 @@ export type CoinPurchaseStore = {
   fulfillPaidPurchase: (params: FulfillPaidPurchaseParams) =>
     | { ok: true; purchase: CoinPurchaseSnapshot; alreadyCredited: boolean }
     | { ok: false; message: string }
+  needsPaymentMethodSnapshot: (purchaseId: string) => boolean
+  updatePaymentMethodSnapshot: (
+    purchaseId: string,
+    snapshot: PaymentMethodSnapshot,
+  ) => void
   hidePurchaseForUser: (
     purchaseId: string,
     profileId: string,
@@ -123,6 +143,13 @@ type CoinPurchaseRow = {
   hidden_at: string | null
   created_at: string
   updated_at: string
+  stripe_payment_intent_id: string | null
+  stripe_charge_id: string | null
+  payment_method_type: string | null
+  wallet_type: string | null
+  card_brand: string | null
+  card_last4: string | null
+  card_country: string | null
 }
 
 type CoinPurchaseInternalRow = CoinPurchaseRow & {
@@ -419,6 +446,29 @@ export async function createCoinPurchaseStore(
       AND status = 'pending';
   `)
 
+  // Non-destructive: COALESCE keeps existing non-null values.
+  // Webhook and backfill may call this multiple times safely.
+  const updatePaymentMethodSnapshotStatement = database.prepare(`
+    UPDATE coin_purchase_ledger
+    SET
+      stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, ?),
+      stripe_charge_id         = COALESCE(stripe_charge_id, ?),
+      payment_method_type      = COALESCE(payment_method_type, ?),
+      wallet_type              = COALESCE(wallet_type, ?),
+      card_brand               = COALESCE(card_brand, ?),
+      card_last4               = COALESCE(card_last4, ?),
+      card_country             = COALESCE(card_country, ?),
+      updated_at               = CURRENT_TIMESTAMP
+    WHERE purchase_id = ?;
+  `)
+
+  const needsPaymentMethodSnapshotStatement = database.prepare(`
+    SELECT 1 FROM coin_purchase_ledger
+    WHERE purchase_id = ?
+      AND (stripe_payment_intent_id IS NULL OR payment_method_type IS NULL)
+    LIMIT 1;
+  `)
+
   const ensureWalletStatement = database.prepare(`
     INSERT INTO profile_wallets (
       profile_id,
@@ -652,6 +702,28 @@ export async function createCoinPurchaseStore(
     return { ok: true, purchase: fulfilled, alreadyCredited: false }
   }
 
+  function needsPaymentMethodSnapshot(purchaseId: string): boolean {
+    const row = needsPaymentMethodSnapshotStatement.get(purchaseId)
+    return row !== undefined
+  }
+
+  function updatePaymentMethodSnapshot(
+    purchaseId: string,
+    snapshot: PaymentMethodSnapshot,
+  ): void {
+    // Parameters match COALESCE(column, ?) order — existing non-null values are preserved.
+    updatePaymentMethodSnapshotStatement.run(
+      snapshot.stripePaymentIntentId,
+      snapshot.stripeChargeId,
+      snapshot.paymentMethodType,
+      snapshot.walletType,
+      snapshot.cardBrand,
+      snapshot.cardLast4,
+      snapshot.cardCountry,
+      purchaseId,
+    )
+  }
+
   function hidePurchaseForUser(
     purchaseId: string,
     profileId: string,
@@ -816,6 +888,11 @@ export async function createCoinPurchaseStore(
       provider: string
       status: CoinPurchaseStatus
       provider_checkout_session_id: string | null
+      payment_method_type: string | null
+      wallet_type: string | null
+      card_brand: string | null
+      card_last4: string | null
+      card_country: string | null
       created_at: string
       credited_at: string | null
       hidden_at: string | null
@@ -838,6 +915,11 @@ export async function createCoinPurchaseStore(
         cpl.provider,
         cpl.status,
         cpl.provider_checkout_session_id,
+        cpl.payment_method_type,
+        cpl.wallet_type,
+        cpl.card_brand,
+        cpl.card_last4,
+        cpl.card_country,
         cpl.created_at,
         cpl.credited_at,
         cpl.hidden_at
@@ -865,6 +947,11 @@ export async function createCoinPurchaseStore(
       provider:                    r.provider,
       status:                      r.status,
       providerCheckoutSessionId:   r.provider_checkout_session_id ?? null,
+      paymentMethodType:           r.payment_method_type ?? null,
+      walletType:                  r.wallet_type ?? null,
+      cardBrand:                   r.card_brand ?? null,
+      cardLast4:                   r.card_last4 ?? null,
+      cardCountry:                 r.card_country ?? null,
       createdAt:                   dbDateToUtc(r.created_at),
       creditedAt:                  r.credited_at ? dbDateToUtc(r.credited_at) : null,
       hiddenAt:                    r.hidden_at ? dbDateToUtc(r.hidden_at) : null,
@@ -889,6 +976,8 @@ export async function createCoinPurchaseStore(
     markPurchaseCanceledByCheckoutSessionId,
     markPurchaseFailedByCheckoutSessionId,
     fulfillPaidPurchase,
+    needsPaymentMethodSnapshot,
+    updatePaymentMethodSnapshot,
     hidePurchaseForUser,
     close,
   }
