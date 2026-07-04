@@ -33,14 +33,14 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { scanFileForForbiddenContent, type SanitizationViolation } from './trainingDataset/sanitizeOutput.js'
-import type { CardDecisionState, CompactCard, CompactPlayedCard } from './trainingInference/cardModelFeatures.js'
+import type { CardDecisionState, CompactCard, CompactPlayedCard } from '../src/ai/cardModelFeatures.js'
 import {
   CardModelLoadError,
   loadCardModelFromFile,
   rankLegalCardsWithCardModel,
   type CardModel,
   type RankedCardPrediction,
-} from './trainingInference/cardModelInference.js'
+} from '../src/ai/cardModelInference.js'
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
 

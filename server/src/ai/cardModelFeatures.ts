@@ -2,11 +2,12 @@
  * cardModelFeatures.ts
  *
  * Shared feature extraction за card-model-v1 — единственото място, което
- * дефинира какви feature-и вижда моделът. Използва се И от trainer-а
- * (server/scripts/trainCardModel.ts), И от inference wrapper-а
- * (cardModelInference.ts), за да е гарантирано, че двете никога не могат
- * да се разминат (същия код, не копие). Няма runtime ефект върху gameplay —
- * това е чист feature-computation helper за offline training/inference.
+ * дефинира какви feature-и вижда моделът. Използва се И от offline
+ * training tooling-а (server/scripts/trainCardModel.ts и др.), И от
+ * runtime local AI beta wrapper-а (server/src/ai/localAiCardBeta.ts), за
+ * да е гарантирано, че двете никога не могат да се разминат (същия код,
+ * не копие). Самият файл няма runtime side-effect — чист feature-computation
+ * helper, безопасен за import от production код.
  *
  * ВАЖНО (виж и metrics.md на trainer-а): softmax-over-candidates ranking
  * loss дава ТОЧНО нулев градиент за всеки feature, чиято стойност е
@@ -16,8 +17,8 @@
  * interaction терми — виж CARD_MODEL_FEATURE_NAMES по-долу.
  */
 
-import { getServerCardPoints, type ServerScoringContract } from '../../src/game/serverScoring.js'
-import type { ServerSuit } from '../../src/game/serverGameTypes.js'
+import { getServerCardPoints, type ServerScoringContract } from '../game/serverScoring.js'
+import type { ServerSuit } from '../game/serverGameTypes.js'
 
 // ─── Shapes (минималният набор полета, нужен за feature computation) ────────
 

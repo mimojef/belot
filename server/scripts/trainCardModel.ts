@@ -37,7 +37,7 @@ import {
   dot,
   type CardDecisionState,
   type CompactCard,
-} from './trainingInference/cardModelFeatures.js'
+} from '../src/ai/cardModelFeatures.js'
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -71,7 +71,7 @@ const L2_REGULARIZATION = 0.001
 const FIRST_LEGAL_NONFORCED_TEST_TARGET = 0.34 // от task brief / evaluation-summary.json
 
 // Feature set-ът (имена + computation) е споделен с inference wrapper-а чрез
-// trainingInference/cardModelFeatures.ts — гарантира, че trainer и inference
+// src/ai/cardModelFeatures.ts — гарантира, че trainer и inference
 // никога не могат да се разминат (виж модула за обяснение защо feature set-ът
 // съдържа само per-candidate-varying стойности).
 const FEATURE_COUNT = CARD_MODEL_FEATURE_NAMES.length
@@ -195,7 +195,7 @@ function pct(value: number): string {
 }
 
 // ─── Training: full-batch gradient descent на softmax cross-entropy над legalCards ─
-// (feature computation е в trainingInference/cardModelFeatures.ts — споделено с inference wrapper-а)
+// (feature computation е в src/ai/cardModelFeatures.ts — споделено с inference wrapper-а)
 
 function trainWeights(records: CardRecord[]): { weights: number[]; finalLoss: number; epochLosses: number[] } {
   const weights = new Array(FEATURE_COUNT).fill(0)

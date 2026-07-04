@@ -2,18 +2,22 @@
  * cardModelInference.ts
  *
  * Read-only, fail-closed inference wrapper за card-model-v1. Зарежда
- * model.json (произведен от server/scripts/trainCardModel.ts) и предлага
- * чиста функция за ranking на legalCards в даден decision context.
+ * model.json (произведен от server/scripts/trainCardModel.ts, local-only
+ * артефакт, никога не се commit-ва) и предлага чиста функция за ranking на
+ * legalCards в даден decision context.
  *
- * Няма runtime gameplay ефект — това е offline/local inference helper,
- * подготовка за евентуален бъдещ beta bot. НЕ е включен в gameplay,
- * matchmaking, bot strategy или client protocol.
+ * Използва се от:
+ *  - offline training/eval tooling (server/scripts/*.ts) — async loader;
+ *  - runtime local AI beta wrapper (server/src/ai/localAiCardBeta.ts) —
+ *    sync loader, защото bot card-play flow-ът е синхронен и не бива да се
+ *    прави async само заради experimental AI candidate.
  *
  * Feature extraction се преизползва от cardModelFeatures.ts (същия код,
  * който trainer-ът използва) — гарантира, че inference и training никога
  * не могат да се разминат в feature логиката.
  */
 
+import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 
 import {
@@ -99,11 +103,35 @@ export function validateAndBuildCardModel(parsed: unknown): CardModel {
   }
 }
 
-/** Чете и валидира model.json от диск. Fail-closed при missing/corrupt файл. */
+/** Чете и валидира model.json от диск (async). Fail-closed при missing/corrupt файл. */
 export async function loadCardModelFromFile(modelPath: string): Promise<CardModel> {
   let content: string
   try {
     content = await readFile(modelPath, 'utf8')
+  } catch (e) {
+    throw new CardModelLoadError(`Не мога да прочета model artifact "${modelPath}": ${e instanceof Error ? e.message : String(e)}`)
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content)
+  } catch (e) {
+    throw new CardModelLoadError(`model.json на "${modelPath}" не е валиден JSON: ${e instanceof Error ? e.message : String(e)}`)
+  }
+
+  return validateAndBuildCardModel(parsed)
+}
+
+/**
+ * Синхронен вариант — използва се от runtime bot card-play flow-а
+ * (advanceExpiredServerPlayingState.ts е синхронен; AI beta wrapper-ът не
+ * бива да превръща gameplay flow-а в async само заради experimental
+ * candidate). Fail-closed по същия начин като async варианта.
+ */
+export function loadCardModelFromFileSync(modelPath: string): CardModel {
+  let content: string
+  try {
+    content = readFileSync(modelPath, 'utf8')
   } catch (e) {
     throw new CardModelLoadError(`Не мога да прочета model artifact "${modelPath}": ${e instanceof Error ? e.message : String(e)}`)
   }

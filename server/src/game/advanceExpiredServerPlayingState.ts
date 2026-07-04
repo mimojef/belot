@@ -2,7 +2,7 @@ import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
 import type { Seat } from '../core/serverTypes.js'
 import type { ServerCard } from './serverGameTypes.js'
 import { detectServerDeclarationsInHand } from './declarations/index.js'
-import { pickServerBotPlayCard } from './pickServerBotPlayCard.js'
+import { pickServerBotPlayCardWithAiCandidate } from '../ai/localAiCardBeta.js'
 import { rebaseServerStateToEventAt } from './rebaseServerStateToEventAt.js'
 import { isServerSeatControlledByBot } from './serverTimerStateHelpers.js'
 import { submitServerPlayCard } from './submitServerPlayCard.js'
@@ -101,7 +101,7 @@ export function advanceExpiredServerPlayingState(
         },
       }
 
-  const card = pickServerBotPlayCard(stateWithBotControl, currentSeat)
+  const card = pickServerBotPlayCardWithAiCandidate(stateWithBotControl, currentSeat)
 
   if (!card) {
     return { state, advanced: false, eventAt }
