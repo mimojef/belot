@@ -13,13 +13,15 @@
  * bot strategy, matchmaking, economy, client protocol или recorder writer.
  *
  * Usage:
- *   npm run test:card-model-inference   (от server/)
+ *   npm run test:card-model-inference       (от server/) — тества card-model-v1 (default, непроменено поведение)
+ *   npm run test:card-model-v2-inference    (от server/) — тества card-model-v2
+ *   tsx scripts/testCardModelInference.ts card-model-v2   — директен CLI извикване с explicit версия
  *
  * Exit codes:
  *   0 — inference metrics съвпадат с trainer metrics (в tolerance),
  *       privacy PASS, invalid predictions = 0
  *   1 — invalid/missing input, privacy нарушение, trainer/inference mismatch,
- *       invalid predictions > 0
+ *       invalid predictions > 0, неизвестна model version
  *   2 — file system грешка (липсващ model/split файл)
  */
 
@@ -28,7 +30,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { scanFileForForbiddenContent, type SanitizationViolation } from './trainingDataset/sanitizeOutput.js'
-import type { CardDecisionState, CompactCard, CompactPlayedCard } from '../src/ai/cardModelFeatures.js'
+import { CARD_MODEL_VERSIONS, isSupportedCardModelVersion, type CardDecisionState, type CardModelVersion, type CompactCard, type CompactPlayedCard } from '../src/ai/cardModelFeatures.js'
 import {
   CardModelLoadError,
   loadCardModelFromFile,
@@ -36,13 +38,22 @@ import {
   type CardModel,
 } from '../src/ai/cardModelInference.js'
 
+// ─── Version selection (CLI arg, default card-model-v1 — непроменено поведение) ─
+
+const versionArg = process.argv.slice(2).find((a) => !a.startsWith('-'))
+if (versionArg && !isSupportedCardModelVersion(versionArg)) {
+  console.error(`FATAL: неизвестна model version "${versionArg}" — поддържани: ${CARD_MODEL_VERSIONS.join(', ')}`)
+  process.exit(1)
+}
+const MODEL_VERSION: CardModelVersion = versionArg && isSupportedCardModelVersion(versionArg) ? versionArg : 'card-model-v1'
+
 // ─── Paths ────────────────────────────────────────────────────────────────────
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(__dirname, '..', '..')
 const OUTPUT_DIR = join(REPO_ROOT, 'training-output')
 const BASELINE_DIR = join(OUTPUT_DIR, 'baseline')
-const MODEL_DIR = join(OUTPUT_DIR, 'models', 'card-model-v1')
+const MODEL_DIR = join(OUTPUT_DIR, 'models', MODEL_VERSION)
 
 const MODEL_JSON_PATH = join(MODEL_DIR, 'model.json')
 const TRAINER_METRICS_JSON_PATH = join(MODEL_DIR, 'metrics.json')
@@ -283,7 +294,7 @@ function approxEqual(a: number, b: number, tolerance: number): boolean {
 
 async function main(): Promise<void> {
   console.log('─────────────────────────────────────────')
-  console.log('  Card Model Inference Test (локален, read-only)')
+  console.log(`  Card Model Inference Test — ${MODEL_VERSION} (локален, read-only)`)
   console.log('─────────────────────────────────────────')
 
   // ─── Стъпка: зареди model.json (fail-closed) ───────────────────────────────
@@ -293,7 +304,7 @@ async function main(): Promise<void> {
   } catch (e) {
     if (e instanceof CardModelLoadError) {
       console.error(`FATAL: невалиден/липсващ model artifact: ${e.message}`)
-      console.error('\nИзпълни първо: npm run train:card-model')
+      console.error(`\nИзпълни първо: npm run ${MODEL_VERSION === 'card-model-v2' ? 'train:card-model-v2' : 'train:card-model'}`)
       process.exit(e.message.includes('Не мога да прочета') ? 2 : 1)
       return
     }
@@ -389,7 +400,7 @@ async function main(): Promise<void> {
     trainerMetrics = JSON.parse(await readFile(TRAINER_METRICS_JSON_PATH, 'utf8'))
   } catch (e) {
     console.error(`FATAL: не мога да прочета trainer metrics.json (${TRAINER_METRICS_JSON_PATH}): ${e instanceof Error ? e.message : String(e)}`)
-    console.error('Изпълни първо: npm run train:card-model')
+    console.error(`Изпълни първо: npm run ${MODEL_VERSION === 'card-model-v2' ? 'train:card-model-v2' : 'train:card-model'}`)
     process.exit(2)
     return
   }
@@ -492,7 +503,7 @@ async function main(): Promise<void> {
 
 function renderMarkdown(s: any): string {
   const lines: string[] = []
-  lines.push('# Card Model v1 — Inference Test')
+  lines.push(`# ${s.modelVersion} — Inference Test`)
   lines.push('')
   lines.push(`Генериран на: ${s.generatedAt}`)
   lines.push(`Модел: \`${s.modelVersion}\``)

@@ -76,6 +76,38 @@ Get-ChildItem Env:LOCAL_AI_CARD_BETA_*
 
 ---
 
+## B2) Тестване на `card-model-v2` вместо `card-model-v1` (по избор)
+
+`card-model-v2` е по-богат feature set (виж `training-output/models/card-model-v2/metrics.md`
+за пълни метрики) — offline измерено, значително по-добър при **lead** решения от v1
+(non-forced test lead accuracy ≈51% срещу ≈37.5% за v1), при почти same follow accuracy.
+**Default моделен път остава v1** — v2 се тества само ако изрично зададеш друг
+`LOCAL_AI_CARD_BETA_MODEL_PATH`:
+
+```powershell
+cd D:\Project\Belot-V2\server
+
+$env:LOCAL_AI_CARD_BETA_ENABLED = "true"
+$env:LOCAL_AI_CARD_BETA_TRACE_ENABLED = "true"
+$env:LOCAL_AI_CARD_BETA_MODEL_PATH = "D:\Project\Belot-V2\training-output\models\card-model-v2\model.json"
+$env:LOCAL_AI_CARD_BETA_TRACE_PATH = "D:\Project\Belot-V2\training-output\local-ai-beta\card-decisions.jsonl"
+```
+
+Ако `training-output/models/card-model-v2/model.json` липсва, генерирай го (от `server/`):
+
+```powershell
+npm run train:card-model-v2
+npm run test:card-model-v2-inference
+npm run simulate:ai-card-v2-candidate
+```
+
+Забележка: `LOCAL_AI_CARD_BETA_MODEL_PATH` е единственото нещо, което избира версията —
+`server/src/ai/cardModelInference.ts` разпознава `modelVersion` от самия `model.json` файл
+(`card-model-v1` или `card-model-v2`) и автоматично ползва правилния feature set. Няма
+отделен env флаг за версия — не се включва в production по никакъв начин.
+
+---
+
 ## C) Стартиране на backend + frontend
 
 Реалните npm scripts от repo-то (не са измислени — виж `server\package.json` и
@@ -117,9 +149,11 @@ npm run dev
    - **Card-play на bot места** — AI candidate-ът участва само тук.
    - По-видимо AI влияние очаквай при **follow** ситуации (когато bot-ът следва
      чужда боя) — там AI моделът показа значително по-висока точност спрямо
-     baseline-ите в офлайн оценките. При **lead** (bot-ът води трик) очаквай
-     по-слабо/по-неутрално влияние — офлайн метриките там са по-близо до
-     baseline.
+     baseline-ите в офлайн оценките, при И v1, И v2. При **lead** (bot-ът води
+     трик): с v1 очаквай по-слабо/по-неутрално влияние (офлайн ≈37.5% test
+     accuracy); с `card-model-v2` (виж B2) lead поведението е измеримо
+     по-силно (офлайн ≈51% test accuracy) — ако тестваш v2, очаквай по-видима
+     разлика и при lead, не само при follow.
    - Forced ходове (само 1 legal карта) винаги изглеждат същите, независимо от
      AI флага — няма реален избор там.
 

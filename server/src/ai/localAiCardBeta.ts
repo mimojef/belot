@@ -44,10 +44,11 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import type { Seat } from '../core/serverTypes.js'
-import type { ServerAuthoritativeGameState, ServerCard } from '../game/serverGameTypes.js'
+import type { ServerAuthoritativeGameState, ServerCard, ServerSuit } from '../game/serverGameTypes.js'
 import { getServerValidPlayCards } from '../game/getServerValidPlayCards.js'
 import { getServerTrickWinner } from '../game/getServerTrickWinner.js'
 import { pickServerBotPlayCard } from '../game/pickServerBotPlayCard.js'
+import { getServerCardPoints, type ServerScoringContract } from '../game/serverScoring.js'
 import {
   CardModelLoadError,
   loadCardModelFromFileSync,
@@ -154,7 +155,10 @@ function buildCardDecisionState(
     seat,
     ownHand: state.hands[seat] ?? [],
     legalCards,
-    contract: { contract, trumpSuit },
+    // bidderSeat = winningBid.seat (същото поле, вече изчислено по-горе) —
+    // само за card-model-v2 (isOurTeamContractor interaction терми);
+    // card-model-v1 feature extraction никога не го чете (виж cardModelFeatures.ts).
+    contract: { contract, trumpSuit, bidderSeat: winningBid?.seat ?? null },
     currentTrick: plays,
     currentWinningSeat: currentWinner?.seat ?? null,
   }
@@ -162,7 +166,12 @@ function buildCardDecisionState(
 
 // ─── Decision tracing (local-only, OFF by default, independent of the AI flag) ─
 
-export const LOCAL_AI_CARD_BETA_TRACE_VERSION = 1
+// v2: добавени isLead/positionInTrick/pointsInTrick — позволява бъдещ trace
+// анализ да прави lead/follow breakdown директно от trace-а (виж
+// weakness-analysis.md, "Lead/follow breakdown: НЕ е налично" находка).
+// Чисто адитивна схема промяна — по-старите consumers (computeTraceSummary),
+// които не четат новите полета, продължават да работят непроменени.
+export const LOCAL_AI_CARD_BETA_TRACE_VERSION = 2
 
 export type LocalAiCardBetaDecisionSource =
   | 'ai_disabled'
@@ -187,6 +196,11 @@ export type LocalAiCardBetaTraceRecord = {
   isForced: boolean
   gameMode: string | null
   trumpSuit: string | null
+  // Добавени в traceVersion 2 — computed unconditionally от state.playing?.currentTrick,
+  // независимо от AI флага, за да е налично за ai_disabled/forced_card decisions също.
+  isLead: boolean
+  positionInTrick: number
+  pointsInTrick: number
   conventionalCard: string | null
   aiSelectedCard: string | null
   finalCard: string | null
@@ -280,6 +294,18 @@ export function pickServerBotPlayCardWithAiCandidate(
   const winningBid = state.bidding.winningBid
   const gameMode = winningBid?.contract ?? null
   const trumpSuit = winningBid?.contract === 'suit' ? (winningBid.trumpSuit ?? null) : null
+
+  // Computed unconditionally (не само за AI-enabled клона), за да е налично
+  // за trace-а дори при ai_disabled/forced_card decisions — евтино, чисто
+  // read-only върху вече наличния plays масив.
+  const currentPlays = state.playing?.currentTrick?.plays ?? []
+  const isLeadDecision = currentPlays.length === 0
+  const positionInTrickForTrace = currentPlays.length
+  const traceContract: ServerScoringContract = winningBid?.contract ?? 'no-trumps'
+  const pointsInTrickForTrace = currentPlays.reduce(
+    (sum, p) => sum + getServerCardPoints(p.card.suit, p.card.rank, traceContract, trumpSuit as ServerSuit | null),
+    0,
+  )
 
   let decisionSource: LocalAiCardBetaDecisionSource
   let finalCard: ServerCard | null = conventionalCard
@@ -388,6 +414,9 @@ export function pickServerBotPlayCardWithAiCandidate(
       isForced,
       gameMode,
       trumpSuit,
+      isLead: isLeadDecision,
+      positionInTrick: positionInTrickForTrace,
+      pointsInTrick: pointsInTrickForTrace,
       conventionalCard: conventionalCard?.id ?? null,
       aiSelectedCard: aiSelectedCardId,
       finalCard: finalCard?.id ?? null,

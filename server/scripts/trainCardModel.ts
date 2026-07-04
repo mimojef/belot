@@ -16,12 +16,14 @@
  * еднакъв вход. Никакви native/тежки ML dependency-та — чист TypeScript.
  *
  * Usage:
- *   npm run train:card-model   (от server/)
+ *   npm run train:card-model        (от server/) — тренира card-model-v1 (default, непроменено поведение)
+ *   npm run train:card-model-v2     (от server/) — тренира card-model-v2 (richer features, виж cardModelFeatures.ts)
+ *   tsx scripts/trainCardModel.ts card-model-v2   — директен CLI извикване с explicit версия
  *
  * Exit codes:
  *   0 — модел трениран + оценен успешно (дори ако не бие baseline-а —
  *       това само се отбелязва в metrics.md, не е фатално)
- *   1 — invalid/missing input, privacy нарушение
+ *   1 — invalid/missing input, privacy нарушение, неизвестна model version
  *   2 — file system грешка
  */
 
@@ -32,12 +34,24 @@ import { fileURLToPath } from 'node:url'
 
 import { scanFileForForbiddenContent, type SanitizationViolation } from './trainingDataset/sanitizeOutput.js'
 import {
-  CARD_MODEL_FEATURE_NAMES,
-  computeCardModelFeatures,
+  CARD_MODEL_VERSIONS,
+  computeCardModelFeaturesForVersion,
   dot,
+  getCardModelFeatureNames,
+  isSupportedCardModelVersion,
   type CardDecisionState,
+  type CardModelVersion,
   type CompactCard,
 } from '../src/ai/cardModelFeatures.js'
+
+// ─── Version selection (CLI arg, default card-model-v1 — непроменено поведение) ─
+
+const versionArg = process.argv.slice(2).find((a) => !a.startsWith('-'))
+if (versionArg && !isSupportedCardModelVersion(versionArg)) {
+  console.error(`FATAL: неизвестна model version "${versionArg}" — поддържани: ${CARD_MODEL_VERSIONS.join(', ')}`)
+  process.exit(1)
+}
+const MODEL_VERSION: CardModelVersion = versionArg && isSupportedCardModelVersion(versionArg) ? versionArg : 'card-model-v1'
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -45,7 +59,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(__dirname, '..', '..')
 const OUTPUT_DIR = join(REPO_ROOT, 'training-output')
 const BASELINE_DIR = join(OUTPUT_DIR, 'baseline')
-const MODEL_DIR = join(OUTPUT_DIR, 'models', 'card-model-v1')
+const MODEL_DIR = join(OUTPUT_DIR, 'models', MODEL_VERSION)
 
 const CARD_PATHS = {
   train: join(BASELINE_DIR, 'card-train.jsonl'),
@@ -64,7 +78,6 @@ const METRICS_MD_PATH = join(MODEL_DIR, 'metrics.md')
 type SplitName = 'train' | 'validation' | 'test'
 const SPLIT_NAMES: SplitName[] = ['train', 'validation', 'test']
 
-const MODEL_VERSION = 'card-model-v1'
 const EPOCHS = 60
 const LEARNING_RATE = 0.5
 const L2_REGULARIZATION = 0.001
@@ -73,8 +86,10 @@ const FIRST_LEGAL_NONFORCED_TEST_TARGET = 0.34 // от task brief / evaluation-s
 // Feature set-ът (имена + computation) е споделен с inference wrapper-а чрез
 // src/ai/cardModelFeatures.ts — гарантира, че trainer и inference
 // никога не могат да се разминат (виж модула за обяснение защо feature set-ът
-// съдържа само per-candidate-varying стойности).
-const FEATURE_COUNT = CARD_MODEL_FEATURE_NAMES.length
+// съдържа само per-candidate-varying стойности). Кой feature set се ползва
+// (v1 или v2) се определя от MODEL_VERSION по-горе.
+const FEATURE_NAMES = getCardModelFeatureNames(MODEL_VERSION)
+const FEATURE_COUNT = FEATURE_NAMES.length
 
 // ─── Shared shapes (pass-through — matches training-output/baseline/card-*.jsonl) ─
 
@@ -203,7 +218,7 @@ function trainWeights(records: CardRecord[]): { weights: number[]; finalLoss: nu
 
   // Пред-изчисляваме feature векторите веднъж (не се променят между epochs).
   const samples = records.map((r) => {
-    const featureVectors = r.legalCards.map((c) => computeCardModelFeatures(r, c))
+    const featureVectors = r.legalCards.map((c) => computeCardModelFeaturesForVersion(MODEL_VERSION, r, c))
     const trueIndex = r.legalCards.findIndex((c) => c.id === r.chosenCard.id)
     return { featureVectors, trueIndex }
   })
@@ -253,7 +268,7 @@ function predictCard(weights: number[], record: CardRecord): PredictionResult {
   }
 
   const scored = legalCards.map((c) => {
-    const x = computeCardModelFeatures(record, c)
+    const x = computeCardModelFeaturesForVersion(MODEL_VERSION, record, c)
     const score = dot(weights, x)
     return { id: c.id, score }
   })
@@ -365,7 +380,7 @@ function legalCardsLengthBucket(len: number): '1' | '2' | '3' | '4' | '5+' {
 
 async function main(): Promise<void> {
   console.log('─────────────────────────────────────────')
-  console.log('  Card Model Trainer (локален, dependency-light)')
+  console.log(`  Card Model Trainer — ${MODEL_VERSION} (локален, dependency-light)`)
   console.log('─────────────────────────────────────────')
 
   // ─── Стъпка: чети input файловете ───────────────────────────────────────────
@@ -517,20 +532,135 @@ async function main(): Promise<void> {
   // ─── model.json artifact ────────────────────────────────────────────────────
   const trainDataHash = createHash('sha256').update(fileContents.train!).digest('hex')
 
+  const DESCRIPTION_V1 =
+    'Contextual multinomial logistic regression за card ranking: за всяка карта в legalCards се смята линеен score = w·features; ' +
+    'ranking = сортиране по score. Теглата са учени чрез пълен-batch gradient descent върху softmax cross-entropy loss ' +
+    '(chosen card = положителен клас сред legalCards кандидатите), само върху non-forced train sample-и (forced sample-ите ' +
+    'имат само 1 legal card и не носят gradient сигнал). Нулева инициализация на теглата → напълно детерминистичен резултат ' +
+    'при еднакъв вход (без random seed). Feature set-ът съдържа само per-candidate-varying стойности (+ interaction терми с ' +
+    'context сигнали) — в softmax-over-candidates ranking loss всеки feature, константен за всички кандидати в едно решение, ' +
+    'математически носи нулев градиент (доказано и потвърдено емпирично при по-ранна итерация с bias/isLeading/matchesLedSuit/ ' +
+    'legalCardsCount — виж excludedFeaturesNote).'
+
+  const DESCRIPTION_V2 =
+    DESCRIPTION_V1 +
+    ' card-model-v2 добавя 6 нови features към същия linear-softmax-ranker подход (не сменя архитектурата) — адресира ' +
+    'находката от weakness-analysis.md, че lead decisions (≈35-37% accuracy) са драстично по-слаби от follow (≈76%), защото ' +
+    'leadershipTimesTrump/Points са нула на lead. Новите features: canWinTrick (per-candidate, reuse на getServerTrickWinner), ' +
+    'winningPointsInteraction (canWinTrick × pointsInTrickNormalized), leadCandidateStrengthWhenLeading (isLead-gated per-candidate ' +
+    'rank power, reuse на getServerCardRankPower), ownTrumpCountTimesIsTrump и isOurTeamContractorTimesTrump/Points (decision-level ' +
+    'контекст, използван САМО като interaction с per-candidate feature — виж cardModelFeatures.ts за методологичната бележка).'
+
+  const EXCLUDED_FEATURES_NOTE_V1 =
+    'Не се използва пълна изиграна история извън текущия trick (не е налична в схема-та — само currentTrick), ' +
+    'нито информация за картите на другите играчи извън own hand (не е налична и не бива да е). Отделно: bias, isLeading, ' +
+    'matchesLedSuit, суров trickLeadershipSignal и legalCardsCountNormalized бяха ИЗРИЧНО премахнати след проверка — всеки от ' +
+    'тях е константен за всички кандидати в дадено решение (напр. matchesLedSuit е 100% константен в реалните train данни: ' +
+    '0 от 14926 non-forced решения имат mixed led-suit match сред legalCards, защото follow-suit правилото вече е приложено ' +
+    'преди legalCards да достигне модела), което математически гарантира нулев градиент в softmax-over-candidates loss — ' +
+    'потвърдено в по-ранна итерация (тегла ≈1e-18 след 60 epochs). trickLeadershipSignal е запазен само като interaction term ' +
+    '(leadershipTimesTrump, leadershipTimesPoints), където реално модулира per-candidate features.'
+
+  const EXCLUDED_FEATURES_NOTE_V2 =
+    EXCLUDED_FEATURES_NOTE_V1 +
+    ' За v2: isLead и pointsInTrickNormalized СЪЗНАТЕЛНО НЕ са добавени като голи features (двете са decision-level константи — ' +
+    'същия капан като по-горе) — влизат само през leadCandidateStrengthWhenLeading/winningPointsInteraction interaction термите. ' +
+    'played cards извън текущия trick / tricks taken so far / declarations остават извън v2 — те изискват dataset builder ' +
+    'enhancement (join върху recorder-ския TrainingDealRecord.tricks) или recorder writer промяна, извън обхвата на тази задача ' +
+    '(виж weakness-analysis.md Priority 3/4).'
+
+  // ─── "Clean hand" / played-cards / remaining-cards feature audit ───────────
+  // Отговор на допълнително user уточнение: AI-ят трябва в бъдеще да помни
+  // цялото раздаване (кои карти са излезли, кои остават, кои собствени карти
+  // са "clean winners"/guaranteed да вземат взятка). Проверено едно по едно
+  // срещу РЕАЛНАТА card decision sample schema (card-{train,validation,test}.jsonl) —
+  // само currentTrick (текущия, недовършен trick) е наличен; playedCardCountBeforeAction
+  // е САМО брояч, не card identities; completed tricks от по-рано в раздаването
+  // изобщо не са част от per-action schema-та (макар да съществуват на deal-ниво
+  // в recorder архива, TrainingDealRecord.tricks — недостъпни тук без dataset
+  // builder join). Затова "clean winner" features (изискват да знаеш кои карти
+  // от дадена боя вече са изиграни навсякъде по масата) НЕ могат да се изчислят
+  // safely сега — не са измислени/апроксимирани, а изрично отбелязани blocking.
+  const FUTURE_CLEAN_HAND_FEATURE_AUDIT = [
+    {
+      feature: 'playedCardsSoFar',
+      status: 'blocked_needs_dataset_join',
+      note: 'Изисква пълна история на изиграни карти извън текущия trick. Per-action schema-та има само currentTrick ' +
+        '(текущия trick) + playedCardCountBeforeAction (брояч, не identities). Derivable БЕЗ recorder writer промяна чрез ' +
+        'dataset builder join върху TrainingDealRecord.tricks (recorder-ът вече го записва на deal-ниво) — Priority 1 за ' +
+        'следваща задача.',
+    },
+    {
+      feature: 'remainingCardsBySuit',
+      status: 'blocked_needs_dataset_join',
+      note: 'Зависи от playedCardsSoFar (32 карти − ownHand − played = remaining). Blocking по същата причина.',
+    },
+    {
+      feature: 'higherRemainingCardsCount',
+      status: 'blocked_needs_dataset_join',
+      note: 'Зависи от remainingCardsBySuit (колко от все още невидените карти в тази боя бият candidate картата). Blocking.',
+    },
+    {
+      feature: 'isCleanWinner',
+      status: 'blocked_needs_dataset_join',
+      note: '"Гарантирано ще вземе взятка, ако се изиграе" — изисква higherRemainingCardsCount===0 за съответната боя. Blocking.',
+    },
+    {
+      feature: 'ownCleanWinnersCount',
+      status: 'blocked_needs_dataset_join',
+      note: 'Брой clean-winner карти в own hand — зависи от isCleanWinner per card. Blocking.',
+    },
+    {
+      feature: 'shouldPreserveCleanWinner',
+      status: 'blocked_needs_dataset_join',
+      note: 'Heuristic/interaction "не хаби clean winner без причина" — зависи от isCleanWinner + trick context. Blocking.',
+    },
+    {
+      feature: 'suitExhaustedExceptOwnCards',
+      status: 'blocked_needs_dataset_join',
+      note: 'Дали дадена боя е напълно изчерпана навсякъде другаде освен в own hand — изисква пълна played-card история. Blocking.',
+    },
+    {
+      feature: 'remainingTrumpCount',
+      status: 'blocked_needs_dataset_join',
+      note: 'Колко козове не са излезли — 8 (общо козове) − played trumps − own trump count. Изисква played-card история. Blocking.',
+    },
+    {
+      feature: 'ownTrumpCount',
+      status: 'implemented_in_v2',
+      note: 'Derivable само от ownHand (без played history) — вече имплементирано като ownTrumpCountTimesIsTrump interaction term.',
+    },
+    {
+      feature: 'currentTrickWinningTeam',
+      status: 'already_equivalent',
+      note: 'Информацията вече се улавя чрез trickLeadershipSignal (deriveTeam(currentWinningSeat) спрямо own team) — ' +
+        'наследено от card-model-v1, не е ново.',
+    },
+    {
+      feature: 'partnerCurrentlyWinning',
+      status: 'already_equivalent',
+      note: 'Математически идентично на trickLeadershipSignal===+1 — actor-ът никога не е играл в текущия trick преди ' +
+        'собственото си решение, значи currentWinningSeat никога не е самия него; "own team печели" ⇔ "партньорът печели".',
+    },
+    {
+      feature: 'opponentCurrentlyWinning',
+      status: 'already_equivalent',
+      note: 'Математически идентично на trickLeadershipSignal===-1, по същата логика.',
+    },
+    {
+      feature: 'pointsInTrick',
+      status: 'implemented_in_v2',
+      note: 'Изчислено (pointsInTrickNormalized) и използвано вътре в winningPointsInteraction — не е гол feature (decision-level ' +
+        'константа, същото anti-zero-gradient правило).',
+    },
+  ] as const
+
   const modelJson = {
     modelVersion: MODEL_VERSION,
     generatedAt: new Date().toISOString(),
     approach: 'linear-softmax-ranker',
-    description:
-      'Contextual multinomial logistic regression за card ranking: за всяка карта в legalCards се смята линеен score = w·features; ' +
-      'ranking = сортиране по score. Теглата са учени чрез пълен-batch gradient descent върху softmax cross-entropy loss ' +
-      '(chosen card = положителен клас сред legalCards кандидатите), само върху non-forced train sample-и (forced sample-ите ' +
-      'имат само 1 legal card и не носят gradient сигнал). Нулева инициализация на теглата → напълно детерминистичен резултат ' +
-      'при еднакъв вход (без random seed). Feature set-ът съдържа само per-candidate-varying стойности (+ interaction терми с ' +
-      'context сигнали) — в softmax-over-candidates ranking loss всеки feature, константен за всички кандидати в едно решение, ' +
-      'математически носи нулев градиент (доказано и потвърдено емпирично при по-ранна итерация с bias/isLeading/matchesLedSuit/ ' +
-      'legalCardsCount — виж excludedFeaturesNote).',
-    featureNames: CARD_MODEL_FEATURE_NAMES,
+    description: MODEL_VERSION === 'card-model-v2' ? DESCRIPTION_V2 : DESCRIPTION_V1,
+    featureNames: FEATURE_NAMES,
     weights,
     hyperparameters: {
       epochs: EPOCHS,
@@ -545,16 +675,9 @@ async function main(): Promise<void> {
     fallbackStrategy: 'Ако ranking-ът не даде валидна карта (NaN/Infinite score или празен legalCards) → legalCards[0] (first-legal baseline).',
     trainingDataHash: `sha256:${trainDataHash}`,
     trainingDataFile: 'training-output/baseline/card-train.jsonl',
-    excludedFeaturesNote:
-      'Не се използва пълна изиграна история извън текущия trick (не е налична в схема-та — само currentTrick), ' +
-      'нито информация за картите на другите играчи извън own hand (не е налична и не бива да е). Отделно: bias, isLeading, ' +
-      'matchesLedSuit, суров trickLeadershipSignal и legalCardsCountNormalized бяха ИЗРИЧНО премахнати след проверка — всеки от ' +
-      'тях е константен за всички кандидати в дадено решение (напр. matchesLedSuit е 100% константен в реалните train данни: ' +
-      '0 от 14926 non-forced решения имат mixed led-suit match сред legalCards, защото follow-suit правилото вече е приложено ' +
-      'преди legalCards да достигне модела), което математически гарантира нулев градиент в softmax-over-candidates loss — ' +
-      'потвърдено в по-ранна итерация (тегла ≈1e-18 след 60 epochs). trickLeadershipSignal е запазен само като interaction term ' +
-      '(leadershipTimesTrump, leadershipTimesPoints), където реално модулира per-candidate features.',
+    excludedFeaturesNote: MODEL_VERSION === 'card-model-v2' ? EXCLUDED_FEATURES_NOTE_V2 : EXCLUDED_FEATURES_NOTE_V1,
     finalTrainLoss: finalLoss,
+    ...(MODEL_VERSION === 'card-model-v2' ? { futureCleanHandFeatureAudit: FUTURE_CLEAN_HAND_FEATURE_AUDIT } : {}),
   }
 
   await rm(MODEL_DIR, { recursive: true, force: true })
@@ -583,6 +706,7 @@ async function main(): Promise<void> {
     baselineComparison,
     beatsFirstLegalNonForcedTestBaseline: beatsTargetBaseline,
     firstLegalNonForcedTestBaselineUsed: targetBaseline,
+    ...(MODEL_VERSION === 'card-model-v2' ? { futureCleanHandFeatureAudit: FUTURE_CLEAN_HAND_FEATURE_AUDIT } : {}),
   }
 
   await writeFile(METRICS_JSON_PATH, JSON.stringify(metricsJson, null, 2) + '\n', 'utf8')
@@ -621,7 +745,7 @@ async function main(): Promise<void> {
 
 function renderMarkdown(m: any): string {
   const lines: string[] = []
-  lines.push('# Card Model v1 — Training Metrics')
+  lines.push(`# ${m.modelVersion} — Training Metrics`)
   lines.push('')
   lines.push(`Генериран на: ${m.generatedAt}`)
   lines.push(`Модел: \`${m.modelVersion}\` — linear-softmax ranker (contextual multinomial logistic regression), чист TypeScript, без ML dependency-та.`)
@@ -649,19 +773,60 @@ function renderMarkdown(m: any): string {
   lines.push('| `suitVoidRisk` | дял карти от същия suit в own hand спрямо цялата ръка |')
   lines.push('| `leadershipTimesTrump` | (+1 партньор печели / -1 противник / 0 никой) × isTrump — контекстът модулира предпочитанието към коз |')
   lines.push('| `leadershipTimesPoints` | (+1 партньор печели / -1 противник / 0 никой) × cardPointsNormalized — контекстът модулира предпочитанието към високи карти |')
+  if (m.modelVersion === 'card-model-v2') {
+    lines.push('| `canWinTrick` | дали candidate картата би спечелила trick-а точно сега (reuse на getServerTrickWinner) — per-candidate, варира |')
+    lines.push('| `winningPointsInteraction` | canWinTrick × pointsInTrickNormalized (точки вече заложени в trick-а) |')
+    lines.push('| `leadCandidateStrengthWhenLeading` | isLead × (rank power / 7, reuse на getServerCardRankPower) — само ненулево при lead |')
+    lines.push('| `ownTrumpCountTimesIsTrump` | (own trump count / hand size) × isTrump — "имам ли много/малко козове" |')
+    lines.push('| `isOurTeamContractorTimesTrump` | isOurTeamContractor × isTrump — собственият отбор на обявилия срещу защитниците |')
+    lines.push('| `isOurTeamContractorTimesPoints` | isOurTeamContractor × cardPointsNormalized |')
+  }
   lines.push('')
   lines.push('⚠ **Методологична бележка:** по-ранна итерация включваше и `bias`, `isLeading`, `matchesLedSuit` (суров), `trickLeadershipSignal` (суров) и `legalCardsCountNormalized` — всичките ≈0 тегло след 60 epochs. Причината не е бъг: в softmax-over-candidates ranking loss всеки feature, константен за всички candidate карти в рамките на едно решение, математически носи ТОЧНО нулев градиент (защото sum на (prob−target) по кандидатите е винаги 0). Проверка върху реалните train данни потвърди, че `matchesLedSuit` е 100% константен във всяко решение (0 от 14926 non-forced решения имат mixed match) — follow-suit правилото вече е приложено в `legalCards`, преди моделът изобщо да види картите. `trickLeadershipSignal` е запазен само като interaction term по-горе, където реално варира per-candidate.')
+  if (m.modelVersion === 'card-model-v2') {
+    lines.push('')
+    lines.push('Същото правило важи за v2 добавките: `isLead` и `pointsInTrickNormalized` СЪЗНАТЕЛНО НЕ фигурират като голи features (decision-level константи) — влизат само през `leadCandidateStrengthWhenLeading`/`winningPointsInteraction`, където per-candidate вариращата половина на произведението гарантира ненулев градиент.')
+  }
   lines.push('')
   lines.push('## Features (СЪЗНАТЕЛНО НЕ използвани — недостатъчно/небезопасно налична информация)')
   lines.push('')
-  lines.push('- Пълна изиграна история извън текущия trick (само `currentTrick` е наличен в schema-та; `playedCardCountBeforeAction` е само брояч, не история на самите карти).')
+  if (m.modelVersion === 'card-model-v2') {
+    lines.push('- Пълна изиграна история извън текущия trick / tricks взети до момента по отбор (само `currentTrick` е наличен per-action; derivable БЕЗ recorder writer промяна чрез join върху `TrainingDealRecord.tricks`, но това е dataset builder enhancement извън обхвата на тази задача — виж weakness-analysis.md Priority 3).')
+    lines.push('- Declarations context (терца/50/100/каре/белот) — липсва напълно от recorder schema-та (Priority 4, изисква recorder writer промяна).')
+  } else {
+    lines.push('- Пълна изиграна история извън текущия trick (само `currentTrick` е наличен в schema-та; `playedCardCountBeforeAction` е само брояч, не история на самите карти).')
+  }
   lines.push('- Карти в ръцете на другите играчи / void tracking извън own hand — не е налично и не бива да е (would leak information the real player never had at decision time either, беше си коректно скрито от recorder-а).')
   lines.push('- Bidding контекст/история — bidding decisions са отделен dataset, не е join-нат тук.')
   lines.push('')
 
+  if (m.modelVersion === 'card-model-v2' && Array.isArray(m.futureCleanHandFeatureAudit)) {
+    lines.push('## "Clean hand" / played-cards / remaining-cards feature audit (за бъдещ card-model-v3)')
+    lines.push('')
+    lines.push(
+      'AI-ят трябва в бъдеще да помни цялото раздаване (кои карти са излезли, кои остават, кои собствени карти са ' +
+      '"clean winners"/guaranteed да вземат взятка). Проверено едно по едно срещу РЕАЛНАТА card decision sample schema — ' +
+      'следната таблица е точният статус на всяко исканo поле.',
+    )
+    lines.push('')
+    lines.push('| Feature | Статус | Бележка |')
+    lines.push('|---|---|---|')
+    for (const f of m.futureCleanHandFeatureAudit as Array<{ feature: string; status: string; note: string }>) {
+      lines.push(`| \`${f.feature}\` | **${f.status}** | ${f.note} |`)
+    }
+    lines.push('')
+    lines.push(
+      '`blocked_needs_dataset_join` означава: данните СЪЩЕСТВУВАТ в recorder архива (TrainingDealRecord.tricks, записан ' +
+      'на deal-ниво), но НЕ са част от per-action card decision schema-та (card-{train,validation,test}.jsonl) — изисква ' +
+      'dataset builder enhancement (join по trickIndex), НЕ recorder writer промяна. Отбелязано като blocking Priority 1 ' +
+      'за следваща задача, не имплементирано тук (извън обхвата: "не прави голяма dataset builder rewrite в тази задача").',
+    )
+    lines.push('')
+  }
+
   lines.push('## Model artifact')
   lines.push('')
-  lines.push('- `training-output/models/card-model-v1/model.json` (тегла + hyperparameters + training data hash — детерминистичен при еднакъв вход)')
+  lines.push(`- \`training-output/models/${m.modelVersion}/model.json\` (тегла + hyperparameters + training data hash — детерминистичен при еднакъв вход)`)
   lines.push('')
 
   lines.push('## Metrics по split')

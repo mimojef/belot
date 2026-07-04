@@ -56,6 +56,11 @@ export type TraceRecord = {
   isForced: boolean
   gameMode: string | null
   trumpSuit: string | null
+  // Добавени в traceVersion 2 (server/src/ai/localAiCardBeta.ts) — optional,
+  // защото по-стари trace файлове (traceVersion 1) не ги съдържат.
+  isLead?: boolean
+  positionInTrick?: number
+  pointsInTrick?: number
   conventionalCard: string | null
   aiSelectedCard: string | null
   finalCard: string | null

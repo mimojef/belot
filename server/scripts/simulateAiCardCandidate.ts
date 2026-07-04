@@ -1,10 +1,10 @@
 /**
  * simulateAiCardCandidate.ts
  *
- * Локален safety harness за card-model-v1 — доказва, че inference
- * wrapper-ът (rankLegalCardsWithCardModel) може безопасно да се използва
- * като bot-card decision candidate в game-like offline симулация, ПРЕДИ
- * каквато и да е реална beta/runtime интеграция.
+ * Локален safety harness за card-model-v1/card-model-v2 — доказва, че
+ * inference wrapper-ът (rankLegalCardsWithCardModel) може безопасно да се
+ * използва като bot-card decision candidate в game-like offline симулация,
+ * ПРЕДИ каквато и да е реална beta/runtime интеграция.
  *
  * Няма runtime ефект: не пипа gameplay, matchmaking, economy, client
  * protocol, recorder writer или production bot behavior. Не включва AI
@@ -18,13 +18,15 @@
  * да са верни преди какъвто и да е бъдещ beta wrapper.
  *
  * Usage:
- *   npm run simulate:ai-card-candidate   (от server/)
+ *   npm run simulate:ai-card-candidate      (от server/) — тества card-model-v1 (default, непроменено поведение)
+ *   npm run simulate:ai-card-v2-candidate   (от server/) — тества card-model-v2
+ *   tsx scripts/simulateAiCardCandidate.ts card-model-v2   — директен CLI извикване с explicit версия
  *
  * Exit codes:
  *   0 — симулацията е safe (0 invalid final cards, 0 privacy нарушения,
  *       0 nondeterministic decisions под stress repeats)
  *   1 — invalid/missing input, privacy нарушение, invalid final selected
- *       card, nondeterministic behavior под repeats
+ *       card, nondeterministic behavior под repeats, неизвестна model version
  *   2 — file system грешка (липсващ model/split файл)
  */
 
@@ -33,7 +35,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { scanFileForForbiddenContent, type SanitizationViolation } from './trainingDataset/sanitizeOutput.js'
-import type { CardDecisionState, CompactCard, CompactPlayedCard } from '../src/ai/cardModelFeatures.js'
+import { CARD_MODEL_VERSIONS, isSupportedCardModelVersion, type CardDecisionState, type CardModelVersion, type CompactCard, type CompactPlayedCard } from '../src/ai/cardModelFeatures.js'
 import {
   CardModelLoadError,
   loadCardModelFromFile,
@@ -42,13 +44,22 @@ import {
   type RankedCardPrediction,
 } from '../src/ai/cardModelInference.js'
 
+// ─── Version selection (CLI arg, default card-model-v1 — непроменено поведение) ─
+
+const versionArg = process.argv.slice(2).find((a) => !a.startsWith('-'))
+if (versionArg && !isSupportedCardModelVersion(versionArg)) {
+  console.error(`FATAL: неизвестна model version "${versionArg}" — поддържани: ${CARD_MODEL_VERSIONS.join(', ')}`)
+  process.exit(1)
+}
+const MODEL_VERSION: CardModelVersion = versionArg && isSupportedCardModelVersion(versionArg) ? versionArg : 'card-model-v1'
+
 // ─── Paths ────────────────────────────────────────────────────────────────────
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(__dirname, '..', '..')
 const OUTPUT_DIR = join(REPO_ROOT, 'training-output')
 const BASELINE_DIR = join(OUTPUT_DIR, 'baseline')
-const MODEL_DIR = join(OUTPUT_DIR, 'models', 'card-model-v1')
+const MODEL_DIR = join(OUTPUT_DIR, 'models', MODEL_VERSION)
 
 const MODEL_JSON_PATH = join(MODEL_DIR, 'model.json')
 const EVALUATION_SUMMARY_JSON_PATH = join(BASELINE_DIR, 'evaluation-summary.json')
@@ -456,7 +467,7 @@ function runStressRepeats(model: CardModel, records: FullCardRecord[], repeats: 
 
 async function main(): Promise<void> {
   console.log('─────────────────────────────────────────')
-  console.log('  AI Card Candidate Simulation Harness (локален, safety-focused)')
+  console.log(`  AI Card Candidate Simulation Harness — ${MODEL_VERSION} (локален, safety-focused)`)
   console.log('─────────────────────────────────────────')
 
   // ─── Зареди model.json (fail-closed) ────────────────────────────────────────
@@ -466,7 +477,7 @@ async function main(): Promise<void> {
   } catch (e) {
     if (e instanceof CardModelLoadError) {
       console.error(`FATAL: невалиден/липсващ model artifact: ${e.message}`)
-      console.error('\nИзпълни първо: npm run train:card-model')
+      console.error(`\nИзпълни първо: npm run ${MODEL_VERSION === 'card-model-v2' ? 'train:card-model-v2' : 'train:card-model'}`)
       process.exit(e.message.includes('Не мога да прочета') ? 2 : 1)
       return
     }
@@ -702,7 +713,7 @@ async function main(): Promise<void> {
 
 function renderMarkdown(s: any): string {
   const lines: string[] = []
-  lines.push('# Card Model v1 — Simulation Harness')
+  lines.push(`# ${s.modelVersion} — Simulation Harness`)
   lines.push('')
   lines.push(`Генериран на: ${s.generatedAt}`)
   lines.push(`Модел: \`${s.modelVersion}\``)

@@ -455,7 +455,7 @@ checkAsync('[9] computeTraceSummary дава коректни counts върху 
   const mk = (overrides: Partial<LocalAiCardBetaTraceRecord>): { record: LocalAiCardBetaTraceRecord; lineNumber: number } => ({
     record: {
       timestamp: now,
-      traceVersion: 1,
+      traceVersion: 2,
       modelVersion: 'card-model-v1',
       aiEnabled: true,
       traceEnabled: true,
@@ -469,6 +469,9 @@ checkAsync('[9] computeTraceSummary дава коректни counts върху 
       isForced: false,
       gameMode: 'all-trumps',
       trumpSuit: null,
+      isLead: false,
+      positionInTrick: 1,
+      pointsInTrick: 0,
       conventionalCard: 'hearts-8',
       aiSelectedCard: 'hearts-J',
       finalCard: 'hearts-J',

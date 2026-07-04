@@ -22,6 +22,14 @@ const TRUMP_RANK_POWER: Record<ServerRank, number> = {
   J: 7,
 }
 
+// Canonical per-rank "strength" (0..7), independent of point value — same tables
+// used internally above to resolve trick winners. Exposed read-only for reuse by
+// AI feature extraction (e.g. card-model-v2's leadCandidateStrength) so that any
+// notion of "how strong is this rank" never drifts from the actual game rules.
+export function getServerCardRankPower(rank: ServerRank, isTrump: boolean): number {
+  return isTrump ? TRUMP_RANK_POWER[rank] : NO_TRUMPS_RANK_POWER[rank]
+}
+
 function isTrumpCard(suit: string, winningBid: ServerWinningBid): boolean {
   return winningBid?.contract === 'suit' && winningBid.trumpSuit === suit
 }

@@ -1,10 +1,12 @@
 /**
  * cardModelInference.ts
  *
- * Read-only, fail-closed inference wrapper за card-model-v1. Зарежда
- * model.json (произведен от server/scripts/trainCardModel.ts, local-only
- * артефакт, никога не се commit-ва) и предлага чиста функция за ranking на
- * legalCards в даден decision context.
+ * Read-only, fail-closed inference wrapper за card-model-v1 И card-model-v2.
+ * Зарежда model.json (произведен от server/scripts/trainCardModel.ts,
+ * local-only артефакт, никога не се commit-ва) и предлага чиста функция за
+ * ranking на legalCards в даден decision context. Кой feature set се
+ * използва е ИЗЦЯЛО определено от artifact-а самия (raw.modelVersion) — не
+ * от caller-а, така че trainer/inference никога не могат да се разминат.
  *
  * Използва се от:
  *  - offline training/eval tooling (server/scripts/*.ts) — async loader;
@@ -21,18 +23,18 @@ import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 
 import {
-  CARD_MODEL_FEATURE_NAMES,
-  computeCardModelFeatures,
+  computeCardModelFeaturesForVersion,
   dot,
+  getCardModelFeatureNames,
+  isSupportedCardModelVersion,
   type CardDecisionState,
+  type CardModelVersion,
 } from './cardModelFeatures.js'
 
 // ─── Model schema ─────────────────────────────────────────────────────────────
 
-export const EXPECTED_MODEL_VERSION = 'card-model-v1'
-
 export type CardModel = {
-  modelVersion: string
+  modelVersion: CardModelVersion
   featureNames: readonly string[]
   weights: readonly number[]
   raw: Record<string, unknown>
@@ -48,7 +50,10 @@ export class CardModelLoadError extends Error {
 /**
  * Валидира и построява CardModel от вече parse-нат JSON обект. Fail-closed:
  * хвърля CardModelLoadError за всякаква липсваща/невалидна/несъвместима
- * стойност, вместо тихо да продължи с непълен/грешен модел.
+ * стойност, вместо тихо да продължи с непълен/грешен модел. featureNames
+ * задължително трябва да съвпада ТОЧНО (ред+дължина) с очакваните имена за
+ * декларирания modelVersion — card-model-v1 и card-model-v2 имат различни
+ * feature sets (виж cardModelFeatures.ts).
  */
 export function validateAndBuildCardModel(parsed: unknown): CardModel {
   if (typeof parsed !== 'object' || parsed === null) {
@@ -59,25 +64,28 @@ export function validateAndBuildCardModel(parsed: unknown): CardModel {
   if (typeof raw.modelVersion !== 'string' || raw.modelVersion.length === 0) {
     throw new CardModelLoadError('model.json: липсва/невалиден modelVersion')
   }
-  if (raw.modelVersion !== EXPECTED_MODEL_VERSION) {
+  if (!isSupportedCardModelVersion(raw.modelVersion)) {
     throw new CardModelLoadError(
-      `model.json: неочакван modelVersion "${raw.modelVersion}" (очакван "${EXPECTED_MODEL_VERSION}") — inference wrapper-ът е писан точно за тази model schema.`,
+      `model.json: неочакван modelVersion "${raw.modelVersion}" (поддържани: card-model-v1, card-model-v2) — ` +
+        'inference wrapper-ът е писан точно за тези model schema-и.',
     )
   }
+  const modelVersion = raw.modelVersion
+  const expectedFeatureNames = getCardModelFeatureNames(modelVersion)
 
   if (!Array.isArray(raw.featureNames) || raw.featureNames.length === 0) {
     throw new CardModelLoadError('model.json: липсва/празен featureNames')
   }
   const featureNames = raw.featureNames as unknown[]
-  if (featureNames.length !== CARD_MODEL_FEATURE_NAMES.length) {
+  if (featureNames.length !== expectedFeatureNames.length) {
     throw new CardModelLoadError(
-      `model.json: featureNames.length=${featureNames.length}, очаквано ${CARD_MODEL_FEATURE_NAMES.length}`,
+      `model.json: featureNames.length=${featureNames.length}, очаквано ${expectedFeatureNames.length} (за ${modelVersion})`,
     )
   }
-  for (let i = 0; i < CARD_MODEL_FEATURE_NAMES.length; i++) {
-    if (featureNames[i] !== CARD_MODEL_FEATURE_NAMES[i]) {
+  for (let i = 0; i < expectedFeatureNames.length; i++) {
+    if (featureNames[i] !== expectedFeatureNames[i]) {
       throw new CardModelLoadError(
-        `model.json: featureNames[${i}]="${String(featureNames[i])}", очаквано "${CARD_MODEL_FEATURE_NAMES[i]}" — ` +
+        `model.json: featureNames[${i}]="${String(featureNames[i])}", очаквано "${expectedFeatureNames[i]}" (за ${modelVersion}) — ` +
           'редът на features е критичен за коректен dot-product; несъвпадение означава несъвместим/повреден model artifact.',
       )
     }
@@ -96,7 +104,7 @@ export function validateAndBuildCardModel(parsed: unknown): CardModel {
   }
 
   return {
-    modelVersion: raw.modelVersion,
+    modelVersion,
     featureNames: featureNames as string[],
     weights: weights as number[],
     raw,
@@ -186,7 +194,10 @@ export function rankLegalCardsWithCardModel(model: CardModel, state: CardDecisio
   }
 
   const legalIds = new Set(legalCards.map((c) => c.id))
-  const scored = legalCards.map((c) => ({ id: c.id, score: dot(model.weights, computeCardModelFeatures(state, c)) }))
+  const scored = legalCards.map((c) => ({
+    id: c.id,
+    score: dot(model.weights, computeCardModelFeaturesForVersion(model.modelVersion, state, c)),
+  }))
   const hasInvalidScore = scored.some((s) => !Number.isFinite(s.score))
 
   let fallbackUsed = false
