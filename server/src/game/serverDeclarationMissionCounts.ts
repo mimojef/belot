@@ -1,11 +1,15 @@
-import { createEmptyMatchDeclarationMissionCounts } from './createServerRoundDefaults.js'
+import {
+  createEmptyMatchDeclarationMissionCounts,
+  createEmptyMatchDeclarationMissionCountsBySeat,
+} from './createServerRoundDefaults.js'
 import type {
   ServerDeclaration,
+  ServerDeclarationMissionCountsBySeat,
   ServerDeclarationMissionType,
   ServerRoundScore,
 } from './serverGameTypes.js'
 
-function getDeclarationMissionType(
+export function getDeclarationMissionType(
   declaration: ServerDeclaration,
 ): ServerDeclarationMissionType | null {
   switch (declaration.publicLabel) {
@@ -49,6 +53,16 @@ export function normalizeMatchDeclarationMissionCounts(
   }
 }
 
+export function normalizeMatchDeclarationMissionCountsBySeat(
+  bySeat: ServerDeclarationMissionCountsBySeat | null | undefined,
+): ServerDeclarationMissionCountsBySeat {
+  if (!bySeat) {
+    return createEmptyMatchDeclarationMissionCountsBySeat()
+  }
+  // shallow clone — inner objects are cloned when mutated below
+  return { ...bySeat }
+}
+
 export function addDeclarationsToMatchMissionCounts(
   counts: Partial<Record<ServerDeclarationMissionType, ServerRoundScore>> | null | undefined,
   declarations: ServerDeclaration[],
@@ -74,4 +88,31 @@ export function addDeclarationsToMatchMissionCounts(
   }
 
   return nextCounts
+}
+
+export function addDeclarationsToMatchMissionCountsBySeat(
+  bySeat: ServerDeclarationMissionCountsBySeat | null | undefined,
+  declarations: ServerDeclaration[],
+): ServerDeclarationMissionCountsBySeat {
+  const next = normalizeMatchDeclarationMissionCountsBySeat(bySeat)
+
+  for (const declaration of declarations) {
+    if (!declaration.valid || !declaration.announced) {
+      continue
+    }
+
+    const missionType = getDeclarationMissionType(declaration)
+    if (missionType === null) {
+      continue
+    }
+
+    const seat = declaration.seat
+    const seatCounts = next[seat] ?? {}
+    next[seat] = {
+      ...seatCounts,
+      [missionType]: (seatCounts[missionType] ?? 0) + 1,
+    }
+  }
+
+  return next
 }

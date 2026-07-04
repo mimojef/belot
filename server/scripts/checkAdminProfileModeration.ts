@@ -157,9 +157,9 @@ check(
 check(
   'admin moderation updates target profile, not admin session profile',
   adminModerationBody.includes('session.profile.profileId === targetProfileId') &&
-    adminModerationBody.includes('playerProgressStore.adminRenameProfileDisplayName(\n      targetProfileId') &&
-    adminModerationBody.includes('playerProgressStore.updateProfileAvatar(targetProfileId') &&
-    adminModerationBody.includes('playerProgressStore.deleteProfileGalleryImage(targetProfileId'),
+    /playerProgressStore\.adminRenameProfileDisplayName\(\s*targetProfileId/.test(adminModerationBody) &&
+    /playerProgressStore\.updateProfileAvatar\(\s*targetProfileId/.test(adminModerationBody) &&
+    /playerProgressStore\.deleteProfileGalleryImage\(\s*targetProfileId/.test(adminModerationBody),
 )
 
 if (failed > 0) {

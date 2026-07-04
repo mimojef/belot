@@ -6,7 +6,7 @@ import {
   validatePassword,
   verifyPassword,
 } from './authHelpers.js'
-import { normalizeProfileDisplayName, normalizeProfileUsername } from './normalizeProfileIdentityText.js'
+import { validateProfileDisplayName } from './normalizeProfileIdentityText.js'
 import type { PlayerProgressStore } from './playerProgressStore.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
@@ -324,8 +324,7 @@ export async function createAuthStore(
     gender?: 'male' | 'female' | null
   }): { ok: true; sessionToken: string; session: AuthSessionSnapshot } | { ok: false; message: string } {
     const email = normalizeEmail(input.email)
-    const displayName = input.displayName.trim()
-    const normalizedDisplayName = normalizeProfileDisplayName(displayName)
+    const displayNameResult = validateProfileDisplayName(input.displayName)
 
     if (email === null) {
       return { ok: false, message: 'Невалиден email адрес.' }
@@ -335,12 +334,8 @@ export async function createAuthStore(
       return { ok: false, message: 'Паролата трябва да е поне 6 символа.' }
     }
 
-    if (normalizedDisplayName === null) {
-      return { ok: false, message: 'Името може да съдържа само букви на кирилица, латиница, цифри и интервал.' }
-    }
-
-    if (displayName.length < 3 || displayName.length > 32) {
-      return { ok: false, message: 'Името трябва да е между 3 и 32 символа.' }
+    if (!displayNameResult.ok) {
+      return { ok: false, message: displayNameResult.message }
     }
 
     const existingAccount = selectAccountByEmailStatement.get(email) as AccountRow | undefined
@@ -351,11 +346,26 @@ export async function createAuthStore(
 
     const accountId = randomUUID()
     const profileId = randomUUID()
-    const normalizedUsername = normalizeProfileUsername(displayName) ?? normalizedDisplayName
+    const displayName = displayNameResult.canonicalDisplayName
+    const normalizedDisplayName = displayNameResult.normalizedKey
+    const normalizedUsername = normalizedDisplayName
     const passwordHash = createPasswordHash(input.password)
 
     try {
-      database.exec('BEGIN;')
+      database.exec('BEGIN IMMEDIATE;')
+
+      const nameConflict = database.prepare(`
+        SELECT profile_id FROM profiles
+        WHERE status = 'active'
+          AND (normalized_display_name = ? OR normalized_username = ?)
+        LIMIT 1;
+      `).get(normalizedDisplayName, normalizedUsername) as { profile_id: string } | undefined
+
+      if (nameConflict !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, message: 'Това име вече е заето.' }
+      }
+
       insertAccountStatement.run(accountId, email, passwordHash)
       const gender = input.gender === 'male' || input.gender === 'female' ? input.gender : null
       insertProfileStatement.run(
@@ -397,7 +407,10 @@ export async function createAuthStore(
 
       const message = error instanceof Error ? error.message : String(error)
 
-      if (message.includes('normalized_display_name')) {
+      if (
+        message.includes('normalized_display_name') ||
+        message.includes('normalized_username')
+      ) {
         return { ok: false, message: 'Това име вече е заето.' }
       }
 

@@ -25,7 +25,7 @@ import {
 import { createBlockStore, BLOCK_LIMIT } from './db/blockStore.js'
 import { createLikeStore } from './db/likeStore.js'
 import { createMissionStore, type MissionType } from './db/missionStore.js'
-import { createCoinPurchaseStore } from './db/coinPurchaseStore.js'
+import { createCoinPurchaseStore, ADMIN_PAYMENT_PERIODS } from './db/coinPurchaseStore.js'
 import { createDailyRewardsStore } from './db/dailyRewardsStore.js'
 import {
   createSiteVisitStore,
@@ -1174,6 +1174,21 @@ async function tickRoomGameRuntimes(): Promise<void> {
             )
           }
 
+          const roundContra = getRoundContraTransition(previousRoom, room)
+          if (roundContra !== null) {
+            runMatchCompletionSideEffect(
+              'record-round-contra',
+              room.id,
+              () => {
+                missionStore.recordRoundContra({
+                  room,
+                  winnerTeam: roundContra.winnerTeam,
+                  roundKey: roundContra.roundKey,
+                })
+              },
+            )
+          }
+
           if (!shouldRunMatchCompletionSideEffects(previousRoom, room)) {
             return
           }
@@ -1584,6 +1599,52 @@ function getRoundCapotTransition(
   const roundKey = `${dealerSeat}:${prevScore.teamA}:${prevScore.teamB}`
 
   return { capotTeam, roundKey }
+}
+
+type RoundContraTransition = {
+  winnerTeam: Team
+  roundKey: string
+}
+
+function getRoundContraTransition(
+  previousRoom: ServerRoom,
+  nextRoom: ServerRoom,
+): RoundContraTransition | null {
+  const prevState = previousRoom.game.authoritativeState
+  const nextState = nextRoom.game.authoritativeState
+
+  if (
+    prevState === null ||
+    !('phase' in prevState) ||
+    prevState.phase !== 'playing'
+  ) {
+    return null
+  }
+
+  if (
+    nextState === null ||
+    !('phase' in nextState) ||
+    nextState.phase !== 'scoring'
+  ) {
+    return null
+  }
+
+  const scoring = nextState.scoring
+  if (scoring === null || scoring.counterMultiplier <= 1) {
+    return null
+  }
+
+  // Winner is the team with more official round points.
+  // officialRoundPoints already accounts for inside/capot rules.
+  const pts = scoring.officialRoundPoints
+  if (pts.teamA === pts.teamB) return null
+  const winnerTeam: Team = pts.teamA > pts.teamB ? 'A' : 'B'
+
+  const prevScore = prevState.score.match
+  const dealerSeat = prevState.round.dealerSeat ?? 'bottom'
+  const roundKey = `${dealerSeat}:${prevScore.teamA}:${prevScore.teamB}`
+
+  return { winnerTeam, roundKey }
 }
 
 function getPartnerSeat(seat: Seat): Seat {
@@ -3329,7 +3390,7 @@ function handleCheckNameRequest(
 ): boolean {
   if (requestUrl.pathname !== '/api/profile/check-name') return false
   const name = requestUrl.searchParams.get('name') ?? ''
-  const available = name.trim().length >= 3 && playerProgressStore.isDisplayNameAvailable(name)
+  const available = playerProgressStore.isDisplayNameAvailable(name)
   sendJsonResponse(res, 200, { available })
   return true
 }
@@ -4546,6 +4607,7 @@ async function handleStripeWebhookRequest(
       const amountPaidCents = stripeSession.amount_total ?? 0
       const currency = stripeSession.currency ?? ''
 
+      // Step 1: fulfill atomically — this MUST succeed regardless of Stripe enrichment
       const result = coinPurchaseStore.fulfillPaidPurchase({
         checkoutSessionId,
         purchaseId,
@@ -4557,14 +4619,69 @@ async function handleStripeWebhookRequest(
         console.error(
           `[stripe/webhook] fulfillPaidPurchase failed session=${checkoutSessionId} purchaseId=${purchaseId} message=${result.message}`,
         )
-      } else if (result.alreadyCredited) {
-        console.log(
-          `[stripe/webhook] already credited session=${checkoutSessionId} purchaseId=${purchaseId}`,
-        )
       } else {
-        console.log(
-          `[stripe/webhook] fulfilled purchaseId=${result.purchase.purchaseId} coins=${result.purchase.yellowCoinsAmount}`,
-        )
+        if (result.alreadyCredited) {
+          console.log(
+            `[stripe/webhook] already credited session=${checkoutSessionId} purchaseId=${purchaseId}`,
+          )
+        } else {
+          console.log(
+            `[stripe/webhook] fulfilled purchaseId=${result.purchase.purchaseId} coins=${result.purchase.yellowCoinsAmount}`,
+          )
+        }
+
+        // Step 2: enrich payment method snapshot — non-blocking, must not affect credits.
+        // Runs on first webhook AND on repeated webhooks when snapshot is still missing
+        // (alreadyCredited=true but snapshot was never written, e.g. enrichment failed earlier).
+        const fulfilledPurchaseId = result.purchase.purchaseId
+        const paymentIntentId =
+          typeof stripeSession.payment_intent === 'string'
+            ? stripeSession.payment_intent
+            : (stripeSession.payment_intent as { id?: string } | null)?.id ?? null
+
+        if (paymentIntentId && coinPurchaseStore.needsPaymentMethodSnapshot(fulfilledPurchaseId)) {
+          try {
+            const pi = await stripe.paymentIntents.retrieve(paymentIntentId, {
+              expand: ['latest_charge'],
+            })
+
+            // latest_charge may be an expanded Charge object or a bare string ID
+            let charge: Stripe.Charge | null = null
+            if (pi.latest_charge && typeof pi.latest_charge === 'object') {
+              charge = pi.latest_charge as Stripe.Charge
+            } else if (pi.latest_charge && typeof pi.latest_charge === 'string') {
+              charge = await stripe.charges.retrieve(pi.latest_charge)
+            }
+            // charge remains null if latest_charge is null
+
+            const pmd = charge?.payment_method_details ?? null
+            const cardDetails = pmd?.card ?? null
+            const walletDetails = cardDetails?.wallet ?? null
+
+            coinPurchaseStore.updatePaymentMethodSnapshot(fulfilledPurchaseId, {
+              stripePaymentIntentId: paymentIntentId,
+              stripeChargeId: charge?.id ?? null,
+              paymentMethodType: pmd?.type ?? null,
+              walletType: walletDetails?.type ?? null,
+              cardBrand: cardDetails?.brand ?? null,
+              cardLast4: cardDetails?.last4 ?? null,
+              cardCountry: cardDetails?.country ?? null,
+            })
+            console.log(
+              `[stripe/webhook] enriched purchaseId=${fulfilledPurchaseId} method=${pmd?.type ?? 'null'} wallet=${walletDetails?.type ?? 'null'}`,
+            )
+          } catch (enrichErr) {
+            // Log and continue — enrichment failure must never risk double-credit
+            console.warn(
+              `[stripe/webhook] payment method enrichment failed purchaseId=${fulfilledPurchaseId}:`,
+              enrichErr instanceof Error ? enrichErr.message : String(enrichErr),
+            )
+          }
+        } else if (paymentIntentId) {
+          console.log(
+            `[stripe/webhook] snapshot already complete purchaseId=${fulfilledPurchaseId}, skipping enrichment`,
+          )
+        }
       }
     }
   } else if (event.type === 'checkout.session.expired') {
@@ -5400,6 +5517,166 @@ async function handleAdminStatsRequest(
   return true
 }
 
+// Parses a query param as a strict non-negative integer (decimal digits only, no
+// leading sign, no decimal point, no trailing garbage). Returns the parsed number
+// or null if the value is absent/empty (caller supplies the default), or 'invalid'
+// if the string is present but malformed.
+function parseStrictQueryInt(raw: string | null): number | null | 'invalid' {
+  if (raw === null || raw === '') return null
+  if (!/^\d+$/.test(raw)) return 'invalid'
+  const n = Number(raw)
+  if (!Number.isSafeInteger(n)) return 'invalid'
+  return n
+}
+
+async function handleAdminPaymentsListRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  if (pathname !== '/api/admin/payments') {
+    return false
+  }
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!session) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Unauthorized' })
+    return true
+  }
+
+  if (session.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
+    return true
+  }
+
+  const rawPeriod = requestUrl.searchParams.get('period') ?? ''
+  if (!(ADMIN_PAYMENT_PERIODS as readonly string[]).includes(rawPeriod)) {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      errorCode: 'INVALID_PERIOD',
+      message: `Invalid period "${rawPeriod}". Valid values: ${ADMIN_PAYMENT_PERIODS.join(', ')}.`,
+    })
+    return true
+  }
+
+  const parsedLimit  = parseStrictQueryInt(requestUrl.searchParams.get('limit'))
+  const parsedOffset = parseStrictQueryInt(requestUrl.searchParams.get('offset'))
+
+  if (parsedLimit === 'invalid') {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      errorCode: 'INVALID_LIMIT',
+      message: 'limit must be a positive integer (1–100).',
+    })
+    return true
+  }
+
+  if (parsedOffset === 'invalid') {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      errorCode: 'INVALID_OFFSET',
+      message: 'offset must be a non-negative integer.',
+    })
+    return true
+  }
+
+  // null → param absent → use default
+  const limitRaw = parsedLimit ?? 50
+
+  if (limitRaw === 0) {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      errorCode: 'INVALID_LIMIT',
+      message: 'limit must be a positive integer (1–100).',
+    })
+    return true
+  }
+
+  const limit  = Math.min(limitRaw, 100)
+  const offset = parsedOffset ?? 0
+
+  const result = coinPurchaseStore.getAdminPaymentListByPeriod({
+    period: rawPeriod as (typeof ADMIN_PAYMENT_PERIODS)[number],
+    limit,
+    offset,
+  })
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    period: rawPeriod,
+    purchases: result.rows,
+    pagination: {
+      limit,
+      offset,
+      total: result.total,
+      hasMore: offset + result.rows.length < result.total,
+    },
+    summary: {
+      totalsByCurrency: result.totalsByCurrency,
+    },
+  })
+  return true
+}
+
+async function handleAdminPaymentDetailRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/admin\/payments\/([^/]+)$/.exec(pathname)
+  if (!match) return false
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!session) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Unauthorized' })
+    return true
+  }
+
+  if (session.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
+    return true
+  }
+
+  const rawPurchaseId = match[1] ?? ''
+  let purchaseId: string
+  try {
+    purchaseId = decodeURIComponent(rawPurchaseId)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Invalid purchaseId.' })
+    return true
+  }
+
+  // purchaseId must be non-empty after path extraction; normalizeId trims+slices inside the store
+  if (!purchaseId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Missing purchaseId.' })
+    return true
+  }
+
+  const detail = coinPurchaseStore.getAdminPaymentDetail(purchaseId)
+  if (!detail) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Плащането не е намерено.' })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, purchase: detail })
+  return true
+}
+
 async function handleAdminVisitorSourcesRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -6073,6 +6350,14 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminStatsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminPaymentDetailRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminPaymentsListRequest(req, res, requestUrl.pathname, requestUrl)) {
     return
   }
 

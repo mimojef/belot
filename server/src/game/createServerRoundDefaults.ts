@@ -4,6 +4,7 @@ import type {
   ServerCard,
   ServerCarryOverPoints,
   ServerDeclaration,
+  ServerDeclarationMissionCountsBySeat,
   ServerDeclarationMissionType,
   ServerPlayingState,
   ServerRoundScore,
@@ -90,6 +91,10 @@ export function createEmptyMatchDeclarationMissionCounts(): Record<ServerDeclara
     announce_kare: createEmptyRoundScore(),
     announce_belot: createEmptyRoundScore(),
   }
+}
+
+export function createEmptyMatchDeclarationMissionCountsBySeat(): ServerDeclarationMissionCountsBySeat {
+  return {}
 }
 
 export function createEmptyScoreBreakdown(): ServerScoreBreakdown {

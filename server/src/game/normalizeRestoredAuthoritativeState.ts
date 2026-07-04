@@ -1,7 +1,9 @@
 import type {
   ServerAuthoritativeGameState,
+  ServerDeclarationMissionCountsBySeat,
   ServerScoringState,
 } from './serverGameTypes.js'
+import { createEmptyMatchDeclarationMissionCountsBySeat } from './createServerRoundDefaults.js'
 
 type ServerScoringOutcome = ServerScoringState['outcome']
 
@@ -45,12 +47,23 @@ export function normalizeRestoredAuthoritativeState(
 ): ServerAuthoritativeGameState {
   const normalizedScoring = normalizeServerScoringState(state.scoring)
 
-  if (normalizedScoring === state.scoring) {
+  // Backward compatibility: older persisted states lack matchDeclarationMissionCountsBySeat.
+  // Default to empty — attribution for games already in progress cannot be reconstructed,
+  // so they will simply receive no declaration mission progress for that match.
+  const legacyState = state as ServerAuthoritativeGameState & {
+    matchDeclarationMissionCountsBySeat?: ServerDeclarationMissionCountsBySeat
+  }
+  const normalizedBySeat: ServerDeclarationMissionCountsBySeat =
+    legacyState.matchDeclarationMissionCountsBySeat ??
+    createEmptyMatchDeclarationMissionCountsBySeat()
+
+  if (normalizedScoring === state.scoring && normalizedBySeat === legacyState.matchDeclarationMissionCountsBySeat) {
     return state
   }
 
   return {
     ...state,
     scoring: normalizedScoring,
+    matchDeclarationMissionCountsBySeat: normalizedBySeat,
   }
 }

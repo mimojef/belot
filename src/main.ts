@@ -16,6 +16,7 @@ import {
   createLobbyFlowController,
   type LobbyFlowController,
 } from './app/lobby/createLobbyFlowController'
+import { validateProfileDisplayName } from './app/lobby/profileDisplayNameValidation'
 import type { GiftLimitErrorPayload } from './app/lobby/formatGiftLimitError'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult } from './app/adminServer/adminServerTypes'
@@ -1076,6 +1077,70 @@ async function loadAdminVisitorSources(params: {
       return { ok: false, message: data.message ?? 'Грешка при зареждане на източници.' }
     }
     return { ok: true, rows: data.rows, total: data.total }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadAdminPayments(params: {
+  period: string
+  limit: number
+  offset: number
+}): Promise<
+  | {
+      ok: true
+      purchases: import('./app/adminPayments/adminPaymentsTypes').AdminPaymentListRow[]
+      pagination: { limit: number; offset: number; total: number; hasMore: boolean }
+      summary: { totalsByCurrency: Record<string, number> }
+    }
+  | { ok: false; message: string }
+> {
+  try {
+    const qs = new URLSearchParams({
+      period: params.period,
+      limit: String(params.limit),
+      offset: String(params.offset),
+    })
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/payments?${qs}`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    type PaymentsResponse = {
+      ok: boolean
+      purchases?: import('./app/adminPayments/adminPaymentsTypes').AdminPaymentListRow[]
+      pagination?: { limit: number; offset: number; total: number; hasMore: boolean }
+      summary?: { totalsByCurrency: Record<string, number> }
+      message?: string
+    }
+    const data = (await response.json()) as PaymentsResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.purchases) || !data.pagination || !data.summary) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на плащанията.' }
+    }
+    return { ok: true, purchases: data.purchases, pagination: data.pagination, summary: data.summary }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadAdminPaymentDetail(purchaseId: string): Promise<
+  | { ok: true; purchase: import('./app/adminPayments/adminPaymentsTypes').AdminPaymentDetailRow }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/payments/${encodeURIComponent(purchaseId)}`,
+      { method: 'GET', credentials: 'include' },
+    )
+    type DetailResponse = {
+      ok: boolean
+      purchase?: import('./app/adminPayments/adminPaymentsTypes').AdminPaymentDetailRow
+      message?: string
+    }
+    const data = (await response.json()) as DetailResponse
+    if (!response.ok || !data.ok || !data.purchase) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на плащането.' }
+    }
+    return { ok: true, purchase: data.purchase }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
   }
@@ -2373,6 +2438,11 @@ async function submitPresetAvatarUrl(targetProfileId: string | null, avatarUrl: 
 }
 
 async function submitProfileNameChange(targetProfileId: string | null, displayName: string): Promise<string | null> {
+  const validation = validateProfileDisplayName(displayName)
+  if (!validation.ok) {
+    return validation.message
+  }
+
   try {
     const path = targetProfileId === null
       ? '/api/profile/me/display-name'
@@ -2383,7 +2453,7 @@ async function submitProfileNameChange(targetProfileId: string | null, displayNa
         'Content-Type': 'application/json',
       },
       credentials: 'include',
-      body: JSON.stringify({ displayName }),
+      body: JSON.stringify({ displayName: validation.canonicalDisplayName }),
     })
     const data = targetProfileId === null
       ? await readAuthResponse(response)
@@ -2706,12 +2776,16 @@ lobby = createLobbyFlowController({
       password,
     }),
   onRegisterSubmit: (displayName, email, password, gender) =>
-    submitAuthRequest('register', {
-      displayName,
-      email,
-      password,
-      ...(gender !== null ? { gender } : {}),
-    }),
+    {
+      const validation = validateProfileDisplayName(displayName)
+      if (!validation.ok) return Promise.resolve(validation.message)
+      return submitAuthRequest('register', {
+        displayName: validation.canonicalDisplayName,
+        email,
+        password,
+        ...(gender !== null ? { gender } : {}),
+      })
+    },
   onProfileEditSubmit: (targetProfileId, avatarFile, avatarCrop, galleryFiles) =>
     submitProfileUpdate(targetProfileId, avatarFile, avatarCrop, galleryFiles),
   onPresetAvatarApply: (targetProfileId, avatarUrl) => submitPresetAvatarUrl(targetProfileId, avatarUrl),
@@ -2860,6 +2934,8 @@ lobby = createLobbyFlowController({
   },
   onAdminVisitorsLoad: (params) => loadAdminVisitors(params),
   onAdminVisitorSourcesLoad: (params) => loadAdminVisitorSources(params),
+  onAdminPaymentsLoad: (params) => loadAdminPayments(params),
+  onAdminPaymentDetailLoad: (purchaseId) => loadAdminPaymentDetail(purchaseId),
   onNotifFriendRequestClick: (friendshipId) => {
     const req = lobby?.getPendingFriendRequest(friendshipId)
     if (!req) return
