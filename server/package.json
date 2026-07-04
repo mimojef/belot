@@ -47,6 +47,7 @@
     "check:local-ai-card-beta": "tsx scripts/checkLocalAiCardBeta.ts",
     "summarize:local-ai-card-beta-trace": "tsx scripts/summarizeLocalAiCardBetaTrace.ts",
     "check:local-ai-card-beta-trace": "tsx scripts/checkLocalAiCardBetaTrace.ts",
+    "check:local-ai-card-beta-runbook": "tsx scripts/checkLocalAiCardBetaRunbook.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",
     "verify:db:prod": "node dist-scripts/scripts/checkDbBackupVerify.js",
