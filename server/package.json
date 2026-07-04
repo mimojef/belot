@@ -43,6 +43,7 @@
     "evaluate:training-baselines": "tsx scripts/evaluateTrainingBaselines.ts",
     "train:card-model": "tsx scripts/trainCardModel.ts",
     "test:card-model-inference": "tsx scripts/testCardModelInference.ts",
+    "simulate:ai-card-candidate": "tsx scripts/simulateAiCardCandidate.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",
     "verify:db:prod": "node dist-scripts/scripts/checkDbBackupVerify.js",
