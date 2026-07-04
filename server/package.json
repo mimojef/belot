@@ -24,6 +24,7 @@
     "check:backup-logic": "tsx scripts/checkBackupLogic.ts",
     "check:gift-limit": "tsx scripts/checkYellowCoinGiftLimit.ts",
     "check:gift-limit-frontend": "tsx scripts/checkGiftLimitFrontend.ts",
+    "check:admin-profile-moderation": "tsx scripts/checkAdminProfileModeration.ts",
     "check:shop-purchase-flow": "tsx scripts/checkShopPurchaseFlow.ts",
     "check:reconnect-contract": "tsx scripts/checkReconnectContractDisplay.ts",
     "check:client-winning-bid": "tsx scripts/checkClientWinningBidHelpers.ts",

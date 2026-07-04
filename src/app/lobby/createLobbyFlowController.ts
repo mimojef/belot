@@ -97,13 +97,14 @@ export type CreateLobbyFlowControllerOptions = {
     gender: 'male' | 'female' | null,
   ) => Promise<string | null>
   onProfileEditSubmit?: (
+    targetProfileId: string | null,
     avatarFile: File | null,
     avatarCrop: AvatarCropSelection | null,
     galleryFiles: File[],
   ) => Promise<string | null>
-  onPresetAvatarApply?: (avatarUrl: string) => Promise<string | null>
-  onProfileGalleryDelete?: (imageId: string) => Promise<string | null>
-  onProfileNameChangeSubmit?: (displayName: string) => Promise<string | null>
+  onPresetAvatarApply?: (targetProfileId: string | null, avatarUrl: string) => Promise<string | null>
+  onProfileGalleryDelete?: (targetProfileId: string | null, imageId: string) => Promise<string | null>
+  onProfileNameChangeSubmit?: (targetProfileId: string | null, displayName: string) => Promise<string | null>
   onChangePasswordSubmit?: (currentPassword: string, newPassword: string) => Promise<string | null>
   onPlayersLoad?: () => Promise<
     | { ok: true; players: PlayerPublicProfileSnapshot[] }
@@ -418,6 +419,8 @@ type InternalLobbyFlowState = {
   profilePopupProfile: PlayerPublicProfileSnapshot | null
   profilePopupCanEdit: boolean
   profileEditorOpen: boolean
+  profileEditorTargetProfileId: string | null
+  profileEditorTargetProfile: PlayerPublicProfileSnapshot | null
   profileEditorErrorText: string | null
   profileNameChangeErrorText: string | null
   profileNameChangeSuccessAmount: number | null
@@ -632,6 +635,8 @@ function createInitialState(): InternalLobbyFlowState {
     profilePopupProfile: null,
     profilePopupCanEdit: true,
     profileEditorOpen: false,
+    profileEditorTargetProfileId: null,
+    profileEditorTargetProfile: null,
     profileEditorErrorText: null,
     profileNameChangeErrorText: null,
     profileNameChangeSuccessAmount: null,
@@ -1780,6 +1785,8 @@ export function createLobbyFlowController(
         options.getProfileNameChangePrice?.() ??
         50000,
       profileEditorOpen: state.profileEditorOpen,
+      profileEditorTargetProfileId: state.profileEditorTargetProfileId,
+      profileEditorTargetProfile: state.profileEditorTargetProfile,
       profileEditorErrorText: state.profileEditorErrorText,
       profileNameChangeErrorText: state.profileNameChangeErrorText,
       profileNameChangeSuccessAmount: state.profileNameChangeSuccessAmount,
@@ -1918,6 +1925,8 @@ export function createLobbyFlowController(
         renderPopupOnly()
       },
       onProfileEditClick: () => {
+        state.profileEditorTargetProfileId = null
+        state.profileEditorTargetProfile = null
         state.profileEditorOpen = true
         state.profileEditorErrorText = null
         state.profileNameChangeErrorText = null
@@ -1927,6 +1936,8 @@ export function createLobbyFlowController(
       },
       onProfileEditClose: () => {
         state.profileEditorOpen = false
+        state.profileEditorTargetProfileId = null
+        state.profileEditorTargetProfile = null
         state.profileEditorErrorText = null
         state.profileNameChangeErrorText = null
         state.profileNameChangeSuccessAmount = null
@@ -2674,8 +2685,9 @@ export function createLobbyFlowController(
   }
 
   async function submitPresetAvatar(avatarUrl: string): Promise<void> {
+    const targetProfileId = state.profileEditorTargetProfileId
     const errorText = options.onPresetAvatarApply
-      ? await options.onPresetAvatarApply(avatarUrl)
+      ? await options.onPresetAvatarApply(targetProfileId, avatarUrl)
       : 'Функцията временно не е налична.'
 
     if (errorText !== null) {
@@ -2690,6 +2702,7 @@ export function createLobbyFlowController(
       state.localAvatarUrl = authSession.profile.avatarUrl
     }
 
+    await refreshEditedTargetProfile(targetProfileId)
     state.profileEditorErrorText = null
     render()
   }
@@ -2699,8 +2712,9 @@ export function createLobbyFlowController(
     avatarCrop: AvatarCropSelection | null,
     galleryFiles: File[],
   ): Promise<void> {
+    const targetProfileId = state.profileEditorTargetProfileId
     const errorText = options.onProfileEditSubmit
-      ? await options.onProfileEditSubmit(avatarFile, avatarCrop, galleryFiles)
+      ? await options.onProfileEditSubmit(targetProfileId, avatarFile, avatarCrop, galleryFiles)
       : 'Редакцията временно не е налична.'
 
     if (errorText !== null) {
@@ -2715,6 +2729,7 @@ export function createLobbyFlowController(
       state.localAvatarUrl = authSession.profile.avatarUrl
     }
 
+    await refreshEditedTargetProfile(targetProfileId)
     state.profileEditorOpen = false
     state.profileEditorErrorText = null
     state.profilePopupOpen = true
@@ -2723,8 +2738,9 @@ export function createLobbyFlowController(
   }
 
   async function submitProfileNameChange(displayName: string): Promise<void> {
+    const targetProfileId = state.profileEditorTargetProfileId
     const errorText = options.onProfileNameChangeSubmit
-      ? await options.onProfileNameChangeSubmit(displayName)
+      ? await options.onProfileNameChangeSubmit(targetProfileId, displayName)
       : 'Смяната на име временно не е налична.'
 
     if (errorText !== null) {
@@ -2740,12 +2756,16 @@ export function createLobbyFlowController(
       state.localAvatarUrl = authSession.profile.avatarUrl
     }
 
+    await refreshEditedTargetProfile(targetProfileId)
     state.profileNameChangeErrorText = null
-    state.profileNameChangeSuccessAmount =
-      state.adminSettings?.profileNameChangePrice ??
-      options.getProfileNameChangePrice?.() ??
-      50000
-    void new Audio('/audio/game-sounds/coins.mp3').play().catch(() => undefined)
+    state.profileNameChangeSuccessAmount = targetProfileId === null
+      ? state.adminSettings?.profileNameChangePrice ??
+        options.getProfileNameChangePrice?.() ??
+        50000
+      : null
+    if (targetProfileId === null) {
+      void new Audio('/audio/game-sounds/coins.mp3').play().catch(() => undefined)
+    }
     render()
   }
 
@@ -2802,8 +2822,9 @@ export function createLobbyFlowController(
   }
 
   async function deleteProfileGalleryImage(imageId: string): Promise<void> {
+    const targetProfileId = state.profileEditorTargetProfileId
     const errorText = options.onProfileGalleryDelete
-      ? await options.onProfileGalleryDelete(imageId)
+      ? await options.onProfileGalleryDelete(targetProfileId, imageId)
       : 'Изтриването на снимки временно не е налично.'
 
     if (errorText !== null) {
@@ -4794,6 +4815,60 @@ export function createLobbyFlowController(
     return friendshipAction
   }
 
+  function isAdminTargetEdit(): boolean {
+    return state.profileEditorTargetProfileId !== null &&
+      (options.getAuthSession?.() ?? null)?.account.role === 'admin'
+  }
+
+  function updateEditedTargetProfile(profile: PlayerPublicProfileSnapshot): void {
+    state.players = state.players.map((player) =>
+      player.profileId === profile.profileId ? profile : player,
+    )
+    if (state.profilePopupProfile?.profileId === profile.profileId) {
+      state.profilePopupProfile = profile
+    }
+    if (state.profileEditorTargetProfileId === profile.profileId) {
+      state.profileEditorTargetProfile = profile
+    }
+  }
+
+  async function refreshEditedTargetProfile(profileId: string | null): Promise<void> {
+    if (profileId === null || !isAdminTargetEdit()) return
+    const result = await options.onPlayersLoad?.()
+    if (!result?.ok) return
+    state.players = result.players
+    const profile = result.players.find((player) => player.profileId === profileId) ?? null
+    if (profile !== null) {
+      updateEditedTargetProfile(profile)
+    }
+  }
+
+  function openProfileEditorForTarget(profileId: string | null): void {
+    const authSession = options.getAuthSession?.() ?? null
+    const ownProfileId = authSession?.profile.profileId ?? null
+    const targetProfile = profileId
+      ? (state.profilePopupProfile?.profileId === profileId
+          ? state.profilePopupProfile
+          : state.players.find((player) => player.profileId === profileId) ?? null)
+      : null
+    const isOwn = profileId === null || (ownProfileId !== null && profileId === ownProfileId)
+
+    if (!isOwn && authSession?.account.role !== 'admin') {
+      state.profileEditorOpen = false
+      state.profileEditorTargetProfileId = null
+      state.profileEditorTargetProfile = null
+      return
+    }
+
+    state.profileEditorTargetProfileId = isOwn ? null : profileId
+    state.profileEditorTargetProfile = isOwn ? null : targetProfile
+    state.profileEditorOpen = true
+    state.profileEditorErrorText = null
+    state.profileNameChangeErrorText = null
+    state.profileNameChangeSuccessAmount = null
+    state.profilePopupOpen = false
+  }
+
   function getPopupCallbacks(): ProfilePopupCallbacks {
     return {
       onClose: () => {
@@ -4802,9 +4877,8 @@ export function createLobbyFlowController(
         state.profilePopupCanEdit = true
         syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
       },
-      onEditClick: () => {
-        state.profileEditorOpen = true
-        state.profileEditorErrorText = null
+      onEditClick: (profileId) => {
+        openProfileEditorForTarget(profileId)
         state.profilePopupOpen = false
         syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
         render()

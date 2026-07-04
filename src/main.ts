@@ -211,6 +211,12 @@ type AuthResponse = {
   message?: string
 }
 
+type AdminProfileResponse = {
+  ok: boolean
+  profile?: PlayerPublicProfileSnapshot
+  message?: string
+}
+
 type PlayersResponse = {
   ok: boolean
   players?: PlayerPublicProfileSnapshot[]
@@ -2271,11 +2277,15 @@ async function imageFileToServerUploadDataUrl(
 }
 
 async function submitProfileImageData(
+  targetProfileId: string | null,
   endpoint: 'avatar' | 'gallery',
   imageDataUrl: string,
   crop?: AvatarCropSelection,
 ): Promise<AuthResponse> {
-  const response = await fetch(`${getApiBaseUrl()}/api/profile/me/${endpoint}`, {
+  const path = targetProfileId === null
+    ? `/api/profile/me/${endpoint}`
+    : `/api/admin/profiles/${encodeURIComponent(targetProfileId)}/${endpoint}`
+  const response = await fetch(`${getApiBaseUrl()}${path}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -2292,78 +2302,101 @@ async function submitProfileImageData(
         : {}),
     }),
   })
-  const data = await readAuthResponse(response)
+  const data = targetProfileId === null
+    ? await readAuthResponse(response)
+    : ((await response.json().catch(() => ({ ok: false, message: 'Невалиден отговор от сървъра.' }))) as AdminProfileResponse)
 
-  if (!response.ok || !data.ok || !data.session) {
+  if (!response.ok || !data.ok || (targetProfileId === null && !(data as AuthResponse).session)) {
     throw new Error(data.message ?? 'Профилът не беше обновен.')
   }
 
-  return data
+  return data as AuthResponse
 }
 
-async function deleteProfileGalleryImage(imageId: string): Promise<string | null> {
+async function deleteProfileGalleryImage(targetProfileId: string | null, imageId: string): Promise<string | null> {
   try {
+    const path = targetProfileId === null
+      ? `/api/profile/me/gallery/${encodeURIComponent(imageId)}`
+      : `/api/admin/profiles/${encodeURIComponent(targetProfileId)}/gallery/${encodeURIComponent(imageId)}`
     const response = await fetch(
-      `${getApiBaseUrl()}/api/profile/me/gallery/${encodeURIComponent(imageId)}`,
+      `${getApiBaseUrl()}${path}`,
       {
         method: 'DELETE',
         credentials: 'include',
       },
     )
-    const data = await readAuthResponse(response)
+    const data = targetProfileId === null
+      ? await readAuthResponse(response)
+      : ((await response.json().catch(() => ({ ok: false, message: 'Невалиден отговор от сървъра.' }))) as AdminProfileResponse)
 
-    if (!response.ok || !data.ok || !data.session) {
+    if (!response.ok || !data.ok || (targetProfileId === null && !(data as AuthResponse).session)) {
       return data.message ?? 'Снимката не беше изтрита.'
     }
 
-    currentAuthSession = data.session
-    syncLobbyWithAuthSession()
+    if (targetProfileId === null) {
+      currentAuthSession = (data as AuthResponse).session ?? currentAuthSession
+      syncLobbyWithAuthSession()
+    }
     return null
   } catch {
     return 'Няма връзка със сървъра за профили.'
   }
 }
 
-async function submitPresetAvatarUrl(avatarUrl: string): Promise<string | null> {
+async function submitPresetAvatarUrl(targetProfileId: string | null, avatarUrl: string): Promise<string | null> {
   try {
-    const response = await fetch(`${getApiBaseUrl()}/api/profile/me`, {
+    const path = targetProfileId === null
+      ? '/api/profile/me'
+      : `/api/admin/profiles/${encodeURIComponent(targetProfileId)}/avatar`
+    const response = await fetch(`${getApiBaseUrl()}${path}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: JSON.stringify({ avatarUrl }),
     })
-    const data = await readAuthResponse(response)
+    const data = targetProfileId === null
+      ? await readAuthResponse(response)
+      : ((await response.json().catch(() => ({ ok: false, message: 'Невалиден отговор от сървъра.' }))) as AdminProfileResponse)
 
-    if (!response.ok || !data.ok || !data.session) {
+    if (!response.ok || !data.ok || (targetProfileId === null && !(data as AuthResponse).session)) {
       return data.message ?? 'Аватарът не беше обновен.'
     }
 
-    currentAuthSession = data.session
-    syncLobbyWithAuthSession()
+    if (targetProfileId === null) {
+      currentAuthSession = (data as AuthResponse).session ?? currentAuthSession
+      syncLobbyWithAuthSession()
+    }
     return null
   } catch {
     return 'Няма връзка със сървъра.'
   }
 }
 
-async function submitProfileNameChange(displayName: string): Promise<string | null> {
+async function submitProfileNameChange(targetProfileId: string | null, displayName: string): Promise<string | null> {
   try {
-    const response = await fetch(`${getApiBaseUrl()}/api/profile/me/display-name`, {
-      method: 'POST',
+    const path = targetProfileId === null
+      ? '/api/profile/me/display-name'
+      : `/api/admin/profiles/${encodeURIComponent(targetProfileId)}/display-name`
+    const response = await fetch(`${getApiBaseUrl()}${path}`, {
+      method: targetProfileId === null ? 'POST' : 'PATCH',
       headers: {
         'Content-Type': 'application/json',
       },
       credentials: 'include',
       body: JSON.stringify({ displayName }),
     })
-    const data = await readAuthResponse(response)
+    const data = targetProfileId === null
+      ? await readAuthResponse(response)
+      : ((await response.json().catch(() => ({ ok: false, message: 'Невалиден отговор от сървъра.' }))) as AdminProfileResponse)
 
-    if (!response.ok || !data.ok || !data.session) {
+    if (!response.ok || !data.ok || (targetProfileId === null && !(data as AuthResponse).session)) {
       return data.message ?? 'Името не беше сменено.'
     }
 
-    currentAuthSession = data.session
-    syncLobbyWithAuthSession()
+    if (targetProfileId === null) {
+      currentAuthSession = (data as AuthResponse).session ?? currentAuthSession
+      syncLobbyWithAuthSession()
+    }
     return null
   } catch {
     return 'Няма връзка със сървъра за смяна на име.'
@@ -2392,6 +2425,7 @@ async function submitChangePassword(
 }
 
 async function submitProfileUpdate(
+  targetProfileId: string | null,
   avatarFile: File | null,
   avatarCrop: AvatarCropSelection | null,
   galleryFiles: File[],
@@ -2401,12 +2435,17 @@ async function submitProfileUpdate(
   }
 
   try {
-    const currentGalleryCount =
-      currentAuthSession?.profile.galleryImages.length ?? 0
+    const currentGalleryCount = targetProfileId === null
+      ? currentAuthSession?.profile.galleryImages.length ?? 0
+      : 0
     const remainingGallerySlots = Math.max(
       0,
       MAX_PROFILE_GALLERY_IMAGES - currentGalleryCount,
     )
+
+    if (targetProfileId !== null && galleryFiles.length > 0) {
+      return 'Администраторската редакция позволява само изтриване на снимки от галерията.'
+    }
 
     if (galleryFiles.length > remainingGallerySlots) {
       return `Галерията може да има най-много ${MAX_PROFILE_GALLERY_IMAGES} снимки.`
@@ -2423,19 +2462,19 @@ async function submitProfileUpdate(
         y: Math.round(avatarCrop.y * avatarScale),
         size: Math.round(avatarCrop.size * avatarScale),
       }
-      const data = await submitProfileImageData('avatar', avatarDataUrl, scaledCrop)
-      currentAuthSession = data.session ?? currentAuthSession
+      const data = await submitProfileImageData(targetProfileId, 'avatar', avatarDataUrl, scaledCrop)
+      if (targetProfileId === null) currentAuthSession = data.session ?? currentAuthSession
     }
 
     for (const galleryFile of galleryFiles.slice(0, remainingGallerySlots)) {
       const imageDataUrl = await imageFileToServerUploadDataUrl(galleryFile, {
         mode: 'gallery',
       })
-      const data = await submitProfileImageData('gallery', imageDataUrl)
+      const data = await submitProfileImageData(null, 'gallery', imageDataUrl)
       currentAuthSession = data.session ?? currentAuthSession
     }
 
-    syncLobbyWithAuthSession()
+    if (targetProfileId === null) syncLobbyWithAuthSession()
     return null
   } catch (error) {
     return error instanceof Error
@@ -2673,15 +2712,15 @@ lobby = createLobbyFlowController({
       password,
       ...(gender !== null ? { gender } : {}),
     }),
-  onProfileEditSubmit: (avatarFile, avatarCrop, galleryFiles) =>
-    submitProfileUpdate(avatarFile, avatarCrop, galleryFiles),
-  onPresetAvatarApply: (avatarUrl) => submitPresetAvatarUrl(avatarUrl),
+  onProfileEditSubmit: (targetProfileId, avatarFile, avatarCrop, galleryFiles) =>
+    submitProfileUpdate(targetProfileId, avatarFile, avatarCrop, galleryFiles),
+  onPresetAvatarApply: (targetProfileId, avatarUrl) => submitPresetAvatarUrl(targetProfileId, avatarUrl),
   getSignupBonusYellowCoins: () => publicSignupBonusYellowCoins,
   getOnlinePlayersCount: () => publicOnlinePlayersCount,
   getProfileNameChangePrice: () => publicProfileNameChangePrice,
   getApiBaseUrl: () => getApiBaseUrl(),
-  onProfileGalleryDelete: (imageId) => deleteProfileGalleryImage(imageId),
-  onProfileNameChangeSubmit: (displayName) => submitProfileNameChange(displayName),
+  onProfileGalleryDelete: (targetProfileId, imageId) => deleteProfileGalleryImage(targetProfileId, imageId),
+  onProfileNameChangeSubmit: (targetProfileId, displayName) => submitProfileNameChange(targetProfileId, displayName),
   onChangePasswordSubmit: (currentPassword, newPassword) => submitChangePassword(currentPassword, newPassword),
   onPlayersLoad: () => loadPlayersDirectory(),
   onLeaderboardsLoad: () => loadLeaderboards(),

@@ -45,6 +45,10 @@ export type PlayerProgressStore = {
     displayName: string,
     priceAmount: number,
   ) => { ok: true; profile: PlayerPublicProfileSnapshot } | { ok: false; message: string }
+  adminRenameProfileDisplayName: (
+    profileId: ProfileId,
+    displayName: string,
+  ) => { ok: true; profile: PlayerPublicProfileSnapshot } | { ok: false; message: string }
   updateProfileAvatar: (
     profileId: ProfileId,
     avatarUrl: string | null,
@@ -993,6 +997,60 @@ export async function createPlayerProgressStore(
     }
   }
 
+  function adminRenameProfileDisplayName(
+    profileId: ProfileId,
+    displayNameRaw: string,
+  ): { ok: true; profile: PlayerPublicProfileSnapshot } | { ok: false; message: string } {
+    const displayName = displayNameRaw.trim().replace(/\s+/g, ' ')
+    const normalizedDisplayName = normalizeProfileDisplayName(displayName)
+
+    if (normalizedDisplayName === null) {
+      return { ok: false, message: 'Името може да съдържа само букви, цифри и интервал.' }
+    }
+
+    if (displayName.length < 3 || displayName.length > 32) {
+      return { ok: false, message: 'Името трябва да е между 3 и 32 символа.' }
+    }
+
+    const existingProfile = selectProfileDisplayNameStatement.get(profileId) as
+      | { display_name: string }
+      | undefined
+
+    if (!existingProfile) {
+      return { ok: false, message: 'Профилът не беше намерен.' }
+    }
+
+    if (normalizeProfileDisplayName(existingProfile.display_name) === normalizedDisplayName) {
+      const profile = getPublicProfile(profileId)
+      if (profile === null) return { ok: false, message: 'Профилът не беше намерен.' }
+      return { ok: true, profile }
+    }
+
+    try {
+      const updateResult = updateProfileDisplayNameStatement.run(
+        displayName,
+        normalizedDisplayName,
+        profileId,
+      ) as { changes?: number }
+
+      if ((updateResult.changes ?? 0) === 0) {
+        return { ok: false, message: 'Профилът не беше намерен.' }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (message.includes('normalized_display_name')) {
+        return { ok: false, message: 'Това име вече е заето.' }
+      }
+      throw error
+    }
+
+    const profile = getPublicProfile(profileId)
+    if (profile === null) {
+      return { ok: false, message: 'Профилът не беше намерен.' }
+    }
+    return { ok: true, profile }
+  }
+
   function updateProfileAvatar(
     profileId: ProfileId,
     avatarUrl: string | null,
@@ -1396,6 +1454,7 @@ export async function createPlayerProgressStore(
     listPublicHumanProfiles,
     listLeaderboards,
     changeProfileDisplayName,
+    adminRenameProfileDisplayName,
     isDisplayNameAvailable,
     countHumanProfiles,
     updateProfileAvatar,

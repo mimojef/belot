@@ -3670,6 +3670,152 @@ async function handleProfileRequest(
   return true
 }
 
+function hasOnlyAllowedFields(
+  body: Record<string, unknown>,
+  allowedFields: Set<string>,
+): boolean {
+  return Object.keys(body).every((key) => allowedFields.has(key))
+}
+
+async function handleAdminProfileModerationRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const displayNameMatch = pathname.match(/^\/api\/admin\/profiles\/([^/]+)\/display-name$/)
+  const avatarMatch = pathname.match(/^\/api\/admin\/profiles\/([^/]+)\/avatar$/)
+  const galleryDeleteMatch = pathname.match(/^\/api\/admin\/profiles\/([^/]+)\/gallery\/([^/]+)$/)
+
+  if (!displayNameMatch && !avatarMatch && !galleryDeleteMatch) return false
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.account.role !== 'admin') {
+    sendJsonResponse(res, 403, { ok: false, message: 'Само администратор може да редактира чужд профил.' })
+    return true
+  }
+
+  const targetProfileId = decodeURIComponent(
+    (displayNameMatch?.[1] ?? avatarMatch?.[1] ?? galleryDeleteMatch?.[1] ?? '').trim(),
+  )
+
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(targetProfileId)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден profileId.' })
+    return true
+  }
+
+  if (session.profile.profileId === targetProfileId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'За собствен профил използвай стандартната редакция.' })
+    return true
+  }
+
+  if (displayNameMatch) {
+    if (req.method !== 'PATCH' && req.method !== 'POST') return false
+    const body = await readJsonRequestBody(req, MAX_JSON_BODY_BYTES)
+    if (!isRecord(body) || !hasOnlyAllowedFields(body, new Set(['displayName']))) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Позволена е само промяна на displayName.' })
+      return true
+    }
+
+    const result = playerProgressStore.adminRenameProfileDisplayName(
+      targetProfileId,
+      getStringField(body, 'displayName'),
+    )
+
+    sendJsonResponse(res, result.ok ? 200 : 400, result)
+    return true
+  }
+
+  if (avatarMatch) {
+    if (req.method !== 'PATCH' && req.method !== 'POST') return false
+    const body = await readJsonRequestBody(req, MAX_JSON_BODY_BYTES)
+    const allowedAvatarFields = new Set(['avatarUrl', 'imageDataUrl', 'cropX', 'cropY', 'cropSize'])
+    if (!isRecord(body) || !hasOnlyAllowedFields(body, allowedAvatarFields)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Позволена е само промяна на avatar.' })
+      return true
+    }
+
+    if (req.method === 'PATCH') {
+      const avatarUrl = getStringField(body, 'avatarUrl')
+      if (
+        avatarUrl === null ||
+        (!avatarUrl.startsWith('/assets/avatars/male/') &&
+          !avatarUrl.startsWith('/assets/avatars/female/'))
+      ) {
+        sendJsonResponse(res, 400, { ok: false, message: 'Невалиден URL за аватар.' })
+        return true
+      }
+
+      const result = playerProgressStore.updateProfileAvatar(targetProfileId, avatarUrl)
+      sendJsonResponse(res, result.ok ? 200 : 400, result)
+      return true
+    }
+
+    const imageBuffer = decodeImageDataUrl(getStringField(body, 'imageDataUrl'))
+    const cropX = getNumberField(body, 'cropX')
+    const cropY = getNumberField(body, 'cropY')
+    const cropSize = getNumberField(body, 'cropSize')
+
+    if (
+      imageBuffer === null ||
+      cropX === null ||
+      cropY === null ||
+      cropSize === null
+    ) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Изпрати валидна снимка и crop за аватар.' })
+      return true
+    }
+
+    const avatarBuffer = await createCroppedAvatarWebp({
+      imageBuffer,
+      cropX,
+      cropY,
+      cropSize,
+    })
+
+    if (avatarBuffer === null) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Избраният crop е извън снимката.' })
+      return true
+    }
+
+    const avatarFilename = `${randomUUID()}.webp`
+    await writeWebpUploadFile(AVATAR_UPLOADS_PATH, avatarFilename, avatarBuffer)
+    const avatarUrl = createUploadUrl('avatars', avatarFilename)
+    const result = playerProgressStore.updateProfileAvatar(targetProfileId, avatarUrl)
+    if (!result.ok) {
+      void deleteUploadFileByUrl(avatarUrl)
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, result)
+    return true
+  }
+
+  if (galleryDeleteMatch) {
+    if (req.method !== 'DELETE') return false
+    const imageId = decodeURIComponent(galleryDeleteMatch[2] ?? '').trim()
+
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(imageId)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидна снимка за изтриване.' })
+      return true
+    }
+
+    const result = playerProgressStore.deleteProfileGalleryImage(targetProfileId, imageId)
+    if (!result.ok) {
+      sendJsonResponse(res, 404, result)
+      return true
+    }
+
+    await Promise.all(result.deletedImageUrls.map(deleteUploadFileByUrl))
+    sendJsonResponse(res, 200, { ok: true, profile: result.profile })
+    return true
+  }
+
+  return false
+}
+
 async function handleProfileBlockRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -5847,6 +5993,10 @@ async function handleHttpRequest(
   }
 
   if (await handleProfileRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminProfileModerationRequest(req, res, requestUrl.pathname)) {
     return
   }
 

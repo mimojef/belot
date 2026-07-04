@@ -189,6 +189,8 @@ export type LobbyScreenState = {
   signupBonusYellowCoins: number
   profileNameChangePrice: number
   profileEditorOpen: boolean
+  profileEditorTargetProfileId: string | null
+  profileEditorTargetProfile: PlayerPublicProfileSnapshot | null
   profileEditorErrorText: string | null
   profileNameChangeErrorText: string | null
   profileNameChangeSuccessAmount: number | null
@@ -446,7 +448,7 @@ let inviteCountdownTimer: ReturnType<typeof setInterval> | null = null
 
 export type ProfilePopupCallbacks = {
   onClose: () => void
-  onEditClick: () => void
+  onEditClick: (profileId: string | null) => void
   onFriendRequestClick: (profileId: string) => void
   onBlockClick: (profileId: string) => void
   onFriendAcceptClick: (friendshipId: string) => void
@@ -457,14 +459,16 @@ export type ProfilePopupCallbacks = {
   onLikeClick: (profileId: string) => void
 }
 
-function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks): void {
+function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profileId: string | null): void {
   el.querySelector<HTMLButtonElement>('[data-player-profile-popup-close="1"]')
     ?.addEventListener('click', cb.onClose)
   el.querySelector<HTMLElement>('[data-player-profile-popup-backdrop="1"]')
     ?.addEventListener('click', cb.onClose)
   const editEl = el.querySelector<HTMLElement>('[data-player-profile-edit="1"]')
   if (editEl) {
-    editEl.addEventListener('click', cb.onEditClick)
+    editEl.addEventListener('click', () => {
+      cb.onEditClick(profileId)
+    })
     editEl.addEventListener('mouseenter', () => { editEl.style.textDecoration = 'underline' })
     editEl.addEventListener('mouseleave', () => { editEl.style.textDecoration = 'none' })
   }
@@ -559,7 +563,7 @@ export function syncProfilePopup(
     friendshipAction: popupState.friendshipAction,
     skipAnimation: !isFirstOpen,
   })
-  attachPopupListeners(el, cb)
+  attachPopupListeners(el, cb, popupState.profile?.profileId ?? null)
 }
 
 function escapeHtml(value: string): string {
@@ -898,13 +902,23 @@ function renderProfileEditModal(state: LobbyScreenState): string {
   if (!state.profileEditorOpen) {
     return ''
   }
+  if (state.profileEditorTargetProfileId !== null && !state.isAdmin) {
+    return ''
+  }
+  if (state.profileEditorTargetProfileId !== null && state.profileEditorTargetProfile === null) {
+    return ''
+  }
 
-  const galleryImages = [...state.profile.galleryImages].sort(
+  const isAdminTargetEdit = state.profileEditorTargetProfileId !== null && state.isAdmin
+  const editorProfile = isAdminTargetEdit
+    ? (state.profileEditorTargetProfile ?? state.profile)
+    : state.profile
+  const galleryImages = [...editorProfile.galleryImages].sort(
     (left, right) => left.sortOrder - right.sortOrder,
   )
   const gallerySlotsLeft = Math.max(
     0,
-    MAX_PROFILE_GALLERY_IMAGES - galleryImages.length,
+    isAdminTargetEdit ? 0 : MAX_PROFILE_GALLERY_IMAGES - galleryImages.length,
   )
   const nameChangePrice = state.profileNameChangePrice
   const isPhoneLayout = isPhoneLayoutViewport()
@@ -936,15 +950,15 @@ function renderProfileEditModal(state: LobbyScreenState): string {
           <div style="display:grid;grid-template-columns:1fr auto;align-items:end;gap:10px;">
             <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
               Ime в играта
-              <input value="${escapeHtml(state.profile.displayName)}" disabled style="height:42px;border-radius:8px;border:1px solid rgba(255,255,255,0.10);background:#101010;color:rgba(255,255,255,0.58);padding:0 12px;font-size:15px;font-weight:700;outline:none;width:100%;box-sizing:border-box;">
+              <input value="${escapeHtml(editorProfile.displayName)}" disabled style="height:42px;border-radius:8px;border:1px solid rgba(255,255,255,0.10);background:#101010;color:rgba(255,255,255,0.58);padding:0 12px;font-size:15px;font-weight:700;outline:none;width:100%;box-sizing:border-box;">
             </label>
-            <button
+            ${isAdminTargetEdit ? '' : `<button
               type="button"
               data-change-password-open="1"
               style="height:42px;padding:0 14px;white-space:nowrap;border:1px solid rgba(212,165,32,0.58);border-radius:8px;background:#080808;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;flex-shrink:0;"
-            >Смяна на парола</button>
+            >Смяна на парола</button>`}
           </div>
-          ${state.profileNameChangeSuccessAmount !== null ? `
+          ${!isAdminTargetEdit && state.profileNameChangeSuccessAmount !== null ? `
             <div style="font-size:13px;font-weight:800;color:#4ade80;">
               Успешно сменихте името на профила.
               <span data-name-change-cost="1" style="color:#4ade80;">-0</span> жълтици
@@ -954,13 +968,13 @@ function renderProfileEditModal(state: LobbyScreenState): string {
           <div style="${nameChangeCardStyle}">
             <div style="${nameChangeHeaderStyle}">
               <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">Смяна на име</div>
-              <div style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.62);">
+              ${isAdminTargetEdit ? '' : `<div style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.62);">
                 <strong style="color:#d4a520;">${formatAmount(nameChangePrice)}</strong> жълтици
-              </div>
+              </div>`}
             </div>
             <label style="display:grid;gap:6px;">
               <span style="position:relative;display:block;">
-                <input name="paidDisplayName" maxlength="32" autocomplete="nickname" placeholder="Въведи ново име" data-name-check-input="namechange" style="${nameChangeInputStyle}">
+                <input name="paidDisplayName" maxlength="32" autocomplete="nickname" placeholder="Въведи ново име" value="${isAdminTargetEdit ? escapeHtml(editorProfile.displayName) : ''}" data-name-check-input="namechange" style="${nameChangeInputStyle}">
                 <span data-name-hint="namechange" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:800;pointer-events:none;white-space:nowrap;"></span>
               </span>
               <span style="${nameChangeHelpStyle}">Мин. 3 символа. Само букви на кирилица, латиница, цифри и интервал.</span>
@@ -980,8 +994,8 @@ function renderProfileEditModal(state: LobbyScreenState): string {
                 data-avatar-preview="1"
                 style="width:80px;height:80px;border-radius:8px;border:1px solid rgba(212,165,32,0.35);background:#101010;flex:0 0 auto;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#facc15;font-size:28px;font-weight:900;position:relative;"
               >
-                ${state.profile.avatarUrl
-                  ? `<img src="${escapeHtml(state.profile.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">`
+                ${editorProfile.avatarUrl
+                  ? `<img src="${escapeHtml(editorProfile.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">`
                   : `<span style="opacity:0.4;">?</span>`}
               </div>
               <input name="avatarFile" type="file" accept="image/png,image/jpeg,image/webp" style="display:none;">
@@ -1020,7 +1034,7 @@ function renderProfileEditModal(state: LobbyScreenState): string {
                   >×</button>
                 </div>
               `).join('')}
-              ${Array.from({ length: gallerySlotsLeft }, () => `
+              ${isAdminTargetEdit ? '' : Array.from({ length: gallerySlotsLeft }, () => `
                 <div
                   data-gallery-add-slot="1"
                   role="button"
@@ -8175,7 +8189,10 @@ export function renderLobbyScreen(
     avatarInput?.click()
   })
 
-  const avatarGender = options.state.profile.gender ?? 'male'
+  const editorProfile = options.state.profileEditorTargetProfileId !== null && options.state.isAdmin
+    ? (options.state.profileEditorTargetProfile ?? options.state.profile)
+    : options.state.profile
+  const avatarGender = editorProfile.gender ?? 'male'
   const avatarFolder = avatarGender === 'female' ? 'female' : 'male'
   const avatarPrefix = avatarGender === 'female' ? 'female-avatar' : 'male-avatar'
   const PRESET_AVATAR_COUNT = 30
