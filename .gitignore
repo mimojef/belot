@@ -45,3 +45,9 @@ server/uploads/avatars/*
 !server/uploads/profile-gallery/
 server/uploads/profile-gallery/**
 !server/uploads/profile-gallery/.gitkeep
+
+# AI training dataset builder — generated local output, никога не се commit-ва
+training-output/
+
+# Training recorder audit архиви, свалени локално за dataset export
+training-recorder-audit-*.tar.gz
