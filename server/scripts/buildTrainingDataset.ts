@@ -48,6 +48,7 @@ const SUMMARY_MD_PATH = join(OUTPUT_DIR, 'summary.md')
 
 type CriticalError = {
   kind: 'parse' | 'validation'
+  area?: 'card' | 'bidding-hand'
   file: string
   line: number
   message: string
@@ -87,6 +88,19 @@ function bumpActorKind(counts: ActorKindCounts, kind: TrainingActorKind): void {
   counts[kind] = (counts[kind] ?? 0) + 1
 }
 
+// Валидира, че всяка карта в ownHand има очакваната ServerCard форма
+// ({id, suit, rank}, всички непразни низове) — същия representation, който
+// вече се използва за ownHand/legalCards/chosenCard в card decisions.
+function isValidCompactCard(card: unknown): card is { id: string; suit: string; rank: string } {
+  if (typeof card !== 'object' || card === null) return false
+  const c = card as Record<string, unknown>
+  return (
+    typeof c.id === 'string' && c.id.length > 0 &&
+    typeof c.suit === 'string' && c.suit.length > 0 &&
+    typeof c.rank === 'string' && c.rank.length > 0
+  )
+}
+
 // ─── Export record shapes (pseudonymized-only fields, no raw identifiers) ────
 
 type CardDecisionRecord = {
@@ -118,6 +132,7 @@ type BiddingDecisionRecord = {
   sequence: number
   seat: string
   playerKey: string | null
+  ownHand: unknown
   dealerSeat: unknown
   scoreBeforeDeal: unknown
   previousBids: unknown
@@ -204,6 +219,29 @@ async function main(): Promise<void> {
         bumpActorKind(stats.biddingActorKindCounts, action.actorKind)
         if (action.actorKind !== 'human_manual') continue
 
+        const ownHand = action.visibleBeforeAction.ownHand
+
+        if (!Array.isArray(ownHand) || ownHand.length === 0) {
+          criticalErrors.push({
+            kind: 'validation',
+            area: 'bidding-hand',
+            file: file.archivePath,
+            line: i + 1,
+            message: `bidding ownHand липсва/празно (recordingId=${deal.recordingId}, sequence=${action.sequence})`,
+          })
+          continue
+        }
+        if (!ownHand.every(isValidCompactCard)) {
+          criticalErrors.push({
+            kind: 'validation',
+            area: 'bidding-hand',
+            file: file.archivePath,
+            line: i + 1,
+            message: `bidding ownHand съдържа невалидна card representation (recordingId=${deal.recordingId}, sequence=${action.sequence})`,
+          })
+          continue
+        }
+
         const record: BiddingDecisionRecord = {
           recordingId: deal.recordingId,
           roomKey: deal.roomKey,
@@ -211,6 +249,7 @@ async function main(): Promise<void> {
           sequence: action.sequence,
           seat: action.seat,
           playerKey: deal.seats[action.seat]?.playerKey ?? null,
+          ownHand,
           dealerSeat: action.visibleBeforeAction.dealerSeat,
           scoreBeforeDeal: action.visibleBeforeAction.scoreBeforeDeal,
           previousBids: action.visibleBeforeAction.previousBids,
@@ -231,6 +270,7 @@ async function main(): Promise<void> {
         if (!legalIds.has(action.chosenCard.id)) {
           criticalErrors.push({
             kind: 'validation',
+            area: 'card',
             file: file.archivePath,
             line: i + 1,
             message: `chosenCard "${action.chosenCard.id}" не е в legalCards (recordingId=${deal.recordingId}, sequence=${action.sequence})`,
@@ -240,6 +280,7 @@ async function main(): Promise<void> {
         if (!handIds.has(action.chosenCard.id)) {
           criticalErrors.push({
             kind: 'validation',
+            area: 'card',
             file: file.archivePath,
             line: i + 1,
             message: `chosenCard "${action.chosenCard.id}" не е в ownHand (recordingId=${deal.recordingId}, sequence=${action.sequence})`,
@@ -276,6 +317,8 @@ async function main(): Promise<void> {
 
   const parseErrorCount = criticalErrors.filter((e) => e.kind === 'parse').length
   const validationErrorCount = criticalErrors.filter((e) => e.kind === 'validation').length
+  const cardValidationErrorCount = criticalErrors.filter((e) => e.kind === 'validation' && e.area === 'card').length
+  const biddingHandValidationErrorCount = criticalErrors.filter((e) => e.kind === 'validation' && e.area === 'bidding-hand').length
 
   if (criticalErrors.length > 0) {
     console.error(`\n✗ Открити ${criticalErrors.length} критични грешки — export СПРЯН, dataset файлове НЕ СА записани.\n`)
@@ -289,6 +332,8 @@ async function main(): Promise<void> {
       stats,
       parseErrorCount,
       validationErrorCount,
+      cardValidationErrorCount,
+      biddingHandValidationErrorCount,
       sanitizationViolations: [],
       criticalErrors,
     })
@@ -313,6 +358,8 @@ async function main(): Promise<void> {
     stats,
     parseErrorCount,
     validationErrorCount,
+    cardValidationErrorCount,
+    biddingHandValidationErrorCount,
     sanitizationViolations: datasetViolations,
     criticalErrors: [],
   })
@@ -348,12 +395,17 @@ type SummaryInput = {
   stats: BuildStats
   parseErrorCount: number
   validationErrorCount: number
+  cardValidationErrorCount: number
+  biddingHandValidationErrorCount: number
   sanitizationViolations: SanitizationViolation[]
   criticalErrors: CriticalError[]
 }
 
 async function writeSummary(input: SummaryInput): Promise<void> {
-  const { status, archivePath, stats, parseErrorCount, validationErrorCount, sanitizationViolations, criticalErrors } = input
+  const {
+    status, archivePath, stats, parseErrorCount, validationErrorCount,
+    cardValidationErrorCount, biddingHandValidationErrorCount, sanitizationViolations, criticalErrors,
+  } = input
 
   const ignoredBiddingActorKinds = { ...stats.biddingActorKindCounts }
   const ignoredCardActorKinds = { ...stats.cardActorKindCounts }
@@ -382,6 +434,9 @@ async function writeSummary(input: SummaryInput): Promise<void> {
     },
     parseErrorCount,
     validationErrorCount,
+    cardValidationErrorCount,
+    biddingHandValidationErrorCount,
+    biddingOwnHandIncluded: true,
     sanitizationViolationCount: sanitizationViolations.length,
     outputFiles: {
       cardDecisions: 'training-output/card-decisions.jsonl',
@@ -413,6 +468,9 @@ function buildSummaryMarkdown(s: {
   ignoredActorKindCounts: { bidding: ActorKindCounts; card: ActorKindCounts }
   parseErrorCount: number
   validationErrorCount: number
+  cardValidationErrorCount: number
+  biddingHandValidationErrorCount: number
+  biddingOwnHandIncluded: boolean
   sanitizationViolationCount: number
   criticalErrors?: Array<{ kind: string; file: string; line: number; message: string }>
 }): string {
@@ -450,7 +508,10 @@ function buildSummaryMarkdown(s: {
   lines.push('## Validation')
   lines.push('')
   lines.push(`- Parse errors: ${s.parseErrorCount}`)
-  lines.push(`- Validation errors (chosenCard не в legalCards/ownHand): ${s.validationErrorCount}`)
+  lines.push(`- Validation errors общо: ${s.validationErrorCount}`)
+  lines.push(`  - Card validation errors (chosenCard не в legalCards/ownHand): ${s.cardValidationErrorCount}`)
+  lines.push(`  - Bidding hand validation errors (ownHand липсва/празно/невалидно): ${s.biddingHandValidationErrorCount}`)
+  lines.push(`- Bidding decisions включват ownHand: ${s.biddingOwnHandIncluded ? 'ДА' : 'НЕ'}`)
   lines.push(`- Sanitization violations: ${s.sanitizationViolationCount}`)
   lines.push('')
 

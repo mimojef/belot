@@ -83,6 +83,29 @@ function distributionStats(counts: Map<string, number>): {
   }
 }
 
+function numericStats(values: number[]): { count: number; min: number; max: number; median: number } {
+  if (values.length === 0) return { count: 0, min: 0, max: 0, median: 0 }
+  const sortedAsc = [...values].sort((a, b) => a - b)
+  return {
+    count: values.length,
+    min: sortedAsc[0]!,
+    max: sortedAsc[sortedAsc.length - 1]!,
+    median: median(sortedAsc),
+  }
+}
+
+// Същата ServerCard shape проверка като в buildTrainingDataset.ts
+// (id/suit/rank непразни низове) — независима повторна проверка тук.
+function isValidCompactCard(card: unknown): card is CompactCard {
+  if (typeof card !== 'object' || card === null) return false
+  const c = card as Record<string, unknown>
+  return (
+    typeof c.id === 'string' && c.id.length > 0 &&
+    typeof c.suit === 'string' && c.suit.length > 0 &&
+    typeof c.rank === 'string' && c.rank.length > 0
+  )
+}
+
 // Кратка (не-обратимо разкриваема) etикетка за playerKey/roomKey в отчета —
 // показваме само първите 10 hex символа от вече псевдонимизирания HMAC ключ,
 // колкото да се различават записите в top10 списъка. Пълният ключ никога не
@@ -173,6 +196,7 @@ type BiddingDecisionRecord = {
   sequence?: unknown
   seat?: Seat
   playerKey?: string | null
+  ownHand?: CompactCard[]
   dealerSeat?: unknown
   scoreBeforeDeal?: { team0?: unknown; team1?: unknown }
   previousBids?: CompactBidAction[]
@@ -187,7 +211,7 @@ const CARD_REQUIRED_FIELDS: Array<keyof CardDecisionRecord> = [
 ]
 
 const BIDDING_REQUIRED_FIELDS: Array<keyof BiddingDecisionRecord> = [
-  'recordingId', 'roomKey', 'dealIndex', 'sequence', 'seat', 'playerKey',
+  'recordingId', 'roomKey', 'dealIndex', 'sequence', 'seat', 'playerKey', 'ownHand',
   'dealerSeat', 'scoreBeforeDeal', 'previousBids', 'legalActions', 'chosenAction',
 ]
 
@@ -228,6 +252,10 @@ type BiddingAnalysis = {
     topRepeated: Array<{ count: number; distinctChoices: number; choiceCounts: Record<string, number> }>
   }
   ownHandFieldPresent: boolean
+  ownHandStats: ReturnType<typeof numericStats>
+  missingOwnHandCount: number
+  emptyOwnHandCount: number
+  invalidOwnHandCount: number
 }
 
 function analyzeBidding(content: string): BiddingAnalysis {
@@ -243,8 +271,12 @@ function analyzeBidding(content: string): BiddingAnalysis {
   const contextMap = new Map<string, Map<string, number>>() // contextKey -> (choiceLabel -> count)
   const parseErrors: Array<{ line: number; error: string }> = []
   const rawLines: string[] = []
+  const ownHandLengths: number[] = []
   let nullPlayerKeyCount = 0
   let ownHandFieldSeen = false
+  let missingOwnHandCount = 0
+  let emptyOwnHandCount = 0
+  let invalidOwnHandCount = 0
 
   for (const result of results) {
     rawLines.push(result.raw)
@@ -256,6 +288,16 @@ function analyzeBidding(content: string): BiddingAnalysis {
     if ('ownHand' in record) ownHandFieldSeen = true
 
     for (const field of findMissingFields(record, BIDDING_REQUIRED_FIELDS)) bump(missingFieldCounts, field)
+
+    if (record.ownHand === undefined || record.ownHand === null) {
+      missingOwnHandCount++
+    } else if (!Array.isArray(record.ownHand) || record.ownHand.length === 0) {
+      emptyOwnHandCount++
+    } else if (!record.ownHand.every(isValidCompactCard)) {
+      invalidOwnHandCount++
+    } else {
+      ownHandLengths.push(record.ownHand.length)
+    }
 
     if (record.playerKey === null) nullPlayerKeyCount++
     if (typeof record.playerKey === 'string') playerKeyCounts.set(record.playerKey, (playerKeyCounts.get(record.playerKey) ?? 0) + 1)
@@ -273,6 +315,7 @@ function analyzeBidding(content: string): BiddingAnalysis {
 
     const contextKey = JSON.stringify({
       seat: record.seat,
+      ownHand: [...(record.ownHand ?? [])].map((c) => c.id).sort(),
       dealerSeat: record.dealerSeat,
       scoreBeforeDeal: record.scoreBeforeDeal,
       previousBids: record.previousBids,
@@ -325,6 +368,10 @@ function analyzeBidding(content: string): BiddingAnalysis {
       topRepeated: topRepeatedRaw.slice(0, 10).map((g) => ({ count: g.totalCount, distinctChoices: g.distinctChoices, choiceCounts: g.choiceCounts })),
     },
     ownHandFieldPresent: ownHandFieldSeen,
+    ownHandStats: numericStats(ownHandLengths),
+    missingOwnHandCount,
+    emptyOwnHandCount,
+    invalidOwnHandCount,
   }
 }
 
@@ -622,6 +669,17 @@ async function main(): Promise<void> {
       schemaNote: bidding.ownHandFieldPresent
         ? 'ownHand присъства в bidding-decisions.jsonl'
         : 'ВНИМАНИЕ: bidding-decisions.jsonl НЕ съдържа ownHand — моделът не вижда ръката на играча при обявяване.',
+      ownHandCoverage: {
+        recordsWithValidOwnHand: bidding.ownHandStats.count,
+        missingOwnHandCount: bidding.missingOwnHandCount,
+        emptyOwnHandCount: bidding.emptyOwnHandCount,
+        invalidOwnHandCount: bidding.invalidOwnHandCount,
+        ownHandLength: {
+          min: bidding.ownHandStats.min,
+          max: bidding.ownHandStats.max,
+          median: bidding.ownHandStats.median,
+        },
+      },
       actionTypeCounts: bidding.actionTypeCounts,
       suitCounts: bidding.suitCounts,
       seatCounts: bidding.seatCounts,
@@ -714,6 +772,13 @@ function renderMarkdownReport(
     }
     biddingQuality: {
       schemaNote: string
+      ownHandCoverage: {
+        recordsWithValidOwnHand: number
+        missingOwnHandCount: number
+        emptyOwnHandCount: number
+        invalidOwnHandCount: number
+        ownHandLength: { min: number; max: number; median: number }
+      }
       actionTypeCounts: Record<string, number>
       suitCounts: Record<string, number>
       seatCounts: Record<string, number>
@@ -776,6 +841,13 @@ function renderMarkdownReport(
   lines.push('')
   lines.push(`**Schema бележка:** ${r.biddingQuality.schemaNote}`)
   lines.push('')
+  lines.push('**ownHand coverage (bidding):**')
+  lines.push(`- Records с валиден (non-empty, правилна card shape) ownHand: **${r.biddingQuality.ownHandCoverage.recordsWithValidOwnHand}**`)
+  lines.push(`- Missing ownHand (undefined/null): ${r.biddingQuality.ownHandCoverage.missingOwnHandCount}`)
+  lines.push(`- Empty ownHand (array с 0 елемента / не е array): ${r.biddingQuality.ownHandCoverage.emptyOwnHandCount}`)
+  lines.push(`- Invalid ownHand (поне 1 карта с невалидна id/suit/rank форма): ${r.biddingQuality.ownHandCoverage.invalidOwnHandCount}`)
+  lines.push(`- ownHand.length — min: ${r.biddingQuality.ownHandCoverage.ownHandLength.min}, max: ${r.biddingQuality.ownHandCoverage.ownHandLength.max}, median: ${r.biddingQuality.ownHandCoverage.ownHandLength.median}`)
+  lines.push('')
   lines.push('**Разпределение по action type:**')
   lines.push(...renderCountsTable(r.biddingQuality.actionTypeCounts))
   lines.push('')
@@ -801,7 +873,7 @@ function renderMarkdownReport(
     lines.push('**Missing/null критични полета:** няма — всички задължителни полета присъстват във всеки ред.')
   }
   lines.push('')
-  lines.push(`**Top repeated bidding contexts** (контекст = seat+dealerSeat+scoreBeforeDeal+previousBids+legalActions; ${r.biddingQuality.contextStats.totalContexts} уникални контекста, ${r.biddingQuality.contextStats.repeatedContexts} се повтарят):`)
+  lines.push(`**Top repeated bidding contexts** (контекст = seat+sorted ownHand+dealerSeat+scoreBeforeDeal+previousBids+legalActions; ${r.biddingQuality.contextStats.totalContexts} уникални контекста, ${r.biddingQuality.contextStats.repeatedContexts} се повтарят):`)
   for (const g of r.biddingQuality.contextStats.topRepeated) {
     lines.push(`  - count=${g.count}, distinct choices=${g.distinctChoices}: ${JSON.stringify(g.choiceCounts)}`)
   }
@@ -918,6 +990,10 @@ function renderMarkdownReport(
   const readinessNotes: string[] = []
   if (!bidding.ownHandFieldPresent) {
     readinessNotes.push('🔴 **Блокиращо за bidding модел:** `bidding-decisions.jsonl` няма `ownHand` — без ръката на играча не може да се обучи модел, който предсказва обявяване от visible state. Builder-ът трябва да добави `ownHand` от `visibleBeforeAction.ownHand` (вече присъства в recorder schema-та, просто не е copy-нато в export record-а).')
+  } else if (bidding.missingOwnHandCount > 0 || bidding.emptyOwnHandCount > 0 || bidding.invalidOwnHandCount > 0) {
+    readinessNotes.push(`🔴 **Блокиращо:** ${bidding.missingOwnHandCount} missing + ${bidding.emptyOwnHandCount} empty + ${bidding.invalidOwnHandCount} invalid ownHand записи в bidding dataset-а — builder-ската validation трябва да се разгледа отново.`)
+  } else {
+    readinessNotes.push(`🟢 Bidding dataset-ът вече включва \`ownHand\` за всички ${bidding.ownHandStats.count} records (min/max/median дължина: ${bidding.ownHandStats.min}/${bidding.ownHandStats.max}/${bidding.ownHandStats.median}) — вече е подходящ за supervised bidding модел, при 0 validation нарушения.`)
   }
   if (cards.chosenNotInLegalCount > 0 || cards.chosenNotInHandCount > 0) {
     readinessNotes.push(`🔴 **Блокиращо:** намерени ${cards.chosenNotInLegalCount} chosenCard извън legalCards и ${cards.chosenNotInHandCount} извън ownHand в card dataset-а — validation-а на builder-а трябва да се разгледа отново.`)
