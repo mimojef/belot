@@ -31,8 +31,13 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { scanFileForForbiddenContent, type SanitizationViolation } from './trainingDataset/sanitizeOutput.js'
-import { getServerCardPoints, type ServerScoringContract } from '../src/game/serverScoring.js'
-import type { ServerSuit } from '../src/game/serverGameTypes.js'
+import {
+  CARD_MODEL_FEATURE_NAMES,
+  computeCardModelFeatures,
+  dot,
+  type CardDecisionState,
+  type CompactCard,
+} from './trainingInference/cardModelFeatures.js'
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -65,61 +70,28 @@ const LEARNING_RATE = 0.5
 const L2_REGULARIZATION = 0.001
 const FIRST_LEGAL_NONFORCED_TEST_TARGET = 0.34 // от task brief / evaluation-summary.json
 
-// ВАЖНО: softmax-over-candidates ranking loss дава ТОЧНО нулев градиент за
-// всеки feature, чиято стойност е константна за всички кандидати в рамките
-// на едно решение (доказуемо: sum_i(probs_i − y_i) = 0, значи c·0 = 0 за
-// произволна константа c). Затова "context-only" полета (bias, isLeading,
-// matchesLedSuit, суров trickLeadershipSignal, legalCardsCountNormalized)
-// НЕ могат да получат сигнал в тази архитектура — потвърдено и емпирично
-// (тегла ≈1e-18 след 60 epochs) И върху реалните данни (matchesLedSuit е
-// 100% константен във всяко решение — legalCards вече прилага follow-suit
-// правилото, преди моделът изобщо да види картите: 0 от 14926 non-forced
-// train решения имат mixed led-suit match сред legalCards). Затова се
-// използват само per-candidate-varying features + interaction термове,
-// които реално носят градиент (suit variety се среща в 8463/14926 non-forced
-// train решения — leading/void ситуации).
-const FEATURE_NAMES = [
-  'isTrump',
-  'cardPointsNormalized',
-  'suitVoidRisk',
-  'leadershipTimesTrump',
-  'leadershipTimesPoints',
-] as const
-const FEATURE_COUNT = FEATURE_NAMES.length
+// Feature set-ът (имена + computation) е споделен с inference wrapper-а чрез
+// trainingInference/cardModelFeatures.ts — гарантира, че trainer и inference
+// никога не могат да се разминат (виж модула за обяснение защо feature set-ът
+// съдържа само per-candidate-varying стойности).
+const FEATURE_COUNT = CARD_MODEL_FEATURE_NAMES.length
 
 // ─── Shared shapes (pass-through — matches training-output/baseline/card-*.jsonl) ─
 
-type CompactCard = { id: string; suit: string; rank: string }
-type CompactPlayedCard = { sequence: number; trickIndex: number; positionInTrick: number; seat: string; card: CompactCard }
-
-type CardRecord = {
+type CardRecord = CardDecisionState & {
   recordingId: string
   roomKey: string
   dealIndex: number
   sequence: number
   trickIndex: number
   positionInTrick: number
-  seat: string
   playerKey: string | null
-  ownHand: CompactCard[]
-  legalCards: CompactCard[]
   chosenCard: CompactCard
-  contract: { bidderSeat?: string; contract?: string; trumpSuit?: string | null; doubled?: boolean; redoubled?: boolean }
   playedCardCountBeforeAction: number
-  currentTrick: CompactPlayedCard[]
-  currentWinningSeat: string | null
   currentWinningCard: CompactCard | null
   dealerSeat: string
   leaderSeat: string
   scoreBeforeDeal: unknown
-}
-
-type Team = 'A' | 'B'
-
-// Канонично правило от server/src/game/createInitialAuthoritativeGameState.ts:
-// bottom/top → team A, right/left → team B.
-function deriveTeam(seat: string): Team {
-  return seat === 'bottom' || seat === 'top' ? 'A' : 'B'
 }
 
 // ─── Strict JSONL parsing (само trailing newline позволен като "празен ред") ─
@@ -222,54 +194,8 @@ function pct(value: number): string {
   return `${(value * 100).toFixed(1)}%`
 }
 
-// ─── Features (само реално налични, безопасни полета — виж metrics.md за списък) ─
-//
-// Features, които СЪЗНАТЕЛНО НЕ се използват, защото не са безопасно/ясно
-// изводими от card-decisions schema-та:
-//   - пълна изиграна история извън текущия trick (само currentTrick е наличен,
-//     playedCardCountBeforeAction е брояч, не история на самите карти)
-//   - карти в ръцете на другите играчи / raw void tracking отвъд own hand
-//   - bidding история корелация (bidding decisions са отделен dataset)
-
-function computeCardFeatures(record: CardRecord, card: CompactCard): number[] {
-  const contract = (record.contract.contract ?? 'suit') as ServerScoringContract
-  const trumpSuit = (record.contract.trumpSuit ?? null) as ServerSuit | null
-
-  const isTrump =
-    contract === 'all-trumps' ? 1 : contract === 'no-trumps' ? 0 : trumpSuit !== null && card.suit === trumpSuit ? 1 : 0
-
-  const cardPoints = getServerCardPoints(card.suit as ServerSuit, card.rank, contract, trumpSuit)
-  const cardPointsNormalized = cardPoints / 20 // 20 = максимална точкова стойност (коз Ж)
-
-  const suitCountInHand = record.ownHand.filter((c) => c.suit === card.suit).length
-  const suitVoidRisk = record.ownHand.length > 0 ? suitCountInHand / record.ownHand.length : 0
-
-  // trickLeadershipSignal (+1 партньор печели / -1 противник печели / 0 никой
-  // все още) е ЕДНАКЪВ за всеки candidate в дадено решение → сам по себе си
-  // носи нулев градиент в softmax-over-candidates loss. Затова се използва
-  // САМО като interaction term с per-candidate-varying features (isTrump,
-  // cardPointsNormalized), за да позволи на контекста ("кой печели трика в
-  // момента") да модулира предпочитанието към коз/високи карти за КОНКРЕТНАТА
-  // карта, вместо да съществува като самостоятелен (мъртъв) feature.
-  let trickLeadershipSignal = 0
-  if (record.currentWinningSeat) {
-    const myTeam = deriveTeam(record.seat)
-    const winningTeam = deriveTeam(record.currentWinningSeat)
-    trickLeadershipSignal = myTeam === winningTeam ? 1 : -1
-  }
-  const leadershipTimesTrump = trickLeadershipSignal * isTrump
-  const leadershipTimesPoints = trickLeadershipSignal * cardPointsNormalized
-
-  return [isTrump, cardPointsNormalized, suitVoidRisk, leadershipTimesTrump, leadershipTimesPoints]
-}
-
-function dot(w: number[], x: number[]): number {
-  let sum = 0
-  for (let i = 0; i < w.length; i++) sum += w[i]! * x[i]!
-  return sum
-}
-
 // ─── Training: full-batch gradient descent на softmax cross-entropy над legalCards ─
+// (feature computation е в trainingInference/cardModelFeatures.ts — споделено с inference wrapper-а)
 
 function trainWeights(records: CardRecord[]): { weights: number[]; finalLoss: number; epochLosses: number[] } {
   const weights = new Array(FEATURE_COUNT).fill(0)
@@ -277,7 +203,7 @@ function trainWeights(records: CardRecord[]): { weights: number[]; finalLoss: nu
 
   // Пред-изчисляваме feature векторите веднъж (не се променят между epochs).
   const samples = records.map((r) => {
-    const featureVectors = r.legalCards.map((c) => computeCardFeatures(r, c))
+    const featureVectors = r.legalCards.map((c) => computeCardModelFeatures(r, c))
     const trueIndex = r.legalCards.findIndex((c) => c.id === r.chosenCard.id)
     return { featureVectors, trueIndex }
   })
@@ -327,7 +253,7 @@ function predictCard(weights: number[], record: CardRecord): PredictionResult {
   }
 
   const scored = legalCards.map((c) => {
-    const x = computeCardFeatures(record, c)
+    const x = computeCardModelFeatures(record, c)
     const score = dot(weights, x)
     return { id: c.id, score }
   })
@@ -604,7 +530,7 @@ async function main(): Promise<void> {
       'context сигнали) — в softmax-over-candidates ranking loss всеки feature, константен за всички кандидати в едно решение, ' +
       'математически носи нулев градиент (доказано и потвърдено емпирично при по-ранна итерация с bias/isLeading/matchesLedSuit/ ' +
       'legalCardsCount — виж excludedFeaturesNote).',
-    featureNames: FEATURE_NAMES,
+    featureNames: CARD_MODEL_FEATURE_NAMES,
     weights,
     hyperparameters: {
       epochs: EPOCHS,
