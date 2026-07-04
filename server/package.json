@@ -38,6 +38,7 @@
     "check:training-recorder": "tsx scripts/checkTrainingRecorder.ts",
     "validate:training-recordings": "tsx scripts/validateTrainingRecordings.ts",
     "build:training-dataset": "tsx scripts/buildTrainingDataset.ts",
+    "review:training-dataset": "tsx scripts/reviewTrainingDataset.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",
     "verify:db:prod": "node dist-scripts/scripts/checkDbBackupVerify.js",
