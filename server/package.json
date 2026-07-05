@@ -65,6 +65,7 @@
     "evaluate:card-selection-within-suit": "tsx scripts/evaluateCardSelectionWithinSuit.ts",
     "evaluate:rule-e2-signal-advisor": "tsx scripts/evaluateRuleE2SignalAdvisor.ts",
     "check:local-ai-rule-e2-observation-trace": "tsx scripts/checkLocalAiRuleE2ObservationTrace.ts",
+    "analyze:rule-e2-observation-trace": "tsx scripts/analyzeRuleE2ObservationTrace.ts",
     "check:local-ai-card-beta-runbook": "tsx scripts/checkLocalAiCardBetaRunbook.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",
