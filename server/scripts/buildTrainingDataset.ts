@@ -26,6 +26,16 @@ import { fileURLToPath } from 'node:url'
 
 import { readJsonlFilesFromTarGz } from './trainingDataset/tarGzJsonlReader.js'
 import { scanFileForForbiddenContent, type SanitizationViolation } from './trainingDataset/sanitizeOutput.js'
+import {
+  computeCardMemorySnapshot,
+  computeCandidateMemoryFeatures,
+  computeSuitExhaustedExceptOwnCards,
+  type CardMemorySnapshot,
+  type CandidateMemoryFeatures,
+  type CompactCard as MemoryCompactCard,
+  type MemoryComputationInput,
+} from './trainingDataset/cardMemoryFeatures.js'
+import { SERVER_SUITS } from '../src/game/serverCardConstants.js'
 import type {
   AnyTrainingRecord,
   TrainingActorKind,
@@ -48,7 +58,7 @@ const SUMMARY_MD_PATH = join(OUTPUT_DIR, 'summary.md')
 
 type CriticalError = {
   kind: 'parse' | 'validation'
-  area?: 'card' | 'bidding-hand'
+  area?: 'card' | 'bidding-hand' | 'memory'
   file: string
   line: number
   message: string
@@ -67,6 +77,18 @@ type BuildStats = {
   cardActorKindCounts: ActorKindCounts
   exportedBiddingDecisions: number
   exportedCardDecisions: number
+  // ─── Memory feature coverage (виж cardMemoryFeatures.ts) ──────────────────
+  memorySamplesWithPlayedCardsSoFar: number
+  memoryOwnCleanWinnersTotal: number
+  memoryOwnCleanWinnersHistogram: Record<string, number> // count-of-clean-winners -> брой decisions
+  memoryCandidateIsCleanWinnerCount: number
+  memoryShouldPreserveCleanWinnerCount: number
+  memorySuitExhaustedExceptOwnCardsCount: number
+  memoryRemainingTrumpCountHistogram: Record<string, number>
+  memoryVoidSuitsBySeatObservations: number
+  memoryPartnerVoidSuitsObservations: number
+  memoryOpponentVoidSuitsObservations: number
+  memoryKnownCannotHaveObservations: number
 }
 
 function createStats(filesRead: number): BuildStats {
@@ -81,11 +103,79 @@ function createStats(filesRead: number): BuildStats {
     cardActorKindCounts: {},
     exportedBiddingDecisions: 0,
     exportedCardDecisions: 0,
+    memorySamplesWithPlayedCardsSoFar: 0,
+    memoryOwnCleanWinnersTotal: 0,
+    memoryOwnCleanWinnersHistogram: {},
+    memoryCandidateIsCleanWinnerCount: 0,
+    memoryShouldPreserveCleanWinnerCount: 0,
+    memorySuitExhaustedExceptOwnCardsCount: 0,
+    memoryRemainingTrumpCountHistogram: {},
+    memoryVoidSuitsBySeatObservations: 0,
+    memoryPartnerVoidSuitsObservations: 0,
+    memoryOpponentVoidSuitsObservations: 0,
+    memoryKnownCannotHaveObservations: 0,
   }
 }
 
 function bumpActorKind(counts: ActorKindCounts, kind: TrainingActorKind): void {
   counts[kind] = (counts[kind] ?? 0) + 1
+}
+
+// ─── Memory snapshot validation (защита срещу измислени/невъзможни данни) ────
+// Виж task изискванията: snapshot трябва да е ПРЕДИ chosenCard, без дубликати/
+// overlap, без невъзможни deck брой, и suitExhaustedExceptOwnCards/
+// candidateIsCleanWinner трябва да са arithmetically/logically консистентни.
+function validateMemorySnapshot(
+  input: MemoryComputationInput,
+  snapshot: CardMemorySnapshot,
+  suitExhaustedExceptOwnCards: Record<string, boolean>,
+  chosenCardMemoryFeatures: CandidateMemoryFeatures,
+  chosenCard: MemoryCompactCard,
+): string[] {
+  const errors: string[] = []
+
+  const playedIds = snapshot.playedCardsSoFar.map((c) => c.id)
+  const playedIdSet = new Set(playedIds)
+  if (playedIdSet.size !== playedIds.length) {
+    errors.push('memory: playedCardsSoFar съдържа дублирани карти')
+  }
+
+  const handIds = new Set(input.ownHand.map((c) => c.id))
+  for (const id of playedIdSet) {
+    if (handIds.has(id)) {
+      errors.push(`memory: карта "${id}" е едновременно в ownHand и playedCardsSoFar`)
+    }
+  }
+
+  if (playedIdSet.has(chosenCard.id)) {
+    errors.push(`memory: chosenCard "${chosenCard.id}" вече присъства в playedCardsSoFar`)
+  }
+
+  if (snapshot.remainingCardsCount < 0) {
+    errors.push(`memory: невъзможен remainingCardsCount=${snapshot.remainingCardsCount} (отрицателен)`)
+  }
+  if (input.ownHand.length + snapshot.playedCardsSoFar.length > 32) {
+    errors.push(
+      `memory: невъзможен deck count — ownHand(${input.ownHand.length}) + playedCardsSoFar(${snapshot.playedCardsSoFar.length}) > 32`,
+    )
+  }
+
+  for (const [suit, exhausted] of Object.entries(suitExhaustedExceptOwnCards)) {
+    if (!exhausted) continue
+    const played = snapshot.playedCardsBySuit[suit] ?? 0
+    const own = input.ownHand.filter((c) => c.suit === suit).length
+    if (played + own !== 8) {
+      errors.push(`memory: suitExhaustedExceptOwnCards["${suit}"]=true, но played(${played})+ownHand(${own}) !== 8`)
+    }
+  }
+
+  if (chosenCardMemoryFeatures.candidateIsCleanWinner && chosenCardMemoryFeatures.higherRemainingCardsCount !== 0) {
+    errors.push(
+      `memory: candidateIsCleanWinner=true за chosenCard, но higherRemainingCardsCount=${chosenCardMemoryFeatures.higherRemainingCardsCount} (очаквано 0)`,
+    )
+  }
+
+  return errors
 }
 
 // Валидира, че всяка карта в ownHand има очакваната ServerCard форма
@@ -123,6 +213,12 @@ type CardDecisionRecord = {
   dealerSeat: unknown
   leaderSeat: unknown
   scoreBeforeDeal: unknown
+  // ─── Belot card memory / belief-tracker enrichment (виж cardMemoryFeatures.ts) ─
+  // Изцяло derived от deal.tricks (recorder-ски, вече записани на deal-ниво) +
+  // action.visibleBeforeAction.currentTrick — БЕЗ recorder writer промяна.
+  memory: CardMemorySnapshot & { suitExhaustedExceptOwnCards: Record<string, boolean> }
+  chosenCardMemoryFeatures: CandidateMemoryFeatures
+  legalCardsMemoryFeatures: CandidateMemoryFeatures[]
 }
 
 type BiddingDecisionRecord = {
@@ -288,6 +384,59 @@ async function main(): Promise<void> {
           continue
         }
 
+        // ─── Belot card memory snapshot (виж cardMemoryFeatures.ts за пълния алгоритъм) ─
+        const memoryInput: MemoryComputationInput = {
+          seat: action.seat,
+          ownHand: action.visibleBeforeAction.ownHand,
+          legalCards: action.visibleBeforeAction.legalCards,
+          contract: action.visibleBeforeAction.contract.contract,
+          trumpSuit: action.visibleBeforeAction.contract.trumpSuit,
+          completedTricksSoFar: (deal.tricks ?? [])
+            .filter((t) => t.trickIndex < action.trickIndex)
+            .map((t) => ({ plays: t.plays.map((p) => ({ seat: p.seat, card: p.card })) })),
+          currentTrickPlaysSoFar: action.visibleBeforeAction.currentTrick.map((p) => ({ seat: p.seat, card: p.card })),
+        }
+        const memorySnapshot = computeCardMemorySnapshot(memoryInput)
+        const ownHandBySuit: Record<string, number> = {}
+        for (const suit of SERVER_SUITS) ownHandBySuit[suit] = 0
+        for (const c of memoryInput.ownHand) ownHandBySuit[c.suit] = (ownHandBySuit[c.suit] ?? 0) + 1
+        const suitExhaustedExceptOwnCards: Record<string, boolean> = {}
+        for (const suit of SERVER_SUITS) suitExhaustedExceptOwnCards[suit] = computeSuitExhaustedExceptOwnCards(memorySnapshot, ownHandBySuit, suit)
+
+        const chosenCardMemoryFeatures = computeCandidateMemoryFeatures(memoryInput, memorySnapshot, action.chosenCard)
+        const legalCardsMemoryFeatures = memoryInput.legalCards.map((c) => computeCandidateMemoryFeatures(memoryInput, memorySnapshot, c))
+
+        const memoryValidationErrors = validateMemorySnapshot(
+          memoryInput, memorySnapshot, suitExhaustedExceptOwnCards, chosenCardMemoryFeatures, action.chosenCard,
+        )
+        if (memoryValidationErrors.length > 0) {
+          for (const message of memoryValidationErrors) {
+            criticalErrors.push({
+              kind: 'validation',
+              area: 'memory',
+              file: file.archivePath,
+              line: i + 1,
+              message: `${message} (recordingId=${deal.recordingId}, sequence=${action.sequence})`,
+            })
+          }
+          continue
+        }
+
+        // ─── Memory coverage stats ─────────────────────────────────────────────
+        if (memorySnapshot.playedCardsSoFar.length > 0 || memorySnapshot.trickNumber > 0) stats.memorySamplesWithPlayedCardsSoFar++
+        stats.memoryOwnCleanWinnersTotal += memorySnapshot.ownCleanWinnersCount
+        const cleanWinnerBucket = String(memorySnapshot.ownCleanWinnersCount)
+        stats.memoryOwnCleanWinnersHistogram[cleanWinnerBucket] = (stats.memoryOwnCleanWinnersHistogram[cleanWinnerBucket] ?? 0) + 1
+        if (chosenCardMemoryFeatures.candidateIsCleanWinner) stats.memoryCandidateIsCleanWinnerCount++
+        if (chosenCardMemoryFeatures.shouldPreserveCleanWinner) stats.memoryShouldPreserveCleanWinnerCount++
+        if (Object.values(suitExhaustedExceptOwnCards).some(Boolean)) stats.memorySuitExhaustedExceptOwnCardsCount++
+        const trumpBucket = String(memorySnapshot.remainingTrumpCount)
+        stats.memoryRemainingTrumpCountHistogram[trumpBucket] = (stats.memoryRemainingTrumpCountHistogram[trumpBucket] ?? 0) + 1
+        if (Object.values(memorySnapshot.voidSuitsBySeat).some((arr) => arr.length > 0)) stats.memoryVoidSuitsBySeatObservations++
+        if (memorySnapshot.partnerVoidSuits.length > 0) stats.memoryPartnerVoidSuitsObservations++
+        if (Object.values(memorySnapshot.opponentVoidSuits).some((arr) => arr.length > 0)) stats.memoryOpponentVoidSuitsObservations++
+        if (Object.keys(memorySnapshot.knownCannotHaveCardsBySeat).length > 0) stats.memoryKnownCannotHaveObservations++
+
         const record: CardDecisionRecord = {
           recordingId: deal.recordingId,
           roomKey: deal.roomKey,
@@ -308,6 +457,9 @@ async function main(): Promise<void> {
           dealerSeat: action.visibleBeforeAction.dealerSeat,
           leaderSeat: action.visibleBeforeAction.leaderSeat,
           scoreBeforeDeal: action.visibleBeforeAction.scoreBeforeDeal,
+          memory: { ...memorySnapshot, suitExhaustedExceptOwnCards },
+          chosenCardMemoryFeatures,
+          legalCardsMemoryFeatures,
         }
         cardDecisionLines.push(JSON.stringify(record))
         stats.exportedCardDecisions++
@@ -319,6 +471,7 @@ async function main(): Promise<void> {
   const validationErrorCount = criticalErrors.filter((e) => e.kind === 'validation').length
   const cardValidationErrorCount = criticalErrors.filter((e) => e.kind === 'validation' && e.area === 'card').length
   const biddingHandValidationErrorCount = criticalErrors.filter((e) => e.kind === 'validation' && e.area === 'bidding-hand').length
+  const memoryValidationErrorCount = criticalErrors.filter((e) => e.kind === 'validation' && e.area === 'memory').length
 
   if (criticalErrors.length > 0) {
     console.error(`\n✗ Открити ${criticalErrors.length} критични грешки — export СПРЯН, dataset файлове НЕ СА записани.\n`)
@@ -334,6 +487,7 @@ async function main(): Promise<void> {
       validationErrorCount,
       cardValidationErrorCount,
       biddingHandValidationErrorCount,
+      memoryValidationErrorCount,
       sanitizationViolations: [],
       criticalErrors,
     })
@@ -360,6 +514,7 @@ async function main(): Promise<void> {
     validationErrorCount,
     cardValidationErrorCount,
     biddingHandValidationErrorCount,
+    memoryValidationErrorCount,
     sanitizationViolations: datasetViolations,
     criticalErrors: [],
   })
@@ -397,6 +552,7 @@ type SummaryInput = {
   validationErrorCount: number
   cardValidationErrorCount: number
   biddingHandValidationErrorCount: number
+  memoryValidationErrorCount: number
   sanitizationViolations: SanitizationViolation[]
   criticalErrors: CriticalError[]
 }
@@ -404,13 +560,31 @@ type SummaryInput = {
 async function writeSummary(input: SummaryInput): Promise<void> {
   const {
     status, archivePath, stats, parseErrorCount, validationErrorCount,
-    cardValidationErrorCount, biddingHandValidationErrorCount, sanitizationViolations, criticalErrors,
+    cardValidationErrorCount, biddingHandValidationErrorCount, memoryValidationErrorCount, sanitizationViolations, criticalErrors,
   } = input
 
   const ignoredBiddingActorKinds = { ...stats.biddingActorKindCounts }
   const ignoredCardActorKinds = { ...stats.cardActorKindCounts }
   delete ignoredBiddingActorKinds.human_manual
   delete ignoredCardActorKinds.human_manual
+
+  const exportedCard = stats.exportedCardDecisions
+  const memoryCoverage = {
+    samplesWithPlayedCardsSoFarPct: exportedCard > 0 ? stats.memorySamplesWithPlayedCardsSoFar / exportedCard : 0,
+    ownCleanWinnersAvg: exportedCard > 0 ? stats.memoryOwnCleanWinnersTotal / exportedCard : 0,
+    ownCleanWinnersHistogram: stats.memoryOwnCleanWinnersHistogram,
+    candidateIsCleanWinnerCount: stats.memoryCandidateIsCleanWinnerCount,
+    candidateIsCleanWinnerPct: exportedCard > 0 ? stats.memoryCandidateIsCleanWinnerCount / exportedCard : 0,
+    shouldPreserveCleanWinnerCount: stats.memoryShouldPreserveCleanWinnerCount,
+    shouldPreserveCleanWinnerPct: exportedCard > 0 ? stats.memoryShouldPreserveCleanWinnerCount / exportedCard : 0,
+    suitExhaustedExceptOwnCardsCount: stats.memorySuitExhaustedExceptOwnCardsCount,
+    suitExhaustedExceptOwnCardsPct: exportedCard > 0 ? stats.memorySuitExhaustedExceptOwnCardsCount / exportedCard : 0,
+    remainingTrumpCountHistogram: stats.memoryRemainingTrumpCountHistogram,
+    voidSuitsBySeatObservationsPct: exportedCard > 0 ? stats.memoryVoidSuitsBySeatObservations / exportedCard : 0,
+    partnerVoidSuitsObservationsPct: exportedCard > 0 ? stats.memoryPartnerVoidSuitsObservations / exportedCard : 0,
+    opponentVoidSuitsObservationsPct: exportedCard > 0 ? stats.memoryOpponentVoidSuitsObservations / exportedCard : 0,
+    knownCannotHaveObservationsPct: exportedCard > 0 ? stats.memoryKnownCannotHaveObservations / exportedCard : 0,
+  }
 
   const summaryJson = {
     generatedAt: new Date().toISOString(),
@@ -436,8 +610,10 @@ async function writeSummary(input: SummaryInput): Promise<void> {
     validationErrorCount,
     cardValidationErrorCount,
     biddingHandValidationErrorCount,
+    memoryValidationErrorCount,
     biddingOwnHandIncluded: true,
     sanitizationViolationCount: sanitizationViolations.length,
+    memoryFeatureCoverage: memoryCoverage,
     outputFiles: {
       cardDecisions: 'training-output/card-decisions.jsonl',
       biddingDecisions: 'training-output/bidding-decisions.jsonl',
@@ -470,8 +646,25 @@ function buildSummaryMarkdown(s: {
   validationErrorCount: number
   cardValidationErrorCount: number
   biddingHandValidationErrorCount: number
+  memoryValidationErrorCount: number
   biddingOwnHandIncluded: boolean
   sanitizationViolationCount: number
+  memoryFeatureCoverage: {
+    samplesWithPlayedCardsSoFarPct: number
+    ownCleanWinnersAvg: number
+    ownCleanWinnersHistogram: Record<string, number>
+    candidateIsCleanWinnerCount: number
+    candidateIsCleanWinnerPct: number
+    shouldPreserveCleanWinnerCount: number
+    shouldPreserveCleanWinnerPct: number
+    suitExhaustedExceptOwnCardsCount: number
+    suitExhaustedExceptOwnCardsPct: number
+    remainingTrumpCountHistogram: Record<string, number>
+    voidSuitsBySeatObservationsPct: number
+    partnerVoidSuitsObservationsPct: number
+    opponentVoidSuitsObservationsPct: number
+    knownCannotHaveObservationsPct: number
+  }
   criticalErrors?: Array<{ kind: string; file: string; line: number; message: string }>
 }): string {
   const lines: string[] = []
@@ -511,8 +704,37 @@ function buildSummaryMarkdown(s: {
   lines.push(`- Validation errors общо: ${s.validationErrorCount}`)
   lines.push(`  - Card validation errors (chosenCard не в legalCards/ownHand): ${s.cardValidationErrorCount}`)
   lines.push(`  - Bidding hand validation errors (ownHand липсва/празно/невалидно): ${s.biddingHandValidationErrorCount}`)
+  lines.push(`  - Memory validation errors (viж cardMemoryFeatures.ts — дубликати/overlap/impossible deck count/arithmetic несъответствие): ${s.memoryValidationErrorCount}`)
   lines.push(`- Bidding decisions включват ownHand: ${s.biddingOwnHandIncluded ? 'ДА' : 'НЕ'}`)
   lines.push(`- Sanitization violations: ${s.sanitizationViolationCount}`)
+  lines.push('')
+
+  lines.push('## Memory feature coverage (Belot card memory / belief-tracker enrichment)')
+  lines.push('')
+  lines.push(
+    'Всяко card decision вече включва `memory` snapshot (played/remaining cards, void suits, clean winners, ' +
+    'trick context) + `chosenCardMemoryFeatures`/`legalCardsMemoryFeatures` (per-candidate higherRemainingCardsCount/ ' +
+    'candidateIsCleanWinner/shouldPreserveCleanWinner) — виж server/scripts/trainingDataset/cardMemoryFeatures.ts.',
+  )
+  lines.push('')
+  const mc = s.memoryFeatureCoverage
+  lines.push(`- Samples с непразен playedCardsSoFar (trickNumber>0 или вече изиграни карти в текущия trick): ${(mc.samplesWithPlayedCardsSoFarPct * 100).toFixed(1)}%`)
+  lines.push(`- Среден брой ownCleanWinners на decision: ${mc.ownCleanWinnersAvg.toFixed(2)}`)
+  lines.push('- Хистограма ownCleanWinnersCount (брой decisions по count):')
+  for (const [count, n] of Object.entries(mc.ownCleanWinnersHistogram).sort((a, b) => Number(a[0]) - Number(b[0]))) {
+    lines.push(`  - ${count}: ${n}`)
+  }
+  lines.push(`- candidateIsCleanWinner=true (за chosenCard): ${mc.candidateIsCleanWinnerCount} (${(mc.candidateIsCleanWinnerPct * 100).toFixed(1)}%)`)
+  lines.push(`- shouldPreserveCleanWinner=true (за chosenCard): ${mc.shouldPreserveCleanWinnerCount} (${(mc.shouldPreserveCleanWinnerPct * 100).toFixed(1)}%)`)
+  lines.push(`- suitExhaustedExceptOwnCards=true за поне 1 боя: ${mc.suitExhaustedExceptOwnCardsCount} (${(mc.suitExhaustedExceptOwnCardsPct * 100).toFixed(1)}%)`)
+  lines.push('- Хистограма remainingTrumpCount:')
+  for (const [count, n] of Object.entries(mc.remainingTrumpCountHistogram).sort((a, b) => Number(a[0]) - Number(b[0]))) {
+    lines.push(`  - ${count}: ${n}`)
+  }
+  lines.push(`- Decisions с поне 1 known void suit (произволен seat): ${(mc.voidSuitsBySeatObservationsPct * 100).toFixed(1)}%`)
+  lines.push(`- Decisions с известен partner void suit: ${(mc.partnerVoidSuitsObservationsPct * 100).toFixed(1)}%`)
+  lines.push(`- Decisions с известен opponent void suit: ${(mc.opponentVoidSuitsObservationsPct * 100).toFixed(1)}%`)
+  lines.push(`- Decisions с поне 1 knownCannotHaveCardsBySeat (overtrump-failure дедукция): ${(mc.knownCannotHaveObservationsPct * 100).toFixed(1)}%`)
   lines.push('')
 
   if (s.criticalErrors && s.criticalErrors.length > 0) {
@@ -546,6 +768,10 @@ function printFinalReport(stats: BuildStats): void {
   console.log(`  Incomplete deals:            ${stats.incompleteDeals}`)
   console.log(`  Exported bidding decisions:  ${stats.exportedBiddingDecisions}`)
   console.log(`  Exported card decisions:     ${stats.exportedCardDecisions}`)
+  console.log('─────────────────────────────────────────')
+  console.log(`  Memory: ownCleanWinners avg=${stats.exportedCardDecisions > 0 ? (stats.memoryOwnCleanWinnersTotal / stats.exportedCardDecisions).toFixed(2) : '0.00'}, ` +
+    `candidateIsCleanWinner=${stats.memoryCandidateIsCleanWinnerCount}, shouldPreserve=${stats.memoryShouldPreserveCleanWinnerCount}, ` +
+    `suitExhausted=${stats.memorySuitExhaustedExceptOwnCardsCount}, knownCannotHave=${stats.memoryKnownCannotHaveObservations}`)
   console.log('─────────────────────────────────────────')
 }
 
