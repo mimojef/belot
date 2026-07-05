@@ -1,8 +1,8 @@
 /**
  * cardModelInference.ts
  *
- * Read-only, fail-closed inference wrapper за card-model-v1 И card-model-v2.
- * Зарежда model.json (произведен от server/scripts/trainCardModel.ts,
+ * Read-only, fail-closed inference wrapper за card-model-v1, card-model-v2 И
+ * card-model-v3. Зарежда model.json (произведен от server/scripts/trainCardModel.ts,
  * local-only артефакт, никога не се commit-ва) и предлага чиста функция за
  * ranking на legalCards в даден decision context. Кой feature set се
  * използва е ИЗЦЯЛО определено от artifact-а самия (raw.modelVersion) — не
@@ -52,7 +52,7 @@ export class CardModelLoadError extends Error {
  * хвърля CardModelLoadError за всякаква липсваща/невалидна/несъвместима
  * стойност, вместо тихо да продължи с непълен/грешен модел. featureNames
  * задължително трябва да съвпада ТОЧНО (ред+дължина) с очакваните имена за
- * декларирания modelVersion — card-model-v1 и card-model-v2 имат различни
+ * декларирания modelVersion — card-model-v1/v2/v3 имат различни
  * feature sets (виж cardModelFeatures.ts).
  */
 export function validateAndBuildCardModel(parsed: unknown): CardModel {
@@ -66,7 +66,7 @@ export function validateAndBuildCardModel(parsed: unknown): CardModel {
   }
   if (!isSupportedCardModelVersion(raw.modelVersion)) {
     throw new CardModelLoadError(
-      `model.json: неочакван modelVersion "${raw.modelVersion}" (поддържани: card-model-v1, card-model-v2) — ` +
+      `model.json: неочакван modelVersion "${raw.modelVersion}" (поддържани: card-model-v1, card-model-v2, card-model-v3) — ` +
         'inference wrapper-ът е писан точно за тези model schema-и.',
     )
   }

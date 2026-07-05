@@ -18,7 +18,8 @@
  * Usage:
  *   npm run train:card-model        (от server/) — тренира card-model-v1 (default, непроменено поведение)
  *   npm run train:card-model-v2     (от server/) — тренира card-model-v2 (richer features, виж cardModelFeatures.ts)
- *   tsx scripts/trainCardModel.ts card-model-v2   — директен CLI извикване с explicit версия
+ *   npm run train:card-model-v3     (от server/) — тренира card-model-v3 (+ memory-aware features)
+ *   tsx scripts/trainCardModel.ts card-model-v3   — директен CLI извикване с explicit версия
  *
  * Exit codes:
  *   0 — модел трениран + оценен успешно (дори ако не бие baseline-а —
@@ -569,6 +570,25 @@ async function main(): Promise<void> {
     'enhancement (join върху recorder-ския TrainingDealRecord.tricks) или recorder writer промяна, извън обхвата на тази задача ' +
     '(виж weakness-analysis.md Priority 3/4).'
 
+  const DESCRIPTION_V3 =
+    DESCRIPTION_V2 +
+    ' card-model-v3 добавя 14 нови memory-aware features (24 общо) — отговор на "AI-ят трябва да помни цялото раздаване" ' +
+    'искането (2026-07-05). Data source: card-decisions.jsonl вече е enrich-нат от "Add Belot card memory dataset features" ' +
+    '(commit 1a033e1) с played/remaining cards, void suits, known-cannot-have дедукции, clean-winner detection. Новите ' +
+    'features: candidateIsCleanWinner + 3 interaction терма с isLead/partnerCurrentlyWinning/opponentCurrentlyWinning, ' +
+    'higherRemainingCardsCountNormalized, shouldPreserveCleanWinner, suitExhaustedExceptOwnCardsForCandidate, ' +
+    'candidateSuitRemainingCountNormalized, remainingTrumpCountTimesIsTrump, canWinTrickTimesPartnerWinning/OpponentWinning, ' +
+    'pointsInTrickTimesCardPoints, candidateSuitVoidForPartner/BothOpponents. Всички per-candidate-varying или interaction ' +
+    'терми — виж cardModelFeatures.ts за пълната методологична бележка и MEMORY_FEATURE_STATUS_V3 за какво е използвано/ ' +
+    'пропуснато.'
+
+  const EXCLUDED_FEATURES_NOTE_V3 =
+    EXCLUDED_FEATURES_NOTE_V2 +
+    ' За v3: ownCleanWinnersCount, trickNumber, cardsPlayedInDealCount, remainingCardsCount СЪЗНАТЕЛНО НЕ са добавени като ' +
+    'голи features (decision-level константи без ясен interaction partner в тази итерация — виж MEMORY_FEATURE_STATUS_V3). ' +
+    'knownCannotHaveCardsBySeat е наличен в dataset-а, но НЕ е използван като feature (изисква по-фино per-seat/per-rank ' +
+    'engineering, отложено за v4). Taken-tricks-per-team/running score/declarations остават извън dataset-а изобщо.'
+
   // ─── "Clean hand" / played-cards / remaining-cards feature audit ───────────
   // Отговор на допълнително user уточнение: AI-ят трябва в бъдеще да помни
   // цялото раздаване (кои карти са излезли, кои остават, кои собствени карти
@@ -581,7 +601,7 @@ async function main(): Promise<void> {
   // builder join). Затова "clean winner" features (изискват да знаеш кои карти
   // от дадена боя вече са изиграни навсякъде по масата) НЕ могат да се изчислят
   // safely сега — не са измислени/апроксимирани, а изрично отбелязани blocking.
-  const FUTURE_CLEAN_HAND_FEATURE_AUDIT = [
+  const FUTURE_CLEAN_HAND_FEATURE_AUDIT_V2 = [
     {
       feature: 'playedCardsSoFar',
       status: 'blocked_needs_dataset_join',
@@ -655,11 +675,35 @@ async function main(): Promise<void> {
     },
   ] as const
 
+  // ─── v3: memory feature status — "Add Belot card memory dataset features" ──
+  // (commit 1a033e1) direct answered повечето от v2-ерата blocking находки
+  // по-горе чрез dataset builder enhancement (cardMemoryFeatures.ts, join
+  // върху TrainingDealRecord.tricks). Този масив отразява РЕАЛНИЯ статус СЕГА,
+  // за разлика от FUTURE_CLEAN_HAND_FEATURE_AUDIT_V2 по-горе (запазен непроменен
+  // като исторически точен snapshot от v2 ерата).
+  const MEMORY_FEATURE_STATUS_V3 = [
+    { feature: 'playedCardsSoFar / playedCardsBySuit', status: 'implemented_in_v3', note: 'В dataset-а (memory.playedCardsSoFar) от "Add Belot card memory dataset features" — НЕ директно feature (само 32-card история), но подхранва remainingCardsBySuit/higherRemainingCardsCount по-долу.' },
+    { feature: 'remainingCardsBySuit / candidateSuitRemainingCountNormalized', status: 'implemented_in_v3', note: 'Per-candidate feature (варира по candidate.suit) — memory.remainingCardsBySuit[card.suit]/8.' },
+    { feature: 'higherRemainingCardsCount / higherRemainingCardsCountNormalized', status: 'implemented_in_v3', note: 'Per-candidate feature — candidateMemory.higherRemainingCardsCount/7.' },
+    { feature: 'candidateIsCleanWinner', status: 'implemented_in_v3', note: 'Per-candidate boolean → 0/1 feature, плюс 3 interaction терма (cleanWinnerTimesIsLead/OpponentWinning/PartnerWinning).' },
+    { feature: 'ownCleanWinnersCount', status: 'not_used_as_bare_feature', note: 'Decision-level константа (еднаква за всички candidates) — СЪЗНАТЕЛНО не добавена гола (би учила ≈0 тегло); marginal overlap с shouldPreserveCleanWinner, виж weakness report-а за препоръка за v4 interaction.' },
+    { feature: 'shouldPreserveCleanWinner', status: 'implemented_in_v3', note: 'Per-candidate heuristic boolean → 0/1 feature директно.' },
+    { feature: 'suitExhaustedExceptOwnCards', status: 'implemented_in_v3', note: 'Per-candidate feature (варира по candidate.suit) — suitExhaustedExceptOwnCardsForCandidate.' },
+    { feature: 'remainingTrumpCount', status: 'implemented_in_v3', note: 'Interaction term (remainingTrumpCountTimesIsTrump) — decision-level стойност × per-candidate isTrump.' },
+    { feature: 'voidSuitsBySeat / partnerVoidSuits / opponentVoidSuits', status: 'implemented_in_v3', note: 'candidateSuitVoidForPartner/BothOpponents — per-candidate (варира по candidate.suit членство в void списъците).' },
+    { feature: 'knownCannotHaveCardsBySeat (overtrump-failure дедукция)', status: 'not_used_in_v3', note: 'Наличен в dataset-а, но НЕ използван като model feature в v3 — сложна per-seat/per-card структура, изисква по-фино feature engineering (напр. "candidate rank е сред known-cannot-have за desен опонент"). Отбелязано за v4.' },
+    { feature: 'partnerCurrentlyWinning / opponentCurrentlyWinning', status: 'implemented_in_v3', note: 'Interaction терми (canWinTrickTimesPartnerWinning/OpponentWinning) — по-фино от съществуващия leadershipTimesTrump/Points, защото използва РЕАЛНОТО canWinTrick, не само isTrump.' },
+    { feature: 'pointsInTrick (unconditional, не само при canWinTrick)', status: 'implemented_in_v3', note: 'pointsInTrickTimesCardPoints — ново, различно от v2-ткия winningPointsInteraction (което е gated от canWinTrick); тук е безусловно "точки заложени × точки на тази карта".' },
+    { feature: 'trickNumber / cardsPlayedInDealCount / remainingCardsCount', status: 'not_used_as_bare_feature', note: 'Decision-level константи без ясен per-candidate interaction partner в тази итерация — не добавени, за да не се риск повтори bias/matchesLedSuit грешката.' },
+    { feature: 'taken tricks so far по отбор / running score в ръката', status: 'still_missing_from_dataset', note: 'Все още НЕ explicit export-нати полета в card-decisions.jsonl (виж feature gap audit в analyzeAiCardModelWeaknesses.ts) — derivable от същия deal.tricks join, следваща dataset стъпка.' },
+    { feature: 'declarations context', status: 'still_missing_from_dataset', note: 'Единствената истинска Priority 4 находка — изисква recorder writer промяна, непроменено от v2 анализа.' },
+  ] as const
+
   const modelJson = {
     modelVersion: MODEL_VERSION,
     generatedAt: new Date().toISOString(),
     approach: 'linear-softmax-ranker',
-    description: MODEL_VERSION === 'card-model-v2' ? DESCRIPTION_V2 : DESCRIPTION_V1,
+    description: MODEL_VERSION === 'card-model-v3' ? DESCRIPTION_V3 : MODEL_VERSION === 'card-model-v2' ? DESCRIPTION_V2 : DESCRIPTION_V1,
     featureNames: FEATURE_NAMES,
     weights,
     hyperparameters: {
@@ -675,9 +719,10 @@ async function main(): Promise<void> {
     fallbackStrategy: 'Ако ranking-ът не даде валидна карта (NaN/Infinite score или празен legalCards) → legalCards[0] (first-legal baseline).',
     trainingDataHash: `sha256:${trainDataHash}`,
     trainingDataFile: 'training-output/baseline/card-train.jsonl',
-    excludedFeaturesNote: MODEL_VERSION === 'card-model-v2' ? EXCLUDED_FEATURES_NOTE_V2 : EXCLUDED_FEATURES_NOTE_V1,
+    excludedFeaturesNote: MODEL_VERSION === 'card-model-v3' ? EXCLUDED_FEATURES_NOTE_V3 : MODEL_VERSION === 'card-model-v2' ? EXCLUDED_FEATURES_NOTE_V2 : EXCLUDED_FEATURES_NOTE_V1,
     finalTrainLoss: finalLoss,
-    ...(MODEL_VERSION === 'card-model-v2' ? { futureCleanHandFeatureAudit: FUTURE_CLEAN_HAND_FEATURE_AUDIT } : {}),
+    ...(MODEL_VERSION === 'card-model-v2' ? { futureCleanHandFeatureAudit: FUTURE_CLEAN_HAND_FEATURE_AUDIT_V2 } : {}),
+    ...(MODEL_VERSION === 'card-model-v3' ? { memoryFeatureStatus: MEMORY_FEATURE_STATUS_V3 } : {}),
   }
 
   await rm(MODEL_DIR, { recursive: true, force: true })
@@ -706,7 +751,8 @@ async function main(): Promise<void> {
     baselineComparison,
     beatsFirstLegalNonForcedTestBaseline: beatsTargetBaseline,
     firstLegalNonForcedTestBaselineUsed: targetBaseline,
-    ...(MODEL_VERSION === 'card-model-v2' ? { futureCleanHandFeatureAudit: FUTURE_CLEAN_HAND_FEATURE_AUDIT } : {}),
+    ...(MODEL_VERSION === 'card-model-v2' ? { futureCleanHandFeatureAudit: FUTURE_CLEAN_HAND_FEATURE_AUDIT_V2 } : {}),
+    ...(MODEL_VERSION === 'card-model-v3' ? { memoryFeatureStatus: MEMORY_FEATURE_STATUS_V3 } : {}),
   }
 
   await writeFile(METRICS_JSON_PATH, JSON.stringify(metricsJson, null, 2) + '\n', 'utf8')
@@ -773,7 +819,8 @@ function renderMarkdown(m: any): string {
   lines.push('| `suitVoidRisk` | дял карти от същия suit в own hand спрямо цялата ръка |')
   lines.push('| `leadershipTimesTrump` | (+1 партньор печели / -1 противник / 0 никой) × isTrump — контекстът модулира предпочитанието към коз |')
   lines.push('| `leadershipTimesPoints` | (+1 партньор печели / -1 противник / 0 никой) × cardPointsNormalized — контекстът модулира предпочитанието към високи карти |')
-  if (m.modelVersion === 'card-model-v2') {
+  const hasV2Features = m.modelVersion === 'card-model-v2' || m.modelVersion === 'card-model-v3'
+  if (hasV2Features) {
     lines.push('| `canWinTrick` | дали candidate картата би спечелила trick-а точно сега (reuse на getServerTrickWinner) — per-candidate, варира |')
     lines.push('| `winningPointsInteraction` | canWinTrick × pointsInTrickNormalized (точки вече заложени в trick-а) |')
     lines.push('| `leadCandidateStrengthWhenLeading` | isLead × (rank power / 7, reuse на getServerCardRankPower) — само ненулево при lead |')
@@ -781,16 +828,40 @@ function renderMarkdown(m: any): string {
     lines.push('| `isOurTeamContractorTimesTrump` | isOurTeamContractor × isTrump — собственият отбор на обявилия срещу защитниците |')
     lines.push('| `isOurTeamContractorTimesPoints` | isOurTeamContractor × cardPointsNormalized |')
   }
+  if (m.modelVersion === 'card-model-v3') {
+    lines.push('| `candidateIsCleanWinner` | candidate картата е guaranteed да вземе бъдещ trick (0 по-силни оставащи карти в релевантния контекст) |')
+    lines.push('| `higherRemainingCardsCountNormalized` | брой все още невидени по-силни карти в релевантната боя/коз, /7 |')
+    lines.push('| `shouldPreserveCleanWinner` | conservative heuristic: clean winner + trick not urgent + има low-risk алтернатива |')
+    lines.push('| `suitExhaustedExceptOwnCardsForCandidate` | боята на candidate-а е напълно изчерпана другаде по масата |')
+    lines.push('| `candidateSuitRemainingCountNormalized` | оставащи невидени карти в боята на candidate-а, /8 |')
+    lines.push('| `remainingTrumpCountTimesIsTrump` | (оставащи козове/8) × isTrump — "пести/похарчи коз" сигнал |')
+    lines.push('| `canWinTrickTimesPartnerWinning` | canWinTrick × партньорът вече печели trick-а |')
+    lines.push('| `canWinTrickTimesOpponentWinning` | canWinTrick × противникът вече печели trick-а |')
+    lines.push('| `pointsInTrickTimesCardPoints` | точки вече заложени × точки на тази карта (безусловно, за разлика от winningPointsInteraction) |')
+    lines.push('| `cleanWinnerTimesIsLead` | candidateIsCleanWinner × isLead |')
+    lines.push('| `cleanWinnerTimesOpponentWinning` | candidateIsCleanWinner × противникът печели |')
+    lines.push('| `cleanWinnerTimesPartnerWinning` | candidateIsCleanWinner × партньорът печели |')
+    lines.push('| `candidateSuitVoidForPartner` | партньорът е известно void в боята на candidate-а |')
+    lines.push('| `candidateSuitVoidForBothOpponents` | И двамата противници са известно void в боята на candidate-а |')
+  }
   lines.push('')
   lines.push('⚠ **Методологична бележка:** по-ранна итерация включваше и `bias`, `isLeading`, `matchesLedSuit` (суров), `trickLeadershipSignal` (суров) и `legalCardsCountNormalized` — всичките ≈0 тегло след 60 epochs. Причината не е бъг: в softmax-over-candidates ranking loss всеки feature, константен за всички candidate карти в рамките на едно решение, математически носи ТОЧНО нулев градиент (защото sum на (prob−target) по кандидатите е винаги 0). Проверка върху реалните train данни потвърди, че `matchesLedSuit` е 100% константен във всяко решение (0 от 14926 non-forced решения имат mixed match) — follow-suit правилото вече е приложено в `legalCards`, преди моделът изобщо да види картите. `trickLeadershipSignal` е запазен само като interaction term по-горе, където реално варира per-candidate.')
-  if (m.modelVersion === 'card-model-v2') {
+  if (hasV2Features) {
     lines.push('')
     lines.push('Същото правило важи за v2 добавките: `isLead` и `pointsInTrickNormalized` СЪЗНАТЕЛНО НЕ фигурират като голи features (decision-level константи) — влизат само през `leadCandidateStrengthWhenLeading`/`winningPointsInteraction`, където per-candidate вариращата половина на произведението гарантира ненулев градиент.')
+  }
+  if (m.modelVersion === 'card-model-v3') {
+    lines.push('')
+    lines.push('Същото правило важи и за v3 добавките: `ownCleanWinnersCount`, `trickNumber`, `cardsPlayedInDealCount`, `remainingCardsCount` СЪЗНАТЕЛНО НЕ фигурират голи (decision-level константи без ясен interaction partner в тази итерация) — виж `memoryFeatureStatus` за пълния breakdown на кое memory поле е използвано/пропуснато и защо.')
   }
   lines.push('')
   lines.push('## Features (СЪЗНАТЕЛНО НЕ използвани — недостатъчно/небезопасно налична информация)')
   lines.push('')
-  if (m.modelVersion === 'card-model-v2') {
+  if (m.modelVersion === 'card-model-v3') {
+    lines.push('- Taken tricks so far по отбор / running score в текущата ръка — все още НЕ explicit export-нати полета в dataset-а (derivable от същия deal.tricks join, следваща стъпка).')
+    lines.push('- `knownCannotHaveCardsBySeat` (overtrump-failure дедукция) — наличен в dataset-а, но НЕ използван като model feature в тази итерация (сложна per-seat/per-rank структура, отложено за v4).')
+    lines.push('- Declarations context (терца/50/100/каре/белот) — липсва напълно от recorder schema-та (Priority 4, изисква recorder writer промяна).')
+  } else if (m.modelVersion === 'card-model-v2') {
     lines.push('- Пълна изиграна история извън текущия trick / tricks взети до момента по отбор (само `currentTrick` е наличен per-action; derivable БЕЗ recorder writer промяна чрез join върху `TrainingDealRecord.tricks`, но това е dataset builder enhancement извън обхвата на тази задача — виж weakness-analysis.md Priority 3).')
     lines.push('- Declarations context (терца/50/100/каре/белот) — липсва напълно от recorder schema-та (Priority 4, изисква recorder writer промяна).')
   } else {
@@ -821,6 +892,23 @@ function renderMarkdown(m: any): string {
       'dataset builder enhancement (join по trickIndex), НЕ recorder writer промяна. Отбелязано като blocking Priority 1 ' +
       'за следваща задача, не имплементирано тук (извън обхвата: "не прави голяма dataset builder rewrite в тази задача").',
     )
+    lines.push('')
+  }
+
+  if (m.modelVersion === 'card-model-v3' && Array.isArray(m.memoryFeatureStatus)) {
+    lines.push('## Memory feature status (v3 — реален статус СЕГА)')
+    lines.push('')
+    lines.push(
+      'Директен резултат от "Add Belot card memory dataset features" (commit 1a033e1) — повечето v2-ера blocking ' +
+      'находки вече са решени. Таблицата показва кое memory поле е използвано като model feature, кое съзнателно не е ' +
+      '(decision-level константа без ясен interaction), и кое все още липсва от самия dataset.',
+    )
+    lines.push('')
+    lines.push('| Feature | Статус | Бележка |')
+    lines.push('|---|---|---|')
+    for (const f of m.memoryFeatureStatus as Array<{ feature: string; status: string; note: string }>) {
+      lines.push(`| \`${f.feature}\` | **${f.status}** | ${f.note} |`)
+    }
     lines.push('')
   }
 

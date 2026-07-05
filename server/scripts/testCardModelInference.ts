@@ -170,6 +170,10 @@ function toDecisionState(record: FullCardRecord): CardDecisionState {
     contract: record.contract,
     currentTrick: record.currentTrick as CompactPlayedCard[],
     currentWinningSeat: record.currentWinningSeat,
+    // v3-only, optional — pass-through, ако присъстват в record-а (card-model-v1/v2
+    // ги игнорират изцяло, виж cardModelFeatures.ts).
+    memory: record.memory,
+    legalCardsMemoryFeatures: record.legalCardsMemoryFeatures,
   }
 }
 

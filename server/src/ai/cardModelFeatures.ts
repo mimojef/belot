@@ -39,6 +39,64 @@ export type CardDecisionState = {
   contract: { contract?: string; trumpSuit?: string | null; bidderSeat?: string | null }
   currentTrick: CompactPlayedCard[]
   currentWinningSeat: string | null
+  // ─── v3-only, optional (v1/v2 feature extraction никога не ги четат) ──────
+  // Identична форма на server/scripts/trainingDataset/cardMemoryFeatures.ts
+  // изхода (memory / legalCardsMemoryFeatures в card-decisions.jsonl) —
+  // ДЕКЛАРИРАНА тук независимо (не import-вана), защото src/ (runtime, rootDir
+  // boundary) не може да import-ва от scripts/ (виж bележката горе за
+  // rootDir="./src"). Ако липсват (напр. runtime state без memory
+  // computation), v3 gracefully деградира към неутрални (0/false) стойности —
+  // безопасно за accidental beta wrapper usage, виж DEFAULT_MEMORY_CONTEXT.
+  memory?: CardMemoryContext
+  legalCardsMemoryFeatures?: CandidateMemoryContext[]
+}
+
+export type CardMemoryContext = {
+  playedCardsBySuit: Record<string, number>
+  remainingCardsBySuit: Record<string, number>
+  remainingTrumpCount: number
+  ownTrumpCount: number
+  ownCleanWinnersCount: number
+  partnerCurrentlyWinning: boolean
+  opponentCurrentlyWinning: boolean
+  pointsInTrick: number
+  trickNumber: number
+  cardsPlayedInDealCount: number
+  remainingCardsCount: number
+  partnerVoidSuits: string[]
+  opponentVoidSuits: Record<string, string[]>
+  suitExhaustedExceptOwnCards: Record<string, boolean>
+}
+
+export type CandidateMemoryContext = {
+  id: string
+  higherRemainingCardsCount: number
+  candidateIsCleanWinner: boolean
+  shouldPreserveCleanWinner: boolean
+}
+
+const DEFAULT_MEMORY_CONTEXT: CardMemoryContext = {
+  playedCardsBySuit: {},
+  remainingCardsBySuit: {},
+  remainingTrumpCount: 0,
+  ownTrumpCount: 0,
+  ownCleanWinnersCount: 0,
+  partnerCurrentlyWinning: false,
+  opponentCurrentlyWinning: false,
+  pointsInTrick: 0,
+  trickNumber: 0,
+  cardsPlayedInDealCount: 0,
+  remainingCardsCount: 0,
+  partnerVoidSuits: [],
+  opponentVoidSuits: {},
+  suitExhaustedExceptOwnCards: {},
+}
+
+const DEFAULT_CANDIDATE_MEMORY: CandidateMemoryContext = {
+  id: '',
+  higherRemainingCardsCount: 0,
+  candidateIsCleanWinner: false,
+  shouldPreserveCleanWinner: false,
 }
 
 export type Team = 'A' | 'B'
@@ -235,9 +293,124 @@ export function computeCardModelFeaturesV2(state: CardDecisionState, card: Compa
   ]
 }
 
-// ─── Version dispatch (позволява trainer/inference да работят с двете версии) ─
+// ─── card-model-v3 feature names (ред-чувствителни!) ─────────────────────────
+//
+// v3 = всичките 11 v2 features (непроменени, reuse чрез computeCardModelFeaturesV2)
+// + 14 нови memory-aware features, отговор на Milen-ското "ботът трябва да
+// помни цялото раздаване" искане (виж server/scripts/trainingDataset/
+// cardMemoryFeatures.ts за derivation-a на самите memory данни, вече записани
+// в card-decisions.jsonl от "Add Belot card memory dataset features").
+//
+// Всеки нов feature е ИЛИ (a) genuinely per-candidate-varying (candidateIsCleanWinner,
+// higherRemainingCardsCountNormalized, shouldPreserveCleanWinner,
+// suitExhaustedExceptOwnCardsForCandidate, candidateSuitRemainingCountNormalized,
+// candidateSuitVoidForPartner/BothOpponents — всички варират по candidate.suit
+// или candidate-specific memory lookup), ИЛИ (b) interaction term между
+// decision-level memory context (remainingTrumpCount, partnerCurrentlyWinning,
+// opponentCurrentlyWinning, pointsInTrick) и per-candidate-varying feature
+// (isTrump, canWinTrick, cardPointsNormalized, candidateIsCleanWinner, isLead)
+// — НИКОГА гол decision-level константен терм (виж методологичната бележка
+// най-горе във файла, доказана емпирично при v1 и потвърдена пак при v2).
+//
+// Съзнателно ИЗКЛЮЧЕНИ от v3 (биха научили ≈0 тегло като голи features):
+//  - ownCleanWinnersCount само по себе си (decision-level константа) — не е
+//    добавен като interaction в тази версия (marginal очаквана стойност,
+//    largely overlap с shouldPreserveCleanWinner, виж weakness report-а).
+//  - trickNumber/cardsPlayedInDealCount/remainingCardsCount голи — decision-level
+//    константи без ясен per-candidate interaction partner в тази итерация.
+//  - taken-tricks-per-team/running score — все още не са explicit export-нати
+//    полета (виж feature gap audit в analyzeAiCardModelWeaknesses.ts).
 
-export const CARD_MODEL_VERSIONS = ['card-model-v1', 'card-model-v2'] as const
+export const CARD_MODEL_V3_FEATURE_NAMES = [
+  ...CARD_MODEL_V2_FEATURE_NAMES,
+  'candidateIsCleanWinner',
+  'higherRemainingCardsCountNormalized',
+  'shouldPreserveCleanWinner',
+  'suitExhaustedExceptOwnCardsForCandidate',
+  'candidateSuitRemainingCountNormalized',
+  'remainingTrumpCountTimesIsTrump',
+  'canWinTrickTimesPartnerWinning',
+  'canWinTrickTimesOpponentWinning',
+  'pointsInTrickTimesCardPoints',
+  'cleanWinnerTimesIsLead',
+  'cleanWinnerTimesOpponentWinning',
+  'cleanWinnerTimesPartnerWinning',
+  'candidateSuitVoidForPartner',
+  'candidateSuitVoidForBothOpponents',
+] as const
+
+export type CardModelV3FeatureName = (typeof CARD_MODEL_V3_FEATURE_NAMES)[number]
+
+/**
+ * Изчислява v3 feature вектора (v2's 11 + 14 нови memory-aware features).
+ * Редът ТРЯБВА да съвпада с CARD_MODEL_V3_FEATURE_NAMES. Reuse-ва
+ * computeCardModelFeaturesV2 непроменено (v2 репродуцируемостта не се засяга)
+ * и добавя новите стойности от state.memory/state.legalCardsMemoryFeatures
+ * (или safe неутрални defaults, ако липсват — виж DEFAULT_MEMORY_CONTEXT).
+ */
+export function computeCardModelFeaturesV3(state: CardDecisionState, card: CompactCard): number[] {
+  const v2Features = computeCardModelFeaturesV2(state, card)
+
+  const contract = (state.contract.contract ?? 'suit') as ServerScoringContract
+  const trumpSuit = (state.contract.trumpSuit ?? null) as ServerSuit | null
+
+  const isTrump = computeIsTrump(card.suit, contract, trumpSuit)
+  const cardPoints = getServerCardPoints(card.suit as ServerSuit, card.rank, contract, trumpSuit)
+  const cardPointsNormalized = cardPoints / 20
+  const canWinTrick = computeCanWinTrick(state, card, contract, trumpSuit)
+  const isLead = state.currentTrick.length === 0 ? 1 : 0
+
+  const memory = state.memory ?? DEFAULT_MEMORY_CONTEXT
+  const candidateMemory = state.legalCardsMemoryFeatures?.find((c) => c.id === card.id) ?? DEFAULT_CANDIDATE_MEMORY
+
+  const candidateIsCleanWinner = candidateMemory.candidateIsCleanWinner ? 1 : 0
+  const higherRemainingCardsCountNormalized = candidateMemory.higherRemainingCardsCount / 7
+  const shouldPreserveCleanWinner = candidateMemory.shouldPreserveCleanWinner ? 1 : 0
+
+  const suitExhaustedExceptOwnCardsForCandidate = memory.suitExhaustedExceptOwnCards[card.suit] ? 1 : 0
+  const candidateSuitRemainingCountNormalized = (memory.remainingCardsBySuit[card.suit] ?? 0) / 8
+
+  const remainingTrumpCountNormalized = memory.remainingTrumpCount / 8
+  const remainingTrumpCountTimesIsTrump = remainingTrumpCountNormalized * isTrump
+
+  const partnerCurrentlyWinning = memory.partnerCurrentlyWinning ? 1 : 0
+  const opponentCurrentlyWinning = memory.opponentCurrentlyWinning ? 1 : 0
+  const canWinTrickTimesPartnerWinning = canWinTrick * partnerCurrentlyWinning
+  const canWinTrickTimesOpponentWinning = canWinTrick * opponentCurrentlyWinning
+
+  const pointsInTrickNormalized = memory.pointsInTrick / MAX_POINTS_IN_TRICK_NORMALIZER
+  const pointsInTrickTimesCardPoints = pointsInTrickNormalized * cardPointsNormalized
+
+  const cleanWinnerTimesIsLead = candidateIsCleanWinner * isLead
+  const cleanWinnerTimesOpponentWinning = candidateIsCleanWinner * opponentCurrentlyWinning
+  const cleanWinnerTimesPartnerWinning = candidateIsCleanWinner * partnerCurrentlyWinning
+
+  const candidateSuitVoidForPartner = memory.partnerVoidSuits.includes(card.suit) ? 1 : 0
+  const opponentSeatsVoidForCandidateSuit = Object.values(memory.opponentVoidSuits).filter((suits) => suits.includes(card.suit)).length
+  const candidateSuitVoidForBothOpponents = opponentSeatsVoidForCandidateSuit === 2 ? 1 : 0
+
+  return [
+    ...v2Features,
+    candidateIsCleanWinner,
+    higherRemainingCardsCountNormalized,
+    shouldPreserveCleanWinner,
+    suitExhaustedExceptOwnCardsForCandidate,
+    candidateSuitRemainingCountNormalized,
+    remainingTrumpCountTimesIsTrump,
+    canWinTrickTimesPartnerWinning,
+    canWinTrickTimesOpponentWinning,
+    pointsInTrickTimesCardPoints,
+    cleanWinnerTimesIsLead,
+    cleanWinnerTimesOpponentWinning,
+    cleanWinnerTimesPartnerWinning,
+    candidateSuitVoidForPartner,
+    candidateSuitVoidForBothOpponents,
+  ]
+}
+
+// ─── Version dispatch (позволява trainer/inference да работят с всичките версии) ─
+
+export const CARD_MODEL_VERSIONS = ['card-model-v1', 'card-model-v2', 'card-model-v3'] as const
 export type CardModelVersion = (typeof CARD_MODEL_VERSIONS)[number]
 
 export function isSupportedCardModelVersion(version: string): version is CardModelVersion {
@@ -245,11 +418,15 @@ export function isSupportedCardModelVersion(version: string): version is CardMod
 }
 
 export function getCardModelFeatureNames(version: CardModelVersion): readonly string[] {
-  return version === 'card-model-v2' ? CARD_MODEL_V2_FEATURE_NAMES : CARD_MODEL_FEATURE_NAMES
+  if (version === 'card-model-v3') return CARD_MODEL_V3_FEATURE_NAMES
+  if (version === 'card-model-v2') return CARD_MODEL_V2_FEATURE_NAMES
+  return CARD_MODEL_FEATURE_NAMES
 }
 
 export function computeCardModelFeaturesForVersion(version: CardModelVersion, state: CardDecisionState, card: CompactCard): number[] {
-  return version === 'card-model-v2' ? computeCardModelFeaturesV2(state, card) : computeCardModelFeatures(state, card)
+  if (version === 'card-model-v3') return computeCardModelFeaturesV3(state, card)
+  if (version === 'card-model-v2') return computeCardModelFeaturesV2(state, card)
+  return computeCardModelFeatures(state, card)
 }
 
 export function dot(w: readonly number[], x: readonly number[]): number {
