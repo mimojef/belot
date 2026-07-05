@@ -51,6 +51,7 @@
     "summarize:local-ai-card-beta-trace": "tsx scripts/summarizeLocalAiCardBetaTrace.ts",
     "check:local-ai-card-beta-trace": "tsx scripts/checkLocalAiCardBetaTrace.ts",
     "analyze:ai-card-weaknesses": "tsx scripts/analyzeAiCardModelWeaknesses.ts",
+    "build:human-move-memory-index": "tsx scripts/buildHumanMoveMemoryIndex.ts",
     "check:local-ai-card-beta-runbook": "tsx scripts/checkLocalAiCardBetaRunbook.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",
