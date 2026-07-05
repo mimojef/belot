@@ -56,6 +56,8 @@
     "analyze:ai-card-weaknesses": "tsx scripts/analyzeAiCardModelWeaknesses.ts",
     "analyze:card-model-v3": "tsx scripts/analyzeCardModelV3.ts",
     "build:human-move-memory-index": "tsx scripts/buildHumanMoveMemoryIndex.ts",
+    "build:human-move-memory-index-v2": "tsx scripts/buildHumanMoveMemoryIndexV2.ts",
+    "analyze:human-move-memory-v2": "tsx scripts/analyzeHumanMoveMemoryV2.ts",
     "check:local-ai-card-beta-runbook": "tsx scripts/checkLocalAiCardBetaRunbook.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",
