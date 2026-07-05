@@ -300,7 +300,7 @@ checkAsync('[3] Trace ON + AI избира различна валидна ка�
     await writeFile(modelPath, JSON.stringify(validModelJson([0, w2, 0, 0, 0])), 'utf8')
 
     withEnv(
-      { LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_TRACE_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: modelPath, LOCAL_AI_CARD_BETA_TRACE_PATH: tracePath },
+      { LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_TRACE_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: modelPath, LOCAL_AI_CARD_BETA_TRACE_PATH: tracePath },
       () => {
         resetAllCaches()
         const result = pickServerBotPlayCardWithAiCandidate(state, seat)
@@ -330,7 +330,7 @@ checkAsync('[4] Trace ON + AI избира СЪЩАТА карта като conv
     await writeFile(modelPath, JSON.stringify(validModelJson([0, w2, 0, 0, 0])), 'utf8')
 
     withEnv(
-      { LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_TRACE_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: modelPath, LOCAL_AI_CARD_BETA_TRACE_PATH: tracePath },
+      { LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_TRACE_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: modelPath, LOCAL_AI_CARD_BETA_TRACE_PATH: tracePath },
       () => {
         resetAllCaches()
         const result = pickServerBotPlayCardWithAiCandidate(state, seat)
@@ -356,6 +356,7 @@ checkAsync('[5] Trace ON + missing model → decisionSource="conventional_fallba
     withEnv(
       {
         LOCAL_AI_CARD_BETA_ENABLED: 'true',
+        LOCAL_AI_CARD_BETA_POLICY: 'model',
         LOCAL_AI_CARD_BETA_TRACE_ENABLED: 'true',
         LOCAL_AI_CARD_BETA_MODEL_PATH: join(dir, 'does-not-exist.json'),
         LOCAL_AI_CARD_BETA_TRACE_PATH: tracePath,
@@ -385,7 +386,7 @@ checkAsync('[6] Trace ON + corrupt model (invalid JSON) → decisionSource="conv
     const conventional = pickServerBotPlayCard(state, seat)!
 
     withEnv(
-      { LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_TRACE_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: modelPath, LOCAL_AI_CARD_BETA_TRACE_PATH: tracePath },
+      { LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_TRACE_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: modelPath, LOCAL_AI_CARD_BETA_TRACE_PATH: tracePath },
       () => {
         resetAllCaches()
         const result = pickServerBotPlayCardWithAiCandidate(state, seat)
@@ -408,7 +409,7 @@ checkAsync('[7] Forced card (1 legal card) → decisionSource="forced_card"', as
     const { state, seat } = buildForcedState()
 
     withEnv(
-      { LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_TRACE_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: modelPath, LOCAL_AI_CARD_BETA_TRACE_PATH: tracePath },
+      { LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_TRACE_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: modelPath, LOCAL_AI_CARD_BETA_TRACE_PATH: tracePath },
       () => {
         resetAllCaches()
         const result = pickServerBotPlayCardWithAiCandidate(state, seat)
@@ -434,7 +435,7 @@ checkAsync('[8] Astronomически тегла (non-finite score) → decisionS
     const conventional = pickServerBotPlayCard(state, seat)!
 
     withEnv(
-      { LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_TRACE_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: modelPath, LOCAL_AI_CARD_BETA_TRACE_PATH: tracePath },
+      { LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_TRACE_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: modelPath, LOCAL_AI_CARD_BETA_TRACE_PATH: tracePath },
       () => {
         resetAllCaches()
         const result = pickServerBotPlayCardWithAiCandidate(state, seat)
@@ -480,6 +481,20 @@ checkAsync('[9] computeTraceSummary дава коректни counts върху 
       aiCardValid: true,
       rankingLength: 2,
       topPredictions: [],
+      policyMode: 'model',
+      advisorSelectedCard: null,
+      advisorOverride: null,
+      advisorReason: null,
+      partnerCurrentlyWinning: null,
+      opponentCurrentlyWinning: null,
+      conventionalCardCandidateIsCleanWinner: null,
+      conventionalCardShouldPreserveCleanWinner: null,
+      finalCardCandidateIsCleanWinner: null,
+      finalCardShouldPreserveCleanWinner: null,
+      predictedWinnerIfConventional: null,
+      predictedWinningTeamIfConventional: null,
+      predictedWinnerIfAdvisor: null,
+      predictedWinningTeamIfAdvisor: null,
       roomKey: null,
       ...overrides,
     },
@@ -526,7 +541,7 @@ checkAsync('[10] Trace output няма forbidden markers (roomId/profileId/email
     for (const build of [buildTwoCardState, buildForcedState]) {
       const { state, seat } = build()
       withEnv(
-        { LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_TRACE_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: modelPath, LOCAL_AI_CARD_BETA_TRACE_PATH: tracePath },
+        { LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_TRACE_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: modelPath, LOCAL_AI_CARD_BETA_TRACE_PATH: tracePath },
         () => {
           resetAllCaches()
           pickServerBotPlayCardWithAiCandidate(state, seat)

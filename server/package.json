@@ -58,6 +58,8 @@
     "build:human-move-memory-index": "tsx scripts/buildHumanMoveMemoryIndex.ts",
     "build:human-move-memory-index-v2": "tsx scripts/buildHumanMoveMemoryIndexV2.ts",
     "analyze:human-move-memory-v2": "tsx scripts/analyzeHumanMoveMemoryV2.ts",
+    "evaluate:card-advisor": "tsx scripts/evaluateCardAdvisor.ts",
+    "check:local-ai-card-beta-advisor": "tsx scripts/checkLocalAiCardBetaAdvisor.ts",
     "check:local-ai-card-beta-runbook": "tsx scripts/checkLocalAiCardBetaRunbook.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",

@@ -265,7 +265,7 @@ checkAsync('[2] Flag ON + валиден model + non-forced sample → вали�
   const { state, seat } = buildNonForcedState()
   const { dir, path } = await writeTempModel(validModelJson())
   try {
-    withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: path }, () => {
+    withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_MODEL_PATH: path }, () => {
       resetLocalAiCardBetaModelCacheForTests()
       const legalIds = legalIdsOf(state, seat)
       const result = pickServerBotPlayCardWithAiCandidate(state, seat)
@@ -280,7 +280,7 @@ checkAsync('[2] Flag ON + валиден model + non-forced sample → вали�
 // [3] Missing model → fallback, без crash
 checkSync('[3] Missing model file → fallback към conventional, без crash', () => {
   const { state, seat } = buildNonForcedState()
-  withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: join(tmpdir(), 'does-not-exist-12345', 'model.json') }, () => {
+  withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_MODEL_PATH: join(tmpdir(), 'does-not-exist-12345', 'model.json') }, () => {
     resetLocalAiCardBetaModelCacheForTests()
     const conventional = pickServerBotPlayCard(state, seat)
     const wrapped = pickServerBotPlayCardWithAiCandidate(state, seat)
@@ -293,7 +293,7 @@ checkAsync('[4a] Corrupt model (invalid JSON) → fallback, без crash', async
   const { state, seat } = buildNonForcedState()
   const { dir, path } = await writeTempModel('{ this is not valid json')
   try {
-    withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: path }, () => {
+    withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_MODEL_PATH: path }, () => {
       resetLocalAiCardBetaModelCacheForTests()
       const conventional = pickServerBotPlayCard(state, seat)
       const wrapped = pickServerBotPlayCardWithAiCandidate(state, seat)
@@ -309,7 +309,7 @@ checkAsync('[4b] Corrupt model (грешен modelVersion) → fallback, без 
   const { state, seat } = buildNonForcedState()
   const { dir, path } = await writeTempModel({ ...validModelJson(), modelVersion: 'card-model-v999' })
   try {
-    withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: path }, () => {
+    withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_MODEL_PATH: path }, () => {
       resetLocalAiCardBetaModelCacheForTests()
       const conventional = pickServerBotPlayCard(state, seat)
       const wrapped = pickServerBotPlayCardWithAiCandidate(state, seat)
@@ -325,7 +325,7 @@ checkAsync('[4c] Corrupt model (featureNames mismatch) → fallback, без cras
   const { state, seat } = buildNonForcedState()
   const { dir, path } = await writeTempModel({ ...validModelJson(), featureNames: ['wrong', 'feature', 'names', 'here', 'x'] })
   try {
-    withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: path }, () => {
+    withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_MODEL_PATH: path }, () => {
       resetLocalAiCardBetaModelCacheForTests()
       const conventional = pickServerBotPlayCard(state, seat)
       const wrapped = pickServerBotPlayCardWithAiCandidate(state, seat)
@@ -344,7 +344,7 @@ checkAsync('[5] Астрономически тегла (non-finite score) → w
   const hugeWeights = [1e308, 1e308, 1e308, 1e308, 1e308]
   const { dir, path } = await writeTempModel(validModelJson(hugeWeights))
   try {
-    withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: path }, () => {
+    withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_MODEL_PATH: path }, () => {
       resetLocalAiCardBetaModelCacheForTests()
       const legalIds = legalIdsOf(state, seat)
       const result = pickServerBotPlayCardWithAiCandidate(state, seat)
@@ -370,7 +370,7 @@ checkAsync('[6b] Forced (1 legal card), flag ON + валиден model → вс�
   const { state, seat } = buildForcedState()
   const { dir, path } = await writeTempModel(validModelJson())
   try {
-    withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: path }, () => {
+    withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_MODEL_PATH: path }, () => {
       resetLocalAiCardBetaModelCacheForTests()
       const result = pickServerBotPlayCardWithAiCandidate(state, seat)
       assertEqual(result?.id, 'hearts-J', 'forced card трябва да остане единствената опция дори с AI ON')
@@ -467,7 +467,7 @@ checkAsync('[9] Real-data smoke: card-test.jsonl — flag OFF==conventional, fla
     // flag ON (ако има реален model) → никога invalid карта
     if (hasRealModel) {
       const handIds = new Set(rec.ownHand.map((c) => c.id))
-      const aiResult = withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_MODEL_PATH: REAL_MODEL_PATH }, () => {
+      const aiResult = withEnv({ LOCAL_AI_CARD_BETA_ENABLED: 'true', LOCAL_AI_CARD_BETA_POLICY: 'model', LOCAL_AI_CARD_BETA_MODEL_PATH: REAL_MODEL_PATH }, () => {
         resetLocalAiCardBetaModelCacheForTests()
         return pickServerBotPlayCardWithAiCandidate(state, rec.seat)
       })

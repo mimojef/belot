@@ -35,9 +35,18 @@ const SUMMARY_MD_PATH = join(TRACE_DIR, 'summary.md')
 
 // ─── Trace record shape (pass-through — matches localAiCardBeta.ts) ──────────
 
-export type DecisionSource = 'ai_disabled' | 'ai_accepted' | 'ai_same_as_conventional' | 'conventional_fallback' | 'forced_card'
+export type DecisionSource =
+  | 'ai_disabled'
+  | 'ai_accepted'
+  | 'ai_same_as_conventional'
+  | 'conventional_fallback'
+  | 'forced_card'
+  | 'advisor_override'
+  | 'advisor_no_override'
+  | 'advisor_fallback'
 const KNOWN_DECISION_SOURCES: DecisionSource[] = [
   'ai_disabled', 'ai_accepted', 'ai_same_as_conventional', 'conventional_fallback', 'forced_card',
+  'advisor_override', 'advisor_no_override', 'advisor_fallback',
 ]
 
 export type TraceRecord = {
@@ -69,6 +78,22 @@ export type TraceRecord = {
   aiCardValid: boolean | null
   rankingLength: number
   topPredictions: Array<{ id: string; score: number; probability: number }>
+  // Добавени в traceVersion 3 (conventional-first tactical advisor policy) —
+  // optional, защото по-стари trace файлове (traceVersion 1/2) не ги съдържат.
+  policyMode?: 'model' | 'advisor' | null
+  advisorSelectedCard?: string | null
+  advisorOverride?: boolean | null
+  advisorReason?: string | null
+  partnerCurrentlyWinning?: boolean | null
+  opponentCurrentlyWinning?: boolean | null
+  conventionalCardCandidateIsCleanWinner?: boolean | null
+  conventionalCardShouldPreserveCleanWinner?: boolean | null
+  finalCardCandidateIsCleanWinner?: boolean | null
+  finalCardShouldPreserveCleanWinner?: boolean | null
+  predictedWinnerIfConventional?: string | null
+  predictedWinningTeamIfConventional?: string | null
+  predictedWinnerIfAdvisor?: string | null
+  predictedWinningTeamIfAdvisor?: string | null
   roomKey: string | null
 }
 
@@ -147,6 +172,13 @@ export type TraceSummary = {
   nonForcedAiEnabledTotal: number
   validAiPredictionsTotal: number
   topAiSelectedCards: Array<{ id: string; count: number }>
+  // ─── Advisor policy stats (traceVersion 3, additive) ────────────────────────
+  advisorTotalDecisions: number
+  advisorOverrideCount: number
+  advisorNoOverrideCount: number
+  advisorFallbackCount: number
+  advisorOverrideRate: number
+  advisorReasonCounts: Record<string, number>
 }
 
 export function computeTraceSummary(
@@ -155,12 +187,14 @@ export function computeTraceSummary(
 ): TraceSummary {
   const bySource: Record<DecisionSource, number> = {
     ai_disabled: 0, ai_accepted: 0, ai_same_as_conventional: 0, conventional_fallback: 0, forced_card: 0,
+    advisor_override: 0, advisor_no_override: 0, advisor_fallback: 0,
   }
   let invalidAiPredictions = 0
   let invalidFinalCards = 0
   const invalidFinalCardLines: number[] = []
   const fallbackReasonCounts: Record<string, number> = {}
   const aiSelectedCardCounts: Record<string, number> = {}
+  const advisorReasonCounts: Record<string, number> = {}
 
   for (const { record, lineNumber } of records) {
     bySource[record.decisionSource]++
@@ -175,6 +209,9 @@ export function computeTraceSummary(
     if (record.aiSelectedCard) {
       aiSelectedCardCounts[record.aiSelectedCard] = (aiSelectedCardCounts[record.aiSelectedCard] ?? 0) + 1
     }
+    if (record.decisionSource === 'advisor_override' && record.advisorReason) {
+      advisorReasonCounts[record.advisorReason] = (advisorReasonCounts[record.advisorReason] ?? 0) + 1
+    }
   }
 
   const total = records.length
@@ -187,6 +224,9 @@ export function computeTraceSummary(
     .sort((a, b) => b[1] - a[1])
     .slice(0, 10)
     .map(([id, count]) => ({ id, count }))
+
+  const advisorTotalDecisions = bySource.advisor_override + bySource.advisor_no_override + bySource.advisor_fallback
+  const advisorOverrideRate = advisorTotalDecisions > 0 ? bySource.advisor_override / advisorTotalDecisions : 0
 
   return {
     generatedAt: new Date().toISOString(),
@@ -203,6 +243,12 @@ export function computeTraceSummary(
     nonForcedAiEnabledTotal,
     validAiPredictionsTotal,
     topAiSelectedCards,
+    advisorTotalDecisions,
+    advisorOverrideCount: bySource.advisor_override,
+    advisorNoOverrideCount: bySource.advisor_no_override,
+    advisorFallbackCount: bySource.advisor_fallback,
+    advisorOverrideRate,
+    advisorReasonCounts,
   }
 }
 
@@ -285,6 +331,11 @@ async function main(): Promise<void> {
   console.log(`  Invalid final cards: ${summaryJson.invalidFinalCards}`)
   console.log(`  AI accepted rate (excluding forced): ${pct(summaryJson.decisionSourceCounts.ai_accepted, summaryJson.nonForcedAiEnabledTotal)}`)
   console.log(`  AI differs from conventional rate: ${pct(summaryJson.decisionSourceCounts.ai_accepted, summaryJson.validAiPredictionsTotal)}`)
+  if (summaryJson.advisorTotalDecisions > 0) {
+    console.log(`  Advisor policy — total: ${summaryJson.advisorTotalDecisions}, override: ${summaryJson.advisorOverrideCount}, no_override: ${summaryJson.advisorNoOverrideCount}, fallback: ${summaryJson.advisorFallbackCount}`)
+    console.log(`  Advisor override rate: ${pct(summaryJson.advisorOverrideCount, summaryJson.advisorTotalDecisions)}`)
+    console.log(`  Advisor reasons: ${Object.entries(summaryJson.advisorReasonCounts).map(([k, v]) => `${k}=${v}`).join(', ') || '(none)'}`)
+  }
   console.log(`\n✓ Отчет: ${SUMMARY_MD_PATH}`)
   console.log(`✓ Отчет: ${SUMMARY_JSON_PATH}`)
 
@@ -298,22 +349,7 @@ async function main(): Promise<void> {
   process.exit(0)
 }
 
-function renderMarkdown(s: {
-  generatedAt: string
-  tracePath: string
-  totalDecisions: number
-  decisionSourceCounts: Record<DecisionSource, number>
-  invalidAiPredictions: number
-  invalidFinalCards: number
-  invalidFinalCardLines: number[]
-  fallbackReasonCounts: Record<string, number>
-  aiAcceptedRateExcludingForced: number
-  aiDiffersFromConventionalCount: number
-  aiDiffersFromConventionalRate: number
-  nonForcedAiEnabledTotal: number
-  validAiPredictionsTotal: number
-  topAiSelectedCards: Array<{ id: string; count: number }>
-}): string {
+function renderMarkdown(s: TraceSummary): string {
   const lines: string[] = []
   lines.push('# Local AI Card Beta — Trace Summary')
   lines.push('')
@@ -365,6 +401,28 @@ function renderMarkdown(s: {
     lines.push('Няма AI-selected карти в trace-а.')
   } else {
     for (const c of s.topAiSelectedCards) lines.push(`- ${c.id}: ${c.count}`)
+  }
+  lines.push('')
+
+  lines.push('## Advisor policy (conventional-first tactical guard, traceVersion 3)')
+  lines.push('')
+  if (s.advisorTotalDecisions === 0) {
+    lines.push('Няма advisor-policy decisions в trace-а (LOCAL_AI_CARD_BETA_POLICY беше "model" или AI флагът е бил off).')
+  } else {
+    lines.push(`- Total advisor decisions: ${s.advisorTotalDecisions}`)
+    lines.push(`- advisor_override: ${s.advisorOverrideCount}`)
+    lines.push(`- advisor_no_override: ${s.advisorNoOverrideCount}`)
+    lines.push(`- advisor_fallback: ${s.advisorFallbackCount}`)
+    lines.push(`- Override rate: ${pct(s.advisorOverrideCount, s.advisorTotalDecisions)}`)
+    lines.push('')
+    lines.push('Override reasons:')
+    if (Object.keys(s.advisorReasonCounts).length === 0) {
+      lines.push('- (none)')
+    } else {
+      for (const [reason, count] of Object.entries(s.advisorReasonCounts).sort((a, b) => b[1] - a[1])) {
+        lines.push(`- ${reason}: ${count}`)
+      }
+    }
   }
   lines.push('')
 

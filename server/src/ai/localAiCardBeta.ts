@@ -55,7 +55,9 @@ import {
   rankLegalCardsWithCardModel,
   type CardModel,
 } from './cardModelInference.js'
-import type { CardDecisionState } from './cardModelFeatures.js'
+import { deriveTeam, type CardDecisionState, type Team } from './cardModelFeatures.js'
+import { decideAdvisorCard, type AdvisorDecisionInput, type AdvisorReason } from './cardAdvisorPolicy.js'
+import { buildAdvisorRuntimeMemory } from './cardAdvisorMemory.js'
 
 // ─── Feature flags ─────────────────────────────────────────────────────────────
 
@@ -65,6 +67,22 @@ function isLocalAiCardBetaEnabled(): boolean {
 
 function isLocalAiCardBetaTraceEnabled(): boolean {
   return process.env['LOCAL_AI_CARD_BETA_TRACE_ENABLED']?.trim().toLowerCase() === 'true'
+}
+
+export type LocalAiCardBetaPolicyMode = 'model' | 'advisor'
+
+/**
+ * 'model' = old pure model-replacement candidate (unchanged logic, kept
+ * available, no longer default). 'advisor' = new conventional-first tactical
+ * guard engine (server/src/ai/cardAdvisorPolicy.ts) — DEFAULT when the beta
+ * is enabled and this is unset/invalid, per the explicit pivot away from
+ * "pure AI replacement" after live testing showed weak/erratic play despite
+ * good offline model metrics. Set LOCAL_AI_CARD_BETA_POLICY=model explicitly
+ * to keep the old behavior.
+ */
+function getLocalAiCardBetaPolicyMode(): LocalAiCardBetaPolicyMode {
+  const raw = process.env['LOCAL_AI_CARD_BETA_POLICY']?.trim().toLowerCase()
+  return raw === 'model' ? 'model' : 'advisor'
 }
 
 // ─── Paths (local-only artifacts, never committed) ────────────────────────────
@@ -169,9 +187,14 @@ function buildCardDecisionState(
 // v2: добавени isLead/positionInTrick/pointsInTrick — позволява бъдещ trace
 // анализ да прави lead/follow breakdown директно от trace-а (виж
 // weakness-analysis.md, "Lead/follow breakdown: НЕ е налично" находка).
+// v3: добавен policyMode='advisor' (conventional-first tactical guard engine,
+// server/src/ai/cardAdvisorPolicy.ts) — новите полета описват advisor
+// override-и (advisorSelectedCard/advisorOverride/advisorReason), memory
+// facts (partnerCurrentlyWinning/opponentCurrentlyWinning), clean-winner
+// сигнали за conventional/final картата, и predicted-winner симулации.
 // Чисто адитивна схема промяна — по-старите consumers (computeTraceSummary),
 // които не четат новите полета, продължават да работят непроменени.
-export const LOCAL_AI_CARD_BETA_TRACE_VERSION = 2
+export const LOCAL_AI_CARD_BETA_TRACE_VERSION = 3
 
 export type LocalAiCardBetaDecisionSource =
   | 'ai_disabled'
@@ -179,6 +202,9 @@ export type LocalAiCardBetaDecisionSource =
   | 'ai_same_as_conventional'
   | 'conventional_fallback'
   | 'forced_card'
+  | 'advisor_override'
+  | 'advisor_no_override'
+  | 'advisor_fallback'
 
 export type LocalAiCardBetaTraceRecord = {
   timestamp: string
@@ -209,6 +235,27 @@ export type LocalAiCardBetaTraceRecord = {
   aiCardValid: boolean | null
   rankingLength: number
   topPredictions: Array<{ id: string; score: number; probability: number }>
+  // ─── traceVersion 3 (advisor policy) ────────────────────────────────────────
+  // null когато aiEnabled=false (никакъв policy path не е взет за това решение).
+  policyMode: LocalAiCardBetaPolicyMode | null
+  advisorSelectedCard: string | null
+  advisorOverride: boolean | null
+  advisorReason: AdvisorReason | null
+  partnerCurrentlyWinning: boolean | null
+  opponentCurrentlyWinning: boolean | null
+  conventionalCardCandidateIsCleanWinner: boolean | null
+  conventionalCardShouldPreserveCleanWinner: boolean | null
+  finalCardCandidateIsCleanWinner: boolean | null
+  finalCardShouldPreserveCleanWinner: boolean | null
+  // predictedWinner*/predictedWinningTeam* са РЕАЛНИЯТ финален trick winner
+  // САМО когато positionInTrick===3 (последен да играе в трика) — на по-ранна
+  // позиция това е "ако трикът свършеше точно сега" interim симулация, която
+  // по-нататъшен ход на противник може да обезсили. Никога не третирай тези
+  // полета като гарантиран изход извън positionInTrick===3.
+  predictedWinnerIfConventional: string | null
+  predictedWinningTeamIfConventional: Team | null
+  predictedWinnerIfAdvisor: string | null
+  predictedWinningTeamIfAdvisor: Team | null
   // ServerAuthoritativeGameState носи никакъв room identifier (нито raw, нито
   // псевдонимизиран) — recorder-ският roomKey се смята на друг слой
   // (trainingRecorderCollector), недостъпен от тук. Затова полето е винаги
@@ -224,6 +271,10 @@ function seatIndexOf(seat: Seat): number {
 
 function teamIndexOf(seat: Seat): number {
   return seat === 'bottom' || seat === 'top' ? 0 : 1
+}
+
+function getPartnerSeat(seat: Seat): Seat {
+  return SEAT_ORDER[(SEAT_ORDER.indexOf(seat) + 2) % 4]!
 }
 
 let traceDirEnsuredForPath: string | null = null
@@ -317,6 +368,18 @@ export function pickServerBotPlayCardWithAiCandidate(
   let rankingLength = 0
   let topPredictions: Array<{ id: string; score: number; probability: number }> = []
   let modelVersionUsed: string | null = null
+  let policyModeUsed: LocalAiCardBetaPolicyMode | null = null
+  let advisorSelectedCardId: string | null = null
+  let advisorOverrideFlag: boolean | null = null
+  let advisorReasonValue: AdvisorReason | null = null
+  let partnerCurrentlyWinningForTrace: boolean | null = null
+  let opponentCurrentlyWinningForTrace: boolean | null = null
+  let conventionalCleanWinner: boolean | null = null
+  let conventionalPreserve: boolean | null = null
+  let finalCleanWinner: boolean | null = null
+  let finalPreserve: boolean | null = null
+  let predictedWinnerConventionalSeat: Seat | null = null
+  let predictedWinnerAdvisorSeat: Seat | null = null
 
   if (isForced) {
     // Forced (или без избор) — conventional вече е единствената/коректна опция,
@@ -330,64 +393,141 @@ export function pickServerBotPlayCardWithAiCandidate(
     fallbackUsed = true
     fallbackReason = 'conventional bot върна null (edge case, вероятно празна ръка)'
   } else {
-    logStartupStatusOnce()
-    const model = loadModel()
+    const policyMode = getLocalAiCardBetaPolicyMode()
+    policyModeUsed = policyMode
 
-    if (!model) {
-      decisionSource = 'conventional_fallback'
-      fallbackUsed = true
-      fallbackReason = currentModelFailureReason() ?? 'AI model не е наличен'
-    } else {
-      modelVersionUsed = model.modelVersion
-      const legalIds = new Set(legalCards.map((c) => c.id))
-      const handIds = new Set(hand.map((c) => c.id))
-
+    if (policyMode === 'advisor') {
+      // ─── Conventional-first tactical advisor (default policy) ──────────────
+      // conventionalCard е винаги отправната точка; guard rules (server/src/ai/
+      // cardAdvisorPolicy.ts) override-ват само на силен, explainable сигнал.
       try {
-        const decisionState = buildCardDecisionState(state, seat, legalCards)
-        const prediction = rankLegalCardsWithCardModel(model, decisionState)
-        rankingLength = prediction.ranking.length
-        topPredictions = prediction.ranking
-          .slice(0, 3)
-          .map((r) => ({ id: r.id, score: r.score, probability: r.probability }))
-        fallbackUsed = prediction.fallbackUsed
-        fallbackReason = prediction.fallbackReason
+        const partnerSeat = getPartnerSeat(seat)
+        const memory = buildAdvisorRuntimeMemory(
+          state, seat, partnerSeat, traceContract, trumpSuit as ServerSuit | null, hand, legalCards, currentPlays,
+        )
+        const input: AdvisorDecisionInput = {
+          seat,
+          partnerSeat,
+          positionInTrick: positionInTrickForTrace,
+          contract: traceContract,
+          trumpSuit: trumpSuit as ServerSuit | null,
+          currentTrickPlays: currentPlays,
+          legalCards,
+          conventionalCard,
+          partnerCurrentlyWinning: memory.partnerCurrentlyWinning,
+          opponentCurrentlyWinning: memory.opponentCurrentlyWinning,
+          pointsInTrick: memory.pointsInTrick,
+          candidateMemoryById: memory.candidateMemoryById,
+        }
+        const result = decideAdvisorCard(input)
 
-        const predictionIsValidMember = legalIds.has(prediction.selectedCard) && handIds.has(prediction.selectedCard)
+        const legalIds = new Set(legalCards.map((c) => c.id))
+        const handIds = new Set(hand.map((c) => c.id))
+        const resultIsValidMember = legalIds.has(result.finalCard.id) && handIds.has(result.finalCard.id)
 
-        // Ако rankLegalCardsWithCardModel вътрешно fallback-на (напр. non-finite
-        // score) ИЛИ избраната карта се окаже извън legalCards/ownHand, това НЕ
-        // е реална AI препоръка — третираме го като conventional_fallback и
-        // връщаме точно conventionalCard, а не вътрешния first-legal pick на
-        // inference модула (за да decisionSource="conventional_fallback" винаги
-        // означава "finalCard === conventionalCard", както изисква схемата).
-        if (!predictionIsValidMember || prediction.fallbackUsed) {
-          aiCardValid = predictionIsValidMember
-          if (!predictionIsValidMember) {
-            console.warn(
-              `[local-ai-card-beta] AI selected card "${prediction.selectedCard}" е invalid (не е в legalCards/ownHand за seat=${seat}) — fallback към conventional bot.`,
-            )
-          }
-          decisionSource = 'conventional_fallback'
+        partnerCurrentlyWinningForTrace = memory.partnerCurrentlyWinning
+        opponentCurrentlyWinningForTrace = memory.opponentCurrentlyWinning
+        const conventionalMemory = memory.candidateMemoryById.get(conventionalCard.id) ?? null
+        conventionalCleanWinner = conventionalMemory?.candidateIsCleanWinner ?? null
+        conventionalPreserve = conventionalMemory?.shouldPreserveCleanWinner ?? null
+        predictedWinnerConventionalSeat = result.predictedWinnerSeatIfConventional
+
+        if (!resultIsValidMember) {
+          console.warn(
+            `[local-ai-card-beta] Advisor selected card "${result.finalCard.id}" е invalid (не е в legalCards/ownHand за seat=${seat}) — fallback към conventional bot.`,
+          )
+          decisionSource = 'advisor_fallback'
           finalCard = conventionalCard
           fallbackUsed = true
-          fallbackReason = fallbackReason ?? 'AI selected card извън legalCards/ownHand'
+          fallbackReason = 'Advisor selected card извън legalCards/ownHand'
+          predictedWinnerAdvisorSeat = predictedWinnerConventionalSeat
+          finalCleanWinner = conventionalCleanWinner
+          finalPreserve = conventionalPreserve
         } else {
-          aiCardValid = true
-          aiSelectedCardId = prediction.selectedCard
-          const aiCard = legalCards.find((c) => c.id === prediction.selectedCard)!
-          aiSameAsConventional = aiCard.id === conventionalCard.id
-          finalCard = aiCard
-          decisionSource = aiSameAsConventional ? 'ai_same_as_conventional' : 'ai_accepted'
-          console.log(`[local-ai-card-beta] AI избра карта: ${aiCard.id} (seat=${seat})`)
+          finalCard = result.finalCard
+          advisorOverrideFlag = result.override
+          advisorReasonValue = result.reason
+          advisorSelectedCardId = result.override ? result.finalCard.id : null
+          predictedWinnerAdvisorSeat = result.predictedWinnerSeatIfFinal
+          const finalMemory = memory.candidateMemoryById.get(result.finalCard.id) ?? null
+          finalCleanWinner = finalMemory?.candidateIsCleanWinner ?? null
+          finalPreserve = finalMemory?.shouldPreserveCleanWinner ?? null
+          decisionSource = result.override ? 'advisor_override' : 'advisor_no_override'
+          if (result.override) {
+            console.log(`[local-ai-card-beta] Advisor override: ${conventionalCard.id} → ${result.finalCard.id} (reason=${result.reason}, seat=${seat})`)
+          }
         }
       } catch (e) {
-        aiCardValid = false
-        decisionSource = 'conventional_fallback'
+        decisionSource = 'advisor_fallback'
+        finalCard = conventionalCard
         fallbackUsed = true
         fallbackReason = `exception: ${e instanceof Error ? e.message : String(e)}`
         console.warn(
-          `[local-ai-card-beta] Exception при AI inference за seat=${seat} (${e instanceof Error ? e.message : String(e)}) — fallback към conventional bot.`,
+          `[local-ai-card-beta] Exception при advisor decision за seat=${seat} (${e instanceof Error ? e.message : String(e)}) — fallback към conventional bot.`,
         )
+      }
+    } else {
+      // ─── policyMode === 'model' — старата "pure model replacement" логика,
+      // непроменена (kept available, no longer default след пивота към advisor). ─
+      logStartupStatusOnce()
+      const model = loadModel()
+
+      if (!model) {
+        decisionSource = 'conventional_fallback'
+        fallbackUsed = true
+        fallbackReason = currentModelFailureReason() ?? 'AI model не е наличен'
+      } else {
+        modelVersionUsed = model.modelVersion
+        const legalIds = new Set(legalCards.map((c) => c.id))
+        const handIds = new Set(hand.map((c) => c.id))
+
+        try {
+          const decisionState = buildCardDecisionState(state, seat, legalCards)
+          const prediction = rankLegalCardsWithCardModel(model, decisionState)
+          rankingLength = prediction.ranking.length
+          topPredictions = prediction.ranking
+            .slice(0, 3)
+            .map((r) => ({ id: r.id, score: r.score, probability: r.probability }))
+          fallbackUsed = prediction.fallbackUsed
+          fallbackReason = prediction.fallbackReason
+
+          const predictionIsValidMember = legalIds.has(prediction.selectedCard) && handIds.has(prediction.selectedCard)
+
+          // Ако rankLegalCardsWithCardModel вътрешно fallback-на (напр. non-finite
+          // score) ИЛИ избраната карта се окаже извън legalCards/ownHand, това НЕ
+          // е реална AI препоръка — третираме го като conventional_fallback и
+          // връщаме точно conventionalCard, а не вътрешния first-legal pick на
+          // inference модула (за да decisionSource="conventional_fallback" винаги
+          // означава "finalCard === conventionalCard", както изисква схемата).
+          if (!predictionIsValidMember || prediction.fallbackUsed) {
+            aiCardValid = predictionIsValidMember
+            if (!predictionIsValidMember) {
+              console.warn(
+                `[local-ai-card-beta] AI selected card "${prediction.selectedCard}" е invalid (не е в legalCards/ownHand за seat=${seat}) — fallback към conventional bot.`,
+              )
+            }
+            decisionSource = 'conventional_fallback'
+            finalCard = conventionalCard
+            fallbackUsed = true
+            fallbackReason = fallbackReason ?? 'AI selected card извън legalCards/ownHand'
+          } else {
+            aiCardValid = true
+            aiSelectedCardId = prediction.selectedCard
+            const aiCard = legalCards.find((c) => c.id === prediction.selectedCard)!
+            aiSameAsConventional = aiCard.id === conventionalCard.id
+            finalCard = aiCard
+            decisionSource = aiSameAsConventional ? 'ai_same_as_conventional' : 'ai_accepted'
+            console.log(`[local-ai-card-beta] AI избра карта: ${aiCard.id} (seat=${seat})`)
+          }
+        } catch (e) {
+          aiCardValid = false
+          decisionSource = 'conventional_fallback'
+          fallbackUsed = true
+          fallbackReason = `exception: ${e instanceof Error ? e.message : String(e)}`
+          console.warn(
+            `[local-ai-card-beta] Exception при AI inference за seat=${seat} (${e instanceof Error ? e.message : String(e)}) — fallback към conventional bot.`,
+          )
+        }
       }
     }
   }
@@ -425,6 +565,20 @@ export function pickServerBotPlayCardWithAiCandidate(
       aiCardValid,
       rankingLength,
       topPredictions,
+      policyMode: policyModeUsed,
+      advisorSelectedCard: advisorSelectedCardId,
+      advisorOverride: advisorOverrideFlag,
+      advisorReason: advisorReasonValue,
+      partnerCurrentlyWinning: partnerCurrentlyWinningForTrace,
+      opponentCurrentlyWinning: opponentCurrentlyWinningForTrace,
+      conventionalCardCandidateIsCleanWinner: conventionalCleanWinner,
+      conventionalCardShouldPreserveCleanWinner: conventionalPreserve,
+      finalCardCandidateIsCleanWinner: finalCleanWinner,
+      finalCardShouldPreserveCleanWinner: finalPreserve,
+      predictedWinnerIfConventional: predictedWinnerConventionalSeat,
+      predictedWinningTeamIfConventional: predictedWinnerConventionalSeat ? deriveTeam(predictedWinnerConventionalSeat) : null,
+      predictedWinnerIfAdvisor: predictedWinnerAdvisorSeat,
+      predictedWinningTeamIfAdvisor: predictedWinnerAdvisorSeat ? deriveTeam(predictedWinnerAdvisorSeat) : null,
       roomKey: null,
     })
   }

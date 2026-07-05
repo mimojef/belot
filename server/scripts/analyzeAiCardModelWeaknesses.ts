@@ -635,6 +635,7 @@ type TraceAnalysis = {
 function analyzeTrace(records: TraceRecord[]): TraceAnalysis {
   const sourceCounts: Record<DecisionSource, number> = {
     ai_disabled: 0, ai_accepted: 0, ai_same_as_conventional: 0, conventional_fallback: 0, forced_card: 0,
+    advisor_override: 0, advisor_no_override: 0, advisor_fallback: 0,
   }
   let invalidAiPredictions = 0
   let invalidFinalCards = 0
