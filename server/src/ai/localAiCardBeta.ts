@@ -37,6 +37,16 @@
  * validated offline by server/scripts/{trainCardModel,testCardModelInference,
  * simulateAiCardCandidate}.ts (server/src/ai/cardModelFeatures.ts,
  * cardModelInference.ts) — nothing is duplicated or re-implemented here.
+ *
+ * Optional local-only Rule E2 OBSERVATIONAL tracing
+ * (LOCAL_AI_CARD_BETA_RULE_E2_TRACE_ENABLED, default OFF, independent of the
+ * AI/policy/trace flags above, only takes effect when trace is also ON) adds
+ * a `ruleE2Observation` field to each trace record describing what the
+ * proposed Rule E2 (`e2_no_point_feed` partner-signal-return variant, see
+ * server/src/ai/cardAdvisorSignalRuleE2.ts) would have suggested and why
+ * (not) — purely for local beta observation. It NEVER selects the bot's
+ * actual card and NEVER affects decisionSource. When this flag is OFF, no
+ * ruleE2Observation key is added to the trace record at all.
  */
 
 import { appendFileSync, mkdirSync } from 'node:fs'
@@ -58,6 +68,11 @@ import {
 import { deriveTeam, type CardDecisionState, type Team } from './cardModelFeatures.js'
 import { decideAdvisorCard, type AdvisorDecisionInput, type AdvisorReason } from './cardAdvisorPolicy.js'
 import { buildAdvisorRuntimeMemory } from './cardAdvisorMemory.js'
+import {
+  observeRuleE2NoPointFeed,
+  type RuleE2SignalType,
+  type RuleE2SuppressionReason,
+} from './cardAdvisorSignalRuleE2.js'
 
 // ─── Feature flags ─────────────────────────────────────────────────────────────
 
@@ -67,6 +82,21 @@ function isLocalAiCardBetaEnabled(): boolean {
 
 function isLocalAiCardBetaTraceEnabled(): boolean {
   return process.env['LOCAL_AI_CARD_BETA_TRACE_ENABLED']?.trim().toLowerCase() === 'true'
+}
+
+/**
+ * Purely OBSERVATIONAL — never influences finalCard/decisionSource. When true
+ * (and LOCAL_AI_CARD_BETA_TRACE_ENABLED is also true), each trace record gets
+ * an additional `ruleE2Observation` payload describing what the proposed
+ * Rule E2 (`e2_no_point_feed` variant, see server/src/ai/cardAdvisorSignalRuleE2.ts
+ * and server/scripts/evaluateRuleE2SignalAdvisor.ts) would have suggested and
+ * why (not) — for local beta observation only, so a future decision about a
+ * real runtime override can be informed by live gameplay data, not just the
+ * offline dataset. Default OFF; when OFF, no ruleE2Observation key is added
+ * to the trace record at all (not even null), keeping trace output lean.
+ */
+function isLocalAiCardBetaRuleE2TraceEnabled(): boolean {
+  return process.env['LOCAL_AI_CARD_BETA_RULE_E2_TRACE_ENABLED']?.trim().toLowerCase() === 'true'
 }
 
 export type LocalAiCardBetaPolicyMode = 'model' | 'advisor'
@@ -261,6 +291,26 @@ export type LocalAiCardBetaTraceRecord = {
   // (trainingRecorderCollector), недостъпен от тук. Затова полето е винаги
   // null — никога не се извежда/измисля raw roomId.
   roomKey: null
+  // Optional (не `| null`, а изцяло липсващо поле, когато flag-ът е OFF) —
+  // виж isLocalAiCardBetaRuleE2TraceEnabled(). Чисто observational: никога не
+  // влияе finalCard/decisionSource по-горе.
+  ruleE2Observation?: LocalAiCardBetaRuleE2ObservationPayload
+}
+
+export type LocalAiCardBetaRuleE2ObservationPayload = {
+  enabled: true
+  variant: 'e2_no_point_feed'
+  wouldFire: boolean
+  suggestedCard: string | null
+  signalSuit: string | null
+  signalType: RuleE2SignalType | null
+  signalConfidence: number | null
+  suppressionReason: RuleE2SuppressionReason | null
+  wouldDifferFromFinal: boolean
+  wouldDifferFromConventional: boolean
+  wouldDifferFromAdvisorV0: boolean
+  safety: { suggestionInLegalCards: boolean; suggestionInOwnHand: boolean }
+  error: string | null
 }
 
 const SEAT_ORDER: Seat[] = ['bottom', 'right', 'top', 'left']
@@ -538,6 +588,61 @@ export function pickServerBotPlayCardWithAiCandidate(
     const handIds = new Set(hand.map((c) => c.id))
     const finalCardValid = finalCard !== null && legalIds.has(finalCard.id) && (hand.length === 0 || handIds.has(finalCard.id))
 
+    // ─── Rule E2 observational trace (never influences finalCard/decisionSource) ─
+    // Independent of aiEnabled/policyMode — computes its own shadow advisor v0
+    // (A-D) check internally (see cardAdvisorSignalRuleE2.ts), so this works
+    // even when the live decision took the 'model' policy path or AI is off.
+    let ruleE2Observation: LocalAiCardBetaRuleE2ObservationPayload | undefined
+    if (isLocalAiCardBetaRuleE2TraceEnabled()) {
+      try {
+        const partnerSeat = getPartnerSeat(seat)
+        const obs = observeRuleE2NoPointFeed({
+          state,
+          seat,
+          partnerSeat,
+          legalCards,
+          ownHand: hand,
+          contract: traceContract,
+          trumpSuit: trumpSuit as ServerSuit | null,
+          currentTrickPlays: currentPlays,
+        })
+        ruleE2Observation = {
+          enabled: true,
+          variant: obs.variant,
+          wouldFire: obs.wouldFire,
+          suggestedCard: obs.suggestedCard,
+          signalSuit: obs.signalSuit,
+          signalType: obs.signalType,
+          signalConfidence: obs.signalConfidence,
+          suppressionReason: obs.suppressionReason,
+          wouldDifferFromFinal: obs.suggestedCard !== null && obs.suggestedCard !== (finalCard?.id ?? null),
+          wouldDifferFromConventional: obs.suggestedCard !== null && obs.suggestedCard !== (conventionalCard?.id ?? null),
+          wouldDifferFromAdvisorV0: obs.suggestedCard !== null && obs.advisorV0CardId !== null && obs.suggestedCard !== obs.advisorV0CardId,
+          safety: obs.safety,
+          error: null,
+        }
+      } catch (e) {
+        ruleE2Observation = {
+          enabled: true,
+          variant: 'e2_no_point_feed',
+          wouldFire: false,
+          suggestedCard: null,
+          signalSuit: null,
+          signalType: null,
+          signalConfidence: null,
+          suppressionReason: null,
+          wouldDifferFromFinal: false,
+          wouldDifferFromConventional: false,
+          wouldDifferFromAdvisorV0: false,
+          safety: { suggestionInLegalCards: true, suggestionInOwnHand: true },
+          error: `exception: ${e instanceof Error ? e.message : String(e)}`,
+        }
+        console.warn(
+          `[local-ai-card-beta-trace] Rule E2 observation exception за seat=${seat} (${e instanceof Error ? e.message : String(e)}) — само trace полето е засегнато, finalCard непроменен.`,
+        )
+      }
+    }
+
     writeTraceRecordSafely({
       timestamp: new Date().toISOString(),
       traceVersion: LOCAL_AI_CARD_BETA_TRACE_VERSION,
@@ -580,6 +685,7 @@ export function pickServerBotPlayCardWithAiCandidate(
       predictedWinnerIfAdvisor: predictedWinnerAdvisorSeat,
       predictedWinningTeamIfAdvisor: predictedWinnerAdvisorSeat ? deriveTeam(predictedWinnerAdvisorSeat) : null,
       roomKey: null,
+      ...(ruleE2Observation ? { ruleE2Observation } : {}),
     })
   }
 
