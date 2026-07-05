@@ -60,6 +60,7 @@
     "analyze:human-move-memory-v2": "tsx scripts/analyzeHumanMoveMemoryV2.ts",
     "evaluate:card-advisor": "tsx scripts/evaluateCardAdvisor.ts",
     "check:local-ai-card-beta-advisor": "tsx scripts/checkLocalAiCardBetaAdvisor.ts",
+    "analyze:partner-signal-memory": "tsx scripts/analyzePartnerSignalMemory.ts",
     "check:local-ai-card-beta-runbook": "tsx scripts/checkLocalAiCardBetaRunbook.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",
