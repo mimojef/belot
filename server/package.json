@@ -61,6 +61,7 @@
     "evaluate:card-advisor": "tsx scripts/evaluateCardAdvisor.ts",
     "check:local-ai-card-beta-advisor": "tsx scripts/checkLocalAiCardBetaAdvisor.ts",
     "analyze:partner-signal-memory": "tsx scripts/analyzePartnerSignalMemory.ts",
+    "evaluate:signal-memory-advisor": "tsx scripts/evaluateSignalMemoryAdvisor.ts",
     "check:local-ai-card-beta-runbook": "tsx scripts/checkLocalAiCardBetaRunbook.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",

@@ -39,7 +39,7 @@
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { readJsonlFilesFromTarGz } from './trainingDataset/tarGzJsonlReader.js'
 import {
@@ -73,11 +73,11 @@ const REPORT_MD_PATH = join(REPORT_DIR, 'partner-signal-memory-analysis.md')
 // never import seat helpers from pickServerBotPlayCard.ts) ──────────────────────
 
 const SEAT_ORDER: Seat[] = ['bottom', 'right', 'top', 'left']
-function getPartnerSeat(seat: Seat): Seat {
+export function getPartnerSeat(seat: Seat): Seat {
   return SEAT_ORDER[(SEAT_ORDER.indexOf(seat) + 2) % 4]!
 }
 
-function isTrumpCard(suit: ServerSuit, contract: string, trumpSuit: ServerSuit | null): boolean {
+export function isTrumpCard(suit: ServerSuit, contract: string, trumpSuit: ServerSuit | null): boolean {
   if (contract === 'all-trumps') return true
   if (contract === 'no-trumps') return false
   return trumpSuit !== null && suit === trumpSuit
@@ -100,7 +100,7 @@ function pct(part: number, total: number): string {
 type SuitLeadEvent = { trickIndex: number; suit: ServerSuit; rank: string; rankPower: number; isHigh: boolean; isLow: boolean }
 type SuitPlayEvent = { trickIndex: number; suit: ServerSuit }
 
-type DealLedger = {
+export type DealLedger = {
   suitLeadsBySeat: Record<Seat, SuitLeadEvent[]>
   suitPlaysBySeat: Record<Seat, SuitPlayEvent[]>
   voidSuitsBySeat: Record<Seat, Set<ServerSuit>>
@@ -117,7 +117,7 @@ function topRankForSuit(suit: ServerSuit, contract: string, trumpSuit: ServerSui
   return isTrumpCard(suit, contract, trumpSuit) ? 'J' : 'A'
 }
 
-function buildDealLedger(deal: TrainingDealRecord): DealLedger {
+export function buildDealLedger(deal: TrainingDealRecord): DealLedger {
   const contract = deal.finalContract?.contract ?? 'no-trumps'
   const trumpSuit = deal.finalContract?.trumpSuit ?? null
 
@@ -176,7 +176,7 @@ function buildDealLedger(deal: TrainingDealRecord): DealLedger {
 
 // ─── Signal detection (queried at decision time, filtered to trickIndex < actionTrickIndex) ─
 
-type SuitReturnSignal = {
+export type SuitReturnSignal = {
   suit: ServerSuit
   signalTrickIndex: number
   isHigh: boolean
@@ -186,7 +186,7 @@ type SuitReturnSignal = {
   confidence: number
 }
 
-function detectPartnerSuitSignal(
+export function detectPartnerSuitSignal(
   ledger: DealLedger,
   partnerSeat: Seat,
   actingSeat: Seat,
@@ -220,9 +220,9 @@ function detectPartnerSuitSignal(
   return null
 }
 
-type TrumpDrawSignal = { signalTrickIndex: number; confidence: number }
+export type TrumpDrawSignal = { signalTrickIndex: number; confidence: number }
 
-function detectPartnerTrumpDrawSignal(ledger: DealLedger, partnerSeat: Seat, actionTrickIndex: number): TrumpDrawSignal | null {
+export function detectPartnerTrumpDrawSignal(ledger: DealLedger, partnerSeat: Seat, actionTrickIndex: number): TrumpDrawSignal | null {
   const leadsBeforeNow = ledger.trumpLeadTricksBySeat[partnerSeat]!.filter((t) => t < actionTrickIndex)
   if (leadsBeforeNow.length === 0) return null
   const last = leadsBeforeNow[leadsBeforeNow.length - 1]!
@@ -621,7 +621,13 @@ function renderMarkdown(report: any): string {
   return lines.join('\n')
 }
 
-main().catch((e) => {
-  console.error('FATAL:', e instanceof Error ? e.stack ?? e.message : String(e))
-  process.exit(2)
-})
+// main() трябва да тръгне САМО когато файлът се изпълнява директно (npm run
+// analyze:partner-signal-memory), НЕ когато buildDealLedger/detectPartnerSuitSignal/
+// detectPartnerTrumpDrawSignal се import-ват от evaluateSignalMemoryAdvisor.ts
+// (иначе process.exit тук би убил импортиращия процес по средата на неговия run).
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  main().catch((e) => {
+    console.error('FATAL:', e instanceof Error ? e.stack ?? e.message : String(e))
+    process.exit(2)
+  })
+}
