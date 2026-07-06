@@ -68,6 +68,7 @@
     "analyze:rule-e2-observation-trace": "tsx scripts/analyzeRuleE2ObservationTrace.ts",
     "analyze:advisor-override-trace-cases": "tsx scripts/analyzeAdvisorOverrideTraceCases.ts",
     "check:local-ai-shadow-trace": "tsx scripts/checkLocalAiShadowTrace.ts",
+    "check:production-shadow-trace-readiness": "tsx scripts/checkProductionShadowTraceReadiness.ts",
     "check:local-ai-card-beta-runbook": "tsx scripts/checkLocalAiCardBetaRunbook.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",
