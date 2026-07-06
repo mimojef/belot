@@ -47,6 +47,15 @@
  * (not) — purely for local beta observation. It NEVER selects the bot's
  * actual card and NEVER affects decisionSource. When this flag is OFF, no
  * ruleE2Observation key is added to the trace record at all.
+ *
+ * Separate, PRODUCTION-SAFE shadow observation mode
+ * (LOCAL_AI_CARD_SHADOW_TRACE_ENABLED, default OFF, fully independent of
+ * every flag above — see server/src/ai/localAiCardShadowTrace.ts) can be
+ * enabled even when LOCAL_AI_CARD_BETA_ENABLED stays OFF. It writes its own
+ * separate JSONL file recording what advisor v0 and Rule E2 would have
+ * picked, purely as observation — the actual selected card is always
+ * whatever this function already computed (conventionalCard, when the beta
+ * AI flag is off, which is the intended production posture for this mode).
  */
 
 import { appendFileSync, mkdirSync } from 'node:fs'
@@ -73,6 +82,7 @@ import {
   type RuleE2SignalType,
   type RuleE2SuppressionReason,
 } from './cardAdvisorSignalRuleE2.js'
+import { runLocalAiCardShadowTraceIfEnabled, isLocalAiCardShadowTraceEnabled } from './localAiCardShadowTrace.js'
 
 // ─── Feature flags ─────────────────────────────────────────────────────────────
 
@@ -381,8 +391,9 @@ export function pickServerBotPlayCardWithAiCandidate(
   const conventionalCard = pickServerBotPlayCard(state, seat)
   const aiEnabled = isLocalAiCardBetaEnabled()
   const traceEnabled = isLocalAiCardBetaTraceEnabled()
+  const shadowTraceEnabled = isLocalAiCardShadowTraceEnabled()
 
-  if (!aiEnabled && !traceEnabled) {
+  if (!aiEnabled && !traceEnabled && !shadowTraceEnabled) {
     return conventionalCard
   }
 
@@ -686,6 +697,24 @@ export function pickServerBotPlayCardWithAiCandidate(
       predictedWinningTeamIfAdvisor: predictedWinnerAdvisorSeat ? deriveTeam(predictedWinnerAdvisorSeat) : null,
       roomKey: null,
       ...(ruleE2Observation ? { ruleE2Observation } : {}),
+    })
+  }
+
+  // ─── Production-safe shadow observation trace (see localAiCardShadowTrace.ts) ─
+  // Fully independent of aiEnabled/traceEnabled — never influences finalCard,
+  // only observes what advisor v0/Rule E2 would have picked and logs it to a
+  // separate file. Fail-safe internally; cannot affect the returned card.
+  if (shadowTraceEnabled) {
+    runLocalAiCardShadowTraceIfEnabled({
+      state,
+      seat,
+      conventionalCard,
+      finalCard,
+      legalCards,
+      ownHand: hand,
+      currentTrickPlays: currentPlays,
+      gameMode: traceContract,
+      trumpSuit: trumpSuit as ServerSuit | null,
     })
   }
 
