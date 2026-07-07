@@ -49,6 +49,7 @@ export function tryCreatePendingMatchGroup(
       readyResult.shouldStartImmediately,
       blockCheck,
       createTempBot,
+      readyResult.maxBots,
     )
 
     return {

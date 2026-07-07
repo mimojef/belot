@@ -62,6 +62,15 @@ export type PendingMatchGroup = {
 
 export const MATCHMAKING_WAIT_MS = 20000
 
+// Duration of the bot-fill window before oldest entry expires.
+// With MATCHMAKING_WAIT_MS=20000 this opens the bot-fill window at t=17s.
+export const MATCHMAKING_BOT_FILL_WINDOW_MS = 3000
+
+// How many bots are allowed per elapsed second inside the bot-fill window.
+// One bot is unlocked per second: t=17s→1 bot, t=18s→2 bots, t=19s→3 bots.
+// A room is only created when humans + allowedBots === 4 (full table).
+export const MATCHMAKING_BOT_FILL_RATE_MS = 1000
+
 // Populated at runtime from matchRoomsStore — do not rely on this at import time.
 export let SUPPORTED_MATCH_STAKES: MatchStake[] = []
 

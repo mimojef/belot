@@ -145,6 +145,7 @@ export function createMatchedRoomFromEntries(
   shouldStartImmediately: boolean,
   blockCheck?: BlockCheck,
   createTempBot?: TempBotFactory,
+  maxBots?: number,
 ): CreateMatchedRoomFromEntriesResult {
   const createdAt = Date.now()
   const stake = assertSingleStake(entries)
@@ -197,14 +198,18 @@ export function createMatchedRoomFromEntries(
     })
   }
 
+  // Honour the staged bot-fill limit: only add up to maxBots bots this tick.
+  // Undefined means no limit (e.g. shouldStartImmediately path).
+  const botLimit = maxBots ?? shuffledSeats.length
+
   const selectedBotProfiles = selectMatchmakingBotProfiles({
     stake,
-    count: shuffledSeats.length,
+    count: Math.min(shuffledSeats.length, botLimit),
     selectionSeed: createMatchmakingBotSelectionSeed(stake, entries),
     createTempBot,
   })
 
-  while (shuffledSeats.length > 0) {
+  while (shuffledSeats.length > 0 && addedBots.length < botLimit) {
     const seat = shuffledSeats.shift()
 
     if (!seat) {
