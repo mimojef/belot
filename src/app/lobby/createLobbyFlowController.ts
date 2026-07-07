@@ -513,6 +513,7 @@ type InternalLobbyFlowState = {
   giftModalFriendName: string
   giftModalErrorText: string | null
   giftSuccessModal: { amount: number; friendName: string } | null
+  giftReceivedModal: { amount: number; fromDisplayName: string } | null
   pendingGiftNotifications: Array<{ giftId: string; amount: number; fromDisplayName: string }>
   acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   acceptanceProcessingIds: Set<string>
@@ -742,6 +743,7 @@ function createInitialState(): InternalLobbyFlowState {
     giftModalFriendName: '',
     giftModalErrorText: null,
     giftSuccessModal: null,
+    giftReceivedModal: null,
     pendingGiftNotifications: [],
     acceptanceNotifications: [],
     acceptanceProcessingIds: new Set<string>(),
@@ -1820,6 +1822,7 @@ export function createLobbyFlowController(
       giftModalFriendName: state.giftModalFriendName,
       giftModalErrorText: state.giftModalErrorText,
       giftSuccessModal: state.giftSuccessModal,
+      giftReceivedModal: state.giftReceivedModal,
       pendingGiftNotifications: state.pendingGiftNotifications,
       acceptanceNotifications: state.acceptanceNotifications,
       acceptanceErrorText: state.acceptanceErrorText,
@@ -2261,6 +2264,10 @@ export function createLobbyFlowController(
         state.giftSuccessModal = null
         render()
       },
+      onGiftReceivedClose: () => {
+        state.giftReceivedModal = null
+        render()
+      },
       onLowCoinsModalClose: () => {
         state.lowCoinsModalOpen = false
         render()
@@ -2311,7 +2318,7 @@ export function createLobbyFlowController(
       },
       onNotifGiftClick: (giftId, amount, fromDisplayName) => {
         state.pendingGiftNotifications = state.pendingGiftNotifications.filter((g) => g.giftId !== giftId)
-        state.giftSuccessModal = { amount, friendName: fromDisplayName }
+        state.giftReceivedModal = { amount, fromDisplayName }
         void options.onMarkGiftNotificationRead?.(giftId)
         render()
       },

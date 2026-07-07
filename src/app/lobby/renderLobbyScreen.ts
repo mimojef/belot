@@ -180,6 +180,7 @@ export type LobbyScreenState = {
   giftModalFriendName: string
   giftModalErrorText: string | null
   giftSuccessModal: { amount: number; friendName: string } | null
+  giftReceivedModal: { amount: number; fromDisplayName: string } | null
   pendingGiftNotifications: Array<{ giftId: string; amount: number; fromDisplayName: string }>
   acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   acceptanceErrorText: string | null
@@ -383,6 +384,7 @@ export type RenderLobbyScreenOptions = {
   onGiftCoinsClose: () => void
   onGiftCoinsSubmit: (friendshipId: string, amount: number) => void
   onGiftSuccessClose: () => void
+  onGiftReceivedClose: () => void
   onLowCoinsModalClose: () => void
   onLowCoinsShopClick: () => void
   onAuthModalClose: () => void
@@ -1211,6 +1213,38 @@ function renderGiftSuccessModal(state: LobbyScreenState): string {
         <button
           type="button"
           data-lobby-gift-success-ok="1"
+          style="
+            width:100%;
+            height:44px;
+            border:0;
+            border-radius:8px;
+            background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+            color:#080808;
+            font-size:15px;
+            font-weight:900;
+            cursor:pointer;
+          "
+        >OK</button>
+      </div>
+    </div>
+  `
+}
+
+function renderGiftReceivedModal(state: LobbyScreenState): string {
+  if (!state.giftReceivedModal) return ''
+  const { amount, fromDisplayName } = state.giftReceivedModal
+  return `
+    <div data-lobby-gift-received-root="1" style="position:fixed;inset:0;z-index:13600;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div style="position:absolute;inset:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,400px);border-radius:12px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:32px 28px;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center;">
+        <div style="width:56px;height:56px;border-radius:999px;background:linear-gradient(180deg,rgba(212,165,32,0.18) 0%,rgba(212,165,32,0.08) 100%);border:2px solid rgba(212,165,32,0.50);display:flex;align-items:center;justify-content:center;font-size:28px;">🎁</div>
+        <div>
+          <div style="font-size:20px;font-weight:900;color:#f8fafc;line-height:1.2;">${escapeHtml(fromDisplayName)} ви подари</div>
+          <div style="margin-top:8px;font-size:14px;font-weight:700;color:rgba(255,255,255,0.62);">${escapeHtml(String(amount.toLocaleString('bg-BG')))} жълтици</div>
+        </div>
+        <button
+          type="button"
+          data-lobby-gift-received-ok="1"
           style="
             width:100%;
             height:44px;
@@ -6982,6 +7016,7 @@ export function renderLobbyScreen(
     </div>
     ${renderGiftCoinsModal(state)}
     ${renderGiftSuccessModal(state)}
+    ${renderGiftReceivedModal(state)}
   ` : `
     <div
       ${mobileLayoutAttribute}
@@ -7208,6 +7243,7 @@ export function renderLobbyScreen(
     </div>
     ${renderGiftCoinsModal(state)}
     ${renderGiftSuccessModal(state)}
+    ${renderGiftReceivedModal(state)}
   `
 
   const mobileMenuEl = root.querySelector<HTMLDetailsElement>('[data-lobby-mobile-menu="1"]')
@@ -8186,6 +8222,10 @@ export function renderLobbyScreen(
   root
     .querySelector<HTMLButtonElement>('[data-lobby-gift-success-ok="1"]')
     ?.addEventListener('click', options.onGiftSuccessClose)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-gift-received-ok="1"]')
+    ?.addEventListener('click', options.onGiftReceivedClose)
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-profile-editor-close="1"]')
