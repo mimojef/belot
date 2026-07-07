@@ -1594,7 +1594,7 @@ function renderGuestHeroCard(signupBonus: number, useMobileLayout = false): stri
   const heroBannerHtml = useMobileLayout
     ? ''
     : `
-      <div style="flex:0 1 985px; min-width:0; border:2px solid rgba(212,165,32,0.75); border-radius:14px; overflow:hidden; position:relative; box-sizing:border-box;">
+      <div style="flex:0 1 985px; min-width:0; border:2px solid rgba(212,165,32,0.88); border-radius:14px; overflow:hidden; position:relative; box-sizing:border-box;">
         <img src="/assets/lobby/hero-banner.png" alt="Добре дошъл в лобито"
           style="width:100%; height:254px; max-width:100%; display:block; object-fit:contain;">
       </div>
@@ -1606,7 +1606,7 @@ function renderGuestHeroCard(signupBonus: number, useMobileLayout = false): stri
       <div style="
         flex:1 1 620px; min-width:580px; height:258px;
         background: linear-gradient(160deg, #050505 0%, #0d0d0d 100%);
-        border: 2px solid rgba(212,165,32,0.75);
+        border: 2px solid rgba(212,165,32,0.88);
         border-radius:14px;
         padding:16px 28px;
         box-sizing:border-box;
@@ -1690,7 +1690,7 @@ function renderHeroSection(
   const heroBannerHtml = useMobileLayout
     ? ''
     : `
-      <div style="flex:0 1 985px; min-width:0; border:2px solid rgba(212,165,32,0.75); border-radius:14px; overflow:hidden; position:relative; box-sizing:border-box;">
+      <div style="flex:0 1 985px; min-width:0; border:2px solid rgba(212,165,32,0.88); border-radius:14px; overflow:hidden; position:relative; box-sizing:border-box;">
         <img src="/assets/lobby/hero-banner.png" alt="Добре дошъл в лобито"
           style="width:100%; height:254px; max-width:100%; display:block; object-fit:contain;">
       </div>
@@ -1702,7 +1702,7 @@ function renderHeroSection(
       <div style="
         flex:1 1 620px; min-width:580px; height:258px;
         background: linear-gradient(160deg, #050505 0%, #0d0d0d 100%);
-        border: 2px solid rgba(212,165,32,0.75);
+        border: 2px solid rgba(212,165,32,0.88);
         border-radius:14px;
         padding:16px 28px;
         box-sizing:border-box;
@@ -1852,14 +1852,13 @@ function renderStakeSection(
           min-width:180px;
           position:relative;
           background:#000000;
-          border: 1px solid ${isSelected ? '#c8940e' : isLocked ? 'rgba(255,255,255,0.35)' : 'rgba(212,165,32,0.72)'};
+          border: 2px solid ${isSelected ? '#d4a520' : isLocked ? 'rgba(255,255,255,0.35)' : 'rgba(212,165,32,0.88)'};
           border-radius:12px;
           padding:16px 14px 14px;
           cursor:${isDisabled ? 'default' : 'pointer'};
           text-align:left;
           overflow:hidden;
-          transition:border-color 0.15s, background 0.15s, box-shadow 0.15s;
-          box-shadow: ${isSelected ? '0 0 0 1px rgba(200,148,14,0.3), 0 8px 24px rgba(0,0,0,0.4)' : '0 4px 16px rgba(0,0,0,0.3)'};
+          transition:border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
           opacity:${isLocked ? '0.72' : isDisabled && !isSelected ? '0.7' : '1'};
         "
       >
@@ -1984,8 +1983,9 @@ function renderStakeSection(
 
       <style>
         [data-lobby-stake-card]:not(:disabled):hover {
-          border-color:#c8940e !important;
-          box-shadow:0 0 0 2px rgba(200,148,14,0.42), 0 8px 24px rgba(212,165,32,0.18) !important;
+          border-color:rgba(212,165,32,0.96) !important;
+          background:rgba(212,165,32,0.06) !important;
+          box-shadow:inset 0 0 0 1px rgba(212,165,32,0.96) !important;
         }
         [data-stakes-prev]:hover, [data-stakes-next]:hover {
           background:linear-gradient(180deg, rgba(112,76,10,1) 0%, rgba(42,29,5,1) 100%) !important;
@@ -2375,21 +2375,20 @@ function renderBottomSection(
   const footerDecorHtml = useMobileLayout
     ? ''
     : '<img src="/assets/lobby/footer-decor.png" alt="" style="width:332px; height:137px; display:block; object-fit:contain;">'
-  const coinPackages = lobbyPackages.map((pkg, index) => {
-    const isFirstPackage = index === 0
+  const coinPackages = lobbyPackages.map((pkg, pkgIndex) => {
     const imgSrc = getCoinPackageImage(pkg.sortOrder)
+    const isFirstPkg = pkgIndex === 0
 
     return `
     <div style="
       background:#000000;
-      border:1px solid rgba(212,165,32,0.72);
+      border:2px solid rgba(212,165,32,0.84);
       border-radius:12px;
       padding:10px 12px;
-      margin-left:${isFirstPackage ? '-8px' : '0'};
       display:grid; grid-template-columns:80px minmax(0, 1fr); align-items:center; gap:10px;
       flex:1; min-width:0;
       overflow:hidden;
-      box-shadow:inset 0 0 18px rgba(212,165,32,0.035);
+      ${isFirstPkg ? 'position:relative; z-index:2;' : ''}
     ">
       <div style="height:98px; display:flex; align-items:center; justify-content:center;">
         <img src="${imgSrc}" alt="${formatAmount(pkg.yellowCoinsAmount)} жълтици"
@@ -2421,19 +2420,29 @@ function renderBottomSection(
   const packagesSection = lobbyPackages.length === 0 ? '' : `
     <div style="
       display:grid;
-      grid-template-columns:310px repeat(${lobbyPackages.length}, minmax(0, 1fr));
+      grid-template-columns:326px repeat(${lobbyPackages.length}, minmax(0, 1fr));
       gap:8px;
       align-items:stretch;
       margin-bottom:16px;
     ">
       <div style="
         background:#000000;
-        border:1px solid rgba(212,165,32,0.72);
-        border-right:0;
-        border-radius:12px 0 0 12px;
+        border:2px solid rgba(212,165,32,0.84);
+        border-radius:12px;
         padding:15px 20px;
         display:flex; flex-direction:column; justify-content:center;
+        position:relative; overflow:visible; z-index:1;
       ">
+        <div style="
+          position:absolute; top:-2px; bottom:-2px;
+          right:calc(-8px - 50%);
+          left:0;
+          background:#000000;
+          border:2px solid rgba(212,165,32,0.84);
+          border-right:0;
+          border-radius:12px 0 0 12px;
+          pointer-events:none; z-index:-1;
+        "></div>
         <div style="display:flex; align-items:flex-start; gap:10px;">
           <div style="
             width:45px; height:43px; border-radius:12px;
@@ -2498,16 +2507,16 @@ function renderBottomSection(
     ">
       <div data-lobby-private-rooms-card="1" style="
         background:#000000;
-        border:1px solid rgba(167,139,250,0.62);
+        border:2px solid rgba(167,139,250,0.78);
         border-radius:12px;
         padding:16px;
         display:flex; align-items:center; gap:14px;
         cursor:pointer;
         min-height:137px;
-        transition:border-color 0.15s, box-shadow 0.15s;
+        transition:border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
       "
-      onmouseenter="this.style.borderColor='rgba(167,139,250,1)';this.style.boxShadow='0 0 0 1px rgba(167,139,250,0.5)'"
-      onmouseleave="this.style.borderColor='rgba(167,139,250,0.62)';this.style.boxShadow='none'"
+      onmouseenter="this.style.borderColor='rgba(167,139,250,0.96)';this.style.boxShadow='inset 0 0 0 1px rgba(167,139,250,0.96)';this.style.background='rgba(167,139,250,0.05)'"
+      onmouseleave="this.style.borderColor='rgba(167,139,250,0.78)';this.style.boxShadow='none';this.style.background='#000000'"
       >
         <img src="/assets/lobby/icon-private-table.png" alt="" style="width:76px; height:75px; display:block; object-fit:contain; flex-shrink:0;">
         <div style="flex:1; min-width:0;">
@@ -2518,17 +2527,17 @@ function renderBottomSection(
 
       <div data-lobby-daily-rewards-card="1" style="
         background:#000000;
-        border:1px solid rgba(212,165,32,0.68);
+        border:2px solid rgba(212,165,32,0.84);
         border-radius:12px;
         padding:16px;
         display:flex; align-items:center; gap:14px;
         cursor:pointer;
         position:relative;
         min-height:137px;
-        transition:border-color 0.15s, box-shadow 0.15s;
+        transition:border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
       "
-      onmouseenter="this.style.borderColor='rgba(212,165,32,1)';this.style.boxShadow='0 0 0 1px rgba(212,165,32,0.5)'"
-      onmouseleave="this.style.borderColor='rgba(212,165,32,0.68)';this.style.boxShadow='none'"
+      onmouseenter="this.style.borderColor='rgba(212,165,32,0.96)';this.style.boxShadow='inset 0 0 0 1px rgba(212,165,32,0.96)';this.style.background='rgba(212,165,32,0.05)'"
+      onmouseleave="this.style.borderColor='rgba(212,165,32,0.84)';this.style.boxShadow='none';this.style.background='#000000'"
       >
         ${renderQuickActionBadge(hasUnclaimedDailyReward ? 1 : 0)}
         <img src="/assets/lobby/icon-daily-rewards.png" alt="" style="width:74px; height:75px; display:block; object-fit:contain; flex-shrink:0;">
@@ -2540,17 +2549,17 @@ function renderBottomSection(
 
       <div data-lobby-missions-card="1" style="
         background:#000000;
-        border:1px solid rgba(96,165,250,0.62);
+        border:2px solid rgba(96,165,250,0.78);
         border-radius:12px;
         padding:16px;
         display:flex; align-items:center; gap:14px;
         cursor:pointer;
         min-height:137px;
         position:relative;
-        transition:border-color 0.15s, box-shadow 0.15s;
+        transition:border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
       "
-      onmouseenter="this.style.borderColor='rgba(96,165,250,1)';this.style.boxShadow='0 0 0 1px rgba(96,165,250,0.5)'"
-      onmouseleave="this.style.borderColor='rgba(96,165,250,0.62)';this.style.boxShadow='none'"
+      onmouseenter="this.style.borderColor='rgba(96,165,250,0.96)';this.style.boxShadow='inset 0 0 0 1px rgba(96,165,250,0.96)';this.style.background='rgba(96,165,250,0.05)'"
+      onmouseleave="this.style.borderColor='rgba(96,165,250,0.78)';this.style.boxShadow='none';this.style.background='#000000'"
       >
         ${renderQuickActionBadge(unclaimedMissionsCount)}
         <img src="/assets/lobby/icon-missions.png" alt="" style="width:73px; height:76px; display:block; object-fit:contain; flex-shrink:0;">
@@ -2579,17 +2588,17 @@ function renderBottomSection(
     ">
       <a href="/rules" data-lobby-rules-card="1" style="
         background:#000000;
-        border:1px solid rgba(212,165,32,0.40);
+        border:2px solid rgba(212,165,32,0.78);
         border-radius:12px;
         padding:16px;
         display:flex; align-items:center; gap:14px;
         cursor:pointer;
         min-height:80px;
-        transition:border-color 0.15s, box-shadow 0.15s;
+        transition:border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
         text-decoration:none; color:inherit;
       "
-      onmouseenter="this.style.borderColor='rgba(212,165,32,0.85)';this.style.boxShadow='0 0 0 1px rgba(212,165,32,0.35)'"
-      onmouseleave="this.style.borderColor='rgba(212,165,32,0.40)';this.style.boxShadow='none'"
+      onmouseenter="this.style.borderColor='rgba(212,165,32,0.96)';this.style.boxShadow='inset 0 0 0 1px rgba(212,165,32,0.96)';this.style.background='rgba(212,165,32,0.05)'"
+      onmouseleave="this.style.borderColor='rgba(212,165,32,0.78)';this.style.boxShadow='none';this.style.background='#000000'"
       >
         <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="rgba(212,165,32,0.90)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="9" y1="7" x2="15" y2="7"/><line x1="9" y1="11" x2="15" y2="11"/><line x1="9" y1="15" x2="12" y2="15"/></svg>
         <div style="flex:1; min-width:0;">
@@ -2600,17 +2609,17 @@ function renderBottomSection(
 
       <a href="/strategy" data-lobby-strategy-card="1" style="
         background:#000000;
-        border:1px solid rgba(212,165,32,0.40);
+        border:2px solid rgba(212,165,32,0.78);
         border-radius:12px;
         padding:16px;
         display:flex; align-items:center; gap:14px;
         cursor:pointer;
         min-height:80px;
-        transition:border-color 0.15s, box-shadow 0.15s;
+        transition:border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
         text-decoration:none; color:inherit;
       "
-      onmouseenter="this.style.borderColor='rgba(212,165,32,0.85)';this.style.boxShadow='0 0 0 1px rgba(212,165,32,0.35)'"
-      onmouseleave="this.style.borderColor='rgba(212,165,32,0.40)';this.style.boxShadow='none'"
+      onmouseenter="this.style.borderColor='rgba(212,165,32,0.96)';this.style.boxShadow='inset 0 0 0 1px rgba(212,165,32,0.96)';this.style.background='rgba(212,165,32,0.05)'"
+      onmouseleave="this.style.borderColor='rgba(212,165,32,0.78)';this.style.boxShadow='none';this.style.background='#000000'"
       >
         <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="rgba(212,165,32,0.90)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
         <div style="flex:1; min-width:0;">
@@ -2772,7 +2781,7 @@ function renderMobileProfileCard(state: LobbyScreenState, profileName: string): 
 
   return `
     <section style="
-      margin:12px;border:1px solid rgba(212,165,32,0.42);border-radius:8px;
+      margin:12px;border:2px solid rgba(212,165,32,0.84);border-radius:8px;
       background:#080808;padding:12px;display:flex;align-items:center;gap:12px;
     ">
       <button type="button" data-lobby-profile-button="1" style="
@@ -2810,7 +2819,7 @@ function renderMobileProfileCard(state: LobbyScreenState, profileName: string): 
 function renderMobileGuestCard(signupBonus: number): string {
   return `
     <section style="
-      margin:12px;border:1px solid rgba(212,165,32,0.42);border-radius:8px;
+      margin:12px;border:2px solid rgba(212,165,32,0.84);border-radius:8px;
       background:#080808;padding:14px;display:grid;gap:12px;
     ">
       <div style="font-size:20px;font-weight:900;color:#ffffff;">Pika.bg</div>
@@ -2853,7 +2862,7 @@ function renderMobileStakeSection(
     return `
       <article style="
         flex:0 0 calc(100vw - 128px);max-width:none;min-height:136px;border-radius:8px;
-        border:1px solid ${isSelected ? '#f4c95b' : isLocked ? 'rgba(255,255,255,0.24)' : 'rgba(212,165,32,0.54)'};
+        border:2px solid ${isSelected ? '#f4c95b' : isLocked ? 'rgba(255,255,255,0.28)' : 'rgba(212,165,32,0.88)'};
         background:#080808;color:#ffffff;padding:12px;text-align:left;position:relative;
         opacity:${isDisabled && !isSelected ? '0.68' : '1'};scroll-snap-align:${snapAlign};${snapMargin}box-sizing:border-box;
         overflow:hidden;
@@ -2917,7 +2926,7 @@ function renderMobileOffersSection(lobbyPackages: CoinPackageSnapshot[], isLogge
     return `
       <article style="
         flex:0 0 calc(100vw - 128px);max-width:none;min-height:136px;border-radius:8px;
-        border:1px solid rgba(212,165,32,0.44);background:#080808;padding:12px;
+        border:2px solid rgba(212,165,32,0.84);background:#080808;padding:12px;
         display:grid;grid-template-columns:82px minmax(0,1fr);gap:10px;align-items:center;scroll-snap-align:${snapAlign};${snapMargin}box-sizing:border-box;
       ">
         <img src="${imgSrc}" alt="${formatAmount(pkg.yellowCoinsAmount)} жълтици" style="width:78px;height:78px;display:block;object-fit:contain;">
@@ -2957,15 +2966,22 @@ function renderMobileOffersSection(lobbyPackages: CoinPackageSnapshot[], isLogge
 
 function renderMobileQuickActions(unclaimedMissionsCount: number, hasUnclaimedDailyReward: boolean): string {
   return `
+    <style>
+      [data-lobby-private-rooms-card]:hover { border-color:rgba(167,139,250,0.96) !important; box-shadow:inset 0 0 0 1px rgba(167,139,250,0.96) !important; background:rgba(167,139,250,0.05) !important; }
+      [data-lobby-daily-rewards-card]:hover { border-color:rgba(212,165,32,0.96) !important; box-shadow:inset 0 0 0 1px rgba(212,165,32,0.96) !important; background:rgba(212,165,32,0.05) !important; }
+      [data-lobby-missions-card]:hover { border-color:rgba(96,165,250,0.96) !important; box-shadow:inset 0 0 0 1px rgba(96,165,250,0.96) !important; background:rgba(96,165,250,0.05) !important; }
+      [data-lobby-rules-card]:hover { border-color:rgba(212,165,32,0.96) !important; box-shadow:inset 0 0 0 1px rgba(212,165,32,0.96) !important; background:rgba(212,165,32,0.05) !important; }
+      [data-lobby-strategy-card]:hover { border-color:rgba(212,165,32,0.96) !important; box-shadow:inset 0 0 0 1px rgba(212,165,32,0.96) !important; background:rgba(212,165,32,0.05) !important; }
+    </style>
     <section style="margin:14px 12px 22px;display:grid;gap:10px;">
-      <button type="button" data-lobby-private-rooms-card="1" style="${mobileActionCardStyle('#a78bfa', 'rgba(167,139,250,0.62)')}">
+      <button type="button" data-lobby-private-rooms-card="1" style="${mobileActionCardStyle('#a78bfa', 'rgba(167,139,250,0.78)')}">
         <img src="/assets/lobby/icon-private-table.png" alt="" style="${mobileActionIconStyle()}">
         <span style="min-width:0;display:grid;gap:3px;">
           <span>Частни маси</span>
           <span style="${mobileActionSubtitleStyle()}">Създай маса и играй с приятели.</span>
         </span>
       </button>
-      <button type="button" data-lobby-daily-rewards-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.68)')}">
+      <button type="button" data-lobby-daily-rewards-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.84)')}">
         ${renderQuickActionBadge(hasUnclaimedDailyReward ? 1 : 0)}
         <img src="/assets/lobby/icon-daily-rewards.png" alt="" style="${mobileActionIconStyle()}">
         <span style="min-width:0;display:grid;gap:3px;">
@@ -2973,7 +2989,7 @@ function renderMobileQuickActions(unclaimedMissionsCount: number, hasUnclaimedDa
           <span style="${mobileActionSubtitleStyle()}">Влизай всеки ден и вземи своите награди.</span>
         </span>
       </button>
-      <button type="button" data-lobby-missions-card="1" style="${mobileActionCardStyle('#60a5fa', 'rgba(96,165,250,0.62)')}">
+      <button type="button" data-lobby-missions-card="1" style="${mobileActionCardStyle('#60a5fa', 'rgba(96,165,250,0.78)')}">
         ${renderQuickActionBadge(unclaimedMissionsCount)}
         <img src="/assets/lobby/icon-missions.png" alt="" style="${mobileActionIconStyle()}">
         <span style="min-width:0;display:grid;gap:3px;">
@@ -2981,14 +2997,14 @@ function renderMobileQuickActions(unclaimedMissionsCount: number, hasUnclaimedDa
           <span style="${mobileActionSubtitleStyle()}">Изпълнявай дневни мисии и печели жълтици.</span>
         </span>
       </button>
-      <a href="/rules" data-lobby-rules-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.40)')}text-decoration:none;">
+      <a href="/rules" data-lobby-rules-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.78)')}text-decoration:none;">
         <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="9" y1="7" x2="15" y2="7"/><line x1="9" y1="11" x2="15" y2="11"/><line x1="9" y1="15" x2="12" y2="15"/></svg>
         <span style="min-width:0;display:grid;gap:3px;">
           <span>Правила на белота</span>
           <span style="${mobileActionSubtitleStyle()}">Виж правилата, анонсите и точкуването.</span>
         </span>
       </a>
-      <a href="/strategy" data-lobby-strategy-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.40)')}text-decoration:none;">
+      <a href="/strategy" data-lobby-strategy-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.78)')}text-decoration:none;">
         <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
         <span style="min-width:0;display:grid;gap:3px;">
           <span>Съвети и стратегии</span>
@@ -3001,9 +3017,10 @@ function renderMobileQuickActions(unclaimedMissionsCount: number, hasUnclaimedDa
 
 function mobileActionCardStyle(color: string, borderColor: string): string {
   return `
-    min-height:72px;border:1px solid ${borderColor};border-radius:8px;background:#000000;
+    min-height:72px;border:2px solid ${borderColor};border-radius:8px;background:#000000;
     color:${color};font-size:15px;font-weight:900;text-align:left;padding:10px 14px;cursor:pointer;
     display:flex;align-items:center;gap:12px;position:relative;
+    transition:border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
   `
 }
 
