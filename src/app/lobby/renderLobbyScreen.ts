@@ -3471,15 +3471,15 @@ function renderMobileLobbyScreenContent(
   `
 }
 
-function renderFooter(onlinePlayersCount: number): string {
+function renderFooter(): string {
   return `
     <footer style="
       margin-top:16px;
       border-top:1px solid rgba(255,255,255,0.07);
       padding:16px 0;
-      display:grid;
-      grid-template-columns:1fr auto 1fr;
+      display:flex;
       align-items:center;
+      justify-content:space-between;
       gap:18px;
     ">
       <style>
@@ -3489,63 +3489,16 @@ function renderFooter(onlinePlayersCount: number): string {
           text-underline-offset:3px;
         }
       </style>
-      <div data-lobby-footer-items="1" style="display:flex; align-items:center; gap:30px; justify-self:start;">
-        <div style="display:flex; align-items:center; gap:10px;">
-          <img src="/assets/lobby/icon-fair-play.png" alt="" style="height:28px; opacity:0.7;">
-          <div>
-            <div style="font-size:12px; font-weight:700; color:rgba(255,255,255,0.75);">Честна игра</div>
-            <div style="font-size:10px; color:rgba(255,255,255,0.4); font-weight:600;">За коректна и безопасна среда</div>
-          </div>
-        </div>
-        <div style="display:flex; align-items:center; gap:10px;">
-          <div style="opacity:0.7;">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="rgba(255,255,255,0.6)"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM12 17c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/></svg>
-          </div>
-          <div>
-            <div style="font-size:12px; font-weight:700; color:rgba(255,255,255,0.75);">Сигурност</div>
-            <div style="font-size:10px; color:rgba(255,255,255,0.4); font-weight:600;">Защита на данни</div>
-          </div>
-        </div>
-        <div style="display:flex; align-items:center; gap:10px;">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" style="display:block; flex-shrink:0; opacity:0.88;">
-            <circle cx="8" cy="9" r="3.1" stroke="#d4a520" stroke-width="1.7"/>
-            <path d="M3.4 19c.7-3.2 2.3-4.8 4.6-4.8s3.9 1.6 4.6 4.8" stroke="#d4a520" stroke-width="1.7" stroke-linecap="round"/>
-            <circle cx="15.8" cy="8.2" r="2.5" stroke="rgba(212,165,32,0.72)" stroke-width="1.55"/>
-            <path d="M13.2 14.2c.7-.7 1.6-1 2.8-1 2 0 3.5 1.5 4.1 4.4" stroke="rgba(212,165,32,0.72)" stroke-width="1.55" stroke-linecap="round"/>
-          </svg>
-          <img src="/assets/lobby/icon-users.png" alt="" style="display:none;">
-          <div>
-            <div style="font-size:12px; font-weight:700; color:rgba(255,255,255,0.75);">Онлайн играчи</div>
-            <div style="font-size:13px; color:rgba(255,255,255,0.4); font-weight:600;">${formatAmount(onlinePlayersCount)}</div>
-          </div>
-        </div>
-        <div style="display:flex; align-items:center; gap:10px;">
-          <div style="opacity:0.7;">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="rgba(255,255,255,0.6)"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
-          </div>
-          <div>
-            <div style="font-size:12px; font-weight:700; color:rgba(255,255,255,0.75);">Помощ</div>
-            <div style="font-size:10px; color:rgba(255,255,255,0.4); font-weight:600;">Свържи се с нас</div>
-          </div>
-        </div>
-      </div>
-      <nav aria-label="Правни връзки" style="display:flex;align-items:center;justify-content:center;gap:0;flex-wrap:wrap;text-align:center;justify-self:center;">
+      <nav aria-label="Правни връзки" style="display:flex;align-items:center;justify-content:center;gap:0;flex-wrap:wrap;text-align:center;">
         <a data-lobby-footer-legal-link="1" href="/terms" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Общи условия</a>
         <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
         <a data-lobby-footer-legal-link="1" href="/privacy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Политика за поверителност</a>
         <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
         <a data-lobby-footer-legal-link="1" href="/contact" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Контакти</a>
       </nav>
-      <div style="justify-self:end;color:rgba(255,255,255,0.52);font-size:13px;font-weight:700;white-space:nowrap;">
+      <div style="color:rgba(255,255,255,0.52);font-size:13px;font-weight:700;white-space:nowrap;">
         © Pika.bg 2026 · Всички права запазени
       </div>
-      <style>
-        [data-lobby-footer-items="1"] > div:nth-child(1),
-        [data-lobby-footer-items="1"] > div:nth-child(2),
-        [data-lobby-footer-items="1"] > div:nth-child(4) {
-          display:none !important;
-        }
-      </style>
     </footer>
   `
 }
@@ -7172,7 +7125,7 @@ export function renderLobbyScreen(
                 isPhoneLayout,
               )}
             `}
-          ${renderFooter(state.onlinePlayersCount)}
+          ${renderFooter()}
         </div>
       </div>
 
