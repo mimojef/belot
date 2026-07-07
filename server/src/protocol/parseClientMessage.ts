@@ -363,7 +363,7 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         return null
       }
 
-      if (!/^phrase_(?:0[1-9]|1[0-9]|2[0-2])$/.test(phraseId)) {
+      if (!/^phrase_(?:0[1-9]|1[0-9]|2[0-4])$/.test(phraseId)) {
         return null
       }
 

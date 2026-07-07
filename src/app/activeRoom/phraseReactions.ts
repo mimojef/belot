@@ -26,6 +26,8 @@ export const PHRASE_REACTIONS: PhraseReaction[] = [
   { id: 'phrase_20', text: 'Тук вече е сериозно!' },
   { id: 'phrase_21', text: 'Смях на масата!' },
   { id: 'phrase_22', text: 'Да живее белотът!' },
+  { id: 'phrase_23', text: 'Заспивам!' },
+  { id: 'phrase_24', text: 'Да играем пак!' },
 ]
 
 export function getPhraseReactionText(phraseId: string): string | null {
