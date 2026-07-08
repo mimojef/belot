@@ -2666,6 +2666,76 @@ function renderBottomSection(
         </div>
       </a>
     </div>
+
+    <div style="
+      display:grid;
+      grid-template-columns:repeat(3, minmax(0, 1fr));
+      gap:12px;
+      margin-top:12px;
+    ">
+      <a href="/learn" data-lobby-learn-card="1" style="
+        background:#000000;
+        border:2px solid rgba(212,165,32,0.78);
+        border-radius:12px;
+        padding:16px;
+        display:flex; align-items:center; gap:14px;
+        cursor:pointer;
+        min-height:80px;
+        transition:border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+        text-decoration:none; color:inherit;
+      "
+      onmouseenter="this.style.borderColor='rgba(212,165,32,0.96)';this.style.boxShadow='inset 0 0 0 1px rgba(212,165,32,0.96)';this.style.background='rgba(212,165,32,0.05)'"
+      onmouseleave="this.style.borderColor='rgba(212,165,32,0.78)';this.style.boxShadow='none';this.style.background='#000000'"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="rgba(212,165,32,0.90)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><path d="M22 10v6M2 10l10-5 10 5-10 5-10-5z"/><path d="M6 12v5c0 1.66 2.69 3 6 3s6-1.34 6-3v-5"/></svg>
+        <div style="flex:1; min-width:0;">
+          <div style="font-size:15px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Научи белот</div>
+          <div style="font-size:13px; color:rgba(255,255,255,0.5); margin-top:4px; font-weight:400;">Основите на играта за нови играчи.</div>
+        </div>
+      </a>
+
+      <a href="/fair-play" data-lobby-fair-play-card="1" style="
+        background:#000000;
+        border:2px solid rgba(212,165,32,0.78);
+        border-radius:12px;
+        padding:16px;
+        display:flex; align-items:center; gap:14px;
+        cursor:pointer;
+        min-height:80px;
+        transition:border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+        text-decoration:none; color:inherit;
+      "
+      onmouseenter="this.style.borderColor='rgba(212,165,32,0.96)';this.style.boxShadow='inset 0 0 0 1px rgba(212,165,32,0.96)';this.style.background='rgba(212,165,32,0.05)'"
+      onmouseleave="this.style.borderColor='rgba(212,165,32,0.78)';this.style.boxShadow='none';this.style.background='#000000'"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="rgba(212,165,32,0.90)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+        <div style="flex:1; min-width:0;">
+          <div style="font-size:15px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Честна игра</div>
+          <div style="font-size:13px; color:rgba(255,255,255,0.5); margin-top:4px; font-weight:400;">Случайно раздаване и роля на ботовете.</div>
+        </div>
+      </a>
+
+      <a href="/faq" data-lobby-faq-card="1" style="
+        background:#000000;
+        border:2px solid rgba(212,165,32,0.78);
+        border-radius:12px;
+        padding:16px;
+        display:flex; align-items:center; gap:14px;
+        cursor:pointer;
+        min-height:80px;
+        transition:border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+        text-decoration:none; color:inherit;
+      "
+      onmouseenter="this.style.borderColor='rgba(212,165,32,0.96)';this.style.boxShadow='inset 0 0 0 1px rgba(212,165,32,0.96)';this.style.background='rgba(212,165,32,0.05)'"
+      onmouseleave="this.style.borderColor='rgba(212,165,32,0.78)';this.style.boxShadow='none';this.style.background='#000000'"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="rgba(212,165,32,0.90)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <div style="flex:1; min-width:0;">
+          <div style="font-size:15px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Често задавани въпроси</div>
+          <div style="font-size:13px; color:rgba(255,255,255,0.5); margin-top:4px; font-weight:400;">Отговори на чести въпроси за играта.</div>
+        </div>
+      </a>
+    </div>
   `
 }
 
@@ -3010,6 +3080,9 @@ function renderMobileQuickActions(unclaimedMissionsCount: number, hasUnclaimedDa
       [data-lobby-missions-card]:hover { border-color:rgba(96,165,250,0.96) !important; box-shadow:inset 0 0 0 1px rgba(96,165,250,0.96) !important; background:rgba(96,165,250,0.05) !important; }
       [data-lobby-rules-card]:hover { border-color:rgba(212,165,32,0.96) !important; box-shadow:inset 0 0 0 1px rgba(212,165,32,0.96) !important; background:rgba(212,165,32,0.05) !important; }
       [data-lobby-strategy-card]:hover { border-color:rgba(212,165,32,0.96) !important; box-shadow:inset 0 0 0 1px rgba(212,165,32,0.96) !important; background:rgba(212,165,32,0.05) !important; }
+      [data-lobby-learn-card]:hover { border-color:rgba(212,165,32,0.96) !important; box-shadow:inset 0 0 0 1px rgba(212,165,32,0.96) !important; background:rgba(212,165,32,0.05) !important; }
+      [data-lobby-fair-play-card]:hover { border-color:rgba(212,165,32,0.96) !important; box-shadow:inset 0 0 0 1px rgba(212,165,32,0.96) !important; background:rgba(212,165,32,0.05) !important; }
+      [data-lobby-faq-card]:hover { border-color:rgba(212,165,32,0.96) !important; box-shadow:inset 0 0 0 1px rgba(212,165,32,0.96) !important; background:rgba(212,165,32,0.05) !important; }
     </style>
     <section style="margin:14px 12px 22px;display:grid;gap:10px;">
       <button type="button" data-lobby-private-rooms-card="1" style="${mobileActionCardStyle('#a78bfa', 'rgba(167,139,250,0.78)')}">
@@ -3047,6 +3120,27 @@ function renderMobileQuickActions(unclaimedMissionsCount: number, hasUnclaimedDa
         <span style="min-width:0;display:grid;gap:3px;">
           <span>Съвети и стратегии</span>
           <span style="${mobileActionSubtitleStyle()}">Научи полезни тактики и стани по-добър.</span>
+        </span>
+      </a>
+      <a href="/learn" data-lobby-learn-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.78)')}text-decoration:none;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><path d="M22 10v6M2 10l10-5 10 5-10 5-10-5z"/><path d="M6 12v5c0 1.66 2.69 3 6 3s6-1.34 6-3v-5"/></svg>
+        <span style="min-width:0;display:grid;gap:3px;">
+          <span>Научи белот</span>
+          <span style="${mobileActionSubtitleStyle()}">Основите на играта за нови играчи.</span>
+        </span>
+      </a>
+      <a href="/fair-play" data-lobby-fair-play-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.78)')}text-decoration:none;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+        <span style="min-width:0;display:grid;gap:3px;">
+          <span>Честна игра</span>
+          <span style="${mobileActionSubtitleStyle()}">Случайно раздаване и роля на ботовете.</span>
+        </span>
+      </a>
+      <a href="/faq" data-lobby-faq-card="1" style="${mobileActionCardStyle('#d4a520', 'rgba(212,165,32,0.78)')}text-decoration:none;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <span style="min-width:0;display:grid;gap:3px;">
+          <span>Често задавани въпроси</span>
+          <span style="${mobileActionSubtitleStyle()}">Отговори на чести въпроси за играта.</span>
         </span>
       </a>
     </section>
@@ -3540,6 +3634,14 @@ function renderFooter(): string {
         <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
         <a data-lobby-footer-legal-link="1" href="/strategy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Съвети и стратегии</a>
         <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-footer-legal-link="1" href="/learn" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Научи белот</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-footer-legal-link="1" href="/fair-play" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Честна игра</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-footer-legal-link="1" href="/faq" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Често задавани въпроси</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-footer-legal-link="1" href="/about" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">За Pika.bg</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
         <a data-lobby-footer-legal-link="1" href="/terms" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Общи условия</a>
         <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
         <a data-lobby-footer-legal-link="1" href="/privacy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Политика за поверителност</a>
@@ -3575,6 +3677,14 @@ function renderMobileFooter(): string {
         <a data-lobby-mobile-footer-legal-link="1" href="/rules" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Правила</a>
         <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
         <a data-lobby-mobile-footer-legal-link="1" href="/strategy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Съвети и стратегии</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/learn" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Научи белот</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/fair-play" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Честна игра</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/faq" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Често задавани въпроси</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/about" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">За Pika.bg</a>
         <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
         <a data-lobby-mobile-footer-legal-link="1" href="/terms" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Общи условия</a>
         <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>

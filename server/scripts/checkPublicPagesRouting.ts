@@ -241,6 +241,62 @@ await check('[7.2] renderStrategyPage.ts все още експортира rend
   }
 })
 
+// ─── [8] Lobby карти и footer линкове към новите публични страници ──────────
+
+console.log('\n[8] Lobby карти и footer линкове към /learn, /faq, /about, /fair-play')
+
+for (const path of ['/learn', '/fair-play', '/faq', '/about']) {
+  await check(`[8] renderLobbyScreen.ts съдържа href="${path}"`, () => {
+    if (!lobbyScreenSource.includes(`href="${path}"`)) {
+      throw new Error(`Липсва href="${path}" в renderLobbyScreen.ts`)
+    }
+  })
+}
+
+for (const text of ['Научи белот', 'Честна игра', 'Често задавани въпроси', 'За Pika.bg']) {
+  await check(`[8] renderLobbyScreen.ts съдържа текста "${text}"`, () => {
+    if (!lobbyScreenSource.includes(text)) {
+      throw new Error(`Липсва текстът "${text}" в renderLobbyScreen.ts`)
+    }
+  })
+}
+
+await check('[8] старите href="/rules" и href="/strategy" остават налични', () => {
+  for (const path of ['/rules', '/strategy']) {
+    if (!lobbyScreenSource.includes(`href="${path}"`)) {
+      throw new Error(`Липсва href="${path}" в renderLobbyScreen.ts`)
+    }
+  }
+})
+
+await check('[8] footer линковете към /terms, /privacy и /contact остават налични', () => {
+  for (const path of ['/terms', '/privacy', '/contact']) {
+    if (!lobbyScreenSource.includes(`href="${path}"`)) {
+      throw new Error(`Липсва href="${path}" в renderLobbyScreen.ts`)
+    }
+  }
+})
+
+await check('[8] renderFooter (desktop) съдържа линкове към /learn, /fair-play, /faq, /about', () => {
+  const match = lobbyScreenSource.match(/function renderFooter\(\)[\s\S]*?\n\}/)
+  const body = match?.[0] ?? ''
+  for (const path of ['/learn', '/fair-play', '/faq', '/about']) {
+    if (!body.includes(`href="${path}"`)) {
+      throw new Error(`Липсва href="${path}" в renderFooter()`)
+    }
+  }
+})
+
+await check('[8] renderMobileFooter съдържа линкове към /learn, /fair-play, /faq, /about', () => {
+  const match = lobbyScreenSource.match(/function renderMobileFooter\(\)[\s\S]*?\n\}/)
+  const body = match?.[0] ?? ''
+  for (const path of ['/learn', '/fair-play', '/faq', '/about']) {
+    if (!body.includes(`href="${path}"`)) {
+      throw new Error(`Липсва href="${path}" в renderMobileFooter()`)
+    }
+  }
+})
+
 // ─── Резюме ───────────────────────────────────────────────────────────────────
 
 console.log(`\n${'═'.repeat(60)}`)
