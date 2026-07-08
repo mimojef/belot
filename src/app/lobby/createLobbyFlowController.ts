@@ -71,6 +71,10 @@ export type LobbyFlowScreen =
   | 'guest-contact-messages'
   | 'rules'
   | 'strategy'
+  | 'learn'
+  | 'faq'
+  | 'about'
+  | 'fair-play'
 export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
 export type LobbyAuthSession = {
@@ -1047,6 +1051,10 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/contact': 'contact',
   '/rules': 'rules',
   '/strategy': 'strategy',
+  '/learn': 'learn',
+  '/faq': 'faq',
+  '/about': 'about',
+  '/fair-play': 'fair-play',
 }
 
 export function createLobbyFlowController(
@@ -1749,6 +1757,14 @@ export function createLobbyFlowController(
               ? 'rules'
             : state.currentScreen === 'strategy'
               ? 'strategy'
+            : state.currentScreen === 'learn'
+              ? 'learn'
+            : state.currentScreen === 'faq'
+              ? 'faq'
+            : state.currentScreen === 'about'
+              ? 'about'
+            : state.currentScreen === 'fair-play'
+              ? 'fair-play'
           : state.currentScreen === 'friends'
             ? 'friends'
             : state.currentScreen === 'chat'
@@ -4551,6 +4567,62 @@ export function createLobbyFlowController(
     scrollLobbyRootToTop()
   }
 
+  function showLearnPage(): void {
+    leaveAdminServerIfActive()
+    state.currentScreen = 'learn'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+    scrollLobbyRootToTop()
+  }
+
+  function showFaqPage(): void {
+    leaveAdminServerIfActive()
+    state.currentScreen = 'faq'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+    scrollLobbyRootToTop()
+  }
+
+  function showAboutPage(): void {
+    leaveAdminServerIfActive()
+    state.currentScreen = 'about'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+    scrollLobbyRootToTop()
+  }
+
+  function showFairPlayPage(): void {
+    leaveAdminServerIfActive()
+    state.currentScreen = 'fair-play'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+    scrollLobbyRootToTop()
+  }
+
   async function openChatConversation(
     friendshipId: string,
     shouldRenderLoading = true,
@@ -4916,6 +4988,10 @@ export function createLobbyFlowController(
     contact: '/contact',
     rules: '/rules',
     strategy: '/strategy',
+    learn: '/learn',
+    faq: '/faq',
+    about: '/about',
+    'fair-play': '/fair-play',
   }
 
   const PATH_TO_SCREEN: Record<string, LobbySocialScreen> = {
@@ -4935,6 +5011,10 @@ export function createLobbyFlowController(
     '/contact': 'contact',
     '/rules': 'rules',
     '/strategy': 'strategy',
+    '/learn': 'learn',
+    '/faq': 'faq',
+    '/about': 'about',
+    '/fair-play': 'fair-play',
   }
 
   const _loadPath = window.location.pathname
@@ -5011,6 +5091,10 @@ export function createLobbyFlowController(
       case 'contact': showPublicLegalPage('contact'); break
       case 'rules': showRulesPage(); break
       case 'strategy': showStrategyPage(); break
+      case 'learn': showLearnPage(); break
+      case 'faq': showFaqPage(); break
+      case 'about': showAboutPage(); break
+      case 'fair-play': showFairPlayPage(); break
     }
   }
 

@@ -13,6 +13,7 @@
     "check:visitor-tracking": "tsx scripts/checkVisitorTracking.ts",
     "check:view-layout-tracking": "tsx scripts/checkViewLayoutTracking.ts",
     "check:view-layout-frontend": "tsx scripts/checkViewLayoutFrontend.ts --project-root=..",
+    "check:public-pages-routing": "tsx scripts/checkPublicPagesRouting.ts --project-root=..",
     "check:visitor-summary": "tsx scripts/checkVisitorSummary.ts",
     "check:device-type": "tsx scripts/checkDeviceType.ts",
     "check:device-migration": "tsx scripts/checkDeviceMigration.ts --server-root=.",

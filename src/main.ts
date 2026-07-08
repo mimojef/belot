@@ -3397,6 +3397,10 @@ const _VALID_PATHS = new Set([
   '/contact',
   '/rules',
   '/strategy',
+  '/learn',
+  '/faq',
+  '/about',
+  '/fair-play',
   '/reset-password',
 ])
 if (!isStripePaymentReturn && !isRunningAsStandalone() && !_VALID_PATHS.has(_initialPath)) {

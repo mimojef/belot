@@ -31,6 +31,10 @@ import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import { PUBLIC_LEGAL_PAGES, type PublicLegalPageKey } from './publicLegalPages'
 import { renderRulesPage } from './renderRulesPage'
 import { renderStrategyPage } from './renderStrategyPage'
+import { renderLearnPage } from './renderLearnPage'
+import { renderFaqPage } from './renderFaqPage'
+import { renderAboutPage } from './renderAboutPage'
+import { renderFairPlayPage } from './renderFairPlayPage'
 import { orderPlayersForViewer } from './orderPlayersForViewer'
 import {
   getProfileDisplayNameAvailabilityQuery,
@@ -104,7 +108,7 @@ export type GuestContactFormInput = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -3488,6 +3492,14 @@ function renderMobileLobbyScreenContent(
             ? renderRulesPage(true)
           : state.view === 'strategy'
             ? renderStrategyPage(true)
+          : state.view === 'learn'
+            ? renderLearnPage(true)
+          : state.view === 'faq'
+            ? renderFaqPage(true)
+          : state.view === 'about'
+            ? renderAboutPage(true)
+          : state.view === 'fair-play'
+            ? renderFairPlayPage(true)
           : ''}
       </main>
     `
@@ -3524,6 +3536,10 @@ function renderFooter(): string {
         }
       </style>
       <nav aria-label="Правни връзки" style="display:flex;align-items:center;justify-content:center;gap:0;flex-wrap:wrap;text-align:center;">
+        <a data-lobby-footer-legal-link="1" href="/rules" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Правила</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-footer-legal-link="1" href="/strategy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Съвети и стратегии</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
         <a data-lobby-footer-legal-link="1" href="/terms" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Общи условия</a>
         <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
         <a data-lobby-footer-legal-link="1" href="/privacy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Политика за поверителност</a>
@@ -3556,6 +3572,10 @@ function renderMobileFooter(): string {
         }
       </style>
       <nav aria-label="Правни връзки" style="display:flex;align-items:center;justify-content:center;gap:0;flex-wrap:wrap;">
+        <a data-lobby-mobile-footer-legal-link="1" href="/rules" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Правила</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/strategy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Съвети и стратегии</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
         <a data-lobby-mobile-footer-legal-link="1" href="/terms" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Общи условия</a>
         <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
         <a data-lobby-mobile-footer-legal-link="1" href="/privacy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Политика за поверителност</a>
@@ -7170,6 +7190,14 @@ export function renderLobbyScreen(
                 ? renderRulesPage()
               : state.view === 'strategy'
                 ? renderStrategyPage()
+              : state.view === 'learn'
+                ? renderLearnPage()
+              : state.view === 'faq'
+                ? renderFaqPage()
+              : state.view === 'about'
+                ? renderAboutPage()
+              : state.view === 'fair-play'
+                ? renderFairPlayPage()
               : `
               ${state.profile.profileId !== null
                 ? renderHeroSection(profileName, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level, isPhoneLayout)
