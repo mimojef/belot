@@ -146,6 +146,7 @@ export type AdminVisitorSummary = {
   yesterday: number
   last7days: number
   last30days: number
+  newToday: number
 }
 
 export type AdminViewLayoutPeriodCounts = {

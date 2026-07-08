@@ -44,6 +44,7 @@ export type VisitorSummary = {
   yesterday: number
   last7days: number
   last30days: number
+  newToday: number
 }
 
 export type ViewLayoutPeriodCounts = {
@@ -228,6 +229,16 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     WHERE occurred_at >= ?;
   `)
 
+  // Counts visitor records first seen in a half-open UTC interval [since, until),
+  // based on site_visitors.first_seen_at (set once at INSERT, never updated on
+  // return visits). This is distinct from countInRange, which counts any event
+  // activity (including returning visitors) in the period.
+  const countNewInRangeStmt = database.prepare(`
+    SELECT COUNT(*) AS n
+    FROM site_visitors
+    WHERE first_seen_at >= ? AND first_seen_at < ?;
+  `)
+
   // Counts app-entry page-views by view_layout in a half-open UTC interval.
   // is_entry = 1 means the initial load (navigate/reload at startup, or
   // back_forward as the very first event). SPA pushState and in-app popstate
@@ -385,6 +396,11 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     return row?.n ?? 0
   }
 
+  function countNewInRange(since: string, until: string): number {
+    const row = countNewInRangeStmt.get(since, until) as { n: number } | undefined
+    return row?.n ?? 0
+  }
+
   function getVisitorSummary(now: Date = new Date()): VisitorSummary {
     const bounds = getSofiaDayBoundsUtc(now)
     const last7Start  = toSqliteUtc(new Date(now.getTime() - 7  * 86_400_000))
@@ -394,6 +410,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       yesterday:  countInRange(bounds.yesterdayStart, bounds.todayStart),
       last7days:  countSince(last7Start),
       last30days: countSince(last30Start),
+      newToday:   countNewInRange(bounds.todayStart, bounds.tomorrowStart),
     }
   }
 

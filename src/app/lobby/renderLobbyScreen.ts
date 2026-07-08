@@ -4321,6 +4321,17 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
         ${visitorCard('Вчера', stats.visitors.yesterday, 'yesterday')}
         ${visitorCard('Последните 7 дни', stats.visitors.last7days, '7d')}
         ${visitorCard('Последните 30 дни', stats.visitors.last30days, '30d')}
+        <div style="
+          display:flex; flex-direction:column; gap:8px; text-align:left;
+          background:#0d0d0d; border:1px solid rgba(96,165,250,0.25); border-radius:12px;
+          padding:16px 18px; width:100%;
+        ">
+          <div style="font-size:10px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.45);">Нови посетители днес</div>
+          <div style="display:flex;align-items:baseline;gap:6px;">
+            <span style="font-size:30px;font-weight:900;color:#60a5fa;">${(stats.visitors.newToday ?? 0).toLocaleString('bg-BG')}</span>
+            <span style="font-size:12px;color:rgba(96,165,250,0.6);">посетители</span>
+          </div>
+        </div>
       </div>
 
       <h3 style="font-size:13px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin:0 0 12px;">Влизания по версия</h3>
