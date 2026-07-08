@@ -16,6 +16,7 @@ import {
   validateProfileDisplayName,
 } from './normalizeProfileIdentityText.js'
 import { createRankProgressSnapshot, getRankTitleForLevel, computeEloChange } from '../progression/rankProgression.js'
+import { getSofiaDayBoundsUtc } from './sofiaDayBounds.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -25,6 +26,12 @@ export type LeaderboardsSnapshot = Record<
   LeaderboardCategory,
   PlayerPublicProfileSnapshot[]
 >
+
+export type HumanProfileCountStats = {
+  total: number
+  today: number
+  yesterday: number
+}
 
 export type PlayerProgressStore = {
   createTemporaryHumanProfile: (
@@ -73,7 +80,7 @@ export type PlayerProgressStore = {
       }
     | { ok: false; message: string }
   isDisplayNameAvailable: (displayName: string) => boolean
-  countHumanProfiles: () => number
+  countHumanProfiles: (now?: Date) => HumanProfileCountStats
   seedCatalogBotsIfNeeded: () => void
   refillCatalogBotWallets: () => void
   recordCompletedMatch: (room: ServerRoom) => void
@@ -1408,11 +1415,24 @@ export async function createPlayerProgressStore(
     return { ok: true }
   }
 
-  function countHumanProfiles(): number {
-    const row = database.prepare(
+  function countHumanProfiles(now: Date = new Date()): HumanProfileCountStats {
+    const total = (database.prepare(
       `SELECT COUNT(*) AS count FROM profiles WHERE profile_kind = 'human'`,
-    ).get() as { count: number }
-    return row.count
+    ).get() as { count: number }).count
+
+    const bounds = getSofiaDayBoundsUtc(now)
+    const countCreatedInRange = (start: string, end: string): number => {
+      const row = database.prepare(
+        `SELECT COUNT(*) AS count FROM profiles WHERE profile_kind = 'human' AND created_at >= ? AND created_at < ?`,
+      ).get(start, end) as { count: number }
+      return row.count
+    }
+
+    return {
+      total,
+      today: countCreatedInRange(bounds.todayStart, bounds.tomorrowStart),
+      yesterday: countCreatedInRange(bounds.yesterdayStart, bounds.todayStart),
+    }
   }
 
   function seedCatalogBotsIfNeeded(): void {

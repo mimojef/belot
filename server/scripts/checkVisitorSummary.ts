@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { cp, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises'
 import { request } from 'node:http'
 import { createServer } from 'node:net'
 import { DatabaseSync } from 'node:sqlite'
@@ -728,6 +728,34 @@ try {
       if (v.last30days < v.last7days) throw new Error(`last30days(${v.last30days}) < last7days(${v.last7days})`)
       if (v.last7days < v.yesterday)  throw new Error(`last7days(${v.last7days}) < yesterday(${v.yesterday})`)
     })
+
+    await check('[10.10] stats.registeredProfiles е обект', () => {
+      if (!stats?.registeredProfiles || typeof stats.registeredProfiles !== 'object' || Array.isArray(stats.registeredProfiles)) {
+        throw new Error(`registeredProfiles=${String(stats?.registeredProfiles)}`)
+      }
+    })
+    const registeredProfiles = stats?.registeredProfiles as Record<string, unknown> | undefined
+    await check('[10.11] registeredProfiles.total е integer >= 1 (admin профилът от теста)', () => {
+      if (!Number.isInteger(registeredProfiles?.total) || (registeredProfiles.total as number) < 1) {
+        throw new Error(`total=${String(registeredProfiles?.total)}`)
+      }
+    })
+    await check('[10.12] registeredProfiles.today е integer >= 1 (admin профилът е регистриран днес)', () => {
+      if (!Number.isInteger(registeredProfiles?.today) || (registeredProfiles.today as number) < 1) {
+        throw new Error(`today=${String(registeredProfiles?.today)}`)
+      }
+    })
+    await check('[10.13] registeredProfiles.yesterday е integer ≥ 0', () => {
+      if (!Number.isInteger(registeredProfiles?.yesterday) || (registeredProfiles.yesterday as number) < 0) {
+        throw new Error(`yesterday=${String(registeredProfiles?.yesterday)}`)
+      }
+    })
+    await check('[10.14] registeredProfiles.total >= today + yesterday', () => {
+      const p = registeredProfiles as { total: number; today: number; yesterday: number }
+      if (p.total < p.today + p.yesterday) {
+        throw new Error(`total(${p.total}) < today(${p.today}) + yesterday(${p.yesterday})`)
+      }
+    })
   }
 
 } catch (err) {
@@ -738,6 +766,58 @@ try {
   if (server) await stopServer(server)
   await isolated.cleanup()
 }
+
+// ─── [11] Frontend source — типове и маркиране на „Регистрирани профили“ ────
+
+console.log('\n[11] Frontend source checks — registeredProfiles')
+
+const clientPath = join(sourceServerRoot, '..', 'src', 'app', 'network', 'createGameServerClient.ts')
+const clientSource = await readFile(clientPath, 'utf8')
+
+await check('[11.1] AdminRegisteredProfilesStats е дефиниран', () => {
+  if (!clientSource.includes('AdminRegisteredProfilesStats')) {
+    throw new Error('Липсва AdminRegisteredProfilesStats')
+  }
+})
+await check('[11.2] AdminStatsSnapshot съдържа registeredProfiles поле', () => {
+  if (!clientSource.includes('registeredProfiles: AdminRegisteredProfilesStats')) {
+    throw new Error('Липсва registeredProfiles: AdminRegisteredProfilesStats в AdminStatsSnapshot')
+  }
+})
+await check('[11.3] totalProfiles е премахнат от AdminStatsSnapshot', () => {
+  if (clientSource.includes('totalProfiles')) {
+    throw new Error('totalProfiles все още присъства в createGameServerClient.ts')
+  }
+})
+
+const lobbyScreenPath = join(sourceServerRoot, '..', 'src', 'app', 'lobby', 'renderLobbyScreen.ts')
+const lobbyScreenSource = await readFile(lobbyScreenPath, 'utf8')
+
+await check('[11.4] HTML съдържа "РЕГИСТРИРАНИ ПРОФИЛИ" заглавие', () => {
+  if (!lobbyScreenSource.includes('Регистрирани профили')) {
+    throw new Error('Липсва "Регистрирани профили" в renderLobbyScreen.ts')
+  }
+})
+await check('[11.5] HTML съдържа "общо"', () => {
+  if (!lobbyScreenSource.includes('>общо<')) {
+    throw new Error('Липсва "общо" етикет')
+  }
+})
+await check('[11.6] HTML съдържа "днес"', () => {
+  if (!lobbyScreenSource.includes('>днес<')) {
+    throw new Error('Липсва "днес" етикет')
+  }
+})
+await check('[11.7] HTML съдържа "вчера"', () => {
+  if (!lobbyScreenSource.includes('>вчера<')) {
+    throw new Error('Липсва "вчера" етикет')
+  }
+})
+await check('[11.8] rendering използва registeredProfiles с fallback към 0', () => {
+  if (!lobbyScreenSource.includes('stats.registeredProfiles?.total ?? 0')) {
+    throw new Error('Липсва fallback stats.registeredProfiles?.total ?? 0')
+  }
+})
 
 // ─── Резюме ───────────────────────────────────────────────────────────────────
 

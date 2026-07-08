@@ -5497,7 +5497,7 @@ async function handleAdminStatsRequest(
     (c) => c.status === 'connected' && socketRegistry.get(c.id)?.readyState === WebSocket.OPEN,
   ).length
 
-  const totalProfiles = playerProgressStore.countHumanProfiles()
+  const registeredProfiles = playerProgressStore.countHumanProfiles()
 
   const paymentStats = coinPurchaseStore.getAdminPaymentStats()
 
@@ -5508,7 +5508,7 @@ async function handleAdminStatsRequest(
     ok: true,
     stats: {
       onlineCount,
-      totalProfiles,
+      registeredProfiles,
       payments: paymentStats,
       visitors,
       viewLayout,

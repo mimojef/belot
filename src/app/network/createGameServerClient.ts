@@ -160,9 +160,15 @@ export type AdminViewLayoutSummary = {
   last30days: AdminViewLayoutPeriodCounts
 }
 
+export type AdminRegisteredProfilesStats = {
+  total: number
+  today: number
+  yesterday: number
+}
+
 export type AdminStatsSnapshot = {
   onlineCount: number
-  totalProfiles: number
+  registeredProfiles: AdminRegisteredProfilesStats
   payments: {
     today: AdminPaymentPeriodStats
     yesterday: AdminPaymentPeriodStats

@@ -4295,10 +4295,22 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
           </div>
         </div>
         <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:12px;padding:18px 22px;">
-          <div style="font-size:11px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin-bottom:10px;">Регистрирани</div>
-          <div style="display:flex;align-items:center;gap:10px;">
-            <span style="font-size:32px;font-weight:900;color:#ffffff;">${stats.totalProfiles.toLocaleString('bg-BG')}</span>
-            <span style="font-size:13px;color:rgba(255,255,255,0.45);">профила</span>
+          <div style="font-size:11px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin-bottom:10px;">Регистрирани профили</div>
+          <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;row-gap:4px;">
+            <div>
+              <span style="font-size:13px;color:rgba(255,255,255,0.45);margin-right:4px;">общо</span>
+              <span style="font-size:32px;font-weight:900;color:#ffffff;">${(stats.registeredProfiles?.total ?? 0).toLocaleString('bg-BG')}</span>
+            </div>
+            <span style="font-size:16px;color:rgba(255,255,255,0.25);">|</span>
+            <div>
+              <span style="font-size:11px;color:rgba(212,165,32,0.6);margin-right:3px;">днес</span>
+              <span style="font-size:16px;font-weight:800;color:#d4a520;">${(stats.registeredProfiles?.today ?? 0).toLocaleString('bg-BG')}</span>
+            </div>
+            <span style="font-size:16px;color:rgba(255,255,255,0.25);">|</span>
+            <div>
+              <span style="font-size:11px;color:rgba(212,165,32,0.6);margin-right:3px;">вчера</span>
+              <span style="font-size:16px;font-weight:800;color:#d4a520;">${(stats.registeredProfiles?.yesterday ?? 0).toLocaleString('bg-BG')}</span>
+            </div>
           </div>
         </div>
       </div>
