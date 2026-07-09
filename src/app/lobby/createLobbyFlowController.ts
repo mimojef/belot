@@ -709,6 +709,7 @@ function createInitialState(): InternalLobbyFlowState {
       maxGames: GUEST_TRIAL_MAX_GAMES,
       errorText: null,
       isSubmitting: false,
+      hasConfirmedStatus: false,
     },
     guestLockedStakePopup: {
       isOpen: false,
@@ -4939,11 +4940,16 @@ export function createLobbyFlowController(
   }
 
   async function openGuestTrialPopup(): Promise<void> {
+    // hasConfirmedStatus остава false, докато нямаме fresh server отговор — попречва на
+    // showing stale/default remaining (напр. "Имате 3 пробни игри" за guest, който вече
+    // е изчерпал лимита си в предишна сесия). renderGuestTrialPopup показва loading state,
+    // докато полето е false.
     state.guestTrialPopup = {
       ...state.guestTrialPopup,
       isOpen: true,
       errorText: null,
       isSubmitting: false,
+      hasConfirmedStatus: false,
     }
     render()
 
@@ -4959,11 +4965,13 @@ export function createLobbyFlowController(
         gamesUsed: result.gamesUsed,
         remaining: result.remaining,
         maxGames: result.maxGames,
+        hasConfirmedStatus: true,
       }
     } else {
       state.guestTrialPopup = {
         ...state.guestTrialPopup,
         errorText: result.message,
+        hasConfirmedStatus: true,
       }
     }
 
@@ -5001,7 +5009,7 @@ export function createLobbyFlowController(
   }
 
   function handleGuestTrialPlayClick(): void {
-    if (state.guestTrialPopup.isSubmitting || state.guestTrialPopup.remaining <= 0) {
+    if (!state.guestTrialPopup.hasConfirmedStatus || state.guestTrialPopup.isSubmitting || state.guestTrialPopup.remaining <= 0) {
       return
     }
 
@@ -5573,11 +5581,17 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'guest_trial_error') {
+      // guest_trial_limit_reached е нормален state (лимитът е изчерпан), не unexpected
+      // грешка — popup-ът трябва directно да превключи на exhausted state (heading +
+      // "Създай профил"/"Вход"), без червен warning text. Другите reason-и
+      // (invalid_stake, unavailable) остават реални грешки, показани в error лентата.
+      const isNormalLimitReached = message.reason === 'guest_trial_limit_reached'
       state.guestTrialPopup = {
         ...state.guestTrialPopup,
         isSubmitting: false,
-        errorText: message.message,
+        errorText: isNormalLimitReached ? null : message.message,
         remaining: message.remaining,
+        hasConfirmedStatus: true,
       }
       render()
       return true
@@ -5589,6 +5603,7 @@ export function createLobbyFlowController(
         gamesUsed: message.gamesUsed,
         remaining: message.remaining,
         maxGames: message.maxGames,
+        hasConfirmedStatus: true,
       }
       render()
       return true

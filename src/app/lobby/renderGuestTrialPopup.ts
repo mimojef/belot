@@ -7,6 +7,10 @@ export type GuestTrialPopupState = {
   maxGames: number
   errorText: string | null
   isSubmitting: boolean
+  // true само след server-confirmed /api/guest/trial-status отговор. Докато е false,
+  // popup-ът показва loading state вместо потенциално stale/default remaining стойност
+  // (предотвратява "Имате 3 пробни игри" flash за guest, който вече е изчерпал лимита си).
+  hasConfirmedStatus: boolean
 }
 
 export type GuestTrialPopupOptions = {
@@ -34,9 +38,33 @@ function renderCtaBodyHtml(): string {
   return `${escapeHtml(beforeAmount)}<span style="color:#d4a520;font-weight:900;">100 000</span>${escapeHtml(afterAmount)}`
 }
 
+function renderLoadingModalShell(bodyHtml: string): string {
+  return `
+    <div data-guest-trial-modal-root="1" style="position:fixed;inset:0;z-index:13000;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div data-guest-trial-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.45);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,480px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
+        <button type="button" data-guest-trial-modal-close="1" aria-label="Затвори" style="position:absolute;right:4px;top:4px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
+        <div style="display:grid;gap:14px;">
+          <div style="display:grid;gap:16px;text-align:center;">
+            ${bodyHtml}
+          </div>
+        </div>
+      </div>
+    </div>
+  `
+}
+
 export function renderGuestTrialPopup(state: GuestTrialPopupState): string {
   if (!state.isOpen) {
     return ''
+  }
+
+  // Докато нямаме server-confirmed status, не рендерираме heading/бутони на база
+  // потенциално stale/default state.remaining — показваме кратък loading state вместо това.
+  if (!state.hasConfirmedStatus) {
+    return renderLoadingModalShell(
+      `<div style="font-size:17px;line-height:1.4;font-weight:800;color:rgba(255,255,255,0.85);padding:12px 0;">Проверяваме пробните игри…</div>`,
+    )
   }
 
   const heading = buildHeadingText(state.remaining)

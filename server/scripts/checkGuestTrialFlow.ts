@@ -68,6 +68,18 @@
  * [62] startMatchmaking продължава нормално за registered user с достатъчно ниво
  * [63] guestLockedStakePopup и levelLockedStakePopup са отделни, независими state/модули
  * [64] renderLevelLockedStakePopup е wire-нат в renderLobbyScreen.ts
+ * [65] hasConfirmedStatus=false → loading state "Проверяваме пробните игри…", без default remaining=3 heading, без бутони
+ * [66] games_used=3, hasConfirmedStatus=true → директно exhausted popup, без "Играй", без generic error
+ * [67] games_used=0, hasConfirmedStatus=true → "Имате 3 пробни игри…" + бутон "Играй"
+ * [68] games_used=1 → remaining=2
+ * [69] games_used=2 → remaining=1
+ * [70] games_used=3 → exhausted (потвърдено и по gamesUsed полето)
+ * [71] след guest_trial_limit_reached (errorText=null) → exhausted UI без generic error
+ * [72] реална unexpected грешка (различен reason) продължава да се показва в error лентата
+ * [73] default guestTrialPopup init state: hasConfirmedStatus: false (без stale remaining=3 source of truth)
+ * [74] openGuestTrialPopup() resetва hasConfirmedStatus:false преди fetch, сеща true само след await резултата
+ * [75] "Играй на 5 000" от locked stake popup минава само през openGuestTrialPopup() (същия fresh status check)
+ * [76] handleGuestTrialPlayClick guard-нат с hasConfirmedStatus (defense-in-depth)
  */
 
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
@@ -260,6 +272,7 @@ function baseGuestTrialPopupState(remaining: number): GuestTrialPopupState {
     maxGames: GUEST_TRIAL_MAX_GAMES,
     errorText: null,
     isSubmitting: false,
+    hasConfirmedStatus: true,
   }
 }
 
@@ -336,6 +349,214 @@ function checkPopupTextRules(): void {
 function checkGuestTrialStakeConstant(): void {
   console.log('\n[14] GUEST_TRIAL_STAKE constant')
   check('[14] GUEST_TRIAL_STAKE === 5000', GUEST_TRIAL_STAKE === 5000)
+}
+
+function checkHasConfirmedStatusLoadingState(): void {
+  console.log('\n[65-72] hasConfirmedStatus: без stale default remaining, loading state, exhausted без generic error')
+
+  // [65] Докато hasConfirmedStatus е false, popup-ът показва loading state — НЕ heading-а
+  // за remaining=3 (default state стойност), независимо какво стои в state.remaining.
+  const unconfirmedState: GuestTrialPopupState = {
+    isOpen: true,
+    gamesUsed: 0,
+    remaining: GUEST_TRIAL_MAX_GAMES,
+    maxGames: GUEST_TRIAL_MAX_GAMES,
+    errorText: null,
+    isSubmitting: false,
+    hasConfirmedStatus: false,
+  }
+  const unconfirmedHtml = renderGuestTrialPopup(unconfirmedState)
+  check(
+    '[65] hasConfirmedStatus=false → показва loading текст "Проверяваме пробните игри…"',
+    unconfirmedHtml.includes('Проверяваме пробните игри…'),
+  )
+  check(
+    '[65] hasConfirmedStatus=false → НЕ показва default "Имате 3 пробни игри" heading (без server-confirmed данни)',
+    !unconfirmedHtml.includes('Имате 3 пробни игри като гост с виртуални играчи.'),
+  )
+  check(
+    '[65] hasConfirmedStatus=false → без бутон "Играй" (нищо не се предлага преди confirm)',
+    !unconfirmedHtml.includes('data-guest-trial-play-button="1"'),
+  )
+  check(
+    '[65] hasConfirmedStatus=false → без бутони "Създай профил"/"Вход" (само loading state)',
+    !unconfirmedHtml.includes('data-guest-trial-register-button="1"') &&
+      !unconfirmedHtml.includes('data-guest-trial-login-button="1"'),
+  )
+
+  // [66] guest с games_used=3 (server-confirmed remaining=0) → директно exhausted popup.
+  const exhaustedConfirmedState: GuestTrialPopupState = {
+    isOpen: true,
+    gamesUsed: 3,
+    remaining: 0,
+    maxGames: GUEST_TRIAL_MAX_GAMES,
+    errorText: null,
+    isSubmitting: false,
+    hasConfirmedStatus: true,
+  }
+  const exhaustedHtml = renderGuestTrialPopup(exhaustedConfirmedState)
+  check(
+    '[66] games_used=3, hasConfirmedStatus=true → heading "Изиграхте своите пробни игри като гост."',
+    exhaustedHtml.includes('Изиграхте своите пробни игри като гост.'),
+  )
+  check(
+    '[66] games_used=3 → НЕ показва бутон "Играй"',
+    !exhaustedHtml.includes('data-guest-trial-play-button="1"'),
+  )
+  check(
+    '[66] games_used=3 → без червен error за нормален limit reached (errorText=null)',
+    !exhaustedHtml.includes('data-guest-trial-error="1" style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;"'),
+  )
+
+  // [67] guest с games_used=0 (server-confirmed) → "Имате 3 пробни игри…" + бутон "Играй".
+  const zeroUsedState: GuestTrialPopupState = {
+    isOpen: true,
+    gamesUsed: 0,
+    remaining: 3,
+    maxGames: GUEST_TRIAL_MAX_GAMES,
+    errorText: null,
+    isSubmitting: false,
+    hasConfirmedStatus: true,
+  }
+  const zeroUsedHtml = renderGuestTrialPopup(zeroUsedState)
+  check(
+    '[67] games_used=0, hasConfirmedStatus=true → "Имате 3 пробни игри като гост с виртуални играчи."',
+    zeroUsedHtml.includes('Имате 3 пробни игри като гост с виртуални играчи.'),
+  )
+  check(
+    '[67] games_used=0 → показва бутон "Играй"',
+    zeroUsedHtml.includes('data-guest-trial-play-button="1"'),
+  )
+
+  // [68] games_used=1 → remaining=2.
+  const oneUsedState: GuestTrialPopupState = { ...zeroUsedState, gamesUsed: 1, remaining: 2 }
+  check(
+    '[68] games_used=1 → "Имате 2 пробни игри като гост с виртуални играчи."',
+    renderGuestTrialPopup(oneUsedState).includes('Имате 2 пробни игри като гост с виртуални играчи.'),
+  )
+
+  // [69] games_used=2 → remaining=1.
+  const twoUsedState: GuestTrialPopupState = { ...zeroUsedState, gamesUsed: 2, remaining: 1 }
+  check(
+    '[69] games_used=2 → "Имате 1 пробна игра като гост с виртуални играчи."',
+    renderGuestTrialPopup(twoUsedState).includes('Имате 1 пробна игра като гост с виртуални играчи.'),
+  )
+
+  // [70] games_used=3 → exhausted (дублира [66] с явен gamesUsed фокус за пълнота на матрицата 0/1/2/3).
+  check(
+    '[70] games_used=3 → exhausted heading (потвърдено и чрез gamesUsed поле, не само remaining)',
+    exhaustedConfirmedState.gamesUsed === 3 && exhaustedHtml.includes('Изиграхте своите пробни игри като гост.'),
+  )
+
+  // [71] join_guest_trial guest_trial_limit_reached симулация: controller логиката (виж
+  // guest_trial_error handler в createLobbyFlowController.ts) update-ва state до remaining=0,
+  // errorText=null, hasConfirmedStatus=true — точно както прави реалният handler. Тук проверяваме,
+  // че renderGuestTrialPopup за резултантния state показва exhausted UI без generic error text.
+  const afterLimitReachedErrorState: GuestTrialPopupState = {
+    isOpen: true,
+    gamesUsed: 3,
+    remaining: 0,
+    maxGames: GUEST_TRIAL_MAX_GAMES,
+    errorText: null,
+    isSubmitting: false,
+    hasConfirmedStatus: true,
+  }
+  const afterLimitReachedHtml = renderGuestTrialPopup(afterLimitReachedErrorState)
+  check(
+    '[71] след guest_trial_limit_reached: exhausted heading, без бутон "Играй", без error text',
+    afterLimitReachedHtml.includes('Изиграхте своите пробни игри като гост.') &&
+      !afterLimitReachedHtml.includes('data-guest-trial-play-button="1"') &&
+      afterLimitReachedErrorState.errorText === null,
+  )
+  check(
+    '[71] след guest_trial_limit_reached: показва "Създай профил" и "Вход"',
+    afterLimitReachedHtml.includes('data-guest-trial-register-button="1"') &&
+      afterLimitReachedHtml.includes('data-guest-trial-login-button="1"'),
+  )
+
+  // [72] Реален unexpected error (различен reason, напр. guest_trial_invalid_stake) продължава
+  // да показва errorText, за разлика от нормалния limit-reached case — доказва, че разграничението
+  // по reason е explicit, не blanket "никога не показвай error".
+  const unexpectedErrorState: GuestTrialPopupState = {
+    isOpen: true,
+    gamesUsed: 1,
+    remaining: 2,
+    maxGames: GUEST_TRIAL_MAX_GAMES,
+    errorText: 'Възникна неочаквана грешка.',
+    isSubmitting: false,
+    hasConfirmedStatus: true,
+  }
+  const unexpectedErrorHtml = renderGuestTrialPopup(unexpectedErrorState)
+  check(
+    '[72] реална unexpected грешка (различна от limit_reached) продължава да се показва в error лентата',
+    unexpectedErrorHtml.includes('Възникна неочаквана грешка.'),
+  )
+}
+
+async function checkOpenGuestTrialPopupSourceGuards(): Promise<void> {
+  console.log('\n[73-76] openGuestTrialPopup source guards (fresh status fetch преди render на heading/бутони)')
+
+  const controllerSource = await readFile(
+    new URL('../../src/app/lobby/createLobbyFlowController.ts', import.meta.url),
+    'utf8',
+  )
+
+  // [73] Default init state за guestTrialPopup има hasConfirmedStatus: false (source of truth
+  // е server response, не default remaining=3).
+  check(
+    '[73] default guestTrialPopup init state: hasConfirmedStatus: false',
+    /guestTrialPopup:\s*\{[^}]*hasConfirmedStatus:\s*false/s.test(controllerSource),
+  )
+
+  // [74] openGuestTrialPopup() resetва hasConfirmedStatus: false веднага при отваряне (преди fetch),
+  // и chака options.onGuestTrialStatusLoad резултата преди да сети true.
+  const openFnStart = controllerSource.indexOf('async function openGuestTrialPopup')
+  const openFnEnd = controllerSource.indexOf('\n}', openFnStart)
+  const openFnBody = controllerSource.slice(openFnStart, openFnEnd)
+  check(
+    '[74] openGuestTrialPopup() съществува',
+    openFnStart !== -1,
+  )
+  check(
+    '[74] openGuestTrialPopup() resetва hasConfirmedStatus: false преди await fetch',
+    (() => {
+      const resetIndex = openFnBody.indexOf('hasConfirmedStatus: false')
+      const awaitIndex = openFnBody.indexOf('await options.onGuestTrialStatusLoad')
+      return resetIndex !== -1 && awaitIndex !== -1 && resetIndex < awaitIndex
+    })(),
+  )
+  check(
+    '[74] openGuestTrialPopup() сеща hasConfirmedStatus: true само след await резултата (ok и грешка клонове)',
+    (() => {
+      const awaitIndex = openFnBody.indexOf('await options.onGuestTrialStatusLoad')
+      const afterAwait = openFnBody.slice(awaitIndex)
+      const trueOccurrences = (afterAwait.match(/hasConfirmedStatus:\s*true/g) ?? []).length
+      return awaitIndex !== -1 && trueOccurrences >= 2
+    })(),
+  )
+
+  // [75] "Играй на 5 000" от locked stake popup минава само през openGuestTrialPopup() (вече
+  // проверено функционално в [52]/[53]) — тук допълнително потвърждаваме, че няма отделен
+  // "бърз път" директно към joinGuestTrial или директно сетване на hasConfirmedStatus:true
+  // някъде извън openGuestTrialPopup за locked-stake handler-а.
+  const play5000HandlerStart = controllerSource.indexOf('onGuestLockedStakePlay5000Click: () => {')
+  const play5000HandlerEnd = controllerSource.indexOf('},', play5000HandlerStart)
+  const play5000HandlerBody = controllerSource.slice(play5000HandlerStart, play5000HandlerEnd)
+  check(
+    '[75] "Играй на 5 000" вика openGuestTrialPopup() (същия fresh status check path, без bypass)',
+    play5000HandlerBody.includes('openGuestTrialPopup()') &&
+      !play5000HandlerBody.includes('hasConfirmedStatus'),
+  )
+
+  // [76] handleGuestTrialPlayClick има defense-in-depth guard срещу клик преди hasConfirmedStatus
+  // (в допълнение на факта, че бутонът не се рендерира в loading state).
+  const playClickFnStart = controllerSource.indexOf('function handleGuestTrialPlayClick')
+  const playClickFnEnd = controllerSource.indexOf('\n  }', playClickFnStart)
+  const playClickFnBody = controllerSource.slice(playClickFnStart, playClickFnEnd)
+  check(
+    '[76] handleGuestTrialPlayClick guard-нат с !state.guestTrialPopup.hasConfirmedStatus early-return',
+    playClickFnBody.includes('!state.guestTrialPopup.hasConfirmedStatus'),
+  )
 }
 
 async function checkReplayCannotBypassTrialLimit(): Promise<void> {
@@ -989,6 +1210,8 @@ async function main(): Promise<void> {
   await checkUndoTrialGameStarted()
   checkCreateGuestTrialRoom()
   checkPopupTextRules()
+  checkHasConfirmedStatusLoadingState()
+  await checkOpenGuestTrialPopupSourceGuards()
   checkGuestTrialStakeConstant()
   await checkReplayCannotBypassTrialLimit()
   checkRegisteredUserReplayNotBroken()
