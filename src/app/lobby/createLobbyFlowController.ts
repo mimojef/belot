@@ -18,6 +18,7 @@ import {
   type LobbyScreenState,
   type ProfilePopupCallbacks,
 } from './renderLobbyScreen'
+import type { GuestTrialPopupState } from './renderGuestTrialPopup'
 import {
   computeShopResumeConfirmOpen,
   computeShopPurchaseConfirmDispatch,
@@ -87,8 +88,15 @@ export type LobbyAuthSession = {
 export type CreateLobbyFlowControllerOptions = {
   root: HTMLElement
   joinMatchmaking: (stake: MatchStake, displayName?: string) => void
+  joinGuestTrial?: (stake: MatchStake) => void
   leaveMatchmaking: () => void
   onMatchFound: (message: MatchFoundMessage, stakeAlreadyShown: boolean) => void
+  onGuestTrialStatusLoad?: () => Promise<
+    | { ok: true; gamesUsed: number; remaining: number; maxGames: number; stake: MatchStake }
+    | { ok: false; message: string }
+  >
+  onGuestTrialRegisterClick?: () => void
+  onGuestTrialLoginClick?: () => void
   tryUnlockDocumentAudio?: () => void
   getAuthSession?: () => LobbyAuthSession | null
   getSignupBonusYellowCoins?: () => number
@@ -457,6 +465,7 @@ type InternalLobbyFlowState = {
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
   authSubmitInFlight: boolean
+  guestTrialPopup: GuestTrialPopupState
   lowCoinsModalOpen: boolean
   serverRoomSeats: RoomSeatSnapshot[] | null
   serverYourSeat: RoomSeatSnapshot['seat'] | null
@@ -646,6 +655,8 @@ type InternalLobbyFlowState = {
 
 const DEFAULT_REQUIRED_PLAYERS = 4
 const DEFAULT_COUNTDOWN_MS = 20000
+const GUEST_TRIAL_MAX_GAMES = 3
+export const GUEST_TRIAL_STAKE: MatchStake = 5000
 const FINAL_FILL_START_REMAINING_MS = 3000
 const FINAL_FILL_STAGGER_OFFSETS_MS = [0, 720, 1120] as const
 const FINAL_FILL_MATCH_START_DELAY_MS = 1000
@@ -687,6 +698,14 @@ function createInitialState(): InternalLobbyFlowState {
     authModalMode: 'closed',
     authErrorText: null,
     authSubmitInFlight: false,
+    guestTrialPopup: {
+      isOpen: false,
+      gamesUsed: 0,
+      remaining: GUEST_TRIAL_MAX_GAMES,
+      maxGames: GUEST_TRIAL_MAX_GAMES,
+      errorText: null,
+      isSubmitting: false,
+    },
     lowCoinsModalOpen: false,
     serverRoomSeats: null,
     serverYourSeat: null,
@@ -1850,6 +1869,7 @@ export function createLobbyFlowController(
       chatErrorText: state.chatErrorText,
       authModalMode: state.authModalMode,
       authErrorText: state.authErrorText,
+      guestTrialPopup: state.guestTrialPopup,
       lowCoinsModalOpen: state.lowCoinsModalOpen,
       onlinePlayersCount: options.getOnlinePlayersCount?.() ?? 0,
       signupBonusYellowCoins: options.getSignupBonusYellowCoins?.() ?? 100000,
@@ -2308,6 +2328,32 @@ export function createLobbyFlowController(
           el.textContent = message
           el.style.display = ''
         }
+      },
+      onGuestTrialPlayClick: () => {
+        handleGuestTrialPlayClick()
+      },
+      onGuestTrialRegisterClick: () => {
+        closeGuestTrialPopup()
+        if (options.onGuestTrialRegisterClick) {
+          options.onGuestTrialRegisterClick()
+        } else {
+          state.authModalMode = 'register'
+          state.authErrorText = null
+          render()
+        }
+      },
+      onGuestTrialLoginClick: () => {
+        closeGuestTrialPopup()
+        if (options.onGuestTrialLoginClick) {
+          options.onGuestTrialLoginClick()
+        } else {
+          state.authModalMode = 'login'
+          state.authErrorText = null
+          render()
+        }
+      },
+      onGuestTrialClose: () => {
+        closeGuestTrialPopup()
       },
       onLoginSubmit: (email, password) => {
         void submitLogin(email, password)
@@ -4841,6 +4887,72 @@ export function createLobbyFlowController(
     }
   }
 
+  async function openGuestTrialPopup(): Promise<void> {
+    state.guestTrialPopup = {
+      ...state.guestTrialPopup,
+      isOpen: true,
+      errorText: null,
+      isSubmitting: false,
+    }
+    render()
+
+    const result = await options.onGuestTrialStatusLoad?.()
+
+    if (!result || !state.guestTrialPopup.isOpen) {
+      return
+    }
+
+    if (result.ok) {
+      state.guestTrialPopup = {
+        ...state.guestTrialPopup,
+        gamesUsed: result.gamesUsed,
+        remaining: result.remaining,
+        maxGames: result.maxGames,
+      }
+    } else {
+      state.guestTrialPopup = {
+        ...state.guestTrialPopup,
+        errorText: result.message,
+      }
+    }
+
+    render()
+  }
+
+  function closeGuestTrialPopup(): void {
+    state.guestTrialPopup = {
+      ...state.guestTrialPopup,
+      isOpen: false,
+      errorText: null,
+      isSubmitting: false,
+    }
+    render()
+  }
+
+  function handleGuestTrialPlayClick(): void {
+    if (state.guestTrialPopup.isSubmitting || state.guestTrialPopup.remaining <= 0) {
+      return
+    }
+
+    if (!state.isConnected) {
+      state.guestTrialPopup = {
+        ...state.guestTrialPopup,
+        errorText: 'Няма връзка със сървъра.',
+      }
+      render()
+      return
+    }
+
+    state.guestTrialPopup = {
+      ...state.guestTrialPopup,
+      isSubmitting: true,
+      errorText: null,
+    }
+    render()
+
+    options.joinGuestTrial?.(GUEST_TRIAL_STAKE)
+  }
+
   function startMatchmaking(stake: MatchStake, displayName?: string): void {
     state.selectedStake = stake
 
@@ -4854,6 +4966,13 @@ export function createLobbyFlowController(
       state.currentScreen = 'lobby'
       state.isSearching = false
       state.errorText = null
+
+      if (stake === GUEST_TRIAL_STAKE) {
+        void openGuestTrialPopup()
+        render()
+        return
+      }
+
       state.authModalMode = 'cta'
       state.authErrorText = null
       render()
@@ -5376,6 +5495,28 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'guest_trial_error') {
+      state.guestTrialPopup = {
+        ...state.guestTrialPopup,
+        isSubmitting: false,
+        errorText: message.message,
+        remaining: message.remaining,
+      }
+      render()
+      return true
+    }
+
+    if (message.type === 'guest_trial_status') {
+      state.guestTrialPopup = {
+        ...state.guestTrialPopup,
+        gamesUsed: message.gamesUsed,
+        remaining: message.remaining,
+        maxGames: message.maxGames,
+      }
+      render()
+      return true
+    }
+
     if (message.type === 'error') {
       if (state.currentScreen === 'private-rooms') {
         state.privateRoomInfoText = message.message
@@ -5490,6 +5631,15 @@ export function createLobbyFlowController(
 
     if (message.type === 'match_found') {
       pendingMatchFoundMessage = message
+
+      if (state.guestTrialPopup.isOpen) {
+        state.guestTrialPopup = {
+          ...state.guestTrialPopup,
+          isOpen: false,
+          isSubmitting: false,
+          errorText: null,
+        }
+      }
 
       if (startFinalFillSequenceNow()) {
         state.remainingMs = 0

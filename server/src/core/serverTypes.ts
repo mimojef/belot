@@ -92,6 +92,7 @@ export type HumanRoomParticipant = {
   reconnectToken: string | null
   identity: PlayerIdentitySnapshot
   publicProfile?: PlayerPublicProfileSnapshot | null
+  isGuestTrial?: boolean
 }
 
 export type BotRoomParticipant = {
@@ -124,6 +125,7 @@ export type ServerRoomConfig = {
   targetScore: number
   turnTimeMs: number
   reconnectGraceMs: number
+  isGuestTrial?: boolean
 }
 
 export type ServerBootstrapAuthoritativeState = {

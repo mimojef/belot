@@ -27,6 +27,7 @@ export type ActiveRoomState = {
   isConnected: boolean
   errorText: string | null
   leavePenaltyWarningOpen: boolean
+  isGuestTrial: boolean
 }
 
 export type CreateActiveRoomFlowControllerOptions = {
@@ -50,6 +51,7 @@ export type CreateActiveRoomFlowControllerOptions = {
   onBlockProfile: (profileId: string) => Promise<{ message: string }>
   showLobby: (errorText?: string | null) => void
   startNewGame: (stake: MatchStake, displayName?: string) => void
+  onGuestTrialReplayRequested: () => void
 }
 
 export type ActiveRoomFlowController = {

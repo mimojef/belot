@@ -100,6 +100,12 @@ export function shouldKeepRoomAlive(
   room: ServerRoom,
   now: number = Date.now(),
 ): boolean {
+  // Guest trial rooms never survive a disconnect: no reconnect grace, no bot takeover.
+  // The guest's single game is already counted as used, so there is nothing to preserve.
+  if (room.config.isGuestTrial) {
+    return roomHasConnectedHumanParticipants(room)
+  }
+
   if (
     room.game.phase !== null &&
     room.game.phase !== 'bootstrap' &&

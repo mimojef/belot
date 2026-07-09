@@ -331,7 +331,16 @@ export function createActiveRoomFlowController(
     const extraPenaltyAmount = activeRoomState.stake
     const totalLossAmount = activeRoomState.stake + extraPenaltyAmount
 
-    const bodyHtml = isPlayingPhase
+    const bodyHtml = activeRoomState.isGuestTrial
+      ? `
+          <div style="font-size:24px;line-height:1.18;font-weight:900;color:#f8fafc;">
+            Напускане на играта
+          </div>
+          <div style="margin-top:12px;font-size:15px;line-height:1.55;color:#d4d4d8;">
+            Сигурен ли си, че искаш да напуснеш играта?
+          </div>
+        `
+      : isPlayingPhase
       ? `
           <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#f6d36b;margin-bottom:10px;">
             Предупреждение
@@ -356,7 +365,7 @@ export function createActiveRoomFlowController(
           </div>
         `
 
-    const confirmLabel = isPlayingPhase ? 'Напусни и плати' : 'Напусни'
+    const confirmLabel = !activeRoomState.isGuestTrial && isPlayingPhase ? 'Напусни и плати' : 'Напусни'
 
     return `
       <div
@@ -2938,6 +2947,12 @@ export function createActiveRoomFlowController(
             return
           }
 
+          if (activeRoomState.isGuestTrial) {
+            returnToLobbyFromMatchEnded()
+            options.onGuestTrialReplayRequested()
+            return
+          }
+
           options.sendReplayVote(activeRoomState.roomId)
         },
         onLeaveVote: () => {
@@ -3442,6 +3457,7 @@ export function createActiveRoomFlowController(
     activeRoomState.seats = message.seats
     activeRoomState.game = message.game ?? null
     activeRoomState.errorText = null
+    activeRoomState.isGuestTrial = message.isGuestTrial
     if (message.stakeAmount !== null && message.stakeAmount > 0) {
       activeRoomState.stake = message.stakeAmount as MatchStake
     }
@@ -3502,6 +3518,7 @@ export function createActiveRoomFlowController(
       isConnected: options.isConnected(),
       errorText: null,
       leavePenaltyWarningOpen: false,
+      isGuestTrial: false,
     }
 
     const pendingRoomSnapshot = pendingRoomSnapshots.get(roomId)
@@ -3549,6 +3566,7 @@ export function createActiveRoomFlowController(
       isConnected: options.isConnected(),
       errorText: null,
       leavePenaltyWarningOpen: false,
+      isGuestTrial: false,
     }
 
     const pendingRoomSnapshot = pendingRoomSnapshots.get(message.roomId)

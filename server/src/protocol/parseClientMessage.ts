@@ -188,6 +188,17 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       }
     }
 
+    if (parsed.type === 'join_guest_trial') {
+      if (typeof parsed.stake !== 'number' || !Number.isInteger(parsed.stake)) {
+        return null
+      }
+
+      return {
+        type: 'join_guest_trial',
+        stake: parsed.stake,
+      }
+    }
+
     if (parsed.type === 'request_player_profile') {
       const roomId = normalizeRequiredText(parsed.roomId)
 

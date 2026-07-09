@@ -18,6 +18,7 @@ type AddHumanToRoomOptions = {
   reconnectToken?: string | null
   identity?: Partial<PlayerIdentitySnapshot>
   publicProfile?: PlayerPublicProfileSnapshot | null
+  isGuestTrial?: boolean
 }
 
 export type AddHumanToRoomResult = {
@@ -46,6 +47,7 @@ export function addHumanToRoom(
     reconnectToken: options.reconnectToken ?? null,
     identity: options.identity,
     publicProfile: options.publicProfile ?? null,
+    isGuestTrial: options.isGuestTrial,
   })
 
   const nextRoom = seatParticipantInRoom(room, seat, participant)

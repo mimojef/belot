@@ -19,6 +19,14 @@ import { createChatStore } from './db/chatStore.js'
 import { createSupportStore, type SupportMessageSnapshot, type SupportConversationSnapshot } from './db/supportStore.js'
 import { createGuestContactStore } from './db/guestContactStore.js'
 import {
+  createGuestTrialStore,
+  createGuestIdCookieHeader,
+  getGuestIdFromCookieHeader,
+  hashGuestIdentitySignal,
+  GUEST_TRIAL_MAX_GAMES,
+  GUEST_TRIAL_STAKE,
+} from './db/guestTrialStore.js'
+import {
   createCoinPackageStore,
   type CoinPackageStatus,
 } from './db/coinPackageStore.js'
@@ -138,6 +146,7 @@ import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
 import type { PrivateRoom, PrivateRoomMember } from './game/privateRoomsStore.js'
 import { addHumanToRoom } from './core/addHumanToRoom.js'
 import { createRoomWithHumanHost } from './core/createRoomWithHumanHost.js'
+import { createGuestTrialRoom } from './core/createGuestTrialRoom.js'
 import type { ClientMessage, PrivateRoomSnapshot } from './protocol/messageTypes.js'
 import { validateGuestContactPayload } from './contact/guestContactValidation.js'
 import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
@@ -297,6 +306,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'create_room':
     case 'join_room':
     case 'join_matchmaking':
+    case 'join_guest_trial':
     case 'leave_matchmaking':
     case 'resume_room':
     case 'leave_active_room':
@@ -395,6 +405,7 @@ const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databa
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
 const supportStore = await createSupportStore(databaseBootstrap.databaseFilePath)
 const guestContactStore = await createGuestContactStore(databaseBootstrap.databaseFilePath)
+const guestTrialStore = await createGuestTrialStore(databaseBootstrap.databaseFilePath)
 const siteVisitStore = await createSiteVisitStore(databaseBootstrap.databaseFilePath)
 
 // Password reset store — optional. Ако env липсва, store-ът е null и само
@@ -650,6 +661,7 @@ let matchmakingState: MatchmakingState = createInitialMatchmakingState()
 let matchmakingCapacityRetryAt = 0
 
 const socketRegistry = new Map<ConnectionId, WebSocket>()
+const guestIdByConnection = new Map<ConnectionId, string>()
 const roomGameRuntimeRegistry = new Map<string, ServerGameRuntime>()
 
 const inProcessActiveRoomRuntime =
@@ -1208,21 +1220,23 @@ async function tickRoomGameRuntimes(): Promise<void> {
             },
           )
           const hadAwardedPrizeBeforePayout = room.awardedPrizePerSeat !== undefined
-          runMatchCompletionSideEffect(
-            'payout-match-winners',
-            room.id,
-            () => {
-              const payoutResult = matchEconomyStore.payoutMatchWinners(room)
+          if (!room.config.isGuestTrial) {
+            runMatchCompletionSideEffect(
+              'payout-match-winners',
+              room.id,
+              () => {
+                const payoutResult = matchEconomyStore.payoutMatchWinners(room)
 
-              if (!payoutResult.ok) {
-                console.error(
-                  `[match-economy] payout failed room=${room.id}: ${payoutResult.message}`,
-                )
-              } else {
-                room.awardedPrizePerSeat = payoutResult.awardedPerSeat
-              }
-            },
-          )
+                if (!payoutResult.ok) {
+                  console.error(
+                    `[match-economy] payout failed room=${room.id}: ${payoutResult.message}`,
+                  )
+                } else {
+                  room.awardedPrizePerSeat = payoutResult.awardedPerSeat
+                }
+              },
+            )
+          }
           // The first broadcast happened before payout completed (awardedPrizePerSeat was
           // undefined). If payout has now populated the field, send one targeted rebroadcast
           // so clients receive the correct awardedPrizeAmount. The idempotency guard on
@@ -1234,13 +1248,15 @@ async function tickRoomGameRuntimes(): Promise<void> {
           ) {
             broadcastRoomSnapshots(room, socketRegistry)
           }
-          runMatchCompletionSideEffect(
-            'top-up-depleted-bot-wallets',
-            room.id,
-            () => {
-              matchEconomyStore.topUpDepletedBotWallets(room)
-            },
-          )
+          if (!room.config.isGuestTrial) {
+            runMatchCompletionSideEffect(
+              'top-up-depleted-bot-wallets',
+              room.id,
+              () => {
+                matchEconomyStore.topUpDepletedBotWallets(room)
+              },
+            )
+          }
         },
       })
 
@@ -1655,6 +1671,10 @@ function getPartnerSeat(seat: Seat): Seat {
 }
 
 function shouldApplyTableExitPenalty(room: ServerRoom): boolean {
+  if (room.config.isGuestTrial) {
+    return false
+  }
+
   const stakeAmount = room.config.stakeAmount ?? null
   const phase = room.game.phase
 
@@ -5865,6 +5885,34 @@ async function handlePublicRoomsRequest(
   return true
 }
 
+async function handleGuestTrialStatusRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/guest/trial-status' || req.method !== 'GET') return false
+
+  const existingGuestId = getGuestIdFromCookieHeader(req.headers.cookie)
+  const ipHash = req.socket.remoteAddress ? hashGuestIdentitySignal(req.socket.remoteAddress) : null
+  const userAgentHash = req.headers['user-agent'] ? hashGuestIdentitySignal(req.headers['user-agent']) : null
+
+  const session = guestTrialStore.getOrCreateSession(existingGuestId, ipHash, userAgentHash)
+
+  sendJsonResponse(
+    res,
+    200,
+    {
+      ok: true,
+      gamesUsed: session.gamesUsed,
+      remaining: session.remaining,
+      maxGames: GUEST_TRIAL_MAX_GAMES,
+      stake: GUEST_TRIAL_STAKE,
+    },
+    existingGuestId === session.guestId ? {} : { 'Set-Cookie': createGuestIdCookieHeader(session.guestId) },
+  )
+  return true
+}
+
 async function handleAdminMatchRoomsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -6377,6 +6425,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleGuestTrialStatusRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleAdminMatchRoomsRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -6453,6 +6505,13 @@ wsServer.on('connection', (socket, request) => {
 
   serverState = upsertServerConnection(serverState, connection)
   socketRegistry.set(connection.id, socket)
+
+  if (authSession === null) {
+    const guestId = getGuestIdFromCookieHeader(request.headers.cookie)
+    if (guestId !== null) {
+      guestIdByConnection.set(connection.id, guestId)
+    }
+  }
 
   console.log(
     `[ws] client connected: ${connection.id} (${connection.remoteAddress ?? 'unknown'}) profile=${connection.profileId ?? 'none'}`,
@@ -6860,6 +6919,16 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        if (replayRoom.config.isGuestTrial) {
+          safeSendToConnection(connection.id, {
+            type: 'guest_trial_error',
+            message: 'Пробните игри не поддържат преиграване. Стартирайте нова пробна игра от лобито.',
+            reason: 'guest_trial_unavailable',
+            remaining: 0,
+          })
+          return
+        }
+
         const authState = replayRoom.game.authoritativeState
         if (!authState || 'kind' in authState || authState.phase !== 'match-ended') {
           return
@@ -7262,6 +7331,137 @@ wsServer.on('connection', (socket, request) => {
 
         broadcastMatchmakingStatusForStake(queuedEntryAfterStakeCollection.stake)
         processMatchmaking()
+        return
+      }
+
+      if (message.type === 'join_guest_trial') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection === null) {
+          throw new Error(`Connection "${connection.id}" was not found.`)
+        }
+
+        if (latestConnection.profileId !== null) {
+          safeSendToConnection(connection.id, {
+            type: 'guest_trial_error',
+            message: 'Влезли сте в профил — пробните игри са само за гости.',
+            reason: 'guest_trial_unavailable',
+            remaining: 0,
+          })
+          return
+        }
+
+        if (latestConnection.currentRoomId !== null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Вече си в активна игра.',
+          })
+          return
+        }
+
+        if (message.stake !== GUEST_TRIAL_STAKE) {
+          safeSendToConnection(connection.id, {
+            type: 'guest_trial_error',
+            message: 'Пробните игри са достъпни само на маса с вход 5 000.',
+            reason: 'guest_trial_invalid_stake',
+            remaining: 0,
+          })
+          return
+        }
+
+        const guestId = guestIdByConnection.get(connection.id)
+
+        if (guestId === undefined) {
+          safeSendToConnection(connection.id, {
+            type: 'guest_trial_error',
+            message: 'Гостовата сесия не беше намерена. Презареди страницата.',
+            reason: 'guest_trial_unavailable',
+            remaining: 0,
+          })
+          return
+        }
+
+        const trialResult = guestTrialStore.registerTrialGameStarted(guestId)
+
+        if (!trialResult.ok) {
+          safeSendToConnection(connection.id, {
+            type: 'guest_trial_error',
+            message: trialResult.message,
+            reason: trialResult.reason,
+            remaining: 0,
+          })
+          return
+        }
+
+        let guestRoomResult: ReturnType<typeof createGuestTrialRoom>
+
+        try {
+          guestRoomResult = createGuestTrialRoom({
+            connectionId: connection.id,
+            guestId,
+            stake: message.stake,
+          })
+        } catch (error) {
+          console.error('[guest-trial] failed to create trial room:', error)
+          guestTrialStore.undoTrialGameStarted(guestId)
+          safeSendToConnection(connection.id, {
+            type: 'guest_trial_error',
+            message: 'Не може да се стартира пробна игра в момента.',
+            reason: 'guest_trial_unavailable',
+            remaining: trialResult.session.remaining + 1,
+          })
+          return
+        }
+
+        const initializedGuestRoom = initializeRoomAuthoritativeGameState(guestRoomResult.room)
+
+        const ensureGuestRoomResult = activeRoomRuntime.ensureRoom(initializedGuestRoom)
+
+        if (!ensureGuestRoomResult.ok) {
+          console.error(
+            `[guest-trial] no runtime capacity for room=${initializedGuestRoom.id}: ${ensureGuestRoomResult.reason}`,
+          )
+          guestTrialStore.undoTrialGameStarted(guestId)
+          safeSendToConnection(connection.id, {
+            type: 'guest_trial_error',
+            message: 'Не може да се стартира пробна игра в момента.',
+            reason: 'guest_trial_unavailable',
+            remaining: trialResult.session.remaining + 1,
+          })
+          return
+        }
+
+        const attachedGuestConnection = attachConnectionToRoomSeat(
+          latestConnection,
+          connection.id,
+          initializedGuestRoom,
+          guestRoomResult.hostSeat,
+        )
+
+        serverState = updateServerConnectionInState(
+          serverState,
+          connection.id,
+          attachedGuestConnection,
+        )
+
+        serverState = commitServerRoomWithSnapshot(initializedGuestRoom, serverState)
+
+        safeSendToConnection(connection.id, {
+          type: 'match_found',
+          roomId: initializedGuestRoom.id,
+          seat: guestRoomResult.hostSeat,
+          stake: message.stake,
+          humanPlayers: 1,
+          botPlayers: 3,
+          shouldStartImmediately: true,
+        })
+
+        broadcastRoomSnapshots(initializedGuestRoom, socketRegistry)
+
+        console.log(
+          `[guest-trial] room created ${initializedGuestRoom.id} | guest=${guestId} | remaining=${trialResult.session.remaining}`,
+        )
+
         return
       }
 
@@ -7841,6 +8041,8 @@ wsServer.on('connection', (socket, request) => {
   })
 
   socket.on('close', () => {
+    guestIdByConnection.delete(connection.id)
+
     try {
       if (isServerShuttingDown) {
         socketRegistry.delete(connection.id)

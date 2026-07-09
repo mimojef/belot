@@ -14,6 +14,7 @@ import {
 import { createGameAudioController } from './app/audio/createGameAudioController'
 import {
   createLobbyFlowController,
+  GUEST_TRIAL_STAKE,
   type LobbyFlowController,
 } from './app/lobby/createLobbyFlowController'
 import { validateProfileDisplayName } from './app/lobby/profileDisplayNameValidation'
@@ -517,6 +518,46 @@ async function loadPlayersDirectory(): Promise<
     return {
       ok: false,
       message: 'Няма връзка със сървъра за играчи.',
+    }
+  }
+}
+
+async function loadGuestTrialStatus(): Promise<
+  | { ok: true; gamesUsed: number; remaining: number; maxGames: number; stake: number }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/guest/trial-status`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as {
+      ok: boolean
+      gamesUsed?: number
+      remaining?: number
+      maxGames?: number
+      stake?: number
+      message?: string
+    }
+
+    if (!response.ok || !data.ok || data.remaining === undefined) {
+      return {
+        ok: false,
+        message: data.message ?? 'Пробният статус не беше зареден.',
+      }
+    }
+
+    return {
+      ok: true,
+      gamesUsed: data.gamesUsed ?? 0,
+      remaining: data.remaining,
+      maxGames: data.maxGames ?? 3,
+      stake: data.stake ?? 5000,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра.',
     }
   }
 }
@@ -2762,9 +2803,13 @@ lobby = createLobbyFlowController({
   joinMatchmaking: (stake, displayName) => {
     client.joinMatchmaking(stake, displayName)
   },
+  joinGuestTrial: (stake) => {
+    client.joinGuestTrial(stake)
+  },
   leaveMatchmaking: () => {
     client.leaveMatchmaking()
   },
+  onGuestTrialStatusLoad: () => loadGuestTrialStatus(),
   onMatchFound: (message, stakeAlreadyShown) => {
     activeRoom.enterActiveRoom(message, stakeAlreadyShown)
   },
@@ -3028,6 +3073,10 @@ const activeRoom = createActiveRoomFlowController({
   startNewGame: (stake, displayName) => {
     lobby.setConnected(client.isConnected())
     lobby.startMatchmaking(stake, displayName)
+  },
+  onGuestTrialReplayRequested: () => {
+    lobby.setConnected(client.isConnected())
+    lobby.startMatchmaking(GUEST_TRIAL_STAKE)
   },
 })
 
@@ -3527,7 +3576,12 @@ void loadAuthSession().then(() => {
     void handleStripePaymentSuccessReturn(stripeReturnCheckoutSessionId)
   }
 })
-client.connect()
+
+// Гарантира, че belot_guest_id cookie-то съществува преди WebSocket handshake-а,
+// защото сървърът чете guest identity само от cookie-тата на connection request-а.
+void loadGuestTrialStatus().finally(() => {
+  client.connect()
+})
 
 // Offline overlay — показва се при реална загуба на интернет връзка
 ;(function initOfflineOverlay() {

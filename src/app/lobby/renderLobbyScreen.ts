@@ -43,6 +43,7 @@ import {
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes'
 import { renderAdminPaymentsPanel, attachAdminPaymentsPanelHandlers } from '../adminPayments/renderAdminPaymentsPanel'
 import { renderAdminPaymentDetailPanel, attachAdminPaymentDetailHandlers } from '../adminPayments/renderAdminPaymentDetailPanel'
+import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 
 const MISSION_TYPE_LABELS: Record<string, string> = {
   win_games: 'Спечели N игри',
@@ -196,6 +197,7 @@ export type LobbyScreenState = {
   chatErrorText: string | null
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
+  guestTrialPopup: GuestTrialPopupState
   lowCoinsModalOpen: boolean
   onlinePlayersCount: number
   signupBonusYellowCoins: number
@@ -394,6 +396,10 @@ export type RenderLobbyScreenOptions = {
   onAuthModalClose: () => void
   onAuthModeChange: (mode: Exclude<LobbyAuthModalMode, 'closed'>) => void
   onAuthError: (message: string) => void
+  onGuestTrialPlayClick: () => void
+  onGuestTrialRegisterClick: () => void
+  onGuestTrialLoginClick: () => void
+  onGuestTrialClose: () => void
   onLoginSubmit: (email: string, password: string) => void
   onRegisterSubmit: (displayName: string, email: string, password: string, gender: 'male' | 'female' | null) => void
   onForgotPasswordSubmit?: (email: string) => void
@@ -597,7 +603,7 @@ export function syncProfilePopup(
   attachPopupListeners(el, cb, popupState.profile?.profileId ?? null)
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return String(value)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -834,7 +840,7 @@ function renderAuthModal(state: LobbyScreenState): string {
           Регистрирай се и вземи <span style="white-space:nowrap"><img src="/assets/lobby/icon-coin.png" alt="" style="width:28px;height:28px;vertical-align:middle;margin:0 2px 3px 0;"><span style="color:#d4a520;">${escapeHtml(bonusText)}</span></span> жълтици
         </div>
         <div style="font-size:15px;line-height:1.5;color:rgba(255,255,255,0.72);font-weight:700;">
-          Създай профил, избери име и играй белот с други хора. Използвай чат с приятели, изпращай подаръци, печели жълтици и трупай рейтинг.
+          Създай профил, избери име и отключи всички маси. Използвай чат с приятели, изпращай подаръци, печели жълтици и трупай рейтинг.
         </div>
         <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:6px;">
           <button type="button" data-lobby-auth-register-button="1" style="height:46px;min-width:150px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;">Регистрация</button>
@@ -1684,7 +1690,7 @@ function renderGuestHeroCard(signupBonus: number, useMobileLayout = false): stri
             ">
               <img src="/assets/lobby/icon-coin.png" alt="" style="width:28px;height:28px;object-fit:contain;flex-shrink:0;">
               <div style="font-size:15px;font-weight:400;color:rgba(255,255,255,0.80);line-height:1.4;">
-                Регистрирай се и вземи <span style="color:#d4a520;font-weight:700;">${bonusText} жълтици</span> безплатно
+                Създай профил и започни със <span style="color:#d4a520;font-weight:700;">${bonusText} жълтици</span>
               </div>
             </div>
           </div>
@@ -1856,6 +1862,8 @@ function renderStakeSection(
   playerLevel: number,
   matchRoomsLoading: boolean,
   useMobileLayout = false,
+  isGuestSession = false,
+  guestTrialStake: MatchStake = 5000,
 ): string {
   const rooms = matchRooms.filter((r) => r.isEnabled)
 
@@ -1876,7 +1884,8 @@ function renderStakeSection(
   }
 
   const stakeCards = rooms.map((room) => {
-    const isLocked = playerLevel < room.minLevel
+    const isLockedForGuest = isGuestSession && room.stakeAmount !== guestTrialStake
+    const isLocked = playerLevel < room.minLevel || isLockedForGuest
     const isSelected = isSearching && room.stakeAmount === selectedStake
     const isDisabled = !canStartSearch || isLocked
 
@@ -1925,8 +1934,12 @@ function renderStakeSection(
             border-radius:8px; padding:8px 14px;
             text-align:center; pointer-events:none; z-index:2;
           ">
-            <div style="font-size:9px; font-weight:900; text-transform:uppercase; letter-spacing:0.1em; color:rgba(0,0,0,0.65); margin-bottom:3px;">Ниво за вход</div>
-            <div style="font-size:22px; font-weight:900; color:#000000; line-height:1;">${room.minLevel}</div>
+            ${isLockedForGuest ? `
+              <div style="font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:0.06em; color:rgba(0,0,0,0.72); max-width:110px;">Влез в профила си</div>
+            ` : `
+              <div style="font-size:9px; font-weight:900; text-transform:uppercase; letter-spacing:0.1em; color:rgba(0,0,0,0.65); margin-bottom:3px;">Ниво за вход</div>
+              <div style="font-size:22px; font-weight:900; color:#000000; line-height:1;">${room.minLevel}</div>
+            `}
           </div>
         ` : ''}
 
@@ -2932,7 +2945,7 @@ function renderMobileGuestCard(signupBonus: number): string {
     ">
       <div style="font-size:20px;font-weight:900;color:#ffffff;">Pika.bg</div>
       <div style="font-size:14px;line-height:1.45;color:rgba(255,255,255,0.66);font-weight:700;">
-        Влез за да играеш или се регистрирай и вземи <span style="color:#d4a520;">${formatAmount(signupBonus)} жълтици</span> безплатно.
+        Влез или създай профил и започни със <span style="color:#d4a520;">${formatAmount(signupBonus)} жълтици</span>.
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
         <button type="button" data-lobby-auth-login="1" style="height:44px;border:1px solid rgba(212,165,32,0.54);border-radius:8px;background:#050505;color:#d4a520;font-size:14px;font-weight:900;">Вход</button>
@@ -2949,6 +2962,8 @@ function renderMobileStakeSection(
   matchRooms: MatchRoomSnapshot[],
   playerLevel: number,
   matchRoomsLoading: boolean,
+  isGuestSession = false,
+  guestTrialStake: MatchStake = 5000,
 ): string {
   const rooms = matchRooms.filter((room) => room.isEnabled)
 
@@ -2957,7 +2972,8 @@ function renderMobileStakeSection(
   }
 
   const cards = rooms.map((room, index) => {
-    const isLocked = playerLevel < room.minLevel
+    const isLockedForGuest = isGuestSession && room.stakeAmount !== guestTrialStake
+    const isLocked = playerLevel < room.minLevel || isLockedForGuest
     const isSelected = isSearching && room.stakeAmount === selectedStake
     const isDisabled = !canStartSearch || isLocked
     const snapAlign = index === 0
@@ -2992,7 +3008,7 @@ function renderMobileStakeSection(
             <div style="margin-top:4px;font-size:18px;font-weight:400;color:#ffffff;">${formatAmount(room.stakeAmount)}</div>
           </div>
           ${isLocked ? `
-            <div style="font-size:12px;font-weight:900;color:#fca5a5;text-align:right;">Ниво ${room.minLevel}</div>
+            <div style="font-size:12px;font-weight:900;color:#fca5a5;text-align:right;">${isLockedForGuest ? 'Влез в профила си' : `Ниво ${room.minLevel}`}</div>
           ` : `
             <button type="button" data-lobby-stake-card="${room.stakeAmount}" ${isDisabled ? 'disabled' : ''} style="
               height:44px;padding:0 16px;border:0;border-radius:8px;
@@ -3604,7 +3620,7 @@ function renderMobileLobbyScreenContent(
       ${state.profile.profileId !== null
         ? renderMobileProfileCard(state, profileName)
         : renderMobileGuestCard(state.signupBonusYellowCoins ?? 0)}
-      ${renderMobileStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading)}
+      ${renderMobileStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, state.profile.profileId === null)}
       ${renderMobileOffersSection(state.lobbyPackages, state.profile.profileId !== null)}
       ${renderMobileQuickActions(state.dailyMissionsUnclaimedCount, getUnclaimedDailyRewardsBadgeCount(state) > 0)}
     </main>
@@ -7155,6 +7171,7 @@ export function renderLobbyScreen(
       ${renderProfileEditModal(state)}
       ${renderChangePasswordModal(state)}
       ${renderAuthModal(state)}
+      ${renderGuestTrialPopup(state.guestTrialPopup)}
       ${renderShopPurchaseConfirmModal(state)}
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
@@ -7312,7 +7329,7 @@ export function renderLobbyScreen(
               ${state.profile.profileId !== null
                 ? renderHeroSection(profileName, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level, isPhoneLayout)
                 : renderGuestHeroCard(state.signupBonusYellowCoins ?? 0, isPhoneLayout)}
-              ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, isPhoneLayout)}
+              ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, isPhoneLayout, state.profile.profileId === null)}
               ${renderBottomSection(
                 state.lobbyPackages,
                 state.profile.profileId !== null,
@@ -7390,6 +7407,7 @@ export function renderLobbyScreen(
       ${renderProfileEditModal(state)}
       ${renderChangePasswordModal(state)}
       ${renderAuthModal(state)}
+      ${renderGuestTrialPopup(state.guestTrialPopup)}
       ${renderShopPurchaseConfirmModal(state)}
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
@@ -9033,6 +9051,17 @@ export function renderLobbyScreen(
   root
     .querySelector<HTMLElement>('[data-lobby-auth-modal-root="1"] [role="dialog"]')
     ?.addEventListener('click', (e) => e.stopPropagation())
+
+  root
+    .querySelector<HTMLElement>('[data-guest-trial-modal-root="1"] [role="dialog"]')
+    ?.addEventListener('click', (e) => e.stopPropagation())
+
+  attachGuestTrialPopupEventListeners(root, {
+    onPlayClick: options.onGuestTrialPlayClick,
+    onRegisterClick: options.onGuestTrialRegisterClick,
+    onLoginClick: options.onGuestTrialLoginClick,
+    onClose: options.onGuestTrialClose,
+  })
 
   root
     .querySelector<HTMLButtonElement>('[data-lobby-auth-register-button="1"]')

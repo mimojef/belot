@@ -48,6 +48,10 @@ export type ClientMessage =
       stake: MatchStake
     }
   | {
+      type: 'join_guest_trial'
+      stake: MatchStake
+    }
+  | {
       type: 'leave_matchmaking'
     }
   | {
@@ -324,6 +328,7 @@ export type RoomSnapshotMessage = {
   seats: RoomSeatSnapshot[]
   game?: RoomGameSnapshot | null
   stakeAmount: number | null
+  isGuestTrial: boolean
 }
 
 export type ConnectedMessage = {
@@ -340,6 +345,21 @@ export type PongMessage = {
 export type ErrorMessage = {
   type: 'error'
   message: string
+}
+
+export type GuestTrialErrorMessage = {
+  type: 'guest_trial_error'
+  message: string
+  reason: 'guest_trial_limit_reached' | 'guest_trial_invalid_stake' | 'guest_trial_unavailable'
+  remaining: number
+}
+
+export type GuestTrialStatusMessage = {
+  type: 'guest_trial_status'
+  gamesUsed: number
+  remaining: number
+  maxGames: number
+  stake: MatchStake
 }
 
 export type PlayerProfileMessage = {
@@ -569,6 +589,8 @@ export type ServerMessage =
   | ConnectedMessage
   | PongMessage
   | ErrorMessage
+  | GuestTrialErrorMessage
+  | GuestTrialStatusMessage
   | SessionDisplacedMessage
   | SessionInGameMessage
   | PlayerProfileMessage

@@ -13,6 +13,7 @@ type CreateHumanParticipantOptions = {
   reconnectToken?: string | null
   identity?: Partial<PlayerIdentitySnapshot>
   publicProfile?: PlayerPublicProfileSnapshot | null
+  isGuestTrial?: boolean
 }
 
 function createDefaultIdentity(): PlayerIdentitySnapshot {
@@ -47,5 +48,6 @@ export function createHumanParticipant(
       ...options.identity,
     },
     publicProfile: options.publicProfile ?? null,
+    ...(options.isGuestTrial ? { isGuestTrial: true } : {}),
   }
 }

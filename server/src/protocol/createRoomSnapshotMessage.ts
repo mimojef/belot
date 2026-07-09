@@ -330,5 +330,6 @@ export function createRoomSnapshotMessage(
     seats: SERVER_SEAT_ORDER.map((seat) => createSeatSnapshot(room, seat)),
     game: createGameSnapshot(room, yourSeat),
     stakeAmount: room.config.stakeAmount ?? null,
+    isGuestTrial: room.config.isGuestTrial === true,
   }
 }

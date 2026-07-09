@@ -29,6 +29,7 @@
     "check:admin-profile-moderation": "tsx scripts/checkAdminProfileModeration.ts",
     "check:shop-purchase-flow": "tsx scripts/checkShopPurchaseFlow.ts",
     "check:reconnect-contract": "tsx scripts/checkReconnectContractDisplay.ts",
+    "check:guest-trial-flow": "tsx scripts/checkGuestTrialFlow.ts",
     "check:client-winning-bid": "tsx scripts/checkClientWinningBidHelpers.ts",
     "check:password-reset": "tsx scripts/checkPasswordReset.ts",
     "check:password-reset-http": "tsx scripts/checkPasswordResetHttp.ts",

@@ -21,6 +21,7 @@ type CreateRoomWithHumanHostOptions = {
   identity?: Partial<PlayerIdentitySnapshot>
   publicProfile?: PlayerPublicProfileSnapshot | null
   config?: Partial<ServerRoomConfig>
+  isGuestTrial?: boolean
 }
 
 export type CreateRoomWithHumanHostResult = {
@@ -43,6 +44,7 @@ export function createRoomWithHumanHost(
     reconnectToken: options.reconnectToken ?? null,
     identity: options.identity,
     publicProfile: options.publicProfile ?? null,
+    isGuestTrial: options.isGuestTrial,
   })
 
   const nextRoom = updateRoomHostPlayerId(addHumanResult.room)

@@ -375,6 +375,10 @@ export type ClientMessage =
       stake: MatchStake
     }
   | {
+      type: 'join_guest_trial'
+      stake: MatchStake
+    }
+  | {
       type: 'leave_matchmaking'
     }
   | {
@@ -676,6 +680,21 @@ export type ErrorMessage = {
   message: string
 }
 
+export type GuestTrialErrorMessage = {
+  type: 'guest_trial_error'
+  message: string
+  reason: 'guest_trial_limit_reached' | 'guest_trial_invalid_stake' | 'guest_trial_unavailable'
+  remaining: number
+}
+
+export type GuestTrialStatusMessage = {
+  type: 'guest_trial_status'
+  gamesUsed: number
+  remaining: number
+  maxGames: number
+  stake: MatchStake
+}
+
 export type RoomCreatedMessage = {
   type: 'room_created'
   roomId: string
@@ -729,6 +748,7 @@ export type RoomSnapshotMessage = {
   seats: RoomSeatSnapshot[]
   game?: RoomGameSnapshot | null
   stakeAmount: number | null
+  isGuestTrial: boolean
 }
 
 export type PlayerProfileMessage = {
@@ -968,6 +988,8 @@ export type ServerMessage =
   | ConnectedMessage
   | PongMessage
   | ErrorMessage
+  | GuestTrialErrorMessage
+  | GuestTrialStatusMessage
   | RoomCreatedMessage
   | RoomJoinedMessage
   | RoomResumedMessage
@@ -1026,6 +1048,7 @@ export type GameServerClient = {
   createRoom: (displayName?: string) => void
   joinRoom: (roomId: string, displayName?: string) => void
   joinMatchmaking: (stake: MatchStake, displayName?: string) => void
+  joinGuestTrial: (stake: MatchStake) => void
   leaveMatchmaking: () => void
   requestPlayerProfile: (roomId: string, seat: Seat) => void
   resumeRoom: (roomId: string, reconnectToken: string) => void
@@ -1172,6 +1195,13 @@ export function createGameServerClient(
     })
   }
 
+  function joinGuestTrial(stake: MatchStake): void {
+    send({
+      type: 'join_guest_trial',
+      stake,
+    })
+  }
+
   function requestPlayerProfile(roomId: string, seat: Seat): void {
     send({
       type: 'request_player_profile',
@@ -1306,6 +1336,7 @@ export function createGameServerClient(
     createRoom,
     joinRoom,
     joinMatchmaking,
+    joinGuestTrial,
     leaveMatchmaking,
     requestPlayerProfile,
     resumeRoom,
