@@ -19,6 +19,7 @@ import {
   type ProfilePopupCallbacks,
 } from './renderLobbyScreen'
 import type { GuestTrialPopupState } from './renderGuestTrialPopup'
+import type { GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import {
   computeShopResumeConfirmOpen,
   computeShopPurchaseConfirmDispatch,
@@ -466,6 +467,7 @@ type InternalLobbyFlowState = {
   authErrorText: string | null
   authSubmitInFlight: boolean
   guestTrialPopup: GuestTrialPopupState
+  guestLockedStakePopup: GuestLockedStakePopupState
   lowCoinsModalOpen: boolean
   serverRoomSeats: RoomSeatSnapshot[] | null
   serverYourSeat: RoomSeatSnapshot['seat'] | null
@@ -705,6 +707,9 @@ function createInitialState(): InternalLobbyFlowState {
       maxGames: GUEST_TRIAL_MAX_GAMES,
       errorText: null,
       isSubmitting: false,
+    },
+    guestLockedStakePopup: {
+      isOpen: false,
     },
     lowCoinsModalOpen: false,
     serverRoomSeats: null,
@@ -1104,7 +1109,6 @@ export function createLobbyFlowController(
   let _initMatchRoomsDone = !options.onMatchRoomsLoad
   let _initPackagesDone = !options.onLobbyPackagesLoad
   let _initConnected = false
-  let _guestCtaShown = false
   let _initOverlayEl: HTMLElement | null = null
   let _initBarEl: HTMLElement | null = null
   let _initOverlayHidden = false
@@ -1870,6 +1874,7 @@ export function createLobbyFlowController(
       authModalMode: state.authModalMode,
       authErrorText: state.authErrorText,
       guestTrialPopup: state.guestTrialPopup,
+      guestLockedStakePopup: state.guestLockedStakePopup,
       lowCoinsModalOpen: state.lowCoinsModalOpen,
       onlinePlayersCount: options.getOnlinePlayersCount?.() ?? 0,
       signupBonusYellowCoins: options.getSignupBonusYellowCoins?.() ?? 100000,
@@ -2354,6 +2359,33 @@ export function createLobbyFlowController(
       },
       onGuestTrialClose: () => {
         closeGuestTrialPopup()
+      },
+      onGuestLockedStakePlay5000Click: () => {
+        closeGuestLockedStakePopup()
+        void openGuestTrialPopup()
+      },
+      onGuestLockedStakeRegisterClick: () => {
+        closeGuestLockedStakePopup()
+        if (options.onGuestTrialRegisterClick) {
+          options.onGuestTrialRegisterClick()
+        } else {
+          state.authModalMode = 'register'
+          state.authErrorText = null
+          render()
+        }
+      },
+      onGuestLockedStakeLoginClick: () => {
+        closeGuestLockedStakePopup()
+        if (options.onGuestTrialLoginClick) {
+          options.onGuestTrialLoginClick()
+        } else {
+          state.authModalMode = 'login'
+          state.authErrorText = null
+          render()
+        }
+      },
+      onGuestLockedStakeClose: () => {
+        closeGuestLockedStakePopup()
       },
       onLoginSubmit: (email, password) => {
         void submitLogin(email, password)
@@ -4929,6 +4961,16 @@ export function createLobbyFlowController(
     render()
   }
 
+  function openGuestLockedStakePopup(): void {
+    state.guestLockedStakePopup = { isOpen: true }
+    render()
+  }
+
+  function closeGuestLockedStakePopup(): void {
+    state.guestLockedStakePopup = { isOpen: false }
+    render()
+  }
+
   function handleGuestTrialPlayClick(): void {
     if (state.guestTrialPopup.isSubmitting || state.guestTrialPopup.remaining <= 0) {
       return
@@ -4973,9 +5015,7 @@ export function createLobbyFlowController(
         return
       }
 
-      state.authModalMode = 'cta'
-      state.authErrorText = null
-      render()
+      openGuestLockedStakePopup()
       return
     }
 
@@ -6036,15 +6076,6 @@ export function createLobbyFlowController(
       if (value) {
         _initConnected = true
         maybeHideInitialOverlay()
-        if (!_guestCtaShown && options.getAuthSession?.() === null && state.authModalMode === 'closed') {
-          _guestCtaShown = true
-          window.setTimeout(() => {
-            if (state.isConnected && state.authModalMode === 'closed' && options.getAuthSession?.() === null) {
-              state.authModalMode = 'cta'
-              render()
-            }
-          }, 1500)
-        }
       }
       render()
     },

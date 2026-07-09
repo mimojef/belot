@@ -43,6 +43,22 @@
  * [37] confirmLabel за guest trial е "Напусни" (не "Напусни и плати")
  * [38] guest trial exit текст не съдържа жълтици/санкция/баланс/портфейл/залог
  * [39] "Остани" не вика leaveActiveRoom (само затваря popup); "Напусни" вика leaveActiveRoom
+ * [40] setConnected() вече не auto-show-ва authModalMode='cta' чрез setTimeout при lobby mount
+ * [41] startMatchmaking guest + GUEST_TRIAL_STAKE → guest trial popup (не auth CTA)
+ * [42] startMatchmaking guest + заключена маса → authModalMode='cta' (contextual при клик)
+ * [43] Остават contextual CTA trigger-и: shop/friends/chat/block explicit user actions
+ * [44] renderGuestTrialPopup е независим от authModalMode (собствен state)
+ * [45] Desktop: isLockedForGuest карти не са HTML disabled (кликаеми за auth CTA)
+ * [46] Mobile: guest-locked карта рендерира кликаем бутон "Влез в профила си"
+ * [47] Level-locked (registered) карти остават с истинско disabled поведение
+ * [48] stakeButtons click handler води locked-for-guest клик до startMatchmaking
+ * [49] Locked stake popup: точен текст "Като гост не можете да играете на маса с този залог."
+ * [50] Locked stake popup: бутони "Играй на 5 000" / "Вход" / "Създай профил"
+ * [51] Locked stake popup: без забранени думи, без "100 000"/"баланс"
+ * [52] "Играй на 5 000" затваря locked popup и отваря guest trial popup
+ * [53] "Играй на 5 000" не bypass-ва лимита (минава само през openGuestTrialPopup fresh fetch)
+ * [54] "Вход"/"Създай профил" от locked popup водят към auth flow
+ * [55] renderGuestLockedStakePopup е wire-нат в renderLobbyScreen.ts
  */
 
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
@@ -576,6 +592,234 @@ async function checkGuestTrialExitConfirmationPopup(): Promise<void> {
   )
 }
 
+async function checkNoAutoRegistrationModalOnLobbyMount(): Promise<void> {
+  console.log('\n[40-44] Guest lobby mount не показва auto registration modal; contextual triggers остават')
+
+  const controllerSource = await readFile(
+    new URL('../../src/app/lobby/createLobbyFlowController.ts', import.meta.url),
+    'utf8',
+  )
+
+  // [40] setConnected вече не планира auto-show на authModalMode='cta' чрез setTimeout.
+  const setConnectedStart = controllerSource.indexOf('setConnected: (value) => {')
+  const setConnectedEnd = controllerSource.indexOf('\n    },', setConnectedStart)
+  const setConnectedBody = controllerSource.slice(setConnectedStart, setConnectedEnd)
+
+  check(
+    '[40] setConnected() вече не съдържа window.setTimeout auto-show на authModalMode',
+    setConnectedStart !== -1 && !setConnectedBody.includes('window.setTimeout'),
+  )
+  check(
+    '[40] setConnected() вече не пипа state.authModalMode изобщо (без auto-CTA)',
+    !setConnectedBody.includes('authModalMode'),
+  )
+  check(
+    '[40] _guestCtaShown auto-show флагът е премахнат от контролера',
+    !controllerSource.includes('_guestCtaShown'),
+  )
+
+  // [41] startMatchmaking(stake) за guest все още прави разлика: GUEST_TRIAL_STAKE → guest trial popup,
+  // друга (заключена) маса → guestLockedStakePopup (специфичен popup, не generic auth CTA).
+  // Contextual, не auto-show при mount.
+  const startMatchmakingStart = controllerSource.indexOf('function startMatchmaking(stake: MatchStake')
+  const startMatchmakingEnd = controllerSource.indexOf('\n  function ', startMatchmakingStart + 10)
+  const startMatchmakingBody = controllerSource.slice(startMatchmakingStart, startMatchmakingEnd)
+
+  check(
+    '[41] startMatchmaking: guest + GUEST_TRIAL_STAKE → openGuestTrialPopup (не auth CTA)',
+    startMatchmakingBody.includes('stake === GUEST_TRIAL_STAKE') &&
+      startMatchmakingBody.includes('openGuestTrialPopup()'),
+  )
+  check(
+    '[42] startMatchmaking: guest + друга (заключена) маса → openGuestLockedStakePopup() (contextual при клик, не generic auth CTA)',
+    /if \(stake === GUEST_TRIAL_STAKE\) \{[\s\S]*?\}\s*\n\s*openGuestLockedStakePopup\(\)/.test(startMatchmakingBody),
+  )
+
+  // [43] Останалите authModalMode='cta' trigger-и са explicit user actions (shop/friends/chat/block),
+  // не mount-time код — те стоят в named async функции, не в setConnected/render/init пътища.
+  const remainingCtaTriggerFunctionNames = [
+    'function openShopPurchaseConfirm',
+    'async function startShopPurchase',
+    'async function showFriendsDirectory',
+    'async function submitFriendRequest',
+    'async function blockProfile',
+    'async function openBlockedPlayersPopup',
+    'showChat',
+  ]
+  for (const fnName of remainingCtaTriggerFunctionNames) {
+    check(
+      `[43] contextual CTA trigger "${fnName}" присъства (запазен explicit user-action popup)`,
+      controllerSource.includes(fnName),
+    )
+  }
+
+  // [44] Guest trial limit-reached popup (remaining=0) все още показва отделен CTA
+  // (register/login), различен от generic auth CTA — вече покрито от checkPopupTextRules [32],
+  // тук само потвърждаваме, че renderGuestTrialPopup не зависи от authModalMode.
+  const popupSource = await readFile(
+    new URL('../../src/app/lobby/renderGuestTrialPopup.ts', import.meta.url),
+    'utf8',
+  )
+  check(
+    '[44] renderGuestTrialPopup е напълно самостоятелен от authModalMode (собствен isOpen state)',
+    !popupSource.includes('authModalMode'),
+  )
+}
+
+async function checkLockedStakeCardsAreClickableForGuest(): Promise<void> {
+  console.log('\n[45-48] Заключените маси остават кликаеми за guest (не HTML disabled), за да отворят auth CTA')
+
+  const lobbySource = await readFile(
+    new URL('../../src/app/lobby/renderLobbyScreen.ts', import.meta.url),
+    'utf8',
+  )
+
+  // [45] Desktop renderStakeSection: isDisabled изключва isLockedForGuest от HTML disabled логиката.
+  check(
+    '[45] Desktop stake card: isDisabled = !canStartSearch || (isLocked && !isLockedForGuest)',
+    lobbySource.includes('const isDisabled = !canStartSearch || (isLocked && !isLockedForGuest)'),
+  )
+
+  // [46] Mobile renderMobileStakeSection: locked-for-guest маси рендерират кликаем бутон
+  // "Влез в профила си" (data-lobby-stake-card + data-lobby-stake-card-guest-locked), а не
+  // само статичен текст без event target (какъвто беше преди fix-а).
+  check(
+    '[46] Mobile guest-locked карта рендерира data-lobby-stake-card-guest-locked бутон',
+    lobbySource.includes('data-lobby-stake-card-guest-locked="1"') &&
+      lobbySource.includes('isLockedForGuest ? `'),
+  )
+  check(
+    '[46] Mobile guest-locked бутон има текст "Влез в профила си" и е type="button" (кликаем, не disabled)',
+    /isLockedForGuest \? `\s*<button type="button" data-lobby-stake-card="\$\{room\.stakeAmount\}" data-lobby-stake-card-guest-locked="1"[^>]*>\s*[\s\S]*?Влез в профила си/.test(
+      lobbySource,
+    ),
+  )
+
+  // [47] Level-locked (registered users с недостатъчно ниво) карти НЕ са засегнати —
+  // остават с истинско HTML disabled поведение, различно от guest-locked случая.
+  check(
+    '[47] isLockedForGuest е explicit разграничен от общия isLocked (level-lock продължава да disable-ва)',
+    lobbySource.includes('const isLockedForGuest = isGuestSession && room.stakeAmount !== guestTrialStake') &&
+      lobbySource.includes('const isLocked = playerLevel < room.minLevel || isLockedForGuest'),
+  )
+
+  // [48] Кликването на locked stake бутон минава през същия stakeButtons click handler,
+  // който вика options.onStakeChange + options.onSearchClick → startMatchmaking(stake) →
+  // guest detection → authModalMode='cta' (вече проверено статично в [42]).
+  const clickHandlerStart = lobbySource.indexOf("stakeButtons.forEach((button) => {")
+  const clickHandlerEnd = lobbySource.indexOf('})', clickHandlerStart)
+  const clickHandlerBody = lobbySource.slice(clickHandlerStart, clickHandlerEnd)
+  check(
+    '[48] stakeButtons click handler не филтрира по isLockedForGuest (locked-for-guest клик стига до startMatchmaking)',
+    clickHandlerBody.includes('options.onStakeChange(rawStake)') && clickHandlerBody.includes('options.onSearchClick()'),
+  )
+}
+
+async function checkGuestLockedStakePopup(): Promise<void> {
+  console.log('\n[49-55] Отделен guest locked stake popup ("Като гост не можете да играете на маса с този залог.")')
+
+  const popupSource = await readFile(
+    new URL('../../src/app/lobby/renderGuestLockedStakePopup.ts', import.meta.url),
+    'utf8',
+  )
+  const controllerSource = await readFile(
+    new URL('../../src/app/lobby/createLobbyFlowController.ts', import.meta.url),
+    'utf8',
+  )
+  const lobbySource = await readFile(
+    new URL('../../src/app/lobby/renderLobbyScreen.ts', import.meta.url),
+    'utf8',
+  )
+
+  // [49] Точен текст на popup-а.
+  check(
+    '[49] locked stake popup текст: "Като гост не можете да играете на маса с този залог."',
+    popupSource.includes('Като гост не можете да играете на маса с този залог.'),
+  )
+  check(
+    '[49] locked stake popup текст: "Пробвайте маса със залог 5 000 или влезте в профила си."',
+    popupSource.includes('Пробвайте маса със залог 5 000 или влезте в профила си.'),
+  )
+
+  // [50] Трите бутона: "Играй на 5 000", "Вход", "Създай профил".
+  check(
+    '[50] бутон "Играй на 5 000" присъства (data-guest-locked-stake-play-5000-button)',
+    popupSource.includes('data-guest-locked-stake-play-5000-button="1"') && popupSource.includes('Играй на 5 000'),
+  )
+  check(
+    '[50] бутон "Вход" присъства (data-guest-locked-stake-login-button)',
+    popupSource.includes('data-guest-locked-stake-login-button="1"') && popupSource.includes('>Вход<'),
+  )
+  check(
+    '[50] бутон "Създай профил" присъства (data-guest-locked-stake-register-button)',
+    popupSource.includes('data-guest-locked-stake-register-button="1"') && popupSource.includes('>Създай профил<'),
+  )
+
+  // [51] Забранени думи/обещания отсъстват.
+  const lowerPopupSource = popupSource.toLowerCase()
+  const forbiddenWords = ['безплатни', 'безплатно', 'бонус', 'подарък']
+  for (const word of forbiddenWords) {
+    check(`[51] locked stake popup не съдържа "${word}"`, !lowerPopupSource.includes(word))
+  }
+  const forbiddenPromiseFragments = ['играете с истински хора', 'играй с истински хора', 'срещу истински хора']
+  for (const fragment of forbiddenPromiseFragments) {
+    check(`[51] locked stake popup не обещава "${fragment}"`, !lowerPopupSource.includes(fragment))
+  }
+  check(
+    '[51] locked stake popup не показва "100 000" (не е guest balance CTA, а само redirect текст)',
+    !popupSource.includes('100 000') && !lowerPopupSource.includes('баланс'),
+  )
+
+  // [52] "Играй на 5 000" затваря locked popup-а и отваря guest trial popup (openGuestTrialPopup).
+  const play5000HandlerStart = controllerSource.indexOf('onGuestLockedStakePlay5000Click: () => {')
+  const play5000HandlerEnd = controllerSource.indexOf('},', play5000HandlerStart)
+  const play5000HandlerBody = controllerSource.slice(play5000HandlerStart, play5000HandlerEnd)
+  check(
+    '[52] "Играй на 5 000" вика closeGuestLockedStakePopup() + openGuestTrialPopup()',
+    play5000HandlerBody.includes('closeGuestLockedStakePopup()') && play5000HandlerBody.includes('openGuestTrialPopup()'),
+  )
+
+  // [53] "Играй на 5 000" не bypass-ва лимита директно — openGuestTrialPopup() винаги прави
+  // fresh onGuestTrialStatusLoad fetch и renderGuestTrialPopup показва limit-reached UI
+  // (без "Играй" бутон) автоматично при remaining=0 — вече покрито функционално в
+  // checkPopupTextRules [32]. Тук потвърждаваме, че play5000 handler-ът няма отделен bypass път
+  // (напр. директно joinGuestTrial без fresh status check).
+  check(
+    '[53] "Играй на 5 000" handler-ът не вика options.joinGuestTrial директно (минава само през openGuestTrialPopup)',
+    !play5000HandlerBody.includes('options.joinGuestTrial'),
+  )
+
+  // [54] "Вход"/"Създай профил" от locked popup водят към същия auth flow като guest trial limit popup-а
+  // (options.onGuestTrialLoginClick / options.onGuestTrialRegisterClick, или fallback authModalMode).
+  const loginHandlerStart = controllerSource.indexOf('onGuestLockedStakeLoginClick: () => {')
+  const loginHandlerEnd = controllerSource.indexOf('},', loginHandlerStart)
+  const loginHandlerBody = controllerSource.slice(loginHandlerStart, loginHandlerEnd)
+  check(
+    '[54] "Вход" от locked popup затваря locked popup-а и води към login flow (authModalMode/onGuestTrialLoginClick)',
+    loginHandlerBody.includes('closeGuestLockedStakePopup()') &&
+      (loginHandlerBody.includes('onGuestTrialLoginClick') || loginHandlerBody.includes("authModalMode = 'login'")),
+  )
+
+  const registerHandlerStart = controllerSource.indexOf('onGuestLockedStakeRegisterClick: () => {')
+  const registerHandlerEnd = controllerSource.indexOf('},', registerHandlerStart)
+  const registerHandlerBody = controllerSource.slice(registerHandlerStart, registerHandlerEnd)
+  check(
+    '[54] "Създай профил" от locked popup затваря locked popup-а и води към register flow',
+    registerHandlerBody.includes('closeGuestLockedStakePopup()') &&
+      (registerHandlerBody.includes('onGuestTrialRegisterClick') || registerHandlerBody.includes("authModalMode = 'register'")),
+  )
+
+  // [55] renderGuestLockedStakePopup е wire-нат в renderLobbyScreen.ts (desktop + mobile общ render).
+  check(
+    '[55] renderGuestLockedStakePopup е извикан в renderLobbyScreen.ts',
+    lobbySource.includes('renderGuestLockedStakePopup(state.guestLockedStakePopup)'),
+  )
+  check(
+    '[55] attachGuestLockedStakePopupEventListeners е закачен в renderLobbyScreen.ts',
+    lobbySource.includes('attachGuestLockedStakePopupEventListeners(root,'),
+  )
+}
+
 async function main(): Promise<void> {
   await checkTrialLimitLifecycle()
   await checkUndoTrialGameStarted()
@@ -588,6 +832,9 @@ async function main(): Promise<void> {
   await checkGuestTrialExitPenaltyNeverApplied()
   checkEconomyNotInvokedForGuestCleanup()
   await checkGuestTrialExitConfirmationPopup()
+  await checkNoAutoRegistrationModalOnLobbyMount()
+  await checkLockedStakeCardsAreClickableForGuest()
+  await checkGuestLockedStakePopup()
 
   console.log(`\n${passed + failed} checks: ${passed} passed, ${failed} failed`)
   if (failed > 0) {
