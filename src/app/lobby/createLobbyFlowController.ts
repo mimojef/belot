@@ -20,6 +20,7 @@ import {
 } from './renderLobbyScreen'
 import type { GuestTrialPopupState } from './renderGuestTrialPopup'
 import type { GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
+import type { LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
 import {
   computeShopResumeConfirmOpen,
   computeShopPurchaseConfirmDispatch,
@@ -468,6 +469,7 @@ type InternalLobbyFlowState = {
   authSubmitInFlight: boolean
   guestTrialPopup: GuestTrialPopupState
   guestLockedStakePopup: GuestLockedStakePopupState
+  levelLockedStakePopup: LevelLockedStakePopupState
   lowCoinsModalOpen: boolean
   serverRoomSeats: RoomSeatSnapshot[] | null
   serverYourSeat: RoomSeatSnapshot['seat'] | null
@@ -710,6 +712,11 @@ function createInitialState(): InternalLobbyFlowState {
     },
     guestLockedStakePopup: {
       isOpen: false,
+    },
+    levelLockedStakePopup: {
+      isOpen: false,
+      requiredLevel: 1,
+      currentLevel: 1,
     },
     lowCoinsModalOpen: false,
     serverRoomSeats: null,
@@ -1875,6 +1882,7 @@ export function createLobbyFlowController(
       authErrorText: state.authErrorText,
       guestTrialPopup: state.guestTrialPopup,
       guestLockedStakePopup: state.guestLockedStakePopup,
+      levelLockedStakePopup: state.levelLockedStakePopup,
       lowCoinsModalOpen: state.lowCoinsModalOpen,
       onlinePlayersCount: options.getOnlinePlayersCount?.() ?? 0,
       signupBonusYellowCoins: options.getSignupBonusYellowCoins?.() ?? 100000,
@@ -2386,6 +2394,17 @@ export function createLobbyFlowController(
       },
       onGuestLockedStakeClose: () => {
         closeGuestLockedStakePopup()
+      },
+      onLevelLockedStakeViewProfileClick: () => {
+        closeLevelLockedStakePopup()
+        state.profilePopupProfile = null
+        state.profilePopupCanEdit = true
+        state.profilePopupOpen = true
+        render()
+        void fetchOwnLikesCount()
+      },
+      onLevelLockedStakeClose: () => {
+        closeLevelLockedStakePopup()
       },
       onLoginSubmit: (email, password) => {
         void submitLogin(email, password)
@@ -4971,6 +4990,16 @@ export function createLobbyFlowController(
     render()
   }
 
+  function openLevelLockedStakePopup(requiredLevel: number, currentLevel: number): void {
+    state.levelLockedStakePopup = { isOpen: true, requiredLevel, currentLevel }
+    render()
+  }
+
+  function closeLevelLockedStakePopup(): void {
+    state.levelLockedStakePopup = { ...state.levelLockedStakePopup, isOpen: false }
+    render()
+  }
+
   function handleGuestTrialPlayClick(): void {
     if (state.guestTrialPopup.isSubmitting || state.guestTrialPopup.remaining <= 0) {
       return
@@ -5020,6 +5049,14 @@ export function createLobbyFlowController(
     }
 
     state.displayName = authSession.profile.displayName
+
+    const stakeRoomForLevelCheck = state.matchRooms.find((r) => r.stakeAmount === stake)
+    const requiredLevel = stakeRoomForLevelCheck?.minLevel ?? 1
+    const currentLevel = authSession.profile.level ?? 1
+    if (currentLevel < requiredLevel) {
+      openLevelLockedStakePopup(requiredLevel, currentLevel)
+      return
+    }
 
     const balance = authSession.profile.yellowCoinsBalance ?? 0
     if (balance < stake) {

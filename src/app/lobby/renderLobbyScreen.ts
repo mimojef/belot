@@ -45,6 +45,7 @@ import { renderAdminPaymentsPanel, attachAdminPaymentsPanelHandlers } from '../a
 import { renderAdminPaymentDetailPanel, attachAdminPaymentDetailHandlers } from '../adminPayments/renderAdminPaymentDetailPanel'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
+import { renderLevelLockedStakePopup, attachLevelLockedStakePopupEventListeners, type LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
 
 const MISSION_TYPE_LABELS: Record<string, string> = {
   win_games: 'Спечели N игри',
@@ -200,6 +201,7 @@ export type LobbyScreenState = {
   authErrorText: string | null
   guestTrialPopup: GuestTrialPopupState
   guestLockedStakePopup: GuestLockedStakePopupState
+  levelLockedStakePopup: LevelLockedStakePopupState
   lowCoinsModalOpen: boolean
   onlinePlayersCount: number
   signupBonusYellowCoins: number
@@ -406,6 +408,8 @@ export type RenderLobbyScreenOptions = {
   onGuestLockedStakeRegisterClick: () => void
   onGuestLockedStakeLoginClick: () => void
   onGuestLockedStakeClose: () => void
+  onLevelLockedStakeViewProfileClick: () => void
+  onLevelLockedStakeClose: () => void
   onLoginSubmit: (email: string, password: string) => void
   onRegisterSubmit: (displayName: string, email: string, password: string, gender: 'male' | 'female' | null) => void
   onForgotPasswordSubmit?: (email: string) => void
@@ -1891,17 +1895,19 @@ function renderStakeSection(
 
   const stakeCards = rooms.map((room) => {
     const isLockedForGuest = isGuestSession && room.stakeAmount !== guestTrialStake
+    const isLevelLockedForRegistered = !isGuestSession && playerLevel < room.minLevel
     const isLocked = playerLevel < room.minLevel || isLockedForGuest
     const isSelected = isSearching && room.stakeAmount === selectedStake
-    // Guest-locked карти остават кликаеми (не HTML disabled), за да могат да отворят
-    // auth CTA popup при клик. Level-locked карти (registered users) остават истински disabled.
-    const isDisabled = !canStartSearch || (isLocked && !isLockedForGuest)
+    // Guest-locked и level-locked карти остават кликаеми (не HTML disabled), за да могат да
+    // отворят съответния popup при клик, вместо директно да стартират matchmaking.
+    const isDisabled = !canStartSearch || (isLocked && !isLockedForGuest && !isLevelLockedForRegistered)
 
     return `
       <button
         type="button"
         data-lobby-stake-card="${room.stakeAmount}"
         ${isLockedForGuest ? `data-lobby-stake-card-guest-locked="1"` : ''}
+        ${isLevelLockedForRegistered ? `data-lobby-stake-card-level-locked="1" data-lobby-stake-card-required-level="${room.minLevel}"` : ''}
         ${isDisabled ? 'disabled' : ''}
         style="
           flex: 0 0 calc(20% - 10px);
@@ -2982,9 +2988,10 @@ function renderMobileStakeSection(
 
   const cards = rooms.map((room, index) => {
     const isLockedForGuest = isGuestSession && room.stakeAmount !== guestTrialStake
+    const isLevelLockedForRegistered = !isGuestSession && playerLevel < room.minLevel
     const isLocked = playerLevel < room.minLevel || isLockedForGuest
     const isSelected = isSearching && room.stakeAmount === selectedStake
-    const isDisabled = !canStartSearch || (isLocked && !isLockedForGuest)
+    const isDisabled = !canStartSearch || (isLocked && !isLockedForGuest && !isLevelLockedForRegistered)
     const snapAlign = index === 0
       ? 'start'
       : index === rooms.length - 1
@@ -3022,6 +3029,12 @@ function renderMobileStakeSection(
               background:#0a0a0a;color:#f6d36b;font-size:12px;font-weight:900;display:flex;align-items:center;justify-content:center;
               cursor:pointer;
             ">Влез в профила си</button>
+          ` : isLevelLockedForRegistered ? `
+            <button type="button" data-lobby-stake-card="${room.stakeAmount}" data-lobby-stake-card-level-locked="1" data-lobby-stake-card-required-level="${room.minLevel}" style="
+              height:44px;padding:0 14px;border:1px solid rgba(212,165,32,0.55);border-radius:8px;
+              background:#0a0a0a;color:#fca5a5;font-size:12px;font-weight:900;display:flex;align-items:center;justify-content:center;
+              cursor:pointer;
+            ">Ниво ${room.minLevel}</button>
           ` : isLocked ? `
             <div style="font-size:12px;font-weight:900;color:#fca5a5;text-align:right;">Ниво ${room.minLevel}</div>
           ` : `
@@ -7188,6 +7201,7 @@ export function renderLobbyScreen(
       ${renderAuthModal(state)}
       ${renderGuestTrialPopup(state.guestTrialPopup)}
       ${renderGuestLockedStakePopup(state.guestLockedStakePopup)}
+      ${renderLevelLockedStakePopup(state.levelLockedStakePopup)}
       ${renderShopPurchaseConfirmModal(state)}
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
@@ -7425,6 +7439,7 @@ export function renderLobbyScreen(
       ${renderAuthModal(state)}
       ${renderGuestTrialPopup(state.guestTrialPopup)}
       ${renderGuestLockedStakePopup(state.guestLockedStakePopup)}
+      ${renderLevelLockedStakePopup(state.levelLockedStakePopup)}
       ${renderShopPurchaseConfirmModal(state)}
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
@@ -9089,6 +9104,15 @@ export function renderLobbyScreen(
     onRegisterClick: options.onGuestLockedStakeRegisterClick,
     onLoginClick: options.onGuestLockedStakeLoginClick,
     onClose: options.onGuestLockedStakeClose,
+  })
+
+  root
+    .querySelector<HTMLElement>('[data-level-locked-stake-modal-root="1"] [role="dialog"]')
+    ?.addEventListener('click', (e) => e.stopPropagation())
+
+  attachLevelLockedStakePopupEventListeners(root, {
+    onViewProfileClick: options.onLevelLockedStakeViewProfileClick,
+    onClose: options.onLevelLockedStakeClose,
   })
 
   root

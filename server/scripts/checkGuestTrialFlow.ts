@@ -50,7 +50,7 @@
  * [44] renderGuestTrialPopup е независим от authModalMode (собствен state)
  * [45] Desktop: isLockedForGuest карти не са HTML disabled (кликаеми за auth CTA)
  * [46] Mobile: guest-locked карта рендерира кликаем бутон "Влез в профила си"
- * [47] Level-locked (registered) карти остават с истинско disabled поведение
+ * [47] isLockedForGuest е explicit разграничен от общия isLocked (registered level-lock е отделен случай)
  * [48] stakeButtons click handler води locked-for-guest клик до startMatchmaking
  * [49] Locked stake popup: точен текст "Като гост не можете да играете на маса с този залог."
  * [50] Locked stake popup: бутони "Играй на 5 000" / "Вход" / "Създай профил"
@@ -59,6 +59,15 @@
  * [53] "Играй на 5 000" не bypass-ва лимита (минава само през openGuestTrialPopup fresh fetch)
  * [54] "Вход"/"Създай профил" от locked popup водят към auth flow
  * [55] renderGuestLockedStakePopup е wire-нат в renderLobbyScreen.ts
+ * [56] Level-locked карти (registered, недостатъчно ниво) не са HTML disabled (desktop + mobile)
+ * [57] Level-locked popup: точен текст с динамични required/current level
+ * [58] Level-locked popup: бутони "Разбрах" / "Виж профила"
+ * [59] "Разбрах" затваря popup-а
+ * [60] "Виж профила" затваря popup-а и отваря profile popup flow
+ * [61] Level-locked клик спира преди matchmaking старт (return преди isSearching=true)
+ * [62] startMatchmaking продължава нормално за registered user с достатъчно ниво
+ * [63] guestLockedStakePopup и levelLockedStakePopup са отделни, независими state/модули
+ * [64] renderLevelLockedStakePopup е wire-нат в renderLobbyScreen.ts
  */
 
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
@@ -674,10 +683,13 @@ async function checkLockedStakeCardsAreClickableForGuest(): Promise<void> {
     'utf8',
   )
 
-  // [45] Desktop renderStakeSection: isDisabled изключва isLockedForGuest от HTML disabled логиката.
+  // [45] Desktop renderStakeSection: isDisabled изключва и isLockedForGuest, и isLevelLockedForRegistered
+  // от HTML disabled логиката (и двата случая трябва да са кликаеми, всеки за своя popup).
   check(
-    '[45] Desktop stake card: isDisabled = !canStartSearch || (isLocked && !isLockedForGuest)',
-    lobbySource.includes('const isDisabled = !canStartSearch || (isLocked && !isLockedForGuest)'),
+    '[45] Desktop stake card: isDisabled изключва isLockedForGuest и isLevelLockedForRegistered',
+    lobbySource.includes(
+      'const isDisabled = !canStartSearch || (isLocked && !isLockedForGuest && !isLevelLockedForRegistered)',
+    ),
   )
 
   // [46] Mobile renderMobileStakeSection: locked-for-guest маси рендерират кликаем бутон
@@ -695,10 +707,10 @@ async function checkLockedStakeCardsAreClickableForGuest(): Promise<void> {
     ),
   )
 
-  // [47] Level-locked (registered users с недостатъчно ниво) карти НЕ са засегнати —
-  // остават с истинско HTML disabled поведение, различно от guest-locked случая.
+  // [47] isLockedForGuest (guest на non-trial маса) е explicit разграничен от общия isLocked
+  // (level-locked за registered е отделен случай, покрит от checkLevelLockedStakePopup [56]).
   check(
-    '[47] isLockedForGuest е explicit разграничен от общия isLocked (level-lock продължава да disable-ва)',
+    '[47] isLockedForGuest е explicit разграничен от общия isLocked',
     lobbySource.includes('const isLockedForGuest = isGuestSession && room.stakeAmount !== guestTrialStake') &&
       lobbySource.includes('const isLocked = playerLevel < room.minLevel || isLockedForGuest'),
   )
@@ -820,6 +832,134 @@ async function checkGuestLockedStakePopup(): Promise<void> {
   )
 }
 
+async function checkLevelLockedStakePopup(): Promise<void> {
+  console.log('\n[56-64] Level-locked stake popup за registered users с недостатъчно ниво')
+
+  const popupSource = await readFile(
+    new URL('../../src/app/lobby/renderLevelLockedStakePopup.ts', import.meta.url),
+    'utf8',
+  )
+  const controllerSource = await readFile(
+    new URL('../../src/app/lobby/createLobbyFlowController.ts', import.meta.url),
+    'utf8',
+  )
+  const lobbySource = await readFile(
+    new URL('../../src/app/lobby/renderLobbyScreen.ts', import.meta.url),
+    'utf8',
+  )
+
+  // [56] renderLobbyScreen.ts: level-locked карти (desktop + mobile) не са HTML disabled,
+  // за да могат да отворят popup-а при клик вместо да стартират matchmaking.
+  check(
+    '[56] Desktop: isDisabled изключва isLevelLockedForRegistered от HTML disabled',
+    lobbySource.includes(
+      'const isDisabled = !canStartSearch || (isLocked && !isLockedForGuest && !isLevelLockedForRegistered)',
+    ),
+  )
+  check(
+    '[56] Desktop: isLevelLockedForRegistered = !isGuestSession && playerLevel < room.minLevel',
+    lobbySource.includes(
+      'const isLevelLockedForRegistered = !isGuestSession && playerLevel < room.minLevel',
+    ),
+  )
+  check(
+    '[56] Mobile: level-locked карта рендерира кликаем data-lobby-stake-card-level-locked бутон',
+    lobbySource.includes('data-lobby-stake-card-level-locked="1"') &&
+      lobbySource.includes('isLevelLockedForRegistered ? `'),
+  )
+
+  // [57] Точен popup текст с динамични required/current level стойности.
+  check(
+    '[57] popup heading темплейт: "Тази маса изисква ниво ${state.requiredLevel} за вход, а вашето ниво е ${state.currentLevel}."',
+    popupSource.includes(
+      'Тази маса изисква ниво ${state.requiredLevel} за вход, а вашето ниво е ${state.currentLevel}.',
+    ),
+  )
+  check(
+    '[57] popup body текст: "Можете да видите нивото си върху профилната снимка в лобито или в профила си..."',
+    popupSource.includes(
+      'Можете да видите нивото си върху профилната снимка в лобито или в профила си, където може да следите и прогреса на нивото.',
+    ),
+  )
+
+  // [58] Бутони "Разбрах" и "Виж профила".
+  check(
+    '[58] бутон "Разбрах" присъства (data-level-locked-stake-ok-button)',
+    popupSource.includes('data-level-locked-stake-ok-button="1"') && popupSource.includes('>Разбрах<'),
+  )
+  check(
+    '[58] бутон "Виж профила" присъства (data-level-locked-stake-view-profile-button)',
+    popupSource.includes('data-level-locked-stake-view-profile-button="1"') &&
+      popupSource.includes('>Виж профила<'),
+  )
+
+  // [59] "Разбрах" затваря popup-а (onClose), не прави нищо друго.
+  const okHandlerSource = popupSource.slice(
+    popupSource.indexOf("'[data-level-locked-stake-ok-button=\"1\"]'"),
+  )
+  check(
+    '[59] "Разбрах" click handler вика options.onClose()',
+    okHandlerSource.includes('options.onClose()'),
+  )
+
+  // [60] "Виж профила" затваря level-locked popup-а и отваря profile popup (същия flow като
+  // "Профил" бутона в hero картата — profilePopupOpen = true, profilePopupProfile = null).
+  const viewProfileHandlerStart = controllerSource.indexOf('onLevelLockedStakeViewProfileClick: () => {')
+  const viewProfileHandlerEnd = controllerSource.indexOf('},', viewProfileHandlerStart)
+  const viewProfileHandlerBody = controllerSource.slice(viewProfileHandlerStart, viewProfileHandlerEnd)
+  check(
+    '[60] "Виж профила" вика closeLevelLockedStakePopup() + отваря profilePopupOpen',
+    viewProfileHandlerBody.includes('closeLevelLockedStakePopup()') &&
+      viewProfileHandlerBody.includes('state.profilePopupOpen = true'),
+  )
+
+  // [61] Level-locked клик не стартира matchmaking — startMatchmaking() прекратява с return
+  // веднага след openLevelLockedStakePopup(), преди balance check / isSearching / matchmaking state.
+  const startMatchmakingStart = controllerSource.indexOf('function startMatchmaking(stake: MatchStake')
+  const startMatchmakingEnd = controllerSource.indexOf('\n  function ', startMatchmakingStart + 10)
+  const startMatchmakingBody = controllerSource.slice(startMatchmakingStart, startMatchmakingEnd)
+  check(
+    '[61] startMatchmaking: level check спира преди balance check / isSearching=true',
+    /if \(currentLevel < requiredLevel\) \{\s*openLevelLockedStakePopup\(requiredLevel, currentLevel\)\s*return\s*\}/.test(
+      startMatchmakingBody,
+    ) && startMatchmakingBody.indexOf('currentLevel < requiredLevel') < startMatchmakingBody.indexOf('state.isSearching = true'),
+  )
+
+  // [62] Registered user с достатъчно ниво продължава нормално (level check не блокира валидни случаи) —
+  // проверяваме, че кодът след level-check блока продължава към balance/isSearching логиката
+  // (вече покрито от [61] позиционно; тук потвърждаваме, че самият matchmaking start код не е изтрит).
+  check(
+    '[62] startMatchmaking продължава към matchmaking старт (state.isSearching = true) за достатъчно ниво',
+    startMatchmakingBody.includes('state.isSearching = true') &&
+      startMatchmakingBody.includes("state.currentScreen = 'matchmaking-room'"),
+  )
+
+  // [63] Guest flow-овете остават напълно отделни: guestLockedStakePopup и levelLockedStakePopup
+  // са различни state полета/render модули, не се смесват.
+  check(
+    '[63] guestLockedStakePopup и levelLockedStakePopup са отделни state полета',
+    controllerSource.includes('guestLockedStakePopup: GuestLockedStakePopupState') &&
+      controllerSource.includes('levelLockedStakePopup: LevelLockedStakePopupState'),
+  )
+  check(
+    '[63] renderGuestLockedStakePopup.ts не е променен да съдържа level-locked логика',
+    !(await readFile(
+      new URL('../../src/app/lobby/renderGuestLockedStakePopup.ts', import.meta.url),
+      'utf8',
+    )).includes('requiredLevel'),
+  )
+
+  // [64] renderLevelLockedStakePopup е wire-нат в renderLobbyScreen.ts.
+  check(
+    '[64] renderLevelLockedStakePopup е извикан в renderLobbyScreen.ts',
+    lobbySource.includes('renderLevelLockedStakePopup(state.levelLockedStakePopup)'),
+  )
+  check(
+    '[64] attachLevelLockedStakePopupEventListeners е закачен в renderLobbyScreen.ts',
+    lobbySource.includes('attachLevelLockedStakePopupEventListeners(root,'),
+  )
+}
+
 async function main(): Promise<void> {
   await checkTrialLimitLifecycle()
   await checkUndoTrialGameStarted()
@@ -835,6 +975,7 @@ async function main(): Promise<void> {
   await checkNoAutoRegistrationModalOnLobbyMount()
   await checkLockedStakeCardsAreClickableForGuest()
   await checkGuestLockedStakePopup()
+  await checkLevelLockedStakePopup()
 
   console.log(`\n${passed + failed} checks: ${passed} passed, ${failed} failed`)
   if (failed > 0) {
