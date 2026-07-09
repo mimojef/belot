@@ -5524,6 +5524,9 @@ async function handleAdminStatsRequest(
   const visitors = siteVisitStore.getVisitorSummary()
   const viewLayout = siteVisitStore.getViewLayoutSummary()
 
+  const userGamesPlayed = playerProgressStore.getUserGamesPlayedStats()
+  const guestTrialGamesPlayed = guestTrialStore.getGamesPlayedStats()
+
   sendJsonResponse(res, 200, {
     ok: true,
     stats: {
@@ -5532,6 +5535,12 @@ async function handleAdminStatsRequest(
       payments: paymentStats,
       visitors,
       viewLayout,
+      gamesPlayed: {
+        userGamesToday: userGamesPlayed.today,
+        userGamesYesterday: userGamesPlayed.yesterday,
+        guestTrialGamesToday: guestTrialGamesPlayed.today,
+        guestTrialGamesYesterday: guestTrialGamesPlayed.yesterday,
+      },
     },
   })
   return true
@@ -7430,6 +7439,8 @@ wsServer.on('connection', (socket, request) => {
           })
           return
         }
+
+        guestTrialStore.recordTrialGameStart(guestId, initializedGuestRoom.id, message.stake)
 
         const attachedGuestConnection = attachConnectionToRoomSeat(
           latestConnection,

@@ -112,7 +112,31 @@ function buildGuestTrialSchema(db: DatabaseSync): void {
       ip_hash TEXT,
       user_agent_hash TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS guest_trial_game_starts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guest_id TEXT NOT NULL,
+      room_id TEXT NOT NULL UNIQUE,
+      stake_amount INTEGER NOT NULL CHECK (stake_amount > 0),
+      started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
   `)
+}
+
+// On Windows, SQLite WAL-mode -shm/-wal files can briefly remain locked after
+// close() returns (async handle release). Retry rm with short delays instead
+// of propagating EBUSY/EPERM from a transient OS-level lock.
+async function retryRmDir(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(path, { recursive: true, force: true })
+      return
+    } catch {
+      // retry
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 200))
+  }
 }
 
 async function withTempDbFile(fn: (dbPath: string) => Promise<void>): Promise<void> {
@@ -124,7 +148,7 @@ async function withTempDbFile(fn: (dbPath: string) => Promise<void>): Promise<vo
     bootstrap.close()
     await fn(dbPath)
   } finally {
-    await rm(dir, { recursive: true, force: true })
+    await retryRmDir(dir)
   }
 }
 

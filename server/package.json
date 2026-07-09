@@ -30,6 +30,7 @@
     "check:shop-purchase-flow": "tsx scripts/checkShopPurchaseFlow.ts",
     "check:reconnect-contract": "tsx scripts/checkReconnectContractDisplay.ts",
     "check:guest-trial-flow": "tsx scripts/checkGuestTrialFlow.ts",
+    "check:admin-games-played": "tsx scripts/checkAdminGamesPlayed.ts",
     "check:client-winning-bid": "tsx scripts/checkClientWinningBidHelpers.ts",
     "check:password-reset": "tsx scripts/checkPasswordReset.ts",
     "check:password-reset-http": "tsx scripts/checkPasswordResetHttp.ts",

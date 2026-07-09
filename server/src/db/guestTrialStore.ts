@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { getSofiaDayBoundsUtc, toSqliteUtc } from './sofiaDayBounds.js';
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>;
 
@@ -21,6 +22,9 @@ export type GuestTrialStore = {
   getSession(guestId: string): GuestTrialSessionSnapshot | null;
   registerTrialGameStarted(guestId: string): { ok: true; session: GuestTrialSessionSnapshot } | { ok: false; message: string; reason: 'guest_trial_limit_reached' };
   undoTrialGameStarted(guestId: string): void;
+  recordTrialGameStart(guestId: string, roomId: string, stakeAmount: number): void;
+  undoTrialGameStart(roomId: string): void;
+  getGamesPlayedStats(now?: Date): { today: number; yesterday: number };
   close(): void;
 };
 
@@ -126,6 +130,22 @@ export async function createGuestTrialStore(databaseFilePath: string): Promise<G
       AND games_used > 0
   `);
 
+  const insertGameStart = db.prepare(`
+    INSERT OR IGNORE INTO guest_trial_game_starts (guest_id, room_id, stake_amount, started_at, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+
+  const deleteGameStartByRoomId = db.prepare(`
+    DELETE FROM guest_trial_game_starts
+    WHERE room_id = ?
+  `);
+
+  const countGameStartsInRange = db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM guest_trial_game_starts
+    WHERE started_at >= ? AND started_at < ?
+  `);
+
   return {
     getOrCreateSession(guestId, ipHash, userAgentHash) {
       const now = new Date().toISOString();
@@ -176,6 +196,22 @@ export async function createGuestTrialStore(databaseFilePath: string): Promise<G
       }
 
       decrementGamesUsed.run(guestId);
+    },
+    recordTrialGameStart(guestId, roomId, stakeAmount) {
+      const now = toSqliteUtc(new Date());
+      insertGameStart.run(guestId, roomId, stakeAmount, now, now);
+    },
+    undoTrialGameStart(roomId) {
+      deleteGameStartByRoomId.run(roomId);
+    },
+    getGamesPlayedStats(now = new Date()) {
+      const bounds = getSofiaDayBoundsUtc(now);
+      const todayRow = countGameStartsInRange.get(bounds.todayStart, bounds.tomorrowStart) as { n: number } | undefined;
+      const yesterdayRow = countGameStartsInRange.get(bounds.yesterdayStart, bounds.todayStart) as { n: number } | undefined;
+      return {
+        today: todayRow?.n ?? 0,
+        yesterday: yesterdayRow?.n ?? 0,
+      };
     },
     close() {
       db.close();

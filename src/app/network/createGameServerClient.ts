@@ -167,6 +167,13 @@ export type AdminRegisteredProfilesStats = {
   yesterday: number
 }
 
+export type AdminGamesPlayedStats = {
+  userGamesToday: number
+  userGamesYesterday: number
+  guestTrialGamesToday: number
+  guestTrialGamesYesterday: number
+}
+
 export type AdminStatsSnapshot = {
   onlineCount: number
   registeredProfiles: AdminRegisteredProfilesStats
@@ -179,6 +186,7 @@ export type AdminStatsSnapshot = {
   }
   visitors: AdminVisitorSummary
   viewLayout: AdminViewLayoutSummary
+  gamesPlayed: AdminGamesPlayedStats
 }
 
 export type VisitorListPeriod = 'today' | 'yesterday' | '7d' | '30d'

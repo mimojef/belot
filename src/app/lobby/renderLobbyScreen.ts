@@ -4508,6 +4508,36 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
         </div>
       </div>
 
+      <h3 style="font-size:13px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin:0 0 12px;">Изиграни игри</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:24px;">
+        <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:12px;padding:16px 18px;">
+          <div style="font-size:10px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.45);margin-bottom:10px;">Игри от потребители</div>
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span style="font-size:11px;color:rgba(255,255,255,0.45);width:56px;">Днес</span>
+              <span style="font-size:20px;font-weight:900;color:#d4a520;">${(stats.gamesPlayed?.userGamesToday ?? 0).toLocaleString('bg-BG')}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span style="font-size:11px;color:rgba(255,255,255,0.45);width:56px;">Вчера</span>
+              <span style="font-size:20px;font-weight:900;color:#d4a520;">${(stats.gamesPlayed?.userGamesYesterday ?? 0).toLocaleString('bg-BG')}</span>
+            </div>
+          </div>
+        </div>
+        <div style="background:#0d0d0d;border:1px solid rgba(96,165,250,0.25);border-radius:12px;padding:16px 18px;">
+          <div style="font-size:10px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.45);margin-bottom:10px;">Пробни игри</div>
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span style="font-size:11px;color:rgba(255,255,255,0.45);width:56px;">Днес</span>
+              <span style="font-size:20px;font-weight:900;color:#60a5fa;">${(stats.gamesPlayed?.guestTrialGamesToday ?? 0).toLocaleString('bg-BG')}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span style="font-size:11px;color:rgba(255,255,255,0.45);width:56px;">Вчера</span>
+              <span style="font-size:20px;font-weight:900;color:#60a5fa;">${(stats.gamesPlayed?.guestTrialGamesYesterday ?? 0).toLocaleString('bg-BG')}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <h3 style="font-size:13px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin:0 0 12px;">Влизания по версия</h3>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-bottom:24px;">
         ${(['today', 'yesterday', 'last7days', 'last30days'] as const).map((period) => {

@@ -81,6 +81,7 @@ export type PlayerProgressStore = {
     | { ok: false; message: string }
   isDisplayNameAvailable: (displayName: string) => boolean
   countHumanProfiles: (now?: Date) => HumanProfileCountStats
+  getUserGamesPlayedStats: (now?: Date) => { today: number; yesterday: number }
   seedCatalogBotsIfNeeded: () => void
   refillCatalogBotWallets: () => void
   recordCompletedMatch: (room: ServerRoom) => void
@@ -650,8 +651,10 @@ export async function createPlayerProgressStore(
       room_id,
       profile_id,
       team,
-      did_win
+      did_win,
+      is_guest_trial
     ) VALUES (
+      ?,
       ?,
       ?,
       ?,
@@ -1323,6 +1326,7 @@ export async function createPlayerProgressStore(
         profileId,
         team,
         didWin ? 1 : 0,
+        room.config.isGuestTrial ? 1 : 0,
       ) as { changes?: number }
 
       if ((result.changes ?? 0) > 0) {
@@ -1432,6 +1436,25 @@ export async function createPlayerProgressStore(
       total,
       today: countCreatedInRange(bounds.todayStart, bounds.tomorrowStart),
       yesterday: countCreatedInRange(bounds.yesterdayStart, bounds.todayStart),
+    }
+  }
+
+  function getUserGamesPlayedStats(now: Date = new Date()): { today: number; yesterday: number } {
+    const bounds = getSofiaDayBoundsUtc(now)
+    const countCompletedInRange = (start: string, end: string): number => {
+      const row = database.prepare(
+        `SELECT COUNT(DISTINCT room_id) AS count
+         FROM profile_match_results
+         WHERE is_guest_trial = 0
+           AND completed_at >= ?
+           AND completed_at < ?`,
+      ).get(start, end) as { count: number }
+      return row.count
+    }
+
+    return {
+      today: countCompletedInRange(bounds.todayStart, bounds.tomorrowStart),
+      yesterday: countCompletedInRange(bounds.yesterdayStart, bounds.todayStart),
     }
   }
 
@@ -1549,6 +1572,7 @@ export async function createPlayerProgressStore(
     adminRenameProfileDisplayName,
     isDisplayNameAvailable,
     countHumanProfiles,
+    getUserGamesPlayedStats,
     updateProfileAvatar,
     addProfileGalleryImage,
     deleteProfileGalleryImage,
