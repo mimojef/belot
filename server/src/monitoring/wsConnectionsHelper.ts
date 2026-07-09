@@ -75,12 +75,20 @@ export type WsConnectionsDiagnostic = {
  * @param hasActiveGameSession   Injected predicate — returns true if the profile is currently
  *                               a live human participant in any active game room
  * @param getDisplayName Injected lookup — returns the public display name for a profileId, or null
+ * @param roomExists     Injected predicate — returns true if the given roomId is still a live
+ *                        room in the current room registry. Defensive safety net: if a
+ *                        connection's currentRoomId points at a room that no longer exists
+ *                        (e.g. reaped by finished-match TTL while the socket stayed open), the
+ *                        diagnostic reports it as "no room" instead of a stale/orphan binding.
+ *                        Defaults to always-true so existing callers/tests that don't pass it
+ *                        keep their current behavior unchanged.
  */
 export function buildWsConnectionsDiagnostic(
   sockets: ReadonlyMap<string, { readyState: number }>,
   connections: Readonly<Record<string, WsConnectionInput>>,
   hasActiveGameSession: (profileId: string) => boolean,
   getDisplayName: (profileId: string) => string | null,
+  roomExists: (roomId: string) => boolean = () => true,
 ): WsConnectionsDiagnostic {
   const entries: WsConnectionEntry[] = []
   const profileOpenCounts = new Map<string, number>()
@@ -90,7 +98,8 @@ export function buildWsConnectionsDiagnostic(
     const rs = socket.readyState
     const isOpen = rs === WS_OPEN
     const profileId = conn?.profileId ?? null
-    const currentRoomId = conn?.currentRoomId ?? null
+    const rawCurrentRoomId = conn?.currentRoomId ?? null
+    const currentRoomId = rawCurrentRoomId !== null && roomExists(rawCurrentRoomId) ? rawCurrentRoomId : null
     const hasGame = profileId !== null && hasActiveGameSession(profileId)
     const probablePendingSessionInGame = isOpen && profileId !== null && currentRoomId === null && hasGame
 

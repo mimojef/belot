@@ -59,6 +59,7 @@ import { countServerRoomsByPhase } from './core/countServerRoomsByPhase.js'
 import { createInitialServerState } from './core/createInitialServerState.js'
 import { createServerConnection } from './core/createServerConnection.js'
 import { detachConnectionFromRoomSeat } from './core/detachConnectionFromRoomSeat.js'
+import { detachConnectionsBoundToRoom } from './core/detachConnectionsBoundToRoom.js'
 import { findHumanParticipantByConnectionId } from './core/findHumanParticipantByConnectionId.js'
 import { findParticipantSeat } from './core/findParticipantSeat.js'
 import { getConnectionById } from './core/getConnectionById.js'
@@ -644,10 +645,17 @@ function removeCommittedServerRoom(
   const nextRooms = { ...currentServerState.rooms }
   delete nextRooms[roomId]
   roomRevisionRegistry.remove(roomId)
-  return {
+
+  const nextState: ServerState = {
     ...currentServerState,
     rooms: nextRooms,
   }
+
+  // Detach any surviving connections still bound to this room (напр. socket
+  // оставен отворен след finished-match TTL/reconnect-grace reap) — иначе
+  // connection.currentRoomId остава да сочи към вече изтрита стая, виж
+  // detachConnectionsBoundToRoom.ts за пълния root-cause коментар.
+  return detachConnectionsBoundToRoom(nextState, roomId)
 }
 
 let serverState: ServerState = loadPersistedServerState()
@@ -3145,6 +3153,7 @@ function handleAdminMonitoringConnectionsRequest(
     serverState.connections,
     (profileId) => findProfileInGameSession(profileId) !== null,
     (profileId) => playerProgressStore.getPublicProfile(profileId)?.displayName ?? null,
+    (roomId) => roomId in serverState.rooms,
   )
 
   sendJsonResponse(res, 200, { ok: true, ...diagnostic })
