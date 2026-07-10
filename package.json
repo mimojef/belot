@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "check:password-reset-frontend": "npx tsx scripts/checkPasswordResetFrontend.ts",
-    "check:gift-notification-modal-fix": "npx tsx scripts/checkGiftNotificationModalFix.ts"
+    "check:gift-notification-modal-fix": "npx tsx scripts/checkGiftNotificationModalFix.ts",
+    "check:cutting-pile-stack-order-fix": "npx tsx scripts/checkCuttingPileStackOrderFix.ts"
   },
   "devDependencies": {
     "typescript": "~5.9.3",

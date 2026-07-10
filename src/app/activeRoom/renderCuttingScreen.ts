@@ -43,6 +43,16 @@ const SELECTED_GAP = CUTTING_SELECTED_GAP
 const CARD_HOVER_LIFT_PX = 14
 export const CUTTING_VISUAL_ANIMATION_TOTAL_MS = 860
 
+// Анимацията минава през три явни фази вместо произволен timeout:
+//   separating (0% -> SEPARATED_PERCENT):    двата пакета се раздалечават, оригинален stack order.
+//   separated  (SEPARATED_PERCENT, holding): пакетите са напълно разделени, не се застъпват — тук
+//                                             се сменя z-index (discrete CSS keyframe jump).
+//   gathering  (GATHER_START_PERCENT -> 100%): пакетите се събират с разменен stack order — десен под ляв.
+export const CUTTING_SEPARATED_PERCENT = 42
+export const CUTTING_GATHER_START_PERCENT = 46
+export const CUTTING_SEPARATED_HOLD_PERCENT = CUTTING_SEPARATED_PERCENT + 0.01
+const SEPARATED_HOLD_PERCENT = CUTTING_SEPARATED_HOLD_PERCENT
+
 export type CuttingGatheredCardOffset = {
   x: number
   y: number
@@ -204,14 +214,27 @@ function renderCuttingAnimationStyles(): string {
         0% {
           transform: var(--cut-from-transform);
           box-shadow: 0 14px 24px rgba(0,0,0,0.18);
+          z-index: var(--cut-from-zindex);
         }
-        42% {
+        ${CUTTING_SEPARATED_PERCENT}% {
           transform: var(--cut-split-transform);
           box-shadow: 0 24px 34px rgba(0,0,0,0.24);
+          z-index: var(--cut-from-zindex);
+        }
+        ${SEPARATED_HOLD_PERCENT}% {
+          transform: var(--cut-split-transform);
+          box-shadow: 0 24px 34px rgba(0,0,0,0.24);
+          z-index: var(--cut-gather-zindex);
+        }
+        ${CUTTING_GATHER_START_PERCENT}% {
+          transform: var(--cut-split-transform);
+          box-shadow: 0 24px 34px rgba(0,0,0,0.24);
+          z-index: var(--cut-gather-zindex);
         }
         100% {
           transform: var(--cut-final-transform);
           box-shadow: 0 3px 6px rgba(0,0,0,0.08);
+          z-index: var(--cut-gather-zindex);
         }
       }
 
@@ -219,14 +242,27 @@ function renderCuttingAnimationStyles(): string {
         0% {
           transform: var(--cut-from-transform);
           box-shadow: 0 14px 24px rgba(0,0,0,0.18);
+          z-index: var(--cut-from-zindex);
         }
-        42% {
+        ${CUTTING_SEPARATED_PERCENT}% {
           transform: var(--cut-split-transform);
           box-shadow: 0 24px 34px rgba(0,0,0,0.24);
+          z-index: var(--cut-from-zindex);
+        }
+        ${SEPARATED_HOLD_PERCENT}% {
+          transform: var(--cut-split-transform);
+          box-shadow: 0 24px 34px rgba(0,0,0,0.24);
+          z-index: var(--cut-gather-zindex);
+        }
+        ${CUTTING_GATHER_START_PERCENT}% {
+          transform: var(--cut-split-transform);
+          box-shadow: 0 24px 34px rgba(0,0,0,0.24);
+          z-index: var(--cut-gather-zindex);
         }
         100% {
           transform: var(--cut-final-transform);
           box-shadow: 0 3px 6px rgba(0,0,0,0.08);
+          z-index: var(--cut-gather-zindex);
         }
       }
 
@@ -234,14 +270,27 @@ function renderCuttingAnimationStyles(): string {
         0% {
           transform: var(--mobile-cut-from-transform);
           opacity: 1;
+          z-index: var(--mobile-cut-from-zindex);
         }
-        44% {
+        ${CUTTING_SEPARATED_PERCENT}% {
           transform: var(--mobile-cut-split-transform);
           opacity: 1;
+          z-index: var(--mobile-cut-from-zindex);
+        }
+        ${SEPARATED_HOLD_PERCENT}% {
+          transform: var(--mobile-cut-split-transform);
+          opacity: 1;
+          z-index: var(--mobile-cut-gather-zindex);
+        }
+        ${CUTTING_GATHER_START_PERCENT}% {
+          transform: var(--mobile-cut-split-transform);
+          opacity: 1;
+          z-index: var(--mobile-cut-gather-zindex);
         }
         100% {
           transform: var(--mobile-cut-final-transform);
           opacity: 1;
+          z-index: var(--mobile-cut-gather-zindex);
         }
       }
     </style>
@@ -301,6 +350,8 @@ function renderMobileLightCutAnimation(
         --mobile-cut-from-transform:translate(0px, 0px) rotate(-1deg);
         --mobile-cut-split-transform:translate(-122px, -12px) rotate(-7deg);
         --mobile-cut-final-transform:translate(${leftFinalX.toFixed(2)}px, ${finalY.toFixed(2)}px) rotate(-4deg);
+        --mobile-cut-from-zindex:${VISUAL_CARD_COUNT + 2};
+        --mobile-cut-gather-zindex:${VISUAL_CARD_COUNT + 3};
         animation:belot-active-room-mobile-cut-pile ${CUTTING_VISUAL_ANIMATION_TOTAL_MS}ms cubic-bezier(0.25, 0.8, 0.25, 1) ${animationDelayMs.toFixed(2)}ms forwards;
       "
     >
@@ -320,6 +371,8 @@ function renderMobileLightCutAnimation(
         --mobile-cut-from-transform:translate(0px, 0px) rotate(1deg);
         --mobile-cut-split-transform:translate(122px, 12px) rotate(7deg);
         --mobile-cut-final-transform:translate(${rightFinalX.toFixed(2)}px, ${finalY.toFixed(2)}px) rotate(-2deg);
+        --mobile-cut-from-zindex:${VISUAL_CARD_COUNT + 3};
+        --mobile-cut-gather-zindex:${VISUAL_CARD_COUNT + 2};
         animation:belot-active-room-mobile-cut-pile ${CUTTING_VISUAL_ANIMATION_TOTAL_MS}ms cubic-bezier(0.25, 0.8, 0.25, 1) ${animationDelayMs.toFixed(2)}ms forwards;
       "
     >
@@ -368,6 +421,19 @@ function renderVisualDeck(
       : '0 14px 24px rgba(0,0,0,0.18)'
     const isSplitActive = selectedCutIndex !== null
     const isLeftSplitPile = isSplitActive && cardNumber <= selectedCutIndex
+    // Стек редът се разменя (дясно под ляво) само след separated фазата.
+    // По време на самата CSS анимация превключването е discrete keyframe jump
+    // (виж belot-active-room-cut-left/-right, SEPARATED_HOLD_PERCENT), не JS timeout.
+    // Inline/static z-index пази ОРИГИНАЛНИЯ ред докато анимацията тече — animation-fill-mode
+    // е forwards (не backwards/both), значи по време на отрицателния animation-delay браузърът
+    // все още не е приложил keyframe стойностите, а fallback-ва към inline. Ако inline вече
+    // сочи разменения ред, ефектът се вижда веднага при клик / по време на separating.
+    // Едва СЛЕД като анимацията реално приключи (played through, forwards fill остава на 100%)
+    // inline трябва да пази финалния (разменен) ред статично.
+    const originZIndex = index + 1
+    const gatherZIndex = isLeftSplitPile ? VISUAL_CARD_COUNT + cardNumber : cardNumber
+    const hasAnimationPlayedThrough = isCutAnimationVisible && !shouldAnimateCut
+    const staticZIndex = hasAnimationPlayedThrough ? gatherZIndex : originZIndex
     const splitDistanceFromCut = isSplitActive
       ? isLeftSplitPile
         ? selectedCutIndex - cardNumber
@@ -401,6 +467,8 @@ function renderVisualDeck(
           --cut-from-transform:${baseTransform};
           --cut-split-transform:${splitTransform};
           --cut-final-transform:${finalTransform};
+          --cut-from-zindex:${originZIndex};
+          --cut-gather-zindex:${gatherZIndex};
           animation:${isLeftSplitPile ? 'belot-active-room-cut-left' : 'belot-active-room-cut-right'} ${CUTTING_VISUAL_ANIMATION_TOTAL_MS}ms cubic-bezier(0.25, 0.8, 0.25, 1) ${animationDelayMs.toFixed(2)}ms forwards;
         `
       : ''
@@ -418,7 +486,7 @@ function renderVisualDeck(
           border:1px solid ${borderColor};
           border-radius:16px;
           overflow:hidden;
-          z-index:${index + 1};
+          z-index:${staticZIndex};
           transform-origin:center bottom;
           --belot-cut-card-base-shadow:${shadow};
           --belot-cut-card-hover-shadow:${hoverShadow};
