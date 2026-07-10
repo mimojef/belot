@@ -37,6 +37,7 @@
     "check:friend-acceptance": "tsx scripts/checkFriendAcceptanceNotifications.ts",
     "check:round-capot-mission": "tsx scripts/checkRoundCapotMission.ts",
     "check:partner-suit-all-trumps": "tsx scripts/checkPartnerSuitAllTrumpsLead.ts",
+    "check:all-trumps-guaranteed-suit-continuation": "tsx scripts/checkAllTrumpsGuaranteedSuitContinuation.ts",
     "check:strict-mode-bidding": "tsx scripts/checkStrictModeBidding.ts",
     "check:training-recorder": "tsx scripts/checkTrainingRecorder.ts",
     "validate:training-recordings": "tsx scripts/validateTrainingRecordings.ts",

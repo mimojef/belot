@@ -1169,6 +1169,56 @@ function chooseAllTrumpsMasterLead(
   return null
 }
 
+/**
+ * Всичко коз: продължаване на боя, вече контролирана от отбора, дори когато
+ * НАШАТА карта не е обективно властна (isCardMaster изисква по-високата
+ * карта да е изиграна или в нашата ръка — но тя може вместо това да е у
+ * партньора).
+ *
+ * Сценарий: държим ПОСЛЕДНАТА си карта от боя X; и двамата противници са
+ * доказано void в X (voidSuitsOf); значи всяка още неизиграна и невидяна
+ * карта от X може да е единствено у партньора. Взятката е гарантирана за
+ * отбора независимо кой от двама ни има по-високата карта — защото
+ * противниците физически не могат да участват в тази боя (всяка тяхна
+ * карта е от друга боя и не се сравнява с нашата при определяне на
+ * победителя, виж getValidCardsInAllTrumpsContract).
+ *
+ * Затова тук НЕ е нужно нашата карта да е "master" — важно е само, че
+ * никой противник не може да държи по-висока карта от X.
+ *
+ * Прилага се само когато:
+ *   - боята вече е "изчерпана" в ръката ни до последната карта (за да не
+ *     жертваме тактическа гъвкавост при дълги бои — тя си остава работа на
+ *     chooseAllTrumpsDeclarerLongSuitUnlock);
+ *   - и двамата противника са доказано void в тази боя.
+ */
+function chooseAllTrumpsGuaranteedTeamSuitContinuation(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  const [opp1, opp2] = getOpponentSeats(seat)
+  const opp1Voids = voidSuitsOf(state, opp1, null, 'all-trumps')
+  const opp2Voids = voidSuitsOf(state, opp2, null, 'all-trumps')
+
+  const candidateGroups = ALL_SUITS
+    .map(suit => ({ suit, cards: bySuit(validCards, suit) }))
+    .filter(group => group.cards.length === 1)
+    .filter(group => opp1Voids.has(group.suit) && opp2Voids.has(group.suit))
+
+  if (candidateGroups.length === 0) return null
+
+  // При избор измежду няколко такива бои — водим с най-високата ни карта
+  // (максимизира шанса взятката да носи повече точки за отбора).
+  const best = candidateGroups.reduce((bestGroup, group) =>
+    cardPower(group.cards[0]!, null, 'all-trumps') > cardPower(bestGroup.cards[0]!, null, 'all-trumps')
+      ? group
+      : bestGroup
+  )
+
+  return best.cards[0]!
+}
+
 function chooseNoTrumpsDeclarerControlLead(
   seat: Seat,
   state: ServerAuthoritativeGameState,
@@ -1609,6 +1659,22 @@ function chooseLead(
       const longSuitUnlock = chooseAllTrumpsDeclarerLongSuitUnlock(state, validCards)
       if (longSuitUnlock) {
         return longSuitUnlock
+      }
+
+      // ── Гарантирана боя за отбора: последната ни карта от боя, в която
+      //    и двамата противника са доказано void. isCardMaster() я пропуска
+      //    като "не-властна", ако по-високата карта е у партньора (не у нас,
+      //    не изиграна) — но щом опонентите не могат да я държат, взятката
+      //    е сигурна за отбора независимо кой от двама ни има по-високата.
+      //    Прилага се само след партньорските сигнали и long-suit unlock-а,
+      //    за да не изпревари по-силен явен тактически ход.
+      const guaranteedTeamSuit = chooseAllTrumpsGuaranteedTeamSuitContinuation(
+        seat,
+        state,
+        validCards,
+      )
+      if (guaranteedTeamSuit) {
+        return guaranteedTeamSuit
       }
 
       // ── А-СИГНАЛ: Ако имаме А + нещо друго в боя (без Вале) и противникът има Вале
