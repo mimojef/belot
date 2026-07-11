@@ -3759,7 +3759,7 @@ function showLandingOverlay(): void {
             position:sticky;bottom:0;margin-top:auto;padding:14px 12px 12px;
             background:linear-gradient(180deg, rgba(0,0,0,0), #000000 28%);
           ">
-            <button id="pwa-install-btn" style="
+            <button id="pwa-install-btn" class="pwa-cta-glow" style="
               width:100%;height:50px;border:0;border-radius:8px;
               background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
               color:#080808;font-size:15px;font-weight:900;cursor:pointer;
