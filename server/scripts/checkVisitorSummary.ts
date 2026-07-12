@@ -142,6 +142,7 @@ await withTempDb(async (dbPath) => {
     await check('[1.2] yesterday = 0',  () => { if (summary.yesterday !== 0) throw new Error(`yesterday=${summary.yesterday}`) })
     await check('[1.3] last7days = 0',  () => { if (summary.last7days  !== 0) throw new Error(`last7days=${summary.last7days}`) })
     await check('[1.4] last30days = 0', () => { if (summary.last30days !== 0) throw new Error(`last30days=${summary.last30days}`) })
+    await check('[1.5] newYesterday = 0', () => { if (summary.newYesterday !== 0) throw new Error(`newYesterday=${summary.newYesterday}`) })
   } finally {
     store.close()
   }
@@ -200,6 +201,9 @@ await withTempDb(async (dbPath) => {
     await check('[2.6] newToday = 1 (само todayVisitor е нов днес по first_seen_at)', () => {
       if (summary.newToday !== 1) throw new Error(`newToday=${summary.newToday}`)
     })
+    await check('[2.7] newYesterday = 1 (само yesterdayVisitor е нов вчера по first_seen_at)', () => {
+      if (summary.newYesterday !== 1) throw new Error(`newYesterday=${summary.newYesterday}`)
+    })
   } finally {
     store.close()
   }
@@ -249,6 +253,56 @@ await withTempDb(async (dbPath) => {
     })
     await check('[2b.4] visitor C (first_seen_at=преди 5 дни) не се брои в newToday, въпреки посещение днес', () => {
       if (summary.newToday >= 2) throw new Error(`newToday=${summary.newToday} (C е погрешно преброен)`)
+    })
+  } finally {
+    store.close()
+  }
+})
+
+// ─── [2c] newYesterday използва first_seen_at, не last_seen_at (връщащи се посетители) ──
+//
+// Огледален вариант на [2b], но за вчерашния ден:
+//   visitor D: first_seen_at = вчера,          last_seen_at = вчера  → брои се в newYesterday
+//   visitor E: first_seen_at = преди 2 дни,    last_seen_at = вчера  → НЕ се брои (но е в yesterday)
+//   visitor F: first_seen_at = днес,           last_seen_at = днес   → НЕ се брои (различен ден изцяло)
+
+console.log('\n[2c] newYesterday използва first_seen_at, не last_seen_at (връщащи се посетители)')
+await withTempDb(async (dbPath) => {
+  const fixedNow = new Date('2026-06-27T10:00:00Z')
+  const bounds   = getSofiaDayBoundsUtc(fixedNow)
+  const yesterdayTs = toSqliteUtc(offsetHours(new Date(bounds.yesterdayStart + 'Z'), 2))
+  const todayTs     = toSqliteUtc(offsetHours(new Date(bounds.todayStart + 'Z'), 2))
+
+  const db = new DatabaseSync(dbPath)
+  db.exec('PRAGMA journal_mode = WAL;')
+
+  const visitorD = randomUUID() // new yesterday
+  const visitorE = randomUUID() // first seen 2 days ago, returns yesterday
+  const visitorF = randomUUID() // new today (not yesterday)
+
+  insertVisitorAt(db, visitorD, yesterdayTs)
+
+  const twoDaysAgoTs = toSqliteUtc(new Date(fixedNow.getTime() - 2 * 86_400_000))
+  insertReturningVisitEvent(db, visitorE, twoDaysAgoTs, yesterdayTs)
+
+  insertVisitorAt(db, visitorF, todayTs)
+
+  db.close()
+
+  const store = await createSiteVisitStore(dbPath)
+  try {
+    const summary = store.getVisitorSummary(fixedNow)
+    await check('[2c.1] yesterday = 2 (D и E активни вчера по event activity)', () => {
+      if (summary.yesterday !== 2) throw new Error(`yesterday=${summary.yesterday}`)
+    })
+    await check('[2c.2] newYesterday = 1 (само visitor D е нов по first_seen_at)', () => {
+      if (summary.newYesterday !== 1) throw new Error(`newYesterday=${summary.newYesterday} (очакван 1 — само D)`)
+    })
+    await check('[2c.3] visitor E (first_seen_at=преди 2 дни) не се брои в newYesterday, въпреки посещение вчера', () => {
+      if (summary.newYesterday >= 2) throw new Error(`newYesterday=${summary.newYesterday} (E е погрешно преброен)`)
+    })
+    await check('[2c.4] visitor F (нов днес) не се брои в newYesterday', () => {
+      if (summary.newYesterday >= 2) throw new Error(`newYesterday=${summary.newYesterday} (F е погрешно преброен)`)
     })
   } finally {
     store.close()
@@ -808,6 +862,15 @@ try {
       const v = visitors as { today: number; newToday: number }
       if (v.newToday > v.today) throw new Error(`newToday(${v.newToday}) > today(${v.today})`)
     })
+    await check('[10.9d] visitors.newYesterday е integer ≥ 0', () => {
+      if (!Number.isInteger(visitors?.newYesterday) || (visitors.newYesterday as number) < 0) {
+        throw new Error(`newYesterday=${String(visitors?.newYesterday)}`)
+      }
+    })
+    await check('[10.9e] newYesterday <= yesterday (нови посетители не могат да надвишат общия брой активни вчера)', () => {
+      const v = visitors as { yesterday: number; newYesterday: number }
+      if (v.newYesterday > v.yesterday) throw new Error(`newYesterday(${v.newYesterday}) > yesterday(${v.yesterday})`)
+    })
 
     await check('[10.10] stats.registeredProfiles е обект', () => {
       if (!stats?.registeredProfiles || typeof stats.registeredProfiles !== 'object' || Array.isArray(stats.registeredProfiles)) {
@@ -928,6 +991,40 @@ await check('[12.4] новото каре е позиционирано след
   if (idxNew < idx30d) throw new Error('„Нови посетители днес“ не е след „Последните 30 дни“ в source-а')
 })
 
+// ─── [12b] Frontend source — „Нови посетители вчера“ каре ───────────────────
+
+console.log('\n[12b] Frontend source checks — newYesterday / „Нови посетители вчера“')
+
+await check('[12b.1] AdminVisitorSummary съдържа newYesterday поле', () => {
+  const match = clientSource.match(/AdminVisitorSummary\s*=\s*\{([^}]+)\}/)
+  const body = match?.[1] ?? ''
+  if (!body.includes('newYesterday')) {
+    throw new Error('Липсва newYesterday в AdminVisitorSummary')
+  }
+})
+await check('[12b.2] HTML съдържа "Нови посетители вчера" заглавие', () => {
+  if (!lobbyScreenSource.includes('Нови посетители вчера')) {
+    throw new Error('Липсва "Нови посетители вчера" в renderLobbyScreen.ts')
+  }
+})
+await check('[12b.3] rendering използва stats.visitors.newYesterday с fallback към 0', () => {
+  if (!lobbyScreenSource.includes('stats.visitors.newYesterday ?? 0')) {
+    throw new Error('Липсва fallback stats.visitors.newYesterday ?? 0')
+  }
+})
+await check('[12b.4] новото каре „вчера“ е позиционирано непосредствено след карето „Нови посетители днес“', () => {
+  const idxToday = lobbyScreenSource.indexOf('Нови посетители днес')
+  const idxYesterday = lobbyScreenSource.indexOf('Нови посетители вчера')
+  if (idxToday === -1) throw new Error('Не е намерено карето "Нови посетители днес"')
+  if (idxYesterday === -1) throw new Error('Не е намерено карето "Нови посетители вчера"')
+  if (idxYesterday < idxToday) throw new Error('„Нови посетители вчера“ не е след „Нови посетители днес“ в source-а')
+  const between = lobbyScreenSource.slice(idxToday, idxYesterday)
+  const divCount = (between.match(/<div/g) ?? []).length
+  if (divCount > 6) {
+    throw new Error('Между двете карета има твърде много markup — вероятно не са съседни в grid-а')
+  }
+})
+
 // ─── [13] Backend source — newToday използва first_seen_at + Sofia bounds ───
 
 console.log('\n[13] Backend source checks — newToday логика')
@@ -964,6 +1061,28 @@ await check('[13.4] getVisitorSummary изчислява newToday чрез getSo
   const fnBody = fnMatch?.[0] ?? ''
   if (!fnBody.includes('countNewInRange(bounds.todayStart, bounds.tomorrowStart)')) {
     throw new Error('newToday не използва bounds.todayStart/bounds.tomorrowStart от getSofiaDayBoundsUtc')
+  }
+})
+await check('[13.5] VisitorSummary съдържа newYesterday поле', () => {
+  const match = siteVisitStoreSource.match(/export type VisitorSummary\s*=\s*\{([^}]+)\}/)
+  const body = match?.[1] ?? ''
+  if (!body.includes('newYesterday')) {
+    throw new Error('Липсва newYesterday в export type VisitorSummary')
+  }
+})
+await check('[13.6] getVisitorSummary изчислява newYesterday чрез getSofiaDayBoundsUtc bounds (yesterdayStart/todayStart)', () => {
+  const fnMatch = siteVisitStoreSource.match(/function getVisitorSummary\([\s\S]*?\n  \}/)
+  const fnBody = fnMatch?.[0] ?? ''
+  if (!fnBody.includes('countNewInRange(bounds.yesterdayStart, bounds.todayStart)')) {
+    throw new Error('newYesterday не използва bounds.yesterdayStart/bounds.todayStart от getSofiaDayBoundsUtc')
+  }
+})
+await check('[13.7] newYesterday преизползва countNewInRange (не нов SQL statement, различен от first_seen_at филтъра)', () => {
+  const match = siteVisitStoreSource.match(/countNewInRangeStmt\s*=\s*database\.prepare\(`([\s\S]*?)`\)/)
+  const sql = match?.[1] ?? ''
+  const occurrences = siteVisitStoreSource.match(/FROM site_visitors\s*\n\s*WHERE first_seen_at/g) ?? []
+  if (!sql.includes('first_seen_at') || occurrences.length !== 1) {
+    throw new Error('Очакван е точно един SQL statement, филтриращ site_visitors по first_seen_at (споделен за newToday и newYesterday)')
   }
 })
 

@@ -45,6 +45,7 @@ export type VisitorSummary = {
   last7days: number
   last30days: number
   newToday: number
+  newYesterday: number
 }
 
 export type ViewLayoutPeriodCounts = {
@@ -410,7 +411,8 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       yesterday:  countInRange(bounds.yesterdayStart, bounds.todayStart),
       last7days:  countSince(last7Start),
       last30days: countSince(last30Start),
-      newToday:   countNewInRange(bounds.todayStart, bounds.tomorrowStart),
+      newToday: countNewInRange(bounds.todayStart, bounds.tomorrowStart),
+      newYesterday: countNewInRange(bounds.yesterdayStart, bounds.todayStart),
     }
   }
 
