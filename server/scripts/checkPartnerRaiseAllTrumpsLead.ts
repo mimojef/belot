@@ -4,42 +4,61 @@
  * Regression проверки за правилото за разиграване след партньорска
  * „Всичко коз“ комбинация (виж checkPartnerRaiseAllTrumpsBid.ts за bidding
  * частта): деклараторът е обявил собствена боя X, партньорът е вдигнал с
- * по-висока Y, деклараторът е обявил all-trumps докато Y е била водеща.
+ * по-висока боя Y, деклараторът е обявил all-trumps докато Y е била водеща.
  *
- * ПРИОРИТЕТ: правилото има предимство ПРЕД chooseAllTrumpsMasterLead,
- * partnerMandatoryRequestedSuit, partnerAllTrumpsColorSignaledSuit и всички
- * други all-trumps lead heuristics, докато планът не е приключил —
- * включително когато ботът държи властно Вале от собствената си боя.
- * Подаването към партньора използва НАЙ-ВИСОКАТА законна карта от боята
- * (ред J>9>A>10>K>Q>8>7 при all-trumps), не най-ниската.
+ * Приоритетът се РАЗКЛОНЯВА по това дали X е имала Вале И 9 при обявата —
+ * derive чрез seatHeldOrPlayedCard (9 все още в ръката на бота ИЛИ вече
+ * лично изиграна от него, не само "в текущата ръка сега"):
  *
- * Вале без 9:
- * [1]  J+A+Q+7 в own suit, 8♥ у партньора → свободен lead = 8♥, не J♣ (master)
- * [2]  Същото + властно Вале в трета боя → пак 8♥
- * [3]  Partner suit има 8♥+A♥ → играе A♥ (най-висока), не 8♥
- * [4]  Partner suit има 9♥+A♥ → играе 9♥ (9 > A в trump реда)
- * [5]  Partner suit има J♥+9♥ → играе J♥ (J е връх)
- * [6]  След еднократно подаване в partner suit → следващ lead не форсира отново
+ * СЛУЧАЙ A (X имала Вале + 9) — chooseAllTrumpsOwnSuitNinePlanLead:
+ *   1. Най-високата останала карта на бота от X — ако е ЛИЧНО властна
+ *      (isCardMaster) → играй я. Проверява се наново на всеки lead.
+ *   2. Ако X няма лично властна карта: master в трета боя Z (≠X, ≠Y) чрез
+ *      chooseAllTrumpsThirdSuitMasterLead (reuse на conventional
+ *      chooseAllTrumpsMasterLead реда между няколко Z).
+ *   3. Ако нито X, нито Z имат лично властна карта, и ботът има карта от Y
+ *      → подай highestCard(Y). Планът СЕ СЧИТА за изпълнен от този момент.
+ *   4. Само ако ботът НЯМА карта от Y (fallback) → най-високата карта от X,
+ *      ако е доказано сигурна за отбора (isOwnOrTeamGuaranteedAllTrumpsWinner).
  *
- * Вале + 9:
- * [7]  J+9+A+Q в own suit: след J и 9 изиграни, A/Q още в ръката → продължава own suit
- * [8]  Own suit напълно изчерпана → следващ lead = най-високата карта от partner suit
- * [9]  След еднократно подаване в partner suit (Случай A) → план приключен
+ * СЛУЧАЙ B (X имала Вале, но НЕ 9) — първоначалната конвенция, НЕ отменена:
+ *   1. Директно highestCard(Y), преди всякакво X/Z master разглеждане —
+ *      дори ако X или Z имат властно Вале.
+ *   2. Планът приключва след подаването.
+ *   3. Нормалната conventional логика (X, Z, master lead, partner signals)
+ *      поема оттук нататък — ако партньорът по-късно върне X, ботът с
+ *      Валето вече може да изтегли чуждата 9 и да разработи X нормално.
+ *
+ * Случай A тестове:
+ * [1]  X masters преди всичко: J, после 9 в X, дори с карта в Y
+ * [2]  Невластна X + налична Y → не играе X (дори "сигурна за отбора"),
+ *      подава Y
+ * [3]  Невластна X, БЕЗ Y карта, сигурна за отбора → fallback играе X
+ * [4]  Master в трета боя Z, докато има Y карта → играе Z, не подава Y
+ * [5]  Поредица от masters в Z → J, после 9 (ако вече master), чак после Y
+ * [6]  Няколко трети бои Z1/Z2 → conventional master-lead ред, без hardcode
+ * [7]  Master само в Y (нито X, нито Z) → подава Y, план приключва
+ * [8]  X лично master, дори с master в Z → X първо, после Z
+ * [11-a] Симетрия за различни X/Y/Z комбинации (Случай A)
+ *
+ * Случай B тестове:
+ * [16] J+A+Q+7 в X (без 9) + карта от Y → директно Y, НЕ играе J от X
+ * [17] Същото + властно Вале в трета боя Z → пак Y, нито J от X, нито J от Z
+ * [18] Избор на карта от Y: 8+A→A, 9+A→9, J+9→J (trump ред)
+ * [19] След еднократно подаване в Y → планът приключва, нормална логика поема
+ * [11-b] Симетрия за различни X/Y/Z комбинации (Случай B)
+ *
+ * Конфликтен тест (доказва разликата Случай A срещу Случай B):
+ * [20] Две почти еднакви ръце (X: J,9,8,7 срещу X: J,A,Q,7 без 9), еднакви
+ *      Y и Z → напълно различно поведение само заради наличието на 9 в X
  *
  * Защити:
- * [10] Без активна bidding комбинация → chooseAllTrumpsMasterLead непроменен
- * [11] Follow ситуация → правилото не участва, само законни карти
- * [12] Няма карта от own/partner suit → безопасен fallback (валидна карта, без грешка)
- * [13] Празни bidding.entries (ново раздаване) → комбинацията не се "помни"
- *
- * Partner-signal взаимодействие:
- * [14] Активна комбинация (pending) + mandatory J-сигнал от партньора → новото
- *      правило печели (комбинацията все още неизпълнена)
- * [15] Активна комбинация (pending) + color-сигнал от партньора → новото
- *      правило печели
- * [16] След изпълнение на плана + mandatory J-сигнал → сигналът печели
- *      (нормалният приоритет се възстановява)
- * [17] След изпълнение на плана + color-сигнал → сигналът печели
+ * [9]  Follow ситуация → правилото не участва, само законни карти
+ * [10] След приключване на плана → нормални partner signals/master lead
+ * [12] Без активна bidding комбинация → chooseAllTrumpsMasterLead непроменен
+ * [13] Няма карта нито от X, нито от Y, нито Z master → безопасен fallback
+ * [14] Празни bidding.entries (ново раздаване) → комбинацията не се "помни"
+ * [15] След еднократно подаване в Y → следващ lead не форсира отново
  */
 
 import { pickServerBotPlayCard } from '../src/game/pickServerBotPlayCard.js'
@@ -252,7 +271,7 @@ function makeBaseState(overrides: {
   }
 }
 
-// bottom = declarer (бот, обявил own suit + all-trumps), top = партньор (вдигнал)
+// bottom = declarer (бот, обявил X + all-trumps), top = партньор (вдигнал Y)
 const BOT: Seat = 'bottom'
 const PARTNER: Seat = 'top'
 const OPP1: Seat = 'right'
@@ -260,7 +279,7 @@ const OPP2: Seat = 'left'
 
 const BOT_ALL_TRUMPS_WIN = ALL_TRUMPS_WINNING_BID_TEMPLATE(BOT)
 
-// Стандартна комбинация: BOT обявява clubs, PARTNER вдига с hearts, BOT обявява all-trumps
+// Стандартна комбинация: BOT обявява clubs (X), PARTNER вдига с hearts (Y)
 const COMBO_ENTRIES: ServerBidEntry[] = [
   { seat: BOT, action: { type: 'suit', suit: 'clubs' } },
   { seat: OPP1, action: { type: 'pass' } },
@@ -272,15 +291,15 @@ const COMBO_ENTRIES: ServerBidEntry[] = [
   { seat: OPP2, action: { type: 'pass' } },
 ]
 
-// ─── Проверки: Вале без 9 ─────────────────────────────────────────────────────
+// ─── Проверки ────────────────────────────────────────────────────────────────
 
 console.log('\ncheckPartnerRaiseAllTrumpsLead\n')
 
-check('[1] Вале без 9 в own suit → partner suit (8♥) побеждава master J♣', () => {
+// [1] X masters преди всичко: J, после 9 в X, дори с карта в Y
+check('[1] X master (J) печели пред Y, дори с карта от Y на разположение', () => {
   const botHand: ServerCard[] = [
     makeCard('clubs', 'J'),
-    makeCard('clubs', 'A'),
-    makeCard('clubs', 'Q'),
+    makeCard('clubs', '9'),
     makeCard('clubs', '7'),
     makeCard('hearts', '8'),
   ]
@@ -294,152 +313,12 @@ check('[1] Вале без 9 в own suit → partner suit (8♥) побежда�
 
   const result = pickServerBotPlayCard(state, BOT)
   assert(result !== null, 'Трябва да върне карта')
-  assertEqual(result!.suit, 'hearts', 'Боя (partner suit, не own suit)')
-  assertEqual(result!.rank, '8', 'Ранк (единствената hearts карта)')
-})
+  assertEqual(result!.suit, 'clubs', 'Боя (X master J печели)')
+  assertEqual(result!.rank, 'J', 'Ранк')
 
-check('[2] Второ властно Вале в трета боя не побеждава правилото → пак hearts', () => {
-  const botHand: ServerCard[] = [
-    makeCard('clubs', 'J'),
-    makeCard('clubs', 'A'),
-    makeCard('clubs', 'Q'),
-    makeCard('clubs', '7'),
-    makeCard('spades', 'J'),
-    makeCard('hearts', '8'),
-  ]
-
-  const state = makeBaseState({
-    botSeat: BOT,
-    hand: botHand,
-    bidEntries: COMBO_ENTRIES,
-    winningBid: BOT_ALL_TRUMPS_WIN,
-  })
-
-  const result = pickServerBotPlayCard(state, BOT)
-  assert(result !== null, 'Трябва да върне карта')
-  assertEqual(result!.suit, 'hearts', 'Боя (partner suit, не spades master J)')
-  assertEqual(result!.rank, '8', 'Ранк')
-})
-
-check('[3] Partner suit 8♥+A♥ → играе А♥ (най-висока)', () => {
-  const botHand: ServerCard[] = [
-    makeCard('clubs', 'J'),
-    makeCard('clubs', 'A'),
-    makeCard('clubs', 'Q'),
-    makeCard('clubs', '7'),
-    makeCard('hearts', '8'),
-    makeCard('hearts', 'A'),
-  ]
-
-  const state = makeBaseState({
-    botSeat: BOT,
-    hand: botHand,
-    bidEntries: COMBO_ENTRIES,
-    winningBid: BOT_ALL_TRUMPS_WIN,
-  })
-
-  const result = pickServerBotPlayCard(state, BOT)
-  assert(result !== null, 'Трябва да върне карта')
-  assertEqual(result!.suit, 'hearts', 'Боя')
-  assertEqual(result!.rank, 'A', 'Ранк (А е по-висока от 8 в trump реда)')
-})
-
-check('[4] Partner suit 9♥+A♥ → играе 9♥ (9 > A в trump реда)', () => {
-  const botHand: ServerCard[] = [
-    makeCard('clubs', 'J'),
-    makeCard('clubs', 'A'),
-    makeCard('clubs', 'Q'),
-    makeCard('clubs', '7'),
-    makeCard('hearts', '9'),
-    makeCard('hearts', 'A'),
-  ]
-
-  const state = makeBaseState({
-    botSeat: BOT,
-    hand: botHand,
-    bidEntries: COMBO_ENTRIES,
-    winningBid: BOT_ALL_TRUMPS_WIN,
-  })
-
-  const result = pickServerBotPlayCard(state, BOT)
-  assert(result !== null, 'Трябва да върне карта')
-  assertEqual(result!.suit, 'hearts', 'Боя')
-  assertEqual(result!.rank, '9', 'Ранк (9 е по-висока от A в trump реда J>9>A>10>K>Q>8>7)')
-})
-
-check('[5] Partner suit J♥+9♥ → играе J♥ (J е връх)', () => {
-  const botHand: ServerCard[] = [
-    makeCard('clubs', 'J'),
-    makeCard('clubs', 'A'),
-    makeCard('clubs', 'Q'),
-    makeCard('clubs', '7'),
-    makeCard('hearts', 'J'),
-    makeCard('hearts', '9'),
-  ]
-
-  const state = makeBaseState({
-    botSeat: BOT,
-    hand: botHand,
-    bidEntries: COMBO_ENTRIES,
-    winningBid: BOT_ALL_TRUMPS_WIN,
-  })
-
-  const result = pickServerBotPlayCard(state, BOT)
-  assert(result !== null, 'Трябва да върне карта')
-  assertEqual(result!.suit, 'hearts', 'Боя')
-  assertEqual(result!.rank, 'J', 'Ранк (J е връх на trump реда)')
-})
-
-check('[6] След еднократно подаване в partner suit → не форсира отново', () => {
-  // Реалистична взятка: ботът (leader) е повел с 8♥ (partner suit); партньорът
-  // хвърля 7♥ (следва боята), противниците хвърлят по-ниски карти извън hearts
-  // (нямат hearts). Победител: чрез getServerTrickWinner (all-trumps: най-
-  // силната карта, следваща led suit, печели — тук BOT/8♥ е единствената
-  // hearts, следователно печели триковата, освен ако друг играч не следва
-  // hearts с по-висока — тук партньорът играе 7♥, по-ниска от 8♥, значи BOT печели).
-  const completedTricks: ServerCompletedTrick[] = [
-    makeRealisticTrick(
-      0,
-      BOT,
-      {
-        [BOT]: makeCard('hearts', '8'),
-        [OPP1]: makeCard('diamonds', '7'),
-        [PARTNER]: makeCard('hearts', '7'),
-        [OPP2]: makeCard('diamonds', 'K'),
-      },
-      BOT_ALL_TRUMPS_WIN,
-    ),
-  ]
-
-  const botHand: ServerCard[] = [
-    makeCard('clubs', 'J'),
-    makeCard('clubs', 'A'),
-    makeCard('clubs', 'Q'),
-    makeCard('clubs', '7'),
-  ]
-
-  const state = makeBaseState({
-    botSeat: BOT,
-    hand: botHand,
-    bidEntries: COMBO_ENTRIES,
-    winningBid: BOT_ALL_TRUMPS_WIN,
-    completedTricks,
-  })
-
-  const result = pickServerBotPlayCard(state, BOT)
-  assert(result !== null, 'Трябва да върне карта')
-  // Планът (Случай B) е приключен → пада към нормалната логика →
-  // master lead избира J♣ (все още master, никой друг клубс по-висок)
-  assertEqual(result!.suit, 'clubs', 'Боя (стара логика — master lead)')
-  assertEqual(result!.rank, 'J', 'Ранк (master)')
-})
-
-// ─── Проверки: Вале + 9 ────────────────────────────────────────────────────────
-
-check('[7] J+9 изиграни, A/Q все още в own suit → продължава own suit', () => {
-  // Две реалистични взятки: ботът (leader) е повел с J♣, после 9♣ — партньорът
-  // и противниците следват в clubs с по-ниски карти (или хвърлят друга боя ако
-  // нямат clubs). Бот печели и двете (J и 9 са върхът на trump реда).
+  // След J (изигран от бота, печели триковата) → 9♣ е следващата топ карта
+  // в X; J е единствената по-висока и вече изиграна → 9 е лично властна →
+  // продължава X, не подава Y все още.
   const completedTricks: ServerCompletedTrick[] = [
     makeRealisticTrick(
       0,
@@ -452,6 +331,439 @@ check('[7] J+9 изиграни, A/Q все още в own suit → продъл�
       },
       BOT_ALL_TRUMPS_WIN,
     ),
+  ]
+  const remainingHand: ServerCard[] = [
+    makeCard('clubs', '9'),
+    makeCard('clubs', '7'),
+    makeCard('hearts', '8'),
+  ]
+  const stateAfterJack = makeBaseState({
+    botSeat: BOT,
+    hand: remainingHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+    completedTricks,
+  })
+  const resultAfterJack = pickServerBotPlayCard(stateAfterJack, BOT)
+  assert(resultAfterJack !== null, 'Трябва да върне карта (след J)')
+  assertEqual(resultAfterJack!.suit, 'clubs', 'Боя (9♣ лично властна — X продължава)')
+  assertEqual(resultAfterJack!.rank, '9', 'Ранк')
+})
+
+// [2] Невластна X + налична Y → НЕ играе X (дори "сигурна за отбора"), подава Y
+check('[2] Невластна X (макар сигурна за отбора) + карта от Y → подава Y, не X', () => {
+  // Взятка 0: X=clubs led; и двамата противника доказано void в clubs (не
+  // следват) → останалите по-високи клубс карти могат да бъдат само у
+  // партньора. X топ картата на бота е Q (K все още неизиграна и не у бота
+  // — виж бележката в тест [4] за trump реда; Q не е лично master, но е
+  // "сигурна за отбора" защото и двамата противника са void). По старата
+  // (грешна) логика това би "продължило X" — новата спецификация изисква Y
+  // да изпревари "сигурна за отбора" X, докато ботът държи карта от Y.
+  const completedTricks: ServerCompletedTrick[] = [
+    makeRealisticTrick(
+      0,
+      BOT,
+      {
+        [BOT]: makeCard('clubs', 'J'),
+        [OPP1]: makeCard('diamonds', '7'), // не следва → void в clubs
+        [PARTNER]: makeCard('clubs', 'A'),
+        [OPP2]: makeCard('diamonds', 'K'), // не следва → void в clubs
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+    makeRealisticTrick(
+      1,
+      BOT,
+      {
+        [BOT]: makeCard('clubs', '9'),
+        [OPP1]: makeCard('diamonds', 'Q'), // вече доказан void в clubs
+        [PARTNER]: makeCard('clubs', '10'),
+        [OPP2]: makeCard('diamonds', '8'), // вече доказан void в clubs
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+  ]
+
+  // Ботът държи Q♣ (X — не master: K неизиграна, не у бота, но противниците
+  // са void → сигурна за отбора), и 8♥ (Y).
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'Q'),
+    makeCard('hearts', '8'),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+    completedTricks,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'hearts', 'Боя (Y изпреварва "сигурна за отбора" X)')
+  assertEqual(result!.rank, '8', 'Ранк (единствената Y карта)')
+})
+
+// [3] Невластна X, БЕЗ Y карта, сигурна за отбора → fallback играе X
+check('[3] Невластна X, няма Y карта, сигурна за отбора → fallback играе X', () => {
+  const completedTricks: ServerCompletedTrick[] = [
+    makeRealisticTrick(
+      0,
+      BOT,
+      {
+        [BOT]: makeCard('clubs', 'J'),
+        [OPP1]: makeCard('diamonds', '7'), // void в clubs
+        [PARTNER]: makeCard('clubs', 'A'),
+        [OPP2]: makeCard('diamonds', 'K'), // void в clubs
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+  ]
+
+  // Ботът НЯМА карта от hearts (Y) тук — само X и трета боя без master.
+  const botHand: ServerCard[] = [
+    makeCard('clubs', '9'),
+    makeCard('clubs', '8'),
+    makeCard('diamonds', '8'), // трета боя, не master (K вече изиграна от OPP2, но Q/10/A неизвестни... виж долу)
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+    completedTricks,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  // Няма Y карта → fallback стъпка 4: 9♣ сигурна за отбора (и двамата
+  // противника доказано void в clubs) → играе я.
+  assertEqual(result!.suit, 'clubs', 'Боя (fallback — X сигурна за отбора, няма Y)')
+  assertEqual(result!.rank, '9', 'Ранк')
+})
+
+// [4] Master в трета боя Z, докато има Y карта → играе Z, не подава Y
+//
+// Бележка за trump реда (J>9>A>10>K>Q>8>7): щом J излезе, 9 автоматично е
+// master (единствената по-висока карта е J); после A автоматично master
+// (по-високи са J,9 — вече изиграни); после 10 (по-високи J,9,A); после K
+// (J,9,A,10) — веригата е НЕПРЕКЪСНАТА отгоре надолу. Единственият начин
+// топ картата на бота да НЕ е master е тя да е ниско в реда (Q или по-долу)
+// докато поне една от по-високите 5 карти (J,9,A,10,K) остава неизиграна и
+// извън ръката на бота. Затова тук топ картата в X е Q, с K все още неиграна.
+check('[4] Master в Z печели пред подаване в Y (Случай A: X имала Вале+9)', () => {
+  // Валето И 9-ката трябва да са ЛИЧНО изиграни от бота (не от партньора),
+  // за да потвърдят Случай A (X имала Вале+9) — иначе ownSuitHadNine=false
+  // → Случай B се активира директно, без Z/X master проверки. K♣ остава
+  // неиграна и никой не е доказано void → топ картата Q♣ НЕ е master.
+  const completedTricks: ServerCompletedTrick[] = [
+    makeRealisticTrick(
+      0,
+      BOT,
+      {
+        [BOT]: makeCard('clubs', 'J'),
+        [OPP1]: makeCard('clubs', 'A'), // следва clubs → не void
+        [PARTNER]: makeCard('clubs', '10'),
+        [OPP2]: makeCard('diamonds', '7'),
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+    makeRealisticTrick(
+      1,
+      BOT,
+      {
+        [BOT]: makeCard('clubs', '9'), // лично изиграна от бота
+        [OPP1]: makeCard('diamonds', 'K'),
+        [PARTNER]: makeCard('diamonds', 'Q'),
+        [OPP2]: makeCard('clubs', '7'), // следва clubs → не void
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+  ]
+
+  // Ботът държи Q♣ (топ в X, останала след J,9,A,10,7 изиграни). По-висока
+  // от Q е само K (неизиграна, никой доказано void) → Q не е master.
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'Q'),
+    makeCard('spades', 'J'), // Z=spades, master (никой друг има по-висока — J е връх)
+    makeCard('hearts', '8'), // Y
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+    completedTricks,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'spades', 'Боя (Z master печели пред Y)')
+  assertEqual(result!.rank, 'J', 'Ранк')
+})
+
+// [5] Поредица от masters в Z → J, после 9 (ако вече master), чак после Y
+check('[5] Поредица от masters в Z: J после 9, чак след това Y', () => {
+  // X (clubs) топ карта е Q — по-висока K все още неизиграна → не master
+  // (виж бележката в тест [4] за непрекъснатата J>9>A>10>K верига).
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'Q'), // X, не master (K неизиграна)
+    makeCard('spades', 'J'), // Z, master
+    makeCard('spades', '9'), // Z, ще стане master след J
+    makeCard('hearts', '8'), // Y
+  ]
+  // Валето И 9-ката трябва да са ЛИЧНО изиграни от бота, за да потвърдят
+  // Случай A (иначе Случай B се активира и Z/X master проверките отпадат).
+  const completedTricksInit: ServerCompletedTrick[] = [
+    makeRealisticTrick(
+      0,
+      BOT,
+      {
+        [BOT]: makeCard('clubs', 'J'),
+        [OPP1]: makeCard('clubs', 'A'),
+        [PARTNER]: makeCard('clubs', '10'),
+        [OPP2]: makeCard('diamonds', '7'),
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+    makeRealisticTrick(
+      1,
+      BOT,
+      {
+        [BOT]: makeCard('clubs', '9'), // лично изиграна от бота
+        [OPP1]: makeCard('diamonds', 'K'),
+        [PARTNER]: makeCard('diamonds', 'Q'),
+        [OPP2]: makeCard('clubs', '7'),
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+    completedTricks: completedTricksInit,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'spades', 'Боя (Z master J печели)')
+  assertEqual(result!.rank, 'J', 'Ранк')
+
+  // След J♠ изигран → 9♠ е следваща топ карта в Z=spades, лично властна
+  // (J е единствената по-висока, вече изиграна) → продължава Z, не Y.
+  const completedTricksAfterJ: ServerCompletedTrick[] = [
+    ...completedTricksInit,
+    makeRealisticTrick(
+      2,
+      BOT,
+      {
+        [BOT]: makeCard('spades', 'J'),
+        [OPP1]: makeCard('spades', '8'),
+        [PARTNER]: makeCard('spades', 'K'),
+        [OPP2]: makeCard('spades', '10'),
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+  ]
+  const handAfterJ: ServerCard[] = [
+    makeCard('clubs', 'Q'), // X все още не master (K неизиграна)
+    makeCard('spades', '9'),
+    makeCard('hearts', '8'),
+  ]
+  const stateAfterJ = makeBaseState({
+    botSeat: BOT,
+    hand: handAfterJ,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+    completedTricks: completedTricksAfterJ,
+  })
+  const resultAfterJ = pickServerBotPlayCard(stateAfterJ, BOT)
+  assert(resultAfterJ !== null, 'Трябва да върне карта (след J♠)')
+  assertEqual(resultAfterJ!.suit, 'spades', 'Боя (9♠ лично властна — Z продължава)')
+  assertEqual(resultAfterJ!.rank, '9', 'Ранк')
+})
+
+// [6] Няколко трети бои Z1/Z2 → conventional master-lead ред, без hardcode
+check('[6] Няколко Z (spades, diamonds) → conventional master-lead избор', () => {
+  // X (clubs) топ карта е Q — K неизиграна → не master. J и 9 лично
+  // изиграни от бота (две взятки), за да потвърдят Случай A.
+  // И двете Z имат master карта; chooseAllTrumpsMasterLead избира по дължина
+  // на групата, после сила — тук diamonds има 2 карти (по-дълга), spades 1.
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'Q'), // X, не master (K неизиграна)
+    makeCard('spades', 'J'), // Z1, 1 карта, master
+    makeCard('diamonds', 'J'), // Z2, 2 карти, master
+    makeCard('diamonds', '7'),
+    makeCard('hearts', '8'), // Y
+  ]
+  const completedTricks: ServerCompletedTrick[] = [
+    makeRealisticTrick(
+      0,
+      BOT,
+      {
+        [BOT]: makeCard('clubs', 'J'),
+        [OPP1]: makeCard('clubs', 'A'),
+        [PARTNER]: makeCard('clubs', '10'),
+        [OPP2]: makeCard('hearts', '7'),
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+    makeRealisticTrick(
+      1,
+      BOT,
+      {
+        [BOT]: makeCard('clubs', '9'), // лично изиграна от бота
+        [OPP1]: makeCard('hearts', 'K'),
+        [PARTNER]: makeCard('hearts', 'Q'),
+        [OPP2]: makeCard('clubs', '7'),
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+    completedTricks,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  // Не проверяваме кой конкретен Z печели (зависи от conventional master-lead
+  // сортировката, не hardcode-ваме) — само че резултатът е Z, не X, не Y.
+  assert(result!.suit === 'diamonds' || result!.suit === 'spades', `Трябва да е Z (spades/diamonds), получено ${result!.suit}`)
+  assertEqual(result!.rank, 'J', 'Ранк (master)')
+})
+
+// [7] Master само в Y (нито X, нито Z) → подава Y, план приключва
+check('[7] Master само в Y → играе Y, планът приключва', () => {
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'Q'), // X, не master (K неизиграна)
+    makeCard('diamonds', '8'), // Z, не master (нищо от diamonds изиграно)
+    makeCard('hearts', 'J'), // Y, master (J е връх)
+  ]
+  const completedTricks: ServerCompletedTrick[] = [
+    makeRealisticTrick(
+      0,
+      BOT,
+      {
+        [BOT]: makeCard('clubs', 'J'),
+        [OPP1]: makeCard('clubs', 'A'),
+        [PARTNER]: makeCard('clubs', '9'),
+        [OPP2]: makeCard('clubs', '10'),
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+    completedTricks,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'hearts', 'Боя (Y — единствен master)')
+  assertEqual(result!.rank, 'J', 'Ранк')
+
+  // Планът е приключен → следващ свободен lead не форсира Y отново.
+  const completedTricksAfterY: ServerCompletedTrick[] = [
+    ...completedTricks,
+    makeRealisticTrick(
+      1,
+      BOT,
+      {
+        [BOT]: makeCard('hearts', 'J'),
+        [OPP1]: makeCard('hearts', '8'),
+        [PARTNER]: makeCard('hearts', '7'),
+        [OPP2]: makeCard('hearts', 'A'),
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+  ]
+  const handAfterY: ServerCard[] = [
+    makeCard('diamonds', '8'),
+  ]
+  const stateAfterY = makeBaseState({
+    botSeat: BOT,
+    hand: handAfterY,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+    completedTricks: completedTricksAfterY,
+  })
+  const resultAfterY = pickServerBotPlayCard(stateAfterY, BOT)
+  assert(resultAfterY !== null, 'Трябва да върне карта (след Y)')
+  assertEqual(resultAfterY!.suit, 'diamonds', 'Боя (план приключен, единствената налична карта)')
+})
+
+// [8] X лично master (Случай A: X имала Вале+9), дори с master в Z → X първо, после Z
+check('[8] X master печели пред Z master (Случай A: X имала Вале+9)', () => {
+  // Ботът държи J+9 в X (потвърждава Случай A) → X master (J) печели пред Z.
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'J'), // X, master (връх)
+    makeCard('clubs', '9'), // X, потвърждава Случай A
+    makeCard('spades', 'J'), // Z, също master
+    makeCard('hearts', '8'), // Y
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'clubs', 'Боя (X master печели пред Z master)')
+  assertEqual(result!.rank, 'J', 'Ранк')
+
+  // След X master J изигран → следваща топ карта в X е 9♣ (лично властна,
+  // J единствената по-висока, вече изиграна) → X ПРОДЪЛЖАВА, не Z все още.
+  const completedTricks: ServerCompletedTrick[] = [
+    makeRealisticTrick(
+      0,
+      BOT,
+      {
+        [BOT]: makeCard('clubs', 'J'),
+        [OPP1]: makeCard('clubs', '8'),
+        [PARTNER]: makeCard('clubs', 'K'),
+        [OPP2]: makeCard('clubs', '10'),
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+  ]
+  const handAfterJ: ServerCard[] = [
+    makeCard('clubs', '9'),
+    makeCard('spades', 'J'),
+    makeCard('hearts', '8'),
+  ]
+  const stateAfterJ = makeBaseState({
+    botSeat: BOT,
+    hand: handAfterJ,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+    completedTricks,
+  })
+  const resultAfterJ = pickServerBotPlayCard(stateAfterJ, BOT)
+  assert(resultAfterJ !== null, 'Трябва да върне карта (след J)')
+  assertEqual(resultAfterJ!.suit, 'clubs', 'Боя (9♣ лично властна — X продължава)')
+  assertEqual(resultAfterJ!.rank, '9', 'Ранк')
+
+  // Едва след X изчерпана (9 изиграна) → следващ lead преминава към Z master.
+  const completedTricksAfterNine: ServerCompletedTrick[] = [
+    ...completedTricks,
     makeRealisticTrick(
       1,
       BOT,
@@ -464,164 +776,29 @@ check('[7] J+9 изиграни, A/Q все още в own suit → продъл�
       BOT_ALL_TRUMPS_WIN,
     ),
   ]
-
-  const remainingHand: ServerCard[] = [
-    makeCard('clubs', 'A'),
-    makeCard('clubs', 'Q'),
-    makeCard('clubs', '7'),
-    makeCard('hearts', '8'),
-  ]
-
-  const state = makeBaseState({
-    botSeat: BOT,
-    hand: remainingHand,
-    bidEntries: COMBO_ENTRIES,
-    winningBid: BOT_ALL_TRUMPS_WIN,
-    completedTricks,
-  })
-
-  const result = pickServerBotPlayCard(state, BOT)
-  assert(result !== null, 'Трябва да върне карта')
-  assertEqual(result!.suit, 'clubs', 'Боя (own suit продължава — все още не е изчерпана)')
-})
-
-check('[8] Own suit изчерпана → най-високата карта от partner suit', () => {
-  const completedTricks: ServerCompletedTrick[] = [
-    makeRealisticTrick(
-      0,
-      BOT,
-      {
-        [BOT]: makeCard('clubs', 'J'),
-        [OPP1]: makeCard('clubs', '8'),
-        [PARTNER]: makeCard('clubs', 'K'),
-        [OPP2]: makeCard('clubs', '10'),
-      },
-      BOT_ALL_TRUMPS_WIN,
-    ),
-    makeRealisticTrick(
-      1,
-      BOT,
-      {
-        [BOT]: makeCard('clubs', '9'),
-        [OPP1]: makeCard('clubs', 'A'),
-        [PARTNER]: makeCard('clubs', 'Q'),
-        [OPP2]: makeCard('clubs', '7'),
-      },
-      BOT_ALL_TRUMPS_WIN,
-    ),
-  ]
-
-  const botHand: ServerCard[] = [
-    makeCard('hearts', '8'),
-    makeCard('hearts', 'A'),
-  ]
-
-  const state = makeBaseState({
-    botSeat: BOT,
-    hand: botHand,
-    bidEntries: COMBO_ENTRIES,
-    winningBid: BOT_ALL_TRUMPS_WIN,
-    completedTricks,
-  })
-
-  const result = pickServerBotPlayCard(state, BOT)
-  assert(result !== null, 'Трябва да върне карта')
-  assertEqual(result!.suit, 'hearts', 'Боя (partner suit — own suit изчерпана)')
-  assertEqual(result!.rank, 'A', 'Ранк (най-висока: A > 8 в trump реда)')
-})
-
-check('[9] След еднократно подаване в partner suit (Случай А) → план приключен', () => {
-  // Own suit изчерпана (J, 9 изиграни в предишни взятки), после ботът е
-  // подал A♥ в partner suit (трета взятка, leader=BOT). Сега план приключен
-  // → следващ свободен lead пада към нормалната логика.
-  const completedTricks: ServerCompletedTrick[] = [
-    makeRealisticTrick(
-      0,
-      BOT,
-      {
-        [BOT]: makeCard('clubs', 'J'),
-        [OPP1]: makeCard('clubs', '8'),
-        [PARTNER]: makeCard('clubs', 'K'),
-        [OPP2]: makeCard('clubs', '10'),
-      },
-      BOT_ALL_TRUMPS_WIN,
-    ),
-    makeRealisticTrick(
-      1,
-      BOT,
-      {
-        [BOT]: makeCard('clubs', '9'),
-        [OPP1]: makeCard('clubs', 'A'),
-        [PARTNER]: makeCard('clubs', 'Q'),
-        [OPP2]: makeCard('clubs', '7'),
-      },
-      BOT_ALL_TRUMPS_WIN,
-    ),
-    makeRealisticTrick(
-      2,
-      BOT,
-      {
-        [BOT]: makeCard('hearts', 'A'),
-        [OPP1]: makeCard('diamonds', '7'),
-        [PARTNER]: makeCard('hearts', '7'),
-        [OPP2]: makeCard('diamonds', 'K'),
-      },
-      BOT_ALL_TRUMPS_WIN,
-    ),
-  ]
-
-  const botHand: ServerCard[] = [
+  const handAfterX: ServerCard[] = [
     makeCard('spades', 'J'),
     makeCard('hearts', '8'),
   ]
-
-  const state = makeBaseState({
+  const stateAfterX = makeBaseState({
     botSeat: BOT,
-    hand: botHand,
+    hand: handAfterX,
     bidEntries: COMBO_ENTRIES,
     winningBid: BOT_ALL_TRUMPS_WIN,
-    completedTricks,
+    completedTricks: completedTricksAfterNine,
   })
-
-  const result = pickServerBotPlayCard(state, BOT)
-  assert(result !== null, 'Трябва да върне карта')
-  // План приключен → пада към master lead → J♠ е master (никой друг spades по-висок)
-  assertEqual(result!.suit, 'spades', 'Боя (стара логика — master lead J♠)')
-  assertEqual(result!.rank, 'J', 'Ранк')
+  const resultAfterX = pickServerBotPlayCard(stateAfterX, BOT)
+  assert(resultAfterX !== null, 'Трябва да върне карта (след X)')
+  assertEqual(resultAfterX!.suit, 'spades', 'Боя (X изчерпана → Z master поема)')
+  assertEqual(resultAfterX!.rank, 'J', 'Ранк')
 })
 
-// ─── Защити ────────────────────────────────────────────────────────────────────
-
-check('[10] Без активна комбинация → master-lead приоритетът работи непроменен', () => {
-  const directEntries: ServerBidEntry[] = [
-    { seat: BOT, action: { type: 'all-trumps' } },
-    { seat: OPP1, action: { type: 'pass' } },
-    { seat: PARTNER, action: { type: 'pass' } },
-    { seat: OPP2, action: { type: 'pass' } },
-  ]
-  const botHand: ServerCard[] = [
-    makeCard('clubs', 'J'),
-    makeCard('hearts', '7'),
-  ]
-
-  const state = makeBaseState({
-    botSeat: BOT,
-    hand: botHand,
-    bidEntries: directEntries,
-    winningBid: BOT_ALL_TRUMPS_WIN,
-  })
-
-  const result = pickServerBotPlayCard(state, BOT)
-  assert(result !== null, 'Трябва да върне карта')
-  assertEqual(result!.suit, 'clubs', 'Боя (стара master-lead логика)')
-  assertEqual(result!.rank, 'J', 'Ранк')
-})
-
-check('[11] Follow ситуация → правилото не участва, само законни карти', () => {
+// [9] Follow ситуация → правилото не участва, само законни карти
+check('[9] Follow ситуация → само законна карта, правилото не участва', () => {
   const botHand: ServerCard[] = [
     makeCard('diamonds', '7'),
     makeCard('clubs', 'J'),
-    makeCard('clubs', 'A'),
+    makeCard('clubs', '9'),
     makeCard('hearts', '8'),
   ]
   const currentTrickPlays: ServerTrickPlay[] = [
@@ -639,148 +816,17 @@ check('[11] Follow ситуация → правилото не участва, 
   const result = pickServerBotPlayCard(state, BOT)
   assert(result !== null, 'Трябва да върне карта')
   assertEqual(result!.suit, 'diamonds', 'Боя (задължение за следване, не свободен lead)')
-  assertEqual(result!.rank, '7', 'Ранк (единствената законна diamonds карта)')
+  assertEqual(result!.rank, '7', 'Ранк (единствена законна diamonds карта)')
 })
 
-check('[12] Няма карта от own/partner suit → безопасен fallback', () => {
-  const botHand: ServerCard[] = [
-    makeCard('spades', 'J'),
-    makeCard('diamonds', '7'),
-  ]
-
-  const state = makeBaseState({
-    botSeat: BOT,
-    hand: botHand,
-    bidEntries: COMBO_ENTRIES,
-    winningBid: BOT_ALL_TRUMPS_WIN,
-  })
-
-  const result = pickServerBotPlayCard(state, BOT)
-  assert(result !== null, 'Трябва да върне валидна карта (fallback, без грешка)')
-})
-
-check('[13] Празни bidding.entries (ново раздаване) → правилото не се активира', () => {
-  const emptyEntries: ServerBidEntry[] = []
-  const botHand: ServerCard[] = [
-    makeCard('clubs', 'J'),
-    makeCard('clubs', '9'),
-    makeCard('clubs', '7'),
-    makeCard('hearts', '8'),
-  ]
-
-  const state = makeBaseState({
-    botSeat: BOT,
-    hand: botHand,
-    bidEntries: emptyEntries,
-    winningBid: BOT_ALL_TRUMPS_WIN,
-  })
-
-  const result = pickServerBotPlayCard(state, BOT)
-  assert(result !== null, 'Трябва да върне карта')
-  assertEqual(result!.suit, 'clubs', 'Боя (стара master-lead логика, не новото правило)')
-  assertEqual(result!.rank, 'J', 'Ранк')
-})
-
-// ─── Partner-signal взаимодействие ─────────────────────────────────────────────
-
-// В тези тестове партньорът (top) е дал сигнал в предишна наша взятка. За
-// mandatory J-сигнал: партньорът е изчистил J от боя различна от led suit в
-// последната взятка, спечелена от нашия отбор (виж
-// partnerMandatoryRequestedSuit в pickServerBotPlayCard.ts, all-trumps клон:
-// card.rank === 'J' → сигнал). За color-сигнал: партньорът е изчистил
-// не-J/не-9 карта от друг цвят (resolveColorSignal логиката).
-
-check('[14] Pending комбинация (Вале без 9) + mandatory J-сигнал → комбинацията печели', () => {
-  // Ботът има own suit (clubs, без 9) все още неподадена. Партньорът е дал
-  // mandatory J-сигнал (изчистил J♦ в наша спечелена взятка, водена в spades).
+// [10] След приключване на плана → нормални partner signals/master lead
+check('[10-mandatory] След подаване в Y → mandatory J-сигнал работи нормално', () => {
   const completedTricks: ServerCompletedTrick[] = [
     makeRealisticTrick(
       0,
       BOT,
       {
-        [BOT]: makeCard('spades', 'A'), // led spades, BOT печели (A е силна в trump реда сред spades)
-        [OPP1]: makeCard('spades', '7'),
-        [PARTNER]: makeCard('diamonds', 'J'), // партньор изчиства J♦ (не следва spades) → mandatory сигнал за diamonds
-        [OPP2]: makeCard('spades', '8'),
-      },
-      BOT_ALL_TRUMPS_WIN,
-    ),
-  ]
-
-  const botHand: ServerCard[] = [
-    makeCard('clubs', 'J'),
-    makeCard('clubs', 'A'),
-    makeCard('clubs', 'Q'),
-    makeCard('clubs', '7'),
-    makeCard('hearts', '8'), // partner suit (COMBO_ENTRIES: partner вдигна hearts)
-  ]
-
-  const state = makeBaseState({
-    botSeat: BOT,
-    hand: botHand,
-    bidEntries: COMBO_ENTRIES,
-    winningBid: BOT_ALL_TRUMPS_WIN,
-    completedTricks,
-  })
-
-  const result = pickServerBotPlayCard(state, BOT)
-  assert(result !== null, 'Трябва да върне карта')
-  // Планът (Случай B, hearts) е още неизпълнен → печели пред mandatory diamonds сигнала
-  assertEqual(result!.suit, 'hearts', 'Боя (pending комбинация печели пред mandatory сигнал)')
-  assertEqual(result!.rank, '8', 'Ранк (единствената hearts карта)')
-})
-
-check('[15] Pending комбинация (Вале без 9) + color-сигнал → комбинацията печели', () => {
-  // Партньорът изчиства неутрална карта (не J, не 9) от друг цвят в наша
-  // спечелена взятка → color-сигнал (resolveColorSignal), но комбинацията
-  // (hearts, partner suit) все още неизпълнена → трябва да победи.
-  const completedTricks: ServerCompletedTrick[] = [
-    makeRealisticTrick(
-      0,
-      BOT,
-      {
-        [BOT]: makeCard('spades', 'A'),
-        [OPP1]: makeCard('spades', '7'),
-        [PARTNER]: makeCard('diamonds', 'Q'), // изчистена Q♦ (не J, не 9) → color-сигнал
-        [OPP2]: makeCard('spades', '8'),
-      },
-      BOT_ALL_TRUMPS_WIN,
-    ),
-  ]
-
-  const botHand: ServerCard[] = [
-    makeCard('clubs', 'J'),
-    makeCard('clubs', 'A'),
-    makeCard('clubs', 'Q'),
-    makeCard('clubs', '7'),
-    makeCard('hearts', '8'),
-  ]
-
-  const state = makeBaseState({
-    botSeat: BOT,
-    hand: botHand,
-    bidEntries: COMBO_ENTRIES,
-    winningBid: BOT_ALL_TRUMPS_WIN,
-    completedTricks,
-  })
-
-  const result = pickServerBotPlayCard(state, BOT)
-  assert(result !== null, 'Трябва да върне карта')
-  assertEqual(result!.suit, 'hearts', 'Боя (pending комбинация печели пред color-сигнал)')
-  assertEqual(result!.rank, '8', 'Ранк')
-})
-
-check('[16] След изпълнение на плана + mandatory J-сигнал → сигналът печели', () => {
-  // Ботът вече е подал веднъж hearts (Случай B изпълнен, взятка 0). После
-  // партньорът дава mandatory J-сигнал (J♦) в наша следваща спечелена
-  // взятка (взятка 1). Планът е приключен → нормалният сигнален приоритет
-  // трябва да поеме и да предпочете diamonds.
-  const completedTricks: ServerCompletedTrick[] = [
-    makeRealisticTrick(
-      0,
-      BOT,
-      {
-        [BOT]: makeCard('hearts', 'A'), // подаване в partner suit (Случай B) — план приключен
+        [BOT]: makeCard('hearts', 'A'), // подаване в Y (X/Z нямаха master тук)
         [OPP1]: makeCard('diamonds', '7'),
         [PARTNER]: makeCard('hearts', '7'),
         [OPP2]: makeCard('diamonds', 'K'),
@@ -801,7 +847,7 @@ check('[16] След изпълнение на плана + mandatory J-сигн
   ]
 
   const botHand: ServerCard[] = [
-    makeCard('clubs', 'A'), // own suit — не master (J♣ не е в ръка/изигран от бота)
+    makeCard('clubs', 'A'), // X, не master (J♣ не е у бота/изиграна)
     makeCard('diamonds', 'Q'),
   ]
 
@@ -815,11 +861,10 @@ check('[16] След изпълнение на плана + mandatory J-сигн
 
   const result = pickServerBotPlayCard(state, BOT)
   assert(result !== null, 'Трябва да върне карта')
-  // Планът е приключен (правилото връща null) → mandatory сигнал поема → diamonds
   assertEqual(result!.suit, 'diamonds', 'Боя (mandatory сигнал печели след изпълнен план)')
 })
 
-check('[17] След изпълнение на плана + color-сигнал → сигналът печели', () => {
+check('[10-color] След подаване в Y → color-сигнал работи нормално', () => {
   const completedTricks: ServerCompletedTrick[] = [
     makeRealisticTrick(
       0,
@@ -861,6 +906,479 @@ check('[17] След изпълнение на плана + color-сигнал �
   const result = pickServerBotPlayCard(state, BOT)
   assert(result !== null, 'Трябва да върне карта')
   assertEqual(result!.suit, 'diamonds', 'Боя (color-сигнал печели след изпълнен план)')
+})
+
+// [11] Симетрия: различни X/Y/Z комбинации, без hardcode
+check('[11-a] Симетрия: X=diamonds (Случай A: Вале+9), Y=spades → X master печели', () => {
+  const symmetricEntries: ServerBidEntry[] = [
+    { seat: BOT, action: { type: 'suit', suit: 'diamonds' } },
+    { seat: OPP1, action: { type: 'pass' } },
+    { seat: PARTNER, action: { type: 'suit', suit: 'spades' } },
+    { seat: OPP2, action: { type: 'pass' } },
+    { seat: BOT, action: { type: 'all-trumps' } },
+    { seat: OPP1, action: { type: 'pass' } },
+    { seat: PARTNER, action: { type: 'pass' } },
+    { seat: OPP2, action: { type: 'pass' } },
+  ]
+
+  // X=diamonds има Вале+9 → Случай A → X master (J) печели пред Y.
+  const botHand: ServerCard[] = [
+    makeCard('diamonds', 'J'),
+    makeCard('diamonds', '9'),
+    makeCard('diamonds', 'Q'),
+    makeCard('diamonds', '7'),
+    makeCard('spades', '8'),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: symmetricEntries,
+    winningBid: ALL_TRUMPS_WINNING_BID_TEMPLATE(BOT),
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  // J♦ е лично властна (връх на trump реда) → X печели, дори Y=spades налична
+  assertEqual(result!.suit, 'diamonds', 'Боя (X=diamonds master печели, симетрично)')
+  assertEqual(result!.rank, 'J', 'Ранк')
+})
+
+check('[11-b] Симетрия (Случай A): X=diamonds (без master), Y=spades → подава Y', () => {
+  // Bidding suit order: clubs < diamonds < hearts < spades — Y трябва да е
+  // ПО-ВИСОКА от X (X=spades няма валидна по-висока боя над себе си, затова
+  // X=diamonds, Y=spades тук).
+  const symmetricEntries: ServerBidEntry[] = [
+    { seat: BOT, action: { type: 'suit', suit: 'diamonds' } },
+    { seat: OPP1, action: { type: 'pass' } },
+    { seat: PARTNER, action: { type: 'suit', suit: 'spades' } },
+    { seat: OPP2, action: { type: 'pass' } },
+    { seat: BOT, action: { type: 'all-trumps' } },
+    { seat: OPP1, action: { type: 'pass' } },
+    { seat: PARTNER, action: { type: 'pass' } },
+    { seat: OPP2, action: { type: 'pass' } },
+  ]
+
+  // X (diamonds) топ карта е Q — K все още неизиграна и никой не е доказано
+  // void → Q не е master (виж бележката в тест [4] за trump реда). J и 9 от
+  // X лично изиграни от бота (потвърждава Случай A).
+  const completedTricks: ServerCompletedTrick[] = [
+    makeRealisticTrick(
+      0,
+      BOT,
+      {
+        [BOT]: makeCard('diamonds', 'J'),
+        [OPP1]: makeCard('diamonds', 'A'), // следва → не void
+        [PARTNER]: makeCard('diamonds', '10'),
+        [OPP2]: makeCard('hearts', '7'),
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+    makeRealisticTrick(
+      1,
+      BOT,
+      {
+        [BOT]: makeCard('diamonds', '9'), // лично изиграна от бота
+        [OPP1]: makeCard('hearts', 'K'),
+        [PARTNER]: makeCard('hearts', 'Q'),
+        [OPP2]: makeCard('diamonds', '7'), // следва → не void
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+  ]
+
+  const botHand: ServerCard[] = [
+    makeCard('diamonds', 'Q'), // X, не master (K неизиграна)
+    makeCard('spades', '8'), // Y
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: symmetricEntries,
+    winningBid: ALL_TRUMPS_WINNING_BID_TEMPLATE(BOT),
+    completedTricks,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'spades', 'Боя (Y=spades, симетрично работи за произволни X/Y)')
+  assertEqual(result!.rank, '8', 'Ранк')
+})
+
+// ─── Допълнителни защити ────────────────────────────────────────────────────
+
+check('[12] Без активна bidding комбинация → chooseAllTrumpsMasterLead непроменен', () => {
+  const directEntries: ServerBidEntry[] = [
+    { seat: BOT, action: { type: 'all-trumps' } },
+    { seat: OPP1, action: { type: 'pass' } },
+    { seat: PARTNER, action: { type: 'pass' } },
+    { seat: OPP2, action: { type: 'pass' } },
+  ]
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'J'),
+    makeCard('hearts', '7'),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: directEntries,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'clubs', 'Боя (стара master-lead логика)')
+  assertEqual(result!.rank, 'J', 'Ранк')
+})
+
+check('[13] Няма карта от X, master в Z, нито Y → безопасен fallback', () => {
+  const botHand: ServerCard[] = [
+    makeCard('spades', '8'), // Z, не master (J неизиграна, никой void)
+    makeCard('diamonds', '7'), // друга боя без връзка
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне валидна карта (fallback, без грешка)')
+})
+
+check('[14] Празни bidding.entries (ново раздаване) → правилото не се активира', () => {
+  const emptyEntries: ServerBidEntry[] = []
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'J'),
+    makeCard('clubs', '9'),
+    makeCard('clubs', '7'),
+    makeCard('hearts', '8'),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: emptyEntries,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'clubs', 'Боя (стара master-lead логика, не новото правило)')
+  assertEqual(result!.rank, 'J', 'Ранк')
+})
+
+check('[15] След еднократно подаване в Y → следващ lead не форсира отново', () => {
+  const completedTricks: ServerCompletedTrick[] = [
+    makeRealisticTrick(
+      0,
+      BOT,
+      {
+        [BOT]: makeCard('hearts', 'A'), // подаване в Y
+        [OPP1]: makeCard('diamonds', '7'),
+        [PARTNER]: makeCard('hearts', '7'),
+        [OPP2]: makeCard('diamonds', 'K'),
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+  ]
+
+  const botHand: ServerCard[] = [
+    makeCard('spades', 'J'), // master в трета боя — план приключен, старата логика поема
+    makeCard('hearts', '8'),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+    completedTricks,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'spades', 'Боя (план приключен, master lead работи)')
+  assertEqual(result!.rank, 'J', 'Ранк')
+})
+
+// ─── Случай B: X имала Вале, но НЕ 9 — първоначалната конвенция ─────────────
+
+check('[16] J+A+Q+7 в X (без 9) + карта от Y → директно Y, НЕ играе J от X', () => {
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'J'),
+    makeCard('clubs', 'A'),
+    makeCard('clubs', 'Q'),
+    makeCard('clubs', '7'),
+    makeCard('hearts', '8'),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'hearts', 'Боя (Y директно, Случай B — без 9 в X)')
+  assertEqual(result!.rank, '8', 'Ранк (единствена Y карта)')
+})
+
+check('[17] J+A+Q+7 в X (без 9) + властно Вале в Z + карта от Y → пак Y, нито J от X, нито J от Z', () => {
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'J'), // X, master, но БЕЗ 9 → Случай B
+    makeCard('clubs', 'A'),
+    makeCard('clubs', 'Q'),
+    makeCard('clubs', '7'),
+    makeCard('spades', 'J'), // Z, също master
+    makeCard('hearts', '8'), // Y
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'hearts', 'Боя (Y печели пред J от X И пред J от Z — Случай B)')
+  assertEqual(result!.rank, '8', 'Ранк')
+})
+
+check('[18-a] Случай B: Y = 8+A → играе А (най-висока)', () => {
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'J'),
+    makeCard('clubs', 'A'),
+    makeCard('clubs', 'Q'),
+    makeCard('clubs', '7'),
+    makeCard('hearts', '8'),
+    makeCard('hearts', 'A'),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'hearts', 'Боя')
+  assertEqual(result!.rank, 'A', 'Ранк (А > 8 в trump реда)')
+})
+
+check('[18-b] Случай B: Y = 9+A → играе 9 (9 > A в trump реда)', () => {
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'J'),
+    makeCard('clubs', 'A'),
+    makeCard('clubs', 'Q'),
+    makeCard('clubs', '7'),
+    makeCard('hearts', '9'),
+    makeCard('hearts', 'A'),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'hearts', 'Боя')
+  assertEqual(result!.rank, '9', 'Ранк (9 > A в trump реда J>9>A>10>K>Q>8>7)')
+})
+
+check('[18-c] Случай B: Y = J+9 → играе J (връх на trump реда)', () => {
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'J'), // X master, но без 9 в X → Случай B
+    makeCard('clubs', 'A'),
+    makeCard('clubs', 'Q'),
+    makeCard('clubs', '7'),
+    makeCard('hearts', 'J'),
+    makeCard('hearts', '9'),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'hearts', 'Боя')
+  assertEqual(result!.rank, 'J', 'Ранк (J е връх на trump реда)')
+})
+
+check('[19] Случай B: след еднократно подаване в Y → планът приключва, нормална логика поема', () => {
+  // Ботът вече е повел с 8♥ (Y) в предишна взятка — Случай B изпълнен.
+  const completedTricks: ServerCompletedTrick[] = [
+    makeRealisticTrick(
+      0,
+      BOT,
+      {
+        [BOT]: makeCard('hearts', '8'),
+        [OPP1]: makeCard('diamonds', '7'),
+        [PARTNER]: makeCard('hearts', '7'),
+        [OPP2]: makeCard('diamonds', 'K'),
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+  ]
+
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'J'), // X master, без 9 в X — но планът вече е приключен
+    makeCard('clubs', 'A'),
+    makeCard('clubs', 'Q'),
+    makeCard('clubs', '7'),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+    completedTricks,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  // Планът приключен → нормалната master-lead логика поема → J♣ (master)
+  assertEqual(result!.suit, 'clubs', 'Боя (план приключен — нормална master-lead логика)')
+  assertEqual(result!.rank, 'J', 'Ранк')
+})
+
+check('[11-b-case-b] Симетрия (Случай B): X=diamonds (без 9), Y=spades → подава Y', () => {
+  // Bidding suit order: clubs < diamonds < hearts < spades — партньорската
+  // обява (Y) трябва да е ПО-ВИСОКА от X, затова X=diamonds, Y=spades тук
+  // (не X=spades, което няма по-висока боя над себе си).
+  const symmetricEntries: ServerBidEntry[] = [
+    { seat: BOT, action: { type: 'suit', suit: 'diamonds' } },
+    { seat: OPP1, action: { type: 'pass' } },
+    { seat: PARTNER, action: { type: 'suit', suit: 'spades' } },
+    { seat: OPP2, action: { type: 'pass' } },
+    { seat: BOT, action: { type: 'all-trumps' } },
+    { seat: OPP1, action: { type: 'pass' } },
+    { seat: PARTNER, action: { type: 'pass' } },
+    { seat: OPP2, action: { type: 'pass' } },
+  ]
+
+  // X=diamonds има Вале, но БЕЗ 9 → Случай B → директно Y=spades, дори J♦ master.
+  const botHand: ServerCard[] = [
+    makeCard('diamonds', 'J'),
+    makeCard('diamonds', 'A'),
+    makeCard('diamonds', 'Q'),
+    makeCard('diamonds', '7'),
+    makeCard('spades', '8'),
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: symmetricEntries,
+    winningBid: ALL_TRUMPS_WINNING_BID_TEMPLATE(BOT),
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'spades', 'Боя (Y=spades директно, Случай B симетрично)')
+  assertEqual(result!.rank, '8', 'Ранк')
+})
+
+// ─── Конфликтен тест: наличието на 9 в X определя целия план ────────────────
+
+check('[20-a] Конфликтен тест, Ръка 1: X=J,9,8,7 (Случай A) → J от X, после 9 от X', () => {
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'J'),
+    makeCard('clubs', '9'),
+    makeCard('clubs', '8'),
+    makeCard('clubs', '7'),
+    makeCard('spades', 'J'), // Z
+    makeCard('hearts', 'A'), // Y
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  assertEqual(result!.suit, 'clubs', 'Боя (Случай A — X master J печели пред Z и Y)')
+  assertEqual(result!.rank, 'J', 'Ранк')
+
+  // След J → 9♣ лично властна (J единствената по-висока, изиграна) → X продължава
+  const completedTricks: ServerCompletedTrick[] = [
+    makeRealisticTrick(
+      0,
+      BOT,
+      {
+        [BOT]: makeCard('clubs', 'J'),
+        [OPP1]: makeCard('clubs', 'A'),
+        [PARTNER]: makeCard('clubs', 'K'),
+        [OPP2]: makeCard('clubs', '10'),
+      },
+      BOT_ALL_TRUMPS_WIN,
+    ),
+  ]
+  const handAfterJ: ServerCard[] = [
+    makeCard('clubs', '9'),
+    makeCard('clubs', '8'),
+    makeCard('clubs', '7'),
+    makeCard('spades', 'J'),
+    makeCard('hearts', 'A'),
+  ]
+  const stateAfterJ = makeBaseState({
+    botSeat: BOT,
+    hand: handAfterJ,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+    completedTricks,
+  })
+  const resultAfterJ = pickServerBotPlayCard(stateAfterJ, BOT)
+  assert(resultAfterJ !== null, 'Трябва да върне карта (след J)')
+  assertEqual(resultAfterJ!.suit, 'clubs', 'Боя (9♣ лично властна — X продължава, Случай A)')
+  assertEqual(resultAfterJ!.rank, '9', 'Ранк')
+})
+
+check('[20-b] Конфликтен тест, Ръка 2: X=J,A,Q,7 без 9 (Случай B) → директно A от Y, не J от X, не J от Z', () => {
+  // Почти същата ръка като Ръка 1, но БЕЗ 9 в X (заменена с A,Q вместо 9,8) —
+  // единствената разлика е липсата на 9 в X, но поведението е коренно различно.
+  const botHand: ServerCard[] = [
+    makeCard('clubs', 'J'),
+    makeCard('clubs', 'A'),
+    makeCard('clubs', 'Q'),
+    makeCard('clubs', '7'),
+    makeCard('spades', 'J'), // Z, master — но не изпреварва Y в Случай B
+    makeCard('hearts', 'A'), // Y
+  ]
+
+  const state = makeBaseState({
+    botSeat: BOT,
+    hand: botHand,
+    bidEntries: COMBO_ENTRIES,
+    winningBid: BOT_ALL_TRUMPS_WIN,
+  })
+
+  const result = pickServerBotPlayCard(state, BOT)
+  assert(result !== null, 'Трябва да върне карта')
+  // Случай B: директно Y, нито J от X, нито J от Z
+  assertEqual(result!.suit, 'hearts', 'Боя (Случай B — директно Y, липсата на 9 в X определя плана)')
+  assertEqual(result!.rank, 'A', 'Ранк (единствена Y карта)')
 })
 
 // ─── Резултат ────────────────────────────────────────────────────────────────

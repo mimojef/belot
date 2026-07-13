@@ -1224,31 +1224,98 @@ function seatHasLedSuitOnce(
 }
 
 /**
+ * Проверява дали `card` е гарантирана печеливша при all-trumps — лично ИЛИ
+ * за отбора — при свободен lead в собствената ѝ боя.
+ *
+ * Две независими причини, всяка достатъчна сама по себе си:
+ *
+ * 1. Лично властна (reuse на isCardMaster): всяка по-висока карта от същата
+ *    боя е или в ръката на `seat`, или вече изиграна от когото и да е.
+ *
+ * 2. Сигурна отборна ръка: `card` не е лично властна (по-висока карта все
+ *    още не е изиграна и не е в ръката на `seat`), но за ВСЯКА такава
+ *    неизиграна по-висока карта е доказано чрез elimination
+ *    (canAnyOpponentPossiblyHoldCard), че никой противник не може да я
+ *    държи — единствената възможност е тя да е у партньора. При all-trumps
+ *    противник без карта от водената боя не може да я победи с карта от
+ *    друга боя, затова взятката остава за отбора независимо кой от двама ни
+ *    държи по-високата карта.
+ *
+ * Не приема автоматично, че "останалите карти от боята" са сигурни само
+ * защото се проверява последователно — всяко извикване проверява наново
+ * само за текущата конкретна `card` спрямо актуалното известно состояние.
+ */
+function isOwnOrTeamGuaranteedAllTrumpsWinner(
+  card: ServerCard,
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+): boolean {
+  if (isCardMaster(card, seat, state, null, 'all-trumps')) return true
+
+  const played = allPlayedCards(state)
+  const hand = state.hands[seat] ?? []
+
+  for (const rank of Object.keys(TRUMP_POWER) as ServerRank[]) {
+    if (TRUMP_POWER[rank] <= TRUMP_POWER[card.rank]) continue
+
+    const inMyHand = hand.some(c => c.suit === card.suit && c.rank === rank)
+    if (inMyHand) continue
+
+    const wasPlayed = played.some(c => c.suit === card.suit && c.rank === rank)
+    if (wasPlayed) continue
+
+    // По-висока карта не е нито у нас, нито изиграна — трябва да е доказано
+    // невъзможна у противник (единствената допустима алтернатива: партньора).
+    if (canAnyOpponentPossiblyHoldCard(seat, state, { suit: card.suit, rank }, null, 'all-trumps')) {
+      return false
+    }
+  }
+
+  return true
+}
+
+/**
+ * Master-lead само сред трети бои Z (различни от X и Y). Преизползва
+ * conventional избора между няколко Z чрез chooseAllTrumpsMasterLead
+ * (сортира по дължина, после сила — виж дефиницията ѝ), без да дублира
+ * rank/suit-order логиката. X и Y се изключват от validCards ПРЕДИ
+ * извикването, за да не може generic master-lead-а да избере Y преждевременно
+ * (Y е запазена изрично за подаването в стъпка 3, не за третиране като Z).
+ */
+function chooseAllTrumpsThirdSuitMasterLead(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  ownSuit: ServerSuit,
+  partnerSuit: ServerSuit,
+): ServerCard | null {
+  const thirdSuitCards = validCards.filter(c => c.suit !== ownSuit && c.suit !== partnerSuit)
+  if (thirdSuitCards.length === 0) return null
+
+  return chooseAllTrumpsMasterLead(seat, state, thirdSuitCards, null, 'all-trumps')
+}
+
+/**
  * Правило за разиграване след партньорска „Всичко коз“ комбинация (виж
  * getPartnerRaiseAllTrumpsContext). Влияе САМО на свободния избор на
  * начален цвят от декларатора и има приоритет ПРЕД chooseAllTrumpsMasterLead
- * и всички други all-trumps lead heuristics, докато планът не е приключил —
- * дори когато ботът държи властно Вале от собствената си боя.
+ * и всички други all-trumps lead heuristics, докато планът не е приключил.
  *
- * Случай A — own suit е имала Вале И 9 (изведено от seatHeldOrPlayedCard,
- * т.е. 9 е още в ръката на бота или вече е играна от самия него):
- *   при всеки свободен lead предпочита own suit, докато тя не се изчерпи в
- *   ръката; едва тогава, при следващия подходящ свободен lead, подава ВЕДНЪЖ
- *   в партньорската боя; след това план приключен → връща null.
+ * Разклонява се по това дали X (собствената обявена боя на бота) е имала
+ * едновременно Вале И 9 при обявата — derive чрез seatHeldOrPlayedCard (9
+ * все още в ръката на бота ИЛИ вече лично изиграна от него; не се съди само
+ * по текущата ръка, защото картата може вече да е изиграна):
  *
- * Случай B — own suit е имала Вале, но НЕ 9:
- *   при първия свободен lead подава директно в партньорската боя (дори ако
- *   own suit все още държи властно Вале); това става само ВЕДНЪЖ
- *   (seatHasLedSuitOnce за partner suit); след това план приключен → null,
- *   контролът се връща към нормалната конвенционална логика (напр. ако
- *   партньорът върне own suit по-късно, следва я нормален follow/master ред).
+ * Случай A (X имала Вале + 9) — пълен приоритет X master → Z master → Y →
+ *   X team-guaranteed fallback (виж chooseAllTrumpsOwnSuitNinePlanLead).
  *
- * Подаването към партньора винаги е с НАЙ-ВИСОКАТА законна карта от боята
- * (highestCard/TRUMP_POWER, ред J>9>A>10>K>Q>8>7 при all-trumps) — както и
- * own suit lead-а, без дублиране на нова rank логика.
+ * Случай B (X имала Вале, но НЕ 9) — първоначалната конвенция: директно
+ *   подаване в Y преди всякакво X/Z master разглеждане (партньорът развива
+ *   Y първи; ако по-късно върне X, ботът с Валето вече ще може да изтегли
+ *   чуждата 9 и да разработи X нормално чрез съществуващата логика).
  *
- * Ако предпочитаната боя липсва в наличните карти → връща null (безопасен
- * fallback към нормалната логика, никога не форсира невалиден избор).
+ * И в двата случая подаването в Y е еднократно (seatHasLedSuitOnce маркира
+ * приключването) и използва highestCard(..., null, 'all-trumps').
  */
 function chooseAllTrumpsPartnerRaiseLeadPreference(
   seat: Seat,
@@ -1263,37 +1330,89 @@ function chooseAllTrumpsPartnerRaiseLeadPreference(
 
   // Валето е гарантирано у бота при обявата (виж getPartnerRaiseAllTrumpsContext
   // за bidding условието) — тук изискваме то все още да е у него ИЛИ вече да
-  // е било изиграно лично от него, за да потвърдим own suit е тази, върху
-  // която планът важи (а не съвпадение по suit име).
+  // е било изиграно лично от него, за да потвърдим X е тази, върху която
+  // планът важи (а не съвпадение по suit име).
   if (!seatHeldOrPlayedCard(seat, state, context.ownSuit, 'J')) return null
 
+  // Планът е изпълнен веднъж завинаги, щом ботът е повел Y — не се активира
+  // повторно, независимо от Случай A/B.
+  if (seatHasLedSuitOnce(seat, state, context.partnerSuit)) return null
+
   const ownSuitHadNine = seatHeldOrPlayedCard(seat, state, context.ownSuit, '9')
-  const hand = state.hands[seat] ?? []
-  const ownSuitCardsInHand = bySuit(hand, context.ownSuit)
-  const ownSuitExhausted = ownSuitCardsInHand.length === 0
 
-  if (ownSuitHadNine) {
-    // Случай A: докато own suit не е изчерпана в ръката → продължаваме нея.
-    if (!ownSuitExhausted) {
-      const ownSuitLeadCards = bySuit(validCards, context.ownSuit)
-      if (ownSuitLeadCards.length === 0) return null
-      return highestCard(ownSuitLeadCards, null, 'all-trumps')
-    }
-
-    // Own suit изчерпана → подаваме ВЕДНЪЖ в партньорската боя, после план приключен.
-    if (seatHasLedSuitOnce(seat, state, context.partnerSuit)) return null
-
+  if (!ownSuitHadNine) {
+    // Случай B: директно Y, преди всякакво X/Z master разглеждане.
     const partnerSuitCards = bySuit(validCards, context.partnerSuit)
     if (partnerSuitCards.length === 0) return null
     return highestCard(partnerSuitCards, null, 'all-trumps')
   }
 
-  // Случай B: own suit без 9 → директно партньорската боя, само ВЕДНЪЖ.
-  if (seatHasLedSuitOnce(seat, state, context.partnerSuit)) return null
+  // Случай A: пълен X master → Z master → Y → X team-guaranteed fallback ред.
+  return chooseAllTrumpsOwnSuitNinePlanLead(seat, state, validCards, context.ownSuit, context.partnerSuit)
+}
 
-  const partnerSuitCards = bySuit(validCards, context.partnerSuit)
-  if (partnerSuitCards.length === 0) return null
-  return highestCard(partnerSuitCards, null, 'all-trumps')
+/**
+ * Случай A (X имала Вале + 9) — пълният приоритет за партньорската
+ * комбинация, извикан само когато X действително е имала 9 при обявата:
+ *
+ *   1. Най-високата останала карта на бота от X — ако е ЛИЧНО властна
+ *      (isCardMaster, никаква "сигурна за отбора" аргументация тук) → играй
+ *      я. Проверката се прави наново на всеки свободен lead — не се приема
+ *      автоматично, че следваща карта от X е master само защото
+ *      предишната беше.
+ *   2. Ако X няма лично властна карта: провери трети бои Z (≠X, ≠Y) чрез
+ *      chooseAllTrumpsThirdSuitMasterLead — играй master от Z, ако има.
+ *      Y изрично се изключва тук (пазена е за стъпка 3).
+ *   3. Ако нито X, нито Z имат лично властна карта, и ботът държи поне
+ *      една карта от Y → подай highestCard(Y). Планът СЕ СЧИТА ЗА
+ *      ИЗПЪЛНЕН (seatHasLedSuitOnce маркира това за следващи извиквания).
+ *   4. Само ако ботът НЯМА нито една карта от Y (fallback, партньорът не
+ *      може да получи прякото подаване) — играй най-високата карта от X,
+ *      ако е доказано сигурна за отбора (isOwnOrTeamGuaranteedAllTrumpsWinner
+ *      — противниците не могат да я бият, по-високите карти са у партньора
+ *      или вече изиграни). Тази стъпка НЕ изпреварва стъпка 3 — вика се
+ *      само когато Y липсва в ръката.
+ *
+ * Ако нищо от горното не приложимо → връща null (нормалният fallback поема,
+ * никога не форсира невалиден избор).
+ */
+function chooseAllTrumpsOwnSuitNinePlanLead(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  ownSuit: ServerSuit,
+  partnerSuit: ServerSuit,
+): ServerCard | null {
+  // ── Стъпка 1: X лично властна ──────────────────────────────────────────
+  const ownSuitLeadCards = bySuit(validCards, ownSuit)
+  if (ownSuitLeadCards.length > 0) {
+    const topOwnSuitCard = highestCard(ownSuitLeadCards, null, 'all-trumps')
+    if (isCardMaster(topOwnSuitCard, seat, state, null, 'all-trumps')) {
+      return topOwnSuitCard
+    }
+  }
+
+  // ── Стъпка 2: master в трета боя Z (≠X, ≠Y) ────────────────────────────
+  const thirdSuitMaster = chooseAllTrumpsThirdSuitMasterLead(seat, state, validCards, ownSuit, partnerSuit)
+  if (thirdSuitMaster) {
+    return thirdSuitMaster
+  }
+
+  // ── Стъпка 3: подаване в Y (планът приключва след това) ────────────────
+  const partnerSuitCards = bySuit(validCards, partnerSuit)
+  if (partnerSuitCards.length > 0) {
+    return highestCard(partnerSuitCards, null, 'all-trumps')
+  }
+
+  // ── Стъпка 4: fallback — X сигурна за отбора, само ако няма Y карта ────
+  if (ownSuitLeadCards.length > 0) {
+    const topOwnSuitCard = highestCard(ownSuitLeadCards, null, 'all-trumps')
+    if (isOwnOrTeamGuaranteedAllTrumpsWinner(topOwnSuitCard, seat, state)) {
+      return topOwnSuitCard
+    }
+  }
+
+  return null
 }
 
 /**
