@@ -422,6 +422,8 @@ export type LobbyFlowController = {
   refreshSupportUnread: () => void
   removePendingFriendRequest: (friendshipId: string) => void
   getPendingFriendRequest: (friendshipId: string) => { friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null } | undefined
+  isConversationOpen: (friendshipId: string) => boolean
+  openChatWithFriend: (friendshipId: string) => void
   getFriendshipActionForProfile: (profileId: string) => import('../../ui/overlays/renderPlayerProfilePopup').PlayerProfileFriendshipAction | null
   handleServerMessage: (message: ServerMessage) => boolean
   navigateToShop: (noticeText: string | null) => void
@@ -6199,6 +6201,15 @@ export function createLobbyFlowController(
         fromDisplayName: incomingRelationship.profile.displayName,
         fromAvatarUrl: incomingRelationship.profile.avatarUrl,
       }
+    },
+    isConversationOpen: (friendshipId: string) => {
+      return state.currentScreen === 'chat' && state.activeChatFriendshipId === friendshipId
+    },
+    openChatWithFriend: (friendshipId: string) => {
+      void showChatPanel().then(() => {
+        void openChatConversation(friendshipId)
+        void options.onChatMarkRead?.(friendshipId)
+      })
     },
     getFriendshipActionForProfile: (profileId: string) => {
       const authSession = options.getAuthSession?.() ?? null

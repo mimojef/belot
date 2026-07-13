@@ -58,6 +58,7 @@ import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
 import { createFriendRequestNotification } from './ui/notifications/friendRequestNotification'
 import { createPartnerRatingNotification } from './ui/notifications/partnerRatingNotification'
+import { createChatMessageNotification } from './ui/notifications/chatMessageNotification'
 import { createVisitorPageViewTracker } from './app/visitors/createVisitorPageViewTracker'
 import {
   extractAndClearResetToken,
@@ -132,6 +133,18 @@ document.body.appendChild(partnerRatingNotifContainer)
 
 const partnerRatingNotification = createPartnerRatingNotification({
   container: partnerRatingNotifContainer,
+})
+
+const chatMessageNotifContainer = document.createElement('div')
+chatMessageNotifContainer.id = 'global-chat-message-notifications'
+document.body.appendChild(chatMessageNotifContainer)
+
+const chatMessageNotification = createChatMessageNotification({
+  container: chatMessageNotifContainer,
+  isInGame: () => activeRoom.hasActiveRoom(),
+  onView: (friendshipId) => {
+    lobby?.openChatWithFriend(friendshipId)
+  },
 })
 
 const SERVER_RESTART_WAIT_MESSAGE = 'Изчаква се рестарт на сървъра.'
@@ -1694,6 +1707,38 @@ async function loadChatMessages(friendshipId: string): Promise<
   }
 }
 
+/**
+ * Единственият path, който маркира разговор като прочетен — и на сървъра
+ * (source of truth за shouldNotify при бъдещи съобщения), и локално в
+ * chat popup опашката. Реда е строго: сървърна заявка ПЪРВО; локалният
+ * queue reset (chatMessageNotification.markRead) се извиква САМО при
+ * потвърден успех — иначе клиентът би "забравил" за непрочетена поредица,
+ * докато сървърът все още я смята за непрочетена, и следващо съобщение от
+ * същия подател грешно би получило shouldNotify=false (защото сървърът вече
+ * знае, че получателят реално е видял разговора).
+ *
+ * Reuse-ва се от: явния "маркирай прочетено" клик в чат списъка
+ * (onChatMarkRead) И от chat_message_received handler-а, когато съобщението
+ * пристига докато разговорът с подателя вече е отворен и видим.
+ */
+async function markChatConversationRead(friendshipId: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/chat/${encodeURIComponent(friendshipId)}/read`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+
+    if (!response.ok) {
+      return false
+    }
+
+    chatMessageNotification.markRead(friendshipId)
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function sendChatMessage(friendshipId: string, body: string): Promise<
   | {
       ok: true
@@ -2886,10 +2931,7 @@ lobby = createLobbyFlowController({
   onChatConversationsLoad: () => loadChatConversations(),
   onChatMessagesLoad: (friendshipId) => loadChatMessages(friendshipId),
   onChatMarkRead: async (friendshipId) => {
-    await fetch(`${getApiBaseUrl()}/api/chat/${encodeURIComponent(friendshipId)}/read`, {
-      method: 'POST',
-      credentials: 'include',
-    })
+    await markChatConversationRead(friendshipId)
   },
   onChatSend: (friendshipId, body) => sendChatMessage(friendshipId, body),
   onLogout: () => submitLogout(),
@@ -3303,6 +3345,37 @@ client = createGameServerClient({
         raterDisplayName: message.raterDisplayName,
         ratingValue: message.ratingValue,
       })
+      return
+    }
+
+    if (message.type === 'chat_message_received') {
+      const isOwnMessage = currentAuthSession !== null
+        && message.senderProfileId === currentAuthSession.profile.profileId
+      const isInGameNow = activeRoom.hasActiveRoom()
+      const alreadyOpen = !isInGameNow && lobby.isConversationOpen(message.friendshipId)
+
+      if (!isOwnMessage && !alreadyOpen) {
+        chatMessageNotification.handleIncoming({
+          friendshipId: message.friendshipId,
+          messageId: message.messageId,
+          fromDisplayName: message.fromDisplayName,
+          shouldNotify: message.shouldNotify,
+        })
+      }
+
+      if (alreadyOpen) {
+        // Разговорът е реално отворен и видим — съобщението се смята за
+        // веднага прочетено. Маркира се и на СЪРВЪРА (source of truth за
+        // shouldNotify при следващи съобщения), не само локално — иначе,
+        // ако потребителят излезе от разговора без изричен mark-read клик,
+        // следващото съобщение от този подател погрешно пак би получило
+        // shouldNotify=false (сървърът все още би виждал стар unread запис).
+        void markChatConversationRead(message.friendshipId)
+      }
+
+      if (!isInGameNow) {
+        lobby.handleServerMessage(message)
+      }
       return
     }
 

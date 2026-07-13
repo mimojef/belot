@@ -771,6 +771,10 @@ export type ChatMessageReceivedMessage = {
   type: 'chat_message_received'
   friendshipId: string
   senderProfileId: string
+  fromDisplayName: string
+  fromAvatarUrl: string | null
+  messageId: string
+  shouldNotify: boolean
 }
 
 export type MatchmakingQueuedPlayerPreview = {

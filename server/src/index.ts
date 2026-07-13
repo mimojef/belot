@@ -1700,8 +1700,11 @@ function sendChatNotificationToProfile(input: {
   recipientProfileId: string
   friendshipId: string
   senderProfileId: string
+  messageId: string
+  shouldNotify: boolean
 }): void {
-  if (isProfileInActiveGame(input.recipientProfileId)) {
+  const senderProfile = playerProgressStore.getPublicProfile(input.senderProfileId)
+  if (senderProfile === null) {
     return
   }
 
@@ -1717,6 +1720,10 @@ function sendChatNotificationToProfile(input: {
       type: 'chat_message_received',
       friendshipId: input.friendshipId,
       senderProfileId: input.senderProfileId,
+      fromDisplayName: senderProfile.displayName,
+      fromAvatarUrl: senderProfile.avatarUrl,
+      messageId: input.messageId,
+      shouldNotify: input.shouldNotify,
     })
   }
 }
@@ -5307,6 +5314,15 @@ async function handleChatRequest(
       return true
     }
 
+    // Снимка НА получателя ПРЕДИ insert-а на новото съобщение — иначе
+    // isFirstUnreadMessage винаги би намерил поне самото ново съобщение.
+    const recipientProfileIdBeforeSend = chatStore
+      .listConversations(profileId)
+      .find((c) => c.friendshipId === friendshipId)?.friend.profileId ?? null
+
+    const shouldNotify = recipientProfileIdBeforeSend !== null
+      && chatStore.isFirstUnreadMessage(recipientProfileIdBeforeSend, friendshipId)
+
     const result = chatStore.sendMessage(
       profileId,
       friendshipId,
@@ -5319,12 +5335,15 @@ async function handleChatRequest(
     }
 
     const recipientProfileId = result.conversation.friend.profileId
+    const newMessageId = result.messages[result.messages.length - 1]?.messageId ?? null
 
-    if (recipientProfileId !== null) {
+    if (recipientProfileId !== null && newMessageId !== null) {
       sendChatNotificationToProfile({
         recipientProfileId,
         friendshipId,
         senderProfileId: profileId,
+        messageId: newMessageId,
+        shouldNotify,
       })
     }
 

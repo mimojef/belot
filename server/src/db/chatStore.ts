@@ -45,6 +45,7 @@ export type ChatStore = {
       }
     | { ok: false; message: string }
   markConversationRead: (profileId: ProfileId, friendshipId: string) => void
+  isFirstUnreadMessage: (recipientProfileId: ProfileId, friendshipId: string) => boolean
   close: () => void
 }
 
@@ -358,6 +359,17 @@ export async function createChatStore(
     upsertReadStatement.run(profileId, friendshipId)
   }
 
+  /**
+   * Вярно само когато получателят няма НИКАКВИ непрочетени съобщения в тази
+   * боя преди текущия момент — т.е. следващото съобщение, изпратено сега, ще
+   * бъде ПЪРВОТО непрочетено в поредицата му. Трябва да се извика ПРЕДИ
+   * sendMessage() да вмъкне новото съобщение, иначе винаги ще намери поне 1
+   * непрочетено (самото ново съобщение).
+   */
+  function isFirstUnreadMessage(recipientProfileId: ProfileId, friendshipId: string): boolean {
+    return getUnreadCount(recipientProfileId, friendshipId) === 0
+  }
+
   function close(): void {
     database.close()
   }
@@ -367,6 +379,7 @@ export async function createChatStore(
     listMessages,
     sendMessage,
     markConversationRead,
+    isFirstUnreadMessage,
     close,
   }
 }
