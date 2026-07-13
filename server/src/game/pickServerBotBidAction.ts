@@ -89,6 +89,11 @@ type OpponentSuitBidContext = {
   bidderPartnerSeat: Seat
 }
 
+export type PartnerRaisedOwnSuitContext = {
+  ownSuit: ServerSuit
+  partnerSuit: ServerSuit
+}
+
 type RankCounts = Record<string, number>
 
 export function pickServerBotBidAction(
@@ -111,6 +116,21 @@ export function pickServerBotBidAction(
     const opponentTeamDeals = getTeamBySeat(state.round.dealerSeat!) !== botTeam
     if (!opponentTeamDeals) {
       return { type: 'pass' }
+    }
+  }
+
+  // Партньорска „Всичко коз“ конвенция: проверява се СЛЕД strict-mode блока
+  // (условие 5 от конвенцията — нашият отбор има first lead — предполага
+  // противниковият отбор раздава, тъй като firstDealSeat = getSeatAfterDealer
+  // и съседните seats са от противоположни отбори; следователно strict-mode
+  // early pass за "нашият отбор раздава" никога реално не може да съвпадне
+  // с изпълнена комбинация). Проверката е ПРЕДИ minimumSecureTricks/
+  // getBestBotContractCandidate — точната конвенция е директно, детерминирано
+  // действие и не трябва да бъде филтрирана от secure-tricks scoring-а.
+  if (validActions.allTrumps) {
+    const partnerRaiseAction = getPartnerRaisedOwnSuitAllTrumpsAction(state, seat, hand)
+    if (partnerRaiseAction) {
+      return partnerRaiseAction
     }
   }
 
@@ -629,6 +649,105 @@ function getLatestOpponentSuitBidContext(
   }
 
   return null
+}
+
+const SUIT_BID_ORDER: ServerSuit[] = ['clubs', 'diamonds', 'hearts', 'spades']
+
+function isHigherServerSuitBid(candidate: ServerSuit, reference: ServerSuit): boolean {
+  return SUIT_BID_ORDER.indexOf(candidate) > SUIT_BID_ORDER.indexOf(reference)
+}
+
+/**
+ * Партньорска комбинация за „Всичко коз“:
+ *   1. Ботът обявява своя боя X.
+ *   2. Партньорът вдига с по-висока боя Y.
+ *   3. Между тях никой противник не е обявил боя, която все още е водеща
+ *      (т.е. Y трябва да е последната suit обява преди сегашния ред на бота).
+ *
+ * Обхожда bidding.entries по ред (не отзад-напред), защото последователността
+ * X → Y трябва да е точно тази двойка ходове, а не произволни две suit обяви
+ * на бота и партньора някъде в историята.
+ */
+function getPartnerRaisedOwnSuitContext(
+  state: ServerAuthoritativeGameState,
+  seat: Seat,
+): PartnerRaisedOwnSuitContext | null {
+  const partner = getPartnerSeat(seat)
+  let ownSuit: ServerSuit | null = null
+  let partnerRaiseSuit: ServerSuit | null = null
+
+  for (const entry of state.bidding.entries) {
+    if (entry.seat === seat && entry.action.type === 'suit') {
+      // Нова собствена обява на бота нулира търсенето — комбинацията трябва
+      // да важи за НАЙ-ПОСЛЕДНАТА собствена suit обява, последвана от вдигане.
+      ownSuit = entry.action.suit
+      partnerRaiseSuit = null
+      continue
+    }
+
+    if (
+      ownSuit !== null &&
+      partnerRaiseSuit === null &&
+      entry.seat === partner &&
+      entry.action.type === 'suit' &&
+      isHigherServerSuitBid(entry.action.suit, ownSuit)
+    ) {
+      partnerRaiseSuit = entry.action.suit
+      continue
+    }
+  }
+
+  if (ownSuit === null || partnerRaiseSuit === null) {
+    return null
+  }
+
+  // Условие 4: текущата водеща обява трябва все още да е точно партньорската боя
+  // (ако противник е вдигнал над нея междувременно, комбинацията не важи).
+  const winningBid = state.bidding.winningBid
+  if (
+    !winningBid ||
+    winningBid.contract !== 'suit' ||
+    winningBid.trumpSuit !== partnerRaiseSuit ||
+    winningBid.seat !== partner
+  ) {
+    return null
+  }
+
+  return { ownSuit, partnerSuit: partnerRaiseSuit }
+}
+
+/**
+ * Ново конвенционално правило: партньорът вдига собствената боя на бота с
+ * по-висока боя → ботът обявява „Всичко коз“, ако държи Вале в собствената
+ * си обявена боя И отборът му ще води първи в разиграването.
+ *
+ * Изключения (връщат null → нормалната bid логика продължава):
+ *   - Ботът няма Вале в собствената си боя (дори да има 9).
+ *   - Противниковият отбор ще започне разиграването.
+ *   - Партньорската боя вече не е водещата обява (проверено в
+ *     getPartnerRaisedOwnSuitContext).
+ */
+function getPartnerRaisedOwnSuitAllTrumpsAction(
+  state: ServerAuthoritativeGameState,
+  seat: Seat,
+  hand: ServerCard[],
+): ServerBidAction | null {
+  const context = getPartnerRaisedOwnSuitContext(state, seat)
+  if (!context) {
+    return null
+  }
+
+  const ownSuitProfile = buildSuitProfile(hand, context.ownSuit)
+  if (!ownSuitProfile.hasJ) {
+    return null
+  }
+
+  const firstDealSeat = state.round.firstDealSeat
+  if (!firstDealSeat || getTeamBySeat(firstDealSeat) !== getTeamBySeat(seat)) {
+    return null
+  }
+
+  return { type: 'all-trumps' }
 }
 
 function getBestAllTrumpsSuitProfile(suitProfiles: SuitProfile[]): SuitProfile {

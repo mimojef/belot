@@ -1123,6 +1123,179 @@ function getPartnerLastSuitBidBeforeOpponentAllTrumps(
   return lastPartnerSuit
 }
 
+const SUIT_BID_ORDER: ServerSuit[] = ['clubs', 'diamonds', 'hearts', 'spades']
+
+function isHigherServerSuitBid(candidate: ServerSuit, reference: ServerSuit): boolean {
+  return SUIT_BID_ORDER.indexOf(candidate) > SUIT_BID_ORDER.indexOf(reference)
+}
+
+type PartnerRaiseAllTrumpsContext = {
+  ownSuit: ServerSuit
+  partnerSuit: ServerSuit
+}
+
+/**
+ * Реконструира партньорската „Всичко коз“ комбинация от bidding.entries за
+ * СПЕЧЕЛИЛИЯ all-trumps договор:
+ *   1. Деклараторът (winningBid.seat) е обявил собствена боя X.
+ *   2. Неговият партньор е вдигнал с по-висока боя Y (X все още водеща в момента).
+ *   3. Деклараторът е обявил „Всичко коз“ докато Y е била водещата обява.
+ *
+ * Играта е stateless между извиквания (виж останалите derive helpers в този
+ * файл) — затова комбинацията се извлича наново от bidding.entries вместо да
+ * се пази в отделна памет. Валидна е само за текущото раздаване, защото
+ * bidding.entries се нулира при всяко ново раздаване.
+ */
+function getPartnerRaiseAllTrumpsContext(
+  state: ServerAuthoritativeGameState,
+): PartnerRaiseAllTrumpsContext | null {
+  const winningBid = state.bidding.winningBid
+  if (winningBid?.contract !== 'all-trumps') return null
+
+  const declarerSeat = winningBid.seat
+  const partnerSeat = getPartnerSeat(declarerSeat)
+
+  let ownSuit: ServerSuit | null = null
+  let partnerRaiseSuit: ServerSuit | null = null
+
+  for (const entry of state.bidding.entries) {
+    if (entry.seat === declarerSeat && entry.action.type === 'suit') {
+      ownSuit = entry.action.suit
+      partnerRaiseSuit = null
+      continue
+    }
+
+    if (
+      ownSuit !== null &&
+      partnerRaiseSuit === null &&
+      entry.seat === partnerSeat &&
+      entry.action.type === 'suit' &&
+      isHigherServerSuitBid(entry.action.suit, ownSuit)
+    ) {
+      partnerRaiseSuit = entry.action.suit
+      continue
+    }
+
+    if (
+      entry.seat === declarerSeat &&
+      entry.action.type === 'all-trumps'
+    ) {
+      if (ownSuit !== null && partnerRaiseSuit !== null) {
+        return { ownSuit, partnerSuit: partnerRaiseSuit }
+      }
+      return null
+    }
+  }
+
+  return null
+}
+
+/**
+ * Проверява дали `seat` вече е ЛИЧНО играл ранг `rank` от `suit` — или в
+ * ръката му в момента, или в completedTricks. Ползва се за реконструиране
+ * на историческо условие (напр. „own suit е имала 9 при обявата“) без
+ * отделна памет — картата или е още у бота, или той вече я е изиграл.
+ */
+function seatHeldOrPlayedCard(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  suit: ServerSuit,
+  rank: ServerRank,
+): boolean {
+  const hand = state.hands[seat] ?? []
+  if (hand.some(c => c.suit === suit && c.rank === rank)) return true
+
+  return (state.playing?.completedTricks ?? []).some(trick =>
+    trick.plays.some(p => p.seat === seat && p.card.suit === suit && p.card.rank === rank),
+  )
+}
+
+/**
+ * Проверява дали `seat` вече е ПОВЕЛ (leaderSeat) с боя `suit` поне веднъж.
+ */
+function seatHasLedSuitOnce(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  suit: ServerSuit,
+): boolean {
+  return (state.playing?.completedTricks ?? []).some(trick =>
+    trick.leaderSeat === seat && trick.plays[0]?.card.suit === suit,
+  )
+}
+
+/**
+ * Правило за разиграване след партньорска „Всичко коз“ комбинация (виж
+ * getPartnerRaiseAllTrumpsContext). Влияе САМО на свободния избор на
+ * начален цвят от декларатора и има приоритет ПРЕД chooseAllTrumpsMasterLead
+ * и всички други all-trumps lead heuristics, докато планът не е приключил —
+ * дори когато ботът държи властно Вале от собствената си боя.
+ *
+ * Случай A — own suit е имала Вале И 9 (изведено от seatHeldOrPlayedCard,
+ * т.е. 9 е още в ръката на бота или вече е играна от самия него):
+ *   при всеки свободен lead предпочита own suit, докато тя не се изчерпи в
+ *   ръката; едва тогава, при следващия подходящ свободен lead, подава ВЕДНЪЖ
+ *   в партньорската боя; след това план приключен → връща null.
+ *
+ * Случай B — own suit е имала Вале, но НЕ 9:
+ *   при първия свободен lead подава директно в партньорската боя (дори ако
+ *   own suit все още държи властно Вале); това става само ВЕДНЪЖ
+ *   (seatHasLedSuitOnce за partner suit); след това план приключен → null,
+ *   контролът се връща към нормалната конвенционална логика (напр. ако
+ *   партньорът върне own suit по-късно, следва я нормален follow/master ред).
+ *
+ * Подаването към партньора винаги е с НАЙ-ВИСОКАТА законна карта от боята
+ * (highestCard/TRUMP_POWER, ред J>9>A>10>K>Q>8>7 при all-trumps) — както и
+ * own suit lead-а, без дублиране на нова rank логика.
+ *
+ * Ако предпочитаната боя липсва в наличните карти → връща null (безопасен
+ * fallback към нормалната логика, никога не форсира невалиден избор).
+ */
+function chooseAllTrumpsPartnerRaiseLeadPreference(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+): ServerCard | null {
+  const winningBid = state.bidding.winningBid
+  if (winningBid?.contract !== 'all-trumps' || winningBid.seat !== seat) return null
+
+  const context = getPartnerRaiseAllTrumpsContext(state)
+  if (!context) return null
+
+  // Валето е гарантирано у бота при обявата (виж getPartnerRaiseAllTrumpsContext
+  // за bidding условието) — тук изискваме то все още да е у него ИЛИ вече да
+  // е било изиграно лично от него, за да потвърдим own suit е тази, върху
+  // която планът важи (а не съвпадение по suit име).
+  if (!seatHeldOrPlayedCard(seat, state, context.ownSuit, 'J')) return null
+
+  const ownSuitHadNine = seatHeldOrPlayedCard(seat, state, context.ownSuit, '9')
+  const hand = state.hands[seat] ?? []
+  const ownSuitCardsInHand = bySuit(hand, context.ownSuit)
+  const ownSuitExhausted = ownSuitCardsInHand.length === 0
+
+  if (ownSuitHadNine) {
+    // Случай A: докато own suit не е изчерпана в ръката → продължаваме нея.
+    if (!ownSuitExhausted) {
+      const ownSuitLeadCards = bySuit(validCards, context.ownSuit)
+      if (ownSuitLeadCards.length === 0) return null
+      return highestCard(ownSuitLeadCards, null, 'all-trumps')
+    }
+
+    // Own suit изчерпана → подаваме ВЕДНЪЖ в партньорската боя, после план приключен.
+    if (seatHasLedSuitOnce(seat, state, context.partnerSuit)) return null
+
+    const partnerSuitCards = bySuit(validCards, context.partnerSuit)
+    if (partnerSuitCards.length === 0) return null
+    return highestCard(partnerSuitCards, null, 'all-trumps')
+  }
+
+  // Случай B: own suit без 9 → директно партньорската боя, само ВЕДНЪЖ.
+  if (seatHasLedSuitOnce(seat, state, context.partnerSuit)) return null
+
+  const partnerSuitCards = bySuit(validCards, context.partnerSuit)
+  if (partnerSuitCards.length === 0) return null
+  return highestCard(partnerSuitCards, null, 'all-trumps')
+}
+
 /**
  * Проверява дали ботът вече е водил в дадена боя (задължението е изпълнено).
  *
@@ -1624,6 +1797,18 @@ function chooseLead(
   // ── Rule 4а: Всичко коз — различна стратегия за ОБЯВИТЕЛЕН и ЗАЩИТЕН отбор
   if (contract === 'all-trumps') {
     if (botTeamDeclared) {
+      // ── Партньорска „Всичко коз“ комбинация: докато планът (own-suit
+      //    развитие или еднократно подаване към партньора) не е приключил,
+      //    той има ПРИОРИТЕТ пред master lead и всички други all-trumps lead
+      //    heuristics — включително когато ботът държи властно Вале от
+      //    собствената си боя (виж chooseAllTrumpsPartnerRaiseLeadPreference).
+      //    След като планът приключи, функцията връща null и логиката
+      //    продължава към master lead/партньорски сигнали/generic heuristics.
+      const partnerRaiseLead = chooseAllTrumpsPartnerRaiseLeadPreference(seat, state, validCards)
+      if (partnerRaiseLead) {
+        return partnerRaiseLead
+      }
+
       const masterLead = chooseAllTrumpsMasterLead(
         seat,
         state,

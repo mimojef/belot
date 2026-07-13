@@ -39,6 +39,8 @@
     "check:partner-suit-all-trumps": "tsx scripts/checkPartnerSuitAllTrumpsLead.ts",
     "check:all-trumps-guaranteed-suit-continuation": "tsx scripts/checkAllTrumpsGuaranteedSuitContinuation.ts",
     "check:strict-mode-bidding": "tsx scripts/checkStrictModeBidding.ts",
+    "check:partner-raise-all-trumps-bid": "tsx scripts/checkPartnerRaiseAllTrumpsBid.ts",
+    "check:partner-raise-all-trumps-lead": "tsx scripts/checkPartnerRaiseAllTrumpsLead.ts",
     "check:training-recorder": "tsx scripts/checkTrainingRecorder.ts",
     "validate:training-recordings": "tsx scripts/validateTrainingRecordings.ts",
     "build:training-dataset": "tsx scripts/buildTrainingDataset.ts",
