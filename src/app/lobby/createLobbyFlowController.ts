@@ -427,7 +427,13 @@ export type LobbyFlowController = {
   getFriendshipActionForProfile: (profileId: string) => import('../../ui/overlays/renderPlayerProfilePopup').PlayerProfileFriendshipAction | null
   handleServerMessage: (message: ServerMessage) => boolean
   navigateToShop: (noticeText: string | null) => void
-  setPwaUpdatePending: (pending: boolean, applyFn: (() => void) | null) => void
+  getPwaUpdateSafetySnapshot: () => {
+    isSearching: boolean
+    hasPrivateRoomInvite: boolean
+    hasQueuedPrivateRoomInvites: boolean
+    isInPrivateRoomsScreen: boolean
+    isConnected: boolean
+  }
   setAdminMonitoringSnapshot: (snapshot: import('../adminServer/adminServerTypes.js').MonitoringSnapshot) => void
   setAdminMonitoringError: (message: string) => void
   setAdminHistoryLoading: (loading: boolean) => void
@@ -655,8 +661,6 @@ type InternalLobbyFlowState = {
   adminPaymentDetailPurchase: AdminPaymentDetailRow | null
   adminPaymentDetailErrorText: string | null
   adminPaymentDetailFromPeriod: string | null
-  pwaUpdatePending: boolean
-  pwaUpdateApplyFn: (() => void) | null
 }
 
 const DEFAULT_REQUIRED_PLAYERS = 4
@@ -888,8 +892,6 @@ function createInitialState(): InternalLobbyFlowState {
     adminPaymentDetailPurchase: null,
     adminPaymentDetailErrorText: null,
     adminPaymentDetailFromPeriod: null,
-    pwaUpdatePending: false,
-    pwaUpdateApplyFn: null,
   }
 }
 
@@ -2000,7 +2002,6 @@ export function createLobbyFlowController(
       adminPaymentDetailLoading: state.adminPaymentDetailLoading,
       adminPaymentDetailPurchase: state.adminPaymentDetailPurchase,
       adminPaymentDetailErrorText: state.adminPaymentDetailErrorText,
-      pwaUpdatePending: state.pwaUpdatePending,
       shopPurchaseResumeId: state.shopPurchaseResumeId,
       shopPurchaseHideConfirmId: state.shopPurchaseHideConfirmId,
       shopPurchaseActionPurchaseId: state.shopPurchaseActionPurchaseId,
@@ -2768,9 +2769,6 @@ export function createLobbyFlowController(
           }
           render()
         })()
-      },
-      onPwaUpdateApply: () => {
-        state.pwaUpdateApplyFn?.()
       },
       onAdminHistoryWindowChange: (window) => {
         state.adminHistoryWindow = window
@@ -6246,11 +6244,13 @@ export function createLobbyFlowController(
       })()
     },
     handleServerMessage,
-    setPwaUpdatePending: (pending: boolean, applyFn: (() => void) | null) => {
-      state.pwaUpdatePending = pending
-      state.pwaUpdateApplyFn = applyFn
-      if (!(options.getIsInGame?.() ?? false)) render()
-    },
+    getPwaUpdateSafetySnapshot: () => ({
+      isSearching: state.isSearching,
+      hasPrivateRoomInvite: state.privateRoomInvite !== null,
+      hasQueuedPrivateRoomInvites: state.privateRoomInviteQueue.length > 0,
+      isInPrivateRoomsScreen: state.currentScreen === 'private-rooms',
+      isConnected: state.isConnected,
+    }),
     setAdminMonitoringSnapshot: (snapshot) => {
       state.adminMonitoringSnapshot = snapshot
       state.adminMonitoringErrorText = null

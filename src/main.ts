@@ -5,7 +5,14 @@ import {
   isRunningAsStandalone,
   canInstallPwa,
   triggerPwaInstall,
+  requestPwaUpdateCheck,
+  CURRENT_BUILD_ID,
 } from './pwa'
+import {
+  setPendingPwaUpdate,
+  tryApplyPendingPwaUpdate,
+  type PwaUpdateSafetyState,
+} from './pwaUpdateCoordinator'
 import { createActiveRoomFlowController } from './app/activeRoom/createActiveRoomFlowController'
 import {
   isMatchEndedPreviewRequest,
@@ -162,6 +169,10 @@ let isRefreshingAuthConnection = false
 let isSessionDisplaced = false
 let shouldReloadLobbyOnReconnect = false
 let offlineLobbyReloadScheduled = false
+let pwaBootstrapAuthSessionLoaded = false
+let pwaBootstrapGuestStatusLoaded = false
+let pwaBootstrapServerStateResolved = false
+let pwaIsReconnectingActiveRoom = false
 let showOfflineConnectionOverlay: () => void = () => {
   shouldReloadLobbyOnReconnect = true
 }
@@ -3111,6 +3122,7 @@ const activeRoom = createActiveRoomFlowController({
     lobby.resetToLobby()
     lobby.setErrorText(errorText)
     void loadAuthSession()
+    requestPwaUpdateApplyAttempt()
   },
   startNewGame: (stake, displayName) => {
     lobby.setConnected(client.isConnected())
@@ -3261,6 +3273,13 @@ client = createGameServerClient({
       connectionErrorTimerId = null
     }
 
+    // Връзката е успешно възстановена — reconnect-ът вече не е "в ход",
+    // независимо дали resume-ваме активна стая или се връщаме в чист lobby.
+    // activeRoom.hasActiveRoom() продължава самостоятелно да блокира apply
+    // по време на самата игра/resume; този флаг само не бива да остава
+    // "заклещен" true завинаги след като играта приключи.
+    pwaIsReconnectingActiveRoom = false
+
     if (shouldReloadLobbyOnReconnect) {
       forceOfflineLobbyReload()
       return
@@ -3276,6 +3295,8 @@ client = createGameServerClient({
       lobby.setConnected(true)
       lobby.setErrorText(null)
     }
+
+    requestPwaUpdateApplyAttempt()
   },
   onClose: () => {
     if (isSessionDisplaced || isPageUnloading) {
@@ -3293,6 +3314,7 @@ client = createGameServerClient({
 
     if (activeRoom.hasActiveRoom()) {
       shouldReloadLobbyOnReconnect = true
+      pwaIsReconnectingActiveRoom = true
       activeRoom.setConnectionState(false, SERVER_RESTART_WAIT_MESSAGE)
       scheduleServerReconnect()
       return
@@ -3320,6 +3342,22 @@ client = createGameServerClient({
     }
   },
   onMessage: (message) => {
+    if (message.type === 'connected') {
+      // Сървърът праща 'connected' синхронно ПЪРВО в connection handler-а
+      // си, а евентуално 'session_in_game' (ако профилът има активна игра)
+      // веднага след него в СЪЩИЯ handler — двете пристигат в тази подредба
+      // през WS message опашката. Изчакваме един tick, за да може
+      // 'session_in_game' (ако предстои) да бъде обработено първо, преди
+      // да маркираме bootstrap-а за завършен — сурово onOpen не е достатъчен
+      // сигнал, защото не гарантира, че сървърът вече е казал дали има
+      // resume-able сесия.
+      window.setTimeout(() => {
+        pwaBootstrapServerStateResolved = true
+        requestPwaUpdateApplyAttempt()
+      }, 0)
+      return
+    }
+
     if (message.type === 'session_displaced') {
       isSessionDisplaced = true
       showSessionDisplacedOverlay()
@@ -3447,12 +3485,14 @@ client = createGameServerClient({
     }
 
     if (activeRoom.handleServerMessage(message)) {
+      requestPwaUpdateApplyAttempt()
       return
     }
 
     if (!activeRoom.hasActiveRoom() && !_isResetPasswordPath) {
       lobby.handleServerMessage(message)
     }
+    requestPwaUpdateApplyAttempt()
   },
 })
 
@@ -3593,51 +3633,50 @@ const visitorPageViewTracker = createVisitorPageViewTracker({
 })
 visitorPageViewTracker.start()
 
-// PWA — регистрира service worker и следи за нови версии
+// PWA — тихо автоматично обновяване. Никакъв popup/banner: onNeedRefresh
+// само записва pending update-а и моли coordinator-а да прецени дали
+// клиентът в момента е в безопасно състояние (виж getPwaSafetyState по-долу
+// и pwaUpdateCoordinator.ts за пълния watchdog/retry lifecycle).
 initPwa((applyFn) => {
-  lobby.setPwaUpdatePending(true, applyFn)
+  setPendingPwaUpdate(applyFn)
+  requestPwaUpdateApplyAttempt()
+})
 
-  if (!activeRoom.hasActiveRoom() && !document.getElementById('pwa-update-banner')) {
-    const banner = document.createElement('div')
-    banner.id = 'pwa-update-banner'
-    banner.style.cssText = 'position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);font-family:system-ui,-apple-system,sans-serif;'
-    banner.innerHTML = `
-      <div style="
-        width:min(92vw,420px);
-        background:linear-gradient(180deg,#1a1100 0%,#0d0900 100%);
-        border:1.5px solid rgba(212,165,32,0.55);
-        border-radius:16px;
-        padding:32px 28px;
-        text-align:center;
-        box-shadow:0 24px 64px rgba(0,0,0,0.6);
-      ">
-        <div style="font-size:36px;margin-bottom:12px;">🔄</div>
-        <div style="font-size:17px;font-weight:900;color:#f4c95b;margin-bottom:8px;">Нова версия</div>
-        <div style="font-size:13px;color:rgba(255,255,255,0.72);margin-bottom:24px;line-height:1.5;">
-          Налична е нова версия на играта.<br>Приложи я преди следващата игра.
-        </div>
-        <button id="pwa-update-apply-btn" style="
-          width:100%;height:44px;border:0;border-radius:10px;
-          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
-          color:#080808;font-size:14px;font-weight:900;cursor:pointer;
-          box-shadow:0 4px 16px rgba(212,165,32,0.35);
-        ">Приложи сега</button>
-      </div>
-    `
-    document.body.appendChild(banner)
-    document.getElementById('pwa-update-apply-btn')?.addEventListener('click', () => {
-      const button = document.getElementById('pwa-update-apply-btn') as HTMLButtonElement | null
-      if (button) {
-        button.disabled = true
-        button.textContent = 'Обновяване...'
-        button.style.cursor = 'wait'
-      }
-
-      void Promise.resolve(applyFn()).catch(() => {
-        window.location.reload()
-      })
-    })
+function getPwaSafetyState(): PwaUpdateSafetyState {
+  const pwaSnapshot = lobby.getPwaUpdateSafetySnapshot()
+  return {
+    bootstrapComplete: pwaBootstrapAuthSessionLoaded && pwaBootstrapGuestStatusLoaded && pwaBootstrapServerStateResolved,
+    hasActiveRoom: activeRoom.hasActiveRoom(),
+    isSearching: pwaSnapshot.isSearching,
+    hasPrivateRoomInvite: pwaSnapshot.hasPrivateRoomInvite,
+    hasQueuedPrivateRoomInvites: pwaSnapshot.hasQueuedPrivateRoomInvites,
+    isInPrivateRoomsScreen: pwaSnapshot.isInPrivateRoomsScreen,
+    isConnected: pwaSnapshot.isConnected,
+    isReconnecting: pwaIsReconnectingActiveRoom,
   }
+}
+
+function requestPwaUpdateApplyAttempt(): void {
+  void tryApplyPendingPwaUpdate(getPwaSafetyState, CURRENT_BUILD_ID)
+}
+
+// Явна проверка за нова версия при връщане в сайта — не прилага/reload-ва,
+// само моли browser-а да провери /sw.js за промяна (throttled в pwa.ts).
+// Ако вече има pending update, опитваме apply веднага след проверката —
+// coordinator-ът пак ще прецени safety, така че е безопасно по време на игра.
+function requestPwaUpdateCheckAndRetryApply(): void {
+  requestPwaUpdateCheck()
+  requestPwaUpdateApplyAttempt()
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    requestPwaUpdateCheckAndRetryApply()
+  }
+})
+
+window.addEventListener('pageshow', () => {
+  requestPwaUpdateCheckAndRetryApply()
 })
 
 void loadPublicSettings()
@@ -3648,11 +3687,15 @@ void loadAuthSession().then(() => {
   if (stripeReturnPayment === 'success') {
     void handleStripePaymentSuccessReturn(stripeReturnCheckoutSessionId)
   }
+  pwaBootstrapAuthSessionLoaded = true
+  requestPwaUpdateApplyAttempt()
 })
 
 // Гарантира, че belot_guest_id cookie-то съществува преди WebSocket handshake-а,
 // защото сървърът чете guest identity само от cookie-тата на connection request-а.
 void loadGuestTrialStatus().finally(() => {
+  pwaBootstrapGuestStatusLoaded = true
+  requestPwaUpdateApplyAttempt()
   client.connect()
 })
 

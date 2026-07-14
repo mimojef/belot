@@ -310,7 +310,6 @@ export type LobbyScreenState = {
   adminPaymentDetailLoading: boolean
   adminPaymentDetailPurchase: AdminPaymentDetailRow | null
   adminPaymentDetailErrorText: string | null
-  pwaUpdatePending: boolean
 }
 
 export type RenderLobbyScreenOptions = {
@@ -462,7 +461,6 @@ export type RenderLobbyScreenOptions = {
   onSupportDeleteClick: () => void
   onSupportDeleteCancel: () => void
   onSupportDeleteConfirm: () => void
-  onPwaUpdateApply: () => void
   onAdminHistoryWindowChange: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
@@ -7206,12 +7204,6 @@ export function renderLobbyScreen(
       "
     >
       ${renderMobileMenu(state)}
-      ${state.pwaUpdatePending ? `
-        <div style="margin:10px 12px;border:1px solid rgba(212,165,32,0.38);border-radius:8px;background:#120d04;padding:10px;display:flex;align-items:center;gap:10px;">
-          <div style="flex:1;color:#d4a520;font-size:12px;font-weight:800;">Има нова версия на играта.</div>
-          <button data-pwa-update-apply="1" style="height:34px;padding:0 12px;border:0;border-radius:7px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:12px;font-weight:900;">Приложи</button>
-        </div>
-      ` : ''}
       ${renderMobileLobbyScreenContent(state, profileName, canStartSearch)}
       ${renderMobileFooter()}
 
@@ -7320,16 +7312,6 @@ export function renderLobbyScreen(
       </style>
 
       <div data-lobby-scale-stage="1" style="width:1640px; margin:0 auto; zoom:var(--lobby-scale);">
-        ${state.pwaUpdatePending ? `
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;background:linear-gradient(90deg,#1a0e00 0%,#1c1100 100%);border-bottom:1px solid rgba(212,165,32,0.35);padding:10px 20px;">
-            <div style="font-size:13px;font-weight:800;color:#f4c95b;">
-              🔄 Има нова версия на играта. Приложи преди следващата игра.
-            </div>
-            <button data-pwa-update-apply="1" style="height:34px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:12px;font-weight:900;cursor:pointer;white-space:nowrap;">
-              Приложи
-            </button>
-          </div>
-        ` : ''}
         ${renderNav(state)}
 
         <div style="max-width: 1640px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;">
@@ -8073,12 +8055,6 @@ export function renderLobbyScreen(
       }
     })
   })
-
-  root
-    .querySelector<HTMLButtonElement>('[data-pwa-update-apply="1"]')
-    ?.addEventListener('click', () => {
-      options.onPwaUpdateApply()
-    })
 
   root
     .querySelector<HTMLFormElement>('[data-lobby-admin-settings-form="1"]')

@@ -1,5 +1,19 @@
+import { execSync } from 'node:child_process'
 import { defineConfig, type InlineConfig } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
+
+function resolveBuildId(): string {
+  if (process.env.VITE_BUILD_ID) {
+    return process.env.VITE_BUILD_ID
+  }
+  try {
+    return execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim()
+  } catch {
+    return `t${Date.now()}`
+  }
+}
 
 function disableServiceWorkerCodeSplitting(options: InlineConfig): void {
   const output = options.build?.rollupOptions?.output
@@ -20,6 +34,9 @@ function disableServiceWorkerCodeSplitting(options: InlineConfig): void {
 }
 
 export default defineConfig({
+  define: {
+    __PWA_BUILD_ID__: JSON.stringify(resolveBuildId()),
+  },
   server: {
     proxy: {
       '/uploads': 'http://localhost:3001',

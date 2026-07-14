@@ -10,7 +10,8 @@
     "check:password-reset-frontend": "npx tsx scripts/checkPasswordResetFrontend.ts",
     "check:gift-notification-modal-fix": "npx tsx scripts/checkGiftNotificationModalFix.ts",
     "check:cutting-pile-stack-order-fix": "npx tsx scripts/checkCuttingPileStackOrderFix.ts",
-    "check:chat-message-notification": "npx tsx scripts/checkChatMessageNotification.ts"
+    "check:chat-message-notification": "npx tsx scripts/checkChatMessageNotification.ts",
+    "check:pwa-auto-update": "npx tsx scripts/checkPwaAutoUpdate.ts"
   },
   "devDependencies": {
     "typescript": "~5.9.3",
