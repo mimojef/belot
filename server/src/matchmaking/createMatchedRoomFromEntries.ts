@@ -5,7 +5,6 @@ import { createHumanParticipant } from '../core/createHumanParticipant.js'
 import { createServerRoom } from '../core/createServerRoom.js'
 import { seatParticipantInRoom } from '../core/seatParticipantInRoom.js'
 import {
-  SERVER_SEAT_ORDER,
   type BotRoomParticipant,
   type Seat,
   type ServerRoom,
@@ -27,45 +26,6 @@ import {
 export type CreateMatchedRoomFromEntriesResult = {
   room: ServerRoom
   group: PendingMatchGroup
-}
-
-type BlockCheck = (profileIdA: string, profileIdB: string) => boolean
-
-const TEAM_A_SEATS = new Set<Seat>(['bottom', 'top'])
-
-function hasBlockedPartnership(
-  entries: MatchmakingQueueEntry[],
-  shuffled: Seat[],
-  isBlocked: BlockCheck,
-): boolean {
-  for (let i = 0; i < entries.length; i++) {
-    for (let j = i + 1; j < entries.length; j++) {
-      const seatI = shuffled[i]
-      const seatJ = shuffled[j]
-      if (!seatI || !seatJ) continue
-      const sameTeam = TEAM_A_SEATS.has(seatI) === TEAM_A_SEATS.has(seatJ)
-      if (!sameTeam) continue
-      const a = entries[i].profileId
-      const b = entries[j].profileId
-      if (!a || !b) continue
-      if (isBlocked(a, b) || isBlocked(b, a)) return true
-    }
-  }
-  return false
-}
-
-function shuffleSeats(seats: Seat[]): Seat[] {
-  const nextSeats = [...seats]
-
-  for (let index = nextSeats.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1))
-    const currentSeat = nextSeats[index]
-
-    nextSeats[index] = nextSeats[swapIndex]
-    nextSeats[swapIndex] = currentSeat
-  }
-
-  return nextSeats
 }
 
 function assertSingleStake(entries: MatchmakingQueueEntry[]): MatchStake {
@@ -143,20 +103,14 @@ function createBotParticipantFromFallbackSelection(
 export function createMatchedRoomFromEntries(
   entries: MatchmakingQueueEntry[],
   shouldStartImmediately: boolean,
-  blockCheck?: BlockCheck,
+  resolvedSeatOrder: Seat[],
   createTempBot?: TempBotFactory,
   maxBots?: number,
 ): CreateMatchedRoomFromEntriesResult {
   const createdAt = Date.now()
   const stake = assertSingleStake(entries)
 
-  let shuffledSeats = shuffleSeats(SERVER_SEAT_ORDER)
-  if (blockCheck) {
-    for (let attempt = 0; attempt < 20; attempt++) {
-      if (!hasBlockedPartnership(entries, shuffledSeats, blockCheck)) break
-      if (attempt < 19) shuffledSeats = shuffleSeats(SERVER_SEAT_ORDER)
-    }
-  }
+  const shuffledSeats = [...resolvedSeatOrder]
   let nextRoom = createServerRoom({
     config: {
       allowBots: true,
