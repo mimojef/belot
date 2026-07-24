@@ -10,32 +10,54 @@
 # Модел (Capistrano-style releases + shared content-addressed asset pool):
 #
 #   $DEPLOY_ROOT/
-#     assets/                 <- СПОДЕЛЕН, кумулативен pool. Само добавяне,
-#                                никога цялостно изтриване — Vite hashed
-#                                имена са content-addressed (index-HASH.js),
-#                                значи еднакво име == еднакво съдържание,
-#                                копирането е идемпотентно и безопасно.
-#     releases/<release-id>/  <- САМО стабилните entry файлове (index.html,
-#                                sw.js, manifest.webmanifest + дребните
-#                                public/ статични файлове, презаписвани
-#                                всеки път — не са content-hashed, нямат
-#                                нужда от retention).
+#     assets/                    <- СПОДЕЛЕН, кумулативен pool — САМО
+#                                   доказано content-hashed build артефакти
+#                                   (Vite/Rollup изход: index-HASH.js,
+#                                   index-HASH.css, workbox-window-HASH.js).
+#                                   Само добавяне, никога изтриване тук —
+#                                   еднакво име == еднакво съдържание.
+#     releases/<release-id>/
+#       index.html, sw.js, manifest.webmanifest, icons/, audio/, ...
+#       assets/                  <- RELEASE-SPECIFIC mutable assets (avatars,
+#                                   изображения, лого и т.н. — стабилни
+#                                   имена БЕЗ hash, копирани от build/assets/
+#                                   подпапки като avatars/, lobby/,
+#                                   landing-page/ и т.н.). Презаписват се
+#                                   свободно при всеки deploy; rollback
+#                                   автоматично връща и тяхната версия,
+#                                   защото живеят вътре в release-а.
 #     current -> releases/<release-id>   (атомарен symlink)
 #
-# nginx трябва да сочи root към CURRENT_LINK за всичко ОСВЕН /assets/, и
-# отделен location за /assets/ директно към $DEPLOY_ROOT/assets/ (виж
-# deploy/nginx-frontend-cache-headers.conf.example) — иначе старите hashed
-# assets НЕ биха останали достъпими след смяна на "current" (те не са част
-# от новия release directory).
+# КРИТИЧНО разграничение (виж is_hashed_asset() по-долу и diagnostic
+# отчета): dist/assets/ съдържа И двете категории смесени — само файловете
+# на върха с Vite content-hash в името (обикновено 3: index-*.js,
+# index-*.css, workbox-window-*.js) са реално content-addressed. Остатъкът
+# (169-3=166 в реалния build) идва verbatim от public/assets/** (avatars/,
+# animated-emoji/, game-icons/, landing-page/, lobby/) — стабилни имена,
+# МОГАТ да сменят съдържанието си между releases без hash в URL-а, значи
+# НЕ могат да живеят в immutable shared pool-а нито да се третират с cp -n
+# (което би спряло да ги обновява завинаги след първия deploy).
+#
+# nginx трябва да има ОТДЕЛЕН route само за hashed файловете (regex location
+# по hash-pattern, immutable cache) към $DEPLOY_ROOT/assets/, докато
+# останалите /assets/... заявки падат към CURRENT_LINK/assets/... с умерен
+# (не immutable) cache — виж deploy/nginx-frontend-cache-headers.conf.example.
 #
 # Употреба:
 #   scripts/deployFrontendAtomic.sh [--keep N] [--dry-run]
 #   scripts/deployFrontendAtomic.sh --rollback
 #   scripts/deployFrontendAtomic.sh --list
-#   scripts/deployFrontendAtomic.sh --gc-assets   (пести конзервативен cleanup на assets/ пула)
+#   scripts/deployFrontendAtomic.sh --gc-assets     (конзервативен cleanup на assets/ пула)
+#   scripts/deployFrontendAtomic.sh --adopt <dist>  (еднократна baseline миграция
+#                                                     от вече работещ, ръчно build-нат
+#                                                     dist — виж deploy/PRODUCTION_DEPLOY_PLAN.md)
 #
-# Изисква: node, npm, git. Предназначен за изпълнение НА production сървъра,
-# с cwd в repo checkout-а (напр. /var/www/belot-v2/repo или еквивалент).
+# Изисква: node, npm, git. Предназначен за изпълнение НА production сървъра.
+# Production checkout-ът Е /var/www/belot-v2 директно (НЕ .../repo подпапка
+# — backend/PM2 също разчита на тази структура, скриптът не мести repo-то).
+# PROJECT_ROOT по подразбиране се извежда от местоположението на самия
+# скрипт (../ спрямо scripts/), значи съвпада правилно с /var/www/belot-v2
+# без нужда от explicit override там.
 
 set -euo pipefail
 
@@ -50,12 +72,14 @@ DRY_RUN=0
 
 # ─── Аргументи ────────────────────────────────────────────────────────────
 ACTION="deploy"
+ADOPT_DIST=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep) KEEP_RELEASES="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --rollback) ACTION="rollback"; shift ;;
     --list) ACTION="list"; shift ;;
+    --adopt) ACTION="deploy"; ADOPT_DIST="$2"; shift 2 ;;
     --gc-assets) ACTION="gc-assets"; shift ;;
     *) echo "Непознат аргумент: $1" >&2; exit 1 ;;
   esac
@@ -63,6 +87,20 @@ done
 
 log() { printf '[deploy] %s\n' "$1"; }
 fail() { printf '[deploy] FAIL: %s\n' "$1" >&2; exit 1; }
+
+# Vite/Rollup content-hash filename pattern: <name>-<hash>.<js|mjs|css>, с
+# hash от 8-10 alphanumeric/_/- символа непосредствено преди разширението.
+# Умишлено ограничено до js/mjs/css (не /-разчита само на разширението/ —
+# mutable assets в този проект никога нямат тези разширения, hashed Vite
+# bundle output винаги ги има; комбинацията "hash suffix" + "bundle
+# extension" е двойна проверка, не само едната). Тествано срещу реалната
+# build структура (169 assets/ файла, 0 несъответствия спрямо public/
+# ground truth — виж diagnostic отчета) — идентичен regex се ползва и в
+# scripts/validatePrecacheClosure.mjs и в nginx location-а, за да остане
+# класификацията консистентна навсякъде, където се прилага.
+is_hashed_asset() {
+  [[ "$1" =~ -[0-9A-Za-z_-]{8,10}\.(js|mjs|css)$ ]]
+}
 
 # ─── --list: покажи налични release-и ────────────────────────────────────
 if [ "$ACTION" = "list" ]; then
@@ -103,16 +141,26 @@ if [ "$ACTION" = "rollback" ]; then
   ln -sfn "$RELEASES_DIR/$PREV_ID" "$CURRENT_LINK.tmp"
   mv -Tf "$CURRENT_LINK.tmp" "$CURRENT_LINK"
   log "Rollback завършен. current -> $PREV_ID"
-  log "Забележка: assets/ пулът е споделен и не се пипа при rollback — hashed"
-  log "файловете, нужни на $PREV_ID, вече би трябвало да са в него."
+  log "Hashed assets: споделеният pool не се пипа при rollback (hash-овете,"
+  log "нужни на $PREV_ID, вече би трябвало да са в него)."
+  log "Mutable assets (avatars/images/audio): живеят вътре в $PREV_ID/assets/,"
+  log "значи rollback автоматично връща и тяхната стара версия."
   exit 0
 fi
 
-# ─── --gc-assets: консервативен cleanup на споделения assets pool ────────
+# ─── --gc-assets: консервативен cleanup на споделения HASHED assets pool ──
 # Трие от $SHARED_ASSETS_DIR само hash-ове, които НЕ се реферират от НИТО
 # ЕДИН запазен release (index.html/sw.js на всички директории в releases/).
 # Никога не се вика автоматично от deploy стъпката — отделна, explicit
 # команда, за да остане поведението лесно за одит.
+#
+# $SHARED_ASSETS_DIR трябва да съдържа САМО hashed файлове (по дизайн на
+# deploy стъпката по-долу) — is_hashed_asset() тук е defense-in-depth: ако
+# по някаква причина (стар/ръчен deploy отпреди тази поправка) в пула се
+# озове mutable файл, gc-assets НИКОГА не го пипа (не е негова отговорност —
+# такъв файл трябва да се мигрира ръчно, не да бъде трит мълчаливо).
+# Рекурсивен find (не само top-level *) — коректно обработва hashed файлове
+# в под-директории, ако някога се появят.
 if [ "$ACTION" = "gc-assets" ]; then
   [ -d "$SHARED_ASSETS_DIR" ] || fail "Няма assets директория: $SHARED_ASSETS_DIR"
   [ -d "$RELEASES_DIR" ] || fail "Няма releases директория: $RELEASES_DIR"
@@ -122,23 +170,30 @@ if [ "$ACTION" = "gc-assets" ]; then
 
   for f in "$RELEASES_DIR"/*/index.html "$RELEASES_DIR"/*/sw.js; do
     [ -f "$f" ] || continue
-    grep -oE 'assets/[A-Za-z0-9._-]+' "$f" 2>/dev/null | sed 's#^assets/##' >> "$REFERENCED_TMP" || true
+    grep -oE 'assets/[A-Za-z0-9._/-]+' "$f" 2>/dev/null | sed 's#^assets/##' >> "$REFERENCED_TMP" || true
   done
   sort -u -o "$REFERENCED_TMP" "$REFERENCED_TMP"
 
   REMOVED=0
-  for asset in "$SHARED_ASSETS_DIR"/*; do
-    [ -f "$asset" ] || continue
-    name="$(basename "$asset")"
-    if ! grep -qxF "$name" "$REFERENCED_TMP"; then
-      log "gc-assets: премахвам $name (не се реферира от нито един запазен release)"
+  SKIPPED_NON_HASHED=0
+  while IFS= read -r -d '' asset; do
+    rel="${asset#"$SHARED_ASSETS_DIR"/}"
+    base="$(basename "$asset")"
+    if ! is_hashed_asset "$base"; then
+      # Не е наша отговорност — виж коментара по-горе.
+      SKIPPED_NON_HASHED=$((SKIPPED_NON_HASHED + 1))
+      continue
+    fi
+    if ! grep -qxF "$rel" "$REFERENCED_TMP"; then
+      log "gc-assets: премахвам $rel (не се реферира от нито един запазен release)"
       if [ "$DRY_RUN" != "1" ]; then
         rm -f "$asset"
       fi
       REMOVED=$((REMOVED + 1))
     fi
-  done
-  log "gc-assets: $REMOVED файла($ъл) премахнати(о)."
+  done < <(find "$SHARED_ASSETS_DIR" -type f -print0)
+
+  log "gc-assets: $REMOVED hashed файла($ъл) премахнати(о). $SKIPPED_NON_HASHED non-hashed файла($ъл) пропуснати(о) (не е отговорност на gc-assets)."
   exit 0
 fi
 
@@ -152,6 +207,9 @@ GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo 'nogit')"
 # Позволява explicit override (напр. regression тестове, hotfix re-deploy на
 # същия commit) — по подразбиране пада към git SHA както преди.
 BUILD_ID="${VITE_BUILD_ID:-$GIT_SHA}"
+if [ -n "$ADOPT_DIST" ]; then
+  BUILD_ID="baseline-${BUILD_ID}"
+fi
 RELEASE_ID="$(date -u +%Y%m%d%H%M%S)-${BUILD_ID}"
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/belot-frontend-build-XXXXXX")"
 
@@ -161,11 +219,23 @@ cleanup_build_dir() {
 trap cleanup_build_dir EXIT
 
 log "Release: $RELEASE_ID"
-log "Build в изолирана временна директория: $BUILD_DIR (НЕ в live dist)"
 
-# ─── 1. Build извън live dist, с явен build id (за __PWA_BUILD_ID__ и debugging) ──
-VITE_BUILD_ID="$BUILD_ID" npx tsc
-VITE_BUILD_ID="$BUILD_ID" npx vite build --outDir "$BUILD_DIR" --emptyOutDir
+if [ -n "$ADOPT_DIST" ]; then
+  # ─── 1 (adopt режим). Еднократна baseline миграция от ВЕЧЕ работещ dist ──
+  # НЕ build-ва нищо — приема съществуващ, вече обслужван от nginx dist
+  # (виж deploy/PRODUCTION_DEPLOY_PLAN.md). Копира (НЕ мести/линква) в
+  # BUILD_DIR — cleanup trap-ът по-долу трие само тази временна копия,
+  # никога оригиналния $ADOPT_DIST (все още живо обслужван от nginx по
+  # време на цялата миграция).
+  [ -d "$ADOPT_DIST" ] || fail "--adopt директорията не съществува: $ADOPT_DIST"
+  log "Adopt режим: копирам съществуващия dist от $ADOPT_DIST (НЕ build, НЕ пипам оригинала)..."
+  cp -r "$ADOPT_DIST"/. "$BUILD_DIR"/
+else
+  log "Build в изолирана временна директория: $BUILD_DIR (НЕ в live dist)"
+  # ─── 1. Build извън live dist, с явен build id (за __PWA_BUILD_ID__ и debugging) ──
+  VITE_BUILD_ID="$BUILD_ID" npx tsc
+  VITE_BUILD_ID="$BUILD_ID" npx vite build --outDir "$BUILD_DIR" --emptyOutDir
+fi
 
 # ─── 2. Валидация на build резултата ──────────────────────────────────────
 [ -f "$BUILD_DIR/index.html" ] || fail "index.html липсва след build."
@@ -204,41 +274,62 @@ if [ "$DRY_RUN" = "1" ]; then
   exit 0
 fi
 
-# ─── 3. Публикувай hashed assets в СПОДЕЛЕНИЯ pool ПЪРВО ──────────────────
-# Никога не се трие/презаписва съществуващ файл тук (content-addressed —
-# еднакво име гарантирано означава еднакво съдържание). Новите hash-ове
-# стават достъпими на своя финален URL, ПРЕДИ index.html/sw.js, които ги
-# реферират, да бъдат публикувани — точно обратното на текущия production
-# дефект, доказан в диагностиката.
+# ─── 3+4. Класифицирай и публикувай assets/ съдържанието ──────────────────
+# ПЪРВО hashed → споделен pool, ПРЕДИ index.html/sw.js да бъдат публикувани
+# (точно обратното на доказания production дефект). Mutable файлове отиват
+# в НОВАТА release директория (все още невидима, докато current не се
+# превключи) — виж is_hashed_asset() и коментара в началото на файла.
 mkdir -p "$SHARED_ASSETS_DIR"
-log "Публикувам hashed assets в споделения pool ($SHARED_ASSETS_DIR)..."
-# -r: assets/ съдържа и под-директории с невhashed статични изображения
-# (напр. avatars/, landing-page/) наред с hashed JS/CSS файлове на върха.
-# -n: content-addressed hashed файлове никога не се презаписват; за
-# под-директориите -n действа per-file по време на рекурсията.
-cp -rn "$BUILD_DIR"/assets/* "$SHARED_ASSETS_DIR/"
-
-# ─── 4. Подготви нова release директория (само стабилни/дребни файлове) ──
 mkdir -p "$RELEASES_DIR"
 RELEASE_DIR="$RELEASES_DIR/$RELEASE_ID"
 [ ! -e "$RELEASE_DIR" ] || fail "Release директорията вече съществува: $RELEASE_DIR"
-mkdir -p "$RELEASE_DIR"
+mkdir -p "$RELEASE_DIR/assets"
 
-# public/ статичните файлове, ВКЛЮЧИТЕЛНО manifest.webmanifest — то е част
-# от precache closure-а (реферирано от sw.js), затова се третира като
-# "static dependency", не като "entry файл". Единствените ДЕЙСТВИТЕЛНО
-# гейтвани зад precache validation-а файлове са sw.js/sw.js.map/index.html.
+log "Класифицирам и публикувам assets/ съдържанието (hashed pool vs release-specific mutable)..."
+HASHED_PUBLISHED=0
+MUTABLE_PUBLISHED=0
+while IFS= read -r -d '' file; do
+  rel="${file#"$BUILD_DIR"/assets/}"
+  base="$(basename "$rel")"
+  if is_hashed_asset "$base"; then
+    dest="$SHARED_ASSETS_DIR/$rel"
+    mkdir -p "$(dirname "$dest")"
+    # Content-addressed — еднакво име гарантирано означава еднакво
+    # съдържание, никога не презаписваме съществуващ hash.
+    [ -e "$dest" ] || cp "$file" "$dest"
+    HASHED_PUBLISHED=$((HASHED_PUBLISHED + 1))
+  else
+    dest="$RELEASE_DIR/assets/$rel"
+    mkdir -p "$(dirname "$dest")"
+    # Mutable — винаги копираме свежата версия в НОВИЯ release (не е
+    # content-addressed, стабилно име може да носи ново съдържание между
+    # releases, напр. подменен avatar placeholder).
+    cp "$file" "$dest"
+    MUTABLE_PUBLISHED=$((MUTABLE_PUBLISHED + 1))
+  fi
+done < <(find "$BUILD_DIR/assets" -type f -print0)
+
+log "assets/: $HASHED_PUBLISHED hashed файла в споделения pool, $MUTABLE_PUBLISHED mutable файла в release-а."
+
+# public/ статичните файлове НА ВЪРХА (icons/, audio/, favicon.*,
+# manifest.webmanifest и т.н.) — не са content-hashed, презаписват се
+# свободно. manifest.webmanifest Е част от precache closure-а (реферирано
+# от sw.js), затова се третира като "static dependency", не като "entry
+# файл". Единствените ДЕЙСТВИТЕЛНО гейтвани зад precache validation-а
+# файлове са sw.js/sw.js.map/index.html.
 log "Копирам дребните статични public/ файлове (не content-hashed, презаписват се свободно)..."
 find "$BUILD_DIR" -mindepth 1 -maxdepth 1 \
   ! -name 'index.html' ! -name 'sw.js' ! -name 'sw.js.map' ! -name 'assets' \
   -exec cp -r {} "$RELEASE_DIR/" \;
 
 # ─── 4b. ПЪЛНА precache closure проверка срещу РЕАЛНАТА publish структура ──
-# Едва сега SHARED_ASSETS_DIR и RELEASE_DIR отразяват точно това, което би
-# видял production request след atomic swap-а. Ако липсва дори един
-# precache-нат ресурс тук, index.html/sw.js НЕ се копират и current НЕ се
-# пипа — старият release остава напълно непроменен и живо обслужван.
-log "Проверявам precache closure срещу реалната publish структура (assets pool + release)..."
+# Едва сега SHARED_ASSETS_DIR (hashed) и RELEASE_DIR/RELEASE_DIR/assets
+# (root static + mutable) отразяват точно това, което би видял production
+# request след atomic swap-а — validatePrecacheClosure.mjs прави 3-пътна
+# резолюция (hashed → pool, mutable /assets/... → release/assets/, друго →
+# release root). Ако липсва дори един precache-нат ресурс от КОЯТО и да е
+# категория, index.html/sw.js НЕ се копират и current НЕ се пипа.
+log "Проверявам precache closure срещу реалната publish структура (hashed pool + release root + release/assets)..."
 if ! node "$PROJECT_ROOT/scripts/validatePrecacheClosure.mjs" \
   "$BUILD_DIR/sw.js" "$SHARED_ASSETS_DIR" "$RELEASE_DIR"; then
   # Release директорията никога не е станала "current" — трием я, за да не

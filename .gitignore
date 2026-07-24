@@ -12,6 +12,15 @@ dist
 dist-ssr
 *.local
 
+# scripts/deployFrontendAtomic.sh runtime artifacts — DEPLOY_ROOT по
+# подразбиране съвпада с repo checkout-а (/var/www/belot-v2), значи тези
+# директории се появяват като sibling-и на src/, server/ и т.н. Leading
+# slash е задължителен — без него "assets" би игнорирал и тракнатия
+# public/assets/.
+/releases
+/assets
+/current
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

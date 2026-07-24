@@ -2,34 +2,69 @@
 #
 # ПРЕПОРЪЧАН location блок за https://pika.bg frontend-a. Не е приложен към
 # production — само reference за отделно ръчно review/одобрение (виж
-# production deployment плана).
+# deploy/PRODUCTION_DEPLOY_PLAN.md).
 #
 # КОНТЕКСТ (доказано с реален curl срещу production, read-only, без действия):
 #   - / и /index.html в момента се връщат БЕЗ никакъв Cache-Control header
 #     (само ETag + Last-Modified) → браузърите прилагат heuristic freshness
 #     (RFC 7234) и МОГАТ да сервират кеширано старо index.html без изобщо
-#     да направят revalidation заявка — това е ДОПЪЛНИТЕЛНА, отделна от
-#     build-race-а причина браузър да зареди стар index.html, който реферира
-#     вече изтрит hashed asset след следващ deploy.
-#   - /sw.js също няма Cache-Control — service worker update check-ът
-#     (registration.update()) зависи от това browser-ът реално да провери
-#     мрежата, не стар кеш.
-#   - /assets/index-*.js и /assets/index-*.css (content-hashed имена) СЪЩО
-#     нямат Cache-Control в момента — под-оптимално (излишни revalidation
-#     заявки за файлове, чието съдържание никога не се променя под същото
-#     име), макар и не толкова опасно, колкото HTML/SW проблема.
+#     да направят revalidation заявка.
+#   - /sw.js също няма Cache-Control — registration.update() зависи от това
+#     browser-ът реално да провери мрежата, не стар кеш.
+#   - /assets/index-*.js и /assets/index-*.css нямат Cache-Control в момента.
 #
-# Ако е приет releases/current моделът от scripts/deployFrontendAtomic.sh:
-#   root /var/www/belot-v2/current;       за index.html/sw.js/manifest и т.н.
-#   /var/www/belot-v2/assets/             СПОДЕЛЕН, кумулативен pool за
-#                                          content-hashed JS/CSS — НЕ живее
-#                                          вътре в current/release
-#                                          директориите, защото старите
-#                                          hash-ове иначе биха изчезнали от
-#                                          обслужване веднага щом current
-#                                          превключи към нов release.
-# (nginx resolve-ва symlink-а on-the-fly при всяка заявка — не изисква
-# nginx -s reload при всеки deploy, само при промяна на самия nginx config).
+# ─── КРИТИЧНО: hashed vs mutable /assets/ разделяне ────────────────────────
+# scripts/deployFrontendAtomic.sh публикува ДВЕ различни категории под
+# "/assets/" URL префикса (виж диагностичния отчет за пълния анализ):
+#
+#   1. Content-hashed Vite/Rollup bundle output (index-HASH.js,
+#      index-HASH.css, workbox-window-HASH.js — обикновено само 3 файла) →
+#      /var/www/belot-v2/assets/ (СПОДЕЛЕН, кумулативен pool, никога не се
+#      трие автоматично — старите hash-ове остават достъпими за стари
+#      отворени tabs/PWA clients след следващ deploy). Immutable cache.
+#
+#   2. Mutable, СТАБИЛНО именувани статични файлове verbatim от
+#      public/assets/** (avatars/, animated-emoji/, game-icons/,
+#      landing-page/, lobby/ — в реалния build 166 от 169 файла) →
+#      /var/www/belot-v2/current/assets/ (ВЪТРЕ в release директорията —
+#      презаписват се свободно всеки deploy, rollback автоматично връща и
+#      тяхната стара версия). УМЕРЕН (НЕ immutable) cache — съдържанието
+#      под същото име МОЖЕ да се промени между releases.
+#
+# Двете категории се различават чрез regex match на hash suffix pattern-а в
+# ИМЕТО на файла (виж is_hashed_asset() в scripts/deployFrontendAtomic.sh —
+# идентичен regex, тестван срещу реалната build структура: 169 assets/
+# файла, 0 несъответствия). nginx規 трябва да прилага СЪЩИЯ pattern.
+#
+# ─── ВАЖНО: location precedence (доказано емпирично, реален nginx 1.26.2) ──
+# nginx правило: `location ^~ prefix` СПИРА regex проверката изцяло за
+# всичко под този префикс — ако general `/assets/` location-ът използва
+# `^~`, regex location-ът за hashed файлове НИКОГА не би се достигнал.
+#
+# Правилен ред:
+#   1. Regex location (`~`) за hashed pattern — БЕЗ `^~` никъде преди него.
+#   2. Plain prefix location `/assets/` (БЕЗ `^~`) като fallback за всичко
+#      останало под /assets/.
+# nginx автоматично проверява regex locations ПРЕДИ да се спре на plain
+# prefix match, стига да няма `^~` конкурент — точно затова #2 НЕ трябва да
+# ползва `^~`. Емпирично потвърдено: hashed заявка → X-Debug-Route:
+# hashed-pool + immutable header; mutable заявка (включително nested,
+# /assets/avatars/x.png) → X-Debug-Route: mutable-release + max-age=86400.
+#
+# ─── ВАЖНО: quoting на regex с {n,m} quantifier ────────────────────────────
+# nginx-ският config tokenizer (НЕ PCRE) третира `{` СПЕЦИАЛНО навсякъде в
+# config файла (начало на блок) — регекс, съдържащ буквален `{8,10}`
+# quantifier, ТРЯБВА да е в кавички, иначе nginx -t дава подвеждаща грешка
+# ("unknown directive") на мястото на quantifier-а. Виж примера по-долу —
+# без кавичките config-ът НЕ парсва.
+#
+# root/release структура:
+#   root /var/www/belot-v2/current;       за index.html/sw.js/manifest/icons/...
+#   /var/www/belot-v2/current/assets/     mutable assets (вътре в release-а)
+#   /var/www/belot-v2/assets/             СПОДЕЛЕН hashed pool (ИЗВЪН release-а)
+# (nginx resolve-ва "current" symlink-а on-the-fly при всяка заявка — не
+# изисква nginx -s reload при всеки deploy, само при промяна на самия nginx
+# config).
 
 server {
     # ... съществуващи server_name / listen / ssl директиви — непроменени ...
@@ -69,33 +104,44 @@ server {
         add_header Cache-Control "no-cache, must-revalidate" always;
     }
 
-    # ─── hashed assets (съдържат Vite content hash в името) — immutable ────
-    # Всяка промяна в съдържанието произвежда НОВО име на файл — старото име
-    # никога не сочи към различно съдържание, значи е безопасно за
-    # дългосрочен, immutable кеш.
+    # ─── 1. Content-hashed assets → СПОДЕЛЕН pool, immutable ────────────────
+    # Regex location, ЗАДЪЛЖИТЕЛНО В КАВИЧКИ заради {8,10} quantifier-а (виж
+    # бележката по-горе). Capture group $1 пази пълния относителен path СЛЕД
+    # "assets/" (включително евентуални под-директории — nested-safe).
     #
-    # ВАЖНО: сочи към СПОДЕЛЕНИЯ pool (deployFrontendAtomic.sh публикува
-    # hashed assets в $DEPLOY_ROOT/assets/, НЕ вътре в current/release
-    # директорията) — иначе стар hash изчезва от обслужване веднага щом
-    # current превключи към нов release, което би счупило точно сценария,
-    # който retention-ът трябва да пази.
-    location ^~ /assets/ {
-        alias /var/www/belot-v2/assets/;
+    # НЕ поставяй `^~` на НИКОЙ location преди този, иначе nginx никога няма
+    # да провери този regex за заявки под /assets/.
+    location ~ "^/assets/(.+-[0-9A-Za-z_-]{8,10}\.(?:js|mjs|css))$" {
+        alias /var/www/belot-v2/assets/$1;
         add_header Cache-Control "public, max-age=31536000, immutable" always;
     }
 
-    # ─── статични, невhashed ресурси (икони, audio и т.н.) — умерен кеш ────
+    # ─── 2. Всичко останало под /assets/ → mutable, от CURRENT release ─────
+    # Plain prefix (БЕЗ `^~`) — критично: `^~` тук би блокирал regex
+    # location-а по-горе от изобщо да бъде проверен (виж бележката за
+    # location precedence). Умерен, НЕ immutable cache — съдържанието под
+    # това стабилно име МОЖЕ да се промени в следващ release (напр. подменен
+    # avatar placeholder).
+    location /assets/ {
+        alias /var/www/belot-v2/current/assets/;
+        add_header Cache-Control "public, max-age=86400" always;
+    }
+
+    # ─── статични, невhashed root ресурси (икони, audio и т.н.) — умерен кеш ──
+    # Идват директно от current/ (root директивата по-горе), не от /assets/.
     # Не са content-hashed, но се променят рядко — умерен max-age с
     # revalidation, не immutable.
     location ~* \.(?:png|webp|svg|ico|mp3|woff2)$ {
         add_header Cache-Control "public, max-age=86400" always;
     }
 
-    # ─── API/WS/uploads/health — НИКОГА кеширани от nginx самия (без промяна) ──
-    # location /api/ { ... } — непроменена, извън обхвата на тази задача.
-    # location /ws { ... }   — непроменена.
+    # ─── API/WS/uploads/health — НЕ ПИПАНИ, извън обхвата на тази задача ────
+    # location /api/ { ... }     — непроменена (proxy_pass към backend).
+    # location /health { ... }   — непроменена.
     # location /uploads/ { ... } — непроменена.
+    # location /ws { ... }       — непроменена (WebSocket upgrade proxy).
 
+    # ─── SPA fallback — последен, най-нисък приоритет ────────────────────────
     location / {
         try_files $uri $uri/ /index.html;
         # Fallback за SPA routes (/lobby, /strategy и т.н.) — index.html пак

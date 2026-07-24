@@ -91,6 +91,10 @@ async function check(label: string, fn: () => Promise<void> | void): Promise<voi
 const PROJECT_ROOT = resolve(process.cwd())
 const SCRIPT_PATH = join(PROJECT_ROOT, 'scripts', 'deployFrontendAtomic.sh')
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
 async function runDeployScript(deployRoot: string, args: string[], env: Record<string, string> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
   // Workaround само за средата (виж HAS_REAL_SYMLINKS коментара по-горе) —
   // премахва "current"/"current.tmp", ако не са истински symlink-ове, за да
@@ -161,9 +165,17 @@ try {
       if (!existsSync(join(deployRoot, 'releases', release1, f))) throw new Error(`липсва ${f}`)
     }
   })
-  await check('[1e] Release #1 директорията НЕ съдържа собствена assets/ поддиректория (споделен pool, не per-release)', () => {
-    if (existsSync(join(deployRoot, 'releases', release1, 'assets'))) {
-      throw new Error('assets/ съществува вътре в release директорията — старите hash-ове биха изчезнали при следваща смяна на current')
+  await check('[1e] Release #1/assets/ съдържа mutable файлове, но НИТО ЕДИН hashed файл (тези живеят само в споделения pool)', () => {
+    const releaseAssetsDir = join(deployRoot, 'releases', release1, 'assets')
+    if (!existsSync(releaseAssetsDir)) throw new Error('release/assets/ липсва — mutable съдържанието (avatars, изображения) няма къде да живее')
+    const hashedPattern = /-[0-9A-Za-z_-]{8,10}\.(?:js|mjs|css)$/
+    const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+      const full = join(dir, e.name)
+      return e.isDirectory() ? walk(full) : [full]
+    })
+    const hashedInRelease = walk(releaseAssetsDir).filter((f) => hashedPattern.test(f))
+    if (hashedInRelease.length > 0) {
+      throw new Error(`hashed файл(ове) погрешно копирани в release/assets/: ${hashedInRelease.join(', ')}`)
     }
   })
 
@@ -423,6 +435,209 @@ try {
   } finally {
     await rm(pcProjectRoot, { recursive: true, force: true })
     await rm(pcDeployRoot, { recursive: true, force: true })
+  }
+
+  // ─── [10]/[11] Mutable asset update + rollback ────────────────────────────
+  console.log('\nТествам mutable asset update между releases + rollback...')
+  const mutProjectRoot = await mkdtemp(join(tmpdir(), 'belot-mutable-project-'))
+  const mutDeployRoot = await mkdtemp(join(tmpdir(), 'belot-mutable-deploy-'))
+  try {
+    const { symlink } = await import('node:fs/promises')
+    await cp(join(PROJECT_ROOT, 'package.json'), join(mutProjectRoot, 'package.json'))
+    await cp(join(PROJECT_ROOT, 'vite.config.ts'), join(mutProjectRoot, 'vite.config.ts'))
+    await cp(join(PROJECT_ROOT, 'tsconfig.json'), join(mutProjectRoot, 'tsconfig.json'))
+    await cp(join(PROJECT_ROOT, 'index.html'), join(mutProjectRoot, 'index.html'))
+    await symlink(join(PROJECT_ROOT, 'node_modules'), join(mutProjectRoot, 'node_modules'), 'junction')
+    await cp(join(PROJECT_ROOT, 'src'), join(mutProjectRoot, 'src'), { recursive: true })
+    await cp(join(PROJECT_ROOT, 'public'), join(mutProjectRoot, 'public'), { recursive: true }).catch(() => {})
+    await mkdir(join(mutProjectRoot, 'scripts'), { recursive: true })
+    await cp(join(PROJECT_ROOT, 'scripts', 'validatePrecacheClosure.mjs'), join(mutProjectRoot, 'scripts', 'validatePrecacheClosure.mjs'))
+
+    // Нов mutable static file — стабилно име, съдържанието му ще се смени
+    // между два deploy-а, за да докаже release-specific update поведението.
+    await mkdir(join(mutProjectRoot, 'public', 'assets', 'testdir'), { recursive: true })
+    await writeFile(join(mutProjectRoot, 'public', 'assets', 'testdir', 'marker.png'), 'MUTABLE-CONTENT-V1')
+
+    const rV1 = await runDeployScript(mutDeployRoot, [], { PROJECT_ROOT: mutProjectRoot, VITE_BUILD_ID: 'mut-v1' })
+    await check('[10a] Deploy #1 (marker.png = V1) завършва успешно', () => {
+      if (rV1.code !== 0) throw new Error(`exit=${rV1.code}\n${rV1.stdout.slice(-500)}\n${rV1.stderr.slice(-500)}`)
+    })
+    const releaseV1 = listReleases(mutDeployRoot)[0]
+    await check('[10b] marker.png (V1) е в release/assets/testdir/, НЕ в shared hashed pool', () => {
+      const inRelease = existsSync(join(mutDeployRoot, 'releases', releaseV1, 'assets', 'testdir', 'marker.png'))
+      const inPool = existsSync(join(mutDeployRoot, 'assets', 'testdir', 'marker.png'))
+      if (!inRelease) throw new Error('marker.png липсва от release/assets/testdir/')
+      if (inPool) throw new Error('marker.png погрешно е публикуван в споделения hashed pool')
+    })
+
+    await sleep(1100)
+    await writeFile(join(mutProjectRoot, 'public', 'assets', 'testdir', 'marker.png'), 'MUTABLE-CONTENT-V2')
+    const rV2 = await runDeployScript(mutDeployRoot, [], { PROJECT_ROOT: mutProjectRoot, VITE_BUILD_ID: 'mut-v2' })
+    await check('[10c] Deploy #2 (marker.png = V2, ново съдържание, СЪЩОТО име) завършва успешно', () => {
+      if (rV2.code !== 0) throw new Error(`exit=${rV2.code}\n${rV2.stdout.slice(-500)}\n${rV2.stderr.slice(-500)}`)
+    })
+    const releaseV2 = listReleases(mutDeployRoot).find((r) => r !== releaseV1)!
+
+    await check('[10d] Новият release съдържа V2 съдържанието на marker.png (mutable update отразен)', () => {
+      const content = readFileSync(join(mutDeployRoot, 'releases', releaseV2, 'assets', 'testdir', 'marker.png'), 'utf8')
+      if (content !== 'MUTABLE-CONTENT-V2') throw new Error(`съдържание=${content}, очаквах MUTABLE-CONTENT-V2`)
+    })
+    await check('[10e] Старият release (V1) остава НЕПРОМЕНЕН — все още съдържа V1 (release isolation)', () => {
+      const content = readFileSync(join(mutDeployRoot, 'releases', releaseV1, 'assets', 'testdir', 'marker.png'), 'utf8')
+      if (content !== 'MUTABLE-CONTENT-V1') throw new Error(`съдържание=${content}, очаквах MUTABLE-CONTENT-V1 (старият release не бива да се презаписва)`)
+    })
+
+    if (HAS_REAL_SYMLINKS) {
+      const rollback = await runDeployScript(mutDeployRoot, ['--rollback'])
+      await check('[11a] Rollback завършва успешно', () => {
+        if (rollback.code !== 0) throw new Error(`exit=${rollback.code}\n${rollback.stdout}\n${rollback.stderr}`)
+      })
+      await check('[11b] Rollback връща СТАРАТА (V1) версия на mutable marker.png през "current"', () => {
+        const content = readFileSync(join(mutDeployRoot, 'current', 'assets', 'testdir', 'marker.png'), 'utf8')
+        if (content !== 'MUTABLE-CONTENT-V1') throw new Error(`current съдържание=${content}, очаквах MUTABLE-CONTENT-V1 след rollback`)
+      })
+    } else {
+      skip('[11] Rollback връща старата версия на mutable asset', 'изисква истински symlink за "current" — недоказуемо на тази машина, виж бележката в началото на файла')
+    }
+  } finally {
+    await rm(mutProjectRoot, { recursive: true, force: true })
+    await rm(mutDeployRoot, { recursive: true, force: true })
+  }
+
+  // ─── [12]/[13] nginx конфигурация — структурни проверки (без реален nginx) ──
+  // Реалният location precedence е емпирично доказан отделно (реален
+  // nginx 1.26.2, локален тест, виж diagnostic отчета) — тук проверяваме
+  // само че PUBLISHED конфигурационният файл продължава да отразява тези
+  // изисквания текстово (regression срещу случайна бъдеща промяна).
+  console.log('\nПроверявам nginx конфигурационния fragment (структурни проверки)...')
+  const nginxConfPath = join(PROJECT_ROOT, 'deploy', 'nginx-frontend-cache-headers.conf.example')
+  const nginxConf = await readFile(nginxConfPath, 'utf8')
+
+  await check('[12a] Hashed regex location е В КАВИЧКИ (заради {n,m} quantifier — иначе nginx -t fail-ва)', () => {
+    if (!nginxConf.includes('location ~ "^/assets/')) throw new Error('Regex location-ът не е quoted')
+  })
+  await check('[12b] Hashed regex location получава immutable Cache-Control', () => {
+    // Матчваме до края на quoted низа ПЪРВО (той сам съдържа { от {n,m}
+    // quantifier-а) — иначе "стигни до първата {" грешно спира вътре в
+    // самия regex pattern, преди да достигне истинското тяло на блока.
+    const m = nginxConf.match(/location ~ "[^"]*"\s*\{[\s\S]*?\n {4}\}/)
+    if (!m || !m[0].includes('immutable')) throw new Error(`Hashed location блокът не съдържа immutable. Матч:\n${m?.[0]}`)
+  })
+  await check('[12c] Plain-prefix /assets/ location НЕ използва ^~ (иначе блокира regex-а изцяло)', () => {
+    if (nginxConf.includes('location ^~ /assets/')) throw new Error('Открит е ^~ /assets/ — би блокирал hashed regex location-а от изобщо да бъде проверен')
+    if (!nginxConf.includes('location /assets/ {')) throw new Error('Липсва plain-prefix location /assets/ fallback')
+  })
+  await check('[12d] Plain-prefix /assets/ (mutable) location НЕ получава immutable — умерен max-age', () => {
+    const m = nginxConf.match(/location \/assets\/ \{[\s\S]*?\}/)
+    if (!m) throw new Error('Не намерих location /assets/ блока')
+    if (m[0].includes('immutable')) throw new Error('Mutable /assets/ location погрешно получава immutable')
+    if (!m[0].includes('max-age=86400')) throw new Error('Mutable /assets/ location няма очаквания умерен max-age=86400')
+  })
+  await check('[13] index.html/sw.js/manifest.webmanifest получават no-cache, must-revalidate', () => {
+    for (const name of ['/index.html', '/sw.js', '/manifest.webmanifest']) {
+      const re = new RegExp(`location = ${name.replace('.', '\\.')} \\{[\\s\\S]*?\\}`)
+      const m = nginxConf.match(re)
+      if (!m || !m[0].includes('no-cache, must-revalidate')) throw new Error(`${name} location не съдържа no-cache, must-revalidate`)
+    }
+  })
+
+  // ─── [14] Missing SHARED HASHED ресурс блокира swap (различно от [9] mutable) ──
+  console.log('\nТествам precache closure gate за липсващ HASHED ресурс (различно от mutable в [9])...')
+  const hProjectRoot = await mkdtemp(join(tmpdir(), 'belot-hashed-missing-project-'))
+  const hDeployRoot = await mkdtemp(join(tmpdir(), 'belot-hashed-missing-deploy-'))
+  try {
+    const { symlink } = await import('node:fs/promises')
+    await cp(join(PROJECT_ROOT, 'package.json'), join(hProjectRoot, 'package.json'))
+    await cp(join(PROJECT_ROOT, 'tsconfig.json'), join(hProjectRoot, 'tsconfig.json'))
+    await cp(join(PROJECT_ROOT, 'index.html'), join(hProjectRoot, 'index.html'))
+    await symlink(join(PROJECT_ROOT, 'node_modules'), join(hProjectRoot, 'node_modules'), 'junction')
+    await cp(join(PROJECT_ROOT, 'src'), join(hProjectRoot, 'src'), { recursive: true })
+    await cp(join(PROJECT_ROOT, 'public'), join(hProjectRoot, 'public'), { recursive: true }).catch(() => {})
+    await mkdir(join(hProjectRoot, 'scripts'), { recursive: true })
+    await cp(join(PROJECT_ROOT, 'scripts', 'validatePrecacheClosure.mjs'), join(hProjectRoot, 'scripts', 'validatePrecacheClosure.mjs'))
+
+    const originalViteConfig = await readFile(join(PROJECT_ROOT, 'vite.config.ts'), 'utf8')
+    // Phantom hashed URL: матчва hash-pattern-а (8 главни букви + .js), но
+    // файлът никога няма да съществува никъде — трябва да бъде класифициран
+    // като HASHED (не mutable, за разлика от [9]) и да блокира swap-а.
+    const brokenViteConfig = originalViteConfig.replace(
+      'injectManifest: {',
+      "injectManifest: {\n        additionalManifestEntries: [{ url: 'assets/phantom-name-ABCDEFGH.js', revision: 'test-marker' }],",
+    )
+    if (brokenViteConfig === originalViteConfig) {
+      throw new Error('vite.config.ts patch не съвпадна')
+    }
+    await writeFile(join(hProjectRoot, 'vite.config.ts'), brokenViteConfig)
+
+    const rBad = await runDeployScript(hDeployRoot, [], { PROJECT_ROOT: hProjectRoot, VITE_BUILD_ID: 'hashed-missing' })
+    await check('[14a] Deploy с липсващ HASHED precache ресурс fail-ва (exit != 0)', () => {
+      if (rBad.code === 0) throw new Error('Скриптът е върнал success въпреки липсващия hashed ресурс')
+    })
+    await check('[14b] Fail изходът категоризира ресурса като "shared hashed pool"', () => {
+      if (!rBad.stderr.includes('shared hashed pool')) throw new Error(`stderr:\n${rBad.stderr.slice(-1000)}`)
+    })
+    await check('[14c] Fail изходът споменава точно phantom hashed файла', () => {
+      if (!rBad.stderr.includes('phantom-name-ABCDEFGH.js')) throw new Error(`stderr:\n${rBad.stderr.slice(-1000)}`)
+    })
+    await check('[14d] releases/ остава празна (нищо не е публикувано)', () => {
+      const releasesNow = listReleases(hDeployRoot)
+      if (releasesNow.length !== 0) throw new Error(`releases=${JSON.stringify(releasesNow)}`)
+    })
+  } finally {
+    await rm(hProjectRoot, { recursive: true, force: true })
+    await rm(hDeployRoot, { recursive: true, force: true })
+  }
+
+  // ─── [15] --adopt baseline миграция + валиден rollback target след нов deploy ──
+  console.log('\nТествам --adopt baseline миграция (без build) + следващ нормален deploy...')
+  const adoptDeployRoot = await mkdtemp(join(tmpdir(), 'belot-adopt-deploy-'))
+  try {
+    const realDistPath = join(PROJECT_ROOT, 'dist')
+    if (!existsSync(join(realDistPath, 'index.html'))) {
+      throw new Error(`dist/ липсва или е непълен — очаквах вече build-нат dist от предходна стъпка: ${realDistPath}`)
+    }
+
+    const rAdopt = await runDeployScript(adoptDeployRoot, ['--adopt', realDistPath])
+    await check('[15a] --adopt завършва успешно, БЕЗ да build-ва (само копира съществуващия dist)', () => {
+      if (rAdopt.code !== 0) throw new Error(`exit=${rAdopt.code}\n${rAdopt.stdout.slice(-500)}\n${rAdopt.stderr.slice(-500)}`)
+      if (rAdopt.stdout.includes('building client environment for production')) {
+        throw new Error('--adopt погрешно е задействал реален vite build — трябваше само да копира')
+      }
+      if (!rAdopt.stdout.includes('Adopt режим')) throw new Error('Логът не потвърждава adopt режима')
+    })
+    const baselineRelease = listReleases(adoptDeployRoot)[0]
+    await check('[15b] Baseline release id съдържа "baseline" маркера', () => {
+      if (!baselineRelease.includes('baseline')) throw new Error(`release id=${baselineRelease}`)
+    })
+    await check('[15c] Baseline "current" е готов ЛОКАЛНО (index.html + hashed pool + mutable assets всички налични)', () => {
+      if (!existsSync(join(adoptDeployRoot, 'current', 'index.html'))) throw new Error('current/index.html липсва')
+      const poolFiles = existsSync(join(adoptDeployRoot, 'assets')) ? readdirSync(join(adoptDeployRoot, 'assets')) : []
+      if (poolFiles.length === 0) throw new Error('shared hashed pool е празен след adopt')
+    })
+
+    // Нов, реален deploy (build) върху вече мигрирания baseline.
+    await sleep(1100)
+    const rSecond = await runDeployScript(adoptDeployRoot, [], { VITE_BUILD_ID: 'post-adopt-real' })
+    await check('[15d] Следващ нормален (реален build) deploy след --adopt завършва успешно', () => {
+      if (rSecond.code !== 0) throw new Error(`exit=${rSecond.code}\n${rSecond.stdout.slice(-500)}\n${rSecond.stderr.slice(-500)}`)
+    })
+    const releasesAfterSecond = listReleases(adoptDeployRoot)
+    await check('[15e] След първия нов deploy има точно 2 release-а (baseline + новия)', () => {
+      if (releasesAfterSecond.length !== 2) throw new Error(`releases=${JSON.stringify(releasesAfterSecond)}`)
+    })
+
+    if (HAS_REAL_SYMLINKS) {
+      const rollbackDry = await runDeployScript(adoptDeployRoot, ['--rollback', '--dry-run'])
+      await check('[15f] Валиден rollback target съществува — сочи към baseline release-а', () => {
+        if (!rollbackDry.stdout.includes(`-> ${baselineRelease}`)) {
+          throw new Error(`Очаквах rollback target ${baselineRelease}:\n${rollbackDry.stdout}`)
+        }
+      })
+    } else {
+      skip('[15f] Валиден rollback target след --adopt', 'изисква истински symlink за "current" — недоказуемо на тази машина')
+    }
+  } finally {
+    await rm(adoptDeployRoot, { recursive: true, force: true })
   }
 } finally {
   if (deployRoot) await rm(deployRoot, { recursive: true, force: true }).catch(() => {})

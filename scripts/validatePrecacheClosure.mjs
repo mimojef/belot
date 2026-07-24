@@ -12,15 +12,20 @@
  * "images/cards – Копие/card-back.png"), които bash word-splitting/regex
  * би трошил.
  *
- * Логика на резолюция за всеки precache URL:
- *   - ако е URL, започващ с "assets/" → трябва да съществува в
- *     SHARED_ASSETS_DIR (споделения, кумулативен pool) под същото
- *     относително име (без "assets/" префикса).
- *   - иначе → трябва да съществува в RELEASE_STATIC_DIR (release
- *     директорията, на мястото, където вече са копирани всички
- *     не-hashed public/ файлове — ПРЕДИ index.html/sw.js/manifest да
- *     бъдат копирани там, т.е. извикваме тази проверка точно в тази
- *     междинна точка на deploy pipeline-а).
+ * Логика на резолюция за всеки precache URL (3 категории, виж
+ * scripts/deployFrontendAtomic.sh за пълния коментар за произхода на
+ * разделянето):
+ *
+ *   1. URL под "assets/" с Vite/Rollup content-hash в името (index-HASH.js,
+ *      index-HASH.css, workbox-window-HASH.js) → трябва да съществува в
+ *      SHARED_ASSETS_DIR (споделения, immutable, кумулативен pool).
+ *   2. URL под "assets/" БЕЗ hash в името (avatars/, lobby/, landing-page/
+ *      и т.н. — verbatim от public/assets/**, стабилни имена, mutable
+ *      съдържание между releases) → трябва да съществува в
+ *      RELEASE_STATIC_DIR/assets/... (release-specific, не в pool-а).
+ *   3. Всеки друг URL (root/статични файлове — icons/, audio/, favicon.*,
+ *      manifest.webmanifest и т.н.) → трябва да съществува директно в
+ *      RELEASE_STATIC_DIR/...
  *
  * Употреба:
  *   node validatePrecacheClosure.mjs <sw.js-path> <sharedAssetsDir> <releaseStaticDir>
@@ -31,6 +36,25 @@
 
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+
+// ИДЕНТИЧЕН regex на is_hashed_asset() в scripts/deployFrontendAtomic.sh —
+// умишлено дублиран (bash и Node не си споделят код), но двата трябва да
+// класифицират еднакво всеки файл, иначе validator-ът би проверявал грешно
+// място спрямо това, което deploy стъпката реално е копирала. Тествано
+// срещу реалната build структура (169 assets/ файла, 0 несъответствия
+// спрямо public/ ground truth — виж diagnostic отчета).
+const HASHED_ASSET_PATTERN = /-[0-9A-Za-z_-]{8,10}\.(?:js|mjs|css)$/
+
+function classifyUrl(url) {
+  if (!url.startsWith('assets/')) {
+    return { category: 'root', label: 'release root' }
+  }
+  const rel = url.slice('assets/'.length)
+  if (HASHED_ASSET_PATTERN.test(rel)) {
+    return { category: 'hashed', label: 'shared hashed pool', rel }
+  }
+  return { category: 'mutable', label: 'release mutable assets', rel }
+}
 
 const [, , swJsPath, sharedAssetsDir, releaseStaticDir] = process.argv
 
@@ -65,18 +89,31 @@ if (urls.length === 0) {
 }
 
 const missing = []
+let hashedCount = 0
+let mutableCount = 0
+let rootCount = 0
+
 for (const url of urls) {
-  const isAssetsUrl = url.startsWith('assets/')
-  const resolvedPath = isAssetsUrl
-    ? join(sharedAssetsDir, url.slice('assets/'.length))
-    : join(releaseStaticDir, url)
+  const info = classifyUrl(url)
+  const resolvedPath = info.category === 'hashed'
+    ? join(sharedAssetsDir, info.rel)
+    : info.category === 'mutable'
+      ? join(releaseStaticDir, 'assets', info.rel)
+      : join(releaseStaticDir, url)
+
+  if (info.category === 'hashed') hashedCount++
+  else if (info.category === 'mutable') mutableCount++
+  else rootCount++
 
   if (!existsSync(resolvedPath)) {
-    missing.push({ url, resolvedPath, pool: isAssetsUrl ? 'assets pool' : 'release static' })
+    missing.push({ url, resolvedPath, pool: info.label })
   }
 }
 
-console.log(`Precache manifest: ${urls.length} URL-а общо (${urls.filter((u) => u.startsWith('assets/')).length} под assets/, ${urls.filter((u) => !u.startsWith('assets/')).length} други).`)
+console.log(
+  `Precache manifest: ${urls.length} URL-а общо `
+  + `(${hashedCount} hashed под assets/, ${mutableCount} mutable под assets/, ${rootCount} root/static).`,
+)
 
 if (missing.length > 0) {
   console.error(`\nЛИПСВАЩИ precache ресурси (${missing.length}):`)
