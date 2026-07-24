@@ -5,6 +5,15 @@ import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
+
+sharp.block({
+  operation: [
+    'VipsForeignLoadNsgif',
+    'VipsForeignLoadTiff',
+    'VipsForeignLoadVips',
+  ],
+})
+
 import Stripe from 'stripe'
 import { WebSocketServer, WebSocket, type RawData } from 'ws'
 import { createActiveRoomSnapshotStore } from './db/activeRoomSnapshotStore.js'
