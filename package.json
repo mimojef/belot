@@ -11,9 +11,12 @@
     "check:gift-notification-modal-fix": "npx tsx scripts/checkGiftNotificationModalFix.ts",
     "check:cutting-pile-stack-order-fix": "npx tsx scripts/checkCuttingPileStackOrderFix.ts",
     "check:chat-message-notification": "npx tsx scripts/checkChatMessageNotification.ts",
-    "check:pwa-auto-update": "npx tsx scripts/checkPwaAutoUpdate.ts"
+    "check:pwa-auto-update": "npx tsx scripts/checkPwaAutoUpdate.ts",
+    "check:frontend-deploy-atomic": "npx tsx scripts/checkFrontendDeployAtomic.ts",
+    "check:bootstrap-recovery": "npx tsx scripts/checkBootstrapRecovery.ts"
   },
   "devDependencies": {
+    "playwright": "^1.61.1",
     "typescript": "~5.9.3",
     "vite": "^8.0.1",
     "vite-plugin-pwa": "^1.3.0"

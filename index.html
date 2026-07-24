@@ -32,6 +32,59 @@
           var app = document.getElementById('app')
           if (!app || app.children.length > 0 || document.getElementById('pika-bootstrap-recovery')) return
 
+          // Пази текущия път/query/hash — recovery-то трябва да върне
+          // потребителя там, откъдето е дошъл (/, /lobby, /strategy и т.н.),
+          // не винаги на /lobby. recoveryReload маркерът се маха от main.ts
+          // след успешно зареждане (независимо от pathname).
+          function urlWithRecoveryMarker() {
+            var target = new URL(window.location.href)
+            target.searchParams.set('recoveryReload', String(Date.now()))
+            return target.pathname + target.search + target.hash
+          }
+
+          function clearStaleServiceWorkerState() {
+            var clearWorkers = 'serviceWorker' in navigator
+              ? navigator.serviceWorker.getRegistrations().then(function (registrations) {
+                return Promise.all(registrations.map(function (registration) { return registration.unregister() }))
+              })
+              : Promise.resolve()
+            var clearCaches = 'caches' in window
+              ? caches.keys().then(function (keys) {
+                return Promise.all(keys.map(function (key) { return caches.delete(key) }))
+              })
+              : Promise.resolve()
+
+            return Promise.all([clearWorkers, clearCaches])
+          }
+
+          // Само ЕДИН автоматичен recovery опит на browser сесия
+          // (sessionStorage — ново табче/сесия получава свеж опит; main.ts
+          // маха маркера при успешно зареждане, така че легитимен ПОВТОРЕН
+          // проблем по-късно в същата сесия пак получава auto-retry).
+          // Без този guard, ако автоматичното презареждане не оправи нищо
+          // (реален, неотстранен deploy дефект), браузърът би влязъл в
+          // безкраен reload loop.
+          var AUTO_RETRY_GUARD_KEY = 'pika-bootstrap-recovery-auto-retry'
+          var alreadyAutoRetried = false
+          try {
+            alreadyAutoRetried = sessionStorage.getItem(AUTO_RETRY_GUARD_KEY) === '1'
+          } catch (e) { /* sessionStorage недостъпен — третирай като неопитан */ }
+
+          if (!alreadyAutoRetried) {
+            try {
+              sessionStorage.setItem(AUTO_RETRY_GUARD_KEY, '1')
+            } catch (e) { /* ignore */ }
+
+            clearStaleServiceWorkerState().finally(function () {
+              window.location.replace(urlWithRecoveryMarker())
+            })
+            return
+          }
+
+          // Автоматичният опит вече беше направен в тази сесия и пак не
+          // помогна — последна защита: покажи ръчния бутон. Това НЕ трябва
+          // да маскира реален, неотстранен deploy дефект — вижда се само
+          // ако автоматичният опит вече се е провалил.
           var recovery = document.createElement('div')
           recovery.id = 'pika-bootstrap-recovery'
           recovery.style.cssText = [
@@ -50,19 +103,8 @@
           document.body.appendChild(recovery)
 
           document.getElementById('pika-bootstrap-recovery-btn').addEventListener('click', function () {
-            var clearWorkers = 'serviceWorker' in navigator
-              ? navigator.serviceWorker.getRegistrations().then(function (registrations) {
-                return Promise.all(registrations.map(function (registration) { return registration.unregister() }))
-              })
-              : Promise.resolve()
-            var clearCaches = 'caches' in window
-              ? caches.keys().then(function (keys) {
-                return Promise.all(keys.map(function (key) { return caches.delete(key) }))
-              })
-              : Promise.resolve()
-
-            Promise.all([clearWorkers, clearCaches]).finally(function () {
-              window.location.replace('/lobby?recoveryReload=' + Date.now())
+            clearStaleServiceWorkerState().finally(function () {
+              window.location.replace(urlWithRecoveryMarker())
             })
           })
         }, 5000)

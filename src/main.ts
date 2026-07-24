@@ -3574,9 +3574,29 @@ const isStripePaymentReturn =
 const offlineReloadParam = stripeReturnParams.get('offlineReload')
 const recoveryReloadParam = stripeReturnParams.get('recoveryReload')
 
-if ((offlineReloadParam !== null || recoveryReloadParam !== null) && window.location.pathname === '/lobby') {
+// offlineReload е умишлено само /lobby (forceOfflineLobbyReload() винаги
+// генерира точно /lobby?offlineReload=...) — непроменен flow.
+if (offlineReloadParam !== null && window.location.pathname === '/lobby') {
   history.replaceState(null, '', '/lobby')
 }
+
+// recoveryReload (index.html bootstrap recovery) трябва да върне
+// потребителя на ТОЧНО пътя, откъдето е тръгнал (/, /lobby, /strategy...),
+// не само /lobby — маха се тук, независимо от pathname, без да пипа други
+// query параметри или hash.
+if (recoveryReloadParam !== null) {
+  const cleanedUrl = new URL(window.location.href)
+  cleanedUrl.searchParams.delete('recoveryReload')
+  history.replaceState(null, '', cleanedUrl.pathname + cleanedUrl.search + cleanedUrl.hash)
+}
+
+// main.ts стигна дотук изпълнимо → bootstrap-ът реално успя този път.
+// Изчисти auto-retry guard-а от index.html recovery script-а, за да може
+// легитимен БЪДЕЩ bootstrap проблем в същата сесия пак да получи един
+// автоматичен опит, вместо направо да скача към ръчния бутон.
+try {
+  sessionStorage.removeItem('pika-bootstrap-recovery-auto-retry')
+} catch { /* sessionStorage недостъпен — няма какво да чистим */ }
 
 // Landing страница — показва се само в браузър и без валиден path (не в standalone режим)
 // Трябва да е ПРЕДИ lobby.render() за да може syncUrlPath() да я засече

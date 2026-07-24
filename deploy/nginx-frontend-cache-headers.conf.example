@@ -1,0 +1,105 @@
+# nginx-frontend-cache-headers.conf.example
+#
+# ПРЕПОРЪЧАН location блок за https://pika.bg frontend-a. Не е приложен към
+# production — само reference за отделно ръчно review/одобрение (виж
+# production deployment плана).
+#
+# КОНТЕКСТ (доказано с реален curl срещу production, read-only, без действия):
+#   - / и /index.html в момента се връщат БЕЗ никакъв Cache-Control header
+#     (само ETag + Last-Modified) → браузърите прилагат heuristic freshness
+#     (RFC 7234) и МОГАТ да сервират кеширано старо index.html без изобщо
+#     да направят revalidation заявка — това е ДОПЪЛНИТЕЛНА, отделна от
+#     build-race-а причина браузър да зареди стар index.html, който реферира
+#     вече изтрит hashed asset след следващ deploy.
+#   - /sw.js също няма Cache-Control — service worker update check-ът
+#     (registration.update()) зависи от това browser-ът реално да провери
+#     мрежата, не стар кеш.
+#   - /assets/index-*.js и /assets/index-*.css (content-hashed имена) СЪЩО
+#     нямат Cache-Control в момента — под-оптимално (излишни revalidation
+#     заявки за файлове, чието съдържание никога не се променя под същото
+#     име), макар и не толкова опасно, колкото HTML/SW проблема.
+#
+# Ако е приет releases/current моделът от scripts/deployFrontendAtomic.sh:
+#   root /var/www/belot-v2/current;       за index.html/sw.js/manifest и т.н.
+#   /var/www/belot-v2/assets/             СПОДЕЛЕН, кумулативен pool за
+#                                          content-hashed JS/CSS — НЕ живее
+#                                          вътре в current/release
+#                                          директориите, защото старите
+#                                          hash-ове иначе биха изчезнали от
+#                                          обслужване веднага щом current
+#                                          превключи към нов release.
+# (nginx resolve-ва symlink-а on-the-fly при всяка заявка — не изисква
+# nginx -s reload при всеки deploy, само при промяна на самия nginx config).
+
+server {
+    # ... съществуващи server_name / listen / ssl директиви — непроменени ...
+
+    root /var/www/belot-v2/current;
+    index index.html;
+
+    # ─── index.html / navigation fallback — НИКОГА дългосрочно кеширано ────
+    # Service worker-ът вече прави navigation requests network-only (виж
+    # src/sw.ts), но browser-ът трябва и той да провери мрежата всеки път,
+    # иначе heuristic caching може да сервира старо index.html локално, без
+    # изобщо да стигне до сървъра.
+    location = / {
+        add_header Cache-Control "no-cache, must-revalidate" always;
+        try_files /index.html =404;
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-cache, must-revalidate" always;
+    }
+
+    # ─── service worker — трябва винаги да е revalidate-нат ────────────────
+    # registration.update() (виж src/pwa.ts requestPwaUpdateCheck) разчита
+    # browser-ът реално да удари мрежата и да сравни байт-по-байт, за да
+    # detect-не нов SW. Дългосрочен кеш тук би заключил клиентите на стара
+    # версия неопределено дълго.
+    location = /sw.js {
+        add_header Cache-Control "no-cache, must-revalidate" always;
+        add_header Service-Worker-Allowed "/" always;
+    }
+
+    location = /manifest.webmanifest {
+        add_header Cache-Control "no-cache, must-revalidate" always;
+    }
+
+    location = /offline.html {
+        add_header Cache-Control "no-cache, must-revalidate" always;
+    }
+
+    # ─── hashed assets (съдържат Vite content hash в името) — immutable ────
+    # Всяка промяна в съдържанието произвежда НОВО име на файл — старото име
+    # никога не сочи към различно съдържание, значи е безопасно за
+    # дългосрочен, immutable кеш.
+    #
+    # ВАЖНО: сочи към СПОДЕЛЕНИЯ pool (deployFrontendAtomic.sh публикува
+    # hashed assets в $DEPLOY_ROOT/assets/, НЕ вътре в current/release
+    # директорията) — иначе стар hash изчезва от обслужване веднага щом
+    # current превключи към нов release, което би счупило точно сценария,
+    # който retention-ът трябва да пази.
+    location ^~ /assets/ {
+        alias /var/www/belot-v2/assets/;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+    }
+
+    # ─── статични, невhashed ресурси (икони, audio и т.н.) — умерен кеш ────
+    # Не са content-hashed, но се променят рядко — умерен max-age с
+    # revalidation, не immutable.
+    location ~* \.(?:png|webp|svg|ico|mp3|woff2)$ {
+        add_header Cache-Control "public, max-age=86400" always;
+    }
+
+    # ─── API/WS/uploads/health — НИКОГА кеширани от nginx самия (без промяна) ──
+    # location /api/ { ... } — непроменена, извън обхвата на тази задача.
+    # location /ws { ... }   — непроменена.
+    # location /uploads/ { ... } — непроменена.
+
+    location / {
+        try_files $uri $uri/ /index.html;
+        # Fallback за SPA routes (/lobby, /strategy и т.н.) — index.html пак
+        # получава no-cache чрез именования location блок по-горе, тъй като
+        # nginx избира най-специфичния матчващ location, не първия срещнат.
+    }
+}
