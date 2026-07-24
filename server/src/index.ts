@@ -551,6 +551,13 @@ function prepareRestoredRoomForServerStart(
         connectionId: null,
         isConnected: false,
         lastSeenAt: now,
+        // Legacy snapshots (записани преди добавянето на полето) нямат
+        // permanentlyLeftAt в JSON-а изобщо → след JSON.parse е `undefined`,
+        // не `null`. Нормализираме тук, на единственото място, което вече
+        // rehydrate-ва всеки restored human participant — иначе isProfileInActiveGame
+        // би третирала undefined различно от null според само TS типа,
+        // който JSON round-trip не спазва рънтайм.
+        permanentlyLeftAt: participant.permanentlyLeftAt ?? null,
       },
     }
   }
@@ -1482,7 +1489,16 @@ function isProfileInActiveGame(profileId: string): boolean {
       const participantProfileId =
         participant?.identity.profileId ?? participant?.publicProfile?.profileId ?? null
 
-      if (participant?.kind === 'human' && participantProfileId === profileId) {
+      if (
+        participant?.kind === 'human' &&
+        participantProfileId === profileId &&
+        // Loose (== null), не strict — legacy restored участници могат да
+        // имат permanentlyLeftAt===undefined, ако по някаква причина не са
+        // минали през prepareRestoredRoomForServerStart нормализацията
+        // (напр. диагностика/друг read path). undefined и null трябва да
+        // означават едно и също: "не е отбелязано доброволно напускане".
+        participant.permanentlyLeftAt == null
+      ) {
         return true
       }
     }
@@ -7641,6 +7657,7 @@ wsServer.on('connection', (socket, request) => {
             connection.id,
           ),
           reconnectToken: null,
+          permanentlyLeftAt: Date.now(),
         }
         const disconnectedRoom = updateHumanParticipantInRoom(
           roomWithLeaveVote,

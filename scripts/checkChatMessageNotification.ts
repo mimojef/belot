@@ -16,6 +16,32 @@
  *     index.ts/chatStore.ts, и че звукът реюзва съществуващия audio helper
  *     pattern (player-seat-fill.mp3), не нов файл.
  *
+ *  C) РЕАЛНИ поведенчески тестове върху src/pendingChatRefreshTracker.ts
+ *     (чист state machine, без DOM/network зависимост) — regression покритие
+ *     за production бъга: чат съобщение по време на игра показва popup
+ *     коректно, но conversation/unread state оставаше остарял след напускане
+ *     на масата, защото chat GET заявките продължават да връщат 403 известно
+ *     време след leave (сървърът брои профила като "в игра" докато bot
+ *     takeover довърши мача вместо напусналия играч — виж
+ *     server/src/game/abandonHumanControlForRoom.ts, player.mode остава
+ *     'human'). Тук се доказва самата логика "маркерът устоява на неуспешни
+ *     опити, изчиства се само при потвърден успех, няма дублирани заявки при
+ *     няколко съобщения, няма tight retry loop" — не чрез regex.
+ *
+ *  D) Source-text проверки, че main.ts реално свързва tracker-а на
+ *     правилните lifecycle точки (showLobby, startNewGame, visibilitychange,
+ *     pageshow, focus) и че popup dismiss/auto-hide не го пипа.
+ *
+ * MANUAL/RUNTIME-VERIFIED (извън автоматизирания suite — изисква реален
+ * spawned HTTP+WS сървър + реален Chromium браузър, виж диагностичната сесия
+ * от този fix): с два напълно изолирани browser contexts, реален matchmaking
+ * bot-fill до room.status==='playing', и реално доброволно напускане на
+ * масата — потвърдено е, че (1) GET /api/chat/conversations връща 403 и
+ * директно след left_active_room, и до ~2 минути по-късно (persistent, не
+ * race); (2) dispatch на synthetic 'focus' докато все още блокирано коректно
+ * задейства нов опит (брой заявки расте), без permanent give-up; (3) build
+ * на текущия HEAD е потвърден зареден в browser контекста.
+ *
  * Изпълнява се в Node.js чрез tsx, без build/dev server.
  */
 
@@ -26,6 +52,13 @@ import {
   createChatNotificationQueue,
   type ChatNotificationEvent,
 } from '../src/ui/notifications/chatNotificationQueue.ts'
+import {
+  markPendingChatRefresh,
+  clearPendingChatRefresh,
+  isChatRefreshPending,
+  attemptPendingChatRefresh,
+  resetPendingChatRefreshTrackerForTests,
+} from '../src/pendingChatRefreshTracker.ts'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(__dirname, '..')
@@ -36,6 +69,7 @@ const CONTROLLER_PATH = join(REPO_ROOT, 'src', 'app', 'lobby', 'createLobbyFlowC
 const CLIENT_PATH = join(REPO_ROOT, 'src', 'app', 'network', 'createGameServerClient.ts')
 const SERVER_INDEX_PATH = join(REPO_ROOT, 'server', 'src', 'index.ts')
 const CHAT_STORE_PATH = join(REPO_ROOT, 'server', 'src', 'db', 'chatStore.ts')
+const TRACKER_PATH = join(REPO_ROOT, 'src', 'pendingChatRefreshTracker.ts')
 
 let passed = 0
 let failed = 0
@@ -96,6 +130,7 @@ const controllerSrc = normalizeLineEndings(await readFile(CONTROLLER_PATH, 'utf8
 const clientSrc = normalizeLineEndings(await readFile(CLIENT_PATH, 'utf8'))
 const serverSrc = normalizeLineEndings(await readFile(SERVER_INDEX_PATH, 'utf8'))
 const chatStoreSrc = normalizeLineEndings(await readFile(CHAT_STORE_PATH, 'utf8'))
+const trackerSrc = normalizeLineEndings(await readFile(TRACKER_PATH, 'utf8'))
 
 console.log('\n=== Chat Message Notification Checks ===\n')
 
@@ -741,6 +776,185 @@ await check('[B14] Popup не блокира игровото управлени
 
 await check('[B15] Позициониране отчита mobile safe-area (notch)', () => {
   assert(notifSrc.includes('env(safe-area-inset-top, 0px)'), 'top позиционирането трябва да добавя safe-area отстъп')
+})
+
+// ─── C) РЕАЛНО поведение на pendingChatRefreshTracker (не regex) ────────────
+//
+// Regression покритие за: чат съобщение по време на игра → popup се показва,
+// но unread conversation state остава остарял (chat GET би 403-нал) → трябва
+// маркер, който устоява до успешен refresh на следващ сигурен lifecycle
+// момент (връщане в лоби / PWA resume), без дублирани заявки и без tight loop.
+//
+// Реален production сценарий, довел до тази поправка: получателят получава
+// popup коректно (сървърна routing логика вече потвърдена в отделни runtime
+// тестове), но дори СЛЕД напускане на масата сървърът продължава да брои
+// профила като "в активна игра" известно време (bot takeover довършва
+// оставащия мач вместо напусналия играч, без да го маркира като бот
+// участник — виж server/src/game/abandonHumanControlForRoom.ts), затова
+// първите опити за refresh реално получават 403. Тестовете тук доказват, че
+// tracker-ът устоява на точно такива неуспехи, вместо да се предаде.
+
+console.log('\n=== C) pendingChatRefreshTracker — реално поведение ===\n')
+
+await check('[C1] Без markPendingChatRefresh() → attempt() е "skipped", performRefresh НЕ се вика', async () => {
+  resetPendingChatRefreshTrackerForTests()
+  let calls = 0
+  const result = await attemptPendingChatRefresh(true, async () => { calls++; return true })
+  assert(result === 'skipped', `очаквано 'skipped', получено '${result}'`)
+  assert(calls === 0, `performRefresh не трябва да се вика, извикан е ${calls} пъти`)
+})
+
+await check('[C2] markPendingChatRefresh() + canAttemptNow=false → "blocked", performRefresh НЕ се вика (все още локално сме в игра)', async () => {
+  resetPendingChatRefreshTrackerForTests()
+  markPendingChatRefresh()
+  let calls = 0
+  const result = await attemptPendingChatRefresh(false, async () => { calls++; return true })
+  assert(result === 'blocked', `очаквано 'blocked', получено '${result}'`)
+  assert(calls === 0, 'performRefresh не трябва да се вика докато canAttemptNow=false')
+  assert(isChatRefreshPending(), 'маркерът трябва да остане pending')
+})
+
+await check('[C3] markPendingChatRefresh() + canAttemptNow=true, но refresh се проваля (симулира 403) → "failed", маркерът устоява', async () => {
+  resetPendingChatRefreshTrackerForTests()
+  markPendingChatRefresh()
+  const result = await attemptPendingChatRefresh(true, async () => false)
+  assert(result === 'failed', `очаквано 'failed', получено '${result}'`)
+  assert(isChatRefreshPending(), 'маркерът НЕ трябва да се изчисти при неуспешен refresh — точно това е production бъгът, който поправяме')
+})
+
+await check('[C4] След неуспешен опит, следващ опит с успешен refresh → "succeeded", маркерът се изчиства', async () => {
+  resetPendingChatRefreshTrackerForTests()
+  markPendingChatRefresh()
+  const failedResult = await attemptPendingChatRefresh(true, async () => false)
+  assert(failedResult === 'failed', 'първият опит трябва да е неуспешен (симулация на все още активен isProfileInActiveGame гейт)')
+  assert(isChatRefreshPending(), 'маркерът остава pending след неуспеха')
+
+  const successResult = await attemptPendingChatRefresh(true, async () => {
+    clearPendingChatRefresh() // симулира syncLobbyChatConversations() при success
+    return true
+  })
+  assert(successResult === 'succeeded', `очаквано 'succeeded', получено '${successResult}'`)
+  assert(!isChatRefreshPending(), 'маркерът трябва да е изчистен след успешния refresh')
+})
+
+await check('[C5] Няколко съобщения (няколко markPendingChatRefresh извиквания) → само ЕДИН успешен опит е достатъчен, без дублирани заявки', async () => {
+  resetPendingChatRefreshTrackerForTests()
+  markPendingChatRefresh() // съобщение 1
+  markPendingChatRefresh() // съобщение 2 (все още в същата игра)
+  markPendingChatRefresh() // съобщение 3
+
+  let refreshCalls = 0
+  const result = await attemptPendingChatRefresh(true, async () => {
+    refreshCalls++
+    clearPendingChatRefresh()
+    return true
+  })
+
+  assert(result === 'succeeded', 'опитът трябва да успее')
+  assert(refreshCalls === 1, `performRefresh трябва да се извика точно 1 път за целия "burst" от съобщения, извикан е ${refreshCalls} пъти`)
+  assert(!isChatRefreshPending(), 'маркерът трябва да е изчистен')
+})
+
+await check('[C6] Конкурентен опит докато друг вече тече (in-flight) → "skipped", performRefresh НЕ се извиква повторно (no duplicate GET)', async () => {
+  resetPendingChatRefreshTrackerForTests()
+  markPendingChatRefresh()
+
+  let refreshCalls = 0
+  let resolveFirst: (value: boolean) => void = () => {}
+  const firstRefreshPromise = new Promise<boolean>((resolve) => { resolveFirst = resolve })
+
+  const firstAttempt = attemptPendingChatRefresh(true, async () => {
+    refreshCalls++
+    return firstRefreshPromise // виси, докато не resolve-нем ръчно
+  })
+
+  // Втори опит, докато първият все още "тече" (in-flight guard)
+  const secondResult = await attemptPendingChatRefresh(true, async () => {
+    refreshCalls++
+    return true
+  })
+  assert(secondResult === 'skipped', `конкурентен опит трябва да е 'skipped', получено '${secondResult}'`)
+  assert(refreshCalls === 1, `performRefresh трябва да се е извикал само 1 път дотук (от първия опит), извикан е ${refreshCalls} пъти`)
+
+  resolveFirst(true)
+  const firstResult = await firstAttempt
+  assert(firstResult === 'failed' || firstResult === 'succeeded', 'първият опит трябва в крайна сметка да завърши')
+  assert(refreshCalls === 1, `performRefresh трябва да се е извикал общо само 1 път, извикан е ${refreshCalls} пъти`)
+})
+
+await check('[C7] Многократни неуспешни опити не хвърлят грешка и не увисват — всеки resolve-ва бързо (без tight retry loop)', async () => {
+  resetPendingChatRefreshTrackerForTests()
+  markPendingChatRefresh()
+
+  for (let i = 0; i < 5; i++) {
+    const start = Date.now()
+    const result = await attemptPendingChatRefresh(true, async () => false)
+    const elapsedMs = Date.now() - start
+    assert(result === 'failed', `опит ${i + 1} трябва да е 'failed'`)
+    assert(elapsedMs < 1000, `опит ${i + 1} не трябва да виси — отне ${elapsedMs}ms`)
+  }
+  assert(isChatRefreshPending(), 'маркерът остава pending след серия неуспешни опити — не се отказва завинаги')
+})
+
+resetPendingChatRefreshTrackerForTests()
+
+// ─── D) Wiring source checks — main.ts свързва tracker-а на правилните lifecycle точки ──
+
+console.log('\n=== D) main.ts wiring на pendingChatRefreshTracker ===\n')
+
+await check('[D1] chat_message_received: markPendingChatRefresh() се вика САМО в клона за "все още в игра" (не при !isInGameNow)', () => {
+  const block = extractBlock(mainSrc, `if (message.type === 'chat_message_received') {`, 'chat_message_received handler', "\n      return\n    }")
+  assert(
+    /if \(!isInGameNow\) \{\s*\n\s*lobby\.handleServerMessage\(message\)\s*\n\s*\} else if \(!isOwnMessage\) \{\s*\n[\s\S]*?markPendingChatRefresh\(\)/.test(block),
+    'markPendingChatRefresh() трябва да се вика в else-клона (isInGameNow && !isOwnMessage), не безусловно',
+  )
+})
+
+await check('[D2] showLobby callback вика attemptPendingChatRefresh (връщане в лоби — leave/resume-failed/match-ended пътища)', () => {
+  const wiring = extractBlock(mainSrc, 'showLobby: (errorText = null) => {', 'showLobby wiring', '\n  },')
+  assert(wiring.includes('void attemptPendingChatRefresh()'), 'showLobby трябва да опита pending chat refresh при всяко връщане в лоби')
+})
+
+await check('[D3] startNewGame callback ("Играй пак" от match-ended, байпасва showLobby) също вика attemptPendingChatRefresh', () => {
+  const wiring = extractBlock(mainSrc, 'startNewGame: (stake, displayName) => {', 'startNewGame wiring', '\n  },')
+  assert(wiring.includes('void attemptPendingChatRefresh()'), 'startNewGame трябва също да опита refresh, иначе "Играй пак" пътят пропуска синхронизацията')
+})
+
+await check('[D4] visibilitychange (PWA resume/tab focus) опитва refresh, когато страницата стане видима', () => {
+  const block = extractBlock(mainSrc, `document.addEventListener('visibilitychange', () => {`, 'visibilitychange handler', '\n})')
+  assert(/if \(document\.visibilityState === 'visible'\) \{[\s\S]*?void attemptPendingChatRefresh\(\)/.test(block), 'visibilitychange трябва да опита refresh при visible')
+})
+
+await check('[D5] pageshow (bfcache restore) опитва refresh', () => {
+  const block = extractBlock(mainSrc, `window.addEventListener('pageshow', () => {`, 'pageshow handler', '\n})')
+  assert(block.includes('void attemptPendingChatRefresh()'), 'pageshow трябва да опита refresh')
+})
+
+await check('[D6] window focus listener съществува и опитва refresh', () => {
+  const block = extractBlock(mainSrc, `window.addEventListener('focus', () => {`, 'focus handler', '\n})')
+  assert(block.includes('void attemptPendingChatRefresh()'), 'focus трябва да опита refresh')
+})
+
+await check('[D7] syncLobbyChatConversations() изчиства маркера САМО в success клона (result.ok), не безусловно', () => {
+  const fn = extractFunctionBody(mainSrc, 'async function syncLobbyChatConversations(): Promise<boolean> {', 'syncLobbyChatConversations')
+  const successBlock = extractBlock(fn, 'if (result.ok) {', 'success block', '\n    return true\n  }')
+  assert(successBlock.includes('clearPendingChatRefresh()'), 'clearPendingChatRefresh() трябва да се вика само след потвърден успешен GET')
+})
+
+await check('[D8] Popup dismiss/auto-hide/markRead (chatMessageNotification.ts, chatNotificationQueue.ts) НЕ пипат pendingChatRefreshTracker', () => {
+  assert(!notifSrc.includes('PendingChatRefresh'), 'chatMessageNotification.ts не трябва да реферира pendingChatRefreshTracker — dismiss не е mark-read, не е и chat-refresh trigger')
+  assert(!queueSrc.includes('PendingChatRefresh'), 'chatNotificationQueue.ts не трябва да реферира pendingChatRefreshTracker')
+})
+
+await check('[D9] attemptPendingChatRefresh (main.ts) проверява activeRoom.hasActiveRoom() преди опит — не стреля напразно докато локално знаем, че сме в игра', () => {
+  const fn = extractFunctionBody(mainSrc, 'async function attemptPendingChatRefresh(): Promise<void> {', 'attemptPendingChatRefresh (main.ts wrapper)')
+  assert(fn.includes('!activeRoom.hasActiveRoom()'), 'canAttemptNow трябва да проверява activeRoom.hasActiveRoom()')
+})
+
+await check('[D10] Няма нов polling/interval механизъм — синхронизацията е чисто event-driven (lifecycle hooks), не таймер', () => {
+  assert(!trackerSrc.includes('setInterval'), 'pendingChatRefreshTracker.ts не трябва да съдържа setInterval')
+  assert(!mainSrc.includes('setInterval(') || !extractBlock(mainSrc, 'async function attemptPendingChatRefresh(): Promise<void> {', 'attemptPendingChatRefresh (main.ts wrapper)', '\n}').includes('setInterval'),
+    'attemptPendingChatRefresh не трябва да стартира polling interval')
 })
 
 // ─── Резултат ────────────────────────────────────────────────────────────────

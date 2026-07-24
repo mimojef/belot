@@ -90,6 +90,17 @@ export type HumanRoomParticipant = {
   joinedAt: number
   lastSeenAt: number
   reconnectToken: string | null
+  /**
+   * Non-null само когато играчът окончателно и доброволно е напуснал масата
+   * (потвърдил е санкцията при "Излез") — за разлика от временен disconnect
+   * (reconnectToken се пази) или bot takeover при изтекъл timer
+   * (controlledByBot в authoritative game state, participant.kind остава
+   * 'human' до края на мача за history/attribution). Единствен писател:
+   * leave_active_room handler-ът в index.ts. Четец: isProfileInActiveGame —
+   * позволява на напусналия профил да ползва чат, докато ботът довършва
+   * мача вместо него, без да пипа kind/mode/controlledByBot.
+   */
+  permanentlyLeftAt: number | null
   identity: PlayerIdentitySnapshot
   publicProfile?: PlayerPublicProfileSnapshot | null
   isGuestTrial?: boolean

@@ -13,6 +13,11 @@ import {
   tryApplyPendingPwaUpdate,
   type PwaUpdateSafetyState,
 } from './pwaUpdateCoordinator'
+import {
+  markPendingChatRefresh,
+  clearPendingChatRefresh,
+  attemptPendingChatRefresh as attemptPendingChatRefreshTracker,
+} from './pendingChatRefreshTracker'
 import { createActiveRoomFlowController } from './app/activeRoom/createActiveRoomFlowController'
 import {
   isMatchEndedPreviewRequest,
@@ -394,17 +399,36 @@ async function syncLobbyFriendships(): Promise<void> {
   }
 }
 
-async function syncLobbyChatConversations(): Promise<void> {
+// Единствената точка, която реално дърпа /api/chat/conversations и прилага
+// резултата в lobby state-а. Изчиства pendingChatRefreshAfterGame при успех,
+// независимо кой я е извикал — loadAuthSession() я вика безусловно при всяко
+// връщане в лоби; attemptPendingChatRefresh() я вика условно, само докато
+// маркерът е активен. Ако едната вече е синхронизирала успешно, другата няма
+// какво да върши (маркерът вече е false) — така се избягва дублирана заявка.
+async function syncLobbyChatConversations(): Promise<boolean> {
   if (currentAuthSession === null) {
     lobby.setChatConversations([])
-    return
+    return true
   }
 
   const result = await loadChatConversations()
 
   if (result.ok) {
     lobby.setChatConversations(result.conversations)
+    clearPendingChatRefresh()
+    return true
   }
+
+  return false
+}
+
+// Извиква се на всеки сигурен lifecycle момент (връщане в лоби, PWA resume),
+// докато pendingChatRefreshTracker веднъж успее. canAttemptNow е локалната ни
+// преценка (не сме в игра, имаме сесия) — самата успешност на заявката пак
+// зависи от сървъра (виж коментара в pendingChatRefreshTracker.ts).
+async function attemptPendingChatRefresh(): Promise<void> {
+  const canAttemptNow = !activeRoom.hasActiveRoom() && currentAuthSession !== null
+  await attemptPendingChatRefreshTracker(canAttemptNow, syncLobbyChatConversations)
 }
 
 function refreshGameServerConnectionForAuth(): void {
@@ -484,6 +508,10 @@ async function submitAuthRequest(
 
     currentAuthSession = data.session
     saveSessionCache(currentAuthSession)
+    // Маркерът е module-level state, не е обвързан с конкретен профил —
+    // нова сесия (login/register) не трябва да наследи "pending" от преди
+    // (напр. предишен профил в същия таб/PWA runtime, или guest сесия).
+    clearPendingChatRefresh()
     syncLobbyWithAuthSession()
     lobby.resetToLobby()
     lobby.refreshDailyRewardsStatus()
@@ -509,6 +537,7 @@ async function submitLogout(): Promise<void> {
   }
   currentAuthSession = null
   clearSessionCache()
+  clearPendingChatRefresh()
   stopSupportUnreadPolling()
   stopMonitoringPolling()
   syncLobbyWithAuthSession()
@@ -3122,11 +3151,13 @@ const activeRoom = createActiveRoomFlowController({
     lobby.resetToLobby()
     lobby.setErrorText(errorText)
     void loadAuthSession()
+    void attemptPendingChatRefresh()
     requestPwaUpdateApplyAttempt()
   },
   startNewGame: (stake, displayName) => {
     lobby.setConnected(client.isConnected())
     lobby.startMatchmaking(stake, displayName)
+    void attemptPendingChatRefresh()
   },
   onGuestTrialReplayRequested: () => {
     lobby.setConnected(client.isConnected())
@@ -3413,6 +3444,13 @@ client = createGameServerClient({
 
       if (!isInGameNow) {
         lobby.handleServerMessage(message)
+      } else if (!isOwnMessage) {
+        // Докато сме в игра, chat GET заявки (lobby.handleServerMessage би
+        // задействал такава чрез refreshChatAfterNotification) биха 403-нали
+        // — виж isProfileInActiveGame на сървъра. Затова тук само отбелязваме,
+        // че conversation/unread state е остарял; реалният refresh се случва
+        // при следващ сигурен lifecycle момент — виж attemptPendingChatRefresh().
+        markPendingChatRefresh()
       }
       return
     }
@@ -3672,11 +3710,17 @@ function requestPwaUpdateCheckAndRetryApply(): void {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     requestPwaUpdateCheckAndRetryApply()
+    void attemptPendingChatRefresh()
   }
 })
 
 window.addEventListener('pageshow', () => {
   requestPwaUpdateCheckAndRetryApply()
+  void attemptPendingChatRefresh()
+})
+
+window.addEventListener('focus', () => {
+  void attemptPendingChatRefresh()
 })
 
 void loadPublicSettings()
