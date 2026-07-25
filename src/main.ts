@@ -72,6 +72,9 @@ import { createFriendRequestNotification } from './ui/notifications/friendReques
 import { createPartnerRatingNotification } from './ui/notifications/partnerRatingNotification'
 import { createChatMessageNotification } from './ui/notifications/chatMessageNotification'
 import { createVisitorPageViewTracker } from './app/visitors/createVisitorPageViewTracker'
+import { mountConsentUi } from './app/consent/consentUi'
+import { initializeAnalytics } from './app/analytics/initializeAnalytics'
+import { trackCompleteRegistration } from './app/analytics/metaPixel'
 import {
   extractAndClearResetToken,
   renderResetPasswordScreen,
@@ -526,6 +529,12 @@ async function submitAuthRequest(
     await syncLobbyFriendships()
     await syncLobbyChatConversations()
     refreshGameServerConnectionForAuth()
+    // Meta CompleteRegistration — само за успешен register, никога login.
+    // eventId е стабилен спрямо accountId (веднъж заделен от сървъра при
+    // успешен INSERT), не случаен UUID — идемпотентен дори при бъдещо CAPI.
+    if (endpoint === 'register') {
+      trackCompleteRegistration(`complete-registration-${currentAuthSession.account.accountId}`)
+    }
     return null
   } catch {
     return 'Няма връзка със сървъра за профили.'
@@ -3758,6 +3767,12 @@ const visitorPageViewTracker = createVisitorPageViewTracker({
   getViewLayout: () => isPhoneLayoutViewport() ? 'mobile' : 'desktop',
 })
 visitorPageViewTracker.start()
+
+// GDPR consent banner/modal + analytics (AdSense/Meta Pixel) bootstrap —
+// самостоятелен от лобито/играта, монтира се директно в document.body и
+// работи на всеки екран (виж src/app/consent/consentUi.ts).
+mountConsentUi()
+initializeAnalytics()
 
 // PWA — тихо автоматично обновяване. Никакъв popup/banner: onNeedRefresh
 // само записва pending update-а и моли coordinator-а да прецени дали

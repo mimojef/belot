@@ -3763,6 +3763,8 @@ function renderFooter(): string {
         <a data-lobby-footer-legal-link="1" href="/privacy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Политика за поверителност</a>
         <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
         <a data-lobby-footer-legal-link="1" href="/contact" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Контакти</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-footer-legal-link="1" data-consent-open-settings="1" href="#" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Настройки на бисквитките</a>
       </nav>
       <div style="color:rgba(255,255,255,0.52);font-size:13px;font-weight:700;white-space:nowrap;">
         © Pika.bg 2026 · Всички права запазени
@@ -3807,6 +3809,8 @@ function renderMobileFooter(): string {
         <a data-lobby-mobile-footer-legal-link="1" href="/privacy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Политика за поверителност</a>
         <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
         <a data-lobby-mobile-footer-legal-link="1" href="/contact" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Контакти</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" data-consent-open-settings="1" href="#" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Настройки на бисквитките</a>
       </nav>
     </footer>
   `

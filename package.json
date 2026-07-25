@@ -13,7 +13,8 @@
     "check:chat-message-notification": "npx tsx scripts/checkChatMessageNotification.ts",
     "check:pwa-auto-update": "npx tsx scripts/checkPwaAutoUpdate.ts",
     "check:frontend-deploy-atomic": "npx tsx scripts/checkFrontendDeployAtomic.ts",
-    "check:bootstrap-recovery": "npx tsx scripts/checkBootstrapRecovery.ts"
+    "check:bootstrap-recovery": "npx tsx scripts/checkBootstrapRecovery.ts",
+    "check:consent-analytics": "npx tsx scripts/checkConsentAnalytics.ts"
   },
   "devDependencies": {
     "playwright": "^1.61.1",
