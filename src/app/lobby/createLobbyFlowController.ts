@@ -125,8 +125,20 @@ export type CreateLobbyFlowControllerOptions = {
   onProfileGalleryDelete?: (targetProfileId: string | null, imageId: string) => Promise<string | null>
   onProfileNameChangeSubmit?: (targetProfileId: string | null, displayName: string) => Promise<string | null>
   onChangePasswordSubmit?: (currentPassword: string, newPassword: string) => Promise<string | null>
-  onPlayersLoad?: () => Promise<
-    | { ok: true; players: PlayerPublicProfileSnapshot[] }
+  onPlayersLoad?: (
+    page: number,
+    snapshotToken: string | null,
+  ) => Promise<
+    | {
+        ok: true
+        players: PlayerPublicProfileSnapshot[]
+        page: number
+        pageSize: number
+        totalCount: number
+        totalPages: number
+        snapshot: string
+        snapshotReset: boolean
+      }
     | { ok: false; message: string }
   >
   onPlayersSearch?: (
@@ -492,6 +504,10 @@ type InternalLobbyFlowState = {
   serverQueuedPlayerPreviews: MatchmakingRoomPlayer[]
   serverPreviewBotDisplayNames: string[]
   players: PlayerPublicProfileSnapshot[]
+  playersPage: number
+  playersSnapshotToken: string | null
+  playersTotalCount: number
+  playersTotalPages: number
   playersSearchQuery: string
   playersSearchDraft: string
   playersSearchResults: PlayerPublicProfileSnapshot[] | null
@@ -741,6 +757,10 @@ function createInitialState(): InternalLobbyFlowState {
     serverQueuedPlayerPreviews: [],
     serverPreviewBotDisplayNames: [],
     players: [],
+    playersPage: 1,
+    playersSnapshotToken: null,
+    playersTotalCount: 0,
+    playersTotalPages: 1,
     playersSearchQuery: '',
     playersSearchDraft: '',
     playersSearchResults: null,
@@ -1879,6 +1899,9 @@ export function createLobbyFlowController(
       profilePopupProfile: state.profilePopupProfile,
       profilePopupCanEdit: state.profilePopupCanEdit,
       players: state.players,
+      playersPage: state.playersPage,
+      playersTotalCount: state.playersTotalCount,
+      playersTotalPages: state.playersTotalPages,
       playersSearchQuery: state.playersSearchQuery,
       playersSearchDraft: state.playersSearchDraft,
       playersSearchResults: state.playersSearchResults,
@@ -2327,6 +2350,7 @@ export function createLobbyFlowController(
         triggerPlayersSearch(query)
         render()
       },
+      onPlayersPageChange: (page) => { void goToPlayersPage(page) },
       onLeaderboardPlayerClick: (profile) => {
         const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId
         const isOwn = Boolean(ownProfileId && profile.profileId === ownProfileId)
@@ -3121,6 +3145,20 @@ export function createLobbyFlowController(
     render()
   }
 
+  function applySuccessfulPlayersPage(result: {
+    players: PlayerPublicProfileSnapshot[]
+    page: number
+    totalCount: number
+    totalPages: number
+    snapshot: string
+  }): void {
+    state.players = result.players
+    state.playersPage = result.page
+    state.playersSnapshotToken = result.snapshot
+    state.playersTotalCount = result.totalCount
+    state.playersTotalPages = result.totalPages
+  }
+
   async function showPlayersDirectory(): Promise<void> {
     leaveAdminServerIfActive()
     state.currentScreen = 'players'
@@ -3134,6 +3172,9 @@ export function createLobbyFlowController(
     state.playersSearchDraft = ''
     state.playersSearchResults = null
     state.playersSearchLoading = false
+    // Прясно зареждане → нов snapshot (нов случаен ред), не пренасяме стар token.
+    state.playersPage = 1
+    state.playersSnapshotToken = null
     stopWaitingRoomActivity()
     resetFinalFillSequence()
 
@@ -3147,7 +3188,7 @@ export function createLobbyFlowController(
     state.playersErrorText = null
     render()
 
-    const result = await options.onPlayersLoad()
+    const result = await options.onPlayersLoad(1, null)
 
     if (state.currentScreen !== 'players') {
       return
@@ -3161,7 +3202,36 @@ export function createLobbyFlowController(
       return
     }
 
-    state.players = result.players
+    applySuccessfulPlayersPage(result)
+    state.playersErrorText = null
+    render()
+  }
+
+  async function goToPlayersPage(targetPage: number): Promise<void> {
+    if (!options.onPlayersLoad || state.playersLoading) return
+
+    const clamped = Math.min(Math.max(1, Math.trunc(targetPage)), Math.max(1, state.playersTotalPages))
+    if (clamped === state.playersPage) return
+
+    state.playersLoading = true
+    state.playersErrorText = null
+    render()
+
+    const result = await options.onPlayersLoad(clamped, state.playersSnapshotToken)
+
+    if (state.currentScreen !== 'players') {
+      return
+    }
+
+    state.playersLoading = false
+
+    if (!result.ok) {
+      state.playersErrorText = result.message
+      render()
+      return
+    }
+
+    applySuccessfulPlayersPage(result)
     state.playersErrorText = null
     render()
   }
@@ -5446,9 +5516,9 @@ export function createLobbyFlowController(
     knownDisplayNameHint?: string | null,
   ): Promise<void> {
     if (profileId === null || !isAdminTargetEdit()) return
-    const result = await options.onPlayersLoad?.()
+    const result = await options.onPlayersLoad?.(state.playersPage, state.playersSnapshotToken)
     if (!result?.ok) return
-    state.players = result.players
+    applySuccessfulPlayersPage(result)
     let profile = result.players.find((player) => player.profileId === profileId) ?? null
 
     // Целевият профил може да е извън капнатия bulk списък (напр. намерен

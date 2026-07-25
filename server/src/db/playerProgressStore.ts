@@ -54,6 +54,11 @@ export type PlayerProgressStore = {
     normalizedTerm: string,
     onlineProfileIds?: Set<string>,
   ) => PlayerPublicProfileSnapshot[]
+  listEligibleProfileKinds: () => Array<{ profileId: string; isBot: boolean }>
+  getProfileSnapshotsByIds: (
+    profileIds: string[],
+    onlineProfileIds?: Set<string>,
+  ) => PlayerPublicProfileSnapshot[]
   listLeaderboards: () => LeaderboardsSnapshot
   changeProfileDisplayName: (
     profileId: ProfileId,
@@ -429,6 +434,22 @@ export async function createPlayerProgressStore(
       p.normalized_display_name ASC,
       p.profile_id ASC
     LIMIT 50;
+  `)
+
+  // Лек statement (без joins/LIMIT) за server-side pagination на players
+  // директорията — връща ID + категория за ВСИЧКИ допустими профили, за да
+  // може подредбата (seeded shuffle + admin bucketing) да покрие всички,
+  // не само първите 500. Пълните данни (wallet/progress/gallery) се теглят
+  // отделно, само за profileId-тата от текущата заявена страница.
+  const listEligibleProfileKindsStatement = database.prepare(`
+    SELECT p.profile_id, p.profile_kind
+    FROM profiles p
+    WHERE p.status = 'active'
+      AND p.is_temporary = 0
+      AND (
+        (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
+        OR p.profile_kind = 'bot'
+      );
   `)
 
   const listLeaderboardByBalanceStatement = database.prepare(`
@@ -943,6 +964,68 @@ export async function createPlayerProgressStore(
     ) as Array<Parameters<typeof toPublicProfileSnapshot>[0] & { profile_kind: string }>
 
     return mapProfileRowsToSnapshots(rows, onlineProfileIds)
+  }
+
+  function listEligibleProfileKinds(): Array<{ profileId: string; isBot: boolean }> {
+    const rows = listEligibleProfileKindsStatement.all() as Array<{
+      profile_id: string
+      profile_kind: string
+    }>
+    return rows.map((row) => ({ profileId: row.profile_id, isBot: row.profile_kind === 'bot' }))
+  }
+
+  function getProfileSnapshotsByIds(
+    profileIds: string[],
+    onlineProfileIds?: Set<string>,
+  ): PlayerPublicProfileSnapshot[] {
+    if (profileIds.length === 0) {
+      return []
+    }
+
+    // Динамична arity (варира по страница) — statement-ът се строи прясно
+    // за тази заявка, не се кешира като останалите (фиксирани) statements.
+    const placeholders = profileIds.map(() => '?').join(', ')
+    const statement = database.prepare(`
+      SELECT
+        p.profile_id,
+        p.profile_kind,
+        p.display_name,
+        p.avatar_url,
+        p.level,
+        p.rank_title,
+        p.skill_rating,
+        p.average_rating,
+        p.total_ratings_count,
+        COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance,
+        pp.completed_games_count,
+        pp.won_games_count,
+        p.gender
+      FROM profiles p
+      LEFT JOIN profile_wallets pw
+        ON pw.profile_id = p.profile_id
+      LEFT JOIN profile_progress pp
+        ON pp.profile_id = p.profile_id
+      WHERE p.status = 'active'
+        AND p.is_temporary = 0
+        AND (
+          (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
+          OR p.profile_kind = 'bot'
+        )
+        AND p.profile_id IN (${placeholders});
+    `)
+
+    const rows = statement.all(...profileIds) as Array<
+      Parameters<typeof toPublicProfileSnapshot>[0] & { profile_kind: string }
+    >
+
+    const snapshots = mapProfileRowsToSnapshots(rows, onlineProfileIds)
+    const byId = new Map(snapshots.map((s) => [s.profileId, s]))
+
+    // IN (...) не гарантира ред — пресъздаваме точно подадения ред
+    // (вече определен от computePlayersPageOrder + slice за страницата).
+    return profileIds
+      .map((id) => byId.get(id))
+      .filter((s): s is PlayerPublicProfileSnapshot => s !== undefined)
   }
 
   function listProfilesFromStatement(
@@ -1642,6 +1725,8 @@ export async function createPlayerProgressStore(
     getPublicProfile,
     listPublicHumanProfiles,
     searchPublicProfiles,
+    listEligibleProfileKinds,
+    getProfileSnapshotsByIds,
     listLeaderboards,
     changeProfileDisplayName,
     adminRenameProfileDisplayName,

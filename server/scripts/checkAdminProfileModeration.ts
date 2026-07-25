@@ -23,7 +23,11 @@ function readProjectFile(path: string): string {
 function functionBody(source: string, name: string): string {
   const start = source.indexOf(`function ${name}(`)
   if (start === -1) return ''
-  const nextFunction = source.indexOf('\n  function ', start + 1)
+  // Следваща TOP-LEVEL декларация (колона 0) — не случаен nested helper
+  // вътре в целевата функция (крехко към рефактори на вложени функции).
+  const rest = source.slice(start + 1)
+  const nextMatch = /\n(?:export )?(?:async )?function /.exec(rest)
+  const nextFunction = nextMatch ? start + 1 + nextMatch.index : -1
   return source.slice(start, nextFunction === -1 ? undefined : nextFunction)
 }
 

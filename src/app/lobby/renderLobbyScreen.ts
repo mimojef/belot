@@ -36,6 +36,7 @@ import { renderFaqPage } from './renderFaqPage'
 import { renderAboutPage } from './renderAboutPage'
 import { renderFairPlayPage } from './renderFairPlayPage'
 import { orderPlayersForViewer } from './orderPlayersForViewer'
+import { computePaginationItems } from './computePaginationItems'
 import {
   getProfileDisplayNameAvailabilityQuery,
   validateProfileDisplayName,
@@ -134,6 +135,9 @@ export type LobbyScreenState = {
   profilePopupProfile: PlayerPublicProfileSnapshot | null
   profilePopupCanEdit: boolean
   players: PlayerPublicProfileSnapshot[]
+  playersPage: number
+  playersTotalCount: number
+  playersTotalPages: number
   playersSearchQuery: string
   playersSearchDraft: string
   playersSearchResults: PlayerPublicProfileSnapshot[] | null
@@ -382,6 +386,7 @@ export type RenderLobbyScreenOptions = {
   onPlayersSearchChange: (query: string) => void
   onPlayersSearchDraftChange: (draft: string) => void
   onPlayersSearchSubmit: (query: string) => void
+  onPlayersPageChange: (page: number) => void
   onLeaderboardPlayerClick: (profile: PlayerPublicProfileSnapshot) => void
   onFriendProfileClick: (profile: PlayerPublicProfileSnapshot) => void
   onFriendRequestClick: (profileId: string) => void
@@ -3278,12 +3283,21 @@ function renderMobilePlayerListCard(player: PlayerPublicProfileSnapshot, attrNam
 function computePlayersDirectoryLists(
   state: LobbyScreenState,
   opts: { isAdmin: boolean; ownProfileId: string | null },
-): { allPlayers: PlayerPublicProfileSnapshot[]; players: PlayerPublicProfileSnapshot[] } {
+): {
+  allPlayers: PlayerPublicProfileSnapshot[]
+  players: PlayerPublicProfileSnapshot[]
+  isSearchActive: boolean
+} {
   const allPlayers = orderPlayersForViewer(state.players, opts)
   const query = state.playersSearchQuery.trim()
+  const isSearchActive = query !== ''
 
-  if (query !== '' && state.playersSearchResults !== null) {
-    return { allPlayers, players: orderPlayersForViewer(state.playersSearchResults, opts) }
+  if (isSearchActive && state.playersSearchResults !== null) {
+    return {
+      allPlayers,
+      players: orderPlayersForViewer(state.playersSearchResults, opts),
+      isSearchActive,
+    }
   }
 
   const normalizedQuery = query.toLocaleLowerCase()
@@ -3291,21 +3305,49 @@ function computePlayersDirectoryLists(
     ? allPlayers.filter((p) => (p.displayName ?? '').toLocaleLowerCase().includes(normalizedQuery))
     : allPlayers
 
-  return { allPlayers, players }
+  return { allPlayers, players, isSearchActive }
+}
+
+/**
+ * Pagination navigация `< 1 2 3 4 … >` — рендира се еднакво над и под
+ * grid-а (desktop и mobile), скрита докато search резултати са активни.
+ */
+function renderPlayersPager(state: LobbyScreenState): string {
+  const totalPages = state.playersTotalPages
+  if (totalPages <= 1) return ''
+
+  const currentPage = state.playersPage
+  const items = computePaginationItems(currentPage, totalPages)
+  const isFirst = currentPage <= 1
+  const isLast = currentPage >= totalPages
+
+  const arrowStyle = (disabled: boolean): string =>
+    `min-width:34px;height:34px;padding:0 10px;border-radius:6px;border:1px solid rgba(212,165,32,0.4);background:${disabled ? 'rgba(255,255,255,0.04)' : '#0d0d0d'};color:${disabled ? 'rgba(255,255,255,0.28)' : '#d4a520'};font-size:15px;font-weight:900;cursor:${disabled ? 'default' : 'pointer'};`
+
+  return `
+    <nav data-lobby-players-pager="1" aria-label="Странициране на играчите" style="display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap;padding:2px 0;">
+      <button type="button" data-lobby-players-page="prev" ${isFirst ? 'disabled' : ''} aria-label="Предишна страница" style="${arrowStyle(isFirst)}">‹</button>
+      ${items.map((item) => item === 'ellipsis'
+        ? `<span aria-hidden="true" style="min-width:24px;height:34px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.4);font-weight:900;">…</span>`
+        : `<button type="button" data-lobby-players-page="${item}" ${item === currentPage ? 'aria-current="page"' : ''} style="min-width:34px;height:34px;padding:0 8px;border-radius:6px;border:1px solid ${item === currentPage ? '#d4a520' : 'rgba(212,165,32,0.28)'};background:${item === currentPage ? '#d4a520' : '#0d0d0d'};color:${item === currentPage ? '#080808' : '#f8fafc'};font-size:14px;font-weight:900;cursor:pointer;">${item}</button>`
+      ).join('')}
+      <button type="button" data-lobby-players-page="next" ${isLast ? 'disabled' : ''} aria-label="Следваща страница" style="${arrowStyle(isLast)}">›</button>
+    </nav>
+  `
 }
 
 function renderMobilePlayersDirectory(state: LobbyScreenState): string {
   if (state.playersLoading) return `${renderMobilePageTitle('Играчите')}${renderMobileStateMessage('Зареждане на играчи...')}`
   if (state.playersErrorText) return `${renderMobilePageTitle('Играчите')}${renderMobileStateMessage(state.playersErrorText, 'error')}`
 
-  const { allPlayers, players } = computePlayersDirectoryLists(state, {
+  const { players, isSearchActive } = computePlayersDirectoryLists(state, {
     isAdmin: state.isAdmin,
     ownProfileId: state.profile.profileId,
   })
   const applied = state.playersSearchQuery.trim()
 
   return `
-    ${renderMobilePageTitle('Играчите', `${formatAmount(allPlayers.length)} профила`)}
+    ${renderMobilePageTitle('Играчите', `${formatAmount(state.playersTotalCount)} профила`)}
     <div style="padding:12px 12px 8px;">
       <form data-lobby-players-search-form="1" style="display:grid;gap:8px;">
         <label style="display:flex;align-items:center;gap:10px;background:#0d0d0d;border:1px solid rgba(212,165,32,0.44);border-radius:8px;padding:0 14px;height:46px;">
@@ -3328,13 +3370,15 @@ function renderMobilePlayersDirectory(state: LobbyScreenState): string {
         >Намери</button>
       </form>
     </div>
+    ${!isSearchActive ? `<div style="padding:0 12px;">${renderPlayersPager(state)}</div>` : ''}
     <section style="padding:4px 12px 12px;display:grid;gap:9px;">
-      ${allPlayers.length === 0
+      ${state.playersTotalCount === 0
         ? renderMobileStateMessage('Все още няма регистрирани играчи.')
         : players.length === 0 && applied !== ''
           ? renderMobileStateMessage('Няма намерени играчи.')
           : players.map((player) => renderMobilePlayerListCard(player, 'data-lobby-player-card')).join('')}
     </section>
+    ${!isSearchActive ? `<div style="padding:0 12px 16px;">${renderPlayersPager(state)}</div>` : ''}
   `
 }
 
@@ -4032,7 +4076,7 @@ function renderChatPanel(state: LobbyScreenState): string {
 }
 
 function renderPlayersDirectory(state: LobbyScreenState): string {
-  const { allPlayers, players } = computePlayersDirectoryLists(state, {
+  const { players, isSearchActive } = computePlayersDirectoryLists(state, {
     isAdmin: state.isAdmin,
     ownProfileId: state.profile.profileId,
   })
@@ -4072,11 +4116,13 @@ function renderPlayersDirectory(state: LobbyScreenState): string {
               style="flex:1;min-width:0;background:transparent;border:0;outline:none;color:#f8fafc;font-size:15px;font-weight:700;font-family:inherit;"
             >
           </label>
-          <div style="font-size:13px;font-weight:900;color:#d4a520;white-space:nowrap;">${formatAmount(allPlayers.length)} играчи</div>
+          <div style="font-size:13px;font-weight:900;color:#d4a520;white-space:nowrap;">${formatAmount(state.playersTotalCount)} играчи</div>
         </div>
       </div>
 
-      ${allPlayers.length === 0 ? `
+      ${!isSearchActive ? renderPlayersPager(state) : ''}
+
+      ${state.playersTotalCount === 0 ? `
         <div style="min-height:360px;display:flex;align-items:center;justify-content:center;border:1px dashed rgba(255,255,255,0.16);background:rgba(255,255,255,0.03);border-radius:8px;color:rgba(255,255,255,0.62);font-size:15px;font-weight:800;">
           Все още няма регистрирани играчи.
         </div>
@@ -4124,6 +4170,8 @@ function renderPlayersDirectory(state: LobbyScreenState): string {
           }).join('')}
         </div>
       `}
+
+      ${!isSearchActive ? renderPlayersPager(state) : ''}
     </section>
   `
 }
@@ -8054,6 +8102,21 @@ export function renderLobbyScreen(
       const input = form.querySelector<HTMLInputElement>('[data-lobby-players-search-mobile="1"]')
       options.onPlayersSearchSubmit(input?.value ?? '')
     })
+
+  // Pagination — еднакво wiring за горния и долния pager (и desktop, и mobile).
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-players-page]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const raw = button.dataset.lobbyPlayersPage ?? ''
+      const targetPage =
+        raw === 'prev' ? state.playersPage - 1
+        : raw === 'next' ? state.playersPage + 1
+        : Number.parseInt(raw, 10)
+
+      if (Number.isFinite(targetPage)) {
+        options.onPlayersPageChange(targetPage)
+      }
+    })
+  })
 
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-leaderboard-tab]').forEach((button) => {
     button.addEventListener('click', () => {

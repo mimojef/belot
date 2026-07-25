@@ -252,6 +252,12 @@ type PlayersResponse = {
   ok: boolean
   players?: PlayerPublicProfileSnapshot[]
   message?: string
+  page?: number
+  pageSize?: number
+  totalCount?: number
+  totalPages?: number
+  snapshot?: string
+  snapshotReset?: boolean
 }
 
 type LeaderboardsResponse = {
@@ -545,18 +551,42 @@ async function submitLogout(): Promise<void> {
   lobby.refreshDailyRewardsStatus()
 }
 
-async function loadPlayersDirectory(): Promise<
-  | { ok: true; players: PlayerPublicProfileSnapshot[] }
+async function loadPlayersDirectory(
+  page: number,
+  snapshotToken: string | null,
+): Promise<
+  | {
+      ok: true
+      players: PlayerPublicProfileSnapshot[]
+      page: number
+      pageSize: number
+      totalCount: number
+      totalPages: number
+      snapshot: string
+      snapshotReset: boolean
+    }
   | { ok: false; message: string }
 > {
   try {
-    const response = await fetch(`${getApiBaseUrl()}/api/players`, {
+    const params = new URLSearchParams({ page: String(page) })
+    if (snapshotToken) params.set('snapshot', snapshotToken)
+
+    const response = await fetch(`${getApiBaseUrl()}/api/players?${params.toString()}`, {
       method: 'GET',
       credentials: 'include',
     })
     const data = (await response.json()) as PlayersResponse
 
-    if (!response.ok || !data.ok || !Array.isArray(data.players)) {
+    if (
+      !response.ok ||
+      !data.ok ||
+      !Array.isArray(data.players) ||
+      typeof data.page !== 'number' ||
+      typeof data.pageSize !== 'number' ||
+      typeof data.totalCount !== 'number' ||
+      typeof data.totalPages !== 'number' ||
+      typeof data.snapshot !== 'string'
+    ) {
       return {
         ok: false,
         message: data.message ?? 'Списъкът с играчи не беше зареден.',
@@ -566,6 +596,12 @@ async function loadPlayersDirectory(): Promise<
     return {
       ok: true,
       players: data.players,
+      page: data.page,
+      pageSize: data.pageSize,
+      totalCount: data.totalCount,
+      totalPages: data.totalPages,
+      snapshot: data.snapshot,
+      snapshotReset: data.snapshotReset === true,
     }
   } catch {
     return {
@@ -2957,7 +2993,7 @@ lobby = createLobbyFlowController({
   onProfileGalleryDelete: (targetProfileId, imageId) => deleteProfileGalleryImage(targetProfileId, imageId),
   onProfileNameChangeSubmit: (targetProfileId, displayName) => submitProfileNameChange(targetProfileId, displayName),
   onChangePasswordSubmit: (currentPassword, newPassword) => submitChangePassword(currentPassword, newPassword),
-  onPlayersLoad: () => loadPlayersDirectory(),
+  onPlayersLoad: (page, snapshotToken) => loadPlayersDirectory(page, snapshotToken),
   onPlayersSearch: (query, signal) => searchPlayersDirectory(query, signal),
   onLeaderboardsLoad: () => loadLeaderboards(),
   onLobbyPackagesLoad: () => loadLobbyPackages(),

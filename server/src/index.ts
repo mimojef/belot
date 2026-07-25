@@ -60,6 +60,11 @@ import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { createMatchEconomyStore, setMatchPrizeResolver } from './db/matchEconomyStore.js'
 import { createMatchRoomsStore } from './db/matchRoomsStore.js'
 import { normalizeProfileSearchTerm } from './db/normalizeProfileIdentityText.js'
+import {
+  computePlayersPageOrder,
+  generatePlayersPageSeed,
+} from './db/computePlayersPageOrder.js'
+import { createPlayersPageSnapshotStore } from './db/playersPageSnapshotStore.js'
 import { createPlayerProgressStore } from './db/playerProgressStore.js'
 import { createTableExitPenaltyStore } from './db/tableExitPenaltyStore.js'
 import { createYellowCoinGiftStore } from './db/yellowCoinGiftStore.js'
@@ -359,6 +364,7 @@ const playerProgressStore = await createPlayerProgressStore(
 )
 const likeStore = await createLikeStore(databaseBootstrap.databaseFilePath)
 const blockStore = await createBlockStore(databaseBootstrap.databaseFilePath)
+const playersPageSnapshotStore = createPlayersPageSnapshotStore()
 playerProgressStore.seedCatalogBotsIfNeeded()
 catalogBotRefillInterval = setInterval(() => {
   if (isServerShuttingDown) {
@@ -4051,10 +4057,13 @@ async function handleProfileLikeRequest(
   return true
 }
 
+const PLAYERS_PAGE_SIZE = 300
+
 async function handlePlayersRequest(
   req: IncomingMessage,
   res: ServerResponse,
   pathname: string,
+  requestUrl: URL,
 ): Promise<boolean> {
   if (pathname !== '/api/players' || req.method !== 'GET') {
     return false
@@ -4070,34 +4079,62 @@ async function handlePlayersRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
   const currentProfileId = session?.profile.profileId ?? null
+  const isAdmin = session?.account.role === 'admin'
 
-  const all = playerProgressStore.listPublicHumanProfiles(onlineProfileIds)
+  const rawPage = parseStrictQueryInt(requestUrl.searchParams.get('page'))
+  const requestedPage = rawPage === 'invalid' || rawPage === null ? 1 : rawPage
 
-  const me = currentProfileId ? all.filter((p) => p.profileId === currentProfileId) : []
-  const humans = all.filter((p) => !p.isBot && p.profileId !== currentProfileId)
-  const bots = all.filter((p) => p.isBot === true)
+  const incomingSnapshotToken = requestUrl.searchParams.get('snapshot')
+  const existingOrder = incomingSnapshotToken
+    ? playersPageSnapshotStore.get(incomingSnapshotToken, isAdmin, currentProfileId)
+    : null
 
-  // Fisher-Yates shuffle
-  function shuffle<T>(arr: T[]): T[] {
-    for (let i = arr.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1))
-      ;[arr[i], arr[j]] = [arr[j], arr[i]]
-    }
-    return arr
+  let orderedIds: string[]
+  let snapshotToken: string
+  let effectivePage: number
+  // true само ако клиентът Е подал token, но той се оказа невалиден/
+  // изтекъл/за друг viewer — НЕ и при обикновено прясно отваряне (без token).
+  const snapshotReset = incomingSnapshotToken !== null && existingOrder === null
+
+  if (existingOrder !== null && incomingSnapshotToken) {
+    // Валиден, все още жив snapshot — преизползваме замразената подредба
+    // непроменена (isOnline статусът на картите пак се смята "на живо" по-долу).
+    orderedIds = existingOrder
+    snapshotToken = incomingSnapshotToken
+    effectivePage = requestedPage
+  } else {
+    // Липсващ/невалиден/изтекъл/чужд snapshot ИЛИ прясно отваряне →
+    // изчисляваме и замразяваме НОВА глобална подредба; винаги страница 1
+    // (никога не се доверяваме на исканата страница под непознат snapshot).
+    const eligible = playerProgressStore.listEligibleProfileKinds()
+    orderedIds = computePlayersPageOrder(eligible, {
+      isAdmin,
+      onlineProfileIds,
+      seed: generatePlayersPageSeed(),
+      ownProfileId: currentProfileId,
+    })
+    snapshotToken = playersPageSnapshotStore.create(orderedIds, isAdmin, currentProfileId)
+    effectivePage = 1
   }
 
-  const allPlayers = [...me, ...shuffle(humans), ...shuffle(bots)].map((p) => ({
-    ...p,
-    likesCount: p.profileId ? likeStore.getLikesCount(p.profileId) : null,
-    hasLikedByMe: p.profileId && currentProfileId
-      ? likeStore.hasLikedRecently(currentProfileId, p.profileId)
-      : null,
-    isBlockedByMe: p.profileId && currentProfileId
-      ? blockStore.isBlocked(currentProfileId, p.profileId)
-      : null,
-  }))
+  const totalCount = orderedIds.length
+  const totalPages = Math.max(1, Math.ceil(totalCount / PLAYERS_PAGE_SIZE))
+  const page = Math.min(Math.max(1, effectivePage), totalPages)
 
-  sendJsonResponse(res, 200, { ok: true, players: allPlayers })
+  const pageIds = orderedIds.slice((page - 1) * PLAYERS_PAGE_SIZE, page * PLAYERS_PAGE_SIZE)
+  const pageSnapshots = playerProgressStore.getProfileSnapshotsByIds(pageIds, onlineProfileIds)
+  const players = enrichPlayerProfilesForViewer(pageSnapshots, currentProfileId)
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    players,
+    page,
+    pageSize: PLAYERS_PAGE_SIZE,
+    totalCount,
+    totalPages,
+    snapshot: snapshotToken,
+    snapshotReset,
+  })
   return true
 }
 
@@ -6483,7 +6520,7 @@ async function handleHttpRequest(
     return
   }
 
-  if (await handlePlayersRequest(req, res, requestUrl.pathname)) {
+  if (await handlePlayersRequest(req, res, requestUrl.pathname, requestUrl)) {
     return
   }
 
