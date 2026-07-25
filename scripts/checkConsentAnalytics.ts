@@ -12,8 +12,11 @@
  *     regex. Тества consent validation (липсващ/невалиден/стар/валиден),
  *     v1→v2 миграция (re-prompt, не auto-accept), независимост на
  *     analytics/marketing запис+възстановяване, idempotency guard-ове
- *     (script/init/PageView/CompleteRegistration) и marketing-only gating
- *     (analytics:true сам по себе си НЕ зарежда AdSense/Pixel).
+ *     (script/autoConfig/init/PageView/CompleteRegistration) и marketing-only
+ *     gating (analytics:true сам по себе си НЕ зарежда AdSense/Pixel).
+ *     Потвърждава и точния ред fbq('set','autoConfig',false,pixelId) СТРИКТНО
+ *     преди fbq('init', pixelId) — изключва Meta "automatic events" (напр.
+ *     SubscribedButtonClick).
  *
  *  B) Source-text проверки за wiring-а, който изисква пълен app контекст
  *     (main.ts register-only CompleteRegistration извикване, липса на
@@ -327,25 +330,27 @@ await check('[A15] no consent, no pixel ID → nothing happens, no fbq created',
   assert(fakeDocument.headAppended.length === 0, 'no script should be injected')
 })
 
-await check('[A16] marketing:true but VITE_META_PIXEL_ID missing → no crash, no script, no init', () => {
+await check('[A16] marketing:true but VITE_META_PIXEL_ID missing → no crash, no script, no init, no autoConfig', () => {
   fullReset()
   saveConsentChoice(false, true)
   __setMetaPixelIdOverrideForTests(null)
   initMetaPixelIfConsented()
   assert((globalThis as Record<string, unknown>).fbq === undefined, 'fbq must not be created without a pixel ID')
   assert(fakeDocument.headAppended.length === 0, 'no script should be injected without a pixel ID')
+  assert(getFbqQueue().filter((call) => call[0] === 'set' && call[1] === 'autoConfig').length === 0, 'autoConfig must not be queued without a pixel ID')
 })
 
-await check('[A17] analytics:true + marketing:false + valid pixel ID → Meta Pixel does NOT load', () => {
+await check('[A17] analytics:true + marketing:false + valid pixel ID → Meta Pixel does NOT load, no autoConfig', () => {
   fullReset()
   saveConsentChoice(true, false)
   __setMetaPixelIdOverrideForTests('123456789012345')
   initMetaPixelIfConsented()
   assert((globalThis as Record<string, unknown>).fbq === undefined, 'analytics-only consent must not init the pixel')
   assert(fakeDocument.headAppended.length === 0, 'analytics-only consent must not inject fbevents.js')
+  assert(getFbqQueue().filter((call) => call[0] === 'set' && call[1] === 'autoConfig').length === 0, 'autoConfig must not be queued when marketing is declined')
 })
 
-await check('[A18] marketing:true + valid pixel ID → script injected once, init once, PageView once', () => {
+await check('[A18] marketing:true + valid pixel ID → autoConfig(false) once BEFORE init, init once, PageView once', () => {
   fullReset()
   saveConsentChoice(false, true)
   __setMetaPixelIdOverrideForTests('123456789012345')
@@ -355,14 +360,23 @@ await check('[A18] marketing:true + valid pixel ID → script injected once, ini
     'fbevents.js must be injected',
   )
   const queue = getFbqQueue()
-  assert(queue.some((call) => call[0] === 'init' && call[1] === '123456789012345'), 'fbq init must be queued')
+
+  const autoConfigCalls = queue.filter((call) => call[0] === 'set' && call[1] === 'autoConfig' && call[2] === false && call[3] === '123456789012345')
+  assert(autoConfigCalls.length === 1, `expected exactly 1 autoConfig(false) call, got ${autoConfigCalls.length}`)
+
+  const autoConfigIndex = queue.findIndex((call) => call[0] === 'set' && call[1] === 'autoConfig')
+  const initIndex = queue.findIndex((call) => call[0] === 'init' && call[1] === '123456789012345')
+  assert(initIndex !== -1, 'fbq init must be queued')
+  assert(autoConfigIndex !== -1 && autoConfigIndex < initIndex, 'autoConfig(false) must be queued strictly before init')
+
+  assert(queue.filter((call) => call[0] === 'init' && call[1] === '123456789012345').length === 1, 'exactly one init')
   assert(queue.filter((call) => call[0] === 'track' && call[1] === 'PageView').length === 1, 'exactly one PageView')
 
-  // repeated call → no duplication
+  // repeated call → no duplication (script, autoConfig, init, or PageView)
   initMetaPixelIfConsented()
   const fbEventsScripts = fakeDocument.headAppended.filter((el) => el.src.includes('fbevents.js'))
   assert(fbEventsScripts.length === 1, 'repeated init must not duplicate the script')
-  assert(getFbqQueue().length === queue.length, 'repeated init must not duplicate init/PageView calls')
+  assert(getFbqQueue().length === queue.length, 'repeated init must not duplicate autoConfig/init/PageView calls')
 })
 
 await check('[A19] decline marketing first, then accept later in the same load → pixel loads and sends PageView once', () => {

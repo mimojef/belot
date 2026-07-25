@@ -92,10 +92,15 @@ function sendPageViewOnce(): void {
 /**
  * Инициализира Meta Pixel, само ако едновременно: consent-ът е валиден,
  * marketing === true, и VITE_META_PIXEL_ID е конфигуриран. Идемпотентна —
- * не дублира script, fbq queue, init или PageView. Ако потребителят приеме
- * marketing по-късно в същата сесия, извикването отново тук зарежда Pixel и
- * изпраща PageView (само ако още не е изпратен в текущото app зареждане).
- * analytics:true САМО (без marketing:true) НЕ зарежда Pixel-а.
+ * не дублира script, fbq queue, autoConfig, init или PageView. Ако
+ * потребителят приеме marketing по-късно в същата сесия, извикването отново
+ * тук зарежда Pixel и изпраща PageView (само ако още не е изпратен в
+ * текущото app зареждане). analytics:true САМО (без marketing:true) НЕ
+ * зарежда Pixel-а.
+ *
+ * fbq('set','autoConfig',false,pixelId) се вика точно преди fbq('init', ...),
+ * за да изключи Meta-то автоматично улавяне на "automatic events" (напр.
+ * SubscribedButtonClick), които не са explicit добавени тук.
  */
 export function initMetaPixelIfConsented(): void {
   if (pixelInitialized) return
@@ -106,6 +111,10 @@ export function initMetaPixelIfConsented(): void {
 
   const fbq = ensureFbqStub()
   injectFbEventsScript()
+  // Изключва Meta-то "automatic events" (напр. SubscribedButtonClick) —
+  // трябва да е точно преди init, докато Pixel Helper/Events Manager все
+  // още не е видял init повикването за този pixelId.
+  fbq('set', 'autoConfig', false, pixelId)
   fbq('init', pixelId)
   pixelInitialized = true
 
