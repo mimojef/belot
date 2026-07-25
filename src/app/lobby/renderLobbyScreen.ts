@@ -136,6 +136,8 @@ export type LobbyScreenState = {
   players: PlayerPublicProfileSnapshot[]
   playersSearchQuery: string
   playersSearchDraft: string
+  playersSearchResults: PlayerPublicProfileSnapshot[] | null
+  playersSearchLoading: boolean
   playersLoading: boolean
   playersErrorText: string | null
   leaderboards: LeaderboardsSnapshot | null
@@ -3264,15 +3266,43 @@ function renderMobilePlayerListCard(player: PlayerPublicProfileSnapshot, attrNam
   `
 }
 
+/**
+ * Общ helper за desktop/mobile players directory рендиране.
+ * `allPlayers` винаги е базиран на state.players (непроменено поведение
+ * на стандартния списък) — не се влияе от search резултатите. `players`
+ * предпочита сървърните search резултати (покриват всички допустими
+ * профили, не само първите 500), докато те не са налични — пада обратно
+ * към мигновения локален substring filter, за да няма flicker/празен
+ * екран, докато debounce/мрежовата заявка е в процес.
+ */
+function computePlayersDirectoryLists(
+  state: LobbyScreenState,
+  opts: { isAdmin: boolean; ownProfileId: string | null },
+): { allPlayers: PlayerPublicProfileSnapshot[]; players: PlayerPublicProfileSnapshot[] } {
+  const allPlayers = orderPlayersForViewer(state.players, opts)
+  const query = state.playersSearchQuery.trim()
+
+  if (query !== '' && state.playersSearchResults !== null) {
+    return { allPlayers, players: orderPlayersForViewer(state.playersSearchResults, opts) }
+  }
+
+  const normalizedQuery = query.toLocaleLowerCase()
+  const players = query
+    ? allPlayers.filter((p) => (p.displayName ?? '').toLocaleLowerCase().includes(normalizedQuery))
+    : allPlayers
+
+  return { allPlayers, players }
+}
+
 function renderMobilePlayersDirectory(state: LobbyScreenState): string {
   if (state.playersLoading) return `${renderMobilePageTitle('Играчите')}${renderMobileStateMessage('Зареждане на играчи...')}`
   if (state.playersErrorText) return `${renderMobilePageTitle('Играчите')}${renderMobileStateMessage(state.playersErrorText, 'error')}`
 
-  const allPlayers = orderPlayersForViewer(state.players, { isAdmin: state.isAdmin, ownProfileId: state.profile.profileId })
-  const applied = state.playersSearchQuery.trim().toLocaleLowerCase()
-  const players = applied
-    ? allPlayers.filter((p) => (p.displayName ?? '').toLocaleLowerCase().includes(applied))
-    : allPlayers
+  const { allPlayers, players } = computePlayersDirectoryLists(state, {
+    isAdmin: state.isAdmin,
+    ownProfileId: state.profile.profileId,
+  })
+  const applied = state.playersSearchQuery.trim()
 
   return `
     ${renderMobilePageTitle('Играчите', `${formatAmount(allPlayers.length)} профила`)}
@@ -4002,11 +4032,10 @@ function renderChatPanel(state: LobbyScreenState): string {
 }
 
 function renderPlayersDirectory(state: LobbyScreenState): string {
-  const allPlayers = orderPlayersForViewer(state.players, { isAdmin: state.isAdmin, ownProfileId: state.profile.profileId })
-  const query = state.playersSearchQuery.trim().toLocaleLowerCase()
-  const players = query
-    ? allPlayers.filter((p) => (p.displayName ?? '').toLocaleLowerCase().includes(query))
-    : allPlayers
+  const { allPlayers, players } = computePlayersDirectoryLists(state, {
+    isAdmin: state.isAdmin,
+    ownProfileId: state.profile.profileId,
+  })
 
   if (state.playersLoading) {
     return `
@@ -7993,7 +8022,11 @@ export function renderLobbyScreen(
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-player-card]').forEach((button) => {
     button.addEventListener('click', () => {
       const profileId = button.dataset.lobbyPlayerCard ?? ''
-      const profile = state.players.find((player) => player.profileId === profileId)
+      // Профил намерен само чрез server-side search (извън първите 500 в
+      // state.players) не е в базовия списък — fallback към search резултатите.
+      const profile =
+        state.players.find((player) => player.profileId === profileId) ??
+        state.playersSearchResults?.find((player) => player.profileId === profileId)
 
       if (profile) {
         options.onPlayerCardClick(profile)

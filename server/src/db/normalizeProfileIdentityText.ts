@@ -103,3 +103,22 @@ export function normalizeProfileUsername(
 ): string | null {
   return normalizeProfileIdentityText(value)
 }
+
+/**
+ * Нормализира частичен search term по СЪЩИЯ начин, по който се записва
+ * normalized_display_name (NFKC + collapse whitespace + trim + bg-BG
+ * lowercase), но БЕЗ строгата дължина/regex валидация на пълно име —
+ * търсеният фрагмент не е задължен да е валидно цяло display name.
+ */
+export function normalizeProfileSearchTerm(value: string): string {
+  return value.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase('bg-BG')
+}
+
+/**
+ * Ескейпва SQL LIKE wildcard символите (%, _, \), за да не бъдат
+ * третирани като wildcard-и, когато потребителят ги въведе буквално.
+ * Ползва се заедно с `ESCAPE '\'` в LIKE клаузата.
+ */
+export function escapeSqlLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`)
+}

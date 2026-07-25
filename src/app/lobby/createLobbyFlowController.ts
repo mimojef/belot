@@ -25,6 +25,7 @@ import {
   computeShopResumeConfirmOpen,
   computeShopPurchaseConfirmDispatch,
 } from './shopResumeConfirmState'
+import { createDebouncedPlayerSearch } from './createDebouncedPlayerSearch'
 import type {
   AdminSettingsSnapshot,
   AdminStatsSnapshot,
@@ -125,6 +126,13 @@ export type CreateLobbyFlowControllerOptions = {
   onProfileNameChangeSubmit?: (targetProfileId: string | null, displayName: string) => Promise<string | null>
   onChangePasswordSubmit?: (currentPassword: string, newPassword: string) => Promise<string | null>
   onPlayersLoad?: () => Promise<
+    | { ok: true; players: PlayerPublicProfileSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onPlayersSearch?: (
+    query: string,
+    signal: AbortSignal,
+  ) => Promise<
     | { ok: true; players: PlayerPublicProfileSnapshot[] }
     | { ok: false; message: string }
   >
@@ -486,6 +494,8 @@ type InternalLobbyFlowState = {
   players: PlayerPublicProfileSnapshot[]
   playersSearchQuery: string
   playersSearchDraft: string
+  playersSearchResults: PlayerPublicProfileSnapshot[] | null
+  playersSearchLoading: boolean
   playersLoading: boolean
   playersErrorText: string | null
   leaderboards: LeaderboardsSnapshot | null
@@ -733,6 +743,8 @@ function createInitialState(): InternalLobbyFlowState {
     players: [],
     playersSearchQuery: '',
     playersSearchDraft: '',
+    playersSearchResults: null,
+    playersSearchLoading: false,
     playersLoading: false,
     playersErrorText: null,
     leaderboards: null,
@@ -1115,6 +1127,50 @@ export function createLobbyFlowController(
       _renderTimerId = null
       render()
     }, 50)
+  }
+
+  // --- Players directory server-side search (debounced, latest-wins) ---
+  const PLAYERS_SEARCH_MIN_QUERY_LENGTH = 2
+
+  const playersSearchRunner = createDebouncedPlayerSearch<PlayerPublicProfileSnapshot[]>({
+    run: (query, signal) => {
+      if (!options.onPlayersSearch) {
+        return Promise.reject(new Error('Търсенето временно не е налично.'))
+      }
+      return options.onPlayersSearch(query, signal).then((result) => {
+        if (!result.ok) {
+          throw new Error(result.message)
+        }
+        return result.players
+      })
+    },
+    onResult: (result) => {
+      // Игнорирай, ако вече не сме на страница "Играчи" или полето вече
+      // не съдържа точно този query (напр. потребителят е продължил да
+      // пише/изчисти междувременно) — защита срещу stale отговор.
+      if (state.currentScreen !== 'players') return
+      if (state.playersSearchQuery.trim() !== result.query) return
+      state.playersSearchLoading = false
+      if (result.ok) {
+        state.playersSearchResults = result.value
+      }
+      // При грешка (различна от отменена заявка) запазваме сегашния
+      // playersSearchResults/локален filter непроменен — без flicker.
+      render()
+    },
+    delayMs: 300,
+  })
+
+  function triggerPlayersSearch(query: string): void {
+    const trimmed = query.trim()
+    if (trimmed.length < PLAYERS_SEARCH_MIN_QUERY_LENGTH) {
+      playersSearchRunner.cancel()
+      state.playersSearchResults = null
+      state.playersSearchLoading = false
+      return
+    }
+    state.playersSearchLoading = true
+    playersSearchRunner.schedule(trimmed)
   }
 
   // --- Initial loading overlay ---
@@ -1825,6 +1881,8 @@ export function createLobbyFlowController(
       players: state.players,
       playersSearchQuery: state.playersSearchQuery,
       playersSearchDraft: state.playersSearchDraft,
+      playersSearchResults: state.playersSearchResults,
+      playersSearchLoading: state.playersSearchLoading,
       playersLoading: state.playersLoading,
       playersErrorText: state.playersErrorText,
       leaderboards: state.leaderboards,
@@ -2251,9 +2309,11 @@ export function createLobbyFlowController(
         else void ensureFriendshipsLoaded()
       },
       onPlayersSearchChange: (query) => {
-        // Desktop: обновява и draft, и applied → live filter
+        // Desktop: обновява и draft, и applied → мигновен локален filter,
+        // плюс debounced server-side search за резултати извън заредените.
         state.playersSearchDraft = query
         state.playersSearchQuery = query
+        triggerPlayersSearch(query)
         render()
       },
       onPlayersSearchDraftChange: (draft) => {
@@ -2264,6 +2324,7 @@ export function createLobbyFlowController(
         // Mobile: използва реалната DOM стойност — надеждно при composition и гласово въвеждане
         state.playersSearchDraft = query
         state.playersSearchQuery = query
+        triggerPlayersSearch(query)
         render()
       },
       onLeaderboardPlayerClick: (profile) => {
@@ -2973,7 +3034,7 @@ export function createLobbyFlowController(
       state.localAvatarUrl = authSession.profile.avatarUrl
     }
 
-    await refreshEditedTargetProfile(targetProfileId)
+    await refreshEditedTargetProfile(targetProfileId, displayName)
     state.profileNameChangeErrorText = null
     state.profileNameChangeSuccessAmount = targetProfileId === null
       ? state.adminSettings?.profileNameChangePrice ??
@@ -3068,8 +3129,11 @@ export function createLobbyFlowController(
     state.profilePopupOpen = false
     state.profilePopupProfile = null
     state.profilePopupCanEdit = true
+    playersSearchRunner.cancel()
     state.playersSearchQuery = ''
     state.playersSearchDraft = ''
+    state.playersSearchResults = null
+    state.playersSearchLoading = false
     stopWaitingRoomActivity()
     resetFinalFillSequence()
 
@@ -4237,6 +4301,7 @@ export function createLobbyFlowController(
         : p
 
     state.players = state.players.map(applyLike)
+    state.playersSearchResults = state.playersSearchResults?.map(applyLike) ?? null
 
     if (state.leaderboards) {
       const updated: LeaderboardsSnapshot = {} as LeaderboardsSnapshot
@@ -4410,6 +4475,7 @@ export function createLobbyFlowController(
       p.profileId === profileId ? { ...p, isBlockedByMe: blocked } : p
 
     state.players = state.players.map(updateProfile)
+    state.playersSearchResults = state.playersSearchResults?.map(updateProfile) ?? null
     state.leaderboards = state.leaderboards
       ? {
           balance: state.leaderboards.balance.map(updateProfile),
@@ -4477,6 +4543,7 @@ export function createLobbyFlowController(
     const updateProfile = (p: PlayerPublicProfileSnapshot) =>
       p.profileId === profileId ? { ...p, isBlockedByMe: false } : p
     state.players = state.players.map(updateProfile)
+    state.playersSearchResults = state.playersSearchResults?.map(updateProfile) ?? null
     if (state.profilePopupProfile?.profileId === profileId) {
       state.profilePopupProfile = { ...state.profilePopupProfile, isBlockedByMe: false }
     }
@@ -5363,6 +5430,9 @@ export function createLobbyFlowController(
     state.players = state.players.map((player) =>
       player.profileId === profile.profileId ? profile : player,
     )
+    state.playersSearchResults = state.playersSearchResults?.map((player) =>
+      player.profileId === profile.profileId ? profile : player,
+    ) ?? null
     if (state.profilePopupProfile?.profileId === profile.profileId) {
       state.profilePopupProfile = profile
     }
@@ -5371,12 +5441,36 @@ export function createLobbyFlowController(
     }
   }
 
-  async function refreshEditedTargetProfile(profileId: string | null): Promise<void> {
+  async function refreshEditedTargetProfile(
+    profileId: string | null,
+    knownDisplayNameHint?: string | null,
+  ): Promise<void> {
     if (profileId === null || !isAdminTargetEdit()) return
     const result = await options.onPlayersLoad?.()
     if (!result?.ok) return
     state.players = result.players
-    const profile = result.players.find((player) => player.profileId === profileId) ?? null
+    let profile = result.players.find((player) => player.profileId === profileId) ?? null
+
+    // Целевият профил може да е извън капнатия bulk списък (напр. намерен
+    // само чрез server-side search) — fallback търсене по известното
+    // display name, за да получим актуализираните данни след admin edit.
+    if (profile === null && options.onPlayersSearch) {
+      const searchTerm =
+        knownDisplayNameHint ??
+        state.profileEditorTargetProfile?.displayName ??
+        state.profilePopupProfile?.displayName ??
+        null
+      if (searchTerm && searchTerm.trim().length >= 2) {
+        const abortController = new AbortController()
+        const searchResult = await options
+          .onPlayersSearch(searchTerm, abortController.signal)
+          .catch(() => null)
+        if (searchResult?.ok) {
+          profile = searchResult.players.find((player) => player.profileId === profileId) ?? null
+        }
+      }
+    }
+
     if (profile !== null) {
       updateEditedTargetProfile(profile)
     }
@@ -5388,7 +5482,9 @@ export function createLobbyFlowController(
     const targetProfile = profileId
       ? (state.profilePopupProfile?.profileId === profileId
           ? state.profilePopupProfile
-          : state.players.find((player) => player.profileId === profileId) ?? null)
+          : state.players.find((player) => player.profileId === profileId) ??
+            state.playersSearchResults?.find((player) => player.profileId === profileId) ??
+            null)
       : null
     const isOwn = profileId === null || (ownProfileId !== null && profileId === ownProfileId)
 

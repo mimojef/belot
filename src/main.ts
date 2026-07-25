@@ -575,6 +575,37 @@ async function loadPlayersDirectory(): Promise<
   }
 }
 
+async function searchPlayersDirectory(
+  query: string,
+  signal: AbortSignal,
+): Promise<
+  | { ok: true; players: PlayerPublicProfileSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/players/search?q=${encodeURIComponent(query)}`,
+      {
+        method: 'GET',
+        credentials: 'include',
+        signal,
+      },
+    )
+    const data = (await response.json()) as PlayersResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.players)) {
+      return { ok: false, message: data.message ?? 'Търсенето не беше успешно.' }
+    }
+
+    return { ok: true, players: data.players }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error
+    }
+    return { ok: false, message: 'Няма връзка със сървъра за играчи.' }
+  }
+}
+
 async function loadGuestTrialStatus(): Promise<
   | { ok: true; gamesUsed: number; remaining: number; maxGames: number; stake: number }
   | { ok: false; message: string }
@@ -2927,6 +2958,7 @@ lobby = createLobbyFlowController({
   onProfileNameChangeSubmit: (targetProfileId, displayName) => submitProfileNameChange(targetProfileId, displayName),
   onChangePasswordSubmit: (currentPassword, newPassword) => submitChangePassword(currentPassword, newPassword),
   onPlayersLoad: () => loadPlayersDirectory(),
+  onPlayersSearch: (query, signal) => searchPlayersDirectory(query, signal),
   onLeaderboardsLoad: () => loadLeaderboards(),
   onLobbyPackagesLoad: () => loadLobbyPackages(),
   onShopPackagesLoad: () => loadShopPackages(),

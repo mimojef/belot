@@ -59,6 +59,7 @@ import { createFriendshipStore } from './db/friendshipStore.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { createMatchEconomyStore, setMatchPrizeResolver } from './db/matchEconomyStore.js'
 import { createMatchRoomsStore } from './db/matchRoomsStore.js'
+import { normalizeProfileSearchTerm } from './db/normalizeProfileIdentityText.js'
 import { createPlayerProgressStore } from './db/playerProgressStore.js'
 import { createTableExitPenaltyStore } from './db/tableExitPenaltyStore.js'
 import { createYellowCoinGiftStore } from './db/yellowCoinGiftStore.js'
@@ -4100,6 +4101,81 @@ async function handlePlayersRequest(
   return true
 }
 
+const PLAYERS_SEARCH_MIN_QUERY_LENGTH = 2
+const PLAYERS_SEARCH_MAX_RAW_QUERY_LENGTH = 64
+const PLAYERS_SEARCH_TOO_SHORT_MESSAGE = 'Въведи поне 2 символа за търсене.'
+
+function enrichPlayerProfilesForViewer(
+  profiles: PlayerPublicProfileSnapshot[],
+  currentProfileId: string | null,
+): PlayerPublicProfileSnapshot[] {
+  return profiles.map((p) => ({
+    ...p,
+    likesCount: p.profileId ? likeStore.getLikesCount(p.profileId) : null,
+    hasLikedByMe: p.profileId && currentProfileId
+      ? likeStore.hasLikedRecently(currentProfileId, p.profileId)
+      : null,
+    isBlockedByMe: p.profileId && currentProfileId
+      ? blockStore.isBlocked(currentProfileId, p.profileId)
+      : null,
+  }))
+}
+
+async function handlePlayersSearchRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  // Точен match — /api/players/search не трябва да бъде прихванат от,
+  // нито да прихваща, евентуален бъдещ динамичен /api/players/:id маршрут.
+  if (pathname !== '/api/players/search' || req.method !== 'GET') {
+    return false
+  }
+
+  const rawQuery = (requestUrl.searchParams.get('q') ?? '').trim()
+
+  if (rawQuery.length === 0) {
+    sendJsonResponse(res, 400, { ok: false, message: PLAYERS_SEARCH_TOO_SHORT_MESSAGE })
+    return true
+  }
+
+  if (rawQuery.length > PLAYERS_SEARCH_MAX_RAW_QUERY_LENGTH) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Търсенето е твърде дълго.' })
+    return true
+  }
+
+  const normalizedTerm = normalizeProfileSearchTerm(rawQuery)
+
+  if (normalizedTerm.length < PLAYERS_SEARCH_MIN_QUERY_LENGTH) {
+    sendJsonResponse(res, 400, { ok: false, message: PLAYERS_SEARCH_TOO_SHORT_MESSAGE })
+    return true
+  }
+
+  // Идентична идентификация на текущия потребител и на онлайн профилите
+  // като в handlePlayersRequest — search резултатите носят същите
+  // isOnline/likesCount/hasLikedByMe/isBlockedByMe правила за достъп.
+  const onlineProfileIds = new Set<string>()
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.profileId && socketRegistry.get(conn.id)?.readyState === WebSocket.OPEN) {
+      onlineProfileIds.add(conn.profileId)
+    }
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+  const currentProfileId = session?.profile.profileId ?? null
+
+  // LIMIT-ът е твърдо зададен в searchPublicProfilesStatement (50) —
+  // клиентът няма начин да го надвиши, тъй като не се чете никакъв
+  // limit/offset query параметър тук.
+  const matches = playerProgressStore.searchPublicProfiles(normalizedTerm, onlineProfileIds)
+  const players = enrichPlayerProfilesForViewer(matches, currentProfileId)
+
+  sendJsonResponse(res, 200, { ok: true, players })
+  return true
+}
+
 function markMatchmakingEntriesStakePaid(entryIds: string[]): void {
   const entryIdsSet = new Set(entryIds)
 
@@ -6400,6 +6476,10 @@ async function handleHttpRequest(
   }
 
   if (await handleProfileBlockRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handlePlayersSearchRequest(req, res, requestUrl.pathname, requestUrl)) {
     return
   }
 

@@ -12,6 +12,7 @@ import {
   SERVER_TEAM_A_SEATS,
 } from '../core/serverTypes.js'
 import {
+  escapeSqlLikePattern,
   normalizeProfileDisplayName,
   validateProfileDisplayName,
 } from './normalizeProfileIdentityText.js'
@@ -49,6 +50,10 @@ export type PlayerProgressStore = {
   isTemporaryProfile: (profileId: string) => boolean
   getPublicProfile: (profileId: ProfileId) => PlayerPublicProfileSnapshot | null
   listPublicHumanProfiles: (onlineProfileIds?: Set<string>) => PlayerPublicProfileSnapshot[]
+  searchPublicProfiles: (
+    normalizedTerm: string,
+    onlineProfileIds?: Set<string>,
+  ) => PlayerPublicProfileSnapshot[]
   listLeaderboards: () => LeaderboardsSnapshot
   changeProfileDisplayName: (
     profileId: ProfileId,
@@ -383,6 +388,47 @@ export async function createPlayerProgressStore(
       )
     ORDER BY p.updated_at DESC, p.created_at DESC
     LIMIT 500;
+  `)
+
+  // Отделен search statement — не наследява LIMIT 500 на browse списъка.
+  // Проверява ВСИЧКИ допустими профили (същия WHERE филтър), за да могат
+  // резултати извън първите 500 (по updated_at/created_at) да се намират.
+  const searchPublicProfilesStatement = database.prepare(`
+    SELECT
+      p.profile_id,
+      p.profile_kind,
+      p.display_name,
+      p.avatar_url,
+      p.level,
+      p.rank_title,
+      p.skill_rating,
+      p.average_rating,
+      p.total_ratings_count,
+      COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance,
+      pp.completed_games_count,
+      pp.won_games_count,
+      p.gender
+    FROM profiles p
+    LEFT JOIN profile_wallets pw
+      ON pw.profile_id = p.profile_id
+    LEFT JOIN profile_progress pp
+      ON pp.profile_id = p.profile_id
+    WHERE p.status = 'active'
+      AND p.is_temporary = 0
+      AND (
+        (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
+        OR p.profile_kind = 'bot'
+      )
+      AND p.normalized_display_name LIKE ? ESCAPE '\\'
+    ORDER BY
+      CASE
+        WHEN p.normalized_display_name = ? THEN 0
+        WHEN p.normalized_display_name LIKE ? ESCAPE '\\' THEN 1
+        ELSE 2
+      END,
+      p.normalized_display_name ASC,
+      p.profile_id ASC
+    LIMIT 50;
   `)
 
   const listLeaderboardByBalanceStatement = database.prepare(`
@@ -852,11 +898,10 @@ export async function createPlayerProgressStore(
     return toPublicProfileSnapshot(row, galleryImages)
   }
 
-  function listPublicHumanProfiles(onlineProfileIds?: Set<string>): PlayerPublicProfileSnapshot[] {
-    const rows = listPublicHumanProfilesStatement.all() as Array<
-      Parameters<typeof toPublicProfileSnapshot>[0] & { profile_kind: string }
-    >
-
+  function mapProfileRowsToSnapshots(
+    rows: Array<Parameters<typeof toPublicProfileSnapshot>[0] & { profile_kind: string }>,
+    onlineProfileIds?: Set<string>,
+  ): PlayerPublicProfileSnapshot[] {
     return rows.map((row) => {
       const galleryImages = selectProfileGalleryImagesStatement.all(
         row.profile_id,
@@ -869,6 +914,35 @@ export async function createPlayerProgressStore(
       }
       return snapshot
     })
+  }
+
+  function listPublicHumanProfiles(onlineProfileIds?: Set<string>): PlayerPublicProfileSnapshot[] {
+    const rows = listPublicHumanProfilesStatement.all() as Array<
+      Parameters<typeof toPublicProfileSnapshot>[0] & { profile_kind: string }
+    >
+
+    return mapProfileRowsToSnapshots(rows, onlineProfileIds)
+  }
+
+  function searchPublicProfiles(
+    normalizedTerm: string,
+    onlineProfileIds?: Set<string>,
+  ): PlayerPublicProfileSnapshot[] {
+    if (normalizedTerm.length === 0) {
+      return []
+    }
+
+    const escapedTerm = escapeSqlLikePattern(normalizedTerm)
+    const containsPattern = `%${escapedTerm}%`
+    const prefixPattern = `${escapedTerm}%`
+
+    const rows = searchPublicProfilesStatement.all(
+      containsPattern,
+      normalizedTerm,
+      prefixPattern,
+    ) as Array<Parameters<typeof toPublicProfileSnapshot>[0] & { profile_kind: string }>
+
+    return mapProfileRowsToSnapshots(rows, onlineProfileIds)
   }
 
   function listProfilesFromStatement(
@@ -1567,6 +1641,7 @@ export async function createPlayerProgressStore(
     isTemporaryProfile,
     getPublicProfile,
     listPublicHumanProfiles,
+    searchPublicProfiles,
     listLeaderboards,
     changeProfileDisplayName,
     adminRenameProfileDisplayName,

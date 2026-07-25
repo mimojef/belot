@@ -31,6 +31,8 @@
     "check:gift-limit-frontend": "tsx scripts/checkGiftLimitFrontend.ts",
     "check:admin-profile-moderation": "tsx scripts/checkAdminProfileModeration.ts",
     "check:avatar-upload-security": "tsx scripts/checkAvatarUploadSecurity.ts",
+    "check:players-search": "tsx scripts/checkPlayersSearch.ts",
+    "check:debounced-player-search": "tsx scripts/checkDebouncedPlayerSearch.ts",
     "check:shop-purchase-flow": "tsx scripts/checkShopPurchaseFlow.ts",
     "check:reconnect-contract": "tsx scripts/checkReconnectContractDisplay.ts",
     "check:guest-trial-flow": "tsx scripts/checkGuestTrialFlow.ts",

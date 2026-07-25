@@ -157,19 +157,29 @@ const players = [offlineA, bot1, onlineA, own, onlineB, offlineB, bot2]
 }
 
 // [8] Source check: renderLobbyScreen.ts използва orderPlayersForViewer и в desktop, и в mobile
+//
+// desktop/mobile players directory рендиране минава през общия helper
+// computePlayersDirectoryLists (добавен за players search — виж
+// checkPlayersSearch.ts), който самият той извиква orderPlayersForViewer.
+// Проверяваме и двете нива: helper-ът съдържа реалния call, а всяка от
+// двете render функции извиква helper-а.
 {
   const renderSrc = readFileSync(resolve(PROJECT_ROOT, 'src/app/lobby/renderLobbyScreen.ts'), 'utf8')
 
   check('[8] renderLobbyScreen: import на orderPlayersForViewer', renderSrc.includes("from './orderPlayersForViewer'"))
 
-  // Намираме и двете функции и проверяваме, че всяка съдържа orderPlayersForViewer
+  const helperMatch = renderSrc.match(/function computePlayersDirectoryLists[\s\S]*?^function /m)
+  const helperSrc = helperMatch ? helperMatch[0] : ''
+  check('[8] computePlayersDirectoryLists: използва orderPlayersForViewer', helperSrc.includes('orderPlayersForViewer'))
+
+  // Намираме и двете render функции и проверяваме, че всяка вика споделения helper.
   const desktopMatch = renderSrc.match(/function renderPlayersDirectory[\s\S]*?^function /m)
   const desktopSrc = desktopMatch ? desktopMatch[0] : ''
-  check('[8] renderPlayersDirectory (desktop): използва orderPlayersForViewer', desktopSrc.includes('orderPlayersForViewer'))
+  check('[8] renderPlayersDirectory (desktop): използва computePlayersDirectoryLists', desktopSrc.includes('computePlayersDirectoryLists'))
 
   const mobileMatch = renderSrc.match(/function renderMobilePlayersDirectory[\s\S]*?^function /m)
   const mobileSrc = mobileMatch ? mobileMatch[0] : ''
-  check('[8] renderMobilePlayersDirectory (mobile): използва orderPlayersForViewer', mobileSrc.includes('orderPlayersForViewer'))
+  check('[8] renderMobilePlayersDirectory (mobile): използва computePlayersDirectoryLists', mobileSrc.includes('computePlayersDirectoryLists'))
 }
 
 console.log(`\n${passed + failed} checks: ${passed} passed, ${failed} failed\n`)
