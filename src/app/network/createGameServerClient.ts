@@ -241,6 +241,7 @@ export type CoinPackageSnapshot = {
   status: CoinPackageStatus
   sortOrder: number
   showInLobby: boolean
+  isTopOffer: boolean
 }
 
 export type CoinPackageInput = {
@@ -254,6 +255,7 @@ export type CoinPackageInput = {
   status: CoinPackageStatus
   sortOrder: number
   showInLobby: boolean
+  isTopOffer: boolean
 }
 
 export type MissionType =

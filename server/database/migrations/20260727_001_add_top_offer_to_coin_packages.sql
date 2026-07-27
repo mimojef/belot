@@ -1,0 +1,1 @@
+ALTER TABLE coin_packages ADD COLUMN is_top_offer INTEGER NOT NULL DEFAULT 0;

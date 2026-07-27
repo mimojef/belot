@@ -38,6 +38,8 @@
     "check:pagination-items": "tsx scripts/checkComputePaginationItems.ts",
     "check:players-page-snapshot-store": "tsx scripts/checkPlayersPageSnapshotStore.ts",
     "check:shop-purchase-flow": "tsx scripts/checkShopPurchaseFlow.ts",
+    "check:coin-packages-top-offer": "tsx scripts/checkCoinPackagesTopOffer.ts",
+    "check:coin-packages-top-offer-badge": "tsx scripts/checkCoinPackagesTopOfferBadge.ts",
     "check:reconnect-contract": "tsx scripts/checkReconnectContractDisplay.ts",
     "check:guest-trial-flow": "tsx scripts/checkGuestTrialFlow.ts",
     "check:admin-games-played": "tsx scripts/checkAdminGamesPlayed.ts",

@@ -1594,6 +1594,46 @@ async function setAdminCoinPackageLobbyVisibility(
   }
 }
 
+async function setAdminCoinPackageTopOffer(
+  packageId: string,
+  isTopOffer: boolean,
+): Promise<
+  | { ok: true; packages: CoinPackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/coin-packages/${encodeURIComponent(packageId)}/top-offer`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({ isTopOffer }),
+      },
+    )
+    const data = (await response.json()) as CoinPackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Топ офертата не беше променена.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за промяна на топ оферта.',
+    }
+  }
+}
+
 async function readFriendshipsResponse(response: Response): Promise<FriendshipsResponse> {
   try {
     return (await response.json()) as FriendshipsResponse
@@ -3026,6 +3066,8 @@ lobby = createLobbyFlowController({
   onAdminCoinPackageDelete: (packageId) => deleteAdminCoinPackage(packageId),
   onAdminCoinPackageLobbyToggle: (packageId, showInLobby) =>
     setAdminCoinPackageLobbyVisibility(packageId, showInLobby),
+  onAdminCoinPackageTopOfferToggle: (packageId, isTopOffer) =>
+    setAdminCoinPackageTopOffer(packageId, isTopOffer),
   onFriendshipsLoad: () => loadFriendships(),
   onFriendRequestSubmit: (profileId) => submitFriendRequest(profileId),
   onFriendAccept: (friendshipId) => submitFriendAction(friendshipId, 'accept'),

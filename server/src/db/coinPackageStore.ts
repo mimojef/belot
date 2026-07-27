@@ -15,6 +15,7 @@ export type CoinPackageSnapshot = {
   status: CoinPackageStatus
   sortOrder: number
   showInLobby: boolean
+  isTopOffer: boolean
 }
 
 export type CoinPackageInput = {
@@ -28,6 +29,7 @@ export type CoinPackageInput = {
   status: CoinPackageStatus
   sortOrder: number
   showInLobby: boolean
+  isTopOffer: boolean
 }
 
 export type CoinPackageStore = {
@@ -44,6 +46,10 @@ export type CoinPackageStore = {
   setPackageLobbyVisibility: (
     packageId: string,
     showInLobby: boolean,
+  ) => { ok: true; package: CoinPackageSnapshot } | { ok: false; message: string }
+  setPackageTopOffer: (
+    packageId: string,
+    isTopOffer: boolean,
   ) => { ok: true; package: CoinPackageSnapshot } | { ok: false; message: string }
   deletePackage: (
     packageId: string,
@@ -62,6 +68,7 @@ type CoinPackageRow = {
   status: CoinPackageStatus
   sort_order: number
   show_in_lobby: number
+  is_top_offer: number
 }
 
 function rowToSnapshot(row: CoinPackageRow): CoinPackageSnapshot {
@@ -76,6 +83,7 @@ function rowToSnapshot(row: CoinPackageRow): CoinPackageSnapshot {
     status: row.status,
     sortOrder: row.sort_order,
     showInLobby: row.show_in_lobby !== 0,
+    isTopOffer: row.is_top_offer !== 0,
   }
 }
 
@@ -131,7 +139,8 @@ export async function createCoinPackageStore(
       currency,
       status,
       sort_order,
-      show_in_lobby
+      show_in_lobby,
+      is_top_offer
     FROM coin_packages
     WHERE status = 'active'
     ORDER BY sort_order ASC, yellow_coins_amount ASC;
@@ -148,7 +157,8 @@ export async function createCoinPackageStore(
       currency,
       status,
       sort_order,
-      show_in_lobby
+      show_in_lobby,
+      is_top_offer
     FROM coin_packages
     WHERE status = 'active' AND show_in_lobby = 1
     ORDER BY yellow_coins_amount ASC;
@@ -165,7 +175,8 @@ export async function createCoinPackageStore(
       currency,
       status,
       sort_order,
-      show_in_lobby
+      show_in_lobby,
+      is_top_offer
     FROM coin_packages
     ORDER BY sort_order ASC, yellow_coins_amount ASC;
   `)
@@ -181,7 +192,8 @@ export async function createCoinPackageStore(
       currency,
       status,
       sort_order,
-      show_in_lobby
+      show_in_lobby,
+      is_top_offer
     FROM coin_packages
     WHERE package_id = ?;
   `)
@@ -197,8 +209,10 @@ export async function createCoinPackageStore(
       currency,
       status,
       sort_order,
-      show_in_lobby
+      show_in_lobby,
+      is_top_offer
     ) VALUES (
+      ?,
       ?,
       ?,
       ?,
@@ -233,6 +247,14 @@ export async function createCoinPackageStore(
     UPDATE coin_packages
     SET
       show_in_lobby = ?,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE package_id = ?;
+  `)
+
+  const updateTopOfferStatement = database.prepare(`
+    UPDATE coin_packages
+    SET
+      is_top_offer = ?,
       updated_at = CURRENT_TIMESTAMP
     WHERE package_id = ?;
   `)
@@ -332,6 +354,7 @@ export async function createCoinPackageStore(
       status,
       sortOrder,
       input.showInLobby ? 1 : 0,
+      input.isTopOffer ? 1 : 0,
     )
 
     const savedPackage =
@@ -403,6 +426,27 @@ export async function createCoinPackageStore(
     return { ok: true, package: updatedPackage }
   }
 
+  function setPackageTopOffer(
+    packageId: string,
+    isTopOffer: boolean,
+  ): { ok: true; package: CoinPackageSnapshot } | { ok: false; message: string } {
+    const normalizedPackageId = normalizeText(packageId, 96)
+
+    if (normalizedPackageId.length === 0) {
+      return { ok: false, message: 'Невалиден ID на пакет.' }
+    }
+
+    updateTopOfferStatement.run(isTopOffer ? 1 : 0, normalizedPackageId)
+
+    const updatedPackage = getPackageById(normalizedPackageId)
+
+    if (updatedPackage === null) {
+      return { ok: false, message: 'Пакетът не беше намерен.' }
+    }
+
+    return { ok: true, package: updatedPackage }
+  }
+
   function deletePackage(
     packageId: string,
   ): { ok: true; packages: CoinPackageSnapshot[] } | { ok: false; message: string } {
@@ -434,6 +478,7 @@ export async function createCoinPackageStore(
     upsertPackage,
     setPackageStatus,
     setPackageLobbyVisibility,
+    setPackageTopOffer,
     deletePackage,
     close,
   }

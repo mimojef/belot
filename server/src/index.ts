@@ -4933,12 +4933,14 @@ async function handleAdminCoinPackagesRequest(
 ): Promise<boolean> {
   const statusMatch = /^\/api\/admin\/coin-packages\/([^/]+)\/status$/.exec(pathname)
   const lobbyMatch = /^\/api\/admin\/coin-packages\/([^/]+)\/lobby$/.exec(pathname)
+  const topOfferMatch = /^\/api\/admin\/coin-packages\/([^/]+)\/top-offer$/.exec(pathname)
   const deleteMatch = /^\/api\/admin\/coin-packages\/([^/]+)$/.exec(pathname)
 
   if (
     pathname !== '/api/admin/coin-packages' &&
     statusMatch === null &&
     lobbyMatch === null &&
+    topOfferMatch === null &&
     deleteMatch === null
   ) {
     return false
@@ -4985,6 +4987,7 @@ async function handleAdminCoinPackagesRequest(
       status: getStringField(body, 'status') as CoinPackageStatus,
       sortOrder: getNumberField(body, 'sortOrder') ?? 0,
       showInLobby: body['showInLobby'] === true,
+      isTopOffer: body['isTopOffer'] === true,
     })
 
     if (!result.ok) {
@@ -5054,6 +5057,34 @@ async function handleAdminCoinPackagesRequest(
     const result = coinPackageStore.setPackageLobbyVisibility(
       decodeURIComponent(lobbyMatch[1] ?? ''),
       showInLobby,
+    )
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      package: result.package,
+      packages: coinPackageStore.listAdminPackages(),
+    })
+    return true
+  }
+
+  if (topOfferMatch !== null && req.method === 'PATCH') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
+      return true
+    }
+
+    const isTopOffer = body['isTopOffer'] === true
+
+    const result = coinPackageStore.setPackageTopOffer(
+      decodeURIComponent(topOfferMatch[1] ?? ''),
+      isTopOffer,
     )
 
     if (!result.ok) {

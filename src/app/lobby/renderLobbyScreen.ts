@@ -372,6 +372,7 @@ export type RenderLobbyScreenOptions = {
   onAdminCoinPackageEdit: (packageId: string) => void
   onAdminCoinPackageDelete: (packageId: string) => void
   onAdminCoinPackageLobbyToggle: (packageId: string, showInLobby: boolean) => void
+  onAdminCoinPackageTopOfferToggle: (packageId: string, isTopOffer: boolean) => void
   onFriendsClick: () => void
   onBlockedPlayersClick: () => void
   onBlockedPlayersClose: () => void
@@ -629,6 +630,10 @@ export function escapeHtml(value: string): string {
 
 function formatAmount(value: number): string {
   return new Intl.NumberFormat('bg-BG').format(value)
+}
+
+export function renderTopOfferBadge(): string {
+  return `<div style="position:absolute;top:-11px;left:14px;z-index:3;display:inline-flex;align-items:center;gap:4px;background:linear-gradient(135deg,#f4c95b 0%,#c98f13 100%);color:#000000;font-size:11px;font-weight:900;letter-spacing:0.01em;padding:5px 11px;border-radius:999px;box-shadow:0 4px 10px rgba(0,0,0,0.4);white-space:nowrap;pointer-events:none;">✦ ТОП ОФЕРТА</div>`
 }
 
 function renderLevelBadge(level: number | null | undefined, size: 'sm' | 'md' = 'md'): string {
@@ -2436,7 +2441,7 @@ function syncMissionsPopup(
   })
 }
 
-function renderBottomSection(
+export function renderBottomSection(
   lobbyPackages: CoinPackageSnapshot[],
   isLoggedIn: boolean,
   unclaimedMissionsCount: number,
@@ -2458,9 +2463,10 @@ function renderBottomSection(
       padding:10px 12px;
       display:grid; grid-template-columns:80px minmax(0, 1fr); align-items:center; gap:10px;
       flex:1; min-width:0;
-      overflow:hidden;
-      ${isFirstPkg ? 'position:relative; z-index:2;' : ''}
+      position:relative;
+      ${isFirstPkg ? 'z-index:2;' : ''}
     ">
+      ${pkg.isTopOffer ? renderTopOfferBadge() : ''}
       <div style="height:98px; display:flex; align-items:center; justify-content:center;">
         <img src="${imgSrc}" alt="${formatAmount(pkg.yellowCoinsAmount)} жълтици"
           style="width:80px; height:80px; display:block; object-fit:contain;">
@@ -3068,7 +3074,7 @@ function renderMobileStakeSection(
   `
 }
 
-function renderMobileOffersSection(lobbyPackages: CoinPackageSnapshot[], isLoggedIn: boolean): string {
+export function renderMobileOffersSection(lobbyPackages: CoinPackageSnapshot[], isLoggedIn: boolean): string {
   if (lobbyPackages.length === 0) return ''
 
   const cards = lobbyPackages.map((pkg, index) => {
@@ -3082,10 +3088,12 @@ function renderMobileOffersSection(lobbyPackages: CoinPackageSnapshot[], isLogge
 
     return `
       <article style="
+        position:relative;
         flex:0 0 calc(100vw - 128px);max-width:none;min-height:136px;border-radius:8px;
         border:2px solid rgba(212,165,32,0.84);background:#080808;padding:12px;
         display:grid;grid-template-columns:82px minmax(0,1fr);gap:10px;align-items:center;scroll-snap-align:${snapAlign};${snapMargin}box-sizing:border-box;
       ">
+        ${pkg.isTopOffer ? renderTopOfferBadge() : ''}
         <img src="${imgSrc}" alt="${formatAmount(pkg.yellowCoinsAmount)} жълтици" style="width:78px;height:78px;display:block;object-fit:contain;">
         <div style="min-width:0;">
           <div style="font-size:21px;font-weight:900;color:#d4a520;white-space:nowrap;display:flex;align-items:center;gap:6px;">
@@ -3114,7 +3122,7 @@ function renderMobileOffersSection(lobbyPackages: CoinPackageSnapshot[], isLogge
           text-decoration:underline;text-underline-offset:3px;padding:4px 0;cursor:pointer;
         ">всички оферти</button>
       </div>
-      <div style="display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x mandatory;padding:0 12px 8px;scroll-padding-left:12px;scroll-padding-right:12px;-webkit-overflow-scrolling:touch;">
+      <div style="display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x mandatory;padding:14px 12px 8px;scroll-padding-left:12px;scroll-padding-right:12px;-webkit-overflow-scrolling:touch;">
         ${cards}
       </div>
     </section>
@@ -3429,7 +3437,7 @@ function renderMobileLeaderboardsDirectory(state: LobbyScreenState): string {
   `
 }
 
-function renderMobileShopPanel(state: LobbyScreenState): string {
+export function renderMobileShopPanel(state: LobbyScreenState): string {
   if (state.shopPackagesLoading) return `${renderMobilePageTitle('Магазин')}${renderMobileStateMessage('Зареждане на магазина...')}`
   if (state.shopPackagesErrorText) return `${renderMobilePageTitle('Магазин')}${renderMobileStateMessage(state.shopPackagesErrorText, 'error')}`
 
@@ -3442,7 +3450,8 @@ function renderMobileShopPanel(state: LobbyScreenState): string {
       ${state.shopPackages.length === 0 ? renderMobileStateMessage('Няма активни пакети в магазина.') : state.shopPackages.map((coinPackage) => {
         const isPurchasing = state.shopPurchaseActionPackageId === coinPackage.packageId
         return `
-          <article style="border:1px solid rgba(212,165,32,0.46);border-radius:8px;background:#080808;padding:12px;display:grid;grid-template-columns:84px minmax(0,1fr);gap:10px;align-items:center;">
+          <article style="position:relative;border:1px solid rgba(212,165,32,0.46);border-radius:8px;background:#080808;padding:12px;display:grid;grid-template-columns:84px minmax(0,1fr);gap:10px;align-items:center;${coinPackage.isTopOffer ? 'margin-top:14px;' : ''}">
+            ${coinPackage.isTopOffer ? renderTopOfferBadge() : ''}
             <img src="${getCoinPackageImage(coinPackage.sortOrder)}" alt="" style="width:82px;height:82px;object-fit:contain;">
             <div style="min-width:0;">
               <div style="font-size:12px;font-weight:900;color:rgba(255,255,255,0.48);text-transform:uppercase;">${escapeHtml(coinPackage.title)}</div>
@@ -4303,7 +4312,7 @@ function renderLeaderboardsDirectory(state: LobbyScreenState): string {
   `
 }
 
-function renderShopPanel(state: LobbyScreenState): string {
+export function renderShopPanel(state: LobbyScreenState): string {
   if (state.shopPackagesLoading) {
     return `
       <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.34);background:#050505;border-radius:8px;color:#d4a520;font-size:18px;font-weight:900;">
@@ -4412,17 +4421,27 @@ function renderShopPanel(state: LobbyScreenState): string {
           Няма активни пакети в магазина.
         </div>
       ` : `
-        <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;">
-          ${packages.map((coinPackage) => {
-            const isPurchasing = state.shopPurchaseActionPackageId === coinPackage.packageId
-            return `
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          ${(() => {
+            const packageRows: (typeof packages)[] = []
+            for (let i = 0; i < packages.length; i += 5) {
+              packageRows.push(packages.slice(i, i + 5))
+            }
+            return packageRows.map((row) => {
+              const rowHasTopOffer = row.some((p) => p.isTopOffer)
+              return `
+          <div style="display:flex;gap:12px;${rowHasTopOffer ? 'margin-top:14px;' : ''}">
+            ${row.map((coinPackage) => {
+              const isPurchasing = state.shopPurchaseActionPackageId === coinPackage.packageId
+              return `
             <article style="
               position:relative;
+              flex:0 0 calc((100% - 48px) / 5);
+              min-width:0;
               background:#000000;
               border:1px solid rgba(212,165,32,0.72);
               border-radius:12px;
               padding:16px 14px 14px;
-              overflow:hidden;
               box-shadow:0 4px 16px rgba(0,0,0,0.3);
             ">
               <img src="${getCoinPackageImage(coinPackage.sortOrder)}" alt="" style="position:absolute;bottom:10px;right:10px;width:76px;height:76px;object-fit:contain;opacity:0.88;pointer-events:none;">
@@ -4430,6 +4449,8 @@ function renderShopPanel(state: LobbyScreenState): string {
               <button type="button" data-lobby-shop-package="${escapeHtml(coinPackage.packageId)}" ${isPurchasing ? 'disabled' : ''} style="position:absolute;top:14px;right:14px;height:34px;padding:0 14px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:12px;font-weight:900;cursor:${isPurchasing ? 'wait' : 'pointer'};transition:filter 0.15s,transform 0.1s;">
                 ${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи пакет' : 'Влез за покупка'}
               </button>
+
+              ${coinPackage.isTopOffer ? renderTopOfferBadge() : ''}
 
               <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:5px;">Жълтици</div>
               <div style="font-size:22px;font-weight:900;color:#d4a520;line-height:1;margin-bottom:12px;">${formatAmount(coinPackage.yellowCoinsAmount)}</div>
@@ -4448,9 +4469,21 @@ function renderShopPanel(state: LobbyScreenState): string {
                     style="width:15px;height:15px;accent-color:#d4a520;cursor:pointer;flex-shrink:0;">
                   <span style="font-size:11px;font-weight:800;color:rgba(212,165,32,0.85);text-transform:uppercase;letter-spacing:0.05em;">Видима в лобито</span>
                 </label>
+                <label style="display:flex;align-items:center;gap:7px;margin-top:7px;cursor:pointer;user-select:none;">
+                  <input type="checkbox"
+                    data-lobby-shop-package-top-offer="${escapeHtml(coinPackage.packageId)}"
+                    ${coinPackage.isTopOffer ? 'checked' : ''}
+                    style="width:15px;height:15px;accent-color:#d4a520;cursor:pointer;flex-shrink:0;">
+                  <span style="font-size:11px;font-weight:800;color:rgba(212,165,32,0.85);text-transform:uppercase;letter-spacing:0.05em;">Топ оферта</span>
+                </label>
               ` : ''}
             </article>
-          `}).join('')}
+            `
+            }).join('')}
+          </div>
+              `
+            }).join('')
+          })()}
         </div>
         <style>
           [data-lobby-shop-package]:not(:disabled):hover {
@@ -5549,6 +5582,13 @@ function renderAdminPanel(state: LobbyScreenState, isMobile = false): string {
                     style="width:15px;height:15px;accent-color:#d4a520;cursor:pointer;flex-shrink:0;">
                   <span style="font-size:10px;font-weight:800;color:rgba(212,165,32,0.85);text-transform:uppercase;letter-spacing:0.05em;">Лоби</span>
                 </label>
+                <label style="display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none;white-space:nowrap;" title="Топ оферта">
+                  <input type="checkbox"
+                    data-lobby-admin-package-top-offer="${escapeHtml(coinPackage.packageId)}"
+                    ${coinPackage.isTopOffer ? 'checked' : ''}
+                    style="width:15px;height:15px;accent-color:#d4a520;cursor:pointer;flex-shrink:0;">
+                  <span style="font-size:10px;font-weight:800;color:rgba(212,165,32,0.85);text-transform:uppercase;letter-spacing:0.05em;">Топ оферта</span>
+                </label>
                 <button type="button" data-lobby-admin-package-edit="${escapeHtml(coinPackage.packageId)}" style="height:36px;padding:0 12px;border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:${isEditing ? 'rgba(212,165,32,0.18)' : '#111111'};color:#d4a520;font-size:12px;font-weight:900;cursor:pointer;">
                   ${isEditing ? 'Редактира се' : 'Редактирай'}
                 </button>
@@ -5608,6 +5648,10 @@ function renderAdminPanel(state: LobbyScreenState, isMobile = false): string {
           <label style="grid-column:1 / -1;display:flex;align-items:center;gap:10px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;cursor:pointer;">
             <input name="showInLobby" type="checkbox" ${editPackage?.showInLobby ? 'checked' : ''} style="width:16px;height:16px;accent-color:#d4a520;cursor:pointer;flex-shrink:0;">
             Видима в лобито
+          </label>
+          <label style="grid-column:1 / -1;display:flex;align-items:center;gap:10px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;cursor:pointer;">
+            <input name="isTopOffer" type="checkbox" ${editPackage?.isTopOffer ? 'checked' : ''} style="width:16px;height:16px;accent-color:#d4a520;cursor:pointer;flex-shrink:0;">
+            Топ оферта
           </label>
           <div style="grid-column:1 / -1;display:flex;justify-content:flex-end;gap:8px;">
             ${editPackage ? `
@@ -7939,6 +7983,26 @@ export function renderLobbyScreen(
     })
   })
 
+  root.querySelectorAll<HTMLInputElement>('[data-lobby-shop-package-top-offer]').forEach((checkbox) => {
+    checkbox.addEventListener('change', () => {
+      const packageId = checkbox.dataset.lobbyShopPackageTopOffer?.trim() ?? ''
+
+      if (packageId.length > 0) {
+        options.onAdminCoinPackageTopOfferToggle(packageId, checkbox.checked)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLInputElement>('[data-lobby-admin-package-top-offer]').forEach((checkbox) => {
+    checkbox.addEventListener('change', () => {
+      const packageId = checkbox.dataset.lobbyAdminPackageTopOffer?.trim() ?? ''
+
+      if (packageId.length > 0) {
+        options.onAdminCoinPackageTopOfferToggle(packageId, checkbox.checked)
+      }
+    })
+  })
+
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-buy-coins-package]').forEach((button) => {
     button.addEventListener('click', () => {
       const packageId = button.dataset.lobbyBuyCoinsPackage?.trim() ?? ''
@@ -8199,6 +8263,7 @@ export function renderLobbyScreen(
         status,
         sortOrder: Number(data.get('sortOrder')),
         showInLobby: data.get('showInLobby') === 'on',
+        isTopOffer: data.get('isTopOffer') === 'on',
       })
     })
 

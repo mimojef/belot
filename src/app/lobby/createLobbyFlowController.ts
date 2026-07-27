@@ -238,6 +238,13 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; packages: CoinPackageSnapshot[] }
     | { ok: false; message: string }
   >
+  onAdminCoinPackageTopOfferToggle?: (
+    packageId: string,
+    isTopOffer: boolean,
+  ) => Promise<
+    | { ok: true; packages: CoinPackageSnapshot[] }
+    | { ok: false; message: string }
+  >
   onNotifFriendRequestClick?: (friendshipId: string) => void
   onMarkGiftNotificationRead?: (giftId: string) => Promise<void>
   onMarkAcceptanceNotificationRead?: (friendshipId: string) => Promise<void>
@@ -2284,6 +2291,9 @@ export function createLobbyFlowController(
       onAdminCoinPackageLobbyToggle: (packageId, showInLobby) => {
         void toggleAdminCoinPackageLobbyVisibility(packageId, showInLobby)
       },
+      onAdminCoinPackageTopOfferToggle: (packageId, isTopOffer) => {
+        void toggleAdminCoinPackageTopOffer(packageId, isTopOffer)
+      },
       onFriendsClick: () => {
         void showFriendsDirectory()
       },
@@ -4239,6 +4249,70 @@ export function createLobbyFlowController(
     state.adminCoinPackagesErrorText = null
     render()
     void loadLobbyPackages()
+  }
+
+  async function toggleAdminCoinPackageTopOffer(
+    packageId: string,
+    isTopOffer: boolean,
+  ): Promise<void> {
+    // Optimistic update using adminCoinPackages as source of truth
+    state.adminCoinPackages = state.adminCoinPackages.map((p) =>
+      p.packageId === packageId ? { ...p, isTopOffer } : p
+    )
+    state.lobbyPackages = state.lobbyPackages.map((p) =>
+      p.packageId === packageId ? { ...p, isTopOffer } : p
+    )
+    state.shopPackages = state.shopPackages.map((p) =>
+      p.packageId === packageId ? { ...p, isTopOffer } : p
+    )
+    state.adminCoinPackagesErrorText = null
+    render()
+
+    if (!options.onAdminCoinPackageTopOfferToggle) {
+      // Revert optimistic update
+      state.adminCoinPackages = state.adminCoinPackages.map((p) =>
+        p.packageId === packageId ? { ...p, isTopOffer: !isTopOffer } : p
+      )
+      state.lobbyPackages = state.lobbyPackages.map((p) =>
+        p.packageId === packageId ? { ...p, isTopOffer: !isTopOffer } : p
+      )
+      state.shopPackages = state.shopPackages.map((p) =>
+        p.packageId === packageId ? { ...p, isTopOffer: !isTopOffer } : p
+      )
+      state.adminCoinPackagesErrorText = 'Промяната на топ офертата временно не е налична.'
+      render()
+      return
+    }
+
+    const result = await options.onAdminCoinPackageTopOfferToggle(packageId, isTopOffer)
+
+    if (!result.ok) {
+      // Revert optimistic update on API error
+      state.adminCoinPackages = state.adminCoinPackages.map((p) =>
+        p.packageId === packageId ? { ...p, isTopOffer: !isTopOffer } : p
+      )
+      state.lobbyPackages = state.lobbyPackages.map((p) =>
+        p.packageId === packageId ? { ...p, isTopOffer: !isTopOffer } : p
+      )
+      state.shopPackages = state.shopPackages.map((p) =>
+        p.packageId === packageId ? { ...p, isTopOffer: !isTopOffer } : p
+      )
+      state.adminCoinPackagesErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminCoinPackages = result.packages
+    state.lobbyPackages = state.lobbyPackages.map((p) => {
+      const updated = result.packages.find((r) => r.packageId === p.packageId)
+      return updated !== undefined ? { ...p, isTopOffer: updated.isTopOffer } : p
+    })
+    state.shopPackages = state.shopPackages.map((p) => {
+      const updated = result.packages.find((r) => r.packageId === p.packageId)
+      return updated !== undefined ? { ...p, isTopOffer: updated.isTopOffer } : p
+    })
+    state.adminCoinPackagesErrorText = null
+    render()
   }
 
   async function ensureFriendshipsLoaded(): Promise<void> {
