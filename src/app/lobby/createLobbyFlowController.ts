@@ -88,6 +88,16 @@ export type LobbyAuthSession = {
   profile: PlayerPublicProfileSnapshot
 }
 
+/** Пълен администратор — единствената роля с достъп до "Настройки", редакция на профили, чат с поддръжката, управление на роли. */
+function isFullAdminAuthSession(session: LobbyAuthSession | null): boolean {
+  return session !== null && session.account.role === 'admin'
+}
+
+/** Read-only административен достъп ("Информация" / "Сървър") — субадмин ИЛИ пълен администратор. */
+function isAdminOrSubadminAuthSession(session: LobbyAuthSession | null): boolean {
+  return session !== null && (session.account.role === 'admin' || session.account.role === 'subadmin')
+}
+
 export type CreateLobbyFlowControllerOptions = {
   root: HTMLElement
   joinMatchmaking: (stake: MatchStake, displayName?: string) => void
@@ -178,7 +188,7 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onAdminStatsLoad?: () => Promise<
     | { ok: true; stats: AdminStatsSnapshot }
-    | { ok: false; message: string }
+    | { ok: false; message: string; forbidden?: boolean }
   >
   onAdminDailyRewardsLoad?: () => Promise<
     | { ok: true; activeTiers: DailyRewardTierSnapshot[]; stagedTiers: DailyRewardTierSnapshot[] }
@@ -383,6 +393,12 @@ export type CreateLobbyFlowControllerOptions = {
   onSupportDeleteConversation?: () => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminServerScreenEnter?: () => void
   onAdminServerScreenLeave?: () => void
+  /** GET текуща роля на профил (само за пълен admin viewer) — за "Субадмин" бадж в профилния попъп. */
+  onAdminGetTargetRole?: (
+    profileId: string,
+  ) => Promise<{ ok: true; role: 'player' | 'subadmin' | 'admin' | null } | { ok: false; message: string }>
+  onAdminGrantSubadmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
+  onAdminRevokeSubadmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminHistoryWindowChange?: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
@@ -400,7 +416,7 @@ export type CreateLobbyFlowControllerOptions = {
     offset: number
   }) => Promise<
     | { ok: true; rows: import('../network/createGameServerClient.js').AdminVisitorRow[]; total: number }
-    | { ok: false; message: string }
+    | { ok: false; message: string; forbidden?: boolean }
   >
   onAdminVisitorSourcesLoad?: (params: {
     period: import('../network/createGameServerClient.js').VisitorListPeriod
@@ -409,7 +425,7 @@ export type CreateLobbyFlowControllerOptions = {
     os: import('../network/createGameServerClient.js').VisitorOsFilter
   }) => Promise<
     | { ok: true; rows: import('../network/createGameServerClient.js').AdminVisitorSourceRow[]; total: number }
-    | { ok: false; message: string }
+    | { ok: false; message: string; forbidden?: boolean }
   >
   onAdminPaymentsLoad?: (params: {
     period: AdminPaymentPeriod
@@ -422,12 +438,15 @@ export type CreateLobbyFlowControllerOptions = {
         pagination: { limit: number; offset: number; total: number; hasMore: boolean }
         summary: { totalsByCurrency: Record<string, number> }
       }
-    | { ok: false; message: string }
+    | { ok: false; message: string; forbidden?: boolean }
   >
   onAdminPaymentDetailLoad?: (purchaseId: string) => Promise<
     | { ok: true; purchase: AdminPaymentDetailRow }
-    | { ok: false; message: string }
+    | { ok: false; message: string; forbidden?: boolean }
   >
+  /** Пуска се при вход в екран от фамилията "Информация" (stats/visitors/payments/detail) — лек role-check polling, за да засече отнет достъп докато потребителят е неактивен. */
+  onAdminInfoFamilyScreenEnter?: () => void
+  onAdminInfoFamilyScreenLeave?: () => void
 }
 
 
@@ -463,6 +482,7 @@ export type LobbyFlowController = {
   }
   setAdminMonitoringSnapshot: (snapshot: import('../adminServer/adminServerTypes.js').MonitoringSnapshot) => void
   setAdminMonitoringError: (message: string) => void
+  forceLeaveAdminScreenForbidden: (message: string) => void
   setAdminHistoryLoading: (loading: boolean) => void
   setAdminHistoryResult: (result: import('../adminServer/adminServerTypes.js').MonitoringHistoryResult) => void
   setAdminHistoryError: (message: string) => void
@@ -490,6 +510,13 @@ type InternalLobbyFlowState = {
   profilePopupOpen: boolean
   profilePopupProfile: PlayerPublicProfileSnapshot | null
   profilePopupCanEdit: boolean
+  /** Роля на разглеждания акаунт (само заредена/показана за пълен admin viewer). */
+  profilePopupTargetRole: 'player' | 'subadmin' | 'admin' | null
+  /** profileId, за който profilePopupTargetRole вече е (или се) зарежда — memoization guard. */
+  profilePopupTargetRoleProfileId: string | null
+  subadminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke' } | null
+  subadminActionBusy: boolean
+  subadminActionToast: { text: string; ok: boolean } | null
   profileEditorOpen: boolean
   profileEditorTargetProfileId: string | null
   profileEditorTargetProfile: PlayerPublicProfileSnapshot | null
@@ -730,6 +757,11 @@ function createInitialState(): InternalLobbyFlowState {
     profilePopupOpen: false,
     profilePopupProfile: null,
     profilePopupCanEdit: true,
+    profilePopupTargetRole: null,
+    profilePopupTargetRoleProfileId: null,
+    subadminActionConfirm: null,
+    subadminActionBusy: false,
+    subadminActionToast: null,
     profileEditorOpen: false,
     profileEditorTargetProfileId: null,
     profileEditorTargetProfile: null,
@@ -1497,10 +1529,46 @@ export function createLobbyFlowController(
     clearSeatFillSoundTimeouts()
   }
 
+  /** "Информация" family — screens with read-only subadmin+admin access (виж isAdminOrSubadminAuthSession). */
+  function isAdminInfoFamilyScreen(screen: LobbySocialScreen): boolean {
+    return screen === 'admin-info' || screen === 'admin-visitors' ||
+      screen === 'admin-payments' || screen === 'admin-payment-detail'
+  }
+
+  /**
+   * Спира ВСИЧКИ admin-screen polling цикли, ако в момента сме на такъв
+   * екран — "Сървър" (monitoring/connections polling) и "Информация"
+   * family (лек role-check polling, виж onAdminInfoFamilyScreenEnter/Leave).
+   * Извиква се в началото на практически всяка навигационна функция, за да
+   * не остане polling активен след напускане на съответния екран.
+   */
   function leaveAdminServerIfActive(): void {
     if (state.currentScreen === 'admin-server') {
       options.onAdminServerScreenLeave?.()
     }
+    if (isAdminInfoFamilyScreen(state.currentScreen)) {
+      options.onAdminInfoFamilyScreenLeave?.()
+    }
+  }
+
+  /**
+   * Ролята е отнета докато потребителят е бил на административен екран
+   * (напр. subadmin revoke-нат междувременно, докато е на "Сървър" с
+   * активен polling, или на "Информация" — idle или при 403 от реална
+   * заявка). Backend вече отказва заявките — това само връща UI безопасно
+   * към лобито вместо да остави счупен/празен екран. Проверява текущия
+   * екран В МОМЕНТА НА ИЗВИКВАНЕ — ако потребителят вече е навигирал към
+   * друг (не-admin) екран междувременно, не прави нищо (без stale redirect).
+   */
+  function forceLeaveAdminScreenForbidden(message: string): void {
+    if (state.currentScreen !== 'admin' && state.currentScreen !== 'admin-info' &&
+      state.currentScreen !== 'admin-server' && state.currentScreen !== 'admin-visitors' &&
+      state.currentScreen !== 'admin-payments' && state.currentScreen !== 'admin-payment-detail') {
+      return
+    }
+    switchToLobby()
+    state.errorText = message
+    render()
   }
 
   function switchToLobby(): void {
@@ -1831,6 +1899,7 @@ export function createLobbyFlowController(
     clearServerRoomSnapshot()
 
     const authSession = options.getAuthSession?.() ?? null
+    ensureProfilePopupTargetRoleLoaded()
     const friendshipAction = createProfileFriendshipAction(authSession)
     const acceptedRelationship =
       state.profilePopupProfile?.profileId
@@ -1907,6 +1976,10 @@ export function createLobbyFlowController(
       profile: createLocalProfilePreview(state, authSession),
       profilePopupProfile: state.profilePopupProfile,
       profilePopupCanEdit: state.profilePopupCanEdit,
+      profilePopupTargetRole: state.profilePopupTargetRole,
+      subadminActionConfirm: state.subadminActionConfirm,
+      subadminActionBusy: state.subadminActionBusy,
+      subadminActionToast: state.subadminActionToast,
       players: state.players,
       playersPage: state.playersPage,
       playersTotalCount: state.playersTotalCount,
@@ -1931,7 +2004,8 @@ export function createLobbyFlowController(
       shopPurchaseConfirmPackageId: state.shopPurchaseConfirmPackageId,
       shopPurchaseActionPackageId: state.shopPurchaseActionPackageId,
       shopPurchaseMessageText: state.shopPurchaseMessageText,
-      isAdmin: authSession?.account.role === 'admin',
+      isAdmin: isFullAdminAuthSession(authSession),
+      isAdminOrSubadmin: isAdminOrSubadminAuthSession(authSession),
       adminStats: state.adminStats,
       adminStatsLoading: state.adminStatsLoading,
       adminStatsErrorText: state.adminStatsErrorText,
@@ -2146,6 +2220,18 @@ export function createLobbyFlowController(
         state.profileNameChangeSuccessAmount = null
         state.profilePopupOpen = false
         render()
+      },
+      onProfileGrantSubadminClick: (profileId) => {
+        getPopupCallbacks().onGrantSubadminClick(profileId)
+      },
+      onProfileRevokeSubadminClick: (profileId) => {
+        getPopupCallbacks().onRevokeSubadminClick(profileId)
+      },
+      onSubadminActionCancel: () => {
+        cancelSubadminAction()
+      },
+      onSubadminActionConfirm: () => {
+        void confirmSubadminAction()
       },
       onProfileEditClose: () => {
         state.profileEditorOpen = false
@@ -2693,7 +2779,8 @@ export function createLobbyFlowController(
         const authSession = options.getAuthSession?.() ?? null
         if (authSession === null) return
         leaveAdminServerIfActive()
-        if (authSession.account.role === 'admin') {
+        // Чат с поддръжката (admin inbox) — само пълен admin; subadmin вижда обичайния свой чат.
+        if (isFullAdminAuthSession(authSession)) {
           state.currentScreen = 'support'
           state.adminSupportSelectedProfileId = null
           state.adminSupportConversations = []
@@ -3636,7 +3723,8 @@ export function createLobbyFlowController(
   async function showAdminGuestContactMessages(): Promise<void> {
     const authSession = options.getAuthSession?.() ?? null
 
-    if (authSession?.account.role !== 'admin') {
+    // Съобщения от гости — третираме като "поддръжка", само пълен admin.
+    if (!isFullAdminAuthSession(authSession)) {
       state.currentScreen = 'lobby'
       state.errorText = 'Нямаш достъп до admin панела.'
       render()
@@ -3683,7 +3771,8 @@ export function createLobbyFlowController(
     leaveAdminServerIfActive()
     const authSession = options.getAuthSession?.() ?? null
 
-    if (authSession?.account.role !== 'admin') {
+    // "Информация" — read-only, достъпно за admin И subadmin.
+    if (!isAdminOrSubadminAuthSession(authSession)) {
       state.currentScreen = 'lobby'
       state.errorText = 'Нямаш достъп до admin панела.'
       render()
@@ -3698,6 +3787,7 @@ export function createLobbyFlowController(
     state.profilePopupCanEdit = true
     stopWaitingRoomActivity()
     resetFinalFillSequence()
+    options.onAdminInfoFamilyScreenEnter?.()
 
     state.adminStats = null
     state.adminStatsLoading = true
@@ -3715,6 +3805,10 @@ export function createLobbyFlowController(
     state.adminStatsLoading = false
 
     if (!result.ok) {
+      if (result.forbidden) {
+        forceLeaveAdminScreenForbidden(result.message)
+        return
+      }
       state.adminStatsErrorText = result.message
       render()
       return
@@ -3727,7 +3821,8 @@ export function createLobbyFlowController(
   function showAdminVisitorsPanel(overridePeriod?: string, overrideView?: string, overrideDevice?: string, overrideType?: string, overrideOs?: string): void {
     const authSession = options.getAuthSession?.() ?? null
 
-    if (authSession?.account.role !== 'admin') {
+    // "Информация" (посетители) — read-only, достъпно за admin И subadmin.
+    if (!isAdminOrSubadminAuthSession(authSession)) {
       state.currentScreen = 'lobby'
       state.errorText = 'Нямаш достъп до admin панела.'
       render()
@@ -3742,6 +3837,7 @@ export function createLobbyFlowController(
     state.profilePopupProfile = null
     stopWaitingRoomActivity()
     resetFinalFillSequence()
+    options.onAdminInfoFamilyScreenEnter?.()
 
     if (overridePeriod && (overridePeriod === 'today' || overridePeriod === 'yesterday' || overridePeriod === '7d' || overridePeriod === '30d')) {
       state.adminVisitorsPeriod = overridePeriod
@@ -3792,15 +3888,21 @@ export function createLobbyFlowController(
       limit: state.adminVisitorsLimit,
       offset: state.adminVisitorsOffset,
     })
+    // Потребителят вече е напуснал "Информация/Посетители" — stale response, игнорирай.
+    if (state.currentScreen !== 'admin-visitors') return
     state.adminVisitorsLoading = false
     if (!result.ok) {
+      if (result.forbidden) {
+        forceLeaveAdminScreenForbidden(result.message)
+        return
+      }
       state.adminVisitorsErrorText = result.message
     } else {
       state.adminVisitorsRows = result.rows
       state.adminVisitorsTotal = result.total
       state.adminVisitorsErrorText = null
     }
-    if (state.currentScreen === 'admin-visitors') render()
+    render()
   }
 
   async function fetchAdminVisitorSources(): Promise<void> {
@@ -3811,15 +3913,21 @@ export function createLobbyFlowController(
       return
     }
     const result = await options.onAdminVisitorSourcesLoad({ period: state.adminVisitorsPeriod, type: state.adminVisitorsType, device: state.adminVisitorsDevice, os: state.adminVisitorsOs })
+    // Потребителят вече е напуснал "Информация/Посетители" — stale response, игнорирай.
+    if (state.currentScreen !== 'admin-visitors') return
     state.adminVisitorsSourcesLoading = false
     if (!result.ok) {
+      if (result.forbidden) {
+        forceLeaveAdminScreenForbidden(result.message)
+        return
+      }
       state.adminVisitorsSourcesErrorText = result.message
     } else {
       state.adminVisitorsSourcesRows = result.rows
       state.adminVisitorsSourcesTotal = result.total
       state.adminVisitorsSourcesErrorText = null
     }
-    if (state.currentScreen === 'admin-visitors') render()
+    render()
   }
 
   // Incremented on every new fetch; checked after await to discard stale responses.
@@ -3827,7 +3935,8 @@ export function createLobbyFlowController(
 
   function showAdminPaymentsPanel(overridePeriod?: string, historyMode: 'push' | 'replace' = 'push'): void {
     const authSession = options.getAuthSession?.() ?? null
-    if (authSession?.account.role !== 'admin') {
+    // "Информация" (плащания) — read-only, достъпно за admin И subadmin.
+    if (!isAdminOrSubadminAuthSession(authSession)) {
       state.currentScreen = 'lobby'
       state.errorText = 'Нямаш достъп до admin панела.'
       render()
@@ -3841,6 +3950,7 @@ export function createLobbyFlowController(
     state.profilePopupProfile = null
     stopWaitingRoomActivity()
     resetFinalFillSequence()
+    options.onAdminInfoFamilyScreenEnter?.()
     const p = overridePeriod && isAdminPaymentPeriod(overridePeriod) ? overridePeriod : 'today'
     state.adminPaymentsPeriod = p
     state.adminPaymentsOffset = 0
@@ -3887,6 +3997,10 @@ export function createLobbyFlowController(
     if (state.currentScreen !== 'admin-payments') return
     state.adminPaymentsLoading = false
     if (!result.ok) {
+      if (result.forbidden) {
+        forceLeaveAdminScreenForbidden(result.message)
+        return
+      }
       state.adminPaymentsErrorText = result.message
     } else {
       state.adminPaymentsRows = result.purchases
@@ -3899,7 +4013,8 @@ export function createLobbyFlowController(
 
   function showAdminPaymentDetailPanel(purchaseId: string): void {
     const authSession = options.getAuthSession?.() ?? null
-    if (authSession?.account.role !== 'admin') {
+    // "Информация" (детайли на плащане) — read-only, достъпно за admin И subadmin.
+    if (!isAdminOrSubadminAuthSession(authSession)) {
       state.currentScreen = 'lobby'
       state.errorText = 'Нямаш достъп до admin панела.'
       render()
@@ -3915,6 +4030,7 @@ export function createLobbyFlowController(
     state.profilePopupProfile = null
     stopWaitingRoomActivity()
     resetFinalFillSequence()
+    options.onAdminInfoFamilyScreenEnter?.()
     state.adminPaymentDetailPurchaseId = purchaseId
     state.adminPaymentDetailLoading = true
     state.adminPaymentDetailPurchase = null
@@ -3939,6 +4055,10 @@ export function createLobbyFlowController(
     if (state.adminPaymentDetailPurchaseId !== purchaseId) return
     state.adminPaymentDetailLoading = false
     if (!result.ok) {
+      if (result.forbidden) {
+        forceLeaveAdminScreenForbidden(result.message)
+        return
+      }
       state.adminPaymentDetailErrorText = result.message
     } else {
       state.adminPaymentDetailPurchase = result.purchase
@@ -3950,7 +4070,8 @@ export function createLobbyFlowController(
   function showAdminServerPanel(): void {
     const authSession = options.getAuthSession?.() ?? null
 
-    if (authSession?.account.role !== 'admin') {
+    // "Сървър" — read-only, достъпно за admin И subadmin.
+    if (!isAdminOrSubadminAuthSession(authSession)) {
       state.currentScreen = 'lobby'
       state.errorText = 'Нямаш достъп до admin панела.'
       render()
@@ -3979,7 +4100,8 @@ export function createLobbyFlowController(
     leaveAdminServerIfActive()
     const authSession = options.getAuthSession?.() ?? null
 
-    if (authSession?.account.role !== 'admin') {
+    // "Настройки" — само пълен admin.
+    if (!isFullAdminAuthSession(authSession)) {
       state.currentScreen = 'lobby'
       state.errorText = 'Нямаш достъп до админ панела.'
       render()
@@ -5576,7 +5698,7 @@ export function createLobbyFlowController(
 
   function isAdminTargetEdit(): boolean {
     return state.profileEditorTargetProfileId !== null &&
-      (options.getAuthSession?.() ?? null)?.account.role === 'admin'
+      isFullAdminAuthSession(options.getAuthSession?.() ?? null)
   }
 
   function updateEditedTargetProfile(profile: PlayerPublicProfileSnapshot): void {
@@ -5641,7 +5763,7 @@ export function createLobbyFlowController(
       : null
     const isOwn = profileId === null || (ownProfileId !== null && profileId === ownProfileId)
 
-    if (!isOwn && authSession?.account.role !== 'admin') {
+    if (!isOwn && !isFullAdminAuthSession(authSession)) {
       state.profileEditorOpen = false
       state.profileEditorTargetProfileId = null
       state.profileEditorTargetProfile = null
@@ -5679,18 +5801,131 @@ export function createLobbyFlowController(
       onFriendRemoveClick: (friendshipId) => { void removeFriendRelationship(friendshipId) },
       onGiftCoinsClick: (friendshipId) => { openGiftModal(friendshipId) },
       onLikeClick: (profileId) => { void likeProfile(profileId) },
+      onGrantSubadminClick: (profileId) => {
+        if (!profileId) return
+        const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
+        state.subadminActionConfirm = { profileId, displayName, action: 'grant' }
+        state.profilePopupOpen = false
+        syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+        render()
+      },
+      onRevokeSubadminClick: (profileId) => {
+        if (!profileId) return
+        const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
+        state.subadminActionConfirm = { profileId, displayName, action: 'revoke' }
+        state.profilePopupOpen = false
+        syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+        render()
+      },
     }
+  }
+
+  /**
+   * Заявява текущата роля на разгледания в попъпа профил — само когато
+   * viewer-ът е ПЪЛЕН admin, профилът не е собственият, и все още не сме
+   * заредили ролята именно за този profileId (memoization guard чрез
+   * profilePopupTargetRoleProfileId, за да не се спами при всеки render()).
+   * Вика се от renderLobby() и renderPopupOnly() — покрива всички входни
+   * точки за отваряне на попъпа без да ги дублира на всяко място.
+   */
+  function ensureProfilePopupTargetRoleLoaded(): void {
+    const authSession = options.getAuthSession?.() ?? null
+    const profile = state.profilePopupProfile
+
+    if (!state.profilePopupOpen || profile === null || profile.profileId === null) {
+      return
+    }
+    if (!isFullAdminAuthSession(authSession)) {
+      return
+    }
+    const ownProfileId = authSession?.profile.profileId ?? null
+    if (profile.profileId === ownProfileId) {
+      return
+    }
+    if (state.profilePopupTargetRoleProfileId === profile.profileId) {
+      return
+    }
+
+    const targetProfileId = profile.profileId
+    state.profilePopupTargetRoleProfileId = targetProfileId
+    state.profilePopupTargetRole = null
+
+    void (async () => {
+      const result = await options.onAdminGetTargetRole?.(targetProfileId)
+      // Ако попъпът вече сочи към друг профил (или е затворен) междувременно,
+      // резултатът е stale — не го прилагаме.
+      if (!result || state.profilePopupTargetRoleProfileId !== targetProfileId) {
+        return
+      }
+      if (result.ok) {
+        state.profilePopupTargetRole = result.role
+        render()
+      }
+    })()
+  }
+
+  function cancelSubadminAction(): void {
+    if (state.subadminActionBusy) return
+    state.subadminActionConfirm = null
+    render()
+  }
+
+  let subadminActionToastGeneration = 0
+
+  async function confirmSubadminAction(): Promise<void> {
+    const pending = state.subadminActionConfirm
+    if (!pending || state.subadminActionBusy) return
+
+    state.subadminActionBusy = true
+    render()
+
+    const caller = pending.action === 'grant' ? options.onAdminGrantSubadmin : options.onAdminRevokeSubadmin
+    const result = await caller?.(pending.profileId)
+
+    state.subadminActionBusy = false
+    state.subadminActionConfirm = null
+
+    if (result?.ok) {
+      state.subadminActionToast = {
+        text: pending.action === 'grant' ? 'Потребителят вече е субадмин.' : 'Ролята субадмин е премахната.',
+        ok: true,
+      }
+      // Инвалидираме кеша на баджа — ако попъпът за същия профил се отвори пак, ще презареди свежата роля.
+      if (state.profilePopupTargetRoleProfileId === pending.profileId) {
+        state.profilePopupTargetRoleProfileId = null
+        state.profilePopupTargetRole = null
+      }
+    } else {
+      state.subadminActionToast = {
+        text: result?.message ?? 'Действието не бе завършено.',
+        ok: false,
+      }
+    }
+    render()
+
+    // Токенизирано спрямо конкретния toast — по-стар таймер не бива да
+    // изтрие по-нов toast, ако confirmSubadminAction се извика отново
+    // (напр. второ действие) в рамките на същите 3.5с.
+    const toastGeneration = ++subadminActionToastGeneration
+    setTimeout(() => {
+      if (toastGeneration !== subadminActionToastGeneration) return
+      state.subadminActionToast = null
+      render()
+    }, 3500)
   }
 
   function renderPopupOnly(): void {
     const authSession = options.getAuthSession?.() ?? null
+    ensureProfilePopupTargetRoleLoaded()
     syncProfilePopup(
       {
         isOpen: state.profilePopupOpen,
         profile: state.profilePopupProfile ?? createLocalProfilePreview(state, authSession),
         canEdit: state.profilePopupCanEdit,
-        isAdmin: authSession?.account.role === 'admin',
+        isAdmin: isFullAdminAuthSession(authSession),
         friendshipAction: buildPopupFriendshipAction(),
+        viewerIsFullAdmin: isFullAdminAuthSession(authSession),
+        targetAccountRole: state.profilePopupTargetRole,
       },
       getPopupCallbacks(),
     )
@@ -6366,6 +6601,7 @@ export function createLobbyFlowController(
   return {
     render,
     destroy: () => {
+      leaveAdminServerIfActive()
       stopWaitingRoomActivity()
       clearServerRoomSnapshot()
       resetFinalFillSequence()
@@ -6509,6 +6745,7 @@ export function createLobbyFlowController(
       state.adminMonitoringErrorText = message
       if (state.currentScreen === 'admin-server') render()
     },
+    forceLeaveAdminScreenForbidden,
     setAdminHistoryLoading: (loading) => {
       state.adminHistoryLoading = loading
       if (state.currentScreen === 'admin-server') render()

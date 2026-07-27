@@ -487,6 +487,7 @@ async function loadAuthSession(): Promise<void> {
       lobby.refreshDailyRewardsStatus()
       stopSupportUnreadPolling()
       stopMonitoringPolling()
+      stopAdminInfoAccessPolling()
     }
     await syncLobbyFriendships()
     await syncLobbyChatConversations()
@@ -555,6 +556,7 @@ async function submitLogout(): Promise<void> {
   clearPendingChatRefresh()
   stopSupportUnreadPolling()
   stopMonitoringPolling()
+  stopAdminInfoAccessPolling()
   syncLobbyWithAuthSession()
   lobby.resetToLobby()
   lobby.refreshDailyRewardsStatus()
@@ -1182,13 +1184,16 @@ async function claimDailyReward(tierId: string): Promise<
 
 async function loadAdminStats(): Promise<
   | { ok: true; stats: AdminStatsSnapshot }
-  | { ok: false; message: string }
+  | { ok: false; message: string; forbidden?: boolean }
 > {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/admin/stats`, {
       method: 'GET',
       credentials: 'include',
     })
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп до статистиките.', forbidden: true }
+    }
     const data = (await response.json()) as { ok: boolean; stats?: AdminStatsSnapshot; message?: string }
     if (!response.ok || !data.ok || !data.stats) {
       return { ok: false, message: data.message ?? 'Грешка при зареждане на статистиките.' }
@@ -1206,7 +1211,7 @@ async function loadAdminVisitors(params: {
   os: VisitorOsFilter
   limit: number
   offset: number
-}): Promise<{ ok: true } & AdminVisitorListResult | { ok: false; message: string }> {
+}): Promise<{ ok: true } & AdminVisitorListResult | { ok: false; message: string; forbidden?: boolean }> {
   try {
     const qs = new URLSearchParams({
       period: params.period,
@@ -1220,6 +1225,9 @@ async function loadAdminVisitors(params: {
       method: 'GET',
       credentials: 'include',
     })
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп до посетителите.', forbidden: true }
+    }
     const data = (await response.json()) as { ok: boolean; rows?: AdminVisitorListResult['rows']; total?: number; message?: string }
     if (!response.ok || !data.ok || !Array.isArray(data.rows) || typeof data.total !== 'number') {
       return { ok: false, message: data.message ?? 'Грешка при зареждане на посетителите.' }
@@ -1235,13 +1243,16 @@ async function loadAdminVisitorSources(params: {
   type: VisitorListType
   device: VisitorDeviceFilter
   os: VisitorOsFilter
-}): Promise<{ ok: true } & AdminVisitorSourcesResult | { ok: false; message: string }> {
+}): Promise<{ ok: true } & AdminVisitorSourcesResult | { ok: false; message: string; forbidden?: boolean }> {
   try {
     const qs = new URLSearchParams({ period: params.period, type: params.type, device: params.device, os: params.os })
     const response = await fetch(`${getApiBaseUrl()}/api/admin/visitor-sources?${qs}`, {
       method: 'GET',
       credentials: 'include',
     })
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп до източниците.', forbidden: true }
+    }
     const data = (await response.json()) as { ok: boolean; rows?: AdminVisitorSourcesResult['rows']; total?: number; message?: string }
     if (!response.ok || !data.ok || !Array.isArray(data.rows) || typeof data.total !== 'number') {
       return { ok: false, message: data.message ?? 'Грешка при зареждане на източници.' }
@@ -1263,7 +1274,7 @@ async function loadAdminPayments(params: {
       pagination: { limit: number; offset: number; total: number; hasMore: boolean }
       summary: { totalsByCurrency: Record<string, number> }
     }
-  | { ok: false; message: string }
+  | { ok: false; message: string; forbidden?: boolean }
 > {
   try {
     const qs = new URLSearchParams({
@@ -1275,6 +1286,9 @@ async function loadAdminPayments(params: {
       method: 'GET',
       credentials: 'include',
     })
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп до плащанията.', forbidden: true }
+    }
     type PaymentsResponse = {
       ok: boolean
       purchases?: import('./app/adminPayments/adminPaymentsTypes').AdminPaymentListRow[]
@@ -1294,13 +1308,16 @@ async function loadAdminPayments(params: {
 
 async function loadAdminPaymentDetail(purchaseId: string): Promise<
   | { ok: true; purchase: import('./app/adminPayments/adminPaymentsTypes').AdminPaymentDetailRow }
-  | { ok: false; message: string }
+  | { ok: false; message: string; forbidden?: boolean }
 > {
   try {
     const response = await fetch(
       `${getApiBaseUrl()}/api/admin/payments/${encodeURIComponent(purchaseId)}`,
       { method: 'GET', credentials: 'include' },
     )
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп до това плащане.', forbidden: true }
+    }
     type DetailResponse = {
       ok: boolean
       purchase?: import('./app/adminPayments/adminPaymentsTypes').AdminPaymentDetailRow
@@ -2077,7 +2094,7 @@ type AdminMonitoringApiResponse = {
 
 async function loadAdminMonitoring(): Promise<
   | { ok: true; snapshot: MonitoringSnapshot }
-  | { ok: false; message: string }
+  | { ok: false; message: string; forbidden?: boolean }
 > {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/admin/monitoring/current`, {
@@ -2085,7 +2102,7 @@ async function loadAdminMonitoring(): Promise<
       credentials: 'include',
     })
     if (response.status === 403) {
-      return { ok: false, message: 'Нямаш достъп до мониторинга.' }
+      return { ok: false, message: 'Нямаш достъп до мониторинга.', forbidden: true }
     }
     if (response.status === 503) {
       return { ok: false, message: 'Мониторингът временно не е наличен.' }
@@ -2120,7 +2137,7 @@ function isWsConnectionsResult(data: unknown): data is WsConnectionsResult {
 
 async function loadAdminConnections(): Promise<
   | { ok: true; result: WsConnectionsResult }
-  | { ok: false; message: string }
+  | { ok: false; message: string; forbidden?: boolean }
 > {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/admin/monitoring/connections`, {
@@ -2128,7 +2145,7 @@ async function loadAdminConnections(): Promise<
       credentials: 'include',
     })
     if (response.status === 403) {
-      return { ok: false, message: 'Нямаш достъп.' }
+      return { ok: false, message: 'Нямаш достъп.', forbidden: true }
     }
     const data = await response.json() as { ok?: boolean; message?: string } & Record<string, unknown>
     if (!response.ok || data['ok'] !== true) {
@@ -2159,6 +2176,12 @@ function startMonitoringPolling(): void {
           loadAdminConnections(),
         ])
         if (gen !== monitoringGeneration) return
+        if (!monResult.ok && monResult.forbidden) {
+          // Ролята е отнета междувременно (напр. subadmin revoke-нат, докато
+          // е бил на "Сървър") — backend вече отказва; безопасно връщаме UI.
+          lobby.forceLeaveAdminScreenForbidden('Достъпът до администраторския панел беше отнет.')
+          return
+        }
         if (monResult.ok) {
           lobby.setAdminMonitoringSnapshot(monResult.snapshot)
         } else {
@@ -2186,6 +2209,71 @@ function stopMonitoringPolling(): void {
   monitoringIntervalId = null
   monitoringGeneration++
   monitoringFetchInFlightGeneration = null
+}
+
+// ─── "Информация" family — лек role-check polling (без monitoring/stats заявки) ──
+//
+// За разлика от "Сървър" (чиито 5s tick-ове и без друго дърпат реални данни,
+// така че forbidden се засича като страничен ефект), екраните "Информация"
+// (stats/visitors/visitor-sources/payments/payment-detail) нямат собствен
+// polling — веднъж заредени, си стоят статично. За да засечем subadmin
+// revoke, докато потребителят просто седи на "Информация" без действие,
+// пускаме единствено /api/auth/me (вече съществуващ, лек endpoint — само
+// session lookup, без stats/monitoring агрегации) на същия 5s интервал.
+
+async function loadCurrentAccountRole(): Promise<{ ok: true; role: string | null } | { ok: false }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/auth/me`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = await readAuthResponse(response)
+    if (!data.ok) return { ok: false }
+    return { ok: true, role: data.session?.account.role ?? null }
+  } catch {
+    return { ok: false }
+  }
+}
+
+let adminInfoAccessIntervalId: ReturnType<typeof setInterval> | null = null
+let adminInfoAccessGeneration = 0
+let adminInfoAccessFetchInFlightGeneration: number | null = null
+
+function startAdminInfoAccessPolling(): void {
+  if (adminInfoAccessIntervalId !== null) return
+  const runOnePoll = (gen: number): void => {
+    if (adminInfoAccessFetchInFlightGeneration === gen) return
+    adminInfoAccessFetchInFlightGeneration = gen
+    void (async () => {
+      try {
+        const result = await loadCurrentAccountRole()
+        // Ако polling-ът е бил спрян/рестартиран междувременно (напр.
+        // потребителят вече е напуснал "Информация"), generation-ът вече не
+        // съвпада — резултатът е stale, изхвърляме го без да пренасочваме.
+        if (gen !== adminInfoAccessGeneration) return
+        if (!result.ok) return // мрежова грешка — не е доказателство за отнет достъп
+        if (result.role !== 'admin' && result.role !== 'subadmin') {
+          lobby.forceLeaveAdminScreenForbidden('Достъпът до администраторския панел беше отнет.')
+        }
+      } finally {
+        if (adminInfoAccessFetchInFlightGeneration === gen) {
+          adminInfoAccessFetchInFlightGeneration = null
+        }
+      }
+    })()
+  }
+  runOnePoll(adminInfoAccessGeneration)
+  adminInfoAccessIntervalId = setInterval(() => {
+    runOnePoll(adminInfoAccessGeneration)
+  }, 5_000)
+}
+
+function stopAdminInfoAccessPolling(): void {
+  if (adminInfoAccessIntervalId === null) return
+  clearInterval(adminInfoAccessIntervalId)
+  adminInfoAccessIntervalId = null
+  adminInfoAccessGeneration++
+  adminInfoAccessFetchInFlightGeneration = null
 }
 
 function isFiniteNonNegative(v: unknown): v is number {
@@ -2715,6 +2803,46 @@ async function submitProfileNameChange(targetProfileId: string | null, displayNa
   }
 }
 
+async function loadAdminTargetRole(
+  profileId: string,
+): Promise<{ ok: true; role: 'player' | 'subadmin' | 'admin' | null } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(profileId)}/subadmin`,
+      { method: 'GET', credentials: 'include' },
+    )
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп.' }
+    }
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; role?: 'player' | 'subadmin' | 'admin' | null; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Ролята не можа да бъде заредена.' }
+    }
+    return { ok: true, role: data.role ?? null }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function submitSubadminRoleChange(
+  profileId: string,
+  action: 'grant' | 'revoke',
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(profileId)}/subadmin`,
+      { method: action === 'grant' ? 'POST' : 'DELETE', credentials: 'include' },
+    )
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Действието не бе завършено.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function submitChangePassword(
   currentPassword: string,
   newPassword: string,
@@ -3168,6 +3296,15 @@ lobby = createLobbyFlowController({
     stopMonitoringPolling()
     invalidateHistoryGeneration()
   },
+  onAdminInfoFamilyScreenEnter: () => {
+    startAdminInfoAccessPolling()
+  },
+  onAdminInfoFamilyScreenLeave: () => {
+    stopAdminInfoAccessPolling()
+  },
+  onAdminGetTargetRole: (profileId) => loadAdminTargetRole(profileId),
+  onAdminGrantSubadmin: (profileId) => submitSubadminRoleChange(profileId, 'grant'),
+  onAdminRevokeSubadmin: (profileId) => submitSubadminRoleChange(profileId, 'revoke'),
   onAdminHistoryWindowChange: (window: HistoryWindow) => {
     invalidateHistoryGeneration()
     fetchAdminHistory(window)

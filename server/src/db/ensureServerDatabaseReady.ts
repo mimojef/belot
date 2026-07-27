@@ -21,6 +21,13 @@ const DATABASE_FILENAME = 'belot-v2.sqlite'
 const MIGRATIONS_DIRECTORY_NAME = 'migrations'
 const MIGRATIONS_TABLE_NAME = 'server_migrations'
 
+// Маркер за миграции, които трябва да управляват собствената си транзакция
+// (напр. защото toggle-ват `PRAGMA foreign_keys`, което SQLite отказва да
+// промени вътре в отворена транзакция). Такъв файл съдържа собствени
+// BEGIN/COMMIT + INSERT в server_migrations — runner-ът само го изпълнява
+// с един exec() и НЕ добавя своя BEGIN/COMMIT/insertAppliedMigrationStatement.
+const MANUAL_TRANSACTION_MARKER = '-- MANUAL_TRANSACTION_MIGRATION'
+
 function getServerRootPath(): string {
   const currentFilePath = fileURLToPath(import.meta.url)
   return resolve(dirname(currentFilePath), '..', '..')
@@ -147,6 +154,42 @@ export async function ensureServerDatabaseReady(): Promise<EnsureServerDatabaseR
 
       if (!migrationSql) {
         skippedCount += 1
+        continue
+      }
+
+      if (migrationSql.startsWith(MANUAL_TRANSACTION_MARKER)) {
+        // Файлът сам управлява BEGIN/COMMIT и сам вмъква реда си в
+        // server_migrations (виж коментара до MANUAL_TRANSACTION_MARKER).
+        try {
+          database.exec(migrationSql)
+          appliedCount += 1
+        } catch (error) {
+          // Възстановяване на инвариантите, ако файлът е паднал по средата.
+          // Редът има значение: PRAGMA foreign_keys не може да се промени
+          // вътре в отворена транзакция (SQLite го прави мълчаливо no-op) —
+          // ако файлът е паднал СЛЕД своя BEGIN, но ПРЕДИ COMMIT,
+          // транзакцията е още отворена и трябва първо изрично да се затвори
+          // с ROLLBACK. (Empирично потвърдено: затваряне на connection-а
+          // също би отменило отворената транзакция автоматично — този
+          // explicit ROLLBACK прави възстановяването коректно дори ако
+          // connection-ът не бъде затворен веднага след тази грешка.)
+          try {
+            database.exec('ROLLBACK;')
+          } catch {
+            // Няма отворена транзакция (файлът е паднал преди своя BEGIN,
+            // напр. на самия `PRAGMA foreign_keys = OFF;` ред) — очаквано, игнорираме.
+          }
+          try {
+            database.exec('PRAGMA foreign_keys = ON;')
+          } catch {
+            // ignore — оригиналната грешка е по-важна
+          }
+
+          throw new Error(
+            `Failed to apply migration "${migrationFileName}": ${toErrorMessage(error)}`,
+          )
+        }
+
         continue
       }
 

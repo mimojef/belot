@@ -64,7 +64,11 @@ check(
 
 check(
   'non-admin cannot open target profile editor',
-  lobbyController.includes("authSession?.account.role !== 'admin'") &&
+  // Рефакторирано зад isFullAdminAuthSession() helper (виж subadmin ролята) —
+  // семантиката е непроменена: само пълен admin (role==='admin') може да отвори
+  // редактора на чужд профил. Реалната authorization behavior се тества end-to-end
+  // в checkSubadminHttpAuthorization.ts.
+  lobbyController.includes('!isFullAdminAuthSession(authSession)') &&
     lobbyController.includes('state.profileEditorOpen = false') &&
     popupRenderer.includes("state.profileEditorTargetProfileId !== null && !state.isAdmin"),
 )
@@ -88,7 +92,9 @@ check(
 
 check(
   'admin display-name endpoint is admin-only and allowlisted',
-  serverIndex.includes("session.account.role !== 'admin'") &&
+  // Рефакторирано зад isFullAdminSession() type-predicate helper (виж subadmin
+  // ролята: server/src/db/authStore.ts) — семантиката е непроменена.
+  serverIndex.includes('!isFullAdminSession(session)') &&
     serverIndex.includes("new Set(['displayName'])") &&
     serverIndex.includes('adminRenameProfileDisplayName('),
 )
@@ -108,14 +114,16 @@ check(
 
 check(
   'admin endpoints reject unauthenticated and non-admin sessions server-side',
+  // isFullAdminSession() е type predicate: session is null → връща false (не хвърля) —
+  // покрива и "session === null" случая от старата inline проверка. Виж authStore.ts.
   adminModerationBody.includes('const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)') &&
     adminModerationBody.includes('const session = authStore.getSession(sessionToken)') &&
-    adminModerationBody.includes("session === null || session.account.role !== 'admin'") &&
-    adminModerationBody.indexOf("session === null || session.account.role !== 'admin'") <
+    adminModerationBody.includes('!isFullAdminSession(session)') &&
+    adminModerationBody.indexOf('!isFullAdminSession(session)') <
       adminModerationBody.indexOf('playerProgressStore.adminRenameProfileDisplayName(') &&
-    adminModerationBody.indexOf("session === null || session.account.role !== 'admin'") <
+    adminModerationBody.indexOf('!isFullAdminSession(session)') <
       adminModerationBody.indexOf('playerProgressStore.updateProfileAvatar(') &&
-    adminModerationBody.indexOf("session === null || session.account.role !== 'admin'") <
+    adminModerationBody.indexOf('!isFullAdminSession(session)') <
       adminModerationBody.indexOf('playerProgressStore.deleteProfileGalleryImage('),
 )
 
@@ -131,7 +139,7 @@ check(
 
 check(
   'normal users cannot change another display-name, avatar, or gallery image',
-  adminModerationBody.includes("session === null || session.account.role !== 'admin'") &&
+  adminModerationBody.includes('!isFullAdminSession(session)') &&
     adminModerationBody.includes('playerProgressStore.adminRenameProfileDisplayName(') &&
     adminModerationBody.includes('playerProgressStore.updateProfileAvatar(targetProfileId') &&
     adminModerationBody.includes('playerProgressStore.deleteProfileGalleryImage(targetProfileId'),

@@ -13,6 +13,18 @@ export type RenderPlayerProfilePopupOptions = {
   isAdmin?: boolean
   friendshipAction?: PlayerProfileFriendshipAction | null
   skipAnimation?: boolean
+  /**
+   * Само за ПЪЛЕН администратор (не субадмин) — управлява видимостта на
+   * "Субадмин" баджа и бутоните "Направи/Премахни субадмин". Обикновени
+   * потребители и субадмини никога не трябва да виждат чужд субадмин статус.
+   */
+  viewerIsFullAdmin?: boolean
+  /**
+   * Текуща роля на разглеждания акаунт — null докато не е известна (все
+   * още не е заредена) или ако профилът няма акаунт (бот/гост/временен).
+   * Ползва се само когато viewerIsFullAdmin е true.
+   */
+  targetAccountRole?: 'player' | 'subadmin' | 'admin' | null
 }
 
 export type PlayerProfileFriendshipAction = {
@@ -458,6 +470,70 @@ function renderEmptyContent(seat: Seat | null): string {
   `
 }
 
+function renderSubadminRoleControls(
+  isOwnProfile: boolean,
+  viewerIsFullAdmin: boolean,
+  targetAccountRole: 'player' | 'subadmin' | 'admin' | null,
+): string {
+  // Никога за собствен профил, никога за друг пълен admin (target === 'admin'),
+  // никога ако ролята още не е заредена (null) — не показваме грешен бутон
+  // докато чакаме отговора от /api/admin/profiles/:id/subadmin.
+  if (isOwnProfile || !viewerIsFullAdmin || targetAccountRole === null || targetAccountRole === 'admin') {
+    return ''
+  }
+
+  if (targetAccountRole === 'subadmin') {
+    return `
+      <span
+        data-player-profile-subadmin-badge="1"
+        style="
+          display:inline-flex;
+          align-items:center;
+          padding:3px 10px;
+          border-radius:999px;
+          background:rgba(212,165,32,0.16);
+          border:1px solid rgba(212,165,32,0.55);
+          color:#d4a520;
+          font-size:11px;
+          font-weight:900;
+          letter-spacing:0.04em;
+          text-transform:uppercase;
+          white-space:nowrap;
+        "
+      >Субадмин</span>
+      <span
+        data-player-profile-revoke-subadmin="1"
+        style="
+          display:inline-flex;
+          align-items:center;
+          gap:6px;
+          color:#f87171;
+          font-size:14px;
+          font-weight:900;
+          cursor:pointer;
+          white-space:nowrap;
+        "
+      >Премахни субадмин</span>
+    `
+  }
+
+  return `
+    <span
+      data-player-profile-grant-subadmin="1"
+      style="
+        display:inline-flex;
+        align-items:center;
+        gap:6px;
+        color:#d4a520;
+        font-size:14px;
+        font-weight:900;
+        cursor:pointer;
+        white-space:nowrap;
+      "
+    >Направи субадмин</span>
+  `
+}
+
 function renderProfileContent(
   profile: PlayerPublicProfileSnapshot,
   seat: Seat | null,
@@ -465,6 +541,8 @@ function renderProfileContent(
   isOwnProfile: boolean,
   isAdmin: boolean,
   friendshipAction: PlayerProfileFriendshipAction | null,
+  viewerIsFullAdmin: boolean,
+  targetAccountRole: 'player' | 'subadmin' | 'admin' | null,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -561,6 +639,7 @@ function renderProfileContent(
                 Редакция
               </span>
             ` : ''}
+            ${renderSubadminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderCoinBalanceInline(profile)}
           </div>
 
@@ -834,6 +913,8 @@ export function renderPlayerProfilePopup(
           options.isOwnProfile ?? false,
           options.isAdmin ?? false,
           options.friendshipAction ?? null,
+          options.viewerIsFullAdmin ?? false,
+          options.targetAccountRole ?? null,
         )
       : renderEmptyContent(options.seat)
 

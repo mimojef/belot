@@ -11,10 +11,12 @@ import type { PlayerProgressStore } from './playerProgressStore.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
+export type AccountRoleValue = 'player' | 'subadmin' | 'admin'
+
 export type AuthAccountSnapshot = {
   accountId: AccountId
   email: string
-  role: 'player' | 'admin'
+  role: AccountRoleValue
   status: 'active' | 'disabled'
   createdAt: string
 }
@@ -24,6 +26,44 @@ export type AuthSessionSnapshot = {
   account: AuthAccountSnapshot
   profile: PlayerPublicProfileSnapshot
 }
+
+/**
+ * Пълен администратор — единствената роля с достъп до "Настройки",
+ * редакция/модериране на профили, чат с поддръжката и управление на роли.
+ *
+ * Type predicate (не просто boolean) — след `if (!isFullAdminSession(session)) return`
+ * TypeScript стеснява `session` до non-null за остатъка от функцията, точно
+ * както правеше досегашният inline `session === null || session.account.role !== 'admin'`.
+ */
+export function isFullAdminSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && session.account.role === 'admin'
+}
+
+/**
+ * Read-only административен достъп ("Информация" / "Сървър") —
+ * субадмин ИЛИ пълен администратор. Виж isFullAdminSession за защо е type predicate.
+ */
+export function isAdminOrSubadminSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && (session.account.role === 'admin' || session.account.role === 'subadmin')
+}
+
+export type SubadminRoleChangeErrorCode =
+  | 'not_found'
+  | 'no_account'
+  | 'self'
+  | 'target_is_admin'
+  | 'conflict'
+  | 'profile_inactive'
+  | 'profile_temporary'
+  | 'account_inactive'
+
+export type SubadminRoleChangeResult =
+  | { ok: true; role: 'subadmin' | 'player' }
+  | { ok: false; code: SubadminRoleChangeErrorCode; message: string }
 
 export type AuthStore = {
   register: (input: {
@@ -43,6 +83,20 @@ export type AuthStore = {
   }) => { ok: true } | { ok: false; message: string }
   getSession: (sessionToken: string | null) => AuthSessionSnapshot | null
   logout: (sessionToken: string | null) => void
+  /**
+   * Назначава/премахва субадмин роля за профила зад `targetProfileId`.
+   * Ролята принадлежи на АКАУНТА (не профила) — виж AccountRow.role.
+   * Атомарно: role UPDATE + admin_role_audit_log INSERT в една транзакция.
+   * Идемпотентно: повторно грантване на вече-субадмин (или повторно
+   * revoke на вече-player) връща ok:true без нов audit ред.
+   */
+  setSubadminRole: (input: {
+    actorAccountId: string
+    targetProfileId: string
+    action: 'grant' | 'revoke'
+  }) => SubadminRoleChangeResult
+  /** Роля на акаунта зад даден профил — само за UI показване (badge), null ако профилът няма акаунт (бот/гост/изтрит). */
+  getAccountRoleForProfile: (profileId: string) => AccountRoleValue | null
   close: () => void
 }
 
@@ -54,7 +108,7 @@ type AccountRow = {
   account_id: string
   email: string
   password_hash: string
-  role: 'player' | 'admin'
+  role: AccountRoleValue
   status: 'active' | 'disabled'
   created_at: string
 }
@@ -64,7 +118,7 @@ type SessionRow = {
   account_id: string
   profile_id: string
   email: string
-  role: 'player' | 'admin'
+  role: AccountRoleValue
   status: 'active' | 'disabled'
   account_created_at: string
 }
@@ -263,6 +317,40 @@ export async function createAuthStore(
     FROM accounts
     WHERE account_id = ?
     LIMIT 1;
+  `)
+
+  // status/is_temporary се ползват само от setSubadminRole (grant eligibility) —
+  // getAccountRoleForProfile чете единствено account_id и игнорира останалото.
+  const selectProfileRoleEligibilityStatement = database.prepare(`
+    SELECT account_id, status, is_temporary
+    FROM profiles
+    WHERE profile_id = ?
+    LIMIT 1;
+  `)
+
+  const conditionalUpdateAccountRoleStatement = database.prepare(`
+    UPDATE accounts
+    SET role = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE account_id = ?
+      AND role = ?;
+  `)
+
+  const insertAdminRoleAuditLogStatement = database.prepare(`
+    INSERT INTO admin_role_audit_log (
+      log_id,
+      actor_account_id,
+      target_account_id,
+      action,
+      previous_role,
+      new_role
+    ) VALUES (
+      ?,
+      ?,
+      ?,
+      ?,
+      ?,
+      ?
+    );
   `)
 
   const updatePasswordHashStatement = database.prepare(`
@@ -514,6 +602,153 @@ export async function createAuthStore(
     revokeSessionStatement.run(hashSessionToken(sessionToken))
   }
 
+  function getAccountRoleForProfile(profileId: string): AccountRoleValue | null {
+    const profileRow = selectProfileRoleEligibilityStatement.get(profileId) as
+      | { account_id: string | null }
+      | undefined
+
+    if (!profileRow || profileRow.account_id === null) {
+      return null
+    }
+
+    const accountRow = selectAccountByIdStatement.get(profileRow.account_id) as AccountRow | undefined
+    return accountRow?.role ?? null
+  }
+
+  function setSubadminRole(input: {
+    actorAccountId: string
+    targetProfileId: string
+    action: 'grant' | 'revoke'
+  }): SubadminRoleChangeResult {
+    const profileRow = selectProfileRoleEligibilityStatement.get(input.targetProfileId) as
+      | { account_id: string | null; status: 'active' | 'disabled'; is_temporary: number }
+      | undefined
+
+    if (!profileRow) {
+      return { ok: false, code: 'not_found', message: 'Профилът не беше намерен.' }
+    }
+
+    const targetAccountId = profileRow.account_id
+
+    if (targetAccountId === null) {
+      return {
+        ok: false,
+        code: 'no_account',
+        message: 'Този потребител няма регистриран акаунт и не може да получи административна роля.',
+      }
+    }
+
+    if (targetAccountId === input.actorAccountId) {
+      return { ok: false, code: 'self', message: 'Не можеш да промениш собствената си роля.' }
+    }
+
+    const targetAccount = selectAccountByIdStatement.get(targetAccountId) as AccountRow | undefined
+
+    if (!targetAccount) {
+      return { ok: false, code: 'not_found', message: 'Акаунтът не беше намерен.' }
+    }
+
+    if (targetAccount.role === 'admin') {
+      return {
+        ok: false,
+        code: 'target_is_admin',
+        message: 'Не можеш да промениш ролята на друг администратор.',
+      }
+    }
+
+    // Одобрено продуктово решение: субадмин може да бъде НАЗНАЧЕН само на
+    // активен, постоянен човешки профил със свързан активен акаунт. REVOKE
+    // остава разрешен независимо от статуса — пълният admin трябва винаги
+    // да може да премахне субадмин права, дори ако профилът/акаунтът вече е
+    // деактивиран междувременно. Автоматично отнемане при деактивиране НЕ се
+    // прави тук — извън обхвата на тази проверка (умишлено, отделно решение).
+    if (input.action === 'grant') {
+      if (profileRow.is_temporary === 1) {
+        return {
+          ok: false,
+          code: 'profile_temporary',
+          message: 'Не можеш да направиш временен профил субадмин.',
+        }
+      }
+
+      if (profileRow.status !== 'active') {
+        return {
+          ok: false,
+          code: 'profile_inactive',
+          message: 'Не можеш да направиш неактивен профил субадмин.',
+        }
+      }
+
+      if (targetAccount.status !== 'active') {
+        return {
+          ok: false,
+          code: 'account_inactive',
+          message: 'Не можеш да направиш неактивен акаунт субадмин.',
+        }
+      }
+    }
+
+    const fromRole: 'player' | 'subadmin' = input.action === 'grant' ? 'player' : 'subadmin'
+    const toRole: 'player' | 'subadmin' = input.action === 'grant' ? 'subadmin' : 'player'
+    const auditAction = input.action === 'grant' ? 'grant_subadmin' : 'revoke_subadmin'
+
+    database.exec('BEGIN IMMEDIATE;')
+
+    try {
+      const changeResult = conditionalUpdateAccountRoleStatement.run(toRole, targetAccountId, fromRole)
+
+      if (changeResult.changes === 0) {
+        // Ролята вече не е `fromRole` — или конкурентна заявка вече е
+        // приложила същата промяна (идемпотентно), или състоянието се е
+        // променило междувременно (race). Прочитаме текущата роля вътре в
+        // същата транзакция, за да върнем коректен резултат без частична
+        // промяна в базата.
+        const currentAccount = selectAccountByIdStatement.get(targetAccountId) as AccountRow
+        database.exec('ROLLBACK;')
+
+        if (currentAccount.role === toRole) {
+          // Идемпотентно повторение — вече е в желаното състояние.
+          return { ok: true, role: toRole }
+        }
+
+        if (currentAccount.role === 'admin') {
+          return {
+            ok: false,
+            code: 'target_is_admin',
+            message: 'Не можеш да промениш ролята на друг администратор.',
+          }
+        }
+
+        return {
+          ok: false,
+          code: 'conflict',
+          message: 'Ролята на потребителя е променена междувременно. Презареди и опитай пак.',
+        }
+      }
+
+      insertAdminRoleAuditLogStatement.run(
+        randomUUID(),
+        input.actorAccountId,
+        targetAccountId,
+        auditAction,
+        fromRole,
+        toRole,
+      )
+
+      database.exec('COMMIT;')
+
+      return { ok: true, role: toRole }
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // ignore rollback failure and surface the original error
+      }
+
+      throw error
+    }
+  }
+
   function close(): void {
     database.close()
   }
@@ -524,6 +759,8 @@ export async function createAuthStore(
     changePassword,
     getSession,
     logout,
+    setSubadminRole,
+    getAccountRoleForProfile,
     close,
   }
 }

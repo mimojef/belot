@@ -134,6 +134,11 @@ export type LobbyScreenState = {
   profile: PlayerPublicProfileSnapshot
   profilePopupProfile: PlayerPublicProfileSnapshot | null
   profilePopupCanEdit: boolean
+  /** Роля на разглеждания акаунт — само за isAdmin (пълен) viewer; виж renderPlayerProfilePopup. */
+  profilePopupTargetRole: 'player' | 'subadmin' | 'admin' | null
+  subadminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke' } | null
+  subadminActionBusy: boolean
+  subadminActionToast: { text: string; ok: boolean } | null
   players: PlayerPublicProfileSnapshot[]
   playersPage: number
   playersTotalCount: number
@@ -161,7 +166,10 @@ export type LobbyScreenState = {
   shopPurchaseResumeId: string | null
   shopPurchaseHideConfirmId: string | null
   shopPurchaseActionPurchaseId: string | null
+  /** Пълен администратор — вижда "Настройки", редакция на профили, чат с поддръжката, съобщения от гости. */
   isAdmin: boolean
+  /** Admin ИЛИ subadmin — вижда "⚙ Админ" менюто (само "Информация"/"Сървър" вътре, ако не е isAdmin). */
+  isAdminOrSubadmin: boolean
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
@@ -329,6 +337,10 @@ export type RenderLobbyScreenOptions = {
   onProfileClick: () => void
   onProfileClose: () => void
   onProfileEditClick: () => void
+  onProfileGrantSubadminClick: (profileId: string | null) => void
+  onProfileRevokeSubadminClick: (profileId: string | null) => void
+  onSubadminActionCancel: () => void
+  onSubadminActionConfirm: () => void
   onProfileEditClose: () => void
   onProfileEditSubmit: (
     avatarFile: File | null,
@@ -513,6 +525,8 @@ export type ProfilePopupCallbacks = {
   onFriendRemoveClick: (friendshipId: string) => void
   onGiftCoinsClick: (friendshipId: string) => void
   onLikeClick: (profileId: string) => void
+  onGrantSubadminClick: (profileId: string | null) => void
+  onRevokeSubadminClick: (profileId: string | null) => void
 }
 
 function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profileId: string | null): void {
@@ -527,6 +541,22 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
     })
     editEl.addEventListener('mouseenter', () => { editEl.style.textDecoration = 'underline' })
     editEl.addEventListener('mouseleave', () => { editEl.style.textDecoration = 'none' })
+  }
+  const grantSubadminEl = el.querySelector<HTMLElement>('[data-player-profile-grant-subadmin="1"]')
+  if (grantSubadminEl) {
+    grantSubadminEl.addEventListener('click', () => {
+      cb.onGrantSubadminClick(profileId)
+    })
+    grantSubadminEl.addEventListener('mouseenter', () => { grantSubadminEl.style.textDecoration = 'underline' })
+    grantSubadminEl.addEventListener('mouseleave', () => { grantSubadminEl.style.textDecoration = 'none' })
+  }
+  const revokeSubadminEl = el.querySelector<HTMLElement>('[data-player-profile-revoke-subadmin="1"]')
+  if (revokeSubadminEl) {
+    revokeSubadminEl.addEventListener('click', () => {
+      cb.onRevokeSubadminClick(profileId)
+    })
+    revokeSubadminEl.addEventListener('mouseenter', () => { revokeSubadminEl.style.textDecoration = 'underline' })
+    revokeSubadminEl.addEventListener('mouseleave', () => { revokeSubadminEl.style.textDecoration = 'none' })
   }
   el.querySelector<HTMLButtonElement>('[data-player-profile-like]')
     ?.addEventListener('click', (e) => {
@@ -596,6 +626,8 @@ export function syncProfilePopup(
     canEdit: boolean
     isAdmin?: boolean
     friendshipAction: PlayerProfileFriendshipAction | null
+    viewerIsFullAdmin?: boolean
+    targetAccountRole?: 'player' | 'subadmin' | 'admin' | null
   },
   cb: ProfilePopupCallbacks,
 ): void {
@@ -618,6 +650,8 @@ export function syncProfilePopup(
     isAdmin: popupState.isAdmin ?? false,
     friendshipAction: popupState.friendshipAction,
     skipAnimation: !isFirstOpen,
+    viewerIsFullAdmin: popupState.viewerIsFullAdmin ?? false,
+    targetAccountRole: popupState.targetAccountRole ?? null,
   })
   attachPopupListeners(el, cb, popupState.profile?.profileId ?? null)
 }
@@ -1468,7 +1502,7 @@ function renderNav(state: LobbyScreenState): string {
 
       <div style="display:flex; align-items:center; gap:4px; margin-left:auto;">
         ${state.profile.profileId !== null ? `
-          ${state.isAdmin ? `
+          ${state.isAdminOrSubadmin ? `
             <div style="position:relative; height:100%; display:flex; align-items:center;" data-admin-dropdown-wrap="1">
               <button type="button" data-lobby-nav-admin-toggle="1" class="lobby-nav-btn" style="
                 display:flex; align-items:center; gap:8px;
@@ -1496,6 +1530,7 @@ function renderNav(state: LobbyScreenState): string {
                 z-index:999;
                 overflow:hidden;
               ">
+                ${state.isAdmin ? `
                 <button type="button" data-lobby-nav-admin="1" style="
                   display:flex; align-items:center; gap:10px;
                   width:100%; background:none; border:none;
@@ -1510,6 +1545,7 @@ function renderNav(state: LobbyScreenState): string {
                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/><path d="M1 12h2M21 12h2M12 1v2M12 21v2"/></svg>
                   Настройки
                 </button>
+                ` : ''}
                 <button type="button" data-lobby-nav-admin-info="1" style="
                   display:flex; align-items:center; gap:10px;
                   width:100%; background:none; border:none;
@@ -2866,8 +2902,10 @@ function renderMobileMenu(state: LobbyScreenState): string {
               <button type="button" data-lobby-nav-chat="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('chat', `Чат${unreadChatCount > 0 ? ` (${unreadChatCount})` : ''}`)}</button>
               <button type="button" data-lobby-nav-blocked-players="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('blocked', 'Блокирани')}</button>
               <button type="button" data-lobby-nav-support="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('support', `Поддръжка${mailUnreadCount > 0 ? ` (${mailUnreadCount})` : ''}`)}</button>
-              ${state.isAdmin ? `
+              ${state.isAdminOrSubadmin ? `
+                ${state.isAdmin ? `
                 <button type="button" data-lobby-nav-admin="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ настройки')}</button>
+                ` : ''}
                 <button type="button" data-lobby-nav-admin-info="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ информация')}</button>
                 <button type="button" data-lobby-nav-admin-server="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Сървър')}</button>
               ` : ''}
@@ -3682,7 +3720,7 @@ function renderMobileLobbyScreenContent(
           : state.view === 'admin-payments'
             ? renderAdminPaymentsPanel(
                 {
-                  isAdmin: state.isAdmin,
+                  isAdmin: state.isAdminOrSubadmin,
                   period: state.adminPaymentsPeriod,
                   loading: state.adminPaymentsLoading,
                   errorText: state.adminPaymentsErrorText,
@@ -3697,7 +3735,7 @@ function renderMobileLobbyScreenContent(
           : state.view === 'admin-payment-detail'
             ? renderAdminPaymentDetailPanel(
                 {
-                  isAdmin: state.isAdmin,
+                  isAdmin: state.isAdminOrSubadmin,
                   loading: state.adminPaymentDetailLoading,
                   errorText: state.adminPaymentDetailErrorText,
                   purchase: state.adminPaymentDetailPurchase,
@@ -4501,8 +4539,8 @@ export function renderShopPanel(state: LobbyScreenState): string {
   `
 }
 
-function renderAdminInfoPanel(state: LobbyScreenState): string {
-  if (!state.isAdmin) {
+export function renderAdminInfoPanel(state: LobbyScreenState): string {
+  if (!state.isAdminOrSubadmin) {
     return `<div style="min-height:520px;display:flex;align-items:center;justify-content:center;color:#fecaca;font-size:15px;font-weight:800;">Нямаш достъп.</div>`
   }
 
@@ -4703,7 +4741,7 @@ function renderAdminInfoPanel(state: LobbyScreenState): string {
 
 
 function renderAdminVisitorsPanel(state: LobbyScreenState): string {
-  if (!state.isAdmin) {
+  if (!state.isAdminOrSubadmin) {
     return `<div style="min-height:520px;display:flex;align-items:center;justify-content:center;color:#fecaca;font-size:15px;font-weight:800;">Нямаш достъп.</div>`
   }
 
@@ -5032,8 +5070,8 @@ function renderSourcesBody(state: LobbyScreenState): string {
   `
 }
 
-function renderAdminServerPanel(state: LobbyScreenState): string {
-  if (!state.isAdmin) {
+export function renderAdminServerPanel(state: LobbyScreenState): string {
+  if (!state.isAdminOrSubadmin) {
     return `<div style="min-height:520px;display:flex;align-items:center;justify-content:center;color:#fecaca;font-size:15px;font-weight:800;">Нямаш достъп.</div>`
   }
 
@@ -5434,7 +5472,7 @@ function renderAdminServerPanel(state: LobbyScreenState): string {
   `
 }
 
-function renderAdminPanel(state: LobbyScreenState, isMobile = false): string {
+export function renderAdminPanel(state: LobbyScreenState, isMobile = false): string {
   if (!state.isAdmin) {
     return `
       <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(248,113,113,0.34);background:rgba(127,29,29,0.28);border-radius:8px;color:#fecaca;font-size:15px;font-weight:800;text-align:center;padding:20px;">
@@ -7021,6 +7059,77 @@ function renderLeavePrivateRoomConfirmPopup(state: LobbyScreenState): string {
   `
 }
 
+export function renderSubadminActionConfirmPopup(state: LobbyScreenState): string {
+  const pending = state.subadminActionConfirm
+  if (!pending) return ''
+
+  const isGrant = pending.action === 'grant'
+  const title = isGrant ? 'Направи субадмин?' : 'Премахни субадмин?'
+  const message = isGrant
+    ? 'Потребителят ще получи достъп само за преглед до секциите „Информация“ и „Сървър“. Няма да може да редактира профили, да чете чата с поддръжката или да променя настройки.'
+    : 'Потребителят ще загуби достъпа до административните секции „Информация“ и „Сървър“.'
+  const confirmLabel = isGrant ? 'Направи субадмин' : 'Премахни'
+  const busy = state.subadminActionBusy
+
+  return `
+    <div style="
+      position:fixed;inset:0;z-index:9600;
+      display:flex;align-items:center;justify-content:center;
+      background:rgba(0,0,0,0.7);
+    ">
+      <div style="
+        background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);
+        border-radius:16px;padding:28px 28px 24px;max-width:400px;width:90%;
+        box-shadow:0 20px 60px rgba(0,0,0,0.6);
+      ">
+        <div style="font-size:18px;font-weight:900;color:#fff;margin-bottom:14px;">${escapeHtml(title)}</div>
+        <div style="font-size:14px;color:rgba(255,255,255,0.7);line-height:1.5;margin-bottom:24px;">${escapeHtml(message)}</div>
+        <div style="display:flex;gap:12px;">
+          <button type="button" data-subadmin-action-cancel="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
+            border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};
+          ">Отказ</button>
+          <button type="button" data-subadmin-action-confirm="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(212,165,32,0.62);
+            background:linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%);
+            border-radius:10px;color:#080808;font-size:14px;font-weight:900;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.7' : '1'};
+          ">${busy ? 'Изчакай…' : escapeHtml(confirmLabel)}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+export function renderSubadminActionToast(state: LobbyScreenState): string {
+  const toast = state.subadminActionToast
+  if (!toast) return ''
+
+  return `
+    <div style="
+      position:fixed;inset:0;z-index:9700;
+      display:flex;align-items:flex-end;justify-content:center;
+      padding-bottom:64px;
+      pointer-events:none;
+    ">
+      <div style="
+        pointer-events:auto;
+        background:#1a1a2e;
+        border:1px solid ${toast.ok ? 'rgba(212,165,32,0.55)' : 'rgba(239,68,68,0.55)'};
+        border-radius:12px;
+        padding:14px 22px;
+        text-align:center;
+        box-shadow:0 8px 40px rgba(0,0,0,0.7);
+        max-width:calc(100vw - 48px);
+        animation:prInfoIn 0.18s ease both;
+      ">
+        <div style="font-size:14px;font-weight:800;color:${toast.ok ? '#fde68a' : '#fca5a5'};">${escapeHtml(toast.text)}</div>
+      </div>
+    </div>
+  `
+}
+
 function renderPrivateRoomInfoPopup(state: LobbyScreenState): string {
   if (!state.privateRoomInfoText) return ''
   return `
@@ -7447,6 +7556,8 @@ export function renderLobbyScreen(
       ${renderInviteFriendsPopup(state, options)}
       ${renderPrivateRoomInfoPopup(state)}
       ${renderLeavePrivateRoomConfirmPopup(state)}
+      ${renderSubadminActionConfirmPopup(state)}
+      ${renderSubadminActionToast(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
       ${renderNoPlayersModal(state)}
@@ -7544,7 +7655,7 @@ export function renderLobbyScreen(
               : state.view === 'admin-payments'
                 ? renderAdminPaymentsPanel(
                     {
-                      isAdmin: state.isAdmin,
+                      isAdmin: state.isAdminOrSubadmin,
                       period: state.adminPaymentsPeriod,
                       loading: state.adminPaymentsLoading,
                       errorText: state.adminPaymentsErrorText,
@@ -7559,7 +7670,7 @@ export function renderLobbyScreen(
               : state.view === 'admin-payment-detail'
                 ? renderAdminPaymentDetailPanel(
                     {
-                      isAdmin: state.isAdmin,
+                      isAdmin: state.isAdminOrSubadmin,
                       loading: state.adminPaymentDetailLoading,
                       errorText: state.adminPaymentDetailErrorText,
                       purchase: state.adminPaymentDetailPurchase,
@@ -7675,6 +7786,8 @@ export function renderLobbyScreen(
       ${renderInviteFriendsPopup(state, options)}
       ${renderPrivateRoomInfoPopup(state)}
       ${renderLeavePrivateRoomConfirmPopup(state)}
+      ${renderSubadminActionConfirmPopup(state)}
+      ${renderSubadminActionToast(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
       ${renderNoPlayersModal(state)}
@@ -8641,6 +8754,8 @@ export function renderLobbyScreen(
       canEdit: state.profilePopupCanEdit,
       isAdmin: state.isAdmin,
       friendshipAction: state.friendshipAction,
+      viewerIsFullAdmin: state.isAdmin,
+      targetAccountRole: state.profilePopupTargetRole,
     },
     {
       onClose: options.onProfileClose,
@@ -8653,6 +8768,8 @@ export function renderLobbyScreen(
       onFriendRemoveClick: options.onFriendRemoveClick,
       onGiftCoinsClick: options.onGiftCoinsClick,
       onLikeClick: options.onLikeClick,
+      onGrantSubadminClick: options.onProfileGrantSubadminClick,
+      onRevokeSubadminClick: options.onProfileRevokeSubadminClick,
     },
   )
 
@@ -9621,6 +9738,12 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-leave-pr-cancel="1"]')
     ?.addEventListener('click', options.onLeavePrivateRoomAndMatchmakeCancel)
+
+  root.querySelector<HTMLButtonElement>('[data-subadmin-action-confirm="1"]')
+    ?.addEventListener('click', options.onSubadminActionConfirm)
+
+  root.querySelector<HTMLButtonElement>('[data-subadmin-action-cancel="1"]')
+    ?.addEventListener('click', options.onSubadminActionCancel)
 
   if (root.querySelector('[data-private-room-info-toast="1"]')) {
     if (privateRoomInfoDismissTimer !== null) clearTimeout(privateRoomInfoDismissTimer)

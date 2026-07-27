@@ -23,6 +23,9 @@ import {
   createClearSessionCookieHeader,
   createSessionCookieHeader,
   getSessionTokenFromCookieHeader,
+  isAdminOrSubadminSession,
+  isFullAdminSession,
+  type AuthSessionSnapshot,
 } from './db/authStore.js'
 import { createChatStore } from './db/chatStore.js'
 import { createSupportStore, type SupportMessageSnapshot, type SupportConversationSnapshot } from './db/supportStore.js'
@@ -3107,7 +3110,8 @@ function handleAdminMonitoringCurrentRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (session?.account.role !== 'admin') {
+  // "Сървър" — read-only diagnostics, достъпно за admin И subadmin.
+  if (!isAdminOrSubadminSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
     return true
   }
@@ -3138,7 +3142,8 @@ function handleAdminMonitoringHistoryRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (session?.account.role !== 'admin') {
+  // "Сървър" — read-only diagnostics, достъпно за admin И subadmin.
+  if (!isAdminOrSubadminSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
     return true
   }
@@ -3177,7 +3182,8 @@ function handleAdminMonitoringConnectionsRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (session?.account.role !== 'admin') {
+  // "Сървър" — read-only diagnostics, достъпно за admin И subadmin.
+  if (!isAdminOrSubadminSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
     return true
   }
@@ -3219,7 +3225,8 @@ async function handleAdminGuestContactMessagesRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (session?.account.role !== 'admin') {
+  // Съобщения от гости (contact form) — третираме като "поддръжка", само пълен admin.
+  if (!isFullAdminSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
     return true
   }
@@ -3820,7 +3827,7 @@ async function handleAdminProfileModerationRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (session === null || session.account.role !== 'admin') {
+  if (!isFullAdminSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Само администратор може да редактира чужд профил.' })
     return true
   }
@@ -3943,6 +3950,76 @@ async function handleAdminProfileModerationRequest(
   }
 
   return false
+}
+
+/**
+ * Управление и справка за субадмин роля:
+ *   GET    = текуща роля на целевия профил (за "Субадмин" бадж в профилния
+ *            попъп — единственото място, откъдето ролята изтича към клиента,
+ *            и то само за пълен admin. НЕ пипаме споделения
+ *            PlayerPublicProfileSnapshot conveyor, защото той се сериализира
+ *            в ~15 други, не-административни пътища — риск от изтичане на
+ *            субадмин статус към обикновени потребители).
+ *   POST   = grant, DELETE = revoke.
+ * Само пълен admin (isFullAdminSession) за ВСИЧКИ методи — никога субадмин,
+ * дори по директна API заявка. Всички self/target-is-admin/no-account/
+ * конкурентни защити са в authStore.setSubadminRole (единствен източник на
+ * истина за прехода).
+ */
+async function handleAdminSubadminRoleRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = pathname.match(/^\/api\/admin\/profiles\/([^/]+)\/subadmin$/)
+  if (!match) return false
+
+  if (req.method !== 'GET' && req.method !== 'POST' && req.method !== 'DELETE') return false
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Само администратор може да управлява роли.' })
+    return true
+  }
+
+  const targetProfileId = decodeURIComponent((match[1] ?? '').trim())
+
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(targetProfileId)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден profileId.' })
+    return true
+  }
+
+  if (req.method === 'GET') {
+    const role = authStore.getAccountRoleForProfile(targetProfileId)
+    sendJsonResponse(res, 200, { ok: true, role })
+    return true
+  }
+
+  const result = authStore.setSubadminRole({
+    actorAccountId: session.account.accountId,
+    targetProfileId,
+    action: req.method === 'POST' ? 'grant' : 'revoke',
+  })
+
+  if (!result.ok) {
+    const statusByCode: Record<typeof result.code, number> = {
+      not_found: 404,
+      no_account: 400,
+      self: 400,
+      target_is_admin: 409,
+      conflict: 409,
+      profile_inactive: 400,
+      profile_temporary: 400,
+      account_inactive: 400,
+    }
+    sendJsonResponse(res, statusByCode[result.code], { ok: false, message: result.message })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, role: result.role })
+  return true
 }
 
 async function handleProfileBlockRequest(
@@ -4879,7 +4956,7 @@ async function handleAdminSettingsRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (session === null || session.account.role !== 'admin') {
+  if (!isFullAdminSession(session)) {
     sendJsonResponse(res, 403, {
       ok: false,
       message: 'Нямаш достъп до админ настройките.',
@@ -4949,7 +5026,7 @@ async function handleAdminCoinPackagesRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (session === null || session.account.role !== 'admin') {
+  if (!isFullAdminSession(session)) {
     sendJsonResponse(res, 403, {
       ok: false,
       message: 'Нямаш достъп до админ пакетите.',
@@ -5594,7 +5671,7 @@ async function handleAdminMissionsRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (session === null || session.account.role !== 'admin') {
+  if (!isFullAdminSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш достъп до админ мисиите.' })
     return true
   }
@@ -5705,7 +5782,8 @@ async function handleAdminStatsRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (session?.account.role !== 'admin') {
+  // "Информация" — read-only статистики, достъпно за admin И subadmin.
+  if (!isAdminOrSubadminSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
     return true
   }
@@ -5778,7 +5856,8 @@ async function handleAdminPaymentsListRequest(
     return true
   }
 
-  if (session.account.role !== 'admin') {
+  // "Информация" — read-only плащания, достъпно за admin И subadmin.
+  if (!isAdminOrSubadminSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
     return true
   }
@@ -5873,7 +5952,8 @@ async function handleAdminPaymentDetailRequest(
     return true
   }
 
-  if (session.account.role !== 'admin') {
+  // "Информация" — read-only детайли на плащане, достъпно за admin И subadmin.
+  if (!isAdminOrSubadminSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
     return true
   }
@@ -5921,7 +6001,8 @@ async function handleAdminVisitorSourcesRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (session?.account.role !== 'admin') {
+  // "Информация" — read-only visitor sources, достъпно за admin И subadmin.
+  if (!isAdminOrSubadminSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
     return true
   }
@@ -5972,7 +6053,8 @@ async function handleAdminVisitorsRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (session?.account.role !== 'admin') {
+  // "Информация" — read-only посетители, достъпно за admin И subadmin.
+  if (!isAdminOrSubadminSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
     return true
   }
@@ -6024,7 +6106,8 @@ async function handleAdminDailyRewardsRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (session?.account.role !== 'admin') {
+  // "Настройки" — само пълен admin.
+  if (!isFullAdminSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
     return true
   }
@@ -6129,7 +6212,8 @@ async function handleAdminMatchRoomsRequest(
   if (pathname !== '/api/admin/rooms' && deleteMatch === null) return false
 
   const session = authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))
-  if (!session || session.account.role !== 'admin') {
+  // "Настройки" (rooms) — само пълен admin.
+  if (!isFullAdminSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
     return true
   }
@@ -6252,6 +6336,9 @@ async function handleSupportRequest(
       sendJsonResponse(res, 200, { ok: true, unreadCount: 0 })
       return true
     }
+    // session вече е стеснен до non-null по-горе — директна проверка на ролята
+    // (isFullAdminSession тук би дал `never` в false клона, защото TS вече знае
+    // че session е AuthSessionSnapshot и type predicate-ът го изключва изцяло).
     const unreadCount = session.account.role === 'admin'
       ? supportStore.getTotalUnreadForAdmin()
       : supportStore.getUnreadCountForUser(session.profile.profileId)
@@ -6259,9 +6346,9 @@ async function handleSupportRequest(
     return true
   }
 
-  // GET /api/support/admin/conversations — admin sees all
+  // GET /api/support/admin/conversations — admin sees all (чат с поддръжката — само пълен admin)
   if (pathname === '/api/support/admin/conversations' && req.method === 'GET') {
-    if (session?.account.role !== 'admin') {
+    if (!isFullAdminSession(session)) {
       sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
       return true
     }
@@ -6275,9 +6362,9 @@ async function handleSupportRequest(
     return true
   }
 
-  // GET /api/support/admin/messages/:profileId — admin reads thread
+  // GET /api/support/admin/messages/:profileId — admin reads thread (само пълен admin)
   if (pathname.startsWith('/api/support/admin/messages/') && req.method === 'GET') {
-    if (session?.account.role !== 'admin') {
+    if (!isFullAdminSession(session)) {
       sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
       return true
     }
@@ -6288,9 +6375,9 @@ async function handleSupportRequest(
     return true
   }
 
-  // POST /api/support/admin/reply — admin replies
+  // POST /api/support/admin/reply — admin replies (само пълен admin)
   if (pathname === '/api/support/admin/reply' && req.method === 'POST') {
-    if (session?.account.role !== 'admin') {
+    if (!isFullAdminSession(session)) {
       sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
       return true
     }
@@ -6312,9 +6399,9 @@ async function handleSupportRequest(
     return true
   }
 
-  // POST /api/support/admin/conversations/:profileId/archive — admin archives thread
+  // POST /api/support/admin/conversations/:profileId/archive — admin archives thread (само пълен admin)
   if (pathname.match(/^\/api\/support\/admin\/conversations\/[^/]+\/archive$/) && req.method === 'POST') {
-    if (session?.account.role !== 'admin') {
+    if (!isFullAdminSession(session)) {
       sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
       return true
     }
@@ -6328,9 +6415,9 @@ async function handleSupportRequest(
     return true
   }
 
-  // DELETE /api/support/admin/conversations/:profileId — admin hard-deletes thread
+  // DELETE /api/support/admin/conversations/:profileId — admin hard-deletes thread (само пълен admin)
   if (pathname.startsWith('/api/support/admin/conversations/') && req.method === 'DELETE') {
-    if (session?.account.role !== 'admin') {
+    if (!isFullAdminSession(session)) {
       sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
       return true
     }
@@ -6528,6 +6615,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminProfileModerationRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminSubadminRoleRequest(req, res, requestUrl.pathname)) {
     return
   }
 
