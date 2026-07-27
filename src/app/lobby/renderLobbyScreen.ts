@@ -276,6 +276,7 @@ export type LobbyScreenState = {
   adminSupportReplyLoading: boolean
   adminSupportDeleteConfirmProfileId: string | null
   adminSupportDeleteLoading: boolean
+  adminSupportMobileConversationOpen: boolean
   adminGuestContactMessages: GuestContactMessageListItem[]
   adminGuestContactMessagesLoading: boolean
   adminGuestContactMessagesErrorText: string | null
@@ -465,6 +466,7 @@ export type RenderLobbyScreenOptions = {
   onAdminSupportDeleteClick: (profileId: string) => void
   onAdminSupportDeleteCancel: () => void
   onAdminSupportDeleteConfirm: (profileId: string) => void
+  onAdminSupportMobileBack: () => void
   onAdminGuestContactMessageRead: (messageId: string) => void
   onSupportDeleteClick: () => void
   onSupportDeleteCancel: () => void
@@ -498,6 +500,7 @@ let mobileMenuCloseTimer: ReturnType<typeof setTimeout> | null = null
 let stakesFirstCardIndex = -1
 let stakesAnimFrame = 0
 let inviteCountdownTimer: ReturnType<typeof setInterval> | null = null
+let savedAdminSupportMobileListScrollTop = 0
 
 export type ProfilePopupCallbacks = {
   onClose: () => void
@@ -3657,7 +3660,7 @@ function renderMobileLobbyScreenContent(
     return `
       <main style="padding:12px;">
         ${state.view === 'support'
-          ? renderAdminSupportPage(state)
+          ? renderAdminSupportPage(state, true)
           : state.view === 'guest-contact-messages'
           ? renderAdminGuestContactMessagesPage(state, true)
           : state.view === 'private-rooms'
@@ -6295,7 +6298,7 @@ function renderGuestContactPopup(state: LobbyScreenState): string {
   `
 }
 
-function renderAdminSupportPage(state: LobbyScreenState): string {
+export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false): string {
   const sorted = [...state.adminSupportConversations].sort((a, b) => {
     if (a.unreadByAdmin > 0 && b.unreadByAdmin === 0) return -1
     if (a.unreadByAdmin === 0 && b.unreadByAdmin > 0) return 1
@@ -6360,32 +6363,11 @@ function renderAdminSupportPage(state: LobbyScreenState): string {
   const isDeleteConfirming = state.adminSupportDeleteConfirmProfileId === state.adminSupportSelectedProfileId && state.adminSupportSelectedProfileId !== null
   const deleteWarning = isDeleteConfirming && selectedConv !== null && !selectedConv.lastMessageIsFromAdmin
 
-  const rightPanelHtml = state.adminSupportSelectedProfileId === null ? `
-    <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:rgba(255,255,255,0.28);">
-      <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.4;"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
-      <div style="font-size:14px;font-weight:700;">Избери разговор</div>
-    </div>
-  ` : `
-    <div style="
-      display:flex;align-items:center;justify-content:space-between;
-      padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.08);
-      flex-shrink:0;background:#0a0a0a;
-    ">
-      <div style="font-size:14px;font-weight:800;color:#f8fafc;">
-        ${escapeHtml(selectedConv?.displayName ?? '')}
-      </div>
-      <button data-admin-support-delete="${escapeHtml(state.adminSupportSelectedProfileId)}" style="
-        display:flex;align-items:center;gap:6px;
-        background:rgba(212,165,32,0.10);border:1px solid rgba(212,165,32,0.30);
-        border-radius:7px;padding:6px 12px;cursor:pointer;
-        color:#d4a520;font-size:12px;font-weight:800;
-      ">
-        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
-        Архивирай
-      </button>
-    </div>
+  const selectedAvatarHtml = selectedConv?.avatarUrl
+    ? `<img src="${selectedConv.avatarUrl}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;flex-shrink:0;">`
+    : `<div style="width:32px;height:32px;border-radius:50%;background:rgba(212,165,32,0.15);display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;">👤</div>`
 
-    ${isDeleteConfirming ? `
+  const deleteConfirmBlockHtml = isDeleteConfirming ? `
     <div style="
       flex-shrink:0;padding:14px 18px;
       background:${deleteWarning ? 'rgba(239,68,68,0.10)' : 'rgba(255,255,255,0.05)'};
@@ -6400,7 +6382,7 @@ function renderAdminSupportPage(state: LobbyScreenState): string {
       <div style="font-size:13px;font-weight:700;color:rgba(255,255,255,0.70);margin-bottom:10px;">Разговорът ще бъде скрит от списъка. Ако потребителят изпрати ново съобщение, ще се появи отново.</div>
       `}
       <div style="display:flex;gap:8px;">
-        <button data-admin-support-delete-confirm="${escapeHtml(state.adminSupportSelectedProfileId)}"
+        <button data-admin-support-delete-confirm="${escapeHtml(state.adminSupportSelectedProfileId ?? '')}"
           ${state.adminSupportDeleteLoading ? 'disabled' : ''}
           style="
             height:34px;padding:0 16px;border:0;border-radius:7px;
@@ -6413,15 +6395,10 @@ function renderAdminSupportPage(state: LobbyScreenState): string {
         ">Откажи</button>
       </div>
     </div>
-    ` : ''}
+    ` : ''
 
-    <div id="support-admin-messages-scroll" style="
-      flex:1;min-height:0;overflow-y:auto;padding:20px;
-      display:flex;flex-direction:column;gap:10px;
-    ">
-      ${renderSupportMessagesBubbles(state.adminSupportMessages, state.adminSupportMessagesLoading)}
-    </div>
-    <form data-admin-support-reply-form="${escapeHtml(state.adminSupportSelectedProfileId)}" style="
+  const replyFormHtml = `
+    <form data-admin-support-reply-form="${escapeHtml(state.adminSupportSelectedProfileId ?? '')}" style="
       display:flex;gap:10px;padding:14px 16px;
       border-top:1px solid rgba(255,255,255,0.10);
       background:#080808;flex-shrink:0;
@@ -6441,36 +6418,133 @@ function renderAdminSupportPage(state: LobbyScreenState): string {
     </form>
   `
 
+  const rightPanelHtml = state.adminSupportSelectedProfileId === null ? `
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:rgba(255,255,255,0.28);">
+      <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.4;"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+      <div style="font-size:14px;font-weight:700;">Избери разговор</div>
+    </div>
+  ` : `
+    <div style="
+      display:flex;align-items:center;justify-content:space-between;
+      padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.08);
+      flex-shrink:0;background:#0a0a0a;
+    ">
+      <div style="font-size:14px;font-weight:800;color:#f8fafc;">
+        ${escapeHtml(selectedConv?.displayName ?? '')}
+      </div>
+      <button data-admin-support-delete="${escapeHtml(state.adminSupportSelectedProfileId ?? '')}" style="
+        display:flex;align-items:center;gap:6px;
+        background:rgba(212,165,32,0.10);border:1px solid rgba(212,165,32,0.30);
+        border-radius:7px;padding:6px 12px;cursor:pointer;
+        color:#d4a520;font-size:12px;font-weight:800;
+      ">
+        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
+        Архивирай
+      </button>
+    </div>
+
+    ${deleteConfirmBlockHtml}
+
+    <div id="support-admin-messages-scroll" style="
+      flex:1;min-height:0;overflow-y:auto;padding:20px;
+      display:flex;flex-direction:column;gap:10px;
+    ">
+      ${renderSupportMessagesBubbles(state.adminSupportMessages, state.adminSupportMessagesLoading)}
+    </div>
+    ${replyFormHtml}
+  `
+
   const totalUnread = state.adminSupportConversations.reduce((s, c) => s + c.unreadByAdmin, 0)
+
+  const headerHtml = `
+    <div style="
+      display:flex;align-items:center;gap:12px;
+      border-bottom:1px solid rgba(212,165,32,0.28);
+      padding-bottom:14px;margin-bottom:20px;flex-shrink:0;
+    ">
+      <button data-lobby-nav-back="1" style="
+        display:flex;align-items:center;gap:6px;background:none;border:none;
+        cursor:pointer;padding:8px 12px;border-radius:8px;
+        color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;letter-spacing:0.03em;
+      ">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        Назад
+      </button>
+      <div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="font-size:22px;font-weight:900;color:#f8fafc;line-height:1.1;">Поддръжка</div>
+          ${totalUnread > 0 ? `<span style="
+            min-width:22px;height:22px;border-radius:11px;
+            background:#ef4444;
+            display:flex;align-items:center;justify-content:center;
+            font-size:11px;font-weight:900;color:#fff;padding:0 6px;box-sizing:border-box;
+          ">${totalUnread}</span>` : ''}
+        </div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.45);font-weight:700;margin-top:3px;">Запитвания от потребители</div>
+      </div>
+    </div>
+  `
+
+  if (isMobile) {
+    if (state.adminSupportMobileConversationOpen && state.adminSupportSelectedProfileId !== null) {
+      const selectedProfileId = state.adminSupportSelectedProfileId
+      return `
+        <section style="display:flex;flex-direction:column;">
+          <div style="
+            display:flex;align-items:center;justify-content:space-between;gap:10px;
+            padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.08);
+            background:#0a0a0a;
+          ">
+            <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+              <button type="button" data-admin-support-mobile-back="1" style="
+                display:flex;align-items:center;justify-content:center;
+                width:32px;height:32px;flex-shrink:0;
+                background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.72);padding:0;
+              ">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+              </button>
+              ${selectedAvatarHtml}
+              <div style="font-size:15px;font-weight:800;color:#f8fafc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">
+                ${escapeHtml(selectedConv?.displayName ?? '')}
+              </div>
+            </div>
+            <button data-admin-support-delete="${escapeHtml(selectedProfileId)}" style="
+              display:flex;align-items:center;gap:6px;flex-shrink:0;
+              background:rgba(212,165,32,0.10);border:1px solid rgba(212,165,32,0.30);
+              border-radius:7px;padding:6px 10px;cursor:pointer;
+              color:#d4a520;font-size:11px;font-weight:800;
+            ">
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
+              Архивирай
+            </button>
+          </div>
+
+          ${deleteConfirmBlockHtml}
+
+          <div id="support-admin-messages-scroll" style="
+            max-height:52vh;overflow-y:auto;padding:16px;
+            display:flex;flex-direction:column;gap:10px;
+          ">
+            ${renderSupportMessagesBubbles(state.adminSupportMessages, state.adminSupportMessagesLoading)}
+          </div>
+          ${replyFormHtml}
+        </section>
+      `
+    }
+
+    return `
+      <section style="display:flex;flex-direction:column;">
+        ${headerHtml}
+        <div data-admin-support-mobile-list-scroll="1" style="overflow-y:auto;max-height:calc(100vh - 190px);">
+          ${convListHtml}
+        </div>
+      </section>
+    `
+  }
 
   return `
     <section style="height:calc(100vh - 160px);display:flex;flex-direction:column;gap:0;min-height:500px;">
-      <div style="
-        display:flex;align-items:center;gap:12px;
-        border-bottom:1px solid rgba(212,165,32,0.28);
-        padding-bottom:14px;margin-bottom:20px;flex-shrink:0;
-      ">
-        <button data-lobby-nav-back="1" style="
-          display:flex;align-items:center;gap:6px;background:none;border:none;
-          cursor:pointer;padding:8px 12px;border-radius:8px;
-          color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;letter-spacing:0.03em;
-        ">
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
-          Назад
-        </button>
-        <div>
-          <div style="display:flex;align-items:center;gap:10px;">
-            <div style="font-size:22px;font-weight:900;color:#f8fafc;line-height:1.1;">Поддръжка</div>
-            ${totalUnread > 0 ? `<span style="
-              min-width:22px;height:22px;border-radius:11px;
-              background:#ef4444;
-              display:flex;align-items:center;justify-content:center;
-              font-size:11px;font-weight:900;color:#fff;padding:0 6px;box-sizing:border-box;
-            ">${totalUnread}</span>` : ''}
-          </div>
-          <div style="font-size:12px;color:rgba(255,255,255,0.45);font-weight:700;margin-top:3px;">Запитвания от потребители</div>
-        </div>
-      </div>
+      ${headerHtml}
 
       <div style="
         flex:1;min-height:0;display:grid;grid-template-columns:300px 1fr;gap:0;
@@ -7310,6 +7384,13 @@ export function renderLobbyScreen(
   const profileName = state.displayName.trim() || 'Играч'
 
   const savedScrollTop = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')?.scrollTop ?? 0
+  // Отделно от savedScrollTop по-горе: списъкът с admin support запитвания има собствен
+  // scroll контейнер, за да не се презаписва позицията му от detail изгледа на разговора
+  // (двата дела на мобилния admin support екран споделят един и същ root, но не и една скрол зона).
+  const currentAdminSupportMobileListEl = root.querySelector<HTMLElement>('[data-admin-support-mobile-list-scroll="1"]')
+  if (currentAdminSupportMobileListEl) {
+    savedAdminSupportMobileListScrollTop = currentAdminSupportMobileListEl.scrollTop
+  }
   // stakesFirstCardIndex се пази като модулна променлива — не се чете от scrollLeft
   const prevSearchEl = root.querySelector<HTMLInputElement>('[data-lobby-players-search="1"]')
   const wasSearchFocused = prevSearchEl !== null && document.activeElement === prevSearchEl
@@ -9580,6 +9661,11 @@ export function renderLobbyScreen(
     newScrollEl.scrollTop = savedScrollTop
   }
 
+  const newAdminSupportMobileListEl = root.querySelector<HTMLElement>('[data-admin-support-mobile-list-scroll="1"]')
+  if (newAdminSupportMobileListEl && savedAdminSupportMobileListScrollTop > 0) {
+    newAdminSupportMobileListEl.scrollTop = savedAdminSupportMobileListScrollTop
+  }
+
   if (wasSearchFocused) {
     const newSearchEl = root.querySelector<HTMLInputElement>('[data-lobby-players-search="1"]')
     if (newSearchEl) {
@@ -9686,6 +9772,9 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-admin-support-delete-cancel="1"]')
     ?.addEventListener('click', () => options.onAdminSupportDeleteCancel())
+
+  root.querySelector<HTMLButtonElement>('[data-admin-support-mobile-back="1"]')
+    ?.addEventListener('click', () => options.onAdminSupportMobileBack())
 
   root.querySelector<HTMLButtonElement>('[data-support-delete-click="1"]')
     ?.addEventListener('click', () => options.onSupportDeleteClick())

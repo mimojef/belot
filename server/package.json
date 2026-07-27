@@ -40,6 +40,7 @@
     "check:shop-purchase-flow": "tsx scripts/checkShopPurchaseFlow.ts",
     "check:coin-packages-top-offer": "tsx scripts/checkCoinPackagesTopOffer.ts",
     "check:coin-packages-top-offer-badge": "tsx scripts/checkCoinPackagesTopOfferBadge.ts",
+    "check:admin-support-mobile-layout": "tsx scripts/checkAdminSupportMobileLayout.ts",
     "check:reconnect-contract": "tsx scripts/checkReconnectContractDisplay.ts",
     "check:guest-trial-flow": "tsx scripts/checkGuestTrialFlow.ts",
     "check:admin-games-played": "tsx scripts/checkAdminGamesPlayed.ts",

@@ -652,6 +652,7 @@ type InternalLobbyFlowState = {
   adminSupportReplyLoading: boolean
   adminSupportDeleteConfirmProfileId: string | null
   adminSupportDeleteLoading: boolean
+  adminSupportMobileConversationOpen: boolean
   adminGuestContactMessages: GuestContactMessageListItem[]
   adminGuestContactMessagesLoading: boolean
   adminGuestContactMessagesErrorText: string | null
@@ -889,6 +890,7 @@ function createInitialState(): InternalLobbyFlowState {
     adminSupportReplyLoading: false,
     adminSupportDeleteConfirmProfileId: null,
     adminSupportDeleteLoading: false,
+    adminSupportMobileConversationOpen: false,
     adminGuestContactMessages: [],
     adminGuestContactMessagesLoading: false,
     adminGuestContactMessagesErrorText: null,
@@ -2049,6 +2051,7 @@ export function createLobbyFlowController(
       adminSupportReplyLoading: state.adminSupportReplyLoading,
       adminSupportDeleteConfirmProfileId: state.adminSupportDeleteConfirmProfileId,
       adminSupportDeleteLoading: state.adminSupportDeleteLoading,
+      adminSupportMobileConversationOpen: state.adminSupportMobileConversationOpen,
       adminGuestContactMessages: state.adminGuestContactMessages,
       adminGuestContactMessagesLoading: state.adminGuestContactMessagesLoading,
       adminGuestContactMessagesErrorText: state.adminGuestContactMessagesErrorText,
@@ -2695,6 +2698,7 @@ export function createLobbyFlowController(
           state.adminSupportSelectedProfileId = null
           state.adminSupportConversations = []
           state.adminSupportConversationsLoading = true
+          state.adminSupportMobileConversationOpen = false
           render()
           void loadAdminSupportConversations()
           return
@@ -2801,6 +2805,7 @@ export function createLobbyFlowController(
         state.adminSupportSelectedProfileId = profileId
         state.adminSupportMessages = []
         state.adminSupportMessagesLoading = true
+        state.adminSupportMobileConversationOpen = true
         render()
         void (async () => {
           const result = await options.onAdminSupportMessagesLoad?.(profileId)
@@ -2841,6 +2846,10 @@ export function createLobbyFlowController(
       },
       onAdminSupportDeleteCancel: () => {
         state.adminSupportDeleteConfirmProfileId = null
+        render()
+      },
+      onAdminSupportMobileBack: () => {
+        state.adminSupportMobileConversationOpen = false
         render()
       },
       onAdminSupportDeleteConfirm: (profileId) => {
