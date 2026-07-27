@@ -127,7 +127,10 @@ function buildTestDb(dbPath: string): void {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE profiles (
-      profile_id TEXT PRIMARY KEY, account_id TEXT, display_name TEXT NOT NULL,
+      profile_id TEXT PRIMARY KEY, account_id TEXT,
+      profile_kind TEXT NOT NULL DEFAULT 'human' CHECK (profile_kind IN ('human','bot')),
+      username TEXT NULL,
+      display_name TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -161,6 +164,9 @@ function buildTestDb(dbPath: string): void {
       credited_at TEXT, hidden_at TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      stripe_payment_intent_id TEXT, stripe_charge_id TEXT,
+      payment_method_type TEXT, wallet_type TEXT,
+      card_brand TEXT, card_last4 TEXT, card_country TEXT,
       FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE,
       FOREIGN KEY (package_id) REFERENCES coin_packages(package_id) ON DELETE SET NULL
     );
@@ -170,8 +176,10 @@ function buildTestDb(dbPath: string): void {
 
     INSERT INTO accounts VALUES ('acc-1','u1@t.bg','x','player','active',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
     INSERT INTO accounts VALUES ('acc-2','u2@t.bg','x','player','active',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
-    INSERT INTO profiles VALUES ('prof-1','acc-1','Тест 1',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
-    INSERT INTO profiles VALUES ('prof-2','acc-2','Тест 2',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
+    INSERT INTO profiles (profile_id, account_id, display_name, created_at, updated_at)
+      VALUES ('prof-1','acc-1','Тест 1',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
+    INSERT INTO profiles (profile_id, account_id, display_name, created_at, updated_at)
+      VALUES ('prof-2','acc-2','Тест 2',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
 
     -- Отделни пакети за всеки тест → не удряме unique partial index
     INSERT INTO coin_packages (package_id,package_key,title,yellow_coins_amount,price_cents,currency,status,sort_order)
@@ -725,7 +733,8 @@ async function main(): Promise<void> {
       const db2Path = join(tmpDir, 'db17.sqlite')
       buildTestDb(db2Path)
       seedDb(db2Path, `
-        INSERT INTO profiles VALUES ('prof-17','acc-1','Тест 17',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
+        INSERT INTO profiles (profile_id, account_id, display_name, created_at, updated_at)
+          VALUES ('prof-17','acc-1','Тест 17',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
         INSERT INTO profile_wallets VALUES ('prof-17',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
         INSERT INTO coin_packages VALUES ('pkg-17','key-17','Пакет 17','',50000,299,'EUR','active',1,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
         INSERT INTO coin_purchase_ledger
@@ -773,7 +782,8 @@ async function main(): Promise<void> {
       const db3Path = join(tmpDir, 'db18.sqlite')
       buildTestDb(db3Path)
       seedDb(db3Path, `
-        INSERT INTO profiles VALUES ('prof-18','acc-1','Тест 18',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
+        INSERT INTO profiles (profile_id, account_id, display_name, created_at, updated_at)
+          VALUES ('prof-18','acc-1','Тест 18',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
         INSERT INTO profile_wallets VALUES ('prof-18',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
         INSERT INTO coin_packages VALUES ('pkg-18','key-18','Пакет 18','',50000,299,'EUR','active',1,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
         INSERT INTO coin_purchase_ledger
@@ -877,8 +887,10 @@ async function main(): Promise<void> {
       INSERT INTO coin_packages (package_id,package_key,title,yellow_coins_amount,price_cents,currency,status,sort_order)
         VALUES ('pkg-h10','h10','Пакет H10',100000,499,'EUR','active',19);
 
-      INSERT INTO profiles VALUES ('hprof-1','acc-1','Hide Тест 1',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
-      INSERT INTO profiles VALUES ('hprof-2','acc-2','Hide Тест 2',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
+      INSERT INTO profiles (profile_id, account_id, display_name, created_at, updated_at)
+        VALUES ('hprof-1','acc-1','Hide Тест 1',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
+      INSERT INTO profiles (profile_id, account_id, display_name, created_at, updated_at)
+        VALUES ('hprof-2','acc-2','Hide Тест 2',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
       INSERT INTO profile_wallets VALUES ('hprof-1',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
       INSERT INTO profile_wallets VALUES ('hprof-2',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
     `)
