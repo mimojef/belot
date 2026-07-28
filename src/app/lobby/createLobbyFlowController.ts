@@ -609,6 +609,7 @@ type InternalLobbyFlowState = {
   chatLoading: boolean
   chatMessagesLoading: boolean
   chatErrorText: string | null
+  chatDraftByFriendshipId: Record<string, string>
   notificationsOpen: boolean
   pendingFriendRequests: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   missionsPopupOpen: boolean
@@ -868,6 +869,7 @@ function createInitialState(): InternalLobbyFlowState {
     chatLoading: false,
     chatMessagesLoading: false,
     chatErrorText: null,
+    chatDraftByFriendshipId: {},
     notificationsOpen: false,
     pendingFriendRequests: [],
     missionsPopupOpen: false,
@@ -2047,6 +2049,7 @@ export function createLobbyFlowController(
       chatLoading: state.chatLoading,
       chatMessagesLoading: state.chatMessagesLoading,
       chatErrorText: state.chatErrorText,
+      chatDraftByFriendshipId: state.chatDraftByFriendshipId,
       authModalMode: state.authModalMode,
       authErrorText: state.authErrorText,
       guestTrialPopup: state.guestTrialPopup,
@@ -2419,6 +2422,12 @@ export function createLobbyFlowController(
       },
       onChatSubmit: (friendshipId, body) => {
         void sendChatMessage(friendshipId, body)
+      },
+      onChatDraftChange: (friendshipId, draft) => {
+        // Нарочно без render(): чист локален state update, докато потребителят пише.
+        // Браузърът пази фокуса/каретата в живия <input> без нужда от re-render;
+        // state само служи като "чернова backup", ползван при следващ фонов re-render.
+        state.chatDraftByFriendshipId = { ...state.chatDraftByFriendshipId, [friendshipId]: draft }
       },
       onPlayerCardClick: (profile) => {
         const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId

@@ -211,6 +211,10 @@ export type LobbyScreenState = {
   chatLoading: boolean
   chatMessagesLoading: boolean
   chatErrorText: string | null
+  // Незапратен текст, писан от потребителя за всеки разговор поотделно (keyed по friendshipId).
+  // Пази се отделно от chatMessages, за да не се губи при re-render, предизвикан от входящо
+  // съобщение, polling или друго фоново обновяване, докато потребителят пише.
+  chatDraftByFriendshipId: Record<string, string>
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
   guestTrialPopup: GuestTrialPopupState
@@ -396,6 +400,7 @@ export type RenderLobbyScreenOptions = {
   onChatConversationClick: (friendshipId: string) => void
   onChatMarkRead: (friendshipId: string) => void
   onChatSubmit: (friendshipId: string, body: string) => void
+  onChatDraftChange: (friendshipId: string, draft: string) => void
   onPlayerCardClick: (profile: PlayerPublicProfileSnapshot) => void
   onPlayersSearchChange: (query: string) => void
   onPlayersSearchDraftChange: (draft: string) => void
@@ -3618,7 +3623,7 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
             ${state.chatMessagesLoading ? `<div style="margin:auto;color:#d4a520;font-size:14px;font-weight:900;">Зареждане...</div>` : state.chatMessages.length === 0 ? `<div style="margin:auto;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;">Няма съобщения.</div>` : state.chatMessages.map((message) => `<div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:82%;"><div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 9px;font-size:13px;font-weight:800;line-height:1.35;word-break:break-word;">${renderMessageBody(message.body)}</div><div style="margin-top:2px;font-size:10px;font-weight:800;color:rgba(255,255,255,0.38);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div></div>`).join('')}
           </div>
           <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;gap:8px;padding:10px;border-top:1px solid rgba(212,165,32,0.20);">
-            <input name="message" maxlength="1000" autocomplete="off" placeholder="Съобщение..." style="height:40px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 10px;font-size:14px;font-weight:700;outline:none;">
+            <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Съобщение..." style="height:40px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 10px;font-size:14px;font-weight:700;outline:none;">
             <button type="submit" style="height:40px;padding:0 12px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;">Изпрати</button>
           </form>
         `}
@@ -4110,7 +4115,7 @@ function renderChatPanel(state: LobbyScreenState): string {
             `}).join('')}
           </div>
           <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;gap:10px;padding:14px 16px;border-top:1px solid rgba(212,165,32,0.20);">
-            <input name="message" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;">
+            <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;">
             <button type="submit" style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;">Изпрати</button>
           </form>
         `}
@@ -7505,6 +7510,13 @@ export function renderLobbyScreen(
   const wasSearchFocused = prevSearchEl !== null && document.activeElement === prevSearchEl
   const savedSearchCaret = wasSearchFocused ? prevSearchEl.selectionStart : null
 
+  // Личният чат се пренарежда изцяло (root.innerHTML) при всяко входящо съобщение,
+  // periodic refresh или друго фоново обновяване — без това, недовършена чернова
+  // в полето за писане би изчезвала под пръстите на потребителя.
+  const prevChatInputEl = root.querySelector<HTMLInputElement>('[data-lobby-chat-message-input="1"]')
+  const wasChatInputFocused = prevChatInputEl !== null && document.activeElement === prevChatInputEl
+  const savedChatInputCaret = wasChatInputFocused ? prevChatInputEl.selectionStart : null
+
   root.innerHTML = isPhoneLayout ? `
     <div
       ${mobileLayoutAttribute}
@@ -8313,8 +8325,20 @@ export function renderLobbyScreen(
 
       if (friendshipId.length > 0 && body.length > 0) {
         options.onChatSubmit(friendshipId, body)
+        // Изчистваме и локалната чернова веднага (не само DOM полето чрез form.reset()) —
+        // иначе следващ фонов re-render би възстановил вече изпратения текст от state.
+        options.onChatDraftChange(friendshipId, '')
         form.reset()
         form.querySelector<HTMLInputElement>('input[name="message"]')?.focus()
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLInputElement>('[data-lobby-chat-message-input="1"]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const friendshipId = input.closest('form')?.dataset.lobbyChatForm?.trim() ?? ''
+      if (friendshipId.length > 0) {
+        options.onChatDraftChange(friendshipId, input.value)
       }
     })
   })
@@ -9795,6 +9819,16 @@ export function renderLobbyScreen(
       newSearchEl.focus()
       if (savedSearchCaret !== null) {
         newSearchEl.setSelectionRange(savedSearchCaret, savedSearchCaret)
+      }
+    }
+  }
+
+  if (wasChatInputFocused) {
+    const newChatInputEl = root.querySelector<HTMLInputElement>('[data-lobby-chat-message-input="1"]')
+    if (newChatInputEl) {
+      newChatInputEl.focus()
+      if (savedChatInputCaret !== null) {
+        newChatInputEl.setSelectionRange(savedChatInputCaret, savedChatInputCaret)
       }
     }
   }
