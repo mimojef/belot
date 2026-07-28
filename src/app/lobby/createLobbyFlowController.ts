@@ -5122,11 +5122,15 @@ export function createLobbyFlowController(
     const result = await options.onChatSend(friendshipId, body)
 
     if (!result.ok) {
+      // Изпращането е неуспешно — черновата НЕ се пипа, текстът остава в полето,
+      // за да не го изгуби потребителят и да може да опита отново.
       state.chatErrorText = result.message
       render()
       return
     }
 
+    // Изчистваме черновата едва тук — след потвърден успех от сървъра.
+    state.chatDraftByFriendshipId = { ...state.chatDraftByFriendshipId, [friendshipId]: '' }
     state.chatMessages = result.messages
     state.chatErrorText = null
     state.activeChatFriendshipId = friendshipId

@@ -16,9 +16,10 @@
  * Fix: `state.chatDraftByFriendshipId` (createLobbyFlowController.ts) пази
  * недовършения текст per-friendshipId; renderLobbyScreen.ts рендира
  * `value="${...}"` от него И пази focus/caret преди/след innerHTML replace
- * (същия established pattern като players search инпута, viж prevSearchEl/
- * wasSearchFocused). Черновата се изчиства само при явно подаден submit
- * (form.reset() + onChatDraftChange(friendshipId, '') в самия submit handler).
+ * (същия established pattern като players search инпута, виж prevSearchEl/
+ * wasSearchFocused). Черновата се изчиства САМО след потвърден успех от
+ * сървъра (в sendChatMessage, след `result.ok`) — submit handler-ът вече не
+ * чисти полето оптимистично, за да не изгуби текста при неуспешно изпращане.
  *
  * Реален браузър (Playwright) + реален production код (createLobbyFlowController
  * + renderLobbyScreen), зареден през Vite dev server (без build, без jsdom —
@@ -33,6 +34,8 @@
  *  [4]  Чернова в разговор А оцелява при входящо съобщение в РАЗЛИЧЕН разговор Б
  *       (unread badge update / несвързано фоново обновяване)
  *  [5]  Успешно изпращане изчиства полето (и само тогава)
+ *  [5b] Неуспешно изпращане (сървърна грешка) НЕ изчиства полето — текстът
+ *       остава за retry, черновата не се губи преди резултатът да е известен
  *  [6]  Смяна на разговор и връщане пази отделните чернови per-conversation
  *       (не изтича между разговори, не се смесва с чужд разговор)
  *  [7]  Изпратеното съобщение отива в правилния разговор (без cross-talk)
@@ -170,6 +173,24 @@ async function runScenario(page: Page, label: string): Promise<void> {
     const value = await input.inputValue()
     assert(value === '', `Полето трябваше да е празно след изпращане, а е "${value}"`)
   })
+
+  // ─── [5b] Неуспешно изпращане НЕ изчиства полето (текстът остава за retry) ──
+  await check(`${label} [5b] Неуспешно изпращане не изчиства полето`, async () => {
+    const failingDraft = 'Този текст не трябва да се изгуби __FAIL_SEND__'
+    await input.click()
+    await input.type(failingDraft, { delay: 5 })
+    await page.locator('[data-lobby-chat-form] button[type="submit"]').click()
+    // Изчакваме sendChatMessage(ok:false) да приключи и да рендира грешката —
+    // чак тогава е сигурно, че евентуално (грешно) изчистване вече би се случило.
+    await page.waitForFunction(
+      () => document.body.textContent?.includes('Симулирана грешка при изпращане.') ?? false,
+      undefined,
+      { timeout: 5000 },
+    )
+    const value = await page.locator(CHAT_INPUT_SELECTOR).inputValue()
+    assert(value === failingDraft, `Полето трябваше да запази "${failingDraft}" при неуспех, а е "${value}"`)
+  })
+  await page.locator(CHAT_INPUT_SELECTOR).fill('')
 
   // ─── [6]-[7] Смяна на разговор пази отделни чернови, без cross-talk ──────
   const draftA2 = 'Втора чернова за Anna'

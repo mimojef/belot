@@ -8324,12 +8324,10 @@ export function renderLobbyScreen(
       const body = String(data.get('message') ?? '').trim()
 
       if (friendshipId.length > 0 && body.length > 0) {
+        // Не чистим полето/черновата тук — резултатът от изпращането все още не е
+        // известен. Черновата се изчиства едва след потвърден успех от сървъра
+        // (виж sendChatMessage в createLobbyFlowController.ts); при неуспех текстът остава.
         options.onChatSubmit(friendshipId, body)
-        // Изчистваме и локалната чернова веднага (не само DOM полето чрез form.reset()) —
-        // иначе следващ фонов re-render би възстановил вече изпратения текст от state.
-        options.onChatDraftChange(friendshipId, '')
-        form.reset()
-        form.querySelector<HTMLInputElement>('input[name="message"]')?.focus()
       }
     })
   })

@@ -75,6 +75,11 @@ const controller = createLobbyFlowController({
     messages: messagesByFriendship[friendshipId] ?? [],
   }),
   onChatSend: async (friendshipId: string, body: string) => {
+    // Тестова кука за симулиране на неуспешно изпращане (мрежова/сървърна грешка) —
+    // без реален backend, само маркерен string в тялото на съобщението.
+    if (body.includes('__FAIL_SEND__')) {
+      return { ok: false, message: 'Симулирана грешка при изпращане.' }
+    }
     const message: ChatMessageSnapshot = {
       messageId: `own-${Date.now()}-${Math.random()}`,
       friendshipId,
