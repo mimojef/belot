@@ -2603,6 +2603,7 @@ export function renderBottomSection(
   unclaimedMissionsCount: number,
   hasUnclaimedDailyReward = false,
   useMobileLayout = false,
+  privateRoomsCount = 0,
 ): string {
   const footerDecorHtml = useMobileLayout
     ? ''
@@ -2745,12 +2746,14 @@ export function renderBottomSection(
         padding:16px;
         display:flex; align-items:center; gap:14px;
         cursor:pointer;
+        position:relative;
         min-height:137px;
         transition:border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
       "
       onmouseenter="this.style.borderColor='rgba(167,139,250,0.96)';this.style.boxShadow='inset 0 0 0 1px rgba(167,139,250,0.96)';this.style.background='rgba(167,139,250,0.05)'"
       onmouseleave="this.style.borderColor='rgba(167,139,250,0.78)';this.style.boxShadow='none';this.style.background='#000000'"
       >
+        ${renderQuickActionBadge(privateRoomsCount)}
         <img src="/assets/lobby/icon-private-table.png" alt="" style="width:76px; height:75px; display:block; object-fit:contain; flex-shrink:0;">
         <div style="flex:1; min-width:0;">
           <div style="font-size:15px; font-weight:800; color:#a78bfa; text-transform:uppercase; letter-spacing:0.05em;">Частни маси</div>
@@ -2932,6 +2935,10 @@ export function renderBottomSection(
       </a>
     </div>
   `
+}
+
+export function getPrivateRoomsBadgeCount(privateRooms: readonly PrivateRoomSnapshot[]): number {
+  return privateRooms.length
 }
 
 function renderQuickActionBadge(count: number): string {
@@ -3302,7 +3309,7 @@ export function renderMobileOffersSection(lobbyPackages: CoinPackageSnapshot[], 
   `
 }
 
-function renderMobileQuickActions(unclaimedMissionsCount: number, hasUnclaimedDailyReward: boolean): string {
+function renderMobileQuickActions(unclaimedMissionsCount: number, hasUnclaimedDailyReward: boolean, privateRoomsCount: number): string {
   return `
     <style>
       [data-lobby-private-rooms-card]:hover { border-color:rgba(167,139,250,0.96) !important; box-shadow:inset 0 0 0 1px rgba(167,139,250,0.96) !important; background:rgba(167,139,250,0.05) !important; }
@@ -3316,6 +3323,7 @@ function renderMobileQuickActions(unclaimedMissionsCount: number, hasUnclaimedDa
     </style>
     <section style="margin:14px 12px 22px;display:grid;gap:10px;">
       <button type="button" data-lobby-private-rooms-card="1" style="${mobileActionCardStyle('#a78bfa', 'rgba(167,139,250,0.78)')}">
+        ${renderQuickActionBadge(privateRoomsCount)}
         <img src="/assets/lobby/icon-private-table.png" alt="" style="${mobileActionIconStyle()}">
         <span style="min-width:0;display:grid;gap:3px;">
           <span>Частни маси</span>
@@ -3905,7 +3913,7 @@ function renderMobileLobbyScreenContent(
       ${renderMobileLobbyChatSection(state)}
       ${renderMobileStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, state.profile.profileId === null)}
       ${renderMobileOffersSection(state.lobbyPackages, state.profile.profileId !== null)}
-      ${renderMobileQuickActions(state.dailyMissionsUnclaimedCount, getUnclaimedDailyRewardsBadgeCount(state) > 0)}
+      ${renderMobileQuickActions(state.dailyMissionsUnclaimedCount, getUnclaimedDailyRewardsBadgeCount(state) > 0, getPrivateRoomsBadgeCount(state.privateRooms))}
     </main>
   `
 }
@@ -7544,6 +7552,7 @@ export function renderLobbyScreen(
   const canStartSearch = state.isConnected && !state.isSearching
   const isPhoneLayout = isPhoneLayoutViewport()
   const mobileLayoutAttribute = isPhoneLayout ? 'data-mobile-layout="1"' : ''
+  const privateRoomsCount = getPrivateRoomsBadgeCount(state.privateRooms)
   const profileName = state.displayName.trim() || 'Играч'
 
   const savedScrollTop = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')?.scrollTop ?? 0
@@ -7785,6 +7794,7 @@ export function renderLobbyScreen(
                 state.dailyMissionsUnclaimedCount,
                 getUnclaimedDailyRewardsBadgeCount(state) > 0,
                 isPhoneLayout,
+                privateRoomsCount,
               )}
             `}
           ${renderFooter()}
