@@ -16,6 +16,8 @@
     "check:bootstrap-recovery": "npx tsx scripts/checkBootstrapRecovery.ts",
     "check:consent-analytics": "npx tsx scripts/checkConsentAnalytics.ts",
     "check:chat-draft-preserved": "npx tsx scripts/checkChatDraftPreserved.ts",
+    "check:private-room-created-notification": "npx tsx scripts/checkPrivateRoomCreatedNotification.ts",
+    "check:notification-sound-assignments": "npx tsx scripts/checkNotificationSoundAssignments.ts",
     "deploy:frontend": "VERIFY_BASE_URL=https://www.pika.bg bash scripts/deployFrontendAtomic.sh"
   },
   "devDependencies": {

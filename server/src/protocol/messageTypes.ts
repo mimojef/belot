@@ -593,6 +593,20 @@ export type PrivateRoomFullMessage = {
   stake: MatchStake
 }
 
+// Broadcast-ва се до всички допустими онлайн потребители (без създателя) при
+// успешно създаване на нова частна маса. `notificationId` = id-то на самата
+// частна стая (уникално per creation, стабилно при redelivery/reconnect —
+// клиентът го ползва за dedup). `recipientInActiveGame` се изчислява
+// персонализирано за всеки получател на сървъра (isProfileInActiveGame),
+// клиентът никога не решава сам този статус.
+export type PrivateRoomCreatedNoticeMessage = {
+  type: 'private_room_created_notice'
+  notificationId: string
+  creatorDisplayName: string
+  creatorAvatarUrl: string | null
+  recipientInActiveGame: boolean
+}
+
 // --- Client messages for private rooms ---
 // (extends ClientMessage union below)
 
@@ -632,6 +646,7 @@ export type ServerMessage =
   | PrivateRoomMemberLeftMessage
   | PrivateRoomClosedMessage
   | PrivateRoomFullMessage
+  | PrivateRoomCreatedNoticeMessage
   | ProfileLikedMessage
   | FriendRequestReceivedMessage
   | FriendRequestCancelledMessage

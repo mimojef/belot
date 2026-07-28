@@ -181,7 +181,7 @@ export function createProfileLikeNotification(options: {
   }
 
   function playSound(): void {
-    const audio = new Audio('/audio/ui/player-seat-fill.mp3')
+    const audio = new Audio('/audio/Notifications/notification-2.mp3')
     audio.volume = 0.6
     void audio.play().catch(() => {/* autoplay policy */})
   }

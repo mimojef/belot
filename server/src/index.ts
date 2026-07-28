@@ -1082,6 +1082,27 @@ function broadcastPrivateRoomsListToLobbyConnections(): void {
   }
 }
 
+function broadcastPrivateRoomCreatedNotice(input: {
+  creatorProfileId: string
+  creatorDisplayName: string
+  creatorAvatarUrl: string | null
+  roomId: string
+}): void {
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.status !== 'connected' || conn.profileId === null || conn.profileId === input.creatorProfileId) {
+      continue
+    }
+
+    safeSendToConnection(conn.id, {
+      type: 'private_room_created_notice',
+      notificationId: input.roomId,
+      creatorDisplayName: input.creatorDisplayName,
+      creatorAvatarUrl: input.creatorAvatarUrl,
+      recipientInActiveGame: isProfileInActiveGame(conn.profileId),
+    })
+  }
+}
+
 function sendPrivateRoomUpdateToMembers(room: PrivateRoom): void {
   const snapshot = buildPrivateRoomSnapshot(room)
   for (const member of room.members) {
@@ -8431,6 +8452,13 @@ wsServer.on('connection', (socket, request) => {
         safeSendToConnection(connection.id, {
           type: 'private_room_updated',
           room: buildPrivateRoomSnapshot(createResult.room),
+        })
+
+        broadcastPrivateRoomCreatedNotice({
+          creatorProfileId: latestConnection.profileId,
+          creatorDisplayName: publicProfile.displayName,
+          creatorAvatarUrl: publicProfile.avatarUrl,
+          roomId: createResult.room.id,
         })
         return
       }

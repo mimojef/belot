@@ -482,6 +482,7 @@ export type LobbyFlowController = {
   getFriendshipActionForProfile: (profileId: string) => import('../../ui/overlays/renderPlayerProfilePopup').PlayerProfileFriendshipAction | null
   handleServerMessage: (message: ServerMessage) => boolean
   navigateToShop: (noticeText: string | null) => void
+  navigateToPrivateRooms: () => void
   getPwaUpdateSafetySnapshot: () => {
     isSearching: boolean
     hasPrivateRoomInvite: boolean
@@ -7003,6 +7004,13 @@ export function createLobbyFlowController(
     },
     navigateAdminPaymentDetail: (purchaseId: string) => {
       showAdminPaymentDetailPanel(purchaseId)
+    },
+    navigateToPrivateRooms: () => {
+      state.currentScreen = 'private-rooms'
+      state.privateRoomInfoText = null
+      state.privateRoomsTab = 'all'
+      options.onPrivateRoomsOpen?.()
+      render()
     },
     navigateToShop: (noticeText: string | null) => {
       void showShopPanel().then(() => {

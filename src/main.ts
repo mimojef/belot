@@ -71,6 +71,7 @@ import { createProfileLikeNotification } from './ui/notifications/profileLikeNot
 import { createFriendRequestNotification } from './ui/notifications/friendRequestNotification'
 import { createPartnerRatingNotification } from './ui/notifications/partnerRatingNotification'
 import { createChatMessageNotification } from './ui/notifications/chatMessageNotification'
+import { createPrivateRoomCreatedNotification } from './ui/notifications/privateRoomCreatedNotification'
 import { createVisitorPageViewTracker } from './app/visitors/createVisitorPageViewTracker'
 import { mountConsentUi } from './app/consent/consentUi'
 import { initializeAnalytics } from './app/analytics/initializeAnalytics'
@@ -159,6 +160,17 @@ const chatMessageNotification = createChatMessageNotification({
   isInGame: () => activeRoom.hasActiveRoom(),
   onView: (friendshipId) => {
     lobby?.openChatWithFriend(friendshipId)
+  },
+})
+
+const privateRoomCreatedNotifContainer = document.createElement('div')
+privateRoomCreatedNotifContainer.id = 'global-private-room-created-notifications'
+document.body.appendChild(privateRoomCreatedNotifContainer)
+
+const privateRoomCreatedNotification = createPrivateRoomCreatedNotification({
+  container: privateRoomCreatedNotifContainer,
+  onEnterPrivateRooms: () => {
+    lobby?.navigateToPrivateRooms()
   },
 })
 
@@ -3807,6 +3819,16 @@ client = createGameServerClient({
       friendRequestNotification.showAccepted({
         fromDisplayName: message.fromDisplayName,
         fromAvatarUrl: message.fromAvatarUrl,
+      })
+      return
+    }
+
+    if (message.type === 'private_room_created_notice') {
+      privateRoomCreatedNotification.handleIncoming({
+        notificationId: message.notificationId,
+        creatorDisplayName: message.creatorDisplayName,
+        creatorAvatarUrl: message.creatorAvatarUrl,
+        recipientInActiveGame: message.recipientInActiveGame,
       })
       return
     }

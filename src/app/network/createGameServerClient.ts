@@ -939,6 +939,14 @@ export type PrivateRoomFullMessage = {
   stake: MatchStake
 }
 
+export type PrivateRoomCreatedNoticeMessage = {
+  type: 'private_room_created_notice'
+  notificationId: string
+  creatorDisplayName: string
+  creatorAvatarUrl: string | null
+  recipientInActiveGame: boolean
+}
+
 export type ProfileLikedMessage = {
   type: 'profile_liked'
   fromProfileId: string
@@ -1093,6 +1101,7 @@ export type ServerMessage =
   | PrivateRoomMemberLeftMessage
   | PrivateRoomClosedMessage
   | PrivateRoomFullMessage
+  | PrivateRoomCreatedNoticeMessage
   | ProfileLikedMessage
   | FriendRequestReceivedMessage
   | FriendRequestCancelledMessage
