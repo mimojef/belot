@@ -6061,9 +6061,9 @@ async function handleChatRequest(
     }
 
     const recipientProfileId = result.conversation.friend.profileId
-    const newMessageId = result.messages[result.messages.length - 1]?.messageId ?? null
+    const newMessageId = result.newMessage.messageId
 
-    if (recipientProfileId !== null && newMessageId !== null) {
+    if (recipientProfileId !== null) {
       sendChatNotificationToProfile({
         recipientProfileId,
         friendshipId,
@@ -6077,6 +6077,7 @@ async function handleChatRequest(
       ok: true,
       conversation: result.conversation,
       messages: result.messages,
+      newMessage: result.newMessage,
     })
     return true
   }

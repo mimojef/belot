@@ -327,6 +327,7 @@ type ChatMessagesResponse = {
   ok: boolean
   messages?: ChatMessageSnapshot[]
   conversation?: ChatConversationSnapshot
+  newMessage?: ChatMessageSnapshot
   message?: string
 }
 
@@ -1947,6 +1948,7 @@ async function sendChatMessage(friendshipId: string, body: string): Promise<
       ok: true
       conversation: ChatConversationSnapshot
       messages: ChatMessageSnapshot[]
+      newMessage?: ChatMessageSnapshot
     }
   | { ok: false; message: string }
 > {
@@ -1980,6 +1982,7 @@ async function sendChatMessage(friendshipId: string, body: string): Promise<
       ok: true,
       conversation: data.conversation,
       messages: data.messages,
+      newMessage: data.newMessage,
     }
   } catch {
     return {

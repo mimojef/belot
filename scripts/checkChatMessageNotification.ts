@@ -738,7 +738,7 @@ await check('[B9] chatStore.isFirstUnreadMessage проверява unread count
 
 await check('[B10] messageId се разпространява от sendMessage резултата до WS payload-а (стабилен dedup key)', () => {
   const block = extractBlock(serverSrc, `if (messagesMatch !== null && req.method === 'POST') {`, 'chat POST handler', '\n  }')
-  assert(block.includes('result.messages[result.messages.length - 1]?.messageId'), 'newMessageId трябва да идва от последното съобщение в резултата')
+  assert(block.includes('result.newMessage.messageId'), 'newMessageId трябва да идва от каноничния insert snapshot, не от ограничения history резултат')
   assert(block.includes('messageId: newMessageId'), 'sendChatNotificationToProfile трябва да получи messageId')
 
   const fn = extractFunctionBody(serverSrc, 'function sendChatNotificationToProfile(input: {', 'sendChatNotificationToProfile')

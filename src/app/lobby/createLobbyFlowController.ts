@@ -319,6 +319,7 @@ export type CreateLobbyFlowControllerOptions = {
         ok: true
         conversation: ChatConversationSnapshot
         messages: ChatMessageSnapshot[]
+        newMessage?: ChatMessageSnapshot
       }
     | { ok: false; message: string }
   >

@@ -8,6 +8,9 @@ import { dbDateToUtc } from './dbDate.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
+export const PERSONAL_CHAT_HISTORY_LIMIT = 100
+export const PERSONAL_CHAT_STORAGE_LIMIT = 500
+
 export type ChatMessageSnapshot = {
   messageId: string
   friendshipId: string
@@ -42,6 +45,7 @@ export type ChatStore = {
         ok: true
         conversation: ChatConversationSnapshot
         messages: ChatMessageSnapshot[]
+        newMessage: ChatMessageSnapshot
       }
     | { ok: false; message: string }
   markConversationRead: (profileId: ProfileId, friendshipId: string) => void
@@ -57,6 +61,7 @@ type FriendshipRow = {
 }
 
 type ChatMessageRow = {
+  rowid: number
   message_id: string
   friendship_id: string
   sender_profile_id: string
@@ -151,7 +156,7 @@ export async function createChatStore(
     FROM friend_chat_messages
     WHERE friendship_id = ?
       AND deleted_at IS NULL
-    ORDER BY created_at DESC
+    ORDER BY created_at DESC, rowid DESC
     LIMIT 1;
   `)
 
@@ -162,11 +167,34 @@ export async function createChatStore(
       sender_profile_id,
       body,
       created_at
+    FROM (
+      SELECT
+        rowid,
+        message_id,
+        friendship_id,
+        sender_profile_id,
+        body,
+        created_at
+      FROM friend_chat_messages
+      WHERE friendship_id = ?
+        AND deleted_at IS NULL
+      ORDER BY created_at DESC, rowid DESC
+      LIMIT ?
+    )
+    ORDER BY created_at ASC, rowid ASC;
+  `)
+
+  const selectInsertedMessageStatement = database.prepare(`
+    SELECT
+      rowid,
+      message_id,
+      friendship_id,
+      sender_profile_id,
+      body,
+      created_at
     FROM friend_chat_messages
-    WHERE friendship_id = ?
-      AND deleted_at IS NULL
-    ORDER BY created_at ASC
-    LIMIT 100;
+    WHERE message_id = ?
+    LIMIT 1;
   `)
 
   const insertMessageStatement = database.prepare(`
@@ -206,6 +234,18 @@ export async function createChatStore(
     VALUES (?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT (profile_id, friendship_id)
     DO UPDATE SET last_read_at = CURRENT_TIMESTAMP;
+  `)
+
+  const pruneOldMessagesStatement = database.prepare(`
+    DELETE FROM friend_chat_messages
+    WHERE friendship_id = ?
+      AND rowid IN (
+        SELECT rowid
+        FROM friend_chat_messages
+        WHERE friendship_id = ?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT -1 OFFSET ?
+      );
   `)
 
   function getUnreadCount(profileId: ProfileId, friendshipId: string): number {
@@ -292,7 +332,10 @@ export async function createChatStore(
       }
     }
 
-    const rows = selectMessagesStatement.all(friendshipId) as ChatMessageRow[]
+    const rows = selectMessagesStatement.all(
+      friendshipId,
+      PERSONAL_CHAT_HISTORY_LIMIT,
+    ) as ChatMessageRow[]
 
     return {
       ok: true,
@@ -309,6 +352,7 @@ export async function createChatStore(
         ok: true
         conversation: ChatConversationSnapshot
         messages: ChatMessageSnapshot[]
+        newMessage: ChatMessageSnapshot
       }
     | { ok: false; message: string } {
     const friendship = getAcceptedFriendship(profileId, friendshipId)
@@ -329,14 +373,42 @@ export async function createChatStore(
       }
     }
 
-    insertMessageStatement.run(
-      randomUUID(),
-      friendshipId,
-      profileId,
-      normalizedBody,
-    )
-    touchFriendshipStatement.run(friendshipId)
-    upsertReadStatement.run(profileId, friendshipId)
+    const messageId = randomUUID()
+    let insertedRow: ChatMessageRow | undefined
+
+    database.exec('BEGIN IMMEDIATE;')
+
+    try {
+      insertMessageStatement.run(
+        messageId,
+        friendshipId,
+        profileId,
+        normalizedBody,
+      )
+      insertedRow = selectInsertedMessageStatement.get(messageId) as ChatMessageRow | undefined
+      touchFriendshipStatement.run(friendshipId)
+      upsertReadStatement.run(profileId, friendshipId)
+      pruneOldMessagesStatement.run(
+        friendshipId,
+        friendshipId,
+        PERSONAL_CHAT_STORAGE_LIMIT,
+      )
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // Keep the original write failure visible to the caller.
+      }
+      throw error
+    }
+
+    if (insertedRow === undefined) {
+      return {
+        ok: false,
+        message: 'РЎСЉРѕР±С‰РµРЅРёРµС‚Рѕ РЅРµ Р±РµС€Рµ Р·Р°РїРёСЃР°РЅРѕ.',
+      }
+    }
 
     const conversation = createConversationSnapshot(friendship, profileId)
     const messagesResult = listMessages(profileId, friendshipId)
@@ -352,6 +424,7 @@ export async function createChatStore(
       ok: true,
       conversation,
       messages: messagesResult.messages,
+      newMessage: toMessageSnapshot(insertedRow, profileId),
     }
   }
 
