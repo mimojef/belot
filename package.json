@@ -18,6 +18,7 @@
     "check:chat-draft-preserved": "npx tsx scripts/checkChatDraftPreserved.ts",
     "check:private-room-created-notification": "npx tsx scripts/checkPrivateRoomCreatedNotification.ts",
     "check:notification-sound-assignments": "npx tsx scripts/checkNotificationSoundAssignments.ts",
+    "check:private-room-mobile-responsive": "npx tsx scripts/checkPrivateRoomMobileResponsive.ts",
     "deploy:frontend": "VERIFY_BASE_URL=https://www.pika.bg bash scripts/deployFrontendAtomic.sh"
   },
   "devDependencies": {

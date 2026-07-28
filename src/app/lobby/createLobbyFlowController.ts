@@ -1228,6 +1228,7 @@ export function createLobbyFlowController(
   }
 
   let _renderTimerId: ReturnType<typeof setTimeout> | null = null
+  let _privateRoomWaitingViewportListenerAttached = false
 
   function shouldSuppressLobbyRender(): boolean {
     return (options.suppressRendering === true) || (options.getIsInGame?.() ?? false)
@@ -5842,6 +5843,24 @@ export function createLobbyFlowController(
       state.privateRoomWaitingChatDraft = chatInput.value
     })
 
+    // Мобилна клавиатура: при focus и при промяна на visualViewport (напр.
+    // отваряне/затваряне на клавиатурата), държим полето за писане видимо.
+    // Native browser "scroll focused element into view" поведение не винаги
+    // се задейства надеждно само от resize-а — затова е изрично тук.
+    chatInput?.addEventListener('focus', () => {
+      chatInput.scrollIntoView({ block: 'nearest' })
+    })
+
+    if (typeof window !== 'undefined' && window.visualViewport && !_privateRoomWaitingViewportListenerAttached) {
+      _privateRoomWaitingViewportListenerAttached = true
+      window.visualViewport.addEventListener('resize', () => {
+        const activeInput = options.root.querySelector<HTMLInputElement>('[data-private-waiting-chat-input="1"]')
+        if (activeInput !== null && document.activeElement === activeInput) {
+          activeInput.scrollIntoView({ block: 'nearest' })
+        }
+      })
+    }
+
     chatForm?.addEventListener('submit', (event) => {
       event.preventDefault()
 
@@ -6398,7 +6417,16 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'error') {
-      if (state.currentScreen === 'private-rooms') {
+      if (state.currentScreen === 'private-rooms' || state.currentScreen === 'private-room-waiting') {
+        // The waiting room bypasses normal lobby chrome (same as
+        // matchmaking-room), so it never displays the generic
+        // state.errorText toast — without this branch, a server-side
+        // rejection (e.g. a race-lost "Запълни с ботове" attempt) would be
+        // silently swallowed instead of shown in the waiting room's own
+        // info banner.
+        if (state.currentScreen === 'private-room-waiting') {
+          state.privateRoomWaitingFillBotsLoading = false
+        }
         state.privateRoomInfoText = message.message
       } else {
         state.errorText = message.message
@@ -6644,6 +6672,9 @@ export function createLobbyFlowController(
         state.privateRoomWaitingChatErrorText = null
         state.privateRoomWaitingFillBotsConfirmOpen = false
         state.privateRoomWaitingLeaveConfirmOpen = false
+        // Avoid carrying a stale banner (e.g. "Домакинът затвори масата.")
+        // from a previous room into a freshly (re)joined one.
+        state.privateRoomInfoText = null
       }
       render()
       return true

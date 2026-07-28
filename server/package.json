@@ -13,6 +13,7 @@
     "check:private-room-bot-fill-gating": "tsx scripts/checkPrivateRoomBotFillGating.ts",
     "check:private-room-waiting-chat": "tsx scripts/checkPrivateRoomWaitingChat.ts",
     "check:private-table-end-game-origin": "tsx scripts/checkPrivateTableEndGameOrigin.ts",
+    "check:private-room-ws-round-trip": "tsx scripts/checkPrivateRoomWebSocketRoundTrip.ts --server-root=.",
     "check:voluntary-leave-chat-gate": "tsx scripts/checkVoluntaryLeaveChatGate.ts --server-root=.",
     "check:voluntary-leave-snapshot-persistence": "tsx scripts/checkVoluntaryLeaveSnapshotPersistence.ts --server-root=.",
     "check:monitoring-history": "tsx scripts/checkMonitoringHistory.ts",
