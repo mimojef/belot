@@ -143,6 +143,23 @@ export type ClientMessage =
       type: 'request_private_rooms_list'
     }
   | {
+      type: 'fill_private_room_with_bots'
+    }
+  | {
+      type: 'subscribe_private_room_chat'
+      privateRoomId: string
+    }
+  | {
+      type: 'unsubscribe_private_room_chat'
+      privateRoomId: string
+    }
+  | {
+      type: 'send_private_room_chat_message'
+      privateRoomId: string
+      body: string
+      requestId?: string
+    }
+  | {
       type: 'subscribe_lobby_chat'
     }
   | {
@@ -340,6 +357,7 @@ export type RoomSnapshotMessage = {
   game?: RoomGameSnapshot | null
   stakeAmount: number | null
   isGuestTrial: boolean
+  isPrivateTableOrigin: boolean
 }
 
 export type ConnectedMessage = {
@@ -607,6 +625,47 @@ export type PrivateRoomCreatedNoticeMessage = {
   recipientInActiveGame: boolean
 }
 
+// --- Private room waiting-room chat (изолиран, ефимерен чат за живота на
+// чакалнята — виж privateRoomChatStore.ts. Не се бърка с lobby/friend/game
+// chat.) ---
+
+export type PrivateRoomChatMessageSnapshot = {
+  seq: number
+  messageId: string
+  senderProfileId: string | null
+  senderDisplayName: string
+  body: string
+  createdAt: number
+}
+
+export type PrivateRoomChatHistoryMessage = {
+  type: 'private_room_chat_history'
+  privateRoomId: string
+  messages: PrivateRoomChatMessageSnapshot[]
+}
+
+export type PrivateRoomChatMessageReceivedMessage = PrivateRoomChatMessageSnapshot & {
+  type: 'private_room_chat_message'
+  privateRoomId: string
+  requestId?: string
+}
+
+export type PrivateRoomChatErrorCode =
+  | 'not_authenticated'
+  | 'not_member'
+  | 'empty_body'
+  | 'body_too_long'
+  | 'invalid_body'
+  | 'rate_limited'
+  | 'duplicate_message'
+
+export type PrivateRoomChatErrorMessage = {
+  type: 'private_room_chat_error'
+  code: PrivateRoomChatErrorCode
+  message: string
+  requestId?: string
+}
+
 // --- Client messages for private rooms ---
 // (extends ClientMessage union below)
 
@@ -647,6 +706,9 @@ export type ServerMessage =
   | PrivateRoomClosedMessage
   | PrivateRoomFullMessage
   | PrivateRoomCreatedNoticeMessage
+  | PrivateRoomChatHistoryMessage
+  | PrivateRoomChatMessageReceivedMessage
+  | PrivateRoomChatErrorMessage
   | ProfileLikedMessage
   | FriendRequestReceivedMessage
   | FriendRequestCancelledMessage

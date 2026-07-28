@@ -7,6 +7,7 @@ import {
   renderMatchmakingRoomScreen,
   type MatchmakingRoomPlayer,
 } from './renderMatchmakingRoomScreen'
+import { renderPrivateRoomWaitingScreen } from './renderPrivateRoomWaitingScreen'
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
   renderLobbyScreen,
@@ -48,6 +49,7 @@ import type {
   MissionTemplateSnapshot,
   PlayerMissionProgressSnapshot,
   PlayerPublicProfileSnapshot,
+  PrivateRoomChatMessageSnapshot,
   PrivateRoomSnapshot,
   RoomSeatSnapshot,
   ServerMessage,
@@ -72,6 +74,7 @@ export type LobbyFlowScreen =
   | 'contact'
   | 'matchmaking-room'
   | 'private-rooms'
+  | 'private-room-waiting'
   | 'support'
   | 'guest-contact-messages'
   | 'rules'
@@ -359,6 +362,10 @@ export type CreateLobbyFlowControllerOptions = {
   onPrivateRoomInvite?: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
   onCancelPrivateRoomInvite?: (inviteId: string) => void
   onPrivateRoomInviteRespond?: (inviteId: string, accept: boolean) => void
+  onPrivateRoomFillWithBots?: () => void
+  onPrivateRoomChatSubscribe?: (privateRoomId: string) => void
+  onPrivateRoomChatUnsubscribe?: (privateRoomId: string) => void
+  onPrivateRoomChatSend?: (privateRoomId: string, body: string, requestId?: string) => void
   onSupportMessagesLoad?: () => Promise<
     | { ok: true; messages: SupportMessageSnapshot[] }
     | { ok: false; message: string }
@@ -671,6 +678,15 @@ type InternalLobbyFlowState = {
     expiresAt: number
   }>
   privateRoomInfoText: string | null
+  privateRoomWaitingChatMessages: PrivateRoomChatMessageSnapshot[]
+  privateRoomWaitingChatSubscribedRoomId: string | null
+  privateRoomWaitingChatDraft: string
+  privateRoomWaitingChatSending: boolean
+  privateRoomWaitingChatPendingRequestId: string | null
+  privateRoomWaitingChatErrorText: string | null
+  privateRoomWaitingLeaveConfirmOpen: boolean
+  privateRoomWaitingFillBotsConfirmOpen: boolean
+  privateRoomWaitingFillBotsLoading: boolean
   leavePrivateRoomForMatchmakingOpen: boolean
   inviteFriendsPopupOpen: boolean
   blockedPlayersPopupOpen: boolean
@@ -922,6 +938,15 @@ function createInitialState(): InternalLobbyFlowState {
     privateRoomInvite: null,
     privateRoomInviteQueue: [],
     privateRoomInfoText: null,
+    privateRoomWaitingChatMessages: [],
+    privateRoomWaitingChatSubscribedRoomId: null,
+    privateRoomWaitingChatDraft: '',
+    privateRoomWaitingChatSending: false,
+    privateRoomWaitingChatPendingRequestId: null,
+    privateRoomWaitingChatErrorText: null,
+    privateRoomWaitingLeaveConfirmOpen: false,
+    privateRoomWaitingFillBotsConfirmOpen: false,
+    privateRoomWaitingFillBotsLoading: false,
     leavePrivateRoomForMatchmakingOpen: false,
     inviteFriendsPopupOpen: false,
     blockedPlayersPopupOpen: false,
@@ -5701,6 +5726,160 @@ export function createLobbyFlowController(
     startLiveCountdownLoop()
   }
 
+  // Чат subscription lifecycle за чакалнята на частна маса — огледало на
+  // reconcileLobbyChatSubscription(), но key-нато по room id вместо по
+  // фиксиран екран, защото местната чакалня може да смени room id-то си
+  // (напр. re-join в друга маса без пълен logout).
+  function reconcilePrivateRoomWaitingChatSubscription(): void {
+    const targetRoomId = state.currentScreen === 'private-room-waiting' ? (state.myPrivateRoom?.id ?? null) : null
+
+    if (targetRoomId === state.privateRoomWaitingChatSubscribedRoomId) {
+      return
+    }
+
+    if (state.privateRoomWaitingChatSubscribedRoomId !== null) {
+      options.onPrivateRoomChatUnsubscribe?.(state.privateRoomWaitingChatSubscribedRoomId)
+    }
+
+    state.privateRoomWaitingChatSubscribedRoomId = targetRoomId
+
+    if (targetRoomId !== null) {
+      options.onPrivateRoomChatSubscribe?.(targetRoomId)
+    }
+  }
+
+  function renderPrivateRoomWaitingRoom(): void {
+    reconcilePrivateRoomWaitingChatSubscription()
+
+    const room = state.myPrivateRoom
+
+    if (room === null) {
+      state.currentScreen = 'private-rooms'
+      renderLobby()
+      return
+    }
+
+    const authSession = options.getAuthSession?.() ?? null
+    const localProfileId = authSession?.profile.profileId ?? null
+    const localMember = room.members.find((m) => m.profileId !== null && m.profileId === localProfileId) ?? null
+    const isHost = localMember?.isHost ?? false
+    const humanCount = room.members.length
+    const canFillWithBots = isHost && humanCount >= 2 && humanCount <= 3
+
+    const previousInput = options.root.querySelector<HTMLInputElement>('[data-private-waiting-chat-input="1"]')
+    const wasInputFocused = previousInput !== null && document.activeElement === previousInput
+    const caretStart = previousInput?.selectionStart ?? null
+    const caretEnd = previousInput?.selectionEnd ?? null
+
+    const previousScroll = options.root.querySelector<HTMLElement>('[data-private-waiting-chat-scroll="1"]')
+    const wasNearBottom = previousScroll === null
+      ? true
+      : previousScroll.scrollHeight - previousScroll.scrollTop - previousScroll.clientHeight < 48
+    const previousScrollTop = previousScroll?.scrollTop ?? 0
+
+    options.root.innerHTML = renderPrivateRoomWaitingScreen({
+      isLocked: room.kind === 'locked',
+      stake: room.stake,
+      members: room.members,
+      localProfileId,
+      isHost,
+      canFillWithBots,
+      fillBotsLoading: state.privateRoomWaitingFillBotsLoading,
+      fillBotsConfirmOpen: state.privateRoomWaitingFillBotsConfirmOpen,
+      leaveConfirmOpen: state.privateRoomWaitingLeaveConfirmOpen,
+      chatMessages: state.privateRoomWaitingChatMessages,
+      chatDraft: state.privateRoomWaitingChatDraft,
+      chatSending: state.privateRoomWaitingChatSending,
+      chatErrorText: state.privateRoomWaitingChatErrorText,
+      infoText: state.privateRoomInfoText,
+    })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-waiting-leave-button="1"]')
+      ?.addEventListener('click', () => {
+        state.privateRoomWaitingLeaveConfirmOpen = true
+        render()
+      })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-waiting-leave-confirm-yes="1"]')
+      ?.addEventListener('click', () => {
+        state.privateRoomWaitingLeaveConfirmOpen = false
+        options.onPrivateRoomLeave?.()
+        render()
+      })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-waiting-leave-confirm-cancel="1"]')
+      ?.addEventListener('click', () => {
+        state.privateRoomWaitingLeaveConfirmOpen = false
+        render()
+      })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-waiting-fillbots-button="1"]')
+      ?.addEventListener('click', () => {
+        if (!canFillWithBots || state.privateRoomWaitingFillBotsLoading) return
+        state.privateRoomWaitingFillBotsConfirmOpen = true
+        render()
+      })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-waiting-fillbots-confirm-yes="1"]')
+      ?.addEventListener('click', () => {
+        if (state.privateRoomWaitingFillBotsLoading) return
+        state.privateRoomWaitingFillBotsConfirmOpen = false
+        state.privateRoomWaitingFillBotsLoading = true
+        options.onPrivateRoomFillWithBots?.()
+        render()
+      })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-waiting-fillbots-confirm-cancel="1"]')
+      ?.addEventListener('click', () => {
+        state.privateRoomWaitingFillBotsConfirmOpen = false
+        render()
+      })
+
+    const chatForm = options.root.querySelector<HTMLFormElement>('[data-private-waiting-chat-form="1"]')
+    const chatInput = options.root.querySelector<HTMLInputElement>('[data-private-waiting-chat-input="1"]')
+
+    chatInput?.addEventListener('input', () => {
+      state.privateRoomWaitingChatDraft = chatInput.value
+    })
+
+    chatForm?.addEventListener('submit', (event) => {
+      event.preventDefault()
+
+      if (state.privateRoomWaitingChatSending) {
+        return
+      }
+
+      const body = state.privateRoomWaitingChatDraft.trim()
+      const currentRoom = state.myPrivateRoom
+
+      if (body.length === 0 || currentRoom === null) {
+        return
+      }
+
+      const requestId = `prwc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      state.privateRoomWaitingChatSending = true
+      state.privateRoomWaitingChatPendingRequestId = requestId
+      state.privateRoomWaitingChatErrorText = null
+      options.onPrivateRoomChatSend?.(currentRoom.id, body, requestId)
+      render()
+    })
+
+    if (wasInputFocused) {
+      const nextInput = options.root.querySelector<HTMLInputElement>('[data-private-waiting-chat-input="1"]')
+      if (nextInput !== null) {
+        nextInput.focus()
+        if (caretStart !== null && caretEnd !== null) {
+          nextInput.setSelectionRange(caretStart, caretEnd)
+        }
+      }
+    }
+
+    const nextScroll = options.root.querySelector<HTMLElement>('[data-private-waiting-chat-scroll="1"]')
+    if (nextScroll !== null) {
+      nextScroll.scrollTop = wasNearBottom ? nextScroll.scrollHeight : previousScrollTop
+    }
+  }
+
   // Общ лайв чат в лобито — subscribe/unsubscribe lifecycle.
   //
   // reconcileLobbyChatSubscription() се вика на всеки render() и покрива
@@ -5796,6 +5975,11 @@ export function createLobbyFlowController(
     }
     if (state.currentScreen === 'matchmaking-room') {
       renderMatchmakingRoom()
+      return
+    }
+
+    if (state.currentScreen === 'private-room-waiting') {
+      renderPrivateRoomWaitingRoom()
       return
     }
 
@@ -6451,20 +6635,33 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'private_room_updated') {
+      const isNewRoom = state.myPrivateRoom?.id !== message.room.id
       state.myPrivateRoom = message.room
+      state.currentScreen = 'private-room-waiting'
+      if (isNewRoom) {
+        state.privateRoomWaitingChatMessages = []
+        state.privateRoomWaitingChatSubscribedRoomId = null
+        state.privateRoomWaitingChatErrorText = null
+        state.privateRoomWaitingFillBotsConfirmOpen = false
+        state.privateRoomWaitingLeaveConfirmOpen = false
+      }
       render()
       return true
     }
 
     if (message.type === 'private_room_left') {
+      leavePrivateRoomWaitingScreen()
       state.myPrivateRoom = null
+      state.currentScreen = 'private-rooms'
       render()
       return true
     }
 
     if (message.type === 'private_room_expired') {
       if (state.myPrivateRoom?.id === message.privateRoomId) {
+        leavePrivateRoomWaitingScreen()
         state.myPrivateRoom = null
+        state.currentScreen = 'private-rooms'
         state.privateRoomInfoText = 'Частната маса изтече — не беше напълнена навреме.'
         render()
       }
@@ -6536,7 +6733,9 @@ export function createLobbyFlowController(
 
     if (message.type === 'private_room_closed') {
       if (state.myPrivateRoom?.id === message.privateRoomId) {
+        leavePrivateRoomWaitingScreen()
         state.myPrivateRoom = null
+        state.currentScreen = 'private-rooms'
         state.privateRoomInfoText = 'Домакинът затвори масата.'
         render()
       }
@@ -6554,9 +6753,11 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'private_room_full') {
+      leavePrivateRoomWaitingScreen()
       state.myPrivateRoom = null
       state.currentScreen = 'lobby'
       state.privateRoomsCreatePopupOpen = false
+      state.privateRoomWaitingFillBotsLoading = false
       options.onMatchFound({
         type: 'match_found',
         roomId: message.roomId,
@@ -6569,7 +6770,56 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'private_room_chat_history') {
+      if (state.myPrivateRoom?.id === message.privateRoomId) {
+        state.privateRoomWaitingChatMessages = message.messages
+        render()
+      }
+      return true
+    }
+
+    if (message.type === 'private_room_chat_message') {
+      if (state.myPrivateRoom?.id === message.privateRoomId) {
+        const alreadyPresent = state.privateRoomWaitingChatMessages.some((m) => m.messageId === message.messageId)
+        if (!alreadyPresent) {
+          state.privateRoomWaitingChatMessages = [...state.privateRoomWaitingChatMessages, message]
+        }
+        if (message.requestId !== undefined && message.requestId === state.privateRoomWaitingChatPendingRequestId) {
+          state.privateRoomWaitingChatSending = false
+          state.privateRoomWaitingChatPendingRequestId = null
+          state.privateRoomWaitingChatDraft = ''
+        }
+        render()
+      }
+      return true
+    }
+
+    if (message.type === 'private_room_chat_error') {
+      if (message.requestId !== undefined && message.requestId === state.privateRoomWaitingChatPendingRequestId) {
+        state.privateRoomWaitingChatSending = false
+        state.privateRoomWaitingChatPendingRequestId = null
+      }
+      state.privateRoomWaitingChatErrorText = message.message
+      render()
+      return true
+    }
+
     return false
+  }
+
+  function leavePrivateRoomWaitingScreen(): void {
+    if (state.myPrivateRoom !== null) {
+      options.onPrivateRoomChatUnsubscribe?.(state.myPrivateRoom.id)
+    }
+    state.privateRoomWaitingChatMessages = []
+    state.privateRoomWaitingChatSubscribedRoomId = null
+    state.privateRoomWaitingChatDraft = ''
+    state.privateRoomWaitingChatSending = false
+    state.privateRoomWaitingChatPendingRequestId = null
+    state.privateRoomWaitingChatErrorText = null
+    state.privateRoomWaitingLeaveConfirmOpen = false
+    state.privateRoomWaitingFillBotsConfirmOpen = false
+    state.privateRoomWaitingFillBotsLoading = false
   }
 
   async function openMissionsPopup(): Promise<void> {

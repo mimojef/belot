@@ -439,6 +439,41 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return { type: 'cancel_private_room_invite', inviteId }
     }
 
+    if (parsed.type === 'fill_private_room_with_bots') {
+      return { type: 'fill_private_room_with_bots' }
+    }
+
+    if (parsed.type === 'subscribe_private_room_chat') {
+      const privateRoomId = normalizeRequiredText(parsed.privateRoomId)
+      if (privateRoomId === null) return null
+      return { type: 'subscribe_private_room_chat', privateRoomId }
+    }
+
+    if (parsed.type === 'unsubscribe_private_room_chat') {
+      const privateRoomId = normalizeRequiredText(parsed.privateRoomId)
+      if (privateRoomId === null) return null
+      return { type: 'unsubscribe_private_room_chat', privateRoomId }
+    }
+
+    if (parsed.type === 'send_private_room_chat_message') {
+      // Само структурна проверка — семантичната валидация (дължина,
+      // забранени символи, членство, rate limit) е в index.ts, за да върне
+      // конкретен `private_room_chat_error.code` + requestId.
+      const privateRoomId = normalizeRequiredText(parsed.privateRoomId)
+      if (privateRoomId === null || typeof parsed.body !== 'string') return null
+
+      const requestId = typeof parsed.requestId === 'string' && parsed.requestId.trim() !== ''
+        ? parsed.requestId.trim().slice(0, 100)
+        : undefined
+
+      return {
+        type: 'send_private_room_chat_message',
+        privateRoomId,
+        body: parsed.body,
+        ...(requestId !== undefined ? { requestId } : {}),
+      }
+    }
+
     if (parsed.type === 'subscribe_lobby_chat') {
       return { type: 'subscribe_lobby_chat' }
     }

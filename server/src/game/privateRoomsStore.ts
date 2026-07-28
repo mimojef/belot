@@ -43,6 +43,10 @@ export type CloseRoomResult =
   | { ok: true; room: PrivateRoom }
   | { ok: false; message: string }
 
+export type BeginBotFillResult =
+  | { ok: true; room: PrivateRoom }
+  | { ok: false; message: string }
+
 export type PrivateRoomsStore = {
   createRoom: (input: CreateRoomInput) => CreateRoomResult
   joinRoom: (input: JoinRoomInput) => JoinRoomResult
@@ -52,6 +56,7 @@ export type PrivateRoomsStore = {
   cancelInvite: (inviteId: string, senderConnectionId: string) => CancelInviteResult
   removeInviteById: (inviteId: string) => PrivateRoomInvite | null
   respondToInvite: (input: RespondToInviteInput) => RespondToInviteResult
+  beginBotFill: (hostConnectionId: string) => BeginBotFillResult
   listRooms: () => PrivateRoom[]
   getRoomByConnectionId: (connectionId: string) => PrivateRoom | null
   getRoomByProfileId: (profileId: string) => PrivateRoom | null
@@ -482,6 +487,41 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     return { ok: true, room: nextRoom, joined: true }
   }
 
+  function beginBotFill(hostConnectionId: string): BeginBotFillResult {
+    const roomId = connectionToRoom.get(hostConnectionId)
+    if (roomId === undefined) {
+      return { ok: false, message: 'Не си в частна маса.' }
+    }
+
+    const room = rooms.get(roomId)
+    if (room === undefined) {
+      connectionToRoom.delete(hostConnectionId)
+      return { ok: false, message: 'Масата не съществува.' }
+    }
+
+    if (room.hostConnectionId !== hostConnectionId) {
+      return { ok: false, message: 'Само домакинът може да стартира със ботове.' }
+    }
+
+    if (room.members.length < 2 || room.members.length >= MAX_MEMBERS) {
+      return { ok: false, message: 'Запълването с ботове изисква 2 или 3 играчи в масата.' }
+    }
+
+    // Detach the room from the store synchronously (same pattern as the
+    // room-full auto-start path) so no concurrent join/invite/second
+    // bot-fill call can observe or mutate it afterwards — Node's
+    // single-threaded event loop guarantees this happens atomically with
+    // respect to any other WS message handler.
+    cancelExpiry(roomId)
+    rooms.delete(roomId)
+    for (const m of room.members) {
+      connectionToRoom.delete(m.connectionId)
+    }
+    callbacks.onRoomsChanged()
+
+    return { ok: true, room }
+  }
+
   function listRooms(): PrivateRoom[] {
     return Array.from(rooms.values())
   }
@@ -541,6 +581,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     cancelInvite,
     removeInviteById,
     respondToInvite,
+    beginBotFill,
     listRooms,
     getRoomByConnectionId,
     getRoomByProfileId,

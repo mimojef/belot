@@ -481,6 +481,23 @@ export type ClientMessage =
       type: 'request_private_rooms_list'
     }
   | {
+      type: 'fill_private_room_with_bots'
+    }
+  | {
+      type: 'subscribe_private_room_chat'
+      privateRoomId: string
+    }
+  | {
+      type: 'unsubscribe_private_room_chat'
+      privateRoomId: string
+    }
+  | {
+      type: 'send_private_room_chat_message'
+      privateRoomId: string
+      body: string
+      requestId?: string
+    }
+  | {
       type: 'subscribe_lobby_chat'
     }
   | {
@@ -771,6 +788,7 @@ export type RoomSnapshotMessage = {
   game?: RoomGameSnapshot | null
   stakeAmount: number | null
   isGuestTrial: boolean
+  isPrivateTableOrigin: boolean
 }
 
 export type PlayerProfileMessage = {
@@ -947,6 +965,45 @@ export type PrivateRoomCreatedNoticeMessage = {
   recipientInActiveGame: boolean
 }
 
+// --- Чат в чакалнята на частна маса (изолиран от lobby/friend/game chat) ---
+
+export type PrivateRoomChatMessageSnapshot = {
+  seq: number
+  messageId: string
+  senderProfileId: string | null
+  senderDisplayName: string
+  body: string
+  createdAt: number
+}
+
+export type PrivateRoomChatHistoryMessage = {
+  type: 'private_room_chat_history'
+  privateRoomId: string
+  messages: PrivateRoomChatMessageSnapshot[]
+}
+
+export type PrivateRoomChatMessageEventMessage = PrivateRoomChatMessageSnapshot & {
+  type: 'private_room_chat_message'
+  privateRoomId: string
+  requestId?: string
+}
+
+export type PrivateRoomChatErrorCode =
+  | 'not_authenticated'
+  | 'not_member'
+  | 'empty_body'
+  | 'body_too_long'
+  | 'invalid_body'
+  | 'rate_limited'
+  | 'duplicate_message'
+
+export type PrivateRoomChatErrorMessage = {
+  type: 'private_room_chat_error'
+  code: PrivateRoomChatErrorCode
+  message: string
+  requestId?: string
+}
+
 export type ProfileLikedMessage = {
   type: 'profile_liked'
   fromProfileId: string
@@ -1102,6 +1159,9 @@ export type ServerMessage =
   | PrivateRoomClosedMessage
   | PrivateRoomFullMessage
   | PrivateRoomCreatedNoticeMessage
+  | PrivateRoomChatHistoryMessage
+  | PrivateRoomChatMessageEventMessage
+  | PrivateRoomChatErrorMessage
   | ProfileLikedMessage
   | FriendRequestReceivedMessage
   | FriendRequestCancelledMessage
@@ -1154,6 +1214,10 @@ export type GameServerClient = {
   inviteToPrivateRoom: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
   cancelPrivateRoomInvite: (inviteId: string) => void
   respondPrivateRoomInvite: (inviteId: string, accept: boolean) => void
+  fillPrivateRoomWithBots: () => void
+  subscribePrivateRoomChat: (privateRoomId: string) => void
+  unsubscribePrivateRoomChat: (privateRoomId: string) => void
+  sendPrivateRoomChatMessage: (privateRoomId: string, body: string, requestId?: string) => void
   subscribeLobbyChat: () => void
   unsubscribeLobbyChat: () => void
   sendLobbyChatMessage: (body: string, requestId?: string) => void
@@ -1416,6 +1480,22 @@ export function createGameServerClient(
     send({ type: 'respond_private_room_invite', inviteId, accept })
   }
 
+  function fillPrivateRoomWithBots(): void {
+    send({ type: 'fill_private_room_with_bots' })
+  }
+
+  function subscribePrivateRoomChat(privateRoomId: string): void {
+    send({ type: 'subscribe_private_room_chat', privateRoomId })
+  }
+
+  function unsubscribePrivateRoomChat(privateRoomId: string): void {
+    send({ type: 'unsubscribe_private_room_chat', privateRoomId })
+  }
+
+  function sendPrivateRoomChatMessage(privateRoomId: string, body: string, requestId?: string): void {
+    send({ type: 'send_private_room_chat_message', privateRoomId, body, requestId })
+  }
+
   function subscribeLobbyChat(): void {
     send({ type: 'subscribe_lobby_chat' })
   }
@@ -1457,6 +1537,10 @@ export function createGameServerClient(
     inviteToPrivateRoom,
     cancelPrivateRoomInvite,
     respondPrivateRoomInvite,
+    fillPrivateRoomWithBots,
+    subscribePrivateRoomChat,
+    unsubscribePrivateRoomChat,
+    sendPrivateRoomChatMessage,
     subscribeLobbyChat,
     unsubscribeLobbyChat,
     sendLobbyChatMessage,

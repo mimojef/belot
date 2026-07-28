@@ -331,5 +331,6 @@ export function createRoomSnapshotMessage(
     game: createGameSnapshot(room, yourSeat),
     stakeAmount: room.config.stakeAmount ?? null,
     isGuestTrial: room.config.isGuestTrial === true,
+    isPrivateTableOrigin: room.config.isPrivateTableOrigin === true,
   }
 }

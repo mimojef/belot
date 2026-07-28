@@ -34,6 +34,10 @@ import {
   countUnicodeCodePoints,
   LOBBY_CHAT_MAX_BODY_CODE_POINTS,
 } from './protocol/lobbyChatValidation.js'
+import {
+  validatePrivateRoomChatBody,
+  PRIVATE_ROOM_CHAT_MAX_BODY_CODE_POINTS,
+} from './protocol/privateRoomChatValidation.js'
 import { createSupportStore, type SupportMessageSnapshot, type SupportConversationSnapshot } from './db/supportStore.js'
 import { createGuestContactStore } from './db/guestContactStore.js'
 import {
@@ -167,12 +171,19 @@ import {
 } from './game/createRoomShadowSynchronizer.js'
 import { resolveGameWorkerEntryUrl } from './game/resolveGameWorkerEntryUrl.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
-import type { LobbyChatErrorCode } from './protocol/messageTypes.js'
+import type { LobbyChatErrorCode, PrivateRoomChatErrorCode } from './protocol/messageTypes.js'
 import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
 import type { PrivateRoom, PrivateRoomMember } from './game/privateRoomsStore.js'
+import { createPrivateRoomChatStore, PRIVATE_ROOM_CHAT_HISTORY_LIMIT } from './game/privateRoomChatStore.js'
 import { addHumanToRoom } from './core/addHumanToRoom.js'
 import { createRoomWithHumanHost } from './core/createRoomWithHumanHost.js'
 import { createGuestTrialRoom } from './core/createGuestTrialRoom.js'
+import { createServerRoom } from './core/createServerRoom.js'
+import { createHumanParticipant } from './core/createHumanParticipant.js'
+import { createBotParticipant } from './core/createBotParticipant.js'
+import { seatParticipantInRoom } from './core/seatParticipantInRoom.js'
+import { updateRoomHostPlayerId } from './core/updateRoomHostPlayerId.js'
+import { shuffleSeatOrder } from './core/seededRandom.js'
 import type { ClientMessage, PrivateRoomSnapshot } from './protocol/messageTypes.js'
 import { validateGuestContactPayload } from './contact/guestContactValidation.js'
 import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
@@ -350,6 +361,10 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'cancel_private_room_invite':
     case 'respond_private_room_invite':
     case 'request_private_rooms_list':
+    case 'fill_private_room_with_bots':
+    case 'subscribe_private_room_chat':
+    case 'unsubscribe_private_room_chat':
+    case 'send_private_room_chat_message':
     case 'subscribe_lobby_chat':
     case 'unsubscribe_lobby_chat':
     case 'send_lobby_chat_message':
@@ -1130,6 +1145,7 @@ function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
     config: {
       allowBots: false,
       isPrivate: true,
+      isPrivateTableOrigin: true,
       stakeAmount: privateRoom.stake,
     },
   })
@@ -1218,9 +1234,11 @@ function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
   }
 
   broadcastRoomSnapshots(initializedRoom, socketRegistry)
+  privateRoomChatStore.clearRoom(privateRoom.id)
 }
 
 function handlePrivateRoomExpired(room: PrivateRoom): void {
+  privateRoomChatStore.clearRoom(room.id)
   for (const invite of room.pendingInvites) {
     cancelPrivateRoomInviteTimer(invite.inviteId)
     const inviteeConn = Object.values(serverState.connections).find(
@@ -1284,6 +1302,7 @@ function schedulePrivateRoomInviteExpiry(
 }
 
 function handlePrivateRoomClosed(room: PrivateRoom): void {
+  privateRoomChatStore.clearRoom(room.id)
   for (const invite of room.pendingInvites) {
     cancelPrivateRoomInviteTimer(invite.inviteId)
     const inviteeConn = Object.values(serverState.connections).find(
@@ -1312,6 +1331,173 @@ function handlePrivateRoomMemberLeft(room: PrivateRoom, member: PrivateRoomMembe
     displayName: member.displayName,
   })
 }
+
+// "Запълни с ботове" — вика се от privateRoomsStore.beginBotFill(), който
+// вече е откачил синхронно `privateRoom` от store-а (виж коментара там),
+// така че нищо конкурентно не може повече да го присъедини/промени. Огледало
+// на handlePrivateRoomFull, но с два разлики: (1) местата на хората и
+// ботовете се разбъркват еднократно на сървъра (SERVER_TEAM_A/B съставите не
+// се пазят от реда на присъединяване), (2) допълва оставащите места с ботове
+// през същия matchmaking bot-selection механизъм (без паралелен gameplay поток).
+function handlePrivateRoomBotFill(privateRoom: PrivateRoom): void {
+  const botsNeeded = 4 - privateRoom.members.length
+
+  const selectedBotProfiles = selectMatchmakingBotProfiles({
+    stake: privateRoom.stake,
+    count: botsNeeded,
+    selectionSeed: `private-room-fill:${privateRoom.id}`,
+    createTempBot: (stake, profileId, baseName, completedGamesCount, wonGamesCount) => {
+      const stakeMinLevel = matchRoomsStore.getRoom(stake)?.minLevel ?? 1
+      if (stakeMinLevel > 7) return null
+      const profile = playerProgressStore.createTemporaryBotProfile(profileId, baseName, completedGamesCount, wonGamesCount)
+      return profile.displayName
+    },
+  })
+
+  if (selectedBotProfiles.length < botsNeeded) {
+    console.error(
+      `[private-room] bot-fill could not select enough bots room=${privateRoom.id}: needed=${botsNeeded} got=${selectedBotProfiles.length}`,
+    )
+    for (const member of privateRoom.members) {
+      safeSendToConnection(member.connectionId, {
+        type: 'private_room_expired',
+        privateRoomId: privateRoom.id,
+      })
+    }
+    privateRoomChatStore.clearRoom(privateRoom.id)
+    return
+  }
+
+  // Единствената random стъпка — извиква се точно веднъж, тук, при
+  // окончателното стартиране. Резултатът се материализира директно в
+  // room.seats (server-authoritative), не се преизчислява при reconnect.
+  const shuffledSeats = shuffleSeatOrder()
+
+  let currentRoom = createServerRoom({
+    config: {
+      allowBots: true,
+      isPrivate: true,
+      isPrivateTableOrigin: true,
+      stakeAmount: privateRoom.stake,
+    },
+  })
+
+  const seatAssignments: Array<{ connectionId: string; seat: Seat }> = []
+
+  privateRoom.members.forEach((member, index) => {
+    const seat = shuffledSeats[index]!
+    const publicProfile = member.profileId
+      ? playerProgressStore.getPublicProfile(member.profileId)
+      : null
+
+    const participant = createHumanParticipant({
+      connectionId: member.connectionId,
+      identity: {
+        profileId: member.profileId,
+        displayName: member.displayName,
+        avatarUrl: member.avatarUrl,
+        level: member.level,
+        rankTitle: member.rankTitle,
+      },
+      publicProfile,
+    })
+
+    currentRoom = seatParticipantInRoom(currentRoom, seat, participant)
+    seatAssignments.push({ connectionId: member.connectionId, seat })
+  })
+
+  selectedBotProfiles.forEach((botProfile, index) => {
+    const seat = shuffledSeats[privateRoom.members.length + index]!
+    const botParticipant = createBotParticipant({
+      botProfileId: botProfile.profileId ?? undefined,
+      botCode: botProfile.code,
+      difficulty: botProfile.difficulty,
+      behaviorPreset: botProfile.behaviorPreset,
+      logicSource: botProfile.logicSource,
+      identity: botProfile.identity,
+    })
+    currentRoom = seatParticipantInRoom(currentRoom, seat, botParticipant)
+  })
+
+  currentRoom = updateRoomHostPlayerId(currentRoom)
+
+  let nextServerState = upsertServerRoom(serverState, currentRoom)
+
+  for (const { connectionId, seat } of seatAssignments) {
+    const conn = getConnectionById(nextServerState, connectionId)
+    if (conn) {
+      const nextConn = attachConnectionToRoomSeat(conn, connectionId, currentRoom, seat)
+      nextServerState = updateServerConnectionInState(nextServerState, connectionId, nextConn)
+    }
+  }
+
+  const initializedRoom = initializeRoomAuthoritativeGameState(currentRoom)
+
+  function notifyMembersExpired(): void {
+    for (const member of privateRoom.members) {
+      safeSendToConnection(member.connectionId, {
+        type: 'private_room_expired',
+        privateRoomId: privateRoom.id,
+      })
+    }
+  }
+
+  const ensureResult = activeRoomRuntime.ensureRoom(initializedRoom)
+  if (!ensureResult.ok) {
+    console.error(
+      `[private-room] no runtime capacity for bot-fill room=${initializedRoom.id}: ${ensureResult.reason}`,
+    )
+    notifyMembersExpired()
+    privateRoomChatStore.clearRoom(privateRoom.id)
+    return
+  }
+
+  if (privateRoom.stake > 0) {
+    const stakeResult = matchEconomyStore.collectRoomStakes(initializedRoom, privateRoom.stake)
+    if (!stakeResult.ok) {
+      console.error(`[private-room] bot-fill stake collection failed room=${initializedRoom.id}: ${stakeResult.message}`)
+      activeRoomRuntime.removeRoom(initializedRoom.id)
+      notifyMembersExpired()
+      privateRoomChatStore.clearRoom(privateRoom.id)
+      return
+    }
+
+    const botStakeResult = matchEconomyStore.collectBotStakes(initializedRoom, privateRoom.stake)
+    if (!botStakeResult.ok) {
+      console.error(`[private-room] bot-fill bot-stake collection failed room=${initializedRoom.id}: ${botStakeResult.message}`)
+    }
+  }
+
+  nextServerState = commitServerRoomWithSnapshot(initializedRoom, nextServerState)
+  serverState = nextServerState
+
+  for (const { connectionId, seat } of seatAssignments) {
+    safeSendToConnection(connectionId, {
+      type: 'private_room_full',
+      roomId: initializedRoom.id,
+      seat,
+      stake: privateRoom.stake,
+    })
+  }
+
+  broadcastRoomSnapshots(initializedRoom, socketRegistry)
+  privateRoomChatStore.clearRoom(privateRoom.id)
+
+  for (const invite of privateRoom.pendingInvites) {
+    cancelPrivateRoomInviteTimer(invite.inviteId)
+    const inviteeConn = Object.values(serverState.connections).find(
+      (c) => c.profileId === invite.toProfileId && c.status === 'connected',
+    )
+    if (inviteeConn) {
+      safeSendToConnection(inviteeConn.id, {
+        type: 'private_room_invite_cancelled',
+        inviteId: invite.inviteId,
+      })
+    }
+  }
+}
+
+const privateRoomChatStore = createPrivateRoomChatStore()
 
 const privateRoomsStore = createPrivateRoomsStore({
   onRoomsChanged: () => broadcastPrivateRoomsListToLobbyConnections(),
@@ -8542,12 +8728,141 @@ wsServer.on('connection', (socket, request) => {
           privateRoomsStore.closeRoom(connection.id)
         } else {
           privateRoomsStore.leaveRoom(connection.id)
+          if (privateRoom !== null && !hasOtherMembers) {
+            // Room was silently deleted (last member left) — no
+            // onRoomClosed/onRoomExpired callback fires for this path, so
+            // clear the ephemeral chat here explicitly.
+            privateRoomChatStore.clearRoom(privateRoom.id)
+          }
         }
 
         safeSendToConnection(connection.id, {
           type: 'private_room_left',
           privateRoomId: privateRoom?.id ?? '',
         })
+        return
+      }
+
+      if (message.type === 'fill_private_room_with_bots') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection?.profileId == null) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+
+        const fillResult = privateRoomsStore.beginBotFill(connection.id)
+
+        if (!fillResult.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: fillResult.message })
+          return
+        }
+
+        handlePrivateRoomBotFill(fillResult.room)
+        return
+      }
+
+      if (message.type === 'subscribe_private_room_chat') {
+        const room = privateRoomsStore.getRoomByConnectionId(connection.id)
+
+        if (room === null || room.id !== message.privateRoomId) {
+          safeSendToConnection(connection.id, {
+            type: 'private_room_chat_error',
+            code: 'not_member',
+            message: 'Не си в тази чакалня.',
+          })
+          return
+        }
+
+        const history = privateRoomChatStore
+          .listRecentMessages(room.id)
+          .slice(-PRIVATE_ROOM_CHAT_HISTORY_LIMIT)
+
+        safeSendToConnection(connection.id, {
+          type: 'private_room_chat_history',
+          privateRoomId: room.id,
+          messages: history,
+        })
+        return
+      }
+
+      if (message.type === 'unsubscribe_private_room_chat') {
+        // Няма отделен subscriber Set за освобождаване — доставката винаги
+        // се извежда наново от текущото членство в privateRoomsStore (виж
+        // send_private_room_chat_message по-долу), затова тук няма какво да
+        // се почисти. Съобщението съществува само за симетричен client-side
+        // lifecycle hook.
+        return
+      }
+
+      if (message.type === 'send_private_room_chat_message') {
+        const requestId = message.requestId
+
+        function sendPrivateRoomChatError(code: PrivateRoomChatErrorCode, errorMessage: string): void {
+          safeSendToConnection(connection.id, {
+            type: 'private_room_chat_error',
+            code,
+            message: errorMessage,
+            ...(requestId ? { requestId } : {}),
+          })
+        }
+
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection?.profileId == null) {
+          sendPrivateRoomChatError('not_authenticated', 'Трябва да влезеш в профила си.')
+          return
+        }
+
+        const room = privateRoomsStore.getRoomByConnectionId(connection.id)
+
+        if (room === null || room.id !== message.privateRoomId) {
+          sendPrivateRoomChatError('not_member', 'Не си в тази чакалня.')
+          return
+        }
+
+        const senderMember = room.members.find((m) => m.connectionId === connection.id)
+
+        if (senderMember === undefined) {
+          sendPrivateRoomChatError('not_member', 'Не си в тази чакалня.')
+          return
+        }
+
+        const validation = validatePrivateRoomChatBody(message.body)
+
+        if (!validation.ok) {
+          const messagesByCode: Record<typeof validation.code, string> = {
+            empty_body: 'Съобщението не може да бъде празно.',
+            body_too_long: `Съобщението може да е най-много ${PRIVATE_ROOM_CHAT_MAX_BODY_CODE_POINTS} символа.`,
+            invalid_body: 'Съобщението съдържа неразрешени символи.',
+          }
+          sendPrivateRoomChatError(validation.code, messagesByCode[validation.code])
+          return
+        }
+
+        const sendResult = privateRoomChatStore.sendMessage(room.id, {
+          senderProfileId: senderMember.profileId,
+          senderDisplayName: senderMember.displayName,
+          body: validation.body,
+        })
+
+        if (!sendResult.ok) {
+          const errorMessagesByCode: Record<typeof sendResult.code, string> = {
+            rate_limited: 'Твърде много съобщения. Изчакай малко и опитай пак.',
+            duplicate_message: 'Вече изпрати това съобщение.',
+          }
+          sendPrivateRoomChatError(sendResult.code, errorMessagesByCode[sendResult.code])
+          return
+        }
+
+        for (const member of room.members) {
+          safeSendToConnection(member.connectionId, {
+            type: 'private_room_chat_message',
+            privateRoomId: room.id,
+            ...sendResult.message,
+            ...(member.connectionId === connection.id && requestId ? { requestId } : {}),
+          })
+        }
         return
       }
 

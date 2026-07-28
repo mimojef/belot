@@ -6154,61 +6154,6 @@ function formatStake(stake: MatchStake): string {
   return stake.toLocaleString('bg-BG')
 }
 
-function renderMyRoomPanel(room: PrivateRoomSnapshot): string {
-  const timeLeft = Math.max(0, room.expiresAt - Date.now())
-  const minutesLeft = Math.ceil(timeLeft / 60000)
-  const isLocked = room.kind === 'locked'
-  const membersHtml = Array.from({ length: 4 }, (_, i) => {
-    const member = room.members[i]
-    if (member) {
-      return `
-        <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(255,255,255,0.05);border-radius:10px;">
-          <div style="width:36px;height:36px;border-radius:50%;background:rgba(167,139,250,0.2);border:2px solid rgba(167,139,250,0.5);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;overflow:hidden;">
-            ${member.avatarUrl ? `<img src="${member.avatarUrl}" style="width:100%;height:100%;object-fit:cover;">` : '👤'}
-          </div>
-          <div style="flex:1;min-width:0;">
-            <div style="font-size:14px;font-weight:700;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-              ${member.displayName}${member.isHost ? ' <span style="font-size:10px;color:#a78bfa;font-weight:600;">ДОМАКИН</span>' : ''}
-            </div>
-            ${member.rankTitle ? `<div style="font-size:11px;color:rgba(255,255,255,0.4);">${member.rankTitle}</div>` : ''}
-          </div>
-        </div>
-      `
-    }
-    return `
-      <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(255,255,255,0.03);border-radius:10px;border:1px dashed rgba(255,255,255,0.1);">
-        <div style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,0.05);flex-shrink:0;"></div>
-        <div style="font-size:13px;color:rgba(255,255,255,0.25);font-style:italic;">Чака играч...</div>
-      </div>
-    `
-  }).join('')
-
-  return `
-    <div style="background:rgba(167,139,250,0.06);border:1px solid rgba(167,139,250,0.25);border-radius:14px;padding:20px 24px;margin-bottom:24px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-        <div>
-          <div style="font-size:15px;font-weight:800;color:#a78bfa;">Моята маса</div>
-          <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:2px;">
-            ${isLocked ? 'Заключена' : 'Отворена'} · Залог ${formatStake(room.stake)} · ~${minutesLeft} мин. оставащи
-          </div>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          ${isLocked && room.members.length < 4 ? `
-            <button type="button" id="invite-friends-open" style="
-              padding:6px 14px;border:1px solid rgba(167,139,250,0.5);background:rgba(167,139,250,0.15);
-              border-radius:8px;color:#a78bfa;font-size:13px;font-weight:700;cursor:pointer;
-            ">+ Покани</button>
-          ` : ''}
-          <button type="button" data-private-room-leave="1" style="
-            padding:6px 14px;border:1px solid rgba(239,68,68,0.5);background:rgba(239,68,68,0.1);
-            border-radius:8px;color:#f87171;font-size:13px;font-weight:700;cursor:pointer;
-          ">Напусни</button>
-        </div>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:8px;">${membersHtml}</div>
-    </div>
-  `
-}
 
 function formatSupportTime(isoString: string): string {
   try {
@@ -6878,36 +6823,18 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
   ]
   const allRoomsHtml = allRooms.map(roomRowHtml).join('')
 
-  const createBtnHtml = hasMyRoom
-    ? `
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-        <div style="font-size:13px;color:rgba(255,165,0,0.9);font-weight:600;">Вече имате създадена маса</div>
-        <button type="button" data-private-rooms-tab="mine" style="
-          padding:7px 14px;background:rgba(167,139,250,0.15);border:1px solid rgba(167,139,250,0.4);
-          border-radius:9px;color:#a78bfa;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;
-        ">Виж масата</button>
-      </div>
-    `
-    : `
-      <button type="button" data-private-rooms-create-open="1" style="
+  // hasMyRoom вече практически винаги е false тук — веднага щом сървърът
+  // потвърди членство (private_room_updated), контролерът пренасочва към
+  // отделния екран на чакалнята ('private-room-waiting'). Списъкът показва
+  // само наличните маси и бутона "Влез" — без вградено "Моята маса" табче
+  // и без чат под редовете (виж task спецификацията).
+  const createBtnHtml = `
+      <button type="button" data-private-rooms-create-open="1" ${hasMyRoom ? 'disabled' : ''} style="
         padding:8px 20px;background:rgba(167,139,250,0.18);border:1px solid rgba(167,139,250,0.55);
         border-radius:10px;color:#a78bfa;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;
+        opacity:${hasMyRoom ? '0.5' : '1'};
       ">+ Създай маса</button>
     `
-
-  const activeTab = state.privateRoomsTab
-  const tabStyle = (tab: 'all' | 'mine'): string => {
-    const isActive = activeTab === tab
-    return `
-      padding:8px 20px;font-size:13px;font-weight:700;cursor:pointer;border:none;border-radius:9px;
-      background:${isActive ? 'rgba(167,139,250,0.25)' : 'transparent'};
-      color:${isActive ? '#a78bfa' : 'rgba(255,255,255,0.4)'};
-    `
-  }
-
-  const mineTabContent = state.myPrivateRoom
-    ? renderMyRoomPanel(state.myPrivateRoom)
-    : `<div style="text-align:center;color:rgba(255,255,255,0.3);font-size:14px;padding:40px 0;">Нямате създадена маса.</div>`
 
   const allTabContent = allRooms.length > 0
     ? `<div style="display:flex;flex-direction:column;gap:8px;">${allRoomsHtml}</div>`
@@ -6926,14 +6853,8 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
         ${createBtnHtml}
       </div>
 
-      <!-- Табове -->
-      <div style="display:flex;gap:4px;margin-bottom:20px;background:rgba(255,255,255,0.05);border-radius:11px;padding:4px;width:fit-content;">
-        <button type="button" data-private-rooms-tab="all" style="${tabStyle('all')}">Всички маси</button>
-        <button type="button" data-private-rooms-tab="mine" style="${tabStyle('mine')}">Моята маса</button>
-      </div>
-
       <!-- Съдържание -->
-      ${activeTab === 'mine' ? mineTabContent : allTabContent}
+      ${allTabContent}
     </div>
 
     ${renderPrivateRoomsCreatePopup(state)}

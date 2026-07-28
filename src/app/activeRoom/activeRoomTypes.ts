@@ -28,6 +28,7 @@ export type ActiveRoomState = {
   errorText: string | null
   leavePenaltyWarningOpen: boolean
   isGuestTrial: boolean
+  isPrivateTableOrigin: boolean
 }
 
 export type CreateActiveRoomFlowControllerOptions = {

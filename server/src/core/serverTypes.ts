@@ -137,6 +137,13 @@ export type ServerRoomConfig = {
   turnTimeMs: number
   reconnectGraceMs: number
   isGuestTrial?: boolean
+  /**
+   * True само за игри, стартирали от частна маса (нормален 4-human старт
+   * или "Запълни с ботове"). За разлика от `isPrivate` (който важи и за
+   * guest trial стаите), това поле управлява само end-game UI
+   * ("Нова игра" бутонът се крие) — виж createRoomSnapshotMessage.ts.
+   */
+  isPrivateTableOrigin?: boolean
 }
 
 export type ServerBootstrapAuthoritativeState = {

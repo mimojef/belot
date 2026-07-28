@@ -2933,6 +2933,7 @@ export function createActiveRoomFlowController(
         prizeAmount: activeRoomState.game?.matchEnded?.awardedPrizeAmount ?? null,
         skipPrizeAnimation: matchEndedPrizeAnimated,
         countdownSeconds: matchEndedCountdownSeconds,
+        isPrivateTableOrigin: activeRoomState.isPrivateTableOrigin,
         onReturnToLobby: returnToLobbyFromMatchEnded,
         onStartNewGame: startNewGameFromMatchEnded,
         onSubmitPartnerRating: (ratingValue) => {
@@ -3458,6 +3459,7 @@ export function createActiveRoomFlowController(
     activeRoomState.game = message.game ?? null
     activeRoomState.errorText = null
     activeRoomState.isGuestTrial = message.isGuestTrial
+    activeRoomState.isPrivateTableOrigin = message.isPrivateTableOrigin
     if (message.stakeAmount !== null && message.stakeAmount > 0) {
       activeRoomState.stake = message.stakeAmount as MatchStake
     }
@@ -3519,6 +3521,7 @@ export function createActiveRoomFlowController(
       errorText: null,
       leavePenaltyWarningOpen: false,
       isGuestTrial: false,
+      isPrivateTableOrigin: false,
     }
 
     const pendingRoomSnapshot = pendingRoomSnapshots.get(roomId)
@@ -3567,6 +3570,7 @@ export function createActiveRoomFlowController(
       errorText: null,
       leavePenaltyWarningOpen: false,
       isGuestTrial: false,
+      isPrivateTableOrigin: false,
     }
 
     const pendingRoomSnapshot = pendingRoomSnapshots.get(message.roomId)

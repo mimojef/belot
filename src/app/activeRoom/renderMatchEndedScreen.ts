@@ -24,6 +24,7 @@ type RenderMatchEndedScreenOptions = {
   prizeAmount?: number | null
   skipPrizeAnimation?: boolean
   countdownSeconds: number
+  isPrivateTableOrigin?: boolean
   onReturnToLobby: () => void
   onStartNewGame?: () => void
   onSubmitPartnerRating?: (ratingValue: number) => void
@@ -405,6 +406,7 @@ function renderMobileMatchEndedPanel(
   prizeAmount?: number | null,
   countdownSeconds = 120,
   skipPrizeAnimation = false,
+  isPrivateTableOrigin = false,
 ): string {
   const localTeam = getTeamBySeat(localSeat)
   const opponentTeam = getOpponentTeam(localTeam)
@@ -508,7 +510,7 @@ function renderMobileMatchEndedPanel(
           >
             Към лобито
           </button>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <div style="display:grid;grid-template-columns:${isPrivateTableOrigin ? '1fr' : '1fr 1fr'};gap:8px;">
             <button
               type="button"
               data-match-ended-replay-button="1"
@@ -532,6 +534,7 @@ function renderMobileMatchEndedPanel(
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
               Преиграй
             </button>
+            ${isPrivateTableOrigin ? '' : `
             <button
               type="button"
               data-match-ended-new-game-button="1"
@@ -550,6 +553,7 @@ function renderMobileMatchEndedPanel(
             >
               Нова игра
             </button>
+            `}
           </div>
         </div>
 
@@ -577,6 +581,7 @@ function renderMatchEndedPanel(
   _onReplayVote?: () => void,
   countdownSeconds = 120,
   skipPrizeAnimation = false,
+  isPrivateTableOrigin = false,
 ): string {
   const localTeam = getTeamBySeat(localSeat)
   const opponentTeam = getOpponentTeam(localTeam)
@@ -707,6 +712,7 @@ function renderMatchEndedPanel(
             Преиграй
           </button>
 
+          ${isPrivateTableOrigin ? '' : `
           <button
             type="button"
             data-match-ended-new-game-button="1"
@@ -727,6 +733,7 @@ function renderMatchEndedPanel(
           >
             Нова игра
           </button>
+          `}
         </div>
 
         <div style="display:flex;justify-content:flex-end;margin-top:14px;">
@@ -757,6 +764,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
     prizeAmount,
     skipPrizeAnimation = false,
     countdownSeconds,
+    isPrivateTableOrigin = false,
     onReturnToLobby,
     onStartNewGame,
     onSubmitPartnerRating,
@@ -788,7 +796,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
           font-family:Inter, system-ui, sans-serif;
         "
       >
-        ${renderMobileMatchEndedPanel(game, seats, localSeat, prizeAmount, countdownSeconds, skipPrizeAnimation)}
+        ${renderMobileMatchEndedPanel(game, seats, localSeat, prizeAmount, countdownSeconds, skipPrizeAnimation, isPrivateTableOrigin)}
       </div>
     `
   } else {
@@ -838,7 +846,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
               box-sizing:border-box;
             "
           >
-            ${renderMatchEndedPanel(game, seats, localSeat, prizeAmount, onReplayVote, countdownSeconds, skipPrizeAnimation)}
+            ${renderMatchEndedPanel(game, seats, localSeat, prizeAmount, onReplayVote, countdownSeconds, skipPrizeAnimation, isPrivateTableOrigin)}
           </div>
         </div>
       </div>
