@@ -237,6 +237,20 @@ function framesOfType(client: TestClient, type: string): any[] {
   return client.frames.filter((f) => f.type === type)
 }
 
+function isActiveServerAuthoritativeRoomSnapshot(frame: any, roomId: string): boolean {
+  return (
+    frame.type === 'room_snapshot' &&
+    frame.roomId === roomId &&
+    frame.roomStatus === 'playing' &&
+    frame.game !== null &&
+    frame.game !== undefined &&
+    frame.game.phase !== null &&
+    frame.game.phase !== 'bootstrap' &&
+    frame.game.authoritativePhase !== null &&
+    frame.game.authoritativePhase !== undefined
+  )
+}
+
 async function waitForFrame(
   client: TestClient,
   predicate: (frame: any) => boolean,
@@ -410,13 +424,20 @@ try {
   })
 
   await check('[A16] both real human participants receive the started game state (room_snapshot with an active game phase)', async () => {
-    await waitForCondition(
-      'roomStatus flips to playing (game worker authoritative sync)',
-      () => hostA.frames.some((f) => f.type === 'room_snapshot' && f.roomId === gameRoomIdA && f.roomStatus === 'playing'),
-      15_000,
+    const hostActiveSnapshot = await waitForFrame(
+      hostA,
+      (f) => isActiveServerAuthoritativeRoomSnapshot(f, gameRoomIdA),
+      5_000,
+      'host active server-authoritative room_snapshot',
     )
-    const latestGuestSnapshot = [...guestA1.frames].reverse().find((f) => f.type === 'room_snapshot' && f.roomId === gameRoomIdA)
-    if (latestGuestSnapshot.game === null || latestGuestSnapshot.game === undefined) throw new Error('guest snapshot has no game state')
+    const guestActiveSnapshot = await waitForFrame(
+      guestA1,
+      (f) => isActiveServerAuthoritativeRoomSnapshot(f, gameRoomIdA),
+      5_000,
+      'guest active server-authoritative room_snapshot',
+    )
+    if (hostActiveSnapshot.yourSeat !== hostFullA.seat) throw new Error(`host yourSeat=${hostActiveSnapshot.yourSeat}, expected ${hostFullA.seat}`)
+    if (guestActiveSnapshot.yourSeat !== guestFullA.seat) throw new Error(`guest yourSeat=${guestActiveSnapshot.yourSeat}, expected ${guestFullA.seat}`)
   })
 
   await check('[A17] the private table is no longer in the public private_rooms_list', async () => {

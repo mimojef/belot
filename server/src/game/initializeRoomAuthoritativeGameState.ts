@@ -20,6 +20,7 @@ export function initializeRoomAuthoritativeGameState(
 
   return {
     ...room,
+    status: 'playing',
     updatedAt: now,
     game: {
       ...room.game,
