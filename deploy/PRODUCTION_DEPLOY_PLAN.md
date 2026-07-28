@@ -8,6 +8,27 @@ Production checkout-ът Е `/var/www/belot-v2` директно — backend/PM2
 
 ---
 
+## ПРАВИЛО: frontend-ът НИКОГА не се deploy-ва ръчно
+
+**Доказан production инцидент:** ръчен deploy (ръчно `cp`/`rsync` на нов `dist/` + ръчно превключване на `current`) създаде release и превключи `current`, БЕЗ да публикува hashed-натите assets в споделения `assets/` pool. `index.html` сочеше към `/assets/index-Bm5-rzqQ.js`, а nginx връщаше **404** — счупен production за всеки нов зареждащ клиент.
+
+Затова:
+
+- Frontend-ът се публикува **единствено** през `npm run deploy:frontend` (обвивка над `scripts/deployFrontendAtomic.sh`, виж по-долу) — никога чрез ръчно копиране на `dist/` в `current/` или `assets/`, и никога чрез ръчна промяна на `current` symlink-а (`ln -sfn`/`mv` на ръка).
+- `scripts/deployFrontendAtomic.sh` е единственият механизъм, който гарантира правилния ред: build извън live dist → класификация hashed/mutable → публикуване в споделения pool → **HTTP verification срещу реалния nginx (виж по-долу)** → едва тогава atomic switch на `current` → post-switch HTTP verification с автоматичен rollback при провал.
+- Ако някой path извън `scripts/deployFrontendAtomic.sh` бъде използван за публикуване на frontend build, приемай текущия `current` за потенциално счупен и провери през `--list`/`--rollback`, преди да продължиш с каквото и да е друго.
+
+### HTTP verification gate (защита срещу точно този клас инцидент)
+
+`deployFrontendAtomic.sh` вече прави реални HTTP заявки (с cache-busting query, за да заобиколи browser/intermediate/CDN кеш) — не само disk-based проверки:
+
+- **Pre-switch:** всеки hashed JS/MJS/CSS entry файл, реферирано директно от новия `index.html`, трябва да върне HTTP 200 през `VERIFY_BASE_URL`. Провал тук трие release-а и `current` НЕ се пипа.
+- **Post-switch:** публичният `index.html` реферира новия main JS, main JS-ът продължава да връща 200, `/health` отговаря успешно. Провал тук атомично връща `current` към предишния release и скриптът излиза с ненулев exit code.
+
+`VERIFY_BASE_URL` е конфигурируем чрез environment variable, за да не удрят regression тестовете production — `npm run deploy:frontend` го задава автоматично на `https://www.pika.bg`. Ръчно извикване на `scripts/deployFrontendAtomic.sh` без `VERIFY_BASE_URL` пропуска HTTP verification-а (само лог предупреждение) — точно затова production deploy-ите минават през `npm run deploy:frontend`, не директно през скрипта.
+
+---
+
 ## Предпоставки (еднократни, преди първата миграция)
 
 1. `git pull` в `/var/www/belot-v2` до commit-а с тази поправка (`scripts/deployFrontendAtomic.sh`, `scripts/validatePrecacheClosure.mjs`, `deploy/`).
@@ -100,6 +121,8 @@ KEEP_RELEASES=3 \
 
 nginx **все още** сочи към `dist/` — този нов release само превключва `current` symlink-а локално, без ефект върху живия трафик.
 
+**Умишлено БЕЗ `VERIFY_BASE_URL` тук** — nginx все още не разпознава новия release/pool layout (стъпка 9 по-долу е тази, която го учи), значи HTTP verification срещу `https://pika.bg` в тази точка би fail-нал погрешно. `npm run deploy:frontend` (с вградения `VERIFY_BASE_URL`) става коректната команда едва СЛЕД стъпка 9, за всички следващи (обикновени) deploy-и.
+
 ### 8. Потвърди поне 2 release-а и валиден rollback target
 
 ```bash
@@ -173,11 +196,18 @@ nginx вече сочи към `current`, значи всеки следващ d
 ```bash
 cd /var/www/belot-v2
 git pull
-PROJECT_ROOT=/var/www/belot-v2 DEPLOY_ROOT=/var/www/belot-v2 KEEP_RELEASES=3 \
-  bash scripts/deployFrontendAtomic.sh
+npm run deploy:frontend
 ```
 
-Без nginx reload, без downtime, без ръчна намеса.
+`npm run deploy:frontend` е единствената поддържана production команда — вика `scripts/deployFrontendAtomic.sh` и задава `VERIFY_BASE_URL=https://www.pika.bg`, значи всеки deploy минава и през HTTP verification gate-а (pre-switch + post-switch, виж правилото по-горе), не само disk-based проверките. Без nginx reload, без downtime, без ръчна намеса.
+
+(Еквивалентно, за explicit override на `KEEP_RELEASES` или друга нестандартна конфигурация:
+```bash
+PROJECT_ROOT=/var/www/belot-v2 DEPLOY_ROOT=/var/www/belot-v2 KEEP_RELEASES=3 \
+VERIFY_BASE_URL=https://www.pika.bg \
+  bash scripts/deployFrontendAtomic.sh
+```
+— но `npm run deploy:frontend` покрива стандартния случай и е предпочитаният начин.)
 
 ---
 

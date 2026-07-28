@@ -21,6 +21,13 @@
  *  [6] gc-assets premahva samo hash-ове, нереферирани от НИТО ЕДИН запазен release
  *  [7] Rollback избира правилния предишен release (target selection логика)
  *  [8] Build validation gate-овете реално fail-ват при счупен build
+ *  [16] HTTP verification gate (VERIFY_BASE_URL, локален mock origin сървър,
+ *       виж startMockOriginServer): pre-switch проверка на всеки hashed entry
+ *       файл + post-switch проверка (index.html/main JS/health) с автоматичен
+ *       rollback при провал. [16b] е ТОЧНИЯТ доказан production инцидент:
+ *       index.html сочи към hashed JS, файлът реално съществува на диска
+ *       (build + shared pool), но HTTP route-ът (mock, застъпващ nginx) не
+ *       го обслужва → deploy fail-ва ПРЕДИ switch, current остава непроменен.
  *
  * Забележка за Windows dev машини: Git Bash/MSYS без administrator/Developer
  * Mode права не създава истински NTFS symlink-ове (`ln -s` fallback-ва към
@@ -34,7 +41,9 @@
 
 import { spawn } from 'node:child_process'
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { createReadStream, existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { createServer as createHttpServer, type Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -134,6 +143,82 @@ function referencedHashesFromRelease(deployRoot: string, releaseId: string): str
     for (const entry of m) matches.add(entry.replace(/^assets\//, ''))
   }
   return [...matches]
+}
+
+// ─── Mock "origin" HTTP сървър — застъпва nginx/pika.bg за VERIFY_BASE_URL ──
+//
+// Резолвва заявки по СЪЩАТА топология като реалната production конфигурация
+// (виж deploy/nginx-frontend-cache-headers.conf.example):
+//   /assets/<hashed>  -> СПОДЕЛЕНИЯТ hashed pool ($deployRoot/assets/...)
+//   /assets/<mutable> -> current/assets/... (fallback, ако липсва в pool-а)
+//   /, /index.html    -> current/index.html
+//   /health           -> синтетичен {ok:true} (или 503, ако healthOk=false)
+//   всичко останало   -> current/<path>
+//
+// `blockedMatcher`, ако е зададен, force-ва HTTP 404 за relative пътища, за
+// които връща true — НЕЗАВИСИМО дали файлът реално съществува на диска.
+// Точно с това симулираме доказания production инцидент: файлът Е публикуван
+// (build/shared pool), но живият edge (nginx) все пак не го обслужва
+// (config drift, пропуснат reload, permissions, edge cache и т.н.) —
+// disk-based проверките (validatePrecacheClosure.mjs) не могат да хванат
+// такъв клас проблем, само реална HTTP заявка може.
+type MockOriginServer = {
+  url: string
+  close: () => Promise<void>
+  setBlockedMatcher: (matcher: ((relPath: string) => boolean) | null) => void
+  setHealthOk: (ok: boolean) => void
+}
+
+async function startMockOriginServer(deployRoot: string): Promise<MockOriginServer> {
+  let blockedMatcher: ((relPath: string) => boolean) | null = null
+  let healthOk = true
+
+  const server = createHttpServer((req, res) => {
+    const requestUrl = new URL(req.url ?? '/', 'http://mock-origin.invalid')
+    const pathname = decodeURIComponent(requestUrl.pathname)
+    const relPath = pathname.replace(/^\/+/, '')
+
+    if (pathname === '/health') {
+      res.writeHead(healthOk ? 200 : 503, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: healthOk }))
+      return
+    }
+
+    if (blockedMatcher !== null && blockedMatcher(relPath)) {
+      res.writeHead(404, { 'content-type': 'text/plain' })
+      res.end('not found (simulated HTTP-route gap)')
+      return
+    }
+
+    let filePath: string
+    if (pathname === '/' || pathname === '/index.html') {
+      filePath = join(deployRoot, 'current', 'index.html')
+    } else if (relPath.startsWith('assets/')) {
+      const rel = relPath.slice('assets/'.length)
+      const poolPath = join(deployRoot, 'assets', rel)
+      filePath = existsSync(poolPath) ? poolPath : join(deployRoot, 'current', 'assets', rel)
+    } else {
+      filePath = join(deployRoot, 'current', relPath)
+    }
+
+    if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+      res.writeHead(404, { 'content-type': 'text/plain' })
+      res.end('not found')
+      return
+    }
+    res.writeHead(200)
+    createReadStream(filePath).pipe(res)
+  })
+
+  await new Promise<void>((resolveListen) => server.listen(0, '127.0.0.1', resolveListen))
+  const address = server.address() as AddressInfo
+
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise((resolveClose) => server.close(() => resolveClose())),
+    setBlockedMatcher: (matcher) => { blockedMatcher = matcher },
+    setHealthOk: (ok) => { healthOk = ok },
+  }
 }
 
 console.log('\ncheckFrontendDeployAtomic\n')
@@ -638,6 +723,135 @@ try {
     }
   } finally {
     await rm(adoptDeployRoot, { recursive: true, force: true })
+  }
+
+  // ─── [16] HTTP verification gate (VERIFY_BASE_URL) — реален инцидент repro ──
+  // Локален mock HTTP сървър застъпва nginx/pika.bg (виж startMockOriginServer
+  // по-горе) — без мрежов достъп до production, точно затова VERIFY_BASE_URL е
+  // конфигурируем (изискване: regression тестовете никога да не удрят реален
+  // production).
+  console.log('\nТествам HTTP verification gate (VERIFY_BASE_URL)...')
+  const vProjectRoot = await mkdtemp(join(tmpdir(), 'belot-http-verify-project-'))
+  const vDeployRoot = await mkdtemp(join(tmpdir(), 'belot-http-verify-deploy-'))
+  try {
+    await cp(join(PROJECT_ROOT, 'package.json'), join(vProjectRoot, 'package.json'))
+    await cp(join(PROJECT_ROOT, 'vite.config.ts'), join(vProjectRoot, 'vite.config.ts'))
+    await cp(join(PROJECT_ROOT, 'tsconfig.json'), join(vProjectRoot, 'tsconfig.json'))
+    await cp(join(PROJECT_ROOT, 'index.html'), join(vProjectRoot, 'index.html'))
+    await symlink(join(PROJECT_ROOT, 'node_modules'), join(vProjectRoot, 'node_modules'), 'junction')
+    await cp(join(PROJECT_ROOT, 'src'), join(vProjectRoot, 'src'), { recursive: true })
+    await cp(join(PROJECT_ROOT, 'public'), join(vProjectRoot, 'public'), { recursive: true }).catch(() => {})
+    await mkdir(join(vProjectRoot, 'scripts'), { recursive: true })
+    await cp(join(PROJECT_ROOT, 'scripts', 'validatePrecacheClosure.mjs'), join(vProjectRoot, 'scripts', 'validatePrecacheClosure.mjs'))
+
+    // ─── [16a] Happy path: mock origin-ът сервира всичко коректно ───────────
+    const happyMock = await startMockOriginServer(vDeployRoot)
+    let rHappy: { code: number; stdout: string; stderr: string }
+    try {
+      rHappy = await runDeployScript(vDeployRoot, [], { PROJECT_ROOT: vProjectRoot, VITE_BUILD_ID: 'http-happy', VERIFY_BASE_URL: happyMock.url })
+    } finally {
+      await happyMock.close()
+    }
+    await check('[16a] Happy path: deploy с VERIFY_BASE_URL завършва успешно, когато mock origin-ът сервира всичко коректно', () => {
+      if (rHappy.code !== 0) throw new Error(`exit=${rHappy.code}\nstdout tail:\n${rHappy.stdout.slice(-800)}\nstderr tail:\n${rHappy.stderr.slice(-800)}`)
+    })
+    await check('[16a2] Логът потвърждава, че pre-switch И post-switch HTTP проверките реално са се изпълнили', () => {
+      if (!rHappy.stdout.includes('Pre-switch HTTP проверка')) throw new Error(`Липсва pre-switch HTTP лог:\n${rHappy.stdout.slice(-1500)}`)
+      if (!rHappy.stdout.includes('Post-switch HTTP проверките минаха')) throw new Error(`Post-switch проверката не е потвърдила успех:\n${rHappy.stdout.slice(-1500)}`)
+    })
+    const releaseHappy = listReleases(vDeployRoot)[0]
+    await check('[16a3] "current" реално е превключен към новия release след успешните HTTP проверки', () => {
+      if (!HAS_REAL_SYMLINKS) return
+      const currentIndex = readFileSync(join(vDeployRoot, 'current', 'index.html'), 'utf8')
+      const releaseIndex = readFileSync(join(vDeployRoot, 'releases', releaseHappy, 'index.html'), 'utf8')
+      if (currentIndex !== releaseIndex) throw new Error('current/index.html не съвпада с новия release')
+    })
+
+    // ─── [16b] Точният production инцидент ──────────────────────────────────
+    // index.html сочи към hashed main JS, файлът РЕАЛНО съществува на диска
+    // (build + shared pool — стъпки 3+4 на скрипта вече минаха успешно), но
+    // HTTP route-ът (mock origin-ът, застъпващ nginx) все пак не го обслужва
+    // (force-нат 404, независимо от диска) → pre-switch gate трябва да fail-не
+    // ПРЕДИ switch, "current" остава непроменен (все още сочи към [16a]).
+    console.log('Deploy с force-нат HTTP 404 за main JS-а (main asset е на диска, но "nginx" не го сервира)...')
+    await sleep(1100)
+    const incidentMock = await startMockOriginServer(vDeployRoot)
+    incidentMock.setBlockedMatcher((relPath) => /^assets\/index-[^/]+\.js$/.test(relPath))
+    let rIncident: { code: number; stdout: string; stderr: string }
+    try {
+      rIncident = await runDeployScript(vDeployRoot, [], { PROJECT_ROOT: vProjectRoot, VITE_BUILD_ID: 'http-incident', VERIFY_BASE_URL: incidentMock.url })
+    } finally {
+      await incidentMock.close()
+    }
+    await check('[16b] Точният инцидент: main JS е на диска, но HTTP route-ът 404-ва → deploy fail-ва (exit != 0)', () => {
+      if (rIncident.code === 0) throw new Error('Скриптът е върнал success въпреки симулирания HTTP 404 за main JS-а')
+    })
+    await check('[16b2] Fail съобщението идентифицира pre-switch HTTP провала и точния asset', () => {
+      if (!rIncident.stderr.includes('Pre-switch HTTP проверка неуспешна')) throw new Error(`stderr:\n${rIncident.stderr.slice(-1000)}`)
+      if (!/assets\/index-[^\s]+\.js/.test(rIncident.stderr)) throw new Error(`stderr не споменава конкретния asset:\n${rIncident.stderr.slice(-1000)}`)
+    })
+    await check('[16b3] Release директорията от неуспешния опит е премахната (не остава debris)', () => {
+      const releases = listReleases(vDeployRoot)
+      if (releases.length !== 1 || releases[0] !== releaseHappy) throw new Error(`releases=${JSON.stringify(releases)}, очаквах само [${releaseHappy}]`)
+    })
+    if (HAS_REAL_SYMLINKS) {
+      await check('[16b4] "current" остава НЕПРОМЕНЕН (все още сочи към [16a] release-а, въпреки успешния build)', () => {
+        const currentIndex = readFileSync(join(vDeployRoot, 'current', 'index.html'), 'utf8')
+        const happyIndex = readFileSync(join(vDeployRoot, 'releases', releaseHappy, 'index.html'), 'utf8')
+        if (currentIndex !== happyIndex) throw new Error('current е бил пипнат въпреки pre-switch HTTP провала')
+      })
+    } else {
+      skip('[16b4] "current" остава непроменен при pre-switch HTTP провал', 'изисква истински symlink — недоказуемо на тази машина')
+    }
+
+    // ─── [16c] Post-switch провал (/health) → атомичен rollback + exit != 0 ──
+    console.log('Deploy с успешен pre-switch, но force-нат неуспешен /health post-switch...')
+    await sleep(1100)
+    const postFailMock = await startMockOriginServer(vDeployRoot)
+    postFailMock.setHealthOk(false)
+    const currentIndexBeforeAttempt = HAS_REAL_SYMLINKS
+      ? readFileSync(join(vDeployRoot, 'current', 'index.html'), 'utf8')
+      : ''
+    let rPostFail: { code: number; stdout: string; stderr: string }
+    try {
+      rPostFail = await runDeployScript(vDeployRoot, [], { PROJECT_ROOT: vProjectRoot, VITE_BUILD_ID: 'http-postfail', VERIFY_BASE_URL: postFailMock.url })
+    } finally {
+      await postFailMock.close()
+    }
+    await check('[16c] Post-switch провал (/health неуспешен): deploy fail-ва (exit != 0)', () => {
+      if (rPostFail.code === 0) throw new Error('Скриптът е върнал success въпреки неуспешния post-switch /health')
+    })
+    // [16c2]-[16c4] изискват РЕАЛЕН rollback (втори ln -sfn+mv -Tf swap върху
+    // "current" В РАМКИТЕ на същото script извикване, СЛЕД като първият
+    // switch вече е минал). На Windows Git Bash/MSYS fallback (виж
+    // HAS_REAL_SYMLINKS по-горе) "current" е РЕАЛНА non-empty директория (не
+    // symlink) — JS harness workaround-ът (виж runDeployScript) я изтрива само
+    // ПРЕДИ да пусне скрипта, не и по средата на самото му изпълнение, значи
+    // rollback опитът вътре в скрипта реално hit-ва "mv: Directory not empty"
+    // и скриптът crash-ва там (set -e) ПРЕДИ изобщо да стигне до нашето чисто
+    // "Post-switch HTTP проверка неуспешна" fail съобщение. На реален Linux
+    // "current" винаги е истински symlink (създаден изцяло от самия скрипт),
+    // значи mv -Tf там е тривиален atomic rename и работи надеждно — това е
+    // чисто ограничение на Windows dev машината, не бъг в rollback логиката.
+    if (HAS_REAL_SYMLINKS) {
+      await check('[16c2] Fail съобщението идентифицира post-switch /health провала', () => {
+        if (!rPostFail.stderr.includes('Post-switch HTTP проверка неуспешна') || !rPostFail.stderr.includes('/health')) {
+          throw new Error(`stderr:\n${rPostFail.stderr.slice(-1000)}`)
+        }
+      })
+      await check('[16c3] "current" е автоматично възстановен към release-а отпреди опита (rollback)', () => {
+        const currentIndexAfter = readFileSync(join(vDeployRoot, 'current', 'index.html'), 'utf8')
+        if (currentIndexAfter !== currentIndexBeforeAttempt) throw new Error('current НЕ е върнат към предишния release след post-switch провал')
+      })
+      await check('[16c4] Логът потвърждава реален rollback опит', () => {
+        if (!rPostFail.stdout.includes('Атомично връщам current')) throw new Error(`stdout:\n${rPostFail.stdout.slice(-1000)}`)
+      })
+    } else {
+      skip('[16c2]/[16c3]/[16c4] Автоматичен post-switch rollback (съобщение + ефект)', 'изисква истински symlink за "current" — недоказуемо на тази машина, виж бележката в началото на файла')
+    }
+  } finally {
+    await rm(vProjectRoot, { recursive: true, force: true })
+    await rm(vDeployRoot, { recursive: true, force: true })
   }
 } finally {
   if (deployRoot) await rm(deployRoot, { recursive: true, force: true }).catch(() => {})

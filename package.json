@@ -15,7 +15,8 @@
     "check:frontend-deploy-atomic": "npx tsx scripts/checkFrontendDeployAtomic.ts",
     "check:bootstrap-recovery": "npx tsx scripts/checkBootstrapRecovery.ts",
     "check:consent-analytics": "npx tsx scripts/checkConsentAnalytics.ts",
-    "check:chat-draft-preserved": "npx tsx scripts/checkChatDraftPreserved.ts"
+    "check:chat-draft-preserved": "npx tsx scripts/checkChatDraftPreserved.ts",
+    "deploy:frontend": "VERIFY_BASE_URL=https://www.pika.bg bash scripts/deployFrontendAtomic.sh"
   },
   "devDependencies": {
     "playwright": "^1.61.1",

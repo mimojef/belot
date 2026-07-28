@@ -52,7 +52,33 @@
 #                                                     от вече работещ, ръчно build-нат
 #                                                     dist — виж deploy/PRODUCTION_DEPLOY_PLAN.md)
 #
-# Изисква: node, npm, git. Предназначен за изпълнение НА production сървъра.
+# ─── HTTP verification (VERIFY_BASE_URL) ────────────────────────────────────
+# Доказан production инцидент: hashed assets бяха публикувани на диска, но
+# ръчен deploy създаде release и превключи "current" БЕЗ да публикува
+# hashed-овете в споделения pool — index.html сочеше към
+# /assets/index-Bm5-rzqQ.js, nginx връщаше 404. Файловите/precache closure
+# проверките по-долу (стъпки 2b/4b) хващат това ЛОКАЛНО на диска, но не
+# доказват, че живият nginx РЕАЛНО обслужва файла (config drift, пропуснат
+# reload, permissions, CDN/edge cache и т.н.).
+#
+# Ако VERIFY_BASE_URL е зададен, скриптът прави РЕАЛНИ HTTP заявки (с
+# cache-busting query, за да заобиколи всякакъв intermediate/browser cache):
+#   - ПРЕДИ atomic switch: всеки hashed JS/MJS/CSS entry, реферирано директно
+#     от новия index.html, трябва да върне HTTP 200 през VERIFY_BASE_URL.
+#     Провал тук трие release-а и НЕ пипа "current" (evтин revert).
+#   - СЛЕД atomic switch: публичният index.html реферира очаквания нов main
+#     JS, main JS-ът продължава да връща 200, /health връща успешен отговор.
+#     Провал тук атомично връща "current" към предишния release и скриптът
+#     излиза с ненулев exit code.
+#
+# Ако VERIFY_BASE_URL НЕ е зададен, HTTP проверките се пропускат изцяло (само
+# лог предупреждение) — умишлено, за да не изисква всяко --dry-run/локално/
+# regression тестово изпълнение мрежов достъп до production. Production
+# deploy-ите трябва да минават през "npm run deploy:frontend" (виж
+# package.json), който задава VERIFY_BASE_URL=https://www.pika.bg.
+#
+# Изисква: node, npm, git (+ curl, само ако VERIFY_BASE_URL е зададен).
+# Предназначен за изпълнение НА production сървъра.
 # Production checkout-ът Е /var/www/belot-v2 директно (НЕ .../repo подпапка
 # — backend/PM2 също разчита на тази структура, скриптът не мести repo-то).
 # PROJECT_ROOT по подразбиране се извежда от местоположението на самия
@@ -68,6 +94,10 @@ RELEASES_DIR="${RELEASES_DIR:-$DEPLOY_ROOT/releases}"
 CURRENT_LINK="${CURRENT_LINK:-$DEPLOY_ROOT/current}"
 SHARED_ASSETS_DIR="${SHARED_ASSETS_DIR:-$DEPLOY_ROOT/assets}"
 KEEP_RELEASES="${KEEP_RELEASES:-3}"
+# Празно по подразбиране == HTTP verification изключена (виж бележката в
+# началото на файла). Regression тестовете сочат това към локален mock HTTP
+# сървър; production използва https://www.pika.bg чрез "npm run deploy:frontend".
+VERIFY_BASE_URL="${VERIFY_BASE_URL:-}"
 DRY_RUN=0
 
 # ─── Аргументи ────────────────────────────────────────────────────────────
@@ -100,6 +130,58 @@ fail() { printf '[deploy] FAIL: %s\n' "$1" >&2; exit 1; }
 # класификацията консистентна навсякъде, където се прилага.
 is_hashed_asset() {
   [[ "$1" =~ -[0-9A-Za-z_-]{8,10}\.(js|mjs|css)$ ]]
+}
+
+# ─── HTTP verification helpers (виж бележката за VERIFY_BASE_URL горе) ──────
+
+# Извлича ВСИЧКИ hashed JS/MJS/CSS entry файлове, реферирани директно от
+# подадения index.html (script/link src/href) — не regex срещу целия sw.js
+# precache manifest (това вече прави validatePrecacheClosure.mjs), а само
+# файловете, от които browser-ът реално стартира при първо зареждане.
+extract_hashed_entries_from_html() {
+  local html_file="$1"
+  grep -oE 'assets/[A-Za-z0-9._-]+-[0-9A-Za-z_-]{8,10}\.(js|mjs|css)' "$html_file" | sort -u
+}
+
+# Уникален cache-busting query, за да заобиколим browser/intermediate/CDN
+# кеш при всяка HTTP verification заявка.
+cache_bust_query() {
+  printf '_cb=%s-%s' "$(date +%s%N 2>/dev/null || date +%s)" "$RANDOM"
+}
+
+# HTTP статус код за GET заявка, "000" при мрежова грешка/timeout (никога не
+# chain-ва set -e фейлура нагоре — извикващият код explicit проверява стойността).
+http_status_for() {
+  local url="$1"
+  curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$url" 2>/dev/null || echo '000'
+}
+
+# Global "чернова" за причината на последния провал — по-просто от bash
+# multi-return, четено веднага след връщане на грешка от функцията по-долу.
+VERIFY_FAIL_DETAIL=""
+
+# Проверява ВСИЧКИ hashed entry файлове от $2 (index.html) през
+# VERIFY_BASE_URL — изисква HTTP 200 за всеки, с cache-busting query.
+# Връща 1 (failure) при първия неуспешен файл, попълва VERIFY_FAIL_DETAIL.
+verify_hashed_entries_http() {
+  local label="$1" html_file="$2"
+  local entries=()
+  mapfile -t entries < <(extract_hashed_entries_from_html "$html_file")
+  if [ "${#entries[@]}" -eq 0 ]; then
+    VERIFY_FAIL_DETAIL="index.html не реферира нито един hashed JS/MJS/CSS entry файл"
+    return 1
+  fi
+  local asset url code
+  for asset in "${entries[@]}"; do
+    url="${VERIFY_BASE_URL%/}/${asset}?$(cache_bust_query)"
+    code="$(http_status_for "$url")"
+    log "HTTP [$label] GET $url -> $code"
+    if [ "$code" != "200" ]; then
+      VERIFY_FAIL_DETAIL="$asset (HTTP $code през $url)"
+      return 1
+    fi
+  done
+  return 0
 }
 
 # ─── --list: покажи налични release-и ────────────────────────────────────
@@ -345,15 +427,99 @@ cp "$BUILD_DIR/sw.js" "$RELEASE_DIR/sw.js"
 [ -f "$BUILD_DIR/sw.js.map" ] && cp "$BUILD_DIR/sw.js.map" "$RELEASE_DIR/sw.js.map" || true
 cp "$BUILD_DIR/index.html" "$RELEASE_DIR/index.html"
 
+# ─── 4c. HTTP verification срещу РЕАЛНИЯ nginx, ПРЕДИ atomic switch ────────
+# Точно доказаният production дефект: hashed-овете вече са на диска (стъпки
+# 3+4 по-горе), но това НЕ доказва, че живият nginx реално ги обслужва.
+# Провал тук е евтин за отмяна — release-ът никога не е станал "current".
+if [ -n "$VERIFY_BASE_URL" ]; then
+  command -v curl >/dev/null 2>&1 || fail "curl не е намерен в PATH (нужен за VERIFY_BASE_URL HTTP проверките)."
+  log "Pre-switch HTTP проверка на hashed entry файлове срещу $VERIFY_BASE_URL..."
+  if ! verify_hashed_entries_http "pre-switch" "$RELEASE_DIR/index.html"; then
+    rm -rf "$RELEASE_DIR"
+    fail "Pre-switch HTTP проверка неуспешна: $VERIFY_FAIL_DETAIL — current НЕ е пипнат, release директорията е премахната."
+  fi
+  log "Всички hashed entry файлове са достъпни (HTTP 200) през $VERIFY_BASE_URL — продължавам към switch."
+else
+  log "VERIFY_BASE_URL не е зададен — пропускам pre-switch HTTP проверката."
+fi
+
 # ─── 5. Атомарен switch на "current" symlink-а ────────────────────────────
 # Създай нов symlink с временно име, после rename (mv) — rename е атомарна
 # операция на едно и също файлова система (POSIX), значи нито един request
 # никога не вижда "полу-сменено" състояние.
+PREVIOUS_CURRENT_TARGET="$(readlink -f "$CURRENT_LINK" 2>/dev/null || echo '')"
 log "Атомарно превключвам current -> $RELEASE_ID..."
 ln -sfn "$RELEASE_DIR" "$CURRENT_LINK.tmp"
 mv -Tf "$CURRENT_LINK.tmp" "$CURRENT_LINK"
 
 log "Публикувано: current -> $RELEASE_ID"
+
+# ─── 5b. Post-switch HTTP verification + автоматичен rollback при провал ───
+# Проверява точно през реалния nginx (с cache-busting query): (1) публичният
+# index.html вече реферира новия main JS, (2) main JS-ът продължава да
+# връща 200, (3) /health отговаря успешно. При провал на КОЕТО и да е от
+# трите, "current" се връща атомично към предишния release и скриптът
+# излиза с ненулев exit code — deploy-ът НЕ приключва "успешно" върху счупен
+# live edge.
+if [ -n "$VERIFY_BASE_URL" ]; then
+  log "Post-switch HTTP проверка срещу $VERIFY_BASE_URL..."
+  POST_SWITCH_OK=1
+  POST_SWITCH_FAIL_REASON=""
+
+  EXPECTED_MAIN_JS="$(grep -oE 'assets/index-[0-9A-Za-z_-]{8,10}\.js' "$RELEASE_DIR/index.html" | head -1 || true)"
+  if [ -z "$EXPECTED_MAIN_JS" ]; then
+    POST_SWITCH_OK=0
+    POST_SWITCH_FAIL_REASON="Новият index.html не съдържа очаквания hashed main JS entry (assets/index-*.js)."
+  fi
+
+  if [ "$POST_SWITCH_OK" = "1" ]; then
+    LIVE_INDEX_URL="${VERIFY_BASE_URL%/}/index.html?$(cache_bust_query)"
+    LIVE_INDEX_BODY="$(curl -s --max-time 15 "$LIVE_INDEX_URL" 2>/dev/null || echo '')"
+    if ! grep -qF "$EXPECTED_MAIN_JS" <<<"$LIVE_INDEX_BODY"; then
+      POST_SWITCH_OK=0
+      POST_SWITCH_FAIL_REASON="Публичният index.html (през $VERIFY_BASE_URL) не реферира новия main JS ($EXPECTED_MAIN_JS)."
+    else
+      log "HTTP [post-switch] $LIVE_INDEX_URL реферира очаквания $EXPECTED_MAIN_JS."
+    fi
+  fi
+
+  if [ "$POST_SWITCH_OK" = "1" ]; then
+    MAIN_JS_URL="${VERIFY_BASE_URL%/}/${EXPECTED_MAIN_JS}?$(cache_bust_query)"
+    MAIN_JS_CODE="$(http_status_for "$MAIN_JS_URL")"
+    log "HTTP [post-switch] GET $MAIN_JS_URL -> $MAIN_JS_CODE"
+    if [ "$MAIN_JS_CODE" != "200" ]; then
+      POST_SWITCH_OK=0
+      POST_SWITCH_FAIL_REASON="Основният JS ($EXPECTED_MAIN_JS) връща HTTP $MAIN_JS_CODE вместо 200 след switch."
+    fi
+  fi
+
+  if [ "$POST_SWITCH_OK" = "1" ]; then
+    HEALTH_URL="${VERIFY_BASE_URL%/}/health?$(cache_bust_query)"
+    HEALTH_CODE="$(http_status_for "$HEALTH_URL")"
+    log "HTTP [post-switch] GET $HEALTH_URL -> $HEALTH_CODE"
+    if [ "$HEALTH_CODE" != "200" ]; then
+      POST_SWITCH_OK=0
+      POST_SWITCH_FAIL_REASON="/health връща HTTP $HEALTH_CODE вместо успешен отговор след switch."
+    fi
+  fi
+
+  if [ "$POST_SWITCH_OK" != "1" ]; then
+    log "Post-switch проверка НЕУСПЕШНА: $POST_SWITCH_FAIL_REASON"
+    if [ -n "$PREVIOUS_CURRENT_TARGET" ] && [ -d "$PREVIOUS_CURRENT_TARGET" ]; then
+      log "Атомично връщам current -> $(basename "$PREVIOUS_CURRENT_TARGET")..."
+      ln -sfn "$PREVIOUS_CURRENT_TARGET" "$CURRENT_LINK.tmp"
+      mv -Tf "$CURRENT_LINK.tmp" "$CURRENT_LINK"
+      log "current възстановен -> $(basename "$PREVIOUS_CURRENT_TARGET")."
+    else
+      log "ПРЕДУПРЕЖДЕНИЕ: няма валиден предишен release за автоматичен rollback (първи deploy?) — current остава -> $RELEASE_ID, нужна е ръчна намеса."
+    fi
+    fail "Post-switch HTTP проверка неуспешна: $POST_SWITCH_FAIL_REASON"
+  fi
+
+  log "Post-switch HTTP проверките минаха: index.html, main JS, /health — всички OK."
+else
+  log "VERIFY_BASE_URL не е зададен — пропускам post-switch HTTP проверката."
+fi
 
 # ─── 6. Retention cleanup — пази последните KEEP_RELEASES release ДИРЕКТОРИИ ──
 # Забележка: това трие само малките release-entry директории (index.html/
