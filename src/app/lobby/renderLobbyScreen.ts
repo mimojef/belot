@@ -3395,7 +3395,7 @@ function renderMobilePlayersDirectory(state: LobbyScreenState): string {
   if (state.playersErrorText) return `${renderMobilePageTitle('Играчите')}${renderMobileStateMessage(state.playersErrorText, 'error')}`
 
   const { players, isSearchActive } = computePlayersDirectoryLists(state, {
-    isAdmin: state.isAdmin,
+    isAdmin: state.isAdminOrSubadmin,
     ownProfileId: state.profile.profileId,
   })
   const applied = state.playersSearchQuery.trim()
@@ -4136,7 +4136,7 @@ function renderChatPanel(state: LobbyScreenState): string {
 
 function renderPlayersDirectory(state: LobbyScreenState): string {
   const { players, isSearchActive } = computePlayersDirectoryLists(state, {
-    isAdmin: state.isAdmin,
+    isAdmin: state.isAdminOrSubadmin,
     ownProfileId: state.profile.profileId,
   })
 

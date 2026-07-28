@@ -12,6 +12,9 @@
  * [6]  bot с isOnline=true → отива в bots групата, не в onlineHumans
  * [7]  admin + search: ordered list се филтрира; own профил не е force-shown при non-match
  * [8]  renderLobbyScreen.ts и renderMobilePlayersDirectory използват orderPlayersForViewer (source check)
+ * [9]  subadmin (isAdmin flag=true подаден за subadmin viewer) → същото групиране като admin
+ * [10] source check: computePlayersDirectoryLists се вика с state.isAdminOrSubadmin (не state.isAdmin),
+ *      за да получи subadmin същата подредба като admin, без отделна логика и без нови права
  */
 
 import { readFileSync } from 'node:fs'
@@ -154,6 +157,49 @@ const players = [offlineA, bot1, onlineA, own, onlineB, offlineB, bot2]
   check('[7] search: само matching играчи', filtered.every((p) => (p.displayName ?? '').toLocaleLowerCase().includes('онлайн')))
   check('[7] search: own не е включен (displayName="Аз" не match "онлайн")', !filtered.some((p) => p.profileId === ownId))
   check('[7] search: online humans са включени', filtered.some((p) => p.profileId === 'online-a') && filtered.some((p) => p.profileId === 'online-b'))
+}
+
+// [9] subadmin viewer: orderPlayersForViewer няма отделен "subadmin" клон — единственият
+// вход е булев isAdmin флаг. Извикващият (renderLobbyScreen) подава state.isAdminOrSubadmin,
+// така че subadmin вижда точно същото групиране own → online → offline → bots като admin.
+{
+  const subadminOwnId = 'subadmin-profile-id'
+  const subadminOwn = makePlayer({ profileId: subadminOwnId, displayName: 'Субадмин', isOnline: true })
+  const subadminPlayers = [offlineA, bot1, onlineA, subadminOwn, onlineB, offlineB, bot2]
+
+  const subadminResult = orderPlayersForViewer(subadminPlayers, { isAdmin: true, ownProfileId: subadminOwnId })
+
+  check('[9] subadmin: собственият профил е пръв', subadminResult[0]?.profileId === subadminOwnId)
+  check(
+    '[9] subadmin: online humans преди offline humans преди bots',
+    subadminResult.findIndex((p) => p.profileId === 'online-a') <
+      subadminResult.findIndex((p) => p.profileId === 'offline-a') &&
+      subadminResult.findIndex((p) => p.profileId === 'offline-a') <
+        subadminResult.findIndex((p) => p.profileId === 'bot-1'),
+  )
+}
+
+// [10] Source check: computePlayersDirectoryLists (desktop + mobile) се вика с
+// state.isAdminOrSubadmin — не state.isAdmin — за да получи subadmin реда на admin,
+// без нови права (isAdminOrSubadmin само определя подредбата в orderPlayersForViewer).
+{
+  const renderSrc = readFileSync(resolve(PROJECT_ROOT, 'src/app/lobby/renderLobbyScreen.ts'), 'utf8')
+
+  const desktopCallMatch = renderSrc.match(
+    /function renderPlayersDirectory[\s\S]*?computePlayersDirectoryLists\(state,\s*\{\s*isAdmin:\s*([^,]+),/,
+  )
+  check(
+    '[10] renderPlayersDirectory (desktop): computePlayersDirectoryLists получава state.isAdminOrSubadmin',
+    desktopCallMatch?.[1]?.trim() === 'state.isAdminOrSubadmin',
+  )
+
+  const mobileCallMatch = renderSrc.match(
+    /function renderMobilePlayersDirectory[\s\S]*?computePlayersDirectoryLists\(state,\s*\{\s*isAdmin:\s*([^,]+),/,
+  )
+  check(
+    '[10] renderMobilePlayersDirectory (mobile): computePlayersDirectoryLists получава state.isAdminOrSubadmin',
+    mobileCallMatch?.[1]?.trim() === 'state.isAdminOrSubadmin',
+  )
 }
 
 // [8] Source check: renderLobbyScreen.ts използва orderPlayersForViewer и в desktop, и в mobile

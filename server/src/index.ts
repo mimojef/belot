@@ -4156,7 +4156,7 @@ async function handlePlayersRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
   const currentProfileId = session?.profile.profileId ?? null
-  const isAdmin = session?.account.role === 'admin'
+  const isAdmin = isAdminOrSubadminSession(session)
 
   const rawPage = parseStrictQueryInt(requestUrl.searchParams.get('page'))
   const requestedPage = rawPage === 'invalid' || rawPage === null ? 1 : rawPage

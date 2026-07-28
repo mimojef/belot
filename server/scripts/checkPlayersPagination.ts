@@ -39,6 +39,10 @@
  * [13] Липсващ (не подаден изобщо) snapshot token за page>1 → третира се
  *      като обикновено прясно отваряне (snapshotReset=false), не като
  *      "възстановяване от грешка".
+ * [14] Subadmin получава ТОЧНО СЪЩИЯ глобален ред като admin (own позиция 0,
+ *      online веднага след own, own без дублиране, хора преди ботове) —
+ *      без нови права, само чрез същата isAdminOrSubadminSession проверка,
+ *      която computePlayersPageOrder вече ползва за admin (server/src/index.ts).
  */
 
 import { DatabaseSync } from 'node:sqlite'
@@ -450,6 +454,50 @@ try {
     const lastHumanIdx = flat.reduce((acc, p, i) => (p.isBot !== true ? i : acc), -1)
     const firstBotIdx = flat.findIndex((p) => p.isBot === true)
     assert(lastHumanIdx < firstBotIdx, `(admin) последен човек (${lastHumanIdx}) трябва да е преди първия бот (${firstBotIdx})`)
+  })
+
+  // ─── Subadmin ordering: същия глобален ред като admin ─────────────────────
+
+  const subadminEmail = `pager-subadmin-${runId}@example.test`
+  const subadminRegRes = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: subadminEmail, password: PASSWORD, displayName: 'PagerSubadmin', gender: 'male' }),
+  })
+  if (subadminRegRes.status !== 200) throw new Error(`Register (subadmin) ${subadminRegRes.status}`)
+
+  const db3 = new DatabaseSync(iso.dbFile, { open: true, enableForeignKeyConstraints: true })
+  db3.prepare(`UPDATE accounts SET role='subadmin' WHERE email=?`).run(subadminEmail)
+  db3.close()
+
+  const subadminLoginRes = await fetch(`http://127.0.0.1:${port}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: subadminEmail, password: PASSWORD }),
+  })
+  const sh = subadminLoginRes.headers as Headers & { getSetCookie?: () => string[] }
+  const subadminCookie = (sh.getSetCookie?.()[0] ?? subadminLoginRes.headers.get('set-cookie'))?.split(';')[0]
+  if (!subadminCookie) throw new Error('No Set-Cookie on subadmin login')
+
+  const subadminMeRes = await httpGetJson(port, '/api/auth/me', subadminCookie)
+  const pagerSubadminProfileId = (subadminMeRes.body as { session?: { profile?: { profileId?: string } } })
+    .session?.profile?.profileId
+  if (!pagerSubadminProfileId) throw new Error('No profileId from subadmin /api/auth/me')
+
+  await check('[14] Subadmin: същият глобален ред като admin (own позиция 0, online веднага след own, own без дублиране, хора преди ботове)', async () => {
+    const subadminTraversal = await fetchAllPages(port, subadminCookie)
+    const flat = subadminTraversal.pages.flatMap((p) => p.players)
+
+    assert(subadminTraversal.pages[0]!.page === 1, 'own трябва да е на page 1')
+    assert(flat[0]?.profileId === pagerSubadminProfileId, `очакван own (${pagerSubadminProfileId}) на глобална позиция 0, получен ${flat[0]?.profileId}`)
+    assert(flat[1]?.profileId === pagerUserProfileId, `очакван online PagerUser веднага след own, получен ${flat[1]?.profileId}`)
+
+    const ownOccurrences = flat.filter((p) => p.profileId === pagerSubadminProfileId).length
+    assert(ownOccurrences === 1, `own трябва да се среща точно веднъж, срещнат ${ownOccurrences} пъти`)
+
+    const lastHumanIdx = flat.reduce((acc, p, i) => (p.isBot !== true ? i : acc), -1)
+    const firstBotIdx = flat.findIndex((p) => p.isBot === true)
+    assert(lastHumanIdx < firstBotIdx, `(subadmin) последен човек (${lastHumanIdx}) трябва да е преди първия бот (${firstBotIdx})`)
   })
 
   // ─── Invalid page numbers (в рамките на СЪЩИЯ snapshot) ────────────────────
