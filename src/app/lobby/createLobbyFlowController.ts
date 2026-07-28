@@ -40,6 +40,7 @@ import type {
   FriendshipsSnapshot,
   LeaderboardCategory,
   LeaderboardsSnapshot,
+  LobbyChatMessageSnapshot,
   MatchFoundMessage,
   MatchRoomSnapshot,
   MatchStake,
@@ -117,6 +118,10 @@ export type CreateLobbyFlowControllerOptions = {
   getOnlinePlayersCount?: () => number
   getApiBaseUrl?: () => string
   getIsInGame?: () => boolean
+  onLobbyChatSubscribe?: () => void
+  onLobbyChatUnsubscribe?: () => void
+  onLobbyChatSend?: (body: string, requestId: string) => void
+  onLobbyChatDeleteMessage?: (messageId: string) => void
   suppressRendering?: boolean
   onLoginSubmit?: (email: string, password: string) => Promise<string | null>
   onRegisterSubmit?: (
@@ -463,6 +468,10 @@ export type LobbyFlowController = {
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
   resetToLobby: () => void
   openAuthModal: (mode: Exclude<import('./renderLobbyScreen').LobbyAuthModalMode, 'closed'>) => void
+  suspendLobbyChatForActiveRoom: () => void
+  forceLobbyChatResubscribeIfOnLobbyScreen: () => void
+  updateLobbyChatDraft: (value: string) => void
+  submitLobbyChatMessage: () => void
   refreshMissionsCount: () => void
   refreshDailyRewardsStatus: () => void
   refreshSupportUnread: () => void
@@ -610,6 +619,14 @@ type InternalLobbyFlowState = {
   chatMessagesLoading: boolean
   chatErrorText: string | null
   chatDraftByFriendshipId: Record<string, string>
+  // Общ лайв чат в лобито (отделен от chatConversations/chatMessages по-горе —
+  // тези са за 1:1 личния чат от раздел "ЧАТ"; виж CLAUDE.md/задачата).
+  lobbyChatMessages: LobbyChatMessageSnapshot[]
+  lobbyChatSubscribed: boolean
+  lobbyChatDraft: string
+  lobbyChatSending: boolean
+  lobbyChatPendingRequestId: string | null
+  lobbyChatErrorText: string | null
   notificationsOpen: boolean
   pendingFriendRequests: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   missionsPopupOpen: boolean
@@ -727,6 +744,7 @@ type InternalLobbyFlowState = {
 
 const DEFAULT_REQUIRED_PLAYERS = 4
 const DEFAULT_COUNTDOWN_MS = 20000
+const LOBBY_CHAT_CLIENT_MAX_MESSAGES = 80
 const GUEST_TRIAL_MAX_GAMES = 3
 export const GUEST_TRIAL_STAKE: MatchStake = 5000
 const FINAL_FILL_START_REMAINING_MS = 3000
@@ -870,6 +888,12 @@ function createInitialState(): InternalLobbyFlowState {
     chatMessagesLoading: false,
     chatErrorText: null,
     chatDraftByFriendshipId: {},
+    lobbyChatMessages: [],
+    lobbyChatSubscribed: false,
+    lobbyChatDraft: '',
+    lobbyChatSending: false,
+    lobbyChatPendingRequestId: null,
+    lobbyChatErrorText: null,
     notificationsOpen: false,
     pendingFriendRequests: [],
     missionsPopupOpen: false,
@@ -2050,6 +2074,11 @@ export function createLobbyFlowController(
       chatMessagesLoading: state.chatMessagesLoading,
       chatErrorText: state.chatErrorText,
       chatDraftByFriendshipId: state.chatDraftByFriendshipId,
+      lobbyChatMessages: state.lobbyChatMessages,
+      lobbyChatSubscribed: state.lobbyChatSubscribed,
+      lobbyChatDraft: state.lobbyChatDraft,
+      lobbyChatSending: state.lobbyChatSending,
+      lobbyChatErrorText: state.lobbyChatErrorText,
       authModalMode: state.authModalMode,
       authErrorText: state.authErrorText,
       guestTrialPopup: state.guestTrialPopup,
@@ -2538,6 +2567,15 @@ export function createLobbyFlowController(
           el.textContent = message
           el.style.display = ''
         }
+      },
+      onLobbyChatDraftChange: (value) => {
+        updateLobbyChatDraft(value)
+      },
+      onLobbyChatSubmit: () => {
+        submitLobbyChatMessage()
+      },
+      onLobbyChatDelete: (messageId) => {
+        options.onLobbyChatDeleteMessage?.(messageId)
       },
       onGuestTrialPlayClick: () => {
         handleGuestTrialPlayClick()
@@ -5662,6 +5700,73 @@ export function createLobbyFlowController(
     startLiveCountdownLoop()
   }
 
+  // Общ лайв чат в лобито — subscribe/unsubscribe lifecycle.
+  //
+  // reconcileLobbyChatSubscription() се вика на всеки render() и покрива
+  // цялата ВЪТРЕШНА навигация в лобито (players/friends/chat/admin/...) чрез
+  // единствения източник на истина state.currentScreen — субектите на
+  // навигационни функции не се докосват едно по едно.
+  //
+  // Влизане/възстановяване на игра НЕ минава през state.currentScreen (лобито
+  // просто спира да се рендира, докато activeRoom държи екрана) — затова
+  // suspendLobbyChatForActiveRoom() се вика ИЗРИЧНО от main.ts на точните
+  // 2 места, където това реално се случва (match_found, room_resumed).
+  //
+  // forceLobbyChatResubscribeIfOnLobbyScreen() се вика от main.ts на всяко
+  // WS 'open' (нова връзка = нов connection.id на сървъра => старият
+  // subscribe за тази връзка вече не важи там), но само ресетва bookkeeping-а
+  // и оставя reconcile/директния fetch да свърши същинската работа, ако
+  // клиентът наистина Е на началния екран в момента на reconnect-а.
+  function reconcileLobbyChatSubscription(): void {
+    const shouldBeSubscribed = state.currentScreen === 'lobby'
+
+    if (!shouldBeSubscribed) {
+      if (state.lobbyChatSubscribed) {
+        options.onLobbyChatUnsubscribe?.()
+      }
+      state.lobbyChatSubscribed = false
+      state.lobbyChatMessages = []
+      return
+    }
+
+    if (!state.lobbyChatSubscribed) {
+      options.onLobbyChatSubscribe?.()
+      state.lobbyChatSubscribed = true
+    }
+  }
+
+  function suspendLobbyChatForActiveRoom(): void {
+    if (state.lobbyChatSubscribed) {
+      options.onLobbyChatUnsubscribe?.()
+    }
+    state.lobbyChatSubscribed = false
+    state.lobbyChatMessages = []
+  }
+
+  function forceLobbyChatResubscribeIfOnLobbyScreen(): void {
+    state.lobbyChatSubscribed = false
+    reconcileLobbyChatSubscription()
+  }
+
+  function updateLobbyChatDraft(value: string): void {
+    state.lobbyChatDraft = value
+  }
+
+  function submitLobbyChatMessage(): void {
+    const trimmed = state.lobbyChatDraft.trim()
+
+    if (trimmed === '' || state.lobbyChatSending) {
+      return
+    }
+
+    const requestId = `lc-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    state.lobbyChatSending = true
+    state.lobbyChatErrorText = null
+    state.lobbyChatPendingRequestId = requestId
+    options.onLobbyChatSend?.(trimmed, requestId)
+    render()
+  }
+
   function render(): void {
     if (_renderTimerId !== null) {
       clearTimeout(_renderTimerId)
@@ -5670,6 +5775,7 @@ export function createLobbyFlowController(
     if (shouldSuppressLobbyRender()) {
       return
     }
+    reconcileLobbyChatSubscription()
     if (state.authModalMode !== 'closed') {
       if (state.authSubmitInFlight) {
         return
@@ -6262,6 +6368,81 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'lobby_chat_history') {
+      // Merge с дедупликация по messageId — живо съобщение може вече да е
+      // пристигнало (напр. през cross-instance poll-а) преди историята,
+      // ако subscribe/insert са паднали в много тясен race прозорец.
+      const freshIds = new Set(message.messages.map((m) => m.messageId))
+      const minFreshSeq = message.messages.length > 0
+        ? Math.min(...message.messages.map((m) => m.seq))
+        : null
+
+      // Reconnect/re-subscribe reconciliation: ако клиентско съобщение пада в
+      // обхвата на свежата история (seq >= минималния в нея), но вече го НЯМА
+      // там — значи е било изтрито от admin, докато сме били offline/не
+      // абонирани. Без това то би останало "залепено" в изгледа завинаги
+      // (само lobby_chat_message_deleted, пропуснат докато сме офлайн, не би
+      // го премахнал). Съобщения ПРЕДИ обхвата на историята не се пипат —
+      // за тях няма информация дали още съществуват.
+      const keptExisting = minFreshSeq === null
+        ? state.lobbyChatMessages
+        : state.lobbyChatMessages.filter((m) => m.seq < minFreshSeq || freshIds.has(m.messageId))
+
+      const keptExistingIds = new Set(keptExisting.map((m) => m.messageId))
+      const newFromHistory = message.messages.filter((m) => !keptExistingIds.has(m.messageId))
+
+      state.lobbyChatMessages = [...keptExisting, ...newFromHistory]
+        .sort((a, b) => a.seq - b.seq)
+        .slice(-LOBBY_CHAT_CLIENT_MAX_MESSAGES)
+      render()
+      return true
+    }
+
+    if (message.type === 'lobby_chat_message') {
+      const alreadyHave = state.lobbyChatMessages.some((m) => m.messageId === message.messageId)
+      if (!alreadyHave) {
+        state.lobbyChatMessages = [
+          ...state.lobbyChatMessages,
+          {
+            seq: message.seq,
+            messageId: message.messageId,
+            senderProfileId: message.senderProfileId,
+            senderDisplayName: message.senderDisplayName,
+            body: message.body,
+            createdAt: message.createdAt,
+          },
+        ]
+          .sort((a, b) => a.seq - b.seq)
+          .slice(-LOBBY_CHAT_CLIENT_MAX_MESSAGES)
+      }
+
+      if (message.requestId !== undefined && message.requestId === state.lobbyChatPendingRequestId) {
+        state.lobbyChatDraft = ''
+        state.lobbyChatSending = false
+        state.lobbyChatPendingRequestId = null
+        state.lobbyChatErrorText = null
+      }
+
+      render()
+      return true
+    }
+
+    if (message.type === 'lobby_chat_message_deleted') {
+      state.lobbyChatMessages = state.lobbyChatMessages.filter((m) => m.messageId !== message.messageId)
+      render()
+      return true
+    }
+
+    if (message.type === 'lobby_chat_error') {
+      if (message.requestId !== undefined && message.requestId === state.lobbyChatPendingRequestId) {
+        state.lobbyChatSending = false
+        state.lobbyChatPendingRequestId = null
+      }
+      state.lobbyChatErrorText = message.message
+      render()
+      return true
+    }
+
     if (message.type === 'private_rooms_list') {
       state.privateRooms = message.rooms
       render()
@@ -6626,6 +6807,15 @@ export function createLobbyFlowController(
       if (value) {
         _initConnected = true
         maybeHideInitialOverlay()
+      } else {
+        // Ако връзката падне между изпращане на съобщение в лайв чата и
+        // получаване на потвърждение/грешка, lobbyChatSending би останал
+        // "заклещен" true завинаги (никой lobby_chat_message/lobby_chat_error
+        // не би пристигнал вече по тази връзка) — бутонът "изпрати" би
+        // останал disabled дори след успешен reconnect. Нулираме тук, за да
+        // може потребителят да опита пак; чернова текста НЕ се губи.
+        state.lobbyChatSending = false
+        state.lobbyChatPendingRequestId = null
       }
       render()
     },
@@ -6674,6 +6864,10 @@ export function createLobbyFlowController(
     startMatchmaking,
     resetToLobby,
     openAuthModal,
+    suspendLobbyChatForActiveRoom,
+    forceLobbyChatResubscribeIfOnLobbyScreen,
+    updateLobbyChatDraft,
+    submitLobbyChatMessage,
     refreshMissionsCount: () => { void loadPlayerUnclaimedCount() },
     refreshDailyRewardsStatus: () => { void loadDailyRewardsStatus() },
     removePendingFriendRequest: (friendshipId: string) => {

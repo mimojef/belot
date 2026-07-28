@@ -28,6 +28,12 @@ import {
   type AuthSessionSnapshot,
 } from './db/authStore.js'
 import { createChatStore } from './db/chatStore.js'
+import { createLobbyChatStore } from './db/lobbyChatStore.js'
+import {
+  validateLobbyChatBody,
+  countUnicodeCodePoints,
+  LOBBY_CHAT_MAX_BODY_CODE_POINTS,
+} from './protocol/lobbyChatValidation.js'
 import { createSupportStore, type SupportMessageSnapshot, type SupportConversationSnapshot } from './db/supportStore.js'
 import { createGuestContactStore } from './db/guestContactStore.js'
 import {
@@ -161,6 +167,7 @@ import {
 } from './game/createRoomShadowSynchronizer.js'
 import { resolveGameWorkerEntryUrl } from './game/resolveGameWorkerEntryUrl.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
+import type { LobbyChatErrorCode } from './protocol/messageTypes.js'
 import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
 import type { PrivateRoom, PrivateRoomMember } from './game/privateRoomsStore.js'
 import { addHumanToRoom } from './core/addHumanToRoom.js'
@@ -343,6 +350,9 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'cancel_private_room_invite':
     case 'respond_private_room_invite':
     case 'request_private_rooms_list':
+    case 'subscribe_lobby_chat':
+    case 'unsubscribe_lobby_chat':
+    case 'send_lobby_chat_message':
       return true
     case 'ping':
     case 'request_player_profile':
@@ -408,6 +418,268 @@ const friendshipStore = await createFriendshipStore(
 const chatStore = await createChatStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
+)
+const lobbyChatStore = await createLobbyChatStore(databaseBootstrap.databaseFilePath)
+
+// ─── Общ лайв чат в лобито (broadcast към абонирани connection-и) ───────────
+//
+// Няколко PM2 процеса споделят една SQLite база (WAL) — всеки процес пази
+// СВОЯ собствена socketRegistry/serverState.connections в паметта, затова
+// insert-ите на ЕДИН процес не стигат автоматично до сокетите на другите.
+// Стратегия: (1) веднага след локален insert/delete — синхронен local
+// broadcast към собствените абонати (нулева латентност); (2) лек периодичен
+// poll (LOBBY_CHAT_POLL_INTERVAL_MS) на споделената SQLite таблица по
+// монотонен `seq`/`event_seq` cursor — announce-ва само редове, които тази
+// инстанция все още не е обявила локално (собствените insert-и вече са
+// напреднали cursor-а синхронно, така че poll-ът естествено announce-ва само
+// съобщения/изтривания от ДРУГИ инстанции — виж runLobbyChatCrossInstancePoll).
+const lobbyChatSubscriberConnectionIds = new Set<ConnectionId>()
+
+const LOBBY_CHAT_HISTORY_LIMIT = 50
+const LOBBY_CHAT_POLL_INTERVAL_MS = 700
+const LOBBY_CHAT_POLL_BATCH_SIZE = 200
+const LOBBY_CHAT_RETENTION_DAYS = 30
+const LOBBY_CHAT_RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000
+const LOBBY_CHAT_RETENTION_STARTUP_DELAY_MS = 45 * 1000
+const LOBBY_CHAT_RETENTION_BATCH_SIZE = 500
+const LOBBY_CHAT_RATE_LIMIT_WINDOW_MS = 10_000
+const LOBBY_CHAT_RATE_LIMIT_MAX_PER_WINDOW = 5
+const LOBBY_CHAT_RATE_LIMIT_CLEANUP_INTERVAL_MS = 30_000
+const LOBBY_CHAT_DUPLICATE_GUARD_MS = 8_000
+
+type LobbyChatRateLimitEntry = { count: number; windowStartedAt: number }
+const lobbyChatRateLimitByProfileId = new Map<string, LobbyChatRateLimitEntry>()
+let lobbyChatRateLimitLastCleanupAt = 0
+
+type LobbyChatLastMessageEntry = { normalizedBody: string; sentAt: number }
+const lobbyChatLastMessageByProfileId = new Map<string, LobbyChatLastMessageEntry>()
+
+// Cache: viewerProfileId -> Set(blockedProfileId) — избягва
+// blockStore.getBlockedProfileIds() при ВСЕКИ recipient на ВСЯКО broadcast-нато
+// съобщение. Инвалидира се изрично при (un)block действие (виж handleProfileBlockRequest).
+// Ограничена по размер (LOBBY_CHAT_BLOCK_CACHE_MAX_ENTRIES) с изтриване на
+// least-recently-used записите — без това, при дълго работещ процес кешът би
+// растял неограничено с всеки различен профил, отворил лайв чата някога.
+const LOBBY_CHAT_BLOCK_CACHE_MAX_ENTRIES = 5000
+const LOBBY_CHAT_BLOCK_CACHE_CLEANUP_INTERVAL_MS = 60_000
+let lobbyChatBlockCacheLastCleanupAt = 0
+
+type LobbyChatBlockCacheEntry = { blockedProfileIds: Set<string>; lastAccessedAt: number }
+const lobbyChatBlockCache = new Map<string, LobbyChatBlockCacheEntry>()
+
+function cleanupLobbyChatBlockCacheIfNeeded(now: number): void {
+  if (
+    now - lobbyChatBlockCacheLastCleanupAt < LOBBY_CHAT_BLOCK_CACHE_CLEANUP_INTERVAL_MS ||
+    lobbyChatBlockCache.size <= LOBBY_CHAT_BLOCK_CACHE_MAX_ENTRIES
+  ) {
+    return
+  }
+  lobbyChatBlockCacheLastCleanupAt = now
+
+  const sortedByOldest = [...lobbyChatBlockCache.entries()]
+    .sort((a, b) => a[1].lastAccessedAt - b[1].lastAccessedAt)
+  const deleteCount = lobbyChatBlockCache.size - LOBBY_CHAT_BLOCK_CACHE_MAX_ENTRIES
+  for (let i = 0; i < deleteCount; i++) {
+    lobbyChatBlockCache.delete(sortedByOldest[i]![0])
+  }
+}
+
+function getLobbyChatBlockedSet(viewerProfileId: string): Set<string> {
+  const now = Date.now()
+  const cached = lobbyChatBlockCache.get(viewerProfileId)
+  if (cached !== undefined) {
+    cached.lastAccessedAt = now
+    return cached.blockedProfileIds
+  }
+  const fresh = new Set(blockStore.getBlockedProfileIds(viewerProfileId))
+  lobbyChatBlockCache.set(viewerProfileId, { blockedProfileIds: fresh, lastAccessedAt: now })
+  cleanupLobbyChatBlockCacheIfNeeded(now)
+  return fresh
+}
+
+function invalidateLobbyChatBlockCache(profileId: string): void {
+  lobbyChatBlockCache.delete(profileId)
+}
+
+let lobbyChatLastAnnouncedSeq = lobbyChatStore.getMaxSeq()
+let lobbyChatLastAnnouncedDeletionEventSeq = lobbyChatStore.getMaxDeletionEventSeq()
+
+function checkLobbyChatRateLimit(profileId: string, now: number = Date.now()): boolean {
+  const existing = lobbyChatRateLimitByProfileId.get(profileId)
+
+  if (!existing || now - existing.windowStartedAt >= LOBBY_CHAT_RATE_LIMIT_WINDOW_MS) {
+    lobbyChatRateLimitByProfileId.set(profileId, { count: 1, windowStartedAt: now })
+    return true
+  }
+
+  if (existing.count >= LOBBY_CHAT_RATE_LIMIT_MAX_PER_WINDOW) {
+    return false
+  }
+
+  existing.count += 1
+  return true
+}
+
+function isDuplicateLobbyChatMessage(profileId: string, normalizedBody: string, now: number = Date.now()): boolean {
+  const last = lobbyChatLastMessageByProfileId.get(profileId)
+  return last !== undefined
+    && last.normalizedBody === normalizedBody
+    && now - last.sentAt < LOBBY_CHAT_DUPLICATE_GUARD_MS
+}
+
+function recordLobbyChatSentMessage(profileId: string, normalizedBody: string, now: number = Date.now()): void {
+  lobbyChatLastMessageByProfileId.set(profileId, { normalizedBody, sentAt: now })
+}
+
+function cleanupLobbyChatRateLimitState(now: number): void {
+  if (now - lobbyChatRateLimitLastCleanupAt < LOBBY_CHAT_RATE_LIMIT_CLEANUP_INTERVAL_MS) {
+    return
+  }
+  lobbyChatRateLimitLastCleanupAt = now
+
+  for (const [profileId, entry] of lobbyChatRateLimitByProfileId.entries()) {
+    if (now - entry.windowStartedAt >= LOBBY_CHAT_RATE_LIMIT_WINDOW_MS) {
+      lobbyChatRateLimitByProfileId.delete(profileId)
+    }
+  }
+
+  for (const [profileId, entry] of lobbyChatLastMessageByProfileId.entries()) {
+    if (now - entry.sentAt >= LOBBY_CHAT_DUPLICATE_GUARD_MS) {
+      lobbyChatLastMessageByProfileId.delete(profileId)
+    }
+  }
+}
+
+type LobbyChatBroadcastSnapshot = {
+  seq: number
+  messageId: string
+  senderProfileId: string
+  senderDisplayName: string
+  body: string
+  createdAt: string
+}
+
+function broadcastLobbyChatMessageToLocalSubscribers(
+  snapshot: LobbyChatBroadcastSnapshot,
+  opts?: { originatingConnectionId?: ConnectionId; requestId?: string },
+): void {
+  for (const subscriberConnectionId of [...lobbyChatSubscriberConnectionIds]) {
+    const subscriberConnection = getConnectionById(serverState, subscriberConnectionId)
+    const socket = socketRegistry.get(subscriberConnectionId)
+
+    if (subscriberConnection === null || !socket || socket.readyState !== WebSocket.OPEN) {
+      lobbyChatSubscriberConnectionIds.delete(subscriberConnectionId)
+      continue
+    }
+
+    if (
+      subscriberConnection.profileId !== null &&
+      getLobbyChatBlockedSet(subscriberConnection.profileId).has(snapshot.senderProfileId)
+    ) {
+      continue
+    }
+
+    const isOriginator = opts?.originatingConnectionId === subscriberConnectionId
+
+    safeSendToConnection(subscriberConnectionId, {
+      type: 'lobby_chat_message',
+      seq: snapshot.seq,
+      messageId: snapshot.messageId,
+      senderProfileId: snapshot.senderProfileId,
+      senderDisplayName: snapshot.senderDisplayName,
+      body: snapshot.body,
+      createdAt: snapshot.createdAt,
+      ...(isOriginator && opts?.requestId ? { requestId: opts.requestId } : {}),
+    })
+  }
+}
+
+function broadcastLobbyChatDeletionToLocalSubscribers(messageId: string): void {
+  for (const subscriberConnectionId of [...lobbyChatSubscriberConnectionIds]) {
+    const subscriberConnection = getConnectionById(serverState, subscriberConnectionId)
+    const socket = socketRegistry.get(subscriberConnectionId)
+
+    if (subscriberConnection === null || !socket || socket.readyState !== WebSocket.OPEN) {
+      lobbyChatSubscriberConnectionIds.delete(subscriberConnectionId)
+      continue
+    }
+
+    safeSendToConnection(subscriberConnectionId, {
+      type: 'lobby_chat_message_deleted',
+      messageId,
+    })
+  }
+}
+
+function runLobbyChatCrossInstancePoll(): void {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  const now = Date.now()
+  cleanupLobbyChatRateLimitState(now)
+
+  try {
+    const newMessages = lobbyChatStore.pollNewMessages(lobbyChatLastAnnouncedSeq, LOBBY_CHAT_POLL_BATCH_SIZE)
+    for (const message of newMessages) {
+      lobbyChatLastAnnouncedSeq = Math.max(lobbyChatLastAnnouncedSeq, message.seq)
+
+      if (message.deletedAt !== null) {
+        // Вмъкнато И изтрито (от друга инстанция) между два тика на тази
+        // инстанция — deletion poll-ът по-долу announce-ва изтриването;
+        // тук не показваме съобщение, което вече не съществува.
+        continue
+      }
+
+      broadcastLobbyChatMessageToLocalSubscribers(message)
+    }
+  } catch (error) {
+    console.error('[lobby-chat] cross-instance message poll failed:', error)
+  }
+
+  try {
+    const deletionEvents = lobbyChatStore.pollDeletionEvents(
+      lobbyChatLastAnnouncedDeletionEventSeq,
+      LOBBY_CHAT_POLL_BATCH_SIZE,
+    )
+    for (const event of deletionEvents) {
+      lobbyChatLastAnnouncedDeletionEventSeq = Math.max(lobbyChatLastAnnouncedDeletionEventSeq, event.eventSeq)
+      broadcastLobbyChatDeletionToLocalSubscribers(event.messageId)
+    }
+  } catch (error) {
+    console.error('[lobby-chat] cross-instance deletion poll failed:', error)
+  }
+}
+
+let lobbyChatPollInterval: ReturnType<typeof setInterval> | null = setInterval(
+  runLobbyChatCrossInstancePoll,
+  LOBBY_CHAT_POLL_INTERVAL_MS,
+)
+
+function runLobbyChatRetentionCleanup(): void {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  try {
+    const result = lobbyChatStore.purgeOlderThanDays(LOBBY_CHAT_RETENTION_DAYS, LOBBY_CHAT_RETENTION_BATCH_SIZE)
+    if (result.deletedMessages > 0 || result.deletedDeletionEvents > 0) {
+      console.log(
+        `[lobby-chat] Retention cleanup: deleted messages=${result.deletedMessages} deletionEvents=${result.deletedDeletionEvents}`,
+      )
+    }
+  } catch (error) {
+    console.error('[lobby-chat] Retention cleanup failed:', error)
+  }
+}
+
+let lobbyChatRetentionStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+  runLobbyChatRetentionCleanup,
+  LOBBY_CHAT_RETENTION_STARTUP_DELAY_MS,
+)
+let lobbyChatRetentionInterval: ReturnType<typeof setInterval> | null = setInterval(
+  runLobbyChatRetentionCleanup,
+  LOBBY_CHAT_RETENTION_INTERVAL_MS,
 )
 const yellowCoinGiftStore = await createYellowCoinGiftStore(
   databaseBootstrap.databaseFilePath,
@@ -4071,6 +4343,7 @@ async function handleProfileBlockRequest(
     }
 
     const result = blockStore.toggleBlock(myProfileId, targetProfileId)
+    invalidateLobbyChatBlockCache(myProfileId)
 
     if (result.limitReached) {
       sendJsonResponse(res, 429, {
@@ -5604,6 +5877,61 @@ async function handleChatRequest(
   return false
 }
 
+// Модерация на общия лайв чат — само пълен admin (isFullAdminSession
+// проверява ролята НА МОМЕНТА през жива JOIN към accounts, виж
+// authStore.getSession). HTTP (не WS), нарочно — за да имаме прясна
+// cookie-based сесийна проверка на всяко изтриване, а не роля кеширана
+// само при WS handshake-а на дълготрайна връзка.
+async function handleLobbyChatDeleteRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const deleteMatch = /^\/api\/lobby-chat\/messages\/([^/]+)$/.exec(pathname)
+
+  if (deleteMatch === null || req.method !== 'DELETE') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, {
+      ok: false,
+      message: 'Само пълен администратор може да трие съобщения от общия чат.',
+    })
+    return true
+  }
+
+  const messageId = decodeURIComponent(deleteMatch[1]).trim()
+
+  if (messageId.length === 0) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Липсва message ID.' })
+    return true
+  }
+
+  const result = lobbyChatStore.deleteMessage({
+    messageId,
+    actorAccountId: session.account.accountId,
+  })
+
+  if (!result.ok && result.code === 'not_found') {
+    sendJsonResponse(res, 404, { ok: false, message: 'Съобщението не беше намерено.' })
+    return true
+  }
+
+  // 'already_deleted' и прясно успешно изтриване се третират еднакво навън —
+  // идемпотентно: гарантирано вече не съществува в потока при връщане 200.
+  if (result.ok) {
+    lobbyChatLastAnnouncedDeletionEventSeq = lobbyChatStore.getMaxDeletionEventSeq()
+    broadcastLobbyChatDeletionToLocalSubscribers(messageId)
+  }
+
+  sendJsonResponse(res, 200, { ok: true, messageId })
+  return true
+}
+
 async function handleMissionsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -6627,6 +6955,10 @@ async function handleHttpRequest(
   }
 
   if (await handleChatRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleLobbyChatDeleteRequest(req, res, requestUrl.pathname)) {
     return
   }
 
@@ -8329,6 +8661,99 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (message.type === 'subscribe_lobby_chat') {
+        lobbyChatSubscriberConnectionIds.add(connection.id)
+
+        const latestConnection = getConnectionById(serverState, connection.id)
+        const excludedSenderProfileIds = latestConnection?.profileId != null
+          ? [...getLobbyChatBlockedSet(latestConnection.profileId)]
+          : []
+
+        const history = lobbyChatStore.listRecentMessages(LOBBY_CHAT_HISTORY_LIMIT, excludedSenderProfileIds)
+
+        safeSendToConnection(connection.id, {
+          type: 'lobby_chat_history',
+          messages: history.map((m) => ({
+            seq: m.seq,
+            messageId: m.messageId,
+            senderProfileId: m.senderProfileId,
+            senderDisplayName: m.senderDisplayName,
+            body: m.body,
+            createdAt: m.createdAt,
+          })),
+        })
+        return
+      }
+
+      if (message.type === 'unsubscribe_lobby_chat') {
+        lobbyChatSubscriberConnectionIds.delete(connection.id)
+        return
+      }
+
+      if (message.type === 'send_lobby_chat_message') {
+        const requestId = message.requestId
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        function sendLobbyChatError(code: LobbyChatErrorCode, errorMessage: string): void {
+          safeSendToConnection(connection.id, {
+            type: 'lobby_chat_error',
+            code,
+            message: errorMessage,
+            ...(requestId ? { requestId } : {}),
+          })
+        }
+
+        if (latestConnection?.profileId == null) {
+          sendLobbyChatError('not_authenticated', 'Трябва да влезеш в профила си, за да пишеш в чата.')
+          return
+        }
+
+        if (playerProgressStore.isTemporaryProfile(latestConnection.profileId)) {
+          sendLobbyChatError('guest_not_allowed', 'Общ чат само за регистрирани потребители.')
+          return
+        }
+
+        const validation = validateLobbyChatBody(message.body)
+
+        if (!validation.ok) {
+          const messagesByCode: Record<typeof validation.code, string> = {
+            empty_body: 'Съобщението не може да бъде празно.',
+            body_too_long: `Съобщението може да е най-много ${LOBBY_CHAT_MAX_BODY_CODE_POINTS} символа.`,
+            invalid_body: 'Съобщението съдържа неразрешени символи.',
+          }
+          sendLobbyChatError(validation.code, messagesByCode[validation.code])
+          return
+        }
+
+        if (!checkLobbyChatRateLimit(latestConnection.profileId)) {
+          sendLobbyChatError('rate_limited', 'Твърде много съобщения. Изчакай малко и опитай пак.')
+          return
+        }
+
+        if (isDuplicateLobbyChatMessage(latestConnection.profileId, validation.body)) {
+          sendLobbyChatError('duplicate_message', 'Вече изпрати това съобщение.')
+          return
+        }
+
+        const publicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
+        const senderDisplayName = publicProfile?.displayName?.trim() || 'Играч'
+
+        const snapshot = lobbyChatStore.insertMessage({
+          senderProfileId: latestConnection.profileId,
+          senderDisplayName,
+          body: validation.body,
+        })
+
+        lobbyChatLastAnnouncedSeq = Math.max(lobbyChatLastAnnouncedSeq, snapshot.seq)
+        recordLobbyChatSentMessage(latestConnection.profileId, validation.body)
+
+        broadcastLobbyChatMessageToLocalSubscribers(snapshot, {
+          originatingConnectionId: connection.id,
+          requestId,
+        })
+        return
+      }
+
       sendJsonMessage(socket, {
         type: 'error',
         message: 'Unsupported message type.',
@@ -8346,6 +8771,7 @@ wsServer.on('connection', (socket, request) => {
 
   socket.on('close', () => {
     guestIdByConnection.delete(connection.id)
+    lobbyChatSubscriberConnectionIds.delete(connection.id)
 
     try {
       if (isServerShuttingDown) {
@@ -8618,6 +9044,21 @@ function clearMutationTimersForShutdown(): void {
     missionRotationTimeout = null
   }
 
+  if (lobbyChatPollInterval !== null) {
+    clearInterval(lobbyChatPollInterval)
+    lobbyChatPollInterval = null
+  }
+
+  if (lobbyChatRetentionInterval !== null) {
+    clearInterval(lobbyChatRetentionInterval)
+    lobbyChatRetentionInterval = null
+  }
+
+  if (lobbyChatRetentionStartupTimeout !== null) {
+    clearTimeout(lobbyChatRetentionStartupTimeout)
+    lobbyChatRetentionStartupTimeout = null
+  }
+
   clearPrivateRoomInviteTimers()
   monitoringSampler?.stop()
   monitoringSampler = null
@@ -8651,6 +9092,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('authStore', () => authStore.close())
   closeStore('friendshipStore', () => friendshipStore.close())
   closeStore('chatStore', () => chatStore.close())
+  closeStore('lobbyChatStore', () => lobbyChatStore.close())
   closeStore('yellowCoinGiftStore', () => yellowCoinGiftStore.close())
   closeStore('tableExitPenaltyStore', () => tableExitPenaltyStore.close())
   closeStore('matchEconomyStore', () => matchEconomyStore.close())

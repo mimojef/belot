@@ -439,6 +439,34 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return { type: 'cancel_private_room_invite', inviteId }
     }
 
+    if (parsed.type === 'subscribe_lobby_chat') {
+      return { type: 'subscribe_lobby_chat' }
+    }
+
+    if (parsed.type === 'unsubscribe_lobby_chat') {
+      return { type: 'unsubscribe_lobby_chat' }
+    }
+
+    if (parsed.type === 'send_lobby_chat_message') {
+      // Само структурна проверка (тип на полето) — семантичните правила
+      // (дължина в Unicode code points, забранени символи, rate limit)
+      // се прилагат в index.ts, за да могат да върнат конкретен
+      // `lobby_chat_error.code` + requestId, а не generic parse failure.
+      if (typeof parsed.body !== 'string') {
+        return null
+      }
+
+      const requestId = typeof parsed.requestId === 'string' && parsed.requestId.trim() !== ''
+        ? parsed.requestId.trim().slice(0, 100)
+        : undefined
+
+      return {
+        type: 'send_lobby_chat_message',
+        body: parsed.body,
+        ...(requestId !== undefined ? { requestId } : {}),
+      }
+    }
+
     if (parsed.type === 'respond_private_room_invite') {
       const inviteId = normalizeRequiredText(parsed.inviteId)
 

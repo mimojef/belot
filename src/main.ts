@@ -1880,6 +1880,24 @@ async function loadChatMessages(friendshipId: string): Promise<
   }
 }
 
+// Модерация на общия лайв чат в лобито — само пълен admin (сървърът проверява
+// ролята НА МОМЕНТА, виж handleLobbyChatDeleteRequest в server/src/index.ts).
+// UI обновяването идва по WS (lobby_chat_message_deleted broadcast до всички
+// абонирани, вкл. самия admin), затова тук не правим оптимистично премахване.
+async function deleteLobbyChatMessage(messageId: string): Promise<void> {
+  try {
+    await fetch(
+      `${getApiBaseUrl()}/api/lobby-chat/messages/${encodeURIComponent(messageId)}`,
+      {
+        method: 'DELETE',
+        credentials: 'include',
+      },
+    )
+  } catch {
+    // Мълчаливо: липса на връзка тук не е критична — admin може да опита пак.
+  }
+}
+
 /**
  * Единственият path, който маркира разговор като прочетен — и на сървъра
  * (source of truth за shouldNotify при бъдещи съобщения), и локално в
@@ -3140,7 +3158,20 @@ lobby = createLobbyFlowController({
   },
   onGuestTrialStatusLoad: () => loadGuestTrialStatus(),
   onMatchFound: (message, stakeAlreadyShown) => {
+    lobby.suspendLobbyChatForActiveRoom()
     activeRoom.enterActiveRoom(message, stakeAlreadyShown)
+  },
+  onLobbyChatSubscribe: () => {
+    client.subscribeLobbyChat()
+  },
+  onLobbyChatUnsubscribe: () => {
+    client.unsubscribeLobbyChat()
+  },
+  onLobbyChatSend: (body, requestId) => {
+    client.sendLobbyChatMessage(body, requestId)
+  },
+  onLobbyChatDeleteMessage: (messageId) => {
+    void deleteLobbyChatMessage(messageId)
   },
   getAuthSession: () => currentAuthSession,
   getIsInGame: () => activeRoom.hasActiveRoom(),
@@ -3581,6 +3612,12 @@ client = createGameServerClient({
     if (!_isResetPasswordPath) {
       lobby.setConnected(true)
       lobby.setErrorText(null)
+      // Нова WS връзка = нов connection.id на сървъра, старият lobby chat
+      // subscribe (ако имаше такъв на предишната връзка) вече не важи там.
+      // Форсира свеж subscribe_lobby_chat САМО ако клиентът реално е на
+      // началния екран в момента на reconnect-а (виж коментара над
+      // reconcileLobbyChatSubscription в createLobbyFlowController.ts).
+      lobby.forceLobbyChatResubscribeIfOnLobbyScreen()
     }
 
     requestPwaUpdateApplyAttempt()
@@ -3652,6 +3689,7 @@ client = createGameServerClient({
     }
 
     if (message.type === 'session_in_game') {
+      lobby.suspendLobbyChatForActiveRoom()
       showSessionInGameOverlay(message.roomId, message.reconnectToken)
       return
     }
@@ -3707,6 +3745,22 @@ client = createGameServerClient({
         // че conversation/unread state е остарял; реалният refresh се случва
         // при следващ сигурен lifecycle момент — виж attemptPendingChatRefresh().
         markPendingChatRefresh()
+      }
+      return
+    }
+
+    if (
+      message.type === 'lobby_chat_history' ||
+      message.type === 'lobby_chat_message' ||
+      message.type === 'lobby_chat_message_deleted' ||
+      message.type === 'lobby_chat_error'
+    ) {
+      // Абонаментът вече се сваля изрично при влизане/възстановяване на игра
+      // (suspendLobbyChatForActiveRoom), затова сървърът не би трябвало да
+      // праща тези съобщения по време на игра — проверката тук е допълнителна
+      // защита, не основният механизъм.
+      if (!activeRoom.hasActiveRoom()) {
+        lobby.handleServerMessage(message)
       }
       return
     }
@@ -3774,6 +3828,7 @@ client = createGameServerClient({
 
     if (message.type === 'room_resumed' && !activeRoom.hasActiveRoom()) {
       removeLandingOverlay()
+      lobby.suspendLobbyChatForActiveRoom()
       activeRoom.enterActiveRoomFromResume(message.roomId, message.seat, 5000)
       return
     }

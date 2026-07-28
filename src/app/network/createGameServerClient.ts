@@ -480,6 +480,17 @@ export type ClientMessage =
   | {
       type: 'request_private_rooms_list'
     }
+  | {
+      type: 'subscribe_lobby_chat'
+    }
+  | {
+      type: 'unsubscribe_lobby_chat'
+    }
+  | {
+      type: 'send_lobby_chat_message'
+      body: string
+      requestId?: string
+    }
 
 export type PrivateRoomMemberSnapshot = {
   profileId: string | null
@@ -999,6 +1010,52 @@ export type PendingGiftNotificationsMessage = {
   gifts: Array<{ giftId: string; amount: number; fromDisplayName: string }>
 }
 
+// --- Общ лайв чат в лобито (разделен от ChatMessageReceivedMessage — това
+// е публичен broadcast поток, не 1:1 нотификация между приятели) ---
+
+export type LobbyChatMessageSnapshot = {
+  seq: number
+  messageId: string
+  senderProfileId: string
+  senderDisplayName: string
+  body: string
+  createdAt: string
+}
+
+export type LobbyChatHistoryMessage = {
+  type: 'lobby_chat_history'
+  messages: LobbyChatMessageSnapshot[]
+}
+
+export type LobbyChatMessageEventMessage = LobbyChatMessageSnapshot & {
+  type: 'lobby_chat_message'
+  requestId?: string
+}
+
+export type LobbyChatMessageDeletedMessage = {
+  type: 'lobby_chat_message_deleted'
+  messageId: string
+}
+
+export type LobbyChatErrorCode =
+  | 'not_authenticated'
+  | 'guest_not_allowed'
+  | 'empty_body'
+  | 'body_too_long'
+  | 'invalid_body'
+  | 'duplicate_message'
+  | 'rate_limited'
+  | 'not_found'
+  | 'already_deleted'
+  | 'forbidden'
+
+export type LobbyChatErrorMessage = {
+  type: 'lobby_chat_error'
+  code: LobbyChatErrorCode
+  message: string
+  requestId?: string
+}
+
 export type ServerMessage =
   | ConnectedMessage
   | PongMessage
@@ -1046,6 +1103,10 @@ export type ServerMessage =
   | FriendAcceptanceNotificationReadMessage
   | CoinsGiftedMessage
   | PendingGiftNotificationsMessage
+  | LobbyChatHistoryMessage
+  | LobbyChatMessageEventMessage
+  | LobbyChatMessageDeletedMessage
+  | LobbyChatErrorMessage
 
 type CreateGameServerClientOptions = {
   url?: string
@@ -1084,6 +1145,9 @@ export type GameServerClient = {
   inviteToPrivateRoom: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
   cancelPrivateRoomInvite: (inviteId: string) => void
   respondPrivateRoomInvite: (inviteId: string, accept: boolean) => void
+  subscribeLobbyChat: () => void
+  unsubscribeLobbyChat: () => void
+  sendLobbyChatMessage: (body: string, requestId?: string) => void
 }
 
 function getDefaultServerUrl(): string {
@@ -1343,6 +1407,18 @@ export function createGameServerClient(
     send({ type: 'respond_private_room_invite', inviteId, accept })
   }
 
+  function subscribeLobbyChat(): void {
+    send({ type: 'subscribe_lobby_chat' })
+  }
+
+  function unsubscribeLobbyChat(): void {
+    send({ type: 'unsubscribe_lobby_chat' })
+  }
+
+  function sendLobbyChatMessage(body: string, requestId?: string): void {
+    send({ type: 'send_lobby_chat_message', body, requestId })
+  }
+
   return {
     connect,
     disconnect,
@@ -1372,5 +1448,8 @@ export function createGameServerClient(
     inviteToPrivateRoom,
     cancelPrivateRoomInvite,
     respondPrivateRoomInvite,
+    subscribeLobbyChat,
+    unsubscribeLobbyChat,
+    sendLobbyChatMessage,
   }
 }

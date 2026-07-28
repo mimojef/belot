@@ -142,6 +142,17 @@ export type ClientMessage =
   | {
       type: 'request_private_rooms_list'
     }
+  | {
+      type: 'subscribe_lobby_chat'
+    }
+  | {
+      type: 'unsubscribe_lobby_chat'
+    }
+  | {
+      type: 'send_lobby_chat_message'
+      body: string
+      requestId?: string
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -629,6 +640,10 @@ export type ServerMessage =
   | PendingFriendRequestsMessage
   | PendingAcceptanceNotificationsMessage
   | FriendAcceptanceNotificationReadMessage
+  | LobbyChatHistoryMessage
+  | LobbyChatMessageReceivedMessage
+  | LobbyChatMessageDeletedMessage
+  | LobbyChatErrorMessage
 
 export type ProfileLikedMessage = {
   type: 'profile_liked'
@@ -687,6 +702,51 @@ export type PendingAcceptanceNotificationsMessage = {
 export type FriendAcceptanceNotificationReadMessage = {
   type: 'friend_acceptance_notification_read'
   friendshipId: string
+}
+
+// --- Lobby live chat (общ публичен чат в лобито — виж lobbyChatStore.ts) ---
+
+export type LobbyChatMessageSnapshot = {
+  seq: number
+  messageId: string
+  senderProfileId: string
+  senderDisplayName: string
+  body: string
+  createdAt: string
+}
+
+export type LobbyChatHistoryMessage = {
+  type: 'lobby_chat_history'
+  messages: LobbyChatMessageSnapshot[]
+}
+
+export type LobbyChatMessageReceivedMessage = LobbyChatMessageSnapshot & {
+  type: 'lobby_chat_message'
+  requestId?: string
+}
+
+export type LobbyChatMessageDeletedMessage = {
+  type: 'lobby_chat_message_deleted'
+  messageId: string
+}
+
+export type LobbyChatErrorCode =
+  | 'not_authenticated'
+  | 'guest_not_allowed'
+  | 'empty_body'
+  | 'body_too_long'
+  | 'invalid_body'
+  | 'duplicate_message'
+  | 'rate_limited'
+  | 'not_found'
+  | 'already_deleted'
+  | 'forbidden'
+
+export type LobbyChatErrorMessage = {
+  type: 'lobby_chat_error'
+  code: LobbyChatErrorCode
+  message: string
+  requestId?: string
 }
 
 export function getDisplayNameFromIdentity(

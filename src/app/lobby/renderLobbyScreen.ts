@@ -12,6 +12,7 @@ import type {
   FriendshipsSnapshot,
   LeaderboardCategory,
   LeaderboardsSnapshot,
+  LobbyChatMessageSnapshot,
   MatchStake,
   MissionTemplateInput,
   MatchRoomSnapshot,
@@ -60,7 +61,7 @@ const MISSION_TYPE_LABELS: Record<string, string> = {
   announce_belot: 'Обяви N белота',
 }
 
-export type LobbyAuthModalMode = 'closed' | 'cta' | 'login' | 'register' | 'forgot-password'
+export type LobbyAuthModalMode = 'closed' | 'cta' | 'login' | 'register' | 'forgot-password' | 'lobby-chat-guest'
 
 let _persistentAvatarInput: HTMLInputElement | null = null
 let _persistentGalleryInput: HTMLInputElement | null = null
@@ -215,6 +216,13 @@ export type LobbyScreenState = {
   // Пази се отделно от chatMessages, за да не се губи при re-render, предизвикан от входящо
   // съобщение, polling или друго фоново обновяване, докато потребителят пише.
   chatDraftByFriendshipId: Record<string, string>
+  // Общ лайв чат в лобито (херо карето на началния екран) — отделен поток от
+  // chatConversations/chatMessages по-горе (личен 1:1 чат от раздел "ЧАТ").
+  lobbyChatMessages: LobbyChatMessageSnapshot[]
+  lobbyChatSubscribed: boolean
+  lobbyChatDraft: string
+  lobbyChatSending: boolean
+  lobbyChatErrorText: string | null
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
   guestTrialPopup: GuestTrialPopupState
@@ -425,6 +433,9 @@ export type RenderLobbyScreenOptions = {
   onAuthModalClose: () => void
   onAuthModeChange: (mode: Exclude<LobbyAuthModalMode, 'closed'>) => void
   onAuthError: (message: string) => void
+  onLobbyChatDraftChange: (value: string) => void
+  onLobbyChatSubmit: () => void
+  onLobbyChatDelete: (messageId: string) => void
   onGuestTrialPlayClick: () => void
   onGuestTrialRegisterClick: () => void
   onGuestTrialLoginClick: () => void
@@ -903,6 +914,18 @@ function renderAuthModal(state: LobbyScreenState): string {
         </div>
         <div style="font-size:15px;line-height:1.5;color:rgba(255,255,255,0.72);font-weight:700;">
           Създай профил, избери име и отключи всички маси. Използвай чат с приятели, изпращай подаръци, печели жълтици и трупай рейтинг.
+        </div>
+        <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:6px;">
+          <button type="button" data-lobby-auth-register-button="1" style="height:46px;min-width:150px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;">Регистрация</button>
+          <button type="button" data-lobby-auth-login-button="1" style="height:46px;min-width:130px;border:1px solid rgba(212,165,32,0.62);border-radius:8px;background:#080808;color:#f8fafc;font-size:15px;font-weight:900;cursor:pointer;">Вход</button>
+        </div>
+      </div>
+    `
+    : state.authModalMode === 'lobby-chat-guest'
+    ? `
+      <div style="display:grid;gap:16px;text-align:center;">
+        <div style="font-size:22px;line-height:1.25;font-weight:900;color:#f8fafc;">
+          Общ чат само за регистрирани потребители
         </div>
         <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:6px;">
           <button type="button" data-lobby-auth-register-button="1" style="height:46px;min-width:150px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;">Регистрация</button>
@@ -1697,16 +1720,109 @@ function renderNav(state: LobbyScreenState): string {
   `
 }
 
-function renderGuestHeroCard(signupBonus: number, useMobileLayout = false): string {
+function renderLobbyChatMessageRow(state: LobbyScreenState, message: LobbyChatMessageSnapshot): string {
+  const canDelete = state.isAdmin
+
+  return `
+    <div data-lobby-livechat-message="${escapeHtml(message.messageId)}" style="display:flex;align-items:flex-start;gap:5px;font-size:13px;line-height:1.45;word-break:break-word;">
+      <div style="flex:1;min-width:0;">
+        <span style="color:#d4a520;font-weight:900;">${escapeHtml(message.senderDisplayName)}:</span>
+        <span style="color:#f1f5f9;font-weight:500;"> ${escapeHtml(message.body)}</span>
+      </div>
+      ${canDelete ? `
+        <button type="button" data-lobby-livechat-delete="${escapeHtml(message.messageId)}" aria-label="Изтрий съобщението" title="Изтрий (admin)" style="flex:0 0 auto;width:16px;height:16px;line-height:16px;border:0;background:transparent;color:rgba(255,255,255,0.34);font-size:14px;cursor:pointer;padding:0;">×</button>
+      ` : ''}
+    </div>
+  `
+}
+
+/**
+ * Общ лайв чат в лобито — вгражда се вдясно от hero-cards.png в лявото херо
+ * каре (desktop/guest) или като компактна лента под профилната карта (mobile).
+ * Гост (state.profile.profileId === null): полето е `readonly` + целият
+ * `<form>` носи data-lobby-livechat-guest-gate, за да може wiring кодът да
+ * пренасочи клик/submit към auth попъп с текст "Общ чат само за регистрирани
+ * потребители" (не към действително изпращане) — виж attachLobbyScreenHandlers.
+ */
+function renderLobbyChatPanel(state: LobbyScreenState, opts: { isGuest: boolean; compact: boolean }): string {
+  const { isGuest, compact } = opts
+  const isDisconnected = !state.isConnected
+
+  const messagesHtml = state.lobbyChatMessages.length === 0
+    ? `<div style="margin:auto;color:rgba(255,255,255,0.42);font-size:12px;font-weight:700;text-align:center;padding:8px;">Все още няма съобщения. Пиши първи!</div>`
+    : state.lobbyChatMessages.map((m) => renderLobbyChatMessageRow(state, m)).join('')
+
+  const placeholderText = isGuest
+    ? 'Влез, за да пишеш в чата...'
+    : isDisconnected
+      ? 'Изчакай връзка...'
+      : 'Напиши съобщение...'
+
+  const sendButtonDisabled = !isGuest && (isDisconnected || state.lobbyChatSending)
+  const titleSize = compact ? '11px' : '13px'
+  const rowHeight = compact ? '30px' : '34px'
+  const fontSize = compact ? '13px' : '13px'
+
+  return `
+    <div style="display:flex;flex-direction:column;min-width:0;height:100%;box-sizing:border-box;">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0;padding-bottom:${compact ? '5' : '7'}px;">
+        <div style="font-size:${titleSize};font-weight:900;letter-spacing:0.06em;text-transform:uppercase;color:#d4a520;">Лайв чат</div>
+        ${isDisconnected ? `<div style="font-size:10px;font-weight:800;color:#f87171;">Няма връзка</div>` : ''}
+      </div>
+      <div data-lobby-livechat-messages-scroll="1" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:5px;padding-right:4px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
+        ${messagesHtml}
+      </div>
+      ${state.lobbyChatErrorText ? `
+        <div style="flex-shrink:0;margin-top:4px;font-size:11px;font-weight:800;color:#fecaca;">${escapeHtml(state.lobbyChatErrorText)}</div>
+      ` : ''}
+      <form data-lobby-livechat-form="1" ${isGuest ? 'data-lobby-livechat-guest-gate="1"' : ''} style="display:flex;gap:6px;margin-top:6px;flex-shrink:0;">
+        <input
+          type="text"
+          name="lobbyChatMessage"
+          data-lobby-livechat-input="1"
+          value="${escapeHtml(state.lobbyChatDraft)}"
+          maxlength="600"
+          autocomplete="off"
+          ${isGuest ? 'readonly' : ''}
+          placeholder="${escapeHtml(placeholderText)}"
+          style="flex:1;min-width:0;height:${rowHeight};border-radius:7px;border:1px solid rgba(212,165,32,0.30);background:#050505;color:#ffffff;padding:0 10px;font-size:${fontSize};font-weight:600;outline:none;box-sizing:border-box;${isGuest ? 'cursor:pointer;' : ''}"
+        >
+        <button
+          type="submit"
+          data-lobby-livechat-send="1"
+          ${sendButtonDisabled ? 'disabled' : ''}
+          style="flex:0 0 auto;height:${rowHeight};padding:0 14px;border:0;border-radius:7px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:pointer;opacity:${sendButtonDisabled ? '0.55' : '1'};"
+        >&#10148;</button>
+      </form>
+    </div>
+  `
+}
+
+/**
+ * Дясната замяна на старото heroBannerHtml (hero-banner.png) — вляво
+ * hero-cards.png (обект без деформация/изрязване), вдясно лайв чат. Обща
+ * височина на кутията остава 254px (както преди), само вътрешната подредба
+ * се променя.
+ */
+function renderLobbyHeroCardsAndChat(state: LobbyScreenState, isGuest: boolean): string {
+  return `
+    <div style="flex:0 1 985px; min-width:0; border:2px solid rgba(212,165,32,0.88); border-radius:14px; box-sizing:border-box; background: linear-gradient(160deg, #050505 0%, #0d0d0d 100%); height:258px; padding:14px; display:flex; align-items:stretch; gap:14px; overflow:hidden;">
+      <div style="flex:0 0 auto; height:100%; display:flex; align-items:center; justify-content:center;">
+        <img src="/assets/lobby/hero-cards.png" alt="Белот карти" style="height:100%; width:auto; max-width:420px; display:block; object-fit:contain;">
+      </div>
+      <div style="width:1px; align-self:stretch; background:rgba(212,165,32,0.30); flex-shrink:0;"></div>
+      <div style="flex:1; min-width:0; height:100%;">
+        ${renderLobbyChatPanel(state, { isGuest, compact: false })}
+      </div>
+    </div>
+  `
+}
+
+function renderGuestHeroCard(state: LobbyScreenState, signupBonus: number, useMobileLayout = false): string {
   const bonusText = formatAmount(signupBonus)
   const heroBannerHtml = useMobileLayout
     ? ''
-    : `
-      <div style="flex:0 1 985px; min-width:0; border:2px solid rgba(212,165,32,0.88); border-radius:14px; overflow:hidden; position:relative; box-sizing:border-box;">
-        <img src="/assets/lobby/hero-banner.png" alt="Добре дошъл в лобито"
-          style="width:100%; height:254px; max-width:100%; display:block; object-fit:contain;">
-      </div>
-    `
+    : renderLobbyHeroCardsAndChat(state, true)
   return `
     <div style="display:flex; gap:16px; align-items:stretch; margin-bottom:16px;">
       ${heroBannerHtml}
@@ -1782,6 +1898,7 @@ function renderGuestHeroCard(signupBonus: number, useMobileLayout = false): stri
 }
 
 function renderHeroSection(
+  state: LobbyScreenState,
   profileName: string,
   avatarUrl: string | null,
   yellowCoinsBalance: number | null,
@@ -1797,12 +1914,7 @@ function renderHeroSection(
       : null
   const heroBannerHtml = useMobileLayout
     ? ''
-    : `
-      <div style="flex:0 1 985px; min-width:0; border:2px solid rgba(212,165,32,0.88); border-radius:14px; overflow:hidden; position:relative; box-sizing:border-box;">
-        <img src="/assets/lobby/hero-banner.png" alt="Добре дошъл в лобито"
-          style="width:100%; height:254px; max-width:100%; display:block; object-fit:contain;">
-      </div>
-    `
+    : renderLobbyHeroCardsAndChat(state, false)
   return `
     <div style="display:flex; gap:16px; align-items:stretch; margin-bottom:16px;">
       ${heroBannerHtml}
@@ -2968,6 +3080,21 @@ function mobileMenuSvgItemContent(
   `
 }
 
+/**
+ * Компактна лента с лайв чат за телефон — постоянна (не collapsed) фиксирана
+ * височина ~156px, между профилната карта и "Избери маса". Собствен вертикален
+ * scroll в зоната със съобщения; цялата лента не расте извън border-а.
+ */
+function renderMobileLobbyChatSection(state: LobbyScreenState): string {
+  const isGuest = state.profile.profileId === null
+
+  return `
+    <section style="margin:0 12px 12px;border:2px solid rgba(212,165,32,0.84);border-radius:8px;background:#080808;padding:10px;height:156px;box-sizing:border-box;">
+      ${renderLobbyChatPanel(state, { isGuest, compact: true })}
+    </section>
+  `
+}
+
 function renderMobileProfileCard(state: LobbyScreenState, profileName: string): string {
   const yellowCoinsBalance = state.profile.yellowCoinsBalance
   const avatarUrl = state.profile.avatarUrl
@@ -3775,6 +3902,7 @@ function renderMobileLobbyScreenContent(
       ${state.profile.profileId !== null
         ? renderMobileProfileCard(state, profileName)
         : renderMobileGuestCard(state.signupBonusYellowCoins ?? 0)}
+      ${renderMobileLobbyChatSection(state)}
       ${renderMobileStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, state.profile.profileId === null)}
       ${renderMobileOffersSection(state.lobbyPackages, state.profile.profileId !== null)}
       ${renderMobileQuickActions(state.dailyMissionsUnclaimedCount, getUnclaimedDailyRewardsBadgeCount(state) > 0)}
@@ -7517,6 +7645,24 @@ export function renderLobbyScreen(
   const wasChatInputFocused = prevChatInputEl !== null && document.activeElement === prevChatInputEl
   const savedChatInputCaret = wasChatInputFocused ? prevChatInputEl.selectionStart : null
 
+  // Общ лайв чат в лобито — същия проблем/решение като личния чат по-горе:
+  // всяко несвързано WS събитие пренарежда целия root, затова изрично пазим
+  // draft/focus/caret на полето И scroll позицията на съобщенията. За разлика
+  // от личния чат, тук съобщенията идват от ВСИЧКИ потребители непрекъснато,
+  // затова "smart autoscroll" е задължителен: скролваме до дъно само ако
+  // потребителят вече Е бил близо до дъното (или е неговото собствено ново
+  // съобщение — това естествено съвпада, защото изпращане винаги става от
+  // дъното) — иначе не му местим позицията, докато чете по-стари съобщения.
+  const prevLobbyChatScrollEl = root.querySelector<HTMLElement>('[data-lobby-livechat-messages-scroll="1"]')
+  const wasLobbyChatNearBottom = prevLobbyChatScrollEl === null
+    ? true
+    : prevLobbyChatScrollEl.scrollHeight - prevLobbyChatScrollEl.scrollTop - prevLobbyChatScrollEl.clientHeight < 48
+  const savedLobbyChatScrollTop = prevLobbyChatScrollEl?.scrollTop ?? 0
+
+  const prevLobbyChatInputEl = root.querySelector<HTMLInputElement>('[data-lobby-livechat-input="1"]')
+  const wasLobbyChatInputFocused = prevLobbyChatInputEl !== null && document.activeElement === prevLobbyChatInputEl
+  const savedLobbyChatInputCaret = wasLobbyChatInputFocused ? prevLobbyChatInputEl.selectionStart : null
+
   root.innerHTML = isPhoneLayout ? `
     <div
       ${mobileLayoutAttribute}
@@ -7709,8 +7855,8 @@ export function renderLobbyScreen(
                 ? renderFairPlayPage()
               : `
               ${state.profile.profileId !== null
-                ? renderHeroSection(profileName, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level, isPhoneLayout)
-                : renderGuestHeroCard(state.signupBonusYellowCoins ?? 0, isPhoneLayout)}
+                ? renderHeroSection(state, profileName, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level, isPhoneLayout)
+                : renderGuestHeroCard(state, state.signupBonusYellowCoins ?? 0, isPhoneLayout)}
               ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, isPhoneLayout, state.profile.profileId === null)}
               ${renderBottomSection(
                 state.lobbyPackages,
@@ -8348,6 +8494,45 @@ export function renderLobbyScreen(
       const friendshipId = form?.dataset.lobbyChatForm?.trim() ?? ''
       if (!code || !friendshipId) return
       options.onChatSubmit(friendshipId, code)
+    })
+  })
+
+  // Общ лайв чат в лобито (херо карето / mobile лента) — гост-версия на
+  // формата носи data-lobby-livechat-guest-gate: и submit, и клик/фокус върху
+  // полето отварят auth попъпа вместо реално изпращане (сървърът и без това
+  // би отказал непостоянен профил, но за гост UX-ът е "обясни защо", не грешка).
+  root.querySelectorAll<HTMLFormElement>('[data-lobby-livechat-form="1"]').forEach((form) => {
+    const isGuestGated = form.hasAttribute('data-lobby-livechat-guest-gate')
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault()
+      if (isGuestGated) {
+        options.onAuthModeChange('lobby-chat-guest')
+        return
+      }
+      options.onLobbyChatSubmit()
+    })
+
+    const input = form.querySelector<HTMLInputElement>('[data-lobby-livechat-input="1"]')
+    if (input) {
+      if (isGuestGated) {
+        input.addEventListener('click', () => options.onAuthModeChange('lobby-chat-guest'))
+        input.addEventListener('focus', () => {
+          input.blur()
+          options.onAuthModeChange('lobby-chat-guest')
+        })
+      } else {
+        input.addEventListener('input', () => options.onLobbyChatDraftChange(input.value))
+      }
+    }
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-livechat-delete]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const messageId = btn.dataset.lobbyLivechatDelete?.trim() ?? ''
+      if (messageId.length > 0) {
+        options.onLobbyChatDelete(messageId)
+      }
     })
   })
 
@@ -9829,6 +10014,23 @@ export function renderLobbyScreen(
         newChatInputEl.setSelectionRange(savedChatInputCaret, savedChatInputCaret)
       }
     }
+  }
+
+  if (wasLobbyChatInputFocused) {
+    const newLobbyChatInputEl = root.querySelector<HTMLInputElement>('[data-lobby-livechat-input="1"]')
+    if (newLobbyChatInputEl) {
+      newLobbyChatInputEl.focus()
+      if (savedLobbyChatInputCaret !== null) {
+        newLobbyChatInputEl.setSelectionRange(savedLobbyChatInputCaret, savedLobbyChatInputCaret)
+      }
+    }
+  }
+
+  const newLobbyChatScrollEl = root.querySelector<HTMLElement>('[data-lobby-livechat-messages-scroll="1"]')
+  if (newLobbyChatScrollEl) {
+    newLobbyChatScrollEl.scrollTop = wasLobbyChatNearBottom
+      ? newLobbyChatScrollEl.scrollHeight
+      : savedLobbyChatScrollTop
   }
 
   cancelAnimationFrame(stakesAnimFrame)
