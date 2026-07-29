@@ -3438,7 +3438,7 @@ function renderMobileStateMessage(text: string, tone: 'normal' | 'error' = 'norm
   `
 }
 
-function renderMobilePlayerListCard(player: PlayerPublicProfileSnapshot, attrName: string): string {
+export function renderMobilePlayerListCard(player: PlayerPublicProfileSnapshot, attrName: string, showOnlineStatus: boolean): string {
   const displayName = player.displayName?.trim() || 'Играч'
   const avatarUrl = player.avatarUrl?.trim() ?? ''
   const profileId = player.profileId ?? ''
@@ -3462,7 +3462,7 @@ function renderMobilePlayerListCard(player: PlayerPublicProfileSnapshot, attrNam
           <span>Оценка ${typeof player.averageRating === 'number' ? player.averageRating.toFixed(2) : '-'}</span>
         </div>
       </div>
-      ${player.isOnline !== undefined ? `<div style="color:${player.isOnline ? '#4ade80' : '#f87171'};font-size:11px;font-weight:900;flex:0 0 auto;">${player.isOnline ? 'Онлайн' : 'Офлайн'}</div>` : ''}
+      ${showOnlineStatus && player.isOnline !== undefined ? `<div style="color:${player.isOnline ? '#4ade80' : '#f87171'};font-size:11px;font-weight:900;flex:0 0 auto;">${player.isOnline ? 'Онлайн' : 'Офлайн'}</div>` : ''}
     </button>
   `
 }
@@ -3572,7 +3572,7 @@ function renderMobilePlayersDirectory(state: LobbyScreenState): string {
         ? renderMobileStateMessage('Все още няма регистрирани играчи.')
         : players.length === 0 && applied !== ''
           ? renderMobileStateMessage('Няма намерени играчи.')
-          : players.map((player) => renderMobilePlayerListCard(player, 'data-lobby-player-card')).join('')}
+          : players.map((player) => renderMobilePlayerListCard(player, 'data-lobby-player-card', state.isAdminOrSubadmin)).join('')}
     </section>
     ${!isSearchActive ? `<div style="padding:0 12px 16px;">${renderPlayersPager(state)}</div>` : ''}
   `
@@ -4367,7 +4367,7 @@ function renderChatPanel(state: LobbyScreenState): string {
   `
 }
 
-function renderPlayersDirectory(state: LobbyScreenState): string {
+export function renderPlayersDirectory(state: LobbyScreenState): string {
   const { players, isSearchActive } = computePlayersDirectoryLists(state, {
     isAdmin: state.isAdminOrSubadmin,
     ownProfileId: state.profile.profileId,
@@ -4442,7 +4442,7 @@ function renderPlayersDirectory(state: LobbyScreenState): string {
                     <div style="font-size:15px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
                     <div style="margin-top:3px;display:flex;align-items:center;gap:6px;min-width:0;">
                       <div style="font-size:12px;font-weight:800;color:#d4a520;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(player.rankTitle ?? 'Ранг 1')}</div>
-                      ${player.isOnline !== undefined ? `<div style="font-size:11px;font-weight:800;color:${player.isOnline ? '#4ade80' : '#f87171'};white-space:nowrap;flex-shrink:0;">${player.isOnline ? 'Онлайн' : 'Офлайн'}</div>` : ''}
+                      ${state.isAdminOrSubadmin && player.isOnline !== undefined ? `<div style="font-size:11px;font-weight:800;color:${player.isOnline ? '#4ade80' : '#f87171'};white-space:nowrap;flex-shrink:0;">${player.isOnline ? 'Онлайн' : 'Офлайн'}</div>` : ''}
                     </div>
                     <div style="margin-top:8px;display:flex;align-items:center;gap:12px;">
                       <div>

@@ -49,6 +49,7 @@
     "check:players-pagination": "tsx scripts/checkPlayersPagination.ts",
     "check:pagination-items": "tsx scripts/checkComputePaginationItems.ts",
     "check:players-page-snapshot-store": "tsx scripts/checkPlayersPageSnapshotStore.ts",
+    "check:players-directory-online-status-visibility": "tsx scripts/checkPlayersDirectoryOnlineStatusVisibility.ts",
     "check:shop-purchase-flow": "tsx scripts/checkShopPurchaseFlow.ts",
     "check:coin-packages-top-offer": "tsx scripts/checkCoinPackagesTopOffer.ts",
     "check:coin-packages-top-offer-badge": "tsx scripts/checkCoinPackagesTopOfferBadge.ts",
