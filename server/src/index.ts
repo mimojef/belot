@@ -25,6 +25,7 @@ import {
   getSessionTokenFromCookieHeader,
   isAdminOrSubadminSession,
   isFullAdminSession,
+  isLobbyChatModeratorSession,
   type AuthSessionSnapshot,
 } from './db/authStore.js'
 import { createChatStore } from './db/chatStore.js'
@@ -601,6 +602,7 @@ type LobbyChatBroadcastSnapshot = {
   messageId: string
   senderProfileId: string
   senderDisplayName: string
+  senderIsChatAdmin: boolean
   body: string
   createdAt: string
 }
@@ -633,6 +635,7 @@ function broadcastLobbyChatMessageToLocalSubscribers(
       messageId: snapshot.messageId,
       senderProfileId: snapshot.senderProfileId,
       senderDisplayName: snapshot.senderDisplayName,
+      senderIsChatAdmin: snapshot.senderIsChatAdmin,
       body: snapshot.body,
       createdAt: snapshot.createdAt,
       ...(isOriginator && opts?.requestId ? { requestId: opts.requestId } : {}),
@@ -4769,6 +4772,65 @@ async function handleAdminSubadminRoleRequest(
   return true
 }
 
+/**
+ * Управление на chat_admin роля — огледално на handleAdminSubadminRoleRequest,
+ * виж коментара там за пълния rationale. Няма отделен GET тук — четенето на
+ * текущата роля на профил (за badge/бутони в попъпа) минава през СЪЩИЯ
+ * /api/admin/profiles/:id/subadmin GET (той вече връща произволна роля през
+ * authStore.getAccountRoleForProfile, не само subadmin) — не дублираме
+ * четящ endpoint само заради различно име на пътя.
+ * POST = grant, DELETE = revoke. Само пълен admin (isFullAdminSession).
+ */
+async function handleAdminChatAdminRoleRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = pathname.match(/^\/api\/admin\/profiles\/([^/]+)\/chat-admin$/)
+  if (!match) return false
+
+  if (req.method !== 'POST' && req.method !== 'DELETE') return false
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Само администратор може да управлява роли.' })
+    return true
+  }
+
+  const targetProfileId = decodeURIComponent((match[1] ?? '').trim())
+
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(targetProfileId)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден profileId.' })
+    return true
+  }
+
+  const result = authStore.setChatAdminRole({
+    actorAccountId: session.account.accountId,
+    targetProfileId,
+    action: req.method === 'POST' ? 'grant' : 'revoke',
+  })
+
+  if (!result.ok) {
+    const statusByCode: Record<typeof result.code, number> = {
+      not_found: 404,
+      no_account: 400,
+      self: 400,
+      target_is_admin: 409,
+      conflict: 409,
+      profile_inactive: 400,
+      profile_temporary: 400,
+      account_inactive: 400,
+    }
+    sendJsonResponse(res, statusByCode[result.code], { ok: false, message: result.message })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, role: result.role })
+  return true
+}
+
 async function handleProfileBlockRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -6504,11 +6566,11 @@ async function handleChatAttachmentDownloadRequest(
   }
 }
 
-// Модерация на общия лайв чат — само пълен admin (isFullAdminSession
-// проверява ролята НА МОМЕНТА през жива JOIN към accounts, виж
-// authStore.getSession). HTTP (не WS), нарочно — за да имаме прясна
-// cookie-based сесийна проверка на всяко изтриване, а не роля кеширана
-// само при WS handshake-а на дълготрайна връзка.
+// Модерация на общия лайв чат — admin, subadmin ИЛИ chat_admin
+// (isLobbyChatModeratorSession проверява ролята НА МОМЕНТА през жива JOIN
+// към accounts, виж authStore.getSession). HTTP (не WS), нарочно — за да
+// имаме прясна cookie-based сесийна проверка на всяко изтриване, а не роля
+// кеширана само при WS handshake-а на дълготрайна връзка.
 async function handleLobbyChatDeleteRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -6523,10 +6585,10 @@ async function handleLobbyChatDeleteRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (!isFullAdminSession(session)) {
+  if (!isLobbyChatModeratorSession(session)) {
     sendJsonResponse(res, 403, {
       ok: false,
-      message: 'Само пълен администратор може да трие съобщения от общия чат.',
+      message: 'Нямаш право да триеш съобщения от общия чат.',
     })
     return true
   }
@@ -6538,9 +6600,12 @@ async function handleLobbyChatDeleteRequest(
     return true
   }
 
+  // isLobbyChatModeratorSession гарантира role !== 'player' — типовият predicate
+  // стеснява само session (non-null), не и вложеното account.role поле.
   const result = lobbyChatStore.deleteMessage({
     messageId,
     actorAccountId: session.account.accountId,
+    actorRoleAtDeletion: session.account.role as 'admin' | 'subadmin' | 'chat_admin',
   })
 
   if (!result.ok && result.code === 'not_found') {
@@ -7574,6 +7639,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminSubadminRoleRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminChatAdminRoleRequest(req, res, requestUrl.pathname)) {
     return
   }
 
@@ -9442,6 +9511,7 @@ wsServer.on('connection', (socket, request) => {
             messageId: m.messageId,
             senderProfileId: m.senderProfileId,
             senderDisplayName: m.senderDisplayName,
+            senderIsChatAdmin: m.senderIsChatAdmin,
             body: m.body,
             createdAt: m.createdAt,
           })),
@@ -9501,10 +9571,12 @@ wsServer.on('connection', (socket, request) => {
 
         const publicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
         const senderDisplayName = publicProfile?.displayName?.trim() || 'Играч'
+        const senderIsChatAdmin = authStore.getAccountRoleForProfile(latestConnection.profileId) === 'chat_admin'
 
         const snapshot = lobbyChatStore.insertMessage({
           senderProfileId: latestConnection.profileId,
           senderDisplayName,
+          senderIsChatAdmin,
           body: validation.body,
         })
 

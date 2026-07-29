@@ -806,6 +806,8 @@ export type LobbyChatMessageSnapshot = {
   messageId: string
   senderProfileId: string
   senderDisplayName: string
+  /** Snapshot към момента на изпращане — само за оцветяване на името в чата. */
+  senderIsChatAdmin: boolean
   body: string
   createdAt: string
 }

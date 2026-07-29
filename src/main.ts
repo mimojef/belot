@@ -2844,7 +2844,7 @@ async function submitProfileNameChange(targetProfileId: string | null, displayNa
 
 async function loadAdminTargetRole(
   profileId: string,
-): Promise<{ ok: true; role: 'player' | 'subadmin' | 'admin' | null } | { ok: false; message: string }> {
+): Promise<{ ok: true; role: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null } | { ok: false; message: string }> {
   try {
     const response = await fetch(
       `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(profileId)}/subadmin`,
@@ -2853,7 +2853,7 @@ async function loadAdminTargetRole(
     if (response.status === 403) {
       return { ok: false, message: 'Нямаш достъп.' }
     }
-    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; role?: 'player' | 'subadmin' | 'admin' | null; message?: string }
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; role?: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null; message?: string }
     if (!response.ok || !data.ok) {
       return { ok: false, message: data.message ?? 'Ролята не можа да бъде заредена.' }
     }
@@ -2870,6 +2870,26 @@ async function submitSubadminRoleChange(
   try {
     const response = await fetch(
       `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(profileId)}/subadmin`,
+      { method: action === 'grant' ? 'POST' : 'DELETE', credentials: 'include' },
+    )
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Действието не бе завършено.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+/** Огледално на submitSubadminRoleChange, за chat_admin роля. */
+async function submitChatAdminRoleChange(
+  profileId: string,
+  action: 'grant' | 'revoke',
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(profileId)}/chat-admin`,
       { method: action === 'grant' ? 'POST' : 'DELETE', credentials: 'include' },
     )
     const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
@@ -3361,6 +3381,8 @@ lobby = createLobbyFlowController({
   onAdminGetTargetRole: (profileId) => loadAdminTargetRole(profileId),
   onAdminGrantSubadmin: (profileId) => submitSubadminRoleChange(profileId, 'grant'),
   onAdminRevokeSubadmin: (profileId) => submitSubadminRoleChange(profileId, 'revoke'),
+  onAdminGrantChatAdmin: (profileId) => submitChatAdminRoleChange(profileId, 'grant'),
+  onAdminRevokeChatAdmin: (profileId) => submitChatAdminRoleChange(profileId, 'revoke'),
   onAdminHistoryWindowChange: (window: HistoryWindow) => {
     invalidateHistoryGeneration()
     fetchAdminHistory(window)

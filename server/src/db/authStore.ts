@@ -11,7 +11,7 @@ import type { PlayerProgressStore } from './playerProgressStore.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
-export type AccountRoleValue = 'player' | 'subadmin' | 'admin'
+export type AccountRoleValue = 'player' | 'chat_admin' | 'subadmin' | 'admin'
 
 export type AuthAccountSnapshot = {
   accountId: AccountId
@@ -51,6 +51,23 @@ export function isAdminOrSubadminSession(
   return session !== null && (session.account.role === 'admin' || session.account.role === 'subadmin')
 }
 
+/**
+ * Единственото право на chat_admin: изтриване на съобщения от общия лайв чат
+ * в лобито. НЕ дава достъп до нищо друго — admin/subadmin/chat_admin,
+ * нищо повече (никакви други "OR" комбинации с chat_admin другаде в кода).
+ */
+export function isLobbyChatModeratorSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'subadmin'
+    || session.account.role === 'chat_admin'
+  )
+}
+
+export type ElevatedRole = 'subadmin' | 'chat_admin'
+
 export type SubadminRoleChangeErrorCode =
   | 'not_found'
   | 'no_account'
@@ -64,6 +81,12 @@ export type SubadminRoleChangeErrorCode =
 export type SubadminRoleChangeResult =
   | { ok: true; role: 'subadmin' | 'player' }
   | { ok: false; code: SubadminRoleChangeErrorCode; message: string }
+
+export type ChatAdminRoleChangeErrorCode = SubadminRoleChangeErrorCode
+
+export type ChatAdminRoleChangeResult =
+  | { ok: true; role: 'chat_admin' | 'player' }
+  | { ok: false; code: ChatAdminRoleChangeErrorCode; message: string }
 
 export type AuthStore = {
   register: (input: {
@@ -89,12 +112,22 @@ export type AuthStore = {
    * Атомарно: role UPDATE + admin_role_audit_log INSERT в една транзакция.
    * Идемпотентно: повторно грантване на вече-субадмин (или повторно
    * revoke на вече-player) връща ok:true без нов audit ред.
+   * Ако акаунтът в момента е chat_admin, grant('subadmin') го ПРЕВКЛЮЧВА
+   * директно на subadmin (chat_admin/subadmin са взаимно изключващи се);
+   * revoke('subadmin'), докато акаунтът реално е chat_admin, се отказва
+   * ('conflict') — не пипа чуждата роля по подразбиране.
    */
   setSubadminRole: (input: {
     actorAccountId: string
     targetProfileId: string
     action: 'grant' | 'revoke'
   }) => SubadminRoleChangeResult
+  /** Огледално на setSubadminRole, но за chat_admin роля — виж коментара там. */
+  setChatAdminRole: (input: {
+    actorAccountId: string
+    targetProfileId: string
+    action: 'grant' | 'revoke'
+  }) => ChatAdminRoleChangeResult
   /** Роля на акаунта зад даден профил — само за UI показване (badge), null ако профилът няма акаунт (бот/гост/изтрит). */
   getAccountRoleForProfile: (profileId: string) => AccountRoleValue | null
   close: () => void
@@ -615,11 +648,27 @@ export async function createAuthStore(
     return accountRow?.role ?? null
   }
 
-  function setSubadminRole(input: {
+  /**
+   * Споделена имплементация за setSubadminRole/setChatAdminRole — двете
+   * "елевирани" роли (subadmin, chat_admin) са взаимно изключващи се и имат
+   * идентични защити (self/target-is-admin/grant-eligibility/idempotency/audit),
+   * разликата е само коя стойност се пише в role колоната.
+   *
+   * fromRole се чете от РЕАЛНАТА текуща роля на акаунта (не се хардкодва
+   * 'player'), за да поддържа директно превключване между subadmin ↔
+   * chat_admin (grant на едната, докато акаунтът е другата, просто я
+   * заменя — единична role колона, няма нужда от изричен revoke стъпка).
+   * REVOKE изисква текущата роля да съвпада точно с input.role — опит за
+   * revoke на роля, която акаунтът реално няма (напр. "revoke chat_admin"
+   * върху subadmin акаунт), се отказва с 'conflict', вместо тихо да пипне
+   * другата роля.
+   */
+  function changeElevatedRole(input: {
     actorAccountId: string
     targetProfileId: string
+    role: ElevatedRole
     action: 'grant' | 'revoke'
-  }): SubadminRoleChangeResult {
+  }): { ok: true; role: 'player' | ElevatedRole } | { ok: false; code: SubadminRoleChangeErrorCode; message: string } {
     const profileRow = selectProfileRoleEligibilityStatement.get(input.targetProfileId) as
       | { account_id: string | null; status: 'active' | 'disabled'; is_temporary: number }
       | undefined
@@ -656,18 +705,20 @@ export async function createAuthStore(
       }
     }
 
-    // Одобрено продуктово решение: субадмин може да бъде НАЗНАЧЕН само на
-    // активен, постоянен човешки профил със свързан активен акаунт. REVOKE
+    // Одобрено продуктово решение: елевирана роля може да бъде НАЗНАЧЕНА само
+    // на активен, постоянен човешки профил със свързан активен акаунт. REVOKE
     // остава разрешен независимо от статуса — пълният admin трябва винаги
-    // да може да премахне субадмин права, дори ако профилът/акаунтът вече е
+    // да може да премахне правата, дори ако профилът/акаунтът вече е
     // деактивиран междувременно. Автоматично отнемане при деактивиране НЕ се
     // прави тук — извън обхвата на тази проверка (умишлено, отделно решение).
+    // Проверките важат безусловно за всеки grant (дори "идемпотентен" повторен
+    // grant на вече-същата роля) — запазва точното досегашно поведение.
     if (input.action === 'grant') {
       if (profileRow.is_temporary === 1) {
         return {
           ok: false,
           code: 'profile_temporary',
-          message: 'Не можеш да направиш временен профил субадмин.',
+          message: `Не можеш да направиш временен профил ${input.role === 'chat_admin' ? 'чат админ' : 'субадмин'}.`,
         }
       }
 
@@ -675,7 +726,7 @@ export async function createAuthStore(
         return {
           ok: false,
           code: 'profile_inactive',
-          message: 'Не можеш да направиш неактивен профил субадмин.',
+          message: `Не можеш да направиш неактивен профил ${input.role === 'chat_admin' ? 'чат админ' : 'субадмин'}.`,
         }
       }
 
@@ -683,14 +734,38 @@ export async function createAuthStore(
         return {
           ok: false,
           code: 'account_inactive',
-          message: 'Не можеш да направиш неактивен акаунт субадмин.',
+          message: `Не можеш да направиш неактивен акаунт ${input.role === 'chat_admin' ? 'чат админ' : 'субадмин'}.`,
         }
       }
     }
 
-    const fromRole: 'player' | 'subadmin' = input.action === 'grant' ? 'player' : 'subadmin'
-    const toRole: 'player' | 'subadmin' = input.action === 'grant' ? 'subadmin' : 'player'
-    const auditAction = input.action === 'grant' ? 'grant_subadmin' : 'revoke_subadmin'
+    const currentRole = targetAccount.role
+
+    if (input.action === 'grant' && currentRole === input.role) {
+      // Идемпотентно повторение — вече е в желаната роля, без нов audit ред.
+      return { ok: true, role: input.role }
+    }
+
+    if (input.action === 'revoke' && currentRole === 'player') {
+      // Идемпотентно повторение — вече е обикновен player.
+      return { ok: true, role: 'player' }
+    }
+
+    if (input.action === 'revoke' && currentRole !== input.role) {
+      // Акаунтът реално има ДРУГАТА елевирана роля (напр. опит за
+      // "revoke chat_admin" върху subadmin акаунт) — отказваме, не пипаме
+      // чуждата роля мълчаливо.
+      return {
+        ok: false,
+        code: 'conflict',
+        message: 'Ролята на потребителя е променена междувременно. Презареди и опитай пак.',
+      }
+    }
+
+    const fromRole = currentRole
+    const toRole: 'player' | ElevatedRole = input.action === 'grant' ? input.role : 'player'
+    const auditAction = `${input.action}_${input.role}` as
+      | 'grant_subadmin' | 'revoke_subadmin' | 'grant_chat_admin' | 'revoke_chat_admin'
 
     database.exec('BEGIN IMMEDIATE;')
 
@@ -698,16 +773,13 @@ export async function createAuthStore(
       const changeResult = conditionalUpdateAccountRoleStatement.run(toRole, targetAccountId, fromRole)
 
       if (changeResult.changes === 0) {
-        // Ролята вече не е `fromRole` — или конкурентна заявка вече е
-        // приложила същата промяна (идемпотентно), или състоянието се е
-        // променило междувременно (race). Прочитаме текущата роля вътре в
-        // същата транзакция, за да върнем коректен резултат без частична
-        // промяна в базата.
+        // Състоянието се е променило между прочита по-горе и тази транзакция
+        // (race) — прочитаме текущата роля вътре в същата транзакция, за да
+        // върнем коректен резултат без частична промяна в базата.
         const currentAccount = selectAccountByIdStatement.get(targetAccountId) as AccountRow
         database.exec('ROLLBACK;')
 
         if (currentAccount.role === toRole) {
-          // Идемпотентно повторение — вече е в желаното състояние.
           return { ok: true, role: toRole }
         }
 
@@ -749,6 +821,22 @@ export async function createAuthStore(
     }
   }
 
+  function setSubadminRole(input: {
+    actorAccountId: string
+    targetProfileId: string
+    action: 'grant' | 'revoke'
+  }): SubadminRoleChangeResult {
+    return changeElevatedRole({ ...input, role: 'subadmin' }) as SubadminRoleChangeResult
+  }
+
+  function setChatAdminRole(input: {
+    actorAccountId: string
+    targetProfileId: string
+    action: 'grant' | 'revoke'
+  }): ChatAdminRoleChangeResult {
+    return changeElevatedRole({ ...input, role: 'chat_admin' }) as ChatAdminRoleChangeResult
+  }
+
   function close(): void {
     database.close()
   }
@@ -760,6 +848,7 @@ export async function createAuthStore(
     getSession,
     logout,
     setSubadminRole,
+    setChatAdminRole,
     getAccountRoleForProfile,
     close,
   }

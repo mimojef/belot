@@ -22,6 +22,8 @@ import {
 import {
   renderSubadminActionConfirmPopup,
   renderSubadminActionToast,
+  renderChatAdminActionConfirmPopup,
+  renderChatAdminActionToast,
   renderAdminPanel,
   renderAdminInfoPanel,
   renderAdminServerPanel,
@@ -150,6 +152,64 @@ check('[12.3] опции без viewerIsFullAdmin/targetAccountRole изобщо
   assert(!html.includes('data-player-profile-grant-subadmin="1"'), 'по подразбиране не трябва grant бутон')
 })
 
+// ─── [11b]/[12b] renderChatAdminRoleControls — огледално на [11]/[12] ──────
+check('[11b.1] viewerIsFullAdmin=true, targetAccountRole=chat_admin => показва бадж "Чат админ" + "Премахни чат админ"', () => {
+  const html = renderPopup({ viewerIsFullAdmin: true, targetAccountRole: 'chat_admin' })
+  assert(html.includes('data-player-profile-chat-admin-badge="1"'), 'липсва chat_admin badge markup')
+  assert(html.includes('Чат админ'), 'липсва текст "Чат админ"')
+  assert(html.includes('data-player-profile-revoke-chat-admin="1"'), 'липсва бутон "Премахни чат админ"')
+  assert(html.includes('Премахни чат админ'), 'липсва текст "Премахни чат админ"')
+})
+
+check('[11b.2] viewerIsFullAdmin=true, targetAccountRole=player => показва "Направи чат админ", БЕЗ бадж', () => {
+  const html = renderPopup({ viewerIsFullAdmin: true, targetAccountRole: 'player' })
+  assert(html.includes('data-player-profile-grant-chat-admin="1"'), 'липсва бутон "Направи чат админ"')
+  assert(html.includes('Направи чат админ'), 'липсва текст "Направи чат админ"')
+  assert(!html.includes('data-player-profile-chat-admin-badge="1"'), 'НЕ трябва да има chat_admin badge за player роля')
+  assert(!html.includes('data-player-profile-revoke-chat-admin="1"'), 'НЕ трябва да има revoke бутон за player роля')
+})
+
+check('[11b.3] viewerIsFullAdmin=true, targetAccountRole=subadmin => ПАРАЛЕЛНО показва и "Направи чат админ" (директно превключване)', () => {
+  const html = renderPopup({ viewerIsFullAdmin: true, targetAccountRole: 'subadmin' })
+  assert(html.includes('data-player-profile-subadmin-badge="1"'), 'subadmin баджът трябва да е там')
+  assert(html.includes('data-player-profile-grant-chat-admin="1"'), 'трябва да предлага и "Направи чат админ", за да се позволи директно превключване')
+  assert(!html.includes('data-player-profile-chat-admin-badge="1"'), 'не трябва chat_admin бадж, докато реално е subadmin')
+})
+
+check('[11b.4] viewerIsFullAdmin=true, targetAccountRole=chat_admin => ПАРАЛЕЛНО показва и "Направи субадмин" (директно превключване обратно)', () => {
+  const html = renderPopup({ viewerIsFullAdmin: true, targetAccountRole: 'chat_admin' })
+  assert(html.includes('data-player-profile-chat-admin-badge="1"'), 'chat_admin баджът трябва да е там')
+  assert(html.includes('data-player-profile-grant-subadmin="1"'), 'трябва да предлага и "Направи субадмин", за да се позволи директно превключване обратно')
+  assert(!html.includes('data-player-profile-subadmin-badge="1"'), 'не трябва subadmin бадж, докато реално е chat_admin')
+})
+
+check('[11b.5] viewerIsFullAdmin=true, targetAccountRole=admin (друг пълен admin) => НИЩО от chat_admin контролите', () => {
+  const html = renderPopup({ viewerIsFullAdmin: true, targetAccountRole: 'admin' })
+  assert(!html.includes('data-player-profile-chat-admin-badge="1"'), 'не трябва бадж за друг admin')
+  assert(!html.includes('data-player-profile-grant-chat-admin="1"'), 'не трябва grant бутон за друг admin')
+  assert(!html.includes('data-player-profile-revoke-chat-admin="1"'), 'не трябва revoke бутон за друг admin')
+})
+
+check('[11b.6] собствен профил (isOwnProfile=true) — никога chat_admin бадж/бутони, дори за пълен admin viewer', () => {
+  const html = renderPopup({ isOwnProfile: true, viewerIsFullAdmin: true, targetAccountRole: 'chat_admin' })
+  assert(!html.includes('data-player-profile-chat-admin-badge="1"'), 'не трябва бадж за собствен профил')
+  assert(!html.includes('data-player-profile-grant-chat-admin="1"'), 'не трябва grant бутон за собствен профил')
+  assert(!html.includes('data-player-profile-revoke-chat-admin="1"'), 'не трябва revoke бутон за собствен профил')
+})
+
+check('[12b.1] viewerIsFullAdmin=false, дори ако targetAccountRole=chat_admin => НИЩО', () => {
+  const html = renderPopup({ viewerIsFullAdmin: false, targetAccountRole: 'chat_admin' })
+  assert(!html.includes('data-player-profile-chat-admin-badge="1"'), 'обикновен потребител не бива да вижда chat_admin badge')
+  assert(!html.includes('Чат админ'), 'обикновен потребител не бива да вижда текст "Чат админ"')
+  assert(!html.includes('data-player-profile-revoke-chat-admin="1"'), 'обикновен потребител не бива да вижда revoke бутон')
+})
+
+check('[12b.2] опции без viewerIsFullAdmin/targetAccountRole изобщо (undefined, стар caller) => НИЩО от chat_admin, без грешка', () => {
+  const html = renderPopup({})
+  assert(!html.includes('data-player-profile-chat-admin-badge="1"'), 'по подразбиране не трябва бадж')
+  assert(!html.includes('data-player-profile-grant-chat-admin="1"'), 'по подразбиране не трябва grant бутон')
+})
+
 // ─── [13]/[14] Confirm попъп — точен текст по спецификация ─────────────────
 function makeConfirmState(overrides: Partial<LobbyScreenState> = {}): LobbyScreenState {
   return {
@@ -242,6 +302,102 @@ check('[toast.revoke] съобщение за успех при премахва
 
 check('[toast] няма toast (null) => празен низ', () => {
   const html = renderSubadminActionToast(makeConfirmState({ subadminActionToast: null }))
+  assert(html === '', 'трябва да върне празен низ, когато няма toast')
+})
+
+// ─── [13b]/[14b] previousRole switch-предупреждение — субадмин ↔ чат админ ──
+check('[13b.1] Grant subadmin, previousRole=chat_admin => базовият текст ОСТАВА + добавено предупреждение за замяна', () => {
+  const html = renderSubadminActionConfirmPopup(makeConfirmState({
+    subadminActionConfirm: { profileId: 'p1', displayName: 'Иван', action: 'grant', previousRole: 'chat_admin' },
+  }))
+  assert(
+    html.includes('Потребителят ще получи достъп само за преглед до секциите „Информация“ и „Сървър“. Няма да може да редактира профили, да чете чата с поддръжката или да променя настройки.'),
+    'базовият текст трябва да си остане непроменен (само добавка отгоре)',
+  )
+  assert(html.includes('Текущата роля „Чат админ“ ще бъде заменена.'), 'липсва предупреждението за замяна на chat_admin ролята')
+})
+
+check('[13b.2] Grant subadmin, БЕЗ previousRole (стандартен случай — player -> subadmin) => БЕЗ предупреждение за замяна', () => {
+  const html = renderSubadminActionConfirmPopup(makeConfirmState({
+    subadminActionConfirm: { profileId: 'p1', displayName: 'Иван', action: 'grant' },
+  }))
+  assert(!html.includes('ще бъде заменена'), 'не трябва предупреждение за замяна, когато няма previousRole')
+})
+
+// ─── Пълен паралелен блок за renderChatAdminActionConfirmPopup/Toast ────────
+function makeChatAdminConfirmState(overrides: Partial<LobbyScreenState> = {}): LobbyScreenState {
+  return {
+    chatAdminActionConfirm: null,
+    chatAdminActionBusy: false,
+    chatAdminActionToast: null,
+    ...overrides,
+  } as unknown as LobbyScreenState
+}
+
+check('[cb.1] Grant chat_admin confirm popup — заглавие "Направи чат админ?" + бутони', () => {
+  const html = renderChatAdminActionConfirmPopup(makeChatAdminConfirmState({
+    chatAdminActionConfirm: { profileId: 'p1', displayName: 'Иван', action: 'grant' },
+  }))
+  assert(html.includes('Направи чат админ?'), 'липсва заглавие "Направи чат админ?"')
+  assert(html.includes('data-chat-admin-action-cancel="1"') && html.includes('>Отказ<'), 'липсва бутон "Отказ"')
+  assert(html.includes('data-chat-admin-action-confirm="1"') && html.includes('Направи чат админ'), 'липсва бутон "Направи чат админ"')
+})
+
+check('[cb.2] Revoke chat_admin confirm popup — заглавие "Премахни чат админ?" + бутони', () => {
+  const html = renderChatAdminActionConfirmPopup(makeChatAdminConfirmState({
+    chatAdminActionConfirm: { profileId: 'p1', displayName: 'Иван', action: 'revoke' },
+  }))
+  assert(html.includes('Премахни чат админ?'), 'липсва заглавие "Премахни чат админ?"')
+  assert(html.includes('data-chat-admin-action-cancel="1"') && html.includes('>Отказ<'), 'липсва бутон "Отказ"')
+  assert(html.includes('data-chat-admin-action-confirm="1"') && html.includes('>Премахни<'), 'липсва бутон "Премахни"')
+})
+
+check('[cb.3] Grant chat_admin, previousRole=subadmin => добавено предупреждение за замяна на "Субадмин"', () => {
+  const html = renderChatAdminActionConfirmPopup(makeChatAdminConfirmState({
+    chatAdminActionConfirm: { profileId: 'p1', displayName: 'Иван', action: 'grant', previousRole: 'subadmin' },
+  }))
+  assert(html.includes('Текущата роля „Субадмин“ ще бъде заменена.'), 'липсва предупреждението за замяна на subadmin ролята')
+})
+
+check('[cb.4] Grant chat_admin, БЕЗ previousRole => БЕЗ предупреждение за замяна', () => {
+  const html = renderChatAdminActionConfirmPopup(makeChatAdminConfirmState({
+    chatAdminActionConfirm: { profileId: 'p1', displayName: 'Иван', action: 'grant' },
+  }))
+  assert(!html.includes('ще бъде заменена'), 'не трябва предупреждение за замяна, когато няма previousRole')
+})
+
+check('[cb.5] busy=true — бутоните са disabled', () => {
+  const html = renderChatAdminActionConfirmPopup(makeChatAdminConfirmState({
+    chatAdminActionConfirm: { profileId: 'p1', displayName: 'Иван', action: 'grant' },
+    chatAdminActionBusy: true,
+  }))
+  const confirmBtnMatch = /data-chat-admin-action-confirm="1"[^>]*disabled/.exec(html)
+  const cancelBtnMatch = /data-chat-admin-action-cancel="1"[^>]*disabled/.exec(html)
+  assert(confirmBtnMatch !== null, 'confirm бутонът трябва да е disabled докато е busy')
+  assert(cancelBtnMatch !== null, 'cancel бутонът трябва да е disabled докато е busy')
+})
+
+check('[cb.6] няма отворен confirm (chatAdminActionConfirm=null) => празен низ', () => {
+  const html = renderChatAdminActionConfirmPopup(makeChatAdminConfirmState({ chatAdminActionConfirm: null }))
+  assert(html === '', 'трябва да върне празен низ, когато няма pending action')
+})
+
+check('[cb.toast.grant] съобщение за успех при назначаване: "Потребителят вече е чат админ."', () => {
+  const html = renderChatAdminActionToast(makeChatAdminConfirmState({
+    chatAdminActionToast: { text: 'Потребителят вече е чат админ.', ok: true },
+  }))
+  assert(html.includes('Потребителят вече е чат админ.'), 'липсва точния success текст при grant')
+})
+
+check('[cb.toast.revoke] съобщение за успех при премахване: "Ролята чат админ е премахната."', () => {
+  const html = renderChatAdminActionToast(makeChatAdminConfirmState({
+    chatAdminActionToast: { text: 'Ролята чат админ е премахната.', ok: true },
+  }))
+  assert(html.includes('Ролята чат админ е премахната.'), 'липсва точния success текст при revoke')
+})
+
+check('[cb.toast] няма toast (null) => празен низ', () => {
+  const html = renderChatAdminActionToast(makeChatAdminConfirmState({ chatAdminActionToast: null }))
   assert(html === '', 'трябва да върне празен низ, когато няма toast')
 })
 

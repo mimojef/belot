@@ -24,7 +24,7 @@ export type RenderPlayerProfilePopupOptions = {
    * още не е заредена) или ако профилът няма акаунт (бот/гост/временен).
    * Ползва се само когато viewerIsFullAdmin е true.
    */
-  targetAccountRole?: 'player' | 'subadmin' | 'admin' | null
+  targetAccountRole?: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null
 }
 
 export type PlayerProfileFriendshipAction = {
@@ -473,7 +473,7 @@ function renderEmptyContent(seat: Seat | null): string {
 function renderSubadminRoleControls(
   isOwnProfile: boolean,
   viewerIsFullAdmin: boolean,
-  targetAccountRole: 'player' | 'subadmin' | 'admin' | null,
+  targetAccountRole: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null,
 ): string {
   // Никога за собствен профил, никога за друг пълен admin (target === 'admin'),
   // никога ако ролята още не е заредена (null) — не показваме грешен бутон
@@ -534,6 +534,74 @@ function renderSubadminRoleControls(
   `
 }
 
+/**
+ * Огледално на renderSubadminRoleControls, за chat_admin роля. Рендерирана
+ * ЗАЕДНО с renderSubadminRoleControls (виж call site-а в renderProfileContent) —
+ * така всяка от двете елевирани роли показва своя бадж+revoke, докато
+ * ДРУГАТА показва своя grant линк, което естествено предлага директно
+ * превключване между тях без допълнителна логика тук.
+ */
+function renderChatAdminRoleControls(
+  isOwnProfile: boolean,
+  viewerIsFullAdmin: boolean,
+  targetAccountRole: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null,
+): string {
+  if (isOwnProfile || !viewerIsFullAdmin || targetAccountRole === null || targetAccountRole === 'admin') {
+    return ''
+  }
+
+  if (targetAccountRole === 'chat_admin') {
+    return `
+      <span
+        data-player-profile-chat-admin-badge="1"
+        style="
+          display:inline-flex;
+          align-items:center;
+          padding:3px 10px;
+          border-radius:999px;
+          background:rgba(20,184,166,0.16);
+          border:1px solid rgba(20,184,166,0.55);
+          color:#14b8a6;
+          font-size:11px;
+          font-weight:900;
+          letter-spacing:0.04em;
+          text-transform:uppercase;
+          white-space:nowrap;
+        "
+      >Чат админ</span>
+      <span
+        data-player-profile-revoke-chat-admin="1"
+        style="
+          display:inline-flex;
+          align-items:center;
+          gap:6px;
+          color:#f87171;
+          font-size:14px;
+          font-weight:900;
+          cursor:pointer;
+          white-space:nowrap;
+        "
+      >Премахни чат админ</span>
+    `
+  }
+
+  return `
+    <span
+      data-player-profile-grant-chat-admin="1"
+      style="
+        display:inline-flex;
+        align-items:center;
+        gap:6px;
+        color:#14b8a6;
+        font-size:14px;
+        font-weight:900;
+        cursor:pointer;
+        white-space:nowrap;
+      "
+    >Направи чат админ</span>
+  `
+}
+
 function renderProfileContent(
   profile: PlayerPublicProfileSnapshot,
   seat: Seat | null,
@@ -542,7 +610,7 @@ function renderProfileContent(
   isAdmin: boolean,
   friendshipAction: PlayerProfileFriendshipAction | null,
   viewerIsFullAdmin: boolean,
-  targetAccountRole: 'player' | 'subadmin' | 'admin' | null,
+  targetAccountRole: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -640,6 +708,7 @@ function renderProfileContent(
               </span>
             ` : ''}
             ${renderSubadminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
+            ${renderChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderCoinBalanceInline(profile)}
           </div>
 

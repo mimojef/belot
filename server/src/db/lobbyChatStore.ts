@@ -8,6 +8,12 @@ export type LobbyChatMessageSnapshot = {
   messageId: string
   senderProfileId: string
   senderDisplayName: string
+  /**
+   * Snapshot КЪМ МОМЕНТА НА ИЗПРАЩАНЕ (същия модел като senderDisplayName) —
+   * дали подателят е бил chat_admin, когато е публикувал съобщението. Само
+   * за визуално оцветяване на името в общия чат, НЕ за авторизация.
+   */
+  senderIsChatAdmin: boolean
   body: string
   createdAt: string
   deletedAt: string | null
@@ -22,6 +28,7 @@ export type LobbyChatStore = {
   insertMessage: (input: {
     senderProfileId: string
     senderDisplayName: string
+    senderIsChatAdmin: boolean
     body: string
   }) => LobbyChatMessageSnapshot
   listRecentMessages: (
@@ -31,6 +38,8 @@ export type LobbyChatStore = {
   deleteMessage: (input: {
     messageId: string
     actorAccountId: string | null
+    /** Ролята на модератора В МОМЕНТА на изтриването — snapshot за одита. */
+    actorRoleAtDeletion: 'admin' | 'subadmin' | 'chat_admin'
   }) =>
     | { ok: true; senderProfileId: string }
     | { ok: false; code: 'not_found' | 'already_deleted' }
@@ -50,6 +59,7 @@ type LobbyChatMessageRow = {
   message_id: string
   sender_profile_id: string
   sender_display_name: string
+  sender_is_chat_admin: number
   body: string
   created_at: string
   deleted_at: string | null
@@ -61,6 +71,7 @@ function toSnapshot(row: LobbyChatMessageRow): LobbyChatMessageSnapshot {
     messageId: row.message_id,
     senderProfileId: row.sender_profile_id,
     senderDisplayName: row.sender_display_name,
+    senderIsChatAdmin: row.sender_is_chat_admin === 1,
     body: row.body,
     createdAt: dbDateToUtc(row.created_at),
     deletedAt: row.deleted_at ? dbDateToUtc(row.deleted_at) : null,
@@ -85,12 +96,12 @@ export async function createLobbyChatStore(
 
   const insertMessageStatement = database.prepare(`
     INSERT INTO lobby_chat_messages (
-      message_id, sender_profile_id, sender_display_name, body
-    ) VALUES (?, ?, ?, ?);
+      message_id, sender_profile_id, sender_display_name, sender_is_chat_admin, body
+    ) VALUES (?, ?, ?, ?, ?);
   `)
 
   const selectByMessageIdStatement = database.prepare(`
-    SELECT seq, message_id, sender_profile_id, sender_display_name, body, created_at, deleted_at
+    SELECT seq, message_id, sender_profile_id, sender_display_name, sender_is_chat_admin, body, created_at, deleted_at
     FROM lobby_chat_messages
     WHERE message_id = ?
     LIMIT 1;
@@ -108,8 +119,8 @@ export async function createLobbyChatStore(
 
   const insertDeletionAuditStatement = database.prepare(`
     INSERT INTO lobby_chat_deletion_audit_log (
-      log_id, actor_account_id, message_id, sender_profile_id
-    ) VALUES (?, ?, ?, ?);
+      log_id, actor_account_id, message_id, sender_profile_id, actor_role_at_deletion
+    ) VALUES (?, ?, ?, ?, ?);
   `)
 
   const selectMaxSeqStatement = database.prepare(`
@@ -121,7 +132,7 @@ export async function createLobbyChatStore(
   `)
 
   const selectNewMessagesStatement = database.prepare(`
-    SELECT seq, message_id, sender_profile_id, sender_display_name, body, created_at, deleted_at
+    SELECT seq, message_id, sender_profile_id, sender_display_name, sender_is_chat_admin, body, created_at, deleted_at
     FROM lobby_chat_messages
     WHERE seq > ?
     ORDER BY seq ASC
@@ -141,7 +152,7 @@ export async function createLobbyChatStore(
       ? `AND sender_profile_id NOT IN (${Array(excludedCount).fill('?').join(',')})`
       : ''
     return database.prepare(`
-      SELECT seq, message_id, sender_profile_id, sender_display_name, body, created_at, deleted_at
+      SELECT seq, message_id, sender_profile_id, sender_display_name, sender_is_chat_admin, body, created_at, deleted_at
       FROM lobby_chat_messages
       WHERE deleted_at IS NULL
       ${exclusionClause}
@@ -173,6 +184,7 @@ export async function createLobbyChatStore(
   function insertMessage(input: {
     senderProfileId: string
     senderDisplayName: string
+    senderIsChatAdmin: boolean
     body: string
   }): LobbyChatMessageSnapshot {
     const messageId = randomUUID()
@@ -180,6 +192,7 @@ export async function createLobbyChatStore(
       messageId,
       input.senderProfileId,
       input.senderDisplayName,
+      input.senderIsChatAdmin ? 1 : 0,
       input.body,
     )
     const row = selectByMessageIdStatement.get(messageId) as LobbyChatMessageRow
@@ -203,6 +216,7 @@ export async function createLobbyChatStore(
   function deleteMessage(input: {
     messageId: string
     actorAccountId: string | null
+    actorRoleAtDeletion: 'admin' | 'subadmin' | 'chat_admin'
   }):
     | { ok: true; senderProfileId: string }
     | { ok: false; code: 'not_found' | 'already_deleted' } {
@@ -235,6 +249,7 @@ export async function createLobbyChatStore(
         input.actorAccountId,
         input.messageId,
         existing.sender_profile_id,
+        input.actorRoleAtDeletion,
       )
       database.exec('COMMIT;')
     } catch (error) {

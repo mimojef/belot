@@ -26,7 +26,9 @@
  *       B продължава да вижда съобщенията на A (едностранно).
  * [A10] Модерация: пълен admin трие съобщение → веднага lobby_chat_message_deleted
  *       до всички абонати; съобщението изчезва от следваща история.
- * [A11] Subadmin НЕ може да трие (403); обикновен player НЕ може да трие (403).
+ * [A11] Admin, subadmin И chat_admin МОГАТ да трият (200); обикновен player
+ *       НЕ може (403). (Обновено: subadmin/chat_admin получиха това право —
+ *       виж isLobbyChatModeratorSession в authStore.ts.)
  * [A12] Повторно изтриване на вече изтрито съобщение е безопасно (200, без
  *       дублиран audit запис).
  * [A13] Стабилен ред (seq) при бързо изпратени съобщения; дедупликация по
@@ -40,6 +42,9 @@
  *       трябва да имат допълнителен излишен индекс; created_at на
  *       lobby_chat_deletion_events ТРЯБВА да има индекс (ползва се от
  *       retention purge заявката) — намерен и коригиран проблем.
+ * [A17] senderIsChatAdmin snapshot флаг: true в WS broadcast/history за
+ *       съобщение от chat_admin подател, false за admin/subadmin/player
+ *       (само за оцветяване на името в клиента, виж renderLobbyChatMessageRow).
  *
  * === Cross-instance broadcast (Section B) ===
  * [B1]  Съобщение, изпратено през instance #1, стига до абонат на instance #2
@@ -485,16 +490,19 @@ try {
   const userB = await registerAndLogin(portA, `lc-user-b-${runId}@example.test`, 'Blondie')
   const adminUser = await registerAndLogin(portA, `lc-admin-${runId}@example.test`, 'AdminUser')
   const subadminUser = await registerAndLogin(portA, `lc-subadmin-${runId}@example.test`, 'SubadminUser')
+  const chatAdminUser = await registerAndLogin(portA, `lc-chat-admin-${runId}@example.test`, 'ChatAdminUser')
 
   const dbForRoles = new DatabaseSync(isoA.dbFile, { open: true, enableForeignKeyConstraints: true })
   dbForRoles.prepare(`UPDATE accounts SET role='admin' WHERE email=?`).run(`lc-admin-${runId}@example.test`)
   dbForRoles.prepare(`UPDATE accounts SET role='subadmin' WHERE email=?`).run(`lc-subadmin-${runId}@example.test`)
+  dbForRoles.prepare(`UPDATE accounts SET role='chat_admin' WHERE email=?`).run(`lc-chat-admin-${runId}@example.test`)
   dbForRoles.close()
 
   const wsA = await openWs(portA, userA.cookie)
   const wsB = await openWs(portA, userB.cookie)
   const wsAdmin = await openWs(portA, adminUser.cookie)
   const wsSubadmin = await openWs(portA, subadminUser.cookie)
+  const wsChatAdmin = await openWs(portA, chatAdminUser.cookie)
   const wsAnon = await openWs(portA)
 
   await check('[A1] Анонимен: subscribe -> получава история; send -> отказан от сървъра', async () => {
@@ -690,16 +698,56 @@ try {
     assert(!stillThere, 'изтритото съобщение не трябва да се появява в последваща история')
   })
 
-  await check('[A11] Subadmin и обикновен player НЕ могат да трият (403)', async () => {
-    sendWs(wsB, { type: 'send_lobby_chat_message', body: `за-опит-за-изтриване-${Date.now()}`, requestId: 'req-for-delete-attempt' })
-    const targetMsg = await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-for-delete-attempt')
-    const targetMessageId = targetMsg.messageId as string
+  await check('[A11] Subadmin и chat_admin МОГАТ да трият (200); player и неавтентикиран — НЕ (403)', async () => {
+    // Отделно съобщение за всеки опит — веднъж изтрито, не може да послужи повторно.
+    sendWs(wsB, { type: 'send_lobby_chat_message', body: `за-player-опит-${Date.now()}`, requestId: 'req-player-attempt' })
+    const forPlayer = await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-player-attempt')
 
-    const subadminAttempt = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(targetMessageId)}`, subadminUser.cookie)
-    assert(subadminAttempt.status === 403, `subadmin delete трябва да е 403, получен ${subadminAttempt.status}`)
+    sendWs(wsB, { type: 'send_lobby_chat_message', body: `за-анонимен-опит-${Date.now()}`, requestId: 'req-anon-attempt' })
+    const forAnon = await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-anon-attempt')
 
-    const playerAttempt = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(targetMessageId)}`, userB.cookie)
+    sendWs(wsB, { type: 'send_lobby_chat_message', body: `за-subadmin-изтриване-${Date.now()}`, requestId: 'req-subadmin-delete' })
+    const forSubadmin = await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-subadmin-delete')
+
+    sendWs(wsB, { type: 'send_lobby_chat_message', body: `за-chat-admin-изтриване-${Date.now()}`, requestId: 'req-chat-admin-delete' })
+    const forChatAdmin = await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-chat-admin-delete')
+
+    const playerAttempt = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(forPlayer.messageId as string)}`, userB.cookie)
     assert(playerAttempt.status === 403, `player delete трябва да е 403, получен ${playerAttempt.status}`)
+
+    const anonAttempt = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(forAnon.messageId as string)}`)
+    assert(anonAttempt.status === 403, `неавтентикиран delete трябва да е 403, получен ${anonAttempt.status}`)
+
+    const subadminAttempt = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(forSubadmin.messageId as string)}`, subadminUser.cookie)
+    assert(subadminAttempt.status === 200, `subadmin delete трябва да е 200, получен ${subadminAttempt.status}`)
+
+    const chatAdminAttempt = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(forChatAdmin.messageId as string)}`, chatAdminUser.cookie)
+    assert(chatAdminAttempt.status === 200, `chat_admin delete трябва да е 200, получен ${chatAdminAttempt.status}`)
+
+    // Директна проверка, че сървърът наистина е изтрил (не само върнал 200) —
+    // подправена/невалидна заявка не бива да променя съобщението.
+    const db = new DatabaseSync(isoA.dbFile, { open: true, enableForeignKeyConstraints: true })
+    try {
+      const playerMsgRow = db.prepare(`SELECT deleted_at FROM lobby_chat_messages WHERE message_id = ?`).get(forPlayer.messageId) as { deleted_at: string | null }
+      assert(playerMsgRow.deleted_at === null, 'player-blocked съобщението НЕ трябва да е маркирано изтрито')
+
+      const subadminMsgRow = db.prepare(`SELECT deleted_at FROM lobby_chat_messages WHERE message_id = ?`).get(forSubadmin.messageId) as { deleted_at: string | null }
+      assert(subadminMsgRow.deleted_at !== null, 'subadmin трябва наистина да е изтрил съобщението')
+
+      const chatAdminMsgRow = db.prepare(`SELECT deleted_at FROM lobby_chat_messages WHERE message_id = ?`).get(forChatAdmin.messageId) as { deleted_at: string | null }
+      assert(chatAdminMsgRow.deleted_at !== null, 'chat_admin трябва наистина да е изтрил съобщението')
+
+      const auditRoleRows = db.prepare(`
+        SELECT message_id, actor_role_at_deletion FROM lobby_chat_deletion_audit_log
+        WHERE message_id IN (?, ?)
+      `).all(forSubadmin.messageId, forChatAdmin.messageId) as { message_id: string; actor_role_at_deletion: string }[]
+      const bySubadmin = auditRoleRows.find((r) => r.message_id === forSubadmin.messageId)
+      const byChatAdmin = auditRoleRows.find((r) => r.message_id === forChatAdmin.messageId)
+      assert(bySubadmin?.actor_role_at_deletion === 'subadmin', `audit actor_role_at_deletion за subadmin трябва да е 'subadmin', получено ${bySubadmin?.actor_role_at_deletion}`)
+      assert(byChatAdmin?.actor_role_at_deletion === 'chat_admin', `audit actor_role_at_deletion за chat_admin трябва да е 'chat_admin', получено ${byChatAdmin?.actor_role_at_deletion}`)
+    } finally {
+      db.close()
+    }
   })
 
   await check('[A12] Повторно изтриване на вече изтрито съобщение е безопасно (идемпотентно)', async () => {
@@ -716,6 +764,49 @@ try {
     } finally {
       db.close()
     }
+  })
+
+  await check('[A17] senderIsChatAdmin: true за съобщение от chat_admin, false за admin/subadmin/player', async () => {
+    // subadmin/chat_admin socket-ите досега само са изтривали през HTTP
+    // (виж [A11]) — никога не са се абонирали за live broadcast, затова тук
+    // подателят не би получил СОБСТВЕНОТО си потвърждение без предварителен subscribe.
+    sendWs(wsSubadmin, { type: 'subscribe_lobby_chat' })
+    await waitForWsMessage(wsSubadmin, (m) => m.type === 'lobby_chat_history')
+    sendWs(wsChatAdmin, { type: 'subscribe_lobby_chat' })
+    await waitForWsMessage(wsChatAdmin, (m) => m.type === 'lobby_chat_history')
+
+    // Свеж, никога преди неизползван player акаунт — wsB вече е изпратил
+    // много съобщения в по-ранни тестове (A9/A11 и др.) и може да е близо до
+    // rate limit-а (5 съобщения / 10с прозорец); свеж профил гарантира, че
+    // тази проверка не зависи от точния timing на предходните тестове.
+    const freshPlayer = await registerAndLogin(portA, `lc-color-player-${runId}@example.test`, 'ColorPlayer')
+    const wsFreshPlayer = await openWs(portA, freshPlayer.cookie)
+    sendWs(wsFreshPlayer, { type: 'subscribe_lobby_chat' })
+    await waitForWsMessage(wsFreshPlayer, (m) => m.type === 'lobby_chat_history')
+
+    sendWs(wsChatAdmin, { type: 'send_lobby_chat_message', body: `от-chat-admin-${Date.now()}`, requestId: 'req-color-chat-admin' })
+    const fromChatAdmin = await waitForWsMessage(wsChatAdmin, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-color-chat-admin')
+    assert(fromChatAdmin.senderIsChatAdmin === true, `senderIsChatAdmin трябва да е true за chat_admin подател, получено ${fromChatAdmin.senderIsChatAdmin}`)
+
+    sendWs(wsAdmin, { type: 'send_lobby_chat_message', body: `от-admin-${Date.now()}`, requestId: 'req-color-admin' })
+    const fromAdmin = await waitForWsMessage(wsAdmin, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-color-admin')
+    assert(fromAdmin.senderIsChatAdmin === false, `senderIsChatAdmin трябва да е false за пълен admin подател, получено ${fromAdmin.senderIsChatAdmin}`)
+
+    sendWs(wsSubadmin, { type: 'send_lobby_chat_message', body: `от-subadmin-${Date.now()}`, requestId: 'req-color-subadmin' })
+    const fromSubadmin = await waitForWsMessage(wsSubadmin, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-color-subadmin')
+    assert(fromSubadmin.senderIsChatAdmin === false, `senderIsChatAdmin трябва да е false за subadmin подател, получено ${fromSubadmin.senderIsChatAdmin}`)
+
+    sendWs(wsFreshPlayer, { type: 'send_lobby_chat_message', body: `от-player-${Date.now()}`, requestId: 'req-color-player' })
+    const fromPlayer = await waitForWsMessage(wsFreshPlayer, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-color-player')
+    assert(fromPlayer.senderIsChatAdmin === false, `senderIsChatAdmin трябва да е false за обикновен player, получено ${fromPlayer.senderIsChatAdmin}`)
+    await closeWs(wsFreshPlayer)
+
+    // Проверка и в историята (subscribe наново), не само в live broadcast-а.
+    sendWs(wsChatAdmin, { type: 'subscribe_lobby_chat' })
+    const historyForChatAdmin = await waitForWsMessage(wsChatAdmin, (m) => m.type === 'lobby_chat_history')
+    const historyEntry = (historyForChatAdmin.messages as Array<{ messageId: string; senderIsChatAdmin: boolean }>)
+      .find((m) => m.messageId === fromChatAdmin.messageId)
+    assert(historyEntry?.senderIsChatAdmin === true, 'senderIsChatAdmin трябва да остане true и в lobby_chat_history')
   })
 
   await check('[A13] Стабилен ред (seq) при бързи съобщения; дедупликация по messageId', async () => {

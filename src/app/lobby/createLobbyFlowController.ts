@@ -106,6 +106,19 @@ function isAdminOrSubadminAuthSession(session: LobbyAuthSession | null): boolean
   return session !== null && (session.account.role === 'admin' || session.account.role === 'subadmin')
 }
 
+/**
+ * Единственото право на chat_admin: показва бутона "(×)" за изтриване на
+ * съобщения от общия лайв чат. Само UX — сървърът презаверява това право на
+ * всяко DELETE през isLobbyChatModeratorSession (виж authStore.ts).
+ */
+function isLobbyChatModeratorAuthSession(session: LobbyAuthSession | null): boolean {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'subadmin'
+    || session.account.role === 'chat_admin'
+  )
+}
+
 export type CreateLobbyFlowControllerOptions = {
   root: HTMLElement
   joinMatchmaking: (stake: MatchStake, displayName?: string) => void
@@ -410,12 +423,14 @@ export type CreateLobbyFlowControllerOptions = {
   onSupportDeleteConversation?: () => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminServerScreenEnter?: () => void
   onAdminServerScreenLeave?: () => void
-  /** GET текуща роля на профил (само за пълен admin viewer) — за "Субадмин" бадж в профилния попъп. */
+  /** GET текуща роля на профил (само за пълен admin viewer) — за "Субадмин"/"Чат админ" бадж в профилния попъп. */
   onAdminGetTargetRole?: (
     profileId: string,
-  ) => Promise<{ ok: true; role: 'player' | 'subadmin' | 'admin' | null } | { ok: false; message: string }>
+  ) => Promise<{ ok: true; role: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null } | { ok: false; message: string }>
   onAdminGrantSubadmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminRevokeSubadmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
+  onAdminGrantChatAdmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
+  onAdminRevokeChatAdmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminHistoryWindowChange?: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
@@ -533,12 +548,15 @@ type InternalLobbyFlowState = {
   profilePopupProfile: PlayerPublicProfileSnapshot | null
   profilePopupCanEdit: boolean
   /** Роля на разглеждания акаунт (само заредена/показана за пълен admin viewer). */
-  profilePopupTargetRole: 'player' | 'subadmin' | 'admin' | null
+  profilePopupTargetRole: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null
   /** profileId, за който profilePopupTargetRole вече е (или се) зарежда — memoization guard. */
   profilePopupTargetRoleProfileId: string | null
-  subadminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke' } | null
+  subadminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'chat_admin' | null } | null
   subadminActionBusy: boolean
   subadminActionToast: { text: string; ok: boolean } | null
+  chatAdminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | null } | null
+  chatAdminActionBusy: boolean
+  chatAdminActionToast: { text: string; ok: boolean } | null
   profileEditorOpen: boolean
   profileEditorTargetProfileId: string | null
   profileEditorTargetProfile: PlayerPublicProfileSnapshot | null
@@ -809,6 +827,9 @@ function createInitialState(): InternalLobbyFlowState {
     subadminActionConfirm: null,
     subadminActionBusy: false,
     subadminActionToast: null,
+    chatAdminActionConfirm: null,
+    chatAdminActionBusy: false,
+    chatAdminActionToast: null,
     profileEditorOpen: false,
     profileEditorTargetProfileId: null,
     profileEditorTargetProfile: null,
@@ -2117,6 +2138,9 @@ export function createLobbyFlowController(
       subadminActionConfirm: state.subadminActionConfirm,
       subadminActionBusy: state.subadminActionBusy,
       subadminActionToast: state.subadminActionToast,
+      chatAdminActionConfirm: state.chatAdminActionConfirm,
+      chatAdminActionBusy: state.chatAdminActionBusy,
+      chatAdminActionToast: state.chatAdminActionToast,
       players: state.players,
       playersPage: state.playersPage,
       playersTotalCount: state.playersTotalCount,
@@ -2143,6 +2167,7 @@ export function createLobbyFlowController(
       shopPurchaseMessageText: state.shopPurchaseMessageText,
       isAdmin: isFullAdminAuthSession(authSession),
       isAdminOrSubadmin: isAdminOrSubadminAuthSession(authSession),
+      canDeleteLobbyChat: isLobbyChatModeratorAuthSession(authSession),
       adminStats: state.adminStats,
       adminStatsLoading: state.adminStatsLoading,
       adminStatsErrorText: state.adminStatsErrorText,
@@ -2377,6 +2402,18 @@ export function createLobbyFlowController(
       },
       onSubadminActionConfirm: () => {
         void confirmSubadminAction()
+      },
+      onProfileGrantChatAdminClick: (profileId) => {
+        getPopupCallbacks().onGrantChatAdminClick(profileId)
+      },
+      onProfileRevokeChatAdminClick: (profileId) => {
+        getPopupCallbacks().onRevokeChatAdminClick(profileId)
+      },
+      onChatAdminActionCancel: () => {
+        cancelChatAdminAction()
+      },
+      onChatAdminActionConfirm: () => {
+        void confirmChatAdminAction()
       },
       onProfileEditClose: () => {
         state.profileEditorOpen = false
@@ -6322,7 +6359,8 @@ export function createLobbyFlowController(
       onGrantSubadminClick: (profileId) => {
         if (!profileId) return
         const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
-        state.subadminActionConfirm = { profileId, displayName, action: 'grant' }
+        const previousRole = state.profilePopupTargetRole === 'chat_admin' ? 'chat_admin' : null
+        state.subadminActionConfirm = { profileId, displayName, action: 'grant', previousRole }
         state.profilePopupOpen = false
         syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
         render()
@@ -6331,6 +6369,23 @@ export function createLobbyFlowController(
         if (!profileId) return
         const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
         state.subadminActionConfirm = { profileId, displayName, action: 'revoke' }
+        state.profilePopupOpen = false
+        syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+        render()
+      },
+      onGrantChatAdminClick: (profileId) => {
+        if (!profileId) return
+        const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
+        const previousRole = state.profilePopupTargetRole === 'subadmin' ? 'subadmin' : null
+        state.chatAdminActionConfirm = { profileId, displayName, action: 'grant', previousRole }
+        state.profilePopupOpen = false
+        syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+        render()
+      },
+      onRevokeChatAdminClick: (profileId) => {
+        if (!profileId) return
+        const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
+        state.chatAdminActionConfirm = { profileId, displayName, action: 'revoke' }
         state.profilePopupOpen = false
         syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
         render()
@@ -6428,6 +6483,53 @@ export function createLobbyFlowController(
     setTimeout(() => {
       if (toastGeneration !== subadminActionToastGeneration) return
       state.subadminActionToast = null
+      render()
+    }, 3500)
+  }
+
+  /** Огледално на cancelSubadminAction/confirmSubadminAction, за chat_admin роля. */
+  function cancelChatAdminAction(): void {
+    if (state.chatAdminActionBusy) return
+    state.chatAdminActionConfirm = null
+    render()
+  }
+
+  let chatAdminActionToastGeneration = 0
+
+  async function confirmChatAdminAction(): Promise<void> {
+    const pending = state.chatAdminActionConfirm
+    if (!pending || state.chatAdminActionBusy) return
+
+    state.chatAdminActionBusy = true
+    render()
+
+    const caller = pending.action === 'grant' ? options.onAdminGrantChatAdmin : options.onAdminRevokeChatAdmin
+    const result = await caller?.(pending.profileId)
+
+    state.chatAdminActionBusy = false
+    state.chatAdminActionConfirm = null
+
+    if (result?.ok) {
+      state.chatAdminActionToast = {
+        text: pending.action === 'grant' ? 'Потребителят вече е чат админ.' : 'Ролята чат админ е премахната.',
+        ok: true,
+      }
+      if (state.profilePopupTargetRoleProfileId === pending.profileId) {
+        state.profilePopupTargetRoleProfileId = null
+        state.profilePopupTargetRole = null
+      }
+    } else {
+      state.chatAdminActionToast = {
+        text: result?.message ?? 'Действието не бе завършено.',
+        ok: false,
+      }
+    }
+    render()
+
+    const toastGeneration = ++chatAdminActionToastGeneration
+    setTimeout(() => {
+      if (toastGeneration !== chatAdminActionToastGeneration) return
+      state.chatAdminActionToast = null
       render()
     }, 3500)
   }
@@ -6816,6 +6918,7 @@ export function createLobbyFlowController(
             messageId: message.messageId,
             senderProfileId: message.senderProfileId,
             senderDisplayName: message.senderDisplayName,
+            senderIsChatAdmin: message.senderIsChatAdmin,
             body: message.body,
             createdAt: message.createdAt,
           },

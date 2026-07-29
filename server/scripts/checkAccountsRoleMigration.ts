@@ -17,6 +17,23 @@
  * [5]  PRAGMA integrity_check = 'ok'.
  * [6]  PRAGMA foreign_key_check връща 0 нарушения.
  * [7]  Всички индекси/колони на accounts са възстановени след rebuild-а.
+ *
+ * ── Стъпка 3 (добавена за chat_admin роля) ──────────────────────────────
+ * Прилага 20260729_002_extend_accounts_role_chat_admin.sql +
+ * 20260729_003_extend_admin_role_audit_log_chat_admin.sql ВЪРХУ вече
+ * мигрираната от стъпка 2 база (с реалния subadmin ред и admin_role_audit_log
+ * реда от [2]/[4] по-горе вече вътре) — доказва, че вторият rebuild на всяка
+ * таблица не губи данните от ПЪРВИЯ rebuild:
+ * [8]  CHECK на accounts.role вече позволява 'chat_admin'.
+ * [9]  CHECK на accounts.role продължава да отхвърля невалидна роля.
+ * [10] Редът subadmin от [2] е ОЩЕ вътре (втория table rebuild не го е изгубил).
+ * [11] Legacy admin акаунтът пази role='admin' и след двете rebuild-и.
+ * [12] admin_role_audit_log приема grant_chat_admin/revoke_chat_admin action
+ *      и previous_role/new_role='chat_admin'.
+ * [13] admin_role_audit_log CHECK продължава да отхвърля невалиден action.
+ * [14] Редът от [4] (grant_subadmin) е ОЩЕ вътре след rebuild-а на audit log-а.
+ * [15] PRAGMA integrity_check/foreign_key_check са чисти и след стъпка 3.
+ * [16] Индексите на admin_role_audit_log са възстановени.
  */
 
 import { DatabaseSync } from 'node:sqlite'
@@ -90,14 +107,24 @@ const NEW_MIGRATIONS = [
   '20260727_003_create_admin_role_audit_log.sql',
 ]
 
-for (const f of NEW_MIGRATIONS) {
+// Стъпка 3 — chat_admin роля, приложена ОТДЕЛНО (след синтетичните "стари"
+// данни И след стъпка 2), за да докажем, че вторият table rebuild на всяка
+// таблица не губи данните, вкарани от rebuild-а на стъпка 2.
+const STEP3_MIGRATIONS = [
+  '20260729_002_extend_accounts_role_chat_admin.sql',
+  '20260729_003_extend_admin_role_audit_log_chat_admin.sql',
+]
+
+for (const f of [...NEW_MIGRATIONS, ...STEP3_MIGRATIONS]) {
   if (!allMigrationFiles.includes(f)) {
     console.error(`FAIL: очакваният migration файл "${f}" липсва в ${migrationsDir}`)
     process.exit(1)
   }
 }
 
-const preExistingMigrationFiles = allMigrationFiles.filter((f) => !NEW_MIGRATIONS.includes(f))
+const preExistingMigrationFiles = allMigrationFiles.filter(
+  (f) => !NEW_MIGRATIONS.includes(f) && !STEP3_MIGRATIONS.includes(f),
+)
 
 const tempDir = await mkdtemp(join(tmpdir(), 'belot-role-migration-'))
 const dbPath = join(tempDir, 'test.sqlite')
@@ -247,6 +274,103 @@ try {
 
   const indexes = (db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='accounts'").all() as { name: string }[]).map((r) => r.name)
   check('[7.2] idx_accounts_role_status възстановен', indexes.includes('idx_accounts_role_status'))
+
+  // ══ Стъпка 3: приложи chat_admin миграциите ВЪРХУ вече мигрираната база ══
+  for (const fileName of STEP3_MIGRATIONS) {
+    await applyOneMigrationFile(db, migrationsDir, fileName)
+  }
+
+  // ── [8] CHECK позволява chat_admin ────────────────────────────────────────
+  let chatAdminInsertOk = false
+  try {
+    db.exec('BEGIN;')
+    db.prepare(`
+      INSERT INTO accounts (account_id, email, password_hash, role, status)
+      VALUES (?, 'new-chat-admin@example.test', 'scrypt:salt:hash', 'chat_admin', 'active')
+    `).run(randomUUID())
+    chatAdminInsertOk = true
+    db.exec('COMMIT;')
+  } catch {
+    db.exec('ROLLBACK;')
+  }
+  check('[8] CHECK constraint позволява role=chat_admin', chatAdminInsertOk)
+
+  // ── [9] CHECK продължава да отхвърля невалидна роля ──────────────────────
+  let invalidRoleStillRejected = false
+  try {
+    db.exec('BEGIN;')
+    db.prepare(`
+      INSERT INTO accounts (account_id, email, password_hash, role, status)
+      VALUES (?, 'bad-role-2@example.test', 'scrypt:salt:hash', 'superadmin', 'active')
+    `).run(randomUUID())
+    db.exec('COMMIT;')
+  } catch {
+    invalidRoleStillRejected = true
+    db.exec('ROLLBACK;')
+  }
+  check('[9] CHECK constraint продължава да отхвърля невалидна роля след стъпка 3', invalidRoleStillRejected)
+
+  // ── [10] Редът subadmin от [2] е още вътре ────────────────────────────────
+  const subadminRow = db.prepare(`SELECT role FROM accounts WHERE email = 'new-subadmin@example.test'`).get() as { role: string } | undefined
+  check('[10] subadmin редът от стъпка 2 е запазен след rebuild-а на стъпка 3', subadminRow?.role === 'subadmin')
+
+  // ── [11] Legacy admin запазва role=admin и след двете rebuild-и ──────────
+  const legacyRoleAfterStep3 = (db.prepare('SELECT role FROM accounts WHERE account_id = ?').get(legacyAdminAccountId) as { role: string } | undefined)?.role
+  check('[11] legacy admin запазва role=admin след стъпка 3', legacyRoleAfterStep3 === 'admin')
+
+  // ── [12] admin_role_audit_log приема chat_admin action/roles ─────────────
+  let chatAdminAuditInsertOk = false
+  try {
+    db.exec('BEGIN;')
+    db.prepare(`
+      INSERT INTO admin_role_audit_log (log_id, actor_account_id, target_account_id, action, previous_role, new_role)
+      VALUES (?, ?, ?, 'grant_chat_admin', 'player', 'chat_admin')
+    `).run(randomUUID(), legacyAdminAccountId, legacyAdminAccountId)
+    chatAdminAuditInsertOk = true
+    db.exec('COMMIT;')
+  } catch (err) {
+    console.error('chat_admin audit insert error:', err)
+    db.exec('ROLLBACK;')
+  }
+  check('[12] admin_role_audit_log приема grant_chat_admin (previous=player, new=chat_admin)', chatAdminAuditInsertOk)
+
+  // ── [13] admin_role_audit_log CHECK продължава да отхвърля невалиден action ──
+  let auditActionStillRejects = false
+  try {
+    db.exec('BEGIN;')
+    db.prepare(`
+      INSERT INTO admin_role_audit_log (log_id, actor_account_id, target_account_id, action, previous_role, new_role)
+      VALUES (?, ?, ?, 'delete_everything_2', 'player', 'chat_admin')
+    `).run(randomUUID(), legacyAdminAccountId, legacyAdminAccountId)
+    db.exec('COMMIT;')
+  } catch {
+    auditActionStillRejects = true
+    db.exec('ROLLBACK;')
+  }
+  check('[13] admin_role_audit_log CHECK продължава да отхвърля невалиден action', auditActionStillRejects)
+
+  // ── [14] Редът grant_subadmin от [4] е още вътре след rebuild-а на audit log ──
+  const oldAuditRow = db.prepare(`
+    SELECT action, previous_role, new_role FROM admin_role_audit_log
+    WHERE actor_account_id = ? AND target_account_id = ? AND action = 'grant_subadmin'
+  `).get(legacyAdminAccountId, legacyAdminAccountId) as { action: string; previous_role: string; new_role: string } | undefined
+  check(
+    '[14] grant_subadmin редът от стъпка 2 е запазен след rebuild-а на audit log таблицата',
+    oldAuditRow?.previous_role === 'player' && oldAuditRow?.new_role === 'subadmin',
+  )
+
+  // ── [15] Интегритет след стъпка 3 ─────────────────────────────────────────
+  const integrityAfterStep3 = (db.prepare('PRAGMA integrity_check').get() as { integrity_check: string }).integrity_check
+  check('[15.1] PRAGMA integrity_check = ok след стъпка 3', integrityAfterStep3 === 'ok')
+
+  const fkViolationsAfterStep3 = db.prepare('PRAGMA foreign_key_check').all()
+  check('[15.2] PRAGMA foreign_key_check = 0 нарушения след стъпка 3', fkViolationsAfterStep3.length === 0)
+
+  // ── [16] Индексите на admin_role_audit_log са възстановени ───────────────
+  const auditLogIndexes = (db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='admin_role_audit_log'").all() as { name: string }[]).map((r) => r.name)
+  check('[16] idx_admin_role_audit_log_target и idx_admin_role_audit_log_actor възстановени', (
+    auditLogIndexes.includes('idx_admin_role_audit_log_target') && auditLogIndexes.includes('idx_admin_role_audit_log_actor')
+  ))
 
   db.close()
 } finally {

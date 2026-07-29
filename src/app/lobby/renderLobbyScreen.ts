@@ -136,10 +136,19 @@ export type LobbyScreenState = {
   profilePopupProfile: PlayerPublicProfileSnapshot | null
   profilePopupCanEdit: boolean
   /** Роля на разглеждания акаунт — само за isAdmin (пълен) viewer; виж renderPlayerProfilePopup. */
-  profilePopupTargetRole: 'player' | 'subadmin' | 'admin' | null
-  subadminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke' } | null
+  profilePopupTargetRole: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null
+  /**
+   * previousRole: ако назначаваме субадмин, докато акаунтът реално е
+   * chat_admin (или обратно за chatAdminActionConfirm по-долу) — само за
+   * "старата роля ще бъде заменена" текст в confirm попъпа.
+   */
+  subadminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'chat_admin' | null } | null
   subadminActionBusy: boolean
   subadminActionToast: { text: string; ok: boolean } | null
+  /** Огледално на subadminActionConfirm/Busy/Toast, но за chat_admin роля. */
+  chatAdminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | null } | null
+  chatAdminActionBusy: boolean
+  chatAdminActionToast: { text: string; ok: boolean } | null
   players: PlayerPublicProfileSnapshot[]
   playersPage: number
   playersTotalCount: number
@@ -171,6 +180,13 @@ export type LobbyScreenState = {
   isAdmin: boolean
   /** Admin ИЛИ subadmin — вижда "⚙ Админ" менюто (само "Информация"/"Сървър" вътре, ако не е isAdmin). */
   isAdminOrSubadmin: boolean
+  /**
+   * admin, subadmin ИЛИ chat_admin — единствено за показване на бутона "(×)"
+   * в общия лайв чат. НЕ дава достъп до нищо друго (виж isAdmin/isAdminOrSubadmin
+   * по-горе за админските менюта) — сървърът презаверява това право на всяко
+   * DELETE през isLobbyChatModeratorSession, така че скриването тук е само UX.
+   */
+  canDeleteLobbyChat: boolean
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
@@ -358,6 +374,10 @@ export type RenderLobbyScreenOptions = {
   onProfileRevokeSubadminClick: (profileId: string | null) => void
   onSubadminActionCancel: () => void
   onSubadminActionConfirm: () => void
+  onProfileGrantChatAdminClick: (profileId: string | null) => void
+  onProfileRevokeChatAdminClick: (profileId: string | null) => void
+  onChatAdminActionCancel: () => void
+  onChatAdminActionConfirm: () => void
   onProfileEditClose: () => void
   onProfileEditSubmit: (
     avatarFile: File | null,
@@ -550,6 +570,8 @@ export type ProfilePopupCallbacks = {
   onLikeClick: (profileId: string) => void
   onGrantSubadminClick: (profileId: string | null) => void
   onRevokeSubadminClick: (profileId: string | null) => void
+  onGrantChatAdminClick: (profileId: string | null) => void
+  onRevokeChatAdminClick: (profileId: string | null) => void
 }
 
 function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profileId: string | null): void {
@@ -580,6 +602,22 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
     })
     revokeSubadminEl.addEventListener('mouseenter', () => { revokeSubadminEl.style.textDecoration = 'underline' })
     revokeSubadminEl.addEventListener('mouseleave', () => { revokeSubadminEl.style.textDecoration = 'none' })
+  }
+  const grantChatAdminEl = el.querySelector<HTMLElement>('[data-player-profile-grant-chat-admin="1"]')
+  if (grantChatAdminEl) {
+    grantChatAdminEl.addEventListener('click', () => {
+      cb.onGrantChatAdminClick(profileId)
+    })
+    grantChatAdminEl.addEventListener('mouseenter', () => { grantChatAdminEl.style.textDecoration = 'underline' })
+    grantChatAdminEl.addEventListener('mouseleave', () => { grantChatAdminEl.style.textDecoration = 'none' })
+  }
+  const revokeChatAdminEl = el.querySelector<HTMLElement>('[data-player-profile-revoke-chat-admin="1"]')
+  if (revokeChatAdminEl) {
+    revokeChatAdminEl.addEventListener('click', () => {
+      cb.onRevokeChatAdminClick(profileId)
+    })
+    revokeChatAdminEl.addEventListener('mouseenter', () => { revokeChatAdminEl.style.textDecoration = 'underline' })
+    revokeChatAdminEl.addEventListener('mouseleave', () => { revokeChatAdminEl.style.textDecoration = 'none' })
   }
   el.querySelector<HTMLButtonElement>('[data-player-profile-like]')
     ?.addEventListener('click', (e) => {
@@ -650,7 +688,7 @@ export function syncProfilePopup(
     isAdmin?: boolean
     friendshipAction: PlayerProfileFriendshipAction | null
     viewerIsFullAdmin?: boolean
-    targetAccountRole?: 'player' | 'subadmin' | 'admin' | null
+    targetAccountRole?: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null
   },
   cb: ProfilePopupCallbacks,
 ): void {
@@ -1727,17 +1765,21 @@ function renderNav(state: LobbyScreenState): string {
   `
 }
 
-function renderLobbyChatMessageRow(state: LobbyScreenState, message: LobbyChatMessageSnapshot): string {
-  const canDelete = state.isAdmin
+export function renderLobbyChatMessageRow(state: LobbyScreenState, message: LobbyChatMessageSnapshot): string {
+  const canDelete = state.canDeleteLobbyChat
+  // chat_admin вижда леко различен, приглушен teal нюанс на името си в
+  // общия чат (единственото място, където ролята му е разпознаваема) —
+  // admin/subadmin остават на стандартното злато, без промяна.
+  const nameColor = message.senderIsChatAdmin ? '#14b8a6' : '#d4a520'
 
   return `
     <div data-lobby-livechat-message="${escapeHtml(message.messageId)}" style="display:flex;align-items:flex-start;gap:5px;font-size:13px;line-height:1.45;word-break:break-word;">
       <div style="flex:1;min-width:0;">
-        <span style="color:#d4a520;font-weight:900;">${escapeHtml(message.senderDisplayName)}:</span>
+        <span style="color:${nameColor};font-weight:900;">${escapeHtml(message.senderDisplayName)}:</span>
         <span style="color:#f1f5f9;font-weight:500;"> ${escapeHtml(message.body)}</span>
       </div>
       ${canDelete ? `
-        <button type="button" data-lobby-livechat-delete="${escapeHtml(message.messageId)}" aria-label="Изтрий съобщението" title="Изтрий (admin)" style="flex:0 0 auto;width:16px;height:16px;line-height:16px;border:0;background:transparent;color:rgba(255,255,255,0.34);font-size:14px;cursor:pointer;padding:0;">×</button>
+        <button type="button" data-lobby-livechat-delete="${escapeHtml(message.messageId)}" aria-label="Изтрий съобщението" title="Изтрий" style="flex:0 0 auto;width:16px;height:16px;line-height:16px;border:0;background:transparent;color:rgba(255,255,255,0.34);font-size:14px;cursor:pointer;padding:0;">×</button>
       ` : ''}
     </div>
   `
@@ -7236,9 +7278,12 @@ export function renderSubadminActionConfirmPopup(state: LobbyScreenState): strin
 
   const isGrant = pending.action === 'grant'
   const title = isGrant ? 'Направи субадмин?' : 'Премахни субадмин?'
-  const message = isGrant
+  const baseMessage = isGrant
     ? 'Потребителят ще получи достъп само за преглед до секциите „Информация“ и „Сървър“. Няма да може да редактира профили, да чете чата с поддръжката или да променя настройки.'
     : 'Потребителят ще загуби достъпа до административните секции „Информация“ и „Сървър“.'
+  const message = isGrant && pending.previousRole === 'chat_admin'
+    ? `${baseMessage} Текущата роля „Чат админ“ ще бъде заменена.`
+    : baseMessage
   const confirmLabel = isGrant ? 'Направи субадмин' : 'Премахни'
   const busy = state.subadminActionBusy
 
@@ -7275,6 +7320,81 @@ export function renderSubadminActionConfirmPopup(state: LobbyScreenState): strin
 
 export function renderSubadminActionToast(state: LobbyScreenState): string {
   const toast = state.subadminActionToast
+  if (!toast) return ''
+
+  return `
+    <div style="
+      position:fixed;inset:0;z-index:9700;
+      display:flex;align-items:flex-end;justify-content:center;
+      padding-bottom:64px;
+      pointer-events:none;
+    ">
+      <div style="
+        pointer-events:auto;
+        background:#1a1a2e;
+        border:1px solid ${toast.ok ? 'rgba(212,165,32,0.55)' : 'rgba(239,68,68,0.55)'};
+        border-radius:12px;
+        padding:14px 22px;
+        text-align:center;
+        box-shadow:0 8px 40px rgba(0,0,0,0.7);
+        max-width:calc(100vw - 48px);
+        animation:prInfoIn 0.18s ease both;
+      ">
+        <div style="font-size:14px;font-weight:800;color:${toast.ok ? '#fde68a' : '#fca5a5'};">${escapeHtml(toast.text)}</div>
+      </div>
+    </div>
+  `
+}
+
+/** Огледално на renderSubadminActionConfirmPopup, но за chat_admin роля — виж коментара там за switch-предупреждението. */
+export function renderChatAdminActionConfirmPopup(state: LobbyScreenState): string {
+  const pending = state.chatAdminActionConfirm
+  if (!pending) return ''
+
+  const isGrant = pending.action === 'grant'
+  const title = isGrant ? 'Направи чат админ?' : 'Премахни чат админ?'
+  const baseMessage = isGrant
+    ? 'Потребителят ще може да трие потребителски съобщения от общия чат в лобито. Няма да получи достъп до администраторското меню, статистики, настройки или чужди профили.'
+    : 'Потребителят ще загуби правото да трие съобщения от общия чат в лобито.'
+  const message = isGrant && pending.previousRole === 'subadmin'
+    ? `${baseMessage} Текущата роля „Субадмин“ ще бъде заменена.`
+    : baseMessage
+  const confirmLabel = isGrant ? 'Направи чат админ' : 'Премахни'
+  const busy = state.chatAdminActionBusy
+
+  return `
+    <div style="
+      position:fixed;inset:0;z-index:9600;
+      display:flex;align-items:center;justify-content:center;
+      background:rgba(0,0,0,0.7);
+    ">
+      <div style="
+        background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);
+        border-radius:16px;padding:28px 28px 24px;max-width:400px;width:90%;
+        box-shadow:0 20px 60px rgba(0,0,0,0.6);
+      ">
+        <div style="font-size:18px;font-weight:900;color:#fff;margin-bottom:14px;">${escapeHtml(title)}</div>
+        <div style="font-size:14px;color:rgba(255,255,255,0.7);line-height:1.5;margin-bottom:24px;">${escapeHtml(message)}</div>
+        <div style="display:flex;gap:12px;">
+          <button type="button" data-chat-admin-action-cancel="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
+            border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};
+          ">Отказ</button>
+          <button type="button" data-chat-admin-action-confirm="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(212,165,32,0.62);
+            background:linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%);
+            border-radius:10px;color:#080808;font-size:14px;font-weight:900;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.7' : '1'};
+          ">${busy ? 'Изчакай…' : escapeHtml(confirmLabel)}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+export function renderChatAdminActionToast(state: LobbyScreenState): string {
+  const toast = state.chatAdminActionToast
   if (!toast) return ''
 
   return `
@@ -7755,6 +7875,8 @@ export function renderLobbyScreen(
       ${renderLeavePrivateRoomConfirmPopup(state)}
       ${renderSubadminActionConfirmPopup(state)}
       ${renderSubadminActionToast(state)}
+      ${renderChatAdminActionConfirmPopup(state)}
+      ${renderChatAdminActionToast(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
       ${renderNoPlayersModal(state)}
@@ -7986,6 +8108,8 @@ export function renderLobbyScreen(
       ${renderLeavePrivateRoomConfirmPopup(state)}
       ${renderSubadminActionConfirmPopup(state)}
       ${renderSubadminActionToast(state)}
+      ${renderChatAdminActionConfirmPopup(state)}
+      ${renderChatAdminActionToast(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
       ${renderNoPlayersModal(state)}
@@ -9054,6 +9178,8 @@ export function renderLobbyScreen(
       onLikeClick: options.onLikeClick,
       onGrantSubadminClick: options.onProfileGrantSubadminClick,
       onRevokeSubadminClick: options.onProfileRevokeSubadminClick,
+      onGrantChatAdminClick: options.onProfileGrantChatAdminClick,
+      onRevokeChatAdminClick: options.onProfileRevokeChatAdminClick,
     },
   )
 
@@ -10032,6 +10158,12 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-subadmin-action-cancel="1"]')
     ?.addEventListener('click', options.onSubadminActionCancel)
+
+  root.querySelector<HTMLButtonElement>('[data-chat-admin-action-confirm="1"]')
+    ?.addEventListener('click', options.onChatAdminActionConfirm)
+
+  root.querySelector<HTMLButtonElement>('[data-chat-admin-action-cancel="1"]')
+    ?.addEventListener('click', options.onChatAdminActionCancel)
 
   if (root.querySelector('[data-private-room-info-toast="1"]')) {
     if (privateRoomInfoDismissTimer !== null) clearTimeout(privateRoomInfoDismissTimer)
