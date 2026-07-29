@@ -33,6 +33,46 @@ export type RenderPrivateRoomWaitingScreenParams = {
   chatSending: boolean
   chatErrorText: string | null
   infoText: string | null
+  expiresAt: number
+}
+
+// Pure formatter — exported so it can be unit-tested and reused by the
+// controller's tick loop without re-rendering the whole screen.
+export function formatPrivateRoomCountdown(remainingMs: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+  }
+
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+}
+
+export function getPrivateRoomCountdownState(remainingMs: number): 'normal' | 'warning' | 'critical' {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000))
+  if (totalSeconds <= 30) return 'critical'
+  if (totalSeconds <= 60) return 'warning'
+  return 'normal'
+}
+
+function renderCountdownBadge(expiresAt: number): string {
+  const remainingMs = Math.max(0, expiresAt - Date.now())
+  const text = formatPrivateRoomCountdown(remainingMs)
+  const countdownState = getPrivateRoomCountdownState(remainingMs)
+
+  return `
+    <div
+      data-private-room-countdown="1"
+      data-expires-at="${expiresAt}"
+      class="prw-countdown prw-countdown-${countdownState}"
+    >
+      <span class="prw-countdown-label">Оставащо време</span>
+      <span data-private-room-countdown-value="1" class="prw-countdown-value">${text}</span>
+    </div>
+  `
 }
 
 function escapeHtml(value: string): string {
@@ -163,6 +203,73 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           font-size:13px;
           font-weight:800;
           cursor:pointer;
+        }
+
+        .prw-header-actions {
+          display:flex;
+          align-items:center;
+          gap:10px;
+          flex-wrap:wrap;
+        }
+
+        .prw-countdown {
+          display:flex;
+          align-items:baseline;
+          gap:6px;
+          padding:8px 14px;
+          border-radius:8px;
+          background:rgba(255,255,255,0.06);
+          border:1px solid rgba(255,255,255,0.14);
+          white-space:nowrap;
+        }
+
+        .prw-countdown-label {
+          font-size:11px;
+          font-weight:700;
+          color:rgba(248,250,252,0.56);
+          text-transform:uppercase;
+          letter-spacing:0.03em;
+        }
+
+        .prw-countdown-value {
+          font-size:15px;
+          font-weight:900;
+          color:#f8fafc;
+          font-variant-numeric:tabular-nums;
+        }
+
+        .prw-countdown-warning {
+          border-color:rgba(239,68,68,0.45);
+          background:rgba(239,68,68,0.08);
+        }
+
+        .prw-countdown-warning .prw-countdown-value {
+          color:#f87171;
+        }
+
+        .prw-countdown-critical {
+          border-color:rgba(239,68,68,0.6);
+          background:rgba(239,68,68,0.12);
+        }
+
+        .prw-countdown-critical .prw-countdown-value {
+          color:#f87171;
+          animation:prw-countdown-pulse 1s ease-in-out infinite;
+        }
+
+        @keyframes prw-countdown-pulse {
+          0%, 100% { opacity:1; }
+          50% { opacity:0.55; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          .prw-countdown-critical .prw-countdown-value {
+            animation:none;
+          }
+        }
+
+        .prw-countdown-mobile-row {
+          display:none;
         }
 
         .prw-info-banner {
@@ -467,6 +574,12 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           .prw-chat-panel {
             height:320px;
           }
+          .prw-header .prw-countdown {
+            display:none;
+          }
+          .prw-countdown-mobile-row {
+            display:flex;
+          }
         }
       </style>
 
@@ -478,8 +591,13 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
               ${params.isLocked ? 'Заключена' : 'Отворена'} · Залог ${formatStake(params.stake)} · ${humanCount}/4 играчи
             </div>
           </div>
-          <button type="button" data-private-waiting-leave-button="1" class="prw-leave-button">Напусни</button>
+          <div class="prw-header-actions">
+            ${renderCountdownBadge(params.expiresAt)}
+            <button type="button" data-private-waiting-leave-button="1" class="prw-leave-button">Напусни</button>
+          </div>
         </div>
+
+        <div class="prw-countdown-mobile-row">${renderCountdownBadge(params.expiresAt)}</div>
 
         ${params.infoText ? `<div class="prw-info-banner">${escapeHtml(params.infoText)}</div>` : ''}
 

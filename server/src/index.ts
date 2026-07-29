@@ -9048,6 +9048,7 @@ wsServer.on('connection', (socket, request) => {
           rankTitle: publicProfile.rankTitle,
           stake: message.stake,
           isLocked: message.isLocked,
+          waitMinutes: message.waitMinutes,
         })
 
         if (!createResult.ok) {

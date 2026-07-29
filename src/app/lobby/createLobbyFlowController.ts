@@ -7,7 +7,11 @@ import {
   renderMatchmakingRoomScreen,
   type MatchmakingRoomPlayer,
 } from './renderMatchmakingRoomScreen'
-import { renderPrivateRoomWaitingScreen } from './renderPrivateRoomWaitingScreen'
+import {
+  renderPrivateRoomWaitingScreen,
+  formatPrivateRoomCountdown,
+  getPrivateRoomCountdownState,
+} from './renderPrivateRoomWaitingScreen'
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
   renderLobbyScreen,
@@ -357,7 +361,7 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminMatchRoomDelete?: (stakeAmount: number) => Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }>
   onPrivateRoomsOpen?: () => void
   onPrivateRoomsClose?: () => void
-  onPrivateRoomCreate?: (stake: MatchStake, isLocked: boolean) => void
+  onPrivateRoomCreate?: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30) => void
   onPrivateRoomJoin?: (privateRoomId: string) => void
   onPrivateRoomLeave?: () => void
   onPrivateRoomInvite?: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
@@ -1358,6 +1362,16 @@ export function createLobbyFlowController(
   let progressBarElement: HTMLElement | null = null
   let lastRenderedCountdownSecond: number | null = null
 
+  // Отделен tick loop за брояча в чакалнята на частна маса — независим от
+  // matchmaking countdown-а по-горе (никога не са активни едновременно, но
+  // логически не са свързани). Обновява само текста/класовете на
+  // [data-private-room-countdown="1"] елементите чрез DOM мутация, БЕЗ пълен
+  // render() — чакалнята съдържа чат с draft/focus/caret/scroll състояние,
+  // което пълен render всяка секунда би застрашил.
+  let privateRoomCountdownIntervalId: ReturnType<typeof setInterval> | null = null
+  let privateRoomCountdownRoomId: string | null = null
+  let privateRoomCountdownExpiresAt: number | null = null
+
   let finalFillSequenceStartedAt: number | null = null
   let finalFillBaseQueuedPlayers: number | null = null
   let finalFillAnimatedQueuedPlayers: number | null = null
@@ -1589,6 +1603,67 @@ export function createLobbyFlowController(
     clearUiTickLoop()
     stopWaitingClockAudio()
     clearSeatFillSoundTimeouts()
+  }
+
+  function updatePrivateRoomCountdownDom(expiresAt: number): void {
+    const remainingMs = Math.max(0, expiresAt - Date.now())
+    const text = formatPrivateRoomCountdown(remainingMs)
+    const countdownState = getPrivateRoomCountdownState(remainingMs)
+
+    const badges = options.root.querySelectorAll<HTMLElement>('[data-private-room-countdown="1"]')
+    badges.forEach((badge) => {
+      badge.classList.remove('prw-countdown-normal', 'prw-countdown-warning', 'prw-countdown-critical')
+      badge.classList.add(`prw-countdown-${countdownState}`)
+      const valueEl = badge.querySelector<HTMLElement>('[data-private-room-countdown-value="1"]')
+      if (valueEl !== null) {
+        valueEl.textContent = text
+      }
+    })
+  }
+
+  function clearPrivateRoomCountdownLoop(): void {
+    if (privateRoomCountdownIntervalId !== null) {
+      window.clearInterval(privateRoomCountdownIntervalId)
+      privateRoomCountdownIntervalId = null
+    }
+    privateRoomCountdownRoomId = null
+    privateRoomCountdownExpiresAt = null
+  }
+
+  // Idempotent: called after every renderPrivateRoomWaitingRoom() re-render
+  // (chat message, member join/leave, etc.), which happens far more often
+  // than the room id or expiresAt actually change. Only tears down and
+  // restarts the interval when the (roomId, expiresAt) pair changes; a
+  // same-room/same-expiresAt re-render just re-syncs the freshly rendered
+  // DOM node (its innerHTML replace means the DOM element from the previous
+  // render no longer exists) without touching the interval itself.
+  function startPrivateRoomCountdownLoop(roomId: string, expiresAt: number): void {
+    if (privateRoomCountdownIntervalId !== null &&
+      privateRoomCountdownRoomId === roomId &&
+      privateRoomCountdownExpiresAt === expiresAt
+    ) {
+      updatePrivateRoomCountdownDom(expiresAt)
+      return
+    }
+
+    clearPrivateRoomCountdownLoop()
+    privateRoomCountdownRoomId = roomId
+    privateRoomCountdownExpiresAt = expiresAt
+
+    updatePrivateRoomCountdownDom(expiresAt)
+
+    privateRoomCountdownIntervalId = window.setInterval(() => {
+      const currentRoom = state.myPrivateRoom
+      if (state.currentScreen !== 'private-room-waiting' || currentRoom === null) {
+        clearPrivateRoomCountdownLoop()
+        return
+      }
+      // Recompute from the server-authoritative expiresAt every tick rather
+      // than counting down a locally-held remaining value — avoids drift and
+      // matches the "client never decides closure" contract: reaching 00:00
+      // here only changes displayed text, it never removes the room locally.
+      updatePrivateRoomCountdownDom(currentRoom.expiresAt)
+    }, 1000)
   }
 
   /** "Информация" family — screens with read-only subadmin+admin access (виж isAdminOrSubadminAuthSession). */
@@ -2812,9 +2887,9 @@ export function createLobbyFlowController(
         state.privateRoomsCreatePopupOpen = false
         render()
       },
-      onPrivateRoomCreate: (stake, isLocked) => {
+      onPrivateRoomCreate: (stake, isLocked, waitMinutes) => {
         state.privateRoomsCreatePopupOpen = false
-        options.onPrivateRoomCreate?.(stake, isLocked)
+        options.onPrivateRoomCreate?.(stake, isLocked, waitMinutes)
       },
       onPrivateRoomJoin: (privateRoomId) => {
         options.onPrivateRoomJoin?.(privateRoomId)
@@ -5910,7 +5985,10 @@ export function createLobbyFlowController(
       chatSending: state.privateRoomWaitingChatSending,
       chatErrorText: state.privateRoomWaitingChatErrorText,
       infoText: state.privateRoomInfoText,
+      expiresAt: room.expiresAt,
     })
+
+    startPrivateRoomCountdownLoop(room.id, room.expiresAt)
 
     options.root.querySelector<HTMLButtonElement>('[data-private-waiting-leave-button="1"]')
       ?.addEventListener('click', () => {
@@ -6810,7 +6888,7 @@ export function createLobbyFlowController(
         leavePrivateRoomWaitingScreen()
         state.myPrivateRoom = null
         state.currentScreen = 'private-rooms'
-        state.privateRoomInfoText = 'Частната маса изтече — не беше напълнена навреме.'
+        state.privateRoomInfoText = 'Частната маса беше затворена, защото времето за изчакване изтече.'
         render()
       }
       return true
@@ -6956,6 +7034,7 @@ export function createLobbyFlowController(
   }
 
   function leavePrivateRoomWaitingScreen(): void {
+    clearPrivateRoomCountdownLoop()
     if (state.myPrivateRoom !== null) {
       options.onPrivateRoomChatUnsubscribe?.(state.myPrivateRoom.id)
     }
@@ -7196,6 +7275,7 @@ export function createLobbyFlowController(
     destroy: () => {
       leaveAdminServerIfActive()
       stopWaitingRoomActivity()
+      clearPrivateRoomCountdownLoop()
       clearServerRoomSnapshot()
       resetFinalFillSequence()
       doHideInitialOverlay()

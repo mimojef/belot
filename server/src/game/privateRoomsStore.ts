@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
+import type { PrivateRoomWaitMinutes } from '../protocol/messageTypes.js'
 
-export const PRIVATE_ROOM_OPEN_TIMEOUT_MS = 10 * 60 * 1000
-export const PRIVATE_ROOM_LOCKED_TIMEOUT_MS = 20 * 60 * 1000
 const MAX_MEMBERS = 4
 
 export type PrivateRoomMember = {
@@ -73,6 +72,7 @@ export type CreateRoomInput = {
   rankTitle: string | null
   stake: MatchStake
   isLocked: boolean
+  waitMinutes: PrivateRoomWaitMinutes
 }
 
 export type CreateRoomResult =
@@ -172,7 +172,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     }
 
     const now = Date.now()
-    const timeoutMs = input.isLocked ? PRIVATE_ROOM_LOCKED_TIMEOUT_MS : PRIVATE_ROOM_OPEN_TIMEOUT_MS
+    const timeoutMs = input.waitMinutes * 60 * 1000
 
     const member: PrivateRoomMember = {
       connectionId: input.connectionId,

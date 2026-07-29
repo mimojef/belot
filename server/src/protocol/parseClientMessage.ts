@@ -3,7 +3,26 @@ import {
   type MatchStake,
 } from '../matchmaking/matchmakingTypes.js'
 import { SERVER_SEAT_ORDER, type Seat } from '../core/serverTypes.js'
-import type { ClientBidAction, ClientMessage } from './messageTypes.js'
+import type { ClientBidAction, ClientMessage, PrivateRoomWaitMinutes } from './messageTypes.js'
+
+const ALLOWED_PRIVATE_ROOM_WAIT_MINUTES: readonly PrivateRoomWaitMinutes[] = [5, 10, 15, 30]
+const DEFAULT_PRIVATE_ROOM_WAIT_MINUTES: PrivateRoomWaitMinutes = 15
+
+// Returns the normalized value if `value` is missing (undefined), the exact
+// default if `value` is present but invalid signals a parse failure so the
+// whole message is rejected — a legacy client omitting the field is fine, but
+// a client (or attacker) sending a bogus value is not silently coerced.
+function parsePrivateRoomWaitMinutes(value: unknown): PrivateRoomWaitMinutes | null {
+  if (value === undefined) {
+    return DEFAULT_PRIVATE_ROOM_WAIT_MINUTES
+  }
+
+  if (typeof value === 'number' && (ALLOWED_PRIVATE_ROOM_WAIT_MINUTES as readonly number[]).includes(value)) {
+    return value as PrivateRoomWaitMinutes
+  }
+
+  return null
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -394,10 +413,16 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         return null
       }
 
+      const waitMinutes = parsePrivateRoomWaitMinutes(parsed.waitMinutes)
+      if (waitMinutes === null) {
+        return null
+      }
+
       return {
         type: 'create_private_room',
         stake: parsed.stake,
         isLocked: parsed.isLocked === true,
+        waitMinutes,
         displayName: normalizeOptionalDisplayName(parsed.displayName),
       }
     }

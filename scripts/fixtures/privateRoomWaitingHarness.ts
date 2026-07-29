@@ -22,6 +22,22 @@ function record(name: string) {
   }
 }
 
+// Instrument window.setInterval/clearInterval so tests can assert "at most
+// one active interval at a time" for the private-room countdown loop,
+// without reaching into controller internals.
+const activeIntervalIds = new Set<number>()
+const nativeSetInterval = window.setInterval.bind(window)
+const nativeClearInterval = window.clearInterval.bind(window)
+;(window as any).setInterval = (...args: Parameters<typeof window.setInterval>) => {
+  const id = nativeSetInterval(...(args as [any, any]))
+  activeIntervalIds.add(id as unknown as number)
+  return id
+}
+;(window as any).clearInterval = (id?: number) => {
+  if (id !== undefined) activeIntervalIds.delete(id)
+  return nativeClearInterval(id)
+}
+
 const controller = createLobbyFlowController({
   root,
   joinMatchmaking: () => {},
@@ -84,4 +100,10 @@ const controller = createLobbyFlowController({
     const found = [...calls].reverse().find((c) => c.name === name)
     return found ? found.args : undefined
   },
+  getActiveIntervalCount: () => activeIntervalIds.size,
+  // Returns the sole active interval id (or null), so tests can prove the
+  // *same* interval survives a re-render (idempotent) versus being cleared
+  // and re-created with a coincidentally-equal count.
+  getSoleActiveIntervalId: () => (activeIntervalIds.size === 1 ? [...activeIntervalIds][0] : null),
+  destroy: () => controller.destroy(),
 }

@@ -464,6 +464,7 @@ export type ClientMessage =
       type: 'create_private_room'
       stake: MatchStake
       isLocked: boolean
+      waitMinutes: 5 | 10 | 15 | 30
       displayName?: string
     }
   | {
@@ -1218,7 +1219,7 @@ export type GameServerClient = {
   sendEmojiReaction: (roomId: string, emojiId: string) => void
   sendPhraseReaction: (roomId: string, phraseId: string) => void
   requestPrivateRoomsList: () => void
-  createPrivateRoom: (stake: MatchStake, isLocked: boolean) => void
+  createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30) => void
   joinPrivateRoom: (privateRoomId: string) => void
   leavePrivateRoom: () => void
   inviteToPrivateRoom: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
@@ -1466,8 +1467,8 @@ export function createGameServerClient(
     send({ type: 'request_private_rooms_list' })
   }
 
-  function createPrivateRoom(stake: MatchStake, isLocked: boolean): void {
-    send({ type: 'create_private_room', stake, isLocked })
+  function createPrivateRoom(stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30): void {
+    send({ type: 'create_private_room', stake, isLocked, waitMinutes })
   }
 
   function joinPrivateRoom(privateRoomId: string): void {

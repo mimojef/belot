@@ -11,6 +11,7 @@
     "check:matchmaking-blocked-partnership": "tsx scripts/checkMatchmakingBlockedPartnership.ts",
     "check:private-room-seat-randomization": "tsx scripts/checkPrivateRoomSeatRandomization.ts",
     "check:private-room-bot-fill-gating": "tsx scripts/checkPrivateRoomBotFillGating.ts",
+    "check:private-room-wait-time-selection": "tsx scripts/checkPrivateRoomWaitTimeSelection.ts",
     "check:private-room-waiting-chat": "tsx scripts/checkPrivateRoomWaitingChat.ts",
     "check:private-table-end-game-origin": "tsx scripts/checkPrivateTableEndGameOrigin.ts",
     "check:private-room-ws-round-trip": "tsx scripts/checkPrivateRoomWebSocketRoundTrip.ts --server-root=.",

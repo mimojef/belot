@@ -116,6 +116,7 @@ export type ClientMessage =
       type: 'create_private_room'
       stake: MatchStake
       isLocked: boolean
+      waitMinutes: PrivateRoomWaitMinutes
       displayName?: string
     }
   | {
@@ -519,6 +520,8 @@ export type PhraseReactionMessage = {
 }
 
 // --- Private rooms ---
+
+export type PrivateRoomWaitMinutes = 5 | 10 | 15 | 30
 
 export type PrivateRoomMemberSnapshot = {
   profileId: string | null

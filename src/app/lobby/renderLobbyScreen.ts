@@ -478,7 +478,7 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomsTabChange: (tab: 'all' | 'mine') => void
   onPrivateRoomsCreateOpen: () => void
   onPrivateRoomsCreateClose: () => void
-  onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean) => void
+  onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30) => void
   onPrivateRoomJoin: (privateRoomId: string) => void
   onPrivateRoomLeave: () => void
   onPrivateRoomInvite: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
@@ -6970,6 +6970,8 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState): string {
   if (!state.privateRoomsCreatePopupOpen) return ''
 
   const SUPPORTED_STAKES: MatchStake[] = [5000, 8000, 10000, 15000, 20000]
+  const WAIT_MINUTES_OPTIONS: Array<5 | 10 | 15 | 30> = [5, 10, 15, 30]
+  const DEFAULT_WAIT_MINUTES = 15
 
   return `
     <div data-private-rooms-create-backdrop="1" style="
@@ -7010,6 +7012,16 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState): string {
             <input type="checkbox" name="isLocked" style="width:17px;height:17px;cursor:pointer;accent-color:#a78bfa;">
             <span style="font-size:13px;color:rgba(255,255,255,0.7);">Заключена маса <span style="color:rgba(255,255,255,0.4);">(само с покана)</span></span>
           </label>
+          <div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Време за изчакване на играчи</div>
+            <select name="waitMinutes" style="
+              width:100%;padding:10px 12px;background:#2a2a3e;
+              border:1px solid rgba(255,255,255,0.2);border-radius:9px;color:#fff;font-size:14px;
+              color-scheme:dark;
+            ">
+              ${WAIT_MINUTES_OPTIONS.map((m) => `<option value="${m}"${m === DEFAULT_WAIT_MINUTES ? ' selected' : ''}>${m} минути</option>`).join('')}
+            </select>
+          </div>
           <button type="submit" style="
             padding:11px;background:rgba(167,139,250,0.2);
             border:1px solid rgba(167,139,250,0.5);border-radius:10px;
@@ -9952,7 +9964,11 @@ export function renderLobbyScreen(
       const data = new FormData(form)
       const stake = Number(data.get('stake') ?? 5000) as MatchStake
       const isLocked = (data.get('isLocked') ?? null) !== null
-      options.onPrivateRoomCreate(stake, isLocked)
+      const rawWaitMinutes = Number(data.get('waitMinutes'))
+      const waitMinutes: 5 | 10 | 15 | 30 = [5, 10, 15, 30].includes(rawWaitMinutes)
+        ? (rawWaitMinutes as 5 | 10 | 15 | 30)
+        : 15
+      options.onPrivateRoomCreate(stake, isLocked, waitMinutes)
     })
 
   root.querySelectorAll<HTMLButtonElement>('[data-private-room-join]').forEach((btn) => {
