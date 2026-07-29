@@ -22,6 +22,7 @@ import { chromium, type Browser, type BrowserContext, type Page } from 'playwrig
 import { createServer as createNetServer } from 'node:net'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 let passed = 0
 let failed = 0
@@ -62,10 +63,9 @@ function findFreePort(): Promise<number> {
   })
 }
 
-const SCREENSHOT_DIR = join(
-  'C:/Users/NELL/AppData/Local/Temp/claude/d--Project-Belot-V2/0d63a98d-2522-49e0-829b-235ff4f68e46/scratchpad',
-  'private-room-mobile-screenshots',
-)
+// Project-local, machine-independent scratch location — no hardcoded
+// absolute user-specific path, so the suite runs reliably on any machine/CI.
+const SCREENSHOT_DIR = join(tmpdir(), 'belot-v2-private-room-mobile-screenshots')
 
 async function settlePaint(page: Page): Promise<void> {
   // Guard against a Chromium headless "cold first paint" artifact observed
@@ -117,8 +117,8 @@ function makeMember(profileId: string, displayName: string, isHost: boolean, lev
   return { profileId, displayName, avatarUrl: null, level, rankTitle: isHost ? null : 'Играч', isHost }
 }
 
-function makeRoom(id: string, members: unknown[], kind: 'open' | 'locked' = 'open', stake = 5000) {
-  return { id, kind, stake, members, createdAt: Date.now(), expiresAt: Date.now() + 10 * 60_000 }
+function makeRoom(id: string, members: unknown[], kind: 'open' | 'locked' = 'open', stake = 5000, expiresAt?: number) {
+  return { id, kind, stake, members, createdAt: Date.now(), expiresAt: expiresAt ?? Date.now() + 10 * 60_000 }
 }
 
 const LONG_CYRILLIC_NAME = 'Константин-Александър Величковски-Радославов'
@@ -516,6 +516,304 @@ async function runKeyboardOpenScenario(page: Page, label: string, viewportWidth:
   })
 }
 
+// Verifies the mobile "Чакалня — частна маса" rework: 2x2 seat grid, the
+// compact host badge, chat reachability (composer never off-screen/covered),
+// and chat-area-only scrolling (composer stays put while messages scroll).
+async function runMobileWaitingRoomLayoutScenario(page: Page, label: string, viewportWidth: number): Promise<void> {
+  await page.goto('/scripts/fixtures/privateRoomWaitingHarness.html')
+  await page.waitForFunction(() => (window as any).__prwHarness !== undefined, undefined, { timeout: 10_000 })
+
+  // ─── 1/4 players, open room ──────────────────────────────────────────────
+  await page.evaluate(({ room }) => {
+    ;(window as any).__prwHarness.navigateToPrivateRooms()
+    ;(window as any).__prwHarness.pushRoomUpdated(room)
+  }, { room: makeRoom('mobile-grid-room', [makeMember('me', 'Тестов Играч', true)], 'open') })
+  await page.waitForSelector('[data-private-room-waiting-screen="1"]', { state: 'attached' })
+
+  await check(`${label} [G1] Grid: exactly 2 columns at mobile width`, async () => {
+    const columnCount = await page.evaluate(() => {
+      const el = document.querySelector('.prw-seats')
+      const cols = getComputedStyle(el!).gridTemplateColumns.trim().split(/\s+/)
+      return cols.length
+    })
+    assert(columnCount === 2, `expected 2 grid-template-columns, got ${columnCount}`)
+  })
+
+  await check(`${label} [G2] Grid: the 4 seats form exactly 2 rows of 2 (2x2)`, async () => {
+    const rects = await page.$$eval('.prw-seat', (els) => els.map((el) => el.getBoundingClientRect()).map((r) => ({ top: Math.round(r.top), left: Math.round(r.left) })))
+    assert(rects.length === 4, `expected 4 seat cards, got ${rects.length}`)
+    const rowTops = [...new Set(rects.map((r) => r.top))]
+    const colLefts = [...new Set(rects.map((r) => r.left))]
+    assert(rowTops.length === 2, `expected 2 distinct row positions, got ${rowTops.length} (${JSON.stringify(rowTops)})`)
+    assert(colLefts.length === 2, `expected 2 distinct column positions, got ${colLefts.length} (${JSON.stringify(colLefts)})`)
+  })
+
+  await check(`${label} [G3] Grid: all 4 seat cards have equal height`, async () => {
+    const heights = await page.$$eval('.prw-seat', (els) => els.map((el) => Math.round(el.getBoundingClientRect().height)))
+    const distinct = [...new Set(heights)]
+    assert(distinct.length === 1, `expected equal heights across all 4 cards, got ${JSON.stringify(heights)}`)
+  })
+
+  await check(`${label} [G4] Grid: seat card height is in the 60-100px compact range`, async () => {
+    const height = await page.$eval('.prw-seat', (el) => el.getBoundingClientRect().height)
+    assert(height >= 60 && height <= 100, `seat card height ${height}px out of the expected compact range`)
+  })
+
+  await check(`${label} [G5] Grid: no horizontal overflow with the 2x2 layout`, async () => {
+    const { overflow } = await hasHorizontalScroll(page)
+    assert(!overflow, 'horizontal overflow with the mobile 2x2 seat grid')
+  })
+
+  // ─── Host badge: only on the host, correct text, survives long names ────
+  await check(`${label} [H1] Host badge is visible only for the host`, async () => {
+    const badgeCount = await page.locator('.prw-host-badge').count()
+    assert(badgeCount === 1, `expected exactly 1 host badge, got ${badgeCount}`)
+  })
+
+  await check(`${label} [H2] Host badge text reads "ДОМАКИН"`, async () => {
+    const text = await page.locator('.prw-host-badge').textContent()
+    assert((text ?? '').trim() === 'ДОМАКИН', `unexpected host badge text "${text}"`)
+  })
+
+  // Long name: badge must stay visible and the card must not overflow.
+  await page.evaluate(({ room }) => {
+    ;(window as any).__prwHarness.pushRoomUpdated(room)
+  }, { room: makeRoom('mobile-grid-room', [makeMember('me', LONG_CYRILLIC_NAME, true), makeMember('guest-1', LONG_LATIN_NAME, false)], 'open') })
+
+  await check(`${label} [H3] Long host name: the host badge remains visible (not clipped away)`, async () => {
+    const box = await page.locator('.prw-host-badge').boundingBox()
+    assert(box !== null && box.width > 0 && box.height > 0, 'host badge disappeared or collapsed with a long display name')
+  })
+
+  await check(`${label} [H4] Long host name: the name is ellipsized (does not force the card wider)`, async () => {
+    const overflowsHidden = await page.evaluate(() => {
+      const nameEl = document.querySelector('.prw-seat-name')
+      if (!nameEl) return false
+      const style = getComputedStyle(nameEl)
+      return style.textOverflow === 'ellipsis' && style.overflow === 'hidden'
+    })
+    assert(overflowsHidden, 'seat name is not set up to ellipsize (text-overflow/overflow)')
+  })
+
+  await check(`${label} [H5] Long host name: the seat card does not overflow horizontally`, async () => {
+    const { overflow } = await hasHorizontalScroll(page)
+    assert(!overflow, 'long host name caused horizontal overflow')
+  })
+
+  await check(`${label} [H6] Host badge stays a readable, non-collapsed size even with a long name`, async () => {
+    const box = await page.locator('.prw-host-badge').boundingBox()
+    assert(box !== null && box.width >= 40 && box.height >= 10, `host badge shrank to an unreadable size: ${JSON.stringify(box)}`)
+  })
+
+  // ─── Empty seat stays the same height as occupied ones ───────────────────
+  await check(`${label} [G6] Empty seat card has the same height as occupied cards`, async () => {
+    const heights = await page.$$eval('.prw-seat', (els) => els.map((el) => Math.round(el.getBoundingClientRect().height)))
+    const distinct = [...new Set(heights)]
+    assert(distinct.length === 1, `empty and occupied seat heights differ: ${JSON.stringify(heights)}`)
+  })
+
+  // ─── 4/4 players still forms a clean 2x2, no overflow ────────────────────
+  await page.evaluate(({ room }) => {
+    ;(window as any).__prwHarness.pushRoomUpdated(room)
+  }, {
+    room: makeRoom('mobile-grid-full', [
+      makeMember('me', 'Тестов Играч', true),
+      makeMember('g1', 'Гост Едно', false),
+      makeMember('g2', 'Гост Две', false),
+      makeMember('g3', 'Гост Три', false),
+    ], 'locked'),
+  })
+
+  await check(`${label} [G7] 4/4 players (locked room): still exactly 4 cards, 2x2, no overflow`, async () => {
+    const rects = await page.$$eval('.prw-seat', (els) => els.map((el) => el.getBoundingClientRect()).map((r) => ({ top: Math.round(r.top), left: Math.round(r.left) })))
+    assert(rects.length === 4, `expected 4 seat cards at 4/4, got ${rects.length}`)
+    const rowTops = [...new Set(rects.map((r) => r.top))]
+    assert(rowTops.length === 2, `expected 2 rows at 4/4, got ${rowTops.length}`)
+    const { overflow } = await hasHorizontalScroll(page)
+    assert(!overflow, 'horizontal overflow at 4/4 players')
+  })
+
+  // ─── Chat reachability: composer is reachable/focusable, within viewport ─
+  await page.evaluate(({ room }) => {
+    ;(window as any).__prwHarness.pushRoomUpdated(room)
+  }, { room: makeRoom('mobile-chat-reach', [makeMember('me', 'Тестов Играч', true), makeMember('guest-1', 'Гост', false)], 'open') })
+
+  await check(`${label} [CH1] Composer input+send are within the viewport horizontally (no horizontal scroll needed)`, async () => {
+    const within = await page.evaluate(() => {
+      const input = document.querySelector('[data-private-waiting-chat-input="1"]')
+      const send = document.querySelector('[data-private-waiting-chat-form="1"] button[type="submit"]')
+      if (!input || !send) return false
+      const ir = input.getBoundingClientRect()
+      const sr = send.getBoundingClientRect()
+      return ir.left >= 0 && sr.right <= window.innerWidth + 1
+    })
+    assert(within, 'chat composer input/send extends outside the viewport width')
+  })
+
+  await check(`${label} [CH2] Composer input can be focused`, async () => {
+    await page.locator('[data-private-waiting-chat-input="1"]').click()
+    const focused = await page.evaluate(() => document.activeElement === document.querySelector('[data-private-waiting-chat-input="1"]'))
+    assert(focused, 'chat input could not be focused')
+  })
+
+  await check(`${label} [CH3] Composer is reachable by scrolling the page at a very short viewport`, async () => {
+    const originalSize = page.viewportSize()
+    if (originalSize) {
+      await page.setViewportSize({ width: originalSize.width, height: 420 })
+    }
+    const sendButton = page.locator('[data-private-waiting-chat-form="1"] button[type="submit"]')
+    await sendButton.scrollIntoViewIfNeeded()
+    const box = await sendButton.boundingBox()
+    assert(box !== null, 'send button not found after scrolling into view at a short viewport')
+    const vp = page.viewportSize()
+    assert(
+      box!.y >= 0 && box!.y + box!.height <= (vp?.height ?? 420) + 1,
+      `send button not within the short viewport after scroll: ${JSON.stringify(box)}`,
+    )
+    if (originalSize) {
+      await page.setViewportSize(originalSize)
+    }
+  })
+
+  // ─── Chat scrolling: many messages scroll the message area, not the page;
+  // composer stays fixed relative to the panel (does not travel with list).
+  await page.evaluate(() => (window as any).__prwHarness.clearCalls())
+  await page.evaluate(({ room }) => {
+    ;(window as any).__prwHarness.pushRoomUpdated(room)
+  }, { room: makeRoom('mobile-chat-scroll', [makeMember('me', 'Тестов Играч', true), makeMember('guest-1', 'Гост', false)], 'open') })
+
+  const composerYBefore = await page.evaluate(() => {
+    const send = document.querySelector('[data-private-waiting-chat-form="1"] button[type="submit"]')
+    return send?.getBoundingClientRect().y ?? null
+  })
+
+  for (let i = 0; i < 25; i++) {
+    await page.evaluate((i) => {
+      ;(window as any).__prwHarness.pushChatMessage('mobile-chat-scroll', {
+        seq: i, messageId: `msg-${i}`, senderProfileId: 'guest-1', senderDisplayName: 'Гост', body: `Съобщение номер ${i} за проверка на скрола в чата`, createdAt: Date.now(),
+      })
+    }, i)
+  }
+
+  await check(`${label} [CS1] Many messages create scroll within the message area (scrollHeight > clientHeight)`, async () => {
+    const { scrollHeight, clientHeight } = await page.evaluate(() => {
+      const el = document.querySelector('[data-private-waiting-chat-scroll="1"]') as HTMLElement
+      return { scrollHeight: el.scrollHeight, clientHeight: el.clientHeight }
+    })
+    assert(scrollHeight > clientHeight, `expected message list to overflow (scrollHeight=${scrollHeight}, clientHeight=${clientHeight})`)
+  })
+
+  await check(`${label} [CS2] The composer does not move when the message list scrolls`, async () => {
+    const composerYAfter = await page.evaluate(() => {
+      const send = document.querySelector('[data-private-waiting-chat-form="1"] button[type="submit"]')
+      return send?.getBoundingClientRect().y ?? null
+    })
+    assert(composerYAfter === composerYBefore, `composer moved: before=${composerYBefore}, after=${composerYAfter}`)
+  })
+
+  await check(`${label} [CS3] Smart autoscroll still applies on mobile (scrolled near bottom after a burst of messages)`, async () => {
+    const nearBottom = await page.evaluate(() => {
+      const el = document.querySelector('[data-private-waiting-chat-scroll="1"]') as HTMLElement
+      return el.scrollHeight - el.scrollTop - el.clientHeight < 48
+    })
+    assert(nearBottom, 'message list did not autoscroll to bottom on mobile after new messages')
+  })
+
+  await check(`${label} [CS4] No horizontal overflow after a long chat scroll session`, async () => {
+    const { overflow } = await hasHorizontalScroll(page)
+    assert(!overflow, 'horizontal overflow after populating many chat messages on mobile')
+  })
+
+  // ─── Countdown warning/critical states render on mobile without overflow ─
+  await page.evaluate(({ room }) => {
+    ;(window as any).__prwHarness.pushRoomUpdated(room)
+  }, { room: makeRoom('mobile-countdown-warning', [makeMember('me', 'Тестов Играч', true)], 'open', 5000, Date.now() + 45_000) })
+
+  await check(`${label} [CD1] Countdown warning state (<60s) renders on mobile without overflow`, async () => {
+    await page.waitForFunction(() => {
+      const el = document.querySelector('[data-private-room-countdown="1"]')
+      return el !== null && el.className.includes('warning')
+    }, undefined, { timeout: 3_000 })
+    const { overflow } = await hasHorizontalScroll(page)
+    assert(!overflow, 'horizontal overflow with countdown in warning state')
+  })
+
+  await page.evaluate(({ room }) => {
+    ;(window as any).__prwHarness.pushRoomUpdated(room)
+  }, { room: makeRoom('mobile-countdown-critical', [makeMember('me', 'Тестов Играч', true)], 'open', 5000, Date.now() + 20_000) })
+
+  await check(`${label} [CD2] Countdown critical state (<30s) renders on mobile without overflow`, async () => {
+    await page.waitForFunction(() => {
+      const el = document.querySelector('[data-private-room-countdown="1"]')
+      return el !== null && el.className.includes('critical')
+    }, undefined, { timeout: 3_000 })
+    const { overflow } = await hasHorizontalScroll(page)
+    assert(!overflow, 'horizontal overflow with countdown in critical state')
+  })
+
+  await check(`${label} [CD3] Countdown badge and leave button remain on-screen together (no element pushed off-screen)`, async () => {
+    const leaveBox = await page.locator('[data-private-waiting-leave-button="1"]').boundingBox()
+    const countdownBox = await page.locator('[data-private-room-countdown="1"]').first().boundingBox()
+    assert(leaveBox !== null && countdownBox !== null, 'countdown badge or leave button missing')
+    const vp = page.viewportSize()
+    assert(leaveBox!.x + leaveBox!.width <= (vp?.width ?? 0) + 1, 'leave button extends past the viewport width')
+    assert(countdownBox!.x >= -1, 'countdown badge extends before the viewport left edge')
+  })
+
+  // ─── Very narrow viewport (≤340px, e.g. 320x568): the countdown label must
+  // switch to the short, complete "Остава" instead of clipping "Оставащо
+  // време" mid-word with an ellipsis. The remaining-time value itself must
+  // always stay fully visible regardless of which label is shown. ─────────
+  if (viewportWidth <= 340) {
+    await page.evaluate(({ room }) => {
+      ;(window as any).__prwHarness.pushRoomUpdated(room)
+    }, { room: makeRoom('mobile-narrow-countdown', [makeMember('me', 'Тестов Играч', true)], 'open', 5000, Date.now() + (14 * 60_000 + 32_000)) })
+
+    await check(`${label} [CD4] Narrow viewport: the short label "Остава" is shown, not the full "Оставащо време"`, async () => {
+      const info = await page.evaluate(() => {
+        const full = document.querySelector('.prw-countdown-label-full')
+        const short = document.querySelector('.prw-countdown-label-short')
+        return {
+          fullVisible: full !== null && getComputedStyle(full).display !== 'none',
+          shortVisible: short !== null && getComputedStyle(short).display !== 'none',
+          shortText: short?.textContent?.trim(),
+        }
+      })
+      assert(!info.fullVisible, 'the full "Оставащо време" label is still visible at a narrow viewport')
+      assert(info.shortVisible, 'the short "Остава" label is not visible at a narrow viewport')
+      assert(info.shortText === 'Остава', `expected short label text "Остава", got "${info.shortText}"`)
+    })
+
+    await check(`${label} [CD5] Narrow viewport: no ellipsis/clipped text in the countdown label`, async () => {
+      const info = await page.evaluate(() => {
+        const short = document.querySelector('.prw-countdown-label-short')
+        if (short === null) return null
+        const style = getComputedStyle(short)
+        return { textOverflow: style.textOverflow, text: short.textContent }
+      })
+      assert(info !== null, 'short label not found')
+      assert(!(info!.text ?? '').includes('…') && !(info!.text ?? '').includes('...'), `label text contains an ellipsis: "${info!.text}"`)
+    })
+
+    await check(`${label} [CD6] Narrow viewport: the remaining time value is fully visible (e.g. "14:32", not truncated)`, async () => {
+      const text = await page.locator('[data-private-room-countdown-value="1"]').first().textContent()
+      assert(/^14:3[0-3]$/.test((text ?? '').trim()), `expected a fully visible ~14:3x value, got "${text}"`)
+      const box = await page.locator('[data-private-room-countdown-value="1"]').first().boundingBox()
+      assert(box !== null && box.width > 0, 'countdown value is not visible/rendered')
+    })
+
+    await check(`${label} [CD7] Narrow viewport: countdown badge and "Напусни" both remain within the viewport (no horizontal overflow)`, async () => {
+      const leaveBox = await page.locator('[data-private-waiting-leave-button="1"]').boundingBox()
+      const countdownBox = await page.locator('[data-private-room-countdown="1"]').first().boundingBox()
+      assert(leaveBox !== null && countdownBox !== null, 'countdown badge or leave button missing at narrow viewport')
+      assert(countdownBox!.x >= -1 && countdownBox!.x + countdownBox!.width <= viewportWidth + 1, `countdown badge out of bounds: ${JSON.stringify(countdownBox)}`)
+      assert(leaveBox!.x >= -1 && leaveBox!.x + leaveBox!.width <= viewportWidth + 1, `leave button out of bounds: ${JSON.stringify(leaveBox)}`)
+      const { overflow } = await hasHorizontalScroll(page)
+      assert(!overflow, 'horizontal overflow at narrow viewport with countdown + leave button')
+    })
+  }
+}
+
 async function runMatchEndedScenario(page: Page, label: string, viewportWidth: number): Promise<void> {
   await page.goto('/scripts/fixtures/matchEndedHarness.html')
   await page.waitForFunction(() => (window as any).__matchEndedHarness !== undefined, undefined, { timeout: 10_000 })
@@ -617,8 +915,11 @@ console.log('\ncheckPrivateRoomMobileResponsive\n')
 
 const VIEWPORTS: Array<{ width: number; height: number; label: string; mobile: boolean }> = [
   { width: 320, height: 568, label: '320x568', mobile: true },
+  { width: 360, height: 640, label: '360x640', mobile: true },
   { width: 360, height: 800, label: '360x800', mobile: true },
+  { width: 375, height: 667, label: '375x667', mobile: true },
   { width: 390, height: 844, label: '390x844', mobile: true },
+  { width: 412, height: 915, label: '412x915', mobile: true },
   { width: 430, height: 932, label: '430x932', mobile: true },
   { width: 1280, height: 800, label: '1280x800 (desktop)', mobile: false },
 ]
@@ -655,6 +956,7 @@ try {
     await runWaitingRoomScenario(page, `[${vp.label}]`, vp.width)
     if (vp.mobile) {
       await runKeyboardOpenScenario(page, `[${vp.label}]`, vp.width, vp.height)
+      await runMobileWaitingRoomLayoutScenario(page, `[${vp.label}]`, vp.width)
     }
     await runMatchEndedScenario(page, `[${vp.label}]`, vp.width)
     await runNotificationScenario(page, `[${vp.label}]`, vp.width)

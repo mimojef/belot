@@ -69,7 +69,8 @@ function renderCountdownBadge(expiresAt: number): string {
       data-expires-at="${expiresAt}"
       class="prw-countdown prw-countdown-${countdownState}"
     >
-      <span class="prw-countdown-label">Оставащо време</span>
+      <span class="prw-countdown-label prw-countdown-label-full">Оставащо време</span>
+      <span class="prw-countdown-label prw-countdown-label-short">Остава</span>
       <span data-private-room-countdown-value="1" class="prw-countdown-value">${text}</span>
     </div>
   `
@@ -151,6 +152,7 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
     <section data-private-room-waiting-screen="1" class="prw-screen">
       <style>
         .prw-screen {
+          min-height:100vh;
           min-height:100dvh;
           width:100%;
           box-sizing:border-box;
@@ -162,6 +164,7 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           color:#f8fafc;
           font-family:Inter, Arial, sans-serif;
           overflow-y:auto;
+          overscroll-behavior-y:contain;
         }
 
         .prw-shell {
@@ -231,6 +234,10 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           letter-spacing:0.03em;
         }
 
+        .prw-countdown-label-short {
+          display:none;
+        }
+
         .prw-countdown-value {
           font-size:15px;
           font-weight:900;
@@ -266,10 +273,6 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           .prw-countdown-critical .prw-countdown-value {
             animation:none;
           }
-        }
-
-        .prw-countdown-mobile-row {
-          display:none;
         }
 
         .prw-info-banner {
@@ -568,17 +571,185 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
         }
 
         @media (max-width: 640px) {
-          .prw-seats {
-            grid-template-columns:1fr;
+          .prw-screen {
+            padding:14px 10px calc(14px + env(safe-area-inset-bottom, 0px));
+            display:block;
           }
-          .prw-chat-panel {
-            height:320px;
-          }
-          .prw-header .prw-countdown {
-            display:none;
-          }
-          .prw-countdown-mobile-row {
+
+          .prw-shell {
+            width:100%;
             display:flex;
+            flex-direction:column;
+            gap:10px;
+            min-height:calc(100vh - 28px);
+            min-height:calc(100dvh - 28px);
+          }
+
+          /* Header becomes two stacked rows: title+info, then countdown+leave
+             together on their own full-width row — matches the "countdown
+             badge and Напусни on the next line" requirement. */
+          .prw-header {
+            flex-direction:column;
+            align-items:stretch;
+            gap:6px;
+          }
+
+          .prw-title {
+            font-size:17px;
+          }
+
+          .prw-subtitle {
+            font-size:12px;
+          }
+
+          .prw-header-actions {
+            width:100%;
+            justify-content:space-between;
+            flex-wrap:nowrap;
+          }
+
+          .prw-header-actions .prw-countdown {
+            flex:0 1 auto;
+            min-width:0;
+            padding:7px 10px;
+          }
+
+          .prw-header-actions .prw-countdown-label {
+            overflow:hidden;
+            text-overflow:ellipsis;
+            white-space:nowrap;
+          }
+
+          .prw-header-actions .prw-leave-button {
+            flex:0 0 auto;
+            height:36px;
+            padding:0 14px;
+          }
+
+          /* Very narrow phones: "Оставащо време" has no room to render fully
+             and would otherwise clip mid-word ("ОСТАВАЩО ВРЕ..."). Swap to a
+             short, complete label instead — the remaining-time value itself
+             (data-private-room-countdown-value) is untouched and always
+             stays fully visible; only the label text changes. */
+          @media (max-width: 340px) {
+            .prw-header-actions .prw-countdown-label-full {
+              display:none;
+            }
+
+            .prw-header-actions .prw-countdown-label-short {
+              display:inline;
+              overflow:visible;
+              text-overflow:clip;
+              white-space:nowrap;
+            }
+          }
+
+          /* 2x2 compact grid — fixed row height, no vertical stacking. */
+          .prw-seats {
+            grid-template-columns:1fr 1fr;
+            grid-template-rows:repeat(2, minmax(72px, auto));
+            gap:8px;
+          }
+
+          .prw-seat {
+            padding:8px 10px;
+            gap:8px;
+            min-width:0;
+          }
+
+          .prw-seat-avatar {
+            width:34px;
+            height:34px;
+            flex:0 0 34px;
+            font-size:14px;
+          }
+
+          .prw-seat-copy {
+            display:flex;
+            flex-direction:column;
+            justify-content:center;
+            gap:2px;
+            min-width:0;
+          }
+
+          .prw-seat-name {
+            font-size:12px;
+            /* Room for an inline host badge without overflowing the card —
+               the name itself still ellipsizes first (see .prw-seat-name). */
+            max-width:100%;
+          }
+
+          .prw-seat-sub {
+            font-size:10px;
+          }
+
+          .prw-host-badge {
+            display:inline-flex;
+            align-items:center;
+            flex:0 0 auto;
+            padding:1px 6px;
+            border-radius:999px;
+            background:rgba(167,139,250,0.16);
+            border:1px solid rgba(167,139,250,0.4);
+            font-size:9px;
+            letter-spacing:0.02em;
+            white-space:nowrap;
+          }
+
+          .prw-seat-name-empty {
+            font-size:11px;
+            text-align:center;
+          }
+
+          .prw-seat-empty {
+            justify-content:center;
+          }
+
+          .prw-seat-avatar-empty {
+            width:26px;
+            height:26px;
+            flex:0 0 26px;
+          }
+
+          .prw-fillbots-button {
+            height:42px;
+            font-size:13px;
+          }
+
+          /* Chat: the panel grows to fill remaining space instead of a fixed
+             height, so the composer never gets pushed off-screen. The
+             message list is the only scrolling region inside it; the
+             composer is a non-shrinking flex item pinned to the panel's
+             bottom (NOT position:fixed against the viewport), so it can
+             never be covered by the keyboard or browser chrome and never
+             needs a horizontal scroll. */
+          .prw-chat-panel {
+            flex:1 1 260px;
+            min-height:220px;
+            display:flex;
+            flex-direction:column;
+          }
+
+          .prw-chat-header {
+            flex:0 0 auto;
+          }
+
+          .prw-chat-scroll {
+            flex:1 1 auto;
+            min-height:0;
+            overflow-y:auto;
+            overscroll-behavior-y:contain;
+          }
+
+          .prw-chat-form {
+            flex:0 0 auto;
+            padding:8px;
+            padding-bottom:calc(8px + env(safe-area-inset-bottom, 0px));
+          }
+
+          .prw-chat-input,
+          .prw-chat-send {
+            height:38px;
           }
         }
       </style>
@@ -596,8 +767,6 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
             <button type="button" data-private-waiting-leave-button="1" class="prw-leave-button">Напусни</button>
           </div>
         </div>
-
-        <div class="prw-countdown-mobile-row">${renderCountdownBadge(params.expiresAt)}</div>
 
         ${params.infoText ? `<div class="prw-info-banner">${escapeHtml(params.infoText)}</div>` : ''}
 
