@@ -11,6 +11,15 @@ type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 export const PERSONAL_CHAT_HISTORY_LIMIT = 100
 export const PERSONAL_CHAT_STORAGE_LIMIT = 500
 
+export type ChatAttachmentSnapshot = {
+  attachmentId: string
+  width: number
+  height: number
+  byteSize: number
+  viewUrl: string
+  downloadUrl: string
+}
+
 export type ChatMessageSnapshot = {
   messageId: string
   friendshipId: string
@@ -18,6 +27,7 @@ export type ChatMessageSnapshot = {
   body: string
   createdAt: string
   isOwnMessage: boolean
+  attachment: ChatAttachmentSnapshot | null
 }
 
 export type ChatConversationSnapshot = {
@@ -26,6 +36,18 @@ export type ChatConversationSnapshot = {
   lastMessage: ChatMessageSnapshot | null
   updatedAt: string
   unreadCount: number
+}
+
+// Входни данни за нов attachment — попълва се от sharp обработения буфер
+// ПРЕДИ извикване на sendMessage (файлът вече е записан на диск към момента
+// на този запис, виж handleChatRequest/index.ts за атомарността: file write
+// → DB транзакция → при DB грешка, изтрий файла).
+export type NewChatAttachmentInput = {
+  storageFilename: string
+  width: number
+  height: number
+  byteSize: number
+  contentType: string
 }
 
 export type ChatStore = {
@@ -40,6 +62,7 @@ export type ChatStore = {
     profileId: ProfileId,
     friendshipId: string,
     body: string,
+    attachment?: NewChatAttachmentInput | null,
   ) =>
     | {
         ok: true
@@ -50,6 +73,18 @@ export type ChatStore = {
     | { ok: false; message: string }
   markConversationRead: (profileId: ProfileId, friendshipId: string) => void
   isFirstUnreadMessage: (recipientProfileId: ProfileId, friendshipId: string) => boolean
+  getAttachmentForDownload: (
+    profileId: ProfileId,
+    friendshipId: string,
+    storageFilename: string,
+  ) => { storageFilename: string; contentType: string } | null
+  // ─── Background attachment cleanup (виж index.ts runChatAttachmentCleanup /
+  // runChatAttachmentOrphanScan) ───────────────────────────────────────────
+  listPendingAttachmentDeletions: (limit: number) => { eventSeq: number; storageFilename: string }[]
+  markAttachmentDeletionDone: (eventSeq: number) => void
+  markAttachmentDeletionFailed: (eventSeq: number) => void
+  attachmentExistsForFilename: (storageFilename: string) => boolean
+  purgeDoneAttachmentDeletions: (olderThanDays: number, batchSize: number) => number
   close: () => void
 }
 
@@ -67,6 +102,20 @@ type ChatMessageRow = {
   sender_profile_id: string
   body: string
   created_at: string
+  attachment_filename: string | null
+  attachment_width: number | null
+  attachment_height: number | null
+  attachment_byte_size: number | null
+  attachment_content_type: string | null
+}
+
+// URL-и за преглед/сваляне на attachment — не физически filesystem path.
+// Пазени тук (не в index.ts), за да останат consistent навсякъде, където
+// chatStore конструира ChatMessageSnapshot (listMessages, sendMessage,
+// createConversationSnapshot за lastMessage preview).
+function buildAttachmentUrls(friendshipId: string, storageFilename: string): { viewUrl: string; downloadUrl: string } {
+  const base = `/api/chat/${encodeURIComponent(friendshipId)}/attachments/${encodeURIComponent(storageFilename)}`
+  return { viewUrl: base, downloadUrl: `${base}?download=1` }
 }
 
 function getFriendProfileId(
@@ -78,10 +127,15 @@ function getFriendProfileId(
     : friendship.requester_profile_id
 }
 
+// Позволява празен body (когато съобщението носи attachment) — за разлика
+// от предишната версия, тук НЕ отхвърляме normalized.length === 0. Дали
+// празен body е валиден зависи от наличието на attachment, а тази функция
+// не го знае — извикващият (sendMessage) прилага "text ИЛИ attachment
+// задължителни" правилото.
 function normalizeMessageBody(value: string): string | null {
   const normalized = value.replace(/\s+/g, ' ').trim()
 
-  if (normalized.length === 0 || normalized.length > 1000) {
+  if (normalized.length > 1000) {
     return null
   }
 
@@ -92,6 +146,19 @@ function toMessageSnapshot(
   row: ChatMessageRow,
   ownProfileId: ProfileId,
 ): ChatMessageSnapshot {
+  const attachment = row.attachment_filename !== null
+    && row.attachment_width !== null
+    && row.attachment_height !== null
+    && row.attachment_byte_size !== null
+    ? {
+        attachmentId: row.attachment_filename,
+        width: row.attachment_width,
+        height: row.attachment_height,
+        byteSize: row.attachment_byte_size,
+        ...buildAttachmentUrls(row.friendship_id, row.attachment_filename),
+      }
+    : null
+
   return {
     messageId: row.message_id,
     friendshipId: row.friendship_id,
@@ -99,12 +166,21 @@ function toMessageSnapshot(
     body: row.body,
     createdAt: dbDateToUtc(row.created_at),
     isOwnMessage: row.sender_profile_id === ownProfileId,
+    attachment,
   }
+}
+
+// Минимален inject-нат interface от blockStore — избягва circular
+// dependency между двата store модула (chatStore не се нуждае от целия
+// BlockStore API, само от проверката "A блокирал ли е B").
+export type ChatStoreBlockChecker = {
+  isBlocked: (blockerProfileId: string, blockedProfileId: string) => boolean
 }
 
 export async function createChatStore(
   databaseFilePath: string,
   playerProgressStore: PlayerProgressStore,
+  blockChecker: ChatStoreBlockChecker,
 ): Promise<ChatStore> {
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
@@ -148,15 +224,21 @@ export async function createChatStore(
 
   const selectLatestMessageStatement = database.prepare(`
     SELECT
-      message_id,
-      friendship_id,
-      sender_profile_id,
-      body,
-      created_at
-    FROM friend_chat_messages
-    WHERE friendship_id = ?
-      AND deleted_at IS NULL
-    ORDER BY created_at DESC, rowid DESC
+      m.message_id,
+      m.friendship_id,
+      m.sender_profile_id,
+      m.body,
+      m.created_at,
+      a.storage_filename AS attachment_filename,
+      a.width AS attachment_width,
+      a.height AS attachment_height,
+      a.byte_size AS attachment_byte_size,
+      a.content_type AS attachment_content_type
+    FROM friend_chat_messages m
+    LEFT JOIN friend_chat_attachments a ON a.message_id = m.message_id
+    WHERE m.friendship_id = ?
+      AND m.deleted_at IS NULL
+    ORDER BY m.created_at DESC, m.rowid DESC
     LIMIT 1;
   `)
 
@@ -166,19 +248,30 @@ export async function createChatStore(
       friendship_id,
       sender_profile_id,
       body,
-      created_at
+      created_at,
+      attachment_filename,
+      attachment_width,
+      attachment_height,
+      attachment_byte_size,
+      attachment_content_type
     FROM (
       SELECT
-        rowid,
-        message_id,
-        friendship_id,
-        sender_profile_id,
-        body,
-        created_at
-      FROM friend_chat_messages
-      WHERE friendship_id = ?
-        AND deleted_at IS NULL
-      ORDER BY created_at DESC, rowid DESC
+        m.rowid AS rowid,
+        m.message_id,
+        m.friendship_id,
+        m.sender_profile_id,
+        m.body,
+        m.created_at,
+        a.storage_filename AS attachment_filename,
+        a.width AS attachment_width,
+        a.height AS attachment_height,
+        a.byte_size AS attachment_byte_size,
+        a.content_type AS attachment_content_type
+      FROM friend_chat_messages m
+      LEFT JOIN friend_chat_attachments a ON a.message_id = m.message_id
+      WHERE m.friendship_id = ?
+        AND m.deleted_at IS NULL
+      ORDER BY m.created_at DESC, m.rowid DESC
       LIMIT ?
     )
     ORDER BY created_at ASC, rowid ASC;
@@ -186,14 +279,20 @@ export async function createChatStore(
 
   const selectInsertedMessageStatement = database.prepare(`
     SELECT
-      rowid,
-      message_id,
-      friendship_id,
-      sender_profile_id,
-      body,
-      created_at
-    FROM friend_chat_messages
-    WHERE message_id = ?
+      m.rowid AS rowid,
+      m.message_id,
+      m.friendship_id,
+      m.sender_profile_id,
+      m.body,
+      m.created_at,
+      a.storage_filename AS attachment_filename,
+      a.width AS attachment_width,
+      a.height AS attachment_height,
+      a.byte_size AS attachment_byte_size,
+      a.content_type AS attachment_content_type
+    FROM friend_chat_messages m
+    LEFT JOIN friend_chat_attachments a ON a.message_id = m.message_id
+    WHERE m.message_id = ?
     LIMIT 1;
   `)
 
@@ -209,6 +308,75 @@ export async function createChatStore(
       ?,
       ?
     );
+  `)
+
+  const insertAttachmentStatement = database.prepare(`
+    INSERT INTO friend_chat_attachments (
+      message_id,
+      storage_filename,
+      width,
+      height,
+      byte_size,
+      content_type
+    ) VALUES (
+      ?,
+      ?,
+      ?,
+      ?,
+      ?,
+      ?
+    );
+  `)
+
+  const selectAttachmentForDownloadStatement = database.prepare(`
+    SELECT
+      a.storage_filename,
+      a.content_type
+    FROM friend_chat_attachments a
+    JOIN friend_chat_messages m ON m.message_id = a.message_id
+    WHERE m.friendship_id = ?
+      AND a.storage_filename = ?
+    LIMIT 1;
+  `)
+
+  // Включва и 'failed' редове (не само 'pending') — иначе запис, маркиран
+  // failed след transient FS грешка (напр. временно заключен файл), никога
+  // повече не би се преоценил и файлът остава завинаги неизтрит. Redим по
+  // event_seq (FIFO), за да не гладуват по-стари failed записи зад
+  // непрекъснат поток от нови pending записи.
+  const selectPendingAttachmentDeletionsStatement = database.prepare(`
+    SELECT event_seq, storage_filename
+    FROM friend_chat_attachment_deletions
+    WHERE cleanup_status IN ('pending', 'failed')
+    ORDER BY event_seq ASC
+    LIMIT ?;
+  `)
+
+  const markAttachmentDeletionStatusStatement = database.prepare(`
+    UPDATE friend_chat_attachment_deletions
+    SET cleanup_status = ?
+    WHERE event_seq = ?;
+  `)
+
+  // Завършените (done/failed-retried) записи не се трият автоматично при
+  // markAttachmentDeletionDone/Failed — таблицата би растяла неограничено
+  // без периодично почистване. Batch purge по created_at, аналогично на
+  // lobbyChatStore.purgeOlderThanDays (viz. purgeDeletionEventsBatchStatement).
+  const purgeDoneAttachmentDeletionsStatement = database.prepare(`
+    DELETE FROM friend_chat_attachment_deletions
+    WHERE event_seq IN (
+      SELECT event_seq FROM friend_chat_attachment_deletions
+      WHERE cleanup_status = 'done' AND created_at < ?
+      ORDER BY event_seq ASC
+      LIMIT ?
+    );
+  `)
+
+  const selectAttachmentExistsStatement = database.prepare(`
+    SELECT 1 as found
+    FROM friend_chat_attachments
+    WHERE storage_filename = ?
+    LIMIT 1;
   `)
 
   const touchFriendshipStatement = database.prepare(`
@@ -234,6 +402,28 @@ export async function createChatStore(
     VALUES (?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT (profile_id, friendship_id)
     DO UPDATE SET last_read_at = CURRENT_TIMESTAMP;
+  `)
+
+  // Кои attachment файлове принадлежат на съобщенията, които prune-ът е на
+  // път да изтрие (виж pruneOldMessagesStatement по-долу) — изпълнява се
+  // ПРЕДИ delete-а, в СЪЩАТА транзакция, за да може deletion-intent записът
+  // (insertAttachmentDeletionStatement) никога да не изостане от реалното
+  // изтриване на съобщението.
+  const selectPrunedAttachmentFilenamesStatement = database.prepare(`
+    SELECT a.storage_filename
+    FROM friend_chat_attachments a
+    WHERE a.message_id IN (
+      SELECT message_id
+      FROM friend_chat_messages
+      WHERE friendship_id = ?
+      ORDER BY created_at DESC, rowid DESC
+      LIMIT -1 OFFSET ?
+    );
+  `)
+
+  const insertAttachmentDeletionStatement = database.prepare(`
+    INSERT INTO friend_chat_attachment_deletions (storage_filename)
+    VALUES (?);
   `)
 
   const pruneOldMessagesStatement = database.prepare(`
@@ -347,6 +537,7 @@ export async function createChatStore(
     profileId: ProfileId,
     friendshipId: string,
     body: string,
+    attachment: NewChatAttachmentInput | null = null,
   ):
     | {
         ok: true
@@ -364,12 +555,34 @@ export async function createChatStore(
       }
     }
 
+    const recipientProfileId = getFriendProfileId(friendship, profileId)
+
+    // Блокиране в която и да е посока спира изпращането на НОВИ съобщения
+    // (текст или снимка) — историческите съобщения остават непроменени и
+    // видими (виж listMessages, който НЕ guard-ва с blockChecker).
+    if (
+      blockChecker.isBlocked(profileId, recipientProfileId)
+      || blockChecker.isBlocked(recipientProfileId, profileId)
+    ) {
+      return {
+        ok: false,
+        message: 'Чатът е недостъпен поради блокиране.',
+      }
+    }
+
     const normalizedBody = normalizeMessageBody(body)
 
     if (normalizedBody === null) {
       return {
         ok: false,
-        message: 'Съобщението трябва да е между 1 и 1000 символа.',
+        message: 'Съобщението трябва да е до 1000 символа.',
+      }
+    }
+
+    if (normalizedBody.length === 0 && attachment === null) {
+      return {
+        ok: false,
+        message: 'Съобщението трябва да съдържа текст или снимка.',
       }
     }
 
@@ -385,9 +598,33 @@ export async function createChatStore(
         profileId,
         normalizedBody,
       )
+
+      if (attachment !== null) {
+        insertAttachmentStatement.run(
+          messageId,
+          attachment.storageFilename,
+          attachment.width,
+          attachment.height,
+          attachment.byteSize,
+          attachment.contentType,
+        )
+      }
+
       insertedRow = selectInsertedMessageStatement.get(messageId) as ChatMessageRow | undefined
       touchFriendshipStatement.run(friendshipId)
       upsertReadStatement.run(profileId, friendshipId)
+
+      // Deletion-intent ПРЕДИ delete-а, в същата транзакция — виж коментара
+      // до selectPrunedAttachmentFilenamesStatement по-горе.
+      const prunedAttachmentRows = selectPrunedAttachmentFilenamesStatement.all(
+        friendshipId,
+        PERSONAL_CHAT_STORAGE_LIMIT,
+      ) as { storage_filename: string }[]
+
+      for (const prunedRow of prunedAttachmentRows) {
+        insertAttachmentDeletionStatement.run(prunedRow.storage_filename)
+      }
+
       pruneOldMessagesStatement.run(
         friendshipId,
         friendshipId,
@@ -406,7 +643,7 @@ export async function createChatStore(
     if (insertedRow === undefined) {
       return {
         ok: false,
-        message: 'РЎСЉРѕР±С‰РµРЅРёРµС‚Рѕ РЅРµ Р±РµС€Рµ Р·Р°РїРёСЃР°РЅРѕ.',
+        message: 'Съобщението не беше записано.',
       }
     }
 
@@ -443,6 +680,69 @@ export async function createChatStore(
     return getUnreadCount(recipientProfileId, friendshipId) === 0
   }
 
+  // Guard за защитения view/download endpoint (index.ts handleChatAttachmentRequest):
+  // изисква профилът да участва в accepted friendship-а (същия стандарт като
+  // listMessages/sendMessage) И attachment записът действително да принадлежи
+  // на съобщение от ТОЗИ friendship — предотвратява enumeration на чужди
+  // снимки чрез познат UUID.webp filename при друг friendshipId.
+  function getAttachmentForDownload(
+    profileId: ProfileId,
+    friendshipId: string,
+    storageFilename: string,
+  ): { storageFilename: string; contentType: string } | null {
+    const friendship = getAcceptedFriendship(profileId, friendshipId)
+
+    if (friendship === null) {
+      return null
+    }
+
+    const row = selectAttachmentForDownloadStatement.get(
+      friendshipId,
+      storageFilename,
+    ) as { storage_filename: string; content_type: string } | undefined
+
+    if (row === undefined) {
+      return null
+    }
+
+    return { storageFilename: row.storage_filename, contentType: row.content_type }
+  }
+
+  function listPendingAttachmentDeletions(limit: number): { eventSeq: number; storageFilename: string }[] {
+    const rows = selectPendingAttachmentDeletionsStatement.all(limit) as {
+      event_seq: number
+      storage_filename: string
+    }[]
+
+    return rows.map((row) => ({ eventSeq: row.event_seq, storageFilename: row.storage_filename }))
+  }
+
+  function markAttachmentDeletionDone(eventSeq: number): void {
+    markAttachmentDeletionStatusStatement.run('done', eventSeq)
+  }
+
+  function markAttachmentDeletionFailed(eventSeq: number): void {
+    markAttachmentDeletionStatusStatement.run('failed', eventSeq)
+  }
+
+  function attachmentExistsForFilename(storageFilename: string): boolean {
+    return selectAttachmentExistsStatement.get(storageFilename) !== undefined
+  }
+
+  function purgeDoneAttachmentDeletions(olderThanDays: number, batchSize: number): number {
+    const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString()
+    let totalDeleted = 0
+
+    for (;;) {
+      const result = purgeDoneAttachmentDeletionsStatement.run(cutoff, batchSize) as { changes?: number }
+      const changes = result.changes ?? 0
+      totalDeleted += changes
+      if (changes < batchSize) break
+    }
+
+    return totalDeleted
+  }
+
   function close(): void {
     database.close()
   }
@@ -453,6 +753,12 @@ export async function createChatStore(
     sendMessage,
     markConversationRead,
     isFirstUnreadMessage,
+    getAttachmentForDownload,
+    listPendingAttachmentDeletions,
+    markAttachmentDeletionDone,
+    markAttachmentDeletionFailed,
+    attachmentExistsForFilename,
+    purgeDoneAttachmentDeletions,
     close,
   }
 }

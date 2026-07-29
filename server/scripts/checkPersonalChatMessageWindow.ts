@@ -3,6 +3,7 @@ import { cp, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import WebSocket from 'ws'
 import {
   createChatStore,
@@ -122,7 +123,7 @@ async function createStoreFixture() {
       message_id TEXT PRIMARY KEY,
       friendship_id TEXT NOT NULL,
       sender_profile_id TEXT NOT NULL,
-      body TEXT NOT NULL CHECK (trim(body) <> '' AND length(body) <= 1000),
+      body TEXT NOT NULL CHECK (length(body) <= 1000),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       deleted_at TEXT NULL,
       FOREIGN KEY (friendship_id) REFERENCES profile_friendships(friendship_id) ON DELETE CASCADE
@@ -130,6 +131,26 @@ async function createStoreFixture() {
 
     CREATE INDEX idx_friend_chat_messages_friendship
       ON friend_chat_messages(friendship_id, created_at);
+
+    CREATE TABLE friend_chat_attachments (
+      message_id TEXT PRIMARY KEY REFERENCES friend_chat_messages(message_id) ON DELETE CASCADE,
+      storage_filename TEXT NOT NULL,
+      width INTEGER NOT NULL CHECK (width > 0),
+      height INTEGER NOT NULL CHECK (height > 0),
+      byte_size INTEGER NOT NULL CHECK (byte_size > 0),
+      content_type TEXT NOT NULL DEFAULT 'image/webp',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE UNIQUE INDEX idx_friend_chat_attachments_filename
+      ON friend_chat_attachments(storage_filename);
+
+    CREATE TABLE friend_chat_attachment_deletions (
+      event_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      storage_filename TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      cleanup_status TEXT NOT NULL DEFAULT 'pending' CHECK (cleanup_status IN ('pending', 'done', 'failed'))
+    );
 
     CREATE TABLE chat_conversation_reads (
       profile_id TEXT NOT NULL,
@@ -161,7 +182,7 @@ async function createStoreFixture() {
     ) VALUES (?, ?, ?, ?, ?, 'accepted', ?);
   `).run('friendship-b', 'profile-a', 'profile-c', 'profile-a', 'profile-c', '2020-01-01 00:00:00')
 
-  const store = await createChatStore(databaseFile, createFakeProgressStore())
+  const store = await createChatStore(databaseFile, createFakeProgressStore(), { isBlocked: () => false })
   return {
     database,
     store,
@@ -313,6 +334,99 @@ async function runStoreRegressionChecks(): Promise<void> {
       assertEqual(result.messages.length, PERSONAL_CHAT_HISTORY_LIMIT, 'history length')
       assertEqual(result.messages[0].body, 'msg-401', 'first visible body')
       assertEqual(result.messages[99].body, 'msg-500', 'last visible body')
+    } finally {
+      await fixture.cleanup()
+    }
+  })
+
+  // Инвариантът "text ИЛИ attachment задължителни" е application-level (JS
+  // if в chatStore.sendMessage), НЕ SQLite CHECK/trigger — migration-ът
+  // 20260729_001 разхлаби body CHECK-а до length(body) <= 1000 (позволява
+  // '' на DB ниво), затова тук викаме production store API директно
+  // (fixture.store.sendMessage — не HTTP mock), за да докажем, че
+  // единственият production write path налага инварианта коректно.
+  await check('[S8] sendMessage отхвърля body="" без attachment (application-level guard, не DB constraint)', async () => {
+    const fixture = await createStoreFixture()
+    try {
+      const result = fixture.store.sendMessage('profile-a', 'friendship-a', '')
+      assert(!result.ok, 'sendMessage трябва да отхвърли празно body без attachment')
+      const count = fixture.database.prepare('SELECT COUNT(*) AS count FROM friend_chat_messages').get() as { count: number }
+      assertEqual(count.count, 0, 'не трябва да е записан никакъв ред при отхвърлено съобщение')
+    } finally {
+      await fixture.cleanup()
+    }
+  })
+
+  await check('[S9] sendMessage приема body="" КОГАТО има attachment (текст не е задължителен при снимка)', async () => {
+    const fixture = await createStoreFixture()
+    try {
+      const result = fixture.store.sendMessage('profile-a', 'friendship-a', '', {
+        storageFilename: `${randomUUID()}.webp`,
+        width: 100,
+        height: 80,
+        byteSize: 12345,
+        contentType: 'image/webp',
+      })
+      assert(result.ok, `sendMessage с attachment трябва да успее: ${!result.ok ? result.message : ''}`)
+      if (result.ok) {
+        assertEqual(result.newMessage.body, '', 'body остава празен')
+        assert(result.newMessage.attachment !== null, 'attachment трябва да е зададен')
+      }
+      const dbRow = fixture.database.prepare(
+        'SELECT m.body, a.storage_filename FROM friend_chat_messages m JOIN friend_chat_attachments a ON a.message_id = m.message_id',
+      ).get() as { body: string; storage_filename: string } | undefined
+      assert(dbRow !== undefined, 'DB трябва да съдържа message+attachment ред')
+      assertEqual(dbRow?.body, '', 'DB body е празен')
+    } finally {
+      await fixture.cleanup()
+    }
+  })
+
+  await check('[S10] sendMessage продължава да приема текст-само (без attachment) — регресия след migration-а', async () => {
+    const fixture = await createStoreFixture()
+    try {
+      const result = fixture.store.sendMessage('profile-a', 'friendship-a', 'здравей')
+      assert(result.ok, 'text-only sendMessage трябва да успее')
+      if (result.ok) {
+        assertEqual(result.newMessage.body, 'здравей', 'body запазен')
+        assertEqual(result.newMessage.attachment, null, 'няма attachment за текстово съобщение')
+      }
+    } finally {
+      await fixture.cleanup()
+    }
+  })
+
+  await check('[S11] Attachment INSERT failure (UNIQUE storage_filename collision) rollback-ва и message insert-а — не остава ред без attachment', async () => {
+    const fixture = await createStoreFixture()
+    try {
+      const collidingFilename = `${randomUUID()}.webp`
+      // Пресяваме съществуващ ред с този filename директно в DB (симулира
+      // теоретична колизия — randomUUID() прави това практически невъзможно
+      // в production, но тестваме defensive поведението на транзакцията).
+      const seedResult = fixture.store.sendMessage('profile-a', 'friendship-a', '', {
+        storageFilename: collidingFilename, width: 10, height: 10, byteSize: 100, contentType: 'image/webp',
+      })
+      assert(seedResult.ok, 'seed sendMessage трябва да успее')
+
+      let threw = false
+      try {
+        fixture.store.sendMessage('profile-a', 'friendship-a', '', {
+          storageFilename: collidingFilename, width: 20, height: 20, byteSize: 200, contentType: 'image/webp',
+        })
+      } catch {
+        threw = true
+      }
+      assert(threw, 'втори sendMessage със същия storage_filename трябва да хвърли грешка (UNIQUE constraint)')
+
+      const messageCount = fixture.database.prepare('SELECT COUNT(*) AS count FROM friend_chat_messages').get() as { count: number }
+      assertEqual(messageCount.count, 1, 'само първото (успешно) съобщение трябва да е записано — вторият опит е изцяло rollback-нат')
+
+      const orphanBodyRows = fixture.database.prepare(
+        `SELECT m.message_id FROM friend_chat_messages m
+         LEFT JOIN friend_chat_attachments a ON a.message_id = m.message_id
+         WHERE trim(m.body) = '' AND a.message_id IS NULL`,
+      ).all() as { message_id: string }[]
+      assertEqual(orphanBodyRows.length, 0, 'не трябва да съществува ред с празен body и без attachment')
     } finally {
       await fixture.cleanup()
     }

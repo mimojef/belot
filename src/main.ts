@@ -1943,7 +1943,11 @@ async function markChatConversationRead(friendshipId: string): Promise<boolean> 
   }
 }
 
-async function sendChatMessage(friendshipId: string, body: string): Promise<
+async function sendChatMessage(
+  friendshipId: string,
+  body: string,
+  imageDataUrl?: string | null,
+): Promise<
   | {
       ok: true
       conversation: ChatConversationSnapshot
@@ -1961,7 +1965,9 @@ async function sendChatMessage(friendshipId: string, body: string): Promise<
           'Content-Type': 'application/json',
         },
         credentials: 'include',
-        body: JSON.stringify({ body }),
+        body: JSON.stringify(
+          imageDataUrl ? { body, imageDataUrl } : { body },
+        ),
       },
     )
     const data = await readChatMessagesResponse(response)
@@ -3266,7 +3272,7 @@ lobby = createLobbyFlowController({
   onChatMarkRead: async (friendshipId) => {
     await markChatConversationRead(friendshipId)
   },
-  onChatSend: (friendshipId, body) => sendChatMessage(friendshipId, body),
+  onChatSend: (friendshipId, body, imageDataUrl) => sendChatMessage(friendshipId, body, imageDataUrl),
   onLogout: () => submitLogout(),
   onDailyMissionsLoad: () => loadDailyMissions(),
   onMissionClaim: (missionId) => claimMissionReward(missionId),

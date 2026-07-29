@@ -216,6 +216,11 @@ export type LobbyScreenState = {
   // Пази се отделно от chatMessages, за да не се губи при re-render, предизвикан от входящо
   // съобщение, polling или друго фоново обновяване, докато потребителят пише.
   chatDraftByFriendshipId: Record<string, string>
+  // Избрана-но-неизпратена снимка per разговор (keyed по friendshipId) —
+  // previewUrl е object-URL (URL.createObjectURL), освобождава се explicit
+  // при премахване/успешно изпращане (виж createLobbyFlowController.ts).
+  chatPendingImageByFriendshipId: Record<string, { file: File; previewUrl: string } | undefined>
+  chatUploadingFriendshipIds: Set<string>
   // Общ лайв чат в лобито (херо карето на началния екран) — отделен поток от
   // chatConversations/chatMessages по-горе (личен 1:1 чат от раздел "ЧАТ").
   lobbyChatMessages: LobbyChatMessageSnapshot[]
@@ -409,6 +414,8 @@ export type RenderLobbyScreenOptions = {
   onChatMarkRead: (friendshipId: string) => void
   onChatSubmit: (friendshipId: string, body: string) => void
   onChatDraftChange: (friendshipId: string, draft: string) => void
+  onChatImageSelect: (friendshipId: string, file: File) => void
+  onChatImageRemove: (friendshipId: string) => void
   onPlayerCardClick: (profile: PlayerPublicProfileSnapshot) => void
   onPlayersSearchChange: (query: string) => void
   onPlayersSearchDraftChange: (draft: string) => void
@@ -3755,11 +3762,24 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
         ${activeConversation === null ? `<div style="min-height:240px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;padding:18px;">Избери приятел от списъка.</div>` : `
           <div style="padding:10px 12px;border-bottom:1px solid rgba(212,165,32,0.20);font-size:15px;font-weight:900;color:#ffffff;">${escapeHtml(activeConversation.friend.displayName ?? 'Играч')}</div>
           <div data-chat-messages-scroll="1" style="height:360px;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:6px;">
-            ${state.chatMessagesLoading ? `<div style="margin:auto;color:#d4a520;font-size:14px;font-weight:900;">Зареждане...</div>` : state.chatMessages.length === 0 ? `<div style="margin:auto;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;">Няма съобщения.</div>` : state.chatMessages.map((message) => `<div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:82%;"><div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 9px;font-size:13px;font-weight:800;line-height:1.35;word-break:break-word;">${renderMessageBody(message.body)}</div><div style="margin-top:2px;font-size:10px;font-weight:800;color:rgba(255,255,255,0.38);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div></div>`).join('')}
+            ${state.chatMessagesLoading ? `<div style="margin:auto;color:#d4a520;font-size:14px;font-weight:900;">Зареждане...</div>` : state.chatMessages.length === 0 ? `<div style="margin:auto;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;">Няма съобщения.</div>` : state.chatMessages.map((message) => {
+              const hasText = message.body.trim().length > 0
+              return `<div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:82%;">${message.attachment ? `
+                <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
+                  ${renderChatAttachmentBubble(message.attachment)}
+                  ${hasText ? `<div style="padding:0 4px 2px;font-size:13px;font-weight:800;line-height:1.35;word-break:break-word;">${renderMessageBody(message.body)}</div>` : ''}
+                </div>
+              ` : `
+                <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 9px;font-size:13px;font-weight:800;line-height:1.35;word-break:break-word;">${renderMessageBody(message.body)}</div>
+              `}<div style="margin-top:2px;font-size:10px;font-weight:800;color:rgba(255,255,255,0.38);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div></div>`
+            }).join('')}
           </div>
-          <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;gap:8px;padding:10px;border-top:1px solid rgba(212,165,32,0.20);">
-            <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Съобщение..." style="height:40px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 10px;font-size:14px;font-weight:700;outline:none;">
-            <button type="submit" style="height:40px;padding:0 12px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;">Изпрати</button>
+          <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;flex-direction:column;gap:6px;padding:10px;border-top:1px solid rgba(212,165,32,0.20);">
+            <div style="display:flex;gap:8px;align-items:center;">
+              ${renderChatImagePickerControls(state, activeConversation.friendshipId)}
+              <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Съобщение..." ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:40px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 10px;font-size:14px;font-weight:700;outline:none;">
+              <button type="submit" ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:40px;padding:0 12px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;opacity:${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? '0.6' : '1'};">${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'Качване…' : 'Изпрати'}</button>
+            </div>
           </form>
         `}
       </div>
@@ -4126,6 +4146,72 @@ function renderFriendsDirectory(state: LobbyScreenState): string {
   `
 }
 
+// Image bubble за chat съобщение с прикачена снимка — width/height атрибути
+// идват директно от DB метаданните (записани при upload, виж
+// createChatAttachmentWebp в index.ts), за да няма layout shift докато
+// снимката се зарежда. Всички динамични стойности минават през escapeHtml
+// (никакво innerHTML с непроверени attachment полета).
+function renderChatAttachmentBubble(attachment: NonNullable<ChatMessageSnapshot['attachment']>): string {
+  return `
+    <div style="display:grid;gap:6px;">
+      <a href="${escapeHtml(attachment.viewUrl)}" target="_blank" rel="noopener noreferrer" style="display:block;border-radius:8px;overflow:hidden;line-height:0;">
+        <img
+          src="${escapeHtml(attachment.viewUrl)}"
+          width="${attachment.width}"
+          height="${attachment.height}"
+          loading="lazy"
+          alt=""
+          style="display:block;max-width:100%;width:100%;height:auto;border-radius:8px;background:rgba(255,255,255,0.06);"
+        >
+      </a>
+      <a href="${escapeHtml(attachment.downloadUrl)}" download style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:900;color:inherit;text-decoration:none;opacity:0.82;">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+        Изтегли файл
+      </a>
+    </div>
+  `
+}
+
+// Скрит file input + видима икона-бутон + thumbnail preview на избраната
+// (все още неизпратена) снимка — споделен между desktop и mobile chat форми.
+function renderChatImagePickerControls(state: LobbyScreenState, friendshipId: string): string {
+  const pending = state.chatPendingImageByFriendshipId[friendshipId]
+  const isUploading = state.chatUploadingFriendshipIds.has(friendshipId)
+
+  return `
+    <input
+      type="file"
+      accept="image/jpeg,image/png,image/webp"
+      data-chat-image-input="${escapeHtml(friendshipId)}"
+      style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"
+      ${isUploading ? 'disabled' : ''}
+    >
+    <button
+      type="button"
+      data-chat-image-pick="${escapeHtml(friendshipId)}"
+      title="Прикачи снимка"
+      aria-label="Прикачи снимка"
+      ${isUploading ? 'disabled' : ''}
+      style="height:42px;width:42px;flex:0 0 auto;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;display:flex;align-items:center;justify-content:center;cursor:${isUploading ? 'default' : 'pointer'};opacity:${isUploading ? '0.5' : '1'};"
+    >
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
+    </button>
+    ${pending ? `
+      <div style="position:relative;flex:0 0 auto;">
+        <img src="${escapeHtml(pending.previewUrl)}" alt="" style="width:42px;height:42px;object-fit:cover;border-radius:8px;border:1px solid rgba(212,165,32,0.48);display:block;">
+        <button
+          type="button"
+          data-chat-image-remove="${escapeHtml(friendshipId)}"
+          title="Премахни снимката"
+          aria-label="Премахни снимката"
+          ${isUploading ? 'disabled' : ''}
+          style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;border:0;background:#ef4444;color:#fff;font-size:11px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;cursor:${isUploading ? 'default' : 'pointer'};padding:0;"
+        >✕</button>
+      </div>
+    ` : ''}
+  `
+}
+
 const CHAT_EMOJIS = Array.from({ length: 24 }, (_, i) => {
   const n = String(i + 1).padStart(2, '0')
   return {
@@ -4237,22 +4323,33 @@ function renderChatPanel(state: LobbyScreenState): string {
               <div style="margin:auto;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;">Няма съобщения. Започни разговора.</div>
             ` : state.chatMessages.map((message) => {
               const isEmojiOnly = /^(\[e:\d{2}\])+$/.test(message.body.trim())
+              const hasText = message.body.trim().length > 0
               return `
               <div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:min(72%,620px);display:grid;gap:3px;">
-                <div style="${isEmojiOnly
-                  ? 'padding:2px;line-height:1;'
-                  : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;`}">
-                  ${isEmojiOnly
-                    ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="/assets/animated-emoji/emoji-${n}.webp" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
-                    : renderMessageBody(message.body)}
-                </div>
+                ${message.attachment ? `
+                  <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
+                    ${renderChatAttachmentBubble(message.attachment)}
+                    ${hasText ? `<div style="padding:0 4px 2px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;">${renderMessageBody(message.body)}</div>` : ''}
+                  </div>
+                ` : `
+                  <div style="${isEmojiOnly
+                    ? 'padding:2px;line-height:1;'
+                    : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;`}">
+                    ${isEmojiOnly
+                      ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="/assets/animated-emoji/emoji-${n}.webp" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
+                      : renderMessageBody(message.body)}
+                  </div>
+                `}
                 <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.42);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div>
               </div>
             `}).join('')}
           </div>
-          <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;gap:10px;padding:14px 16px;border-top:1px solid rgba(212,165,32,0.20);">
-            <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;">
-            <button type="submit" style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;">Изпрати</button>
+          <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;flex-direction:column;gap:8px;padding:14px 16px;border-top:1px solid rgba(212,165,32,0.20);">
+            <div style="display:flex;gap:10px;align-items:center;">
+              ${renderChatImagePickerControls(state, activeConversation.friendshipId)}
+              <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;">
+              <button type="submit" ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;opacity:${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? '0.6' : '1'};">${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'Качване…' : 'Изпрати'}</button>
+            </div>
           </form>
         `}
       </div>
@@ -8399,8 +8496,12 @@ export function renderLobbyScreen(
       const friendshipId = form.dataset.lobbyChatForm?.trim() ?? ''
       const data = new FormData(form)
       const body = String(data.get('message') ?? '').trim()
+      const hasPendingImage = Boolean(state.chatPendingImageByFriendshipId[friendshipId])
 
-      if (friendshipId.length > 0 && body.length > 0) {
+      // Позволяваме submit ако има ТЕКСТ ИЛИ избрана снимка (или и двете) —
+      // самата снимка се чете от state в sendChatMessage
+      // (createLobbyFlowController.ts), не се подава тук.
+      if (friendshipId.length > 0 && (body.length > 0 || hasPendingImage)) {
         // Не чистим полето/черновата тук — резултатът от изпращането все още не е
         // известен. Черновата се изчиства едва след потвърден успех от сървъра
         // (виж sendChatMessage в createLobbyFlowController.ts); при неуспех текстът остава.
@@ -8425,6 +8526,39 @@ export function renderLobbyScreen(
       const friendshipId = form?.dataset.lobbyChatForm?.trim() ?? ''
       if (!code || !friendshipId) return
       options.onChatSubmit(friendshipId, code)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-chat-image-pick]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const friendshipId = btn.dataset.chatImagePick?.trim() ?? ''
+      const input = root.querySelector<HTMLInputElement>(
+        `[data-chat-image-input="${CSS.escape(friendshipId)}"]`,
+      )
+      input?.click()
+    })
+  })
+
+  root.querySelectorAll<HTMLInputElement>('[data-chat-image-input]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const friendshipId = input.dataset.chatImageInput?.trim() ?? ''
+      const file = input.files?.[0] ?? null
+      // Ресетваме value веднага — позволява на потребителя да избере СЪЩИЯ
+      // файл отново (напр. след премахване), браузърът иначе не би emit-нал
+      // 'change' за идентичен избор.
+      input.value = ''
+      if (friendshipId.length > 0 && file !== null) {
+        options.onChatImageSelect(friendshipId, file)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-chat-image-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const friendshipId = btn.dataset.chatImageRemove?.trim() ?? ''
+      if (friendshipId.length > 0) {
+        options.onChatImageRemove(friendshipId)
+      }
     })
   })
 

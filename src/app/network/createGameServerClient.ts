@@ -71,6 +71,15 @@ export type FriendshipsSnapshot = {
   friends: FriendRelationshipSnapshot[]
 }
 
+export type ChatAttachmentSnapshot = {
+  attachmentId: string
+  width: number
+  height: number
+  byteSize: number
+  viewUrl: string
+  downloadUrl: string
+}
+
 export type ChatMessageSnapshot = {
   messageId: string
   friendshipId: string
@@ -78,6 +87,7 @@ export type ChatMessageSnapshot = {
   body: string
   createdAt: string
   isOwnMessage: boolean
+  attachment: ChatAttachmentSnapshot | null
 }
 
 export type ChatConversationSnapshot = {

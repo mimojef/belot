@@ -314,7 +314,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onChatMarkRead?: (friendshipId: string) => Promise<void>
-  onChatSend?: (friendshipId: string, body: string) => Promise<
+  onChatSend?: (friendshipId: string, body: string, imageDataUrl?: string | null) => Promise<
     | {
         ok: true
         conversation: ChatConversationSnapshot
@@ -628,6 +628,12 @@ type InternalLobbyFlowState = {
   chatMessagesLoading: boolean
   chatErrorText: string | null
   chatDraftByFriendshipId: Record<string, string>
+  // Избрана-но-неизпратена снимка per разговор (за да оцелее при
+  // превключване между разговори, по модела на chatDraftByFriendshipId).
+  // previewUrl е обект-URL (URL.createObjectURL) — освобождава се explicit
+  // при премахване/успешно изпращане (виж onChatImageRemove/sendChatMessage).
+  chatPendingImageByFriendshipId: Record<string, { file: File; previewUrl: string } | undefined>
+  chatUploadingFriendshipIds: Set<string>
   // Общ лайв чат в лобито (отделен от chatConversations/chatMessages по-горе —
   // тези са за 1:1 личния чат от раздел "ЧАТ"; виж CLAUDE.md/задачата).
   lobbyChatMessages: LobbyChatMessageSnapshot[]
@@ -906,6 +912,8 @@ function createInitialState(): InternalLobbyFlowState {
     chatMessagesLoading: false,
     chatErrorText: null,
     chatDraftByFriendshipId: {},
+    chatPendingImageByFriendshipId: {},
+    chatUploadingFriendshipIds: new Set<string>(),
     lobbyChatMessages: [],
     lobbyChatSubscribed: false,
     lobbyChatDraft: '',
@@ -2102,6 +2110,8 @@ export function createLobbyFlowController(
       chatMessagesLoading: state.chatMessagesLoading,
       chatErrorText: state.chatErrorText,
       chatDraftByFriendshipId: state.chatDraftByFriendshipId,
+      chatPendingImageByFriendshipId: state.chatPendingImageByFriendshipId,
+      chatUploadingFriendshipIds: state.chatUploadingFriendshipIds,
       lobbyChatMessages: state.lobbyChatMessages,
       lobbyChatSubscribed: state.lobbyChatSubscribed,
       lobbyChatDraft: state.lobbyChatDraft,
@@ -2485,6 +2495,13 @@ export function createLobbyFlowController(
         // Браузърът пази фокуса/каретата в живия <input> без нужда от re-render;
         // state само служи като "чернова backup", ползван при следващ фонов re-render.
         state.chatDraftByFriendshipId = { ...state.chatDraftByFriendshipId, [friendshipId]: draft }
+      },
+      onChatImageSelect: (friendshipId, file) => {
+        selectChatImage(friendshipId, file)
+      },
+      onChatImageRemove: (friendshipId) => {
+        clearChatPendingImage(friendshipId)
+        render()
       },
       onPlayerCardClick: (profile) => {
         const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId
@@ -5175,6 +5192,67 @@ export function createLobbyFlowController(
     render()
   }
 
+  const CHAT_IMAGE_ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp'])
+  // Трябва да съвпада точно със сървърния MAX_ORIGINAL_IMAGE_BYTES
+  // (server/src/index.ts) — 10 000 000 байта (decimal 10 MB), НЕ
+  // 10 * 1024 * 1024 (10 MiB = 10 485 760). Разминаване тук би означавало
+  // файл между двете стойности минава клиентската проверка, но сървърът
+  // пак го отхвърля — подвеждащ UX въпреки коректния краен резултат.
+  const CHAT_IMAGE_MAX_BYTES = 10_000_000
+
+  // Клиентска проверка — бърза UX обратна връзка, НЕ заменя сървърната
+  // проверка (реалният формат/размер се валидира отново на сървъра чрез
+  // sharp metadata, виж createChatAttachmentWebp в index.ts).
+  function validateChatImageFile(file: File): string | null {
+    if (!CHAT_IMAGE_ALLOWED_MIME_TYPES.has(file.type)) {
+      return 'Поддържат се само JPEG, PNG и WebP снимки.'
+    }
+    if (file.size > CHAT_IMAGE_MAX_BYTES) {
+      return 'Снимката трябва да бъде до 10 MB.'
+    }
+    return null
+  }
+
+  function clearChatPendingImage(friendshipId: string): void {
+    const pending = state.chatPendingImageByFriendshipId[friendshipId]
+    if (pending) {
+      URL.revokeObjectURL(pending.previewUrl)
+    }
+    const next = { ...state.chatPendingImageByFriendshipId }
+    delete next[friendshipId]
+    state.chatPendingImageByFriendshipId = next
+  }
+
+  function selectChatImage(friendshipId: string, file: File): void {
+    const validationError = validateChatImageFile(file)
+
+    if (validationError !== null) {
+      state.chatErrorText = validationError
+      render()
+      return
+    }
+
+    // Замяна на предишен избор (ако имаше) — освобождаваме стария object URL
+    // преди да създадем нов, за да не изтичат ресурси.
+    clearChatPendingImage(friendshipId)
+    const previewUrl = URL.createObjectURL(file)
+    state.chatPendingImageByFriendshipId = {
+      ...state.chatPendingImageByFriendshipId,
+      [friendshipId]: { file, previewUrl },
+    }
+    state.chatErrorText = null
+    render()
+  }
+
+  function readFileAsDataUrl(file: File): Promise<string> {
+    return new Promise((resolvePromise, rejectPromise) => {
+      const reader = new FileReader()
+      reader.onload = () => resolvePromise(String(reader.result))
+      reader.onerror = () => rejectPromise(reader.error ?? new Error('FileReader error'))
+      reader.readAsDataURL(file)
+    })
+  }
+
   async function sendChatMessage(
     friendshipId: string,
     body: string,
@@ -5185,18 +5263,56 @@ export function createLobbyFlowController(
       return
     }
 
-    const result = await options.onChatSend(friendshipId, body)
+    // Защита от двойно изпращане — блокира повторен submit, докато чака
+    // сървърния отговор (виж chatUploadingFriendshipIds — рендер слоят
+    // disable-ва input/бутон/файл-бутон, докато friendshipId е в this Set).
+    if (state.chatUploadingFriendshipIds.has(friendshipId)) {
+      return
+    }
+
+    const pendingImage = state.chatPendingImageByFriendshipId[friendshipId] ?? null
+
+    if (body.trim().length === 0 && pendingImage === null) {
+      return
+    }
+
+    state.chatUploadingFriendshipIds = new Set(state.chatUploadingFriendshipIds).add(friendshipId)
+    state.chatErrorText = null
+    render()
+
+    let imageDataUrl: string | null = null
+
+    if (pendingImage !== null) {
+      try {
+        imageDataUrl = await readFileAsDataUrl(pendingImage.file)
+      } catch {
+        const nextUploading = new Set(state.chatUploadingFriendshipIds)
+        nextUploading.delete(friendshipId)
+        state.chatUploadingFriendshipIds = nextUploading
+        state.chatErrorText = 'Качването на снимката не бе успешно. Опитайте отново.'
+        render()
+        return
+      }
+    }
+
+    const result = await options.onChatSend(friendshipId, body, imageDataUrl)
+
+    const nextUploading = new Set(state.chatUploadingFriendshipIds)
+    nextUploading.delete(friendshipId)
+    state.chatUploadingFriendshipIds = nextUploading
 
     if (!result.ok) {
-      // Изпращането е неуспешно — черновата НЕ се пипа, текстът остава в полето,
-      // за да не го изгуби потребителят и да може да опита отново.
+      // Изпращането е неуспешно — черновата и избраната снимка НЕ се пипат,
+      // за да не ги изгуби потребителят и да може да опита отново.
       state.chatErrorText = result.message
       render()
       return
     }
 
-    // Изчистваме черновата едва тук — след потвърден успех от сървъра.
+    // Изчистваме черновата и избраната снимка едва тук — след потвърден
+    // успех от сървъра.
     state.chatDraftByFriendshipId = { ...state.chatDraftByFriendshipId, [friendshipId]: '' }
+    clearChatPendingImage(friendshipId)
     state.chatMessages = result.messages
     state.chatErrorText = null
     state.activeChatFriendshipId = friendshipId

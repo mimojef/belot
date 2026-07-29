@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
@@ -231,6 +231,36 @@ const SERVER_ROOT_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const UPLOADS_ROOT_PATH = join(SERVER_ROOT_PATH, 'uploads')
 const AVATAR_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'avatars')
 const GALLERY_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'profile-gallery')
+
+// Личен чат — снимки. Отделна upload директория, НЕ сервирана от публичния
+// handleUploadsRequest (виж handleChatAttachmentRequest) — снимките в
+// чата са лично съдържание между двама конкретни потребители, за разлика
+// от avatar/gallery, които са умишлено публични.
+const CHAT_ATTACHMENT_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'chat-attachments')
+// base64 data URL overhead е ~33% над бинарния размер; 10MB оригинал →
+// ~13.3MB base64 текст. 15MB праг покрива това с марж, съгласувано с
+// MAX_JSON_BODY_BYTES, ползван за profile avatar/gallery endpoint-ите.
+const MAX_CHAT_ATTACHMENT_JSON_BYTES = 15_000_000
+const CHAT_ATTACHMENT_MAX_DIMENSION_PX = 1920
+const CHAT_ATTACHMENT_WEBP_QUALITY = 82
+const CHAT_ATTACHMENT_FILENAME_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.webp$/
+// Колко pending deletion записа обработва background cleanup job-ът на
+// един цикъл — ограничава worst-case I/O натоварването на един tick.
+const CHAT_ATTACHMENT_CLEANUP_BATCH_SIZE = 200
+const CHAT_ATTACHMENT_CLEANUP_INTERVAL_MS = 5 * 60 * 1000
+const CHAT_ATTACHMENT_CLEANUP_STARTUP_DELAY_MS = 30_000
+// Orphan scan е по-рядък и по-скъп (directory listing + DB lookup за всеки
+// файл) — grace period предпазва in-flight upload-и (файлът вече е записан
+// на диск, но DB транзакцията все още не е committed) от преждевременно
+// изтриване.
+const CHAT_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS = 6 * 60 * 60 * 1000
+const CHAT_ATTACHMENT_ORPHAN_SCAN_STARTUP_DELAY_MS = 90_000
+const CHAT_ATTACHMENT_ORPHAN_GRACE_PERIOD_MS = 24 * 60 * 60 * 1000
+// Колко дни пазим завършени ('done') deletion-queue редове преди purge —
+// достатъчно дълго за post-hoc debugging, но предпазва
+// friend_chat_attachment_deletions от неограничен растеж (виж
+// purgeDoneAttachmentDeletions, извикван от runChatAttachmentOrphanScan).
+const CHAT_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS = 7
 const guestContactRateLimitByIp = new Map<string, { windowStartedAt: number; count: number }>()
 
 type GameWorkerTickMode = 'in-process' | 'worker-candidate'
@@ -433,6 +463,7 @@ const friendshipStore = await createFriendshipStore(
 const chatStore = await createChatStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
+  blockStore,
 )
 const lobbyChatStore = await createLobbyChatStore(databaseBootstrap.databaseFilePath)
 
@@ -695,6 +726,149 @@ let lobbyChatRetentionStartupTimeout: ReturnType<typeof setTimeout> | null = set
 let lobbyChatRetentionInterval: ReturnType<typeof setInterval> | null = setInterval(
   runLobbyChatRetentionCleanup,
   LOBBY_CHAT_RETENTION_INTERVAL_MS,
+)
+
+// ─── Личен чат — attachment cleanup ─────────────────────────────────────────
+//
+// Два отделни job-а:
+// 1) runChatAttachmentCleanup — обработва friend_chat_attachment_deletions
+//    (deletion-intent записи от chatStore prune-а при 500-съобщения лимита,
+//    виж chatStore.sendMessage) — бърз, чест, малък batch.
+// 2) runChatAttachmentOrphanScan — по-рядък defensive scan: сравнява
+//    файловете на диска срещу DB, трие файлове без НИКАКЪВ DB запис (напр.
+//    ако upload е паднал точно между file write и DB insert, а deletion
+//    queue записът не е могъл да се създаде, защото DB транзакцията никога
+//    не е стартирала). grace period предпазва in-flight upload-и.
+async function runChatAttachmentCleanup(): Promise<void> {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  try {
+    const pending = chatStore.listPendingAttachmentDeletions(CHAT_ATTACHMENT_CLEANUP_BATCH_SIZE)
+
+    if (pending.length === 0) {
+      return
+    }
+
+    let deletedCount = 0
+    let failedCount = 0
+
+    for (const entry of pending) {
+      // Defensive: ако файлът вече принадлежи на друг, по-нов attachment
+      // запис (теоретично невъзможно заради UNIQUE storage_filename, но
+      // проверяваме explicit преди физическо изтриване, за да никога не
+      // трием файл, който все още е активно свързан с валидно съобщение).
+      if (chatStore.attachmentExistsForFilename(entry.storageFilename)) {
+        chatStore.markAttachmentDeletionDone(entry.eventSeq)
+        continue
+      }
+
+      const deleted = await deleteChatAttachmentFileByFilename(entry.storageFilename)
+
+      if (deleted) {
+        chatStore.markAttachmentDeletionDone(entry.eventSeq)
+        deletedCount += 1
+      } else {
+        chatStore.markAttachmentDeletionFailed(entry.eventSeq)
+        failedCount += 1
+      }
+    }
+
+    if (deletedCount > 0 || failedCount > 0) {
+      console.log(`[chat-attachments] Cleanup: deleted=${deletedCount} failed=${failedCount}`)
+    }
+  } catch (error) {
+    console.error('[chat-attachments] Cleanup failed:', error)
+  }
+}
+
+async function runChatAttachmentOrphanScan(): Promise<void> {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  try {
+    await mkdir(CHAT_ATTACHMENT_UPLOADS_PATH, { recursive: true })
+    const entries = await readdir(CHAT_ATTACHMENT_UPLOADS_PATH, { withFileTypes: true })
+    const now = Date.now()
+    let deletedCount = 0
+
+    for (const entry of entries) {
+      if (isServerShuttingDown) {
+        return
+      }
+
+      if (!entry.isFile() || !CHAT_ATTACHMENT_FILENAME_PATTERN.test(entry.name)) {
+        continue
+      }
+
+      // Никога не трием файл, който все още присъства във
+      // friend_chat_attachments — това е финалният, авторитетен guard
+      // (изисквано изрично: "никога да не изтрива файл, който все още е
+      // свързан с валидно чат съобщение").
+      if (chatStore.attachmentExistsForFilename(entry.name)) {
+        continue
+      }
+
+      const filePath = join(CHAT_ATTACHMENT_UPLOADS_PATH, entry.name)
+
+      try {
+        const fileStats = await stat(filePath)
+
+        if (now - fileStats.mtimeMs < CHAT_ATTACHMENT_ORPHAN_GRACE_PERIOD_MS) {
+          // Твърде "прясен" — може да е in-flight upload (файлът е записан,
+          // но DB транзакцията все още не е committed). Пропускаме до
+          // следващия scan цикъл.
+          continue
+        }
+      } catch {
+        continue
+      }
+
+      const deleted = await deleteChatAttachmentFileByFilename(entry.name)
+      if (deleted) {
+        deletedCount += 1
+      }
+    }
+
+    if (deletedCount > 0) {
+      console.log(`[chat-attachments] Orphan scan: deleted ${deletedCount} orphaned file(s)`)
+    }
+
+    // Завършените (done) deletion-queue записи не се трият автоматично при
+    // отбелязването им — без този purge friend_chat_attachment_deletions
+    // би растяла неограничено. Вградено тук (по-рядкия 6ч job), не в
+    // честия 5-мин cleanup, за да не удря SQL всеки цикъл. failed записите
+    // НЕ се пипат от purge-а — те продължават да се преоценяват от
+    // runChatAttachmentCleanup (виж cleanup_status IN ('pending','failed')).
+    const purgedDeletionEvents = chatStore.purgeDoneAttachmentDeletions(
+      CHAT_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS,
+      CHAT_ATTACHMENT_CLEANUP_BATCH_SIZE,
+    )
+    if (purgedDeletionEvents > 0) {
+      console.log(`[chat-attachments] Purged ${purgedDeletionEvents} completed deletion-queue row(s)`)
+    }
+  } catch (error) {
+    console.error('[chat-attachments] Orphan scan failed:', error)
+  }
+}
+
+let chatAttachmentCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+  () => { void runChatAttachmentCleanup() },
+  CHAT_ATTACHMENT_CLEANUP_STARTUP_DELAY_MS,
+)
+let chatAttachmentCleanupInterval: ReturnType<typeof setInterval> | null = setInterval(
+  () => { void runChatAttachmentCleanup() },
+  CHAT_ATTACHMENT_CLEANUP_INTERVAL_MS,
+)
+let chatAttachmentOrphanScanStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+  () => { void runChatAttachmentOrphanScan() },
+  CHAT_ATTACHMENT_ORPHAN_SCAN_STARTUP_DELAY_MS,
+)
+let chatAttachmentOrphanScanInterval: ReturnType<typeof setInterval> | null = setInterval(
+  () => { void runChatAttachmentOrphanScan() },
+  CHAT_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS,
 )
 const yellowCoinGiftStore = await createYellowCoinGiftStore(
   databaseBootstrap.databaseFilePath,
@@ -3285,6 +3459,31 @@ async function deleteUploadFileByUrl(uploadUrl: string): Promise<void> {
   }
 }
 
+// Chat attachment файловете НЕ живеят под публичния UPLOADS_ROUTE_PREFIX
+// (не се сервират от handleUploadsRequest), затова delete helper-ът тук
+// работи директно с filename (не URL) — валидиран срещу строгия
+// UUID.webp regex преди path resolve, за да е невъзможен path traversal
+// дори при повреден/подправен storage_filename запис в DB.
+async function deleteChatAttachmentFileByFilename(filename: string): Promise<boolean> {
+  if (!CHAT_ATTACHMENT_FILENAME_PATTERN.test(filename)) {
+    return false
+  }
+
+  const filePath = join(CHAT_ATTACHMENT_UPLOADS_PATH, filename)
+
+  try {
+    await unlink(filePath)
+    return true
+  } catch (error) {
+    // ENOENT: файлът вече не съществува — третираме като успешно "изтрит"
+    // (idempotent cleanup), не грешка.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return true
+    }
+    return false
+  }
+}
+
 async function createCroppedAvatarWebp(input: {
   imageBuffer: Buffer
   cropX: number
@@ -3349,6 +3548,71 @@ async function createGalleryImageWebp(imageBuffer: Buffer): Promise<Buffer | nul
     .toBuffer()
 }
 
+// Личен чат — снимка към съобщение. За разлика от avatar/gallery (fit:
+// 'cover', фиксиран квадрат), тук пазим оригиналните пропорции (fit:
+// 'inside') — резултатът е снимка, не profile thumbnail.
+//
+// Проверката "реален формат ∈ {jpeg, png, webp}" ПРЕДИ resize е explicit
+// whitelist, отделен слой защита ОТГОРЕ на глобалния sharp.block()
+// (VipsForeignLoadNsgif/Tiff/Vips defense-in-depth от началото на файла) —
+// sharp.block() е blacklist (блокира конкретни опасни loader-и), докато
+// тук изрично разрешаваме само трите позволени формата, вместо да разчитаме
+// единствено на "не е в blacklist-а".
+//
+// .rotate() без аргументи чете EXIF Orientation тага и физически завърта
+// пикселите, после НЕ пренася EXIF/ICC/XMP към изхода — sharp по подразбиране
+// strip-ва metadata освен ако не се извика .withMetadata() (нарочно НЕ се
+// вика тук).
+async function createChatAttachmentWebp(
+  imageBuffer: Buffer,
+): Promise<{ buffer: Buffer; width: number; height: number } | null> {
+  const metadata = await sharp(imageBuffer).metadata()
+
+  if (metadata.format !== 'jpeg' && metadata.format !== 'png' && metadata.format !== 'webp') {
+    return null
+  }
+
+  const imageWidth = metadata.width ?? 0
+  const imageHeight = metadata.height ?? 0
+
+  if (imageWidth <= 0 || imageHeight <= 0) {
+    return null
+  }
+
+  const buffer = await sharp(imageBuffer)
+    .rotate()
+    .resize(CHAT_ATTACHMENT_MAX_DIMENSION_PX, CHAT_ATTACHMENT_MAX_DIMENSION_PX, {
+      fit: 'inside',
+      withoutEnlargement: true,
+    })
+    .webp({ quality: CHAT_ATTACHMENT_WEBP_QUALITY })
+    .toBuffer()
+
+  const outputMetadata = await sharp(buffer).metadata()
+  const outputWidth = outputMetadata.width ?? 0
+  const outputHeight = outputMetadata.height ?? 0
+
+  if (outputWidth <= 0 || outputHeight <= 0) {
+    return null
+  }
+
+  return { buffer, width: outputWidth, height: outputHeight }
+}
+
+// ВАЖНО: whitelist само на умишлено ПУБЛИЧНИТЕ поддиректории (avatars,
+// profile-gallery). chat-attachments/ живее физически под същия
+// UPLOADS_ROOT_PATH (виж CHAT_ATTACHMENT_UPLOADS_PATH), но снимките в
+// личния чат НЕ трябва да са достъпни без сесия/friendship проверка (виж
+// handleChatAttachmentDownloadRequest) — ако тази функция разрешаваше
+// всякакъв relative path под UPLOADS_ROOT_PATH (какъвто беше предишният ѝ
+// implementation), GET /uploads/chat-attachments/<uuid>.webp би заобиколил
+// изцяло auth guard-а на защитения endpoint. Explicit whitelist на root
+// поддиректорията (не само anti-traversal resolve-check) затваря тази дупка.
+const PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS = [
+  resolve(AVATAR_UPLOADS_PATH),
+  resolve(GALLERY_UPLOADS_PATH),
+]
+
 function resolveUploadRequestPath(pathname: string): string | null {
   if (!pathname.startsWith(UPLOADS_ROUTE_PREFIX)) {
     return null
@@ -3358,9 +3622,13 @@ function resolveUploadRequestPath(pathname: string): string | null {
     pathname.slice(UPLOADS_ROUTE_PREFIX.length),
   )
   const resolvedPath = resolve(UPLOADS_ROOT_PATH, relativePath)
-  const uploadsRoot = `${resolve(UPLOADS_ROOT_PATH)}${/[/\\]$/.test(UPLOADS_ROOT_PATH) ? '' : '\\'}`
 
-  if (!resolvedPath.startsWith(uploadsRoot) && resolvedPath !== resolve(UPLOADS_ROOT_PATH)) {
+  const isUnderPublicSubdirectory = PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS.some((publicRoot) => {
+    const publicRootWithSeparator = `${publicRoot}${/[/\\]$/.test(publicRoot) ? '' : '\\'}`
+    return resolvedPath.startsWith(publicRootWithSeparator) || resolvedPath === publicRoot
+  })
+
+  if (!isUnderPublicSubdirectory) {
     return null
   }
 
@@ -5967,8 +6235,14 @@ async function handleChatRequest(
 ): Promise<boolean> {
   const messagesMatch = /^\/api\/chat\/([^/]+)\/messages$/.exec(pathname)
   const readMatch = /^\/api\/chat\/([^/]+)\/read$/.exec(pathname)
+  const attachmentMatch = /^\/api\/chat\/([^/]+)\/attachments\/([^/]+)$/.exec(pathname)
 
-  if (pathname !== '/api/chat/conversations' && messagesMatch === null && readMatch === null) {
+  if (
+    pathname !== '/api/chat/conversations' &&
+    messagesMatch === null &&
+    readMatch === null &&
+    attachmentMatch === null
+  ) {
     return false
   }
 
@@ -5991,6 +6265,16 @@ async function handleChatRequest(
       message: 'Чатът не е позволен по време на игра.',
     })
     return true
+  }
+
+  if (attachmentMatch !== null && req.method === 'GET') {
+    return await handleChatAttachmentDownloadRequest(
+      req,
+      res,
+      profileId,
+      decodeURIComponent(attachmentMatch[1]).trim(),
+      decodeURIComponent(attachmentMatch[2]).trim(),
+    )
   }
 
   if (pathname === '/api/chat/conversations' && req.method === 'GET') {
@@ -6030,7 +6314,7 @@ async function handleChatRequest(
 
   if (messagesMatch !== null && req.method === 'POST') {
     const friendshipId = decodeURIComponent(messagesMatch[1]).trim()
-    const body = await readJsonRequestBody(req)
+    const body = await readJsonRequestBody(req, MAX_CHAT_ATTACHMENT_JSON_BYTES)
 
     if (!isRecord(body)) {
       sendJsonResponse(res, 400, {
@@ -6038,6 +6322,59 @@ async function handleChatRequest(
         message: 'Invalid request body.',
       })
       return true
+    }
+
+    // Приятелство + blocking guard-ват само в chatStore.sendMessage, но за
+    // снимка искаме да избегнем скъпата sharp обработка изцяло, ако
+    // заявката очевидно ще бъде отхвърлена — затова кратка предварителна
+    // проверка тук за самото участие във friendship-а (без status filter,
+    // достатъчно бърза), не дублира валидацията в store-а, само spестява
+    // работа при явно невалидни заявки.
+    const imageDataUrlField = body.imageDataUrl
+    let attachmentInput: { storageFilename: string; width: number; height: number; byteSize: number; contentType: string } | null = null
+    let writtenAttachmentFilename: string | null = null
+
+    if (typeof imageDataUrlField === 'string' && imageDataUrlField.trim().length > 0) {
+      const imageBuffer = decodeImageDataUrl(imageDataUrlField)
+
+      if (imageBuffer === null) {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          message: 'Поддържат се само JPEG, PNG и WebP снимки до 10 MB.',
+        })
+        return true
+      }
+
+      const processed = await createChatAttachmentWebp(imageBuffer)
+
+      if (processed === null) {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          message: 'Поддържат се само JPEG, PNG и WebP снимки.',
+        })
+        return true
+      }
+
+      const storageFilename = `${randomUUID()}.webp`
+
+      try {
+        await writeWebpUploadFile(CHAT_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer)
+        writtenAttachmentFilename = storageFilename
+      } catch {
+        sendJsonResponse(res, 500, {
+          ok: false,
+          message: 'Качването на снимката не бе успешно. Опитайте отново.',
+        })
+        return true
+      }
+
+      attachmentInput = {
+        storageFilename,
+        width: processed.width,
+        height: processed.height,
+        byteSize: processed.buffer.length,
+        contentType: 'image/webp',
+      }
     }
 
     // Снимка НА получателя ПРЕДИ insert-а на новото съобщение — иначе
@@ -6049,13 +6386,37 @@ async function handleChatRequest(
     const shouldNotify = recipientProfileIdBeforeSend !== null
       && chatStore.isFirstUnreadMessage(recipientProfileIdBeforeSend, friendshipId)
 
-    const result = chatStore.sendMessage(
-      profileId,
-      friendshipId,
-      getStringField(body, 'body'),
-    )
+    let result: ReturnType<typeof chatStore.sendMessage>
+
+    try {
+      result = chatStore.sendMessage(
+        profileId,
+        friendshipId,
+        getStringField(body, 'body'),
+        attachmentInput,
+      )
+    } catch (error) {
+      // DB транзакцията се провали ПОСЛЕ вече записания файл на диска —
+      // изтрий го веднага, за да не остане "осиротял" файл без DB запис.
+      // Ако самото изтриване се провали (напр. transient FS грешка),
+      // orphan scan job-ът (виж runChatAttachmentOrphanScan) ще го хване
+      // по-късно — grace period-ът му е достатъчно дълъг да не удари
+      // in-flight upload-и, а достатъчно кратък да чисти реални orphans.
+      if (writtenAttachmentFilename !== null) {
+        await deleteChatAttachmentFileByFilename(writtenAttachmentFilename)
+      }
+
+      throw error
+    }
 
     if (!result.ok) {
+      // Съобщението не беше записано (validation/guard грешка от store-а,
+      // напр. blocking или "нито текст, нито снимка") — файлът вече е на
+      // диска, трябва да се изтрие незабавно, за да не остане orphan.
+      if (writtenAttachmentFilename !== null) {
+        await deleteChatAttachmentFileByFilename(writtenAttachmentFilename)
+      }
+
       sendJsonResponse(res, 400, result)
       return true
     }
@@ -6083,6 +6444,64 @@ async function handleChatRequest(
   }
 
   return false
+}
+
+// Защитен преглед/сваляне на chat attachment — НЕ минава през публичния
+// handleUploadsRequest (виж бележката до CHAT_ATTACHMENT_UPLOADS_PATH).
+// Guard-овете (сесия + friendship membership + attachment принадлежи на
+// точно този friendship) живеят в chatStore.getAttachmentForDownload,
+// извикани от profileId на текущата сесия — не е възможно да се подаде
+// произволен profileId отвън.
+async function handleChatAttachmentDownloadRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  profileId: string,
+  friendshipId: string,
+  filename: string,
+): Promise<boolean> {
+  if (!CHAT_ATTACHMENT_FILENAME_PATTERN.test(filename)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно име на файл.' })
+    return true
+  }
+
+  const attachment = chatStore.getAttachmentForDownload(profileId, friendshipId, filename)
+
+  if (attachment === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
+    return true
+  }
+
+  const filePath = join(CHAT_ATTACHMENT_UPLOADS_PATH, attachment.storageFilename)
+
+  try {
+    const fileStats = await stat(filePath)
+
+    if (!fileStats.isFile()) {
+      sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
+      return true
+    }
+
+    const fileBuffer = await readFile(filePath)
+    const url = new URL(req.url ?? '', 'http://localhost')
+    const isDownload = url.searchParams.get('download') !== null
+
+    res.writeHead(200, {
+      'Content-Type': attachment.contentType,
+      // private (не public): браузърът може локално да кешира, но НЕ
+      // споделен/proxy кеш — снимката е лично съдържание между двама
+      // конкретни потребители, за разлика от avatar/gallery (immutable,
+      // public — виж handleUploadsRequest), които са умишлено публични.
+      'Cache-Control': 'private, max-age=86400',
+      ...(isDownload
+        ? { 'Content-Disposition': `attachment; filename="${attachment.storageFilename}"` }
+        : {}),
+    })
+    res.end(fileBuffer)
+    return true
+  } catch {
+    sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
+    return true
+  }
 }
 
 // Модерация на общия лайв чат — само пълен admin (isFullAdminSession
@@ -9401,6 +9820,26 @@ function clearMutationTimersForShutdown(): void {
   if (lobbyChatRetentionStartupTimeout !== null) {
     clearTimeout(lobbyChatRetentionStartupTimeout)
     lobbyChatRetentionStartupTimeout = null
+  }
+
+  if (chatAttachmentCleanupInterval !== null) {
+    clearInterval(chatAttachmentCleanupInterval)
+    chatAttachmentCleanupInterval = null
+  }
+
+  if (chatAttachmentCleanupStartupTimeout !== null) {
+    clearTimeout(chatAttachmentCleanupStartupTimeout)
+    chatAttachmentCleanupStartupTimeout = null
+  }
+
+  if (chatAttachmentOrphanScanInterval !== null) {
+    clearInterval(chatAttachmentOrphanScanInterval)
+    chatAttachmentOrphanScanInterval = null
+  }
+
+  if (chatAttachmentOrphanScanStartupTimeout !== null) {
+    clearTimeout(chatAttachmentOrphanScanStartupTimeout)
+    chatAttachmentOrphanScanStartupTimeout = null
   }
 
   clearPrivateRoomInviteTimers()

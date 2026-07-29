@@ -666,6 +666,20 @@ export type PrivateRoomChatErrorMessage = {
   requestId?: string
 }
 
+// --- Личен (1:1 приятелски) чат — push нотификация при ново съобщение ---
+// (самото изпращане/четене е HTTP REST, виж handleChatRequest в index.ts;
+// това съобщение носи само метаданни за известяване — клиентът прави GET
+// refresh на историята, за да получи пълното съдържание, вкл. attachment.)
+export type ChatMessageReceivedMessage = {
+  type: 'chat_message_received'
+  friendshipId: string
+  senderProfileId: string
+  fromDisplayName: string
+  fromAvatarUrl: string | null
+  messageId: string
+  shouldNotify: boolean
+}
+
 // --- Client messages for private rooms ---
 // (extends ClientMessage union below)
 
@@ -721,6 +735,7 @@ export type ServerMessage =
   | LobbyChatMessageReceivedMessage
   | LobbyChatMessageDeletedMessage
   | LobbyChatErrorMessage
+  | ChatMessageReceivedMessage
 
 export type ProfileLikedMessage = {
   type: 'profile_liked'
