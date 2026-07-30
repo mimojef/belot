@@ -557,6 +557,7 @@ try {
       'entryFee', 'playerCapacity', 'confirmedEntriesCount', 'reservedPlacesCount',
       'occupiedPlacesCount', 'completedTeamsCount', 'formingTeamsCount', 'startMode',
       'scheduledStartAt', 'createdAt', 'prizePreview', 'isMine', 'availablePlaces', 'isFull',
+      'championTeamId', 'runnerUpTeamId', 'settlementState', 'settledAt',
       'viewer',
     ])
     for (const t of b.tournaments) {

@@ -357,6 +357,45 @@ function renderTournamentMatchAssignmentCallout(t: TournamentDetailSnapshot): st
   `
 }
 
+function renderTournamentFinalSummary(t: TournamentDetailSnapshot): string {
+  const hasFinalWinner = t.championTeamId !== null || t.runnerUpTeamId !== null
+  if (!hasFinalWinner && t.status !== 'finished') return ''
+  const championTeam = t.championTeamId !== null
+    ? t.teams.find((team) => team.teamId === t.championTeamId) ?? null
+    : null
+  const runnerUpTeam = t.runnerUpTeamId !== null
+    ? t.teams.find((team) => team.teamId === t.runnerUpTeamId) ?? null
+    : null
+  const teamNames = (team: typeof championTeam): string => {
+    if (team === null || team.members.length === 0) return 'Отбор'
+    return team.members.map((member) => member.displayName).join(' и ')
+  }
+  const placementText =
+    t.viewer.myPlacement === 'champion'
+      ? `Ти си шампион. Награда: ${formatAmount(t.viewer.myPrizeAmount ?? 0)}.`
+      : t.viewer.myPlacement === 'runner_up'
+        ? `Ти си на второ място. Награда: ${formatAmount(t.viewer.myPrizeAmount ?? 0)}.`
+        : t.viewer.myPlacement === 'eliminated'
+          ? 'Твоят отбор отпадна преди финала.'
+          : ''
+  return `
+    <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.34);border-radius:10px;padding:16px;margin-bottom:20px;">
+      <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;margin-bottom:10px;">Финал</div>
+      ${t.settlementState === 'settled' ? `
+        <div style="display:grid;gap:8px;font-size:13px;color:rgba(255,255,255,0.78);">
+          <div style="display:flex;justify-content:space-between;gap:12px;"><span>Шампион: ${escapeHtml(teamNames(championTeam))}</span><span style="font-weight:900;color:#86efac;">${formatAmount(t.prizePreview.firstTeamPrize)}</span></div>
+          <div style="display:flex;justify-content:space-between;gap:12px;"><span>Второ място: ${escapeHtml(teamNames(runnerUpTeam))}</span><span style="font-weight:900;color:#fde68a;">${formatAmount(t.prizePreview.secondTeamPrize)}</span></div>
+          <div style="display:flex;justify-content:space-between;gap:12px;"><span>На играч в шампионския отбор</span><span style="font-weight:800;">${formatAmount(t.prizePreview.firstPlayerPrize)}</span></div>
+          <div style="display:flex;justify-content:space-between;gap:12px;"><span>На играч във втория отбор</span><span style="font-weight:800;">${formatAmount(t.prizePreview.secondPlayerPrize)}</span></div>
+          ${placementText ? `<div style="margin-top:8px;color:#f8fafc;font-weight:900;">${escapeHtml(placementText)}</div>` : ''}
+        </div>
+      ` : `
+        <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.72);">Наградите се обработват. Турнирът ще се появи в последните завършили, когато settlement-ът приключи.</div>
+      `}
+    </div>
+  `
+}
+
 function renderTournamentRounds(t: TournamentDetailSnapshot): string {
   if (!t.rounds || t.rounds.length === 0) {
     return '<div style="font-size:13px;color:rgba(255,255,255,0.4);font-style:italic;">Схемата ще се появи, след като турнирът стартира.</div>'
@@ -438,6 +477,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
       </div>
 
       ${renderTournamentMatchAssignmentCallout(t)}
+      ${renderTournamentFinalSummary(t)}
 
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:20px;">
         <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:12px 14px;">

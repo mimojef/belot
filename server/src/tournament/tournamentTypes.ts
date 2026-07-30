@@ -111,6 +111,10 @@ export type TournamentRecord = {
   updatedAt: string
   startedAt: string | null
   finishedAt: string | null
+  championTeamId: TournamentTeamId | null
+  runnerUpTeamId: TournamentTeamId | null
+  settlementState: 'pending' | 'settled'
+  settledAt: string | null
   totalEntryAmount: number | null
   systemFeePercent: number | null
   systemFeeAmount: number | null

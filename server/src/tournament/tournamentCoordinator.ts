@@ -18,6 +18,7 @@ import {
 import { createServerRoom } from '../core/createServerRoom.js'
 import { createHumanParticipant } from '../core/createHumanParticipant.js'
 import { createBotParticipant } from '../core/createBotParticipant.js'
+import { removeParticipantFromRoom } from '../core/removeParticipantFromRoom.js'
 import { seatParticipantInRoom } from '../core/seatParticipantInRoom.js'
 import { initializeRoomAuthoritativeGameState } from '../game/initializeRoomAuthoritativeGameState.js'
 import { dbDateToUtc } from '../db/dbDate.js'
@@ -58,6 +59,8 @@ export type TournamentCoordinatorHealth = {
   botFillMatchesLastTick: number
   gameStartsLastTick: number
   takeoversLastTick: number
+  settlementAttemptsLastTick: number
+  tournamentsSettledLastTick: number
   recoveryActionsLastTick: number
 }
 
@@ -89,6 +92,11 @@ type TournamentCoordinatorDeps = {
   getRoom: (roomId: string) => ServerRoom | null
   commitRoom: (room: ServerRoom) => void
   ensureRoomRuntime: (room: ServerRoom) => { ok: true } | { ok: false; reason: string }
+  settleTournamentPrizes: (tournamentId: TournamentId) => {
+    ok: boolean
+    alreadySettled?: boolean
+    reason?: string
+  }
   notifyAssignment: (profileId: ProfileId, assignment: TournamentMatchAssignment) => void
   isConnectionAttached: (input: {
     profileId: ProfileId
@@ -258,6 +266,24 @@ export async function createTournamentCoordinator(
     FROM tournaments
     WHERE status IN ('starting', 'semifinal_in_progress', 'final_in_progress')
     ORDER BY started_at ASC, created_at ASC
+    LIMIT ?;
+  `)
+
+  const selectSettlementDueTournamentsStatement = database.prepare(`
+    SELECT DISTINCT t.tournament_id, t.name, t.status
+    FROM tournaments t
+    JOIN tournament_rounds tr
+      ON tr.tournament_id = t.tournament_id
+     AND tr.round_type = 'final'
+     AND tr.round_index = 1
+    JOIN tournament_matches tm
+      ON tm.round_id = tr.round_id
+     AND tm.status = 'completed'
+     AND tm.result_kind IN ('played', 'played_with_bots', 'walkover')
+     AND tm.winner_team_id IS NOT NULL
+    WHERE t.status = 'final_in_progress'
+      AND t.settlement_state = 'pending'
+    ORDER BY t.updated_at ASC
     LIMIT ?;
   `)
 
@@ -542,6 +568,9 @@ export async function createTournamentCoordinator(
   let botFillMatchesLastTick = 0
   let gameStartsLastTick = 0
   let takeoversLastTick = 0
+  let settlementAttemptsLastTick = 0
+  let tournamentsSettledLastTick = 0
+  let settlementPendingLastTick = false
   let recoveryActionsLastTick = 0
 
   function appendEvent(
@@ -928,7 +957,7 @@ export async function createTournamentCoordinator(
         assignment,
         replacement,
       )
-      nextRoom = seatParticipantInRoom(nextRoom, assignment.seat, bot)
+      nextRoom = seatParticipantInRoom(removeParticipantFromRoom(nextRoom, assignment.seat), assignment.seat, bot)
     }
     return refreshTournamentRoomSnapshot(match, nextRoom)
   }
@@ -1127,6 +1156,21 @@ export async function createTournamentCoordinator(
       runnerUpTeamId,
       payoutPending: true,
     })
+    settlementAttemptsLastTick += 1
+    const settlement = deps.settleTournamentPrizes(match.tournament_id)
+    if (settlement.ok) {
+      if (settlement.alreadySettled !== true) {
+        tournamentsSettledLastTick += 1
+        appendEvent(match.tournament_id, 'tournament_finished', {
+          matchId: match.match_id,
+          winnerTeamId,
+          runnerUpTeamId,
+        })
+      }
+    } else {
+      settlementPendingLastTick = true
+      lastError = `tournament settlement pending: ${settlement.reason ?? 'failed'}`
+    }
   }
 
   function advanceCompletedMatch(match: MatchRow): void {
@@ -1169,6 +1213,20 @@ export async function createTournamentCoordinator(
     }
   }
 
+  function reconcileSettlementDueTournament(tournament: TournamentRow): void {
+    settlementAttemptsLastTick += 1
+    const settlement = deps.settleTournamentPrizes(tournament.tournament_id)
+    if (settlement.ok) {
+      if (settlement.alreadySettled !== true) {
+        tournamentsSettledLastTick += 1
+      }
+      processedLastTick += 1
+      return
+    }
+    settlementPendingLastTick = true
+    lastError = `tournament settlement pending: ${settlement.reason ?? 'failed'}`
+  }
+
   function runTick(): void {
     if (stopped || inFlight) return
     inFlight = true
@@ -1181,14 +1239,23 @@ export async function createTournamentCoordinator(
     walkoversLastTick = 0
     botFillMatchesLastTick = 0
     gameStartsLastTick = 0
+    settlementAttemptsLastTick = 0
+    tournamentsSettledLastTick = 0
+    settlementPendingLastTick = false
     recoveryActionsLastTick = 0
     try {
       const tournaments = selectActiveTournamentsStatement.all(batchSize) as TournamentRow[]
       for (const tournament of tournaments) {
         reconcileTournament(tournament)
       }
+      const settlementDue = selectSettlementDueTournamentsStatement.all(batchSize) as TournamentRow[]
+      for (const tournament of settlementDue) {
+        reconcileSettlementDueTournament(tournament)
+      }
       lastSuccessAt = utcNow()
-      lastError = null
+      if (!settlementPendingLastTick) {
+        lastError = null
+      }
     } catch (error) {
       lastError = sanitizeError(error)
       logError('[tournament-coordinator] tick failed', error)
@@ -1289,7 +1356,7 @@ export async function createTournamentCoordinator(
       },
       publicProfile: assignment.publicProfile,
     })
-    pendingRoom = seatParticipantInRoom(pendingRoom, assignment.seat, human)
+    pendingRoom = seatParticipantInRoom(removeParticipantFromRoom(pendingRoom, assignment.seat), assignment.seat, human)
     const authState = pendingRoom.game.authoritativeState
     if (authState !== null && !('kind' in authState)) {
       authState.players[assignment.seat] = {
@@ -1374,6 +1441,8 @@ export async function createTournamentCoordinator(
         botFillMatchesLastTick,
         gameStartsLastTick,
         takeoversLastTick,
+        settlementAttemptsLastTick,
+        tournamentsSettledLastTick,
         recoveryActionsLastTick,
       }
     },

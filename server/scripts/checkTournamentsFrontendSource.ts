@@ -51,6 +51,10 @@ const tournamentsScreenSource = await readFile(
   join(projectRoot, 'src', 'app', 'lobby', 'renderTournamentsScreen.ts'),
   'utf8',
 )
+const coordinatorSource = await readFile(
+  join(projectRoot, 'server', 'src', 'tournament', 'tournamentCoordinator.ts'),
+  'utf8',
+)
 const seoSource = await readFile(join(projectRoot, 'src', 'app', 'seo', 'applyRouteSeo.ts'), 'utf8')
 
 // ── [27] /tournaments route е добавен ──
@@ -308,17 +312,20 @@ await check('[J72] CSRF/Origin guard (isAllowedVisitorRequestOrigin) е окаб
   }
 })
 
-await check('[J73] System fee finalization е налична, но prize payout липсва', () => {
+await check('[J73] System fee finalization и prize payout settlement са налични', () => {
   assert(tournamentEconomyStoreSource.includes('system_fee'), 'Липсва system_fee ledger запис')
   assert(tournamentEconomyStoreSource.includes('insertSystemFeeLedgerStatement'), 'Липсва idempotent system_fee insert')
-  assert(!tournamentEconomyStoreSource.includes('prize_payout'), 'Prize payout ledger не трябва да се създава в този етап')
-  assert(!tournamentEconomyStoreSource.includes('payoutPrize'), 'Prize payout helper не трябва да се създава в този етап')
+  assert(tournamentEconomyStoreSource.includes('prize_payout'), 'Липсва prize_payout ledger запис')
+  assert(tournamentEconomyStoreSource.includes('settleTournamentPrizesAtomically'), 'Липсва atomic prize settlement helper')
+  assert(tournamentEconomyStoreSource.includes('settlement_state'), 'Липсва persisted settlement state')
+  assert(tournamentsScreenSource.includes('renderTournamentFinalSummary'), 'Липсва UI summary за champion/runner-up/prizes')
 })
 
-await check('[J74] Semifinal skeleton е наличен без game-room/walkover integration', () => {
+await check('[J74] Semifinal/final runtime integration е налична', () => {
   assert(tournamentEconomyStoreSource.includes('createSemifinalSkeletons'), 'Липсва semifinal skeleton seeding')
   assert(tournamentEconomyStoreSource.includes('room_id, team_a_id, team_b_id'), 'Semifinal matches трябва да са persisted skeleton rows')
-  assert(!tournamentEconomyStoreSource.includes('walkover_reason ='), 'Walkover logic не трябва да се реализира в този етап')
+  assert(coordinatorSource.includes('walkover_reason ='), 'Липсва persisted walkover resolution в coordinator-а')
+  assert(coordinatorSource.includes('ensureFinalAfterSemifinals'), 'Липсва final bracket transition')
 })
 
 await check('[J75] Join/leave/cancel confirm popup-ите остават responsive (max-width + border-box, без фиксирана desktop ширина)', () => {

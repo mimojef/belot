@@ -102,6 +102,8 @@ export type TournamentViewerParticipation = {
   canInvitePartner: boolean
   canLeave: boolean
   canCancel: boolean
+  myPlacement: 'champion' | 'runner_up' | 'eliminated' | null
+  myPrizeAmount: number | null
 }
 
 export type TournamentTeamMemberSnapshot = {
@@ -208,6 +210,10 @@ export type TournamentSummarySnapshot = {
   requiresPassword: boolean
   status: TournamentStatus
   statusLabel: string
+  championTeamId: string | null
+  runnerUpTeamId: string | null
+  settlementState: 'pending' | 'settled'
+  settledAt: string | null
   entryFee: number
   playerCapacity: number
   confirmedEntriesCount: number

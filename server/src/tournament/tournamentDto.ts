@@ -67,6 +67,8 @@ export type TournamentViewerParticipationDto = {
   canInvitePartner: boolean
   canLeave: boolean
   canCancel: boolean
+  myPlacement: 'champion' | 'runner_up' | 'eliminated' | null
+  myPrizeAmount: number | null
 }
 
 export type TournamentTeamMemberDto = {
@@ -150,6 +152,10 @@ export type TournamentSummaryDto = {
   requiresPassword: boolean
   status: TournamentStatus
   statusLabel: string
+  championTeamId: string | null
+  runnerUpTeamId: string | null
+  settlementState: 'pending' | 'settled'
+  settledAt: string | null
   entryFee: number
   playerCapacity: number
   confirmedEntriesCount: number
@@ -271,6 +277,20 @@ function computeViewerParticipation(input: ToTournamentSummaryDtoInput): Tournam
       occupiedPlacesCount < tournament.playerCapacity,
     canLeave: isParticipant && tournament.status === 'open',
     canCancel: isMine && tournament.status === 'open',
+    myPlacement:
+      input.viewerEntryStatus === 'champion'
+        ? 'champion'
+        : input.viewerEntryStatus === 'finalist' && tournament.settlementState === 'settled'
+          ? 'runner_up'
+          : input.viewerEntryStatus === 'eliminated'
+            ? 'eliminated'
+            : null,
+    myPrizeAmount:
+      input.viewerEntryStatus === 'champion' && tournament.settlementState === 'settled'
+        ? tournament.winnerPlayerPrizeAmount
+        : input.viewerEntryStatus === 'finalist' && tournament.settlementState === 'settled'
+          ? tournament.runnerUpPlayerPrizeAmount
+          : null,
   }
 }
 
@@ -287,6 +307,10 @@ export function toTournamentSummaryDto(input: ToTournamentSummaryDtoInput): Tour
     requiresPassword: tournament.visibility === 'password',
     status: tournament.status,
     statusLabel: getTournamentStatusLabel(tournament.status),
+    championTeamId: tournament.championTeamId,
+    runnerUpTeamId: tournament.runnerUpTeamId,
+    settlementState: tournament.settlementState,
+    settledAt: tournament.settledAt,
     entryFee: tournament.entryFee,
     playerCapacity: tournament.playerCapacity,
     confirmedEntriesCount: input.confirmedEntriesCount,
@@ -430,7 +454,10 @@ export function buildTeamDtos(input: {
 }): TournamentTeamDto[] {
   return input.teams.map((team) => {
     const members = input.entries
-      .filter((entry) => entry.teamId === team.teamId && entry.status === 'confirmed')
+      .filter((entry) => (
+        entry.teamId === team.teamId &&
+        (entry.status === 'confirmed' || entry.status === 'finalist' || entry.status === 'champion')
+      ))
       .map((entry) => {
         const profile = input.getPublicProfile(entry.profileId)
         return {

@@ -11051,6 +11051,9 @@ try {
       broadcastRoomSnapshots(room, socketRegistry)
     },
     ensureRoomRuntime: (room) => activeRoomRuntime.ensureRoom(room),
+    settleTournamentPrizes: (tournamentId) => {
+      return tournamentEconomyStore.settleTournamentPrizesAtomically(tournamentId, new Date())
+    },
     isConnectionAttached: ({ profileId, connectionId, roomId, seat }) => {
       const connection = serverState.connections[connectionId] ?? null
       return (

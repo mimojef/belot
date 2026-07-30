@@ -36,7 +36,7 @@ import {
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
-type TournamentLedgerEntryType = 'entry_fee_debit' | 'entry_fee_refund' | 'system_fee'
+type TournamentLedgerEntryType = 'entry_fee_debit' | 'entry_fee_refund' | 'prize_payout' | 'system_fee'
 
 export type PartnerCandidateRecord = {
   profileId: ProfileId
@@ -120,6 +120,27 @@ export type AutoCancelScheduledTournamentResult =
       tournament: TournamentRecord
     }
   | { ok: false; reason: 'tournament_not_found' | 'tournament_not_open' }
+
+export type SettleTournamentPrizesResult =
+  | {
+      ok: true
+      alreadySettled: boolean
+      tournament: TournamentRecord
+      championTeamId: TournamentTeamId
+      runnerUpTeamId: TournamentTeamId
+      payoutRows: number
+      totalPrizePaid: number
+    }
+  | {
+      ok: false
+      reason:
+        | 'tournament_not_found'
+        | 'not_ready'
+        | 'invalid_final_state'
+        | 'invalid_financial_snapshot'
+        | 'invalid_recipients'
+        | 'ledger_mismatch'
+    }
 
 export type PartnerInviteMutationResult =
   | {
@@ -230,6 +251,10 @@ export type TournamentEconomyStore = {
     now: Date,
     reason: string,
   ) => AutoCancelScheduledTournamentResult
+  settleTournamentPrizesAtomically: (
+    tournamentId: TournamentId,
+    now: Date,
+  ) => SettleTournamentPrizesResult
   close: () => void
 }
 
@@ -250,6 +275,10 @@ type TournamentRow = {
   updated_at: string
   started_at: string | null
   finished_at: string | null
+  champion_team_id: string | null
+  runner_up_team_id: string | null
+  settlement_state: string
+  settled_at: string | null
   total_entry_amount: number | null
   system_fee_percent: number | null
   system_fee_amount: number | null
@@ -317,6 +346,15 @@ type ProfileEligibilityRow = {
   is_temporary: number | null
 }
 
+type FinalMatchSettlementRow = {
+  match_id: string
+  team_a_id: string
+  team_b_id: string
+  winner_team_id: string | null
+  status: string
+  result_kind: string | null
+}
+
 function toTournamentRecord(row: TournamentRow): TournamentRecord {
   return {
     tournamentId: row.tournament_id,
@@ -335,6 +373,10 @@ function toTournamentRecord(row: TournamentRow): TournamentRecord {
     updatedAt: dbDateToUtc(row.updated_at),
     startedAt: row.started_at !== null ? dbDateToUtc(row.started_at) : null,
     finishedAt: row.finished_at !== null ? dbDateToUtc(row.finished_at) : null,
+    championTeamId: row.champion_team_id,
+    runnerUpTeamId: row.runner_up_team_id,
+    settlementState: row.settlement_state as TournamentRecord['settlementState'],
+    settledAt: row.settled_at !== null ? dbDateToUtc(row.settled_at) : null,
     totalEntryAmount: row.total_entry_amount,
     systemFeePercent: row.system_fee_percent,
     systemFeeAmount: row.system_fee_amount,
@@ -403,6 +445,14 @@ function systemFeeKey(tournamentId: TournamentId): string {
   return `tournament:${tournamentId}:system-fee:${TOURNAMENT_FINANCIAL_RULES_VERSION}`
 }
 
+function prizePayoutKey(
+  tournamentId: TournamentId,
+  placement: 'winner' | 'runner_up',
+  profileId: ProfileId,
+): string {
+  return `tournament:${tournamentId}:prize:${placement}:${profileId}:${TOURNAMENT_FINANCIAL_RULES_VERSION}`
+}
+
 function shuffleInPlace<T>(items: T[]): void {
   for (let i = items.length - 1; i > 0; i -= 1) {
     const j = randomInt(i + 1)
@@ -440,6 +490,7 @@ export async function createTournamentEconomyStore(
       tournament_id, kind, name, creator_profile_id, visibility, password_hash,
       entry_fee, player_capacity, start_mode, scheduled_start_at, status,
       cancel_reason, created_at, updated_at, started_at, finished_at,
+      champion_team_id, runner_up_team_id, settlement_state, settled_at,
       total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
       winner_share_percent, runner_up_share_percent, winner_team_prize_amount,
       runner_up_team_prize_amount, winner_player_prize_amount,
@@ -454,6 +505,7 @@ export async function createTournamentEconomyStore(
       tournament_id, kind, name, creator_profile_id, visibility, password_hash,
       entry_fee, player_capacity, start_mode, scheduled_start_at, status,
       cancel_reason, created_at, updated_at, started_at, finished_at,
+      champion_team_id, runner_up_team_id, settlement_state, settled_at,
       total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
       winner_share_percent, runner_up_share_percent, winner_team_prize_amount,
       runner_up_team_prize_amount, winner_player_prize_amount,
@@ -530,6 +582,26 @@ export async function createTournamentEconomyStore(
     ORDER BY te.created_at ASC;
   `)
 
+  const selectEntryDebitLedgerRowsStatement = database.prepare(`
+    SELECT profile_id, amount
+    FROM tournament_economy_ledger
+    WHERE tournament_id = ? AND entry_type = 'entry_fee_debit'
+    ORDER BY profile_id ASC;
+  `)
+
+  const selectSystemFeeLedgerRowsStatement = database.prepare(`
+    SELECT profile_id, amount
+    FROM tournament_economy_ledger
+    WHERE tournament_id = ? AND entry_type = 'system_fee';
+  `)
+
+  const selectPrizePayoutLedgerRowsStatement = database.prepare(`
+    SELECT profile_id, amount, idempotency_key
+    FROM tournament_economy_ledger
+    WHERE tournament_id = ? AND entry_type = 'prize_payout'
+    ORDER BY idempotency_key ASC;
+  `)
+
   const selectConfirmedParticipationDuplicateRowsStatement = database.prepare(`
     SELECT COALESCE(p.account_id, te.profile_id) as participant_key, COUNT(*) as count
     FROM tournament_entries te
@@ -560,6 +632,16 @@ export async function createTournamentEconomyStore(
     FROM tournament_entries
     WHERE team_id = ?
     ORDER BY created_at ASC;
+  `)
+
+  const selectFinalMatchForSettlementStatement = database.prepare(`
+    SELECT tm.match_id, tm.team_a_id, tm.team_b_id, tm.winner_team_id, tm.status, tm.result_kind
+    FROM tournament_matches tm
+    JOIN tournament_rounds tr ON tr.round_id = tm.round_id
+    WHERE tm.tournament_id = ?
+      AND tr.round_type = 'final'
+      AND tr.round_index = 1
+    LIMIT 1;
   `)
 
   const selectConfirmedEntriesForTeamStatement = database.prepare(`
@@ -850,6 +932,20 @@ export async function createTournamentEconomyStore(
         cancel_reason = ?,
         updated_at = ?
     WHERE tournament_id = ? AND status = 'open';
+  `)
+
+  const updateTournamentSettledStatement = database.prepare(`
+    UPDATE tournaments
+    SET status = 'finished',
+        champion_team_id = ?,
+        runner_up_team_id = ?,
+        settlement_state = 'settled',
+        settled_at = ?,
+        finished_at = ?,
+        updated_at = ?
+    WHERE tournament_id = ?
+      AND status = 'final_in_progress'
+      AND settlement_state = 'pending';
   `)
 
   const insertRoundStatement = database.prepare(`
@@ -1238,6 +1334,206 @@ export async function createTournamentEconomyStore(
     }
   }
 
+  function validateFinancialSnapshot(tournament: TournamentRow): boolean {
+    if (
+      tournament.financial_rules_version !== TOURNAMENT_FINANCIAL_RULES_VERSION ||
+      tournament.player_capacity !== 8 ||
+      tournament.total_entry_amount === null ||
+      tournament.system_fee_percent === null ||
+      tournament.system_fee_amount === null ||
+      tournament.prize_pool_amount === null ||
+      tournament.winner_share_percent === null ||
+      tournament.runner_up_share_percent === null ||
+      tournament.winner_team_prize_amount === null ||
+      tournament.runner_up_team_prize_amount === null ||
+      tournament.winner_player_prize_amount === null ||
+      tournament.runner_up_player_prize_amount === null
+    ) {
+      return false
+    }
+    const preview = calculateTournamentPrizePreview(tournament.entry_fee, tournament.player_capacity)
+    return (
+      preview.financialRulesVersion === tournament.financial_rules_version &&
+      preview.totalEntryFees === tournament.total_entry_amount &&
+      preview.systemFeePercent === tournament.system_fee_percent &&
+      preview.systemFee === tournament.system_fee_amount &&
+      preview.prizePool === tournament.prize_pool_amount &&
+      preview.winnerSharePercent === tournament.winner_share_percent &&
+      preview.runnerUpSharePercent === tournament.runner_up_share_percent &&
+      preview.firstTeamPrize === tournament.winner_team_prize_amount &&
+      preview.secondTeamPrize === tournament.runner_up_team_prize_amount &&
+      preview.firstPlayerPrize === tournament.winner_player_prize_amount &&
+      preview.secondPlayerPrize === tournament.runner_up_player_prize_amount &&
+      tournament.system_fee_amount + tournament.prize_pool_amount === tournament.total_entry_amount &&
+      tournament.winner_team_prize_amount + tournament.runner_up_team_prize_amount === tournament.prize_pool_amount &&
+      tournament.winner_player_prize_amount * 2 === tournament.winner_team_prize_amount &&
+      tournament.runner_up_player_prize_amount * 2 === tournament.runner_up_team_prize_amount
+    )
+  }
+
+  function getSettlementTeamMembers(teamId: TournamentTeamId): TournamentEntryRow[] {
+    return (selectEntriesForTeamStatement.all(teamId) as TournamentEntryRow[])
+      .filter((entry) => entry.status === 'confirmed' || entry.status === 'finalist' || entry.status === 'champion')
+  }
+
+  function settleTournamentPrizesAtomicallyLocal(
+    tournamentId: TournamentId,
+    now: Date,
+  ): SettleTournamentPrizesResult {
+    const nowIso = now.toISOString()
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+      const tournament = selectTournamentForUpdateStatement.get(tournamentId) as TournamentRow | undefined
+      if (tournament === undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'tournament_not_found' }
+      }
+      if (tournament.settlement_state === 'settled' && tournament.champion_team_id !== null && tournament.runner_up_team_id !== null) {
+        database.exec('ROLLBACK;')
+        return {
+          ok: true,
+          alreadySettled: true,
+          tournament: toTournamentRecord(tournament),
+          championTeamId: tournament.champion_team_id,
+          runnerUpTeamId: tournament.runner_up_team_id,
+          payoutRows: 0,
+          totalPrizePaid: 0,
+        }
+      }
+      if (tournament.status !== 'final_in_progress' || tournament.settlement_state !== 'pending') {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'not_ready' }
+      }
+      if (!validateFinancialSnapshot(tournament)) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'invalid_financial_snapshot' }
+      }
+
+      const finalMatch = selectFinalMatchForSettlementStatement.get(tournamentId) as FinalMatchSettlementRow | undefined
+      if (
+        finalMatch === undefined ||
+        finalMatch.status !== 'completed' ||
+        !['played', 'played_with_bots', 'walkover'].includes(finalMatch.result_kind ?? '') ||
+        finalMatch.winner_team_id === null ||
+        finalMatch.team_a_id === finalMatch.team_b_id ||
+        (finalMatch.winner_team_id !== finalMatch.team_a_id && finalMatch.winner_team_id !== finalMatch.team_b_id)
+      ) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'invalid_final_state' }
+      }
+
+      const championTeamId = finalMatch.winner_team_id
+      const runnerUpTeamId = championTeamId === finalMatch.team_a_id
+        ? finalMatch.team_b_id
+        : finalMatch.team_a_id
+      const championMembers = getSettlementTeamMembers(championTeamId)
+      const runnerUpMembers = getSettlementTeamMembers(runnerUpTeamId)
+      const recipientProfileIds = [
+        ...championMembers.map((entry) => entry.profile_id),
+        ...runnerUpMembers.map((entry) => entry.profile_id),
+      ]
+      if (
+        championMembers.length !== 2 ||
+        runnerUpMembers.length !== 2 ||
+        new Set(recipientProfileIds).size !== 4
+      ) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'invalid_recipients' }
+      }
+
+      const debitRows = selectEntryDebitLedgerRowsStatement.all(tournamentId) as Array<{ profile_id: string; amount: number }>
+      const debitProfiles = new Set(debitRows.map((row) => row.profile_id))
+      const debitTotal = debitRows.reduce((sum, row) => sum + row.amount, 0)
+      if (
+        debitRows.length !== 8 ||
+        debitProfiles.size !== 8 ||
+        debitRows.some((row) => row.amount !== tournament.entry_fee) ||
+        debitTotal !== tournament.total_entry_amount
+      ) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'ledger_mismatch' }
+      }
+      const systemRows = selectSystemFeeLedgerRowsStatement.all(tournamentId) as Array<{ profile_id: string | null; amount: number }>
+      if (
+        systemRows.length !== 1 ||
+        systemRows[0]?.profile_id !== null ||
+        systemRows[0]?.amount !== tournament.system_fee_amount
+      ) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'ledger_mismatch' }
+      }
+      const existingPrizeRows = selectPrizePayoutLedgerRowsStatement.all(tournamentId) as Array<{ profile_id: string | null; amount: number; idempotency_key: string }>
+      if (existingPrizeRows.length > 0) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'ledger_mismatch' }
+      }
+
+      const payouts: Array<{ profileId: ProfileId; placement: 'winner' | 'runner_up'; amount: number }> = [
+        ...championMembers.map((entry) => ({
+          profileId: entry.profile_id,
+          placement: 'winner' as const,
+          amount: tournament.winner_player_prize_amount!,
+        })),
+        ...runnerUpMembers.map((entry) => ({
+          profileId: entry.profile_id,
+          placement: 'runner_up' as const,
+          amount: tournament.runner_up_player_prize_amount!,
+        })),
+      ]
+
+      for (const payout of payouts) {
+        const key = prizePayoutKey(tournamentId, payout.placement, payout.profileId)
+        ensureWalletStatement.run(payout.profileId)
+        creditWalletStatement.run(payout.amount, payout.profileId)
+        insertLedgerStatement.run(
+          randomUUID(),
+          key,
+          tournamentId,
+          payout.profileId,
+          'prize_payout' satisfies TournamentLedgerEntryType,
+          payout.amount,
+          getWalletBalance(payout.profileId),
+        )
+      }
+
+      const updateResult = updateTournamentSettledStatement.run(
+        championTeamId,
+        runnerUpTeamId,
+        nowIso,
+        nowIso,
+        nowIso,
+        tournamentId,
+      )
+      if ((updateResult.changes ?? 0) !== 1) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'not_ready' }
+      }
+
+      insertEvent(tournamentId, 'tournament_prizes_settled', null, 'system', {
+        championTeamId,
+        runnerUpTeamId,
+        prizePoolAmount: tournament.prize_pool_amount,
+        winnerPlayerPrizeAmount: tournament.winner_player_prize_amount,
+        runnerUpPlayerPrizeAmount: tournament.runner_up_player_prize_amount,
+        financialRulesVersion: tournament.financial_rules_version,
+      })
+      database.exec('COMMIT;')
+      const finalTournament = selectTournamentByIdStatement.get(tournamentId) as TournamentRow
+      return {
+        ok: true,
+        alreadySettled: false,
+        tournament: toTournamentRecord(finalTournament),
+        championTeamId,
+        runnerUpTeamId,
+        payoutRows: payouts.length,
+        totalPrizePaid: payouts.reduce((sum, payout) => sum + payout.amount, 0),
+      }
+    } catch (error) {
+      try { database.exec('ROLLBACK;') } catch {}
+      throw error
+    }
+  }
+
   function autoCancelScheduledTournamentAtomicallyLocal(
     tournamentId: TournamentId,
     now: Date,
@@ -1451,6 +1747,13 @@ export async function createTournamentEconomyStore(
       reason: string,
     ): AutoCancelScheduledTournamentResult {
       return autoCancelScheduledTournamentAtomicallyLocal(tournamentId, now, reason)
+    },
+
+    settleTournamentPrizesAtomically(
+      tournamentId: TournamentId,
+      now: Date,
+    ): SettleTournamentPrizesResult {
+      return settleTournamentPrizesAtomicallyLocal(tournamentId, now)
     },
 
     createPartnerInviteAtomically(

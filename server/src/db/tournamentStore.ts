@@ -151,6 +151,10 @@ type TournamentRow = {
   updated_at: string
   started_at: string | null
   finished_at: string | null
+  champion_team_id: string | null
+  runner_up_team_id: string | null
+  settlement_state: string
+  settled_at: string | null
   total_entry_amount: number | null
   system_fee_percent: number | null
   system_fee_amount: number | null
@@ -260,6 +264,10 @@ function toTournamentRecord(row: TournamentRow): TournamentRecord {
     updatedAt: dbDateToUtc(row.updated_at),
     startedAt: row.started_at !== null ? dbDateToUtc(row.started_at) : null,
     finishedAt: row.finished_at !== null ? dbDateToUtc(row.finished_at) : null,
+    championTeamId: row.champion_team_id,
+    runnerUpTeamId: row.runner_up_team_id,
+    settlementState: row.settlement_state as TournamentRecord['settlementState'],
+    settledAt: row.settled_at !== null ? dbDateToUtc(row.settled_at) : null,
     totalEntryAmount: row.total_entry_amount,
     systemFeePercent: row.system_fee_percent,
     systemFeeAmount: row.system_fee_amount,
@@ -399,6 +407,7 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
       tournament_id, kind, name, creator_profile_id, visibility, password_hash,
       entry_fee, player_capacity, start_mode, scheduled_start_at, status,
       cancel_reason, created_at, updated_at, started_at, finished_at,
+      champion_team_id, runner_up_team_id, settlement_state, settled_at,
       total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
       winner_share_percent, runner_up_share_percent, winner_team_prize_amount,
       runner_up_team_prize_amount, winner_player_prize_amount,
@@ -577,6 +586,7 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
              tournament_id, kind, name, creator_profile_id, visibility, password_hash,
              entry_fee, player_capacity, start_mode, scheduled_start_at, status,
              cancel_reason, created_at, updated_at, started_at, finished_at,
+             champion_team_id, runner_up_team_id, settlement_state, settled_at,
              total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
              winner_share_percent, runner_up_share_percent, winner_team_prize_amount,
              runner_up_team_prize_amount, winner_player_prize_amount,
