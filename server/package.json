@@ -25,6 +25,7 @@
     "check:admin-active-rooms-panel": "tsx scripts/checkAdminActiveRoomsPanel.ts",
     "check:accounts-role-migration": "tsx scripts/checkAccountsRoleMigration.ts",
     "check:migration-runner-crash-recovery": "tsx scripts/checkMigrationRunnerCrashRecovery.ts",
+    "check:tournament-persistence": "tsx scripts/checkTournamentPersistence.ts",
     "check:subadmin-http-authorization": "tsx scripts/checkSubadminHttpAuthorization.ts --server-root=.",
     "check:subadmin-profile-popup-rendering": "tsx scripts/checkSubadminProfilePopupRendering.ts",
     "check:subadmin-admin-info-access-polling": "tsx scripts/checkSubadminAdminInfoAccessPolling.ts",
