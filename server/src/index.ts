@@ -91,6 +91,10 @@ import {
   type TournamentPartnerCandidateDto,
   type TournamentSummaryDto,
 } from './tournament/tournamentDto.js'
+import {
+  createTournamentScheduler,
+  type TournamentScheduler,
+} from './tournament/tournamentScheduler.js'
 import { createPasswordHash, verifyPassword } from './db/authHelpers.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { createMatchEconomyStore, setMatchPrizeResolver } from './db/matchEconomyStore.js'
@@ -486,6 +490,7 @@ const friendshipStore = await createFriendshipStore(
 )
 const tournamentStore = await createTournamentStore(databaseBootstrap.databaseFilePath)
 const tournamentEconomyStore = await createTournamentEconomyStore(databaseBootstrap.databaseFilePath)
+let tournamentScheduler: TournamentScheduler | null = null
 const chatStore = await createChatStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
@@ -8649,6 +8654,7 @@ async function handleHttpRequest(
         startedAt: startupWorkerHealth?.startedAt ?? null,
         activeRooms: startupWorkerHealth?.activeRooms ?? null,
       },
+      tournamentScheduler: tournamentScheduler?.getHealth() ?? null,
       roomShadowSync: roomShadowSynchronizer?.getHealth() ?? null,
       gameWorkerPool: poolHealth,
       trainingRecorder: {
@@ -10924,6 +10930,18 @@ const gameRuntimeTickInterval = setInterval(() => {
   })
 }, GAME_RUNTIME_TICK_MS)
 
+try {
+  tournamentScheduler = await createTournamentScheduler({
+    databaseFilePath: databaseBootstrap.databaseFilePath,
+    economyStore: tournamentEconomyStore,
+    logError: (message, error) => console.error(message, sanitizeErrorMessage(error)),
+  })
+  tournamentScheduler.start()
+  console.log('[tournament-scheduler] Scheduler started')
+} catch (error) {
+  console.error('[tournament-scheduler] Failed to start scheduler:', sanitizeErrorMessage(error))
+}
+
 // ─── Monitoring sampler ───────────────────────────────────────────────────────
 
 try {
@@ -11032,6 +11050,7 @@ function clearMutationTimersForShutdown(): void {
   }
 
   clearPrivateRoomInviteTimers()
+  tournamentScheduler?.stop()
   monitoringSampler?.stop()
   monitoringSampler = null
 
@@ -11072,6 +11091,8 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('coinPurchaseStore', () => coinPurchaseStore.close())
   closeStore('dailyRewardsStore', () => dailyRewardsStore.close())
   closeStore('siteVisitStore', () => siteVisitStore.close())
+  closeStore('tournamentScheduler', () => tournamentScheduler?.close())
+  tournamentScheduler = null
 
   if (passwordResetStore !== null) {
     closeStore('passwordResetStore', () => passwordResetStore!.close())

@@ -77,6 +77,13 @@ export type TournamentPrizePreview = {
   prizePool: number
   firstTeamPrize: number
   secondTeamPrize: number
+  firstPlayerPrize: number
+  secondPlayerPrize: number
+  systemFeePercent: number
+  winnerSharePercent: number
+  runnerUpSharePercent: number
+  financialRulesVersion: string
+  persisted: boolean
 }
 
 export type TournamentEntryStatus =

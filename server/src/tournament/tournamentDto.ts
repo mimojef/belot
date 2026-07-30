@@ -8,6 +8,7 @@ import type {
   TournamentStatus,
   TournamentTeamRecord,
 } from './tournamentTypes.js'
+import { calculateTournamentPrizePreview } from './tournamentPrizeRules.js'
 
 export const ACTIVE_TOURNAMENT_STATUSES: TournamentStatus[] = [
   'open',
@@ -44,6 +45,13 @@ export type TournamentPrizePreviewDto = {
   prizePool: number
   firstTeamPrize: number
   secondTeamPrize: number
+  firstPlayerPrize: number
+  secondPlayerPrize: number
+  systemFeePercent: number
+  winnerSharePercent: number
+  runnerUpSharePercent: number
+  financialRulesVersion: string
+  persisted: boolean
 }
 
 export type TournamentViewerParticipationDto = {
@@ -138,12 +146,39 @@ export function computeTournamentPrizePreview(
   entryFee: number,
   playerCapacity: number,
 ): TournamentPrizePreviewDto {
-  const totalEntryFees = entryFee * playerCapacity
-  const systemFee = Math.round(totalEntryFees * 0.1)
-  const prizePool = totalEntryFees - systemFee
-  const firstTeamPrize = Math.round(prizePool * 0.7)
-  const secondTeamPrize = prizePool - firstTeamPrize
-  return { totalEntryFees, systemFee, prizePool, firstTeamPrize, secondTeamPrize }
+  return { ...calculateTournamentPrizePreview(entryFee, playerCapacity), persisted: false }
+}
+
+function getTournamentPrizePreview(tournament: TournamentRecord): TournamentPrizePreviewDto {
+  if (
+    tournament.totalEntryAmount !== null &&
+    tournament.systemFeeAmount !== null &&
+    tournament.prizePoolAmount !== null &&
+    tournament.winnerTeamPrizeAmount !== null &&
+    tournament.runnerUpTeamPrizeAmount !== null &&
+    tournament.winnerPlayerPrizeAmount !== null &&
+    tournament.runnerUpPlayerPrizeAmount !== null &&
+    tournament.systemFeePercent !== null &&
+    tournament.winnerSharePercent !== null &&
+    tournament.runnerUpSharePercent !== null &&
+    tournament.financialRulesVersion !== null
+  ) {
+    return {
+      totalEntryFees: tournament.totalEntryAmount,
+      systemFee: tournament.systemFeeAmount,
+      prizePool: tournament.prizePoolAmount,
+      firstTeamPrize: tournament.winnerTeamPrizeAmount,
+      secondTeamPrize: tournament.runnerUpTeamPrizeAmount,
+      firstPlayerPrize: tournament.winnerPlayerPrizeAmount,
+      secondPlayerPrize: tournament.runnerUpPlayerPrizeAmount,
+      systemFeePercent: tournament.systemFeePercent,
+      winnerSharePercent: tournament.winnerSharePercent,
+      runnerUpSharePercent: tournament.runnerUpSharePercent,
+      financialRulesVersion: tournament.financialRulesVersion,
+      persisted: true,
+    }
+  }
+  return computeTournamentPrizePreview(tournament.entryFee, tournament.playerCapacity)
 }
 
 function toTournamentCreatorDto(
@@ -227,7 +262,7 @@ export function toTournamentSummaryDto(input: ToTournamentSummaryDtoInput): Tour
     startMode: tournament.startMode,
     scheduledStartAt: tournament.scheduledStartAt,
     createdAt: tournament.createdAt,
-    prizePreview: computeTournamentPrizePreview(tournament.entryFee, tournament.playerCapacity),
+    prizePreview: getTournamentPrizePreview(tournament),
     isMine: input.viewerProfileId !== null && input.viewerProfileId === tournament.creatorProfileId,
     viewer: computeViewerParticipation(input),
   }

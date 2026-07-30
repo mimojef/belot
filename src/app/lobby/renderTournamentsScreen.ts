@@ -62,13 +62,17 @@ function computePrizePreview(entryFee: number, playerCapacity = 8): {
   prizePool: number
   firstTeamPrize: number
   secondTeamPrize: number
+  firstPlayerPrize: number
+  secondPlayerPrize: number
 } {
   const totalEntryFees = entryFee * playerCapacity
-  const systemFee = Math.round(totalEntryFees * 0.1)
+  const systemFee = Math.trunc(totalEntryFees * 0.2)
   const prizePool = totalEntryFees - systemFee
-  const firstTeamPrize = Math.round(prizePool * 0.7)
+  const firstTeamPrize = Math.trunc(prizePool * 0.65)
   const secondTeamPrize = prizePool - firstTeamPrize
-  return { totalEntryFees, systemFee, prizePool, firstTeamPrize, secondTeamPrize }
+  const firstPlayerPrize = Math.trunc(firstTeamPrize / 2)
+  const secondPlayerPrize = Math.trunc(secondTeamPrize / 2)
+  return { totalEntryFees, systemFee, prizePool, firstTeamPrize, secondTeamPrize, firstPlayerPrize, secondPlayerPrize }
 }
 
 function startModeLabel(t: TournamentSummarySnapshot): string {
@@ -261,10 +265,10 @@ function renderTournamentCreatePopup(state: LobbyScreenState): string {
           <div data-tournament-create-preview="1" style="background:rgba(212,165,32,0.06);border:1px solid rgba(212,165,32,0.24);border-radius:8px;padding:12px;font-size:12px;color:rgba(255,255,255,0.75);display:grid;gap:4px;">
             <div style="display:flex;justify-content:space-between;"><span>Участници</span><span style="font-weight:800;">8</span></div>
             <div style="display:flex;justify-content:space-between;" data-preview-total><span>Общо входове</span><span style="font-weight:800;">${formatAmount(preview.totalEntryFees)}</span></div>
-            <div style="display:flex;justify-content:space-between;" data-preview-fee><span>Системна такса (10%)</span><span style="font-weight:800;">${formatAmount(preview.systemFee)}</span></div>
+            <div style="display:flex;justify-content:space-between;" data-preview-fee><span>Системна такса (20%)</span><span style="font-weight:800;">${formatAmount(preview.systemFee)}</span></div>
             <div style="display:flex;justify-content:space-between;color:#d4a520;" data-preview-pool><span>Награден фонд</span><span style="font-weight:900;">${formatAmount(preview.prizePool)}</span></div>
-            <div style="display:flex;justify-content:space-between;" data-preview-first><span>Първи отбор (70%)</span><span style="font-weight:800;">${formatAmount(preview.firstTeamPrize)}</span></div>
-            <div style="display:flex;justify-content:space-between;" data-preview-second><span>Втори отбор (30%)</span><span style="font-weight:800;">${formatAmount(preview.secondTeamPrize)}</span></div>
+            <div style="display:flex;justify-content:space-between;" data-preview-first><span>Първи отбор (65%)</span><span style="font-weight:800;">${formatAmount(preview.firstTeamPrize)}</span></div>
+            <div style="display:flex;justify-content:space-between;" data-preview-second><span>Втори отбор (35%)</span><span style="font-weight:800;">${formatAmount(preview.secondTeamPrize)}</span></div>
           </div>
 
           <div>
@@ -409,10 +413,10 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
         <div style="display:grid;gap:5px;font-size:13px;color:rgba(255,255,255,0.75);">
           <div style="display:flex;justify-content:space-between;"><span>Единичен вход за целия турнир</span><span style="font-weight:800;">${formatAmount(t.entryFee)}</span></div>
           <div style="display:flex;justify-content:space-between;"><span>Общо входове (при пълен турнир)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.totalEntryFees)}</span></div>
-          <div style="display:flex;justify-content:space-between;"><span>Системна такса (10%)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.systemFee)}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>Системна такса (20%)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.systemFee)}</span></div>
           <div style="display:flex;justify-content:space-between;color:#d4a520;"><span>Награден фонд (90%)</span><span style="font-weight:900;">${formatAmount(t.prizePreview.prizePool)}</span></div>
-          <div style="display:flex;justify-content:space-between;"><span>Първо място (70%)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.firstTeamPrize)}</span></div>
-          <div style="display:flex;justify-content:space-between;"><span>Второ място (30%)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.secondTeamPrize)}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>Първо място (65%)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.firstTeamPrize)}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>Второ място (35%)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.secondTeamPrize)}</span></div>
         </div>
       </div>
 

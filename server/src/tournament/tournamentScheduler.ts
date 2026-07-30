@@ -1,0 +1,194 @@
+import type { TournamentId } from './tournamentTypes.js'
+import type { TournamentEconomyStore } from '../db/tournamentEconomyStore.js'
+
+type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
+
+export type TournamentSchedulerHealth = {
+  state: 'idle' | 'running' | 'stopped'
+  inFlight: boolean
+  lastTickAt: string | null
+  lastSuccessAt: string | null
+  lastError: string | null
+  processedLastTick: number
+  nextTickIntervalMs: number
+}
+
+export type TournamentScheduler = {
+  start: () => void
+  stop: () => void
+  tickNow: () => void
+  getHealth: () => TournamentSchedulerHealth
+  close: () => void
+}
+
+type TournamentSchedulerDeps = {
+  databaseFilePath: string
+  economyStore: TournamentEconomyStore
+  intervalMs?: number
+  batchSize?: number
+  setInterval?: (fn: () => void, ms: number) => ReturnType<typeof globalThis.setInterval>
+  clearInterval?: (id: ReturnType<typeof globalThis.setInterval>) => void
+  now?: () => Date
+  logError?: (message: string, error: unknown) => void
+}
+
+const DEFAULT_INTERVAL_MS = 5_000
+const DEFAULT_BATCH_SIZE = 25
+const SCHEDULED_START_NOT_READY = 'scheduled_start_not_ready'
+
+function sanitizeError(error: unknown): string {
+  if (error instanceof Error) return error.message
+  return String(error)
+}
+
+export async function createTournamentScheduler(
+  deps: TournamentSchedulerDeps,
+): Promise<TournamentScheduler> {
+  const sqliteModule = await import('node:sqlite')
+  const database: SqliteDatabase = new sqliteModule.DatabaseSync(deps.databaseFilePath, {
+    open: true,
+    enableForeignKeyConstraints: true,
+  })
+  database.exec('PRAGMA foreign_keys = ON;')
+  database.exec('PRAGMA journal_mode = WAL;')
+
+  const intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS
+  const batchSize = deps.batchSize ?? DEFAULT_BATCH_SIZE
+  const now = deps.now ?? (() => new Date())
+  const logError = deps.logError ?? ((message, error) => console.error(message, error))
+  const setTimer = deps.setInterval ?? ((fn, ms) => globalThis.setInterval(fn, ms))
+  const clearTimer = deps.clearInterval ?? ((id) => globalThis.clearInterval(id))
+
+  const selectDueScheduledTournamentIdsStatement = database.prepare(`
+    SELECT tournament_id
+    FROM tournaments
+    WHERE status = 'open'
+      AND start_mode = 'scheduled'
+      AND scheduled_start_at IS NOT NULL
+      AND datetime(scheduled_start_at) <= datetime(?)
+    ORDER BY scheduled_start_at ASC
+    LIMIT ?;
+  `)
+
+  const selectReadyFillTournamentIdsStatement = database.prepare(`
+    SELECT t.tournament_id
+    FROM tournaments t
+    WHERE t.status = 'open'
+      AND t.start_mode = 'fill'
+      AND (
+        SELECT COUNT(*)
+        FROM tournament_entries te
+        WHERE te.tournament_id = t.tournament_id AND te.status = 'confirmed'
+      ) >= t.player_capacity
+      AND NOT EXISTS (
+        SELECT 1
+        FROM tournament_partner_invites tpi
+        WHERE tpi.tournament_id = t.tournament_id AND tpi.status = 'pending'
+      )
+    ORDER BY t.created_at ASC
+    LIMIT ?;
+  `)
+
+  let intervalId: ReturnType<typeof globalThis.setInterval> | null = null
+  let inFlight = false
+  let stopped = false
+  let lastTickAt: string | null = null
+  let lastSuccessAt: string | null = null
+  let lastError: string | null = null
+  let processedLastTick = 0
+
+  function runTick(): void {
+    if (stopped || inFlight) return
+    inFlight = true
+    const tickNow = now()
+    lastTickAt = tickNow.toISOString()
+    processedLastTick = 0
+    try {
+      deps.economyStore.expireDuePartnerInvitesAtomically()
+
+      const dueScheduledIds = (
+        selectDueScheduledTournamentIdsStatement.all(tickNow.toISOString(), batchSize) as {
+          tournament_id: string
+        }[]
+      ).map((row) => row.tournament_id)
+      for (const tournamentId of dueScheduledIds) {
+        try {
+          const startResult = deps.economyStore.startTournamentAtomically(tournamentId, tickNow)
+          if (!startResult.ok) {
+            deps.economyStore.autoCancelScheduledTournamentAtomically(
+              tournamentId,
+              tickNow,
+              SCHEDULED_START_NOT_READY,
+            )
+          }
+          processedLastTick += 1
+        } catch (error) {
+          lastError = sanitizeError(error)
+          logError(`[tournament-scheduler] scheduled tournament failed: ${tournamentId}`, error)
+        }
+      }
+
+      const readyFillIds = (
+        selectReadyFillTournamentIdsStatement.all(batchSize) as { tournament_id: string }[]
+      ).map((row) => row.tournament_id)
+      for (const tournamentId of readyFillIds) {
+        try {
+          deps.economyStore.startTournamentAtomically(tournamentId, tickNow)
+          processedLastTick += 1
+        } catch (error) {
+          lastError = sanitizeError(error)
+          logError(`[tournament-scheduler] fill tournament failed: ${tournamentId}`, error)
+        }
+      }
+
+      lastSuccessAt = new Date().toISOString()
+      if (lastError === null || processedLastTick > 0) lastError = null
+    } catch (error) {
+      lastError = sanitizeError(error)
+      logError('[tournament-scheduler] tick failed', error)
+    } finally {
+      inFlight = false
+    }
+  }
+
+  function start(): void {
+      if (intervalId !== null) return
+      stopped = false
+      runTick()
+      intervalId = setTimer(runTick, intervalMs)
+      if (typeof intervalId === 'object' && intervalId !== null && 'unref' in intervalId) {
+        ;(intervalId as { unref: () => void }).unref()
+      }
+  }
+
+  function stop(): void {
+      stopped = true
+      if (intervalId !== null) {
+        clearTimer(intervalId)
+        intervalId = null
+      }
+  }
+
+  return {
+    start,
+    stop,
+    tickNow(): void {
+      runTick()
+    },
+    getHealth(): TournamentSchedulerHealth {
+      return {
+        state: stopped ? 'stopped' : intervalId === null ? 'idle' : 'running',
+        inFlight,
+        lastTickAt,
+        lastSuccessAt,
+        lastError,
+        processedLastTick,
+        nextTickIntervalMs: intervalMs,
+      }
+    },
+    close(): void {
+      stop()
+      database.close()
+    },
+  }
+}

@@ -111,6 +111,17 @@ export type TournamentRecord = {
   updatedAt: string
   startedAt: string | null
   finishedAt: string | null
+  totalEntryAmount: number | null
+  systemFeePercent: number | null
+  systemFeeAmount: number | null
+  prizePoolAmount: number | null
+  winnerSharePercent: number | null
+  runnerUpSharePercent: number | null
+  winnerTeamPrizeAmount: number | null
+  runnerUpTeamPrizeAmount: number | null
+  winnerPlayerPrizeAmount: number | null
+  runnerUpPlayerPrizeAmount: number | null
+  financialRulesVersion: string | null
 }
 
 export type TournamentTeamRecord = {

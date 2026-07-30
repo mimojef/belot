@@ -10,7 +10,7 @@
 // tournamentStore.ts cross-store извиквания, защото entry INSERT/UPDATE и
 // wallet debit/credit трябва да са atomically all-or-nothing заедно.
 
-import { randomUUID } from 'node:crypto'
+import { randomInt, randomUUID } from 'node:crypto'
 import type { ProfileId } from '../core/serverTypes.js'
 import { dbDateToUtc } from './dbDate.js'
 import { verifyPassword as verifyTournamentPassword } from './authHelpers.js'
@@ -29,10 +29,14 @@ import type {
   TournamentTeamStatus,
   TournamentVisibility,
 } from '../tournament/tournamentTypes.js'
+import {
+  calculateTournamentPrizePreview,
+  TOURNAMENT_FINANCIAL_RULES_VERSION,
+} from '../tournament/tournamentPrizeRules.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
-type TournamentLedgerEntryType = 'entry_fee_debit' | 'entry_fee_refund'
+type TournamentLedgerEntryType = 'entry_fee_debit' | 'entry_fee_refund' | 'system_fee'
 
 export type PartnerCandidateRecord = {
   profileId: ProfileId
@@ -88,6 +92,34 @@ export type CancelOpenTournamentResult =
       ok: false
       reason: 'tournament_not_found' | 'not_creator' | 'tournament_not_open'
     }
+
+export type StartTournamentResult =
+  | {
+      ok: true
+      alreadyStarted: boolean
+      tournament: TournamentRecord
+      startedTeams: TournamentTeamRecord[]
+      systemFeeAmount: number
+    }
+  | {
+      ok: false
+      reason:
+        | 'tournament_not_found'
+        | 'tournament_not_open'
+        | 'not_ready'
+        | 'ledger_mismatch'
+        | 'invalid_team_state'
+    }
+
+export type AutoCancelScheduledTournamentResult =
+  | {
+      ok: true
+      alreadyCancelled: boolean
+      refundedEntries: number
+      totalRefunded: number
+      tournament: TournamentRecord
+    }
+  | { ok: false; reason: 'tournament_not_found' | 'tournament_not_open' }
 
 export type PartnerInviteMutationResult =
   | {
@@ -189,6 +221,15 @@ export type TournamentEconomyStore = {
     inviterProfileId: ProfileId,
   ) => PartnerInviteMutationResult
   expireDuePartnerInvitesAtomically: (tournamentId?: TournamentId) => number
+  startTournamentAtomically: (
+    tournamentId: TournamentId,
+    now: Date,
+  ) => StartTournamentResult
+  autoCancelScheduledTournamentAtomically: (
+    tournamentId: TournamentId,
+    now: Date,
+    reason: string,
+  ) => AutoCancelScheduledTournamentResult
   close: () => void
 }
 
@@ -209,6 +250,17 @@ type TournamentRow = {
   updated_at: string
   started_at: string | null
   finished_at: string | null
+  total_entry_amount: number | null
+  system_fee_percent: number | null
+  system_fee_amount: number | null
+  prize_pool_amount: number | null
+  winner_share_percent: number | null
+  runner_up_share_percent: number | null
+  winner_team_prize_amount: number | null
+  runner_up_team_prize_amount: number | null
+  winner_player_prize_amount: number | null
+  runner_up_player_prize_amount: number | null
+  financial_rules_version: string | null
 }
 
 type TournamentEntryRow = {
@@ -283,6 +335,17 @@ function toTournamentRecord(row: TournamentRow): TournamentRecord {
     updatedAt: dbDateToUtc(row.updated_at),
     startedAt: row.started_at !== null ? dbDateToUtc(row.started_at) : null,
     finishedAt: row.finished_at !== null ? dbDateToUtc(row.finished_at) : null,
+    totalEntryAmount: row.total_entry_amount,
+    systemFeePercent: row.system_fee_percent,
+    systemFeeAmount: row.system_fee_amount,
+    prizePoolAmount: row.prize_pool_amount,
+    winnerSharePercent: row.winner_share_percent,
+    runnerUpSharePercent: row.runner_up_share_percent,
+    winnerTeamPrizeAmount: row.winner_team_prize_amount,
+    runnerUpTeamPrizeAmount: row.runner_up_team_prize_amount,
+    winnerPlayerPrizeAmount: row.winner_player_prize_amount,
+    runnerUpPlayerPrizeAmount: row.runner_up_player_prize_amount,
+    financialRulesVersion: row.financial_rules_version,
   }
 }
 
@@ -336,6 +399,19 @@ function entryFeeRefundKey(tournamentId: TournamentId, profileId: ProfileId): st
   return `tournament:${tournamentId}:profile:${profileId}:entry-fee-refund`
 }
 
+function systemFeeKey(tournamentId: TournamentId): string {
+  return `tournament:${tournamentId}:system-fee:${TOURNAMENT_FINANCIAL_RULES_VERSION}`
+}
+
+function shuffleInPlace<T>(items: T[]): void {
+  for (let i = items.length - 1; i > 0; i -= 1) {
+    const j = randomInt(i + 1)
+    const value = items[i]
+    items[i] = items[j] as T
+    items[j] = value as T
+  }
+}
+
 function computePartnerInviteExpiresAt(tournament: TournamentRow, nowMs = Date.now()): string | null {
   if (tournament.start_mode === 'fill') {
     return new Date(nowMs + 60 * 60 * 1000).toISOString()
@@ -363,7 +439,11 @@ export async function createTournamentEconomyStore(
     SELECT
       tournament_id, kind, name, creator_profile_id, visibility, password_hash,
       entry_fee, player_capacity, start_mode, scheduled_start_at, status,
-      cancel_reason, created_at, updated_at, started_at, finished_at
+      cancel_reason, created_at, updated_at, started_at, finished_at,
+      total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
+      winner_share_percent, runner_up_share_percent, winner_team_prize_amount,
+      runner_up_team_prize_amount, winner_player_prize_amount,
+      runner_up_player_prize_amount, financial_rules_version
     FROM tournaments
     WHERE tournament_id = ?
     LIMIT 1;
@@ -373,7 +453,11 @@ export async function createTournamentEconomyStore(
     SELECT
       tournament_id, kind, name, creator_profile_id, visibility, password_hash,
       entry_fee, player_capacity, start_mode, scheduled_start_at, status,
-      cancel_reason, created_at, updated_at, started_at, finished_at
+      cancel_reason, created_at, updated_at, started_at, finished_at,
+      total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
+      winner_share_percent, runner_up_share_percent, winner_team_prize_amount,
+      runner_up_team_prize_amount, winner_player_prize_amount,
+      runner_up_player_prize_amount, financial_rules_version
     FROM tournaments
     WHERE tournament_id = ?
     LIMIT 1;
@@ -435,11 +519,47 @@ export async function createTournamentEconomyStore(
     ORDER BY created_at ASC;
   `)
 
+  const selectConfirmedEntriesWithDebitLedgerStatement = database.prepare(`
+    SELECT te.entry_id, te.profile_id, te.team_id, tel.amount
+    FROM tournament_entries te
+    LEFT JOIN tournament_economy_ledger tel
+      ON tel.tournament_id = te.tournament_id
+     AND tel.profile_id = te.profile_id
+     AND tel.entry_type = 'entry_fee_debit'
+    WHERE te.tournament_id = ? AND te.status = 'confirmed'
+    ORDER BY te.created_at ASC;
+  `)
+
+  const selectConfirmedParticipationDuplicateRowsStatement = database.prepare(`
+    SELECT COALESCE(p.account_id, te.profile_id) as participant_key, COUNT(*) as count
+    FROM tournament_entries te
+    JOIN profiles p ON p.profile_id = te.profile_id
+    WHERE te.tournament_id = ? AND te.status = 'confirmed'
+    GROUP BY COALESCE(p.account_id, te.profile_id)
+    HAVING COUNT(*) > 1
+    LIMIT 1;
+  `)
+
   const selectTeamByIdStatement = database.prepare(`
     SELECT team_id, tournament_id, status, seed_slot, created_at, updated_at
     FROM tournament_teams
     WHERE team_id = ?
     LIMIT 1;
+  `)
+
+  const selectTeamsForTournamentStatement = database.prepare(`
+    SELECT team_id, tournament_id, status, seed_slot, created_at, updated_at
+    FROM tournament_teams
+    WHERE tournament_id = ?
+    ORDER BY created_at ASC;
+  `)
+
+  const selectEntriesForTeamStatement = database.prepare(`
+    SELECT entry_id, tournament_id, profile_id, team_id, joined_as, status,
+           created_at, updated_at, withdrawn_at, refunded_at
+    FROM tournament_entries
+    WHERE team_id = ?
+    ORDER BY created_at ASC;
   `)
 
   const selectConfirmedEntriesForTeamStatement = database.prepare(`
@@ -514,15 +634,31 @@ export async function createTournamentEconomyStore(
     VALUES (?, ?, 'forming', NULL);
   `)
 
+  const insertLockedTeamStatement = database.prepare(`
+    INSERT INTO tournament_teams (team_id, tournament_id, status, seed_slot)
+    VALUES (?, ?, 'locked', ?);
+  `)
+
   const updateTeamStatusStatement = database.prepare(`
     UPDATE tournament_teams
     SET status = ?, updated_at = CURRENT_TIMESTAMP
     WHERE team_id = ? AND tournament_id = ?;
   `)
 
+  const lockTeamWithSeedStatement = database.prepare(`
+    UPDATE tournament_teams
+    SET status = 'locked', seed_slot = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE team_id = ? AND tournament_id = ? AND status IN ('complete', 'locked');
+  `)
+
   const deleteTeamStatement = database.prepare(`
     DELETE FROM tournament_teams
     WHERE team_id = ? AND tournament_id = ?;
+  `)
+
+  const deleteTeamsForTournamentStatement = database.prepare(`
+    DELETE FROM tournament_teams
+    WHERE tournament_id = ?;
   `)
 
   const insertPartnerInviteStatement = database.prepare(`
@@ -567,6 +703,12 @@ export async function createTournamentEconomyStore(
     UPDATE tournament_entries
     SET team_id = NULL, joined_as = 'solo', updated_at = CURRENT_TIMESTAMP
     WHERE entry_id = ? AND status = 'confirmed';
+  `)
+
+  const assignEntryToTeamStatement = database.prepare(`
+    UPDATE tournament_entries
+    SET team_id = ?, joined_as = 'solo', updated_at = CURRENT_TIMESTAMP
+    WHERE entry_id = ? AND tournament_id = ? AND status = 'confirmed';
   `)
 
   const insertPartnerInviteeEntryStatement = database.prepare(`
@@ -668,11 +810,66 @@ export async function createTournamentEconomyStore(
     ON CONFLICT(idempotency_key) DO NOTHING;
   `)
 
+  const insertSystemFeeLedgerStatement = database.prepare(`
+    INSERT INTO tournament_economy_ledger (
+      ledger_id, idempotency_key, tournament_id, profile_id, entry_type, amount, balance_after,
+      metadata_json
+    ) VALUES (?, ?, ?, NULL, 'system_fee', ?, NULL, ?)
+    ON CONFLICT(idempotency_key) DO NOTHING;
+  `)
+
   const selectLedgerByKeyStatement = database.prepare(`
     SELECT ledger_id, amount
     FROM tournament_economy_ledger
     WHERE idempotency_key = ?
     LIMIT 1;
+  `)
+
+  const updateTournamentStartedStatement = database.prepare(`
+    UPDATE tournaments
+    SET status = 'starting',
+        started_at = ?,
+        updated_at = ?,
+        total_entry_amount = ?,
+        system_fee_percent = ?,
+        system_fee_amount = ?,
+        prize_pool_amount = ?,
+        winner_share_percent = ?,
+        runner_up_share_percent = ?,
+        winner_team_prize_amount = ?,
+        runner_up_team_prize_amount = ?,
+        winner_player_prize_amount = ?,
+        runner_up_player_prize_amount = ?,
+        financial_rules_version = ?
+    WHERE tournament_id = ? AND status = 'open';
+  `)
+
+  const updateTournamentAutoCancelledStatement = database.prepare(`
+    UPDATE tournaments
+    SET status = 'auto_cancelled',
+        cancel_reason = ?,
+        updated_at = ?
+    WHERE tournament_id = ? AND status = 'open';
+  `)
+
+  const insertRoundStatement = database.prepare(`
+    INSERT INTO tournament_rounds (round_id, tournament_id, round_type, round_index)
+    VALUES (?, ?, 'semifinal', ?)
+    ON CONFLICT(tournament_id, round_type, round_index) DO NOTHING;
+  `)
+
+  const selectRoundIdStatement = database.prepare(`
+    SELECT round_id
+    FROM tournament_rounds
+    WHERE tournament_id = ? AND round_type = 'semifinal' AND round_index = ?
+    LIMIT 1;
+  `)
+
+  const insertMatchStatement = database.prepare(`
+    INSERT INTO tournament_matches (
+      match_id, tournament_id, round_id, room_id, team_a_id, team_b_id,
+      status, no_show_deadline_at
+    ) VALUES (?, ?, ?, NULL, ?, ?, 'awaiting_players', NULL);
   `)
 
   const insertEventStatement = database.prepare(`
@@ -843,6 +1040,296 @@ export async function createTournamentEconomyStore(
     }
   }
 
+  function getStartedTournamentResult(
+    tournamentId: TournamentId,
+    alreadyStarted: boolean,
+  ): StartTournamentResult {
+    const tournament = selectTournamentByIdStatement.get(tournamentId) as TournamentRow
+    const teams = (selectTeamsForTournamentStatement.all(tournamentId) as TournamentTeamRow[])
+      .map(toTournamentTeamRecord)
+    return {
+      ok: true,
+      alreadyStarted,
+      tournament: toTournamentRecord(tournament),
+      startedTeams: teams,
+      systemFeeAmount: tournament.system_fee_amount ?? 0,
+    }
+  }
+
+  function validateAndLockTeamsForStart(
+    tournamentId: TournamentId,
+  ): { ok: true; teams: TournamentTeamRow[]; seedSnapshot: Record<string, string[]> } | { ok: false } {
+    const entries = selectConfirmedEntriesStatement.all(tournamentId) as TournamentEntryRow[]
+    const teams = selectTeamsForTournamentStatement.all(tournamentId) as TournamentTeamRow[]
+    const completeTeams: TournamentTeamRow[] = []
+    const assignedEntryIds = new Set<string>()
+
+    for (const team of teams) {
+      const members = (selectEntriesForTeamStatement.all(team.team_id) as TournamentEntryRow[])
+        .filter((entry) => entry.status === 'confirmed')
+      if (members.length === 0 && team.status === 'forming') {
+        deleteTeamStatement.run(team.team_id, tournamentId)
+        continue
+      }
+      if (members.length === 2 && (team.status === 'complete' || team.status === 'locked')) {
+        completeTeams.push(team)
+        for (const member of members) assignedEntryIds.add(member.entry_id)
+        continue
+      }
+      if (members.length > 0) return { ok: false }
+    }
+
+    const soloEntries = entries.filter((entry) => entry.team_id === null || !assignedEntryIds.has(entry.entry_id))
+    if (soloEntries.length % 2 !== 0) return { ok: false }
+    shuffleInPlace(soloEntries)
+
+    for (let i = 0; i < soloEntries.length; i += 2) {
+      const first = soloEntries[i]
+      const second = soloEntries[i + 1]
+      if (first === undefined || second === undefined) return { ok: false }
+      const teamId = randomUUID()
+      insertLockedTeamStatement.run(teamId, tournamentId, null)
+      assignEntryToTeamStatement.run(teamId, first.entry_id, tournamentId)
+      assignEntryToTeamStatement.run(teamId, second.entry_id, tournamentId)
+      const row = selectTeamByIdStatement.get(teamId) as TournamentTeamRow
+      completeTeams.push(row)
+    }
+
+    if (completeTeams.length !== 4) return { ok: false }
+    shuffleInPlace(completeTeams)
+
+    const seedSnapshot: Record<string, string[]> = {}
+    for (let i = 0; i < completeTeams.length; i += 1) {
+      const seedSlot = i + 1
+      const team = completeTeams[i] as TournamentTeamRow
+      lockTeamWithSeedStatement.run(seedSlot, team.team_id, tournamentId)
+      team.status = 'locked'
+      team.seed_slot = seedSlot
+      seedSnapshot[String(seedSlot)] = (selectEntriesForTeamStatement.all(team.team_id) as TournamentEntryRow[])
+        .filter((entry) => entry.status === 'confirmed')
+        .map((entry) => entry.profile_id)
+    }
+
+    return { ok: true, teams: completeTeams, seedSnapshot }
+  }
+
+  function createSemifinalSkeletons(tournamentId: TournamentId, teams: TournamentTeamRow[]): void {
+    const bySeed = new Map<number, string>()
+    for (const team of teams) {
+      if (team.seed_slot !== null) bySeed.set(team.seed_slot, team.team_id)
+    }
+    const seed1 = bySeed.get(1)
+    const seed2 = bySeed.get(2)
+    const seed3 = bySeed.get(3)
+    const seed4 = bySeed.get(4)
+    if (!seed1 || !seed2 || !seed3 || !seed4) throw new Error('Missing tournament seed slots.')
+
+    insertRoundStatement.run(randomUUID(), tournamentId, 1)
+    insertRoundStatement.run(randomUUID(), tournamentId, 2)
+    const round1 = selectRoundIdStatement.get(tournamentId, 1) as { round_id: string }
+    const round2 = selectRoundIdStatement.get(tournamentId, 2) as { round_id: string }
+    insertMatchStatement.run(randomUUID(), tournamentId, round1.round_id, seed1, seed2)
+    insertMatchStatement.run(randomUUID(), tournamentId, round2.round_id, seed3, seed4)
+  }
+
+  function startTournamentAtomicallyLocal(
+    tournamentId: TournamentId,
+    now: Date,
+  ): StartTournamentResult {
+    const nowIso = now.toISOString()
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+      expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+
+      const tournament = selectTournamentForUpdateStatement.get(tournamentId) as TournamentRow | undefined
+      if (tournament === undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'tournament_not_found' }
+      }
+      if (tournament.status !== 'open') {
+        database.exec('ROLLBACK;')
+        if (
+          tournament.status === 'starting' ||
+          tournament.status === 'semifinal_in_progress' ||
+          tournament.status === 'final_in_progress' ||
+          tournament.status === 'finished'
+        ) {
+          return getStartedTournamentResult(tournamentId, true)
+        }
+        return { ok: false, reason: 'tournament_not_open' }
+      }
+
+      const confirmedEntries = selectConfirmedEntriesWithDebitLedgerStatement.all(tournamentId) as {
+        entry_id: string
+        profile_id: string
+        team_id: string | null
+        amount: number | null
+      }[]
+      if (confirmedEntries.length !== 8 || getReservedPendingPlaces(tournamentId) !== 0) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'not_ready' }
+      }
+      if (selectConfirmedParticipationDuplicateRowsStatement.get(tournamentId) !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'invalid_team_state' }
+      }
+      const ledgerTotal = confirmedEntries.reduce((sum, entry) => {
+        if (entry.amount !== tournament.entry_fee) return Number.NaN
+        return sum + entry.amount
+      }, 0)
+      if (!Number.isFinite(ledgerTotal) || ledgerTotal !== tournament.entry_fee * 8) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'ledger_mismatch' }
+      }
+
+      const teamResult = validateAndLockTeamsForStart(tournamentId)
+      if (!teamResult.ok) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'invalid_team_state' }
+      }
+
+      const preview = calculateTournamentPrizePreview(tournament.entry_fee, 8)
+      if (preview.totalEntryFees !== ledgerTotal) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'ledger_mismatch' }
+      }
+
+      insertSystemFeeLedgerStatement.run(
+        randomUUID(),
+        systemFeeKey(tournamentId),
+        tournamentId,
+        preview.systemFee,
+        JSON.stringify({
+          totalEntryAmount: preview.totalEntryFees,
+          systemFeePercent: preview.systemFeePercent,
+          prizePoolAmount: preview.prizePool,
+          winnerSharePercent: preview.winnerSharePercent,
+          runnerUpSharePercent: preview.runnerUpSharePercent,
+          financialRulesVersion: preview.financialRulesVersion,
+        }),
+      )
+
+      updateTournamentStartedStatement.run(
+        nowIso,
+        nowIso,
+        preview.totalEntryFees,
+        preview.systemFeePercent,
+        preview.systemFee,
+        preview.prizePool,
+        preview.winnerSharePercent,
+        preview.runnerUpSharePercent,
+        preview.firstTeamPrize,
+        preview.secondTeamPrize,
+        preview.firstPlayerPrize,
+        preview.secondPlayerPrize,
+        preview.financialRulesVersion,
+        tournamentId,
+      )
+      createSemifinalSkeletons(tournamentId, teamResult.teams)
+      insertEvent(tournamentId, 'tournament_started', null, 'system', {
+        financial: preview,
+        teamSeeds: teamResult.seedSnapshot,
+      })
+      database.exec('COMMIT;')
+      return getStartedTournamentResult(tournamentId, false)
+    } catch (error) {
+      try { database.exec('ROLLBACK;') } catch {}
+      throw error
+    }
+  }
+
+  function autoCancelScheduledTournamentAtomicallyLocal(
+    tournamentId: TournamentId,
+    now: Date,
+    reason: string,
+  ): AutoCancelScheduledTournamentResult {
+    const nowIso = now.toISOString()
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+      expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+      const tournament = selectTournamentForUpdateStatement.get(tournamentId) as TournamentRow | undefined
+      if (tournament === undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'tournament_not_found' }
+      }
+      if (tournament.status === 'auto_cancelled') {
+        database.exec('ROLLBACK;')
+        return {
+          ok: true,
+          alreadyCancelled: true,
+          refundedEntries: 0,
+          totalRefunded: 0,
+          tournament: toTournamentRecord(tournament),
+        }
+      }
+      if (tournament.status !== 'open') {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'tournament_not_open' }
+      }
+
+      const statusUpdate = updateTournamentAutoCancelledStatement.run(reason, nowIso, tournamentId) as {
+        changes?: number
+      }
+      if ((statusUpdate.changes ?? 0) === 0) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'tournament_not_open' }
+      }
+
+      const pendingInvites = database.prepare(`
+        SELECT invite_id, tournament_id, team_id, inviter_profile_id, invitee_profile_id,
+               status, expires_at, popup_dismissed_at, notification_read_at, created_at,
+               responded_at
+        FROM tournament_partner_invites
+        WHERE tournament_id = ? AND status = 'pending';
+      `).all(tournamentId) as TournamentPartnerInviteRow[]
+      for (const invite of pendingInvites) {
+        resolvePartnerInviteStatement.run('cancelled', invite.invite_id, tournamentId)
+      }
+
+      const confirmedEntries = selectConfirmedEntriesStatement.all(tournamentId) as TournamentEntryRow[]
+      let refundedEntries = 0
+      let totalRefunded = 0
+      for (const entry of confirmedEntries) {
+        const refundKey = entryFeeRefundKey(tournamentId, entry.profile_id)
+        if (getLedgerByKey(refundKey) !== null) continue
+        const debitLedger = getLedgerByKey(entryFeeDebitKey(tournamentId, entry.profile_id))
+        const refundAmount = debitLedger?.amount ?? tournament.entry_fee
+        ensureWalletStatement.run(entry.profile_id)
+        creditWalletStatement.run(refundAmount, entry.profile_id)
+        insertLedgerStatement.run(
+          randomUUID(),
+          refundKey,
+          tournamentId,
+          entry.profile_id,
+          'entry_fee_refund' satisfies TournamentLedgerEntryType,
+          refundAmount,
+          getWalletBalance(entry.profile_id),
+        )
+        updateEntryToRefundedByCancelStatement.run(entry.entry_id)
+        refundedEntries += 1
+        totalRefunded += refundAmount
+      }
+      deleteTeamsForTournamentStatement.run(tournamentId)
+      insertEvent(tournamentId, 'tournament_auto_cancelled', null, 'system', {
+        reason,
+        refundedEntries,
+        totalRefunded,
+      })
+      database.exec('COMMIT;')
+      const finalTournament = selectTournamentByIdStatement.get(tournamentId) as TournamentRow
+      return {
+        ok: true,
+        alreadyCancelled: false,
+        refundedEntries,
+        totalRefunded,
+        tournament: toTournamentRecord(finalTournament),
+      }
+    } catch (error) {
+      try { database.exec('ROLLBACK;') } catch {}
+      throw error
+    }
+  }
+
   return {
     getPartnerCandidatesForTournament(
       tournamentId: TournamentId,
@@ -949,6 +1436,21 @@ export async function createTournamentEconomyStore(
 
     expireDuePartnerInvitesAtomically(tournamentId?: TournamentId): number {
       return expireDuePartnerInvitesAtomicallyLocal(tournamentId)
+    },
+
+    startTournamentAtomically(
+      tournamentId: TournamentId,
+      now: Date,
+    ): StartTournamentResult {
+      return startTournamentAtomicallyLocal(tournamentId, now)
+    },
+
+    autoCancelScheduledTournamentAtomically(
+      tournamentId: TournamentId,
+      now: Date,
+      reason: string,
+    ): AutoCancelScheduledTournamentResult {
+      return autoCancelScheduledTournamentAtomicallyLocal(tournamentId, now, reason)
     },
 
     createPartnerInviteAtomically(

@@ -10372,9 +10372,9 @@ export function renderLobbyScreen(
       if (!previewBox || !entryFeeSelect) return
       const entryFee = Number(entryFeeSelect.value) || 0
       const totalEntryFees = entryFee * 8
-      const systemFee = Math.round(totalEntryFees * 0.1)
+      const systemFee = Math.trunc(totalEntryFees * 0.2)
       const prizePool = totalEntryFees - systemFee
-      const firstTeamPrize = Math.round(prizePool * 0.7)
+      const firstTeamPrize = Math.trunc(prizePool * 0.65)
       const secondTeamPrize = prizePool - firstTeamPrize
       const fmt = (n: number) => new Intl.NumberFormat('bg-BG').format(n)
       const totalEl = previewBox.querySelector('[data-preview-total] span:last-child')

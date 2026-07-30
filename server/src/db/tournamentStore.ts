@@ -149,6 +149,17 @@ type TournamentRow = {
   updated_at: string
   started_at: string | null
   finished_at: string | null
+  total_entry_amount: number | null
+  system_fee_percent: number | null
+  system_fee_amount: number | null
+  prize_pool_amount: number | null
+  winner_share_percent: number | null
+  runner_up_share_percent: number | null
+  winner_team_prize_amount: number | null
+  runner_up_team_prize_amount: number | null
+  winner_player_prize_amount: number | null
+  runner_up_player_prize_amount: number | null
+  financial_rules_version: string | null
 }
 
 type TournamentTeamRow = {
@@ -241,6 +252,17 @@ function toTournamentRecord(row: TournamentRow): TournamentRecord {
     updatedAt: dbDateToUtc(row.updated_at),
     startedAt: row.started_at !== null ? dbDateToUtc(row.started_at) : null,
     finishedAt: row.finished_at !== null ? dbDateToUtc(row.finished_at) : null,
+    totalEntryAmount: row.total_entry_amount,
+    systemFeePercent: row.system_fee_percent,
+    systemFeeAmount: row.system_fee_amount,
+    prizePoolAmount: row.prize_pool_amount,
+    winnerSharePercent: row.winner_share_percent,
+    runnerUpSharePercent: row.runner_up_share_percent,
+    winnerTeamPrizeAmount: row.winner_team_prize_amount,
+    runnerUpTeamPrizeAmount: row.runner_up_team_prize_amount,
+    winnerPlayerPrizeAmount: row.winner_player_prize_amount,
+    runnerUpPlayerPrizeAmount: row.runner_up_player_prize_amount,
+    financialRulesVersion: row.financial_rules_version,
   }
 }
 
@@ -362,7 +384,11 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
     SELECT
       tournament_id, kind, name, creator_profile_id, visibility, password_hash,
       entry_fee, player_capacity, start_mode, scheduled_start_at, status,
-      cancel_reason, created_at, updated_at, started_at, finished_at
+      cancel_reason, created_at, updated_at, started_at, finished_at,
+      total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
+      winner_share_percent, runner_up_share_percent, winner_team_prize_amount,
+      runner_up_team_prize_amount, winner_player_prize_amount,
+      runner_up_player_prize_amount, financial_rules_version
     FROM tournaments
     WHERE tournament_id = ?
     LIMIT 1;
@@ -524,7 +550,11 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
           `SELECT
              tournament_id, kind, name, creator_profile_id, visibility, password_hash,
              entry_fee, player_capacity, start_mode, scheduled_start_at, status,
-             cancel_reason, created_at, updated_at, started_at, finished_at
+             cancel_reason, created_at, updated_at, started_at, finished_at,
+             total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
+             winner_share_percent, runner_up_share_percent, winner_team_prize_amount,
+             runner_up_team_prize_amount, winner_player_prize_amount,
+             runner_up_player_prize_amount, financial_rules_version
            FROM tournaments
            ${whereClause}
            ORDER BY created_at DESC

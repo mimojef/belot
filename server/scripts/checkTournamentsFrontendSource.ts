@@ -147,18 +147,18 @@ await check('[33] data-tournament-create-scheduled-field е display:none по п
 })
 
 // ── [34] Live prize preview използва точните формули ──
-await check('[34] computePrizePreview() използва 10%/90%/70%/30% формулите', () => {
-  assert(tournamentsScreenSource.includes('totalEntryFees * 0.1'), 'Липсва 10% системна такса формула')
-  assert(tournamentsScreenSource.includes('prizePool * 0.7'), 'Липсва 70% формула за първи отбор')
+await check('[34] computePrizePreview() използва 20%/80%/65%/35% формулите', () => {
+  assert(tournamentsScreenSource.includes('totalEntryFees * 0.2'), 'Липсва 20% системна такса формула')
+  assert(tournamentsScreenSource.includes('prizePool * 0.65'), 'Липсва 65% формула за първи отбор')
   assert(
     tournamentsScreenSource.includes('prizePool - firstTeamPrize'),
-    'secondTeamPrize трябва да е остатъкът (prizePool - firstTeamPrize), не отделно закръглено 30%',
+    'secondTeamPrize трябва да е остатъкът (prizePool - firstTeamPrize), не отделно закръглено 35%',
   )
 })
 
 await check('[34b] Client-side JS preview (в renderLobbyScreen listeners) използва същите формули', () => {
-  assert(renderLobbySource.includes('totalEntryFees * 0.1'), 'Липсва JS preview 10% формула')
-  assert(renderLobbySource.includes('prizePool * 0.7'), 'Липсва JS preview 70% формула')
+  assert(renderLobbySource.includes('totalEntryFees * 0.2'), 'Липсва JS preview 20% формула')
+  assert(renderLobbySource.includes('prizePool * 0.65'), 'Липсва JS preview 65% формула')
 })
 
 // ── [35] "Запиши се сам" вече е реализирано действие (трети етап) ──
@@ -212,22 +212,24 @@ await check('[J60] Creator "Отмени турнира" (cancel) действи
   )
 })
 
-await check('[J61] Липсва partner invite функционалност', () => {
-  for (const forbidden of ['покани партньор', 'Покани партньор', 'invitePartner', 'partner_inviter', 'избери приятел']) {
-    assert(!tournamentsScreenSource.includes(forbidden), `Намерен забранен partner-invite маркер: ${forbidden}`)
+await check('[J61] Partner invite функционалността е налична', () => {
+  assert(tournamentsScreenSource.includes('data-tournament-partner-picker-open="1"'), 'Липсва partner invite picker open бутон')
+  assert(tournamentEconomyStoreSource.includes('createPartnerInviteAtomically'), 'Липсва atomic partner invite операция')
+})
+
+await check('[J62] Automatic solo pairing логиката е само server-side', () => {
+  assert(tournamentEconomyStoreSource.includes('validateAndLockTeamsForStart'), 'Липсва server-side start pairing/locking helper')
+  for (const forbidden of ['autoPair', 'automatchTeam', 'pairPlayers']) {
+    assert(!tournamentsScreenSource.includes(forbidden), `Намерен client-side auto-team маркер: ${forbidden}`)
+    assert(!controllerSource.includes(forbidden), `Намерен client-side auto-team маркер в контролера: ${forbidden}`)
   }
 })
 
-await check('[J62] Липсва automatic team creation / pairing логика', () => {
-  for (const forbidden of ['createTeam(', 'autoPair', 'automatchTeam', 'pairPlayers']) {
-    assert(!tournamentsScreenSource.includes(forbidden), `Намерен забранен auto-team маркер: ${forbidden}`)
-    assert(!controllerSource.includes(forbidden), `Намерен забранен auto-team маркер в контролера: ${forbidden}`)
-  }
-})
-
-await check('[J63] Липсва scheduler / auto-start транзиция в economy store-а', () => {
+await check('[J63] Scheduler / auto-start логиката е отделена от economy store interval-и', () => {
+  assert(indexSource.includes('createTournamentScheduler'), 'Липсва server bootstrap wiring за tournament scheduler')
+  assert(tournamentEconomyStoreSource.includes('startTournamentAtomically'), 'Липсва atomic start операция')
   for (const forbidden of ['setInterval', 'setTimeout', 'cron', 'node-cron']) {
-    assert(!tournamentEconomyStoreSource.includes(forbidden), `Намерен забранен scheduler маркер: ${forbidden}`)
+    assert(!tournamentEconomyStoreSource.includes(forbidden), `Economy store не трябва да съдържа scheduler timer: ${forbidden}`)
   }
 })
 
@@ -306,17 +308,17 @@ await check('[J72] CSRF/Origin guard (isAllowedVisitorRequestOrigin) е окаб
   }
 })
 
-await check('[J73] Липсва system fee finalization / prize payout логика в tournamentEconomyStore', () => {
-  for (const forbidden of ['system_fee', 'prize_payout', 'finalizeFee', 'payoutPrize']) {
-    assert(!tournamentEconomyStoreSource.includes(forbidden), `Намерен забранен финализация/payout маркер: ${forbidden}`)
-  }
+await check('[J73] System fee finalization е налична, но prize payout липсва', () => {
+  assert(tournamentEconomyStoreSource.includes('system_fee'), 'Липсва system_fee ledger запис')
+  assert(tournamentEconomyStoreSource.includes('insertSystemFeeLedgerStatement'), 'Липсва idempotent system_fee insert')
+  assert(!tournamentEconomyStoreSource.includes('prize_payout'), 'Prize payout ledger не трябва да се създава в този етап')
+  assert(!tournamentEconomyStoreSource.includes('payoutPrize'), 'Prize payout helper не трябва да се създава в този етап')
 })
 
-await check('[J74] Липсва bracket / semifinal / final / walkover логика', () => {
-  for (const forbidden of ['bracket', 'semifinal', 'walkover', 'Полуфинал', 'Финал (кръг)']) {
-    assert(!tournamentEconomyStoreSource.includes(forbidden), `Намерен забранен bracket/walkover маркер: ${forbidden}`)
-    assert(!controllerSource.includes(`create${forbidden}`), `Намерен забранен bracket/walkover action в контролера: ${forbidden}`)
-  }
+await check('[J74] Semifinal skeleton е наличен без game-room/walkover integration', () => {
+  assert(tournamentEconomyStoreSource.includes('createSemifinalSkeletons'), 'Липсва semifinal skeleton seeding')
+  assert(tournamentEconomyStoreSource.includes('room_id, team_a_id, team_b_id'), 'Semifinal matches трябва да са persisted skeleton rows')
+  assert(!tournamentEconomyStoreSource.includes('walkover_reason ='), 'Walkover logic не трябва да се реализира в този етап')
 })
 
 await check('[J75] Join/leave/cancel confirm popup-ите остават responsive (max-width + border-box, без фиксирана desktop ширина)', () => {
