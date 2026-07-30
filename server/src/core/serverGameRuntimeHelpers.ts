@@ -106,6 +106,10 @@ export function shouldKeepRoomAlive(
     return roomHasConnectedHumanParticipants(room)
   }
 
+  if (room.config.isTournamentMatchOrigin === true && room.status !== 'finished') {
+    return true
+  }
+
   if (
     room.game.phase !== null &&
     room.game.phase !== 'bootstrap' &&

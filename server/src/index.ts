@@ -2130,6 +2130,39 @@ function tryResumeRoomForConnection(
   const match = findHumanParticipantByReconnectToken(room, reconnectToken)
 
   if (match === null) {
+    if (isTournamentMatchRoom(room) && connection.profileId !== null && tournamentCoordinator !== null) {
+      const takeoverResult = tournamentCoordinator.tryTakeoverNoShowBot({
+        room,
+        profileId: connection.profileId,
+        connectionId,
+        reconnectToken,
+      })
+      if (takeoverResult.ok) {
+        const attachedConnection = attachConnectionToRoomSeat(
+          connection,
+          connectionId,
+          takeoverResult.room,
+          takeoverResult.seat,
+        )
+        serverState = updateServerConnectionInState(
+          serverState,
+          connectionId,
+          attachedConnection,
+        )
+        activeRoomRuntime.ensureRoom(takeoverResult.room)
+        return {
+          ok: true,
+          room: takeoverResult.room,
+          seat: takeoverResult.seat,
+        }
+      }
+      if (takeoverResult.reason === 'match_completed') {
+        return {
+          ok: false,
+          message: 'Отборът ви загуби служебно поради неявяване. Мачът вече е приключил.',
+        }
+      }
+    }
     return {
       ok: false,
       message: 'Невалиден код за връщане в играта.',
@@ -5808,16 +5841,26 @@ async function handleTournamentsListRequest(
       viewerProfileId = session?.profile.profileId ?? null
     }
 
-    const filter = mineParam
-      ? { creatorProfileId: viewerProfileId ?? undefined, limit, offset }
-      : { statuses: ACTIVE_TOURNAMENT_STATUSES, limit, offset }
-
-    const tournaments = tournamentStore.listTournaments(filter)
-    const totalCount = tournamentStore.countTournaments(
-      mineParam
-        ? { creatorProfileId: viewerProfileId ?? undefined }
-        : { statuses: ACTIVE_TOURNAMENT_STATUSES },
-    )
+    const tournaments = mineParam
+      ? tournamentStore.listTournaments({ creatorProfileId: viewerProfileId ?? undefined, limit, offset })
+      : [
+          ...tournamentStore.listTournaments({
+            statuses: ACTIVE_TOURNAMENT_STATUSES,
+            limit: 50,
+            offset: 0,
+            orderBy: 'created_desc',
+          }),
+          ...tournamentStore.listTournaments({
+            statuses: ['finished'],
+            limit: 10,
+            offset: 0,
+            orderBy: 'finished_desc',
+          }),
+        ]
+    const totalCount = mineParam
+      ? tournamentStore.countTournaments({ creatorProfileId: viewerProfileId ?? undefined })
+      : tournamentStore.countTournaments({ statuses: ACTIVE_TOURNAMENT_STATUSES }) +
+        Math.min(10, tournamentStore.countTournaments({ statuses: ['finished'] }))
 
     sendJsonResponse(res, 200, {
       ok: true,
@@ -11008,6 +11051,16 @@ try {
       broadcastRoomSnapshots(room, socketRegistry)
     },
     ensureRoomRuntime: (room) => activeRoomRuntime.ensureRoom(room),
+    isConnectionAttached: ({ profileId, connectionId, roomId, seat }) => {
+      const connection = serverState.connections[connectionId] ?? null
+      return (
+        connection !== null &&
+        connection.status === 'connected' &&
+        connection.profileId === profileId &&
+        connection.currentRoomId === roomId &&
+        connection.currentSeat === seat
+      )
+    },
     notifyAssignment: (profileId, assignment) => {
       sendTournamentMatchAssignment(profileId, assignment)
     },

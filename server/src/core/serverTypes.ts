@@ -3,6 +3,7 @@ import type {
   TournamentId,
   TournamentMatchId,
   TournamentRoundType,
+  TournamentTeamId,
 } from '../tournament/tournamentTypes.js'
 
 export type ConnectionId = string
@@ -120,11 +121,62 @@ export type BotRoomParticipant = {
   botProfileId?: ProfileId
   behaviorPreset?: BotBehaviorPreset
   logicSource?: BotLogicSource
+  tournamentNoShowReplacement?: {
+    tournamentId: TournamentId
+    matchId: TournamentMatchId
+    assignedProfileId: ProfileId
+    assignedSeat: Seat
+    replacementReason: 'no_show'
+    insertedAt: string
+    status: 'active' | 'takeover_pending' | 'completed'
+  }
   identity: PlayerIdentitySnapshot
   publicProfile?: PlayerPublicProfileSnapshot | null
 }
 
 export type RoomParticipant = HumanRoomParticipant | BotRoomParticipant
+
+export type TournamentAttendancePlayerSummary = {
+  seat: Seat
+  team: Team
+  displayName: string
+  avatarUrl: string | null
+}
+
+export type TournamentAttendanceSnapshot = {
+  state: 'waiting' | 'resolved' | 'countdown' | 'started' | 'completed'
+  serverNow: string
+  deadlineAt: string | null
+  secondsRemaining: number
+  missingPlayers: TournamentAttendancePlayerSummary[]
+  missingByTeam: Record<Team, TournamentAttendancePlayerSummary[]>
+  resolutionKind: 'all_present' | 'walkover' | 'bots_inserted' | null
+  gameStartAt: string | null
+  startSecondsRemaining: number
+  walkover: {
+    winnerTeamId: TournamentTeamId
+    loserTeamId: TournamentTeamId
+    reason: string
+    completedAt: string
+  } | null
+}
+
+export type TournamentBotReplacementSnapshot = {
+  seat: Seat
+  replacedPlayer: TournamentAttendancePlayerSummary
+  takeoverAvailableForMe: boolean
+  takeoverPending: boolean
+  takeoverCompleted: boolean
+  replacementActive: boolean
+}
+
+export type TournamentRoomBannerSnapshot = {
+  id: string
+  kind: 'bots_inserted' | 'takeover_pending' | 'takeover_completed'
+  message: string
+  createdAt: string
+  expiresAt: string
+}
 
 export type RoomSeatSlot = {
   seat: Seat
@@ -153,6 +205,9 @@ export type ServerRoomConfig = {
   tournamentId?: TournamentId
   tournamentMatchId?: TournamentMatchId
   tournamentRoundType?: TournamentRoundType
+  tournamentAttendance?: TournamentAttendanceSnapshot | null
+  tournamentBotReplacements?: TournamentBotReplacementSnapshot[]
+  tournamentBanners?: TournamentRoomBannerSnapshot[]
 }
 
 export type ServerBootstrapAuthoritativeState = {

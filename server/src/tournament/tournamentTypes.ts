@@ -80,7 +80,7 @@ export const TOURNAMENT_MATCH_STATUSES = [
 ] as const
 export type TournamentMatchStatus = (typeof TOURNAMENT_MATCH_STATUSES)[number]
 
-export const TOURNAMENT_MATCH_RESULT_KINDS = ['played', 'walkover'] as const
+export const TOURNAMENT_MATCH_RESULT_KINDS = ['played', 'played_with_bots', 'walkover'] as const
 export type TournamentMatchResultKind = (typeof TOURNAMENT_MATCH_RESULT_KINDS)[number]
 
 export const TOURNAMENT_LEDGER_ENTRY_TYPES = [
@@ -177,6 +177,12 @@ export type TournamentMatchRecord = {
   teamBId: TournamentTeamId
   status: TournamentMatchStatus
   noShowDeadlineAt: string | null
+  attendanceStartedAt: string | null
+  attendanceDeadlineAt: string | null
+  attendanceResolvedAt: string | null
+  attendanceResolutionKind: 'all_present' | 'walkover' | 'bots_inserted' | null
+  gameStartAt: string | null
+  attendanceRevision: number
   winnerTeamId: TournamentTeamId | null
   resultKind: TournamentMatchResultKind | null
   walkoverReason: string | null

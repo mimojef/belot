@@ -5,6 +5,9 @@ import type {
   RoomId,
   RoomStatus,
   Seat,
+  TournamentAttendanceSnapshot,
+  TournamentBotReplacementSnapshot,
+  TournamentRoomBannerSnapshot,
 } from '../core/serverTypes.js'
 import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
 import type { TournamentMatchAssignment } from '../tournament/tournamentCoordinator.js'
@@ -367,6 +370,9 @@ export type RoomSnapshotMessage = {
   isGuestTrial: boolean
   isPrivateTableOrigin: boolean
   isTournamentMatchOrigin: boolean
+  tournamentAttendance?: TournamentAttendanceSnapshot | null
+  tournamentBotReplacements?: TournamentBotReplacementSnapshot[]
+  tournamentBanners?: TournamentRoomBannerSnapshot[]
 }
 
 export type ConnectedMessage = {

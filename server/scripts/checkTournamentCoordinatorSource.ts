@@ -49,11 +49,20 @@ check('coordinator uses fixed team seats', [
   'SERVER_TEAM_B_SEATS[0]',
   'SERVER_TEAM_B_SEATS[1]',
 ].every((needle) => coordinator.includes(needle)))
-check('coordinator persists played winners and final skeleton', [
-  "result_kind = 'played'",
+check('coordinator persists terminal winners and final skeleton', [
+  'played_with_bots',
+  "'walkover'",
   "INSERT INTO tournament_rounds (round_id, tournament_id, round_type, round_index)",
   "VALUES (?, ?, 'final', 1)",
   'tournament_final_completed',
+].every((needle) => coordinator.includes(needle)))
+check('coordinator has Stage 8 attendance resolution flow', [
+  'ATTENDANCE_WAIT_MS = 180_000',
+  'START_COUNTDOWN_MS = 5_000',
+  'ensureAttendanceStartedStatement',
+  'resolveWalkoverStatement',
+  'resolveBotsStatement',
+  'tryTakeoverNoShowBot',
 ].every((needle) => coordinator.includes(needle)))
 
 check('server starts and exposes coordinator health', [
@@ -75,6 +84,11 @@ check('protocol and snapshots expose assignment and tournament room flags', [
   'isTournamentMatchOrigin: boolean',
 ].every((needle) => serverMessages.includes(needle) || clientNetwork.includes(needle)))
 check('room snapshots include tournament origin flag', roomSnapshot.includes('isTournamentMatchOrigin: room.config.isTournamentMatchOrigin === true'))
+check('room snapshots include safe tournament attendance state', [
+  'tournamentAttendance',
+  'tournamentBotReplacements',
+  'tournamentBanners',
+].every((needle) => roomSnapshot.includes(needle) && serverMessages.includes(needle) && clientNetwork.includes(needle)))
 check('detail DTO includes rounds and myActiveMatch', [
   'TournamentRoundDto',
   'rounds: TournamentRoundDto[]',
@@ -90,6 +104,11 @@ check('tournament detail UI has ready callout and enter button', [
 check('active room UI hides replay/new game for tournament rooms', [
   'activeRoomState.isPrivateTableOrigin || activeRoomState.isTournamentMatchOrigin',
   'activeRoomState.isTournamentMatchOrigin = message.isTournamentMatchOrigin',
+].every((needle) => activeRoomController.includes(needle)))
+check('active room UI renders attendance overlay and tournament banners', [
+  'tournamentAttendance',
+  'appendTournamentBanners',
+  'data-tournament-banner-dismiss',
 ].every((needle) => activeRoomController.includes(needle)))
 
 if (failed > 0) {

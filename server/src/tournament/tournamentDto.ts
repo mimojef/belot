@@ -93,6 +93,15 @@ export type TournamentMatchDto = {
   winnerTeamId: string | null
   resultKind: string | null
   roomReady: boolean
+  attendance: {
+    state: 'waiting' | 'resolved' | 'countdown' | 'started' | 'completed'
+    deadlineAt: string | null
+    secondsRemaining: number
+    resolutionKind: 'all_present' | 'walkover' | 'bots_inserted' | null
+    gameStartAt: string | null
+    startSecondsRemaining: number
+  }
+  progressLabel: string
   startedAt: string | null
   completedAt: string | null
 }
@@ -316,22 +325,63 @@ export function buildTournamentRoundDtos(input: {
   rounds: TournamentRoundRecord[]
   matches: TournamentMatchRecord[]
 }): TournamentRoundDto[] {
+  const now = Date.now()
   return input.rounds.map((round) => {
     const matches = input.matches
       .filter((match) => match.roundId === round.roundId)
-      .map((match) => ({
-        matchId: match.matchId,
-        roundId: match.roundId,
-        roomId: match.roomId,
-        teamAId: match.teamAId,
-        teamBId: match.teamBId,
-        status: match.status,
-        winnerTeamId: match.winnerTeamId,
-        resultKind: match.resultKind,
-        roomReady: match.roomId !== null && match.status !== 'completed',
-        startedAt: match.startedAt,
-        completedAt: match.completedAt,
-      }))
+      .map((match) => {
+        const deadlineMs = match.attendanceDeadlineAt !== null
+          ? Date.parse(match.attendanceDeadlineAt)
+          : null
+        const gameStartMs = match.gameStartAt !== null ? Date.parse(match.gameStartAt) : null
+        const attendanceState: TournamentMatchDto['attendance']['state'] =
+          match.status === 'completed'
+            ? 'completed'
+            : match.status === 'in_progress'
+              ? 'started'
+              : match.status === 'countdown'
+                ? 'countdown'
+                : match.attendanceResolutionKind !== null
+                  ? 'resolved'
+                  : 'waiting'
+        const progressLabel =
+          match.resultKind === 'walkover'
+            ? 'Служебна победа'
+            : match.status === 'completed'
+              ? 'Завършен'
+              : match.status === 'in_progress' && match.resultKind === 'played_with_bots'
+                ? 'Играе се с бот'
+                : match.status === 'in_progress'
+                  ? 'Играе се'
+                  : match.status === 'countdown'
+                    ? 'Започва след 5 секунди'
+                    : match.roomId !== null
+                      ? 'Изчакват се играчите'
+                      : 'Масата се подготвя'
+
+        return {
+          matchId: match.matchId,
+          roundId: match.roundId,
+          roomId: match.roomId,
+          teamAId: match.teamAId,
+          teamBId: match.teamBId,
+          status: match.status,
+          winnerTeamId: match.winnerTeamId,
+          resultKind: match.resultKind,
+          roomReady: match.roomId !== null && match.status !== 'completed',
+          attendance: {
+            state: attendanceState,
+            deadlineAt: match.attendanceDeadlineAt,
+            secondsRemaining: deadlineMs === null ? 0 : Math.max(0, Math.ceil((deadlineMs - now) / 1000)),
+            resolutionKind: match.attendanceResolutionKind,
+            gameStartAt: match.gameStartAt,
+            startSecondsRemaining: gameStartMs === null ? 0 : Math.max(0, Math.ceil((gameStartMs - now) / 1000)),
+          },
+          progressLabel,
+          startedAt: match.startedAt,
+          completedAt: match.completedAt,
+        }
+      })
     return {
       roundId: round.roundId,
       roundType: round.roundType,

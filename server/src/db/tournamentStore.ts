@@ -45,6 +45,7 @@ export type ListTournamentsFilter = {
   creatorProfileId?: ProfileId
   limit?: number
   offset?: number
+  orderBy?: 'created_desc' | 'finished_desc'
 }
 
 export type CreateTournamentResult =
@@ -216,6 +217,12 @@ type TournamentMatchRow = {
   team_b_id: string
   status: string
   no_show_deadline_at: string | null
+  attendance_started_at: string | null
+  attendance_deadline_at: string | null
+  attendance_resolved_at: string | null
+  attendance_resolution_kind: string | null
+  game_start_at: string | null
+  attendance_revision: number
   winner_team_id: string | null
   result_kind: string | null
   walkover_reason: string | null
@@ -332,6 +339,12 @@ function toTournamentMatchRecord(row: TournamentMatchRow): TournamentMatchRecord
     teamBId: row.team_b_id,
     status: row.status as TournamentMatchStatus,
     noShowDeadlineAt: row.no_show_deadline_at !== null ? dbDateToUtc(row.no_show_deadline_at) : null,
+    attendanceStartedAt: row.attendance_started_at !== null ? dbDateToUtc(row.attendance_started_at) : null,
+    attendanceDeadlineAt: row.attendance_deadline_at !== null ? dbDateToUtc(row.attendance_deadline_at) : null,
+    attendanceResolvedAt: row.attendance_resolved_at !== null ? dbDateToUtc(row.attendance_resolved_at) : null,
+    attendanceResolutionKind: row.attendance_resolution_kind as TournamentMatchRecord['attendanceResolutionKind'],
+    gameStartAt: row.game_start_at !== null ? dbDateToUtc(row.game_start_at) : null,
+    attendanceRevision: row.attendance_revision,
     winnerTeamId: row.winner_team_id,
     resultKind: row.result_kind as TournamentMatchResultKind | null,
     walkoverReason: row.walkover_reason,
@@ -491,7 +504,9 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
   const selectMatchesForTournamentStatement = database.prepare(`
     SELECT
       match_id, tournament_id, round_id, room_id, team_a_id, team_b_id, status,
-      no_show_deadline_at, winner_team_id, result_kind, walkover_reason,
+      no_show_deadline_at, attendance_started_at, attendance_deadline_at,
+      attendance_resolved_at, attendance_resolution_kind, game_start_at,
+      attendance_revision, winner_team_id, result_kind, walkover_reason,
       missing_profile_ids, created_at, started_at, completed_at
     FROM tournament_matches
     WHERE tournament_id = ?
@@ -553,6 +568,9 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
       }
 
       const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+      const orderBy = filter.orderBy === 'finished_desc'
+        ? 'finished_at DESC, created_at DESC'
+        : 'created_at DESC'
       const rows = database
         .prepare(
           `SELECT
@@ -565,7 +583,7 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
              runner_up_player_prize_amount, financial_rules_version
            FROM tournaments
            ${whereClause}
-           ORDER BY created_at DESC
+           ORDER BY ${orderBy}
            LIMIT ? OFFSET ?;`,
         )
         .all(...params, limit, offset) as TournamentRow[]
@@ -718,7 +736,9 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
         .prepare(
           `SELECT
              match_id, tournament_id, round_id, room_id, team_a_id, team_b_id, status,
-             no_show_deadline_at, winner_team_id, result_kind, walkover_reason,
+             no_show_deadline_at, attendance_started_at, attendance_deadline_at,
+             attendance_resolved_at, attendance_resolution_kind, game_start_at,
+             attendance_revision, winner_team_id, result_kind, walkover_reason,
              missing_profile_ids, created_at, started_at, completed_at
            FROM tournament_matches WHERE match_id = ? LIMIT 1;`,
         )

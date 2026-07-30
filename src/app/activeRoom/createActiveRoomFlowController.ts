@@ -2198,6 +2198,80 @@ export function createActiveRoomFlowController(
         })
       : ''
 
+    const tournamentAttendance = activeRoomState.tournamentAttendance
+    if (
+      tournamentAttendance !== null &&
+      tournamentAttendance.state !== 'started' &&
+      tournamentAttendance.state !== 'completed'
+    ) {
+      const missingNames = tournamentAttendance.missingPlayers
+        .map((player) => escapeHtml(player.displayName))
+        .join(', ')
+      const title =
+        tournamentAttendance.state === 'countdown'
+          ? tournamentAttendance.resolutionKind === 'bots_inserted'
+            ? 'Липсващите места са запълнени с ботове'
+            : 'Всички играчи са на масата'
+          : tournamentAttendance.missingPlayers.length > 0
+            ? 'Изчакват се играчите'
+            : 'Всички играчи са на масата'
+      const seconds =
+        tournamentAttendance.state === 'countdown'
+          ? tournamentAttendance.startSecondsRemaining
+          : tournamentAttendance.secondsRemaining
+      const minutesText = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+      const consequence =
+        tournamentAttendance.state === 'countdown'
+          ? `Играта започва след ${Math.max(1, seconds)} секунди.`
+          : tournamentAttendance.missingByTeam.A.length > 0 && tournamentAttendance.missingByTeam.B.length > 0
+            ? 'Ако не се присъединят навреме, играта ще започне с ботове на техните места.'
+            : tournamentAttendance.missingPlayers.length > 0
+              ? 'Ако не се присъединят навреме, пълният отбор ще спечели служебно.'
+              : 'Играта ще започне след кратко отброяване.'
+
+      options.root.innerHTML = `
+        <div
+          ${mobileLayoutAttribute}
+          style="
+            min-height:100vh;
+            width:100%;
+            box-sizing:border-box;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            overflow:hidden;
+            background:${tableBackground};
+            font-family:Inter, system-ui, sans-serif;
+          "
+        >
+          <div
+            style="
+              width:min(92vw, 540px);
+              max-height:calc(100dvh - 32px);
+              overflow:auto;
+              box-sizing:border-box;
+              border:1px solid rgba(255,255,255,0.18);
+              border-radius:8px;
+              padding:24px;
+              background:rgba(15,23,42,0.92);
+              color:#f8fafc;
+              box-shadow:0 24px 70px rgba(2,6,23,0.45);
+              text-align:center;
+            "
+          >
+            <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">Турнирен мач</div>
+            <div style="margin-top:10px;font-size:26px;font-weight:900;line-height:1.15;">${escapeHtml(title)}</div>
+            <div style="margin-top:16px;font-size:40px;font-weight:900;color:#facc15;">${minutesText}</div>
+            <div style="margin-top:14px;font-size:15px;line-height:1.5;color:#dbeafe;">${missingNames ? `Липсват: ${missingNames}.` : 'Няма липсващи играчи.'}</div>
+            <div style="margin-top:10px;font-size:14px;line-height:1.5;color:#cbd5e1;">${escapeHtml(consequence)}</div>
+          </div>
+          ${scoreHudHtml}
+        </div>
+      `
+      window.setTimeout(() => renderActiveRoomScreen(), 1000)
+      return
+    }
+
     if (cuttingSnapshotForRender) {
       if (!initialStakeEffectShown) {
         initialStakeEffectShown = true
@@ -3374,6 +3448,7 @@ export function createActiveRoomFlowController(
     ensureEmojiButton(Boolean(isShowingScoringPhase || isShowingMatchEndedPhase), stageScale)
     syncEmojiPickerPanel(stageScale)
     syncPhrasePickerPanel(stageScale)
+    appendTournamentBanners()
     appendLeaveControls()
     syncPersistentBotTakeoverPopup()
 
@@ -3445,6 +3520,39 @@ export function createActiveRoomFlowController(
       })
   }
 
+  function appendTournamentBanners(): void {
+    if (!activeRoomState || activeRoomState.tournamentBanners.length === 0) {
+      return
+    }
+    const activeBanners = activeRoomState.tournamentBanners.filter((banner) => Date.parse(banner.expiresAt) > Date.now())
+    activeRoomState.tournamentBanners = activeBanners
+    if (activeBanners.length === 0) return
+    const banner = activeBanners[activeBanners.length - 1]!
+    const host = document.createElement('div')
+    host.setAttribute('data-tournament-banner-host', '1')
+    host.style.cssText = [
+      'position:fixed',
+      'left:50%',
+      'top:max(12px, env(safe-area-inset-top))',
+      'transform:translateX(-50%)',
+      'z-index:40',
+      'width:min(92vw, 560px)',
+      'pointer-events:auto',
+    ].join(';')
+    host.innerHTML = `
+      <div style="display:flex;gap:12px;align-items:flex-start;border:1px solid rgba(250,204,21,0.35);border-radius:8px;background:rgba(15,23,42,0.94);box-shadow:0 16px 44px rgba(2,6,23,0.35);color:#f8fafc;padding:12px 14px;font-size:14px;line-height:1.4;">
+        <div style="flex:1;min-width:0;">${escapeHtml(banner.message)}</div>
+        <button type="button" data-tournament-banner-dismiss="1" aria-label="Затвори" style="width:28px;height:28px;border:0;border-radius:999px;background:rgba(255,255,255,0.12);color:#fff;font-weight:900;cursor:pointer;">×</button>
+      </div>
+    `
+    options.root.appendChild(host)
+    host.querySelector<HTMLButtonElement>('[data-tournament-banner-dismiss="1"]')?.addEventListener('click', () => {
+      if (!activeRoomState) return
+      activeRoomState.tournamentBanners = activeRoomState.tournamentBanners.filter((item) => item.id !== banner.id)
+      renderActiveRoomScreen()
+    })
+  }
+
   function applyRoomSnapshotToActiveRoom(message: RoomSnapshotMessage): boolean {
     if (!activeRoomState) {
       return false
@@ -3462,6 +3570,9 @@ export function createActiveRoomFlowController(
     activeRoomState.isGuestTrial = message.isGuestTrial
     activeRoomState.isPrivateTableOrigin = message.isPrivateTableOrigin
     activeRoomState.isTournamentMatchOrigin = message.isTournamentMatchOrigin
+    activeRoomState.tournamentAttendance = message.tournamentAttendance ?? null
+    activeRoomState.tournamentBotReplacements = message.tournamentBotReplacements ?? []
+    activeRoomState.tournamentBanners = message.tournamentBanners ?? []
     if (message.stakeAmount !== null && message.stakeAmount > 0) {
       activeRoomState.stake = message.stakeAmount as MatchStake
     }
@@ -3525,6 +3636,9 @@ export function createActiveRoomFlowController(
       isGuestTrial: false,
       isPrivateTableOrigin: false,
       isTournamentMatchOrigin: false,
+      tournamentAttendance: null,
+      tournamentBotReplacements: [],
+      tournamentBanners: [],
     }
 
     const pendingRoomSnapshot = pendingRoomSnapshots.get(roomId)
@@ -3575,6 +3689,9 @@ export function createActiveRoomFlowController(
       isGuestTrial: false,
       isPrivateTableOrigin: false,
       isTournamentMatchOrigin: false,
+      tournamentAttendance: null,
+      tournamentBotReplacements: [],
+      tournamentBanners: [],
     }
 
     const pendingRoomSnapshot = pendingRoomSnapshots.get(message.roomId)

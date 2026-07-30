@@ -333,5 +333,8 @@ export function createRoomSnapshotMessage(
     isGuestTrial: room.config.isGuestTrial === true,
     isPrivateTableOrigin: room.config.isPrivateTableOrigin === true,
     isTournamentMatchOrigin: room.config.isTournamentMatchOrigin === true,
+    tournamentAttendance: room.config.tournamentAttendance ?? null,
+    tournamentBotReplacements: room.config.tournamentBotReplacements ?? [],
+    tournamentBanners: room.config.tournamentBanners ?? [],
   }
 }

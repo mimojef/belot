@@ -9,6 +9,9 @@ import type {
   RoomStatus,
   Seat,
   ServerMessage,
+  TournamentAttendanceSnapshot,
+  TournamentBotReplacementSnapshot,
+  TournamentRoomBannerSnapshot,
 } from '../network/createGameServerClient'
 import type { GameAudioController } from '../audio/createGameAudioController'
 import type { PendingDeclarationPrompt } from './declarations/declarationPromptTypes'
@@ -30,6 +33,9 @@ export type ActiveRoomState = {
   isGuestTrial: boolean
   isPrivateTableOrigin: boolean
   isTournamentMatchOrigin: boolean
+  tournamentAttendance: TournamentAttendanceSnapshot | null
+  tournamentBotReplacements: TournamentBotReplacementSnapshot[]
+  tournamentBanners: TournamentRoomBannerSnapshot[]
 }
 
 export type CreateActiveRoomFlowControllerOptions = {

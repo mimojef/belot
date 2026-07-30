@@ -332,6 +332,13 @@ function tournamentMatchStatusLabel(status: string, roomReady: boolean): string 
   return status
 }
 
+function tournamentResultKindLabel(resultKind: string | null): string {
+  if (resultKind === 'walkover') return 'Служебна победа'
+  if (resultKind === 'played_with_bots') return 'Играно с бот'
+  if (resultKind === 'played') return 'Нормално изигран'
+  return ''
+}
+
 function renderTournamentMatchAssignmentCallout(t: TournamentDetailSnapshot): string {
   const assignment = t.myActiveMatch
   if (assignment === null) return ''
@@ -363,7 +370,7 @@ function renderTournamentRounds(t: TournamentDetailSnapshot): string {
             ${round.matches.map((match) => `
               <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;">
                 <div style="font-size:13px;font-weight:800;color:rgba(255,255,255,0.78);min-width:0;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(match.teamAId.slice(0, 8))} срещу ${escapeHtml(match.teamBId.slice(0, 8))}</div>
-                <div style="font-size:11px;font-weight:900;color:${match.status === 'completed' ? '#86efac' : '#fde68a'};white-space:nowrap;">${tournamentMatchStatusLabel(match.status, match.roomReady)}</div>
+                <div style="font-size:11px;font-weight:900;color:${match.status === 'completed' ? '#86efac' : '#fde68a'};white-space:nowrap;text-align:right;">${escapeHtml(match.progressLabel ?? tournamentMatchStatusLabel(match.status, match.roomReady))}${tournamentResultKindLabel(match.resultKind) ? `<div style="margin-top:3px;color:#cbd5e1;">${escapeHtml(tournamentResultKindLabel(match.resultKind))}</div>` : ''}</div>
               </div>
             `).join('')}
           </div>

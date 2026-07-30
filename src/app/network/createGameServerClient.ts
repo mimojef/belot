@@ -138,6 +138,15 @@ export type TournamentMatchSnapshot = {
   winnerTeamId: string | null
   resultKind: string | null
   roomReady: boolean
+  attendance?: {
+    state: 'waiting' | 'resolved' | 'countdown' | 'started' | 'completed'
+    deadlineAt: string | null
+    secondsRemaining: number
+    resolutionKind: 'all_present' | 'walkover' | 'bots_inserted' | null
+    gameStartAt: string | null
+    startSecondsRemaining: number
+  }
+  progressLabel?: string
   startedAt: string | null
   completedAt: string | null
 }
@@ -994,6 +1003,51 @@ export type RoomSnapshotMessage = {
   isGuestTrial: boolean
   isPrivateTableOrigin: boolean
   isTournamentMatchOrigin: boolean
+  tournamentAttendance?: TournamentAttendanceSnapshot | null
+  tournamentBotReplacements?: TournamentBotReplacementSnapshot[]
+  tournamentBanners?: TournamentRoomBannerSnapshot[]
+}
+
+export type TournamentAttendancePlayerSummary = {
+  seat: Seat
+  team: 'A' | 'B'
+  displayName: string
+  avatarUrl: string | null
+}
+
+export type TournamentAttendanceSnapshot = {
+  state: 'waiting' | 'resolved' | 'countdown' | 'started' | 'completed'
+  serverNow: string
+  deadlineAt: string | null
+  secondsRemaining: number
+  missingPlayers: TournamentAttendancePlayerSummary[]
+  missingByTeam: Record<'A' | 'B', TournamentAttendancePlayerSummary[]>
+  resolutionKind: 'all_present' | 'walkover' | 'bots_inserted' | null
+  gameStartAt: string | null
+  startSecondsRemaining: number
+  walkover: {
+    winnerTeamId: string
+    loserTeamId: string
+    reason: string
+    completedAt: string
+  } | null
+}
+
+export type TournamentBotReplacementSnapshot = {
+  seat: Seat
+  replacedPlayer: TournamentAttendancePlayerSummary
+  takeoverAvailableForMe: boolean
+  takeoverPending: boolean
+  takeoverCompleted: boolean
+  replacementActive: boolean
+}
+
+export type TournamentRoomBannerSnapshot = {
+  id: string
+  kind: 'bots_inserted' | 'takeover_pending' | 'takeover_completed'
+  message: string
+  createdAt: string
+  expiresAt: string
 }
 
 export type PlayerProfileMessage = {
