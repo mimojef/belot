@@ -500,6 +500,31 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; tournament: TournamentDetailSnapshot }
     | { ok: false; message: string; requiresPassword?: boolean }
   >
+  onTournamentJoin?: (tournamentId: string, password: string | null) => Promise<
+    | { ok: true; alreadyJoined: boolean; walletBalance: number; tournament: TournamentSummarySnapshot }
+    | { ok: false; message: string; reason?: string; requiresPassword?: boolean }
+  >
+  onTournamentLeave?: (tournamentId: string) => Promise<
+    | {
+        ok: true
+        alreadyRefunded: boolean
+        refundedAmount: number
+        walletBalance: number
+        tournament: TournamentSummarySnapshot
+      }
+    | { ok: false; message: string }
+  >
+  onTournamentCancel?: (tournamentId: string) => Promise<
+    | {
+        ok: true
+        alreadyCancelled: boolean
+        refundedEntries: number
+        totalRefunded: number
+        walletBalance: number
+        tournament: TournamentSummarySnapshot
+      }
+    | { ok: false; message: string }
+  >
 }
 
 
@@ -823,6 +848,15 @@ type InternalLobbyFlowState = {
   tournamentDetailPasswordDraft: string
   tournamentDetailUnlockBusy: boolean
   tournamentDetailUnlockErrorText: string | null
+  tournamentJoinConfirmOpen: boolean
+  tournamentJoinBusy: boolean
+  tournamentJoinErrorText: string | null
+  tournamentLeaveConfirmOpen: boolean
+  tournamentLeaveBusy: boolean
+  tournamentLeaveErrorText: string | null
+  tournamentCancelConfirmOpen: boolean
+  tournamentCancelBusy: boolean
+  tournamentCancelErrorText: string | null
 }
 
 const DEFAULT_REQUIRED_PLAYERS = 4
@@ -1103,6 +1137,15 @@ function createInitialState(): InternalLobbyFlowState {
     tournamentDetailPasswordDraft: '',
     tournamentDetailUnlockBusy: false,
     tournamentDetailUnlockErrorText: null,
+    tournamentJoinConfirmOpen: false,
+    tournamentJoinBusy: false,
+    tournamentJoinErrorText: null,
+    tournamentLeaveConfirmOpen: false,
+    tournamentLeaveBusy: false,
+    tournamentLeaveErrorText: null,
+    tournamentCancelConfirmOpen: false,
+    tournamentCancelBusy: false,
+    tournamentCancelErrorText: null,
   }
 }
 
@@ -2408,6 +2451,15 @@ export function createLobbyFlowController(
       tournamentDetailPasswordDraft: state.tournamentDetailPasswordDraft,
       tournamentDetailUnlockBusy: state.tournamentDetailUnlockBusy,
       tournamentDetailUnlockErrorText: state.tournamentDetailUnlockErrorText,
+      tournamentJoinConfirmOpen: state.tournamentJoinConfirmOpen,
+      tournamentJoinBusy: state.tournamentJoinBusy,
+      tournamentJoinErrorText: state.tournamentJoinErrorText,
+      tournamentLeaveConfirmOpen: state.tournamentLeaveConfirmOpen,
+      tournamentLeaveBusy: state.tournamentLeaveBusy,
+      tournamentLeaveErrorText: state.tournamentLeaveErrorText,
+      tournamentCancelConfirmOpen: state.tournamentCancelConfirmOpen,
+      tournamentCancelBusy: state.tournamentCancelBusy,
+      tournamentCancelErrorText: state.tournamentCancelErrorText,
       shopPurchaseResumeId: state.shopPurchaseResumeId,
       shopPurchaseHideConfirmId: state.shopPurchaseHideConfirmId,
       shopPurchaseActionPurchaseId: state.shopPurchaseActionPurchaseId,
@@ -2604,6 +2656,33 @@ export function createLobbyFlowController(
       },
       onTournamentUnlockSubmit: () => {
         void submitTournamentUnlock()
+      },
+      onTournamentJoinConfirmOpen: () => {
+        openTournamentJoinConfirm()
+      },
+      onTournamentJoinConfirmClose: () => {
+        closeTournamentJoinConfirm()
+      },
+      onTournamentJoinSubmit: () => {
+        void submitTournamentJoin()
+      },
+      onTournamentLeaveConfirmOpen: () => {
+        openTournamentLeaveConfirm()
+      },
+      onTournamentLeaveConfirmClose: () => {
+        closeTournamentLeaveConfirm()
+      },
+      onTournamentLeaveSubmit: () => {
+        void submitTournamentLeave()
+      },
+      onTournamentCancelConfirmOpen: () => {
+        openTournamentCancelConfirm()
+      },
+      onTournamentCancelConfirmClose: () => {
+        closeTournamentCancelConfirm()
+      },
+      onTournamentCancelSubmit: () => {
+        void submitTournamentCancel()
       },
       onLeaderboardCategoryClick: (category) => {
         state.activeLeaderboardCategory = category
@@ -3814,6 +3893,146 @@ export function createLobbyFlowController(
     state.tournamentDetailRequiresPassword = false
     state.tournamentDetailUnlockErrorText = null
     state.tournamentDetailPasswordDraft = ''
+    render()
+  }
+
+  // Join/leave/cancel връщат TournamentSummarySnapshot (не Detail) — мержваме
+  // върху текущия state.tournamentDetail, за да запазим cancelReason/
+  // startedAt/finishedAt (detail-only полета, непроменени от тия действия).
+  function mergeTournamentSummaryIntoDetail(summary: TournamentSummarySnapshot): void {
+    if (state.tournamentDetail === null) return
+    state.tournamentDetail = { ...state.tournamentDetail, ...summary }
+  }
+
+  function openTournamentJoinConfirm(): void {
+    state.tournamentJoinConfirmOpen = true
+    state.tournamentJoinErrorText = null
+    render()
+  }
+
+  function closeTournamentJoinConfirm(): void {
+    if (state.tournamentJoinBusy) return
+    state.tournamentJoinConfirmOpen = false
+    state.tournamentJoinErrorText = null
+    render()
+  }
+
+  async function submitTournamentJoin(): Promise<void> {
+    if (!options.onTournamentJoin || state.tournamentDetailId === null || state.tournamentJoinBusy) {
+      return
+    }
+    const tournamentId = state.tournamentDetailId
+
+    state.tournamentJoinBusy = true
+    state.tournamentJoinErrorText = null
+    render()
+
+    const result = await options.onTournamentJoin(tournamentId, null)
+
+    if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) {
+      return
+    }
+
+    state.tournamentJoinBusy = false
+
+    if (!result.ok) {
+      state.tournamentJoinErrorText = result.message
+      render()
+      return
+    }
+
+    state.tournamentJoinConfirmOpen = false
+    state.tournamentJoinErrorText = null
+    mergeTournamentSummaryIntoDetail(result.tournament)
+    void refetchTournamentsList()
+    render()
+  }
+
+  function openTournamentLeaveConfirm(): void {
+    state.tournamentLeaveConfirmOpen = true
+    state.tournamentLeaveErrorText = null
+    render()
+  }
+
+  function closeTournamentLeaveConfirm(): void {
+    if (state.tournamentLeaveBusy) return
+    state.tournamentLeaveConfirmOpen = false
+    state.tournamentLeaveErrorText = null
+    render()
+  }
+
+  async function submitTournamentLeave(): Promise<void> {
+    if (!options.onTournamentLeave || state.tournamentDetailId === null || state.tournamentLeaveBusy) {
+      return
+    }
+    const tournamentId = state.tournamentDetailId
+
+    state.tournamentLeaveBusy = true
+    state.tournamentLeaveErrorText = null
+    render()
+
+    const result = await options.onTournamentLeave(tournamentId)
+
+    if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) {
+      return
+    }
+
+    state.tournamentLeaveBusy = false
+
+    if (!result.ok) {
+      state.tournamentLeaveErrorText = result.message
+      render()
+      return
+    }
+
+    state.tournamentLeaveConfirmOpen = false
+    state.tournamentLeaveErrorText = null
+    mergeTournamentSummaryIntoDetail(result.tournament)
+    void refetchTournamentsList()
+    render()
+  }
+
+  function openTournamentCancelConfirm(): void {
+    state.tournamentCancelConfirmOpen = true
+    state.tournamentCancelErrorText = null
+    render()
+  }
+
+  function closeTournamentCancelConfirm(): void {
+    if (state.tournamentCancelBusy) return
+    state.tournamentCancelConfirmOpen = false
+    state.tournamentCancelErrorText = null
+    render()
+  }
+
+  async function submitTournamentCancel(): Promise<void> {
+    if (!options.onTournamentCancel || state.tournamentDetailId === null || state.tournamentCancelBusy) {
+      return
+    }
+    const tournamentId = state.tournamentDetailId
+
+    state.tournamentCancelBusy = true
+    state.tournamentCancelErrorText = null
+    render()
+
+    const result = await options.onTournamentCancel(tournamentId)
+
+    if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) {
+      return
+    }
+
+    state.tournamentCancelBusy = false
+
+    if (!result.ok) {
+      state.tournamentCancelErrorText = result.message
+      render()
+      return
+    }
+
+    state.tournamentCancelConfirmOpen = false
+    state.tournamentCancelErrorText = null
+    mergeTournamentSummaryIntoDetail(result.tournament)
+    void refetchTournamentsList()
     render()
   }
 

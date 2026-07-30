@@ -71,6 +71,7 @@ import { detectOsType } from './utils/detectOsType.js'
 import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
 import { createTournamentStore } from './db/tournamentStore.js'
+import { createTournamentEconomyStore } from './db/tournamentEconomyStore.js'
 import type { TournamentRecord } from './tournament/tournamentTypes.js'
 import {
   ALLOWED_TOURNAMENT_ENTRY_FEES,
@@ -481,6 +482,7 @@ const friendshipStore = await createFriendshipStore(
   playerProgressStore,
 )
 const tournamentStore = await createTournamentStore(databaseBootstrap.databaseFilePath)
+const tournamentEconomyStore = await createTournamentEconomyStore(databaseBootstrap.databaseFilePath)
 const chatStore = await createChatStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
@@ -5632,12 +5634,16 @@ function buildTournamentSummaryDto(
 ): TournamentSummaryDto {
   const entries = tournamentStore.getEntriesForTournament(tournament.tournamentId)
   const teams = tournamentStore.getTeamsForTournament(tournament.tournamentId)
+  const viewerEntry = viewerProfileId !== null
+    ? entries.find((e) => e.profileId === viewerProfileId) ?? null
+    : null
   return toTournamentSummaryDto({
     tournament,
     creatorPublicProfile: getTournamentCreatorPublicProfile(tournament.creatorProfileId),
     confirmedEntriesCount: entries.filter((e) => e.status === 'confirmed').length,
     completedTeamsCount: teams.filter((t) => t.status !== 'forming').length,
     viewerProfileId,
+    viewerEntryStatus: viewerEntry?.status ?? null,
   })
 }
 
@@ -5896,19 +5902,304 @@ async function handleTournamentDetailRequest(
     }
   }
 
+  const detailEntries = tournamentStore.getEntriesForTournament(tournament.tournamentId)
+  const detailViewerEntry = viewerProfileId !== null
+    ? detailEntries.find((e) => e.profileId === viewerProfileId) ?? null
+    : null
+
   sendJsonResponse(res, 200, {
     ok: true,
     tournament: toTournamentDetailDto({
       tournament,
       creatorPublicProfile: getTournamentCreatorPublicProfile(tournament.creatorProfileId),
-      confirmedEntriesCount: tournamentStore
-        .getEntriesForTournament(tournament.tournamentId)
-        .filter((e) => e.status === 'confirmed').length,
+      confirmedEntriesCount: detailEntries.filter((e) => e.status === 'confirmed').length,
       completedTeamsCount: tournamentStore
         .getTeamsForTournament(tournament.tournamentId)
         .filter((t) => t.status !== 'forming').length,
       viewerProfileId,
+      viewerEntryStatus: detailViewerEntry?.status ?? null,
     }),
+  })
+  return true
+}
+
+// ─── Tournaments: join / leave / cancel (entry fee escrow) ────────────────
+
+const TOURNAMENT_ENTRY_ACTION_RATE_LIMIT_WINDOW_MS = 60_000
+const TOURNAMENT_ENTRY_ACTION_RATE_LIMIT_MAX_PER_WINDOW = 5
+const tournamentEntryActionRateLimitByProfileId = new Map<string, { count: number; windowStartedAt: number }>()
+
+function isTournamentEntryActionRateLimited(profileId: string, now: number): boolean {
+  const existing = tournamentEntryActionRateLimitByProfileId.get(profileId)
+  if (
+    existing === undefined ||
+    now - existing.windowStartedAt >= TOURNAMENT_ENTRY_ACTION_RATE_LIMIT_WINDOW_MS
+  ) {
+    tournamentEntryActionRateLimitByProfileId.set(profileId, { count: 1, windowStartedAt: now })
+    return false
+  }
+  if (existing.count >= TOURNAMENT_ENTRY_ACTION_RATE_LIMIT_MAX_PER_WINDOW) {
+    return true
+  }
+  existing.count += 1
+  return false
+}
+
+const JOIN_FAILURE_MESSAGES: Record<string, string> = {
+  tournament_not_found: 'Турнирът не е намерен.',
+  tournament_not_open: 'Турнирът вече не приема записвания.',
+  tournament_full: 'Турнирът е запълнен.',
+  rejoin_not_allowed: 'Вече си напускал този турнир и не можеш да се запишеш повторно.',
+  already_participating_elsewhere: 'Вече участваш в друг активен турнир.',
+  insufficient_funds: 'Нямаш достатъчно жълтици за този вход.',
+  requires_password: 'Този турнир е защитен с парола.',
+}
+
+async function handleTournamentJoinRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)\/join$/.exec(pathname)
+  if (!match) return false
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (!isAllowedVisitorRequestOrigin(req)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Заявката е отхвърлена.' })
+    return true
+  }
+
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си, за да се запишеш.' })
+    return true
+  }
+  const { profileId } = authResult
+
+  if (isTournamentEntryActionRateLimited(profileId, Date.now())) {
+    sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
+    return true
+  }
+
+  let tournamentId: string
+  try {
+    tournamentId = decodeURIComponent(match[1] ?? '')
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+  if (!tournamentId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+
+  // Клиентът не подава profileId/accountId/entryFee/joinedAs/idempotencyKey —
+  // всичко идва от session и tournament record. Единственото допустимо поле
+  // е password, и то само защото е най-малкият безопасен модел за join към
+  // password-protected турнир (виж handleTournamentDetailRequest unlock модела).
+  let password: string | null = null
+  try {
+    const body = await readJsonRequestBody(req)
+    if (isRecord(body) && typeof body.password === 'string') {
+      password = body.password
+    }
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно JSON тяло.' })
+    return true
+  }
+
+  const result = tournamentEconomyStore.joinTournamentSoloAtomically(tournamentId, profileId, {
+    password,
+  })
+
+  if (!result.ok) {
+    const status = result.reason === 'tournament_not_found' ? 404
+      : result.reason === 'requires_password' ? 403
+      : result.reason === 'insufficient_funds' ? 402
+      : result.reason === 'tournament_full' || result.reason === 'already_participating_elsewhere'
+        || result.reason === 'tournament_not_open' || result.reason === 'rejoin_not_allowed' ? 409
+      : 400
+    sendJsonResponse(res, status, {
+      ok: false,
+      reason: result.reason,
+      message: JOIN_FAILURE_MESSAGES[result.reason] ?? 'Записването не бе успешно.',
+      requiresPassword: result.reason === 'requires_password' ? true : undefined,
+    })
+    return true
+  }
+
+  // tournament_events записът за 'entry_confirmed' вече е вписан атомарно
+  // вътре в joinTournamentSoloAtomically (същата транзакция като debit-а).
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    alreadyJoined: result.alreadyJoined,
+    entry: {
+      entryId: result.entry.entryId,
+      status: result.entry.status,
+      joinedAs: result.entry.joinedAs,
+      createdAt: result.entry.createdAt,
+    },
+    walletBalance: result.walletBalance,
+    tournament: buildTournamentSummaryDto(result.tournament, profileId),
+  })
+  return true
+}
+
+const LEAVE_FAILURE_MESSAGES: Record<string, string> = {
+  entry_not_found: 'Нямаш записване в този турнир.',
+  not_own_entry: 'Не можеш да управляваш чуждо записване.',
+  tournament_not_open: 'Турнирът вече не е в статус за отказване.',
+  entry_not_confirmed: 'Записването не е в статус, позволяващ отказване.',
+}
+
+async function handleTournamentLeaveRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)\/leave$/.exec(pathname)
+  if (!match) return false
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (!isAllowedVisitorRequestOrigin(req)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Заявката е отхвърлена.' })
+    return true
+  }
+
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  const { profileId } = authResult
+
+  if (isTournamentEntryActionRateLimited(profileId, Date.now())) {
+    sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
+    return true
+  }
+
+  let tournamentId: string
+  try {
+    tournamentId = decodeURIComponent(match[1] ?? '')
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+  if (!tournamentId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+
+  const result = tournamentEconomyStore.leaveTournamentAndRefundAtomically(tournamentId, profileId)
+
+  if (!result.ok) {
+    const status = result.reason === 'entry_not_found' ? 404 : 409
+    sendJsonResponse(res, status, {
+      ok: false,
+      reason: result.reason,
+      message: LEAVE_FAILURE_MESSAGES[result.reason] ?? 'Отказването не бе успешно.',
+    })
+    return true
+  }
+
+  // tournament_events записът за 'entry_withdrawn_and_refunded' вече е
+  // вписан атомарно вътре в leaveTournamentAndRefundAtomically.
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    alreadyRefunded: result.alreadyRefunded,
+    refundedAmount: result.refundedAmount,
+    walletBalance: result.walletBalance,
+    tournament: buildTournamentSummaryDto(result.tournament, profileId),
+  })
+  return true
+}
+
+const CANCEL_FAILURE_MESSAGES: Record<string, string> = {
+  tournament_not_found: 'Турнирът не е намерен.',
+  not_creator: 'Само създателят на турнира може да го отмени.',
+  tournament_not_open: 'Турнирът вече не може да бъде отменен.',
+}
+
+async function handleTournamentCancelRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)\/cancel$/.exec(pathname)
+  if (!match) return false
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (!isAllowedVisitorRequestOrigin(req)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Заявката е отхвърлена.' })
+    return true
+  }
+
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  const { profileId } = authResult
+
+  if (isTournamentEntryActionRateLimited(profileId, Date.now())) {
+    sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
+    return true
+  }
+
+  let tournamentId: string
+  try {
+    tournamentId = decodeURIComponent(match[1] ?? '')
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+  if (!tournamentId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+
+  const result = tournamentEconomyStore.cancelOpenTournamentAndRefundAtomically(
+    tournamentId,
+    profileId,
+    'Отменен от създателя.',
+  )
+
+  if (!result.ok) {
+    const status = result.reason === 'tournament_not_found' ? 404
+      : result.reason === 'not_creator' ? 403
+      : 409
+    sendJsonResponse(res, status, {
+      ok: false,
+      reason: result.reason,
+      message: CANCEL_FAILURE_MESSAGES[result.reason] ?? 'Отмяната не бе успешна.',
+    })
+    return true
+  }
+
+  // tournament_events записът за 'tournament_cancelled_by_creator' вече е
+  // вписан атомарно вътре в cancelOpenTournamentAndRefundAtomically.
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    alreadyCancelled: result.alreadyCancelled,
+    refundedEntries: result.refundedEntries,
+    totalRefunded: result.totalRefunded,
+    walletBalance: result.walletBalance,
+    tournament: buildTournamentSummaryDto(result.tournament, profileId),
   })
   return true
 }
@@ -8119,6 +8410,18 @@ async function handleHttpRequest(
   }
 
   if (await handleTournamentDetailRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTournamentJoinRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTournamentLeaveRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTournamentCancelRequest(req, res, requestUrl.pathname)) {
     return
   }
 

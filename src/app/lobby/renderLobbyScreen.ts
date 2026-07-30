@@ -381,6 +381,15 @@ export type LobbyScreenState = {
   tournamentDetailPasswordDraft: string
   tournamentDetailUnlockBusy: boolean
   tournamentDetailUnlockErrorText: string | null
+  tournamentJoinConfirmOpen: boolean
+  tournamentJoinBusy: boolean
+  tournamentJoinErrorText: string | null
+  tournamentLeaveConfirmOpen: boolean
+  tournamentLeaveBusy: boolean
+  tournamentLeaveErrorText: string | null
+  tournamentCancelConfirmOpen: boolean
+  tournamentCancelBusy: boolean
+  tournamentCancelErrorText: string | null
 }
 
 export type RenderLobbyScreenOptions = {
@@ -435,6 +444,15 @@ export type RenderLobbyScreenOptions = {
   onTournamentCardClick: (tournamentId: string) => void
   onTournamentDetailPasswordDraftChange: (value: string) => void
   onTournamentUnlockSubmit: () => void
+  onTournamentJoinConfirmOpen: () => void
+  onTournamentJoinConfirmClose: () => void
+  onTournamentJoinSubmit: () => void
+  onTournamentLeaveConfirmOpen: () => void
+  onTournamentLeaveConfirmClose: () => void
+  onTournamentLeaveSubmit: () => void
+  onTournamentCancelConfirmOpen: () => void
+  onTournamentCancelConfirmClose: () => void
+  onTournamentCancelSubmit: () => void
   onAdminClick: () => void
   onAdminInfoClick: () => void
   onAdminServerClick: () => void
@@ -10374,6 +10392,39 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-tournament-unlock-submit="1"]')
     ?.addEventListener('click', options.onTournamentUnlockSubmit)
+
+  root.querySelector<HTMLButtonElement>('[data-tournament-join-open="1"]')
+    ?.addEventListener('click', options.onTournamentJoinConfirmOpen)
+  root.querySelector<HTMLButtonElement>('[data-tournament-join-close="1"]')
+    ?.addEventListener('click', options.onTournamentJoinConfirmClose)
+  root.querySelector<HTMLButtonElement>('[data-tournament-join-submit="1"]')
+    ?.addEventListener('click', options.onTournamentJoinSubmit)
+  root.querySelector<HTMLElement>('[data-tournament-join-backdrop="1"]')
+    ?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) options.onTournamentJoinConfirmClose()
+    })
+
+  root.querySelector<HTMLButtonElement>('[data-tournament-leave-open="1"]')
+    ?.addEventListener('click', options.onTournamentLeaveConfirmOpen)
+  root.querySelector<HTMLButtonElement>('[data-tournament-leave-close="1"]')
+    ?.addEventListener('click', options.onTournamentLeaveConfirmClose)
+  root.querySelector<HTMLButtonElement>('[data-tournament-leave-submit="1"]')
+    ?.addEventListener('click', options.onTournamentLeaveSubmit)
+  root.querySelector<HTMLElement>('[data-tournament-leave-backdrop="1"]')
+    ?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) options.onTournamentLeaveConfirmClose()
+    })
+
+  root.querySelector<HTMLButtonElement>('[data-tournament-cancel-open="1"]')
+    ?.addEventListener('click', options.onTournamentCancelConfirmOpen)
+  root.querySelector<HTMLButtonElement>('[data-tournament-cancel-close="1"]')
+    ?.addEventListener('click', options.onTournamentCancelConfirmClose)
+  root.querySelector<HTMLButtonElement>('[data-tournament-cancel-submit="1"]')
+    ?.addEventListener('click', options.onTournamentCancelSubmit)
+  root.querySelector<HTMLElement>('[data-tournament-cancel-backdrop="1"]')
+    ?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) options.onTournamentCancelConfirmClose()
+    })
 
   root.querySelector<HTMLButtonElement>('[data-private-room-leave="1"]')
     ?.addEventListener('click', options.onPrivateRoomLeave)

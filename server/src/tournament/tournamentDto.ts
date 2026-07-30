@@ -1,5 +1,5 @@
 import type { ProfileId } from '../core/serverTypes.js'
-import type { TournamentRecord, TournamentStatus } from './tournamentTypes.js'
+import type { TournamentEntryStatus, TournamentRecord, TournamentStatus } from './tournamentTypes.js'
 
 // Статуси, показвани по подразбиране в публичния "активен" списък.
 // finished/cancelled/admin_cancelled/auto_cancelled/failed изискват
@@ -41,6 +41,14 @@ export type TournamentPrizePreviewDto = {
   secondTeamPrize: number
 }
 
+export type TournamentViewerParticipationDto = {
+  isParticipant: boolean
+  entryStatus: TournamentEntryStatus | null
+  canJoinSolo: boolean
+  canLeave: boolean
+  canCancel: boolean
+}
+
 export type TournamentSummaryDto = {
   tournamentId: string
   name: string
@@ -53,11 +61,14 @@ export type TournamentSummaryDto = {
   playerCapacity: number
   confirmedEntriesCount: number
   completedTeamsCount: number
+  availablePlaces: number
+  isFull: boolean
   startMode: 'fill' | 'scheduled'
   scheduledStartAt: string | null
   createdAt: string
   prizePreview: TournamentPrizePreviewDto
   isMine: boolean
+  viewer: TournamentViewerParticipationDto
 }
 
 export type TournamentDetailDto = TournamentSummaryDto & {
@@ -96,12 +107,39 @@ function toTournamentCreatorDto(
   }
 }
 
+// "Активно" участие в смисъла на viewer-facing DTO — само confirmed се
+// показва като "участваш". finalist е бъдещ bracket статус (schema вече го
+// поддържа), еliminated/champion/refunded/withdrawn са терминални.
+const ACTIVE_VIEWER_ENTRY_STATUSES: TournamentEntryStatus[] = ['confirmed', 'finalist']
+
 export type ToTournamentSummaryDtoInput = {
   tournament: TournamentRecord
   creatorPublicProfile: { profileId: string | null; displayName: string; avatarUrl: string | null } | null
   confirmedEntriesCount: number
   completedTeamsCount: number
   viewerProfileId: ProfileId | null
+  viewerEntryStatus: TournamentEntryStatus | null
+}
+
+function computeViewerParticipation(input: ToTournamentSummaryDtoInput): TournamentViewerParticipationDto {
+  const { tournament, viewerProfileId, viewerEntryStatus } = input
+  const isParticipant =
+    viewerEntryStatus !== null && ACTIVE_VIEWER_ENTRY_STATUSES.includes(viewerEntryStatus)
+  const isMine = viewerProfileId !== null && viewerProfileId === tournament.creatorProfileId
+  const isFull = input.confirmedEntriesCount >= tournament.playerCapacity
+
+  return {
+    isParticipant,
+    entryStatus: viewerEntryStatus,
+    canJoinSolo:
+      viewerProfileId !== null &&
+      tournament.status === 'open' &&
+      !isParticipant &&
+      !isFull &&
+      viewerEntryStatus === null, // терминален (refunded/withdrawn) → rejoin не е позволен
+    canLeave: isParticipant && tournament.status === 'open',
+    canCancel: isMine && tournament.status === 'open',
+  }
 }
 
 // Безопасен DTO mapping — НИКОГА не пропуска password_hash, cancel_reason
@@ -109,6 +147,7 @@ export type ToTournamentSummaryDtoInput = {
 // поле извън изрично изброените тук.
 export function toTournamentSummaryDto(input: ToTournamentSummaryDtoInput): TournamentSummaryDto {
   const { tournament } = input
+  const availablePlaces = Math.max(0, tournament.playerCapacity - input.confirmedEntriesCount)
   return {
     tournamentId: tournament.tournamentId,
     name: tournament.name,
@@ -121,11 +160,14 @@ export function toTournamentSummaryDto(input: ToTournamentSummaryDtoInput): Tour
     playerCapacity: tournament.playerCapacity,
     confirmedEntriesCount: input.confirmedEntriesCount,
     completedTeamsCount: input.completedTeamsCount,
+    availablePlaces,
+    isFull: availablePlaces === 0,
     startMode: tournament.startMode,
     scheduledStartAt: tournament.scheduledStartAt,
     createdAt: tournament.createdAt,
     prizePreview: computeTournamentPrizePreview(tournament.entryFee, tournament.playerCapacity),
     isMine: input.viewerProfileId !== null && input.viewerProfileId === tournament.creatorProfileId,
+    viewer: computeViewerParticipation(input),
   }
 }
 

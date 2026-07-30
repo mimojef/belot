@@ -518,7 +518,8 @@ try {
     const allowedKeys = new Set([
       'tournamentId', 'name', 'creator', 'visibility', 'requiresPassword', 'status', 'statusLabel',
       'entryFee', 'playerCapacity', 'confirmedEntriesCount', 'completedTeamsCount', 'startMode',
-      'scheduledStartAt', 'createdAt', 'prizePreview', 'isMine',
+      'scheduledStartAt', 'createdAt', 'prizePreview', 'isMine', 'availablePlaces', 'isFull',
+      'viewer',
     ])
     for (const t of b.tournaments) {
       for (const key of Object.keys(t)) {

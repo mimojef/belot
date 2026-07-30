@@ -379,8 +379,180 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
         <div style="font-size:13px;color:rgba(255,255,255,0.4);font-style:italic;">Схемата ще се появи, след като турнирът стартира.</div>
       </div>
 
+      ${renderTournamentParticipationActions(state, t)}
+
       <div style="font-size:11px;color:rgba(255,255,255,0.35);">Създаден: ${fmtLocalDateTime(t.createdAt)}</div>
     </section>
+
+    ${state.tournamentJoinConfirmOpen ? renderTournamentJoinConfirmPopup(state, t) : ''}
+    ${state.tournamentLeaveConfirmOpen ? renderTournamentLeaveConfirmPopup(state, t) : ''}
+    ${state.tournamentCancelConfirmOpen ? renderTournamentCancelConfirmPopup(state) : ''}
+  `
+}
+
+function renderTournamentParticipationActions(state: LobbyScreenState, t: TournamentDetailSnapshot): string {
+  const errorBox = (text: string | null) =>
+    text
+      ? `<div style="margin-bottom:10px;padding:8px 10px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:12px;font-weight:700;">${escapeHtml(text)}</div>`
+      : ''
+
+  if (t.viewer.isParticipant) {
+    return `
+      <div style="background:#0d0d0d;border:1px solid rgba(34,197,94,0.32);border-radius:10px;padding:16px;margin-bottom:14px;">
+        ${errorBox(state.tournamentLeaveErrorText)}
+        <div style="font-size:14px;font-weight:800;color:#22c55e;margin-bottom:10px;">✓ Записан си самостоятелно</div>
+        <button type="button" data-tournament-leave-open="1" style="
+          height:38px;padding:0 18px;border-radius:8px;border:1px solid rgba(248,113,113,0.4);
+          background:rgba(127,29,29,0.2);color:#fca5a5;font-size:13px;font-weight:800;cursor:pointer;
+        ">Откажи участие</button>
+        ${t.viewer.canCancel ? renderCreatorCancelBlock(state) : ''}
+      </div>
+    `
+  }
+
+  if (t.viewer.canJoinSolo) {
+    return `
+      <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:16px;margin-bottom:14px;">
+        ${errorBox(state.tournamentJoinErrorText)}
+        <button type="button" data-tournament-join-open="1" style="
+          width:100%;height:42px;border:0;border-radius:8px;
+          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;
+          font-size:14px;font-weight:900;cursor:pointer;
+        ">Запиши се сам</button>
+        <div style="margin-top:8px;font-size:12px;color:rgba(255,255,255,0.5);text-align:center;">
+          Входът се плаща еднократно за целия турнир: ${formatAmount(t.entryFee)} жълтици.
+        </div>
+        <div style="margin-top:6px;font-size:12px;color:rgba(255,255,255,0.4);text-align:center;font-style:italic;">
+          Участие с избран партньор ще бъде добавено в следващия етап.
+        </div>
+      </div>
+    `
+  }
+
+  if (t.isFull && t.status === 'open') {
+    return `
+      <div style="background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:16px;margin-bottom:14px;">
+        <button type="button" disabled style="
+          width:100%;height:42px;border:1px solid rgba(255,255,255,0.12);border-radius:8px;
+          background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.35);font-size:13px;font-weight:800;cursor:not-allowed;
+        ">Турнирът е запълнен</button>
+        ${t.viewer.canCancel ? renderCreatorCancelBlock(state) : ''}
+      </div>
+    `
+  }
+
+  // Терминален viewer статус (refunded/withdrawn) или турнирът вече не е open —
+  // няма join действие, но creator cancel блок все пак може да е relevant
+  // (напр. isMine, status=open, viewer никога не се е записвал).
+  if (t.viewer.canCancel) {
+    return `
+      <div style="background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:16px;margin-bottom:14px;">
+        ${renderCreatorCancelBlock(state)}
+      </div>
+    `
+  }
+
+  return ''
+}
+
+function renderCreatorCancelBlock(state: LobbyScreenState): string {
+  return `
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08);">
+      ${state.tournamentCancelErrorText ? `
+        <div style="margin-bottom:10px;padding:8px 10px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:12px;font-weight:700;">${escapeHtml(state.tournamentCancelErrorText)}</div>
+      ` : ''}
+      <button type="button" data-tournament-cancel-open="1" style="
+        height:38px;padding:0 18px;border-radius:8px;border:1px solid rgba(248,113,113,0.4);
+        background:rgba(127,29,29,0.2);color:#fca5a5;font-size:13px;font-weight:800;cursor:pointer;
+      ">Отмени турнира</button>
+    </div>
+  `
+}
+
+function renderTournamentJoinConfirmPopup(state: LobbyScreenState, t: TournamentDetailSnapshot): string {
+  return `
+    <div data-tournament-join-backdrop="1" style="position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:16px;">
+      <div style="background:#111118;border:1px solid rgba(212,165,32,0.4);border-radius:16px;width:100%;max-width:380px;padding:24px;box-sizing:border-box;">
+        <div style="font-size:16px;font-weight:900;color:#d4a520;margin-bottom:12px;">Запиши се сам</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.75);line-height:1.5;margin-bottom:6px;">
+          Ще платиш еднократен вход от <strong style="color:#fff;">${formatAmount(t.entryFee)} жълтици</strong> за целия турнир.
+        </div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.5);line-height:1.5;margin-bottom:16px;">
+          Ако се откажеш преди старта на турнира, сумата се връща изцяло.
+        </div>
+        ${state.tournamentJoinErrorText ? `
+          <div style="margin-bottom:14px;padding:8px 10px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:12px;font-weight:700;">${escapeHtml(state.tournamentJoinErrorText)}</div>
+        ` : ''}
+        <div style="display:flex;gap:10px;">
+          <button type="button" data-tournament-join-close="1" ${state.tournamentJoinBusy ? 'disabled' : ''} style="
+            flex:1;height:40px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);
+            background:transparent;color:rgba(255,255,255,0.75);font-size:13px;font-weight:800;
+            cursor:${state.tournamentJoinBusy ? 'default' : 'pointer'};
+          ">Отказ</button>
+          <button type="button" data-tournament-join-submit="1" ${state.tournamentJoinBusy ? 'disabled' : ''} style="
+            flex:1;height:40px;border:0;border-radius:8px;
+            background:${state.tournamentJoinBusy ? 'rgba(212,165,32,0.35)' : 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)'};
+            color:#080808;font-size:13px;font-weight:900;cursor:${state.tournamentJoinBusy ? 'default' : 'pointer'};
+          ">${state.tournamentJoinBusy ? 'Записване...' : 'Потвърди'}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderTournamentLeaveConfirmPopup(state: LobbyScreenState, t: TournamentDetailSnapshot): string {
+  return `
+    <div data-tournament-leave-backdrop="1" style="position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:16px;">
+      <div style="background:#111118;border:1px solid rgba(248,113,113,0.4);border-radius:16px;width:100%;max-width:380px;padding:24px;box-sizing:border-box;">
+        <div style="font-size:16px;font-weight:900;color:#fca5a5;margin-bottom:12px;">Откажи участие</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.75);line-height:1.5;margin-bottom:16px;">
+          Ще получиш обратно <strong style="color:#fff;">${formatAmount(t.entryFee)} жълтици</strong>. Ще напуснеш турнира.
+        </div>
+        ${state.tournamentLeaveErrorText ? `
+          <div style="margin-bottom:14px;padding:8px 10px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:12px;font-weight:700;">${escapeHtml(state.tournamentLeaveErrorText)}</div>
+        ` : ''}
+        <div style="display:flex;gap:10px;">
+          <button type="button" data-tournament-leave-close="1" ${state.tournamentLeaveBusy ? 'disabled' : ''} style="
+            flex:1;height:40px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);
+            background:transparent;color:rgba(255,255,255,0.75);font-size:13px;font-weight:800;
+            cursor:${state.tournamentLeaveBusy ? 'default' : 'pointer'};
+          ">Отказ</button>
+          <button type="button" data-tournament-leave-submit="1" ${state.tournamentLeaveBusy ? 'disabled' : ''} style="
+            flex:1;height:40px;border:0;border-radius:8px;
+            background:${state.tournamentLeaveBusy ? 'rgba(248,113,113,0.35)' : 'linear-gradient(180deg,#f87171 0%,#dc2626 100%)'};
+            color:#080808;font-size:13px;font-weight:900;cursor:${state.tournamentLeaveBusy ? 'default' : 'pointer'};
+          ">${state.tournamentLeaveBusy ? 'Отказване...' : 'Потвърди'}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderTournamentCancelConfirmPopup(state: LobbyScreenState): string {
+  return `
+    <div data-tournament-cancel-backdrop="1" style="position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:16px;">
+      <div style="background:#111118;border:1px solid rgba(248,113,113,0.4);border-radius:16px;width:100%;max-width:400px;padding:24px;box-sizing:border-box;">
+        <div style="font-size:16px;font-weight:900;color:#fca5a5;margin-bottom:12px;">Отмени турнира</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.75);line-height:1.5;margin-bottom:16px;">
+          Всички записани участници ще получат пълния си вход обратно. Турнирът не може да бъде възстановен.
+        </div>
+        ${state.tournamentCancelErrorText ? `
+          <div style="margin-bottom:14px;padding:8px 10px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:12px;font-weight:700;">${escapeHtml(state.tournamentCancelErrorText)}</div>
+        ` : ''}
+        <div style="display:flex;gap:10px;">
+          <button type="button" data-tournament-cancel-close="1" ${state.tournamentCancelBusy ? 'disabled' : ''} style="
+            flex:1;height:40px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);
+            background:transparent;color:rgba(255,255,255,0.75);font-size:13px;font-weight:800;
+            cursor:${state.tournamentCancelBusy ? 'default' : 'pointer'};
+          ">Назад</button>
+          <button type="button" data-tournament-cancel-submit="1" ${state.tournamentCancelBusy ? 'disabled' : ''} style="
+            flex:1;height:40px;border:0;border-radius:8px;
+            background:${state.tournamentCancelBusy ? 'rgba(248,113,113,0.35)' : 'linear-gradient(180deg,#f87171 0%,#dc2626 100%)'};
+            color:#080808;font-size:13px;font-weight:900;cursor:${state.tournamentCancelBusy ? 'default' : 'pointer'};
+          ">${state.tournamentCancelBusy ? 'Отменяне...' : 'Отмени турнира'}</button>
+        </div>
+      </div>
+    </div>
   `
 }
 

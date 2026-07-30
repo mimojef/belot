@@ -161,19 +161,172 @@ await check('[34b] Client-side JS preview (в renderLobbyScreen listeners) из�
   assert(renderLobbySource.includes('prizePool * 0.7'), 'Липсва JS preview 70% формула')
 })
 
-// ── [35] Няма "Запиши се" действие в този commit ──
-await check('[35] Няма работещ "Запиши се" бутон — само disabled placeholder', () => {
-  assert(!tournamentsScreenSource.includes('Запиши се'), 'Не трябва да съществува "Запиши се" текст в този etaп')
+// ── [35] "Запиши се сам" вече е реализирано действие (трети етап) ──
+await check('[35] "Запиши се сам" е работещ бутон, свързан със submit handler', () => {
+  assert(tournamentsScreenSource.includes('Запиши се сам'), 'Липсва "Запиши се сам" текст в detail екрана')
   assert(
-    tournamentsScreenSource.includes('Записването ще бъде достъпно скоро') &&
-    tournamentsScreenSource.includes('disabled'),
-    'Липсва disabled placeholder бутон',
+    tournamentsScreenSource.includes('data-tournament-join-open="1"'),
+    'Липсва data-tournament-join-open бутон',
   )
 })
 
-// ── [36] Няма wallet/coin mutation от тази фича ──
+// ── [36] Wallet mutation минава изцяло през tournamentEconomyStore (не directly tournamentStore) ──
 await check('[36] tournamentStore.ts не докосва profile_wallets', () => {
   // Тази проверка изисква server файла — виж отделния server-side check по-долу.
+})
+
+// ── J58-J75: Join/leave/cancel UI (трети самостоятелен етап) ──
+
+const tournamentEconomyStoreSource = await readFile(
+  join(projectRoot, 'server', 'src', 'db', 'tournamentEconomyStore.ts'),
+  'utf8',
+)
+const indexSource = await readFile(join(projectRoot, 'server', 'src', 'index.ts'), 'utf8')
+
+await check('[J58] "Запиши се сам" join confirm popup присъства с точен escrow текст', () => {
+  assert(
+    tournamentsScreenSource.includes('function renderTournamentJoinConfirmPopup'),
+    'Липсва renderTournamentJoinConfirmPopup',
+  )
+  assert(
+    tournamentsScreenSource.includes('data-tournament-join-submit="1"'),
+    'Липсва data-tournament-join-submit бутон',
+  )
+})
+
+await check('[J59] "Откажи участие" (leave) действие присъства', () => {
+  assert(tournamentsScreenSource.includes('Откажи участие'), 'Липсва "Откажи участие" текст')
+  assert(
+    tournamentsScreenSource.includes('data-tournament-leave-open="1"') &&
+    tournamentsScreenSource.includes('data-tournament-leave-submit="1"'),
+    'Липсва leave open/submit data-attribute wiring',
+  )
+})
+
+await check('[J60] Creator "Отмени турнира" (cancel) действие присъства', () => {
+  assert(tournamentsScreenSource.includes('Отмени турнира'), 'Липсва "Отмени турнира" текст')
+  assert(
+    tournamentsScreenSource.includes('data-tournament-cancel-open="1"') &&
+    tournamentsScreenSource.includes('data-tournament-cancel-submit="1"'),
+    'Липсва cancel open/submit data-attribute wiring',
+  )
+})
+
+await check('[J61] Липсва partner invite функционалност', () => {
+  for (const forbidden of ['покани партньор', 'Покани партньор', 'invitePartner', 'partner_inviter', 'избери приятел']) {
+    assert(!tournamentsScreenSource.includes(forbidden), `Намерен забранен partner-invite маркер: ${forbidden}`)
+  }
+})
+
+await check('[J62] Липсва automatic team creation / pairing логика', () => {
+  for (const forbidden of ['createTeam(', 'autoPair', 'automatchTeam', 'pairPlayers']) {
+    assert(!tournamentsScreenSource.includes(forbidden), `Намерен забранен auto-team маркер: ${forbidden}`)
+    assert(!controllerSource.includes(forbidden), `Намерен забранен auto-team маркер в контролера: ${forbidden}`)
+  }
+})
+
+await check('[J63] Липсва scheduler / auto-start транзиция в economy store-а', () => {
+  for (const forbidden of ['setInterval', 'setTimeout', 'cron', 'node-cron']) {
+    assert(!tournamentEconomyStoreSource.includes(forbidden), `Намерен забранен scheduler маркер: ${forbidden}`)
+  }
+})
+
+await check('[J64] Липсва game-room интеграция (не се създава/стартира game room от join/leave/cancel)', () => {
+  for (const forbidden of ['createGameRoom', 'roomStore.create', 'startGame(', 'gameWorker']) {
+    assert(!tournamentEconomyStoreSource.includes(forbidden), `Намерен забранен game-room маркер: ${forbidden}`)
+  }
+})
+
+await check('[J65] Double-submit guard: join/leave/cancel submit функциите проверяват *Busy флага', () => {
+  assert(/submitTournamentJoin[\s\S]{0,300}tournamentJoinBusy/.test(controllerSource), 'submitTournamentJoin няма busy guard')
+  assert(/submitTournamentLeave[\s\S]{0,300}tournamentLeaveBusy/.test(controllerSource), 'submitTournamentLeave няма busy guard')
+  assert(/submitTournamentCancel[\s\S]{0,300}tournamentCancelBusy/.test(controllerSource), 'submitTournamentCancel няма busy guard')
+})
+
+await check('[J66] Join/leave/cancel бутоните са disabled по време на *Busy', () => {
+  assert(tournamentsScreenSource.includes('tournamentJoinBusy'), 'Join popup не реагира на tournamentJoinBusy')
+  assert(tournamentsScreenSource.includes('tournamentLeaveBusy'), 'Leave popup не реагира на tournamentLeaveBusy')
+  assert(tournamentsScreenSource.includes('tournamentCancelBusy'), 'Cancel popup не реагира на tournamentCancelBusy')
+})
+
+await check('[J67] Error response не поврежда/затваря popup state-a (както при create формата)', () => {
+  const joinBody = (controllerSource.match(/async function submitTournamentJoin[\s\S]*?\n  \}/) ?? [''])[0]
+  assert(joinBody.length > 0, 'Липсва submitTournamentJoin()')
+  const errorBlock = (joinBody.match(/if \(!result\.ok\) \{[\s\S]*?return\s*\n\s*\}/) ?? [''])[0]
+  assert(errorBlock.length > 0, 'submitTournamentJoin няма отделен !result.ok блок')
+  assert(
+    !errorBlock.includes('tournamentJoinConfirmOpen = false'),
+    'submitTournamentJoin не трябва да затваря popup-а при грешка',
+  )
+})
+
+await check('[J68] Wallet UI update pattern: success response mutira currentAuthSession.profile.yellowCoinsBalance', () => {
+  assert(
+    mainSource.includes('currentAuthSession.profile.yellowCoinsBalance = data.walletBalance') ||
+    /walletBalance[\s\S]{0,260}yellowCoinsBalance/.test(mainSource) ||
+    /yellowCoinsBalance[\s\S]{0,80}data\.walletBalance/.test(mainSource),
+    'main.ts не актуализира yellowCoinsBalance от walletBalance response полето',
+  )
+  assert(mainSource.includes('syncLobbyWithAuthSession'), 'Липсва извикване на syncLobbyWithAuthSession() след wallet update')
+})
+
+await check('[J69] Join/leave/cancel заявки не подават profileId/accountId/entryFee/idempotencyKey от клиента', () => {
+  const fnNames = ['joinTournamentRequest', 'leaveTournamentRequest', 'cancelTournamentRequest']
+  for (const fnName of fnNames) {
+    const match = mainSource.match(new RegExp(`async function ${fnName}[\\s\\S]*?\\n\\}`))
+    assert(match !== null, `Липсва ${fnName}() в main.ts`)
+    const body = match![0]
+    for (const forbidden of ['profileId:', 'accountId:', 'entryFee:', 'idempotencyKey:']) {
+      assert(!body.includes(forbidden), `${fnName} не трябва да подава ${forbidden} в request body-то`)
+    }
+  }
+})
+
+await check('[J70] Server endpoints игнорират client-supplied profileId/entryFee (auth session е единственият източник)', () => {
+  assert(
+    indexSource.includes('requireRegisteredHumanSession'),
+    'Join/leave/cancel handler-ите трябва да минават през requireRegisteredHumanSession guard',
+  )
+})
+
+await check('[J71] Rate limiting е окабелен за join/leave/cancel endpoints', () => {
+  assert(
+    indexSource.includes('TOURNAMENT_ENTRY_ACTION_RATE_LIMIT_WINDOW_MS') &&
+    indexSource.includes('isTournamentEntryActionRateLimited'),
+    'Липсва rate limit инфраструктура за tournament entry actions',
+  )
+})
+
+await check('[J72] CSRF/Origin guard (isAllowedVisitorRequestOrigin) е окабелен за join/leave/cancel handlers', () => {
+  const joinHandler = (indexSource.match(/async function handleTournamentJoinRequest[\s\S]*?\n\}/) ?? [''])[0]
+  const leaveHandler = (indexSource.match(/async function handleTournamentLeaveRequest[\s\S]*?\n\}/) ?? [''])[0]
+  const cancelHandler = (indexSource.match(/async function handleTournamentCancelRequest[\s\S]*?\n\}/) ?? [''])[0]
+  for (const [name, body] of [['join', joinHandler], ['leave', leaveHandler], ['cancel', cancelHandler]] as const) {
+    assert(body.includes('isAllowedVisitorRequestOrigin'), `${name} handler няма CSRF/Origin guard`)
+  }
+})
+
+await check('[J73] Липсва system fee finalization / prize payout логика в tournamentEconomyStore', () => {
+  for (const forbidden of ['system_fee', 'prize_payout', 'finalizeFee', 'payoutPrize']) {
+    assert(!tournamentEconomyStoreSource.includes(forbidden), `Намерен забранен финализация/payout маркер: ${forbidden}`)
+  }
+})
+
+await check('[J74] Липсва bracket / semifinal / final / walkover логика', () => {
+  for (const forbidden of ['bracket', 'semifinal', 'walkover', 'Полуфинал', 'Финал (кръг)']) {
+    assert(!tournamentEconomyStoreSource.includes(forbidden), `Намерен забранен bracket/walkover маркер: ${forbidden}`)
+    assert(!controllerSource.includes(`create${forbidden}`), `Намерен забранен bracket/walkover action в контролера: ${forbidden}`)
+  }
+})
+
+await check('[J75] Join/leave/cancel confirm popup-ите остават responsive (max-width + border-box, без фиксирана desktop ширина)', () => {
+  const joinPopup = (tournamentsScreenSource.match(/function renderTournamentJoinConfirmPopup[\s\S]*?\n\}/) ?? [''])[0]
+  const leavePopup = (tournamentsScreenSource.match(/function renderTournamentLeaveConfirmPopup[\s\S]*?\n\}/) ?? [''])[0]
+  const cancelPopup = (tournamentsScreenSource.match(/function renderTournamentCancelConfirmPopup[\s\S]*?\n\}/) ?? [''])[0]
+  for (const [name, body] of [['join', joinPopup], ['leave', leavePopup], ['cancel', cancelPopup]] as const) {
+    assert(body.length > 0, `Липсва render${name} popup функция`)
+    assert(/max-width:\d+px/.test(body), `${name} popup няма max-width ограничение`)
+  }
 })
 
 // ── [40] Password не се поставя в URL/localStorage ──

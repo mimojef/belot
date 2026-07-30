@@ -111,29 +111,41 @@ function readSource(relativePath: string): string {
 {
   const indexTs = readSource('server/src/index.ts')
 
-  const handlePrivateRoomFullMatch = indexTs.match(
-    /function handlePrivateRoomFull\([\s\S]*?\n}\n/,
+  function sliceBetween(source: string, startMarker: string, endMarker: string): string | null {
+    const start = source.indexOf(startMarker)
+    if (start === -1) return null
+    const end = source.indexOf(endMarker, start + startMarker.length)
+    if (end === -1) return null
+    return source.slice(start, end)
+  }
+
+  const handlePrivateRoomFullBody = sliceBetween(
+    indexTs,
+    'function handlePrivateRoomFull',
+    'function handlePrivateRoomExpired',
   )
-  const handlePrivateRoomBotFillMatch = indexTs.match(
-    /function handlePrivateRoomBotFill\([\s\S]*?\n}\n/,
+  const handlePrivateRoomBotFillBody = sliceBetween(
+    indexTs,
+    'function handlePrivateRoomBotFill',
+    'const privateRoomChatStore',
   )
 
   check(
     '[B1] handlePrivateRoomFull found in index.ts',
-    handlePrivateRoomFullMatch !== null,
+    handlePrivateRoomFullBody !== null,
   )
   check(
     '[B1b] handlePrivateRoomFull (normal 4-human private start) sets isPrivateTableOrigin: true',
-    handlePrivateRoomFullMatch !== null && /isPrivateTableOrigin:\s*true/.test(handlePrivateRoomFullMatch[0]),
+    handlePrivateRoomFullBody !== null && /isPrivateTableOrigin:\s*true/.test(handlePrivateRoomFullBody),
   )
 
   check(
     '[B2] handlePrivateRoomBotFill found in index.ts',
-    handlePrivateRoomBotFillMatch !== null,
+    handlePrivateRoomBotFillBody !== null,
   )
   check(
     '[B2b] handlePrivateRoomBotFill ("Запълни с ботове" start) sets isPrivateTableOrigin: true',
-    handlePrivateRoomBotFillMatch !== null && /isPrivateTableOrigin:\s*true/.test(handlePrivateRoomBotFillMatch[0]),
+    handlePrivateRoomBotFillBody !== null && /isPrivateTableOrigin:\s*true/.test(handlePrivateRoomBotFillBody),
   )
 }
 

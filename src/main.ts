@@ -3303,6 +3303,144 @@ async function unlockTournamentDetail(
   }
 }
 
+type TournamentEntryActionErrorResponse = {
+  ok: false
+  message?: string
+  reason?: string
+  requiresPassword?: boolean
+}
+
+async function joinTournamentRequest(
+  tournamentId: string,
+  password: string | null,
+): Promise<
+  | { ok: true; alreadyJoined: boolean; walletBalance: number; tournament: TournamentSummarySnapshot }
+  | { ok: false; message: string; reason?: string; requiresPassword?: boolean }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/join`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(password !== null ? { password } : {}),
+    })
+    const data = (await response.json()) as
+      | { ok: true; alreadyJoined: boolean; walletBalance: number; tournament: TournamentSummarySnapshot }
+      | TournamentEntryActionErrorResponse
+    if (!response.ok || !data.ok) {
+      return {
+        ok: false,
+        message: (data as TournamentEntryActionErrorResponse).message ?? 'Записването не бе успешно.',
+        reason: (data as TournamentEntryActionErrorResponse).reason,
+        requiresPassword: (data as TournamentEntryActionErrorResponse).requiresPassword,
+      }
+    }
+    if (currentAuthSession !== null) {
+      currentAuthSession = {
+        ...currentAuthSession,
+        profile: { ...currentAuthSession.profile, yellowCoinsBalance: data.walletBalance },
+      }
+      syncLobbyWithAuthSession()
+    }
+    return { ok: true, alreadyJoined: data.alreadyJoined, walletBalance: data.walletBalance, tournament: data.tournament }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function leaveTournamentRequest(
+  tournamentId: string,
+): Promise<
+  | { ok: true; alreadyRefunded: boolean; refundedAmount: number; walletBalance: number; tournament: TournamentSummarySnapshot }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/leave`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as
+      | {
+          ok: true
+          alreadyRefunded: boolean
+          refundedAmount: number
+          walletBalance: number
+          tournament: TournamentSummarySnapshot
+        }
+      | TournamentEntryActionErrorResponse
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: (data as TournamentEntryActionErrorResponse).message ?? 'Отказването не бе успешно.' }
+    }
+    if (currentAuthSession !== null) {
+      currentAuthSession = {
+        ...currentAuthSession,
+        profile: { ...currentAuthSession.profile, yellowCoinsBalance: data.walletBalance },
+      }
+      syncLobbyWithAuthSession()
+    }
+    return {
+      ok: true,
+      alreadyRefunded: data.alreadyRefunded,
+      refundedAmount: data.refundedAmount,
+      walletBalance: data.walletBalance,
+      tournament: data.tournament,
+    }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function cancelTournamentRequest(
+  tournamentId: string,
+): Promise<
+  | {
+      ok: true
+      alreadyCancelled: boolean
+      refundedEntries: number
+      totalRefunded: number
+      walletBalance: number
+      tournament: TournamentSummarySnapshot
+    }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/cancel`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as
+      | {
+          ok: true
+          alreadyCancelled: boolean
+          refundedEntries: number
+          totalRefunded: number
+          walletBalance: number
+          tournament: TournamentSummarySnapshot
+        }
+      | TournamentEntryActionErrorResponse
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: (data as TournamentEntryActionErrorResponse).message ?? 'Отмяната не бе успешна.' }
+    }
+    if (currentAuthSession !== null) {
+      currentAuthSession = {
+        ...currentAuthSession,
+        profile: { ...currentAuthSession.profile, yellowCoinsBalance: data.walletBalance },
+      }
+      syncLobbyWithAuthSession()
+    }
+    return {
+      ok: true,
+      alreadyCancelled: data.alreadyCancelled,
+      refundedEntries: data.refundedEntries,
+      totalRefunded: data.totalRefunded,
+      walletBalance: data.walletBalance,
+      tournament: data.tournament,
+    }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 lobby = createLobbyFlowController({
   root: rootElement,
   suppressRendering: _isResetPasswordPath,
@@ -3519,6 +3657,9 @@ lobby = createLobbyFlowController({
   onTournamentCreate: (input) => createTournamentRequest(input),
   onTournamentDetailLoad: (tournamentId) => loadTournamentDetail(tournamentId),
   onTournamentUnlock: (tournamentId, password) => unlockTournamentDetail(tournamentId, password),
+  onTournamentJoin: (tournamentId, password) => joinTournamentRequest(tournamentId, password),
+  onTournamentLeave: (tournamentId) => leaveTournamentRequest(tournamentId),
+  onTournamentCancel: (tournamentId) => cancelTournamentRequest(tournamentId),
   onNotifFriendRequestClick: (friendshipId) => {
     const req = lobby?.getPendingFriendRequest(friendshipId)
     if (!req) return

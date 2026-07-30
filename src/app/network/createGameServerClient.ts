@@ -79,6 +79,22 @@ export type TournamentPrizePreview = {
   secondTeamPrize: number
 }
 
+export type TournamentEntryStatus =
+  | 'confirmed'
+  | 'withdrawn'
+  | 'refunded'
+  | 'eliminated'
+  | 'finalist'
+  | 'champion'
+
+export type TournamentViewerParticipation = {
+  isParticipant: boolean
+  entryStatus: TournamentEntryStatus | null
+  canJoinSolo: boolean
+  canLeave: boolean
+  canCancel: boolean
+}
+
 export type TournamentSummarySnapshot = {
   tournamentId: string
   name: string
@@ -91,11 +107,14 @@ export type TournamentSummarySnapshot = {
   playerCapacity: number
   confirmedEntriesCount: number
   completedTeamsCount: number
+  availablePlaces: number
+  isFull: boolean
   startMode: TournamentStartMode
   scheduledStartAt: string | null
   createdAt: string
   prizePreview: TournamentPrizePreview
   isMine: boolean
+  viewer: TournamentViewerParticipation
 }
 
 export type TournamentDetailSnapshot = TournamentSummarySnapshot & {
@@ -111,6 +130,13 @@ export type TournamentCreateInput = {
   password?: string
   startMode: TournamentStartMode
   scheduledStartAt?: string
+}
+
+export type TournamentJoinEntrySnapshot = {
+  entryId: string
+  status: TournamentEntryStatus
+  joinedAs: 'solo' | 'partner_inviter' | 'partner_invitee'
+  createdAt: string
 }
 
 export type FriendshipStatus = 'pending' | 'accepted'

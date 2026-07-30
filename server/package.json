@@ -27,6 +27,7 @@
     "check:migration-runner-crash-recovery": "tsx scripts/checkMigrationRunnerCrashRecovery.ts",
     "check:tournament-persistence": "tsx scripts/checkTournamentPersistence.ts",
     "check:tournament-http-api": "tsx scripts/checkTournamentHttpApi.ts --server-root=.",
+    "check:tournament-entry-http-api": "tsx scripts/checkTournamentEntryHttpApi.ts --server-root=.",
     "check:tournaments-frontend-source": "tsx scripts/checkTournamentsFrontendSource.ts --project-root=..",
     "check:subadmin-http-authorization": "tsx scripts/checkSubadminHttpAuthorization.ts --server-root=.",
     "check:subadmin-profile-popup-rendering": "tsx scripts/checkSubadminProfilePopupRendering.ts",
