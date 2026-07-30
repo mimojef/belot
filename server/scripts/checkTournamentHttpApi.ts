@@ -145,7 +145,26 @@ async function waitFor(
 
 type RunningServer = {
   child: ChildProcessWithoutNullStreams
+  closed: Promise<void>
   output(): string
+}
+
+const CLEANUP_RETRYABLE_ERROR_CODES = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY'])
+
+async function rmTempRootWithRetry(root: string): Promise<void> {
+  const maxAttempts = 6
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await rm(root, { recursive: true, force: true })
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? ''
+      if (!CLEANUP_RETRYABLE_ERROR_CODES.has(code) || attempt === maxAttempts) {
+        throw error
+      }
+      await sleep(150 * attempt)
+    }
+  }
 }
 
 async function createIsolatedServerRoot(originalServerRoot: string): Promise<{
@@ -187,7 +206,7 @@ async function createIsolatedServerRoot(originalServerRoot: string): Promise<{
     serverDir,
     databaseFile,
     cleanup: async () => {
-      await rm(root, { recursive: true, force: true })
+      await rmTempRootWithRetry(root)
     },
   }
 }
@@ -212,16 +231,29 @@ function startServer(serverDir: string, port: number): RunningServer {
   child.stderr.setEncoding('utf8')
   child.stdout.on('data', (c: string) => chunks.push(c))
   child.stderr.on('data', (c: string) => chunks.push(c))
-  return { child, output: () => chunks.join('') }
+  const closed = new Promise<void>((resolveClosed) => {
+    child.once('close', () => resolveClosed())
+  })
+  return { child, closed, output: () => chunks.join('') }
 }
 
 async function stopServer(server: RunningServer): Promise<void> {
-  if (server.child.exitCode !== null) return
-  server.child.kill('SIGTERM')
-  await new Promise<void>((resolveStop) => {
-    const t = setTimeout(() => { server.child.kill('SIGKILL'); resolveStop() }, 10_000)
-    server.child.once('exit', () => { clearTimeout(t); resolveStop() })
-  })
+  if (server.child.exitCode === null) {
+    server.child.kill('SIGTERM')
+  }
+  let forceKillTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    if (server.child.exitCode === null) {
+      server.child.kill('SIGKILL')
+    }
+  }, 10_000)
+  try {
+    await server.closed
+  } finally {
+    if (forceKillTimer !== null) {
+      clearTimeout(forceKillTimer)
+      forceKillTimer = null
+    }
+  }
 }
 
 async function registerAndGetCookie(port: number, runId: string, suffix: string): Promise<string> {
