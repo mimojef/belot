@@ -84,8 +84,11 @@ import {
 } from './tournament/tournamentValidation.js'
 import {
   ACTIVE_TOURNAMENT_STATUSES,
+  buildTeamDtos,
+  toTournamentPartnerInviteDto,
   toTournamentDetailDto,
   toTournamentSummaryDto,
+  type TournamentPartnerCandidateDto,
   type TournamentSummaryDto,
 } from './tournament/tournamentDto.js'
 import { createPasswordHash, verifyPassword } from './db/authHelpers.js'
@@ -5632,19 +5635,80 @@ function buildTournamentSummaryDto(
   tournament: TournamentRecord,
   viewerProfileId: string | null,
 ): TournamentSummaryDto {
+  tournamentEconomyStore.expireDuePartnerInvitesAtomically(tournament.tournamentId)
   const entries = tournamentStore.getEntriesForTournament(tournament.tournamentId)
   const teams = tournamentStore.getTeamsForTournament(tournament.tournamentId)
   const viewerEntry = viewerProfileId !== null
     ? entries.find((e) => e.profileId === viewerProfileId) ?? null
     : null
+  const reservedPlacesCount = tournamentEconomyStore.countReservedPendingPlaces(
+    tournament.tournamentId,
+  )
   return toTournamentSummaryDto({
     tournament,
     creatorPublicProfile: getTournamentCreatorPublicProfile(tournament.creatorProfileId),
     confirmedEntriesCount: entries.filter((e) => e.status === 'confirmed').length,
+    reservedPlacesCount,
     completedTeamsCount: teams.filter((t) => t.status !== 'forming').length,
+    formingTeamsCount: teams.filter((t) => t.status === 'forming').length,
     viewerProfileId,
     viewerEntryStatus: viewerEntry?.status ?? null,
+    viewerEntryJoinedAs: viewerEntry?.joinedAs ?? null,
   })
+}
+
+function getSafePublicProfile(profileId: string): { profileId: string | null; displayName: string; avatarUrl: string | null } | null {
+  const profile = playerProgressStore.getPublicProfile(profileId)
+  if (profile === null) return null
+  return { profileId: profile.profileId, displayName: profile.displayName, avatarUrl: profile.avatarUrl }
+}
+
+function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId: string | null) {
+  tournamentEconomyStore.expireDuePartnerInvitesAtomically(tournament.tournamentId)
+  const entries = tournamentStore.getEntriesForTournament(tournament.tournamentId)
+  const teams = tournamentStore.getTeamsForTournament(tournament.tournamentId)
+  const viewerEntry = viewerProfileId !== null
+    ? entries.find((e) => e.profileId === viewerProfileId) ?? null
+    : null
+  const reservedPlacesCount = tournamentEconomyStore.countReservedPendingPlaces(
+    tournament.tournamentId,
+  )
+  const teamDtos = buildTeamDtos({
+    teams,
+    entries,
+    getPublicProfile: getSafePublicProfile,
+  })
+  const pendingInvites = viewerProfileId !== null
+    ? tournamentEconomyStore.listPendingPartnerInvitesForProfile(viewerProfileId)
+    : []
+  const incomingPartnerInvite = pendingInvites.find((i) => i.tournamentId === tournament.tournamentId) ?? null
+  const outgoingPartnerInvite = viewerProfileId !== null
+    ? tournamentEconomyStore.getOutgoingPendingInviteForProfile(tournament.tournamentId, viewerProfileId)
+    : null
+  const base = toTournamentDetailDto({
+    tournament,
+    creatorPublicProfile: getTournamentCreatorPublicProfile(tournament.creatorProfileId),
+    confirmedEntriesCount: entries.filter((e) => e.status === 'confirmed').length,
+    reservedPlacesCount,
+    completedTeamsCount: teams.filter((t) => t.status !== 'forming').length,
+    formingTeamsCount: teams.filter((t) => t.status === 'forming').length,
+    viewerProfileId,
+    viewerEntryStatus: viewerEntry?.status ?? null,
+    viewerEntryJoinedAs: viewerEntry?.joinedAs ?? null,
+  })
+  const inviteToDto = (invite: NonNullable<typeof incomingPartnerInvite>) => toTournamentPartnerInviteDto({
+    invite,
+    inviterPublicProfile: getSafePublicProfile(invite.inviterProfileId),
+    inviteePublicProfile: getSafePublicProfile(invite.inviteeProfileId),
+    tournament,
+  })
+  return {
+    ...base,
+    teams: teamDtos,
+    myTeam: viewerEntry?.teamId ? teamDtos.find((team) => team.teamId === viewerEntry.teamId) ?? null : null,
+    incomingPartnerInvite: incomingPartnerInvite ? inviteToDto(incomingPartnerInvite) : null,
+    outgoingPartnerInvite: outgoingPartnerInvite ? inviteToDto(outgoingPartnerInvite) : null,
+  }
 }
 
 async function handleTournamentsListRequest(
@@ -5867,8 +5931,16 @@ async function handleTournamentDetailRequest(
   const session = authStore.getSession(sessionToken)
   const viewerProfileId = session?.profile.profileId ?? null
   const isCreator = viewerProfileId !== null && viewerProfileId === tournament.creatorProfileId
+  const hasPendingInviteAccess = viewerProfileId !== null &&
+    tournamentEconomyStore
+      .listPendingPartnerInvitesForProfile(viewerProfileId)
+      .some((invite) => invite.tournamentId === tournament.tournamentId)
+  const isParticipantForAccess = viewerProfileId !== null &&
+    tournamentStore
+      .getEntriesForTournament(tournament.tournamentId)
+      .some((entry) => entry.profileId === viewerProfileId && entry.status === 'confirmed')
 
-  if (tournament.visibility === 'password' && !isCreator) {
+  if (tournament.visibility === 'password' && !isCreator && !hasPendingInviteAccess && !isParticipantForAccess) {
     // POST /api/tournaments/:id с {password} служи като unlock проверка;
     // GET (или POST без валидна парола) никога не разкрива детайлите.
     let providedPassword: string | null = null
@@ -5902,23 +5974,9 @@ async function handleTournamentDetailRequest(
     }
   }
 
-  const detailEntries = tournamentStore.getEntriesForTournament(tournament.tournamentId)
-  const detailViewerEntry = viewerProfileId !== null
-    ? detailEntries.find((e) => e.profileId === viewerProfileId) ?? null
-    : null
-
   sendJsonResponse(res, 200, {
     ok: true,
-    tournament: toTournamentDetailDto({
-      tournament,
-      creatorPublicProfile: getTournamentCreatorPublicProfile(tournament.creatorProfileId),
-      confirmedEntriesCount: detailEntries.filter((e) => e.status === 'confirmed').length,
-      completedTeamsCount: tournamentStore
-        .getTeamsForTournament(tournament.tournamentId)
-        .filter((t) => t.status !== 'forming').length,
-      viewerProfileId,
-      viewerEntryStatus: detailViewerEntry?.status ?? null,
-    }),
+    tournament: buildTournamentDetailDto(tournament, viewerProfileId),
   })
   return true
 }
@@ -5953,6 +6011,221 @@ const JOIN_FAILURE_MESSAGES: Record<string, string> = {
   already_participating_elsewhere: 'Вече участваш в друг активен турнир.',
   insufficient_funds: 'Нямаш достатъчно жълтици за този вход.',
   requires_password: 'Този турнир е защитен с парола.',
+}
+
+const PARTNER_INVITE_FAILURE_MESSAGES: Record<string, string> = {
+  tournament_not_found: 'Турнирът не е намерен.',
+  tournament_not_open: 'Турнирът вече не приема записвания.',
+  tournament_full: 'Няма достатъчно свободни места.',
+  invite_window_closed: 'Прозорецът за покани е затворен.',
+  requires_password: 'Този турнир е защитен с парола.',
+  not_friend: 'Можеш да поканиш само потвърден приятел.',
+  blocked: 'Не можеш да поканиш този приятел заради блокиране.',
+  invalid_invitee: 'Избраният профил не може да бъде поканен.',
+  self_invite: 'Не можеш да поканиш себе си.',
+  already_participant: 'Този играч вече участва в турнира.',
+  already_participating_elsewhere: 'Играчът вече има активно турнирно участие.',
+  already_has_pending_invite: 'Вече има активна покана.',
+  already_teamed: 'Вече участваш в отбор.',
+  invite_not_found: 'Поканата не е намерена.',
+  not_invitee: 'Само поканеният може да приеме или откаже поканата.',
+  not_inviter: 'Само поканилият може да отмени поканата.',
+  invite_not_pending: 'Поканата вече е обработена.',
+  insufficient_funds: 'Нямаш достатъчно жълтици за входа.',
+  team_invalid: 'Отборът вече не е валиден.',
+}
+
+function getPartnerInviteFailureStatus(reason: string): number {
+  if (reason === 'tournament_not_found' || reason === 'invite_not_found') return 404
+  if (reason === 'requires_password' || reason === 'not_invitee' || reason === 'not_inviter') return 403
+  if (reason === 'insufficient_funds') return 402
+  return 409
+}
+
+function isProfileOnline(profileId: string): boolean {
+  for (const connection of Object.values(serverState.connections)) {
+    if (connection.profileId === profileId) return true
+  }
+  return false
+}
+
+async function handleTournamentPartnerCandidatesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)\/partner-candidates$/.exec(pathname)
+  if (!match) return false
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  const tournamentId = decodeURIComponent(match[1] ?? '')
+  const candidates: TournamentPartnerCandidateDto[] = tournamentEconomyStore
+    .getPartnerCandidatesForTournament(tournamentId, authResult.profileId)
+    .map((candidate) => ({
+      profileId: candidate.profileId,
+      displayName: candidate.displayName,
+      avatarUrl: candidate.avatarUrl,
+      online: isProfileOnline(candidate.profileId),
+      eligible: candidate.eligible,
+      unavailableReason: candidate.unavailableReason,
+    }))
+    .sort((a, b) => Number(b.online) - Number(a.online) || a.displayName.localeCompare(b.displayName, 'bg'))
+  sendJsonResponse(res, 200, { ok: true, candidates })
+  return true
+}
+
+async function handlePendingTournamentPartnerInvitesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/tournaments/partner-invites/pending') return false
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  const invites = tournamentEconomyStore
+    .listPendingPartnerInvitesForProfile(authResult.profileId)
+    .map((invite) => toTournamentPartnerInviteDto({
+      invite,
+      inviterPublicProfile: getSafePublicProfile(invite.inviterProfileId),
+      inviteePublicProfile: getSafePublicProfile(invite.inviteeProfileId),
+      tournament: tournamentStore.getTournamentById(invite.tournamentId),
+    }))
+  sendJsonResponse(res, 200, { ok: true, invites })
+  return true
+}
+
+async function handleTournamentPartnerInviteCreateRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)\/partner-invites$/.exec(pathname)
+  if (!match) return false
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+  if (!isAllowedVisitorRequestOrigin(req)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Заявката е отхвърлена.' })
+    return true
+  }
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  if (isTournamentEntryActionRateLimited(authResult.profileId, Date.now())) {
+    sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
+    return true
+  }
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно JSON тяло.' })
+    return true
+  }
+  if (!isRecord(body) || typeof body.inviteeProfileId !== 'string') {
+    sendJsonResponse(res, 400, { ok: false, message: 'Избери приятел за партньор.' })
+    return true
+  }
+  const tournamentId = decodeURIComponent(match[1] ?? '')
+  const result = tournamentEconomyStore.createPartnerInviteAtomically(
+    tournamentId,
+    authResult.profileId,
+    body.inviteeProfileId,
+    { password: typeof body.password === 'string' ? body.password : null },
+  )
+  if (!result.ok) {
+    sendJsonResponse(res, getPartnerInviteFailureStatus(result.reason), {
+      ok: false,
+      reason: result.reason,
+      message: PARTNER_INVITE_FAILURE_MESSAGES[result.reason] ?? 'Поканата не бе изпратена.',
+      requiresPassword: result.reason === 'requires_password' ? true : undefined,
+    })
+    return true
+  }
+  sendJsonResponse(res, 200, {
+    ok: true,
+    invite: toTournamentPartnerInviteDto({
+      invite: result.invite,
+      inviterPublicProfile: getSafePublicProfile(result.invite.inviterProfileId),
+      inviteePublicProfile: getSafePublicProfile(result.invite.inviteeProfileId),
+      tournament: result.tournament,
+    }),
+    walletBalance: result.walletBalance,
+    tournament: buildTournamentSummaryDto(result.tournament, authResult.profileId),
+  })
+  return true
+}
+
+async function handleTournamentPartnerInviteActionRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)\/partner-invites\/([^/]+)\/(accept|decline|cancel)$/.exec(pathname)
+  if (!match) return false
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+  if (!isAllowedVisitorRequestOrigin(req)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Заявката е отхвърлена.' })
+    return true
+  }
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  if (isTournamentEntryActionRateLimited(authResult.profileId, Date.now())) {
+    sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
+    return true
+  }
+  const tournamentId = decodeURIComponent(match[1] ?? '')
+  const inviteId = decodeURIComponent(match[2] ?? '')
+  const action = match[3] ?? ''
+  const result = action === 'accept'
+    ? tournamentEconomyStore.acceptPartnerInviteAtomically(tournamentId, inviteId, authResult.profileId)
+    : action === 'decline'
+      ? tournamentEconomyStore.declinePartnerInviteAtomically(tournamentId, inviteId, authResult.profileId)
+      : tournamentEconomyStore.cancelPartnerInviteAtomically(tournamentId, inviteId, authResult.profileId)
+  if (!result.ok) {
+    sendJsonResponse(res, getPartnerInviteFailureStatus(result.reason), {
+      ok: false,
+      reason: result.reason,
+      message: PARTNER_INVITE_FAILURE_MESSAGES[result.reason] ?? 'Поканата не бе обработена.',
+    })
+    return true
+  }
+  sendJsonResponse(res, 200, {
+    ok: true,
+    alreadyResolved: result.alreadyResolved === true,
+    invite: toTournamentPartnerInviteDto({
+      invite: result.invite,
+      inviterPublicProfile: getSafePublicProfile(result.invite.inviterProfileId),
+      inviteePublicProfile: getSafePublicProfile(result.invite.inviteeProfileId),
+      tournament: result.tournament,
+    }),
+    walletBalance: result.walletBalance,
+    tournament: buildTournamentSummaryDto(result.tournament, authResult.profileId),
+  })
+  return true
 }
 
 async function handleTournamentJoinRequest(
@@ -8406,6 +8679,22 @@ async function handleHttpRequest(
   }
 
   if (await handleTournamentsListRequest(req, res, requestUrl.pathname, requestUrl)) {
+    return
+  }
+
+  if (await handlePendingTournamentPartnerInvitesRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTournamentPartnerCandidatesRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTournamentPartnerInviteCreateRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTournamentPartnerInviteActionRequest(req, res, requestUrl.pathname)) {
     return
   }
 

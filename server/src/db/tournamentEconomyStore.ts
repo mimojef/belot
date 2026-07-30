@@ -19,14 +19,28 @@ import type {
   TournamentEntryRecord,
   TournamentEntryStatus,
   TournamentId,
+  TournamentPartnerInviteId,
+  TournamentPartnerInviteRecord,
+  TournamentPartnerInviteStatus,
   TournamentRecord,
   TournamentStatus,
+  TournamentTeamId,
+  TournamentTeamRecord,
+  TournamentTeamStatus,
   TournamentVisibility,
 } from '../tournament/tournamentTypes.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
 type TournamentLedgerEntryType = 'entry_fee_debit' | 'entry_fee_refund'
+
+export type PartnerCandidateRecord = {
+  profileId: ProfileId
+  displayName: string
+  avatarUrl: string | null
+  eligible: boolean
+  unavailableReason: string | null
+}
 
 export type JoinTournamentSoloResult =
   | {
@@ -75,6 +89,38 @@ export type CancelOpenTournamentResult =
       reason: 'tournament_not_found' | 'not_creator' | 'tournament_not_open'
     }
 
+export type PartnerInviteMutationResult =
+  | {
+      ok: true
+      alreadyResolved?: boolean
+      invite: TournamentPartnerInviteRecord
+      walletBalance: number
+      tournament: TournamentRecord
+    }
+  | {
+      ok: false
+      reason:
+        | 'tournament_not_found'
+        | 'tournament_not_open'
+        | 'tournament_full'
+        | 'invite_window_closed'
+        | 'requires_password'
+        | 'not_friend'
+        | 'blocked'
+        | 'invalid_invitee'
+        | 'self_invite'
+        | 'already_participant'
+        | 'already_participating_elsewhere'
+        | 'already_has_pending_invite'
+        | 'already_teamed'
+        | 'invite_not_found'
+        | 'not_invitee'
+        | 'not_inviter'
+        | 'invite_not_pending'
+        | 'insufficient_funds'
+        | 'team_invalid'
+    }
+
 export type TournamentEconomyStore = {
   joinTournamentSoloAtomically: (
     tournamentId: TournamentId,
@@ -90,6 +136,40 @@ export type TournamentEconomyStore = {
     creatorProfileId: ProfileId,
     cancelReason: string,
   ) => CancelOpenTournamentResult
+  getPartnerCandidatesForTournament: (
+    tournamentId: TournamentId,
+    inviterProfileId: ProfileId,
+  ) => PartnerCandidateRecord[]
+  listPendingPartnerInvitesForProfile: (
+    inviteeProfileId: ProfileId,
+  ) => TournamentPartnerInviteRecord[]
+  getOutgoingPendingInviteForProfile: (
+    tournamentId: TournamentId,
+    inviterProfileId: ProfileId,
+  ) => TournamentPartnerInviteRecord | null
+  countReservedPendingPlaces: (tournamentId: TournamentId) => number
+  createPartnerInviteAtomically: (
+    tournamentId: TournamentId,
+    inviterProfileId: ProfileId,
+    inviteeProfileId: ProfileId,
+    options?: { password?: string | null },
+  ) => PartnerInviteMutationResult
+  acceptPartnerInviteAtomically: (
+    tournamentId: TournamentId,
+    inviteId: TournamentPartnerInviteId,
+    inviteeProfileId: ProfileId,
+  ) => PartnerInviteMutationResult
+  declinePartnerInviteAtomically: (
+    tournamentId: TournamentId,
+    inviteId: TournamentPartnerInviteId,
+    inviteeProfileId: ProfileId,
+  ) => PartnerInviteMutationResult
+  cancelPartnerInviteAtomically: (
+    tournamentId: TournamentId,
+    inviteId: TournamentPartnerInviteId,
+    inviterProfileId: ProfileId,
+  ) => PartnerInviteMutationResult
+  expireDuePartnerInvitesAtomically: (tournamentId?: TournamentId) => number
   close: () => void
 }
 
@@ -125,12 +205,45 @@ type TournamentEntryRow = {
   refunded_at: string | null
 }
 
+type TournamentTeamRow = {
+  team_id: string
+  tournament_id: string
+  status: string
+  seed_slot: number | null
+  created_at: string
+  updated_at: string
+}
+
+type TournamentPartnerInviteRow = {
+  invite_id: string
+  tournament_id: string
+  team_id: string
+  inviter_profile_id: string
+  invitee_profile_id: string
+  status: string
+  expires_at: string
+  popup_dismissed_at: string | null
+  notification_read_at: string | null
+  created_at: string
+  responded_at: string | null
+}
+
 type WalletRow = {
   yellow_coins_balance: number
 }
 
 type ActiveAccountEntryRow = {
   entry_id: string
+}
+
+type ProfileEligibilityRow = {
+  profile_id: string
+  account_id: string | null
+  display_name: string
+  avatar_url: string | null
+  profile_kind: string
+  status: string
+  is_temporary: number | null
 }
 
 function toTournamentRecord(row: TournamentRow): TournamentRecord {
@@ -169,12 +282,50 @@ function toTournamentEntryRecord(row: TournamentEntryRow): TournamentEntryRecord
   }
 }
 
+function toTournamentTeamRecord(row: TournamentTeamRow): TournamentTeamRecord {
+  return {
+    teamId: row.team_id,
+    tournamentId: row.tournament_id,
+    status: row.status as TournamentTeamStatus,
+    seedSlot: row.seed_slot,
+    createdAt: dbDateToUtc(row.created_at),
+    updatedAt: dbDateToUtc(row.updated_at),
+  }
+}
+
+function toTournamentPartnerInviteRecord(row: TournamentPartnerInviteRow): TournamentPartnerInviteRecord {
+  return {
+    inviteId: row.invite_id,
+    tournamentId: row.tournament_id,
+    teamId: row.team_id,
+    inviterProfileId: row.inviter_profile_id,
+    inviteeProfileId: row.invitee_profile_id,
+    status: row.status as TournamentPartnerInviteStatus,
+    expiresAt: dbDateToUtc(row.expires_at),
+    popupDismissedAt: row.popup_dismissed_at !== null ? dbDateToUtc(row.popup_dismissed_at) : null,
+    notificationReadAt: row.notification_read_at !== null ? dbDateToUtc(row.notification_read_at) : null,
+    createdAt: dbDateToUtc(row.created_at),
+    respondedAt: row.responded_at !== null ? dbDateToUtc(row.responded_at) : null,
+  }
+}
+
 function entryFeeDebitKey(tournamentId: TournamentId, profileId: ProfileId): string {
   return `tournament:${tournamentId}:profile:${profileId}:entry-fee-debit`
 }
 
 function entryFeeRefundKey(tournamentId: TournamentId, profileId: ProfileId): string {
   return `tournament:${tournamentId}:profile:${profileId}:entry-fee-refund`
+}
+
+function computePartnerInviteExpiresAt(tournament: TournamentRow, nowMs = Date.now()): string | null {
+  if (tournament.start_mode === 'fill') {
+    return new Date(nowMs + 60 * 60 * 1000).toISOString()
+  }
+  if (tournament.scheduled_start_at === null) return null
+  const scheduledMs = new Date(dbDateToUtc(tournament.scheduled_start_at)).getTime()
+  const expiresMs = scheduledMs - 30 * 60 * 1000
+  if (!Number.isFinite(expiresMs) || expiresMs <= nowMs) return null
+  return new Date(expiresMs).toISOString()
 }
 
 export async function createTournamentEconomyStore(
@@ -221,6 +372,12 @@ export async function createTournamentEconomyStore(
     WHERE tournament_id = ? AND status = 'confirmed';
   `)
 
+  const countReservedPendingPlacesStatement = database.prepare(`
+    SELECT COUNT(*) as count
+    FROM tournament_partner_invites
+    WHERE tournament_id = ? AND status = 'pending';
+  `)
+
   const selectEntryByTournamentAndProfileStatement = database.prepare(`
     SELECT entry_id, tournament_id, profile_id, team_id, joined_as, status,
            created_at, updated_at, withdrawn_at, refunded_at
@@ -257,6 +414,145 @@ export async function createTournamentEconomyStore(
     FROM tournament_entries
     WHERE tournament_id = ? AND status = 'confirmed'
     ORDER BY created_at ASC;
+  `)
+
+  const selectTeamByIdStatement = database.prepare(`
+    SELECT team_id, tournament_id, status, seed_slot, created_at, updated_at
+    FROM tournament_teams
+    WHERE team_id = ?
+    LIMIT 1;
+  `)
+
+  const selectConfirmedEntriesForTeamStatement = database.prepare(`
+    SELECT entry_id, tournament_id, profile_id, team_id, joined_as, status,
+           created_at, updated_at, withdrawn_at, refunded_at
+    FROM tournament_entries
+    WHERE team_id = ? AND status = 'confirmed'
+    ORDER BY created_at ASC;
+  `)
+
+  const selectPendingInviteByIdStatement = database.prepare(`
+    SELECT invite_id, tournament_id, team_id, inviter_profile_id, invitee_profile_id,
+           status, expires_at, popup_dismissed_at, notification_read_at, created_at,
+           responded_at
+    FROM tournament_partner_invites
+    WHERE invite_id = ? AND tournament_id = ?
+    LIMIT 1;
+  `)
+
+  const selectPendingOutgoingInviteStatement = database.prepare(`
+    SELECT invite_id, tournament_id, team_id, inviter_profile_id, invitee_profile_id,
+           status, expires_at, popup_dismissed_at, notification_read_at, created_at,
+           responded_at
+    FROM tournament_partner_invites
+    WHERE tournament_id = ? AND inviter_profile_id = ? AND status = 'pending'
+    ORDER BY created_at DESC
+    LIMIT 1;
+  `)
+
+  const selectPendingInvitesForProfileStatement = database.prepare(`
+    SELECT invite_id, tournament_id, team_id, inviter_profile_id, invitee_profile_id,
+           status, expires_at, popup_dismissed_at, notification_read_at, created_at,
+           responded_at
+    FROM tournament_partner_invites
+    WHERE invitee_profile_id = ? AND status = 'pending'
+    ORDER BY created_at DESC;
+  `)
+
+  const selectDuePendingInvitesStatement = database.prepare(`
+    SELECT invite_id, tournament_id, team_id, inviter_profile_id, invitee_profile_id,
+           status, expires_at, popup_dismissed_at, notification_read_at, created_at,
+           responded_at
+    FROM tournament_partner_invites
+    WHERE status = 'pending'
+      AND datetime(expires_at) <= CURRENT_TIMESTAMP
+      AND (? IS NULL OR tournament_id = ?)
+    ORDER BY expires_at ASC;
+  `)
+
+  const insertTeamStatement = database.prepare(`
+    INSERT INTO tournament_teams (team_id, tournament_id, status, seed_slot)
+    VALUES (?, ?, 'forming', NULL);
+  `)
+
+  const updateTeamStatusStatement = database.prepare(`
+    UPDATE tournament_teams
+    SET status = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE team_id = ? AND tournament_id = ?;
+  `)
+
+  const deleteTeamStatement = database.prepare(`
+    DELETE FROM tournament_teams
+    WHERE team_id = ? AND tournament_id = ?;
+  `)
+
+  const insertPartnerInviteStatement = database.prepare(`
+    INSERT INTO tournament_partner_invites (
+      invite_id, tournament_id, team_id, inviter_profile_id, invitee_profile_id, expires_at
+    ) VALUES (?, ?, ?, ?, ?, ?);
+  `)
+
+  const resolvePartnerInviteStatement = database.prepare(`
+    UPDATE tournament_partner_invites
+    SET status = ?, responded_at = CURRENT_TIMESTAMP
+    WHERE invite_id = ? AND tournament_id = ? AND status = 'pending';
+  `)
+
+  const updateEntryToPartnerInviterStatement = database.prepare(`
+    UPDATE tournament_entries
+    SET team_id = ?, joined_as = 'partner_inviter', updated_at = CURRENT_TIMESTAMP
+    WHERE entry_id = ? AND status = 'confirmed';
+  `)
+
+  const updateEntryToSoloStatement = database.prepare(`
+    UPDATE tournament_entries
+    SET team_id = NULL, joined_as = 'solo', updated_at = CURRENT_TIMESTAMP
+    WHERE entry_id = ? AND status = 'confirmed';
+  `)
+
+  const insertPartnerInviteeEntryStatement = database.prepare(`
+    INSERT INTO tournament_entries (
+      entry_id, tournament_id, profile_id, team_id, joined_as, status
+    ) VALUES (?, ?, ?, ?, 'partner_invitee', 'confirmed');
+  `)
+
+  const selectConfirmedFriendshipStatement = database.prepare(`
+    SELECT 1 as found
+    FROM profile_friendships
+    WHERE status = 'accepted'
+      AND (
+        (requester_profile_id = ? AND addressee_profile_id = ?)
+        OR (requester_profile_id = ? AND addressee_profile_id = ?)
+      )
+    LIMIT 1;
+  `)
+
+  const selectProfileEligibilityStatement = database.prepare(`
+    SELECT profile_id, account_id, display_name, avatar_url, profile_kind, status, is_temporary
+    FROM profiles
+    WHERE profile_id = ?
+    LIMIT 1;
+  `)
+
+  const selectAcceptedFriendsStatement = database.prepare(`
+    SELECT p.profile_id, p.account_id, p.display_name, p.avatar_url, p.profile_kind, p.status, p.is_temporary
+    FROM profile_friendships f
+    JOIN profiles p
+      ON p.profile_id = CASE
+        WHEN f.requester_profile_id = ? THEN f.addressee_profile_id
+        ELSE f.requester_profile_id
+      END
+    WHERE f.status = 'accepted'
+      AND (f.requester_profile_id = ? OR f.addressee_profile_id = ?)
+    ORDER BY lower(p.display_name) ASC;
+  `)
+
+  const selectBlockStatement = database.prepare(`
+    SELECT 1 as found
+    FROM player_blocks
+    WHERE (blocker_profile_id = ? AND blocked_profile_id = ?)
+       OR (blocker_profile_id = ? AND blocked_profile_id = ?)
+    LIMIT 1;
   `)
 
   const insertEntryStatement = database.prepare(`
@@ -353,7 +649,577 @@ export async function createTournamentEconomyStore(
     )
   }
 
+  function isConfirmedFriend(leftProfileId: ProfileId, rightProfileId: ProfileId): boolean {
+    return selectConfirmedFriendshipStatement.get(
+      leftProfileId,
+      rightProfileId,
+      rightProfileId,
+      leftProfileId,
+    ) !== undefined
+  }
+
+  function hasBlockBetween(leftProfileId: ProfileId, rightProfileId: ProfileId): boolean {
+    return selectBlockStatement.get(
+      leftProfileId,
+      rightProfileId,
+      rightProfileId,
+      leftProfileId,
+    ) !== undefined
+  }
+
+  function getReservedPendingPlaces(tournamentId: TournamentId): number {
+    return (countReservedPendingPlacesStatement.get(tournamentId) as { count: number }).count
+  }
+
+  function getOccupiedPlaces(tournamentId: TournamentId): number {
+    const confirmed = (countConfirmedEntriesStatement.get(tournamentId) as { count: number }).count
+    return confirmed + getReservedPendingPlaces(tournamentId)
+  }
+
+  function resetFormingTeamToSolo(
+    tournamentId: TournamentId,
+    teamId: TournamentTeamId,
+    inviterProfileId: ProfileId,
+  ): void {
+    const inviterEntry = selectEntryByTournamentAndProfileStatement.get(
+      tournamentId,
+      inviterProfileId,
+    ) as TournamentEntryRow | undefined
+    if (inviterEntry !== undefined && inviterEntry.status === 'confirmed') {
+      updateEntryToSoloStatement.run(inviterEntry.entry_id)
+    }
+    deleteTeamStatement.run(teamId, tournamentId)
+  }
+
+  function expireDuePartnerInvitesInCurrentTransaction(tournamentId?: TournamentId): number {
+    const tournamentParam = tournamentId ?? null
+    const rows = selectDuePendingInvitesStatement.all(
+      tournamentParam,
+      tournamentParam,
+    ) as TournamentPartnerInviteRow[]
+    let expired = 0
+    for (const invite of rows) {
+      const result = resolvePartnerInviteStatement.run(
+        'expired',
+        invite.invite_id,
+        invite.tournament_id,
+      ) as { changes?: number }
+      if ((result.changes ?? 0) === 0) continue
+      resetFormingTeamToSolo(invite.tournament_id, invite.team_id, invite.inviter_profile_id)
+      insertEvent(invite.tournament_id, 'partner_invite_expired', null, 'system', {
+        inviteId: invite.invite_id,
+        teamId: invite.team_id,
+      })
+      expired += 1
+    }
+    return expired
+  }
+
+  function getInviteById(
+    tournamentId: TournamentId,
+    inviteId: TournamentPartnerInviteId,
+  ): TournamentPartnerInviteRecord | null {
+    const row = selectPendingInviteByIdStatement.get(inviteId, tournamentId) as
+      | TournamentPartnerInviteRow
+      | undefined
+    return row ? toTournamentPartnerInviteRecord(row) : null
+  }
+
+  function getCandidateUnavailableReason(
+    tournamentId: TournamentId,
+    inviterProfileId: ProfileId,
+    candidate: ProfileEligibilityRow,
+  ): string | null {
+    if (candidate.profile_id === inviterProfileId) return 'self'
+    if (candidate.profile_kind !== 'human' || candidate.status !== 'active' || candidate.account_id === null) {
+      return 'not_registered_human'
+    }
+    if (candidate.is_temporary === 1) return 'temporary'
+    if (!isConfirmedFriend(inviterProfileId, candidate.profile_id)) return 'not_friend'
+    if (hasBlockBetween(inviterProfileId, candidate.profile_id)) return 'blocked'
+    const existingEntry = selectEntryByTournamentAndProfileStatement.get(
+      tournamentId,
+      candidate.profile_id,
+    ) as TournamentEntryRow | undefined
+    if (existingEntry !== undefined && existingEntry.status === 'confirmed') return 'already_in_tournament'
+    const activeAccountEntry = selectActiveEntryForAccountStatement.get(
+      candidate.profile_id,
+    ) as ActiveAccountEntryRow | undefined
+    if (activeAccountEntry !== undefined) return 'active_tournament'
+    return null
+  }
+
+  function validateInvitee(
+    tournamentId: TournamentId,
+    inviterProfileId: ProfileId,
+    inviteeProfileId: ProfileId,
+  ): PartnerInviteMutationResult | null {
+    if (inviterProfileId === inviteeProfileId) return { ok: false, reason: 'self_invite' }
+    const invitee = selectProfileEligibilityStatement.get(inviteeProfileId) as
+      | ProfileEligibilityRow
+      | undefined
+    if (invitee === undefined) return { ok: false, reason: 'invalid_invitee' }
+    const reason = getCandidateUnavailableReason(tournamentId, inviterProfileId, invitee)
+    if (reason === null) return null
+    if (reason === 'not_friend') return { ok: false, reason: 'not_friend' }
+    if (reason === 'blocked') return { ok: false, reason: 'blocked' }
+    if (reason === 'already_in_tournament') return { ok: false, reason: 'already_participant' }
+    if (reason === 'active_tournament') return { ok: false, reason: 'already_participating_elsewhere' }
+    return { ok: false, reason: 'invalid_invitee' }
+  }
+
+  function expireDuePartnerInvitesAtomicallyLocal(tournamentId?: TournamentId): number {
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+      const expired = expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+      database.exec('COMMIT;')
+      return expired
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // keep original error
+      }
+      throw error
+    }
+  }
+
   return {
+    getPartnerCandidatesForTournament(
+      tournamentId: TournamentId,
+      inviterProfileId: ProfileId,
+    ): PartnerCandidateRecord[] {
+      const tournament = selectTournamentByIdStatement.get(tournamentId) as TournamentRow | undefined
+      if (tournament === undefined || tournament.status !== 'open') return []
+      const rows = selectAcceptedFriendsStatement.all(
+        inviterProfileId,
+        inviterProfileId,
+        inviterProfileId,
+      ) as ProfileEligibilityRow[]
+      return rows.map((row) => {
+        const unavailableReason = getCandidateUnavailableReason(tournamentId, inviterProfileId, row)
+        return {
+          profileId: row.profile_id,
+          displayName: row.display_name,
+          avatarUrl: row.avatar_url,
+          eligible: unavailableReason === null,
+          unavailableReason,
+        }
+      })
+    },
+
+    listPendingPartnerInvitesForProfile(
+      inviteeProfileId: ProfileId,
+    ): TournamentPartnerInviteRecord[] {
+      expireDuePartnerInvitesAtomicallyLocal()
+      const rows = selectPendingInvitesForProfileStatement.all(
+        inviteeProfileId,
+      ) as TournamentPartnerInviteRow[]
+      return rows.map(toTournamentPartnerInviteRecord)
+    },
+
+    getOutgoingPendingInviteForProfile(
+      tournamentId: TournamentId,
+      inviterProfileId: ProfileId,
+    ): TournamentPartnerInviteRecord | null {
+      expireDuePartnerInvitesAtomicallyLocal(tournamentId)
+      const row = selectPendingOutgoingInviteStatement.get(
+        tournamentId,
+        inviterProfileId,
+      ) as TournamentPartnerInviteRow | undefined
+      return row ? toTournamentPartnerInviteRecord(row) : null
+    },
+
+    countReservedPendingPlaces(tournamentId: TournamentId): number {
+      expireDuePartnerInvitesAtomicallyLocal(tournamentId)
+      return getReservedPendingPlaces(tournamentId)
+    },
+
+    expireDuePartnerInvitesAtomically(tournamentId?: TournamentId): number {
+      return expireDuePartnerInvitesAtomicallyLocal(tournamentId)
+    },
+
+    createPartnerInviteAtomically(
+      tournamentId: TournamentId,
+      inviterProfileId: ProfileId,
+      inviteeProfileId: ProfileId,
+      options: { password?: string | null } = {},
+    ): PartnerInviteMutationResult {
+      const tournamentRow = selectTournamentByIdStatement.get(tournamentId) as TournamentRow | undefined
+      if (tournamentRow === undefined) return { ok: false, reason: 'tournament_not_found' }
+
+      const existingPending = selectPendingOutgoingInviteStatement.get(
+        tournamentId,
+        inviterProfileId,
+      ) as TournamentPartnerInviteRow | undefined
+      if (existingPending !== undefined) {
+        return {
+          ok: true,
+          invite: toTournamentPartnerInviteRecord(existingPending),
+          walletBalance: getWalletBalance(inviterProfileId),
+          tournament: toTournamentRecord(tournamentRow),
+        }
+      }
+
+      let result: PartnerInviteMutationResult
+      try {
+        database.exec('BEGIN IMMEDIATE;')
+        expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+
+        const freshTournament = selectTournamentForUpdateStatement.get(tournamentId) as
+          | TournamentRow
+          | undefined
+        if (freshTournament === undefined) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_not_found' }
+        }
+        if (freshTournament.status !== 'open') {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_not_open' }
+        }
+
+        const expiresAt = computePartnerInviteExpiresAt(freshTournament)
+        if (expiresAt === null) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'invite_window_closed' }
+        }
+
+        const inviteeValidation = validateInvitee(tournamentId, inviterProfileId, inviteeProfileId)
+        if (inviteeValidation !== null) {
+          database.exec('ROLLBACK;')
+          return inviteeValidation
+        }
+
+        const existingInTx = selectPendingOutgoingInviteStatement.get(
+          tournamentId,
+          inviterProfileId,
+        ) as TournamentPartnerInviteRow | undefined
+        if (existingInTx !== undefined) {
+          database.exec('ROLLBACK;')
+          return {
+            ok: true,
+            invite: toTournamentPartnerInviteRecord(existingInTx),
+            walletBalance: getWalletBalance(inviterProfileId),
+            tournament: toTournamentRecord(freshTournament),
+          }
+        }
+
+        const inviterEntry = selectEntryByTournamentAndProfileStatement.get(
+          tournamentId,
+          inviterProfileId,
+        ) as TournamentEntryRow | undefined
+        if (inviterEntry !== undefined && inviterEntry.status !== 'confirmed') {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'already_participant' }
+        }
+        if (inviterEntry !== undefined && inviterEntry.team_id !== null) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'already_teamed' }
+        }
+
+        const neededPlaces = inviterEntry === undefined ? 2 : 1
+        const capacity = Math.min(freshTournament.player_capacity, 8)
+        if (getOccupiedPlaces(tournamentId) + neededPlaces > capacity) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_full' }
+        }
+
+        const isCreator = freshTournament.creator_profile_id === inviterProfileId
+        if (freshTournament.visibility === 'password' && !isCreator && inviterEntry === undefined) {
+          const providedPassword = options.password ?? null
+          if (
+            providedPassword === null ||
+            freshTournament.password_hash === null ||
+            !verifyTournamentPassword(providedPassword, freshTournament.password_hash)
+          ) {
+            database.exec('ROLLBACK;')
+            return { ok: false, reason: 'requires_password' }
+          }
+        }
+
+        const activeAccountEntry = inviterEntry === undefined
+          ? selectActiveEntryForAccountStatement.get(inviterProfileId) as ActiveAccountEntryRow | undefined
+          : undefined
+        if (activeAccountEntry !== undefined) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'already_participating_elsewhere' }
+        }
+
+        const teamId = randomUUID()
+        insertTeamStatement.run(teamId, tournamentId)
+
+        let entryId = inviterEntry?.entry_id ?? randomUUID()
+        if (inviterEntry === undefined) {
+          ensureWalletStatement.run(inviterProfileId)
+          const debitResult = debitWalletStatement.run(
+            freshTournament.entry_fee,
+            inviterProfileId,
+            freshTournament.entry_fee,
+          ) as { changes?: number }
+          if ((debitResult.changes ?? 0) === 0) {
+            database.exec('ROLLBACK;')
+            return { ok: false, reason: 'insufficient_funds' }
+          }
+          database.prepare(`
+            INSERT INTO tournament_entries (
+              entry_id, tournament_id, profile_id, team_id, joined_as, status
+            ) VALUES (?, ?, ?, ?, 'partner_inviter', 'confirmed');
+          `).run(entryId, tournamentId, inviterProfileId, teamId)
+          insertLedgerStatement.run(
+            randomUUID(),
+            entryFeeDebitKey(tournamentId, inviterProfileId),
+            tournamentId,
+            inviterProfileId,
+            'entry_fee_debit' satisfies TournamentLedgerEntryType,
+            freshTournament.entry_fee,
+            getWalletBalance(inviterProfileId),
+          )
+        } else {
+          updateEntryToPartnerInviterStatement.run(teamId, inviterEntry.entry_id)
+        }
+
+        const inviteId = randomUUID()
+        insertPartnerInviteStatement.run(
+          inviteId,
+          tournamentId,
+          teamId,
+          inviterProfileId,
+          inviteeProfileId,
+          expiresAt,
+        )
+        insertEvent(tournamentId, 'partner_invite_created', inviterProfileId, 'player', {
+          inviteId,
+          inviteeProfileId,
+          teamId,
+          entryId,
+        })
+        database.exec('COMMIT;')
+
+        const inviteRow = selectPendingInviteByIdStatement.get(
+          inviteId,
+          tournamentId,
+        ) as TournamentPartnerInviteRow
+        result = {
+          ok: true,
+          invite: toTournamentPartnerInviteRecord(inviteRow),
+          walletBalance: getWalletBalance(inviterProfileId),
+          tournament: toTournamentRecord(freshTournament),
+        }
+      } catch (error) {
+        try {
+          database.exec('ROLLBACK;')
+        } catch {
+          // keep original error
+        }
+        throw error
+      }
+      return result
+    },
+
+    acceptPartnerInviteAtomically(
+      tournamentId: TournamentId,
+      inviteId: TournamentPartnerInviteId,
+      inviteeProfileId: ProfileId,
+    ): PartnerInviteMutationResult {
+      try {
+        database.exec('BEGIN IMMEDIATE;')
+        expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+        const inviteRow = selectPendingInviteByIdStatement.get(inviteId, tournamentId) as
+          | TournamentPartnerInviteRow
+          | undefined
+        if (inviteRow === undefined) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'invite_not_found' }
+        }
+        if (inviteRow.invitee_profile_id !== inviteeProfileId) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'not_invitee' }
+        }
+        if (inviteRow.status === 'accepted') {
+          database.exec('ROLLBACK;')
+          const tournament = selectTournamentByIdStatement.get(tournamentId) as TournamentRow
+          return {
+            ok: true,
+            alreadyResolved: true,
+            invite: toTournamentPartnerInviteRecord(inviteRow),
+            walletBalance: getWalletBalance(inviteeProfileId),
+            tournament: toTournamentRecord(tournament),
+          }
+        }
+        if (inviteRow.status !== 'pending') {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'invite_not_pending' }
+        }
+        const freshTournament = selectTournamentForUpdateStatement.get(tournamentId) as TournamentRow | undefined
+        if (freshTournament === undefined) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_not_found' }
+        }
+        if (freshTournament.status !== 'open') {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_not_open' }
+        }
+        if (new Date(dbDateToUtc(inviteRow.expires_at)).getTime() <= Date.now()) {
+          resolvePartnerInviteStatement.run('expired', inviteId, tournamentId)
+          resetFormingTeamToSolo(tournamentId, inviteRow.team_id, inviteRow.inviter_profile_id)
+          database.exec('COMMIT;')
+          return { ok: false, reason: 'invite_not_pending' }
+        }
+        const teamRow = selectTeamByIdStatement.get(inviteRow.team_id) as TournamentTeamRow | undefined
+        const teamMembers = selectConfirmedEntriesForTeamStatement.all(inviteRow.team_id) as TournamentEntryRow[]
+        if (teamRow === undefined || teamRow.status !== 'forming' || teamMembers.length !== 1) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'team_invalid' }
+        }
+        const inviteeValidation = validateInvitee(
+          tournamentId,
+          inviteRow.inviter_profile_id,
+          inviteeProfileId,
+        )
+        if (inviteeValidation !== null) {
+          database.exec('ROLLBACK;')
+          return inviteeValidation
+        }
+        ensureWalletStatement.run(inviteeProfileId)
+        const debitResult = debitWalletStatement.run(
+          freshTournament.entry_fee,
+          inviteeProfileId,
+          freshTournament.entry_fee,
+        ) as { changes?: number }
+        if ((debitResult.changes ?? 0) === 0) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'insufficient_funds' }
+        }
+        const entryId = randomUUID()
+        insertPartnerInviteeEntryStatement.run(entryId, tournamentId, inviteeProfileId, inviteRow.team_id)
+        insertLedgerStatement.run(
+          randomUUID(),
+          entryFeeDebitKey(tournamentId, inviteeProfileId),
+          tournamentId,
+          inviteeProfileId,
+          'entry_fee_debit' satisfies TournamentLedgerEntryType,
+          freshTournament.entry_fee,
+          getWalletBalance(inviteeProfileId),
+        )
+        updateTeamStatusStatement.run('complete', inviteRow.team_id, tournamentId)
+        resolvePartnerInviteStatement.run('accepted', inviteId, tournamentId)
+        insertEvent(tournamentId, 'partner_invite_accepted', inviteeProfileId, 'player', {
+          inviteId,
+          teamId: inviteRow.team_id,
+          entryId,
+        })
+        database.exec('COMMIT;')
+        const finalInvite = getInviteById(tournamentId, inviteId)
+        return {
+          ok: true,
+          invite: finalInvite ?? toTournamentPartnerInviteRecord(inviteRow),
+          walletBalance: getWalletBalance(inviteeProfileId),
+          tournament: toTournamentRecord(freshTournament),
+        }
+      } catch (error) {
+        try { database.exec('ROLLBACK;') } catch {}
+        throw error
+      }
+    },
+
+    declinePartnerInviteAtomically(
+      tournamentId: TournamentId,
+      inviteId: TournamentPartnerInviteId,
+      inviteeProfileId: ProfileId,
+    ): PartnerInviteMutationResult {
+      try {
+        database.exec('BEGIN IMMEDIATE;')
+        expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+        const inviteRow = selectPendingInviteByIdStatement.get(inviteId, tournamentId) as TournamentPartnerInviteRow | undefined
+        if (inviteRow === undefined) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'invite_not_found' }
+        }
+        if (inviteRow.invitee_profile_id !== inviteeProfileId) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'not_invitee' }
+        }
+        if (inviteRow.status !== 'pending') {
+          const tournament = selectTournamentByIdStatement.get(tournamentId) as TournamentRow
+          database.exec('ROLLBACK;')
+          return {
+            ok: true,
+            alreadyResolved: true,
+            invite: toTournamentPartnerInviteRecord(inviteRow),
+            walletBalance: getWalletBalance(inviteeProfileId),
+            tournament: toTournamentRecord(tournament),
+          }
+        }
+        resolvePartnerInviteStatement.run('declined', inviteId, tournamentId)
+        resetFormingTeamToSolo(tournamentId, inviteRow.team_id, inviteRow.inviter_profile_id)
+        insertEvent(tournamentId, 'partner_invite_declined', inviteeProfileId, 'player', {
+          inviteId,
+          teamId: inviteRow.team_id,
+        })
+        const tournament = selectTournamentByIdStatement.get(tournamentId) as TournamentRow
+        database.exec('COMMIT;')
+        const finalInvite = getInviteById(tournamentId, inviteId)
+        return {
+          ok: true,
+          invite: finalInvite ?? toTournamentPartnerInviteRecord(inviteRow),
+          walletBalance: getWalletBalance(inviteeProfileId),
+          tournament: toTournamentRecord(tournament),
+        }
+      } catch (error) {
+        try { database.exec('ROLLBACK;') } catch {}
+        throw error
+      }
+    },
+
+    cancelPartnerInviteAtomically(
+      tournamentId: TournamentId,
+      inviteId: TournamentPartnerInviteId,
+      inviterProfileId: ProfileId,
+    ): PartnerInviteMutationResult {
+      try {
+        database.exec('BEGIN IMMEDIATE;')
+        expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+        const inviteRow = selectPendingInviteByIdStatement.get(inviteId, tournamentId) as TournamentPartnerInviteRow | undefined
+        if (inviteRow === undefined) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'invite_not_found' }
+        }
+        if (inviteRow.inviter_profile_id !== inviterProfileId) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'not_inviter' }
+        }
+        if (inviteRow.status !== 'pending') {
+          const tournament = selectTournamentByIdStatement.get(tournamentId) as TournamentRow
+          database.exec('ROLLBACK;')
+          return {
+            ok: true,
+            alreadyResolved: true,
+            invite: toTournamentPartnerInviteRecord(inviteRow),
+            walletBalance: getWalletBalance(inviterProfileId),
+            tournament: toTournamentRecord(tournament),
+          }
+        }
+        resolvePartnerInviteStatement.run('cancelled', inviteId, tournamentId)
+        resetFormingTeamToSolo(tournamentId, inviteRow.team_id, inviteRow.inviter_profile_id)
+        insertEvent(tournamentId, 'partner_invite_cancelled', inviterProfileId, 'player', {
+          inviteId,
+          teamId: inviteRow.team_id,
+        })
+        const tournament = selectTournamentByIdStatement.get(tournamentId) as TournamentRow
+        database.exec('COMMIT;')
+        const finalInvite = getInviteById(tournamentId, inviteId)
+        return {
+          ok: true,
+          invite: finalInvite ?? toTournamentPartnerInviteRecord(inviteRow),
+          walletBalance: getWalletBalance(inviterProfileId),
+          tournament: toTournamentRecord(tournament),
+        }
+      } catch (error) {
+        try { database.exec('ROLLBACK;') } catch {}
+        throw error
+      }
+    },
+
     joinTournamentSoloAtomically(
       tournamentId: TournamentId,
       profileId: ProfileId,
@@ -398,6 +1264,7 @@ export async function createTournamentEconomyStore(
 
       try {
         database.exec('BEGIN IMMEDIATE;')
+        expireDuePartnerInvitesInCurrentTransaction(tournamentId)
 
         const freshTournament = selectTournamentForUpdateStatement.get(tournamentId) as
           | TournamentRow
@@ -460,11 +1327,8 @@ export async function createTournamentEconomyStore(
           return { ok: false, reason: 'already_participating_elsewhere' }
         }
 
-        const confirmedCount = (
-          countConfirmedEntriesStatement.get(tournamentId) as { count: number }
-        ).count
         const playerCapacity = Math.min(freshTournament.player_capacity, 8)
-        if (confirmedCount >= playerCapacity) {
+        if (getOccupiedPlaces(tournamentId) + 1 > playerCapacity) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'tournament_full' }
         }
@@ -568,6 +1432,7 @@ export async function createTournamentEconomyStore(
 
       try {
         database.exec('BEGIN IMMEDIATE;')
+        expireDuePartnerInvitesInCurrentTransaction(tournamentId)
 
         const freshTournament = selectTournamentForUpdateStatement.get(tournamentId) as TournamentRow
         if (freshTournament.status !== 'open') {
@@ -615,6 +1480,22 @@ export async function createTournamentEconomyStore(
           refundAmount,
           getWalletBalance(profileId),
         )
+
+        if (freshEntry.team_id !== null) {
+          const teamMembers = selectConfirmedEntriesForTeamStatement.all(freshEntry.team_id) as TournamentEntryRow[]
+          const remainingMembers = teamMembers.filter((entry) => entry.entry_id !== freshEntry.entry_id)
+          const pendingInvite = selectPendingOutgoingInviteStatement.get(
+            tournamentId,
+            profileId,
+          ) as TournamentPartnerInviteRow | undefined
+          if (pendingInvite !== undefined) {
+            resolvePartnerInviteStatement.run('cancelled', pendingInvite.invite_id, tournamentId)
+          }
+          for (const member of remainingMembers) {
+            updateEntryToSoloStatement.run(member.entry_id)
+          }
+          deleteTeamStatement.run(freshEntry.team_id, tournamentId)
+        }
 
         const updateResult = updateEntryToRefundedStatement.run(freshEntry.entry_id) as {
           changes?: number
@@ -679,6 +1560,7 @@ export async function createTournamentEconomyStore(
 
       try {
         database.exec('BEGIN IMMEDIATE;')
+        expireDuePartnerInvitesInCurrentTransaction(tournamentId)
 
         const statusUpdateResult = updateTournamentStatusStatement.run(
           'cancelled',
@@ -702,6 +1584,18 @@ export async function createTournamentEconomyStore(
             }
           }
           return { ok: false, reason: 'tournament_not_open' }
+        }
+
+        const pendingInvites = database.prepare(`
+          SELECT invite_id, tournament_id, team_id, inviter_profile_id, invitee_profile_id,
+                 status, expires_at, popup_dismissed_at, notification_read_at, created_at,
+                 responded_at
+          FROM tournament_partner_invites
+          WHERE tournament_id = ? AND status = 'pending';
+        `).all(tournamentId) as TournamentPartnerInviteRow[]
+        for (const invite of pendingInvites) {
+          resolvePartnerInviteStatement.run('cancelled', invite.invite_id, tournamentId)
+          resetFormingTeamToSolo(tournamentId, invite.team_id, invite.inviter_profile_id)
         }
 
         const confirmedEntries = selectConfirmedEntriesStatement.all(

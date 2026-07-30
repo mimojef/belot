@@ -24,6 +24,8 @@ import type {
   SupportMessageSnapshot,
   SupportConversationSnapshot,
   TournamentDetailSnapshot,
+  TournamentPartnerCandidateSnapshot,
+  TournamentPartnerInviteSnapshot,
   TournamentSummarySnapshot,
 } from '../network/createGameServerClient'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, ActiveRoomSnapshot } from '../adminServer/adminServerTypes'
@@ -384,6 +386,14 @@ export type LobbyScreenState = {
   tournamentJoinConfirmOpen: boolean
   tournamentJoinBusy: boolean
   tournamentJoinErrorText: string | null
+  tournamentPartnerInvites: TournamentPartnerInviteSnapshot[]
+  tournamentPartnerCandidates: TournamentPartnerCandidateSnapshot[]
+  tournamentPartnerPickerOpen: boolean
+  tournamentPartnerPickerLoading: boolean
+  tournamentPartnerPickerErrorText: string | null
+  tournamentPartnerInviteBusy: boolean
+  tournamentPartnerInviteErrorText: string | null
+  tournamentPartnerInviteQuery: string
   tournamentLeaveConfirmOpen: boolean
   tournamentLeaveBusy: boolean
   tournamentLeaveErrorText: string | null
@@ -447,6 +457,13 @@ export type RenderLobbyScreenOptions = {
   onTournamentJoinConfirmOpen: () => void
   onTournamentJoinConfirmClose: () => void
   onTournamentJoinSubmit: () => void
+  onTournamentPartnerPickerOpen: () => void
+  onTournamentPartnerPickerClose: () => void
+  onTournamentPartnerInviteSubmit: (profileId: string) => void
+  onTournamentPartnerInviteQueryChange: (value: string) => void
+  onTournamentPartnerInviteAccept: (tournamentId: string, inviteId: string) => void
+  onTournamentPartnerInviteDecline: (tournamentId: string, inviteId: string) => void
+  onTournamentPartnerInviteCancel: (tournamentId: string, inviteId: string) => void
   onTournamentLeaveConfirmOpen: () => void
   onTournamentLeaveConfirmClose: () => void
   onTournamentLeaveSubmit: () => void
@@ -10403,6 +10420,45 @@ export function renderLobbyScreen(
     ?.addEventListener('click', (e) => {
       if (e.target === e.currentTarget) options.onTournamentJoinConfirmClose()
     })
+  root.querySelector<HTMLButtonElement>('[data-tournament-partner-picker-open="1"]')
+    ?.addEventListener('click', options.onTournamentPartnerPickerOpen)
+  root.querySelector<HTMLButtonElement>('[data-tournament-partner-picker-close="1"]')
+    ?.addEventListener('click', options.onTournamentPartnerPickerClose)
+  root.querySelector<HTMLElement>('[data-tournament-partner-picker-backdrop="1"]')
+    ?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) options.onTournamentPartnerPickerClose()
+    })
+  root.querySelector<HTMLInputElement>('[data-tournament-partner-query="1"]')
+    ?.addEventListener('input', (e) => {
+      options.onTournamentPartnerInviteQueryChange((e.currentTarget as HTMLInputElement).value)
+    })
+  root.querySelectorAll<HTMLButtonElement>('[data-tournament-partner-invite]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const profileId = btn.dataset.tournamentPartnerInvite ?? ''
+      if (profileId) options.onTournamentPartnerInviteSubmit(profileId)
+    })
+  })
+  root.querySelectorAll<HTMLButtonElement>('[data-tournament-partner-accept]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const inviteId = btn.dataset.tournamentPartnerAccept ?? ''
+      const tournamentId = btn.dataset.tournamentId ?? ''
+      if (inviteId && tournamentId) options.onTournamentPartnerInviteAccept(tournamentId, inviteId)
+    })
+  })
+  root.querySelectorAll<HTMLButtonElement>('[data-tournament-partner-decline]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const inviteId = btn.dataset.tournamentPartnerDecline ?? ''
+      const tournamentId = btn.dataset.tournamentId ?? ''
+      if (inviteId && tournamentId) options.onTournamentPartnerInviteDecline(tournamentId, inviteId)
+    })
+  })
+  root.querySelectorAll<HTMLButtonElement>('[data-tournament-partner-cancel]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const inviteId = btn.dataset.tournamentPartnerCancel ?? ''
+      const tournamentId = btn.dataset.tournamentId ?? ''
+      if (inviteId && tournamentId) options.onTournamentPartnerInviteCancel(tournamentId, inviteId)
+    })
+  })
 
   root.querySelector<HTMLButtonElement>('[data-tournament-leave-open="1"]')
     ?.addEventListener('click', options.onTournamentLeaveConfirmOpen)

@@ -1,6 +1,8 @@
 import type {
   TournamentCreateInput,
   TournamentDetailSnapshot,
+  TournamentPartnerCandidateSnapshot,
+  TournamentPartnerInviteSnapshot,
   TournamentSummarySnapshot,
   TournamentVisibility,
   TournamentStartMode,
@@ -32,6 +34,16 @@ function fmtLocalDateTime(iso: string): string {
   } catch {
     return iso
   }
+}
+
+function formatInviteCountdown(expiresAt: string): string {
+  const remainingMs = new Date(expiresAt).getTime() - Date.now()
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) return 'изтича'
+  const minutes = Math.floor(remainingMs / 60000)
+  if (minutes < 60) return `${minutes} мин.`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return `${hours} ч. ${rest} мин.`
 }
 
 // ── Позволени входни стойности (огледално на server ALLOWED_TOURNAMENT_ENTRY_FEES) ──
@@ -111,6 +123,40 @@ function renderTournamentCard(t: TournamentSummarySnapshot): string {
   `
 }
 
+function renderIncomingInviteCard(invite: TournamentPartnerInviteSnapshot): string {
+  return `
+    <article style="border:1px solid rgba(34,197,94,0.32);border-radius:8px;background:#0d0d0d;padding:12px;display:grid;gap:8px;">
+      <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+        <div style="width:30px;height:30px;border-radius:999px;background:#141414;border:1px solid rgba(255,255,255,0.14);overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:12px;font-weight:900;flex-shrink:0;">
+          ${invite.inviter.avatarUrl ? `<img src="${escapeHtml(invite.inviter.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(invite.inviter.displayName.slice(0, 1).toUpperCase())}
+        </div>
+        <div style="min-width:0;">
+          <div style="font-size:13px;font-weight:900;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(invite.inviter.displayName)} те кани</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.55);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(invite.tournamentName ?? 'Турнир')}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:11px;color:rgba(255,255,255,0.65);">
+        ${invite.entryFee !== undefined ? `<span>${formatAmount(invite.entryFee)} вход</span>` : ''}
+        <span>Остава ${escapeHtml(formatInviteCountdown(invite.expiresAt))}</span>
+        ${invite.scheduledStartAt ? `<span>${escapeHtml(fmtLocalDateTime(invite.scheduledStartAt))}</span>` : ''}
+      </div>
+      <button type="button" data-tournament-card="${escapeHtml(invite.tournamentId)}" style="height:34px;border-radius:6px;border:1px solid rgba(212,165,32,0.36);background:rgba(212,165,32,0.10);color:#d4a520;font-size:12px;font-weight:900;cursor:pointer;">Виж турнира</button>
+    </article>
+  `
+}
+
+function renderIncomingInvitesSection(state: LobbyScreenState): string {
+  if (state.profile.profileId === null || state.tournamentPartnerInvites.length === 0) return ''
+  return `
+    <section style="margin-bottom:16px;">
+      <div style="font-size:13px;font-weight:900;color:#22c55e;margin-bottom:8px;">Покани към теб</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;">
+        ${state.tournamentPartnerInvites.map(renderIncomingInviteCard).join('')}
+      </div>
+    </section>
+  `
+}
+
 export function renderTournamentsScreen(state: LobbyScreenState): string {
   const isMineFilter = state.tournamentsFilter === 'mine'
 
@@ -171,6 +217,7 @@ export function renderTournamentsScreen(state: LobbyScreenState): string {
     <section style="padding:0 4px;">
       ${header}
       ${filters}
+      ${renderIncomingInvitesSection(state)}
       ${body}
       ${state.tournamentCreatePopupOpen ? renderTournamentCreatePopup(state) : ''}
     </section>
@@ -191,7 +238,7 @@ function renderTournamentCreatePopup(state: LobbyScreenState): string {
       <div style="background:#111118;border:1px solid rgba(212,165,32,0.4);border-radius:16px;width:440px;max-width:100%;padding:24px;box-shadow:0 8px 40px rgba(0,0,0,0.7);max-height:92vh;overflow-y:auto;box-sizing:border-box;">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
           <div style="font-size:17px;font-weight:900;color:#d4a520;">Създай турнир</div>
-          <button type="button" data-tournament-create-close="1" style="width:30px;height:30px;border:none;background:rgba(255,255,255,0.08);border-radius:7px;color:rgba(255,255,255,0.6);font-size:18px;font-weight:700;cursor:pointer;">×</button>
+          <button type="button" data-tournament-create-close="1" style="width:32px;height:32px;border:none;background:rgba(255,255,255,0.08);border-radius:7px;color:rgba(255,255,255,0.6);font-size:18px;font-weight:700;cursor:pointer;">×</button>
         </div>
 
         ${state.tournamentCreateErrorText ? `
@@ -379,15 +426,39 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
         <div style="font-size:13px;color:rgba(255,255,255,0.4);font-style:italic;">Схемата ще се появи, след като турнирът стартира.</div>
       </div>
 
+      ${renderTournamentPartnerPanel(state, t)}
       ${renderTournamentParticipationActions(state, t)}
 
       <div style="font-size:11px;color:rgba(255,255,255,0.35);">Създаден: ${fmtLocalDateTime(t.createdAt)}</div>
     </section>
 
     ${state.tournamentJoinConfirmOpen ? renderTournamentJoinConfirmPopup(state, t) : ''}
+    ${state.tournamentPartnerPickerOpen ? renderTournamentPartnerPickerPopup(state, t) : ''}
     ${state.tournamentLeaveConfirmOpen ? renderTournamentLeaveConfirmPopup(state, t) : ''}
     ${state.tournamentCancelConfirmOpen ? renderTournamentCancelConfirmPopup(state) : ''}
   `
+}
+
+function renderTournamentPartnerPanel(state: LobbyScreenState, t: TournamentDetailSnapshot): string {
+  const error = state.tournamentPartnerInviteErrorText
+    ? `<div style="margin-bottom:10px;padding:8px 10px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:12px;font-weight:700;">${escapeHtml(state.tournamentPartnerInviteErrorText)}</div>`
+    : ''
+  if (t.incomingPartnerInvite) {
+    const invite = t.incomingPartnerInvite
+    return `<div style="background:#0d0d0d;border:1px solid rgba(34,197,94,0.36);border-radius:10px;padding:16px;margin-bottom:14px;">${error}<div style="font-size:14px;font-weight:900;color:#22c55e;margin-bottom:8px;">${escapeHtml(invite.inviter.displayName)} те кани да участвате като партньори.</div><div style="font-size:12px;color:rgba(255,255,255,0.62);margin-bottom:12px;">При приемане ще бъдат приспаднати ${formatAmount(t.entryFee)} жълтици. Остава ${escapeHtml(formatInviteCountdown(invite.expiresAt))}.</div><div style="display:flex;gap:8px;flex-wrap:wrap;"><button type="button" data-tournament-partner-accept="${escapeHtml(invite.inviteId)}" data-tournament-id="${escapeHtml(t.tournamentId)}" ${state.tournamentPartnerInviteBusy ? 'disabled' : ''} style="height:38px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#4ade80 0%,#16a34a 100%);color:#06120a;font-size:13px;font-weight:900;cursor:pointer;">Приеми поканата</button><button type="button" data-tournament-partner-decline="${escapeHtml(invite.inviteId)}" data-tournament-id="${escapeHtml(t.tournamentId)}" ${state.tournamentPartnerInviteBusy ? 'disabled' : ''} style="height:38px;padding:0 16px;border-radius:8px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.2);color:#fca5a5;font-size:13px;font-weight:800;cursor:pointer;">Откажи</button></div></div>`
+  }
+  if (t.outgoingPartnerInvite) {
+    const invite = t.outgoingPartnerInvite
+    return `<div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.32);border-radius:10px;padding:16px;margin-bottom:14px;">${error}<div style="font-size:14px;font-weight:900;color:#d4a520;margin-bottom:8px;">Чакаме отговор от ${escapeHtml(invite.invitee.displayName)}</div><div style="font-size:12px;color:rgba(255,255,255,0.62);margin-bottom:12px;">Мястото е временно резервирано. Остава ${escapeHtml(formatInviteCountdown(invite.expiresAt))}.</div><button type="button" data-tournament-partner-cancel="${escapeHtml(invite.inviteId)}" data-tournament-id="${escapeHtml(t.tournamentId)}" ${state.tournamentPartnerInviteBusy ? 'disabled' : ''} style="height:38px;padding:0 16px;border-radius:8px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.2);color:#fca5a5;font-size:13px;font-weight:800;cursor:pointer;">Отмени поканата</button></div>`
+  }
+  if (t.myTeam && t.myTeam.status === 'complete') {
+    return `<div style="background:#0d0d0d;border:1px solid rgba(34,197,94,0.32);border-radius:10px;padding:16px;margin-bottom:14px;"><div style="font-size:14px;font-weight:900;color:#22c55e;margin-bottom:10px;">Отборът е готов</div><div style="display:flex;gap:10px;flex-wrap:wrap;">${t.myTeam.members.map((member) => `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:8px;padding:7px 9px;"><span style="width:26px;height:26px;border-radius:999px;overflow:hidden;background:#171717;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:11px;font-weight:900;">${member.avatarUrl ? `<img src="${escapeHtml(member.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(member.displayName.slice(0, 1).toUpperCase())}</span><span style="font-size:12px;color:#fff;font-weight:800;">${escapeHtml(member.displayName)}</span></div>`).join('')}</div></div>`
+  }
+  if (t.status === 'open' && !t.incomingPartnerInvite && !t.outgoingPartnerInvite && t.viewer.canInvitePartner) {
+    const label = t.viewer.isParticipant ? 'Покани приятел за партньор' : 'Участвай с партньор'
+    return `<div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:16px;margin-bottom:14px;">${error}<button type="button" data-tournament-partner-picker-open="1" style="width:100%;height:40px;border-radius:8px;border:1px solid rgba(212,165,32,0.42);background:rgba(212,165,32,0.10);color:#d4a520;font-size:14px;font-weight:900;cursor:pointer;">${label}</button></div>`
+  }
+  return ''
 }
 
 function renderTournamentParticipationActions(state: LobbyScreenState, t: TournamentDetailSnapshot): string {
@@ -423,7 +494,7 @@ function renderTournamentParticipationActions(state: LobbyScreenState, t: Tourna
           Входът се плаща еднократно за целия турнир: ${formatAmount(t.entryFee)} жълтици.
         </div>
         <div style="margin-top:6px;font-size:12px;color:rgba(255,255,255,0.4);text-align:center;font-style:italic;">
-          Участие с избран партньор ще бъде добавено в следващия етап.
+          Можеш да се запишеш сам или да поканиш приятел от списъка си.
         </div>
       </div>
     `
@@ -497,6 +568,48 @@ function renderTournamentJoinConfirmPopup(state: LobbyScreenState, t: Tournament
         </div>
       </div>
     </div>
+  `
+}
+
+function renderTournamentPartnerPickerPopup(state: LobbyScreenState, t: TournamentDetailSnapshot): string {
+  const query = state.tournamentPartnerInviteQuery.trim().toLowerCase()
+  const candidates = state.tournamentPartnerCandidates
+    .filter((candidate) => query.length === 0 || candidate.displayName.toLowerCase().includes(query))
+    .sort((a, b) => Number(b.online) - Number(a.online) || a.displayName.localeCompare(b.displayName, 'bg'))
+  const body = state.tournamentPartnerPickerLoading
+    ? `<div style="padding:26px;text-align:center;color:#d4a520;font-weight:800;">Зареждане...</div>`
+    : state.tournamentPartnerPickerErrorText
+      ? `<div style="padding:14px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:13px;font-weight:700;">${escapeHtml(state.tournamentPartnerPickerErrorText)}</div>`
+      : candidates.length === 0
+        ? `<div style="padding:20px;text-align:center;color:rgba(255,255,255,0.55);font-size:13px;">Няма приятели за показване.</div>`
+        : candidates.map((candidate) => renderPartnerCandidateRow(candidate, state)).join('')
+  return `
+    <div data-tournament-partner-picker-backdrop="1" style="position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,0.72);display:flex;align-items:center;justify-content:center;padding:14px;">
+      <div style="background:#111118;border:1px solid rgba(212,165,32,0.4);border-radius:14px;width:100%;max-width:460px;padding:18px;box-sizing:border-box;max-height:92vh;overflow:auto;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;">
+          <div style="font-size:16px;font-weight:900;color:#d4a520;">Избери партньор</div>
+          <button type="button" data-tournament-partner-picker-close="1" ${state.tournamentPartnerInviteBusy ? 'disabled' : ''} style="width:32px;height:32px;border:none;background:rgba(255,255,255,0.08);border-radius:7px;color:rgba(255,255,255,0.65);font-size:18px;font-weight:800;cursor:pointer;">x</button>
+        </div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.62);line-height:1.45;margin-bottom:12px;">Ще платиш вход от ${formatAmount(t.entryFee)} жълтици. Поканеният приятел ще плати своя вход само ако приеме.</div>
+        ${state.tournamentPartnerInviteErrorText ? `<div style="margin-bottom:10px;padding:8px 10px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:12px;font-weight:700;">${escapeHtml(state.tournamentPartnerInviteErrorText)}</div>` : ''}
+        <input type="search" data-tournament-partner-query="1" value="${escapeHtml(state.tournamentPartnerInviteQuery)}" placeholder="Търси в приятелите" style="width:100%;height:38px;box-sizing:border-box;margin-bottom:10px;padding:0 11px;background:#1a1a24;border:1px solid rgba(255,255,255,0.16);border-radius:8px;color:#fff;font-size:13px;">
+        <div style="display:grid;gap:8px;">${body}</div>
+      </div>
+    </div>
+  `
+}
+
+function renderPartnerCandidateRow(candidate: TournamentPartnerCandidateSnapshot, state: LobbyScreenState): string {
+  const status = candidate.online ? 'Онлайн' : 'Офлайн'
+  const disabledReason = candidate.unavailableReason ? ` (${candidate.unavailableReason})` : ''
+  return `
+    <button type="button" data-tournament-partner-invite="${escapeHtml(candidate.profileId)}" ${!candidate.eligible || state.tournamentPartnerInviteBusy ? 'disabled' : ''} style="width:100%;min-height:48px;border-radius:8px;border:1px solid ${candidate.eligible ? 'rgba(212,165,32,0.28)' : 'rgba(255,255,255,0.10)'};background:${candidate.eligible ? 'rgba(212,165,32,0.07)' : 'rgba(255,255,255,0.03)'};display:flex;align-items:center;gap:9px;padding:8px 10px;cursor:${candidate.eligible && !state.tournamentPartnerInviteBusy ? 'pointer' : 'not-allowed'};text-align:left;">
+      <span style="width:30px;height:30px;border-radius:999px;background:#171717;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:12px;font-weight:900;flex-shrink:0;">${candidate.avatarUrl ? `<img src="${escapeHtml(candidate.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(candidate.displayName.slice(0, 1).toUpperCase())}</span>
+      <span style="min-width:0;display:grid;gap:2px;">
+        <span style="font-size:13px;font-weight:900;color:${candidate.eligible ? '#fff' : 'rgba(255,255,255,0.42)'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(candidate.displayName)}</span>
+        <span style="font-size:11px;color:${candidate.online ? '#22c55e' : 'rgba(255,255,255,0.45)'};">${status}${escapeHtml(disabledReason)}</span>
+      </span>
+    </button>
   `
 }
 

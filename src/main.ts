@@ -68,6 +68,8 @@ import {
   type TournamentSummarySnapshot,
   type TournamentDetailSnapshot,
   type TournamentCreateInput,
+  type TournamentPartnerCandidateSnapshot,
+  type TournamentPartnerInviteSnapshot,
 } from './app/network/createGameServerClient'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
@@ -3441,6 +3443,114 @@ async function cancelTournamentRequest(
   }
 }
 
+type TournamentPartnerInviteActionResponse =
+  | {
+      ok: true
+      alreadyResolved?: boolean
+      invite: TournamentPartnerInviteSnapshot
+      walletBalance: number
+      tournament: TournamentSummarySnapshot
+    }
+  | { ok: false; message: string; reason?: string; requiresPassword?: boolean }
+
+async function loadTournamentPartnerCandidates(
+  tournamentId: string,
+): Promise<
+  | { ok: true; candidates: TournamentPartnerCandidateSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/partner-candidates`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as { ok: boolean; message?: string; candidates?: TournamentPartnerCandidateSnapshot[] }
+    if (!response.ok || !data.ok || !Array.isArray(data.candidates)) {
+      return { ok: false, message: data.message ?? 'Приятелите не бяха заредени.' }
+    }
+    return { ok: true, candidates: data.candidates }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadPendingTournamentPartnerInvites(): Promise<
+  | { ok: true; invites: TournamentPartnerInviteSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/partner-invites/pending`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as { ok: boolean; message?: string; invites?: TournamentPartnerInviteSnapshot[] }
+    if (!response.ok || !data.ok || !Array.isArray(data.invites)) {
+      return { ok: false, message: data.message ?? 'Поканите не бяха заредени.' }
+    }
+    return { ok: true, invites: data.invites }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function createTournamentPartnerInviteRequest(
+  tournamentId: string,
+  inviteeProfileId: string,
+  password: string | null,
+): Promise<TournamentPartnerInviteActionResponse> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/partner-invites`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ inviteeProfileId, ...(password !== null ? { password } : {}) }),
+    })
+    const data = (await response.json()) as TournamentPartnerInviteActionResponse
+    if (!response.ok || !data.ok) {
+      const errorData = data as Extract<TournamentPartnerInviteActionResponse, { ok: false }>
+      return { ok: false, message: errorData.message ?? 'Поканата не бе изпратена.', reason: errorData.reason, requiresPassword: errorData.requiresPassword }
+    }
+    if (currentAuthSession !== null) {
+      currentAuthSession = {
+        ...currentAuthSession,
+        profile: { ...currentAuthSession.profile, yellowCoinsBalance: data.walletBalance },
+      }
+      syncLobbyWithAuthSession()
+    }
+    return data
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function respondTournamentPartnerInviteRequest(
+  tournamentId: string,
+  inviteId: string,
+  action: 'accept' | 'decline' | 'cancel',
+): Promise<TournamentPartnerInviteActionResponse> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/partner-invites/${encodeURIComponent(inviteId)}/${action}`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as TournamentPartnerInviteActionResponse
+    if (!response.ok || !data.ok) {
+      const errorData = data as Extract<TournamentPartnerInviteActionResponse, { ok: false }>
+      return { ok: false, message: errorData.message ?? 'Поканата не бе обработена.', reason: errorData.reason }
+    }
+    if (currentAuthSession !== null) {
+      currentAuthSession = {
+        ...currentAuthSession,
+        profile: { ...currentAuthSession.profile, yellowCoinsBalance: data.walletBalance },
+      }
+      syncLobbyWithAuthSession()
+    }
+    return data
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 lobby = createLobbyFlowController({
   root: rootElement,
   suppressRendering: _isResetPasswordPath,
@@ -3660,6 +3770,10 @@ lobby = createLobbyFlowController({
   onTournamentJoin: (tournamentId, password) => joinTournamentRequest(tournamentId, password),
   onTournamentLeave: (tournamentId) => leaveTournamentRequest(tournamentId),
   onTournamentCancel: (tournamentId) => cancelTournamentRequest(tournamentId),
+  onTournamentPartnerCandidatesLoad: (tournamentId) => loadTournamentPartnerCandidates(tournamentId),
+  onPendingTournamentPartnerInvitesLoad: () => loadPendingTournamentPartnerInvites(),
+  onTournamentPartnerInviteCreate: (tournamentId, inviteeProfileId, password) => createTournamentPartnerInviteRequest(tournamentId, inviteeProfileId, password),
+  onTournamentPartnerInviteRespond: (tournamentId, inviteId, action) => respondTournamentPartnerInviteRequest(tournamentId, inviteId, action),
   onNotifFriendRequestClick: (friendshipId) => {
     const req = lobby?.getPendingFriendRequest(friendshipId)
     if (!req) return

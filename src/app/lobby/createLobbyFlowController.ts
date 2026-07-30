@@ -62,6 +62,8 @@ import type {
   SupportConversationSnapshot,
   TournamentCreateInput,
   TournamentDetailSnapshot,
+  TournamentPartnerCandidateSnapshot,
+  TournamentPartnerInviteSnapshot,
   TournamentSummarySnapshot,
 } from '../network/createGameServerClient'
 
@@ -525,6 +527,30 @@ export type CreateLobbyFlowControllerOptions = {
       }
     | { ok: false; message: string }
   >
+  onTournamentPartnerCandidatesLoad?: (tournamentId: string) => Promise<
+    | { ok: true; candidates: TournamentPartnerCandidateSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onPendingTournamentPartnerInvitesLoad?: () => Promise<
+    | { ok: true; invites: TournamentPartnerInviteSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onTournamentPartnerInviteCreate?: (
+    tournamentId: string,
+    inviteeProfileId: string,
+    password: string | null,
+  ) => Promise<
+    | { ok: true; invite: TournamentPartnerInviteSnapshot; walletBalance: number; tournament: TournamentSummarySnapshot }
+    | { ok: false; message: string; reason?: string; requiresPassword?: boolean }
+  >
+  onTournamentPartnerInviteRespond?: (
+    tournamentId: string,
+    inviteId: string,
+    action: 'accept' | 'decline' | 'cancel',
+  ) => Promise<
+    | { ok: true; invite: TournamentPartnerInviteSnapshot; walletBalance: number; tournament: TournamentSummarySnapshot }
+    | { ok: false; message: string; reason?: string }
+  >
 }
 
 
@@ -851,6 +877,14 @@ type InternalLobbyFlowState = {
   tournamentJoinConfirmOpen: boolean
   tournamentJoinBusy: boolean
   tournamentJoinErrorText: string | null
+  tournamentPartnerInvites: TournamentPartnerInviteSnapshot[]
+  tournamentPartnerCandidates: TournamentPartnerCandidateSnapshot[]
+  tournamentPartnerPickerOpen: boolean
+  tournamentPartnerPickerLoading: boolean
+  tournamentPartnerPickerErrorText: string | null
+  tournamentPartnerInviteBusy: boolean
+  tournamentPartnerInviteErrorText: string | null
+  tournamentPartnerInviteQuery: string
   tournamentLeaveConfirmOpen: boolean
   tournamentLeaveBusy: boolean
   tournamentLeaveErrorText: string | null
@@ -1140,6 +1174,14 @@ function createInitialState(): InternalLobbyFlowState {
     tournamentJoinConfirmOpen: false,
     tournamentJoinBusy: false,
     tournamentJoinErrorText: null,
+    tournamentPartnerInvites: [],
+    tournamentPartnerCandidates: [],
+    tournamentPartnerPickerOpen: false,
+    tournamentPartnerPickerLoading: false,
+    tournamentPartnerPickerErrorText: null,
+    tournamentPartnerInviteBusy: false,
+    tournamentPartnerInviteErrorText: null,
+    tournamentPartnerInviteQuery: '',
     tournamentLeaveConfirmOpen: false,
     tournamentLeaveBusy: false,
     tournamentLeaveErrorText: null,
@@ -2454,6 +2496,14 @@ export function createLobbyFlowController(
       tournamentJoinConfirmOpen: state.tournamentJoinConfirmOpen,
       tournamentJoinBusy: state.tournamentJoinBusy,
       tournamentJoinErrorText: state.tournamentJoinErrorText,
+      tournamentPartnerInvites: state.tournamentPartnerInvites,
+      tournamentPartnerCandidates: state.tournamentPartnerCandidates,
+      tournamentPartnerPickerOpen: state.tournamentPartnerPickerOpen,
+      tournamentPartnerPickerLoading: state.tournamentPartnerPickerLoading,
+      tournamentPartnerPickerErrorText: state.tournamentPartnerPickerErrorText,
+      tournamentPartnerInviteBusy: state.tournamentPartnerInviteBusy,
+      tournamentPartnerInviteErrorText: state.tournamentPartnerInviteErrorText,
+      tournamentPartnerInviteQuery: state.tournamentPartnerInviteQuery,
       tournamentLeaveConfirmOpen: state.tournamentLeaveConfirmOpen,
       tournamentLeaveBusy: state.tournamentLeaveBusy,
       tournamentLeaveErrorText: state.tournamentLeaveErrorText,
@@ -2665,6 +2715,28 @@ export function createLobbyFlowController(
       },
       onTournamentJoinSubmit: () => {
         void submitTournamentJoin()
+      },
+      onTournamentPartnerPickerOpen: () => {
+        void openTournamentPartnerPicker()
+      },
+      onTournamentPartnerPickerClose: () => {
+        closeTournamentPartnerPicker()
+      },
+      onTournamentPartnerInviteSubmit: (profileId) => {
+        void submitTournamentPartnerInvite(profileId)
+      },
+      onTournamentPartnerInviteQueryChange: (value) => {
+        state.tournamentPartnerInviteQuery = value
+        render()
+      },
+      onTournamentPartnerInviteAccept: (tournamentId, inviteId) => {
+        void respondTournamentPartnerInvite(tournamentId, inviteId, 'accept')
+      },
+      onTournamentPartnerInviteDecline: (tournamentId, inviteId) => {
+        void respondTournamentPartnerInvite(tournamentId, inviteId, 'decline')
+      },
+      onTournamentPartnerInviteCancel: (tournamentId, inviteId) => {
+        void respondTournamentPartnerInvite(tournamentId, inviteId, 'cancel')
       },
       onTournamentLeaveConfirmOpen: () => {
         openTournamentLeaveConfirm()
@@ -3729,7 +3801,17 @@ export function createLobbyFlowController(
 
     state.tournaments = result.tournaments
     state.tournamentsErrorText = null
+    void refetchPendingTournamentPartnerInvites()
     render()
+  }
+
+  async function refetchPendingTournamentPartnerInvites(): Promise<void> {
+    if (!options.onPendingTournamentPartnerInvitesLoad) return
+    const result = await options.onPendingTournamentPartnerInvitesLoad()
+    if (result.ok) {
+      state.tournamentPartnerInvites = result.invites
+      if (state.currentScreen === 'tournaments') render()
+    }
   }
 
   async function refetchTournamentsList(): Promise<void> {
@@ -3747,6 +3829,7 @@ export function createLobbyFlowController(
     }
     state.tournaments = result.tournaments
     state.tournamentsErrorText = null
+    void refetchPendingTournamentPartnerInvites()
     render()
   }
 
@@ -3945,6 +4028,84 @@ export function createLobbyFlowController(
     state.tournamentJoinErrorText = null
     mergeTournamentSummaryIntoDetail(result.tournament)
     void refetchTournamentsList()
+    render()
+  }
+
+  async function openTournamentPartnerPicker(): Promise<void> {
+    if (!options.onTournamentPartnerCandidatesLoad || state.tournamentDetailId === null) return
+    const tournamentId = state.tournamentDetailId
+    state.tournamentPartnerPickerOpen = true
+    state.tournamentPartnerPickerLoading = true
+    state.tournamentPartnerPickerErrorText = null
+    state.tournamentPartnerInviteErrorText = null
+    state.tournamentPartnerInviteQuery = ''
+    render()
+    const result = await options.onTournamentPartnerCandidatesLoad(tournamentId)
+    if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) return
+    state.tournamentPartnerPickerLoading = false
+    if (!result.ok) {
+      state.tournamentPartnerPickerErrorText = result.message
+      render()
+      return
+    }
+    state.tournamentPartnerCandidates = result.candidates
+    render()
+  }
+
+  function closeTournamentPartnerPicker(): void {
+    if (state.tournamentPartnerInviteBusy) return
+    state.tournamentPartnerPickerOpen = false
+    state.tournamentPartnerPickerErrorText = null
+    state.tournamentPartnerInviteErrorText = null
+    render()
+  }
+
+  async function submitTournamentPartnerInvite(profileId: string): Promise<void> {
+    if (!options.onTournamentPartnerInviteCreate || state.tournamentDetailId === null || state.tournamentPartnerInviteBusy) {
+      return
+    }
+    const tournamentId = state.tournamentDetailId
+    state.tournamentPartnerInviteBusy = true
+    state.tournamentPartnerInviteErrorText = null
+    render()
+    const result = await options.onTournamentPartnerInviteCreate(tournamentId, profileId, null)
+    if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) return
+    state.tournamentPartnerInviteBusy = false
+    if (!result.ok) {
+      state.tournamentPartnerInviteErrorText = result.message
+      render()
+      return
+    }
+    state.tournamentPartnerPickerOpen = false
+    state.tournamentPartnerInviteErrorText = null
+    mergeTournamentSummaryIntoDetail(result.tournament)
+    void fetchTournamentDetail(tournamentId)
+    void refetchTournamentsList()
+    render()
+  }
+
+  async function respondTournamentPartnerInvite(
+    tournamentId: string,
+    inviteId: string,
+    action: 'accept' | 'decline' | 'cancel',
+  ): Promise<void> {
+    if (!options.onTournamentPartnerInviteRespond || state.tournamentPartnerInviteBusy) return
+    state.tournamentPartnerInviteBusy = true
+    state.tournamentPartnerInviteErrorText = null
+    render()
+    const result = await options.onTournamentPartnerInviteRespond(tournamentId, inviteId, action)
+    state.tournamentPartnerInviteBusy = false
+    if (!result.ok) {
+      state.tournamentPartnerInviteErrorText = result.message
+      render()
+      return
+    }
+    if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === tournamentId) {
+      mergeTournamentSummaryIntoDetail(result.tournament)
+      void fetchTournamentDetail(tournamentId)
+    }
+    void refetchTournamentsList()
+    void refetchPendingTournamentPartnerInvites()
     render()
   }
 

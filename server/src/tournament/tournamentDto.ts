@@ -1,9 +1,14 @@
 import type { ProfileId } from '../core/serverTypes.js'
-import type { TournamentEntryStatus, TournamentRecord, TournamentStatus } from './tournamentTypes.js'
+import type {
+  TournamentEntryJoinedAs,
+  TournamentEntryRecord,
+  TournamentEntryStatus,
+  TournamentPartnerInviteRecord,
+  TournamentRecord,
+  TournamentStatus,
+  TournamentTeamRecord,
+} from './tournamentTypes.js'
 
-// Статуси, показвани по подразбиране в публичния "активен" списък.
-// finished/cancelled/admin_cancelled/auto_cancelled/failed изискват
-// изричен status филтър (продуктово изискване — няма history tab в този etaп).
 export const ACTIVE_TOURNAMENT_STATUSES: TournamentStatus[] = [
   'open',
   'starting',
@@ -44,9 +49,52 @@ export type TournamentPrizePreviewDto = {
 export type TournamentViewerParticipationDto = {
   isParticipant: boolean
   entryStatus: TournamentEntryStatus | null
+  joinedAs: TournamentEntryJoinedAs | null
   canJoinSolo: boolean
+  canInvitePartner: boolean
   canLeave: boolean
   canCancel: boolean
+}
+
+export type TournamentTeamMemberDto = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  joinedAt: string
+  joinedAs: TournamentEntryJoinedAs
+}
+
+export type TournamentTeamDto = {
+  teamId: string
+  status: string
+  members: TournamentTeamMemberDto[]
+}
+
+export type TournamentPartnerInviteDto = {
+  inviteId: string
+  tournamentId: string
+  teamId: string
+  inviterProfileId: string
+  inviteeProfileId: string
+  inviter: TournamentCreatorDto
+  invitee: TournamentCreatorDto
+  status: string
+  expiresAt: string
+  createdAt: string
+  respondedAt: string | null
+  tournamentName?: string
+  entryFee?: number
+  startMode?: 'fill' | 'scheduled'
+  scheduledStartAt?: string | null
+}
+
+export type TournamentPartnerCandidateDto = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  online: boolean
+  eligible: boolean
+  unavailableReason: string | null
 }
 
 export type TournamentSummaryDto = {
@@ -60,7 +108,10 @@ export type TournamentSummaryDto = {
   entryFee: number
   playerCapacity: number
   confirmedEntriesCount: number
+  reservedPlacesCount: number
+  occupiedPlacesCount: number
   completedTeamsCount: number
+  formingTeamsCount: number
   availablePlaces: number
   isFull: boolean
   startMode: 'fill' | 'scheduled'
@@ -75,12 +126,12 @@ export type TournamentDetailDto = TournamentSummaryDto & {
   cancelReason: string | null
   startedAt: string | null
   finishedAt: string | null
+  myTeam: TournamentTeamDto | null
+  teams: TournamentTeamDto[]
+  incomingPartnerInvite: TournamentPartnerInviteDto | null
+  outgoingPartnerInvite: TournamentPartnerInviteDto | null
 }
 
-// 10% системна такса, 90% награден фонд, 70/30 разпределение между
-// финалистите — точните продуктови формули (виж CLAUDE.md/продуктови
-// изисквания). Само informational preview в този commit — не задейства
-// никаква финансова операция.
 export function computeTournamentPrizePreview(
   entryFee: number,
   playerCapacity: number,
@@ -107,18 +158,18 @@ function toTournamentCreatorDto(
   }
 }
 
-// "Активно" участие в смисъла на viewer-facing DTO — само confirmed се
-// показва като "участваш". finalist е бъдещ bracket статус (schema вече го
-// поддържа), еliminated/champion/refunded/withdrawn са терминални.
 const ACTIVE_VIEWER_ENTRY_STATUSES: TournamentEntryStatus[] = ['confirmed', 'finalist']
 
 export type ToTournamentSummaryDtoInput = {
   tournament: TournamentRecord
   creatorPublicProfile: { profileId: string | null; displayName: string; avatarUrl: string | null } | null
   confirmedEntriesCount: number
+  reservedPlacesCount?: number
   completedTeamsCount: number
+  formingTeamsCount?: number
   viewerProfileId: ProfileId | null
   viewerEntryStatus: TournamentEntryStatus | null
+  viewerEntryJoinedAs?: TournamentEntryJoinedAs | null
 }
 
 function computeViewerParticipation(input: ToTournamentSummaryDtoInput): TournamentViewerParticipationDto {
@@ -126,28 +177,34 @@ function computeViewerParticipation(input: ToTournamentSummaryDtoInput): Tournam
   const isParticipant =
     viewerEntryStatus !== null && ACTIVE_VIEWER_ENTRY_STATUSES.includes(viewerEntryStatus)
   const isMine = viewerProfileId !== null && viewerProfileId === tournament.creatorProfileId
-  const isFull = input.confirmedEntriesCount >= tournament.playerCapacity
+  const reservedPlacesCount = input.reservedPlacesCount ?? 0
+  const occupiedPlacesCount = input.confirmedEntriesCount + reservedPlacesCount
+  const isFull = occupiedPlacesCount >= tournament.playerCapacity
 
   return {
     isParticipant,
     entryStatus: viewerEntryStatus,
+    joinedAs: input.viewerEntryJoinedAs ?? null,
     canJoinSolo:
       viewerProfileId !== null &&
       tournament.status === 'open' &&
       !isParticipant &&
       !isFull &&
-      viewerEntryStatus === null, // терминален (refunded/withdrawn) → rejoin не е позволен
+      viewerEntryStatus === null,
+    canInvitePartner:
+      viewerProfileId !== null &&
+      tournament.status === 'open' &&
+      occupiedPlacesCount < tournament.playerCapacity,
     canLeave: isParticipant && tournament.status === 'open',
     canCancel: isMine && tournament.status === 'open',
   }
 }
 
-// Безопасен DTO mapping — НИКОГА не пропуска password_hash, cancel_reason
-// (в summary виждане), internal statuses без превод, или каквото и да е
-// поле извън изрично изброените тук.
 export function toTournamentSummaryDto(input: ToTournamentSummaryDtoInput): TournamentSummaryDto {
   const { tournament } = input
-  const availablePlaces = Math.max(0, tournament.playerCapacity - input.confirmedEntriesCount)
+  const reservedPlacesCount = input.reservedPlacesCount ?? 0
+  const occupiedPlacesCount = input.confirmedEntriesCount + reservedPlacesCount
+  const availablePlaces = Math.max(0, tournament.playerCapacity - occupiedPlacesCount)
   return {
     tournamentId: tournament.tournamentId,
     name: tournament.name,
@@ -159,7 +216,10 @@ export function toTournamentSummaryDto(input: ToTournamentSummaryDtoInput): Tour
     entryFee: tournament.entryFee,
     playerCapacity: tournament.playerCapacity,
     confirmedEntriesCount: input.confirmedEntriesCount,
+    reservedPlacesCount,
+    occupiedPlacesCount,
     completedTeamsCount: input.completedTeamsCount,
+    formingTeamsCount: input.formingTeamsCount ?? 0,
     availablePlaces,
     isFull: availablePlaces === 0,
     startMode: tournament.startMode,
@@ -178,5 +238,61 @@ export function toTournamentDetailDto(input: ToTournamentSummaryDtoInput): Tourn
     cancelReason: input.tournament.cancelReason,
     startedAt: input.tournament.startedAt,
     finishedAt: input.tournament.finishedAt,
+    myTeam: null,
+    teams: [],
+    incomingPartnerInvite: null,
+    outgoingPartnerInvite: null,
   }
+}
+
+export function toTournamentPartnerInviteDto(input: {
+  invite: TournamentPartnerInviteRecord
+  inviterPublicProfile: { profileId: string | null; displayName: string; avatarUrl: string | null } | null
+  inviteePublicProfile: { profileId: string | null; displayName: string; avatarUrl: string | null } | null
+  tournament?: TournamentRecord | null
+}): TournamentPartnerInviteDto {
+  const fallback = (profileId: string): TournamentCreatorDto => ({
+    profileId,
+    displayName: 'Играч',
+    avatarUrl: null,
+  })
+  return {
+    inviteId: input.invite.inviteId,
+    tournamentId: input.invite.tournamentId,
+    teamId: input.invite.teamId,
+    inviterProfileId: input.invite.inviterProfileId,
+    inviteeProfileId: input.invite.inviteeProfileId,
+    inviter: input.inviterPublicProfile ?? fallback(input.invite.inviterProfileId),
+    invitee: input.inviteePublicProfile ?? fallback(input.invite.inviteeProfileId),
+    status: input.invite.status,
+    expiresAt: input.invite.expiresAt,
+    createdAt: input.invite.createdAt,
+    respondedAt: input.invite.respondedAt,
+    tournamentName: input.tournament?.name,
+    entryFee: input.tournament?.entryFee,
+    startMode: input.tournament?.startMode,
+    scheduledStartAt: input.tournament?.scheduledStartAt,
+  }
+}
+
+export function buildTeamDtos(input: {
+  teams: TournamentTeamRecord[]
+  entries: TournamentEntryRecord[]
+  getPublicProfile: (profileId: string) => { profileId: string | null; displayName: string; avatarUrl: string | null } | null
+}): TournamentTeamDto[] {
+  return input.teams.map((team) => {
+    const members = input.entries
+      .filter((entry) => entry.teamId === team.teamId && entry.status === 'confirmed')
+      .map((entry) => {
+        const profile = input.getPublicProfile(entry.profileId)
+        return {
+          profileId: entry.profileId,
+          displayName: profile?.displayName ?? 'Играч',
+          avatarUrl: profile?.avatarUrl ?? null,
+          joinedAt: entry.createdAt,
+          joinedAs: entry.joinedAs,
+        }
+      })
+    return { teamId: team.teamId, status: team.status, members }
+  })
 }

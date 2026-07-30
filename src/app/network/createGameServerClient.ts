@@ -90,9 +90,52 @@ export type TournamentEntryStatus =
 export type TournamentViewerParticipation = {
   isParticipant: boolean
   entryStatus: TournamentEntryStatus | null
+  joinedAs: 'solo' | 'partner_inviter' | 'partner_invitee' | null
   canJoinSolo: boolean
+  canInvitePartner: boolean
   canLeave: boolean
   canCancel: boolean
+}
+
+export type TournamentTeamMemberSnapshot = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  joinedAt: string
+  joinedAs: 'solo' | 'partner_inviter' | 'partner_invitee'
+}
+
+export type TournamentTeamSnapshot = {
+  teamId: string
+  status: string
+  members: TournamentTeamMemberSnapshot[]
+}
+
+export type TournamentPartnerInviteSnapshot = {
+  inviteId: string
+  tournamentId: string
+  teamId: string
+  inviterProfileId: string
+  inviteeProfileId: string
+  inviter: TournamentCreatorSnapshot
+  invitee: TournamentCreatorSnapshot
+  status: string
+  expiresAt: string
+  createdAt: string
+  respondedAt: string | null
+  tournamentName?: string
+  entryFee?: number
+  startMode?: TournamentStartMode
+  scheduledStartAt?: string | null
+}
+
+export type TournamentPartnerCandidateSnapshot = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  online: boolean
+  eligible: boolean
+  unavailableReason: string | null
 }
 
 export type TournamentSummarySnapshot = {
@@ -106,7 +149,10 @@ export type TournamentSummarySnapshot = {
   entryFee: number
   playerCapacity: number
   confirmedEntriesCount: number
+  reservedPlacesCount: number
+  occupiedPlacesCount: number
   completedTeamsCount: number
+  formingTeamsCount: number
   availablePlaces: number
   isFull: boolean
   startMode: TournamentStartMode
@@ -121,6 +167,10 @@ export type TournamentDetailSnapshot = TournamentSummarySnapshot & {
   cancelReason: string | null
   startedAt: string | null
   finishedAt: string | null
+  myTeam: TournamentTeamSnapshot | null
+  teams: TournamentTeamSnapshot[]
+  incomingPartnerInvite: TournamentPartnerInviteSnapshot | null
+  outgoingPartnerInvite: TournamentPartnerInviteSnapshot | null
 }
 
 export type TournamentCreateInput = {

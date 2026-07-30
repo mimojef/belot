@@ -258,7 +258,12 @@ type TournamentSummaryResponse = {
   entryFee: number
   playerCapacity: number
   confirmedEntriesCount: number
+  reservedPlacesCount: number
+  occupiedPlacesCount: number
   completedTeamsCount: number
+  formingTeamsCount: number
+  availablePlaces: number
+  isFull: boolean
   startMode: string
   scheduledStartAt: string | null
   createdAt: string
@@ -517,7 +522,8 @@ try {
     assert(b.tournaments.length > 0, 'Очаква се поне 1 турнир в списъка')
     const allowedKeys = new Set([
       'tournamentId', 'name', 'creator', 'visibility', 'requiresPassword', 'status', 'statusLabel',
-      'entryFee', 'playerCapacity', 'confirmedEntriesCount', 'completedTeamsCount', 'startMode',
+      'entryFee', 'playerCapacity', 'confirmedEntriesCount', 'reservedPlacesCount',
+      'occupiedPlacesCount', 'completedTeamsCount', 'formingTeamsCount', 'startMode',
       'scheduledStartAt', 'createdAt', 'prizePreview', 'isMine', 'availablePlaces', 'isFull',
       'viewer',
     ])
