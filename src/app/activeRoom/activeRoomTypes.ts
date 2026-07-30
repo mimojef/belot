@@ -29,6 +29,7 @@ export type ActiveRoomState = {
   leavePenaltyWarningOpen: boolean
   isGuestTrial: boolean
   isPrivateTableOrigin: boolean
+  isTournamentMatchOrigin: boolean
 }
 
 export type CreateActiveRoomFlowControllerOptions = {

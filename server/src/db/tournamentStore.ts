@@ -124,6 +124,7 @@ export type TournamentStore = {
   markInviteNotificationRead: (inviteId: TournamentPartnerInviteId) => boolean
 
   createRound: (input: CreateTournamentRoundInput) => TournamentRoundRecord
+  getRoundsForTournament: (tournamentId: TournamentId) => TournamentRoundRecord[]
   createTournamentMatch: (input: CreateTournamentMatchInput) => TournamentMatchRecord
   getMatchesForTournament: (tournamentId: TournamentId) => TournamentMatchRecord[]
 
@@ -473,6 +474,13 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
     ) VALUES (?, ?, ?, ?);
   `)
 
+  const selectRoundsForTournamentStatement = database.prepare(`
+    SELECT round_id, tournament_id, round_type, round_index, created_at
+    FROM tournament_rounds
+    WHERE tournament_id = ?
+    ORDER BY round_type ASC, round_index ASC;
+  `)
+
   const insertMatchStatement = database.prepare(`
     INSERT INTO tournament_matches (
       match_id, tournament_id, round_id, room_id, team_a_id, team_b_id,
@@ -688,6 +696,11 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
         )
         .get(roundId) as TournamentRoundRow
       return toTournamentRoundRecord(row)
+    },
+
+    getRoundsForTournament(tournamentId: TournamentId): TournamentRoundRecord[] {
+      const rows = selectRoundsForTournamentStatement.all(tournamentId) as TournamentRoundRow[]
+      return rows.map(toTournamentRoundRecord)
     },
 
     createTournamentMatch(input: CreateTournamentMatchInput): TournamentMatchRecord {

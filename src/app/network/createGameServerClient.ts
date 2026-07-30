@@ -118,6 +118,50 @@ export type TournamentTeamSnapshot = {
   members: TournamentTeamMemberSnapshot[]
 }
 
+export type TournamentMatchStatus =
+  | 'awaiting_players'
+  | 'countdown'
+  | 'in_progress'
+  | 'completed'
+  | 'walkover'
+  | 'cancelled'
+
+export type TournamentRoundType = 'semifinal' | 'final'
+
+export type TournamentMatchSnapshot = {
+  matchId: string
+  roundId: string
+  roomId: string | null
+  teamAId: string
+  teamBId: string
+  status: TournamentMatchStatus
+  winnerTeamId: string | null
+  resultKind: string | null
+  roomReady: boolean
+  startedAt: string | null
+  completedAt: string | null
+}
+
+export type TournamentRoundSnapshot = {
+  roundId: string
+  roundType: TournamentRoundType
+  roundIndex: number
+  matches: TournamentMatchSnapshot[]
+}
+
+export type TournamentMatchAssignmentSnapshot = {
+  tournamentId: string
+  tournamentName: string
+  matchId: string
+  roomId: string
+  roundType: TournamentRoundType
+  seat: Seat
+  teamId: string
+  partnerProfileId: string
+  opponentTeamId: string
+  reconnectToken: string | null
+}
+
 export type TournamentPartnerInviteSnapshot = {
   inviteId: string
   tournamentId: string
@@ -178,6 +222,8 @@ export type TournamentDetailSnapshot = TournamentSummarySnapshot & {
   finishedAt: string | null
   myTeam: TournamentTeamSnapshot | null
   teams: TournamentTeamSnapshot[]
+  rounds: TournamentRoundSnapshot[]
+  myActiveMatch: TournamentMatchAssignmentSnapshot | null
   incomingPartnerInvite: TournamentPartnerInviteSnapshot | null
   outgoingPartnerInvite: TournamentPartnerInviteSnapshot | null
 }
@@ -947,6 +993,7 @@ export type RoomSnapshotMessage = {
   stakeAmount: number | null
   isGuestTrial: boolean
   isPrivateTableOrigin: boolean
+  isTournamentMatchOrigin: boolean
 }
 
 export type PlayerProfileMessage = {
@@ -1253,6 +1300,11 @@ export type TournamentPartnerInviteResolvedMessage = {
   status: string
 }
 
+export type TournamentMatchAssignedMessage = {
+  type: 'tournament_match_assigned'
+  assignment: TournamentMatchAssignmentSnapshot
+}
+
 // --- Общ лайв чат в лобито (разделен от ChatMessageReceivedMessage — това
 // е публичен broadcast поток, не 1:1 нотификация между приятели) ---
 
@@ -1355,6 +1407,7 @@ export type ServerMessage =
   | TournamentPartnerInviteReceivedMessage
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage
+  | TournamentMatchAssignedMessage
   | LobbyChatHistoryMessage
   | LobbyChatMessageEventMessage
   | LobbyChatMessageDeletedMessage

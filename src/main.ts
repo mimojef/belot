@@ -3837,6 +3837,9 @@ lobby = createLobbyFlowController({
   onPendingTournamentPartnerInvitesLoad: () => loadPendingTournamentPartnerInvites(),
   onTournamentPartnerInviteCreate: (tournamentId, inviteeProfileId, password) => createTournamentPartnerInviteRequest(tournamentId, inviteeProfileId, password),
   onTournamentPartnerInviteRespond: (tournamentId, inviteId, action) => respondTournamentPartnerInviteRequest(tournamentId, inviteId, action),
+  onTournamentEnterActiveMatch: (roomId, reconnectToken) => {
+    showSessionInGameOverlay(roomId, reconnectToken)
+  },
   onNotifFriendRequestClick: (friendshipId) => {
     const req = lobby?.getPendingFriendRequest(friendshipId)
     if (!req) return
@@ -4306,6 +4309,14 @@ client = createGameServerClient({
     if (message.type === 'tournament_partner_invite_resolved') {
       lobby.handleServerMessage(message)
       tournamentPartnerInvitePopup.remove(message.inviteId)
+      return
+    }
+
+    if (message.type === 'tournament_match_assigned') {
+      lobby.handleServerMessage(message)
+      if (message.assignment.reconnectToken !== null) {
+        showSessionInGameOverlay(message.assignment.roomId, message.assignment.reconnectToken)
+      }
       return
     }
 

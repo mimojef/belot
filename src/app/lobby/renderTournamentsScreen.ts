@@ -323,6 +323,56 @@ function renderTournamentCreatePopup(state: LobbyScreenState): string {
 
 // ─── Детайли на турнир ────────────────────────────────────────────────────
 
+function tournamentMatchStatusLabel(status: string, roomReady: boolean): string {
+  if (status === 'completed') return 'Завършен'
+  if (status === 'in_progress') return roomReady ? 'Играе се' : 'Чака играчите'
+  if (status === 'awaiting_players' || status === 'countdown') {
+    return roomReady ? 'Чака играчите' : 'Масата се подготвя'
+  }
+  return status
+}
+
+function renderTournamentMatchAssignmentCallout(t: TournamentDetailSnapshot): string {
+  const assignment = t.myActiveMatch
+  if (assignment === null) return ''
+  const heading = assignment.roundType === 'final'
+    ? 'Финалната ти маса е готова.'
+    : 'Полуфиналната ти маса е готова.'
+  const token = assignment.reconnectToken ?? ''
+  return `
+    <div style="border:1px solid rgba(34,197,94,0.45);background:rgba(20,83,45,0.28);border-radius:10px;padding:12px 14px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+      <div>
+        <div style="font-size:14px;font-weight:900;color:#dcfce7;">${heading}</div>
+        <div style="font-size:12px;font-weight:700;color:rgba(220,252,231,0.72);margin-top:3px;">${escapeHtml(t.name)}</div>
+      </div>
+      <button type="button" data-tournament-enter-active-match="1" data-room-id="${escapeHtml(assignment.roomId)}" data-reconnect-token="${escapeHtml(token)}" ${token ? '' : 'disabled'} style="height:38px;border:0;border-radius:8px;padding:0 14px;background:${token ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.12)'};color:${token ? '#080808' : 'rgba(255,255,255,0.45)'};font-size:13px;font-weight:900;cursor:${token ? 'pointer' : 'default'};">Влез в масата</button>
+    </div>
+  `
+}
+
+function renderTournamentRounds(t: TournamentDetailSnapshot): string {
+  if (!t.rounds || t.rounds.length === 0) {
+    return '<div style="font-size:13px;color:rgba(255,255,255,0.4);font-style:italic;">Схемата ще се появи, след като турнирът стартира.</div>'
+  }
+  return `
+    <div style="display:grid;gap:10px;">
+      ${t.rounds.map((round) => `
+        <div style="border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:10px;background:rgba(255,255,255,0.03);">
+          <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:#d4a520;margin-bottom:8px;">${round.roundType === 'final' ? 'Финал' : `Полуфинал ${round.roundIndex}`}</div>
+          <div style="display:grid;gap:8px;">
+            ${round.matches.map((match) => `
+              <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;">
+                <div style="font-size:13px;font-weight:800;color:rgba(255,255,255,0.78);min-width:0;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(match.teamAId.slice(0, 8))} срещу ${escapeHtml(match.teamBId.slice(0, 8))}</div>
+                <div style="font-size:11px;font-weight:900;color:${match.status === 'completed' ? '#86efac' : '#fde68a'};white-space:nowrap;">${tournamentMatchStatusLabel(match.status, match.roomReady)}</div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `
+}
+
 export function renderTournamentDetailScreen(state: LobbyScreenState): string {
   if (state.tournamentDetailLoading) {
     return `<section style="padding:0 4px;"><div style="min-height:320px;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:16px;font-weight:800;">Зареждане...</div></section>`
@@ -380,6 +430,8 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
         <span style="font-size:13px;color:rgba(255,255,255,0.65);">Създател: ${escapeHtml(t.creator.displayName)}${t.isMine ? ' (ти)' : ''}</span>
       </div>
 
+      ${renderTournamentMatchAssignmentCallout(t)}
+
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:20px;">
         <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:12px 14px;">
           <div style="font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:4px;">Вход</div>
@@ -427,7 +479,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
 
       <div style="background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:16px;margin-bottom:14px;">
         <div style="font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:8px;">Турнирна схема</div>
-        <div style="font-size:13px;color:rgba(255,255,255,0.4);font-style:italic;">Схемата ще се появи, след като турнирът стартира.</div>
+        ${renderTournamentRounds(t)}
       </div>
 
       ${renderTournamentPartnerPanel(state, t)}

@@ -84,6 +84,7 @@ import {
 } from './tournament/tournamentValidation.js'
 import {
   ACTIVE_TOURNAMENT_STATUSES,
+  buildTournamentRoundDtos,
   buildTeamDtos,
   toTournamentPartnerInviteDto,
   toTournamentDetailDto,
@@ -95,6 +96,11 @@ import {
   createTournamentScheduler,
   type TournamentScheduler,
 } from './tournament/tournamentScheduler.js'
+import {
+  createTournamentCoordinator,
+  type TournamentCoordinator,
+  type TournamentMatchAssignment,
+} from './tournament/tournamentCoordinator.js'
 import { createPasswordHash, verifyPassword } from './db/authHelpers.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { createMatchEconomyStore, setMatchPrizeResolver } from './db/matchEconomyStore.js'
@@ -491,6 +497,7 @@ const friendshipStore = await createFriendshipStore(
 const tournamentStore = await createTournamentStore(databaseBootstrap.databaseFilePath)
 const tournamentEconomyStore = await createTournamentEconomyStore(databaseBootstrap.databaseFilePath)
 let tournamentScheduler: TournamentScheduler | null = null
+let tournamentCoordinator: TournamentCoordinator | null = null
 const chatStore = await createChatStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
@@ -1820,6 +1827,20 @@ function sendToOpenProfileConnections(profileId: string, payload: unknown): numb
   return sentCount
 }
 
+function isTournamentMatchRoom(room: ServerRoom): boolean {
+  return room.config.isTournamentMatchOrigin === true && !!room.config.tournamentMatchId
+}
+
+function sendTournamentMatchAssignment(
+  profileId: string,
+  assignment: TournamentMatchAssignment,
+): void {
+  sendToOpenProfileConnections(profileId, {
+    type: 'tournament_match_assigned',
+    assignment,
+  })
+}
+
 function cleanupTempBotsFromRoom(room: ServerRoom): void {
   for (const seat of SERVER_SEAT_ORDER) {
     const participant = room.seats[seat].participant
@@ -1999,8 +2020,17 @@ async function tickRoomGameRuntimes(): Promise<void> {
               missionStore.recordMatchCompletion(room)
             },
           )
+          if (isTournamentMatchRoom(room)) {
+            runMatchCompletionSideEffect(
+              'record-tournament-match-completion',
+              room.id,
+              () => {
+                tournamentCoordinator?.onTournamentRoomCompleted(room)
+              },
+            )
+          }
           const hadAwardedPrizeBeforePayout = room.awardedPrizePerSeat !== undefined
-          if (!room.config.isGuestTrial) {
+          if (!room.config.isGuestTrial && !isTournamentMatchRoom(room)) {
             runMatchCompletionSideEffect(
               'payout-match-winners',
               room.id,
@@ -2028,7 +2058,7 @@ async function tickRoomGameRuntimes(): Promise<void> {
           ) {
             broadcastRoomSnapshots(room, socketRegistry)
           }
-          if (!room.config.isGuestTrial) {
+          if (!room.config.isGuestTrial && !isTournamentMatchRoom(room)) {
             runMatchCompletionSideEffect(
               'top-up-depleted-bot-wallets',
               room.id,
@@ -2460,7 +2490,7 @@ function getPartnerSeat(seat: Seat): Seat {
 }
 
 function shouldApplyTableExitPenalty(room: ServerRoom): boolean {
-  if (room.config.isGuestTrial) {
+  if (room.config.isGuestTrial || isTournamentMatchRoom(room)) {
     return false
   }
 
@@ -5698,6 +5728,8 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
   tournamentEconomyStore.expireDuePartnerInvitesAtomically(tournament.tournamentId)
   const entries = tournamentStore.getEntriesForTournament(tournament.tournamentId)
   const teams = tournamentStore.getTeamsForTournament(tournament.tournamentId)
+  const rounds = tournamentStore.getRoundsForTournament(tournament.tournamentId)
+  const matches = tournamentStore.getMatchesForTournament(tournament.tournamentId)
   const viewerEntry = viewerProfileId !== null
     ? entries.find((e) => e.profileId === viewerProfileId) ?? null
     : null
@@ -5709,6 +5741,7 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
     entries,
     getPublicProfile: getSafePublicProfile,
   })
+  const roundDtos = buildTournamentRoundDtos({ rounds, matches })
   const pendingInvites = viewerProfileId !== null
     ? tournamentEconomyStore.listPendingPartnerInvitesForProfile(viewerProfileId)
     : []
@@ -5737,6 +5770,10 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
     ...base,
     teams: teamDtos,
     myTeam: viewerEntry?.teamId ? teamDtos.find((team) => team.teamId === viewerEntry.teamId) ?? null : null,
+    rounds: roundDtos,
+    myActiveMatch: viewerProfileId !== null
+      ? tournamentCoordinator?.getAssignmentForProfile(viewerProfileId) ?? null
+      : null,
     incomingPartnerInvite: incomingPartnerInvite ? inviteToDto(incomingPartnerInvite) : null,
     outgoingPartnerInvite: outgoingPartnerInvite ? inviteToDto(outgoingPartnerInvite) : null,
   }
@@ -8655,6 +8692,7 @@ async function handleHttpRequest(
         activeRooms: startupWorkerHealth?.activeRooms ?? null,
       },
       tournamentScheduler: tournamentScheduler?.getHealth() ?? null,
+      tournamentCoordinator: tournamentCoordinator?.getHealth() ?? null,
       roomShadowSync: roomShadowSynchronizer?.getHealth() ?? null,
       gameWorkerPool: poolHealth,
       trainingRecorder: {
@@ -9006,6 +9044,14 @@ wsServer.on('connection', (socket, request) => {
       sendJsonMessage(socket, {
         type: 'tournament_partner_invite_received',
         invite: buildTournamentPartnerInviteDto(invite),
+      })
+    }
+
+    const tournamentAssignment = tournamentCoordinator?.getAssignmentForProfile(connection.profileId)
+    if (tournamentAssignment !== undefined && tournamentAssignment !== null) {
+      sendJsonMessage(socket, {
+        type: 'tournament_match_assigned',
+        assignment: tournamentAssignment,
       })
     }
   }
@@ -9363,6 +9409,14 @@ wsServer.on('connection', (socket, request) => {
           : null
 
         if (!replayRoom || replaySeat === null || replayConnection?.currentRoomId !== message.roomId) {
+          return
+        }
+
+        if (isTournamentMatchRoom(replayRoom)) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Турнирните мачове не поддържат преиграване.',
+          })
           return
         }
 
@@ -10058,13 +10112,15 @@ wsServer.on('connection', (socket, request) => {
           seat,
           disconnectedParticipant,
         )
-        const abandonResult = activeRoomRuntime.abandonHumanControl({
-          room: disconnectedRoom,
-          seat,
-        })
-        const nextRoom = abandonResult.ok ? abandonResult.room : disconnectedRoom
+        const abandonResult = isTournamentMatchRoom(room)
+          ? null
+          : activeRoomRuntime.abandonHumanControl({
+              room: disconnectedRoom,
+              seat,
+            })
+        const nextRoom = abandonResult?.ok ? abandonResult.room : disconnectedRoom
 
-        if (!abandonResult.ok) {
+        if (abandonResult !== null && !abandonResult.ok) {
           console.error(
             `[leave-active-room] failed to hand seat to bot room=${room.id} seat=${seat}: ${abandonResult.message}`,
           )
@@ -10942,6 +10998,27 @@ try {
   console.error('[tournament-scheduler] Failed to start scheduler:', sanitizeErrorMessage(error))
 }
 
+try {
+  tournamentCoordinator = await createTournamentCoordinator({
+    databaseFilePath: databaseBootstrap.databaseFilePath,
+    getPublicProfile: (profileId) => playerProgressStore.getPublicProfile(profileId),
+    getRoom: (roomId) => serverState.rooms[roomId] ?? null,
+    commitRoom: (room) => {
+      serverState = commitServerRoomWithSnapshot(room)
+      broadcastRoomSnapshots(room, socketRegistry)
+    },
+    ensureRoomRuntime: (room) => activeRoomRuntime.ensureRoom(room),
+    notifyAssignment: (profileId, assignment) => {
+      sendTournamentMatchAssignment(profileId, assignment)
+    },
+    logError: (message, error) => console.error(message, sanitizeErrorMessage(error)),
+  })
+  tournamentCoordinator.start()
+  console.log('[tournament-coordinator] Coordinator started')
+} catch (error) {
+  console.error('[tournament-coordinator] Failed to start coordinator:', sanitizeErrorMessage(error))
+}
+
 // ─── Monitoring sampler ───────────────────────────────────────────────────────
 
 try {
@@ -11051,6 +11128,7 @@ function clearMutationTimersForShutdown(): void {
 
   clearPrivateRoomInviteTimers()
   tournamentScheduler?.stop()
+  tournamentCoordinator?.stop()
   monitoringSampler?.stop()
   monitoringSampler = null
 
@@ -11093,6 +11171,8 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('siteVisitStore', () => siteVisitStore.close())
   closeStore('tournamentScheduler', () => tournamentScheduler?.close())
   tournamentScheduler = null
+  closeStore('tournamentCoordinator', () => tournamentCoordinator?.close())
+  tournamentCoordinator = null
 
   if (passwordResetStore !== null) {
     closeStore('passwordResetStore', () => passwordResetStore!.close())

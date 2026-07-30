@@ -464,6 +464,7 @@ export type RenderLobbyScreenOptions = {
   onTournamentPartnerInviteAccept: (tournamentId: string, inviteId: string) => void
   onTournamentPartnerInviteDecline: (tournamentId: string, inviteId: string) => void
   onTournamentPartnerInviteCancel: (tournamentId: string, inviteId: string) => void
+  onTournamentEnterActiveMatch: (roomId: string, reconnectToken: string) => void
   onTournamentLeaveConfirmOpen: () => void
   onTournamentLeaveConfirmClose: () => void
   onTournamentLeaveSubmit: () => void
@@ -10459,6 +10460,16 @@ export function renderLobbyScreen(
       if (inviteId && tournamentId) options.onTournamentPartnerInviteCancel(tournamentId, inviteId)
     })
   })
+
+  root.querySelector<HTMLButtonElement>('[data-tournament-enter-active-match="1"]')
+    ?.addEventListener('click', (event) => {
+      const btn = event.currentTarget as HTMLButtonElement
+      const roomId = btn.dataset.roomId?.trim() ?? ''
+      const reconnectToken = btn.dataset.reconnectToken?.trim() ?? ''
+      if (roomId && reconnectToken) {
+        options.onTournamentEnterActiveMatch(roomId, reconnectToken)
+      }
+    })
 
   root.querySelector<HTMLButtonElement>('[data-tournament-leave-open="1"]')
     ?.addEventListener('click', options.onTournamentLeaveConfirmOpen)

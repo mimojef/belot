@@ -1,4 +1,9 @@
 import type { ServerAuthoritativeGameState } from '../game/serverGameTypes.js'
+import type {
+  TournamentId,
+  TournamentMatchId,
+  TournamentRoundType,
+} from '../tournament/tournamentTypes.js'
 
 export type ConnectionId = string
 export type RoomId = string
@@ -144,6 +149,10 @@ export type ServerRoomConfig = {
    * ("Нова игра" бутонът се крие) — виж createRoomSnapshotMessage.ts.
    */
   isPrivateTableOrigin?: boolean
+  isTournamentMatchOrigin?: boolean
+  tournamentId?: TournamentId
+  tournamentMatchId?: TournamentMatchId
+  tournamentRoundType?: TournamentRoundType
 }
 
 export type ServerBootstrapAuthoritativeState = {

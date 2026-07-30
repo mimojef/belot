@@ -7,7 +7,13 @@ import type {
   Seat,
 } from '../core/serverTypes.js'
 import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
+import type { TournamentMatchAssignment } from '../tournament/tournamentCoordinator.js'
 import type { TournamentPartnerInviteDto } from '../tournament/tournamentDto.js'
+
+export type TournamentMatchAssignedMessage = {
+  type: 'tournament_match_assigned'
+  assignment: TournamentMatchAssignment
+}
 
 export type ClientBidAction =
   | {
@@ -360,6 +366,7 @@ export type RoomSnapshotMessage = {
   stakeAmount: number | null
   isGuestTrial: boolean
   isPrivateTableOrigin: boolean
+  isTournamentMatchOrigin: boolean
 }
 
 export type ConnectedMessage = {
@@ -738,6 +745,7 @@ export type ServerMessage =
   | TournamentPartnerInviteReceivedMessage
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage
+  | TournamentMatchAssignedMessage
   | LobbyChatHistoryMessage
   | LobbyChatMessageReceivedMessage
   | LobbyChatMessageDeletedMessage

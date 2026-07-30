@@ -3,11 +3,16 @@ import type {
   TournamentEntryJoinedAs,
   TournamentEntryRecord,
   TournamentEntryStatus,
+  TournamentMatchRecord,
+  TournamentMatchStatus,
   TournamentPartnerInviteRecord,
   TournamentRecord,
+  TournamentRoundRecord,
+  TournamentRoundType,
   TournamentStatus,
   TournamentTeamRecord,
 } from './tournamentTypes.js'
+import type { TournamentMatchAssignment } from './tournamentCoordinator.js'
 import { calculateTournamentPrizePreview } from './tournamentPrizeRules.js'
 
 export const ACTIVE_TOURNAMENT_STATUSES: TournamentStatus[] = [
@@ -78,6 +83,27 @@ export type TournamentTeamDto = {
   members: TournamentTeamMemberDto[]
 }
 
+export type TournamentMatchDto = {
+  matchId: string
+  roundId: string
+  roomId: string | null
+  teamAId: string
+  teamBId: string
+  status: TournamentMatchStatus
+  winnerTeamId: string | null
+  resultKind: string | null
+  roomReady: boolean
+  startedAt: string | null
+  completedAt: string | null
+}
+
+export type TournamentRoundDto = {
+  roundId: string
+  roundType: TournamentRoundType
+  roundIndex: number
+  matches: TournamentMatchDto[]
+}
+
 export type TournamentPartnerInviteDto = {
   inviteId: string
   tournamentId: string
@@ -138,6 +164,8 @@ export type TournamentDetailDto = TournamentSummaryDto & {
   finishedAt: string | null
   myTeam: TournamentTeamDto | null
   teams: TournamentTeamDto[]
+  rounds: TournamentRoundDto[]
+  myActiveMatch: TournamentMatchAssignment | null
   incomingPartnerInvite: TournamentPartnerInviteDto | null
   outgoingPartnerInvite: TournamentPartnerInviteDto | null
 }
@@ -277,9 +305,40 @@ export function toTournamentDetailDto(input: ToTournamentSummaryDtoInput): Tourn
     finishedAt: input.tournament.finishedAt,
     myTeam: null,
     teams: [],
+    rounds: [],
+    myActiveMatch: null,
     incomingPartnerInvite: null,
     outgoingPartnerInvite: null,
   }
+}
+
+export function buildTournamentRoundDtos(input: {
+  rounds: TournamentRoundRecord[]
+  matches: TournamentMatchRecord[]
+}): TournamentRoundDto[] {
+  return input.rounds.map((round) => {
+    const matches = input.matches
+      .filter((match) => match.roundId === round.roundId)
+      .map((match) => ({
+        matchId: match.matchId,
+        roundId: match.roundId,
+        roomId: match.roomId,
+        teamAId: match.teamAId,
+        teamBId: match.teamBId,
+        status: match.status,
+        winnerTeamId: match.winnerTeamId,
+        resultKind: match.resultKind,
+        roomReady: match.roomId !== null && match.status !== 'completed',
+        startedAt: match.startedAt,
+        completedAt: match.completedAt,
+      }))
+    return {
+      roundId: round.roundId,
+      roundType: round.roundType,
+      roundIndex: round.roundIndex,
+      matches,
+    }
+  })
 }
 
 export function toTournamentPartnerInviteDto(input: {

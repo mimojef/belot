@@ -551,6 +551,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; invite: TournamentPartnerInviteSnapshot; walletBalance: number; tournament: TournamentSummarySnapshot }
     | { ok: false; message: string; reason?: string }
   >
+  onTournamentEnterActiveMatch?: (roomId: string, reconnectToken: string) => void
 }
 
 
@@ -2739,6 +2740,9 @@ export function createLobbyFlowController(
       },
       onTournamentPartnerInviteCancel: (tournamentId, inviteId) => {
         void respondTournamentPartnerInvite(tournamentId, inviteId, 'cancel')
+      },
+      onTournamentEnterActiveMatch: (roomId, reconnectToken) => {
+        options.onTournamentEnterActiveMatch?.(roomId, reconnectToken)
       },
       onTournamentLeaveConfirmOpen: () => {
         openTournamentLeaveConfirm()
@@ -7431,6 +7435,19 @@ export function createLobbyFlowController(
         void refetchTournamentsList()
       }
       render()
+      return false
+    }
+
+    if (message.type === 'tournament_match_assigned') {
+      if (
+        state.currentScreen === 'tournament-detail' &&
+        state.tournamentDetailId === message.assignment.tournamentId
+      ) {
+        void fetchTournamentDetail(message.assignment.tournamentId)
+      }
+      if (state.currentScreen === 'tournaments') {
+        void refetchTournamentsList()
+      }
       return false
     }
 

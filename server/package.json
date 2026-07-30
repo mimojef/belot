@@ -27,6 +27,7 @@
     "check:migration-runner-crash-recovery": "tsx scripts/checkMigrationRunnerCrashRecovery.ts",
     "check:tournament-persistence": "tsx scripts/checkTournamentPersistence.ts",
     "check:tournament-scheduler-start": "tsx scripts/checkTournamentSchedulerStart.ts",
+    "check:tournament-coordinator-source": "tsx scripts/checkTournamentCoordinatorSource.ts",
     "check:tournament-http-api": "tsx scripts/checkTournamentHttpApi.ts --server-root=.",
     "check:tournament-entry-http-api": "tsx scripts/checkTournamentEntryHttpApi.ts --server-root=.",
     "check:tournament-partner-invites-source": "tsx scripts/checkTournamentPartnerInvitesSource.ts --project-root=..",
