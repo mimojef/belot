@@ -89,7 +89,7 @@ export type PlayerProgressStore = {
         deletedImageUrls: string[]
       }
     | { ok: false; message: string }
-  isDisplayNameAvailable: (displayName: string) => boolean
+  isDisplayNameAvailable: (displayName: string, excludedProfileId?: ProfileId | null) => boolean
   countHumanProfiles: (now?: Date) => HumanProfileCountStats
   getUserGamesPlayedStats: (now?: Date) => { today: number; yesterday: number }
   seedCatalogBotsIfNeeded: () => void
@@ -646,11 +646,22 @@ export async function createPlayerProgressStore(
       AND yellow_coins_balance >= ?;
   `)
 
+  // username/normalized_username се записват еднократно при регистрация
+  // (authStore.register) като snapshot на първоначалното display name — ако
+  // тук не се обновят заедно с display_name/normalized_display_name, старото
+  // име остава завинаги "заето" в normalized_username (виж
+  // selectProfileByReservedIdentityNameStatement по-долу, която проверява
+  // И двете колони), макар вече никой активен профил да не го показва.
+  // Държейки username синхронизиран с текущото display name при всяка смяна,
+  // UNIQUE(normalized_username) продължава да пази текущото име, но старото
+  // веднага се освобождава за нов собственик.
   const updateProfileDisplayNameStatement = database.prepare(`
     UPDATE profiles
     SET
       display_name = ?,
       normalized_display_name = ?,
+      username = ?,
+      normalized_username = ?,
       updated_at = CURRENT_TIMESTAMP
     WHERE profile_id = ?
       AND profile_kind = 'human'
@@ -1139,6 +1150,8 @@ export async function createPlayerProgressStore(
       const updateResult = updateProfileDisplayNameStatement.run(
         displayName,
         normalizedDisplayName,
+        displayName,
+        normalizedDisplayName,
         profileId,
       ) as { changes?: number }
 
@@ -1168,7 +1181,7 @@ export async function createPlayerProgressStore(
 
       const message = error instanceof Error ? error.message : String(error)
 
-      if (message.includes('normalized_display_name')) {
+      if (message.includes('normalized_display_name') || message.includes('normalized_username')) {
         return {
           ok: false,
           message: 'Това име вече е заето.',
@@ -1253,8 +1266,21 @@ export async function createPlayerProgressStore(
       return { ok: true, profile }
     }
 
+    const nameConflict = selectProfileByReservedIdentityNameStatement.get(
+      normalizedDisplayName,
+      normalizedDisplayName,
+      profileId,
+      profileId,
+    ) as { profile_id: string } | undefined
+
+    if (nameConflict !== undefined) {
+      return { ok: false, message: 'Това име вече е заето.' }
+    }
+
     try {
       const updateResult = updateProfileDisplayNameStatement.run(
+        displayName,
+        normalizedDisplayName,
         displayName,
         normalizedDisplayName,
         profileId,
@@ -1265,7 +1291,7 @@ export async function createPlayerProgressStore(
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      if (message.includes('normalized_display_name')) {
+      if (message.includes('normalized_display_name') || message.includes('normalized_username')) {
         return { ok: false, message: 'Това име вече е заето.' }
       }
       throw error
@@ -1706,10 +1732,13 @@ export async function createPlayerProgressStore(
     return row === undefined
   }
 
-  function isDisplayNameAvailable(displayName: string): boolean {
+  function isDisplayNameAvailable(
+    displayName: string,
+    excludedProfileId: ProfileId | null = null,
+  ): boolean {
     const normalized = normalizeProfileDisplayName(displayName)
     if (normalized === null) return false
-    return isReservedIdentityNameAvailable(normalized, null)
+    return isReservedIdentityNameAvailable(normalized, excludedProfileId)
   }
 
   function close(): void {

@@ -2382,15 +2382,18 @@ export function createLobbyFlowController(
         state.profilePopupCanEdit = true
         renderPopupOnly()
       },
-      onProfileEditClick: () => {
-        state.profileEditorTargetProfileId = null
-        state.profileEditorTargetProfile = null
-        state.profileEditorOpen = true
-        state.profileEditorErrorText = null
-        state.profileNameChangeErrorText = null
-        state.profileNameChangeSuccessAmount = null
-        state.profilePopupOpen = false
-        render()
+      // ВАЖНО: трябва да приема profileId и да делегира към същия
+      // openProfileEditorForTarget(), който ползва getPopupCallbacks().onEditClick
+      // — този callback е закачен от renderLobbyScreen() (главния full-render
+      // path, ред ~9170), който презаписва popup DOM-а при ВСЯКО WS събитие
+      // (chat, presence, countdown...), не само при явна потребителска
+      // навигация. Преди този фикс тук се игнорираше подаденият profileId и
+      // винаги се отваряше собственият профил на admin-а — ако между
+      // отварянето на попъпа за чужд играч и клика на "Редакция" минеше
+      // дори един такъв фонов re-render (почти сигурно на практика), бутонът
+      // мълчаливо пренасочваше редакцията към самия admin.
+      onProfileEditClick: (profileId) => {
+        getPopupCallbacks().onEditClick(profileId)
       },
       onProfileGrantSubadminClick: (profileId) => {
         getPopupCallbacks().onGrantSubadminClick(profileId)

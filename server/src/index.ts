@@ -4275,7 +4275,14 @@ function handleCheckNameRequest(
 ): boolean {
   if (requestUrl.pathname !== '/api/profile/check-name') return false
   const name = requestUrl.searchParams.get('name') ?? ''
-  const available = playerProgressStore.isDisplayNameAvailable(name)
+  // Изключва собствения профил на текущата сесия (ако има) от uniqueness
+  // проверката — без това, собственик който проверява дали може да остане
+  // на текущото си име (или леко го редактира и се върне) получава невярно
+  // "Заето", защото самото име вече принадлежи на него.
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+  const excludedProfileId = session?.profile.profileId ?? null
+  const available = playerProgressStore.isDisplayNameAvailable(name, excludedProfileId)
   sendJsonResponse(res, 200, { available })
   return true
 }
