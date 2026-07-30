@@ -583,6 +583,8 @@ export type LobbyFlowController = {
   handleServerMessage: (message: ServerMessage) => boolean
   navigateToShop: (noticeText: string | null) => void
   navigateToPrivateRooms: () => void
+  navigateToTournamentDetail: (tournamentId: string) => void
+  refreshPendingTournamentPartnerInvites: () => Promise<void>
   getPwaUpdateSafetySnapshot: () => {
     isSearching: boolean
     hasPrivateRoomInvite: boolean
@@ -7389,6 +7391,49 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'tournament_partner_invite_received') {
+      const invite = message.invite
+      const existingIndex = state.tournamentPartnerInvites.findIndex((i) => i.inviteId === invite.inviteId)
+      if (existingIndex >= 0) {
+        state.tournamentPartnerInvites = state.tournamentPartnerInvites.map((i) =>
+          i.inviteId === invite.inviteId ? invite : i,
+        )
+      } else {
+        state.tournamentPartnerInvites = [...state.tournamentPartnerInvites, invite]
+      }
+      state.tournamentPartnerInvites.sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      )
+      render()
+      return false
+    }
+
+    if (message.type === 'tournament_partner_invite_popup_dismissed') {
+      state.tournamentPartnerInvites = state.tournamentPartnerInvites.map((invite) =>
+        invite.inviteId === message.inviteId
+          ? {
+              ...invite,
+              popupDismissedAt: message.popupDismissedAt,
+              notificationReadAt: message.notificationReadAt,
+            }
+          : invite,
+      )
+      render()
+      return false
+    }
+
+    if (message.type === 'tournament_partner_invite_resolved') {
+      state.tournamentPartnerInvites = state.tournamentPartnerInvites.filter((invite) => invite.inviteId !== message.inviteId)
+      if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === message.tournamentId) {
+        void fetchTournamentDetail(message.tournamentId)
+      }
+      if (state.currentScreen === 'tournaments') {
+        void refetchTournamentsList()
+      }
+      render()
+      return false
+    }
+
     if (message.type === 'guest_trial_error') {
       // guest_trial_limit_reached е нормален state (лимитът е изчерпан), не unexpected
       // грешка — popup-ът трябва directно да превключи на exhausted state (heading +
@@ -8299,6 +8344,10 @@ export function createLobbyFlowController(
       options.onPrivateRoomsOpen?.()
       render()
     },
+    navigateToTournamentDetail: (tournamentId: string) => {
+      showTournamentDetail(tournamentId)
+    },
+    refreshPendingTournamentPartnerInvites: () => refetchPendingTournamentPartnerInvites(),
     navigateToShop: (noticeText: string | null) => {
       void showShopPanel().then(() => {
         if (noticeText !== null && state.currentScreen === 'shop') {

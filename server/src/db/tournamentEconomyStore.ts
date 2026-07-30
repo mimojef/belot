@@ -121,6 +121,10 @@ export type PartnerInviteMutationResult =
         | 'team_invalid'
     }
 
+export type PartnerInviteNotificationStateResult =
+  | { ok: true; invite: TournamentPartnerInviteRecord }
+  | { ok: false; reason: 'invite_not_found' | 'not_invitee' | 'invite_not_pending' }
+
 export type TournamentEconomyStore = {
   joinTournamentSoloAtomically: (
     tournamentId: TournamentId,
@@ -143,6 +147,21 @@ export type TournamentEconomyStore = {
   listPendingPartnerInvitesForProfile: (
     inviteeProfileId: ProfileId,
   ) => TournamentPartnerInviteRecord[]
+  listUndismissedPendingPartnerInvitesForProfile: (
+    inviteeProfileId: ProfileId,
+  ) => TournamentPartnerInviteRecord[]
+  dismissPartnerInvitePopup: (
+    inviteId: TournamentPartnerInviteId,
+    inviteeProfileId: ProfileId,
+  ) => PartnerInviteNotificationStateResult
+  viewPartnerInviteNotification: (
+    inviteId: TournamentPartnerInviteId,
+    inviteeProfileId: ProfileId,
+  ) => PartnerInviteNotificationStateResult
+  markResolvedInviteNotificationState: (
+    inviteId: TournamentPartnerInviteId,
+    inviteeProfileId: ProfileId,
+  ) => TournamentPartnerInviteRecord | null
   getOutgoingPendingInviteForProfile: (
     tournamentId: TournamentId,
     inviterProfileId: ProfileId,
@@ -459,6 +478,26 @@ export async function createTournamentEconomyStore(
     ORDER BY created_at DESC;
   `)
 
+  const selectUndismissedPendingInvitesForProfileStatement = database.prepare(`
+    SELECT invite_id, tournament_id, team_id, inviter_profile_id, invitee_profile_id,
+           status, expires_at, popup_dismissed_at, notification_read_at, created_at,
+           responded_at
+    FROM tournament_partner_invites
+    WHERE invitee_profile_id = ?
+      AND status = 'pending'
+      AND popup_dismissed_at IS NULL
+    ORDER BY created_at ASC;
+  `)
+
+  const selectPartnerInviteByInviteIdStatement = database.prepare(`
+    SELECT invite_id, tournament_id, team_id, inviter_profile_id, invitee_profile_id,
+           status, expires_at, popup_dismissed_at, notification_read_at, created_at,
+           responded_at
+    FROM tournament_partner_invites
+    WHERE invite_id = ?
+    LIMIT 1;
+  `)
+
   const selectDuePendingInvitesStatement = database.prepare(`
     SELECT invite_id, tournament_id, team_id, inviter_profile_id, invitee_profile_id,
            status, expires_at, popup_dismissed_at, notification_read_at, created_at,
@@ -496,6 +535,26 @@ export async function createTournamentEconomyStore(
     UPDATE tournament_partner_invites
     SET status = ?, responded_at = CURRENT_TIMESTAMP
     WHERE invite_id = ? AND tournament_id = ? AND status = 'pending';
+  `)
+
+  const dismissPartnerInvitePopupStatement = database.prepare(`
+    UPDATE tournament_partner_invites
+    SET popup_dismissed_at = COALESCE(popup_dismissed_at, CURRENT_TIMESTAMP)
+    WHERE invite_id = ? AND invitee_profile_id = ? AND status = 'pending';
+  `)
+
+  const viewPartnerInviteNotificationStatement = database.prepare(`
+    UPDATE tournament_partner_invites
+    SET popup_dismissed_at = COALESCE(popup_dismissed_at, CURRENT_TIMESTAMP),
+        notification_read_at = COALESCE(notification_read_at, CURRENT_TIMESTAMP)
+    WHERE invite_id = ? AND invitee_profile_id = ? AND status = 'pending';
+  `)
+
+  const markInviteeResolvedNotificationStateStatement = database.prepare(`
+    UPDATE tournament_partner_invites
+    SET popup_dismissed_at = COALESCE(popup_dismissed_at, CURRENT_TIMESTAMP),
+        notification_read_at = COALESCE(notification_read_at, CURRENT_TIMESTAMP)
+    WHERE invite_id = ? AND invitee_profile_id = ?;
   `)
 
   const updateEntryToPartnerInviterStatement = database.prepare(`
@@ -818,6 +877,59 @@ export async function createTournamentEconomyStore(
       return rows.map(toTournamentPartnerInviteRecord)
     },
 
+    listUndismissedPendingPartnerInvitesForProfile(
+      inviteeProfileId: ProfileId,
+    ): TournamentPartnerInviteRecord[] {
+      expireDuePartnerInvitesAtomicallyLocal()
+      const rows = selectUndismissedPendingInvitesForProfileStatement.all(
+        inviteeProfileId,
+      ) as TournamentPartnerInviteRow[]
+      return rows.map(toTournamentPartnerInviteRecord)
+    },
+
+    dismissPartnerInvitePopup(
+      inviteId: TournamentPartnerInviteId,
+      inviteeProfileId: ProfileId,
+    ): PartnerInviteNotificationStateResult {
+      expireDuePartnerInvitesAtomicallyLocal()
+      const before = selectPartnerInviteByInviteIdStatement.get(inviteId) as
+        | TournamentPartnerInviteRow
+        | undefined
+      if (before === undefined) return { ok: false, reason: 'invite_not_found' }
+      if (before.invitee_profile_id !== inviteeProfileId) return { ok: false, reason: 'not_invitee' }
+      if (before.status !== 'pending') return { ok: false, reason: 'invite_not_pending' }
+      dismissPartnerInvitePopupStatement.run(inviteId, inviteeProfileId)
+      const after = selectPartnerInviteByInviteIdStatement.get(inviteId) as TournamentPartnerInviteRow
+      return { ok: true, invite: toTournamentPartnerInviteRecord(after) }
+    },
+
+    viewPartnerInviteNotification(
+      inviteId: TournamentPartnerInviteId,
+      inviteeProfileId: ProfileId,
+    ): PartnerInviteNotificationStateResult {
+      expireDuePartnerInvitesAtomicallyLocal()
+      const before = selectPartnerInviteByInviteIdStatement.get(inviteId) as
+        | TournamentPartnerInviteRow
+        | undefined
+      if (before === undefined) return { ok: false, reason: 'invite_not_found' }
+      if (before.invitee_profile_id !== inviteeProfileId) return { ok: false, reason: 'not_invitee' }
+      if (before.status !== 'pending') return { ok: false, reason: 'invite_not_pending' }
+      viewPartnerInviteNotificationStatement.run(inviteId, inviteeProfileId)
+      const after = selectPartnerInviteByInviteIdStatement.get(inviteId) as TournamentPartnerInviteRow
+      return { ok: true, invite: toTournamentPartnerInviteRecord(after) }
+    },
+
+    markResolvedInviteNotificationState(
+      inviteId: TournamentPartnerInviteId,
+      inviteeProfileId: ProfileId,
+    ): TournamentPartnerInviteRecord | null {
+      markInviteeResolvedNotificationStateStatement.run(inviteId, inviteeProfileId)
+      const row = selectPartnerInviteByInviteIdStatement.get(inviteId) as
+        | TournamentPartnerInviteRow
+        | undefined
+      return row ? toTournamentPartnerInviteRecord(row) : null
+    },
+
     getOutgoingPendingInviteForProfile(
       tournamentId: TournamentId,
       inviterProfileId: ProfileId,
@@ -1103,6 +1215,7 @@ export async function createTournamentEconomyStore(
         )
         updateTeamStatusStatement.run('complete', inviteRow.team_id, tournamentId)
         resolvePartnerInviteStatement.run('accepted', inviteId, tournamentId)
+        markInviteeResolvedNotificationStateStatement.run(inviteId, inviteeProfileId)
         insertEvent(tournamentId, 'partner_invite_accepted', inviteeProfileId, 'player', {
           inviteId,
           teamId: inviteRow.team_id,
@@ -1151,6 +1264,7 @@ export async function createTournamentEconomyStore(
           }
         }
         resolvePartnerInviteStatement.run('declined', inviteId, tournamentId)
+        markInviteeResolvedNotificationStateStatement.run(inviteId, inviteeProfileId)
         resetFormingTeamToSolo(tournamentId, inviteRow.team_id, inviteRow.inviter_profile_id)
         insertEvent(tournamentId, 'partner_invite_declined', inviteeProfileId, 'player', {
           inviteId,

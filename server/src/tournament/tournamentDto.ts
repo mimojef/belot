@@ -80,6 +80,8 @@ export type TournamentPartnerInviteDto = {
   invitee: TournamentCreatorDto
   status: string
   expiresAt: string
+  popupDismissedAt: string | null
+  notificationReadAt: string | null
   createdAt: string
   respondedAt: string | null
   tournamentName?: string
@@ -266,6 +268,8 @@ export function toTournamentPartnerInviteDto(input: {
     invitee: input.inviteePublicProfile ?? fallback(input.invite.inviteeProfileId),
     status: input.invite.status,
     expiresAt: input.invite.expiresAt,
+    popupDismissedAt: input.invite.popupDismissedAt,
+    notificationReadAt: input.invite.notificationReadAt,
     createdAt: input.invite.createdAt,
     respondedAt: input.invite.respondedAt,
     tournamentName: input.tournament?.name,

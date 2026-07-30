@@ -7,6 +7,7 @@ import type {
   Seat,
 } from '../core/serverTypes.js'
 import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
+import type { TournamentPartnerInviteDto } from '../tournament/tournamentDto.js'
 
 export type ClientBidAction =
   | {
@@ -734,6 +735,9 @@ export type ServerMessage =
   | PendingFriendRequestsMessage
   | PendingAcceptanceNotificationsMessage
   | FriendAcceptanceNotificationReadMessage
+  | TournamentPartnerInviteReceivedMessage
+  | TournamentPartnerInvitePopupDismissedMessage
+  | TournamentPartnerInviteResolvedMessage
   | LobbyChatHistoryMessage
   | LobbyChatMessageReceivedMessage
   | LobbyChatMessageDeletedMessage
@@ -797,6 +801,26 @@ export type PendingAcceptanceNotificationsMessage = {
 export type FriendAcceptanceNotificationReadMessage = {
   type: 'friend_acceptance_notification_read'
   friendshipId: string
+}
+
+export type TournamentPartnerInviteReceivedMessage = {
+  type: 'tournament_partner_invite_received'
+  invite: TournamentPartnerInviteDto
+}
+
+export type TournamentPartnerInvitePopupDismissedMessage = {
+  type: 'tournament_partner_invite_popup_dismissed'
+  inviteId: string
+  tournamentId: string
+  popupDismissedAt: string | null
+  notificationReadAt: string | null
+}
+
+export type TournamentPartnerInviteResolvedMessage = {
+  type: 'tournament_partner_invite_resolved'
+  inviteId: string
+  tournamentId: string
+  status: string
 }
 
 // --- Lobby live chat (общ публичен чат в лобито — виж lobbyChatStore.ts) ---

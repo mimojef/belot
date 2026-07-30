@@ -121,6 +121,8 @@ export type TournamentPartnerInviteSnapshot = {
   invitee: TournamentCreatorSnapshot
   status: string
   expiresAt: string
+  popupDismissedAt: string | null
+  notificationReadAt: string | null
   createdAt: string
   respondedAt: string | null
   tournamentName?: string
@@ -1224,6 +1226,26 @@ export type PendingGiftNotificationsMessage = {
   gifts: Array<{ giftId: string; amount: number; fromDisplayName: string }>
 }
 
+export type TournamentPartnerInviteReceivedMessage = {
+  type: 'tournament_partner_invite_received'
+  invite: TournamentPartnerInviteSnapshot
+}
+
+export type TournamentPartnerInvitePopupDismissedMessage = {
+  type: 'tournament_partner_invite_popup_dismissed'
+  inviteId: string
+  tournamentId: string
+  popupDismissedAt: string | null
+  notificationReadAt: string | null
+}
+
+export type TournamentPartnerInviteResolvedMessage = {
+  type: 'tournament_partner_invite_resolved'
+  inviteId: string
+  tournamentId: string
+  status: string
+}
+
 // --- Общ лайв чат в лобито (разделен от ChatMessageReceivedMessage — това
 // е публичен broadcast поток, не 1:1 нотификация между приятели) ---
 
@@ -1323,6 +1345,9 @@ export type ServerMessage =
   | FriendAcceptanceNotificationReadMessage
   | CoinsGiftedMessage
   | PendingGiftNotificationsMessage
+  | TournamentPartnerInviteReceivedMessage
+  | TournamentPartnerInvitePopupDismissedMessage
+  | TournamentPartnerInviteResolvedMessage
   | LobbyChatHistoryMessage
   | LobbyChatMessageEventMessage
   | LobbyChatMessageDeletedMessage

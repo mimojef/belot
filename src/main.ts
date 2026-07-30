@@ -77,6 +77,7 @@ import { createFriendRequestNotification } from './ui/notifications/friendReques
 import { createPartnerRatingNotification } from './ui/notifications/partnerRatingNotification'
 import { createChatMessageNotification } from './ui/notifications/chatMessageNotification'
 import { createPrivateRoomCreatedNotification } from './ui/notifications/privateRoomCreatedNotification'
+import { createTournamentPartnerInvitePopup } from './ui/notifications/tournamentPartnerInvitePopup'
 import { createVisitorPageViewTracker } from './app/visitors/createVisitorPageViewTracker'
 import { mountConsentUi } from './app/consent/consentUi'
 import { initializeAnalytics } from './app/analytics/initializeAnalytics'
@@ -176,6 +177,31 @@ const privateRoomCreatedNotification = createPrivateRoomCreatedNotification({
   container: privateRoomCreatedNotifContainer,
   onEnterPrivateRooms: () => {
     lobby?.navigateToPrivateRooms()
+  },
+})
+
+const tournamentPartnerInviteNotifContainer = document.createElement('div')
+tournamentPartnerInviteNotifContainer.id = 'global-tournament-partner-invite-notifications'
+document.body.appendChild(tournamentPartnerInviteNotifContainer)
+
+const tournamentPartnerInvitePopup = createTournamentPartnerInvitePopup({
+  container: tournamentPartnerInviteNotifContainer,
+  onDismiss: (inviteId) => dismissTournamentPartnerInvitePopupRequest(inviteId),
+  onView: async (inviteId) => {
+    const result = await viewTournamentPartnerInviteNotificationRequest(inviteId)
+    if (result.ok) {
+      lobby?.navigateToTournamentDetail(result.tournamentId)
+      void lobby?.refreshPendingTournamentPartnerInvites()
+    }
+    return result
+  },
+  onExpiredRefresh: async (inviteId) => {
+    const result = await loadPendingTournamentPartnerInvites()
+    if (result.ok) {
+      void lobby?.refreshPendingTournamentPartnerInvites()
+      return result.invites.some((invite) => invite.inviteId === inviteId && invite.popupDismissedAt === null)
+    }
+    return true
   },
 })
 
@@ -3493,6 +3519,43 @@ async function loadPendingTournamentPartnerInvites(): Promise<
   }
 }
 
+async function dismissTournamentPartnerInvitePopupRequest(
+  inviteId: string,
+): Promise<{ ok: true; tournamentId: string } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/partner-invites/${encodeURIComponent(inviteId)}/dismiss-popup`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as { ok: boolean; message?: string; tournamentId?: string }
+    if (!response.ok || !data.ok || typeof data.tournamentId !== 'string') {
+      return { ok: false, message: data.message ?? 'Поканата не беше затворена.' }
+    }
+    void lobby?.refreshPendingTournamentPartnerInvites()
+    return { ok: true, tournamentId: data.tournamentId }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function viewTournamentPartnerInviteNotificationRequest(
+  inviteId: string,
+): Promise<{ ok: true; tournamentId: string } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/partner-invites/${encodeURIComponent(inviteId)}/view`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as { ok: boolean; message?: string; tournamentId?: string }
+    if (!response.ok || !data.ok || typeof data.tournamentId !== 'string') {
+      return { ok: false, message: data.message ?? 'Поканата не беше отворена.' }
+    }
+    return { ok: true, tournamentId: data.tournamentId }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function createTournamentPartnerInviteRequest(
   tournamentId: string,
   inviteeProfileId: string,
@@ -4225,6 +4288,24 @@ client = createGameServerClient({
 
     if (message.type === 'pending_acceptance_notifications') {
       lobby.handleServerMessage(message)
+      return
+    }
+
+    if (message.type === 'tournament_partner_invite_received') {
+      lobby.handleServerMessage(message)
+      tournamentPartnerInvitePopup.enqueue(message.invite)
+      return
+    }
+
+    if (message.type === 'tournament_partner_invite_popup_dismissed') {
+      lobby.handleServerMessage(message)
+      tournamentPartnerInvitePopup.remove(message.inviteId)
+      return
+    }
+
+    if (message.type === 'tournament_partner_invite_resolved') {
+      lobby.handleServerMessage(message)
+      tournamentPartnerInvitePopup.remove(message.inviteId)
       return
     }
 
