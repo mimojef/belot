@@ -21,6 +21,8 @@
     "check:voluntary-leave-snapshot-persistence": "tsx scripts/checkVoluntaryLeaveSnapshotPersistence.ts --server-root=.",
     "check:monitoring-history": "tsx scripts/checkMonitoringHistory.ts",
     "check:monitoring-history-endpoint": "tsx scripts/checkAdminMonitoringHistoryEndpoint.ts",
+    "check:admin-rooms-list-snapshot": "tsx scripts/checkAdminRoomsListSnapshot.ts",
+    "check:admin-active-rooms-panel": "tsx scripts/checkAdminActiveRoomsPanel.ts",
     "check:accounts-role-migration": "tsx scripts/checkAccountsRoleMigration.ts",
     "check:migration-runner-crash-recovery": "tsx scripts/checkMigrationRunnerCrashRecovery.ts",
     "check:subadmin-http-authorization": "tsx scripts/checkSubadminHttpAuthorization.ts --server-root=.",

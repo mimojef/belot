@@ -1,4 +1,5 @@
 import type { GameWorkerPoolHealth } from '../game/createGameWorkerPool.js'
+import type { ActiveRoomSnapshot } from '../core/computeActiveRoomsSnapshot.js'
 
 export type SamplerStatus = 'warming_up' | 'running' | 'stopped'
 
@@ -51,6 +52,7 @@ export type MonitoringSnapshot = {
 
   activeRooms: number
   roomsByPhase: Record<string, number>
+  rooms: ActiveRoomSnapshot[]
 
   workerPool: MonitoringWorkerPoolSnapshot | null
   lastError: string | null
@@ -80,5 +82,6 @@ export type MonitoringContext = {
   getMatchmakingWaitersByStake: () => Record<string, number>
   getActiveRoomCount: () => number
   getRoomsByPhase: () => Record<string, number>
+  getActiveRooms: () => ActiveRoomSnapshot[]
   getWorkerPoolHealth: () => GameWorkerPoolHealth | null
 }

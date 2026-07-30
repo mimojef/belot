@@ -85,6 +85,7 @@ import { createYellowCoinGiftStore } from './db/yellowCoinGiftStore.js'
 import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js'
 import { broadcastRoomSnapshots } from './core/broadcastRoomSnapshots.js'
 import { countServerRoomsByPhase } from './core/countServerRoomsByPhase.js'
+import { computeActiveRoomsSnapshot } from './core/computeActiveRoomsSnapshot.js'
 import { createInitialServerState } from './core/createInitialServerState.js'
 import { createServerConnection } from './core/createServerConnection.js'
 import { detachConnectionFromRoomSeat } from './core/detachConnectionFromRoomSeat.js'
@@ -9889,6 +9890,10 @@ try {
     getMatchmakingWaitersByStake: () => getQueueCountsByStake(),
     getActiveRoomCount: () => Object.keys(serverState.rooms).length,
     getRoomsByPhase: () => countServerRoomsByPhase(serverState.rooms),
+    getActiveRooms: () =>
+      computeActiveRoomsSnapshot(serverState.rooms, (roomId) =>
+        gameWorkerPool?.getWorkerIdForRoom(roomId) ?? null,
+      ),
     getWorkerPoolHealth: () => gameWorkerPool?.getHealth() ?? null,
   })
   console.log('[monitoring] Sampler started')

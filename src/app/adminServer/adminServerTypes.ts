@@ -105,6 +105,40 @@ export type MonitoringWorkerPoolSnapshot = {
   workers: MonitoringWorkerSnapshot[]
 }
 
+export type ActiveRoomSnapshot = {
+  roomId: string
+  phase: string
+  connectedHumans: number
+  disconnectedHumans: number
+  bots: number
+  occupiedSeats: number
+  workerId: string | null
+  createdAt: number
+  lastActivityAt: number
+}
+
+/**
+ * Праг за визуално маркиране на изоставена (bots-only) стая в admin панела.
+ * Огледален на server/src/core/computeActiveRoomsSnapshot.ts::STALE_ACTIVE_ROOM_THRESHOLD_MS
+ * — трябва да се държи синхронизиран, ако прагът се промени там.
+ * Не се ползва за никаква lifecycle/cleanup логика, само визуален маркер.
+ */
+export const STALE_ACTIVE_ROOM_THRESHOLD_MS = 5 * 60 * 1000
+
+export function isBotsOnlyActiveRoom(room: ActiveRoomSnapshot): boolean {
+  return room.connectedHumans === 0 && room.disconnectedHumans === 0
+}
+
+export function isStaleActiveRoom(
+  room: ActiveRoomSnapshot,
+  nowMs: number = Date.now(),
+): boolean {
+  return (
+    isBotsOnlyActiveRoom(room) &&
+    nowMs - room.lastActivityAt > STALE_ACTIVE_ROOM_THRESHOLD_MS
+  )
+}
+
 export type MonitoringSnapshot = {
   samplerStatus: 'warming_up' | 'running' | 'stopped'
   sampledAtMs: number
@@ -124,6 +158,7 @@ export type MonitoringSnapshot = {
   matchmakingWaitersByStake: Record<string, number>
   activeRooms: number
   roomsByPhase: Record<string, number>
+  rooms: ActiveRoomSnapshot[]
   workerPool: MonitoringWorkerPoolSnapshot | null
   lastError: string | null
 }

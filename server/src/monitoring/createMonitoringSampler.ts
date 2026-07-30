@@ -133,6 +133,7 @@ export function createMonitoringSampler(
 
         activeRooms: context.getActiveRoomCount(),
         roomsByPhase: context.getRoomsByPhase(),
+        rooms: context.getActiveRooms(),
 
         workerPool: buildWorkerPoolSnapshot(),
         lastError: null,
@@ -193,6 +194,7 @@ function buildWarmingSnapshot(
     matchmakingWaitersByStake: {},
     activeRooms: 0,
     roomsByPhase: {},
+    rooms: [],
     workerPool: null,
     lastError: null,
   }
@@ -225,6 +227,7 @@ function buildWarmingSnapshotSafe(
       matchmakingWaitersByStake: {},
       activeRooms: 0,
       roomsByPhase: {},
+      rooms: [],
       workerPool: null,
       lastError: null,
     }

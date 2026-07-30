@@ -24,7 +24,8 @@ import type {
   SupportMessageSnapshot,
   SupportConversationSnapshot,
 } from '../network/createGameServerClient'
-import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult } from '../adminServer/adminServerTypes'
+import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, ActiveRoomSnapshot } from '../adminServer/adminServerTypes'
+import { isBotsOnlyActiveRoom, isStaleActiveRoom } from '../adminServer/adminServerTypes'
 import { renderPeakCards, renderPeakMoments, renderHistoryInfoRow, getWindowLabel } from '../adminServer/renderAdminHistory'
 import type { PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
@@ -5359,14 +5360,22 @@ export function renderAdminServerPanel(state: LobbyScreenState): string {
   const errorText = state.adminMonitoringErrorText
 
   const PHASE_LABELS: Record<string, string> = {
+    'bootstrap': 'Подготовка',
+    'new-game': 'Нова игра',
+    'choose-first-dealer': 'Избор на раздаващ',
     'cutting': 'Разрязване',
+    'cut-resolve': 'Разрязване',
     'deal-first-3': 'Раздаване 1-3',
     'deal-next-2': 'Раздаване 4-5',
     'bidding': 'Обявяване',
     'deal-last-3': 'Раздаване 6-8',
     'playing': 'Игра',
     'scoring': 'Резултати',
+    'next-round': 'Резултати',
+    'match-ended': 'Завършена',
+    'finished': 'Завършена',
   }
+  const fmtPhase = (phase: string): string => PHASE_LABELS[phase] ?? phase
 
   const WORKER_STATE_LABELS: Record<string, string> = {
     ready: 'Работи',
@@ -5471,9 +5480,108 @@ export function renderAdminServerPanel(state: LobbyScreenState): string {
   const phaseRows = Object.entries(snap.roomsByPhase)
     .filter(([, count]) => count > 0)
     .map(([phase, count]) => {
-      const label = PHASE_LABELS[phase] ?? phase
+      const label = fmtPhase(phase)
       return `<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(212,165,32,0.12);border:1px solid rgba(212,165,32,0.28);border-radius:20px;padding:3px 10px;font-size:11px;font-weight:800;color:#d4a520;">${escapeHtml(label)}<span style="color:rgba(255,255,255,0.8);">${count}</span></span>`
     }).join('')
+
+  // ── Активни стаи ──
+  const fmtAgoShort = (ms: number): string => {
+    const sec = Math.max(0, Math.round((Date.now() - ms) / 1000))
+    if (sec < 60) return `преди ${sec} сек.`
+    const min = Math.floor(sec / 60)
+    if (min < 60) return `преди ${min} мин.`
+    const hrs = Math.floor(min / 60)
+    return `преди ${hrs} ч.`
+  }
+
+  const badge = (text: string, color: string, bg: string) =>
+    `<span style="display:inline-flex;align-items:center;background:${bg};border:1px solid ${color}44;border-radius:20px;padding:2px 9px;font-size:11px;font-weight:800;color:${color};white-space:nowrap;">${text}</span>`
+
+  const humanBadge = (n: number) => badge(`${n} ${n === 1 ? 'човек' : 'човека'}`, '#22c55e', 'rgba(34,197,94,0.12)')
+  const botBadge = (n: number) => badge(`${n} ${n === 1 ? 'бот' : 'бота'}`, '#d4a520', 'rgba(212,165,32,0.12)')
+  const disconnectedBadge = (n: number) => badge(`${n} прекъснал${n === 1 ? '' : 'и'}`, '#f59e0b', 'rgba(245,158,11,0.14)')
+
+  const activeRoomsList = snap.rooms
+  const botsOnlyRoom = (r: ActiveRoomSnapshot) => isBotsOnlyActiveRoom(r)
+  const isStaleRoom = (r: ActiveRoomSnapshot) => isStaleActiveRoom(r)
+
+  let activeRoomsHtml: string
+  if (activeRoomsList.length === 0) {
+    activeRoomsHtml = `<p style="font-size:12px;color:rgba(255,255,255,0.35);font-style:italic;margin:0;">В момента няма активни игрови стаи.</p>`
+  } else {
+    const desktopRows = activeRoomsList.map((r) => {
+      const stale = isStaleRoom(r)
+      const onlyBots = botsOnlyRoom(r)
+      const rowBg = stale ? 'rgba(245,158,11,0.05)' : onlyBots ? 'rgba(255,255,255,0.015)' : 'transparent'
+      const idShort = escapeHtml(r.roomId.slice(0, 8))
+      const idFull = escapeHtml(r.roomId)
+      return `
+        <tr style="background:${rowBg};">
+          <td style="padding:7px 10px 7px 0;white-space:nowrap;">
+            <span title="${idFull}" style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.7);font-family:monospace;cursor:default;">${idShort}</span>
+            ${stale ? `<span title="Няма свързани играчи и активност от над 5 минути." style="margin-left:6px;font-size:10px;font-weight:800;color:#f59e0b;">⚠ стара</span>` : ''}
+          </td>
+          <td style="padding:7px 10px;white-space:nowrap;font-size:12px;font-weight:700;color:#fff;">${escapeHtml(fmtPhase(r.phase))}</td>
+          <td style="padding:7px 10px;white-space:nowrap;">
+            <div style="display:flex;gap:5px;flex-wrap:wrap;">
+              ${humanBadge(r.connectedHumans)}
+              ${botBadge(r.bots)}
+              ${r.disconnectedHumans > 0 ? disconnectedBadge(r.disconnectedHumans) : ''}
+            </div>
+          </td>
+          <td style="padding:7px 10px;white-space:nowrap;font-size:11px;color:rgba(255,255,255,0.45);">${escapeHtml(r.workerId ?? '—')}</td>
+          <td style="padding:7px 0 7px 10px;white-space:nowrap;font-size:11px;color:rgba(255,255,255,0.4);">${fmtAgoShort(r.lastActivityAt)}</td>
+        </tr>
+      `
+    }).join('')
+
+    const desktopTable = `
+      <div class="admin-rooms-desktop" style="overflow-x:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr style="border-bottom:1px solid rgba(255,255,255,0.08);">
+              <th style="text-align:left;padding:5px 10px 5px 0;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.3);">Стая</th>
+              <th style="text-align:left;padding:5px 10px;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.3);">Фаза</th>
+              <th style="text-align:left;padding:5px 10px;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.3);">Места</th>
+              <th style="text-align:left;padding:5px 10px;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.3);">Worker</th>
+              <th style="text-align:left;padding:5px 0 5px 10px;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.3);">Активност</th>
+            </tr>
+          </thead>
+          <tbody>${desktopRows}</tbody>
+        </table>
+      </div>
+    `
+
+    const mobileCards = activeRoomsList.map((r) => {
+      const stale = isStaleRoom(r)
+      const onlyBots = botsOnlyRoom(r)
+      const cardBg = stale ? 'rgba(245,158,11,0.06)' : onlyBots ? '#0a0a0a' : '#111111'
+      const idShort = escapeHtml(r.roomId.slice(0, 8))
+      const idFull = escapeHtml(r.roomId)
+      return `
+        <div style="background:${cardBg};border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <span title="${idFull}" style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.7);font-family:monospace;">${idShort}</span>
+            <span style="font-size:12px;font-weight:800;color:#fff;">${escapeHtml(fmtPhase(r.phase))}${stale ? ' <span style="color:#f59e0b;">⚠</span>' : ''}</span>
+          </div>
+          <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px;">
+            ${humanBadge(r.connectedHumans)}
+            ${botBadge(r.bots)}
+            ${r.disconnectedHumans > 0 ? disconnectedBadge(r.disconnectedHumans) : ''}
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:rgba(255,255,255,0.4);">
+            <span>${escapeHtml(r.workerId ?? '—')}</span>
+            <span>${fmtAgoShort(r.lastActivityAt)}</span>
+          </div>
+        </div>
+      `
+    }).join('')
+
+    activeRoomsHtml = `
+      ${desktopTable}
+      <div class="admin-rooms-mobile">${mobileCards}</div>
+    `
+  }
 
   // ── Worker pool ──
   let workerPoolHtml = ''
@@ -5667,6 +5775,10 @@ export function renderAdminServerPanel(state: LobbyScreenState): string {
 
   return `
     <section style="padding:0 4px;">
+      <style>
+        @media(max-width:700px){.admin-rooms-desktop{display:none!important;}}
+        @media(min-width:701px){.admin-rooms-mobile{display:none!important;}}
+      </style>
 
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
         <h2 style="font-size:18px;font-weight:800;color:#d4a520;margin:0;letter-spacing:0.04em;text-transform:uppercase;">Сървър</h2>
@@ -5725,6 +5837,11 @@ export function renderAdminServerPanel(state: LobbyScreenState): string {
           <div style="display:flex;flex-wrap:wrap;gap:6px;">${phaseRows}</div>
         </div>
       ` : ''}
+
+      <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:14px 18px;margin-bottom:20px;">
+        ${sectionLabel('Активни стаи')}
+        ${activeRoomsHtml}
+      </div>
 
       <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:14px 18px;">
         ${sectionLabel('Worker pool')}
