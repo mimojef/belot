@@ -1302,6 +1302,49 @@ function sendPrivateRoomUpdateToMembers(room: PrivateRoom): void {
   }
 }
 
+// PrivateRoomMember.connectionId е снапшот, взет в момента на join/create и
+// може вече да е мъртъв (WS reconnect на мобилна мрежа създава нов
+// connection.id, но старият остава в room.members до следващия
+// reconnectMember() — виж коментара в privateRoomsStore.ts). Затова тук
+// НИКОГА не подаваме member.connectionId directно на createHumanParticipant/
+// attachConnectionToRoomSeat — първо намираме реално жива връзка:
+//  1) ако member.connectionId все още е 'connected' И socket-ът е OPEN,
+//     ползваме нея непроменена;
+//  2) иначе търсим друга 'connected' + OPEN връзка със същия profileId
+//     (потребителят вече се е reconnect-нал с нов connection.id, но
+//     privateRoomsStore все още не е получил reconnectMember() за него —
+//     най-лошият момент от race-а: масата станала 4/4 точно докато той
+//     reconnect-ва);
+//  3) иначе няма жива връзка — връщаме null, участникът остава isConnected:
+//     false в новата стая и се поема от съществуващия bot-takeover механизъм,
+//     вместо мъртъв connectionId да бъде третиран като "connected".
+function resolveLiveConnectionForMember(
+  state: ServerState,
+  member: PrivateRoomMember,
+): ConnectionId | null {
+  const storedConn = getConnectionById(state, member.connectionId)
+  const storedSocket = socketRegistry.get(member.connectionId)
+  if (storedConn?.status === 'connected' && storedSocket?.readyState === WebSocket.OPEN) {
+    return member.connectionId
+  }
+
+  if (member.profileId === null) {
+    return null
+  }
+
+  for (const candidate of Object.values(state.connections)) {
+    if (candidate.profileId !== member.profileId || candidate.status !== 'connected') {
+      continue
+    }
+    const candidateSocket = socketRegistry.get(candidate.id)
+    if (candidateSocket?.readyState === WebSocket.OPEN) {
+      return candidate.id
+    }
+  }
+
+  return null
+}
+
 function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
   const [hostMember, ...restMembers] = privateRoom.members
 
@@ -1309,8 +1352,10 @@ function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
     ? playerProgressStore.getPublicProfile(hostMember.profileId)
     : null
 
+  const hostLiveConnectionId = resolveLiveConnectionForMember(serverState, hostMember)
+
   const roomResult = createRoomWithHumanHost({
-    connectionId: hostMember.connectionId,
+    connectionId: hostLiveConnectionId,
     identity: {
       profileId: hostMember.profileId,
       displayName: hostMember.displayName,
@@ -1330,23 +1375,33 @@ function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
   let currentRoom = roomResult.room
   let nextServerState = upsertServerRoom(serverState, currentRoom)
 
-  const hostConn = getConnectionById(nextServerState, hostMember.connectionId)
-  if (hostConn) {
-    const nextHostConn = attachConnectionToRoomSeat(hostConn, hostMember.connectionId, currentRoom, roomResult.seat)
-    nextServerState = updateServerConnectionInState(nextServerState, hostMember.connectionId, nextHostConn)
+  const seatAssignments: Array<{ connectionId: string; seat: Seat }> = []
+  const liveConnectionIdsForExpiryNotice: string[] = []
+  if (hostLiveConnectionId !== null) {
+    liveConnectionIdsForExpiryNotice.push(hostLiveConnectionId)
   }
 
-  const seatAssignments: Array<{ connectionId: string; seat: Seat }> = [
-    { connectionId: hostMember.connectionId, seat: roomResult.seat },
-  ]
+  if (hostLiveConnectionId !== null) {
+    const hostConn = getConnectionById(nextServerState, hostLiveConnectionId)
+    if (hostConn) {
+      const nextHostConn = attachConnectionToRoomSeat(hostConn, hostLiveConnectionId, currentRoom, roomResult.seat)
+      nextServerState = updateServerConnectionInState(nextServerState, hostLiveConnectionId, nextHostConn)
+      seatAssignments.push({ connectionId: hostLiveConnectionId, seat: roomResult.seat })
+    }
+  }
 
   for (const member of restMembers) {
     const publicProfile = member.profileId
       ? playerProgressStore.getPublicProfile(member.profileId)
       : null
 
+    const memberLiveConnectionId = resolveLiveConnectionForMember(nextServerState, member)
+    if (memberLiveConnectionId !== null) {
+      liveConnectionIdsForExpiryNotice.push(memberLiveConnectionId)
+    }
+
     const addResult = addHumanToRoom(currentRoom, {
-      connectionId: member.connectionId,
+      connectionId: memberLiveConnectionId,
       identity: {
         profileId: member.profileId,
         displayName: member.displayName,
@@ -1360,19 +1415,24 @@ function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
     currentRoom = addResult.room
     nextServerState = updateServerRoomInState(nextServerState, currentRoom.id, currentRoom)
 
-    const memberConn = getConnectionById(nextServerState, member.connectionId)
-    if (memberConn) {
-      const nextMemberConn = attachConnectionToRoomSeat(memberConn, member.connectionId, currentRoom, addResult.seat)
-      nextServerState = updateServerConnectionInState(nextServerState, member.connectionId, nextMemberConn)
-      seatAssignments.push({ connectionId: member.connectionId, seat: addResult.seat })
+    if (memberLiveConnectionId !== null) {
+      const memberConn = getConnectionById(nextServerState, memberLiveConnectionId)
+      if (memberConn) {
+        const nextMemberConn = attachConnectionToRoomSeat(memberConn, memberLiveConnectionId, currentRoom, addResult.seat)
+        nextServerState = updateServerConnectionInState(nextServerState, memberLiveConnectionId, nextMemberConn)
+        seatAssignments.push({ connectionId: memberLiveConnectionId, seat: addResult.seat })
+      }
     }
   }
 
   const initializedRoom = initializeRoomAuthoritativeGameState(currentRoom)
 
   function notifyMembersExpired(): void {
-    for (const member of privateRoom.members) {
-      safeSendToConnection(member.connectionId, {
+    // Известява живите (resolved) връзки — не суровите privateRoom.members,
+    // които може вече да сочат към мъртъв connectionId (виж
+    // resolveLiveConnectionForMember по-горе).
+    for (const connectionId of liveConnectionIdsForExpiryNotice) {
+      safeSendToConnection(connectionId, {
         type: 'private_room_expired',
         privateRoomId: privateRoom.id,
       })

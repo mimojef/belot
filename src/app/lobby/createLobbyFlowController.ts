@@ -497,6 +497,7 @@ export type LobbyFlowController = {
   openAuthModal: (mode: Exclude<import('./renderLobbyScreen').LobbyAuthModalMode, 'closed'>) => void
   suspendLobbyChatForActiveRoom: () => void
   forceLobbyChatResubscribeIfOnLobbyScreen: () => void
+  resyncPrivateRoomMembershipIfWaiting: () => void
   updateLobbyChatDraft: (value: string) => void
   submitLobbyChatMessage: () => void
   refreshMissionsCount: () => void
@@ -6179,6 +6180,20 @@ export function createLobbyFlowController(
     reconcileLobbyChatSubscription()
   }
 
+  // Нова WS връзка = нов connection.id на сървъра => server-side членството в
+  // privateRoomsStore (заключено по стария connection.id) вече не сочи към
+  // тази връзка. request_private_rooms_list е единственият тригер за
+  // server-side reconnectMember() — normalно се вика само при отваряне на
+  // таба „Частни маси“ (onPrivateRoomsOpen), затова тук го форсираме и при WS
+  // reconnect, но само ако потребителят реално е член на чакаща частна маса
+  // (state.myPrivateRoom), за да не гърми при чист lobby/guest/reconnect към
+  // вече активна игра — виж main.ts WS onOpen.
+  function resyncPrivateRoomMembershipIfWaiting(): void {
+    if (state.myPrivateRoom !== null) {
+      options.onPrivateRoomsOpen?.()
+    }
+  }
+
   function updateLobbyChatDraft(value: string): void {
     state.lobbyChatDraft = value
   }
@@ -7448,6 +7463,7 @@ export function createLobbyFlowController(
     openAuthModal,
     suspendLobbyChatForActiveRoom,
     forceLobbyChatResubscribeIfOnLobbyScreen,
+    resyncPrivateRoomMembershipIfWaiting,
     updateLobbyChatDraft,
     submitLobbyChatMessage,
     refreshMissionsCount: () => { void loadPlayerUnclaimedCount() },
