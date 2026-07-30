@@ -60,6 +60,9 @@ import type {
   GuestContactMessageListItem,
   SupportMessageSnapshot,
   SupportConversationSnapshot,
+  TournamentCreateInput,
+  TournamentDetailSnapshot,
+  TournamentSummarySnapshot,
 } from '../network/createGameServerClient'
 
 export type LobbyFlowScreen =
@@ -73,6 +76,8 @@ export type LobbyFlowScreen =
   | 'admin-visitors'
   | 'admin-payments'
   | 'admin-payment-detail'
+  | 'tournaments'
+  | 'tournament-detail'
   | 'terms'
   | 'privacy'
   | 'contact'
@@ -479,6 +484,22 @@ export type CreateLobbyFlowControllerOptions = {
   /** Пуска се при вход в екран от фамилията "Информация" (stats/visitors/payments/detail) — лек role-check polling, за да засече отнет достъп докато потребителят е неактивен. */
   onAdminInfoFamilyScreenEnter?: () => void
   onAdminInfoFamilyScreenLeave?: () => void
+  onTournamentsLoad?: (params: { mine: boolean; page: number }) => Promise<
+    | { ok: true; tournaments: TournamentSummarySnapshot[]; page: number; limit: number; totalCount: number }
+    | { ok: false; message: string }
+  >
+  onTournamentCreate?: (input: TournamentCreateInput) => Promise<
+    | { ok: true; tournament: TournamentSummarySnapshot }
+    | { ok: false; message: string }
+  >
+  onTournamentDetailLoad?: (tournamentId: string) => Promise<
+    | { ok: true; tournament: TournamentDetailSnapshot }
+    | { ok: false; message: string; requiresPassword?: boolean }
+  >
+  onTournamentUnlock?: (tournamentId: string, password: string) => Promise<
+    | { ok: true; tournament: TournamentDetailSnapshot }
+    | { ok: false; message: string; requiresPassword?: boolean }
+  >
 }
 
 
@@ -787,6 +808,21 @@ type InternalLobbyFlowState = {
   adminPaymentDetailPurchase: AdminPaymentDetailRow | null
   adminPaymentDetailErrorText: string | null
   adminPaymentDetailFromPeriod: string | null
+  tournaments: TournamentSummarySnapshot[]
+  tournamentsLoading: boolean
+  tournamentsErrorText: string | null
+  tournamentsFilter: 'all' | 'mine'
+  tournamentCreatePopupOpen: boolean
+  tournamentCreateBusy: boolean
+  tournamentCreateErrorText: string | null
+  tournamentDetailId: string | null
+  tournamentDetailLoading: boolean
+  tournamentDetailErrorText: string | null
+  tournamentDetail: TournamentDetailSnapshot | null
+  tournamentDetailRequiresPassword: boolean
+  tournamentDetailPasswordDraft: string
+  tournamentDetailUnlockBusy: boolean
+  tournamentDetailUnlockErrorText: string | null
 }
 
 const DEFAULT_REQUIRED_PLAYERS = 4
@@ -1052,6 +1088,21 @@ function createInitialState(): InternalLobbyFlowState {
     adminPaymentDetailPurchase: null,
     adminPaymentDetailErrorText: null,
     adminPaymentDetailFromPeriod: null,
+    tournaments: [],
+    tournamentsLoading: false,
+    tournamentsErrorText: null,
+    tournamentsFilter: 'all',
+    tournamentCreatePopupOpen: false,
+    tournamentCreateBusy: false,
+    tournamentCreateErrorText: null,
+    tournamentDetailId: null,
+    tournamentDetailLoading: false,
+    tournamentDetailErrorText: null,
+    tournamentDetail: null,
+    tournamentDetailRequiresPassword: false,
+    tournamentDetailPasswordDraft: '',
+    tournamentDetailUnlockBusy: false,
+    tournamentDetailUnlockErrorText: null,
   }
 }
 
@@ -2093,6 +2144,10 @@ export function createLobbyFlowController(
               ? 'admin-payments'
             : state.currentScreen === 'admin-payment-detail'
               ? 'admin-payment-detail'
+            : state.currentScreen === 'tournaments'
+              ? 'tournaments'
+            : state.currentScreen === 'tournament-detail'
+              ? 'tournament-detail'
             : state.currentScreen === 'guest-contact-messages'
               ? 'guest-contact-messages'
             : state.currentScreen === 'terms'
@@ -2338,6 +2393,21 @@ export function createLobbyFlowController(
       adminPaymentDetailLoading: state.adminPaymentDetailLoading,
       adminPaymentDetailPurchase: state.adminPaymentDetailPurchase,
       adminPaymentDetailErrorText: state.adminPaymentDetailErrorText,
+      tournaments: state.tournaments,
+      tournamentsLoading: state.tournamentsLoading,
+      tournamentsErrorText: state.tournamentsErrorText,
+      tournamentsFilter: state.tournamentsFilter,
+      tournamentCreatePopupOpen: state.tournamentCreatePopupOpen,
+      tournamentCreateBusy: state.tournamentCreateBusy,
+      tournamentCreateErrorText: state.tournamentCreateErrorText,
+      tournamentDetailId: state.tournamentDetailId,
+      tournamentDetailLoading: state.tournamentDetailLoading,
+      tournamentDetailErrorText: state.tournamentDetailErrorText,
+      tournamentDetail: state.tournamentDetail,
+      tournamentDetailRequiresPassword: state.tournamentDetailRequiresPassword,
+      tournamentDetailPasswordDraft: state.tournamentDetailPasswordDraft,
+      tournamentDetailUnlockBusy: state.tournamentDetailUnlockBusy,
+      tournamentDetailUnlockErrorText: state.tournamentDetailUnlockErrorText,
       shopPurchaseResumeId: state.shopPurchaseResumeId,
       shopPurchaseHideConfirmId: state.shopPurchaseHideConfirmId,
       shopPurchaseActionPurchaseId: state.shopPurchaseActionPurchaseId,
@@ -2510,6 +2580,30 @@ export function createLobbyFlowController(
       },
       onLeaderboardsClick: () => {
         void showLeaderboardsDirectory()
+      },
+      onTournamentsClick: () => {
+        void showTournamentsList()
+      },
+      onTournamentsFilterChange: (filter) => {
+        setTournamentsFilter(filter)
+      },
+      onTournamentCreatePopupOpen: () => {
+        openTournamentCreatePopup()
+      },
+      onTournamentCreatePopupClose: () => {
+        closeTournamentCreatePopup()
+      },
+      onTournamentCreateSubmit: (input) => {
+        void submitTournamentCreate(input)
+      },
+      onTournamentCardClick: (tournamentId) => {
+        showTournamentDetail(tournamentId)
+      },
+      onTournamentDetailPasswordDraftChange: (value) => {
+        setTournamentDetailPasswordDraft(value)
+      },
+      onTournamentUnlockSubmit: () => {
+        void submitTournamentUnlock()
       },
       onLeaderboardCategoryClick: (category) => {
         state.activeLeaderboardCategory = category
@@ -3518,6 +3612,208 @@ export function createLobbyFlowController(
 
     applySuccessfulPlayersPage(result)
     state.playersErrorText = null
+    render()
+  }
+
+  async function showTournamentsList(): Promise<void> {
+    leaveAdminServerIfActive()
+    state.currentScreen = 'tournaments'
+    state.tournamentCreatePopupOpen = false
+    state.tournamentCreateErrorText = null
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+
+    if (!options.onTournamentsLoad) {
+      state.tournamentsErrorText = 'Списъкът с турнири временно не е наличен.'
+      render()
+      return
+    }
+
+    state.tournamentsLoading = true
+    state.tournamentsErrorText = null
+    render()
+
+    const mine = state.tournamentsFilter === 'mine'
+    const result = await options.onTournamentsLoad({ mine, page: 1 })
+
+    if (state.currentScreen !== 'tournaments') {
+      return
+    }
+
+    state.tournamentsLoading = false
+
+    if (!result.ok) {
+      state.tournamentsErrorText = result.message
+      render()
+      return
+    }
+
+    state.tournaments = result.tournaments
+    state.tournamentsErrorText = null
+    render()
+  }
+
+  async function refetchTournamentsList(): Promise<void> {
+    if (!options.onTournamentsLoad || state.currentScreen !== 'tournaments') return
+    state.tournamentsLoading = true
+    render()
+    const mine = state.tournamentsFilter === 'mine'
+    const result = await options.onTournamentsLoad({ mine, page: 1 })
+    if (state.currentScreen !== 'tournaments') return
+    state.tournamentsLoading = false
+    if (!result.ok) {
+      state.tournamentsErrorText = result.message
+      render()
+      return
+    }
+    state.tournaments = result.tournaments
+    state.tournamentsErrorText = null
+    render()
+  }
+
+  function setTournamentsFilter(filter: 'all' | 'mine'): void {
+    if (state.tournamentsFilter === filter) return
+    state.tournamentsFilter = filter
+    void refetchTournamentsList()
+  }
+
+  function openTournamentCreatePopup(): void {
+    state.tournamentCreatePopupOpen = true
+    state.tournamentCreateErrorText = null
+    render()
+  }
+
+  function closeTournamentCreatePopup(): void {
+    if (state.tournamentCreateBusy) return
+    state.tournamentCreatePopupOpen = false
+    state.tournamentCreateErrorText = null
+    render()
+  }
+
+  async function submitTournamentCreate(input: TournamentCreateInput): Promise<void> {
+    if (!options.onTournamentCreate || state.tournamentCreateBusy) return
+
+    state.tournamentCreateBusy = true
+    state.tournamentCreateErrorText = null
+    render()
+
+    const result = await options.onTournamentCreate(input)
+
+    state.tournamentCreateBusy = false
+
+    if (!result.ok) {
+      state.tournamentCreateErrorText = result.message
+      render()
+      return
+    }
+
+    state.tournamentCreatePopupOpen = false
+    state.tournamentCreateErrorText = null
+    showTournamentDetailFromCreatedTournament(result.tournament.tournamentId)
+  }
+
+  function showTournamentDetailFromCreatedTournament(tournamentId: string): void {
+    state.currentScreen = 'tournament-detail'
+    state.tournamentDetailId = tournamentId
+    state.tournamentDetailLoading = false
+    state.tournamentDetailErrorText = null
+    state.tournamentDetailRequiresPassword = false
+    state.tournamentDetailPasswordDraft = ''
+    state.tournamentDetailUnlockErrorText = null
+    void refetchTournamentsList()
+    const targetUrl = `/tournaments/${encodeURIComponent(tournamentId)}`
+    if (window.location.pathname !== targetUrl) {
+      history.pushState(null, '', targetUrl)
+    }
+    render()
+    void fetchTournamentDetail(tournamentId)
+  }
+
+  function showTournamentDetail(tournamentId: string): void {
+    leaveAdminServerIfActive()
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    state.currentScreen = 'tournament-detail'
+    state.tournamentDetailId = tournamentId
+    state.tournamentDetail = null
+    state.tournamentDetailLoading = true
+    state.tournamentDetailErrorText = null
+    state.tournamentDetailRequiresPassword = false
+    state.tournamentDetailPasswordDraft = ''
+    state.tournamentDetailUnlockErrorText = null
+    const targetUrl = `/tournaments/${encodeURIComponent(tournamentId)}`
+    if (window.location.pathname !== targetUrl) {
+      history.pushState(null, '', targetUrl)
+    }
+    render()
+    void fetchTournamentDetail(tournamentId)
+  }
+
+  async function fetchTournamentDetail(tournamentId: string): Promise<void> {
+    if (!options.onTournamentDetailLoad) {
+      state.tournamentDetailLoading = false
+      state.tournamentDetailErrorText = 'Турнирът временно не е наличен.'
+      render()
+      return
+    }
+
+    const result = await options.onTournamentDetailLoad(tournamentId)
+
+    if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) {
+      return
+    }
+
+    state.tournamentDetailLoading = false
+
+    if (!result.ok) {
+      if (result.requiresPassword) {
+        state.tournamentDetailRequiresPassword = true
+        state.tournamentDetailErrorText = null
+      } else {
+        state.tournamentDetailErrorText = result.message
+      }
+      render()
+      return
+    }
+
+    state.tournamentDetail = result.tournament
+    state.tournamentDetailRequiresPassword = false
+    state.tournamentDetailErrorText = null
+    render()
+  }
+
+  function setTournamentDetailPasswordDraft(value: string): void {
+    state.tournamentDetailPasswordDraft = value
+  }
+
+  async function submitTournamentUnlock(): Promise<void> {
+    if (!options.onTournamentUnlock || state.tournamentDetailId === null || state.tournamentDetailUnlockBusy) {
+      return
+    }
+    const tournamentId = state.tournamentDetailId
+
+    state.tournamentDetailUnlockBusy = true
+    state.tournamentDetailUnlockErrorText = null
+    render()
+
+    const result = await options.onTournamentUnlock(tournamentId, state.tournamentDetailPasswordDraft)
+
+    if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) {
+      return
+    }
+
+    state.tournamentDetailUnlockBusy = false
+
+    if (!result.ok) {
+      state.tournamentDetailUnlockErrorText = result.message
+      render()
+      return
+    }
+
+    state.tournamentDetail = result.tournament
+    state.tournamentDetailRequiresPassword = false
+    state.tournamentDetailUnlockErrorText = null
+    state.tournamentDetailPasswordDraft = ''
     render()
   }
 
@@ -5838,6 +6134,7 @@ export function createLobbyFlowController(
     'guest-contact-messages': '/admin/guest-contact',
     'admin-visitors': '/admin/visitors',
     'admin-payments': '/admin/payments',
+    tournaments: '/tournaments',
     friends: '/friends',
     chat: '/chat',
     terms: '/terms',
@@ -5861,6 +6158,7 @@ export function createLobbyFlowController(
     '/admin/guest-contact': 'guest-contact-messages',
     '/admin/visitors': 'admin-visitors',
     '/admin/payments': 'admin-payments',
+    '/tournaments': 'tournaments',
     '/friends': 'friends',
     '/chat': 'chat',
     '/terms': 'terms',
@@ -5901,6 +6199,7 @@ export function createLobbyFlowController(
     if (document.getElementById('pwa-landing-overlay') !== null) return
     // Dynamic screens manage their own URL via pushState — skip syncUrlPath for them
     if (state.currentScreen === 'admin-payment-detail') return
+    if (state.currentScreen === 'tournament-detail') return
     const path = SCREEN_TO_PATH[state.currentScreen] ?? '/lobby'
     if (path !== window.location.pathname) {
       history.pushState(null, '', path)
@@ -5913,6 +6212,13 @@ export function createLobbyFlowController(
     const detailMatch = /^\/admin\/payments\/([^/]+)$/.exec(path)
     if (detailMatch) {
       showAdminPaymentDetailPanel(decodeURIComponent(detailMatch[1] ?? ''))
+      return
+    }
+
+    // Dynamic route: /tournaments/:tournamentId
+    const tournamentDetailMatch = /^\/tournaments\/([^/]+)$/.exec(path)
+    if (tournamentDetailMatch) {
+      showTournamentDetail(decodeURIComponent(tournamentDetailMatch[1] ?? ''))
       return
     }
 
@@ -5941,6 +6247,7 @@ export function createLobbyFlowController(
         showAdminPaymentsPanel(_qs.get('period') ?? undefined)
         break
       }
+      case 'tournaments': void showTournamentsList(); break
       case 'friends': void showFriendsDirectory(); break
       case 'chat': void showChatPanel(); break
       case 'terms': showPublicLegalPage('terms'); break
@@ -7577,7 +7884,7 @@ export function createLobbyFlowController(
     navigateInitialPath: () => {
       _navigationReady = true
       applyRouteSeo(_loadPath || '/lobby')
-      const isKnownPath = !!PATH_TO_SCREEN[_loadPath] || /^\/admin\/payments\/[^/]+$/.test(_loadPath)
+      const isKnownPath = !!PATH_TO_SCREEN[_loadPath] || /^\/admin\/payments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+$/.test(_loadPath)
       if (!_loadPath || !isKnownPath) return
       if (state.isConnected) {
         navigateFromPath(_loadPath)

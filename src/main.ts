@@ -65,6 +65,9 @@ import {
   type VisitorListType,
   type VisitorDeviceFilter,
   type VisitorOsFilter,
+  type TournamentSummarySnapshot,
+  type TournamentDetailSnapshot,
+  type TournamentCreateInput,
 } from './app/network/createGameServerClient'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
@@ -3185,6 +3188,121 @@ async function deleteAdminMatchRoom(
   }
 }
 
+async function loadTournaments(
+  params: { mine: boolean; page: number },
+): Promise<
+  | { ok: true; tournaments: TournamentSummarySnapshot[]; page: number; limit: number; totalCount: number }
+  | { ok: false; message: string }
+> {
+  try {
+    const qs = new URLSearchParams()
+    if (params.mine) qs.set('mine', 'true')
+    qs.set('page', String(params.page))
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments?${qs.toString()}`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as {
+      ok: boolean
+      message?: string
+      tournaments?: TournamentSummarySnapshot[]
+      page?: number
+      limit?: number
+      totalCount?: number
+    }
+    if (!response.ok || !data.ok || !Array.isArray(data.tournaments)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на турнирите.' }
+    }
+    return {
+      ok: true,
+      tournaments: data.tournaments,
+      page: data.page ?? 1,
+      limit: data.limit ?? 20,
+      totalCount: data.totalCount ?? data.tournaments.length,
+    }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function createTournamentRequest(
+  input: TournamentCreateInput,
+): Promise<
+  | { ok: true; tournament: TournamentSummarySnapshot }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    const data = (await response.json()) as { ok: boolean; message?: string; tournament?: TournamentSummarySnapshot }
+    if (!response.ok || !data.ok || !data.tournament) {
+      return { ok: false, message: data.message ?? 'Турнирът не беше създаден.' }
+    }
+    return { ok: true, tournament: data.tournament }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadTournamentDetail(
+  tournamentId: string,
+): Promise<
+  | { ok: true; tournament: TournamentDetailSnapshot }
+  | { ok: false; message: string; requiresPassword?: boolean }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as {
+      ok: boolean
+      message?: string
+      requiresPassword?: boolean
+      tournament?: TournamentDetailSnapshot
+    }
+    if (!response.ok || !data.ok || !data.tournament) {
+      return { ok: false, message: data.message ?? 'Турнирът не е намерен.', requiresPassword: data.requiresPassword }
+    }
+    return { ok: true, tournament: data.tournament }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function unlockTournamentDetail(
+  tournamentId: string,
+  password: string,
+): Promise<
+  | { ok: true; tournament: TournamentDetailSnapshot }
+  | { ok: false; message: string; requiresPassword?: boolean }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    })
+    const data = (await response.json()) as {
+      ok: boolean
+      message?: string
+      requiresPassword?: boolean
+      tournament?: TournamentDetailSnapshot
+    }
+    if (!response.ok || !data.ok || !data.tournament) {
+      return { ok: false, message: data.message ?? 'Грешна парола.', requiresPassword: data.requiresPassword }
+    }
+    return { ok: true, tournament: data.tournament }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 lobby = createLobbyFlowController({
   root: rootElement,
   suppressRendering: _isResetPasswordPath,
@@ -3397,6 +3515,10 @@ lobby = createLobbyFlowController({
   onAdminVisitorSourcesLoad: (params) => loadAdminVisitorSources(params),
   onAdminPaymentsLoad: (params) => loadAdminPayments(params),
   onAdminPaymentDetailLoad: (purchaseId) => loadAdminPaymentDetail(purchaseId),
+  onTournamentsLoad: (params) => loadTournaments(params),
+  onTournamentCreate: (input) => createTournamentRequest(input),
+  onTournamentDetailLoad: (tournamentId) => loadTournamentDetail(tournamentId),
+  onTournamentUnlock: (tournamentId, password) => unlockTournamentDetail(tournamentId, password),
   onNotifFriendRequestClick: (friendshipId) => {
     const req = lobby?.getPendingFriendRequest(friendshipId)
     if (!req) return
@@ -3981,6 +4103,7 @@ const _VALID_PATHS = new Set([
   '/lobby',
   '/players',
   '/ranking',
+  '/tournaments',
   '/shop',
   '/friends',
   '/chat',

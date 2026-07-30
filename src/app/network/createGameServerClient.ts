@@ -51,6 +51,68 @@ export type PlayerPublicProfileSnapshot = {
   isBlockedByMe: boolean | null
 }
 
+export type TournamentStatus =
+  | 'open'
+  | 'starting'
+  | 'semifinal_in_progress'
+  | 'final_in_progress'
+  | 'finished'
+  | 'cancelled'
+  | 'admin_cancelled'
+  | 'auto_cancelled'
+  | 'failed'
+
+export type TournamentVisibility = 'public' | 'password'
+export type TournamentStartMode = 'fill' | 'scheduled'
+
+export type TournamentCreatorSnapshot = {
+  profileId: string | null
+  displayName: string
+  avatarUrl: string | null
+}
+
+export type TournamentPrizePreview = {
+  totalEntryFees: number
+  systemFee: number
+  prizePool: number
+  firstTeamPrize: number
+  secondTeamPrize: number
+}
+
+export type TournamentSummarySnapshot = {
+  tournamentId: string
+  name: string
+  creator: TournamentCreatorSnapshot
+  visibility: TournamentVisibility
+  requiresPassword: boolean
+  status: TournamentStatus
+  statusLabel: string
+  entryFee: number
+  playerCapacity: number
+  confirmedEntriesCount: number
+  completedTeamsCount: number
+  startMode: TournamentStartMode
+  scheduledStartAt: string | null
+  createdAt: string
+  prizePreview: TournamentPrizePreview
+  isMine: boolean
+}
+
+export type TournamentDetailSnapshot = TournamentSummarySnapshot & {
+  cancelReason: string | null
+  startedAt: string | null
+  finishedAt: string | null
+}
+
+export type TournamentCreateInput = {
+  name: string
+  entryFee: number
+  visibility: TournamentVisibility
+  password?: string
+  startMode: TournamentStartMode
+  scheduledStartAt?: string
+}
+
 export type FriendshipStatus = 'pending' | 'accepted'
 export type FriendshipDirection = 'incoming' | 'outgoing' | 'accepted'
 

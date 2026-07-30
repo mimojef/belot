@@ -242,9 +242,11 @@ try {
   const profileA = randomUUID()
   const profileB = randomUUID()
   const profileC = randomUUID()
+  const profileD = randomUUID()
   insertTestProfile(db2, profileA, 'Test Player A')
   insertTestProfile(db2, profileB, 'Test Player B')
   insertTestProfile(db2, profileC, 'Test Player C')
+  insertTestProfile(db2, profileD, 'Test Player D')
 
   const insertTournamentStatement = db2.prepare(`
     INSERT INTO tournaments (
@@ -265,6 +267,9 @@ try {
   }
 
   // [7] Валиден community/password/scheduled турнир.
+  // Различен creator от [6] — idx_tournaments_one_active_per_creator (нов
+  // partial UNIQUE index) позволява само 1 активен ('open'/...) турнир на
+  // profile; profileA вече има активен турнир от теста по-горе.
   {
     const id = randomUUID()
     try {
@@ -272,7 +277,7 @@ try {
         id,
         'community',
         'Турнир 2',
-        profileA,
+        profileB,
         'password',
         'fake-hash-123',
         20000,
@@ -364,13 +369,17 @@ try {
   db2.close()
   const store: TournamentStore = await createTournamentStore(dbPath)
 
-  const tournament = store.createTournament({
+  // profileD (не profileA/profileB) — и двата вече имат активен турнир от
+  // constraint тестовете по-горе (idx_tournaments_one_active_per_creator).
+  const createResult = store.createTournament({
     name: 'Store Турнир',
-    creatorProfileId: profileA,
+    creatorProfileId: profileD,
     visibility: 'public',
     entryFee: 20000,
     startMode: 'fill',
   })
+  if (!createResult.ok) throw new Error('Setup failure: createTournament() failed unexpectedly')
+  const tournament = createResult.tournament
 
   // [13] Duplicate tournament entry за същия profile → отхвърлен.
   store.createEntry({ tournamentId: tournament.tournamentId, profileId: profileB, joinedAs: 'solo' })
@@ -524,7 +533,7 @@ try {
       fetched !== null &&
         fetched.tournamentId === tournament.tournamentId &&
         fetched.name === 'Store Турнир' &&
-        fetched.creatorProfileId === profileA &&
+        fetched.creatorProfileId === profileD &&
         fetched.visibility === 'public' &&
         fetched.entryFee === 20000 &&
         fetched.startMode === 'fill' &&
@@ -532,9 +541,9 @@ try {
         typeof fetched.createdAt === 'string',
     )
 
-    const listed = store.listTournaments({ status: 'open' })
+    const listed = store.listTournaments({ statuses: ['open'] })
     check(
-      '[22b] listTournaments({status}) връща записания турнир',
+      '[22b] listTournaments({statuses}) връща записания турнир',
       listed.some((t) => t.tournamentId === tournament.tournamentId),
     )
 

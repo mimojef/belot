@@ -41,10 +41,15 @@ export type CreateTournamentInput = {
 }
 
 export type ListTournamentsFilter = {
-  status?: TournamentStatus
+  statuses?: TournamentStatus[]
+  creatorProfileId?: ProfileId
   limit?: number
   offset?: number
 }
+
+export type CreateTournamentResult =
+  | { ok: true; tournament: TournamentRecord }
+  | { ok: false; reason: 'active_tournament_limit' }
 
 export type CreateTournamentTeamInput = {
   tournamentId: TournamentId
@@ -92,9 +97,10 @@ export type AppendTournamentEventInput = {
 }
 
 export type TournamentStore = {
-  createTournament: (input: CreateTournamentInput) => TournamentRecord
+  createTournament: (input: CreateTournamentInput) => CreateTournamentResult
   getTournamentById: (tournamentId: TournamentId) => TournamentRecord | null
   listTournaments: (filter?: ListTournamentsFilter) => TournamentRecord[]
+  countTournaments: (filter?: Pick<ListTournamentsFilter, 'statuses' | 'creatorProfileId'>) => number
   updateTournamentStatus: (
     tournamentId: TournamentId,
     expectedStatus: TournamentStatus,
@@ -362,27 +368,6 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
     LIMIT 1;
   `)
 
-  const selectTournamentsStatement = database.prepare(`
-    SELECT
-      tournament_id, kind, name, creator_profile_id, visibility, password_hash,
-      entry_fee, player_capacity, start_mode, scheduled_start_at, status,
-      cancel_reason, created_at, updated_at, started_at, finished_at
-    FROM tournaments
-    ORDER BY created_at DESC
-    LIMIT ? OFFSET ?;
-  `)
-
-  const selectTournamentsByStatusStatement = database.prepare(`
-    SELECT
-      tournament_id, kind, name, creator_profile_id, visibility, password_hash,
-      entry_fee, player_capacity, start_mode, scheduled_start_at, status,
-      cancel_reason, created_at, updated_at, started_at, finished_at
-    FROM tournaments
-    WHERE status = ?
-    ORDER BY created_at DESC
-    LIMIT ? OFFSET ?;
-  `)
-
   const updateTournamentStatusStatement = database.prepare(`
     UPDATE tournaments
     SET status = ?, updated_at = CURRENT_TIMESTAMP
@@ -486,22 +471,31 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
   `)
 
   return {
-    createTournament(input: CreateTournamentInput): TournamentRecord {
+    createTournament(input: CreateTournamentInput): CreateTournamentResult {
       const tournamentId = randomUUID()
-      insertTournamentStatement.run(
-        tournamentId,
-        input.kind ?? 'community',
-        input.name,
-        input.creatorProfileId,
-        input.visibility,
-        input.passwordHash ?? null,
-        input.entryFee,
-        input.playerCapacity ?? 8,
-        input.startMode,
-        input.scheduledStartAt ?? null,
-      )
+      try {
+        insertTournamentStatement.run(
+          tournamentId,
+          input.kind ?? 'community',
+          input.name,
+          input.creatorProfileId,
+          input.visibility,
+          input.passwordHash ?? null,
+          input.entryFee,
+          input.playerCapacity ?? 8,
+          input.startMode,
+          input.scheduledStartAt ?? null,
+        )
+      } catch {
+        // Единственият UNIQUE constraint, който INSERT в tournaments може да
+        // удари, е idx_tournaments_one_active_per_creator (partial index,
+        // виж migration 20260730_003) — DB-ниво защита срещу race condition
+        // при две едновременни POST заявки от същия creator (огледално на
+        // insertPartnerRatingStatement pattern-а в playerProgressStore.ts).
+        return { ok: false, reason: 'active_tournament_limit' }
+      }
       const record = selectTournamentByIdStatement.get(tournamentId) as TournamentRow
-      return toTournamentRecord(record)
+      return { ok: true, tournament: toTournamentRecord(record) }
     },
 
     getTournamentById(tournamentId: TournamentId): TournamentRecord | null {
@@ -512,10 +506,52 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
     listTournaments(filter: ListTournamentsFilter = {}): TournamentRecord[] {
       const limit = filter.limit ?? 50
       const offset = filter.offset ?? 0
-      const rows = filter.status
-        ? (selectTournamentsByStatusStatement.all(filter.status, limit, offset) as TournamentRow[])
-        : (selectTournamentsStatement.all(limit, offset) as TournamentRow[])
+      const conditions: string[] = []
+      const params: (string | number)[] = []
+
+      if (filter.statuses && filter.statuses.length > 0) {
+        conditions.push(`status IN (${filter.statuses.map(() => '?').join(', ')})`)
+        params.push(...filter.statuses)
+      }
+      if (filter.creatorProfileId) {
+        conditions.push('creator_profile_id = ?')
+        params.push(filter.creatorProfileId)
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+      const rows = database
+        .prepare(
+          `SELECT
+             tournament_id, kind, name, creator_profile_id, visibility, password_hash,
+             entry_fee, player_capacity, start_mode, scheduled_start_at, status,
+             cancel_reason, created_at, updated_at, started_at, finished_at
+           FROM tournaments
+           ${whereClause}
+           ORDER BY created_at DESC
+           LIMIT ? OFFSET ?;`,
+        )
+        .all(...params, limit, offset) as TournamentRow[]
       return rows.map(toTournamentRecord)
+    },
+
+    countTournaments(filter: Pick<ListTournamentsFilter, 'statuses' | 'creatorProfileId'> = {}): number {
+      const conditions: string[] = []
+      const params: (string | number)[] = []
+
+      if (filter.statuses && filter.statuses.length > 0) {
+        conditions.push(`status IN (${filter.statuses.map(() => '?').join(', ')})`)
+        params.push(...filter.statuses)
+      }
+      if (filter.creatorProfileId) {
+        conditions.push('creator_profile_id = ?')
+        params.push(filter.creatorProfileId)
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+      const row = database
+        .prepare(`SELECT COUNT(*) as count FROM tournaments ${whereClause};`)
+        .get(...params) as { count: number }
+      return row.count
     },
 
     updateTournamentStatus(

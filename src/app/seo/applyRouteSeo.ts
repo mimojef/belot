@@ -31,6 +31,12 @@ const ROUTE_SEO: Record<string, RouteSeoConfig> = {
       'Виж класацията на играчите в Pika.bg по баланс, ранг, победи и партньорска оценка.',
     robots: 'index, follow',
   },
+  '/tournaments': {
+    title: 'Турнири по белот | Pika.bg',
+    description:
+      'Разгледай активните турнири по белот в Pika.bg, създай собствен турнир и се състезавай за наградния фонд.',
+    robots: 'index, follow',
+  },
   '/rules': {
     title: 'Правила на белота – карти, анонси и точкуване | Pika.bg',
     description:

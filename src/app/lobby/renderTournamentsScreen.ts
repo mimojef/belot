@@ -1,0 +1,412 @@
+import type {
+  TournamentCreateInput,
+  TournamentDetailSnapshot,
+  TournamentSummarySnapshot,
+  TournamentVisibility,
+  TournamentStartMode,
+} from '../network/createGameServerClient'
+import type { LobbyScreenState } from './renderLobbyScreen'
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+function formatAmount(value: number): string {
+  return new Intl.NumberFormat('bg-BG').format(value)
+}
+
+function fmtLocalDateTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString('bg-BG', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return iso
+  }
+}
+
+// ── Позволени входни стойности (огледално на server ALLOWED_TOURNAMENT_ENTRY_FEES) ──
+export const TOURNAMENT_ENTRY_FEE_OPTIONS = [5000, 10000, 20000, 50000, 100000] as const
+
+// UTC ISO → стойност за <input type="datetime-local"> (local timezone, без 'Z').
+function isoToDatetimeLocalValue(iso: string): string {
+  const d = new Date(iso)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function computePrizePreview(entryFee: number, playerCapacity = 8): {
+  totalEntryFees: number
+  systemFee: number
+  prizePool: number
+  firstTeamPrize: number
+  secondTeamPrize: number
+} {
+  const totalEntryFees = entryFee * playerCapacity
+  const systemFee = Math.round(totalEntryFees * 0.1)
+  const prizePool = totalEntryFees - systemFee
+  const firstTeamPrize = Math.round(prizePool * 0.7)
+  const secondTeamPrize = prizePool - firstTeamPrize
+  return { totalEntryFees, systemFee, prizePool, firstTeamPrize, secondTeamPrize }
+}
+
+function startModeLabel(t: TournamentSummarySnapshot): string {
+  if (t.startMode === 'fill') return 'При запълване'
+  if (t.scheduledStartAt) return fmtLocalDateTime(t.scheduledStartAt)
+  return 'Насрочен'
+}
+
+function statusBadgeColor(status: TournamentSummarySnapshot['status']): string {
+  if (status === 'open') return '#22c55e'
+  if (status === 'starting' || status === 'semifinal_in_progress' || status === 'final_in_progress') return '#d4a520'
+  if (status === 'finished') return 'rgba(255,255,255,0.5)'
+  return '#f87171'
+}
+
+// ─── Списък с турнири ────────────────────────────────────────────────────
+
+function renderTournamentCard(t: TournamentSummarySnapshot): string {
+  const avatarLetter = t.creator.displayName.slice(0, 1).toUpperCase()
+  return `
+    <article data-tournament-card="${escapeHtml(t.tournamentId)}" style="
+      border:1px solid rgba(212,165,32,0.32);border-radius:8px;
+      background:linear-gradient(180deg,#141414 0%,#050505 100%);
+      padding:14px;display:flex;flex-direction:column;gap:10px;cursor:pointer;min-width:0;
+    ">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <div style="font-size:15px;font-weight:900;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(t.name)}</div>
+        <span style="flex-shrink:0;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;color:${statusBadgeColor(t.status)};border:1px solid ${statusBadgeColor(t.status)}55;border-radius:999px;padding:3px 9px;">${escapeHtml(t.statusLabel)}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <div style="width:26px;height:26px;border-radius:999px;background:#101010;border:1px solid rgba(212,165,32,0.4);overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:12px;font-weight:900;flex-shrink:0;">
+          ${t.creator.avatarUrl ? `<img src="${escapeHtml(t.creator.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : avatarLetter}
+        </div>
+        <span style="font-size:12px;color:rgba(255,255,255,0.6);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(t.creator.displayName)}${t.isMine ? ' (ти)' : ''}</span>
+        ${t.requiresPassword ? '<span title="С парола" style="margin-left:auto;flex-shrink:0;font-size:14px;">🔒</span>' : ''}
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;font-size:11px;">
+        <span style="background:rgba(212,165,32,0.1);border:1px solid rgba(212,165,32,0.3);border-radius:6px;padding:3px 8px;color:#d4a520;font-weight:800;">${formatAmount(t.entryFee)} вход</span>
+        <span style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:3px 8px;color:rgba(255,255,255,0.7);font-weight:800;">${t.confirmedEntriesCount} / ${t.playerCapacity} играчи</span>
+        <span style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:3px 8px;color:rgba(255,255,255,0.7);font-weight:800;">${t.completedTeamsCount} / 4 отбора</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:rgba(255,255,255,0.45);">
+        <span>${escapeHtml(startModeLabel(t))}</span>
+        <span style="color:#d4a520;font-weight:800;">Награден фонд: ${formatAmount(t.prizePreview.prizePool)}</span>
+      </div>
+      <button type="button" disabled style="
+        margin-top:2px;height:34px;border-radius:6px;border:1px solid rgba(255,255,255,0.12);
+        background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.35);font-size:12px;font-weight:800;
+        cursor:not-allowed;
+      ">Записването ще бъде достъпно скоро</button>
+    </article>
+  `
+}
+
+export function renderTournamentsScreen(state: LobbyScreenState): string {
+  const isMineFilter = state.tournamentsFilter === 'mine'
+
+  const header = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
+      <h2 style="font-size:22px;font-weight:900;color:#ffffff;margin:0;">Турнири</h2>
+      <button type="button" data-tournament-create-open="1" style="
+        height:40px;padding:0 18px;border:0;border-radius:8px;
+        background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;
+        font-size:13px;font-weight:900;cursor:pointer;
+      ">+ Създай турнир</button>
+    </div>
+  `
+
+  const filters = state.profile.profileId !== null ? `
+    <div style="display:flex;gap:8px;margin-bottom:16px;">
+      <button type="button" data-tournament-filter="all" style="
+        height:32px;padding:0 14px;border-radius:999px;cursor:pointer;font-size:12px;font-weight:800;
+        border:1px solid ${!isMineFilter ? '#d4a520' : 'rgba(255,255,255,0.16)'};
+        background:${!isMineFilter ? 'rgba(212,165,32,0.12)' : 'transparent'};
+        color:${!isMineFilter ? '#d4a520' : 'rgba(255,255,255,0.6)'};
+      ">Всички</button>
+      <button type="button" data-tournament-filter="mine" style="
+        height:32px;padding:0 14px;border-radius:999px;cursor:pointer;font-size:12px;font-weight:800;
+        border:1px solid ${isMineFilter ? '#d4a520' : 'rgba(255,255,255,0.16)'};
+        background:${isMineFilter ? 'rgba(212,165,32,0.12)' : 'transparent'};
+        color:${isMineFilter ? '#d4a520' : 'rgba(255,255,255,0.6)'};
+      ">Моите</button>
+    </div>
+  ` : ''
+
+  let body: string
+  if (state.tournamentsLoading) {
+    body = `<div style="min-height:320px;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:16px;font-weight:800;">Зареждане...</div>`
+  } else if (state.tournamentsErrorText) {
+    body = `<div style="min-height:320px;display:flex;align-items:center;justify-content:center;color:#fecaca;font-size:14px;font-weight:800;text-align:center;padding:20px;">${escapeHtml(state.tournamentsErrorText)}</div>`
+  } else if (state.tournaments.length === 0) {
+    body = `
+      <div style="min-height:320px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:20px;">
+        <div style="font-size:17px;font-weight:900;color:#ffffff;">Все още няма активни турнири.</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.55);max-width:360px;">Създай турнир, покани приятели и се състезавайте за наградния фонд.</div>
+        <button type="button" data-tournament-create-open="1" style="
+          margin-top:6px;height:40px;padding:0 20px;border:0;border-radius:8px;
+          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;
+          font-size:13px;font-weight:900;cursor:pointer;
+        ">Създай турнир</button>
+      </div>
+    `
+  } else {
+    body = `
+      <div class="tournaments-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;">
+        ${state.tournaments.map(renderTournamentCard).join('')}
+      </div>
+    `
+  }
+
+  return `
+    <section style="padding:0 4px;">
+      ${header}
+      ${filters}
+      ${body}
+      ${state.tournamentCreatePopupOpen ? renderTournamentCreatePopup(state) : ''}
+    </section>
+  `
+}
+
+// ─── Popup "Създай турнир" ───────────────────────────────────────────────
+
+function renderTournamentCreatePopup(state: LobbyScreenState): string {
+  const defaultEntryFee = TOURNAMENT_ENTRY_FEE_OPTIONS[0]
+  const preview = computePrizePreview(defaultEntryFee)
+  const nowPlus30Min = new Date(Date.now() + 30 * 60 * 1000).toISOString()
+  const defaultScheduled = isoToDatetimeLocalValue(nowPlus30Min)
+  const defaultName = `Турнирът на ${state.profile.displayName || state.displayName || 'Играч'}`
+
+  return `
+    <div data-tournament-create-backdrop="1" style="position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:16px;overflow-y:auto;">
+      <div style="background:#111118;border:1px solid rgba(212,165,32,0.4);border-radius:16px;width:440px;max-width:100%;padding:24px;box-shadow:0 8px 40px rgba(0,0,0,0.7);max-height:92vh;overflow-y:auto;box-sizing:border-box;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
+          <div style="font-size:17px;font-weight:900;color:#d4a520;">Създай турнир</div>
+          <button type="button" data-tournament-create-close="1" style="width:30px;height:30px;border:none;background:rgba(255,255,255,0.08);border-radius:7px;color:rgba(255,255,255,0.6);font-size:18px;font-weight:700;cursor:pointer;">×</button>
+        </div>
+
+        ${state.tournamentCreateErrorText ? `
+          <div style="margin-bottom:14px;padding:10px 12px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:13px;font-weight:700;">${escapeHtml(state.tournamentCreateErrorText)}</div>
+        ` : ''}
+
+        <form data-tournament-create-form="1" style="display:flex;flex-direction:column;gap:14px;">
+          <div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;">Име на турнира</div>
+            <input type="text" name="name" value="${escapeHtml(defaultName)}" maxlength="40" style="width:100%;box-sizing:border-box;padding:10px 12px;background:#1a1a24;border:1px solid rgba(255,255,255,0.18);border-radius:8px;color:#fff;font-size:14px;">
+          </div>
+
+          <div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;">Вход на играч</div>
+            <select name="entryFee" data-tournament-create-entryfee="1" style="width:100%;box-sizing:border-box;padding:10px 12px;background:#1a1a24;border:1px solid rgba(255,255,255,0.18);border-radius:8px;color:#fff;font-size:14px;color-scheme:dark;">
+              ${TOURNAMENT_ENTRY_FEE_OPTIONS.map((fee) => `<option value="${fee}">${formatAmount(fee)} жълтици</option>`).join('')}
+            </select>
+          </div>
+
+          <div data-tournament-create-preview="1" style="background:rgba(212,165,32,0.06);border:1px solid rgba(212,165,32,0.24);border-radius:8px;padding:12px;font-size:12px;color:rgba(255,255,255,0.75);display:grid;gap:4px;">
+            <div style="display:flex;justify-content:space-between;"><span>Участници</span><span style="font-weight:800;">8</span></div>
+            <div style="display:flex;justify-content:space-between;" data-preview-total><span>Общо входове</span><span style="font-weight:800;">${formatAmount(preview.totalEntryFees)}</span></div>
+            <div style="display:flex;justify-content:space-between;" data-preview-fee><span>Системна такса (10%)</span><span style="font-weight:800;">${formatAmount(preview.systemFee)}</span></div>
+            <div style="display:flex;justify-content:space-between;color:#d4a520;" data-preview-pool><span>Награден фонд</span><span style="font-weight:900;">${formatAmount(preview.prizePool)}</span></div>
+            <div style="display:flex;justify-content:space-between;" data-preview-first><span>Първи отбор (70%)</span><span style="font-weight:800;">${formatAmount(preview.firstTeamPrize)}</span></div>
+            <div style="display:flex;justify-content:space-between;" data-preview-second><span>Втори отбор (30%)</span><span style="font-weight:800;">${formatAmount(preview.secondTeamPrize)}</span></div>
+          </div>
+
+          <div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;">Видимост</div>
+            <div style="display:flex;gap:8px;">
+              <label style="flex:1;display:flex;align-items:center;justify-content:center;gap:6px;height:38px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);cursor:pointer;font-size:13px;color:rgba(255,255,255,0.8);">
+                <input type="radio" name="visibility" value="public" checked style="accent-color:#d4a520;">
+                Публичен
+              </label>
+              <label style="flex:1;display:flex;align-items:center;justify-content:center;gap:6px;height:38px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);cursor:pointer;font-size:13px;color:rgba(255,255,255,0.8);">
+                <input type="radio" name="visibility" value="password" style="accent-color:#d4a520;">
+                С парола
+              </label>
+            </div>
+          </div>
+
+          <div data-tournament-create-password-field="1" style="display:none;">
+            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;">Парола (4-32 знака)</div>
+            <input type="password" name="password" minlength="4" maxlength="32" style="width:100%;box-sizing:border-box;padding:10px 12px;background:#1a1a24;border:1px solid rgba(255,255,255,0.18);border-radius:8px;color:#fff;font-size:14px;">
+          </div>
+
+          <div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;">Начало</div>
+            <div style="display:flex;gap:8px;">
+              <label style="flex:1;display:flex;align-items:center;justify-content:center;gap:6px;height:38px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);cursor:pointer;font-size:13px;color:rgba(255,255,255,0.8);">
+                <input type="radio" name="startMode" value="fill" checked style="accent-color:#d4a520;">
+                При запълване
+              </label>
+              <label style="flex:1;display:flex;align-items:center;justify-content:center;gap:6px;height:38px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);cursor:pointer;font-size:13px;color:rgba(255,255,255,0.8);">
+                <input type="radio" name="startMode" value="scheduled" style="accent-color:#d4a520;">
+                Насрочен старт
+              </label>
+            </div>
+          </div>
+
+          <div data-tournament-create-scheduled-field="1" style="display:none;">
+            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;">Дата и час (местно време)</div>
+            <input type="datetime-local" name="scheduledStartAt" value="${defaultScheduled}" style="width:100%;box-sizing:border-box;padding:10px 12px;background:#1a1a24;border:1px solid rgba(255,255,255,0.18);border-radius:8px;color:#fff;font-size:14px;color-scheme:dark;">
+            <div style="margin-top:4px;font-size:11px;color:rgba(255,255,255,0.4);">Между 30 минути и 7 дни от сега.</div>
+          </div>
+
+          <button type="submit" ${state.tournamentCreateBusy ? 'disabled' : ''} style="
+            margin-top:4px;height:42px;border:0;border-radius:8px;
+            background:${state.tournamentCreateBusy ? 'rgba(212,165,32,0.35)' : 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)'};
+            color:#080808;font-size:14px;font-weight:900;cursor:${state.tournamentCreateBusy ? 'default' : 'pointer'};
+          ">${state.tournamentCreateBusy ? 'Създаване...' : 'Създай турнир'}</button>
+        </form>
+      </div>
+    </div>
+  `
+}
+
+// ─── Детайли на турнир ────────────────────────────────────────────────────
+
+export function renderTournamentDetailScreen(state: LobbyScreenState): string {
+  if (state.tournamentDetailLoading) {
+    return `<section style="padding:0 4px;"><div style="min-height:320px;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:16px;font-weight:800;">Зареждане...</div></section>`
+  }
+
+  if (state.tournamentDetailRequiresPassword) {
+    return `
+      <section style="padding:0 4px;max-width:420px;margin:0 auto;">
+        <div style="border:1px solid rgba(212,165,32,0.32);border-radius:12px;background:#0d0d0d;padding:28px;text-align:center;display:flex;flex-direction:column;gap:14px;align-items:center;">
+          <div style="font-size:30px;">🔒</div>
+          <div style="font-size:15px;font-weight:800;color:#ffffff;">Този турнир е защитен с парола.</div>
+          ${state.tournamentDetailUnlockErrorText ? `
+            <div style="width:100%;padding:8px 10px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:12px;font-weight:700;box-sizing:border-box;">${escapeHtml(state.tournamentDetailUnlockErrorText)}</div>
+          ` : ''}
+          <input
+            type="password"
+            data-tournament-unlock-password="1"
+            value="${escapeHtml(state.tournamentDetailPasswordDraft)}"
+            placeholder="Парола"
+            style="width:100%;box-sizing:border-box;padding:10px 12px;background:#1a1a24;border:1px solid rgba(255,255,255,0.18);border-radius:8px;color:#fff;font-size:14px;"
+          >
+          <button type="button" data-tournament-unlock-submit="1" ${state.tournamentDetailUnlockBusy ? 'disabled' : ''} style="
+            width:100%;height:40px;border:0;border-radius:8px;
+            background:${state.tournamentDetailUnlockBusy ? 'rgba(212,165,32,0.35)' : 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)'};
+            color:#080808;font-size:14px;font-weight:900;cursor:${state.tournamentDetailUnlockBusy ? 'default' : 'pointer'};
+          ">${state.tournamentDetailUnlockBusy ? 'Проверка...' : 'Отвори турнира'}</button>
+        </div>
+      </section>
+    `
+  }
+
+  if (state.tournamentDetailErrorText) {
+    return `<section style="padding:0 4px;"><div style="min-height:320px;display:flex;align-items:center;justify-content:center;color:#fecaca;font-size:14px;font-weight:800;text-align:center;padding:20px;">${escapeHtml(state.tournamentDetailErrorText)}</div></section>`
+  }
+
+  const t: TournamentDetailSnapshot | null = state.tournamentDetail
+  if (t === null) {
+    return `<section style="padding:0 4px;"><div style="min-height:320px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.5);font-size:14px;">Турнирът не е намерен.</div></section>`
+  }
+
+  const avatarLetter = t.creator.displayName.slice(0, 1).toUpperCase()
+
+  return `
+    <section style="padding:0 4px;max-width:720px;margin:0 auto;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap;">
+        <h2 style="font-size:22px;font-weight:900;color:#ffffff;margin:0;">${escapeHtml(t.name)}</h2>
+        <span style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;color:${statusBadgeColor(t.status)};border:1px solid ${statusBadgeColor(t.status)}55;border-radius:999px;padding:3px 10px;">${escapeHtml(t.statusLabel)}</span>
+        ${t.requiresPassword ? '<span title="С парола" style="font-size:15px;">🔒</span>' : ''}
+      </div>
+
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:18px;">
+        <div style="width:28px;height:28px;border-radius:999px;background:#101010;border:1px solid rgba(212,165,32,0.4);overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:13px;font-weight:900;flex-shrink:0;">
+          ${t.creator.avatarUrl ? `<img src="${escapeHtml(t.creator.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : avatarLetter}
+        </div>
+        <span style="font-size:13px;color:rgba(255,255,255,0.65);">Създател: ${escapeHtml(t.creator.displayName)}${t.isMine ? ' (ти)' : ''}</span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:20px;">
+        <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:12px 14px;">
+          <div style="font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:4px;">Вход</div>
+          <div style="font-size:18px;font-weight:900;color:#ffffff;">${formatAmount(t.entryFee)}</div>
+        </div>
+        <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:12px 14px;">
+          <div style="font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:4px;">Участници</div>
+          <div style="font-size:18px;font-weight:900;color:#ffffff;">${t.confirmedEntriesCount} / ${t.playerCapacity}</div>
+        </div>
+        <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:12px 14px;">
+          <div style="font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:4px;">Отбори</div>
+          <div style="font-size:18px;font-weight:900;color:#ffffff;">${t.completedTeamsCount} / 4</div>
+        </div>
+        <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:12px 14px;">
+          <div style="font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:4px;">Старт</div>
+          <div style="font-size:13px;font-weight:800;color:#ffffff;">${escapeHtml(startModeLabel(t))}</div>
+        </div>
+      </div>
+
+      <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:16px;margin-bottom:20px;">
+        <div style="font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.45);margin-bottom:12px;">Формат</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;font-size:12px;">
+          <span style="background:rgba(255,255,255,0.06);border-radius:6px;padding:4px 10px;color:rgba(255,255,255,0.75);">8 играчи</span>
+          <span style="background:rgba(255,255,255,0.06);border-radius:6px;padding:4px 10px;color:rgba(255,255,255,0.75);">4 отбора</span>
+          <span style="background:rgba(255,255,255,0.06);border-radius:6px;padding:4px 10px;color:rgba(255,255,255,0.75);">2 полуфинала</span>
+          <span style="background:rgba(255,255,255,0.06);border-radius:6px;padding:4px 10px;color:rgba(255,255,255,0.75);">1 финал</span>
+          <span style="background:rgba(255,255,255,0.06);border-radius:6px;padding:4px 10px;color:rgba(255,255,255,0.75);">Без мач за трето място</span>
+          <span style="background:rgba(255,255,255,0.06);border-radius:6px;padding:4px 10px;color:rgba(255,255,255,0.75);">Игра до 151</span>
+        </div>
+        <div style="font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.45);margin-bottom:10px;">Награден фонд</div>
+        <div style="display:grid;gap:5px;font-size:13px;color:rgba(255,255,255,0.75);">
+          <div style="display:flex;justify-content:space-between;"><span>Единичен вход за целия турнир</span><span style="font-weight:800;">${formatAmount(t.entryFee)}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>Общо входове (при пълен турнир)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.totalEntryFees)}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>Системна такса (10%)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.systemFee)}</span></div>
+          <div style="display:flex;justify-content:space-between;color:#d4a520;"><span>Награден фонд (90%)</span><span style="font-weight:900;">${formatAmount(t.prizePreview.prizePool)}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>Първо място (70%)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.firstTeamPrize)}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>Второ място (30%)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.secondTeamPrize)}</span></div>
+        </div>
+      </div>
+
+      <div style="background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:16px;margin-bottom:14px;">
+        <div style="font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:8px;">Отбори</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.4);font-style:italic;">Все още няма сформирани отбори.</div>
+      </div>
+
+      <div style="background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:16px;margin-bottom:14px;">
+        <div style="font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:8px;">Турнирна схема</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.4);font-style:italic;">Схемата ще се появи, след като турнирът стартира.</div>
+      </div>
+
+      <div style="font-size:11px;color:rgba(255,255,255,0.35);">Създаден: ${fmtLocalDateTime(t.createdAt)}</div>
+    </section>
+  `
+}
+
+// ─── Client-side валидация преди submit (defense-in-depth, сървърът е authoritative) ──
+
+export function extractTournamentCreateInputFromForm(form: HTMLFormElement): TournamentCreateInput | null {
+  const data = new FormData(form)
+  const name = String(data.get('name') ?? '').trim()
+  const entryFee = Number(data.get('entryFee'))
+  const visibility = String(data.get('visibility') ?? 'public') as TournamentVisibility
+  const startMode = String(data.get('startMode') ?? 'fill') as TournamentStartMode
+  const password = String(data.get('password') ?? '')
+  const scheduledStartAtLocal = String(data.get('scheduledStartAt') ?? '')
+
+  if (name.length === 0) return null
+  if (!Number.isFinite(entryFee)) return null
+
+  const input: TournamentCreateInput = { name, entryFee, visibility, startMode }
+  if (visibility === 'password') {
+    input.password = password
+  }
+  if (startMode === 'scheduled' && scheduledStartAtLocal) {
+    const parsed = new Date(scheduledStartAtLocal)
+    if (!Number.isNaN(parsed.getTime())) {
+      input.scheduledStartAt = parsed.toISOString()
+    }
+  }
+  return input
+}

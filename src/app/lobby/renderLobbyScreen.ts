@@ -23,6 +23,8 @@ import type {
   GuestContactMessageListItem,
   SupportMessageSnapshot,
   SupportConversationSnapshot,
+  TournamentDetailSnapshot,
+  TournamentSummarySnapshot,
 } from '../network/createGameServerClient'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, ActiveRoomSnapshot } from '../adminServer/adminServerTypes'
 import { isBotsOnlyActiveRoom, isStaleActiveRoom } from '../adminServer/adminServerTypes'
@@ -46,6 +48,11 @@ import {
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes'
 import { renderAdminPaymentsPanel, attachAdminPaymentsPanelHandlers } from '../adminPayments/renderAdminPaymentsPanel'
 import { renderAdminPaymentDetailPanel, attachAdminPaymentDetailHandlers } from '../adminPayments/renderAdminPaymentDetailPanel'
+import {
+  renderTournamentsScreen,
+  renderTournamentDetailScreen,
+  extractTournamentCreateInputFromForm,
+} from './renderTournamentsScreen'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import { renderLevelLockedStakePopup, attachLevelLockedStakePopupEventListeners, type LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
@@ -114,7 +121,7 @@ export type GuestContactFormInput = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'tournaments' | 'tournament-detail' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -359,6 +366,21 @@ export type LobbyScreenState = {
   adminPaymentDetailLoading: boolean
   adminPaymentDetailPurchase: AdminPaymentDetailRow | null
   adminPaymentDetailErrorText: string | null
+  tournaments: TournamentSummarySnapshot[]
+  tournamentsLoading: boolean
+  tournamentsErrorText: string | null
+  tournamentsFilter: 'all' | 'mine'
+  tournamentCreatePopupOpen: boolean
+  tournamentCreateBusy: boolean
+  tournamentCreateErrorText: string | null
+  tournamentDetailId: string | null
+  tournamentDetailLoading: boolean
+  tournamentDetailErrorText: string | null
+  tournamentDetail: TournamentDetailSnapshot | null
+  tournamentDetailRequiresPassword: boolean
+  tournamentDetailPasswordDraft: string
+  tournamentDetailUnlockBusy: boolean
+  tournamentDetailUnlockErrorText: string | null
 }
 
 export type RenderLobbyScreenOptions = {
@@ -405,6 +427,14 @@ export type RenderLobbyScreenOptions = {
   onShopHistoryToggle: () => void
   onLeaderboardsClick: () => void
   onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
+  onTournamentsClick: () => void
+  onTournamentsFilterChange: (filter: 'all' | 'mine') => void
+  onTournamentCreatePopupOpen: () => void
+  onTournamentCreatePopupClose: () => void
+  onTournamentCreateSubmit: (input: import('../network/createGameServerClient').TournamentCreateInput) => void
+  onTournamentCardClick: (tournamentId: string) => void
+  onTournamentDetailPasswordDraftChange: (value: string) => void
+  onTournamentUnlockSubmit: () => void
   onAdminClick: () => void
   onAdminInfoClick: () => void
   onAdminServerClick: () => void
@@ -1409,6 +1439,7 @@ function renderNav(state: LobbyScreenState): string {
   const friendsActive = activeView === 'friends'
   const chatActive = activeView === 'chat'
   const leaderboardsActive = activeView === 'leaderboards'
+  const tournamentsActive = activeView === 'tournaments' || activeView === 'tournament-detail'
   const shopActive = activeView === 'shop'
   const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'guest-contact-messages'
   const lobbyActive = activeView === 'tables'
@@ -1535,6 +1566,24 @@ function renderNav(state: LobbyScreenState): string {
             <line x1="6" y1="20" x2="6" y2="14"/>
           </svg>
           Класация
+        </a>
+        <a href="/tournaments" data-lobby-nav-tournaments="1" ${tournamentsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+          display:flex; align-items:center; gap:10px;
+          padding:0 18px;
+          background:${tournamentsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+          color:${tournamentsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${tournamentsActive ? '#d4a520' : 'transparent'};
+          text-decoration:none; height:100%;
+        ">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+            <path d="M8 21h8"/>
+            <path d="M12 17v4"/>
+            <path d="M7 4h10v6a5 5 0 0 1-10 0z"/>
+            <path d="M5 4H3v2a4 4 0 0 0 4 4"/>
+            <path d="M19 4h2v2a4 4 0 0 1-4 4"/>
+          </svg>
+          Турнири
         </a>
         <a href="/players" data-lobby-nav-players="1" ${playersActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
           display:flex; align-items:center; gap:10px;
@@ -3071,6 +3120,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
             <button type="button" data-lobby-nav-shop="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('shop', 'Магазин')}</button>
             <button type="button" data-lobby-nav-players="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('players', 'Играчите')}</button>
             <button type="button" data-lobby-nav-leaderboards="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('leaderboards', 'Класация')}</button>
+            <button type="button" data-lobby-nav-tournaments="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('tournaments', 'Турнири')}</button>
             ${state.profile.profileId !== null ? `
               <button type="button" data-lobby-nav-friends="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('friends', `Приятели${(state.friendships?.incomingPending.length ?? 0) > 0 ? ` (${state.friendships?.incomingPending.length ?? 0})` : ''}`)}</button>
               <button type="button" data-lobby-nav-chat="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('chat', `Чат${unreadChatCount > 0 ? ` (${unreadChatCount})` : ''}`)}</button>
@@ -3105,7 +3155,7 @@ function mobileMenuButtonStyle(background = 'rgba(255,255,255,0.055)', color = '
 }
 
 function mobileMenuSvgItemContent(
-  icon: 'admin' | 'blocked' | 'chat' | 'friends' | 'leaderboards' | 'lobby' | 'login' | 'logout' | 'players' | 'shop' | 'support',
+  icon: 'admin' | 'blocked' | 'chat' | 'friends' | 'leaderboards' | 'lobby' | 'login' | 'logout' | 'players' | 'shop' | 'support' | 'tournaments',
   label: string,
 ): string {
   const stroke = icon === 'logout' ? '#fecaca' : '#d4a520'
@@ -3113,6 +3163,8 @@ function mobileMenuSvgItemContent(
     ? '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>'
     : icon === 'admin'
       ? '<path d="M12 3l7 4v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V7l7-4z"/><path d="M9 12l2 2 4-4"/>'
+      : icon === 'tournaments'
+        ? '<path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v6a5 5 0 0 1-10 0z"/><path d="M5 4H3v2a4 4 0 0 0 4 4"/><path d="M19 4h2v2a4 4 0 0 1-4 4"/>'
       : icon === 'blocked'
         ? '<circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>'
       : icon === 'chat'
@@ -3945,6 +3997,10 @@ function renderMobileLobbyScreenContent(
                 },
                 { onBack: () => {} },
               )
+          : state.view === 'tournaments'
+            ? renderTournamentsScreen(state)
+          : state.view === 'tournament-detail'
+            ? renderTournamentDetailScreen(state)
           : state.view === 'friends'
             ? renderMobileFriendsDirectory(state)
           : state.view === 'chat'
@@ -8113,6 +8169,10 @@ export function renderLobbyScreen(
                     },
                     { onBack: () => {} },
                   )
+            : state.view === 'tournaments'
+              ? renderTournamentsScreen(state)
+            : state.view === 'tournament-detail'
+              ? renderTournamentDetailScreen(state)
             : state.view === 'friends'
               ? renderFriendsDirectory(state)
             : state.view === 'chat'
@@ -8524,6 +8584,16 @@ export function renderLobbyScreen(
         if (!shouldHandleSpaLinkClick(e as MouseEvent)) return
         e.preventDefault()
         options.onLeaderboardsClick()
+      })
+    })
+
+  root
+    .querySelectorAll<HTMLElement>('[data-lobby-nav-tournaments="1"]')
+    .forEach((element) => {
+      element.addEventListener('click', (e) => {
+        if (!shouldHandleSpaLinkClick(e as MouseEvent)) return
+        e.preventDefault()
+        options.onTournamentsClick()
       })
     })
 
@@ -10220,6 +10290,90 @@ export function renderLobbyScreen(
       if (id) options.onPrivateRoomJoin(id)
     })
   })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-tournament-create-open="1"]')
+    .forEach((btn) => btn.addEventListener('click', options.onTournamentCreatePopupOpen))
+
+  root.querySelector<HTMLButtonElement>('[data-tournament-create-close="1"]')
+    ?.addEventListener('click', options.onTournamentCreatePopupClose)
+
+  root.querySelector<HTMLElement>('[data-tournament-create-backdrop="1"]')
+    ?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) options.onTournamentCreatePopupClose()
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-tournament-filter]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const filter = btn.dataset.tournamentFilter
+      if (filter === 'all' || filter === 'mine') options.onTournamentsFilterChange(filter)
+    })
+  })
+
+  root.querySelectorAll<HTMLElement>('[data-tournament-card]').forEach((card) => {
+    card.addEventListener('click', () => {
+      const tournamentId = card.dataset.tournamentCard?.trim() ?? ''
+      if (tournamentId) options.onTournamentCardClick(tournamentId)
+    })
+  })
+
+  {
+    const createForm = root.querySelector<HTMLFormElement>('[data-tournament-create-form="1"]')
+    const visibilityRadios = root.querySelectorAll<HTMLInputElement>('[data-tournament-create-form="1"] input[name="visibility"]')
+    const passwordField = root.querySelector<HTMLElement>('[data-tournament-create-password-field="1"]')
+    const startModeRadios = root.querySelectorAll<HTMLInputElement>('[data-tournament-create-form="1"] input[name="startMode"]')
+    const scheduledField = root.querySelector<HTMLElement>('[data-tournament-create-scheduled-field="1"]')
+    const entryFeeSelect = root.querySelector<HTMLSelectElement>('[data-tournament-create-entryfee="1"]')
+    const previewBox = root.querySelector<HTMLElement>('[data-tournament-create-preview="1"]')
+
+    function syncVisibilityFields(): void {
+      const selected = root.querySelector<HTMLInputElement>('[data-tournament-create-form="1"] input[name="visibility"]:checked')?.value
+      if (passwordField) passwordField.style.display = selected === 'password' ? 'block' : 'none'
+    }
+    function syncStartModeFields(): void {
+      const selected = root.querySelector<HTMLInputElement>('[data-tournament-create-form="1"] input[name="startMode"]:checked')?.value
+      if (scheduledField) scheduledField.style.display = selected === 'scheduled' ? 'block' : 'none'
+    }
+    function syncPrizePreview(): void {
+      if (!previewBox || !entryFeeSelect) return
+      const entryFee = Number(entryFeeSelect.value) || 0
+      const totalEntryFees = entryFee * 8
+      const systemFee = Math.round(totalEntryFees * 0.1)
+      const prizePool = totalEntryFees - systemFee
+      const firstTeamPrize = Math.round(prizePool * 0.7)
+      const secondTeamPrize = prizePool - firstTeamPrize
+      const fmt = (n: number) => new Intl.NumberFormat('bg-BG').format(n)
+      const totalEl = previewBox.querySelector('[data-preview-total] span:last-child')
+      const feeEl = previewBox.querySelector('[data-preview-fee] span:last-child')
+      const poolEl = previewBox.querySelector('[data-preview-pool] span:last-child')
+      const firstEl = previewBox.querySelector('[data-preview-first] span:last-child')
+      const secondEl = previewBox.querySelector('[data-preview-second] span:last-child')
+      if (totalEl) totalEl.textContent = fmt(totalEntryFees)
+      if (feeEl) feeEl.textContent = fmt(systemFee)
+      if (poolEl) poolEl.textContent = fmt(prizePool)
+      if (firstEl) firstEl.textContent = fmt(firstTeamPrize)
+      if (secondEl) secondEl.textContent = fmt(secondTeamPrize)
+    }
+
+    visibilityRadios.forEach((radio) => radio.addEventListener('change', syncVisibilityFields))
+    startModeRadios.forEach((radio) => radio.addEventListener('change', syncStartModeFields))
+    entryFeeSelect?.addEventListener('change', syncPrizePreview)
+    syncVisibilityFields()
+    syncStartModeFields()
+
+    createForm?.addEventListener('submit', (e) => {
+      e.preventDefault()
+      const input = extractTournamentCreateInputFromForm(createForm)
+      if (input) options.onTournamentCreateSubmit(input)
+    })
+  }
+
+  root.querySelector<HTMLInputElement>('[data-tournament-unlock-password="1"]')
+    ?.addEventListener('input', (e) => {
+      options.onTournamentDetailPasswordDraftChange((e.currentTarget as HTMLInputElement).value)
+    })
+
+  root.querySelector<HTMLButtonElement>('[data-tournament-unlock-submit="1"]')
+    ?.addEventListener('click', options.onTournamentUnlockSubmit)
 
   root.querySelector<HTMLButtonElement>('[data-private-room-leave="1"]')
     ?.addEventListener('click', options.onPrivateRoomLeave)

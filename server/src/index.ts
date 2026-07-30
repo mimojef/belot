@@ -70,6 +70,24 @@ import { detectDeviceType } from './utils/detectDeviceType.js'
 import { detectOsType } from './utils/detectOsType.js'
 import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
+import { createTournamentStore } from './db/tournamentStore.js'
+import type { TournamentRecord } from './tournament/tournamentTypes.js'
+import {
+  ALLOWED_TOURNAMENT_ENTRY_FEES,
+  isAllowedTournamentEntryFee,
+  isValidTournamentStartMode,
+  isValidTournamentVisibility,
+  validateTournamentName,
+  validateTournamentPassword,
+  validateTournamentScheduledStartAt,
+} from './tournament/tournamentValidation.js'
+import {
+  ACTIVE_TOURNAMENT_STATUSES,
+  toTournamentDetailDto,
+  toTournamentSummaryDto,
+  type TournamentSummaryDto,
+} from './tournament/tournamentDto.js'
+import { createPasswordHash, verifyPassword } from './db/authHelpers.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { createMatchEconomyStore, setMatchPrizeResolver } from './db/matchEconomyStore.js'
 import { createMatchRoomsStore } from './db/matchRoomsStore.js'
@@ -462,6 +480,7 @@ const friendshipStore = await createFriendshipStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
 )
+const tournamentStore = await createTournamentStore(databaseBootstrap.databaseFilePath)
 const chatStore = await createChatStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
@@ -5565,6 +5584,335 @@ async function handleShopCheckoutRequest(
   return true
 }
 
+// ─── Tournaments: list / create / details ──────────────────────────────────
+
+const TOURNAMENT_CREATE_RATE_LIMIT_WINDOW_MS = 60_000
+const TOURNAMENT_CREATE_RATE_LIMIT_MAX_PER_WINDOW = 3
+const tournamentCreateRateLimitByProfileId = new Map<string, { count: number; windowStartedAt: number }>()
+
+function isTournamentCreateRateLimited(profileId: string, now: number): boolean {
+  const existing = tournamentCreateRateLimitByProfileId.get(profileId)
+  if (existing === undefined || now - existing.windowStartedAt >= TOURNAMENT_CREATE_RATE_LIMIT_WINDOW_MS) {
+    tournamentCreateRateLimitByProfileId.set(profileId, { count: 1, windowStartedAt: now })
+    return false
+  }
+  if (existing.count >= TOURNAMENT_CREATE_RATE_LIMIT_MAX_PER_WINDOW) {
+    return true
+  }
+  existing.count += 1
+  return false
+}
+
+function requireRegisteredHumanSession(
+  req: IncomingMessage,
+): { ok: true; profileId: string } | { ok: false } {
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+  if (session === null || session.profile.profileId === null) {
+    return { ok: false }
+  }
+  return { ok: true, profileId: session.profile.profileId }
+}
+
+function getTournamentCreatorPublicProfile(
+  creatorProfileId: string,
+): { profileId: string | null; displayName: string; avatarUrl: string | null } | null {
+  const publicProfile = playerProgressStore.getPublicProfile(creatorProfileId)
+  if (publicProfile === null) return null
+  return {
+    profileId: publicProfile.profileId,
+    displayName: publicProfile.displayName,
+    avatarUrl: publicProfile.avatarUrl,
+  }
+}
+
+function buildTournamentSummaryDto(
+  tournament: TournamentRecord,
+  viewerProfileId: string | null,
+): TournamentSummaryDto {
+  const entries = tournamentStore.getEntriesForTournament(tournament.tournamentId)
+  const teams = tournamentStore.getTeamsForTournament(tournament.tournamentId)
+  return toTournamentSummaryDto({
+    tournament,
+    creatorPublicProfile: getTournamentCreatorPublicProfile(tournament.creatorProfileId),
+    confirmedEntriesCount: entries.filter((e) => e.status === 'confirmed').length,
+    completedTeamsCount: teams.filter((t) => t.status !== 'forming').length,
+    viewerProfileId,
+  })
+}
+
+async function handleTournamentsListRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  if (pathname !== '/api/tournaments') return false
+
+  if (req.method === 'GET') {
+    const mineParam = requestUrl.searchParams.get('mine') === 'true'
+    const rawPage = Number(requestUrl.searchParams.get('page') ?? '1')
+    const page = Number.isFinite(rawPage) && rawPage >= 1 ? Math.floor(rawPage) : 1
+    const limit = 20
+    const offset = (page - 1) * limit
+
+    let viewerProfileId: string | null = null
+    if (mineParam) {
+      const authResult = requireRegisteredHumanSession(req)
+      if (!authResult.ok) {
+        sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+        return true
+      }
+      viewerProfileId = authResult.profileId
+    } else {
+      const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+      const session = authStore.getSession(sessionToken)
+      viewerProfileId = session?.profile.profileId ?? null
+    }
+
+    const filter = mineParam
+      ? { creatorProfileId: viewerProfileId ?? undefined, limit, offset }
+      : { statuses: ACTIVE_TOURNAMENT_STATUSES, limit, offset }
+
+    const tournaments = tournamentStore.listTournaments(filter)
+    const totalCount = tournamentStore.countTournaments(
+      mineParam
+        ? { creatorProfileId: viewerProfileId ?? undefined }
+        : { statuses: ACTIVE_TOURNAMENT_STATUSES },
+    )
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      tournaments: tournaments.map((t) => buildTournamentSummaryDto(t, viewerProfileId)),
+      page,
+      limit,
+      totalCount,
+    })
+    return true
+  }
+
+  if (req.method === 'POST') {
+    const authResult = requireRegisteredHumanSession(req)
+    if (!authResult.ok) {
+      sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си, за да създадеш турнир.' })
+      return true
+    }
+    const { profileId } = authResult
+
+    if (isTournamentCreateRateLimited(profileId, Date.now())) {
+      sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
+      return true
+    }
+
+    let body: unknown
+    try {
+      body = await readJsonRequestBody(req)
+    } catch {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидно JSON тяло.' })
+      return true
+    }
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+      return true
+    }
+
+    const nameValidation = validateTournamentName(getStringField(body, 'name'))
+    if (!nameValidation.ok) {
+      const messages: Record<typeof nameValidation.code, string> = {
+        empty: 'Името на турнира е задължително.',
+        too_short: 'Името на турнира трябва да е поне 3 символа.',
+        too_long: 'Името на турнира трябва да е максимум 40 символа.',
+        invalid_characters: 'Името на турнира съдържа непозволени символи.',
+      }
+      sendJsonResponse(res, 400, { ok: false, message: messages[nameValidation.code] })
+      return true
+    }
+
+    const rawEntryFee = getNumberField(body, 'entryFee')
+    if (rawEntryFee === null || !isAllowedTournamentEntryFee(rawEntryFee)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: `Входът трябва да е една от стойностите: ${ALLOWED_TOURNAMENT_ENTRY_FEES.join(', ')}.`,
+      })
+      return true
+    }
+
+    const rawVisibility = getStringField(body, 'visibility')
+    if (!isValidTournamentVisibility(rawVisibility)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидна видимост на турнира.' })
+      return true
+    }
+
+    const rawStartMode = getStringField(body, 'startMode')
+    if (!isValidTournamentStartMode(rawStartMode)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден режим на стартиране.' })
+      return true
+    }
+
+    let passwordHash: string | null = null
+    if (rawVisibility === 'password') {
+      const rawPassword = getStringField(body, 'password')
+      const passwordValidation = validateTournamentPassword(rawPassword)
+      if (!passwordValidation.ok) {
+        const messages: Record<typeof passwordValidation.code, string> = {
+          too_short: `Паролата трябва да е поне 4 знака.`,
+          too_long: `Паролата трябва да е максимум 32 знака.`,
+        }
+        sendJsonResponse(res, 400, { ok: false, message: messages[passwordValidation.code] })
+        return true
+      }
+      passwordHash = createPasswordHash(passwordValidation.password)
+    } else if ('password' in body && getStringField(body, 'password') !== '') {
+      // Public турнир не трябва да носи парола — отхвърляме explicit, вместо
+      // тихо да игнорираме потенциално подведащ вход от клиента.
+      sendJsonResponse(res, 400, { ok: false, message: 'Публичен турнир не може да има парола.' })
+      return true
+    }
+
+    let scheduledStartAt: string | null = null
+    if (rawStartMode === 'scheduled') {
+      const rawScheduledStartAt = getStringField(body, 'scheduledStartAt')
+      const scheduledValidation = validateTournamentScheduledStartAt(rawScheduledStartAt)
+      if (!scheduledValidation.ok) {
+        const messages: Record<typeof scheduledValidation.code, string> = {
+          invalid_timestamp: 'Невалидна дата и час за стартиране.',
+          too_soon: 'Стартът трябва да е поне 30 минути напред.',
+          too_late: 'Стартът трябва да е най-много 7 дни напред.',
+        }
+        sendJsonResponse(res, 400, { ok: false, message: messages[scheduledValidation.code] })
+        return true
+      }
+      scheduledStartAt = scheduledValidation.scheduledStartAt
+    } else if ('scheduledStartAt' in body && getStringField(body, 'scheduledStartAt') !== '') {
+      sendJsonResponse(res, 400, { ok: false, message: 'Турнир "при запълване" не може да има зададен час.' })
+      return true
+    }
+
+    const createResult = tournamentStore.createTournament({
+      kind: 'community',
+      name: nameValidation.name,
+      creatorProfileId: profileId,
+      visibility: rawVisibility,
+      passwordHash,
+      entryFee: rawEntryFee,
+      startMode: rawStartMode,
+      scheduledStartAt,
+    })
+
+    if (!createResult.ok) {
+      sendJsonResponse(res, 409, {
+        ok: false,
+        message: 'Вече имаш активен турнир. Изчакай той да приключи или го отмени, преди да създадеш нов.',
+      })
+      return true
+    }
+
+    tournamentStore.appendTournamentEvent({
+      tournamentId: createResult.tournament.tournamentId,
+      eventType: 'tournament_created',
+      actorProfileId: profileId,
+      actorRole: 'player',
+    })
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      tournament: buildTournamentSummaryDto(createResult.tournament, profileId),
+    })
+    return true
+  }
+
+  sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+  return true
+}
+
+async function handleTournamentDetailRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)$/.exec(pathname)
+  if (!match) return false
+
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  let tournamentId: string
+  try {
+    tournamentId = decodeURIComponent(match[1] ?? '')
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+  if (!tournamentId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+
+  const tournament = tournamentStore.getTournamentById(tournamentId)
+  if (tournament === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Турнирът не е намерен.' })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+  const viewerProfileId = session?.profile.profileId ?? null
+  const isCreator = viewerProfileId !== null && viewerProfileId === tournament.creatorProfileId
+
+  if (tournament.visibility === 'password' && !isCreator) {
+    // POST /api/tournaments/:id с {password} служи като unlock проверка;
+    // GET (или POST без валидна парола) никога не разкрива детайлите.
+    let providedPassword: string | null = null
+    if (req.method === 'POST') {
+      let body: unknown
+      try {
+        body = await readJsonRequestBody(req)
+      } catch {
+        sendJsonResponse(res, 400, { ok: false, message: 'Невалидно JSON тяло.' })
+        return true
+      }
+      if (isRecord(body) && typeof body.password === 'string') {
+        providedPassword = body.password
+      }
+    }
+
+    const passwordMatches =
+      providedPassword !== null &&
+      tournament.passwordHash !== null &&
+      verifyPassword(providedPassword, tournament.passwordHash)
+
+    if (!passwordMatches) {
+      sendJsonResponse(res, 403, {
+        ok: false,
+        message: providedPassword === null
+          ? 'Този турнир е защитен с парола.'
+          : 'Грешна парола.',
+        requiresPassword: true,
+      })
+      return true
+    }
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    tournament: toTournamentDetailDto({
+      tournament,
+      creatorPublicProfile: getTournamentCreatorPublicProfile(tournament.creatorProfileId),
+      confirmedEntriesCount: tournamentStore
+        .getEntriesForTournament(tournament.tournamentId)
+        .filter((e) => e.status === 'confirmed').length,
+      completedTeamsCount: tournamentStore
+        .getTeamsForTournament(tournament.tournamentId)
+        .filter((t) => t.status !== 'forming').length,
+      viewerProfileId,
+    }),
+  })
+  return true
+}
+
 async function handleShopResumeCheckoutRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -7763,6 +8111,14 @@ async function handleHttpRequest(
   }
 
   if (await handleShopCheckoutRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTournamentsListRequest(req, res, requestUrl.pathname, requestUrl)) {
+    return
+  }
+
+  if (await handleTournamentDetailRequest(req, res, requestUrl.pathname)) {
     return
   }
 
