@@ -305,6 +305,20 @@ function renderIncomingInvitesSection(state: LobbyScreenState): string {
 export function renderTournamentsScreen(state: LobbyScreenState): string {
   const isMineFilter = state.tournamentsFilter === 'mine'
 
+  const howItWorksBar = `
+    <div style="margin-bottom:14px;">
+      <button type="button" data-tournament-how-it-works-open="1" style="
+        display:inline-flex;align-items:center;gap:8px;max-width:100%;height:36px;padding:0 14px;
+        border-radius:999px;border:1px solid rgba(212,165,32,0.32);
+        background:rgba(212,165,32,0.06);color:#d4a520;font-size:13px;font-weight:800;
+        cursor:pointer;
+      ">
+        <span aria-hidden="true" style="font-size:15px;line-height:1;">❓</span>
+        <span>Как работят турнирите?</span>
+      </button>
+    </div>
+  `
+
   const header = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
       <h2 style="font-size:22px;font-weight:900;color:#ffffff;margin:0;">Турнири</h2>
@@ -360,6 +374,7 @@ export function renderTournamentsScreen(state: LobbyScreenState): string {
 
   return `
     <section style="padding:0 4px;">
+      ${howItWorksBar}
       ${header}
       ${filters}
       ${renderIncomingInvitesSection(state)}
@@ -1057,6 +1072,115 @@ function renderTournamentCancelConfirmPopup(state: LobbyScreenState): string {
         </div>
       </div>
     </div>
+  `
+}
+
+// ─── "Как работят турнирите?" — статична SPA страница (route /tournaments/how-it-works) ──
+
+type HowItWorksSection = {
+  icon: string
+  title: string
+  paragraphs: string[]
+}
+
+const HOW_IT_WORKS_SECTIONS: HowItWorksSection[] = [
+  {
+    icon: '🏆',
+    title: '1. Създаване на турнир',
+    paragraphs: [
+      'Избирате входна такса, 4, 8 или 16 отбора и по желание парола.',
+      'Създателят не се записва автоматично и трябва отделно да се включи в турнира.',
+      'Ако турнирът не се запълни до 1 час, той се отменя и входните такси се връщат.',
+    ],
+  },
+  {
+    icon: '🤝',
+    title: '2. Участие',
+    paragraphs: [
+      'Можете да се запишете самостоятелно или да поканите партньор.',
+      'Всеки играч плаща своята входна такса.',
+      'При турнир с парола поканеният партньор приема личната покана, без да въвежда паролата.',
+    ],
+  },
+  {
+    icon: '🔔',
+    title: '3. Начало на мача',
+    paragraphs: [
+      'Когато мачът ви е готов, ще получите известие.',
+      'За първия мач играчите имат до 3 минути да се включат.',
+      'За следващите кръгове изчакването е до 20 секунди.',
+    ],
+  },
+  {
+    icon: '🤖',
+    title: '4. Временно заместване от бот',
+    paragraphs: [
+      'Ако играч не се включи навреме, бот временно заема неговото място.',
+      'Името и аватарът на играча се запазват, а мястото се обозначава с „БОТ“.',
+      'При връщане играчът може безопасно да поеме играта от бота.',
+      'Ако липсва целият отбор, съперникът продължава служебно.',
+    ],
+  },
+  {
+    icon: '⏭️',
+    title: '5. Следващ кръг',
+    paragraphs: [
+      'Победителят продължава автоматично към следващия кръг.',
+      'Докато чака съперника си, вижда текущия резултат от мача, който определя следващия му противник.',
+    ],
+  },
+  {
+    icon: '🥇',
+    title: '6. Награди',
+    paragraphs: [
+      '80% от събраните входни такси формират наградния фонд.',
+      'Шампионите получават 65% от фонда, а финалистите — 35%.',
+      'Наградата на всеки отбор се разделя поравно между двамата играчи.',
+      'Няма мач за трето място.',
+    ],
+  },
+]
+
+export function renderTournamentHowItWorksPage(isMobile = false): string {
+  const cardsHtml = HOW_IT_WORKS_SECTIONS.map((section) => `
+    <section style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:${isMobile ? '14px' : '16px 18px'};margin-bottom:12px;">
+      <h3 style="display:flex;align-items:center;gap:10px;margin:0 0 8px;font-size:${isMobile ? '14px' : '15px'};font-weight:900;color:#d4a520;">
+        <span aria-hidden="true" style="font-size:18px;line-height:1;">${section.icon}</span>
+        <span>${escapeHtml(section.title)}</span>
+      </h3>
+      ${section.paragraphs.map((p) => `<p style="margin:0 0 6px;font-size:${isMobile ? '13px' : '13.5px'};line-height:1.55;color:rgba(255,255,255,0.78);">${escapeHtml(p)}</p>`).join('')}
+    </section>
+  `).join('')
+
+  return `
+    <section style="padding:0 4px;max-width:720px;margin:0 auto;">
+      <button
+        type="button"
+        data-tournament-how-it-works-back="1"
+        aria-label="Назад към турнирите"
+        style="
+          display:inline-flex;align-items:center;gap:6px;margin-bottom:12px;height:36px;
+          padding:0 14px;border-radius:8px;border:1px solid rgba(212,165,32,0.32);
+          background:rgba(212,165,32,0.08);color:#d4a520;font-size:13px;font-weight:800;
+          cursor:pointer;
+        "
+      >← Назад към турнирите</button>
+
+      <div style="margin-bottom:18px;">
+        <h2 style="font-size:${isMobile ? '20px' : '22px'};font-weight:900;color:#ffffff;margin:0 0 8px;">Как работят турнирите?</h2>
+        <p style="margin:0;font-size:13px;line-height:1.5;color:rgba(255,255,255,0.6);">Съберете отбор от двама и играйте на директни елиминации до финала.</p>
+      </div>
+
+      ${cardsHtml}
+
+      <div style="display:flex;justify-content:center;margin-top:20px;">
+        <button type="button" data-tournament-how-it-works-back="1" style="
+          width:100%;max-width:320px;height:44px;border:0;border-radius:8px;
+          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;
+          font-size:14px;font-weight:900;cursor:pointer;
+        ">Към турнирите</button>
+      </div>
+    </section>
   `
 }
 

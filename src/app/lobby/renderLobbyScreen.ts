@@ -55,6 +55,7 @@ import { renderAdminTournamentDetailPanel, renderAdminTournamentsPanel, attachAd
 import {
   renderTournamentsScreen,
   renderTournamentDetailScreen,
+  renderTournamentHowItWorksPage,
   extractTournamentCreateInputFromForm,
 } from './renderTournamentsScreen'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
@@ -125,7 +126,7 @@ export type GuestContactFormInput = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'tournaments' | 'tournament-detail' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -463,6 +464,7 @@ export type RenderLobbyScreenOptions = {
   onLeaderboardsClick: () => void
   onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
   onTournamentsClick: () => void
+  onTournamentHowItWorksOpen: () => void
   onTournamentsFilterChange: (filter: 'all' | 'mine') => void
   onTournamentCreatePopupOpen: () => void
   onTournamentCreatePopupClose: () => void
@@ -4084,6 +4086,8 @@ function renderMobileLobbyScreenContent(
             ? renderTournamentsScreen(state)
           : state.view === 'tournament-detail'
             ? renderTournamentDetailScreen(state)
+          : state.view === 'tournament-how-it-works'
+            ? renderTournamentHowItWorksPage(true)
           : state.view === 'friends'
             ? renderMobileFriendsDirectory(state)
           : state.view === 'chat'
@@ -8281,6 +8285,8 @@ export function renderLobbyScreen(
               ? renderTournamentsScreen(state)
             : state.view === 'tournament-detail'
               ? renderTournamentDetailScreen(state)
+            : state.view === 'tournament-how-it-works'
+              ? renderTournamentHowItWorksPage(false)
             : state.view === 'friends'
               ? renderFriendsDirectory(state)
             : state.view === 'chat'
@@ -10433,6 +10439,12 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-tournament-detail-back="1"]')
     ?.addEventListener('click', options.onTournamentsClick)
+
+  root.querySelectorAll<HTMLButtonElement>('[data-tournament-how-it-works-open="1"]')
+    .forEach((btn) => btn.addEventListener('click', options.onTournamentHowItWorksOpen))
+
+  root.querySelectorAll<HTMLButtonElement>('[data-tournament-how-it-works-back="1"]')
+    .forEach((btn) => btn.addEventListener('click', options.onTournamentsClick))
 
   {
     const createForm = root.querySelector<HTMLFormElement>('[data-tournament-create-form="1"]')

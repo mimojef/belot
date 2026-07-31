@@ -84,6 +84,7 @@ export type LobbyFlowScreen =
   | 'admin-tournament-detail'
   | 'tournaments'
   | 'tournament-detail'
+  | 'tournament-how-it-works'
   | 'terms'
   | 'privacy'
   | 'contact'
@@ -2436,6 +2437,8 @@ export function createLobbyFlowController(
               ? 'tournaments'
             : state.currentScreen === 'tournament-detail'
               ? 'tournament-detail'
+            : state.currentScreen === 'tournament-how-it-works'
+              ? 'tournament-how-it-works'
             : state.currentScreen === 'guest-contact-messages'
               ? 'guest-contact-messages'
             : state.currentScreen === 'terms'
@@ -2902,6 +2905,9 @@ export function createLobbyFlowController(
       },
       onTournamentsClick: () => {
         void showTournamentsList()
+      },
+      onTournamentHowItWorksOpen: () => {
+        showTournamentHowItWorksPage()
       },
       onTournamentsFilterChange: (filter) => {
         setTournamentsFilter(filter)
@@ -6420,6 +6426,28 @@ export function createLobbyFlowController(
     scrollLobbyRootToTop()
   }
 
+  // Статична страница, но с nested route /tournaments/how-it-works (не flat
+  // top-level path като rules/faq/fair-play) — затова управлява собствен
+  // URL през pushState, огледално на showTournamentDetail, вместо да мине
+  // през LOBBY_PATH_TO_SCREEN/SCREEN_TO_PATH/PATH_TO_SCREEN картите.
+  function showTournamentHowItWorksPage(): void {
+    leaveAdminServerIfActive()
+    state.currentScreen = 'tournament-how-it-works'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    const targetUrl = '/tournaments/how-it-works'
+    if (window.location.pathname !== targetUrl) {
+      history.pushState(null, '', targetUrl)
+    }
+    render()
+    scrollLobbyRootToTop()
+  }
+
   async function openChatConversation(
     friendshipId: string,
     shouldRenderLoading = true,
@@ -7055,6 +7083,7 @@ export function createLobbyFlowController(
     // Dynamic screens manage their own URL via pushState — skip syncUrlPath for them
     if (state.currentScreen === 'admin-payment-detail') return
     if (state.currentScreen === 'tournament-detail') return
+    if (state.currentScreen === 'tournament-how-it-works') return
     const path = SCREEN_TO_PATH[state.currentScreen] ?? '/lobby'
     if (path !== window.location.pathname) {
       history.pushState(null, '', path)
@@ -7073,6 +7102,14 @@ export function createLobbyFlowController(
     const adminTournamentDetailMatch = /^\/admin\/tournaments\/([^/]+)$/.exec(path)
     if (adminTournamentDetailMatch) {
       showAdminTournamentDetailPanel(decodeURIComponent(adminTournamentDetailMatch[1] ?? ''))
+      return
+    }
+
+    // Fixed route /tournaments/how-it-works — трябва да е ПРЕДИ динамичния
+    // /tournaments/:tournamentId regex по-долу, иначе "how-it-works" би се
+    // тълкувал погрешно като tournamentId.
+    if (path === '/tournaments/how-it-works') {
+      showTournamentHowItWorksPage()
       return
     }
 
