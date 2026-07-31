@@ -444,7 +444,7 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
     SELECT team_id, tournament_id, status, seed_slot, created_at, updated_at
     FROM tournament_teams
     WHERE tournament_id = ?
-    ORDER BY created_at ASC;
+    ORDER BY created_at ASC, team_id ASC;
   `)
 
   const insertEntryStatement = database.prepare(`
