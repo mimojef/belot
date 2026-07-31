@@ -190,6 +190,8 @@ try {
 
   await check('production runbook documents no-deploy verification and rollback commands', () => {
     assert(runbook.includes('No deploy is performed by this checklist.'), 'runbook missing no-deploy guard')
+    assert(runbook.includes('npm run check:tournament-end-to-end'), 'runbook missing end-to-end check')
+    assert(runbook.includes('npm run check:tournament-concurrency'), 'runbook missing concurrency check')
     assert(runbook.includes('npm run check:admin-tournament-api'), 'runbook missing admin API check')
     assert(runbook.includes('npm run check:tournament-integrity'), 'runbook missing integrity check')
     assert(runbook.includes('backup:db:prod'), 'runbook missing production backup command')

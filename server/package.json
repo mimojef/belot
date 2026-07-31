@@ -26,6 +26,8 @@
     "check:accounts-role-migration": "tsx scripts/checkAccountsRoleMigration.ts",
     "check:migration-runner-crash-recovery": "tsx scripts/checkMigrationRunnerCrashRecovery.ts",
     "check:tournament-persistence": "tsx scripts/checkTournamentPersistence.ts",
+    "check:tournament-end-to-end": "tsx scripts/checkTournamentEndToEnd.ts",
+    "check:tournament-concurrency": "tsx scripts/checkTournamentConcurrency.ts",
     "check:tournament-scheduler-start": "tsx scripts/checkTournamentSchedulerStart.ts",
     "check:tournament-coordinator-source": "tsx scripts/checkTournamentCoordinatorSource.ts",
     "check:tournament-stage8-behavior": "tsx scripts/checkTournamentStage8Behavior.ts",

@@ -49,6 +49,8 @@ Run server checks:
 ```powershell
 cd D:\PROJECT\Belot-V2\server
 npm run check:tournament-persistence
+npm run check:tournament-end-to-end
+npm run check:tournament-concurrency
 npm run check:migration-runner-crash-recovery
 npm run check:tournament-scheduler-start
 npm run check:tournament-coordinator-source
