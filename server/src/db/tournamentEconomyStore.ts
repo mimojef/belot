@@ -52,6 +52,10 @@ export type JoinTournamentSoloResult =
   | {
       ok: true
       alreadyJoined: boolean
+      /** Реално задебитираната сума в ТОЗИ извикване — undefined при
+       * alreadyJoined (idempotent retry, без нов debit). Ползва се за
+       * server-authoritative "Платихте входна такса" известие на клиента. */
+      debitedAmount?: number
       entry: TournamentEntryRecord
       walletBalance: number
       tournament: TournamentRecord
@@ -88,6 +92,10 @@ export type CancelOpenTournamentResult =
       alreadyCancelled: boolean
       refundedEntries: number
       totalRefunded: number
+      /** Per-profile breakdown на refund-натите в ТОЗИ извикване (празно при
+       * alreadyCancelled) — ползва се за персонализирани WS известия до
+       * всеки реално refund-нат участник, вкл. създателя ако е бил записан. */
+      refundedProfiles: Array<{ profileId: ProfileId; amount: number }>
       walletBalance: number
       tournament: TournamentRecord
     }
@@ -120,6 +128,9 @@ export type AutoCancelScheduledTournamentResult =
       alreadyCancelled: boolean
       refundedEntries: number
       totalRefunded: number
+      /** Per-profile breakdown на refund-натите в ТОЗИ извикване (празно при
+       * alreadyCancelled) — ползва се за персонализирани WS известия. */
+      refundedProfiles: Array<{ profileId: ProfileId; amount: number }>
       tournament: TournamentRecord
     }
   | { ok: false; reason: 'tournament_not_found' | 'tournament_not_open' }
@@ -149,6 +160,11 @@ export type PartnerInviteMutationResult =
   | {
       ok: true
       alreadyResolved?: boolean
+      /** Реално задебитираната сума на ВИКАЩИЯ профил в ТОЗИ извикване —
+       * undefined за decline/cancel, за idempotent resolved покани, и за
+       * create-invite от вече confirmed inviter (без нов debit). Само
+       * create (inviter) и accept (recipient) някога го задават. */
+      debitedAmount?: number
       invite: TournamentPartnerInviteRecord
       walletBalance: number
       tournament: TournamentRecord
@@ -1693,6 +1709,7 @@ export async function createTournamentEconomyStore(
           alreadyCancelled: true,
           refundedEntries: 0,
           totalRefunded: 0,
+          refundedProfiles: [],
           tournament: toTournamentRecord(tournament),
         }
       }
@@ -1739,6 +1756,7 @@ export async function createTournamentEconomyStore(
       const confirmedEntries = selectConfirmedEntriesStatement.all(tournamentId) as TournamentEntryRow[]
       let refundedEntries = 0
       let totalRefunded = 0
+      const refundedProfiles: Array<{ profileId: ProfileId; amount: number }> = []
       for (const entry of confirmedEntries) {
         const refundKey = entryFeeRefundKeyForAttempt(
           tournamentId,
@@ -1762,6 +1780,7 @@ export async function createTournamentEconomyStore(
         updateEntryToRefundedByCancelStatement.run(entry.entry_id)
         refundedEntries += 1
         totalRefunded += refundAmount
+        refundedProfiles.push({ profileId: entry.profile_id, amount: refundAmount })
       }
       deleteTeamsForTournamentStatement.run(tournamentId)
       insertEvent(tournamentId, 'tournament_auto_cancelled', null, 'system', {
@@ -1776,6 +1795,7 @@ export async function createTournamentEconomyStore(
         alreadyCancelled: false,
         refundedEntries,
         totalRefunded,
+        refundedProfiles,
         tournament: toTournamentRecord(finalTournament),
       }
     } catch (error) {
@@ -2103,6 +2123,7 @@ export async function createTournamentEconomyStore(
         ) as TournamentPartnerInviteRow
         result = {
           ok: true,
+          debitedAmount: hasConfirmedInviterEntry ? undefined : freshTournament.entry_fee,
           invite: toTournamentPartnerInviteRecord(inviteRow),
           walletBalance: getWalletBalance(inviterProfileId),
           tournament: toTournamentRecord(freshTournament),
@@ -2241,6 +2262,7 @@ export async function createTournamentEconomyStore(
         const finalInvite = getInviteById(tournamentId, inviteId)
         return {
           ok: true,
+          debitedAmount: freshTournament.entry_fee,
           invite: finalInvite ?? toTournamentPartnerInviteRecord(inviteRow),
           walletBalance: getWalletBalance(inviteeProfileId),
           tournament: toTournamentRecord(freshTournament),
@@ -2524,6 +2546,7 @@ export async function createTournamentEconomyStore(
         result = {
           ok: true,
           alreadyJoined: false,
+          debitedAmount: entryFee,
           entry: toTournamentEntryRecord(entryRow),
           walletBalance: getWalletBalance(profileId),
           tournament: toTournamentRecord(freshTournament),
@@ -2696,6 +2719,7 @@ export async function createTournamentEconomyStore(
           alreadyCancelled: true,
           refundedEntries: 0,
           totalRefunded: 0,
+          refundedProfiles: [],
           walletBalance: getWalletBalance(creatorProfileId),
           tournament: toTournamentRecord(tournamentRow),
         }
@@ -2727,6 +2751,7 @@ export async function createTournamentEconomyStore(
               alreadyCancelled: true,
               refundedEntries: 0,
               totalRefunded: 0,
+              refundedProfiles: [],
               walletBalance: getWalletBalance(creatorProfileId),
               tournament: toTournamentRecord(freshTournament),
             }
@@ -2752,6 +2777,7 @@ export async function createTournamentEconomyStore(
 
         let refundedEntries = 0
         let totalRefunded = 0
+        const refundedProfiles: Array<{ profileId: ProfileId; amount: number }> = []
 
         for (const entry of confirmedEntries) {
           const refundKey = entryFeeRefundKeyForAttempt(
@@ -2784,6 +2810,7 @@ export async function createTournamentEconomyStore(
 
           refundedEntries += 1
           totalRefunded += refundAmount
+          refundedProfiles.push({ profileId: entry.profile_id, amount: refundAmount })
         }
 
         insertEvent(tournamentId, 'tournament_cancelled_by_creator', creatorProfileId, 'player', {
@@ -2800,6 +2827,7 @@ export async function createTournamentEconomyStore(
           alreadyCancelled: false,
           refundedEntries,
           totalRefunded,
+          refundedProfiles,
           walletBalance: getWalletBalance(creatorProfileId),
           tournament: toTournamentRecord(finalTournament),
         }

@@ -1398,6 +1398,19 @@ export type TournamentFeederScoreProgressMessage = {
   status: 'in_progress'
 }
 
+// Server-initiated entry-fee refund notice (§4/§5 в task spec-а) — само за
+// creator cancellation / fill-expiry auto-cancel refund-и до реално
+// refund-нати online профили. Debit известията (join/partner invite) идват
+// directly от HTTP response-а, не оттук.
+export type TournamentEconomyNoticeMessage = {
+  type: 'tournament_economy_notice'
+  eventId: string
+  tournamentId: string
+  reason: 'creator_cancelled' | 'fill_expired'
+  amount: number
+  occurredAt: string
+}
+
 // --- Общ лайв чат в лобито (разделен от ChatMessageReceivedMessage — това
 // е публичен broadcast поток, не 1:1 нотификация между приятели) ---
 
@@ -1503,6 +1516,7 @@ export type ServerMessage =
   | TournamentMatchAssignedMessage
   | TournamentFeederMatchCompletedMessage
   | TournamentFeederScoreProgressMessage
+  | TournamentEconomyNoticeMessage
   | LobbyChatHistoryMessage
   | LobbyChatMessageEventMessage
   | LobbyChatMessageDeletedMessage

@@ -30,6 +30,14 @@ type TournamentSchedulerDeps = {
   clearInterval?: (id: ReturnType<typeof globalThis.setInterval>) => void
   now?: () => Date
   logError?: (message: string, error: unknown) => void
+  /** Server-authoritative refund известие (§4/§5 в task spec-а) — извиква се
+   * само след реално committed auto-cancel refund, с per-profile сумите от
+   * autoCancelScheduledTournamentAtomically. Няма достъп до WS слоя тук —
+   * index.ts инжектира действителния push механизъм. */
+  notifyEconomyRefunds?: (
+    tournamentId: TournamentId,
+    refundedProfiles: Array<{ profileId: string; amount: number }>,
+  ) => void
 }
 
 const DEFAULT_INTERVAL_MS = 5_000
@@ -133,11 +141,14 @@ export async function createTournamentScheduler(
         try {
           const startResult = deps.economyStore.startTournamentAtomically(tournamentId, tickNow)
           if (!startResult.ok) {
-            deps.economyStore.autoCancelScheduledTournamentAtomically(
+            const cancelResult = deps.economyStore.autoCancelScheduledTournamentAtomically(
               tournamentId,
               tickNow,
               SCHEDULED_START_NOT_READY,
             )
+            if (cancelResult.ok && !cancelResult.alreadyCancelled && cancelResult.refundedProfiles.length > 0) {
+              deps.notifyEconomyRefunds?.(tournamentId, cancelResult.refundedProfiles)
+            }
           }
           processedLastTick += 1
         } catch (error) {
@@ -172,11 +183,14 @@ export async function createTournamentScheduler(
       ).map((row) => row.tournament_id)
       for (const tournamentId of expiredFillIds) {
         try {
-          deps.economyStore.autoCancelScheduledTournamentAtomically(
+          const cancelResult = deps.economyStore.autoCancelScheduledTournamentAtomically(
             tournamentId,
             tickNow,
             FILL_MODE_EXPIRED,
           )
+          if (cancelResult.ok && !cancelResult.alreadyCancelled && cancelResult.refundedProfiles.length > 0) {
+            deps.notifyEconomyRefunds?.(tournamentId, cancelResult.refundedProfiles)
+          }
           processedLastTick += 1
         } catch (error) {
           lastError = sanitizeError(error)

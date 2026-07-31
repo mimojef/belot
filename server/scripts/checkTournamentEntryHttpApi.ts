@@ -17,6 +17,12 @@
  *  G. Leave/refund     [35]-[41]
  *  H. Creator cancel    [42]-[50]
  *  I. Coin conservation  [51]-[57]
+ *  J. Server-authoritative entry-fee/refund popup notifications [58]-[69]
+ *     (debitedAmount на join/partner-invite responses, реален WebSocket
+ *     tournament_economy_notice push при creator cancel/fill expiry)
+ *  K. Client-side notification component [70]-[73] (dedup, close button,
+ *     debit/refund sign rendering, 8s auto-dismiss) — реален import на
+ *     tournamentEconomyNotification(Queue).ts, не source-fragment проверка
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
@@ -26,6 +32,8 @@ import { request } from 'node:http'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import WebSocket from 'ws'
 
 const PASSWORD = 'TournamentEntrySmoke1!'
 const SERVER_READY_TIMEOUT_MS = 30_000
@@ -133,6 +141,40 @@ async function waitFor(
     await sleep(100)
   }
   throw new Error(`Timeout: ${label}`)
+}
+
+// ─── WebSocket helpers (§5/§8 в task spec-а: tournament_economy_notice push) ──
+
+type WsClient = { ws: WebSocket; frames: any[] }
+
+function connectWs(port: number, cookie: string): Promise<WsClient> {
+  return new Promise((resolveOpen, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { Cookie: cookie } })
+    const frames: any[] = []
+    ws.on('message', (data) => {
+      try { frames.push(JSON.parse(data.toString())) } catch { /* ignore non-JSON frames */ }
+    })
+    ws.once('open', () => resolveOpen({ ws, frames }))
+    ws.once('error', reject)
+  })
+}
+
+function closeWs(client: WsClient): void {
+  try { client.ws.close() } catch { /* ignore */ }
+}
+
+async function waitForFrame(
+  client: WsClient,
+  predicate: (frame: any) => boolean,
+  timeoutMs = 10_000,
+): Promise<any | null> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const found = client.frames.find(predicate)
+    if (found !== undefined) return found
+    await sleep(100)
+  }
+  return null
 }
 
 // ─── Сървър helpers ─────────────────────────────────────────────────────────
@@ -269,6 +311,55 @@ async function registerAndGetCookie(port: number, runId: string, suffix: string)
   const rawCookie = headersExt.getSetCookie?.()[0] ?? res.headers.get('set-cookie')
   if (!rawCookie) throw new Error('Липсва Set-Cookie при регистрация.')
   return rawCookie.split(';')[0]!
+}
+
+async function registerAndGetProfile(port: number, runId: string, suffix: string): Promise<{ cookie: string; profileId: string }> {
+  const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: smokeEmail(runId, suffix),
+      password: PASSWORD,
+      displayName: `Smoke ${suffix}`,
+      gender: 'male',
+    }),
+  })
+  if (res.status !== 200) throw new Error(`Регистрацията върна status ${res.status}.`)
+  const payload = await res.json() as { ok?: boolean; message?: string; session?: { profile?: { profileId?: string } } }
+  if (!payload.ok) throw new Error(`Регистрацията не е успешна: ${payload.message ?? '?'}`)
+  const headersExt = res.headers as Headers & { getSetCookie?: () => string[] }
+  const rawCookie = headersExt.getSetCookie?.()[0] ?? res.headers.get('set-cookie')
+  if (!rawCookie) throw new Error('Липсва Set-Cookie при регистрация.')
+  const profileId = payload.session?.profile?.profileId
+  if (!profileId) throw new Error('Липсва profileId при регистрация.')
+  return { cookie: rawCookie.split(';')[0]!, profileId }
+}
+
+async function establishFriendship(
+  port: number,
+  requesterCookie: string,
+  addresseeCookie: string,
+  addresseeProfileId: string,
+): Promise<void> {
+  const sendResult = await httpRequest(port, '/api/friends/request', 'POST', requesterCookie, {
+    profileId: addresseeProfileId,
+  })
+  if (sendResult.status !== 200 || !sendResult.body.ok) {
+    throw new Error(`friend request failed: ${JSON.stringify(sendResult.body)}`)
+  }
+  const incoming = await httpRequest(port, '/api/friends', 'GET', addresseeCookie)
+  if (incoming.status !== 200 || !incoming.body.ok) {
+    throw new Error(`friends list failed: ${JSON.stringify(incoming.body)}`)
+  }
+  const pending = incoming.body.friendships.incomingPending as Array<{ friendshipId: string }>
+  if (pending.length !== 1) {
+    throw new Error(`expected exactly 1 incoming friend request, got ${pending.length}`)
+  }
+  const friendshipId = pending[0]!.friendshipId
+  const acceptResult = await httpRequest(port, `/api/friends/${friendshipId}/accept`, 'POST', addresseeCookie)
+  if (acceptResult.status !== 200 || !acceptResult.body.ok) {
+    throw new Error(`friend accept failed: ${JSON.stringify(acceptResult.body)}`)
+  }
 }
 
 async function createSecondProfileCookieForAccount(
@@ -947,12 +1038,319 @@ try {
     // Аналогично на [56] — payout логиката не е реализирана в този commit.
   })
 
+  // ═══ J. Server-authoritative economy notifications (§3-§7 в popup task spec-а) ═══
+  // Debit известията (join / partner invite create / accept) идват directly
+  // от authoritative HTTP response-а на действащия клиент — тук проверяваме
+  // самото поле debitedAmount. Server-initiated refund известията (creator
+  // cancel / fill expiry) минават през реален WebSocket push — тук отваряме
+  // истински WS връзки към спавнатия сървър и четем реалните frame-ове.
+
+  await check('[58] Successful solo join response carries the exact debited amount (entry_fee_paid notice source)', async () => {
+    const creatorCookie = await registerAndGetCookie(port, runId, 'noticeJoinCreator')
+    const t = await createTournament(port, creatorCookie, { name: 'Notice join', entryFee: 20000 })
+    const p = await registerAndGetCookie(port, runId, 'noticeJoinP')
+    const r = await httpRequest(port, `/api/tournaments/${t.tournamentId}/join`, 'POST', p, {})
+    assert(r.status === 200, `join failed: ${JSON.stringify(r.body)}`)
+    assert(r.body.debitedAmount === 20000, `debitedAmount=${r.body.debitedAmount}, expected 20000`)
+  })
+
+  await check('[59] Failed join (insufficient funds) carries no debitedAmount', async () => {
+    const creatorCookie = await registerAndGetCookie(port, runId, 'noticeFailCreator')
+    const t = await createTournament(port, creatorCookie, { name: 'Notice fail', entryFee: 100000 })
+    const p = await registerAndGetCookie(port, runId, 'noticeFailP')
+    const balanceBefore = await getWalletBalance(port, p)
+    if (balanceBefore >= 100000) return // виж [13]-[15]: пропуска се ако стартовият баланс е достатъчен
+    const r = await httpRequest(port, `/api/tournaments/${t.tournamentId}/join`, 'POST', p, {})
+    assert(r.status === 402, `status=${r.status}`)
+    assert(r.body.debitedAmount === undefined, `debitedAmount присъства при неуспешен join: ${r.body.debitedAmount}`)
+  })
+
+  await check('[60]-[61] Partner inviter is debited only on the first invite (not from an already-confirmed entry)', async () => {
+    const inviter = await registerAndGetProfile(port, runId, 'noticeInviter')
+    const invitee1 = await registerAndGetProfile(port, runId, 'noticeInvitee1')
+    const invitee2 = await registerAndGetProfile(port, runId, 'noticeInvitee2')
+    await establishFriendship(port, inviter.cookie, invitee1.cookie, invitee1.profileId)
+    await establishFriendship(port, inviter.cookie, invitee2.cookie, invitee2.profileId)
+    const creatorCookie = await registerAndGetCookie(port, runId, 'noticeInviteCreator')
+    const t = await createTournament(port, creatorCookie, { name: 'Notice invite', entryFee: 10000 })
+
+    const balanceBeforeInvite1 = await getWalletBalance(port, inviter.cookie)
+    const invite1 = await httpRequest(port, `/api/tournaments/${t.tournamentId}/partner-invites`, 'POST', inviter.cookie, {
+      inviteeProfileId: invitee1.profileId,
+    })
+    assert(invite1.status === 200, `invite1 failed: ${JSON.stringify(invite1.body)}`)
+    assert(invite1.body.debitedAmount === 10000, `invite1 debitedAmount=${invite1.body.debitedAmount}, expected 10000 (first-time inviter debit)`)
+    const balanceAfterInvite1 = await getWalletBalance(port, inviter.cookie)
+    assert(balanceBeforeInvite1 - balanceAfterInvite1 === 10000, 'inviter balance did not change by exactly the entry fee')
+
+    // Invitee1 decline-ва, за да може inviter-ът да опита пак с invitee2, все
+    // още като confirmed solo entry (виж resetFormingTeamToSolo).
+    const decline = await httpRequest(port, `/api/tournaments/${t.tournamentId}/partner-invites/${invite1.body.invite.inviteId}/decline`, 'POST', invitee1.cookie)
+    assert(decline.status === 200, `decline failed: ${JSON.stringify(decline.body)}`)
+
+    const balanceBeforeInvite2 = await getWalletBalance(port, inviter.cookie)
+    const invite2 = await httpRequest(port, `/api/tournaments/${t.tournamentId}/partner-invites`, 'POST', inviter.cookie, {
+      inviteeProfileId: invitee2.profileId,
+    })
+    assert(invite2.status === 200, `invite2 failed: ${JSON.stringify(invite2.body)}`)
+    assert(invite2.body.debitedAmount === undefined, `invite2 debitedAmount=${invite2.body.debitedAmount}, expected undefined (inviter already confirmed, no new debit)`)
+    const balanceAfterInvite2 = await getWalletBalance(port, inviter.cookie)
+    assert(balanceBeforeInvite2 === balanceAfterInvite2, 'inviter balance changed on a no-debit invite creation')
+  })
+
+  await check('[62] Invite recipient is debited exactly once on accept, isolated from the inviter\'s own debit', async () => {
+    const inviter = await registerAndGetProfile(port, runId, 'noticeAcceptInviter')
+    const invitee = await registerAndGetProfile(port, runId, 'noticeAcceptInvitee')
+    await establishFriendship(port, inviter.cookie, invitee.cookie, invitee.profileId)
+    const creatorCookie = await registerAndGetCookie(port, runId, 'noticeAcceptCreator')
+    const t = await createTournament(port, creatorCookie, { name: 'Notice accept', entryFee: 10000 })
+
+    const invite = await httpRequest(port, `/api/tournaments/${t.tournamentId}/partner-invites`, 'POST', inviter.cookie, {
+      inviteeProfileId: invitee.profileId,
+    })
+    assert(invite.status === 200, `invite failed: ${JSON.stringify(invite.body)}`)
+
+    const inviterBalanceBeforeAccept = await getWalletBalance(port, inviter.cookie)
+    const inviteeBalanceBeforeAccept = await getWalletBalance(port, invitee.cookie)
+    const accept = await httpRequest(port, `/api/tournaments/${t.tournamentId}/partner-invites/${invite.body.invite.inviteId}/accept`, 'POST', invitee.cookie)
+    assert(accept.status === 200, `accept failed: ${JSON.stringify(accept.body)}`)
+    assert(accept.body.debitedAmount === 10000, `accept debitedAmount=${accept.body.debitedAmount}, expected 10000`)
+
+    const inviterBalanceAfterAccept = await getWalletBalance(port, inviter.cookie)
+    const inviteeBalanceAfterAccept = await getWalletBalance(port, invitee.cookie)
+    assert(inviterBalanceAfterAccept === inviterBalanceBeforeAccept, 'inviter balance changed during recipient accept — recipient debit leaked to inviter')
+    assert(inviteeBalanceBeforeAccept - inviteeBalanceAfterAccept === 10000, 'recipient balance did not change by exactly the entry fee')
+  })
+
+  await check('[63] Repeated idempotent join/accept carry no second debitedAmount', async () => {
+    const p = await registerAndGetCookie(port, runId, 'noticeIdemJoinP')
+    const joinCreatorCookie = await registerAndGetCookie(port, runId, 'noticeIdemJoinCreator')
+    const t1 = await createTournament(port, joinCreatorCookie, { name: 'Notice idem join' })
+    const join1 = await httpRequest(port, `/api/tournaments/${t1.tournamentId}/join`, 'POST', p, {})
+    assert(join1.status === 200 && join1.body.debitedAmount !== undefined, 'first join missing debitedAmount')
+    const join2 = await httpRequest(port, `/api/tournaments/${t1.tournamentId}/join`, 'POST', p, {})
+    assert(join2.status === 200 && join2.body.alreadyJoined === true, 'second join not idempotent')
+    assert(join2.body.debitedAmount === undefined, `retry join debitedAmount=${join2.body.debitedAmount}, expected undefined`)
+
+    const inviter = await registerAndGetProfile(port, runId, 'noticeIdemAcceptInviter')
+    const invitee = await registerAndGetProfile(port, runId, 'noticeIdemAcceptInvitee')
+    await establishFriendship(port, inviter.cookie, invitee.cookie, invitee.profileId)
+    const acceptCreatorCookie = await registerAndGetCookie(port, runId, 'noticeIdemAcceptCreator')
+    const t2 = await createTournament(port, acceptCreatorCookie, { name: 'Notice idem accept' })
+    const invite = await httpRequest(port, `/api/tournaments/${t2.tournamentId}/partner-invites`, 'POST', inviter.cookie, { inviteeProfileId: invitee.profileId })
+    assert(invite.status === 200, 'invite failed')
+    const accept1 = await httpRequest(port, `/api/tournaments/${t2.tournamentId}/partner-invites/${invite.body.invite.inviteId}/accept`, 'POST', invitee.cookie)
+    assert(accept1.status === 200 && accept1.body.debitedAmount !== undefined, 'first accept missing debitedAmount')
+    const accept2 = await httpRequest(port, `/api/tournaments/${t2.tournamentId}/partner-invites/${invite.body.invite.inviteId}/accept`, 'POST', invitee.cookie)
+    assert(accept2.status === 200 && accept2.body.alreadyResolved === true, 'second accept not idempotent')
+    assert(accept2.body.debitedAmount === undefined, `retry accept debitedAmount=${accept2.body.debitedAmount}, expected undefined`)
+  })
+
+  await check('[64] Voluntary withdrawal carries the exact refunded amount for the refund notice', async () => {
+    const p = await registerAndGetCookie(port, runId, 'noticeWithdrawP')
+    const withdrawCreatorCookie = await registerAndGetCookie(port, runId, 'noticeWithdrawCreator')
+    const t = await createTournament(port, withdrawCreatorCookie, { name: 'Notice withdraw', entryFee: 5000 })
+    const join = await httpRequest(port, `/api/tournaments/${t.tournamentId}/join`, 'POST', p, {})
+    assert(join.status === 200, 'join failed')
+    const leave = await httpRequest(port, `/api/tournaments/${t.tournamentId}/leave`, 'POST', p)
+    assert(leave.status === 200 && leave.body.alreadyRefunded === false, 'leave not a fresh refund')
+    assert(leave.body.refundedAmount === 5000, `refundedAmount=${leave.body.refundedAmount}, expected 5000`)
+  })
+
+  await check('[65]-[68] Creator cancellation pushes a personalized tournament_economy_notice to every refunded online participant (incl. the creator), skips non-refunded profiles, and leaks nothing extra', async () => {
+    const creator = await registerAndGetProfile(port, runId, 'noticeCancelCreator')
+    const p1 = await registerAndGetProfile(port, runId, 'noticeCancelP1')
+    const p2 = await registerAndGetProfile(port, runId, 'noticeCancelP2')
+    const outsider = await registerAndGetProfile(port, runId, 'noticeCancelOutsider')
+
+    const t = await createTournament(port, creator.cookie, { name: 'Notice cancel ws', entryFee: 10000 })
+    // Създателят също се записва — трябва и той да получи refund известие.
+    assert((await httpRequest(port, `/api/tournaments/${t.tournamentId}/join`, 'POST', creator.cookie, {})).status === 200, 'creator join failed')
+    assert((await httpRequest(port, `/api/tournaments/${t.tournamentId}/join`, 'POST', p1.cookie, {})).status === 200, 'p1 join failed')
+    assert((await httpRequest(port, `/api/tournaments/${t.tournamentId}/join`, 'POST', p2.cookie, {})).status === 200, 'p2 join failed')
+
+    const creatorWs = await connectWs(port, creator.cookie)
+    const p1Ws = await connectWs(port, p1.cookie)
+    const p2Ws = await connectWs(port, p2.cookie)
+    const outsiderWs = await connectWs(port, outsider.cookie)
+
+    try {
+      const cancel = await httpRequest(port, `/api/tournaments/${t.tournamentId}/cancel`, 'POST', creator.cookie)
+      assert(cancel.status === 200, `cancel failed: ${JSON.stringify(cancel.body)}`)
+
+      const isNoticeForThisTournament = (f: any): boolean => f.type === 'tournament_economy_notice' && f.tournamentId === t.tournamentId
+      const creatorFrame = await waitForFrame(creatorWs, isNoticeForThisTournament)
+      const p1Frame = await waitForFrame(p1Ws, isNoticeForThisTournament)
+      const p2Frame = await waitForFrame(p2Ws, isNoticeForThisTournament)
+
+      assert(creatorFrame !== null, '[65] creator did not receive tournament_economy_notice despite being refunded')
+      assert(p1Frame !== null, 'p1 did not receive tournament_economy_notice')
+      assert(p2Frame !== null, 'p2 did not receive tournament_economy_notice')
+
+      for (const frame of [creatorFrame, p1Frame, p2Frame]) {
+        assert(frame.reason === 'creator_cancelled', `[65] reason=${frame.reason}`)
+        assert(frame.amount === 10000, `[65] amount=${frame.amount}, expected 10000`)
+        assert(typeof frame.eventId === 'string' && frame.eventId.length > 0, '[65] missing eventId')
+        assert(typeof frame.occurredAt === 'string' && frame.occurredAt.length > 0, '[65] missing occurredAt')
+      }
+
+      // [66]: профил без реален refund (никога не е join-вал турнира) не
+      // получава нищо за него — изчакваме кратко за да сме сигурни, че не е
+      // просто закъсняло.
+      await sleep(500)
+      const outsiderFrame = outsiderWs.frames.find(isNoticeForThisTournament)
+      assert(outsiderFrame === undefined, '[66] outsider unexpectedly received a refund notice for a tournament they never joined')
+
+      // [67]-[68]: payload съдържа само документираните полета — без
+      // password, без чужд profileId/баланс.
+      const keys = Object.keys(creatorFrame).sort()
+      assert(
+        JSON.stringify(keys) === JSON.stringify(['amount', 'eventId', 'occurredAt', 'reason', 'tournamentId', 'type']),
+        `[67] unexpected payload keys: ${JSON.stringify(keys)}`,
+      )
+      const raw = JSON.stringify(creatorFrame)
+      assert(!raw.toLowerCase().includes('password'), '[68] payload leaks a password-related field')
+      assert(!raw.includes(p1.profileId) && !raw.includes(p2.profileId), '[68] payload leaks another profile id')
+    } finally {
+      closeWs(creatorWs)
+      closeWs(p1Ws)
+      closeWs(p2Ws)
+      closeWs(outsiderWs)
+    }
+  })
+
+  await check('[69] Fill expiry pushes tournament_economy_notice with reason=fill_expired and the correct refund amount', async () => {
+    const creator = await registerAndGetProfile(port, runId, 'noticeExpiryCreator')
+    const p = await registerAndGetProfile(port, runId, 'noticeExpiryP')
+    const t = await createTournament(port, creator.cookie, { name: 'Notice expiry ws', entryFee: 5000, startMode: 'fill' })
+    const join = await httpRequest(port, `/api/tournaments/${t.tournamentId}/join`, 'POST', p.cookie, {})
+    assert(join.status === 200, 'join failed')
+
+    const pWs = await connectWs(port, p.cookie)
+    try {
+      const sqliteModule = await import('node:sqlite')
+      const database = new sqliteModule.DatabaseSync(isolated.databaseFile, {
+        open: true,
+        enableForeignKeyConstraints: true,
+      })
+      try {
+        database.prepare(`UPDATE tournaments SET fill_expires_at = datetime('now', '-1 hours') WHERE tournament_id = ?;`).run(t.tournamentId)
+      } finally {
+        database.close()
+      }
+
+      const frame = await waitForFrame(
+        pWs,
+        (f) => f.type === 'tournament_economy_notice' && f.tournamentId === t.tournamentId,
+        15_000,
+      )
+      assert(frame !== null, 'participant did not receive fill_expired tournament_economy_notice in time')
+      assert(frame.reason === 'fill_expired', `reason=${frame.reason}`)
+      assert(frame.amount === 5000, `amount=${frame.amount}, expected 5000`)
+    } finally {
+      closeWs(pWs)
+    }
+  })
+
   console.log('\n[cleanup] Спиране на сървъра и изтриване на временните файлове...')
 } finally {
   if (server) await stopServer(server)
   await isolated.cleanup()
   console.log('  Сървърът е спрян.')
   console.log('  Временните файлове са изтрити.')
+}
+
+// ═══ K. Client-side notification component (§6-§7 в popup task spec-а) ═══
+// Директен import на реалните клиентски модули — не текстови source-fragment
+// проверки. tournamentEconomyNotificationQueue.ts е чист state machine без
+// DOM зависимости; tournamentEconomyNotification.ts борави само с container
+// обекта, подаден му отвън (duck-typed HTMLElement), затова изпълнява се
+// directly в Node (под tsx) без jsdom/browser environment.
+{
+  console.log('\n[client] Проверка на tournamentEconomyNotification(Queue).ts...')
+  const projectRoot = resolve(sourceServerRoot, '..')
+  const queueModuleUrl = pathToFileURL(
+    join(projectRoot, 'src', 'ui', 'notifications', 'tournamentEconomyNotificationQueue.ts'),
+  ).href
+  const notificationModuleUrl = pathToFileURL(
+    join(projectRoot, 'src', 'ui', 'notifications', 'tournamentEconomyNotification.ts'),
+  ).href
+  const queueModule = await import(queueModuleUrl) as {
+    createTournamentEconomyNotificationQueue: () => {
+      handleIncoming: (notice: { eventId: string; reason: string; amount: number }) => { action: 'show' | 'queue' | 'skip' }
+    }
+  }
+  const notificationModule = await import(notificationModuleUrl) as {
+    createTournamentEconomyNotification: (options: { container: unknown }) => {
+      handleIncoming: (notice: { eventId: string; reason: string; amount: number }) => void
+      destroy: () => void
+    }
+  }
+
+  await check('[70] Client-side dedup: the same eventId is never shown twice', () => {
+    const queue = queueModule.createTournamentEconomyNotificationQueue()
+    const first = queue.handleIncoming({ eventId: 'dedup-1', reason: 'entry_fee_paid', amount: 1000 })
+    assert(first.action === 'show', `first action=${first.action}`)
+    const second = queue.handleIncoming({ eventId: 'dedup-1', reason: 'entry_fee_paid', amount: 1000 })
+    assert(second.action === 'skip', `duplicate eventId action=${second.action}, expected skip`)
+  })
+
+  function makeFakeContainer(): { container: unknown; state: { innerHTML: string; closeHandler: (() => void) | null } } {
+    const state: { innerHTML: string; closeHandler: (() => void) | null } = { innerHTML: '', closeHandler: null }
+    const container = {
+      get innerHTML() { return state.innerHTML },
+      set innerHTML(value: string) { state.innerHTML = value },
+      querySelector(selector: string) {
+        if (selector === '#tournament-economy-notif-close-btn') {
+          return { addEventListener: (_event: string, cb: () => void) => { state.closeHandler = cb } }
+        }
+        return null
+      },
+    }
+    return { container, state }
+  }
+
+  await check('[71] Close button ("×") dismisses the notification immediately', () => {
+    const { container, state } = makeFakeContainer()
+    const notif = notificationModule.createTournamentEconomyNotification({ container })
+    notif.handleIncoming({ eventId: 'close-1', reason: 'participant_withdrawal', amount: 500 })
+    assert(state.innerHTML !== '', 'notification did not render')
+    assert(state.closeHandler !== null, 'close button handler was not attached')
+    state.closeHandler!()
+    assert(state.innerHTML === '', 'close button did not dismiss the notification')
+    notif.destroy()
+  })
+
+  await check('[72] Debit amount renders with the math minus sign, refund with a plus sign', () => {
+    const { container, state } = makeFakeContainer()
+    const notif = notificationModule.createTournamentEconomyNotification({ container })
+    const expectedAmountText = new Intl.NumberFormat('bg-BG').format(10000)
+
+    notif.handleIncoming({ eventId: 'sign-debit-1', reason: 'entry_fee_paid', amount: 10000 })
+    assert(state.innerHTML.includes(`−${expectedAmountText}`), `debit math-minus sign missing, html=${state.innerHTML}`)
+    assert(!state.innerHTML.includes(`-${expectedAmountText}`), 'debit uses hyphen-minus instead of the math minus sign')
+    state.closeHandler!()
+
+    notif.handleIncoming({ eventId: 'sign-refund-1', reason: 'creator_cancelled', amount: 10000 })
+    assert(state.innerHTML.includes(`+${expectedAmountText}`), `refund plus sign missing, html=${state.innerHTML}`)
+    notif.destroy()
+  })
+
+  await check('[73] Popup auto-dismisses after exactly the 8-second timeout', async () => {
+    const { container, state } = makeFakeContainer()
+    const notif = notificationModule.createTournamentEconomyNotification({ container })
+    notif.handleIncoming({ eventId: 'timeout-1', reason: 'fill_expired', amount: 2000 })
+    assert(state.innerHTML !== '', 'notification did not render')
+    const shownAt = Date.now()
+    const deadline = shownAt + 9_500
+    while (state.innerHTML !== '' && Date.now() < deadline) {
+      await sleep(100)
+    }
+    const elapsedMs = Date.now() - shownAt
+    assert(state.innerHTML === '', `notification never auto-dismissed within ${elapsedMs}ms`)
+    assert(elapsedMs >= 7_700 && elapsedMs <= 9_500, `auto-dismiss elapsed=${elapsedMs}ms, expected ~8000ms`)
+    notif.destroy()
+  })
 }
 
 console.log('\n' + '═'.repeat(64))

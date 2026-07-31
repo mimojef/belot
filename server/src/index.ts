@@ -1865,6 +1865,29 @@ function sendTournamentMatchAssignment(
   })
 }
 
+// Server-authoritative refund push (§4/§5 в task spec-а) — само след реално
+// committed refund (per-profile сумите идват directly от economy store
+// резултата, никога преизчислени тук). Изпраща се само до online
+// connections за всеки реално refund-нат профил; офлайн профили не получават
+// нищо ретроактивно. eventId е уникален per push (client-side dedup).
+function sendTournamentEconomyRefundNotices(
+  tournamentId: string,
+  reason: 'creator_cancelled' | 'fill_expired',
+  refundedProfiles: Array<{ profileId: string; amount: number }>,
+): void {
+  const occurredAt = new Date().toISOString()
+  for (const { profileId, amount } of refundedProfiles) {
+    sendToOpenProfileConnections(profileId, {
+      type: 'tournament_economy_notice',
+      eventId: randomUUID(),
+      tournamentId,
+      reason,
+      amount,
+      occurredAt,
+    })
+  }
+}
+
 function cleanupTempBotsFromRoom(room: ServerRoom): void {
   for (const seat of SERVER_SEAT_ORDER) {
     const participant = room.seats[seat].participant
@@ -6400,6 +6423,7 @@ async function handleTournamentPartnerInviteCreateRequest(
   }
   sendJsonResponse(res, 200, {
     ok: true,
+    debitedAmount: result.debitedAmount,
     invite: buildTournamentPartnerInviteDto(result.invite),
     walletBalance: result.walletBalance,
     tournament: buildTournamentSummaryDto(result.tournament, authResult.profileId),
@@ -6454,6 +6478,7 @@ async function handleTournamentPartnerInviteActionRequest(
   sendJsonResponse(res, 200, {
     ok: true,
     alreadyResolved: result.alreadyResolved === true,
+    debitedAmount: result.debitedAmount,
     invite: buildTournamentPartnerInviteDto(result.invite),
     walletBalance: result.walletBalance,
     tournament: buildTournamentSummaryDto(result.tournament, authResult.profileId),
@@ -6546,6 +6571,7 @@ async function handleTournamentJoinRequest(
   sendJsonResponse(res, 200, {
     ok: true,
     alreadyJoined: result.alreadyJoined,
+    debitedAmount: result.debitedAmount,
     entry: {
       entryId: result.entry.entryId,
       status: result.entry.status,
@@ -6709,6 +6735,9 @@ async function handleTournamentCancelRequest(
     walletBalance: result.walletBalance,
     tournament: buildTournamentSummaryDto(result.tournament, profileId),
   })
+  if (!result.alreadyCancelled && result.refundedProfiles.length > 0) {
+    sendTournamentEconomyRefundNotices(tournamentId, 'creator_cancelled', result.refundedProfiles)
+  }
   return true
 }
 
@@ -11351,6 +11380,9 @@ try {
     databaseFilePath: databaseBootstrap.databaseFilePath,
     economyStore: tournamentEconomyStore,
     logError: (message, error) => console.error(message, sanitizeErrorMessage(error)),
+    notifyEconomyRefunds: (tournamentId, refundedProfiles) => {
+      sendTournamentEconomyRefundNotices(tournamentId, 'fill_expired', refundedProfiles)
+    },
   })
   tournamentScheduler.start()
   console.log('[tournament-scheduler] Scheduler started')

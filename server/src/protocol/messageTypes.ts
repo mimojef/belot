@@ -40,6 +40,22 @@ export type TournamentFeederScoreProgressMessage = {
   status: 'in_progress'
 }
 
+// Server-initiated entry-fee refund notice (§4 в task spec-а) — изпраща се
+// само до реално refund-нати online профили при creator cancellation или
+// fill-expiry auto-cancel. Debit-нотификациите (join/partner invite create
+// или accept) НЕ минават оттук — те се показват директно от authoritative
+// HTTP response-а на действащия клиент, за да няма двойно известие.
+// eventId е уникален per push и служи за client-side dedup (виж
+// tournamentEconomyNotificationQueue.ts на клиента).
+export type TournamentEconomyNoticeMessage = {
+  type: 'tournament_economy_notice'
+  eventId: string
+  tournamentId: string
+  reason: 'creator_cancelled' | 'fill_expired'
+  amount: number
+  occurredAt: string
+}
+
 export type ClientBidAction =
   | {
       type: 'pass'
@@ -779,6 +795,7 @@ export type ServerMessage =
   | TournamentMatchAssignedMessage
   | TournamentFeederMatchCompletedMessage
   | TournamentFeederScoreProgressMessage
+  | TournamentEconomyNoticeMessage
   | LobbyChatHistoryMessage
   | LobbyChatMessageReceivedMessage
   | LobbyChatMessageDeletedMessage

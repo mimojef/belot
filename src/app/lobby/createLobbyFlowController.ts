@@ -1,4 +1,5 @@
 import { formatGiftLimitError } from './formatGiftLimitError'
+import type { TournamentEconomyNoticeReason } from '../../ui/notifications/tournamentEconomyNotificationQueue.js'
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes.js'
 import { isAdminPaymentPeriod } from '../adminPayments/adminPaymentsTypes.js'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes.js'
@@ -524,7 +525,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string; requiresPassword?: boolean }
   >
   onTournamentJoin?: (tournamentId: string, password: string | null) => Promise<
-    | { ok: true; alreadyJoined: boolean; walletBalance: number; tournament: TournamentSummarySnapshot }
+    | { ok: true; alreadyJoined: boolean; debitedAmount?: number; walletBalance: number; tournament: TournamentSummarySnapshot }
     | { ok: false; message: string; reason?: string; requiresPassword?: boolean }
   >
   onTournamentLeave?: (tournamentId: string) => Promise<
@@ -561,7 +562,7 @@ export type CreateLobbyFlowControllerOptions = {
     inviteeProfileId: string,
     password: string | null,
   ) => Promise<
-    | { ok: true; invite: TournamentPartnerInviteSnapshot; walletBalance: number; tournament: TournamentSummarySnapshot }
+    | { ok: true; debitedAmount?: number; invite: TournamentPartnerInviteSnapshot; walletBalance: number; tournament: TournamentSummarySnapshot }
     | { ok: false; message: string; reason?: string; requiresPassword?: boolean }
   >
   onTournamentPartnerInviteRespond?: (
@@ -569,10 +570,17 @@ export type CreateLobbyFlowControllerOptions = {
     inviteId: string,
     action: 'accept' | 'decline' | 'cancel',
   ) => Promise<
-    | { ok: true; invite: TournamentPartnerInviteSnapshot; walletBalance: number; tournament: TournamentSummarySnapshot }
+    | { ok: true; alreadyResolved?: boolean; debitedAmount?: number; invite: TournamentPartnerInviteSnapshot; walletBalance: number; tournament: TournamentSummarySnapshot }
     | { ok: false; message: string; reason?: string }
   >
   onTournamentEnterActiveMatch?: (roomId: string, reconnectToken: string) => void
+  /** Server-authoritative debit/refund toast (§3-§7 в task spec-а) — извиква
+   * се САМО след потвърден нов debit/refund от authoritative HTTP response
+   * (join / partner invite create-debit / accept-debit / withdrawal).
+   * Creator cancellation и fill-expiry идват отделно, directно през WS
+   * (виж tournament_economy_notice в createGameServerClient.ts), за да няма
+   * двойно известие за създателя, ако той самият е бил refund-нат. */
+  onTournamentEconomyNotice?: (notice: { reason: TournamentEconomyNoticeReason; amount: number }) => void
 }
 
 
@@ -4313,6 +4321,14 @@ export function createLobbyFlowController(
 
     const result = await options.onTournamentJoin(tournamentId, state.tournamentDetailVerifiedPassword)
 
+    // Известието е server-authoritative и независимо от текущия екран —
+    // отговорът вече потвърждава реален нов debit (alreadyJoined: false),
+    // затова се показва дори ако потребителят е напуснал detail екрана
+    // междувременно (виж по-долу screen-guard-а, който пази само local state).
+    if (result.ok && !result.alreadyJoined && typeof result.debitedAmount === 'number') {
+      options.onTournamentEconomyNotice?.({ reason: 'entry_fee_paid', amount: result.debitedAmount })
+    }
+
     if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) {
       return
     }
@@ -4370,6 +4386,9 @@ export function createLobbyFlowController(
     state.tournamentPartnerInviteErrorText = null
     render()
     const result = await options.onTournamentPartnerInviteCreate(tournamentId, profileId, state.tournamentDetailVerifiedPassword)
+    if (result.ok && typeof result.debitedAmount === 'number') {
+      options.onTournamentEconomyNotice?.({ reason: 'entry_fee_paid', amount: result.debitedAmount })
+    }
     if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) return
     state.tournamentPartnerInviteBusy = false
     if (!result.ok) {
@@ -4400,6 +4419,9 @@ export function createLobbyFlowController(
       state.tournamentPartnerInviteErrorText = result.message
       render()
       return
+    }
+    if (action === 'accept' && !result.alreadyResolved && typeof result.debitedAmount === 'number') {
+      options.onTournamentEconomyNotice?.({ reason: 'entry_fee_paid', amount: result.debitedAmount })
     }
     if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === tournamentId) {
       mergeTournamentSummaryIntoDetail(result.tournament)
@@ -4434,6 +4456,10 @@ export function createLobbyFlowController(
     render()
 
     const result = await options.onTournamentLeave(tournamentId)
+
+    if (result.ok && !result.alreadyRefunded) {
+      options.onTournamentEconomyNotice?.({ reason: 'participant_withdrawal', amount: result.refundedAmount })
+    }
 
     if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) {
       return

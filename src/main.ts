@@ -79,6 +79,8 @@ import { createFriendRequestNotification } from './ui/notifications/friendReques
 import { createPartnerRatingNotification } from './ui/notifications/partnerRatingNotification'
 import { createChatMessageNotification } from './ui/notifications/chatMessageNotification'
 import { createPrivateRoomCreatedNotification } from './ui/notifications/privateRoomCreatedNotification'
+import { createTournamentEconomyNotification } from './ui/notifications/tournamentEconomyNotification'
+import type { TournamentEconomyNoticeReason } from './ui/notifications/tournamentEconomyNotificationQueue'
 import { createTournamentPartnerInvitePopup } from './ui/notifications/tournamentPartnerInvitePopup'
 import { createTournamentMatchStartPopup } from './ui/notifications/tournamentMatchStartPopup'
 import { createTournamentFeederWaitingStrip, type TournamentFeederWaitingState } from './ui/notifications/tournamentFeederWaitingStrip'
@@ -182,6 +184,14 @@ const privateRoomCreatedNotification = createPrivateRoomCreatedNotification({
   onEnterPrivateRooms: () => {
     lobby?.navigateToPrivateRooms()
   },
+})
+
+const tournamentEconomyNotifContainer = document.createElement('div')
+tournamentEconomyNotifContainer.id = 'global-tournament-economy-notifications'
+document.body.appendChild(tournamentEconomyNotifContainer)
+
+const tournamentEconomyNotification = createTournamentEconomyNotification({
+  container: tournamentEconomyNotifContainer,
 })
 
 const tournamentPartnerInviteNotifContainer = document.createElement('div')
@@ -3459,7 +3469,7 @@ async function joinTournamentRequest(
   tournamentId: string,
   password: string | null,
 ): Promise<
-  | { ok: true; alreadyJoined: boolean; walletBalance: number; tournament: TournamentSummarySnapshot }
+  | { ok: true; alreadyJoined: boolean; debitedAmount?: number; walletBalance: number; tournament: TournamentSummarySnapshot }
   | { ok: false; message: string; reason?: string; requiresPassword?: boolean }
 > {
   try {
@@ -3470,7 +3480,7 @@ async function joinTournamentRequest(
       body: JSON.stringify(password !== null ? { password } : {}),
     })
     const data = (await response.json()) as
-      | { ok: true; alreadyJoined: boolean; walletBalance: number; tournament: TournamentSummarySnapshot }
+      | { ok: true; alreadyJoined: boolean; debitedAmount?: number; walletBalance: number; tournament: TournamentSummarySnapshot }
       | TournamentEntryActionErrorResponse
     if (!response.ok || !data.ok) {
       return {
@@ -3487,7 +3497,13 @@ async function joinTournamentRequest(
       }
       syncLobbyWithAuthSession()
     }
-    return { ok: true, alreadyJoined: data.alreadyJoined, walletBalance: data.walletBalance, tournament: data.tournament }
+    return {
+      ok: true,
+      alreadyJoined: data.alreadyJoined,
+      debitedAmount: data.debitedAmount,
+      walletBalance: data.walletBalance,
+      tournament: data.tournament,
+    }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
   }
@@ -3590,6 +3606,7 @@ type TournamentPartnerInviteActionResponse =
   | {
       ok: true
       alreadyResolved?: boolean
+      debitedAmount?: number
       invite: TournamentPartnerInviteSnapshot
       walletBalance: number
       tournament: TournamentSummarySnapshot
@@ -3964,6 +3981,13 @@ lobby = createLobbyFlowController({
   onPendingTournamentPartnerInvitesLoad: () => loadPendingTournamentPartnerInvites(),
   onTournamentPartnerInviteCreate: (tournamentId, inviteeProfileId, password) => createTournamentPartnerInviteRequest(tournamentId, inviteeProfileId, password),
   onTournamentPartnerInviteRespond: (tournamentId, inviteId, action) => respondTournamentPartnerInviteRequest(tournamentId, inviteId, action),
+  onTournamentEconomyNotice: (notice: { reason: TournamentEconomyNoticeReason; amount: number }) => {
+    tournamentEconomyNotification.handleIncoming({
+      eventId: crypto.randomUUID(),
+      reason: notice.reason,
+      amount: notice.amount,
+    })
+  },
   onTournamentEnterActiveMatch: (roomId, reconnectToken) => {
     showSessionInGameOverlay(roomId, reconnectToken)
   },
@@ -4519,6 +4543,15 @@ client = createGameServerClient({
         creatorDisplayName: message.creatorDisplayName,
         creatorAvatarUrl: message.creatorAvatarUrl,
         recipientInActiveGame: message.recipientInActiveGame,
+      })
+      return
+    }
+
+    if (message.type === 'tournament_economy_notice') {
+      tournamentEconomyNotification.handleIncoming({
+        eventId: message.eventId,
+        reason: message.reason,
+        amount: message.amount,
       })
       return
     }
