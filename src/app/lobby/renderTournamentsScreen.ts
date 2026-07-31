@@ -442,6 +442,38 @@ function renderTournamentRounds(t: TournamentDetailSnapshot): string {
   `
 }
 
+function renderTournamentTeamMemberChip(member: TournamentDetailSnapshot['teams'][number]['members'][number]): string {
+  return `
+    <div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:8px;padding:7px 9px;min-width:0;">
+      <span style="width:26px;height:26px;flex-shrink:0;border-radius:999px;overflow:hidden;background:#171717;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:11px;font-weight:900;">${member.avatarUrl ? `<img src="${escapeHtml(member.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(member.displayName.slice(0, 1).toUpperCase())}</span>
+      <span style="font-size:12px;color:#fff;font-weight:800;overflow-wrap:anywhere;">${escapeHtml(member.displayName)}</span>
+    </div>
+  `
+}
+
+function renderTournamentTeamCard(team: TournamentDetailSnapshot['teams'][number]): string {
+  const isComplete = team.status !== 'forming'
+  return `
+    <div style="border:1px solid ${isComplete ? 'rgba(34,197,94,0.32)' : 'rgba(255,255,255,0.12)'};border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:8px;min-width:0;">
+      <div style="display:flex;flex-wrap:wrap;gap:8px;">
+        ${team.members.map(renderTournamentTeamMemberChip).join('')}
+      </div>
+      <span style="align-self:flex-start;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;color:${isComplete ? '#22c55e' : 'rgba(255,255,255,0.5)'};border:1px solid ${isComplete ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.18)'};border-radius:999px;padding:2px 8px;">${isComplete ? 'Готов отбор' : 'Изчаква партньор'}</span>
+    </div>
+  `
+}
+
+function renderTournamentTeamsList(t: TournamentDetailSnapshot): string {
+  if (t.teams.length === 0) {
+    return '<div style="font-size:13px;color:rgba(255,255,255,0.4);font-style:italic;">Все още няма сформирани отбори.</div>'
+  }
+  return `
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;">
+      ${t.teams.map(renderTournamentTeamCard).join('')}
+    </div>
+  `
+}
+
 export function renderTournamentDetailScreen(state: LobbyScreenState): string {
   if (state.tournamentDetailLoading) {
     return `<section style="padding:0 4px;"><div style="min-height:320px;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:16px;font-weight:800;">Зареждане...</div></section>`
@@ -544,7 +576,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
 
       <div style="background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:16px;margin-bottom:14px;">
         <div style="font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:8px;">Отбори</div>
-        <div style="font-size:13px;color:rgba(255,255,255,0.4);font-style:italic;">Все още няма сформирани отбори.</div>
+        ${renderTournamentTeamsList(t)}
       </div>
 
       <div style="background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:16px;margin-bottom:14px;">
@@ -630,14 +662,20 @@ function renderTournamentParticipationActions(state: LobbyScreenState, t: Tourna
   }
 
   if (t.viewer.isParticipant) {
+    const hasCompleteTeam = t.myTeam !== null && t.myTeam.status !== 'forming'
+    const partner = hasCompleteTeam
+      ? (t.myTeam?.members.find((member) => member.profileId !== state.profile.profileId) ?? null)
+      : null
+    const statusText = hasCompleteTeam ? 'Отборът ти е готов' : 'Записан си самостоятелно'
     return `
       <div style="background:#0d0d0d;border:1px solid rgba(34,197,94,0.32);border-radius:10px;padding:16px;margin-bottom:14px;">
         ${errorBox(state.tournamentLeaveErrorText)}
-        <div style="font-size:14px;font-weight:800;color:#22c55e;margin-bottom:10px;">✓ Записан си самостоятелно</div>
-        <button type="button" data-tournament-leave-open="1" style="
+        <div style="font-size:14px;font-weight:800;color:#22c55e;margin-bottom:10px;">✓ ${escapeHtml(statusText)}</div>
+        ${partner ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:10px;">Твоят партньор е ${escapeHtml(partner.displayName)}.</div>` : ''}
+        ${t.viewer.canLeave ? `<button type="button" data-tournament-leave-open="1" style="
           height:38px;padding:0 18px;border-radius:8px;border:1px solid rgba(248,113,113,0.4);
           background:rgba(127,29,29,0.2);color:#fca5a5;font-size:13px;font-weight:800;cursor:pointer;
-        ">Откажи участие</button>
+        ">Откажи участие</button>` : ''}
         ${t.viewer.canCancel ? renderCreatorCancelBlock(state) : ''}
       </div>
     `
