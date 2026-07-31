@@ -67,8 +67,27 @@ export const TOURNAMENT_PARTNER_INVITE_STATUSES = [
 ] as const
 export type TournamentPartnerInviteStatus = (typeof TOURNAMENT_PARTNER_INVITE_STATUSES)[number]
 
-export const TOURNAMENT_ROUND_TYPES = ['semifinal', 'final'] as const
+export const TOURNAMENT_ROUND_TYPES = ['round_of_16', 'quarterfinal', 'semifinal', 'final'] as const
 export type TournamentRoundType = (typeof TOURNAMENT_ROUND_TYPES)[number]
+
+// Bracket ladder по team capacity — редът, в който се изиграват кръговете.
+// Единственият generic bracket shape, който продуктът поддържа: single-
+// elimination, без мач за трето място (виж §5 в task spec-а). Ladder-ът е
+// keyed по TEAM capacity (не player capacity), защото самите round types
+// описват брой ОТБОРИ, не играчи.
+export const TOURNAMENT_ROUND_LADDER_BY_TEAM_CAPACITY: Record<4 | 8 | 16, readonly TournamentRoundType[]> = {
+  4: ['semifinal', 'final'],
+  8: ['quarterfinal', 'semifinal', 'final'],
+  16: ['round_of_16', 'quarterfinal', 'semifinal', 'final'],
+}
+
+export function getTournamentRoundLadder(teamCapacity: number): readonly TournamentRoundType[] {
+  const ladder = TOURNAMENT_ROUND_LADDER_BY_TEAM_CAPACITY[teamCapacity as 4 | 8 | 16]
+  if (ladder === undefined) {
+    throw new Error(`Unsupported tournament team capacity: ${teamCapacity}`)
+  }
+  return ladder
+}
 
 export const TOURNAMENT_MATCH_STATUSES = [
   'awaiting_players',

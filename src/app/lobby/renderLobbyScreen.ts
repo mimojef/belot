@@ -10442,6 +10442,7 @@ export function renderLobbyScreen(
     const scheduledField = root.querySelector<HTMLElement>('[data-tournament-create-scheduled-field="1"]')
     const fillField = root.querySelector<HTMLElement>('[data-tournament-create-fill-field="1"]')
     const entryFeeSelect = root.querySelector<HTMLSelectElement>('[data-tournament-create-entryfee="1"]')
+    const teamCapacitySelect = root.querySelector<HTMLSelectElement>('[data-tournament-create-teamcapacity="1"]')
     const previewBox = root.querySelector<HTMLElement>('[data-tournament-create-preview="1"]')
 
     function syncVisibilityFields(): void {
@@ -10453,20 +10454,27 @@ export function renderLobbyScreen(
       if (scheduledField) scheduledField.style.display = selected === 'scheduled' ? 'block' : 'none'
       if (fillField) fillField.style.display = selected === 'fill' ? 'block' : 'none'
     }
+    // Огледало на server calculateTournamentPrizePreview (20%/80%/65%/35%,
+    // виж tournamentPrizeRules.ts) — playerCapacity = teamCapacity * 2,
+    // никога хардкоднато на 8.
     function syncPrizePreview(): void {
       if (!previewBox || !entryFeeSelect) return
       const entryFee = Number(entryFeeSelect.value) || 0
-      const totalEntryFees = entryFee * 8
+      const teamCapacity = Number(teamCapacitySelect?.value) || 4
+      const playerCapacity = teamCapacity * 2
+      const totalEntryFees = entryFee * playerCapacity
       const systemFee = Math.trunc(totalEntryFees * 0.2)
       const prizePool = totalEntryFees - systemFee
       const firstTeamPrize = Math.trunc(prizePool * 0.65)
       const secondTeamPrize = prizePool - firstTeamPrize
       const fmt = (n: number) => new Intl.NumberFormat('bg-BG').format(n)
+      const participantsEl = previewBox.querySelector('[data-preview-participants] span:last-child')
       const totalEl = previewBox.querySelector('[data-preview-total] span:last-child')
       const feeEl = previewBox.querySelector('[data-preview-fee] span:last-child')
       const poolEl = previewBox.querySelector('[data-preview-pool] span:last-child')
       const firstEl = previewBox.querySelector('[data-preview-first] span:last-child')
       const secondEl = previewBox.querySelector('[data-preview-second] span:last-child')
+      if (participantsEl) participantsEl.textContent = String(playerCapacity)
       if (totalEl) totalEl.textContent = fmt(totalEntryFees)
       if (feeEl) feeEl.textContent = fmt(systemFee)
       if (poolEl) poolEl.textContent = fmt(prizePool)
@@ -10477,6 +10485,7 @@ export function renderLobbyScreen(
     visibilityRadios.forEach((radio) => radio.addEventListener('change', syncVisibilityFields))
     startModeRadios.forEach((radio) => radio.addEventListener('change', syncStartModeFields))
     entryFeeSelect?.addEventListener('change', syncPrizePreview)
+    teamCapacitySelect?.addEventListener('change', syncPrizePreview)
     syncVisibilityFields()
     syncStartModeFields()
 

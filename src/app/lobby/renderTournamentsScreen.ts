@@ -49,6 +49,9 @@ function formatInviteCountdown(expiresAt: string): string {
 // ── Позволени входни стойности (огледално на server ALLOWED_TOURNAMENT_ENTRY_FEES) ──
 export const TOURNAMENT_ENTRY_FEE_OPTIONS = [5000, 10000, 20000, 50000, 100000] as const
 
+// ── Позволен брой отбори (огледално на server ALLOWED_TOURNAMENT_TEAM_CAPACITIES) ──
+export const TOURNAMENT_TEAM_CAPACITY_OPTIONS = [4, 8, 16] as const
+
 // UTC ISO → стойност за <input type="datetime-local"> (local timezone, без 'Z').
 function isoToDatetimeLocalValue(iso: string): string {
   const d = new Date(iso)
@@ -79,6 +82,19 @@ function startModeLabel(t: TournamentSummarySnapshot): string {
   if (t.startMode === 'fill') return 'При запълване'
   if (t.scheduledStartAt) return fmtLocalDateTime(t.scheduledStartAt)
   return 'Насрочен'
+}
+
+// Динамични "Формат" chips по playerCapacity — огледало на server round
+// ladder-а (getTournamentRoundLadder в tournamentTypes.ts): 4 отбора → 2
+// полуфинала + 1 финал; 8 → 4 четвъртфинала + 2 полуфинала + 1 финал; 16 →
+// 8 осминафинала + 4 четвъртфинала + 2 полуфинала + 1 финал.
+function computeTournamentFormatStages(playerCapacity: number): string[] {
+  const teamCapacity = playerCapacity / 2
+  const stages = [`${playerCapacity} играчи`, `${teamCapacity} отбора`]
+  if (teamCapacity >= 16) stages.push('8 осминафинала')
+  if (teamCapacity >= 8) stages.push('4 четвъртфинала')
+  stages.push('2 полуфинала', '1 финал')
+  return stages
 }
 
 // Форматира ms остатък като "Остават X ч. Y мин. Z сек." (пропуска нулеви по-едри единици).
@@ -231,7 +247,7 @@ function renderTournamentCard(t: TournamentSummarySnapshot): string {
       <div style="display:flex;flex-wrap:wrap;gap:6px;font-size:11px;">
         <span style="background:rgba(212,165,32,0.1);border:1px solid rgba(212,165,32,0.3);border-radius:6px;padding:3px 8px;color:#d4a520;font-weight:800;">${formatAmount(t.entryFee)} вход</span>
         <span style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:3px 8px;color:rgba(255,255,255,0.7);font-weight:800;">${t.confirmedEntriesCount} / ${t.playerCapacity} играчи</span>
-        <span style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:3px 8px;color:rgba(255,255,255,0.7);font-weight:800;">${t.completedTeamsCount} / 4 отбора</span>
+        <span style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:3px 8px;color:rgba(255,255,255,0.7);font-weight:800;">${t.completedTeamsCount} / ${t.playerCapacity / 2} отбора</span>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:rgba(255,255,255,0.45);">
         <span>${escapeHtml(startModeLabel(t))}</span>
@@ -357,7 +373,8 @@ export function renderTournamentsScreen(state: LobbyScreenState): string {
 
 function renderTournamentCreatePopup(state: LobbyScreenState): string {
   const defaultEntryFee = TOURNAMENT_ENTRY_FEE_OPTIONS[0]
-  const preview = computePrizePreview(defaultEntryFee)
+  const defaultTeamCapacity = TOURNAMENT_TEAM_CAPACITY_OPTIONS[0]
+  const preview = computePrizePreview(defaultEntryFee, defaultTeamCapacity * 2)
   const nowPlus30Min = new Date(Date.now() + 30 * 60 * 1000).toISOString()
   const defaultScheduled = isoToDatetimeLocalValue(nowPlus30Min)
   const defaultName = `Турнирът на ${state.profile.displayName || state.displayName || 'Играч'}`
@@ -381,6 +398,13 @@ function renderTournamentCreatePopup(state: LobbyScreenState): string {
           </div>
 
           <div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;">Брой отбори</div>
+            <select name="teamCapacity" data-tournament-create-teamcapacity="1" style="width:100%;box-sizing:border-box;padding:10px 12px;background:#1a1a24;border:1px solid rgba(255,255,255,0.18);border-radius:8px;color:#fff;font-size:14px;color-scheme:dark;">
+              ${TOURNAMENT_TEAM_CAPACITY_OPTIONS.map((teams) => `<option value="${teams}">${teams} отбора</option>`).join('')}
+            </select>
+          </div>
+
+          <div>
             <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;">Вход на играч</div>
             <select name="entryFee" data-tournament-create-entryfee="1" style="width:100%;box-sizing:border-box;padding:10px 12px;background:#1a1a24;border:1px solid rgba(255,255,255,0.18);border-radius:8px;color:#fff;font-size:14px;color-scheme:dark;">
               ${TOURNAMENT_ENTRY_FEE_OPTIONS.map((fee) => `<option value="${fee}">${formatAmount(fee)} жълтици</option>`).join('')}
@@ -388,7 +412,7 @@ function renderTournamentCreatePopup(state: LobbyScreenState): string {
           </div>
 
           <div data-tournament-create-preview="1" style="background:rgba(212,165,32,0.06);border:1px solid rgba(212,165,32,0.24);border-radius:8px;padding:12px;font-size:12px;color:rgba(255,255,255,0.75);display:grid;gap:4px;">
-            <div style="display:flex;justify-content:space-between;"><span>Участници</span><span style="font-weight:800;">8</span></div>
+            <div style="display:flex;justify-content:space-between;" data-preview-participants><span>Участници</span><span style="font-weight:800;">${defaultTeamCapacity * 2}</span></div>
             <div style="display:flex;justify-content:space-between;" data-preview-total><span>Общо входове</span><span style="font-weight:800;">${formatAmount(preview.totalEntryFees)}</span></div>
             <div style="display:flex;justify-content:space-between;" data-preview-fee><span>Системна такса (20%)</span><span style="font-weight:800;">${formatAmount(preview.systemFee)}</span></div>
             <div style="display:flex;justify-content:space-between;color:#d4a520;" data-preview-pool><span>Награден фонд</span><span style="font-weight:900;">${formatAmount(preview.prizePool)}</span></div>
@@ -468,12 +492,20 @@ function tournamentResultKindLabel(resultKind: string | null): string {
   return ''
 }
 
+// Огледало на server round ladder-а (round_of_16/quarterfinal/semifinal/final).
+function tournamentRoundTypeLabel(roundType: string): string {
+  if (roundType === 'round_of_16') return 'Осминафинал'
+  if (roundType === 'quarterfinal') return 'Четвъртфинал'
+  if (roundType === 'final') return 'Финал'
+  return 'Полуфинал'
+}
+
 function renderTournamentMatchAssignmentCallout(t: TournamentDetailSnapshot): string {
   const assignment = t.myActiveMatch
   if (assignment === null) return ''
   const heading = assignment.roundType === 'final'
     ? 'Финалната ти маса е готова.'
-    : 'Полуфиналната ти маса е готова.'
+    : `${tournamentRoundTypeLabel(assignment.roundType)}ната ти маса е готова.`
   const token = assignment.reconnectToken ?? ''
   return `
     <div style="border:1px solid rgba(34,197,94,0.45);background:rgba(20,83,45,0.28);border-radius:10px;padding:12px 14px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
@@ -549,7 +581,7 @@ function renderTournamentRounds(t: TournamentDetailSnapshot): string {
     <div style="display:grid;gap:10px;">
       ${t.rounds.map((round) => `
         <div style="border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:10px;background:rgba(255,255,255,0.03);">
-          <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:#d4a520;margin-bottom:8px;">${round.roundType === 'final' ? 'Финал' : `Полуфинал ${round.roundIndex}`}</div>
+          <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:#d4a520;margin-bottom:8px;">${round.roundType === 'final' ? 'Финал' : `${tournamentRoundTypeLabel(round.roundType)} ${round.roundIndex}`}</div>
           <div style="display:grid;gap:8px;">
             ${round.matches.map((match) => `
               <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;">
@@ -564,7 +596,11 @@ function renderTournamentRounds(t: TournamentDetailSnapshot): string {
   `
 }
 
-const TOURNAMENT_TEAM_SLOT_LETTERS = ['A', 'B', 'C', 'D'] as const
+// A-P покрива максималния поддържан bracket размер (16 отбора). За 4/8
+// отбора се ползват само първите 4/8 букви — mapping-ът е positional
+// (index в t.teams), затова разширяването тук не променя нищо за
+// съществуващите 4-отборни турнири.
+const TOURNAMENT_TEAM_SLOT_LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P'] as const
 
 // Стабилна идентификация "Отбор A/B/C/D" — еднаква за двамата партньори, за
 // refresh и за външен viewer, защото се извлича от t.teams[], което сървърът
@@ -701,7 +737,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
         </div>
         <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:12px 14px;">
           <div style="font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:4px;">Отбори</div>
-          <div style="font-size:18px;font-weight:900;color:#ffffff;">${t.completedTeamsCount} / 4</div>
+          <div style="font-size:18px;font-weight:900;color:#ffffff;">${t.completedTeamsCount} / ${t.playerCapacity / 2}</div>
         </div>
         <div
           data-tournament-start-card="1"
@@ -722,10 +758,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
       <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:16px;margin-bottom:20px;">
         <div style="font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.45);margin-bottom:12px;">Формат</div>
         <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;font-size:12px;">
-          <span style="background:rgba(255,255,255,0.06);border-radius:6px;padding:4px 10px;color:rgba(255,255,255,0.75);">8 играчи</span>
-          <span style="background:rgba(255,255,255,0.06);border-radius:6px;padding:4px 10px;color:rgba(255,255,255,0.75);">4 отбора</span>
-          <span style="background:rgba(255,255,255,0.06);border-radius:6px;padding:4px 10px;color:rgba(255,255,255,0.75);">2 полуфинала</span>
-          <span style="background:rgba(255,255,255,0.06);border-radius:6px;padding:4px 10px;color:rgba(255,255,255,0.75);">1 финал</span>
+          ${computeTournamentFormatStages(t.playerCapacity).map((stage) => `<span style="background:rgba(255,255,255,0.06);border-radius:6px;padding:4px 10px;color:rgba(255,255,255,0.75);">${escapeHtml(stage)}</span>`).join('')}
           <span style="background:rgba(255,255,255,0.06);border-radius:6px;padding:4px 10px;color:rgba(255,255,255,0.75);">Без мач за трето място</span>
           <span style="background:rgba(255,255,255,0.06);border-radius:6px;padding:4px 10px;color:rgba(255,255,255,0.75);">Игра до 151</span>
         </div>
@@ -1033,6 +1066,7 @@ export function extractTournamentCreateInputFromForm(form: HTMLFormElement): Tou
   const data = new FormData(form)
   const name = String(data.get('name') ?? '').trim()
   const entryFee = Number(data.get('entryFee'))
+  const teamCapacity = Number(data.get('teamCapacity') ?? TOURNAMENT_TEAM_CAPACITY_OPTIONS[0])
   const visibility = String(data.get('visibility') ?? 'public') as TournamentVisibility
   const startMode = String(data.get('startMode') ?? 'fill') as TournamentStartMode
   const password = String(data.get('password') ?? '')
@@ -1040,8 +1074,9 @@ export function extractTournamentCreateInputFromForm(form: HTMLFormElement): Tou
 
   if (name.length === 0) return null
   if (!Number.isFinite(entryFee)) return null
+  if (!Number.isFinite(teamCapacity)) return null
 
-  const input: TournamentCreateInput = { name, entryFee, visibility, startMode }
+  const input: TournamentCreateInput = { name, entryFee, teamCapacity, visibility, startMode }
   if (visibility === 'password') {
     input.password = password
   }

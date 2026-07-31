@@ -23,12 +23,14 @@ import type {
   TournamentPartnerInviteRecord,
   TournamentPartnerInviteStatus,
   TournamentRecord,
+  TournamentRoundType,
   TournamentStatus,
   TournamentTeamId,
   TournamentTeamRecord,
   TournamentTeamStatus,
   TournamentVisibility,
 } from '../tournament/tournamentTypes.js'
+import { getTournamentRoundLadder } from '../tournament/tournamentTypes.js'
 import {
   calculateTournamentPrizePreview,
   TOURNAMENT_FINANCIAL_RULES_VERSION,
@@ -1024,16 +1026,19 @@ export async function createTournamentEconomyStore(
       AND settlement_state = 'pending';
   `)
 
+  // round_type е bind параметър (не литерал) — за да поддържа generic
+  // bracket ladder-а (round_of_16/quarterfinal/semifinal/final, виж
+  // getTournamentRoundLadder в tournamentTypes.ts).
   const insertRoundStatement = database.prepare(`
     INSERT INTO tournament_rounds (round_id, tournament_id, round_type, round_index)
-    VALUES (?, ?, 'semifinal', ?)
+    VALUES (?, ?, ?, ?)
     ON CONFLICT(tournament_id, round_type, round_index) DO NOTHING;
   `)
 
   const selectRoundIdStatement = database.prepare(`
     SELECT round_id
     FROM tournament_rounds
-    WHERE tournament_id = ? AND round_type = 'semifinal' AND round_index = ?
+    WHERE tournament_id = ? AND round_type = ? AND round_index = ?
     LIMIT 1;
   `)
 
@@ -1269,8 +1274,13 @@ export async function createTournamentEconomyStore(
     }
   }
 
+  // teamCapacity = tournament.player_capacity / 2 (4/8/16 отбора, виж §5 в
+  // task spec-а). Пълният брой отбори е единственото, което се проверява
+  // тук — самото bracket pairing (кой отбор играе с кого) се решава в
+  // createFirstRoundBracket() след shuffle-а по-долу.
   function validateAndLockTeamsForStart(
     tournamentId: TournamentId,
+    teamCapacity: number,
   ): { ok: true; teams: TournamentTeamRow[]; seedSnapshot: Record<string, string[]> } | { ok: false } {
     const entries = selectConfirmedEntriesStatement.all(tournamentId) as TournamentEntryRow[]
     const teams = selectTeamsForTournamentStatement.all(tournamentId) as TournamentTeamRow[]
@@ -1308,7 +1318,7 @@ export async function createTournamentEconomyStore(
       completeTeams.push(row)
     }
 
-    if (completeTeams.length !== 4) return { ok: false }
+    if (completeTeams.length !== teamCapacity) return { ok: false }
     shuffleInPlace(completeTeams)
 
     const seedSnapshot: Record<string, string[]> = {}
@@ -1326,23 +1336,34 @@ export async function createTournamentEconomyStore(
     return { ok: true, teams: completeTeams, seedSnapshot }
   }
 
-  function createSemifinalSkeletons(tournamentId: TournamentId, teams: TournamentTeamRow[]): void {
+  // Генерира първия bracket кръг (round_of_16/quarterfinal/semifinal —
+  // винаги first ladder entry за дадения teamCapacity, виж
+  // getTournamentRoundLadder). High-vs-low seed pairing: seed[i] срещу
+  // seed[N-1-i] за i=0..N/2-1 — за 4 отбора: 1-4, 2-3 (= "A-D, B-C" в
+  // task spec-а, тъй като Отбор A/B/C/D е derived от seed reда на
+  // frontend-а). За 8: 1-8,2-7,3-6,4-5. За 16: 1-16,2-15,...,8-9.
+  // Самите seed слотове вече идват от random shuffle (виж
+  // validateAndLockTeamsForStart), затова "high vs low" тук не носи
+  // competitive ranking семантика — само детерминира bracket структурата
+  // от вече разбъркания seed ред.
+  function createFirstRoundBracket(tournamentId: TournamentId, teams: TournamentTeamRow[]): void {
+    const teamCapacity = teams.length
+    const roundType = getTournamentRoundLadder(teamCapacity)[0] as TournamentRoundType
     const bySeed = new Map<number, string>()
     for (const team of teams) {
       if (team.seed_slot !== null) bySeed.set(team.seed_slot, team.team_id)
     }
-    const seed1 = bySeed.get(1)
-    const seed2 = bySeed.get(2)
-    const seed3 = bySeed.get(3)
-    const seed4 = bySeed.get(4)
-    if (!seed1 || !seed2 || !seed3 || !seed4) throw new Error('Missing tournament seed slots.')
 
-    insertRoundStatement.run(randomUUID(), tournamentId, 1)
-    insertRoundStatement.run(randomUUID(), tournamentId, 2)
-    const round1 = selectRoundIdStatement.get(tournamentId, 1) as { round_id: string }
-    const round2 = selectRoundIdStatement.get(tournamentId, 2) as { round_id: string }
-    insertMatchStatement.run(randomUUID(), tournamentId, round1.round_id, seed1, seed2)
-    insertMatchStatement.run(randomUUID(), tournamentId, round2.round_id, seed3, seed4)
+    const matchCount = teamCapacity / 2
+    for (let matchIndex = 0; matchIndex < matchCount; matchIndex += 1) {
+      const roundIndex = matchIndex + 1
+      const highSeed = bySeed.get(matchIndex + 1)
+      const lowSeed = bySeed.get(teamCapacity - matchIndex)
+      if (!highSeed || !lowSeed) throw new Error('Missing tournament seed slots.')
+      insertRoundStatement.run(randomUUID(), tournamentId, roundType, roundIndex)
+      const round = selectRoundIdStatement.get(tournamentId, roundType, roundIndex) as { round_id: string }
+      insertMatchStatement.run(randomUUID(), tournamentId, round.round_id, highSeed, lowSeed)
+    }
   }
 
   function startTournamentAtomicallyLocal(
@@ -1378,7 +1399,7 @@ export async function createTournamentEconomyStore(
         team_id: string | null
         amount: number | null
       }[]
-      if (confirmedEntries.length !== 8 || getReservedPendingPlaces(tournamentId) !== 0) {
+      if (confirmedEntries.length !== tournament.player_capacity || getReservedPendingPlaces(tournamentId) !== 0) {
         database.exec('ROLLBACK;')
         return { ok: false, reason: 'not_ready' }
       }
@@ -1390,18 +1411,18 @@ export async function createTournamentEconomyStore(
         if (entry.amount !== tournament.entry_fee) return Number.NaN
         return sum + entry.amount
       }, 0)
-      if (!Number.isFinite(ledgerTotal) || ledgerTotal !== tournament.entry_fee * 8) {
+      if (!Number.isFinite(ledgerTotal) || ledgerTotal !== tournament.entry_fee * tournament.player_capacity) {
         database.exec('ROLLBACK;')
         return { ok: false, reason: 'ledger_mismatch' }
       }
 
-      const teamResult = validateAndLockTeamsForStart(tournamentId)
+      const teamResult = validateAndLockTeamsForStart(tournamentId, tournament.player_capacity / 2)
       if (!teamResult.ok) {
         database.exec('ROLLBACK;')
         return { ok: false, reason: 'invalid_team_state' }
       }
 
-      const preview = calculateTournamentPrizePreview(tournament.entry_fee, 8)
+      const preview = calculateTournamentPrizePreview(tournament.entry_fee, tournament.player_capacity)
       if (preview.totalEntryFees !== ledgerTotal) {
         database.exec('ROLLBACK;')
         return { ok: false, reason: 'ledger_mismatch' }
@@ -1438,7 +1459,7 @@ export async function createTournamentEconomyStore(
         preview.financialRulesVersion,
         tournamentId,
       )
-      createSemifinalSkeletons(tournamentId, teamResult.teams)
+      createFirstRoundBracket(tournamentId, teamResult.teams)
       insertEvent(tournamentId, 'tournament_started', null, 'system', {
         financial: preview,
         teamSeeds: teamResult.seedSnapshot,
@@ -1454,7 +1475,7 @@ export async function createTournamentEconomyStore(
   function validateFinancialSnapshot(tournament: TournamentRow): boolean {
     if (
       tournament.financial_rules_version !== TOURNAMENT_FINANCIAL_RULES_VERSION ||
-      tournament.player_capacity !== 8 ||
+      (tournament.player_capacity !== 8 && tournament.player_capacity !== 16 && tournament.player_capacity !== 32) ||
       tournament.total_entry_amount === null ||
       tournament.system_fee_percent === null ||
       tournament.system_fee_amount === null ||
@@ -1562,8 +1583,8 @@ export async function createTournamentEconomyStore(
       const debitProfiles = new Set(debitRows.map((row) => row.profile_id))
       const debitTotal = debitRows.reduce((sum, row) => sum + row.amount, 0)
       if (
-        debitRows.length !== 8 ||
-        debitProfiles.size !== 8 ||
+        debitRows.length !== tournament.player_capacity ||
+        debitProfiles.size !== tournament.player_capacity ||
         debitRows.some((row) => row.amount !== tournament.entry_fee) ||
         debitTotal !== tournament.total_entry_amount
       ) {
@@ -1987,7 +2008,7 @@ export async function createTournamentEconomyStore(
         const hasConfirmedInviterEntry =
           inviterEntry !== undefined && inviterEntry.status === 'confirmed'
         const neededPlaces = hasConfirmedInviterEntry ? 1 : 2
-        const capacity = Math.min(freshTournament.player_capacity, 8)
+        const capacity = freshTournament.player_capacity
         if (getOccupiedPlaces(tournamentId) + neededPlaces > capacity) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'tournament_full' }
@@ -2443,7 +2464,7 @@ export async function createTournamentEconomyStore(
           return { ok: false, reason: 'already_participating_elsewhere' }
         }
 
-        const playerCapacity = Math.min(freshTournament.player_capacity, 8)
+        const playerCapacity = freshTournament.player_capacity
         if (getOccupiedPlaces(tournamentId) + 1 > playerCapacity) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'tournament_full' }

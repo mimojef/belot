@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { dbDateToUtc } from '../db/dbDate.js'
 import type { TournamentId, TournamentStatus } from './tournamentTypes.js'
+import { getTournamentRoundLadder } from './tournamentTypes.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -475,8 +476,9 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
       addIssue(issues, 'duplicate_entry_profile', 'error', 'Duplicate participant profile was found.', false)
     }
 
-    if (ACTIVE_STATUSES.includes(tournament.status) && tournament.status !== 'open' && teams.length !== 4) {
-      addIssue(issues, 'invalid_team_count', 'error', 'Started tournament must have exactly four teams.', false)
+    const expectedTeamCapacity = tournament.player_capacity / 2
+    if (ACTIVE_STATUSES.includes(tournament.status) && tournament.status !== 'open' && teams.length !== expectedTeamCapacity) {
+      addIssue(issues, 'invalid_team_count', 'error', 'Started tournament team count does not match its player capacity.', false)
     }
 
     for (const team of teams) {
@@ -490,13 +492,42 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
       }
     }
 
+    // "missing_semifinal"/"duplicate_semifinal" кодовете се пазят непроменени
+    // (виж TournamentIntegrityCode) за backward compatibility, но проверката
+    // вече е generic за целия round ladder (round_of_16/quarterfinal/
+    // semifinal), не само буквално round_type='semifinal'. Първият ladder
+    // кръг трябва да съществува веднага щом турнирът е напуснал 'open'; всеки
+    // следващ ladder кръг се очаква само откакто турнирът напредне достатъчно
+    // (rounds[] просто няма да го съдържа още, което е валидно, не грешка).
     if (['starting', 'semifinal_in_progress', 'final_in_progress', 'finished'].includes(tournament.status)) {
-      const semifinalRounds = rounds.filter((round) => round.round_type === 'semifinal')
-      if (semifinalRounds.length === 0) addIssue(issues, 'missing_semifinal', 'error', 'Semifinal round is missing.', false)
-      if (semifinalRounds.length > 1) addIssue(issues, 'duplicate_semifinal', 'error', 'Duplicate semifinal rounds were found.', false)
-      const semifinalMatches = matches.filter((match) => semifinalRounds.some((round) => round.round_id === match.round_id))
-      if (semifinalMatches.length < 2) addIssue(issues, 'missing_semifinal', 'error', 'Two semifinal matches are required.', false)
-      if (semifinalMatches.length > 2) addIssue(issues, 'duplicate_semifinal', 'error', 'More than two semifinal matches were found.', false)
+      const roundLadder = getTournamentRoundLadder(expectedTeamCapacity)
+      const firstRoundType = roundLadder[0]
+      const firstRounds = rounds.filter((round) => round.round_type === firstRoundType)
+      const expectedFirstRoundMatchCount = expectedTeamCapacity / 2
+      if (firstRounds.length === 0) addIssue(issues, 'missing_semifinal', 'error', 'First bracket round is missing.', false)
+      if (firstRounds.length > expectedFirstRoundMatchCount) addIssue(issues, 'duplicate_semifinal', 'error', 'Duplicate first-round bracket rounds were found.', false)
+      const firstRoundMatches = matches.filter((match) => firstRounds.some((round) => round.round_id === match.round_id))
+      if (firstRoundMatches.length < expectedFirstRoundMatchCount) addIssue(issues, 'missing_semifinal', 'error', 'First bracket round is missing matches.', false)
+      if (firstRoundMatches.length > expectedFirstRoundMatchCount) addIssue(issues, 'duplicate_semifinal', 'error', 'More first-round bracket matches were found than expected.', false)
+
+      for (const roundType of roundLadder) {
+        const roundsOfType = rounds.filter((round) => round.round_type === roundType)
+        if (roundsOfType.length === 0) continue
+        const expectedMatchCount = roundType === 'final'
+          ? 1
+          : roundType === 'semifinal'
+            ? 2
+            : roundType === 'quarterfinal'
+              ? 4
+              : 8
+        const matchesOfType = matches.filter((match) => roundsOfType.some((round) => round.round_id === match.round_id))
+        if (roundsOfType.length > expectedMatchCount) {
+          addIssue(issues, 'duplicate_semifinal', 'error', `Duplicate ${roundType} rounds were found.`, false)
+        }
+        if (matchesOfType.length > expectedMatchCount) {
+          addIssue(issues, 'duplicate_semifinal', 'error', `More ${roundType} matches were found than expected.`, false)
+        }
+      }
     }
 
     if (['final_in_progress', 'finished'].includes(tournament.status)) {

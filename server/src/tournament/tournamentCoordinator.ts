@@ -28,6 +28,7 @@ import type {
   TournamentRoundType,
   TournamentTeamId,
 } from './tournamentTypes.js'
+import { getTournamentRoundLadder } from './tournamentTypes.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -115,6 +116,7 @@ type TournamentRow = {
   tournament_id: string
   name: string
   status: string
+  player_capacity: number
 }
 
 type MatchRow = {
@@ -136,6 +138,7 @@ type MatchRow = {
   completed_at: string | null
   tournament_name: string
   tournament_status: string
+  tournament_player_capacity: number
   round_type: string
   round_index: number
 }
@@ -156,7 +159,7 @@ type SeatAssignment = {
   publicProfile: PublicProfile
 }
 
-type FinalSeedRow = {
+type RoundWinnerRow = {
   match_id: string
   winner_team_id: string
   completed_at: string
@@ -257,12 +260,12 @@ export async function createTournamentCoordinator(
     tm.status, tm.no_show_deadline_at, tm.attendance_started_at, tm.attendance_deadline_at,
     tm.attendance_resolved_at, tm.attendance_resolution_kind, tm.game_start_at,
     tm.winner_team_id, tm.result_kind, tm.completed_at,
-    t.name as tournament_name, t.status as tournament_status,
+    t.name as tournament_name, t.status as tournament_status, t.player_capacity as tournament_player_capacity,
     tr.round_type, tr.round_index
   `
 
   const selectActiveTournamentsStatement = database.prepare(`
-    SELECT tournament_id, name, status
+    SELECT tournament_id, name, status, player_capacity
     FROM tournaments
     WHERE status IN ('starting', 'semifinal_in_progress', 'final_in_progress')
     ORDER BY started_at ASC, created_at ASC
@@ -270,7 +273,7 @@ export async function createTournamentCoordinator(
   `)
 
   const selectSettlementDueTournamentsStatement = database.prepare(`
-    SELECT DISTINCT t.tournament_id, t.name, t.status
+    SELECT DISTINCT t.tournament_id, t.name, t.status, t.player_capacity
     FROM tournaments t
     JOIN tournament_rounds tr
       ON tr.tournament_id = t.tournament_id
@@ -315,10 +318,16 @@ export async function createTournamentCoordinator(
     LIMIT 1;
   `)
 
+  // Включва и 'eliminated' — веднъж назначени към даден match (team_a_id/
+  // team_b_id са immutable за мача), участниците трябва да продължат да се
+  // resolve-ват коректно в getSeatAssignments/createAttendanceSnapshot дори
+  // след като advanceCompletedMatch вече е маркирал загубилия отбор като
+  // eliminated в рамките на СЪЩИЯ tick (commitSnapshot се вика за completed
+  // мача веднага след advanceCompletedMatch — виж onTournamentRoomCompleted).
   const selectEntriesForTeamStatement = database.prepare(`
     SELECT profile_id, joined_as, created_at
     FROM tournament_entries
-    WHERE tournament_id = ? AND team_id = ? AND status IN ('confirmed', 'finalist', 'champion')
+    WHERE tournament_id = ? AND team_id = ? AND status IN ('confirmed', 'finalist', 'champion', 'eliminated')
     ORDER BY created_at ASC;
   `)
 
@@ -404,16 +413,28 @@ export async function createTournamentCoordinator(
       AND (winner_team_id IS NULL OR winner_team_id = ?);
   `)
 
-  const selectSemifinalWinnersStatement = database.prepare(`
+  // round_type е bind параметър — преизползва се за всеки не-final кръг в
+  // ladder-а (round_of_16/quarterfinal/semifinal), виж advanceCompletedRoundIfDue.
+  const selectRoundWinnersStatement = database.prepare(`
     SELECT tm.match_id, tm.winner_team_id, tm.completed_at
     FROM tournament_matches tm
     JOIN tournament_rounds tr ON tr.round_id = tm.round_id
     WHERE tm.tournament_id = ?
-      AND tr.round_type = 'semifinal'
+      AND tr.round_type = ?
       AND tm.status = 'completed'
       AND tm.result_kind IN ('played', 'played_with_bots', 'walkover')
       AND tm.winner_team_id IS NOT NULL
     ORDER BY tr.round_index ASC, tm.completed_at ASC;
+  `)
+
+  // Общ брой мачове, зачислени за даден round_type (независимо от статус) —
+  // ползва се за да разберем дали кръгът вече Е генериран (за да не се
+  // опитаме да го генерираме повторно) и дали е напълно завършен.
+  const countMatchesForRoundTypeStatement = database.prepare(`
+    SELECT COUNT(*) as count
+    FROM tournament_matches tm
+    JOIN tournament_rounds tr ON tr.round_id = tm.round_id
+    WHERE tm.tournament_id = ? AND tr.round_type = ?;
   `)
 
   const insertReplacementStatement = database.prepare(`
@@ -488,6 +509,49 @@ export async function createTournamentCoordinator(
       match_id, tournament_id, round_id, room_id, team_a_id, team_b_id,
       status, no_show_deadline_at
     ) VALUES (?, ?, ?, NULL, ?, ?, 'awaiting_players', NULL);
+  `)
+
+  // Generic версии за средните bracket кръгове (round_of_16 -> quarterfinal,
+  // quarterfinal -> semifinal) — round_type/round_index са bind параметри,
+  // за разлика от insertFinalRoundStatement/selectFinalRoundStatement, които
+  // остават хардкоднати за 'final'/1 (финалът винаги е round_index=1,
+  // независимо от bracket размера — не е "различен" случай за generalize).
+  const insertNextRoundStatement = database.prepare(`
+    INSERT INTO tournament_rounds (round_id, tournament_id, round_type, round_index)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(tournament_id, round_type, round_index) DO NOTHING;
+  `)
+
+  const selectNextRoundIdStatement = database.prepare(`
+    SELECT round_id
+    FROM tournament_rounds
+    WHERE tournament_id = ? AND round_type = ? AND round_index = ?
+    LIMIT 1;
+  `)
+
+  const selectMatchesForRoundTypeStatement = database.prepare(`
+    SELECT ${matchSelectColumns}
+    FROM tournament_matches tm
+    JOIN tournaments t ON t.tournament_id = tm.tournament_id
+    JOIN tournament_rounds tr ON tr.round_id = tm.round_id
+    WHERE tm.tournament_id = ? AND tr.round_type = ?
+    ORDER BY tr.round_index ASC;
+  `)
+
+  // Елиминира отбори, които НЕ продължават към следващия кръг (загубили в
+  // средните rounds — round_of_16/quarterfinal — трябва да станат eliminated
+  // веднага, не да чакат до финала, за разлика от предишната 4-отборна
+  // логика, където единствената elimination точка беше финалът).
+  const updateRoundLosersEliminatedTeamsStatement = database.prepare(`
+    UPDATE tournament_teams
+    SET status = 'eliminated', updated_at = CURRENT_TIMESTAMP
+    WHERE tournament_id = ? AND team_id = ? AND status IN ('locked', 'finalist');
+  `)
+
+  const updateRoundLosersEliminatedEntriesStatement = database.prepare(`
+    UPDATE tournament_entries
+    SET status = 'eliminated', updated_at = CURRENT_TIMESTAMP
+    WHERE tournament_id = ? AND team_id = ? AND status = 'confirmed';
   `)
 
   const selectFinalMatchStatement = database.prepare(`
@@ -1104,36 +1168,89 @@ export async function createTournamentCoordinator(
     commitSnapshot(refreshed, initialized)
   }
 
-  function ensureFinalAfterSemifinals(tournamentId: TournamentId): MatchRow | null {
-    const winners = selectSemifinalWinnersStatement.all(tournamentId) as FinalSeedRow[]
-    if (winners.length !== 2 || winners.some((winner) => winner.winner_team_id === null)) {
+  // Генерира следващия bracket кръг за (currentRoundType -> nextRoundType)
+  // веднага щом ВСИЧКИ мачове от currentRoundType са завършени с победител.
+  // Pairing: winner[0] vs winner[1], winner[2] vs winner[3]... по match
+  // order (round_index ASC) — устойчиво на bracket структурата, защото
+  // самото seed pairing (high-vs-low) вече е "изпечено" в първия кръг
+  // (createFirstRoundBracket), следващите кръгове само следват дървото.
+  //
+  // Ако nextRoundType === 'final': двамата финалисти стават 'finalist',
+  // всички останали locked/finalist отбори стават 'eliminated' (пази
+  // текущия settlement contract — само финалистите получават prize payout).
+  // Ако nextRoundType Е междинен кръг (напр. quarterfinal -> semifinal):
+  // само загубилите в currentRoundType стават 'eliminated' веднага —
+  // победителите остават 'locked' до следващия round transition.
+  function ensureNextRound(
+    tournamentId: TournamentId,
+    currentRoundType: TournamentRoundType,
+    nextRoundType: TournamentRoundType,
+  ): MatchRow[] | null {
+    const currentMatches = selectMatchesForRoundTypeStatement.all(tournamentId, currentRoundType) as MatchRow[]
+    if (currentMatches.length === 0) return null
+    const winners = selectRoundWinnersStatement.all(tournamentId, currentRoundType) as RoundWinnerRow[]
+    if (winners.length !== currentMatches.length || winners.some((winner) => winner.winner_team_id === null)) {
       return null
     }
+    if (winners.length % 2 !== 0) {
+      throw new Error(`Odd number of round winners for tournament=${tournamentId} round=${currentRoundType}`)
+    }
+
+    const nextMatchCount = winners.length / 2
+    const existingNextMatches = selectMatchesForRoundTypeStatement.all(tournamentId, nextRoundType) as MatchRow[]
+    if (existingNextMatches.length >= nextMatchCount) {
+      return existingNextMatches
+    }
+
+    const loserTeamIds = currentMatches
+      .filter((match) => match.winner_team_id !== null)
+      .map((match) => (match.winner_team_id === match.team_a_id ? match.team_b_id : match.team_a_id))
 
     database.exec('BEGIN IMMEDIATE;')
     try {
-      insertFinalRoundStatement.run(randomUUID(), tournamentId)
-      const finalRound = selectFinalRoundStatement.get(tournamentId) as { round_id: string }
-      const existingFinal = selectFinalMatchStatement.get(tournamentId) as MatchRow | undefined
-      if (existingFinal === undefined) {
-        insertFinalMatchStatement.run(
-          randomUUID(),
-          tournamentId,
-          finalRound.round_id,
-          winners[0]!.winner_team_id,
-          winners[1]!.winner_team_id,
-        )
-        updateFinalistTeamsStatement.run(tournamentId, winners[0]!.winner_team_id, winners[1]!.winner_team_id)
+      const isFinal = nextRoundType === 'final'
+      const createdMatchIds: string[] = []
+      for (let i = 0; i < nextMatchCount; i += 1) {
+        const roundIndex = i + 1
+        const teamAId = winners[i * 2]!.winner_team_id
+        const teamBId = winners[i * 2 + 1]!.winner_team_id
+        insertNextRoundStatement.run(randomUUID(), tournamentId, nextRoundType, roundIndex)
+        const round = selectNextRoundIdStatement.get(tournamentId, nextRoundType, roundIndex) as { round_id: string }
+        const existingMatch = existingNextMatches.find((match) => match.round_id === round.round_id)
+        if (existingMatch === undefined) {
+          const matchId = randomUUID()
+          insertFinalMatchStatement.run(matchId, tournamentId, round.round_id, teamAId, teamBId)
+          createdMatchIds.push(matchId)
+          if (isFinal) {
+            updateFinalistTeamsStatement.run(tournamentId, teamAId, teamBId)
+            updateFinalistEntriesStatement.run(tournamentId, teamAId, teamBId)
+          }
+        }
+      }
+
+      if (isFinal) {
         updateEliminatedTeamsStatement.run(tournamentId, winners[0]!.winner_team_id, winners[1]!.winner_team_id)
-        updateFinalistEntriesStatement.run(tournamentId, winners[0]!.winner_team_id, winners[1]!.winner_team_id)
         updateEliminatedEntriesStatement.run(tournamentId, winners[0]!.winner_team_id, winners[1]!.winner_team_id)
-        updateTournamentStatusStatement.run('final_in_progress', tournamentId, 'semifinal_in_progress')
-        appendEvent(tournamentId, 'tournament_final_created', {
-          semifinalMatchIds: winners.map((winner) => winner.match_id),
-          finalistTeamIds: winners.map((winner) => winner.winner_team_id),
-        })
+        if (createdMatchIds.length > 0) {
+          updateTournamentStatusStatement.run('final_in_progress', tournamentId, 'semifinal_in_progress')
+          appendEvent(tournamentId, 'tournament_final_created', {
+            semifinalMatchIds: winners.map((winner) => winner.match_id),
+            finalistTeamIds: winners.map((winner) => winner.winner_team_id),
+          })
+        }
       } else {
-        updateTournamentStatusStatement.run('final_in_progress', tournamentId, 'semifinal_in_progress')
+        for (const loserTeamId of loserTeamIds) {
+          updateRoundLosersEliminatedTeamsStatement.run(tournamentId, loserTeamId)
+          updateRoundLosersEliminatedEntriesStatement.run(tournamentId, loserTeamId)
+        }
+        if (createdMatchIds.length > 0) {
+          appendEvent(tournamentId, 'tournament_round_advanced', {
+            fromRoundType: currentRoundType,
+            toRoundType: nextRoundType,
+            winnerTeamIds: winners.map((winner) => winner.winner_team_id),
+            eliminatedTeamIds: loserTeamIds,
+          })
+        }
       }
       database.exec('COMMIT;')
     } catch (error) {
@@ -1141,7 +1258,21 @@ export async function createTournamentCoordinator(
       throw error
     }
 
-    return selectFinalMatchStatement.get(tournamentId) as MatchRow | null
+    return selectMatchesForRoundTypeStatement.all(tournamentId, nextRoundType) as MatchRow[]
+  }
+
+  // Обхожда ladder-а от текущия round_type (или от началото, ако все още
+  // никой мач не е завършен) до финала, генерирайки всеки следващ кръг,
+  // веднага щом предишният е напълно завършен. Връща финалния мач (ако вече
+  // съществува), за да поддържа съществуващия "ensureMatchRoom(final)" caller.
+  function advanceBracketLadder(tournamentId: TournamentId, teamCapacity: number): MatchRow | null {
+    const ladder = getTournamentRoundLadder(teamCapacity)
+    for (let i = 0; i < ladder.length - 1; i += 1) {
+      const currentRoundType = ladder[i] as TournamentRoundType
+      const nextRoundType = ladder[i + 1] as TournamentRoundType
+      ensureNextRound(tournamentId, currentRoundType, nextRoundType)
+    }
+    return (selectFinalMatchStatement.get(tournamentId) as MatchRow | undefined) ?? null
   }
 
   function completeFinalSideEffects(match: MatchRow, winnerTeamId: TournamentTeamId): void {
@@ -1175,14 +1306,14 @@ export async function createTournamentCoordinator(
 
   function advanceCompletedMatch(match: MatchRow): void {
     if (match.winner_team_id === null) return
-    if (match.round_type === 'semifinal') {
-      const final = ensureFinalAfterSemifinals(match.tournament_id)
-      if (final !== null && final.status !== 'completed') ensureMatchRoom(final)
-      return
-    }
     if (match.round_type === 'final') {
       completeFinalSideEffects(match, match.winner_team_id)
+      return
     }
+    // Всеки не-final round type (round_of_16/quarterfinal/semifinal) следва
+    // общата ladder логика — не само 'semifinal' както преди.
+    const final = advanceBracketLadder(match.tournament_id, match.tournament_player_capacity / 2)
+    if (final !== null && final.status !== 'completed') ensureMatchRoom(final)
   }
 
   function reconcileTournament(tournament: TournamentRow): void {
@@ -1199,13 +1330,22 @@ export async function createTournamentCoordinator(
     }
 
     if (tournament.status === 'starting') {
-      const semifinalMatches = matches.filter((match) => match.round_type === 'semifinal')
-      if (semifinalMatches.length === 2 && semifinalMatches.every((match) => match.room_id !== null)) {
+      // Първият bracket кръг (винаги getTournamentRoundLadder(...)[0]) е
+      // "текущият" кръг, докато турнирът е still 'starting' — веднага щом
+      // всичките му мачове имат стая, статусът минава към 'semifinal_in_progress'
+      // (генеричен "bracket-в-ход" маркер, виж коментара в advanceBracketLadder-а).
+      const teamCapacity = tournament.player_capacity / 2
+      const firstRoundType = getTournamentRoundLadder(teamCapacity)[0]
+      const firstRoundMatches = matches.filter((match) => match.round_type === firstRoundType)
+      if (
+        firstRoundMatches.length === teamCapacity / 2 &&
+        firstRoundMatches.every((match) => match.room_id !== null)
+      ) {
         updateTournamentStatusStatement.run('semifinal_in_progress', tournament.tournament_id, 'starting')
       }
     }
 
-    const final = ensureFinalAfterSemifinals(tournament.tournament_id)
+    const final = advanceBracketLadder(tournament.tournament_id, tournament.player_capacity / 2)
     if (final !== null && final.status !== 'completed') {
       const result = ensureMatchRoom(final)
       if (result === 'created') createdRoomsLastTick += 1

@@ -128,7 +128,7 @@ export type TournamentMatchStatus =
   | 'walkover'
   | 'cancelled'
 
-export type TournamentRoundType = 'semifinal' | 'final'
+export type TournamentRoundType = 'round_of_16' | 'quarterfinal' | 'semifinal' | 'final'
 
 export type TournamentMatchSnapshot = {
   matchId: string
@@ -247,6 +247,7 @@ export type TournamentDetailSnapshot = TournamentSummarySnapshot & {
 export type TournamentCreateInput = {
   name: string
   entryFee: number
+  teamCapacity: number
   visibility: TournamentVisibility
   password?: string
   startMode: TournamentStartMode

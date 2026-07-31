@@ -79,7 +79,9 @@ import {
 } from './tournament/tournamentTypes.js'
 import {
   ALLOWED_TOURNAMENT_ENTRY_FEES,
+  ALLOWED_TOURNAMENT_TEAM_CAPACITIES,
   isAllowedTournamentEntryFee,
+  isAllowedTournamentTeamCapacity,
   isValidTournamentStartMode,
   isValidTournamentVisibility,
   validateTournamentName,
@@ -5934,6 +5936,28 @@ async function handleTournamentsListRequest(
       return true
     }
 
+    // teamCapacity е единственото поле, което клиентът подава за размера на
+    // турнира — playerCapacity НИКОГА не се приема от client payload-а
+    // (server-authoritative: playerCapacity = teamCapacity * 2, виж createTournament).
+    // Ако полето липсва, по подразбиране е 4 отбора (запазва старото поведение).
+    const rawTeamCapacityField = body.teamCapacity
+    const rawTeamCapacity = rawTeamCapacityField === undefined
+      ? 4
+      : getNumberField(body, 'teamCapacity')
+    if (rawTeamCapacity === null || !isAllowedTournamentTeamCapacity(rawTeamCapacity)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: `Броят отбори трябва да е една от стойностите: ${ALLOWED_TOURNAMENT_TEAM_CAPACITIES.join(', ')}.`,
+      })
+      return true
+    }
+    if ('playerCapacity' in body) {
+      // Explicit защита срещу client payload, който се опитва да подаде
+      // playerCapacity директно (напр. несъответстващи 4 отбора и 32 играчи).
+      sendJsonResponse(res, 400, { ok: false, message: 'Броят играчи се изчислява автоматично от броя отбори.' })
+      return true
+    }
+
     const rawVisibility = getStringField(body, 'visibility')
     if (!isValidTournamentVisibility(rawVisibility)) {
       sendJsonResponse(res, 400, { ok: false, message: 'Невалидна видимост на турнира.' })
@@ -5992,6 +6016,7 @@ async function handleTournamentsListRequest(
       visibility: rawVisibility,
       passwordHash,
       entryFee: rawEntryFee,
+      playerCapacity: rawTeamCapacity * 2,
       startMode: rawStartMode,
       scheduledStartAt,
     })

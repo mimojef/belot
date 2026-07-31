@@ -17,6 +17,12 @@ export const TOURNAMENT_PASSWORD_MAX_LENGTH = 32
 export const ALLOWED_TOURNAMENT_ENTRY_FEES = [5000, 10000, 20000, 50000, 100000] as const
 export type AllowedTournamentEntryFee = (typeof ALLOWED_TOURNAMENT_ENTRY_FEES)[number]
 
+// Броят отбори, който потребителят избира при създаване — сървърът винаги
+// изчислява playerCapacity = teamCapacity * 2, никога не приема
+// client-provided playerCapacity директно (виж createTournament handler-а).
+export const ALLOWED_TOURNAMENT_TEAM_CAPACITIES = [4, 8, 16] as const
+export type AllowedTournamentTeamCapacity = (typeof ALLOWED_TOURNAMENT_TEAM_CAPACITIES)[number]
+
 export const TOURNAMENT_SCHEDULED_START_MIN_LEAD_MS = 30 * 60 * 1000
 export const TOURNAMENT_SCHEDULED_START_MAX_LEAD_MS = 7 * 24 * 60 * 60 * 1000
 
@@ -79,6 +85,10 @@ export function validateTournamentName(rawName: string): TournamentNameValidatio
 
 export function isAllowedTournamentEntryFee(value: number): value is AllowedTournamentEntryFee {
   return (ALLOWED_TOURNAMENT_ENTRY_FEES as readonly number[]).includes(value)
+}
+
+export function isAllowedTournamentTeamCapacity(value: number): value is AllowedTournamentTeamCapacity {
+  return (ALLOWED_TOURNAMENT_TEAM_CAPACITIES as readonly number[]).includes(value)
 }
 
 export function isValidTournamentVisibility(value: unknown): value is TournamentVisibility {
