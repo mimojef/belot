@@ -235,6 +235,10 @@ async function checkFrontendWiring(projectRoot: string): Promise<void> {
   assert(renderSource.includes("t.teams.length === 0"), 'teams empty-state branch missing')
   assert(renderSource.includes('hasCompleteTeam'), 'personal status does not check complete team membership')
   assert(renderSource.includes("'Отборът ти е готов'"), 'complete-team personal status text missing')
+  // Дублиращият "Отборът е готов" панел (без "ти") трябва да е премахнат от
+  // renderTournamentPartnerPanel — само personal status ("Отборът ти е готов")
+  // и public "ОТБОРИ" секцията трябва да остават.
+  assert(!renderSource.includes('>Отборът е готов<'), 'duplicate "Отборът е готов" ready-team panel still present in renderTournamentPartnerPanel')
 }
 
 async function getTeamRowCounts(databaseFile: string, tournamentId: string): Promise<{
