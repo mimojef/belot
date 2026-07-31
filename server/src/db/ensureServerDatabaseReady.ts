@@ -28,6 +28,78 @@ const MIGRATIONS_TABLE_NAME = 'server_migrations'
 // с един exec() и НЕ добавя своя BEGIN/COMMIT/insertAppliedMigrationStatement.
 const MANUAL_TRANSACTION_MARKER = '-- MANUAL_TRANSACTION_MIGRATION'
 
+type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
+
+// "Smart" миграции — registry по filename за migration файлове, които се
+// нуждаят от реална процедурна проверка на текущото schema състояние преди
+// DDL (напр. ALTER TABLE ADD COLUMN, за което SQLite няма "IF NOT EXISTS"),
+// затова НЕ могат да бъдат безопасно self-managed чрез статичен .sql текст
+// сам по себе си. Handler-ът получава само DDL responsibility — не отваря/
+// затваря транзакция и не пипа server_migrations; runner-ът (по-долу)
+// увива извикването му в собствен BEGIN/COMMIT + insertAppliedMigrationStatement,
+// точно както за нормалните миграции. Handler-ът трябва да хвърли грешка,
+// ако крайните postcondition-и (колони + типове) не са изпълнени — виж
+// §4/§5 в task spec-а: "не приемай автоматично произволна schema за валидна".
+const SMART_MIGRATION_HANDLERS: Record<string, (database: SqliteDatabase) => void> = {
+  '20260801_002_add_tournament_match_deadline_kind_and_score.sql':
+    applyTournamentMatchDeadlineKindAndScoreMigration,
+}
+
+function getTableColumnTypes(
+  database: SqliteDatabase,
+  tableName: string,
+): Map<string, string> {
+  const rows = database
+    .prepare(`PRAGMA table_info(${tableName});`)
+    .all() as Array<{ name: string; type: string }>
+  return new Map(rows.map((row) => [row.name, row.type]))
+}
+
+// 20260801_002_add_tournament_match_deadline_kind_and_score.sql — добавя
+// deadline_kind/final_score_team_a/final_score_team_b към tournament_matches.
+// Всяка ALTER TABLE ADD COLUMN се изпълнява само ако колоната реално
+// липсва (safe restart recovery за частично приложена миграция), после се
+// потвърждават и трите postcondition-и (колона присъства + очакван тип)
+// преди runner-ът да запише ledger реда. Ако вече всички колони
+// съществуват с правилния тип (schema приложена, ledger липсва), функцията
+// не изпълнява никакъв DDL — само валидира и връща успешно.
+function applyTournamentMatchDeadlineKindAndScoreMigration(database: SqliteDatabase): void {
+  const tableName = 'tournament_matches'
+  const columnsBefore = getTableColumnTypes(database, tableName)
+
+  if (!columnsBefore.has('deadline_kind')) {
+    database.exec(`
+      ALTER TABLE ${tableName} ADD COLUMN deadline_kind TEXT NULL CHECK (
+        deadline_kind IS NULL OR deadline_kind IN ('first_match', 'round_transition')
+      );
+    `)
+  }
+  if (!columnsBefore.has('final_score_team_a')) {
+    database.exec(`ALTER TABLE ${tableName} ADD COLUMN final_score_team_a INTEGER NULL;`)
+  }
+  if (!columnsBefore.has('final_score_team_b')) {
+    database.exec(`ALTER TABLE ${tableName} ADD COLUMN final_score_team_b INTEGER NULL;`)
+  }
+
+  const columnsAfter = getTableColumnTypes(database, tableName)
+  const expectedColumnTypes: Record<string, string> = {
+    deadline_kind: 'TEXT',
+    final_score_team_a: 'INTEGER',
+    final_score_team_b: 'INTEGER',
+  }
+
+  for (const [columnName, expectedType] of Object.entries(expectedColumnTypes)) {
+    const actualType = columnsAfter.get(columnName)
+    if (actualType === undefined || actualType.toUpperCase() !== expectedType) {
+      throw new Error(
+        `Postcondition failed for ${tableName}.${columnName}: expected type ${expectedType}, got ${
+          actualType ?? 'MISSING COLUMN'
+        }.`,
+      )
+    }
+  }
+}
+
 function getServerRootPath(): string {
   const currentFilePath = fileURLToPath(import.meta.url)
   return resolve(dirname(currentFilePath), '..', '..')
@@ -81,8 +153,19 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-export async function ensureServerDatabaseReady(): Promise<EnsureServerDatabaseReadyResult> {
-  const serverRootPath = getServerRootPath()
+export type EnsureServerDatabaseReadyOptions = {
+  /** Same override mechanism as getServerDatabaseFilePath — за restart-safety
+   * тестове с изолиран temp server root (собствена database/migrations +
+   * database/data), без да пипа реалната постоянна база. Production
+   * call site-ът (index.ts) не подава нищо и запазва точно текущото
+   * поведение. */
+  serverRootOverride?: string
+}
+
+export async function ensureServerDatabaseReady(
+  options: EnsureServerDatabaseReadyOptions = {},
+): Promise<EnsureServerDatabaseReadyResult> {
+  const serverRootPath = options.serverRootOverride ?? getServerRootPath()
   const databaseDirectoryPath = getDatabaseDirectoryPath(serverRootPath)
   const migrationsDirectoryPath = getMigrationsDirectoryPath(databaseDirectoryPath)
   const databaseStorageDirectoryPath =
@@ -157,11 +240,58 @@ export async function ensureServerDatabaseReady(): Promise<EnsureServerDatabaseR
         continue
       }
 
+      const smartMigrationHandler = SMART_MIGRATION_HANDLERS[migrationFileName]
+      if (smartMigrationHandler !== undefined) {
+        // Виж SMART_MIGRATION_HANDLERS по-горе — DDL-ът трябва да е
+        // условен (напр. ADD COLUMN само ако липсва), затова живее като
+        // TypeScript функция, не статичен .sql текст. Транзакцията и
+        // ledger insert-ът тук са identично управлявани както за нормалните
+        // миграции по-долу (BEGIN → handler → insertLedger → COMMIT,
+        // ROLLBACK при грешка) — handler-ът само отговаря за DDL/postcondition.
+        database.exec('BEGIN;')
+        try {
+          smartMigrationHandler(database)
+          insertAppliedMigrationStatement.run(migrationFileName)
+          database.exec('COMMIT;')
+          appliedCount += 1
+        } catch (error) {
+          try {
+            database.exec('ROLLBACK;')
+          } catch {
+            // ignore rollback failure and surface the original migration error
+          }
+
+          throw new Error(
+            `Failed to apply migration "${migrationFileName}": ${toErrorMessage(error)}`,
+          )
+        }
+
+        continue
+      }
+
       if (migrationSql.startsWith(MANUAL_TRANSACTION_MARKER)) {
         // Файлът сам управлява BEGIN/COMMIT и сам вмъква реда си в
         // server_migrations (виж коментара до MANUAL_TRANSACTION_MARKER).
         try {
           database.exec(migrationSql)
+          // Contract enforcement (виж §7 в task spec-а): manual-transaction
+          // миграция ТРЯБВА сама да запише реда си в server_migrations като
+          // част от собствената си успешна транзакция. Ако мълчаливо не го
+          // е направила, schema промяната може вече да е приложена, но при
+          // следващ restart файлът ще се изпълни отново и ще гръмне с
+          // "table already exists"/"duplicate column" — точно бъгът, който
+          // причини production incident-а. Хващаме го тук, веднага, вместо
+          // да отложим счупването за следващия startup.
+          const recordedRow = getAppliedMigrationStatement.get(
+            migrationFileName,
+          ) as { filename: string } | undefined
+          if (recordedRow === undefined) {
+            throw new Error(
+              `Manual transaction migration "${migrationFileName}" completed without recording itself ` +
+                `in ${MIGRATIONS_TABLE_NAME} (violates the MANUAL_TRANSACTION_MIGRATION contract — ` +
+                `the file must INSERT its own ledger row inside its own successful transaction).`,
+            )
+          }
           appliedCount += 1
         } catch (error) {
           // Възстановяване на инвариантите, ако файлът е паднал по средата.

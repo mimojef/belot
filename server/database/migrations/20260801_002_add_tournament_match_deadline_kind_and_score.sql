@@ -1,4 +1,3 @@
--- MANUAL_TRANSACTION_MIGRATION
 -- Добавя две неща, необходими за match waiting/round-transition UX flow-а
 -- (виж §3/§9/§8/§12 в task spec-а):
 --
@@ -18,10 +17,23 @@
 --      да покаже финалния резултат на feeder мача дори след restart/refresh
 --      без да разчита на все още жив room snapshot.
 --
--- И двете колони са NULLABL, additive — съществуващите редове/данни не се
+-- И двете колони са NULLABLE, additive — съществуващите редове/данни не се
 -- пипат. Не се налага table rebuild, защото не се добавя CHECK constraint
 -- върху съществуваща колона (само нови nullable колони) — обикновен ALTER
 -- TABLE ADD COLUMN е достатъчен и по-евтин от stage-rebuild.
+--
+-- ВАЖНО: тази миграция НЯМА MANUAL_TRANSACTION_MIGRATION маркер — не
+-- toggle-ва PRAGMA foreign_keys и не прави table rebuild, затова няма нужда
+-- сама да управлява собствена транзакция. Реалното изпълнение става чрез
+-- SMART_MIGRATION_HANDLERS registry-то в ensureServerDatabaseReady.ts
+-- (applyTournamentMatchDeadlineKindAndScoreMigration), защото SQLite няма
+-- "ALTER TABLE ADD COLUMN IF NOT EXISTS" — handler-ът проверява всяка
+-- колона поотделно чрез PRAGMA table_info и добавя само реално липсващите
+-- (safe recovery, ако предишен опит е добавил част от тях преди да падне),
+-- после потвърждава и трите postcondition-и (колона + тип), преди runner-ът
+-- да запише ledger реда — атомарно, в една транзакция, притежавана от
+-- runner-а. SQL-ът по-долу документира точната целева схема и остава
+-- изпълним "както е" (unconditional) само срещу чиста база.
 ALTER TABLE tournament_matches ADD COLUMN deadline_kind TEXT NULL CHECK (
   deadline_kind IS NULL OR deadline_kind IN ('first_match', 'round_transition')
 );
