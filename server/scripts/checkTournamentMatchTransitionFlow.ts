@@ -22,6 +22,7 @@ import type { ServerAuthoritativeGameState } from '../src/game/serverGameTypes.j
 import { createTournamentCoordinator } from '../src/tournament/tournamentCoordinator.js'
 import { createRoomSnapshotMessage } from '../src/protocol/createRoomSnapshotMessage.js'
 import { createTournamentScheduler } from '../src/tournament/tournamentScheduler.js'
+import { buildTournamentRoundDtos } from '../src/tournament/tournamentDto.js'
 
 let passed = 0
 let failed = 0
@@ -492,40 +493,146 @@ try {
     coordinator!.onTournamentRoomCompleted(room)
   }
 
-  // ── [4][5][6][7] Live feeder progress: score update по време на игра ──
+  // ── Live feeder progress audience (виж task spec-а: коригирана аудитория)
+  // — progress push-ът за един feeder мач трябва да стигне САМО до confirmed
+  // членовете на отбора, който вече е спечелил sibling feeder-а си и чака в
+  // непосредствения bracket следващ кръг точно победителя от ТОЗИ feeder.
+  // Ползва QF-B клона (quarterfinals[2]/[3], round_index 3&4 -> semifinal
+  // round_index 2) — незасегнат до момента от bot-fill/takeover сценариите
+  // по-горе, за да изолира чисто resolveWaitingTeamIdForFeeder логиката от
+  // qf2's bot-replacement history.
+  const qfB1 = quarterfinals[2]!
+  const qfB2 = quarterfinals[3]!
+
+  function teamMemberProfileIds(teamId: string): string[] {
+    return tournamentStore!.getEntriesForTournament(tournamentId)
+      .filter((entry) => entry.teamId === teamId)
+      .map((entry) => entry.profileId)
+  }
+
   const feederProgressNotifications: Array<{ profileIds: string[]; update: unknown }> = []
-  let feederProgressCoordinator: Awaited<ReturnType<typeof createTournamentCoordinator>> | null = null
-  await check('feeder progress update is sent before match completion, with the current authoritative score', async () => {
-    feederProgressCoordinator = await createCoordinator({
-      dbPath, profiles, rooms, attachedConnections, economyStore,
-      onFeederProgress: (profileIds, update) => { feederProgressNotifications.push({ profileIds, update }) },
-    })
-    let room = getRoomForMatch(rooms, getMatches(db!, tournamentId).find((m) => m.matchId === quarterfinals[0]!.matchId)!)
+  const feederProgressCoordinator = await createCoordinator({
+    dbPath, profiles, rooms, attachedConnections, economyStore,
+    onFeederProgress: (profileIds, update) => { feederProgressNotifications.push({ profileIds, update }) },
+  })
+
+  await check('no group broadcast while the sibling feeder (QF-B1) has not completed yet', () => {
+    let room = getRoomForMatch(rooms, getMatches(db!, tournamentId).find((m) => m.matchId === qfB2.matchId)!)
+    room = advanceRoundScore(room, { teamA: 10, teamB: 8 })
+    rooms.set(room.id, room)
+    feederProgressCoordinator.notifyFeederScoreProgress(room)
+    assert(feederProgressNotifications.length === 0, `unexpected push while sibling feeder still in progress: ${feederProgressNotifications.length}`)
+  })
+
+  await check('QF-B1 (the sibling feeder) completes with team A as winner', async () => {
+    await playMatchToCompletion(qfB1.matchId, 'A')
+    const refreshed = getMatches(db!, tournamentId).find((m) => m.matchId === qfB1.matchId)!
+    assert(refreshed.status === 'completed' && refreshed.winnerTeamId === refreshed.teamAId, `QF-B1 not completed with team A as winner: ${JSON.stringify(refreshed)}`)
+  })
+
+  const qfB1Completed = getMatches(db!, tournamentId).find((m) => m.matchId === qfB1.matchId)!
+  const waitingTeamMembers = teamMemberProfileIds(qfB1Completed.winnerTeamId!)
+  const qfB1LoserTeamId = qfB1Completed.winnerTeamId === qfB1Completed.teamAId ? qfB1Completed.teamBId : qfB1Completed.teamAId
+  const qfB1LoserMembers = teamMemberProfileIds(qfB1LoserTeamId)
+  const qfB2PlayerMembers = [...teamMemberProfileIds(qfB2.teamAId), ...teamMemberProfileIds(qfB2.teamBId)]
+  const unrelatedBranchMembers = [
+    ...teamMemberProfileIds(quarterfinals[0]!.teamAId),
+    ...teamMemberProfileIds(quarterfinals[0]!.teamBId),
+    ...teamMemberProfileIds(quarterfinals[1]!.teamAId),
+    ...teamMemberProfileIds(quarterfinals[1]!.teamBId),
+  ]
+
+  await check('QF-B2 (still in progress) reaches a real, live in_progress game state', () => {
+    let room = getRoomForMatch(rooms, getMatches(db!, tournamentId).find((m) => m.matchId === qfB2.matchId)!)
+    room = connectAllSeats(room, 'qfb2-live', attachedConnections)
+    rooms.set(room.id, room)
+    coordinator!.tickNow()
+    forceCountdownElapsed(db!, qfB2.matchId)
+    coordinator!.tickNow()
+    const refreshed = getMatches(db!, tournamentId).find((m) => m.matchId === qfB2.matchId)!
+    assert(refreshed.status === 'in_progress', `QF-B2 status=${refreshed.status}, expected in_progress`)
+  })
+
+  await check('a live authoritative score update on QF-B2 is pushed only to the waiting QF-B1 winner team', () => {
+    let room = getRoomForMatch(rooms, getMatches(db!, tournamentId).find((m) => m.matchId === qfB2.matchId)!)
     room = advanceRoundScore(room, { teamA: 32, teamB: 18 })
     rooms.set(room.id, room)
     feederProgressCoordinator.notifyFeederScoreProgress(room)
 
-    assert(feederProgressNotifications.length === 1, `notification count=${feederProgressNotifications.length}, expected 1`)
-    const first = feederProgressNotifications[0]!.update as { status: string; scoreTeamA: number; scoreTeamB: number; matchId: string }
-    assert(first.status === 'in_progress', `status=${first.status}, expected in_progress (must fire BEFORE completion)`)
-    assert(first.scoreTeamA === 32 && first.scoreTeamB === 18, `score=${first.scoreTeamA}:${first.scoreTeamB}, expected 32:18 (current authoritative score)`)
-    assert(first.matchId === quarterfinals[0]!.matchId, 'matchId mismatch in feeder progress update')
+    assert(feederProgressNotifications.length === 1, `notification count=${feederProgressNotifications.length}, expected exactly 1`)
+    const update = feederProgressNotifications[0]!.update as { status: string; scoreTeamA: number; scoreTeamB: number; matchId: string }
+    assert(update.status === 'in_progress', `status=${update.status}, expected in_progress (must fire BEFORE completion)`)
+    assert(update.scoreTeamA === 32 && update.scoreTeamB === 18, `score=${update.scoreTeamA}:${update.scoreTeamB}, expected 32:18`)
+    assert(update.matchId === qfB2.matchId, 'matchId mismatch in feeder progress update')
+
+    assert(waitingTeamMembers.length === 2, `waiting team member count=${waitingTeamMembers.length}, expected 2`)
+    const recipients = feederProgressNotifications[0]!.profileIds
+    const recipientSet = new Set(recipients)
+    assert(recipientSet.size === recipients.length, 'recipient profile IDs are not deduplicated')
+    assert(recipientSet.size === waitingTeamMembers.length, `recipient count=${recipientSet.size}, expected ${waitingTeamMembers.length} (only the waiting QF-B1 winner team)`)
+    for (const profileId of waitingTeamMembers) {
+      assert(recipientSet.has(profileId), `waiting QF-B1 winner-team member ${profileId} missing from recipients`)
+    }
   })
 
-  await check('waiting (confirmed) tournament participants receive the feeder progress update', () => {
+  await check('QF-B2 players currently on the table do not receive the progress push meant for the waiting team', () => {
     const last = feederProgressNotifications[feederProgressNotifications.length - 1]!
-    assert(last.profileIds.length === profileIds.length, `recipient count=${last.profileIds.length}, expected ${profileIds.length} (all confirmed tournament participants)`)
-    for (const profileId of profileIds) {
-      assert(last.profileIds.includes(profileId), `profileId=${profileId} missing from feeder progress recipients`)
+    for (const profileId of qfB2PlayerMembers) {
+      assert(!last.profileIds.includes(profileId), `QF-B2 on-table player ${profileId} unexpectedly received the waiting-team push`)
+    }
+  })
+
+  await check('participants from an unrelated bracket branch (QF-A1/QF-A2) do not receive the push', () => {
+    const last = feederProgressNotifications[feederProgressNotifications.length - 1]!
+    for (const profileId of unrelatedBranchMembers) {
+      assert(!last.profileIds.includes(profileId), `unrelated-branch participant ${profileId} unexpectedly received the push`)
+    }
+  })
+
+  await check('the team eliminated by the sibling feeder (QF-B1 loser) does not receive the push', () => {
+    const last = feederProgressNotifications[feederProgressNotifications.length - 1]!
+    for (const profileId of qfB1LoserMembers) {
+      assert(!last.profileIds.includes(profileId), `QF-B1 losing-team participant ${profileId} unexpectedly received the push`)
     }
   })
 
   await check('repeated notifyFeederScoreProgress with an unchanged score does not resend (no spam on every card)', () => {
     const countBefore = feederProgressNotifications.length
-    const room = getRoomForMatch(rooms, getMatches(db!, tournamentId).find((m) => m.matchId === quarterfinals[0]!.matchId)!)
-    feederProgressCoordinator!.notifyFeederScoreProgress(room)
-    feederProgressCoordinator!.notifyFeederScoreProgress(room)
+    const room = getRoomForMatch(rooms, getMatches(db!, tournamentId).find((m) => m.matchId === qfB2.matchId)!)
+    feederProgressCoordinator.notifyFeederScoreProgress(room)
+    feederProgressCoordinator.notifyFeederScoreProgress(room)
     assert(feederProgressNotifications.length === countBefore, `notification count changed on unchanged-score repeat calls: before=${countBefore}, after=${feederProgressNotifications.length}`)
+  })
+
+  await check('a new authoritative score produces exactly one new push, to the same waiting team', () => {
+    const countBefore = feederProgressNotifications.length
+    let room = getRoomForMatch(rooms, getMatches(db!, tournamentId).find((m) => m.matchId === qfB2.matchId)!)
+    room = advanceRoundScore(room, { teamA: 40, teamB: 25 })
+    rooms.set(room.id, room)
+    feederProgressCoordinator.notifyFeederScoreProgress(room)
+    assert(feederProgressNotifications.length === countBefore + 1, `expected exactly 1 new notification, got ${feederProgressNotifications.length - countBefore}`)
+    const last = feederProgressNotifications[feederProgressNotifications.length - 1]!
+    const update = last.update as { scoreTeamA: number; scoreTeamB: number }
+    assert(update.scoreTeamA === 40 && update.scoreTeamB === 25, `score=${update.scoreTeamA}:${update.scoreTeamB}, expected 40:25`)
+    assert(new Set(last.profileIds).size === waitingTeamMembers.length, 'recipient set size changed on the new push')
+  })
+
+  await check('reconnect snapshot (buildTournamentRoundDtos) still reflects the live authoritative score for QF-B2', () => {
+    const rounds = tournamentStore!.getRoundsForTournament(tournamentId)
+    const dtoMatches = tournamentStore!.getMatchesForTournament(tournamentId)
+    const roundDtos = buildTournamentRoundDtos({
+      rounds,
+      matches: dtoMatches,
+      getLiveScoreForRoom: (roomId) => {
+        const liveRoom = rooms.get(roomId) ?? null
+        const authState = liveRoom?.game.authoritativeState ?? null
+        if (authState === null || 'kind' in authState || authState.matchEnded !== null) return null
+        return { teamA: authState.score.match.teamA, teamB: authState.score.match.teamB }
+      },
+    })
+    const matchDto = roundDtos.flatMap((r) => r.matches).find((m) => m.matchId === qfB2.matchId)
+    assert(matchDto !== undefined, 'QF-B2 match missing from round dtos')
+    assert(matchDto!.liveScoreTeamA === 40 && matchDto!.liveScoreTeamB === 25, `liveScore=${matchDto!.liveScoreTeamA}:${matchDto!.liveScoreTeamB}, expected 40:25`)
   })
 
   await check('a disconnected/unaffiliated profile is not among feeder progress recipients', () => {
@@ -541,7 +648,7 @@ try {
     assert(ledgerRowsBeforeCompletion === 0, `unexpected prize_payout ledger rows from a mid-match progress push: ${ledgerRowsBeforeCompletion}`)
   })
 
-  try { feederProgressCoordinator?.close() } catch {}
+  try { feederProgressCoordinator.close() } catch {}
 
   await check('remaining quarterfinal matches complete normally', async () => {
     await playMatchToCompletion(quarterfinals[0]!.matchId)

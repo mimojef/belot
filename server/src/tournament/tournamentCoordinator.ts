@@ -394,6 +394,20 @@ export async function createTournamentCoordinator(
     LIMIT 1;
   `)
 
+  // Намира sibling feeder мача на same round_type/round_index bracket слот —
+  // ползва се от resolveWaitingTeamIdForFeeder, за да открие другия feeder
+  // на споделения downstream мач БЕЗ downstream match row да съществува
+  // вече (виж коментара при ensureNextRound: следващият кръг се създава
+  // едва след като И ДВАТА sibling мача имат победител).
+  const selectMatchByRoundPositionStatement = database.prepare(`
+    SELECT ${matchSelectColumns}
+    FROM tournament_matches tm
+    JOIN tournaments t ON t.tournament_id = tm.tournament_id
+    JOIN tournament_rounds tr ON tr.round_id = tm.round_id
+    WHERE tm.tournament_id = ? AND tr.round_type = ? AND tr.round_index = ?
+    LIMIT 1;
+  `)
+
   // Включва и 'eliminated' — веднъж назначени към даден match (team_a_id/
   // team_b_id са immutable за мача), участниците трябва да продължат да се
   // resolve-ват коректно в getSeatAssignments/createAttendanceSnapshot дори
@@ -1509,6 +1523,32 @@ export async function createTournamentCoordinator(
     }
   }
 
+  // Открива отбора, който вече е спечелил своя предходен мач и в
+  // непосредствения bracket следващ кръг чака точно победителя от
+  // подадения feeder мач (generic за round_of_16→quarterfinal,
+  // quarterfinal→semifinal, semifinal→final — без hardcoded round label
+  // или bracket размер). Downstream match row-ът НЕ съществува все още,
+  // докато и двата sibling мача не завършат (виж ensureNextRound по-горе),
+  // затова pairing-ът се извежда directно от round_index bracket слота:
+  // round_index 1&2 се сдвояват в следващия кръг, 3&4 и т.н.
+  function resolveWaitingTeamIdForFeeder(match: MatchRow): TournamentTeamId | null {
+    if (match.round_type === 'final') return null
+    const teamCapacity = match.tournament_player_capacity / 2
+    const ladder = getTournamentRoundLadder(teamCapacity)
+    const ladderPosition = ladder.indexOf(match.round_type as TournamentRoundType)
+    if (ladderPosition === -1 || ladderPosition === ladder.length - 1) return null
+
+    const siblingRoundIndex = match.round_index % 2 === 1 ? match.round_index + 1 : match.round_index - 1
+    const sibling = selectMatchByRoundPositionStatement.get(
+      match.tournament_id,
+      match.round_type,
+      siblingRoundIndex,
+    ) as MatchRow | undefined
+    if (sibling === undefined) return null
+    if (sibling.status !== 'completed' || sibling.winner_team_id === null) return null
+    return sibling.winner_team_id
+  }
+
   // Live feeder progress (§2 в task spec-а) — извиква се от произволен room
   // state commit hook на сървъра (виж коментара при notifyFeederScoreProgress
   // в TournamentCoordinator интерфейса по-горе). No-op fast paths за
@@ -1517,6 +1557,14 @@ export async function createTournamentCoordinator(
   // и — най-важно — когато score-ът не се е променил спрямо последния push,
   // за да НЕ праща update при всяка карта (само authoritative смяна на
   // score.match, което на практика значи "завършено раздаване").
+  //
+  // Аудиторията НЕ е вече цялото confirmed турнирно население — само
+  // confirmed членовете на отбора, който вече е спечелил предходния си мач
+  // и в непосредствения bracket следващ кръг чака точно победителя от този
+  // feeder (виж resolveWaitingTeamIdForFeeder). Ако другият feeder на
+  // същия downstream слот още не е завършил, няма кой да чака — тихо
+  // излизаме без push (safe diagnostic no-op, не хвърля грешка, за да не
+  // прекъсне game commit-а).
   function notifyFeederScoreProgress(room: ServerRoom): void {
     if (!isTournamentRoom(room) || !isRealGameStarted(room)) return
     const authState = room.game.authoritativeState as ServerAuthoritativeGameState
@@ -1530,8 +1578,10 @@ export async function createTournamentCoordinator(
     if (match === undefined || match.status === 'completed') return
 
     lastNotifiedFeederScoreByMatchId.set(room.id, signature)
-    const profileIds = (selectConfirmedProfileIdsForTournamentStatement.all(match.tournament_id) as Array<{ profile_id: ProfileId }>)
-      .map((row) => row.profile_id)
+
+    const waitingTeamId = resolveWaitingTeamIdForFeeder(match)
+    if (waitingTeamId === null) return
+    const profileIds = Array.from(new Set(getTeamEntries(match.tournament_id, waitingTeamId).map((entry) => entry.profile_id)))
     if (profileIds.length === 0) return
     deps.notifyFeederScoreProgress(profileIds, {
       tournamentId: match.tournament_id,
