@@ -10431,6 +10431,9 @@ export function renderLobbyScreen(
     })
   })
 
+  root.querySelector<HTMLButtonElement>('[data-tournament-detail-back="1"]')
+    ?.addEventListener('click', options.onTournamentsClick)
+
   {
     const createForm = root.querySelector<HTMLFormElement>('[data-tournament-create-form="1"]')
     const visibilityRadios = root.querySelectorAll<HTMLInputElement>('[data-tournament-create-form="1"] input[name="visibility"]')

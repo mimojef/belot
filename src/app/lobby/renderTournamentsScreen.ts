@@ -81,6 +81,54 @@ function startModeLabel(t: TournamentSummarySnapshot): string {
   return 'Насрочен'
 }
 
+// Форматира ms остатък като "Остават X ч. Y мин. Z сек." (пропуска нулеви по-едри единици).
+export function formatTournamentStartCountdown(remainingMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(remainingMs / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return `Остават ${hours} ч. ${minutes} мин. ${seconds} сек.`
+  if (minutes > 0) return `Остават ${minutes} мин. ${seconds} сек.`
+  return `Остават ${seconds} сек.`
+}
+
+const START_ACTIVE_STATUSES: ReadonlySet<TournamentSummarySnapshot['status']> = new Set([
+  'starting',
+  'semifinal_in_progress',
+  'final_in_progress',
+])
+
+function tournamentStartStateLabel(t: TournamentDetailSnapshot): string | null {
+  if (t.status === 'finished') return 'Турнирът приключи'
+  if (START_ACTIVE_STATUSES.has(t.status)) return 'Турнирът е в ход'
+  return null
+}
+
+// Изчислява primary/secondary текст за "Старт" картата. secondary е null, ако
+// не носи допълнителна информация отделно от primary (напр. started/finished).
+function computeTournamentStartInfo(t: TournamentDetailSnapshot): { primary: string; secondary: string | null } {
+  const activeStateLabel = tournamentStartStateLabel(t)
+  if (activeStateLabel !== null) {
+    return { primary: activeStateLabel, secondary: null }
+  }
+
+  if (t.startMode === 'scheduled' && t.scheduledStartAt) {
+    const remainingMs = new Date(t.scheduledStartAt).getTime() - Date.now()
+    const secondary = Number.isFinite(remainingMs) && remainingMs > 0
+      ? formatTournamentStartCountdown(remainingMs)
+      : 'Очаква се започване...'
+    return { primary: fmtLocalDateTime(t.scheduledStartAt), secondary }
+  }
+
+  // Fill режим (или scheduled без валиден timestamp — defensive fallback).
+  const remainingPlayers = Math.max(0, t.playerCapacity - t.confirmedEntriesCount)
+  if (remainingPlayers === 0) {
+    return { primary: 'При запълване', secondary: 'Турнирът е готов за старт' }
+  }
+  const secondary = `Остават още ${remainingPlayers} ${remainingPlayers === 1 ? 'участник' : 'участници'} до старт`
+  return { primary: 'При запълване', secondary }
+}
+
 function statusBadgeColor(status: TournamentSummarySnapshot['status']): string {
   if (status === 'open') return '#22c55e'
   if (status === 'starting' || status === 'semifinal_in_progress' || status === 'final_in_progress') return '#d4a520'
@@ -515,9 +563,22 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
   }
 
   const avatarLetter = t.creator.displayName.slice(0, 1).toUpperCase()
+  const startInfo = computeTournamentStartInfo(t)
 
   return `
     <section style="padding:0 4px;max-width:720px;margin:0 auto;">
+      <button
+        type="button"
+        data-tournament-detail-back="1"
+        aria-label="Назад към всички турнири"
+        style="
+          display:inline-flex;align-items:center;gap:6px;margin-bottom:12px;height:36px;
+          padding:0 14px;border-radius:8px;border:1px solid rgba(212,165,32,0.32);
+          background:rgba(212,165,32,0.08);color:#d4a520;font-size:13px;font-weight:800;
+          cursor:pointer;
+        "
+      >← Назад към всички турнири</button>
+
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap;">
         <h2 style="font-size:22px;font-weight:900;color:#ffffff;margin:0;">${escapeHtml(t.name)}</h2>
         <span style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;color:${statusBadgeColor(t.status)};border:1px solid ${statusBadgeColor(t.status)}55;border-radius:999px;padding:3px 10px;">${escapeHtml(t.statusLabel)}</span>
@@ -547,9 +608,17 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
           <div style="font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:4px;">Отбори</div>
           <div style="font-size:18px;font-weight:900;color:#ffffff;">${t.completedTeamsCount} / 4</div>
         </div>
-        <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:12px 14px;">
+        <div
+          data-tournament-start-card="1"
+          data-tournament-id="${escapeHtml(t.tournamentId)}"
+          data-start-mode="${escapeHtml(t.startMode)}"
+          data-scheduled-start-at="${t.scheduledStartAt ? escapeHtml(t.scheduledStartAt) : ''}"
+          data-status="${escapeHtml(t.status)}"
+          style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:12px 14px;"
+        >
           <div style="font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:4px;">Старт</div>
-          <div style="font-size:13px;font-weight:800;color:#ffffff;">${escapeHtml(startModeLabel(t))}</div>
+          <div data-tournament-start-primary="1" style="font-size:13px;font-weight:800;color:#ffffff;">${escapeHtml(startInfo.primary)}</div>
+          ${startInfo.secondary !== null ? `<div data-tournament-start-secondary="1" style="margin-top:3px;font-size:11px;font-weight:700;color:#d4a520;">${escapeHtml(startInfo.secondary)}</div>` : `<div data-tournament-start-secondary="1" style="display:none;"></div>`}
         </div>
       </div>
 

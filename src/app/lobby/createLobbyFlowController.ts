@@ -13,6 +13,7 @@ import {
   formatPrivateRoomCountdown,
   getPrivateRoomCountdownState,
 } from './renderPrivateRoomWaitingScreen'
+import { formatTournamentStartCountdown } from './renderTournamentsScreen'
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
   renderLobbyScreen,
@@ -1590,6 +1591,13 @@ export function createLobbyFlowController(
   let privateRoomCountdownRoomId: string | null = null
   let privateRoomCountdownExpiresAt: number | null = null
 
+  // Tick loop за scheduled-start countdown-а в tournament detail "Старт" картата.
+  // Същия DOM-only patch подход като частните стаи по-горе — секундният tick
+  // само пренаписва secondary текста в картата, без пълен render().
+  let tournamentStartCountdownIntervalId: ReturnType<typeof setInterval> | null = null
+  let tournamentStartCountdownTournamentId: string | null = null
+  let tournamentStartCountdownScheduledAt: string | null = null
+
   let finalFillSequenceStartedAt: number | null = null
   let finalFillBaseQueuedPlayers: number | null = null
   let finalFillAnimatedQueuedPlayers: number | null = null
@@ -1881,6 +1889,59 @@ export function createLobbyFlowController(
       // matches the "client never decides closure" contract: reaching 00:00
       // here only changes displayed text, it never removes the room locally.
       updatePrivateRoomCountdownDom(currentRoom.expiresAt)
+    }, 1000)
+  }
+
+  function updateTournamentStartCountdownDom(scheduledStartAt: string): void {
+    const card = options.root.querySelector<HTMLElement>('[data-tournament-start-card="1"]')
+    const secondaryEl = card?.querySelector<HTMLElement>('[data-tournament-start-secondary="1"]')
+    if (secondaryEl === null || secondaryEl === undefined) return
+    const remainingMs = new Date(scheduledStartAt).getTime() - Date.now()
+    const text = Number.isFinite(remainingMs) && remainingMs > 0
+      ? formatTournamentStartCountdown(remainingMs)
+      : 'Очаква се започване...'
+    secondaryEl.textContent = text
+    secondaryEl.style.display = ''
+  }
+
+  function clearTournamentStartCountdownLoop(): void {
+    if (tournamentStartCountdownIntervalId !== null) {
+      window.clearInterval(tournamentStartCountdownIntervalId)
+      tournamentStartCountdownIntervalId = null
+    }
+    tournamentStartCountdownTournamentId = null
+    tournamentStartCountdownScheduledAt = null
+  }
+
+  // Idempotent — извиква се след всеки renderLobby() докато сме на detail
+  // екрана. Рестартира interval-а само когато турнирът или scheduledStartAt
+  // реално се сменят; иначе просто пресинхронизира DOM-а на прясно рендерания
+  // node (innerHTML replace означава старият node вече не съществува).
+  function startTournamentStartCountdownLoop(tournamentId: string, scheduledStartAt: string): void {
+    if (tournamentStartCountdownIntervalId !== null &&
+      tournamentStartCountdownTournamentId === tournamentId &&
+      tournamentStartCountdownScheduledAt === scheduledStartAt
+    ) {
+      updateTournamentStartCountdownDom(scheduledStartAt)
+      return
+    }
+
+    clearTournamentStartCountdownLoop()
+    tournamentStartCountdownTournamentId = tournamentId
+    tournamentStartCountdownScheduledAt = scheduledStartAt
+
+    updateTournamentStartCountdownDom(scheduledStartAt)
+
+    tournamentStartCountdownIntervalId = window.setInterval(() => {
+      if (
+        state.currentScreen !== 'tournament-detail' ||
+        state.tournamentDetailId !== tournamentId ||
+        state.tournamentDetail?.scheduledStartAt !== scheduledStartAt
+      ) {
+        clearTournamentStartCountdownLoop()
+        return
+      }
+      updateTournamentStartCountdownDom(scheduledStartAt)
     }, 1000)
   }
 
@@ -3666,6 +3727,18 @@ export function createLobbyFlowController(
         render()
       },
     })
+
+    if (
+      state.currentScreen === 'tournament-detail' &&
+      state.tournamentDetail !== null &&
+      state.tournamentDetail.startMode === 'scheduled' &&
+      state.tournamentDetail.scheduledStartAt !== null &&
+      state.tournamentDetail.status === 'open'
+    ) {
+      startTournamentStartCountdownLoop(state.tournamentDetail.tournamentId, state.tournamentDetail.scheduledStartAt)
+    } else {
+      clearTournamentStartCountdownLoop()
+    }
   }
 
   async function submitPresetAvatar(avatarUrl: string): Promise<void> {
@@ -7253,6 +7326,10 @@ export function createLobbyFlowController(
         return
       }
     }
+    if (state.currentScreen !== 'tournament-detail') {
+      clearTournamentStartCountdownLoop()
+    }
+
     if (state.currentScreen === 'matchmaking-room') {
       renderMatchmakingRoom()
       return

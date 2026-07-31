@@ -42,6 +42,7 @@
     "check:tournament-detail-entry-actions": "tsx scripts/checkTournamentDetailEntryActions.ts --project-root=..",
     "check:tournament-leave-rejoin": "tsx scripts/checkTournamentLeaveRejoin.ts --server-root=.",
     "check:tournament-partner-acceptance-state": "tsx scripts/checkTournamentPartnerAcceptanceState.ts --server-root=.",
+    "check:tournament-detail-navigation-and-start-info": "tsx scripts/checkTournamentDetailNavigationAndStartInfo.ts --project-root=..",
     "check:admin-tournament-api": "tsx scripts/checkAdminTournamentApi.ts --server-root=.",
     "check:tournament-integrity": "tsx scripts/checkAdminTournamentIntegrity.ts",
     "check:admin-tournament-frontend": "tsx scripts/checkAdminTournamentsFrontend.ts --project-root=..",
