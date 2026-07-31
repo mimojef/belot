@@ -50,6 +50,8 @@ import {
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes'
 import { renderAdminPaymentsPanel, attachAdminPaymentsPanelHandlers } from '../adminPayments/renderAdminPaymentsPanel'
 import { renderAdminPaymentDetailPanel, attachAdminPaymentDetailHandlers } from '../adminPayments/renderAdminPaymentDetailPanel'
+import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes'
+import { renderAdminTournamentDetailPanel, renderAdminTournamentsPanel, attachAdminTournamentsHandlers } from '../adminTournaments/renderAdminTournamentsPanel'
 import {
   renderTournamentsScreen,
   renderTournamentDetailScreen,
@@ -123,7 +125,7 @@ export type GuestContactFormInput = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'tournaments' | 'tournament-detail' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'tournaments' | 'tournament-detail' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -368,6 +370,20 @@ export type LobbyScreenState = {
   adminPaymentDetailLoading: boolean
   adminPaymentDetailPurchase: AdminPaymentDetailRow | null
   adminPaymentDetailErrorText: string | null
+  adminTournamentsLoading: boolean
+  adminTournamentsRows: AdminTournamentSummaryRow[]
+  adminTournamentsTotal: number
+  adminTournamentsErrorText: string | null
+  adminTournamentsCanWrite: boolean
+  adminTournamentsFilters: AdminTournamentFilters
+  adminTournamentDetailId: string | null
+  adminTournamentDetailLoading: boolean
+  adminTournamentDetail: AdminTournamentDetailRow | null
+  adminTournamentDetailErrorText: string | null
+  adminTournamentActionBusy: boolean
+  adminTournamentActionErrorText: string | null
+  adminTournamentActionInfoText: string | null
+  adminTournamentCancelConfirmOpen: boolean
   tournaments: TournamentSummarySnapshot[]
   tournamentsLoading: boolean
   tournamentsErrorText: string | null
@@ -607,6 +623,15 @@ export type RenderLobbyScreenOptions = {
   onAdminPaymentsBackClick?: () => void
   onAdminPaymentsDetailOpen?: (purchaseId: string) => void
   onAdminPaymentDetailBack?: () => void
+  onAdminTournamentsOpen?: () => void
+  onAdminTournamentsBack?: () => void
+  onAdminTournamentsFilter?: (filters: Partial<AdminTournamentFilters>) => void
+  onAdminTournamentsPage?: (page: number) => void
+  onAdminTournamentOpen?: (tournamentId: string) => void
+  onAdminTournamentReconcile?: () => void
+  onAdminTournamentCancelOpen?: () => void
+  onAdminTournamentCancelConfirm?: () => void
+  onAdminTournamentCancelDismiss?: () => void
   onRulesOpen: () => void
   onStrategyOpen: () => void
 }
@@ -1477,7 +1502,7 @@ function renderNav(state: LobbyScreenState): string {
   const leaderboardsActive = activeView === 'leaderboards'
   const tournamentsActive = activeView === 'tournaments' || activeView === 'tournament-detail'
   const shopActive = activeView === 'shop'
-  const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'guest-contact-messages'
+  const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'admin-tournaments' || activeView === 'admin-tournament-detail' || activeView === 'guest-contact-messages'
   const lobbyActive = activeView === 'tables'
   const mailUnreadCount = state.supportUnreadCount + (state.isAdmin ? state.adminGuestContactUnreadCount : 0)
   const notificationsBadgeCount = getNotificationsBadgeCount(state)
@@ -4033,6 +4058,28 @@ function renderMobileLobbyScreenContent(
                 },
                 { onBack: () => {} },
               )
+          : state.view === 'admin-tournaments'
+            ? renderAdminTournamentsPanel({
+                isAdminOrSubadmin: state.isAdminOrSubadmin,
+                canWrite: state.adminTournamentsCanWrite,
+                loading: state.adminTournamentsLoading,
+                errorText: state.adminTournamentsErrorText,
+                rows: state.adminTournamentsRows,
+                total: state.adminTournamentsTotal,
+                filters: state.adminTournamentsFilters,
+              })
+          : state.view === 'admin-tournament-detail'
+            ? renderAdminTournamentDetailPanel({
+                isAdminOrSubadmin: state.isAdminOrSubadmin,
+                canWrite: state.adminTournamentsCanWrite,
+                loading: state.adminTournamentDetailLoading,
+                errorText: state.adminTournamentDetailErrorText,
+                tournament: state.adminTournamentDetail,
+                actionBusy: state.adminTournamentActionBusy,
+                actionErrorText: state.adminTournamentActionErrorText,
+                actionInfoText: state.adminTournamentActionInfoText,
+                cancelConfirmOpen: state.adminTournamentCancelConfirmOpen,
+              })
           : state.view === 'tournaments'
             ? renderTournamentsScreen(state)
           : state.view === 'tournament-detail'
@@ -4983,6 +5030,9 @@ export function renderAdminInfoPanel(state: LobbyScreenState): string {
 
   return `
     <section style="padding:0 4px;">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
+        <button type="button" data-lobby-nav-admin-tournaments="1" style="min-height:38px;border:1px solid rgba(212,165,32,0.35);background:#111;color:#d4a520;border-radius:8px;padding:0 14px;font-weight:900;cursor:pointer;">Admin турнири</button>
+      </div>
       <h2 style="font-size:18px;font-weight:800;color:#d4a520;margin:0 0 20px;letter-spacing:0.04em;text-transform:uppercase;">Информация</h2>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:24px;">
@@ -8205,6 +8255,28 @@ export function renderLobbyScreen(
                     },
                     { onBack: () => {} },
                   )
+              : state.view === 'admin-tournaments'
+                ? renderAdminTournamentsPanel({
+                    isAdminOrSubadmin: state.isAdminOrSubadmin,
+                    canWrite: state.adminTournamentsCanWrite,
+                    loading: state.adminTournamentsLoading,
+                    errorText: state.adminTournamentsErrorText,
+                    rows: state.adminTournamentsRows,
+                    total: state.adminTournamentsTotal,
+                    filters: state.adminTournamentsFilters,
+                  })
+              : state.view === 'admin-tournament-detail'
+                ? renderAdminTournamentDetailPanel({
+                    isAdminOrSubadmin: state.isAdminOrSubadmin,
+                    canWrite: state.adminTournamentsCanWrite,
+                    loading: state.adminTournamentDetailLoading,
+                    errorText: state.adminTournamentDetailErrorText,
+                    tournament: state.adminTournamentDetail,
+                    actionBusy: state.adminTournamentActionBusy,
+                    actionErrorText: state.adminTournamentActionErrorText,
+                    actionInfoText: state.adminTournamentActionInfoText,
+                    cancelConfirmOpen: state.adminTournamentCancelConfirmOpen,
+                  })
             : state.view === 'tournaments'
               ? renderTournamentsScreen(state)
             : state.view === 'tournament-detail'
@@ -8797,6 +8869,13 @@ export function renderLobbyScreen(
     ?.addEventListener('click', () => {
       if (adminDropdown) adminDropdown.style.display = 'none'
       options.onAdminServerClick()
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-nav-admin-tournaments="1"]')
+    ?.addEventListener('click', () => {
+      if (adminDropdown) adminDropdown.style.display = 'none'
+      options.onAdminTournamentsOpen?.()
     })
 
   root
@@ -10809,6 +10888,17 @@ export function renderLobbyScreen(
 
   attachAdminPaymentDetailHandlers(root, {
     onBack: () => { options.onAdminPaymentDetailBack?.() },
+  })
+
+  attachAdminTournamentsHandlers(root, {
+    onBack: () => { options.onAdminTournamentsBack?.() },
+    onFilter: (filters) => { options.onAdminTournamentsFilter?.(filters) },
+    onPage: (page) => { options.onAdminTournamentsPage?.(page) },
+    onOpen: (tournamentId) => { options.onAdminTournamentOpen?.(tournamentId) },
+    onReconcile: () => { options.onAdminTournamentReconcile?.() },
+    onCancelOpen: () => { options.onAdminTournamentCancelOpen?.() },
+    onCancelConfirm: () => { options.onAdminTournamentCancelConfirm?.() },
+    onCancelDismiss: () => { options.onAdminTournamentCancelDismiss?.() },
   })
 
   root.querySelectorAll<HTMLButtonElement>('[data-admin-payments-open]').forEach((btn) => {

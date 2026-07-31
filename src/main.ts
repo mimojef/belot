@@ -34,6 +34,7 @@ import type { GiftLimitErrorPayload } from './app/lobby/formatGiftLimitError'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult } from './app/adminServer/adminServerTypes'
 import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
+import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from './app/adminTournaments/adminTournamentTypes'
 import {
   createGameServerClient,
   type AdminSettingsSnapshot,
@@ -1372,6 +1373,118 @@ async function loadAdminPaymentDetail(purchaseId: string): Promise<
       return { ok: false, message: data.message ?? 'Грешка при зареждане на плащането.' }
     }
     return { ok: true, purchase: data.purchase }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadAdminTournaments(filters: AdminTournamentFilters): Promise<
+  | { ok: true; tournaments: AdminTournamentSummaryRow[]; page: number; limit: number; totalCount: number; canWrite: boolean }
+  | { ok: false; message: string; forbidden?: boolean }
+> {
+  try {
+    const qs = new URLSearchParams({
+      page: String(filters.page),
+      limit: String(filters.limit),
+    })
+    for (const key of ['status', 'settlementState', 'visibility', 'startMode', 'integrityState', 'search'] as const) {
+      const value = filters[key]
+      if (value) qs.set(key, value)
+    }
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/tournaments?${qs}`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп до admin турнири.', forbidden: true }
+    }
+    const data = (await response.json()) as {
+      ok: boolean
+      tournaments?: AdminTournamentSummaryRow[]
+      page?: number
+      limit?: number
+      totalCount?: number
+      canWrite?: boolean
+      message?: string
+    }
+    if (!response.ok || !data.ok || !Array.isArray(data.tournaments) || typeof data.totalCount !== 'number') {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на турнирите.' }
+    }
+    return {
+      ok: true,
+      tournaments: data.tournaments,
+      page: data.page ?? filters.page,
+      limit: data.limit ?? filters.limit,
+      totalCount: data.totalCount,
+      canWrite: data.canWrite === true,
+    }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadAdminTournamentDetail(tournamentId: string): Promise<
+  | { ok: true; tournament: AdminTournamentDetailRow; canWrite: boolean }
+  | { ok: false; message: string; forbidden?: boolean }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/tournaments/${encodeURIComponent(tournamentId)}`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп до този admin турнир.', forbidden: true }
+    }
+    const data = (await response.json()) as {
+      ok: boolean
+      tournament?: AdminTournamentDetailRow
+      canWrite?: boolean
+      message?: string
+    }
+    if (!response.ok || !data.ok || !data.tournament) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на турнира.' }
+    }
+    return { ok: true, tournament: data.tournament, canWrite: data.canWrite === true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function postAdminTournamentAction(
+  tournamentId: string,
+  action: 'reconcile' | 'cancel-open',
+): Promise<
+  | { ok: true; status?: string; alreadyCancelled?: boolean; refundedEntries?: number; totalRefunded?: number }
+  | { ok: false; message: string; forbidden?: boolean }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/tournaments/${encodeURIComponent(tournamentId)}/${action}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш право за тази операция.', forbidden: true }
+    }
+    const data = (await response.json()) as {
+      ok: boolean
+      status?: string
+      alreadyCancelled?: boolean
+      refundedEntries?: number
+      totalRefunded?: number
+      message?: string
+    }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Операцията не беше успешна.' }
+    }
+    return {
+      ok: true,
+      status: data.status,
+      alreadyCancelled: data.alreadyCancelled,
+      refundedEntries: data.refundedEntries,
+      totalRefunded: data.totalRefunded,
+    }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
   }
@@ -3826,6 +3939,16 @@ lobby = createLobbyFlowController({
   onAdminVisitorSourcesLoad: (params) => loadAdminVisitorSources(params),
   onAdminPaymentsLoad: (params) => loadAdminPayments(params),
   onAdminPaymentDetailLoad: (purchaseId) => loadAdminPaymentDetail(purchaseId),
+  onAdminTournamentsLoad: (filters) => loadAdminTournaments(filters),
+  onAdminTournamentDetailLoad: (tournamentId) => loadAdminTournamentDetail(tournamentId),
+  onAdminTournamentReconcile: (tournamentId) => postAdminTournamentAction(tournamentId, 'reconcile') as Promise<
+    | { ok: true; status: string }
+    | { ok: false; message: string; forbidden?: boolean }
+  >,
+  onAdminTournamentCancelOpen: (tournamentId) => postAdminTournamentAction(tournamentId, 'cancel-open') as Promise<
+    | { ok: true; alreadyCancelled: boolean; refundedEntries: number; totalRefunded: number }
+    | { ok: false; message: string; forbidden?: boolean }
+  >,
   onTournamentsLoad: (params) => loadTournaments(params),
   onTournamentCreate: (input) => createTournamentRequest(input),
   onTournamentDetailLoad: (tournamentId) => loadTournamentDetail(tournamentId),

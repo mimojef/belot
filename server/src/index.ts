@@ -72,7 +72,11 @@ import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
 import { createTournamentStore } from './db/tournamentStore.js'
 import { createTournamentEconomyStore } from './db/tournamentEconomyStore.js'
-import type { TournamentPartnerInviteRecord, TournamentRecord } from './tournament/tournamentTypes.js'
+import {
+  TOURNAMENT_STATUSES,
+  type TournamentPartnerInviteRecord,
+  type TournamentRecord,
+} from './tournament/tournamentTypes.js'
 import {
   ALLOWED_TOURNAMENT_ENTRY_FEES,
   isAllowedTournamentEntryFee,
@@ -101,6 +105,10 @@ import {
   type TournamentCoordinator,
   type TournamentMatchAssignment,
 } from './tournament/tournamentCoordinator.js'
+import {
+  createTournamentAdminStore,
+  type TournamentIntegrityState,
+} from './tournament/tournamentAdmin.js'
 import { createPasswordHash, verifyPassword } from './db/authHelpers.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { createMatchEconomyStore, setMatchPrizeResolver } from './db/matchEconomyStore.js'
@@ -498,6 +506,13 @@ const tournamentStore = await createTournamentStore(databaseBootstrap.databaseFi
 const tournamentEconomyStore = await createTournamentEconomyStore(databaseBootstrap.databaseFilePath)
 let tournamentScheduler: TournamentScheduler | null = null
 let tournamentCoordinator: TournamentCoordinator | null = null
+const tournamentAdminStore = await createTournamentAdminStore({
+  databaseFilePath: databaseBootstrap.databaseFilePath,
+  getPublicProfile: (profileId) => playerProgressStore.getPublicProfile(profileId),
+  getCoordinatorHealth: () => tournamentCoordinator?.getHealth() ?? null,
+  getSchedulerHealth: () => tournamentScheduler?.getHealth() ?? null,
+  runCoordinatorTick: () => tournamentCoordinator?.tickNow(),
+})
 const chatStore = await createChatStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
@@ -6645,6 +6660,245 @@ async function handleTournamentCancelRequest(
   return true
 }
 
+const adminTournamentActionRateLimitByProfileId = new Map<string, { count: number; windowStartedAt: number }>()
+const ADMIN_TOURNAMENT_ACTION_RATE_LIMIT_WINDOW_MS = 60_000
+const ADMIN_TOURNAMENT_ACTION_RATE_LIMIT_MAX_PER_WINDOW = 12
+
+function isAdminTournamentActionRateLimited(profileId: string, nowMs: number): boolean {
+  const existing = adminTournamentActionRateLimitByProfileId.get(profileId)
+  if (
+    existing === undefined ||
+    nowMs - existing.windowStartedAt >= ADMIN_TOURNAMENT_ACTION_RATE_LIMIT_WINDOW_MS
+  ) {
+    adminTournamentActionRateLimitByProfileId.set(profileId, { count: 1, windowStartedAt: nowMs })
+    return false
+  }
+  if (existing.count >= ADMIN_TOURNAMENT_ACTION_RATE_LIMIT_MAX_PER_WINDOW) return true
+  existing.count += 1
+  return false
+}
+
+function getAdminTournamentPageParam(requestUrl: URL, name: string, fallback: number): number | null {
+  const raw = requestUrl.searchParams.get(name)
+  if (raw === null) return fallback
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value < 1 || Math.floor(value) !== value) return null
+  return value
+}
+
+function getAdminTournamentEnumParam<T extends readonly string[]>(
+  requestUrl: URL,
+  name: string,
+  values: T,
+): T[number] | null | undefined {
+  const raw = requestUrl.searchParams.get(name)
+  if (raw === null || raw === '') return null
+  return values.includes(raw) ? raw : undefined
+}
+
+function getAdminTournamentDateParam(requestUrl: URL, name: string): string | null | undefined {
+  const raw = requestUrl.searchParams.get(name)
+  if (raw === null || raw.trim() === '') return null
+  const value = raw.trim()
+  const ms = Date.parse(value)
+  if (!Number.isFinite(ms)) return undefined
+  return new Date(ms).toISOString()
+}
+
+function decodeAdminTournamentId(raw: string | undefined): string | null {
+  try {
+    const value = decodeURIComponent(raw ?? '').trim()
+    return value === '' ? null : value
+  } catch {
+    return null
+  }
+}
+
+async function handleAdminTournamentsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  const detailMatch = /^\/api\/admin\/tournaments\/([^/]+)$/.exec(pathname)
+  const actionMatch = /^\/api\/admin\/tournaments\/([^/]+)\/(reconcile|cancel-open)$/.exec(pathname)
+  if (pathname !== '/api/admin/tournaments' && detailMatch === null && actionMatch === null) return false
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+  const isWrite = actionMatch !== null
+
+  if (isWrite) {
+    if (!isFullAdminSession(session)) {
+      sendJsonResponse(res, 403, { ok: false, message: 'No permission.' })
+      return true
+    }
+    if (!isAllowedVisitorRequestOrigin(req)) {
+      sendJsonResponse(res, 403, { ok: false, message: 'Request rejected.' })
+      return true
+    }
+    const actorProfileId = session.profile.profileId
+    if (actorProfileId === null) {
+      sendJsonResponse(res, 403, { ok: false, message: 'No permission.' })
+      return true
+    }
+    if (isAdminTournamentActionRateLimited(actorProfileId, Date.now())) {
+      sendJsonResponse(res, 429, { ok: false, message: 'Too many attempts. Try again later.' })
+      return true
+    }
+  } else if (!isAdminOrSubadminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'No permission.' })
+    return true
+  }
+
+  if (pathname === '/api/admin/tournaments') {
+    if (req.method !== 'GET') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+
+    const page = getAdminTournamentPageParam(requestUrl, 'page', 1)
+    const limit = getAdminTournamentPageParam(requestUrl, 'limit', 25)
+    if (page === null || limit === null || limit > 100) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid pagination.' })
+      return true
+    }
+
+    const status = getAdminTournamentEnumParam(requestUrl, 'status', TOURNAMENT_STATUSES)
+    const settlementState = getAdminTournamentEnumParam(requestUrl, 'settlementState', ['pending', 'settled'] as const)
+    const visibility = getAdminTournamentEnumParam(requestUrl, 'visibility', ['public', 'password'] as const)
+    const startMode = getAdminTournamentEnumParam(requestUrl, 'startMode', ['fill', 'scheduled'] as const)
+    const integrityState = getAdminTournamentEnumParam(requestUrl, 'integrityState', ['healthy', 'warning', 'error'] as const)
+    const createdFrom = getAdminTournamentDateParam(requestUrl, 'createdFrom')
+    const createdTo = getAdminTournamentDateParam(requestUrl, 'createdTo')
+    const finishedFrom = getAdminTournamentDateParam(requestUrl, 'finishedFrom')
+    const finishedTo = getAdminTournamentDateParam(requestUrl, 'finishedTo')
+    const rawSearch = requestUrl.searchParams.get('search')?.trim() ?? ''
+
+    if (
+      status === undefined || settlementState === undefined || visibility === undefined ||
+      startMode === undefined || integrityState === undefined || createdFrom === undefined ||
+      createdTo === undefined || finishedFrom === undefined || finishedTo === undefined
+    ) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid filter.' })
+      return true
+    }
+    if (rawSearch.length > 80) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Search is too long.' })
+      return true
+    }
+
+    const result = tournamentAdminStore.listAdminTournaments({
+      page,
+      limit,
+      status,
+      settlementState,
+      visibility,
+      startMode,
+      integrityState: integrityState as TournamentIntegrityState | null,
+      createdFrom,
+      createdTo,
+      finishedFrom,
+      finishedTo,
+      search: rawSearch === '' ? null : rawSearch,
+    })
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      tournaments: result.rows,
+      page,
+      limit,
+      totalCount: result.totalCount,
+      viewerRole: session.account.role,
+      canWrite: session.account.role === 'admin',
+    })
+    return true
+  }
+
+  if (detailMatch !== null) {
+    if (req.method !== 'GET') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+
+    const tournamentId = decodeAdminTournamentId(detailMatch[1])
+    const eventPage = getAdminTournamentPageParam(requestUrl, 'eventPage', 1)
+    const eventLimit = getAdminTournamentPageParam(requestUrl, 'eventLimit', 25)
+    if (tournamentId === null || eventPage === null || eventLimit === null || eventLimit > 100) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid tournament request.' })
+      return true
+    }
+
+    const tournament = tournamentAdminStore.getAdminTournamentDetail(tournamentId, eventPage, eventLimit)
+    if (tournament === null) {
+      sendJsonResponse(res, 404, { ok: false, message: 'Tournament not found.' })
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      tournament,
+      viewerRole: session.account.role,
+      canWrite: session.account.role === 'admin',
+    })
+    return true
+  }
+
+  if (actionMatch !== null) {
+    if (req.method !== 'POST') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+
+    const tournamentId = decodeAdminTournamentId(actionMatch[1])
+    if (tournamentId === null) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid tournament id.' })
+      return true
+    }
+
+    if (actionMatch[2] === 'reconcile') {
+      const result = tournamentAdminStore.reconcileTournament(tournamentId, session.profile.profileId)
+      if (!result.ok) {
+        sendJsonResponse(res, result.status === 'not_found' ? 404 : 409, {
+          ok: false,
+          status: result.status,
+          message: result.status === 'blocked_by_integrity_error'
+            ? 'Synchronization is blocked by a data integrity problem.'
+            : 'Tournament not found.',
+        })
+        return true
+      }
+      sendJsonResponse(res, 200, { ok: true, status: result.status })
+      return true
+    }
+
+    const result = tournamentAdminStore.cancelOpenTournament(tournamentId, session.profile.profileId)
+    if (!result.ok) {
+      const status = result.reason === 'not_found' ? 404
+        : result.reason === 'not_open' || result.reason === 'unsafe_state' || result.reason === 'integrity_error'
+          ? 409
+          : 400
+      sendJsonResponse(res, status, {
+        ok: false,
+        reason: result.reason,
+        message: result.reason === 'not_open'
+          ? 'The tournament has already started and cannot be cancelled.'
+          : 'The tournament cannot be cancelled safely.',
+      })
+      return true
+    }
+    sendJsonResponse(res, 200, {
+      ok: true,
+      alreadyCancelled: result.alreadyCancelled,
+      refundedEntries: result.refundedEntries,
+      totalRefunded: result.totalRefunded,
+    })
+    return true
+  }
+
+  return false
+}
+
 async function handleShopResumeCheckoutRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -8736,6 +8990,7 @@ async function handleHttpRequest(
       },
       tournamentScheduler: tournamentScheduler?.getHealth() ?? null,
       tournamentCoordinator: tournamentCoordinator?.getHealth() ?? null,
+      tournamentOperations: tournamentAdminStore.getHealthSnapshot(),
       roomShadowSync: roomShadowSynchronizer?.getHealth() ?? null,
       gameWorkerPool: poolHealth,
       trainingRecorder: {
@@ -8837,6 +9092,10 @@ async function handleHttpRequest(
   }
 
   if (await handleLobbyPackagesRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminTournamentsRequest(req, res, requestUrl.pathname, requestUrl)) {
     return
   }
 
@@ -11225,6 +11484,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('coinPurchaseStore', () => coinPurchaseStore.close())
   closeStore('dailyRewardsStore', () => dailyRewardsStore.close())
   closeStore('siteVisitStore', () => siteVisitStore.close())
+  closeStore('tournamentAdminStore', () => tournamentAdminStore.close())
   closeStore('tournamentScheduler', () => tournamentScheduler?.close())
   tournamentScheduler = null
   closeStore('tournamentCoordinator', () => tournamentCoordinator?.close())

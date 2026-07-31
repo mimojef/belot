@@ -1,6 +1,7 @@
 import { formatGiftLimitError } from './formatGiftLimitError'
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes.js'
 import { isAdminPaymentPeriod } from '../adminPayments/adminPaymentsTypes.js'
+import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes.js'
 import type { GiftLimitErrorPayload } from './formatGiftLimitError'
 import { applyRouteSeo } from '../seo/applyRouteSeo'
 import {
@@ -78,6 +79,8 @@ export type LobbyFlowScreen =
   | 'admin-visitors'
   | 'admin-payments'
   | 'admin-payment-detail'
+  | 'admin-tournaments'
+  | 'admin-tournament-detail'
   | 'tournaments'
   | 'tournament-detail'
   | 'terms'
@@ -483,6 +486,22 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; purchase: AdminPaymentDetailRow }
     | { ok: false; message: string; forbidden?: boolean }
   >
+  onAdminTournamentsLoad?: (filters: AdminTournamentFilters) => Promise<
+    | { ok: true; tournaments: AdminTournamentSummaryRow[]; page: number; limit: number; totalCount: number; canWrite: boolean }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  onAdminTournamentDetailLoad?: (tournamentId: string) => Promise<
+    | { ok: true; tournament: AdminTournamentDetailRow; canWrite: boolean }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  onAdminTournamentReconcile?: (tournamentId: string) => Promise<
+    | { ok: true; status: string }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  onAdminTournamentCancelOpen?: (tournamentId: string) => Promise<
+    | { ok: true; alreadyCancelled: boolean; refundedEntries: number; totalRefunded: number }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
   /** Пуска се при вход в екран от фамилията "Информация" (stats/visitors/payments/detail) — лек role-check polling, за да засече отнет достъп докато потребителят е неактивен. */
   onAdminInfoFamilyScreenEnter?: () => void
   onAdminInfoFamilyScreenLeave?: () => void
@@ -862,6 +881,20 @@ type InternalLobbyFlowState = {
   adminPaymentDetailPurchase: AdminPaymentDetailRow | null
   adminPaymentDetailErrorText: string | null
   adminPaymentDetailFromPeriod: string | null
+  adminTournamentsLoading: boolean
+  adminTournamentsRows: AdminTournamentSummaryRow[]
+  adminTournamentsTotal: number
+  adminTournamentsErrorText: string | null
+  adminTournamentsCanWrite: boolean
+  adminTournamentsFilters: AdminTournamentFilters
+  adminTournamentDetailId: string | null
+  adminTournamentDetailLoading: boolean
+  adminTournamentDetail: AdminTournamentDetailRow | null
+  adminTournamentDetailErrorText: string | null
+  adminTournamentActionBusy: boolean
+  adminTournamentActionErrorText: string | null
+  adminTournamentActionInfoText: string | null
+  adminTournamentCancelConfirmOpen: boolean
   tournaments: TournamentSummarySnapshot[]
   tournamentsLoading: boolean
   tournamentsErrorText: string | null
@@ -1159,6 +1192,29 @@ function createInitialState(): InternalLobbyFlowState {
     adminPaymentDetailPurchase: null,
     adminPaymentDetailErrorText: null,
     adminPaymentDetailFromPeriod: null,
+    adminTournamentsLoading: false,
+    adminTournamentsRows: [],
+    adminTournamentsTotal: 0,
+    adminTournamentsErrorText: null,
+    adminTournamentsCanWrite: false,
+    adminTournamentsFilters: {
+      page: 1,
+      limit: 25,
+      status: '',
+      settlementState: '',
+      visibility: '',
+      startMode: '',
+      integrityState: '',
+      search: '',
+    },
+    adminTournamentDetailId: null,
+    adminTournamentDetailLoading: false,
+    adminTournamentDetail: null,
+    adminTournamentDetailErrorText: null,
+    adminTournamentActionBusy: false,
+    adminTournamentActionErrorText: null,
+    adminTournamentActionInfoText: null,
+    adminTournamentCancelConfirmOpen: false,
     tournaments: [],
     tournamentsLoading: false,
     tournamentsErrorText: null,
@@ -1379,6 +1435,7 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/admin/guest-contact': 'guest-contact-messages',
   '/admin/visitors': 'admin-visitors',
   '/admin/payments': 'admin-payments',
+  '/admin/tournaments': 'admin-tournaments',
   '/friends': 'friends',
   '/chat': 'chat',
   '/terms': 'terms',
@@ -1830,7 +1887,8 @@ export function createLobbyFlowController(
   /** "Информация" family — screens with read-only subadmin+admin access (виж isAdminOrSubadminAuthSession). */
   function isAdminInfoFamilyScreen(screen: LobbySocialScreen): boolean {
     return screen === 'admin-info' || screen === 'admin-visitors' ||
-      screen === 'admin-payments' || screen === 'admin-payment-detail'
+      screen === 'admin-payments' || screen === 'admin-payment-detail' ||
+      screen === 'admin-tournaments' || screen === 'admin-tournament-detail'
   }
 
   /**
@@ -1861,7 +1919,8 @@ export function createLobbyFlowController(
   function forceLeaveAdminScreenForbidden(message: string): void {
     if (state.currentScreen !== 'admin' && state.currentScreen !== 'admin-info' &&
       state.currentScreen !== 'admin-server' && state.currentScreen !== 'admin-visitors' &&
-      state.currentScreen !== 'admin-payments' && state.currentScreen !== 'admin-payment-detail') {
+      state.currentScreen !== 'admin-payments' && state.currentScreen !== 'admin-payment-detail' &&
+      state.currentScreen !== 'admin-tournaments' && state.currentScreen !== 'admin-tournament-detail') {
       return
     }
     switchToLobby()
@@ -2232,6 +2291,10 @@ export function createLobbyFlowController(
               ? 'admin-payments'
             : state.currentScreen === 'admin-payment-detail'
               ? 'admin-payment-detail'
+            : state.currentScreen === 'admin-tournaments'
+              ? 'admin-tournaments'
+            : state.currentScreen === 'admin-tournament-detail'
+              ? 'admin-tournament-detail'
             : state.currentScreen === 'tournaments'
               ? 'tournaments'
             : state.currentScreen === 'tournament-detail'
@@ -2481,6 +2544,20 @@ export function createLobbyFlowController(
       adminPaymentDetailLoading: state.adminPaymentDetailLoading,
       adminPaymentDetailPurchase: state.adminPaymentDetailPurchase,
       adminPaymentDetailErrorText: state.adminPaymentDetailErrorText,
+      adminTournamentsLoading: state.adminTournamentsLoading,
+      adminTournamentsRows: state.adminTournamentsRows,
+      adminTournamentsTotal: state.adminTournamentsTotal,
+      adminTournamentsErrorText: state.adminTournamentsErrorText,
+      adminTournamentsCanWrite: state.adminTournamentsCanWrite,
+      adminTournamentsFilters: state.adminTournamentsFilters,
+      adminTournamentDetailId: state.adminTournamentDetailId,
+      adminTournamentDetailLoading: state.adminTournamentDetailLoading,
+      adminTournamentDetail: state.adminTournamentDetail,
+      adminTournamentDetailErrorText: state.adminTournamentDetailErrorText,
+      adminTournamentActionBusy: state.adminTournamentActionBusy,
+      adminTournamentActionErrorText: state.adminTournamentActionErrorText,
+      adminTournamentActionInfoText: state.adminTournamentActionInfoText,
+      adminTournamentCancelConfirmOpen: state.adminTournamentCancelConfirmOpen,
       tournaments: state.tournaments,
       tournamentsLoading: state.tournamentsLoading,
       tournamentsErrorText: state.tournamentsErrorText,
@@ -3547,6 +3624,46 @@ export function createLobbyFlowController(
         // Return to payments list preserving the period without adding another history entry.
         const period = state.adminPaymentDetailFromPeriod ?? state.adminPaymentsPeriod
         showAdminPaymentsPanel(period, 'replace')
+      },
+      onAdminTournamentsOpen: () => {
+        showAdminTournamentsPanel()
+      },
+      onAdminTournamentsBack: () => {
+        void showAdminInfoPanel()
+      },
+      onAdminTournamentsFilter: (filters) => {
+        state.adminTournamentsFilters = { ...state.adminTournamentsFilters, ...filters, page: filters.page ?? 1 }
+        state.adminTournamentsRows = []
+        state.adminTournamentsLoading = true
+        syncAdminTournamentsUrl()
+        render()
+        void fetchAdminTournaments()
+      },
+      onAdminTournamentsPage: (page) => {
+        state.adminTournamentsFilters = { ...state.adminTournamentsFilters, page }
+        state.adminTournamentsRows = []
+        state.adminTournamentsLoading = true
+        syncAdminTournamentsUrl()
+        render()
+        void fetchAdminTournaments()
+      },
+      onAdminTournamentOpen: (tournamentId) => {
+        if (tournamentId) showAdminTournamentDetailPanel(tournamentId)
+      },
+      onAdminTournamentReconcile: () => {
+        void submitAdminTournamentReconcile()
+      },
+      onAdminTournamentCancelOpen: () => {
+        state.adminTournamentCancelConfirmOpen = true
+        render()
+      },
+      onAdminTournamentCancelConfirm: () => {
+        void submitAdminTournamentCancelOpen()
+      },
+      onAdminTournamentCancelDismiss: () => {
+        if (!state.adminTournamentCancelConfirmOpen) return
+        state.adminTournamentCancelConfirmOpen = false
+        render()
       },
     })
   }
@@ -4955,6 +5072,184 @@ export function createLobbyFlowController(
       state.adminPaymentDetailErrorText = null
     }
     render()
+  }
+
+  let _adminTournamentsGen = 0
+
+  function syncAdminTournamentsUrl(): void {
+    if (state.currentScreen !== 'admin-tournaments') return
+    const qs = new URLSearchParams()
+    const filters = state.adminTournamentsFilters
+    for (const [key, value] of Object.entries(filters)) {
+      if (value !== '' && !(key === 'page' && value === 1) && !(key === 'limit' && value === 25)) {
+        qs.set(key, String(value))
+      }
+    }
+    const target = `/admin/tournaments${qs.toString() ? `?${qs.toString()}` : ''}`
+    if (window.location.pathname + window.location.search !== target) {
+      history.replaceState(null, '', target)
+    }
+  }
+
+  function showAdminTournamentsPanel(historyMode: 'push' | 'replace' = 'push'): void {
+    const authSession = options.getAuthSession?.() ?? null
+    if (!isAdminOrSubadminAuthSession(authSession)) {
+      state.currentScreen = 'lobby'
+      state.errorText = 'Нямаш достъп до admin панела.'
+      render()
+      return
+    }
+    leaveAdminServerIfActive()
+    state.currentScreen = 'admin-tournaments'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    options.onAdminInfoFamilyScreenEnter?.()
+    state.adminTournamentsLoading = true
+    state.adminTournamentsErrorText = null
+    state.adminTournamentsRows = []
+    const target = '/admin/tournaments'
+    if (window.location.pathname !== target) {
+      if (historyMode === 'replace') history.replaceState(null, '', target)
+      else history.pushState(null, '', target)
+    }
+    syncAdminTournamentsUrl()
+    render()
+    void fetchAdminTournaments()
+  }
+
+  async function fetchAdminTournaments(): Promise<void> {
+    const gen = ++_adminTournamentsGen
+    if (!options.onAdminTournamentsLoad) {
+      state.adminTournamentsLoading = false
+      state.adminTournamentsErrorText = 'Зареждането не е конфигурирано.'
+      if (state.currentScreen === 'admin-tournaments') render()
+      return
+    }
+    const result = await options.onAdminTournamentsLoad(state.adminTournamentsFilters)
+    if (gen !== _adminTournamentsGen || state.currentScreen !== 'admin-tournaments') return
+    state.adminTournamentsLoading = false
+    if (!result.ok) {
+      if (result.forbidden) {
+        forceLeaveAdminScreenForbidden(result.message)
+        return
+      }
+      state.adminTournamentsErrorText = result.message
+      render()
+      return
+    }
+    state.adminTournamentsRows = result.tournaments
+    state.adminTournamentsTotal = result.totalCount
+    state.adminTournamentsCanWrite = result.canWrite
+    state.adminTournamentsErrorText = null
+    render()
+  }
+
+  function showAdminTournamentDetailPanel(tournamentId: string, historyMode: 'push' | 'replace' = 'push'): void {
+    const authSession = options.getAuthSession?.() ?? null
+    if (!isAdminOrSubadminAuthSession(authSession)) {
+      state.currentScreen = 'lobby'
+      state.errorText = 'Нямаш достъп до admin панела.'
+      render()
+      return
+    }
+    leaveAdminServerIfActive()
+    state.currentScreen = 'admin-tournament-detail'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    options.onAdminInfoFamilyScreenEnter?.()
+    state.adminTournamentDetailId = tournamentId
+    state.adminTournamentDetailLoading = true
+    state.adminTournamentDetail = null
+    state.adminTournamentDetailErrorText = null
+    state.adminTournamentActionErrorText = null
+    state.adminTournamentActionInfoText = null
+    state.adminTournamentCancelConfirmOpen = false
+    const target = `/admin/tournaments/${encodeURIComponent(tournamentId)}`
+    if (window.location.pathname !== target) {
+      if (historyMode === 'replace') history.replaceState(null, '', target)
+      else history.pushState(null, '', target)
+    }
+    render()
+    void fetchAdminTournamentDetail(tournamentId)
+  }
+
+  async function fetchAdminTournamentDetail(tournamentId: string): Promise<void> {
+    if (!options.onAdminTournamentDetailLoad) {
+      state.adminTournamentDetailLoading = false
+      state.adminTournamentDetailErrorText = 'Зареждането не е конфигурирано.'
+      if (state.currentScreen === 'admin-tournament-detail') render()
+      return
+    }
+    const result = await options.onAdminTournamentDetailLoad(tournamentId)
+    if (state.currentScreen !== 'admin-tournament-detail' || state.adminTournamentDetailId !== tournamentId) return
+    state.adminTournamentDetailLoading = false
+    if (!result.ok) {
+      if (result.forbidden) {
+        forceLeaveAdminScreenForbidden(result.message)
+        return
+      }
+      state.adminTournamentDetailErrorText = result.message
+      render()
+      return
+    }
+    state.adminTournamentDetail = result.tournament
+    state.adminTournamentsCanWrite = result.canWrite
+    state.adminTournamentDetailErrorText = null
+    render()
+  }
+
+  async function submitAdminTournamentReconcile(): Promise<void> {
+    const tournamentId = state.adminTournamentDetailId
+    if (!tournamentId || !options.onAdminTournamentReconcile || state.adminTournamentActionBusy) return
+    state.adminTournamentActionBusy = true
+    state.adminTournamentActionErrorText = null
+    state.adminTournamentActionInfoText = null
+    render()
+    const result = await options.onAdminTournamentReconcile(tournamentId)
+    state.adminTournamentActionBusy = false
+    if (!result.ok) {
+      if (result.forbidden) forceLeaveAdminScreenForbidden(result.message)
+      else state.adminTournamentActionErrorText = result.message
+      render()
+      return
+    }
+    state.adminTournamentActionInfoText =
+      result.status === 'already_consistent'
+        ? 'Турнирът вече е в консистентно състояние.'
+        : result.status === 'no_safe_action'
+          ? 'Няма безопасно автоматично действие.'
+          : 'Турнирът е синхронизиран.'
+    render()
+    await fetchAdminTournamentDetail(tournamentId)
+  }
+
+  async function submitAdminTournamentCancelOpen(): Promise<void> {
+    const tournamentId = state.adminTournamentDetailId
+    if (!tournamentId || !options.onAdminTournamentCancelOpen || state.adminTournamentActionBusy) return
+    state.adminTournamentActionBusy = true
+    state.adminTournamentCancelConfirmOpen = false
+    state.adminTournamentActionErrorText = null
+    state.adminTournamentActionInfoText = null
+    render()
+    const result = await options.onAdminTournamentCancelOpen(tournamentId)
+    state.adminTournamentActionBusy = false
+    if (!result.ok) {
+      if (result.forbidden) forceLeaveAdminScreenForbidden(result.message)
+      else state.adminTournamentActionErrorText = result.message
+      render()
+      return
+    }
+    state.adminTournamentActionInfoText = 'Турнирът е отменен. Входните такси са възстановени.'
+    render()
+    await fetchAdminTournamentDetail(tournamentId)
   }
 
   function showAdminServerPanel(): void {
@@ -6520,6 +6815,7 @@ export function createLobbyFlowController(
     'guest-contact-messages': '/admin/guest-contact',
     'admin-visitors': '/admin/visitors',
     'admin-payments': '/admin/payments',
+    'admin-tournaments': '/admin/tournaments',
     tournaments: '/tournaments',
     friends: '/friends',
     chat: '/chat',
@@ -6544,6 +6840,7 @@ export function createLobbyFlowController(
     '/admin/guest-contact': 'guest-contact-messages',
     '/admin/visitors': 'admin-visitors',
     '/admin/payments': 'admin-payments',
+    '/admin/tournaments': 'admin-tournaments',
     '/tournaments': 'tournaments',
     '/friends': 'friends',
     '/chat': 'chat',
@@ -6601,6 +6898,12 @@ export function createLobbyFlowController(
       return
     }
 
+    const adminTournamentDetailMatch = /^\/admin\/tournaments\/([^/]+)$/.exec(path)
+    if (adminTournamentDetailMatch) {
+      showAdminTournamentDetailPanel(decodeURIComponent(adminTournamentDetailMatch[1] ?? ''))
+      return
+    }
+
     // Dynamic route: /tournaments/:tournamentId
     const tournamentDetailMatch = /^\/tournaments\/([^/]+)$/.exec(path)
     if (tournamentDetailMatch) {
@@ -6631,6 +6934,21 @@ export function createLobbyFlowController(
       case 'admin-payments': {
         const _qs = new URLSearchParams(window.location.search)
         showAdminPaymentsPanel(_qs.get('period') ?? undefined)
+        break
+      }
+      case 'admin-tournaments': {
+        const _qs = new URLSearchParams(window.location.search)
+        state.adminTournamentsFilters = {
+          ...state.adminTournamentsFilters,
+          page: Number(_qs.get('page') ?? '1') || 1,
+          status: _qs.get('status') ?? '',
+          settlementState: _qs.get('settlementState') ?? '',
+          visibility: _qs.get('visibility') ?? '',
+          startMode: _qs.get('startMode') ?? '',
+          integrityState: _qs.get('integrityState') ?? '',
+          search: _qs.get('search') ?? '',
+        }
+        showAdminTournamentsPanel()
         break
       }
       case 'tournaments': void showTournamentsList(); break
@@ -8326,7 +8644,7 @@ export function createLobbyFlowController(
     navigateInitialPath: () => {
       _navigationReady = true
       applyRouteSeo(_loadPath || '/lobby')
-      const isKnownPath = !!PATH_TO_SCREEN[_loadPath] || /^\/admin\/payments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+$/.test(_loadPath)
+      const isKnownPath = !!PATH_TO_SCREEN[_loadPath] || /^\/admin\/payments\/[^/]+$/.test(_loadPath) || /^\/admin\/tournaments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+$/.test(_loadPath)
       if (!_loadPath || !isKnownPath) return
       if (state.isConnected) {
         navigateFromPath(_loadPath)
