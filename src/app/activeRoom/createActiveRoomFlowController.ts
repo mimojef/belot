@@ -125,6 +125,18 @@ const SEAT_LABELS: Record<Seat, string> = {
 
 const REACTION_COUNTDOWN_WARNING_THRESHOLD_MS = 7_000
 
+// Огледало на server round ladder-а (round_of_16/quarterfinal/semifinal/final),
+// виж tournamentRoundTypeLabel в renderTournamentsScreen.ts — дублирано тук
+// умишлено (малък pure string helper), за да не се вкарва cross-module
+// зависимост само заради едно label switch-ване.
+function tournamentWaitingRoundLabel(roundType: string | null): string {
+  if (roundType === 'round_of_16') return 'Осминафинал'
+  if (roundType === 'quarterfinal') return 'Четвъртфинал'
+  if (roundType === 'final') return 'Финал'
+  if (roundType === 'semifinal') return 'Полуфинал'
+  return 'Турнирен мач'
+}
+
 
 export function createActiveRoomFlowController(
   options: CreateActiveRoomFlowControllerOptions,
@@ -161,6 +173,18 @@ export function createActiveRoomFlowController(
   let initialStakeEffectShown = false
   let shouldSilenceNextBiddingSnapshot = false
   let matchEndedCountdownDeadlineAt: number | null = null
+  // Tournament round-result екран (§8 в task spec-а) — feeder match info
+  // (sibling match от текущия round, който определя следващия съперник) се
+  // fetch-ва еднократно (HTTP) при завършек на не-финален турнирен мач,
+  // после се обновява само чрез tournament_feeder_match_completed push
+  // (§9 от планирането: "WS push само при completion", не polling).
+  let tournamentRoundResultMatchId: string | null = null
+  let tournamentRoundResultFeederLabel: string | null = null
+  let tournamentRoundResultFeederMatchId: string | null = null
+  let tournamentRoundResultFeederStatus: 'in_progress' | 'completed' | null = null
+  let tournamentRoundResultFeederScoreA: number | null = null
+  let tournamentRoundResultFeederScoreB: number | null = null
+  let tournamentRoundResultFetchInFlight = false
 
   function getSeatGender(seat: Seat): RoomSeatSnapshot['gender'] {
     return activeRoomState?.seats.find((entry) => entry.seat === seat)?.gender ?? null
@@ -209,6 +233,62 @@ export function createActiveRoomFlowController(
     matchEndedCountdownIntervalId = window.setInterval(() => {
       syncMatchEndedCountdownDisplay()
     }, 1000)
+  }
+
+  function clearTournamentRoundResultState(): void {
+    tournamentRoundResultMatchId = null
+    tournamentRoundResultFeederLabel = null
+    tournamentRoundResultFeederMatchId = null
+    tournamentRoundResultFeederStatus = null
+    tournamentRoundResultFeederScoreA = null
+    tournamentRoundResultFeederScoreB = null
+  }
+
+  // Намира "sibling" мача от СЪЩИЯ round (двойката, чийто победител определя
+  // следващия съперник) — pairing правилото на coordinator-а е adjacent по
+  // match/round_index ред (winner[0] vs winner[1], winner[2] vs winner[3]...),
+  // виж коментара при ensureNextRound в tournamentCoordinator.ts. Round
+  // matches идват в roundIndex ред от HTTP detail-а, затова индексът в
+  // масива директно определя pair-а: (0,1), (2,3)...
+  function findTournamentFeederMatch(
+    detail: import('../network/createGameServerClient').TournamentDetailSnapshot,
+    completedMatchId: string,
+  ): { label: string; matchId: string; status: 'in_progress' | 'completed'; scoreA: number | null; scoreB: number | null } | null {
+    for (const round of detail.rounds) {
+      const index = round.matches.findIndex((match) => match.matchId === completedMatchId)
+      if (index === -1) continue
+      const siblingIndex = index % 2 === 0 ? index + 1 : index - 1
+      const sibling = round.matches[siblingIndex]
+      if (!sibling) return null
+      const roundLabel = tournamentWaitingRoundLabel(round.roundType)
+      return {
+        label: `${roundLabel} — Мач ${round.matches.indexOf(sibling) + 1}`,
+        matchId: sibling.matchId,
+        status: sibling.status === 'completed' ? 'completed' : 'in_progress',
+        scoreA: sibling.finalScoreTeamA ?? null,
+        scoreB: sibling.finalScoreTeamB ?? null,
+      }
+    }
+    return null
+  }
+
+  async function loadTournamentRoundResultFeederInfo(tournamentId: string, completedMatchId: string): Promise<void> {
+    if (tournamentRoundResultFetchInFlight) return
+    tournamentRoundResultFetchInFlight = true
+    try {
+      const detail = await options.fetchTournamentDetail(tournamentId)
+      if (detail === null || tournamentRoundResultMatchId !== completedMatchId) return
+      const feeder = findTournamentFeederMatch(detail, completedMatchId)
+      if (feeder === null) return
+      tournamentRoundResultFeederLabel = feeder.label
+      tournamentRoundResultFeederMatchId = feeder.matchId
+      tournamentRoundResultFeederStatus = feeder.status
+      tournamentRoundResultFeederScoreA = feeder.scoreA
+      tournamentRoundResultFeederScoreB = feeder.scoreB
+      renderActiveRoomScreen()
+    } finally {
+      tournamentRoundResultFetchInFlight = false
+    }
   }
 
   function getLocalSeatSnapshot(): RoomSeatSnapshot | null {
@@ -2204,9 +2284,6 @@ export function createActiveRoomFlowController(
       tournamentAttendance.state !== 'started' &&
       tournamentAttendance.state !== 'completed'
     ) {
-      const missingNames = tournamentAttendance.missingPlayers
-        .map((player) => escapeHtml(player.displayName))
-        .join(', ')
       const title =
         tournamentAttendance.state === 'countdown'
           ? tournamentAttendance.resolutionKind === 'bots_inserted'
@@ -2228,6 +2305,40 @@ export function createActiveRoomFlowController(
             : tournamentAttendance.missingPlayers.length > 0
               ? 'Ако не се присъединят навреме, пълният отбор ще спечели служебно.'
               : 'Играта ще започне след кратко отброяване.'
+      const roundLabel = tournamentWaitingRoundLabel(activeRoomState.tournamentRoundType)
+      const missingProfileIds = new Set(tournamentAttendance.missingPlayers.map((player) => `${player.seat}`))
+      const teamASeats: Seat[] = ['bottom', 'top']
+      const teamBSeats: Seat[] = ['left', 'right']
+      const renderTeamRosterHtml = (teamSeats: Seat[], teamLabel: string): string => {
+        const rows = teamSeats.map((seat) => {
+          const seatSnapshot = activeRoomState!.seats.find((item) => item.seat === seat)
+          const replacement = activeRoomState!.tournamentBotReplacements.find((item) => item.seat === seat && item.replacementActive)
+          const displayName = replacement !== undefined
+            ? replacement.replacedPlayer.displayName
+            : seatSnapshot?.displayName ?? 'Играч'
+          const isMissing = missingProfileIds.has(seat) && replacement === undefined
+          const dotColor = replacement !== undefined ? '#facc15' : isMissing ? '#64748b' : '#22c55e'
+          const badge = replacement !== undefined
+            ? '<span style="margin-left:6px;font-size:9px;font-weight:900;letter-spacing:0.04em;color:#78350f;background:#facc15;border-radius:4px;padding:2px 5px;">БОТ</span>'
+            : ''
+          return `
+            <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+              <span style="width:9px;height:9px;border-radius:50%;background:${dotColor};flex:0 0 auto;"></span>
+              <span style="font-size:13px;font-weight:700;color:#f1f5f9;overflow-wrap:anywhere;">${escapeHtml(displayName)}</span>
+              ${badge}
+            </div>
+          `
+        }).join('')
+        return `
+          <div style="flex:1;min-width:0;text-align:left;">
+            <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.05em;color:#93c5fd;margin-bottom:4px;">${escapeHtml(teamLabel)}</div>
+            ${rows}
+          </div>
+        `
+      }
+      const readyCount = 4 - tournamentAttendance.missingPlayers.filter((player) =>
+        !activeRoomState!.tournamentBotReplacements.some((item) => item.seat === player.seat && item.replacementActive),
+      ).length
 
       options.root.innerHTML = `
         <div
@@ -2259,10 +2370,16 @@ export function createActiveRoomFlowController(
               text-align:center;
             "
           >
-            <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">Турнирен мач</div>
-            <div style="margin-top:10px;font-size:26px;font-weight:900;line-height:1.15;">${escapeHtml(title)}</div>
+            <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(roundLabel)}</div>
+            <div style="margin-top:10px;font-size:22px;font-weight:900;line-height:1.15;">${escapeHtml(title)}</div>
             <div style="margin-top:16px;font-size:40px;font-weight:900;color:#facc15;">${minutesText}</div>
-            <div style="margin-top:14px;font-size:15px;line-height:1.5;color:#dbeafe;">${missingNames ? `Липсват: ${missingNames}.` : 'Няма липсващи играчи.'}</div>
+            <div style="margin-top:4px;font-size:12px;font-weight:700;color:rgba(248,250,252,0.6);">Мачът започва след ${minutesText}</div>
+            <div style="margin-top:18px;display:flex;gap:18px;align-items:flex-start;justify-content:center;">
+              ${renderTeamRosterHtml(teamASeats, 'Отбор A')}
+              <div style="align-self:center;font-size:12px;font-weight:900;color:rgba(248,250,252,0.4);">VS</div>
+              ${renderTeamRosterHtml(teamBSeats, 'Отбор Б')}
+            </div>
+            <div style="margin-top:16px;font-size:13px;font-weight:800;color:#dbeafe;">Готови: ${readyCount} от 4</div>
             <div style="margin-top:10px;font-size:14px;line-height:1.5;color:#cbd5e1;">${escapeHtml(consequence)}</div>
           </div>
           ${scoreHudHtml}
@@ -2970,6 +3087,110 @@ export function createActiveRoomFlowController(
         biddingUiState.showBotTakeover = false
         renderActiveRoomScreen()
       })
+    } else if (
+      isShowingMatchEndedPhase &&
+      activeRoomState.game &&
+      activeRoomState.isTournamentMatchOrigin &&
+      activeRoomState.tournamentRoundType !== null &&
+      activeRoomState.tournamentRoundType !== 'final'
+    ) {
+      // Не-финален турнирен мач — вместо стандартния replay/new-game екран,
+      // показваме резултата от рунда + live feeder match (§8/§10 в task
+      // spec-а). Финалът продължава по стандартния renderMatchEndedScreen
+      // path по-долу (payout animation, settlement — непроменено).
+      cuttingVisualCountdown.resetCuttingVisualCountdownState()
+      const matchEnded = activeRoomState.game.matchEnded
+      const localTeam = activeRoomState.seat === 'bottom' || activeRoomState.seat === 'top' ? 'A' : 'B'
+      const wonRound = matchEnded?.winnerTeam === localTeam
+      const finalScore = matchEnded?.finalScore ?? activeRoomState.game.score.match
+      const myScore = localTeam === 'A' ? finalScore.teamA : finalScore.teamB
+      const opponentScore = localTeam === 'A' ? finalScore.teamB : finalScore.teamA
+
+      if (!matchEndedSoundPlayed) {
+        matchEndedSoundPlayed = true
+        options.gameAudio?.playMatchEnded()
+      }
+      if (
+        wonRound &&
+        activeRoomState.tournamentMatchId !== null &&
+        tournamentRoundResultMatchId !== activeRoomState.tournamentMatchId
+      ) {
+        clearTournamentRoundResultState()
+        tournamentRoundResultMatchId = activeRoomState.tournamentMatchId
+        if (activeRoomState.tournamentId !== null) {
+          void loadTournamentRoundResultFeederInfo(activeRoomState.tournamentId, activeRoomState.tournamentMatchId)
+        }
+      }
+
+      const roundLabel = tournamentWaitingRoundLabel(activeRoomState.tournamentRoundType)
+      const feederStatusText = tournamentRoundResultFeederStatus === 'completed'
+        ? `${tournamentRoundResultFeederScoreA ?? 0} : ${tournamentRoundResultFeederScoreB ?? 0} — завършен`
+        : tournamentRoundResultFeederStatus === 'in_progress'
+          ? 'Мачът е в ход'
+          : 'Изчаква се...'
+
+      options.root.innerHTML = `
+        <div
+          ${mobileLayoutAttribute}
+          style="
+            min-height:100vh;
+            width:100%;
+            box-sizing:border-box;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            overflow:hidden;
+            background:${tableBackground};
+            font-family:Inter, system-ui, sans-serif;
+          "
+        >
+          <div
+            style="
+              width:min(92vw, 480px);
+              max-height:calc(100dvh - 32px);
+              overflow:auto;
+              box-sizing:border-box;
+              border:1px solid ${wonRound ? 'rgba(34,197,94,0.45)' : 'rgba(255,255,255,0.18)'};
+              border-radius:8px;
+              padding:24px;
+              background:rgba(15,23,42,0.94);
+              color:#f8fafc;
+              box-shadow:0 24px 70px rgba(2,6,23,0.45);
+              text-align:center;
+            "
+          >
+            <div style="font-size:28px;font-weight:900;color:${wonRound ? '#22c55e' : '#f87171'};">${wonRound ? 'Победихте!' : 'Отпаднахте от турнира'}</div>
+            <div style="margin-top:10px;font-size:18px;font-weight:800;">${myScore} : ${opponentScore}</div>
+            ${wonRound ? `
+              <div style="margin-top:14px;font-size:14px;font-weight:700;color:#dbeafe;">Продължавате към следващия кръг.</div>
+              ${tournamentRoundResultFeederLabel !== null ? `
+                <div style="margin-top:16px;padding:12px;border-radius:8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);">
+                  <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.05em;color:#93c5fd;">Очаквате победителя от</div>
+                  <div style="margin-top:4px;font-size:14px;font-weight:800;">${escapeHtml(tournamentRoundResultFeederLabel)}</div>
+                  <div style="margin-top:6px;font-size:13px;font-weight:700;color:${tournamentRoundResultFeederStatus === 'completed' ? '#22c55e' : '#facc15'};">${escapeHtml(feederStatusText)}</div>
+                </div>
+              ` : ''}
+            ` : `
+              <div style="margin-top:14px;font-size:14px;font-weight:700;color:rgba(248,250,252,0.7);">Достигнат кръг: ${escapeHtml(roundLabel)}</div>
+            `}
+            <div style="margin-top:20px;">
+              <button type="button" data-tournament-round-result-lobby="1" style="height:44px;padding:0 20px;border:1px solid rgba(255,255,255,0.22);border-radius:8px;background:rgba(255,255,255,0.06);color:#f8fafc;font-size:14px;font-weight:900;cursor:pointer;">Към лобито</button>
+            </div>
+          </div>
+        </div>
+      `
+      options.root.querySelector('[data-tournament-round-result-lobby]')?.addEventListener('click', () => {
+        if (wonRound && tournamentRoundResultFeederLabel !== null) {
+          options.onEnterWaitingForNextTournamentRound({
+            label: tournamentRoundResultFeederLabel,
+            scoreA: tournamentRoundResultFeederScoreA,
+            scoreB: tournamentRoundResultFeederScoreB,
+            status: tournamentRoundResultFeederStatus ?? 'in_progress',
+          })
+        }
+        returnToLobbyFromMatchEnded()
+      })
+      return
     } else if (isShowingMatchEndedPhase && activeRoomState.game) {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
       if (!matchEndedSoundPlayed) {
@@ -3570,6 +3791,9 @@ export function createActiveRoomFlowController(
     activeRoomState.isGuestTrial = message.isGuestTrial
     activeRoomState.isPrivateTableOrigin = message.isPrivateTableOrigin
     activeRoomState.isTournamentMatchOrigin = message.isTournamentMatchOrigin
+    activeRoomState.tournamentId = message.tournamentId ?? null
+    activeRoomState.tournamentMatchId = message.tournamentMatchId ?? null
+    activeRoomState.tournamentRoundType = message.tournamentRoundType ?? null
     activeRoomState.tournamentAttendance = message.tournamentAttendance ?? null
     activeRoomState.tournamentBotReplacements = message.tournamentBotReplacements ?? []
     activeRoomState.tournamentBanners = message.tournamentBanners ?? []
@@ -3636,6 +3860,9 @@ export function createActiveRoomFlowController(
       isGuestTrial: false,
       isPrivateTableOrigin: false,
       isTournamentMatchOrigin: false,
+      tournamentId: null,
+      tournamentMatchId: null,
+      tournamentRoundType: null,
       tournamentAttendance: null,
       tournamentBotReplacements: [],
       tournamentBanners: [],
@@ -3667,6 +3894,7 @@ export function createActiveRoomFlowController(
     initialStakeEffectShown = stakeAlreadyShown
     clearMatchEndedCountdown()
     matchEndedCountdownSeconds = 120
+    clearTournamentRoundResultState()
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
     removeSeatProfileOverlay()
@@ -3689,6 +3917,9 @@ export function createActiveRoomFlowController(
       isGuestTrial: false,
       isPrivateTableOrigin: false,
       isTournamentMatchOrigin: false,
+      tournamentId: null,
+      tournamentMatchId: null,
+      tournamentRoundType: null,
       tournamentAttendance: null,
       tournamentBotReplacements: [],
       tournamentBanners: [],
@@ -3712,6 +3943,16 @@ export function createActiveRoomFlowController(
         return true
       }
 
+      return false
+    }
+
+    if (message.type === 'tournament_feeder_match_completed') {
+      if (tournamentRoundResultFeederMatchId === message.matchId) {
+        tournamentRoundResultFeederStatus = 'completed'
+        tournamentRoundResultFeederScoreA = message.finalScoreTeamA
+        tournamentRoundResultFeederScoreB = message.finalScoreTeamB
+        renderActiveRoomScreen()
+      }
       return false
     }
 
@@ -3932,6 +4173,17 @@ export function createActiveRoomFlowController(
     return activeRoomState !== null
   }
 
+  function getActiveNonTournamentRoomInfo(): { roomId: string; stakeAmount: number } | null {
+    if (activeRoomState === null || activeRoomState.isTournamentMatchOrigin) {
+      return null
+    }
+    return { roomId: activeRoomState.roomId, stakeAmount: activeRoomState.stake }
+  }
+
+  function getCurrentRoomId(): string | null {
+    return activeRoomState?.roomId ?? null
+  }
+
   document.body.addEventListener('click', (e) => {
     const target = e.target
     if (!(target instanceof Element)) return
@@ -3968,5 +4220,7 @@ export function createActiveRoomFlowController(
     setConnectionState,
     leaveActiveRoom,
     hasActiveRoom,
+    getActiveNonTournamentRoomInfo,
+    getCurrentRoomId,
   }
 }

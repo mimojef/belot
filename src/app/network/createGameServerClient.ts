@@ -148,6 +148,8 @@ export type TournamentMatchSnapshot = {
     gameStartAt: string | null
     startSecondsRemaining: number
   }
+  finalScoreTeamA?: number | null
+  finalScoreTeamB?: number | null
   progressLabel?: string
   startedAt: string | null
   completedAt: string | null
@@ -171,6 +173,9 @@ export type TournamentMatchAssignmentSnapshot = {
   partnerProfileId: string
   opponentTeamId: string
   reconnectToken: string | null
+  deadlineKind: 'first_match' | 'round_transition' | null
+  attendanceDeadlineAt: string | null
+  gameStartAt: string | null
 }
 
 export type TournamentPartnerInviteSnapshot = {
@@ -1011,6 +1016,9 @@ export type RoomSnapshotMessage = {
   isGuestTrial: boolean
   isPrivateTableOrigin: boolean
   isTournamentMatchOrigin: boolean
+  tournamentId?: string | null
+  tournamentMatchId?: string | null
+  tournamentRoundType?: TournamentRoundType | null
   tournamentAttendance?: TournamentAttendanceSnapshot | null
   tournamentBotReplacements?: TournamentBotReplacementSnapshot[]
   tournamentBanners?: TournamentRoomBannerSnapshot[]
@@ -1367,6 +1375,16 @@ export type TournamentMatchAssignedMessage = {
   assignment: TournamentMatchAssignmentSnapshot
 }
 
+export type TournamentFeederMatchCompletedMessage = {
+  type: 'tournament_feeder_match_completed'
+  tournamentId: string
+  matchId: string
+  roundType: TournamentRoundType
+  winnerTeamId: string
+  finalScoreTeamA: number | null
+  finalScoreTeamB: number | null
+}
+
 // --- Общ лайв чат в лобито (разделен от ChatMessageReceivedMessage — това
 // е публичен broadcast поток, не 1:1 нотификация между приятели) ---
 
@@ -1470,6 +1488,7 @@ export type ServerMessage =
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage
   | TournamentMatchAssignedMessage
+  | TournamentFeederMatchCompletedMessage
   | LobbyChatHistoryMessage
   | LobbyChatMessageEventMessage
   | LobbyChatMessageDeletedMessage

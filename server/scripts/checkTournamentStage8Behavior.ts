@@ -205,6 +205,7 @@ try {
     ensureRoomRuntime: () => ({ ok: true }),
     settleTournamentPrizes: () => ({ ok: false, reason: 'not_final' }),
     notifyAssignment: () => {},
+    notifyFeederMatchCompleted: () => {},
     isConnectionAttached: ({ profileId, connectionId, roomId, seat }) => attachedConnections.has(`${profileId}:${connectionId}:${roomId}:${seat}`),
     setInterval: () => ({ unref() {} }) as ReturnType<typeof globalThis.setInterval>,
     clearInterval: () => {},

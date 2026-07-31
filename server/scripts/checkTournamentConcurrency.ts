@@ -277,6 +277,7 @@ try {
       return result.ok ? { ok: true, alreadySettled: result.alreadySettled } : { ok: false, reason: result.reason }
     },
     notifyAssignment: () => {},
+    notifyFeederMatchCompleted: () => {},
     isConnectionAttached: ({ profileId, connectionId, roomId, seat }) => attachedConnections.has(`${profileId}:${connectionId}:${roomId}:${seat}`),
     setInterval: () => ({ unref() {} }) as ReturnType<typeof globalThis.setInterval>,
     clearInterval: () => {},

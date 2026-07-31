@@ -43,6 +43,13 @@ export type TournamentMatchAssignment = {
   partnerProfileId: ProfileId
   opponentTeamId: TournamentTeamId
   reconnectToken: string | null
+  // Позволява на клиента да реши кой popup вариант да покаже (3-минутен
+  // "първи мач" текст срещу 20-секунден "следващ кръг" текст, виж §3/§9 в
+  // task spec-а) без отделна заявка — попада null само преди
+  // ensureMatchRoom да е стартирал attendance прозореца за match-а.
+  deadlineKind: 'first_match' | 'round_transition' | null
+  attendanceDeadlineAt: string | null
+  gameStartAt: string | null
 }
 
 export type TournamentCoordinatorHealth = {
@@ -63,6 +70,15 @@ export type TournamentCoordinatorHealth = {
   settlementAttemptsLastTick: number
   tournamentsSettledLastTick: number
   recoveryActionsLastTick: number
+}
+
+export type TournamentFeederMatchUpdate = {
+  tournamentId: TournamentId
+  matchId: TournamentMatchId
+  roundType: TournamentRoundType
+  winnerTeamId: TournamentTeamId
+  finalScoreTeamA: number | null
+  finalScoreTeamB: number | null
 }
 
 export type TournamentBotTakeoverResult =
@@ -99,6 +115,12 @@ type TournamentCoordinatorDeps = {
     reason?: string
   }
   notifyAssignment: (profileId: ProfileId, assignment: TournamentMatchAssignment) => void
+  // Push при завършек на всеки НЕ-финален турнирен мач (§8/§12 в task spec-а
+  // — "live" feeder резултат) — само completion събитие, без per-точка
+  // score (виж коментара при advanceCompletedMatch). Извиква се за всички
+  // все още активни участници в турнира; клиентът сам решава дали match-ът
+  // е този, който гледа в момента (сравнява по matchId).
+  notifyFeederMatchCompleted: (profileIds: ProfileId[], update: TournamentFeederMatchUpdate) => void
   isConnectionAttached: (input: {
     profileId: ProfileId
     connectionId: ConnectionId
@@ -132,10 +154,13 @@ type MatchRow = {
   attendance_deadline_at: string | null
   attendance_resolved_at: string | null
   attendance_resolution_kind: 'all_present' | 'walkover' | 'bots_inserted' | null
+  deadline_kind: 'first_match' | 'round_transition' | null
   game_start_at: string | null
   winner_team_id: string | null
   result_kind: string | null
   completed_at: string | null
+  final_score_team_a: number | null
+  final_score_team_b: number | null
   tournament_name: string
   tournament_status: string
   tournament_player_capacity: number
@@ -181,7 +206,14 @@ type ReplacementRow = {
 
 const DEFAULT_INTERVAL_MS = 5_000
 const DEFAULT_BATCH_SIZE = 25
-const ATTENDANCE_WAIT_MS = 180_000
+// Първият bracket кръг (getTournamentRoundLadder(teamCapacity)[0]) получава
+// пълен 3-минутен server-authoritative прозорец за всеки отбор — играчите
+// тепърва се събират след tournament fill/scheduled start (виж §3 в task
+// spec-а). Всеки следващ кръг (round_transition) използва много по-кратък
+// 20-секунден прозорец — отборите вече знаят, че продължават (виж §9),
+// затова не се чака ново 3-минутно "събиране".
+const ATTENDANCE_WAIT_MS_FIRST_MATCH = 180_000
+const ATTENDANCE_WAIT_MS_ROUND_TRANSITION = 20_000
 const START_COUNTDOWN_MS = 5_000
 const BANNER_TTL_MS = 20_000
 
@@ -214,6 +246,15 @@ function getTeamIdForSeat(match: MatchRow, seat: Seat): TournamentTeamId {
 
 function isTournamentRoom(room: ServerRoom): boolean {
   return room.config.isTournamentMatchOrigin === true && !!room.config.tournamentMatchId
+}
+
+// Определя дали даден мач е "първият за отбора" (пълен bracket ladder[0]
+// round type за съответния teamCapacity) или "round transition" (всеки
+// следващ ladder round) — виж коментара при ATTENDANCE_WAIT_MS_* по-горе.
+function getMatchDeadlineKind(match: MatchRow): 'first_match' | 'round_transition' {
+  const teamCapacity = match.tournament_player_capacity / 2
+  const firstRoundType = getTournamentRoundLadder(teamCapacity)[0]
+  return match.round_type === firstRoundType ? 'first_match' : 'round_transition'
 }
 
 function sortTeamEntries(entries: TeamEntryRow[]): TeamEntryRow[] {
@@ -258,8 +299,9 @@ export async function createTournamentCoordinator(
   const matchSelectColumns = `
     tm.match_id, tm.tournament_id, tm.round_id, tm.room_id, tm.team_a_id, tm.team_b_id,
     tm.status, tm.no_show_deadline_at, tm.attendance_started_at, tm.attendance_deadline_at,
-    tm.attendance_resolved_at, tm.attendance_resolution_kind, tm.game_start_at,
+    tm.attendance_resolved_at, tm.attendance_resolution_kind, tm.deadline_kind, tm.game_start_at,
     tm.winner_team_id, tm.result_kind, tm.completed_at,
+    tm.final_score_team_a, tm.final_score_team_b,
     t.name as tournament_name, t.status as tournament_status, t.player_capacity as tournament_player_capacity,
     tr.round_type, tr.round_index
   `
@@ -288,6 +330,13 @@ export async function createTournamentCoordinator(
       AND t.settlement_state = 'pending'
     ORDER BY t.updated_at ASC
     LIMIT ?;
+  `)
+
+  const selectConfirmedProfileIdsForTournamentStatement = database.prepare(`
+    SELECT DISTINCT profile_id
+    FROM tournament_entries
+    WHERE tournament_id = ?
+      AND status IN ('confirmed', 'finalist', 'champion', 'eliminated');
   `)
 
   const selectRunnableMatchesStatement = database.prepare(`
@@ -344,6 +393,7 @@ export async function createTournamentCoordinator(
     SET attendance_started_at = COALESCE(attendance_started_at, ?),
         attendance_deadline_at = COALESCE(attendance_deadline_at, ?),
         no_show_deadline_at = COALESCE(no_show_deadline_at, ?),
+        deadline_kind = COALESCE(deadline_kind, ?),
         attendance_revision = attendance_revision + 1
     WHERE match_id = ?
       AND room_id IS NOT NULL
@@ -407,6 +457,8 @@ export async function createTournamentCoordinator(
         winner_team_id = ?,
         walkover_reason = NULL,
         missing_profile_ids = NULL,
+        final_score_team_a = ?,
+        final_score_team_b = ?,
         completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
     WHERE match_id = ?
       AND status != 'completed'
@@ -746,6 +798,9 @@ export async function createTournamentCoordinator(
       partnerProfileId: assignment.partnerProfileId,
       opponentTeamId: assignment.opponentTeamId,
       reconnectToken: getReconnectToken(room, assignment.seat),
+      deadlineKind: match.deadline_kind,
+      attendanceDeadlineAt: match.attendance_deadline_at,
+      gameStartAt: match.game_start_at,
     }))
   }
 
@@ -913,12 +968,15 @@ export async function createTournamentCoordinator(
     }
 
     const startIso = utcNow()
-    const deadlineIso = addMsIso(startIso, ATTENDANCE_WAIT_MS)
+    const deadlineKind = getMatchDeadlineKind(match)
+    const waitMs = deadlineKind === 'first_match' ? ATTENDANCE_WAIT_MS_FIRST_MATCH : ATTENDANCE_WAIT_MS_ROUND_TRANSITION
+    const deadlineIso = addMsIso(startIso, waitMs)
     if (match.attendance_started_at === null) {
       const result = ensureAttendanceStartedStatement.run(
         startIso,
         deadlineIso,
         deadlineIso,
+        deadlineKind,
         match.match_id,
       )
       if (dbChanges(result) > 0) {
@@ -927,6 +985,7 @@ export async function createTournamentCoordinator(
           matchId: match.match_id,
           roundType: match.round_type,
           deadlineAt: match.attendance_deadline_at,
+          deadlineKind,
         })
       }
     }
@@ -1314,6 +1373,17 @@ export async function createTournamentCoordinator(
     // общата ladder логика — не само 'semifinal' както преди.
     const final = advanceBracketLadder(match.tournament_id, match.tournament_player_capacity / 2)
     if (final !== null && final.status !== 'completed') ensureMatchRoom(final)
+
+    const profileIds = (selectConfirmedProfileIdsForTournamentStatement.all(match.tournament_id) as Array<{ profile_id: ProfileId }>)
+      .map((row) => row.profile_id)
+    deps.notifyFeederMatchCompleted(profileIds, {
+      tournamentId: match.tournament_id,
+      matchId: match.match_id,
+      roundType: match.round_type as TournamentRoundType,
+      winnerTeamId: match.winner_team_id,
+      finalScoreTeamA: match.final_score_team_a,
+      finalScoreTeamB: match.final_score_team_b,
+    })
   }
 
   function reconcileTournament(tournament: TournamentRow): void {
@@ -1419,8 +1489,17 @@ export async function createTournamentCoordinator(
       : match.team_b_id
     const replacementCount = (countActiveReplacementsForMatchStatement.get(match.match_id) as { count: number }).count
     const resultKind = replacementCount > 0 ? 'played_with_bots' : 'played'
+    const finalScoreTeamA = authState.matchEnded.finalScore.teamA
+    const finalScoreTeamB = authState.matchEnded.finalScore.teamB
 
-    const updateResult = completeMatchStatement.run(resultKind, winnerTeamId, match.match_id, winnerTeamId)
+    const updateResult = completeMatchStatement.run(
+      resultKind,
+      winnerTeamId,
+      finalScoreTeamA,
+      finalScoreTeamB,
+      match.match_id,
+      winnerTeamId,
+    )
     if (dbChanges(updateResult) > 0) {
       appendEvent(match.tournament_id, 'tournament_match_completed', {
         matchId: match.match_id,

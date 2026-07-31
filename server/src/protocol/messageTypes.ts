@@ -12,10 +12,21 @@ import type {
 import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
 import type { TournamentMatchAssignment } from '../tournament/tournamentCoordinator.js'
 import type { TournamentPartnerInviteDto } from '../tournament/tournamentDto.js'
+import type { TournamentRoundType } from '../tournament/tournamentTypes.js'
 
 export type TournamentMatchAssignedMessage = {
   type: 'tournament_match_assigned'
   assignment: TournamentMatchAssignment
+}
+
+export type TournamentFeederMatchCompletedMessage = {
+  type: 'tournament_feeder_match_completed'
+  tournamentId: string
+  matchId: string
+  roundType: TournamentRoundType
+  winnerTeamId: string
+  finalScoreTeamA: number | null
+  finalScoreTeamB: number | null
 }
 
 export type ClientBidAction =
@@ -370,6 +381,9 @@ export type RoomSnapshotMessage = {
   isGuestTrial: boolean
   isPrivateTableOrigin: boolean
   isTournamentMatchOrigin: boolean
+  tournamentId?: string | null
+  tournamentMatchId?: string | null
+  tournamentRoundType?: TournamentRoundType | null
   tournamentAttendance?: TournamentAttendanceSnapshot | null
   tournamentBotReplacements?: TournamentBotReplacementSnapshot[]
   tournamentBanners?: TournamentRoomBannerSnapshot[]
@@ -752,6 +766,7 @@ export type ServerMessage =
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage
   | TournamentMatchAssignedMessage
+  | TournamentFeederMatchCompletedMessage
   | LobbyChatHistoryMessage
   | LobbyChatMessageReceivedMessage
   | LobbyChatMessageDeletedMessage

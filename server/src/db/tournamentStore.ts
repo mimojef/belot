@@ -226,12 +226,15 @@ type TournamentMatchRow = {
   attendance_deadline_at: string | null
   attendance_resolved_at: string | null
   attendance_resolution_kind: string | null
+  deadline_kind: string | null
   game_start_at: string | null
   attendance_revision: number
   winner_team_id: string | null
   result_kind: string | null
   walkover_reason: string | null
   missing_profile_ids: string | null
+  final_score_team_a: number | null
+  final_score_team_b: number | null
   created_at: string
   started_at: string | null
   completed_at: string | null
@@ -353,6 +356,7 @@ function toTournamentMatchRecord(row: TournamentMatchRow): TournamentMatchRecord
     attendanceDeadlineAt: row.attendance_deadline_at !== null ? dbDateToUtc(row.attendance_deadline_at) : null,
     attendanceResolvedAt: row.attendance_resolved_at !== null ? dbDateToUtc(row.attendance_resolved_at) : null,
     attendanceResolutionKind: row.attendance_resolution_kind as TournamentMatchRecord['attendanceResolutionKind'],
+    deadlineKind: row.deadline_kind as TournamentMatchRecord['deadlineKind'],
     gameStartAt: row.game_start_at !== null ? dbDateToUtc(row.game_start_at) : null,
     attendanceRevision: row.attendance_revision,
     winnerTeamId: row.winner_team_id,
@@ -361,6 +365,8 @@ function toTournamentMatchRecord(row: TournamentMatchRow): TournamentMatchRecord
     missingProfileIds: row.missing_profile_ids !== null
       ? (JSON.parse(row.missing_profile_ids) as string[])
       : null,
+    finalScoreTeamA: row.final_score_team_a,
+    finalScoreTeamB: row.final_score_team_b,
     createdAt: dbDateToUtc(row.created_at),
     startedAt: row.started_at !== null ? dbDateToUtc(row.started_at) : null,
     completedAt: row.completed_at !== null ? dbDateToUtc(row.completed_at) : null,
@@ -525,9 +531,10 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
     SELECT
       match_id, tournament_id, round_id, room_id, team_a_id, team_b_id, status,
       no_show_deadline_at, attendance_started_at, attendance_deadline_at,
-      attendance_resolved_at, attendance_resolution_kind, game_start_at,
+      attendance_resolved_at, attendance_resolution_kind, deadline_kind, game_start_at,
       attendance_revision, winner_team_id, result_kind, walkover_reason,
-      missing_profile_ids, created_at, started_at, completed_at
+      missing_profile_ids, final_score_team_a, final_score_team_b,
+      created_at, started_at, completed_at
     FROM tournament_matches
     WHERE tournament_id = ?
     ORDER BY created_at ASC;

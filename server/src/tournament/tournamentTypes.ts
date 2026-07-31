@@ -192,6 +192,8 @@ export type TournamentRoundRecord = {
   createdAt: string
 }
 
+export type TournamentMatchDeadlineKind = 'first_match' | 'round_transition'
+
 export type TournamentMatchRecord = {
   matchId: TournamentMatchId
   tournamentId: TournamentId
@@ -205,12 +207,15 @@ export type TournamentMatchRecord = {
   attendanceDeadlineAt: string | null
   attendanceResolvedAt: string | null
   attendanceResolutionKind: 'all_present' | 'walkover' | 'bots_inserted' | null
+  deadlineKind: TournamentMatchDeadlineKind | null
   gameStartAt: string | null
   attendanceRevision: number
   winnerTeamId: TournamentTeamId | null
   resultKind: TournamentMatchResultKind | null
   walkoverReason: string | null
   missingProfileIds: string[] | null
+  finalScoreTeamA: number | null
+  finalScoreTeamB: number | null
   createdAt: string
   startedAt: string | null
   completedAt: string | null

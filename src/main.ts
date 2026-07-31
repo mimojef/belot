@@ -71,6 +71,7 @@ import {
   type TournamentCreateInput,
   type TournamentPartnerCandidateSnapshot,
   type TournamentPartnerInviteSnapshot,
+  type TournamentMatchAssignmentSnapshot,
 } from './app/network/createGameServerClient'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
@@ -79,6 +80,8 @@ import { createPartnerRatingNotification } from './ui/notifications/partnerRatin
 import { createChatMessageNotification } from './ui/notifications/chatMessageNotification'
 import { createPrivateRoomCreatedNotification } from './ui/notifications/privateRoomCreatedNotification'
 import { createTournamentPartnerInvitePopup } from './ui/notifications/tournamentPartnerInvitePopup'
+import { createTournamentMatchStartPopup } from './ui/notifications/tournamentMatchStartPopup'
+import { createTournamentFeederWaitingStrip, type TournamentFeederWaitingState } from './ui/notifications/tournamentFeederWaitingStrip'
 import { createVisitorPageViewTracker } from './app/visitors/createVisitorPageViewTracker'
 import { mountConsentUi } from './app/consent/consentUi'
 import { initializeAnalytics } from './app/analytics/initializeAnalytics'
@@ -216,6 +219,7 @@ const MAX_PROFILE_GALLERY_IMAGES = 6
 let reconnectTimerId: number | null = null
 let connectionErrorTimerId: number | null = null
 let reconnectAttempt = 0
+let pendingTournamentEntryAfterLeave: TournamentMatchAssignmentSnapshot | null = null
 let isPageUnloading = false
 let isRefreshingAuthConnection = false
 let isSessionDisplaced = false
@@ -4063,7 +4067,44 @@ const activeRoom = createActiveRoomFlowController({
     lobby.setConnected(client.isConnected())
     lobby.startMatchmaking(GUEST_TRIAL_STAKE)
   },
+  fetchTournamentDetail: async (tournamentId) => {
+    const result = await loadTournamentDetail(tournamentId)
+    return result.ok ? result.tournament : null
+  },
+  onEnterWaitingForNextTournamentRound: (feeder) => {
+    currentFeederWaitingState = feeder
+    tournamentFeederWaitingStrip.setState(feeder)
+  },
 })
+
+const tournamentFeederWaitingStripContainer = document.createElement('div')
+tournamentFeederWaitingStripContainer.id = 'global-tournament-feeder-waiting-strip'
+document.body.appendChild(tournamentFeederWaitingStripContainer)
+
+const tournamentFeederWaitingStrip = createTournamentFeederWaitingStrip({
+  container: tournamentFeederWaitingStripContainer,
+})
+let currentFeederWaitingState: TournamentFeederWaitingState | null = null
+
+const tournamentMatchStartNotifContainer = document.createElement('div')
+tournamentMatchStartNotifContainer.id = 'global-tournament-match-start-notifications'
+document.body.appendChild(tournamentMatchStartNotifContainer)
+
+const tournamentMatchStartPopup = createTournamentMatchStartPopup({
+  container: tournamentMatchStartNotifContainer,
+  isInOtherActiveGame: () => activeRoom.getActiveNonTournamentRoomInfo(),
+  isViewingAssignedRoom: (roomId) => activeRoom.getCurrentRoomId() === roomId,
+  onEnterTournamentMatch: (assignment) => {
+    if (assignment.reconnectToken === null) return
+    client.resumeRoom(assignment.roomId, assignment.reconnectToken)
+  },
+  onLeaveAndEnterTournamentMatch: (assignment, conflictRoomId) => {
+    pendingTournamentEntryAfterLeave = assignment
+    client.leaveActiveRoom(conflictRoomId, true)
+  },
+})
+
+window.setInterval(() => tournamentMatchStartPopup.tick(), 1000)
 
 function clearReconnectTimer(): void {
   if (reconnectTimerId === null) {
@@ -4437,9 +4478,23 @@ client = createGameServerClient({
 
     if (message.type === 'tournament_match_assigned') {
       lobby.handleServerMessage(message)
-      if (message.assignment.reconnectToken !== null) {
-        showSessionInGameOverlay(message.assignment.roomId, message.assignment.reconnectToken)
+      currentFeederWaitingState = null
+      tournamentFeederWaitingStrip.setState(null)
+      tournamentMatchStartPopup.setAssignment(message.assignment)
+      return
+    }
+
+    if (message.type === 'tournament_feeder_match_completed') {
+      if (currentFeederWaitingState !== null) {
+        currentFeederWaitingState = {
+          ...currentFeederWaitingState,
+          status: 'completed',
+          scoreA: message.finalScoreTeamA,
+          scoreB: message.finalScoreTeamB,
+        }
+        tournamentFeederWaitingStrip.setState(currentFeederWaitingState)
       }
+      activeRoom.handleServerMessage(message)
       return
     }
 
@@ -4488,6 +4543,20 @@ client = createGameServerClient({
       lobby.suspendLobbyChatForActiveRoom()
       activeRoom.enterActiveRoomFromResume(message.roomId, message.seat, 5000)
       return
+    }
+
+    // "Напусни мача и влез в турнира" (tournamentMatchStartPopup, §4 в task
+    // spec-а) праща leave_active_room, после веднага resume_room за
+    // турнирната стая на same WS connection — сървърът обработва двете
+    // съобщения последователно, затова pending-ът тук просто изчаква
+    // left_active_room потвърждение, преди да прати resume_room, вместо
+    // client-side race с два fire-and-forget извиквания.
+    if (message.type === 'left_active_room' && pendingTournamentEntryAfterLeave !== null) {
+      const assignment = pendingTournamentEntryAfterLeave
+      pendingTournamentEntryAfterLeave = null
+      if (assignment.reconnectToken !== null) {
+        client.resumeRoom(assignment.roomId, assignment.reconnectToken)
+      }
     }
 
     if (activeRoom.handleServerMessage(message)) {

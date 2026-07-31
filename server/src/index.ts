@@ -10442,15 +10442,21 @@ wsServer.on('connection', (socket, request) => {
           seat,
           disconnectedParticipant,
         )
-        const abandonResult = isTournamentMatchRoom(room)
-          ? null
-          : activeRoomRuntime.abandonHumanControl({
-              room: disconnectedRoom,
-              seat,
-            })
-        const nextRoom = abandonResult?.ok ? abandonResult.room : disconnectedRoom
+        // Турнирни мачове вече ползват СЪЩИЯ mid-match bot-handoff механизъм
+        // (controlledByBot флаг върху human participant-а) като нормалните
+        // маси — explicit "Напусни" по време на активен турнирен мач трябва
+        // веднага да предаде хода на бота, а не да чака следващия bid/play
+        // timeout. Самата икономика остава изолирана (§11 в task spec-а):
+        // shouldApplyTableExitPenalty вече изключва турнирни стаи по-горе,
+        // защото те се създават с stakeAmount:0 — тук само seat control
+        // handoff, никаква tournament-related такса.
+        const abandonResult = activeRoomRuntime.abandonHumanControl({
+          room: disconnectedRoom,
+          seat,
+        })
+        const nextRoom = abandonResult.ok ? abandonResult.room : disconnectedRoom
 
-        if (abandonResult !== null && !abandonResult.ok) {
+        if (!abandonResult.ok) {
           console.error(
             `[leave-active-room] failed to hand seat to bot room=${room.id} seat=${seat}: ${abandonResult.message}`,
           )
@@ -11353,6 +11359,14 @@ try {
     },
     notifyAssignment: (profileId, assignment) => {
       sendTournamentMatchAssignment(profileId, assignment)
+    },
+    notifyFeederMatchCompleted: (profileIds, update) => {
+      for (const profileId of profileIds) {
+        sendToOpenProfileConnections(profileId, {
+          type: 'tournament_feeder_match_completed',
+          ...update,
+        })
+      }
     },
     logError: (message, error) => console.error(message, sanitizeErrorMessage(error)),
   })

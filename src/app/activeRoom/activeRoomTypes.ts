@@ -10,6 +10,8 @@ import type {
   Seat,
   ServerMessage,
   TournamentAttendanceSnapshot,
+  TournamentDetailSnapshot,
+  TournamentRoundType,
   TournamentBotReplacementSnapshot,
   TournamentRoomBannerSnapshot,
 } from '../network/createGameServerClient'
@@ -33,6 +35,9 @@ export type ActiveRoomState = {
   isGuestTrial: boolean
   isPrivateTableOrigin: boolean
   isTournamentMatchOrigin: boolean
+  tournamentId: string | null
+  tournamentMatchId: string | null
+  tournamentRoundType: TournamentRoundType | null
   tournamentAttendance: TournamentAttendanceSnapshot | null
   tournamentBotReplacements: TournamentBotReplacementSnapshot[]
   tournamentBanners: TournamentRoomBannerSnapshot[]
@@ -60,6 +65,10 @@ export type CreateActiveRoomFlowControllerOptions = {
   showLobby: (errorText?: string | null) => void
   startNewGame: (stake: MatchStake, displayName?: string) => void
   onGuestTrialReplayRequested: () => void
+  fetchTournamentDetail: (tournamentId: string) => Promise<TournamentDetailSnapshot | null>
+  onEnterWaitingForNextTournamentRound: (
+    feeder: { label: string; scoreA: number | null; scoreB: number | null; status: 'in_progress' | 'completed' } | null,
+  ) => void
 }
 
 export type ActiveRoomFlowController = {
@@ -73,6 +82,8 @@ export type ActiveRoomFlowController = {
   setConnectionState: (isConnected: boolean, message: string | null) => void
   leaveActiveRoom: () => void
   hasActiveRoom: () => boolean
+  getActiveNonTournamentRoomInfo: () => { roomId: string; stakeAmount: number } | null
+  getCurrentRoomId: () => string | null
 }
 
 export type CuttingAnimationCache = {

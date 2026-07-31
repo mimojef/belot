@@ -103,6 +103,8 @@ export type TournamentMatchDto = {
     gameStartAt: string | null
     startSecondsRemaining: number
   }
+  finalScoreTeamA: number | null
+  finalScoreTeamB: number | null
   progressLabel: string
   startedAt: string | null
   completedAt: string | null
@@ -407,6 +409,8 @@ export function buildTournamentRoundDtos(input: {
             gameStartAt: match.gameStartAt,
             startSecondsRemaining: gameStartMs === null ? 0 : Math.max(0, Math.ceil((gameStartMs - now) / 1000)),
           },
+          finalScoreTeamA: match.finalScoreTeamA,
+          finalScoreTeamB: match.finalScoreTeamB,
           progressLabel,
           startedAt: match.startedAt,
           completedAt: match.completedAt,
