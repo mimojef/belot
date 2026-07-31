@@ -909,6 +909,15 @@ type InternalLobbyFlowState = {
   tournamentDetail: TournamentDetailSnapshot | null
   tournamentDetailRequiresPassword: boolean
   tournamentDetailPasswordDraft: string
+  /**
+   * Паролата, с която потребителят успешно отключи детайлния изглед на
+   * защитен турнир — пази се само в паметта на тази сесия (никога в
+   * персистентен state, DTO или лог), за да не се налага повторното ѝ
+   * въвеждане при "Запиши се сам" / "Участвай с партньор" веднага след
+   * отключването. За създателя и за вече записан участник остава null,
+   * тъй като сървърът не изисква парола в тези случаи.
+   */
+  tournamentDetailVerifiedPassword: string | null
   tournamentDetailUnlockBusy: boolean
   tournamentDetailUnlockErrorText: string | null
   tournamentJoinConfirmOpen: boolean
@@ -1229,6 +1238,7 @@ function createInitialState(): InternalLobbyFlowState {
     tournamentDetail: null,
     tournamentDetailRequiresPassword: false,
     tournamentDetailPasswordDraft: '',
+    tournamentDetailVerifiedPassword: null,
     tournamentDetailUnlockBusy: false,
     tournamentDetailUnlockErrorText: null,
     tournamentJoinConfirmOpen: false,
@@ -4157,6 +4167,7 @@ export function createLobbyFlowController(
     state.tournamentDetailErrorText = null
     state.tournamentDetailRequiresPassword = false
     state.tournamentDetailPasswordDraft = ''
+    state.tournamentDetailVerifiedPassword = null
     state.tournamentDetailUnlockErrorText = null
     void refetchTournamentsList()
     const targetUrl = `/tournaments/${encodeURIComponent(tournamentId)}`
@@ -4178,6 +4189,7 @@ export function createLobbyFlowController(
     state.tournamentDetailErrorText = null
     state.tournamentDetailRequiresPassword = false
     state.tournamentDetailPasswordDraft = ''
+    state.tournamentDetailVerifiedPassword = null
     state.tournamentDetailUnlockErrorText = null
     const targetUrl = `/tournaments/${encodeURIComponent(tournamentId)}`
     if (window.location.pathname !== targetUrl) {
@@ -4234,7 +4246,8 @@ export function createLobbyFlowController(
     state.tournamentDetailUnlockErrorText = null
     render()
 
-    const result = await options.onTournamentUnlock(tournamentId, state.tournamentDetailPasswordDraft)
+    const passwordAttempt = state.tournamentDetailPasswordDraft
+    const result = await options.onTournamentUnlock(tournamentId, passwordAttempt)
 
     if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) {
       return
@@ -4252,6 +4265,12 @@ export function createLobbyFlowController(
     state.tournamentDetailRequiresPassword = false
     state.tournamentDetailUnlockErrorText = null
     state.tournamentDetailPasswordDraft = ''
+    // Паролата вече е потвърдена от сървъра за тази заявка — пазим я само в
+    // паметта на тази сесия, за да не караме потребителя да я въвежда втори
+    // път при директния "Запиши се сам" / първата покана "Участвай с
+    // партньор" веднага след отключването (виж joinTournamentSoloAtomically /
+    // createPartnerInviteAtomically, които я проверяват отново на сървъра).
+    state.tournamentDetailVerifiedPassword = passwordAttempt
     render()
   }
 
@@ -4286,7 +4305,7 @@ export function createLobbyFlowController(
     state.tournamentJoinErrorText = null
     render()
 
-    const result = await options.onTournamentJoin(tournamentId, null)
+    const result = await options.onTournamentJoin(tournamentId, state.tournamentDetailVerifiedPassword)
 
     if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) {
       return
@@ -4344,7 +4363,7 @@ export function createLobbyFlowController(
     state.tournamentPartnerInviteBusy = true
     state.tournamentPartnerInviteErrorText = null
     render()
-    const result = await options.onTournamentPartnerInviteCreate(tournamentId, profileId, null)
+    const result = await options.onTournamentPartnerInviteCreate(tournamentId, profileId, state.tournamentDetailVerifiedPassword)
     if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) return
     state.tournamentPartnerInviteBusy = false
     if (!result.ok) {
