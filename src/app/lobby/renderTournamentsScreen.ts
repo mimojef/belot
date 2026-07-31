@@ -88,18 +88,32 @@ function statusBadgeColor(status: TournamentSummarySnapshot['status']): string {
   return '#f87171'
 }
 
+function tournamentCardCtaLabel(status: TournamentSummarySnapshot['status']): string {
+  if (status === 'open') return 'Разгледай турнира'
+  if (status === 'starting' || status === 'semifinal_in_progress' || status === 'final_in_progress') return 'Проследи турнира'
+  if (status === 'finished') return 'Виж резултатите'
+  return 'Разгледай турнира'
+}
+
 // ─── Списък с турнири ────────────────────────────────────────────────────
 
 function renderTournamentCard(t: TournamentSummarySnapshot): string {
   const avatarLetter = t.creator.displayName.slice(0, 1).toUpperCase()
+  const ctaLabel = tournamentCardCtaLabel(t.status)
   return `
-    <article data-tournament-card="${escapeHtml(t.tournamentId)}" style="
+    <article style="
       border:1px solid rgba(212,165,32,0.32);border-radius:8px;
       background:linear-gradient(180deg,#141414 0%,#050505 100%);
-      padding:14px;display:flex;flex-direction:column;gap:10px;cursor:pointer;min-width:0;
+      padding:14px;display:flex;flex-direction:column;gap:10px;min-width:0;
     ">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-        <div style="font-size:15px;font-weight:900;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(t.name)}</div>
+        <button
+          type="button"
+          data-tournament-card="${escapeHtml(t.tournamentId)}"
+          aria-label="${escapeHtml(`${ctaLabel}: ${t.name}`)}"
+          title="${escapeHtml(ctaLabel)}"
+          style="min-width:0;border:0;background:transparent;padding:0;color:#ffffff;font-size:15px;font-weight:900;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;"
+        >${escapeHtml(t.name)}</button>
         <span style="flex-shrink:0;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;color:${statusBadgeColor(t.status)};border:1px solid ${statusBadgeColor(t.status)}55;border-radius:999px;padding:3px 9px;">${escapeHtml(t.statusLabel)}</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
@@ -118,11 +132,16 @@ function renderTournamentCard(t: TournamentSummarySnapshot): string {
         <span>${escapeHtml(startModeLabel(t))}</span>
         <span style="color:#d4a520;font-weight:800;">Награден фонд: ${formatAmount(t.prizePreview.prizePool)}</span>
       </div>
-      <button type="button" disabled style="
-        margin-top:2px;height:34px;border-radius:6px;border:1px solid rgba(255,255,255,0.12);
-        background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.35);font-size:12px;font-weight:800;
-        cursor:not-allowed;
-      ">Записването ще бъде достъпно скоро</button>
+      <button
+        type="button"
+        data-tournament-card="${escapeHtml(t.tournamentId)}"
+        aria-label="${escapeHtml(`${ctaLabel}: ${t.name}`)}"
+        style="
+          margin-top:auto;min-height:44px;width:100%;border-radius:6px;border:1px solid rgba(212,165,32,0.48);
+          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;
+          font-size:12px;font-weight:900;cursor:pointer;padding:0 12px;white-space:normal;line-height:1.2;
+        "
+      >${escapeHtml(ctaLabel)}</button>
     </article>
   `
 }
