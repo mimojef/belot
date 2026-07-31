@@ -88,6 +88,10 @@ function statusBadgeColor(status: TournamentSummarySnapshot['status']): string {
   return '#f87171'
 }
 
+function prizePoolPercentLabel(t: TournamentSummarySnapshot): string {
+  return `${100 - t.prizePreview.systemFeePercent}%`
+}
+
 function tournamentCardCtaLabel(status: TournamentSummarySnapshot['status']): string {
   if (status === 'open') return 'Разгледай турнира'
   if (status === 'starting' || status === 'semifinal_in_progress' || status === 'final_in_progress') return 'Проследи турнира'
@@ -532,7 +536,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
           <div style="display:flex;justify-content:space-between;"><span>Единичен вход за целия турнир</span><span style="font-weight:800;">${formatAmount(t.entryFee)}</span></div>
           <div style="display:flex;justify-content:space-between;"><span>Общо входове (при пълен турнир)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.totalEntryFees)}</span></div>
           <div style="display:flex;justify-content:space-between;"><span>Системна такса (20%)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.systemFee)}</span></div>
-          <div style="display:flex;justify-content:space-between;color:#d4a520;"><span>Награден фонд (90%)</span><span style="font-weight:900;">${formatAmount(t.prizePreview.prizePool)}</span></div>
+          <div style="display:flex;justify-content:space-between;color:#d4a520;"><span>Награден фонд (${escapeHtml(prizePoolPercentLabel(t))})</span><span style="font-weight:900;">${formatAmount(t.prizePreview.prizePool)}</span></div>
           <div style="display:flex;justify-content:space-between;"><span>Първо място (65%)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.firstTeamPrize)}</span></div>
           <div style="display:flex;justify-content:space-between;"><span>Второ място (35%)</span><span style="font-weight:800;">${formatAmount(t.prizePreview.secondTeamPrize)}</span></div>
         </div>
@@ -576,7 +580,7 @@ function renderTournamentPartnerPanel(state: LobbyScreenState, t: TournamentDeta
   if (t.myTeam && t.myTeam.status === 'complete') {
     return `<div style="background:#0d0d0d;border:1px solid rgba(34,197,94,0.32);border-radius:10px;padding:16px;margin-bottom:14px;"><div style="font-size:14px;font-weight:900;color:#22c55e;margin-bottom:10px;">Отборът е готов</div><div style="display:flex;gap:10px;flex-wrap:wrap;">${t.myTeam.members.map((member) => `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:8px;padding:7px 9px;"><span style="width:26px;height:26px;border-radius:999px;overflow:hidden;background:#171717;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:11px;font-weight:900;">${member.avatarUrl ? `<img src="${escapeHtml(member.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(member.displayName.slice(0, 1).toUpperCase())}</span><span style="font-size:12px;color:#fff;font-weight:800;">${escapeHtml(member.displayName)}</span></div>`).join('')}</div></div>`
   }
-  if (t.status === 'open' && !t.incomingPartnerInvite && !t.outgoingPartnerInvite && t.viewer.canInvitePartner) {
+  if (t.status === 'open' && t.viewer.isParticipant && !t.incomingPartnerInvite && !t.outgoingPartnerInvite && t.viewer.canInvitePartner) {
     const label = t.viewer.isParticipant ? 'Покани приятел за партньор' : 'Участвай с партньор'
     return `<div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:16px;margin-bottom:14px;">${error}<button type="button" data-tournament-partner-picker-open="1" style="width:100%;height:40px;border-radius:8px;border:1px solid rgba(212,165,32,0.42);background:rgba(212,165,32,0.10);color:#d4a520;font-size:14px;font-weight:900;cursor:pointer;">${label}</button></div>`
   }
@@ -589,6 +593,42 @@ function renderTournamentParticipationActions(state: LobbyScreenState, t: Tourna
       ? `<div style="margin-bottom:10px;padding:8px 10px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:12px;font-weight:700;">${escapeHtml(text)}</div>`
       : ''
 
+  if (t.status === 'open' && !t.viewer.isParticipant && !t.incomingPartnerInvite && !t.outgoingPartnerInvite && (t.viewer.canJoinSolo || t.viewer.canInvitePartner)) {
+    const entryButtons = [
+      t.viewer.canJoinSolo
+        ? `<button type="button" data-tournament-join-open="1" ${state.tournamentJoinBusy ? 'disabled aria-busy="true"' : ''} style="
+          width:100%;min-width:0;min-height:44px;border:0;border-radius:8px;
+          background:${state.tournamentJoinBusy ? 'rgba(212,165,32,0.35)' : 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)'};color:#080808;
+          font-size:14px;font-weight:900;cursor:${state.tournamentJoinBusy ? 'default' : 'pointer'};
+          padding:8px 10px;white-space:normal;line-height:1.2;
+        ">Запиши се сам</button>`
+        : '',
+      t.viewer.canInvitePartner
+        ? `<button type="button" data-tournament-partner-picker-open="1" ${state.tournamentPartnerInviteBusy ? 'disabled aria-busy="true"' : ''} style="
+          width:100%;min-width:0;min-height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.42);
+          background:rgba(212,165,32,0.10);color:#d4a520;font-size:14px;font-weight:900;
+          cursor:${state.tournamentPartnerInviteBusy ? 'default' : 'pointer'};padding:8px 10px;white-space:normal;line-height:1.2;
+        ">Участвай с партньор</button>`
+        : '',
+    ].filter(Boolean).join('')
+    return `
+      <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:16px;margin-bottom:14px;">
+        ${errorBox(state.tournamentJoinErrorText)}
+        ${errorBox(state.tournamentPartnerInviteErrorText)}
+        <div data-tournament-entry-actions="1" style="display:grid;grid-template-columns:${t.viewer.canJoinSolo && t.viewer.canInvitePartner ? 'minmax(0,1fr) minmax(0,1fr)' : 'minmax(0,1fr)'};gap:10px;align-items:stretch;">
+          ${entryButtons}
+        </div>
+        <div style="margin-top:8px;font-size:12px;color:rgba(255,255,255,0.5);text-align:center;">
+          Входът се плаща еднократно за целия турнир: ${formatAmount(t.entryFee)} жълтици.
+        </div>
+        <div style="margin-top:6px;font-size:12px;color:rgba(255,255,255,0.4);text-align:center;font-style:italic;">
+          Можеш да се запишеш сам или да поканиш приятел от списъка си.
+        </div>
+        ${t.viewer.canCancel ? renderCreatorCancelBlock(state) : ''}
+      </div>
+    `
+  }
+
   if (t.viewer.isParticipant) {
     return `
       <div style="background:#0d0d0d;border:1px solid rgba(34,197,94,0.32);border-radius:10px;padding:16px;margin-bottom:14px;">
@@ -599,25 +639,6 @@ function renderTournamentParticipationActions(state: LobbyScreenState, t: Tourna
           background:rgba(127,29,29,0.2);color:#fca5a5;font-size:13px;font-weight:800;cursor:pointer;
         ">Откажи участие</button>
         ${t.viewer.canCancel ? renderCreatorCancelBlock(state) : ''}
-      </div>
-    `
-  }
-
-  if (t.viewer.canJoinSolo) {
-    return `
-      <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:16px;margin-bottom:14px;">
-        ${errorBox(state.tournamentJoinErrorText)}
-        <button type="button" data-tournament-join-open="1" style="
-          width:100%;height:42px;border:0;border-radius:8px;
-          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;
-          font-size:14px;font-weight:900;cursor:pointer;
-        ">Запиши се сам</button>
-        <div style="margin-top:8px;font-size:12px;color:rgba(255,255,255,0.5);text-align:center;">
-          Входът се плаща еднократно за целия турнир: ${formatAmount(t.entryFee)} жълтици.
-        </div>
-        <div style="margin-top:6px;font-size:12px;color:rgba(255,255,255,0.4);text-align:center;font-style:italic;">
-          Можеш да се запишеш сам или да поканиш приятел от списъка си.
-        </div>
       </div>
     `
   }
