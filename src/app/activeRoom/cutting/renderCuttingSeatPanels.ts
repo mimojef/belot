@@ -1,4 +1,4 @@
-import type { RoomCardSnapshot, RoomSeatSnapshot, Seat } from '../../network/createGameServerClient'
+import type { RoomCardSnapshot, RoomSeatSnapshot, Seat, TournamentBotReplacementSnapshot } from '../../network/createGameServerClient'
 import { CARD_BACK_IMAGE_PATH, getCardFaceImagePath } from '../cardImageAssets'
 import {
   CUTTING_VISUAL_SEAT_INITIALS,
@@ -69,6 +69,7 @@ export type RenderCuttingSeatPanelsOptions = {
   declarationBubbles?: Partial<Record<Seat, SeatDeclarationBubble>> | null
   emojiBubbles?: Partial<Record<Seat, SeatEmojiBubble>> | null
   phraseBubbles?: Partial<Record<Seat, SeatPhraseBubble>> | null
+  tournamentBotReplacements?: TournamentBotReplacementSnapshot[] | null
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -201,6 +202,7 @@ export function renderSideCuttingCountdownFooter(
   seatId: Seat,
   escapeHtml: EscapeHtml,
   countdownKey: string,
+  isBotReplacement = false,
 ): string {
   return `
     <div
@@ -258,6 +260,86 @@ export function renderSideCuttingCountdownFooter(
       >
         ${escapeHtml(labelText)}
       </div>
+      ${isBotReplacement
+        ? `
+          <div style="position:relative;z-index:2;margin-top:-8px;padding-bottom:6px;">
+            ${renderTournamentBotSecondaryText(escapeHtml)}
+          </div>
+        `
+        : ''
+      }
+    </div>
+  `
+}
+
+// Временен турнирен бот замества реален играч (виж §6 в task spec-а —
+// pre-game no-show fill в tournamentCoordinator.ts): местото трябва
+// визуално да остане "същият играч" — оригинално име и аватар, само с
+// badge "БОТ" — вместо runtime bot participant-а (чиито identity полета
+// са "Бот вместо {име}", null avatar, изкуствени за AI logic-а, не за
+// показване). Не пипа runtime bot AI логиката — само overrid-ва кои
+// display полета отиват в panel рендъра.
+function resolveSeatIdentityForRender(
+  seat: RoomSeatSnapshot,
+  tournamentBotReplacements: TournamentBotReplacementSnapshot[] | null | undefined,
+): { seat: RoomSeatSnapshot; isBotReplacement: boolean } {
+  const replacement = tournamentBotReplacements?.find(
+    (item) => item.seat === seat.seat && item.replacementActive,
+  )
+  if (replacement === undefined) {
+    return { seat, isBotReplacement: false }
+  }
+  return {
+    seat: {
+      ...seat,
+      displayName: replacement.replacedPlayer.displayName,
+      avatarUrl: replacement.replacedPlayer.avatarUrl,
+    },
+    isBotReplacement: true,
+  }
+}
+
+function renderTournamentBotBadge(isBottomSeat: boolean): string {
+  return `
+    <div
+      data-tournament-bot-badge="1"
+      style="
+        position:absolute;
+        left:${isBottomSeat ? '10px' : '8px'};
+        top:${isBottomSeat ? '10px' : '8px'};
+        padding:${isBottomSeat ? '6px 10px' : '5px 9px'};
+        border-radius:999px;
+        background:rgba(250, 204, 21, 0.96);
+        color:#1c1400;
+        font-size:${isBottomSeat ? '11px' : '10px'};
+        font-weight:900;
+        letter-spacing:0.08em;
+        text-transform:uppercase;
+        box-shadow:0 8px 16px rgba(0,0,0,0.18);
+        z-index:5;
+      "
+    >
+      БОТ
+    </div>
+  `
+}
+
+function renderTournamentBotSecondaryText(escapeHtml: EscapeHtml): string {
+  return `
+    <div
+      data-tournament-bot-secondary="1"
+      style="
+        color:rgba(250,204,21,0.88);
+        font-size:12px;
+        font-weight:700;
+        line-height:1.1;
+        margin-top:2px;
+        white-space:nowrap;
+        overflow:hidden;
+        text-overflow:ellipsis;
+      "
+    >
+      ${escapeHtml('Временно заместване')}
     </div>
   `
 }
@@ -894,7 +976,7 @@ function renderPhraseBubble(
 }
 
 export function createCuttingSeatPanelHtml(
-  seat: RoomSeatSnapshot,
+  rawSeat: RoomSeatSnapshot,
   visualSeat: Seat,
   dealerSeat: Seat | null,
   countdownSeat: Seat | null,
@@ -910,7 +992,9 @@ export function createCuttingSeatPanelHtml(
   countdownKey: string,
   emojiBubbles: Partial<Record<Seat, SeatEmojiBubble>> | null,
   phraseBubbles: Partial<Record<Seat, SeatPhraseBubble>> | null,
+  tournamentBotReplacements?: TournamentBotReplacementSnapshot[] | null,
 ): string {
+  const { seat, isBotReplacement } = resolveSeatIdentityForRender(rawSeat, tournamentBotReplacements)
   const isBottomSeat = visualSeat === 'bottom'
   const isCountdownSeat = seat.seat === countdownSeat
   const isHighlightedSeat = seat.seat === highlightSeat
@@ -1073,6 +1157,15 @@ export function createCuttingSeatPanelHtml(
           >
             ${escapeHtml(displayName)}
           </div>
+          ${isBotReplacement
+            ? `
+              <div style="position:absolute;left:148px;right:18px;top:84px;">
+                ${renderTournamentBotSecondaryText(escapeHtml)}
+              </div>
+            `
+            : ''
+          }
+          ${isBotReplacement ? renderTournamentBotBadge(true) : ''}
 
           ${renderBottomCuttingCountdownBar(
             shouldShowCuttingCountdown,
@@ -1159,8 +1252,10 @@ export function createCuttingSeatPanelHtml(
           seat.seat,
           escapeHtml,
           countdownKey,
+          isBotReplacement,
         )}
 
+        ${isBotReplacement ? renderTournamentBotBadge(false) : ''}
         ${cutterBadgeHtml}
       </div>
       ${renderCuttingDealerBadge(visualSeat, dealerSeat, seat.seat)}
@@ -1190,6 +1285,7 @@ export function createCuttingSeatPanelsHtml(
     declarationBubbles,
     emojiBubbles,
     phraseBubbles,
+    tournamentBotReplacements,
   } = options
   const effectiveCountdownSeat =
     countdownSeat === undefined ? cutterSeat : countdownSeat
@@ -1240,6 +1336,7 @@ export function createCuttingSeatPanelsHtml(
         countdownKey ?? '',
         emojiBubbles ?? null,
         phraseBubbles ?? null,
+        tournamentBotReplacements ?? null,
       )
     })
     .join('')

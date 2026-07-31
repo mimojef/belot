@@ -1179,6 +1179,13 @@ function commitServerRoomWithSnapshot(
   currentServerState: ServerState = serverState,
 ): ServerState {
   persistRoomSnapshot(room)
+  // Единствената наистина универсална точка, през която минава всяко
+  // authoritative room state advance (worker-tick batch commits И direct
+  // submit_play_card/submit_bid_action/submit_cut handlers) — coordinator-ът
+  // сам прави delta detection спрямо последно изпратения score, затова
+  // безопасно е да се вика тук без риск от spam при всяка карта (виж
+  // notifyFeederScoreProgress коментара в tournamentCoordinator.ts).
+  tournamentCoordinator?.notifyFeederScoreProgress(room)
   return commitServerRoomReplacement(room, currentServerState)
 }
 
@@ -1988,6 +1995,12 @@ async function tickRoomGameRuntimes(): Promise<void> {
         },
         onApplied: (previousRoom, room) => {
           handleTrainingRecorderOnApplied(trainingRecorder, previousRoom, room)
+          // Worker-tick batch commits минават покрай commitServerRoomWithSnapshot
+          // (виж commitCanonicalRoom по-горе — директен upsertServerRoom), затова
+          // feeder score push-ът трябва да се закачи и тук отделно, за да
+          // покрие bot auto-play/timer-expiry advances, не само direct
+          // submit_play_card handler-и.
+          tournamentCoordinator?.notifyFeederScoreProgress(room)
 
           const roundCapot = getRoundCapotTransition(previousRoom, room)
           if (roundCapot !== null) {
@@ -5791,7 +5804,18 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
     entries,
     getPublicProfile: getSafePublicProfile,
   })
-  const roundDtos = buildTournamentRoundDtos({ rounds, matches })
+  const roundDtos = buildTournamentRoundDtos({
+    rounds,
+    matches,
+    getLiveScoreForRoom: (roomId) => {
+      const room = serverState.rooms[roomId] ?? null
+      const authState = room?.game.authoritativeState ?? null
+      if (authState === null || 'kind' in authState || authState.matchEnded !== null) {
+        return null
+      }
+      return { teamA: authState.score.match.teamA, teamB: authState.score.match.teamB }
+    },
+  })
   const pendingInvites = viewerProfileId !== null
     ? tournamentEconomyStore.listPendingPartnerInvitesForProfile(viewerProfileId)
     : []
@@ -11364,6 +11388,14 @@ try {
       for (const profileId of profileIds) {
         sendToOpenProfileConnections(profileId, {
           type: 'tournament_feeder_match_completed',
+          ...update,
+        })
+      }
+    },
+    notifyFeederScoreProgress: (profileIds, update) => {
+      for (const profileId of profileIds) {
+        sendToOpenProfileConnections(profileId, {
+          type: 'tournament_feeder_score_progress',
           ...update,
         })
       }

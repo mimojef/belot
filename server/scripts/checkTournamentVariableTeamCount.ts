@@ -251,6 +251,7 @@ async function createCoordinator(input: {
     },
     notifyAssignment: () => {},
     notifyFeederMatchCompleted: () => {},
+    notifyFeederScoreProgress: () => {},
     isConnectionAttached: ({ profileId, connectionId, roomId, seat }) => input.attachedConnections.has(`${profileId}:${connectionId}:${roomId}:${seat}`),
     setInterval: () => ({ unref() {} }) as ReturnType<typeof globalThis.setInterval>,
     clearInterval: () => {},

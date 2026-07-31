@@ -29,6 +29,17 @@ export type TournamentFeederMatchCompletedMessage = {
   finalScoreTeamB: number | null
 }
 
+export type TournamentFeederScoreProgressMessage = {
+  type: 'tournament_feeder_score_progress'
+  tournamentId: string
+  matchId: string
+  teamAId: string
+  teamBId: string
+  scoreTeamA: number
+  scoreTeamB: number
+  status: 'in_progress'
+}
+
 export type ClientBidAction =
   | {
       type: 'pass'
@@ -767,6 +778,7 @@ export type ServerMessage =
   | TournamentPartnerInviteResolvedMessage
   | TournamentMatchAssignedMessage
   | TournamentFeederMatchCompletedMessage
+  | TournamentFeederScoreProgressMessage
   | LobbyChatHistoryMessage
   | LobbyChatMessageReceivedMessage
   | LobbyChatMessageDeletedMessage

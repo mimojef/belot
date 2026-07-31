@@ -278,6 +278,7 @@ try {
     },
     notifyAssignment: () => {},
     notifyFeederMatchCompleted: () => {},
+    notifyFeederScoreProgress: () => {},
     isConnectionAttached: ({ profileId, connectionId, roomId, seat }) => attachedConnections.has(`${profileId}:${connectionId}:${roomId}:${seat}`),
     setInterval: () => ({ unref() {} }) as ReturnType<typeof globalThis.setInterval>,
     clearInterval: () => {},

@@ -150,6 +150,8 @@ export type TournamentMatchSnapshot = {
   }
   finalScoreTeamA?: number | null
   finalScoreTeamB?: number | null
+  liveScoreTeamA?: number | null
+  liveScoreTeamB?: number | null
   progressLabel?: string
   startedAt: string | null
   completedAt: string | null
@@ -1385,6 +1387,17 @@ export type TournamentFeederMatchCompletedMessage = {
   finalScoreTeamB: number | null
 }
 
+export type TournamentFeederScoreProgressMessage = {
+  type: 'tournament_feeder_score_progress'
+  tournamentId: string
+  matchId: string
+  teamAId: string
+  teamBId: string
+  scoreTeamA: number
+  scoreTeamB: number
+  status: 'in_progress'
+}
+
 // --- Общ лайв чат в лобито (разделен от ChatMessageReceivedMessage — това
 // е публичен broadcast поток, не 1:1 нотификация между приятели) ---
 
@@ -1489,6 +1502,7 @@ export type ServerMessage =
   | TournamentPartnerInviteResolvedMessage
   | TournamentMatchAssignedMessage
   | TournamentFeederMatchCompletedMessage
+  | TournamentFeederScoreProgressMessage
   | LobbyChatHistoryMessage
   | LobbyChatMessageEventMessage
   | LobbyChatMessageDeletedMessage

@@ -7,6 +7,7 @@
   RoomSeatSnapshot,
   RoomWinningBidSnapshot,
   Seat,
+  TournamentBotReplacementSnapshot,
 } from '../network/createGameServerClient'
 import { getCardFaceImagePath } from './cardImageAssets'
 import {
@@ -1387,6 +1388,7 @@ export type RenderPlayingScreenOptions = {
   syncSeatPanels?: (html: string) => void
   emojiBubbles?: Partial<Record<Seat, SeatEmojiBubble>> | null
   phraseBubbles?: Partial<Record<Seat, SeatPhraseBubble>> | null
+  tournamentBotReplacements?: TournamentBotReplacementSnapshot[] | null
   cache: PlayingUiCache
 }
 
@@ -1407,6 +1409,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     syncSeatPanels,
     emojiBubbles,
     phraseBubbles,
+    tournamentBotReplacements,
     cache,
   } = options
 
@@ -1792,6 +1795,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         declarationBubbles,
         emojiBubbles: emojiBubbles ?? null,
         phraseBubbles: phraseBubbles ?? null,
+        tournamentBotReplacements: tournamentBotReplacements ?? null,
       }))
     }
   }

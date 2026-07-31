@@ -20,6 +20,7 @@ import { createTableExitPenaltyStore } from '../src/db/tableExitPenaltyStore.js'
 import { initializeRoomAuthoritativeGameState } from '../src/game/initializeRoomAuthoritativeGameState.js'
 import type { ServerAuthoritativeGameState } from '../src/game/serverGameTypes.js'
 import { createTournamentCoordinator } from '../src/tournament/tournamentCoordinator.js'
+import { createRoomSnapshotMessage } from '../src/protocol/createRoomSnapshotMessage.js'
 import { createTournamentScheduler } from '../src/tournament/tournamentScheduler.js'
 
 let passed = 0
@@ -236,6 +237,29 @@ function endRoom(room: ServerRoom, winnerTeam: Team, score: { teamA: number; tea
   }
 }
 
+// Симулира завършено раздаване (round) БЕЗ да приключва целия мач —
+// score.match се променя authoritative, matchEnded остава null. Модел на
+// точно "authoritative промяна на match total score", за която §2 в task
+// spec-а иска feeder progress push (за разлика от endRoom, която приключва
+// самия мач).
+function advanceRoundScore(room: ServerRoom, score: { teamA: number; teamB: number }): ServerRoom {
+  const initialized = initializeRoomAuthoritativeGameState(room)
+  const state = initialized.game.authoritativeState as ServerAuthoritativeGameState
+  const nextState: ServerAuthoritativeGameState = {
+    ...state,
+    score: { ...state.score, match: score },
+  }
+  return {
+    ...initialized,
+    game: {
+      ...initialized.game,
+      stateVersion: initialized.game.stateVersion + 1,
+      updatedAt: Date.now(),
+      authoritativeState: nextState,
+    },
+  }
+}
+
 async function createCoordinator(input: {
   dbPath: string
   profiles: Map<string, PlayerPublicProfileSnapshot>
@@ -243,6 +267,7 @@ async function createCoordinator(input: {
   attachedConnections: Set<string>
   economyStore: Awaited<ReturnType<typeof createTournamentEconomyStore>>
   onFeederCompleted?: (profileIds: string[], update: unknown) => void
+  onFeederProgress?: (profileIds: string[], update: unknown) => void
 }) {
   return createTournamentCoordinator({
     databaseFilePath: input.dbPath,
@@ -258,6 +283,7 @@ async function createCoordinator(input: {
     },
     notifyAssignment: () => {},
     notifyFeederMatchCompleted: (profileIds, update) => { input.onFeederCompleted?.(profileIds, update) },
+    notifyFeederScoreProgress: (profileIds, update) => { input.onFeederProgress?.(profileIds, update) },
     isConnectionAttached: ({ profileId, connectionId, roomId, seat }) => input.attachedConnections.has(`${profileId}:${connectionId}:${roomId}:${seat}`),
     setInterval: () => ({ unref() {} }) as ReturnType<typeof globalThis.setInterval>,
     clearInterval: () => {},
@@ -376,6 +402,26 @@ try {
     }
   })
 
+  // ── bot rendering data: клиентският snapshot пази ОРИГИНАЛНОТО име (не
+  // "Бот вместо X"), маркира replacementActive=true за badge/secondary text ──
+  await check('room snapshot exposes original player identity + active-replacement flag for bot-controlled seats', () => {
+    const refreshedMatch = getMatches(db!, tournamentId).find((m) => m.matchId === qf2.matchId)!
+    const refreshedRoom = getRoomForMatch(rooms, refreshedMatch)
+    const snapshot = createRoomSnapshotMessage(refreshedRoom, 'bottom')
+    assert(snapshot.tournamentBotReplacements !== undefined, 'missing tournamentBotReplacements in room snapshot')
+    const replacements = snapshot.tournamentBotReplacements ?? []
+    assert(replacements.length === 2, `replacement snapshot count=${replacements.length}, expected 2`)
+    for (const seat of ['top', 'left'] as Seat[]) {
+      const replacement = replacements.find((item) => item.seat === seat)
+      assert(replacement !== undefined, `missing replacement snapshot for seat=${seat}`)
+      if (replacement !== undefined) {
+        assert(!replacement.replacedPlayer.displayName.startsWith('Бот'), `replacedPlayer.displayName should be the ORIGINAL name, got "${replacement.replacedPlayer.displayName}"`)
+        assert(replacement.replacementActive === true, `replacementActive=${replacement.replacementActive}, expected true (badge should render)`)
+        assert(replacement.takeoverCompleted === false, 'takeoverCompleted should be false before takeover')
+      }
+    }
+  })
+
   // ── [8] Takeover връща същото seat място на човека ──
   await check('takeover returns the original seat to the real player without restarting the match', () => {
     const refreshedMatch = getMatches(db!, tournamentId).find((m) => m.matchId === qf2.matchId)!
@@ -397,6 +443,22 @@ try {
         'takeover did not restore the original profile to the seat',
       )
     }
+  })
+
+  // ── [3] Takeover премахва bot badge обозначението от room snapshot-а ──
+  await check('takeover removes the bot-replacement designation from the room snapshot for that seat', () => {
+    const refreshedMatch = getMatches(db!, tournamentId).find((m) => m.matchId === qf2.matchId)!
+    const refreshedRoom = getRoomForMatch(rooms, refreshedMatch)
+    const snapshot = createRoomSnapshotMessage(refreshedRoom, 'bottom')
+    const replacements = snapshot.tournamentBotReplacements ?? []
+    const topReplacement = replacements.find((item) => item.seat === 'top')
+    assert(topReplacement !== undefined, 'missing replacement record for seat=top after takeover')
+    if (topReplacement !== undefined) {
+      assert(topReplacement.replacementActive === false, `replacementActive=${topReplacement.replacementActive}, expected false after takeover (badge must disappear)`)
+      assert(topReplacement.takeoverCompleted === true, `takeoverCompleted=${topReplacement.takeoverCompleted}, expected true`)
+    }
+    const leftReplacement = replacements.find((item) => item.seat === 'left')
+    assert(leftReplacement !== undefined && leftReplacement.replacementActive === true, 'seat=left (not taken over) should still show the bot badge')
   })
 
   // Reconnect the takeover seat so the room can complete normally, and finish
@@ -430,6 +492,57 @@ try {
     coordinator!.onTournamentRoomCompleted(room)
   }
 
+  // ── [4][5][6][7] Live feeder progress: score update по време на игра ──
+  const feederProgressNotifications: Array<{ profileIds: string[]; update: unknown }> = []
+  let feederProgressCoordinator: Awaited<ReturnType<typeof createTournamentCoordinator>> | null = null
+  await check('feeder progress update is sent before match completion, with the current authoritative score', async () => {
+    feederProgressCoordinator = await createCoordinator({
+      dbPath, profiles, rooms, attachedConnections, economyStore,
+      onFeederProgress: (profileIds, update) => { feederProgressNotifications.push({ profileIds, update }) },
+    })
+    let room = getRoomForMatch(rooms, getMatches(db!, tournamentId).find((m) => m.matchId === quarterfinals[0]!.matchId)!)
+    room = advanceRoundScore(room, { teamA: 32, teamB: 18 })
+    rooms.set(room.id, room)
+    feederProgressCoordinator.notifyFeederScoreProgress(room)
+
+    assert(feederProgressNotifications.length === 1, `notification count=${feederProgressNotifications.length}, expected 1`)
+    const first = feederProgressNotifications[0]!.update as { status: string; scoreTeamA: number; scoreTeamB: number; matchId: string }
+    assert(first.status === 'in_progress', `status=${first.status}, expected in_progress (must fire BEFORE completion)`)
+    assert(first.scoreTeamA === 32 && first.scoreTeamB === 18, `score=${first.scoreTeamA}:${first.scoreTeamB}, expected 32:18 (current authoritative score)`)
+    assert(first.matchId === quarterfinals[0]!.matchId, 'matchId mismatch in feeder progress update')
+  })
+
+  await check('waiting (confirmed) tournament participants receive the feeder progress update', () => {
+    const last = feederProgressNotifications[feederProgressNotifications.length - 1]!
+    assert(last.profileIds.length === profileIds.length, `recipient count=${last.profileIds.length}, expected ${profileIds.length} (all confirmed tournament participants)`)
+    for (const profileId of profileIds) {
+      assert(last.profileIds.includes(profileId), `profileId=${profileId} missing from feeder progress recipients`)
+    }
+  })
+
+  await check('repeated notifyFeederScoreProgress with an unchanged score does not resend (no spam on every card)', () => {
+    const countBefore = feederProgressNotifications.length
+    const room = getRoomForMatch(rooms, getMatches(db!, tournamentId).find((m) => m.matchId === quarterfinals[0]!.matchId)!)
+    feederProgressCoordinator!.notifyFeederScoreProgress(room)
+    feederProgressCoordinator!.notifyFeederScoreProgress(room)
+    assert(feederProgressNotifications.length === countBefore, `notification count changed on unchanged-score repeat calls: before=${countBefore}, after=${feederProgressNotifications.length}`)
+  })
+
+  await check('a disconnected/unaffiliated profile is not among feeder progress recipients', () => {
+    const outsiderProfileId = randomUUID()
+    const last = feederProgressNotifications[feederProgressNotifications.length - 1]!
+    assert(!last.profileIds.includes(outsiderProfileId), 'outsider profile unexpectedly received a feeder progress update')
+  })
+
+  await check('feeder progress push does not create any wallet or table economy operation', () => {
+    const penaltyRows = countRows(db!, `SELECT COUNT(*) AS count FROM table_exit_penalties;`)
+    assert(penaltyRows === 0, `table_exit_penalties has ${penaltyRows} rows after feeder progress push, expected 0`)
+    const ledgerRowsBeforeCompletion = countRows(db!, `SELECT COUNT(*) AS count FROM tournament_economy_ledger WHERE tournament_id = ? AND entry_type = 'prize_payout';`, tournamentId)
+    assert(ledgerRowsBeforeCompletion === 0, `unexpected prize_payout ledger rows from a mid-match progress push: ${ledgerRowsBeforeCompletion}`)
+  })
+
+  try { feederProgressCoordinator?.close() } catch {}
+
   await check('remaining quarterfinal matches complete normally', async () => {
     await playMatchToCompletion(quarterfinals[0]!.matchId)
     await playMatchToCompletion(qf2.matchId)
@@ -437,6 +550,13 @@ try {
     await playMatchToCompletion(quarterfinals[3]!.matchId)
     const refreshed = getMatches(db!, tournamentId).filter((m) => m.roundType === 'quarterfinal')
     assert(refreshed.every((m) => m.status === 'completed'), 'not all quarterfinals completed')
+  })
+
+  // ── [8] Final completion push остава с крайния резултат (winnerTeamId + final score) ──
+  await check('feeder MATCH COMPLETION push (different from progress) still carries the final result', () => {
+    assert(feederNotifications.length > 0, 'no feeder completion notifications recorded yet')
+    const last = feederNotifications[feederNotifications.length - 1]! as { update: { status?: string; winnerTeamId?: string } }
+    assert('winnerTeamId' in (last.update as object), 'completion update missing winnerTeamId (progress updates never carry this field)')
   })
 
   // ── [9] Победителят вижда waiting-for-opponent state (пресъздадено чрез attendance snapshot) ──

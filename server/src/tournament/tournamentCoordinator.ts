@@ -21,6 +21,7 @@ import { createBotParticipant } from '../core/createBotParticipant.js'
 import { removeParticipantFromRoom } from '../core/removeParticipantFromRoom.js'
 import { seatParticipantInRoom } from '../core/seatParticipantInRoom.js'
 import { initializeRoomAuthoritativeGameState } from '../game/initializeRoomAuthoritativeGameState.js'
+import type { ServerAuthoritativeGameState } from '../game/serverGameTypes.js'
 import { dbDateToUtc } from '../db/dbDate.js'
 import type {
   TournamentId,
@@ -81,6 +82,23 @@ export type TournamentFeederMatchUpdate = {
   finalScoreTeamB: number | null
 }
 
+// Live progress update, докато feeder мачът все още се играе (§2 в task
+// spec-а) — за разлика от TournamentFeederMatchUpdate (изпраща се веднъж,
+// при completion, с winnerTeamId), тук status е винаги 'in_progress' и
+// НЕ носи winnerTeamId. Payload-ът е нарочно минимален (само необходимото
+// за "Отбор H срещу Отбор I / 96:74 / Мачът е в ход" екрана) — teamAId/
+// teamBId се подават вместо display labels, защото label-ите (A-P букви)
+// вече се извеждат на клиента от tournament detail данните.
+export type TournamentFeederProgressUpdate = {
+  tournamentId: TournamentId
+  matchId: TournamentMatchId
+  teamAId: TournamentTeamId
+  teamBId: TournamentTeamId
+  scoreTeamA: number
+  scoreTeamB: number
+  status: 'in_progress'
+}
+
 export type TournamentBotTakeoverResult =
   | { ok: true; room: ServerRoom; seat: Seat }
   | { ok: false; reason: 'not_available' | 'invalid_profile' | 'match_completed' | 'seat_not_replaceable' }
@@ -90,6 +108,14 @@ export type TournamentCoordinator = {
   stop: () => void
   tickNow: () => void
   onTournamentRoomCompleted: (room: ServerRoom) => void
+  // Извиква се от произволен "authoritative room state advance" hook на
+  // сървъра (виж commitServerRoomWithSnapshot в index.ts — единствената
+  // истински универсална точка, през която минават и worker-tick и direct
+  // submit_play_card commits) — coordinator-ът сам решава дали score-ът
+  // реално се е променил (in-memory last-known map по matchId) и дали
+  // изобщо има чакащи участници, преди да push-не нещо. No-op за
+  // нетурнирни стаи или ако score-ът не се е променил след последния push.
+  notifyFeederScoreProgress: (room: ServerRoom) => void
   tryTakeoverNoShowBot: (input: {
     room: ServerRoom
     profileId: ProfileId
@@ -121,6 +147,7 @@ type TournamentCoordinatorDeps = {
   // все още активни участници в турнира; клиентът сам решава дали match-ът
   // е този, който гледа в момента (сравнява по matchId).
   notifyFeederMatchCompleted: (profileIds: ProfileId[], update: TournamentFeederMatchUpdate) => void
+  notifyFeederScoreProgress: (profileIds: ProfileId[], update: TournamentFeederProgressUpdate) => void
   isConnectionAttached: (input: {
     profileId: ProfileId
     connectionId: ConnectionId
@@ -688,6 +715,14 @@ export async function createTournamentCoordinator(
   let tournamentsSettledLastTick = 0
   let settlementPendingLastTick = false
   let recoveryActionsLastTick = 0
+  // Последно изпратен live score per match_id — само in-memory (не се
+  // persist-ва, виж §2 в task spec-а: "DB не е задължително да persist-ва
+  // всеки междинен резултат"). Reset-ва се естествено при server restart;
+  // след restart чакащите клиенти получават текущия резултат чрез detail
+  // fetch (final_score_* остава null докато мачът тече — snapshot-ът пита
+  // самата активна room state directно, виж createTournamentDetailSnapshot
+  // reconnect flow-a на клиента), не чрез този push механизъм.
+  const lastNotifiedFeederScoreByMatchId = new Map<string, string>()
 
   function appendEvent(
     tournamentId: TournamentId,
@@ -1474,8 +1509,44 @@ export async function createTournamentCoordinator(
     }
   }
 
+  // Live feeder progress (§2 в task spec-а) — извиква се от произволен room
+  // state commit hook на сървъра (виж коментара при notifyFeederScoreProgress
+  // в TournamentCoordinator интерфейса по-горе). No-op fast paths за
+  // нетурнирни стаи, все още неexistиращ mach row, приключен мач (final
+  // completion push-ът вече покрива този случай, виж onTournamentRoomCompleted)
+  // и — най-важно — когато score-ът не се е променил спрямо последния push,
+  // за да НЕ праща update при всяка карта (само authoritative смяна на
+  // score.match, което на практика значи "завършено раздаване").
+  function notifyFeederScoreProgress(room: ServerRoom): void {
+    if (!isTournamentRoom(room) || !isRealGameStarted(room)) return
+    const authState = room.game.authoritativeState as ServerAuthoritativeGameState
+    if (authState.matchEnded !== null) return
+    const scoreTeamA = authState.score.match.teamA
+    const scoreTeamB = authState.score.match.teamB
+    const signature = `${scoreTeamA}:${scoreTeamB}`
+    if (lastNotifiedFeederScoreByMatchId.get(room.id) === signature) return
+
+    const match = selectMatchByRoomStatement.get(room.id) as MatchRow | undefined
+    if (match === undefined || match.status === 'completed') return
+
+    lastNotifiedFeederScoreByMatchId.set(room.id, signature)
+    const profileIds = (selectConfirmedProfileIdsForTournamentStatement.all(match.tournament_id) as Array<{ profile_id: ProfileId }>)
+      .map((row) => row.profile_id)
+    if (profileIds.length === 0) return
+    deps.notifyFeederScoreProgress(profileIds, {
+      tournamentId: match.tournament_id,
+      matchId: match.match_id,
+      teamAId: match.team_a_id,
+      teamBId: match.team_b_id,
+      scoreTeamA,
+      scoreTeamB,
+      status: 'in_progress',
+    })
+  }
+
   function onTournamentRoomCompleted(room: ServerRoom): void {
     if (!isTournamentRoom(room)) return
+    lastNotifiedFeederScoreByMatchId.delete(room.id)
     const authState = room.game.authoritativeState
     if (authState === null || 'kind' in authState || authState.matchEnded === null) {
       return
@@ -1642,6 +1713,7 @@ export async function createTournamentCoordinator(
       runTick()
     },
     onTournamentRoomCompleted,
+    notifyFeederScoreProgress,
     tryTakeoverNoShowBot,
     getAssignmentForProfile,
     getHealth(): TournamentCoordinatorHealth {

@@ -105,6 +105,15 @@ export type TournamentMatchDto = {
   }
   finalScoreTeamA: number | null
   finalScoreTeamB: number | null
+  // Текущ (не-финален) резултат на мач в статус 'in_progress', извлечен
+  // директно от активния room authoritative state при заявката (виж §2 в
+  // task spec-а — "DB не е задължително да persist-ва всеки междинен
+  // резултат"). null докато мачът не е стартирал или вече е завършил
+  // (тогава важи finalScoreTeamA/B). Служи за reconnect recovery: клиент,
+  // който презареди detail екрана, вижда текущия резултат веднага, без да
+  // чака следващ WS push.
+  liveScoreTeamA: number | null
+  liveScoreTeamB: number | null
   progressLabel: string
   startedAt: string | null
   completedAt: string | null
@@ -356,12 +365,16 @@ export function toTournamentDetailDto(input: ToTournamentSummaryDtoInput): Tourn
 export function buildTournamentRoundDtos(input: {
   rounds: TournamentRoundRecord[]
   matches: TournamentMatchRecord[]
+  getLiveScoreForRoom?: (roomId: string) => { teamA: number; teamB: number } | null
 }): TournamentRoundDto[] {
   const now = Date.now()
   return input.rounds.map((round) => {
     const matches = input.matches
       .filter((match) => match.roundId === round.roundId)
       .map((match) => {
+        const liveScore = match.status === 'in_progress' && match.roomId !== null
+          ? input.getLiveScoreForRoom?.(match.roomId) ?? null
+          : null
         const deadlineMs = match.attendanceDeadlineAt !== null
           ? Date.parse(match.attendanceDeadlineAt)
           : null
@@ -411,6 +424,8 @@ export function buildTournamentRoundDtos(input: {
           },
           finalScoreTeamA: match.finalScoreTeamA,
           finalScoreTeamB: match.finalScoreTeamB,
+          liveScoreTeamA: liveScore?.teamA ?? null,
+          liveScoreTeamB: liveScore?.teamB ?? null,
           progressLabel,
           startedAt: match.startedAt,
           completedAt: match.completedAt,

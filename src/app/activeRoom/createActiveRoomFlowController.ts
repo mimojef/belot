@@ -265,8 +265,8 @@ export function createActiveRoomFlowController(
         label: `${roundLabel} — Мач ${round.matches.indexOf(sibling) + 1}`,
         matchId: sibling.matchId,
         status: sibling.status === 'completed' ? 'completed' : 'in_progress',
-        scoreA: sibling.finalScoreTeamA ?? null,
-        scoreB: sibling.finalScoreTeamB ?? null,
+        scoreA: sibling.finalScoreTeamA ?? sibling.liveScoreTeamA ?? null,
+        scoreB: sibling.finalScoreTeamB ?? sibling.liveScoreTeamB ?? null,
       }
     }
     return null
@@ -2455,6 +2455,7 @@ export function createActiveRoomFlowController(
             bidBubbles: isShowingNextRoundPause ? bidBubblesForRender : null,
             emojiBubbles: getEmojiBubblesForRender(),
             phraseBubbles: getPhraseBubblesForRender(),
+            tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
           })
           const cuttingRenderSelectionKey = cuttingAnimation.activeSelectionKey !== null
             ? `${cuttingAnimation.activeSelectionKey}|scale:${stageScale.toFixed(3)}`
@@ -2545,6 +2546,7 @@ export function createActiveRoomFlowController(
         bidBubbles: isShowingNextRoundPause ? bidBubblesForRender : null,
         emojiBubbles: getEmojiBubblesForRender(),
         phraseBubbles: getPhraseBubblesForRender(),
+        tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
       }))
 
       if (cutAnimationForRender !== null) {
@@ -2739,6 +2741,7 @@ export function createActiveRoomFlowController(
         bidBubbles: getBidBubblesForRender(),
         emojiBubbles: getEmojiBubblesForRender(),
         phraseBubbles: getPhraseBubblesForRender(),
+        tournamentBotReplacements: activeRoomState!.tournamentBotReplacements,
       })
 
       if (
@@ -2836,6 +2839,7 @@ export function createActiveRoomFlowController(
         bidBubbles: getBidBubblesForRender(),
         emojiBubbles: getEmojiBubblesForRender(),
         phraseBubbles: getPhraseBubblesForRender(),
+        tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
       }))
 
       if (isUsingFirstThreeOverlay && dealingAnimation.activePhaseKey !== null) {
@@ -3059,6 +3063,7 @@ export function createActiveRoomFlowController(
         bidBubbles,
         emojiBubbles: getEmojiBubblesForRender(),
         phraseBubbles: getPhraseBubblesForRender(),
+        tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
       }))
 
       // Wire bid popup buttons
@@ -3126,7 +3131,9 @@ export function createActiveRoomFlowController(
       const feederStatusText = tournamentRoundResultFeederStatus === 'completed'
         ? `${tournamentRoundResultFeederScoreA ?? 0} : ${tournamentRoundResultFeederScoreB ?? 0} — завършен`
         : tournamentRoundResultFeederStatus === 'in_progress'
-          ? 'Мачът е в ход'
+          ? tournamentRoundResultFeederScoreA !== null && tournamentRoundResultFeederScoreB !== null
+            ? `${tournamentRoundResultFeederScoreA} : ${tournamentRoundResultFeederScoreB} — мачът е в ход`
+            : 'Мачът е в ход'
           : 'Изчаква се...'
 
       options.root.innerHTML = `
@@ -3304,6 +3311,7 @@ export function createActiveRoomFlowController(
         syncSeatPanels,
         emojiBubbles: getEmojiBubblesForRender(),
         phraseBubbles: getPhraseBubblesForRender(),
+        tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
         cache: playingCache,
       } satisfies RenderPlayingScreenOptions)
     } else if (activeRoomState.game !== null) {
@@ -3951,6 +3959,16 @@ export function createActiveRoomFlowController(
         tournamentRoundResultFeederStatus = 'completed'
         tournamentRoundResultFeederScoreA = message.finalScoreTeamA
         tournamentRoundResultFeederScoreB = message.finalScoreTeamB
+        renderActiveRoomScreen()
+      }
+      return false
+    }
+
+    if (message.type === 'tournament_feeder_score_progress') {
+      if (tournamentRoundResultFeederMatchId === message.matchId) {
+        tournamentRoundResultFeederStatus = 'in_progress'
+        tournamentRoundResultFeederScoreA = message.scoreTeamA
+        tournamentRoundResultFeederScoreB = message.scoreTeamB
         renderActiveRoomScreen()
       }
       return false
