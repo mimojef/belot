@@ -239,6 +239,7 @@ function toTournamentCreatorDto(
 }
 
 const ACTIVE_VIEWER_ENTRY_STATUSES: TournamentEntryStatus[] = ['confirmed', 'finalist']
+const REJOINABLE_VIEWER_ENTRY_STATUSES: TournamentEntryStatus[] = ['refunded', 'withdrawn']
 
 export type ToTournamentSummaryDtoInput = {
   tournament: TournamentRecord
@@ -260,6 +261,8 @@ function computeViewerParticipation(input: ToTournamentSummaryDtoInput): Tournam
   const reservedPlacesCount = input.reservedPlacesCount ?? 0
   const occupiedPlacesCount = input.confirmedEntriesCount + reservedPlacesCount
   const isFull = occupiedPlacesCount >= tournament.playerCapacity
+  const canRejoin =
+    viewerEntryStatus === null || REJOINABLE_VIEWER_ENTRY_STATUSES.includes(viewerEntryStatus)
 
   return {
     isParticipant,
@@ -270,11 +273,12 @@ function computeViewerParticipation(input: ToTournamentSummaryDtoInput): Tournam
       tournament.status === 'open' &&
       !isParticipant &&
       !isFull &&
-      viewerEntryStatus === null,
+      canRejoin,
     canInvitePartner:
       viewerProfileId !== null &&
       tournament.status === 'open' &&
-      occupiedPlacesCount < tournament.playerCapacity,
+      occupiedPlacesCount < tournament.playerCapacity &&
+      (isParticipant || canRejoin),
     canLeave: isParticipant && tournament.status === 'open',
     canCancel: isMine && tournament.status === 'open',
     myPlacement:

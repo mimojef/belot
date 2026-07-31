@@ -441,6 +441,30 @@ function entryFeeRefundKey(tournamentId: TournamentId, profileId: ProfileId): st
   return `tournament:${tournamentId}:profile:${profileId}:entry-fee-refund`
 }
 
+function entryFeeAttemptKey(baseKey: string, attempt: number): string {
+  return attempt <= 1 ? baseKey : `${baseKey}:attempt-${attempt}`
+}
+
+function entryFeeDebitKeyForAttempt(
+  tournamentId: TournamentId,
+  profileId: ProfileId,
+  attempt: number,
+): string {
+  return entryFeeAttemptKey(entryFeeDebitKey(tournamentId, profileId), attempt)
+}
+
+function entryFeeRefundKeyForAttempt(
+  tournamentId: TournamentId,
+  profileId: ProfileId,
+  attempt: number,
+): string {
+  return entryFeeAttemptKey(entryFeeRefundKey(tournamentId, profileId), attempt)
+}
+
+function isRejoinableEntryStatus(status: string): boolean {
+  return status === 'refunded' || status === 'withdrawn'
+}
+
 function systemFeeKey(tournamentId: TournamentId): string {
   return `tournament:${tournamentId}:system-fee:${TOURNAMENT_FINANCIAL_RULES_VERSION}`
 }
@@ -575,9 +599,15 @@ export async function createTournamentEconomyStore(
     SELECT te.entry_id, te.profile_id, te.team_id, tel.amount
     FROM tournament_entries te
     LEFT JOIN tournament_economy_ledger tel
-      ON tel.tournament_id = te.tournament_id
-     AND tel.profile_id = te.profile_id
-     AND tel.entry_type = 'entry_fee_debit'
+      ON tel.ledger_id = (
+        SELECT latest_tel.ledger_id
+        FROM tournament_economy_ledger latest_tel
+        WHERE latest_tel.tournament_id = te.tournament_id
+          AND latest_tel.profile_id = te.profile_id
+          AND latest_tel.entry_type = 'entry_fee_debit'
+        ORDER BY latest_tel.created_at DESC, latest_tel.ledger_id DESC
+        LIMIT 1
+      )
     WHERE te.tournament_id = ? AND te.status = 'confirmed'
     ORDER BY te.created_at ASC;
   `)
@@ -781,6 +811,13 @@ export async function createTournamentEconomyStore(
     WHERE entry_id = ? AND status = 'confirmed';
   `)
 
+  const reactivateEntryAsPartnerInviterStatement = database.prepare(`
+    UPDATE tournament_entries
+    SET team_id = ?, joined_as = 'partner_inviter', status = 'confirmed',
+        withdrawn_at = NULL, refunded_at = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE entry_id = ? AND status IN ('refunded', 'withdrawn');
+  `)
+
   const updateEntryToSoloStatement = database.prepare(`
     UPDATE tournament_entries
     SET team_id = NULL, joined_as = 'solo', updated_at = CURRENT_TIMESTAMP
@@ -791,6 +828,13 @@ export async function createTournamentEconomyStore(
     UPDATE tournament_entries
     SET team_id = ?, joined_as = 'solo', updated_at = CURRENT_TIMESTAMP
     WHERE entry_id = ? AND tournament_id = ? AND status = 'confirmed';
+  `)
+
+  const reactivateEntryAsPartnerInviteeStatement = database.prepare(`
+    UPDATE tournament_entries
+    SET team_id = ?, joined_as = 'partner_invitee', status = 'confirmed',
+        withdrawn_at = NULL, refunded_at = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE entry_id = ? AND tournament_id = ? AND status IN ('refunded', 'withdrawn');
   `)
 
   const insertPartnerInviteeEntryStatement = database.prepare(`
@@ -842,6 +886,13 @@ export async function createTournamentEconomyStore(
     INSERT INTO tournament_entries (
       entry_id, tournament_id, profile_id, team_id, joined_as, status
     ) VALUES (?, ?, ?, NULL, 'solo', 'confirmed');
+  `)
+
+  const reactivateEntryAsSoloStatement = database.prepare(`
+    UPDATE tournament_entries
+    SET team_id = NULL, joined_as = 'solo', status = 'confirmed',
+        withdrawn_at = NULL, refunded_at = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE entry_id = ? AND status IN ('refunded', 'withdrawn');
   `)
 
   const updateEntryToRefundedStatement = database.prepare(`
@@ -905,6 +956,14 @@ export async function createTournamentEconomyStore(
     FROM tournament_economy_ledger
     WHERE idempotency_key = ?
     LIMIT 1;
+  `)
+
+  const countEntryFeeLedgerByTypeStatement = database.prepare(`
+    SELECT COUNT(*) as count
+    FROM tournament_economy_ledger
+    WHERE tournament_id = ?
+      AND profile_id = ?
+      AND entry_type = ?;
   `)
 
   const updateTournamentStartedStatement = database.prepare(`
@@ -982,6 +1041,42 @@ export async function createTournamentEconomyStore(
   function getLedgerByKey(key: string): { ledgerId: string; amount: number } | null {
     const row = selectLedgerByKeyStatement.get(key) as { ledger_id: string; amount: number } | undefined
     return row ? { ledgerId: row.ledger_id, amount: row.amount } : null
+  }
+
+  function countEntryFeeLedgerRows(
+    tournamentId: TournamentId,
+    profileId: ProfileId,
+    entryType: 'entry_fee_debit' | 'entry_fee_refund',
+  ): number {
+    return (countEntryFeeLedgerByTypeStatement.get(tournamentId, profileId, entryType) as {
+      count: number
+    }).count
+  }
+
+  function nextEntryFeeDebitAttempt(tournamentId: TournamentId, profileId: ProfileId): number {
+    return countEntryFeeLedgerRows(tournamentId, profileId, 'entry_fee_debit') + 1
+  }
+
+  function currentEntryFeeAttempt(tournamentId: TournamentId, profileId: ProfileId): number {
+    return Math.max(1, countEntryFeeLedgerRows(tournamentId, profileId, 'entry_fee_debit'))
+  }
+
+  function getCurrentEntryFeeDebitLedger(
+    tournamentId: TournamentId,
+    profileId: ProfileId,
+  ): { ledgerId: string; amount: number } | null {
+    return getLedgerByKey(
+      entryFeeDebitKeyForAttempt(tournamentId, profileId, currentEntryFeeAttempt(tournamentId, profileId)),
+    )
+  }
+
+  function getCurrentEntryFeeRefundLedger(
+    tournamentId: TournamentId,
+    profileId: ProfileId,
+  ): { ledgerId: string; amount: number } | null {
+    return getLedgerByKey(
+      entryFeeRefundKeyForAttempt(tournamentId, profileId, currentEntryFeeAttempt(tournamentId, profileId)),
+    )
   }
 
   function insertEvent(
@@ -1093,7 +1188,12 @@ export async function createTournamentEconomyStore(
       tournamentId,
       candidate.profile_id,
     ) as TournamentEntryRow | undefined
-    if (existingEntry !== undefined && existingEntry.status === 'confirmed') return 'already_in_tournament'
+    if (
+      existingEntry !== undefined &&
+      (existingEntry.status === 'confirmed' || !isRejoinableEntryStatus(existingEntry.status))
+    ) {
+      return 'already_in_tournament'
+    }
     const activeAccountEntry = selectActiveEntryForAccountStatement.get(
       candidate.profile_id,
     ) as ActiveAccountEntryRow | undefined
@@ -1586,9 +1686,13 @@ export async function createTournamentEconomyStore(
       let refundedEntries = 0
       let totalRefunded = 0
       for (const entry of confirmedEntries) {
-        const refundKey = entryFeeRefundKey(tournamentId, entry.profile_id)
+        const refundKey = entryFeeRefundKeyForAttempt(
+          tournamentId,
+          entry.profile_id,
+          currentEntryFeeAttempt(tournamentId, entry.profile_id),
+        )
         if (getLedgerByKey(refundKey) !== null) continue
-        const debitLedger = getLedgerByKey(entryFeeDebitKey(tournamentId, entry.profile_id))
+        const debitLedger = getCurrentEntryFeeDebitLedger(tournamentId, entry.profile_id)
         const refundAmount = debitLedger?.amount ?? tournament.entry_fee
         ensureWalletStatement.run(entry.profile_id)
         creditWalletStatement.run(refundAmount, entry.profile_id)
@@ -1825,16 +1929,26 @@ export async function createTournamentEconomyStore(
           tournamentId,
           inviterProfileId,
         ) as TournamentEntryRow | undefined
-        if (inviterEntry !== undefined && inviterEntry.status !== 'confirmed') {
+        if (
+          inviterEntry !== undefined &&
+          inviterEntry.status !== 'confirmed' &&
+          !isRejoinableEntryStatus(inviterEntry.status)
+        ) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'already_participant' }
         }
-        if (inviterEntry !== undefined && inviterEntry.team_id !== null) {
+        if (
+          inviterEntry !== undefined &&
+          inviterEntry.status === 'confirmed' &&
+          inviterEntry.team_id !== null
+        ) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'already_teamed' }
         }
 
-        const neededPlaces = inviterEntry === undefined ? 2 : 1
+        const hasConfirmedInviterEntry =
+          inviterEntry !== undefined && inviterEntry.status === 'confirmed'
+        const neededPlaces = hasConfirmedInviterEntry ? 1 : 2
         const capacity = Math.min(freshTournament.player_capacity, 8)
         if (getOccupiedPlaces(tournamentId) + neededPlaces > capacity) {
           database.exec('ROLLBACK;')
@@ -1842,7 +1956,7 @@ export async function createTournamentEconomyStore(
         }
 
         const isCreator = freshTournament.creator_profile_id === inviterProfileId
-        if (freshTournament.visibility === 'password' && !isCreator && inviterEntry === undefined) {
+        if (freshTournament.visibility === 'password' && !isCreator && !hasConfirmedInviterEntry) {
           const providedPassword = options.password ?? null
           if (
             providedPassword === null ||
@@ -1854,9 +1968,9 @@ export async function createTournamentEconomyStore(
           }
         }
 
-        const activeAccountEntry = inviterEntry === undefined
-          ? selectActiveEntryForAccountStatement.get(inviterProfileId) as ActiveAccountEntryRow | undefined
-          : undefined
+        const activeAccountEntry = hasConfirmedInviterEntry
+          ? undefined
+          : selectActiveEntryForAccountStatement.get(inviterProfileId) as ActiveAccountEntryRow | undefined
         if (activeAccountEntry !== undefined) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'already_participating_elsewhere' }
@@ -1865,8 +1979,9 @@ export async function createTournamentEconomyStore(
         const teamId = randomUUID()
         insertTeamStatement.run(teamId, tournamentId)
 
-        let entryId = inviterEntry?.entry_id ?? randomUUID()
-        if (inviterEntry === undefined) {
+        const entryId = inviterEntry?.entry_id ?? randomUUID()
+        if (!hasConfirmedInviterEntry) {
+          const debitAttempt = nextEntryFeeDebitAttempt(tournamentId, inviterProfileId)
           ensureWalletStatement.run(inviterProfileId)
           const debitResult = debitWalletStatement.run(
             freshTournament.entry_fee,
@@ -1877,14 +1992,25 @@ export async function createTournamentEconomyStore(
             database.exec('ROLLBACK;')
             return { ok: false, reason: 'insufficient_funds' }
           }
-          database.prepare(`
-            INSERT INTO tournament_entries (
-              entry_id, tournament_id, profile_id, team_id, joined_as, status
-            ) VALUES (?, ?, ?, ?, 'partner_inviter', 'confirmed');
-          `).run(entryId, tournamentId, inviterProfileId, teamId)
+          if (inviterEntry === undefined) {
+            database.prepare(`
+              INSERT INTO tournament_entries (
+                entry_id, tournament_id, profile_id, team_id, joined_as, status
+              ) VALUES (?, ?, ?, ?, 'partner_inviter', 'confirmed');
+            `).run(entryId, tournamentId, inviterProfileId, teamId)
+          } else {
+            const updateResult = reactivateEntryAsPartnerInviterStatement.run(
+              teamId,
+              inviterEntry.entry_id,
+            ) as { changes?: number }
+            if ((updateResult.changes ?? 0) === 0) {
+              database.exec('ROLLBACK;')
+              return { ok: false, reason: 'already_participant' }
+            }
+          }
           insertLedgerStatement.run(
             randomUUID(),
-            entryFeeDebitKey(tournamentId, inviterProfileId),
+            entryFeeDebitKeyForAttempt(tournamentId, inviterProfileId, debitAttempt),
             tournamentId,
             inviterProfileId,
             'entry_fee_debit' satisfies TournamentLedgerEntryType,
@@ -1997,6 +2123,11 @@ export async function createTournamentEconomyStore(
           database.exec('ROLLBACK;')
           return inviteeValidation
         }
+        const inviteeEntry = selectEntryByTournamentAndProfileStatement.get(
+          tournamentId,
+          inviteeProfileId,
+        ) as TournamentEntryRow | undefined
+        const debitAttempt = nextEntryFeeDebitAttempt(tournamentId, inviteeProfileId)
         ensureWalletStatement.run(inviteeProfileId)
         const debitResult = debitWalletStatement.run(
           freshTournament.entry_fee,
@@ -2007,11 +2138,26 @@ export async function createTournamentEconomyStore(
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'insufficient_funds' }
         }
-        const entryId = randomUUID()
-        insertPartnerInviteeEntryStatement.run(entryId, tournamentId, inviteeProfileId, inviteRow.team_id)
+        const entryId = inviteeEntry?.entry_id ?? randomUUID()
+        if (inviteeEntry === undefined) {
+          insertPartnerInviteeEntryStatement.run(entryId, tournamentId, inviteeProfileId, inviteRow.team_id)
+        } else if (isRejoinableEntryStatus(inviteeEntry.status)) {
+          const updateResult = reactivateEntryAsPartnerInviteeStatement.run(
+            inviteRow.team_id,
+            inviteeEntry.entry_id,
+            tournamentId,
+          ) as { changes?: number }
+          if ((updateResult.changes ?? 0) === 0) {
+            database.exec('ROLLBACK;')
+            return { ok: false, reason: 'already_participant' }
+          }
+        } else {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'already_participant' }
+        }
         insertLedgerStatement.run(
           randomUUID(),
-          entryFeeDebitKey(tournamentId, inviteeProfileId),
+          entryFeeDebitKeyForAttempt(tournamentId, inviteeProfileId, debitAttempt),
           tournamentId,
           inviteeProfileId,
           'entry_fee_debit' satisfies TournamentLedgerEntryType,
@@ -2152,8 +2298,6 @@ export async function createTournamentEconomyStore(
         return { ok: false, reason: 'tournament_not_found' }
       }
 
-      const debitKey = entryFeeDebitKey(tournamentId, profileId)
-
       // Идемпотентност: ако вече има confirmed entry + debit ledger, връщаме
       // success без нов debit (retry-safe за клиентски network грешки).
       const existingEntryRow = selectEntryByTournamentAndProfileStatement.get(
@@ -2163,7 +2307,7 @@ export async function createTournamentEconomyStore(
 
       if (existingEntryRow !== undefined) {
         if (existingEntryRow.status === 'confirmed') {
-          const ledger = getLedgerByKey(debitKey)
+          const ledger = getCurrentEntryFeeDebitLedger(tournamentId, profileId)
           if (ledger !== null) {
             return {
               ok: true,
@@ -2174,9 +2318,10 @@ export async function createTournamentEconomyStore(
             }
           }
         }
-        // refunded/withdrawn/eliminated/finalist/champion — терминален
-        // резултат, не позволяваме повторно записване във V1.
-        return { ok: false, reason: 'rejoin_not_allowed' }
+        // Placement statuses stay terminal; refunded/withdrawn entries may start a new paid attempt.
+        if (!isRejoinableEntryStatus(existingEntryRow.status)) {
+          return { ok: false, reason: 'rejoin_not_allowed' }
+        }
       }
 
       let result: JoinTournamentSoloResult
@@ -2219,13 +2364,13 @@ export async function createTournamentEconomyStore(
           profileId,
         ) as TournamentEntryRow | undefined
         if (existingInTx !== undefined) {
-          database.exec('ROLLBACK;')
           if (existingInTx.status === 'confirmed') {
             // Другият паралелен join вече е commit-нал успешно — идемпотентен
             // success, не грешка (виж продуктово изискване: retry след
             // мрежов проблем не трябва да получи 409).
-            const ledger = getLedgerByKey(debitKey)
+            const ledger = getCurrentEntryFeeDebitLedger(tournamentId, profileId)
             if (ledger !== null) {
+              database.exec('ROLLBACK;')
               return {
                 ok: true,
                 alreadyJoined: true,
@@ -2235,7 +2380,10 @@ export async function createTournamentEconomyStore(
               }
             }
           }
-          return { ok: false, reason: 'rejoin_not_allowed' }
+          if (!isRejoinableEntryStatus(existingInTx.status)) {
+            database.exec('ROLLBACK;')
+            return { ok: false, reason: 'rejoin_not_allowed' }
+          }
         }
 
         const activeAccountEntry = selectActiveEntryForAccountStatement.get(
@@ -2253,6 +2401,7 @@ export async function createTournamentEconomyStore(
         }
 
         const entryFee = freshTournament.entry_fee
+        const debitAttempt = nextEntryFeeDebitAttempt(tournamentId, profileId)
 
         ensureWalletStatement.run(profileId)
         const debitResult = debitWalletStatement.run(entryFee, profileId, entryFee) as {
@@ -2264,21 +2413,28 @@ export async function createTournamentEconomyStore(
           return { ok: false, reason: 'insufficient_funds' }
         }
 
-        const entryId = randomUUID()
-        try {
-          insertEntryStatement.run(entryId, tournamentId, profileId)
-        } catch {
-          // UNIQUE(tournament_id, profile_id) или
-          // idx_tournament_entries_one_active_per_profile constraint violation
-          // — друг активен entry (в този или друг турнир) вече съществува за
-          // profile-a; race condition, hванат от partial UNIQUE index-а.
-          database.exec('ROLLBACK;')
-          return { ok: false, reason: 'already_participating_elsewhere' }
+        const entryId = existingInTx?.entry_id ?? randomUUID()
+        if (existingInTx === undefined) {
+          try {
+            insertEntryStatement.run(entryId, tournamentId, profileId)
+          } catch {
+            // UNIQUE(tournament_id, profile_id) or active-profile partial index.
+            database.exec('ROLLBACK;')
+            return { ok: false, reason: 'already_participating_elsewhere' }
+          }
+        } else {
+          const updateResult = reactivateEntryAsSoloStatement.run(existingInTx.entry_id) as {
+            changes?: number
+          }
+          if ((updateResult.changes ?? 0) === 0) {
+            database.exec('ROLLBACK;')
+            return { ok: false, reason: 'rejoin_not_allowed' }
+          }
         }
 
         insertLedgerStatement.run(
           randomUUID(),
-          debitKey,
+          entryFeeDebitKeyForAttempt(tournamentId, profileId, debitAttempt),
           tournamentId,
           profileId,
           'entry_fee_debit' satisfies TournamentLedgerEntryType,
@@ -2327,10 +2483,14 @@ export async function createTournamentEconomyStore(
         return { ok: false, reason: 'entry_not_found' }
       }
 
-      const refundKey = entryFeeRefundKey(tournamentId, profileId)
+      const refundKey = entryFeeRefundKeyForAttempt(
+        tournamentId,
+        profileId,
+        currentEntryFeeAttempt(tournamentId, profileId),
+      )
 
       if (entryRow.status === 'refunded') {
-        const ledger = getLedgerByKey(refundKey)
+        const ledger = getCurrentEntryFeeRefundLedger(tournamentId, profileId)
         if (ledger !== null) {
           const tournamentRow = selectTournamentByIdStatement.get(tournamentId) as TournamentRow
           return {
@@ -2366,7 +2526,7 @@ export async function createTournamentEconomyStore(
 
         if (freshEntry.status === 'refunded') {
           // Race: друг паралелен leave вече е приключил.
-          const ledger = getLedgerByKey(refundKey)
+          const ledger = getCurrentEntryFeeRefundLedger(tournamentId, profileId)
           database.exec('ROLLBACK;')
           return {
             ok: true,
@@ -2381,8 +2541,7 @@ export async function createTournamentEconomyStore(
           return { ok: false, reason: 'entry_not_confirmed' }
         }
 
-        const debitKey = entryFeeDebitKey(tournamentId, profileId)
-        const debitLedger = getLedgerByKey(debitKey)
+        const debitLedger = getCurrentEntryFeeDebitLedger(tournamentId, profileId)
         // Реалната платена сума идва от debit ledger-а, не от mutable
         // tournament.entryFee (защитава срещу бъдещи entryFee промени).
         const refundAmount = debitLedger?.amount ?? freshTournament.entry_fee
@@ -2525,14 +2684,17 @@ export async function createTournamentEconomyStore(
         let totalRefunded = 0
 
         for (const entry of confirmedEntries) {
-          const refundKey = entryFeeRefundKey(tournamentId, entry.profile_id)
+          const refundKey = entryFeeRefundKeyForAttempt(
+            tournamentId,
+            entry.profile_id,
+            currentEntryFeeAttempt(tournamentId, entry.profile_id),
+          )
 
           if (getLedgerByKey(refundKey) !== null) {
             continue // вече refund-нат (idempotent skip)
           }
 
-          const debitKey = entryFeeDebitKey(tournamentId, entry.profile_id)
-          const debitLedger = getLedgerByKey(debitKey)
+          const debitLedger = getCurrentEntryFeeDebitLedger(tournamentId, entry.profile_id)
           const refundAmount = debitLedger?.amount ?? tournamentRow.entry_fee
 
           ensureWalletStatement.run(entry.profile_id)

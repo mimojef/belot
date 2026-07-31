@@ -668,8 +668,8 @@ try {
     assert(leave1.status === 200, 'leave1 failed')
 
     const rejoin = await httpRequest(port, `/api/tournaments/${t.tournamentId}/join`, 'POST', participant, {})
-    assert(rejoin.status === 409, `rejoin status=${rejoin.status}`)
-    assert(rejoin.body.reason === 'rejoin_not_allowed', `reason=${rejoin.body.reason}`)
+    assert(rejoin.status === 200, `rejoin status=${rejoin.status}, body=${JSON.stringify(rejoin.body)}`)
+    assert(rejoin.body.alreadyJoined === false, 'rejoin must be a new paid join operation')
   })
 
   // ═══ F. Password protection ═════════════════════════════════════════════
