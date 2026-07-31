@@ -303,6 +303,98 @@ check('start card uses box-sizing safe layout (no fixed desktop-only width)', !/
 check('detail section keeps max-width + margin:0 auto (unchanged by this feature)', tournamentsScreenSource.includes('max-width:720px;margin:0 auto'))
 check('back button text can wrap safely on narrow viewports (no white-space:nowrap forcing overflow)', !/data-tournament-detail-back="1"[\s\S]{0,300}white-space:nowrap/.test(tournamentsScreenSource))
 
+// ── G. Public bracket section removed (виж fix(tournaments): remove public bracket section) ──
+
+const teamAId = 'aaaaaaaa-1111-4111-8111-111111111111'
+const teamBId = 'bbbbbbbb-2222-4222-8222-222222222222'
+const teamCId = 'cccccccc-3333-4333-8333-333333333333'
+const teamDId = 'dddddddd-4444-4444-8444-444444444444'
+
+const bracketRoundsFixture: TournamentDetailSnapshot['rounds'] = [
+  {
+    roundId: 'round-sf',
+    roundType: 'semifinal',
+    roundIndex: 1,
+    matches: [
+      {
+        matchId: 'match-sf1', roundId: 'round-sf', roomId: null,
+        teamAId, teamBId, status: 'completed', winnerTeamId: teamAId,
+        resultKind: 'walkover', roomReady: false,
+      },
+    ],
+  },
+  {
+    roundId: 'round-sf2',
+    roundType: 'semifinal',
+    roundIndex: 2,
+    matches: [
+      {
+        matchId: 'match-sf2', roundId: 'round-sf2', roomId: 'room-sf2',
+        teamAId: teamCId, teamBId: teamDId, status: 'in_progress', winnerTeamId: null,
+        resultKind: 'played', roomReady: true,
+      },
+    ],
+  },
+  {
+    roundId: 'round-final',
+    roundType: 'final',
+    roundIndex: 1,
+    matches: [
+      {
+        matchId: 'match-final', roundId: 'round-final', roomId: null,
+        teamAId, teamBId: teamCId, status: 'awaiting_players', winnerTeamId: null,
+        resultKind: null, roomReady: false,
+      },
+    ],
+  },
+]
+
+const teamsFixture: TournamentDetailSnapshot['teams'] = [
+  { teamId: teamAId, status: 'complete', members: [
+    { profileId: 'p-a1', displayName: 'Играч А1', avatarUrl: null, joinedAt: '2026-07-31T10:00:00.000Z', joinedAs: 'solo' },
+    { profileId: 'p-a2', displayName: 'Играч А2', avatarUrl: null, joinedAt: '2026-07-31T10:00:00.000Z', joinedAs: 'partner_invitee' },
+  ] },
+  { teamId: teamBId, status: 'complete', members: [
+    { profileId: 'p-b1', displayName: 'Играч Б1', avatarUrl: null, joinedAt: '2026-07-31T10:00:00.000Z', joinedAs: 'solo' },
+  ] },
+]
+
+const bracketHtml = htmlFor(detail({ rounds: bracketRoundsFixture, teams: teamsFixture }))
+
+check('public detail page has no "Турнирна схема" heading', !bracketHtml.includes('Турнирна схема'))
+check('public detail page renders no "Полуфинал N" bracket round rows', !/Полуфинал\s*\d/.test(bracketHtml))
+check('public detail page renders no bare bracket "Финал" round row (open, non-championed tournament: the separate final-summary block does not render either, so any ">Финал<" here would only come from the removed bracket)', (bracketHtml.match(/>Финал</g) ?? []).length === 0)
+check('public detail page does not leak team A UUID prefix', !bracketHtml.includes(teamAId.slice(0, 8)))
+check('public detail page does not leak team C UUID prefix', !bracketHtml.includes(teamCId.slice(0, 8)))
+check('public detail page does not show "Служебна победа" (walkover result label)', !bracketHtml.includes('Служебна победа'))
+check('public detail page does not show "Нормално изигран" (played result label)', !bracketHtml.includes('Нормално изигран'))
+check('teams section still renders team members even with rounds data present', bracketHtml.includes('Играч А1') && bracketHtml.includes('Играч Б1'))
+check('teams section heading "Отбори" still present', bracketHtml.includes('Отбори'))
+
+const bracketWithActionsHtml = htmlFor(detail({
+  rounds: bracketRoundsFixture,
+  teams: teamsFixture,
+  viewer: { ...baseSummary().viewer, isParticipant: false, canJoinSolo: true, canInvitePartner: true },
+}))
+check('join action still renders with bracket/rounds data present', bracketWithActionsHtml.includes('data-tournament-join-open="1"'))
+check('partner-invite action still renders with bracket/rounds data present', bracketWithActionsHtml.includes('data-tournament-partner-picker-open="1"'))
+
+const activeMatchHtml = htmlFor(detail({
+  rounds: bracketRoundsFixture,
+  teams: teamsFixture,
+  myActiveMatch: {
+    tournamentId, tournamentName: 'Навигационен турнир', matchId: 'match-sf2', roomId: 'room-sf2',
+    roundType: 'semifinal', seat: 'bottom', teamId: teamCId, partnerProfileId: 'p-c2', opponentTeamId: teamDId,
+    reconnectToken: 'reconnect-token-xyz', deadlineKind: null, attendanceDeadlineAt: null, gameStartAt: null,
+  },
+}))
+check('"Влез в масата" (view-table) action still renders when a live match assignment exists', activeMatchHtml.includes('data-tournament-enter-active-match="1"') && activeMatchHtml.includes('Влез в масата'))
+
+check('backend DTO still declares rounds field on TournamentDetailSnapshot (client type unchanged)', (await readFile(join(projectRoot, 'src', 'app', 'network', 'createGameServerClient.ts'), 'utf8')).includes('rounds: TournamentRoundSnapshot[]'))
+
+const adminPanelSource = await readFile(join(projectRoot, 'src', 'app', 'adminTournaments', 'renderAdminTournamentsPanel.ts'), 'utf8')
+check('admin tournament bracket view is not removed', adminPanelSource.includes('t.bracket') && /Bracket/.test(adminPanelSource))
+
 if (failed > 0) {
   console.error(`\ncheckTournamentDetailNavigationAndStartInfo failed: ${failed} failed, ${passed} passed`)
   process.exit(1)

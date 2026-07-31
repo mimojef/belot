@@ -491,22 +491,6 @@ function renderTournamentCreatePopup(state: LobbyScreenState): string {
 
 // ─── Детайли на турнир ────────────────────────────────────────────────────
 
-function tournamentMatchStatusLabel(status: string, roomReady: boolean): string {
-  if (status === 'completed') return 'Завършен'
-  if (status === 'in_progress') return roomReady ? 'Играе се' : 'Чака играчите'
-  if (status === 'awaiting_players' || status === 'countdown') {
-    return roomReady ? 'Чака играчите' : 'Масата се подготвя'
-  }
-  return status
-}
-
-function tournamentResultKindLabel(resultKind: string | null): string {
-  if (resultKind === 'walkover') return 'Служебна победа'
-  if (resultKind === 'played_with_bots') return 'Играно с бот'
-  if (resultKind === 'played') return 'Нормално изигран'
-  return ''
-}
-
 // Огледало на server round ladder-а (round_of_16/quarterfinal/semifinal/final).
 function tournamentRoundTypeLabel(roundType: string): string {
   if (roundType === 'round_of_16') return 'Осминафинал'
@@ -584,29 +568,6 @@ function renderTournamentFillTimeoutCancelledCallout(t: TournamentDetailSnapshot
     <div style="border:1px solid rgba(248,113,113,0.36);background:rgba(127,29,29,0.16);border-radius:10px;padding:14px 16px;margin-bottom:20px;">
       <div style="font-size:13px;font-weight:800;color:#fca5a5;line-height:1.45;">Турнирът беше отменен, защото не се запълни в рамките на 1 час.</div>
       ${t.viewer.entryStatus === 'refunded' ? '<div style="margin-top:6px;font-size:12px;font-weight:700;color:rgba(255,255,255,0.68);">Входната ви такса беше възстановена.</div>' : ''}
-    </div>
-  `
-}
-
-function renderTournamentRounds(t: TournamentDetailSnapshot): string {
-  if (!t.rounds || t.rounds.length === 0) {
-    return '<div style="font-size:13px;color:rgba(255,255,255,0.4);font-style:italic;">Схемата ще се появи, след като турнирът стартира.</div>'
-  }
-  return `
-    <div style="display:grid;gap:10px;">
-      ${t.rounds.map((round) => `
-        <div style="border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:10px;background:rgba(255,255,255,0.03);">
-          <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:#d4a520;margin-bottom:8px;">${round.roundType === 'final' ? 'Финал' : `${tournamentRoundTypeLabel(round.roundType)} ${round.roundIndex}`}</div>
-          <div style="display:grid;gap:8px;">
-            ${round.matches.map((match) => `
-              <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;">
-                <div style="font-size:13px;font-weight:800;color:rgba(255,255,255,0.78);min-width:0;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(match.teamAId.slice(0, 8))} срещу ${escapeHtml(match.teamBId.slice(0, 8))}</div>
-                <div style="font-size:11px;font-weight:900;color:${match.status === 'completed' ? '#86efac' : '#fde68a'};white-space:nowrap;text-align:right;">${escapeHtml(match.progressLabel ?? tournamentMatchStatusLabel(match.status, match.roomReady))}${tournamentResultKindLabel(match.resultKind) ? `<div style="margin-top:3px;color:#cbd5e1;">${escapeHtml(tournamentResultKindLabel(match.resultKind))}</div>` : ''}</div>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      `).join('')}
     </div>
   `
 }
@@ -791,11 +752,6 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
       <div style="background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:16px;margin-bottom:14px;">
         <div style="font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:8px;">Отбори</div>
         ${renderTournamentTeamsList(t)}
-      </div>
-
-      <div style="background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:16px;margin-bottom:14px;">
-        <div style="font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:8px;">Турнирна схема</div>
-        ${renderTournamentRounds(t)}
       </div>
 
       ${renderTournamentPartnerPanel(state, t)}
