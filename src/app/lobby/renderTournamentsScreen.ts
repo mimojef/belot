@@ -564,6 +564,24 @@ function renderTournamentRounds(t: TournamentDetailSnapshot): string {
   `
 }
 
+const TOURNAMENT_TEAM_SLOT_LETTERS = ['A', 'B', 'C', 'D'] as const
+
+// Стабилна идентификация "Отбор A/B/C/D" — еднаква за двамата партньори, за
+// refresh и за външен viewer, защото се извлича от t.teams[], което сървърът
+// вече връща в стабилен, authoritative ред (ORDER BY created_at ASC, виж
+// selectTeamsForTournamentStatement в tournamentStore.ts) и никога не се
+// пренарежда по пътя (buildTeamDtos/buildTournamentDetailDto подават масива
+// directly). teamId се ползва само като Map key, не участва в подредбата —
+// няма зависимост от непредвидим JS object iteration ред.
+function buildTournamentTeamLabelMap(teams: TournamentDetailSnapshot['teams']): Map<string, string> {
+  const map = new Map<string, string>()
+  teams.forEach((team, index) => {
+    const letter = TOURNAMENT_TEAM_SLOT_LETTERS[index] ?? String(index + 1)
+    map.set(team.teamId, `Отбор ${letter}`)
+  })
+  return map
+}
+
 function renderTournamentTeamMemberChip(member: TournamentDetailSnapshot['teams'][number]['members'][number]): string {
   return `
     <div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);border-radius:8px;padding:7px 9px;min-width:0;">
@@ -573,10 +591,11 @@ function renderTournamentTeamMemberChip(member: TournamentDetailSnapshot['teams'
   `
 }
 
-function renderTournamentTeamCard(team: TournamentDetailSnapshot['teams'][number]): string {
+function renderTournamentTeamCard(team: TournamentDetailSnapshot['teams'][number], label: string): string {
   const isComplete = team.status !== 'forming'
   return `
     <div style="border:1px solid ${isComplete ? 'rgba(34,197,94,0.32)' : 'rgba(255,255,255,0.12)'};border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:8px;min-width:0;">
+      <span style="font-size:12px;font-weight:900;color:#d4a520;overflow-wrap:anywhere;">${escapeHtml(label)}</span>
       <div style="display:flex;flex-wrap:wrap;gap:8px;">
         ${team.members.map(renderTournamentTeamMemberChip).join('')}
       </div>
@@ -589,9 +608,10 @@ function renderTournamentTeamsList(t: TournamentDetailSnapshot): string {
   if (t.teams.length === 0) {
     return '<div style="font-size:13px;color:rgba(255,255,255,0.4);font-style:italic;">Все още няма сформирани отбори.</div>'
   }
+  const labelMap = buildTournamentTeamLabelMap(t.teams)
   return `
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;">
-      ${t.teams.map(renderTournamentTeamCard).join('')}
+      ${t.teams.map((team) => renderTournamentTeamCard(team, labelMap.get(team.teamId) ?? '')).join('')}
     </div>
   `
 }
@@ -816,10 +836,18 @@ function renderTournamentParticipationActions(state: LobbyScreenState, t: Tourna
       ? (t.myTeam?.members.find((member) => member.profileId !== state.profile.profileId) ?? null)
       : null
     const statusText = hasCompleteTeam ? 'Отборът ти е готов' : 'Записан си самостоятелно'
+    // Стабилният "Отбор A/B/C/D" label идва от същия mapping като публичната
+    // секция "ОТБОРИ" (виж buildTournamentTeamLabelMap) — еднакъв за двамата
+    // партньори и за refresh, само ако t.myTeam вече съществува.
+    const myTeamLabel = t.myTeam !== null
+      ? buildTournamentTeamLabelMap(t.teams).get(t.myTeam.teamId) ?? null
+      : null
     return `
       <div style="background:#0d0d0d;border:1px solid rgba(34,197,94,0.32);border-radius:10px;padding:16px;margin-bottom:14px;">
         ${errorBox(state.tournamentLeaveErrorText)}
         <div style="font-size:14px;font-weight:800;color:#22c55e;margin-bottom:10px;">✓ ${escapeHtml(statusText)}</div>
+        ${hasCompleteTeam && myTeamLabel ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:4px;">Ти участваш в ${escapeHtml(myTeamLabel)}.</div>` : ''}
+        ${!hasCompleteTeam && myTeamLabel ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:4px;">Сформираш ${escapeHtml(myTeamLabel)}.</div>` : ''}
         ${partner ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:10px;">Твоят партньор е ${escapeHtml(partner.displayName)}.</div>` : ''}
         ${t.viewer.canLeave ? `<button type="button" data-tournament-leave-open="1" style="
           height:38px;padding:0 18px;border-radius:8px;border:1px solid rgba(248,113,113,0.4);

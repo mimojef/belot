@@ -239,6 +239,18 @@ async function checkFrontendWiring(projectRoot: string): Promise<void> {
   // renderTournamentPartnerPanel — само personal status ("Отборът ти е готов")
   // и public "ОТБОРИ" секцията трябва да остават.
   assert(!renderSource.includes('>Отборът е готов<'), 'duplicate "Отборът е готов" ready-team panel still present in renderTournamentPartnerPanel')
+  // Стабилна "Отбор A/B/C/D" идентификация — виж §3/§4/§5 в task spec-а.
+  assert(renderSource.includes('buildTournamentTeamLabelMap'), 'stable team label helper missing')
+  assert(renderSource.includes('TOURNAMENT_TEAM_SLOT_LETTERS'), 'team label helper does not use a stable A/B/C/D slot list')
+  assert(renderSource.includes('Ти участваш в'), 'personal status is missing "Ти участваш в {Отбор X}" line')
+  assert(
+    /renderTournamentTeamsList[\s\S]{0,400}buildTournamentTeamLabelMap\(t\.teams\)/.test(renderSource),
+    'public teams section does not build labels from the same t.teams order',
+  )
+  assert(
+    /myTeamLabel = t\.myTeam !== null[\s\S]{0,120}buildTournamentTeamLabelMap\(t\.teams\)\.get\(t\.myTeam\.teamId\)/.test(renderSource),
+    'personal status label does not come from the same buildTournamentTeamLabelMap(t.teams) mapping',
+  )
 }
 
 async function getTeamRowCounts(databaseFile: string, tournamentId: string): Promise<{
@@ -305,6 +317,7 @@ try {
   const runId = randomUUID().slice(0, 8)
   const a = await registerAndGetCookie(port, runId, 'a')
   const b = await registerAndGetCookie(port, runId, 'b')
+  const c = await registerAndGetCookie(port, runId, 'c')
   await establishFriendship(port, a.cookie, b.cookie, b.profileId)
   pass('friendship established')
 
@@ -390,6 +403,20 @@ try {
   assert(detailForA.viewer.isParticipant === true, 'A is not a participant')
   assert(detailForB.viewer.isParticipant === true, 'B is not a participant')
   pass('both viewers remain active participants')
+
+  // ── Stable team identification (A/B/external viewer must all see the same order) ──
+  const detailForC = await getDetail(port, tournamentId, c.cookie)
+  assert(Array.isArray(detailForC.teams) && detailForC.teams.length === 1, `external viewer teams length=${detailForC.teams?.length}`)
+  const teamIdOrderA = detailForA.teams.map((team: any) => team.teamId)
+  const teamIdOrderB = detailForB.teams.map((team: any) => team.teamId)
+  const teamIdOrderC = detailForC.teams.map((team: any) => team.teamId)
+  assert(
+    JSON.stringify(teamIdOrderA) === JSON.stringify(teamIdOrderB) &&
+    JSON.stringify(teamIdOrderA) === JSON.stringify(teamIdOrderC),
+    `teams[] order differs between viewers: A=${JSON.stringify(teamIdOrderA)} B=${JSON.stringify(teamIdOrderB)} C=${JSON.stringify(teamIdOrderC)}`,
+  )
+  assert(detailForC.myTeam === null, 'external viewer unexpectedly has a myTeam')
+  pass('teams[] order (and therefore the derived Отбор A/B/C/D label) is identical for A, B and an external viewer')
 
   // ── DB integrity ──
   const rowCounts = await getTeamRowCounts(isolated.databaseFile, tournamentId)
