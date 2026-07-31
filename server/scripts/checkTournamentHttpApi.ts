@@ -298,6 +298,7 @@ type TournamentSummaryResponse = {
   isFull: boolean
   startMode: string
   scheduledStartAt: string | null
+  fillExpiresAt: string | null
   createdAt: string
   prizePreview: { totalEntryFees: number; systemFee: number; prizePool: number; firstTeamPrize: number; secondTeamPrize: number }
   isMine: boolean
@@ -556,7 +557,7 @@ try {
       'tournamentId', 'name', 'creator', 'visibility', 'requiresPassword', 'status', 'statusLabel',
       'entryFee', 'playerCapacity', 'confirmedEntriesCount', 'reservedPlacesCount',
       'occupiedPlacesCount', 'completedTeamsCount', 'formingTeamsCount', 'startMode',
-      'scheduledStartAt', 'createdAt', 'prizePreview', 'isMine', 'availablePlaces', 'isFull',
+      'scheduledStartAt', 'fillExpiresAt', 'createdAt', 'prizePreview', 'isMine', 'availablePlaces', 'isFull',
       'championTeamId', 'runnerUpTeamId', 'settlementState', 'settledAt',
       'viewer',
     ])

@@ -145,6 +145,7 @@ type TournamentRow = {
   player_capacity: number
   start_mode: string
   scheduled_start_at: string | null
+  fill_expires_at: string | null
   status: string
   cancel_reason: string | null
   created_at: string
@@ -258,6 +259,7 @@ function toTournamentRecord(row: TournamentRow): TournamentRecord {
     playerCapacity: row.player_capacity,
     startMode: row.start_mode as TournamentStartMode,
     scheduledStartAt: row.scheduled_start_at !== null ? dbDateToUtc(row.scheduled_start_at) : null,
+    fillExpiresAt: row.fill_expires_at !== null ? dbDateToUtc(row.fill_expires_at) : null,
     status: row.status as TournamentStatus,
     cancelReason: row.cancel_reason,
     createdAt: dbDateToUtc(row.created_at),
@@ -387,6 +389,11 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
   database.exec('PRAGMA foreign_keys = ON;')
   database.exec('PRAGMA journal_mode = WAL;')
 
+  // fill_expires_at се изчислява от DB-та (не от app clock) спрямо
+  // start_mode: fill → created_at (DEFAULT CURRENT_TIMESTAMP) + 1 час,
+  // scheduled → NULL. Клиентът никога не подава/влияе тази стойност —
+  // няма съответно поле в CreateTournamentInput. Фиксирано на точно 60
+  // минути, не избираемо.
   const insertTournamentStatement = database.prepare(`
     INSERT INTO tournaments (
       tournament_id,
@@ -398,14 +405,18 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
       entry_fee,
       player_capacity,
       start_mode,
-      scheduled_start_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+      scheduled_start_at,
+      fill_expires_at
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+      CASE WHEN ? = 'fill' THEN datetime(CURRENT_TIMESTAMP, '+1 hours') ELSE NULL END
+    );
   `)
 
   const selectTournamentByIdStatement = database.prepare(`
     SELECT
       tournament_id, kind, name, creator_profile_id, visibility, password_hash,
-      entry_fee, player_capacity, start_mode, scheduled_start_at, status,
+      entry_fee, player_capacity, start_mode, scheduled_start_at, fill_expires_at, status,
       cancel_reason, created_at, updated_at, started_at, finished_at,
       champion_team_id, runner_up_team_id, settlement_state, settled_at,
       total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
@@ -543,6 +554,7 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
           input.playerCapacity ?? 8,
           input.startMode,
           input.scheduledStartAt ?? null,
+          input.startMode,
         )
       } catch {
         // Единственият UNIQUE constraint, който INSERT в tournaments може да
@@ -584,7 +596,7 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
         .prepare(
           `SELECT
              tournament_id, kind, name, creator_profile_id, visibility, password_hash,
-             entry_fee, player_capacity, start_mode, scheduled_start_at, status,
+             entry_fee, player_capacity, start_mode, scheduled_start_at, fill_expires_at, status,
              cancel_reason, created_at, updated_at, started_at, finished_at,
              champion_team_id, runner_up_team_id, settlement_state, settled_at,
              total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,

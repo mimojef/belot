@@ -167,6 +167,7 @@ export type TournamentSummaryDto = {
   isFull: boolean
   startMode: 'fill' | 'scheduled'
   scheduledStartAt: string | null
+  fillExpiresAt: string | null
   createdAt: string
   prizePreview: TournamentPrizePreviewDto
   isMine: boolean
@@ -326,6 +327,7 @@ export function toTournamentSummaryDto(input: ToTournamentSummaryDtoInput): Tour
     isFull: availablePlaces === 0,
     startMode: tournament.startMode,
     scheduledStartAt: tournament.scheduledStartAt,
+    fillExpiresAt: tournament.fillExpiresAt,
     createdAt: tournament.createdAt,
     prizePreview: getTournamentPrizePreview(tournament),
     isMine: input.viewerProfileId !== null && input.viewerProfileId === tournament.creatorProfileId,

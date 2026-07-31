@@ -225,6 +225,7 @@ export type TournamentSummarySnapshot = {
   isFull: boolean
   startMode: TournamentStartMode
   scheduledStartAt: string | null
+  fillExpiresAt: string | null
   createdAt: string
   prizePreview: TournamentPrizePreview
   isMine: boolean

@@ -102,8 +102,8 @@ function insertOpenTournament(database: DatabaseSync, input: {
   database.prepare(`
     INSERT INTO tournaments (
       tournament_id, kind, name, creator_profile_id, visibility, password_hash,
-      entry_fee, player_capacity, start_mode, scheduled_start_at, status
-    ) VALUES (?, 'community', ?, ?, 'public', NULL, ?, 8, 'fill', NULL, 'open');
+      entry_fee, player_capacity, start_mode, scheduled_start_at, fill_expires_at, status
+    ) VALUES (?, 'community', ?, ?, 'public', NULL, ?, 8, 'fill', NULL, datetime('now', '+1 hours'), 'open');
   `).run(input.tournamentId, `Admin smoke ${input.tournamentId.slice(0, 8)}`, input.creatorProfileId, entryFee)
 
   for (const profileId of input.participantProfileIds) {

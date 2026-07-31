@@ -35,6 +35,7 @@ type TournamentSchedulerDeps = {
 const DEFAULT_INTERVAL_MS = 5_000
 const DEFAULT_BATCH_SIZE = 25
 const SCHEDULED_START_NOT_READY = 'scheduled_start_not_ready'
+const FILL_MODE_EXPIRED = 'fill_mode_expired'
 
 function sanitizeError(error: unknown): string {
   if (error instanceof Error) return error.message
@@ -89,6 +90,23 @@ export async function createTournamentScheduler(
     LIMIT ?;
   `)
 
+  // Due-queue за неизпълнени fill турнири (виж migration 20260731_001).
+  // Изпълнява се СЛЕД selectReadyFillTournamentIdsStatement loop-а в runTick,
+  // за да може турнир, запълнил се точно в рамките на същия tick, да стартира
+  // първо (startTournamentAtomically вече е сменил status-а извън 'open' —
+  // затова тук вече не се вижда). Idle/underfilled турнирите с изтекъл срок
+  // остават до следващия tick, ако вече не са ready.
+  const selectExpiredFillTournamentIdsStatement = database.prepare(`
+    SELECT tournament_id
+    FROM tournaments
+    WHERE status = 'open'
+      AND start_mode = 'fill'
+      AND fill_expires_at IS NOT NULL
+      AND datetime(fill_expires_at) <= datetime(?)
+    ORDER BY fill_expires_at ASC
+    LIMIT ?;
+  `)
+
   let intervalId: ReturnType<typeof globalThis.setInterval> | null = null
   let inFlight = false
   let stopped = false
@@ -138,6 +156,31 @@ export async function createTournamentScheduler(
         } catch (error) {
           lastError = sanitizeError(error)
           logError(`[tournament-scheduler] fill tournament failed: ${tournamentId}`, error)
+        }
+      }
+
+      // Ready-before-expiry: изпълнява се СЛЕД readyFillIds по-горе, за да не
+      // отменя турнир, който тъкмо стана 8/8 в рамките на СЪЩИЯ tick.
+      // autoCancelScheduledTournamentAtomically(status='open') е no-op за
+      // всеки tournamentId, който readyFillIds loop-ът вече е стартирал
+      // (freshTournament.status вече не е 'open' вътре в неговата собствена
+      // BEGIN IMMEDIATE транзакция).
+      const expiredFillIds = (
+        selectExpiredFillTournamentIdsStatement.all(tickNow.toISOString(), batchSize) as {
+          tournament_id: string
+        }[]
+      ).map((row) => row.tournament_id)
+      for (const tournamentId of expiredFillIds) {
+        try {
+          deps.economyStore.autoCancelScheduledTournamentAtomically(
+            tournamentId,
+            tickNow,
+            FILL_MODE_EXPIRED,
+          )
+          processedLastTick += 1
+        } catch (error) {
+          lastError = sanitizeError(error)
+          logError(`[tournament-scheduler] fill expiry cancel failed: ${tournamentId}`, error)
         }
       }
 

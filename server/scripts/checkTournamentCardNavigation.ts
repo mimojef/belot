@@ -69,6 +69,7 @@ function tournament(overrides: Partial<TournamentSummarySnapshot> & { tournament
     isFull: overrides.isFull ?? false,
     startMode: overrides.startMode ?? 'fill',
     scheduledStartAt: overrides.scheduledStartAt ?? null,
+    fillExpiresAt: overrides.fillExpiresAt ?? null,
     createdAt: overrides.createdAt ?? '2026-07-31T10:00:00.000Z',
     prizePreview: overrides.prizePreview ?? {
       totalEntryFees: 40000,

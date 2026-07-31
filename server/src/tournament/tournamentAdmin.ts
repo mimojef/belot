@@ -35,6 +35,11 @@ export type TournamentIntegrityCode =
   | 'invalid_runner_up'
   | 'finished_timestamp_missing'
   | 'unexpected_wallet_related_ledger'
+  | 'missing_fill_expiry'
+  | 'invalid_fill_expiry'
+  | 'incomplete_fill_timeout_refunds'
+  | 'fill_timeout_after_start'
+  | 'system_fee_on_fill_timeout_cancel'
 
 export type TournamentIntegrityIssue = {
   code: TournamentIntegrityCode
@@ -75,6 +80,7 @@ export type AdminTournamentSummary = {
   settlementState: 'pending' | 'settled'
   createdAt: string
   scheduledStartAt: string | null
+  fillExpiresAt: string | null
   finishedAt: string | null
   integrity: TournamentIntegrityReport
 }
@@ -185,6 +191,7 @@ type TournamentRow = {
   player_capacity: number
   start_mode: 'fill' | 'scheduled'
   scheduled_start_at: string | null
+  fill_expires_at: string | null
   status: string
   cancel_reason: string | null
   created_at: string
@@ -279,7 +286,7 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
 
   const tournamentColumns = `
     tournament_id, name, creator_profile_id, visibility, entry_fee, player_capacity,
-    start_mode, scheduled_start_at, status, cancel_reason, created_at, updated_at,
+    start_mode, scheduled_start_at, fill_expires_at, status, cancel_reason, created_at, updated_at,
     started_at, finished_at, champion_team_id, runner_up_team_id, settlement_state,
     settled_at, total_entry_amount, system_fee_amount, prize_pool_amount,
     winner_team_prize_amount, runner_up_team_prize_amount, winner_player_prize_amount,
@@ -566,6 +573,40 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
       addIssue(issues, 'unexpected_wallet_related_ledger', 'error', 'Cancelled tournament has prize payouts.', false)
     }
 
+    // Fill-mode 1-час expiry (виж migration 20260731_001) — read-only checks,
+    // без нов write path. cancel_reason е free-form TEXT (виж migration
+    // 20260730_001), затова 'fill_mode_expired' се сравнява buквално, огледално
+    // на FILL_MODE_EXPIRED константата в tournamentScheduler.ts.
+    if (tournament.start_mode === 'fill') {
+      if (tournament.status === 'open' && tournament.fill_expires_at === null) {
+        addIssue(issues, 'missing_fill_expiry', 'error', 'Open fill tournament is missing fill_expires_at.', false)
+      }
+      if (
+        tournament.fill_expires_at !== null &&
+        new Date(dbDateToUtc(tournament.fill_expires_at)).getTime() <= new Date(dbDateToUtc(tournament.created_at)).getTime()
+      ) {
+        addIssue(issues, 'invalid_fill_expiry', 'error', 'fill_expires_at is not after created_at.', false)
+      }
+      if (tournament.status === 'auto_cancelled' && tournament.cancel_reason === 'fill_mode_expired') {
+        const fillTimeoutRefund = ledgerCountSumStatement.get(tournamentId, 'entry_fee_refund') as { count: number; sum: number }
+        if (paidParticipantEntries.some((entry) => entry.status === 'confirmed')) {
+          addIssue(issues, 'incomplete_fill_timeout_refunds', 'error', 'Fill-timeout cancelled tournament still has confirmed (unrefunded) entries.', false)
+        }
+        if (entryDebits.count > 0 && entryDebits.count !== fillTimeoutRefund.count) {
+          addIssue(issues, 'incomplete_fill_timeout_refunds', 'error', 'Fill-timeout cancelled tournament has fewer refunds than debits.', false)
+        }
+        if (systemFee.count > 0) {
+          addIssue(issues, 'system_fee_on_fill_timeout_cancel', 'error', 'Fill-timeout cancelled tournament has a system fee ledger entry.', false)
+        }
+      }
+      if (
+        tournament.cancel_reason === 'fill_mode_expired' &&
+        !['open', 'auto_cancelled'].includes(tournament.status)
+      ) {
+        addIssue(issues, 'fill_timeout_after_start', 'error', 'Tournament has a fill-timeout cancellation reason but is not open/auto_cancelled.', false)
+      }
+    }
+
     return reportFromIssues(issues)
   }
 
@@ -589,6 +630,7 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
       settlementState: tournament.settlement_state,
       createdAt: asUtc(tournament.created_at) ?? tournament.created_at,
       scheduledStartAt: asUtc(tournament.scheduled_start_at),
+      fillExpiresAt: asUtc(tournament.fill_expires_at),
       finishedAt: asUtc(tournament.finished_at),
       integrity: analyzeTournamentIntegrity(tournament.tournament_id),
     }

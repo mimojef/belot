@@ -92,24 +92,52 @@ export function formatTournamentStartCountdown(remainingMs: number): string {
   return `Остават ${seconds} сек.`
 }
 
+// Компактен MM:SS (или H:MM:SS при >= 1 час) брояч за fill-mode 1-часовия
+// прозорец — "Изтича след 42:18". Никога не показва отрицателни стойности.
+export function formatTournamentFillExpiryCountdown(remainingMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(remainingMs / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  const mm = String(minutes).padStart(2, '0')
+  const ss = String(seconds).padStart(2, '0')
+  if (hours > 0) return `Изтича след ${hours}:${mm}:${ss}`
+  return `Изтича след ${mm}:${ss}`
+}
+
 const START_ACTIVE_STATUSES: ReadonlySet<TournamentSummarySnapshot['status']> = new Set([
   'starting',
   'semifinal_in_progress',
   'final_in_progress',
 ])
 
+const START_CANCELLED_STATUSES: ReadonlySet<TournamentSummarySnapshot['status']> = new Set([
+  'cancelled',
+  'admin_cancelled',
+  'auto_cancelled',
+  'failed',
+])
+
+// Покрива всички non-open терминални/активни статуси — нито един от тях не
+// трябва да показва countdown (scheduled или fill), само current-state текст.
 function tournamentStartStateLabel(t: TournamentDetailSnapshot): string | null {
   if (t.status === 'finished') return 'Турнирът приключи'
   if (START_ACTIVE_STATUSES.has(t.status)) return 'Турнирът е в ход'
+  if (START_CANCELLED_STATUSES.has(t.status)) return 'Турнирът е отменен'
   return null
 }
 
-// Изчислява primary/secondary текст за "Старт" картата. secondary е null, ако
-// не носи допълнителна информация отделно от primary (напр. started/finished).
-function computeTournamentStartInfo(t: TournamentDetailSnapshot): { primary: string; secondary: string | null } {
+// Изчислява primary/secondary/tertiary текст за "Старт" картата. secondary/
+// tertiary са null, ако не носят допълнителна информация отделно от primary
+// (напр. started/finished — само primary). tertiary се ползва само за
+// fill-mode expiry countdown-а (виж §4 в task spec-а), рендериран като трети,
+// отделен ред под readiness текста.
+function computeTournamentStartInfo(
+  t: TournamentDetailSnapshot,
+): { primary: string; secondary: string | null; tertiary: string | null } {
   const activeStateLabel = tournamentStartStateLabel(t)
   if (activeStateLabel !== null) {
-    return { primary: activeStateLabel, secondary: null }
+    return { primary: activeStateLabel, secondary: null, tertiary: null }
   }
 
   if (t.startMode === 'scheduled' && t.scheduledStartAt) {
@@ -117,16 +145,25 @@ function computeTournamentStartInfo(t: TournamentDetailSnapshot): { primary: str
     const secondary = Number.isFinite(remainingMs) && remainingMs > 0
       ? formatTournamentStartCountdown(remainingMs)
       : 'Очаква се започване...'
-    return { primary: fmtLocalDateTime(t.scheduledStartAt), secondary }
+    return { primary: fmtLocalDateTime(t.scheduledStartAt), secondary, tertiary: null }
   }
 
   // Fill режим (или scheduled без валиден timestamp — defensive fallback).
   const remainingPlayers = Math.max(0, t.playerCapacity - t.confirmedEntriesCount)
-  if (remainingPlayers === 0) {
-    return { primary: 'При запълване', secondary: 'Турнирът е готов за старт' }
+  const readinessText = remainingPlayers === 0
+    ? 'Турнирът е готов за старт'
+    : remainingPlayers === 1
+      ? 'Остава още 1 участник до старт'
+      : `Остават още ${remainingPlayers} участници до старт`
+
+  if (t.fillExpiresAt === null) {
+    return { primary: 'При запълване', secondary: readinessText, tertiary: null }
   }
-  const secondary = `Остават още ${remainingPlayers} ${remainingPlayers === 1 ? 'участник' : 'участници'} до старт`
-  return { primary: 'При запълване', secondary }
+  const remainingMs = new Date(t.fillExpiresAt).getTime() - Date.now()
+  const expiryText = Number.isFinite(remainingMs) && remainingMs > 0
+    ? formatTournamentFillExpiryCountdown(remainingMs)
+    : 'Срокът изтече. Изчаква се автоматична отмяна...'
+  return { primary: 'При запълване', secondary: readinessText, tertiary: expiryText }
 }
 
 function statusBadgeColor(status: TournamentSummarySnapshot['status']): string {
@@ -148,6 +185,22 @@ function tournamentCardCtaLabel(status: TournamentSummarySnapshot['status']): st
 }
 
 // ─── Списък с турнири ────────────────────────────────────────────────────
+
+// Countdown badge за fill-mode списъчна карта (§13 в task spec-а). Само за
+// status='open' fill турнири с валиден fillExpiresAt — data-атрибутите
+// таргетират единичен, споделен interval в контролера (виж
+// startTournamentCardFillExpiryCountdownLoop), не отделен timer на карта.
+function renderTournamentCardFillExpiryBadge(t: TournamentSummarySnapshot): string {
+  if (t.status !== 'open' || t.startMode !== 'fill' || t.fillExpiresAt === null) return ''
+  return `
+    <div
+      data-tournament-card-fill-expiry="1"
+      data-tournament-id="${escapeHtml(t.tournamentId)}"
+      data-fill-expires-at="${escapeHtml(t.fillExpiresAt)}"
+      style="font-size:11px;font-weight:800;color:#f87171;"
+    ></div>
+  `
+}
 
 function renderTournamentCard(t: TournamentSummarySnapshot): string {
   const avatarLetter = t.creator.displayName.slice(0, 1).toUpperCase()
@@ -184,6 +237,7 @@ function renderTournamentCard(t: TournamentSummarySnapshot): string {
         <span>${escapeHtml(startModeLabel(t))}</span>
         <span style="color:#d4a520;font-weight:800;">Награден фонд: ${formatAmount(t.prizePreview.prizePool)}</span>
       </div>
+      ${renderTournamentCardFillExpiryBadge(t)}
       <button
         type="button"
         data-tournament-card="${escapeHtml(t.tournamentId)}"
@@ -375,6 +429,10 @@ function renderTournamentCreatePopup(state: LobbyScreenState): string {
             </div>
           </div>
 
+          <div data-tournament-create-fill-field="1" style="display:block;background:rgba(212,165,32,0.06);border:1px solid rgba(212,165,32,0.22);border-radius:8px;padding:10px 12px;font-size:12px;line-height:1.5;color:rgba(255,255,255,0.7);">
+            Турнирът ще бъде активен до 1 час. Ако не се запълни, всички входни такси ще бъдат възстановени.
+          </div>
+
           <div data-tournament-create-scheduled-field="1" style="display:none;">
             <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;">Дата и час (местно време)</div>
             <input type="datetime-local" name="scheduledStartAt" value="${defaultScheduled}" style="width:100%;box-sizing:border-box;padding:10px 12px;background:#1a1a24;border:1px solid rgba(255,255,255,0.18);border-radius:8px;color:#fff;font-size:14px;color-scheme:dark;">
@@ -463,6 +521,22 @@ function renderTournamentFinalSummary(t: TournamentDetailSnapshot): string {
       ` : `
         <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.72);">Наградите се обработват. Турнирът ще се появи в последните завършили, когато settlement-ът приключи.</div>
       `}
+    </div>
+  `
+}
+
+// Fill-mode timeout auto-cancel съобщение (виж §14 в task spec-а). cancelReason
+// е free-form TEXT колона на сървъра (виж migration 20260730_001) — literal
+// 'fill_mode_expired' е exact match на константата в tournamentScheduler.ts.
+// refund confirmation-ът не изисква ново DTO поле: viewer.entryStatus вече
+// съдържа 'refunded' след успешен fill-timeout cancel (виж
+// updateEntryToRefundedByCancelStatement в tournamentEconomyStore.ts).
+function renderTournamentFillTimeoutCancelledCallout(t: TournamentDetailSnapshot): string {
+  if (t.status !== 'auto_cancelled' || t.cancelReason !== 'fill_mode_expired') return ''
+  return `
+    <div style="border:1px solid rgba(248,113,113,0.36);background:rgba(127,29,29,0.16);border-radius:10px;padding:14px 16px;margin-bottom:20px;">
+      <div style="font-size:13px;font-weight:800;color:#fca5a5;line-height:1.45;">Турнирът беше отменен, защото не се запълни в рамките на 1 час.</div>
+      ${t.viewer.entryStatus === 'refunded' ? '<div style="margin-top:6px;font-size:12px;font-weight:700;color:rgba(255,255,255,0.68);">Входната ви такса беше възстановена.</div>' : ''}
     </div>
   `
 }
@@ -594,6 +668,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
 
       ${renderTournamentMatchAssignmentCallout(t)}
       ${renderTournamentFinalSummary(t)}
+      ${renderTournamentFillTimeoutCancelledCallout(t)}
 
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:20px;">
         <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:12px 14px;">
@@ -613,12 +688,14 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
           data-tournament-id="${escapeHtml(t.tournamentId)}"
           data-start-mode="${escapeHtml(t.startMode)}"
           data-scheduled-start-at="${t.scheduledStartAt ? escapeHtml(t.scheduledStartAt) : ''}"
+          data-fill-expires-at="${t.fillExpiresAt ? escapeHtml(t.fillExpiresAt) : ''}"
           data-status="${escapeHtml(t.status)}"
           style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:10px;padding:12px 14px;"
         >
           <div style="font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:4px;">Старт</div>
           <div data-tournament-start-primary="1" style="font-size:13px;font-weight:800;color:#ffffff;">${escapeHtml(startInfo.primary)}</div>
           ${startInfo.secondary !== null ? `<div data-tournament-start-secondary="1" style="margin-top:3px;font-size:11px;font-weight:700;color:#d4a520;">${escapeHtml(startInfo.secondary)}</div>` : `<div data-tournament-start-secondary="1" style="display:none;"></div>`}
+          ${startInfo.tertiary !== null ? `<div data-tournament-start-tertiary="1" style="margin-top:3px;font-size:11px;font-weight:700;color:#f87171;">${escapeHtml(startInfo.tertiary)}</div>` : `<div data-tournament-start-tertiary="1" style="display:none;"></div>`}
         </div>
       </div>
 

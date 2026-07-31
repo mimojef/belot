@@ -10440,6 +10440,7 @@ export function renderLobbyScreen(
     const passwordField = root.querySelector<HTMLElement>('[data-tournament-create-password-field="1"]')
     const startModeRadios = root.querySelectorAll<HTMLInputElement>('[data-tournament-create-form="1"] input[name="startMode"]')
     const scheduledField = root.querySelector<HTMLElement>('[data-tournament-create-scheduled-field="1"]')
+    const fillField = root.querySelector<HTMLElement>('[data-tournament-create-fill-field="1"]')
     const entryFeeSelect = root.querySelector<HTMLSelectElement>('[data-tournament-create-entryfee="1"]')
     const previewBox = root.querySelector<HTMLElement>('[data-tournament-create-preview="1"]')
 
@@ -10450,6 +10451,7 @@ export function renderLobbyScreen(
     function syncStartModeFields(): void {
       const selected = root.querySelector<HTMLInputElement>('[data-tournament-create-form="1"] input[name="startMode"]:checked')?.value
       if (scheduledField) scheduledField.style.display = selected === 'scheduled' ? 'block' : 'none'
+      if (fillField) fillField.style.display = selected === 'fill' ? 'block' : 'none'
     }
     function syncPrizePreview(): void {
       if (!previewBox || !entryFeeSelect) return

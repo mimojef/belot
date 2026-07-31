@@ -105,6 +105,7 @@ export type TournamentRecord = {
   playerCapacity: number
   startMode: TournamentStartMode
   scheduledStartAt: string | null
+  fillExpiresAt: string | null
   status: TournamentStatus
   cancelReason: string | null
   createdAt: string

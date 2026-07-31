@@ -289,7 +289,7 @@ const controllerSource = stripSourceComments(await readFile(join(projectRoot, 's
 check('start countdown formatter exists and is exported for reuse', tournamentsScreenSource.includes('export function formatTournamentStartCountdown'))
 check('start info branching helper exists (no ad-hoc duplicated logic)', tournamentsScreenSource.includes('function computeTournamentStartInfo'))
 check('controller uses a single setInterval-based tick loop for the tournament countdown', /tournamentStartCountdownIntervalId = window\.setInterval/.test(controllerSource))
-check('controller does not start a second interval when one is already active for the same tournament/timestamp', /tournamentStartCountdownIntervalId !== null &&\s*tournamentStartCountdownTournamentId === tournamentId &&\s*tournamentStartCountdownScheduledAt === scheduledStartAt/.test(controllerSource))
+check('controller does not start a second interval when one is already active for the same tournament/deadline', /tournamentStartCountdownIntervalId !== null &&\s*tournamentStartCountdownTournamentId === tournamentId &&\s*tournamentStartCountdownDeadline === deadline/.test(controllerSource))
 check('controller clears the tournament countdown interval on screen change (no leaked interval)', controllerSource.includes('clearTournamentStartCountdownLoop()'))
 check(
   'countdown interval is torn down whenever leaving the tournament-detail screen (covers matchmaking/private-room paths too)',

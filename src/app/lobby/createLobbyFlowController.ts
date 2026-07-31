@@ -13,7 +13,7 @@ import {
   formatPrivateRoomCountdown,
   getPrivateRoomCountdownState,
 } from './renderPrivateRoomWaitingScreen'
-import { formatTournamentStartCountdown } from './renderTournamentsScreen'
+import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown } from './renderTournamentsScreen'
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
   renderLobbyScreen,
@@ -1591,12 +1591,21 @@ export function createLobbyFlowController(
   let privateRoomCountdownRoomId: string | null = null
   let privateRoomCountdownExpiresAt: number | null = null
 
-  // Tick loop за scheduled-start countdown-а в tournament detail "Старт" картата.
-  // Същия DOM-only patch подход като частните стаи по-горе — секундният tick
-  // само пренаписва secondary текста в картата, без пълен render().
+  // Tick loop за scheduled-start / fill-expiry countdown-а в tournament detail
+  // "Старт" картата. Същия DOM-only patch подход като частните стаи по-горе —
+  // секундният tick само пренаписва secondary/tertiary текста в картата, без
+  // пълен render(). Единичен interval, разграничен по (tournamentId, deadline)
+  // двойка — работи и за двата start mode-а (scheduled патчва secondary,
+  // fill патчва tertiary), никога и двата едновременно за един турнир.
   let tournamentStartCountdownIntervalId: ReturnType<typeof setInterval> | null = null
   let tournamentStartCountdownTournamentId: string | null = null
-  let tournamentStartCountdownScheduledAt: string | null = null
+  let tournamentStartCountdownDeadline: string | null = null
+
+  // Единичен споделен interval за ВСИЧКИ fill-expiry countdown badge-ове в
+  // списъчния изглед "Турнири" (§13 в task spec-а) — обхожда всички
+  // [data-tournament-card-fill-expiry] node-ове на всеки tick, вместо по
+  // един timer на карта. DOM-only patch, никакъв server polling.
+  let tournamentListFillExpiryIntervalId: ReturnType<typeof setInterval> | null = null
 
   let finalFillSequenceStartedAt: number | null = null
   let finalFillBaseQueuedPlayers: number | null = null
@@ -1892,16 +1901,22 @@ export function createLobbyFlowController(
     }, 1000)
   }
 
-  function updateTournamentStartCountdownDom(scheduledStartAt: string): void {
+  function updateTournamentStartCountdownDom(mode: 'scheduled' | 'fill', deadline: string): void {
     const card = options.root.querySelector<HTMLElement>('[data-tournament-start-card="1"]')
-    const secondaryEl = card?.querySelector<HTMLElement>('[data-tournament-start-secondary="1"]')
-    if (secondaryEl === null || secondaryEl === undefined) return
-    const remainingMs = new Date(scheduledStartAt).getTime() - Date.now()
-    const text = Number.isFinite(remainingMs) && remainingMs > 0
-      ? formatTournamentStartCountdown(remainingMs)
-      : 'Очаква се започване...'
-    secondaryEl.textContent = text
-    secondaryEl.style.display = ''
+    const targetEl = mode === 'scheduled'
+      ? card?.querySelector<HTMLElement>('[data-tournament-start-secondary="1"]')
+      : card?.querySelector<HTMLElement>('[data-tournament-start-tertiary="1"]')
+    if (targetEl === null || targetEl === undefined) return
+    const remainingMs = new Date(deadline).getTime() - Date.now()
+    const text = mode === 'scheduled'
+      ? (Number.isFinite(remainingMs) && remainingMs > 0
+          ? formatTournamentStartCountdown(remainingMs)
+          : 'Очаква се започване...')
+      : (Number.isFinite(remainingMs) && remainingMs > 0
+          ? formatTournamentFillExpiryCountdown(remainingMs)
+          : 'Срокът изтече. Изчаква се автоматична отмяна...')
+    targetEl.textContent = text
+    targetEl.style.display = ''
   }
 
   function clearTournamentStartCountdownLoop(): void {
@@ -1910,38 +1925,89 @@ export function createLobbyFlowController(
       tournamentStartCountdownIntervalId = null
     }
     tournamentStartCountdownTournamentId = null
-    tournamentStartCountdownScheduledAt = null
+    tournamentStartCountdownDeadline = null
   }
 
   // Idempotent — извиква се след всеки renderLobby() докато сме на detail
-  // екрана. Рестартира interval-а само когато турнирът или scheduledStartAt
+  // екрана. Рестартира interval-а само когато турнирът или deadline-ът
   // реално се сменят; иначе просто пресинхронизира DOM-а на прясно рендерания
   // node (innerHTML replace означава старият node вече не съществува).
-  function startTournamentStartCountdownLoop(tournamentId: string, scheduledStartAt: string): void {
+  // mode определя кой DOM node (secondary за scheduled, tertiary за fill) и
+  // кой safe post-deadline текст се ползва — двата start mode-а никога не
+  // са едновременно активни за един турнир (start_mode се фиксира при
+  // създаване), затова един interval стига.
+  function startTournamentStartCountdownLoop(
+    tournamentId: string,
+    mode: 'scheduled' | 'fill',
+    deadline: string,
+  ): void {
     if (tournamentStartCountdownIntervalId !== null &&
       tournamentStartCountdownTournamentId === tournamentId &&
-      tournamentStartCountdownScheduledAt === scheduledStartAt
+      tournamentStartCountdownDeadline === deadline
     ) {
-      updateTournamentStartCountdownDom(scheduledStartAt)
+      updateTournamentStartCountdownDom(mode, deadline)
       return
     }
 
     clearTournamentStartCountdownLoop()
     tournamentStartCountdownTournamentId = tournamentId
-    tournamentStartCountdownScheduledAt = scheduledStartAt
+    tournamentStartCountdownDeadline = deadline
 
-    updateTournamentStartCountdownDom(scheduledStartAt)
+    updateTournamentStartCountdownDom(mode, deadline)
 
     tournamentStartCountdownIntervalId = window.setInterval(() => {
+      const currentDeadline = mode === 'scheduled'
+        ? state.tournamentDetail?.scheduledStartAt
+        : state.tournamentDetail?.fillExpiresAt
       if (
         state.currentScreen !== 'tournament-detail' ||
         state.tournamentDetailId !== tournamentId ||
-        state.tournamentDetail?.scheduledStartAt !== scheduledStartAt
+        currentDeadline !== deadline
       ) {
         clearTournamentStartCountdownLoop()
         return
       }
-      updateTournamentStartCountdownDom(scheduledStartAt)
+      updateTournamentStartCountdownDom(mode, deadline)
+    }, 1000)
+  }
+
+  function updateTournamentListFillExpiryBadges(): void {
+    const badges = options.root.querySelectorAll<HTMLElement>('[data-tournament-card-fill-expiry="1"]')
+    if (badges.length === 0) return
+    const nowMs = Date.now()
+    badges.forEach((badge) => {
+      const expiresAt = badge.dataset.fillExpiresAt
+      if (!expiresAt) return
+      const remainingMs = new Date(expiresAt).getTime() - nowMs
+      badge.textContent = Number.isFinite(remainingMs) && remainingMs > 0
+        ? formatTournamentFillExpiryCountdown(remainingMs)
+        : 'Срокът изтече. Изчаква се автоматична отмяна...'
+    })
+  }
+
+  function clearTournamentListFillExpiryLoop(): void {
+    if (tournamentListFillExpiryIntervalId !== null) {
+      window.clearInterval(tournamentListFillExpiryIntervalId)
+      tournamentListFillExpiryIntervalId = null
+    }
+  }
+
+  // Idempotent — извиква се след всеки renderLobby() докато сме на списъчния
+  // "Турнири" екран. Един interval обхожда ВСИЧКИ carded fill-expiry badge-ове
+  // наведнъж (виж renderTournamentCardFillExpiryBadge) — не създава нов timer
+  // per карта, работи еднакво добре за 1 или N активни fill турнира.
+  function startTournamentListFillExpiryLoop(): void {
+    if (tournamentListFillExpiryIntervalId !== null) {
+      updateTournamentListFillExpiryBadges()
+      return
+    }
+    updateTournamentListFillExpiryBadges()
+    tournamentListFillExpiryIntervalId = window.setInterval(() => {
+      if (state.currentScreen !== 'tournaments') {
+        clearTournamentListFillExpiryLoop()
+        return
+      }
+      updateTournamentListFillExpiryBadges()
     }, 1000)
   }
 
@@ -3731,13 +3797,27 @@ export function createLobbyFlowController(
     if (
       state.currentScreen === 'tournament-detail' &&
       state.tournamentDetail !== null &&
+      state.tournamentDetail.status === 'open' &&
       state.tournamentDetail.startMode === 'scheduled' &&
-      state.tournamentDetail.scheduledStartAt !== null &&
-      state.tournamentDetail.status === 'open'
+      state.tournamentDetail.scheduledStartAt !== null
     ) {
-      startTournamentStartCountdownLoop(state.tournamentDetail.tournamentId, state.tournamentDetail.scheduledStartAt)
+      startTournamentStartCountdownLoop(state.tournamentDetail.tournamentId, 'scheduled', state.tournamentDetail.scheduledStartAt)
+    } else if (
+      state.currentScreen === 'tournament-detail' &&
+      state.tournamentDetail !== null &&
+      state.tournamentDetail.status === 'open' &&
+      state.tournamentDetail.startMode === 'fill' &&
+      state.tournamentDetail.fillExpiresAt !== null
+    ) {
+      startTournamentStartCountdownLoop(state.tournamentDetail.tournamentId, 'fill', state.tournamentDetail.fillExpiresAt)
     } else {
       clearTournamentStartCountdownLoop()
+    }
+
+    if (state.currentScreen === 'tournaments') {
+      startTournamentListFillExpiryLoop()
+    } else {
+      clearTournamentListFillExpiryLoop()
     }
   }
 
@@ -7328,6 +7408,9 @@ export function createLobbyFlowController(
     }
     if (state.currentScreen !== 'tournament-detail') {
       clearTournamentStartCountdownLoop()
+    }
+    if (state.currentScreen !== 'tournaments') {
+      clearTournamentListFillExpiryLoop()
     }
 
     if (state.currentScreen === 'matchmaking-room') {

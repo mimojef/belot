@@ -6132,6 +6132,7 @@ function isTournamentEntryActionRateLimited(profileId: string, now: number): boo
 const JOIN_FAILURE_MESSAGES: Record<string, string> = {
   tournament_not_found: 'Турнирът не е намерен.',
   tournament_not_open: 'Турнирът вече не приема записвания.',
+  tournament_fill_expired: 'Срокът за запълване на турнира изтече.',
   tournament_full: 'Турнирът е запълнен.',
   rejoin_not_allowed: 'Вече си напускал този турнир и не можеш да се запишеш повторно.',
   already_participating_elsewhere: 'Вече участваш в друг активен турнир.',
@@ -6142,6 +6143,7 @@ const JOIN_FAILURE_MESSAGES: Record<string, string> = {
 const PARTNER_INVITE_FAILURE_MESSAGES: Record<string, string> = {
   tournament_not_found: 'Турнирът не е намерен.',
   tournament_not_open: 'Турнирът вече не приема записвания.',
+  tournament_fill_expired: 'Турнирът вече е отменен, защото не се запълни навреме.',
   tournament_full: 'Няма достатъчно свободни места.',
   invite_window_closed: 'Прозорецът за покани е затворен.',
   requires_password: 'Този турнир е защитен с парола.',
@@ -6477,7 +6479,8 @@ async function handleTournamentJoinRequest(
       : result.reason === 'requires_password' ? 403
       : result.reason === 'insufficient_funds' ? 402
       : result.reason === 'tournament_full' || result.reason === 'already_participating_elsewhere'
-        || result.reason === 'tournament_not_open' || result.reason === 'rejoin_not_allowed' ? 409
+        || result.reason === 'tournament_not_open' || result.reason === 'rejoin_not_allowed'
+        || result.reason === 'tournament_fill_expired' ? 409
       : 400
     sendJsonResponse(res, status, {
       ok: false,

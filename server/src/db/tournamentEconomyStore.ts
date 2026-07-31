@@ -59,6 +59,7 @@ export type JoinTournamentSoloResult =
       reason:
         | 'tournament_not_found'
         | 'tournament_not_open'
+        | 'tournament_fill_expired'
         | 'tournament_full'
         | 'rejoin_not_allowed'
         | 'already_participating_elsewhere'
@@ -155,6 +156,7 @@ export type PartnerInviteMutationResult =
       reason:
         | 'tournament_not_found'
         | 'tournament_not_open'
+        | 'tournament_fill_expired'
         | 'tournament_full'
         | 'invite_window_closed'
         | 'requires_password'
@@ -182,7 +184,7 @@ export type TournamentEconomyStore = {
   joinTournamentSoloAtomically: (
     tournamentId: TournamentId,
     profileId: ProfileId,
-    options?: { password?: string | null },
+    options?: { password?: string | null; now?: Date },
   ) => JoinTournamentSoloResult
   leaveTournamentAndRefundAtomically: (
     tournamentId: TournamentId,
@@ -224,12 +226,13 @@ export type TournamentEconomyStore = {
     tournamentId: TournamentId,
     inviterProfileId: ProfileId,
     inviteeProfileId: ProfileId,
-    options?: { password?: string | null },
+    options?: { password?: string | null; now?: Date },
   ) => PartnerInviteMutationResult
   acceptPartnerInviteAtomically: (
     tournamentId: TournamentId,
     inviteId: TournamentPartnerInviteId,
     inviteeProfileId: ProfileId,
+    now?: Date,
   ) => PartnerInviteMutationResult
   declinePartnerInviteAtomically: (
     tournamentId: TournamentId,
@@ -269,6 +272,7 @@ type TournamentRow = {
   player_capacity: number
   start_mode: string
   scheduled_start_at: string | null
+  fill_expires_at: string | null
   status: string
   cancel_reason: string | null
   created_at: string
@@ -367,6 +371,7 @@ function toTournamentRecord(row: TournamentRow): TournamentRecord {
     playerCapacity: row.player_capacity,
     startMode: row.start_mode as TournamentRecord['startMode'],
     scheduledStartAt: row.scheduled_start_at !== null ? dbDateToUtc(row.scheduled_start_at) : null,
+    fillExpiresAt: row.fill_expires_at !== null ? dbDateToUtc(row.fill_expires_at) : null,
     status: row.status as TournamentStatus,
     cancelReason: row.cancel_reason,
     createdAt: dbDateToUtc(row.created_at),
@@ -497,6 +502,18 @@ function computePartnerInviteExpiresAt(tournament: TournamentRow, nowMs = Date.n
   return new Date(expiresMs).toISOString()
 }
 
+// Server-authoritative guard: fill-mode турнирите имат фиксиран 1-час
+// прозорец (fill_expires_at, виж migration 20260731_001). Между изтичането
+// и следващия scheduler tick (до 5 сек, виж tournamentScheduler.ts) статусът
+// все още е 'open' — без тази проверка join/invite операциите биха приемали
+// нови участници въпреки изтеклия срок. Клиентският часовник никога не
+// определя резултата — сравнението е спрямо DB-persisted timestamp и app
+// `now`, подаден explicit от caller-а (по подразбиране реално време).
+function isFillExpired(tournament: TournamentRow, nowMs: number): boolean {
+  if (tournament.start_mode !== 'fill' || tournament.fill_expires_at === null) return false
+  return new Date(dbDateToUtc(tournament.fill_expires_at)).getTime() <= nowMs
+}
+
 export async function createTournamentEconomyStore(
   databaseFilePath: string,
 ): Promise<TournamentEconomyStore> {
@@ -512,7 +529,7 @@ export async function createTournamentEconomyStore(
   const selectTournamentByIdStatement = database.prepare(`
     SELECT
       tournament_id, kind, name, creator_profile_id, visibility, password_hash,
-      entry_fee, player_capacity, start_mode, scheduled_start_at, status,
+      entry_fee, player_capacity, start_mode, scheduled_start_at, fill_expires_at, status,
       cancel_reason, created_at, updated_at, started_at, finished_at,
       champion_team_id, runner_up_team_id, settlement_state, settled_at,
       total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
@@ -527,7 +544,7 @@ export async function createTournamentEconomyStore(
   const selectTournamentForUpdateStatement = database.prepare(`
     SELECT
       tournament_id, kind, name, creator_profile_id, visibility, password_hash,
-      entry_fee, player_capacity, start_mode, scheduled_start_at, status,
+      entry_fee, player_capacity, start_mode, scheduled_start_at, fill_expires_at, status,
       cancel_reason, created_at, updated_at, started_at, finished_at,
       champion_team_id, runner_up_team_id, settlement_state, settled_at,
       total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
@@ -1663,6 +1680,22 @@ export async function createTournamentEconomyStore(
         return { ok: false, reason: 'tournament_not_open' }
       }
 
+      // 8th-player-vs-expiry race (виж tournamentScheduler.ts): турнир, който
+      // е станал ready (capacity confirmed places, 0 reserved) в момента на
+      // cancel опита — независимо дали заради late join в същия tick, или
+      // заради изпреварване на fill-expiry cancel от паралелен start — никога
+      // не трябва да бъде отменян. Fresh re-select под BEGIN IMMEDIATE прави
+      // тази проверка TOCTOU-safe спрямо startTournamentAtomically-паралелна
+      // транзакция (SQLite сериализира writer-ите).
+      if (
+        tournament.start_mode === 'fill' &&
+        getOccupiedPlaces(tournamentId) >= tournament.player_capacity &&
+        getReservedPendingPlaces(tournamentId) === 0
+      ) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'tournament_not_open' }
+      }
+
       const statusUpdate = updateTournamentAutoCancelledStatement.run(reason, nowIso, tournamentId) as {
         changes?: number
       }
@@ -1864,8 +1897,9 @@ export async function createTournamentEconomyStore(
       tournamentId: TournamentId,
       inviterProfileId: ProfileId,
       inviteeProfileId: ProfileId,
-      options: { password?: string | null } = {},
+      options: { password?: string | null; now?: Date } = {},
     ): PartnerInviteMutationResult {
+      const nowMs = (options.now ?? new Date()).getTime()
       const tournamentRow = selectTournamentByIdStatement.get(tournamentId) as TournamentRow | undefined
       if (tournamentRow === undefined) return { ok: false, reason: 'tournament_not_found' }
 
@@ -1897,6 +1931,10 @@ export async function createTournamentEconomyStore(
         if (freshTournament.status !== 'open') {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'tournament_not_open' }
+        }
+        if (isFillExpired(freshTournament, nowMs)) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_fill_expired' }
         }
 
         const expiresAt = computePartnerInviteExpiresAt(freshTournament)
@@ -2063,7 +2101,9 @@ export async function createTournamentEconomyStore(
       tournamentId: TournamentId,
       inviteId: TournamentPartnerInviteId,
       inviteeProfileId: ProfileId,
+      now: Date = new Date(),
     ): PartnerInviteMutationResult {
+      const nowMs = now.getTime()
       try {
         database.exec('BEGIN IMMEDIATE;')
         expireDuePartnerInvitesInCurrentTransaction(tournamentId)
@@ -2102,7 +2142,11 @@ export async function createTournamentEconomyStore(
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'tournament_not_open' }
         }
-        if (new Date(dbDateToUtc(inviteRow.expires_at)).getTime() <= Date.now()) {
+        if (isFillExpired(freshTournament, nowMs)) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_fill_expired' }
+        }
+        if (new Date(dbDateToUtc(inviteRow.expires_at)).getTime() <= nowMs) {
           resolvePartnerInviteStatement.run('expired', inviteId, tournamentId)
           resetFormingTeamToSolo(tournamentId, inviteRow.team_id, inviteRow.inviter_profile_id)
           database.exec('COMMIT;')
@@ -2288,8 +2332,9 @@ export async function createTournamentEconomyStore(
     joinTournamentSoloAtomically(
       tournamentId: TournamentId,
       profileId: ProfileId,
-      options: { password?: string | null } = {},
+      options: { password?: string | null; now?: Date } = {},
     ): JoinTournamentSoloResult {
+      const nowMs = (options.now ?? new Date()).getTime()
       // Pre-check извън транзакцията (не намалява коректността — всичко
       // критично се пре-проверява вътре в BEGIN IMMEDIATE по-долу; целта е
       // само бърз early-return без да отваряме транзакция за очевидни грешки).
@@ -2341,6 +2386,10 @@ export async function createTournamentEconomyStore(
         if (freshTournament.status !== 'open') {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'tournament_not_open' }
+        }
+        if (isFillExpired(freshTournament, nowMs)) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_fill_expired' }
         }
 
         const isCreator = freshTournament.creator_profile_id === profileId

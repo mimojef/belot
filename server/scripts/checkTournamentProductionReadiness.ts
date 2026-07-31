@@ -4,6 +4,7 @@ import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { createTournamentAdminStore } from '../src/tournament/tournamentAdmin.js'
+import { createTournamentStore } from '../src/db/tournamentStore.js'
 
 let passed = 0
 let failed = 0
@@ -138,9 +139,67 @@ try {
       'idx_tournament_economy_ledger_tournament_entry_type',
       'idx_tournament_matches_game_start_due',
       'idx_tournament_economy_ledger_prize_payout',
+      'idx_tournaments_fill_expiry_due',
     ]) {
       assert(indexes.has(index), `missing index ${index}`)
     }
+  })
+
+  await check('tournaments table has the fill_expires_at column (1-hour fill-mode expiry)', () => {
+    const columns = (db!.prepare('PRAGMA table_info(tournaments);').all() as Array<{ name: string }>)
+      .map((row) => row.name)
+    assert(columns.includes('fill_expires_at'), 'missing fill_expires_at column on tournaments')
+  })
+
+  await check('fill tournament creation persists a server-computed fill_expires_at, no client duration field exists', async () => {
+    const store = await createTournamentStore(dbPath)
+    try {
+      db!.prepare(`
+        INSERT INTO profiles (profile_id, account_id, display_name, normalized_display_name, profile_kind, status)
+        VALUES ('readiness-creator', 'readiness-creator', 'Readiness Creator', 'readiness creator', 'human', 'active');
+      `).run()
+      const result = store.createTournament({
+        name: 'Readiness Fill Check',
+        creatorProfileId: 'readiness-creator',
+        visibility: 'public',
+        entryFee: 5000,
+        startMode: 'fill',
+      })
+      assert(result.ok, `tournament creation failed: ${!result.ok ? result.reason : ''}`)
+      if (result.ok) {
+        assert(result.tournament.fillExpiresAt !== null, 'fillExpiresAt was not persisted')
+        assert(
+          typeof (result.tournament as Record<string, unknown>).fillDurationMinutes === 'undefined' &&
+          typeof (result.tournament as Record<string, unknown>).fillDurationMs === 'undefined',
+          'a client-settable duration field leaked onto the tournament record',
+        )
+      }
+    } finally {
+      store.close()
+    }
+  })
+
+  const tournamentDtoSource = await readFile(join(serverRootPath, 'src', 'tournament', 'tournamentDto.ts'), 'utf8')
+  await check('public list/detail DTO exposes fillExpiresAt (safe field, no scheduler internals)', () => {
+    assert(tournamentDtoSource.includes('fillExpiresAt: string | null'), 'TournamentSummaryDto is missing fillExpiresAt')
+    assert(!/fillExpiresAt[\s\S]{0,80}(leaseId|lockToken|schedulerId)/i.test(tournamentDtoSource), 'DTO appears to leak scheduler-internal fields near fillExpiresAt')
+  })
+
+  const createTournamentInputSource = tournamentDtoSource
+  await check('create-tournament input type has no client-settable fill duration/expiry field', () => {
+    assert(!createTournamentInputSource.includes('fillDurationMinutes'), 'a client fill-duration field exists in tournamentDto.ts')
+  })
+
+  const storeSource = await readFile(join(serverRootPath, 'src', 'db', 'tournamentStore.ts'), 'utf8')
+  await check('CreateTournamentInput type accepts no duration/expiry override from the caller', () => {
+    const inputTypeMatch = /export type CreateTournamentInput = \{[\s\S]*?\n\}/.exec(storeSource)
+    assert(inputTypeMatch !== null, 'CreateTournamentInput type not found')
+    assert(!(inputTypeMatch?.[0] ?? '').includes('fillExpiresAt'), 'CreateTournamentInput accepts a client-supplied fillExpiresAt')
+  })
+
+  await check('no destructive DELETE of tournament rows exists in the fill-expiry cancellation path', async () => {
+    const economyStoreSource = await readFile(join(serverRootPath, 'src', 'db', 'tournamentEconomyStore.ts'), 'utf8')
+    assert(!/DELETE FROM tournaments\b/i.test(economyStoreSource), 'a destructive DELETE FROM tournaments was found')
   })
 
   await check('admin store opens on migrated DB and health snapshot is aggregate-only', async () => {
