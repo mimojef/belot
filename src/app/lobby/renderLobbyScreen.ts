@@ -3873,6 +3873,7 @@ function renderMobileFriendCard(
         <div style="position:relative;width:52px;height:52px;flex:0 0 auto;">
           <div style="width:100%;height:100%;border-radius:8px;border:1px solid rgba(212,165,32,0.48);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:20px;font-weight:900;">${renderFriendAvatar(profile)}</div>
           ${renderLevelBadge(profile.level, 'sm')}
+          ${variant === 'friend' ? renderFriendOnlineStatusDot(relationship.isOnline) : ''}
         </div>
         <div style="min-width:0;flex:1;">
           <div style="font-size:15px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
@@ -3912,7 +3913,7 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
           const isActive = activeConversation?.friendshipId === conversation.friendshipId
           const displayName = conversation.friend.displayName?.trim() || 'Играч'
           const avatarUrl = conversation.friend.avatarUrl?.trim() ?? ''
-          return `<button type="button" data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}" style="flex:0 0 88px;border:1px solid ${isActive ? 'rgba(212,165,32,0.72)' : 'rgba(255,255,255,0.12)'};border-radius:8px;background:#080808;color:#ffffff;padding:8px;display:grid;gap:6px;justify-items:center;"><div style="width:44px;height:44px;border-radius:8px;background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-weight:900;">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}</div><div style="max-width:72px;font-size:11px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>${conversation.unreadCount > 0 ? `<div style="font-size:10px;font-weight:900;color:#fca5a5;">${conversation.unreadCount} нови</div>` : ''}</button>`
+          return `<button type="button" data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}" style="flex:0 0 88px;border:1px solid ${isActive ? 'rgba(212,165,32,0.72)' : 'rgba(255,255,255,0.12)'};border-radius:8px;background:#080808;color:#ffffff;padding:8px;display:grid;gap:6px;justify-items:center;"><div style="position:relative;width:44px;height:44px;flex:0 0 auto;"><div style="width:100%;height:100%;border-radius:8px;background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-weight:900;">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}</div>${renderFriendOnlineStatusDot(conversation.friend.isOnline)}</div><div style="max-width:72px;font-size:11px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>${conversation.unreadCount > 0 ? `<div style="font-size:10px;font-weight:900;color:#fca5a5;">${conversation.unreadCount} нови</div>` : ''}</button>`
         }).join('')}
       </div>
 
@@ -4225,6 +4226,16 @@ function renderFriendAvatar(profile: PlayerPublicProfileSnapshot): string {
   return fallbackLetter
 }
 
+function renderFriendOnlineStatusDot(isOnline: boolean | undefined): string {
+  if (isOnline === undefined) return ''
+
+  const statusClass = isOnline ? 'friend-online-status-dot--online' : 'friend-online-status-dot--offline'
+  const statusLabel = isOnline ? 'Онлайн' : 'Офлайн'
+  const statusColor = isOnline ? '#22c55e' : '#ef4444'
+
+  return `<span class="friend-online-status-dot ${statusClass}" aria-label="${statusLabel}" title="${statusLabel}" style="position:absolute;right:-2px;bottom:-2px;width:11px;height:11px;border-radius:50%;background:${statusColor};border:2px solid #050505;box-sizing:border-box;pointer-events:none;"></span>`
+}
+
 function renderFriendRelationshipCard(
   relationship: FriendRelationshipSnapshot,
   variant: 'incoming' | 'outgoing' | 'friend',
@@ -4241,6 +4252,7 @@ function renderFriendRelationshipCard(
             ${renderFriendAvatar(profile)}
           </div>
           ${renderLevelBadge(profile.level, 'sm')}
+          ${variant === 'friend' ? renderFriendOnlineStatusDot(relationship.isOnline) : ''}
         </div>
         <div style="min-width:0;">
           <div style="font-size:15px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
