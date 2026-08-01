@@ -453,5 +453,64 @@ await check('[37] Няма WebSocket tournament protocol в тази фича', 
   )
 })
 
+// ── Temporary public maintenance notice (fix(tournaments): show development
+// notice) — /tournaments и /tournaments/<id> показват само "в разработка"
+// съобщение, докато admin панелът и реалния UI код (по-долу в същия файл,
+// зад guard-а) остават непокътнати. ──
+await check('[MAINT-1] Maintenance guard флагът съществува и е включен', () => {
+  assert(
+    tournamentsScreenSource.includes('const TOURNAMENTS_PUBLIC_MAINTENANCE_MODE = true'),
+    'Липсва или е изключен TOURNAMENTS_PUBLIC_MAINTENANCE_MODE',
+  )
+})
+
+await check('[MAINT-2] renderTournamentsScreen прави ранен return зад maintenance guard-а', () => {
+  const match = tournamentsScreenSource.match(
+    /export function renderTournamentsScreen\(state: LobbyScreenState\): string \{\s*\n\s*if \(TOURNAMENTS_PUBLIC_MAINTENANCE_MODE\) \{\s*\n\s*return renderTournamentsMaintenanceNotice\(\)/,
+  )
+  assert(match !== null, 'renderTournamentsScreen няма ранен maintenance return в самото начало на функцията')
+})
+
+await check('[MAINT-3] renderTournamentDetailScreen прави ранен return зад maintenance guard-а', () => {
+  const match = tournamentsScreenSource.match(
+    /export function renderTournamentDetailScreen\(state: LobbyScreenState\): string \{\s*\n\s*if \(TOURNAMENTS_PUBLIC_MAINTENANCE_MODE\) \{\s*\n\s*return renderTournamentsMaintenanceNotice\(\)/,
+  )
+  assert(match !== null, 'renderTournamentDetailScreen няма ранен maintenance return в самото начало на функцията')
+})
+
+await check('[MAINT-4] Maintenance екранът показва точния текст от заявката', () => {
+  assert(tournamentsScreenSource.includes('Турнирите са в разработка'), 'Липсва заглавие "Турнирите са в разработка"')
+  assert(
+    tournamentsScreenSource.includes('В момента извършваме финални тестове. Очаквайте скоро.'),
+    'Липсва описанието на maintenance екрана',
+  )
+})
+
+await check('[MAINT-5] "Към лобито" бутонът ползва съществуващия self-wiring SPA nav data-атрибут', () => {
+  assert(
+    tournamentsScreenSource.includes('href="/lobby" data-lobby-nav-lobby="1"'),
+    'Липсва data-lobby-nav-lobby="1" линк към /lobby в maintenance markup-а',
+  )
+})
+
+await check('[MAINT-6] Реалната tournament UI логика НЕ е изтрита (само guard-ната, за лесно връщане)', () => {
+  assert(
+    tournamentsScreenSource.includes('data-tournament-create-open="1"'),
+    'Реалният "+ Създай турнир" бутон вече не съществува в кода — guard-ът трябва да СКРИВА, не да трие функционалността',
+  )
+  assert(
+    tournamentsScreenSource.includes('data-tournament-enter-active-match="1"'),
+    'Реалният "Влез в масата" бутон вече не съществува в кода',
+  )
+})
+
+await check('[MAINT-7] Admin tournament панелът не е засегнат (различен renderer/route, извън тази проверка)', () => {
+  assert(
+    !tournamentsScreenSource.includes('renderAdminTournamentsPanel')
+      && !tournamentsScreenSource.includes('renderAdminTournamentDetailPanel'),
+    'renderTournamentsScreen.ts не трябва да реферира admin tournament renderer-и',
+  )
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)

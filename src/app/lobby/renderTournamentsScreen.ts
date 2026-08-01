@@ -9,6 +9,33 @@ import type {
 } from '../network/createGameServerClient'
 import type { LobbyScreenState } from './renderLobbyScreen'
 
+// Временен публичен maintenance guard (виж fix(tournaments): show development
+// notice) — НЕ трие/променя реалната turnament UI логика по-долу в този файл,
+// само я прескача с ранен return. Смени на false, за да върнеш публичния
+// tournaments UI, без да пипаш нищо друго в този файл. Admin tournament
+// панелът (src/app/adminTournaments/) е напълно отделен renderer/route и не
+// се засяга от този флаг.
+const TOURNAMENTS_PUBLIC_MAINTENANCE_MODE = true
+
+function renderTournamentsMaintenanceNotice(): string {
+  return `
+    <section style="padding:0 4px;">
+      <div style="min-height:360px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:14px;padding:32px 16px;">
+        <h2 style="font-size:22px;font-weight:900;color:#ffffff;margin:0;">Турнирите са в разработка</h2>
+        <p style="font-size:14px;line-height:1.5;color:rgba(248,250,252,0.72);max-width:420px;margin:0;">
+          В момента извършваме финални тестове. Очаквайте скоро.
+        </p>
+        <a href="/lobby" data-lobby-nav-lobby="1" style="
+          margin-top:10px;display:inline-flex;align-items:center;justify-content:center;
+          height:44px;padding:0 22px;border-radius:10px;text-decoration:none;
+          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;
+          font-size:14px;font-weight:900;
+        ">Към лобито</a>
+      </div>
+    </section>
+  `
+}
+
 function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -303,6 +330,10 @@ function renderIncomingInvitesSection(state: LobbyScreenState): string {
 }
 
 export function renderTournamentsScreen(state: LobbyScreenState): string {
+  if (TOURNAMENTS_PUBLIC_MAINTENANCE_MODE) {
+    return renderTournamentsMaintenanceNotice()
+  }
+
   const isMineFilter = state.tournamentsFilter === 'mine'
 
   const howItWorksBar = `
@@ -689,6 +720,10 @@ function renderTournamentTeamsList(t: TournamentDetailSnapshot): string {
 }
 
 export function renderTournamentDetailScreen(state: LobbyScreenState): string {
+  if (TOURNAMENTS_PUBLIC_MAINTENANCE_MODE) {
+    return renderTournamentsMaintenanceNotice()
+  }
+
   if (state.tournamentDetailLoading) {
     return `<section style="padding:0 4px;"><div style="min-height:320px;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:16px;font-weight:800;">Зареждане...</div></section>`
   }
