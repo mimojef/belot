@@ -29,6 +29,20 @@
  *  D. Both-teams-missing → ботове → реален закъснял takeover           [24]-[27]
  *  E. Restart recovery за stale active_room_snapshots (реален store)   [28]-[32]
  *  F. Final walkover + settlement точно веднъж                         [33]-[35]
+ *
+ * fix(tournaments): route both teams after walkover — добавя (запазвайки
+ * номерацията по-горе непроменена, новите проверки са именувани по буква):
+ *  [A-winner] / [B-loser] semifinal walkover — routing на победител/загубил
+ *    (myPlacement, myActiveMatch, personal elimination callout, no-show
+ *    reconnect, липса на penalty/economy за конкретния неявил се профил).
+ *  [C] Feeder audience — негативно scoping (не изтича към чужди турнири).
+ *  [D]/[E] Final walkover — champion/runner-up routing, реални награди,
+ *    без "eliminated без награда" за runner-up, без waiting view.
+ *  [F] Reconnect на неявил се профил (semifinal и final) — resume се
+ *    отхвърля чисто, вижда правилния личен резултат при следващо влизане.
+ *  Client fixture проверки чрез директен import на
+ *  renderTournamentDetailScreen (реалната клиентска render функция) върху
+ *  реално server-computed DTO — не source-fragment търсене.
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
@@ -41,6 +55,8 @@ import { dirname, extname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import WebSocket from 'ws'
+import { renderTournamentDetailScreen } from '../../src/app/lobby/renderTournamentsScreen.js'
+import type { LobbyScreenState } from '../../src/app/lobby/renderLobbyScreen.js'
 
 const SERVER_READY_TIMEOUT_MS = 30_000
 
@@ -198,6 +214,44 @@ async function getTournamentDetail(port: number, cookie: string, tournamentId: s
     throw new Error(`getTournamentDetail failed: status=${r.status} body=${JSON.stringify(r.body)}`)
   }
   return r.body.tournament
+}
+
+// Рендира РЕАЛНАТА tournament detail страница (renderTournamentDetailScreen,
+// клиентски модул) върху РЕАЛНО server-computed DTO (не измислен fixture) —
+// поведенческа проверка на клиентския callout/текст, не source-fragment
+// търсене. renderTournamentsScreen.ts няма runtime зависимости отвъд себе си
+// (само `import type` за протокол/state типовете), затова е безопасно за
+// директен import тук.
+function renderTournamentDetailScreenForFixture(tournament: any, viewerProfileId = 'fixture-viewer'): string {
+  const state: LobbyScreenState = {
+    profile: { profileId: viewerProfileId, displayName: 'Fixture', avatarUrl: null },
+    displayName: 'Fixture',
+    tournamentDetailLoading: false,
+    tournamentDetailErrorText: null,
+    tournamentDetailRequiresPassword: false,
+    tournamentDetailPasswordDraft: '',
+    tournamentDetailUnlockBusy: false,
+    tournamentDetailUnlockErrorText: null,
+    tournamentDetailId: tournament.tournamentId,
+    tournamentDetail: tournament,
+    tournamentJoinConfirmOpen: false,
+    tournamentJoinBusy: false,
+    tournamentJoinErrorText: null,
+    tournamentPartnerPickerOpen: false,
+    tournamentPartnerPickerLoading: false,
+    tournamentPartnerPickerErrorText: null,
+    tournamentPartnerInviteBusy: false,
+    tournamentPartnerInviteErrorText: null,
+    tournamentPartnerInviteQuery: '',
+    tournamentPartnerCandidates: [],
+    tournamentLeaveConfirmOpen: false,
+    tournamentLeaveBusy: false,
+    tournamentLeaveErrorText: null,
+    tournamentCancelConfirmOpen: false,
+    tournamentCancelBusy: false,
+    tournamentCancelErrorText: null,
+  } as LobbyScreenState
+  return renderTournamentDetailScreen(state)
 }
 
 // ─── WebSocket helpers ───────────────────────────────────────────────────────
@@ -591,6 +645,67 @@ try {
     assert(countRows(alphaDb, `SELECT COUNT(*) AS count FROM match_economy_ledger WHERE room_id = ?;`, sfCRoomId) === 0, 'unexpected match_economy_ledger row')
   })
 
+  // ── C. FEEDER AUDIENCE (негативно scoping — победилият SF-C отбор чака
+  // именно SF-A; не трябва да получава feeder съобщения за чужди турнири) ──
+
+  await check('[C] Победилият SF-C отбор не получава feeder съобщения за турнири, в които не участва', () => {
+    for (const client of sfCClients) {
+      const foreignFeederFrame = client.frames.find((f) =>
+        (f.type === 'tournament_feeder_score_progress' || f.type === 'tournament_feeder_match_completed') &&
+        f.tournamentId !== alphaTournament.tournamentId,
+      )
+      assert(foreignFeederFrame === undefined, `received a feeder message for an unrelated tournament: ${JSON.stringify(foreignFeederFrame)}`)
+    }
+  })
+
+  // ── Полуфинален walkover: routing на ПОБЕДИЛИЯ и ЗАГУБИЛИЯ отбор
+  // (виж fix(tournaments): route both teams after walkover) ─────────────
+
+  const sfCAbsent = sfCPlayers.filter((x) => x.assignment.teamId !== sfCPresentTeamId)
+
+  await check('[A-winner] Победилият отбор не е "eliminated" и все още няма myActiveMatch (изчаква другия полуфинал)', async () => {
+    const winnerDetail = await getTournamentDetail(port, sfCPresent[0]!.p.cookie, alphaTournament.tournamentId)
+    assert(winnerDetail.viewer.myPlacement !== 'eliminated', `winner myPlacement=${winnerDetail.viewer.myPlacement}`)
+    assert(winnerDetail.myActiveMatch === null, 'winner already has a final assignment before the other semifinal finished')
+  })
+
+  // SF-A (sibling полуфинал) остава нарочно "in_progress" за целия тест (за
+  // да провери реален cut action/reconnect в сценарий A/B), затова целият
+  // semifinal кръг НЕ приключва — bracket-ladder логиката (ensureNextRound,
+  // виж коментара "само загубилите в currentRoundType стават 'eliminated'
+  // веднага" в tournamentCoordinator.ts) финализира entryStatus='eliminated'
+  // едва когато И ДВАТА sibling мача са завършени, не мач по мач. Затова тук
+  // проверяваме само каквото е гарантирано веднага след ТОЗИ мач (не
+  // champion/runner_up, без active match/room) — пълният 'eliminated' label
+  // (round вече напълно решен) се проверява отделно в Gamma по-долу, където
+  // и двата полуфинала реално приключват.
+  await check('[B-loser] Загубилият отбор (включително неявилият се играч) няма myActiveMatch и не е champion/runner_up', async () => {
+    for (const { p } of sfCAbsent) {
+      const loserDetail = await getTournamentDetail(port, p.cookie, alphaTournament.tournamentId)
+      assert(loserDetail.viewer.myPlacement !== 'champion' && loserDetail.viewer.myPlacement !== 'runner_up', `loser ${p.profileId} myPlacement=${loserDetail.viewer.myPlacement}`)
+      assert(loserDetail.myActiveMatch === null, `loser ${p.profileId} unexpectedly still has an active match`)
+    }
+  })
+
+  await check('[F] Неявилият се играч не може да resume-не приключилата стая (не виси на "Зареждане на играта...")', async () => {
+    const noShow = sfCAbsent[0]!
+    const { resumed, failed } = await resumeRoomAndWait(port, noShow.p.cookie, noShow.assignment.roomId, noShow.assignment.reconnectToken)
+    assert(resumed === null, 'no-show player unexpectedly resumed the already-closed walkover room')
+    assert(failed !== null, 'expected room_resume_failed for the no-show player on the closed room')
+  })
+
+  await check('[B-loser] Няма penalty/economy операция за неявилия се играч конкретно', () => {
+    const noShowProfileId = sfCAbsent[0]!.p.profileId
+    assert(countRows(alphaDb, `SELECT COUNT(*) AS count FROM table_exit_penalties WHERE profile_id = ?;`, noShowProfileId) === 0, 'unexpected penalty for no-show profile')
+    assert(countRows(alphaDb, `SELECT COUNT(*) AS count FROM match_economy_ledger WHERE profile_id = ?;`, noShowProfileId) === 0, 'unexpected economy ledger row for no-show profile')
+  })
+
+  await check('[B-loser] tournament detail на неявилия се играч не показва премахнатата публична "Турнирна схема"', async () => {
+    const loserDetail = await getTournamentDetail(port, sfCAbsent[0]!.p.cookie, alphaTournament.tournamentId)
+    const html = renderTournamentDetailScreenForFixture(loserDetail)
+    assert(!html.includes('Турнирна схема'), 'removed public bracket section must not reappear')
+  })
+
   for (const c of sfAClients) closeWs(c)
   for (const c of sfCClients) closeWs(c)
   alphaDb.close()
@@ -674,9 +789,11 @@ try {
   const gammaDb = openLiveDb(isolated.databaseFile)
 
   const gammaWinners: Array<{ p: { cookie: string; profileId: string }; assignment: any }[]> = []
+  const gammaLosers: Array<{ p: { cookie: string; profileId: string }; assignment: any }[]> = []
   for (const [matchId, players] of gammaByMatch.entries()) {
     const presentTeamId = players[0]!.assignment.teamId
     const present = players.filter((x) => x.assignment.teamId === presentTeamId)
+    const absent = players.filter((x) => x.assignment.teamId !== presentTeamId)
     for (const { p, assignment } of present) {
       const { resumed, failed } = await resumeRoomAndWait(port, p.cookie, assignment.roomId, assignment.reconnectToken)
       assert(resumed !== null, `gamma semifinal resume failed: ${JSON.stringify(failed)}`)
@@ -687,7 +804,19 @@ try {
       return match !== undefined && match.status === 'completed' && match.result_kind === 'walkover'
     }, 20_000)
     gammaWinners.push(present)
+    gammaLosers.push(absent)
   }
+
+  await check('[B-loser] И двата загубили полуфинала отбора в Gamma виждат eliminated + callout за служебна загуба', async () => {
+    for (const loserTeam of gammaLosers) {
+      for (const { p } of loserTeam) {
+        const detail = await getTournamentDetail(port, p.cookie, gammaTournament.tournamentId)
+        assert(detail.viewer.myPlacement === 'eliminated', `profile ${p.profileId} myPlacement=${detail.viewer.myPlacement}`)
+        const html = renderTournamentDetailScreenForFixture(detail)
+        assert(html.includes('Отпаднахте на полуфинал със служебна загуба.'), 'missing walkover elimination callout for gamma loser')
+      }
+    }
+  })
 
   let gammaFinalMatchId: string | null = null
   let gammaFinalRoomId: string | null = null
@@ -714,6 +843,17 @@ try {
   for (const { p } of gammaWinners[0]!) {
     const detail = await getTournamentDetail(port, p.cookie, gammaTournament.tournamentId)
     gammaFinalPlayers.push({ p, assignment: detail.myActiveMatch })
+  }
+
+  // Другият финалистки отбор (победители на другия полуфинал) НИКОГА не се
+  // свързва към финала — те стават "загубил финала служебно" (runner-up).
+  // Улавяме assignment-а им РАНО (преди да форсираме deadline-а), за да
+  // можем после да тестваме stale resume_room с истинския им token.
+  const gammaFinalRunnerUpPlayers: Array<{ p: { cookie: string; profileId: string }; assignment: any }> = []
+  for (const { p } of gammaWinners[1]!) {
+    const detail = await getTournamentDetail(port, p.cookie, gammaTournament.tournamentId)
+    assert(detail.myActiveMatch?.matchId === gammaFinalMatchId, `runner-up profile ${p.profileId} missing final assignment`)
+    gammaFinalRunnerUpPlayers.push({ p, assignment: detail.myActiveMatch })
   }
 
   await check('[33] Walkover cleanup работи и за final (само единият финалист се явява)', async () => {
@@ -758,6 +898,40 @@ try {
     const { resumed, failed } = await resumeRoomAndWait(port, gammaFinalPlayers[0]!.p.cookie, gammaFinalRoomId!, gammaFinalPlayers[0]!.assignment.reconnectToken)
     assert(resumed === null, 'stale final room unexpectedly accepted a resume_room call')
     assert(failed !== null, 'expected room_resume_failed for the closed final room')
+  })
+
+  // ── D. FINAL WALKOVER — WINNER ───────────────────────────────────────────
+
+  await check('[D] Победителите на финала виждат champion резултат, не waiting view, и получават личната си награда', async () => {
+    for (const { p } of gammaFinalPlayers) {
+      const detail = await getTournamentDetail(port, p.cookie, gammaTournament.tournamentId)
+      assert(detail.viewer.myPlacement === 'champion', `champion profile ${p.profileId} myPlacement=${detail.viewer.myPlacement}`)
+      assert(typeof detail.viewer.myPrizeAmount === 'number' && detail.viewer.myPrizeAmount > 0, `champion profile ${p.profileId} missing prize amount`)
+      assert(detail.myActiveMatch === null, `champion profile ${p.profileId} unexpectedly still has an active match (waiting view)`)
+      const html = renderTournamentDetailScreenForFixture(detail)
+      assert(html.includes('Шампиони!') && html.includes('Спечелихте финала служебно.'), `missing champion walkover text, snippet=${html.slice(0, 400)}`)
+    }
+  })
+
+  // ── E. FINAL WALKOVER — LOSER (runner-up) ────────────────────────────────
+
+  await check('[E] Загубилите финала виждат runner-up резултат и своята награда, не "eliminated без награда"', async () => {
+    for (const { p } of gammaFinalRunnerUpPlayers) {
+      const detail = await getTournamentDetail(port, p.cookie, gammaTournament.tournamentId)
+      assert(detail.viewer.myPlacement === 'runner_up', `runner-up profile ${p.profileId} myPlacement=${detail.viewer.myPlacement}`)
+      assert(typeof detail.viewer.myPrizeAmount === 'number' && detail.viewer.myPrizeAmount > 0, `runner-up profile ${p.profileId} missing prize amount`)
+      assert(detail.myActiveMatch === null, `runner-up profile ${p.profileId} unexpectedly still has an active match (waiting view)`)
+      const html = renderTournamentDetailScreenForFixture(detail)
+      assert(html.includes('Финалисти.') && html.includes('Загубихте финала служебно.'), `missing runner-up walkover text, snippet=${html.slice(0, 400)}`)
+      assert(!html.includes('Отпаднахте на полуфинал'), 'runner-up must not be shown the semifinal elimination callout')
+    }
+  })
+
+  await check('[F] Неявилият се финалист не може да resume-не приключилата финална стая', async () => {
+    const noShowFinalist = gammaFinalRunnerUpPlayers[0]!
+    const { resumed, failed } = await resumeRoomAndWait(port, noShowFinalist.p.cookie, noShowFinalist.assignment.roomId, noShowFinalist.assignment.reconnectToken)
+    assert(resumed === null, 'no-show finalist unexpectedly resumed the closed final room')
+    assert(failed !== null, 'expected room_resume_failed for the no-show finalist')
   })
 
   gammaDb.close()

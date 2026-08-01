@@ -517,6 +517,57 @@ function renderTournamentMatchAssignmentCallout(t: TournamentDetailSnapshot): st
   `
 }
 
+// Намира match записа за даден кръг (напр. финала) в t.rounds — server-
+// authoritative данните вече идват с DTO-то (rounds полето не е премахнато,
+// само публичната "Турнирна схема" визуализация, виж
+// fix(tournaments): remove public bracket section), затова е безопасно да се
+// ползва вътрешно тук, без да се връща премахнатата bracket секция.
+function findRoundMatch(
+  t: TournamentDetailSnapshot,
+  roundType: string,
+): TournamentDetailSnapshot['rounds'][number]['matches'][number] | null {
+  const round = t.rounds.find((r) => r.roundType === roundType)
+  return round?.matches[0] ?? null
+}
+
+// Намира completed мача, в който отборът на viewer-а е загубил (за
+// "Отпаднахте на <кръг> със служебна загуба" callout-а, §3/§7 в task
+// spec-а) — t.myTeam остава resolve-нат дори след elimination (виж
+// selectEntriesForTeamStatement коментара в tournamentCoordinator.ts).
+function findMyEliminationMatch(
+  t: TournamentDetailSnapshot,
+): { match: TournamentDetailSnapshot['rounds'][number]['matches'][number]; roundType: string } | null {
+  if (t.myTeam === null) return null
+  const myTeamId = t.myTeam.teamId
+  for (const round of t.rounds) {
+    for (const match of round.matches) {
+      if (match.status !== 'completed') continue
+      if (match.teamAId !== myTeamId && match.teamBId !== myTeamId) continue
+      if (match.winnerTeamId === myTeamId) continue
+      return { match, roundType: round.roundType }
+    }
+  }
+  return null
+}
+
+// Личен callout за служебно отпаднал отбор (§3.6 в task spec-а) — за разлика
+// от renderTournamentFinalSummary (показва се само след като целият турнир
+// приключи), този се показва веднага щом viewer.myPlacement стане
+// 'eliminated', докато турнирът е още в ход (другите мачове продължават).
+function renderTournamentWalkoverEliminationCallout(t: TournamentDetailSnapshot): string {
+  if (t.viewer.myPlacement !== 'eliminated' || t.status === 'finished') return ''
+  const elimination = findMyEliminationMatch(t)
+  if (elimination === null || elimination.match.resultKind !== 'walkover' || elimination.roundType === 'final') {
+    return ''
+  }
+  const roundLabel = tournamentRoundTypeLabel(elimination.roundType).toLowerCase()
+  return `
+    <div style="background:#0d0d0d;border:1px solid rgba(248,113,113,0.32);border-radius:10px;padding:16px;margin-bottom:20px;">
+      <div style="font-size:13px;font-weight:800;color:#fca5a5;">Отпаднахте на ${escapeHtml(roundLabel)} със служебна загуба.</div>
+    </div>
+  `
+}
+
 function renderTournamentFinalSummary(t: TournamentDetailSnapshot): string {
   const hasFinalWinner = t.championTeamId !== null || t.runnerUpTeamId !== null
   if (!hasFinalWinner && t.status !== 'finished') return ''
@@ -530,11 +581,20 @@ function renderTournamentFinalSummary(t: TournamentDetailSnapshot): string {
     if (team === null || team.members.length === 0) return 'Отбор'
     return team.members.map((member) => member.displayName).join(' и ')
   }
+  // Финалът, решен служебно (§4/§5 в task spec-а), използва различен личен
+  // текст ("Шампиони! Спечелихте финала служебно." / "Финалисти. Загубихте
+  // финала служебно."), но наградната сума остава изведена по същия начин.
+  const finalMatch = findRoundMatch(t, 'final')
+  const finalWasWalkover = finalMatch?.resultKind === 'walkover'
   const placementText =
     t.viewer.myPlacement === 'champion'
-      ? `Ти си шампион. Награда: ${formatAmount(t.viewer.myPrizeAmount ?? 0)}.`
+      ? finalWasWalkover
+        ? `Шампиони! Спечелихте финала служебно. Награда: ${formatAmount(t.viewer.myPrizeAmount ?? 0)}.`
+        : `Ти си шампион. Награда: ${formatAmount(t.viewer.myPrizeAmount ?? 0)}.`
       : t.viewer.myPlacement === 'runner_up'
-        ? `Ти си на второ място. Награда: ${formatAmount(t.viewer.myPrizeAmount ?? 0)}.`
+        ? finalWasWalkover
+          ? `Финалисти. Загубихте финала служебно. Награда: ${formatAmount(t.viewer.myPrizeAmount ?? 0)}.`
+          : `Ти си на второ място. Награда: ${formatAmount(t.viewer.myPrizeAmount ?? 0)}.`
         : t.viewer.myPlacement === 'eliminated'
           ? 'Твоят отбор отпадна преди финала.'
           : ''
@@ -699,6 +759,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
       </div>
 
       ${renderTournamentMatchAssignmentCallout(t)}
+      ${renderTournamentWalkoverEliminationCallout(t)}
       ${renderTournamentFinalSummary(t)}
       ${renderTournamentFillTimeoutCancelledCallout(t)}
 

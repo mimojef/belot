@@ -4531,6 +4531,26 @@ client = createGameServerClient({
       return
     }
 
+    // Live feeder резултат, докато чакащият (walkover или нормално спечелил)
+    // отбор е обратно в лобито и вижда tournamentFeederWaitingStrip-а (§2/§7
+    // в task spec-а: "Live score update-ите се получават без refresh") —
+    // без този клон съобщението стигаше само до createActiveRoomFlowController,
+    // но там няма активна стая, в която да го рендира (играчът вече е напуснал
+    // active-room flow-а), затова лентата никога не се обновяваше на живо.
+    if (message.type === 'tournament_feeder_score_progress') {
+      if (currentFeederWaitingState !== null) {
+        currentFeederWaitingState = {
+          ...currentFeederWaitingState,
+          status: 'in_progress',
+          scoreA: message.scoreTeamA,
+          scoreB: message.scoreTeamB,
+        }
+        tournamentFeederWaitingStrip.setState(currentFeederWaitingState)
+      }
+      activeRoom.handleServerMessage(message)
+      return
+    }
+
     if (message.type === 'friend_acceptance_notification_read') {
       lobby.handleServerMessage(message)
       return

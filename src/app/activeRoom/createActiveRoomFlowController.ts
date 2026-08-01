@@ -272,6 +272,19 @@ export function createActiveRoomFlowController(
     return null
   }
 
+  // Споделено между нормалния round-result екран и walkover-result екрана
+  // (§7 в task spec-а) — и двата показват същата "Изчаква се краят на
+  // другия полуфинал" кутия, захранена от tournamentRoundResultFeeder* state-а.
+  function computeFeederStatusText(): string {
+    return tournamentRoundResultFeederStatus === 'completed'
+      ? `${tournamentRoundResultFeederScoreA ?? 0} : ${tournamentRoundResultFeederScoreB ?? 0} — завършен`
+      : tournamentRoundResultFeederStatus === 'in_progress'
+        ? tournamentRoundResultFeederScoreA !== null && tournamentRoundResultFeederScoreB !== null
+          ? `${tournamentRoundResultFeederScoreA} : ${tournamentRoundResultFeederScoreB} — мачът е в ход`
+          : 'Мачът е в ход'
+        : 'Изчаква се...'
+  }
+
   async function loadTournamentRoundResultFeederInfo(tournamentId: string, completedMatchId: string): Promise<void> {
     if (tournamentRoundResultFetchInFlight) return
     tournamentRoundResultFetchInFlight = true
@@ -2389,19 +2402,46 @@ export function createActiveRoomFlowController(
       return
     }
 
-    // Walkover резултат (§7 в task spec-а) — мачът е приключил СЛУЖЕБНО,
-    // преди реален game state изобщо да е стартирал (room.game.phase остава
-    // 'bootstrap' на сървъра до момента на затваряне на стаята). Без този
-    // клон клиентът пада в generic "Зареждане на играта..." fallback ЗАВИНАГИ,
-    // защото нито един cutting/dealing/bidding/playing/match-ended клон по-долу
-    // не съвпада с bootstrap фаза — точно симптомът от production инцидента.
+    // Walkover резултат (виж fix(tournaments): route both teams after
+    // walkover) — мачът е приключил СЛУЖЕБНО, преди реален game state изобщо
+    // да е стартирал (room.game.phase остава 'bootstrap' на сървъра до
+    // момента на затваряне на стаята). Без този клон клиентът пада в generic
+    // "Зареждане на играта..." fallback ЗАВИНАГИ, защото нито един
+    // cutting/dealing/bidding/playing/match-ended клон по-долу не съвпада с
+    // bootstrap фаза — точно симптомът от production инцидента.
     // "Печели ли локалният играч" се извежда от missingPlayers (ако моят seat
     // НЕ е сред липсващите, моят отбор е присъствал и печели служебно) — без
-    // нужда от допълнително сравнение по team id.
+    // нужда от допълнително сравнение по team id. Победителят на не-финален
+    // кръг минава през СЪЩИЯ next-round waiting/feeder flow като нормално
+    // спечелен мач (loadTournamentRoundResultFeederInfo +
+    // onEnterWaitingForNextTournamentRound) — не се създава отделен waiting
+    // екран, само transient result съобщението се различава (няма реален
+    // резултат за показване).
     if (tournamentAttendance !== null && tournamentAttendance.walkover !== null) {
       const localSeat = activeRoomState.seat
       const wonByWalkover = !tournamentAttendance.missingPlayers.some((player) => player.seat === localSeat)
+      const isFinalRound = activeRoomState.tournamentRoundType === 'final'
       const roundLabel = tournamentWaitingRoundLabel(activeRoomState.tournamentRoundType)
+
+      if (
+        wonByWalkover &&
+        !isFinalRound &&
+        activeRoomState.tournamentMatchId !== null &&
+        tournamentRoundResultMatchId !== activeRoomState.tournamentMatchId
+      ) {
+        clearTournamentRoundResultState()
+        tournamentRoundResultMatchId = activeRoomState.tournamentMatchId
+        if (activeRoomState.tournamentId !== null) {
+          void loadTournamentRoundResultFeederInfo(activeRoomState.tournamentId, activeRoomState.tournamentMatchId)
+        }
+      }
+
+      const title = wonByWalkover ? 'Служебна победа' : 'Служебна загуба'
+      const subtitle = wonByWalkover
+        ? (isFinalRound ? 'Спечелихте финала служебно.' : 'Класирахте се за финала.')
+        : (isFinalRound ? 'Загубихте финала служебно.' : 'Вашият отбор отпадна, защото съотборникът ви не се включи навреме.')
+      const showFeederBox = wonByWalkover && !isFinalRound && tournamentRoundResultFeederLabel !== null
+      const feederStatusText = computeFeederStatusText()
 
       options.root.innerHTML = `
         <div
@@ -2434,8 +2474,15 @@ export function createActiveRoomFlowController(
             "
           >
             <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(roundLabel)}</div>
-            <div style="margin-top:12px;font-size:24px;font-weight:900;color:${wonByWalkover ? '#22c55e' : '#f87171'};">${wonByWalkover ? 'Печелите служебно' : 'Отпаднахте служебно'}</div>
-            <div style="margin-top:10px;font-size:14px;line-height:1.5;color:rgba(248,250,252,0.75);">${wonByWalkover ? 'Съперникът не се яви навреме.' : 'Отборът ти не се яви навреме.'}</div>
+            <div style="margin-top:12px;font-size:24px;font-weight:900;color:${wonByWalkover ? '#22c55e' : '#f87171'};">${escapeHtml(title)}</div>
+            <div style="margin-top:10px;font-size:14px;line-height:1.5;color:rgba(248,250,252,0.75);">${escapeHtml(subtitle)}</div>
+            ${showFeederBox ? `
+              <div style="margin-top:16px;padding:12px;border-radius:8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);">
+                <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.05em;color:#93c5fd;">Изчаква се краят на другия полуфинал</div>
+                <div style="margin-top:4px;font-size:14px;font-weight:800;">${escapeHtml(tournamentRoundResultFeederLabel ?? '')}</div>
+                <div style="margin-top:6px;font-size:13px;font-weight:700;color:${tournamentRoundResultFeederStatus === 'completed' ? '#22c55e' : '#facc15'};">${escapeHtml(feederStatusText)}</div>
+              </div>
+            ` : ''}
             <div style="margin-top:20px;">
               <button type="button" data-tournament-walkover-continue="1" style="height:44px;padding:0 20px;border:1px solid rgba(255,255,255,0.22);border-radius:8px;background:rgba(255,255,255,0.06);color:#f8fafc;font-size:14px;font-weight:900;cursor:pointer;">Към турнира</button>
             </div>
@@ -2443,6 +2490,14 @@ export function createActiveRoomFlowController(
         </div>
       `
       options.root.querySelector('[data-tournament-walkover-continue]')?.addEventListener('click', () => {
+        if (wonByWalkover && !isFinalRound && tournamentRoundResultFeederLabel !== null) {
+          options.onEnterWaitingForNextTournamentRound({
+            label: tournamentRoundResultFeederLabel,
+            scoreA: tournamentRoundResultFeederScoreA,
+            scoreB: tournamentRoundResultFeederScoreB,
+            status: tournamentRoundResultFeederStatus ?? 'in_progress',
+          })
+        }
         returnToLobbyFromMatchEnded()
       })
       return
@@ -3187,13 +3242,7 @@ export function createActiveRoomFlowController(
       }
 
       const roundLabel = tournamentWaitingRoundLabel(activeRoomState.tournamentRoundType)
-      const feederStatusText = tournamentRoundResultFeederStatus === 'completed'
-        ? `${tournamentRoundResultFeederScoreA ?? 0} : ${tournamentRoundResultFeederScoreB ?? 0} — завършен`
-        : tournamentRoundResultFeederStatus === 'in_progress'
-          ? tournamentRoundResultFeederScoreA !== null && tournamentRoundResultFeederScoreB !== null
-            ? `${tournamentRoundResultFeederScoreA} : ${tournamentRoundResultFeederScoreB} — мачът е в ход`
-            : 'Мачът е в ход'
-          : 'Изчаква се...'
+      const feederStatusText = computeFeederStatusText()
 
       options.root.innerHTML = `
         <div
