@@ -9,6 +9,13 @@ export type ActiveRoomSnapshotStore = {
   loadActiveRooms: () => ServerRoom[]
   upsertRoom: (room: ServerRoom) => void
   markRoomRemoved: (roomId: string) => void
+  // Restart-safety recovery (виж production инцидента: completed турнирен
+  // walkover/normal мач, чиято runtime стая никога не получи status='finished'
+  // преди server restart) — деактивира (изтрива) всеки active_room_snapshots
+  // ред, чийто room_id вече принадлежи на completed tournament_matches, ПРЕДИ
+  // loadActiveRooms() да го рестартира в runtime-а. Idempotent (DELETE...WHERE),
+  // не пипа tournament_matches/settlement/economy, връща броя изтрити редове.
+  deactivateStaleCompletedTournamentRoomSnapshots: () => number
   close: () => void
 }
 
@@ -126,6 +133,15 @@ export async function createActiveRoomSnapshotStore(
     WHERE room_id = ?;
   `)
 
+  const deactivateStaleCompletedTournamentRoomSnapshotsStatement = database.prepare(`
+    DELETE FROM active_room_snapshots
+    WHERE is_active = 1
+      AND room_id IN (
+        SELECT room_id FROM tournament_matches
+        WHERE status = 'completed' AND room_id IS NOT NULL
+      );
+  `)
+
   function loadActiveRooms(): ServerRoom[] {
     const rows = loadActiveRoomsStatement.all() as ActiveRoomSnapshotRow[]
 
@@ -157,6 +173,13 @@ export async function createActiveRoomSnapshotStore(
     markRoomRemovedStatement.run(roomId)
   }
 
+  function deactivateStaleCompletedTournamentRoomSnapshots(): number {
+    const result = deactivateStaleCompletedTournamentRoomSnapshotsStatement.run()
+    return typeof result === 'object' && result !== null && 'changes' in result
+      ? Number((result as { changes?: unknown }).changes ?? 0)
+      : 0
+  }
+
   function close(): void {
     database.close()
   }
@@ -165,6 +188,7 @@ export async function createActiveRoomSnapshotStore(
     loadActiveRooms,
     upsertRoom,
     markRoomRemoved,
+    deactivateStaleCompletedTournamentRoomSnapshots,
     close,
   }
 }

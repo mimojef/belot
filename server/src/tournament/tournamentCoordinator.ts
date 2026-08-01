@@ -134,6 +134,14 @@ type TournamentCoordinatorDeps = {
   getPublicProfile: (profileId: ProfileId) => PublicProfile | null
   getRoom: (roomId: string) => ServerRoom | null
   commitRoom: (room: ServerRoom) => void
+  // Извиква се веднъж, точно когато турнирен мач стане completed (walkover
+  // или нормално изигран) — премахва runtime стаята от serverState/worker
+  // pool ВЕДНАГА и detach-ва всички още свързани connections (виж коментара
+  // при finishTournamentRoom/closeCompletedTournamentRoom по-долу).
+  // Детерминирано и не зависи от TTL/reconnect-grace логиката на
+  // shouldKeepRoomAlive, която иначе би държала стаята жива, докато победилият
+  // отбор е все още свързан.
+  closeCompletedRoom: (room: ServerRoom) => void
   ensureRoomRuntime: (room: ServerRoom) => { ok: true } | { ok: false; reason: string }
   settleTournamentPrizes: (tournamentId: TournamentId) => {
     ok: boolean
@@ -996,6 +1004,35 @@ export async function createTournamentCoordinator(
     return refreshed
   }
 
+  // Затваря runtime стаята на completed турнирен мач (walkover или нормално
+  // изигран, виж resolveAttendance/onTournamentRoomCompleted) — root cause
+  // на production инцидента: ServerRoom.status никъде другаде в кодовата
+  // база не се задава на 'finished', а shouldKeepRoomAlive третира ВСЯКА
+  // турнирна стая с status !== 'finished' като "пази вечно", независимо от
+  // резултата на мача. active_room_snapshots.upsertRoom също решава
+  // is_active/deletion единствено по room.status. Затова тук изрично
+  // маркираме и status, и game.phase като 'finished' ПРЕДИ commit, и веднага
+  // след това извикваме deps.closeCompletedRoom — детерминирано, независимо
+  // дали печелившият отбор все още е свързан (roomHasConnectedHumanParticipants
+  // би върнал true и би отложил обичайния TTL-basiran reap инак).
+  function finishTournamentRoom(match: MatchRow, room: ServerRoom): ServerRoom {
+    const refreshed = refreshTournamentRoomSnapshot(match, room)
+    return {
+      ...refreshed,
+      status: 'finished',
+      game: {
+        ...refreshed.game,
+        phase: 'finished',
+      },
+    }
+  }
+
+  function closeCompletedTournamentRoom(match: MatchRow, room: ServerRoom): void {
+    const finishedRoom = finishTournamentRoom(match, room)
+    deps.commitRoom(finishedRoom)
+    deps.closeCompletedRoom(finishedRoom)
+  }
+
   function ensureMatchRoom(match: MatchRow): 'created' | 'recovered' | 'existing' {
     let roomId = match.room_id
     let createdByThisTick = false
@@ -1193,7 +1230,7 @@ export async function createTournamentCoordinator(
         })
       }
       const resolved = selectMatchByIdStatement.get(match.match_id) as MatchRow
-      commitSnapshot(resolved, room)
+      closeCompletedTournamentRoom(resolved, room)
       advanceCompletedMatch(resolved)
       return resolved
     }
@@ -1641,7 +1678,7 @@ export async function createTournamentCoordinator(
 
     const completed = selectMatchByRoomStatement.get(room.id) as MatchRow
     advanceCompletedMatch(completed)
-    commitSnapshot(completed, room)
+    closeCompletedTournamentRoom(completed, room)
   }
 
   function tryTakeoverNoShowBot(input: {

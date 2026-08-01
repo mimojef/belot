@@ -1132,6 +1132,19 @@ function prepareRestoredRoomForServerStart(
 }
 
 function loadPersistedServerState(): ServerState {
+  // Restart-safety recovery (виж production инцидента: completed турнирен
+  // walkover/normal мач, чиято стая никога не получи status='finished' преди
+  // restart) — премахва stale active_room_snapshots редове за вече completed
+  // tournament_matches, ПРЕДИ да ги рестартираме в runtime-а. Idempotent,
+  // не пипа tournament_matches/settlement/economy.
+  const staleTournamentSnapshotsRemoved =
+    activeRoomSnapshotStore.deactivateStaleCompletedTournamentRoomSnapshots()
+  if (staleTournamentSnapshotsRemoved > 0) {
+    console.log(
+      `[room-snapshot] deactivated stale completed-tournament-match snapshots=${staleTournamentSnapshotsRemoved}`,
+    )
+  }
+
   const restoredRooms = activeRoomSnapshotStore.loadActiveRooms()
   const now = Date.now()
   let nextServerState = createInitialServerState()
@@ -11398,6 +11411,18 @@ try {
     commitRoom: (room) => {
       serverState = commitServerRoomWithSnapshot(room)
       broadcastRoomSnapshots(room, socketRegistry)
+    },
+    // Извиква се веднага след commitRoom(finishedRoom) при completed турнирен
+    // мач (walkover или нормално изигран) — премахва runtime стаята
+    // ДЕТЕРМИНИРАНО и НЕЗАБАВНО, вместо да разчита на обичайния
+    // shouldKeepRoomAlive/TTL reap loop (виж tickRoomGameRuntimes), който би
+    // задържал стаята жива, докато печелившият отбор е все още свързан.
+    // Огледало на cleanupInactiveRoomIfNeeded-ото force-remove разклонение.
+    closeCompletedRoom: (room) => {
+      serverState = removeCommittedServerRoom(room.id)
+      cleanupTempBotsFromRoom(room)
+      markRoomSnapshotRemoved(room.id)
+      activeRoomRuntime.removeRoom(room.id)
     },
     ensureRoomRuntime: (room) => activeRoomRuntime.ensureRoom(room),
     settleTournamentPrizes: (tournamentId) => {

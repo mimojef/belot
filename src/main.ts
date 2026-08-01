@@ -3989,7 +3989,16 @@ lobby = createLobbyFlowController({
     })
   },
   onTournamentEnterActiveMatch: (roomId, reconnectToken) => {
-    showSessionInGameOverlay(roomId, reconnectToken)
+    // Директен resume, огледало на tournamentMatchStartPopup.onEnterTournamentMatch
+    // по-долу — тук НЕ показваме showSessionInGameOverlay ("В момента се играе
+    // игра с този профил"): този бутон се render-ва само когато t.myActiveMatch
+    // вече е authoritative-потвърден мач на ТОЗИ профил (виж
+    // renderTournamentMatchAssignmentCallout), не сценарий на конфликт с друга
+    // активна сесия. Production инцидент root cause: преди тази поправка бутонът
+    // оставаше свързан към предишния (pre-tournamentMatchStartPopup) overlay flow
+    // и играчите никога не пращаха resume_room, затова attendance/ready
+    // оставаше 0 и мачът приключваше служебно на deadline.
+    client.resumeRoom(roomId, reconnectToken)
   },
   onNotifFriendRequestClick: (friendshipId) => {
     const req = lobby?.getPendingFriendRequest(friendshipId)

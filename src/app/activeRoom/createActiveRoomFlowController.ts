@@ -2389,6 +2389,65 @@ export function createActiveRoomFlowController(
       return
     }
 
+    // Walkover резултат (§7 в task spec-а) — мачът е приключил СЛУЖЕБНО,
+    // преди реален game state изобщо да е стартирал (room.game.phase остава
+    // 'bootstrap' на сървъра до момента на затваряне на стаята). Без този
+    // клон клиентът пада в generic "Зареждане на играта..." fallback ЗАВИНАГИ,
+    // защото нито един cutting/dealing/bidding/playing/match-ended клон по-долу
+    // не съвпада с bootstrap фаза — точно симптомът от production инцидента.
+    // "Печели ли локалният играч" се извежда от missingPlayers (ако моят seat
+    // НЕ е сред липсващите, моят отбор е присъствал и печели служебно) — без
+    // нужда от допълнително сравнение по team id.
+    if (tournamentAttendance !== null && tournamentAttendance.walkover !== null) {
+      const localSeat = activeRoomState.seat
+      const wonByWalkover = !tournamentAttendance.missingPlayers.some((player) => player.seat === localSeat)
+      const roundLabel = tournamentWaitingRoundLabel(activeRoomState.tournamentRoundType)
+
+      options.root.innerHTML = `
+        <div
+          ${mobileLayoutAttribute}
+          style="
+            min-height:100vh;
+            width:100%;
+            box-sizing:border-box;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            overflow:hidden;
+            background:${tableBackground};
+            font-family:Inter, system-ui, sans-serif;
+          "
+        >
+          <div
+            style="
+              width:min(92vw, 480px);
+              max-height:calc(100dvh - 32px);
+              overflow:auto;
+              box-sizing:border-box;
+              border:1px solid ${wonByWalkover ? 'rgba(34,197,94,0.45)' : 'rgba(255,255,255,0.18)'};
+              border-radius:8px;
+              padding:24px;
+              background:rgba(15,23,42,0.94);
+              color:#f8fafc;
+              box-shadow:0 24px 70px rgba(2,6,23,0.45);
+              text-align:center;
+            "
+          >
+            <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(roundLabel)}</div>
+            <div style="margin-top:12px;font-size:24px;font-weight:900;color:${wonByWalkover ? '#22c55e' : '#f87171'};">${wonByWalkover ? 'Печелите служебно' : 'Отпаднахте служебно'}</div>
+            <div style="margin-top:10px;font-size:14px;line-height:1.5;color:rgba(248,250,252,0.75);">${wonByWalkover ? 'Съперникът не се яви навреме.' : 'Отборът ти не се яви навреме.'}</div>
+            <div style="margin-top:20px;">
+              <button type="button" data-tournament-walkover-continue="1" style="height:44px;padding:0 20px;border:1px solid rgba(255,255,255,0.22);border-radius:8px;background:rgba(255,255,255,0.06);color:#f8fafc;font-size:14px;font-weight:900;cursor:pointer;">Към турнира</button>
+            </div>
+          </div>
+        </div>
+      `
+      options.root.querySelector('[data-tournament-walkover-continue]')?.addEventListener('click', () => {
+        returnToLobbyFromMatchEnded()
+      })
+      return
+    }
+
     if (cuttingSnapshotForRender) {
       if (!initialStakeEffectShown) {
         initialStakeEffectShown = true
