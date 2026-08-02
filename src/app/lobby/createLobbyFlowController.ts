@@ -19,6 +19,7 @@ import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffe
 import {
   renderLobbyScreen,
   releaseLobbyChatBodyScrollLock,
+  resolveLobbyChatSenderRole,
   syncProfilePopup,
   clearProfileEditorPendingState,
   type AvatarCropSelection,
@@ -8438,9 +8439,13 @@ export function createLobbyFlowController(
       // Merge с дедупликация по messageId — живо съобщение може вече да е
       // пристигнало (напр. през cross-instance poll-а) преди историята,
       // ако subscribe/insert са паднали в много тясен race прозорец.
-      const freshIds = new Set(message.messages.map((m) => m.messageId))
-      const minFreshSeq = message.messages.length > 0
-        ? Math.min(...message.messages.map((m) => m.seq))
+      const normalizedMessages = message.messages.map((m) => ({
+        ...m,
+        senderRole: resolveLobbyChatSenderRole(m),
+      }))
+      const freshIds = new Set(normalizedMessages.map((m) => m.messageId))
+      const minFreshSeq = normalizedMessages.length > 0
+        ? Math.min(...normalizedMessages.map((m) => m.seq))
         : null
 
       // Reconnect/re-subscribe reconciliation: ако клиентско съобщение пада в
@@ -8455,7 +8460,7 @@ export function createLobbyFlowController(
         : state.lobbyChatMessages.filter((m) => m.seq < minFreshSeq || freshIds.has(m.messageId))
 
       const keptExistingIds = new Set(keptExisting.map((m) => m.messageId))
-      const newFromHistory = message.messages.filter((m) => !keptExistingIds.has(m.messageId))
+      const newFromHistory = normalizedMessages.filter((m) => !keptExistingIds.has(m.messageId))
 
       state.lobbyChatMessages = [...keptExisting, ...newFromHistory]
         .sort((a, b) => a.seq - b.seq)
@@ -8475,7 +8480,7 @@ export function createLobbyFlowController(
             senderProfileId: message.senderProfileId,
             senderDisplayName: message.senderDisplayName,
             senderIsChatAdmin: message.senderIsChatAdmin,
-            senderRole: message.senderRole ?? (message.senderIsChatAdmin ? 'chat_admin' : 'player'),
+            senderRole: resolveLobbyChatSenderRole(message),
             body: message.body,
             createdAt: message.createdAt,
           },

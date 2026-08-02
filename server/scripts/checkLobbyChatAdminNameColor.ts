@@ -17,7 +17,9 @@
  */
 
 import {
+  getLobbyChatAuthorNameStyle,
   renderLobbyChatMessageRow,
+  resolveLobbyChatSenderRole,
   type LobbyScreenState,
 } from '../../src/app/lobby/renderLobbyScreen.js'
 import type { LobbyChatMessageSnapshot } from '../../src/app/network/createGameServerClient.js'
@@ -64,7 +66,7 @@ function makeState(canDeleteLobbyChat: boolean): LobbyScreenState {
 }
 
 const GOLD_NAME_MARKER = 'color:#d4a520;font-weight:900;'
-const RED_NAME_MARKER = 'color:#f87171;font-weight:900;text-shadow:0 0 8px rgba(248,113,113,0.35);'
+const RED_NAME_MARKER = 'color:#ef4444;font-weight:900;text-shadow:0 0 8px rgba(239,68,68,0.35);'
 const PURPLE_NAME_MARKER = 'color:#c084fc;font-weight:900;text-shadow:0 0 10px rgba(192,132,252,0.42),0 0 18px rgba(192,132,252,0.22);'
 
 function main(): void {
@@ -122,6 +124,23 @@ function main(): void {
     assert(htmlSubadmin.includes(GOLD_NAME_MARKER), 'subadmin author name should use the standard color')
     assert(!htmlAdmin.includes(PURPLE_NAME_MARKER) && !htmlSubadmin.includes(PURPLE_NAME_MARKER), 'admin/subadmin must not use purple role style')
     assert(!htmlAdmin.includes(RED_NAME_MARKER) && !htmlSubadmin.includes(RED_NAME_MARKER), 'admin/subadmin must not use red role style')
+  })
+
+  check('[2e] history/live/legacy role normalization keeps the same author colors', () => {
+    const historyPika = makeMessage({ messageId: 'history-pika', senderRole: 'pika_team' })
+    const livePika = makeMessage({ messageId: 'live-pika', senderRole: 'pika_team' })
+    const legacyChatAdmin = { senderIsChatAdmin: true }
+    const legacyMissingRole = { senderIsChatAdmin: false }
+    const legacyInvalidRole = { senderIsChatAdmin: false, senderRole: 'pika-team' as never }
+
+    assert(renderLobbyChatMessageRow(makeState(false), historyPika).includes(RED_NAME_MARKER), 'old/history pika_team message should render red')
+    assert(renderLobbyChatMessageRow(makeState(false), livePika).includes(RED_NAME_MARKER), 'new/live pika_team message should render red')
+    assert(resolveLobbyChatSenderRole(legacyChatAdmin) === 'chat_admin', 'legacy senderIsChatAdmin should normalize to chat_admin')
+    assert(resolveLobbyChatSenderRole(legacyMissingRole) === 'player', 'missing non-admin role should normalize to player')
+    assert(resolveLobbyChatSenderRole(legacyInvalidRole) === 'player', 'invalid role should normalize to player')
+    assert(getLobbyChatAuthorNameStyle(legacyChatAdmin).color === '#c084fc', 'legacy chat_admin should use purple')
+    assert(getLobbyChatAuthorNameStyle(legacyMissingRole).color === '#d4a520', 'legacy missing role should use default')
+    assert(getLobbyChatAuthorNameStyle(legacyInvalidRole).color === '#d4a520', 'legacy invalid role should use default')
   })
 
   console.log(`\n${passed} passed, ${failed} failed`)

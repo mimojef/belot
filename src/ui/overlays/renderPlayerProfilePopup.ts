@@ -624,15 +624,15 @@ function renderPikaTeamRoleControls(
           align-items:center;
           padding:3px 10px;
           border-radius:999px;
-          background:rgba(248,113,113,0.16);
-          border:1px solid rgba(248,113,113,0.58);
-          color:#f87171;
+          background:rgba(239,68,68,0.16);
+          border:1px solid rgba(239,68,68,0.58);
+          color:#ef4444;
           font-size:11px;
           font-weight:900;
           letter-spacing:0.04em;
           text-transform:uppercase;
           white-space:nowrap;
-          text-shadow:0 0 8px rgba(248,113,113,0.32);
+          text-shadow:0 0 8px rgba(239,68,68,0.32);
         "
       >Екип Pika.bg</span>
       <span
@@ -658,12 +658,12 @@ function renderPikaTeamRoleControls(
         display:inline-flex;
         align-items:center;
         gap:6px;
-        color:#f87171;
+        color:#ef4444;
         font-size:14px;
         font-weight:900;
         cursor:pointer;
         white-space:nowrap;
-        text-shadow:0 0 8px rgba(248,113,113,0.26);
+        text-shadow:0 0 8px rgba(239,68,68,0.26);
       "
     >Направи Екип Pika.bg</span>
   `

@@ -184,7 +184,7 @@ check('[5] lobby chat messages carry senderRole through DB, protocol, live event
 
 check('[6] pika_team author name is red only in shared lobby chat row renderer; existing role colors match current visual rule', () => {
   assert(renderer.includes("senderRole === 'pika_team'"), 'renderer must branch on pika_team')
-  assert(renderer.includes('#f87171'), 'red color missing')
+  assert(renderer.includes('#ef4444'), 'red color missing')
   assert(renderer.includes("senderRole === 'top_chat_admin' || senderRole === 'chat_admin'") && renderer.includes('#c084fc'), 'chat_admin/top_chat_admin purple color changed/missing')
   assert(renderer.includes('#d4a520'), 'default gold color changed/missing')
   assert(renderer.includes('color:#f1f5f9;font-weight:500;'), 'message body style should remain separate from author color')

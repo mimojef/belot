@@ -2152,19 +2152,44 @@ function renderNav(state: LobbyScreenState): string {
   `
 }
 
-export function renderLobbyChatMessageRow(state: LobbyScreenState, message: LobbyChatMessageSnapshot): string {
-  const canDelete = state.canDeleteLobbyChat
-  const senderRole = message.senderRole ?? (message.senderIsChatAdmin ? 'chat_admin' : 'player')
+export function resolveLobbyChatSenderRole(
+  message: Pick<LobbyChatMessageSnapshot, 'senderIsChatAdmin'> & Partial<Pick<LobbyChatMessageSnapshot, 'senderRole'>>,
+): LobbyChatMessageSnapshot['senderRole'] {
+  if (
+    message.senderRole === 'player' ||
+    message.senderRole === 'chat_admin' ||
+    message.senderRole === 'pika_team' ||
+    message.senderRole === 'top_chat_admin' ||
+    message.senderRole === 'subadmin' ||
+    message.senderRole === 'admin'
+  ) {
+    return message.senderRole
+  }
+
+  return message.senderIsChatAdmin ? 'chat_admin' : 'player'
+}
+
+export function getLobbyChatAuthorNameStyle(
+  message: Pick<LobbyChatMessageSnapshot, 'senderIsChatAdmin'> & Partial<Pick<LobbyChatMessageSnapshot, 'senderRole'>>,
+): { color: string; extraStyle: string } {
+  const senderRole = resolveLobbyChatSenderRole(message)
   const nameColor = senderRole === 'pika_team'
-    ? '#f87171'
+    ? '#ef4444'
     : senderRole === 'top_chat_admin' || senderRole === 'chat_admin'
       ? '#c084fc'
       : '#d4a520'
   const nameExtraStyle = senderRole === 'pika_team'
-    ? 'text-shadow:0 0 8px rgba(248,113,113,0.35);'
+    ? 'text-shadow:0 0 8px rgba(239,68,68,0.35);'
     : senderRole === 'top_chat_admin' || senderRole === 'chat_admin'
       ? 'text-shadow:0 0 10px rgba(192,132,252,0.42),0 0 18px rgba(192,132,252,0.22);'
       : ''
+
+  return { color: nameColor, extraStyle: nameExtraStyle }
+}
+
+export function renderLobbyChatMessageRow(state: LobbyScreenState, message: LobbyChatMessageSnapshot): string {
+  const canDelete = state.canDeleteLobbyChat
+  const { color: nameColor, extraStyle: nameExtraStyle } = getLobbyChatAuthorNameStyle(message)
 
   return `
     <div data-lobby-livechat-message="${escapeHtml(message.messageId)}" style="display:flex;align-items:flex-start;gap:5px;font-size:16px;line-height:1.45;word-break:break-word;">

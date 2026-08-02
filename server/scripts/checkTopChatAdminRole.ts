@@ -211,7 +211,7 @@ check('[6] senderRole snapshot/payload supports top_chat_admin through DB, serve
 check('[7] top_chat_admin and chat_admin names use the shared purple glow style only for the author name; existing defaults remain', () => {
   assert(renderer.includes('#c084fc'), 'top_chat_admin purple color missing')
   assert(renderer.includes('rgba(192,132,252,0.42)'), 'top_chat_admin purple glow missing')
-  assert(renderer.includes("senderRole === 'pika_team'") && renderer.includes('#f87171'), 'pika_team red style changed/missing')
+  assert(renderer.includes("senderRole === 'pika_team'") && renderer.includes('#ef4444'), 'pika_team red style changed/missing')
   assert(renderer.includes("senderRole === 'top_chat_admin' || senderRole === 'chat_admin'"), 'chat_admin must share the top_chat_admin purple style')
   assert(renderer.includes('#d4a520'), 'default gold color changed/missing')
   assert(renderer.includes('color:#f1f5f9;font-weight:500;'), 'message body style should remain separate from author color')
