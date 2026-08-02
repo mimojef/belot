@@ -561,14 +561,15 @@ function renderChatAdminRoleControls(
           align-items:center;
           padding:3px 10px;
           border-radius:999px;
-          background:rgba(20,184,166,0.16);
-          border:1px solid rgba(20,184,166,0.55);
-          color:#14b8a6;
+          background:rgba(192,132,252,0.16);
+          border:1px solid rgba(192,132,252,0.58);
+          color:#c084fc;
           font-size:11px;
           font-weight:900;
           letter-spacing:0.04em;
           text-transform:uppercase;
           white-space:nowrap;
+          text-shadow:0 0 10px rgba(192,132,252,0.36);
         "
       >Чат админ</span>
       <span
@@ -594,11 +595,12 @@ function renderChatAdminRoleControls(
         display:inline-flex;
         align-items:center;
         gap:6px;
-        color:#14b8a6;
+        color:#c084fc;
         font-size:14px;
         font-weight:900;
         cursor:pointer;
         white-space:nowrap;
+        text-shadow:0 0 8px rgba(192,132,252,0.30);
       "
     >Направи чат админ</span>
   `
@@ -622,15 +624,15 @@ function renderPikaTeamRoleControls(
           align-items:center;
           padding:3px 10px;
           border-radius:999px;
-          background:rgba(244,114,182,0.16);
-          border:1px solid rgba(244,114,182,0.55);
-          color:#f472b6;
+          background:rgba(248,113,113,0.16);
+          border:1px solid rgba(248,113,113,0.58);
+          color:#f87171;
           font-size:11px;
           font-weight:900;
           letter-spacing:0.04em;
           text-transform:uppercase;
           white-space:nowrap;
-          text-shadow:0 0 8px rgba(244,114,182,0.30);
+          text-shadow:0 0 8px rgba(248,113,113,0.32);
         "
       >Екип Pika.bg</span>
       <span
@@ -656,12 +658,12 @@ function renderPikaTeamRoleControls(
         display:inline-flex;
         align-items:center;
         gap:6px;
-        color:#f472b6;
+        color:#f87171;
         font-size:14px;
         font-weight:900;
         cursor:pointer;
         white-space:nowrap;
-        text-shadow:0 0 8px rgba(244,114,182,0.24);
+        text-shadow:0 0 8px rgba(248,113,113,0.26);
       "
     >Направи Екип Pika.bg</span>
   `

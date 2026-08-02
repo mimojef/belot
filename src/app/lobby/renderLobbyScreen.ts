@@ -2156,15 +2156,13 @@ export function renderLobbyChatMessageRow(state: LobbyScreenState, message: Lobb
   const canDelete = state.canDeleteLobbyChat
   const senderRole = message.senderRole ?? (message.senderIsChatAdmin ? 'chat_admin' : 'player')
   const nameColor = senderRole === 'pika_team'
-    ? '#f472b6'
-    : senderRole === 'top_chat_admin'
+    ? '#f87171'
+    : senderRole === 'top_chat_admin' || senderRole === 'chat_admin'
       ? '#c084fc'
-      : senderRole === 'chat_admin'
-        ? '#14b8a6'
-        : '#d4a520'
+      : '#d4a520'
   const nameExtraStyle = senderRole === 'pika_team'
-    ? 'text-shadow:0 0 8px rgba(244,114,182,0.35);'
-    : senderRole === 'top_chat_admin'
+    ? 'text-shadow:0 0 8px rgba(248,113,113,0.35);'
+    : senderRole === 'top_chat_admin' || senderRole === 'chat_admin'
       ? 'text-shadow:0 0 10px rgba(192,132,252,0.42),0 0 18px rgba(192,132,252,0.22);'
       : ''
 
