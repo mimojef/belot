@@ -27,7 +27,7 @@ export type RenderPlayerProfilePopupOptions = {
   targetAccountRole?: PlayerAccountRole | null
 }
 
-export type PlayerAccountRole = 'player' | 'chat_admin' | 'pika_team' | 'subadmin' | 'admin'
+export type PlayerAccountRole = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
 
 export type PlayerProfileFriendshipAction = {
   profileId: string
@@ -667,6 +667,69 @@ function renderPikaTeamRoleControls(
   `
 }
 
+function renderTopChatAdminRoleControls(
+  isOwnProfile: boolean,
+  viewerIsFullAdmin: boolean,
+  targetAccountRole: PlayerAccountRole | null,
+): string {
+  if (isOwnProfile || !viewerIsFullAdmin || targetAccountRole === null || targetAccountRole === 'admin') {
+    return ''
+  }
+
+  if (targetAccountRole === 'top_chat_admin') {
+    return `
+      <span
+        data-player-profile-top-chat-admin-badge="1"
+        style="
+          display:inline-flex;
+          align-items:center;
+          padding:3px 10px;
+          border-radius:999px;
+          background:rgba(192,132,252,0.16);
+          border:1px solid rgba(192,132,252,0.58);
+          color:#c084fc;
+          font-size:11px;
+          font-weight:900;
+          letter-spacing:0.04em;
+          text-transform:uppercase;
+          white-space:nowrap;
+          text-shadow:0 0 10px rgba(192,132,252,0.40);
+        "
+      >TOP чат админ</span>
+      <span
+        data-player-profile-revoke-top-chat-admin="1"
+        style="
+          display:inline-flex;
+          align-items:center;
+          gap:6px;
+          color:#f87171;
+          font-size:14px;
+          font-weight:900;
+          cursor:pointer;
+          white-space:nowrap;
+        "
+      >Премахни TOP чат админ</span>
+    `
+  }
+
+  return `
+    <span
+      data-player-profile-grant-top-chat-admin="1"
+      style="
+        display:inline-flex;
+        align-items:center;
+        gap:6px;
+        color:#c084fc;
+        font-size:14px;
+        font-weight:900;
+        cursor:pointer;
+        white-space:nowrap;
+        text-shadow:0 0 8px rgba(192,132,252,0.30);
+      "
+    >Направи TOP чат админ</span>
+  `
+}
+
 function renderProfileContent(
   profile: PlayerPublicProfileSnapshot,
   seat: Seat | null,
@@ -775,6 +838,7 @@ function renderProfileContent(
             ${renderSubadminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderPikaTeamRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
+            ${renderTopChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderCoinBalanceInline(profile)}
           </div>
 

@@ -175,8 +175,8 @@ check('[4] only full admin can grant/revoke pika_team through the admin endpoint
 })
 
 check('[5] lobby chat messages carry senderRole through DB, protocol, live events, reconnect/history, and client rerender', () => {
-  assert(protocol.includes("senderRole: 'player' | 'chat_admin' | 'pika_team' | 'subadmin' | 'admin'"), 'server protocol missing senderRole')
-  assert(clientProtocol.includes("senderRole: 'player' | 'chat_admin' | 'pika_team' | 'subadmin' | 'admin'"), 'client protocol missing senderRole')
+  assert(protocol.includes("senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'"), 'server protocol missing senderRole')
+  assert(clientProtocol.includes("senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'"), 'client protocol missing senderRole')
   assert(index.includes('senderRole: m.senderRole'), 'history/reconnect payload missing senderRole')
   assert(index.includes('senderRole: snapshot.senderRole'), 'live broadcast missing senderRole')
   assert(controller.includes("senderRole: message.senderRole ?? (message.senderIsChatAdmin ? 'chat_admin' : 'player')"), 'client live event fallback missing')

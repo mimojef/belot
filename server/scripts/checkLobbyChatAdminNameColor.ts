@@ -66,6 +66,7 @@ function makeState(canDeleteLobbyChat: boolean): LobbyScreenState {
 const TEAL_NAME_MARKER = 'color:#14b8a6;font-weight:900;'
 const GOLD_NAME_MARKER = 'color:#d4a520;font-weight:900;'
 const PINK_NAME_MARKER = 'color:#f472b6;font-weight:900;text-shadow:0 0 8px rgba(244,114,182,0.35);'
+const PURPLE_NAME_MARKER = 'color:#c084fc;font-weight:900;text-shadow:0 0 10px rgba(192,132,252,0.42),0 0 18px rgba(192,132,252,0.22);'
 
 function main(): void {
   check('[1] senderIsChatAdmin:true → името е в приглушен teal (#14b8a6)', () => {
@@ -105,6 +106,14 @@ function main(): void {
     const html = renderLobbyChatMessageRow(makeState(false), makeMessage({ senderRole: 'pika_team' }))
     assert(html.includes(PINK_NAME_MARKER), 'expected pink pika_team author-name style')
     assert(!html.includes(TEAL_NAME_MARKER), 'pika_team must not reuse chat_admin teal style')
+    assert(html.includes('color:#f1f5f9;font-weight:500;'), 'message body style must stay unchanged')
+  })
+
+  check('[2c] senderRole:top_chat_admin -> purple glow author name only', () => {
+    const html = renderLobbyChatMessageRow(makeState(false), makeMessage({ senderRole: 'top_chat_admin' }))
+    assert(html.includes(PURPLE_NAME_MARKER), 'expected purple top_chat_admin author-name style')
+    assert(!html.includes(PINK_NAME_MARKER), 'top_chat_admin must not reuse pika_team pink style')
+    assert(!html.includes(TEAL_NAME_MARKER), 'top_chat_admin must not reuse chat_admin teal style')
     assert(html.includes('color:#f1f5f9;font-weight:500;'), 'message body style must stay unchanged')
   })
 

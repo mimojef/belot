@@ -11,7 +11,7 @@ import type { PlayerProgressStore } from './playerProgressStore.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
-export type AccountRoleValue = 'player' | 'chat_admin' | 'pika_team' | 'subadmin' | 'admin'
+export type AccountRoleValue = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
 
 export type AuthAccountSnapshot = {
   accountId: AccountId
@@ -64,10 +64,11 @@ export function isLobbyChatModeratorSession(
     || session.account.role === 'subadmin'
     || session.account.role === 'chat_admin'
     || session.account.role === 'pika_team'
+    || session.account.role === 'top_chat_admin'
   )
 }
 
-export type ElevatedRole = 'subadmin' | 'chat_admin' | 'pika_team'
+export type ElevatedRole = 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin'
 
 export type SubadminRoleChangeErrorCode =
   | 'not_found'
@@ -94,6 +95,12 @@ export type PikaTeamRoleChangeErrorCode = SubadminRoleChangeErrorCode
 export type PikaTeamRoleChangeResult =
   | { ok: true; role: 'pika_team' | 'player' }
   | { ok: false; code: PikaTeamRoleChangeErrorCode; message: string }
+
+export type TopChatAdminRoleChangeErrorCode = SubadminRoleChangeErrorCode
+
+export type TopChatAdminRoleChangeResult =
+  | { ok: true; role: 'top_chat_admin' | 'player' }
+  | { ok: false; code: TopChatAdminRoleChangeErrorCode; message: string }
 
 export type AuthStore = {
   register: (input: {
@@ -140,6 +147,11 @@ export type AuthStore = {
     targetProfileId: string
     action: 'grant' | 'revoke'
   }) => PikaTeamRoleChangeResult
+  setTopChatAdminRole: (input: {
+    actorAccountId: string
+    targetProfileId: string
+    action: 'grant' | 'revoke'
+  }) => TopChatAdminRoleChangeResult
   /** Роля на акаунта зад даден профил — само за UI показване (badge), null ако профилът няма акаунт (бот/гост/изтрит). */
   getAccountRoleForProfile: (profileId: string) => AccountRoleValue | null
   close: () => void
@@ -731,7 +743,7 @@ export async function createAuthStore(
           ok: false,
           code: 'profile_temporary',
           message: `Не можеш да направиш временен профил ${
-            input.role === 'chat_admin' ? 'чат админ' : input.role === 'pika_team' ? 'Екип Pika.bg' : 'субадмин'
+            input.role === 'chat_admin' ? 'чат админ' : input.role === 'pika_team' ? 'Екип Pika.bg' : input.role === 'top_chat_admin' ? 'TOP чат админ' : 'субадмин'
           }.`,
         }
       }
@@ -741,7 +753,7 @@ export async function createAuthStore(
           ok: false,
           code: 'profile_inactive',
           message: `Не можеш да направиш неактивен профил ${
-            input.role === 'chat_admin' ? 'чат админ' : input.role === 'pika_team' ? 'Екип Pika.bg' : 'субадмин'
+            input.role === 'chat_admin' ? 'чат админ' : input.role === 'pika_team' ? 'Екип Pika.bg' : input.role === 'top_chat_admin' ? 'TOP чат админ' : 'субадмин'
           }.`,
         }
       }
@@ -751,7 +763,7 @@ export async function createAuthStore(
           ok: false,
           code: 'account_inactive',
           message: `Не можеш да направиш неактивен акаунт ${
-            input.role === 'chat_admin' ? 'чат админ' : input.role === 'pika_team' ? 'Екип Pika.bg' : 'субадмин'
+            input.role === 'chat_admin' ? 'чат админ' : input.role === 'pika_team' ? 'Екип Pika.bg' : input.role === 'top_chat_admin' ? 'TOP чат админ' : 'субадмин'
           }.`,
         }
       }
@@ -786,6 +798,7 @@ export async function createAuthStore(
       | 'grant_subadmin' | 'revoke_subadmin'
       | 'grant_chat_admin' | 'revoke_chat_admin'
       | 'grant_pika_team' | 'revoke_pika_team'
+      | 'grant_top_chat_admin' | 'revoke_top_chat_admin'
 
     database.exec('BEGIN IMMEDIATE;')
 
@@ -865,6 +878,14 @@ export async function createAuthStore(
     return changeElevatedRole({ ...input, role: 'pika_team' }) as PikaTeamRoleChangeResult
   }
 
+  function setTopChatAdminRole(input: {
+    actorAccountId: string
+    targetProfileId: string
+    action: 'grant' | 'revoke'
+  }): TopChatAdminRoleChangeResult {
+    return changeElevatedRole({ ...input, role: 'top_chat_admin' }) as TopChatAdminRoleChangeResult
+  }
+
   function close(): void {
     database.close()
   }
@@ -878,6 +899,7 @@ export async function createAuthStore(
     setSubadminRole,
     setChatAdminRole,
     setPikaTeamRole,
+    setTopChatAdminRole,
     getAccountRoleForProfile,
     close,
   }

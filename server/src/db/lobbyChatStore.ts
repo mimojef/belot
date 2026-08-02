@@ -3,7 +3,7 @@ import { dbDateToUtc } from './dbDate.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
-export type LobbyChatSenderRole = 'player' | 'chat_admin' | 'pika_team' | 'subadmin' | 'admin'
+export type LobbyChatSenderRole = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
 
 export type LobbyChatMessageSnapshot = {
   seq: number
@@ -43,7 +43,7 @@ export type LobbyChatStore = {
     messageId: string
     actorAccountId: string | null
     /** Ролята на модератора В МОМЕНТА на изтриването — snapshot за одита. */
-    actorRoleAtDeletion: 'admin' | 'subadmin' | 'chat_admin' | 'pika_team'
+    actorRoleAtDeletion: 'admin' | 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin'
   }) =>
     | { ok: true; senderProfileId: string }
     | { ok: false; code: 'not_found' | 'already_deleted' }
@@ -228,7 +228,7 @@ export async function createLobbyChatStore(
   function deleteMessage(input: {
     messageId: string
     actorAccountId: string | null
-    actorRoleAtDeletion: 'admin' | 'subadmin' | 'chat_admin' | 'pika_team'
+    actorRoleAtDeletion: 'admin' | 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin'
   }):
     | { ok: true; senderProfileId: string }
     | { ok: false; code: 'not_found' | 'already_deleted' } {

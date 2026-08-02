@@ -132,6 +132,7 @@ function isLobbyChatModeratorAuthSession(session: LobbyAuthSession | null): bool
     || session.account.role === 'subadmin'
     || session.account.role === 'chat_admin'
     || session.account.role === 'pika_team'
+    || session.account.role === 'top_chat_admin'
   )
 }
 
@@ -451,6 +452,8 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminRevokeChatAdmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminGrantPikaTeam?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminRevokePikaTeam?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
+  onAdminGrantTopChatAdmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
+  onAdminRevokeTopChatAdmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminHistoryWindowChange?: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
@@ -664,15 +667,18 @@ type InternalLobbyFlowState = {
   profilePopupTargetRole: PlayerAccountRole | null
   /** profileId, за който profilePopupTargetRole вече е (или се) зарежда — memoization guard. */
   profilePopupTargetRoleProfileId: string | null
-  subadminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'chat_admin' | 'pika_team' | null } | null
+  subadminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'chat_admin' | 'pika_team' | 'top_chat_admin' | null } | null
   subadminActionBusy: boolean
   subadminActionToast: { text: string; ok: boolean } | null
-  chatAdminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | 'pika_team' | null } | null
+  chatAdminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | 'pika_team' | 'top_chat_admin' | null } | null
   chatAdminActionBusy: boolean
   chatAdminActionToast: { text: string; ok: boolean } | null
-  pikaTeamActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | 'chat_admin' | null } | null
+  pikaTeamActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | 'chat_admin' | 'top_chat_admin' | null } | null
   pikaTeamActionBusy: boolean
   pikaTeamActionToast: { text: string; ok: boolean } | null
+  topChatAdminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | 'chat_admin' | 'pika_team' | null } | null
+  topChatAdminActionBusy: boolean
+  topChatAdminActionToast: { text: string; ok: boolean } | null
   profileEditorOpen: boolean
   profileEditorTargetProfileId: string | null
   profileEditorTargetProfile: PlayerPublicProfileSnapshot | null
@@ -1007,6 +1013,9 @@ function createInitialState(): InternalLobbyFlowState {
     pikaTeamActionConfirm: null,
     pikaTeamActionBusy: false,
     pikaTeamActionToast: null,
+    topChatAdminActionConfirm: null,
+    topChatAdminActionBusy: false,
+    topChatAdminActionToast: null,
     profileEditorOpen: false,
     profileEditorTargetProfileId: null,
     profileEditorTargetProfile: null,
@@ -2520,6 +2529,9 @@ export function createLobbyFlowController(
       pikaTeamActionConfirm: state.pikaTeamActionConfirm,
       pikaTeamActionBusy: state.pikaTeamActionBusy,
       pikaTeamActionToast: state.pikaTeamActionToast,
+      topChatAdminActionConfirm: state.topChatAdminActionConfirm,
+      topChatAdminActionBusy: state.topChatAdminActionBusy,
+      topChatAdminActionToast: state.topChatAdminActionToast,
       players: state.players,
       playersPage: state.playersPage,
       playersTotalCount: state.playersTotalCount,
@@ -2857,6 +2869,18 @@ export function createLobbyFlowController(
       },
       onPikaTeamActionConfirm: () => {
         void confirmPikaTeamAction()
+      },
+      onProfileGrantTopChatAdminClick: (profileId) => {
+        getPopupCallbacks().onGrantTopChatAdminClick(profileId)
+      },
+      onProfileRevokeTopChatAdminClick: (profileId) => {
+        getPopupCallbacks().onRevokeTopChatAdminClick(profileId)
+      },
+      onTopChatAdminActionCancel: () => {
+        cancelTopChatAdminAction()
+      },
+      onTopChatAdminActionConfirm: () => {
+        void confirmTopChatAdminAction()
       },
       onProfileEditClose: () => {
         if (state.profileEditorSubmitting) return
@@ -7701,7 +7725,7 @@ export function createLobbyFlowController(
       onGrantSubadminClick: (profileId) => {
         if (!profileId) return
         const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
-        const previousRole = state.profilePopupTargetRole === 'chat_admin' || state.profilePopupTargetRole === 'pika_team'
+        const previousRole = state.profilePopupTargetRole === 'chat_admin' || state.profilePopupTargetRole === 'pika_team' || state.profilePopupTargetRole === 'top_chat_admin'
           ? state.profilePopupTargetRole
           : null
         state.subadminActionConfirm = { profileId, displayName, action: 'grant', previousRole }
@@ -7720,7 +7744,7 @@ export function createLobbyFlowController(
       onGrantChatAdminClick: (profileId) => {
         if (!profileId) return
         const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
-        const previousRole = state.profilePopupTargetRole === 'subadmin' || state.profilePopupTargetRole === 'pika_team'
+        const previousRole = state.profilePopupTargetRole === 'subadmin' || state.profilePopupTargetRole === 'pika_team' || state.profilePopupTargetRole === 'top_chat_admin'
           ? state.profilePopupTargetRole
           : null
         state.chatAdminActionConfirm = { profileId, displayName, action: 'grant', previousRole }
@@ -7739,7 +7763,7 @@ export function createLobbyFlowController(
       onGrantPikaTeamClick: (profileId) => {
         if (!profileId) return
         const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
-        const previousRole = state.profilePopupTargetRole === 'subadmin' || state.profilePopupTargetRole === 'chat_admin'
+        const previousRole = state.profilePopupTargetRole === 'subadmin' || state.profilePopupTargetRole === 'chat_admin' || state.profilePopupTargetRole === 'top_chat_admin'
           ? state.profilePopupTargetRole
           : null
         state.pikaTeamActionConfirm = { profileId, displayName, action: 'grant', previousRole }
@@ -7751,6 +7775,25 @@ export function createLobbyFlowController(
         if (!profileId) return
         const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
         state.pikaTeamActionConfirm = { profileId, displayName, action: 'revoke' }
+        state.profilePopupOpen = false
+        syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+        render()
+      },
+      onGrantTopChatAdminClick: (profileId) => {
+        if (!profileId) return
+        const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
+        const previousRole = state.profilePopupTargetRole === 'subadmin' || state.profilePopupTargetRole === 'chat_admin' || state.profilePopupTargetRole === 'pika_team'
+          ? state.profilePopupTargetRole
+          : null
+        state.topChatAdminActionConfirm = { profileId, displayName, action: 'grant', previousRole }
+        state.profilePopupOpen = false
+        syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+        render()
+      },
+      onRevokeTopChatAdminClick: (profileId) => {
+        if (!profileId) return
+        const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
+        state.topChatAdminActionConfirm = { profileId, displayName, action: 'revoke' }
         state.profilePopupOpen = false
         syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
         render()
@@ -7941,6 +7984,52 @@ export function createLobbyFlowController(
     setTimeout(() => {
       if (toastGeneration !== pikaTeamActionToastGeneration) return
       state.pikaTeamActionToast = null
+      render()
+    }, 3500)
+  }
+
+  function cancelTopChatAdminAction(): void {
+    if (state.topChatAdminActionBusy) return
+    state.topChatAdminActionConfirm = null
+    render()
+  }
+
+  let topChatAdminActionToastGeneration = 0
+
+  async function confirmTopChatAdminAction(): Promise<void> {
+    const pending = state.topChatAdminActionConfirm
+    if (!pending || state.topChatAdminActionBusy) return
+
+    state.topChatAdminActionBusy = true
+    render()
+
+    const caller = pending.action === 'grant' ? options.onAdminGrantTopChatAdmin : options.onAdminRevokeTopChatAdmin
+    const result = await caller?.(pending.profileId)
+
+    state.topChatAdminActionBusy = false
+    state.topChatAdminActionConfirm = null
+
+    if (result?.ok) {
+      state.topChatAdminActionToast = {
+        text: pending.action === 'grant' ? 'Потребителят вече е TOP чат админ.' : 'Ролята TOP чат админ е премахната.',
+        ok: true,
+      }
+      if (state.profilePopupTargetRoleProfileId === pending.profileId) {
+        state.profilePopupTargetRoleProfileId = null
+        state.profilePopupTargetRole = null
+      }
+    } else {
+      state.topChatAdminActionToast = {
+        text: result?.message ?? 'Действието не бе завършено.',
+        ok: false,
+      }
+    }
+    render()
+
+    const toastGeneration = ++topChatAdminActionToastGeneration
+    setTimeout(() => {
+      if (toastGeneration !== topChatAdminActionToastGeneration) return
+      state.topChatAdminActionToast = null
       render()
     }, 3500)
   }
