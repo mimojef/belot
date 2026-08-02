@@ -30,6 +30,7 @@ import {
   type LobbyFlowController,
 } from './app/lobby/createLobbyFlowController'
 import { validateProfileDisplayName } from './app/lobby/profileDisplayNameValidation'
+import { validateProfileImageFile } from './app/profileImages/profileImageUploadHelpers'
 import type { GiftLimitErrorPayload } from './app/lobby/formatGiftLimitError'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult } from './app/adminServer/adminServerTypes'
@@ -2797,22 +2798,8 @@ async function submitGiftCoins(friendshipId: string, amount: number): Promise<
   }
 }
 
-function validateImageFile(file: File): string | null {
-  const allowedTypes = new Set(['image/jpeg', 'image/png', 'image/webp'])
-
-  if (!allowedTypes.has(file.type)) {
-    return 'Позволени са само jpg, png и webp снимки.'
-  }
-
-  if (file.size > 10_000_000) {
-    return 'Снимката трябва да е до 10 МБ.'
-  }
-
-  return null
-}
-
 async function fileToDataUrl(file: File): Promise<string> {
-  const validationError = validateImageFile(file)
+  const validationError = validateProfileImageFile(file)
 
   if (validationError !== null) {
     throw new Error(validationError ?? undefined)

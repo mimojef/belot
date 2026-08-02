@@ -321,11 +321,36 @@ try {
     assert(!!last && last.imageUrl.endsWith('.webp'), `imageUrl трябва да завършва на .webp, получено: ${last?.imageUrl}`)
   })
 
-  await check('[9] GIF байтове с "image/png" MIME префикс в gallery → отхвърлено (не 200)', async () => {
+  await check('[8b] Валиден PNG gallery upload → 200 + webp imageUrl', async () => {
+    const r = await httpPostJson(port, '/api/profile/me/gallery', { imageDataUrl: toDataUrl('png', pngBuffer) }, cookie)
+    assert(r.status === 200, `status=${r.status} body=${JSON.stringify(r.body)}`)
+    const b = r.body as { ok: boolean; session: { profile: { galleryImages: { imageUrl: string }[] } } }
+    const last = b.session.profile.galleryImages.at(-1)
+    assert(!!last && last.imageUrl.endsWith('.webp'), `imageUrl трябва да завършва на .webp, получено: ${last?.imageUrl}`)
+  })
+
+  await check('[8c] Валиден WebP gallery upload → 200 + webp imageUrl', async () => {
+    const r = await httpPostJson(port, '/api/profile/me/gallery', { imageDataUrl: toDataUrl('webp', webpBuffer) }, cookie)
+    assert(r.status === 200, `status=${r.status} body=${JSON.stringify(r.body)}`)
+    const b = r.body as { ok: boolean; session: { profile: { galleryImages: { imageUrl: string }[] } } }
+    const last = b.session.profile.galleryImages.at(-1)
+    assert(!!last && last.imageUrl.endsWith('.webp'), `imageUrl трябва да завършва на .webp, получено: ${last?.imageUrl}`)
+  })
+
+  await check('[9] GIF байтове с "image/png" MIME префикс в gallery → отхвърлено с 400', async () => {
     const r = await httpPostJson(port, '/api/profile/me/gallery', { imageDataUrl: toDataUrl('png', gifBuffer) }, cookie)
-    assert(r.status !== 200, `GIF-съдържание с png MIME претенция беше прието в gallery (status=200) — sharp.block() не работи`)
-    const b = r.body as { ok: boolean }
+    assert(r.status === 400, `GIF-съдържание с png MIME претенция трябва да върне 400, status=${r.status}`)
+    const b = r.body as { ok: boolean; message?: string }
     assert(b.ok === false, 'ok трябва да е false')
+    assert(typeof b.message === 'string' && b.message.length > 0, 'трябва да има видимо съобщение за грешка')
+  })
+
+  await check('[9b] HEIC/HEIF data URL prefix is not advertised as supported → 400 with visible message', async () => {
+    const r = await httpPostJson(port, '/api/profile/me/avatar', { imageDataUrl: `data:image/heic;base64,${jpegBuffer.toString('base64')}`, ...crop }, cookie)
+    assert(r.status === 400, `HEIC prefix трябва да върне 400, status=${r.status}`)
+    const b = r.body as { ok: boolean; message?: string }
+    assert(b.ok === false, 'ok трябва да е false')
+    assert(typeof b.message === 'string' && b.message.length > 0, 'трябва да има видимо съобщение за грешка')
   })
 
 } catch (err) {

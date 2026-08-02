@@ -20,6 +20,7 @@
     "check:notification-sound-assignments": "npx tsx scripts/checkNotificationSoundAssignments.ts",
     "check:private-room-mobile-responsive": "npx tsx scripts/checkPrivateRoomMobileResponsive.ts",
     "check:private-room-wait-time-countdown": "npx tsx scripts/checkPrivateRoomWaitTimeCountdown.ts",
+    "check:profile-image-upload-frontend": "node server/node_modules/tsx/dist/cli.mjs scripts/checkProfileImageUploadFrontend.ts",
     "check:tournament-partner-invite-notifications": "npx tsx server/scripts/checkTournamentPartnerInviteNotifications.ts",
     "check:admin-tournament-frontend": "node server/node_modules/tsx/dist/cli.mjs server/scripts/checkAdminTournamentsFrontend.ts --project-root=.",
     "deploy:frontend": "VERIFY_BASE_URL=https://www.pika.bg bash scripts/deployFrontendAtomic.sh"

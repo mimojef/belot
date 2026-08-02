@@ -41,6 +41,22 @@ import { renderLearnPage } from './renderLearnPage'
 import { renderFaqPage } from './renderFaqPage'
 import { renderAboutPage } from './renderAboutPage'
 import { renderFairPlayPage } from './renderFairPlayPage'
+import {
+  type DecodedProfileImageFile,
+  decodeProfileImageFile,
+  validateProfileImageFile,
+} from '../profileImages/profileImageUploadHelpers'
+import {
+  calculateContainedImageRect,
+  createSquareCropFromDrag,
+  displayCropToNaturalCrop,
+  isPointInsideCrop,
+  moveSquareCrop,
+  toImageLocalPoint,
+  type CropImageRect,
+  type CropPoint,
+  type DisplayCropSelection,
+} from '../profileImages/profileImageCropGeometry'
 import { orderPlayersForViewer } from './orderPlayersForViewer'
 import { computePaginationItems } from './computePaginationItems'
 import {
@@ -80,10 +96,14 @@ let _persistentAvatarInput: HTMLInputElement | null = null
 let _persistentGalleryInput: HTMLInputElement | null = null
 let _pendingGalleryItems: Array<{ file: File; crop: AvatarCropSelection; dataUrl: string }> = []
 let _pendingAvatarFile: File | null = null
+let _pendingAvatarCrop: AvatarCropSelection | null = null
+let _pendingAvatarPreviewDataUrl: string | null = null
 
 export function clearProfileEditorPendingState(): void {
   _pendingGalleryItems = []
   _pendingAvatarFile = null
+  _pendingAvatarCrop = null
+  _pendingAvatarPreviewDataUrl = null
   if (_persistentAvatarInput) _persistentAvatarInput.value = ''
   if (_persistentGalleryInput) _persistentGalleryInput.value = ''
 }
@@ -115,6 +135,168 @@ export type AvatarCropSelection = {
   x: number
   y: number
   size: number
+}
+
+function setupSquareCropInteraction(input: {
+  box: HTMLElement
+  image: HTMLImageElement
+  selection: HTMLElement
+  onCropChange: (crop: AvatarCropSelection | null) => void
+}): void {
+  type InteractionState =
+    | { mode: 'idle' }
+    | { mode: 'draw'; pointerId: number; start: CropPoint }
+    | { mode: 'move'; pointerId: number; offset: CropPoint; crop: DisplayCropSelection }
+
+  let state: InteractionState = { mode: 'idle' }
+  let displayCrop: DisplayCropSelection | null = null
+
+  function getImageRect(): CropImageRect | null {
+    const boxRect = input.box.getBoundingClientRect()
+    return calculateContainedImageRect({
+      containerWidth: boxRect.width,
+      containerHeight: boxRect.height,
+      naturalWidth: input.image.naturalWidth,
+      naturalHeight: input.image.naturalHeight,
+    })
+  }
+
+  function getBoxPoint(event: PointerEvent): CropPoint {
+    const boxRect = input.box.getBoundingClientRect()
+    return {
+      x: event.clientX - boxRect.left,
+      y: event.clientY - boxRect.top,
+    }
+  }
+
+  function renderCrop(crop: DisplayCropSelection | null, imageRect: CropImageRect | null = getImageRect()): void {
+    if (crop === null || imageRect === null) {
+      input.selection.style.display = 'none'
+      input.onCropChange(null)
+      return
+    }
+
+    input.selection.style.display = 'block'
+    input.selection.style.left = `${imageRect.left + crop.left}px`
+    input.selection.style.top = `${imageRect.top + crop.top}px`
+    input.selection.style.width = `${crop.size}px`
+    input.selection.style.height = `${crop.size}px`
+    input.onCropChange(displayCropToNaturalCrop({
+      crop,
+      imageRect,
+      naturalWidth: input.image.naturalWidth,
+      naturalHeight: input.image.naturalHeight,
+    }))
+  }
+
+  function updateCursor(event: PointerEvent): void {
+    if (state.mode === 'move') {
+      input.box.style.cursor = 'grabbing'
+      return
+    }
+
+    const imageRect = getImageRect()
+    if (imageRect === null) {
+      input.box.style.cursor = 'default'
+      return
+    }
+
+    const imagePoint = toImageLocalPoint(getBoxPoint(event), imageRect)
+    input.box.style.cursor = imagePoint !== null && displayCrop !== null && isPointInsideCrop(imagePoint, displayCrop)
+      ? 'grab'
+      : 'crosshair'
+  }
+
+  input.box.addEventListener('pointerdown', (event) => {
+    const imageRect = getImageRect()
+    if (imageRect === null) return
+    const point = toImageLocalPoint(getBoxPoint(event), imageRect)
+    if (point === null) return
+
+    event.preventDefault()
+    input.box.setPointerCapture(event.pointerId)
+    if (displayCrop !== null && isPointInsideCrop(point, displayCrop)) {
+      state = {
+        mode: 'move',
+        pointerId: event.pointerId,
+        offset: {
+          x: point.x - displayCrop.left,
+          y: point.y - displayCrop.top,
+        },
+        crop: displayCrop,
+      }
+      input.box.style.cursor = 'grabbing'
+      return
+    }
+
+    state = { mode: 'draw', pointerId: event.pointerId, start: point }
+    displayCrop = null
+    renderCrop(null, imageRect)
+  })
+
+  input.box.addEventListener('pointermove', (event) => {
+    if (state.mode === 'idle') {
+      updateCursor(event)
+      return
+    }
+    if (state.pointerId !== event.pointerId) return
+
+    const imageRect = getImageRect()
+    if (imageRect === null) return
+    const point = toImageLocalPoint(getBoxPoint(event), imageRect)
+    if (point === null && state.mode === 'draw') {
+      event.preventDefault()
+      const clampedBoxPoint = getBoxPoint(event)
+      const clampedImagePoint = {
+        x: Math.max(0, Math.min(imageRect.width, clampedBoxPoint.x - imageRect.left)),
+        y: Math.max(0, Math.min(imageRect.height, clampedBoxPoint.y - imageRect.top)),
+      }
+      displayCrop = createSquareCropFromDrag({
+        start: state.start,
+        current: clampedImagePoint,
+        imageRect,
+      })
+      renderCrop(displayCrop, imageRect)
+      return
+    }
+
+    if (point === null && state.mode === 'move') {
+      event.preventDefault()
+      const clampedBoxPoint = getBoxPoint(event)
+      const clampedImagePoint = {
+        x: Math.max(0, Math.min(imageRect.width, clampedBoxPoint.x - imageRect.left)),
+        y: Math.max(0, Math.min(imageRect.height, clampedBoxPoint.y - imageRect.top)),
+      }
+      displayCrop = moveSquareCrop({
+        crop: state.crop,
+        pointer: clampedImagePoint,
+        offset: state.offset,
+        imageRect,
+      })
+      renderCrop(displayCrop, imageRect)
+      return
+    }
+
+    if (point === null) return
+
+    event.preventDefault()
+    displayCrop = state.mode === 'draw'
+      ? createSquareCropFromDrag({ start: state.start, current: point, imageRect })
+      : moveSquareCrop({ crop: state.crop, pointer: point, offset: state.offset, imageRect })
+    renderCrop(displayCrop, imageRect)
+  })
+
+  function stopInteraction(event: PointerEvent): void {
+    if (state.mode !== 'idle' && state.pointerId === event.pointerId) {
+      if (input.box.hasPointerCapture(event.pointerId)) input.box.releasePointerCapture(event.pointerId)
+      state = { mode: 'idle' }
+      updateCursor(event)
+    }
+  }
+
+  input.box.addEventListener('pointerup', stopInteraction)
+  input.box.addEventListener('pointercancel', stopInteraction)
+  window.addEventListener('resize', () => renderCrop(displayCrop))
 }
 
 export type GuestContactFormInput = {
@@ -270,6 +452,7 @@ export type LobbyScreenState = {
   profileEditorTargetProfileId: string | null
   profileEditorTargetProfile: PlayerPublicProfileSnapshot | null
   profileEditorErrorText: string | null
+  profileEditorSubmitting: boolean
   profileNameChangeErrorText: string | null
   profileNameChangeSuccessAmount: number | null
   changePasswordPopupOpen: boolean
@@ -443,7 +626,7 @@ export type RenderLobbyScreenOptions = {
     avatarCrop: AvatarCropSelection | null,
     galleryFiles: File[],
   ) => void
-  onProfileEditorFileError: (message: string) => void
+  onProfileEditorFileError: (message: string | null) => void
   onPresetAvatarApply: (avatarUrl: string) => void
   onProfileGalleryDelete: (imageId: string) => void
   onProfileNameChangeSubmit: (displayName: string) => void
@@ -1181,6 +1364,8 @@ function renderProfileEditModal(state: LobbyScreenState): string {
     0,
     isAdminTargetEdit ? 0 : MAX_PROFILE_GALLERY_IMAGES - galleryImages.length,
   )
+  const isProfileEditorSubmitting = state.profileEditorSubmitting
+  const avatarPreviewUrl = _pendingAvatarPreviewDataUrl ?? editorProfile.avatarUrl
   const nameChangePrice = state.profileNameChangePrice
   const isPhoneLayout = isPhoneLayoutViewport()
   const nameChangeCardStyle = isPhoneLayout
@@ -1255,8 +1440,8 @@ function renderProfileEditModal(state: LobbyScreenState): string {
                 data-avatar-preview="1"
                 style="width:80px;height:80px;border-radius:8px;border:1px solid rgba(212,165,32,0.35);background:#101010;flex:0 0 auto;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#facc15;font-size:28px;font-weight:900;position:relative;"
               >
-                ${editorProfile.avatarUrl
-                  ? `<img src="${escapeHtml(editorProfile.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">`
+                ${avatarPreviewUrl
+                  ? `<img src="${escapeHtml(avatarPreviewUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">`
                   : `<span style="opacity:0.4;">?</span>`}
               </div>
               <input name="avatarFile" type="file" accept="image/png,image/jpeg,image/webp" style="display:none;">
@@ -1313,7 +1498,7 @@ function renderProfileEditModal(state: LobbyScreenState): string {
 
           <div style="display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;">
             <button type="button" data-lobby-profile-editor-cancel="1" style="height:42px;padding:0 16px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:#080808;color:#f8fafc;font-size:14px;font-weight:900;cursor:pointer;">Откажи</button>
-            <button type="submit" style="height:42px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;">Запази</button>
+            <button type="submit" ${isProfileEditorSubmitting ? 'disabled' : ''} style="height:42px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:${isProfileEditorSubmitting ? 'default' : 'pointer'};opacity:${isProfileEditorSubmitting ? '0.62' : '1'};">${isProfileEditorSubmitting ? 'Запазване...' : 'Запази'}</button>
           </div>
         </form>
       </div>
@@ -9672,9 +9857,7 @@ export function renderLobbyScreen(
     openPresetAvatarGallery()
   })
 
-  let currentCrop: AvatarCropSelection | null = null
-
-  function openCropOverlay(file: File): void {
+  function openCropOverlay(file: File, decodedImage: DecodedProfileImageFile): void {
     const overlay = document.createElement('div')
     overlay.setAttribute('data-avatar-crop-overlay', '1')
     overlay.style.cssText = [
@@ -9706,106 +9889,74 @@ export function renderLobbyScreen(
     const overlayBox = overlay.querySelector<HTMLElement>('[data-crop-box="1"]')!
     const overlaySelection = overlay.querySelector<HTMLElement>('[data-crop-selection="1"]')!
 
-    overlayImage.src = URL.createObjectURL(file)
+    overlayImage.src = decodedImage.imageUrl
 
-    let startX = 0
-    let startY = 0
     let pendingCrop: AvatarCropSelection | null = null
 
-    function clearOverlayCrop(): void {
-      pendingCrop = null
-      overlaySelection.style.display = 'none'
-    }
+    setupSquareCropInteraction({
+      box: overlayBox,
+      image: overlayImage,
+      selection: overlaySelection,
+      onCropChange: (crop) => {
+        pendingCrop = crop
+      },
+    })
 
-    function getOverlayPoint(event: PointerEvent): { x: number; y: number } | null {
-      const rect = overlayImage.getBoundingClientRect()
-      if (rect.width <= 0 || rect.height <= 0) return null
-      const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
-      const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top))
-      return { x, y }
-    }
-
-    function drawOverlayCrop(currentX: number, currentY: number): void {
-      const rect = overlayImage.getBoundingClientRect()
-      const boxRect = overlayBox.getBoundingClientRect()
-      const deltaX = currentX - startX
-      const deltaY = currentY - startY
-      const size = Math.min(Math.abs(deltaX), Math.abs(deltaY))
-      if (size < 4) { clearOverlayCrop(); return }
-      const dirX = deltaX >= 0 ? 1 : -1
-      const dirY = deltaY >= 0 ? 1 : -1
-      const displayX = dirX > 0 ? startX : startX - size
-      const displayY = dirY > 0 ? startY : startY - size
-      const boundedX = Math.max(0, Math.min(rect.width - size, displayX))
-      const boundedY = Math.max(0, Math.min(rect.height - size, displayY))
-      overlaySelection.style.display = 'block'
-      overlaySelection.style.left = `${rect.left - boxRect.left + boundedX}px`
-      overlaySelection.style.top = `${rect.top - boxRect.top + boundedY}px`
-      overlaySelection.style.width = `${size}px`
-      overlaySelection.style.height = `${size}px`
-      pendingCrop = {
-        x: (boundedX / rect.width) * overlayImage.naturalWidth,
-        y: (boundedY / rect.height) * overlayImage.naturalHeight,
-        size: (size / rect.width) * overlayImage.naturalWidth,
+    overlay.querySelector<HTMLButtonElement>('[data-crop-confirm="1"]')?.addEventListener('click', (event) => {
+      const button = event.currentTarget as HTMLButtonElement
+      if (button.disabled) return
+      if (pendingCrop === null) {
+        options.onProfileEditorFileError('Очертай квадрат върху снимката.')
+        return
       }
-    }
-
-    overlayBox.addEventListener('pointerdown', (event) => {
-      const point = getOverlayPoint(event)
-      if (point === null) return
-      event.preventDefault()
-      overlayBox.setPointerCapture(event.pointerId)
-      startX = point.x
-      startY = point.y
-      drawOverlayCrop(point.x, point.y)
-    })
-
-    overlayBox.addEventListener('pointermove', (event) => {
-      if (!overlayBox.hasPointerCapture(event.pointerId)) return
-      const point = getOverlayPoint(event)
-      if (point === null) return
-      event.preventDefault()
-      drawOverlayCrop(point.x, point.y)
-    })
-
-    overlayBox.addEventListener('pointerup', (event) => {
-      if (overlayBox.hasPointerCapture(event.pointerId)) {
-        overlayBox.releasePointerCapture(event.pointerId)
-      }
-    })
-
-    overlay.querySelector('[data-crop-confirm="1"]')?.addEventListener('click', () => {
-      currentCrop = pendingCrop
+      button.disabled = true
+      button.style.opacity = '0.62'
+      button.style.cursor = 'default'
+      _pendingAvatarCrop = pendingCrop
       overlay.remove()
 
-      if (currentCrop !== null) {
+      if (_pendingAvatarCrop !== null) {
         _pendingAvatarFile = file
-        const crop = currentCrop
+        const crop = _pendingAvatarCrop
         const canvas = document.createElement('canvas')
         canvas.width = 250
         canvas.height = 250
         const ctx = canvas.getContext('2d')
-        if (ctx) {
+        if (!ctx) {
+          decodedImage.revoke()
+          _pendingAvatarFile = null
+          _pendingAvatarCrop = null
+          options.onProfileEditorFileError('Снимката е повредена или не може да бъде прочетена. Моля, изберете друг файл.')
+          return
+        }
           const img = new Image()
-          const objectUrl = URL.createObjectURL(file)
           img.onload = () => {
             ctx.drawImage(img, crop.x, crop.y, crop.size, crop.size, 0, 0, 250, 250)
+            const dataUrl = canvas.toDataURL('image/webp')
+            _pendingAvatarPreviewDataUrl = dataUrl
             const preview = root.querySelector<HTMLElement>('[data-avatar-preview="1"]')
             if (preview) {
-              const dataUrl = canvas.toDataURL('image/webp')
               preview.innerHTML = `<img src="${dataUrl}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">`
             }
-            URL.revokeObjectURL(objectUrl)
+            decodedImage.revoke()
+            options.onProfileEditorFileError(null)
           }
-          img.src = objectUrl
+        img.onerror = () => {
+          decodedImage.revoke()
+          _pendingAvatarFile = null
+          _pendingAvatarCrop = null
+          options.onProfileEditorFileError('Снимката е повредена или не може да бъде прочетена. Моля, изберете друг файл.')
         }
+        img.src = decodedImage.imageUrl
       }
     })
 
     overlay.querySelector('[data-crop-cancel="1"]')?.addEventListener('click', () => {
-      currentCrop = null
       _pendingAvatarFile = null
+      _pendingAvatarCrop = null
+      _pendingAvatarPreviewDataUrl = null
       avatarInput.value = ''
+      decodedImage.revoke()
       const preview = root.querySelector<HTMLElement>('[data-avatar-preview="1"]')
       if (preview) {
         preview.innerHTML = state.profile.avatarUrl
@@ -9818,14 +9969,28 @@ export function renderLobbyScreen(
 
   avatarInput.onchange = () => {
     const file = avatarInput.files?.[0] ?? null
-    currentCrop = null
+    _pendingAvatarCrop = null
+    _pendingAvatarFile = null
     if (!file) return
-    if (file.size > 10_000_000) {
-      avatarInput.value = ''
-      options.onProfileEditorFileError('Снимката трябва да е до 10 МБ.')
+    avatarInput.value = ''
+    const validationError = validateProfileImageFile(file)
+    if (validationError !== null) {
+      options.onProfileEditorFileError(validationError)
       return
     }
-    openCropOverlay(file)
+    options.onProfileEditorFileError(null)
+    void (async () => {
+      const decoded = await decodeProfileImageFile(file)
+      if (!decoded.ok) {
+        _pendingAvatarFile = null
+        _pendingAvatarCrop = null
+        _pendingAvatarPreviewDataUrl = null
+        avatarInput.value = ''
+        options.onProfileEditorFileError(decoded.message)
+        return
+      }
+      openCropOverlay(file, decoded.image)
+    })()
   }
 
   const galleryFileInput = ensurePersistentGalleryInput()
@@ -9847,7 +10012,7 @@ export function renderLobbyScreen(
     grid.appendChild(slot)
   }
 
-  function openGalleryCropOverlay(file: File): void {
+  function openGalleryCropOverlay(file: File, decodedImage: DecodedProfileImageFile): void {
     const overlay = document.createElement('div')
     overlay.style.cssText = 'position:fixed;inset:0;z-index:14000;background:#0a0a0a;display:flex;flex-direction:column;font-family:Arial,Helvetica,sans-serif;'
     overlay.innerHTML = `
@@ -9870,86 +10035,44 @@ export function renderLobbyScreen(
     const overlayImage = overlay.querySelector<HTMLImageElement>('[data-gallery-crop-image="1"]')!
     const overlayBox = overlay.querySelector<HTMLElement>('[data-gallery-crop-box="1"]')!
     const overlaySelection = overlay.querySelector<HTMLElement>('[data-gallery-crop-selection="1"]')!
-    overlayImage.src = URL.createObjectURL(file)
+    overlayImage.src = decodedImage.imageUrl
 
-    let startX = 0
-    let startY = 0
     let pendingCrop: AvatarCropSelection | null = null
 
-    function clearGalleryCrop(): void {
-      pendingCrop = null
-      overlaySelection.style.display = 'none'
-    }
+    setupSquareCropInteraction({
+      box: overlayBox,
+      image: overlayImage,
+      selection: overlaySelection,
+      onCropChange: (crop) => {
+        pendingCrop = crop
+      },
+    })
 
-    function getGalleryPoint(event: PointerEvent): { x: number; y: number } | null {
-      const rect = overlayImage.getBoundingClientRect()
-      if (rect.width <= 0 || rect.height <= 0) return null
-      const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
-      const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top))
-      return { x, y }
-    }
-
-    function drawGalleryCrop(currentX: number, currentY: number): void {
-      const rect = overlayImage.getBoundingClientRect()
-      const boxRect = overlayBox.getBoundingClientRect()
-      const deltaX = currentX - startX
-      const deltaY = currentY - startY
-      const size = Math.min(Math.abs(deltaX), Math.abs(deltaY))
-      if (size < 4) { clearGalleryCrop(); return }
-      const dirX = deltaX >= 0 ? 1 : -1
-      const dirY = deltaY >= 0 ? 1 : -1
-      const displayX = dirX > 0 ? startX : startX - size
-      const displayY = dirY > 0 ? startY : startY - size
-      const boundedX = Math.max(0, Math.min(rect.width - size, displayX))
-      const boundedY = Math.max(0, Math.min(rect.height - size, displayY))
-      overlaySelection.style.display = 'block'
-      overlaySelection.style.left = `${rect.left - boxRect.left + boundedX}px`
-      overlaySelection.style.top = `${rect.top - boxRect.top + boundedY}px`
-      overlaySelection.style.width = `${size}px`
-      overlaySelection.style.height = `${size}px`
-      pendingCrop = {
-        x: (boundedX / rect.width) * overlayImage.naturalWidth,
-        y: (boundedY / rect.height) * overlayImage.naturalHeight,
-        size: (size / rect.width) * overlayImage.naturalWidth,
+    overlay.querySelector<HTMLButtonElement>('[data-gallery-crop-confirm="1"]')?.addEventListener('click', (event) => {
+      const button = event.currentTarget as HTMLButtonElement
+      if (button.disabled) return
+      if (pendingCrop === null) {
+        options.onProfileEditorFileError('Очертай квадрат върху снимката.')
+        return
       }
-    }
-
-    overlayBox.addEventListener('pointerdown', (event) => {
-      const point = getGalleryPoint(event)
-      if (point === null) return
-      event.preventDefault()
-      overlayBox.setPointerCapture(event.pointerId)
-      startX = point.x
-      startY = point.y
-      drawGalleryCrop(point.x, point.y)
-    })
-
-    overlayBox.addEventListener('pointermove', (event) => {
-      if (!overlayBox.hasPointerCapture(event.pointerId)) return
-      const point = getGalleryPoint(event)
-      if (point === null) return
-      event.preventDefault()
-      drawGalleryCrop(point.x, point.y)
-    })
-
-    overlayBox.addEventListener('pointerup', (event) => {
-      if (overlayBox.hasPointerCapture(event.pointerId)) overlayBox.releasePointerCapture(event.pointerId)
-    })
-
-    overlay.querySelector('[data-gallery-crop-confirm="1"]')?.addEventListener('click', () => {
-      if (pendingCrop === null) { overlay.remove(); return }
+      button.disabled = true
+      button.style.opacity = '0.62'
+      button.style.cursor = 'default'
       const crop = pendingCrop
       const canvas = document.createElement('canvas')
       canvas.width = 800
       canvas.height = 800
       const ctx = canvas.getContext('2d')
-      if (!ctx) { overlay.remove(); return }
+      if (!ctx) {
+        decodedImage.revoke()
+        overlay.remove()
+        return
+      }
       const img = new Image()
-      const objectUrl = URL.createObjectURL(file)
       img.onload = () => {
         ctx.drawImage(img, crop.x, crop.y, crop.size, crop.size, 0, 0, 800, 800)
         const dataUrl = canvas.toDataURL('image/webp', 0.92)
-        URL.revokeObjectURL(objectUrl)
+        decodedImage.revoke()
         const item = { file, crop, dataUrl }
         _pendingGalleryItems.push(item)
         const grid = getGalleryGrid()
@@ -9982,10 +10105,16 @@ export function renderLobbyScreen(
         }
         overlay.remove()
       }
-      img.src = objectUrl
+      img.onerror = () => {
+        decodedImage.revoke()
+        options.onProfileEditorFileError('Снимката е повредена или не може да бъде прочетена. Моля, изберете друг файл.')
+        overlay.remove()
+      }
+      img.src = decodedImage.imageUrl
     })
 
     overlay.querySelector('[data-gallery-crop-cancel="1"]')?.addEventListener('click', () => {
+      decodedImage.revoke()
       overlay.remove()
     })
   }
@@ -9998,11 +10127,21 @@ export function renderLobbyScreen(
     const file = galleryFileInput.files?.[0] ?? null
     if (!file) return
     galleryFileInput.value = ''
-    if (file.size > 10_000_000) {
-      options.onProfileEditorFileError('Снимката трябва да е до 10 МБ.')
+    const validationError = validateProfileImageFile(file)
+    if (validationError !== null) {
+      options.onProfileEditorFileError(validationError)
       return
     }
-    openGalleryCropOverlay(file)
+    options.onProfileEditorFileError(null)
+    void (async () => {
+      const decoded = await decodeProfileImageFile(file)
+      if (!decoded.ok) {
+        galleryFileInput.value = ''
+        options.onProfileEditorFileError(decoded.message)
+        return
+      }
+      openGalleryCropOverlay(file, decoded.image)
+    })()
   }
 
   // Repopulate gallery previews from module-level state after re-render
@@ -10049,10 +10188,11 @@ export function renderLobbyScreen(
     .querySelector<HTMLFormElement>('[data-lobby-profile-editor-form="1"]')
     ?.addEventListener('submit', (event) => {
       event.preventDefault()
+      if (state.profileEditorSubmitting) return
       const galleryFiles = _pendingGalleryItems.map((item, i) => dataUrlToFile(item.dataUrl, `gallery-${i}.webp`))
       options.onProfileEditSubmit(
         _pendingAvatarFile ?? null,
-        currentCrop,
+        _pendingAvatarCrop,
         galleryFiles,
       )
     })

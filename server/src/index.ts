@@ -3712,13 +3712,21 @@ async function createCroppedAvatarWebp(input: {
   cropY: number
   cropSize: number
 }): Promise<Buffer | null> {
-  const metadata = await sharp(input.imageBuffer).metadata()
-  const imageWidth = metadata.width ?? 0
-  const imageHeight = metadata.height ?? 0
+  const metadata = await sharp(input.imageBuffer).metadata().catch(() => null)
 
-  if (imageWidth <= 0 || imageHeight <= 0) {
+  if (
+    metadata === null ||
+    (metadata.format !== 'jpeg' && metadata.format !== 'png' && metadata.format !== 'webp')
+  ) {
     return null
   }
+
+  const rotated = sharp(input.imageBuffer).rotate()
+  const rotatedMetadata = await rotated.metadata().catch(() => null)
+  const imageWidth = rotatedMetadata?.width ?? metadata.width ?? 0
+  const imageHeight = rotatedMetadata?.height ?? metadata.height ?? 0
+
+  if (imageWidth <= 0 || imageHeight <= 0) return null
 
   const left = Math.round(input.cropX)
   const top = Math.round(input.cropY)
@@ -3748,16 +3756,23 @@ async function createCroppedAvatarWebp(input: {
     })
     .webp({ quality: 86 })
     .toBuffer()
+    .catch(() => null)
 }
 
 async function createGalleryImageWebp(imageBuffer: Buffer): Promise<Buffer | null> {
-  const metadata = await sharp(imageBuffer).metadata()
+  const metadata = await sharp(imageBuffer).metadata().catch(() => null)
+
+  if (
+    metadata === null ||
+    (metadata.format !== 'jpeg' && metadata.format !== 'png' && metadata.format !== 'webp')
+  ) {
+    return null
+  }
+
   const imageWidth = metadata.width ?? 0
   const imageHeight = metadata.height ?? 0
 
-  if (imageWidth <= 0 || imageHeight <= 0) {
-    return null
-  }
+  if (imageWidth <= 0 || imageHeight <= 0) return null
 
   return await sharp(imageBuffer)
     .rotate()
@@ -3768,6 +3783,7 @@ async function createGalleryImageWebp(imageBuffer: Buffer): Promise<Buffer | nul
     })
     .webp({ quality: 80 })
     .toBuffer()
+    .catch(() => null)
 }
 
 // Личен чат — снимка към съобщение. За разлика от avatar/gallery (fit:

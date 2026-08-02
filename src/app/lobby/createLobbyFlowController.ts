@@ -666,6 +666,7 @@ type InternalLobbyFlowState = {
   profileEditorTargetProfileId: string | null
   profileEditorTargetProfile: PlayerPublicProfileSnapshot | null
   profileEditorErrorText: string | null
+  profileEditorSubmitting: boolean
   profileNameChangeErrorText: string | null
   profileNameChangeSuccessAmount: number | null
   changePasswordPopupOpen: boolean
@@ -994,6 +995,7 @@ function createInitialState(): InternalLobbyFlowState {
     profileEditorTargetProfileId: null,
     profileEditorTargetProfile: null,
     profileEditorErrorText: null,
+    profileEditorSubmitting: false,
     profileNameChangeErrorText: null,
     profileNameChangeSuccessAmount: null,
     changePasswordPopupOpen: false,
@@ -2588,6 +2590,7 @@ export function createLobbyFlowController(
       profileEditorTargetProfileId: state.profileEditorTargetProfileId,
       profileEditorTargetProfile: state.profileEditorTargetProfile,
       profileEditorErrorText: state.profileEditorErrorText,
+      profileEditorSubmitting: state.profileEditorSubmitting,
       profileNameChangeErrorText: state.profileNameChangeErrorText,
       profileNameChangeSuccessAmount: state.profileNameChangeSuccessAmount,
       changePasswordPopupOpen: state.changePasswordPopupOpen,
@@ -2820,6 +2823,7 @@ export function createLobbyFlowController(
         void confirmChatAdminAction()
       },
       onProfileEditClose: () => {
+        if (state.profileEditorSubmitting) return
         state.profileEditorOpen = false
         state.profileEditorTargetProfileId = null
         state.profileEditorTargetProfile = null
@@ -2831,6 +2835,7 @@ export function createLobbyFlowController(
       },
       onProfileEditorFileError: (message) => {
         state.profileEditorErrorText = message
+        state.profileEditorSubmitting = false
         render()
       },
       onProfileEditSubmit: (avatarFile, avatarCrop, galleryFiles) => {
@@ -3873,13 +3878,25 @@ export function createLobbyFlowController(
     avatarCrop: AvatarCropSelection | null,
     galleryFiles: File[],
   ): Promise<void> {
+    if (state.profileEditorSubmitting) return
+    state.profileEditorSubmitting = true
+    state.profileEditorErrorText = null
+    render()
+
     const targetProfileId = state.profileEditorTargetProfileId
-    const errorText = options.onProfileEditSubmit
-      ? await options.onProfileEditSubmit(targetProfileId, avatarFile, avatarCrop, galleryFiles)
-      : 'Редакцията временно не е налична.'
+    const errorText = await (async () => {
+      try {
+        return options.onProfileEditSubmit
+          ? await options.onProfileEditSubmit(targetProfileId, avatarFile, avatarCrop, galleryFiles)
+          : 'Редакцията временно не е налична.'
+      } catch {
+        return 'Няма връзка със сървъра за профили.'
+      }
+    })()
 
     if (errorText !== null) {
       state.profileEditorErrorText = errorText
+      state.profileEditorSubmitting = false
       render()
       return
     }
@@ -3893,6 +3910,7 @@ export function createLobbyFlowController(
     await refreshEditedTargetProfile(targetProfileId)
     state.profileEditorOpen = false
     state.profileEditorErrorText = null
+    state.profileEditorSubmitting = false
     state.profilePopupOpen = true
     clearProfileEditorPendingState()
     render()
