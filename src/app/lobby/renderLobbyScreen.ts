@@ -31,7 +31,7 @@ import type {
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, ActiveRoomSnapshot } from '../adminServer/adminServerTypes'
 import { isBotsOnlyActiveRoom, isStaleActiveRoom } from '../adminServer/adminServerTypes'
 import { renderPeakCards, renderPeakMoments, renderHistoryInfoRow, getWindowLabel } from '../adminServer/renderAdminHistory'
-import type { PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
+import type { PlayerAccountRole, PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import { PUBLIC_LEGAL_PAGES, type PublicLegalPageKey } from './publicLegalPages'
@@ -331,19 +331,22 @@ export type LobbyScreenState = {
   profilePopupProfile: PlayerPublicProfileSnapshot | null
   profilePopupCanEdit: boolean
   /** Роля на разглеждания акаунт — само за isAdmin (пълен) viewer; виж renderPlayerProfilePopup. */
-  profilePopupTargetRole: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null
+  profilePopupTargetRole: PlayerAccountRole | null
   /**
    * previousRole: ако назначаваме субадмин, докато акаунтът реално е
    * chat_admin (или обратно за chatAdminActionConfirm по-долу) — само за
    * "старата роля ще бъде заменена" текст в confirm попъпа.
    */
-  subadminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'chat_admin' | null } | null
+  subadminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'chat_admin' | 'pika_team' | null } | null
   subadminActionBusy: boolean
   subadminActionToast: { text: string; ok: boolean } | null
   /** Огледално на subadminActionConfirm/Busy/Toast, но за chat_admin роля. */
-  chatAdminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | null } | null
+  chatAdminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | 'pika_team' | null } | null
   chatAdminActionBusy: boolean
   chatAdminActionToast: { text: string; ok: boolean } | null
+  pikaTeamActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | 'chat_admin' | null } | null
+  pikaTeamActionBusy: boolean
+  pikaTeamActionToast: { text: string; ok: boolean } | null
   players: PlayerPublicProfileSnapshot[]
   playersPage: number
   playersTotalCount: number
@@ -621,6 +624,10 @@ export type RenderLobbyScreenOptions = {
   onProfileRevokeChatAdminClick: (profileId: string | null) => void
   onChatAdminActionCancel: () => void
   onChatAdminActionConfirm: () => void
+  onProfileGrantPikaTeamClick: (profileId: string | null) => void
+  onProfileRevokePikaTeamClick: (profileId: string | null) => void
+  onPikaTeamActionCancel: () => void
+  onPikaTeamActionConfirm: () => void
   onProfileEditClose: () => void
   onProfileEditSubmit: (
     avatarFile: File | null,
@@ -886,6 +893,8 @@ export type ProfilePopupCallbacks = {
   onRevokeSubadminClick: (profileId: string | null) => void
   onGrantChatAdminClick: (profileId: string | null) => void
   onRevokeChatAdminClick: (profileId: string | null) => void
+  onGrantPikaTeamClick: (profileId: string | null) => void
+  onRevokePikaTeamClick: (profileId: string | null) => void
 }
 
 function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profileId: string | null): void {
@@ -932,6 +941,22 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
     })
     revokeChatAdminEl.addEventListener('mouseenter', () => { revokeChatAdminEl.style.textDecoration = 'underline' })
     revokeChatAdminEl.addEventListener('mouseleave', () => { revokeChatAdminEl.style.textDecoration = 'none' })
+  }
+  const grantPikaTeamEl = el.querySelector<HTMLElement>('[data-player-profile-grant-pika-team="1"]')
+  if (grantPikaTeamEl) {
+    grantPikaTeamEl.addEventListener('click', () => {
+      cb.onGrantPikaTeamClick(profileId)
+    })
+    grantPikaTeamEl.addEventListener('mouseenter', () => { grantPikaTeamEl.style.textDecoration = 'underline' })
+    grantPikaTeamEl.addEventListener('mouseleave', () => { grantPikaTeamEl.style.textDecoration = 'none' })
+  }
+  const revokePikaTeamEl = el.querySelector<HTMLElement>('[data-player-profile-revoke-pika-team="1"]')
+  if (revokePikaTeamEl) {
+    revokePikaTeamEl.addEventListener('click', () => {
+      cb.onRevokePikaTeamClick(profileId)
+    })
+    revokePikaTeamEl.addEventListener('mouseenter', () => { revokePikaTeamEl.style.textDecoration = 'underline' })
+    revokePikaTeamEl.addEventListener('mouseleave', () => { revokePikaTeamEl.style.textDecoration = 'none' })
   }
   el.querySelector<HTMLButtonElement>('[data-player-profile-like]')
     ?.addEventListener('click', (e) => {
@@ -1002,7 +1027,7 @@ export function syncProfilePopup(
     isAdmin?: boolean
     friendshipAction: PlayerProfileFriendshipAction | null
     viewerIsFullAdmin?: boolean
-    targetAccountRole?: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null
+    targetAccountRole?: PlayerAccountRole | null
   },
   cb: ProfilePopupCallbacks,
 ): void {
@@ -2102,15 +2127,20 @@ function renderNav(state: LobbyScreenState): string {
 
 export function renderLobbyChatMessageRow(state: LobbyScreenState, message: LobbyChatMessageSnapshot): string {
   const canDelete = state.canDeleteLobbyChat
-  // chat_admin вижда леко различен, приглушен teal нюанс на името си в
-  // общия чат (единственото място, където ролята му е разпознаваема) —
-  // admin/subadmin остават на стандартното злато, без промяна.
-  const nameColor = message.senderIsChatAdmin ? '#14b8a6' : '#d4a520'
+  const senderRole = message.senderRole ?? (message.senderIsChatAdmin ? 'chat_admin' : 'player')
+  const nameColor = senderRole === 'pika_team'
+    ? '#f472b6'
+    : senderRole === 'chat_admin'
+      ? '#14b8a6'
+      : '#d4a520'
+  const nameExtraStyle = senderRole === 'pika_team'
+    ? 'text-shadow:0 0 8px rgba(244,114,182,0.35);'
+    : ''
 
   return `
     <div data-lobby-livechat-message="${escapeHtml(message.messageId)}" style="display:flex;align-items:flex-start;gap:5px;font-size:16px;line-height:1.45;word-break:break-word;">
       <div style="flex:1;min-width:0;">
-        <span style="color:${nameColor};font-weight:900;">${escapeHtml(message.senderDisplayName)}:</span>
+        <span style="color:${nameColor};font-weight:900;${nameExtraStyle}">${escapeHtml(message.senderDisplayName)}:</span>
         <span style="color:#f1f5f9;font-weight:500;"> ${escapeHtml(message.body)}</span>
       </div>
       ${canDelete ? `
@@ -7952,6 +7982,85 @@ export function renderChatAdminActionToast(state: LobbyScreenState): string {
   `
 }
 
+export function renderPikaTeamActionConfirmPopup(state: LobbyScreenState): string {
+  const pending = state.pikaTeamActionConfirm
+  if (!pending) return ''
+
+  const isGrant = pending.action === 'grant'
+  const title = isGrant ? 'Направи Екип Pika.bg?' : 'Премахни Екип Pika.bg?'
+  const baseMessage = isGrant
+    ? 'Потребителят ще може да вижда X и да трие съобщения от общия чат в лобито. Няма да получи достъп до админ панела, Сървър, потребители, плащания или турнири.'
+    : 'Потребителят ще загуби правото да трие съобщения от общия чат в лобито.'
+  const previousLabel = pending.previousRole === 'subadmin'
+    ? 'Субадмин'
+    : pending.previousRole === 'chat_admin'
+      ? 'Чат админ'
+      : null
+  const message = isGrant && previousLabel
+    ? `${baseMessage} Текущата роля „${previousLabel}“ ще бъде заменена.`
+    : baseMessage
+  const confirmLabel = isGrant ? 'Направи Екип Pika.bg' : 'Премахни'
+  const busy = state.pikaTeamActionBusy
+
+  return `
+    <div style="
+      position:fixed;inset:0;z-index:9600;
+      display:flex;align-items:center;justify-content:center;
+      background:rgba(0,0,0,0.7);
+    ">
+      <div style="
+        background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);
+        border-radius:16px;padding:28px 28px 24px;max-width:400px;width:90%;
+        box-shadow:0 20px 60px rgba(0,0,0,0.6);
+      ">
+        <div style="font-size:18px;font-weight:900;color:#fff;margin-bottom:14px;">${escapeHtml(title)}</div>
+        <div style="font-size:14px;color:rgba(255,255,255,0.7);line-height:1.5;margin-bottom:24px;">${escapeHtml(message)}</div>
+        <div style="display:flex;gap:12px;">
+          <button type="button" data-pika-team-action-cancel="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
+            border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};
+          ">Отказ</button>
+          <button type="button" data-pika-team-action-confirm="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(244,114,182,0.62);
+            background:linear-gradient(180deg, rgba(251,182,219,0.98) 0%, rgba(244,114,182,0.98) 100%);
+            border-radius:10px;color:#080808;font-size:14px;font-weight:900;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.7' : '1'};
+          ">${busy ? 'Изчакай…' : escapeHtml(confirmLabel)}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+export function renderPikaTeamActionToast(state: LobbyScreenState): string {
+  const toast = state.pikaTeamActionToast
+  if (!toast) return ''
+
+  return `
+    <div style="
+      position:fixed;inset:0;z-index:9700;
+      display:flex;align-items:flex-end;justify-content:center;
+      padding-bottom:64px;
+      pointer-events:none;
+    ">
+      <div style="
+        pointer-events:auto;
+        background:#1a1a2e;
+        border:1px solid ${toast.ok ? 'rgba(244,114,182,0.55)' : 'rgba(239,68,68,0.55)'};
+        border-radius:12px;
+        padding:14px 22px;
+        text-align:center;
+        box-shadow:0 8px 40px rgba(0,0,0,0.7);
+        max-width:calc(100vw - 48px);
+        animation:prInfoIn 0.18s ease both;
+      ">
+        <div style="font-size:14px;font-weight:800;color:${toast.ok ? '#f9a8d4' : '#fca5a5'};">${escapeHtml(toast.text)}</div>
+      </div>
+    </div>
+  `
+}
+
 function renderPrivateRoomInfoPopup(state: LobbyScreenState): string {
   if (!state.privateRoomInfoText) return ''
   return `
@@ -8413,6 +8522,8 @@ export function renderLobbyScreen(
       ${renderSubadminActionToast(state)}
       ${renderChatAdminActionConfirmPopup(state)}
       ${renderChatAdminActionToast(state)}
+      ${renderPikaTeamActionConfirmPopup(state)}
+      ${renderPikaTeamActionToast(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
       ${renderNoPlayersModal(state)}
@@ -8674,6 +8785,8 @@ export function renderLobbyScreen(
       ${renderSubadminActionToast(state)}
       ${renderChatAdminActionConfirmPopup(state)}
       ${renderChatAdminActionToast(state)}
+      ${renderPikaTeamActionConfirmPopup(state)}
+      ${renderPikaTeamActionToast(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
       ${renderNoPlayersModal(state)}
@@ -9767,6 +9880,8 @@ export function renderLobbyScreen(
       onRevokeSubadminClick: options.onProfileRevokeSubadminClick,
       onGrantChatAdminClick: options.onProfileGrantChatAdminClick,
       onRevokeChatAdminClick: options.onProfileRevokeChatAdminClick,
+      onGrantPikaTeamClick: options.onProfileGrantPikaTeamClick,
+      onRevokePikaTeamClick: options.onProfileRevokePikaTeamClick,
     },
   )
 
@@ -10892,6 +11007,12 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-chat-admin-action-cancel="1"]')
     ?.addEventListener('click', options.onChatAdminActionCancel)
+
+  root.querySelector<HTMLButtonElement>('[data-pika-team-action-confirm="1"]')
+    ?.addEventListener('click', options.onPikaTeamActionConfirm)
+
+  root.querySelector<HTMLButtonElement>('[data-pika-team-action-cancel="1"]')
+    ?.addEventListener('click', options.onPikaTeamActionCancel)
 
   if (root.querySelector('[data-private-room-info-toast="1"]')) {
     if (privateRoomInfoDismissTimer !== null) clearTimeout(privateRoomInfoDismissTimer)

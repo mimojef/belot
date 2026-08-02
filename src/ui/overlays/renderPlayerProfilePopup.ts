@@ -24,8 +24,10 @@ export type RenderPlayerProfilePopupOptions = {
    * още не е заредена) или ако профилът няма акаунт (бот/гост/временен).
    * Ползва се само когато viewerIsFullAdmin е true.
    */
-  targetAccountRole?: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null
+  targetAccountRole?: PlayerAccountRole | null
 }
+
+export type PlayerAccountRole = 'player' | 'chat_admin' | 'pika_team' | 'subadmin' | 'admin'
 
 export type PlayerProfileFriendshipAction = {
   profileId: string
@@ -473,7 +475,7 @@ function renderEmptyContent(seat: Seat | null): string {
 function renderSubadminRoleControls(
   isOwnProfile: boolean,
   viewerIsFullAdmin: boolean,
-  targetAccountRole: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null,
+  targetAccountRole: PlayerAccountRole | null,
 ): string {
   // Никога за собствен профил, никога за друг пълен admin (target === 'admin'),
   // никога ако ролята още не е заредена (null) — не показваме грешен бутон
@@ -544,7 +546,7 @@ function renderSubadminRoleControls(
 function renderChatAdminRoleControls(
   isOwnProfile: boolean,
   viewerIsFullAdmin: boolean,
-  targetAccountRole: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null,
+  targetAccountRole: PlayerAccountRole | null,
 ): string {
   if (isOwnProfile || !viewerIsFullAdmin || targetAccountRole === null || targetAccountRole === 'admin') {
     return ''
@@ -602,6 +604,69 @@ function renderChatAdminRoleControls(
   `
 }
 
+function renderPikaTeamRoleControls(
+  isOwnProfile: boolean,
+  viewerIsFullAdmin: boolean,
+  targetAccountRole: PlayerAccountRole | null,
+): string {
+  if (isOwnProfile || !viewerIsFullAdmin || targetAccountRole === null || targetAccountRole === 'admin') {
+    return ''
+  }
+
+  if (targetAccountRole === 'pika_team') {
+    return `
+      <span
+        data-player-profile-pika-team-badge="1"
+        style="
+          display:inline-flex;
+          align-items:center;
+          padding:3px 10px;
+          border-radius:999px;
+          background:rgba(244,114,182,0.16);
+          border:1px solid rgba(244,114,182,0.55);
+          color:#f472b6;
+          font-size:11px;
+          font-weight:900;
+          letter-spacing:0.04em;
+          text-transform:uppercase;
+          white-space:nowrap;
+          text-shadow:0 0 8px rgba(244,114,182,0.30);
+        "
+      >Екип Pika.bg</span>
+      <span
+        data-player-profile-revoke-pika-team="1"
+        style="
+          display:inline-flex;
+          align-items:center;
+          gap:6px;
+          color:#f87171;
+          font-size:14px;
+          font-weight:900;
+          cursor:pointer;
+          white-space:nowrap;
+        "
+      >Премахни Екип Pika.bg</span>
+    `
+  }
+
+  return `
+    <span
+      data-player-profile-grant-pika-team="1"
+      style="
+        display:inline-flex;
+        align-items:center;
+        gap:6px;
+        color:#f472b6;
+        font-size:14px;
+        font-weight:900;
+        cursor:pointer;
+        white-space:nowrap;
+        text-shadow:0 0 8px rgba(244,114,182,0.24);
+      "
+    >Направи Екип Pika.bg</span>
+  `
+}
+
 function renderProfileContent(
   profile: PlayerPublicProfileSnapshot,
   seat: Seat | null,
@@ -610,7 +675,7 @@ function renderProfileContent(
   isAdmin: boolean,
   friendshipAction: PlayerProfileFriendshipAction | null,
   viewerIsFullAdmin: boolean,
-  targetAccountRole: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null,
+  targetAccountRole: PlayerAccountRole | null,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -709,6 +774,7 @@ function renderProfileContent(
             ` : ''}
             ${renderSubadminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
+            ${renderPikaTeamRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderCoinBalanceInline(profile)}
           </div>
 

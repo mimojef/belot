@@ -33,6 +33,7 @@ import { validateProfileDisplayName } from './app/lobby/profileDisplayNameValida
 import { validateProfileImageFile } from './app/profileImages/profileImageUploadHelpers'
 import type { GiftLimitErrorPayload } from './app/lobby/formatGiftLimitError'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
+import type { PlayerAccountRole } from './ui/overlays/renderPlayerProfilePopup'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult } from './app/adminServer/adminServerTypes'
 import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from './app/adminTournaments/adminTournamentTypes'
@@ -2989,7 +2990,7 @@ async function submitProfileNameChange(targetProfileId: string | null, displayNa
 
 async function loadAdminTargetRole(
   profileId: string,
-): Promise<{ ok: true; role: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null } | { ok: false; message: string }> {
+): Promise<{ ok: true; role: PlayerAccountRole | null } | { ok: false; message: string }> {
   try {
     const response = await fetch(
       `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(profileId)}/subadmin`,
@@ -2998,7 +2999,7 @@ async function loadAdminTargetRole(
     if (response.status === 403) {
       return { ok: false, message: 'Нямаш достъп.' }
     }
-    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; role?: 'player' | 'chat_admin' | 'subadmin' | 'admin' | null; message?: string }
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; role?: PlayerAccountRole | null; message?: string }
     if (!response.ok || !data.ok) {
       return { ok: false, message: data.message ?? 'Ролята не можа да бъде заредена.' }
     }
@@ -3035,6 +3036,25 @@ async function submitChatAdminRoleChange(
   try {
     const response = await fetch(
       `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(profileId)}/chat-admin`,
+      { method: action === 'grant' ? 'POST' : 'DELETE', credentials: 'include' },
+    )
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Действието не бе завършено.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function submitPikaTeamRoleChange(
+  profileId: string,
+  action: 'grant' | 'revoke',
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(profileId)}/pika-team`,
       { method: action === 'grant' ? 'POST' : 'DELETE', credentials: 'include' },
     )
     const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
@@ -3933,6 +3953,8 @@ lobby = createLobbyFlowController({
   onAdminRevokeSubadmin: (profileId) => submitSubadminRoleChange(profileId, 'revoke'),
   onAdminGrantChatAdmin: (profileId) => submitChatAdminRoleChange(profileId, 'grant'),
   onAdminRevokeChatAdmin: (profileId) => submitChatAdminRoleChange(profileId, 'revoke'),
+  onAdminGrantPikaTeam: (profileId) => submitPikaTeamRoleChange(profileId, 'grant'),
+  onAdminRevokePikaTeam: (profileId) => submitPikaTeamRoleChange(profileId, 'revoke'),
   onAdminHistoryWindowChange: (window: HistoryWindow) => {
     invalidateHistoryGeneration()
     fetchAdminHistory(window)

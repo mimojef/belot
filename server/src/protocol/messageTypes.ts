@@ -890,6 +890,7 @@ export type LobbyChatMessageSnapshot = {
   senderDisplayName: string
   /** Snapshot към момента на изпращане — само за оцветяване на името в чата. */
   senderIsChatAdmin: boolean
+  senderRole: 'player' | 'chat_admin' | 'pika_team' | 'subadmin' | 'admin'
   body: string
   createdAt: string
 }

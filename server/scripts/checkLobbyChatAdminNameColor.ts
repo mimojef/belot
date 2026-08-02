@@ -52,6 +52,7 @@ function makeMessage(overrides: Partial<LobbyChatMessageSnapshot> = {}): LobbyCh
     senderProfileId: 'sender-1',
     senderDisplayName: 'Тест Автор',
     senderIsChatAdmin: false,
+    senderRole: 'player',
     body: 'Здравейте от общия чат',
     createdAt: new Date('2026-07-29T10:00:00Z').toISOString(),
     ...overrides,
@@ -64,10 +65,11 @@ function makeState(canDeleteLobbyChat: boolean): LobbyScreenState {
 
 const TEAL_NAME_MARKER = 'color:#14b8a6;font-weight:900;'
 const GOLD_NAME_MARKER = 'color:#d4a520;font-weight:900;'
+const PINK_NAME_MARKER = 'color:#f472b6;font-weight:900;text-shadow:0 0 8px rgba(244,114,182,0.35);'
 
 function main(): void {
   check('[1] senderIsChatAdmin:true → името е в приглушен teal (#14b8a6)', () => {
-    const html = renderLobbyChatMessageRow(makeState(false), makeMessage({ senderIsChatAdmin: true }))
+    const html = renderLobbyChatMessageRow(makeState(false), makeMessage({ senderIsChatAdmin: true, senderRole: 'chat_admin' }))
     assert(html.includes(TEAL_NAME_MARKER), 'трябва да съдържа teal стила на името')
     assert(!html.includes(GOLD_NAME_MARKER), 'не трябва да съдържа златния стил, докато е chat_admin')
   })
@@ -79,14 +81,14 @@ function main(): void {
   })
 
   check('[3a] canDeleteLobbyChat:true → бутонът "(×)" присъства, независимо от senderIsChatAdmin', () => {
-    const htmlChatAdminMsg = renderLobbyChatMessageRow(makeState(true), makeMessage({ senderIsChatAdmin: true }))
+    const htmlChatAdminMsg = renderLobbyChatMessageRow(makeState(true), makeMessage({ senderIsChatAdmin: true, senderRole: 'chat_admin' }))
     const htmlPlayerMsg = renderLobbyChatMessageRow(makeState(true), makeMessage({ senderIsChatAdmin: false }))
     assert(htmlChatAdminMsg.includes('data-lobby-livechat-delete='), 'трябва да съдържа delete бутона (chat_admin съобщение)')
     assert(htmlPlayerMsg.includes('data-lobby-livechat-delete='), 'трябва да съдържа delete бутона (обикновено съобщение)')
   })
 
   check('[3b] canDeleteLobbyChat:false → бутонът "(×)" липсва, независимо от senderIsChatAdmin', () => {
-    const htmlChatAdminMsg = renderLobbyChatMessageRow(makeState(false), makeMessage({ senderIsChatAdmin: true }))
+    const htmlChatAdminMsg = renderLobbyChatMessageRow(makeState(false), makeMessage({ senderIsChatAdmin: true, senderRole: 'chat_admin' }))
     const htmlPlayerMsg = renderLobbyChatMessageRow(makeState(false), makeMessage({ senderIsChatAdmin: false }))
     assert(!htmlChatAdminMsg.includes('data-lobby-livechat-delete='), 'не трябва да съдържа delete бутона (chat_admin съобщение)')
     assert(!htmlPlayerMsg.includes('data-lobby-livechat-delete='), 'не трябва да съдържа delete бутона (обикновено съобщение)')
@@ -97,6 +99,13 @@ function main(): void {
     const htmlPlayer = renderLobbyChatMessageRow(makeState(false), makeMessage({ senderIsChatAdmin: false, body: 'Уникален текст X' }))
     assert(htmlChatAdmin.includes('color:#f1f5f9;font-weight:500;'), 'текстът на съобщението трябва да остане непроменен (chat_admin)')
     assert(htmlPlayer.includes('color:#f1f5f9;font-weight:500;'), 'текстът на съобщението трябва да остане непроменен (обикновен автор)')
+  })
+
+  check('[2b] senderRole:pika_team -> pink author name only', () => {
+    const html = renderLobbyChatMessageRow(makeState(false), makeMessage({ senderRole: 'pika_team' }))
+    assert(html.includes(PINK_NAME_MARKER), 'expected pink pika_team author-name style')
+    assert(!html.includes(TEAL_NAME_MARKER), 'pika_team must not reuse chat_admin teal style')
+    assert(html.includes('color:#f1f5f9;font-weight:500;'), 'message body style must stay unchanged')
   })
 
   console.log(`\n${passed} passed, ${failed} failed`)

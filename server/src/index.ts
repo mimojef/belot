@@ -657,6 +657,7 @@ type LobbyChatBroadcastSnapshot = {
   senderProfileId: string
   senderDisplayName: string
   senderIsChatAdmin: boolean
+  senderRole: 'player' | 'chat_admin' | 'pika_team' | 'subadmin' | 'admin'
   body: string
   createdAt: string
 }
@@ -690,6 +691,7 @@ function broadcastLobbyChatMessageToLocalSubscribers(
       senderProfileId: snapshot.senderProfileId,
       senderDisplayName: snapshot.senderDisplayName,
       senderIsChatAdmin: snapshot.senderIsChatAdmin,
+      senderRole: snapshot.senderRole,
       body: snapshot.body,
       createdAt: snapshot.createdAt,
       ...(isOriginator && opts?.requestId ? { requestId: opts.requestId } : {}),
@@ -5073,6 +5075,56 @@ async function handleAdminChatAdminRoleRequest(
   return true
 }
 
+async function handleAdminPikaTeamRoleRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = pathname.match(/^\/api\/admin\/profiles\/([^/]+)\/pika-team$/)
+  if (!match) return false
+
+  if (req.method !== 'POST' && req.method !== 'DELETE') return false
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Само администратор може да управлява роли.' })
+    return true
+  }
+
+  const targetProfileId = decodeURIComponent((match[1] ?? '').trim())
+
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(targetProfileId)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден profileId.' })
+    return true
+  }
+
+  const result = authStore.setPikaTeamRole({
+    actorAccountId: session.account.accountId,
+    targetProfileId,
+    action: req.method === 'POST' ? 'grant' : 'revoke',
+  })
+
+  if (!result.ok) {
+    const statusByCode: Record<typeof result.code, number> = {
+      not_found: 404,
+      no_account: 400,
+      self: 400,
+      target_is_admin: 409,
+      conflict: 409,
+      profile_inactive: 400,
+      profile_temporary: 400,
+      account_inactive: 400,
+    }
+    sendJsonResponse(res, statusByCode[result.code], { ok: false, message: result.message })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, role: result.role })
+  return true
+}
+
 async function handleProfileBlockRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -8117,7 +8169,7 @@ async function handleLobbyChatDeleteRequest(
   const result = lobbyChatStore.deleteMessage({
     messageId,
     actorAccountId: session.account.accountId,
-    actorRoleAtDeletion: session.account.role as 'admin' | 'subadmin' | 'chat_admin',
+    actorRoleAtDeletion: session.account.role as 'admin' | 'subadmin' | 'chat_admin' | 'pika_team',
   })
 
   if (!result.ok && result.code === 'not_found') {
@@ -9158,6 +9210,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminChatAdminRoleRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminPikaTeamRoleRequest(req, res, requestUrl.pathname)) {
     return
   }
 
@@ -11104,6 +11160,7 @@ wsServer.on('connection', (socket, request) => {
             senderProfileId: m.senderProfileId,
             senderDisplayName: m.senderDisplayName,
             senderIsChatAdmin: m.senderIsChatAdmin,
+            senderRole: m.senderRole,
             body: m.body,
             createdAt: m.createdAt,
           })),
@@ -11163,12 +11220,14 @@ wsServer.on('connection', (socket, request) => {
 
         const publicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
         const senderDisplayName = publicProfile?.displayName?.trim() || 'Играч'
-        const senderIsChatAdmin = authStore.getAccountRoleForProfile(latestConnection.profileId) === 'chat_admin'
+        const senderRole = authStore.getAccountRoleForProfile(latestConnection.profileId) ?? 'player'
+        const senderIsChatAdmin = senderRole === 'chat_admin'
 
         const snapshot = lobbyChatStore.insertMessage({
           senderProfileId: latestConnection.profileId,
           senderDisplayName,
           senderIsChatAdmin,
+          senderRole,
           body: validation.body,
         })
 
