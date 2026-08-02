@@ -2071,7 +2071,7 @@ export function renderLobbyChatMessageRow(state: LobbyScreenState, message: Lobb
   const nameColor = message.senderIsChatAdmin ? '#14b8a6' : '#d4a520'
 
   return `
-    <div data-lobby-livechat-message="${escapeHtml(message.messageId)}" style="display:flex;align-items:flex-start;gap:5px;font-size:13px;line-height:1.45;word-break:break-word;">
+    <div data-lobby-livechat-message="${escapeHtml(message.messageId)}" style="display:flex;align-items:flex-start;gap:5px;font-size:16px;line-height:1.45;word-break:break-word;">
       <div style="flex:1;min-width:0;">
         <span style="color:${nameColor};font-weight:900;">${escapeHtml(message.senderDisplayName)}:</span>
         <span style="color:#f1f5f9;font-weight:500;"> ${escapeHtml(message.body)}</span>
