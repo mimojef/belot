@@ -18,6 +18,7 @@ import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown } f
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
   renderLobbyScreen,
+  releaseLobbyChatBodyScrollLock,
   syncProfilePopup,
   clearProfileEditorPendingState,
   type AvatarCropSelection,
@@ -770,6 +771,7 @@ type InternalLobbyFlowState = {
   lobbyChatSending: boolean
   lobbyChatPendingRequestId: string | null
   lobbyChatErrorText: string | null
+  lobbyChatFullscreen: boolean
   notificationsOpen: boolean
   pendingFriendRequests: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   missionsPopupOpen: boolean
@@ -1107,6 +1109,7 @@ function createInitialState(): InternalLobbyFlowState {
     lobbyChatSending: false,
     lobbyChatPendingRequestId: null,
     lobbyChatErrorText: null,
+    lobbyChatFullscreen: false,
     notificationsOpen: false,
     pendingFriendRequests: [],
     missionsPopupOpen: false,
@@ -2574,6 +2577,7 @@ export function createLobbyFlowController(
       lobbyChatDraft: state.lobbyChatDraft,
       lobbyChatSending: state.lobbyChatSending,
       lobbyChatErrorText: state.lobbyChatErrorText,
+      lobbyChatFullscreen: state.lobbyChatFullscreen,
       authModalMode: state.authModalMode,
       authErrorText: state.authErrorText,
       guestTrialPopup: state.guestTrialPopup,
@@ -3221,6 +3225,9 @@ export function createLobbyFlowController(
       },
       onLobbyChatDelete: (messageId) => {
         options.onLobbyChatDeleteMessage?.(messageId)
+      },
+      onLobbyChatFullscreenChange: (isFullscreen) => {
+        setLobbyChatFullscreen(isFullscreen)
       },
       onGuestTrialPlayClick: () => {
         handleGuestTrialPlayClick()
@@ -7425,6 +7432,8 @@ export function createLobbyFlowController(
       }
       state.lobbyChatSubscribed = false
       state.lobbyChatMessages = []
+      state.lobbyChatFullscreen = false
+      releaseLobbyChatBodyScrollLock()
       return
     }
 
@@ -7440,6 +7449,8 @@ export function createLobbyFlowController(
     }
     state.lobbyChatSubscribed = false
     state.lobbyChatMessages = []
+    state.lobbyChatFullscreen = false
+    releaseLobbyChatBodyScrollLock()
   }
 
   function forceLobbyChatResubscribeIfOnLobbyScreen(): void {
@@ -7463,6 +7474,11 @@ export function createLobbyFlowController(
 
   function updateLobbyChatDraft(value: string): void {
     state.lobbyChatDraft = value
+  }
+
+  function setLobbyChatFullscreen(value: boolean): void {
+    state.lobbyChatFullscreen = value
+    render()
   }
 
   function submitLobbyChatMessage(): void {
@@ -8722,6 +8738,8 @@ export function createLobbyFlowController(
     render,
     destroy: () => {
       leaveAdminServerIfActive()
+      state.lobbyChatFullscreen = false
+      releaseLobbyChatBodyScrollLock()
       stopWaitingRoomActivity()
       clearPrivateRoomCountdownLoop()
       clearServerRoomSnapshot()

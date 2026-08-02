@@ -439,6 +439,7 @@ export type LobbyScreenState = {
   lobbyChatDraft: string
   lobbyChatSending: boolean
   lobbyChatErrorText: string | null
+  lobbyChatFullscreen: boolean
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
   guestTrialPopup: GuestTrialPopupState
@@ -731,6 +732,7 @@ export type RenderLobbyScreenOptions = {
   onLobbyChatDraftChange: (value: string) => void
   onLobbyChatSubmit: () => void
   onLobbyChatDelete: (messageId: string) => void
+  onLobbyChatFullscreenChange: (isFullscreen: boolean) => void
   onGuestTrialPlayClick: () => void
   onGuestTrialRegisterClick: () => void
   onGuestTrialLoginClick: () => void
@@ -833,6 +835,41 @@ let stakesFirstCardIndex = -1
 let stakesAnimFrame = 0
 let inviteCountdownTimer: ReturnType<typeof setInterval> | null = null
 let savedAdminSupportMobileListScrollTop = 0
+let lobbyChatBodyScrollLockPrevious: {
+  bodyOverflow: string
+  bodyTouchAction: string
+  htmlOverscrollBehavior: string
+} | null = null
+
+function setLobbyChatBodyScrollLocked(locked: boolean): void {
+  if (typeof document === 'undefined') return
+
+  const body = document.body
+  const html = document.documentElement
+
+  if (locked) {
+    if (lobbyChatBodyScrollLockPrevious !== null) return
+    lobbyChatBodyScrollLockPrevious = {
+      bodyOverflow: body.style.overflow,
+      bodyTouchAction: body.style.touchAction,
+      htmlOverscrollBehavior: html.style.overscrollBehavior,
+    }
+    body.style.overflow = 'hidden'
+    body.style.touchAction = 'none'
+    html.style.overscrollBehavior = 'none'
+    return
+  }
+
+  if (lobbyChatBodyScrollLockPrevious === null) return
+  body.style.overflow = lobbyChatBodyScrollLockPrevious.bodyOverflow
+  body.style.touchAction = lobbyChatBodyScrollLockPrevious.bodyTouchAction
+  html.style.overscrollBehavior = lobbyChatBodyScrollLockPrevious.htmlOverscrollBehavior
+  lobbyChatBodyScrollLockPrevious = null
+}
+
+export function releaseLobbyChatBodyScrollLock(): void {
+  setLobbyChatBodyScrollLocked(false)
+}
 
 export type ProfilePopupCallbacks = {
   onClose: () => void
@@ -2091,8 +2128,15 @@ export function renderLobbyChatMessageRow(state: LobbyScreenState, message: Lobb
  * пренасочи клик/submit към auth попъп с текст "Общ чат само за регистрирани
  * потребители" (не към действително изпращане) — виж attachLobbyScreenHandlers.
  */
-function renderLobbyChatPanel(state: LobbyScreenState, opts: { isGuest: boolean; compact: boolean }): string {
+function renderLobbyChatFullscreenIcon(isFullscreen: boolean): string {
+  return isFullscreen
+    ? '<path d="M9 3v6H3"/><path d="M15 3v6h6"/><path d="M9 21v-6H3"/><path d="M15 21v-6h6"/>'
+    : '<path d="M8 3H3v5"/><path d="M16 3h5v5"/><path d="M8 21H3v-5"/><path d="M16 21h5v-5"/>'
+}
+
+function renderLobbyChatPanel(state: LobbyScreenState, opts: { isGuest: boolean; compact: boolean; fullscreen?: boolean }): string {
   const { isGuest, compact } = opts
+  const fullscreen = compact && opts.fullscreen === true
   const isDisconnected = !state.isConnected
 
   const messagesHtml = state.lobbyChatMessages.length === 0
@@ -2109,13 +2153,36 @@ function renderLobbyChatPanel(state: LobbyScreenState, opts: { isGuest: boolean;
   const titleSize = compact ? '11px' : '13px'
   const rowHeight = compact ? '30px' : '34px'
   const fontSize = compact ? '13px' : '13px'
+  const fullscreenToggle = compact
+    ? `
+        <button
+          type="button"
+          data-lobby-livechat-fullscreen-toggle="1"
+          aria-label="${fullscreen ? 'Свий лайв чата' : 'Разгъни лайв чата на цял екран'}"
+          title="${fullscreen ? 'Свий' : 'Цял екран'}"
+          style="width:26px;height:26px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.62);border-radius:6px;background:#050505;color:#d4a520;padding:0;cursor:pointer;box-shadow:inset 0 0 0 1px rgba(212,165,32,0.12);flex:0 0 auto;"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#d4a520" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block;">${renderLobbyChatFullscreenIcon(fullscreen)}</svg>
+        </button>
+      `
+    : ''
 
   return `
     <div style="display:flex;flex-direction:column;min-width:0;height:100%;box-sizing:border-box;">
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0;padding-bottom:${compact ? '5' : '7'}px;">
-        <div style="font-size:${titleSize};font-weight:900;letter-spacing:0.06em;text-transform:uppercase;color:#d4a520;">Лайв чат</div>
-        ${isDisconnected ? `<div style="font-size:10px;font-weight:800;color:#f87171;">Няма връзка</div>` : ''}
-      </div>
+      ${compact ? `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-shrink:0;padding-bottom:${fullscreen ? '5' : '2'}px;border-bottom:1px solid rgba(212,165,32,0.28);">
+          <div style="font-size:${titleSize};font-weight:900;letter-spacing:0.06em;text-transform:uppercase;color:#d4a520;">Лайв чат</div>
+          <div style="display:flex;align-items:center;gap:8px;flex:0 0 auto;">
+            ${isDisconnected ? `<div style="font-size:10px;font-weight:800;color:#f87171;">Няма връзка</div>` : ''}
+            ${fullscreenToggle}
+          </div>
+        </div>
+      ` : `
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0;padding-bottom:7px;">
+          <div style="font-size:${titleSize};font-weight:900;letter-spacing:0.06em;text-transform:uppercase;color:#d4a520;">Лайв чат</div>
+          ${isDisconnected ? `<div style="font-size:10px;font-weight:800;color:#f87171;">Няма връзка</div>` : ''}
+        </div>
+      `}
       <div data-lobby-livechat-messages-scroll="1" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:5px;padding-right:4px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
         ${messagesHtml}
       </div>
@@ -3444,10 +3511,14 @@ function mobileMenuSvgItemContent(
  */
 function renderMobileLobbyChatSection(state: LobbyScreenState): string {
   const isGuest = state.profile.profileId === null
+  const isFullscreen = state.lobbyChatFullscreen
+  const sectionStyle = isFullscreen
+    ? 'position:fixed;inset:0;z-index:16000;background:#080808;border:2px solid rgba(212,165,32,0.90);border-radius:0;padding:calc(10px + env(safe-area-inset-top,0px)) calc(10px + env(safe-area-inset-right,0px)) calc(10px + env(safe-area-inset-bottom,0px)) calc(10px + env(safe-area-inset-left,0px));height:100vh;height:100dvh;box-sizing:border-box;'
+    : 'margin:0 12px 12px;border:2px solid rgba(212,165,32,0.84);border-radius:8px;background:#080808;padding:2px 2px 6px 6px;height:190px;box-sizing:border-box;'
 
   return `
-    <section style="margin:0 12px 12px;border:2px solid rgba(212,165,32,0.84);border-radius:8px;background:#080808;padding:10px;height:156px;box-sizing:border-box;">
-      ${renderLobbyChatPanel(state, { isGuest, compact: true })}
+    <section data-lobby-livechat-mobile-section="1" ${isFullscreen ? 'data-lobby-livechat-fullscreen="1"' : ''} style="${sectionStyle}">
+      ${renderLobbyChatPanel(state, { isGuest, compact: true, fullscreen: isFullscreen })}
     </section>
   `
 }
@@ -8243,6 +8314,11 @@ export function renderLobbyScreen(
   const mobileLayoutAttribute = isPhoneLayout ? 'data-mobile-layout="1"' : ''
   const privateRoomsCount = getPrivateRoomsBadgeCount(state.privateRooms)
   const profileName = state.displayName.trim() || 'Играч'
+  const shouldShowLobbyChatFullscreen = isPhoneLayout && state.view === 'tables' && state.lobbyChatFullscreen
+  if (!shouldShowLobbyChatFullscreen && state.lobbyChatFullscreen) {
+    state.lobbyChatFullscreen = false
+  }
+  setLobbyChatBodyScrollLocked(shouldShowLobbyChatFullscreen)
 
   const savedScrollTop = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')?.scrollTop ?? 0
   // Отделно от savedScrollTop по-горе: списъкът с admin support запитвания има собствен
@@ -9239,6 +9315,12 @@ export function renderLobbyScreen(
       if (messageId.length > 0) {
         options.onLobbyChatDelete(messageId)
       }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-livechat-fullscreen-toggle="1"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      options.onLobbyChatFullscreenChange(!state.lobbyChatFullscreen)
     })
   })
 

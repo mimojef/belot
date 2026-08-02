@@ -58,6 +58,7 @@
     "check:subadmin-profile-status-eligibility": "tsx scripts/checkSubadminProfileStatusEligibility.ts --server-root=.",
     "check:chat-admin-role": "tsx scripts/checkChatAdminRole.ts --server-root=.",
     "check:lobby-chat-admin-name-color": "tsx scripts/checkLobbyChatAdminNameColor.ts",
+    "check:lobby-chat-mobile-fullscreen": "tsx scripts/checkLobbyChatMobileFullscreen.ts --project-root=..",
     "check:visitor-tracking": "tsx scripts/checkVisitorTracking.ts",
     "check:view-layout-tracking": "tsx scripts/checkViewLayoutTracking.ts",
     "check:view-layout-frontend": "tsx scripts/checkViewLayoutFrontend.ts --project-root=..",
