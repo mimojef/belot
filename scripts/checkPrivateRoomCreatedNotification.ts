@@ -351,8 +351,11 @@ await check('[22] × бутонът затваря веднага (без пот
   assert(notifSrc.includes(`querySelector('#private-room-created-close-btn')?.addEventListener('click', dismiss)`), '× бутонът трябва директно да вика dismiss()')
 })
 
-await check('[23] "Влез" бутонът присъства само когато !recipientInActiveGame', () => {
-  assert(/const enterButtonHtml = notice\.recipientInActiveGame\s*\n\s*\? ''/.test(notifSrc), 'enterButtonHtml трябва да е празен низ когато recipientInActiveGame===true')
+await check('[23] "Влез" е само извън игра; "Изключи в игра" е само в игра', () => {
+  assert(notifSrc.includes('private-room-created-enter-btn'), 'outside-game popup must keep the Enter button')
+  assert(notifSrc.includes('private-room-created-disable-in-game-btn'), 'in-game popup must include disable-in-game button')
+  assert(/const actionButtonHtml = notice\.recipientInActiveGame\s*\n\s*\? `<button id="private-room-created-disable-in-game-btn"/.test(notifSrc), 'recipientInActiveGame=true must render disable-in-game action')
+  assert(notifSrc.includes('`<button id="private-room-created-enter-btn"'), 'recipientInActiveGame=false must render Enter action')
 })
 
 await check('[24] В игра текстът е информативен без действие; извън игра — покана с действие', () => {
@@ -372,8 +375,9 @@ await check('[25] Клик на "Влез" затваря попъпа пред�
   assert(dismissIdx !== -1 && navIdx !== -1 && dismissIdx < navIdx, 'dismiss() трябва да предхожда навигацията')
 })
 
-await check('[26] Звукът ползва notification-3.mp3, по същия audio helper pattern (volume 0.6, catch за autoplay policy)', () => {
-  assert(notifSrc.includes(`new Audio('/audio/Notifications/notification-3.mp3')`), 'трябва да ползва /audio/Notifications/notification-3.mp3')
+await check('[26] Звукът за нова частна маса е краткият notification-1.mp3, не notification-3.mp3', () => {
+  assert(notifSrc.includes(`new Audio('/audio/Notifications/notification-1.mp3')`), 'трябва да използва /audio/Notifications/notification-1.mp3')
+  assert(!notifSrc.includes(`new Audio('/audio/Notifications/notification-3.mp3')`), 'не трябва да използва стария дълъг notification-3.mp3')
   assert(/audio\.volume = 0\.6/.test(notifSrc), 'volume трябва да е 0.6, консистентно с останалите известия')
   assert(/void audio\.play\(\)\.catch\(\(\) => \{/.test(notifSrc), 'play() трябва да catch-ва autoplay policy грешки')
 })
@@ -384,6 +388,58 @@ await check('[27] playSound() се вика само от presentAndSchedule (р
 
   const handleIncomingFn = extractFunctionBody(notifSrc, 'function handleIncoming(notice: PrivateRoomCreatedNotice): void {', 'handleIncoming')
   assert(!handleIncomingFn.includes('playSound()'), 'handleIncoming не трябва пряко да вика playSound')
+})
+
+await check('[27b] В игра и изключена настройка: няма popup и няма звук', () => {
+  const handleIncomingFn = extractFunctionBody(notifSrc, 'function handleIncoming(notice: PrivateRoomCreatedNotice): void {', 'handleIncoming')
+  assert(handleIncomingFn.includes('recipientInActiveGame: options.isInActiveGame()'), 'client must use live activeRoom state, not stale DOM/server display state')
+  assert(handleIncomingFn.includes('normalizedNotice.recipientInActiveGame && !options.areInGameNotificationsEnabled()'), 'in-game disabled setting must skip notification before show/sound')
+  const skipIdx = handleIncomingFn.indexOf('return')
+  const queueIdx = handleIncomingFn.indexOf('queue.handleIncoming')
+  assert(skipIdx !== -1 && queueIdx !== -1 && skipIdx < queueIdx, 'suppressed in-game notice must return before queue/show/sound')
+})
+
+await check('[27c] Бутонът "Изключи в игра" променя същата постоянна настройка и затваря popup-а', () => {
+  const clickBlock = extractBlock(
+    notifSrc,
+    `options.container.querySelector('#private-room-created-disable-in-game-btn')?.addEventListener('click', () => {`,
+    'disable-in-game click handler',
+    '\n    })',
+  )
+  assert(clickBlock.includes('options.onDisableInGameNotifications()'), 'disable button must call the shared preference setter')
+  assert(clickBlock.includes('dismiss()'), 'disable button must dismiss the active popup')
+})
+
+await check('[27d] Local preference persists, defaults enabled, and syncs across tabs through storage event', () => {
+  assert(mainSrc.includes("const PRIVATE_ROOM_IN_GAME_NOTIFICATIONS_KEY = 'pika.privateRoomInGameNotificationsEnabled'"), 'localStorage key missing')
+  assert(mainSrc.includes("localStorage.getItem(PRIVATE_ROOM_IN_GAME_NOTIFICATIONS_KEY) !== 'false'"), 'default must be enabled unless explicitly false')
+  assert(mainSrc.includes("localStorage.setItem(PRIVATE_ROOM_IN_GAME_NOTIFICATIONS_KEY, enabled ? 'true' : 'false')"), 'setter must persist the same setting')
+  assert(mainSrc.includes("window.addEventListener('storage'"), 'multi-tab storage sync missing')
+  assert(mainSrc.includes('privateRoomCreatedNotification.syncPreferences()'), 'storage sync must update/suppress current popup')
+})
+
+await check('[27e] Toggle is in the existing notifications dropdown and uses the same preference', () => {
+  assert(controllerSrc.includes('initialPrivateRoomInGameNotificationsEnabled'), 'controller must receive initial setting')
+  assert(controllerSrc.includes('onPrivateRoomInGameNotificationsChange?.(enabled)'), 'dropdown toggle must call the shared setting callback')
+  assert(controllerSrc.includes('setPrivateRoomInGameNotificationsEnabled'), 'controller must expose setter for storage sync')
+  assert(notifSrc.includes('areInGameNotificationsEnabled'), 'notification controller must read the same setting')
+})
+
+await check('[27f] Извън игра настройката не влияе: popup и notification-1.mp3 продължават да работят', () => {
+  const handleIncomingFn = extractFunctionBody(notifSrc, 'function handleIncoming(notice: PrivateRoomCreatedNotice): void {', 'handleIncoming')
+  assert(handleIncomingFn.includes('normalizedNotice.recipientInActiveGame && !options.areInGameNotificationsEnabled()'), 'suppression must be gated by recipientInActiveGame')
+  assert(!/if \(!options\.areInGameNotificationsEnabled\(\)\)/.test(handleIncomingFn), 'setting must not suppress outside-game notices globally')
+})
+
+await check('[27g] Другите notification звуци не са променени', async () => {
+  const friendSrc = normalizeLineEndings(await readFile(join(REPO_ROOT, 'src', 'ui', 'notifications', 'friendRequestNotification.ts'), 'utf8'))
+  const likeSrc = normalizeLineEndings(await readFile(join(REPO_ROOT, 'src', 'ui', 'notifications', 'profileLikeNotification.ts'), 'utf8'))
+  const tournamentPartnerSrc = normalizeLineEndings(await readFile(join(REPO_ROOT, 'src', 'ui', 'notifications', 'tournamentPartnerInvitePopup.ts'), 'utf8'))
+  const chatSrc = normalizeLineEndings(await readFile(join(REPO_ROOT, 'src', 'ui', 'notifications', 'chatMessageNotification.ts'), 'utf8'))
+  assert(friendSrc.includes("notification-1.mp3"), 'friend request sound must remain notification-1.mp3')
+  assert(likeSrc.includes("notification-2.mp3"), 'profile like sound must remain notification-2.mp3')
+  assert(tournamentPartnerSrc.includes("notification-1.mp3"), 'tournament partner invite sound must remain notification-1.mp3')
+  assert(chatSrc.includes("player-seat-fill.mp3"), 'chat message sound must remain player-seat-fill.mp3')
 })
 
 await check('[28] Съобщението е добавено към клиентския и сървърния ServerMessage union', () => {

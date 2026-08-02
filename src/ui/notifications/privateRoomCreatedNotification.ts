@@ -5,6 +5,7 @@ import {
 
 type NotificationController = {
   handleIncoming: (notice: PrivateRoomCreatedNotice) => void
+  syncPreferences: () => void
   destroy: () => void
 }
 
@@ -23,6 +24,9 @@ const FALLBACK_AVATAR_HTML = `<div style="width:80px;height:80px;border-radius:1
 
 export function createPrivateRoomCreatedNotification(options: {
   container: HTMLElement
+  isInActiveGame: () => boolean
+  areInGameNotificationsEnabled: () => boolean
+  onDisableInGameNotifications: () => void
   onEnterPrivateRooms: () => void
 }): NotificationController {
   const queue = createPrivateRoomCreatedNotificationQueue()
@@ -37,7 +41,7 @@ export function createPrivateRoomCreatedNotification(options: {
   }
 
   function playSound(): void {
-    const audio = new Audio('/audio/Notifications/notification-3.mp3')
+    const audio = new Audio('/audio/Notifications/notification-1.mp3')
     audio.volume = 0.6
     void audio.play().catch(() => {/* autoplay policy */})
   }
@@ -52,6 +56,10 @@ export function createPrivateRoomCreatedNotification(options: {
   function advanceQueue(): void {
     const decision = queue.handleDismissed()
     if (decision.action === 'show') {
+      if (decision.notice.recipientInActiveGame && !options.areInGameNotificationsEnabled()) {
+        advanceQueue()
+        return
+      }
       presentAndSchedule(decision.notice)
     }
   }
@@ -79,8 +87,14 @@ export function createPrivateRoomCreatedNotification(options: {
       ? 'Създаде частна маса. Можеш да се присъединиш, след като завършиш играта.'
       : 'Създаде частна маса. Присъедини се, ако искаш.'
 
-    const enterButtonHtml = notice.recipientInActiveGame
-      ? ''
+    const actionButtonHtml = notice.recipientInActiveGame
+      ? `<button id="private-room-created-disable-in-game-btn" type="button" style="
+          padding:7px 12px;border:1px solid rgba(212,175,55,0.45);
+          background:rgba(212,175,55,0.08);
+          border-radius:8px;color:#f6d36b;font-size:12px;font-weight:800;cursor:pointer;
+          white-space:nowrap;
+          transition:filter 0.15s,transform 0.15s;
+        ">Изключи в игра</button>`
       : `<button id="private-room-created-enter-btn" type="button" style="
           padding:7px 14px;border:none;
           background:linear-gradient(135deg,#b8960c,#d4af37,#f0c040);
@@ -103,7 +117,8 @@ export function createPrivateRoomCreatedNotification(options: {
           from { width:100%; }
           to   { width:0%; }
         }
-        #private-room-created-enter-btn:hover { filter:brightness(1.15); transform:translateY(-1px); }
+        #private-room-created-enter-btn:hover,
+        #private-room-created-disable-in-game-btn:hover { filter:brightness(1.15); transform:translateY(-1px); }
         #private-room-created-close-btn:hover { filter:brightness(1.3); color:rgba(255,255,255,0.9) !important; }
       </style>
       <div style="
@@ -129,7 +144,7 @@ export function createPrivateRoomCreatedNotification(options: {
         </div>
 
         <div style="display:flex;flex-direction:row;align-items:center;gap:8px;flex-shrink:0;">
-          ${enterButtonHtml}
+          ${actionButtonHtml}
           <button id="private-room-created-close-btn" type="button" style="
             width:34px;height:34px;border-radius:50%;border:1px solid rgba(255,255,255,0.15);
             background:rgba(255,255,255,0.07);color:#fff;
@@ -155,6 +170,11 @@ export function createPrivateRoomCreatedNotification(options: {
       options.onEnterPrivateRooms()
     })
 
+    options.container.querySelector('#private-room-created-disable-in-game-btn')?.addEventListener('click', () => {
+      options.onDisableInGameNotifications()
+      dismiss()
+    })
+
     // Ако аватар URL-ът сочи към счупено/невалидно изображение, замества се
     // със стандартния fallback вместо счупена картинка/празно място.
     options.container.querySelector('#private-room-created-avatar-img')?.addEventListener('error', () => {
@@ -164,11 +184,26 @@ export function createPrivateRoomCreatedNotification(options: {
   }
 
   function handleIncoming(notice: PrivateRoomCreatedNotice): void {
-    const decision = queue.handleIncoming(notice)
+    const normalizedNotice: PrivateRoomCreatedNotice = {
+      ...notice,
+      recipientInActiveGame: options.isInActiveGame(),
+    }
+
+    if (normalizedNotice.recipientInActiveGame && !options.areInGameNotificationsEnabled()) {
+      return
+    }
+
+    const decision = queue.handleIncoming(normalizedNotice)
     if (decision.action === 'show') {
       presentAndSchedule(decision.notice)
     }
     // 'queue' и 'skip' не пипат UI — известието или чака на реда си, или е дубликат.
+  }
+
+  function syncPreferences(): void {
+    if (current?.recipientInActiveGame && !options.areInGameNotificationsEnabled()) {
+      dismiss()
+    }
   }
 
   function destroy(): void {
@@ -176,5 +211,5 @@ export function createPrivateRoomCreatedNotification(options: {
     options.container.innerHTML = ''
   }
 
-  return { handleIncoming, destroy }
+  return { handleIncoming, syncPreferences, destroy }
 }

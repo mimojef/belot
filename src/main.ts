@@ -124,6 +124,29 @@ let client: GameServerClient
 let lobby: LobbyFlowController
 const gameAudio = createGameAudioController()
 
+const PRIVATE_ROOM_IN_GAME_NOTIFICATIONS_KEY = 'pika.privateRoomInGameNotificationsEnabled'
+
+function loadPrivateRoomInGameNotificationsEnabled(): boolean {
+  try {
+    return localStorage.getItem(PRIVATE_ROOM_IN_GAME_NOTIFICATIONS_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
+
+let privateRoomInGameNotificationsEnabled = loadPrivateRoomInGameNotificationsEnabled()
+
+function setPrivateRoomInGameNotificationsEnabled(enabled: boolean): void {
+  privateRoomInGameNotificationsEnabled = enabled
+  try {
+    localStorage.setItem(PRIVATE_ROOM_IN_GAME_NOTIFICATIONS_KEY, enabled ? 'true' : 'false')
+  } catch {
+    // Ignore storage failures; the in-memory setting still applies for this tab.
+  }
+  lobby?.setPrivateRoomInGameNotificationsEnabled(enabled)
+  privateRoomCreatedNotification?.syncPreferences()
+}
+
 const likeNotifContainer = document.createElement('div')
 likeNotifContainer.id = 'global-like-notifications'
 document.body.appendChild(likeNotifContainer)
@@ -183,9 +206,22 @@ document.body.appendChild(privateRoomCreatedNotifContainer)
 
 const privateRoomCreatedNotification = createPrivateRoomCreatedNotification({
   container: privateRoomCreatedNotifContainer,
+  isInActiveGame: () => activeRoom.hasActiveRoom(),
+  areInGameNotificationsEnabled: () => privateRoomInGameNotificationsEnabled,
+  onDisableInGameNotifications: () => {
+    setPrivateRoomInGameNotificationsEnabled(false)
+  },
   onEnterPrivateRooms: () => {
     lobby?.navigateToPrivateRooms()
   },
+})
+
+window.addEventListener('storage', (event) => {
+  if (event.key !== PRIVATE_ROOM_IN_GAME_NOTIFICATIONS_KEY) return
+  const enabled = event.newValue !== 'false'
+  privateRoomInGameNotificationsEnabled = enabled
+  lobby?.setPrivateRoomInGameNotificationsEnabled(enabled)
+  privateRoomCreatedNotification.syncPreferences()
 })
 
 const tournamentEconomyNotifContainer = document.createElement('div')
@@ -3934,6 +3970,10 @@ lobby = createLobbyFlowController({
   onAdminSupportReply: (profileId, body) => sendAdminSupportReply(profileId, body),
   onAdminSupportDeleteConversation: (profileId) => archiveAdminSupportConversation(profileId),
   onSupportDeleteConversation: () => deleteUserSupportConversation(),
+  initialPrivateRoomInGameNotificationsEnabled: privateRoomInGameNotificationsEnabled,
+  onPrivateRoomInGameNotificationsChange: (enabled) => {
+    setPrivateRoomInGameNotificationsEnabled(enabled)
+  },
   onAdminServerScreenEnter: () => {
     startMonitoringPolling()
     fetchAdminHistory('1h')

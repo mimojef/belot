@@ -439,6 +439,8 @@ export type CreateLobbyFlowControllerOptions = {
   onSupportDeleteConversation?: () => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminServerScreenEnter?: () => void
   onAdminServerScreenLeave?: () => void
+  initialPrivateRoomInGameNotificationsEnabled?: boolean
+  onPrivateRoomInGameNotificationsChange?: (enabled: boolean) => void
   /** GET текуща роля на профил (само за пълен admin viewer) — за "Субадмин"/"Чат админ" бадж в профилния попъп. */
   onAdminGetTargetRole?: (
     profileId: string,
@@ -597,6 +599,7 @@ export type LobbyFlowController = {
   setDisplayName: (value: string) => void
   setErrorText: (value: string | null) => void
   setLocalAvatarUrl: (value: string | null) => void
+  setPrivateRoomInGameNotificationsEnabled: (value: boolean) => void
   setFriendships: (value: FriendshipsSnapshot | null) => void
   setChatConversations: (value: ChatConversationSnapshot[]) => void
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
@@ -780,6 +783,7 @@ type InternalLobbyFlowState = {
   lobbyChatErrorText: string | null
   lobbyChatFullscreen: boolean
   notificationsOpen: boolean
+  privateRoomInGameNotificationsEnabled: boolean
   pendingFriendRequests: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   missionsPopupOpen: boolean
   dailyMissions: PlayerMissionProgressSnapshot[]
@@ -1121,6 +1125,7 @@ function createInitialState(): InternalLobbyFlowState {
     lobbyChatErrorText: null,
     lobbyChatFullscreen: false,
     notificationsOpen: false,
+    privateRoomInGameNotificationsEnabled: true,
     pendingFriendRequests: [],
     missionsPopupOpen: false,
     dailyMissions: [],
@@ -1488,6 +1493,7 @@ export function createLobbyFlowController(
   options: CreateLobbyFlowControllerOptions,
 ): LobbyFlowController {
   const state = createInitialState()
+  state.privateRoomInGameNotificationsEnabled = options.initialPrivateRoomInGameNotificationsEnabled ?? true
   const _initialScreen = LOBBY_PATH_TO_SCREEN[window.location.pathname]
   if (_initialScreen) {
     state.currentScreen = _initialScreen
@@ -2613,6 +2619,7 @@ export function createLobbyFlowController(
       changePasswordPopupOpen: state.changePasswordPopupOpen,
       changePasswordErrorText: state.changePasswordErrorText,
       notificationsOpen: state.notificationsOpen,
+      privateRoomInGameNotificationsEnabled: state.privateRoomInGameNotificationsEnabled,
       pendingFriendRequests: state.pendingFriendRequests,
       missionsPopupOpen: state.missionsPopupOpen,
       dailyMissions: state.dailyMissions,
@@ -3332,6 +3339,11 @@ export function createLobbyFlowController(
       },
       onBellClick: () => {
         state.notificationsOpen = !state.notificationsOpen
+        render()
+      },
+      onPrivateRoomInGameNotificationsChange: (enabled) => {
+        state.privateRoomInGameNotificationsEnabled = enabled
+        options.onPrivateRoomInGameNotificationsChange?.(enabled)
         render()
       },
       onNotificationMissionsClick: () => {
@@ -8881,6 +8893,12 @@ export function createLobbyFlowController(
     setLocalAvatarUrl: (value) => {
       state.localAvatarUrl = value
       render()
+    },
+    setPrivateRoomInGameNotificationsEnabled: (value) => {
+      state.privateRoomInGameNotificationsEnabled = value
+      if (state.notificationsOpen) {
+        render()
+      }
     },
     setFriendships: (value) => {
       state.friendships = value

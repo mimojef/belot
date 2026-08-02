@@ -462,6 +462,7 @@ export type LobbyScreenState = {
   changePasswordPopupOpen: boolean
   changePasswordErrorText: string | null
   notificationsOpen: boolean
+  privateRoomInGameNotificationsEnabled: boolean
   pendingFriendRequests: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   missionsPopupOpen: boolean
   dailyMissions: PlayerMissionProgressSnapshot[]
@@ -755,6 +756,7 @@ export type RenderLobbyScreenOptions = {
   onForgotPasswordSubmit?: (email: string) => void
   onLogoutClick: () => void
   onBellClick: () => void
+  onPrivateRoomInGameNotificationsChange: (enabled: boolean) => void
   onNotificationMissionsClick: () => void
   onNotifFriendRequestClick: (friendshipId: string) => void
   onNotifGiftClick: (giftId: string, amount: number, fromDisplayName: string) => void
@@ -2824,6 +2826,24 @@ function renderNotificationsDropdown(state: LobbyScreenState): string {
       <div style="padding:12px 16px; border-bottom:1px solid rgba(255,255,255,0.08); font-size:12px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:rgba(255,255,255,0.45);">
         Известия
       </div>
+      <label style="
+        display:flex;align-items:center;gap:10px;
+        padding:12px 16px;
+        border-bottom:1px solid rgba(255,255,255,0.06);
+        cursor:pointer;
+        user-select:none;
+      ">
+        <input
+          type="checkbox"
+          data-private-room-in-game-notifications-toggle="1"
+          ${state.privateRoomInGameNotificationsEnabled ? 'checked' : ''}
+          style="width:17px;height:17px;accent-color:#d4a520;cursor:pointer;flex-shrink:0;"
+        >
+        <span style="display:flex;flex-direction:column;gap:2px;min-width:0;">
+          <span style="font-size:13px;font-weight:800;color:#f8fafc;">Известия за частни маси по време на игра</span>
+          <span style="font-size:11px;line-height:1.35;color:rgba(255,255,255,0.48);">Когато е изключено, извън игра известията остават активни.</span>
+        </span>
+      </label>
       ${hasMissions ? `
         <button data-notifications-missions="1" style="
           width:100%; background:none; border:none; cursor:pointer;
@@ -2950,6 +2970,7 @@ function syncNotificationsDropdown(
   state: LobbyScreenState,
   callbacks: {
     onClose: () => void
+    onPrivateRoomInGameNotificationsChange: (enabled: boolean) => void
     onMissionsClick: () => void
     onDailyRewardsClick: () => void
     onFriendRequestClick: (friendshipId: string) => void
@@ -2973,6 +2994,12 @@ function syncNotificationsDropdown(
   notificationsDropdownRootEl
     .querySelector('[data-notifications-backdrop="1"]')
     ?.addEventListener('click', callbacks.onClose)
+
+  notificationsDropdownRootEl
+    .querySelector<HTMLInputElement>('[data-private-room-in-game-notifications-toggle="1"]')
+    ?.addEventListener('change', (event) => {
+      callbacks.onPrivateRoomInGameNotificationsChange((event.currentTarget as HTMLInputElement).checked)
+    })
 
   notificationsDropdownRootEl
     .querySelector('[data-notifications-missions="1"]')
@@ -9839,6 +9866,7 @@ export function renderLobbyScreen(
 
   syncNotificationsDropdown(state, {
     onClose: options.onBellClick,
+    onPrivateRoomInGameNotificationsChange: options.onPrivateRoomInGameNotificationsChange,
     onMissionsClick: options.onNotificationMissionsClick,
     onDailyRewardsClick: () => {
       options.onBellClick()
