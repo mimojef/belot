@@ -44,7 +44,6 @@ import { renderFairPlayPage } from './renderFairPlayPage'
 import {
   type DecodedProfileImageFile,
   decodeProfileImageFile,
-  validateProfileImageFile,
 } from '../profileImages/profileImageUploadHelpers'
 import {
   calculateContainedImageRect,
@@ -10551,11 +10550,6 @@ export function renderLobbyScreen(
     _pendingAvatarFile = null
     if (!file) return
     avatarInput.value = ''
-    const validationError = validateProfileImageFile(file)
-    if (validationError !== null) {
-      options.onProfileEditorFileError(validationError)
-      return
-    }
     options.onProfileEditorFileError(null)
     void (async () => {
       const decoded = await decodeProfileImageFile(file)
@@ -10705,11 +10699,6 @@ export function renderLobbyScreen(
     const file = galleryFileInput.files?.[0] ?? null
     if (!file) return
     galleryFileInput.value = ''
-    const validationError = validateProfileImageFile(file)
-    if (validationError !== null) {
-      options.onProfileEditorFileError(validationError)
-      return
-    }
     options.onProfileEditorFileError(null)
     void (async () => {
       const decoded = await decodeProfileImageFile(file)

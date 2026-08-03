@@ -1,9 +1,12 @@
 import {
   MAX_PROFILE_IMAGE_UPLOAD_BYTES,
   PROFILE_IMAGE_DECODE_ERROR_MESSAGE,
+  PROFILE_IMAGE_EMPTY_FILE_MESSAGE,
+  PROFILE_IMAGE_UNSUPPORTED_FORMAT_MESSAGE,
   decodeProfileImageFile,
   getSupportedProfileImageMimeType,
   validateProfileImageFile,
+  validateProfileImageFileForUpload,
 } from '../src/app/profileImages/profileImageUploadHelpers'
 import {
   calculateContainedImageRect,
@@ -44,6 +47,16 @@ function file(name: string, type: string, size = 1024): Pick<File, 'name' | 'typ
 function browserFile(name: string, type: string, size = 1024): File {
   return file(name, type, size) as File
 }
+
+function browserFileWithBytes(name: string, type: string, bytes: Uint8Array): File {
+  return new File([bytes], name, { type })
+}
+
+const jpegHeader = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43])
+const pngHeader = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const webpHeader = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0x18, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50])
+const heicHeader = new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63])
+const avifHeader = new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66])
 
 type MockDecodeMode = 'success' | 'reject' | 'zero-dimensions'
 
@@ -249,10 +262,36 @@ check(
     'Снимката трябва да е до 10 МБ.',
 )
 check(
+  'empty picker result is rejected with a separate message',
+  validateProfileImageFile(file('empty.jpg', 'image/jpeg', 0)) === PROFILE_IMAGE_EMPTY_FILE_MESSAGE,
+)
+check(
   'unsupported non-image extension is rejected',
   validateProfileImageFile(file('payload.gif', 'application/octet-stream')) ===
     'Позволени са само JPEG, PNG и WebP снимки.',
 )
+
+await checkAsync('JPEG bytes pass even when Android omits MIME and extension', async () => {
+  return await validateProfileImageFileForUpload(browserFileWithBytes('content', '', jpegHeader)) === null
+})
+
+await checkAsync('PNG bytes pass even with application/octet-stream and no extension', async () => {
+  return await validateProfileImageFileForUpload(browserFileWithBytes('content', 'application/octet-stream', pngHeader)) === null
+})
+
+await checkAsync('WebP bytes pass even with application/octet-stream and no extension', async () => {
+  return await validateProfileImageFileForUpload(browserFileWithBytes('content', 'application/octet-stream', webpHeader)) === null
+})
+
+await checkAsync('HEIC bytes are unsupported, not reported as corrupt', async () => {
+  return await validateProfileImageFileForUpload(browserFileWithBytes('camera.jpg', 'image/jpeg', heicHeader)) ===
+    PROFILE_IMAGE_UNSUPPORTED_FORMAT_MESSAGE
+})
+
+await checkAsync('AVIF bytes are unsupported, not reported as corrupt', async () => {
+  return await validateProfileImageFileForUpload(browserFileWithBytes('camera.jpg', 'image/jpeg', avifHeader)) ===
+    PROFILE_IMAGE_UNSUPPORTED_FORMAT_MESSAGE
+})
 
 await checkAsync('corrupt JPEG decode failure rejects before crop opens and shows error', async () => {
   const result = await simulateImageSelection(

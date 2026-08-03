@@ -30,7 +30,7 @@ import {
   type LobbyFlowController,
 } from './app/lobby/createLobbyFlowController'
 import { validateProfileDisplayName } from './app/lobby/profileDisplayNameValidation'
-import { validateProfileImageFile } from './app/profileImages/profileImageUploadHelpers'
+import { readProfileImageFileAsDataUrl } from './app/profileImages/profileImageUploadHelpers'
 import type { GiftLimitErrorPayload } from './app/lobby/formatGiftLimitError'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
 import type { PlayerAccountRole } from './ui/overlays/renderPlayerProfilePopup'
@@ -2836,22 +2836,7 @@ async function submitGiftCoins(friendshipId: string, amount: number): Promise<
 }
 
 async function fileToDataUrl(file: File): Promise<string> {
-  const validationError = validateProfileImageFile(file)
-
-  if (validationError !== null) {
-    throw new Error(validationError ?? undefined)
-  }
-
-  return await new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.addEventListener('load', () => {
-      resolve(String(reader.result ?? ''))
-    })
-    reader.addEventListener('error', () => {
-      reject(new Error('Снимката не можа да бъде прочетена.'))
-    })
-    reader.readAsDataURL(file)
-  })
+  return await readProfileImageFileAsDataUrl(file)
 }
 
 async function resizeImageToDataUrl(

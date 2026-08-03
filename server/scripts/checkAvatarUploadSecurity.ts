@@ -283,8 +283,9 @@ try {
   await check('[4] GIF байтове с "image/png" MIME префикс → отхвърлено (не 200)', async () => {
     const r = await httpPostJson(port, '/api/profile/me/avatar', { imageDataUrl: toDataUrl('png', gifBuffer), ...crop }, cookie)
     assert(r.status !== 200, `GIF-съдържание с png MIME претенция беше прието (status=200) — sharp.block() не работи`)
-    const b = r.body as { ok: boolean }
+    const b = r.body as { ok: boolean; code?: string }
     assert(b.ok === false, 'ok трябва да е false')
+    assert(b.code === 'decode_failed', `GIF decode трябва да върне decode_failed, получено: ${b.code}`)
   })
 
   await check('[5] TIFF байтове с "image/jpeg" MIME префикс → отхвърлено (не 200)', async () => {
@@ -297,8 +298,10 @@ try {
   await check('[6] Невалидни/повредени байтове с "image/png" префикс → отхвърлено (не 200)', async () => {
     const r = await httpPostJson(port, '/api/profile/me/avatar', { imageDataUrl: toDataUrl('png', garbageBuffer), ...crop }, cookie)
     assert(r.status !== 200, `Повредени данни бяха приети (status=200)`)
-    const b = r.body as { ok: boolean }
+    const b = r.body as { ok: boolean; code?: string; message?: string }
     assert(b.ok === false, 'ok трябва да е false')
+    assert(b.code === 'decode_failed', `повредени bytes трябва да върнат decode_failed, получено: ${b.code}`)
+    assert(b.message === 'Снимката е повредена или невалидна.', `неочаквано съобщение: ${b.message}`)
   })
 
   // ─── [7] Size limit ────────────────────────────────────────────────────────
@@ -340,8 +343,9 @@ try {
   await check('[9] GIF байтове с "image/png" MIME префикс в gallery → отхвърлено с 400', async () => {
     const r = await httpPostJson(port, '/api/profile/me/gallery', { imageDataUrl: toDataUrl('png', gifBuffer) }, cookie)
     assert(r.status === 400, `GIF-съдържание с png MIME претенция трябва да върне 400, status=${r.status}`)
-    const b = r.body as { ok: boolean; message?: string }
+    const b = r.body as { ok: boolean; code?: string; message?: string }
     assert(b.ok === false, 'ok трябва да е false')
+    assert(b.code === 'decode_failed', `gallery GIF decode трябва да върне decode_failed, получено: ${b.code}`)
     assert(typeof b.message === 'string' && b.message.length > 0, 'трябва да има видимо съобщение за грешка')
   })
 

@@ -3823,19 +3823,64 @@ async function deleteSupportAttachmentFileByFilename(filename: string): Promise<
   return await deleteAttachmentFileByFilename(SUPPORT_ATTACHMENT_UPLOADS_PATH, filename)
 }
 
+type ProfileImageProcessingError =
+  | 'decode_failed'
+  | 'unsupported_format'
+  | 'empty_dimensions'
+  | 'crop_out_of_bounds'
+  | 'processing_failed'
+
+type ProfileImageProcessingResult =
+  | { ok: true; buffer: Buffer }
+  | { ok: false; error: ProfileImageProcessingError; detectedFormat?: string }
+
+function isSupportedProfileImageFormat(format: string | undefined): boolean {
+  return format === 'jpeg' || format === 'png' || format === 'webp'
+}
+
+function getProfileImageProcessingMessage(error: ProfileImageProcessingError): string {
+  if (error === 'unsupported_format') {
+    return 'Този формат не се поддържа. Моля, изберете JPG, PNG или WebP.'
+  }
+  if (error === 'crop_out_of_bounds') {
+    return 'Избраният квадрат е извън снимката.'
+  }
+  if (error === 'empty_dimensions') {
+    return 'Снимката е празна или не може да бъде прочетена.'
+  }
+  return 'Снимката е повредена или невалидна.'
+}
+
+function logProfileImageUploadFailure(input: {
+  flow: 'avatar' | 'gallery'
+  stage: string
+  inputBytes: number
+  errorCode: string
+  detectedFormat?: string
+}): void {
+  console.warn('[profile-image-upload]', {
+    flow: input.flow,
+    stage: input.stage,
+    inputBytes: input.inputBytes,
+    errorCode: input.errorCode,
+    detectedFormat: input.detectedFormat ?? null,
+  })
+}
+
 async function createCroppedAvatarWebp(input: {
   imageBuffer: Buffer
   cropX: number
   cropY: number
   cropSize: number
-}): Promise<Buffer | null> {
+}): Promise<ProfileImageProcessingResult> {
   const metadata = await sharp(input.imageBuffer).metadata().catch(() => null)
 
-  if (
-    metadata === null ||
-    (metadata.format !== 'jpeg' && metadata.format !== 'png' && metadata.format !== 'webp')
-  ) {
-    return null
+  if (metadata === null) {
+    return { ok: false, error: 'decode_failed' }
+  }
+
+  if (!isSupportedProfileImageFormat(metadata.format)) {
+    return { ok: false, error: 'unsupported_format', detectedFormat: metadata.format }
   }
 
   const rotated = sharp(input.imageBuffer).rotate()
@@ -3843,7 +3888,9 @@ async function createCroppedAvatarWebp(input: {
   const imageWidth = rotatedMetadata?.width ?? metadata.width ?? 0
   const imageHeight = rotatedMetadata?.height ?? metadata.height ?? 0
 
-  if (imageWidth <= 0 || imageHeight <= 0) return null
+  if (imageWidth <= 0 || imageHeight <= 0) {
+    return { ok: false, error: 'empty_dimensions', detectedFormat: metadata.format }
+  }
 
   const left = Math.round(input.cropX)
   const top = Math.round(input.cropY)
@@ -3856,10 +3903,10 @@ async function createCroppedAvatarWebp(input: {
     left + size > imageWidth ||
     top + size > imageHeight
   ) {
-    return null
+    return { ok: false, error: 'crop_out_of_bounds', detectedFormat: metadata.format }
   }
 
-  return await sharp(input.imageBuffer)
+  const buffer = await sharp(input.imageBuffer)
     .rotate()
     .extract({
       left,
@@ -3874,24 +3921,31 @@ async function createCroppedAvatarWebp(input: {
     .webp({ quality: 86 })
     .toBuffer()
     .catch(() => null)
+
+  return buffer === null
+    ? { ok: false, error: 'processing_failed', detectedFormat: metadata.format }
+    : { ok: true, buffer }
 }
 
-async function createGalleryImageWebp(imageBuffer: Buffer): Promise<Buffer | null> {
+async function createGalleryImageWebp(imageBuffer: Buffer): Promise<ProfileImageProcessingResult> {
   const metadata = await sharp(imageBuffer).metadata().catch(() => null)
 
-  if (
-    metadata === null ||
-    (metadata.format !== 'jpeg' && metadata.format !== 'png' && metadata.format !== 'webp')
-  ) {
-    return null
+  if (metadata === null) {
+    return { ok: false, error: 'decode_failed' }
+  }
+
+  if (!isSupportedProfileImageFormat(metadata.format)) {
+    return { ok: false, error: 'unsupported_format', detectedFormat: metadata.format }
   }
 
   const imageWidth = metadata.width ?? 0
   const imageHeight = metadata.height ?? 0
 
-  if (imageWidth <= 0 || imageHeight <= 0) return null
+  if (imageWidth <= 0 || imageHeight <= 0) {
+    return { ok: false, error: 'empty_dimensions', detectedFormat: metadata.format }
+  }
 
-  return await sharp(imageBuffer)
+  const buffer = await sharp(imageBuffer)
     .rotate()
     .resize(800, 800, {
       fit: 'cover',
@@ -3901,6 +3955,10 @@ async function createGalleryImageWebp(imageBuffer: Buffer): Promise<Buffer | nul
     .webp({ quality: 80 })
     .toBuffer()
     .catch(() => null)
+
+  return buffer === null
+    ? { ok: false, error: 'processing_failed', detectedFormat: metadata.format }
+    : { ok: true, buffer }
 }
 
 // Личен чат — снимка към съобщение. За разлика от avatar/gallery (fit:
@@ -4673,6 +4731,12 @@ async function handleProfileRequest(
       cropY === null ||
       cropSize === null
     ) {
+      logProfileImageUploadFailure({
+        flow: 'avatar',
+        stage: 'decode_request',
+        inputBytes: 0,
+        errorCode: 'invalid_payload',
+      })
       sendJsonResponse(res, 400, {
         ok: false,
         message: 'Изпрати валидна снимка и избери квадрат за аватар.',
@@ -4680,17 +4744,25 @@ async function handleProfileRequest(
       return true
     }
 
-    const avatarBuffer = await createCroppedAvatarWebp({
+    const avatarResult = await createCroppedAvatarWebp({
       imageBuffer,
       cropX,
       cropY,
       cropSize,
     })
 
-    if (avatarBuffer === null) {
+    if (!avatarResult.ok) {
+      logProfileImageUploadFailure({
+        flow: 'avatar',
+        stage: 'process_image',
+        inputBytes: imageBuffer.length,
+        errorCode: avatarResult.error,
+        detectedFormat: avatarResult.detectedFormat,
+      })
       sendJsonResponse(res, 400, {
         ok: false,
-        message: 'Избраният квадрат е извън снимката.',
+        code: avatarResult.error,
+        message: getProfileImageProcessingMessage(avatarResult.error),
       })
       return true
     }
@@ -4701,7 +4773,7 @@ async function handleProfileRequest(
     await writeWebpUploadFile(
       AVATAR_UPLOADS_PATH,
       avatarFilename,
-      avatarBuffer,
+      avatarResult.buffer,
     )
 
     const avatarUrl = createUploadUrl('avatars', avatarFilename)
@@ -4802,6 +4874,12 @@ async function handleProfileRequest(
     const imageBuffer = decodeImageDataUrl(getStringField(body, 'imageDataUrl'))
 
     if (imageBuffer === null) {
+      logProfileImageUploadFailure({
+        flow: 'gallery',
+        stage: 'decode_request',
+        inputBytes: 0,
+        errorCode: 'invalid_payload',
+      })
       sendJsonResponse(res, 400, {
         ok: false,
         message: 'Изпрати валидна снимка до 5 MB.',
@@ -4809,12 +4887,20 @@ async function handleProfileRequest(
       return true
     }
 
-    const galleryBuffer = await createGalleryImageWebp(imageBuffer)
+    const galleryResult = await createGalleryImageWebp(imageBuffer)
 
-    if (galleryBuffer === null) {
+    if (!galleryResult.ok) {
+      logProfileImageUploadFailure({
+        flow: 'gallery',
+        stage: 'process_image',
+        inputBytes: imageBuffer.length,
+        errorCode: galleryResult.error,
+        detectedFormat: galleryResult.detectedFormat,
+      })
       sendJsonResponse(res, 400, {
         ok: false,
-        message: 'Снимката не можа да бъде обработена.',
+        code: galleryResult.error,
+        message: getProfileImageProcessingMessage(galleryResult.error),
       })
       return true
     }
@@ -4825,7 +4911,7 @@ async function handleProfileRequest(
       session.profile.profileId,
     )
 
-    await writeWebpUploadFile(profileGalleryPath, `${imageId}.webp`, galleryBuffer)
+    await writeWebpUploadFile(profileGalleryPath, `${imageId}.webp`, galleryResult.buffer)
 
     const imageUrl = createUploadUrl(
       'profile-gallery',
@@ -4978,24 +5064,41 @@ async function handleAdminProfileModerationRequest(
       cropY === null ||
       cropSize === null
     ) {
+      logProfileImageUploadFailure({
+        flow: 'avatar',
+        stage: 'admin_decode_request',
+        inputBytes: 0,
+        errorCode: 'invalid_payload',
+      })
       sendJsonResponse(res, 400, { ok: false, message: 'Изпрати валидна снимка и crop за аватар.' })
       return true
     }
 
-    const avatarBuffer = await createCroppedAvatarWebp({
+    const avatarResult = await createCroppedAvatarWebp({
       imageBuffer,
       cropX,
       cropY,
       cropSize,
     })
 
-    if (avatarBuffer === null) {
-      sendJsonResponse(res, 400, { ok: false, message: 'Избраният crop е извън снимката.' })
+    if (!avatarResult.ok) {
+      logProfileImageUploadFailure({
+        flow: 'avatar',
+        stage: 'admin_process_image',
+        inputBytes: imageBuffer.length,
+        errorCode: avatarResult.error,
+        detectedFormat: avatarResult.detectedFormat,
+      })
+      sendJsonResponse(res, 400, {
+        ok: false,
+        code: avatarResult.error,
+        message: getProfileImageProcessingMessage(avatarResult.error),
+      })
       return true
     }
 
     const avatarFilename = `${randomUUID()}.webp`
-    await writeWebpUploadFile(AVATAR_UPLOADS_PATH, avatarFilename, avatarBuffer)
+    await writeWebpUploadFile(AVATAR_UPLOADS_PATH, avatarFilename, avatarResult.buffer)
     const avatarUrl = createUploadUrl('avatars', avatarFilename)
     const result = playerProgressStore.updateProfileAvatar(targetProfileId, avatarUrl)
     if (!result.ok) {
