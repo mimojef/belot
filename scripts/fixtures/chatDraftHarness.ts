@@ -9,6 +9,7 @@ import { createLobbyFlowController } from '/src/app/lobby/createLobbyFlowControl
 import type {
   ChatConversationSnapshot,
   ChatMessageSnapshot,
+  SupportMessageSnapshot,
 } from '/src/app/network/createGameServerClient.ts'
 
 const root = document.createElement('div')
@@ -53,12 +54,22 @@ let unreadByFriendship: Record<string, number> = {
   'friendship-a': 0,
   'friendship-b': 0,
 }
+let lobbyChatSeq = 0
+const supportMessages: SupportMessageSnapshot[] = Array.from({ length: 16 }, (_, index) => ({
+  messageId: `support-${index + 1}`,
+  profileId: 'me',
+  body: `Support history ${index + 1}`,
+  isFromAdmin: index % 2 === 0,
+  createdAt: new Date(2026, 7, 3, 10, index).toISOString(),
+  attachment: null,
+}))
 
 const controller = createLobbyFlowController({
   root,
   joinMatchmaking: () => {},
   leaveMatchmaking: () => {},
   onMatchFound: () => {},
+  onLobbyChatSend: () => {},
   getAuthSession: () => ({
     account: { role: 'player' },
     profile: { profileId: 'me', displayName: 'Me' } as any,
@@ -99,6 +110,10 @@ const controller = createLobbyFlowController({
   onChatMarkRead: async (friendshipId: string) => {
     unreadByFriendship[friendshipId] = 0
   },
+  onSupportMessagesLoad: async () => ({
+    ok: true,
+    messages: supportMessages,
+  }),
 })
 
 // ─── Тестова кука, извиквана от Playwright през page.evaluate ───────────────
@@ -129,5 +144,39 @@ const controller = createLobbyFlowController({
   // пълен render() без да пипа chat state-а изобщо.
   triggerUnrelatedBackgroundRender: () => {
     controller.render()
+  },
+  openLobbyChat: () => {
+    controller.resetToLobby()
+    controller.setConnected(true)
+    controller.render()
+  },
+  deliverLobbyChatMessage: (body: string) => {
+    lobbyChatSeq++
+    controller.handleServerMessage({
+      type: 'lobby_chat_message',
+      seq: lobbyChatSeq,
+      messageId: `lobby-${Date.now()}-${Math.random()}`,
+      senderProfileId: 'other-player',
+      senderDisplayName: 'Other Player',
+      senderIsChatAdmin: false,
+      senderRole: 'player',
+      body,
+      createdAt: new Date().toISOString(),
+    } as any)
+  },
+  setLobbyChatFullscreenViaDom: (value: boolean) => {
+    const isFullscreen = document.querySelector('[data-lobby-livechat-fullscreen="1"]') !== null
+    if (isFullscreen === value) return
+    document.querySelector<HTMLButtonElement>('[data-lobby-livechat-fullscreen-toggle="1"]')?.click()
+  },
+  openSupportPopup: async () => {
+    controller.resetToLobby()
+    controller.setConnected(true)
+    controller.render()
+    document.querySelector<HTMLButtonElement>('[data-lobby-nav-support="1"]')?.click()
+    for (let i = 0; i < 60; i++) {
+      if (document.querySelector('[data-support-send-form="1"] textarea[name="body"]') !== null) return
+      await new Promise((resolve) => window.setTimeout(resolve, 16))
+    }
   },
 }

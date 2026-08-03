@@ -7470,6 +7470,7 @@ export function createLobbyFlowController(
     const wasInputFocused = previousInput !== null && document.activeElement === previousInput
     const caretStart = previousInput?.selectionStart ?? null
     const caretEnd = previousInput?.selectionEnd ?? null
+    const selectionDirection = previousInput?.selectionDirection ?? null
 
     const previousScroll = options.root.querySelector<HTMLElement>('[data-private-waiting-chat-scroll="1"]')
     const wasNearBottom = previousScroll === null
@@ -7590,7 +7591,7 @@ export function createLobbyFlowController(
       if (nextInput !== null) {
         nextInput.focus()
         if (caretStart !== null && caretEnd !== null) {
-          nextInput.setSelectionRange(caretStart, caretEnd)
+          nextInput.setSelectionRange(caretStart, caretEnd, selectionDirection ?? 'none')
         }
       }
     }

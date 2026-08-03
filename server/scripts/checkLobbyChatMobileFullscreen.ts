@@ -79,7 +79,9 @@ check('[5] fullscreen state persists through rerender and is reset on exit', () 
 
 check('[6] existing live chat behavior remains wired', () => {
   assert(renderSrc.includes('wasLobbyChatNearBottom'), 'smart autoscroll guard must remain')
-  assert(renderSrc.includes('savedLobbyChatInputCaret'), 'focus/caret preservation must remain')
+  assert(renderSrc.includes('savedLobbyChatInputSelectionStart'), 'focus/selection preservation must remain')
+  assert(renderSrc.includes('savedLobbyChatInputSelectionEnd'), 'selection end preservation must remain')
+  assert(renderSrc.includes('savedLobbyChatInputSelectionDirection'), 'selection direction preservation must remain')
   assert(renderSrc.includes('data-lobby-livechat-delete'), 'moderator delete wiring must remain')
   assert(controllerSrc.includes('reconcileLobbyChatSubscription()'), 'live subscription reconciliation must remain')
   assert(renderSrc.includes('font-size:16px;line-height:1.45'), 'message row font size must remain 16px with line-height 1.45')

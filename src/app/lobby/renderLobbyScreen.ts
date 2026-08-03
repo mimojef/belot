@@ -8820,7 +8820,14 @@ export function renderLobbyScreen(
   // в полето за писане би изчезвала под пръстите на потребителя.
   const prevChatInputEl = root.querySelector<HTMLInputElement>('[data-lobby-chat-message-input="1"]')
   const wasChatInputFocused = prevChatInputEl !== null && document.activeElement === prevChatInputEl
-  const savedChatInputCaret = wasChatInputFocused ? prevChatInputEl.selectionStart : null
+  const savedChatInputSelectionStart = wasChatInputFocused ? prevChatInputEl.selectionStart : null
+  const savedChatInputSelectionEnd = wasChatInputFocused ? prevChatInputEl.selectionEnd : null
+  const savedChatInputSelectionDirection = wasChatInputFocused ? prevChatInputEl.selectionDirection : null
+  const prevChatMessagesScrollEl = root.querySelector<HTMLElement>('[data-chat-messages-scroll="1"]')
+  const wasChatMessagesNearBottom = prevChatMessagesScrollEl === null
+    ? true
+    : prevChatMessagesScrollEl.scrollHeight - prevChatMessagesScrollEl.scrollTop - prevChatMessagesScrollEl.clientHeight < 48
+  const savedChatMessagesScrollTop = prevChatMessagesScrollEl?.scrollTop ?? 0
 
   // Общ лайв чат в лобито — същия проблем/решение като личния чат по-горе:
   // всяко несвързано WS събитие пренарежда целия root, затова изрично пазим
@@ -8838,7 +8845,41 @@ export function renderLobbyScreen(
 
   const prevLobbyChatInputEl = root.querySelector<HTMLInputElement>('[data-lobby-livechat-input="1"]')
   const wasLobbyChatInputFocused = prevLobbyChatInputEl !== null && document.activeElement === prevLobbyChatInputEl
-  const savedLobbyChatInputCaret = wasLobbyChatInputFocused ? prevLobbyChatInputEl.selectionStart : null
+  const savedLobbyChatInputSelectionStart = wasLobbyChatInputFocused ? prevLobbyChatInputEl.selectionStart : null
+  const savedLobbyChatInputSelectionEnd = wasLobbyChatInputFocused ? prevLobbyChatInputEl.selectionEnd : null
+  const savedLobbyChatInputSelectionDirection = wasLobbyChatInputFocused ? prevLobbyChatInputEl.selectionDirection : null
+
+  const prevSupportInputEl = root.querySelector<HTMLTextAreaElement>('[data-support-send-form="1"] textarea[name="body"]')
+  const wasSupportInputFocused = prevSupportInputEl !== null && document.activeElement === prevSupportInputEl
+  const savedSupportInputValue = wasSupportInputFocused ? prevSupportInputEl.value : null
+  const shouldRestoreSupportInputValue = savedSupportInputValue !== null && state.supportDraft === savedSupportInputValue
+  const savedSupportInputSelectionStart = wasSupportInputFocused ? prevSupportInputEl.selectionStart : null
+  const savedSupportInputSelectionEnd = wasSupportInputFocused ? prevSupportInputEl.selectionEnd : null
+  const savedSupportInputSelectionDirection = wasSupportInputFocused ? prevSupportInputEl.selectionDirection : null
+  const savedSupportInputScrollTop = wasSupportInputFocused ? prevSupportInputEl.scrollTop : 0
+  const prevSupportMessagesScrollEl = root.querySelector<HTMLElement>('#support-popup-messages-scroll')
+  const wasSupportMessagesNearBottom = prevSupportMessagesScrollEl === null
+    ? true
+    : prevSupportMessagesScrollEl.scrollHeight - prevSupportMessagesScrollEl.scrollTop - prevSupportMessagesScrollEl.clientHeight < 48
+  const savedSupportMessagesScrollTop = prevSupportMessagesScrollEl?.scrollTop ?? 0
+
+  const prevAdminSupportReplyEl = root.querySelector<HTMLTextAreaElement>('[data-admin-support-reply-form] textarea[name="body"]')
+  const prevAdminSupportReplyFormEl = prevAdminSupportReplyEl?.closest<HTMLFormElement>('[data-admin-support-reply-form]') ?? null
+  const savedAdminSupportReplyProfileId = prevAdminSupportReplyFormEl?.dataset.adminSupportReplyForm?.trim() ?? null
+  const wasAdminSupportReplyFocused = prevAdminSupportReplyEl !== null && document.activeElement === prevAdminSupportReplyEl
+  const savedAdminSupportReplyValue = wasAdminSupportReplyFocused ? prevAdminSupportReplyEl.value : null
+  const shouldRestoreAdminSupportReplyValue = savedAdminSupportReplyValue !== null &&
+    savedAdminSupportReplyProfileId !== null &&
+    (state.adminSupportReplyDraftByProfileId[savedAdminSupportReplyProfileId] ?? '') === savedAdminSupportReplyValue
+  const savedAdminSupportReplySelectionStart = wasAdminSupportReplyFocused ? prevAdminSupportReplyEl.selectionStart : null
+  const savedAdminSupportReplySelectionEnd = wasAdminSupportReplyFocused ? prevAdminSupportReplyEl.selectionEnd : null
+  const savedAdminSupportReplySelectionDirection = wasAdminSupportReplyFocused ? prevAdminSupportReplyEl.selectionDirection : null
+  const savedAdminSupportReplyScrollTop = wasAdminSupportReplyFocused ? prevAdminSupportReplyEl.scrollTop : 0
+  const prevAdminSupportMessagesScrollEl = root.querySelector<HTMLElement>('#support-admin-messages-scroll')
+  const wasAdminSupportMessagesNearBottom = prevAdminSupportMessagesScrollEl === null
+    ? true
+    : prevAdminSupportMessagesScrollEl.scrollHeight - prevAdminSupportMessagesScrollEl.scrollTop - prevAdminSupportMessagesScrollEl.clientHeight < 48
+  const savedAdminSupportMessagesScrollTop = prevAdminSupportMessagesScrollEl?.scrollTop ?? 0
 
   root.innerHTML = isPhoneLayout ? `
     <div
@@ -11448,8 +11489,12 @@ export function renderLobbyScreen(
     const newChatInputEl = root.querySelector<HTMLInputElement>('[data-lobby-chat-message-input="1"]')
     if (newChatInputEl) {
       newChatInputEl.focus()
-      if (savedChatInputCaret !== null) {
-        newChatInputEl.setSelectionRange(savedChatInputCaret, savedChatInputCaret)
+      if (savedChatInputSelectionStart !== null && savedChatInputSelectionEnd !== null) {
+        newChatInputEl.setSelectionRange(
+          savedChatInputSelectionStart,
+          savedChatInputSelectionEnd,
+          savedChatInputSelectionDirection ?? 'none',
+        )
       }
     }
   }
@@ -11458,8 +11503,12 @@ export function renderLobbyScreen(
     const newLobbyChatInputEl = root.querySelector<HTMLInputElement>('[data-lobby-livechat-input="1"]')
     if (newLobbyChatInputEl) {
       newLobbyChatInputEl.focus()
-      if (savedLobbyChatInputCaret !== null) {
-        newLobbyChatInputEl.setSelectionRange(savedLobbyChatInputCaret, savedLobbyChatInputCaret)
+      if (savedLobbyChatInputSelectionStart !== null && savedLobbyChatInputSelectionEnd !== null) {
+        newLobbyChatInputEl.setSelectionRange(
+          savedLobbyChatInputSelectionStart,
+          savedLobbyChatInputSelectionEnd,
+          savedLobbyChatInputSelectionDirection ?? 'none',
+        )
       }
     }
   }
@@ -11469,6 +11518,58 @@ export function renderLobbyScreen(
     newLobbyChatScrollEl.scrollTop = wasLobbyChatNearBottom
       ? newLobbyChatScrollEl.scrollHeight
       : savedLobbyChatScrollTop
+  }
+
+  if (wasSupportInputFocused) {
+    const newSupportInputEl = root.querySelector<HTMLTextAreaElement>('[data-support-send-form="1"] textarea[name="body"]')
+    if (newSupportInputEl) {
+      if (shouldRestoreSupportInputValue && newSupportInputEl.value !== savedSupportInputValue) {
+        newSupportInputEl.value = savedSupportInputValue
+      }
+      newSupportInputEl.focus()
+      newSupportInputEl.scrollTop = savedSupportInputScrollTop
+      if (savedSupportInputSelectionStart !== null && savedSupportInputSelectionEnd !== null) {
+        newSupportInputEl.setSelectionRange(
+          savedSupportInputSelectionStart,
+          savedSupportInputSelectionEnd,
+          savedSupportInputSelectionDirection ?? 'none',
+        )
+      }
+    }
+  }
+
+  const newSupportMessagesScrollEl = root.querySelector<HTMLElement>('#support-popup-messages-scroll')
+  if (newSupportMessagesScrollEl) {
+    newSupportMessagesScrollEl.scrollTop = wasSupportMessagesNearBottom
+      ? newSupportMessagesScrollEl.scrollHeight
+      : savedSupportMessagesScrollTop
+  }
+
+  if (wasAdminSupportReplyFocused && savedAdminSupportReplyProfileId !== null) {
+    const newAdminSupportReplyEl = root.querySelector<HTMLTextAreaElement>(
+      `[data-admin-support-reply-form="${cssEscape(savedAdminSupportReplyProfileId)}"] textarea[name="body"]`,
+    )
+    if (newAdminSupportReplyEl) {
+      if (shouldRestoreAdminSupportReplyValue && newAdminSupportReplyEl.value !== savedAdminSupportReplyValue) {
+        newAdminSupportReplyEl.value = savedAdminSupportReplyValue
+      }
+      newAdminSupportReplyEl.focus()
+      newAdminSupportReplyEl.scrollTop = savedAdminSupportReplyScrollTop
+      if (savedAdminSupportReplySelectionStart !== null && savedAdminSupportReplySelectionEnd !== null) {
+        newAdminSupportReplyEl.setSelectionRange(
+          savedAdminSupportReplySelectionStart,
+          savedAdminSupportReplySelectionEnd,
+          savedAdminSupportReplySelectionDirection ?? 'none',
+        )
+      }
+    }
+  }
+
+  const newAdminSupportMessagesScrollEl = root.querySelector<HTMLElement>('#support-admin-messages-scroll')
+  if (newAdminSupportMessagesScrollEl) {
+    newAdminSupportMessagesScrollEl.scrollTop = wasAdminSupportMessagesNearBottom
+      ? newAdminSupportMessagesScrollEl.scrollHeight
+      : savedAdminSupportMessagesScrollTop
   }
 
   cancelAnimationFrame(stakesAnimFrame)
@@ -11509,7 +11610,8 @@ export function renderLobbyScreen(
       }
     })
 
-  root.querySelector<HTMLTextAreaElement>('[data-support-send-form="1"] textarea[name="body"]')
+  const supportTextarea = root.querySelector<HTMLTextAreaElement>('[data-support-send-form="1"] textarea[name="body"]')
+  supportTextarea
     ?.addEventListener('input', (e) => {
       options.onSupportDraftChange((e.currentTarget as HTMLTextAreaElement).value)
     })
@@ -11566,7 +11668,8 @@ export function renderLobbyScreen(
     })
 
     const profileId = form.dataset.adminSupportReplyForm?.trim() ?? ''
-    form.querySelector<HTMLTextAreaElement>('textarea[name="body"]')?.addEventListener('input', (e) => {
+    const adminTextarea = form.querySelector<HTMLTextAreaElement>('textarea[name="body"]')
+    adminTextarea?.addEventListener('input', (e) => {
       if (profileId) {
         options.onAdminSupportReplyDraftChange(profileId, (e.currentTarget as HTMLTextAreaElement).value)
       }
@@ -11718,11 +11821,10 @@ export function renderLobbyScreen(
     })
   })
 
-  for (const id of ['support-popup-messages-scroll', 'support-admin-messages-scroll']) {
-    const el = document.getElementById(id)
-    if (el) el.scrollTop = el.scrollHeight
-  }
-
   const chatScroll = root.querySelector<HTMLElement>('[data-chat-messages-scroll="1"]')
-  if (chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight
+  if (chatScroll) {
+    chatScroll.scrollTop = wasChatMessagesNearBottom
+      ? chatScroll.scrollHeight
+      : savedChatMessagesScrollTop
+  }
 }
