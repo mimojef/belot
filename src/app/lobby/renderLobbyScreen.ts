@@ -4302,10 +4302,10 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
               return `<div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:82%;">${message.attachment ? `
                 <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
                   ${renderChatAttachmentBubble(message.attachment)}
-                  ${hasText ? `<div style="padding:0 4px 2px;font-size:13px;font-weight:800;line-height:1.35;word-break:break-word;">${renderMessageBody(message.body)}</div>` : ''}
+                  ${hasText ? `<div style="padding:0 4px 2px;font-size:13px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
                 </div>
               ` : `
-                <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 9px;font-size:13px;font-weight:800;line-height:1.35;word-break:break-word;">${renderMessageBody(message.body)}</div>
+                <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 9px;font-size:13px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>
               `}<div style="margin-top:2px;font-size:10px;font-weight:800;color:rgba(255,255,255,0.38);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div></div>`
             }).join('')}
           </div>
@@ -4903,14 +4903,79 @@ const CHAT_EMOJIS = Array.from({ length: 24 }, (_, i) => {
   }
 })
 
-function renderMessageBody(body: string): string {
-  return body.split(/(\[e:\d{2}\])/).map((part) => {
-    const match = /^\[e:(\d{2})\]$/.exec(part)
-    if (match) {
-      return `<img src="/assets/animated-emoji/emoji-${match[1]}.webp" alt="" style="width:28px;height:28px;vertical-align:middle;display:inline-block;">`
+const PERSONAL_CHAT_TOKEN_PATTERN = /(\[e:\d{2}\])|(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi
+const PERSONAL_CHAT_TRAILING_LINK_PUNCTUATION = '.,!?;:)]}'
+
+function renderPlainPersonalChatText(value: string): string {
+  return escapeHtml(value).replace(/\r\n|\r|\n/g, '<br>')
+}
+
+function splitTrailingLinkPunctuation(value: string): { linkText: string; trailingText: string } {
+  let linkText = value
+  let trailingText = ''
+
+  while (
+    linkText.length > 0 &&
+    PERSONAL_CHAT_TRAILING_LINK_PUNCTUATION.includes(linkText.charAt(linkText.length - 1))
+  ) {
+    trailingText = linkText.charAt(linkText.length - 1) + trailingText
+    linkText = linkText.slice(0, -1)
+  }
+
+  return { linkText, trailingText }
+}
+
+function toSafePersonalChatHref(linkText: string): string | null {
+  const href = /^www\./i.test(linkText) ? `https://${linkText}` : linkText
+
+  try {
+    const url = new URL(href)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      return null
     }
-    return escapeHtml(part)
-  }).join('')
+    return url.href
+  } catch {
+    return null
+  }
+}
+
+function renderPersonalChatLink(linkText: string): string | null {
+  const href = toSafePersonalChatHref(linkText)
+  if (href === null) return null
+
+  return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" data-personal-chat-link="1" style="color:inherit;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:2px;text-decoration-color:rgba(59,130,246,0.88);overflow-wrap:anywhere;word-break:break-word;">${escapeHtml(linkText)}</a>`
+}
+
+export function renderPersonalChatMessageBody(body: string): string {
+  let html = ''
+  let cursor = 0
+
+  for (const match of body.matchAll(PERSONAL_CHAT_TOKEN_PATTERN)) {
+    const rawToken = match[0]
+    const index = match.index ?? 0
+
+    if (index > cursor) {
+      html += renderPlainPersonalChatText(body.slice(cursor, index))
+    }
+
+    const emojiMatch = /^\[e:(\d{2})\]$/.exec(rawToken)
+    if (emojiMatch) {
+      html += `<img src="/assets/animated-emoji/emoji-${emojiMatch[1]}.webp" alt="" style="width:28px;height:28px;vertical-align:middle;display:inline-block;">`
+    } else {
+      const { linkText, trailingText } = splitTrailingLinkPunctuation(rawToken)
+      const renderedLink = linkText.length > 0 ? renderPersonalChatLink(linkText) : null
+      html += renderedLink ?? renderPlainPersonalChatText(linkText)
+      html += renderPlainPersonalChatText(trailingText)
+    }
+
+    cursor = index + rawToken.length
+  }
+
+  if (cursor < body.length) {
+    html += renderPlainPersonalChatText(body.slice(cursor))
+  }
+
+  return html
 }
 
 function formatChatTime(value: string): string {
@@ -5011,7 +5076,7 @@ function renderChatPanel(state: LobbyScreenState): string {
                 ${message.attachment ? `
                   <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
                     ${renderChatAttachmentBubble(message.attachment)}
-                    ${hasText ? `<div style="padding:0 4px 2px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;">${renderMessageBody(message.body)}</div>` : ''}
+                    ${hasText ? `<div style="padding:0 4px 2px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
                   </div>
                 ` : `
                   <div style="${isEmojiOnly
@@ -5019,7 +5084,7 @@ function renderChatPanel(state: LobbyScreenState): string {
                     : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;`}">
                     ${isEmojiOnly
                       ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="/assets/animated-emoji/emoji-${n}.webp" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
-                      : renderMessageBody(message.body)}
+                      : renderPersonalChatMessageBody(message.body)}
                   </div>
                 `}
                 <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.42);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div>

@@ -93,6 +93,7 @@
     "check:admin-support-mobile-layout": "tsx scripts/checkAdminSupportMobileLayout.ts",
     "check:support-attachment-upload-security": "tsx scripts/checkSupportAttachmentUploadSecurity.ts",
     "check:chat-attachment-upload-security": "tsx scripts/checkChatAttachmentUploadSecurity.ts",
+    "check:personal-chat-link-rendering": "tsx scripts/checkPersonalChatLinkRendering.ts",
     "check:reconnect-contract": "tsx scripts/checkReconnectContractDisplay.ts",
     "check:guest-trial-flow": "tsx scripts/checkGuestTrialFlow.ts",
     "check:admin-games-played": "tsx scripts/checkAdminGamesPlayed.ts",
