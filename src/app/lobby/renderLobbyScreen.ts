@@ -2174,15 +2174,11 @@ export function getLobbyChatAuthorNameStyle(
 ): { color: string; extraStyle: string } {
   const senderRole = resolveLobbyChatSenderRole(message)
   const nameColor = senderRole === 'pika_team'
-    ? '#ef4444'
-    : senderRole === 'top_chat_admin' || senderRole === 'chat_admin'
-      ? '#c084fc'
-      : '#d4a520'
+    ? '#c084fc'
+    : '#d4a520'
   const nameExtraStyle = senderRole === 'pika_team'
-    ? 'text-shadow:0 0 8px rgba(239,68,68,0.35);'
-    : senderRole === 'top_chat_admin' || senderRole === 'chat_admin'
-      ? 'text-shadow:0 0 10px rgba(192,132,252,0.42),0 0 18px rgba(192,132,252,0.22);'
-      : ''
+    ? 'text-shadow:0 0 10px rgba(192,132,252,0.42),0 0 18px rgba(192,132,252,0.22);'
+    : ''
 
   return { color: nameColor, extraStyle: nameExtraStyle }
 }

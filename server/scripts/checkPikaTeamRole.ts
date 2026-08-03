@@ -179,13 +179,13 @@ check('[5] lobby chat messages carry senderRole through DB, protocol, live event
   assert(clientProtocol.includes("senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'"), 'client protocol missing senderRole')
   assert(index.includes('senderRole: m.senderRole'), 'history/reconnect payload missing senderRole')
   assert(index.includes('senderRole: snapshot.senderRole'), 'live broadcast missing senderRole')
-  assert(controller.includes("senderRole: message.senderRole ?? (message.senderIsChatAdmin ? 'chat_admin' : 'player')"), 'client live event fallback missing')
+  assert(controller.includes('senderRole: resolveLobbyChatSenderRole(message)'), 'client live event shared role normalization missing')
 })
 
-check('[6] pika_team author name is red only in shared lobby chat row renderer; existing role colors match current visual rule', () => {
+check('[6] pika_team author name uses previous chat-admin purple glow in the shared lobby chat row renderer', () => {
   assert(renderer.includes("senderRole === 'pika_team'"), 'renderer must branch on pika_team')
-  assert(renderer.includes('#ef4444'), 'red color missing')
-  assert(renderer.includes("senderRole === 'top_chat_admin' || senderRole === 'chat_admin'") && renderer.includes('#c084fc'), 'chat_admin/top_chat_admin purple color changed/missing')
+  assert(renderer.includes('#c084fc'), 'pika_team purple color missing')
+  assert(renderer.includes('rgba(192,132,252,0.42)') && renderer.includes('rgba(192,132,252,0.22)'), 'pika_team purple glow missing')
   assert(renderer.includes('#d4a520'), 'default gold color changed/missing')
   assert(renderer.includes('color:#f1f5f9;font-weight:500;'), 'message body style should remain separate from author color')
 })
