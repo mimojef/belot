@@ -4803,26 +4803,28 @@ function renderSupportImagePickerControls(
   },
 ): string {
   return `
-    <input
-      type="file"
-      accept="image/jpeg,image/png,image/webp"
-      ${attributes.input}
-      style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"
-      ${isSending ? 'disabled' : ''}
-    >
-    <button
-      type="button"
-      ${attributes.pick}
-      title="Прикачи снимка"
-      aria-label="Прикачи снимка"
-      ${isSending ? 'disabled' : ''}
-      style="height:44px;width:44px;flex:0 0 auto;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;display:flex;align-items:center;justify-content:center;cursor:${isSending ? 'default' : 'pointer'};opacity:${isSending ? '0.5' : '1'};"
-    >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
-    </button>
-    ${pending ? `
-      <div style="position:relative;flex:0 0 auto;">
-        <img src="${escapeHtml(pending.previewUrl)}" alt="" style="width:44px;height:44px;object-fit:cover;border-radius:8px;border:1px solid rgba(212,165,32,0.48);display:block;">
+    <div data-support-image-slot="1">
+      <input
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        ${attributes.input}
+        style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"
+        ${isSending ? 'disabled' : ''}
+      >
+      <button
+        type="button"
+        data-support-image-button="1"
+        ${attributes.pick}
+        title="Прикачи снимка"
+        aria-label="Прикачи снимка"
+        ${isSending ? 'disabled' : ''}
+        style="height:44px;width:44px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;display:flex;align-items:center;justify-content:center;cursor:${isSending ? 'default' : 'pointer'};opacity:${isSending ? '0.5' : '1'};"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
+      </button>
+      ${pending ? `
+        <div data-support-image-preview="1" style="position:absolute;left:0;bottom:calc(100% + 8px);z-index:2;">
+        <img src="${escapeHtml(pending.previewUrl)}" alt="" style="width:44px;height:44px;object-fit:cover;border-radius:8px;border:1px solid rgba(212,165,32,0.48);display:block;background:#050505;">
         <button
           type="button"
           ${attributes.remove}
@@ -4832,7 +4834,63 @@ function renderSupportImagePickerControls(
           style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;border:0;background:#ef4444;color:#fff;font-size:11px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;cursor:${isSending ? 'default' : 'pointer'};padding:0;"
         >×</button>
       </div>
-    ` : ''}
+      ` : ''}
+    </div>
+  `
+}
+
+function renderSupportComposerStyles(): string {
+  return `
+    <style>
+      [data-support-composer] {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 44px auto;
+        grid-template-areas: "text image send";
+        align-items: end;
+        gap: 10px;
+        max-width: 100%;
+        box-sizing: border-box;
+      }
+      [data-support-composer-text] {
+        grid-area: text;
+        min-width: 0;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      [data-support-image-slot] {
+        grid-area: image;
+        position: relative;
+        width: 44px;
+        height: 44px;
+        align-self: end;
+      }
+      [data-support-composer-send] {
+        grid-area: send;
+        height: 44px;
+        min-width: 96px;
+        align-self: end;
+        box-sizing: border-box;
+      }
+      @media (max-width: 640px) {
+        [data-support-composer] {
+          grid-template-columns: 44px minmax(0, 1fr);
+          grid-template-areas:
+            "text text"
+            "image send";
+          align-items: stretch;
+          padding: 12px;
+          gap: 10px;
+          overflow-x: hidden;
+        }
+        [data-support-composer-send] {
+          width: 100%;
+          min-width: 0;
+        }
+        [data-support-composer-text] {
+          min-height: 66px;
+        }
+      }
+    </style>
   `
 }
 
@@ -7148,14 +7206,15 @@ function renderSupportPopup(state: LobbyScreenState): string {
             <span style="font-size:12px;font-weight:700;color:rgba(212,165,32,0.9);">За защита от злонамерени съобщения ще можете да пишете след ${state.supportAccountTooNewMinutes} ${state.supportAccountTooNewMinutes === 1 ? 'минута' : 'минути'}.</span>
           </div>
         ` : `
-        <form data-support-send-form="1" data-support-has-pending-image="${state.supportPendingImage ? '1' : '0'}" style="
-          display:flex;gap:10px;padding:14px 16px;
+        ${renderSupportComposerStyles()}
+        <form data-support-composer="user" data-support-send-form="1" data-support-has-pending-image="${state.supportPendingImage ? '1' : '0'}" style="
+          padding:14px 16px;
           border-top:1px solid rgba(255,255,255,0.10);
           background:#080808;flex-shrink:0;
         ">
           <input name="website" tabindex="-1" autocomplete="off" style="display:none;position:absolute;left:-9999px;">
-          <textarea name="body" placeholder="Напиши съобщение..." rows="2" maxlength="2000" style="
-            flex:1;border-radius:8px;border:1px solid rgba(255,255,255,0.15);
+          <textarea data-support-composer-text="1" name="body" placeholder="Напиши съобщение..." rows="2" maxlength="2000" style="
+            border-radius:8px;border:1px solid rgba(255,255,255,0.15);
             background:#141414;color:#f8fafc;
             padding:10px 12px;font-size:14px;font-weight:600;
             outline:none;resize:none;font-family:inherit;line-height:1.4;
@@ -7165,8 +7224,8 @@ function renderSupportPopup(state: LobbyScreenState): string {
             pick: 'data-support-image-pick="1"',
             remove: 'data-support-image-remove="1"',
           })}
-          <button type="submit" ${state.supportSendingLoading ? 'disabled' : ''} style="
-            align-self:flex-end;height:44px;padding:0 20px;border:0;border-radius:8px;
+          <button data-support-composer-send="1" type="submit" ${state.supportSendingLoading ? 'disabled' : ''} style="
+            padding:0 20px;border:0;border-radius:8px;
             background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
             color:#080808;font-size:14px;font-weight:900;cursor:pointer;white-space:nowrap;
             opacity:${state.supportSendingLoading ? '0.6' : '1'};
@@ -7376,18 +7435,19 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
   const adminReplyDraft = selectedProfileId ? (state.adminSupportReplyDraftByProfileId[selectedProfileId] ?? '') : ''
   const adminPendingImage = selectedProfileId ? state.adminSupportPendingImageByProfileId[selectedProfileId] : null
   const replyFormHtml = `
+    ${renderSupportComposerStyles()}
     ${state.adminSupportReplyErrorText ? `
       <div style="padding:8px 16px;background:rgba(127,29,29,0.42);border-top:1px solid rgba(248,113,113,0.22);color:#fecaca;font-size:12px;font-weight:800;flex-shrink:0;">
         ${escapeHtml(state.adminSupportReplyErrorText)}
       </div>
     ` : ''}
-    <form data-admin-support-reply-form="${escapeHtml(selectedProfileId)}" data-admin-support-has-pending-image="${adminPendingImage ? '1' : '0'}" style="
-      display:flex;gap:10px;padding:14px 16px;
+    <form data-support-composer="admin" data-admin-support-reply-form="${escapeHtml(selectedProfileId)}" data-admin-support-has-pending-image="${adminPendingImage ? '1' : '0'}" style="
+      padding:14px 16px;
       border-top:1px solid rgba(255,255,255,0.10);
       background:#080808;flex-shrink:0;
     ">
-      <textarea name="body" placeholder="Отговор от екипа..." rows="2" maxlength="2000" style="
-        flex:1;border-radius:8px;border:1px solid rgba(255,255,255,0.15);
+      <textarea data-support-composer-text="1" name="body" placeholder="Отговор от екипа..." rows="2" maxlength="2000" style="
+        border-radius:8px;border:1px solid rgba(255,255,255,0.15);
         background:#141414;color:#f8fafc;
         padding:10px 12px;font-size:14px;font-weight:600;
         outline:none;resize:none;font-family:inherit;line-height:1.4;
@@ -7397,8 +7457,8 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
         pick: `data-admin-support-image-pick="${escapeHtml(selectedProfileId)}"`,
         remove: `data-admin-support-image-remove="${escapeHtml(selectedProfileId)}"`,
       })}
-      <button type="submit" ${state.adminSupportReplyLoading ? 'disabled' : ''} style="
-        align-self:flex-end;height:44px;padding:0 20px;border:0;border-radius:8px;
+      <button data-support-composer-send="1" type="submit" ${state.adminSupportReplyLoading ? 'disabled' : ''} style="
+        padding:0 20px;border:0;border-radius:8px;
         background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
         color:#080808;font-size:14px;font-weight:900;cursor:pointer;white-space:nowrap;
         opacity:${state.adminSupportReplyLoading ? '0.6' : '1'};
