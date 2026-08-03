@@ -44,7 +44,7 @@ function assertAnchor(html: string, href: string, text: string): void {
   assert(html.includes(`href="${href}"`), `missing href ${href}`)
   assert(html.includes('target="_blank"'), 'link must open in a new tab')
   assert(html.includes('rel="noopener noreferrer"'), 'link must use noopener noreferrer')
-  assert(html.includes('data-personal-chat-link="1"'), 'link must be marked as personal chat link')
+  assert(html.includes('data-chat-link="1"'), 'link must be marked as shared chat link')
   assert(html.includes(`>${text}</a>`), `missing visible link text ${text}`)
 }
 
@@ -108,15 +108,16 @@ check('emoji tokens and newlines remain formatted', () => {
   assertAnchor(html, 'https://www.pika.bg/', 'www.pika.bg')
 })
 
-check('other chats continue to use escaped body text, not personal chat linkifier', () => {
+check('personal chat uses the shared linkifier and private-room chat stays plain escaped text', () => {
   const lobbySource = readFileSync(join(PROJECT_ROOT, 'src', 'app', 'lobby', 'renderLobbyScreen.ts'), 'utf8')
   const privateRoomSource = readFileSync(join(PROJECT_ROOT, 'src', 'app', 'lobby', 'renderPrivateRoomWaitingScreen.ts'), 'utf8')
 
-  assert(lobbySource.includes('${escapeHtml(message.body)}</span>'), 'lobby live chat should keep escaped message body')
-  assert(lobbySource.includes('${escapeHtml(msg.body)}</div>'), 'support chat should keep escaped message body')
+  assert(lobbySource.includes('export function renderPersonalChatMessageBody(body: string): string'), 'personal chat wrapper should remain exported')
+  assert(lobbySource.includes('return renderLinkifiedChatMessageBody(body)'), 'personal chat should reuse the shared linkifier')
   assert(privateRoomSource.includes('escapeHtml(message.body)'), 'private-room waiting chat should keep escaped message body')
-  assert(countOccurrences(lobbySource, 'renderPersonalChatMessageBody(message.body)') === 4, 'linkifier should only be used by the personal chat message bubbles')
   assert(!privateRoomSource.includes('renderPersonalChatMessageBody'), 'private-room chat should not use personal chat linkifier')
+  assert(!privateRoomSource.includes('renderLinkifiedChatMessageBody'), 'private-room chat should not use shared linkifier')
+  assert(countOccurrences(lobbySource, 'renderPersonalChatMessageBody(message.body)') === 4, 'personal chat message bubbles should still call the personal wrapper')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

@@ -2206,7 +2206,7 @@ export function renderLobbyChatMessageRow(state: LobbyScreenState, message: Lobb
     <div data-lobby-livechat-message="${escapeHtml(message.messageId)}" style="display:flex;align-items:flex-start;gap:5px;font-size:16px;line-height:1.45;word-break:break-word;">
       <div style="flex:1;min-width:0;">
         <span style="color:${nameColor};font-weight:900;${nameExtraStyle}">${escapeHtml(message.senderDisplayName)}:</span>
-        <span style="color:#f1f5f9;font-weight:500;"> ${escapeHtml(message.body)}</span>
+        <span style="color:#f1f5f9;font-weight:500;"> ${renderLinkifiedChatMessageBody(message.body)}</span>
       </div>
       ${canDelete ? `
         <button type="button" data-lobby-livechat-delete="${escapeHtml(message.messageId)}" aria-label="Изтрий съобщението" title="Изтрий" style="flex:0 0 auto;width:16px;height:16px;line-height:16px;border:0;background:transparent;color:rgba(255,255,255,0.34);font-size:14px;cursor:pointer;padding:0;">×</button>
@@ -4903,10 +4903,10 @@ const CHAT_EMOJIS = Array.from({ length: 24 }, (_, i) => {
   }
 })
 
-const PERSONAL_CHAT_TOKEN_PATTERN = /(\[e:\d{2}\])|(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi
-const PERSONAL_CHAT_TRAILING_LINK_PUNCTUATION = '.,!?;:)]}'
+const LINKIFIED_CHAT_TOKEN_PATTERN = /(\[e:\d{2}\])|(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi
+const LINKIFIED_CHAT_TRAILING_LINK_PUNCTUATION = '.,!?;:)]}'
 
-function renderPlainPersonalChatText(value: string): string {
+function renderPlainLinkifiedChatText(value: string): string {
   return escapeHtml(value).replace(/\r\n|\r|\n/g, '<br>')
 }
 
@@ -4916,7 +4916,7 @@ function splitTrailingLinkPunctuation(value: string): { linkText: string; traili
 
   while (
     linkText.length > 0 &&
-    PERSONAL_CHAT_TRAILING_LINK_PUNCTUATION.includes(linkText.charAt(linkText.length - 1))
+    LINKIFIED_CHAT_TRAILING_LINK_PUNCTUATION.includes(linkText.charAt(linkText.length - 1))
   ) {
     trailingText = linkText.charAt(linkText.length - 1) + trailingText
     linkText = linkText.slice(0, -1)
@@ -4925,7 +4925,7 @@ function splitTrailingLinkPunctuation(value: string): { linkText: string; traili
   return { linkText, trailingText }
 }
 
-function toSafePersonalChatHref(linkText: string): string | null {
+function toSafeLinkifiedChatHref(linkText: string): string | null {
   const href = /^www\./i.test(linkText) ? `https://${linkText}` : linkText
 
   try {
@@ -4939,23 +4939,23 @@ function toSafePersonalChatHref(linkText: string): string | null {
   }
 }
 
-function renderPersonalChatLink(linkText: string): string | null {
-  const href = toSafePersonalChatHref(linkText)
+function renderLinkifiedChatLink(linkText: string): string | null {
+  const href = toSafeLinkifiedChatHref(linkText)
   if (href === null) return null
 
-  return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" data-personal-chat-link="1" style="color:inherit;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:2px;text-decoration-color:rgba(59,130,246,0.88);overflow-wrap:anywhere;word-break:break-word;">${escapeHtml(linkText)}</a>`
+  return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" data-chat-link="1" style="color:inherit;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:2px;text-decoration-color:rgba(59,130,246,0.88);overflow-wrap:anywhere;word-break:break-word;">${escapeHtml(linkText)}</a>`
 }
 
-export function renderPersonalChatMessageBody(body: string): string {
+export function renderLinkifiedChatMessageBody(body: string): string {
   let html = ''
   let cursor = 0
 
-  for (const match of body.matchAll(PERSONAL_CHAT_TOKEN_PATTERN)) {
+  for (const match of body.matchAll(LINKIFIED_CHAT_TOKEN_PATTERN)) {
     const rawToken = match[0]
     const index = match.index ?? 0
 
     if (index > cursor) {
-      html += renderPlainPersonalChatText(body.slice(cursor, index))
+      html += renderPlainLinkifiedChatText(body.slice(cursor, index))
     }
 
     const emojiMatch = /^\[e:(\d{2})\]$/.exec(rawToken)
@@ -4963,19 +4963,23 @@ export function renderPersonalChatMessageBody(body: string): string {
       html += `<img src="/assets/animated-emoji/emoji-${emojiMatch[1]}.webp" alt="" style="width:28px;height:28px;vertical-align:middle;display:inline-block;">`
     } else {
       const { linkText, trailingText } = splitTrailingLinkPunctuation(rawToken)
-      const renderedLink = linkText.length > 0 ? renderPersonalChatLink(linkText) : null
-      html += renderedLink ?? renderPlainPersonalChatText(linkText)
-      html += renderPlainPersonalChatText(trailingText)
+      const renderedLink = linkText.length > 0 ? renderLinkifiedChatLink(linkText) : null
+      html += renderedLink ?? renderPlainLinkifiedChatText(linkText)
+      html += renderPlainLinkifiedChatText(trailingText)
     }
 
     cursor = index + rawToken.length
   }
 
   if (cursor < body.length) {
-    html += renderPlainPersonalChatText(body.slice(cursor))
+    html += renderPlainLinkifiedChatText(body.slice(cursor))
   }
 
   return html
+}
+
+export function renderPersonalChatMessageBody(body: string): string {
+  return renderLinkifiedChatMessageBody(body)
 }
 
 function formatChatTime(value: string): string {
@@ -7142,7 +7146,7 @@ function formatSupportTime(isoString: string): string {
   }
 }
 
-function renderSupportMessagesBubbles(messages: SupportMessageSnapshot[], loading: boolean): string {
+export function renderSupportMessagesBubbles(messages: SupportMessageSnapshot[], loading: boolean): string {
   if (loading) {
     return `<div style="flex:1;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:14px;font-weight:800;">Зареждане...</div>`
   }
@@ -7161,7 +7165,7 @@ function renderSupportMessagesBubbles(messages: SupportMessageSnapshot[], loadin
         color:#f8fafc;font-size:14px;font-weight:600;line-height:1.55;word-break:break-word;
       ">
         ${msg.attachment ? renderChatAttachmentBubble(msg.attachment) : ''}
-        ${hasBody ? `<div style="${msg.attachment ? 'margin-top:8px;' : ''}">${escapeHtml(msg.body)}</div>` : ''}
+        ${hasBody ? `<div style="${msg.attachment ? 'margin-top:8px;' : ''}">${renderLinkifiedChatMessageBody(msg.body)}</div>` : ''}
       </div>
       <div style="font-size:11px;color:rgba(255,255,255,0.35);font-weight:600;padding:0 4px;">
         ${msg.isFromAdmin ? '<span style="color:rgba(212,165,32,0.7);">Екип Pika.bg</span> · ' : ''}${formatSupportTime(msg.createdAt)}
