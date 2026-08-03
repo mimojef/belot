@@ -508,6 +508,8 @@ export type LobbyScreenState = {
   supportLoading: boolean
   supportSendingLoading: boolean
   supportErrorText: string | null
+  supportDraft: string
+  supportPendingImage: { file: File; previewUrl: string } | null
   supportAccountTooNewMinutes: number | null
   guestContactPopupOpen: boolean
   guestContactSending: boolean
@@ -519,6 +521,9 @@ export type LobbyScreenState = {
   adminSupportMessages: SupportMessageSnapshot[]
   adminSupportMessagesLoading: boolean
   adminSupportReplyLoading: boolean
+  adminSupportReplyErrorText: string | null
+  adminSupportReplyDraftByProfileId: Record<string, string>
+  adminSupportPendingImageByProfileId: Record<string, { file: File; previewUrl: string } | undefined>
   adminSupportDeleteConfirmProfileId: string | null
   adminSupportDeleteLoading: boolean
   adminSupportMobileConversationOpen: boolean
@@ -798,11 +803,17 @@ export type RenderLobbyScreenOptions = {
   onLeavePrivateRoomAndMatchmakeCancel: () => void
   onSupportClick: () => void
   onSupportClose: () => void
+  onSupportDraftChange: (draft: string) => void
+  onSupportImageSelect: (file: File) => void
+  onSupportImageRemove: () => void
   onSupportSend: (body: string) => void
   onGuestContactClick: () => void
   onGuestContactClose: () => void
   onGuestContactSubmit: (input: GuestContactFormInput) => void
   onAdminSupportConversationClick: (profileId: string) => void
+  onAdminSupportReplyDraftChange: (profileId: string, draft: string) => void
+  onAdminSupportImageSelect: (profileId: string, file: File) => void
+  onAdminSupportImageRemove: (profileId: string) => void
   onAdminSupportReply: (profileId: string, body: string) => void
   onAdminSupportDeleteClick: (profileId: string) => void
   onAdminSupportDeleteCancel: () => void
@@ -1090,6 +1101,10 @@ export function escapeHtml(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
+}
+
+function cssEscape(value: string): string {
+  return globalThis.CSS?.escape ? globalThis.CSS.escape(value) : value.replace(/["\\]/g, '\\$&')
 }
 
 function formatAmount(value: number): string {
@@ -4710,7 +4725,14 @@ function renderFriendsDirectory(state: LobbyScreenState): string {
 // createChatAttachmentWebp в index.ts), за да няма layout shift докато
 // снимката се зарежда. Всички динамични стойности минават през escapeHtml
 // (никакво innerHTML с непроверени attachment полета).
-function renderChatAttachmentBubble(attachment: NonNullable<ChatMessageSnapshot['attachment']>): string {
+type RenderableImageAttachment = {
+  width: number
+  height: number
+  viewUrl: string
+  downloadUrl: string
+}
+
+function renderChatAttachmentBubble(attachment: RenderableImageAttachment): string {
   return `
     <div style="display:grid;gap:6px;">
       <a href="${escapeHtml(attachment.viewUrl)}" target="_blank" rel="noopener noreferrer" style="display:block;border-radius:8px;overflow:hidden;line-height:0;">
@@ -4766,6 +4788,49 @@ function renderChatImagePickerControls(state: LobbyScreenState, friendshipId: st
           ${isUploading ? 'disabled' : ''}
           style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;border:0;background:#ef4444;color:#fff;font-size:11px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;cursor:${isUploading ? 'default' : 'pointer'};padding:0;"
         >✕</button>
+      </div>
+    ` : ''}
+  `
+}
+
+function renderSupportImagePickerControls(
+  pending: { previewUrl: string } | null | undefined,
+  isSending: boolean,
+  attributes: {
+    input: string
+    pick: string
+    remove: string
+  },
+): string {
+  return `
+    <input
+      type="file"
+      accept="image/jpeg,image/png,image/webp"
+      ${attributes.input}
+      style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"
+      ${isSending ? 'disabled' : ''}
+    >
+    <button
+      type="button"
+      ${attributes.pick}
+      title="Прикачи снимка"
+      aria-label="Прикачи снимка"
+      ${isSending ? 'disabled' : ''}
+      style="height:44px;width:44px;flex:0 0 auto;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;display:flex;align-items:center;justify-content:center;cursor:${isSending ? 'default' : 'pointer'};opacity:${isSending ? '0.5' : '1'};"
+    >
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
+    </button>
+    ${pending ? `
+      <div style="position:relative;flex:0 0 auto;">
+        <img src="${escapeHtml(pending.previewUrl)}" alt="" style="width:44px;height:44px;object-fit:cover;border-radius:8px;border:1px solid rgba(212,165,32,0.48);display:block;">
+        <button
+          type="button"
+          ${attributes.remove}
+          title="Премахни снимката"
+          aria-label="Премахни снимката"
+          ${isSending ? 'disabled' : ''}
+          style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;border:0;background:#ef4444;color:#fff;font-size:11px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;cursor:${isSending ? 'default' : 'pointer'};padding:0;"
+        >×</button>
       </div>
     ` : ''}
   `
@@ -6961,20 +7026,26 @@ function renderSupportMessagesBubbles(messages: SupportMessageSnapshot[], loadin
   if (messages.length === 0) {
     return `<div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.38);font-size:14px;font-weight:700;text-align:center;padding:24px;">Все още няма съобщения.<br>Изпрати ни запитване.</div>`
   }
-  return messages.map((msg) => `
+  return messages.map((msg) => {
+    const hasBody = msg.body.trim().length > 0
+    return `
     <div style="display:flex;flex-direction:column;align-items:${msg.isFromAdmin ? 'flex-start' : 'flex-end'};gap:3px;">
       <div style="
-        max-width:75%;padding:10px 14px;
+        max-width:75%;padding:${hasBody ? '10px 14px' : '8px'};
         border-radius:${msg.isFromAdmin ? '4px 14px 14px 14px' : '14px 4px 14px 14px'};
         background:${msg.isFromAdmin ? 'rgba(212,165,32,0.14)' : '#1e1e1e'};
         border:1px solid ${msg.isFromAdmin ? 'rgba(212,165,32,0.30)' : 'rgba(255,255,255,0.10)'};
         color:#f8fafc;font-size:14px;font-weight:600;line-height:1.55;word-break:break-word;
-      ">${escapeHtml(msg.body)}</div>
+      ">
+        ${msg.attachment ? renderChatAttachmentBubble(msg.attachment) : ''}
+        ${hasBody ? `<div style="${msg.attachment ? 'margin-top:8px;' : ''}">${escapeHtml(msg.body)}</div>` : ''}
+      </div>
       <div style="font-size:11px;color:rgba(255,255,255,0.35);font-weight:600;padding:0 4px;">
         ${msg.isFromAdmin ? '<span style="color:rgba(212,165,32,0.7);">Екип Pika.bg</span> · ' : ''}${formatSupportTime(msg.createdAt)}
       </div>
     </div>
-  `).join('')
+  `
+  }).join('')
 }
 
 function renderSupportPopup(state: LobbyScreenState): string {
@@ -7077,7 +7148,7 @@ function renderSupportPopup(state: LobbyScreenState): string {
             <span style="font-size:12px;font-weight:700;color:rgba(212,165,32,0.9);">За защита от злонамерени съобщения ще можете да пишете след ${state.supportAccountTooNewMinutes} ${state.supportAccountTooNewMinutes === 1 ? 'минута' : 'минути'}.</span>
           </div>
         ` : `
-        <form data-support-send-form="1" style="
+        <form data-support-send-form="1" data-support-has-pending-image="${state.supportPendingImage ? '1' : '0'}" style="
           display:flex;gap:10px;padding:14px 16px;
           border-top:1px solid rgba(255,255,255,0.10);
           background:#080808;flex-shrink:0;
@@ -7088,7 +7159,12 @@ function renderSupportPopup(state: LobbyScreenState): string {
             background:#141414;color:#f8fafc;
             padding:10px 12px;font-size:14px;font-weight:600;
             outline:none;resize:none;font-family:inherit;line-height:1.4;
-          "></textarea>
+          ">${escapeHtml(state.supportDraft)}</textarea>
+          ${renderSupportImagePickerControls(state.supportPendingImage, state.supportSendingLoading, {
+            input: 'data-support-image-input="1"',
+            pick: 'data-support-image-pick="1"',
+            remove: 'data-support-image-remove="1"',
+          })}
           <button type="submit" ${state.supportSendingLoading ? 'disabled' : ''} style="
             align-self:flex-end;height:44px;padding:0 20px;border:0;border-radius:8px;
             background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
@@ -7296,8 +7372,16 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
     </div>
     ` : ''
 
+  const selectedProfileId = state.adminSupportSelectedProfileId ?? ''
+  const adminReplyDraft = selectedProfileId ? (state.adminSupportReplyDraftByProfileId[selectedProfileId] ?? '') : ''
+  const adminPendingImage = selectedProfileId ? state.adminSupportPendingImageByProfileId[selectedProfileId] : null
   const replyFormHtml = `
-    <form data-admin-support-reply-form="${escapeHtml(state.adminSupportSelectedProfileId ?? '')}" style="
+    ${state.adminSupportReplyErrorText ? `
+      <div style="padding:8px 16px;background:rgba(127,29,29,0.42);border-top:1px solid rgba(248,113,113,0.22);color:#fecaca;font-size:12px;font-weight:800;flex-shrink:0;">
+        ${escapeHtml(state.adminSupportReplyErrorText)}
+      </div>
+    ` : ''}
+    <form data-admin-support-reply-form="${escapeHtml(selectedProfileId)}" data-admin-support-has-pending-image="${adminPendingImage ? '1' : '0'}" style="
       display:flex;gap:10px;padding:14px 16px;
       border-top:1px solid rgba(255,255,255,0.10);
       background:#080808;flex-shrink:0;
@@ -7307,7 +7391,12 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
         background:#141414;color:#f8fafc;
         padding:10px 12px;font-size:14px;font-weight:600;
         outline:none;resize:none;font-family:inherit;line-height:1.4;
-      "></textarea>
+      ">${escapeHtml(adminReplyDraft)}</textarea>
+      ${renderSupportImagePickerControls(adminPendingImage, state.adminSupportReplyLoading, {
+        input: `data-admin-support-image-input="${escapeHtml(selectedProfileId)}"`,
+        pick: `data-admin-support-image-pick="${escapeHtml(selectedProfileId)}"`,
+        remove: `data-admin-support-image-remove="${escapeHtml(selectedProfileId)}"`,
+      })}
       <button type="submit" ${state.adminSupportReplyLoading ? 'disabled' : ''} style="
         align-self:flex-end;height:44px;padding:0 20px;border:0;border-radius:8px;
         background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
@@ -11296,10 +11385,32 @@ export function renderLobbyScreen(
       const form = e.currentTarget as HTMLFormElement
       const data = new FormData(form)
       const body = String(data.get('body') ?? '').trim()
-      if (body.length > 0) {
+      const hasPendingImage = form.dataset.supportHasPendingImage === '1'
+      if (body.length > 0 || hasPendingImage) {
         options.onSupportSend(body)
-        form.reset()
       }
+    })
+
+  root.querySelector<HTMLTextAreaElement>('[data-support-send-form="1"] textarea[name="body"]')
+    ?.addEventListener('input', (e) => {
+      options.onSupportDraftChange((e.currentTarget as HTMLTextAreaElement).value)
+    })
+
+  const supportImageInput = root.querySelector<HTMLInputElement>('[data-support-image-input="1"]')
+  root.querySelector<HTMLButtonElement>('[data-support-image-pick="1"]')
+    ?.addEventListener('click', () => {
+      supportImageInput?.click()
+    })
+  supportImageInput?.addEventListener('change', () => {
+    const file = supportImageInput.files?.[0] ?? null
+    if (file !== null) {
+      options.onSupportImageSelect(file)
+    }
+    supportImageInput.value = ''
+  })
+  root.querySelector<HTMLButtonElement>('[data-support-image-remove="1"]')
+    ?.addEventListener('click', () => {
+      options.onSupportImageRemove()
     })
 
   root.querySelector<HTMLFormElement>('[data-guest-contact-form="1"]')
@@ -11330,10 +11441,41 @@ export function renderLobbyScreen(
       const profileId = form.dataset.adminSupportReplyForm?.trim() ?? ''
       const data = new FormData(form)
       const body = String(data.get('body') ?? '').trim()
-      if (profileId && body.length > 0) {
+      const hasPendingImage = form.dataset.adminSupportHasPendingImage === '1'
+      if (profileId && (body.length > 0 || hasPendingImage)) {
         options.onAdminSupportReply(profileId, body)
-        form.reset()
       }
+    })
+
+    const profileId = form.dataset.adminSupportReplyForm?.trim() ?? ''
+    form.querySelector<HTMLTextAreaElement>('textarea[name="body"]')?.addEventListener('input', (e) => {
+      if (profileId) {
+        options.onAdminSupportReplyDraftChange(profileId, (e.currentTarget as HTMLTextAreaElement).value)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLInputElement>('[data-admin-support-image-input]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const profileId = input.dataset.adminSupportImageInput?.trim() ?? ''
+      const file = input.files?.[0] ?? null
+      if (profileId && file !== null) {
+        options.onAdminSupportImageSelect(profileId, file)
+      }
+      input.value = ''
+    })
+  })
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-support-image-pick]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const profileId = btn.dataset.adminSupportImagePick?.trim() ?? ''
+      if (!profileId) return
+      root.querySelector<HTMLInputElement>(`[data-admin-support-image-input="${cssEscape(profileId)}"]`)?.click()
+    })
+  })
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-support-image-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const profileId = btn.dataset.adminSupportImageRemove?.trim() ?? ''
+      if (profileId) options.onAdminSupportImageRemove(profileId)
     })
   })
 

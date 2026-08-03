@@ -75,6 +75,7 @@ function makeMessage(overrides: Partial<SupportMessageSnapshot> = {}): SupportMe
     body: 'Здравейте, имам въпрос.',
     isFromAdmin: false,
     createdAt: new Date('2026-07-27T10:00:00Z').toISOString(),
+    attachment: null,
     ...overrides,
   }
 }
@@ -87,6 +88,9 @@ function makeState(overrides: Partial<LobbyScreenState> = {}): LobbyScreenState 
     adminSupportMessages: [],
     adminSupportMessagesLoading: false,
     adminSupportReplyLoading: false,
+    adminSupportReplyErrorText: null,
+    adminSupportReplyDraftByProfileId: {},
+    adminSupportPendingImageByProfileId: {},
     adminSupportDeleteConfirmProfileId: null,
     adminSupportDeleteLoading: false,
     adminSupportMobileConversationOpen: false,
@@ -97,6 +101,8 @@ function makeState(overrides: Partial<LobbyScreenState> = {}): LobbyScreenState 
 const GRID_MARKER = 'grid-template-columns:300px 1fr'
 const MOBILE_BACK_ATTR = 'data-admin-support-mobile-back="1"'
 const REPLY_FORM_MARKER = 'data-admin-support-reply-form='
+const REPLY_IMAGE_INPUT_MARKER = 'data-admin-support-image-input='
+const REPLY_IMAGE_PICK_MARKER = 'data-admin-support-image-pick='
 const MESSAGES_CONTAINER_MARKER = 'id="support-admin-messages-scroll"'
 const CONV_ROW_MARKER = 'data-admin-support-conv="prof-1"'
 

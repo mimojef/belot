@@ -2237,7 +2237,7 @@ async function loadSupportMessages(): Promise<
   }
 }
 
-async function sendSupportMessage(body: string): Promise<
+async function sendSupportMessage(body: string, imageDataUrl?: string | null): Promise<
   | { ok: true; messages: SupportMessageSnapshot[] }
   | { ok: false; code?: string; remainingMinutes?: number; message?: string }
 > {
@@ -2246,7 +2246,7 @@ async function sendSupportMessage(body: string): Promise<
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ body, website: '' }),
+      body: JSON.stringify({ body, website: '', ...(imageDataUrl ? { imageDataUrl } : {}) }),
     })
     const data = (await response.json()) as SupportMessagesApiResponse & { code?: string; remainingMinutes?: number }
     if (!response.ok || !data.ok) {
@@ -2698,7 +2698,7 @@ async function loadAdminSupportMessages(profileId: string): Promise<
   }
 }
 
-async function sendAdminSupportReply(profileId: string, body: string): Promise<
+async function sendAdminSupportReply(profileId: string, body: string, imageDataUrl?: string | null): Promise<
   | { ok: true; messages: SupportMessageSnapshot[] }
   | { ok: false; message: string }
 > {
@@ -2707,7 +2707,7 @@ async function sendAdminSupportReply(profileId: string, body: string): Promise<
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ profileId, body }),
+      body: JSON.stringify({ profileId, body, ...(imageDataUrl ? { imageDataUrl } : {}) }),
     })
     const data = (await response.json()) as SupportMessagesApiResponse
     if (!response.ok || !data.ok || !Array.isArray(data.messages)) {
@@ -3941,7 +3941,7 @@ lobby = createLobbyFlowController({
   onPrivateRoomChatUnsubscribe: (privateRoomId) => { client.unsubscribePrivateRoomChat(privateRoomId) },
   onPrivateRoomChatSend: (privateRoomId, body, requestId) => { client.sendPrivateRoomChatMessage(privateRoomId, body, requestId) },
   onSupportMessagesLoad: () => loadSupportMessages(),
-  onSupportSend: (body) => sendSupportMessage(body),
+  onSupportSend: (body, imageDataUrl) => sendSupportMessage(body, imageDataUrl),
   onGuestContactSend: (input) => sendGuestContactMessage(input),
   onSupportUnreadLoad: async () => {
     try {
@@ -3986,7 +3986,7 @@ lobby = createLobbyFlowController({
   onAdminGuestContactMessagesLoad: () => loadAdminGuestContactMessages(),
   onAdminGuestContactMessageRead: (messageId) => markAdminGuestContactMessageRead(messageId),
   onAdminSupportMessagesLoad: (profileId) => loadAdminSupportMessages(profileId),
-  onAdminSupportReply: (profileId, body) => sendAdminSupportReply(profileId, body),
+  onAdminSupportReply: (profileId, body, imageDataUrl) => sendAdminSupportReply(profileId, body, imageDataUrl),
   onAdminSupportDeleteConversation: (profileId) => archiveAdminSupportConversation(profileId),
   onSupportDeleteConversation: () => deleteUserSupportConversation(),
   initialPrivateRoomInGameNotificationsEnabled: privateRoomInGameNotificationsEnabled,

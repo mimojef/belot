@@ -335,6 +335,14 @@ export type SupportMessageSnapshot = {
   body: string
   isFromAdmin: boolean
   createdAt: string
+  attachment: {
+    attachmentId: string
+    width: number
+    height: number
+    byteSize: number
+    viewUrl: string
+    downloadUrl: string
+  } | null
 }
 
 export type SupportConversationSnapshot = {

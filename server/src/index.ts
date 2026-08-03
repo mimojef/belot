@@ -50,6 +50,15 @@ import {
   GUEST_TRIAL_STAKE,
 } from './db/guestTrialStore.js'
 import {
+  decodeImageAttachmentDataUrl,
+  deleteAttachmentFileByFilename,
+  IMAGE_ATTACHMENT_FILENAME_PATTERN,
+  MAX_IMAGE_ATTACHMENT_INPUT_BYTES,
+  MAX_IMAGE_ATTACHMENT_JSON_BYTES,
+  processImageAttachmentToWebp,
+  writeWebpAttachmentFile,
+} from './uploads/imageAttachments.js'
+import {
   createCoinPackageStore,
   type CoinPackageStatus,
 } from './db/coinPackageStore.js'
@@ -268,7 +277,6 @@ const MAX_JSON_BODY_BYTES = 15_000_000
 const GUEST_CONTACT_MAX_JSON_BODY_BYTES = 20_000
 const GUEST_CONTACT_RATE_LIMIT_WINDOW_MS = 30 * 60 * 1000
 const GUEST_CONTACT_RATE_LIMIT_MAX_MESSAGES = 3
-const MAX_ORIGINAL_IMAGE_BYTES = 10_000_000
 const MAX_PROFILE_GALLERY_IMAGES = 6
 const UPLOADS_ROUTE_PREFIX = '/uploads/'
 const SERVER_ROOT_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -281,13 +289,10 @@ const GALLERY_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'profile-gallery')
 // чата са лично съдържание между двама конкретни потребители, за разлика
 // от avatar/gallery, които са умишлено публични.
 const CHAT_ATTACHMENT_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'chat-attachments')
+const SUPPORT_ATTACHMENT_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'support-attachments')
 // base64 data URL overhead е ~33% над бинарния размер; 10MB оригинал →
 // ~13.3MB base64 текст. 15MB праг покрива това с марж, съгласувано с
 // MAX_JSON_BODY_BYTES, ползван за profile avatar/gallery endpoint-ите.
-const MAX_CHAT_ATTACHMENT_JSON_BYTES = 15_000_000
-const CHAT_ATTACHMENT_MAX_DIMENSION_PX = 1920
-const CHAT_ATTACHMENT_WEBP_QUALITY = 82
-const CHAT_ATTACHMENT_FILENAME_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.webp$/
 // Колко pending deletion записа обработва background cleanup job-ът на
 // един цикъл — ограничава worst-case I/O натоварването на един tick.
 const CHAT_ATTACHMENT_CLEANUP_BATCH_SIZE = 200
@@ -305,6 +310,13 @@ const CHAT_ATTACHMENT_ORPHAN_GRACE_PERIOD_MS = 24 * 60 * 60 * 1000
 // friend_chat_attachment_deletions от неограничен растеж (виж
 // purgeDoneAttachmentDeletions, извикван от runChatAttachmentOrphanScan).
 const CHAT_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS = 7
+const SUPPORT_ATTACHMENT_CLEANUP_BATCH_SIZE = CHAT_ATTACHMENT_CLEANUP_BATCH_SIZE
+const SUPPORT_ATTACHMENT_CLEANUP_INTERVAL_MS = CHAT_ATTACHMENT_CLEANUP_INTERVAL_MS
+const SUPPORT_ATTACHMENT_CLEANUP_STARTUP_DELAY_MS = 45_000
+const SUPPORT_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS = CHAT_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS
+const SUPPORT_ATTACHMENT_ORPHAN_SCAN_STARTUP_DELAY_MS = 120_000
+const SUPPORT_ATTACHMENT_ORPHAN_GRACE_PERIOD_MS = CHAT_ATTACHMENT_ORPHAN_GRACE_PERIOD_MS
+const SUPPORT_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS = CHAT_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS
 const guestContactRateLimitByIp = new Map<string, { windowStartedAt: number; count: number }>()
 
 type GameWorkerTickMode = 'in-process' | 'worker-candidate'
@@ -858,7 +870,7 @@ async function runChatAttachmentOrphanScan(): Promise<void> {
         return
       }
 
-      if (!entry.isFile() || !CHAT_ATTACHMENT_FILENAME_PATTERN.test(entry.name)) {
+      if (!entry.isFile() || !IMAGE_ATTACHMENT_FILENAME_PATTERN.test(entry.name)) {
         continue
       }
 
@@ -1008,6 +1020,121 @@ function runSupportCleanup(): void {
 }
 runSupportCleanup()
 supportCleanupInterval = setInterval(runSupportCleanup, 24 * 60 * 60 * 1000)
+
+async function runSupportAttachmentCleanup(): Promise<void> {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  try {
+    const pending = supportStore.listPendingAttachmentDeletions(SUPPORT_ATTACHMENT_CLEANUP_BATCH_SIZE)
+
+    if (pending.length === 0) {
+      return
+    }
+
+    let deletedCount = 0
+    let failedCount = 0
+
+    for (const entry of pending) {
+      if (supportStore.attachmentExistsForFilename(entry.storageFilename)) {
+        supportStore.markAttachmentDeletionDone(entry.eventSeq)
+        continue
+      }
+
+      const deleted = await deleteSupportAttachmentFileByFilename(entry.storageFilename)
+
+      if (deleted) {
+        supportStore.markAttachmentDeletionDone(entry.eventSeq)
+        deletedCount += 1
+      } else {
+        supportStore.markAttachmentDeletionFailed(entry.eventSeq)
+        failedCount += 1
+      }
+    }
+
+    if (deletedCount > 0 || failedCount > 0) {
+      console.log(`[support-attachments] Cleanup: deleted=${deletedCount} failed=${failedCount}`)
+    }
+  } catch (error) {
+    console.error('[support-attachments] Cleanup failed:', error)
+  }
+}
+
+async function runSupportAttachmentOrphanScan(): Promise<void> {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  try {
+    await mkdir(SUPPORT_ATTACHMENT_UPLOADS_PATH, { recursive: true })
+    const entries = await readdir(SUPPORT_ATTACHMENT_UPLOADS_PATH, { withFileTypes: true })
+    const now = Date.now()
+    let deletedCount = 0
+
+    for (const entry of entries) {
+      if (isServerShuttingDown) {
+        return
+      }
+
+      if (!entry.isFile() || !IMAGE_ATTACHMENT_FILENAME_PATTERN.test(entry.name)) {
+        continue
+      }
+
+      if (supportStore.attachmentExistsForFilename(entry.name)) {
+        continue
+      }
+
+      const filePath = join(SUPPORT_ATTACHMENT_UPLOADS_PATH, entry.name)
+
+      try {
+        const fileStats = await stat(filePath)
+
+        if (now - fileStats.mtimeMs < SUPPORT_ATTACHMENT_ORPHAN_GRACE_PERIOD_MS) {
+          continue
+        }
+      } catch {
+        continue
+      }
+
+      const deleted = await deleteSupportAttachmentFileByFilename(entry.name)
+      if (deleted) {
+        deletedCount += 1
+      }
+    }
+
+    if (deletedCount > 0) {
+      console.log(`[support-attachments] Orphan scan: deleted ${deletedCount} orphaned file(s)`)
+    }
+
+    const purgedDeletionEvents = supportStore.purgeDoneAttachmentDeletions(
+      SUPPORT_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS,
+      SUPPORT_ATTACHMENT_CLEANUP_BATCH_SIZE,
+    )
+    if (purgedDeletionEvents > 0) {
+      console.log(`[support-attachments] Purged ${purgedDeletionEvents} completed deletion-queue row(s)`)
+    }
+  } catch (error) {
+    console.error('[support-attachments] Orphan scan failed:', error)
+  }
+}
+
+let supportAttachmentCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+  () => { void runSupportAttachmentCleanup() },
+  SUPPORT_ATTACHMENT_CLEANUP_STARTUP_DELAY_MS,
+)
+let supportAttachmentCleanupInterval: ReturnType<typeof setInterval> | null = setInterval(
+  () => { void runSupportAttachmentCleanup() },
+  SUPPORT_ATTACHMENT_CLEANUP_INTERVAL_MS,
+)
+let supportAttachmentOrphanScanStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+  () => { void runSupportAttachmentOrphanScan() },
+  SUPPORT_ATTACHMENT_ORPHAN_SCAN_STARTUP_DELAY_MS,
+)
+let supportAttachmentOrphanScanInterval: ReturnType<typeof setInterval> | null = setInterval(
+  () => { void runSupportAttachmentOrphanScan() },
+  SUPPORT_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS,
+)
 
 function msUntilNextSofiaMidnight(): number {
   const now = new Date()
@@ -3640,7 +3767,7 @@ function decodeImageDataUrl(value: string): Buffer | null {
 
   const buffer = Buffer.from(match[2], 'base64')
 
-  if (buffer.length === 0 || buffer.length > MAX_ORIGINAL_IMAGE_BYTES) {
+  if (buffer.length === 0 || buffer.length > MAX_IMAGE_ATTACHMENT_INPUT_BYTES) {
     return null
   }
 
@@ -3689,23 +3816,11 @@ async function deleteUploadFileByUrl(uploadUrl: string): Promise<void> {
 // UUID.webp regex преди path resolve, за да е невъзможен path traversal
 // дори при повреден/подправен storage_filename запис в DB.
 async function deleteChatAttachmentFileByFilename(filename: string): Promise<boolean> {
-  if (!CHAT_ATTACHMENT_FILENAME_PATTERN.test(filename)) {
-    return false
-  }
+  return await deleteAttachmentFileByFilename(CHAT_ATTACHMENT_UPLOADS_PATH, filename)
+}
 
-  const filePath = join(CHAT_ATTACHMENT_UPLOADS_PATH, filename)
-
-  try {
-    await unlink(filePath)
-    return true
-  } catch (error) {
-    // ENOENT: файлът вече не съществува — третираме като успешно "изтрит"
-    // (idempotent cleanup), не грешка.
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return true
-    }
-    return false
-  }
+async function deleteSupportAttachmentFileByFilename(filename: string): Promise<boolean> {
+  return await deleteAttachmentFileByFilename(SUPPORT_ATTACHMENT_UPLOADS_PATH, filename)
 }
 
 async function createCroppedAvatarWebp(input: {
@@ -3806,37 +3921,7 @@ async function createGalleryImageWebp(imageBuffer: Buffer): Promise<Buffer | nul
 async function createChatAttachmentWebp(
   imageBuffer: Buffer,
 ): Promise<{ buffer: Buffer; width: number; height: number } | null> {
-  const metadata = await sharp(imageBuffer).metadata()
-
-  if (metadata.format !== 'jpeg' && metadata.format !== 'png' && metadata.format !== 'webp') {
-    return null
-  }
-
-  const imageWidth = metadata.width ?? 0
-  const imageHeight = metadata.height ?? 0
-
-  if (imageWidth <= 0 || imageHeight <= 0) {
-    return null
-  }
-
-  const buffer = await sharp(imageBuffer)
-    .rotate()
-    .resize(CHAT_ATTACHMENT_MAX_DIMENSION_PX, CHAT_ATTACHMENT_MAX_DIMENSION_PX, {
-      fit: 'inside',
-      withoutEnlargement: true,
-    })
-    .webp({ quality: CHAT_ATTACHMENT_WEBP_QUALITY })
-    .toBuffer()
-
-  const outputMetadata = await sharp(buffer).metadata()
-  const outputWidth = outputMetadata.width ?? 0
-  const outputHeight = outputMetadata.height ?? 0
-
-  if (outputWidth <= 0 || outputHeight <= 0) {
-    return null
-  }
-
-  return { buffer, width: outputWidth, height: outputHeight }
+  return await processImageAttachmentToWebp(imageBuffer)
 }
 
 // ВАЖНО: whitelist само на умишлено ПУБЛИЧНИТЕ поддиректории (avatars,
@@ -7990,7 +8075,7 @@ async function handleChatRequest(
 
   if (messagesMatch !== null && req.method === 'POST') {
     const friendshipId = decodeURIComponent(messagesMatch[1]).trim()
-    const body = await readJsonRequestBody(req, MAX_CHAT_ATTACHMENT_JSON_BYTES)
+    const body = await readJsonRequestBody(req, MAX_IMAGE_ATTACHMENT_JSON_BYTES)
 
     if (!isRecord(body)) {
       sendJsonResponse(res, 400, {
@@ -8011,7 +8096,7 @@ async function handleChatRequest(
     let writtenAttachmentFilename: string | null = null
 
     if (typeof imageDataUrlField === 'string' && imageDataUrlField.trim().length > 0) {
-      const imageBuffer = decodeImageDataUrl(imageDataUrlField)
+      const imageBuffer = decodeImageAttachmentDataUrl(imageDataUrlField)
 
       if (imageBuffer === null) {
         sendJsonResponse(res, 400, {
@@ -8034,7 +8119,7 @@ async function handleChatRequest(
       const storageFilename = `${randomUUID()}.webp`
 
       try {
-        await writeWebpUploadFile(CHAT_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer)
+        await writeWebpAttachmentFile(CHAT_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer)
         writtenAttachmentFilename = storageFilename
       } catch {
         sendJsonResponse(res, 500, {
@@ -8135,7 +8220,7 @@ async function handleChatAttachmentDownloadRequest(
   friendshipId: string,
   filename: string,
 ): Promise<boolean> {
-  if (!CHAT_ATTACHMENT_FILENAME_PATTERN.test(filename)) {
+  if (!IMAGE_ATTACHMENT_FILENAME_PATTERN.test(filename)) {
     sendJsonResponse(res, 400, { ok: false, message: 'Невалидно име на файл.' })
     return true
   }
@@ -8894,6 +8979,112 @@ async function handleAdminMatchRoomsRequest(
   return true
 }
 
+type SupportAttachmentUploadResult =
+  | {
+      ok: true
+      attachmentInput: {
+        storageFilename: string
+        width: number
+        height: number
+        byteSize: number
+        contentType: string
+      } | null
+      writtenAttachmentFilename: string | null
+    }
+  | { ok: false; statusCode: number; message: string }
+
+async function createSupportAttachmentUpload(
+  imageDataUrlField: unknown,
+): Promise<SupportAttachmentUploadResult> {
+  if (imageDataUrlField === undefined || imageDataUrlField === null) {
+    return { ok: true, attachmentInput: null, writtenAttachmentFilename: null }
+  }
+
+  if (typeof imageDataUrlField !== 'string' || imageDataUrlField.trim().length === 0) {
+    return { ok: false, statusCode: 400, message: 'Невалидна снимка.' }
+  }
+
+  const imageBuffer = decodeImageAttachmentDataUrl(imageDataUrlField)
+
+  if (imageBuffer === null) {
+    return { ok: false, statusCode: 400, message: 'Поддържат се само JPEG, PNG и WebP снимки до 10 MB.' }
+  }
+
+  const processed = await processImageAttachmentToWebp(imageBuffer, { enforceSourcePixelLimit: true })
+
+  if (processed === null) {
+    return { ok: false, statusCode: 400, message: 'Снимката не може да бъде обработена.' }
+  }
+
+  const storageFilename = `${randomUUID()}.webp`
+
+  try {
+    await writeWebpAttachmentFile(SUPPORT_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer)
+  } catch {
+    return { ok: false, statusCode: 500, message: 'Снимката не можа да бъде записана.' }
+  }
+
+  return {
+    ok: true,
+    writtenAttachmentFilename: storageFilename,
+    attachmentInput: {
+      storageFilename,
+      width: processed.width,
+      height: processed.height,
+      byteSize: processed.buffer.length,
+      contentType: 'image/webp',
+    },
+  }
+}
+
+async function handleSupportAttachmentDownloadRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  viewerProfileId: string,
+  isFullAdmin: boolean,
+  filename: string,
+): Promise<boolean> {
+  if (!IMAGE_ATTACHMENT_FILENAME_PATTERN.test(filename)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно име на файл.' })
+    return true
+  }
+
+  const attachment = supportStore.getAttachmentForDownload(viewerProfileId, isFullAdmin, filename)
+
+  if (attachment === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
+    return true
+  }
+
+  const filePath = join(SUPPORT_ATTACHMENT_UPLOADS_PATH, attachment.storageFilename)
+
+  try {
+    const fileStats = await stat(filePath)
+
+    if (!fileStats.isFile()) {
+      sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
+      return true
+    }
+
+    const fileBuffer = await readFile(filePath)
+    const url = new URL(req.url ?? '', 'http://localhost')
+    const isDownload = url.searchParams.get('download') !== null
+
+    res.writeHead(200, {
+      'Content-Type': attachment.contentType,
+      'Cache-Control': 'private, max-age=86400',
+      ...(isDownload
+        ? { 'Content-Disposition': `attachment; filename="${attachment.storageFilename}"` }
+        : {}),
+    })
+    res.end(fileBuffer)
+    return true
+  } catch {
+    sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
+    return true
+  }
+}
+
 async function handleSupportRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -8903,6 +9094,22 @@ async function handleSupportRequest(
 
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
+  const supportAttachmentMatch = /^\/api\/support\/attachments\/([^/]+)$/.exec(pathname)
+
+  if (supportAttachmentMatch !== null && req.method === 'GET') {
+    if (!session || session.profile.profileId === null) {
+      sendJsonResponse(res, 401, { ok: false, message: 'Не си влязъл в профила си.' })
+      return true
+    }
+
+    return await handleSupportAttachmentDownloadRequest(
+      req,
+      res,
+      session.profile.profileId,
+      isFullAdminSession(session),
+      decodeURIComponent(supportAttachmentMatch[1]).trim(),
+    )
+  }
 
   // GET /api/support/messages — user gets own conversation
   if (pathname === '/api/support/messages' && req.method === 'GET') {
@@ -8925,11 +9132,24 @@ async function handleSupportRequest(
       return true
     }
     const profileId = session.profile.profileId
-    const rawBody = await readRawRequestBody(req)
-    const parsed = JSON.parse(rawBody.toString()) as { body?: string; website?: string }
+    let parsed: unknown
+    try {
+      parsed = await readJsonRequestBody(req, MAX_IMAGE_ATTACHMENT_JSON_BYTES)
+    } catch (error) {
+      const message = error instanceof Error && error.message === 'Request body is too large.'
+        ? 'Заявката е твърде голяма.'
+        : 'Невалидна заявка.'
+      sendJsonResponse(res, message === 'Заявката е твърде голяма.' ? 413 : 400, { ok: false, message })
+      return true
+    }
+
+    if (!isRecord(parsed)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+      return true
+    }
 
     // Honeypot — bots fill hidden fields
-    if (parsed.website) {
+    if (getStringField(parsed, 'website')) {
       sendJsonResponse(res, 200, { ok: true })
       return true
     }
@@ -8953,12 +9173,30 @@ async function handleSupportRequest(
       }
     }
 
-    const text = typeof parsed.body === 'string' ? parsed.body.trim() : ''
-    if (text.length === 0 || text.length > 2000) {
+    const text = getStringField(parsed, 'body').trim()
+    if (text.length > 2000) {
       sendJsonResponse(res, 400, { ok: false, message: 'Невалидно съобщение.' })
       return true
     }
-    const message = supportStore.sendUserMessage(profileId, text)
+    const upload = await createSupportAttachmentUpload(parsed.imageDataUrl)
+    if (!upload.ok) {
+      sendJsonResponse(res, upload.statusCode, { ok: false, message: upload.message })
+      return true
+    }
+    if (text.length === 0 && upload.attachmentInput === null) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидно съобщение.' })
+      return true
+    }
+
+    let message: SupportMessageSnapshot
+    try {
+      message = supportStore.sendUserMessage(profileId, text, upload.attachmentInput)
+    } catch (error) {
+      if (upload.writtenAttachmentFilename !== null) {
+        await deleteSupportAttachmentFileByFilename(upload.writtenAttachmentFilename)
+      }
+      throw error
+    }
     const messages = supportStore.getMessages(profileId)
     sendJsonResponse(res, 200, { ok: true, message, messages })
     return true
@@ -9015,16 +9253,51 @@ async function handleSupportRequest(
       sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
       return true
     }
-    const rawBody = await readRawRequestBody(req)
-    const parsed = JSON.parse(rawBody.toString()) as { profileId?: string; body?: string }
-    const profileId = typeof parsed.profileId === 'string' ? parsed.profileId.trim() : ''
-    const text = typeof parsed.body === 'string' ? parsed.body.trim() : ''
-    if (!profileId || text.length === 0 || text.length > 2000) {
+    let parsed: unknown
+    try {
+      parsed = await readJsonRequestBody(req, MAX_IMAGE_ATTACHMENT_JSON_BYTES)
+    } catch (error) {
+      const message = error instanceof Error && error.message === 'Request body is too large.'
+        ? 'Заявката е твърде голяма.'
+        : 'Невалидна заявка.'
+      sendJsonResponse(res, message === 'Заявката е твърде голяма.' ? 413 : 400, { ok: false, message })
+      return true
+    }
+
+    if (!isRecord(parsed)) {
       sendJsonResponse(res, 400, { ok: false, message: 'Невалидни данни.' })
       return true
     }
-    const message = supportStore.sendAdminReply(profileId, text)
+
+    const profileId = getStringField(parsed, 'profileId').trim()
+    const text = getStringField(parsed, 'body').trim()
+    if (!profileId || text.length > 2000) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидни данни.' })
+      return true
+    }
+    const upload = await createSupportAttachmentUpload(parsed.imageDataUrl)
+    if (!upload.ok) {
+      sendJsonResponse(res, upload.statusCode, { ok: false, message: upload.message })
+      return true
+    }
+    if (text.length === 0 && upload.attachmentInput === null) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидни данни.' })
+      return true
+    }
+
+    let message: SupportMessageSnapshot | null
+    try {
+      message = supportStore.sendAdminReply(profileId, text, upload.attachmentInput)
+    } catch (error) {
+      if (upload.writtenAttachmentFilename !== null) {
+        await deleteSupportAttachmentFileByFilename(upload.writtenAttachmentFilename)
+      }
+      throw error
+    }
     if (!message) {
+      if (upload.writtenAttachmentFilename !== null) {
+        await deleteSupportAttachmentFileByFilename(upload.writtenAttachmentFilename)
+      }
       sendJsonResponse(res, 404, { ok: false, message: 'Потребителят няма съобщения.' })
       return true
     }
@@ -11699,6 +11972,26 @@ function clearMutationTimersForShutdown(): void {
   if (chatAttachmentOrphanScanStartupTimeout !== null) {
     clearTimeout(chatAttachmentOrphanScanStartupTimeout)
     chatAttachmentOrphanScanStartupTimeout = null
+  }
+
+  if (supportAttachmentCleanupInterval !== null) {
+    clearInterval(supportAttachmentCleanupInterval)
+    supportAttachmentCleanupInterval = null
+  }
+
+  if (supportAttachmentCleanupStartupTimeout !== null) {
+    clearTimeout(supportAttachmentCleanupStartupTimeout)
+    supportAttachmentCleanupStartupTimeout = null
+  }
+
+  if (supportAttachmentOrphanScanInterval !== null) {
+    clearInterval(supportAttachmentOrphanScanInterval)
+    supportAttachmentOrphanScanInterval = null
+  }
+
+  if (supportAttachmentOrphanScanStartupTimeout !== null) {
+    clearTimeout(supportAttachmentOrphanScanStartupTimeout)
+    supportAttachmentOrphanScanStartupTimeout = null
   }
 
   clearPrivateRoomInviteTimers()

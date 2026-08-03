@@ -406,7 +406,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; messages: SupportMessageSnapshot[] }
     | { ok: false; message: string }
   >
-  onSupportSend?: (body: string) => Promise<
+  onSupportSend?: (body: string, imageDataUrl?: string | null) => Promise<
     | { ok: true; messages: SupportMessageSnapshot[] }
     | { ok: false; code?: string; remainingMinutes?: number; message?: string }
   >
@@ -433,7 +433,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; messages: SupportMessageSnapshot[] }
     | { ok: false; message: string }
   >
-  onAdminSupportReply?: (profileId: string, body: string) => Promise<
+  onAdminSupportReply?: (profileId: string, body: string, imageDataUrl?: string | null) => Promise<
     | { ok: true; messages: SupportMessageSnapshot[] }
     | { ok: false; message: string }
   >
@@ -857,6 +857,8 @@ type InternalLobbyFlowState = {
   supportLoading: boolean
   supportSendingLoading: boolean
   supportErrorText: string | null
+  supportDraft: string
+  supportPendingImage: { file: File; previewUrl: string } | null
   guestContactPopupOpen: boolean
   guestContactSending: boolean
   guestContactErrorText: string | null
@@ -867,6 +869,9 @@ type InternalLobbyFlowState = {
   adminSupportMessages: SupportMessageSnapshot[]
   adminSupportMessagesLoading: boolean
   adminSupportReplyLoading: boolean
+  adminSupportReplyErrorText: string | null
+  adminSupportReplyDraftByProfileId: Record<string, string>
+  adminSupportPendingImageByProfileId: Record<string, { file: File; previewUrl: string } | undefined>
   adminSupportDeleteConfirmProfileId: string | null
   adminSupportDeleteLoading: boolean
   adminSupportMobileConversationOpen: boolean
@@ -1186,6 +1191,8 @@ function createInitialState(): InternalLobbyFlowState {
     supportLoading: false,
     supportSendingLoading: false,
     supportErrorText: null,
+    supportDraft: '',
+    supportPendingImage: null,
     guestContactPopupOpen: false,
     guestContactSending: false,
     guestContactErrorText: null,
@@ -1196,6 +1203,9 @@ function createInitialState(): InternalLobbyFlowState {
     adminSupportMessages: [],
     adminSupportMessagesLoading: false,
     adminSupportReplyLoading: false,
+    adminSupportReplyErrorText: null,
+    adminSupportReplyDraftByProfileId: {},
+    adminSupportPendingImageByProfileId: {},
     adminSupportDeleteConfirmProfileId: null,
     adminSupportDeleteLoading: false,
     adminSupportMobileConversationOpen: false,
@@ -2678,6 +2688,8 @@ export function createLobbyFlowController(
       supportLoading: state.supportLoading,
       supportSendingLoading: state.supportSendingLoading,
       supportErrorText: state.supportErrorText,
+      supportDraft: state.supportDraft,
+      supportPendingImage: state.supportPendingImage,
       guestContactPopupOpen: state.guestContactPopupOpen,
       guestContactSending: state.guestContactSending,
       guestContactErrorText: state.guestContactErrorText,
@@ -2688,6 +2700,9 @@ export function createLobbyFlowController(
       adminSupportMessages: state.adminSupportMessages,
       adminSupportMessagesLoading: state.adminSupportMessagesLoading,
       adminSupportReplyLoading: state.adminSupportReplyLoading,
+      adminSupportReplyErrorText: state.adminSupportReplyErrorText,
+      adminSupportReplyDraftByProfileId: state.adminSupportReplyDraftByProfileId,
+      adminSupportPendingImageByProfileId: state.adminSupportPendingImageByProfileId,
       adminSupportDeleteConfirmProfileId: state.adminSupportDeleteConfirmProfileId,
       adminSupportDeleteLoading: state.adminSupportDeleteLoading,
       adminSupportMobileConversationOpen: state.adminSupportMobileConversationOpen,
@@ -3591,23 +3606,51 @@ export function createLobbyFlowController(
           if (result?.ok) {
             state.supportMessages = []
             state.supportUnreadCount = 0
+            state.supportDraft = ''
+            clearSupportPendingImage()
             state.supportDeleteConfirm = false
             state.supportPopupOpen = false
           }
           render()
         })()
       },
+      onSupportDraftChange: (draft) => {
+        state.supportDraft = draft
+      },
+      onSupportImageSelect: (file) => {
+        selectSupportImage(file)
+      },
+      onSupportImageRemove: () => {
+        clearSupportPendingImage()
+        render()
+      },
       onSupportSend: (body) => {
         if (state.supportSendingLoading) return
+        const pendingImage = state.supportPendingImage
+        if (body.trim().length === 0 && pendingImage === null) return
         state.supportSendingLoading = true
         state.supportErrorText = null
         render()
         void (async () => {
-          const result = await options.onSupportSend?.(body)
+          let imageDataUrl: string | null = null
+          if (pendingImage !== null) {
+            try {
+              imageDataUrl = await readFileAsDataUrl(pendingImage.file)
+            } catch {
+              state.supportSendingLoading = false
+              state.supportErrorText = 'Качването на снимката не бе успешно. Опитайте отново.'
+              render()
+              return
+            }
+          }
+
+          const result = await options.onSupportSend?.(body, imageDataUrl)
           state.supportSendingLoading = false
           if (result?.ok) {
             state.supportMessages = result.messages
             state.supportAccountTooNewMinutes = null
+            state.supportDraft = ''
+            clearSupportPendingImage()
           } else if (result?.code === 'account_too_new' && result.remainingMinutes) {
             state.supportAccountTooNewMinutes = result.remainingMinutes
           } else {
@@ -3658,6 +3701,7 @@ export function createLobbyFlowController(
         void (async () => {
           const result = await options.onAdminSupportMessagesLoad?.(profileId)
           state.adminSupportMessagesLoading = false
+          state.adminSupportReplyErrorText = null
           if (result?.ok) {
             state.adminSupportMessages = result.messages
             const conv = state.adminSupportConversations.find(c => c.profileId === profileId)
@@ -3669,21 +3713,56 @@ export function createLobbyFlowController(
           render()
         })()
       },
+      onAdminSupportReplyDraftChange: (profileId, draft) => {
+        state.adminSupportReplyDraftByProfileId = {
+          ...state.adminSupportReplyDraftByProfileId,
+          [profileId]: draft,
+        }
+      },
+      onAdminSupportImageSelect: (profileId, file) => {
+        selectAdminSupportImage(profileId, file)
+      },
+      onAdminSupportImageRemove: (profileId) => {
+        clearAdminSupportPendingImage(profileId)
+        render()
+      },
       onAdminSupportReply: (profileId, body) => {
         if (state.adminSupportReplyLoading) return
+        const pendingImage = state.adminSupportPendingImageByProfileId[profileId] ?? null
+        if (body.trim().length === 0 && pendingImage === null) return
         state.adminSupportReplyLoading = true
+        state.adminSupportReplyErrorText = null
         render()
         void (async () => {
-          const result = await options.onAdminSupportReply?.(profileId, body)
+          let imageDataUrl: string | null = null
+          if (pendingImage !== null) {
+            try {
+              imageDataUrl = await readFileAsDataUrl(pendingImage.file)
+            } catch {
+              state.adminSupportReplyLoading = false
+              state.adminSupportReplyErrorText = 'Качването на снимката не бе успешно. Опитайте отново.'
+              render()
+              return
+            }
+          }
+
+          const result = await options.onAdminSupportReply?.(profileId, body, imageDataUrl)
           state.adminSupportReplyLoading = false
           if (result?.ok) {
             state.adminSupportMessages = result.messages
+            state.adminSupportReplyDraftByProfileId = {
+              ...state.adminSupportReplyDraftByProfileId,
+              [profileId]: '',
+            }
+            clearAdminSupportPendingImage(profileId)
             const conv = state.adminSupportConversations.find(c => c.profileId === profileId)
             if (conv) {
               conv.lastMessageIsFromAdmin = true
-              conv.lastMessageBody = body
+              conv.lastMessageBody = body.trim().length > 0 ? body : '[Снимка]'
               conv.updatedAt = new Date().toISOString()
             }
+          } else {
+            state.adminSupportReplyErrorText = result?.message ?? 'Грешка при изпращане.'
           }
           render()
         })()
@@ -3717,6 +3796,10 @@ export function createLobbyFlowController(
               state.adminSupportSelectedProfileId = null
               state.adminSupportMessages = []
             }
+            clearAdminSupportPendingImage(profileId)
+            const nextDrafts = { ...state.adminSupportReplyDraftByProfileId }
+            delete nextDrafts[profileId]
+            state.adminSupportReplyDraftByProfileId = nextDrafts
             state.adminSupportDeleteConfirmProfileId = null
           }
           render()
@@ -6627,6 +6710,56 @@ export function createLobbyFlowController(
     const next = { ...state.chatPendingImageByFriendshipId }
     delete next[friendshipId]
     state.chatPendingImageByFriendshipId = next
+  }
+
+  function clearSupportPendingImage(): void {
+    if (state.supportPendingImage !== null) {
+      URL.revokeObjectURL(state.supportPendingImage.previewUrl)
+    }
+    state.supportPendingImage = null
+  }
+
+  function selectSupportImage(file: File): void {
+    const validationError = validateChatImageFile(file)
+
+    if (validationError !== null) {
+      state.supportErrorText = validationError
+      render()
+      return
+    }
+
+    clearSupportPendingImage()
+    state.supportPendingImage = { file, previewUrl: URL.createObjectURL(file) }
+    state.supportErrorText = null
+    render()
+  }
+
+  function clearAdminSupportPendingImage(profileId: string): void {
+    const pending = state.adminSupportPendingImageByProfileId[profileId]
+    if (pending) {
+      URL.revokeObjectURL(pending.previewUrl)
+    }
+    const next = { ...state.adminSupportPendingImageByProfileId }
+    delete next[profileId]
+    state.adminSupportPendingImageByProfileId = next
+  }
+
+  function selectAdminSupportImage(profileId: string, file: File): void {
+    const validationError = validateChatImageFile(file)
+
+    if (validationError !== null) {
+      state.adminSupportReplyErrorText = validationError
+      render()
+      return
+    }
+
+    clearAdminSupportPendingImage(profileId)
+    state.adminSupportPendingImageByProfileId = {
+      ...state.adminSupportPendingImageByProfileId,
+      [profileId]: { file, previewUrl: URL.createObjectURL(file) },
+    }
+    state.adminSupportReplyErrorText = null
+    render()
   }
 
   function selectChatImage(friendshipId: string, file: File): void {
