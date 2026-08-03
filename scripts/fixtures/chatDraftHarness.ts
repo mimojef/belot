@@ -55,6 +55,13 @@ let unreadByFriendship: Record<string, number> = {
   'friendship-b': 0,
 }
 let lobbyChatSeq = 0
+const personalSentBodies: string[] = []
+const supportSentBodies: string[] = []
+let delayNextPersonalSend = false
+let delayedPersonalSend: {
+  friendshipId: string
+  resolve: (value: { ok: true; messages: ChatMessageSnapshot[]; conversation: ChatConversationSnapshot }) => void
+} | null = null
 const supportMessages: SupportMessageSnapshot[] = Array.from({ length: 16 }, (_, index) => ({
   messageId: `support-${index + 1}`,
   profileId: 'me',
@@ -91,6 +98,7 @@ const controller = createLobbyFlowController({
     if (body.includes('__FAIL_SEND__')) {
       return { ok: false, message: 'Симулирана грешка при изпращане.' }
     }
+    personalSentBodies.push(body)
     const message: ChatMessageSnapshot = {
       messageId: `own-${Date.now()}-${Math.random()}`,
       friendshipId,
@@ -101,6 +109,15 @@ const controller = createLobbyFlowController({
     }
     messagesByFriendship[friendshipId] = [...(messagesByFriendship[friendshipId] ?? []), message]
     const friend = friendshipId === 'friendship-a' ? friendA : friendB
+    if (delayNextPersonalSend) {
+      delayNextPersonalSend = false
+      return await new Promise((resolve) => {
+        delayedPersonalSend = {
+          friendshipId,
+          resolve,
+        }
+      })
+    }
     return {
       ok: true,
       messages: messagesByFriendship[friendshipId],
@@ -114,6 +131,26 @@ const controller = createLobbyFlowController({
     ok: true,
     messages: supportMessages,
   }),
+  onSupportSend: async (body: string) => {
+    if (body.includes('__FAIL_SUPPORT__')) {
+      return { ok: false, message: 'Simulated support send failure.' }
+    }
+    supportSentBodies.push(body)
+    return {
+      ok: true,
+      messages: [
+        ...supportMessages,
+        {
+          messageId: `support-own-${Date.now()}`,
+          profileId: 'me',
+          body,
+          isFromAdmin: false,
+          createdAt: new Date().toISOString(),
+          attachment: null,
+        },
+      ],
+    }
+  },
 })
 
 // ─── Тестова кука, извиквана от Playwright през page.evaluate ───────────────
@@ -121,6 +158,22 @@ const controller = createLobbyFlowController({
   controller,
   openConversation: (friendshipId: string) => {
     controller.openChatWithFriend(friendshipId)
+  },
+  getPersonalSentBodies: () => personalSentBodies,
+  getSupportSentBodies: () => supportSentBodies,
+  delayNextPersonalSend: () => {
+    delayNextPersonalSend = true
+  },
+  resolveDelayedPersonalSend: () => {
+    if (delayedPersonalSend === null) return
+    const pending = delayedPersonalSend
+    delayedPersonalSend = null
+    const friend = pending.friendshipId === 'friendship-a' ? friendA : friendB
+    pending.resolve({
+      ok: true,
+      messages: messagesByFriendship[pending.friendshipId] ?? [],
+      conversation: makeConversation(pending.friendshipId, friend, unreadByFriendship[pending.friendshipId] ?? 0),
+    })
   },
   // Симулира реално входящо съобщение от отсрещния потребител — по същия
   // път, по който main.ts подава реални WS 'chat_message_received' кадри.

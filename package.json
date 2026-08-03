@@ -18,6 +18,7 @@
     "check:chat-draft-preserved": "npx tsx scripts/checkChatDraftPreserved.ts",
     "check:support-chat-typing-stability": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSupportChatTypingStability.ts",
     "check:all-chat-typing-stability": "node server/node_modules/tsx/dist/cli.mjs scripts/checkAllChatTypingStability.ts",
+    "check:chat-send-refocus": "node server/node_modules/tsx/dist/cli.mjs scripts/checkChatSendRefocus.ts",
     "check:private-room-created-notification": "node server/node_modules/tsx/dist/cli.mjs scripts/checkPrivateRoomCreatedNotification.ts",
     "check:notification-sound-assignments": "npx tsx scripts/checkNotificationSoundAssignments.ts",
     "check:private-room-mobile-responsive": "npx tsx scripts/checkPrivateRoomMobileResponsive.ts",

@@ -3628,6 +3628,11 @@ export function createLobbyFlowController(
         if (state.supportSendingLoading) return
         const pendingImage = state.supportPendingImage
         if (body.trim().length === 0 && pendingImage === null) return
+        const previousInput = options.root.querySelector<HTMLTextAreaElement>('[data-support-send-form="1"] textarea[name="body"]')
+        const shouldRefocus = previousInput !== null && document.activeElement === previousInput
+        const previousSelectionStart = previousInput?.selectionStart ?? 0
+        const previousSelectionEnd = previousInput?.selectionEnd ?? previousSelectionStart
+        const previousSelectionDirection = previousInput?.selectionDirection ?? 'none'
         state.supportSendingLoading = true
         state.supportErrorText = null
         render()
@@ -3639,7 +3644,11 @@ export function createLobbyFlowController(
             } catch {
               state.supportSendingLoading = false
               state.supportErrorText = 'Качването на снимката не бе успешно. Опитайте отново.'
+              const restoreFocus = canRestoreComposerFocus(shouldRefocus)
               render()
+              if (restoreFocus) {
+                refocusSupportComposer(previousSelectionStart, previousSelectionEnd, previousSelectionDirection)
+              }
               return
             }
           }
@@ -3656,7 +3665,15 @@ export function createLobbyFlowController(
           } else {
             state.supportErrorText = result?.message ?? 'Грешка при изпращане.'
           }
+          const restoreFocus = canRestoreComposerFocus(shouldRefocus)
           render()
+          if (restoreFocus) {
+            if (result?.ok) {
+              refocusSupportComposer(0)
+            } else {
+              refocusSupportComposer(previousSelectionStart, previousSelectionEnd, previousSelectionDirection)
+            }
+          }
         })()
       },
       onGuestContactClick: () => {
@@ -3730,6 +3747,13 @@ export function createLobbyFlowController(
         if (state.adminSupportReplyLoading) return
         const pendingImage = state.adminSupportPendingImageByProfileId[profileId] ?? null
         if (body.trim().length === 0 && pendingImage === null) return
+        const previousInput = options.root.querySelector<HTMLTextAreaElement>(
+          `[data-admin-support-reply-form="${selectorEscape(profileId)}"] textarea[name="body"]`,
+        )
+        const shouldRefocus = previousInput !== null && document.activeElement === previousInput
+        const previousSelectionStart = previousInput?.selectionStart ?? 0
+        const previousSelectionEnd = previousInput?.selectionEnd ?? previousSelectionStart
+        const previousSelectionDirection = previousInput?.selectionDirection ?? 'none'
         state.adminSupportReplyLoading = true
         state.adminSupportReplyErrorText = null
         render()
@@ -3741,7 +3765,11 @@ export function createLobbyFlowController(
             } catch {
               state.adminSupportReplyLoading = false
               state.adminSupportReplyErrorText = 'Качването на снимката не бе успешно. Опитайте отново.'
+              const restoreFocus = canRestoreComposerFocus(shouldRefocus)
               render()
+              if (restoreFocus) {
+                refocusAdminSupportComposer(profileId, previousSelectionStart, previousSelectionEnd, previousSelectionDirection)
+              }
               return
             }
           }
@@ -3764,7 +3792,15 @@ export function createLobbyFlowController(
           } else {
             state.adminSupportReplyErrorText = result?.message ?? 'Грешка при изпращане.'
           }
+          const restoreFocus = canRestoreComposerFocus(shouldRefocus)
           render()
+          if (restoreFocus) {
+            if (result?.ok) {
+              refocusAdminSupportComposer(profileId, 0)
+            } else {
+              refocusAdminSupportComposer(profileId, previousSelectionStart, previousSelectionEnd, previousSelectionDirection)
+            }
+          }
         })()
       },
       onAdminSupportDeleteClick: (profileId) => {
@@ -6792,6 +6828,49 @@ export function createLobbyFlowController(
     })
   }
 
+  function canRestoreComposerFocus(wasComposerFocused: boolean): boolean {
+    if (!wasComposerFocused) return false
+    const active = document.activeElement
+    return active === null || active === document.body || active === options.root
+  }
+
+  function selectorEscape(value: string): string {
+    return globalThis.CSS?.escape ? globalThis.CSS.escape(value) : value.replace(/["\\]/g, '\\$&')
+  }
+
+  function refocusTextControl(
+    input: HTMLInputElement | HTMLTextAreaElement | null,
+    selectionStart: number,
+    selectionEnd: number,
+    selectionDirection: 'forward' | 'backward' | 'none' | null = 'none',
+  ): void {
+    if (input === null || input.disabled || input.offsetParent === null) return
+    input.focus()
+    input.setSelectionRange(selectionStart, selectionEnd, selectionDirection ?? 'none')
+  }
+
+  function refocusPersonalChatComposer(friendshipId: string, selectionStart: number, selectionEnd = selectionStart, selectionDirection: 'forward' | 'backward' | 'none' | null = 'none'): void {
+    if (state.currentScreen !== 'chat' || state.activeChatFriendshipId !== friendshipId) return
+    const input = options.root.querySelector<HTMLInputElement>(
+      `[data-lobby-chat-form="${selectorEscape(friendshipId)}"] [data-lobby-chat-message-input="1"]`,
+    )
+    refocusTextControl(input, selectionStart, selectionEnd, selectionDirection)
+  }
+
+  function refocusSupportComposer(selectionStart: number, selectionEnd = selectionStart, selectionDirection: 'forward' | 'backward' | 'none' | null = 'none'): void {
+    if (!state.supportPopupOpen) return
+    const input = options.root.querySelector<HTMLTextAreaElement>('[data-support-send-form="1"] textarea[name="body"]')
+    refocusTextControl(input, selectionStart, selectionEnd, selectionDirection)
+  }
+
+  function refocusAdminSupportComposer(profileId: string, selectionStart: number, selectionEnd = selectionStart, selectionDirection: 'forward' | 'backward' | 'none' | null = 'none'): void {
+    if (state.currentScreen !== 'support' || state.adminSupportSelectedProfileId !== profileId) return
+    const input = options.root.querySelector<HTMLTextAreaElement>(
+      `[data-admin-support-reply-form="${selectorEscape(profileId)}"] textarea[name="body"]`,
+    )
+    refocusTextControl(input, selectionStart, selectionEnd, selectionDirection)
+  }
+
   async function sendChatMessage(
     friendshipId: string,
     body: string,
@@ -6815,6 +6894,14 @@ export function createLobbyFlowController(
       return
     }
 
+    const previousInput = options.root.querySelector<HTMLInputElement>(
+      `[data-lobby-chat-form="${selectorEscape(friendshipId)}"] [data-lobby-chat-message-input="1"]`,
+    )
+    const shouldRefocus = previousInput !== null && document.activeElement === previousInput
+    const previousSelectionStart = previousInput?.selectionStart ?? 0
+    const previousSelectionEnd = previousInput?.selectionEnd ?? previousSelectionStart
+    const previousSelectionDirection = previousInput?.selectionDirection ?? 'none'
+
     state.chatUploadingFriendshipIds = new Set(state.chatUploadingFriendshipIds).add(friendshipId)
     state.chatErrorText = null
     render()
@@ -6829,7 +6916,11 @@ export function createLobbyFlowController(
         nextUploading.delete(friendshipId)
         state.chatUploadingFriendshipIds = nextUploading
         state.chatErrorText = 'Качването на снимката не бе успешно. Опитайте отново.'
+        const restoreFocus = canRestoreComposerFocus(shouldRefocus)
         render()
+        if (restoreFocus) {
+          refocusPersonalChatComposer(friendshipId, previousSelectionStart, previousSelectionEnd, previousSelectionDirection)
+        }
         return
       }
     }
@@ -6844,7 +6935,11 @@ export function createLobbyFlowController(
       // Изпращането е неуспешно — черновата и избраната снимка НЕ се пипат,
       // за да не ги изгуби потребителят и да може да опита отново.
       state.chatErrorText = result.message
+      const restoreFocus = canRestoreComposerFocus(shouldRefocus)
       render()
+      if (restoreFocus) {
+        refocusPersonalChatComposer(friendshipId, previousSelectionStart, previousSelectionEnd, previousSelectionDirection)
+      }
       return
     }
 
@@ -6852,9 +6947,11 @@ export function createLobbyFlowController(
     // успех от сървъра.
     state.chatDraftByFriendshipId = { ...state.chatDraftByFriendshipId, [friendshipId]: '' }
     clearChatPendingImage(friendshipId)
-    state.chatMessages = result.messages
-    state.chatErrorText = null
-    state.activeChatFriendshipId = friendshipId
+    const isStillActiveChatConversation = state.currentScreen === 'chat' && state.activeChatFriendshipId === friendshipId
+    if (isStillActiveChatConversation) {
+      state.chatMessages = result.messages
+      state.chatErrorText = null
+    }
     const existingConversation = state.chatConversations.find(
       (c) => c.friendshipId === result.conversation.friendshipId,
     )
@@ -6867,7 +6964,11 @@ export function createLobbyFlowController(
         return conversation.friendshipId !== result.conversation.friendshipId
       }),
     ]
+    const restoreFocus = canRestoreComposerFocus(shouldRefocus)
     render()
+    if (restoreFocus) {
+      refocusPersonalChatComposer(friendshipId, 0)
+    }
   }
 
   async function refreshChatAfterNotification(friendshipId: string): Promise<void> {

@@ -1106,6 +1106,23 @@ function cssEscape(value: string): string {
   return globalThis.CSS?.escape ? globalThis.CSS.escape(value) : value.replace(/["\\]/g, '\\$&')
 }
 
+function keepComposerFocusOnPointerSubmit(button: HTMLButtonElement | null): void {
+  if (button === null) return
+  const preserveFocus = (event: PointerEvent | MouseEvent | TouchEvent) => {
+    if (button.disabled) return
+    event.preventDefault()
+  }
+  button.addEventListener('pointerdown', preserveFocus)
+}
+
+function submitTextareaOnEnter(textarea: HTMLTextAreaElement | null): void {
+  textarea?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return
+    event.preventDefault()
+    textarea.form?.requestSubmit()
+  })
+}
+
 function formatAmount(value: number): string {
   return new Intl.NumberFormat('bg-BG').format(value)
 }
@@ -9739,6 +9756,7 @@ export function renderLobbyScreen(
   })
 
   root.querySelectorAll<HTMLFormElement>('[data-lobby-chat-form]').forEach((form) => {
+    keepComposerFocusOnPointerSubmit(form.querySelector<HTMLButtonElement>('button[type="submit"]'))
     form.addEventListener('submit', (event) => {
       event.preventDefault()
       const friendshipId = form.dataset.lobbyChatForm?.trim() ?? ''
@@ -9759,6 +9777,11 @@ export function renderLobbyScreen(
   })
 
   root.querySelectorAll<HTMLInputElement>('[data-lobby-chat-message-input="1"]').forEach((input) => {
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && event.isComposing) {
+        event.preventDefault()
+      }
+    })
     input.addEventListener('input', () => {
       const friendshipId = input.closest('form')?.dataset.lobbyChatForm?.trim() ?? ''
       if (friendshipId.length > 0) {
@@ -11611,10 +11634,12 @@ export function renderLobbyScreen(
     })
 
   const supportTextarea = root.querySelector<HTMLTextAreaElement>('[data-support-send-form="1"] textarea[name="body"]')
+  submitTextareaOnEnter(supportTextarea)
   supportTextarea
     ?.addEventListener('input', (e) => {
       options.onSupportDraftChange((e.currentTarget as HTMLTextAreaElement).value)
     })
+  keepComposerFocusOnPointerSubmit(root.querySelector<HTMLButtonElement>('[data-support-send-form="1"] [data-support-composer-send="1"]'))
 
   const supportImageInput = root.querySelector<HTMLInputElement>('[data-support-image-input="1"]')
   root.querySelector<HTMLButtonElement>('[data-support-image-pick="1"]')
@@ -11656,6 +11681,7 @@ export function renderLobbyScreen(
   })
 
   root.querySelectorAll<HTMLFormElement>('[data-admin-support-reply-form]').forEach((form) => {
+    keepComposerFocusOnPointerSubmit(form.querySelector<HTMLButtonElement>('[data-support-composer-send="1"]'))
     form.addEventListener('submit', (e) => {
       e.preventDefault()
       const profileId = form.dataset.adminSupportReplyForm?.trim() ?? ''
@@ -11669,6 +11695,7 @@ export function renderLobbyScreen(
 
     const profileId = form.dataset.adminSupportReplyForm?.trim() ?? ''
     const adminTextarea = form.querySelector<HTMLTextAreaElement>('textarea[name="body"]')
+    submitTextareaOnEnter(adminTextarea)
     adminTextarea?.addEventListener('input', (e) => {
       if (profileId) {
         options.onAdminSupportReplyDraftChange(profileId, (e.currentTarget as HTMLTextAreaElement).value)
