@@ -62,6 +62,10 @@ export type YellowCoinGiftStore = {
   close: () => void
 }
 
+export type YellowCoinGiftStoreOptions = {
+  pikaTeamGiftBypassProfileId?: string | null
+}
+
 type FriendshipRow = {
   friendship_id: string
   requester_profile_id: string
@@ -95,6 +99,12 @@ const GIFT_AMOUNT_STEP = 1_000
 const DAILY_GIFT_LIMIT = 200_000
 const RECIPIENT_GIFT_WINDOW_LIMIT = 30_000
 const RECIPIENT_GIFT_WINDOW_DAYS = 60
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function normalizeOptionalProfileUuid(value: string | null | undefined): ProfileId | null {
+  const trimmed = value?.trim() ?? ''
+  return UUID_PATTERN.test(trimmed) ? trimmed as ProfileId : null
+}
 
 function normalizeGiftAmount(value: number): number | null {
   if (
@@ -138,7 +148,12 @@ function formatBgNumber(value: number): string {
 export async function createYellowCoinGiftStore(
   databaseFilePath: string,
   playerProgressStore: PlayerProgressStore,
+  options: YellowCoinGiftStoreOptions = {},
 ): Promise<YellowCoinGiftStore> {
+  const pikaTeamGiftBypassProfileId = normalizeOptionalProfileUuid(
+    options.pikaTeamGiftBypassProfileId ?? process.env.PIKA_TEAM_GIFT_BYPASS_PROFILE_ID,
+  )
+
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
     open: true,
@@ -225,6 +240,7 @@ export async function createYellowCoinGiftStore(
       FROM yellow_coin_gift_ledger
       WHERE recipient_profile_id = ?
         AND created_at > datetime('now', '-${RECIPIENT_GIFT_WINDOW_DAYS} days')
+        AND recipient_limit_exempt = 0
     ),
     oldest AS (
       SELECT MIN(created_at) AS oldest_created_at
@@ -271,8 +287,10 @@ export async function createYellowCoinGiftStore(
       recipient_profile_id,
       amount,
       sender_balance_after,
-      recipient_balance_after
+      recipient_balance_after,
+      recipient_limit_exempt
     ) VALUES (
+      ?,
       ?,
       ?,
       ?,
@@ -374,41 +392,46 @@ export async function createYellowCoinGiftStore(
       }
 
       // 5. Recipient 60-дневен лимит
-      const windowRow = selectRecipientWindowStatement.get(recipientProfileId) as
-        | RecipientWindowRow
-        | undefined
-      const receivedInWindow = windowRow?.received_in_window ?? 0
-      const nextReleaseAtRaw = windowRow?.next_release_at ?? null
-      const nextReleaseAmount = windowRow?.next_release_amount ?? 0
-      const nextReleaseAt = nextReleaseAtRaw !== null ? sqliteDateToIso(nextReleaseAtRaw) : null
+      const isRecipientLimitExemptGift = pikaTeamGiftBypassProfileId !== null
+        && senderProfileId === pikaTeamGiftBypassProfileId
 
-      const remainingAllowance = Math.max(0, RECIPIENT_GIFT_WINDOW_LIMIT - receivedInWindow)
+      if (!isRecipientLimitExemptGift) {
+        const windowRow = selectRecipientWindowStatement.get(recipientProfileId) as
+          | RecipientWindowRow
+          | undefined
+        const receivedInWindow = windowRow?.received_in_window ?? 0
+        const nextReleaseAtRaw = windowRow?.next_release_at ?? null
+        const nextReleaseAmount = windowRow?.next_release_amount ?? 0
+        const nextReleaseAt = nextReleaseAtRaw !== null ? sqliteDateToIso(nextReleaseAtRaw) : null
 
-      if (amount > remainingAllowance) {
-        database.exec('ROLLBACK;')
+        const remainingAllowance = Math.max(0, RECIPIENT_GIFT_WINDOW_LIMIT - receivedInWindow)
 
-        if (remainingAllowance === 0) {
+        if (amount > remainingAllowance) {
+          database.exec('ROLLBACK;')
+
+          if (remainingAllowance === 0) {
+            return {
+              ok: false,
+              code: 'RECIPIENT_WINDOW_LIMIT_FULL',
+              message: `Този играч вече е получил максималния размер от ${formatBgNumber(RECIPIENT_GIFT_WINDOW_LIMIT)} подарени жълтици за последните ${RECIPIENT_GIFT_WINDOW_DAYS} дни.`,
+              receivedInWindow,
+              remainingAllowance: 0,
+              attemptedAmount: amount,
+              nextReleaseAt,
+              nextReleaseAmount,
+            }
+          }
+
           return {
             ok: false,
-            code: 'RECIPIENT_WINDOW_LIMIT_FULL',
-            message: `Този играч вече е получил максималния размер от ${formatBgNumber(RECIPIENT_GIFT_WINDOW_LIMIT)} подарени жълтици за последните ${RECIPIENT_GIFT_WINDOW_DAYS} дни.`,
+            code: 'RECIPIENT_WINDOW_LIMIT_PARTIAL',
+            message: `Този играч може да получи още най-много ${formatBgNumber(remainingAllowance)} жълтици в текущия ${RECIPIENT_GIFT_WINDOW_DAYS}-дневен период.`,
             receivedInWindow,
-            remainingAllowance: 0,
+            remainingAllowance,
             attemptedAmount: amount,
             nextReleaseAt,
             nextReleaseAmount,
           }
-        }
-
-        return {
-          ok: false,
-          code: 'RECIPIENT_WINDOW_LIMIT_PARTIAL',
-          message: `Този играч може да получи още най-много ${formatBgNumber(remainingAllowance)} жълтици в текущия ${RECIPIENT_GIFT_WINDOW_DAYS}-дневен период.`,
-          receivedInWindow,
-          remainingAllowance,
-          attemptedAmount: amount,
-          nextReleaseAt,
-          nextReleaseAmount,
         }
       }
 
@@ -447,6 +470,7 @@ export async function createYellowCoinGiftStore(
         amount,
         senderBalanceAfter,
         recipientBalanceAfter,
+        isRecipientLimitExemptGift ? 1 : 0,
       )
 
       // 11. COMMIT

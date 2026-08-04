@@ -38,26 +38,34 @@ import { createYellowCoinGiftStore } from '../src/db/yellowCoinGiftStore.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const serverRoot = resolve(__dirname, '..')
-const migrationPath = resolve(
+const cascadeMigrationPath = resolve(
   serverRoot,
   'database/migrations/20260630_001_fix_gift_ledger_cascade.sql',
 )
+const recipientLimitExemptMigrationPath = resolve(
+  serverRoot,
+  'database/migrations/20260804_001_add_yellow_coin_gift_recipient_limit_exempt.sql',
+)
+const PIKA_BYPASS_PROFILE_ID = '4c146064-85af-4e6e-b08f-08faa39b167e'
 
 // ─── Worker thread за concurrency тест ─────────────────────────────────────
 
 type WorkerResult = { ok: boolean; code?: string; message?: string; error?: string }
 
 if (!isMainThread) {
-  const { dbPath, friendshipId, senderProfileId, amount } = workerData as {
+  const { dbPath, friendshipId, senderProfileId, amount, pikaTeamGiftBypassProfileId } = workerData as {
     dbPath: string
     friendshipId: string
     senderProfileId: string
     amount: number
+    pikaTeamGiftBypassProfileId?: string | null
   }
 
   let store: Awaited<ReturnType<typeof createYellowCoinGiftStore>> | null = null
   try {
-    store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+      pikaTeamGiftBypassProfileId,
+    })
     const result = store.sendGift(senderProfileId, friendshipId, amount)
     const msg: WorkerResult = {
       ok: result.ok,
@@ -215,8 +223,8 @@ function applyOriginalGiftLedgerSchema(db: DatabaseSync): void {
   `)
 }
 
-// Прилага реалния migration файл (обвит в BEGIN/COMMIT, без собствена транзакция)
-async function applyNewMigration(db: DatabaseSync): Promise<void> {
+// Прилага реален migration файл (обвит в BEGIN/COMMIT, както го прави runner-ът)
+async function applyMigrationFile(db: DatabaseSync, migrationPath: string): Promise<void> {
   const sql = await readFile(migrationPath, 'utf8')
   db.exec('BEGIN;')
   try {
@@ -226,6 +234,15 @@ async function applyNewMigration(db: DatabaseSync): Promise<void> {
     db.exec('ROLLBACK;')
     throw err
   }
+}
+
+async function applyNewMigration(db: DatabaseSync): Promise<void> {
+  await applyMigrationFile(db, cascadeMigrationPath)
+  await applyMigrationFile(db, recipientLimitExemptMigrationPath)
+}
+
+async function applyRecipientLimitExemptMigration(db: DatabaseSync): Promise<void> {
+  await applyMigrationFile(db, recipientLimitExemptMigrationPath)
 }
 
 // Помощна функция за новата gift ledger схема (нова схема след migration)
@@ -239,6 +256,7 @@ function applyNewGiftLedgerSchema(db: DatabaseSync): void {
       amount INTEGER NOT NULL CHECK (amount > 0),
       sender_balance_after INTEGER NOT NULL CHECK (sender_balance_after >= 0),
       recipient_balance_after INTEGER NOT NULL CHECK (recipient_balance_after >= 0),
+      recipient_limit_exempt INTEGER NOT NULL DEFAULT 0 CHECK (recipient_limit_exempt IN (0, 1)),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       CHECK (sender_profile_id <> recipient_profile_id),
       FOREIGN KEY (friendship_id) REFERENCES profile_friendships(friendship_id) ON DELETE SET NULL,
@@ -249,6 +267,11 @@ function applyNewGiftLedgerSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_gift_sender ON yellow_coin_gift_ledger(sender_profile_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_gift_friendship ON yellow_coin_gift_ledger(friendship_id, created_at);
   `)
+}
+
+function hasRecipientLimitExemptColumn(db: DatabaseSync): boolean {
+  return (db.prepare(`PRAGMA table_info(yellow_coin_gift_ledger);`).all() as Array<{ name: string }>)
+    .some((row) => row.name === 'recipient_limit_exempt')
 }
 
 // Seed helpers
@@ -273,7 +296,17 @@ function seedGiftLedger(
   recipient: string,
   amount: number,
   createdAt: string,
+  recipientLimitExempt: 0 | 1 = 0,
 ): void {
+  if (hasRecipientLimitExemptColumn(db)) {
+    db.exec(`INSERT INTO yellow_coin_gift_ledger
+      (gift_id, friendship_id, sender_profile_id, recipient_profile_id, amount,
+       sender_balance_after, recipient_balance_after, recipient_limit_exempt, created_at)
+      VALUES ('${giftId}', '${friendshipId}', '${sender}', '${recipient}', ${amount},
+       0, ${amount}, ${recipientLimitExempt}, '${createdAt}')`)
+    return
+  }
+
   db.exec(`INSERT INTO yellow_coin_gift_ledger
     (gift_id, friendship_id, sender_profile_id, recipient_profile_id, amount,
      sender_balance_after, recipient_balance_after, created_at)
@@ -291,6 +324,24 @@ function utcDaysAgo(n: number): string {
 // Преобразува SQLite "YYYY-MM-DD HH:MM:SS" в строг ISO 8601 UTC "YYYY-MM-DDTHH:MM:SS.000Z"
 function toExpectedIso(sqliteTs: string): string {
   return sqliteTs.replace(' ', 'T') + '.000Z'
+}
+
+async function withPikaBypassEnv(value: string | null, fn: () => Promise<void>): Promise<void> {
+  const previous = process.env.PIKA_TEAM_GIFT_BYPASS_PROFILE_ID
+  try {
+    if (value === null) {
+      delete process.env.PIKA_TEAM_GIFT_BYPASS_PROFILE_ID
+    } else {
+      process.env.PIKA_TEAM_GIFT_BYPASS_PROFILE_ID = value
+    }
+    await fn()
+  } finally {
+    if (previous === undefined) {
+      delete process.env.PIKA_TEAM_GIFT_BYPASS_PROFILE_ID
+    } else {
+      process.env.PIKA_TEAM_GIFT_BYPASS_PROFILE_ID = previous
+    }
+  }
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────
@@ -322,6 +373,7 @@ await withTempDir(async (dir) => {
     assert(row !== undefined, 'Редът трябва да съществува след migration')
     assertEqual(row!['amount'] as number, 5_000, 'amount непроменен')
     assertEqual(row!['friendship_id'] as string, 'fs-0', 'friendship_id непроменен')
+    assertEqual(row!['recipient_limit_exempt'] as number, 0, 'recipient_limit_exempt default 0')
   })
 
   // ── [1] Реален migration файл: DELETE приятелство → ledger остава, friendship_id → NULL
@@ -737,7 +789,7 @@ await withTempDir(async (dir) => {
     // Финалното получено в DB; checkpoint за освобождаване на WAL преди temp dir cleanup
     const db2 = new DatabaseSync(dbPath, { open: true })
     const totalReceived = (db2.prepare(
-      "SELECT COALESCE(SUM(amount), 0) AS total FROM yellow_coin_gift_ledger WHERE recipient_profile_id = 'recipient-14' AND created_at > datetime('now', '-60 days')"
+      "SELECT COALESCE(SUM(amount), 0) AS total FROM yellow_coin_gift_ledger WHERE recipient_profile_id = 'recipient-14' AND created_at > datetime('now', '-60 days') AND recipient_limit_exempt = 0"
     ).get() as { total: number }).total
     db2.exec('PRAGMA wal_checkpoint(TRUNCATE);')
     db2.close()
@@ -903,6 +955,428 @@ await withTempDir(async (dir) => {
     assert(result.ok === false, 'Очаква се отказ за 1 500 (некратно на 1 000)')
     assert(!('code' in result), 'Некратна сума не трябва да дава limit code')
     assertEqual((result as { message: string }).message, 'Сумата трябва да е между 1 000 и 30 000 жълтици.', 'message [20]')
+  })
+
+  await check('[21] Configured Pika sender bypass-ва recipient rolling limit и пише marker=1', async () => {
+    const dbPath = join(dir, 'test21.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, PIKA_BYPASS_PROFILE_ID, 100_000)
+    seedProfile(db, 'ordinary-21', 100_000)
+    seedProfile(db, 'recipient-21', 0)
+    seedFriendship(db, 'fs-21a', 'ordinary-21', 'recipient-21')
+    seedFriendship(db, 'fs-21b', PIKA_BYPASS_PROFILE_ID, 'recipient-21')
+    seedGiftLedger(db, 'g21-ordinary', 'fs-21a', 'ordinary-21', 'recipient-21', 30_000, utcDaysAgo(2))
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+      pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
+    })
+    const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-21b', 30_000)
+    store.close()
+
+    const db2 = new DatabaseSync(dbPath, { open: true })
+    const rows = db2.prepare(`
+      SELECT amount, recipient_limit_exempt
+      FROM yellow_coin_gift_ledger
+      WHERE recipient_profile_id = ?
+      ORDER BY created_at ASC
+    `).all('recipient-21') as Array<{ amount: number; recipient_limit_exempt: number }>
+    const ordinaryTotal = (db2.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS total
+      FROM yellow_coin_gift_ledger
+      WHERE recipient_profile_id = ? AND recipient_limit_exempt = 0
+    `).get('recipient-21') as { total: number }).total
+    db2.close()
+
+    assert(result.ok === true, `Очаква се Pika gift да мине, но: ${JSON.stringify(result)}`)
+    assertEqual(rows.length, 2, 'history пази ordinary и exempt ред')
+    assertEqual(rows[0]!.recipient_limit_exempt, 0, 'ordinary marker=0')
+    assertEqual(rows[1]!.recipient_limit_exempt, 1, 'Pika marker=1')
+    assertEqual(ordinaryTotal, 30_000, 'ordinary rolling sum не включва Pika gift')
+  })
+
+  await check('[22] След Pika gift recipient остава FULL за друг ordinary sender', async () => {
+    const dbPath = join(dir, 'test22.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'ordinary-22a', 100_000)
+    seedProfile(db, 'ordinary-22b', 100_000)
+    seedProfile(db, PIKA_BYPASS_PROFILE_ID, 100_000)
+    seedProfile(db, 'recipient-22', 0)
+    seedFriendship(db, 'fs-22a', 'ordinary-22a', 'recipient-22')
+    seedFriendship(db, 'fs-22b', 'ordinary-22b', 'recipient-22')
+    seedFriendship(db, 'fs-22p', PIKA_BYPASS_PROFILE_ID, 'recipient-22')
+    seedGiftLedger(db, 'g22-ordinary', 'fs-22a', 'ordinary-22a', 'recipient-22', 30_000, utcDaysAgo(2))
+    seedGiftLedger(db, 'g22-pika', 'fs-22p', PIKA_BYPASS_PROFILE_ID, 'recipient-22', 30_000, utcDaysAgo(1), 1)
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+      pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
+    })
+    const result = store.sendGift('ordinary-22b', 'fs-22b', 1_000)
+    store.close()
+
+    assert(result.ok === false, 'Очаква се FULL отказ за ordinary sender')
+    assert('code' in result && result.code === 'RECIPIENT_WINDOW_LIMIT_FULL', `Очаква се FULL, но: ${JSON.stringify(result)}`)
+  })
+
+  await check('[23] 20 000 ordinary + 50 000 exempt оставят още 10 000 ordinary allowance', async () => {
+    const dbPath = join(dir, 'test23.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'ordinary-23a', 100_000)
+    seedProfile(db, 'ordinary-23b', 100_000)
+    seedProfile(db, PIKA_BYPASS_PROFILE_ID, 100_000)
+    seedProfile(db, 'recipient-23', 0)
+    seedFriendship(db, 'fs-23a', 'ordinary-23a', 'recipient-23')
+    seedFriendship(db, 'fs-23b', 'ordinary-23b', 'recipient-23')
+    seedGiftLedger(db, 'g23-ordinary', 'fs-23a', 'ordinary-23a', 'recipient-23', 20_000, utcDaysAgo(3))
+    seedGiftLedger(db, 'g23-exempt', 'fs-23a', PIKA_BYPASS_PROFILE_ID, 'recipient-23', 50_000, utcDaysAgo(2), 1)
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const first = store.sendGift('ordinary-23b', 'fs-23b', 10_000)
+    const second = store.sendGift('ordinary-23b', 'fs-23b', 1_000)
+    store.close()
+
+    assert(first.ok === true, `Очаква се 10 000 да минат, но: ${JSON.stringify(first)}`)
+    assert(second.ok === false, 'Следващите 1 000 трябва да се откажат')
+    assert('code' in second && second.code === 'RECIPIENT_WINDOW_LIMIT_FULL', `Очаква се FULL, но: ${JSON.stringify(second)}`)
+  })
+
+  await check('[24] Друг profile с pika_team роля няма bypass без exact UUID match', async () => {
+    const dbPath = join(dir, 'test24.sqlite')
+    const otherPikaProfileId = '11111111-1111-4111-8111-111111111111'
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, otherPikaProfileId, 100_000)
+    seedProfile(db, 'ordinary-24', 100_000)
+    seedProfile(db, 'recipient-24', 0)
+    seedFriendship(db, 'fs-24a', 'ordinary-24', 'recipient-24')
+    seedFriendship(db, 'fs-24p', otherPikaProfileId, 'recipient-24')
+    seedGiftLedger(db, 'g24-ordinary', 'fs-24a', 'ordinary-24', 'recipient-24', 30_000, utcDaysAgo(1))
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+      pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
+    })
+    const result = store.sendGift(otherPikaProfileId, 'fs-24p', 1_000)
+    store.close()
+
+    assert(result.ok === false, 'Друг pika_team profile не трябва да bypass-ва')
+    assert('code' in result && result.code === 'RECIPIENT_WINDOW_LIMIT_FULL', `Очаква се FULL, но: ${JSON.stringify(result)}`)
+  })
+
+  await check('[25] Admin/subadmin/chat admin/top chat admin profile-и нямат implicit bypass', async () => {
+    const dbPath = join(dir, 'test25.sqlite')
+    const senders = [
+      '22222222-2222-4222-8222-222222222222',
+      '33333333-3333-4333-8333-333333333333',
+      '44444444-4444-4444-8444-444444444444',
+      '55555555-5555-4555-8555-555555555555',
+    ]
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'ordinary-25', 100_000)
+    seedProfile(db, 'recipient-25', 0)
+    seedFriendship(db, 'fs-25-base', 'ordinary-25', 'recipient-25')
+    seedGiftLedger(db, 'g25-ordinary', 'fs-25-base', 'ordinary-25', 'recipient-25', 30_000, utcDaysAgo(1))
+    for (const [index, sender] of senders.entries()) {
+      seedProfile(db, sender, 100_000)
+      seedFriendship(db, `fs-25-${index}`, sender, 'recipient-25')
+    }
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+      pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
+    })
+    for (const [index, sender] of senders.entries()) {
+      const result = store.sendGift(sender, `fs-25-${index}`, 1_000)
+      assert(result.ok === false, `sender ${sender} не трябва да мине`)
+      assert('code' in result && result.code === 'RECIPIENT_WINDOW_LIMIT_FULL', `Очаква се FULL, но: ${JSON.stringify(result)}`)
+    }
+    store.close()
+  })
+
+  await check('[26] Липсваща env стойност fail-closed: няма bypass', async () => {
+    await withPikaBypassEnv(null, async () => {
+      const dbPath = join(dir, 'test26.sqlite')
+      const db = new DatabaseSync(dbPath, { open: true })
+      db.exec('PRAGMA foreign_keys = ON;')
+      buildBaseSchema(db)
+      applyNewGiftLedgerSchema(db)
+      seedProfile(db, PIKA_BYPASS_PROFILE_ID, 100_000)
+      seedProfile(db, 'ordinary-26', 100_000)
+      seedProfile(db, 'recipient-26', 0)
+      seedFriendship(db, 'fs-26a', 'ordinary-26', 'recipient-26')
+      seedFriendship(db, 'fs-26p', PIKA_BYPASS_PROFILE_ID, 'recipient-26')
+      seedGiftLedger(db, 'g26-ordinary', 'fs-26a', 'ordinary-26', 'recipient-26', 30_000, utcDaysAgo(1))
+      db.close()
+
+      const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+      const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-26p', 1_000)
+      store.close()
+
+      assert(result.ok === false, 'Липсваща env стойност не трябва да bypass-ва')
+      assert('code' in result && result.code === 'RECIPIENT_WINDOW_LIMIT_FULL', `Очаква се FULL, но: ${JSON.stringify(result)}`)
+    })
+  })
+
+  await check('[27] Празна env стойност fail-closed: няма bypass', async () => {
+    await withPikaBypassEnv('   ', async () => {
+      const dbPath = join(dir, 'test27.sqlite')
+      const db = new DatabaseSync(dbPath, { open: true })
+      db.exec('PRAGMA foreign_keys = ON;')
+      buildBaseSchema(db)
+      applyNewGiftLedgerSchema(db)
+      seedProfile(db, PIKA_BYPASS_PROFILE_ID, 100_000)
+      seedProfile(db, 'ordinary-27', 100_000)
+      seedProfile(db, 'recipient-27', 0)
+      seedFriendship(db, 'fs-27a', 'ordinary-27', 'recipient-27')
+      seedFriendship(db, 'fs-27p', PIKA_BYPASS_PROFILE_ID, 'recipient-27')
+      seedGiftLedger(db, 'g27-ordinary', 'fs-27a', 'ordinary-27', 'recipient-27', 30_000, utcDaysAgo(1))
+      db.close()
+
+      const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+      const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-27p', 1_000)
+      store.close()
+
+      assert(result.ok === false, 'Празна env стойност не трябва да bypass-ва')
+      assert('code' in result && result.code === 'RECIPIENT_WINDOW_LIMIT_FULL', `Очаква се FULL, но: ${JSON.stringify(result)}`)
+    })
+  })
+
+  await check('[28] Невалиден UUID в env fail-closed: няма bypass', async () => {
+    await withPikaBypassEnv('not-a-uuid', async () => {
+      const dbPath = join(dir, 'test28.sqlite')
+      const db = new DatabaseSync(dbPath, { open: true })
+      db.exec('PRAGMA foreign_keys = ON;')
+      buildBaseSchema(db)
+      applyNewGiftLedgerSchema(db)
+      seedProfile(db, PIKA_BYPASS_PROFILE_ID, 100_000)
+      seedProfile(db, 'ordinary-28', 100_000)
+      seedProfile(db, 'recipient-28', 0)
+      seedFriendship(db, 'fs-28a', 'ordinary-28', 'recipient-28')
+      seedFriendship(db, 'fs-28p', PIKA_BYPASS_PROFILE_ID, 'recipient-28')
+      seedGiftLedger(db, 'g28-ordinary', 'fs-28a', 'ordinary-28', 'recipient-28', 30_000, utcDaysAgo(1))
+      db.close()
+
+      const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+      const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-28p', 1_000)
+      store.close()
+
+      assert(result.ok === false, 'Невалиден env UUID не трябва да bypass-ва')
+      assert('code' in result && result.code === 'RECIPIENT_WINDOW_LIMIT_FULL', `Очаква се FULL, но: ${JSON.stringify(result)}`)
+    })
+  })
+
+  await check('[29] Exact UUID в env активира bypass', async () => {
+    await withPikaBypassEnv(PIKA_BYPASS_PROFILE_ID, async () => {
+      const dbPath = join(dir, 'test29.sqlite')
+      const db = new DatabaseSync(dbPath, { open: true })
+      db.exec('PRAGMA foreign_keys = ON;')
+      buildBaseSchema(db)
+      applyNewGiftLedgerSchema(db)
+      seedProfile(db, PIKA_BYPASS_PROFILE_ID, 100_000)
+      seedProfile(db, 'ordinary-29', 100_000)
+      seedProfile(db, 'recipient-29', 0)
+      seedFriendship(db, 'fs-29a', 'ordinary-29', 'recipient-29')
+      seedFriendship(db, 'fs-29p', PIKA_BYPASS_PROFILE_ID, 'recipient-29')
+      seedGiftLedger(db, 'g29-ordinary', 'fs-29a', 'ordinary-29', 'recipient-29', 30_000, utcDaysAgo(1))
+      db.close()
+
+      const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+      const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-29p', 1_000)
+      store.close()
+
+      assert(result.ok === true, `Exact env UUID трябва да bypass-ва, но: ${JSON.stringify(result)}`)
+    })
+  })
+
+  await check('[30] Pika sender с недостатъчен баланс се отказва въпреки bypass', async () => {
+    const dbPath = join(dir, 'test30.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, PIKA_BYPASS_PROFILE_ID, 500)
+    seedProfile(db, 'ordinary-30', 100_000)
+    seedProfile(db, 'recipient-30', 0)
+    seedFriendship(db, 'fs-30a', 'ordinary-30', 'recipient-30')
+    seedFriendship(db, 'fs-30p', PIKA_BYPASS_PROFILE_ID, 'recipient-30')
+    seedGiftLedger(db, 'g30-ordinary', 'fs-30a', 'ordinary-30', 'recipient-30', 30_000, utcDaysAgo(1))
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+      pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
+    })
+    const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-30p', 1_000)
+    store.close()
+
+    const db2 = new DatabaseSync(dbPath, { open: true })
+    const ledgerCount = (db2.prepare(`SELECT COUNT(*) AS c FROM yellow_coin_gift_ledger`).get() as { c: number }).c
+    db2.close()
+
+    assert(result.ok === false, 'Недостатъчен баланс трябва да отказва')
+    assert(!('code' in result), 'Balance отказът не трябва да е recipient limit code')
+    assertEqual(ledgerCount, 1, 'няма частичен exempt ledger ред')
+  })
+
+  await check('[31] Невалидна сума се отказва и за Pika sender', async () => {
+    const dbPath = join(dir, 'test31.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, PIKA_BYPASS_PROFILE_ID, 100_000)
+    seedProfile(db, 'recipient-31', 0)
+    seedFriendship(db, 'fs-31', PIKA_BYPASS_PROFILE_ID, 'recipient-31')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+      pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
+    })
+    const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-31', 1_500)
+    store.close()
+
+    const db2 = new DatabaseSync(dbPath, { open: true })
+    const ledgerCount = (db2.prepare(`SELECT COUNT(*) AS c FROM yellow_coin_gift_ledger`).get() as { c: number }).c
+    db2.close()
+
+    assert(result.ok === false, 'Невалидна сума трябва да се откаже')
+    assert(!('code' in result), 'Невалидна сума не трябва да дава recipient limit code')
+    assertEqual(ledgerCount, 0, 'без ledger ред')
+  })
+
+  await check('[32] Friendship guard остава защитен и за Pika sender', async () => {
+    const dbPath = join(dir, 'test32.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, PIKA_BYPASS_PROFILE_ID, 100_000)
+    seedProfile(db, 'recipient-32', 0)
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+      pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
+    })
+    const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'missing-friendship', 1_000)
+    store.close()
+
+    assert(result.ok === false, 'Липсващо приятелство трябва да се откаже')
+    assert(!('code' in result), 'Friendship guard не трябва да е recipient limit code')
+  })
+
+  await check('[33] Concurrency: exempt и ordinary gift не си пречат неправилно', async () => {
+    const dbPath = join(dir, 'test33.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'ordinary-33a', 100_000)
+    seedProfile(db, 'ordinary-33b', 100_000)
+    seedProfile(db, PIKA_BYPASS_PROFILE_ID, 100_000)
+    seedProfile(db, 'recipient-33', 0)
+    seedFriendship(db, 'fs-33a', 'ordinary-33a', 'recipient-33')
+    seedFriendship(db, 'fs-33b', 'ordinary-33b', 'recipient-33')
+    seedFriendship(db, 'fs-33p', PIKA_BYPASS_PROFILE_ID, 'recipient-33')
+    seedGiftLedger(db, 'g33-pre', 'fs-33a', 'ordinary-33a', 'recipient-33', 20_000, utcDaysAgo(1))
+    db.exec('PRAGMA journal_mode = WAL;')
+    db.exec('PRAGMA busy_timeout = 5000;')
+    db.close()
+
+    const workerScript = fileURLToPath(import.meta.url)
+    const results = await Promise.all([
+      new Promise<WorkerResult>((resolve) => {
+        const w = new Worker(workerScript, {
+          workerData: {
+            dbPath,
+            friendshipId: 'fs-33b',
+            senderProfileId: 'ordinary-33b',
+            amount: 10_000,
+            pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
+          },
+        })
+        let msg: WorkerResult | null = null
+        w.on('message', (m: WorkerResult) => { msg = m })
+        w.on('error', (err) => resolve({ ok: false, error: String(err) }))
+        w.on('exit', () => resolve(msg ?? { ok: false, error: 'Worker exited without message' }))
+      }),
+      new Promise<WorkerResult>((resolve) => {
+        const w = new Worker(workerScript, {
+          workerData: {
+            dbPath,
+            friendshipId: 'fs-33p',
+            senderProfileId: PIKA_BYPASS_PROFILE_ID,
+            amount: 30_000,
+            pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
+          },
+        })
+        let msg: WorkerResult | null = null
+        w.on('message', (m: WorkerResult) => { msg = m })
+        w.on('error', (err) => resolve({ ok: false, error: String(err) }))
+        w.on('exit', () => resolve(msg ?? { ok: false, error: 'Worker exited without message' }))
+      }),
+    ])
+
+    const db2 = new DatabaseSync(dbPath, { open: true })
+    const ordinaryTotal = (db2.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS total
+      FROM yellow_coin_gift_ledger
+      WHERE recipient_profile_id = 'recipient-33'
+        AND created_at > datetime('now', '-60 days')
+        AND recipient_limit_exempt = 0
+    `).get() as { total: number }).total
+    const exemptTotal = (db2.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS total
+      FROM yellow_coin_gift_ledger
+      WHERE recipient_profile_id = 'recipient-33'
+        AND recipient_limit_exempt = 1
+    `).get() as { total: number }).total
+    db2.exec('PRAGMA wal_checkpoint(TRUNCATE);')
+    db2.close()
+
+    for (const r of results) {
+      assert(!r.error, `Worker crashна: ${String(r.error)}`)
+      assert(r.ok === true, `И двата gifts трябва да минат: ${JSON.stringify(results)}`)
+    }
+    assertEqual(ordinaryTotal, 30_000, 'ordinary rolling sum остава точно 30 000')
+    assertEqual(exemptTotal, 30_000, 'exempt gift е записан отделно')
+  })
+
+  await check('[34] Migration върху стара cascade schema добавя колоната с default 0 и flow-ът работи', async () => {
+    const dbPath = join(dir, 'test34.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyOriginalGiftLedgerSchema(db)
+    seedProfile(db, 'sender-34', 100_000)
+    seedProfile(db, 'recipient-34', 0)
+    seedFriendship(db, 'fs-34', 'sender-34', 'recipient-34')
+    seedGiftLedger(db, 'g34-old', 'fs-34', 'sender-34', 'recipient-34', 5_000, utcDaysAgo(1))
+    await applyMigrationFile(db, cascadeMigrationPath)
+    await applyRecipientLimitExemptMigration(db)
+    const oldRow = db.prepare(`SELECT recipient_limit_exempt FROM yellow_coin_gift_ledger WHERE gift_id = ?`).get('g34-old') as { recipient_limit_exempt: number }
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const result = store.sendGift('sender-34', 'fs-34', 1_000)
+    store.close()
+
+    assertEqual(oldRow.recipient_limit_exempt, 0, 'старият ред получава default 0')
+    assert(result.ok === true, `Gift flow трябва да работи след migration, но: ${JSON.stringify(result)}`)
   })
 })
 
