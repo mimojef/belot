@@ -61,6 +61,7 @@ import { computePaginationItems } from './computePaginationItems'
 import {
   getProfileDisplayNameAvailabilityQuery,
   validateProfileDisplayName,
+  type ProfileDisplayNameValidationOptions,
 } from './profileDisplayNameValidation'
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes'
 import { renderAdminPaymentsPanel, attachAdminPaymentsPanelHandlers } from '../adminPayments/renderAdminPaymentsPanel'
@@ -1384,9 +1385,9 @@ function renderAuthModal(state: LobbyScreenState): string {
           <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Име в играта
             <span style="position:relative;display:block;">
-              <input name="displayName" autocomplete="nickname" data-name-check-input="register" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 90px 0 12px;font-size:15px;font-weight:700;outline:none;">
-              <span data-name-hint="register" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);max-width:68%;overflow:hidden;text-overflow:ellipsis;font-size:11px;font-weight:800;letter-spacing:0;text-transform:none;pointer-events:none;white-space:nowrap;"></span>
+              <input name="displayName" autocomplete="nickname" data-name-check-input="register" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
             </span>
+            <span data-name-hint="register" style="min-height:14px;display:block;overflow:hidden;text-overflow:ellipsis;font-size:11px;font-weight:800;line-height:1.25;letter-spacing:0;text-transform:none;pointer-events:none;white-space:nowrap;"></span>
             <span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:#ffffff;">Мин. 3 символа. Букви на кирилица или латиница, цифри и по един интервал между думите.</span>
           </label>
           <div style="display:grid;gap:6px;">
@@ -1494,7 +1495,7 @@ function renderProfileEditModal(state: LobbyScreenState): string {
   const nameChangeHeaderStyle = isPhoneLayout
     ? 'display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;'
     : 'display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;'
-  const nameChangeInputStyle = `width:100%;box-sizing:border-box;height:${isPhoneLayout ? '36px' : '42px'};border-radius:8px;border:1px solid ${state.profileNameChangeErrorText ? 'rgba(248,113,113,0.60)' : 'rgba(212,165,32,0.34)'};background:#050505;color:#ffffff;padding:0 90px 0 12px;font-size:${isPhoneLayout ? '14px' : '15px'};font-weight:700;outline:none;`
+  const nameChangeInputStyle = `width:100%;box-sizing:border-box;height:${isPhoneLayout ? '36px' : '42px'};border-radius:8px;border:1px solid ${state.profileNameChangeErrorText ? 'rgba(248,113,113,0.60)' : 'rgba(212,165,32,0.34)'};background:#050505;color:#ffffff;padding:0 12px;font-size:${isPhoneLayout ? '14px' : '15px'};font-weight:700;outline:none;`
   const nameChangeHelpStyle = isPhoneLayout
     ? 'font-size:10px;font-weight:400;line-height:1.2;color:#ffffff;'
     : 'font-size:11px;font-weight:400;color:#ffffff;'
@@ -1541,8 +1542,8 @@ function renderProfileEditModal(state: LobbyScreenState): string {
             <label style="display:grid;gap:6px;">
               <span style="position:relative;display:block;">
                 <input name="paidDisplayName" autocomplete="nickname" placeholder="Въведи ново име" value="${isAdminTargetEdit ? escapeHtml(editorProfile.displayName) : ''}" data-name-check-input="namechange" style="${nameChangeInputStyle}">
-                <span data-name-hint="namechange" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);max-width:68%;overflow:hidden;text-overflow:ellipsis;font-size:11px;font-weight:800;pointer-events:none;white-space:nowrap;"></span>
               </span>
+              <span data-name-hint="namechange" style="min-height:14px;display:block;overflow:hidden;text-overflow:ellipsis;font-size:11px;font-weight:800;line-height:1.25;pointer-events:none;white-space:nowrap;"></span>
               <span style="${nameChangeHelpStyle}">Мин. 3 символа. Букви на кирилица или латиница, цифри и по един интервал между думите.</span>
             </label>
             ${state.profileNameChangeErrorText ? `<div style="border-radius:6px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:8px 10px;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.profileNameChangeErrorText)}</div>` : ''}
@@ -10435,6 +10436,9 @@ export function renderLobbyScreen(
   const editorProfile = options.state.profileEditorTargetProfileId !== null && options.state.isAdmin
     ? (options.state.profileEditorTargetProfile ?? options.state.profile)
     : options.state.profile
+  const profileNameValidationOptions: ProfileDisplayNameValidationOptions = {
+    profileId: editorProfile.profileId,
+  }
   const avatarGender = editorProfile.gender ?? 'male'
   const avatarFolder = avatarGender === 'female' ? 'female' : 'male'
   const avatarPrefix = avatarGender === 'female' ? 'female-avatar' : 'male-avatar'
@@ -10832,7 +10836,7 @@ export function renderLobbyScreen(
     .querySelector<HTMLButtonElement>('[data-lobby-profile-name-change-submit="1"]')
     ?.addEventListener('click', () => {
       const input = root.querySelector<HTMLInputElement>('input[name="paidDisplayName"]')
-      const validation = validateProfileDisplayName(input?.value ?? '')
+      const validation = validateProfileDisplayName(input?.value ?? '', profileNameValidationOptions)
       const hint = root.querySelector<HTMLElement>('[data-name-hint="namechange"]')
       if (!validation.ok) {
         if (hint) {
@@ -10873,6 +10877,7 @@ export function renderLobbyScreen(
   function attachNameAvailabilityCheck(
     input: HTMLInputElement,
     hintEl: HTMLElement,
+    validationOptions: ProfileDisplayNameValidationOptions = {},
   ): void {
     let timer: ReturnType<typeof setTimeout> | null = null
     let lastChecked = ''
@@ -10884,14 +10889,14 @@ export function renderLobbyScreen(
     }
 
     input.addEventListener('blur', () => {
-      const validation = validateProfileDisplayName(input.value)
+      const validation = validateProfileDisplayName(input.value, validationOptions)
       if (validation.ok) {
         input.value = validation.canonicalDisplayName
       }
     })
 
     input.addEventListener('input', () => {
-      const validation = validateProfileDisplayName(input.value)
+      const validation = validateProfileDisplayName(input.value, validationOptions)
 
       if (timer !== null) clearTimeout(timer)
 
@@ -10905,7 +10910,7 @@ export function renderLobbyScreen(
         return
       }
 
-      const value = getProfileDisplayNameAvailabilityQuery(input.value)
+      const value = getProfileDisplayNameAvailabilityQuery(input.value, validationOptions)
       if (value === null) {
         lastChecked = ''
         return
@@ -10920,7 +10925,7 @@ export function renderLobbyScreen(
             `${options.apiBaseUrl}/api/profile/check-name?name=${encodeURIComponent(value)}`,
           )
           const data = await res.json() as { available: boolean }
-          const currentValidation = validateProfileDisplayName(input.value)
+          const currentValidation = validateProfileDisplayName(input.value, validationOptions)
           if (!currentValidation.ok || currentValidation.canonicalDisplayName !== value) return
           if (data.available) {
             setHint('✓ Свободно', '#4ade80')
@@ -10945,7 +10950,9 @@ export function renderLobbyScreen(
   ;(['register', 'namechange'] as const).forEach((key) => {
     const input = root.querySelector<HTMLInputElement>(`[data-name-check-input="${key}"]`)
     const hint = root.querySelector<HTMLElement>(`[data-name-hint="${key}"]`)
-    if (input && hint) attachNameAvailabilityCheck(input, hint)
+    if (input && hint) {
+      attachNameAvailabilityCheck(input, hint, key === 'namechange' ? profileNameValidationOptions : {})
+    }
   })
 
   root

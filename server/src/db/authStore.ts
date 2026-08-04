@@ -6,7 +6,10 @@ import {
   validatePassword,
   verifyPassword,
 } from './authHelpers.js'
-import { validateProfileDisplayName } from './normalizeProfileIdentityText.js'
+import {
+  validateProfileDisplayName,
+  type ProfileIdentityValidationCode,
+} from './normalizeProfileIdentityText.js'
 import type { PlayerProgressStore } from './playerProgressStore.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
@@ -467,7 +470,9 @@ export async function createAuthStore(
     password: string
     displayName: string
     gender?: 'male' | 'female' | null
-  }): { ok: true; sessionToken: string; session: AuthSessionSnapshot } | { ok: false; message: string } {
+  }):
+    | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
+    | { ok: false; message: string; code?: ProfileIdentityValidationCode } {
     const email = normalizeEmail(input.email)
     const displayNameResult = validateProfileDisplayName(input.displayName)
 
@@ -480,7 +485,7 @@ export async function createAuthStore(
     }
 
     if (!displayNameResult.ok) {
-      return { ok: false, message: displayNameResult.message }
+      return { ok: false, message: displayNameResult.message, code: displayNameResult.code }
     }
 
     const existingAccount = selectAccountByEmailStatement.get(email) as AccountRow | undefined

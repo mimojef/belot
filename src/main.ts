@@ -339,12 +339,14 @@ type AuthResponse = {
   ok: boolean
   session?: AuthSession | null
   message?: string
+  code?: string
 }
 
 type AdminProfileResponse = {
   ok: boolean
   profile?: PlayerPublicProfileSnapshot
   message?: string
+  code?: string
 }
 
 type PlayersResponse = {
@@ -2974,7 +2976,9 @@ async function submitPresetAvatarUrl(targetProfileId: string | null, avatarUrl: 
 }
 
 async function submitProfileNameChange(targetProfileId: string | null, displayName: string): Promise<string | null> {
-  const validation = validateProfileDisplayName(displayName)
+  const validation = validateProfileDisplayName(displayName, {
+    profileId: targetProfileId ?? currentAuthSession?.profile.profileId ?? null,
+  })
   if (!validation.ok) {
     return validation.message
   }

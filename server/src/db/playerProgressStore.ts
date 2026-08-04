@@ -15,11 +15,18 @@ import {
   escapeSqlLikePattern,
   normalizeProfileDisplayName,
   validateProfileDisplayName,
+  type ProfileIdentityValidationCode,
 } from './normalizeProfileIdentityText.js'
 import { createRankProgressSnapshot, getRankTitleForLevel, computeEloChange } from '../progression/rankProgression.js'
 import { getSofiaDayBoundsUtc } from './sofiaDayBounds.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
+
+type ProfileDisplayNameMutationError = {
+  ok: false
+  message: string
+  code?: ProfileIdentityValidationCode
+}
 
 export type LeaderboardCategory = 'balance' | 'rank' | 'wins' | 'rating'
 
@@ -64,11 +71,11 @@ export type PlayerProgressStore = {
     profileId: ProfileId,
     displayName: string,
     priceAmount: number,
-  ) => { ok: true; profile: PlayerPublicProfileSnapshot } | { ok: false; message: string }
+  ) => { ok: true; profile: PlayerPublicProfileSnapshot } | ProfileDisplayNameMutationError
   adminRenameProfileDisplayName: (
     profileId: ProfileId,
     displayName: string,
-  ) => { ok: true; profile: PlayerPublicProfileSnapshot } | { ok: false; message: string }
+  ) => { ok: true; profile: PlayerPublicProfileSnapshot } | ProfileDisplayNameMutationError
   updateProfileAvatar: (
     profileId: ProfileId,
     avatarUrl: string | null,
@@ -131,7 +138,7 @@ function toSafeProfileId(stableKey: string): ProfileId {
   return `guest_${normalizedKey}`.slice(0, 96)
 }
 
-function hashStableKeyToBase36(value: string): string {
+function hashStableKeyToDigits(value: string): string {
   let hash = 2166136261
 
   for (let index = 0; index < value.length; index += 1) {
@@ -139,7 +146,7 @@ function hashStableKeyToBase36(value: string): string {
     hash = Math.imul(hash, 16777619)
   }
 
-  return (hash >>> 0).toString(36).padStart(7, '0').slice(0, 7)
+  return (hash >>> 0).toString(10).padStart(10, '0').slice(0, 10)
 }
 
 function createTemporaryGuestFallbackDisplayName(
@@ -147,8 +154,8 @@ function createTemporaryGuestFallbackDisplayName(
   profileId: string,
   attempt: number,
 ): string {
-  const baseSuffix = hashStableKeyToBase36(`${stableKey}:${profileId}`)
-  const suffix = attempt === 0 ? baseSuffix : `${baseSuffix}${attempt.toString(36)}`
+  const baseSuffix = hashStableKeyToDigits(`${stableKey}:${profileId}`)
+  const suffix = attempt === 0 ? baseSuffix : `${baseSuffix}${attempt}`
   return `Гост ${suffix}`
 }
 
@@ -1076,13 +1083,14 @@ export async function createPlayerProgressStore(
     profileId: ProfileId,
     displayNameRaw: string,
     priceAmountRaw: number,
-  ): { ok: true; profile: PlayerPublicProfileSnapshot } | { ok: false; message: string } {
-    const displayNameResult = validateProfileDisplayName(displayNameRaw)
+  ): { ok: true; profile: PlayerPublicProfileSnapshot } | ProfileDisplayNameMutationError {
+    const displayNameResult = validateProfileDisplayName(displayNameRaw, { profileId })
 
     if (!displayNameResult.ok) {
       return {
         ok: false,
         message: displayNameResult.message,
+        code: displayNameResult.code,
       }
     }
 
@@ -1107,7 +1115,7 @@ export async function createPlayerProgressStore(
       }
     }
 
-    if (normalizeProfileDisplayName(existingProfile.display_name) === normalizedDisplayName) {
+    if (normalizeProfileDisplayName(existingProfile.display_name, { profileId }) === normalizedDisplayName) {
       return {
         ok: false,
         message: 'Новото име трябва да е различно от текущото.',
@@ -1240,17 +1248,19 @@ export async function createPlayerProgressStore(
   function adminRenameProfileDisplayName(
     profileId: ProfileId,
     displayNameRaw: string,
-  ): { ok: true; profile: PlayerPublicProfileSnapshot } | { ok: false; message: string } {
-    const displayName = displayNameRaw.trim().replace(/\s+/g, ' ')
-    const normalizedDisplayName = normalizeProfileDisplayName(displayName)
+  ): { ok: true; profile: PlayerPublicProfileSnapshot } | ProfileDisplayNameMutationError {
+    const displayNameResult = validateProfileDisplayName(displayNameRaw, { profileId })
 
-    if (normalizedDisplayName === null) {
-      return { ok: false, message: 'Името може да съдържа само букви, цифри и интервал.' }
+    if (!displayNameResult.ok) {
+      return {
+        ok: false,
+        message: displayNameResult.message,
+        code: displayNameResult.code,
+      }
     }
 
-    if (displayName.length < 3 || displayName.length > 32) {
-      return { ok: false, message: 'Името трябва да е между 3 и 32 символа.' }
-    }
+    const displayName = displayNameResult.canonicalDisplayName
+    const normalizedDisplayName = displayNameResult.normalizedKey
 
     const existingProfile = selectProfileDisplayNameStatement.get(profileId) as
       | { display_name: string }
@@ -1260,7 +1270,7 @@ export async function createPlayerProgressStore(
       return { ok: false, message: 'Профилът не беше намерен.' }
     }
 
-    if (normalizeProfileDisplayName(existingProfile.display_name) === normalizedDisplayName) {
+    if (normalizeProfileDisplayName(existingProfile.display_name, { profileId }) === normalizedDisplayName) {
       const profile = getPublicProfile(profileId)
       if (profile === null) return { ok: false, message: 'Профилът не беше намерен.' }
       return { ok: true, profile }
@@ -1736,7 +1746,7 @@ export async function createPlayerProgressStore(
     displayName: string,
     excludedProfileId: ProfileId | null = null,
   ): boolean {
-    const normalized = normalizeProfileDisplayName(displayName)
+    const normalized = normalizeProfileDisplayName(displayName, { profileId: excludedProfileId })
     if (normalized === null) return false
     return isReservedIdentityNameAvailable(normalized, excludedProfileId)
   }

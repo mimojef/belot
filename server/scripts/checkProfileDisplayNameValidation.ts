@@ -9,6 +9,9 @@ import {
   validateProfileDisplayName as validateFrontendProfileDisplayName,
 } from '../../src/app/lobby/profileDisplayNameValidation.ts'
 import {
+  OFFICIAL_PIKA_PROFILE_ID,
+  PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE,
+  PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE,
   validateProfileDisplayName as validateBackendProfileDisplayName,
 } from '../src/db/normalizeProfileIdentityText.js'
 import { createAuthStore } from '../src/db/authStore.js'
@@ -55,27 +58,88 @@ async function applyMigrations(databaseFilePath: string): Promise<void> {
   db.close()
 }
 
-function assertValidName(input: string, canonical: string): void {
-  const backend = validateBackendProfileDisplayName(input)
-  const frontend = validateFrontendProfileDisplayName(input)
+function assertValidName(
+  input: string,
+  canonical: string,
+  options: { profileId?: string | null; officialPikaProfileId?: string | null } = {},
+): void {
+  const backend = validateBackendProfileDisplayName(input, options)
+  const frontend = validateFrontendProfileDisplayName(input, options)
   assert(backend.ok, `backend rejected ${input}`)
   assert(frontend.ok, `frontend rejected ${input}`)
   if (backend.ok) assert(backend.canonicalDisplayName === canonical, `backend canonical=${backend.canonicalDisplayName}`)
   if (frontend.ok) assert(frontend.canonicalDisplayName === canonical, `frontend canonical=${frontend.canonicalDisplayName}`)
+  assert(getProfileDisplayNameAvailabilityQuery(input, options) === canonical, `availability query mismatch for ${input}`)
 }
 
-function assertInvalidName(input: string): void {
+function assertInvalidName(
+  input: string,
+  expectedCode?: 'NOT_STRING' | 'LENGTH' | 'INVALID_CHARACTERS' | 'MIXED_ALPHABETS' | 'RESERVED_PIKA_NAME',
+  expectedMessage?: string,
+): void {
   const backend = validateBackendProfileDisplayName(input)
   const frontend = validateFrontendProfileDisplayName(input)
-  assert(!backend.ok, `backend accepted ${input}`)
-  assert(!frontend.ok, `frontend accepted ${input}`)
+  if (backend.ok) throw new Error(`backend accepted ${input}`)
+  if (frontend.ok) throw new Error(`frontend accepted ${input}`)
   assert(!Object.prototype.hasOwnProperty.call(backend, 'canonicalDisplayName'), 'backend invalid result exposes canonicalDisplayName')
   assert(!Object.prototype.hasOwnProperty.call(backend, 'normalizedKey'), 'backend invalid result exposes normalizedKey')
   assert(Object.prototype.hasOwnProperty.call(backend, 'canonicalCandidate'), 'backend invalid result missing canonicalCandidate')
   assert(!Object.prototype.hasOwnProperty.call(frontend, 'canonicalDisplayName'), 'frontend invalid result exposes canonicalDisplayName')
   assert(!Object.prototype.hasOwnProperty.call(frontend, 'normalizedKey'), 'frontend invalid result exposes normalizedKey')
   assert(Object.prototype.hasOwnProperty.call(frontend, 'canonicalCandidate'), 'frontend invalid result missing canonicalCandidate')
+  if (expectedCode !== undefined) {
+    assert(backend.code === expectedCode, `backend code=${backend.code}`)
+    assert(frontend.code === expectedCode, `frontend code=${frontend.code}`)
+  }
+  if (expectedMessage !== undefined) {
+    assert(backend.message === expectedMessage, `backend message=${backend.message}`)
+    assert(frontend.message === expectedMessage, `frontend message=${frontend.message}`)
+  }
   assert(getProfileDisplayNameAvailabilityQuery(input) === null, `availability query produced for ${input}`)
+}
+
+const CYRILLIC_ER = '\u0420'
+const CYRILLIC_KA = '\u041A'
+const CYRILLIC_A = '\u0410'
+const CYRILLIC_VE = '\u0412'
+const CYRILLIC_EM = '\u041C'
+const CYRILLIC_IE = '\u0435'
+const CYRILLIC_EL = '\u043B'
+
+const MIXED_SCRIPT_CASES = [
+  `${CYRILLIC_EM}ilen`,
+  `Mi${CYRILLIC_EL}${CYRILLIC_IE}n`,
+  '\u0418\u0432\u0430\u043DPetrov',
+  `P${CYRILLIC_IE}t${CYRILLIC_IE}r`,
+  'Pika \u0411\u0413',
+  '\u041F\u0438\u043A\u0430 BG',
+]
+
+const RESERVED_PIKA_CASES = [
+  'PIKABG',
+  'pikabg',
+  'PikaBG',
+  'PIKA BG',
+  'PI KA BG',
+  'P I K A B G',
+]
+
+function withOfficialPikaEnv<T>(value: string | undefined, fn: () => T): T {
+  const previous = process.env.PIKA_OFFICIAL_PROFILE_ID
+  try {
+    if (value === undefined) {
+      delete process.env.PIKA_OFFICIAL_PROFILE_ID
+    } else {
+      process.env.PIKA_OFFICIAL_PROFILE_ID = value
+    }
+    return fn()
+  } finally {
+    if (previous === undefined) {
+      delete process.env.PIKA_OFFICIAL_PROFILE_ID
+    } else {
+      process.env.PIKA_OFFICIAL_PROFILE_ID = previous
+    }
+  }
 }
 
 async function main(): Promise<void> {
@@ -85,10 +149,78 @@ async function main(): Promise<void> {
     assertValidName('Иван', 'Иван')
     assertValidName('Иван Петров', 'Иван Петров')
     assertValidName('Иван 123', 'Иван 123')
-    assertValidName('Ivan Иван', 'Ivan Иван')
+    assertValidName('Пика БГ', 'Пика БГ')
     assertValidName('Ѝван', 'Ѝван')
     assertValidName('abc', 'abc')
     assertValidName('Abcdefghij Abcdefghij Abcdefghij', 'Abcdefghij Abcdefghij Abcdefghij')
+  })
+
+  await check('[1b] mixed Cyrillic/Latin names are rejected with exact message', () => {
+    for (const input of MIXED_SCRIPT_CASES) {
+      assertInvalidName(input, 'MIXED_ALPHABETS', PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE)
+    }
+    assertInvalidName(`${CYRILLIC_ER}IKABG`, 'MIXED_ALPHABETS', PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE)
+    assertInvalidName(`PI${CYRILLIC_KA}ABG`, 'MIXED_ALPHABETS', PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE)
+    assertInvalidName(`PIK${CYRILLIC_A}BG`, 'MIXED_ALPHABETS', PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE)
+    assertInvalidName(`PIKA${CYRILLIC_VE}G`, 'MIXED_ALPHABETS', PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE)
+  })
+
+  await check('[1c] reserved PIKABG variants are blocked by canonical reserved key', () => {
+    for (const input of RESERVED_PIKA_CASES) {
+      assertInvalidName(input, 'RESERVED_PIKA_NAME', PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE)
+    }
+    assertValidName('PIKABGUSER', 'PIKABGUSER')
+    assertValidName('MYPIKABG', 'MYPIKABG')
+  })
+
+  await check('[1d] official exact profileId can keep the reserved PIKABG name only with explicit valid config', () => {
+    const official = {
+      profileId: OFFICIAL_PIKA_PROFILE_ID,
+      officialPikaProfileId: OFFICIAL_PIKA_PROFILE_ID,
+    }
+    assertValidName('PIKABG', 'PIKABG', official)
+    assertValidName('P I K A B G', 'P I K A B G', official)
+
+    const other = validateBackendProfileDisplayName('PIKABG', {
+      profileId: '11111111-1111-4111-8111-111111111111',
+      officialPikaProfileId: OFFICIAL_PIKA_PROFILE_ID,
+    })
+    assert(other.ok === false && other.code === 'RESERVED_PIKA_NAME', 'non-official profile was allowed to use PIKABG')
+  })
+
+  await check('[1e] missing, empty, and invalid PIKA_OFFICIAL_PROFILE_ID fail closed', () => {
+    for (const value of [undefined, '', 'not-a-uuid']) {
+      withOfficialPikaEnv(value, () => {
+        const result = validateBackendProfileDisplayName('PIKABG', {
+          profileId: OFFICIAL_PIKA_PROFILE_ID,
+        })
+        assert(result.ok === false, `PIKABG accepted with env=${value ?? '(missing)'}`)
+        if (!result.ok) {
+          assert(result.code === 'RESERVED_PIKA_NAME', `code=${result.code}`)
+          assert(result.message === PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE, `message=${result.message}`)
+        }
+      })
+    }
+
+    withOfficialPikaEnv(OFFICIAL_PIKA_PROFILE_ID, () => {
+      const official = validateBackendProfileDisplayName('PIKABG', {
+        profileId: OFFICIAL_PIKA_PROFILE_ID,
+      })
+      assert(official.ok === true, 'official profile not allowed with valid env UUID')
+
+      const other = validateBackendProfileDisplayName('PIKABG', {
+        profileId: '22222222-2222-4222-8222-222222222222',
+      })
+      assert(other.ok === false && other.code === 'RESERVED_PIKA_NAME', 'other profile allowed with valid env UUID')
+    })
+  })
+
+  await check('[1f] frontend/backend error priority is identical for PIKABG edge cases', () => {
+    assertInvalidName(`${CYRILLIC_ER}IKABG`, 'MIXED_ALPHABETS', PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE)
+    assertInvalidName('PIKA BG', 'RESERVED_PIKA_NAME', PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE)
+    assertInvalidName('P I K A B G', 'RESERVED_PIKA_NAME', PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE)
+    assertValidName('PIKABGUSER', 'PIKABGUSER')
+    assertValidName('MYPIKABG', 'MYPIKABG')
   })
 
   await check('[2] canonicalization', () => {
@@ -133,6 +265,19 @@ async function main(): Promise<void> {
     assertValidName('Иван\nПетров', 'Иван Петров')
     assertValidName('Иван\rПетров', 'Иван Петров')
     assertValidName('Иван\u00a0Петров', 'Иван Петров')
+  })
+
+  await check('[4c] frontend live validation is field-local and uses exact validator message', async () => {
+    const source = await readFile(resolve(serverRoot, '../src/app/lobby/renderLobbyScreen.ts'), 'utf8')
+    const start = source.indexOf('function attachNameAvailabilityCheck(')
+    const end = source.indexOf('function showAuthError(', start)
+    assert(start !== -1 && end !== -1, 'attachNameAvailabilityCheck body not found')
+    const body = source.slice(start, end)
+    assert(body.includes('validateProfileDisplayName(input.value, validationOptions)'), 'live validator does not use validation options')
+    assert(body.includes("setHint(validation.message, '#f87171')"), 'live validator does not show validator message under the field')
+    assert(!body.includes('render()'), 'live validation should not trigger full render on each input')
+    assert(!body.includes('input.focus()'), 'live validation should not move focus')
+    assert(!body.includes('setSelectionRange'), 'live validation should not move caret')
   })
 
   const tempDir = await mkdtemp(join(tmpdir(), 'belot-profile-name-'))
@@ -185,10 +330,41 @@ async function main(): Promise<void> {
       assert(result?.ok === false, 'duplicate registration succeeded')
     })
 
+    await check('[6b] registration rejects mixed-script and reserved PIKABG names', () => {
+      const mixed = authStore?.register({
+        email: 'mixed-register@example.test',
+        password: 'secret1',
+        displayName: MIXED_SCRIPT_CASES[0],
+        gender: 'male',
+      })
+      assert(mixed?.ok === false, 'mixed registration succeeded')
+      if (mixed?.ok === false) {
+        assert(mixed.code === 'MIXED_ALPHABETS', `mixed code=${mixed.code}`)
+        assert(mixed.message === PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE, `mixed message=${mixed.message}`)
+      }
+
+      const reserved = authStore?.register({
+        email: 'reserved-pika@example.test',
+        password: 'secret1',
+        displayName: 'P I K A B G',
+        gender: 'female',
+      })
+      assert(reserved?.ok === false, 'reserved PIKABG registration succeeded')
+      if (reserved?.ok === false) {
+        assert(reserved.code === 'RESERVED_PIKA_NAME', `reserved code=${reserved.code}`)
+        assert(reserved.message === PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE, `reserved message=${reserved.message}`)
+      }
+    })
+
     await check('[7] availability uses same canonicalization', () => {
       assert(progressStore?.isDisplayNameAvailable('𝑫𝑰𝑨𝑩𝑳𝑨') === false, 'decorative duplicate available')
       assert(progressStore?.isDisplayNameAvailable('DIABLA') === false, 'case duplicate available')
       assert(progressStore?.isDisplayNameAvailable('Иван-Петров') === false, 'invalid name available')
+      assert(progressStore?.isDisplayNameAvailable('PIKABG') === false, 'reserved PIKABG available')
+      assert(progressStore?.isDisplayNameAvailable('PIKABGUSER') === true, 'PIKABG substring blocked unexpectedly')
+      withOfficialPikaEnv(OFFICIAL_PIKA_PROFILE_ID, () => {
+        assert(progressStore?.isDisplayNameAvailable('PIKABG', OFFICIAL_PIKA_PROFILE_ID) === true, 'official PIKABG was not available for exact profileId')
+      })
     })
 
     await check('[8] profile rename stores canonical value', () => {
@@ -207,6 +383,34 @@ async function main(): Promise<void> {
       assert(result?.ok === true, 'rename failed')
       if (result?.ok) assert(result.profile.displayName === 'Иван Петров', `displayName=${result.profile.displayName}`)
       assert(progressStore?.isDisplayNameAvailable('Иван   Петров') === false, 'canonical rename duplicate available')
+    })
+
+    await check('[8b] self rename rejects mixed-script and reserved names before wallet debit', () => {
+      const registered = authStore?.register({
+        email: 'mixed-rename@example.test',
+        password: 'secret1',
+        displayName: 'Rename Guard',
+        gender: 'male',
+      })
+      assert(registered?.ok === true, 'registration failed')
+      const profileId = registered.ok ? registered.session.profile.profileId : ''
+      db?.prepare(`UPDATE profile_wallets SET yellow_coins_balance = 500 WHERE profile_id = ?`).run(profileId)
+      const balance = (): number => {
+        const row = db?.prepare(`SELECT yellow_coins_balance FROM profile_wallets WHERE profile_id = ?`).get(profileId) as
+          | { yellow_coins_balance: number }
+          | undefined
+        return row?.yellow_coins_balance ?? -1
+      }
+
+      const mixed = progressStore?.changeProfileDisplayName(profileId, MIXED_SCRIPT_CASES[1], 100)
+      assert(mixed?.ok === false, 'mixed rename succeeded')
+      if (mixed?.ok === false) assert(mixed.code === 'MIXED_ALPHABETS', `mixed rename code=${mixed.code}`)
+      assert(balance() === 500, `mixed rename debited balance=${balance()}`)
+
+      const reserved = progressStore?.changeProfileDisplayName(profileId, 'PIKABG', 100)
+      assert(reserved?.ok === false, 'reserved rename succeeded')
+      if (reserved?.ok === false) assert(reserved.code === 'RESERVED_PIKA_NAME', `reserved rename code=${reserved.code}`)
+      assert(balance() === 500, `reserved rename debited balance=${balance()}`)
     })
 
     await check('[9] temporary human fallback is unique canonical display', () => {
@@ -281,6 +485,64 @@ async function main(): Promise<void> {
       })
       assert(result?.ok === false, 'registration with reserved username succeeded')
       if (result?.ok === false) assert(result.message === 'Това име вече е заето.', `message=${result.message}`)
+    })
+
+    await check('[10b] admin rename uses the same mixed-script and reserved PIKABG validator', () => {
+      const target = authStore?.register({
+        email: 'admin-target-name@example.test',
+        password: 'secret1',
+        displayName: 'Admin Target',
+        gender: 'female',
+      })
+      assert(target?.ok === true, 'target registration failed')
+      const targetProfileId = target.ok ? target.session.profile.profileId : ''
+
+      const mixed = progressStore?.adminRenameProfileDisplayName(targetProfileId, MIXED_SCRIPT_CASES[2])
+      assert(mixed?.ok === false, 'admin mixed rename succeeded')
+      if (mixed?.ok === false) {
+        assert(mixed.code === 'MIXED_ALPHABETS', `admin mixed code=${mixed.code}`)
+        assert(mixed.message === PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE, `admin mixed message=${mixed.message}`)
+      }
+
+      const reserved = progressStore?.adminRenameProfileDisplayName(targetProfileId, 'P I K A B G')
+      assert(reserved?.ok === false, 'admin reserved rename succeeded')
+      if (reserved?.ok === false) {
+        assert(reserved.code === 'RESERVED_PIKA_NAME', `admin reserved code=${reserved.code}`)
+        assert(reserved.message === PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE, `admin reserved message=${reserved.message}`)
+      }
+    })
+
+    await check('[10c] official exact profileId can keep/use PIKABG through mutation path only', () => {
+      db?.prepare(`
+        INSERT INTO profiles (
+          profile_id,
+          account_id,
+          profile_kind,
+          username,
+          normalized_username,
+          display_name,
+          normalized_display_name,
+          status
+        ) VALUES (?, NULL, 'human', 'OfficialPika', 'officialpika', 'OfficialPika', 'officialpika', 'active');
+      `).run(OFFICIAL_PIKA_PROFILE_ID)
+
+      withOfficialPikaEnv(OFFICIAL_PIKA_PROFILE_ID, () => {
+        const official = progressStore?.adminRenameProfileDisplayName(OFFICIAL_PIKA_PROFILE_ID, 'PIKABG')
+        assert(official?.ok === true, 'official profile could not use PIKABG')
+        if (official?.ok) assert(official.profile.displayName === 'PIKABG', `official displayName=${official.profile.displayName}`)
+      })
+
+      const other = authStore?.register({
+        email: 'other-pika-team-role@example.test',
+        password: 'secret1',
+        displayName: 'Other Pika Team',
+        gender: 'male',
+      })
+      assert(other?.ok === true, 'other registration failed')
+      const otherProfileId = other.ok ? other.session.profile.profileId : ''
+      const roleBlind = progressStore?.adminRenameProfileDisplayName(otherProfileId, 'pikabg')
+      assert(roleBlind?.ok === false, 'non-official profile was allowed to use PIKABG')
+      if (roleBlind?.ok === false) assert(roleBlind.code === 'RESERVED_PIKA_NAME', `role-blind code=${roleBlind.code}`)
     })
 
     await check('[11] invalid and taken rename do not debit; successful rename debits once', () => {
