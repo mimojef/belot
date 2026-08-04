@@ -1824,6 +1824,42 @@ function renderNav(state: LobbyScreenState): string {
         color: rgba(255,255,255,0.95) !important;
         background: rgba(212,165,32,0.04) !important;
       }
+      .lobby-nav-btn-label {
+        position: absolute;
+        width: 1px; height: 1px;
+        padding: 0; margin: -1px;
+        overflow: hidden;
+        clip: rect(0,0,0,0);
+        white-space: nowrap;
+        border: 0;
+      }
+      .lobby-nav-btn-icon-only {
+        position: relative;
+        justify-content: center;
+        min-width: 62px;
+      }
+      .lobby-nav-btn-icon-only::after {
+        content: attr(data-tooltip);
+        position: absolute;
+        top: 100%;
+        left: 50%;
+        transform: translateX(-50%) translateY(6px);
+        background: #0a0a0a;
+        border: 1px solid rgba(212,165,32,0.35);
+        color: #d4a520;
+        font-size: 11px; font-weight: 700; letter-spacing: normal; text-transform: none;
+        padding: 5px 10px;
+        border-radius: 6px;
+        white-space: nowrap;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.15s ease;
+        z-index: 1000;
+      }
+      .lobby-nav-btn-icon-only:hover::after,
+      .lobby-nav-btn-icon-only:focus-visible::after {
+        opacity: 1;
+      }
     </style>
     <nav style="
       background: #0a0a0a;
@@ -1860,7 +1896,7 @@ function renderNav(state: LobbyScreenState): string {
           </svg>
           Лоби
         </a>
-        <button type="button" data-lobby-nav-shop="1" ${shopActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+        <button type="button" data-lobby-nav-shop="1" ${shopActive ? 'data-active="1"' : ''} class="lobby-nav-btn lobby-nav-btn-icon-only" aria-label="Магазин" data-tooltip="Магазин" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
           border:0;
@@ -1876,9 +1912,9 @@ function renderNav(state: LobbyScreenState): string {
             <circle cx="20" cy="21" r="1"/>
             <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>
           </svg>
-          Магазин
+          <span class="lobby-nav-btn-label">Магазин</span>
         </button>
-        <button type="button" data-lobby-nav-friends="1" ${friendsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+        <button type="button" data-lobby-nav-friends="1" ${friendsActive ? 'data-active="1"' : ''} class="lobby-nav-btn lobby-nav-btn-icon-only" aria-label="Приятели" data-tooltip="Приятели" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
           border:0;
@@ -1896,14 +1932,14 @@ function renderNav(state: LobbyScreenState): string {
             <path d="M3 3 2 14l6.5 6.5a1 1 0 1 0 3-3"/>
             <path d="M3 4h8"/>
           </svg>
-          Приятели
+          <span class="lobby-nav-btn-label">Приятели</span>
           ${incomingFriendRequestsCount > 0 ? `
             <span style="min-width:20px;height:20px;border-radius:999px;background:#d4a520;color:#080808;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;font-size:11px;font-weight:900;line-height:1;">
               ${formatAmount(incomingFriendRequestsCount)}
             </span>
           ` : ''}
         </button>
-        <button type="button" data-lobby-nav-blocked-players="1" class="lobby-nav-btn" style="
+        <button type="button" data-lobby-nav-blocked-players="1" class="lobby-nav-btn lobby-nav-btn-icon-only" aria-label="Блокирани" data-tooltip="Блокирани" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
           border:0;
@@ -1918,9 +1954,9 @@ function renderNav(state: LobbyScreenState): string {
             <circle cx="12" cy="12" r="10"/>
             <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
           </svg>
-          Блокирани
+          <span class="lobby-nav-btn-label">Блокирани</span>
         </button>
-        <a href="/ranking" data-lobby-nav-leaderboards="1" ${leaderboardsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+        <a href="/ranking" data-lobby-nav-leaderboards="1" ${leaderboardsActive ? 'data-active="1"' : ''} class="lobby-nav-btn lobby-nav-btn-icon-only" aria-label="Класация" data-tooltip="Класация" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
           background:${leaderboardsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
@@ -1934,7 +1970,7 @@ function renderNav(state: LobbyScreenState): string {
             <line x1="12" y1="20" x2="12" y2="4"/>
             <line x1="6" y1="20" x2="6" y2="14"/>
           </svg>
-          Класация
+          <span class="lobby-nav-btn-label">Класация</span>
         </a>
         <a href="/tournaments" data-lobby-nav-tournaments="1" ${tournamentsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
           display:flex; align-items:center; gap:10px;
