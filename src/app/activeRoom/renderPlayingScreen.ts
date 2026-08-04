@@ -1926,27 +1926,22 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     renderPendingDeclarationPrompt()
   }
 
-  const bottomHand = root.querySelector<HTMLElement>('[data-playing-bottom-hand="1"]')
-  bottomHand?.addEventListener('pointerup', (event) => {
-    if (event.pointerType === 'mouse' && event.button !== 0) {
-      return
-    }
-
-    const target = event.target
-    if (!(target instanceof Element)) {
-      return
-    }
-
-    const button = target.closest<HTMLButtonElement>('.play-hand-card--active')
-    const cardId = button?.dataset.cardId
-    if (!button || !cardId || !bottomHand.contains(button)) {
-      return
-    }
-
-    handleHandCardChoice(button, cardId)
-    event.preventDefault()
-  })
-
+  // Card submission is driven ONLY by the native 'click' event, bound per
+  // button with its cardId captured at render time (closure, not re-read
+  // from the DOM). A card play used to also be triggered by a delegated
+  // 'pointerup' listener on the hand container that resolved the target via
+  // `event.target.closest(...)` — a LIVE DOM lookup at release time. This
+  // screen fully rebuilds the hand DOM (`root.innerHTML = ...`) on every
+  // re-render, and re-renders happen for reasons unrelated to the user's own
+  // gesture (any server snapshot, viewport resize/orientationchange, trick
+  // collection/fly animation completion). If one of those re-renders landed
+  // between pointerdown and pointerup, the delegated listener would resolve
+  // whatever card now occupies that screen position — not the card the user
+  // actually pressed. 'click' does not have this failure mode: per the UI
+  // Events model, a browser only synthesizes 'click' when the element that
+  // received the initiating press is still attached at release; if a
+  // re-render swaps it out mid-gesture, no click fires at all (the tap is
+  // safely dropped instead of being misattributed to a different card).
   root.querySelectorAll<HTMLButtonElement>('.play-hand-card--active').forEach((button) => {
     const cardId = button.dataset.cardId
     if (!cardId) {

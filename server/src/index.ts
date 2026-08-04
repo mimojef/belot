@@ -262,6 +262,10 @@ import {
   handleTrainingRecorderHumanCard,
 } from './trainingRecorder/trainingRecorderHooks.js'
 import type { TrainingRecorderMetrics } from './trainingRecorder/trainingRecorderMetrics.js'
+import {
+  logAcceptedCardPlayAudit,
+  logRejectedGameplayAction,
+} from './game/logGameplayActionAudit.js'
 
 const trainingRecorder = createTrainingRecorder('0')
 
@@ -2161,6 +2165,12 @@ async function tickRoomGameRuntimes(): Promise<void> {
         },
         onApplied: (previousRoom, room) => {
           handleTrainingRecorderOnApplied(trainingRecorder, previousRoom, room)
+          logAcceptedCardPlayAudit({
+            previousRoom,
+            nextRoom: room,
+            isHumanManualSubmission: false,
+            connectionId: null,
+          })
           // Worker-tick batch commits минават покрай commitServerRoomWithSnapshot
           // (виж commitCanonicalRoom по-горе — директен upsertServerRoom), затова
           // feeder score push-ът трябва да се закачи и тук отделно, за да
@@ -10049,6 +10059,22 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        if (latestConnection.status !== 'connected') {
+          logRejectedGameplayAction({
+            actionType: 'submit_bid_action',
+            roomId: message.roomId,
+            seat: latestConnection.currentSeat,
+            connectionId: connection.id,
+            connectionStatus: latestConnection.status,
+            reason: 'stale_connection',
+          })
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Връзката не е активна.',
+          })
+          return
+        }
+
         if (latestConnection.currentRoomId !== message.roomId) {
           safeSendToConnection(connection.id, {
             type: 'error',
@@ -10082,6 +10108,14 @@ wsServer.on('connection', (socket, request) => {
         })
 
         if (!result.ok) {
+          logRejectedGameplayAction({
+            actionType: 'submit_bid_action',
+            roomId: message.roomId,
+            seat: latestConnection.currentSeat,
+            connectionId: connection.id,
+            connectionStatus: latestConnection.status,
+            reason: result.message,
+          })
           safeSendToConnection(connection.id, {
             type: 'error',
             message: result.message,
@@ -10103,6 +10137,22 @@ wsServer.on('connection', (socket, request) => {
           safeSendToConnection(connection.id, {
             type: 'error',
             message: 'Connection was not found.',
+          })
+          return
+        }
+
+        if (latestConnection.status !== 'connected') {
+          logRejectedGameplayAction({
+            actionType: 'submit_cut_index',
+            roomId: message.roomId,
+            seat: latestConnection.currentSeat,
+            connectionId: connection.id,
+            connectionStatus: latestConnection.status,
+            reason: 'stale_connection',
+          })
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Връзката не е активна.',
           })
           return
         }
@@ -10140,6 +10190,14 @@ wsServer.on('connection', (socket, request) => {
         })
 
         if (!result.ok) {
+          logRejectedGameplayAction({
+            actionType: 'submit_cut_index',
+            roomId: message.roomId,
+            seat: latestConnection.currentSeat,
+            connectionId: connection.id,
+            connectionStatus: latestConnection.status,
+            reason: result.message,
+          })
           safeSendToConnection(connection.id, {
             type: 'error',
             message: result.message,
@@ -10160,6 +10218,29 @@ wsServer.on('connection', (socket, request) => {
           safeSendToConnection(connection.id, {
             type: 'error',
             message: 'Connection was not found.',
+          })
+          return
+        }
+
+        // A connection that has been displaced (multi-tab/multi-device
+        // resume_room on the same profile) or has already disconnected keeps
+        // its currentRoomId/currentSeat populated — only leave_active_room
+        // clears those. Without this check a stale connection object could
+        // still authorize a play for a seat that another, now-live
+        // connection owns. See checkGameplayActionStaleConnectionGuard.ts.
+        if (latestConnection.status !== 'connected') {
+          logRejectedGameplayAction({
+            actionType: 'submit_play_card',
+            roomId: message.roomId,
+            seat: latestConnection.currentSeat,
+            cardId: message.cardId,
+            connectionId: connection.id,
+            connectionStatus: latestConnection.status,
+            reason: 'stale_connection',
+          })
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Връзката не е активна.',
           })
           return
         }
@@ -10198,6 +10279,15 @@ wsServer.on('connection', (socket, request) => {
         })
 
         if (!result.ok) {
+          logRejectedGameplayAction({
+            actionType: 'submit_play_card',
+            roomId: message.roomId,
+            seat: latestConnection.currentSeat,
+            cardId: message.cardId,
+            connectionId: connection.id,
+            connectionStatus: latestConnection.status,
+            reason: result.message,
+          })
           safeSendToConnection(connection.id, {
             type: 'error',
             message: result.message,
@@ -10205,6 +10295,12 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        logAcceptedCardPlayAudit({
+          previousRoom: room,
+          nextRoom: result.room,
+          isHumanManualSubmission: true,
+          connectionId: connection.id,
+        })
         handleTrainingRecorderHumanCard(trainingRecorder, room, result.room)
         serverState = commitServerRoomWithSnapshot(result.room)
         activeRoomRuntime.ensureRoom(result.room)
