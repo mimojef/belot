@@ -8,7 +8,7 @@ export const PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE =
   'Само кирилица или само латиница'
 
 export const PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE =
-  'Това име е запазено за Екип Pika.bg'
+  'Името не може да съдържа PIKABG, PIKA BG, ПИКАБГ или ПИКА БГ'
 
 export type ProfileDisplayNameValidationCode =
   | 'NOT_STRING'
@@ -53,6 +53,7 @@ const LATIN_LETTER_RE = /\p{Script=Latin}/u
 const CYRILLIC_LETTER_RE = /\p{Script=Cyrillic}/u
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const RESERVED_PIKA_NAME_KEY = 'PIKABG'
+const RESERVED_PIKA_NAME_KEY_CYRILLIC = 'ПИКАБГ'
 
 function normalizeOptionalUuid(value: string | null | undefined): string | null {
   const trimmed = value?.trim() ?? ''
@@ -73,6 +74,24 @@ export function getReservedPikaDisplayNameKey(value: string): string {
     .replace(/[Кк]/gu, 'K')
     .replace(/[Аа]/gu, 'A')
     .replace(/[Вв]/gu, 'B')
+}
+
+/**
+ * Compact uppercase key (NFKC + strip whitespace + uppercase, no lookalike
+ * mapping) used for containment checks — unlike getReservedPikaDisplayNameKey
+ * this intentionally does NOT fold Cyrillic/Latin lookalikes, so it can be
+ * tested against both the Latin and Cyrillic reserved sequences separately.
+ */
+function getCompactUppercaseKey(value: string): string {
+  return value.normalize('NFKC').replace(/\s+/gu, '').toLocaleUpperCase('bg-BG')
+}
+
+function containsReservedPikaSequence(value: string): boolean {
+  const compactUpperName = getCompactUppercaseKey(value)
+  return (
+    compactUpperName.includes(RESERVED_PIKA_NAME_KEY) ||
+    compactUpperName.includes(RESERVED_PIKA_NAME_KEY_CYRILLIC)
+  )
 }
 
 function isOfficialPikaProfile(options: ProfileDisplayNameValidationOptions): boolean {
@@ -139,10 +158,11 @@ export function validateProfileDisplayName(
     }
   }
 
-  if (
+  const isExactOfficialReservedName =
     getReservedPikaDisplayNameKey(canonicalCandidate) === RESERVED_PIKA_NAME_KEY &&
-    !isOfficialPikaProfile(options)
-  ) {
+    isOfficialPikaProfile(options)
+
+  if (containsReservedPikaSequence(canonicalCandidate) && !isExactOfficialReservedName) {
     return {
       ok: false,
       reason: 'reserved-pika-name',

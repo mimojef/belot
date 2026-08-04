@@ -221,10 +221,10 @@ console.log('\n--- [A]+[C] Server-side: admin renames the TARGET, actor untouche
     const bystanderProfileId = bystanderReg.ok ? bystanderReg.session.profile.profileId : ''
 
     await check('[C1] admin renames TargetPlayer via adminRenameProfileDisplayName(targetProfileId, ...) — the target profile changes', () => {
-      const result = progressStore!.adminRenameProfileDisplayName(targetProfileId, 'PikaBGTarget')
+      const result = progressStore!.adminRenameProfileDisplayName(targetProfileId, 'RenamedTarget')
       assert(result.ok === true, `admin rename failed: ${result.ok ? '' : result.message}`)
       const row = readNames(targetProfileId)
-      assert(row.display_name === 'PikaBGTarget', `target display_name=${row.display_name}`)
+      assert(row.display_name === 'RenamedTarget', `target display_name=${row.display_name}`)
     })
 
     await check('[C2] the ADMIN\'s own profile ("Mimojef") is completely untouched by an admin-target rename — this is the exact production incident shape (admin ended up renamed instead of the target)', () => {

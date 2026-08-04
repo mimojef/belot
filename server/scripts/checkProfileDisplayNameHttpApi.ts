@@ -260,6 +260,27 @@ async function main(): Promise<void> {
       )
       assertValidationError(response, 'RESERVED_PIKA_NAME', PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE)
     })
+
+    await check('[5] direct register API rejects reserved name via containment bypass attempts', async () => {
+      const response = await postJson(port, '/api/auth/register', {
+        email: 'bypass-http@example.test',
+        password: PASSWORD,
+        displayName: 'MYPIKABG',
+        gender: 'male',
+      })
+      assertValidationError(response, 'RESERVED_PIKA_NAME', PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE)
+    })
+
+    await check('[6] direct self rename API rejects Cyrillic reserved containment bypass attempts', async () => {
+      const player = await register(port, 'bypass-cyrillic-http@example.test', 'Bypass Cyrillic')
+      const response = await postJson(
+        port,
+        '/api/profile/me/display-name',
+        { displayName: 'ПИКАБГ игра' },
+        { cookie: player.cookie },
+      )
+      assertValidationError(response, 'RESERVED_PIKA_NAME', PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE)
+    })
   } finally {
     await stopServer(server)
     await isolated.cleanup()

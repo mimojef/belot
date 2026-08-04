@@ -98,6 +98,16 @@ function assertInvalidName(
   assert(getProfileDisplayNameAvailabilityQuery(input) === null, `availability query produced for ${input}`)
 }
 
+function assertInvalidName2(
+  result: ReturnType<typeof validateBackendProfileDisplayName>,
+  expectedCode: 'NOT_STRING' | 'LENGTH' | 'INVALID_CHARACTERS' | 'MIXED_ALPHABETS' | 'RESERVED_PIKA_NAME',
+): void {
+  assert(result.ok === false, 'expected validation to fail')
+  if (result.ok === false) {
+    assert(result.code === expectedCode, `code=${result.code}, expected=${expectedCode}`)
+  }
+}
+
 const CYRILLIC_ER = '\u0420'
 const CYRILLIC_KA = '\u041A'
 const CYRILLIC_A = '\u0410'
@@ -116,12 +126,68 @@ const MIXED_SCRIPT_CASES = [
 ]
 
 const RESERVED_PIKA_CASES = [
+  // Latin case variants
   'PIKABG',
   'pikabg',
+  'Pikabg',
   'PikaBG',
+  'PiKaBG',
+  'pIkAbG',
   'PIKA BG',
-  'PI KA BG',
+  'Pika Bg',
+  'pika bg',
   'P I K A B G',
+  'Pi Ka Bg',
+  'PIKABG origin',
+  'PikaBG origin',
+  'origin PIKABG',
+  'origin Pika Bg',
+  'PIKABG 1',
+  '1 PIKABG',
+  'MYPIKABG',
+  'myPikaBg',
+  'PIKABGUSER',
+  'Pika Bg Support',
+  'Support Pika Bg',
+  // Cyrillic case variants
+  'ПИКАБГ',
+  'пикабг',
+  'Пикабг',
+  'ПикаБГ',
+  'ПиКаБг',
+  'пИкАбГ',
+  'ПИКА БГ',
+  'Пика Бг',
+  'пика бг',
+  'П И К А Б Г',
+  'Пи Ка Бг',
+  'ПИКАБГ произход',
+  'ПикаБГ произход',
+  'произход ПИКАБГ',
+  'произход Пика Бг',
+  'ПИКАБГ 1',
+  '1 ПИКАБГ',
+  'МОЯТПИКАБГ',
+  'ПИКАБГИГРА',
+  'Пика Бг Поддръжка',
+  'Поддръжка Пика Бг',
+]
+
+const ALLOWED_PARTIAL_PIKA_CASES = [
+  'PIKA',
+  'PIKAB',
+  'PIKAG',
+  'PIKABOX',
+  'PIKAGAME',
+  'BGPIKA',
+  'PIKA HOME',
+  'PIKA TEAM',
+  'ПИКА',
+  'ПИКАБ',
+  'ПИКАИГРА',
+  'БГПИКА',
+  'ПИКА ДОМ',
+  'ПИКА ОТБОР',
 ]
 
 function withOfficialPikaEnv<T>(value: string | undefined, fn: () => T): T {
@@ -149,7 +215,7 @@ async function main(): Promise<void> {
     assertValidName('Иван', 'Иван')
     assertValidName('Иван Петров', 'Иван Петров')
     assertValidName('Иван 123', 'Иван 123')
-    assertValidName('Пика БГ', 'Пика БГ')
+    assertValidName('Пика Дом', 'Пика Дом')
     assertValidName('Ѝван', 'Ѝван')
     assertValidName('abc', 'abc')
     assertValidName('Abcdefghij Abcdefghij Abcdefghij', 'Abcdefghij Abcdefghij Abcdefghij')
@@ -165,12 +231,16 @@ async function main(): Promise<void> {
     assertInvalidName(`PIKA${CYRILLIC_VE}G`, 'MIXED_ALPHABETS', PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE)
   })
 
-  await check('[1c] reserved PIKABG variants are blocked by canonical reserved key', () => {
+  await check('[1c] reserved PIKABG/ПИКАБГ variants are blocked by containment, regardless of position', () => {
     for (const input of RESERVED_PIKA_CASES) {
       assertInvalidName(input, 'RESERVED_PIKA_NAME', PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE)
     }
-    assertValidName('PIKABGUSER', 'PIKABGUSER')
-    assertValidName('MYPIKABG', 'MYPIKABG')
+  })
+
+  await check('[1c-2] names containing only PIKA/ПИКА (not the full reserved sequence) remain allowed', () => {
+    for (const input of ALLOWED_PARTIAL_PIKA_CASES) {
+      assertValidName(input, input)
+    }
   })
 
   await check('[1d] official exact profileId can keep the reserved PIKABG name only with explicit valid config', () => {
@@ -186,6 +256,23 @@ async function main(): Promise<void> {
       officialPikaProfileId: OFFICIAL_PIKA_PROFILE_ID,
     })
     assert(other.ok === false && other.code === 'RESERVED_PIKA_NAME', 'non-official profile was allowed to use PIKABG')
+  })
+
+  await check('[1d-2] official exception only covers the exact canonical PIKABG key, not longer names or Cyrillic', () => {
+    const official = {
+      profileId: OFFICIAL_PIKA_PROFILE_ID,
+      officialPikaProfileId: OFFICIAL_PIKA_PROFILE_ID,
+    }
+    assertInvalidName2(validateBackendProfileDisplayName('PIKABG origin', official), 'RESERVED_PIKA_NAME')
+    assertInvalidName2(validateBackendProfileDisplayName('origin PIKABG', official), 'RESERVED_PIKA_NAME')
+    assertInvalidName2(validateBackendProfileDisplayName('PIKA BG support', official), 'RESERVED_PIKA_NAME')
+    assertInvalidName2(validateBackendProfileDisplayName('MYPIKABG', official), 'RESERVED_PIKA_NAME')
+    assertInvalidName2(validateBackendProfileDisplayName('ПИКАБГ', official), 'RESERVED_PIKA_NAME')
+    assertInvalidName2(validateBackendProfileDisplayName('ПИКА БГ', official), 'RESERVED_PIKA_NAME')
+    assertInvalidName2(validateBackendProfileDisplayName('ПИКАБГ произход', official), 'RESERVED_PIKA_NAME')
+
+    assertInvalidName2(validateFrontendProfileDisplayName('PIKABG origin', official), 'RESERVED_PIKA_NAME')
+    assertInvalidName2(validateFrontendProfileDisplayName('ПИКАБГ', official), 'RESERVED_PIKA_NAME')
   })
 
   await check('[1e] missing, empty, and invalid PIKA_OFFICIAL_PROFILE_ID fail closed', () => {
@@ -216,11 +303,16 @@ async function main(): Promise<void> {
   })
 
   await check('[1f] frontend/backend error priority is identical for PIKABG edge cases', () => {
+    // Mixed alphabets (Cyrillic Р + Latin IKABG) must win over the reserved-name check.
     assertInvalidName(`${CYRILLIC_ER}IKABG`, 'MIXED_ALPHABETS', PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE)
+    assertInvalidName(`PI${CYRILLIC_KA}ABG`, 'MIXED_ALPHABETS', PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE)
+    assertInvalidName(`PIK${CYRILLIC_A}BG`, 'MIXED_ALPHABETS', PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE)
     assertInvalidName('PIKA BG', 'RESERVED_PIKA_NAME', PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE)
     assertInvalidName('P I K A B G', 'RESERVED_PIKA_NAME', PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE)
-    assertValidName('PIKABGUSER', 'PIKABGUSER')
-    assertValidName('MYPIKABG', 'MYPIKABG')
+    assertInvalidName('PIKABGUSER', 'RESERVED_PIKA_NAME', PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE)
+    assertInvalidName('MYPIKABG', 'RESERVED_PIKA_NAME', PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE)
+    assertValidName('PIKA', 'PIKA')
+    assertValidName('ПИКА', 'ПИКА')
   })
 
   await check('[2] canonicalization', () => {
@@ -361,7 +453,8 @@ async function main(): Promise<void> {
       assert(progressStore?.isDisplayNameAvailable('DIABLA') === false, 'case duplicate available')
       assert(progressStore?.isDisplayNameAvailable('Иван-Петров') === false, 'invalid name available')
       assert(progressStore?.isDisplayNameAvailable('PIKABG') === false, 'reserved PIKABG available')
-      assert(progressStore?.isDisplayNameAvailable('PIKABGUSER') === true, 'PIKABG substring blocked unexpectedly')
+      assert(progressStore?.isDisplayNameAvailable('PIKABGUSER') === false, 'PIKABG containment substring not blocked')
+      assert(progressStore?.isDisplayNameAvailable('ПИКАБГ') === false, 'reserved Cyrillic ПИКАБГ available')
       withOfficialPikaEnv(OFFICIAL_PIKA_PROFILE_ID, () => {
         assert(progressStore?.isDisplayNameAvailable('PIKABG', OFFICIAL_PIKA_PROFILE_ID) === true, 'official PIKABG was not available for exact profileId')
       })
@@ -543,6 +636,16 @@ async function main(): Promise<void> {
       const roleBlind = progressStore?.adminRenameProfileDisplayName(otherProfileId, 'pikabg')
       assert(roleBlind?.ok === false, 'non-official profile was allowed to use PIKABG')
       if (roleBlind?.ok === false) assert(roleBlind.code === 'RESERVED_PIKA_NAME', `role-blind code=${roleBlind.code}`)
+
+      // The official profile stays blocked from a longer name that merely CONTAINS
+      // PIKABG, and from the Cyrillic ПИКАБГ sequence — the exception is exact-only.
+      const officialLonger = progressStore?.adminRenameProfileDisplayName(OFFICIAL_PIKA_PROFILE_ID, 'PIKABG origin')
+      assert(officialLonger?.ok === false, 'official profile was allowed to use a longer PIKABG-containing name')
+      if (officialLonger?.ok === false) assert(officialLonger.code === 'RESERVED_PIKA_NAME', `official longer code=${officialLonger.code}`)
+
+      const officialCyrillic = progressStore?.adminRenameProfileDisplayName(OFFICIAL_PIKA_PROFILE_ID, 'ПИКАБГ')
+      assert(officialCyrillic?.ok === false, 'official profile was allowed to use Cyrillic ПИКАБГ')
+      if (officialCyrillic?.ok === false) assert(officialCyrillic.code === 'RESERVED_PIKA_NAME', `official Cyrillic code=${officialCyrillic.code}`)
     })
 
     await check('[11] invalid and taken rename do not debit; successful rename debits once', () => {
