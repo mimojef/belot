@@ -531,6 +531,7 @@ const chatStore = await createChatStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
   blockStore,
+  friendshipStore,
 )
 const lobbyChatStore = await createLobbyChatStore(databaseBootstrap.databaseFilePath)
 
@@ -8100,12 +8101,14 @@ async function handleChatRequest(
   const messagesMatch = /^\/api\/chat\/([^/]+)\/messages$/.exec(pathname)
   const readMatch = /^\/api\/chat\/([^/]+)\/read$/.exec(pathname)
   const attachmentMatch = /^\/api\/chat\/([^/]+)\/attachments\/([^/]+)$/.exec(pathname)
+  const isPikaSupportStart = pathname === '/api/chat/pika-support/start'
 
   if (
     pathname !== '/api/chat/conversations' &&
     messagesMatch === null &&
     readMatch === null &&
-    attachmentMatch === null
+    attachmentMatch === null &&
+    !isPikaSupportStart
   ) {
     return false
   }
@@ -8146,9 +8149,45 @@ async function handleChatRequest(
     for (const conn of Object.values(serverState.connections)) {
       if (conn.profileId !== null && conn.status === 'connected') onlineProfileIds.add(conn.profileId)
     }
+    const includeArchived = new URL(req.url ?? '', 'http://localhost').searchParams.get('archived') === '1'
     sendJsonResponse(res, 200, {
       ok: true,
-      conversations: chatStore.listConversations(profileId, onlineProfileIds),
+      conversations: chatStore.listConversations(profileId, onlineProfileIds, includeArchived),
+    })
+    return true
+  }
+
+  // Единствен entry point за СЪЗДАВАНЕ на служебен pika_support разговор —
+  // authoritative проверката (initiator === configured official Pika.bg
+  // profileId) живее в chatStore.getOrCreatePikaSupportConversation, не
+  // тук — този handler само подава сесийния profileId, без да го приема от
+  // client payload (session е единственият източник, виж §7 в task spec-а).
+  if (isPikaSupportStart && req.method === 'POST') {
+    const body = await readJsonRequestBody(req, MAX_IMAGE_ATTACHMENT_JSON_BYTES)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
+      return true
+    }
+
+    const recipientProfileId = getStringField(body, 'recipientProfileId').trim()
+
+    if (recipientProfileId.length === 0) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Липсва получател.' })
+      return true
+    }
+
+    const result = chatStore.getOrCreatePikaSupportConversation(profileId, recipientProfileId)
+
+    if (!result.ok) {
+      sendJsonResponse(res, 403, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      friendshipId: result.friendshipId,
+      conversation: result.conversation,
     })
     return true
   }

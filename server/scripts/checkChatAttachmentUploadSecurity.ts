@@ -672,7 +672,8 @@ async function runFileAtomicityUnitChecks(): Promise<void> {
       status TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      responded_at TEXT NULL
+      responded_at TEXT NULL,
+      kind TEXT NOT NULL DEFAULT 'friend' CHECK (kind IN ('friend', 'pika_support'))
     );
     CREATE TABLE friend_chat_messages (
       message_id TEXT PRIMARY KEY,
@@ -717,7 +718,7 @@ async function runFileAtomicityUnitChecks(): Promise<void> {
     yellowCoinsBalance: 0, galleryImages: [], gender: null, likesCount: 0, hasLikedByMe: false, isBlockedByMe: false,
   }) } as any
 
-  const store = await createChatStore(databaseFile, fakeProgressStore, { isBlocked: () => false })
+  const store = await createChatStore(databaseFile, fakeProgressStore, { isBlocked: () => false }, { isRegisteredHumanProfile: () => true })
 
   try {
     await check('[26] DB failure след file write не оставя постоянен orphan (deletion queue поема след неуспешен INSERT)', async () => {

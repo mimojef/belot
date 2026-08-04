@@ -5,11 +5,21 @@ import type {
 } from '../core/serverTypes.js'
 import type { PlayerProgressStore } from './playerProgressStore.js'
 import { dbDateToUtc } from './dbDate.js'
+import { getConfiguredOfficialPikaProfileId } from './normalizeProfileIdentityText.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
 export const PERSONAL_CHAT_HISTORY_LIMIT = 100
 export const PERSONAL_CHAT_STORAGE_LIMIT = 500
+
+// Разговор без нови съобщения за повече от 12 календарни месеца се смята
+// за архивиран (виж createConversationSnapshot/isArchived по-долу) — чисто
+// derived от updatedAt, без отделна archived_at колона/state за поддръжка.
+// Всяко ново съобщение обновява updated_at (touchFriendshipStatement в
+// sendMessage), значи автоматично "изважда" разговора от архивираните.
+const CONVERSATION_ARCHIVE_AFTER_DAYS = 365
+
+export type ChatConversationKind = 'friend' | 'pika_support'
 
 export type ChatAttachmentSnapshot = {
   attachmentId: string
@@ -36,6 +46,8 @@ export type ChatConversationSnapshot = {
   lastMessage: ChatMessageSnapshot | null
   updatedAt: string
   unreadCount: number
+  kind: ChatConversationKind
+  isArchived: boolean
 }
 
 // Входни данни за нов attachment — попълва се от sharp обработения буфер
@@ -51,7 +63,22 @@ export type NewChatAttachmentInput = {
 }
 
 export type ChatStore = {
-  listConversations: (profileId: ProfileId, onlineProfileIds?: Set<string>) => ChatConversationSnapshot[]
+  listConversations: (
+    profileId: ProfileId,
+    onlineProfileIds?: Set<string>,
+    includeArchived?: boolean,
+  ) => ChatConversationSnapshot[]
+  // Единствен начин служебен pika_support разговор да бъде СЪЗДАДЕН — вика
+  // се само от POST /api/chat/pika-support/start, който вече е guard-нал
+  // initiatorProfileId === configuredOfficialPikaProfileId на HTTP ниво.
+  // Тук проверката се повтаря authoritative (defense-in-depth, не разчита
+  // само на handler-а) — виж коментара на функцията по-долу.
+  getOrCreatePikaSupportConversation: (
+    initiatorProfileId: ProfileId,
+    recipientProfileId: ProfileId,
+  ) =>
+    | { ok: true; friendshipId: string; conversation: ChatConversationSnapshot }
+    | { ok: false; message: string }
   listMessages: (
     profileId: ProfileId,
     friendshipId: string,
@@ -93,6 +120,7 @@ type FriendshipRow = {
   requester_profile_id: string
   addressee_profile_id: string
   updated_at: string
+  kind: string
 }
 
 type ChatMessageRow = {
@@ -125,6 +153,19 @@ function getFriendProfileId(
   return friendship.requester_profile_id === profileId
     ? friendship.addressee_profile_id
     : friendship.requester_profile_id
+}
+
+// Огледално на createProfilePair в friendshipStore.ts — детерминистичен
+// (lower, higher) ordering, за да съвпадне с UNIQUE partial index-а
+// idx_profile_friendships_pika_support_pair(lower_profile_id, higher_profile_id)
+// WHERE kind='pika_support'.
+function createChatProfilePair(
+  leftProfileId: ProfileId,
+  rightProfileId: ProfileId,
+): { lowerProfileId: ProfileId; higherProfileId: ProfileId } {
+  return leftProfileId.localeCompare(rightProfileId, 'en') <= 0
+    ? { lowerProfileId: leftProfileId, higherProfileId: rightProfileId }
+    : { lowerProfileId: rightProfileId, higherProfileId: leftProfileId }
 }
 
 // Позволява празен body (когато съобщението носи attachment) — за разлика
@@ -177,11 +218,36 @@ export type ChatStoreBlockChecker = {
   isBlocked: (blockerProfileId: string, blockedProfileId: string) => boolean
 }
 
+// Минимален inject-нат interface от friendshipStore — избягва chatStore да
+// подготвя собствена SQL заявка към profiles таблицата (и по този начин да
+// изисква тя да съществува дори в тестови fixtures, които изолират само
+// chat-специфичните таблици). Реюзва СЪЩАТА "регистриран човешки профил с
+// активен акаунт" дефиниция, която вече guard-ва обикновените friend
+// requests (виж friendshipStore.isRegisteredHumanProfile).
+export type ChatStoreProfileEligibilityChecker = {
+  isRegisteredHumanProfile: (profileId: ProfileId) => boolean
+}
+
+export type ChatStoreOptions = {
+  officialPikaProfileId?: string | null
+}
+
 export async function createChatStore(
   databaseFilePath: string,
   playerProgressStore: PlayerProgressStore,
   blockChecker: ChatStoreBlockChecker,
+  profileEligibilityChecker: ChatStoreProfileEligibilityChecker,
+  options: ChatStoreOptions = {},
 ): Promise<ChatStore> {
+  // Единственият profileId, който смее да СЪЗДАВА pika_support разговори —
+  // fail-closed: липсваща/празна/невалидна env стойност → null → цялата
+  // getOrCreatePikaSupportConversation отказва безусловно (виж по-долу).
+  // Реюзва СЪЩИЯ canonical helper като display-name reservation-а
+  // (normalizeProfileIdentityText.ts), за да няма два разминаващи се env
+  // var-а за "кой е официалният Pika.bg профил".
+  const officialPikaProfileId =
+    options.officialPikaProfileId ?? getConfiguredOfficialPikaProfileId()
+
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
     open: true,
@@ -196,7 +262,8 @@ export async function createChatStore(
       friendship_id,
       requester_profile_id,
       addressee_profile_id,
-      updated_at
+      updated_at,
+      kind
     FROM profile_friendships
     WHERE status = 'accepted'
       AND (
@@ -211,7 +278,8 @@ export async function createChatStore(
       friendship_id,
       requester_profile_id,
       addressee_profile_id,
-      updated_at
+      updated_at,
+      kind
     FROM profile_friendships
     WHERE friendship_id = ?
       AND status = 'accepted'
@@ -220,6 +288,38 @@ export async function createChatStore(
         OR addressee_profile_id = ?
       )
     LIMIT 1;
+  `)
+
+  // Намира вече съществуващ pika_support ред между двойката (независимо
+  // кой е requester/addressee) — 'find' частта на find-or-create.
+  const selectPikaSupportByPairStatement = database.prepare(`
+    SELECT
+      friendship_id,
+      requester_profile_id,
+      addressee_profile_id,
+      updated_at,
+      kind
+    FROM profile_friendships
+    WHERE lower_profile_id = ?
+      AND higher_profile_id = ?
+      AND kind = 'pika_support'
+    LIMIT 1;
+  `)
+
+  // 'create' частта — status веднага 'accepted' (служебният чат няма pending
+  // stage, PIKABG го започва директно), защитено допълнително от партичния
+  // unique index idx_profile_friendships_pika_support_pair (race safety).
+  const insertPikaSupportConversationStatement = database.prepare(`
+    INSERT INTO profile_friendships (
+      friendship_id,
+      requester_profile_id,
+      addressee_profile_id,
+      lower_profile_id,
+      higher_profile_id,
+      status,
+      kind,
+      responded_at
+    ) VALUES (?, ?, ?, ?, ?, 'accepted', 'pika_support', CURRENT_TIMESTAMP);
   `)
 
   const selectLatestMessageStatement = database.prepare(`
@@ -448,6 +548,19 @@ export async function createChatStore(
     return row?.cnt ?? 0
   }
 
+  // Автоматичното 12-месечно архивиране важи ЕДИНСТВЕНО за служебните
+  // pika_support разговори (виж задачата) — обикновените kind='friend'
+  // чатове НЕ трябва да изчезват от основния списък по тази функция, дори
+  // при дългогодишно мълчание. isConversationArchived винаги връща false
+  // за kind='friend', независимо от възрастта на updatedAt.
+  function isConversationArchived(kind: string, updatedAtUtc: string): boolean {
+    if (kind !== 'pika_support') return false
+    const updatedAtMs = new Date(updatedAtUtc).getTime()
+    if (!Number.isFinite(updatedAtMs)) return false
+    const ageMs = Date.now() - updatedAtMs
+    return ageMs > CONVERSATION_ARCHIVE_AFTER_DAYS * 24 * 60 * 60 * 1000
+  }
+
   function createConversationSnapshot(
     friendship: FriendshipRow,
     ownProfileId: ProfileId,
@@ -469,14 +582,19 @@ export async function createChatStore(
       friendship.friendship_id,
     ) as ChatMessageRow | undefined
 
+    const updatedAt = dbDateToUtc(lastMessageRow?.created_at ?? friendship.updated_at)
+    const kind = friendship.kind === 'pika_support' ? 'pika_support' : 'friend'
+
     return {
       friendshipId: friendship.friendship_id,
       friend: friendProfile,
       lastMessage: lastMessageRow
         ? toMessageSnapshot(lastMessageRow, ownProfileId)
         : null,
-      updatedAt: dbDateToUtc(lastMessageRow?.created_at ?? friendship.updated_at),
+      updatedAt,
       unreadCount: getUnreadCount(ownProfileId, friendship.friendship_id),
+      kind,
+      isArchived: isConversationArchived(kind, updatedAt),
     }
   }
 
@@ -493,7 +611,11 @@ export async function createChatStore(
     return row ?? null
   }
 
-  function listConversations(profileId: ProfileId, onlineProfileIds?: Set<string>): ChatConversationSnapshot[] {
+  function listConversations(
+    profileId: ProfileId,
+    onlineProfileIds?: Set<string>,
+    includeArchived = false,
+  ): ChatConversationSnapshot[] {
     const friendships = selectAcceptedFriendshipsStatement.all(
       profileId,
       profileId,
@@ -504,7 +626,99 @@ export async function createChatStore(
       .filter((conversation): conversation is ChatConversationSnapshot => {
         return conversation !== null
       })
+      .filter((conversation) => includeArchived || !conversation.isArchived)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+  }
+
+  // Единственият път служебен pika_support разговор да бъде създаден.
+  // Authoritative правила (виж §2/§7 в task spec-а):
+  //  1) initiatorProfileId ТРЯБВА да е точно configured official Pika.bg
+  //     profileId — fail-closed, ако env var-ът липсва/е невалиден.
+  //  2) initiator != recipient (без self-chat).
+  //  3) recipient трябва да е реален регистриран човешки профил (не guest,
+  //     не бот, не изтрит/деактивиран).
+  //  4) find-or-create по (lower,higher) двойка + kind='pika_support' —
+  //     повторно повикване връща СЪЩИЯ friendship_id (idempotent), никога
+  //     дубликат, защитено допълнително от partial unique index-а.
+  function getOrCreatePikaSupportConversation(
+    initiatorProfileId: ProfileId,
+    recipientProfileId: ProfileId,
+  ):
+    | { ok: true; friendshipId: string; conversation: ChatConversationSnapshot }
+    | { ok: false; message: string } {
+    if (officialPikaProfileId === null || initiatorProfileId !== officialPikaProfileId) {
+      return {
+        ok: false,
+        message: 'Само официалният профил на Pika.bg може да започне този разговор.',
+      }
+    }
+
+    if (initiatorProfileId === recipientProfileId) {
+      return {
+        ok: false,
+        message: 'Не можеш да започнеш служебен чат със себе си.',
+      }
+    }
+
+    if (!profileEligibilityChecker.isRegisteredHumanProfile(recipientProfileId)) {
+      return {
+        ok: false,
+        message: 'Играчът не беше намерен.',
+      }
+    }
+
+    const pair = createChatProfilePair(initiatorProfileId, recipientProfileId)
+
+    const existingRow = selectPikaSupportByPairStatement.get(
+      pair.lowerProfileId,
+      pair.higherProfileId,
+    ) as FriendshipRow | undefined
+
+    let friendship: FriendshipRow | undefined = existingRow
+
+    if (friendship === undefined) {
+      try {
+        insertPikaSupportConversationStatement.run(
+          randomUUID(),
+          initiatorProfileId,
+          recipientProfileId,
+          pair.lowerProfileId,
+          pair.higherProfileId,
+        )
+      } catch {
+        // Race: друг едновременен request вече е вкарал реда между нашия
+        // SELECT по-горе и този INSERT опит (unique partial index го
+        // отхвърли) — очаквано, четем реалния ред по-долу вместо да върнем
+        // грешка на потребителя.
+      }
+
+      friendship = selectPikaSupportByPairStatement.get(
+        pair.lowerProfileId,
+        pair.higherProfileId,
+      ) as FriendshipRow | undefined
+    }
+
+    if (friendship === undefined) {
+      return {
+        ok: false,
+        message: 'Разговорът не беше създаден.',
+      }
+    }
+
+    const conversation = createConversationSnapshot(friendship, initiatorProfileId)
+
+    if (conversation === null) {
+      return {
+        ok: false,
+        message: 'Разговорът не беше създаден.',
+      }
+    }
+
+    return {
+      ok: true,
+      friendshipId: friendship.friendship_id,
+      conversation,
+    }
   }
 
   function listMessages(
@@ -749,6 +963,7 @@ export async function createChatStore(
 
   return {
     listConversations,
+    getOrCreatePikaSupportConversation,
     listMessages,
     sendMessage,
     markConversationRead,

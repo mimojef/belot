@@ -2028,15 +2028,18 @@ async function readChatMessagesResponse(
   }
 }
 
-async function loadChatConversations(): Promise<
+async function loadChatConversations(includeArchived = false): Promise<
   | { ok: true; conversations: ChatConversationSnapshot[] }
   | { ok: false; message: string }
 > {
   try {
-    const response = await fetch(`${getApiBaseUrl()}/api/chat/conversations`, {
-      method: 'GET',
-      credentials: 'include',
-    })
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/chat/conversations${includeArchived ? '?archived=1' : ''}`,
+      {
+        method: 'GET',
+        credentials: 'include',
+      },
+    )
     const data = await readChatConversationsResponse(response)
 
     if (!response.ok || !data.ok || !Array.isArray(data.conversations)) {
@@ -2049,6 +2052,44 @@ async function loadChatConversations(): Promise<
     return {
       ok: true,
       conversations: data.conversations,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за чат.',
+    }
+  }
+}
+
+async function startPikaSupportChat(recipientProfileId: string): Promise<
+  | { ok: true; friendshipId: string }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/chat/pika-support/start`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify({ recipientProfileId }),
+    })
+    const data = await response.json().catch(() => ({})) as {
+      ok?: boolean
+      message?: string
+      friendshipId?: string
+    }
+
+    if (!response.ok || !data.ok || typeof data.friendshipId !== 'string') {
+      return {
+        ok: false,
+        message: data.message ?? 'Разговорът не беше започнат.',
+      }
+    }
+
+    return {
+      ok: true,
+      friendshipId: data.friendshipId,
     }
   } catch {
     return {
@@ -3901,7 +3942,8 @@ lobby = createLobbyFlowController({
   },
   onLikeProfile: (profileId) => submitProfileLike(profileId),
   onGiftCoinsSubmit: (friendshipId, amount) => submitGiftCoins(friendshipId, amount),
-  onChatConversationsLoad: () => loadChatConversations(),
+  onPikaSupportChatStart: (recipientProfileId) => startPikaSupportChat(recipientProfileId),
+  onChatConversationsLoad: (includeArchived) => loadChatConversations(includeArchived),
   onChatMessagesLoad: (friendshipId) => loadChatMessages(friendshipId),
   onChatMarkRead: async (friendshipId) => {
     await markChatConversationRead(friendshipId)

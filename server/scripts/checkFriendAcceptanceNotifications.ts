@@ -120,10 +120,19 @@ function assert(condition: boolean, msg: string): void {
 // ─── Migration helpers ────────────────────────────────────────────────────────
 
 async function applyMigration(db: DatabaseSync, filename: string): Promise<void> {
-  const sql = await readFile(join(migrationsDir, filename), 'utf8')
+  const sql = (await readFile(join(migrationsDir, filename), 'utf8')).trim()
+
+  // MANUAL_TRANSACTION_MIGRATION файлове управляват собствен BEGIN/COMMIT
+  // (виж ensureServerDatabaseReady.ts) — обвиването им в допълнителен
+  // BEGIN тук би хвърлило "cannot start a transaction within a transaction".
+  if (sql.startsWith('-- MANUAL_TRANSACTION_MIGRATION')) {
+    db.exec(sql)
+    return
+  }
+
   db.exec('BEGIN;')
   try {
-    db.exec(sql.trim())
+    db.exec(sql)
     db.exec('COMMIT;')
   } catch (err) {
     db.exec('ROLLBACK;')
@@ -153,6 +162,13 @@ async function buildFullDatabase(dbPath: string): Promise<void> {
   try {
     db.exec('PRAGMA foreign_keys = ON;')
     await applyMigration(db, '20260701_002_add_requester_acceptance_read_at.sql')
+    // 20260804_002 е MANUAL_TRANSACTION_MIGRATION (собствен BEGIN/COMMIT,
+    // table rebuild) — трябва да се приложи СЛЕД 20260701_002 (реалния
+    // азбучен ред на файловете), защото INSERT...SELECT-ва
+    // requester_acceptance_read_at от старата таблица. friendshipStore.ts
+    // заявките винаги филтрират по kind='friend', значи колоната трябва да
+    // съществува преди store-овете по-долу да се инстанцират.
+    await applyMigration(db, '20260804_002_add_pika_support_conversation_kind.sql')
   } finally {
     db.close()
   }
@@ -450,6 +466,11 @@ try {
     db.exec('PRAGMA foreign_keys = ON;')
     try {
       await applyMigration(db, '20260701_002_add_requester_acceptance_read_at.sql')
+      // [A3] по-долу инстанцира createFriendshipStore(baseDbPath, ...) — всички
+      // негови заявки филтрират по kind='friend', значи колоната трябва да
+      // съществува на baseDbPath още тук (реалният азбучен ред на файловете
+      // е 20260701_002 → 20260804_002).
+      await applyMigration(db, '20260804_002_add_pika_support_conversation_kind.sql')
     } finally {
       db.close()
     }

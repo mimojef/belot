@@ -116,7 +116,8 @@ async function createStoreFixture() {
       status TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      responded_at TEXT NULL
+      responded_at TEXT NULL,
+      kind TEXT NOT NULL DEFAULT 'friend' CHECK (kind IN ('friend', 'pika_support'))
     );
 
     CREATE TABLE friend_chat_messages (
@@ -182,7 +183,7 @@ async function createStoreFixture() {
     ) VALUES (?, ?, ?, ?, ?, 'accepted', ?);
   `).run('friendship-b', 'profile-a', 'profile-c', 'profile-a', 'profile-c', '2020-01-01 00:00:00')
 
-  const store = await createChatStore(databaseFile, createFakeProgressStore(), { isBlocked: () => false })
+  const store = await createChatStore(databaseFile, createFakeProgressStore(), { isBlocked: () => false }, { isRegisteredHumanProfile: () => true })
   return {
     database,
     store,

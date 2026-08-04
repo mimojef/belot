@@ -14,6 +14,14 @@ export type RenderPlayerProfilePopupOptions = {
   friendshipAction?: PlayerProfileFriendshipAction | null
   skipAnimation?: boolean
   /**
+   * Вижда се само когато ТЕКУЩИЯТ логнат профил е официалният Pika.bg
+   * профил (проверено server-side при действителния start-заявка; тук е
+   * чисто UI видимост) И разглежданият профил не е собствения/гост. Не
+   * зависи от friendshipAction — PIKABG трябва да може да пише дори на
+   * non-friend.
+   */
+  showPikaSupportChatButton?: boolean
+  /**
    * Само за ПЪЛЕН администратор (не субадмин) — управлява видимостта на
    * "Субадмин" баджа и бутоните "Направи/Премахни субадмин". Обикновени
    * потребители и субадмини никога не трябва да виждат чужд субадмин статус.
@@ -741,6 +749,7 @@ function renderProfileContent(
   friendshipAction: PlayerProfileFriendshipAction | null,
   viewerIsFullAdmin: boolean,
   targetAccountRole: PlayerAccountRole | null,
+  showPikaSupportChatButton: boolean,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -853,6 +862,29 @@ function renderProfileContent(
           ${!canEdit && !isOwnProfile ? `
             <div data-player-profile-actions="1" style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;">
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                ${showPikaSupportChatButton && profile.profileId ? `
+                  <button
+                    type="button"
+                    data-player-profile-pika-support-chat="${escapeHtml(profile.profileId)}"
+                    style="
+                      min-height:38px;
+                      padding:0 14px;
+                      border:1px solid rgba(239,68,68,0.58);
+                      border-radius:8px;
+                      background:rgba(239,68,68,0.16);
+                      color:#ef4444;
+                      font-size:13px;
+                      font-weight:900;
+                      cursor:pointer;
+                      display:flex;
+                      align-items:center;
+                      gap:6px;
+                    "
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    Чат
+                  </button>
+                ` : ''}
                 ${profile.profileId ? `
                   <button
                     type="button"
@@ -1116,6 +1148,7 @@ export function renderPlayerProfilePopup(
           options.friendshipAction ?? null,
           options.viewerIsFullAdmin ?? false,
           options.targetAccountRole ?? null,
+          options.showPikaSupportChatButton ?? false,
         )
       : renderEmptyContent(options.seat)
 
@@ -1138,10 +1171,16 @@ export function renderPlayerProfilePopup(
         filter: brightness(1.1);
         transform: translateY(-1px);
       }
+      [data-player-profile-pika-support-chat]:hover {
+        background: rgba(239,68,68,0.28) !important;
+        filter: brightness(1.1);
+        transform: translateY(-1px);
+      }
       [data-player-profile-like],
       [data-player-profile-friend-request],
       [data-player-profile-block],
-      [data-player-profile-gift-coins] {
+      [data-player-profile-gift-coins],
+      [data-player-profile-pika-support-chat] {
         transition: filter 120ms ease, transform 120ms ease, background 120ms ease, border-color 120ms ease;
       }
 

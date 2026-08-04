@@ -1,4 +1,5 @@
 import { formatGiftLimitError } from './formatGiftLimitError'
+import { OFFICIAL_PIKA_PROFILE_ID } from './profileDisplayNameValidation'
 import type { TournamentEconomyNoticeReason } from '../../ui/notifications/tournamentEconomyNotificationQueue.js'
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes.js'
 import { isAdminPaymentPeriod } from '../adminPayments/adminPaymentsTypes.js'
@@ -340,7 +341,11 @@ export type CreateLobbyFlowControllerOptions = {
     | ({ ok: false; message: string } & GiftLimitErrorPayload)
     | { ok: false; message: string }
   >
-  onChatConversationsLoad?: () => Promise<
+  onPikaSupportChatStart?: (recipientProfileId: string) => Promise<
+    | { ok: true; friendshipId: string }
+    | { ok: false; message: string }
+  >
+  onChatConversationsLoad?: (includeArchived?: boolean) => Promise<
     | { ok: true; conversations: ChatConversationSnapshot[] }
     | { ok: false; message: string }
   >
@@ -768,6 +773,14 @@ type InternalLobbyFlowState = {
   acceptanceProcessingIds: Set<string>
   acceptanceErrorText: string | null
   chatConversations: ChatConversationSnapshot[]
+  // "Архивирани" — разговори без ново съобщение >12 месеца (виж
+  // chatStore.isConversationArchived). Зареждат се lazy, само при клик на
+  // ненатрапчивата "Архивирани" опция (toggleChatArchivedView) — не се
+  // теглят автоматично с основния списък, за да не бави обичайното
+  // зареждане на чат панела.
+  chatShowArchived: boolean
+  chatArchivedConversations: ChatConversationSnapshot[]
+  chatArchivedLoading: boolean
   activeChatFriendshipId: string | null
   chatMessages: ChatMessageSnapshot[]
   chatLoading: boolean
@@ -1124,6 +1137,9 @@ function createInitialState(): InternalLobbyFlowState {
     acceptanceProcessingIds: new Set<string>(),
     acceptanceErrorText: null,
     chatConversations: [],
+    chatShowArchived: false,
+    chatArchivedConversations: [],
+    chatArchivedLoading: false,
     activeChatFriendshipId: null,
     chatMessages: [],
     chatLoading: false,
@@ -2366,6 +2382,26 @@ export function createLobbyFlowController(
     return false
   }
 
+  // UI-само видимост на бутона "Чат" в profile popup-а — истинската защита
+  // е server-side (chatStore.getOrCreatePikaSupportConversation отказва
+  // всеки profileId, различен от configured official Pika.bg profileId).
+  // Тук показваме бутона само когато ТЕКУЩИЯТ логнат профил е точно
+  // OFFICIAL_PIKA_PROFILE_ID, popup-ът разглежда ЧУЖД регистриран профил
+  // (не own, не guest — targetProfileId===null означава гост), и не сме в
+  // "canEdit" (own-profile edit) режим.
+  function shouldShowPikaSupportChatButton(authSession: LobbyAuthSession | null): boolean {
+    const targetProfileId = state.profilePopupProfile?.profileId ?? null
+
+    return (
+      state.profilePopupOpen &&
+      !state.profilePopupCanEdit &&
+      authSession !== null &&
+      authSession.profile.profileId === OFFICIAL_PIKA_PROFILE_ID &&
+      targetProfileId !== null &&
+      targetProfileId !== authSession.profile.profileId
+    )
+  }
+
   function createProfileFriendshipAction(
     authSession: LobbyAuthSession | null,
   ): LobbyScreenState['friendshipAction'] {
@@ -2597,6 +2633,7 @@ export function createLobbyFlowController(
       friendsLoading: state.friendsLoading,
       friendsErrorText: state.friendsErrorText,
       friendshipAction,
+      showPikaSupportChatButton: shouldShowPikaSupportChatButton(authSession),
       giftModalFriendshipId: state.giftModalFriendshipId,
       giftModalFriendName: state.giftModalFriendName,
       giftModalErrorText: state.giftModalErrorText,
@@ -2606,6 +2643,9 @@ export function createLobbyFlowController(
       acceptanceNotifications: state.acceptanceNotifications,
       acceptanceErrorText: state.acceptanceErrorText,
       chatConversations: state.chatConversations,
+      chatShowArchived: state.chatShowArchived,
+      chatArchivedConversations: state.chatArchivedConversations,
+      chatArchivedLoading: state.chatArchivedLoading,
       activeChatFriendshipId: state.activeChatFriendshipId,
       chatMessages: state.chatMessages,
       chatLoading: state.chatLoading,
@@ -3163,6 +3203,9 @@ export function createLobbyFlowController(
         render()
         void options.onChatMarkRead?.(friendshipId)
       },
+      onChatToggleArchived: () => {
+        void toggleChatArchivedView()
+      },
       onChatSubmit: (friendshipId, body) => {
         void sendChatMessage(friendshipId, body)
       },
@@ -3249,6 +3292,7 @@ export function createLobbyFlowController(
       onGiftCoinsClick: (friendshipId) => {
         openGiftModal(friendshipId)
       },
+      onPikaSupportChatClick: (profileId) => { void startPikaSupportChatAndOpen(profileId) },
       onLikeClick: (profileId) => { void likeProfile(profileId) },
       onGiftCoinsClose: () => {
         closeGiftModal()
@@ -6445,6 +6489,37 @@ export function createLobbyFlowController(
     render()
   }
 
+  // Единствен client-side entry point за СЪЗДАВАНЕ/намиране на служебен
+  // pika_support разговор — вика се само от бутона "Чат" в profile popup-а,
+  // видим само когато state.showPikaSupportChatButton е true (виж
+  // buildPopupFriendshipAction/renderPopupOnly). Реалната authoritative
+  // проверка (initiator === official Pika.bg profileId) е server-side в
+  // chatStore.getOrCreatePikaSupportConversation — тук само консумираме
+  // резултата и отваряме чата, ако е успешен.
+  async function startPikaSupportChatAndOpen(recipientProfileId: string): Promise<void> {
+    if (!options.onPikaSupportChatStart) {
+      state.errorText = 'Служебният чат временно не е наличен.'
+      render()
+      return
+    }
+
+    const result = await options.onPikaSupportChatStart(recipientProfileId)
+
+    if (!result.ok) {
+      state.errorText = result.message
+      render()
+      return
+    }
+
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+
+    void showChatPanel().then(() => {
+      void openChatConversation(result.friendshipId)
+    })
+  }
+
   async function submitGiftCoins(
     friendshipId: string,
     amount: number,
@@ -6505,6 +6580,29 @@ export function createLobbyFlowController(
     }
 
     return true
+  }
+
+  // Ненатрапчив toggle между активен/архивиран изглед на списъка с
+  // разговори — сървърът вече прилага 12-месечния праг (виж
+  // chatStore.listConversations/isConversationArchived), тук само
+  // презареждаме съответния списък lazy при първо превключване.
+  async function toggleChatArchivedView(): Promise<void> {
+    state.chatShowArchived = !state.chatShowArchived
+
+    if (state.chatShowArchived && state.chatArchivedConversations.length === 0 && !state.chatArchivedLoading) {
+      state.chatArchivedLoading = true
+      render()
+
+      const result = await options.onChatConversationsLoad?.(true)
+
+      state.chatArchivedLoading = false
+
+      if (result?.ok) {
+        state.chatArchivedConversations = result.conversations.filter((c) => c.isArchived)
+      }
+    }
+
+    render()
   }
 
   async function showChatPanel(): Promise<void> {
@@ -7957,6 +8055,7 @@ export function createLobbyFlowController(
       onFriendCancelClick: (friendshipId) => { void cancelFriendRequest(friendshipId) },
       onFriendRemoveClick: (friendshipId) => { void removeFriendRelationship(friendshipId) },
       onGiftCoinsClick: (friendshipId) => { openGiftModal(friendshipId) },
+      onPikaSupportChatClick: (profileId) => { void startPikaSupportChatAndOpen(profileId) },
       onLikeClick: (profileId) => { void likeProfile(profileId) },
       onGrantSubadminClick: (profileId) => {
         if (!profileId) return
@@ -8282,6 +8381,7 @@ export function createLobbyFlowController(
         friendshipAction: buildPopupFriendshipAction(),
         viewerIsFullAdmin: isFullAdminAuthSession(authSession),
         targetAccountRole: state.profilePopupTargetRole,
+        showPikaSupportChatButton: shouldShowPikaSupportChatButton(authSession),
       },
       getPopupCallbacks(),
     )

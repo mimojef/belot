@@ -40,6 +40,11 @@ export type MarkAcceptanceReadResult =
   | { ok: false; reason: 'wrong_status' }
 
 export type FriendshipStore = {
+  // Реюзвана и от chatStore.getOrCreatePikaSupportConversation — единственото
+  // място извън friendshipStore, което трябва да знае дали recipientProfileId
+  // е реален, активен, човешки профил С акаунт (не guest/бот/деактивиран),
+  // без да дублира собствена SQL заявка към profiles таблицата.
+  isRegisteredHumanProfile: (profileId: ProfileId) => boolean
   listForProfile: (profileId: ProfileId) => FriendshipsSnapshot
   getUnreadAcceptances: (requesterProfileId: ProfileId) => UnreadAcceptanceNotification[]
   markAcceptanceRead: (
@@ -169,6 +174,11 @@ export async function createFriendshipStore(
     LIMIT 1;
   `)
 
+  // 'kind = friend' на всяка заявка по-долу изолира истинските приятелски
+  // редове от служебните pika_support разговори (виж chatStore.ts /
+  // getOrCreatePikaSupportConversation) — служебният чат НЕ трябва да се
+  // появява в incoming/outgoing/friends списъците, нито да участва в
+  // send/accept/reject/cancel/remove friend request потока.
   const selectFriendshipByPairStatement = database.prepare(`
     SELECT
       friendship_id,
@@ -181,6 +191,7 @@ export async function createFriendshipStore(
     WHERE lower_profile_id = ?
       AND higher_profile_id = ?
       AND status != 'blocked'
+      AND kind = 'friend'
     LIMIT 1;
   `)
 
@@ -195,6 +206,7 @@ export async function createFriendshipStore(
     FROM profile_friendships
     WHERE (requester_profile_id = ? OR addressee_profile_id = ?)
       AND status != 'blocked'
+      AND kind = 'friend'
     ORDER BY updated_at DESC, created_at DESC;
   `)
 
@@ -205,8 +217,9 @@ export async function createFriendshipStore(
       addressee_profile_id,
       lower_profile_id,
       higher_profile_id,
-      status
-    ) VALUES (?, ?, ?, ?, ?, 'pending');
+      status,
+      kind
+    ) VALUES (?, ?, ?, ?, ?, 'pending', 'friend');
   `)
 
   const acceptFriendshipStatement = database.prepare(`
@@ -217,14 +230,16 @@ export async function createFriendshipStore(
       responded_at = CURRENT_TIMESTAMP
     WHERE friendship_id = ?
       AND addressee_profile_id = ?
-      AND status = 'pending';
+      AND status = 'pending'
+      AND kind = 'friend';
   `)
 
   const deletePendingFriendshipStatement = database.prepare(`
     DELETE FROM profile_friendships
     WHERE friendship_id = ?
       AND addressee_profile_id = ?
-      AND status = 'pending';
+      AND status = 'pending'
+      AND kind = 'friend';
   `)
 
   const selectOutgoingPendingFriendshipStatement = database.prepare(`
@@ -239,6 +254,7 @@ export async function createFriendshipStore(
     WHERE friendship_id = ?
       AND requester_profile_id = ?
       AND status = 'pending'
+      AND kind = 'friend'
     LIMIT 1;
   `)
 
@@ -246,13 +262,15 @@ export async function createFriendshipStore(
     DELETE FROM profile_friendships
     WHERE friendship_id = ?
       AND requester_profile_id = ?
-      AND status = 'pending';
+      AND status = 'pending'
+      AND kind = 'friend';
   `)
 
   const deleteAcceptedFriendshipStatement = database.prepare(`
     DELETE FROM profile_friendships
     WHERE friendship_id = ?
       AND status = 'accepted'
+      AND kind = 'friend'
       AND (
         requester_profile_id = ?
         OR addressee_profile_id = ?
@@ -270,6 +288,7 @@ export async function createFriendshipStore(
     FROM profile_friendships
     WHERE requester_profile_id = ?
       AND status = 'accepted'
+      AND kind = 'friend'
       AND requester_acceptance_read_at IS NULL
     ORDER BY updated_at DESC;
   `)
@@ -282,6 +301,7 @@ export async function createFriendshipStore(
       requester_acceptance_read_at
     FROM profile_friendships
     WHERE friendship_id = ?
+      AND kind = 'friend'
     LIMIT 1;
   `)
 
@@ -291,6 +311,7 @@ export async function createFriendshipStore(
     WHERE friendship_id = ?
       AND requester_profile_id = ?
       AND status = 'accepted'
+      AND kind = 'friend'
       AND requester_acceptance_read_at IS NULL;
   `)
 
@@ -588,6 +609,7 @@ export async function createFriendshipStore(
   }
 
   return {
+    isRegisteredHumanProfile,
     listForProfile,
     getUnreadAcceptances,
     markAcceptanceRead,

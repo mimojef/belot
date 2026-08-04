@@ -307,12 +307,16 @@ export type ChatMessageSnapshot = {
   attachment: ChatAttachmentSnapshot | null
 }
 
+export type ChatConversationKind = 'friend' | 'pika_support'
+
 export type ChatConversationSnapshot = {
   friendshipId: string
   friend: PlayerPublicProfileSnapshot
   lastMessage: ChatMessageSnapshot | null
   updatedAt: string
   unreadCount: number
+  kind: ChatConversationKind
+  isArchived: boolean
 }
 
 export type LeaderboardCategory = 'balance' | 'rank' | 'wins' | 'rating'

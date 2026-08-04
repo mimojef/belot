@@ -415,6 +415,7 @@ export type LobbyScreenState = {
   friendsLoading: boolean
   friendsErrorText: string | null
   friendshipAction: PlayerProfileFriendshipAction | null
+  showPikaSupportChatButton: boolean
   giftModalFriendshipId: string | null
   giftModalFriendName: string
   giftModalErrorText: string | null
@@ -424,6 +425,9 @@ export type LobbyScreenState = {
   acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   acceptanceErrorText: string | null
   chatConversations: ChatConversationSnapshot[]
+  chatShowArchived: boolean
+  chatArchivedConversations: ChatConversationSnapshot[]
+  chatArchivedLoading: boolean
   activeChatFriendshipId: string | null
   chatMessages: ChatMessageSnapshot[]
   chatLoading: boolean
@@ -721,6 +725,7 @@ export type RenderLobbyScreenOptions = {
   onChatClick: () => void
   onChatConversationClick: (friendshipId: string) => void
   onChatMarkRead: (friendshipId: string) => void
+  onChatToggleArchived: () => void
   onChatSubmit: (friendshipId: string, body: string) => void
   onChatDraftChange: (friendshipId: string, draft: string) => void
   onChatImageSelect: (friendshipId: string, file: File) => void
@@ -739,6 +744,7 @@ export type RenderLobbyScreenOptions = {
   onFriendCancelClick: (friendshipId: string) => void
   onFriendRemoveClick: (friendshipId: string) => void
   onGiftCoinsClick: (friendshipId: string) => void
+  onPikaSupportChatClick: (profileId: string) => void
   onLikeClick: (profileId: string) => void
   onGiftCoinsClose: () => void
   onGiftCoinsSubmit: (friendshipId: string, amount: number) => void
@@ -908,6 +914,7 @@ export type ProfilePopupCallbacks = {
   onFriendCancelClick: (friendshipId: string) => void
   onFriendRemoveClick: (friendshipId: string) => void
   onGiftCoinsClick: (friendshipId: string) => void
+  onPikaSupportChatClick: (profileId: string) => void
   onLikeClick: (profileId: string) => void
   onGrantSubadminClick: (profileId: string | null) => void
   onRevokeSubadminClick: (profileId: string | null) => void
@@ -1016,6 +1023,11 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
       const friendshipId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileGiftCoins?.trim() ?? ''
       if (friendshipId) cb.onGiftCoinsClick(friendshipId)
     })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-pika-support-chat]')
+    ?.addEventListener('click', (e) => {
+      const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfilePikaSupportChat?.trim() ?? ''
+      if (profileId) cb.onPikaSupportChatClick(profileId)
+    })
   el.querySelectorAll<HTMLButtonElement>('[data-player-profile-friend-accept]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.playerProfileFriendAccept?.trim() ?? ''
@@ -1066,6 +1078,7 @@ export function syncProfilePopup(
     friendshipAction: PlayerProfileFriendshipAction | null
     viewerIsFullAdmin?: boolean
     targetAccountRole?: PlayerAccountRole | null
+    showPikaSupportChatButton?: boolean
   },
   cb: ProfilePopupCallbacks,
 ): void {
@@ -1090,6 +1103,7 @@ export function syncProfilePopup(
     skipAnimation: !isFirstOpen,
     viewerIsFullAdmin: popupState.viewerIsFullAdmin ?? false,
     targetAccountRole: popupState.targetAccountRole ?? null,
+    showPikaSupportChatButton: popupState.showPikaSupportChatButton ?? false,
   })
   attachPopupListeners(el, cb, popupState.profile?.profileId ?? null)
 }
@@ -5059,24 +5073,36 @@ function renderChatPanel(state: LobbyScreenState): string {
     `
   }
 
-  const sortedConversations = [...state.chatConversations].sort(
+  const visibleConversations = state.chatShowArchived ? state.chatArchivedConversations : state.chatConversations
+  const sortedConversations = [...visibleConversations].sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
   )
 
   const activeConversation = sortedConversations.find(
     (conversation) => conversation.friendshipId === state.activeChatFriendshipId,
-  ) ?? sortedConversations[0] ?? null
+  ) ?? (state.chatShowArchived ? null : sortedConversations[0] ?? null)
+
+  const pikaSupportBadge = `
+    <span style="display:inline-flex;align-items:center;padding:1px 7px;border-radius:999px;background:rgba(239,68,68,0.16);border:1px solid rgba(239,68,68,0.58);color:#ef4444;font-size:9px;font-weight:900;letter-spacing:0.03em;text-transform:uppercase;white-space:nowrap;flex-shrink:0;">Екип Pika.bg</span>
+  `
 
   return `
     <section style="min-height:520px;display:grid;grid-template-columns:300px minmax(0,1fr) 250px;gap:14px;align-content:start;">
       <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;overflow:hidden;display:flex;flex-direction:column;max-height:560px;">
         <div style="padding:14px 16px;border-bottom:1px solid rgba(212,165,32,0.24);flex-shrink:0;">
-          <div style="font-size:22px;font-weight:900;color:#f8fafc;">Чат</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+            <div style="font-size:22px;font-weight:900;color:#f8fafc;">${state.chatShowArchived ? 'Архивирани' : 'Чат'}</div>
+            <button type="button" data-lobby-chat-toggle-archived="1" style="border:0;background:transparent;color:rgba(212,165,32,0.78);font-size:11px;font-weight:800;cursor:pointer;padding:4px 6px;text-decoration:underline;">
+              ${state.chatShowArchived ? '← Активни' : 'Архивирани'}
+            </button>
+          </div>
           <div style="margin-top:5px;font-size:12px;font-weight:800;color:rgba(255,255,255,0.54);">Само между приятели. Недостъпен по време на игра.</div>
         </div>
-        ${sortedConversations.length === 0 ? `
+        ${state.chatShowArchived && state.chatArchivedLoading ? `
+          <div style="padding:24px 16px;color:#d4a520;font-size:14px;font-weight:800;text-align:center;">Зареждане...</div>
+        ` : sortedConversations.length === 0 ? `
           <div style="padding:24px 16px;color:rgba(255,255,255,0.62);font-size:14px;font-weight:800;text-align:center;">
-            Добави приятели, за да започнеш чат.
+            ${state.chatShowArchived ? 'Няма архивирани разговори.' : 'Добави приятели, за да започнеш чат.'}
           </div>
         ` : `
           <div style="overflow-y:auto;flex:1;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
@@ -5086,11 +5112,12 @@ function renderChatPanel(state: LobbyScreenState): string {
               const avatarUrl = conversation.friend.avatarUrl?.trim() ?? ''
               const preview = conversation.lastMessage?.body ?? 'Няма съобщения'
               const isOnline = conversation.friend.isOnline
+              const isPikaSupport = conversation.kind === 'pika_support'
 
               return `
                 <button type="button" data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}" style="display:flex;align-items:center;gap:12px;width:100%;border:0;border-bottom:1px solid rgba(255,255,255,0.06);background:${isActive ? 'rgba(212,165,32,0.12)' : 'transparent'};color:#ffffff;text-align:left;padding:12px 14px;cursor:pointer;min-width:0;box-sizing:border-box;">
                   <div style="position:relative;width:46px;height:46px;flex:0 0 auto;">
-                    <div style="width:46px;height:46px;border-radius:8px;border:1px solid rgba(212,165,32,0.48);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:19px;font-weight:900;">
+                    <div style="width:46px;height:46px;border-radius:8px;border:1px solid ${isPikaSupport ? 'rgba(239,68,68,0.58)' : 'rgba(212,165,32,0.48)'};background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:${isPikaSupport ? '#ef4444' : '#d4a520'};font-size:19px;font-weight:900;">
                       ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}
                     </div>
                     ${isOnline !== undefined ? `<div style="position:absolute;bottom:-2px;right:-2px;width:11px;height:11px;border-radius:50%;background:${isOnline ? '#22c55e' : '#ef4444'};border:2px solid #050505;"></div>` : ''}
@@ -5098,7 +5125,7 @@ function renderChatPanel(state: LobbyScreenState): string {
                   <div style="min-width:0;flex:1;">
                     <div style="display:flex;align-items:center;gap:6px;">
                       <div style="font-size:14px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">${escapeHtml(displayName)}</div>
-                      ${isOnline !== undefined ? '' : ''}
+                      ${isPikaSupport ? pikaSupportBadge : ''}
                       ${conversation.unreadCount > 0 ? `<span style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 4px;flex-shrink:0;">${conversation.unreadCount}</span>` : ''}
                     </div>
                     <div style="margin-top:4px;font-size:12px;font-weight:700;color:${conversation.unreadCount > 0 ? '#ffffff' : 'rgba(255,255,255,0.54)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(preview)}</div>
@@ -5118,6 +5145,7 @@ function renderChatPanel(state: LobbyScreenState): string {
         ` : `
           <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid rgba(212,165,32,0.24);">
             <div style="font-size:19px;font-weight:900;color:#f8fafc;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(activeConversation.friend.displayName ?? 'Играч')}</div>
+            ${activeConversation.kind === 'pika_support' ? pikaSupportBadge : ''}
             ${state.chatErrorText ? `<div style="margin-left:auto;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.chatErrorText)}</div>` : ''}
           </div>
           <div data-chat-messages-scroll="1" style="height:350px;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
@@ -9792,6 +9820,10 @@ export function renderLobbyScreen(
     })
   })
 
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-chat-toggle-archived="1"]')
+    ?.addEventListener('click', options.onChatToggleArchived)
+
   root.querySelectorAll<HTMLFormElement>('[data-lobby-chat-form]').forEach((form) => {
     keepComposerFocusOnPointerSubmit(form.querySelector<HTMLButtonElement>('button[type="submit"]'))
     form.addEventListener('submit', (event) => {
@@ -10343,6 +10375,7 @@ export function renderLobbyScreen(
       friendshipAction: state.friendshipAction,
       viewerIsFullAdmin: state.isAdmin,
       targetAccountRole: state.profilePopupTargetRole,
+      showPikaSupportChatButton: state.showPikaSupportChatButton,
     },
     {
       onClose: options.onProfileClose,
@@ -10354,6 +10387,7 @@ export function renderLobbyScreen(
       onFriendCancelClick: options.onFriendCancelClick,
       onFriendRemoveClick: options.onFriendRemoveClick,
       onGiftCoinsClick: options.onGiftCoinsClick,
+      onPikaSupportChatClick: options.onPikaSupportChatClick,
       onLikeClick: options.onLikeClick,
       onGrantSubadminClick: options.onProfileGrantSubadminClick,
       onRevokeSubadminClick: options.onProfileRevokeSubadminClick,
