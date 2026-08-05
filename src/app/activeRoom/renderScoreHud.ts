@@ -7,6 +7,7 @@ import type {
 import { escapeHtml } from './activeRoomShared'
 import { getVisualSeatForLocalPerspective } from './cutting/cuttingSeatLayout'
 import { formatBidType, getBidMultiplierLabel } from './winningBidHelpers'
+import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 
 const SCORE_HUD_INTERNAL_OFFSET = 18
 
@@ -125,6 +126,7 @@ function getScoreForLocalPerspective(game: RoomGameSnapshot, localSeat: Seat): {
 
 export function renderScoreHud(options: RenderScoreHudOptions): string {
   const { game, seats, localSeat, winningBid, stageScale } = options
+  const isMobileLayout = isPhoneLayoutViewport()
   const { ourScore, theirScore } = getScoreForLocalPerspective(game, localSeat)
   const bidLabel = formatBidType(winningBid)
   const bidIconMarkup = getBidIconMarkup(winningBid)
@@ -305,7 +307,7 @@ export function renderScoreHud(options: RenderScoreHudOptions): string {
                 align-items:center;
                 padding:0 12px;
                 min-width:0;
-                font-size:16px;
+                font-size:${isMobileLayout ? '20px' : '16px'};
                 font-weight:900;
                 line-height:1.1;
                 color:#111111;

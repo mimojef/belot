@@ -21,6 +21,10 @@ import {
   ACTIVE_ROOM_STAGE_WIDTH,
   ACTIVE_ROOM_VIEWPORT_HORIZONTAL_PADDING,
   ACTIVE_ROOM_VIEWPORT_VERTICAL_PADDING,
+  BOTTOM_HAND_MOBILE_CARD_WIDTH,
+  BOTTOM_HAND_MOBILE_CARD_HEIGHT,
+  BOTTOM_HAND_MOBILE_SPACING,
+  BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET,
   escapeHtml,
 } from './activeRoomShared'
 import {
@@ -807,13 +811,14 @@ function getBottomHandOffset(index: number, count: number): {
   y: number
   rotate: number
 } {
+  const spreadStep = isPhoneLayoutViewport() ? BOTTOM_HAND_MOBILE_SPACING : 62
   const centeredIndex = index - (count - 1) / 2
   const maxCentered = Math.max(1, (count - 1) / 2)
   const edgeProgress = Math.abs(centeredIndex) / maxCentered
   const countProgress = Math.min(1, Math.max(0, (count - 1) / 7))
   const edgeDrop = edgeProgress * edgeProgress * 34 * countProgress
   return {
-    x: centeredIndex * 62,
+    x: centeredIndex * spreadStep,
     y: edgeDrop,
     rotate: centeredIndex * 5,
   }
@@ -1061,7 +1066,10 @@ function renderBottomHandOverlay(options: {
   hoveredHandCardId: string | null
 }): string {
   const { cards, validCardIds, isMyTurn, stageScale, hoveredHandCardId } = options
-  const bottomInset = isPhoneLayoutViewport() ? ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT : 0
+  const isMobileLayout = isPhoneLayoutViewport()
+  const bottomInset = isMobileLayout ? ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT : 0
+  const handCardWidth = isMobileLayout ? BOTTOM_HAND_MOBILE_CARD_WIDTH : HAND_W
+  const handCardHeight = isMobileLayout ? BOTTOM_HAND_MOBILE_CARD_HEIGHT : HAND_H
 
   if (cards.length === 0) {
     return ''
@@ -1086,8 +1094,8 @@ function renderBottomHandOverlay(options: {
           position:absolute;
           left:50%;
           top:50%;
-          width:${HAND_W}px;
-          height:${HAND_H}px;
+          width:${handCardWidth}px;
+          height:${handCardHeight}px;
           padding:0;
           border:1px solid rgba(255,255,255,0.24);
           border-radius:16px;
@@ -1181,7 +1189,7 @@ function renderBottomHandOverlay(options: {
           style="
             position:absolute;
             left:${BOTTOM_HAND_CENTER_X}px;
-            top:${BOTTOM_HAND_CENTER_Y}px;
+            top:${isMobileLayout ? BOTTOM_HAND_CENTER_Y + BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET : BOTTOM_HAND_CENTER_Y}px;
             width:1px;
             height:1px;
             pointer-events:none;

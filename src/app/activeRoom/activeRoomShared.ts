@@ -26,6 +26,17 @@ export const ACTIVE_ROOM_MIN_STAGE_SCALE = 0.46
 export const ACTIVE_ROOM_VIEWPORT_HORIZONTAL_PADDING = 20
 export const ACTIVE_ROOM_VIEWPORT_VERTICAL_PADDING = 20
 export const ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT = 50
+
+// Единна mobile геометрия за долната (местния играч) ръка карти — споделена
+// между dealing/bidding fan renderer-а (renderCuttingSeatPanels.ts) и
+// playing overlay renderer-а (renderPlayingScreen.ts), за да няма визуален
+// размерен скок при прехода last-3 -> playing. Desktop геометрията остава
+// в отделните module-level константи на всеки файл (195×284, spacing 62,
+// center Y 50) — тук се пипа само phone-layout override-ът.
+export const BOTTOM_HAND_MOBILE_CARD_WIDTH = 211
+export const BOTTOM_HAND_MOBILE_CARD_HEIGHT = 307
+export const BOTTOM_HAND_MOBILE_SPACING = 70
+export const BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET = -26
 export const ACTIVE_ROOM_TABLE_BACKGROUND = `
   radial-gradient(circle at center, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0.015) 34%, rgba(0,0,0,0.00) 58%),
   url('/assets/lobby/table-diamond-bg.webp') center / 100% 100% no-repeat,

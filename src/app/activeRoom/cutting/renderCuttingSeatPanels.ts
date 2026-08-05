@@ -9,7 +9,13 @@ import {
   getVisualSeatForLocalPerspective,
 } from './cuttingSeatLayout'
 import { CUTTING_COUNTDOWN_MS } from './cuttingVisualCountdown'
-import { ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT } from '../activeRoomShared'
+import {
+  ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT,
+  BOTTOM_HAND_MOBILE_CARD_WIDTH,
+  BOTTOM_HAND_MOBILE_CARD_HEIGHT,
+  BOTTOM_HAND_MOBILE_SPACING,
+  BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET,
+} from '../activeRoomShared'
 import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
 
 type EscapeHtml = (value: string) => string
@@ -204,6 +210,7 @@ export function renderSideCuttingCountdownFooter(
   countdownKey: string,
   isBotReplacement = false,
 ): string {
+  const isMobileLayout = isPhoneLayoutViewport()
   return `
     <div
       style="
@@ -248,7 +255,7 @@ export function renderSideCuttingCountdownFooter(
           padding:13px 14px 14px;
           color:#f4f8ff;
           text-align:center;
-          font-size:18px;
+          font-size:${isMobileLayout ? '21px' : '18px'};
           font-weight:900;
           letter-spacing:0.03em;
           line-height:1.1;
@@ -438,15 +445,18 @@ function renderPanelDealtCard(
   offsetY: number,
   rotate: number,
   animStyle: string,
+  mobileBottomSeat = false,
 ): string {
   const content = card !== null ? renderPanelCardFront(card) : renderPanelCardBack()
+  const cardWidth = mobileBottomSeat ? BOTTOM_HAND_MOBILE_CARD_WIDTH : PANEL_CARD_WIDTH
+  const cardHeight = mobileBottomSeat ? BOTTOM_HAND_MOBILE_CARD_HEIGHT : PANEL_CARD_HEIGHT
   return `
     <div style="
       position:absolute;
       left:50%;
       top:50%;
-      width:${PANEL_CARD_WIDTH}px;
-      height:${PANEL_CARD_HEIGHT}px;
+      width:${cardWidth}px;
+      height:${cardHeight}px;
       border-radius:16px;
       border:1px solid rgba(255,255,255,0.24);
       box-shadow:0 8px 18px rgba(0,0,0,0.22);
@@ -468,12 +478,13 @@ function getFanOffset(
   index: number,
   count: number,
   compact = false,
+  mobileBottomSeat = false,
 ): { x: number; y: number; rotate: number } {
   const centered = index - (count - 1) / 2
   const maxCentered = Math.max(1, (count - 1) / 2)
   const edgeProgress = Math.abs(centered) / maxCentered
   const countProgress = Math.min(1, Math.max(0, (count - 1) / 7))
-  const spacing = compact ? 42 : 62
+  const spacing = mobileBottomSeat ? BOTTOM_HAND_MOBILE_SPACING : compact ? 42 : 62
   const edgeDropMax = compact ? 20 : 34
   const rotationStep = compact ? 3.4 : 5
   const edgeDrop = edgeProgress * edgeProgress * edgeDropMax * countProgress
@@ -495,9 +506,11 @@ function renderPanelCardFanWrapper(
   let fanRotateDeg = 0
   const mobileSideFanOutset = isPhoneLayoutViewport() ? 34 : 0
 
+  const mobileBottomSeat = isPhoneLayoutViewport() && visualSeat === 'bottom'
+
   if (visualSeat === 'bottom') {
     fanCenterX = 180
-    fanCenterY = 50
+    fanCenterY = 50 + (mobileBottomSeat ? BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET : 0)
     fanRotateDeg = 0
   } else if (visualSeat === 'top') {
     fanCenterX = 93
@@ -550,6 +563,7 @@ function renderDealtCardFanInPanel(
   const shouldReplaceLocalHandAtReveal =
     dealtHands.replaceLocalHandAtRevealSeats?.[actualSeat] === true
   const compactFan = isPhoneLayoutViewport() && visualSeat !== 'bottom'
+  const mobileBottomSeat = isPhoneLayoutViewport() && visualSeat === 'bottom'
 
   const previousCards = isLocalSeat && dealtHands.previousOwnHand ? dealtHands.previousOwnHand : []
   const previousIndexById = new Map(previousCards.map((c, idx) => [c.id, idx]))
@@ -561,17 +575,17 @@ function renderDealtCardFanInPanel(
     previousCards.length > 0
   ) {
     const previousCardElements = previousCards.map((card, i) => {
-      const fan = getFanOffset(i, previousCards.length, compactFan)
+      const fan = getFanOffset(i, previousCards.length, compactFan, mobileBottomSeat)
       const animStyle = `animation: belot-panel-card-hide-at-reveal 1ms linear ${animDelay}ms both;`
-      return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle)
+      return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle, mobileBottomSeat)
     }).join('')
     const finalCardElements = cards.map((card, i) => {
-      const fan = getFanOffset(i, count, compactFan)
+      const fan = getFanOffset(i, count, compactFan, mobileBottomSeat)
       const isNewCard = !previousIndexById.has(card.id)
       const animStyle = isNewCard
         ? `opacity:0; visibility:hidden; animation: belot-panel-card-hidden-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
         : `opacity:0; visibility:hidden; animation: belot-panel-card-show-at-reveal 1ms linear ${animDelay}ms both;`
-      return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle)
+      return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle, mobileBottomSeat)
     }).join('')
 
     return renderPanelCardFanWrapper(
@@ -582,7 +596,7 @@ function renderDealtCardFanInPanel(
   }
 
   const cardElements = Array.from({ length: count }, (_, i) => {
-    const fanTo = getFanOffset(i, count, compactFan)
+    const fanTo = getFanOffset(i, count, compactFan, mobileBottomSeat)
     const card = isLocalSeat ? (cards[i] ?? null) : null
 
     let animStyle = ''
@@ -596,7 +610,7 @@ function renderDealtCardFanInPanel(
             : `animation: belot-panel-card-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
         } else {
           // Existing card — repositions from its old sorted position to its new sorted position
-          const fanFrom = getFanOffset(prevIdx, previousCards.length, compactFan)
+          const fanFrom = getFanOffset(prevIdx, previousCards.length, compactFan, mobileBottomSeat)
           animStyle = `
             --px-from:${fanFrom.x}px; --py-from:${fanFrom.y}px; --pr-from:${fanFrom.rotate}deg;
             --px-to:${fanTo.x}px; --py-to:${fanTo.y}px; --pr-to:${fanTo.rotate}deg;
@@ -610,7 +624,7 @@ function renderDealtCardFanInPanel(
             ? `opacity:0; visibility:hidden; animation: belot-panel-card-hidden-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
             : `animation: belot-panel-card-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
         } else {
-          const fanFrom = getFanOffset(i, dealtHands.animStartIndex, compactFan)
+          const fanFrom = getFanOffset(i, dealtHands.animStartIndex, compactFan, mobileBottomSeat)
           animStyle = `
             --px-from:${fanFrom.x}px; --py-from:${fanFrom.y}px; --pr-from:${fanFrom.rotate}deg;
             --px-to:${fanTo.x}px; --py-to:${fanTo.y}px; --pr-to:${fanTo.rotate}deg;
@@ -620,7 +634,7 @@ function renderDealtCardFanInPanel(
       }
     }
 
-    return renderPanelDealtCard(card, i, fanTo.x, fanTo.y, fanTo.rotate, animStyle)
+    return renderPanelDealtCard(card, i, fanTo.x, fanTo.y, fanTo.rotate, animStyle, mobileBottomSeat)
   }).join('')
 
   // Fan center relative to each panel's anchor point (in unscaled panel coords)
@@ -635,7 +649,7 @@ function renderDealtCardFanInPanel(
 
   if (visualSeat === 'bottom') {
     fanCenterX = 180
-    fanCenterY = -PANEL_CARD_HEIGHT / 2 - 8 + 200
+    fanCenterY = (-PANEL_CARD_HEIGHT / 2 - 8 + 200) + (mobileBottomSeat ? BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET : 0)
     fanRotateDeg = 0
   } else if (visualSeat === 'top') {
     fanCenterX = 93
@@ -930,6 +944,7 @@ function renderPhraseBubble(
   offsetIndex: number,
   escapeHtml: EscapeHtml,
 ): string {
+  const isMobileLayout = isPhoneLayoutViewport()
   const totalMs = PHRASE_BUBBLE_TOTAL_MS
   const fadeInEnd = Math.round((180 / totalMs) * 100)
   const fadeOutStart = Math.round(((totalMs - 420) / totalMs) * 100)
@@ -963,7 +978,7 @@ function renderPhraseBubble(
           background:#ffffff;
           box-shadow:0 8px 20px rgba(0,0,0,0.24);
           color:#111111;
-          font-size:18px;
+          font-size:${isMobileLayout ? '20px' : '18px'};
           line-height:1.18;
           font-weight:900;
           text-align:center;
@@ -996,6 +1011,7 @@ export function createCuttingSeatPanelHtml(
 ): string {
   const { seat, isBotReplacement } = resolveSeatIdentityForRender(rawSeat, tournamentBotReplacements)
   const isBottomSeat = visualSeat === 'bottom'
+  const isMobileLayout = isPhoneLayoutViewport()
   const isCountdownSeat = seat.seat === countdownSeat
   const isHighlightedSeat = seat.seat === highlightSeat
   const shouldShowCuttingCountdown = isCountdownSeat
@@ -1147,7 +1163,7 @@ export function createCuttingSeatPanelHtml(
               right:18px;
               top:58px;
               color:#f8fafc;
-              font-size:22px;
+              font-size:${isMobileLayout ? '25px' : '22px'};
               font-weight:800;
               line-height:1.1;
               white-space:nowrap;
