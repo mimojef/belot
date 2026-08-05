@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "check:worker-candidate-apply": "tsx scripts/checkGameWorkerCandidateApply.ts && tsx scripts/checkGameWorkerCandidateApplyIntegration.ts",
     "check:matchmaking-blocked-partnership": "tsx scripts/checkMatchmakingBlockedPartnership.ts",
+    "check:matchmaking-preview-bot-fallback": "tsx scripts/checkMatchmakingPreviewBotFallback.ts",
     "check:private-room-seat-randomization": "tsx scripts/checkPrivateRoomSeatRandomization.ts",
     "check:private-room-bot-fill-gating": "tsx scripts/checkPrivateRoomBotFillGating.ts",
     "check:private-room-wait-time-selection": "tsx scripts/checkPrivateRoomWaitTimeSelection.ts",

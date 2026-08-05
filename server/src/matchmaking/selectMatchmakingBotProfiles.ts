@@ -114,6 +114,48 @@ function selectWithoutReplacement<T extends WeightedSelectionCandidate>(
   return selected
 }
 
+// Pure, side-effect-free fallback used only when no createTempBot factory is
+// supplied (the matchmaking "preview" call sites — matchmaking_status,
+// matchmaking_joined — which may fire repeatedly per queue entry while a
+// player waits). Unlike the real room-creation createTempBot callback, this
+// never touches the database: it derives a stable display name and a stable
+// synthetic profileId purely from the seeded RNG, so the exact same
+// (selectionSeed, index) input always yields the exact same output — no
+// randomUUID(), no Math.random(), no temporary profile rows to clean up.
+function createPreviewTempBotProfile(
+  nextRandom: () => number,
+  index: number,
+): MatchmakingBotSelectionProfile {
+  const baseName = pickRandomTempBotName(nextRandom)
+  // Deterministic 6-digit suffix (mirrors the real createTemporaryBotProfile
+  // display format "<Name> <suffix>") so preview names read the same as real
+  // temp-bot names, without depending on Math.random() or DB uniqueness checks.
+  const suffix = 100000 + Math.floor(nextRandom() * 900000)
+  const displayName = `${baseName} ${suffix}`
+  const profileId = `preview-bot-${index}-${suffix}`
+
+  return {
+    profileId,
+    code: 'TEMP_BOT',
+    difficulty: 'normal',
+    behaviorPreset: 'balanced',
+    logicSource: 'existing-core-v1',
+    selectionWeight: 10,
+    yellowCoinsBalance: 55000,
+    identity: {
+      accountId: null,
+      profileId,
+      username: null,
+      displayName,
+      avatarUrl: null,
+      level: 7,
+      rankTitle: 'Новак',
+      skillRating: 1000,
+      gender: null,
+    },
+  }
+}
+
 function mapCatalogProfile(
   profile: BotProfileRecord,
 ): MatchmakingBotSelectionProfile {
@@ -193,12 +235,14 @@ export function selectMatchmakingBotProfiles(
     const tempProfiles: MatchmakingBotSelectionProfile[] = []
 
     if (options.createTempBot) {
+      const createTempBot = options.createTempBot
+
       for (let i = 0; i < needed; i++) {
         const profileId = `temp-bot-${randomUUID()}`
         const baseName = pickRandomTempBotName(nextRandom)
         const completedGamesCount = 25 + Math.floor(nextRandom() * 5)
         const wonGamesCount = Math.round(completedGamesCount * (0.40 + nextRandom() * 0.10))
-        const actualDisplayName = options.createTempBot(stake, profileId, baseName, completedGamesCount, wonGamesCount)
+        const actualDisplayName = createTempBot(stake, profileId, baseName, completedGamesCount, wonGamesCount)
 
         if (!actualDisplayName) {
           continue
@@ -224,6 +268,12 @@ export function selectMatchmakingBotProfiles(
             gender: null,
           },
         })
+      }
+    } else {
+      // Preview-only path (no real room is being created): no DB writes, no
+      // randomUUID()/Math.random() — see createPreviewTempBotProfile above.
+      for (let i = 0; i < needed; i++) {
+        tempProfiles.push(createPreviewTempBotProfile(nextRandom, i))
       }
     }
 
