@@ -34,6 +34,22 @@
  *  6. A valid stake is disabled between "popup open" (client had a stale
  *     copy) and "Създай" (server re-validates at request time) -> rejected
  *     safely (code=private_room_stake_unavailable), no room created.
+ *
+ * Scenario 7 extends the same gating to join_private_room (added when the
+ * create-side check was found not to cover joining an *existing* table):
+ *  7-1. Sufficient level and balance -> join succeeds normally.
+ *  7-2. Insufficient level -> rejected (private_room_level_required),
+ *       message names both required/current level, room/member count
+ *       unaffected (no misleading private_room_updated to the host either).
+ *  7-3. Sufficient level but insufficient balance -> rejected
+ *       (private_room_insufficient_balance), no seat taken.
+ *  7-4. Covered inline in 7-2/7-3: a rejected join never changes member
+ *       count or free-seat count, and the host never sees a room update.
+ *  7-5. A repeated direct WebSocket join with the same ineligible profile
+ *       is rejected again (not just a one-shot frontend-button guard).
+ *  7-6. An already-joined member's reconnect (request_private_rooms_list ->
+ *       reconnectMember, a separate code path) is unaffected by the new
+ *       join-time gate.
  */
 
 import { DatabaseSync } from 'node:sqlite'
@@ -481,8 +497,119 @@ try {
     if (!clean) throw new Error('a private_room_updated frame arrived despite the stake being disabled at request time')
   })
 
+  // ───────────────────────────────────────────────────────────────────────
+  // Scenario 7: join_private_room eligibility gating — same rules as
+  // create_private_room, enforced server-side before membership changes.
+  // ───────────────────────────────────────────────────────────────────────
+  console.log('\n--- Scenario 7: join_private_room eligibility gating ---')
+
+  // Re-enable 5000 (Scenario 6 disabled it) and set minLevel=10 so we can
+  // exercise the level-gate on join without touching the 20000 room rules.
+  await adminUpsertRoom(port, adminCookie, { stakeAmount: 5000, minLevel: 10, prizeAmount: 8000, isEnabled: true })
+
+  const { cookie: joinHostCookie, profileId: joinHostProfileId } = await registerAndLogin(port, 'joinhost', runId)
+  setWalletBalance(isolated.dbFile, joinHostProfileId, 50_000)
+  setProfileLevel(isolated.dbFile, joinHostProfileId, 20)
+  const joinHostClient = await connectWs(port, joinHostCookie, joinHostProfileId)
+
+  send(joinHostClient, { type: 'create_private_room', stake: 5000, isLocked: false, waitMinutes: 15 })
+  const joinHostCreated = await waitForFrame(joinHostClient, (f) => f.type === 'private_room_updated', 10_000, 'join-scenario host create ack')
+  const joinTargetRoomId: string = joinHostCreated.room.id
+
+  // [7-2] insufficient level.
+  const { cookie: joinLowLevelCookie, profileId: joinLowLevelProfileId } = await registerAndLogin(port, 'joinlowlevel', runId)
+  setWalletBalance(isolated.dbFile, joinLowLevelProfileId, 50_000)
+  setProfileLevel(isolated.dbFile, joinLowLevelProfileId, 5)
+  const joinLowLevelClient = await connectWs(port, joinLowLevelCookie, joinLowLevelProfileId)
+
+  joinHostClient.frames.length = 0
+  send(joinLowLevelClient, { type: 'join_private_room', privateRoomId: joinTargetRoomId })
+
+  await check('[7-2a] join_private_room with insufficient level is rejected with private_room_level_required', async () => {
+    const errorFrame = await waitForFrame(joinLowLevelClient, (f) => f.type === 'error', 5_000, 'join insufficient level rejection')
+    if (errorFrame.code !== 'private_room_level_required') throw new Error(`code=${errorFrame.code}, message=${errorFrame.message}`)
+    if (!errorFrame.message.includes('10')) throw new Error(`message missing required level: ${errorFrame.message}`)
+    if (!errorFrame.message.includes('5')) throw new Error(`message missing current level: ${errorFrame.message}`)
+  })
+
+  await check('[7-2b] the room is untouched: no private_room_updated reaches the rejected joiner', async () => {
+    const clean = await noFrameArrives(joinLowLevelClient, (f) => f.type === 'private_room_updated')
+    if (!clean) throw new Error('a private_room_updated frame arrived despite insufficient level')
+  })
+
+  await check('[7-2c/4] the host does not see membership change (no misleading room update, member count stays 1)', async () => {
+    const clean = await noFrameArrives(joinHostClient, (f) => f.type === 'private_room_updated')
+    if (!clean) throw new Error('host received a private_room_updated for a rejected join — membership/free-seat count would look changed')
+  })
+
+  // [7-3] sufficient level, insufficient balance.
+  const { cookie: joinPoorCookie, profileId: joinPoorProfileId } = await registerAndLogin(port, 'joinpoor', runId)
+  setWalletBalance(isolated.dbFile, joinPoorProfileId, 4_999)
+  setProfileLevel(isolated.dbFile, joinPoorProfileId, 20)
+  const joinPoorClient = await connectWs(port, joinPoorCookie, joinPoorProfileId)
+
+  joinHostClient.frames.length = 0
+  send(joinPoorClient, { type: 'join_private_room', privateRoomId: joinTargetRoomId })
+
+  await check('[7-3a] join_private_room with insufficient balance is rejected with private_room_insufficient_balance', async () => {
+    const errorFrame = await waitForFrame(joinPoorClient, (f) => f.type === 'error', 5_000, 'join insufficient balance rejection')
+    if (errorFrame.code !== 'private_room_insufficient_balance') throw new Error(`code=${errorFrame.code}, message=${errorFrame.message}`)
+  })
+
+  await check('[7-3b/4] no room is created/updated and no seat is taken for the insufficient-balance joiner', async () => {
+    const clean = await noFrameArrives(joinPoorClient, (f) => f.type === 'private_room_updated')
+    if (!clean) throw new Error('a private_room_updated frame arrived despite insufficient balance')
+    const hostClean = await noFrameArrives(joinHostClient, (f) => f.type === 'private_room_updated')
+    if (!hostClean) throw new Error('host received a private_room_updated for a rejected join')
+  })
+
+  // [7-5] direct/manual WebSocket join with the same invalid profile is
+  // rejected too — not just the frontend button path (re-send, same result).
+  joinPoorClient.frames.length = 0
+  send(joinPoorClient, { type: 'join_private_room', privateRoomId: joinTargetRoomId })
+  await check('[7-5] a repeated direct WS join attempt with the same ineligible profile is rejected again', async () => {
+    const errorFrame = await waitForFrame(joinPoorClient, (f) => f.type === 'error', 5_000, 'repeated direct join rejection')
+    if (errorFrame.code !== 'private_room_insufficient_balance') throw new Error(`code=${errorFrame.code}, message=${errorFrame.message}`)
+  })
+
+  // [7-1] eligible joiner succeeds normally.
+  const { cookie: joinOkCookie, profileId: joinOkProfileId } = await registerAndLogin(port, 'joinok', runId)
+  setWalletBalance(isolated.dbFile, joinOkProfileId, 50_000)
+  setProfileLevel(isolated.dbFile, joinOkProfileId, 20)
+  const joinOkClient = await connectWs(port, joinOkCookie, joinOkProfileId)
+
+  send(joinOkClient, { type: 'join_private_room', privateRoomId: joinTargetRoomId })
+
+  await check('[7-1] an eligible joiner (sufficient level and balance) joins successfully', async () => {
+    const updated = await waitForFrame(joinOkClient, (f) => f.type === 'private_room_updated' && f.room.id === joinTargetRoomId, 10_000, 'eligible join ack')
+    if (updated.room.members.length !== 2) throw new Error(`expected 2 members after the only successful join, got ${updated.room.members.length}`)
+  })
+
+  await check('[7-1b] the previously rejected joins never actually added a member — final count is exactly 2 (host + the one eligible joiner)', async () => {
+    const finalState = await waitForFrame(joinHostClient, (f) => f.type === 'private_room_updated' && f.room.members.length === 2, 10_000, 'host sees exactly 2 members')
+    if (finalState.room.members.length !== 2) throw new Error(`members.length=${finalState.room.members.length}`)
+  })
+
+  // [7-6] reconnect for an already-joined member is unaffected by the new
+  // eligibility gate (reconnectMember is a separate code path from
+  // join_private_room and is never routed through checkPrivateRoomStakeEligibility).
+  await check('[7-6] an already-joined member can still reconnect (request_private_rooms_list -> reconnectMember) without the new join gate interfering', async () => {
+    joinOkClient.ws.close()
+    await new Promise<void>((r) => joinOkClient.ws.once('close', () => r()))
+    await sleep(300)
+
+    const reconnected = await connectWs(port, joinOkCookie, joinOkProfileId)
+    send(reconnected, { type: 'request_private_rooms_list' })
+    const updated = await waitForFrame(reconnected, (f) => f.type === 'private_room_updated' && f.room.id === joinTargetRoomId, 10_000, 'reconnect restores private room membership')
+    if (updated.room.members.length !== 2) throw new Error(`expected 2 members preserved after reconnect, got ${updated.room.members.length}`)
+    try { reconnected.ws.close() } catch { /* ignore */ }
+  })
+
   // ─── Cleanup ──────────────────────────────────────────────────────────
-  for (const c of [unconfClient, observer, poorClient, lowLevelClient, hostClient, guestClient, staleClient]) {
+  for (const c of [
+    unconfClient, observer, poorClient, lowLevelClient, hostClient, guestClient, staleClient,
+    joinHostClient, joinLowLevelClient, joinPoorClient, joinOkClient,
+  ]) {
     try { c.ws.close() } catch { /* ignore */ }
   }
 } finally {

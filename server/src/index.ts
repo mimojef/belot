@@ -11434,6 +11434,22 @@ wsServer.on('connection', (socket, request) => {
           .listRooms()
           .find((r) => r.id === message.privateRoomId)
 
+        if (targetPrivateRoom !== undefined) {
+          const eligibility = checkPrivateRoomStakeEligibility(
+            latestConnection.profileId,
+            publicProfile.level,
+            targetPrivateRoom.stake,
+          )
+          if (!eligibility.ok) {
+            safeSendToConnection(connection.id, {
+              type: 'error',
+              message: eligibility.message,
+              code: eligibility.code,
+            })
+            return
+          }
+        }
+
         if (targetPrivateRoom?.kind === 'open') {
           const memberCount = targetPrivateRoom.members.length
           // Seats assigned in order: bottom(0), right(1), top(2), left(3)
