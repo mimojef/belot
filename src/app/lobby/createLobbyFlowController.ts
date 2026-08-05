@@ -3541,6 +3541,30 @@ export function createLobbyFlowController(
         render()
       },
       onPrivateRoomCreate: (stake, isLocked, waitMinutes) => {
+        const stakeRoom = state.matchRooms.find((r) => r.stakeAmount === stake)
+        if (!stakeRoom || !stakeRoom.isEnabled) {
+          state.privateRoomsCreatePopupOpen = false
+          state.privateRoomInfoText = 'Този залог вече не е наличен. Изберете друг залог.'
+          render()
+          return
+        }
+
+        const authSession = options.getAuthSession?.() ?? null
+        const currentLevel = authSession?.profile.level ?? 1
+        if (currentLevel < stakeRoom.minLevel) {
+          state.privateRoomsCreatePopupOpen = false
+          openLevelLockedStakePopup(stakeRoom.minLevel, currentLevel)
+          return
+        }
+
+        const balance = authSession?.profile.yellowCoinsBalance ?? 0
+        if (balance < stake) {
+          state.privateRoomsCreatePopupOpen = false
+          state.lowCoinsModalOpen = true
+          render()
+          return
+        }
+
         state.privateRoomsCreatePopupOpen = false
         options.onPrivateRoomCreate?.(stake, isLocked, waitMinutes)
       },

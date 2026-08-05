@@ -1482,6 +1482,51 @@ function broadcastPrivateRoomsListToLobbyConnections(): void {
   }
 }
 
+type PrivateRoomStakeEligibilityResult =
+  | { ok: true }
+  | {
+      ok: false
+      code: 'private_room_stake_unavailable' | 'private_room_insufficient_balance' | 'private_room_level_required'
+      message: string
+    }
+
+// Преизползва същите проверки като join_matchmaking (stake config
+// активна/съществуваща, минимално ниво, достатъчен баланс), за да не се
+// стигне до "счупена" частна маса, която никога не може да потегли.
+function checkPrivateRoomStakeEligibility(
+  profileId: string,
+  playerLevel: number | null,
+  stake: number,
+): PrivateRoomStakeEligibilityResult {
+  const room = matchRoomsStore.getRoom(stake)
+  if (!room || !room.isEnabled) {
+    return {
+      ok: false,
+      code: 'private_room_stake_unavailable',
+      message: 'Този залог вече не е наличен. Изберете друг залог.',
+    }
+  }
+
+  const currentLevel = playerLevel ?? 1
+  if (currentLevel < room.minLevel) {
+    return {
+      ok: false,
+      code: 'private_room_level_required',
+      message: `За залог ${room.stakeAmount} се изисква ниво ${room.minLevel}. Вашето ниво е ${currentLevel}.`,
+    }
+  }
+
+  if (!matchEconomyStore.hasEnoughBalance(profileId, stake)) {
+    return {
+      ok: false,
+      code: 'private_room_insufficient_balance',
+      message: `Недостатъчен баланс за маса със залог ${room.stakeAmount} жълтици.`,
+    }
+  }
+
+  return { ok: true }
+}
+
 function broadcastPrivateRoomCreatedNotice(input: {
   creatorProfileId: string
   creatorDisplayName: string
@@ -11318,6 +11363,20 @@ wsServer.on('connection', (socket, request) => {
 
         if (publicProfile === null) {
           safeSendToConnection(connection.id, { type: 'error', message: 'Профилът не беше намерен.' })
+          return
+        }
+
+        const eligibility = checkPrivateRoomStakeEligibility(
+          latestConnection.profileId,
+          publicProfile.level,
+          message.stake,
+        )
+        if (!eligibility.ok) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: eligibility.message,
+            code: eligibility.code,
+          })
           return
         }
 

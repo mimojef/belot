@@ -430,6 +430,10 @@ export type PongMessage = {
 export type ErrorMessage = {
   type: 'error'
   message: string
+  code?:
+    | 'private_room_stake_unavailable'
+    | 'private_room_insufficient_balance'
+    | 'private_room_level_required'
 }
 
 export type GuestTrialErrorMessage = {

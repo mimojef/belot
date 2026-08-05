@@ -15,6 +15,7 @@
     "check:private-room-waiting-chat": "tsx scripts/checkPrivateRoomWaitingChat.ts",
     "check:private-table-end-game-origin": "tsx scripts/checkPrivateTableEndGameOrigin.ts",
     "check:private-room-ws-round-trip": "tsx scripts/checkPrivateRoomWebSocketRoundTrip.ts --server-root=.",
+    "check:private-room-stake-eligibility": "tsx scripts/checkPrivateRoomStakeEligibility.ts --server-root=.",
     "check:private-room-reconnect-race-guard": "tsx scripts/checkPrivateRoomReconnectRaceGuard.ts --server-root=.",
     "check:private-room-reconnect-client-resync": "tsx scripts/checkPrivateRoomReconnectClientResync.ts",
     "check:voluntary-leave-chat-gate": "tsx scripts/checkVoluntaryLeaveChatGate.ts --server-root=.",

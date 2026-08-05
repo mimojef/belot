@@ -64,6 +64,15 @@ function isSupportedStake(value: unknown): value is MatchStake {
   )
 }
 
+// create_private_room намерено допуска всяко положително цяло число тук —
+// само формата се проверява. Дали залогът реално е конфигуриран/активен/
+// покрит от баланс и ниво се решава от checkPrivateRoomStakeEligibility в
+// index.ts, за да може клиентът да получи структуриран error code (напр.
+// private_room_stake_unavailable) вместо генеричен "Invalid message payload".
+function isPositiveIntegerStake(value: unknown): value is MatchStake {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+}
+
 function isSeat(value: unknown): value is Seat {
   return typeof value === 'string' && SERVER_SEAT_ORDER.includes(value as Seat)
 }
@@ -409,7 +418,7 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
     }
 
     if (parsed.type === 'create_private_room') {
-      if (!isSupportedStake(parsed.stake)) {
+      if (!isPositiveIntegerStake(parsed.stake)) {
         return null
       }
 

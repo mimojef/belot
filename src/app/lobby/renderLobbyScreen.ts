@@ -7910,12 +7910,14 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
   // отделния екран на чакалнята ('private-room-waiting'). Списъкът показва
   // само наличните маси и бутона "Влез" — без вградено "Моята маса" табче
   // и без чат под редовете (виж task спецификацията).
+  const hasNoConfiguredStakes = !state.matchRoomsLoading && !state.matchRooms.some((r) => r.isEnabled)
+  const createBtnDisabled = hasMyRoom || hasNoConfiguredStakes
   const createBtnHtml = `
-      <button type="button" data-private-rooms-create-open="1" ${hasMyRoom ? 'disabled' : ''} style="
+      <button type="button" data-private-rooms-create-open="1" ${createBtnDisabled ? 'disabled' : ''} style="
         padding:8px 20px;background:rgba(167,139,250,0.18);border:1px solid rgba(167,139,250,0.55);
         border-radius:10px;color:#a78bfa;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;
-        opacity:${hasMyRoom ? '0.5' : '1'};
-      ">+ Създай маса</button>
+        opacity:${createBtnDisabled ? '0.5' : '1'};
+      " ${hasNoConfiguredStakes ? 'title="В момента няма налични конфигурирани залози за частни маси."' : ''}>+ Създай маса</button>
     `
 
   const allTabContent = allRooms.length > 0
@@ -7946,9 +7948,44 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
 function renderPrivateRoomsCreatePopup(state: LobbyScreenState): string {
   if (!state.privateRoomsCreatePopupOpen) return ''
 
-  const SUPPORTED_STAKES: MatchStake[] = [5000, 8000, 10000, 15000, 20000]
+  const AVAILABLE_STAKES: MatchStake[] = state.matchRooms
+    .filter((r) => r.isEnabled)
+    .map((r) => r.stakeAmount)
   const WAIT_MINUTES_OPTIONS: Array<5 | 10 | 15 | 30> = [5, 10, 15, 30]
   const DEFAULT_WAIT_MINUTES = 15
+
+  if (AVAILABLE_STAKES.length === 0) {
+    return `
+      <div data-private-rooms-create-backdrop="1" style="
+        position:fixed;inset:0;z-index:9500;
+        background:rgba(0,0,0,0.7);
+        display:flex;align-items:center;justify-content:center;
+        padding:16px;
+      ">
+        <div style="
+          background:#1a1a2e;
+          border:1px solid rgba(167,139,250,0.4);
+          border-radius:16px;
+          width:380px;
+          max-width:100%;
+          padding:28px;
+          box-shadow:0 8px 40px rgba(0,0,0,0.7);
+        ">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+            <div style="font-size:17px;font-weight:900;color:#a78bfa;">Нова маса</div>
+            <button type="button" data-private-rooms-create-close="1" style="
+              width:30px;height:30px;border:none;background:rgba(255,255,255,0.08);
+              border-radius:7px;color:rgba(255,255,255,0.6);font-size:18px;font-weight:700;
+              cursor:pointer;display:flex;align-items:center;justify-content:center;
+            ">×</button>
+          </div>
+          <div style="font-size:14px;color:rgba(255,255,255,0.6);text-align:center;padding:12px 0 4px;">
+            В момента няма налични конфигурирани залози за частни маси.
+          </div>
+        </div>
+      </div>
+    `
+  }
 
   return `
     <div data-private-rooms-create-backdrop="1" style="
@@ -7982,7 +8019,7 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState): string {
               border:1px solid rgba(255,255,255,0.2);border-radius:9px;color:#fff;font-size:14px;
               color-scheme:dark;
             ">
-              ${SUPPORTED_STAKES.map((s) => `<option value="${s}">${formatStake(s)} жълтици</option>`).join('')}
+              ${AVAILABLE_STAKES.map((s) => `<option value="${s}">${formatStake(s)} жълтици</option>`).join('')}
             </select>
           </div>
           <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
@@ -11256,7 +11293,8 @@ export function renderLobbyScreen(
       e.preventDefault()
       const form = e.currentTarget as HTMLFormElement
       const data = new FormData(form)
-      const stake = Number(data.get('stake') ?? 5000) as MatchStake
+      const stake = Number(data.get('stake')) as MatchStake
+      if (!Number.isInteger(stake) || stake < 1) return
       const isLocked = (data.get('isLocked') ?? null) !== null
       const rawWaitMinutes = Number(data.get('waitMinutes'))
       const waitMinutes: 5 | 10 | 15 | 30 = [5, 10, 15, 30].includes(rawWaitMinutes)
