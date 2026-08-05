@@ -9,14 +9,16 @@ import {
   getVisualSeatForLocalPerspective,
 } from './cuttingSeatLayout'
 import { CUTTING_COUNTDOWN_MS } from './cuttingVisualCountdown'
-import {
-  ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT,
-  BOTTOM_HAND_MOBILE_CARD_WIDTH,
-  BOTTOM_HAND_MOBILE_CARD_HEIGHT,
-  BOTTOM_HAND_MOBILE_SPACING,
-  BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET,
-} from '../activeRoomShared'
+import { ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT } from '../activeRoomShared'
 import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
+import {
+  BOTTOM_HAND_MOBILE_MAX_CARD_WIDTH,
+  BOTTOM_HAND_MOBILE_MAX_CARD_HEIGHT,
+  BOTTOM_HAND_MOBILE_MAX_SPACING,
+  BOTTOM_HAND_MOBILE_MAX_ROTATION_STEP,
+  BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET,
+  type BottomHandMobileGeometrySnapshot,
+} from '../bottomHandMobileGeometry'
 
 type EscapeHtml = (value: string) => string
 
@@ -35,6 +37,11 @@ export type DealtHandsData = {
   replaceLocalHandAtRevealSeats?: Partial<Record<Seat, boolean>>
   maxCardsPerSeat: number
   animStartIndex: number
+  // Предварително изчислен, кеширан за целия round — виж
+  // bottomHandMobileGeometry.ts. Null на desktop / когато все още не е
+  // изчислен (getFanOffset/renderPanelDealtCard падат back към MAX
+  // константите в такъв случай).
+  mobileBottomHandGeometry?: BottomHandMobileGeometrySnapshot | null
 }
 
 export type SeatBidBubble = {
@@ -446,10 +453,11 @@ function renderPanelDealtCard(
   rotate: number,
   animStyle: string,
   mobileBottomSeat = false,
+  mobileGeometry: BottomHandMobileGeometrySnapshot | null = null,
 ): string {
   const content = card !== null ? renderPanelCardFront(card) : renderPanelCardBack()
-  const cardWidth = mobileBottomSeat ? BOTTOM_HAND_MOBILE_CARD_WIDTH : PANEL_CARD_WIDTH
-  const cardHeight = mobileBottomSeat ? BOTTOM_HAND_MOBILE_CARD_HEIGHT : PANEL_CARD_HEIGHT
+  const cardWidth = mobileBottomSeat ? (mobileGeometry?.cardWidth ?? BOTTOM_HAND_MOBILE_MAX_CARD_WIDTH) : PANEL_CARD_WIDTH
+  const cardHeight = mobileBottomSeat ? (mobileGeometry?.cardHeight ?? BOTTOM_HAND_MOBILE_MAX_CARD_HEIGHT) : PANEL_CARD_HEIGHT
   return `
     <div style="
       position:absolute;
@@ -479,14 +487,30 @@ function getFanOffset(
   count: number,
   compact = false,
   mobileBottomSeat = false,
+  mobileGeometry: BottomHandMobileGeometrySnapshot | null = null,
 ): { x: number; y: number; rotate: number } {
+  // Центрирането е спрямо ТЕКУЩО ВИДИМИЯ `count` (visibleCardCount — 3/5/8),
+  // не спрямо фиксирания target от 8 слота — иначе first-3/next-2 карти биха
+  // стояли в левите слотове на бъдещото 8-картово ветрило вместо да са
+  // центрирани спрямо реалния си брой. cardWidth/cardHeight/spacing/
+  // rotationStep обаче ОСТАВАТ фиксирани от 8-картовия mobileGeometry
+  // snapshot (виж bottomHandMobileGeometry.ts) — само позиционирането
+  // (centered/maxCentered/edgeProgress) следва visibleCardCount. Вече
+  // показани карти могат еднократно да заемат новите си центрирани позиции
+  // при следваща порция раздадени карти (belot-panel-card-reposition
+  // анимацията по-долу) — това е нормалната dealing анимация, не corrective
+  // render.
   const centered = index - (count - 1) / 2
   const maxCentered = Math.max(1, (count - 1) / 2)
   const edgeProgress = Math.abs(centered) / maxCentered
-  const countProgress = Math.min(1, Math.max(0, (count - 1) / 7))
-  const spacing = mobileBottomSeat ? BOTTOM_HAND_MOBILE_SPACING : compact ? 42 : 62
+  const countProgress = mobileBottomSeat ? 1 : Math.min(1, Math.max(0, (count - 1) / 7))
+  const spacing = mobileBottomSeat
+    ? (mobileGeometry?.spacing ?? BOTTOM_HAND_MOBILE_MAX_SPACING)
+    : compact ? 42 : 62
   const edgeDropMax = compact ? 20 : 34
-  const rotationStep = compact ? 3.4 : 5
+  const rotationStep = mobileBottomSeat
+    ? (mobileGeometry?.rotationStep ?? BOTTOM_HAND_MOBILE_MAX_ROTATION_STEP)
+    : compact ? 3.4 : 5
   const edgeDrop = edgeProgress * edgeProgress * edgeDropMax * countProgress
   return {
     x: centered * spacing,
@@ -564,6 +588,7 @@ function renderDealtCardFanInPanel(
     dealtHands.replaceLocalHandAtRevealSeats?.[actualSeat] === true
   const compactFan = isPhoneLayoutViewport() && visualSeat !== 'bottom'
   const mobileBottomSeat = isPhoneLayoutViewport() && visualSeat === 'bottom'
+  const mobileGeometry = mobileBottomSeat ? (dealtHands.mobileBottomHandGeometry ?? null) : null
 
   const previousCards = isLocalSeat && dealtHands.previousOwnHand ? dealtHands.previousOwnHand : []
   const previousIndexById = new Map(previousCards.map((c, idx) => [c.id, idx]))
@@ -575,17 +600,17 @@ function renderDealtCardFanInPanel(
     previousCards.length > 0
   ) {
     const previousCardElements = previousCards.map((card, i) => {
-      const fan = getFanOffset(i, previousCards.length, compactFan, mobileBottomSeat)
+      const fan = getFanOffset(i, previousCards.length, compactFan, mobileBottomSeat, mobileGeometry)
       const animStyle = `animation: belot-panel-card-hide-at-reveal 1ms linear ${animDelay}ms both;`
-      return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle, mobileBottomSeat)
+      return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle, mobileBottomSeat, mobileGeometry)
     }).join('')
     const finalCardElements = cards.map((card, i) => {
-      const fan = getFanOffset(i, count, compactFan, mobileBottomSeat)
+      const fan = getFanOffset(i, count, compactFan, mobileBottomSeat, mobileGeometry)
       const isNewCard = !previousIndexById.has(card.id)
       const animStyle = isNewCard
         ? `opacity:0; visibility:hidden; animation: belot-panel-card-hidden-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
         : `opacity:0; visibility:hidden; animation: belot-panel-card-show-at-reveal 1ms linear ${animDelay}ms both;`
-      return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle, mobileBottomSeat)
+      return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle, mobileBottomSeat, mobileGeometry)
     }).join('')
 
     return renderPanelCardFanWrapper(
@@ -596,7 +621,7 @@ function renderDealtCardFanInPanel(
   }
 
   const cardElements = Array.from({ length: count }, (_, i) => {
-    const fanTo = getFanOffset(i, count, compactFan, mobileBottomSeat)
+    const fanTo = getFanOffset(i, count, compactFan, mobileBottomSeat, mobileGeometry)
     const card = isLocalSeat ? (cards[i] ?? null) : null
 
     let animStyle = ''
@@ -610,7 +635,7 @@ function renderDealtCardFanInPanel(
             : `animation: belot-panel-card-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
         } else {
           // Existing card — repositions from its old sorted position to its new sorted position
-          const fanFrom = getFanOffset(prevIdx, previousCards.length, compactFan, mobileBottomSeat)
+          const fanFrom = getFanOffset(prevIdx, previousCards.length, compactFan, mobileBottomSeat, mobileGeometry)
           animStyle = `
             --px-from:${fanFrom.x}px; --py-from:${fanFrom.y}px; --pr-from:${fanFrom.rotate}deg;
             --px-to:${fanTo.x}px; --py-to:${fanTo.y}px; --pr-to:${fanTo.rotate}deg;
@@ -624,7 +649,7 @@ function renderDealtCardFanInPanel(
             ? `opacity:0; visibility:hidden; animation: belot-panel-card-hidden-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
             : `animation: belot-panel-card-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
         } else {
-          const fanFrom = getFanOffset(i, dealtHands.animStartIndex, compactFan, mobileBottomSeat)
+          const fanFrom = getFanOffset(i, dealtHands.animStartIndex, compactFan, mobileBottomSeat, mobileGeometry)
           animStyle = `
             --px-from:${fanFrom.x}px; --py-from:${fanFrom.y}px; --pr-from:${fanFrom.rotate}deg;
             --px-to:${fanTo.x}px; --py-to:${fanTo.y}px; --pr-to:${fanTo.rotate}deg;
@@ -634,7 +659,7 @@ function renderDealtCardFanInPanel(
       }
     }
 
-    return renderPanelDealtCard(card, i, fanTo.x, fanTo.y, fanTo.rotate, animStyle, mobileBottomSeat)
+    return renderPanelDealtCard(card, i, fanTo.x, fanTo.y, fanTo.rotate, animStyle, mobileBottomSeat, mobileGeometry)
   }).join('')
 
   // Fan center relative to each panel's anchor point (in unscaled panel coords)

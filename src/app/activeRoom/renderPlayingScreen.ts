@@ -21,10 +21,6 @@ import {
   ACTIVE_ROOM_STAGE_WIDTH,
   ACTIVE_ROOM_VIEWPORT_HORIZONTAL_PADDING,
   ACTIVE_ROOM_VIEWPORT_VERTICAL_PADDING,
-  BOTTOM_HAND_MOBILE_CARD_WIDTH,
-  BOTTOM_HAND_MOBILE_CARD_HEIGHT,
-  BOTTOM_HAND_MOBILE_SPACING,
-  BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET,
   escapeHtml,
 } from './activeRoomShared'
 import {
@@ -52,6 +48,14 @@ import {
   renderDeclarationPrompt,
 } from './declarations/renderDeclarationPrompt'
 import { getViewportStageMetrics, isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
+import {
+  BOTTOM_HAND_MOBILE_MAX_CARD_WIDTH,
+  BOTTOM_HAND_MOBILE_MAX_CARD_HEIGHT,
+  BOTTOM_HAND_MOBILE_MAX_SPACING,
+  BOTTOM_HAND_MOBILE_MAX_ROTATION_STEP,
+  BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET,
+  type BottomHandMobileGeometrySnapshot,
+} from './bottomHandMobileGeometry'
 
 const PLAY_CARD_ENTRY_ANIMATION_MS = 400
 const COMPLETED_TRICK_PREVIEW_MS = 220
@@ -806,12 +810,21 @@ function getPlayOrderSpread(index: number): {
   }
 }
 
-function getBottomHandOffset(index: number, count: number): {
+function getBottomHandOffset(
+  index: number,
+  count: number,
+  mobileGeometry: BottomHandMobileGeometrySnapshot | null = null,
+): {
   x: number
   y: number
   rotate: number
 } {
-  const spreadStep = isPhoneLayoutViewport() ? BOTTOM_HAND_MOBILE_SPACING : 62
+  const isMobile = isPhoneLayoutViewport()
+  // spacing/rotationStep идват от същия предварително изчислен snapshot,
+  // ползван от dealing/bidding renderer-а (getFanOffset в
+  // renderCuttingSeatPanels.ts), за да няма скок при last-3 -> playing.
+  const spreadStep = isMobile ? (mobileGeometry?.spacing ?? BOTTOM_HAND_MOBILE_MAX_SPACING) : 62
+  const rotationStep = isMobile ? (mobileGeometry?.rotationStep ?? BOTTOM_HAND_MOBILE_MAX_ROTATION_STEP) : 5
   const centeredIndex = index - (count - 1) / 2
   const maxCentered = Math.max(1, (count - 1) / 2)
   const edgeProgress = Math.abs(centeredIndex) / maxCentered
@@ -820,7 +833,7 @@ function getBottomHandOffset(index: number, count: number): {
   return {
     x: centeredIndex * spreadStep,
     y: edgeDrop,
-    rotate: centeredIndex * 5,
+    rotate: centeredIndex * rotationStep,
   }
 }
 
@@ -1064,19 +1077,20 @@ function renderBottomHandOverlay(options: {
   isMyTurn: boolean
   stageScale: number
   hoveredHandCardId: string | null
+  mobileBottomHandGeometry: BottomHandMobileGeometrySnapshot | null
 }): string {
-  const { cards, validCardIds, isMyTurn, stageScale, hoveredHandCardId } = options
+  const { cards, validCardIds, isMyTurn, stageScale, hoveredHandCardId, mobileBottomHandGeometry } = options
   const isMobileLayout = isPhoneLayoutViewport()
   const bottomInset = isMobileLayout ? ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT : 0
-  const handCardWidth = isMobileLayout ? BOTTOM_HAND_MOBILE_CARD_WIDTH : HAND_W
-  const handCardHeight = isMobileLayout ? BOTTOM_HAND_MOBILE_CARD_HEIGHT : HAND_H
+  const handCardWidth = isMobileLayout ? (mobileBottomHandGeometry?.cardWidth ?? BOTTOM_HAND_MOBILE_MAX_CARD_WIDTH) : HAND_W
+  const handCardHeight = isMobileLayout ? (mobileBottomHandGeometry?.cardHeight ?? BOTTOM_HAND_MOBILE_MAX_CARD_HEIGHT) : HAND_H
 
   if (cards.length === 0) {
     return ''
   }
 
   const cardButtons = cards.map((card, index) => {
-    const offset = getBottomHandOffset(index, cards.length)
+    const offset = getBottomHandOffset(index, cards.length, isMobileLayout ? mobileBottomHandGeometry : null)
     const baseTransform = `translate(-50%,-50%) translate(${offset.x}px,${offset.y}px) rotate(${offset.rotate}deg)`
     const isValid = !isMyTurn || validCardIds === null || validCardIds.includes(card.id)
     const canClick = isMyTurn && isValid
@@ -1397,6 +1411,11 @@ export type RenderPlayingScreenOptions = {
   emojiBubbles?: Partial<Record<Seat, SeatEmojiBubble>> | null
   phraseBubbles?: Partial<Record<Seat, SeatPhraseBubble>> | null
   tournamentBotReplacements?: TournamentBotReplacementSnapshot[] | null
+  // Предварително изчислен, кеширан за целия round snapshot — виж
+  // bottomHandMobileGeometry.ts и dealing/bidding renderer-а
+  // (renderCuttingSeatPanels.ts), който ползва СЪЩИЯ snapshot за
+  // last-3 -> playing без видим скок.
+  mobileBottomHandGeometry?: BottomHandMobileGeometrySnapshot | null
   cache: PlayingUiCache
 }
 
@@ -1418,6 +1437,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     emojiBubbles,
     phraseBubbles,
     tournamentBotReplacements,
+    mobileBottomHandGeometry,
     cache,
   } = options
 
@@ -1752,6 +1772,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         isMyTurn,
         stageScale,
         hoveredHandCardId: cache.hoveredHandCardId,
+        mobileBottomHandGeometry: mobileBottomHandGeometry ?? null,
       })}
       ${renderScoreHud({
         game,

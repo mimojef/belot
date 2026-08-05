@@ -49,7 +49,12 @@ import {
   resetPlayingUiCache,
   computeNextLastKnownWinningBid,
 } from './activeRoomShared'
-import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
+import { isPhoneLayoutViewport, getRealViewportWidthCssPx } from '../../ui/layout/viewportStage'
+import {
+  getBottomHandMobileGeometry,
+  BOTTOM_HAND_MOBILE_TARGET_CARD_COUNT,
+  type BottomHandMobileGeometrySnapshot,
+} from './bottomHandMobileGeometry'
 import {
   getCuttingCycleKey,
   getDealFirstThreePhaseKey,
@@ -154,6 +159,34 @@ export function createActiveRoomFlowController(
   const biddingUiState: BiddingUiState = createBiddingUiState()
   const emojiReactionUiState: EmojiReactionUiState = createEmojiReactionUiState()
   const phraseReactionUiState: PhraseReactionUiState = createPhraseReactionUiState()
+
+  // Кеширан bottom-hand mobile geometry snapshot — виж bottomHandMobileGeometry.ts.
+  // Преизчислява се СИНХРОННО, само когато реалната CSS viewport ширина се
+  // промени (истинска resize/orientation промяна) — не при всеки render(),
+  // не при нова карта/фаза/server съобщение, не при height-only browser
+  // toolbar промяна (тя не пипа ширината, само височината). Затова стои
+  // непроменен през first-3 -> next-2 -> bidding -> last-3 -> playing.
+  let bottomHandMobileGeometryCache: {
+    viewportWidthCssPx: number
+    snapshot: BottomHandMobileGeometrySnapshot
+  } | null = null
+
+  function getCachedBottomHandMobileGeometry(stageScale: number): BottomHandMobileGeometrySnapshot {
+    const viewportWidthCssPx = getRealViewportWidthCssPx()
+    if (
+      bottomHandMobileGeometryCache !== null &&
+      bottomHandMobileGeometryCache.viewportWidthCssPx === viewportWidthCssPx
+    ) {
+      return bottomHandMobileGeometryCache.snapshot
+    }
+    const snapshot = getBottomHandMobileGeometry({
+      viewportWidthCssPx,
+      stageScale,
+      targetCardCount: BOTTOM_HAND_MOBILE_TARGET_CARD_COUNT,
+    })
+    bottomHandMobileGeometryCache = { viewportWidthCssPx, snapshot }
+    return snapshot
+  }
   let emojiPickerOpen = false
   let phrasePickerOpen = false
   const EMOJI_BUBBLE_DURATION_MS = 4000
@@ -2281,6 +2314,9 @@ export function createActiveRoomFlowController(
           ? 'deal-next-2'
           : 'deal-first-3'
     const { stageScale, scaledStageWidth, scaledStageHeight } = getActiveRoomStageMetrics()
+    const mobileBottomHandGeometry = isPhoneLayoutViewport()
+      ? getCachedBottomHandMobileGeometry(stageScale)
+      : null
     const scoreHudHtml = activeRoomState.game
       ? renderScoreHud({
           game: activeRoomState.game,
@@ -2818,6 +2854,7 @@ export function createActiveRoomFlowController(
                   return compensated
                 })()
               : null,
+            mobileBottomHandGeometry,
           }
         : null
 
@@ -3024,6 +3061,7 @@ export function createActiveRoomFlowController(
         maxCardsPerSeat: 5,
         animStartIndex: 0,
         seatAnimDelays: null,
+        mobileBottomHandGeometry,
       }
 
       const bidBubbles = getBidBubblesForRender()
@@ -3420,6 +3458,7 @@ export function createActiveRoomFlowController(
         emojiBubbles: getEmojiBubblesForRender(),
         phraseBubbles: getPhraseBubblesForRender(),
         tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
+        mobileBottomHandGeometry,
         cache: playingCache,
       } satisfies RenderPlayingScreenOptions)
     } else if (activeRoomState.game !== null) {
