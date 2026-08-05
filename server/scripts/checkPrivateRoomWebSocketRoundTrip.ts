@@ -637,8 +637,50 @@ try {
     await waitForFrame(hostD, (f) => f.type === 'private_room_chat_message' && f.body === 'back online', 5_000, 'host receives reconnected member\'s message')
   })
 
+  // ───────────────────────────────────────────────────────────────────────
+  // Explicit voluntary leave: confirms the SERVER broadcasts a fresh
+  // private_room_updated to the remaining member (not just the
+  // human-readable "X left" notice), so a client's server-authoritative
+  // state.myPrivateRoom can never go stale regardless of which screen the
+  // remaining member is currently viewing.
+  // ───────────────────────────────────────────────────────────────────────
+  console.log('\n--- Explicit leave_private_room updates the remaining member\'s snapshot ---')
+
+  const hostE = await connectClient(port, 'hostE')
+  const guestE1 = await connectClient(port, 'guestE1')
+
+  send(hostE, { type: 'create_private_room', stake: 5000, isLocked: false })
+  const createdE = await waitForFrame(hostE, (f) => f.type === 'private_room_updated', 10_000, 'create_private_room E')
+  const roomIdE: string = createdE.room.id
+
+  send(guestE1, { type: 'join_private_room', privateRoomId: roomIdE })
+  await waitForFrame(hostE, (f) => f.type === 'private_room_updated' && f.room.members.length === 2, 10_000, 'E: host sees 2 members')
+  await waitForFrame(guestE1, (f) => f.type === 'private_room_updated' && f.room.members.length === 2, 10_000, 'E: guest sees 2 members')
+
+  hostE.frames.length = 0
+  guestE1.frames.length = 0
+  send(guestE1, { type: 'leave_private_room' })
+
+  await check('[E1] a non-host member leaving still triggers the private_room_member_left notice to the host', async () => {
+    await waitForFrame(hostE, (f) => f.type === 'private_room_member_left', 5_000, 'host receives member-left notice')
+  })
+
+  await check('[E2] the SAME leave also delivers a fresh private_room_updated snapshot to the host with the leaver removed', async () => {
+    const updated = await waitForFrame(hostE, (f) => f.type === 'private_room_updated' && f.room.id === roomIdE, 5_000, 'host receives refreshed room snapshot after member left')
+    if (updated.room.members.length !== 1) throw new Error(`expected 1 member remaining after leave, got ${updated.room.members.length}`)
+    if (updated.room.members.some((m: any) => m.profileId === guestE1.profileId)) {
+      throw new Error('leaver is still present in the broadcast snapshot')
+    }
+  })
+
+  await check('[E3] the leaver themself receives private_room_left and no further private_room_updated for the room they left', async () => {
+    await waitForFrame(guestE1, (f) => f.type === 'private_room_left' && f.privateRoomId === roomIdE, 5_000, 'leaver receives private_room_left')
+    const leaverUpdates = framesOfType(guestE1, 'private_room_updated').filter((f) => f.room.id === roomIdE)
+    if (leaverUpdates.length !== 0) throw new Error('leaver unexpectedly received a private_room_updated for the room they just left')
+  })
+
   // ─── Cleanup: close every remaining socket ───────────────────────────────
-  for (const c of [hostA, guestA1, outsider, hostB, guestB1, guestB2, hostC, guestC1, guestC2, guestC3, hostD, guestD1]) {
+  for (const c of [hostA, guestA1, outsider, hostB, guestB1, guestB2, hostC, guestC1, guestC2, guestC3, hostD, guestD1, hostE, guestE1]) {
     try { c.ws.close() } catch { /* ignore */ }
   }
 } finally {
