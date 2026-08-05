@@ -208,6 +208,24 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           cursor:pointer;
         }
 
+        .prw-waiting-actions {
+          display:flex;
+          gap:10px;
+          flex-wrap:wrap;
+        }
+
+        .prw-wait-in-lobby-button {
+          height:38px;
+          padding:0 16px;
+          border-radius:8px;
+          border:1px solid rgba(255,255,255,0.18);
+          background:rgba(255,255,255,0.06);
+          color:rgba(255,255,255,0.85);
+          font-size:13px;
+          font-weight:800;
+          cursor:pointer;
+        }
+
         .prw-header-actions {
           display:flex;
           align-items:center;
@@ -620,10 +638,21 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
             white-space:nowrap;
           }
 
-          .prw-header-actions .prw-leave-button {
-            flex:0 0 auto;
+          .prw-waiting-actions {
+            width:100%;
+            gap:8px;
+            flex-wrap:nowrap;
+          }
+
+          .prw-waiting-actions .prw-wait-in-lobby-button,
+          .prw-waiting-actions .prw-leave-button {
+            flex:1 1 0;
+            min-width:0;
             height:36px;
-            padding:0 14px;
+            padding:0 10px;
+            overflow:hidden;
+            text-overflow:ellipsis;
+            white-space:nowrap;
           }
 
           /* Very narrow phones: "Оставащо време" has no room to render fully
@@ -764,8 +793,12 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           </div>
           <div class="prw-header-actions">
             ${renderCountdownBadge(params.expiresAt)}
-            <button type="button" data-private-waiting-leave-button="1" class="prw-leave-button">Напусни</button>
           </div>
+        </div>
+
+        <div class="prw-waiting-actions">
+          <button type="button" data-private-waiting-wait-in-lobby-button="1" class="prw-wait-in-lobby-button">Изчакай в лоби</button>
+          <button type="button" data-private-waiting-leave-button="1" class="prw-leave-button">Напусни</button>
         </div>
 
         ${params.infoText ? `<div class="prw-info-banner">${escapeHtml(params.infoText)}</div>` : ''}

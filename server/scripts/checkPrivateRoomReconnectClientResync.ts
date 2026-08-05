@@ -10,21 +10,27 @@
  * поправката се проверява на source ниво, по същия установен модел като
  * checkGiftLimitFrontend.ts checks [10]-[13]:
  *
- *  [1] createLobbyFlowController.ts излага resyncPrivateRoomMembershipIfWaiting
- *      в публичния controller interface.
+ *  [1] createLobbyFlowController.ts излага resyncPrivateRoomMembership в
+ *      публичния controller interface.
  *  [2] имплементацията ѝ извиква options.onPrivateRoomsOpen?.() (единственият
  *      познат тригер за server-side reconnectMember(), виж request_private_
- *      rooms_list handler-а в server/src/index.ts) — И само когато
- *      state.myPrivateRoom !== null, за да не гърми при чист lobby/guest.
- *  [3] main.ts WS onOpen handler-ът реално вика lobby.resyncPrivateRoomMembershipIfWaiting()
+ *      rooms_list handler-а в server/src/index.ts) — БЕЗУСЛОВНО (виж task
+ *      spec "Изчакай в лоби" §9: reload/reconnect трябва да възстанови
+ *      membership-а дори когато state.myPrivateRoom вече е null in-memory
+ *      след hard refresh, затова гейт-а върху него беше премахнат нарочно).
+ *  [3] main.ts WS onOpen handler-ът реално вика lobby.resyncPrivateRoomMembership()
  *      — не само дефинирана, но и wired-ната функция.
  *  [4] извикването е в SAME branch като forceLobbyChatResubscribeIfOnLobbyScreen()
  *      (т.е. само след успешен reconnect към чист/lobby state, не по време
  *      на activeRoom resume и не на _isResetPasswordPath) — не дублира и не
  *      противоречи на съществуващия activeRoom.hasActiveRoom() / lobby chat
  *      resubscribe контракт.
- *  [5] resyncPrivateRoomMembershipIfWaiting() се появява ПРЕДИ requestPwaUpdateApplyAttempt()
+ *  [5] resyncPrivateRoomMembership() се появява ПРЕДИ requestPwaUpdateApplyAttempt()
  *      (запазва реда на onOpen ефектите, без да го чупи).
+ *  [6] private_room_updated handler-ът, който получава сървърния отговор на
+ *      този resync, НЕ прехвърля насила екрана към чакалнята за пасивен
+ *      resync (само за explicit create/join/invite-accept тази сесия) — виж
+ *      checkPrivateRoomWaitInLobby.ts checks [8a]-[8c] за пълната проверка.
  */
 
 import { readFileSync } from 'node:fs'
@@ -56,22 +62,22 @@ const controllerSrc = readSourceNormalized(
 )
 const mainSrc = readSourceNormalized(resolve(PROJECT_ROOT, 'src/main.ts'))
 
-// [1] Public interface exposes the new method.
+// [1] Public interface exposes the method.
 check(
-  '[1] LobbyFlowController interface declares resyncPrivateRoomMembershipIfWaiting: () => void',
-  /resyncPrivateRoomMembershipIfWaiting:\s*\(\)\s*=>\s*void/.test(controllerSrc),
+  '[1] LobbyFlowController interface declares resyncPrivateRoomMembership: () => void',
+  /resyncPrivateRoomMembership:\s*\(\)\s*=>\s*void/.test(controllerSrc),
 )
 
-// [2] Implementation: gated on state.myPrivateRoom !== null, calls onPrivateRoomsOpen.
+// [2] Implementation: unconditional, calls onPrivateRoomsOpen.
 const implMatch = controllerSrc.match(
-  /function resyncPrivateRoomMembershipIfWaiting\(\)[^{]*\{([\s\S]*?)\n  \}/,
+  /function resyncPrivateRoomMembership\(\)[^{]*\{([\s\S]*?)\n  \}/,
 )
-check('[2a] resyncPrivateRoomMembershipIfWaiting() implementation exists', implMatch !== null)
+check('[2a] resyncPrivateRoomMembership() implementation exists', implMatch !== null)
 if (implMatch !== null) {
   const body = implMatch[1]
   check(
-    '[2b] implementation is gated on state.myPrivateRoom !== null (does not fire for users with no private-room membership)',
-    /state\.myPrivateRoom\s*!==\s*null/.test(body),
+    '[2b] implementation is UNCONDITIONAL — no state.myPrivateRoom gate (hard refresh loses that in-memory flag entirely, so gating on it would defeat reload recovery)',
+    !/state\.myPrivateRoom\s*!==\s*null/.test(body) && !/if\s*\(/.test(body),
   )
   check(
     '[2c] implementation calls options.onPrivateRoomsOpen?.() — the same production trigger request_private_rooms_list uses',
@@ -83,9 +89,9 @@ if (implMatch !== null) {
 // in main.ts can actually reach it (declaring it privately would silently
 // no-op from the outside).
 check(
-  '[2d] resyncPrivateRoomMembershipIfWaiting is returned from the controller factory (reachable from main.ts, not just declared internally)',
-  /return\s*\{[\s\S]*?resyncPrivateRoomMembershipIfWaiting,[\s\S]*?\}/.test(controllerSrc) ||
-    /^\s*resyncPrivateRoomMembershipIfWaiting,\s*$/m.test(controllerSrc),
+  '[2d] resyncPrivateRoomMembership is returned from the controller factory (reachable from main.ts, not just declared internally)',
+  /return\s*\{[\s\S]*?resyncPrivateRoomMembership,[\s\S]*?\}/.test(controllerSrc) ||
+    /^\s*resyncPrivateRoomMembership,\s*$/m.test(controllerSrc),
 )
 
 // [3]+[4]+[5] main.ts onOpen wiring.
@@ -96,12 +102,12 @@ if (onOpenMatch !== null) {
   const onOpenBody = onOpenMatch[1]
 
   check(
-    '[3b] onOpen calls lobby.resyncPrivateRoomMembershipIfWaiting()',
-    /lobby\.resyncPrivateRoomMembershipIfWaiting\(\)/.test(onOpenBody),
+    '[3b] onOpen calls lobby.resyncPrivateRoomMembership()',
+    /lobby\.resyncPrivateRoomMembership\(\)/.test(onOpenBody),
   )
 
   const forceResubIdx = onOpenBody.indexOf('lobby.forceLobbyChatResubscribeIfOnLobbyScreen()')
-  const resyncIdx = onOpenBody.indexOf('lobby.resyncPrivateRoomMembershipIfWaiting()')
+  const resyncIdx = onOpenBody.indexOf('lobby.resyncPrivateRoomMembership()')
   const pwaApplyIdx = onOpenBody.indexOf('requestPwaUpdateApplyAttempt()')
 
   check(
@@ -122,7 +128,7 @@ if (onOpenMatch !== null) {
   check(
     '[6] resync call is NOT inside the activeRoom.hasActiveRoom() resume branch (must not fire during active-game reconnect)',
     activeRoomBranchMatch !== null &&
-      !activeRoomBranchMatch[1].includes('resyncPrivateRoomMembershipIfWaiting'),
+      !activeRoomBranchMatch[1].includes('resyncPrivateRoomMembership'),
   )
 }
 

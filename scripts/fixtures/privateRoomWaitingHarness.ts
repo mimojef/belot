@@ -60,13 +60,31 @@ const controller = createLobbyFlowController({
   onPrivateRoomChatSend: record('onPrivateRoomChatSend'),
 })
 
+// Tracks which room id this harness has already simulated an explicit
+// join for — see pushRoomUpdated below. A real client only marks
+// privateRoomJoinInFlight for its OWN join/create click, never for a
+// later live update (e.g. member count changing) about the SAME room it's
+// already in; joinPrivateRoom() would incorrectly re-trigger the "already
+// in a room" conflict prompt if called again for an unchanged room id.
+let lastJoinedRoomId: string | null = null
+
 ;(window as any).__prwHarness = {
   controller,
   navigateToPrivateRooms: () => controller.navigateToPrivateRooms(),
   // Server-authoritative push: this is exactly what arrives right after a
   // successful create_private_room / join_private_room / invite-accept —
-  // the controller reacts by redirecting to 'private-room-waiting'.
-  pushRoomUpdated: (room: unknown) => {
+  // the controller reacts by redirecting to 'private-room-waiting'. Calling
+  // joinPrivateRoom() first (only once per distinct room id) faithfully
+  // reproduces the real click-then-server-response sequence, arming
+  // privateRoomJoinInFlight exactly like a real "Присъедини" click would —
+  // without it, private_room_updated correctly treats the push as a
+  // passive resync (e.g. reconnect) and does NOT force-navigate, per the
+  // "Изчакай в лоби" task spec.
+  pushRoomUpdated: (room: any) => {
+    if (room?.id !== lastJoinedRoomId) {
+      lastJoinedRoomId = room.id
+      controller.joinPrivateRoom(room.id)
+    }
     controller.handleServerMessage({ type: 'private_room_updated', room } as any)
   },
   pushChatHistory: (privateRoomId: string, messages: unknown[]) => {

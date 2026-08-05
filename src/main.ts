@@ -4407,13 +4407,15 @@ client = createGameServerClient({
       // reconcileLobbyChatSubscription в createLobbyFlowController.ts).
       lobby.forceLobbyChatResubscribeIfOnLobbyScreen()
       // Огледално на горното, но за членство в частна маса: ако потребителят
-      // е бил в чакалня на частна маса към момента на прекъсването (кратка
-      // мобилна връзка, screen lock, Wi-Fi/4G смяна), server-side членството
-      // в privateRoomsStore все още сочи към стария (мъртъв) connection.id.
+      // е бил в чакалня на частна маса (или е избрал "Изчакай в лоби") към
+      // момента на прекъсването/презареждането (кратка мобилна връзка,
+      // screen lock, Wi-Fi/4G смяна, F5), server-side членството в
+      // privateRoomsStore все още сочи към стария (мъртъв) connection.id.
       // request_private_rooms_list е единственият тригер за server-side
-      // reconnectMember() — без това извикване играчът остава безкрайно в
-      // чакалнята дори когато масата стане 4/4.
-      lobby.resyncPrivateRoomMembershipIfWaiting()
+      // reconnectMember() — вика се безусловно (виж коментара в
+      // createLobbyFlowController.ts), за да проработи и след hard refresh,
+      // когато state.myPrivateRoom вече не помни нищо локално.
+      lobby.resyncPrivateRoomMembership()
     }
 
     requestPwaUpdateApplyAttempt()

@@ -503,8 +503,7 @@ export type LobbyScreenState = {
   } | null
   privateRoomInviteQueue: Array<{ inviteId: string }>
   privateRoomInfoText: string | null
-  leavePrivateRoomForMatchmakingOpen: boolean
-  leavePrivateRoomForMatchmakingIsHost: boolean
+  privateRoomConflictPromptOpen: boolean
   inviteFriendsPopupOpen: boolean
   supportPopupOpen: boolean
   supportMessages: SupportMessageSnapshot[]
@@ -805,8 +804,8 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomInviteAccept: (inviteId: string) => void
   onPrivateRoomInviteDecline: (inviteId: string) => void
   onPrivateRoomInfoDismiss: () => void
-  onLeavePrivateRoomAndMatchmakeConfirm: () => void
-  onLeavePrivateRoomAndMatchmakeCancel: () => void
+  onPrivateRoomConflictReturnClick: () => void
+  onPrivateRoomConflictDismiss: () => void
   onSupportClick: () => void
   onSupportClose: () => void
   onSupportDraftChange: (draft: string) => void
@@ -8211,11 +8210,16 @@ function renderInviteFriendsPopup(state: LobbyScreenState, _options: RenderLobby
   `
 }
 
-function renderLeavePrivateRoomConfirmPopup(state: LobbyScreenState): string {
-  if (!state.leavePrivateRoomForMatchmakingOpen) return ''
-  const message = state.leavePrivateRoomForMatchmakingIsHost
-    ? 'Ти си домакин на частна маса. Ако продължиш, масата ще бъде затворена и всички участници ще бъдат изхвърлени.'
-    : 'Участваш в изчакване на частна маса. Ако продължиш, ще напуснеш масата.'
+// Показва се, когато потребител, вече чакащ в частна маса (state.myPrivateRoom
+// !== null — може да е стигнал дотук през "Изчакай в лоби"), се опита
+// паралелно да стартира matchmaking, да се присъедини към друга частна маса
+// или да създаде нова, или да приеме покана за друга маса. Server-side
+// guard-овете (privateRoomsStore.ts connectionToRoom проверки) вече отхвърлят
+// това еднозначно — тук просто пресрещаме опита клиентски, за да не пращаме
+// обречена команда и да покажем ясен път назад, БЕЗ да напускаме текущата
+// маса автоматично.
+function renderPrivateRoomConflictPopup(state: LobbyScreenState): string {
+  if (!state.privateRoomConflictPromptOpen) return ''
   return `
     <div style="
       position:fixed;inset:0;z-index:9600;
@@ -8227,17 +8231,17 @@ function renderLeavePrivateRoomConfirmPopup(state: LobbyScreenState): string {
         border-radius:16px;padding:28px 28px 24px;max-width:380px;width:90%;
         box-shadow:0 20px 60px rgba(0,0,0,0.6);
       ">
-        <div style="font-size:18px;font-weight:900;color:#fff;margin-bottom:14px;">⚠️ Напускане на маса</div>
-        <div style="font-size:14px;color:rgba(255,255,255,0.7);line-height:1.5;margin-bottom:24px;">${message}</div>
+        <div style="font-size:18px;font-weight:900;color:#fff;margin-bottom:14px;">Вече чакаш в частна маса.</div>
         <div style="display:flex;gap:12px;">
-          <button type="button" data-leave-pr-cancel="1" style="
+          <button type="button" data-private-room-conflict-dismiss="1" style="
             flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
             border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;cursor:pointer;
-          ">Отказ</button>
-          <button type="button" data-leave-pr-confirm="1" style="
-            flex:1;padding:11px;border:1px solid rgba(239,68,68,0.5);background:rgba(239,68,68,0.15);
-            border-radius:10px;color:#f87171;font-size:14px;font-weight:700;cursor:pointer;
-          ">Продължи</button>
+          ">Затвори</button>
+          <button type="button" data-private-room-conflict-return="1" style="
+            flex:1;padding:11px;border:0;
+            background:linear-gradient(180deg, #f4c95b 0%, #c98f13 100%);
+            border-radius:10px;color:#101010;font-size:14px;font-weight:800;cursor:pointer;
+          ">Върни се</button>
         </div>
       </div>
     </div>
@@ -9050,7 +9054,7 @@ export function renderLobbyScreen(
       ${renderPrivateRoomInvitePopup(state)}
       ${renderInviteFriendsPopup(state, options)}
       ${renderPrivateRoomInfoPopup(state)}
-      ${renderLeavePrivateRoomConfirmPopup(state)}
+      ${renderPrivateRoomConflictPopup(state)}
       ${renderSubadminActionConfirmPopup(state)}
       ${renderSubadminActionToast(state)}
       ${renderChatAdminActionConfirmPopup(state)}
@@ -9315,7 +9319,7 @@ export function renderLobbyScreen(
       ${renderPrivateRoomInvitePopup(state)}
       ${renderInviteFriendsPopup(state, options)}
       ${renderPrivateRoomInfoPopup(state)}
-      ${renderLeavePrivateRoomConfirmPopup(state)}
+      ${renderPrivateRoomConflictPopup(state)}
       ${renderSubadminActionConfirmPopup(state)}
       ${renderSubadminActionToast(state)}
       ${renderChatAdminActionConfirmPopup(state)}
@@ -11539,11 +11543,11 @@ export function renderLobbyScreen(
     })
   })
 
-  root.querySelector<HTMLButtonElement>('[data-leave-pr-confirm="1"]')
-    ?.addEventListener('click', options.onLeavePrivateRoomAndMatchmakeConfirm)
+  root.querySelector<HTMLButtonElement>('[data-private-room-conflict-return="1"]')
+    ?.addEventListener('click', options.onPrivateRoomConflictReturnClick)
 
-  root.querySelector<HTMLButtonElement>('[data-leave-pr-cancel="1"]')
-    ?.addEventListener('click', options.onLeavePrivateRoomAndMatchmakeCancel)
+  root.querySelector<HTMLButtonElement>('[data-private-room-conflict-dismiss="1"]')
+    ?.addEventListener('click', options.onPrivateRoomConflictDismiss)
 
   root.querySelector<HTMLButtonElement>('[data-subadmin-action-confirm="1"]')
     ?.addEventListener('click', options.onSubadminActionConfirm)
