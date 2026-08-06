@@ -7,8 +7,7 @@ import type {
 import { escapeHtml } from './activeRoomShared'
 import { getVisualSeatForLocalPerspective } from './cutting/cuttingSeatLayout'
 import { formatBidType, getBidMultiplierLabel } from './winningBidHelpers'
-import { isPhoneLayoutViewport, getRealViewportWidthCssPx } from '../../ui/layout/viewportStage'
-import { getScoreHudMobileGeometry } from './scoreHudMobileGeometry'
+import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 
 const SCORE_HUD_INTERNAL_OFFSET = 18
 
@@ -138,35 +137,18 @@ export function renderScoreHud(options: RenderScoreHudOptions): string {
     : '—'
   const bidSummary = `${bidLabel}${bidMultiplierLabel}: ${bidOwnerLabel}`
 
-  // hudScale е ДОПЪЛНИТЕЛЕН множител над stageScale, приложен само за да
-  // предпази HUD-а от застъпване с top-seat профилния панел на тесни mobile
-  // viewport-и (виж scoreHudMobileGeometry.ts за пълната geometry и root
-  // cause). combinedScale замества самостоятелния stageScale навсякъде —
-  // включително в top/left offset формулата — защото тя компенсира точно
-  // толкова local px (SCORE_HUD_INTERNAL_OFFSET), колкото transform:scale
-  // после мащабира навън; ако top/left продължаваше да ползва само
-  // stageScale, докато transform ползва stageScale*hudScale, компенсацията
-  // би останала разсинхронизирана и anchor точката би се "плъзнала" встрани
-  // при hudScale<1, вместо да остане фиксирана в левия горен ъгъл.
-  const { hudScale } = getScoreHudMobileGeometry({
-    viewportWidthCssPx: getRealViewportWidthCssPx(),
-    stageScale,
-    isMobileLayout,
-  })
-  const combinedScale = stageScale * hudScale
-
   return `
     <div
       data-active-room-score-hud="1"
       style="
         position:fixed;
-        top:${5 - SCORE_HUD_INTERNAL_OFFSET * combinedScale}px;
-        left:${5 - SCORE_HUD_INTERNAL_OFFSET * combinedScale}px;
+        top:${5 - SCORE_HUD_INTERNAL_OFFSET * stageScale}px;
+        left:${5 - SCORE_HUD_INTERNAL_OFFSET * stageScale}px;
         width:0;
         height:0;
         z-index:8;
         pointer-events:none;
-        transform:scale(${combinedScale});
+        transform:scale(${stageScale});
         transform-origin:top left;
         font-family:Inter, system-ui, sans-serif;
       "

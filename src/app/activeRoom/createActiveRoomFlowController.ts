@@ -49,12 +49,7 @@ import {
   resetPlayingUiCache,
   computeNextLastKnownWinningBid,
 } from './activeRoomShared'
-import { isPhoneLayoutViewport, getRealViewportWidthCssPx } from '../../ui/layout/viewportStage'
-import {
-  getBottomHandMobileGeometry,
-  BOTTOM_HAND_MOBILE_TARGET_CARD_COUNT,
-  type BottomHandMobileGeometrySnapshot,
-} from './bottomHandMobileGeometry'
+import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import {
   getCuttingCycleKey,
   getDealFirstThreePhaseKey,
@@ -159,34 +154,6 @@ export function createActiveRoomFlowController(
   const biddingUiState: BiddingUiState = createBiddingUiState()
   const emojiReactionUiState: EmojiReactionUiState = createEmojiReactionUiState()
   const phraseReactionUiState: PhraseReactionUiState = createPhraseReactionUiState()
-
-  // Кеширан bottom-hand mobile geometry snapshot — виж bottomHandMobileGeometry.ts.
-  // Преизчислява се СИНХРОННО, само когато реалната CSS viewport ширина се
-  // промени (истинска resize/orientation промяна) — не при всеки render(),
-  // не при нова карта/фаза/server съобщение, не при height-only browser
-  // toolbar промяна (тя не пипа ширината, само височината). Затова стои
-  // непроменен през first-3 -> next-2 -> bidding -> last-3 -> playing.
-  let bottomHandMobileGeometryCache: {
-    viewportWidthCssPx: number
-    snapshot: BottomHandMobileGeometrySnapshot
-  } | null = null
-
-  function getCachedBottomHandMobileGeometry(stageScale: number): BottomHandMobileGeometrySnapshot {
-    const viewportWidthCssPx = getRealViewportWidthCssPx()
-    if (
-      bottomHandMobileGeometryCache !== null &&
-      bottomHandMobileGeometryCache.viewportWidthCssPx === viewportWidthCssPx
-    ) {
-      return bottomHandMobileGeometryCache.snapshot
-    }
-    const snapshot = getBottomHandMobileGeometry({
-      viewportWidthCssPx,
-      stageScale,
-      targetCardCount: BOTTOM_HAND_MOBILE_TARGET_CARD_COUNT,
-    })
-    bottomHandMobileGeometryCache = { viewportWidthCssPx, snapshot }
-    return snapshot
-  }
   let emojiPickerOpen = false
   let phrasePickerOpen = false
   const EMOJI_BUBBLE_DURATION_MS = 4000
@@ -701,91 +668,9 @@ export function createActiveRoomFlowController(
 
   function removeSeatPanels(): void {
     document.body.querySelector('[data-seat-panels-host="1"]')?.remove()
-    document.body.querySelector('[data-seat-bubbles-host="1"]')?.remove()
-  }
-
-  // Root cause (защо bubble z-index не можеше да излезе над trick cards):
-  // bubble div-овете преди живееха вътре в data-active-room-seat-anchor,
-  // което е дете на seat-panels-host — host-ът е insert-нат ПРЕДИ #app в
-  // document order изрично, за да могат seat card fans (вътре в host-а) да
-  // останат ПОД trick area-та (вътре в #app). Но това означава, че САМИЯТ
-  // host винаги стои под #app-овото съдържание по document order — никакъв
-  // z-index на bubble-а вътре в host-а не може да пробие над #app, защото
-  // сравнението никога не стига до вътрешния z-index: host-ът вече е "под"
-  // на по-високо ниво. Оттам bubble-ите (анонс/обява/белот/ребелот/терца/
-  // 50/100/emoji/фраза — всички минават през renderBidBubble/
-  // renderDeclarationBubble/renderEmojiBubble/renderPhraseBubble в
-  // renderCuttingSeatPanels.ts) оставаха скрити зад trick cards, независимо
-  // от собствения им z-index (10/11/30/31).
-  //
-  // Решение: bubble markup-ът (createCuttingSeatBubblesLayerHtml) идва
-  // вграден в СЪЩИЯ html string, който createCuttingSeatPanelsHtml връща,
-  // но се извлича тук и се синхронизира в СВОЙ отделен body-level host
-  // (data-seat-bubbles-host), различен от seat-panels-host. #app самият
-  // няма явен z-index (само position:relative — src/style.css), т.е. НЕ
-  // създава изолиран stacking context, така че неговите деца (trick cards
-  // z-index:5, Score HUD z-index:8, bidding popup z-index:10/20) участват
-  // директно в root-ния stacking context заедно с body-level siblings.
-  // Затова bubblesHost-ът (z-index:7 — виж createCuttingSeatBubblesLayerHtml)
-  // сандвичва коректно между trick cards и Score HUD/modals по ЧИСТО
-  // числово сравнение, без значение от document order спрямо #app.
-  function syncSeatBubblesLayer(html: string): void {
-    const temp = document.createElement('div')
-    temp.innerHTML = html
-    const incomingLayer = temp.querySelector<HTMLElement>('[data-seat-bubbles-layer="1"]')
-
-    let bubblesHost = document.body.querySelector<HTMLDivElement>('[data-seat-bubbles-host="1"]')
-    if (!incomingLayer) {
-      bubblesHost?.remove()
-      return
-    }
-    if (!bubblesHost) {
-      bubblesHost = document.createElement('div')
-      bubblesHost.setAttribute('data-seat-bubbles-host', '1')
-      document.body.appendChild(bubblesHost)
-    }
-
-    if (bubblesHost.innerHTML.length > 0) {
-      let ok = true
-      for (const bHost of Array.from(incomingLayer.querySelectorAll<HTMLElement>('[data-seat-bid-bubble]'))) {
-        const seat = bHost.getAttribute('data-seat-bid-bubble')!
-        const existing = bubblesHost.querySelector<HTMLElement>(`[data-seat-bid-bubble="${seat}"]`)
-        if (!existing) { ok = false; break }
-        if (existing.innerHTML !== bHost.innerHTML) existing.innerHTML = bHost.innerHTML
-      }
-      if (ok) {
-        for (const bHost of Array.from(incomingLayer.querySelectorAll<HTMLElement>('[data-seat-declaration-bubble]'))) {
-          const seat = bHost.getAttribute('data-seat-declaration-bubble')!
-          const existing = bubblesHost.querySelector<HTMLElement>(`[data-seat-declaration-bubble="${seat}"]`)
-          if (!existing) { ok = false; break }
-          if (existing.innerHTML !== bHost.innerHTML) existing.innerHTML = bHost.innerHTML
-        }
-      }
-      if (ok) {
-        for (const bHost of Array.from(incomingLayer.querySelectorAll<HTMLElement>('[data-seat-emoji-bubble]'))) {
-          const seat = bHost.getAttribute('data-seat-emoji-bubble')!
-          const existing = bubblesHost.querySelector<HTMLElement>(`[data-seat-emoji-bubble="${seat}"]`)
-          if (!existing) { ok = false; break }
-          if (existing.innerHTML !== bHost.innerHTML) existing.innerHTML = bHost.innerHTML
-        }
-      }
-      if (ok) {
-        for (const bHost of Array.from(incomingLayer.querySelectorAll<HTMLElement>('[data-seat-phrase-bubble]'))) {
-          const seat = bHost.getAttribute('data-seat-phrase-bubble')!
-          const existing = bubblesHost.querySelector<HTMLElement>(`[data-seat-phrase-bubble="${seat}"]`)
-          if (!existing) { ok = false; break }
-          if (existing.innerHTML !== bHost.innerHTML) existing.innerHTML = bHost.innerHTML
-        }
-      }
-      if (ok) return
-    }
-
-    bubblesHost.innerHTML = incomingLayer.outerHTML
   }
 
   function syncSeatPanels(html: string): void {
-    syncSeatBubblesLayer(html)
-
     let host = document.body.querySelector<HTMLDivElement>('[data-seat-panels-host="1"]')
 
     if (host && host.innerHTML.length > 0) {
@@ -826,6 +711,53 @@ export function createActiveRoomFlowController(
         }
       }
 
+      // Update bid bubble wrappers (innerHTML only)
+      if (ok) {
+        for (const bHost of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-bid-bubble]'))) {
+          const seat = bHost.getAttribute('data-seat-bid-bubble')!
+          const existing = host.querySelector<HTMLElement>(`[data-seat-bid-bubble="${seat}"]`)
+          if (!existing) { ok = false; break }
+          if (existing.innerHTML !== bHost.innerHTML) {
+            existing.innerHTML = bHost.innerHTML
+          }
+        }
+      }
+
+      // Update declaration bubble wrappers (innerHTML only)
+      if (ok) {
+        for (const bHost of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-declaration-bubble]'))) {
+          const seat = bHost.getAttribute('data-seat-declaration-bubble')!
+          const existing = host.querySelector<HTMLElement>(`[data-seat-declaration-bubble="${seat}"]`)
+          if (!existing) { ok = false; break }
+          if (existing.innerHTML !== bHost.innerHTML) {
+            existing.innerHTML = bHost.innerHTML
+          }
+        }
+      }
+
+      // Update emoji bubble wrappers (innerHTML only)
+      if (ok) {
+        for (const bHost of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-emoji-bubble]'))) {
+          const seat = bHost.getAttribute('data-seat-emoji-bubble')!
+          const existing = host.querySelector<HTMLElement>(`[data-seat-emoji-bubble="${seat}"]`)
+          if (!existing) { ok = false; break }
+          if (existing.innerHTML !== bHost.innerHTML) {
+            existing.innerHTML = bHost.innerHTML
+          }
+        }
+      }
+
+      if (ok) {
+        for (const bHost of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-phrase-bubble]'))) {
+          const seat = bHost.getAttribute('data-seat-phrase-bubble')!
+          const existing = host.querySelector<HTMLElement>(`[data-seat-phrase-bubble="${seat}"]`)
+          if (!existing) { ok = false; break }
+          if (existing.innerHTML !== bHost.innerHTML) {
+            existing.innerHTML = bHost.innerHTML
+          }
+        }
+      }
+
       // Update card fan content (innerHTML only)
       if (ok) {
         const newFans = Array.from(temp.querySelectorAll<HTMLElement>('[data-active-room-seat-card-fan]'))
@@ -855,28 +787,14 @@ export function createActiveRoomFlowController(
     if (!host) {
       const el = document.createElement('div')
       el.setAttribute('data-seat-panels-host', '1')
-      // This host and #app (the playing-screen root) are both body-level
-      // siblings. It is inserted deterministically BEFORE #app (not
-      // appended after), and given position:relative so the ordering is
-      // explicit rather than relying on default flow — together this keeps
-      // #app's content (including the trick area, once its own z-index is
-      // higher than the seat anchors' inside #app) able to stack above this
-      // host's seat card fans. The end goal: once a played card's flight
-      // overlay finishes and the static trick card becomes visible again,
-      // it stays above the neighboring seats' card-back fans instead of
-      // disappearing behind them.
-      el.style.position = 'relative'
-      document.body.insertBefore(el, options.root)
+      document.body.appendChild(el)
       host = el
     }
-    const temp = document.createElement('div')
-    temp.innerHTML = html
-    temp.querySelector('[data-seat-bubbles-layer="1"]')?.remove()
-    host.innerHTML = temp.innerHTML
+    host.innerHTML = html
   }
 
   function patchEmojiOnlyInPanels(html: string): void {
-    const host = document.body.querySelector<HTMLElement>('[data-seat-bubbles-host="1"]')
+    const host = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
     if (!host) return
     const temp = document.createElement('div')
     temp.innerHTML = html
@@ -899,14 +817,14 @@ export function createActiveRoomFlowController(
   }
 
   function clearPhraseInPanels(seat: Seat): void {
-    const host = document.body.querySelector<HTMLElement>('[data-seat-bubbles-host="1"]')
+    const host = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
     if (!host) return
     const el = host.querySelector<HTMLElement>(`[data-seat-phrase-bubble="${seat}"]`)
     if (el) el.innerHTML = ''
   }
 
   function clearEmojiInPanels(seat: Seat): void {
-    const host = document.body.querySelector<HTMLElement>('[data-seat-bubbles-host="1"]')
+    const host = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
     if (!host) return
     const el = host.querySelector<HTMLElement>(`[data-seat-emoji-bubble="${seat}"]`)
     if (el) el.innerHTML = ''
@@ -2363,9 +2281,6 @@ export function createActiveRoomFlowController(
           ? 'deal-next-2'
           : 'deal-first-3'
     const { stageScale, scaledStageWidth, scaledStageHeight } = getActiveRoomStageMetrics()
-    const mobileBottomHandGeometry = isPhoneLayoutViewport()
-      ? getCachedBottomHandMobileGeometry(stageScale)
-      : null
     const scoreHudHtml = activeRoomState.game
       ? renderScoreHud({
           game: activeRoomState.game,
@@ -2903,7 +2818,6 @@ export function createActiveRoomFlowController(
                   return compensated
                 })()
               : null,
-            mobileBottomHandGeometry,
           }
         : null
 
@@ -3110,7 +3024,6 @@ export function createActiveRoomFlowController(
         maxCardsPerSeat: 5,
         animStartIndex: 0,
         seatAnimDelays: null,
-        mobileBottomHandGeometry,
       }
 
       const bidBubbles = getBidBubblesForRender()
@@ -3507,7 +3420,6 @@ export function createActiveRoomFlowController(
         emojiBubbles: getEmojiBubblesForRender(),
         phraseBubbles: getPhraseBubblesForRender(),
         tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
-        mobileBottomHandGeometry,
         cache: playingCache,
       } satisfies RenderPlayingScreenOptions)
     } else if (activeRoomState.game !== null) {

@@ -102,29 +102,6 @@ export function createViewportResizeHandler(onResize: () => void): () => void {
   }
 }
 
-// Реалната видима CSS viewport ширина, за geometry fitting изчисления (виж
-// bottomHandMobileGeometry.ts), а не за layout/stage scale (getViewportSize
-// по-горе продължава да ползва window.innerWidth за stageScale, непроменено).
-// visualViewport.width е по-точна при pinch-zoom; innerWidth/clientWidth са
-// fallback-и за среди без нея. Никога screen.width/devicePixelRatio — това
-// са физически, не CSS стойности.
-export function getRealViewportWidthCssPx(): number {
-  if (typeof window === 'undefined') {
-    return 0
-  }
-
-  const visualViewportWidth = window.visualViewport?.width
-  if (typeof visualViewportWidth === 'number' && Number.isFinite(visualViewportWidth) && visualViewportWidth > 0) {
-    return visualViewportWidth
-  }
-
-  if (typeof window.innerWidth === 'number' && window.innerWidth > 0) {
-    return window.innerWidth
-  }
-
-  return document.documentElement.clientWidth
-}
-
 export function isPhoneLayoutViewport(): boolean {
   if (typeof window === 'undefined') {
     return false

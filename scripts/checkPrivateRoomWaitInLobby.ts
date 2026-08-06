@@ -318,23 +318,6 @@ check(
   !/openPrivateRoomConflictPrompt\(\)[\s\S]{0,30}options\.onPrivateRoomLeave/.test(controllerSrc),
 )
 
-// ─── [13] Regression guard for the "left member still shown until refresh" ─
-// production bug: host stays on lobby after "Изчакай в лоби", the other
-// member leaves, host's state.myPrivateRoom stayed stale until a hard
-// refresh. Root cause was server-side (handlePrivateRoomMemberLeft never
-// broadcast a fresh private_room_updated — only the "X left" notice) — see
-// server/scripts/checkPrivateRoomWebSocketRoundTrip.ts Scenario E for the
-// real WS end-to-end coverage of that fix. This check pins the CLIENT
-// contract the fix depends on: the assignment must never be gated on
-// state.currentScreen, or the server-side fix would silently stop reaching
-// myPrivateRoom whenever the user is off the waiting screen.
-
-check(
-  '[13] private_room_updated handler assigns state.myPrivateRoom unconditionally — no state.currentScreen gate exists between the handler entry and the assignment',
-  /if \(message\.type === 'private_room_updated'\) \{\s*\n\s*const isNewRoom[\s\S]{0,900}?\n\s*state\.myPrivateRoom = message\.room/.test(controllerSrc) &&
-    !/if \(message\.type === 'private_room_updated'\) \{[\s\S]{0,900}?state\.currentScreen ===[\s\S]{0,60}?state\.myPrivateRoom = message\.room/.test(controllerSrc),
-)
-
 console.log(`\n${'═'.repeat(60)}`)
 console.log(`Passed: ${passed}  Failed: ${failed}`)
 

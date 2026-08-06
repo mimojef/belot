@@ -1820,12 +1820,6 @@ function handlePrivateRoomMemberLeft(room: PrivateRoom, member: PrivateRoomMembe
     type: 'private_room_member_left',
     displayName: member.displayName,
   })
-  // Без този broadcast остатъчните членове (напр. хостът) никога не
-  // получават актуален room snapshot след доброволно напускане — само
-  // notification-а по-горе — и state.myPrivateRoom на клиента остава stale
-  // до следващ reconnect resync. Огледало на sendPrivateRoomUpdateToMembers
-  // след join/invite-accept.
-  sendPrivateRoomUpdateToMembers(room)
 }
 
 // "Запълни с ботове" — вика се от privateRoomsStore.beginBotFill(), който

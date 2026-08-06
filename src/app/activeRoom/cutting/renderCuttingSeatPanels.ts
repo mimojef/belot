@@ -9,16 +9,14 @@ import {
   getVisualSeatForLocalPerspective,
 } from './cuttingSeatLayout'
 import { CUTTING_COUNTDOWN_MS } from './cuttingVisualCountdown'
-import { ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT } from '../activeRoomShared'
-import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
 import {
-  BOTTOM_HAND_MOBILE_MAX_CARD_WIDTH,
-  BOTTOM_HAND_MOBILE_MAX_CARD_HEIGHT,
-  BOTTOM_HAND_MOBILE_MAX_SPACING,
-  BOTTOM_HAND_MOBILE_MAX_ROTATION_STEP,
+  ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT,
+  BOTTOM_HAND_MOBILE_CARD_WIDTH,
+  BOTTOM_HAND_MOBILE_CARD_HEIGHT,
+  BOTTOM_HAND_MOBILE_SPACING,
   BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET,
-  type BottomHandMobileGeometrySnapshot,
-} from '../bottomHandMobileGeometry'
+} from '../activeRoomShared'
+import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
 
 type EscapeHtml = (value: string) => string
 
@@ -37,11 +35,6 @@ export type DealtHandsData = {
   replaceLocalHandAtRevealSeats?: Partial<Record<Seat, boolean>>
   maxCardsPerSeat: number
   animStartIndex: number
-  // Предварително изчислен, кеширан за целия round — виж
-  // bottomHandMobileGeometry.ts. Null на desktop / когато все още не е
-  // изчислен (getFanOffset/renderPanelDealtCard падат back към MAX
-  // константите в такъв случай).
-  mobileBottomHandGeometry?: BottomHandMobileGeometrySnapshot | null
 }
 
 export type SeatBidBubble = {
@@ -409,20 +402,6 @@ const PANEL_CARD_REPOSITION_MS = 150
 const PANEL_CARD_REVEAL_EASING = 'ease'
 const PANEL_CARD_REPOSITION_EASING = 'cubic-bezier(0.22,1,0.36,1)'
 
-// Mobile bottom-hand fan (getFanOffset) нарочно държи countProgress=1
-// (пълен edgeDropMax=34) за ВСЯКА видима бройка карти — за разлика от
-// другите (non-bottom) mobile ветрила, чийто edgeDropMax вече е намален
-// (compact=true → 20) — за да няма визуален скок между last-3 (8 карти) и
-// playing (виж коментара в getFanOffset). Но точно при first-3 (3 видими
-// карти) този постоянен пълен edge-drop прави дъгата видимо по-дълбока,
-// отколкото естественото 3-картово ветрило на другите играчи (които горе
-// получават edgeDropMax=20 × countProgress≈0.286 ≈ 5.7 stage px за
-// крайните карти, а bottom получава пълните 34). Този множител свежда
-// bottom-only 3-картовия edge-drop надолу към сравним, по-плитък обхват,
-// без да пипа spacing/rotation/sizing/centering или другите card-count
-// сценарии (5, 8).
-const BOTTOM_HAND_MOBILE_THREE_CARD_EDGE_DROP_FACTOR = 0.5
-
 function renderPanelCardBack(): string {
   return `
     <span style="position:absolute;inset:0;border-radius:16px;background:linear-gradient(180deg,rgba(255,255,255,0.98) 0%,rgba(241,245,249,0.98) 100%);"></span>
@@ -467,11 +446,10 @@ function renderPanelDealtCard(
   rotate: number,
   animStyle: string,
   mobileBottomSeat = false,
-  mobileGeometry: BottomHandMobileGeometrySnapshot | null = null,
 ): string {
   const content = card !== null ? renderPanelCardFront(card) : renderPanelCardBack()
-  const cardWidth = mobileBottomSeat ? (mobileGeometry?.cardWidth ?? BOTTOM_HAND_MOBILE_MAX_CARD_WIDTH) : PANEL_CARD_WIDTH
-  const cardHeight = mobileBottomSeat ? (mobileGeometry?.cardHeight ?? BOTTOM_HAND_MOBILE_MAX_CARD_HEIGHT) : PANEL_CARD_HEIGHT
+  const cardWidth = mobileBottomSeat ? BOTTOM_HAND_MOBILE_CARD_WIDTH : PANEL_CARD_WIDTH
+  const cardHeight = mobileBottomSeat ? BOTTOM_HAND_MOBILE_CARD_HEIGHT : PANEL_CARD_HEIGHT
   return `
     <div style="
       position:absolute;
@@ -501,34 +479,15 @@ function getFanOffset(
   count: number,
   compact = false,
   mobileBottomSeat = false,
-  mobileGeometry: BottomHandMobileGeometrySnapshot | null = null,
 ): { x: number; y: number; rotate: number } {
-  // Центрирането е спрямо ТЕКУЩО ВИДИМИЯ `count` (visibleCardCount — 3/5/8),
-  // не спрямо фиксирания target от 8 слота — иначе first-3/next-2 карти биха
-  // стояли в левите слотове на бъдещото 8-картово ветрило вместо да са
-  // центрирани спрямо реалния си брой. cardWidth/cardHeight/spacing/
-  // rotationStep обаче ОСТАВАТ фиксирани от 8-картовия mobileGeometry
-  // snapshot (виж bottomHandMobileGeometry.ts) — само позиционирането
-  // (centered/maxCentered/edgeProgress) следва visibleCardCount. Вече
-  // показани карти могат еднократно да заемат новите си центрирани позиции
-  // при следваща порция раздадени карти (belot-panel-card-reposition
-  // анимацията по-долу) — това е нормалната dealing анимация, не corrective
-  // render.
   const centered = index - (count - 1) / 2
   const maxCentered = Math.max(1, (count - 1) / 2)
   const edgeProgress = Math.abs(centered) / maxCentered
-  const countProgress = mobileBottomSeat ? 1 : Math.min(1, Math.max(0, (count - 1) / 7))
-  const spacing = mobileBottomSeat
-    ? (mobileGeometry?.spacing ?? BOTTOM_HAND_MOBILE_MAX_SPACING)
-    : compact ? 42 : 62
+  const countProgress = Math.min(1, Math.max(0, (count - 1) / 7))
+  const spacing = mobileBottomSeat ? BOTTOM_HAND_MOBILE_SPACING : compact ? 42 : 62
   const edgeDropMax = compact ? 20 : 34
-  const rotationStep = mobileBottomSeat
-    ? (mobileGeometry?.rotationStep ?? BOTTOM_HAND_MOBILE_MAX_ROTATION_STEP)
-    : compact ? 3.4 : 5
-  const threeCardEdgeDropFactor = mobileBottomSeat && count === 3
-    ? BOTTOM_HAND_MOBILE_THREE_CARD_EDGE_DROP_FACTOR
-    : 1
-  const edgeDrop = edgeProgress * edgeProgress * edgeDropMax * countProgress * threeCardEdgeDropFactor
+  const rotationStep = compact ? 3.4 : 5
+  const edgeDrop = edgeProgress * edgeProgress * edgeDropMax * countProgress
   return {
     x: centered * spacing,
     y: edgeDrop,
@@ -605,7 +564,6 @@ function renderDealtCardFanInPanel(
     dealtHands.replaceLocalHandAtRevealSeats?.[actualSeat] === true
   const compactFan = isPhoneLayoutViewport() && visualSeat !== 'bottom'
   const mobileBottomSeat = isPhoneLayoutViewport() && visualSeat === 'bottom'
-  const mobileGeometry = mobileBottomSeat ? (dealtHands.mobileBottomHandGeometry ?? null) : null
 
   const previousCards = isLocalSeat && dealtHands.previousOwnHand ? dealtHands.previousOwnHand : []
   const previousIndexById = new Map(previousCards.map((c, idx) => [c.id, idx]))
@@ -617,17 +575,17 @@ function renderDealtCardFanInPanel(
     previousCards.length > 0
   ) {
     const previousCardElements = previousCards.map((card, i) => {
-      const fan = getFanOffset(i, previousCards.length, compactFan, mobileBottomSeat, mobileGeometry)
+      const fan = getFanOffset(i, previousCards.length, compactFan, mobileBottomSeat)
       const animStyle = `animation: belot-panel-card-hide-at-reveal 1ms linear ${animDelay}ms both;`
-      return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle, mobileBottomSeat, mobileGeometry)
+      return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle, mobileBottomSeat)
     }).join('')
     const finalCardElements = cards.map((card, i) => {
-      const fan = getFanOffset(i, count, compactFan, mobileBottomSeat, mobileGeometry)
+      const fan = getFanOffset(i, count, compactFan, mobileBottomSeat)
       const isNewCard = !previousIndexById.has(card.id)
       const animStyle = isNewCard
         ? `opacity:0; visibility:hidden; animation: belot-panel-card-hidden-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
         : `opacity:0; visibility:hidden; animation: belot-panel-card-show-at-reveal 1ms linear ${animDelay}ms both;`
-      return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle, mobileBottomSeat, mobileGeometry)
+      return renderPanelDealtCard(card, i, fan.x, fan.y, fan.rotate, animStyle, mobileBottomSeat)
     }).join('')
 
     return renderPanelCardFanWrapper(
@@ -638,7 +596,7 @@ function renderDealtCardFanInPanel(
   }
 
   const cardElements = Array.from({ length: count }, (_, i) => {
-    const fanTo = getFanOffset(i, count, compactFan, mobileBottomSeat, mobileGeometry)
+    const fanTo = getFanOffset(i, count, compactFan, mobileBottomSeat)
     const card = isLocalSeat ? (cards[i] ?? null) : null
 
     let animStyle = ''
@@ -652,7 +610,7 @@ function renderDealtCardFanInPanel(
             : `animation: belot-panel-card-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
         } else {
           // Existing card — repositions from its old sorted position to its new sorted position
-          const fanFrom = getFanOffset(prevIdx, previousCards.length, compactFan, mobileBottomSeat, mobileGeometry)
+          const fanFrom = getFanOffset(prevIdx, previousCards.length, compactFan, mobileBottomSeat)
           animStyle = `
             --px-from:${fanFrom.x}px; --py-from:${fanFrom.y}px; --pr-from:${fanFrom.rotate}deg;
             --px-to:${fanTo.x}px; --py-to:${fanTo.y}px; --pr-to:${fanTo.rotate}deg;
@@ -666,7 +624,7 @@ function renderDealtCardFanInPanel(
             ? `opacity:0; visibility:hidden; animation: belot-panel-card-hidden-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
             : `animation: belot-panel-card-appear ${PANEL_CARD_REVEAL_MS}ms ${PANEL_CARD_REVEAL_EASING} ${animDelay}ms both;`
         } else {
-          const fanFrom = getFanOffset(i, dealtHands.animStartIndex, compactFan, mobileBottomSeat, mobileGeometry)
+          const fanFrom = getFanOffset(i, dealtHands.animStartIndex, compactFan, mobileBottomSeat)
           animStyle = `
             --px-from:${fanFrom.x}px; --py-from:${fanFrom.y}px; --pr-from:${fanFrom.rotate}deg;
             --px-to:${fanTo.x}px; --py-to:${fanTo.y}px; --pr-to:${fanTo.rotate}deg;
@@ -676,7 +634,7 @@ function renderDealtCardFanInPanel(
       }
     }
 
-    return renderPanelDealtCard(card, i, fanTo.x, fanTo.y, fanTo.rotate, animStyle, mobileBottomSeat, mobileGeometry)
+    return renderPanelDealtCard(card, i, fanTo.x, fanTo.y, fanTo.rotate, animStyle, mobileBottomSeat)
   }).join('')
 
   // Fan center relative to each panel's anchor point (in unscaled panel coords)
@@ -1044,7 +1002,11 @@ export function createCuttingSeatPanelHtml(
   panelScale: number,
   escapeHtml: EscapeHtml,
   dealtHands: DealtHandsData | null,
+  bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null,
+  declarationBubbles: Partial<Record<Seat, SeatDeclarationBubble>> | null,
   countdownKey: string,
+  emojiBubbles: Partial<Record<Seat, SeatEmojiBubble>> | null,
+  phraseBubbles: Partial<Record<Seat, SeatPhraseBubble>> | null,
   tournamentBotReplacements?: TournamentBotReplacementSnapshot[] | null,
 ): string {
   const { seat, isBotReplacement } = resolveSeatIdentityForRender(rawSeat, tournamentBotReplacements)
@@ -1090,6 +1052,28 @@ export function createCuttingSeatPanelHtml(
       `
     : ''
 
+  const hasBidBubble = Boolean(bidBubbles?.[seat.seat])
+  const bubbleHtml = bidBubbles?.[seat.seat]
+    ? renderBidBubble(visualSeat, bidBubbles[seat.seat]!, escapeHtml)
+    : ''
+  const hasDeclarationBubble = Boolean(declarationBubbles?.[seat.seat]?.lines.length)
+  const declarationBubbleHtml = declarationBubbles?.[seat.seat]
+    ? renderDeclarationBubble(
+        visualSeat,
+        declarationBubbles[seat.seat]!,
+        hasBidBubble,
+        escapeHtml,
+      )
+    : ''
+  const emojiOffsetIndex = (hasBidBubble ? 1 : 0) + (hasDeclarationBubble ? 1 : 0)
+  const emojiBubbleHtml = emojiBubbles?.[seat.seat]
+    ? renderEmojiBubble(visualSeat, emojiBubbles[seat.seat]!, emojiOffsetIndex)
+    : ''
+  const phraseOffsetIndex = emojiOffsetIndex + (emojiBubbles?.[seat.seat] ? 1 : 0)
+  const phraseBubbleHtml = phraseBubbles?.[seat.seat]
+    ? renderPhraseBubble(visualSeat, phraseBubbles[seat.seat]!, phraseOffsetIndex, escapeHtml)
+    : ''
+
   if (isBottomSeat) {
     return `
       <div
@@ -1103,6 +1087,10 @@ export function createCuttingSeatPanelHtml(
           pointer-events:none;
         "
       >
+        <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
+        <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
+        <div data-seat-emoji-bubble="${seat.seat}">${emojiBubbleHtml}</div>
+        <div data-seat-phrase-bubble="${seat.seat}">${phraseBubbleHtml}</div>
         ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
         <div
           style="
@@ -1221,6 +1209,10 @@ export function createCuttingSeatPanelHtml(
         pointer-events:none;
       "
     >
+      <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
+      <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
+      <div data-seat-emoji-bubble="${seat.seat}">${emojiBubbleHtml}</div>
+      <div data-seat-phrase-bubble="${seat.seat}">${phraseBubbleHtml}</div>
       ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
       <div
         style="
@@ -1287,125 +1279,6 @@ export function createCuttingSeatPanelHtml(
   `
 }
 
-// Bubble anchor markup за един seat — извикано отделно от panel markup-а
-// (createCuttingSeatPanelHtml), за да може bubble-ите да се рендират в свой
-// собствен fixed layer (виж createCuttingSeatBubblesLayerHtml), insert-нат
-// след #app в DOM-а, вместо вътре в seat-panels host-а, който стои преди
-// #app. Ползва СЪЩИЯ getCuttingSeatPanelAnchorStyle anchor като panel
-// markup-а, за да остане позицията идентична във всяка фаза/viewport.
-function createSeatBubbleAnchorHtml(
-  rawSeat: RoomSeatSnapshot,
-  visualSeat: Seat,
-  panelScale: number,
-  escapeHtml: EscapeHtml,
-  bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null,
-  declarationBubbles: Partial<Record<Seat, SeatDeclarationBubble>> | null,
-  emojiBubbles: Partial<Record<Seat, SeatEmojiBubble>> | null,
-  phraseBubbles: Partial<Record<Seat, SeatPhraseBubble>> | null,
-  tournamentBotReplacements: TournamentBotReplacementSnapshot[] | null | undefined,
-): string {
-  const { seat } = resolveSeatIdentityForRender(rawSeat, tournamentBotReplacements)
-
-  const hasBidBubble = Boolean(bidBubbles?.[seat.seat])
-  const bubbleHtml = bidBubbles?.[seat.seat]
-    ? renderBidBubble(visualSeat, bidBubbles[seat.seat]!, escapeHtml)
-    : ''
-  const hasDeclarationBubble = Boolean(declarationBubbles?.[seat.seat]?.lines.length)
-  const declarationBubbleHtml = declarationBubbles?.[seat.seat]
-    ? renderDeclarationBubble(
-        visualSeat,
-        declarationBubbles[seat.seat]!,
-        hasBidBubble,
-        escapeHtml,
-      )
-    : ''
-  const emojiOffsetIndex = (hasBidBubble ? 1 : 0) + (hasDeclarationBubble ? 1 : 0)
-  const emojiBubbleHtml = emojiBubbles?.[seat.seat]
-    ? renderEmojiBubble(visualSeat, emojiBubbles[seat.seat]!, emojiOffsetIndex)
-    : ''
-  const phraseOffsetIndex = emojiOffsetIndex + (emojiBubbles?.[seat.seat] ? 1 : 0)
-  const phraseBubbleHtml = phraseBubbles?.[seat.seat]
-    ? renderPhraseBubble(visualSeat, phraseBubbles[seat.seat]!, phraseOffsetIndex, escapeHtml)
-    : ''
-
-  return `
-    <div
-      data-active-room-seat-bubble-anchor="${seat.seat}"
-      style="
-        position:absolute;
-        ${getCuttingSeatPanelAnchorStyle(visualSeat, panelScale)}
-        pointer-events:none;
-      "
-    >
-      <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
-      <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
-      <div data-seat-emoji-bubble="${seat.seat}">${emojiBubbleHtml}</div>
-      <div data-seat-phrase-bubble="${seat.seat}">${phraseBubbleHtml}</div>
-    </div>
-  `
-}
-
-// Отделен fixed layer само за seat bubbles (анонс/обява/белот/терца/emoji/
-// фраза), insert-ван от контролера (syncSeatPanels) като body-level sibling
-// — за разлика от createCuttingSeatPanelsHtml's panel layer (card fans,
-// avatar panels), който стои ПРЕДИ #app. #app самият няма явен z-index
-// (само position:relative — виж src/style.css), т.е. НЕ създава изолиран
-// stacking context: неговите деца (trick cards z-index:5, Score HUD
-// z-index:8, bidding popup z-index:10/20) участват директно в root-ния
-// stacking context заедно с body-level siblings като този layer и
-// seat-panels-host. Затова числовият z-index:7 тук е достатъчен — сравнява
-// се directly срещу тези стойности, без значение от document order:
-// seat card fans (z-index:1, вътре в панела) < trick cards (5) < bubbles
-// (7) < Score HUD (8) < bidding/modal overlays (10/20+). Same anchor style
-// (getCuttingSeatPanelAnchorStyle) и panelScale като panel layer-а пазят
-// идентична позиция във всяка фаза/viewport.
-export function createCuttingSeatBubblesLayerHtml(
-  options: RenderCuttingSeatPanelsOptions,
-): string {
-  const { seats, localSeat, panelScale, escapeHtml, bidBubbles, declarationBubbles, emojiBubbles, phraseBubbles, tournamentBotReplacements } = options
-  const seatMap = new Map(seats.map((seat) => [seat.seat, seat]))
-  const visualOrder: readonly Seat[] = ['top', 'left', 'right', 'bottom']
-
-  const bubbleAnchors = SEAT_ORDER.map((actualSeat) => {
-    const seatSnapshot = seatMap.get(actualSeat) ?? createEmptySeatSnapshot(actualSeat)
-    const visualSeat = getVisualSeatForLocalPerspective(actualSeat, localSeat)
-    return { seatSnapshot, visualSeat }
-  })
-    .sort((first, second) => visualOrder.indexOf(first.visualSeat) - visualOrder.indexOf(second.visualSeat))
-    .map(({ seatSnapshot, visualSeat }) =>
-      createSeatBubbleAnchorHtml(
-        seatSnapshot,
-        visualSeat,
-        panelScale,
-        escapeHtml,
-        bidBubbles ?? null,
-        declarationBubbles ?? null,
-        emojiBubbles ?? null,
-        phraseBubbles ?? null,
-        tournamentBotReplacements ?? null,
-      ),
-    )
-    .join('')
-
-  const fixedLayerInsetStyle = isPhoneLayoutViewport()
-    ? `left:0;right:0;top:0;bottom:${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT}px;`
-    : 'inset:0;'
-
-  return `
-    <div
-      data-seat-bubbles-layer="1"
-      style="
-        position:fixed;
-        ${fixedLayerInsetStyle}
-        z-index:7;
-        pointer-events:none;
-      "
-    >
-      ${bubbleAnchors}
-    </div>
-  `
-}
-
 export function createCuttingSeatPanelsHtml(
   options: RenderCuttingSeatPanelsOptions,
 ): string {
@@ -1424,6 +1297,10 @@ export function createCuttingSeatPanelsHtml(
     panelScale,
     escapeHtml,
     dealtHands,
+    bidBubbles,
+    declarationBubbles,
+    emojiBubbles,
+    phraseBubbles,
     tournamentBotReplacements,
   } = options
   const effectiveCountdownSeat =
@@ -1470,7 +1347,11 @@ export function createCuttingSeatPanelsHtml(
         panelScale,
         escapeHtml,
         dealtHands,
+        bidBubbles ?? null,
+        declarationBubbles ?? null,
         countdownKey ?? '',
+        emojiBubbles ?? null,
+        phraseBubbles ?? null,
         tournamentBotReplacements ?? null,
       )
     })
@@ -1520,6 +1401,5 @@ export function createCuttingSeatPanelsHtml(
     >
       ${panels}
     </div>
-    ${createCuttingSeatBubblesLayerHtml(options)}
   `
 }
