@@ -277,6 +277,97 @@ for (const { width, height } of REQUIRED_VIEWPORTS) {
   )
 }
 
+// ─── D) Vertical edge-drop (first-3 3-card fan shallowing fix) ─────────────
+//
+// Bug: mobile bottom fan always used countProgress=1 (full edgeDropMax=34,
+// same as the 8-card fan) regardless of visibleCardCount, unlike the other
+// (non-bottom) mobile seats — which already scale their edgeDropMax down via
+// compact=true (20) AND countProgress≈(count-1)/7. At visibleCardCount=3
+// (the first-3 deal phase), this made the two edge cards drop a full 34
+// stage px below the center card — visibly deeper than the natural 3-card
+// arc the other three seats show, and deeper than intended.
+//
+// Fix: BOTTOM_HAND_MOBILE_THREE_CARD_EDGE_DROP_FACTOR (0.5) is applied to
+// edgeDrop ONLY when mobileBottomSeat && count === 3 — halving the edge-card
+// vertical drop for exactly that one case. x (horizontal spacing) and
+// rotate (rotationStep) are untouched by this factor; count=5/8 use
+// factor=1 (bit-for-bit unchanged formula).
+function verticalEdgeDropStagePx(
+  index: number,
+  count: number,
+  edgeDropMax: number,
+  countProgress: number,
+  threeCardEdgeDropFactor: number,
+): number {
+  const centered = index - (count - 1) / 2
+  const maxCentered = Math.max(1, (count - 1) / 2)
+  const edgeProgress = Math.abs(centered) / maxCentered
+  return edgeProgress * edgeProgress * edgeDropMax * countProgress * threeCardEdgeDropFactor
+}
+
+const MOBILE_BOTTOM_EDGE_DROP_MAX = 34 // edgeDropMax when compact=false (mobileBottomSeat is always non-compact)
+const MOBILE_BOTTOM_COUNT_PROGRESS = 1 // mobileBottomSeat forces countProgress=1 regardless of count
+const THREE_CARD_EDGE_DROP_FACTOR = 0.5 // must match BOTTOM_HAND_MOBILE_THREE_CARD_EDGE_DROP_FACTOR
+
+// [D1] At count=3 (first-3), the two edge cards (index 0 and 2) sit at the
+// SAME Y (symmetric), and the center card (index 1) is strictly higher
+// (smaller Y = higher on screen, since Y is a downward drop from center).
+{
+  const yLeft = verticalEdgeDropStagePx(0, 3, MOBILE_BOTTOM_EDGE_DROP_MAX, MOBILE_BOTTOM_COUNT_PROGRESS, THREE_CARD_EDGE_DROP_FACTOR)
+  const yCenter = verticalEdgeDropStagePx(1, 3, MOBILE_BOTTOM_EDGE_DROP_MAX, MOBILE_BOTTOM_COUNT_PROGRESS, THREE_CARD_EDGE_DROP_FACTOR)
+  const yRight = verticalEdgeDropStagePx(2, 3, MOBILE_BOTTOM_EDGE_DROP_MAX, MOBILE_BOTTOM_COUNT_PROGRESS, THREE_CARD_EDGE_DROP_FACTOR)
+  check(`[D1] first-3 mobile bottom: left and right edge cards are at the same Y drop (left=${yLeft}, right=${yRight})`, yLeft === yRight)
+  check(`[D1] first-3 mobile bottom: center card (y=${yCenter}) sits higher than the edge cards (y=${yLeft})`, yCenter < yLeft)
+  check('[D1] first-3 mobile bottom: center card has zero edge-drop (unmoved)', yCenter === 0)
+}
+
+// [D2] The new (post-fix) edge-drop at count=3 is strictly smaller than the
+// old (pre-fix, factor=1) edge-drop would have been — proves the fan is now
+// shallower, not just repositioned.
+{
+  const oldEdgeDrop = verticalEdgeDropStagePx(0, 3, MOBILE_BOTTOM_EDGE_DROP_MAX, MOBILE_BOTTOM_COUNT_PROGRESS, 1)
+  const newEdgeDrop = verticalEdgeDropStagePx(0, 3, MOBILE_BOTTOM_EDGE_DROP_MAX, MOBILE_BOTTOM_COUNT_PROGRESS, THREE_CARD_EDGE_DROP_FACTOR)
+  check(`[D2] first-3 mobile bottom: new edge-drop (${newEdgeDrop} stage px) is strictly less than the old full edge-drop (${oldEdgeDrop} stage px)`, newEdgeDrop < oldEdgeDrop)
+  check('[D2] old (pre-fix) edge-drop at count=3 was the full 34 stage px', oldEdgeDrop === 34)
+  check('[D2] new (post-fix) edge-drop at count=3 is 17 stage px (34 × 0.5)', newEdgeDrop === 17)
+}
+
+// [D3] count=5 (next-2/bidding) and count=8 (last-3/playing) are COMPLETELY
+// unaffected — the factor only engages at exactly count===3.
+{
+  for (const count of [5, 8]) {
+    const oldEdgeDrop = verticalEdgeDropStagePx(0, count, MOBILE_BOTTOM_EDGE_DROP_MAX, MOBILE_BOTTOM_COUNT_PROGRESS, 1)
+    const unaffectedEdgeDrop = verticalEdgeDropStagePx(0, count, MOBILE_BOTTOM_EDGE_DROP_MAX, MOBILE_BOTTOM_COUNT_PROGRESS, count === 3 ? THREE_CARD_EDGE_DROP_FACTOR : 1)
+    check(`[D3] count=${count}: edge-drop is unchanged by the first-3 fix (${unaffectedEdgeDrop} stage px, same as before)`, unaffectedEdgeDrop === oldEdgeDrop)
+  }
+}
+
+// [D4] Source-text: the factor is defined as a named constant (not an
+// inline magic number), gated on mobileBottomSeat && count === 3, and only
+// multiplies edgeDrop (never spacing/x or rotationStep/rotate).
+{
+  const cuttingSeatPanelsSrcForD = readSourceNormalized(
+    resolve(PROJECT_ROOT, 'src/app/activeRoom/cutting/renderCuttingSeatPanels.ts'),
+  )
+  check(
+    '[D4] BOTTOM_HAND_MOBILE_THREE_CARD_EDGE_DROP_FACTOR is a named constant (not an inline magic number in the formula)',
+    /const BOTTOM_HAND_MOBILE_THREE_CARD_EDGE_DROP_FACTOR = 0\.5/.test(cuttingSeatPanelsSrcForD),
+  )
+  check(
+    '[D4] the factor is gated on mobileBottomSeat && count === 3 (never applies to other counts or other seats)',
+    /const threeCardEdgeDropFactor = mobileBottomSeat && count === 3\s*\n\s*\? BOTTOM_HAND_MOBILE_THREE_CARD_EDGE_DROP_FACTOR\s*\n\s*: 1/.test(cuttingSeatPanelsSrcForD),
+  )
+  check(
+    '[D4] threeCardEdgeDropFactor multiplies edgeDrop (y) only — the return statement\'s x/rotate fields are untouched by this fix',
+    /const edgeDrop = edgeProgress \* edgeProgress \* edgeDropMax \* countProgress \* threeCardEdgeDropFactor/.test(cuttingSeatPanelsSrcForD) &&
+      /x: centered \* spacing,\s*\n\s*y: edgeDrop,\s*\n\s*rotate: centered \* rotationStep,/.test(cuttingSeatPanelsSrcForD),
+  )
+  check(
+    '[D4] renderPlayingScreen.ts (playing renderer) is NOT modified by this fix — no reference to the new factor there',
+    !/BOTTOM_HAND_MOBILE_THREE_CARD_EDGE_DROP_FACTOR/.test(readSourceNormalized(resolve(PROJECT_ROOT, 'src/app/activeRoom/renderPlayingScreen.ts'))),
+  )
+}
+
 // ─── C) Source-text wiring checks ───────────────────────────────────────────
 
 const cuttingSeatPanelsSrc = readSourceNormalized(

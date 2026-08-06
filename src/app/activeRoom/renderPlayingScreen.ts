@@ -1231,6 +1231,11 @@ function renderPlayingStage(options: {
     flyingCardPlayKey,
   } = options
 
+  // z-index:5 on the trick-area wrapper below — above the seat anchors
+  // (z-index:4 in renderCuttingSeatPanels.ts, which stack the side players'
+  // card-back fans on top of the table), so a played card in the center is
+  // never hidden behind a neighbor's hand. Still below Score HUD (8) and the
+  // bidding popup (10/20).
   return `
     <section
       style="
@@ -1247,7 +1252,7 @@ function renderPlayingStage(options: {
           left:50%;
           top:50%;
           transform:translate(-50%,-50%);
-          z-index:2;
+          z-index:5;
         "
       >
         ${renderTrickArea(plays, localSeat, animateNewest, newestEntryElapsedMs, flyingCardPlayKey)}
@@ -1722,6 +1727,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
           width:${scaledStageWidth}px;
           height:${scaledStageHeight}px;
           flex:0 0 auto;
+          z-index:4;
         "
       >
         <div

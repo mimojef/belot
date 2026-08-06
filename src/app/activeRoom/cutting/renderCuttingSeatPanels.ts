@@ -409,6 +409,20 @@ const PANEL_CARD_REPOSITION_MS = 150
 const PANEL_CARD_REVEAL_EASING = 'ease'
 const PANEL_CARD_REPOSITION_EASING = 'cubic-bezier(0.22,1,0.36,1)'
 
+// Mobile bottom-hand fan (getFanOffset) нарочно държи countProgress=1
+// (пълен edgeDropMax=34) за ВСЯКА видима бройка карти — за разлика от
+// другите (non-bottom) mobile ветрила, чийто edgeDropMax вече е намален
+// (compact=true → 20) — за да няма визуален скок между last-3 (8 карти) и
+// playing (виж коментара в getFanOffset). Но точно при first-3 (3 видими
+// карти) този постоянен пълен edge-drop прави дъгата видимо по-дълбока,
+// отколкото естественото 3-картово ветрило на другите играчи (които горе
+// получават edgeDropMax=20 × countProgress≈0.286 ≈ 5.7 stage px за
+// крайните карти, а bottom получава пълните 34). Този множител свежда
+// bottom-only 3-картовия edge-drop надолу към сравним, по-плитък обхват,
+// без да пипа spacing/rotation/sizing/centering или другите card-count
+// сценарии (5, 8).
+const BOTTOM_HAND_MOBILE_THREE_CARD_EDGE_DROP_FACTOR = 0.5
+
 function renderPanelCardBack(): string {
   return `
     <span style="position:absolute;inset:0;border-radius:16px;background:linear-gradient(180deg,rgba(255,255,255,0.98) 0%,rgba(241,245,249,0.98) 100%);"></span>
@@ -511,7 +525,10 @@ function getFanOffset(
   const rotationStep = mobileBottomSeat
     ? (mobileGeometry?.rotationStep ?? BOTTOM_HAND_MOBILE_MAX_ROTATION_STEP)
     : compact ? 3.4 : 5
-  const edgeDrop = edgeProgress * edgeProgress * edgeDropMax * countProgress
+  const threeCardEdgeDropFactor = mobileBottomSeat && count === 3
+    ? BOTTOM_HAND_MOBILE_THREE_CARD_EDGE_DROP_FACTOR
+    : 1
+  const edgeDrop = edgeProgress * edgeProgress * edgeDropMax * countProgress * threeCardEdgeDropFactor
   return {
     x: centered * spacing,
     y: edgeDrop,
@@ -1027,11 +1044,7 @@ export function createCuttingSeatPanelHtml(
   panelScale: number,
   escapeHtml: EscapeHtml,
   dealtHands: DealtHandsData | null,
-  bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null,
-  declarationBubbles: Partial<Record<Seat, SeatDeclarationBubble>> | null,
   countdownKey: string,
-  emojiBubbles: Partial<Record<Seat, SeatEmojiBubble>> | null,
-  phraseBubbles: Partial<Record<Seat, SeatPhraseBubble>> | null,
   tournamentBotReplacements?: TournamentBotReplacementSnapshot[] | null,
 ): string {
   const { seat, isBotReplacement } = resolveSeatIdentityForRender(rawSeat, tournamentBotReplacements)
@@ -1077,28 +1090,6 @@ export function createCuttingSeatPanelHtml(
       `
     : ''
 
-  const hasBidBubble = Boolean(bidBubbles?.[seat.seat])
-  const bubbleHtml = bidBubbles?.[seat.seat]
-    ? renderBidBubble(visualSeat, bidBubbles[seat.seat]!, escapeHtml)
-    : ''
-  const hasDeclarationBubble = Boolean(declarationBubbles?.[seat.seat]?.lines.length)
-  const declarationBubbleHtml = declarationBubbles?.[seat.seat]
-    ? renderDeclarationBubble(
-        visualSeat,
-        declarationBubbles[seat.seat]!,
-        hasBidBubble,
-        escapeHtml,
-      )
-    : ''
-  const emojiOffsetIndex = (hasBidBubble ? 1 : 0) + (hasDeclarationBubble ? 1 : 0)
-  const emojiBubbleHtml = emojiBubbles?.[seat.seat]
-    ? renderEmojiBubble(visualSeat, emojiBubbles[seat.seat]!, emojiOffsetIndex)
-    : ''
-  const phraseOffsetIndex = emojiOffsetIndex + (emojiBubbles?.[seat.seat] ? 1 : 0)
-  const phraseBubbleHtml = phraseBubbles?.[seat.seat]
-    ? renderPhraseBubble(visualSeat, phraseBubbles[seat.seat]!, phraseOffsetIndex, escapeHtml)
-    : ''
-
   if (isBottomSeat) {
     return `
       <div
@@ -1112,10 +1103,6 @@ export function createCuttingSeatPanelHtml(
           pointer-events:none;
         "
       >
-        <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
-        <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
-        <div data-seat-emoji-bubble="${seat.seat}">${emojiBubbleHtml}</div>
-        <div data-seat-phrase-bubble="${seat.seat}">${phraseBubbleHtml}</div>
         ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
         <div
           style="
@@ -1234,10 +1221,6 @@ export function createCuttingSeatPanelHtml(
         pointer-events:none;
       "
     >
-      <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
-      <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
-      <div data-seat-emoji-bubble="${seat.seat}">${emojiBubbleHtml}</div>
-      <div data-seat-phrase-bubble="${seat.seat}">${phraseBubbleHtml}</div>
       ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands) : ''}
       <div
         style="
@@ -1304,6 +1287,125 @@ export function createCuttingSeatPanelHtml(
   `
 }
 
+// Bubble anchor markup за един seat — извикано отделно от panel markup-а
+// (createCuttingSeatPanelHtml), за да може bubble-ите да се рендират в свой
+// собствен fixed layer (виж createCuttingSeatBubblesLayerHtml), insert-нат
+// след #app в DOM-а, вместо вътре в seat-panels host-а, който стои преди
+// #app. Ползва СЪЩИЯ getCuttingSeatPanelAnchorStyle anchor като panel
+// markup-а, за да остане позицията идентична във всяка фаза/viewport.
+function createSeatBubbleAnchorHtml(
+  rawSeat: RoomSeatSnapshot,
+  visualSeat: Seat,
+  panelScale: number,
+  escapeHtml: EscapeHtml,
+  bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null,
+  declarationBubbles: Partial<Record<Seat, SeatDeclarationBubble>> | null,
+  emojiBubbles: Partial<Record<Seat, SeatEmojiBubble>> | null,
+  phraseBubbles: Partial<Record<Seat, SeatPhraseBubble>> | null,
+  tournamentBotReplacements: TournamentBotReplacementSnapshot[] | null | undefined,
+): string {
+  const { seat } = resolveSeatIdentityForRender(rawSeat, tournamentBotReplacements)
+
+  const hasBidBubble = Boolean(bidBubbles?.[seat.seat])
+  const bubbleHtml = bidBubbles?.[seat.seat]
+    ? renderBidBubble(visualSeat, bidBubbles[seat.seat]!, escapeHtml)
+    : ''
+  const hasDeclarationBubble = Boolean(declarationBubbles?.[seat.seat]?.lines.length)
+  const declarationBubbleHtml = declarationBubbles?.[seat.seat]
+    ? renderDeclarationBubble(
+        visualSeat,
+        declarationBubbles[seat.seat]!,
+        hasBidBubble,
+        escapeHtml,
+      )
+    : ''
+  const emojiOffsetIndex = (hasBidBubble ? 1 : 0) + (hasDeclarationBubble ? 1 : 0)
+  const emojiBubbleHtml = emojiBubbles?.[seat.seat]
+    ? renderEmojiBubble(visualSeat, emojiBubbles[seat.seat]!, emojiOffsetIndex)
+    : ''
+  const phraseOffsetIndex = emojiOffsetIndex + (emojiBubbles?.[seat.seat] ? 1 : 0)
+  const phraseBubbleHtml = phraseBubbles?.[seat.seat]
+    ? renderPhraseBubble(visualSeat, phraseBubbles[seat.seat]!, phraseOffsetIndex, escapeHtml)
+    : ''
+
+  return `
+    <div
+      data-active-room-seat-bubble-anchor="${seat.seat}"
+      style="
+        position:absolute;
+        ${getCuttingSeatPanelAnchorStyle(visualSeat, panelScale)}
+        pointer-events:none;
+      "
+    >
+      <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
+      <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
+      <div data-seat-emoji-bubble="${seat.seat}">${emojiBubbleHtml}</div>
+      <div data-seat-phrase-bubble="${seat.seat}">${phraseBubbleHtml}</div>
+    </div>
+  `
+}
+
+// Отделен fixed layer само за seat bubbles (анонс/обява/белот/терца/emoji/
+// фраза), insert-ван от контролера (syncSeatPanels) като body-level sibling
+// — за разлика от createCuttingSeatPanelsHtml's panel layer (card fans,
+// avatar panels), който стои ПРЕДИ #app. #app самият няма явен z-index
+// (само position:relative — виж src/style.css), т.е. НЕ създава изолиран
+// stacking context: неговите деца (trick cards z-index:5, Score HUD
+// z-index:8, bidding popup z-index:10/20) участват директно в root-ния
+// stacking context заедно с body-level siblings като този layer и
+// seat-panels-host. Затова числовият z-index:7 тук е достатъчен — сравнява
+// се directly срещу тези стойности, без значение от document order:
+// seat card fans (z-index:1, вътре в панела) < trick cards (5) < bubbles
+// (7) < Score HUD (8) < bidding/modal overlays (10/20+). Same anchor style
+// (getCuttingSeatPanelAnchorStyle) и panelScale като panel layer-а пазят
+// идентична позиция във всяка фаза/viewport.
+export function createCuttingSeatBubblesLayerHtml(
+  options: RenderCuttingSeatPanelsOptions,
+): string {
+  const { seats, localSeat, panelScale, escapeHtml, bidBubbles, declarationBubbles, emojiBubbles, phraseBubbles, tournamentBotReplacements } = options
+  const seatMap = new Map(seats.map((seat) => [seat.seat, seat]))
+  const visualOrder: readonly Seat[] = ['top', 'left', 'right', 'bottom']
+
+  const bubbleAnchors = SEAT_ORDER.map((actualSeat) => {
+    const seatSnapshot = seatMap.get(actualSeat) ?? createEmptySeatSnapshot(actualSeat)
+    const visualSeat = getVisualSeatForLocalPerspective(actualSeat, localSeat)
+    return { seatSnapshot, visualSeat }
+  })
+    .sort((first, second) => visualOrder.indexOf(first.visualSeat) - visualOrder.indexOf(second.visualSeat))
+    .map(({ seatSnapshot, visualSeat }) =>
+      createSeatBubbleAnchorHtml(
+        seatSnapshot,
+        visualSeat,
+        panelScale,
+        escapeHtml,
+        bidBubbles ?? null,
+        declarationBubbles ?? null,
+        emojiBubbles ?? null,
+        phraseBubbles ?? null,
+        tournamentBotReplacements ?? null,
+      ),
+    )
+    .join('')
+
+  const fixedLayerInsetStyle = isPhoneLayoutViewport()
+    ? `left:0;right:0;top:0;bottom:${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT}px;`
+    : 'inset:0;'
+
+  return `
+    <div
+      data-seat-bubbles-layer="1"
+      style="
+        position:fixed;
+        ${fixedLayerInsetStyle}
+        z-index:7;
+        pointer-events:none;
+      "
+    >
+      ${bubbleAnchors}
+    </div>
+  `
+}
+
 export function createCuttingSeatPanelsHtml(
   options: RenderCuttingSeatPanelsOptions,
 ): string {
@@ -1322,10 +1424,6 @@ export function createCuttingSeatPanelsHtml(
     panelScale,
     escapeHtml,
     dealtHands,
-    bidBubbles,
-    declarationBubbles,
-    emojiBubbles,
-    phraseBubbles,
     tournamentBotReplacements,
   } = options
   const effectiveCountdownSeat =
@@ -1372,11 +1470,7 @@ export function createCuttingSeatPanelsHtml(
         panelScale,
         escapeHtml,
         dealtHands,
-        bidBubbles ?? null,
-        declarationBubbles ?? null,
         countdownKey ?? '',
-        emojiBubbles ?? null,
-        phraseBubbles ?? null,
         tournamentBotReplacements ?? null,
       )
     })
@@ -1426,5 +1520,6 @@ export function createCuttingSeatPanelsHtml(
     >
       ${panels}
     </div>
+    ${createCuttingSeatBubblesLayerHtml(options)}
   `
 }
