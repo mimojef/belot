@@ -1184,7 +1184,7 @@ function renderBottomHandOverlay(options: {
         right:0;
         top:0;
         bottom:${bottomInset}px;
-        z-index:2;
+        z-index:4;
         pointer-events:none;
       "
     >
