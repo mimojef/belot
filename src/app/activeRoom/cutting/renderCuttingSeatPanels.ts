@@ -50,6 +50,13 @@ export type SeatDeclarationBubble = {
 export type SeatEmojiBubble = {
   emojiId: string
   elapsedMs: number
+  // Стабилен идентификатор на КОНКРЕТНАТА reaction instance (не само
+  // emojiId — same emoji, пуснато повторно от same играч, трябва да
+  // рестартира анимацията). Обикновено seat+emojiId+startedAt. Ползван от
+  // syncSeatPanels diffing (createActiveRoomFlowController.ts) за да не
+  // пресъздава <img> DOM node-а (и оттам да не рестартира playback-а на
+  // animated webp) при всеки re-render, докато е активна СЪЩАТА reaction.
+  reactionKey: string
 }
 
 export type SeatPhraseBubble = {
@@ -915,6 +922,7 @@ function renderEmojiBubble(
   return `
     <style>${keyframes}</style>
     <div
+      data-emoji-reaction-key="${bubble.reactionKey}"
       style="
         position:absolute;
         ${wrapperStyle}

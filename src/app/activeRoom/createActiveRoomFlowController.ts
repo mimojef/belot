@@ -741,13 +741,24 @@ export function createActiveRoomFlowController(
         }
       }
 
-      // Update emoji bubble wrappers (innerHTML only)
+      // Update emoji bubble wrappers (innerHTML only) — сравняваме по
+      // data-emoji-reaction-key (стабилен за живота на конкретната
+      // reaction instance), не по цялото innerHTML, защото
+      // animation-delay в markup-а се преизчислява от elapsedMs при
+      // всеки render и би различавал string-и дори за СЪЩАТА активна
+      // reaction. Replacement само когато ключът реално се е сменил (нова
+      // reaction) — иначе <img> DOM node-ът остава недокоснат и animated
+      // webp playback-ът не се рестартира.
       if (ok) {
         for (const bHost of Array.from(temp.querySelectorAll<HTMLElement>('[data-seat-emoji-bubble]'))) {
           const seat = bHost.getAttribute('data-seat-emoji-bubble')!
           const existing = host.querySelector<HTMLElement>(`[data-seat-emoji-bubble="${seat}"]`)
           if (!existing) { ok = false; break }
-          if (existing.innerHTML !== bHost.innerHTML) {
+          const newKey = bHost.querySelector<HTMLElement>('[data-emoji-reaction-key]')
+            ?.getAttribute('data-emoji-reaction-key') ?? null
+          const existingKey = existing.querySelector<HTMLElement>('[data-emoji-reaction-key]')
+            ?.getAttribute('data-emoji-reaction-key') ?? null
+          if (newKey !== existingKey) {
             existing.innerHTML = bHost.innerHTML
           }
         }
@@ -1440,6 +1451,7 @@ export function createActiveRoomFlowController(
       result[seat] = {
         emojiId: bubble.emojiId,
         elapsedMs: Math.round(performance.now() - bubble.startedAt),
+        reactionKey: `${seat}:${bubble.emojiId}:${bubble.startedAt}`,
       }
     }
     return Object.keys(result).length > 0 ? result : null
