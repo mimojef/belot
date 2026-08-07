@@ -1953,6 +1953,8 @@ export function createActiveRoomFlowController(
   }
 
   function submitBidActionFromUi(action: ClientBidAction): void {
+    options.gameAudio?.primeGameplaySfx()
+
     if (!activeRoomState || biddingUiState.pendingBidSent) {
       return
     }
@@ -3958,6 +3960,8 @@ export function createActiveRoomFlowController(
       .querySelectorAll<HTMLButtonElement>('[data-active-room-cut-index]')
       .forEach((button) => {
         button.addEventListener('click', () => {
+          options.gameAudio?.primeGameplaySfx()
+
           if (!activeRoomState) {
             return
           }

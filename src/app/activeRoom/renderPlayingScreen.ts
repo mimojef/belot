@@ -356,13 +356,24 @@ async function animatePlayedCardFromHand(options: {
     void targetPhysicalHeight
 
     const durationMs = 350
-    const landedAudioOffsetMs = 100
-    let didPlayLandedAudio = false
-    let landedTimeoutId: number | null = window.setTimeout(() => {
-      landedTimeoutId = null
-      didPlayLandedAudio = true
+
+    let didCallOnLanded = false
+    function callOnLandedOnce(): void {
+      if (didCallOnLanded) {
+        return
+      }
+      didCallOnLanded = true
       onLanded?.()
-    }, Math.max(0, durationMs - landedAudioOffsetMs))
+    }
+
+    // Safety net, set up before clone.animate() so it still fires even if
+    // that call throws. onfinish below should always win this race under
+    // normal conditions (fires within a frame of durationMs) — this timer
+    // only matters if WAAPI never reports finish/cancel at all, so the
+    // landing sound isn't silently lost the way a single-signal dependency
+    // could drop it. callOnLandedOnce() is idempotent, so this can never
+    // fire the sound twice alongside onfinish.
+    const safetyTimeoutId = window.setTimeout(callOnLandedOnce, durationMs + 60)
 
     const anim = clone.animate(
       [
@@ -380,13 +391,14 @@ async function animatePlayedCardFromHand(options: {
       anim.oncancel = () => resolve(false)
     })
 
-    if (landedTimeoutId !== null) {
-      window.clearTimeout(landedTimeoutId)
-      landedTimeoutId = null
-    }
+    window.clearTimeout(safetyTimeoutId)
 
-    if (didFinish && !didPlayLandedAudio) {
-      onLanded?.()
+    // onLanded fires at animation completion (not a look-ahead offset) —
+    // the SFX pool in createGameAudioController.ts is preloaded/reused, so
+    // it no longer needs a head start to hide Audio-element startup
+    // latency. Don't reintroduce an early-fire offset here.
+    if (didFinish) {
+      callOnLandedOnce()
     }
   } finally {
     overlay.remove()

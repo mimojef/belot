@@ -7,6 +7,7 @@ export type GameAudioController = {
   syncReactionCountdownWarning(shouldPlay: boolean): void
   scheduleDealPacketSounds(sequenceKey: string, timing?: DealPacketSoundTiming): void
   clearDealPacketSounds(): void
+  primeGameplaySfx(): void
   reset(): void
 }
 
@@ -127,6 +128,84 @@ function createAudio(src: string): HTMLAudioElement {
   return audio
 }
 
+// card-on-table/card-move are latency-sensitive: they fire in direct
+// response to a visible card animation, so unlike other SFX they can't
+// afford a per-play `new Audio()` (fetch+decode start-up cost, worst on
+// iOS Safari). Elements are created and `.load()`-ed once at controller
+// init and round-robin reused. Pool size 4 covers the maximum realistic
+// overlap — one full trick's worth of card-on-table plays, or one full
+// deal packet burst (DEFAULT_DEAL_PACKET_COUNT) — without a later play
+// cutting off an earlier one still finishing.
+const CARD_SFX_POOL_SIZE = 4
+
+type PreloadedSfxPool = {
+  play(): void
+  prime(): void
+}
+
+function createPreloadedSfxPool(src: string, size: number): PreloadedSfxPool {
+  const elements: HTMLAudioElement[] = []
+
+  for (let i = 0; i < size; i += 1) {
+    const audio = createAudio(src)
+    audio.load()
+    elements.push(audio)
+  }
+
+  let nextIndex = 0
+
+  function play(): void {
+    if (!canPlayAudioNow()) {
+      return
+    }
+
+    const audio = elements[nextIndex]
+    nextIndex = (nextIndex + 1) % elements.length
+
+    try {
+      audio.currentTime = 0
+    } catch {
+      // Safari can throw if the element isn't seekable yet (readyState too
+      // low) — playback below still proceeds from wherever it currently is.
+    }
+
+    void audio.play().catch(() => {})
+  }
+
+  // One-time iOS unlock: play()+pause() a preloaded element synchronously
+  // inside a real user gesture so later programmatic play() calls (fired
+  // from timers/animation callbacks, not gestures) aren't blocked/delayed.
+  // Muted for the duration of the unlock so it can't produce an audible
+  // blip — play() resolves once playback has *started*, not once it's
+  // silent again, so the brief window between play() and pause() would
+  // otherwise be audible at full volume. Mute state is captured/restored
+  // per element (not hardcoded to false) and restored on both the success
+  // and failure path, so a pool element can never get stuck muted for
+  // real gameplay playback afterwards.
+  function prime(): void {
+    for (const audio of elements) {
+      const wasMuted = audio.muted
+      audio.muted = true
+
+      const restore = () => {
+        audio.pause()
+        audio.currentTime = 0
+        audio.muted = wasMuted
+      }
+
+      const playResult = audio.play()
+
+      if (playResult && typeof playResult.then === 'function') {
+        playResult.then(restore).catch(restore)
+      } else {
+        restore()
+      }
+    }
+  }
+
+  return { play, prime }
+}
+
 function buildFilePath(basePath: string, fileName: string): string {
   return `${basePath.replace(/\/+$/, '')}/${fileName}`
 }
@@ -166,6 +245,16 @@ export function createGameAudioController(
     options.dealPacketDelayStepMs ?? DEFAULT_DEAL_PACKET_DELAY_STEP_MS
   const dealPacketLiftOffsetMs =
     options.dealPacketLiftOffsetMs ?? DEFAULT_DEAL_PACKET_LIFT_OFFSET_MS
+
+  const cardOnTablePool = createPreloadedSfxPool(
+    buildFilePath(sfxBasePath, 'card-on-table.mp3'),
+    CARD_SFX_POOL_SIZE,
+  )
+  const cardMovePool = createPreloadedSfxPool(
+    buildFilePath(sfxBasePath, 'card-move.mp3'),
+    CARD_SFX_POOL_SIZE,
+  )
+  let hasPrimedGameplaySfx = false
 
   let lastPassVariantIndex = -1
   let speechQueue: string[] = []
@@ -394,15 +483,25 @@ export function createGameAudioController(
   }
 
   function playCardMove(): void {
-    playSfx(buildFilePath(sfxBasePath, 'card-move.mp3'))
+    cardMovePool.play()
   }
 
   function playCardOnTable(): void {
-    playSfx(buildFilePath(sfxBasePath, 'card-on-table.mp3'))
+    cardOnTablePool.play()
   }
 
   function playMatchEnded(): void {
     playSfx(buildFilePath(DEFAULT_GAME_SOUNDS_BASE_PATH, 'EndGame.mp3'))
+  }
+
+  function primeGameplaySfx(): void {
+    if (hasPrimedGameplaySfx) {
+      return
+    }
+
+    hasPrimedGameplaySfx = true
+    cardOnTablePool.prime()
+    cardMovePool.prime()
   }
 
   function syncReactionCountdownWarning(shouldPlay: boolean): void {
@@ -547,6 +646,7 @@ export function createGameAudioController(
     syncReactionCountdownWarning,
     scheduleDealPacketSounds,
     clearDealPacketSounds,
+    primeGameplaySfx,
     reset,
   }
 }
