@@ -37,6 +37,45 @@ export const BOTTOM_HAND_MOBILE_CARD_WIDTH = 211
 export const BOTTOM_HAND_MOBILE_CARD_HEIGHT = 307
 export const BOTTOM_HAND_MOBILE_SPACING = 70
 export const BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET = -26
+
+// Под тази viewport ширина долното (местен играч) ветрило карти вече не се
+// смалява допълнително от stageScale (той е clamped на minScale заради
+// height constraint-а), затова при 8 карти краищата изтичат извън екрана.
+// Компенсираме с отделен uniform мащаб, приложен САМО върху bottom hand
+// fan-а (card size + spacing/edgeDrop) — не върху stage/panels/останалите
+// seat ветрила. Използва се еднакво от playing overlay-я
+// (renderPlayingScreen.ts) и от deal/bidding/cutting panel fan-а
+// (renderCuttingSeatPanels.ts), за да няма скок в размера между фазите.
+//
+// Важно: bottom hand fan-ът живее вътре в panel wrapper, който самият вече
+// е scale-нат от getCuttingSeatPanelAnchorStyle(..., stageScale). Затова
+// връщаният тук мащаб е КОМПЕНСИРАН спрямо stageScale — крайният видим
+// (viewport-space) мащаб е stageScale * getBottomHandMobileFanScale(stageScale),
+// който се изчислява да достигне точно целевия half-span.
+const BOTTOM_HAND_FAN_BREAKPOINT = 380
+const BOTTOM_HAND_FAN_EDGE_MARGIN = 5
+// Полу-размах (от центъра на ръката до видимия ръб на крайна карта) за
+// референтния случай 8 карти при естествен (немащабиран) размер:
+// spreadStep=70, card 211x307, rotate ±17.5deg.
+const BOTTOM_HAND_FAN_REFERENCE_HALF_SPAN = 391.78
+
+export function getBottomHandMobileFanScale(stageScale: number): number {
+  if (typeof window === 'undefined') {
+    return 1
+  }
+
+  const viewportWidth = window.innerWidth
+
+  if (viewportWidth > BOTTOM_HAND_FAN_BREAKPOINT) {
+    return 1
+  }
+
+  const availableHalfSpan = viewportWidth / 2 - BOTTOM_HAND_FAN_EDGE_MARGIN
+  const targetVisualScale = availableHalfSpan / BOTTOM_HAND_FAN_REFERENCE_HALF_SPAN
+  const compensatedScale = targetVisualScale / stageScale
+
+  return Math.min(1, Math.max(0.1, compensatedScale))
+}
 export const ACTIVE_ROOM_TABLE_BACKGROUND = `
   radial-gradient(circle at center, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0.015) 34%, rgba(0,0,0,0.00) 58%),
   url('/assets/lobby/table-diamond-bg.webp') center / 100% 100% no-repeat,

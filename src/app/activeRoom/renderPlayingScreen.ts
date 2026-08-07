@@ -25,6 +25,7 @@ import {
   BOTTOM_HAND_MOBILE_CARD_HEIGHT,
   BOTTOM_HAND_MOBILE_SPACING,
   BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET,
+  getBottomHandMobileFanScale,
   escapeHtml,
 } from './activeRoomShared'
 import {
@@ -806,17 +807,19 @@ function getPlayOrderSpread(index: number): {
   }
 }
 
-function getBottomHandOffset(index: number, count: number): {
+function getBottomHandOffset(index: number, count: number, stageScale: number): {
   x: number
   y: number
   rotate: number
 } {
-  const spreadStep = isPhoneLayoutViewport() ? BOTTOM_HAND_MOBILE_SPACING : 62
+  const isMobileLayout = isPhoneLayoutViewport()
+  const fanScale = isMobileLayout ? getBottomHandMobileFanScale(stageScale) : 1
+  const spreadStep = (isMobileLayout ? BOTTOM_HAND_MOBILE_SPACING : 62) * fanScale
   const centeredIndex = index - (count - 1) / 2
   const maxCentered = Math.max(1, (count - 1) / 2)
   const edgeProgress = Math.abs(centeredIndex) / maxCentered
   const countProgress = Math.min(1, Math.max(0, (count - 1) / 7))
-  const edgeDrop = edgeProgress * edgeProgress * 34 * countProgress
+  const edgeDrop = edgeProgress * edgeProgress * 34 * countProgress * fanScale
   return {
     x: centeredIndex * spreadStep,
     y: edgeDrop,
@@ -1067,16 +1070,21 @@ function renderBottomHandOverlay(options: {
 }): string {
   const { cards, validCardIds, isMyTurn, stageScale, hoveredHandCardId } = options
   const isMobileLayout = isPhoneLayoutViewport()
+  const bottomHandFanScale = isMobileLayout ? getBottomHandMobileFanScale(stageScale) : 1
   const bottomInset = isMobileLayout ? ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT : 0
-  const handCardWidth = isMobileLayout ? BOTTOM_HAND_MOBILE_CARD_WIDTH : HAND_W
-  const handCardHeight = isMobileLayout ? BOTTOM_HAND_MOBILE_CARD_HEIGHT : HAND_H
+  const handCardWidth = isMobileLayout
+    ? BOTTOM_HAND_MOBILE_CARD_WIDTH * bottomHandFanScale
+    : HAND_W
+  const handCardHeight = isMobileLayout
+    ? BOTTOM_HAND_MOBILE_CARD_HEIGHT * bottomHandFanScale
+    : HAND_H
 
   if (cards.length === 0) {
     return ''
   }
 
   const cardButtons = cards.map((card, index) => {
-    const offset = getBottomHandOffset(index, cards.length)
+    const offset = getBottomHandOffset(index, cards.length, stageScale)
     const baseTransform = `translate(-50%,-50%) translate(${offset.x}px,${offset.y}px) rotate(${offset.rotate}deg)`
     const isValid = !isMyTurn || validCardIds === null || validCardIds.includes(card.id)
     const canClick = isMyTurn && isValid
