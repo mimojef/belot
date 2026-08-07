@@ -77,6 +77,13 @@ export type RenderCuttingSeatPanelsOptions = {
   emojiBubbles?: Partial<Record<Seat, SeatEmojiBubble>> | null
   phraseBubbles?: Partial<Record<Seat, SeatPhraseBubble>> | null
   tournamentBotReplacements?: TournamentBotReplacementSnapshot[] | null
+  // Mobile playing фаза: bid/declaration/emoji/phrase балончетата се
+  // рендират отделно (createSeatBubbleLayerHtml) в собствен host над
+  // static trick cards. Panel-ът (hand fan + profile каре) оставя 4-те
+  // bubble wrapper div-а празни, за да няма дублиране — геометрията и
+  // анимациите на fan-а/profile карето остават напълно непроменени.
+  // Няма ефект извън mobile playing.
+  separateBubbleLayer?: boolean
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -1018,6 +1025,7 @@ export function createCuttingSeatPanelHtml(
   emojiBubbles: Partial<Record<Seat, SeatEmojiBubble>> | null,
   phraseBubbles: Partial<Record<Seat, SeatPhraseBubble>> | null,
   tournamentBotReplacements?: TournamentBotReplacementSnapshot[] | null,
+  skipBubbleRender = false,
 ): string {
   const { seat, isBotReplacement } = resolveSeatIdentityForRender(rawSeat, tournamentBotReplacements)
   const isBottomSeat = visualSeat === 'bottom'
@@ -1097,10 +1105,10 @@ export function createCuttingSeatPanelHtml(
           pointer-events:none;
         "
       >
-        <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
-        <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
-        <div data-seat-emoji-bubble="${seat.seat}">${emojiBubbleHtml}</div>
-        <div data-seat-phrase-bubble="${seat.seat}">${phraseBubbleHtml}</div>
+        <div data-seat-bid-bubble="${seat.seat}">${skipBubbleRender ? '' : bubbleHtml}</div>
+        <div data-seat-declaration-bubble="${seat.seat}">${skipBubbleRender ? '' : declarationBubbleHtml}</div>
+        <div data-seat-emoji-bubble="${seat.seat}">${skipBubbleRender ? '' : emojiBubbleHtml}</div>
+        <div data-seat-phrase-bubble="${seat.seat}">${skipBubbleRender ? '' : phraseBubbleHtml}</div>
         ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands, panelScale) : ''}
         <div
           style="
@@ -1219,10 +1227,10 @@ export function createCuttingSeatPanelHtml(
         pointer-events:none;
       "
     >
-      <div data-seat-bid-bubble="${seat.seat}">${bubbleHtml}</div>
-      <div data-seat-declaration-bubble="${seat.seat}">${declarationBubbleHtml}</div>
-      <div data-seat-emoji-bubble="${seat.seat}">${emojiBubbleHtml}</div>
-      <div data-seat-phrase-bubble="${seat.seat}">${phraseBubbleHtml}</div>
+      <div data-seat-bid-bubble="${seat.seat}">${skipBubbleRender ? '' : bubbleHtml}</div>
+      <div data-seat-declaration-bubble="${seat.seat}">${skipBubbleRender ? '' : declarationBubbleHtml}</div>
+      <div data-seat-emoji-bubble="${seat.seat}">${skipBubbleRender ? '' : emojiBubbleHtml}</div>
+      <div data-seat-phrase-bubble="${seat.seat}">${skipBubbleRender ? '' : phraseBubbleHtml}</div>
       ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands, panelScale) : ''}
       <div
         style="
@@ -1312,6 +1320,7 @@ export function createCuttingSeatPanelsHtml(
     emojiBubbles,
     phraseBubbles,
     tournamentBotReplacements,
+    separateBubbleLayer,
   } = options
   const effectiveCountdownSeat =
     countdownSeat === undefined ? cutterSeat : countdownSeat
@@ -1363,6 +1372,7 @@ export function createCuttingSeatPanelsHtml(
         emojiBubbles ?? null,
         phraseBubbles ?? null,
         tournamentBotReplacements ?? null,
+        separateBubbleLayer === true,
       )
     })
     .join('')
@@ -1410,6 +1420,104 @@ export function createCuttingSeatPanelsHtml(
       "
     >
       ${panels}
+    </div>
+  `
+}
+
+export type SeatBubbleLayerOptions = {
+  seats: RoomSeatSnapshot[]
+  localSeat: Seat
+  panelScale: number
+  bidBubbles: Partial<Record<Seat, SeatBidBubble>> | null
+  declarationBubbles: Partial<Record<Seat, SeatDeclarationBubble>> | null
+  emojiBubbles: Partial<Record<Seat, SeatEmojiBubble>> | null
+  phraseBubbles: Partial<Record<Seat, SeatPhraseBubble>> | null
+  escapeHtml: EscapeHtml
+}
+
+// Само за mobile playing фаза: рендира bid/declaration/emoji/phrase
+// балончетата на всички места в собствен, изолиран host — над static
+// trick cards. Извиква се ЗАЕДНО с createCuttingSeatPanelsHtml(...,
+// separateBubbleLayer:true), която оставя bubble wrapper div-овете в
+// panel-а празни, за да няма дублиране. Panel geometry (hand fan, profile
+// каре) остава напълно непроменена — само bubble съдържанието мигрира.
+export function createSeatBubbleLayerHtml(
+  options: SeatBubbleLayerOptions,
+): string {
+  const {
+    seats,
+    localSeat,
+    panelScale,
+    bidBubbles,
+    declarationBubbles,
+    emojiBubbles,
+    phraseBubbles,
+    escapeHtml,
+  } = options
+
+  const seatMap = new Map(seats.map((seat) => [seat.seat, seat]))
+  const visualOrder: readonly Seat[] = ['top', 'left', 'right', 'bottom']
+
+  const bubbleGroups = SEAT_ORDER
+    .filter((actualSeat) => seatMap.has(actualSeat))
+    .map((actualSeat) => ({
+      actualSeat,
+      visualSeat: getVisualSeatForLocalPerspective(actualSeat, localSeat),
+    }))
+    .sort((first, second) => visualOrder.indexOf(first.visualSeat) - visualOrder.indexOf(second.visualSeat))
+    .map(({ actualSeat, visualSeat }) => {
+      const hasBidBubble = Boolean(bidBubbles?.[actualSeat])
+      const bubbleHtml = bidBubbles?.[actualSeat]
+        ? renderBidBubble(visualSeat, bidBubbles[actualSeat]!, escapeHtml)
+        : ''
+      const hasDeclarationBubble = Boolean(declarationBubbles?.[actualSeat]?.lines.length)
+      const declarationBubbleHtml = declarationBubbles?.[actualSeat]
+        ? renderDeclarationBubble(visualSeat, declarationBubbles[actualSeat]!, hasBidBubble, escapeHtml)
+        : ''
+      const emojiOffsetIndex = (hasBidBubble ? 1 : 0) + (hasDeclarationBubble ? 1 : 0)
+      const emojiBubbleHtml = emojiBubbles?.[actualSeat]
+        ? renderEmojiBubble(visualSeat, emojiBubbles[actualSeat]!, emojiOffsetIndex)
+        : ''
+      const phraseOffsetIndex = emojiOffsetIndex + (emojiBubbles?.[actualSeat] ? 1 : 0)
+      const phraseBubbleHtml = phraseBubbles?.[actualSeat]
+        ? renderPhraseBubble(visualSeat, phraseBubbles[actualSeat]!, phraseOffsetIndex, escapeHtml)
+        : ''
+
+      if (bubbleHtml === '' && declarationBubbleHtml === '' && emojiBubbleHtml === '' && phraseBubbleHtml === '') {
+        return ''
+      }
+
+      return `
+        <div
+          style="
+            position:absolute;
+            ${getCuttingSeatPanelAnchorStyle(visualSeat, panelScale)}
+            pointer-events:none;
+          "
+        >
+          <div data-seat-bid-bubble="${actualSeat}">${bubbleHtml}</div>
+          <div data-seat-declaration-bubble="${actualSeat}">${declarationBubbleHtml}</div>
+          <div data-seat-emoji-bubble="${actualSeat}">${emojiBubbleHtml}</div>
+          <div data-seat-phrase-bubble="${actualSeat}">${phraseBubbleHtml}</div>
+        </div>
+      `
+    })
+    .join('')
+
+  const fixedLayerInsetStyle = isPhoneLayoutViewport()
+    ? `left:0;right:0;top:0;bottom:${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT}px;`
+    : 'inset:0;'
+
+  return `
+    <div
+      data-mobile-bubble-layer="1"
+      style="
+        position:fixed;
+        ${fixedLayerInsetStyle}
+        pointer-events:none;
+      "
+    >
+      ${bubbleGroups}
     </div>
   `
 }

@@ -30,6 +30,7 @@ import {
 } from './activeRoomShared'
 import {
   createCuttingSeatPanelsHtml,
+  createSeatBubbleLayerHtml,
   type DealtHandsData,
   type SeatDeclarationBubble,
   type SeatEmojiBubble,
@@ -72,6 +73,21 @@ const BOTTOM_PANEL_WIDTH = 360
 const BOTTOM_PANEL_HEIGHT = 138
 const BOTTOM_HAND_CENTER_X = 180
 const BOTTOM_HAND_CENTER_Y = 50
+
+// Mobile playing stacking (положителни нива, без z-index:-1):
+//   bottom-hand-overlay (местна ръка карти, fixed дете на #app)  — z-index:1
+//   seat-panels-host (opponent hand fan-ове + всички profile карета,
+//     вкл. долното) — z-index:2
+//   mobile-trick-layer-host (static trick cards)  — z-index:3
+//   mobile-bubble-layer-host (announcement bubbles) — z-index:4
+// #app самия няма явен z-index, затова position:fixed деца с explicit
+// z-index (bottom-hand-overlay) участват directno в document-level
+// сравнение с останалите host-ове — числата по-долу са избрани сравними
+// на това ниво, независимо от DOM ред.
+const MOBILE_BOTTOM_HAND_Z_INDEX = 1
+const MOBILE_SEAT_PANELS_Z_INDEX = 2
+const MOBILE_TRICK_LAYER_Z_INDEX = 3
+const MOBILE_BUBBLE_LAYER_Z_INDEX = 4
 const ACTIVE_HAND_CARD_LIFT = ' translateY(-5px)'
 const ACTIVE_HAND_CARD_FILTER = 'brightness(1.03) drop-shadow(0 8px 12px rgba(0,0,0,0.18))'
 
@@ -1169,6 +1185,8 @@ function renderBottomHandOverlay(options: {
     `
     : ''
 
+  const bottomHandOverlayZIndex = isMobileLayout ? MOBILE_BOTTOM_HAND_Z_INDEX : 2
+
   return `
     <div
       data-playing-bottom-hand-overlay="1"
@@ -1178,7 +1196,7 @@ function renderBottomHandOverlay(options: {
         right:0;
         top:0;
         bottom:${bottomInset}px;
-        z-index:2;
+        z-index:${bottomHandOverlayZIndex};
         pointer-events:none;
       "
     >
@@ -1216,6 +1234,7 @@ function renderPlayingStage(options: {
   animateNewest: boolean
   newestEntryElapsedMs: number
   flyingCardPlayKey: string | null
+  skipTrickArea?: boolean
 }): string {
   const {
     plays,
@@ -1223,6 +1242,7 @@ function renderPlayingStage(options: {
     animateNewest,
     newestEntryElapsedMs,
     flyingCardPlayKey,
+    skipTrickArea = false,
   } = options
 
   return `
@@ -1244,9 +1264,97 @@ function renderPlayingStage(options: {
           z-index:2;
         "
       >
-        ${renderTrickArea(plays, localSeat, animateNewest, newestEntryElapsedMs, flyingCardPlayKey)}
+        ${skipTrickArea ? '' : renderTrickArea(plays, localSeat, animateNewest, newestEntryElapsedMs, flyingCardPlayKey)}
       </div>
     </section>
+  `
+}
+
+// Mobile playing: static trick cards се рендират в собствен, самостоятелен
+// position:fixed host, вмъкнат в document.body веднага след #app (root).
+// Причина: seat panels/bubbles host-овете (appendChild-нати СЛЕД #app от
+// контролера) трябва да останат над хвърлените карти, а самите карти
+// трябва да останат над hand fan-а и profile карето (вътре в #app) —
+// невъзможно с общ z-index, докато и трите дела общ DOM branch. Извеждаме
+// само trick area (проста, self-contained, вече изцяло пренаписвана при
+// всеки render — без incremental diffing за счупване) в нов layer между
+// #app и seat-panels-host. Геометрията (outer flex wrapper + stage scale
+// wrapper) е copy на съществуващите root.innerHTML стойности — same
+// stageScale/scaledStageWidth/Height/screenHeightStyle, без нова формула.
+function renderMobileTrickLayerHtml(options: {
+  screenHeightStyle: string
+  scaledStageWidth: number
+  scaledStageHeight: number
+  stageScale: number
+  plays: RoomPlayCardSnapshot[]
+  localSeat: Seat
+  animateNewest: boolean
+  newestEntryElapsedMs: number
+  flyingCardPlayKey: string | null
+}): string {
+  const {
+    screenHeightStyle,
+    scaledStageWidth,
+    scaledStageHeight,
+    stageScale,
+    plays,
+    localSeat,
+    animateNewest,
+    newestEntryElapsedMs,
+    flyingCardPlayKey,
+  } = options
+
+  if (plays.length === 0) {
+    return ''
+  }
+
+  return `
+    <div
+      style="
+        position:fixed;
+        inset:0;
+        ${screenHeightStyle}
+        width:100%;
+        box-sizing:border-box;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        overflow:hidden;
+        pointer-events:none;
+      "
+    >
+      <div
+        style="
+          position:relative;
+          width:${scaledStageWidth}px;
+          height:${scaledStageHeight}px;
+          flex:0 0 auto;
+        "
+      >
+        <div
+          style="
+            position:absolute;
+            left:50%;
+            top:50%;
+            width:${ACTIVE_ROOM_STAGE_WIDTH}px;
+            height:${ACTIVE_ROOM_STAGE_HEIGHT}px;
+            transform:translate(-50%, -50%) scale(${stageScale});
+            transform-origin:center center;
+          "
+        >
+          <div
+            style="
+              position:absolute;
+              left:50%;
+              top:50%;
+              transform:translate(-50%,-50%);
+            "
+          >
+            ${renderTrickArea(plays, localSeat, animateNewest, newestEntryElapsedMs, flyingCardPlayKey)}
+          </div>
+        </div>
+      </div>
+    </div>
   `
 }
 
@@ -1297,9 +1405,7 @@ function scheduleCompletedTrickCollection(
       return
     }
 
-    const cardElements = Array.from(
-      root.querySelectorAll<HTMLElement>('[data-current-trick-card]'),
-    )
+    const cardElements = queryCurrentTrickCards(root)
     const visualWinner = getVisualSeatForLocalPerspective(
       completedTrick.winnerSeat,
       localSeat,
@@ -1386,6 +1492,63 @@ function syncPlayingBotTakeoverState(options: {
 
   cache.observedPlayKeys = [...observedKeys]
   cache.wasMyTurn = isMyTurn
+}
+
+const MOBILE_TRICK_LAYER_HOST_ATTR = 'data-mobile-trick-layer-host'
+const MOBILE_BUBBLE_LAYER_HOST_ATTR = 'data-mobile-bubble-layer-host'
+
+function syncFixedBodyHost(attr: string, zIndex: number, html: string): void {
+  let host = document.body.querySelector<HTMLDivElement>(`[${attr}]`)
+
+  if (!host) {
+    host = document.createElement('div')
+    host.setAttribute(attr, '1')
+    document.body.appendChild(host)
+  }
+
+  host.style.position = 'relative'
+  host.style.zIndex = String(zIndex)
+  host.innerHTML = html
+}
+
+function syncMobileTrickLayer(html: string): void {
+  syncFixedBodyHost(MOBILE_TRICK_LAYER_HOST_ATTR, MOBILE_TRICK_LAYER_Z_INDEX, html)
+}
+
+function removeMobileTrickLayer(): void {
+  document.body.querySelector(`[${MOBILE_TRICK_LAYER_HOST_ATTR}]`)?.remove()
+}
+
+function syncMobileBubbleLayer(html: string): void {
+  if (html === '') {
+    removeMobileBubbleLayer()
+    return
+  }
+
+  syncFixedBodyHost(MOBILE_BUBBLE_LAYER_HOST_ATTR, MOBILE_BUBBLE_LAYER_Z_INDEX, html)
+}
+
+function removeMobileBubbleLayer(): void {
+  document.body.querySelector(`[${MOBILE_BUBBLE_LAYER_HOST_ATTR}]`)?.remove()
+}
+
+// seat-panels-host (hand fan + profile каре) е управляван изцяло от
+// createActiveRoomFlowController.ts (syncSeatPanels) — не пипаме неговата
+// структура/съдържание. Тук само задаваме/чистим стиловите му position и
+// z-index свойства отвън, за да участва коректно в mobile stacking-а
+// спрямо новите trick/bubble host-ове. Извън mobile playing z-index-ът се
+// маха (връща се към auto — старото поведение).
+function applyMobileSeatPanelsZIndex(enabled: boolean): void {
+  const host = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
+  if (!host) return
+  host.style.position = enabled ? 'relative' : ''
+  host.style.zIndex = enabled ? String(MOBILE_SEAT_PANELS_Z_INDEX) : ''
+}
+
+function queryCurrentTrickCards(root: HTMLDivElement): HTMLElement[] {
+  const mobileHost = document.body.querySelector<HTMLElement>(`[${MOBILE_TRICK_LAYER_HOST_ATTR}]`)
+  const scope = mobileHost ?? root
+  return Array.from(scope.querySelectorAll<HTMLElement>('[data-current-trick-card]'))
 }
 
 export type RenderPlayingScreenOptions = {
@@ -1740,6 +1903,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
                 ? completedTrickEntryElapsedMs
                 : 0,
               flyingCardPlayKey: cache.flyingCardPlayKey,
+              skipTrickArea: isPhoneLayout,
             })}
           </div>
         </div>
@@ -1771,6 +1935,26 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     </div>
   `
 
+  if (isPhoneLayout) {
+    syncMobileTrickLayer(renderMobileTrickLayerHtml({
+      screenHeightStyle,
+      scaledStageWidth,
+      scaledStageHeight,
+      stageScale,
+      plays: displayedPlays,
+      localSeat,
+      animateNewest: shouldAnimateNewestViaOverlay ? false : animateNewest,
+      newestEntryElapsedMs: shouldAnimateCompletedTrickNewest
+        ? completedTrickEntryElapsedMs
+        : 0,
+      flyingCardPlayKey: cache.flyingCardPlayKey,
+    }))
+  } else {
+    removeMobileTrickLayer()
+  }
+
+  applyMobileSeatPanelsZIndex(isPhoneLayout)
+
   if (syncSeatPanels) {
     const seatPanelKey = [
       game.dealerSeat ?? 'null',
@@ -1786,7 +1970,8 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       seatPanelKey +
       `|scale:${stageScale.toFixed(3)}` +
       '|emoji:' + emojiKey +
-      '|phrase:' + phraseKey
+      '|phrase:' + phraseKey +
+      '|bubbleLayer:' + (isPhoneLayout ? '1' : '0')
 
     if (fullSeatPanelKey !== cache.lastSeatPanelKey) {
       cache.lastSeatPanelKey = fullSeatPanelKey
@@ -1812,7 +1997,23 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         emojiBubbles: emojiBubbles ?? null,
         phraseBubbles: phraseBubbles ?? null,
         tournamentBotReplacements: tournamentBotReplacements ?? null,
+        separateBubbleLayer: isPhoneLayout,
       }))
+
+      if (isPhoneLayout) {
+        syncMobileBubbleLayer(createSeatBubbleLayerHtml({
+          seats,
+          localSeat,
+          panelScale: stageScale,
+          bidBubbles: null,
+          declarationBubbles: declarationBubbles ?? null,
+          emojiBubbles: emojiBubbles ?? null,
+          phraseBubbles: phraseBubbles ?? null,
+          escapeHtml,
+        }))
+      } else {
+        syncMobileBubbleLayer('')
+      }
     }
   }
 
@@ -1996,11 +2197,9 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     shouldAnimateNewestViaOverlay &&
     newestDisplayedPlay !== null
   ) {
-    const trickCardEl = Array.from(
-      root.querySelectorAll<HTMLElement>(
-        `[data-current-trick-card][data-trick-seat="${newestDisplayedPlay.seat}"]`,
-      ),
-    ).find((element) => element.dataset.cardId === newestDisplayedPlay.card.id)
+    const trickCardEl = queryCurrentTrickCards(root)
+      .filter((element) => element.dataset.trickSeat === newestDisplayedPlay.seat)
+      .find((element) => element.dataset.cardId === newestDisplayedPlay.card.id)
     if (trickCardEl) {
       const targetRect = trickCardEl.getBoundingClientRect()
       const targetSize = getScaledPhysicalElementSize(trickCardEl, stageScale)

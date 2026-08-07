@@ -182,6 +182,25 @@ export function createPlayingUiCache(): PlayingUiCache {
 }
 
 export function resetPlayingUiCache(cache: PlayingUiCache): void {
+  // Mobile playing: static trick cards и announcement bubbles живеят в
+  // собствени host-ове (виж renderPlayingScreen.ts), вмъкнати директно в
+  // document.body — не се махат автоматично при innerHTML rebuild-и
+  // другаде, затова се чистят тук, на всеки exit-from-playing път
+  // (единственото място, извиквано последователно от всички съответни
+  // exit points в контролера). seat-panels-host остава (управляван от
+  // createActiveRoomFlowController.ts) — само неговият inline
+  // position/z-index стил, зададен за mobile playing stacking, се връща
+  // към auto/static, за да не изтече в следващата фаза (deal/bidding).
+  if (typeof document !== 'undefined') {
+    document.body.querySelector('[data-mobile-trick-layer-host]')?.remove()
+    document.body.querySelector('[data-mobile-bubble-layer-host]')?.remove()
+    const seatPanelsHost = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
+    if (seatPanelsHost) {
+      seatPanelsHost.style.position = ''
+      seatPanelsHost.style.zIndex = ''
+    }
+  }
+
   cache.lastTrickKey = null
   cache.lastCompletedTricksCount = 0
   cache.isTrickCollectionAnimating = false
