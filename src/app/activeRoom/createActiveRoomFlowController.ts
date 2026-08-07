@@ -674,6 +674,90 @@ export function createActiveRoomFlowController(
   function removeSeatPanels(): void {
     document.body.querySelector('[data-seat-panels-host="1"]')?.remove()
     removeMobilePhraseOverlay()
+    removeBiddingPopupOverlay()
+  }
+
+  const BIDDING_POPUP_HOST_ATTR = 'data-bidding-popup-host'
+
+  // Bid popup живее в собствен host, синхронизиран с incremental DOM
+  // diffing — same причина/похват като bottom-hand card buttons
+  // (renderPlayingScreen.ts): submitBidActionFromUi разчита изцяло на
+  // нативния 'click' event; ако options.root.innerHTML rewrite-ва popup-а
+  // между pointerdown/pointerup на потребителя (напр. при room_snapshot
+  // по време на активен bidding turn), браузърът не синтезира 'click' на
+  // detached node-а и tap-ът се губи. Popup структурата е statична
+  // (същите tiles) докато е visible, затова diff-ът само patch-ва
+  // disabled/style атрибути на съществуващи бутони; rebuild само при
+  // появяване/изчезване/промяна в набора активни бутони.
+  function syncBiddingPopupOverlay(html: string): void {
+    if (html === '') {
+      removeBiddingPopupOverlay()
+      return
+    }
+
+    let host = document.body.querySelector<HTMLDivElement>(`[${BIDDING_POPUP_HOST_ATTR}]`)
+    if (!host) {
+      host = document.createElement('div')
+      host.setAttribute(BIDDING_POPUP_HOST_ATTR, '1')
+      document.body.appendChild(host)
+      host.innerHTML = html
+      return
+    }
+
+    const temp = document.createElement('div')
+    temp.innerHTML = html
+
+    const newPopup = temp.querySelector<HTMLElement>('[data-bidding-popup="1"]')
+    const existingPopup = host.querySelector<HTMLElement>('[data-bidding-popup="1"]')
+
+    if (!newPopup || !existingPopup) {
+      host.innerHTML = html
+      return
+    }
+
+    const buttonKey = (btn: HTMLElement) => btn.dataset.bidAction ?? btn.dataset.bidSuit ?? ''
+    const newButtons = Array.from(newPopup.querySelectorAll<HTMLButtonElement>('button[data-bid-action], button[data-bid-suit]'))
+    const existingButtons = Array.from(existingPopup.querySelectorAll<HTMLButtonElement>('button[data-bid-action], button[data-bid-suit]'))
+    const newKeys = new Set(newButtons.map(buttonKey))
+    const existingKeys = new Set(existingButtons.map(buttonKey))
+    const sameButtonSet = newKeys.size === existingKeys.size && [...newKeys].every((k) => existingKeys.has(k))
+
+    if (!sameButtonSet) {
+      host.innerHTML = html
+      return
+    }
+
+    // Патчваме popup wrapper-а (opacity/transform/filter/pointer-events —
+    // enter animation и pending-submission state) и всеки бутон, без да
+    // пресъздаваме DOM node-овете.
+    for (const attr of ['data-bidding-popup-enter', 'data-bidding-popup-final-opacity', 'data-bidding-popup-final-filter', 'data-bidding-popup-stage-scale']) {
+      const newValue = newPopup.getAttribute(attr)
+      if (newValue !== null && existingPopup.getAttribute(attr) !== newValue) {
+        existingPopup.setAttribute(attr, newValue)
+      }
+    }
+    const newPopupStyle = newPopup.getAttribute('style') ?? ''
+    if (existingPopup.getAttribute('style') !== newPopupStyle) {
+      existingPopup.setAttribute('style', newPopupStyle)
+    }
+
+    for (const newButton of newButtons) {
+      const key = buttonKey(newButton)
+      const existingButton = existingButtons.find((b) => buttonKey(b) === key)
+      if (!existingButton) continue
+
+      if (existingButton.disabled !== newButton.disabled) {
+        existingButton.disabled = newButton.disabled
+      }
+      const newButtonStyle = newButton.getAttribute('style') ?? ''
+      if (existingButton.getAttribute('style') !== newButtonStyle) {
+        existingButton.setAttribute('style', newButtonStyle)
+      }
+    }
+  }
+
+  function removeBiddingPopupOverlay(): void {
+    document.body.querySelector(`[${BIDDING_POPUP_HOST_ATTR}]`)?.remove()
   }
 
   function syncSeatPanels(html: string): void {
@@ -1829,7 +1913,7 @@ export function createActiveRoomFlowController(
   }
 
   function markBiddingPopupPending(): void {
-    const popup = options.root.querySelector<HTMLElement>('[data-bidding-popup="1"]')
+    const popup = document.body.querySelector<HTMLElement>('[data-bidding-popup="1"]')
     if (!popup) {
       return
     }
@@ -1850,7 +1934,7 @@ export function createActiveRoomFlowController(
       return
     }
 
-    const popup = options.root.querySelector<HTMLElement>('[data-bidding-popup="1"]')
+    const popup = document.body.querySelector<HTMLElement>('[data-bidding-popup="1"]')
     if (!popup || popup.dataset.biddingPopupEnter !== '1') {
       return
     }
@@ -3190,9 +3274,9 @@ export function createActiveRoomFlowController(
           </div>
           ${scoreHudHtml}
           ${biddingErrorHtml}
-          ${biddingInteractionHtml}
         </div>
       `
+      syncBiddingPopupOverlay(biddingInteractionHtml)
       activateBiddingPopupEnter(animateBidPopup ? biddingPopupTurnKey : null)
 
       syncSeatPanels(createCuttingSeatPanelsHtml({
@@ -3224,19 +3308,27 @@ export function createActiveRoomFlowController(
         panelScale: stageScale,
       })
 
-      // Wire bid popup buttons
-      options.root
-        .querySelectorAll<HTMLButtonElement>('[data-bid-suit]')
+      // Wire bid popup buttons. Popup-ът вече живее в собствен host
+      // (syncBiddingPopupOverlay), чиито button node-ове се reuse-ват
+      // между re-renders — attach-ът затова е guard-нат с
+      // data-listeners-bound, за да не се закачат дублирани listeners на
+      // reused node-ове.
+      document.body
+        .querySelectorAll<HTMLButtonElement>(`[${BIDDING_POPUP_HOST_ATTR}] [data-bid-suit]`)
         .forEach((btn) => {
+          if (btn.dataset.listenersBound === '1') return
+          btn.dataset.listenersBound = '1'
           btn.addEventListener('click', () => {
             const suit = btn.dataset.bidSuit as 'clubs' | 'diamonds' | 'hearts' | 'spades'
             submitBidActionFromUi({ type: 'suit', suit })
           })
         })
 
-      options.root
-        .querySelectorAll<HTMLButtonElement>('[data-bid-action]')
+      document.body
+        .querySelectorAll<HTMLButtonElement>(`[${BIDDING_POPUP_HOST_ATTR}] [data-bid-action]`)
         .forEach((btn) => {
+          if (btn.dataset.listenersBound === '1') return
+          btn.dataset.listenersBound = '1'
           btn.addEventListener('click', () => {
             const action = btn.dataset.bidAction as ClientBidAction['type']
             if (action === 'pass' || action === 'no-trumps' || action === 'all-trumps' || action === 'double' || action === 'redouble') {

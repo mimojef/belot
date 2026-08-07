@@ -1497,6 +1497,81 @@ function syncPlayingBotTakeoverState(options: {
 
 const MOBILE_TRICK_LAYER_HOST_ATTR = 'data-mobile-trick-layer-host'
 const MOBILE_BUBBLE_LAYER_HOST_ATTR = 'data-mobile-bubble-layer-host'
+const BOTTOM_HAND_HOST_ATTR = 'data-playing-bottom-hand-host'
+
+// Bottom-hand card buttons живеят в собствен host, синхронизиран с
+// incremental DOM diffing (по data-card-id), вместо да минават през
+// root.innerHTML rewrite-а на всеки render. Причина: card play разчита
+// изцяло на нативния 'click' event (виж коментара при event listener
+// attach-а по-долу) — ако re-render (server snapshot и т.н.) унищожи и
+// пресъздаде button node-а между pointerdown и pointerup на потребителя,
+// браузърът изобщо не синтезира 'click' на detached node-а, tap-ът се
+// губи безшумно. Reuse-вайки node-а за same card-id между render-и,
+// избягваме тази race без да сменяме event модела.
+function syncBottomHandOverlay(html: string): HTMLElement | null {
+  if (html === '') {
+    removeBottomHandOverlay()
+    return null
+  }
+
+  let host = document.body.querySelector<HTMLDivElement>(`[${BOTTOM_HAND_HOST_ATTR}]`)
+  if (!host) {
+    host = document.createElement('div')
+    host.setAttribute(BOTTOM_HAND_HOST_ATTR, '1')
+    document.body.appendChild(host)
+    host.innerHTML = html
+    return host
+  }
+
+  const temp = document.createElement('div')
+  temp.innerHTML = html
+
+  const newButtons = Array.from(temp.querySelectorAll<HTMLButtonElement>('[data-card-id]'))
+  const existingButtons = Array.from(host.querySelectorAll<HTMLButtonElement>('[data-card-id]'))
+  const newIds = new Set(newButtons.map((b) => b.dataset.cardId))
+  const existingIds = new Set(existingButtons.map((b) => b.dataset.cardId))
+  const sameCardSet = newIds.size === existingIds.size && [...newIds].every((id) => existingIds.has(id))
+
+  if (!sameCardSet) {
+    // Ръката структурно се е променила (нова раздача, карта изиграна) —
+    // пълен rebuild е безопасен тук, старите node-ове за премахнати карти
+    // и без друго вече не могат да бъдат цел на активен gesture.
+    host.innerHTML = html
+    return host
+  }
+
+  // Same set от карти — patch-ваме само атрибутите, които варират между
+  // render-и (playable/disabled state, hover transform, z-index), без да
+  // пипаме самите button/img DOM node-ове.
+  for (const newButton of newButtons) {
+    const cardId = newButton.dataset.cardId
+    const existingButton = existingButtons.find((b) => b.dataset.cardId === cardId)
+    if (!existingButton) continue
+
+    if (existingButton.className !== newButton.className) {
+      existingButton.className = newButton.className
+    }
+    const newStyle = newButton.getAttribute('style') ?? ''
+    if (existingButton.getAttribute('style') !== newStyle) {
+      existingButton.setAttribute('style', newStyle)
+    }
+    if (existingButton.disabled !== newButton.disabled) {
+      existingButton.disabled = newButton.disabled
+    }
+    if (existingButton.dataset.baseTransform !== newButton.dataset.baseTransform) {
+      existingButton.dataset.baseTransform = newButton.dataset.baseTransform ?? ''
+    }
+    if (existingButton.dataset.z !== newButton.dataset.z) {
+      existingButton.dataset.z = newButton.dataset.z ?? ''
+    }
+  }
+
+  return host
+}
+
+function removeBottomHandOverlay(): void {
+  document.body.querySelector(`[${BOTTOM_HAND_HOST_ATTR}]`)?.remove()
+}
 
 function syncFixedBodyHost(attr: string, zIndex: number, html: string): void {
   let host = document.body.querySelector<HTMLDivElement>(`[${attr}]`)
@@ -1919,13 +1994,6 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
           overflow:visible;
         "
       ></div>
-      ${renderBottomHandOverlay({
-        cards: sortedHand,
-        validCardIds,
-        isMyTurn,
-        stageScale,
-        hoveredHandCardId: cache.hoveredHandCardId,
-      })}
       ${renderScoreHud({
         game,
         seats,
@@ -1935,6 +2003,14 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       })}
     </div>
   `
+
+  const bottomHandHost = syncBottomHandOverlay(renderBottomHandOverlay({
+    cards: sortedHand,
+    validCardIds,
+    isMyTurn,
+    stageScale,
+    hoveredHandCardId: cache.hoveredHandCardId,
+  }))
 
   if (isPhoneLayout) {
     syncMobileTrickLayer(renderMobileTrickLayerHtml({
@@ -2094,7 +2170,9 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         }
 
         const button = Array.from(
-          root.querySelectorAll<HTMLButtonElement>('.play-hand-card--active'),
+          document.body.querySelectorAll<HTMLButtonElement>(
+            `[${BOTTOM_HAND_HOST_ATTR}] .play-hand-card--active`,
+          ),
         ).find((candidateButton) => candidateButton.dataset.cardId === cardId)
 
         if (!button) {
@@ -2167,22 +2245,25 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
   // received the initiating press is still attached at release; if a
   // re-render swaps it out mid-gesture, no click fires at all (the tap is
   // safely dropped instead of being misattributed to a different card).
-  root.querySelectorAll<HTMLButtonElement>('.play-hand-card--active').forEach((button) => {
+  // bottomHandHost persists card button DOM node-и between re-renders
+  // (виж syncBottomHandOverlay) — listener attach-ът затова е guard-нат с
+  // data-listeners-bound, за да не се закачат дублирани listeners на
+  // reused node-ове. Нови/newly-active node-ове (marker липсва) винаги
+  // получават listener-и.
+  bottomHandHost?.querySelectorAll<HTMLButtonElement>('.play-hand-card--active').forEach((button) => {
     const cardId = button.dataset.cardId
-    if (!cardId) {
+    if (!cardId || button.dataset.listenersBound === '1') {
       return
     }
+    button.dataset.listenersBound = '1'
 
     button.addEventListener('click', () => {
       handleHandCardChoice(button, cardId)
     })
-  })
-
-  root.querySelectorAll<HTMLButtonElement>('.play-hand-card--active').forEach((button) => {
-    const baseTransform = button.dataset.baseTransform ?? ''
-    const baseZIndex = Number.parseInt(button.dataset.z ?? '50', 10)
 
     button.addEventListener('pointerenter', () => {
+      const baseTransform = button.dataset.baseTransform ?? ''
+      const baseZIndex = Number.parseInt(button.dataset.z ?? '50', 10)
       cache.hoveredHandCardId = button.dataset.cardId ?? null
       button.style.transform = `${baseTransform}${ACTIVE_HAND_CARD_LIFT}`
       button.style.filter = ACTIVE_HAND_CARD_FILTER
@@ -2190,6 +2271,8 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     })
 
     button.addEventListener('pointerleave', () => {
+      const baseTransform = button.dataset.baseTransform ?? ''
+      const baseZIndex = Number.parseInt(button.dataset.z ?? '50', 10)
       if (cache.hoveredHandCardId === button.dataset.cardId) {
         cache.hoveredHandCardId = null
       }
