@@ -1485,6 +1485,7 @@ export function createActiveRoomFlowController(
           position:fixed;
           bottom:${isPhoneLayout ? `${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT + 8}px` : '76px'};
           right:${isPhoneLayout ? '14px' : '16px'};
+          top:${isPhoneLayout ? '14px' : 'auto'};
           transform:scale(${uiScale});
           transform-origin:bottom right;
           z-index:9999;
@@ -1492,15 +1493,21 @@ export function createActiveRoomFlowController(
           border:1px solid rgba(255,255,255,0.12);
           border-radius:16px;
           padding:12px;
-          display:grid;
-          grid-template-columns:repeat(8,52px);
-          grid-template-rows:repeat(3,52px);
-          gap:4px;
           box-shadow:0 8px 32px rgba(0,0,0,0.5);
           -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
+          ${isPhoneLayout ? 'display:flex;flex-direction:column;overflow:hidden;' : ''}
         "
       >
-        ${rows.join('')}
+        <div
+          style="
+            display:grid;
+            grid-template-columns:repeat(${isPhoneLayout ? '3' : '8'},52px);
+            gap:4px;
+            ${isPhoneLayout ? 'overflow-y:auto;min-height:0;justify-content:center;' : ''}
+          "
+        >
+          ${rows.join('')}
+        </div>
       </div>
     `
   }
