@@ -1581,7 +1581,7 @@ function syncBottomHandOverlay(html: string): HTMLElement | null {
   return host
 }
 
-function removeBottomHandOverlay(): void {
+export function removeBottomHandOverlay(): void {
   document.body.querySelector(`[${BOTTOM_HAND_HOST_ATTR}]`)?.remove()
 }
 

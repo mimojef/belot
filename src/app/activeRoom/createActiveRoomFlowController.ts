@@ -109,7 +109,7 @@ import {
   createBiddingInteractionHtml,
 } from './renderBiddingScreen'
 import { sortLocalHandForAllTrumps, sortLocalHandForDisplay, type SortDisplayOptions } from './sortLocalHand'
-import { renderPlayingScreen, type RenderPlayingScreenOptions } from './renderPlayingScreen'
+import { renderPlayingScreen, removeBottomHandOverlay, type RenderPlayingScreenOptions } from './renderPlayingScreen'
 import { renderScoringScreen } from './renderScoringPanel'
 import { renderMatchEndedScreen } from './renderMatchEndedScreen'
 import { renderScoreHud } from './renderScoreHud'
@@ -2317,6 +2317,24 @@ export function createActiveRoomFlowController(
     syncReactionCountdownAudioTicker()
     if (!isShowingPlayingPhase) {
       resetPlayingUiCache(playingCache)
+      removeBottomHandOverlay()
+    }
+    // Bidding popup/bottom-hand card buttons live in their own document.body
+    // host (see syncBiddingPopupOverlay/syncBottomHandOverlay) instead of
+    // options.root, so a native 'click' still fires even if a server
+    // snapshot rewrites root mid-gesture (b6354f2). That means neither host
+    // is wiped by root's own re-render — removal must be driven explicitly
+    // by authoritativePhase, unconditionally, on every render call. Bidding
+    // can end and jump straight to 'deal-last-3'/'next-round'/'playing' in
+    // a single atomic server snapshot (submitServerBidAction resolves and
+    // transitions phase in one step — see finalizeServerBiddingPhase), with
+    // no intermediate "bidding but nobody's turn" render to hang this off
+    // of. Keying cleanup off authoritativePhase directly (not the render-
+    // local isShowingBiddingPhase, which can be temporarily suppressed by a
+    // lingering deal animation) guarantees removal fires the instant the
+    // phase is no longer 'bidding', regardless of which phase it jumped to.
+    if (authoritativePhase !== 'bidding') {
+      removeBiddingPopupOverlay()
     }
     const hasSeatPanelPhase =
       isShowingPlayingPhase ||
