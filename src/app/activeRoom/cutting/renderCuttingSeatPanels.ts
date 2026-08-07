@@ -1007,6 +1007,70 @@ function renderPhraseBubble(
   `
 }
 
+// Само mobile preset phrase bubbles: маркирано съдържание за отделния,
+// untransformed body-level overlay (виж syncMobilePhraseOverlay.ts).
+// Позицията НЕ се задава тук — само визуалният markup. Размерите са
+// explicit умножени по panelScale, за да запазят същия визуален размер,
+// какъвто bubble-ът имаше в стария path (там беше nested в
+// transform:scale(panelScale) anchor; тук overlay-ят е untransformed).
+export function createMobilePhraseOverlayHtml(
+  seats: RoomSeatSnapshot[],
+  localSeat: Seat,
+  phraseBubbles: Partial<Record<Seat, SeatPhraseBubble>> | null | undefined,
+  panelScale: number,
+  escapeHtml: EscapeHtml,
+): string {
+  if (!phraseBubbles) {
+    return ''
+  }
+
+  const bubbles = SEAT_ORDER
+    .filter((actualSeat) => phraseBubbles[actualSeat] && seats.some((s) => s.seat === actualSeat))
+    .map((actualSeat) => {
+      const bubble = phraseBubbles[actualSeat]!
+      const visualSeat = getVisualSeatForLocalPerspective(actualSeat, localSeat)
+      const minWidth = Math.round(138 * panelScale)
+      const maxWidth = Math.round(230 * panelScale)
+      const paddingV = Math.round(12 * panelScale)
+      const paddingH = Math.round(16 * panelScale)
+      const fontSize = Math.round(20 * panelScale)
+      const borderRadius = Math.round(14 * panelScale)
+      const borderWidth = Math.max(1, Math.round(2 * panelScale))
+
+      return `
+        <div
+          data-mobile-phrase-bubble="${actualSeat}"
+          data-mobile-phrase-seat-visual="${visualSeat}"
+          style="
+            position:fixed;
+            left:0;
+            top:0;
+            max-width:${maxWidth}px;
+            min-width:${minWidth}px;
+            box-sizing:border-box;
+            padding:${paddingV}px ${paddingH}px;
+            border-radius:${borderRadius}px;
+            border:${borderWidth}px solid #111111;
+            background:#ffffff;
+            box-shadow:0 8px 20px rgba(0,0,0,0.24);
+            color:#111111;
+            font-size:${fontSize}px;
+            line-height:1.18;
+            font-weight:900;
+            text-align:center;
+            visibility:hidden;
+            pointer-events:none;
+          "
+        >
+          ${escapeHtml(bubble.text)}
+        </div>
+      `
+    })
+    .join('')
+
+  return bubbles
+}
+
 export function createCuttingSeatPanelHtml(
   rawSeat: RoomSeatSnapshot,
   visualSeat: Seat,
@@ -1088,7 +1152,11 @@ export function createCuttingSeatPanelHtml(
     ? renderEmojiBubble(visualSeat, emojiBubbles[seat.seat]!, emojiOffsetIndex)
     : ''
   const phraseOffsetIndex = emojiOffsetIndex + (emojiBubbles?.[seat.seat] ? 1 : 0)
-  const phraseBubbleHtml = phraseBubbles?.[seat.seat]
+  // Mobile preset phrase bubbles се рендират в отделен, untransformed
+  // body-level overlay (createMobilePhraseOverlayHtml/syncMobilePhraseOverlay),
+  // позициониран спрямо реалния profile card rect — не тук. Desktop
+  // продължава по стария path непроменен.
+  const phraseBubbleHtml = phraseBubbles?.[seat.seat] && !isPhoneLayoutViewport()
     ? renderPhraseBubble(visualSeat, phraseBubbles[seat.seat]!, phraseOffsetIndex, escapeHtml)
     : ''
 
@@ -1111,6 +1179,7 @@ export function createCuttingSeatPanelHtml(
         <div data-seat-phrase-bubble="${seat.seat}">${skipBubbleRender ? '' : phraseBubbleHtml}</div>
         ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands, panelScale) : ''}
         <div
+          data-seat-profile-card="${seat.seat}"
           style="
             position:relative;
             width:360px;
@@ -1233,6 +1302,7 @@ export function createCuttingSeatPanelHtml(
       <div data-seat-phrase-bubble="${seat.seat}">${skipBubbleRender ? '' : phraseBubbleHtml}</div>
       ${dealtHands ? renderDealtCardFanInPanel(seat.seat, visualSeat, dealtHands, panelScale) : ''}
       <div
+        data-seat-profile-card="${seat.seat}"
         style="
           position:relative;
           width:186px;
@@ -1479,7 +1549,10 @@ export function createSeatBubbleLayerHtml(
         ? renderEmojiBubble(visualSeat, emojiBubbles[actualSeat]!, emojiOffsetIndex)
         : ''
       const phraseOffsetIndex = emojiOffsetIndex + (emojiBubbles?.[actualSeat] ? 1 : 0)
-      const phraseBubbleHtml = phraseBubbles?.[actualSeat]
+      // Mobile preset phrase bubbles живеят в отделния phrase overlay
+      // (createMobilePhraseOverlayHtml), не тук — виж коментара в
+      // createCuttingSeatPanelHtml.
+      const phraseBubbleHtml = phraseBubbles?.[actualSeat] && !isPhoneLayoutViewport()
         ? renderPhraseBubble(visualSeat, phraseBubbles[actualSeat]!, phraseOffsetIndex, escapeHtml)
         : ''
 

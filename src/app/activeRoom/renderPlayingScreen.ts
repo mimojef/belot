@@ -36,6 +36,7 @@ import {
   type SeatEmojiBubble,
   type SeatPhraseBubble,
 } from './cutting/renderCuttingSeatPanels'
+import { syncMobilePhraseOverlay } from './cutting/syncMobilePhraseOverlay'
 import {
   getCuttingSeatPanelAnchorStyle,
   getVisualSeatForLocalPerspective,
@@ -2014,6 +2015,13 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       } else {
         syncMobileBubbleLayer('')
       }
+
+      syncMobilePhraseOverlay({
+        seats,
+        localSeat,
+        phraseBubbles: phraseBubbles ?? null,
+        panelScale: stageScale,
+      })
     }
   }
 

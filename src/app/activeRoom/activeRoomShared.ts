@@ -194,6 +194,7 @@ export function resetPlayingUiCache(cache: PlayingUiCache): void {
   if (typeof document !== 'undefined') {
     document.body.querySelector('[data-mobile-trick-layer-host]')?.remove()
     document.body.querySelector('[data-mobile-bubble-layer-host]')?.remove()
+    document.body.querySelector('[data-mobile-phrase-overlay-host]')?.remove()
     const seatPanelsHost = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
     if (seatPanelsHost) {
       seatPanelsHost.style.position = ''

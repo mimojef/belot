@@ -18,6 +18,11 @@ import {
   type SeatPhraseBubble,
 } from './cutting/renderCuttingSeatPanels'
 import {
+  removeMobilePhraseBubbleFromOverlay,
+  removeMobilePhraseOverlay,
+  syncMobilePhraseOverlay,
+} from './cutting/syncMobilePhraseOverlay'
+import {
   type ActiveRoomFlowController,
   type ActiveRoomState,
   type BiddingUiState,
@@ -668,6 +673,7 @@ export function createActiveRoomFlowController(
 
   function removeSeatPanels(): void {
     document.body.querySelector('[data-seat-panels-host="1"]')?.remove()
+    removeMobilePhraseOverlay()
   }
 
   function syncSeatPanels(html: string): void {
@@ -1408,6 +1414,7 @@ export function createActiveRoomFlowController(
       delete phraseReactionUiState.activeBubbles[seat]
       delete phraseReactionUiState.timerIds[seat]
       clearPhraseInPanels(seat)
+      removeMobilePhraseBubbleFromOverlay(seat)
     }, PHRASE_BUBBLE_DURATION_MS)
   }
 
@@ -2669,6 +2676,12 @@ export function createActiveRoomFlowController(
         phraseBubbles: getPhraseBubblesForRender(),
         tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
       }))
+      syncMobilePhraseOverlay({
+        seats: activeRoomState.seats,
+        localSeat: activeRoomState.seat,
+        phraseBubbles: getPhraseBubblesForRender(),
+        panelScale: stageScale,
+      })
 
       if (cutAnimationForRender !== null) {
         cuttingAnimation.renderedSelectionKey = cuttingAnimation.activeSelectionKey !== null
@@ -2962,6 +2975,12 @@ export function createActiveRoomFlowController(
         phraseBubbles: getPhraseBubblesForRender(),
         tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
       }))
+      syncMobilePhraseOverlay({
+        seats: activeRoomState.seats,
+        localSeat: activeRoomState.seat,
+        phraseBubbles: getPhraseBubblesForRender(),
+        panelScale: stageScale,
+      })
 
       if (isUsingFirstThreeOverlay && dealingAnimation.activePhaseKey !== null) {
         const overlayHost =
@@ -3186,6 +3205,12 @@ export function createActiveRoomFlowController(
         phraseBubbles: getPhraseBubblesForRender(),
         tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
       }))
+      syncMobilePhraseOverlay({
+        seats: activeRoomState.seats,
+        localSeat: activeRoomState.seat,
+        phraseBubbles: getPhraseBubblesForRender(),
+        panelScale: stageScale,
+      })
 
       // Wire bid popup buttons
       options.root
