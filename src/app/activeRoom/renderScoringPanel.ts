@@ -16,6 +16,30 @@ import {
 import { renderScoreHud } from './renderScoreHud'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 
+const SCORING_PANEL_MAX_WIDTH_PX = 730
+
+// Под тази viewport ширина скоринг таблото (max-width:730px, вече
+// мащабирано с общия stageScale, който е clamped на minScale под ~700px
+// viewport height) вече не се смалява допълнително — видимите му ръбове
+// изтичат под 5px или извън viewport-а. Компенсираме с отделен uniform
+// мащаб, приложен САМО върху таблото (не върху HUD-а от 7fdf781, нито
+// профили/карти/bubbles/layering), clamp-нат да НЕ разтяга таблото над
+// естествения му размер — само смалява, когато е нужно.
+const SCORING_PANEL_MOBILE_BREAKPOINT = 360
+const SCORING_PANEL_MOBILE_EDGE_GAP = 5
+
+function getScoringPanelMobileScale(viewportWidth: number, stageScale: number): number {
+  if (viewportWidth >= SCORING_PANEL_MOBILE_BREAKPOINT) {
+    return 1
+  }
+
+  const targetWidth = viewportWidth - SCORING_PANEL_MOBILE_EDGE_GAP * 2
+  const naturalWidth = SCORING_PANEL_MAX_WIDTH_PX * stageScale
+  const scale = targetWidth / naturalWidth
+
+  return Math.min(1, Math.max(0.1, scale))
+}
+
 const LABEL_COLUMN_WIDTH_PX = 108
 const TABLE_GRID_COLUMNS = `${LABEL_COLUMN_WIDTH_PX}px minmax(0, 1fr) minmax(0, 1fr)`
 const SUM_COUNTER_DURATION_MS = 1000
@@ -997,6 +1021,9 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
   const tableBackground = isPhoneLayout
     ? ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND
     : ACTIVE_ROOM_TABLE_BACKGROUND
+  const scoringPanelMobileScale = isPhoneLayout && typeof window !== 'undefined'
+    ? getScoringPanelMobileScale(window.innerWidth, stageScale)
+    : 1
 
   root.innerHTML = `
     <div
@@ -1052,7 +1079,20 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
                 box-sizing:border-box;
               "
             >
-              ${renderScoringPanelHtml(game, localSeat, winningBid, countdownSeconds)}
+              ${scoringPanelMobileScale === 1
+                ? renderScoringPanelHtml(game, localSeat, winningBid, countdownSeconds)
+                : `
+                  <div
+                    style="
+                      width:100%;
+                      transform:scale(${scoringPanelMobileScale});
+                      transform-origin:center center;
+                    "
+                  >
+                    ${renderScoringPanelHtml(game, localSeat, winningBid, countdownSeconds)}
+                  </div>
+                `
+              }
             </div>
           </div>
         </div>
