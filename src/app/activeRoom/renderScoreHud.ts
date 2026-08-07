@@ -10,6 +10,36 @@ import { formatBidType, getBidMultiplierLabel } from './winningBidHelpers'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 
 const SCORE_HUD_INTERNAL_OFFSET = 18
+const SCORE_HUD_WIDTH = 300
+
+// Под тази viewport ширина HUD-ът (закотвен долу-ляво на 5px) вече
+// застъпва горното профилно каре — то е центрирано хоризонтално и не се
+// мести, а HUD-ът расте наляво само с stageScale (clamped на minScale под
+// ~700px height, вижте getBottomHandMobileFanScale за аналогичен случай).
+// Компенсираме с отделен uniform мащаб, приложен САМО върху HUD-а (не
+// върху top profile карето), изчислен така, че десният видим ръб на
+// HUD-а да опре на 5px от левия видим ръб на profile карето.
+const SCORE_HUD_MOBILE_BREAKPOINT = 370
+const SCORE_HUD_MOBILE_EDGE_GAP = 5
+const SCORE_HUD_LEFT_ANCHOR = 5
+// Ефективна визуална ширина на top profile карето: PANEL_CARD_WIDTH(186px)
+// от renderCuttingSeatPanels.ts, умножено по вътрешния transform:scale(0.9)
+// на самото каре (виж createCuttingSeatPanelHtml, top/side seat блок).
+const TOP_PROFILE_CARD_VISUAL_WIDTH = 186 * 0.9
+
+function getScoreHudMobileScale(viewportWidth: number, stageScale: number): number {
+  if (viewportWidth >= SCORE_HUD_MOBILE_BREAKPOINT) {
+    return 1
+  }
+
+  const profileLeftEdge =
+    viewportWidth / 2 - (TOP_PROFILE_CARD_VISUAL_WIDTH * stageScale) / 2
+  const availableHudWidth =
+    profileLeftEdge - SCORE_HUD_MOBILE_EDGE_GAP - SCORE_HUD_LEFT_ANCHOR
+  const scale = availableHudWidth / (SCORE_HUD_WIDTH * stageScale)
+
+  return Math.min(1, Math.max(0.1, scale))
+}
 
 type RenderScoreHudOptions = {
   game: RoomGameSnapshot
@@ -127,6 +157,10 @@ function getScoreForLocalPerspective(game: RoomGameSnapshot, localSeat: Seat): {
 export function renderScoreHud(options: RenderScoreHudOptions): string {
   const { game, seats, localSeat, winningBid, stageScale } = options
   const isMobileLayout = isPhoneLayoutViewport()
+  const hudMobileScale = isMobileLayout && typeof window !== 'undefined'
+    ? getScoreHudMobileScale(window.innerWidth, stageScale)
+    : 1
+  const effectiveHudScale = stageScale * hudMobileScale
   const { ourScore, theirScore } = getScoreForLocalPerspective(game, localSeat)
   const bidLabel = formatBidType(winningBid)
   const bidIconMarkup = getBidIconMarkup(winningBid)
@@ -142,13 +176,13 @@ export function renderScoreHud(options: RenderScoreHudOptions): string {
       data-active-room-score-hud="1"
       style="
         position:fixed;
-        top:${5 - SCORE_HUD_INTERNAL_OFFSET * stageScale}px;
-        left:${5 - SCORE_HUD_INTERNAL_OFFSET * stageScale}px;
+        top:${5 - SCORE_HUD_INTERNAL_OFFSET * effectiveHudScale}px;
+        left:${5 - SCORE_HUD_INTERNAL_OFFSET * effectiveHudScale}px;
         width:0;
         height:0;
         z-index:8;
         pointer-events:none;
-        transform:scale(${stageScale});
+        transform:scale(${effectiveHudScale});
         transform-origin:top left;
         font-family:Inter, system-ui, sans-serif;
       "
