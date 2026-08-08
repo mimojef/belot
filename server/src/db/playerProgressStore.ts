@@ -11,6 +11,7 @@ import {
   SERVER_SEAT_ORDER,
   SERVER_TEAM_A_SEATS,
 } from '../core/serverTypes.js'
+import { BOT_CATALOG_DISPLAY_NAMES } from './botCatalogDisplayNames.js'
 import {
   escapeSqlLikePattern,
   normalizeProfileDisplayName,
@@ -1658,9 +1659,6 @@ export async function createPlayerProgressStore(
 
     if (countRow.count >= 300) return
 
-    const maleNames = ['Иван','Петър','Георги','Стефан','Антон','Борис','Мартин','Калин','Симон','Кирил','Радо','Веско','Митко','Христо','Тодор','Алекс','Виктор','Тошко','Данко','Ивайло']
-    const femaleNames = ['Мария','Елена','Надя','Соня','Вера','Нора','Лора','Яна','Деси','Поли','Катя','Таня','Сара','Ева','Диана','Стела','Ани','Ина','Силвия','Биляна']
-
     const insertBotProfile = database.prepare(`
       INSERT OR IGNORE INTO profiles (
         profile_id, account_id, profile_kind, username, normalized_username,
@@ -1686,37 +1684,31 @@ export async function createPlayerProgressStore(
       ) VALUES (?, ?, 'existing-core-v1', 10, 5000, 50000)
     `)
 
-    function suffix(globalIndex: number): string {
-      return String(10000 + ((globalIndex * 7919 + 11111) % 90000))
-    }
-
     function generateBots(
-      names: string[],
       gender: 'male' | 'female',
       profileIdPrefix: string,
-      globalOffset: number,
     ): void {
-      let botIndex = 0
-      for (let nameIdx = 0; nameIdx < names.length; nameIdx++) {
-        const count = nameIdx < 10 ? 8 : 7
-        for (let variant = 0; variant < count; variant++) {
-          const displayName = `${names[nameIdx]}${suffix(globalOffset + botIndex)}`
-          const normalizedDisplayName = displayName.toLocaleLowerCase('bg-BG')
-          const profileId = `${profileIdPrefix}${String(botIndex).padStart(3, '0')}`
-          const botCode = `CATALOG_${profileId.toUpperCase().replace(/-/g, '_')}`
-          insertBotProfile.run(profileId, displayName, normalizedDisplayName, gender)
-          insertBotWallet.run(profileId)
-          insertBotProgress.run(profileId)
-          insertBotMetadata.run(profileId, botCode)
-          botIndex++
+      for (let botIndex = 0; botIndex < 150; botIndex++) {
+        const profileId = `${profileIdPrefix}${String(botIndex).padStart(3, '0')}`
+        const displayName = BOT_CATALOG_DISPLAY_NAMES[profileId]
+
+        if (!displayName) {
+          throw new Error(`Missing catalog display name for bot profile "${profileId}".`)
         }
+
+        const normalizedDisplayName = displayName.toLocaleLowerCase('bg-BG')
+        const botCode = `CATALOG_${profileId.toUpperCase().replace(/-/g, '_')}`
+        insertBotProfile.run(profileId, displayName, normalizedDisplayName, gender)
+        insertBotWallet.run(profileId)
+        insertBotProgress.run(profileId)
+        insertBotMetadata.run(profileId, botCode)
       }
     }
 
     database.exec('BEGIN;')
     try {
-      generateBots(maleNames, 'male', 'bot-m-', 0)
-      generateBots(femaleNames, 'female', 'bot-f-', 150)
+      generateBots('male', 'bot-m-')
+      generateBots('female', 'bot-f-')
       database.exec('COMMIT;')
       console.log('[catalog-bots] Seeded 300 catalog bot profiles.')
     } catch (error) {
