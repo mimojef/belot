@@ -100,6 +100,19 @@ export function shouldKeepRoomAlive(
   room: ServerRoom,
   now: number = Date.now(),
 ): boolean {
+  // Finished rooms: enforce a hard server-side TTL regardless of connected sockets,
+  // BEFORE any room-type-specific branch (incl. guest trial below) can return early.
+  // This prevents rooms from staying alive indefinitely when a player leaves the
+  // endgame screen open with an idle WebSocket (the 120s UI timer is frontend-only,
+  // and there is no server-side heartbeat that would otherwise flip isConnected to
+  // false for a zombie socket).
+  if (room.status === 'finished' || room.game.phase === 'finished') {
+    const matchEndedAt = getMatchEndedAt(room)
+    if (matchEndedAt !== null && now - matchEndedAt >= MATCH_ENDED_ROOM_TTL_MS) {
+      return false
+    }
+  }
+
   // Guest trial rooms never survive a disconnect: no reconnect grace, no bot takeover.
   // The guest's single game is already counted as used, so there is nothing to preserve.
   if (room.config.isGuestTrial) {
@@ -116,16 +129,6 @@ export function shouldKeepRoomAlive(
     room.game.phase !== 'finished'
   ) {
     return true
-  }
-
-  // Finished rooms: enforce a hard server-side TTL regardless of connected sockets.
-  // This prevents rooms from staying alive indefinitely when a player leaves the
-  // endgame screen open with an idle WebSocket (the 120s UI timer is frontend-only).
-  if (room.status === 'finished' || room.game.phase === 'finished') {
-    const matchEndedAt = getMatchEndedAt(room)
-    if (matchEndedAt !== null && now - matchEndedAt >= MATCH_ENDED_ROOM_TTL_MS) {
-      return false
-    }
   }
 
   if (roomHasConnectedHumanParticipants(room)) {

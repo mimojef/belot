@@ -11,6 +11,13 @@
  * [6]  active phase (playing) + disconnected player → grace period applies, not TTL
  * [7]  bootstrap phase + no players → cleanup
  * [8]  null matchEnded + age > TTL (fallback to phaseEnteredAt) → cleanup
+ *
+ * Верифицира поведението след изнасяне на TTL проверката ПРЕДИ isGuestTrial
+ * early return-а (production bug: finished guest trial room с все още
+ * isConnected=true/zombie socket оставаше жива безкрайно, заобикаляйки TTL):
+ *
+ * [9]  guest trial + finished + connected + age < TTL → keep alive
+ * [10] guest trial + finished + connected + age >= TTL → cleanup (production bug fix)
  */
 
 import { shouldKeepRoomAlive } from '../src/core/serverGameRuntimeHelpers.js'
@@ -238,6 +245,33 @@ const room8 = makeRoom({
   seats: makeSeats(true),
 })
 check('[8] null matchEnded fallback to phaseEnteredAt + age > TTL → cleanup', shouldKeepRoomAlive(room8, now8) === false)
+
+// [9] guest trial + finished + connected + age < TTL → keep alive
+const now9 = Date.now()
+const baseRoom9 = makeRoom({
+  phase: 'finished',
+  status: 'finished',
+  authoritativeState: makeFinishedAuthState(60_000), // 60s old, TTL=180s
+  seats: makeSeats(true),
+})
+const room9: ServerRoom = { ...baseRoom9, config: { ...baseRoom9.config, isGuestTrial: true } }
+check('[9] guest trial + finished + connected + age < TTL → keep alive', shouldKeepRoomAlive(room9, now9) === true)
+
+// [10] guest trial + finished + connected + age >= TTL → cleanup (production bug fix:
+// isGuestTrial early return used to bypass this TTL check entirely for a still-"connected"
+// zombie socket, leaving the room alive indefinitely)
+const now10 = Date.now()
+const baseRoom10 = makeRoom({
+  phase: 'finished',
+  status: 'finished',
+  authoritativeState: makeFinishedAuthState(MATCH_ENDED_ROOM_TTL_MS + 1_000), // 181s old
+  seats: makeSeats(true),
+})
+const room10: ServerRoom = { ...baseRoom10, config: { ...baseRoom10.config, isGuestTrial: true } }
+check(
+  '[10] guest trial + finished + connected + age >= TTL → cleanup (production bug fix)',
+  shouldKeepRoomAlive(room10, now10) === false,
+)
 
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)
