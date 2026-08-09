@@ -69,6 +69,14 @@ export type CreateActiveRoomFlowControllerOptions = {
   onEnterWaitingForNextTournamentRound: (
     feeder: { label: string; scoreA: number | null; scoreB: number | null; status: 'in_progress' | 'completed' } | null,
   ) => void
+  // Bid-response watchdog fallback (виж submitBidActionFromUi/handleBidWatchdogExpired
+  // в createActiveRoomFlowController.ts): помолва main.ts да опита съществуващия
+  // resume_room round-trip на текущия socket, без да го затваря/пресъздава.
+  requestBidResync: () => void
+  // Ако дори resync round-trip-ът не отговори навреме (вероятно "zombie" socket
+  // — readyState изглежда OPEN, но нищо реално не се доставя), помолва main.ts
+  // да задейства СЪЩЕСТВУВАЩИЯ disconnect->reconnect->resume механизъм.
+  forceReconnectForZombieConnection: () => void
 }
 
 export type ActiveRoomFlowController = {

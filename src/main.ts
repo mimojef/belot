@@ -277,6 +277,18 @@ let pwaBootstrapAuthSessionLoaded = false
 let pwaBootstrapGuestStatusLoaded = false
 let pwaBootstrapServerStateResolved = false
 let pwaIsReconnectingActiveRoom = false
+// Scoped за forceReconnectForZombieConnection (bid-response watchdog
+// fallback, createActiveRoomFlowController.ts) — единственият тригер, който
+// го сеща на true. Без него, onOpen()'s shouldReloadLobbyOnReconnect клон
+// (сетнат безусловно от showOfflineConnectionOverlay() на всеки onClose,
+// виж initOfflineOverlay по-долу) би пренасочил играча към
+// forceOfflineLobbyReload() -> /lobby при ВСЯКО reconnect, включително
+// точно този explicit "bid response изгубен, socket е zombie" случай —
+// вместо тих resume_room round-trip в СЪЩАТА активна стая. НЕ променя
+// поведението за нормален connection loss (реален close извън тази
+// callback) — shouldReloadLobbyOnReconnect/forceOfflineLobbyReload остават
+// непокътнати за lobby и всеки друг reconnect сценарий.
+let isZombieBidReconnectInFlight = false
 let showOfflineConnectionOverlay: () => void = () => {
   shouldReloadLobbyOnReconnect = true
 }
@@ -4209,6 +4221,26 @@ const activeRoom = createActiveRoomFlowController({
     currentFeederWaitingState = feeder
     tournamentFeederWaitingStrip.setState(feeder)
   },
+  requestBidResync: () => {
+    // Съществуващият resume_room round-trip е безопасен/идемпотентен дори
+    // ако тази връзка вече е коректно attach-ната към стаята (виж
+    // tryResumeRoomForConnection на сървъра — при съвпадащ roomId/token
+    // връща веднага, БЕЗ state мутация, но пак праща room_resumed + свеж
+    // room_snapshot). Не изобретяваме нов resync protocol.
+    requestActiveRoomResume()
+  },
+  forceReconnectForZombieConnection: () => {
+    // client.disconnect() затваря socket-а; регистрираният 'close' listener
+    // (onClose по-долу) каскадно води до СЪЩЕСТВУВАЩия
+    // scheduleServerReconnect() -> onOpen -> requestActiveRoomResume flow —
+    // същият механизъм, който вече обработва реален connection loss.
+    // isZombieBidReconnectInFlight маркира ТОЗИ конкретен reconnect цикъл,
+    // за да не бъде пренасочен от onOpen() към forceOfflineLobbyReload()
+    // (виж флага при декларацията му) — само за explicit bid-recovery
+    // случая, не за нормален connection loss.
+    isZombieBidReconnectInFlight = true
+    client.disconnect()
+  },
 })
 
 const tournamentFeederWaitingStripContainer = document.createElement('div')
@@ -4385,6 +4417,24 @@ client = createGameServerClient({
     // по време на самата игра/resume; този флаг само не бива да остава
     // "заклещен" true завинаги след като играта приключи.
     pwaIsReconnectingActiveRoom = false
+
+    // Explicit bid-recovery reconnect (forceReconnectForZombieConnection) —
+    // винаги тих resume в СЪЩАТА активна стая, никога forceOfflineLobbyReload
+    // navigation, дори shouldReloadLobbyOnReconnect да е сетнат от
+    // showOfflineConnectionOverlay() по-рано в същия close/reconnect цикъл.
+    // Едностреличен bypass: консумира се веднага, не остава "заклещен".
+    if (isZombieBidReconnectInFlight) {
+      isZombieBidReconnectInFlight = false
+      if (activeRoom.hasActiveRoom()) {
+        shouldReloadLobbyOnReconnect = false
+        activeRoom.setConnectionState(true, SERVER_RESUME_WAIT_MESSAGE)
+        requestActiveRoomResume()
+        return
+      }
+      // Стаята вече не е активна (играчът е напуснал междувременно по друг
+      // път) — продължи по нормалния flow по-долу, все едно случаят никога
+      // не е бил "zombie bid reconnect".
+    }
 
     if (shouldReloadLobbyOnReconnect) {
       forceOfflineLobbyReload()
