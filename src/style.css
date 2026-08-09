@@ -113,19 +113,35 @@ body::before {
 }
 
 @media (hover: none) and (pointer: coarse) {
-  #app * {
+  /*
+   * Bidding popup ([data-bidding-popup-host]) and the playing-phase bottom
+   * hand cards ([data-playing-bottom-hand-host]) are appended directly to
+   * document.body (b6354f2) so they survive #app re-renders mid-gesture.
+   * That makes them siblings of #app, not descendants, so the #app-scoped
+   * rules below never reached them and Chromium's default tap highlight
+   * (rgba(51,181,229,0.4)) flashed on tap.
+   */
+  #app *,
+  [data-bidding-popup-host] *,
+  [data-playing-bottom-hand-host] * {
     -webkit-tap-highlight-color: transparent;
   }
 
   #app button,
   #app a,
-  #app [role='button'] {
+  #app [role='button'],
+  [data-bidding-popup-host] button,
+  [data-playing-bottom-hand-host] button,
+  [data-playing-bottom-hand-host] [role='button'] {
     touch-action: manipulation;
   }
 
   #app button:focus:not(:focus-visible),
   #app a:focus:not(:focus-visible),
-  #app [role='button']:focus:not(:focus-visible) {
+  #app [role='button']:focus:not(:focus-visible),
+  [data-bidding-popup-host] button:focus:not(:focus-visible),
+  [data-playing-bottom-hand-host] button:focus:not(:focus-visible),
+  [data-playing-bottom-hand-host] [role='button']:focus:not(:focus-visible) {
     outline: none;
   }
 }
