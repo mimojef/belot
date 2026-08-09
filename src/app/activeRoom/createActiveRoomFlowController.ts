@@ -131,6 +131,17 @@ const SEAT_LABELS: Record<Seat, string> = {
 
 const REACTION_COUNTDOWN_WARNING_THRESHOLD_MS = 7_000
 
+// submit_bid_action е fire-and-forget (createGameServerClient.ts) — ако
+// сървърът никога не отговори (silent drop, изгубен snapshot и т.н.),
+// markBiddingPopupPending() няма собствен self-recovery и popup-ът би
+// останал блокиран завинаги. Двата timeout-а по-долу ограничават колко
+// дълго чакаме, преди да опитаме resync, и после reconnect fallback.
+// Реален healthy round-trip приключва за части от секундата; 5s е щедър
+// marge за нормален mobile latency, но достатъчно кратък играчът да не
+// седи дълго на заклещен UI.
+const BID_RESPONSE_WATCHDOG_MS = 5_000
+const BID_RESYNC_RESPONSE_TIMEOUT_MS = 5_000
+
 // Огледало на server round ladder-а (round_of_16/quarterfinal/semifinal/final),
 // виж tournamentRoundTypeLabel в renderTournamentsScreen.ts — дублирано тук
 // умишлено (малък pure string helper), за да не се вкарва cross-module
@@ -158,6 +169,21 @@ export function createActiveRoomFlowController(
   const nextTwoOverlay: DealPacketOverlayState = createDealPacketOverlayState()
   const lastThreeOverlay: DealPacketOverlayState = createDealPacketOverlayState()
   const biddingUiState: BiddingUiState = createBiddingUiState()
+  // Watchdog state за submit_bid_action fire-and-forget freeze (виж
+  // BID_RESPONSE_WATCHDOG_MS по-горе). resyncRequested/reconnectTriggered
+  // дедуплират: най-много един resync опит и най-много един reconnect
+  // fallback на pending bid.
+  const bidWatchdog: {
+    bidResponseTimerId: number | null
+    resyncTimeoutId: number | null
+    resyncRequested: boolean
+    reconnectFallbackTriggered: boolean
+  } = {
+    bidResponseTimerId: null,
+    resyncTimeoutId: null,
+    resyncRequested: false,
+    reconnectFallbackTriggered: false,
+  }
   const emojiReactionUiState: EmojiReactionUiState = createEmojiReactionUiState()
   const phraseReactionUiState: PhraseReactionUiState = createPhraseReactionUiState()
   let emojiPickerOpen = false
@@ -1718,11 +1744,62 @@ export function createActiveRoomFlowController(
     }, remainingMs)
   }
 
+  function cancelBidWatchdog(): void {
+    if (bidWatchdog.bidResponseTimerId !== null) {
+      window.clearTimeout(bidWatchdog.bidResponseTimerId)
+      bidWatchdog.bidResponseTimerId = null
+    }
+    if (bidWatchdog.resyncTimeoutId !== null) {
+      window.clearTimeout(bidWatchdog.resyncTimeoutId)
+      bidWatchdog.resyncTimeoutId = null
+    }
+    bidWatchdog.resyncRequested = false
+    bidWatchdog.reconnectFallbackTriggered = false
+  }
+
+  function handleBidResyncTimedOut(): void {
+    bidWatchdog.resyncTimeoutId = null
+    if (!activeRoomState || !biddingUiState.pendingBidSent) {
+      return
+    }
+    if (bidWatchdog.reconnectFallbackTriggered) {
+      return
+    }
+    bidWatchdog.reconnectFallbackTriggered = true
+    options.forceReconnectForZombieConnection()
+  }
+
+  function handleBidWatchdogExpired(): void {
+    bidWatchdog.bidResponseTimerId = null
+    if (!activeRoomState || !biddingUiState.pendingBidSent) {
+      return
+    }
+    if (bidWatchdog.resyncRequested) {
+      return
+    }
+    bidWatchdog.resyncRequested = true
+    options.requestBidResync()
+    bidWatchdog.resyncTimeoutId = window.setTimeout(
+      handleBidResyncTimedOut,
+      BID_RESYNC_RESPONSE_TIMEOUT_MS,
+    )
+  }
+
+  function startBidResponseWatchdog(): void {
+    cancelBidWatchdog()
+    bidWatchdog.bidResponseTimerId = window.setTimeout(
+      handleBidWatchdogExpired,
+      BID_RESPONSE_WATCHDOG_MS,
+    )
+  }
+
   function clearBiddingUiState(): void {
+    cancelBidWatchdog()
     clearBiddingUiStateFromStore(biddingUiState)
   }
 
   function clearPendingBidSubmission(): void {
+    cancelBidWatchdog()
     clearPendingBidSubmissionFromStore(biddingUiState)
   }
 
@@ -2218,6 +2295,7 @@ export function createActiveRoomFlowController(
     activeRoomState.errorText = null
     markBiddingPopupPending()
     options.submitBidAction(activeRoomState.roomId, action)
+    startBidResponseWatchdog()
   }
 
   function syncBiddingUiState(
@@ -3496,6 +3574,7 @@ export function createActiveRoomFlowController(
       const biddingErrorHtml = activeRoomState.errorText
         ? `
           <div
+            data-bidding-error="1"
             style="
               position:fixed;
               left:50%;
@@ -4382,6 +4461,17 @@ export function createActiveRoomFlowController(
       return false
     }
 
+    // Всеки реален snapshot за активната стая доказва, че връзката е жива —
+    // bid-watchdog-ът (виж submitBidActionFromUi/BID_RESPONSE_WATCHDOG_MS)
+    // вече е изпълнил единствената си задача, независимо дали ТОЗИ snapshot
+    // разрешава pending bid-а. wasPendingBidSentBeforeSnapshot се пази
+    // отделно, за да различим по-долу "bid-ът никога не е бил приложен"
+    // (currentBidderSeat все още сочи локалния играч) от нормалното
+    // разрешаване (нов entry за локалния seat, вече обработено от
+    // syncBiddingUiState по-надолу в renderActiveRoomScreen).
+    const wasPendingBidSentBeforeSnapshot = biddingUiState.pendingBidSent
+    cancelBidWatchdog()
+
     activeRoomState.roomStatus = message.roomStatus
     activeRoomState.reconnectToken = message.reconnectToken
     activeRoomState.seats = message.seats
@@ -4416,6 +4506,22 @@ export function createActiveRoomFlowController(
         biddingUiState.pendingBidSent = false
       }
       shouldSilenceNextBiddingSnapshot = false
+    }
+
+    // Fresh snapshot (нормален или resync-предизвикан) показва, че сървърът
+    // ВСЕ ОЩЕ чака точно от този играч обява — т.е. предишният bid никога не
+    // е бил приложен server-side (иначе currentBidderSeat щеше да се смени
+    // или щеше да има нов entry, което syncBiddingUiState вече би обработил
+    // по-долу). Разблокирай UI-я вместо да оставяш popup-а в заклещено
+    // pending/faded състояние — НЕ пращаме автоматично втори bid.
+    if (
+      wasPendingBidSentBeforeSnapshot &&
+      biddingUiState.pendingBidSent &&
+      activeRoomState.game?.authoritativePhase === 'bidding' &&
+      activeRoomState.game.bidding?.currentBidderSeat === activeRoomState.seat
+    ) {
+      biddingUiState.pendingBidSent = false
+      activeRoomState.errorText = 'Обявата не беше потвърдена. Опитайте отново.'
     }
 
     renderActiveRoomScreen(

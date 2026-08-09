@@ -10217,6 +10217,20 @@ wsServer.on('connection', (socket, request) => {
       }
 
       if (isServerShuttingDown && isShutdownGuardedClientMessage(message)) {
+        // submit_bid_action е fire-and-forget за клиента (виж
+        // markBiddingPopupPending() в createActiveRoomFlowController.ts) —
+        // без explicit отговор играчът остава заклещен в pending/faded
+        // popup до самостоятелен client-side watchdog/resync. Останалите
+        // shutdown-guarded типове запазват съществуващото поведение
+        // (мълчаливо dropped по време на graceful shutdown) — не разширяваме
+        // fix-а извън submit_bid_action, за да не пипаме несвързани action
+        // recovery paths без анализ.
+        if (message.type === 'submit_bid_action') {
+          sendJsonMessage(socket, {
+            type: 'error',
+            message: 'Сървърът рестартира. Моля опитайте отново.',
+          })
+        }
         return
       }
 
