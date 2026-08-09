@@ -62,13 +62,22 @@ export type CreateActiveRoomFlowControllerOptions = {
   onSendFriendRequest: (profileId: string) => Promise<{ ok: true; newLabel: string } | { ok: false; message: string }>
   onLikeProfile: (profileId: string) => Promise<{ ok: true; liked: boolean; likesCount: number } | { ok: false }>
   onBlockProfile: (profileId: string) => Promise<{ message: string }>
-  showLobby: (errorText?: string | null) => void
+  /** leftRoomId — стаята, от която играчът реално/логически излиза точно в
+   * този момент (ако има такава) — позволява на извикващия (main.ts) да
+   * изчисти всякакъв global "stale" state, обвързан конкретно с тази стая
+   * (напр. tournamentMatchStartPopup assignment), без да засяга state за
+   * друга, все още валидна стая/assignment. */
+  showLobby: (errorText?: string | null, leftRoomId?: string | null) => void
   startNewGame: (stake: MatchStake, displayName?: string) => void
   onGuestTrialReplayRequested: () => void
   fetchTournamentDetail: (tournamentId: string) => Promise<TournamentDetailSnapshot | null>
+  acknowledgeTournamentSemifinalResult: (tournamentId: string, semifinalMatchId: string) => void
   onEnterWaitingForNextTournamentRound: (
-    feeder: { label: string; scoreA: number | null; scoreB: number | null; status: 'in_progress' | 'completed' } | null,
+    feeder: { tournamentId: string; label: string; scoreA: number | null; scoreB: number | null; status: 'in_progress' | 'completed' } | null,
+    tournamentId: string,
+    result: { currentRoundType: TournamentRoundType; semifinalScoreA: number | null; semifinalScoreB: number | null },
   ) => void
+  onTournamentFinalResultContinue: (tournamentId: string) => void
 }
 
 export type ActiveRoomFlowController = {
@@ -76,6 +85,7 @@ export type ActiveRoomFlowController = {
   enterActiveRoom: (message: MatchFoundMessage, stakeAlreadyShown?: boolean) => void
   enterActiveRoomFromResume: (roomId: string, seat: Seat, stake: MatchStake) => void
   handleServerMessage: (message: ServerMessage) => boolean
+  completePendingTournamentRoundResultTransition: () => boolean
   getResumeInfo: () => { roomId: string; reconnectToken: string } | null
   setConnected: (value: boolean) => void
   setConnectionError: (message: string | null) => void

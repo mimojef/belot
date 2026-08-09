@@ -81,8 +81,12 @@ import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
 import { createTournamentStore } from './db/tournamentStore.js'
 import { createTournamentEconomyStore } from './db/tournamentEconomyStore.js'
+import { isLocalTournamentTestModeEnabled } from './localTournamentTest/localTournamentTestModeGuard.js'
+import { createLocalTournamentTestService } from './localTournamentTest/localTournamentTestService.js'
+import { handleLocalTournamentTestRequest } from './localTournamentTest/handleLocalTournamentTestRequest.js'
 import {
   TOURNAMENT_STATUSES,
+  type TournamentEntryStatus,
   type TournamentPartnerInviteRecord,
   type TournamentRecord,
 } from './tournament/tournamentTypes.js'
@@ -452,6 +456,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'respond_private_room_invite':
     case 'request_private_rooms_list':
     case 'fill_private_room_with_bots':
+    case 'tournament_semifinal_result_acknowledge':
     case 'subscribe_private_room_chat':
     case 'unsubscribe_private_room_chat':
     case 'send_private_room_chat_message':
@@ -470,7 +475,14 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
   return exhaustiveCheck
 }
 
+if (isLocalTournamentTestModeEnabled()) {
+  console.log('[local-tournament-test] enabled')
+}
+
 const databaseBootstrap = await ensureServerDatabaseReady()
+if (isLocalTournamentTestModeEnabled()) {
+  console.log(`[local-tournament-test] database file: ${databaseBootstrap.databaseFilePath}`)
+}
 const botCatalogImport = await importBotProfilesCatalog(
   databaseBootstrap.databaseFilePath,
 )
@@ -522,6 +534,18 @@ const friendshipStore = await createFriendshipStore(
 )
 const tournamentStore = await createTournamentStore(databaseBootstrap.databaseFilePath)
 const tournamentEconomyStore = await createTournamentEconomyStore(databaseBootstrap.databaseFilePath)
+// Конструираме я безусловно (евтино — само затваря deps), но всеки заявка
+// към нея минава първо през isLocalTournamentTestRequestAllowed (виж
+// handleLocalTournamentTestRequest.ts) — извън strictly-local режима е
+// напълно неактивна.
+const localTournamentTestService = createLocalTournamentTestService({
+  databaseFilePath: databaseBootstrap.databaseFilePath,
+  tournamentStore,
+  tournamentEconomyStore,
+  authStore,
+  refillCatalogBotWallets: () => playerProgressStore.refillCatalogBotWallets(),
+  removeTournamentRoomIfPresent: (roomId) => forceRemoveTournamentRoomById(roomId),
+})
 let tournamentScheduler: TournamentScheduler | null = null
 let tournamentCoordinator: TournamentCoordinator | null = null
 const tournamentAdminStore = await createTournamentAdminStore({
@@ -2113,6 +2137,22 @@ function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): 
   console.log(`[room-cleanup] removed inactive room=${roomId}`)
 
   return true
+}
+
+// За разлика от cleanupInactiveRoomIfNeeded, тук НЕ минаваме през
+// shouldKeepRoomAlive (за турнирна стая тя винаги връща true, докато
+// status !== 'finished' — виж serverGameRuntimeHelpers.ts) — ползва се
+// единствено от local-tournament-test "Нулирай теста" (§12 в task spec-а),
+// където трябва форсирано да затворим турнирна стая независимо от фазата ѝ.
+// Огледално на closeCompletedRoom callback-а, подаден на
+// createTournamentCoordinator по-долу. No-op ако стаята вече не съществува.
+function forceRemoveTournamentRoomById(roomId: string): void {
+  const room = serverState.rooms[roomId]
+  if (room === undefined) return
+  serverState = removeCommittedServerRoom(roomId)
+  cleanupTempBotsFromRoom(room)
+  markRoomSnapshotRemoved(roomId)
+  activeRoomRuntime.removeRoom(roomId)
 }
 
 async function tickRoomGameRuntimes(): Promise<void> {
@@ -6143,7 +6183,7 @@ function buildTournamentSummaryDto(
   return toTournamentSummaryDto({
     tournament,
     creatorPublicProfile: getTournamentCreatorPublicProfile(tournament.creatorProfileId),
-    confirmedEntriesCount: entries.filter((e) => e.status === 'confirmed').length,
+    confirmedEntriesCount: entries.filter((e) => isTournamentRosterEntryStatus(e.status)).length,
     reservedPlacesCount,
     completedTeamsCount: teams.filter((t) => t.status !== 'forming').length,
     formingTeamsCount: teams.filter((t) => t.status === 'forming').length,
@@ -6153,10 +6193,18 @@ function buildTournamentSummaryDto(
   })
 }
 
+function isTournamentRosterEntryStatus(status: TournamentEntryStatus): boolean {
+  return status === 'confirmed' || status === 'finalist' || status === 'champion' || status === 'eliminated'
+}
+
 function getSafePublicProfile(profileId: string): { profileId: string | null; displayName: string; avatarUrl: string | null } | null {
   const profile = playerProgressStore.getPublicProfile(profileId)
   if (profile === null) return null
   return { profileId: profile.profileId, displayName: profile.displayName, avatarUrl: profile.avatarUrl }
+}
+
+function isBotProfile(profileId: string): boolean {
+  return playerProgressStore.getPublicProfile(profileId)?.isBot === true
 }
 
 function buildTournamentPartnerInviteDto(invite: TournamentPartnerInviteRecord) {
@@ -6224,7 +6272,7 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
   const base = toTournamentDetailDto({
     tournament,
     creatorPublicProfile: getTournamentCreatorPublicProfile(tournament.creatorProfileId),
-    confirmedEntriesCount: entries.filter((e) => e.status === 'confirmed').length,
+    confirmedEntriesCount: entries.filter((e) => isTournamentRosterEntryStatus(e.status)).length,
     reservedPlacesCount,
     completedTeamsCount: teams.filter((t) => t.status !== 'forming').length,
     formingTeamsCount: teams.filter((t) => t.status === 'forming').length,
@@ -6238,14 +6286,99 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
     inviteePublicProfile: getSafePublicProfile(invite.inviteeProfileId),
     tournament,
   })
+  const myActiveMatch = viewerProfileId !== null
+    ? tournamentCoordinator?.getAssignmentForProfile(viewerProfileId) ?? null
+    : null
+  const buildMyInterRoundWaiting = () => {
+    if (viewerProfileId === null || viewerEntry?.teamId === null || viewerEntry?.teamId === undefined) return null
+    if (tournament.status === 'finished' || myActiveMatch !== null) return null
+    if (
+      viewerEntry.status !== 'confirmed' &&
+      viewerEntry.status !== 'finalist' &&
+      viewerEntry.status !== 'champion'
+    ) {
+      return null
+    }
+
+    const semifinalMatches = roundDtos
+      .filter((round) => round.roundType === 'semifinal')
+      .flatMap((round) => round.matches.map((match) => ({ roundIndex: round.roundIndex, match })))
+      .sort((a, b) => a.roundIndex - b.roundIndex)
+    const completedSemifinal = semifinalMatches.find(({ match }) => {
+      return match.status === 'completed' &&
+        match.winnerTeamId === viewerEntry.teamId &&
+        (match.teamAId === viewerEntry.teamId || match.teamBId === viewerEntry.teamId)
+    })?.match
+    if (completedSemifinal === undefined) return null
+
+    const completedIndex = semifinalMatches.findIndex(({ match }) => match.matchId === completedSemifinal.matchId)
+    const sibling = completedIndex >= 0
+      ? semifinalMatches[completedIndex % 2 === 0 ? completedIndex + 1 : completedIndex - 1]?.match
+      : undefined
+    if (sibling === undefined) return null
+    const siblingTeamA = teamDtos.find((team) => team.teamId === sibling.teamAId) ?? null
+    const siblingTeamB = teamDtos.find((team) => team.teamId === sibling.teamBId) ?? null
+    if (siblingTeamA === null || siblingTeamB === null) return null
+
+    const finalMatch = roundDtos
+      .find((round) => round.roundType === 'final')
+      ?.matches[0] ?? null
+    if (finalMatch !== null && (finalMatch.status === 'countdown' || finalMatch.status === 'in_progress' || finalMatch.status === 'completed')) {
+      return null
+    }
+
+    const ownResultAcknowledged = tournamentStore.hasSemifinalResultAcknowledgement(
+      tournament.tournamentId,
+      completedSemifinal.matchId,
+      viewerProfileId,
+    )
+    const otherFinalistTeamId = finalMatch !== null
+      ? finalMatch.teamAId === viewerEntry.teamId ? finalMatch.teamBId : finalMatch.teamAId
+      : sibling.winnerTeamId
+    const otherFinalistEntries = otherFinalistTeamId !== null
+      ? entries.filter((entry) => entry.teamId === otherFinalistTeamId && entry.status === 'finalist')
+      : []
+    const otherHumanFinalistEntries = otherFinalistEntries.filter((entry) => !isBotProfile(entry.profileId))
+    const otherFinalistReady = sibling.status === 'completed' &&
+      otherFinalistTeamId !== null &&
+      otherHumanFinalistEntries.every((entry) => {
+        const wonSemifinal = semifinalMatches.find(({ match }) => {
+          return match.status === 'completed' && match.winnerTeamId === entry.teamId
+        })?.match
+        return wonSemifinal !== undefined &&
+          tournamentStore.hasSemifinalResultAcknowledgement(tournament.tournamentId, wonSemifinal.matchId, entry.profileId)
+      })
+
+    return {
+      tournamentId: tournament.tournamentId,
+      completedSemifinalMatchId: completedSemifinal.matchId,
+      currentRoundType: 'semifinal',
+      nextRoundType: 'final',
+      siblingSemifinal: {
+        matchId: sibling.matchId,
+        teamA: siblingTeamA,
+        teamB: siblingTeamB,
+        scoreA: sibling.finalScoreTeamA ?? sibling.liveScoreTeamA ?? null,
+        scoreB: sibling.finalScoreTeamB ?? sibling.liveScoreTeamB ?? null,
+        status: sibling.status,
+        winnerTeamId: sibling.winnerTeamId,
+        progressLabel: sibling.progressLabel ?? '',
+      },
+      ownResultAcknowledged,
+      otherFinalistReady,
+      finalMatchId: finalMatch?.matchId ?? null,
+      finalRoomId: finalMatch?.roomId ?? null,
+      finalStartAt: finalMatch?.finalStartAt ?? null,
+      serverNow: new Date().toISOString(),
+    }
+  }
   return {
     ...base,
     teams: teamDtos,
     myTeam: viewerEntry?.teamId ? teamDtos.find((team) => team.teamId === viewerEntry.teamId) ?? null : null,
     rounds: roundDtos,
-    myActiveMatch: viewerProfileId !== null
-      ? tournamentCoordinator?.getAssignmentForProfile(viewerProfileId) ?? null
-      : null,
+    myActiveMatch,
+    myInterRoundWaiting: buildMyInterRoundWaiting(),
     incomingPartnerInvite: incomingPartnerInvite ? inviteToDto(incomingPartnerInvite) : null,
     outgoingPartnerInvite: outgoingPartnerInvite ? inviteToDto(outgoingPartnerInvite) : null,
   }
@@ -9628,6 +9761,13 @@ async function handleHttpRequest(
 
   const requestUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
 
+  // Guard-нат вътрешно (флаг + loopback, виж localTournamentTestModeGuard.ts) —
+  // извън strictly-local режима pathname проверката е единственият разход и
+  // отговорът е 404, идентично на непознат route.
+  if (await handleLocalTournamentTestRequest(req, res, requestUrl.pathname, localTournamentTestService)) {
+    return
+  }
+
   if (await handleUploadsRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -10727,6 +10867,21 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (message.type === 'tournament_semifinal_result_acknowledge') {
+        if (connection.profileId === null || tournamentCoordinator === null) {
+          return
+        }
+        const result = tournamentCoordinator.acknowledgeSemifinalResult({
+          tournamentId: message.tournamentId,
+          semifinalMatchId: message.semifinalMatchId,
+          profileId: connection.profileId,
+        })
+        if (result.ok) {
+          tournamentCoordinator.tickNow()
+        }
+        return
+      }
+
       if (message.type === 'join_matchmaking') {
         const latestConnection = getConnectionById(serverState, connection.id)
 
@@ -11071,6 +11226,24 @@ wsServer.on('connection', (socket, request) => {
         }
 
         if (latestConnection.currentRoomId !== message.roomId) {
+          // Идемпотентност: ако connection-ът вече изобщо не е закачен за
+          // никоя стая, или конкретно тази стая вече не съществува (напр.
+          // турнирна стая, force-затворена от tournamentCoordinator веднага
+          // след завършек на мача — виж closeCompletedTournamentRoom — ПРЕДИ
+          // клиентският "Към лобито" leave_active_room да пристигне),
+          // намерението на извикващия ("не искам да съм в тази стая") вече
+          // е изпълнено. Връщаме benign left_active_room вместо подвеждащ
+          // "You are not attached to this room." toast — клиентът вече е
+          // напуснал/показал лобито fire-and-forget. Ако connection-ът реално
+          // е закачен за ДРУГА валидна стая, това си остава грешка.
+          if (latestConnection.currentRoomId === null || serverState.rooms[message.roomId] === undefined) {
+            safeSendToConnection(connection.id, {
+              type: 'left_active_room',
+              roomId: message.roomId,
+              removed: false,
+            })
+            return
+          }
           safeSendToConnection(connection.id, {
             type: 'error',
             message: 'You are not attached to this room.',
@@ -12103,10 +12276,17 @@ const gameRuntimeTickInterval = setInterval(() => {
   })
 }, GAME_RUNTIME_TICK_MS)
 
+// Само в strictly local tournament test mode (виж localTournamentTestModeGuard.ts) —
+// по-чест poll tick, за да не удвои изчакването наложено от вече ускорените
+// attendance/transition таймери (tournamentCoordinator.ts). Без флага е
+// undefined и двата store-а падат обратно на production DEFAULT_INTERVAL_MS.
+const localTournamentTestPollIntervalMs = isLocalTournamentTestModeEnabled() ? 1_000 : undefined
+
 try {
   tournamentScheduler = await createTournamentScheduler({
     databaseFilePath: databaseBootstrap.databaseFilePath,
     economyStore: tournamentEconomyStore,
+    intervalMs: localTournamentTestPollIntervalMs,
     logError: (message, error) => console.error(message, sanitizeErrorMessage(error)),
     notifyEconomyRefunds: (tournamentId, refundedProfiles) => {
       sendTournamentEconomyRefundNotices(tournamentId, 'fill_expired', refundedProfiles)
@@ -12121,6 +12301,7 @@ try {
 try {
   tournamentCoordinator = await createTournamentCoordinator({
     databaseFilePath: databaseBootstrap.databaseFilePath,
+    intervalMs: localTournamentTestPollIntervalMs,
     getPublicProfile: (profileId) => playerProgressStore.getPublicProfile(profileId),
     getRoom: (roomId) => serverState.rooms[roomId] ?? null,
     commitRoom: (room) => {
@@ -12132,12 +12313,10 @@ try {
     // ДЕТЕРМИНИРАНО и НЕЗАБАВНО, вместо да разчита на обичайния
     // shouldKeepRoomAlive/TTL reap loop (виж tickRoomGameRuntimes), който би
     // задържал стаята жива, докато печелившият отбор е все още свързан.
-    // Огледало на cleanupInactiveRoomIfNeeded-ото force-remove разклонение.
+    // Огледало на cleanupInactiveRoomIfNeeded-ото force-remove разклонение;
+    // споделя точно същото тяло с forceRemoveTournamentRoomById по-горе.
     closeCompletedRoom: (room) => {
-      serverState = removeCommittedServerRoom(room.id)
-      cleanupTempBotsFromRoom(room)
-      markRoomSnapshotRemoved(room.id)
-      activeRoomRuntime.removeRoom(room.id)
+      forceRemoveTournamentRoomById(room.id)
     },
     ensureRoomRuntime: (room) => activeRoomRuntime.ensureRoom(room),
     settleTournamentPrizes: (tournamentId) => {

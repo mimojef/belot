@@ -477,6 +477,13 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return { type: 'fill_private_room_with_bots' }
     }
 
+    if (parsed.type === 'tournament_semifinal_result_acknowledge') {
+      const tournamentId = normalizeRequiredText(parsed.tournamentId)
+      const semifinalMatchId = normalizeRequiredText(parsed.semifinalMatchId)
+      if (tournamentId === null || semifinalMatchId === null) return null
+      return { type: 'tournament_semifinal_result_acknowledge', tournamentId, semifinalMatchId }
+    }
+
     if (parsed.type === 'subscribe_private_room_chat') {
       const privateRoomId = normalizeRequiredText(parsed.privateRoomId)
       if (privateRoomId === null) return null

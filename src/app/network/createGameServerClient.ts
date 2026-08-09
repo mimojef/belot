@@ -153,6 +153,7 @@ export type TournamentMatchSnapshot = {
   liveScoreTeamA?: number | null
   liveScoreTeamB?: number | null
   progressLabel?: string
+  finalStartAt?: string | null
   startedAt: string | null
   completedAt: string | null
 }
@@ -178,6 +179,29 @@ export type TournamentMatchAssignmentSnapshot = {
   deadlineKind: 'first_match' | 'round_transition' | null
   attendanceDeadlineAt: string | null
   gameStartAt: string | null
+}
+
+export type TournamentInterRoundWaitingSnapshot = {
+  tournamentId: string
+  completedSemifinalMatchId: string
+  currentRoundType: TournamentRoundType
+  nextRoundType: TournamentRoundType
+  siblingSemifinal: {
+    matchId: string
+    teamA: TournamentTeamSnapshot
+    teamB: TournamentTeamSnapshot
+    scoreA: number | null
+    scoreB: number | null
+    status: TournamentMatchStatus
+    winnerTeamId: string | null
+    progressLabel: string
+  }
+  ownResultAcknowledged: boolean
+  otherFinalistReady: boolean
+  finalMatchId: string | null
+  finalRoomId: string | null
+  finalStartAt: string | null
+  serverNow: string
 }
 
 export type TournamentPartnerInviteSnapshot = {
@@ -247,6 +271,7 @@ export type TournamentDetailSnapshot = TournamentSummarySnapshot & {
   teams: TournamentTeamSnapshot[]
   rounds: TournamentRoundSnapshot[]
   myActiveMatch: TournamentMatchAssignmentSnapshot | null
+  myInterRoundWaiting: TournamentInterRoundWaitingSnapshot | null
   incomingPartnerInvite: TournamentPartnerInviteSnapshot | null
   outgoingPartnerInvite: TournamentPartnerInviteSnapshot | null
 }
@@ -640,6 +665,11 @@ export type ClientMessage =
       type: 'resume_room'
       roomId: string
       reconnectToken: string
+    }
+  | {
+      type: 'tournament_semifinal_result_acknowledge'
+      tournamentId: string
+      semifinalMatchId: string
     }
   | {
       type: 'leave_active_room'
@@ -1555,6 +1585,7 @@ export type GameServerClient = {
   leaveMatchmaking: () => void
   requestPlayerProfile: (roomId: string, seat: Seat) => void
   resumeRoom: (roomId: string, reconnectToken: string) => void
+  acknowledgeTournamentSemifinalResult: (tournamentId: string, semifinalMatchId: string) => void
   leaveActiveRoom: (roomId: string, acceptPenalty?: boolean) => void
   submitBidAction: (roomId: string, action: ClientBidAction) => void
   submitCutIndex: (roomId: string, cutIndex: number) => void
@@ -1728,6 +1759,14 @@ export function createGameServerClient(
     })
   }
 
+  function acknowledgeTournamentSemifinalResult(tournamentId: string, semifinalMatchId: string): void {
+    send({
+      type: 'tournament_semifinal_result_acknowledge',
+      tournamentId,
+      semifinalMatchId,
+    })
+  }
+
   function leaveActiveRoom(roomId: string, acceptPenalty = false): void {
     send({
       type: 'leave_active_room',
@@ -1878,6 +1917,7 @@ export function createGameServerClient(
     leaveMatchmaking,
     requestPlayerProfile,
     resumeRoom,
+    acknowledgeTournamentSemifinalResult,
     leaveActiveRoom,
     submitBidAction,
     submitCutIndex,

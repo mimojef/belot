@@ -24,6 +24,7 @@ import type {
   SupportMessageSnapshot,
   SupportConversationSnapshot,
   TournamentDetailSnapshot,
+  TournamentRoundType,
   TournamentPartnerCandidateSnapshot,
   TournamentPartnerInviteSnapshot,
   TournamentSummarySnapshot,
@@ -595,6 +596,13 @@ export type LobbyScreenState = {
   tournamentDetailLoading: boolean
   tournamentDetailErrorText: string | null
   tournamentDetail: TournamentDetailSnapshot | null
+  tournamentInterRoundPendingResult: {
+    tournamentId: string
+    currentRoundType: TournamentRoundType
+    semifinalScoreA: number | null
+    semifinalScoreB: number | null
+    shownAt: number
+  } | null
   tournamentDetailRequiresPassword: boolean
   tournamentDetailPasswordDraft: string
   tournamentDetailUnlockBusy: boolean

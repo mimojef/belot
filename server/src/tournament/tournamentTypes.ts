@@ -216,6 +216,7 @@ export type TournamentMatchRecord = {
   missingProfileIds: string[] | null
   finalScoreTeamA: number | null
   finalScoreTeamB: number | null
+  finalStartAt: string | null
   createdAt: string
   startedAt: string | null
   completedAt: string | null

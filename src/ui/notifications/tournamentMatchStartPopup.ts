@@ -2,6 +2,11 @@ import type { TournamentMatchAssignmentSnapshot } from '../../app/network/create
 
 type TournamentMatchStartPopupController = {
   setAssignment: (assignment: TournamentMatchAssignmentSnapshot | null) => void
+  /** Изчиства текущия assignment САМО ако сочи точно към roomId — вика се
+   * при напускане/приключване на конкретна стая (виж showLobby wiring в
+   * main.ts), за да не остане stale countdown/CTA сочещ към вече затворена
+   * турнирна стая, без да засяга легитимен по-нов assignment за друг мач. */
+  clearAssignmentForRoom: (roomId: string) => void
   tick: () => void
   destroy: () => void
 }
@@ -84,18 +89,18 @@ export function createTournamentMatchStartPopup(options: {
       // избрал explicit "напусни", просто изчакал играта да свърши сама.
       const justFinishedConflict = hadConflictForMatchId === assignment.matchId
       const introText = justFinishedConflict
-        ? 'Текущият ти мач приключи. Влез в турнира.'
+        ? 'Вашият мач вече е започнал.'
         : isFirstMatch
-          ? `Твоят турнирен мач започва след ${deadlineText}`
-          : `Продължаваш към следващия кръг — мачът започва след ${deadlineText}`
+          ? 'Вашият мач вече е започнал.'
+          : 'Вашият мач вече е започнал.'
       options.container.innerHTML = `
         <div id="tms-popup" role="dialog" aria-live="polite" style="${popupShellStyle()}">
           <button type="button" data-tms-minimize="1" aria-label="Минимизирай" style="${minimizeButtonStyle()}">—</button>
           <div style="font-size:13px;font-weight:900;color:#93c5fd;text-transform:uppercase;letter-spacing:0.04em;padding-right:28px;">${escapeHtml(assignment.tournamentName)}</div>
-          <div style="margin-top:8px;font-size:16px;font-weight:900;line-height:1.3;">${escapeHtml(introText)}</div>
-          <div style="margin-top:6px;font-size:12px;line-height:1.5;color:rgba(248,250,252,0.72);">Влез в турнира и изчакай останалите участници.</div>
+          <div style="margin-top:8px;font-size:16px;font-weight:900;line-height:1.3;">Участвате в активен турнир</div>
+          <div style="margin-top:6px;font-size:12px;line-height:1.5;color:rgba(248,250,252,0.72);">${escapeHtml(introText)}</div>
           <div style="margin-top:14px;display:flex;justify-content:flex-end;">
-            <button type="button" data-tms-enter="1" style="${primaryButtonStyle()}">Влез в турнира</button>
+            <button type="button" data-tms-enter="1" style="${primaryButtonStyle()}">Продължи играта</button>
           </div>
         </div>
       `
@@ -153,6 +158,13 @@ export function createTournamentMatchStartPopup(options: {
         minimizedMatchId = null
       }
       current = assignment
+      render()
+    },
+    clearAssignmentForRoom(roomId) {
+      if (current === null || current.roomId !== roomId) return
+      current = null
+      minimizedMatchId = null
+      hadConflictForMatchId = null
       render()
     },
     tick() {

@@ -23,6 +23,7 @@ import { seatParticipantInRoom } from '../core/seatParticipantInRoom.js'
 import { initializeRoomAuthoritativeGameState } from '../game/initializeRoomAuthoritativeGameState.js'
 import type { ServerAuthoritativeGameState } from '../game/serverGameTypes.js'
 import { dbDateToUtc } from '../db/dbDate.js'
+import { getLocalTournamentTestTimingOverrides } from '../localTournamentTest/localTournamentTestModeGuard.js'
 import type {
   TournamentId,
   TournamentMatchId,
@@ -103,6 +104,10 @@ export type TournamentBotTakeoverResult =
   | { ok: true; room: ServerRoom; seat: Seat }
   | { ok: false; reason: 'not_available' | 'invalid_profile' | 'match_completed' | 'seat_not_replaceable' }
 
+export type TournamentSemifinalResultAcknowledgeResult =
+  | { ok: true; alreadyAcknowledged: boolean }
+  | { ok: false; reason: 'not_found' | 'not_semifinal' | 'not_completed' | 'not_winner' | 'not_finalist' }
+
 export type TournamentCoordinator = {
   start: () => void
   stop: () => void
@@ -122,6 +127,11 @@ export type TournamentCoordinator = {
     connectionId: ConnectionId
     reconnectToken: string
   }) => TournamentBotTakeoverResult
+  acknowledgeSemifinalResult: (input: {
+    tournamentId: TournamentId
+    semifinalMatchId: TournamentMatchId
+    profileId: ProfileId
+  }) => TournamentSemifinalResultAcknowledgeResult
   getAssignmentForProfile: (profileId: ProfileId) => TournamentMatchAssignment | null
   getHealth: () => TournamentCoordinatorHealth
   close: () => void
@@ -196,6 +206,7 @@ type MatchRow = {
   completed_at: string | null
   final_score_team_a: number | null
   final_score_team_b: number | null
+  final_start_at: string | null
   tournament_name: string
   tournament_status: string
   tournament_player_capacity: number
@@ -247,8 +258,12 @@ const DEFAULT_BATCH_SIZE = 25
 // spec-а). Всеки следващ кръг (round_transition) използва много по-кратък
 // 20-секунден прозорец — отборите вече знаят, че продължават (виж §9),
 // затова не се чака ново 3-минутно "събиране".
-const ATTENDANCE_WAIT_MS_FIRST_MATCH = 180_000
-const ATTENDANCE_WAIT_MS_ROUND_TRANSITION = 20_000
+// getLocalTournamentTestTimingOverrides() връща точно production стойностите
+// (180s/20s), освен ако local tournament test mode не е активен — виж
+// localTournamentTestModeGuard.ts. Изчислено веднъж при module load.
+const localTournamentTestTimingOverrides = getLocalTournamentTestTimingOverrides()
+const ATTENDANCE_WAIT_MS_FIRST_MATCH = localTournamentTestTimingOverrides.attendanceFirstMatchMs
+const ATTENDANCE_WAIT_MS_ROUND_TRANSITION = localTournamentTestTimingOverrides.attendanceTransitionMs
 const START_COUNTDOWN_MS = 5_000
 const BANNER_TTL_MS = 20_000
 
@@ -336,7 +351,7 @@ export async function createTournamentCoordinator(
     tm.status, tm.no_show_deadline_at, tm.attendance_started_at, tm.attendance_deadline_at,
     tm.attendance_resolved_at, tm.attendance_resolution_kind, tm.deadline_kind, tm.game_start_at,
     tm.winner_team_id, tm.result_kind, tm.completed_at,
-    tm.final_score_team_a, tm.final_score_team_b,
+    tm.final_score_team_a, tm.final_score_team_b, tm.final_start_at,
     t.name as tournament_name, t.status as tournament_status, t.player_capacity as tournament_player_capacity,
     tr.round_type, tr.round_index
   `
@@ -435,6 +450,60 @@ export async function createTournamentCoordinator(
     WHERE match_id = ?
       AND room_id IS NULL
       AND status IN ('awaiting_players', 'countdown', 'in_progress');
+  `)
+
+  const updateFinalStartAtStatement = database.prepare(`
+    UPDATE tournament_matches
+    SET final_start_at = COALESCE(final_start_at, ?)
+    WHERE match_id = ?
+      AND final_start_at IS NULL;
+  `)
+
+  const insertSemifinalAcknowledgementStatement = database.prepare(`
+    INSERT INTO tournament_semifinal_result_acknowledgements (
+      acknowledgement_id, tournament_id, semifinal_match_id, profile_id
+    ) VALUES (?, ?, ?, ?)
+    ON CONFLICT(tournament_id, semifinal_match_id, profile_id) DO NOTHING;
+  `)
+
+  const selectSemifinalAcknowledgementStatement = database.prepare(`
+    SELECT acknowledgement_id
+    FROM tournament_semifinal_result_acknowledgements
+    WHERE tournament_id = ? AND semifinal_match_id = ? AND profile_id = ?
+    LIMIT 1;
+  `)
+
+  const countMissingHumanFinalistAcknowledgementsStatement = database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM tournament_entries te
+    JOIN profiles p ON p.profile_id = te.profile_id
+    WHERE te.tournament_id = ?
+      AND te.team_id IN (?, ?)
+      AND te.status = 'finalist'
+      AND p.profile_kind = 'human'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM tournament_matches sm
+        JOIN tournament_rounds sr ON sr.round_id = sm.round_id
+        WHERE sm.tournament_id = te.tournament_id
+          AND sr.round_type = 'semifinal'
+          AND sm.status = 'completed'
+          AND sm.winner_team_id = te.team_id
+          AND EXISTS (
+            SELECT 1
+            FROM tournament_semifinal_result_acknowledgements ack
+            WHERE ack.tournament_id = te.tournament_id
+              AND ack.semifinal_match_id = sm.match_id
+              AND ack.profile_id = te.profile_id
+          )
+      );
+  `)
+
+  const selectEntryForProfileStatement = database.prepare(`
+    SELECT entry_id, team_id, status
+    FROM tournament_entries
+    WHERE tournament_id = ? AND profile_id = ?
+    LIMIT 1;
   `)
 
   const ensureAttendanceStartedStatement = database.prepare(`
@@ -1101,6 +1170,57 @@ export async function createTournamentCoordinator(
     return createdByThisTick ? 'created' : 'recovered'
   }
 
+  function ensureMatchRoomId(match: MatchRow): MatchRow {
+    if (match.room_id !== null) return match
+    const candidateRoomId = randomUUID()
+    const claimResult = claimRoomIdStatement.run(candidateRoomId, match.match_id)
+    if (dbChanges(claimResult) > 0) {
+      return selectMatchByIdStatement.get(match.match_id) as MatchRow
+    }
+    const current = selectMatchByIdStatement.get(match.match_id) as MatchRow | undefined
+    if (current === undefined || current.room_id === null) {
+      throw new Error(`Could not claim tournament match room match=${match.match_id}`)
+    }
+    return current
+  }
+
+  function isFinalStartDue(match: MatchRow): boolean {
+    return match.round_type === 'final' &&
+      match.final_start_at !== null &&
+      Date.parse(match.final_start_at) <= Date.now()
+  }
+
+  function ensureFinalStartAtIfReady(match: MatchRow): MatchRow {
+    if (match.round_type !== 'final' || match.status !== 'awaiting_players') return match
+    let final = ensureMatchRoomId(match)
+    if (final.final_start_at !== null) return final
+
+    const missingCount = (countMissingHumanFinalistAcknowledgementsStatement.get(
+      final.tournament_id,
+      final.team_a_id,
+      final.team_b_id,
+    ) as { count: number }).count
+    if (missingCount > 0) return final
+
+    const conditionSatisfiedAt = utcNow()
+    const finalStartAt = addMsIso(conditionSatisfiedAt, START_COUNTDOWN_MS)
+    if (dbChanges(updateFinalStartAtStatement.run(finalStartAt, final.match_id)) > 0) {
+      appendEvent(final.tournament_id, 'tournament_final_start_scheduled', {
+        matchId: final.match_id,
+        roomId: final.room_id,
+        finalStartAt,
+      })
+    }
+    final = selectMatchByIdStatement.get(final.match_id) as MatchRow
+    return final
+  }
+
+  function shouldDelayFinalMatch(match: MatchRow): boolean {
+    if (match.round_type !== 'final' || match.status !== 'awaiting_players') return false
+    const gated = ensureFinalStartAtIfReady(match)
+    return !isFinalStartDue(gated)
+  }
+
   function createNoShowBot(assignment: SeatAssignment): BotRoomParticipant {
     return createBotParticipant({
       botCode: `TournamentNoShow-${assignment.seat}`,
@@ -1458,7 +1578,7 @@ export async function createTournamentCoordinator(
     // Всеки не-final round type (round_of_16/quarterfinal/semifinal) следва
     // общата ladder логика — не само 'semifinal' както преди.
     const final = advanceBracketLadder(match.tournament_id, match.tournament_player_capacity / 2)
-    if (final !== null && final.status !== 'completed') ensureMatchRoom(final)
+    if (final !== null && final.status !== 'completed') ensureFinalStartAtIfReady(final)
 
     const profileIds = (selectConfirmedProfileIdsForTournamentStatement.all(match.tournament_id) as Array<{ profile_id: ProfileId }>)
       .map((row) => row.profile_id)
@@ -1475,6 +1595,10 @@ export async function createTournamentCoordinator(
   function reconcileTournament(tournament: TournamentRow): void {
     const matches = selectRunnableMatchesStatement.all(tournament.tournament_id) as MatchRow[]
     for (const initialMatch of matches) {
+      if (shouldDelayFinalMatch(initialMatch)) {
+        processedLastTick += 1
+        continue
+      }
       const result = ensureMatchRoom(initialMatch)
       if (result === 'created') createdRoomsLastTick += 1
       if (result === 'recovered') recoveredRoomsLastTick += 1
@@ -1503,6 +1627,8 @@ export async function createTournamentCoordinator(
 
     const final = advanceBracketLadder(tournament.tournament_id, tournament.player_capacity / 2)
     if (final !== null && final.status !== 'completed') {
+      const gatedFinal = ensureFinalStartAtIfReady(final)
+      if (!isFinalStartDue(gatedFinal)) return
       const result = ensureMatchRoom(final)
       if (result === 'created') createdRoomsLastTick += 1
       if (result === 'recovered') recoveredRoomsLastTick += 1
@@ -1760,11 +1886,73 @@ export async function createTournamentCoordinator(
     return { ok: true, room: refreshed, seat: assignment.seat }
   }
 
+  function acknowledgeSemifinalResult(input: {
+    tournamentId: TournamentId
+    semifinalMatchId: TournamentMatchId
+    profileId: ProfileId
+  }): TournamentSemifinalResultAcknowledgeResult {
+    const match = selectMatchByIdStatement.get(input.semifinalMatchId) as MatchRow | undefined
+    if (match === undefined || match.tournament_id !== input.tournamentId) {
+      return { ok: false, reason: 'not_found' }
+    }
+    if (match.round_type !== 'semifinal') {
+      return { ok: false, reason: 'not_semifinal' }
+    }
+    if (match.status !== 'completed' || match.winner_team_id === null) {
+      return { ok: false, reason: 'not_completed' }
+    }
+    const entry = selectEntryForProfileStatement.get(input.tournamentId, input.profileId) as
+      | { entry_id: string; team_id: string | null; status: string }
+      | undefined
+    if (entry === undefined || entry.team_id !== match.winner_team_id) {
+      return { ok: false, reason: 'not_winner' }
+    }
+    if (entry.status !== 'finalist') {
+      return { ok: false, reason: 'not_finalist' }
+    }
+
+    const existing = selectSemifinalAcknowledgementStatement.get(
+      input.tournamentId,
+      input.semifinalMatchId,
+      input.profileId,
+    ) as { acknowledgement_id: string } | undefined
+    if (existing !== undefined) {
+      const final = selectFinalMatchStatement.get(input.tournamentId) as MatchRow | undefined
+      if (final !== undefined) ensureFinalStartAtIfReady(final)
+      return { ok: true, alreadyAcknowledged: true }
+    }
+
+    insertSemifinalAcknowledgementStatement.run(
+      randomUUID(),
+      input.tournamentId,
+      input.semifinalMatchId,
+      input.profileId,
+    )
+    appendEvent(input.tournamentId, 'tournament_semifinal_result_acknowledged', {
+      semifinalMatchId: input.semifinalMatchId,
+      profileId: input.profileId,
+    })
+    const final = selectFinalMatchStatement.get(input.tournamentId) as MatchRow | undefined
+    if (final !== undefined) ensureFinalStartAtIfReady(final)
+    return { ok: true, alreadyAcknowledged: false }
+  }
+
   function getAssignmentForProfile(profileId: ProfileId): TournamentMatchAssignment | null {
     for (const tournament of selectActiveTournamentsStatement.all(batchSize) as TournamentRow[]) {
       const matches = selectRunnableMatchesStatement.all(tournament.tournament_id) as MatchRow[]
-      for (const match of matches) {
-        if (match.room_id === null || match.status === 'completed') continue
+      for (let match of matches) {
+        if (match.status === 'completed') continue
+        if (match.round_type === 'final') {
+          const gated = ensureFinalStartAtIfReady(match)
+          if (!isFinalStartDue(gated)) continue
+          if (gated.room_id === null || deps.getRoom(gated.room_id) === null) {
+            ensureMatchRoom(gated)
+            match = selectMatchByIdStatement.get(gated.match_id) as MatchRow
+          } else {
+            match = gated
+          }
+        }
+        if (match.room_id === null) continue
         const room = deps.getRoom(match.room_id)
         if (room === null) continue
         const assignment = createAssignments(match, room).find((item) => {
@@ -1802,6 +1990,7 @@ export async function createTournamentCoordinator(
     onTournamentRoomCompleted,
     notifyFeederScoreProgress,
     tryTakeoverNoShowBot,
+    acknowledgeSemifinalResult,
     getAssignmentForProfile,
     getHealth(): TournamentCoordinatorHealth {
       return {

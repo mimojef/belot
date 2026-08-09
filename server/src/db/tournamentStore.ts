@@ -128,6 +128,16 @@ export type TournamentStore = {
   getRoundsForTournament: (tournamentId: TournamentId) => TournamentRoundRecord[]
   createTournamentMatch: (input: CreateTournamentMatchInput) => TournamentMatchRecord
   getMatchesForTournament: (tournamentId: TournamentId) => TournamentMatchRecord[]
+  hasSemifinalResultAcknowledgement: (
+    tournamentId: TournamentId,
+    semifinalMatchId: string,
+    profileId: ProfileId,
+  ) => boolean
+  countMissingHumanFinalistAcknowledgements: (
+    tournamentId: TournamentId,
+    teamAId: TournamentTeamId,
+    teamBId: TournamentTeamId,
+  ) => number
 
   appendTournamentEvent: (input: AppendTournamentEventInput) => TournamentEventRecord
 
@@ -235,6 +245,7 @@ type TournamentMatchRow = {
   missing_profile_ids: string | null
   final_score_team_a: number | null
   final_score_team_b: number | null
+  final_start_at: string | null
   created_at: string
   started_at: string | null
   completed_at: string | null
@@ -367,6 +378,7 @@ function toTournamentMatchRecord(row: TournamentMatchRow): TournamentMatchRecord
       : null,
     finalScoreTeamA: row.final_score_team_a,
     finalScoreTeamB: row.final_score_team_b,
+    finalStartAt: row.final_start_at !== null ? dbDateToUtc(row.final_start_at) : null,
     createdAt: dbDateToUtc(row.created_at),
     startedAt: row.started_at !== null ? dbDateToUtc(row.started_at) : null,
     completedAt: row.completed_at !== null ? dbDateToUtc(row.completed_at) : null,
@@ -533,11 +545,44 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
       no_show_deadline_at, attendance_started_at, attendance_deadline_at,
       attendance_resolved_at, attendance_resolution_kind, deadline_kind, game_start_at,
       attendance_revision, winner_team_id, result_kind, walkover_reason,
-      missing_profile_ids, final_score_team_a, final_score_team_b,
+      missing_profile_ids, final_score_team_a, final_score_team_b, final_start_at,
       created_at, started_at, completed_at
     FROM tournament_matches
     WHERE tournament_id = ?
     ORDER BY created_at ASC;
+  `)
+
+  const selectSemifinalAcknowledgementStatement = database.prepare(`
+    SELECT acknowledgement_id
+    FROM tournament_semifinal_result_acknowledgements
+    WHERE tournament_id = ? AND semifinal_match_id = ? AND profile_id = ?
+    LIMIT 1;
+  `)
+
+  const countMissingHumanFinalistAcknowledgementsStatement = database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM tournament_entries te
+    JOIN profiles p ON p.profile_id = te.profile_id
+    WHERE te.tournament_id = ?
+      AND te.team_id IN (?, ?)
+      AND te.status = 'finalist'
+      AND p.profile_kind = 'human'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM tournament_matches sm
+        JOIN tournament_rounds sr ON sr.round_id = sm.round_id
+        WHERE sm.tournament_id = te.tournament_id
+          AND sr.round_type = 'semifinal'
+          AND sm.status = 'completed'
+          AND sm.winner_team_id = te.team_id
+          AND EXISTS (
+            SELECT 1
+            FROM tournament_semifinal_result_acknowledgements ack
+            WHERE ack.tournament_id = te.tournament_id
+              AND ack.semifinal_match_id = sm.match_id
+              AND ack.profile_id = te.profile_id
+          )
+      );
   `)
 
   const insertEventStatement = database.prepare(`
@@ -768,7 +813,8 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
              no_show_deadline_at, attendance_started_at, attendance_deadline_at,
              attendance_resolved_at, attendance_resolution_kind, game_start_at,
              attendance_revision, winner_team_id, result_kind, walkover_reason,
-             missing_profile_ids, created_at, started_at, completed_at
+             missing_profile_ids, final_score_team_a, final_score_team_b, final_start_at,
+             created_at, started_at, completed_at
            FROM tournament_matches WHERE match_id = ? LIMIT 1;`,
         )
         .get(matchId) as TournamentMatchRow
@@ -778,6 +824,22 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
     getMatchesForTournament(tournamentId: TournamentId): TournamentMatchRecord[] {
       const rows = selectMatchesForTournamentStatement.all(tournamentId) as TournamentMatchRow[]
       return rows.map(toTournamentMatchRecord)
+    },
+
+    hasSemifinalResultAcknowledgement(
+      tournamentId: TournamentId,
+      semifinalMatchId: string,
+      profileId: ProfileId,
+    ): boolean {
+      return selectSemifinalAcknowledgementStatement.get(tournamentId, semifinalMatchId, profileId) !== undefined
+    },
+
+    countMissingHumanFinalistAcknowledgements(
+      tournamentId: TournamentId,
+      teamAId: TournamentTeamId,
+      teamBId: TournamentTeamId,
+    ): number {
+      return (countMissingHumanFinalistAcknowledgementsStatement.get(tournamentId, teamAId, teamBId) as { count: number }).count
     },
 
     appendTournamentEvent(input: AppendTournamentEventInput): TournamentEventRecord {

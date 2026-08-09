@@ -113,6 +113,11 @@ export type ClientMessage =
       reconnectToken: string
     }
   | {
+      type: 'tournament_semifinal_result_acknowledge'
+      tournamentId: string
+      semifinalMatchId: string
+    }
+  | {
       type: 'leave_active_room'
       roomId: RoomId
       acceptPenalty?: boolean

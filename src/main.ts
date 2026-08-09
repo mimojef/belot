@@ -4074,6 +4074,22 @@ lobby = createLobbyFlowController({
   onTournamentsLoad: (params) => loadTournaments(params),
   onTournamentCreate: (input) => createTournamentRequest(input),
   onTournamentDetailLoad: (tournamentId) => loadTournamentDetail(tournamentId),
+  onTournamentActiveMatchRecovered: (assignment) => {
+    if (assignment !== null && assignment.reconnectToken !== null) {
+      tournamentMatchStartPopup.setAssignment(assignment)
+    } else if (assignment === null) {
+      tournamentMatchStartPopup.setAssignment(null)
+    }
+  },
+  onTournamentAutoEnterMatch: (assignment) => {
+    tournamentMatchStartPopup.clearAssignmentForRoom(assignment.roomId)
+    if (assignment.reconnectToken !== null) {
+      client.resumeRoom(assignment.roomId, assignment.reconnectToken)
+    }
+  },
+  onTournamentSemifinalResultAckNeeded: (tournamentId, semifinalMatchId) => {
+    client.acknowledgeTournamentSemifinalResult(tournamentId, semifinalMatchId)
+  },
   onTournamentUnlock: (tournamentId, password) => unlockTournamentDetail(tournamentId, password),
   onTournamentJoin: (tournamentId, password) => joinTournamentRequest(tournamentId, password),
   onTournamentLeave: (tournamentId) => leaveTournamentRequest(tournamentId),
@@ -4184,7 +4200,14 @@ const activeRoom = createActiveRoomFlowController({
     if ('ok' in result && !result.ok) return { message: result.message }
     return { message: 'blocked' in result && result.blocked ? 'Играчът е блокиран.' : 'Операцията не успя.' }
   },
-  showLobby: (errorText = null) => {
+  showLobby: (errorText = null, leftRoomId = null) => {
+    // Ако tournamentMatchStartPopup в момента сочи точно към стаята, която
+    // играчът напуска (мач приключил — win/loss/walkover), изчистваме stale
+    // assignment-а тук, вместо да оставим countdown-а да замръзне на 00:00
+    // и бутонът "Влез в турнира" да сочи към вече затворена/чужда стая.
+    if (leftRoomId !== null) {
+      tournamentMatchStartPopup.clearAssignmentForRoom(leftRoomId)
+    }
     lobby.setConnected(client.isConnected())
     lobby.resetToLobby()
     lobby.setErrorText(errorText)
@@ -4205,9 +4228,19 @@ const activeRoom = createActiveRoomFlowController({
     const result = await loadTournamentDetail(tournamentId)
     return result.ok ? result.tournament : null
   },
-  onEnterWaitingForNextTournamentRound: (feeder) => {
-    currentFeederWaitingState = feeder
-    tournamentFeederWaitingStrip.setState(feeder)
+  acknowledgeTournamentSemifinalResult: (tournamentId, semifinalMatchId) => {
+    client.acknowledgeTournamentSemifinalResult(tournamentId, semifinalMatchId)
+  },
+  onEnterWaitingForNextTournamentRound: (_feeder, tournamentId, result) => {
+    currentFeederWaitingState = null
+    tournamentFeederWaitingStrip.setState(null)
+    lobby?.showTournamentInterRoundPendingResult(tournamentId, result)
+  },
+  onTournamentFinalResultContinue: (tournamentId) => {
+    currentFeederWaitingState = null
+    tournamentFeederWaitingStrip.setState(null)
+    tournamentMatchStartPopup.setAssignment(null)
+    lobby?.showTournamentDetail(tournamentId)
   },
 })
 
@@ -4613,14 +4646,24 @@ client = createGameServerClient({
     }
 
     if (message.type === 'tournament_match_assigned') {
+      activeRoom.completePendingTournamentRoundResultTransition()
       lobby.handleServerMessage(message)
       currentFeederWaitingState = null
       tournamentFeederWaitingStrip.setState(null)
-      tournamentMatchStartPopup.setAssignment(message.assignment)
+      if (message.assignment.roundType === 'final' && lobby?.getCurrentScreen() === 'tournament-detail') {
+        tournamentMatchStartPopup.clearAssignmentForRoom(message.assignment.roomId)
+        return
+      }
+      if (message.assignment.reconnectToken !== null) {
+        tournamentMatchStartPopup.setAssignment(message.assignment)
+      } else {
+        tournamentMatchStartPopup.clearAssignmentForRoom(message.assignment.roomId)
+      }
       return
     }
 
     if (message.type === 'tournament_feeder_match_completed') {
+      lobby.handleServerMessage(message)
       if (currentFeederWaitingState !== null) {
         currentFeederWaitingState = {
           ...currentFeederWaitingState,
@@ -4641,6 +4684,7 @@ client = createGameServerClient({
     // но там няма активна стая, в която да го рендира (играчът вече е напуснал
     // active-room flow-а), затова лентата никога не се обновяваше на живо.
     if (message.type === 'tournament_feeder_score_progress') {
+      lobby.handleServerMessage(message)
       if (currentFeederWaitingState !== null) {
         currentFeederWaitingState = {
           ...currentFeederWaitingState,
@@ -4701,6 +4745,17 @@ client = createGameServerClient({
       }
       showCoinsGiftedPopup(message.amount, message.fromDisplayName)
       return
+    }
+
+    // Defense-in-depth (§3 в task spec-а: "Не изпращай resume_room към
+    // приключила или чужда стая") — покрива и рядкия случай, в който
+    // tournamentMatchStartPopup вече е показал stale assignment, ПРЕДИ
+    // showLobby(..., leftRoomId) да е успял да го изчисти (напр. играчът
+    // никога не е влизал в activeRoomState за тази стая — activeRoom.handleServerMessage
+    // guard-ва с "if (!activeRoomState) return false" и никога не вижда това
+    // съобщение). Идемпотентно — no-op ако popup-ът не сочи към тази стая.
+    if (message.type === 'room_resume_failed') {
+      tournamentMatchStartPopup.clearAssignmentForRoom(message.roomId)
     }
 
     if (message.type === 'room_resumed' && !activeRoom.hasActiveRoom()) {

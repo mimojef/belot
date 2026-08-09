@@ -611,11 +611,14 @@ export async function createTournamentEconomyStore(
   const selectActiveEntryForAccountStatement = database.prepare(`
     SELECT te.entry_id
     FROM tournament_entries te
+    JOIN tournaments t
+      ON t.tournament_id = te.tournament_id
     JOIN profiles entry_profile
       ON entry_profile.profile_id = te.profile_id
     JOIN profiles joining_profile
       ON joining_profile.profile_id = ?
     WHERE te.status IN ('confirmed', 'finalist')
+      AND t.status IN ('open', 'starting', 'semifinal_in_progress', 'final_in_progress')
       AND entry_profile.account_id IS NOT NULL
       AND joining_profile.account_id IS NOT NULL
       AND entry_profile.account_id = joining_profile.account_id

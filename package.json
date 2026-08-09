@@ -21,6 +21,7 @@
     "check:chat-send-refocus": "node server/node_modules/tsx/dist/cli.mjs scripts/checkChatSendRefocus.ts",
     "check:private-room-created-notification": "node server/node_modules/tsx/dist/cli.mjs scripts/checkPrivateRoomCreatedNotification.ts",
     "check:notification-sound-assignments": "npx tsx scripts/checkNotificationSoundAssignments.ts",
+    "check:active-room-render-stability": "node server/node_modules/tsx/dist/cli.mjs scripts/checkActiveRoomRenderStability.ts",
     "check:gameplay-sfx-latency": "npx tsx scripts/checkGameplaySfxLatency.ts",
     "check:bidding-board-lifecycle": "npx tsx scripts/checkBiddingBoardLifecycle.ts",
     "check:private-room-mobile-responsive": "npx tsx scripts/checkPrivateRoomMobileResponsive.ts",

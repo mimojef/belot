@@ -74,6 +74,7 @@ type RenderScoringScreenOptions = {
   localSeat: Seat
   winningBid: NonNullable<RoomWinningBidSnapshot> | null
   countdownSeconds: number
+  animateSumCounters: boolean
   stageScale: number
   scaledStageWidth: number
   scaledStageHeight: number
@@ -711,7 +712,11 @@ function renderResultRow(ourPoints: number, theirPoints: number): string {
   `
 }
 
-function renderAnimatedSumValue(points: number): string {
+function renderSumValue(points: number, animate: boolean): string {
+  if (!animate) {
+    return `<span style="display:inline-block;min-width:4ch;line-height:1;">${points}</span>`
+  }
+
   return `
     <span
       style="
@@ -812,6 +817,7 @@ function renderScoringPanelHtml(
   localSeat: Seat,
   fallbackWinningBid: NonNullable<RoomWinningBidSnapshot> | null,
   countdownSeconds: number,
+  animateSumCounters: boolean,
 ): string {
   const scoring = game.scoring
 
@@ -955,7 +961,7 @@ function renderScoringPanelHtml(
             formatRawHandValue(rawHands.ourPoints, rawHandTricksWon.ourPoints),
             formatRawHandValue(rawHands.theirPoints, rawHandTricksWon.theirPoints),
           )}
-          ${renderMatrixRow('Сбор', renderAnimatedSumValue(sumPoints.ourPoints), renderAnimatedSumValue(sumPoints.theirPoints), {
+          ${renderMatrixRow('Сбор', renderSumValue(sumPoints.ourPoints, animateSumCounters), renderSumValue(sumPoints.theirPoints, animateSumCounters), {
             overflowVisible: true,
             useValueHtml: true,
           })}
@@ -1012,6 +1018,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
     localSeat,
     winningBid,
     countdownSeconds,
+    animateSumCounters,
     stageScale,
     scaledStageWidth,
     scaledStageHeight,
@@ -1080,7 +1087,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
               "
             >
               ${scoringPanelMobileScale === 1
-                ? renderScoringPanelHtml(game, localSeat, winningBid, countdownSeconds)
+                ? renderScoringPanelHtml(game, localSeat, winningBid, countdownSeconds, animateSumCounters)
                 : `
                   <div
                     style="
@@ -1089,7 +1096,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
                       transform-origin:center center;
                     "
                   >
-                    ${renderScoringPanelHtml(game, localSeat, winningBid, countdownSeconds)}
+                    ${renderScoringPanelHtml(game, localSeat, winningBid, countdownSeconds, animateSumCounters)}
                   </div>
                 `
               }
@@ -1108,5 +1115,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
     </div>
   `
 
-  animateScoringSumCounters(root)
+  if (animateSumCounters) {
+    animateScoringSumCounters(root)
+  }
 }

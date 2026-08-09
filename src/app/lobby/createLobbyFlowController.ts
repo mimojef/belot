@@ -536,6 +536,9 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; tournament: TournamentDetailSnapshot }
     | { ok: false; message: string; requiresPassword?: boolean }
   >
+  onTournamentActiveMatchRecovered?: (assignment: TournamentDetailSnapshot['myActiveMatch']) => void
+  onTournamentAutoEnterMatch?: (assignment: NonNullable<TournamentDetailSnapshot['myActiveMatch']>) => void
+  onTournamentSemifinalResultAckNeeded?: (tournamentId: string, semifinalMatchId: string) => void
   onTournamentUnlock?: (tournamentId: string, password: string) => Promise<
     | { ok: true; tournament: TournamentDetailSnapshot }
     | { ok: false; message: string; requiresPassword?: boolean }
@@ -613,6 +616,11 @@ export type LobbyFlowController = {
   setChatConversations: (value: ChatConversationSnapshot[]) => void
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
   resetToLobby: () => void
+  showTournamentDetail: (tournamentId: string) => void
+  showTournamentInterRoundPendingResult: (
+    tournamentId: string,
+    result: { currentRoundType: import('../network/createGameServerClient').TournamentRoundType; semifinalScoreA: number | null; semifinalScoreB: number | null },
+  ) => void
   openAuthModal: (mode: Exclude<import('./renderLobbyScreen').LobbyAuthModalMode, 'closed'>) => void
   suspendLobbyChatForActiveRoom: () => void
   forceLobbyChatResubscribeIfOnLobbyScreen: () => void
@@ -962,6 +970,13 @@ type InternalLobbyFlowState = {
   tournamentDetailLoading: boolean
   tournamentDetailErrorText: string | null
   tournamentDetail: TournamentDetailSnapshot | null
+  tournamentInterRoundPendingResult: {
+    tournamentId: string
+    currentRoundType: import('../network/createGameServerClient').TournamentRoundType
+    semifinalScoreA: number | null
+    semifinalScoreB: number | null
+    shownAt: number
+  } | null
   tournamentDetailRequiresPassword: boolean
   tournamentDetailPasswordDraft: string
   /**
@@ -1309,6 +1324,7 @@ function createInitialState(): InternalLobbyFlowState {
     tournamentDetailLoading: false,
     tournamentDetailErrorText: null,
     tournamentDetail: null,
+    tournamentInterRoundPendingResult: null,
     tournamentDetailRequiresPassword: false,
     tournamentDetailPasswordDraft: '',
     tournamentDetailVerifiedPassword: null,
@@ -1684,6 +1700,13 @@ export function createLobbyFlowController(
   let tournamentStartCountdownIntervalId: ReturnType<typeof setInterval> | null = null
   let tournamentStartCountdownTournamentId: string | null = null
   let tournamentStartCountdownDeadline: string | null = null
+  let tournamentInterRoundCountdownIntervalId: ReturnType<typeof setInterval> | null = null
+  let tournamentInterRoundCountdownTournamentId: string | null = null
+  let tournamentInterRoundCountdownFinalStartAt: string | null = null
+  let tournamentInterRoundRefetchTimeoutId: ReturnType<typeof setTimeout> | null = null
+  let tournamentInterRoundAckRefetchTimeoutId: ReturnType<typeof setTimeout> | null = null
+  let tournamentInterRoundAckRefetchKey: string | null = null
+  let tournamentInterRoundWinnerMinimumTimeoutId: ReturnType<typeof setTimeout> | null = null
 
   // Единичен споделен interval за ВСИЧКИ fill-expiry countdown badge-ове в
   // списъчния изглед "Турнири" (§13 в task spec-а) — обхожда всички
@@ -2053,6 +2076,175 @@ export function createLobbyFlowController(
       }
       updateTournamentStartCountdownDom(mode, deadline)
     }, 1000)
+  }
+
+  function updateTournamentInterRoundCountdownDom(finalStartAt: string): void {
+    const target = options.root.querySelector<HTMLElement>('[data-tournament-inter-round-countdown="1"]')
+    if (target === null) return
+    const remainingMs = Date.parse(finalStartAt) - Date.now()
+    const seconds = Number.isFinite(remainingMs) ? Math.max(0, Math.ceil(remainingMs / 1000)) : 0
+    target.textContent = `00:${String(seconds).padStart(2, '0')}`
+  }
+
+  function clearTournamentInterRoundCountdownLoop(): void {
+    if (tournamentInterRoundCountdownIntervalId !== null) {
+      window.clearInterval(tournamentInterRoundCountdownIntervalId)
+      tournamentInterRoundCountdownIntervalId = null
+    }
+    if (tournamentInterRoundRefetchTimeoutId !== null) {
+      window.clearTimeout(tournamentInterRoundRefetchTimeoutId)
+      tournamentInterRoundRefetchTimeoutId = null
+    }
+    tournamentInterRoundCountdownTournamentId = null
+    tournamentInterRoundCountdownFinalStartAt = null
+  }
+
+  function clearTournamentInterRoundWinnerMinimumTimer(): void {
+    if (tournamentInterRoundWinnerMinimumTimeoutId !== null) {
+      window.clearTimeout(tournamentInterRoundWinnerMinimumTimeoutId)
+      tournamentInterRoundWinnerMinimumTimeoutId = null
+    }
+  }
+
+  function scheduleTournamentInterRoundWinnerMinimumTimer(): void {
+    const pending = state.tournamentInterRoundPendingResult
+    if (
+      pending === null ||
+      state.currentScreen !== 'tournament-detail' ||
+      state.tournamentDetailId !== pending.tournamentId
+    ) {
+      clearTournamentInterRoundWinnerMinimumTimer()
+      return
+    }
+    const remainingMs = Math.max(0, 3000 - (Date.now() - pending.shownAt))
+    if (remainingMs === 0) {
+      clearTournamentInterRoundWinnerMinimumTimer()
+      return
+    }
+    if (tournamentInterRoundWinnerMinimumTimeoutId !== null) return
+    tournamentInterRoundWinnerMinimumTimeoutId = window.setTimeout(() => {
+      tournamentInterRoundWinnerMinimumTimeoutId = null
+      if (
+        state.currentScreen === 'tournament-detail' &&
+        state.tournamentDetailId === pending.tournamentId &&
+        state.tournamentInterRoundPendingResult !== null
+      ) {
+        const assignment = state.tournamentDetail?.myActiveMatch ?? null
+        if (assignment !== null && assignment.roundType === 'final') {
+          state.tournamentInterRoundPendingResult = null
+          options.onTournamentAutoEnterMatch?.(assignment)
+          return
+        }
+        render()
+      }
+    }, remainingMs)
+  }
+
+  function scheduleTournamentInterRoundAckRefetch(tournamentId: string, semifinalMatchId: string): void {
+    const key = `${tournamentId}:${semifinalMatchId}`
+    if (tournamentInterRoundAckRefetchTimeoutId !== null && tournamentInterRoundAckRefetchKey === key) {
+      return
+    }
+    if (tournamentInterRoundAckRefetchTimeoutId !== null) {
+      window.clearTimeout(tournamentInterRoundAckRefetchTimeoutId)
+    }
+    tournamentInterRoundAckRefetchKey = key
+    tournamentInterRoundAckRefetchTimeoutId = window.setTimeout(() => {
+      tournamentInterRoundAckRefetchTimeoutId = null
+      tournamentInterRoundAckRefetchKey = null
+      if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === tournamentId) {
+        void fetchTournamentDetail(tournamentId)
+      }
+    }, 350)
+  }
+
+  function startTournamentInterRoundCountdownLoop(tournamentId: string, finalStartAt: string): void {
+    if (
+      tournamentInterRoundCountdownIntervalId !== null &&
+      tournamentInterRoundCountdownTournamentId === tournamentId &&
+      tournamentInterRoundCountdownFinalStartAt === finalStartAt
+    ) {
+      updateTournamentInterRoundCountdownDom(finalStartAt)
+      return
+    }
+
+    clearTournamentInterRoundCountdownLoop()
+    tournamentInterRoundCountdownTournamentId = tournamentId
+    tournamentInterRoundCountdownFinalStartAt = finalStartAt
+    updateTournamentInterRoundCountdownDom(finalStartAt)
+
+    tournamentInterRoundCountdownIntervalId = window.setInterval(() => {
+      if (
+        state.currentScreen !== 'tournament-detail' ||
+        state.tournamentDetailId !== tournamentId ||
+        state.tournamentDetail?.myInterRoundWaiting?.finalStartAt !== finalStartAt
+      ) {
+        clearTournamentInterRoundCountdownLoop()
+        return
+      }
+      updateTournamentInterRoundCountdownDom(finalStartAt)
+    }, 250)
+
+    const refetchDelayMs = Math.max(0, Date.parse(finalStartAt) - Date.now()) + 150
+    tournamentInterRoundRefetchTimeoutId = window.setTimeout(() => {
+      if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === tournamentId) {
+        void fetchTournamentDetail(tournamentId)
+      }
+    }, refetchDelayMs)
+  }
+
+  function patchTournamentInterRoundSiblingDom(matchId: string, scoreA: number | null, scoreB: number | null, statusText: string): void {
+    const scoreNode = options.root.querySelector<HTMLElement>(
+      `[data-tournament-inter-round-score="1"][data-match-id="${CSS.escape(matchId)}"]`,
+    )
+    if (scoreNode !== null) {
+      scoreNode.textContent = scoreA !== null && scoreB !== null ? `${scoreA} : ${scoreB}` : '0 : 0'
+    }
+    const statusNode = options.root.querySelector<HTMLElement>(
+      `[data-tournament-inter-round-status="1"][data-match-id="${CSS.escape(matchId)}"]`,
+    )
+    if (statusNode !== null) {
+      statusNode.textContent = statusText
+    }
+  }
+
+  function patchTournamentInterRoundSiblingProgress(input: {
+    tournamentId: string
+    matchId: string
+    scoreA: number | null
+    scoreB: number | null
+    status: 'in_progress' | 'completed'
+    progressLabel: string
+    winnerTeamId?: string | null
+  }): boolean {
+    const waiting = state.tournamentDetail?.myInterRoundWaiting ?? null
+    if (
+      state.currentScreen !== 'tournament-detail' ||
+      state.tournamentDetailId !== input.tournamentId ||
+      waiting === null ||
+      waiting.siblingSemifinal.matchId !== input.matchId
+    ) {
+      return false
+    }
+    state.tournamentDetail = {
+      ...state.tournamentDetail!,
+      myInterRoundWaiting: {
+        ...waiting,
+        siblingSemifinal: {
+          ...waiting.siblingSemifinal,
+          scoreA: input.scoreA,
+          scoreB: input.scoreB,
+          status: input.status,
+          winnerTeamId: input.winnerTeamId ?? waiting.siblingSemifinal.winnerTeamId,
+          progressLabel: input.progressLabel,
+        },
+      },
+    }
+    if (input.status === 'in_progress') {
+      patchTournamentInterRoundSiblingDom(input.matchId, input.scoreA, input.scoreB, input.progressLabel)
+      return true
+    }
+    return false
   }
 
   function updateTournamentListFillExpiryBadges(): void {
@@ -2816,6 +3008,7 @@ export function createLobbyFlowController(
       tournamentDetailLoading: state.tournamentDetailLoading,
       tournamentDetailErrorText: state.tournamentDetailErrorText,
       tournamentDetail: state.tournamentDetail,
+      tournamentInterRoundPendingResult: state.tournamentInterRoundPendingResult,
       tournamentDetailRequiresPassword: state.tournamentDetailRequiresPassword,
       tournamentDetailPasswordDraft: state.tournamentDetailPasswordDraft,
       tournamentDetailUnlockBusy: state.tournamentDetailUnlockBusy,
@@ -4105,6 +4298,22 @@ export function createLobbyFlowController(
       clearTournamentStartCountdownLoop()
     }
 
+    if (
+      state.currentScreen === 'tournament-detail' &&
+      state.tournamentDetail !== null &&
+      state.tournamentDetail.myInterRoundWaiting?.finalStartAt !== null &&
+      state.tournamentDetail.myInterRoundWaiting?.finalStartAt !== undefined
+    ) {
+      startTournamentInterRoundCountdownLoop(
+        state.tournamentDetail.tournamentId,
+        state.tournamentDetail.myInterRoundWaiting.finalStartAt,
+      )
+    } else {
+      clearTournamentInterRoundCountdownLoop()
+    }
+
+    scheduleTournamentInterRoundWinnerMinimumTimer()
+
     if (state.currentScreen === 'tournaments') {
       startTournamentListFillExpiryLoop()
     } else {
@@ -4479,6 +4688,7 @@ export function createLobbyFlowController(
     state.currentScreen = 'tournament-detail'
     state.tournamentDetailId = tournamentId
     state.tournamentDetail = null
+    state.tournamentInterRoundPendingResult = null
     state.tournamentDetailLoading = true
     state.tournamentDetailErrorText = null
     state.tournamentDetailRequiresPassword = false
@@ -4491,6 +4701,61 @@ export function createLobbyFlowController(
     }
     render()
     void fetchTournamentDetail(tournamentId)
+  }
+
+  function showTournamentInterRoundPendingResult(
+    tournamentId: string,
+    result: { currentRoundType: import('../network/createGameServerClient').TournamentRoundType; semifinalScoreA: number | null; semifinalScoreB: number | null },
+  ): void {
+    leaveAdminServerIfActive()
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    state.currentScreen = 'tournament-detail'
+    state.tournamentDetailId = tournamentId
+    state.tournamentDetail = null
+    state.tournamentInterRoundPendingResult = {
+      tournamentId,
+      currentRoundType: result.currentRoundType,
+      semifinalScoreA: result.semifinalScoreA,
+      semifinalScoreB: result.semifinalScoreB,
+      shownAt: Date.now(),
+    }
+    state.tournamentDetailLoading = true
+    state.tournamentDetailErrorText = null
+    state.tournamentDetailRequiresPassword = false
+    state.tournamentDetailPasswordDraft = ''
+    state.tournamentDetailVerifiedPassword = null
+    state.tournamentDetailUnlockErrorText = null
+    const targetUrl = `/tournaments/${encodeURIComponent(tournamentId)}`
+    if (window.location.pathname !== targetUrl) {
+      history.pushState(null, '', targetUrl)
+    }
+    render()
+    void fetchTournamentDetail(tournamentId)
+  }
+
+  function shouldKeepTournamentInterRoundPendingResult(
+    detail: TournamentDetailSnapshot,
+  ): boolean {
+    return state.tournamentInterRoundPendingResult !== null &&
+      state.tournamentInterRoundPendingResult.tournamentId === detail.tournamentId &&
+      (
+        detail.myActiveMatch === null ||
+        Date.now() - state.tournamentInterRoundPendingResult.shownAt < 3000
+      ) &&
+      detail.status !== 'finished' &&
+      detail.status !== 'cancelled' &&
+      detail.status !== 'admin_cancelled' &&
+      detail.status !== 'auto_cancelled' &&
+      detail.status !== 'failed' &&
+      detail.viewer.isParticipant &&
+      detail.viewer.entryStatus !== 'eliminated' &&
+      detail.viewer.entryStatus !== 'withdrawn' &&
+      detail.viewer.entryStatus !== 'refunded' &&
+      (
+        Date.now() - state.tournamentInterRoundPendingResult.shownAt < 3000 ||
+        detail.myInterRoundWaiting === null
+      )
   }
 
   async function fetchTournamentDetail(tournamentId: string): Promise<void> {
@@ -4521,6 +4786,36 @@ export function createLobbyFlowController(
     }
 
     state.tournamentDetail = result.tournament
+    if (!shouldKeepTournamentInterRoundPendingResult(result.tournament)) {
+      state.tournamentInterRoundPendingResult = null
+    }
+    if (state.tournamentInterRoundPendingResult !== null) {
+      options.onTournamentActiveMatchRecovered?.(null)
+      state.tournamentDetailRequiresPassword = false
+      state.tournamentDetailErrorText = null
+      render()
+      return
+    }
+    if (
+      result.tournament.myInterRoundWaiting !== null &&
+      result.tournament.myInterRoundWaiting.ownResultAcknowledged === false
+    ) {
+      options.onTournamentSemifinalResultAckNeeded?.(
+        result.tournament.myInterRoundWaiting.tournamentId,
+        result.tournament.myInterRoundWaiting.completedSemifinalMatchId,
+      )
+      scheduleTournamentInterRoundAckRefetch(
+        result.tournament.myInterRoundWaiting.tournamentId,
+        result.tournament.myInterRoundWaiting.completedSemifinalMatchId,
+      )
+    }
+    if (result.tournament.myInterRoundWaiting !== null) {
+      options.onTournamentActiveMatchRecovered?.(null)
+    } else if (result.tournament.myActiveMatch !== null && result.tournament.myActiveMatch.roundType === 'final') {
+      options.onTournamentAutoEnterMatch?.(result.tournament.myActiveMatch)
+    } else {
+      options.onTournamentActiveMatchRecovered?.(result.tournament.myActiveMatch)
+    }
     state.tournamentDetailRequiresPassword = false
     state.tournamentDetailErrorText = null
     render()
@@ -4556,6 +4851,37 @@ export function createLobbyFlowController(
     }
 
     state.tournamentDetail = result.tournament
+    if (!shouldKeepTournamentInterRoundPendingResult(result.tournament)) {
+      state.tournamentInterRoundPendingResult = null
+    }
+    if (state.tournamentInterRoundPendingResult !== null) {
+      options.onTournamentActiveMatchRecovered?.(null)
+      state.tournamentDetailRequiresPassword = false
+      state.tournamentDetailUnlockErrorText = null
+      state.tournamentDetailPasswordDraft = ''
+      render()
+      return
+    }
+    if (
+      result.tournament.myInterRoundWaiting !== null &&
+      result.tournament.myInterRoundWaiting.ownResultAcknowledged === false
+    ) {
+      options.onTournamentSemifinalResultAckNeeded?.(
+        result.tournament.myInterRoundWaiting.tournamentId,
+        result.tournament.myInterRoundWaiting.completedSemifinalMatchId,
+      )
+      scheduleTournamentInterRoundAckRefetch(
+        result.tournament.myInterRoundWaiting.tournamentId,
+        result.tournament.myInterRoundWaiting.completedSemifinalMatchId,
+      )
+    }
+    if (result.tournament.myInterRoundWaiting !== null) {
+      options.onTournamentActiveMatchRecovered?.(null)
+    } else if (result.tournament.myActiveMatch !== null && result.tournament.myActiveMatch.roundType === 'final') {
+      options.onTournamentAutoEnterMatch?.(result.tournament.myActiveMatch)
+    } else {
+      options.onTournamentActiveMatchRecovered?.(result.tournament.myActiveMatch)
+    }
     state.tournamentDetailRequiresPassword = false
     state.tournamentDetailUnlockErrorText = null
     state.tournamentDetailPasswordDraft = ''
@@ -8621,6 +8947,35 @@ export function createLobbyFlowController(
       return false
     }
 
+    if (message.type === 'tournament_feeder_score_progress' || message.type === 'tournament_feeder_match_completed') {
+      if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === message.tournamentId) {
+        if (message.type === 'tournament_feeder_score_progress') {
+          const patched = patchTournamentInterRoundSiblingProgress({
+            tournamentId: message.tournamentId,
+            matchId: message.matchId,
+            scoreA: message.scoreTeamA,
+            scoreB: message.scoreTeamB,
+            status: 'in_progress',
+            progressLabel: 'Играе се',
+          })
+          if (patched) return false
+        }
+        if (message.type === 'tournament_feeder_match_completed') {
+          patchTournamentInterRoundSiblingProgress({
+            tournamentId: message.tournamentId,
+            matchId: message.matchId,
+            scoreA: message.finalScoreTeamA,
+            scoreB: message.finalScoreTeamB,
+            status: 'completed',
+            winnerTeamId: message.winnerTeamId,
+            progressLabel: 'Завършен',
+          })
+        }
+        void fetchTournamentDetail(message.tournamentId)
+      }
+      return false
+    }
+
     if (message.type === 'guest_trial_error') {
       // guest_trial_limit_reached е нормален state (лимитът е изчерпан), не unexpected
       // грешка — popup-ът трябва directно да превключи на exhausted state (heading +
@@ -9398,6 +9753,7 @@ export function createLobbyFlowController(
       stopWaitingRoomActivity()
       clearPrivateRoomCountdownLoop()
       clearServerRoomSnapshot()
+      clearTournamentInterRoundWinnerMinimumTimer()
       resetFinalFillSequence()
       doHideInitialOverlay()
     },
@@ -9469,6 +9825,8 @@ export function createLobbyFlowController(
     },
     startMatchmaking,
     resetToLobby,
+    showTournamentDetail,
+    showTournamentInterRoundPendingResult,
     openAuthModal,
     suspendLobbyChatForActiveRoom,
     forceLobbyChatResubscribeIfOnLobbyScreen,

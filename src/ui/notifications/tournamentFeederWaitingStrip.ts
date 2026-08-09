@@ -8,6 +8,7 @@ function escapeHtml(value: string): string {
 }
 
 export type TournamentFeederWaitingState = {
+  tournamentId: string
   label: string
   scoreA: number | null
   scoreB: number | null

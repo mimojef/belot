@@ -457,11 +457,38 @@ await check('[37] Няма WebSocket tournament protocol в тази фича', 
 // notice) — /tournaments и /tournaments/<id> показват само "в разработка"
 // съобщение, докато admin панелът и реалния UI код (по-долу в същия файл,
 // зад guard-а) остават непокътнати. ──
-await check('[MAINT-1] Maintenance guard флагът съществува и е включен', () => {
+await check('[MAINT-1] Maintenance guard флагът съществува и е production-safe (build-time PROD gate)', () => {
   assert(
-    tournamentsScreenSource.includes('const TOURNAMENTS_PUBLIC_MAINTENANCE_MODE = true'),
-    'Липсва или е изключен TOURNAMENTS_PUBLIC_MAINTENANCE_MODE',
+    tournamentsScreenSource.includes('const TOURNAMENTS_PUBLIC_MAINTENANCE_MODE = import.meta.env?.PROD === true'),
+    'Липсва или guard-ът вече не е build-time production-safe форма (import.meta.env?.PROD === true)',
   )
+})
+
+// tournament-resume migration (виж docs/local-tournament-test.md): гейтът
+// вече не е hardcoded true — активен е само когато import.meta.env.PROD е
+// СТРОГО true, което Vite гарантира единствено при `vite build` (истинския
+// production bundle). Vite dev server и server/scripts/check*.ts
+// (изпълнявани directly през tsx/Node, където import.meta.env изобщо не
+// съществува) по default виждат реалния UI — safe default е "не блокирай",
+// не "блокирай", при непознат/липсващ сигнал. Целта на този check е да
+// заключи, че bypass-ът остава build-time-only Vite сигнал, а не някакъв
+// runtime/client-controlled toggle (query param, localStorage, cookie,
+// header), който би могъл да отключи turnament UI-я в production.
+await check('[MAINT-1b] Dev bypass-ът е build-time Vite сигнал, не runtime/client-controlled toggle', () => {
+  const guardLine = tournamentsScreenSource
+    .split('\n')
+    .find((line) => line.includes('const TOURNAMENTS_PUBLIC_MAINTENANCE_MODE ='))
+  assert(guardLine !== undefined, 'Не е намерен редът с декларацията на TOURNAMENTS_PUBLIC_MAINTENANCE_MODE')
+  assert(
+    guardLine!.includes('import.meta.env'),
+    'Guard-ът вече не чете import.meta.env (Vite build-time сигнал)',
+  )
+  for (const unsafePattern of ['location.search', 'URLSearchParams', 'localStorage', 'sessionStorage', 'document.cookie']) {
+    assert(
+      !guardLine!.includes(unsafePattern),
+      `Guard-ът съдържа потенциално client-controlled сигнал "${unsafePattern}" — недопустимо за production safety`,
+    )
+  }
 })
 
 await check('[MAINT-2] renderTournamentsScreen прави ранен return зад maintenance guard-а', () => {

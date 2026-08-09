@@ -8,14 +8,28 @@ import type {
   TournamentStartMode,
 } from '../network/createGameServerClient'
 import type { LobbyScreenState } from './renderLobbyScreen'
+import { getNextTournamentRoundLabel, getTournamentRoundLabel } from '../tournaments/tournamentRoundLabels'
 
 // Временен публичен maintenance guard (виж fix(tournaments): show development
 // notice) — НЕ трие/променя реалната turnament UI логика по-долу в този файл,
-// само я прескача с ранен return. Смени на false, за да върнеш публичния
-// tournaments UI, без да пипаш нищо друго в този файл. Admin tournament
-// панелът (src/app/adminTournaments/) е напълно отделен renderer/route и не
-// се засяга от този флаг.
-const TOURNAMENTS_PUBLIC_MAINTENANCE_MODE = true
+// само я прескача с ранен return. Admin tournament панелът
+// (src/app/adminTournaments/) е напълно отделен renderer/route и не се
+// засяга от този флаг.
+//
+// import.meta.env?.PROD === true вместо hardcoded true: production build
+// (`vite build`) е ЕДИНСТВЕНИЯТ контекст, в който import.meta.env.PROD е
+// литерално true (Vite build-time constant, dead-code-eliminate-ва
+// обратния клон) — никой runtime/client-controlled сигнал (query param,
+// browser persistent storage, header) не може да го отключи. Default-ът е "false"
+// (реален UI), не "true" (maintenance), при липсващ/непознат сигнал —
+// нарочно, за да работят коректно и Vite dev server-ът (`npm run dev`,
+// import.meta.env.PROD=false), И server/scripts/check*.ts, изпълнявани
+// directly през tsx/Node, където import.meta.env изобщо не съществува
+// (`?.` предпазва от TypeError; `undefined === true` е false, т.е. safe
+// default към реалния UI, не към maintenance). Ако някога потрябва РЪЧНО
+// да се форсира maintenance notice-ът локално — смени експлицитно на
+// `true` тук.
+const TOURNAMENTS_PUBLIC_MAINTENANCE_MODE = import.meta.env?.PROD === true
 
 function renderTournamentsMaintenanceNotice(): string {
   return `
@@ -543,7 +557,7 @@ function renderTournamentMatchAssignmentCallout(t: TournamentDetailSnapshot): st
         <div style="font-size:14px;font-weight:900;color:#dcfce7;">${heading}</div>
         <div style="font-size:12px;font-weight:700;color:rgba(220,252,231,0.72);margin-top:3px;">${escapeHtml(t.name)}</div>
       </div>
-      <button type="button" data-tournament-enter-active-match="1" data-room-id="${escapeHtml(assignment.roomId)}" data-reconnect-token="${escapeHtml(token)}" ${token ? '' : 'disabled'} style="height:38px;border:0;border-radius:8px;padding:0 14px;background:${token ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.12)'};color:${token ? '#080808' : 'rgba(255,255,255,0.45)'};font-size:13px;font-weight:900;cursor:${token ? 'pointer' : 'default'};">Влез в масата</button>
+      <button type="button" data-tournament-enter-active-match="1" data-room-id="${escapeHtml(assignment.roomId)}" data-reconnect-token="${escapeHtml(token)}" ${token ? '' : 'disabled'} style="height:38px;border:0;border-radius:8px;padding:0 14px;background:${token ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.12)'};color:${token ? '#080808' : 'rgba(255,255,255,0.45)'};font-size:13px;font-weight:900;cursor:${token ? 'pointer' : 'default'};">Продължи играта</button>
     </div>
   `
 }
@@ -719,9 +733,152 @@ function renderTournamentTeamsList(t: TournamentDetailSnapshot): string {
   `
 }
 
+function formatTournamentInterRoundScore(scoreA: number | null, scoreB: number | null): string {
+  return scoreA !== null && scoreB !== null ? `${scoreA} : ${scoreB}` : '0 : 0'
+}
+
+function renderTournamentInterRoundTeam(team: TournamentDetailSnapshot['teams'][number], label: string): string {
+  return `
+    <div style="border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:10px;min-width:0;background:rgba(13,13,13,0.92);">
+      <div style="font-size:12px;font-weight:900;color:#d4a520;margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(label)}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:7px;min-width:0;">
+        ${team.members.map((member) => `
+          <div style="display:flex;align-items:center;gap:6px;min-width:0;max-width:100%;">
+            <span style="width:22px;height:22px;border-radius:999px;background:#151515;border:1px solid rgba(212,165,32,0.28);display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:10px;font-weight:900;flex-shrink:0;overflow:hidden;">${member.avatarUrl ? `<img src="${escapeHtml(member.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(member.displayName.slice(0, 1).toUpperCase())}</span>
+            <span style="font-size:12px;color:#fff;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;">${escapeHtml(member.displayName)}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `
+}
+
+function renderTournamentInterRoundOverlay(content: string, marker = ''): string {
+  return `
+    <section data-tournament-inter-round-overlay="1" ${marker} style="
+      min-height:calc(100vh - 96px);
+      width:100%;
+      box-sizing:border-box;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:16px;
+      background:radial-gradient(circle at 50% 18%, rgba(34,197,94,0.16), transparent 30%), linear-gradient(180deg,#052013 0%,#07120d 54%,#050806 100%);
+      font-family:Inter, system-ui, sans-serif;
+    ">
+      <div style="
+        width:min(92vw, 620px);
+        max-height:calc(100dvh - 118px);
+        overflow:auto;
+        box-sizing:border-box;
+        border:1px solid rgba(212,165,32,0.32);
+        border-radius:8px;
+        padding:clamp(18px,3vw,26px);
+        background:rgba(15,23,18,0.96);
+        color:#f8fafc;
+        box-shadow:0 24px 70px rgba(2,6,23,0.48);
+        text-align:center;
+      ">
+        ${content}
+      </div>
+    </section>
+  `
+}
+
+function renderTournamentInterRoundWaitingScreen(t: TournamentDetailSnapshot): string {
+  const waiting = t.myInterRoundWaiting
+  if (waiting === null || waiting === undefined) return ''
+  const labelMap = buildTournamentTeamLabelMap(t.teams)
+  const sibling = waiting.siblingSemifinal
+  const score = formatTournamentInterRoundScore(sibling.scoreA, sibling.scoreB)
+  const siblingWinner = sibling.winnerTeamId !== null
+    ? (labelMap.get(sibling.winnerTeamId) ?? 'Финалист')
+    : null
+  const currentRound = getTournamentRoundLabel(waiting.currentRoundType)
+  const nextRound = getTournamentRoundLabel(waiting.nextRoundType)
+  const opponentTeam = sibling.winnerTeamId !== null
+    ? sibling.winnerTeamId === sibling.teamA.teamId ? sibling.teamA : sibling.teamB
+    : null
+  const countdownOffsetMs = waiting.finalStartAt !== null
+    ? Date.parse(waiting.finalStartAt) - Date.parse(waiting.serverNow)
+    : null
+  const countdownSeconds = countdownOffsetMs !== null && Number.isFinite(countdownOffsetMs)
+    ? Math.max(0, Math.ceil(countdownOffsetMs / 1000))
+    : null
+  const body = sibling.status !== 'completed'
+    ? `
+      <div style="font-size:20px;font-weight:900;color:#ffffff;">Изчаква се другият ${escapeHtml(currentRound.lower)}</div>
+      <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);">Победителят ще бъде вашият противник в ${escapeHtml(nextRound.lowerDefinite)}.</div>
+    `
+    : waiting.finalStartAt !== null
+      ? `
+        <div style="font-size:18px;font-weight:900;color:#ffffff;">В ${escapeHtml(nextRound.lowerDefinite)} ще играете срещу:</div>
+        ${opponentTeam !== null ? `<div style="margin-top:10px;">${renderTournamentInterRoundTeam(opponentTeam, siblingWinner ?? 'Противник')}</div>` : ''}
+        <div style="margin-top:12px;font-size:13px;font-weight:800;color:rgba(255,255,255,0.68);">Резултат от техния ${escapeHtml(currentRound.lower)}: ${escapeHtml(score)}</div>
+        <div style="margin-top:16px;font-size:18px;font-weight:900;color:#ffffff;">Мачът започва след</div>
+        <div data-tournament-inter-round-countdown="1" data-final-start-at="${escapeHtml(waiting.finalStartAt)}" data-server-now="${escapeHtml(waiting.serverNow)}" style="font-size:44px;line-height:1;font-weight:900;color:#f4c95b;letter-spacing:0;">00:${String(countdownSeconds ?? 0).padStart(2, '0')}</div>
+      `
+      : `
+        <div style="font-size:18px;font-weight:900;color:#ffffff;">Изчаква се другият финалист</div>
+        <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);">Другият финалист още разглежда резултата.</div>
+      `
+  return renderTournamentInterRoundOverlay(`
+      <div data-tournament-inter-round-waiting="1" style="display:grid;gap:14px;">
+        <div>
+          <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(t.name)}</div>
+          <div style="margin-top:8px;font-size:22px;font-weight:900;color:#ffffff;">Класирахте се за ${escapeHtml(nextRound.lowerDefinite)}.</div>
+        </div>
+        ${body}
+        ${sibling.status !== 'completed' ? `
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;">
+            ${renderTournamentInterRoundTeam(sibling.teamA, labelMap.get(sibling.teamA.teamId) ?? 'Отбор A')}
+            ${renderTournamentInterRoundTeam(sibling.teamB, labelMap.get(sibling.teamB.teamId) ?? 'Отбор B')}
+          </div>
+        ` : ''}
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
+          <div>
+            <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(255,255,255,0.45);">Друг ${escapeHtml(currentRound.lower)}</div>
+            <div data-tournament-inter-round-status="1" data-match-id="${escapeHtml(sibling.matchId)}" style="margin-top:4px;font-size:13px;font-weight:800;color:rgba(255,255,255,0.76);">${escapeHtml(sibling.progressLabel || (sibling.status === 'completed' ? 'Завършен' : 'Играе се'))}</div>
+          </div>
+          <div data-tournament-inter-round-score="1" data-match-id="${escapeHtml(sibling.matchId)}" style="font-size:24px;font-weight:900;color:#ffffff;">${escapeHtml(score)}</div>
+        </div>
+        ${siblingWinner !== null ? `<div style="font-size:13px;font-weight:900;color:#86efac;">Класиран отбор: ${escapeHtml(siblingWinner)}</div>` : ''}
+      </div>
+    `)
+}
+
+function renderTournamentInterRoundPendingScreen(state: LobbyScreenState): string {
+  const pending = state.tournamentInterRoundPendingResult
+  if (pending == null) return ''
+  const score = formatTournamentInterRoundScore(pending.semifinalScoreA, pending.semifinalScoreB)
+  const currentRound = getTournamentRoundLabel(pending.currentRoundType)
+  const nextRound = getNextTournamentRoundLabel(pending.currentRoundType)
+  return renderTournamentInterRoundOverlay(`
+      <div data-tournament-inter-round-pending="1" style="display:grid;gap:14px;">
+        <div style="font-size:26px;font-weight:900;color:#22c55e;">Спечелихте ${escapeHtml(currentRound.lowerDefinite)}!</div>
+        <div style="font-size:16px;font-weight:900;color:#dbeafe;">${nextRound !== null ? `Класирахте се за ${escapeHtml(nextRound.lowerDefinite)}.` : 'Продължавате напред.'}</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,0.08);border-bottom:1px solid rgba(255,255,255,0.08);padding:12px 0;">
+          <div style="font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(255,255,255,0.45);">Вашият ${escapeHtml(currentRound.lower)}</div>
+          <div style="font-size:28px;font-weight:900;color:#ffffff;">${escapeHtml(score)}</div>
+        </div>
+        <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);">Подготвяме информацията за ${nextRound !== null ? escapeHtml(nextRound.lowerDefinite) : 'следващия кръг'}...</div>
+      </div>
+    `, 'data-tournament-inter-round-result="1"')
+}
+
 export function renderTournamentDetailScreen(state: LobbyScreenState): string {
   if (TOURNAMENTS_PUBLIC_MAINTENANCE_MODE) {
     return renderTournamentsMaintenanceNotice()
+  }
+
+  if (
+    state.tournamentInterRoundPendingResult != null &&
+    (
+      state.tournamentDetail?.myInterRoundWaiting == null ||
+      Date.now() - state.tournamentInterRoundPendingResult.shownAt < 3000
+    )
+  ) {
+    return renderTournamentInterRoundPendingScreen(state)
   }
 
   if (state.tournamentDetailLoading) {
@@ -761,6 +918,10 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
   const t: TournamentDetailSnapshot | null = state.tournamentDetail
   if (t === null) {
     return `<section style="padding:0 4px;"><div style="min-height:320px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.5);font-size:14px;">Турнирът не е намерен.</div></section>`
+  }
+
+  if (t.myInterRoundWaiting !== null && t.myInterRoundWaiting !== undefined) {
+    return renderTournamentInterRoundWaitingScreen(t)
   }
 
   const avatarLetter = t.creator.displayName.slice(0, 1).toUpperCase()

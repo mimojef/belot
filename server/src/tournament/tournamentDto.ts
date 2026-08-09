@@ -115,6 +115,7 @@ export type TournamentMatchDto = {
   liveScoreTeamA: number | null
   liveScoreTeamB: number | null
   progressLabel: string
+  finalStartAt: string | null
   startedAt: string | null
   completedAt: string | null
 }
@@ -193,8 +194,32 @@ export type TournamentDetailDto = TournamentSummaryDto & {
   teams: TournamentTeamDto[]
   rounds: TournamentRoundDto[]
   myActiveMatch: TournamentMatchAssignment | null
+  myInterRoundWaiting: TournamentInterRoundWaitingDto | null
   incomingPartnerInvite: TournamentPartnerInviteDto | null
   outgoingPartnerInvite: TournamentPartnerInviteDto | null
+}
+
+export type TournamentInterRoundWaitingDto = {
+  tournamentId: string
+  completedSemifinalMatchId: string
+  currentRoundType: TournamentRoundType
+  nextRoundType: TournamentRoundType
+  siblingSemifinal: {
+    matchId: string
+    teamA: TournamentTeamDto
+    teamB: TournamentTeamDto
+    scoreA: number | null
+    scoreB: number | null
+    status: TournamentMatchStatus
+    winnerTeamId: string | null
+    progressLabel: string
+  }
+  ownResultAcknowledged: boolean
+  otherFinalistReady: boolean
+  finalMatchId: string | null
+  finalRoomId: string | null
+  finalStartAt: string | null
+  serverNow: string
 }
 
 export function computeTournamentPrizePreview(
@@ -357,6 +382,7 @@ export function toTournamentDetailDto(input: ToTournamentSummaryDtoInput): Tourn
     teams: [],
     rounds: [],
     myActiveMatch: null,
+    myInterRoundWaiting: null,
     incomingPartnerInvite: null,
     outgoingPartnerInvite: null,
   }
@@ -427,6 +453,7 @@ export function buildTournamentRoundDtos(input: {
           liveScoreTeamA: liveScore?.teamA ?? null,
           liveScoreTeamB: liveScore?.teamB ?? null,
           progressLabel,
+          finalStartAt: match.finalStartAt,
           startedAt: match.startedAt,
           completedAt: match.completedAt,
         }
@@ -481,7 +508,7 @@ export function buildTeamDtos(input: {
     const members = input.entries
       .filter((entry) => (
         entry.teamId === team.teamId &&
-        (entry.status === 'confirmed' || entry.status === 'finalist' || entry.status === 'champion')
+        (entry.status === 'confirmed' || entry.status === 'finalist' || entry.status === 'champion' || entry.status === 'eliminated')
       ))
       .map((entry) => {
         const profile = input.getPublicProfile(entry.profileId)

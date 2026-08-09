@@ -7,6 +7,7 @@ import {
   type RoomGameSnapshot,
   type RoomSeatSnapshot,
   type RoomSnapshotMessage,
+  type TournamentRoundType,
   type RoomWinningBidSnapshot,
   type Seat,
   type ServerMessage,
@@ -165,11 +166,14 @@ export function createActiveRoomFlowController(
   const PHRASE_BUBBLE_DURATION_MS = 4500
   const EMOJI_COUNT = 24
   const SCORING_VISUAL_COUNTDOWN_MS = 5000
+  const TOURNAMENT_ROUND_RESULT_AUTO_TRANSITION_MS = 2500
   const playingCache: PlayingUiCache = createPlayingUiCache()
   let lastKnownWinningBid: NonNullable<RoomWinningBidSnapshot> | null = null
   let scoringCountdownIntervalId: number | null = null
   let scoringVisualCountdownKey: string | null = null
   let scoringVisualCountdownStartedAt = 0
+  let stablePhaseRenderKey: string | null = null
+  const playedScoringPresentationKeys = new Set<string>()
   let reactionCountdownAudioIntervalId: number | null = null
   let matchEndedSoundPlayed = false
   let matchEndedPrizeAnimated = false
@@ -190,6 +194,9 @@ export function createActiveRoomFlowController(
   let tournamentRoundResultFeederScoreA: number | null = null
   let tournamentRoundResultFeederScoreB: number | null = null
   let tournamentRoundResultFetchInFlight = false
+  let tournamentRoundResultAutoTransitionTimerId: number | null = null
+  let tournamentRoundResultAutoTransitionKey: string | null = null
+  let tournamentRoundResultCompletedTransitionKey: string | null = null
 
   function getSeatGender(seat: Seat): RoomSeatSnapshot['gender'] {
     return activeRoomState?.seats.find((entry) => entry.seat === seat)?.gender ?? null
@@ -229,6 +236,7 @@ export function createActiveRoomFlowController(
       clearTimeout(matchEndedPrizeAnimatedTimerId)
       matchEndedPrizeAnimatedTimerId = null
     }
+    clearTournamentRoundResultAutoTransitionTimer()
   }
 
   function startMatchEndedCountdown(): void {
@@ -240,13 +248,23 @@ export function createActiveRoomFlowController(
     }, 1000)
   }
 
+  function clearTournamentRoundResultAutoTransitionTimer(): void {
+    if (tournamentRoundResultAutoTransitionTimerId !== null) {
+      clearTimeout(tournamentRoundResultAutoTransitionTimerId)
+      tournamentRoundResultAutoTransitionTimerId = null
+    }
+    tournamentRoundResultAutoTransitionKey = null
+  }
+
   function clearTournamentRoundResultState(): void {
+    clearTournamentRoundResultAutoTransitionTimer()
     tournamentRoundResultMatchId = null
     tournamentRoundResultFeederLabel = null
     tournamentRoundResultFeederMatchId = null
     tournamentRoundResultFeederStatus = null
     tournamentRoundResultFeederScoreA = null
     tournamentRoundResultFeederScoreB = null
+    tournamentRoundResultCompletedTransitionKey = null
   }
 
   // Намира "sibling" мача от СЪЩИЯ round (двойката, чийто победител определя
@@ -288,6 +306,177 @@ export function createActiveRoomFlowController(
           ? `${tournamentRoundResultFeederScoreA} : ${tournamentRoundResultFeederScoreB} — мачът е в ход`
           : 'Мачът е в ход'
         : 'Изчаква се...'
+  }
+
+  function getTournamentRoundResultTransitionContext(): {
+    key: string
+    tournamentId: string
+    semifinalMatchId: string
+    currentRoundType: TournamentRoundType
+    wonRound: boolean
+    semifinalScoreA: number | null
+    semifinalScoreB: number | null
+    feeder: { tournamentId: string; label: string; scoreA: number | null; scoreB: number | null; status: 'in_progress' | 'completed' } | null
+  } | null {
+    if (
+      activeRoomState === null ||
+      !activeRoomState.isTournamentMatchOrigin ||
+      activeRoomState.tournamentId === null ||
+      activeRoomState.tournamentRoundType === null ||
+      activeRoomState.tournamentRoundType === 'final' ||
+      activeRoomState.tournamentMatchId === null ||
+      activeRoomState.game?.matchEnded == null
+    ) {
+      return null
+    }
+    const tournamentId = activeRoomState.tournamentId
+    const localTeam = activeRoomState.seat === 'bottom' || activeRoomState.seat === 'top' ? 'A' : 'B'
+    const wonRound = activeRoomState.game.matchEnded.winnerTeam === localTeam
+    const feeder = tournamentRoundResultFeederLabel !== null
+      ? {
+          tournamentId,
+          label: tournamentRoundResultFeederLabel,
+          scoreA: tournamentRoundResultFeederScoreA,
+          scoreB: tournamentRoundResultFeederScoreB,
+          status: tournamentRoundResultFeederStatus ?? 'in_progress',
+        }
+      : null
+    return {
+      key: `${activeRoomState.roomId}:${activeRoomState.tournamentMatchId}:${activeRoomState.game.matchEnded.winnerTeam}`,
+      tournamentId,
+      semifinalMatchId: activeRoomState.tournamentMatchId,
+      currentRoundType: activeRoomState.tournamentRoundType,
+      wonRound,
+      semifinalScoreA: activeRoomState.game.matchEnded.finalScore.teamA,
+      semifinalScoreB: activeRoomState.game.matchEnded.finalScore.teamB,
+      feeder,
+    }
+  }
+
+  function completeTournamentRoundResultTransition(expectedKey?: string): boolean {
+    const context = getTournamentRoundResultTransitionContext()
+    if (context === null) return false
+    if (expectedKey !== undefined && context.key !== expectedKey) return false
+    if (!context.wonRound) return false
+    if (tournamentRoundResultCompletedTransitionKey === context.key) return false
+
+    tournamentRoundResultCompletedTransitionKey = context.key
+    clearTournamentRoundResultAutoTransitionTimer()
+    options.acknowledgeTournamentSemifinalResult(context.tournamentId, context.semifinalMatchId)
+    returnToLobbyFromMatchEnded()
+    options.onEnterWaitingForNextTournamentRound(context.feeder, context.tournamentId, {
+      currentRoundType: context.currentRoundType,
+      semifinalScoreA: context.semifinalScoreA,
+      semifinalScoreB: context.semifinalScoreB,
+    })
+    return true
+  }
+
+  function continueFromTournamentRoundResultButton(): boolean {
+    const context = getTournamentRoundResultTransitionContext()
+    if (context === null) return false
+    if (context.wonRound) {
+      return completeTournamentRoundResultTransition(context.key)
+    }
+    if (tournamentRoundResultCompletedTransitionKey === context.key) return false
+    tournamentRoundResultCompletedTransitionKey = context.key
+    clearTournamentRoundResultAutoTransitionTimer()
+    returnToLobbyFromMatchEnded()
+    return true
+  }
+
+  function ensureTournamentRoundResultAutoTransitionTimer(): void {
+    const context = getTournamentRoundResultTransitionContext()
+    if (context === null || !context.wonRound) {
+      clearTournamentRoundResultAutoTransitionTimer()
+      return
+    }
+    if (
+      tournamentRoundResultAutoTransitionTimerId !== null &&
+      tournamentRoundResultAutoTransitionKey === context.key
+    ) {
+      return
+    }
+
+    clearTournamentRoundResultAutoTransitionTimer()
+    tournamentRoundResultAutoTransitionKey = context.key
+    tournamentRoundResultAutoTransitionTimerId = window.setTimeout(() => {
+      completeTournamentRoundResultTransition(context.key)
+    }, TOURNAMENT_ROUND_RESULT_AUTO_TRANSITION_MS)
+  }
+
+  function shouldEnterTournamentInterRoundWaitingImmediately(): boolean {
+    const context = getTournamentRoundResultTransitionContext()
+    return context !== null && context.wonRound
+  }
+
+  function continueFromTournamentFinalResult(tournamentId: string): void {
+    returnToLobbyFromMatchEnded()
+    options.onTournamentFinalResultContinue(tournamentId)
+  }
+
+  function renderTournamentFinalResultScreen(input: {
+    mobileLayoutAttribute: string
+    tableBackground: string
+  }): boolean {
+    if (
+      activeRoomState === null ||
+      activeRoomState.game === null ||
+      activeRoomState.game.matchEnded === null ||
+      !activeRoomState.isTournamentMatchOrigin ||
+      activeRoomState.tournamentRoundType !== 'final' ||
+      activeRoomState.tournamentId === null
+    ) {
+      return false
+    }
+
+    const matchEnded = activeRoomState.game.matchEnded
+    const localTeam = activeRoomState.seat === 'bottom' || activeRoomState.seat === 'top' ? 'A' : 'B'
+    const wonFinal = matchEnded.winnerTeam === localTeam
+    const finalScore = matchEnded.finalScore ?? activeRoomState.game.score.match
+    const myScore = localTeam === 'A' ? finalScore.teamA : finalScore.teamB
+    const opponentScore = localTeam === 'A' ? finalScore.teamB : finalScore.teamA
+    const prizeAmount = matchEnded.awardedPrizeAmount
+    const prizeText = prizeAmount !== null && prizeAmount > 0
+      ? `Лична награда: ${prizeAmount.toLocaleString('bg-BG')} жълтици.`
+      : 'Наградата се обработва.'
+    const tournamentId = activeRoomState.tournamentId
+
+    cuttingVisualCountdown.resetCuttingVisualCountdownState()
+    clearMatchEndedCountdown()
+    if (!matchEndedSoundPlayed) {
+      matchEndedSoundPlayed = true
+      options.gameAudio?.playMatchEnded()
+    }
+
+    options.root.innerHTML = `
+      <div
+        ${input.mobileLayoutAttribute}
+        style="
+          min-height:100vh;width:100%;box-sizing:border-box;display:flex;align-items:center;justify-content:center;
+          overflow:hidden;background:${input.tableBackground};font-family:Inter, system-ui, sans-serif;
+        "
+      >
+        <div style="
+          width:min(92vw, 500px);max-height:calc(100dvh - 32px);overflow:auto;box-sizing:border-box;
+          border:1px solid ${wonFinal ? 'rgba(34,197,94,0.45)' : 'rgba(250,204,21,0.38)'};
+          border-radius:8px;padding:24px;background:rgba(15,23,42,0.94);color:#f8fafc;
+          box-shadow:0 24px 70px rgba(2,6,23,0.45);text-align:center;
+        ">
+          <div style="font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:#93c5fd;">Финал</div>
+          <div style="margin-top:10px;font-size:28px;font-weight:900;color:${wonFinal ? '#22c55e' : '#facc15'};">${wonFinal ? 'Спечелихте турнира!' : 'Завършихте на второ място'}</div>
+          <div style="margin-top:12px;font-size:20px;font-weight:900;">${myScore} : ${opponentScore}</div>
+          <div style="margin-top:12px;font-size:14px;font-weight:800;color:${prizeAmount !== null && prizeAmount > 0 ? '#dcfce7' : '#fde68a'};">${escapeHtml(prizeText)}</div>
+          <div style="margin-top:20px;">
+            <button type="button" data-tournament-final-result-detail="1" style="height:44px;padding:0 20px;border:1px solid rgba(255,255,255,0.22);border-radius:8px;background:rgba(255,255,255,0.06);color:#f8fafc;font-size:14px;font-weight:900;cursor:pointer;">Към турнира</button>
+          </div>
+        </div>
+      </div>
+    `
+    options.root.querySelector('[data-tournament-final-result-detail]')?.addEventListener('click', () => {
+      continueFromTournamentFinalResult(tournamentId)
+    })
+    return true
   }
 
   async function loadTournamentRoundResultFeederInfo(tournamentId: string, completedMatchId: string): Promise<void> {
@@ -1111,6 +1300,65 @@ export function createActiveRoomFlowController(
     scoringCountdownIntervalId = null
     scoringVisualCountdownKey = null
     scoringVisualCountdownStartedAt = 0
+  }
+
+  function clearStablePhaseRenderKey(): void {
+    stablePhaseRenderKey = null
+  }
+
+  function clearScoringPresentationGuards(): void {
+    playedScoringPresentationKeys.clear()
+  }
+
+  function clearRenderStabilityGuards(): void {
+    clearStablePhaseRenderKey()
+    clearScoringPresentationGuards()
+  }
+
+  function getScoringPresentationKey(): string | null {
+    const game = activeRoomState?.game ?? null
+    const scoring = game?.scoring ?? null
+    if (activeRoomState === null || game === null || scoring === null) {
+      return null
+    }
+
+    return JSON.stringify({
+      roomId: activeRoomState.roomId,
+      phase: game.authoritativePhase,
+      winningBid: scoring.winningBid,
+      rawHandPoints: scoring.rawHandPoints,
+      rawHandTricksWon: scoring.rawHandTricksWon,
+      declarationPoints: scoring.declarationPoints,
+      belotePoints: scoring.belotePoints,
+      sumPoints: scoring.sumPoints,
+      officialRoundPoints: scoring.officialRoundPoints,
+      matchTotals: scoring.matchTotals,
+      carryOver: scoring.carryOver,
+      outcomeLabel: scoring.outcomeLabel,
+      outcomeShortLabel: scoring.outcomeShortLabel,
+      counterMultiplier: scoring.counterMultiplier,
+      declarations: game.declarations.map((declaration) => ({
+        seat: declaration.seat,
+        team: declaration.team,
+        type: declaration.type,
+        points: declaration.points,
+        cardIds: declaration.cardIds,
+        announced: declaration.announced,
+        valid: declaration.valid,
+      })),
+    })
+  }
+
+  function shouldAnimateScoringPresentation(): boolean {
+    const key = getScoringPresentationKey()
+    if (key === null) {
+      return false
+    }
+    if (playedScoringPresentationKeys.has(key)) {
+      return false
+    }
+    playedScoringPresentationKeys.add(key)
+    return true
   }
 
   function getScoringVisualCountdownKey(): string | null {
@@ -2620,15 +2868,25 @@ export function createActiveRoomFlowController(
         </div>
       `
       options.root.querySelector('[data-tournament-walkover-continue]')?.addEventListener('click', () => {
-        if (wonByWalkover && !isFinalRound && tournamentRoundResultFeederLabel !== null) {
-          options.onEnterWaitingForNextTournamentRound({
-            label: tournamentRoundResultFeederLabel,
-            scoreA: tournamentRoundResultFeederScoreA,
-            scoreB: tournamentRoundResultFeederScoreB,
-            status: tournamentRoundResultFeederStatus ?? 'in_progress',
+        const tournamentId = activeRoomState?.tournamentId ?? null
+        const currentRoundType = activeRoomState?.tournamentRoundType ?? null
+        const feeder = wonByWalkover && !isFinalRound && tournamentId !== null && tournamentRoundResultFeederLabel !== null
+          ? {
+              tournamentId,
+              label: tournamentRoundResultFeederLabel,
+              scoreA: tournamentRoundResultFeederScoreA,
+              scoreB: tournamentRoundResultFeederScoreB,
+              status: tournamentRoundResultFeederStatus ?? 'in_progress' as const,
+            }
+          : null
+        returnToLobbyFromMatchEnded()
+        if (tournamentId !== null && currentRoundType !== null && wonByWalkover && !isFinalRound) {
+          options.onEnterWaitingForNextTournamentRound(feeder, tournamentId, {
+            currentRoundType,
+            semifinalScoreA: null,
+            semifinalScoreB: null,
           })
         }
-        returnToLobbyFromMatchEnded()
       })
       return
     }
@@ -2675,6 +2933,59 @@ export function createActiveRoomFlowController(
           isLocalPlayerCutter,
         cutAnimation: cutAnimationForRender,
       })
+      const cuttingPanelsHtml = createCuttingSeatPanelsHtml({
+        seats: activeRoomState.seats,
+        localSeat: activeRoomState.seat,
+        dealerSeat: dealerSeatForRender,
+        cutterSeat: cutterSeatForRender,
+        cuttingCountdownRemainingMs: cuttingCountdownRemainingMsForRender,
+        countdownKey: cutterSeatForRender !== null &&
+          cuttingCountdownRemainingMsForRender !== null &&
+          activeRoomState.game?.timerDeadlineAt != null
+          ? `c:${cutterSeatForRender}:${activeRoomState.game.timerDeadlineAt}`
+          : null,
+        panelScale: stageScale,
+        escapeHtml,
+        dealtHands: null,
+        bidBubbles: isShowingNextRoundPause ? bidBubblesForRender : null,
+        emojiBubbles: getEmojiBubblesForRender(),
+        phraseBubbles: getPhraseBubblesForRender(),
+        tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
+      })
+      const cuttingStableRenderKey = cutAnimationForRender === null
+        ? JSON.stringify({
+            phase: 'cutting',
+            roomId: activeRoomState.roomId,
+            mobileLayoutAttribute,
+            stageScale: stageScale.toFixed(3),
+            scaledStageWidth,
+            scaledStageHeight,
+            dealerSeat: dealerSeatForRender,
+            cutterSeat: cutterSeatForRender,
+            cutterDisplayName: cutterDisplayNameForRender,
+            deckCount: cuttingSnapshotForRender.deckCount,
+            selectedCutIndex: cuttingSnapshotForRender.selectedCutIndex,
+            canSubmitCut: cuttingSnapshotForRender.canSubmitCut,
+            isLocalPlayerCutter,
+            isCutSubmissionPending,
+            tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
+          })
+        : null
+
+      if (
+        cuttingStableRenderKey !== null &&
+        stablePhaseRenderKey === cuttingStableRenderKey &&
+        options.root.querySelector('[data-active-room-phase="cutting"]') !== null
+      ) {
+        syncSeatPanels(cuttingPanelsHtml)
+        syncMobilePhraseOverlay({
+          seats: activeRoomState.seats,
+          localSeat: activeRoomState.seat,
+          phraseBubbles: getPhraseBubblesForRender(),
+          panelScale: stageScale,
+        })
+        return
+      }
 
       if (preferAnimationPatch && cutAnimationForRender !== null) {
         const cuttingVisualRoot = options.root.querySelector<HTMLDivElement>(
@@ -2682,25 +2993,6 @@ export function createActiveRoomFlowController(
         )
 
         if (cuttingVisualRoot) {
-          const cuttingPanelsHtml = createCuttingSeatPanelsHtml({
-            seats: activeRoomState.seats,
-            localSeat: activeRoomState.seat,
-            dealerSeat: dealerSeatForRender,
-            cutterSeat: cutterSeatForRender,
-            cuttingCountdownRemainingMs: cuttingCountdownRemainingMsForRender,
-            countdownKey: cutterSeatForRender !== null &&
-              cuttingCountdownRemainingMsForRender !== null &&
-              activeRoomState.game?.timerDeadlineAt != null
-              ? `c:${cutterSeatForRender}:${activeRoomState.game.timerDeadlineAt}`
-              : null,
-            panelScale: stageScale,
-            escapeHtml,
-            dealtHands: null,
-            bidBubbles: isShowingNextRoundPause ? bidBubblesForRender : null,
-            emojiBubbles: getEmojiBubblesForRender(),
-            phraseBubbles: getPhraseBubblesForRender(),
-            tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
-          })
           const cuttingRenderSelectionKey = cuttingAnimation.activeSelectionKey !== null
             ? `${cuttingAnimation.activeSelectionKey}|scale:${stageScale.toFixed(3)}`
             : null
@@ -2724,6 +3016,7 @@ export function createActiveRoomFlowController(
       options.root.innerHTML = `
         <div
           ${mobileLayoutAttribute}
+          data-active-room-phase="cutting"
           style="
             position:relative;
             min-height:100vh;
@@ -2773,25 +3066,8 @@ export function createActiveRoomFlowController(
         </div>
       `
 
-      syncSeatPanels(createCuttingSeatPanelsHtml({
-        seats: activeRoomState.seats,
-        localSeat: activeRoomState.seat,
-        dealerSeat: dealerSeatForRender,
-        cutterSeat: cutterSeatForRender,
-        cuttingCountdownRemainingMs: cuttingCountdownRemainingMsForRender,
-        countdownKey: cutterSeatForRender !== null &&
-          cuttingCountdownRemainingMsForRender !== null &&
-          activeRoomState.game?.timerDeadlineAt != null
-          ? `c:${cutterSeatForRender}:${activeRoomState.game.timerDeadlineAt}`
-          : null,
-        panelScale: stageScale,
-        escapeHtml,
-        dealtHands: null,
-        bidBubbles: isShowingNextRoundPause ? bidBubblesForRender : null,
-        emojiBubbles: getEmojiBubblesForRender(),
-        phraseBubbles: getPhraseBubblesForRender(),
-        tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
-      }))
+      stablePhaseRenderKey = cuttingStableRenderKey
+      syncSeatPanels(cuttingPanelsHtml)
       syncMobilePhraseOverlay({
         seats: activeRoomState.seats,
         localSeat: activeRoomState.seat,
@@ -3245,9 +3521,70 @@ export function createActiveRoomFlowController(
         `
         : ''
 
+      const biddingSeatPanelsHtml = createCuttingSeatPanelsHtml({
+        seats: activeRoomState.seats,
+        localSeat: activeRoomState.seat,
+        dealerSeat,
+        cutterSeat: null,
+        cuttingCountdownRemainingMs: null,
+        countdownSeat: biddingSnapshot.currentBidderSeat,
+        countdownRemainingMs: biddingCountdownRemainingMs,
+        countdownTotalMs: biddingCountdownTotalMs,
+        countdownKey: biddingSnapshot.currentBidderSeat !== null && biddingGame.timerDeadlineAt !== null
+          ? `b:${biddingSnapshot.currentBidderSeat}:${biddingGame.timerDeadlineAt}`
+          : null,
+        highlightSeat: biddingSnapshot.currentBidderSeat,
+        highlightBadgeLabel: null,
+        panelScale: stageScale,
+        escapeHtml,
+        dealtHands: dealtHandsForBidding,
+        bidBubbles,
+        emojiBubbles: getEmojiBubblesForRender(),
+        phraseBubbles: getPhraseBubblesForRender(),
+        tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
+      })
+      const biddingStableRenderKey = JSON.stringify({
+        phase: 'bidding',
+        roomId: activeRoomState.roomId,
+        mobileLayoutAttribute,
+        stageScale: stageScale.toFixed(3),
+        scaledStageWidth,
+        scaledStageHeight,
+        dealerSeat,
+        currentBidderSeat: biddingSnapshot.currentBidderSeat,
+        entries: biddingSnapshot.entries,
+        winningBid: biddingSnapshot.winningBid,
+        validActions: biddingSnapshot.validActions,
+        canSubmitBid: biddingSnapshot.canSubmitBid,
+        pendingBidSent: biddingUiState.pendingBidSent,
+        showBidPopup,
+        showBotTakeover: biddingUiState.showBotTakeover,
+        errorText: activeRoomState.errorText,
+        handCounts,
+        ownHandIds: ownHand.map((card) => card.id),
+        tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
+      })
+
+      if (
+        stablePhaseRenderKey === biddingStableRenderKey &&
+        options.root.querySelector('[data-active-room-phase="bidding"]') !== null
+      ) {
+        syncSeatPanels(biddingSeatPanelsHtml)
+        syncBiddingPopupOverlay(biddingInteractionHtml)
+        activateBiddingPopupEnter(animateBidPopup ? biddingPopupTurnKey : null)
+        syncMobilePhraseOverlay({
+          seats: activeRoomState.seats,
+          localSeat: activeRoomState.seat,
+          phraseBubbles: getPhraseBubblesForRender(),
+          panelScale: stageScale,
+        })
+        return
+      }
+
       options.root.innerHTML = `
         <div
           ${mobileLayoutAttribute}
+          data-active-room-phase="bidding"
           style="
             position:relative;
             min-height:100vh;
@@ -3296,31 +3633,11 @@ export function createActiveRoomFlowController(
           ${biddingErrorHtml}
         </div>
       `
+      stablePhaseRenderKey = biddingStableRenderKey
       syncBiddingPopupOverlay(biddingInteractionHtml)
       activateBiddingPopupEnter(animateBidPopup ? biddingPopupTurnKey : null)
 
-      syncSeatPanels(createCuttingSeatPanelsHtml({
-        seats: activeRoomState.seats,
-        localSeat: activeRoomState.seat,
-        dealerSeat,
-        cutterSeat: null,
-        cuttingCountdownRemainingMs: null,
-        countdownSeat: biddingSnapshot.currentBidderSeat,
-        countdownRemainingMs: biddingCountdownRemainingMs,
-        countdownTotalMs: biddingCountdownTotalMs,
-        countdownKey: biddingSnapshot.currentBidderSeat !== null && biddingGame.timerDeadlineAt !== null
-          ? `b:${biddingSnapshot.currentBidderSeat}:${biddingGame.timerDeadlineAt}`
-          : null,
-        highlightSeat: biddingSnapshot.currentBidderSeat,
-        highlightBadgeLabel: null,
-        panelScale: stageScale,
-        escapeHtml,
-        dealtHands: dealtHandsForBidding,
-        bidBubbles,
-        emojiBubbles: getEmojiBubblesForRender(),
-        phraseBubbles: getPhraseBubblesForRender(),
-        tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
-      }))
+      syncSeatPanels(biddingSeatPanelsHtml)
       syncMobilePhraseOverlay({
         seats: activeRoomState.seats,
         localSeat: activeRoomState.seat,
@@ -3399,6 +3716,11 @@ export function createActiveRoomFlowController(
 
       const roundLabel = tournamentWaitingRoundLabel(activeRoomState.tournamentRoundType)
       const feederStatusText = computeFeederStatusText()
+      if (shouldEnterTournamentInterRoundWaitingImmediately()) {
+        completeTournamentRoundResultTransition()
+        return
+      }
+      ensureTournamentRoundResultAutoTransitionTimer()
 
       options.root.innerHTML = `
         <div
@@ -3430,7 +3752,7 @@ export function createActiveRoomFlowController(
               text-align:center;
             "
           >
-            <div style="font-size:28px;font-weight:900;color:${wonRound ? '#22c55e' : '#f87171'};">${wonRound ? 'Победихте!' : 'Отпаднахте от турнира'}</div>
+            <div style="font-size:28px;font-weight:900;color:${wonRound ? '#22c55e' : '#f87171'};">${wonRound ? 'Победихте!' : 'Загубихте мача'}</div>
             <div style="margin-top:10px;font-size:18px;font-weight:800;">${myScore} : ${opponentScore}</div>
             ${wonRound ? `
               <div style="margin-top:14px;font-size:14px;font-weight:700;color:#dbeafe;">Продължавате към следващия кръг.</div>
@@ -3442,26 +3764,26 @@ export function createActiveRoomFlowController(
                 </div>
               ` : ''}
             ` : `
+              <div style="margin-top:14px;font-size:14px;font-weight:800;color:rgba(248,250,252,0.82);">Отпадате от турнира.</div>
               <div style="margin-top:14px;font-size:14px;font-weight:700;color:rgba(248,250,252,0.7);">Достигнат кръг: ${escapeHtml(roundLabel)}</div>
             `}
             <div style="margin-top:20px;">
-              <button type="button" data-tournament-round-result-lobby="1" style="height:44px;padding:0 20px;border:1px solid rgba(255,255,255,0.22);border-radius:8px;background:rgba(255,255,255,0.06);color:#f8fafc;font-size:14px;font-weight:900;cursor:pointer;">Към лобито</button>
+              <button type="button" data-tournament-round-result-lobby="1" style="height:44px;padding:0 20px;border:1px solid rgba(255,255,255,0.22);border-radius:8px;background:rgba(255,255,255,0.06);color:#f8fafc;font-size:14px;font-weight:900;cursor:pointer;">${wonRound ? 'Към турнира' : 'Към лобито'}</button>
             </div>
           </div>
         </div>
       `
       options.root.querySelector('[data-tournament-round-result-lobby]')?.addEventListener('click', () => {
-        if (wonRound && tournamentRoundResultFeederLabel !== null) {
-          options.onEnterWaitingForNextTournamentRound({
-            label: tournamentRoundResultFeederLabel,
-            scoreA: tournamentRoundResultFeederScoreA,
-            scoreB: tournamentRoundResultFeederScoreB,
-            status: tournamentRoundResultFeederStatus ?? 'in_progress',
-          })
-        }
-        returnToLobbyFromMatchEnded()
+        continueFromTournamentRoundResultButton()
       })
       return
+    } else if (
+      isShowingMatchEndedPhase &&
+      activeRoomState.game &&
+      activeRoomState.isTournamentMatchOrigin &&
+      activeRoomState.tournamentRoundType === 'final'
+    ) {
+      if (renderTournamentFinalResultScreen({ mobileLayoutAttribute, tableBackground })) return
     } else if (isShowingMatchEndedPhase && activeRoomState.game) {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
       if (!matchEndedSoundPlayed) {
@@ -3540,6 +3862,7 @@ export function createActiveRoomFlowController(
         }, 1700)
       }
     } else if (isShowingScoringPhase && activeRoomState.game?.scoring) {
+      clearStablePhaseRenderKey()
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
       renderScoringScreen({
         root: options.root,
@@ -3548,12 +3871,14 @@ export function createActiveRoomFlowController(
         localSeat: activeRoomState.seat,
         winningBid: lastKnownWinningBid,
         countdownSeconds: getScoringVisualCountdownSeconds(),
+        animateSumCounters: shouldAnimateScoringPresentation(),
         stageScale,
         scaledStageWidth,
         scaledStageHeight,
       })
       syncScoringCountdownTicker()
     } else if (isShowingPlayingPhase && activeRoomState.game) {
+      clearStablePhaseRenderKey()
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
       renderPlayingScreen({
         root: options.root,
@@ -4075,6 +4400,14 @@ export function createActiveRoomFlowController(
       activeRoomState.stake = message.stakeAmount as MatchStake
     }
 
+    const tournamentRoundResultContext = getTournamentRoundResultTransitionContext()
+    if (
+      tournamentRoundResultAutoTransitionKey !== null &&
+      (tournamentRoundResultContext === null || tournamentRoundResultContext.key !== tournamentRoundResultAutoTransitionKey)
+    ) {
+      clearTournamentRoundResultAutoTransitionTimer()
+    }
+
     if (shouldSilenceNextBiddingSnapshot) {
       const biddingSnapshot = activeRoomState.game?.bidding ?? null
       if (biddingSnapshot) {
@@ -4100,6 +4433,8 @@ export function createActiveRoomFlowController(
     clearDealNextTwoAnimationState()
     clearDealLastThreeAnimationState()
     clearScoringCountdownTicker()
+    clearRenderStabilityGuards()
+    clearTournamentRoundResultAutoTransitionTimer()
     clearReactionCountdownAudioTicker()
     clearBiddingUiState()
     clearEmojiReactionUiState()
@@ -4112,6 +4447,7 @@ export function createActiveRoomFlowController(
     initialStakeEffectShown = true
     clearMatchEndedCountdown()
     matchEndedCountdownSeconds = 120
+    clearTournamentRoundResultState()
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
     removeSeatProfileOverlay()
@@ -4157,6 +4493,7 @@ export function createActiveRoomFlowController(
     clearDealNextTwoAnimationState()
     clearDealLastThreeAnimationState()
     clearScoringCountdownTicker()
+    clearRenderStabilityGuards()
     clearReactionCountdownAudioTicker()
     clearBiddingUiState()
     clearEmojiReactionUiState()
@@ -4250,6 +4587,8 @@ export function createActiveRoomFlowController(
       clearDealNextTwoAnimationState()
       clearDealLastThreeAnimationState()
       clearScoringCountdownTicker()
+      clearRenderStabilityGuards()
+      clearTournamentRoundResultState()
       clearReactionCountdownAudioTicker()
       clearBiddingUiState()
       clearEmojiReactionUiState()
@@ -4266,6 +4605,7 @@ export function createActiveRoomFlowController(
         message.penalty
           ? `Санкция при напускане: ${formatCoinAmount(message.penalty.chargedAmount)} жълтици.`
           : null,
+        message.roomId,
       )
       return true
     }
@@ -4283,6 +4623,8 @@ export function createActiveRoomFlowController(
       clearDealNextTwoAnimationState()
       clearDealLastThreeAnimationState()
       clearScoringCountdownTicker()
+      clearRenderStabilityGuards()
+      clearTournamentRoundResultState()
       clearReactionCountdownAudioTicker()
       clearBiddingUiState()
       clearEmojiReactionUiState()
@@ -4295,7 +4637,7 @@ export function createActiveRoomFlowController(
       removeSeatPanels()
       removeLeaveButton()
       activeRoomState = null
-      options.showLobby(message.message)
+      options.showLobby(message.message, message.roomId)
       return true
     }
 
@@ -4407,6 +4749,7 @@ export function createActiveRoomFlowController(
     clearDealNextTwoAnimationState()
     clearDealLastThreeAnimationState()
     clearScoringCountdownTicker()
+    clearRenderStabilityGuards()
     clearReactionCountdownAudioTicker()
     clearBiddingUiState()
     clearEmojiReactionUiState()
@@ -4419,7 +4762,7 @@ export function createActiveRoomFlowController(
     removeLeaveButton()
     options.leaveActiveRoom(roomId)
     activeRoomState = null
-    options.showLobby(null)
+    options.showLobby(null, roomId)
   }
 
   function startNewGameFromMatchEnded(): void {
@@ -4438,6 +4781,7 @@ export function createActiveRoomFlowController(
     clearDealNextTwoAnimationState()
     clearDealLastThreeAnimationState()
     clearScoringCountdownTicker()
+    clearRenderStabilityGuards()
     clearReactionCountdownAudioTicker()
     clearBiddingUiState()
     clearEmojiReactionUiState()
@@ -4498,6 +4842,7 @@ export function createActiveRoomFlowController(
     enterActiveRoom,
     enterActiveRoomFromResume,
     handleServerMessage,
+    completePendingTournamentRoundResultTransition: completeTournamentRoundResultTransition,
     getResumeInfo,
     setConnected,
     setConnectionError,
