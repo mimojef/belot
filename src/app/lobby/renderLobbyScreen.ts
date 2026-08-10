@@ -1074,10 +1074,12 @@ export function syncProfilePopup(
     profile: PlayerPublicProfileSnapshot | null
     canEdit: boolean
     isAdmin?: boolean
+    isOwnProfile?: boolean
     friendshipAction: PlayerProfileFriendshipAction | null
     viewerIsFullAdmin?: boolean
     targetAccountRole?: PlayerAccountRole | null
     showPikaSupportChatButton?: boolean
+    ownVipActiveUntil?: string | null
   },
   cb: ProfilePopupCallbacks,
 ): void {
@@ -1098,10 +1100,12 @@ export function syncProfilePopup(
     profile: popupState.profile,
     canEdit: popupState.canEdit,
     isAdmin: popupState.isAdmin ?? false,
+    isOwnProfile: popupState.isOwnProfile ?? false,
     friendshipAction: popupState.friendshipAction,
     skipAnimation: !isFirstOpen,
     viewerIsFullAdmin: popupState.viewerIsFullAdmin ?? false,
     targetAccountRole: popupState.targetAccountRole ?? null,
+    ownVipActiveUntil: popupState.ownVipActiveUntil ?? null,
     showPikaSupportChatButton: popupState.showPikaSupportChatButton ?? false,
   })
   attachPopupListeners(el, cb, popupState.profile?.profileId ?? null)

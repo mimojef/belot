@@ -204,6 +204,7 @@ function toPublicProfileSnapshot(row: {
     likesCount: null,
     hasLikedByMe: null,
     isBlockedByMe: null,
+    isVip: null,
   }
 }
 

@@ -147,6 +147,7 @@ function createBotPublicProfileSnapshot(
     likesCount: null,
     hasLikedByMe: null,
     isBlockedByMe: null,
+    isVip: null,
   }
 }
 

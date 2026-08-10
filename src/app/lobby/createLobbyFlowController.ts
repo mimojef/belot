@@ -452,6 +452,8 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminGetTargetRole?: (
     profileId: string,
   ) => Promise<{ ok: true; role: PlayerAccountRole | null } | { ok: false; message: string }>
+  /** GET VIP статус на СОБСТВЕНИЯ логнат профил — за "VIP до [дата]" в профилния попъп, само когато е own profile. */
+  onGetOwnVipStatus?: () => Promise<{ ok: true; activeUntil: string | null } | { ok: false }>
   onAdminGrantSubadmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminRevokeSubadmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminGrantChatAdmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
@@ -670,6 +672,10 @@ type InternalLobbyFlowState = {
   profilePopupOpen: boolean
   profilePopupProfile: PlayerPublicProfileSnapshot | null
   profilePopupCanEdit: boolean
+  /** VIP изтичане на СОБСТВЕНИЯ профил на viewer-а — lazy-load само когато popup-ът показва own profile. null = все още не е зареден. */
+  ownVipActiveUntil: string | null
+  /** profileId, за който ownVipActiveUntil вече е (или се) зарежда — memoization guard, аналогично на profilePopupTargetRoleProfileId. */
+  ownVipActiveUntilLoadedForProfileId: string | null
   /** Роля на разглеждания акаунт (само заредена/показана за пълен admin viewer). */
   profilePopupTargetRole: PlayerAccountRole | null
   /** profileId, за който profilePopupTargetRole вече е (или се) зарежда — memoization guard. */
@@ -1028,6 +1034,8 @@ function createInitialState(): InternalLobbyFlowState {
     profilePopupOpen: false,
     profilePopupProfile: null,
     profilePopupCanEdit: true,
+    ownVipActiveUntil: null,
+    ownVipActiveUntilLoadedForProfileId: null,
     profilePopupTargetRole: null,
     profilePopupTargetRoleProfileId: null,
     subadminActionConfirm: null,
@@ -1463,6 +1471,7 @@ function createLocalProfilePreview(
     likesCount: null,
     hasLikedByMe: null,
     isBlockedByMe: null,
+    isVip: null,
   }
 }
 
@@ -8225,6 +8234,41 @@ export function createLobbyFlowController(
     })()
   }
 
+  function ensureOwnVipStatusLoaded(): void {
+    const authSession = options.getAuthSession?.() ?? null
+    const profile = state.profilePopupProfile
+    const ownProfileId = authSession?.profile.profileId ?? null
+
+    if (!state.profilePopupOpen || profile === null || profile.profileId === null || ownProfileId === null) {
+      // Popup затворен (или все още няма профил) — нулираме guard-а, за да
+      // може следващото отваряне на own profile да refetch-не свеж статус
+      // (напр. ако потребителят междувременно е взел launch gift).
+      state.ownVipActiveUntilLoadedForProfileId = null
+      return
+    }
+    if (profile.profileId !== ownProfileId) {
+      return
+    }
+    if (state.ownVipActiveUntilLoadedForProfileId === ownProfileId) {
+      return
+    }
+
+    state.ownVipActiveUntilLoadedForProfileId = ownProfileId
+
+    void (async () => {
+      const result = await options.onGetOwnVipStatus?.()
+      // Ако попъпът вече е затворен (или memoization guard е нулиран) междувременно,
+      // резултатът е stale — не го прилагаме.
+      if (!result || state.ownVipActiveUntilLoadedForProfileId !== ownProfileId) {
+        return
+      }
+      if (result.ok) {
+        state.ownVipActiveUntil = result.activeUntil
+        render()
+      }
+    })()
+  }
+
   function cancelSubadminAction(): void {
     if (state.subadminActionBusy) return
     state.subadminActionConfirm = null
@@ -8417,16 +8461,23 @@ export function createLobbyFlowController(
   function renderPopupOnly(): void {
     const authSession = options.getAuthSession?.() ?? null
     ensureProfilePopupTargetRoleLoaded()
+    ensureOwnVipStatusLoaded()
+    const popupProfile = state.profilePopupProfile ?? createLocalProfilePreview(state, authSession)
+    const isOwnProfile = authSession !== null
+      && popupProfile.profileId !== null
+      && popupProfile.profileId === authSession.profile.profileId
     syncProfilePopup(
       {
         isOpen: state.profilePopupOpen,
-        profile: state.profilePopupProfile ?? createLocalProfilePreview(state, authSession),
+        profile: popupProfile,
         canEdit: state.profilePopupCanEdit,
         isAdmin: isFullAdminAuthSession(authSession),
+        isOwnProfile,
         friendshipAction: buildPopupFriendshipAction(),
         viewerIsFullAdmin: isFullAdminAuthSession(authSession),
         targetAccountRole: state.profilePopupTargetRole,
         showPikaSupportChatButton: shouldShowPikaSupportChatButton(authSession),
+        ownVipActiveUntil: isOwnProfile ? state.ownVipActiveUntil : null,
       },
       getPopupCallbacks(),
     )

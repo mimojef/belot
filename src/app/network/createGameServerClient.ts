@@ -49,6 +49,7 @@ export type PlayerPublicProfileSnapshot = {
   likesCount: number | null
   hasLikedByMe: boolean | null
   isBlockedByMe: boolean | null
+  isVip: boolean | null
 }
 
 export type TournamentStatus =

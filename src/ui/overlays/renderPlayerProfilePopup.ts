@@ -33,6 +33,12 @@ export type RenderPlayerProfilePopupOptions = {
    * Ползва се само когато viewerIsFullAdmin е true.
    */
   targetAccountRole?: PlayerAccountRole | null
+  /**
+   * ISO дата на изтичане на VIP — попълва се само когато profile е
+   * собственият профил на viewer-а (isOwnProfile). За чужди профили
+   * оставаме само с публичния "VIP" бадж, без дата (виж т.13 от брифа).
+   */
+  ownVipActiveUntil?: string | null
 }
 
 export type PlayerAccountRole = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
@@ -480,6 +486,37 @@ function renderEmptyContent(seat: Seat | null): string {
   `
 }
 
+function renderVipBadge(profile: PlayerPublicProfileSnapshot, isOwnProfile: boolean, vipActiveUntil?: string | null): string {
+  if (!profile.isVip) {
+    return ''
+  }
+
+  const ownExpiryLabel = isOwnProfile && vipActiveUntil
+    ? ` до ${new Date(vipActiveUntil).toLocaleDateString('bg-BG')}`
+    : ''
+
+  return `
+    <span
+      data-player-profile-vip-badge="1"
+      style="
+        display:inline-flex;
+        align-items:center;
+        padding:3px 10px;
+        border-radius:999px;
+        background:rgba(212,165,32,0.16);
+        border:1px solid rgba(212,165,32,0.58);
+        color:#d4a520;
+        font-size:11px;
+        font-weight:900;
+        letter-spacing:0.04em;
+        text-transform:uppercase;
+        white-space:nowrap;
+        text-shadow:0 0 8px rgba(212,165,32,0.32);
+      "
+    >VIP${ownExpiryLabel}</span>
+  `
+}
+
 function renderSubadminRoleControls(
   isOwnProfile: boolean,
   viewerIsFullAdmin: boolean,
@@ -750,6 +787,7 @@ function renderProfileContent(
   viewerIsFullAdmin: boolean,
   targetAccountRole: PlayerAccountRole | null,
   showPikaSupportChatButton: boolean,
+  ownVipActiveUntil: string | null,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -826,6 +864,8 @@ function renderProfileContent(
             >
               ${escapeHtml(displayName)}
             </div>
+
+            ${renderVipBadge(profile, isOwnProfile, ownVipActiveUntil)}
 
             ${(canEdit || isAdmin) && !isOwnProfile ? `
               <span
@@ -1149,6 +1189,7 @@ export function renderPlayerProfilePopup(
           options.viewerIsFullAdmin ?? false,
           options.targetAccountRole ?? null,
           options.showPikaSupportChatButton ?? false,
+          options.ownVipActiveUntil ?? null,
         )
       : renderEmptyContent(options.seat)
 

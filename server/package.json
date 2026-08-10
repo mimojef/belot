@@ -78,6 +78,7 @@
     "check:db-backup-verify": "tsx scripts/checkDbBackupVerify.ts",
     "check:backup-logic": "tsx scripts/checkBackupLogic.ts",
     "check:gift-limit": "tsx scripts/checkYellowCoinGiftLimit.ts",
+    "check:vip-store": "tsx scripts/checkVipStore.ts",
     "check:gift-limit-frontend": "tsx scripts/checkGiftLimitFrontend.ts",
     "check:admin-profile-moderation": "tsx scripts/checkAdminProfileModeration.ts",
     "check:profile-name-release-and-admin-edit-target": "tsx scripts/checkProfileNameReleaseAndAdminEditTarget.ts",

@@ -124,6 +124,7 @@ import { createPasswordHash, verifyPassword } from './db/authHelpers.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { createMatchEconomyStore, setMatchPrizeResolver } from './db/matchEconomyStore.js'
 import { createMatchRoomsStore } from './db/matchRoomsStore.js'
+import { createVipStore, type VipInterval } from './db/vipStore.js'
 import { normalizeProfileSearchTerm } from './db/normalizeProfileIdentityText.js'
 import {
   computePlayersPageOrder,
@@ -959,6 +960,7 @@ setSupportedMatchStakes(matchRoomsStore.getEnabledStakes())
 setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
 
 const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databaseFilePath)
+const vipStore = await createVipStore(databaseBootstrap.databaseFilePath)
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
 const supportStore = await createSupportStore(databaseBootstrap.databaseFilePath)
 const guestContactStore = await createGuestContactStore(databaseBootstrap.databaseFilePath)
@@ -2492,6 +2494,7 @@ function createFallbackPublicProfileSnapshot(
     likesCount: null,
     hasLikedByMe: null,
     isBlockedByMe: null,
+    isVip: null,
   }
 }
 
@@ -2546,6 +2549,7 @@ function sendPlayerProfileToConnection(
         likesCount: likeStore.getLikesCount(profileId),
         hasLikedByMe: viewerProfileId ? likeStore.hasLikedRecently(viewerProfileId, profileId) : null,
         isBlockedByMe: viewerProfileId ? blockStore.isBlocked(viewerProfileId, profileId) : null,
+        isVip: vipStore.getStatus(profileId).isActive,
       }
     : baseProfile
 
@@ -5630,6 +5634,7 @@ function enrichPlayerProfilesForViewer(
     isBlockedByMe: p.profileId && currentProfileId
       ? blockStore.isBlocked(currentProfileId, p.profileId)
       : null,
+    isVip: p.profileId ? vipStore.getStatus(p.profileId).isActive : null,
   }))
 }
 
@@ -5818,6 +5823,7 @@ async function handleLeaderboardsRequest(
       isBlockedByMe: p.profileId && currentProfileId
         ? blockStore.isBlocked(currentProfileId, p.profileId)
         : null,
+      isVip: p.profileId ? vipStore.getStatus(p.profileId).isActive : null,
     }))
 
   sendJsonResponse(res, 200, {
@@ -6082,6 +6088,79 @@ async function handleShopCheckoutRequest(
     purchase: attached,
   })
 
+  return true
+}
+
+// ─── VIP: launch gift + status ─────────────────────────────────────────────
+
+const VIP_LAUNCH_GIFT_INTERVAL: VipInterval = { unit: 'days', amount: 30 }
+
+async function handleVipStatusRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/vip/status' || req.method !== 'GET') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си.',
+    })
+    return true
+  }
+
+  const status = vipStore.getStatus(session.profile.profileId)
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    status,
+    hasClaimedLaunchGift: vipStore.hasClaimedLaunchGift(session.profile.profileId),
+  })
+  return true
+}
+
+async function handleVipClaimLaunchGiftRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/vip/claim-launch-gift' || req.method !== 'POST') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си, за да вземеш безплатния VIP.',
+    })
+    return true
+  }
+
+  const result = vipStore.claimLaunchGift(session.profile.profileId, VIP_LAUNCH_GIFT_INTERVAL)
+
+  if (!result.ok) {
+    sendJsonResponse(res, 409, {
+      ok: false,
+      code: result.code,
+      message: 'Безплатният VIP подарък вече е използван за този профил.',
+      status: result.status,
+    })
+    return true
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    status: result.status,
+  })
   return true
 }
 
@@ -9794,6 +9873,14 @@ async function handleHttpRequest(
   }
 
   if (await handleShopCheckoutRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleVipStatusRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleVipClaimLaunchGiftRequest(req, res, requestUrl.pathname)) {
     return
   }
 

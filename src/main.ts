@@ -3087,6 +3087,25 @@ async function loadAdminTargetRole(
   }
 }
 
+async function loadOwnVipStatus(): Promise<{ ok: true; activeUntil: string | null } | { ok: false }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/vip/status`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json().catch(() => ({}))) as {
+      ok?: boolean
+      status?: { isActive?: boolean; activeUntil?: string | null }
+    }
+    if (!response.ok || !data.ok) {
+      return { ok: false }
+    }
+    return { ok: true, activeUntil: data.status?.activeUntil ?? null }
+  } catch {
+    return { ok: false }
+  }
+}
+
 async function submitSubadminRoleChange(
   profileId: string,
   action: 'grant' | 'revoke',
@@ -4051,6 +4070,7 @@ lobby = createLobbyFlowController({
     stopAdminInfoAccessPolling()
   },
   onAdminGetTargetRole: (profileId) => loadAdminTargetRole(profileId),
+  onGetOwnVipStatus: () => loadOwnVipStatus(),
   onAdminGrantSubadmin: (profileId) => submitSubadminRoleChange(profileId, 'grant'),
   onAdminRevokeSubadmin: (profileId) => submitSubadminRoleChange(profileId, 'revoke'),
   onAdminGrantChatAdmin: (profileId) => submitChatAdminRoleChange(profileId, 'grant'),
