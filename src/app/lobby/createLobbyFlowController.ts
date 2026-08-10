@@ -72,6 +72,8 @@ import type {
   TournamentPartnerCandidateSnapshot,
   TournamentPartnerInviteSnapshot,
   TournamentSummarySnapshot,
+  TopicSnapshot,
+  TopicMessageSnapshot,
 } from '../network/createGameServerClient'
 
 export type LobbyFlowScreen =
@@ -90,6 +92,7 @@ export type LobbyFlowScreen =
   | 'tournaments'
   | 'tournament-detail'
   | 'tournament-how-it-works'
+  | 'topics'
   | 'terms'
   | 'privacy'
   | 'contact'
@@ -530,6 +533,20 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; tournaments: TournamentSummarySnapshot[]; page: number; limit: number; totalCount: number }
     | { ok: false; message: string }
   >
+  onTopicsLoad?: () => Promise<
+    | { ok: true; topics: TopicSnapshot[] }
+    | { ok: false; message: string }
+  >
+  /** Canonical single-profile fetch по id — за profile popup, когато профилът не е (или може да е остарял) в state.players кеша. */
+  onProfileByIdLoad?: (profileId: string) => Promise<
+    | { ok: true; profile: PlayerPublicProfileSnapshot }
+    | { ok: false; message: string }
+  >
+  /** beforeSeq=null → последните N съобщения; иначе → по-стари от beforeSeq (cursor pagination). */
+  onTopicMessagesLoad?: (topicId: string, beforeSeq: number | null) => Promise<
+    | { ok: true; messages: TopicMessageSnapshot[]; hasMore: boolean; oldestSeq: number | null }
+    | { ok: false; message: string }
+  >
   onTournamentCreate?: (input: TournamentCreateInput) => Promise<
     | { ok: true; tournament: TournamentSummarySnapshot }
     | { ok: false; message: string }
@@ -634,6 +651,7 @@ export type LobbyFlowController = {
   navigateToShop: (noticeText: string | null) => void
   navigateToPrivateRooms: () => void
   navigateToTournamentDetail: (tournamentId: string) => void
+  navigateToTopics: () => void
   refreshPendingTournamentPartnerInvites: () => Promise<void>
   getPwaUpdateSafetySnapshot: () => {
     isSearching: boolean
@@ -676,6 +694,34 @@ type InternalLobbyFlowState = {
   ownVipActiveUntil: string | null
   /** profileId, за който ownVipActiveUntil вече е (или се) зарежда — memoization guard, аналогично на profilePopupTargetRoleProfileId. */
   ownVipActiveUntilLoadedForProfileId: string | null
+  topicsLoading: boolean
+  topicsErrorText: string | null
+  topics: TopicSnapshot[] | null
+  activeTopicId: string | null
+  topicMessagesLoading: boolean
+  topicMessagesErrorText: string | null
+  topicMessages: TopicMessageSnapshot[] | null
+  topicMessagesHasMore: boolean
+  topicMessagesOldestSeq: number | null
+  topicOlderMessagesLoading: boolean
+  /**
+   * Инкрементира се при ВСЯКО ново зареждане на message history (initial
+   * open/topic switch/load older) — monotonic generation token. Само
+   * topicId сравнение НЕ е достатъчно при rapid A→B→A превключване: третата
+   * заявка (пак за A) може да resolve-не преди първата (също за A), която
+   * все още виси — topicId guard-ът сам не би хванал това, защото и двете
+   * заявки са "за текущата тема". Generation token различава кой отговор е
+   * НАЙ-НОВИЯТ поискан, независимо от коя тема е.
+   */
+  topicMessagesRequestGeneration: number
+  /**
+   * Инкрементира се при всяко отваряне на profile popup чрез profileId (виж
+   * onTopicMessageAuthorClick) — stale-response guard: ако потребителят
+   * кликне бързо на профил A, после профил B, закъснелият canonical fetch
+   * за A сравнява своя token срещу текущия и не прилага резултата, ако не
+   * съвпада (потребителят вече гледа B).
+   */
+  profilePopupRequestToken: number
   /** Роля на разглеждания акаунт (само заредена/показана за пълен admin viewer). */
   profilePopupTargetRole: PlayerAccountRole | null
   /** profileId, за който profilePopupTargetRole вече е (или се) зарежда — memoization guard. */
@@ -1036,6 +1082,18 @@ function createInitialState(): InternalLobbyFlowState {
     profilePopupCanEdit: true,
     ownVipActiveUntil: null,
     ownVipActiveUntilLoadedForProfileId: null,
+    topicsLoading: false,
+    topicsErrorText: null,
+    topics: null,
+    activeTopicId: null,
+    topicMessagesLoading: false,
+    topicMessagesErrorText: null,
+    topicMessages: null,
+    topicMessagesHasMore: false,
+    topicMessagesOldestSeq: null,
+    topicOlderMessagesLoading: false,
+    topicMessagesRequestGeneration: 0,
+    profilePopupRequestToken: 0,
     profilePopupTargetRole: null,
     profilePopupTargetRoleProfileId: null,
     subadminActionConfirm: null,
@@ -2541,6 +2599,8 @@ export function createLobbyFlowController(
               ? 'tournament-detail'
             : state.currentScreen === 'tournament-how-it-works'
               ? 'tournament-how-it-works'
+            : state.currentScreen === 'topics'
+              ? 'topics'
             : state.currentScreen === 'guest-contact-messages'
               ? 'guest-contact-messages'
             : state.currentScreen === 'terms'
@@ -2849,6 +2909,16 @@ export function createLobbyFlowController(
       shopPurchaseResumeId: state.shopPurchaseResumeId,
       shopPurchaseHideConfirmId: state.shopPurchaseHideConfirmId,
       shopPurchaseActionPurchaseId: state.shopPurchaseActionPurchaseId,
+      topicsLoading: state.topicsLoading,
+      topicsErrorText: state.topicsErrorText,
+      topics: state.topics,
+      activeTopicId: state.activeTopicId,
+      topicMessagesLoading: state.topicMessagesLoading,
+      topicMessagesErrorText: state.topicMessagesErrorText,
+      topicMessages: state.topicMessages,
+      topicMessagesHasMore: state.topicMessagesHasMore,
+      topicMessagesOldestSeq: state.topicMessagesOldestSeq,
+      topicOlderMessagesLoading: state.topicOlderMessagesLoading,
     }
 
     renderLobbyScreen(options.root, {
@@ -3047,6 +3117,77 @@ export function createLobbyFlowController(
       },
       onTournamentsClick: () => {
         void showTournamentsList()
+      },
+      onTopicsClick: () => {
+        void showTopicsDirectory()
+      },
+      onTopicChipClick: (topicId) => {
+        openTopic(topicId)
+      },
+      onTopicsBackToGeneral: () => {
+        backToGeneralTopic()
+      },
+      onTopicMessagesLoadOlder: () => {
+        void loadOlderTopicMessages()
+      },
+      onTopicMessageAuthorClick: (profileId, displayName) => {
+        const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId
+        const isOwn = Boolean(ownProfileId && profileId === ownProfileId)
+        const requestToken = ++state.profilePopupRequestToken
+
+        // Отваряме popup-а веднага с каквото вече знаем (кеширан players
+        // запис или само profileId/displayName от message row-а), после
+        // fetch-ваме canonical данни отдолу — потребителят не чака празен
+        // popup, но резултатът ще се презапише с актуалните данни щом дойдат.
+        const cached = state.players.find((p) => p.profileId === profileId) ?? null
+        state.profilePopupProfile = isOwn
+          ? null
+          : cached ?? {
+              profileId,
+              displayName,
+              avatarUrl: null,
+              level: null,
+              rankTitle: null,
+              skillRating: null,
+              completedGamesCount: null,
+              wonGamesCount: null,
+              currentRankGames: null,
+              nextRankGames: null,
+              gamesUntilNextRank: null,
+              rankProgressRatio: null,
+              averageRating: null,
+              totalRatingsCount: null,
+              yellowCoinsBalance: null,
+              galleryImages: [],
+              gender: null,
+              likesCount: null,
+              hasLikedByMe: null,
+              isBlockedByMe: null,
+              isVip: null,
+            }
+        state.profilePopupCanEdit = isOwn
+        state.profilePopupOpen = true
+        renderPopupOnly()
+        if (isOwn) {
+          void fetchOwnLikesCount()
+          return
+        }
+        void ensureFriendshipsLoaded()
+
+        if (!options.onProfileByIdLoad) return
+        void (async () => {
+          const result = await options.onProfileByIdLoad!(profileId)
+          // Stale-response guard: ако потребителят е кликнал на друг профил
+          // МЕЖДУВРЕМЕННО, token-ът вече не съвпада — изхвърляме резултата.
+          // Проверяваме и profilePopupOpen изрично — token сам по себе си не
+          // се "изгаря" при затваряне (close минава през ~30 различни call
+          // sites, не всички викат renderPopupOnly), затова затворен popup
+          // винаги отхвърля закъснял резултат, независимо от token-а.
+          if (state.profilePopupRequestToken !== requestToken || !state.profilePopupOpen) return
+          if (!result.ok) return
+          state.profilePopupProfile = result.profile
+          renderPopupOnly()
+        })()
       },
       onTournamentHowItWorksOpen: () => {
         showTournamentHowItWorksPage()
@@ -4352,6 +4493,164 @@ export function createLobbyFlowController(
 
     applySuccessfulPlayersPage(result)
     state.playersErrorText = null
+    render()
+  }
+
+  // A) Initial open / topic switch — НЕ reuse-ва стар scroll anchor, зарежда
+  // history за новата тема, viewport отива до дъното (последните съобщения)
+  // след успешен load. Вика се от showTopicsDirectory() и openTopic().
+  async function loadTopicMessagesForActiveTopic(topicId: string): Promise<void> {
+    const requestGeneration = ++state.topicMessagesRequestGeneration
+
+    if (!options.onTopicMessagesLoad) {
+      state.topicMessagesErrorText = 'Съобщенията временно не са налични.'
+      state.topicMessagesLoading = false
+      render()
+      return
+    }
+
+    state.topicMessagesLoading = true
+    state.topicMessagesErrorText = null
+    render()
+
+    const result = await options.onTopicMessagesLoad(topicId, null)
+
+    // C) Rapid topic switching guard — generation token е monotonic номер на
+    // ВСЯКО ново зареждане (не само сравнение по topicId): ако потребителят
+    // отвори A→B→A бързо, response за първата (сега "остаряла") заявка за A
+    // никога не презаписва по-новата, дори топикId да съвпада отново.
+    if (state.currentScreen !== 'topics' || state.topicMessagesRequestGeneration !== requestGeneration) {
+      return
+    }
+
+    state.topicMessagesLoading = false
+
+    if (!result.ok) {
+      state.topicMessagesErrorText = result.message
+      render()
+      return
+    }
+
+    state.topicMessages = result.messages
+    state.topicMessagesHasMore = result.hasMore
+    state.topicMessagesOldestSeq = result.oldestSeq
+    state.topicMessagesErrorText = null
+    // Viewport към последните съобщения — render() тук е последван от
+    // scroll-to-bottom логиката в renderLobbyScreen.ts (виж
+    // savedTopicMessagesDistanceFromBottom === null клона).
+    render()
+  }
+
+  async function showTopicsDirectory(): Promise<void> {
+    leaveAdminServerIfActive()
+    state.currentScreen = 'topics'
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+
+    if (!options.onTopicsLoad) {
+      state.topicsErrorText = 'Списъкът с теми временно не е наличен.'
+      render()
+      return
+    }
+
+    state.topicsLoading = true
+    state.topicsErrorText = null
+    render()
+
+    const result = await options.onTopicsLoad()
+
+    if (state.currentScreen !== 'topics') {
+      return
+    }
+
+    state.topicsLoading = false
+
+    if (!result.ok) {
+      state.topicsErrorText = result.message
+      render()
+      return
+    }
+
+    state.topics = result.topics
+    state.topicsErrorText = null
+
+    // При вход в "Теми" отваряме "Общ чат" по подразбиране (т.2/8 от брифа).
+    const generalTopic = result.topics.find((t) => t.isGeneral) ?? result.topics[0] ?? null
+    state.activeTopicId = generalTopic?.topicId ?? null
+    state.topicMessages = null
+    state.topicMessagesHasMore = false
+    state.topicMessagesOldestSeq = null
+    render()
+
+    if (state.activeTopicId) {
+      void loadTopicMessagesForActiveTopic(state.activeTopicId)
+    }
+  }
+
+  function openTopic(topicId: string): void {
+    if (state.activeTopicId === topicId) return
+    state.activeTopicId = topicId
+    state.topicMessages = null
+    state.topicMessagesHasMore = false
+    state.topicMessagesOldestSeq = null
+    state.topicMessagesErrorText = null
+    state.topicOlderMessagesLoading = false
+    render()
+    // loadTopicMessagesForActiveTopic инкрементира generation token-а
+    // СИНХРОННО (преди първия await) — това "убива" всяка still-pending
+    // load-older заявка от старата тема веднага, без нужда от отделен
+    // increment тук.
+    void loadTopicMessagesForActiveTopic(topicId)
+  }
+
+  function backToGeneralTopic(): void {
+    const generalTopic = (state.topics ?? []).find((t) => t.isGeneral) ?? null
+    if (generalTopic) openTopic(generalTopic.topicId)
+  }
+
+  // B) Load older в СЪЩАТА тема — НЕ инкрементира generation token-а (не е
+  // "нов switch", а продължение на текущия), но капсулира текущата стойност
+  // при старт, за да засече дали потребителят е превключил тема междувременно
+  // (openTopic/showTopicsDirectory инкрементират generation-а при switch).
+  async function loadOlderTopicMessages(): Promise<void> {
+    const topicId = state.activeTopicId
+    const requestGeneration = state.topicMessagesRequestGeneration
+    if (
+      topicId === null ||
+      state.topicOlderMessagesLoading ||
+      !state.topicMessagesHasMore ||
+      state.topicMessagesOldestSeq === null ||
+      !options.onTopicMessagesLoad
+    ) {
+      return
+    }
+
+    state.topicOlderMessagesLoading = true
+    render()
+
+    const result = await options.onTopicMessagesLoad(topicId, state.topicMessagesOldestSeq)
+
+    // Ако потребителят е превключил тема междувременно (generation token се
+    // е сменил), изхвърляме резултата — той принадлежи на вече напусната
+    // тема (т.3B/C от брифа).
+    if (state.topicMessagesRequestGeneration !== requestGeneration) {
+      return
+    }
+
+    state.topicOlderMessagesLoading = false
+
+    if (!result.ok) {
+      render()
+      return
+    }
+
+    // Prepend по-старите съобщения пред вече заредените (старо→ново ред).
+    state.topicMessages = [...result.messages, ...(state.topicMessages ?? [])]
+    state.topicMessagesHasMore = result.hasMore
+    state.topicMessagesOldestSeq = result.oldestSeq ?? state.topicMessagesOldestSeq
     render()
   }
 
@@ -7501,6 +7800,7 @@ export function createLobbyFlowController(
     'admin-payments': '/admin/payments',
     'admin-tournaments': '/admin/tournaments',
     tournaments: '/tournaments',
+    topics: '/topics',
     friends: '/friends',
     chat: '/chat',
     terms: '/terms',
@@ -7526,6 +7826,7 @@ export function createLobbyFlowController(
     '/admin/payments': 'admin-payments',
     '/admin/tournaments': 'admin-tournaments',
     '/tournaments': 'tournaments',
+    '/topics': 'topics',
     '/friends': 'friends',
     '/chat': 'chat',
     '/terms': 'terms',
@@ -7645,6 +7946,7 @@ export function createLobbyFlowController(
         break
       }
       case 'tournaments': void showTournamentsList(); break
+      case 'topics': void showTopicsDirectory(); break
       case 'friends': void showFriendsDirectory(); break
       case 'chat': void showChatPanel(); break
       case 'terms': showPublicLegalPage('terms'); break
@@ -9666,6 +9968,9 @@ export function createLobbyFlowController(
     navigateToPrivateRooms,
     navigateToTournamentDetail: (tournamentId: string) => {
       showTournamentDetail(tournamentId)
+    },
+    navigateToTopics: () => {
+      void showTopicsDirectory()
     },
     refreshPendingTournamentPartnerInvites: () => refetchPendingTournamentPartnerInvites(),
     navigateToShop: (noticeText: string | null) => {

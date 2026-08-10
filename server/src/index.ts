@@ -30,6 +30,8 @@ import {
 } from './db/authStore.js'
 import { createChatStore } from './db/chatStore.js'
 import { createLobbyChatStore } from './db/lobbyChatStore.js'
+import { createTopicStore } from './db/topicStore.js'
+import { createTopicMessageStore } from './db/topicMessageStore.js'
 import {
   validateLobbyChatBody,
   countUnicodeCodePoints,
@@ -539,6 +541,8 @@ const chatStore = await createChatStore(
   friendshipStore,
 )
 const lobbyChatStore = await createLobbyChatStore(databaseBootstrap.databaseFilePath)
+const topicStore = await createTopicStore(databaseBootstrap.databaseFilePath)
+const topicMessageStore = await createTopicMessageStore(databaseBootstrap.databaseFilePath)
 
 // ─── Общ лайв чат в лобито (broadcast към абонирани connection-и) ───────────
 //
@@ -5638,6 +5642,46 @@ function enrichPlayerProfilesForViewer(
   }))
 }
 
+// Canonical single-profile lookup by id — reuse-ва playerProgressStore
+// (единствения source of truth за public profile данни) и
+// enrichPlayerProfilesForViewer (същия likes/blocked/VIP enrichment, ползван
+// от players directory/leaderboards). Достъпен за всеки логнат потребител —
+// profile popup-ът (напр. от "Теми") трябва да покаже актуални данни за
+// произволен профил, не само за тези вече в state.players кеша на клиента.
+async function handleProfileByIdRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/profiles\/([^/]+)$/.exec(pathname)
+  if (!match || req.method !== 'GET') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+  const currentProfileId = session?.profile.profileId ?? null
+
+  const profileId = decodeURIComponent(match[1] ?? '')
+  const profile = playerProgressStore.getPublicProfile(profileId)
+
+  if (profile === null) {
+    sendJsonResponse(res, 404, {
+      ok: false,
+      message: 'Профилът не беше намерен.',
+    })
+    return true
+  }
+
+  const [enriched] = enrichPlayerProfilesForViewer([profile], currentProfileId)
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    profile: enriched,
+  })
+  return true
+}
+
 async function handlePlayersSearchRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -6160,6 +6204,132 @@ async function handleVipClaimLaunchGiftRequest(
   sendJsonResponse(res, 200, {
     ok: true,
     status: result.status,
+  })
+  return true
+}
+
+// ─── Topics (Теми): read-only списък + cursor/seq history ──────────────────
+// Етап 1 — само четене. Няма send/like/create/moderation handlers тук; те
+// идват в следващи етапи.
+//
+// Достъп: РЕГИСТРИРАН профил (не гост) — валидирано server-side тук, не само
+// скрито от навигацията на клиента. Причина: безплатният 30-дневен VIP е
+// profile-bound (виж vipStore.ts / launch gift claim), а гост няма profile,
+// към който да бъде активиран — затова "Теми" изобщо не се отварят за гост,
+// дори само за четене. VIP НЕ се изисква за четене (само за писане, Етап 2).
+function requireRegisteredProfileSession(
+  req: IncomingMessage,
+): { ok: true; profileId: string } | { ok: false } {
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+  if (session === null || session.profile.profileId === null) {
+    return { ok: false }
+  }
+  return { ok: true, profileId: session.profile.profileId }
+}
+
+const TOPIC_MESSAGES_DEFAULT_LIMIT = 30
+const TOPIC_MESSAGES_MAX_LIMIT = 50
+
+async function handleTopicsListRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/topics' || req.method !== 'GET') {
+    return false
+  }
+
+  const auth = requireRegisteredProfileSession(req)
+  if (!auth.ok) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си, за да разгледаш „Теми“.',
+    })
+    return true
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    topics: topicStore.listActiveTopics(),
+  })
+  return true
+}
+
+function clampTopicMessagesLimit(rawValue: string | null): number {
+  const parsed = rawValue !== null ? Number.parseInt(rawValue, 10) : NaN
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return TOPIC_MESSAGES_DEFAULT_LIMIT
+  }
+  return Math.min(parsed, TOPIC_MESSAGES_MAX_LIMIT)
+}
+
+async function handleTopicMessagesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/([^/]+)\/messages$/.exec(pathname)
+  if (!match || req.method !== 'GET') {
+    return false
+  }
+
+  const auth = requireRegisteredProfileSession(req)
+  if (!auth.ok) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си, за да разгледаш „Теми“.',
+    })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+  const topic = topicStore.getTopicById(topicId)
+
+  if (topic === null) {
+    sendJsonResponse(res, 404, {
+      ok: false,
+      message: 'Темата не беше намерена.',
+    })
+    return true
+  }
+
+  const excludedSenderProfileIds = [...getLobbyChatBlockedSet(auth.profileId)]
+
+  const limit = clampTopicMessagesLimit(requestUrl.searchParams.get('limit'))
+  const beforeRaw = requestUrl.searchParams.get('before')
+  const beforeSeq = beforeRaw !== null ? Number.parseInt(beforeRaw, 10) : null
+
+  const page = beforeSeq !== null && Number.isInteger(beforeSeq)
+    ? topicMessageStore.getMessagesBefore(topicId, beforeSeq, limit, excludedSenderProfileIds)
+    : topicMessageStore.getRecentMessages(topicId, limit, excludedSenderProfileIds)
+
+  // Avatar е derived от canonical profile data (виж коментара в
+  // TopicMessageSnapshot.senderAvatarUrl) — не се пази в topic_messages,
+  // затова resolve-ваме ТУК, при всяко четене, вместо да snapshot-ваме
+  // остарял URL в момента на писане.
+  //
+  // Batch + dedup (не N+1): събираме уникалните sender profileId-та от
+  // страницата и правим ЕДНА заявка (getProfileSnapshotsByIds — вече
+  // съществуващ batch helper, ползван и от players directory), вместо
+  // getPublicProfile() по едно за всяко от до 30-50-те съобщения в batch-а,
+  // с повторни lookup-и за същия автор, ако е писал многократно.
+  const uniqueSenderProfileIds = [...new Set(page.messages.map((m) => m.senderProfileId))]
+  const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
+  const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
+
+  const enrichedMessages = page.messages.map((message) => ({
+    ...message,
+    senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
+  }))
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    topic,
+    messages: enrichedMessages,
+    hasMore: page.hasMore,
+    oldestSeq: page.oldestSeq,
   })
   return true
 }
@@ -9881,6 +10051,18 @@ async function handleHttpRequest(
   }
 
   if (await handleVipClaimLaunchGiftRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTopicsListRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTopicMessagesRequest(req, res, requestUrl.pathname, requestUrl)) {
+    return
+  }
+
+  if (await handleProfileByIdRequest(req, res, requestUrl.pathname)) {
     return
   }
 

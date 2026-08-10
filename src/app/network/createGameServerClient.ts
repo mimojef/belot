@@ -1473,6 +1473,39 @@ export type LobbyChatErrorMessage = {
   requestId?: string
 }
 
+// --- "Теми" (topics) — Етап 1 е чисто REST read-only, БЕЗ WS realtime
+// handlers. Тези типове описват REST response shape (GET /api/topics,
+// GET /api/topics/:id/messages), не WS протокол съобщения — затова НЕ са
+// част от ServerMessage union-а по-долу. Realtime push (subscribe_topic и
+// т.н.) е бъдещ етап; когато дойде, ще получи собствени WS message типове
+// тук, без rewrite на тези REST snapshot типове.
+
+export type TopicSnapshot = {
+  topicId: string
+  slug: string
+  title: string
+  description: string | null
+  isGeneral: boolean
+  createdByProfileId: string | null
+  status: 'active' | 'locked' | 'removed'
+  sortOrder: number
+  createdAt: string
+}
+
+export type TopicMessageSnapshot = {
+  seq: number
+  messageId: string
+  topicId: string
+  parentMessageId: string | null
+  senderProfileId: string
+  senderDisplayName: string
+  /** Derived от canonical profile data при read — ТЕКУЩИЯТ avatar, не snapshot от момента на писане. */
+  senderAvatarUrl: string | null
+  senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
+  body: string
+  createdAt: string
+}
+
 export type ServerMessage =
   | ConnectedMessage
   | PongMessage

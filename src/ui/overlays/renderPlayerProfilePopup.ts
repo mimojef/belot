@@ -1452,6 +1452,7 @@ export function renderPlayerProfilePopup(
           class="gold-scrollbar"
           style="
             position:relative;
+            box-sizing:border-box;
             width:min(92vw, 760px);
             max-height:min(88vh, 860px);
             overflow:auto;

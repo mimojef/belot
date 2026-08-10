@@ -71,6 +71,8 @@ import {
   type TournamentSummarySnapshot,
   type TournamentDetailSnapshot,
   type TournamentCreateInput,
+  type TopicSnapshot,
+  type TopicMessageSnapshot,
   type TournamentPartnerCandidateSnapshot,
   type TournamentPartnerInviteSnapshot,
   type TournamentMatchAssignmentSnapshot,
@@ -3466,6 +3468,81 @@ async function deleteAdminMatchRoom(
   }
 }
 
+async function loadProfileById(
+  profileId: string,
+): Promise<
+  | { ok: true; profile: PlayerPublicProfileSnapshot }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/profiles/${encodeURIComponent(profileId)}`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as { ok: boolean; message?: string; profile?: PlayerPublicProfileSnapshot }
+    if (!response.ok || !data.ok || !data.profile) {
+      return { ok: false, message: data.message ?? 'Профилът не беше зареден.' }
+    }
+    return { ok: true, profile: data.profile }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadTopics(): Promise<
+  | { ok: true; topics: TopicSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as { ok: boolean; message?: string; topics?: TopicSnapshot[] }
+    if (!response.ok || !data.ok || !Array.isArray(data.topics)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на темите.' }
+    }
+    return { ok: true, topics: data.topics }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadTopicMessages(
+  topicId: string,
+  beforeSeq: number | null,
+): Promise<
+  | { ok: true; messages: TopicMessageSnapshot[]; hasMore: boolean; oldestSeq: number | null }
+  | { ok: false; message: string }
+> {
+  try {
+    const qs = new URLSearchParams()
+    if (beforeSeq !== null) qs.set('before', String(beforeSeq))
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/messages?${qs.toString()}`,
+      { method: 'GET', credentials: 'include' },
+    )
+    const data = (await response.json()) as {
+      ok: boolean
+      message?: string
+      messages?: TopicMessageSnapshot[]
+      hasMore?: boolean
+      oldestSeq?: number | null
+    }
+    if (!response.ok || !data.ok || !Array.isArray(data.messages)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на съобщенията.' }
+    }
+    return {
+      ok: true,
+      messages: data.messages,
+      hasMore: data.hasMore ?? false,
+      oldestSeq: data.oldestSeq ?? null,
+    }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function loadTournaments(
   params: { mine: boolean; page: number },
 ): Promise<
@@ -4104,6 +4181,9 @@ lobby = createLobbyFlowController({
     | { ok: false; message: string; forbidden?: boolean }
   >,
   onTournamentsLoad: (params) => loadTournaments(params),
+  onTopicsLoad: () => loadTopics(),
+  onProfileByIdLoad: (profileId) => loadProfileById(profileId),
+  onTopicMessagesLoad: (topicId, beforeSeq) => loadTopicMessages(topicId, beforeSeq),
   onTournamentCreate: (input) => createTournamentRequest(input),
   onTournamentDetailLoad: (tournamentId) => loadTournamentDetail(tournamentId),
   onTournamentUnlock: (tournamentId, password) => unlockTournamentDetail(tournamentId, password),
@@ -4878,6 +4958,7 @@ const _VALID_PATHS = new Set([
   '/players',
   '/ranking',
   '/tournaments',
+  '/topics',
   '/shop',
   '/friends',
   '/chat',

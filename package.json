@@ -16,6 +16,8 @@
     "check:bootstrap-recovery": "npx tsx scripts/checkBootstrapRecovery.ts",
     "check:consent-analytics": "npx tsx scripts/checkConsentAnalytics.ts",
     "check:chat-draft-preserved": "npx tsx scripts/checkChatDraftPreserved.ts",
+    "check:topics-switch-race": "npx tsx scripts/checkTopicsSwitchRace.ts",
+    "check:profile-popup-mobile-responsive": "npx tsx scripts/checkProfilePopupMobileResponsive.ts",
     "check:support-chat-typing-stability": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSupportChatTypingStability.ts",
     "check:all-chat-typing-stability": "node server/node_modules/tsx/dist/cli.mjs scripts/checkAllChatTypingStability.ts",
     "check:chat-send-refocus": "node server/node_modules/tsx/dist/cli.mjs scripts/checkChatSendRefocus.ts",

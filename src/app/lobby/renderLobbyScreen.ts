@@ -27,6 +27,8 @@ import type {
   TournamentPartnerCandidateSnapshot,
   TournamentPartnerInviteSnapshot,
   TournamentSummarySnapshot,
+  TopicSnapshot,
+  TopicMessageSnapshot,
 } from '../network/createGameServerClient'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, ActiveRoomSnapshot } from '../adminServer/adminServerTypes'
 import { isBotsOnlyActiveRoom, isStaleActiveRoom } from '../adminServer/adminServerTypes'
@@ -74,6 +76,7 @@ import {
   renderTournamentHowItWorksPage,
   extractTournamentCreateInputFromForm,
 } from './renderTournamentsScreen'
+import { renderTopicsScreen } from './renderTopicsScreen'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import { renderLevelLockedStakePopup, attachLevelLockedStakePopupEventListeners, type LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
@@ -308,7 +311,17 @@ export type GuestContactFormInput = {
 }
 
 export type LobbyScreenState = {
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
+  topicsLoading: boolean
+  topicsErrorText: string | null
+  topics: TopicSnapshot[] | null
+  activeTopicId: string | null
+  topicMessagesLoading: boolean
+  topicMessagesErrorText: string | null
+  topicMessages: TopicMessageSnapshot[] | null
+  topicMessagesHasMore: boolean
+  topicMessagesOldestSeq: number | null
+  topicOlderMessagesLoading: boolean
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -671,6 +684,11 @@ export type RenderLobbyScreenOptions = {
   onLeaderboardsClick: () => void
   onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
   onTournamentsClick: () => void
+  onTopicsClick: () => void
+  onTopicChipClick: (topicId: string) => void
+  onTopicsBackToGeneral: () => void
+  onTopicMessagesLoadOlder: () => void
+  onTopicMessageAuthorClick: (profileId: string, displayName: string) => void
   onTournamentHowItWorksOpen: () => void
   onTournamentsFilterChange: (filter: 'all' | 'mine') => void
   onTournamentCreatePopupOpen: () => void
@@ -1826,6 +1844,7 @@ function renderNav(state: LobbyScreenState): string {
   const chatActive = activeView === 'chat'
   const leaderboardsActive = activeView === 'leaderboards'
   const tournamentsActive = activeView === 'tournaments' || activeView === 'tournament-detail'
+  const topicsActive = activeView === 'topics'
   const shopActive = activeView === 'shop'
   const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'admin-tournaments' || activeView === 'admin-tournament-detail' || activeView === 'guest-contact-messages'
   const lobbyActive = activeView === 'tables'
@@ -2007,6 +2026,22 @@ function renderNav(state: LobbyScreenState): string {
           </svg>
           Турнири
         </a>
+        ${state.profile.profileId !== null ? `
+          <a href="/topics" data-lobby-nav-topics="1" ${topicsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+            display:flex; align-items:center; gap:10px;
+            padding:0 18px;
+            background:${topicsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+            font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+            color:${topicsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+            border-bottom:2px solid ${topicsActive ? '#d4a520' : 'transparent'};
+            text-decoration:none; height:100%;
+          ">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+            Теми
+          </a>
+        ` : ''}
         <a href="/players" data-lobby-nav-players="1" ${playersActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
@@ -3627,6 +3662,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
             <button type="button" data-lobby-nav-leaderboards="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('leaderboards', 'Класация')}</button>
             <button type="button" data-lobby-nav-tournaments="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('tournaments', 'Турнири')}</button>
             ${state.profile.profileId !== null ? `
+              <button type="button" data-lobby-nav-topics="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('topics', 'Теми')}</button>
               <button type="button" data-lobby-nav-friends="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('friends', `Приятели${(state.friendships?.incomingPending.length ?? 0) > 0 ? ` (${state.friendships?.incomingPending.length ?? 0})` : ''}`)}</button>
               <button type="button" data-lobby-nav-chat="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('chat', `Чат${unreadChatCount > 0 ? ` (${unreadChatCount})` : ''}`)}</button>
               <button type="button" data-lobby-nav-blocked-players="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('blocked', 'Блокирани')}</button>
@@ -3660,7 +3696,7 @@ function mobileMenuButtonStyle(background = 'rgba(255,255,255,0.055)', color = '
 }
 
 function mobileMenuSvgItemContent(
-  icon: 'admin' | 'blocked' | 'chat' | 'friends' | 'leaderboards' | 'lobby' | 'login' | 'logout' | 'players' | 'shop' | 'support' | 'tournaments',
+  icon: 'admin' | 'blocked' | 'chat' | 'friends' | 'leaderboards' | 'lobby' | 'login' | 'logout' | 'players' | 'shop' | 'support' | 'tournaments' | 'topics',
   label: string,
 ): string {
   const stroke = icon === 'logout' ? '#fecaca' : '#d4a520'
@@ -3672,7 +3708,7 @@ function mobileMenuSvgItemContent(
         ? '<path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v6a5 5 0 0 1-10 0z"/><path d="M5 4H3v2a4 4 0 0 0 4 4"/><path d="M19 4h2v2a4 4 0 0 1-4 4"/>'
       : icon === 'blocked'
         ? '<circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>'
-      : icon === 'chat'
+      : icon === 'chat' || icon === 'topics'
         ? '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'
       : icon === 'friends'
         ? '<path d="m11 17 2 2a1 1 0 1 0 3-3"/><path d="m14 14 2.5 2.5a1 1 0 1 0 3-3l-3.88-3.88a3 3 0 0 0-4.24 0l-.88.88a1 1 0 1 1-3-3l2.81-2.81a5.79 5.79 0 0 1 7.06-.87l.47.28a2 2 0 0 0 1.42.25L21 4"/><path d="m21 3 1 11h-1"/><path d="M3 3 2 14l6.5 6.5a1 1 0 1 0 3-3"/><path d="M3 4h8"/>'
@@ -4460,8 +4496,16 @@ function renderMobileLobbyScreenContent(
   canStartSearch: boolean,
 ): string {
   if (state.view !== 'tables') {
+    // Topics view се нуждае от <main>, участващ в flex height chain-a
+    // (flex:1;min-height:0), за да може renderTopicsScreen да получи
+    // изчислима height отдолу нагоре — вместо обичайния "padding + normal
+    // block flow", който разчита на родителския page-level overflow-y:auto
+    // (изрично изключен за Topics, виж root wrapper-а по-горе).
+    const mainStyle = state.view === 'topics'
+      ? 'flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;'
+      : 'padding:12px;'
     return `
-      <main style="padding:12px;">
+      <main style="${mainStyle}">
         ${state.view === 'support'
           ? renderAdminSupportPage(state, true)
           : state.view === 'guest-contact-messages'
@@ -4535,6 +4579,8 @@ function renderMobileLobbyScreenContent(
             ? renderTournamentDetailScreen(state)
           : state.view === 'tournament-how-it-works'
             ? renderTournamentHowItWorksPage(true)
+          : state.view === 'topics'
+            ? renderTopicsScreen(state)
           : state.view === 'friends'
             ? renderMobileFriendsDirectory(state)
           : state.view === 'chat'
@@ -8929,6 +8975,19 @@ export function renderLobbyScreen(
   }
   setLobbyChatBodyScrollLocked(shouldShowLobbyChatFullscreen)
 
+  // Prepend-safe scroll preservation за "Теми" message stream (т.4/7 от Етап 1
+  // брифа): при зареждане на по-стари съобщения над текущите, потребителят не
+  // трябва визуално да "подскочи". За разлика от savedLobbyChatScrollTop
+  // по-долу (append в дъното → пазим абсолютен scrollTop), тук пазим
+  // (scrollHeight - scrollTop) — разстоянието от ДОЛНИЯ край на текущото
+  // съдържание, което остава константно дори когато нов, по-висок контент
+  // бъде добавен НАД видимата зона. След re-render изваждаме тази стойност
+  // от новата scrollHeight, за да получим правилния нов scrollTop.
+  const prevTopicMessagesScrollEl = root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
+  const savedTopicMessagesDistanceFromBottom = prevTopicMessagesScrollEl
+    ? prevTopicMessagesScrollEl.scrollHeight - prevTopicMessagesScrollEl.scrollTop
+    : null
+
   const savedScrollTop = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')?.scrollTop ?? 0
   // Отделно от savedScrollTop по-горе: списъкът с admin support запитвания има собствен
   // scroll контейнер, за да не се презаписва позицията му от detail изгледа на разговора
@@ -9016,14 +9075,16 @@ export function renderLobbyScreen(
         position:fixed;inset:0;
         background:#000000;color:#ffffff;
         font-family:Arial, Helvetica, sans-serif;
-        overflow-y:auto;overflow-x:hidden;
+        ${state.view === 'topics'
+          ? 'overflow:hidden;display:flex;flex-direction:column;'
+          : 'overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;'}
         z-index:50;
-        -webkit-overflow-scrolling:touch;
       "
     >
       ${renderMobileMenu(state)}
-      ${renderMobileLobbyScreenContent(state, profileName, canStartSearch)}
-      ${renderMobileFooter()}
+      ${state.view === 'topics'
+        ? `<div style="flex:1;min-height:0;display:flex;flex-direction:column;">${renderMobileLobbyScreenContent(state, profileName, canStartSearch)}</div>`
+        : `${renderMobileLobbyScreenContent(state, profileName, canStartSearch)}${renderMobileFooter()}`}
 
       ${state.isSearching ? `
         <div style="
@@ -9086,8 +9147,9 @@ export function renderLobbyScreen(
         background: #242424;
         color: #ffffff;
         font-family: Arial, Helvetica, sans-serif;
-        overflow-y: auto;
-        overflow-x: hidden;
+        ${state.view === 'topics'
+          ? 'overflow:hidden;display:flex;flex-direction:column;'
+          : 'overflow-y:auto;overflow-x:hidden;'}
         z-index: 50;
       "
     >
@@ -9137,10 +9199,14 @@ export function renderLobbyScreen(
         }
       </style>
 
-      <div data-lobby-scale-stage="1" style="width:1640px; margin:0 auto; zoom:var(--lobby-scale);">
+      <div data-lobby-scale-stage="1" style="${state.view === 'topics'
+        ? 'width:100%;height:100%;display:flex;flex-direction:column;min-height:0;'
+        : 'width:1640px; margin:0 auto; zoom:var(--lobby-scale);'}">
         ${renderNav(state)}
 
-        <div style="max-width: 1640px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;">
+        <div style="${state.view === 'topics'
+          ? 'flex:1;min-height:0;display:flex;flex-direction:column;max-width:1640px;width:100%;margin:0 auto;padding:16px 20px;background:#000000;box-sizing:border-box;overflow:hidden;'
+          : 'max-width: 1640px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;'}">
           ${state.view === 'support'
             ? renderAdminSupportPage(state)
             : state.view === 'guest-contact-messages'
@@ -9214,6 +9280,8 @@ export function renderLobbyScreen(
               ? renderTournamentDetailScreen(state)
             : state.view === 'tournament-how-it-works'
               ? renderTournamentHowItWorksPage(false)
+            : state.view === 'topics'
+              ? renderTopicsScreen(state)
             : state.view === 'friends'
               ? renderFriendsDirectory(state)
             : state.view === 'chat'
@@ -9246,7 +9314,7 @@ export function renderLobbyScreen(
                 privateRoomsCount,
               )}
             `}
-          ${renderFooter()}
+          ${state.view === 'topics' ? '' : renderFooter()}
         </div>
       </div>
 
@@ -9641,6 +9709,109 @@ export function renderLobbyScreen(
         options.onTournamentsClick()
       })
     })
+
+  root
+    .querySelectorAll<HTMLElement>('[data-lobby-nav-topics="1"]')
+    .forEach((element) => {
+      element.addEventListener('click', (e) => {
+        if (!shouldHandleSpaLinkClick(e as MouseEvent)) return
+        e.preventDefault()
+        options.onTopicsClick()
+      })
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-topic-chip]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const topicId = button.dataset.topicChip ?? ''
+      if (topicId) options.onTopicChipClick(topicId)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-topics-back-to-general="1"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      options.onTopicsBackToGeneral()
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-author]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const profileId = button.dataset.topicMessageAuthor ?? ''
+      const displayName = button.dataset.topicMessageAuthorName ?? ''
+      if (profileId) options.onTopicMessageAuthorClick(profileId, displayName)
+    })
+  })
+
+  const topicMessagesScroll = root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
+  if (topicMessagesScroll) {
+    topicMessagesScroll.addEventListener('scroll', () => {
+      if (topicMessagesScroll.scrollTop <= 40) {
+        options.onTopicMessagesLoadOlder()
+      }
+    })
+  }
+
+  const topicsScreenRoot = root.querySelector<HTMLElement>('[data-topics-screen="1"]')
+  const topicsBarScroll = root.querySelector<HTMLElement>('[data-topics-bar-scroll="1"]')
+  const topicsArrowLeft = root.querySelector<HTMLButtonElement>('[data-topics-arrow="left"]')
+  const topicsArrowRight = root.querySelector<HTMLButtonElement>('[data-topics-arrow="right"]')
+
+  if (topicsBarScroll) {
+    const TOPICS_ARROW_SCROLL_STEP_PX = 160
+    const TOPICS_EDGE_EPSILON_PX = 2
+
+    function updateTopicsArrowState(): void {
+      if (!topicsBarScroll) return
+      const maxScrollLeft = topicsBarScroll.scrollWidth - topicsBarScroll.clientWidth
+      const atStart = topicsBarScroll.scrollLeft <= TOPICS_EDGE_EPSILON_PX
+      const atEnd = topicsBarScroll.scrollLeft >= maxScrollLeft - TOPICS_EDGE_EPSILON_PX
+      if (topicsArrowLeft) topicsArrowLeft.disabled = atStart
+      if (topicsArrowRight) topicsArrowRight.disabled = atEnd || maxScrollLeft <= 0
+    }
+
+    // Wheel routing (т.7 от брифа): нормален vertical wheel ВСЯКЪДЕ в Topics
+    // screen-а — заглавие, topics bar, празно място между fixed-top и
+    // stream-а — трябва да скролва message stream-а, НЕ да мести topics
+    // strip-а хоризонтално, НЕ да chain-ва към page/lobby root. Attach-нато
+    // на data-topics-screen (целия екран), не само на bar-а, за да покрие
+    // цялата "fixed top" зона с едно място — bubble-натите wheel events от
+    // header/bar/empty space стигат тук. data-topic-messages-scroll вече
+    // си има native overflow-y:auto — не е нужен routing върху него самия
+    // (естественият browser scroll там вече върши правилното нещо), затова
+    // изрично го изключваме от target-а тук, за да не дублираме handling.
+    //
+    // Истинско horizontal действие (trackpad deltaX, Shift+wheel — браузърите
+    // превръщат Shift+wheel в deltaX естествено) продължава да движи topics
+    // strip-а нормално, без preventDefault. Локално само за Topics screen-а
+    // — не пипа wheel поведението никъде другаде в приложението.
+    topicsScreenRoot?.addEventListener('wheel', (event) => {
+      const target = event.target as HTMLElement | null
+      if (target?.closest('[data-topic-messages-scroll="1"]')) return
+
+      const isPrimarilyVertical = Math.abs(event.deltaY) > Math.abs(event.deltaX)
+      if (!isPrimarilyVertical) return
+
+      event.preventDefault()
+      if (topicMessagesScroll) {
+        topicMessagesScroll.scrollTop += event.deltaY
+      }
+    }, { passive: false })
+
+    topicsBarScroll.addEventListener('scroll', () => {
+      updateTopicsArrowState()
+    }, { passive: true })
+
+    topicsArrowLeft?.addEventListener('click', () => {
+      topicsBarScroll.scrollBy({ left: -TOPICS_ARROW_SCROLL_STEP_PX, behavior: 'smooth' })
+    })
+    topicsArrowRight?.addEventListener('click', () => {
+      topicsBarScroll.scrollBy({ left: TOPICS_ARROW_SCROLL_STEP_PX, behavior: 'smooth' })
+    })
+
+    // Начално състояние (след render/resize/topic switch) — arrow disabled
+    // атрибутите в markup-а са статични ("disabled" always в render-а),
+    // трябва реално измерена проверка веднага след DOM-ът е в документа.
+    updateTopicsArrowState()
+  }
 
   root
     .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-shop="1"]')
@@ -11614,6 +11785,20 @@ export function renderLobbyScreen(
   const newScrollEl = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')
   if (newScrollEl && savedScrollTop > 0) {
     newScrollEl.scrollTop = savedScrollTop
+  }
+
+  const newTopicMessagesScrollEl = root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
+  if (newTopicMessagesScrollEl) {
+    if (savedTopicMessagesDistanceFromBottom !== null) {
+      // Prepend (или обикновен re-render на същия екран) — възстановяваме
+      // точната визуална позиция чрез запазената delta от долния край.
+      newTopicMessagesScrollEl.scrollTop = newTopicMessagesScrollEl.scrollHeight - savedTopicMessagesDistanceFromBottom
+    } else {
+      // Първо зареждане на тема (или превключване към нова тема) — viewport
+      // към последните съобщения (т.4 от Етап 1 брифа: "viewport е към
+      // долната част/последните съобщения").
+      newTopicMessagesScrollEl.scrollTop = newTopicMessagesScrollEl.scrollHeight
+    }
   }
 
   const newAdminSupportMobileListEl = root.querySelector<HTMLElement>('[data-admin-support-mobile-list-scroll="1"]')
