@@ -38,6 +38,8 @@ import { createTopicMessageStore } from '../src/db/topicMessageStore.js'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const serverRoot = resolve(__dirname, '..')
 const topicsMigrationPath = resolve(serverRoot, 'database/migrations/20260810_002_create_topics_and_messages.sql')
+const likesMigrationPath = resolve(serverRoot, 'database/migrations/20260811_001_create_topic_message_likes.sql')
+const attachmentsMigrationPath = resolve(serverRoot, 'database/migrations/20260811_002_create_topic_message_attachments.sql')
 
 // ─── Брояч ───────────────────────────────────────────────────────────────
 
@@ -292,6 +294,8 @@ await withTempDir(async (dir) => {
   const db = new DatabaseSync(dbPath, { open: true })
   buildBaseSchema(db)
   await applyMigrationFile(db, topicsMigrationPath)
+  await applyMigrationFile(db, likesMigrationPath)
+  await applyMigrationFile(db, attachmentsMigrationPath)
 
   seedProfile(db, 'sender-1')
   seedProfile(db, 'sender-2')
@@ -469,6 +473,8 @@ await withTempDir(async (dir) => {
   const db = new DatabaseSync(dbPath, { open: true })
   buildBaseSchema(db)
   await applyMigrationFile(db, topicsMigrationPath)
+  await applyMigrationFile(db, likesMigrationPath)
+  await applyMigrationFile(db, attachmentsMigrationPath)
 
   seedProfile(db, 'profile-with-avatar')
   seedProfile(db, 'profile-without-avatar')
@@ -558,6 +564,8 @@ await withTempDir(async (dir) => {
   const db = new DatabaseSync(dbPath, { open: true })
   buildBaseSchema(db)
   await applyMigrationFile(db, topicsMigrationPath)
+  await applyMigrationFile(db, likesMigrationPath)
+  await applyMigrationFile(db, attachmentsMigrationPath)
 
   const authorIds = ['author-1', 'author-2', 'author-3']
   for (const id of authorIds) seedProfile(db, id)

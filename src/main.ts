@@ -4074,11 +4074,11 @@ lobby = createLobbyFlowController({
   onTopicMessagesUnsubscribe: (topicId) => {
     client.unsubscribeTopicMessages(topicId)
   },
-  onTopicMessageSend: (topicId, body, requestId) => {
-    client.sendTopicMessage(topicId, body, requestId)
+  onTopicMessageSend: (topicId, body, requestId, imageDataUrl) => {
+    client.sendTopicMessage(topicId, body, requestId, imageDataUrl)
   },
-  onTopicReplySend: (topicId, parentMessageId, body, requestId) => {
-    client.sendTopicReply(topicId, parentMessageId, body, requestId)
+  onTopicReplySend: (topicId, parentMessageId, body, requestId, imageDataUrl) => {
+    client.sendTopicReply(topicId, parentMessageId, body, requestId, imageDataUrl)
   },
   onTopicMessageLikeToggle: (messageId, requestId) => {
     client.toggleTopicMessageLike(messageId, requestId)

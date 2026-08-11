@@ -319,6 +319,8 @@ export type GuestContactFormInput = {
 }
 
 export type LobbyScreenState = {
+  /** Established API origin resolver (main.ts getApiBaseUrl) — виж коментара в createLobbyFlowController.ts за пълния rationale. Prefix-ва се пред protected attachment view/download/viewer URL-и (chat/support/topics), за да не се resolve-ват спрямо Vite dev origin-а (:5173) в local dev split-origin setup. */
+  apiBaseUrl: string
   view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
   topicsLoading: boolean
   topicsErrorText: string | null
@@ -334,6 +336,7 @@ export type LobbyScreenState = {
   topicComposerDraftByTopicId: Record<string, string>
   topicComposerPendingRequestIdByTopicId: Record<string, string | null>
   topicComposerErrorTextByTopicId: Record<string, string | null>
+  topicComposerPendingImageByTopicId: Record<string, { file: File; previewUrl: string } | undefined>
   topicExpandedReplyRootIds: string[]
   topicRepliesByRootId: Record<string, TopicReplySnapshot[] | null>
   topicRepliesHasMoreByRootId: Record<string, boolean>
@@ -342,6 +345,8 @@ export type LobbyScreenState = {
   topicReplyComposerPendingRequestIdByRootId: Record<string, string | null>
   topicReplyComposerErrorTextByRootId: Record<string, string | null>
   topicReplyComposerOpenRootId: string | null
+  topicReplyComposerPendingImageByRootId: Record<string, { file: File; previewUrl: string } | undefined>
+  imageViewer: { viewUrl: string; downloadUrl: string; historyPushed: boolean } | null
   topicMessageLikeCountById: Record<string, number>
   topicMessageViewerHasLikedById: Record<string, boolean>
   topicMessageLikePendingRequestIdById: Record<string, string | null>
@@ -722,12 +727,18 @@ export type RenderLobbyScreenOptions = {
   onTopicComposerInput: (topicId: string, value: string) => void
   onTopicComposerSubmit: (topicId: string) => void
   onTopicComposerNonVipTap: () => void
+  onTopicComposerImageSelect: (topicId: string, file: File) => void
+  onTopicComposerImageRemove: (topicId: string) => void
   onTopicRepliesLoadMore: (rootMessageId: string) => void
   onTopicMessageLikeToggleClick: (messageId: string) => void
   onTopicReplyClick: (rootMessageId: string) => void
   onTopicReplyComposerCancel: (rootMessageId: string) => void
   onTopicReplyComposerInput: (rootMessageId: string, value: string) => void
   onTopicReplyComposerSubmit: (rootMessageId: string) => void
+  onTopicReplyComposerImageSelect: (rootMessageId: string, file: File) => void
+  onTopicReplyComposerImageRemove: (rootMessageId: string) => void
+  onImageViewerOpen: (attachment: { viewUrl: string; downloadUrl: string }) => void
+  onImageViewerClose: () => void
   onTopicsVipPopupClose: () => void
   onTopicsVipPopupClaimLaunchGift: () => void
   onTopicsVipPopupSeePlans: () => void
@@ -921,6 +932,14 @@ export type RenderLobbyScreenOptions = {
 const MAX_PROFILE_GALLERY_IMAGES = 6
 
 let popupRootEl: HTMLElement | null = null
+// Image viewer delegated listener-и (click + Esc) — attach-ват се ЕДИНИЧНО
+// (module-level guard), не при всеки render, защото `root` е стабилен
+// елемент между render-ите (само innerHTML се презаписва) — повторен
+// addEventListener на всеки render би трупал duplicate handlers.
+let imageViewerRootListenerAttachedFor: HTMLElement | null = null
+let imageViewerEscListenerAttached = false
+let latestImageViewerOpenHandler: ((attachment: { viewUrl: string; downloadUrl: string }) => void) | null = null
+let latestImageViewerCloseHandler: (() => void) | null = null
 let privateRoomInfoDismissTimer: ReturnType<typeof setTimeout> | null = null
 let mobileMenuOpen = false
 let mobileMenuCloseTimer: ReturnType<typeof setTimeout> | null = null
@@ -4459,7 +4478,7 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
               const hasText = message.body.trim().length > 0
               return `<div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:82%;">${message.attachment ? `
                 <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
-                  ${renderChatAttachmentBubble(message.attachment)}
+                  ${renderChatAttachmentBubble(message.attachment, state.apiBaseUrl)}
                   ${hasText ? `<div style="padding:0 4px 2px;font-size:13px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
                 </div>
               ` : `
@@ -4893,29 +4912,110 @@ function renderFriendsDirectory(state: LobbyScreenState): string {
 // createChatAttachmentWebp в index.ts), за да няма layout shift докато
 // снимката се зарежда. Всички динамични стойности минават през escapeHtml
 // (никакво innerHTML с непроверени attachment полета).
-type RenderableImageAttachment = {
+export type RenderableImageAttachment = {
   width: number
   height: number
   viewUrl: string
   downloadUrl: string
 }
 
-function renderChatAttachmentBubble(attachment: RenderableImageAttachment): string {
+// Protected attachment view/download URL-ите, връщани от сървъра
+// (chatStore/supportStore/topicMessageStore buildAttachmentUrls), винаги са
+// relative пътища (/api/.../attachments/...) — коректно за same-origin
+// production, но в local dev frontend-ът тича на отделен Vite origin
+// (:5173), докато бекендът е на :3001 (виж vite.config.ts — proxy-нат е
+// само /uploads, НЕ /api). Relative src/href в browser-а resolve-ва спрямо
+// document origin-а (:5173), удря SPA fallback-а и връща index.html вместо
+// снимката (Content-Type: text/html). Reuse на established resolver-а
+// (main.ts getApiBaseUrl — СЪЩИЯТ helper, ползван от ВСЕКИ fetch() в
+// приложението): localhost/127.0.0.1 → изричен :3001 origin; иначе празен
+// string (production same-origin/proxy, url-ът остава relative непроменен).
+export function resolveAttachmentUrl(apiBaseUrl: string, path: string): string {
+  return `${apiBaseUrl}${path}`
+}
+
+// Click отваря reusable in-app image viewer (renderImageViewerOverlay по-долу)
+// ВМЕСТО target="_blank" — старият new-tab подход бе проблемен за PWA Back
+// button (виж т.11/12 от Attachment брифа: потребителят не можеше нормално
+// да затвори new tab-а и стигаше до затваряне на цялото приложение).
+export function renderChatAttachmentBubble(attachment: RenderableImageAttachment, apiBaseUrl: string): string {
+  const viewUrl = resolveAttachmentUrl(apiBaseUrl, attachment.viewUrl)
+  const downloadUrl = resolveAttachmentUrl(apiBaseUrl, attachment.downloadUrl)
   return `
-    <div style="display:grid;gap:6px;">
-      <a href="${escapeHtml(attachment.viewUrl)}" target="_blank" rel="noopener noreferrer" style="display:block;border-radius:8px;overflow:hidden;line-height:0;">
+    <div style="display:grid;gap:6px;max-width:calc(100% - 12px);">
+      <button
+        type="button"
+        data-image-viewer-open="1"
+        data-image-viewer-view-url="${escapeHtml(viewUrl)}"
+        data-image-viewer-download-url="${escapeHtml(downloadUrl)}"
+        style="display:block;border-radius:8px;overflow:hidden;line-height:0;border:0;padding:0;background:transparent;cursor:pointer;text-align:left;width:100%;"
+      >
         <img
-          src="${escapeHtml(attachment.viewUrl)}"
+          src="${escapeHtml(viewUrl)}"
           width="${attachment.width}"
           height="${attachment.height}"
           loading="lazy"
           alt=""
-          style="display:block;max-width:100%;width:100%;height:auto;border-radius:8px;background:rgba(255,255,255,0.06);"
+          style="display:block;max-width:100%;width:100%;height:auto;border-radius:8px;background:rgba(255,255,255,0.06);pointer-events:none;"
         >
-      </a>
-      <a href="${escapeHtml(attachment.downloadUrl)}" download style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:900;color:inherit;text-decoration:none;opacity:0.82;">
+      </button>
+      <a href="${escapeHtml(downloadUrl)}" download style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:900;color:inherit;text-decoration:none;opacity:0.82;">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
         Изтегли файл
+      </a>
+    </div>
+  `
+}
+
+// Reusable fullscreen in-app image viewer (lightbox) — заменя target="_blank"
+// навсякъде в приложението (chat + Topics, виж т.11/13 от Attachment брифа).
+// Feature-agnostic: не знае нищо за chat/Topics, работи само с viewUrl/
+// downloadUrl. History integration (X/Esc/backdrop → history.back(),
+// system Back → popstate consume) е в createLobbyFlowController.ts
+// (openImageViewer/closeImageViewer/handleWindowPopstate).
+function renderImageViewerOverlay(state: LobbyScreenState): string {
+  const viewer = state.imageViewer
+  if (!viewer) return ''
+
+  return `
+    <div
+      data-image-viewer-backdrop="1"
+      style="
+        position:fixed;inset:0;z-index:9800;
+        background:rgba(0,0,0,0.92);
+        display:flex;align-items:center;justify-content:center;
+        padding:env(safe-area-inset-top,0) env(safe-area-inset-right,0) env(safe-area-inset-bottom,0) env(safe-area-inset-left,0);
+      "
+    >
+      <button
+        type="button"
+        data-image-viewer-close="1"
+        title="Затвори"
+        aria-label="Затвори"
+        style="
+          position:fixed;top:calc(12px + env(safe-area-inset-top,0));right:calc(12px + env(safe-area-inset-right,0));z-index:9820;
+          width:44px;height:44px;border-radius:50%;border:1px solid rgba(255,255,255,0.24);
+          background:rgba(10,10,10,0.72);color:#f8fafc;font-size:22px;font-weight:900;line-height:1;
+          display:flex;align-items:center;justify-content:center;cursor:pointer;
+        "
+      >&#10005;</button>
+      <img
+        src="${escapeHtml(viewer.viewUrl)}"
+        alt=""
+        style="max-width:92vw;max-height:88vh;width:auto;height:auto;object-fit:contain;border-radius:6px;box-shadow:0 24px 64px rgba(0,0,0,0.6);"
+      >
+      <a
+        href="${escapeHtml(viewer.downloadUrl)}"
+        download
+        style="
+          position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom,0));transform:translateX(-50%);z-index:9820;
+          display:inline-flex;align-items:center;gap:8px;
+          padding:9px 16px;border-radius:20px;border:1px solid rgba(212,165,32,0.4);
+          background:rgba(10,10,10,0.78);color:#d4a520;font-size:13px;font-weight:900;text-decoration:none;
+        "
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+        Изтегли
       </a>
     </div>
   `
@@ -5261,7 +5361,7 @@ function renderChatPanel(state: LobbyScreenState): string {
               <div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:min(72%,620px);display:grid;gap:3px;">
                 ${message.attachment ? `
                   <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
-                    ${renderChatAttachmentBubble(message.attachment)}
+                    ${renderChatAttachmentBubble(message.attachment, state.apiBaseUrl)}
                     ${hasText ? `<div style="padding:0 4px 2px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
                   </div>
                 ` : `
@@ -7328,7 +7428,7 @@ function formatSupportTime(isoString: string): string {
   }
 }
 
-export function renderSupportMessagesBubbles(messages: SupportMessageSnapshot[], loading: boolean): string {
+export function renderSupportMessagesBubbles(messages: SupportMessageSnapshot[], loading: boolean, apiBaseUrl: string): string {
   if (loading) {
     return `<div style="flex:1;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:14px;font-weight:800;">Зареждане...</div>`
   }
@@ -7346,7 +7446,7 @@ export function renderSupportMessagesBubbles(messages: SupportMessageSnapshot[],
         border:1px solid ${msg.isFromAdmin ? 'rgba(212,165,32,0.30)' : 'rgba(255,255,255,0.10)'};
         color:#f8fafc;font-size:14px;font-weight:600;line-height:1.55;word-break:break-word;
       ">
-        ${msg.attachment ? renderChatAttachmentBubble(msg.attachment) : ''}
+        ${msg.attachment ? renderChatAttachmentBubble(msg.attachment, apiBaseUrl) : ''}
         ${hasBody ? `<div style="${msg.attachment ? 'margin-top:8px;' : ''}">${renderLinkifiedChatMessageBody(msg.body)}</div>` : ''}
       </div>
       <div style="font-size:11px;color:rgba(255,255,255,0.35);font-weight:600;padding:0 4px;">
@@ -7404,7 +7504,7 @@ function renderSupportPopup(state: LobbyScreenState): string {
           display:flex;flex-direction:column;gap:12px;
           min-height:220px;max-height:400px;
         ">
-          ${renderSupportMessagesBubbles(state.supportMessages, state.supportLoading)}
+          ${renderSupportMessagesBubbles(state.supportMessages, state.supportLoading, state.apiBaseUrl)}
         </div>
 
         ${state.supportErrorText ? `
@@ -7748,7 +7848,7 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
       flex:1;min-height:0;overflow-y:auto;padding:20px;
       display:flex;flex-direction:column;gap:10px;
     ">
-      ${renderSupportMessagesBubbles(state.adminSupportMessages, state.adminSupportMessagesLoading)}
+      ${renderSupportMessagesBubbles(state.adminSupportMessages, state.adminSupportMessagesLoading, state.apiBaseUrl)}
     </div>
     ${replyFormHtml}
   `
@@ -7824,7 +7924,7 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
             max-height:52vh;overflow-y:auto;padding:16px;
             display:flex;flex-direction:column;gap:10px;
           ">
-            ${renderSupportMessagesBubbles(state.adminSupportMessages, state.adminSupportMessagesLoading)}
+            ${renderSupportMessagesBubbles(state.adminSupportMessages, state.adminSupportMessagesLoading, state.apiBaseUrl)}
           </div>
           ${replyFormHtml}
         </section>
@@ -9202,6 +9302,7 @@ export function renderLobbyScreen(
     ${renderGiftCoinsModal(state)}
     ${renderGiftSuccessModal(state)}
     ${renderGiftReceivedModal(state)}
+    ${renderImageViewerOverlay(state)}
   ` : `
     <div
       ${mobileLayoutAttribute}
@@ -9476,6 +9577,7 @@ export function renderLobbyScreen(
     ${renderGiftCoinsModal(state)}
     ${renderGiftSuccessModal(state)}
     ${renderGiftReceivedModal(state)}
+    ${renderImageViewerOverlay(state)}
   `
 
   const mobileMenuEl = root.querySelector<HTMLDetailsElement>('[data-lobby-mobile-menu="1"]')
@@ -9916,6 +10018,32 @@ export function renderLobbyScreen(
         })
         keepComposerFocusOnPointerSubmit(topicsComposerSendBtn)
       }
+
+      // Image picker (Attachment feature) — non-VIP клик отваря СЪЩИЯ VIP gate
+      // като текстовото поле, БЕЗ да отваря file picker преди VIP check
+      // (Attachment брифа т.3 — "server-side authorization е задължителен
+      // security boundary", но UI-то също не трябва да покаже file picker-а).
+      const imagePickBtn = root.querySelector<HTMLButtonElement>(`[data-topics-image-pick="${cssEscape(topicId)}"]`)
+      const imageInput = root.querySelector<HTMLInputElement>(`[data-topics-image-input="${cssEscape(topicId)}"]`)
+      const imageRemoveBtn = root.querySelector<HTMLButtonElement>(`[data-topics-image-remove="${cssEscape(topicId)}"]`)
+
+      imagePickBtn?.addEventListener('click', () => {
+        if (isVipLocked) {
+          options.onTopicComposerNonVipTap()
+          return
+        }
+        imageInput?.click()
+      })
+      imageInput?.addEventListener('change', () => {
+        const file = imageInput.files?.[0] ?? null
+        imageInput.value = ''
+        if (topicId && file !== null) {
+          options.onTopicComposerImageSelect(topicId, file)
+        }
+      })
+      imageRemoveBtn?.addEventListener('click', () => {
+        if (topicId) options.onTopicComposerImageRemove(topicId)
+      })
     }
   }
 
@@ -9933,6 +10061,51 @@ export function renderLobbyScreen(
     root.querySelector<HTMLButtonElement>('[data-topics-vip-popup-see-plans="1"]')?.addEventListener('click', () => {
       options.onTopicsVipPopupSeePlans()
     })
+  }
+
+  // ─── Reusable in-app image viewer (lightbox) ─────────────────────────────
+  // Delegated click за отваряне — снимките се render-ват в множество
+  // message/reply rows (Topics + chat), delegation избягва N individual
+  // listener-и при всеки re-render. Затваряне: X бутон, backdrop click, Esc
+  // (desktop). History (system/PWA Back) е wire-нат отделно в
+  // createLobbyFlowController.ts (popstate listener), не тук.
+  {
+    if (imageViewerRootListenerAttachedFor !== root) {
+      imageViewerRootListenerAttachedFor = root
+      root.addEventListener('click', (event) => {
+        const target = event.target as HTMLElement | null
+        const openTrigger = target?.closest<HTMLElement>('[data-image-viewer-open="1"]')
+        if (openTrigger) {
+          const viewUrl = openTrigger.dataset.imageViewerViewUrl ?? ''
+          const downloadUrl = openTrigger.dataset.imageViewerDownloadUrl ?? ''
+          if (viewUrl && downloadUrl) {
+            latestImageViewerOpenHandler?.({ viewUrl, downloadUrl })
+          }
+          return
+        }
+        if (target?.closest('[data-image-viewer-close="1"]')) {
+          latestImageViewerCloseHandler?.()
+          return
+        }
+        if (target?.matches('[data-image-viewer-backdrop="1"]')) {
+          latestImageViewerCloseHandler?.()
+        }
+      })
+    }
+
+    if (!imageViewerEscListenerAttached) {
+      imageViewerEscListenerAttached = true
+      document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return
+        latestImageViewerCloseHandler?.()
+      })
+    }
+
+    // Handler референциите се обновяват при ВСЕКИ render (свеж `options`
+    // closure), но самите listener-и (click/keydown) се attach-ват само
+    // веднъж — виж module-level guard-овете по-горе.
+    latestImageViewerOpenHandler = (attachment) => options.onImageViewerOpen(attachment)
+    latestImageViewerCloseHandler = state.imageViewer ? () => options.onImageViewerClose() : null
   }
 
   // ─── UI polish pass v2: Topics desktop shell = РЕАЛНАТА рендирана navbar
@@ -10038,6 +10211,26 @@ export function renderLobbyScreen(
         }
       })
     }
+
+    // Reply composer се render-ва САМО за VIP (виж коментара при
+    // renderInlineReplyComposer) — non-VIP tap interception не е нужна тук.
+    const replyImagePickBtn = form.querySelector<HTMLButtonElement>(`[data-topics-reply-image-pick="${cssEscape(rootMessageId)}"]`)
+    const replyImageInput = form.querySelector<HTMLInputElement>(`[data-topics-reply-image-input="${cssEscape(rootMessageId)}"]`)
+    const replyImageRemoveBtn = form.querySelector<HTMLButtonElement>(`[data-topics-reply-image-remove="${cssEscape(rootMessageId)}"]`)
+
+    replyImagePickBtn?.addEventListener('click', () => {
+      replyImageInput?.click()
+    })
+    replyImageInput?.addEventListener('change', () => {
+      const file = replyImageInput.files?.[0] ?? null
+      replyImageInput.value = ''
+      if (file !== null) {
+        options.onTopicReplyComposerImageSelect(rootMessageId, file)
+      }
+    })
+    replyImageRemoveBtn?.addEventListener('click', () => {
+      options.onTopicReplyComposerImageRemove(rootMessageId)
+    })
   })
 
   root

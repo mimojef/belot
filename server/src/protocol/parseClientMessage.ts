@@ -575,11 +575,17 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       const requestId = normalizeRequiredText(parsed.requestId)
       if (requestId === null) return null
 
+      // imageDataUrl е опционален — само тип-проверка (string), decode/
+      // validate/process pipeline-ът (imageAttachments.ts) е в index.ts,
+      // симетрично на принципа "структура тук, семантика там" по-горе.
+      const imageDataUrl = typeof parsed.imageDataUrl === 'string' ? parsed.imageDataUrl : undefined
+
       return {
         type: 'send_topic_message',
         topicId,
         body: parsed.body,
         requestId: requestId.slice(0, 100),
+        ...(imageDataUrl !== undefined ? { imageDataUrl } : {}),
       }
     }
 
@@ -594,12 +600,15 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       const requestId = normalizeRequiredText(parsed.requestId)
       if (requestId === null) return null
 
+      const imageDataUrl = typeof parsed.imageDataUrl === 'string' ? parsed.imageDataUrl : undefined
+
       return {
         type: 'send_topic_reply',
         topicId,
         parentMessageId,
         body: parsed.body,
         requestId: requestId.slice(0, 100),
+        ...(imageDataUrl !== undefined ? { imageDataUrl } : {}),
       }
     }
 

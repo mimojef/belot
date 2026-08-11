@@ -40,6 +40,27 @@ export type TopicMessageAggregates = {
   viewerHasLiked: boolean
 }
 
+// Attachment metadata — reuse на СЪЩИЯ shape/модел като
+// ChatAttachmentSnapshot/support attachment (виж chatStore.ts): отделна
+// таблица (не колона в topic_messages), 1:1 с message_id, derived-at-read
+// viewUrl/downloadUrl (построени в index.ts, не тук — store-ът не знае
+// нищо за HTTP routing, само filename/dimensions/size).
+export type TopicMessageAttachmentRecord = {
+  storageFilename: string
+  width: number
+  height: number
+  byteSize: number
+  contentType: string
+}
+
+export type NewTopicMessageAttachmentInput = {
+  storageFilename: string
+  width: number
+  height: number
+  byteSize: number
+  contentType: string
+}
+
 export type TopicMessageStore = {
   /** Последните `limit` root съобщения в темата, подредени старо→ново (viewport към дъното). */
   getRecentMessages: (
@@ -67,13 +88,21 @@ export type TopicMessageStore = {
     limit: number,
     excludedSenderProfileIds: readonly string[],
   ) => TopicMessageHistoryPage
-  /** Вмъква ново ROOT съобщение (parent_message_id винаги NULL). */
+  /**
+   * Вмъква ново ROOT съобщение (parent_message_id винаги NULL). `attachment`
+   * опционален — insert на съобщение + attachment ред е в ЕДНА BEGIN
+   * IMMEDIATE транзакция (виж имплементацията), симетрично на
+   * chatStore.sendMessage/supportStore — файлът вече е записан на диск
+   * ПРЕДИ това извикване (index.ts координира file-write → DB-transaction →
+   * delete-on-failure).
+   */
   insertMessage: (input: {
     topicId: string
     senderProfileId: string
     senderDisplayName: string
     senderRole: TopicMessageSenderRole
     body: string
+    attachment?: NewTopicMessageAttachmentInput | null
   }) => TopicMessageSnapshot
   /**
    * Вмъква нов REPLY (parent_message_id = parentMessageId, задължителен и
@@ -88,6 +117,7 @@ export type TopicMessageStore = {
     senderDisplayName: string
     senderRole: TopicMessageSenderRole
     body: string
+    attachment?: NewTopicMessageAttachmentInput | null
   }) => TopicMessageSnapshot
   /** Първите `limit` replies на `parentMessageId`, старо→ново (хронологично четене отгоре-надолу, за разлика от root viewport-към-дъното). */
   getReplies: (
@@ -121,6 +151,34 @@ export type TopicMessageStore = {
     viewerProfileId: string | null,
     excludedSenderProfileIds?: readonly string[],
   ) => Map<string, TopicMessageAggregates>
+  /**
+   * Batch attachment lookup за набор от messageId-та — ЕДНА заявка за целия
+   * batch (root list page / reply page / poll batch), не N+1. Съобщения без
+   * attachment просто липсват от Map-а (не null-стойност) — caller-ът прави
+   * `.get(id) ?? null`, симетрично на getMessageAggregatesByIds default-map
+   * pattern-а по-горе.
+   */
+  getAttachmentsByMessageIds: (messageIds: readonly string[]) => Map<string, TopicMessageAttachmentRecord>
+  /**
+   * Guard за защитения view/download endpoint (index.ts
+   * handleTopicAttachmentDownloadRequest) — attachment записът трябва
+   * действително да принадлежи на съобщение от ЗАДЪЛЖИТЕЛНО подадения
+   * topicId (предотвратява enumeration на снимки от друга тема чрез познат
+   * UUID.webp filename). Registered-read-access проверката (auth сесия,
+   * не-guest) е отговорност на caller-а (index.ts), точно като
+   * handleTopicMessagesRequest — тук само DB-level isolation.
+   */
+  getAttachmentForDownload: (
+    topicId: string,
+    storageFilename: string,
+  ) => { storageFilename: string; contentType: string } | null
+  attachmentExistsForFilename: (storageFilename: string) => boolean
+  /** Deletion-intent запис — extra safety net за orphan file (виж index.ts: не се очаква нормално да е нужен, тъй като insertMessage/insertReply вече изтриват файла синхронно при DB грешка; за бъдещ message-delete flow. */
+  enqueueAttachmentDeletion: (storageFilename: string) => void
+  listPendingAttachmentDeletions: (limit: number) => { eventSeq: number; storageFilename: string }[]
+  markAttachmentDeletionDone: (eventSeq: number) => void
+  markAttachmentDeletionFailed: (eventSeq: number) => void
+  purgeDoneAttachmentDeletions: (olderThanDays: number, batchSize: number) => number
   /** Toggle like: INSERT ако липсва, DELETE ако съществува — единична BEGIN IMMEDIATE транзакция, връща новия likeCount + viewerHasLiked. */
   toggleLike: (
     messageId: string,
@@ -308,22 +366,46 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     LIMIT 1;
   `)
 
+  const insertAttachmentStatement = database.prepare(`
+    INSERT INTO topic_message_attachments (
+      message_id, storage_filename, width, height, byte_size, content_type
+    ) VALUES (?, ?, ?, ?, ?, ?);
+  `)
+
   function insertMessage(input: {
     topicId: string
     senderProfileId: string
     senderDisplayName: string
     senderRole: TopicMessageSenderRole
     body: string
+    attachment?: NewTopicMessageAttachmentInput | null
   }): TopicMessageSnapshot {
     const messageId = randomUUID()
-    insertMessageStatement.run(
-      messageId,
-      input.topicId,
-      input.senderProfileId,
-      input.senderDisplayName,
-      input.senderRole,
-      input.body,
-    )
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      insertMessageStatement.run(
+        messageId,
+        input.topicId,
+        input.senderProfileId,
+        input.senderDisplayName,
+        input.senderRole,
+        input.body,
+      )
+      if (input.attachment) {
+        insertAttachmentStatement.run(
+          messageId,
+          input.attachment.storageFilename,
+          input.attachment.width,
+          input.attachment.height,
+          input.attachment.byteSize,
+          input.attachment.contentType,
+        )
+      }
+      database.exec('COMMIT;')
+    } catch (error) {
+      database.exec('ROLLBACK;')
+      throw error
+    }
     const row = selectByMessageIdStatement.get(messageId) as TopicMessageRow
     return toSnapshot(row)
   }
@@ -373,17 +455,35 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     senderDisplayName: string
     senderRole: TopicMessageSenderRole
     body: string
+    attachment?: NewTopicMessageAttachmentInput | null
   }): TopicMessageSnapshot {
     const messageId = randomUUID()
-    insertReplyStatement.run(
-      messageId,
-      input.topicId,
-      input.parentMessageId,
-      input.senderProfileId,
-      input.senderDisplayName,
-      input.senderRole,
-      input.body,
-    )
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      insertReplyStatement.run(
+        messageId,
+        input.topicId,
+        input.parentMessageId,
+        input.senderProfileId,
+        input.senderDisplayName,
+        input.senderRole,
+        input.body,
+      )
+      if (input.attachment) {
+        insertAttachmentStatement.run(
+          messageId,
+          input.attachment.storageFilename,
+          input.attachment.width,
+          input.attachment.height,
+          input.attachment.byteSize,
+          input.attachment.contentType,
+        )
+      }
+      database.exec('COMMIT;')
+    } catch (error) {
+      database.exec('ROLLBACK;')
+      throw error
+    }
     const row = selectByMessageIdStatement.get(messageId) as TopicMessageRow
     return toSnapshot(row)
   }
@@ -558,6 +658,108 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     return result
   }
 
+  // ─── Attachments (image, Топикс attachment feature) ───────────────────────
+
+  function getAttachmentsByMessageIds(messageIds: readonly string[]): Map<string, TopicMessageAttachmentRecord> {
+    const result = new Map<string, TopicMessageAttachmentRecord>()
+    if (messageIds.length === 0) return result
+    const placeholders = messageIds.map(() => '?').join(',')
+    const rows = database
+      .prepare(`SELECT message_id, storage_filename, width, height, byte_size, content_type FROM topic_message_attachments WHERE message_id IN (${placeholders});`)
+      .all(...messageIds) as Array<{ message_id: string; storage_filename: string; width: number; height: number; byte_size: number; content_type: string }>
+    for (const row of rows) {
+      result.set(row.message_id, {
+        storageFilename: row.storage_filename,
+        width: row.width,
+        height: row.height,
+        byteSize: row.byte_size,
+        contentType: row.content_type,
+      })
+    }
+    return result
+  }
+
+  const selectAttachmentForDownloadStatement = database.prepare(`
+    SELECT a.storage_filename, a.content_type
+    FROM topic_message_attachments a
+    INNER JOIN topic_messages m ON m.message_id = a.message_id
+    WHERE a.storage_filename = ? AND m.topic_id = ?
+    LIMIT 1;
+  `)
+
+  function getAttachmentForDownload(
+    topicId: string,
+    storageFilename: string,
+  ): { storageFilename: string; contentType: string } | null {
+    const row = selectAttachmentForDownloadStatement.get(storageFilename, topicId) as
+      | { storage_filename: string; content_type: string }
+      | undefined
+    if (row === undefined) return null
+    return { storageFilename: row.storage_filename, contentType: row.content_type }
+  }
+
+  const selectAttachmentExistsStatement = database.prepare(`
+    SELECT 1 FROM topic_message_attachments WHERE storage_filename = ? LIMIT 1;
+  `)
+
+  function attachmentExistsForFilename(storageFilename: string): boolean {
+    return selectAttachmentExistsStatement.get(storageFilename) !== undefined
+  }
+
+  const insertAttachmentDeletionStatement = database.prepare(`
+    INSERT INTO topic_message_attachment_deletions (storage_filename) VALUES (?);
+  `)
+
+  function enqueueAttachmentDeletion(storageFilename: string): void {
+    insertAttachmentDeletionStatement.run(storageFilename)
+  }
+
+  const selectPendingAttachmentDeletionsStatement = database.prepare(`
+    SELECT event_seq, storage_filename
+    FROM topic_message_attachment_deletions
+    WHERE cleanup_status IN ('pending', 'failed')
+    ORDER BY event_seq ASC
+    LIMIT ?;
+  `)
+
+  function listPendingAttachmentDeletions(limit: number): { eventSeq: number; storageFilename: string }[] {
+    const rows = selectPendingAttachmentDeletionsStatement.all(limit) as Array<{ event_seq: number; storage_filename: string }>
+    return rows.map((row) => ({ eventSeq: row.event_seq, storageFilename: row.storage_filename }))
+  }
+
+  const markAttachmentDeletionStatusStatement = database.prepare(`
+    UPDATE topic_message_attachment_deletions SET cleanup_status = ? WHERE event_seq = ?;
+  `)
+
+  function markAttachmentDeletionDone(eventSeq: number): void {
+    markAttachmentDeletionStatusStatement.run('done', eventSeq)
+  }
+
+  function markAttachmentDeletionFailed(eventSeq: number): void {
+    markAttachmentDeletionStatusStatement.run('failed', eventSeq)
+  }
+
+  function purgeDoneAttachmentDeletions(olderThanDays: number, batchSize: number): number {
+    const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString()
+    let totalDeleted = 0
+    while (totalDeleted < batchSize) {
+      const remaining = batchSize - totalDeleted
+      const result = database.prepare(`
+        DELETE FROM topic_message_attachment_deletions
+        WHERE event_seq IN (
+          SELECT event_seq FROM topic_message_attachment_deletions
+          WHERE cleanup_status = 'done' AND created_at < ?
+          ORDER BY event_seq ASC
+          LIMIT ?
+        );
+      `).run(cutoff, remaining)
+      const deleted = result.changes as number
+      totalDeleted += deleted
+      if (deleted === 0) break
+    }
+    return totalDeleted
+  }
+
   function close(): void {
     database.close()
   }
@@ -572,6 +774,14 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     getRepliesAfter,
     getMessageById,
     getMessageAggregatesByIds,
+    getAttachmentsByMessageIds,
+    getAttachmentForDownload,
+    attachmentExistsForFilename,
+    enqueueAttachmentDeletion,
+    listPendingAttachmentDeletions,
+    markAttachmentDeletionDone,
+    markAttachmentDeletionFailed,
+    purgeDoneAttachmentDeletions,
     toggleLike,
     getLikeCountsByMessageIds,
     getMaxSeq,

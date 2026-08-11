@@ -307,6 +307,10 @@ const GALLERY_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'profile-gallery')
 // от avatar/gallery, които са умишлено публични.
 const CHAT_ATTACHMENT_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'chat-attachments')
 const SUPPORT_ATTACHMENT_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'support-attachments')
+// "Теми" — снимки към root съобщения/replies. Protected, СЪЩИЯТ модел като
+// chat/support (НЕ в PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS по-долу) — Topics е
+// registered-only четене, а не публично достъпно съдържание.
+const TOPIC_ATTACHMENT_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'topic-attachments')
 // base64 data URL overhead е ~33% над бинарния размер; 10MB оригинал →
 // ~13.3MB base64 текст. 15MB праг покрива това с марж, съгласувано с
 // MAX_JSON_BODY_BYTES, ползван за profile avatar/gallery endpoint-ите.
@@ -334,6 +338,16 @@ const SUPPORT_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS = CHAT_ATTACHMENT_ORPHAN_SCAN_I
 const SUPPORT_ATTACHMENT_ORPHAN_SCAN_STARTUP_DELAY_MS = 120_000
 const SUPPORT_ATTACHMENT_ORPHAN_GRACE_PERIOD_MS = CHAT_ATTACHMENT_ORPHAN_GRACE_PERIOD_MS
 const SUPPORT_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS = CHAT_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS
+// "Теми" attachment cleanup — трети независим job чифт, изместени startup
+// delay-и (60s/150s) спрямо chat (30s/90s) и support (45s/120s), за да не се
+// засичат в момента на server startup.
+const TOPIC_ATTACHMENT_CLEANUP_BATCH_SIZE = CHAT_ATTACHMENT_CLEANUP_BATCH_SIZE
+const TOPIC_ATTACHMENT_CLEANUP_INTERVAL_MS = CHAT_ATTACHMENT_CLEANUP_INTERVAL_MS
+const TOPIC_ATTACHMENT_CLEANUP_STARTUP_DELAY_MS = 60_000
+const TOPIC_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS = CHAT_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS
+const TOPIC_ATTACHMENT_ORPHAN_SCAN_STARTUP_DELAY_MS = 150_000
+const TOPIC_ATTACHMENT_ORPHAN_GRACE_PERIOD_MS = CHAT_ATTACHMENT_ORPHAN_GRACE_PERIOD_MS
+const TOPIC_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS = CHAT_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS
 const guestContactRateLimitByIp = new Map<string, { windowStartedAt: number; count: number }>()
 
 type GameWorkerTickMode = 'in-process' | 'worker-candidate'
@@ -1016,6 +1030,15 @@ type TopicReplyBroadcastBase = Omit<TopicReplyBroadcastSnapshot, 'viewerHasLiked
 // накуп, никога в цикъл по едно съобщение. viewerProfileId=null тук нарочно —
 // aggregates-ите, върнати оттук, са viewer-AGNOSTIC (likeCount/replyCount),
 // viewerHasLiked се добавя отделно per-subscriber (appendViewerHasLiked).
+// Reuse на СЪЩИЯ URL shape като chatStore.ts buildAttachmentUrls — viewUrl/
+// downloadUrl построени тук (не в store слоя, който не знае нищо за HTTP
+// routing), топлика с protected download endpoint-а по-долу
+// (handleTopicAttachmentDownloadRequest).
+function buildTopicAttachmentUrls(topicId: string, storageFilename: string): { viewUrl: string; downloadUrl: string } {
+  const base = `/api/topics/${encodeURIComponent(topicId)}/attachments/${encodeURIComponent(storageFilename)}`
+  return { viewUrl: base, downloadUrl: `${base}?download=1` }
+}
+
 function hydrateTopicMessagesWithCurrentAvatars(
   messages: readonly TopicMessageSnapshot[],
 ): TopicMessageBroadcastBase[] {
@@ -1025,21 +1048,38 @@ function hydrateTopicMessagesWithCurrentAvatars(
 
   const messageIds = messages.map((m) => m.messageId)
   const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, null)
+  // Batch attachment lookup — ЕДНА заявка за целия batch, не N+1 (виж
+  // getAttachmentsByMessageIds коментара в topicMessageStore.ts).
+  const attachmentsByMessageId = topicMessageStore.getAttachmentsByMessageIds(messageIds)
 
-  return messages.map((message) => ({
-    seq: message.seq,
-    messageId: message.messageId,
-    topicId: message.topicId,
-    parentMessageId: message.parentMessageId,
-    senderProfileId: message.senderProfileId,
-    senderDisplayName: message.senderDisplayName,
-    senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
-    senderRole: message.senderRole,
-    body: message.body,
-    createdAt: message.createdAt,
-    likeCount: aggregatesByMessageId.get(message.messageId)?.likeCount ?? 0,
-    replyCount: aggregatesByMessageId.get(message.messageId)?.replyCount ?? 0,
-  }))
+  return messages.map((message) => {
+    const attachmentRecord = attachmentsByMessageId.get(message.messageId)
+    const attachment = attachmentRecord
+      ? {
+          attachmentId: attachmentRecord.storageFilename,
+          width: attachmentRecord.width,
+          height: attachmentRecord.height,
+          byteSize: attachmentRecord.byteSize,
+          ...buildTopicAttachmentUrls(message.topicId, attachmentRecord.storageFilename),
+        }
+      : null
+
+    return {
+      seq: message.seq,
+      messageId: message.messageId,
+      topicId: message.topicId,
+      parentMessageId: message.parentMessageId,
+      senderProfileId: message.senderProfileId,
+      senderDisplayName: message.senderDisplayName,
+      senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
+      senderRole: message.senderRole,
+      body: message.body,
+      createdAt: message.createdAt,
+      attachment,
+      likeCount: aggregatesByMessageId.get(message.messageId)?.likeCount ?? 0,
+      replyCount: aggregatesByMessageId.get(message.messageId)?.replyCount ?? 0,
+    }
+  })
 }
 
 // viewerHasLiked е per-subscriber private state — не може да е част от
@@ -1657,6 +1697,123 @@ let supportAttachmentOrphanScanStartupTimeout: ReturnType<typeof setTimeout> | n
 let supportAttachmentOrphanScanInterval: ReturnType<typeof setInterval> | null = setInterval(
   () => { void runSupportAttachmentOrphanScan() },
   SUPPORT_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS,
+)
+
+// "Теми" attachment cleanup — трети независим job чифт, reuse на СЪЩИЯ модел
+// (deletion queue + defensive orphan scan) като chat/support по-горе.
+async function runTopicAttachmentCleanup(): Promise<void> {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  try {
+    const pending = topicMessageStore.listPendingAttachmentDeletions(TOPIC_ATTACHMENT_CLEANUP_BATCH_SIZE)
+
+    if (pending.length === 0) {
+      return
+    }
+
+    let deletedCount = 0
+    let failedCount = 0
+
+    for (const entry of pending) {
+      if (topicMessageStore.attachmentExistsForFilename(entry.storageFilename)) {
+        topicMessageStore.markAttachmentDeletionDone(entry.eventSeq)
+        continue
+      }
+
+      const deleted = await deleteTopicAttachmentFileByFilename(entry.storageFilename)
+
+      if (deleted) {
+        topicMessageStore.markAttachmentDeletionDone(entry.eventSeq)
+        deletedCount += 1
+      } else {
+        topicMessageStore.markAttachmentDeletionFailed(entry.eventSeq)
+        failedCount += 1
+      }
+    }
+
+    if (deletedCount > 0 || failedCount > 0) {
+      console.log(`[topic-attachments] Cleanup: deleted=${deletedCount} failed=${failedCount}`)
+    }
+  } catch (error) {
+    console.error('[topic-attachments] Cleanup failed:', error)
+  }
+}
+
+async function runTopicAttachmentOrphanScan(): Promise<void> {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  try {
+    await mkdir(TOPIC_ATTACHMENT_UPLOADS_PATH, { recursive: true })
+    const entries = await readdir(TOPIC_ATTACHMENT_UPLOADS_PATH, { withFileTypes: true })
+    const now = Date.now()
+    let deletedCount = 0
+
+    for (const entry of entries) {
+      if (isServerShuttingDown) {
+        return
+      }
+
+      if (!entry.isFile() || !IMAGE_ATTACHMENT_FILENAME_PATTERN.test(entry.name)) {
+        continue
+      }
+
+      if (topicMessageStore.attachmentExistsForFilename(entry.name)) {
+        continue
+      }
+
+      const filePath = join(TOPIC_ATTACHMENT_UPLOADS_PATH, entry.name)
+
+      try {
+        const fileStats = await stat(filePath)
+
+        if (now - fileStats.mtimeMs < TOPIC_ATTACHMENT_ORPHAN_GRACE_PERIOD_MS) {
+          continue
+        }
+      } catch {
+        continue
+      }
+
+      const deleted = await deleteTopicAttachmentFileByFilename(entry.name)
+      if (deleted) {
+        deletedCount += 1
+      }
+    }
+
+    if (deletedCount > 0) {
+      console.log(`[topic-attachments] Orphan scan: deleted ${deletedCount} orphaned file(s)`)
+    }
+
+    const purgedDeletionEvents = topicMessageStore.purgeDoneAttachmentDeletions(
+      TOPIC_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS,
+      TOPIC_ATTACHMENT_CLEANUP_BATCH_SIZE,
+    )
+    if (purgedDeletionEvents > 0) {
+      console.log(`[topic-attachments] Purged ${purgedDeletionEvents} completed deletion-queue row(s)`)
+    }
+  } catch (error) {
+    console.error('[topic-attachments] Orphan scan failed:', error)
+  }
+}
+
+let topicAttachmentCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+  () => { void runTopicAttachmentCleanup() },
+  TOPIC_ATTACHMENT_CLEANUP_STARTUP_DELAY_MS,
+)
+let topicAttachmentCleanupInterval: ReturnType<typeof setInterval> | null = setInterval(
+  () => { void runTopicAttachmentCleanup() },
+  TOPIC_ATTACHMENT_CLEANUP_INTERVAL_MS,
+)
+let topicAttachmentOrphanScanStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+  () => { void runTopicAttachmentOrphanScan() },
+  TOPIC_ATTACHMENT_ORPHAN_SCAN_STARTUP_DELAY_MS,
+)
+let topicAttachmentOrphanScanInterval: ReturnType<typeof setInterval> | null = setInterval(
+  () => { void runTopicAttachmentOrphanScan() },
+  TOPIC_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS,
 )
 
 function msUntilNextSofiaMidnight(): number {
@@ -4399,6 +4556,10 @@ async function deleteSupportAttachmentFileByFilename(filename: string): Promise<
   return await deleteAttachmentFileByFilename(SUPPORT_ATTACHMENT_UPLOADS_PATH, filename)
 }
 
+async function deleteTopicAttachmentFileByFilename(filename: string): Promise<boolean> {
+  return await deleteAttachmentFileByFilename(TOPIC_ATTACHMENT_UPLOADS_PATH, filename)
+}
+
 type ProfileImageProcessingError =
   | 'decode_failed'
   | 'unsupported_format'
@@ -6743,6 +6904,71 @@ function requireRegisteredProfileSession(
 const TOPIC_MESSAGES_DEFAULT_LIMIT = 30
 const TOPIC_MESSAGES_MAX_LIMIT = 50
 
+// Reuse на СЪЩИЯ decode→validate→process→write pipeline като
+// createSupportAttachmentUpload (index.ts, chat/support attachment слоя) —
+// enforceSourcePixelLimit:true (decompression-bomb guard), точно като
+// support (по-строгия от двата established варианта, виж проучването за
+// friend-chat pipeline-a). Извикано от WS handler-а (send_topic_message/
+// send_topic_reply), не HTTP — imageDataUrl пътува в WS message payload-а,
+// не multipart/form-data.
+type TopicAttachmentUploadResult =
+  | {
+      ok: true
+      attachmentInput: {
+        storageFilename: string
+        width: number
+        height: number
+        byteSize: number
+        contentType: string
+      } | null
+      writtenAttachmentFilename: string | null
+    }
+  | { ok: false; code: TopicMessageErrorCode; message: string }
+
+async function createTopicAttachmentUpload(
+  imageDataUrlField: unknown,
+): Promise<TopicAttachmentUploadResult> {
+  if (imageDataUrlField === undefined || imageDataUrlField === null) {
+    return { ok: true, attachmentInput: null, writtenAttachmentFilename: null }
+  }
+
+  if (typeof imageDataUrlField !== 'string' || imageDataUrlField.trim().length === 0) {
+    return { ok: false, code: 'invalid_image', message: 'Невалидна снимка.' }
+  }
+
+  const imageBuffer = decodeImageAttachmentDataUrl(imageDataUrlField)
+
+  if (imageBuffer === null) {
+    return { ok: false, code: 'invalid_image', message: 'Поддържат се само JPEG, PNG и WebP снимки до 10 MB.' }
+  }
+
+  const processed = await processImageAttachmentToWebp(imageBuffer, { enforceSourcePixelLimit: true })
+
+  if (processed === null) {
+    return { ok: false, code: 'invalid_image', message: 'Снимката не може да бъде обработена.' }
+  }
+
+  const storageFilename = `${randomUUID()}.webp`
+
+  try {
+    await writeWebpAttachmentFile(TOPIC_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer)
+  } catch {
+    return { ok: false, code: 'attachment_upload_failed', message: 'Снимката не можа да бъде записана.' }
+  }
+
+  return {
+    ok: true,
+    writtenAttachmentFilename: storageFilename,
+    attachmentInput: {
+      storageFilename,
+      width: processed.width,
+      height: processed.height,
+      byteSize: processed.buffer.length,
+      contentType: 'image/webp',
+    },
+  }
+}
+
 async function handleTopicsListRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -6837,12 +7063,23 @@ async function handleTopicMessagesRequest(
   // viewer-aware (blocked-и replies не се броят — виж коментара в store-а).
   const messageIds = page.messages.map((m) => m.messageId)
   const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId, excludedSenderProfileIds)
+  const attachmentsByMessageId = topicMessageStore.getAttachmentsByMessageIds(messageIds)
 
   const enrichedMessages = page.messages.map((message) => {
     const aggregates = aggregatesByMessageId.get(message.messageId)
+    const attachmentRecord = attachmentsByMessageId.get(message.messageId)
     return {
       ...message,
       senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
+      attachment: attachmentRecord
+        ? {
+            attachmentId: attachmentRecord.storageFilename,
+            width: attachmentRecord.width,
+            height: attachmentRecord.height,
+            byteSize: attachmentRecord.byteSize,
+            ...buildTopicAttachmentUrls(topicId, attachmentRecord.storageFilename),
+          }
+        : null,
       likeCount: aggregates?.likeCount ?? 0,
       replyCount: aggregates?.replyCount ?? 0,
       viewerHasLiked: aggregates?.viewerHasLiked ?? false,
@@ -6925,12 +7162,23 @@ async function handleTopicRepliesRequest(
 
   const messageIds = page.messages.map((m) => m.messageId)
   const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId)
+  const attachmentsByMessageId = topicMessageStore.getAttachmentsByMessageIds(messageIds)
 
   const enrichedReplies = page.messages.map((message) => {
     const aggregates = aggregatesByMessageId.get(message.messageId)
+    const attachmentRecord = attachmentsByMessageId.get(message.messageId)
     return {
       ...message,
       senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
+      attachment: attachmentRecord
+        ? {
+            attachmentId: attachmentRecord.storageFilename,
+            width: attachmentRecord.width,
+            height: attachmentRecord.height,
+            byteSize: attachmentRecord.byteSize,
+            ...buildTopicAttachmentUrls(topicId, attachmentRecord.storageFilename),
+          }
+        : null,
       likeCount: aggregates?.likeCount ?? 0,
       viewerHasLiked: aggregates?.viewerHasLiked ?? false,
     }
@@ -6943,6 +7191,72 @@ async function handleTopicRepliesRequest(
     oldestSeq: page.oldestSeq,
   })
   return true
+}
+
+// Protected attachment download за "Теми" — reuse на СЪЩИЯ модел като
+// handleSupportAttachmentDownloadRequest: registered-session auth (не
+// изисква VIP — likes/read/download НЕ са VIP функции, само publish е),
+// строг UUID.webp filename regex ПРЕДИ join() (path traversal защита),
+// attachment↔topic JOIN isolation (getAttachmentForDownload), private
+// cache-control, uniform 404 на всеки грешен път.
+async function handleTopicAttachmentDownloadRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/([^/]+)\/attachments\/([^/]+)$/.exec(pathname)
+  if (!match || req.method !== 'GET') {
+    return false
+  }
+
+  const auth = requireRegisteredProfileSession(req)
+  if (!auth.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си, за да разгледаш „Теми“.' })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+  const filename = decodeURIComponent(match[2] ?? '')
+
+  if (!IMAGE_ATTACHMENT_FILENAME_PATTERN.test(filename)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно име на файл.' })
+    return true
+  }
+
+  const attachment = topicMessageStore.getAttachmentForDownload(topicId, filename)
+
+  if (attachment === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
+    return true
+  }
+
+  const filePath = join(TOPIC_ATTACHMENT_UPLOADS_PATH, attachment.storageFilename)
+
+  try {
+    const fileStats = await stat(filePath)
+
+    if (!fileStats.isFile()) {
+      sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
+      return true
+    }
+
+    const fileBuffer = await readFile(filePath)
+    const url = new URL(req.url ?? '', 'http://localhost')
+    const isDownload = url.searchParams.get('download') !== null
+
+    res.writeHead(200, {
+      'Content-Type': attachment.contentType,
+      'Cache-Control': 'private, max-age=86400',
+      ...(isDownload
+        ? { 'Content-Disposition': `attachment; filename="pika-topic-${attachment.storageFilename}"` }
+        : {}),
+    })
+    res.end(fileBuffer)
+    return true
+  } catch {
+    sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
+    return true
+  }
 }
 
 // ─── Tournaments: list / create / details ──────────────────────────────────
@@ -10677,6 +10991,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleTopicAttachmentDownloadRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleProfileByIdRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -12872,6 +13190,7 @@ wsServer.on('connection', (socket, request) => {
       if (message.type === 'send_topic_message') {
         const requestId = message.requestId
         const latestConnection = getConnectionById(serverState, connection.id)
+        const imageDataUrlField = message.imageDataUrl
 
         function sendTopicMessageError(code: TopicMessageErrorCode, errorMessage: string): void {
           safeSendToConnection(connection.id, {
@@ -12887,7 +13206,13 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        if (playerProgressStore.isTemporaryProfile(latestConnection.profileId)) {
+        // Capture-нато в локална const веднага след null check-а — TS
+        // narrowing не преминава през closure boundary-я на async IIFE-то
+        // по-долу, затова latestConnection.profileId (string | null) не би
+        // се стеснил там без explicit локална string константа.
+        const senderProfileId: string = latestConnection.profileId
+
+        if (playerProgressStore.isTemporaryProfile(senderProfileId)) {
           sendTopicMessageError('guest_not_allowed', '„Теми“ само за регистрирани потребители.')
           return
         }
@@ -12896,7 +13221,8 @@ wsServer.on('connection', (socket, request) => {
         // composer показва локално (Етап 2 брифа: "Frontend скриването НЕ е
         // security boundary"). Ако VIP е изтекъл между отваряне на composer-а
         // и send-а, клиентът получава 'vip_required' тук и re-fetch-ва
-        // canonical статус (виж controller-а, т.5 от корекциите).
+        // canonical статус (виж controller-а, т.5 от корекциите). Снимка е
+        // писане, значи СЪЩИЯТ VIP guard важи за нея (Attachment брифа т.3).
         if (!vipStore.getStatus(latestConnection.profileId).isActive) {
           sendTopicMessageError('vip_required', 'Писането в „Теми“ изисква активен VIP.')
           return
@@ -12916,65 +13242,114 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        const validation = validateTopicMessageBody(message.body)
+        // Image processing е ЕДИНСТВЕНАТА async стъпка в целия WS message
+        // handler flow — обвиваме остатъка в IIFE, за да можем да await-нем
+        // sharp resize/webp конверсията преди insert. Всичко останало (error
+        // responses, insert, broadcast) е непроменено спрямо синхронния flow.
+        //
+        // Rate limit е СЛЕД upload+validation (запазва established реда от
+        // преди Attachment feature-а — виж checkTopicMessagesRealtime.ts
+        // A8-A11): validation грешки (empty/too-long/invalid_body) НЕ трябва
+        // да consume-ват rate limit slot, само реално ПРИЕТИ съобщения го
+        // правят. Duplicate guard-ът е СЛЕД rate limit, симетрично на
+        // оригиналния синхронен flow.
+        void (async () => {
+          const uploadResult = await createTopicAttachmentUpload(imageDataUrlField)
 
-        if (!validation.ok) {
-          const messagesByCode: Record<typeof validation.code, string> = {
-            empty_body: 'Съобщението не може да бъде празно.',
-            body_too_long: `Съобщението може да е най-много ${TOPIC_MESSAGE_MAX_BODY_CODE_POINTS} символа.`,
-            invalid_body: 'Съобщението съдържа неразрешени символи.',
+          if (!uploadResult.ok) {
+            sendTopicMessageError(uploadResult.code, uploadResult.message)
+            return
           }
-          sendTopicMessageError(validation.code, messagesByCode[validation.code])
-          return
-        }
 
-        if (!checkTopicMessageRateLimit(latestConnection.profileId)) {
-          sendTopicMessageError('rate_limited', 'Твърде много съобщения. Изчакай малко и опитай пак.')
-          return
-        }
+          const validation = validateTopicMessageBody(message.body, uploadResult.attachmentInput !== null)
 
-        // Scoped по profileId+topicId+root (Етап 2 брифа т.7, Етап 3
-        // разширение) — НЕ глобално per profile, за да не блокира легитимно
-        // еднакъв кратък текст в две различни теми.
-        if (isDuplicateTopicMessage(latestConnection.profileId, message.topicId, null, validation.body)) {
-          sendTopicMessageError('duplicate_message', 'Вече изпрати това съобщение.')
-          return
-        }
+          if (!validation.ok) {
+            const messagesByCode: Record<typeof validation.code, string> = {
+              empty_body: 'Съобщението трябва да съдържа текст или снимка.',
+              body_too_long: `Съобщението може да е най-много ${TOPIC_MESSAGE_MAX_BODY_CODE_POINTS} символа.`,
+              invalid_body: 'Съобщението съдържа неразрешени символи.',
+            }
+            if (uploadResult.writtenAttachmentFilename !== null) {
+              await deleteTopicAttachmentFileByFilename(uploadResult.writtenAttachmentFilename)
+            }
+            sendTopicMessageError(validation.code, messagesByCode[validation.code])
+            return
+          }
 
-        const publicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
-        const senderDisplayName = publicProfile?.displayName?.trim() || 'Играч'
-        const senderRole = authStore.getAccountRoleForProfile(latestConnection.profileId) ?? 'player'
+          if (!checkTopicMessageRateLimit(senderProfileId)) {
+            if (uploadResult.writtenAttachmentFilename !== null) {
+              await deleteTopicAttachmentFileByFilename(uploadResult.writtenAttachmentFilename)
+            }
+            sendTopicMessageError('rate_limited', 'Твърде много съобщения. Изчакай малко и опитай пак.')
+            return
+          }
 
-        const row = topicMessageStore.insertMessage({
-          topicId: message.topicId,
-          senderProfileId: latestConnection.profileId,
-          senderDisplayName,
-          senderRole,
-          body: validation.body,
+          // Scoped по profileId+topicId+root (Етап 2 брифа т.7, Етап 3
+          // разширение) — НЕ глобално per profile, за да не блокира легитимно
+          // еднакъв кратък текст в две различни теми. Image-only съобщения
+          // (body='') никога не се смятат за duplicate помежду си — празен
+          // normalizedBody не носи информация за сравнение (реалният anti-spam
+          // guard за самите снимки е rate limit-ът по-горе).
+          if (validation.body.length > 0 && isDuplicateTopicMessage(senderProfileId, message.topicId, null, validation.body)) {
+            if (uploadResult.writtenAttachmentFilename !== null) {
+              await deleteTopicAttachmentFileByFilename(uploadResult.writtenAttachmentFilename)
+            }
+            sendTopicMessageError('duplicate_message', 'Вече изпрати това съобщение.')
+            return
+          }
+
+          const publicProfile = playerProgressStore.getPublicProfile(senderProfileId)
+          const senderDisplayName = publicProfile?.displayName?.trim() || 'Играч'
+          const senderRole = authStore.getAccountRoleForProfile(senderProfileId) ?? 'player'
+
+          let row: TopicMessageSnapshot
+          try {
+            row = topicMessageStore.insertMessage({
+              topicId: message.topicId,
+              senderProfileId,
+              senderDisplayName,
+              senderRole,
+              body: validation.body,
+              attachment: uploadResult.attachmentInput,
+            })
+          } catch (error) {
+            // File-write-succeeded/DB-insert-failed — изтрий файла веднага,
+            // не чакай orphan scan-а (виж Attachment брифа т.15).
+            if (uploadResult.writtenAttachmentFilename !== null) {
+              await deleteTopicAttachmentFileByFilename(uploadResult.writtenAttachmentFilename)
+            }
+            throw error
+          }
+
+          if (validation.body.length > 0) {
+            recordTopicMessageSent(senderProfileId, message.topicId, null, validation.body)
+          }
+
+          // Local instant broadcast — маркира seq-а като locally-announced ПРЕДИ
+          // broadcast (за да го хване следващият poll tick дори ако той изпревари
+          // synchronous-ния return тук, което не би могло да стане в единствената
+          // Node event loop нишка, но държим реда defensive- но правилен). ПОЛ
+          // CURSOR-ЪТ СЪЗНАТЕЛНО НЕ СЕ ПИПА ТУК — виж инвариант коментара при
+          // декларацията на topicMessagePollCursor по-горе във файла.
+          topicMessageLocallyAnnouncedSeqs.set(row.seq, Date.now())
+          const [hydrated] = hydrateTopicMessagesWithCurrentAvatars([row])
+          if (hydrated) {
+            broadcastTopicMessageToLocalSubscribers(message.topicId, hydrated, {
+              originatingConnectionId: connection.id,
+              requestId,
+            })
+          }
+        })().catch((error) => {
+          console.error('[topics] send_topic_message attachment flow failed:', error)
+          sendTopicMessageError('attachment_upload_failed', 'Съобщението не можа да бъде изпратено.')
         })
-
-        recordTopicMessageSent(latestConnection.profileId, message.topicId, null, validation.body)
-
-        // Local instant broadcast — маркира seq-а като locally-announced ПРЕДИ
-        // broadcast (за да го хване следващият poll tick дори ако той изпревари
-        // synchronous-ния return тук, което не би могло да стане в единствената
-        // Node event loop нишка, но държим реда defensive- но правилен). ПОЛ
-        // CURSOR-ЪТ СЪЗНАТЕЛНО НЕ СЕ ПИПА ТУК — виж инвариант коментара при
-        // декларацията на topicMessagePollCursor по-горе във файла.
-        topicMessageLocallyAnnouncedSeqs.set(row.seq, Date.now())
-        const [hydrated] = hydrateTopicMessagesWithCurrentAvatars([row])
-        if (hydrated) {
-          broadcastTopicMessageToLocalSubscribers(message.topicId, hydrated, {
-            originatingConnectionId: connection.id,
-            requestId,
-          })
-        }
         return
       }
 
       if (message.type === 'send_topic_reply') {
         const requestId = message.requestId
         const latestConnection = getConnectionById(serverState, connection.id)
+        const imageDataUrlField = message.imageDataUrl
 
         function sendTopicReplyError(code: TopicReplyErrorCode, errorMessage: string): void {
           safeSendToConnection(connection.id, {
@@ -12990,15 +13365,18 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        if (playerProgressStore.isTemporaryProfile(latestConnection.profileId)) {
+        const senderProfileId: string = latestConnection.profileId
+
+        if (playerProgressStore.isTemporaryProfile(senderProfileId)) {
           sendTopicReplyError('guest_not_allowed', '„Теми“ само за регистрирани потребители.')
           return
         }
 
         // VIP guard — reply е писане в Topics, идентично на root send (Етап 3
         // брифа: "Reply е писане в Topics" → "Server-side VIP guard е
-        // задължителен и остава security boundary").
-        if (!vipStore.getStatus(latestConnection.profileId).isActive) {
+        // задължителен и остава security boundary"). Снимка към reply е
+        // писане, значи СЪЩИЯТ guard важи (Attachment брифа т.3).
+        if (!vipStore.getStatus(senderProfileId).isActive) {
           sendTopicReplyError('vip_required', 'Писането в „Теми“ изисква активен VIP.')
           return
         }
@@ -13028,58 +13406,92 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        const validation = validateTopicMessageBody(message.body)
-        if (!validation.ok) {
-          const messagesByCode: Record<typeof validation.code, string> = {
-            empty_body: 'Съобщението не може да бъде празно.',
-            body_too_long: `Съобщението може да е най-много ${TOPIC_MESSAGE_MAX_BODY_CODE_POINTS} символа.`,
-            invalid_body: 'Съобщението съдържа неразрешени символи.',
+        // Rate limit е СЛЕД upload+validation — виж коментара в
+        // send_topic_message за пълния rationale (established test поведение:
+        // validation грешки не трябва да consume-ват rate limit slot).
+        void (async () => {
+          const uploadResult = await createTopicAttachmentUpload(imageDataUrlField)
+
+          if (!uploadResult.ok) {
+            sendTopicReplyError(uploadResult.code, uploadResult.message)
+            return
           }
-          sendTopicReplyError(validation.code, messagesByCode[validation.code])
-          return
-        }
 
-        // Споделен Topics-writing rate limit bucket (Етап 3 брифа: "един общ
-        // Topics-writing anti-spam budget за profile" — reply консумира от
-        // СЪЩИЯ topicMessageRateLimitByProfileId prozorec като root send, за
-        // да не може limit-ът да бъде заобиколен чрез редуване root/reply).
-        if (!checkTopicMessageRateLimit(latestConnection.profileId)) {
-          sendTopicReplyError('rate_limited', 'Твърде много съобщения. Изчакай малко и опитай пак.')
-          return
-        }
+          const validation = validateTopicMessageBody(message.body, uploadResult.attachmentInput !== null)
+          if (!validation.ok) {
+            const messagesByCode: Record<typeof validation.code, string> = {
+              empty_body: 'Съобщението трябва да съдържа текст или снимка.',
+              body_too_long: `Съобщението може да е най-много ${TOPIC_MESSAGE_MAX_BODY_CODE_POINTS} символа.`,
+              invalid_body: 'Съобщението съдържа неразрешени символи.',
+            }
+            if (uploadResult.writtenAttachmentFilename !== null) {
+              await deleteTopicAttachmentFileByFilename(uploadResult.writtenAttachmentFilename)
+            }
+            sendTopicReplyError(validation.code, messagesByCode[validation.code])
+            return
+          }
 
-        if (isDuplicateTopicMessage(latestConnection.profileId, message.topicId, message.parentMessageId, validation.body)) {
-          sendTopicReplyError('duplicate_message', 'Вече изпрати това съобщение.')
-          return
-        }
+          if (!checkTopicMessageRateLimit(senderProfileId)) {
+            if (uploadResult.writtenAttachmentFilename !== null) {
+              await deleteTopicAttachmentFileByFilename(uploadResult.writtenAttachmentFilename)
+            }
+            sendTopicReplyError('rate_limited', 'Твърде много съобщения. Изчакай малко и опитай пак.')
+            return
+          }
 
-        const publicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
-        const senderDisplayName = publicProfile?.displayName?.trim() || 'Играч'
-        const senderRole = authStore.getAccountRoleForProfile(latestConnection.profileId) ?? 'player'
+          if (
+            validation.body.length > 0 &&
+            isDuplicateTopicMessage(senderProfileId, message.topicId, message.parentMessageId, validation.body)
+          ) {
+            if (uploadResult.writtenAttachmentFilename !== null) {
+              await deleteTopicAttachmentFileByFilename(uploadResult.writtenAttachmentFilename)
+            }
+            sendTopicReplyError('duplicate_message', 'Вече изпрати това съобщение.')
+            return
+          }
 
-        const row = topicMessageStore.insertReply({
-          topicId: message.topicId,
-          parentMessageId: message.parentMessageId,
-          senderProfileId: latestConnection.profileId,
-          senderDisplayName,
-          senderRole,
-          body: validation.body,
+          const publicProfile = playerProgressStore.getPublicProfile(senderProfileId)
+          const senderDisplayName = publicProfile?.displayName?.trim() || 'Играч'
+          const senderRole = authStore.getAccountRoleForProfile(senderProfileId) ?? 'player'
+
+          let row: TopicMessageSnapshot
+          try {
+            row = topicMessageStore.insertReply({
+              topicId: message.topicId,
+              parentMessageId: message.parentMessageId,
+              senderProfileId,
+              senderDisplayName,
+              senderRole,
+              body: validation.body,
+              attachment: uploadResult.attachmentInput,
+            })
+          } catch (error) {
+            if (uploadResult.writtenAttachmentFilename !== null) {
+              await deleteTopicAttachmentFileByFilename(uploadResult.writtenAttachmentFilename)
+            }
+            throw error
+          }
+
+          if (validation.body.length > 0) {
+            recordTopicMessageSent(senderProfileId, message.topicId, message.parentMessageId, validation.body)
+          }
+
+          // Същия locally-announced+poll-cursor инвариант като root (Етап 3
+          // разширение — виж коментара при pollNewMessagesStatement/
+          // computeTopicMessagePollAdvance: parent-agnostic по дизайн).
+          topicMessageLocallyAnnouncedSeqs.set(row.seq, Date.now())
+          const [hydrated] = hydrateTopicMessagesWithCurrentAvatars([row])
+          if (hydrated && hydrated.parentMessageId !== null) {
+            const { replyCount: _replyCount, ...replyBase } = hydrated
+            broadcastTopicReplyToLocalSubscribers(message.topicId, { ...replyBase, parentMessageId: hydrated.parentMessageId }, {
+              originatingConnectionId: connection.id,
+              requestId,
+            })
+          }
+        })().catch((error) => {
+          console.error('[topics] send_topic_reply attachment flow failed:', error)
+          sendTopicReplyError('attachment_upload_failed', 'Отговорът не можа да бъде изпратен.')
         })
-
-        recordTopicMessageSent(latestConnection.profileId, message.topicId, message.parentMessageId, validation.body)
-
-        // Същия locally-announced+poll-cursor инвариант като root (Етап 3
-        // разширение — виж коментара при pollNewMessagesStatement/
-        // computeTopicMessagePollAdvance: parent-agnostic по дизайн).
-        topicMessageLocallyAnnouncedSeqs.set(row.seq, Date.now())
-        const [hydrated] = hydrateTopicMessagesWithCurrentAvatars([row])
-        if (hydrated && hydrated.parentMessageId !== null) {
-          const { replyCount: _replyCount, ...replyBase } = hydrated
-          broadcastTopicReplyToLocalSubscribers(message.topicId, { ...replyBase, parentMessageId: hydrated.parentMessageId }, {
-            originatingConnectionId: connection.id,
-            requestId,
-          })
-        }
         return
       }
 
@@ -13588,6 +14000,26 @@ function clearMutationTimersForShutdown(): void {
   if (supportAttachmentOrphanScanStartupTimeout !== null) {
     clearTimeout(supportAttachmentOrphanScanStartupTimeout)
     supportAttachmentOrphanScanStartupTimeout = null
+  }
+
+  if (topicAttachmentCleanupInterval !== null) {
+    clearInterval(topicAttachmentCleanupInterval)
+    topicAttachmentCleanupInterval = null
+  }
+
+  if (topicAttachmentCleanupStartupTimeout !== null) {
+    clearTimeout(topicAttachmentCleanupStartupTimeout)
+    topicAttachmentCleanupStartupTimeout = null
+  }
+
+  if (topicAttachmentOrphanScanInterval !== null) {
+    clearInterval(topicAttachmentOrphanScanInterval)
+    topicAttachmentOrphanScanInterval = null
+  }
+
+  if (topicAttachmentOrphanScanStartupTimeout !== null) {
+    clearTimeout(topicAttachmentOrphanScanStartupTimeout)
+    topicAttachmentOrphanScanStartupTimeout = null
   }
 
   clearPrivateRoomInviteTimers()

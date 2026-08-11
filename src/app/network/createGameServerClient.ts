@@ -765,6 +765,8 @@ export type ClientMessage =
       body: string
       /** Задължителен (за разлика от lobby chat) — единствен ack-correlation механизъм. */
       requestId: string
+      /** Base64 data URL на избраната снимка (attachment feature) — опционален, max 1/съобщение. */
+      imageDataUrl?: string
     }
   | {
       type: 'send_topic_reply'
@@ -772,6 +774,7 @@ export type ClientMessage =
       parentMessageId: string
       body: string
       requestId: string
+      imageDataUrl?: string
     }
   | {
       type: 'toggle_topic_message_like'
@@ -1520,6 +1523,16 @@ export type TopicSnapshot = {
   createdAt: string
 }
 
+/** Огледално на server-side TopicAttachmentSnapshot (protocol/messageTypes.ts). */
+export type TopicAttachmentSnapshot = {
+  attachmentId: string
+  width: number
+  height: number
+  byteSize: number
+  viewUrl: string
+  downloadUrl: string
+}
+
 export type TopicMessageSnapshot = {
   seq: number
   messageId: string
@@ -1536,6 +1549,7 @@ export type TopicMessageSnapshot = {
   likeCount: number
   replyCount: number
   viewerHasLiked: boolean
+  attachment: TopicAttachmentSnapshot | null
 }
 
 /**
@@ -1557,6 +1571,7 @@ export type TopicReplySnapshot = {
   createdAt: string
   likeCount: number
   viewerHasLiked: boolean
+  attachment: TopicAttachmentSnapshot | null
 }
 
 export type TopicMessageCatchupMessage = {
@@ -1583,6 +1598,8 @@ export type TopicMessageErrorCode =
   | 'invalid_body'
   | 'duplicate_message'
   | 'rate_limited'
+  | 'invalid_image'
+  | 'attachment_upload_failed'
 
 export type TopicMessageErrorMessage = {
   type: 'topic_message_error'
@@ -1756,8 +1773,8 @@ export type GameServerClient = {
   sendLobbyChatMessage: (body: string, requestId?: string) => void
   subscribeTopicMessages: (topicId: string, afterSeq: number) => void
   unsubscribeTopicMessages: (topicId: string) => void
-  sendTopicMessage: (topicId: string, body: string, requestId: string) => void
-  sendTopicReply: (topicId: string, parentMessageId: string, body: string, requestId: string) => void
+  sendTopicMessage: (topicId: string, body: string, requestId: string, imageDataUrl?: string) => void
+  sendTopicReply: (topicId: string, parentMessageId: string, body: string, requestId: string, imageDataUrl?: string) => void
   toggleTopicMessageLike: (messageId: string, requestId: string) => void
 }
 
@@ -2054,12 +2071,12 @@ export function createGameServerClient(
     send({ type: 'unsubscribe_topic_messages', topicId })
   }
 
-  function sendTopicMessage(topicId: string, body: string, requestId: string): void {
-    send({ type: 'send_topic_message', topicId, body, requestId })
+  function sendTopicMessage(topicId: string, body: string, requestId: string, imageDataUrl?: string): void {
+    send({ type: 'send_topic_message', topicId, body, requestId, ...(imageDataUrl !== undefined ? { imageDataUrl } : {}) })
   }
 
-  function sendTopicReply(topicId: string, parentMessageId: string, body: string, requestId: string): void {
-    send({ type: 'send_topic_reply', topicId, parentMessageId, body, requestId })
+  function sendTopicReply(topicId: string, parentMessageId: string, body: string, requestId: string, imageDataUrl?: string): void {
+    send({ type: 'send_topic_reply', topicId, parentMessageId, body, requestId, ...(imageDataUrl !== undefined ? { imageDataUrl } : {}) })
   }
 
   function toggleTopicMessageLike(messageId: string, requestId: string): void {

@@ -1,5 +1,6 @@
 import { formatGiftLimitError } from './formatGiftLimitError'
 import { OFFICIAL_PIKA_PROFILE_ID } from './profileDisplayNameValidation'
+import { decideOpenImageViewer, decideRequestImageViewerClose, decideHandlePopstate, type ImageViewerAction, type ImageViewerHistoryState } from './imageViewerHistoryState'
 import type { TournamentEconomyNoticeReason } from '../../ui/notifications/tournamentEconomyNotificationQueue.js'
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes.js'
 import { isAdminPaymentPeriod } from '../adminPayments/adminPaymentsTypes.js'
@@ -555,14 +556,14 @@ export type CreateLobbyFlowControllerOptions = {
    */
   onTopicMessagesSubscribe?: (topicId: string, afterSeq: number) => void
   onTopicMessagesUnsubscribe?: (topicId: string) => void
-  /** requestId се генерира от контролера (не от викащия) — служи само за ack correlation, виж Етап 2 брифа т.7. */
-  onTopicMessageSend?: (topicId: string, body: string, requestId: string) => void
+  /** requestId се генерира от контролера (не от викащия) — служи само за ack correlation, виж Етап 2 брифа т.7. imageDataUrl опционален — Attachment feature, reuse на СЪЩИЯ data-URL pipeline като friend chat. */
+  onTopicMessageSend?: (topicId: string, body: string, requestId: string, imageDataUrl?: string) => void
   /** afterSeq=null → първите N replies; иначе → следващи от afterSeq (forward cursor, "Покажи още"). Етап 3. */
   onTopicRepliesLoad?: (topicId: string, rootMessageId: string, afterSeq: number | null) => Promise<
     | { ok: true; replies: TopicReplySnapshot[]; hasMore: boolean; oldestSeq: number | null }
     | { ok: false; message: string }
   >
-  onTopicReplySend?: (topicId: string, parentMessageId: string, body: string, requestId: string) => void
+  onTopicReplySend?: (topicId: string, parentMessageId: string, body: string, requestId: string, imageDataUrl?: string) => void
   onTopicMessageLikeToggle?: (messageId: string, requestId: string) => void
   /** GET VIP gate статус (isActive + hasClaimedLaunchGift) за composer gating в "Теми" — отделно от onGetOwnVipStatus (profile popup use case). */
   onGetTopicsVipGateStatus?: () => Promise<
@@ -758,6 +759,8 @@ type InternalLobbyFlowState = {
   /** pending requestId per тема, докато чакаме sever ack (echo/error) — null = нищо не се изпраща в момента за тази тема. */
   topicComposerPendingRequestIdByTopicId: Record<string, string | null>
   topicComposerErrorTextByTopicId: Record<string, string | null>
+  /** Избрана (все още неизпратена) снимка за root composer-а, keyed по topicId — Attachment feature, reuse на СЪЩИЯ { file, previewUrl } shape като chatPendingImageByFriendshipId. */
+  topicComposerPendingImageByTopicId: Record<string, { file: File; previewUrl: string } | undefined>
 
   // ─── Replies (Етап 3) ───────────────────────────────────────────────────
   /** Кои root съобщения имат отворен ("expanded") reply thread в момента. */
@@ -772,6 +775,16 @@ type InternalLobbyFlowState = {
   topicReplyComposerErrorTextByRootId: Record<string, string | null>
   /** Само ЕДИН inline reply composer отворен наведнъж — продуктово решение за опростен UX. */
   topicReplyComposerOpenRootId: string | null
+  /** Избрана снимка за reply composer-а, keyed по rootMessageId — изолирана от root composer-a и от други едновременно отворени reply threads. */
+  topicReplyComposerPendingImageByRootId: Record<string, { file: File; previewUrl: string } | undefined>
+
+  // ─── Reusable in-app image viewer (lightbox) ────────────────────────────
+  // Generален, feature-agnostic — reuse-ван и от Topics attachments, и от
+  // friend chat (виж т.13 от Attachment брифа). null = затворен. Полетата
+  // огледални на ImageViewerHistoryState (imageViewerHistoryState.ts) —
+  // viewUrl/downloadUrl са display данни, historyPushed/closePending са
+  // decision-logic state (виж пълния rationale там).
+  imageViewer: { viewUrl: string; downloadUrl: string; historyPushed: boolean; closePending: boolean } | null
 
   // ─── Likes (Етап 3) ──────────────────────────────────────────────────────
   /** Override-натите likeCount/viewerHasLiked стойности — попълва се от WS/REST отговори, overwrite-ва каквото носи самия TopicMessageSnapshot/TopicReplySnapshot при render. */
@@ -1174,6 +1187,7 @@ function createInitialState(): InternalLobbyFlowState {
     topicComposerDraftByTopicId: {},
     topicComposerPendingRequestIdByTopicId: {},
     topicComposerErrorTextByTopicId: {},
+    topicComposerPendingImageByTopicId: {},
     topicExpandedReplyRootIds: [],
     topicRepliesByRootId: {},
     topicRepliesHasMoreByRootId: {},
@@ -1182,6 +1196,8 @@ function createInitialState(): InternalLobbyFlowState {
     topicReplyComposerPendingRequestIdByRootId: {},
     topicReplyComposerErrorTextByRootId: {},
     topicReplyComposerOpenRootId: null,
+    topicReplyComposerPendingImageByRootId: {},
+    imageViewer: null,
     topicMessageLikeCountById: {},
     topicMessageViewerHasLikedById: {},
     topicMessageLikePendingRequestIdById: {},
@@ -2669,6 +2685,14 @@ export function createLobbyFlowController(
       friendshipAction.giftFriendshipId = acceptedRelationship.friendshipId
     }
     const lobbyState: LobbyScreenState = {
+      // Established API origin resolver (main.ts getApiBaseUrl) — local dev
+      // frontend :5173 + backend :3001 split origin, same-origin/proxy в
+      // production (празен string). Reuse-ва СЪЩИЯ helper като options.apiBaseUrl
+      // по-долу (renderLobbyScreen options), но тук е на state-а самия, защото
+      // renderTopicsScreen(state)/renderChatAttachmentBubble(attachment) не
+      // получават options — attachment view/download/viewer URL-ите трябва да
+      // минат през него, за да не се resolve-ват спрямо Vite dev origin-а.
+      apiBaseUrl: options.getApiBaseUrl?.() ?? '',
       view:
         state.currentScreen === 'players'
           ? 'players'
@@ -3022,6 +3046,7 @@ export function createLobbyFlowController(
       topicComposerDraftByTopicId: state.topicComposerDraftByTopicId,
       topicComposerPendingRequestIdByTopicId: state.topicComposerPendingRequestIdByTopicId,
       topicComposerErrorTextByTopicId: state.topicComposerErrorTextByTopicId,
+      topicComposerPendingImageByTopicId: state.topicComposerPendingImageByTopicId,
       topicExpandedReplyRootIds: state.topicExpandedReplyRootIds,
       topicRepliesByRootId: state.topicRepliesByRootId,
       topicRepliesHasMoreByRootId: state.topicRepliesHasMoreByRootId,
@@ -3030,6 +3055,8 @@ export function createLobbyFlowController(
       topicReplyComposerPendingRequestIdByRootId: state.topicReplyComposerPendingRequestIdByRootId,
       topicReplyComposerErrorTextByRootId: state.topicReplyComposerErrorTextByRootId,
       topicReplyComposerOpenRootId: state.topicReplyComposerOpenRootId,
+      topicReplyComposerPendingImageByRootId: state.topicReplyComposerPendingImageByRootId,
+      imageViewer: state.imageViewer,
       topicMessageLikeCountById: state.topicMessageLikeCountById,
       topicMessageViewerHasLikedById: state.topicMessageViewerHasLikedById,
       topicMessageLikePendingRequestIdById: state.topicMessageLikePendingRequestIdById,
@@ -3295,6 +3322,26 @@ export function createLobbyFlowController(
       },
       onTopicComposerNonVipTap: () => {
         handleTopicComposerNonVipTap()
+      },
+      onTopicComposerImageSelect: (topicId, file) => {
+        selectTopicComposerImage(topicId, file)
+      },
+      onTopicComposerImageRemove: (topicId) => {
+        clearTopicComposerPendingImage(topicId)
+        render()
+      },
+      onTopicReplyComposerImageSelect: (rootMessageId, file) => {
+        selectTopicReplyComposerImage(rootMessageId, file)
+      },
+      onTopicReplyComposerImageRemove: (rootMessageId) => {
+        clearTopicReplyComposerPendingImage(rootMessageId)
+        render()
+      },
+      onImageViewerOpen: (attachment) => {
+        openImageViewer(attachment)
+      },
+      onImageViewerClose: () => {
+        requestImageViewerClose()
       },
       onTopicsVipPopupClose: () => {
         closeTopicsVipPopup()
@@ -5052,7 +5099,8 @@ export function createLobbyFlowController(
 
     const draft = state.topicReplyComposerDraftByRootId[rootMessageId] ?? ''
     const trimmed = draft.trim()
-    if (trimmed.length === 0) return
+    const pendingImage = state.topicReplyComposerPendingImageByRootId[rootMessageId] ?? null
+    if (trimmed.length === 0 && pendingImage === null) return
     if (state.topicReplyComposerPendingRequestIdByRootId[rootMessageId]) return
 
     if (!(state.topicsVipGate?.isActive ?? false)) {
@@ -5065,7 +5113,20 @@ export function createLobbyFlowController(
     state.topicReplyComposerErrorTextByRootId[rootMessageId] = null
     render()
 
-    options.onTopicReplySend?.(topicId, rootMessageId, trimmed, requestId)
+    if (pendingImage === null) {
+      options.onTopicReplySend?.(topicId, rootMessageId, trimmed, requestId)
+      return
+    }
+
+    void readFileAsDataUrl(pendingImage.file)
+      .then((imageDataUrl) => {
+        options.onTopicReplySend?.(topicId, rootMessageId, trimmed, requestId, imageDataUrl)
+      })
+      .catch(() => {
+        state.topicReplyComposerPendingRequestIdByRootId[rootMessageId] = null
+        state.topicReplyComposerErrorTextByRootId[rootMessageId] = 'Снимката не можа да бъде прочетена. Опитайте отново.'
+        render()
+      })
   }
 
   // ─── Realtime merge/dedupe (Етап 2) ─────────────────────────────────────
@@ -5235,6 +5296,88 @@ export function createLobbyFlowController(
     render()
   }
 
+  // ─── Reusable in-app image viewer (lightbox) ────────────────────────────
+  // Feature-agnostic — извиква се от Topics attachment click (и по-късно
+  // friend chat, виж т.13 от Attachment брифа). Замества target="_blank"
+  // (проблемно за PWA Back button, виж т.11/12) с fullscreen overlay, ВЪТРЕ
+  // в приложението. Отварянето push-ва ЕДИН виртуален history entry — пълния
+  // decision-logic rationale (вкл. критичния race-condition bug fix между
+  // explicit close/history.back()/popstate) е в imageViewerHistoryState.ts.
+  //
+  // Side-effect executor за ImageViewerAction[] — единственото място, което
+  // реално пипа history API/render за viewer-a. `attachment` носи display
+  // данните (viewUrl/downloadUrl) само при open; `nextState` носи decision-logic
+  // полетата (historyPushed/closePending), computed от imageViewerHistoryState.ts
+  // — тук просто ги записваме в state.imageViewer, без да ги преизчисляваме.
+  function runImageViewerActions(
+    actions: ImageViewerAction[],
+    nextState: ImageViewerHistoryState,
+    attachment: { viewUrl: string; downloadUrl: string } | null,
+  ): void {
+    for (const action of actions) {
+      switch (action.type) {
+        case 'push-history-state':
+          state.imageViewer = attachment
+            ? { viewUrl: attachment.viewUrl, downloadUrl: attachment.downloadUrl, historyPushed: nextState.historyPushed, closePending: nextState.closePending }
+            : state.imageViewer
+          history.pushState({ pikaImageViewer: true }, '')
+          render()
+          break
+        case 'call-history-back':
+          if (state.imageViewer) {
+            state.imageViewer = { ...state.imageViewer, historyPushed: nextState.historyPushed, closePending: nextState.closePending }
+          }
+          history.back()
+          break
+        case 'finalize-close':
+          state.imageViewer = null
+          render()
+          break
+        case 'noop':
+          break
+      }
+    }
+  }
+
+  function readImageViewerHistoryState(): ImageViewerHistoryState {
+    const viewer = state.imageViewer
+    return {
+      isOpen: viewer !== null,
+      historyPushed: viewer?.historyPushed ?? false,
+      closePending: viewer?.closePending ?? false,
+    }
+  }
+
+  function openImageViewer(attachment: { viewUrl: string; downloadUrl: string }): void {
+    const { nextState, actions } = decideOpenImageViewer()
+    runImageViewerActions(actions, nextState, attachment)
+  }
+
+  // X / Esc / backdrop click извикват ТОВА — единна decision точка (виж
+  // decideRequestImageViewerClose в imageViewerHistoryState.ts). Никога не
+  // маха state.imageViewer синхронно тук при нормален flow — финализацията
+  // идва през handleWindowPopstate, за да не пропусне popstate consumption
+  // (виж критичния invariant коментар в imageViewerHistoryState.ts).
+  // closePending guard-ът (записан от call-history-back action-а по-горе)
+  // предпазва от двоен history.back() при бърз double X/Esc/backdrop click
+  // преди асинхронния popstate да пристигне.
+  function requestImageViewerClose(): void {
+    if (state.imageViewer === null) return
+    const { nextState, actions } = decideRequestImageViewerClose(readImageViewerHistoryState())
+    runImageViewerActions(actions, nextState, null)
+  }
+
+  // System/browser Back (popstate) — consume-ва СЪЩОТО popstate събитие,
+  // независимо дали е причинено от requestImageViewerClose() (виж по-горе)
+  // или от реален потребителски Back tap, докато viewer-ът е отворен.
+  // Връща true → повикващият (window 'popstate' listener) НЕ delegate-ва
+  // към navigateFromPath за това събитие.
+  function handleWindowPopstate(): boolean {
+    const { nextState, actions, consumed } = decideHandlePopstate(readImageViewerHistoryState())
+    runImageViewerActions(actions, nextState, null)
+    return consumed
+  }
+
   // ─── Composer (Етап 2) ───────────────────────────────────────────────────
 
   function updateTopicComposerDraft(topicId: string, value: string): void {
@@ -5248,11 +5391,15 @@ export function createLobbyFlowController(
   function submitTopicComposerMessage(topicId: string): void {
     const draft = state.topicComposerDraftByTopicId[topicId] ?? ''
     const trimmed = draft.trim()
-    if (trimmed.length === 0) return
+    const pendingImage = state.topicComposerPendingImageByTopicId[topicId] ?? null
+    // Text-or-image (Attachment feature) — reject само ако И двете липсват;
+    // image-only (trimmed='', pendingImage!==null) е валидно съобщение.
+    if (trimmed.length === 0 && pendingImage === null) return
     if (state.topicComposerPendingRequestIdByTopicId[topicId]) return // вече чакаме ack за тази тема
 
     // Client-side gate е само UX (избягва излишен round-trip) — реалният
     // guard е server-side (Етап 2 брифа: "Frontend скриването НЕ е security boundary").
+    // Снимка е писане (Attachment брифа т.3) — СЪЩИЯТ VIP gate важи за нея.
     if (!(state.topicsVipGate?.isActive ?? false)) {
       openTopicsVipPopup()
       return
@@ -5263,7 +5410,24 @@ export function createLobbyFlowController(
     state.topicComposerErrorTextByTopicId[topicId] = null
     render()
 
-    options.onTopicMessageSend?.(topicId, trimmed, requestId)
+    if (pendingImage === null) {
+      options.onTopicMessageSend?.(topicId, trimmed, requestId)
+      return
+    }
+
+    // FileReader encode е async — draft/pendingImage/pending-request state
+    // остават непокътнати докато чакаме, точно както root chat flow-а
+    // (виж sendChatMessage) — при неуспех на самия encode (рядко, но
+    // технически възможно), освобождаваме pending state-а и показваме грешка.
+    void readFileAsDataUrl(pendingImage.file)
+      .then((imageDataUrl) => {
+        options.onTopicMessageSend?.(topicId, trimmed, requestId, imageDataUrl)
+      })
+      .catch(() => {
+        state.topicComposerPendingRequestIdByTopicId[topicId] = null
+        state.topicComposerErrorTextByTopicId[topicId] = 'Снимката не можа да бъде прочетена. Опитайте отново.'
+        render()
+      })
   }
 
   async function showTournamentsList(): Promise<void> {
@@ -7867,6 +8031,64 @@ export function createLobbyFlowController(
     render()
   }
 
+  // ─── Topics attachment (root composer) — reuse на СЪЩИЯ validateChatImageFile ──
+
+  function clearTopicComposerPendingImage(topicId: string): void {
+    const pending = state.topicComposerPendingImageByTopicId[topicId]
+    if (pending) {
+      URL.revokeObjectURL(pending.previewUrl)
+    }
+    const next = { ...state.topicComposerPendingImageByTopicId }
+    delete next[topicId]
+    state.topicComposerPendingImageByTopicId = next
+  }
+
+  function selectTopicComposerImage(topicId: string, file: File): void {
+    const validationError = validateChatImageFile(file)
+    if (validationError !== null) {
+      state.topicComposerErrorTextByTopicId[topicId] = validationError
+      render()
+      return
+    }
+    clearTopicComposerPendingImage(topicId)
+    const previewUrl = URL.createObjectURL(file)
+    state.topicComposerPendingImageByTopicId = {
+      ...state.topicComposerPendingImageByTopicId,
+      [topicId]: { file, previewUrl },
+    }
+    state.topicComposerErrorTextByTopicId[topicId] = null
+    render()
+  }
+
+  // ─── Topics attachment (reply composer) ─────────────────────────────────
+
+  function clearTopicReplyComposerPendingImage(rootMessageId: string): void {
+    const pending = state.topicReplyComposerPendingImageByRootId[rootMessageId]
+    if (pending) {
+      URL.revokeObjectURL(pending.previewUrl)
+    }
+    const next = { ...state.topicReplyComposerPendingImageByRootId }
+    delete next[rootMessageId]
+    state.topicReplyComposerPendingImageByRootId = next
+  }
+
+  function selectTopicReplyComposerImage(rootMessageId: string, file: File): void {
+    const validationError = validateChatImageFile(file)
+    if (validationError !== null) {
+      state.topicReplyComposerErrorTextByRootId[rootMessageId] = validationError
+      render()
+      return
+    }
+    clearTopicReplyComposerPendingImage(rootMessageId)
+    const previewUrl = URL.createObjectURL(file)
+    state.topicReplyComposerPendingImageByRootId = {
+      ...state.topicReplyComposerPendingImageByRootId,
+      [rootMessageId]: { file, previewUrl },
+    }
+    state.topicReplyComposerErrorTextByRootId[rootMessageId] = null
+    render()
+  }
+
   function readFileAsDataUrl(file: File): Promise<string> {
     return new Promise((resolvePromise, rejectPromise) => {
       const reader = new FileReader()
@@ -9920,6 +10142,9 @@ export function createLobbyFlowController(
         state.topicComposerDraftByTopicId[message.topicId] = ''
         state.topicComposerPendingRequestIdByTopicId[message.topicId] = null
         state.topicComposerErrorTextByTopicId[message.topicId] = null
+        // Успешен send — изчиства избраната снимка (Attachment брифа т.6:
+        // "При успешен send: clear text; clear attachment selection").
+        clearTopicComposerPendingImage(message.topicId)
       }
 
       state.topicMessagesRenderReason = 'live-append'
@@ -9988,6 +10213,7 @@ export function createLobbyFlowController(
         state.topicReplyComposerDraftByRootId[rootMessageId] = ''
         state.topicReplyComposerPendingRequestIdByRootId[rootMessageId] = null
         state.topicReplyComposerErrorTextByRootId[rootMessageId] = null
+        clearTopicReplyComposerPendingImage(rootMessageId)
       }
 
       render()
@@ -10529,6 +10755,9 @@ export function createLobbyFlowController(
   void loadPlayerUnclaimedCount()
 
   window.addEventListener('popstate', () => {
+    // Image viewer-ът (ако е отворен) консумира popstate събитието първо —
+    // виж коментара при openImageViewer/handleWindowPopstate по-горе.
+    if (handleWindowPopstate()) return
     const path = window.location.pathname
     applyRouteSeo(path)
     navigateFromPath(path)

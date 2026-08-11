@@ -118,6 +118,11 @@ function makeAttachment(filename: string) {
 
 function makeAdminState(overrides: Partial<LobbyScreenState> = {}): LobbyScreenState {
   return {
+    // Празен string = production same-origin/proxy (resolveAttachmentUrl
+    // reuse, виж checkTopicAttachments.ts [16]-[19]) — realistic default,
+    // не оставяме полето undefined (би дало "undefined/api/..." runtime
+    // резултат, който случайно все пак минава substring assertion-ите).
+    apiBaseUrl: '',
     adminSupportConversations: [{
       profileId: 'user-profile',
       displayName: 'Support User',

@@ -241,6 +241,8 @@ export type ClientMessage =
       body: string
       /** Задължителен (за разлика от lobby chat) — единствен ack-correlation механизъм, виж Етап 2 брифа т.7. */
       requestId: string
+      /** Опционален `data:image/...;base64,...` — reuse на СЪЩИЯ decode/validate/process pipeline като friend chat (imageAttachments.ts), виж index.ts. Максимум 1 attachment/съобщение. */
+      imageDataUrl?: string
     }
   | {
       type: 'send_topic_reply'
@@ -249,6 +251,7 @@ export type ClientMessage =
       parentMessageId: string
       body: string
       requestId: string
+      imageDataUrl?: string
     }
   | {
       type: 'toggle_topic_message_like'
@@ -986,6 +989,21 @@ export type LobbyChatErrorMessage = {
 // broadcast-ват пълна история — виж topicMessageStore.getMessagesAfter.
 
 /**
+ * Attachment metadata — reuse на СЪЩИЯ shape като ChatAttachmentSnapshot
+ * (chatStore.ts) — viewUrl/downloadUrl вече построени server-side (index.ts),
+ * WS payload носи само безопасен descriptor/reference, НИКОГА raw image bytes
+ * (изричното изискване от брифа).
+ */
+export type TopicAttachmentSnapshot = {
+  attachmentId: string
+  width: number
+  height: number
+  byteSize: number
+  viewUrl: string
+  downloadUrl: string
+}
+
+/**
  * Съвместим DTO с TopicMessageSnapshot от REST response-а (index.ts
  * enrichment слой, GET /api/topics/:id/messages) — включително
  * senderAvatarUrl, batch-hydrate-нат от canonical profile данни, НЕ по едно
@@ -1004,6 +1022,8 @@ export type TopicMessageBroadcastSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   body: string
   createdAt: string
+  /** Attachment feature — максимум 1 image/съобщение, null ако няма. */
+  attachment: TopicAttachmentSnapshot | null
   /**
    * Етап 3 — включено в root push-а (не в reply push-а, виж
    * TopicReplyBroadcastSnapshot), за да не се налага отделна REST/WS заявка
@@ -1039,6 +1059,7 @@ export type TopicReplyBroadcastSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   body: string
   createdAt: string
+  attachment: TopicAttachmentSnapshot | null
   likeCount: number
   viewerHasLiked: boolean
 }
@@ -1073,6 +1094,8 @@ export type TopicMessageErrorCode =
   | 'invalid_body'
   | 'duplicate_message'
   | 'rate_limited'
+  | 'invalid_image'
+  | 'attachment_upload_failed'
 
 export type TopicMessageErrorMessage = {
   type: 'topic_message_error'

@@ -48,10 +48,22 @@ export type TopicMessageBodyValidationResult =
 // trim() маха само outer whitespace (включително заграждащи \n) — вътрешните
 // нови редове от textarea Shift+Enter се пазят непокътнати, за разлика от
 // еднолинейния lobby chat input.
-export function validateTopicMessageBody(rawBody: string): TopicMessageBodyValidationResult {
+//
+// `hasAttachment` (Топикс attachment feature) — image-only съобщения (празен
+// текст + валидна снимка) са позволени: empty_body се връща САМО ако И
+// текстът е празен, И няма attachment. Text validation (forbidden chars,
+// max length) остава непроменена за съобщения, които ИМАТ текст — не се
+// разхлабва, само empty-check-ът става условен.
+export function validateTopicMessageBody(
+  rawBody: string,
+  hasAttachment: boolean = false,
+): TopicMessageBodyValidationResult {
   const trimmed = rawBody.trim()
 
   if (trimmed.length === 0) {
+    if (hasAttachment) {
+      return { ok: true, body: '' }
+    }
     return { ok: false, code: 'empty_body' }
   }
 

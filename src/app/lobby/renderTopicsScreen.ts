@@ -1,5 +1,6 @@
-import type { TopicMessageSnapshot, TopicReplySnapshot } from '../network/createGameServerClient'
+import type { TopicMessageSnapshot, TopicReplySnapshot, TopicAttachmentSnapshot } from '../network/createGameServerClient'
 import type { LobbyScreenState } from './renderLobbyScreen'
+import { resolveAttachmentUrl, renderLinkifiedChatMessageBody } from './renderLobbyScreen'
 import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup'
 
 // Read-only Етап 1 — root history + navigation. Етап 2 добави real composer
@@ -267,10 +268,68 @@ function renderTopicAuthorBlock(senderProfileId: string, senderDisplayName: stri
 // рендиране за двата layout-а — label текст + icon glyph са и двата
 // маркирани с CSS класове, видимостта им се превключва по media query, не
 // JS device detection.
+// Компактен icon-only image picker, споделен между root и reply composer-а
+// (Attachment feature брифа т.2/3) — reuse на layout-а от
+// renderChatImagePickerControls (renderLobbyScreen.ts), но с VIP gate:
+// non-VIP клик отваря СЪЩИЯ VIP popup като текстовото поле, БЕЗ да отваря
+// file picker (data-topics-image-pick-vip-locked маркира интерцепцията,
+// wiring-ът е в renderLobbyScreen.ts, огледално на data-topics-composer-vip-locked).
+function renderTopicsImagePickerControls(options: {
+  kind: 'root' | 'reply'
+  key: string
+  pending: { previewUrl: string } | null
+  isSending: boolean
+  isVip: boolean
+}): string {
+  const { kind, key, pending, isSending, isVip } = options
+  const disabled = isSending
+  const inputAttr = kind === 'root' ? `data-topics-image-input="${escapeHtml(key)}"` : `data-topics-reply-image-input="${escapeHtml(key)}"`
+  const pickAttr = kind === 'root' ? `data-topics-image-pick="${escapeHtml(key)}"` : `data-topics-reply-image-pick="${escapeHtml(key)}"`
+  const removeAttr = kind === 'root' ? `data-topics-image-remove="${escapeHtml(key)}"` : `data-topics-reply-image-remove="${escapeHtml(key)}"`
+  const vipLockedAttr = isVip ? '' : 'data-topics-image-vip-locked="1"'
+  const size = kind === 'root' ? 40 : 36
+
+  return `
+    <input
+      type="file"
+      accept="image/jpeg,image/png,image/webp"
+      ${inputAttr}
+      style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"
+      ${disabled ? 'disabled' : ''}
+    >
+    <button
+      type="button"
+      ${pickAttr}
+      ${vipLockedAttr}
+      title="Добави снимка"
+      aria-label="Добави снимка"
+      ${disabled ? 'disabled' : ''}
+      style="height:${size}px;width:${size}px;flex:0 0 auto;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;display:flex;align-items:center;justify-content:center;cursor:${disabled ? 'default' : 'pointer'};opacity:${disabled ? '0.5' : '1'};"
+    >
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
+    </button>
+    ${pending ? `
+      <div style="position:relative;flex:0 0 auto;">
+        <img src="${escapeHtml(pending.previewUrl)}" alt="" style="width:${size}px;height:${size}px;object-fit:cover;border-radius:8px;border:1px solid rgba(212,165,32,0.48);display:block;">
+        <button
+          type="button"
+          ${removeAttr}
+          title="Премахни снимката"
+          aria-label="Премахни снимката"
+          ${disabled ? 'disabled' : ''}
+          style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;border:0;background:#ef4444;color:#fff;font-size:11px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;cursor:${disabled ? 'default' : 'pointer'};padding:0;"
+        >✕</button>
+      </div>
+    ` : ''}
+  `
+}
+
 function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: string): string {
   const draft = state.topicReplyComposerDraftByRootId[rootMessageId] ?? ''
   const isSending = Boolean(state.topicReplyComposerPendingRequestIdByRootId[rootMessageId])
   const errorText = state.topicReplyComposerErrorTextByRootId[rootMessageId] ?? null
+  const pendingImage = state.topicReplyComposerPendingImageByRootId[rootMessageId] ?? null
+  const isVip = state.topicsVipGate?.isActive ?? false
 
   return `
     <style>
@@ -288,6 +347,13 @@ function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: strin
         data-topics-reply-composer-root-id="${escapeHtml(rootMessageId)}"
         style="display:flex;align-items:flex-end;gap:8px;"
       >
+        ${renderTopicsImagePickerControls({
+          kind: 'reply',
+          key: rootMessageId,
+          pending: pendingImage,
+          isSending,
+          isVip,
+        })}
         <textarea
           data-topics-reply-composer-text="1"
           name="body"
@@ -326,14 +392,15 @@ function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: strin
   `
 }
 
-function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySnapshot): string {
+export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySnapshot): string {
   return `
     <div data-topic-reply="${escapeHtml(reply.messageId)}">
       <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 4px 8px ${REPLY_INDENT_PX}px;">
         ${renderTopicAuthorBlock(reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt)}
       </div>
       <div style="margin:-6px 0 6px ${REPLY_INDENT_PX}px;">
-        <div style="font-size:14px;line-height:1.4;color:#e2e8f0;word-break:break-word;white-space:pre-wrap;">${escapeHtml(reply.body)}</div>
+        ${reply.body.length > 0 ? `<div style="font-size:14px;line-height:1.4;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(reply.body)}</div>` : ''}
+        ${reply.attachment ? renderTopicAttachment(reply.attachment, state.apiBaseUrl) : ''}
         <div style="margin-top:2px;margin-left:-8px;">
           ${renderTopicLikeButton(state, reply.messageId, reply.likeCount, reply.viewerHasLiked)}
         </div>
@@ -385,14 +452,54 @@ function renderRepliesSection(state: LobbyScreenState, rootMessageId: string): s
   `
 }
 
-function renderTopicMessageRow(state: LobbyScreenState, message: TopicMessageSnapshot): string {
+// Публикувана снимка — компактно, responsive, запазено aspect ratio,
+// rounded corners в Pika.bg стил (Attachment брифа т.9: desktop max
+// ~320-400px, mobile max-width:100%). Click отваря reusable in-app viewer
+// (data-image-viewer-open, wiring в renderLobbyScreen.ts) — НЕ target="_blank".
+export function renderTopicAttachment(attachment: TopicAttachmentSnapshot, apiBaseUrl: string): string {
+  // Reuse на established API origin resolver-а (main.ts getApiBaseUrl, виж
+  // resolveAttachmentUrl в renderLobbyScreen.ts) — в local dev frontend-ът
+  // тича на отделен Vite origin (:5173), докато сървърът (и protected
+  // attachment route-а) е на :3001. viewUrl/downloadUrl от сървъра са
+  // relative (/api/topics/.../attachments/...) — без resolve, browser-ът ги
+  // зарежда спрямо :5173 и удря SPA fallback-а (text/html вместо image/webp).
+  const viewUrl = resolveAttachmentUrl(apiBaseUrl, attachment.viewUrl)
+  const downloadUrl = resolveAttachmentUrl(apiBaseUrl, attachment.downloadUrl)
+  return `
+    <div style="margin-top:8px;display:grid;gap:6px;max-width:min(360px, calc(100% - 12px));width:100%;">
+      <button
+        type="button"
+        data-image-viewer-open="1"
+        data-image-viewer-view-url="${escapeHtml(viewUrl)}"
+        data-image-viewer-download-url="${escapeHtml(downloadUrl)}"
+        style="display:block;border-radius:10px;overflow:hidden;line-height:0;border:0;padding:0;background:transparent;cursor:pointer;text-align:left;width:100%;"
+      >
+        <img
+          src="${escapeHtml(viewUrl)}"
+          width="${attachment.width}"
+          height="${attachment.height}"
+          loading="lazy"
+          alt=""
+          style="display:block;max-width:100%;width:100%;height:auto;border-radius:10px;background:rgba(255,255,255,0.06);pointer-events:none;"
+        >
+      </button>
+      <a href="${escapeHtml(downloadUrl)}" download style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:900;color:rgba(248,250,252,0.72);text-decoration:none;">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+        Изтегли
+      </a>
+    </div>
+  `
+}
+
+export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMessageSnapshot): string {
   return `
     <div data-topic-message="${escapeHtml(message.messageId)}">
       <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 4px 0;">
         ${renderTopicAuthorBlock(message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt)}
       </div>
       <div style="padding:0 4px 10px 46px;">
-        <div style="margin-top:2px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;white-space:pre-wrap;">${escapeHtml(message.body)}</div>
+        ${message.body.length > 0 ? `<div style="margin-top:2px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body)}</div>` : ''}
+        ${message.attachment ? renderTopicAttachment(message.attachment, state.apiBaseUrl) : ''}
         <div style="margin-top:4px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
           ${renderTopicLikeButton(state, message.messageId, message.likeCount, message.viewerHasLiked)}
           ${renderTopicReplyButton(message.messageId, message.replyCount)}
@@ -532,6 +639,7 @@ function renderTopicsComposer(state: LobbyScreenState, topicId: string): string 
   const draft = state.topicComposerDraftByTopicId[topicId] ?? ''
   const isSending = Boolean(state.topicComposerPendingRequestIdByTopicId[topicId])
   const errorText = state.topicComposerErrorTextByTopicId[topicId] ?? null
+  const pendingImage = state.topicComposerPendingImageByTopicId[topicId] ?? null
 
   // Mobile Send бутон става icon-only (СЪЩИЯТ CSS class/media query pattern
   // като inline reply composer-a, виж renderInlineReplyComposer) — desktop
@@ -564,6 +672,13 @@ function renderTopicsComposer(state: LobbyScreenState, topicId: string): string 
         background:#0a0a0a;
       "
     >
+      ${renderTopicsImagePickerControls({
+        kind: 'root',
+        key: topicId,
+        pending: pendingImage,
+        isSending,
+        isVip,
+      })}
       <textarea
         data-topics-composer-text="1"
         name="body"
