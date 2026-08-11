@@ -26,12 +26,18 @@ import {
   isAdminOrSubadminSession,
   isFullAdminSession,
   isLobbyChatModeratorSession,
+  isTopicModeratorSession,
   type AuthSessionSnapshot,
 } from './db/authStore.js'
 import { createChatStore } from './db/chatStore.js'
 import { createLobbyChatStore } from './db/lobbyChatStore.js'
-import { createTopicStore } from './db/topicStore.js'
+import { createTopicStore, type TopicSnapshot } from './db/topicStore.js'
 import { createTopicMessageStore, type TopicMessageSnapshot } from './db/topicMessageStore.js'
+import {
+  createTopicModerationStore,
+  type TopicModeratorRole,
+  type TopicModerationAction,
+} from './db/topicModerationStore.js'
 import {
   validateLobbyChatBody,
   countUnicodeCodePoints,
@@ -237,7 +243,9 @@ import type {
   TopicReplyBroadcastSnapshot,
   TopicReplyErrorCode,
   TopicMessageLikeErrorCode,
+  TopicCreateErrorCode,
 } from './protocol/messageTypes.js'
+import { validateTopicTitle, TOPIC_TITLE_MAX_CODE_POINTS } from './protocol/topicTitleValidation.js'
 import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
 import type { PrivateRoom, PrivateRoomMember } from './game/privateRoomsStore.js'
 import { createPrivateRoomChatStore, PRIVATE_ROOM_CHAT_HISTORY_LIMIT } from './game/privateRoomChatStore.js'
@@ -490,6 +498,9 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'send_topic_message':
     case 'send_topic_reply':
     case 'toggle_topic_message_like':
+    case 'create_topic':
+    case 'subscribe_topics_directory':
+    case 'unsubscribe_topics_directory':
       return true
     case 'ping':
     case 'request_player_profile':
@@ -572,6 +583,7 @@ const chatStore = await createChatStore(
 const lobbyChatStore = await createLobbyChatStore(databaseBootstrap.databaseFilePath)
 const topicStore = await createTopicStore(databaseBootstrap.databaseFilePath)
 const topicMessageStore = await createTopicMessageStore(databaseBootstrap.databaseFilePath)
+const topicModerationStore = await createTopicModerationStore(databaseBootstrap.databaseFilePath)
 
 // ─── Общ лайв чат в лобито (broadcast към абонирани connection-и) ───────────
 //
@@ -866,6 +878,12 @@ let lobbyChatRetentionInterval: ReturnType<typeof setInterval> | null = setInter
 
 const topicMessageSubscriberTopicIdByConnectionId = new Map<ConnectionId, string>()
 const topicMessageSubscribersByTopicId = new Map<string, Set<ConnectionId>>()
+
+// Directory-wide "гледам списъка с теми" interest (Custom Topic Creation) —
+// mirror на lobbyChatSubscriberConnectionIds (единствен глобален канал, не
+// per-topic Map), защото "нова тема се появи" е relevant за ВСЕКИ клиент в
+// Topics директорията, независимо коя конкретна тема гледа в момента.
+const topicsDirectorySubscriberConnectionIds = new Set<ConnectionId>()
 
 const TOPIC_MESSAGES_REALTIME_CATCHUP_LIMIT = 50
 const TOPIC_MESSAGE_POLL_BATCH_SIZE = 200
@@ -1214,6 +1232,82 @@ function broadcastTopicMessageLikeChangedToLocalSubscribers(topicId: string, mes
   }
 }
 
+// ─── Moderation realtime (Етап 4) ────────────────────────────────────────
+
+// Общ multi-connection push helper (потребител може да има desktop + mobile
+// таб едновременно) — за target-only moderation notify (mute/unmute), за
+// разлика от topic subscriber broadcast-ите по-горе. Не филтрира по
+// currentRoomId (за разлика от gift notify pattern-а другаде в index.ts) —
+// moderation state трябва да стигне до профила независимо дали в момента
+// играе в стая.
+function broadcastToProfileConnections(profileId: string, payload: unknown): void {
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.profileId === profileId) {
+      safeSendToConnection(conn.id, payload)
+    }
+  }
+}
+
+// Public — всички subscribers на темата виждат lock/unlock realtime (виж
+// брифа т.10: "composer/state се обновява без refresh"). Пълно текущо
+// state (не delta), огледално на broadcastTopicMessageLikeChangedToLocalSubscribers.
+function broadcastTopicLockStateChangedToLocalSubscribers(
+  topicId: string,
+  lockSnapshot: { isLocked: boolean; lockedUntil: string | null; lockedReason: string | null },
+): void {
+  const subscribers = topicMessageSubscribersByTopicId.get(topicId)
+  if (subscribers === undefined || subscribers.size === 0) {
+    return
+  }
+  for (const subscriberConnectionId of [...subscribers]) {
+    safeSendToConnection(subscriberConnectionId, {
+      type: 'topic_lock_state_changed',
+      topicId,
+      isLocked: lockSnapshot.isLocked,
+      lockedUntil: lockSnapshot.lockedUntil,
+      lockedReason: lockSnapshot.lockedReason,
+    })
+  }
+}
+
+// Public — subscribed клиенти трябва безопасно да се приберат в Topics
+// directory (брифа т.10). Клиентът маха локалния subscription state при
+// получаване, огледално на unsubscribe_topic_messages handling-а.
+function broadcastTopicDeletedToLocalSubscribers(topicId: string): void {
+  const subscribers = topicMessageSubscribersByTopicId.get(topicId)
+  if (subscribers === undefined || subscribers.size === 0) {
+    return
+  }
+  for (const subscriberConnectionId of [...subscribers]) {
+    safeSendToConnection(subscriberConnectionId, {
+      type: 'topic_deleted',
+      topicId,
+    })
+    topicMessageSubscribersByTopicId.get(topicId)?.delete(subscriberConnectionId)
+    if (topicMessageSubscriberTopicIdByConnectionId.get(subscriberConnectionId) === topicId) {
+      topicMessageSubscriberTopicIdByConnectionId.delete(subscriberConnectionId)
+    }
+  }
+}
+
+// Target-only (private) — САМО до connections на заглушения/отглушения
+// потребител, НЕ broadcast към всички subscribers (брифа т.10: "останалите
+// клиенти не трябва да получават чувствителна/ненужна moderation
+// информация").
+function notifyProfileOfTopicMuteStateChange(
+  profileId: string,
+  topicId: string,
+  muteSnapshot: { isMuted: boolean; mutedUntil: string | null; reason: string | null },
+): void {
+  broadcastToProfileConnections(profileId, {
+    type: 'topic_mute_state_changed',
+    topicId,
+    isMuted: muteSnapshot.isMuted,
+    mutedUntil: muteSnapshot.mutedUntil,
+    reason: muteSnapshot.reason,
+  })
+}
+
 // Lightweight aggregate drift-detection poll (Етап 3 cross-instance likes) —
 // НЕ е seq-based invariant като root/reply poll-а. За всеки topicId с
 // локални subscribers в момента, взима likeCount за message-ите, чийто
@@ -1359,6 +1453,122 @@ function runTopicMessagesCrossInstancePoll(): void {
 let topicMessagePollInterval: ReturnType<typeof setInterval> | null = setInterval(
   runTopicMessagesCrossInstancePoll,
   LOBBY_CHAT_POLL_INTERVAL_MS,
+)
+
+// ─── "Теми" (Topics) realtime — създаване на нова тема (Custom Topic
+// Creation) ──────────────────────────────────────────────────────────────
+//
+// Same instant-local-broadcast + cross-instance-poll модел като root
+// съобщенията по-горе, но опростен — topic creation е рядко действие (не
+// high-volume chat), затова НЕ се нуждае от locally-announced echo
+// suppression set: directory upsert-ва по topicId client-side (виж
+// TopicCreatedMessage коментара в messageTypes.ts), значи дори ако
+// creator-ът получи и direct success, И собствения си broadcast (edge-case
+// timing), клиентът просто overwrite-ва СЪЩИЯ topicId — безвредно.
+//
+// Cursor: composite (createdAt, topicId), виж
+// topicStore.pollNewActiveTopicsCreatedAfter коментара — 'topics' няма
+// auto-increment seq като topic_messages.
+
+const TOPIC_CREATE_RATE_LIMIT_WINDOW_MS = 60_000
+const TOPIC_CREATE_RATE_LIMIT_MAX_PER_WINDOW = 3
+const TOPIC_CREATE_RATE_LIMIT_CLEANUP_INTERVAL_MS = 60_000
+const TOPICS_DIRECTORY_POLL_INTERVAL_MS = 2_000
+const TOPICS_DIRECTORY_POLL_BATCH_SIZE = 50
+
+type TopicCreateRateLimitEntry = { count: number; windowStartedAt: number }
+// Отделен bucket от topicMessageRateLimitByProfileId — създаването на теми е
+// различно, по-рядко действие от писането на съобщения, не бива да дели
+// budget с тях.
+const topicCreateRateLimitByProfileId = new Map<string, TopicCreateRateLimitEntry>()
+let topicCreateRateLimitLastCleanupAt = 0
+
+function checkTopicCreateRateLimit(profileId: string, now: number = Date.now()): boolean {
+  const existing = topicCreateRateLimitByProfileId.get(profileId)
+
+  if (!existing || now - existing.windowStartedAt >= TOPIC_CREATE_RATE_LIMIT_WINDOW_MS) {
+    topicCreateRateLimitByProfileId.set(profileId, { count: 1, windowStartedAt: now })
+    return true
+  }
+
+  if (existing.count >= TOPIC_CREATE_RATE_LIMIT_MAX_PER_WINDOW) {
+    return false
+  }
+
+  existing.count += 1
+  return true
+}
+
+function cleanupTopicCreateRateLimitState(now: number): void {
+  if (now - topicCreateRateLimitLastCleanupAt < TOPIC_CREATE_RATE_LIMIT_CLEANUP_INTERVAL_MS) {
+    return
+  }
+  topicCreateRateLimitLastCleanupAt = now
+  for (const [profileId, entry] of topicCreateRateLimitByProfileId.entries()) {
+    if (now - entry.windowStartedAt >= TOPIC_CREATE_RATE_LIMIT_WINDOW_MS) {
+      topicCreateRateLimitByProfileId.delete(profileId)
+    }
+  }
+}
+
+function broadcastTopicCreatedToLocalSubscribers(
+  topic: TopicSnapshot,
+  opts?: { originatingConnectionId?: ConnectionId },
+): void {
+  for (const subscriberConnectionId of [...topicsDirectorySubscriberConnectionIds]) {
+    // Originator-ът вече получи ОТДЕЛЕН requestId-matched success response
+    // (виж create_topic handler-а) — за разлика от lobby chat/topic
+    // message broadcast (където originator-ът е subscriber И самата
+    // broadcast функция носи неговия requestId в СЪЩИЯ пакет), тук directno
+    // skip-ваме originator connection-а изцяло, за да не получи ВТОРИ
+    // 'topic_created' пакет (би създало duplicate-append риск client-side,
+    // spec изисква "success + broadcast да не създадат duplicate chip").
+    if (opts?.originatingConnectionId === subscriberConnectionId) {
+      continue
+    }
+
+    const subscriberConnection = getConnectionById(serverState, subscriberConnectionId)
+    const socket = socketRegistry.get(subscriberConnectionId)
+
+    if (subscriberConnection === null || !socket || socket.readyState !== WebSocket.OPEN) {
+      topicsDirectorySubscriberConnectionIds.delete(subscriberConnectionId)
+      continue
+    }
+
+    safeSendToConnection(subscriberConnectionId, {
+      type: 'topic_created',
+      topic,
+    })
+  }
+}
+
+// Startup baseline = rowid на последната ВЕЧЕ съществуваща тема — НЕ '0' —
+// за да не се replay-ва цялата историческа topics таблица към local
+// subscribers след рестарт на процеса (established convention, mirror на
+// topicMessagePollCursor баселайна).
+let topicsDirectoryPollCursor: string = topicStore.getLatestActiveTopicCursor()
+
+function runTopicsDirectoryCrossInstancePoll(): void {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  cleanupTopicCreateRateLimitState(Date.now())
+
+  try {
+    const { topics: newTopics, nextCursor } = topicStore.pollNewActiveTopicsCreatedAfter(topicsDirectoryPollCursor, TOPICS_DIRECTORY_POLL_BATCH_SIZE)
+    topicsDirectoryPollCursor = nextCursor
+    for (const topic of newTopics) {
+      broadcastTopicCreatedToLocalSubscribers(topic)
+    }
+  } catch (error) {
+    console.error('[topics] directory cross-instance poll failed:', error)
+  }
+}
+
+let topicsDirectoryPollInterval: ReturnType<typeof setInterval> | null = setInterval(
+  runTopicsDirectoryCrossInstancePoll,
+  TOPICS_DIRECTORY_POLL_INTERVAL_MS,
 )
 
 // ─── Личен чат — attachment cleanup ─────────────────────────────────────────
@@ -7259,6 +7469,534 @@ async function handleTopicAttachmentDownloadRequest(
   }
 }
 
+// ─── Topics Moderation (Етап 4) ────────────────────────────────────────────
+//
+// Moderation actions (lock/unlock/mute/unmute/delete) минават през HTTP, НЕ
+// WS — established convention за moderation в проекта (виж
+// handleLobbyChatDeleteRequest коментара: "прясна cookie-based сесийна
+// проверка на всяко изтриване, не роля кеширана само при WS handshake-а на
+// дълготрайна връзка"). Realtime notify на РЕЗУЛТАТА reuse-ва СЪЩИЯ WS канал
+// като останалите Topics събития (topicMessageSubscribersByTopicId) — не
+// втора паралелна infrastructure.
+
+// Предварително планирани duration опции (брифа т.2) — валидирани server-
+// side по exact milliseconds match, не free-form число от клиента (защита
+// срещу произволна/абсурдна duration стойност).
+const TOPIC_MODERATION_ALLOWED_DURATIONS_MS = [
+  30 * 60 * 1000,
+  60 * 60 * 1000,
+  3 * 60 * 60 * 1000,
+  24 * 60 * 60 * 1000,
+]
+
+const TOPIC_MODERATION_REASON_MAX_LENGTH = 200
+
+function parseTopicModerationReason(rawReason: unknown): string | null {
+  if (typeof rawReason !== 'string') return null
+  const trimmed = rawReason.trim()
+  if (trimmed.length === 0 || trimmed.length > TOPIC_MODERATION_REASON_MAX_LENGTH) return null
+  return trimmed
+}
+
+function parseTopicModerationDurationMs(rawDurationMs: unknown): number | null {
+  if (typeof rawDurationMs !== 'number' || !Number.isFinite(rawDurationMs)) return null
+  return TOPIC_MODERATION_ALLOWED_DURATIONS_MS.includes(rawDurationMs) ? rawDurationMs : null
+}
+
+// isTopicModeratorSession гарантира role !== 'player'/'chat_admin'/'guest' —
+// type predicate стеснява само session (non-null), не и вложеното
+// account.role поле, затова explicit cast тук (огледално на
+// handleLobbyChatDeleteRequest коментара за actorRoleAtDeletion).
+function toTopicModeratorRole(session: AuthSessionSnapshot): TopicModeratorRole {
+  return session.account.role as TopicModeratorRole
+}
+
+async function handleTopicLockRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/([^/]+)\/lock$/.exec(pathname)
+  if (!match || req.method !== 'POST') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да заключваш теми.' })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+  const topic = topicStore.getTopicById(topicId)
+  if (topic === null || topic.status === 'removed') {
+    sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
+    return true
+  }
+
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+    return true
+  }
+  const parsedBody = body as { reason?: unknown; durationMs?: unknown }
+
+  const reason = parseTopicModerationReason(parsedBody.reason)
+  if (reason === null) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Липсва или невалидна причина.' })
+    return true
+  }
+  const durationMs = parseTopicModerationDurationMs(parsedBody.durationMs)
+  if (durationMs === null) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна продължителност.' })
+    return true
+  }
+
+  const lockSnapshot = topicModerationStore.lockTopic({
+    topicId,
+    actorAccountId: session.account.accountId,
+    actorRole: toTopicModeratorRole(session),
+    reason,
+    durationMs,
+  })
+
+  broadcastTopicLockStateChangedToLocalSubscribers(topicId, lockSnapshot)
+
+  sendJsonResponse(res, 200, { ok: true, lock: lockSnapshot })
+  return true
+}
+
+async function handleTopicUnlockRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/([^/]+)\/unlock$/.exec(pathname)
+  if (!match || req.method !== 'POST') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да отключваш теми.' })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+  const topic = topicStore.getTopicById(topicId)
+  if (topic === null || topic.status === 'removed') {
+    sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
+    return true
+  }
+
+  // Idempotent — unlock на вече отключена/изтекла тема е no-op success, не
+  // грешка (брифа т.12: "не връщай generic server error при harmless
+  // repeated action"). changed=false пропуска излишен broadcast/audit ред.
+  const { changed, snapshot } = topicModerationStore.unlockTopic({
+    topicId,
+    actorAccountId: session.account.accountId,
+    actorRole: toTopicModeratorRole(session),
+  })
+
+  if (changed) {
+    broadcastTopicLockStateChangedToLocalSubscribers(topicId, snapshot)
+  }
+
+  sendJsonResponse(res, 200, { ok: true, lock: snapshot })
+  return true
+}
+
+// Lazy lookup за MUTE/UNMUTE UI бутона до автор (виж renderTopicsScreen.ts
+// data-topic-mute-toggle) — клиентът НЕ batch-hydrate-ва mute state за
+// всеки автор в message list-а (би било extra query на всеки render за рядко
+// ползвана moderator-only функция), затова fetch-ва при самия click.
+async function handleTopicMuteStatusRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/([^/]+)\/mute-status$/.exec(pathname)
+  if (!match || req.method !== 'GET') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+  const profileId = requestUrl.searchParams.get('profileId')
+  if (!profileId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Липсва потребител.' })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, mute: topicModerationStore.getMuteSnapshot(topicId, profileId) })
+  return true
+}
+
+async function handleTopicMuteRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/([^/]+)\/mute$/.exec(pathname)
+  if (!match || req.method !== 'POST') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да заглушаваш потребители.' })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+  const topic = topicStore.getTopicById(topicId)
+  if (topic === null || topic.status === 'removed') {
+    sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
+    return true
+  }
+
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+    return true
+  }
+  const parsedBody = body as { profileId?: unknown; reason?: unknown; durationMs?: unknown }
+
+  const targetProfileId = typeof parsedBody.profileId === 'string' ? parsedBody.profileId.trim() : ''
+  if (targetProfileId.length === 0) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Липсва потребител.' })
+    return true
+  }
+  const reason = parseTopicModerationReason(parsedBody.reason)
+  if (reason === null) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Липсва или невалидна причина.' })
+    return true
+  }
+  const durationMs = parseTopicModerationDurationMs(parsedBody.durationMs)
+  if (durationMs === null) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна продължителност.' })
+    return true
+  }
+
+  const muteSnapshot = topicModerationStore.muteProfileInTopic({
+    topicId,
+    profileId: targetProfileId,
+    actorAccountId: session.account.accountId,
+    actorRole: toTopicModeratorRole(session),
+    reason,
+    durationMs,
+  })
+
+  notifyProfileOfTopicMuteStateChange(targetProfileId, topicId, muteSnapshot)
+
+  sendJsonResponse(res, 200, { ok: true, mute: muteSnapshot })
+  return true
+}
+
+async function handleTopicUnmuteRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/([^/]+)\/unmute$/.exec(pathname)
+  if (!match || req.method !== 'POST') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да отглушаваш потребители.' })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+  const topic = topicStore.getTopicById(topicId)
+  if (topic === null || topic.status === 'removed') {
+    sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
+    return true
+  }
+
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+    return true
+  }
+  const targetProfileId = typeof (body as { profileId?: unknown }).profileId === 'string'
+    ? ((body as { profileId: string }).profileId).trim()
+    : ''
+  if (targetProfileId.length === 0) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Липсва потребител.' })
+    return true
+  }
+
+  const { changed } = topicModerationStore.unmuteProfileInTopic({
+    topicId,
+    profileId: targetProfileId,
+    actorAccountId: session.account.accountId,
+    actorRole: toTopicModeratorRole(session),
+  })
+
+  if (changed) {
+    notifyProfileOfTopicMuteStateChange(targetProfileId, topicId, { isMuted: false, mutedUntil: null, reason: null })
+  }
+
+  sendJsonResponse(res, 200, { ok: true })
+  return true
+}
+
+async function handleTopicDeleteRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/([^/]+)$/.exec(pathname)
+  if (!match || req.method !== 'DELETE') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да триеш теми.' })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+    return true
+  }
+  const reason = parseTopicModerationReason((body as { reason?: unknown }).reason)
+  if (reason === null) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Липсва или невалидна причина.' })
+    return true
+  }
+
+  // КРИТИЧНО (Топикс moderation брифа т.9): attachment filenames се събират
+  // ПРЕДИ deleteTopic-а — soft-delete-ът НЕ trие topic_message_attachments
+  // редовете (само маркира topic_messages.deleted_at), затова редът тук е
+  // без значение за DB integrity, но enqueue-ването ПРЕДИ delete пази
+  // extra safety marge, ако бъдещ hard-cleanup job премести логиката.
+  const attachmentFilenames = topicModerationStore.getAttachmentFilenamesForTopic(topicId)
+
+  const result = topicModerationStore.deleteTopic({
+    topicId,
+    actorAccountId: session.account.accountId,
+    actorRole: toTopicModeratorRole(session),
+    reason,
+  })
+
+  if (!result.ok && result.code === 'not_found') {
+    sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
+    return true
+  }
+
+  // already_removed третираме идентично на success навън — идемпотентно
+  // (брифа т.12), темата вече гарантирано е премахната при връщане 200.
+  if (result.ok) {
+    for (const filename of attachmentFilenames) {
+      topicMessageStore.enqueueAttachmentDeletion(filename)
+    }
+    broadcastTopicDeletedToLocalSubscribers(topicId)
+  }
+
+  sendJsonResponse(res, 200, { ok: true, topicId })
+  return true
+}
+
+const TOPIC_REPORT_REASON_MAX_LENGTH = 300
+
+async function handleTopicReportRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/([^/]+)\/report$/.exec(pathname)
+  if (!match || req.method !== 'POST') {
+    return false
+  }
+
+  const auth = requireRegisteredProfileSession(req)
+  if (!auth.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  if (playerProgressStore.isTemporaryProfile(auth.profileId)) {
+    sendJsonResponse(res, 403, { ok: false, message: '„Теми“ само за регистрирани потребители.' })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+  const topic = topicStore.getTopicById(topicId)
+  if (topic === null || topic.status === 'removed') {
+    sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
+    return true
+  }
+
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+    return true
+  }
+  const rawReason = (body as { reason?: unknown }).reason
+  const reason = typeof rawReason === 'string' ? rawReason.trim() : ''
+  if (reason.length === 0 || reason.length > TOPIC_REPORT_REASON_MAX_LENGTH) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Липсва или невалидна причина.' })
+    return true
+  }
+
+  // reporter identity ИЗКЛЮЧИТЕЛНО от authenticated session (auth.profileId
+  // от requireRegisteredProfileSession) — НИКОГА client-provided стойност
+  // от request body-то (брифа т.6: "Не позволявай anonymous client-provided
+  // reporter profile id").
+  const result = topicModerationStore.createReport({
+    topicId,
+    reporterProfileId: auth.profileId,
+    reason,
+  })
+
+  if (!result.ok) {
+    sendJsonResponse(res, 409, { ok: false, code: 'topic_report_duplicate', message: 'Вече докладва тази тема наскоро.' })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, reportId: result.report.reportId })
+  return true
+}
+
+async function handleTopicReportsListRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  if (pathname !== '/api/admin/topic-reports' || req.method !== 'GET') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+    return true
+  }
+
+  const statusParam = requestUrl.searchParams.get('status')
+  const status = statusParam === 'pending' || statusParam === 'reviewed' || statusParam === 'dismissed' ? statusParam : null
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    reports: topicModerationStore.listReports(status, 100),
+    pendingCount: topicModerationStore.countPendingReports(),
+  })
+  return true
+}
+
+async function handleTopicReportReviewRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/admin\/topic-reports\/([^/]+)\/review$/.exec(pathname)
+  if (!match || req.method !== 'POST') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+    return true
+  }
+
+  const reportId = decodeURIComponent(match[1] ?? '')
+
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+    return true
+  }
+  const rawStatus = (body as { status?: unknown }).status
+  if (rawStatus !== 'reviewed' && rawStatus !== 'dismissed') {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден статус.' })
+    return true
+  }
+
+  const result = topicModerationStore.reviewReport({
+    reportId,
+    status: rawStatus,
+    actorAccountId: session.account.accountId,
+  })
+
+  if (!result.ok) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Докладът не беше намерен.' })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, report: result.report })
+  return true
+}
+
+async function handleTopicModerationAuditLogRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/admin\/topics\/([^/]+)\/moderation-log$/.exec(pathname)
+  if (!match || req.method !== 'GET') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+  sendJsonResponse(res, 200, {
+    ok: true,
+    entries: topicModerationStore.listAuditLogForTopic(topicId, 100),
+  })
+  return true
+}
+
 // ─── Tournaments: list / create / details ──────────────────────────────────
 
 const TOURNAMENT_CREATE_RATE_LIMIT_WINDOW_MS = 60_000
@@ -10995,6 +11733,49 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleTopicLockRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTopicUnlockRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTopicMuteStatusRequest(req, res, requestUrl.pathname, requestUrl)) {
+    return
+  }
+
+  if (await handleTopicMuteRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTopicUnmuteRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTopicReportRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTopicReportsListRequest(req, res, requestUrl.pathname, requestUrl)) {
+    return
+  }
+
+  if (await handleTopicReportReviewRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTopicModerationAuditLogRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  // handleTopicDeleteRequest ПОСЛЕДЕН сред Topics route-овете — DELETE
+  // /api/topics/:topicId regex-ът е широк (само 1 path segment) и би могъл
+  // да засенчи по-специфични бъдещи routes, ако бъде поставен по-рано.
+  if (await handleTopicDeleteRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleProfileByIdRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -13189,6 +13970,7 @@ wsServer.on('connection', (socket, request) => {
 
       if (message.type === 'send_topic_message') {
         const requestId = message.requestId
+        const requestTopicId = message.topicId
         const latestConnection = getConnectionById(serverState, connection.id)
         const imageDataUrlField = message.imageDataUrl
 
@@ -13198,6 +13980,7 @@ wsServer.on('connection', (socket, request) => {
             code,
             message: errorMessage,
             requestId,
+            topicId: requestTopicId,
           })
         }
 
@@ -13237,8 +14020,35 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        if (topic.status === 'locked') {
+        // Server-authoritative lock check — computed at READ time (виж
+        // topicModerationStore.getTopicLockSnapshot), НЕ static topic.status
+        // enum сравнение. Естественият expiry на temporary lock-а НЕ обновява
+        // topics.status автоматично (само ръчен unlock го прави directno) —
+        // static enum четенето би останало 'locked' дори СЛЕД lockedUntil да
+        // е минал, ако разчитахме на него тук (Топикс moderation брифа т.2:
+        // "При изтичане: topic lock автоматично престава да блокира писането").
+        const lockSnapshot = topicModerationStore.getTopicLockSnapshot(message.topicId)
+        if (lockSnapshot?.isLocked) {
           sendTopicMessageError('topic_locked', 'Темата е заключена за писане.')
+          return
+        }
+
+        // Topic-specific mute (profile_id + topic_id, НЕ global account mute)
+        // — server-authoritative, computed at read time (isProfileMutedInTopic
+        // reuse-ва СЪЩИЯ expiry-comparison pattern като lock-а по-горе).
+        // mutedUntil в грешката носи точния timestamp — клиентът форматира
+        // локализирания час (Bulgarian UI text), сървърът праща само
+        // generic съобщение + raw ISO expiry (виж брифа т.13).
+        const muteSnapshot = topicModerationStore.getMuteSnapshot(message.topicId, senderProfileId)
+        if (muteSnapshot.isMuted) {
+          safeSendToConnection(connection.id, {
+            type: 'topic_message_error',
+            code: 'topic_muted',
+            message: 'Заглушен сте в тази тема.',
+            requestId,
+            mutedUntil: muteSnapshot.mutedUntil ?? undefined,
+            topicId: message.topicId,
+          })
           return
         }
 
@@ -13348,6 +14158,7 @@ wsServer.on('connection', (socket, request) => {
 
       if (message.type === 'send_topic_reply') {
         const requestId = message.requestId
+        const requestTopicId = message.topicId
         const latestConnection = getConnectionById(serverState, connection.id)
         const imageDataUrlField = message.imageDataUrl
 
@@ -13357,6 +14168,7 @@ wsServer.on('connection', (socket, request) => {
             code,
             message: errorMessage,
             requestId,
+            topicId: requestTopicId,
           })
         }
 
@@ -13386,8 +14198,26 @@ wsServer.on('connection', (socket, request) => {
           sendTopicReplyError('topic_not_found', 'Темата не беше намерена.')
           return
         }
-        if (topic.status === 'locked') {
+
+        // Server-authoritative, computed at read time — виж коментара в
+        // send_topic_message за пълния rationale (static status enum не се
+        // самообновява при естествен expiry).
+        const lockSnapshot = topicModerationStore.getTopicLockSnapshot(message.topicId)
+        if (lockSnapshot?.isLocked) {
           sendTopicReplyError('topic_locked', 'Темата е заключена за писане.')
+          return
+        }
+
+        const muteSnapshot = topicModerationStore.getMuteSnapshot(message.topicId, senderProfileId)
+        if (muteSnapshot.isMuted) {
+          safeSendToConnection(connection.id, {
+            type: 'topic_reply_error',
+            code: 'topic_muted',
+            message: 'Заглушен сте в тази тема.',
+            requestId,
+            mutedUntil: muteSnapshot.mutedUntil ?? undefined,
+            topicId: message.topicId,
+          })
           return
         }
 
@@ -13560,6 +14390,106 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (message.type === 'subscribe_topics_directory') {
+        topicsDirectorySubscriberConnectionIds.add(connection.id)
+        return
+      }
+
+      if (message.type === 'unsubscribe_topics_directory') {
+        topicsDirectorySubscriberConnectionIds.delete(connection.id)
+        return
+      }
+
+      if (message.type === 'create_topic') {
+        const requestId = message.requestId
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        function sendTopicCreateError(code: TopicCreateErrorCode, errorMessage: string): void {
+          safeSendToConnection(connection.id, {
+            type: 'topic_create_error',
+            code,
+            message: errorMessage,
+            requestId,
+          })
+        }
+
+        if (latestConnection?.profileId == null) {
+          sendTopicCreateError('not_authenticated', 'Трябва да влезеш в профила си.')
+          return
+        }
+
+        const creatorProfileId: string = latestConnection.profileId
+
+        if (playerProgressStore.isTemporaryProfile(creatorProfileId)) {
+          sendTopicCreateError('guest_not_allowed', '„Теми“ само за регистрирани потребители.')
+          return
+        }
+
+        // VIP guard — reuse на СЪЩИЯ established Topics write eligibility
+        // guard като send_topic_message/send_topic_reply (виж CLAUDE.md /
+        // Топикс брифовете) — server е source of truth, "+" клик на клиента е
+        // само UX, не security boundary.
+        if (!vipStore.getStatus(creatorProfileId).isActive) {
+          sendTopicCreateError('vip_required', 'Създаването на теми изисква активен VIP.')
+          return
+        }
+
+        const validation = validateTopicTitle(message.title)
+        if (!validation.ok) {
+          const messagesByCode: Record<typeof validation.code, string> = {
+            empty_title: 'Името на темата не може да бъде празно.',
+            title_too_long: `Името може да е най-много ${TOPIC_TITLE_MAX_CODE_POINTS} символа.`,
+            invalid_title: 'Името съдържа неразрешени символи.',
+          }
+          sendTopicCreateError(validation.code, messagesByCode[validation.code])
+          return
+        }
+
+        // Established ред: rate limit СЛЕД validation (validation грешки не
+        // консумират slot, mirror на send_topic_message конвенцията).
+        if (!checkTopicCreateRateLimit(creatorProfileId)) {
+          sendTopicCreateError('rate_limited', 'Твърде много създадени теми. Изчакай малко и опитай пак.')
+          return
+        }
+
+        // Duplicate-check + insert е ЕДНА атомична BEGIN IMMEDIATE транзакция
+        // вътре в topicStore.createTopic — виж коментара там за пълния
+        // concurrency rationale. Две едновременни create заявки със same
+        // normalized title НЕ могат и двете да минат — SQLite writer lock-ът
+        // сериализира ги.
+        const result = topicStore.createTopic({ title: validation.title, createdByProfileId: creatorProfileId })
+
+        if (!result.ok) {
+          sendTopicCreateError('topic_title_exists', 'Вече има тема с такова име.')
+          return
+        }
+
+        // Напредваме directory poll cursor-а веднага при local create (mirror
+        // на lobbyChatLastAnnouncedSeq модела — за topics НЯМА race риск от
+        // topicMessagePollCursor-стил "изгубен ред" сценарий, защото directory
+        // broadcast-ът тук е ОТДЕЛЕН от poll-а по origin: local send directno
+        // broadcast-ва instant, а poll-ът напредва cursor-а само върху редове,
+        // които САМ е прочел от DB — виждайки този ред по-късно той просто ще
+        // пропусне instant-broadcast-натия topicId, защото rowid cursor-ът
+        // вече е >= неговия rowid). Re-read на MAX(rowid) е евтина indexed
+        // scalar заявка (PRIMARY KEY-driven table scan е излишен — SQLite
+        // ползва rowid index directno).
+        topicsDirectoryPollCursor = topicStore.getLatestActiveTopicCursor()
+
+        // Success директно до originator-а (requestId-matched, управлява
+        // popup lifecycle) + broadcast до всички ДРУГИ directory subscribers
+        // (БЕЗ requestId). broadcastTopicCreatedToLocalSubscribers skip-ва
+        // originator connection-а изцяло (виж коментара там) — той получава
+        // ТОЧНО ЕДИН 'topic_created' пакет общо, изпратен тук.
+        safeSendToConnection(connection.id, {
+          type: 'topic_created',
+          topic: result.topic,
+          requestId,
+        })
+        broadcastTopicCreatedToLocalSubscribers(result.topic, { originatingConnectionId: connection.id })
+        return
+      }
+
       sendJsonMessage(socket, {
         type: 'error',
         message: 'Unsupported message type.',
@@ -13578,6 +14508,7 @@ wsServer.on('connection', (socket, request) => {
   socket.on('close', () => {
     guestIdByConnection.delete(connection.id)
     lobbyChatSubscriberConnectionIds.delete(connection.id)
+    topicsDirectorySubscriberConnectionIds.delete(connection.id)
 
     const disconnectedTopicId = topicMessageSubscriberTopicIdByConnectionId.get(connection.id)
     if (disconnectedTopicId !== undefined) {
@@ -13950,6 +14881,11 @@ function clearMutationTimersForShutdown(): void {
   if (topicMessageLikePollInterval !== null) {
     clearInterval(topicMessageLikePollInterval)
     topicMessageLikePollInterval = null
+  }
+
+  if (topicsDirectoryPollInterval !== null) {
+    clearInterval(topicsDirectoryPollInterval)
+    topicsDirectoryPollInterval = null
   }
 
   if (lobbyChatRetentionInterval !== null) {

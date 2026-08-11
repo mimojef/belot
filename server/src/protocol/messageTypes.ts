@@ -13,6 +13,7 @@ import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
 import type { TournamentMatchAssignment } from '../tournament/tournamentCoordinator.js'
 import type { TournamentPartnerInviteDto } from '../tournament/tournamentDto.js'
 import type { TournamentRoundType } from '../tournament/tournamentTypes.js'
+import type { TopicSnapshot } from '../db/topicStore.js'
 
 export type TournamentMatchAssignedMessage = {
   type: 'tournament_match_assigned'
@@ -258,6 +259,19 @@ export type ClientMessage =
       /** Работи еднакво за root съобщение и reply — likes не различават нивото. */
       messageId: string
       requestId: string
+    }
+  | {
+      type: 'create_topic'
+      title: string
+      /** Задължителен — единствен ack-correlation механизъм, mirror на send_topic_message. */
+      requestId: string
+    }
+  | {
+      /** Directory-wide "гледам списъка с теми" interest — reuse на subscribe_lobby_chat pattern-а, за да получава клиентът topic_created broadcast без polling. */
+      type: 'subscribe_topics_directory'
+    }
+  | {
+      type: 'unsubscribe_topics_directory'
     }
 
 export type RoomSeatSnapshot = {
@@ -853,6 +867,11 @@ export type ServerMessage =
   | TopicMessageLikeChangedMessage
   | TopicMessageLikeChangedSelfMessage
   | TopicMessageLikeErrorMessage
+  | TopicCreatedMessage
+  | TopicCreateErrorMessage
+  | TopicLockStateChangedMessage
+  | TopicMuteStateChangedMessage
+  | TopicDeletedMessage
 
 export type ProfileLikedMessage = {
   type: 'profile_liked'
@@ -1089,6 +1108,7 @@ export type TopicMessageErrorCode =
   | 'vip_required'
   | 'topic_not_found'
   | 'topic_locked'
+  | 'topic_muted'
   | 'empty_body'
   | 'body_too_long'
   | 'invalid_body'
@@ -1102,6 +1122,10 @@ export type TopicMessageErrorMessage = {
   code: TopicMessageErrorCode
   message: string
   requestId?: string
+  /** Само при code==='topic_muted' — точния expiry за UI banner-а ("Заглушен сте до 14:30"), server-authoritative, не client timer. */
+  mutedUntil?: string
+  /** Само при code==='topic_locked'|'topic_muted' — за да може клиентът да потвърди грешката е за АКТИВНАТА тема (rapid topic switch guard), не остаряла заявка от вече напусната тема. */
+  topicId?: string
 }
 
 // ─── Replies (Етап 3) ────────────────────────────────────────────────────
@@ -1121,6 +1145,8 @@ export type TopicReplyErrorMessage = {
   code: TopicReplyErrorCode
   message: string
   requestId: string
+  mutedUntil?: string
+  topicId?: string
 }
 
 // ─── Likes (Етап 3) ──────────────────────────────────────────────────────
@@ -1158,6 +1184,89 @@ export type TopicMessageLikeErrorMessage = {
   code: TopicMessageLikeErrorCode
   message: string
   requestId: string
+}
+
+// ─── Topic creation (Custom Topic Creation) ──────────────────────────────
+
+/**
+ * Push при успешно създадена тема. До originator-а идва с matching
+ * `requestId` (popup lifecycle correlation) — до всички ДРУГИ
+ * topics-directory subscribers идва БЕЗ requestId (established
+ * isOriginator convention, mirror на topic_message/topic_reply). Клиентът
+ * upsert-ва по `topic.topicId`, не append-ва слепешката — гарантира, че
+ * directory broadcast и direct success response (edge-case near-simultaneous
+ * delivery) никога не създават duplicate chip.
+ */
+export type TopicCreatedMessage = {
+  type: 'topic_created'
+  topic: TopicSnapshot
+  requestId?: string
+}
+
+export type TopicCreateErrorCode =
+  | 'not_authenticated'
+  | 'guest_not_allowed'
+  | 'vip_required'
+  | 'empty_title'
+  | 'title_too_long'
+  | 'invalid_title'
+  | 'topic_title_exists'
+  | 'rate_limited'
+
+export type TopicCreateErrorMessage = {
+  type: 'topic_create_error'
+  code: TopicCreateErrorCode
+  message: string
+  requestId: string
+}
+
+// ─── Moderation (Етап 4) ────────────────────────────────────────────────
+//
+// Moderation ЗАПИСВАНЕТО (lock/unlock/mute/unmute/delete) минава през HTTP
+// (established convention за moderation actions — виж
+// handleLobbyChatDeleteRequest: "прясна cookie-based сесийна проверка на
+// всяко изтриване, не роля кеширана само при WS handshake"), но
+// РЕЗУЛТАТНОТО state promяна се broadcast-ва към subscribers през
+// СЪЩИЯ WS канал като останалите Topics realtime събития (reuse на
+// topicMessageSubscribersByTopicId — не втора паралелна infrastructure).
+
+/**
+ * Public broadcast към ВСИЧКИ subscribers на темата при lock/unlock —
+ * composer state се обновява realtime без refresh (брифа т.10). Носи
+ * ПЪЛНОТО текущо lock state (не delta) — клиентът просто overwrite-ва
+ * локалния view, симетрично на topic_message_like_changed shape-а.
+ */
+export type TopicLockStateChangedMessage = {
+  type: 'topic_lock_state_changed'
+  topicId: string
+  isLocked: boolean
+  lockedUntil: string | null
+  lockedReason: string | null
+}
+
+/**
+ * Target-only (private) push при mute/unmute — САМО до connections на
+ * заглушения потребител, НЕ broadcast към всички subscribers (брифа т.10:
+ * "останалите клиенти не трябва да получават чувствителна/ненужна
+ * moderation информация"). Виж broadcastToProfileConnections в index.ts.
+ */
+export type TopicMuteStateChangedMessage = {
+  type: 'topic_mute_state_changed'
+  topicId: string
+  isMuted: boolean
+  mutedUntil: string | null
+  reason: string | null
+}
+
+/**
+ * Public broadcast при изтриване на тема — subscribed клиенти трябва
+ * безопасно да се приберат обратно в Topics directory (брифа т.10), без
+ * stale subscription/crash. Клиентът маха subscription-а си локално при
+ * получаване (аналогично на unsubscribe_topic_messages).
+ */
+export type TopicDeletedMessage = {
+  type: 'topic_deleted'
+  topicId: string
 }
 
 export function getDisplayNameFromIdentity(

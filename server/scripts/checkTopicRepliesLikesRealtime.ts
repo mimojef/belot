@@ -254,11 +254,11 @@ async function waitForWsMessage(ws: WebSocket, predicate: (msg: AnyMsg) => boole
   }
 }
 
-function insertTopic(db: DatabaseSync, input: { topicId: string; slug: string; title: string; status?: string }): void {
+function insertTopic(db: DatabaseSync, input: { topicId: string; slug: string; title: string; status?: string; lockedUntil?: string }): void {
   db.prepare(`
-    INSERT INTO topics (topic_id, slug, title, is_general, created_by_profile_id, status, sort_order)
-    VALUES (?, ?, ?, 0, NULL, ?, 100);
-  `).run(input.topicId, input.slug, input.title, input.status ?? 'active')
+    INSERT INTO topics (topic_id, slug, title, is_general, created_by_profile_id, status, sort_order, locked_until)
+    VALUES (?, ?, ?, 0, NULL, ?, 100, ?);
+  `).run(input.topicId, input.slug, input.title, input.status ?? 'active', input.lockedUntil ?? null)
 }
 
 async function grantVipViaLaunchGift(port: number, cookie: string): Promise<void> {
@@ -285,7 +285,8 @@ try {
 
   const db = new DatabaseSync(iso.dbFile, { open: true, enableForeignKeyConstraints: true })
   insertTopic(db, { topicId: 'topic-rl-active', slug: 'rl-active', title: 'Активна тема' })
-  insertTopic(db, { topicId: 'topic-rl-locked', slug: 'rl-locked', title: 'Заключена тема', status: 'locked' })
+  // Temporary lock (Етап 4) — виж коментара в checkTopicMessagesRealtime.ts.
+  insertTopic(db, { topicId: 'topic-rl-locked', slug: 'rl-locked', title: 'Заключена тема', status: 'locked', lockedUntil: new Date(Date.now() + 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ') })
   db.close()
 
   await grantVipViaLaunchGift(port, userA.cookie) // A е VIP през целия тест

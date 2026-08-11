@@ -1,4 +1,4 @@
-import type { TopicMessageSnapshot, TopicReplySnapshot, TopicAttachmentSnapshot } from '../network/createGameServerClient'
+import type { TopicMessageSnapshot, TopicReplySnapshot, TopicAttachmentSnapshot, TopicReportStatus } from '../network/createGameServerClient'
 import type { LobbyScreenState } from './renderLobbyScreen'
 import { resolveAttachmentUrl, renderLinkifiedChatMessageBody } from './renderLobbyScreen'
 import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup'
@@ -13,6 +13,17 @@ import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup
 // 14px (UI polish: "не залепвай съдържанието до линията, но значително
 // по-малко от сегашното"), особено ценно на mobile ширина.
 const REPLY_INDENT_PX = 14
+
+// Предварително планирани duration опции (Топикс moderation брифа т.2) —
+// точно ТЕЗИ 4 стойности, валидирани и server-side (виж
+// TOPIC_MODERATION_ALLOWED_DURATIONS_MS в index.ts). Споделени между lock и
+// mute popup-а (не отделен модел за всеки).
+const TOPIC_MODERATION_DURATION_OPTIONS: Array<{ ms: number; label: string }> = [
+  { ms: 30 * 60 * 1000, label: '30 минути' },
+  { ms: 60 * 60 * 1000, label: '1 час' },
+  { ms: 3 * 60 * 60 * 1000, label: '3 часа' },
+  { ms: 24 * 60 * 60 * 1000, label: '24 часа' },
+]
 
 function escapeHtml(value: string): string {
   return value
@@ -160,8 +171,7 @@ function renderTopicsBar(state: LobbyScreenState): string {
         type="button"
         data-topics-create="1"
         class="topic-create-chip"
-        aria-label="Нова тема (ще бъде налично скоро)"
-        title="Скоро"
+        aria-label="Нова тема"
         style="
           flex:0 0 auto;
           display:inline-flex;
@@ -236,7 +246,28 @@ function renderTopicReplyButton(rootMessageId: string, replyCount: number): stri
   `
 }
 
-function renderTopicAuthorBlock(senderProfileId: string, senderDisplayName: string, senderAvatarUrl: string | null, createdAt: string): string {
+function renderTopicAuthorBlock(state: LobbyScreenState, senderProfileId: string, senderDisplayName: string, senderAvatarUrl: string | null, createdAt: string): string {
+  // MUTE/UNMUTE compact icon бутон — само за модератор, само за активната
+  // тема (mute е topic-specific, брифа т.4), скрит за собствения профил на
+  // viewer-a (модератор не мутира себе си). Не претрупва обикновения
+  // потребителски изглед — виждан само от isTopicModerator.
+  const ownProfileId = state.profile.profileId
+  const canModerateThisAuthor = state.isTopicModerator && state.activeTopicId !== null && senderProfileId !== ownProfileId
+  const isMuteStatusLoading = state.topicMuteStatusLoadingProfileId === senderProfileId
+  const muteControl = canModerateThisAuthor
+    ? `
+      <button
+        type="button"
+        data-topic-mute-toggle="${escapeHtml(senderProfileId)}"
+        data-topic-mute-toggle-name="${escapeHtml(senderDisplayName)}"
+        title="Модерация"
+        aria-label="Модерация на ${escapeHtml(senderDisplayName)}"
+        ${isMuteStatusLoading ? 'disabled' : ''}
+        style="border:0;background:transparent;padding:2px 4px;cursor:${isMuteStatusLoading ? 'default' : 'pointer'};color:rgba(248,250,252,0.38);font-size:14px;line-height:1;flex:0 0 auto;opacity:${isMuteStatusLoading ? '0.5' : '1'};"
+      >&#9881;</button>
+    `
+    : ''
+
   return `
     <button
       type="button"
@@ -254,6 +285,7 @@ function renderTopicAuthorBlock(senderProfileId: string, senderDisplayName: stri
           style="border:0;background:transparent;padding:0;cursor:pointer;font-size:14px;font-weight:900;color:#f8fafc;"
         >${escapeHtml(senderDisplayName)}</button>
         <span style="font-size:12px;color:rgba(248,250,252,0.42);">${formatTopicMessageTime(createdAt)}</span>
+        ${muteControl}
       </div>
     </div>
   `
@@ -396,7 +428,7 @@ export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySn
   return `
     <div data-topic-reply="${escapeHtml(reply.messageId)}">
       <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 4px 8px ${REPLY_INDENT_PX}px;">
-        ${renderTopicAuthorBlock(reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt)}
+        ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt)}
       </div>
       <div style="margin:-6px 0 6px ${REPLY_INDENT_PX}px;">
         ${reply.body.length > 0 ? `<div style="font-size:14px;line-height:1.4;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(reply.body)}</div>` : ''}
@@ -495,7 +527,7 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
   return `
     <div data-topic-message="${escapeHtml(message.messageId)}">
       <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 4px 0;">
-        ${renderTopicAuthorBlock(message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt)}
+        ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt)}
       </div>
       <div style="padding:0 4px 10px 46px;">
         ${message.body.length > 0 ? `<div style="margin-top:2px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body)}</div>` : ''}
@@ -769,6 +801,302 @@ function renderTopicsInfoToast(state: LobbyScreenState): string {
   `
 }
 
+// Lock/Mute action popup — единна форма (kind='lock'|'mute'), огледална на
+// renderSubadminActionConfirmPopup стила (fullscreen dark backdrop,
+// centered card), но с duration избор + кратко reason поле (брифа т.5:
+// "1. избор на duration; 2. поле за причина; 3. потвърждение" — потвърждение
+// е самия Submit бутон тук, single-step е достатъчно за lock/mute, за
+// разлика от delete, който изисква двустъпков confirm).
+function renderTopicModerationActionPopup(state: LobbyScreenState): string {
+  const pending = state.topicModerationActionPopup
+  if (!pending) return ''
+
+  if (pending.kind === 'unmute') {
+    const busy = state.topicModerationActionBusy
+    return `
+      <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
+        <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+          <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:4px;">Отглуши потребител?</div>
+          <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:20px;">
+            ${escapeHtml(pending.targetDisplayName)} е заглушен в тази тема${pending.mutedUntil ? ` до ${escapeHtml(formatModerationExpiry(pending.mutedUntil))}` : ''}.
+          </div>
+          ${state.topicModerationActionErrorText ? `<div style="font-size:12px;color:#f87171;margin-bottom:8px;">${escapeHtml(state.topicModerationActionErrorText)}</div>` : ''}
+          <div style="display:flex;gap:12px;">
+            <button type="button" data-topic-moderation-cancel="1" ${busy ? 'disabled' : ''} style="
+              flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
+              border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;
+              cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};
+            ">Отказ</button>
+            <button type="button" data-topic-moderation-submit="1" ${busy ? 'disabled' : ''} style="
+              flex:1;padding:11px;border:1px solid rgba(74,222,128,0.5);background:rgba(74,222,128,0.16);
+              border-radius:10px;color:#4ade80;font-size:14px;font-weight:900;
+              cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.7' : '1'};
+            ">${busy ? 'Изчакай…' : 'Отглуши'}</button>
+          </div>
+        </div>
+      </div>
+    `
+  }
+
+  const isLock = pending.kind === 'lock'
+  const title = isLock ? 'Заключи темата' : 'Заглуши потребител'
+  const subtitle = isLock
+    ? escapeHtml(pending.topicTitle)
+    : `${escapeHtml(pending.targetDisplayName)} — в тази тема`
+  const busy = state.topicModerationActionBusy
+  const selectedDurationMs = state.topicModerationActionDurationMs
+
+  return `
+    <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
+      <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+        <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:4px;">${escapeHtml(title)}</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:16px;">${subtitle}</div>
+
+        <div style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.7);margin-bottom:8px;">Продължителност</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px;">
+          ${TOPIC_MODERATION_DURATION_OPTIONS.map((opt) => {
+            const isSelected = selectedDurationMs === opt.ms
+            return `
+              <button type="button" data-topic-moderation-duration="${opt.ms}" ${busy ? 'disabled' : ''} style="
+                padding:9px;border-radius:8px;font-size:13px;font-weight:800;cursor:${busy ? 'default' : 'pointer'};
+                border:1px solid ${isSelected ? 'rgba(212,165,32,0.7)' : 'rgba(255,255,255,0.16)'};
+                background:${isSelected ? 'rgba(212,165,32,0.18)' : 'rgba(255,255,255,0.05)'};
+                color:${isSelected ? '#fde68a' : 'rgba(255,255,255,0.75)'};
+              ">${opt.label}</button>
+            `
+          }).join('')}
+        </div>
+
+        <div style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.7);margin-bottom:8px;">Причина</div>
+        <textarea
+          data-topic-moderation-reason="1"
+          rows="2"
+          maxlength="200"
+          placeholder="Кратка причина..."
+          ${busy ? 'disabled' : ''}
+          style="width:100%;box-sizing:border-box;border-radius:8px;border:1px solid rgba(212,165,32,0.24);background:#050505;color:#f8fafc;padding:9px 10px;font-size:13px;font-weight:600;outline:none;resize:none;font-family:inherit;margin-bottom:8px;"
+        >${escapeHtml(state.topicModerationActionReason)}</textarea>
+
+        ${state.topicModerationActionErrorText ? `<div style="font-size:12px;color:#f87171;margin-bottom:8px;">${escapeHtml(state.topicModerationActionErrorText)}</div>` : ''}
+
+        <div style="display:flex;gap:12px;margin-top:8px;">
+          <button type="button" data-topic-moderation-cancel="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
+            border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};
+          ">Отказ</button>
+          <button type="button" data-topic-moderation-submit="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(212,165,32,0.62);
+            background:linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%);
+            border-radius:10px;color:#080808;font-size:14px;font-weight:900;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.7' : '1'};
+          ">${busy ? 'Изчакай…' : (isLock ? 'Заключи' : 'Заглуши')}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+// Двустъпков confirm (защита от accidental single-click deletion, брифа
+// т.5) — 'reason' стъпка пази кратка причина, 'confirm' стъпка е финалният
+// "сигурен ли си" екран, който реално изпраща DELETE-а.
+function renderTopicDeleteConfirmPopup(state: LobbyScreenState): string {
+  const pending = state.topicDeleteConfirm
+  if (!pending) return ''
+
+  const busy = state.topicDeleteBusy
+
+  if (pending.step === 'reason') {
+    return `
+      <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
+        <div style="background:#1a1a2e;border:1px solid rgba(239,68,68,0.4);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+          <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:4px;">Изтрий темата?</div>
+          <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:16px;">${escapeHtml(pending.topicTitle)}</div>
+
+          <div style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.7);margin-bottom:8px;">Причина</div>
+          <textarea
+            data-topic-delete-reason="1"
+            rows="2"
+            maxlength="200"
+            placeholder="Кратка причина..."
+            ${busy ? 'disabled' : ''}
+            style="width:100%;box-sizing:border-box;border-radius:8px;border:1px solid rgba(239,68,68,0.24);background:#050505;color:#f8fafc;padding:9px 10px;font-size:13px;font-weight:600;outline:none;resize:none;font-family:inherit;margin-bottom:8px;"
+          >${escapeHtml(state.topicDeleteReason)}</textarea>
+
+          ${state.topicDeleteErrorText ? `<div style="font-size:12px;color:#f87171;margin-bottom:8px;">${escapeHtml(state.topicDeleteErrorText)}</div>` : ''}
+
+          <div style="display:flex;gap:12px;margin-top:8px;">
+            <button type="button" data-topic-delete-cancel="1" ${busy ? 'disabled' : ''} style="
+              flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
+              border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;cursor:pointer;
+            ">Отказ</button>
+            <button type="button" data-topic-delete-advance="1" ${busy ? 'disabled' : ''} style="
+              flex:1;padding:11px;border:1px solid rgba(239,68,68,0.62);background:rgba(239,68,68,0.85);
+              border-radius:10px;color:#fff;font-size:14px;font-weight:900;cursor:pointer;
+            ">Продължи</button>
+          </div>
+        </div>
+      </div>
+    `
+  }
+
+  // step === 'confirm' — финален "сигурен ли си" екран, отделна ясна
+  // потвърждение стъпка срещу случайно единично кликване.
+  return `
+    <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
+      <div style="background:#1a1a2e;border:1px solid rgba(239,68,68,0.5);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+        <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:8px;">Сигурен ли си?</div>
+        <div style="font-size:14px;color:rgba(255,255,255,0.7);line-height:1.5;margin-bottom:20px;">
+          Темата „${escapeHtml(pending.topicTitle)}“ и всички съобщения в нея ще бъдат премахнати. Това действие не може да бъде отменено от потребителите.
+        </div>
+        <div style="display:flex;gap:12px;">
+          <button type="button" data-topic-delete-cancel="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
+            border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};
+          ">Отказ</button>
+          <button type="button" data-topic-delete-confirm="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(239,68,68,0.7);background:rgba(239,68,68,0.9);
+            border-radius:10px;color:#fff;font-size:14px;font-weight:900;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.7' : '1'};
+          ">${busy ? 'Изчакай…' : 'Изтрий темата'}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+// Report popup — достъпен за обикновен потребител (не-модератор), кратко
+// reason поле, без duration избор.
+function renderTopicReportPopup(state: LobbyScreenState): string {
+  if (!state.topicReportPopupOpen) return ''
+
+  const busy = state.topicReportBusy
+
+  return `
+    <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
+      <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+        <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:16px;">Докладвай темата</div>
+
+        <div style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.7);margin-bottom:8px;">Причина</div>
+        <textarea
+          data-topic-report-reason="1"
+          rows="3"
+          maxlength="300"
+          placeholder="Опиши накратко проблема..."
+          ${busy ? 'disabled' : ''}
+          style="width:100%;box-sizing:border-box;border-radius:8px;border:1px solid rgba(212,165,32,0.24);background:#050505;color:#f8fafc;padding:9px 10px;font-size:13px;font-weight:600;outline:none;resize:none;font-family:inherit;margin-bottom:8px;"
+        >${escapeHtml(state.topicReportReason)}</textarea>
+
+        ${state.topicReportErrorText ? `<div style="font-size:12px;color:#f87171;margin-bottom:8px;">${escapeHtml(state.topicReportErrorText)}</div>` : ''}
+
+        <div style="display:flex;gap:12px;margin-top:8px;">
+          <button type="button" data-topic-report-cancel="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
+            border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};
+          ">Отказ</button>
+          <button type="button" data-topic-report-submit="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(212,165,32,0.62);
+            background:linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%);
+            border-radius:10px;color:#080808;font-size:14px;font-weight:900;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.7' : '1'};
+          ">${busy ? 'Изчакай…' : 'Докладвай'}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderTopicReportSuccessToast(state: LobbyScreenState): string {
+  if (!state.topicReportSuccessToast) return ''
+
+  return `
+    <div style="position:fixed;inset:0;z-index:9700;display:flex;align-items:flex-end;justify-content:center;padding-bottom:64px;pointer-events:none;">
+      <div style="pointer-events:auto;background:#1a1a2e;border:1px solid rgba(212,165,32,0.55);border-radius:12px;padding:14px 22px;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,0.7);max-width:calc(100vw - 48px);">
+        <div style="font-size:14px;font-weight:800;color:#fde68a;">Докладът беше изпратен. Благодарим ти!</div>
+      </div>
+    </div>
+  `
+}
+
+// Компактни icon-only moderation action бутони — Заключи/Отключи/Изтрий за
+// модератор (isTopicModerator), Докладвай за обикновен потребител. Не
+// претрупва нормалния Topics UI (брифа т.5) — само 44px icon бутони в
+// header реда, popup-ите за duration/reason/confirm се отварят при click.
+function renderTopicHeaderModerationControls(state: LobbyScreenState, activeTopic: NonNullable<LobbyScreenState['topics']>[number]): string {
+  if (activeTopic.isGeneral) return ''
+
+  const isLocked = state.activeTopicLock?.isLocked ?? (activeTopic.status === 'locked')
+  const buttons: string[] = []
+
+  if (state.isTopicModerator) {
+    if (isLocked) {
+      buttons.push(`
+        <button type="button" data-topic-unlock="${escapeHtml(activeTopic.topicId)}" title="Отключи темата" aria-label="Отключи темата"
+          style="height:36px;width:36px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#4ade80;display:flex;align-items:center;justify-content:center;cursor:pointer;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+        </button>
+      `)
+    } else {
+      buttons.push(`
+        <button type="button" data-topic-lock="${escapeHtml(activeTopic.topicId)}" data-topic-lock-title="${escapeHtml(activeTopic.title)}" title="Заключи темата" aria-label="Заключи темата"
+          style="height:36px;width:36px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;display:flex;align-items:center;justify-content:center;cursor:pointer;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        </button>
+      `)
+    }
+    buttons.push(`
+      <button type="button" data-topic-delete="${escapeHtml(activeTopic.topicId)}" data-topic-delete-title="${escapeHtml(activeTopic.title)}" title="Изтрий темата" aria-label="Изтрий темата"
+        style="height:36px;width:36px;border:1px solid rgba(239,68,68,0.34);border-radius:8px;background:#050505;color:#f87171;display:flex;align-items:center;justify-content:center;cursor:pointer;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+      </button>
+    `)
+  } else {
+    buttons.push(`
+      <button type="button" data-topic-report="1" title="Докладвай темата" aria-label="Докладвай темата"
+        style="height:36px;width:36px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:#050505;color:rgba(248,250,252,0.62);display:flex;align-items:center;justify-content:center;cursor:pointer;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><path d="M4 22v-7"/></svg>
+      </button>
+    `)
+  }
+
+  return `<div style="margin-left:auto;display:flex;align-items:center;gap:6px;">${buttons.join('')}</div>`
+}
+
+// Ясен, но ненатрапчив banner при заключена/muted тема (брифа т.3/т.4:
+// "Темата е заключена до 14:30" / "Заглушен сте в тази тема до 14:30").
+// server-authoritative timestamp формат-нат локално (Bulgarian час/дата).
+function formatModerationExpiry(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString('bg-BG', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return iso
+  }
+}
+
+function renderTopicModerationBanners(state: LobbyScreenState): string {
+  const banners: string[] = []
+
+  if (state.activeTopicLock?.isLocked && state.activeTopicLock.lockedUntil) {
+    banners.push(`
+      <div style="padding:8px 12px;background:rgba(239,68,68,0.12);border-bottom:1px solid rgba(239,68,68,0.28);color:#fca5a5;font-size:12px;font-weight:800;text-align:center;">
+        🔒 Темата е заключена до ${escapeHtml(formatModerationExpiry(state.activeTopicLock.lockedUntil))}${state.activeTopicLock.lockedReason ? ` — ${escapeHtml(state.activeTopicLock.lockedReason)}` : ''}
+      </div>
+    `)
+  }
+
+  if (state.activeTopicViewerMute?.isMuted && state.activeTopicViewerMute.mutedUntil) {
+    banners.push(`
+      <div style="padding:8px 12px;background:rgba(212,165,32,0.12);border-bottom:1px solid rgba(212,165,32,0.28);color:#fde68a;font-size:12px;font-weight:800;text-align:center;">
+        🔇 Заглушен сте в тази тема до ${escapeHtml(formatModerationExpiry(state.activeTopicViewerMute.mutedUntil))}
+      </div>
+    `)
+  }
+
+  return banners.join('')
+}
+
 function renderTopicsHeader(state: LobbyScreenState): string {
   const activeTopic = (state.topics ?? []).find((t) => t.topicId === state.activeTopicId) ?? null
   const isGeneral = activeTopic?.isGeneral ?? true
@@ -783,6 +1111,83 @@ function renderTopicsHeader(state: LobbyScreenState): string {
         &larr; Общ чат
       </button>
       <h1 style="margin:0;font-size:18px;font-weight:900;color:#f8fafc;">${escapeHtml(activeTopic.title)}</h1>
+      ${renderTopicHeaderModerationControls(state, activeTopic)}
+    </div>
+  `
+}
+
+// Create Topic popup (Custom Topic Creation) — mirror на renderVipRequiredPopup.ts
+// структурата (единствена card, position:fixed;inset:0 backdrop, X бутон),
+// но с form+input вместо статичен текст. Минимален — само заглавие поле,
+// НЕ description/category/privacy (spec т.4). Grешка при неуспешен submit
+// остава inline, title draft-а НЕ се чисти (потребителят не губи текста).
+function renderTopicCreatePopup(state: LobbyScreenState): string {
+  if (!state.topicCreatePopupOpen) return ''
+
+  const draft = state.topicCreateTitleDraft
+  const trimmedLength = draft.trim().length
+  const canSubmit = trimmedLength > 0 && !state.topicCreateBusy
+
+  return `
+    <div data-topic-create-backdrop="1" style="
+      position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,0.6);
+      display:flex;align-items:center;justify-content:center;padding:16px;
+    ">
+      <div data-topic-create-card="1" style="
+        width:100%;max-width:360px;box-sizing:border-box;
+        background:#141414;border:1px solid rgba(212,165,32,0.24);border-radius:16px;
+        padding:22px 20px;box-shadow:0 20px 60px rgba(0,0,0,0.5);
+      ">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+          <span style="font-size:15px;font-weight:900;color:#f8fafc;">Създай тема</span>
+          <button
+            type="button"
+            data-topic-create-close="1"
+            aria-label="Затвори"
+            style="border:0;background:transparent;color:rgba(248,250,252,0.6);font-size:20px;line-height:1;cursor:pointer;padding:4px;"
+          >&times;</button>
+        </div>
+        <form data-topic-create-form="1">
+          <input
+            type="text"
+            data-topic-create-title-input="1"
+            name="title"
+            maxlength="80"
+            placeholder="Име на темата"
+            autocomplete="off"
+            value="${escapeHtml(draft)}"
+            ${state.topicCreateBusy ? 'disabled' : ''}
+            style="
+              width:100%;box-sizing:border-box;padding:12px 14px;margin-bottom:14px;
+              border:1px solid rgba(255,255,255,0.14);border-radius:10px;
+              background:#0a0a0a;color:#f8fafc;font-size:15px;
+            "
+          >
+          ${state.topicCreateErrorText ? `<p style="margin:0 0 14px;font-size:13px;color:#f87171;">${escapeHtml(state.topicCreateErrorText)}</p>` : ''}
+          <div style="display:flex;gap:10px;">
+            <button
+              type="button"
+              data-topic-create-cancel="1"
+              ${state.topicCreateBusy ? 'disabled' : ''}
+              style="
+                flex:1;padding:12px 16px;border:1px solid rgba(255,255,255,0.14);border-radius:10px;
+                background:transparent;color:rgba(248,250,252,0.72);font-size:14px;font-weight:700;cursor:pointer;
+              "
+            >Отказ</button>
+            <button
+              type="submit"
+              data-topic-create-submit="1"
+              ${canSubmit ? '' : 'disabled'}
+              style="
+                flex:1;padding:12px 16px;border:0;border-radius:10px;
+                background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+                color:#080808;font-size:14px;font-weight:900;cursor:pointer;
+                opacity:${canSubmit ? '1' : '0.5'};
+              "
+            >${state.topicCreateBusy ? 'Изчакай...' : 'Създай'}</button>
+          </div>
+        </form>
+      </div>
     </div>
   `
 }
@@ -829,6 +1234,7 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
         ${renderTopicsBar(state)}
       </div>
       <div data-topics-stream-container="1" style="flex:1;min-height:0;border:1px solid rgba(255,255,255,0.10);border-radius:12px 12px 0 0;border-bottom:0;background:#0a0a0a;display:flex;flex-direction:column;overflow:hidden;">
+        ${renderTopicModerationBanners(state)}
         ${renderTopicMessageStream(state)}
       </div>
       ${activeTopicId ? renderTopicsComposer(state, activeTopicId) : ''}
@@ -840,6 +1246,89 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
       claimErrorText: state.topicsVipClaimErrorText,
       seePlansMessageVisible: state.topicsVipSeePlansMessageVisible,
     })}
+    ${renderTopicCreatePopup(state)}
     ${renderTopicsInfoToast(state)}
+    ${renderTopicModerationActionPopup(state)}
+    ${renderTopicDeleteConfirmPopup(state)}
+    ${renderTopicReportPopup(state)}
+    ${renderTopicReportSuccessToast(state)}
+  `
+}
+
+// Admin reports queue — компактен popup panel (брифа т.6: "Не създавай
+// отделно огромно admin приложение само за Topics reports"), отворен от
+// mail dropdown-a (renderLobbyScreen.ts data-lobby-nav-admin-topic-reports),
+// НЕ отделен screen/route. Достъпен за всички Topics moderator roles
+// (isTopicModerator), не само пълен admin — reuse на established
+// fullscreen popup стил (subadminActionConfirm/lock-mute popup-ите).
+export function renderAdminTopicReportsPanel(state: LobbyScreenState): string {
+  if (!state.adminTopicReportsPopupOpen) return ''
+
+  const filter = state.adminTopicReportsFilter
+  const filterOptions: Array<{ value: TopicReportStatus | null; label: string }> = [
+    { value: 'pending', label: 'Чакащи' },
+    { value: 'reviewed', label: 'Прегледани' },
+    { value: 'dismissed', label: 'Отхвърлени' },
+    { value: null, label: 'Всички' },
+  ]
+
+  const reports = state.adminTopicReports ?? []
+
+  return `
+    <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
+      <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:20px;max-width:560px;width:100%;max-height:82vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex:0 0 auto;">
+          <div style="font-size:17px;font-weight:900;color:#fff;">Доклади за теми</div>
+          <button type="button" data-admin-topic-reports-close="1" aria-label="Затвори" style="border:0;background:transparent;color:rgba(255,255,255,0.6);font-size:20px;line-height:1;cursor:pointer;padding:4px;">&#10005;</button>
+        </div>
+
+        <div style="display:flex;gap:6px;margin-bottom:14px;flex:0 0 auto;flex-wrap:wrap;">
+          ${filterOptions.map((opt) => {
+            const isSelected = filter === opt.value
+            return `
+              <button type="button" data-admin-topic-reports-filter="${opt.value ?? 'all'}" style="
+                padding:7px 12px;border-radius:999px;font-size:12px;font-weight:800;cursor:pointer;
+                border:1px solid ${isSelected ? 'rgba(212,165,32,0.7)' : 'rgba(255,255,255,0.16)'};
+                background:${isSelected ? 'rgba(212,165,32,0.18)' : 'rgba(255,255,255,0.05)'};
+                color:${isSelected ? '#fde68a' : 'rgba(255,255,255,0.75)'};
+              ">${opt.label}</button>
+            `
+          }).join('')}
+        </div>
+
+        <div style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;">
+          ${state.adminTopicReportsLoading ? `<div style="text-align:center;color:rgba(255,255,255,0.5);font-size:13px;padding:20px 0;">Зареждане...</div>` : ''}
+          ${state.adminTopicReportsErrorText ? `<div style="text-align:center;color:#f87171;font-size:13px;padding:20px 0;">${escapeHtml(state.adminTopicReportsErrorText)}</div>` : ''}
+          ${!state.adminTopicReportsLoading && !state.adminTopicReportsErrorText && reports.length === 0 ? `<div style="text-align:center;color:rgba(255,255,255,0.42);font-size:13px;padding:20px 0;">Няма доклади.</div>` : ''}
+          ${reports.map((report) => {
+            const isBusy = state.adminTopicReportActionBusyId === report.reportId
+            const statusColor = report.status === 'pending' ? '#fde68a' : report.status === 'reviewed' ? '#4ade80' : 'rgba(255,255,255,0.5)'
+            const statusLabel = report.status === 'pending' ? 'Чака' : report.status === 'reviewed' ? 'Прегледан' : 'Отхвърлен'
+            return `
+              <div style="border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:10px 12px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;">
+                  <span style="font-size:11px;font-weight:900;color:${statusColor};">${statusLabel}</span>
+                  <span style="font-size:11px;color:rgba(255,255,255,0.4);">${escapeHtml(formatModerationExpiry(report.createdAt))}</span>
+                </div>
+                <div style="font-size:13px;color:#f8fafc;line-height:1.4;margin-bottom:8px;word-break:break-word;">${escapeHtml(report.reason)}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.38);margin-bottom:8px;">Тема: ${escapeHtml(report.topicId)}</div>
+                ${report.status === 'pending' ? `
+                  <div style="display:flex;gap:8px;">
+                    <button type="button" data-admin-topic-report-review="${escapeHtml(report.reportId)}" data-admin-topic-report-review-status="reviewed" ${isBusy ? 'disabled' : ''} style="
+                      flex:1;padding:7px;border-radius:8px;font-size:12px;font-weight:800;cursor:${isBusy ? 'default' : 'pointer'};
+                      border:1px solid rgba(74,222,128,0.4);background:rgba(74,222,128,0.12);color:#4ade80;
+                    ">Прегледан</button>
+                    <button type="button" data-admin-topic-report-review="${escapeHtml(report.reportId)}" data-admin-topic-report-review-status="dismissed" ${isBusy ? 'disabled' : ''} style="
+                      flex:1;padding:7px;border-radius:8px;font-size:12px;font-weight:800;cursor:${isBusy ? 'default' : 'pointer'};
+                      border:1px solid rgba(255,255,255,0.16);background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.7);
+                    ">Отхвърли</button>
+                  </div>
+                ` : ''}
+              </div>
+            `
+          }).join('')}
+        </div>
+      </div>
+    </div>
   `
 }

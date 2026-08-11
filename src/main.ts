@@ -3580,6 +3580,229 @@ async function loadTopicReplies(
   }
 }
 
+// ─── Topics Moderation (Етап 4) ─────────────────────────────────────────
+//
+// Moderation actions минават през HTTP (established convention — виж
+// deleteLobbyChatMessage по-долу за прецедента), НЕ WS — реалният WS канал
+// се ползва само за realtime NOTIFY на резултата (topic_lock_state_changed/
+// topic_mute_state_changed/topic_deleted WS messages, wire-нати в
+// createGameServerClient.ts).
+
+type TopicLockSnapshot = {
+  isLocked: boolean
+  lockedUntil: string | null
+  lockedByAccountId: string | null
+  lockedReason: string | null
+}
+
+type TopicMuteSnapshot = {
+  isMuted: boolean
+  mutedUntil: string | null
+  mutedByAccountId: string | null
+  reason: string | null
+}
+
+async function lockTopic(
+  topicId: string,
+  reason: string,
+  durationMs: number,
+): Promise<{ ok: true; lock: TopicLockSnapshot } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/lock`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason, durationMs }),
+    })
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string; lock?: TopicLockSnapshot }
+    if (!response.ok || !data.ok || !data.lock) {
+      return { ok: false, message: data.message ?? 'Грешка при заключване на темата.' }
+    }
+    return { ok: true, lock: data.lock }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function unlockTopic(
+  topicId: string,
+): Promise<{ ok: true; lock: TopicLockSnapshot } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/unlock`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string; lock?: TopicLockSnapshot }
+    if (!response.ok || !data.ok || !data.lock) {
+      return { ok: false, message: data.message ?? 'Грешка при отключване на темата.' }
+    }
+    return { ok: true, lock: data.lock }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadTopicMuteStatus(
+  topicId: string,
+  profileId: string,
+): Promise<{ ok: true; mute: TopicMuteSnapshot } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/mute-status?profileId=${encodeURIComponent(profileId)}`,
+      { method: 'GET', credentials: 'include' },
+    )
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string; mute?: TopicMuteSnapshot }
+    if (!response.ok || !data.ok || !data.mute) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на статуса.' }
+    }
+    return { ok: true, mute: data.mute }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function muteProfileInTopic(
+  topicId: string,
+  profileId: string,
+  reason: string,
+  durationMs: number,
+): Promise<{ ok: true; mute: TopicMuteSnapshot } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/mute`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId, reason, durationMs }),
+    })
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string; mute?: TopicMuteSnapshot }
+    if (!response.ok || !data.ok || !data.mute) {
+      return { ok: false, message: data.message ?? 'Грешка при заглушаване.' }
+    }
+    return { ok: true, mute: data.mute }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function unmuteProfileInTopic(
+  topicId: string,
+  profileId: string,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/unmute`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId }),
+    })
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Грешка при отглушаване.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function deleteTopic(
+  topicId: string,
+  reason: string,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    })
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Грешка при изтриване на темата.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function reportTopic(
+  topicId: string,
+  reason: string,
+): Promise<{ ok: true } | { ok: false; code?: string; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/report`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    })
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; code?: string; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, code: data.code, message: data.message ?? 'Грешка при докладването.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+type TopicReportSnapshot = {
+  reportId: string
+  topicId: string
+  reporterProfileId: string
+  reason: string
+  status: 'pending' | 'reviewed' | 'dismissed'
+  reviewedByAccountId: string | null
+  reviewedAt: string | null
+  createdAt: string
+}
+
+async function loadTopicReports(
+  status: 'pending' | 'reviewed' | 'dismissed' | null,
+): Promise<{ ok: true; reports: TopicReportSnapshot[]; pendingCount: number } | { ok: false; message: string }> {
+  try {
+    const qs = status !== null ? `?status=${encodeURIComponent(status)}` : ''
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/topic-reports${qs}`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json().catch(() => ({}))) as {
+      ok?: boolean
+      message?: string
+      reports?: TopicReportSnapshot[]
+      pendingCount?: number
+    }
+    if (!response.ok || !data.ok || !Array.isArray(data.reports)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на докладите.' }
+    }
+    return { ok: true, reports: data.reports, pendingCount: data.pendingCount ?? 0 }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function reviewTopicReport(
+  reportId: string,
+  status: 'reviewed' | 'dismissed',
+): Promise<{ ok: true; report: TopicReportSnapshot } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/topic-reports/${encodeURIComponent(reportId)}/review`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    })
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string; report?: TopicReportSnapshot }
+    if (!response.ok || !data.ok || !data.report) {
+      return { ok: false, message: data.message ?? 'Грешка при преглед на доклада.' }
+    }
+    return { ok: true, report: data.report }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 // Отделен от loadOwnVipStatus (profile popup use case, само activeUntil) —
 // composer gating в "Теми" се нуждае и от hasClaimedLaunchGift, за да избере
 // правилния VIP popup текст ("Вземи 30 дни безплатно" vs "Виж VIP плановете").
@@ -4083,6 +4306,15 @@ lobby = createLobbyFlowController({
   onTopicMessageLikeToggle: (messageId, requestId) => {
     client.toggleTopicMessageLike(messageId, requestId)
   },
+  onTopicCreateSubmit: (title, requestId) => {
+    client.createTopic(title, requestId)
+  },
+  onTopicsDirectorySubscribe: () => {
+    client.subscribeTopicsDirectory()
+  },
+  onTopicsDirectoryUnsubscribe: () => {
+    client.unsubscribeTopicsDirectory()
+  },
   getAuthSession: () => currentAuthSession,
   getIsInGame: () => activeRoom.hasActiveRoom(),
   onLoginSubmit: (email, password) =>
@@ -4291,6 +4523,15 @@ lobby = createLobbyFlowController({
   onProfileByIdLoad: (profileId) => loadProfileById(profileId),
   onTopicMessagesLoad: (topicId, beforeSeq) => loadTopicMessages(topicId, beforeSeq),
   onTopicRepliesLoad: (topicId, rootMessageId, afterSeq) => loadTopicReplies(topicId, rootMessageId, afterSeq),
+  onTopicLock: (topicId, reason, durationMs) => lockTopic(topicId, reason, durationMs),
+  onTopicUnlock: (topicId) => unlockTopic(topicId),
+  onTopicMuteStatusLoad: (topicId, profileId) => loadTopicMuteStatus(topicId, profileId),
+  onTopicMuteProfile: (topicId, profileId, reason, durationMs) => muteProfileInTopic(topicId, profileId, reason, durationMs),
+  onTopicUnmuteProfile: (topicId, profileId) => unmuteProfileInTopic(topicId, profileId),
+  onTopicDelete: (topicId, reason) => deleteTopic(topicId, reason),
+  onTopicReport: (topicId, reason) => reportTopic(topicId, reason),
+  onTopicReportsLoad: (status) => loadTopicReports(status),
+  onTopicReportReview: (reportId, status) => reviewTopicReport(reportId, status),
   onGetTopicsVipGateStatus: () => loadTopicsVipGateStatus(),
   onClaimTopicsLaunchGift: () => claimTopicsLaunchGiftRequest(),
   onTournamentCreate: (input) => createTournamentRequest(input),
@@ -4669,6 +4910,9 @@ client = createGameServerClient({
       // старата WS subscription невалидна server-side. Resubscribe-ва с
       // gap-closing afterSeq САМО ако клиентът реално е на "Теми" екрана.
       lobby.forceTopicMessagesResubscribeIfOnTopicsScreen()
+      // Огледално, но за directory-wide "нова тема се появи" interest
+      // (Custom Topic Creation) — mirror на горното.
+      lobby.forceTopicsDirectoryResubscribeIfOnTopicsScreen()
       // Огледално на горното, но за членство в частна маса: ако потребителят
       // е бил в чакалня на частна маса (или е избрал "Изчакай в лоби") към
       // момента на прекъсването/презареждането (кратка мобилна връзка,

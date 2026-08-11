@@ -1,0 +1,651 @@
+import { randomUUID } from 'node:crypto'
+import { dbDateToUtc } from './dbDate.js'
+
+type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
+
+export type TopicModeratorRole = 'admin' | 'subadmin' | 'pika_team' | 'top_chat_admin'
+export type TopicModerationAction = 'topic_lock' | 'topic_unlock' | 'topic_mute' | 'topic_unmute' | 'topic_delete'
+
+/**
+ * "Current lock state" snapshot — derived at READ time от topics.locked_*
+ * колоните, огледално на vipStore.toStatusSnapshot (isActive computed от
+ * expiry comparison, никога persisted boolean). null lockedUntil/reason
+ * значи темата никога не е била заключвана (или lock-ът е бил ръчно
+ * премахнат — виж unlockTopic, който explicit NULL-ва колоните).
+ */
+export type TopicLockSnapshot = {
+  isLocked: boolean
+  lockedUntil: string | null
+  lockedByAccountId: string | null
+  lockedReason: string | null
+}
+
+export type TopicMuteSnapshot = {
+  isMuted: boolean
+  mutedUntil: string | null
+  mutedByAccountId: string | null
+  reason: string | null
+}
+
+export type TopicModerationAuditEntry = {
+  logId: string
+  actorAccountId: string | null
+  actorRole: TopicModeratorRole
+  action: TopicModerationAction
+  topicId: string
+  targetProfileId: string | null
+  reason: string | null
+  expiresAt: string | null
+  createdAt: string
+}
+
+export type TopicReportStatus = 'pending' | 'reviewed' | 'dismissed'
+
+export type TopicReportSnapshot = {
+  reportId: string
+  topicId: string
+  reporterProfileId: string
+  reason: string
+  status: TopicReportStatus
+  reviewedByAccountId: string | null
+  reviewedAt: string | null
+  createdAt: string
+}
+
+export type CreateTopicReportResult =
+  | { ok: true; report: TopicReportSnapshot }
+  | { ok: false; code: 'duplicate' }
+
+export type TopicModerationStore = {
+  // ─── Lock/Unlock (temporary topic write restriction) ───────────────────
+  lockTopic: (input: {
+    topicId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+    reason: string
+    durationMs: number
+  }) => TopicLockSnapshot
+  /** No-op idempotent ако темата вече не е заключена (виж брифа т.12) — все пак append-ва audit ред само ако РЕАЛНО е имало активен lock. */
+  unlockTopic: (input: {
+    topicId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+  }) => { changed: boolean; snapshot: TopicLockSnapshot }
+  getTopicLockSnapshot: (topicId: string) => TopicLockSnapshot | null
+
+  // ─── Mute/Unmute (topic-specific, profile_id + topic_id) ────────────────
+  muteProfileInTopic: (input: {
+    topicId: string
+    profileId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+    reason: string
+    durationMs: number
+  }) => TopicMuteSnapshot
+  unmuteProfileInTopic: (input: {
+    topicId: string
+    profileId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+  }) => { changed: boolean }
+  getMuteSnapshot: (topicId: string, profileId: string) => TopicMuteSnapshot
+  /** Server-authoritative enforcement lookup за send_topic_message/send_topic_reply — expiry checked at read time. */
+  isProfileMutedInTopic: (topicId: string, profileId: string) => boolean
+
+  // ─── Delete (soft-delete + eager attachment cleanup от caller-а) ────────
+  /** Връща storage filenames-ите на ВСИЧКИ attachments в темата — caller-ът (index.ts) ги enqueue-ва за физически cleanup ПРЕДИ/след soft-delete-а. */
+  getAttachmentFilenamesForTopic: (topicId: string) => string[]
+  deleteTopic: (input: {
+    topicId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+    reason: string
+  }) => { ok: true } | { ok: false; code: 'not_found' | 'already_removed' }
+
+  // ─── Reports ─────────────────────────────────────────────────────────────
+  createReport: (input: {
+    topicId: string
+    reporterProfileId: string
+    reason: string
+  }) => CreateTopicReportResult
+  listReports: (status: TopicReportStatus | null, limit: number) => TopicReportSnapshot[]
+  countPendingReports: () => number
+  reviewReport: (input: {
+    reportId: string
+    status: 'reviewed' | 'dismissed'
+    actorAccountId: string
+  }) => { ok: true; report: TopicReportSnapshot } | { ok: false; code: 'not_found' }
+
+  // ─── Audit log ───────────────────────────────────────────────────────────
+  listAuditLogForTopic: (topicId: string, limit: number) => TopicModerationAuditEntry[]
+
+  close: () => void
+}
+
+type TopicLockRow = {
+  status: string
+  locked_until: string | null
+  locked_by_account_id: string | null
+  locked_reason: string | null
+}
+
+function toLockSnapshot(row: TopicLockRow, now: number): TopicLockSnapshot {
+  if (row.locked_until === null) {
+    return { isLocked: false, lockedUntil: null, lockedByAccountId: null, lockedReason: null }
+  }
+  const lockedUntilIso = dbDateToUtc(row.locked_until)
+  const isLocked = new Date(lockedUntilIso).getTime() > now
+  return {
+    isLocked,
+    lockedUntil: lockedUntilIso,
+    lockedByAccountId: row.locked_by_account_id,
+    lockedReason: row.locked_reason,
+  }
+}
+
+type TopicMuteRow = {
+  muted_until: string
+  muted_by_account_id: string | null
+  reason: string | null
+}
+
+function toMuteSnapshot(row: TopicMuteRow | undefined, now: number): TopicMuteSnapshot {
+  if (!row) {
+    return { isMuted: false, mutedUntil: null, mutedByAccountId: null, reason: null }
+  }
+  const mutedUntilIso = dbDateToUtc(row.muted_until)
+  return {
+    isMuted: new Date(mutedUntilIso).getTime() > now,
+    mutedUntil: mutedUntilIso,
+    mutedByAccountId: row.muted_by_account_id,
+    reason: row.reason,
+  }
+}
+
+function toSqliteDateTimeString(date: Date): string {
+  return date.toISOString().slice(0, 19).replace('T', ' ')
+}
+
+type TopicReportRow = {
+  report_id: string
+  topic_id: string
+  reporter_profile_id: string
+  reason: string
+  status: TopicReportStatus
+  reviewed_by_account_id: string | null
+  reviewed_at: string | null
+  created_at: string
+}
+
+function toReportSnapshot(row: TopicReportRow): TopicReportSnapshot {
+  return {
+    reportId: row.report_id,
+    topicId: row.topic_id,
+    reporterProfileId: row.reporter_profile_id,
+    reason: row.reason,
+    status: row.status,
+    reviewedByAccountId: row.reviewed_by_account_id,
+    reviewedAt: row.reviewed_at ? dbDateToUtc(row.reviewed_at) : null,
+    createdAt: dbDateToUtc(row.created_at),
+  }
+}
+
+type AuditRow = {
+  log_id: string
+  actor_account_id: string | null
+  actor_role: TopicModeratorRole
+  action: TopicModerationAction
+  topic_id: string
+  target_profile_id: string | null
+  reason: string | null
+  expires_at: string | null
+  created_at: string
+}
+
+function toAuditEntry(row: AuditRow): TopicModerationAuditEntry {
+  return {
+    logId: row.log_id,
+    actorAccountId: row.actor_account_id,
+    actorRole: row.actor_role,
+    action: row.action,
+    topicId: row.topic_id,
+    targetProfileId: row.target_profile_id,
+    reason: row.reason,
+    expiresAt: row.expires_at ? dbDateToUtc(row.expires_at) : null,
+    createdAt: dbDateToUtc(row.created_at),
+  }
+}
+
+// Duplicate/spam guard прозорец за report-и — един и същ (reporter, topic)
+// не може да докладва повторно в рамките на този прозорец. Persisted DB
+// query (не in-memory Map), restart-safe, следва established
+// duplicate-guard семантика (виж isDuplicateTopicMessage в index.ts), но
+// тук е по-дълъг прозорец (report-ите са рядко, преднамерено действие, не
+// chat спам) — минути, не секунди.
+const TOPIC_REPORT_DUPLICATE_WINDOW_MS = 10 * 60 * 1000
+
+export async function createTopicModerationStore(databaseFilePath: string): Promise<TopicModerationStore> {
+  const sqliteModule = await import('node:sqlite')
+  const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
+    open: true,
+    enableForeignKeyConstraints: true,
+  })
+
+  database.exec('PRAGMA foreign_keys = ON;')
+  database.exec('PRAGMA journal_mode = WAL;')
+  database.exec('PRAGMA busy_timeout = 5000;')
+
+  // ─── Lock/Unlock ──────────────────────────────────────────────────────────
+
+  const selectTopicLockStatement = database.prepare(`
+    SELECT status, locked_until, locked_by_account_id, locked_reason FROM topics WHERE topic_id = ? LIMIT 1;
+  `)
+
+  const updateTopicLockStatement = database.prepare(`
+    UPDATE topics SET status = 'locked', locked_until = ?, locked_by_account_id = ?, locked_reason = ?
+    WHERE topic_id = ?;
+  `)
+
+  const insertAuditStatement = database.prepare(`
+    INSERT INTO topic_moderation_audit_log (
+      log_id, actor_account_id, actor_role, action, topic_id, target_profile_id, reason, expires_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+  `)
+
+  function appendAudit(input: {
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+    action: TopicModerationAction
+    topicId: string
+    targetProfileId: string | null
+    reason: string | null
+    expiresAt: string | null
+  }): void {
+    insertAuditStatement.run(
+      randomUUID(),
+      input.actorAccountId,
+      input.actorRole,
+      input.action,
+      input.topicId,
+      input.targetProfileId,
+      input.reason,
+      input.expiresAt,
+    )
+  }
+
+  function lockTopic(input: {
+    topicId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+    reason: string
+    durationMs: number
+  }): TopicLockSnapshot {
+    const now = Date.now()
+    const lockedUntil = toSqliteDateTimeString(new Date(now + input.durationMs))
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      updateTopicLockStatement.run(lockedUntil, input.actorAccountId, input.reason, input.topicId)
+      appendAudit({
+        actorAccountId: input.actorAccountId,
+        actorRole: input.actorRole,
+        action: 'topic_lock',
+        topicId: input.topicId,
+        targetProfileId: null,
+        reason: input.reason,
+        expiresAt: lockedUntil,
+      })
+      database.exec('COMMIT;')
+    } catch (error) {
+      database.exec('ROLLBACK;')
+      throw error
+    }
+
+    const row = selectTopicLockStatement.get(input.topicId) as TopicLockRow
+    return toLockSnapshot(row, now)
+  }
+
+  // Ръчен unlock връща status обратно на 'active' (НЕ 'removed' — темата не
+  // е била премахната) и NULL-ва locked_* колоните directno (не overwrite с
+  // минала дата) — виж migration коментара за rationale (семпъл lookup, без
+  // допълнителен is_active флаг). Idempotent: ако темата вече не е заключена
+  // (locked_until е NULL ИЛИ вече е изтекла естествено), връща changed=false
+  // и НЕ append-ва излишен audit ред за "unlock на нищо" (брифа т.12: "не
+  // връщай generic server error при harmless repeated action" — тук просто
+  // no-op, без грешка).
+  const clearTopicLockStatement = database.prepare(`
+    UPDATE topics SET status = 'active', locked_until = NULL, locked_by_account_id = NULL, locked_reason = NULL
+    WHERE topic_id = ?;
+  `)
+
+  function unlockTopic(input: {
+    topicId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+  }): { changed: boolean; snapshot: TopicLockSnapshot } {
+    const now = Date.now()
+    const row = selectTopicLockStatement.get(input.topicId) as TopicLockRow | undefined
+    if (row === undefined) {
+      return { changed: false, snapshot: { isLocked: false, lockedUntil: null, lockedByAccountId: null, lockedReason: null } }
+    }
+    const currentSnapshot = toLockSnapshot(row, now)
+    if (!currentSnapshot.isLocked) {
+      return { changed: false, snapshot: currentSnapshot }
+    }
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      clearTopicLockStatement.run(input.topicId)
+      appendAudit({
+        actorAccountId: input.actorAccountId,
+        actorRole: input.actorRole,
+        action: 'topic_unlock',
+        topicId: input.topicId,
+        targetProfileId: null,
+        reason: null,
+        expiresAt: null,
+      })
+      database.exec('COMMIT;')
+    } catch (error) {
+      database.exec('ROLLBACK;')
+      throw error
+    }
+
+    return { changed: true, snapshot: { isLocked: false, lockedUntil: null, lockedByAccountId: null, lockedReason: null } }
+  }
+
+  function getTopicLockSnapshot(topicId: string): TopicLockSnapshot | null {
+    const row = selectTopicLockStatement.get(topicId) as TopicLockRow | undefined
+    if (row === undefined) return null
+    return toLockSnapshot(row, Date.now())
+  }
+
+  // ─── Mute/Unmute ──────────────────────────────────────────────────────────
+
+  const upsertMuteStatement = database.prepare(`
+    INSERT INTO topic_mutes (topic_id, profile_id, muted_until, muted_by_account_id, reason)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(topic_id, profile_id) DO UPDATE SET
+      muted_until = excluded.muted_until,
+      muted_by_account_id = excluded.muted_by_account_id,
+      reason = excluded.reason,
+      created_at = CURRENT_TIMESTAMP;
+  `)
+
+  const selectMuteStatement = database.prepare(`
+    SELECT muted_until, muted_by_account_id, reason FROM topic_mutes WHERE topic_id = ? AND profile_id = ? LIMIT 1;
+  `)
+
+  function muteProfileInTopic(input: {
+    topicId: string
+    profileId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+    reason: string
+    durationMs: number
+  }): TopicMuteSnapshot {
+    const now = Date.now()
+    const mutedUntil = toSqliteDateTimeString(new Date(now + input.durationMs))
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      upsertMuteStatement.run(input.topicId, input.profileId, mutedUntil, input.actorAccountId, input.reason)
+      appendAudit({
+        actorAccountId: input.actorAccountId,
+        actorRole: input.actorRole,
+        action: 'topic_mute',
+        topicId: input.topicId,
+        targetProfileId: input.profileId,
+        reason: input.reason,
+        expiresAt: mutedUntil,
+      })
+      database.exec('COMMIT;')
+    } catch (error) {
+      database.exec('ROLLBACK;')
+      throw error
+    }
+
+    const row = selectMuteStatement.get(input.topicId, input.profileId) as TopicMuteRow
+    return toMuteSnapshot(row, now)
+  }
+
+  // Ръчен unmute ТРИЕ реда (не overwrite с минала дата) — семпъл lookup
+  // (PRIMARY KEY presence = active mute) без нужда от expiry comparison за
+  // "изтрит ли е записа логически". Idempotent: DELETE на несъществуващ ред
+  // просто changes=0, без грешка (брифа т.12).
+  const deleteMuteStatement = database.prepare(`
+    DELETE FROM topic_mutes WHERE topic_id = ? AND profile_id = ?;
+  `)
+
+  function unmuteProfileInTopic(input: {
+    topicId: string
+    profileId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+  }): { changed: boolean } {
+    const row = selectMuteStatement.get(input.topicId, input.profileId) as TopicMuteRow | undefined
+    const wasActive = row !== undefined && toMuteSnapshot(row, Date.now()).isMuted
+    if (!wasActive) {
+      return { changed: false }
+    }
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      deleteMuteStatement.run(input.topicId, input.profileId)
+      appendAudit({
+        actorAccountId: input.actorAccountId,
+        actorRole: input.actorRole,
+        action: 'topic_unmute',
+        topicId: input.topicId,
+        targetProfileId: input.profileId,
+        reason: null,
+        expiresAt: null,
+      })
+      database.exec('COMMIT;')
+    } catch (error) {
+      database.exec('ROLLBACK;')
+      throw error
+    }
+
+    return { changed: true }
+  }
+
+  function getMuteSnapshot(topicId: string, profileId: string): TopicMuteSnapshot {
+    const row = selectMuteStatement.get(topicId, profileId) as TopicMuteRow | undefined
+    return toMuteSnapshot(row, Date.now())
+  }
+
+  function isProfileMutedInTopic(topicId: string, profileId: string): boolean {
+    return getMuteSnapshot(topicId, profileId).isMuted
+  }
+
+  // ─── Delete (soft-delete + eager attachment cleanup) ────────────────────
+
+  const selectAttachmentFilenamesForTopicStatement = database.prepare(`
+    SELECT a.storage_filename
+    FROM topic_message_attachments a
+    INNER JOIN topic_messages m ON m.message_id = a.message_id
+    WHERE m.topic_id = ?;
+  `)
+
+  function getAttachmentFilenamesForTopic(topicId: string): string[] {
+    const rows = selectAttachmentFilenamesForTopicStatement.all(topicId) as Array<{ storage_filename: string }>
+    return rows.map((row) => row.storage_filename)
+  }
+
+  const selectTopicStatusStatement = database.prepare(`
+    SELECT status FROM topics WHERE topic_id = ? LIMIT 1;
+  `)
+
+  const updateTopicRemovedStatement = database.prepare(`
+    UPDATE topics SET status = 'removed', removed_by_account_id = ?, removed_reason = ?, removed_at = CURRENT_TIMESTAMP
+    WHERE topic_id = ?;
+  `)
+
+  const softDeleteTopicMessagesStatement = database.prepare(`
+    UPDATE topic_messages SET deleted_at = CURRENT_TIMESTAMP WHERE topic_id = ? AND deleted_at IS NULL;
+  `)
+
+  // Soft-delete (не hard DELETE FROM topics) — темата остава четима за
+  // audit/history цели (виж брифа резюмето: "Soft-delete + eager attachment
+  // cleanup"), но всички read пътища (listActiveTopics/handleTopicsRequest)
+  // вече третират status='removed' идентично на "не съществува" (Етап 1-3
+  // established convention). Attachment filenames се събират ПРЕДИ soft-
+  // delete-а (getAttachmentFilenamesForTopic извиква се от caller-а, index.ts,
+  // ПРЕДИ deleteTopic — виж handleTopicDeleteRequest) — enqueue-ването на
+  // физическия cleanup queue е отговорност на index.ts (store-ът тук не знае
+  // нищо за filesystem paths), но redovete в topic_message_attachments
+  // умишлено НЕ се трият тук (нито topic_messages hard-delete-нати) — само
+  // deleted_at маркиран, за да остане история четима.
+  function deleteTopic(input: {
+    topicId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+    reason: string
+  }): { ok: true } | { ok: false; code: 'not_found' | 'already_removed' } {
+    const statusRow = selectTopicStatusStatement.get(input.topicId) as { status: string } | undefined
+    if (statusRow === undefined) {
+      return { ok: false, code: 'not_found' }
+    }
+    if (statusRow.status === 'removed') {
+      return { ok: false, code: 'already_removed' }
+    }
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      updateTopicRemovedStatement.run(input.actorAccountId, input.reason, input.topicId)
+      softDeleteTopicMessagesStatement.run(input.topicId)
+      appendAudit({
+        actorAccountId: input.actorAccountId,
+        actorRole: input.actorRole,
+        action: 'topic_delete',
+        topicId: input.topicId,
+        targetProfileId: null,
+        reason: input.reason,
+        expiresAt: null,
+      })
+      database.exec('COMMIT;')
+    } catch (error) {
+      database.exec('ROLLBACK;')
+      throw error
+    }
+
+    return { ok: true }
+  }
+
+  // ─── Reports ─────────────────────────────────────────────────────────────
+
+  const selectRecentReportStatement = database.prepare(`
+    SELECT 1 FROM topic_reports
+    WHERE reporter_profile_id = ? AND topic_id = ? AND created_at > ?
+    LIMIT 1;
+  `)
+
+  const insertReportStatement = database.prepare(`
+    INSERT INTO topic_reports (report_id, topic_id, reporter_profile_id, reason)
+    VALUES (?, ?, ?, ?);
+  `)
+
+  const selectReportByIdStatement = database.prepare(`
+    SELECT report_id, topic_id, reporter_profile_id, reason, status, reviewed_by_account_id, reviewed_at, created_at
+    FROM topic_reports WHERE report_id = ? LIMIT 1;
+  `)
+
+  function createReport(input: {
+    topicId: string
+    reporterProfileId: string
+    reason: string
+  }): CreateTopicReportResult {
+    const cutoff = toSqliteDateTimeString(new Date(Date.now() - TOPIC_REPORT_DUPLICATE_WINDOW_MS))
+    const existing = selectRecentReportStatement.get(input.reporterProfileId, input.topicId, cutoff)
+    if (existing !== undefined) {
+      return { ok: false, code: 'duplicate' }
+    }
+
+    const reportId = randomUUID()
+    insertReportStatement.run(reportId, input.topicId, input.reporterProfileId, input.reason)
+    const row = selectReportByIdStatement.get(reportId) as TopicReportRow
+    return { ok: true, report: toReportSnapshot(row) }
+  }
+
+  const selectReportsByStatusStatement = database.prepare(`
+    SELECT report_id, topic_id, reporter_profile_id, reason, status, reviewed_by_account_id, reviewed_at, created_at
+    FROM topic_reports WHERE status = ? ORDER BY created_at DESC LIMIT ?;
+  `)
+
+  const selectAllReportsStatement = database.prepare(`
+    SELECT report_id, topic_id, reporter_profile_id, reason, status, reviewed_by_account_id, reviewed_at, created_at
+    FROM topic_reports ORDER BY created_at DESC LIMIT ?;
+  `)
+
+  function listReports(status: TopicReportStatus | null, limit: number): TopicReportSnapshot[] {
+    const rows = (status === null
+      ? selectAllReportsStatement.all(limit)
+      : selectReportsByStatusStatement.all(status, limit)) as TopicReportRow[]
+    return rows.map(toReportSnapshot)
+  }
+
+  const countPendingReportsStatement = database.prepare(`
+    SELECT COUNT(*) as cnt FROM topic_reports WHERE status = 'pending';
+  `)
+
+  function countPendingReports(): number {
+    const row = countPendingReportsStatement.get() as { cnt: number }
+    return row.cnt
+  }
+
+  const updateReportStatusStatement = database.prepare(`
+    UPDATE topic_reports SET status = ?, reviewed_by_account_id = ?, reviewed_at = CURRENT_TIMESTAMP WHERE report_id = ?;
+  `)
+
+  function reviewReport(input: {
+    reportId: string
+    status: 'reviewed' | 'dismissed'
+    actorAccountId: string
+  }): { ok: true; report: TopicReportSnapshot } | { ok: false; code: 'not_found' } {
+    const existing = selectReportByIdStatement.get(input.reportId) as TopicReportRow | undefined
+    if (existing === undefined) {
+      return { ok: false, code: 'not_found' }
+    }
+    updateReportStatusStatement.run(input.status, input.actorAccountId, input.reportId)
+    const row = selectReportByIdStatement.get(input.reportId) as TopicReportRow
+    return { ok: true, report: toReportSnapshot(row) }
+  }
+
+  // ─── Audit log ───────────────────────────────────────────────────────────
+
+  const selectAuditForTopicStatement = database.prepare(`
+    SELECT log_id, actor_account_id, actor_role, action, topic_id, target_profile_id, reason, expires_at, created_at
+    FROM topic_moderation_audit_log
+    WHERE topic_id = ?
+    ORDER BY created_at DESC
+    LIMIT ?;
+  `)
+
+  function listAuditLogForTopic(topicId: string, limit: number): TopicModerationAuditEntry[] {
+    const rows = selectAuditForTopicStatement.all(topicId, limit) as AuditRow[]
+    return rows.map(toAuditEntry)
+  }
+
+  function close(): void {
+    database.close()
+  }
+
+  return {
+    lockTopic,
+    unlockTopic,
+    getTopicLockSnapshot,
+    muteProfileInTopic,
+    unmuteProfileInTopic,
+    getMuteSnapshot,
+    isProfileMutedInTopic,
+    getAttachmentFilenamesForTopic,
+    deleteTopic,
+    createReport,
+    listReports,
+    countPendingReports,
+    reviewReport,
+    listAuditLogForTopic,
+    close,
+  }
+}

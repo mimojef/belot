@@ -76,6 +76,10 @@ import type {
   TopicSnapshot,
   TopicMessageSnapshot,
   TopicReplySnapshot,
+  TopicLockSnapshot,
+  TopicMuteSnapshot,
+  TopicReportSnapshot,
+  TopicReportStatus,
 } from '../network/createGameServerClient'
 
 export type LobbyFlowScreen =
@@ -138,6 +142,21 @@ function isLobbyChatModeratorAuthSession(session: LobbyAuthSession | null): bool
     session.account.role === 'admin'
     || session.account.role === 'subadmin'
     || session.account.role === 'chat_admin'
+    || session.account.role === 'pika_team'
+    || session.account.role === 'top_chat_admin'
+  )
+}
+
+/**
+ * Topics moderation UI достъп (lock/unlock/mute/unmute/delete тема бутони)
+ * — само UX, сървърът презаверява на всяко HTTP moderation действие през
+ * isTopicModeratorSession (authStore.ts). Изрично БЕЗ chat_admin — Topics
+ * moderation е отделен permission set от lobby chat moderation.
+ */
+function isTopicModeratorAuthSession(session: LobbyAuthSession | null): boolean {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'subadmin'
     || session.account.role === 'pika_team'
     || session.account.role === 'top_chat_admin'
   )
@@ -565,6 +584,48 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onTopicReplySend?: (topicId: string, parentMessageId: string, body: string, requestId: string, imageDataUrl?: string) => void
   onTopicMessageLikeToggle?: (messageId: string, requestId: string) => void
+  /** requestId се генерира от контролера — fire-and-forget correlation (mirror на onTopicMessageSend), popup lifecycle-ът се управлява от matching topic_created/topic_create_error push, не Promise resolution. */
+  onTopicCreateSubmit?: (title: string, requestId: string) => void
+  /** Directory-wide "нова тема се появи" interest — subscribe при вход в Topics директорията, unsubscribe при напускане (mirror на onLobbyChatSubscribe/onLobbyChatUnsubscribe). */
+  onTopicsDirectorySubscribe?: () => void
+  onTopicsDirectoryUnsubscribe?: () => void
+  // ─── Moderation (Етап 4) ─────────────────────────────────────────────────
+  onTopicLock?: (topicId: string, reason: string, durationMs: number) => Promise<
+    | { ok: true; lock: TopicLockSnapshot }
+    | { ok: false; message: string }
+  >
+  onTopicUnlock?: (topicId: string) => Promise<
+    | { ok: true; lock: TopicLockSnapshot }
+    | { ok: false; message: string }
+  >
+  onTopicMuteStatusLoad?: (topicId: string, profileId: string) => Promise<
+    | { ok: true; mute: TopicMuteSnapshot }
+    | { ok: false; message: string }
+  >
+  onTopicMuteProfile?: (topicId: string, profileId: string, reason: string, durationMs: number) => Promise<
+    | { ok: true; mute: TopicMuteSnapshot }
+    | { ok: false; message: string }
+  >
+  onTopicUnmuteProfile?: (topicId: string, profileId: string) => Promise<
+    | { ok: true }
+    | { ok: false; message: string }
+  >
+  onTopicDelete?: (topicId: string, reason: string) => Promise<
+    | { ok: true }
+    | { ok: false; message: string }
+  >
+  onTopicReport?: (topicId: string, reason: string) => Promise<
+    | { ok: true }
+    | { ok: false; code?: string; message: string }
+  >
+  onTopicReportsLoad?: (status: TopicReportStatus | null) => Promise<
+    | { ok: true; reports: TopicReportSnapshot[]; pendingCount: number }
+    | { ok: false; message: string }
+  >
+  onTopicReportReview?: (reportId: string, status: 'reviewed' | 'dismissed') => Promise<
+    | { ok: true; report: TopicReportSnapshot }
+    | { ok: false; message: string }
+  >
   /** GET VIP gate статус (isActive + hasClaimedLaunchGift) за composer gating в "Теми" — отделно от onGetOwnVipStatus (profile popup use case). */
   onGetTopicsVipGateStatus?: () => Promise<
     | { ok: true; isActive: boolean; hasClaimedLaunchGift: boolean }
@@ -663,6 +724,7 @@ export type LobbyFlowController = {
   suspendLobbyChatForActiveRoom: () => void
   forceLobbyChatResubscribeIfOnLobbyScreen: () => void
   forceTopicMessagesResubscribeIfOnTopicsScreen: () => void
+  forceTopicsDirectoryResubscribeIfOnTopicsScreen: () => void
   resyncPrivateRoomMembership: () => void
   joinPrivateRoom: (privateRoomId: string) => void
   updateLobbyChatDraft: (value: string) => void
@@ -802,6 +864,53 @@ type InternalLobbyFlowState = {
   topicsVipSeePlansMessageVisible: boolean
   /** UI polish pass — кратък "ще бъде налично скоро" toast за create-topic/like/reply (все още неимплементирани), огледално на subadminActionToast моделa. */
   topicsInfoToast: { text: string } | null
+
+  // ─── Create Topic popup (Custom Topic Creation) ─────────────────────────
+  /** Mirror на tournamentCreatePopupOpen lifecycle-а. */
+  topicCreatePopupOpen: boolean
+  topicCreateBusy: boolean
+  topicCreateErrorText: string | null
+  topicCreateTitleDraft: string
+  /** requestId на текущата чакаща create_topic заявка — null = нищо не се чака. Fire-and-forget correlation (не Promise), виж submitTopicCreate. */
+  topicCreatePendingRequestId: string | null
+  /** true докато има активна WS subscription за topics directory (нова тема broadcast) — subscribe/unsubscribe lifecycle-ът е symmetric на topicMessagesSubscribedTopicId по-горе. */
+  topicsDirectorySubscribed: boolean
+  // ─── Topics Moderation (Етап 4) ──────────────────────────────────────────
+  /** Текущ lock snapshot за активната тема — обновен от REST load-а И от realtime topic_lock_state_changed push. null докато не е зареден. */
+  activeTopicLock: TopicLockSnapshot | null
+  /** Текущ mute snapshot за viewer-а В активната тема — обновен от realtime topic_mute_state_changed push (target-only). null = не е muted (или все още не е известно). */
+  activeTopicViewerMute: TopicMuteSnapshot | null
+  /** Discriminated popup state за lock/mute/unmute action — избор на duration + reason + потвърждение, огледално на subadminActionConfirm модела. 'unmute' е прост confirm (без duration/reason), отворен САМО след lazy-fetch потвърди active mute (виж openTopicMuteMenuForAuthor). */
+  topicModerationActionPopup:
+    | { kind: 'lock'; topicId: string; topicTitle: string }
+    | { kind: 'mute'; topicId: string; targetProfileId: string; targetDisplayName: string }
+    | { kind: 'unmute'; topicId: string; targetProfileId: string; targetDisplayName: string; mutedUntil: string | null }
+    | null
+  topicModerationActionDurationMs: number | null
+  topicModerationActionReason: string
+  topicModerationActionBusy: boolean
+  topicModerationActionErrorText: string | null
+  /** Lazy mute-status fetch в прогрес (виж openTopicMuteMenuForAuthor) — disable-ва gear иконата, докато чакаме отговор. */
+  topicMuteStatusLoadingProfileId: string | null
+  /** Delete confirmation — отделен popup (различна форма от lock/mute: само reason, без duration), с explicit "потвърди" крачка срещу accidental single-click deletion. */
+  topicDeleteConfirm: { topicId: string; topicTitle: string; step: 'reason' | 'confirm' } | null
+  topicDeleteReason: string
+  topicDeleteBusy: boolean
+  topicDeleteErrorText: string | null
+  /** Report popup — обикновен потребител докладва тема. */
+  topicReportPopupOpen: boolean
+  topicReportReason: string
+  topicReportBusy: boolean
+  topicReportErrorText: string | null
+  topicReportSuccessToast: boolean
+  /** Admin reports queue — компактен popup panel (не отделен screen/route), отворен от mail dropdown-a, виж renderAdminTopicReportsPanel. */
+  adminTopicReportsPopupOpen: boolean
+  adminTopicReportsLoading: boolean
+  adminTopicReportsErrorText: string | null
+  adminTopicReports: TopicReportSnapshot[] | null
+  adminTopicReportsPendingCount: number
+  adminTopicReportsFilter: TopicReportStatus | null
+  adminTopicReportActionBusyId: string | null
   /**
    * Инкрементира се при всяко отваряне на profile popup чрез profileId (виж
    * onTopicMessageAuthorClick) — stale-response guard: ако потребителят
@@ -1208,6 +1317,36 @@ function createInitialState(): InternalLobbyFlowState {
     topicsVipClaimErrorText: null,
     topicsVipSeePlansMessageVisible: false,
     topicsInfoToast: null,
+    topicCreatePopupOpen: false,
+    topicCreateBusy: false,
+    topicCreateErrorText: null,
+    topicCreateTitleDraft: '',
+    topicCreatePendingRequestId: null,
+    topicsDirectorySubscribed: false,
+    activeTopicLock: null,
+    activeTopicViewerMute: null,
+    topicModerationActionPopup: null,
+    topicModerationActionDurationMs: null,
+    topicModerationActionReason: '',
+    topicModerationActionBusy: false,
+    topicModerationActionErrorText: null,
+    topicMuteStatusLoadingProfileId: null,
+    topicDeleteConfirm: null,
+    topicDeleteReason: '',
+    topicDeleteBusy: false,
+    topicDeleteErrorText: null,
+    topicReportPopupOpen: false,
+    topicReportReason: '',
+    topicReportBusy: false,
+    topicReportErrorText: null,
+    topicReportSuccessToast: false,
+    adminTopicReportsPopupOpen: false,
+    adminTopicReportsLoading: false,
+    adminTopicReportsErrorText: null,
+    adminTopicReports: null,
+    adminTopicReportsPendingCount: 0,
+    adminTopicReportsFilter: 'pending',
+    adminTopicReportActionBusyId: null,
     profilePopupRequestToken: 0,
     profilePopupTargetRole: null,
     profilePopupTargetRoleProfileId: null,
@@ -3067,6 +3206,35 @@ export function createLobbyFlowController(
       topicsVipClaimErrorText: state.topicsVipClaimErrorText,
       topicsVipSeePlansMessageVisible: state.topicsVipSeePlansMessageVisible,
       topicsInfoToast: state.topicsInfoToast,
+      topicCreatePopupOpen: state.topicCreatePopupOpen,
+      topicCreateBusy: state.topicCreateBusy,
+      topicCreateErrorText: state.topicCreateErrorText,
+      topicCreateTitleDraft: state.topicCreateTitleDraft,
+      activeTopicLock: state.activeTopicLock,
+      activeTopicViewerMute: state.activeTopicViewerMute,
+      topicModerationActionPopup: state.topicModerationActionPopup,
+      topicModerationActionDurationMs: state.topicModerationActionDurationMs,
+      topicModerationActionReason: state.topicModerationActionReason,
+      topicModerationActionBusy: state.topicModerationActionBusy,
+      topicModerationActionErrorText: state.topicModerationActionErrorText,
+      topicMuteStatusLoadingProfileId: state.topicMuteStatusLoadingProfileId,
+      topicDeleteConfirm: state.topicDeleteConfirm,
+      topicDeleteReason: state.topicDeleteReason,
+      topicDeleteBusy: state.topicDeleteBusy,
+      topicDeleteErrorText: state.topicDeleteErrorText,
+      topicReportPopupOpen: state.topicReportPopupOpen,
+      topicReportReason: state.topicReportReason,
+      topicReportBusy: state.topicReportBusy,
+      topicReportErrorText: state.topicReportErrorText,
+      topicReportSuccessToast: state.topicReportSuccessToast,
+      adminTopicReportsPopupOpen: state.adminTopicReportsPopupOpen,
+      adminTopicReportsLoading: state.adminTopicReportsLoading,
+      adminTopicReportsErrorText: state.adminTopicReportsErrorText,
+      adminTopicReports: state.adminTopicReports,
+      adminTopicReportsPendingCount: state.adminTopicReportsPendingCount,
+      adminTopicReportsFilter: state.adminTopicReportsFilter,
+      adminTopicReportActionBusyId: state.adminTopicReportActionBusyId,
+      isTopicModerator: isTopicModeratorAuthSession(options.getAuthSession?.() ?? null),
     }
 
     renderLobbyScreen(options.root, {
@@ -3275,6 +3443,15 @@ export function createLobbyFlowController(
       onTopicCreateClick: () => {
         handleTopicCreateClick()
       },
+      onTopicCreatePopupClose: () => {
+        closeTopicCreatePopup()
+      },
+      onTopicCreateTitleInput: (value) => {
+        updateTopicCreateTitleDraft(value)
+      },
+      onTopicCreateSubmit: () => {
+        submitTopicCreate()
+      },
       onTopicsBackToGeneral: () => {
         backToGeneralTopic()
       },
@@ -3351,6 +3528,73 @@ export function createLobbyFlowController(
       },
       onTopicsVipPopupSeePlans: () => {
         showTopicsVipPlansInertMessage()
+      },
+      // ─── Topics Moderation (Етап 4) ────────────────────────────────────
+      onTopicLockClick: (topicId, topicTitle) => {
+        openTopicLockPopup(topicId, topicTitle)
+      },
+      onTopicUnlockClick: (topicId) => {
+        void unlockActiveTopic(topicId)
+      },
+      onTopicMuteClick: (topicId, targetProfileId, targetDisplayName) => {
+        void openTopicMuteMenuForAuthor(topicId, targetProfileId, targetDisplayName)
+      },
+      onTopicUnmuteClick: (topicId, targetProfileId) => {
+        void unmuteProfileInActiveTopic(topicId, targetProfileId)
+      },
+      onTopicModerationActionPopupClose: () => {
+        closeTopicModerationActionPopup()
+      },
+      onTopicModerationActionDurationChange: (durationMs) => {
+        updateTopicModerationActionDuration(durationMs)
+      },
+      onTopicModerationActionReasonChange: (reason) => {
+        updateTopicModerationActionReason(reason)
+      },
+      onTopicModerationActionSubmit: () => {
+        void submitTopicModerationAction()
+      },
+      onTopicDeleteClick: (topicId, topicTitle) => {
+        openTopicDeleteConfirm(topicId, topicTitle)
+      },
+      onTopicDeleteConfirmClose: () => {
+        closeTopicDeleteConfirm()
+      },
+      onTopicDeleteReasonChange: (reason) => {
+        updateTopicDeleteReason(reason)
+      },
+      onTopicDeleteAdvance: () => {
+        advanceTopicDeleteConfirm()
+      },
+      onTopicDeleteConfirmSubmit: () => {
+        void confirmTopicDelete()
+      },
+      onTopicReportClick: () => {
+        openTopicReportPopup()
+      },
+      onTopicReportPopupClose: () => {
+        closeTopicReportPopup()
+      },
+      onTopicReportReasonChange: (reason) => {
+        updateTopicReportReason(reason)
+      },
+      onTopicReportSubmit: () => {
+        void submitTopicReport()
+      },
+      onAdminTopicReportsFilterChange: (status) => {
+        void loadAdminTopicReports(status)
+      },
+      onAdminTopicReportReview: (reportId, status) => {
+        void reviewAdminTopicReport(reportId, status)
+      },
+      onAdminTopicReportsOpen: () => {
+        state.adminTopicReportsPopupOpen = true
+        render()
+        void loadAdminTopicReports('pending')
+      },
+      onAdminTopicReportsClose: () => {
+        state.adminTopicReportsPopupOpen = false
+        render()
       },
       onTopicMessageAuthorClick: (profileId, displayName) => {
         const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId
@@ -4739,6 +4983,312 @@ export function createLobbyFlowController(
     return messages.reduce((max, m) => Math.max(max, m.seq), 0)
   }
 
+  // ─── Topics Moderation (Етап 4) ──────────────────────────────────────────
+  //
+  // isLocked е computed CLIENT-SIDE тук САМО за display purposes (banner
+  // text/composer disabled look) — реалната authoritative проверка е винаги
+  // server-side (topicModerationStore.getTopicLockSnapshot в index.ts).
+  // Client timer НЕ управлява реалното право на писане (брифа т.2) — ако
+  // client clock-ът е разминат, composer-ът може накратко да изглежда
+  // грешно, но submit винаги минава през server проверка.
+  function deriveTopicLockSnapshot(topic: TopicSnapshot): TopicLockSnapshot | null {
+    if (topic.lockedUntil === null) {
+      return { isLocked: false, lockedUntil: null, lockedByAccountId: null, lockedReason: null }
+    }
+    return {
+      isLocked: new Date(topic.lockedUntil).getTime() > Date.now(),
+      lockedUntil: topic.lockedUntil,
+      lockedByAccountId: null,
+      lockedReason: topic.lockedReason,
+    }
+  }
+
+  function openTopicLockPopup(topicId: string, topicTitle: string): void {
+    state.topicModerationActionPopup = { kind: 'lock', topicId, topicTitle }
+    state.topicModerationActionDurationMs = null
+    state.topicModerationActionReason = ''
+    state.topicModerationActionErrorText = null
+    render()
+  }
+
+  // Lazy-fetch (не batch-hydrate-нат в message list-а, виж коментара в
+  // renderTopicsScreen.ts data-topic-mute-toggle) — модераторският "⚙" клик
+  // до автор първо проверява active mute статус, после решава дали да
+  // отвори Mute (duration+reason) или Unmute (прост confirm) popup-а.
+  async function openTopicMuteMenuForAuthor(topicId: string, targetProfileId: string, targetDisplayName: string): Promise<void> {
+    if (state.topicMuteStatusLoadingProfileId !== null) return
+    state.topicMuteStatusLoadingProfileId = targetProfileId
+    render()
+
+    const result = await options.onTopicMuteStatusLoad?.(topicId, targetProfileId)
+    state.topicMuteStatusLoadingProfileId = null
+
+    if (!result || !result.ok) {
+      render()
+      return
+    }
+
+    if (result.mute.isMuted) {
+      state.topicModerationActionPopup = { kind: 'unmute', topicId, targetProfileId, targetDisplayName, mutedUntil: result.mute.mutedUntil }
+    } else {
+      state.topicModerationActionPopup = { kind: 'mute', topicId, targetProfileId, targetDisplayName }
+      state.topicModerationActionDurationMs = null
+      state.topicModerationActionReason = ''
+      state.topicModerationActionErrorText = null
+    }
+    render()
+  }
+
+  function closeTopicModerationActionPopup(): void {
+    if (state.topicModerationActionBusy) return
+    state.topicModerationActionPopup = null
+    render()
+  }
+
+  function updateTopicModerationActionDuration(durationMs: number): void {
+    state.topicModerationActionDurationMs = durationMs
+  }
+
+  function updateTopicModerationActionReason(reason: string): void {
+    state.topicModerationActionReason = reason
+  }
+
+  async function submitTopicModerationAction(): Promise<void> {
+    const pending = state.topicModerationActionPopup
+    if (!pending || state.topicModerationActionBusy) return
+
+    if (pending.kind === 'unmute') {
+      state.topicModerationActionBusy = true
+      render()
+      const result = await options.onTopicUnmuteProfile?.(pending.topicId, pending.targetProfileId)
+      state.topicModerationActionBusy = false
+      if (!result || !result.ok) {
+        state.topicModerationActionErrorText = result?.message ?? 'Грешка при отглушаване.'
+        render()
+        return
+      }
+      state.topicModerationActionPopup = null
+      render()
+      return
+    }
+
+    const reason = state.topicModerationActionReason.trim()
+    if (reason.length === 0) {
+      state.topicModerationActionErrorText = 'Моля, въведи причина.'
+      render()
+      return
+    }
+    const durationMs = state.topicModerationActionDurationMs
+    if (durationMs === null) {
+      state.topicModerationActionErrorText = 'Моля, избери продължителност.'
+      render()
+      return
+    }
+
+    state.topicModerationActionBusy = true
+    state.topicModerationActionErrorText = null
+    render()
+
+    if (pending.kind === 'lock') {
+      const result = await options.onTopicLock?.(pending.topicId, reason, durationMs)
+      state.topicModerationActionBusy = false
+      if (!result || !result.ok) {
+        state.topicModerationActionErrorText = result?.message ?? 'Грешка при заключване.'
+        render()
+        return
+      }
+      if (state.activeTopicId === pending.topicId) {
+        state.activeTopicLock = result.lock
+      }
+      state.topicModerationActionPopup = null
+      render()
+      return
+    }
+
+    // kind === 'mute'
+    const result = await options.onTopicMuteProfile?.(pending.topicId, pending.targetProfileId, reason, durationMs)
+    state.topicModerationActionBusy = false
+    if (!result || !result.ok) {
+      state.topicModerationActionErrorText = result?.message ?? 'Грешка при заглушаване.'
+      render()
+      return
+    }
+    state.topicModerationActionPopup = null
+    render()
+  }
+
+  async function unlockActiveTopic(topicId: string): Promise<void> {
+    const result = await options.onTopicUnlock?.(topicId)
+    if (result && result.ok && state.activeTopicId === topicId) {
+      state.activeTopicLock = result.lock
+      render()
+    }
+  }
+
+  async function unmuteProfileInActiveTopic(topicId: string, profileId: string): Promise<void> {
+    await options.onTopicUnmuteProfile?.(topicId, profileId)
+    // Realtime topic_mute_state_changed push (target-only) обновява
+    // state.activeTopicViewerMute за самия заглушен потребител — модераторът,
+    // който изпълнява unmute-а, няма нужда от локален state тук (той не е
+    // muted), само действието трябва да достигне до сървъра.
+  }
+
+  function openTopicDeleteConfirm(topicId: string, topicTitle: string): void {
+    state.topicDeleteConfirm = { topicId, topicTitle, step: 'reason' }
+    state.topicDeleteReason = ''
+    state.topicDeleteErrorText = null
+    render()
+  }
+
+  function closeTopicDeleteConfirm(): void {
+    if (state.topicDeleteBusy) return
+    state.topicDeleteConfirm = null
+    render()
+  }
+
+  function updateTopicDeleteReason(reason: string): void {
+    state.topicDeleteReason = reason
+  }
+
+  // Двустъпков confirm (защита от accidental single-click deletion, брифа
+  // т.5) — 'reason' стъпката пази причината и минава към 'confirm', 'confirm'
+  // стъпката реално изпраща DELETE заявката.
+  function advanceTopicDeleteConfirm(): void {
+    const pending = state.topicDeleteConfirm
+    if (!pending) return
+    const reason = state.topicDeleteReason.trim()
+    if (reason.length === 0) {
+      state.topicDeleteErrorText = 'Моля, въведи причина.'
+      render()
+      return
+    }
+    state.topicDeleteErrorText = null
+    state.topicDeleteConfirm = { ...pending, step: 'confirm' }
+    render()
+  }
+
+  async function confirmTopicDelete(): Promise<void> {
+    const pending = state.topicDeleteConfirm
+    if (!pending || state.topicDeleteBusy) return
+
+    state.topicDeleteBusy = true
+    state.topicDeleteErrorText = null
+    render()
+
+    const result = await options.onTopicDelete?.(pending.topicId, state.topicDeleteReason.trim())
+    state.topicDeleteBusy = false
+
+    if (!result || !result.ok) {
+      state.topicDeleteErrorText = result?.message ?? 'Грешка при изтриване на темата.'
+      render()
+      return
+    }
+
+    state.topicDeleteConfirm = null
+    render()
+    // Realtime topic_deleted push (публичен broadcast) ще прибере ВСИЧКИ
+    // subscribers (вкл. самия actor, ако е subscribed) обратно в Topics
+    // directory — виж handleServerMessage. Не дублираме навигацията тук.
+  }
+
+  function openTopicReportPopup(): void {
+    state.topicReportPopupOpen = true
+    state.topicReportReason = ''
+    state.topicReportErrorText = null
+    render()
+  }
+
+  function closeTopicReportPopup(): void {
+    if (state.topicReportBusy) return
+    state.topicReportPopupOpen = false
+    render()
+  }
+
+  function updateTopicReportReason(reason: string): void {
+    state.topicReportReason = reason
+  }
+
+  async function submitTopicReport(): Promise<void> {
+    const topicId = state.activeTopicId
+    if (topicId === null || state.topicReportBusy) return
+
+    const reason = state.topicReportReason.trim()
+    if (reason.length === 0) {
+      state.topicReportErrorText = 'Моля, въведи причина.'
+      render()
+      return
+    }
+
+    state.topicReportBusy = true
+    state.topicReportErrorText = null
+    render()
+
+    const result = await options.onTopicReport?.(topicId, reason)
+    state.topicReportBusy = false
+
+    if (!result || !result.ok) {
+      state.topicReportErrorText = result?.code === 'topic_report_duplicate'
+        ? 'Вече докладва тази тема наскоро.'
+        : (result?.message ?? 'Грешка при докладването.')
+      render()
+      return
+    }
+
+    state.topicReportPopupOpen = false
+    state.topicReportSuccessToast = true
+    render()
+    setTimeout(() => {
+      state.topicReportSuccessToast = false
+      render()
+    }, 3000)
+  }
+
+  async function loadAdminTopicReports(status: TopicReportStatus | null): Promise<void> {
+    state.adminTopicReportsLoading = true
+    state.adminTopicReportsErrorText = null
+    state.adminTopicReportsFilter = status
+    render()
+
+    const result = await options.onTopicReportsLoad?.(status)
+
+    state.adminTopicReportsLoading = false
+    if (!result || !result.ok) {
+      state.adminTopicReportsErrorText = result?.message ?? 'Грешка при зареждане на докладите.'
+      render()
+      return
+    }
+
+    state.adminTopicReports = result.reports
+    state.adminTopicReportsPendingCount = result.pendingCount
+    render()
+  }
+
+  async function reviewAdminTopicReport(reportId: string, status: 'reviewed' | 'dismissed'): Promise<void> {
+    if (state.adminTopicReportActionBusyId !== null) return
+    state.adminTopicReportActionBusyId = reportId
+    render()
+
+    const result = await options.onTopicReportReview?.(reportId, status)
+    state.adminTopicReportActionBusyId = null
+
+    if (!result || !result.ok) {
+      render()
+      return
+    }
+
+    // Обновяваме локалния списък inline (не re-fetch) — reviewed report
+    // излиза от 'pending' филтъра, ако е активен.
+    if (state.adminTopicReports) {
+      if (state.adminTopicReportsFilter === 'pending') {
+        state.adminTopicReports = state.adminTopicReports.filter((r) => r.reportId !== reportId)
+      } else {
+        state.adminTopicReports = state.adminTopicReports.map((r) => (r.reportId === reportId ? result.report : r))
+      }
+    }
+    state.adminTopicReportsPendingCount = Math.max(0, state.adminTopicReportsPendingCount - (result.report.status !== 'pending' ? 1 : 0))
+    render()
+  }
+
   // A) Initial open / topic switch — НЕ reuse-ва стар scroll anchor, зарежда
   // history за новата тема, viewport отива до дъното (последните съобщения)
   // след успешен load. Вика се от showTopicsDirectory() и openTopic().
@@ -4841,12 +5391,28 @@ export function createLobbyFlowController(
     state.topics = result.topics
     state.topicsErrorText = null
 
+    // Directory-wide realtime interest — subscribe-ваме СЛЕД REST loadTopics()
+    // да е приключил успешно (established gap-closing convention, mirror на
+    // subscribeToTopicMessagesGapClosing по-долу), за да не пропуснем
+    // теми създадени В прозореца между snapshot-а и subscribe-а — те просто
+    // ще пристигнат и през REST snapshot-а (ако insert-нати преди loadTopics
+    // отговори), и през WS broadcast (ако insert-нати след), upsert-ът в
+    // handleTopicCreatedBroadcast е idempotent за двата случая.
+    subscribeToTopicsDirectory()
+
     // При вход в "Теми" отваряме "Общ чат" по подразбиране (т.2/8 от брифа).
     const generalTopic = result.topics.find((t) => t.isGeneral) ?? result.topics[0] ?? null
     state.activeTopicId = generalTopic?.topicId ?? null
     state.topicMessages = null
     state.topicMessagesHasMore = false
     state.topicMessagesOldestSeq = null
+    // Lock state derive-нат directno от TopicSnapshot (вече носи
+    // lockedUntil/lockedReason от REST list-а) — не отделен REST call.
+    // Mute state (per-viewer, per-topic) НЕ идва batch-нато оттук —
+    // reset-ва се при всеки topic switch и се попълва само от realtime
+    // topic_mute_state_changed push (target-only), виж handleServerMessage.
+    state.activeTopicLock = generalTopic ? deriveTopicLockSnapshot(generalTopic) : null
+    state.activeTopicViewerMute = null
     render()
 
     if (state.activeTopicId) {
@@ -4866,6 +5432,9 @@ export function createLobbyFlowController(
     state.topicMessagesOldestSeq = null
     state.topicMessagesErrorText = null
     state.topicOlderMessagesLoading = false
+    const switchedTopic = (state.topics ?? []).find((t) => t.topicId === topicId) ?? null
+    state.activeTopicLock = switchedTopic ? deriveTopicLockSnapshot(switchedTopic) : null
+    state.activeTopicViewerMute = null
     render()
     // loadTopicMessagesForActiveTopic инкрементира generation token-а
     // СИНХРОННО (преди първия await) — това "убива" всяка still-pending
@@ -5187,6 +5756,16 @@ export function createLobbyFlowController(
     subscribeToTopicMessagesGapClosing(state.activeTopicId)
   }
 
+  /** WS reconnect hook за directory-wide subscription-а (Custom Topic Creation) — mirror на forceTopicMessagesResubscribeIfOnTopicsScreen, извиква се от main.ts на всяко WS onOpen. */
+  function forceTopicsDirectoryResubscribeIfOnTopicsScreen(): void {
+    if (state.currentScreen !== 'topics') return
+    // Нова WS connection = server-side subscriber set-ът (keyed по
+    // connection.id) вече не съдържа тази връзка — reset локалния флаг, за
+    // да не блокира subscribeToTopicsDirectory guard-а ("вече subscribed").
+    state.topicsDirectorySubscribed = false
+    subscribeToTopicsDirectory()
+  }
+
   // ─── VIP gate + launch gift (Етап 2) ────────────────────────────────────
 
   async function ensureTopicsVipGateLoaded(): Promise<void> {
@@ -5231,29 +5810,116 @@ export function createLobbyFlowController(
     render()
   }
 
-  // ─── UI polish pass: "ще бъде налично скоро" toast (create-topic/like/reply) ──
-  // Огледално на subadminActionToast модела (renderLobbyScreen.ts
-  // renderSubadminActionToast) — generation-token-guarded auto-clear, за да
-  // не изтрие по-стар таймер по-нов toast, ако потребителят кликне бързо
-  // няколко пъти подред. Тези функции НЕ пипат realtime/VIP/send
-  // архитектурата от Етап 2 — само UI feedback за все още неимплементирани
-  // features (create-topic, likes, replies).
-  let topicsInfoToastGeneration = 0
+  // ─── Create Topic popup (Custom Topic Creation) ──────────────────────────
+  // Lifecycle mirror на tournament create popup-а (openTournamentCreatePopup/
+  // closeTournamentCreatePopup/submitTournamentCreate), но fire-and-forget
+  // (WS push-driven success/error, не await-нат Promise) — mirror на
+  // submitTopicComposerMessage flow-а вместо HTTP request/response стила.
 
-  function showTopicsInfoToast(text: string): void {
-    state.topicsInfoToast = { text }
+  function openTopicCreatePopup(): void {
+    if (state.topicCreateBusy) return
+    state.topicCreatePopupOpen = true
+    state.topicCreateErrorText = null
+    state.topicCreateTitleDraft = ''
+    render()
+  }
+
+  function closeTopicCreatePopup(): void {
+    if (state.topicCreateBusy) return
+    state.topicCreatePopupOpen = false
+    state.topicCreateErrorText = null
+    render()
+  }
+
+  function updateTopicCreateTitleDraft(value: string): void {
+    state.topicCreateTitleDraft = value
+    // Грешката изчезва при следваща промяна (established UX convention,
+    // mirror на topicComposerErrorTextByTopicId clearing-a при input).
+    state.topicCreateErrorText = null
+    render()
+  }
+
+  function submitTopicCreate(): void {
+    const trimmed = state.topicCreateTitleDraft.trim()
+    if (trimmed.length === 0) return
+    if (state.topicCreateBusy) return // established idempotency guard
+
+    const requestId = `topic-create-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    state.topicCreatePendingRequestId = requestId
+    state.topicCreateBusy = true
+    state.topicCreateErrorText = null
     render()
 
-    const toastGeneration = ++topicsInfoToastGeneration
-    setTimeout(() => {
-      if (toastGeneration !== topicsInfoToastGeneration) return
-      state.topicsInfoToast = null
-      render()
-    }, 3500)
+    // Fire-and-forget — БЕЗ await. Резултатът пристига през WS
+    // topic_created/topic_create_error push, dispatch-нат в
+    // handleServerMessage (виж handleTopicCreateSuccess/handleTopicCreateError).
+    options.onTopicCreateSubmit?.(trimmed, requestId)
+  }
+
+  function upsertTopicIntoDirectoryState(topic: TopicSnapshot): void {
+    if (state.topics === null) {
+      state.topics = [topic]
+      return
+    }
+    // Idempotent upsert по topicId — гарантира, че success-response
+    // (originator) и directory broadcast (edge-case near-simultaneous
+    // timing) никога не създават duplicate chip (spec изисква точно това).
+    if (state.topics.some((t) => t.topicId === topic.topicId)) {
+      return
+    }
+    // Append в края — сървърът вече праща в established created_at
+    // ascending ред, новата тема е винаги "най-новата" (виж
+    // topicStore.listActiveTopics ordering-а), клиентът не пре-сортира локално.
+    state.topics = [...state.topics, topic]
+  }
+
+  function handleTopicCreateSuccess(topic: TopicSnapshot): void {
+    state.topicCreateBusy = false
+    state.topicCreatePendingRequestId = null
+    state.topicCreatePopupOpen = false
+    state.topicCreateErrorText = null
+    state.topicCreateTitleDraft = ''
+    upsertTopicIntoDirectoryState(topic)
+    // Auto-open новата тема (spec т.11 — предпочитано поведение, безопасно
+    // тук защото сме гарантирано в Topics директорията в момента на submit).
+    openTopic(topic.topicId)
+  }
+
+  function handleTopicCreateError(message: string): void {
+    state.topicCreateBusy = false
+    state.topicCreatePendingRequestId = null
+    // Draft НЕ се чисти при грешка (established convention, mirror на topic
+    // composer error handling) — popup остава отворен.
+    state.topicCreateErrorText = message
+    render()
+  }
+
+  function handleTopicCreatedBroadcast(topic: TopicSnapshot): void {
+    upsertTopicIntoDirectoryState(topic)
+    render()
+  }
+
+  function subscribeToTopicsDirectory(): void {
+    if (state.topicsDirectorySubscribed) return
+    state.topicsDirectorySubscribed = true
+    options.onTopicsDirectorySubscribe?.()
+  }
+
+  function unsubscribeFromTopicsDirectory(): void {
+    if (!state.topicsDirectorySubscribed) return
+    state.topicsDirectorySubscribed = false
+    options.onTopicsDirectoryUnsubscribe?.()
   }
 
   function handleTopicCreateClick(): void {
-    showTopicsInfoToast('Създаването на теми ще бъде налично скоро.')
+    // Reuse на established composer non-VIP tap логиката (виж
+    // handleTopicComposerNonVipTap) — server е source of truth, "+" клик е
+    // само UX gating, не security boundary.
+    if (!(state.topicsVipGate?.isActive ?? false)) {
+      openTopicsVipPopup()
+      return
+    }
+    openTopicCreatePopup()
   }
 
   function showTopicsVipPlansInertMessage(): void {
@@ -9097,6 +9763,10 @@ export function createLobbyFlowController(
     // да unsubscribe-ва, независимо кой път е довел дотам.
     if (state.currentScreen !== 'topics') {
       unsubscribeFromCurrentTopicMessages()
+      // Симетрично teardown-only reconcile за directory-wide subscription
+      // (Custom Topic Creation) — setup е explicit в showTopicsDirectory(),
+      // но напускане на "Теми" отвсякъде трябва винаги да unsubscribe-ва.
+      unsubscribeFromTopicsDirectory()
     }
     if (state.authModalMode !== 'closed') {
       if (state.authSubmitInFlight) {
@@ -10173,6 +10843,14 @@ export function createLobbyFlowController(
         state.topicsVipPopupOpen = true
       }
 
+      // Пропуснат mute realtime push (напр. mute-нат докато composer-ът е
+      // бил отворен, но преди target-only WS push-а да пристигне) — send
+      // опитът самия открива restriction-a. Обновяваме banner state-а
+      // веднага от error response-а, не чакаме отделен push.
+      if (message.code === 'topic_muted' && message.topicId === state.activeTopicId) {
+        state.activeTopicViewerMute = { isMuted: true, mutedUntil: message.mutedUntil ?? null, mutedByAccountId: null, reason: null }
+      }
+
       render()
       return true
     }
@@ -10237,6 +10915,10 @@ export function createLobbyFlowController(
         state.topicsVipPopupOpen = true
       }
 
+      if (message.code === 'topic_muted' && message.topicId === state.activeTopicId) {
+        state.activeTopicViewerMute = { isMuted: true, mutedUntil: message.mutedUntil ?? null, mutedByAccountId: null, reason: null }
+      }
+
       render()
       return true
     }
@@ -10290,6 +10972,83 @@ export function createLobbyFlowController(
       for (const [messageId, pendingRequestId] of Object.entries(state.topicMessageLikePendingRequestIdById)) {
         if (pendingRequestId === message.requestId) {
           state.topicMessageLikePendingRequestIdById[messageId] = null
+        }
+      }
+      render()
+      return true
+    }
+
+    if (message.type === 'topic_created') {
+      if (message.requestId !== undefined && message.requestId === state.topicCreatePendingRequestId) {
+        handleTopicCreateSuccess(message.topic)
+        return true
+      }
+      // Directory broadcast от друг user (или от собствения ни create, ако
+      // near-simultaneous broadcast+success timing — виж index.ts коментара,
+      // на практика не се случва защото originator-ът е skip-нат от
+      // broadcast-а, но upsert-ът тук е idempotent defense-in-depth).
+      handleTopicCreatedBroadcast(message.topic)
+      return true
+    }
+
+    if (message.type === 'topic_create_error') {
+      if (message.requestId === state.topicCreatePendingRequestId) {
+        handleTopicCreateError(message.message)
+      }
+      // requestId mismatch → stale/foreign response, игнорирай мълчаливо
+      // (established convention, mirror на topic_message_error handling-а).
+      return true
+    }
+
+    // ─── Topics Moderation realtime (Етап 4) ───────────────────────────────
+
+    if (message.type === 'topic_lock_state_changed') {
+      // Public broadcast към ВСИЧКИ subscribers — composer/banner state се
+      // обновява без refresh (брифа т.10), независимо кой е задействал lock/
+      // unlock-а. Обновяваме и topics list snapshot-а (за случая, в който
+      // потребителят се върне в directory-то, без re-fetch).
+      if (state.topics) {
+        state.topics = state.topics.map((t) => t.topicId === message.topicId
+          ? { ...t, status: message.isLocked ? 'locked' : t.status === 'locked' ? 'active' : t.status, lockedUntil: message.lockedUntil, lockedReason: message.lockedReason }
+          : t)
+      }
+      if (message.topicId === state.activeTopicId) {
+        state.activeTopicLock = { isLocked: message.isLocked, lockedUntil: message.lockedUntil, lockedByAccountId: null, lockedReason: message.lockedReason }
+      }
+      render()
+      return true
+    }
+
+    if (message.type === 'topic_mute_state_changed') {
+      // Target-only push (виж index.ts notifyProfileOfTopicMuteStateChange)
+      // — само СОБСТВЕНИЯТ browser на заглушения/отглушения потребител
+      // получава това съобщение, значи винаги важи за viewer-а самия.
+      if (message.topicId === state.activeTopicId) {
+        state.activeTopicViewerMute = { isMuted: message.isMuted, mutedUntil: message.mutedUntil, mutedByAccountId: null, reason: message.reason }
+      }
+      render()
+      return true
+    }
+
+    if (message.type === 'topic_deleted') {
+      // Public broadcast — subscribed клиенти се прибират безопасно в Topics
+      // directory (брифа т.10: "без crash/stale subscription"). Маха темата
+      // от локалния списък directno (сървърът вече не я връща от
+      // listActiveTopics, но re-fetch не е нужен тук).
+      if (state.topics) {
+        state.topics = state.topics.filter((t) => t.topicId !== message.topicId)
+      }
+      if (message.topicId === state.activeTopicId) {
+        state.activeTopicId = null
+        state.topicMessages = null
+        state.activeTopicLock = null
+        state.activeTopicViewerMute = null
+        state.topicsErrorText = 'Темата беше премахната от модератор.'
+        // subscription cleanup-ът вече е направен server-side (виж
+        // broadcastTopicDeletedToLocalSubscribers) — тук само local state.
+        const fallbackTopic = (state.topics ?? []).find((t) => t.isGeneral) ?? state.topics?.[0] ?? null
+        if (fallbackTopic) {
+          openTopic(fallbackTopic.topicId)
         }
       }
       render()
@@ -10881,6 +11640,7 @@ export function createLobbyFlowController(
     suspendLobbyChatForActiveRoom,
     forceLobbyChatResubscribeIfOnLobbyScreen,
     forceTopicMessagesResubscribeIfOnTopicsScreen,
+    forceTopicsDirectoryResubscribeIfOnTopicsScreen,
     resyncPrivateRoomMembership,
     joinPrivateRoom: handlePrivateRoomJoin,
     updateLobbyChatDraft,

@@ -626,6 +626,29 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       }
     }
 
+    if (parsed.type === 'create_topic') {
+      // Само структурна проверка — семантичните правила (title validation,
+      // VIP, rate limit, duplicate) са в index.ts, mirror на send_topic_message.
+      if (typeof parsed.title !== 'string') return null
+
+      const requestId = normalizeRequiredText(parsed.requestId)
+      if (requestId === null) return null
+
+      return {
+        type: 'create_topic',
+        title: parsed.title,
+        requestId: requestId.slice(0, 100),
+      }
+    }
+
+    if (parsed.type === 'subscribe_topics_directory') {
+      return { type: 'subscribe_topics_directory' }
+    }
+
+    if (parsed.type === 'unsubscribe_topics_directory') {
+      return { type: 'unsubscribe_topics_directory' }
+    }
+
     if (parsed.type === 'respond_private_room_invite') {
       const inviteId = normalizeRequiredText(parsed.inviteId)
 

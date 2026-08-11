@@ -40,6 +40,7 @@ const serverRoot = resolve(__dirname, '..')
 const topicsMigrationPath = resolve(serverRoot, 'database/migrations/20260810_002_create_topics_and_messages.sql')
 const likesMigrationPath = resolve(serverRoot, 'database/migrations/20260811_001_create_topic_message_likes.sql')
 const attachmentsMigrationPath = resolve(serverRoot, 'database/migrations/20260811_002_create_topic_message_attachments.sql')
+const moderationMigrationPath = resolve(serverRoot, 'database/migrations/20260811_003_create_topic_moderation.sql')
 
 // ─── Брояч ───────────────────────────────────────────────────────────────
 
@@ -94,6 +95,15 @@ function buildBaseSchema(db: DatabaseSync): void {
       profile_id TEXT PRIMARY KEY,
       display_name TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `)
+  // Минимален mock — само за да удовлетвори FK референциите на
+  // topic_moderation_audit_log/topics.locked_by_account_id и т.н. (Етап 4
+  // moderation migration). Реалната accounts таблица (roles, password hash)
+  // не е нужна за topicStore/listActiveTopics тестовете тук.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS accounts (
+      account_id TEXT PRIMARY KEY
     );
   `)
 }
@@ -237,6 +247,7 @@ await withTempDir(async (dir) => {
   const db = new DatabaseSync(dbPath, { open: true })
   buildBaseSchema(db)
   await applyMigrationFile(db, topicsMigrationPath)
+  await applyMigrationFile(db, moderationMigrationPath)
 
   insertTopic(db, { topicId: 'topic-a', slug: 'belot', title: 'Белот', sortOrder: 10 })
   insertTopic(db, { topicId: 'topic-b', slug: 'tournaments', title: 'Турнири', sortOrder: 20 })
@@ -245,22 +256,30 @@ await withTempDir(async (dir) => {
 
   const store = await createTopicStore(dbPath)
 
-  await check('[3] listActiveTopics връща само status=active записи', () => {
+  // Етап 4 (Topics moderation) поправка: 'locked' теми ОСТАВАТ видими в
+  // списъка (само писането е блокирано, четенето не — виж брифа т.3: "МОЖЕ
+  // да се отвори темата, да се четат старите съобщения"). Само 'removed' се
+  // изключва. Старото поведение (locked скрито от списъка) беше архитектурен
+  // пропуск преди moderation stage-а, поправен тук explicit.
+  await check('[3] listActiveTopics връща active И locked, но НЕ removed записи', () => {
     const topics = store.listActiveTopics()
     const slugs = topics.map((t) => t.slug).sort()
     assertEqual(
       slugs.join(','),
-      ['general', 'belot', 'tournaments'].sort().join(','),
-      'locked/removed теми не трябва да се връщат',
+      ['general', 'belot', 'tournaments', 'locked-one'].sort().join(','),
+      'locked темата трябва да се вижда (само writing е блокиран), removed не трябва да се връща',
     )
   })
 
   await check('[4] listActiveTopics подрежда по sort_order, после created_at', () => {
     const topics = store.listActiveTopics()
-    // general е seed-нат с sort_order=0 → трябва да е първи.
+    // general е seed-нат с sort_order=0 → трябва да е първи. locked-one
+    // (sort_order=5) вече се показва (Етап 4 поправка по-горе) — пада между
+    // general(0) и belot(10).
     assertEqual(topics[0]!.slug, 'general', 'general (sort_order=0) трябва да е първи')
-    assertEqual(topics[1]!.slug, 'belot', 'belot (sort_order=10) трябва да е втори')
-    assertEqual(topics[2]!.slug, 'tournaments', 'tournaments (sort_order=20) трябва да е трети')
+    assertEqual(topics[1]!.slug, 'locked-one', 'locked-one (sort_order=5) трябва да е втори')
+    assertEqual(topics[2]!.slug, 'belot', 'belot (sort_order=10) трябва да е трети')
+    assertEqual(topics[3]!.slug, 'tournaments', 'tournaments (sort_order=20) трябва да е четвърти')
   })
 
   await check('[5] getTopicById за съществуваща тема връща коректен snapshot', () => {

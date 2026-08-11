@@ -314,11 +314,11 @@ async function collectWsMessages(ws: WebSocket, durationMs: number): Promise<Any
 
 // ─── Topics-специфични helpers ──────────────────────────────────────────────
 
-function insertTopic(db: DatabaseSync, input: { topicId: string; slug: string; title: string; status?: string }): void {
+function insertTopic(db: DatabaseSync, input: { topicId: string; slug: string; title: string; status?: string; lockedUntil?: string }): void {
   db.prepare(`
-    INSERT INTO topics (topic_id, slug, title, is_general, created_by_profile_id, status, sort_order)
-    VALUES (?, ?, ?, 0, NULL, ?, 100);
-  `).run(input.topicId, input.slug, input.title, input.status ?? 'active')
+    INSERT INTO topics (topic_id, slug, title, is_general, created_by_profile_id, status, sort_order, locked_until)
+    VALUES (?, ?, ?, 0, NULL, ?, 100, ?);
+  `).run(input.topicId, input.slug, input.title, input.status ?? 'active', input.lockedUntil ?? null)
 }
 
 function seedOldTopicMessage(db: DatabaseSync, input: { topicId: string; senderProfileId: string; senderDisplayName: string; body: string }): number {
@@ -370,7 +370,12 @@ try {
   const db = new DatabaseSync(isoA.dbFile, { open: true, enableForeignKeyConstraints: true })
   insertTopic(db, { topicId: 'topic-a-active', slug: 'a-active', title: 'Активна тема' })
   insertTopic(db, { topicId: 'topic-a-active-2', slug: 'a-active-2', title: 'Втора активна тема' })
-  insertTopic(db, { topicId: 'topic-a-locked', slug: 'a-locked', title: 'Заключена тема', status: 'locked' })
+  // Temporary lock (Етап 4) — locked_until в бъдещето, огледално на реален
+  // topicModerationStore.lockTopic() резултат (виж checkTopicModeration.ts
+  // за store-level теста), не само static status enum (иначе новата
+  // computed isLocked проверка в index.ts би върнала false — виж
+  // getTopicLockSnapshot).
+  insertTopic(db, { topicId: 'topic-a-locked', slug: 'a-locked', title: 'Заключена тема', status: 'locked', lockedUntil: new Date(Date.now() + 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ') })
   insertTopic(db, { topicId: 'topic-a-removed', slug: 'a-removed', title: 'Премахната тема', status: 'removed' })
   db.close()
 

@@ -71,6 +71,25 @@ export function isLobbyChatModeratorSession(
   )
 }
 
+/**
+ * Topics moderation достъп (lock/unlock/mute/unmute/delete тема) —
+ * admin/subadmin/pika_team/top_chat_admin. Изрично БЕЗ chat_admin (за
+ * разлика от isLobbyChatModeratorSession) — chat_admin правото е тясно
+ * scoped само до общия лайв чат в лобито, Topics moderation е отделен
+ * permission set (Топикс moderation брифа: "Не разширявай автоматично
+ * moderator permissions към други роли").
+ */
+export function isTopicModeratorSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'subadmin'
+    || session.account.role === 'pika_team'
+    || session.account.role === 'top_chat_admin'
+  )
+}
+
 export type ElevatedRole = 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin'
 
 export type SubadminRoleChangeErrorCode =

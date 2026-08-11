@@ -781,6 +781,17 @@ export type ClientMessage =
       messageId: string
       requestId: string
     }
+  | {
+      type: 'create_topic'
+      title: string
+      requestId: string
+    }
+  | {
+      type: 'subscribe_topics_directory'
+    }
+  | {
+      type: 'unsubscribe_topics_directory'
+    }
 
 export type PrivateRoomMemberSnapshot = {
   profileId: string | null
@@ -1521,6 +1532,9 @@ export type TopicSnapshot = {
   status: 'active' | 'locked' | 'removed'
   sortOrder: number
   createdAt: string
+  /** Moderation (Етап 4) — null докато темата никога не е била заключвана. Server-authoritative expiry, виж topicModerationStore.ts. */
+  lockedUntil: string | null
+  lockedReason: string | null
 }
 
 /** Огледално на server-side TopicAttachmentSnapshot (protocol/messageTypes.ts). */
@@ -1593,6 +1607,7 @@ export type TopicMessageErrorCode =
   | 'vip_required'
   | 'topic_not_found'
   | 'topic_locked'
+  | 'topic_muted'
   | 'empty_body'
   | 'body_too_long'
   | 'invalid_body'
@@ -1606,6 +1621,8 @@ export type TopicMessageErrorMessage = {
   code: TopicMessageErrorCode
   message: string
   requestId?: string
+  mutedUntil?: string
+  topicId?: string
 }
 
 // ─── Replies (Етап 3) ────────────────────────────────────────────────────
@@ -1625,6 +1642,8 @@ export type TopicReplyErrorMessage = {
   code: TopicReplyErrorCode
   message: string
   requestId: string
+  mutedUntil?: string
+  topicId?: string
 }
 
 // ─── Likes (Етап 3) ──────────────────────────────────────────────────────
@@ -1654,6 +1673,85 @@ export type TopicMessageLikeErrorMessage = {
   code: TopicMessageLikeErrorCode
   message: string
   requestId: string
+}
+
+/** Push при успешно създадена тема — до originator-а с matching requestId (popup lifecycle), до други directory subscribers БЕЗ requestId (mirror на server-side messageTypes.ts). Клиентът upsert-ва по topic.topicId. */
+export type TopicCreatedMessage = {
+  type: 'topic_created'
+  topic: TopicSnapshot
+  requestId?: string
+}
+
+export type TopicCreateErrorCode =
+  | 'not_authenticated'
+  | 'guest_not_allowed'
+  | 'vip_required'
+  | 'empty_title'
+  | 'title_too_long'
+  | 'invalid_title'
+  | 'topic_title_exists'
+  | 'rate_limited'
+
+export type TopicCreateErrorMessage = {
+  type: 'topic_create_error'
+  code: TopicCreateErrorCode
+  message: string
+  requestId: string
+}
+
+// ─── Moderation (Етап 4) ────────────────────────────────────────────────
+
+/** HTTP response shape за lock/unlock actions — огледално на server-side TopicLockSnapshot (topicModerationStore.ts). */
+export type TopicLockSnapshot = {
+  isLocked: boolean
+  lockedUntil: string | null
+  lockedByAccountId: string | null
+  lockedReason: string | null
+}
+
+/** HTTP response shape за mute/unmute actions — огледално на server-side TopicMuteSnapshot. */
+export type TopicMuteSnapshot = {
+  isMuted: boolean
+  mutedUntil: string | null
+  mutedByAccountId: string | null
+  reason: string | null
+}
+
+export type TopicReportStatus = 'pending' | 'reviewed' | 'dismissed'
+
+export type TopicReportSnapshot = {
+  reportId: string
+  topicId: string
+  reporterProfileId: string
+  reason: string
+  status: TopicReportStatus
+  reviewedByAccountId: string | null
+  reviewedAt: string | null
+  createdAt: string
+}
+
+/** Public broadcast — ВСИЧКИ subscribers на темата виждат lock/unlock realtime, без refresh. */
+export type TopicLockStateChangedMessage = {
+  type: 'topic_lock_state_changed'
+  topicId: string
+  isLocked: boolean
+  lockedUntil: string | null
+  lockedReason: string | null
+}
+
+/** Target-only (private) — САМО заглушеният/отглушеният потребител получава това, не broadcast към всички subscribers. */
+export type TopicMuteStateChangedMessage = {
+  type: 'topic_mute_state_changed'
+  topicId: string
+  isMuted: boolean
+  mutedUntil: string | null
+  reason: string | null
+}
+
+/** Public broadcast при изтриване на тема — клиентът маха subscription-а си локално и се прибира в Topics directory. */
+export type TopicDeletedMessage = {
+  type: 'topic_deleted'
+  topicId: string
 }
 
 export type ServerMessage =
@@ -1726,6 +1824,11 @@ export type ServerMessage =
   | TopicMessageLikeChangedMessage
   | TopicMessageLikeChangedSelfMessage
   | TopicMessageLikeErrorMessage
+  | TopicCreatedMessage
+  | TopicCreateErrorMessage
+  | TopicLockStateChangedMessage
+  | TopicMuteStateChangedMessage
+  | TopicDeletedMessage
 
 type CreateGameServerClientOptions = {
   url?: string
@@ -1776,6 +1879,9 @@ export type GameServerClient = {
   sendTopicMessage: (topicId: string, body: string, requestId: string, imageDataUrl?: string) => void
   sendTopicReply: (topicId: string, parentMessageId: string, body: string, requestId: string, imageDataUrl?: string) => void
   toggleTopicMessageLike: (messageId: string, requestId: string) => void
+  createTopic: (title: string, requestId: string) => void
+  subscribeTopicsDirectory: () => void
+  unsubscribeTopicsDirectory: () => void
 }
 
 function getDefaultServerUrl(): string {
@@ -2083,6 +2189,18 @@ export function createGameServerClient(
     send({ type: 'toggle_topic_message_like', messageId, requestId })
   }
 
+  function createTopic(title: string, requestId: string): void {
+    send({ type: 'create_topic', title, requestId })
+  }
+
+  function subscribeTopicsDirectory(): void {
+    send({ type: 'subscribe_topics_directory' })
+  }
+
+  function unsubscribeTopicsDirectory(): void {
+    send({ type: 'unsubscribe_topics_directory' })
+  }
+
   return {
     connect,
     disconnect,
@@ -2124,5 +2242,8 @@ export function createGameServerClient(
     sendTopicMessage,
     sendTopicReply,
     toggleTopicMessageLike,
+    createTopic,
+    subscribeTopicsDirectory,
+    unsubscribeTopicsDirectory,
   }
 }

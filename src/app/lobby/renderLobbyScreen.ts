@@ -30,6 +30,10 @@ import type {
   TopicSnapshot,
   TopicMessageSnapshot,
   TopicReplySnapshot,
+  TopicLockSnapshot,
+  TopicMuteSnapshot,
+  TopicReportSnapshot,
+  TopicReportStatus,
 } from '../network/createGameServerClient'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, ActiveRoomSnapshot } from '../adminServer/adminServerTypes'
 import { isBotsOnlyActiveRoom, isStaleActiveRoom } from '../adminServer/adminServerTypes'
@@ -77,7 +81,7 @@ import {
   renderTournamentHowItWorksPage,
   extractTournamentCreateInputFromForm,
 } from './renderTournamentsScreen'
-import { renderTopicsScreen } from './renderTopicsScreen'
+import { renderTopicsScreen, renderAdminTopicReportsPanel } from './renderTopicsScreen'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import { renderLevelLockedStakePopup, attachLevelLockedStakePopupEventListeners, type LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
@@ -357,6 +361,41 @@ export type LobbyScreenState = {
   topicsVipClaimErrorText: string | null
   topicsVipSeePlansMessageVisible: boolean
   topicsInfoToast: { text: string } | null
+  topicCreatePopupOpen: boolean
+  topicCreateBusy: boolean
+  topicCreateErrorText: string | null
+  topicCreateTitleDraft: string
+  // ─── Topics Moderation (Етап 4) ──────────────────────────────────────────
+  activeTopicLock: TopicLockSnapshot | null
+  activeTopicViewerMute: TopicMuteSnapshot | null
+  topicModerationActionPopup:
+    | { kind: 'lock'; topicId: string; topicTitle: string }
+    | { kind: 'mute'; topicId: string; targetProfileId: string; targetDisplayName: string }
+    | { kind: 'unmute'; topicId: string; targetProfileId: string; targetDisplayName: string; mutedUntil: string | null }
+    | null
+  topicModerationActionDurationMs: number | null
+  topicModerationActionReason: string
+  topicMuteStatusLoadingProfileId: string | null
+  topicModerationActionBusy: boolean
+  topicModerationActionErrorText: string | null
+  topicDeleteConfirm: { topicId: string; topicTitle: string; step: 'reason' | 'confirm' } | null
+  topicDeleteReason: string
+  topicDeleteBusy: boolean
+  topicDeleteErrorText: string | null
+  topicReportPopupOpen: boolean
+  topicReportReason: string
+  topicReportBusy: boolean
+  topicReportErrorText: string | null
+  topicReportSuccessToast: boolean
+  adminTopicReportsPopupOpen: boolean
+  adminTopicReportsLoading: boolean
+  adminTopicReportsErrorText: string | null
+  adminTopicReports: TopicReportSnapshot[] | null
+  adminTopicReportsPendingCount: number
+  adminTopicReportsFilter: TopicReportStatus | null
+  adminTopicReportActionBusyId: string | null
+  /** Client-side UX gate (server е authoritative на всяко HTTP moderation действие) — виж isTopicModeratorAuthSession в createLobbyFlowController.ts. */
+  isTopicModerator: boolean
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -722,6 +761,9 @@ export type RenderLobbyScreenOptions = {
   onTopicsClick: () => void
   onTopicChipClick: (topicId: string) => void
   onTopicCreateClick: () => void
+  onTopicCreatePopupClose: () => void
+  onTopicCreateTitleInput: (value: string) => void
+  onTopicCreateSubmit: () => void
   onTopicsBackToGeneral: () => void
   onTopicMessagesLoadOlder: () => void
   onTopicComposerInput: (topicId: string, value: string) => void
@@ -742,6 +784,26 @@ export type RenderLobbyScreenOptions = {
   onTopicsVipPopupClose: () => void
   onTopicsVipPopupClaimLaunchGift: () => void
   onTopicsVipPopupSeePlans: () => void
+  // ─── Topics Moderation (Етап 4) ──────────────────────────────────────────
+  onTopicLockClick: (topicId: string, topicTitle: string) => void
+  onTopicUnlockClick: (topicId: string) => void
+  onTopicMuteClick: (topicId: string, targetProfileId: string, targetDisplayName: string) => void
+  onTopicUnmuteClick: (topicId: string, targetProfileId: string) => void
+  onTopicModerationActionPopupClose: () => void
+  onTopicModerationActionDurationChange: (durationMs: number) => void
+  onTopicModerationActionReasonChange: (reason: string) => void
+  onTopicModerationActionSubmit: () => void
+  onTopicDeleteClick: (topicId: string, topicTitle: string) => void
+  onTopicDeleteConfirmClose: () => void
+  onTopicDeleteReasonChange: (reason: string) => void
+  onTopicDeleteAdvance: () => void
+  onTopicDeleteConfirmSubmit: () => void
+  onTopicReportClick: () => void
+  onTopicReportPopupClose: () => void
+  onTopicReportReasonChange: (reason: string) => void
+  onTopicReportSubmit: () => void
+  onAdminTopicReportsFilterChange: (status: TopicReportStatus | null) => void
+  onAdminTopicReportReview: (reportId: string, status: 'reviewed' | 'dismissed') => void
   onTopicMessageAuthorClick: (profileId: string, displayName: string) => void
   onTournamentHowItWorksOpen: () => void
   onTournamentsFilterChange: (filter: 'all' | 'mine') => void
@@ -772,6 +834,8 @@ export type RenderLobbyScreenOptions = {
   onAdminInfoClick: () => void
   onAdminServerClick: () => void
   onAdminGuestContactMessagesClick: () => void
+  onAdminTopicReportsOpen: () => void
+  onAdminTopicReportsClose: () => void
   onAdminDailyRewardAdd: (amount: number) => void
   onAdminDailyRewardRemove: (tierId: string) => void
   onDailyRewardsOpen: () => void
@@ -940,6 +1004,10 @@ let imageViewerRootListenerAttachedFor: HTMLElement | null = null
 let imageViewerEscListenerAttached = false
 let latestImageViewerOpenHandler: ((attachment: { viewUrl: string; downloadUrl: string }) => void) | null = null
 let latestImageViewerCloseHandler: (() => void) | null = null
+// Create Topic popup Esc singleton (Custom Topic Creation) — mirror на image
+// viewer Esc pattern-а по-горе.
+let topicCreateEscListenerAttached = false
+let latestTopicCreateCloseHandler: (() => void) | null = null
 let privateRoomInfoDismissTimer: ReturnType<typeof setTimeout> | null = null
 let mobileMenuOpen = false
 let mobileMenuCloseTimer: ReturnType<typeof setTimeout> | null = null
@@ -2245,13 +2313,14 @@ function renderNav(state: LobbyScreenState): string {
                 pointer-events:none;
               ">${mailUnreadCount > 0 ? mailUnreadCount : ''}</span>
             </button>
-            ${state.isAdmin ? `
+            ${state.isAdmin || state.isTopicModerator ? `
               <div data-admin-mail-dropdown="1" style="
                 display:none;position:absolute;top:100%;right:0;min-width:250px;
                 background:#111111;border:1px solid rgba(212,165,32,0.35);
                 border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,0.72);
                 z-index:1000;overflow:hidden;
               ">
+                ${state.isAdmin ? `
                 <button type="button" data-lobby-nav-support-users="1" style="
                   width:100%;display:flex;align-items:center;justify-content:space-between;gap:14px;
                   border:0;background:none;color:rgba(255,255,255,0.84);padding:13px 14px;
@@ -2269,6 +2338,18 @@ function renderNav(state: LobbyScreenState): string {
                   <span>Съобщения от гости</span>
                   <span style="min-width:22px;height:22px;border-radius:999px;background:${state.adminGuestContactUnreadCount > 0 ? '#ef4444' : 'rgba(255,255,255,0.10)'};color:#fff;display:inline-flex;align-items:center;justify-content:center;padding:0 7px;font-size:11px;font-weight:900;">${state.adminGuestContactUnreadCount}</span>
                 </button>
+                <div style="height:1px;background:rgba(212,165,32,0.18);margin:0 10px;"></div>
+                ` : ''}
+                ${state.isTopicModerator ? `
+                <button type="button" data-lobby-nav-admin-topic-reports="1" style="
+                  width:100%;display:flex;align-items:center;justify-content:space-between;gap:14px;
+                  border:0;background:none;color:rgba(255,255,255,0.84);padding:13px 14px;
+                  cursor:pointer;text-align:left;font-size:13px;font-weight:800;
+                " onmouseenter="this.style.background='rgba(212,165,32,0.09)';this.style.color='#d4a520'" onmouseleave="this.style.background='none';this.style.color='rgba(255,255,255,0.84)'">
+                  <span>Доклади за теми</span>
+                  <span style="min-width:22px;height:22px;border-radius:999px;background:${state.adminTopicReportsPendingCount > 0 ? '#ef4444' : 'rgba(255,255,255,0.10)'};color:#fff;display:inline-flex;align-items:center;justify-content:center;padding:0 7px;font-size:11px;font-weight:900;">${state.adminTopicReportsPendingCount}</span>
+                </button>
+                ` : ''}
               </div>
             ` : ''}
           </div>
@@ -9286,6 +9367,7 @@ export function renderLobbyScreen(
       ${renderPrivateRoomInfoPopup(state)}
       ${renderPrivateRoomConflictPopup(state)}
       ${renderSubadminActionConfirmPopup(state)}
+      ${renderAdminTopicReportsPanel(state)}
       ${renderSubadminActionToast(state)}
       ${renderChatAdminActionConfirmPopup(state)}
       ${renderChatAdminActionToast(state)}
@@ -9561,6 +9643,7 @@ export function renderLobbyScreen(
       ${renderPrivateRoomInfoPopup(state)}
       ${renderPrivateRoomConflictPopup(state)}
       ${renderSubadminActionConfirmPopup(state)}
+      ${renderAdminTopicReportsPanel(state)}
       ${renderSubadminActionToast(state)}
       ${renderChatAdminActionConfirmPopup(state)}
       ${renderChatAdminActionToast(state)}
@@ -10000,15 +10083,40 @@ export function renderLobbyScreen(
       })
 
       if (isVipLocked) {
-        // Non-VIP: прихващаме ПРЕДИ focus/mobile keyboard да се задействат
-        // (Етап 2 брифа — "tap не трябва да отваря mobile keyboard"). `readonly`
-        // в HTML е defense-in-depth baseline, истинската интерцепция е тук.
-        const interceptNonVipTap = (event: Event): void => {
+        // Non-VIP textarea — ДВА отделни handler-а с различна цел, нарочно
+        // разделени (regression fix, втора итерация):
+        //
+        // 1) pointerdown: САМО preventDefault(), НИКАКВО popup тук. Focus (и
+        //    оттам mobile keyboard) е browser-native default action на
+        //    pointerdown/mousedown — preventDefault() тук е ЕДИНСТВЕНИЯТ
+        //    начин да го спре навреме. Ако попадне на click вместо това,
+        //    focus вече ще се е случил преди click-ът изобщо да стигне (click
+        //    винаги идва СЛЕД mousedown/mouseup в native event order), значи
+        //    твърде късно за preventDefault() да го отмени.
+        // 2) click: отваря VIP popup-а. Изчаква пълен press-release цикъл
+        //    върху textarea-та, преди popup-ът изобщо да се появи — няма tap
+        //    "остатък", който да падне върху вече отворения backdrop
+        //    (position:fixed;inset:0) и да го затвори веднага (първата
+        //    итерация на този fix направи точно тази грешка — отваряше
+        //    popup-а на pointerdown, mirror на текущия send-бутон бъг).
+        //
+        // Резултат: readonly textarea никога не получава реален edit focus/
+        // mobile keyboard (pointerdown продължава да го спира), а popup-ът
+        // отваря се едва след завършен tap, без self-closing race.
+        topicsComposerTextEl?.addEventListener('pointerdown', (event) => {
+          event.preventDefault()
+        })
+        topicsComposerTextEl?.addEventListener('click', (event) => {
           event.preventDefault()
           options.onTopicComposerNonVipTap()
-        }
-        topicsComposerTextEl?.addEventListener('pointerdown', interceptNonVipTap)
-        topicsComposerSendBtn?.addEventListener('pointerdown', interceptNonVipTap)
+        })
+        // Send бутонът няма focus/keyboard side effect за preempt-ване
+        // (не е editable input) — само click е нужен, mirror на established
+        // image-pick бутона по-долу.
+        topicsComposerSendBtn?.addEventListener('click', (event) => {
+          event.preventDefault()
+          options.onTopicComposerNonVipTap()
+        })
       } else {
         submitTextareaOnEnter(topicsComposerTextEl)
         topicsComposerTextEl?.addEventListener('input', (event) => {
@@ -10061,6 +10169,50 @@ export function renderLobbyScreen(
     root.querySelector<HTMLButtonElement>('[data-topics-vip-popup-see-plans="1"]')?.addEventListener('click', () => {
       options.onTopicsVipPopupSeePlans()
     })
+  }
+
+  // ─── Create Topic popup (Custom Topic Creation) ──────────────────────────
+  {
+    root.querySelector<HTMLElement>('[data-topic-create-backdrop="1"]')?.addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) options.onTopicCreatePopupClose()
+    })
+    root.querySelector<HTMLButtonElement>('[data-topic-create-close="1"]')?.addEventListener('click', () => {
+      options.onTopicCreatePopupClose()
+    })
+    root.querySelector<HTMLButtonElement>('[data-topic-create-cancel="1"]')?.addEventListener('click', () => {
+      options.onTopicCreatePopupClose()
+    })
+    root.querySelector<HTMLFormElement>('[data-topic-create-form="1"]')?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      options.onTopicCreateSubmit()
+    })
+    const topicCreateTitleInput = root.querySelector<HTMLInputElement>('[data-topic-create-title-input="1"]')
+    topicCreateTitleInput?.addEventListener('input', () => {
+      options.onTopicCreateTitleInput(topicCreateTitleInput.value)
+    })
+    // Autofocus при отваряне — established UX за single-field popups (mirror
+    // на established modal convention), само ако още не е фокусирано (избягва
+    // caret jump/re-select при keystroke re-render).
+    if (topicCreateTitleInput && document.activeElement !== topicCreateTitleInput) {
+      topicCreateTitleInput.focus()
+      const len = topicCreateTitleInput.value.length
+      topicCreateTitleInput.setSelectionRange(len, len)
+    }
+
+    // Module-level singleton Esc listener (mirror на imageViewerEscListenerAttached
+    // по-долу) — popup-ът re-render-ва на всеки keystroke, затова setup-ът
+    // веднъж + свеж handler reference на всеки render е задължителен, за да
+    // не се трупат дублирани document listeners.
+    latestTopicCreateCloseHandler = state.topicCreatePopupOpen && !state.topicCreateBusy
+      ? () => options.onTopicCreatePopupClose()
+      : null
+    if (!topicCreateEscListenerAttached) {
+      topicCreateEscListenerAttached = true
+      document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return
+        latestTopicCreateCloseHandler?.()
+      })
+    }
   }
 
   // ─── Reusable in-app image viewer (lightbox) ─────────────────────────────
@@ -10170,6 +10322,96 @@ export function renderLobbyScreen(
     btn.addEventListener('click', () => {
       options.onTopicReplyClick(rootMessageId)
     })
+  })
+
+  // ─── Topics Moderation (Етап 4) ────────────────────────────────────────
+  root.querySelector<HTMLButtonElement>('[data-topic-lock]')?.addEventListener('click', (event) => {
+    const btn = event.currentTarget as HTMLButtonElement
+    const topicId = btn.dataset.topicLock ?? ''
+    const topicTitle = btn.dataset.topicLockTitle ?? ''
+    if (topicId) options.onTopicLockClick(topicId, topicTitle)
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-unlock]')?.addEventListener('click', (event) => {
+    const topicId = (event.currentTarget as HTMLButtonElement).dataset.topicUnlock ?? ''
+    if (topicId) options.onTopicUnlockClick(topicId)
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-delete]')?.addEventListener('click', (event) => {
+    const btn = event.currentTarget as HTMLButtonElement
+    const topicId = btn.dataset.topicDelete ?? ''
+    const topicTitle = btn.dataset.topicDeleteTitle ?? ''
+    if (topicId) options.onTopicDeleteClick(topicId, topicTitle)
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-report="1"]')?.addEventListener('click', () => {
+    options.onTopicReportClick()
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-topic-mute-toggle]').forEach((btn) => {
+    const targetProfileId = btn.dataset.topicMuteToggle ?? ''
+    const targetDisplayName = btn.dataset.topicMuteToggleName ?? ''
+    if (!targetProfileId) return
+    btn.addEventListener('click', () => {
+      const topicId = state.activeTopicId
+      if (!topicId) return
+      options.onTopicMuteClick(topicId, targetProfileId, targetDisplayName)
+    })
+  })
+
+  // Lock/Mute/Unmute action popup — споделен form wiring (duration select +
+  // reason textarea + cancel/submit), discriminated по kind (lock/mute) на
+  // controller ниво; unmute popup reuse-ва СЪЩИТЕ data-topic-moderation-cancel/
+  // data-topic-moderation-submit маркери (без duration/reason UI, виж
+  // renderTopicModerationActionPopup early branch).
+  root.querySelectorAll<HTMLButtonElement>('[data-topic-moderation-duration]').forEach((btn) => {
+    const durationMs = Number.parseInt(btn.dataset.topicModerationDuration ?? '', 10)
+    if (!Number.isFinite(durationMs)) return
+    btn.addEventListener('click', () => {
+      options.onTopicModerationActionDurationChange(durationMs)
+    })
+  })
+
+  root.querySelector<HTMLTextAreaElement>('[data-topic-moderation-reason="1"]')?.addEventListener('input', (event) => {
+    options.onTopicModerationActionReasonChange((event.currentTarget as HTMLTextAreaElement).value)
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-moderation-cancel="1"]')?.addEventListener('click', () => {
+    options.onTopicModerationActionPopupClose()
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-moderation-submit="1"]')?.addEventListener('click', () => {
+    options.onTopicModerationActionSubmit()
+  })
+
+  // Delete confirm — двустъпков (reason → confirm), виж renderTopicDeleteConfirmPopup.
+  root.querySelector<HTMLTextAreaElement>('[data-topic-delete-reason="1"]')?.addEventListener('input', (event) => {
+    options.onTopicDeleteReasonChange((event.currentTarget as HTMLTextAreaElement).value)
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-delete-cancel="1"]')?.addEventListener('click', () => {
+    options.onTopicDeleteConfirmClose()
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-delete-advance="1"]')?.addEventListener('click', () => {
+    options.onTopicDeleteAdvance()
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-delete-confirm="1"]')?.addEventListener('click', () => {
+    options.onTopicDeleteConfirmSubmit()
+  })
+
+  // Report popup.
+  root.querySelector<HTMLTextAreaElement>('[data-topic-report-reason="1"]')?.addEventListener('input', (event) => {
+    options.onTopicReportReasonChange((event.currentTarget as HTMLTextAreaElement).value)
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-report-cancel="1"]')?.addEventListener('click', () => {
+    options.onTopicReportPopupClose()
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-report-submit="1"]')?.addEventListener('click', () => {
+    options.onTopicReportSubmit()
   })
 
   root.querySelectorAll<HTMLButtonElement>('[data-topic-replies-load-more]').forEach((btn) => {
@@ -10413,6 +10655,35 @@ export function renderLobbyScreen(
       if (adminMailDropdown) adminMailDropdown.style.display = 'none'
       options.onAdminGuestContactMessagesClick()
     }))
+
+  root
+    .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-admin-topic-reports="1"]')
+    .forEach((button) => button.addEventListener('click', () => {
+      if (adminDropdown) adminDropdown.style.display = 'none'
+      if (adminMailDropdown) adminMailDropdown.style.display = 'none'
+      options.onAdminTopicReportsOpen()
+    }))
+
+  root.querySelector<HTMLButtonElement>('[data-admin-topic-reports-close="1"]')?.addEventListener('click', () => {
+    options.onAdminTopicReportsClose()
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-topic-reports-filter]').forEach((btn) => {
+    const raw = btn.dataset.adminTopicReportsFilter ?? ''
+    const status = raw === 'all' ? null : (raw as 'pending' | 'reviewed' | 'dismissed')
+    btn.addEventListener('click', () => {
+      options.onAdminTopicReportsFilterChange(status)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-topic-report-review]').forEach((btn) => {
+    const reportId = btn.dataset.adminTopicReportReview ?? ''
+    const status = btn.dataset.adminTopicReportReviewStatus === 'dismissed' ? 'dismissed' : 'reviewed'
+    if (!reportId) return
+    btn.addEventListener('click', () => {
+      options.onAdminTopicReportReview(reportId, status)
+    })
+  })
 
   root
     .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-support-users="1"]')

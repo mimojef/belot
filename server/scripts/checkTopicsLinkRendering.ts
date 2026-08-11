@@ -78,6 +78,12 @@ function assertAnchor(html: string, href: string, text: string): void {
 function makeMinimalState(overrides: Partial<LobbyScreenState> = {}): LobbyScreenState {
   return {
     apiBaseUrl: '',
+    // Топикс moderation (Етап 4) — renderTopicAuthorBlock чете
+    // state.profile.profileId (own-profile guard за MUTE control бутона) и
+    // state.isTopicModerator (за да реши дали да рендира бутона изобщо).
+    profile: { profileId: 'viewer-profile' },
+    isTopicModerator: false,
+    topicMuteStatusLoadingProfileId: null,
     topicExpandedReplyRootIds: [],
     topicRepliesByRootId: {},
     topicRepliesHasMoreByRootId: {},
