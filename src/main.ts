@@ -73,6 +73,7 @@ import {
   type TournamentCreateInput,
   type TopicSnapshot,
   type TopicMessageSnapshot,
+  type TopicReplySnapshot,
   type TournamentPartnerCandidateSnapshot,
   type TournamentPartnerInviteSnapshot,
   type TournamentMatchAssignmentSnapshot,
@@ -3543,6 +3544,42 @@ async function loadTopicMessages(
   }
 }
 
+async function loadTopicReplies(
+  topicId: string,
+  rootMessageId: string,
+  afterSeq: number | null,
+): Promise<
+  | { ok: true; replies: TopicReplySnapshot[]; hasMore: boolean; oldestSeq: number | null }
+  | { ok: false; message: string }
+> {
+  try {
+    const qs = new URLSearchParams()
+    if (afterSeq !== null) qs.set('after', String(afterSeq))
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/messages/${encodeURIComponent(rootMessageId)}/replies?${qs.toString()}`,
+      { method: 'GET', credentials: 'include' },
+    )
+    const data = (await response.json()) as {
+      ok: boolean
+      message?: string
+      replies?: TopicReplySnapshot[]
+      hasMore?: boolean
+      oldestSeq?: number | null
+    }
+    if (!response.ok || !data.ok || !Array.isArray(data.replies)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на отговорите.' }
+    }
+    return {
+      ok: true,
+      replies: data.replies,
+      hasMore: data.hasMore ?? false,
+      oldestSeq: data.oldestSeq ?? null,
+    }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 // Отделен от loadOwnVipStatus (profile popup use case, само activeUntil) —
 // composer gating в "Теми" се нуждае и от hasClaimedLaunchGift, за да избере
 // правилния VIP popup текст ("Вземи 30 дни безплатно" vs "Виж VIP плановете").
@@ -4040,6 +4077,12 @@ lobby = createLobbyFlowController({
   onTopicMessageSend: (topicId, body, requestId) => {
     client.sendTopicMessage(topicId, body, requestId)
   },
+  onTopicReplySend: (topicId, parentMessageId, body, requestId) => {
+    client.sendTopicReply(topicId, parentMessageId, body, requestId)
+  },
+  onTopicMessageLikeToggle: (messageId, requestId) => {
+    client.toggleTopicMessageLike(messageId, requestId)
+  },
   getAuthSession: () => currentAuthSession,
   getIsInGame: () => activeRoom.hasActiveRoom(),
   onLoginSubmit: (email, password) =>
@@ -4247,6 +4290,7 @@ lobby = createLobbyFlowController({
   onTopicsLoad: () => loadTopics(),
   onProfileByIdLoad: (profileId) => loadProfileById(profileId),
   onTopicMessagesLoad: (topicId, beforeSeq) => loadTopicMessages(topicId, beforeSeq),
+  onTopicRepliesLoad: (topicId, rootMessageId, afterSeq) => loadTopicReplies(topicId, rootMessageId, afterSeq),
   onGetTopicsVipGateStatus: () => loadTopicsVipGateStatus(),
   onClaimTopicsLaunchGift: () => claimTopicsLaunchGiftRequest(),
   onTournamentCreate: (input) => createTournamentRequest(input),

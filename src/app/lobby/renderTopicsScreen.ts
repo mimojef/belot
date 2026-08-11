@@ -1,10 +1,17 @@
-import type { TopicMessageSnapshot } from '../network/createGameServerClient'
+import type { TopicMessageSnapshot, TopicReplySnapshot } from '../network/createGameServerClient'
 import type { LobbyScreenState } from './renderLobbyScreen'
 import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup'
 
-// Read-only Етап 1 — няма likes, create-topic, moderation, unread badges.
-// Етап 2 добави real composer (root send, VIP gate, launch gift) — виж
-// CLAUDE.md / project memory за пълния roadmap на следващите етапи.
+// Read-only Етап 1 — root history + navigation. Етап 2 добави real composer
+// (root send, VIP gate, launch gift). Етап 3 добавя реални likes (root +
+// replies) и едно-ниво replies (expand/collapse, inline VIP composer) — виж
+// CLAUDE.md / project memory за пълния roadmap на следващите етапи (Етап 4+
+// все още не са започнати: create-topic, moderation, unread badges).
+
+// Indentation на replies спрямо златната вертикала — намалено от 46px до
+// 14px (UI polish: "не залепвай съдържанието до линията, но значително
+// по-малко от сегашното"), особено ценно на mobile ширина.
+const REPLY_INDENT_PX = 14
 
 function escapeHtml(value: string): string {
   return value
@@ -192,44 +199,206 @@ function renderTopicsBar(state: LobbyScreenState): string {
   `
 }
 
-function renderTopicMessageRow(message: TopicMessageSnapshot): string {
+// Like бутон — icon-only (♡/♥), с малък числов counter до иконата (Етап 3
+// брифа: "До иконата трябва да може да се показва малък числов counter",
+// "Не искам постоянния текст «Харесай»" — само tooltip, не visible label).
+// Reuse-ва СЪЩИЯ likeCount/viewerHasLiked overrides map за root И reply
+// (виж т.13 — state.topicMessageLikeCountById/topicMessageViewerHasLikedById
+// е authoritative, НЕ директно полето от snapshot-а, за realtime updates).
+function renderTopicLikeButton(state: LobbyScreenState, messageId: string, snapshotLikeCount: number, snapshotViewerHasLiked: boolean): string {
+  const likeCount = state.topicMessageLikeCountById[messageId] ?? snapshotLikeCount
+  const viewerHasLiked = state.topicMessageViewerHasLikedById[messageId] ?? snapshotViewerHasLiked
+  const isPending = Boolean(state.topicMessageLikePendingRequestIdById[messageId])
+
   return `
-    <div data-topic-message="${escapeHtml(message.messageId)}" style="display:flex;align-items:flex-start;gap:10px;padding:10px 4px;">
-      <button
-        type="button"
-        data-topic-message-author="${escapeHtml(message.senderProfileId)}"
-        data-topic-message-author-name="${escapeHtml(message.senderDisplayName)}"
-        style="border:0;background:transparent;padding:0;cursor:pointer;flex:0 0 auto;"
-        aria-label="Профил на ${escapeHtml(message.senderDisplayName)}"
-      >${renderMessageAvatar(message.senderDisplayName, message.senderAvatarUrl)}</button>
-      <div style="flex:1;min-width:0;">
-        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">
-          <button
-            type="button"
-            data-topic-message-author="${escapeHtml(message.senderProfileId)}"
-            data-topic-message-author-name="${escapeHtml(message.senderDisplayName)}"
-            style="border:0;background:transparent;padding:0;cursor:pointer;font-size:14px;font-weight:900;color:#f8fafc;"
-          >${escapeHtml(message.senderDisplayName)}</button>
-          <span style="font-size:12px;color:rgba(248,250,252,0.42);">${formatTopicMessageTime(message.createdAt)}</span>
-        </div>
-        <div style="margin-top:2px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;white-space:pre-wrap;">${escapeHtml(message.body)}</div>
-        <div style="margin-top:4px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
-          <button
-            type="button"
-            data-topic-message-like="1"
-            class="topic-message-action-btn"
-            aria-label="Харесай"
-            data-tooltip="Харесай"
-          ><span class="topic-message-action-icon" aria-hidden="true">&#9825;</span></button>
-          <button
-            type="button"
-            data-topic-message-reply="1"
-            class="topic-message-action-btn"
-            aria-label="Отговори"
-            data-tooltip="Отговори"
-          ><span class="topic-message-action-icon" aria-hidden="true">&#128172;</span></button>
+    <button
+      type="button"
+      data-topic-message-like="${escapeHtml(messageId)}"
+      class="topic-message-action-btn${viewerHasLiked ? ' topic-message-action-btn-liked' : ''}"
+      aria-label="Харесай"
+      aria-pressed="${viewerHasLiked ? 'true' : 'false'}"
+      data-tooltip="Харесай"
+      ${isPending ? 'disabled' : ''}
+    ><span class="topic-message-action-icon" aria-hidden="true">${viewerHasLiked ? '&#9829;' : '&#9825;'}</span>${likeCount > 0 ? `<span class="topic-message-action-count">${likeCount}</span>` : ''}</button>
+  `
+}
+
+function renderTopicReplyButton(rootMessageId: string, replyCount: number): string {
+  return `
+    <button
+      type="button"
+      data-topic-message-reply="${escapeHtml(rootMessageId)}"
+      class="topic-message-action-btn"
+      aria-label="Отговори"
+      data-tooltip="Отговори"
+    ><span class="topic-message-action-icon" aria-hidden="true">&#128172;</span>${replyCount > 0 ? `<span class="topic-message-action-count">${replyCount}</span>` : ''}</button>
+  `
+}
+
+function renderTopicAuthorBlock(senderProfileId: string, senderDisplayName: string, senderAvatarUrl: string | null, createdAt: string): string {
+  return `
+    <button
+      type="button"
+      data-topic-message-author="${escapeHtml(senderProfileId)}"
+      data-topic-message-author-name="${escapeHtml(senderDisplayName)}"
+      style="border:0;background:transparent;padding:0;cursor:pointer;flex:0 0 auto;"
+      aria-label="Профил на ${escapeHtml(senderDisplayName)}"
+    >${renderMessageAvatar(senderDisplayName, senderAvatarUrl)}</button>
+    <div style="flex:1;min-width:0;">
+      <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">
+        <button
+          type="button"
+          data-topic-message-author="${escapeHtml(senderProfileId)}"
+          data-topic-message-author-name="${escapeHtml(senderDisplayName)}"
+          style="border:0;background:transparent;padding:0;cursor:pointer;font-size:14px;font-weight:900;color:#f8fafc;"
+        >${escapeHtml(senderDisplayName)}</button>
+        <span style="font-size:12px;color:rgba(248,250,252,0.42);">${formatTopicMessageTime(createdAt)}</span>
+      </div>
+    </div>
+  `
+}
+
+/** Inline reply composer — reuse на renderTopicsComposer VIP-gated textarea pattern-а, но БЕЗ readonly escape hatch: composer-ът се render-ва САМО за VIP (non-VIP click отваря VIP popup-а вместо да отвори composer-а, виж onTopicReplyClick в controller-а), затова тук винаги е editable. */
+// Desktop пази текстовите бутони ("Откажи"/"Изпрати") — mobile (touch/coarse
+// pointer) ги свива до icon-only, за да не изяждат хоризонталното място на
+// reply composer-а (виж CSS по-долу, огледално на established
+// @media (hover:none) and (pointer:coarse) конвенцията, ползвана вече за
+// .topics-arrow-control/.topic-message-action-btn в този файл). Едно DOM
+// рендиране за двата layout-а — label текст + icon glyph са и двата
+// маркирани с CSS класове, видимостта им се превключва по media query, не
+// JS device detection.
+function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: string): string {
+  const draft = state.topicReplyComposerDraftByRootId[rootMessageId] ?? ''
+  const isSending = Boolean(state.topicReplyComposerPendingRequestIdByRootId[rootMessageId])
+  const errorText = state.topicReplyComposerErrorTextByRootId[rootMessageId] ?? null
+
+  return `
+    <style>
+      .topics-reply-composer-btn { display:inline-flex; align-items:center; justify-content:center; }
+      .topics-reply-composer-btn-icon { display:none; font-size:16px; line-height:1; }
+      @media (hover: none) and (pointer: coarse) {
+        .topics-reply-composer-btn { width:36px; padding:0 !important; }
+        .topics-reply-composer-btn-label { display:none; }
+        .topics-reply-composer-btn-icon { display:inline-flex; }
+      }
+    </style>
+    <div style="margin:6px 0 10px;padding-left:${REPLY_INDENT_PX}px;">
+      <form
+        data-topics-reply-composer-form="1"
+        data-topics-reply-composer-root-id="${escapeHtml(rootMessageId)}"
+        style="display:flex;align-items:flex-end;gap:8px;"
+      >
+        <textarea
+          data-topics-reply-composer-text="1"
+          name="body"
+          rows="1"
+          maxlength="2000"
+          placeholder="Напиши отговор..."
+          style="
+            flex:1;min-width:0;max-height:100px;min-height:36px;box-sizing:border-box;
+            border-radius:8px;border:1px solid rgba(212,165,32,0.24);background:#050505;
+            color:#f8fafc;padding:8px 10px;font-size:13px;font-weight:600;outline:none;
+            resize:none;font-family:inherit;line-height:1.4;overflow-y:auto;
+          "
+        >${escapeHtml(draft)}</textarea>
+        <button
+          type="button"
+          data-topics-reply-composer-cancel="${escapeHtml(rootMessageId)}"
+          class="topics-reply-composer-btn"
+          aria-label="Откажи отговора"
+          style="flex:0 0 auto;height:36px;padding:0 10px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:transparent;color:rgba(248,250,252,0.62);font-size:12px;font-weight:800;cursor:pointer;"
+        ><span class="topics-reply-composer-btn-label">Откажи</span><span class="topics-reply-composer-btn-icon" aria-hidden="true">&#10005;</span></button>
+        <button
+          data-topics-reply-composer-send="1"
+          type="submit"
+          class="topics-reply-composer-btn"
+          aria-label="Изпрати отговора"
+          ${isSending ? 'disabled' : ''}
+          style="
+            flex:0 0 auto;height:36px;padding:0 12px;border:0;border-radius:8px;
+            background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;
+            font-size:12px;font-weight:900;cursor:${isSending ? 'default' : 'pointer'};opacity:${isSending ? '0.6' : '1'};
+          "
+        ><span class="topics-reply-composer-btn-label">Изпрати</span><span class="topics-reply-composer-btn-icon" aria-hidden="true">&#10148;</span></button>
+      </form>
+      ${errorText ? `<div style="padding:4px 0 0;font-size:11px;color:#f87171;">${escapeHtml(errorText)}</div>` : ''}
+    </div>
+  `
+}
+
+function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySnapshot): string {
+  return `
+    <div data-topic-reply="${escapeHtml(reply.messageId)}">
+      <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 4px 8px ${REPLY_INDENT_PX}px;">
+        ${renderTopicAuthorBlock(reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt)}
+      </div>
+      <div style="margin:-6px 0 6px ${REPLY_INDENT_PX}px;">
+        <div style="font-size:14px;line-height:1.4;color:#e2e8f0;word-break:break-word;white-space:pre-wrap;">${escapeHtml(reply.body)}</div>
+        <div style="margin-top:2px;margin-left:-8px;">
+          ${renderTopicLikeButton(state, reply.messageId, reply.likeCount, reply.viewerHasLiked)}
         </div>
       </div>
+    </div>
+  `
+}
+
+function renderRepliesSection(state: LobbyScreenState, rootMessageId: string): string {
+  const isExpanded = state.topicExpandedReplyRootIds.includes(rootMessageId)
+  if (!isExpanded) return ''
+
+  const replies = state.topicRepliesByRootId[rootMessageId]
+  const isLoading = Boolean(state.topicRepliesLoadingByRootId[rootMessageId])
+  const hasMore = Boolean(state.topicRepliesHasMoreByRootId[rootMessageId])
+
+  const listHtml = replies === null || replies === undefined
+    ? (isLoading ? `<div style="padding:8px 0 8px ${REPLY_INDENT_PX}px;color:rgba(248,250,252,0.42);font-size:12px;">Зареждане на отговори...</div>` : '')
+    : replies.length === 0
+      ? `<div style="padding:4px 0 8px ${REPLY_INDENT_PX}px;color:rgba(248,250,252,0.36);font-size:12px;">Все още няма отговори.</div>`
+      : replies.map((r) => renderTopicReplyRow(state, r)).join('')
+
+  const loadMoreHtml = hasMore && replies !== null && replies !== undefined
+    ? `
+      <div style="padding-left:${REPLY_INDENT_PX}px;padding-bottom:6px;">
+        <button
+          type="button"
+          data-topic-replies-load-more="${escapeHtml(rootMessageId)}"
+          ${isLoading ? 'disabled' : ''}
+          style="border:0;background:transparent;color:#d4a520;font-size:12px;font-weight:800;cursor:${isLoading ? 'default' : 'pointer'};padding:4px 0;"
+        >${isLoading ? 'Зареждане...' : 'Покажи още'}</button>
+      </div>
+    `
+    : ''
+
+  const composerHtml = state.topicReplyComposerOpenRootId === rootMessageId
+    ? renderInlineReplyComposer(state, rootMessageId)
+    : ''
+
+  // Златната вертикала — по-ярка и по-ясно видима (т.1 от брифа: "около 2px",
+  // "малко по-ярка", "без прекален glow") — alpha вдигнат от 0.16 на 0.55,
+  // без box-shadow/glow ефект, за да остане елегантен, не крещящ.
+  return `
+    <div data-topic-replies-section="${escapeHtml(rootMessageId)}" style="border-left:2px solid rgba(212,165,32,0.55);margin-left:18px;">
+      ${listHtml}
+      ${loadMoreHtml}
+      ${composerHtml}
+    </div>
+  `
+}
+
+function renderTopicMessageRow(state: LobbyScreenState, message: TopicMessageSnapshot): string {
+  return `
+    <div data-topic-message="${escapeHtml(message.messageId)}">
+      <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 4px 0;">
+        ${renderTopicAuthorBlock(message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt)}
+      </div>
+      <div style="padding:0 4px 10px 46px;">
+        <div style="margin-top:2px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;white-space:pre-wrap;">${escapeHtml(message.body)}</div>
+        <div style="margin-top:4px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
+          ${renderTopicLikeButton(state, message.messageId, message.likeCount, message.viewerHasLiked)}
+          ${renderTopicReplyButton(message.messageId, message.replyCount)}
+        </div>
+      </div>
+      ${renderRepliesSection(state, message.messageId)}
     </div>
   `
 }
@@ -281,6 +450,7 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
       .topic-message-action-btn {
         position:relative;
         display:inline-flex;align-items:center;justify-content:center;
+        gap:4px;
         border:0;background:transparent;border-radius:8px;
         padding:9px;
         color:rgba(248,250,252,0.46);
@@ -290,8 +460,19 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
         font-size:20px;
         line-height:1;
       }
+      .topic-message-action-count {
+        font-size:12px;
+        font-weight:800;
+        color:inherit;
+      }
       .topic-message-action-btn:hover { background:rgba(255,255,255,0.06); color:rgba(248,250,252,0.8); }
       .topic-message-action-btn:active { background:rgba(255,255,255,0.10); }
+      /* Active liked state — ясно различимо (Pika.bg gold accent + filled
+         heart glyph), но остава в icon-only стилистиката (Етап 3 брифа: "Не
+         искам постоянния текст «Харесай»"). */
+      .topic-message-action-btn-liked { color:#d4a520; }
+      .topic-message-action-btn-liked:hover { color:#f4c95b; }
+      .topic-message-action-btn:disabled { opacity:0.6; cursor:default; }
       @media (hover: none) and (pointer: coarse) {
         .topic-message-action-btn { padding:11px; }
       }
@@ -331,7 +512,7 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
     <div data-topic-messages-scroll="1" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;">
       ${loadOlderIndicator}
       <div data-topic-messages-list="1" style="display:flex;flex-direction:column;">
-        ${messages.map(renderTopicMessageRow).join('')}
+        ${messages.map((m) => renderTopicMessageRow(state, m)).join('')}
       </div>
     </div>
   `
@@ -352,7 +533,21 @@ function renderTopicsComposer(state: LobbyScreenState, topicId: string): string 
   const isSending = Boolean(state.topicComposerPendingRequestIdByTopicId[topicId])
   const errorText = state.topicComposerErrorTextByTopicId[topicId] ?? null
 
+  // Mobile Send бутон става icon-only (СЪЩИЯТ CSS class/media query pattern
+  // като inline reply composer-a, виж renderInlineReplyComposer) — desktop
+  // пази текстовия label непроменен. Класовете са споделени/идентични с
+  // .topics-reply-composer-btn*, затова CSS правилата не влизат в конфликт,
+  // ако двата composer-а са в DOM-а едновременно (root + expanded reply).
   return `
+    <style>
+      .topics-reply-composer-btn { display:inline-flex; align-items:center; justify-content:center; }
+      .topics-reply-composer-btn-icon { display:none; font-size:16px; line-height:1; }
+      @media (hover: none) and (pointer: coarse) {
+        .topics-reply-composer-btn { width:40px; padding:0 !important; }
+        .topics-reply-composer-btn-label { display:none; }
+        .topics-reply-composer-btn-icon { display:inline-flex; }
+      }
+    </style>
     <form
       data-topics-composer-form="1"
       data-topics-composer-topic-id="${escapeHtml(topicId)}"
@@ -399,6 +594,8 @@ function renderTopicsComposer(state: LobbyScreenState, topicId: string): string 
       <button
         data-topics-composer-send="1"
         type="submit"
+        class="topics-reply-composer-btn"
+        aria-label="Изпрати съобщението"
         ${isSending ? 'disabled' : ''}
         style="
           flex:0 0 auto;
@@ -413,7 +610,7 @@ function renderTopicsComposer(state: LobbyScreenState, topicId: string): string 
           cursor:${isSending ? 'default' : 'pointer'};
           opacity:${isSending ? '0.6' : '1'};
         "
-      >Изпрати</button>
+      ><span class="topics-reply-composer-btn-label">Изпрати</span><span class="topics-reply-composer-btn-icon" aria-hidden="true">&#10148;</span></button>
     </form>
     ${errorText ? `<div data-topics-composer-error="1" style="flex:0 0 auto;padding:4px 12px 0;font-size:12px;color:#f87171;">${escapeHtml(errorText)}</div>` : ''}
   `

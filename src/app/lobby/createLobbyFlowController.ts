@@ -74,6 +74,7 @@ import type {
   TournamentSummarySnapshot,
   TopicSnapshot,
   TopicMessageSnapshot,
+  TopicReplySnapshot,
 } from '../network/createGameServerClient'
 
 export type LobbyFlowScreen =
@@ -556,6 +557,13 @@ export type CreateLobbyFlowControllerOptions = {
   onTopicMessagesUnsubscribe?: (topicId: string) => void
   /** requestId се генерира от контролера (не от викащия) — служи само за ack correlation, виж Етап 2 брифа т.7. */
   onTopicMessageSend?: (topicId: string, body: string, requestId: string) => void
+  /** afterSeq=null → първите N replies; иначе → следващи от afterSeq (forward cursor, "Покажи още"). Етап 3. */
+  onTopicRepliesLoad?: (topicId: string, rootMessageId: string, afterSeq: number | null) => Promise<
+    | { ok: true; replies: TopicReplySnapshot[]; hasMore: boolean; oldestSeq: number | null }
+    | { ok: false; message: string }
+  >
+  onTopicReplySend?: (topicId: string, parentMessageId: string, body: string, requestId: string) => void
+  onTopicMessageLikeToggle?: (messageId: string, requestId: string) => void
   /** GET VIP gate статус (isActive + hasClaimedLaunchGift) за composer gating в "Теми" — отделно от onGetOwnVipStatus (profile popup use case). */
   onGetTopicsVipGateStatus?: () => Promise<
     | { ok: true; isActive: boolean; hasClaimedLaunchGift: boolean }
@@ -750,6 +758,27 @@ type InternalLobbyFlowState = {
   /** pending requestId per тема, докато чакаме sever ack (echo/error) — null = нищо не се изпраща в момента за тази тема. */
   topicComposerPendingRequestIdByTopicId: Record<string, string | null>
   topicComposerErrorTextByTopicId: Record<string, string | null>
+
+  // ─── Replies (Етап 3) ───────────────────────────────────────────────────
+  /** Кои root съобщения имат отворен ("expanded") reply thread в момента. */
+  topicExpandedReplyRootIds: string[]
+  /** null = не е зареждано още за този root; [] = зареден, но празен списък. */
+  topicRepliesByRootId: Record<string, TopicReplySnapshot[] | null>
+  topicRepliesHasMoreByRootId: Record<string, boolean>
+  topicRepliesLoadingByRootId: Record<string, boolean>
+  /** Draft текст, keyed по rootMessageId (НЕ topicId) — изолира drafts на различни едновременно отворени reply composers. */
+  topicReplyComposerDraftByRootId: Record<string, string>
+  topicReplyComposerPendingRequestIdByRootId: Record<string, string | null>
+  topicReplyComposerErrorTextByRootId: Record<string, string | null>
+  /** Само ЕДИН inline reply composer отворен наведнъж — продуктово решение за опростен UX. */
+  topicReplyComposerOpenRootId: string | null
+
+  // ─── Likes (Етап 3) ──────────────────────────────────────────────────────
+  /** Override-натите likeCount/viewerHasLiked стойности — попълва се от WS/REST отговори, overwrite-ва каквото носи самия TopicMessageSnapshot/TopicReplySnapshot при render. */
+  topicMessageLikeCountById: Record<string, number>
+  topicMessageViewerHasLikedById: Record<string, boolean>
+  /** pending requestId за optimistic toggle reconciliation — виж т.13 от Етап 3 плана. */
+  topicMessageLikePendingRequestIdById: Record<string, string | null>
   /** VIP gate статус за "Теми" composer — null = все още не е зареден. */
   topicsVipGate: { isActive: boolean; hasClaimedLaunchGift: boolean } | null
   topicsVipGateLoading: boolean
@@ -1145,6 +1174,17 @@ function createInitialState(): InternalLobbyFlowState {
     topicComposerDraftByTopicId: {},
     topicComposerPendingRequestIdByTopicId: {},
     topicComposerErrorTextByTopicId: {},
+    topicExpandedReplyRootIds: [],
+    topicRepliesByRootId: {},
+    topicRepliesHasMoreByRootId: {},
+    topicRepliesLoadingByRootId: {},
+    topicReplyComposerDraftByRootId: {},
+    topicReplyComposerPendingRequestIdByRootId: {},
+    topicReplyComposerErrorTextByRootId: {},
+    topicReplyComposerOpenRootId: null,
+    topicMessageLikeCountById: {},
+    topicMessageViewerHasLikedById: {},
+    topicMessageLikePendingRequestIdById: {},
     topicsVipGate: null,
     topicsVipGateLoading: false,
     topicsVipPopupOpen: false,
@@ -2982,6 +3022,17 @@ export function createLobbyFlowController(
       topicComposerDraftByTopicId: state.topicComposerDraftByTopicId,
       topicComposerPendingRequestIdByTopicId: state.topicComposerPendingRequestIdByTopicId,
       topicComposerErrorTextByTopicId: state.topicComposerErrorTextByTopicId,
+      topicExpandedReplyRootIds: state.topicExpandedReplyRootIds,
+      topicRepliesByRootId: state.topicRepliesByRootId,
+      topicRepliesHasMoreByRootId: state.topicRepliesHasMoreByRootId,
+      topicRepliesLoadingByRootId: state.topicRepliesLoadingByRootId,
+      topicReplyComposerDraftByRootId: state.topicReplyComposerDraftByRootId,
+      topicReplyComposerPendingRequestIdByRootId: state.topicReplyComposerPendingRequestIdByRootId,
+      topicReplyComposerErrorTextByRootId: state.topicReplyComposerErrorTextByRootId,
+      topicReplyComposerOpenRootId: state.topicReplyComposerOpenRootId,
+      topicMessageLikeCountById: state.topicMessageLikeCountById,
+      topicMessageViewerHasLikedById: state.topicMessageViewerHasLikedById,
+      topicMessageLikePendingRequestIdById: state.topicMessageLikePendingRequestIdById,
       topicsVipGate: state.topicsVipGate,
       topicsVipGateLoading: state.topicsVipGateLoading,
       topicsVipPopupOpen: state.topicsVipPopupOpen,
@@ -3197,17 +3248,44 @@ export function createLobbyFlowController(
       onTopicCreateClick: () => {
         handleTopicCreateClick()
       },
-      onTopicMessageLikeClick: () => {
-        handleTopicMessageLikeClick()
-      },
-      onTopicMessageReplyClick: () => {
-        handleTopicMessageReplyClick()
-      },
       onTopicsBackToGeneral: () => {
         backToGeneralTopic()
       },
       onTopicMessagesLoadOlder: () => {
         void loadOlderTopicMessages()
+      },
+      onTopicRepliesLoadMore: (rootMessageId) => {
+        void loadMoreReplies(rootMessageId)
+      },
+      onTopicMessageLikeToggleClick: (messageId) => {
+        submitTopicMessageLikeToggle(messageId)
+      },
+      onTopicReplyClick: (rootMessageId) => {
+        if (!(state.topicsVipGate?.isActive ?? false)) {
+          handleTopicReplyComposerNonVipTap()
+          return
+        }
+        // VIP toggle семантика е върху COMPOSER-а, не самия expanded thread
+        // (двете са независими — само ЕДИН inline composer е отворен
+        // наведнъж, виж т.13, но root A може да остане expanded докато
+        // потребителят разглежда/пише в composer-а на root B). Click на
+        // root, чийто composer вече е отворен → collapse thread-а и затвори
+        // composer-а. Click на друг root (или все още затворен) → отвори
+        // composer-а му (и expand-не thread-а му, ако не е вече).
+        if (state.topicReplyComposerOpenRootId === rootMessageId) {
+          collapseReplyThread(rootMessageId)
+        } else {
+          openInlineReplyComposer(rootMessageId)
+        }
+      },
+      onTopicReplyComposerCancel: (rootMessageId) => {
+        closeInlineReplyComposer(rootMessageId)
+      },
+      onTopicReplyComposerInput: (rootMessageId, value) => {
+        updateTopicReplyComposerDraft(rootMessageId, value)
+      },
+      onTopicReplyComposerSubmit: (rootMessageId) => {
+        submitTopicReplyComposerMessage(rootMessageId)
       },
       onTopicComposerInput: (topicId, value) => {
         updateTopicComposerDraft(topicId, value)
@@ -4660,6 +4738,7 @@ export function createLobbyFlowController(
     state.topicMessagesOldestSeq = result.oldestSeq
     state.topicMessagesErrorText = null
     state.topicMessagesLatestKnownSeqByTopicId[topicId] = computeLatestSeq(result.messages)
+    seedLikeStateFromMessages(result.messages)
     // Viewport към последните съобщения — render() тук е последван от
     // scroll-to-bottom логиката в renderLobbyScreen.ts (виж
     // savedTopicMessagesDistanceFromBottom === null клона).
@@ -4793,8 +4872,200 @@ export function createLobbyFlowController(
     state.topicMessages = [...result.messages, ...(state.topicMessages ?? [])]
     state.topicMessagesHasMore = result.hasMore
     state.topicMessagesOldestSeq = result.oldestSeq ?? state.topicMessagesOldestSeq
+    seedLikeStateFromMessages(result.messages)
     state.topicMessagesRenderReason = 'prepend'
     render()
+  }
+
+  // ─── Replies expand/collapse/pagination (Етап 3) ────────────────────────
+  // Toggle behavior-ът живее директно в onTopicReplyClick bridge-а по-горе
+  // (collapse при повторен click на VIP viewer) — тук само примитивите.
+
+  function collapseReplyThread(rootMessageId: string): void {
+    state.topicExpandedReplyRootIds = state.topicExpandedReplyRootIds.filter((id) => id !== rootMessageId)
+    // Затваряме и reply composer-а, ако е бил отворен точно за този thread
+    // (продуктово решение: само ЕДИН inline composer наведнъж, виж т.13).
+    if (state.topicReplyComposerOpenRootId === rootMessageId) {
+      state.topicReplyComposerOpenRootId = null
+    }
+    render()
+  }
+
+  async function expandReplyThread(rootMessageId: string): Promise<void> {
+    state.topicExpandedReplyRootIds = [...state.topicExpandedReplyRootIds, rootMessageId]
+    render()
+
+    // Вече заредено (напр. потребителят е collapse-нал и после отваря пак) —
+    // не правим повторна REST заявка, разчитаме на вече кешираните replies.
+    if (state.topicRepliesByRootId[rootMessageId] !== undefined && state.topicRepliesByRootId[rootMessageId] !== null) {
+      return
+    }
+
+    const topicId = state.activeTopicId
+    if (topicId === null || !options.onTopicRepliesLoad) return
+
+    state.topicRepliesLoadingByRootId[rootMessageId] = true
+    render()
+
+    const result = await options.onTopicRepliesLoad(topicId, rootMessageId, null)
+
+    // Stale-response guard — потребителят може вече да е превключил тема
+    // или collapse-нал thread-а, докато заявката е висяла.
+    if (state.activeTopicId !== topicId || !state.topicExpandedReplyRootIds.includes(rootMessageId)) {
+      state.topicRepliesLoadingByRootId[rootMessageId] = false
+      return
+    }
+
+    state.topicRepliesLoadingByRootId[rootMessageId] = false
+
+    if (!result.ok) {
+      render()
+      return
+    }
+
+    state.topicRepliesByRootId[rootMessageId] = result.replies
+    state.topicRepliesHasMoreByRootId[rootMessageId] = result.hasMore
+    // Seed-ва like state за replies от initial load-а (виж т.13 — likeCount/
+    // viewerHasLiked overrides идват от WS/REST, отделно от самия snapshot).
+    for (const reply of result.replies) {
+      state.topicMessageLikeCountById[reply.messageId] = reply.likeCount
+      state.topicMessageViewerHasLikedById[reply.messageId] = reply.viewerHasLiked
+    }
+    render()
+  }
+
+  async function loadMoreReplies(rootMessageId: string): Promise<void> {
+    const topicId = state.activeTopicId
+    const existing = state.topicRepliesByRootId[rootMessageId]
+    if (
+      topicId === null ||
+      !options.onTopicRepliesLoad ||
+      existing === undefined ||
+      existing === null ||
+      state.topicRepliesLoadingByRootId[rootMessageId] ||
+      !state.topicRepliesHasMoreByRootId[rootMessageId]
+    ) {
+      return
+    }
+
+    const lastKnownSeq = existing.length > 0 ? existing[existing.length - 1]!.seq : null
+    if (lastKnownSeq === null) return
+
+    state.topicRepliesLoadingByRootId[rootMessageId] = true
+    render()
+
+    const result = await options.onTopicRepliesLoad(topicId, rootMessageId, lastKnownSeq)
+
+    if (state.activeTopicId !== topicId || !state.topicExpandedReplyRootIds.includes(rootMessageId)) {
+      state.topicRepliesLoadingByRootId[rootMessageId] = false
+      return
+    }
+
+    state.topicRepliesLoadingByRootId[rootMessageId] = false
+
+    if (!result.ok) {
+      render()
+      return
+    }
+
+    const currentReplies = state.topicRepliesByRootId[rootMessageId] ?? []
+    const byId = new Map<string, TopicReplySnapshot>()
+    for (const r of currentReplies) byId.set(r.messageId, r)
+    for (const r of result.replies) byId.set(r.messageId, r)
+    state.topicRepliesByRootId[rootMessageId] = [...byId.values()].sort((a, b) => a.seq - b.seq)
+    state.topicRepliesHasMoreByRootId[rootMessageId] = result.hasMore
+    for (const reply of result.replies) {
+      state.topicMessageLikeCountById[reply.messageId] = reply.likeCount
+      state.topicMessageViewerHasLikedById[reply.messageId] = reply.viewerHasLiked
+    }
+    render()
+  }
+
+  // ─── Likes (Етап 3) ──────────────────────────────────────────────────────
+
+  const TOPIC_MESSAGE_LIKE_ACK_TIMEOUT_MS = 5000
+
+  /**
+   * Optimistic toggle (т.13 от плана): flip-ва локално веднага при click,
+   * задава pending requestId, и разчита на topic_message_like_changed_self
+   * (виж WS message handler-а по-горе) да reconcile-не с authoritative
+   * сървърен отговор. Ако ack не пристигне в TOPIC_MESSAGE_LIKE_ACK_TIMEOUT_MS
+   * (network issue / dropped message), revert-ваме към ПОСЛЕДНОТО ПОЗНАТО
+   * сървърно състояние (capture-нато ПРЕДИ optimistic flip-а) — НЕ towards
+   * противоположния на optimistic guess-а, защото друг realtime update може
+   * вече легитимно да е изместил count-а междувременно.
+   */
+  function submitTopicMessageLikeToggle(messageId: string): void {
+    if (!options.onTopicMessageLikeToggle) return
+    if (state.topicMessageLikePendingRequestIdById[messageId]) return // вече чакаме ack за този message
+
+    const requestId = `topic-like-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    const priorCount = state.topicMessageLikeCountById[messageId] ?? 0
+    const priorViewerHasLiked = state.topicMessageViewerHasLikedById[messageId] ?? false
+
+    state.topicMessageLikeCountById[messageId] = priorViewerHasLiked ? priorCount - 1 : priorCount + 1
+    state.topicMessageViewerHasLikedById[messageId] = !priorViewerHasLiked
+    state.topicMessageLikePendingRequestIdById[messageId] = requestId
+    render()
+
+    options.onTopicMessageLikeToggle(messageId, requestId)
+
+    setTimeout(() => {
+      if (state.topicMessageLikePendingRequestIdById[messageId] !== requestId) return // вече reconciled от ack/error
+      state.topicMessageLikePendingRequestIdById[messageId] = null
+      state.topicMessageLikeCountById[messageId] = priorCount
+      state.topicMessageViewerHasLikedById[messageId] = priorViewerHasLiked
+      render()
+    }, TOPIC_MESSAGE_LIKE_ACK_TIMEOUT_MS)
+  }
+
+  // ─── Reply composer (Етап 3) — огледално на root composer (submitTopicComposerMessage) ──
+
+  function updateTopicReplyComposerDraft(rootMessageId: string, value: string): void {
+    state.topicReplyComposerDraftByRootId[rootMessageId] = value
+  }
+
+  /** VIP click на Reply контролата → отваря inline composer (ако вече не е отворен) и разгъва thread-а. Non-VIP се прихваща в renderLobbyScreen.ts преди тук (виж onTopicReplyComposerNonVipTap). */
+  function openInlineReplyComposer(rootMessageId: string): void {
+    state.topicReplyComposerOpenRootId = rootMessageId
+    if (!state.topicExpandedReplyRootIds.includes(rootMessageId)) {
+      void expandReplyThread(rootMessageId)
+    } else {
+      render()
+    }
+  }
+
+  function closeInlineReplyComposer(rootMessageId: string): void {
+    if (state.topicReplyComposerOpenRootId === rootMessageId) {
+      state.topicReplyComposerOpenRootId = null
+      render()
+    }
+  }
+
+  function handleTopicReplyComposerNonVipTap(): void {
+    openTopicsVipPopup()
+  }
+
+  function submitTopicReplyComposerMessage(rootMessageId: string): void {
+    const topicId = state.activeTopicId
+    if (topicId === null) return
+
+    const draft = state.topicReplyComposerDraftByRootId[rootMessageId] ?? ''
+    const trimmed = draft.trim()
+    if (trimmed.length === 0) return
+    if (state.topicReplyComposerPendingRequestIdByRootId[rootMessageId]) return
+
+    if (!(state.topicsVipGate?.isActive ?? false)) {
+      openTopicsVipPopup()
+      return
+    }
+
+    const requestId = `topic-reply-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    state.topicReplyComposerPendingRequestIdByRootId[rootMessageId] = requestId
+    state.topicReplyComposerErrorTextByRootId[rootMessageId] = null
+    render()
+
+    options.onTopicReplySend?.(topicId, rootMessageId, trimmed, requestId)
   }
 
   // ─── Realtime merge/dedupe (Етап 2) ─────────────────────────────────────
@@ -4809,6 +5080,19 @@ export function createLobbyFlowController(
     for (const m of existing) byId.set(m.messageId, m)
     for (const m of incoming) byId.set(m.messageId, m)
     return [...byId.values()].sort((a, b) => a.seq - b.seq)
+  }
+
+  // Етап 3 — likeCount/viewerHasLiked "override" state-ът се захранва от
+  // ВСЯКО място, откъдето root TopicMessageSnapshot[]/единично съобщение
+  // влиза в state.topicMessages (initial load, load older, live-append,
+  // catch-up, reconnect refresh) — единна точка, за да не забравим някой от
+  // множеството call sites. Overwrite безусловно (не merge/max) — REST/WS
+  // винаги носи canonical snapshot към момента на fetch-а.
+  function seedLikeStateFromMessages(messages: readonly { messageId: string; likeCount: number; viewerHasLiked: boolean }[]): void {
+    for (const m of messages) {
+      state.topicMessageLikeCountById[m.messageId] = m.likeCount
+      state.topicMessageViewerHasLikedById[m.messageId] = m.viewerHasLiked
+    }
   }
 
   function updateLatestKnownSeqFromMessages(topicId: string, messages: readonly TopicMessageSnapshot[]): void {
@@ -4831,6 +5115,7 @@ export function createLobbyFlowController(
     if (!result.ok) return
     state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], result.messages)
     updateLatestKnownSeqFromMessages(topicId, result.messages)
+    seedLikeStateFromMessages(result.messages)
     state.topicMessagesRenderReason = 'reconnect-refresh'
     render()
   }
@@ -4908,14 +5193,6 @@ export function createLobbyFlowController(
 
   function handleTopicCreateClick(): void {
     showTopicsInfoToast('Създаването на теми ще бъде налично скоро.')
-  }
-
-  function handleTopicMessageLikeClick(): void {
-    showTopicsInfoToast('Функцията ще бъде налична скоро.')
-  }
-
-  function handleTopicMessageReplyClick(): void {
-    showTopicsInfoToast('Функцията ще бъде налична скоро.')
   }
 
   function showTopicsVipPlansInertMessage(): void {
@@ -9609,6 +9886,7 @@ export function createLobbyFlowController(
       if (message.messages.length > 0) {
         state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], message.messages)
         updateLatestKnownSeqFromMessages(message.topicId, message.messages)
+        seedLikeStateFromMessages(message.messages)
         // reconnect-refresh поведение (near-bottom threshold, НЕ форсиран
         // bottom) — catch-up batch-ът може да съдържа съобщения, докато
         // потребителят чете стари, скролнал нагоре.
@@ -9634,6 +9912,7 @@ export function createLobbyFlowController(
       const { type: _msgType, requestId, ...incomingMessage } = message
       state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], [incomingMessage])
       updateLatestKnownSeqFromMessages(message.topicId, [incomingMessage])
+      seedLikeStateFromMessages([incomingMessage])
 
       // Ack по requestId (НЕ по body matching — Етап 2 корекция т.4): само
       // ТОЧНО съвпадащ pending requestId за тази тема чисти draft-а/pending state-а.
@@ -9669,6 +9948,124 @@ export function createLobbyFlowController(
         state.topicsVipPopupOpen = true
       }
 
+      render()
+      return true
+    }
+
+    if (message.type === 'topic_reply') {
+      // Reply push идва към ВСИЧКИ subscribers на темата (сървърът не следи
+      // expanded state client-side, виж коментара при
+      // broadcastTopicReplyToLocalSubscribers/index.ts) — клиентът решава
+      // append vs. counter-only update.
+      if (message.topicId !== state.activeTopicId) {
+        return true
+      }
+
+      const { type: _msgType, requestId, ...incomingReply } = message
+      const rootMessageId = incomingReply.parentMessageId
+
+      // Root replyCount винаги се увеличава, независимо от expanded state
+      // (Етап 3 брифа: "ако collapsed → само counter се обновява").
+      const rootMessage = (state.topicMessages ?? []).find((m) => m.messageId === rootMessageId)
+      if (rootMessage) {
+        rootMessage.replyCount += 1
+      }
+
+      const isExpanded = state.topicExpandedReplyRootIds.includes(rootMessageId)
+      const alreadyLoaded = state.topicRepliesByRootId[rootMessageId] !== undefined && state.topicRepliesByRootId[rootMessageId] !== null
+      if (isExpanded && alreadyLoaded) {
+        const existing = state.topicRepliesByRootId[rootMessageId] ?? []
+        const byId = new Map<string, TopicReplySnapshot>()
+        for (const r of existing) byId.set(r.messageId, r)
+        byId.set(incomingReply.messageId, incomingReply)
+        state.topicRepliesByRootId[rootMessageId] = [...byId.values()].sort((a, b) => a.seq - b.seq)
+        seedLikeStateFromMessages([incomingReply])
+      }
+
+      // Ack по requestId — reply composer draft/pending clearing (keyed по
+      // rootMessageId, не topicId — виж т.13).
+      if (requestId !== undefined && requestId === state.topicReplyComposerPendingRequestIdByRootId[rootMessageId]) {
+        state.topicReplyComposerDraftByRootId[rootMessageId] = ''
+        state.topicReplyComposerPendingRequestIdByRootId[rootMessageId] = null
+        state.topicReplyComposerErrorTextByRootId[rootMessageId] = null
+      }
+
+      render()
+      return true
+    }
+
+    if (message.type === 'topic_reply_error') {
+      const pendingRootId = Object.keys(state.topicReplyComposerPendingRequestIdByRootId).find(
+        (rootId) => state.topicReplyComposerPendingRequestIdByRootId[rootId] === message.requestId,
+      )
+      if (pendingRootId !== undefined) {
+        state.topicReplyComposerPendingRequestIdByRootId[pendingRootId] = null
+        state.topicReplyComposerErrorTextByRootId[pendingRootId] = message.message
+      }
+
+      if (message.code === 'vip_required') {
+        if (state.topicsVipGate) {
+          state.topicsVipGate = { ...state.topicsVipGate, isActive: false }
+        }
+        void refreshTopicsVipGateStatus()
+        state.topicsVipPopupOpen = true
+      }
+
+      render()
+      return true
+    }
+
+    if (message.type === 'topic_message_like_changed') {
+      // PUBLIC broadcast — само count, viewer-agnostic. НИКОГА не пипа
+      // topicMessageViewerHasLikedById (private state, само _self вариантът
+      // го update-ва, виж т.13 — reconciliation, не merge).
+      state.topicMessageLikeCountById[message.messageId] = message.likeCount
+      // Синхронизираме и самия snapshot обект (root/reply), ако е зареден в
+      // момента — за да не изостане derived render-а от override map-а.
+      const rootMatch = (state.topicMessages ?? []).find((m) => m.messageId === message.messageId)
+      if (rootMatch) rootMatch.likeCount = message.likeCount
+      for (const replies of Object.values(state.topicRepliesByRootId)) {
+        const replyMatch = replies?.find((r) => r.messageId === message.messageId)
+        if (replyMatch) replyMatch.likeCount = message.likeCount
+      }
+      render()
+      return true
+    }
+
+    if (message.type === 'topic_message_like_changed_self') {
+      // PRIVATE ack към toggle-ващия connection — authoritative reconciliation
+      // на optimistic UI (виж т.13, т.7 от плана): сървърният отговор ВИНАГИ
+      // побеждава локалния optimistic guess, независимо от pending timing.
+      if (state.topicMessageLikePendingRequestIdById[message.messageId] === message.requestId) {
+        state.topicMessageLikePendingRequestIdById[message.messageId] = null
+      }
+      state.topicMessageLikeCountById[message.messageId] = message.likeCount
+      state.topicMessageViewerHasLikedById[message.messageId] = message.viewerHasLiked
+      const rootMatch = (state.topicMessages ?? []).find((m) => m.messageId === message.messageId)
+      if (rootMatch) {
+        rootMatch.likeCount = message.likeCount
+        rootMatch.viewerHasLiked = message.viewerHasLiked
+      }
+      for (const replies of Object.values(state.topicRepliesByRootId)) {
+        const replyMatch = replies?.find((r) => r.messageId === message.messageId)
+        if (replyMatch) {
+          replyMatch.likeCount = message.likeCount
+          replyMatch.viewerHasLiked = message.viewerHasLiked
+        }
+      }
+      render()
+      return true
+    }
+
+    if (message.type === 'topic_message_like_error') {
+      // Само revert-ва pending state-а, ако все още е pending за ТОЗИ requestId
+      // — timeout-driven revert (виж submitTopicMessageLikeToggle в Етап 3e)
+      // може вече да е изчистил pending-а преди error-ът да пристигне.
+      for (const [messageId, pendingRequestId] of Object.entries(state.topicMessageLikePendingRequestIdById)) {
+        if (pendingRequestId === message.requestId) {
+          state.topicMessageLikePendingRequestIdById[messageId] = null
+        }
+      }
       render()
       return true
     }

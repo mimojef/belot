@@ -583,6 +583,40 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       }
     }
 
+    if (parsed.type === 'send_topic_reply') {
+      // Само структурна проверка — семантика (VIP, parent exists/root-only,
+      // topic status, дължина, rate limit) е в index.ts (виж send_topic_message
+      // коментара по-горе за същия принцип).
+      const topicId = normalizeRequiredText(parsed.topicId)
+      const parentMessageId = normalizeRequiredText(parsed.parentMessageId)
+      if (topicId === null || parentMessageId === null || typeof parsed.body !== 'string') return null
+
+      const requestId = normalizeRequiredText(parsed.requestId)
+      if (requestId === null) return null
+
+      return {
+        type: 'send_topic_reply',
+        topicId,
+        parentMessageId,
+        body: parsed.body,
+        requestId: requestId.slice(0, 100),
+      }
+    }
+
+    if (parsed.type === 'toggle_topic_message_like') {
+      const messageId = normalizeRequiredText(parsed.messageId)
+      if (messageId === null) return null
+
+      const requestId = normalizeRequiredText(parsed.requestId)
+      if (requestId === null) return null
+
+      return {
+        type: 'toggle_topic_message_like',
+        messageId,
+        requestId: requestId.slice(0, 100),
+      }
+    }
+
     if (parsed.type === 'respond_private_room_invite') {
       const inviteId = normalizeRequiredText(parsed.inviteId)
 

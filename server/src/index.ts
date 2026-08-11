@@ -229,7 +229,15 @@ import {
 } from './game/createRoomShadowSynchronizer.js'
 import { resolveGameWorkerEntryUrl } from './game/resolveGameWorkerEntryUrl.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
-import type { LobbyChatErrorCode, PrivateRoomChatErrorCode, TopicMessageErrorCode, TopicMessageBroadcastSnapshot } from './protocol/messageTypes.js'
+import type {
+  LobbyChatErrorCode,
+  PrivateRoomChatErrorCode,
+  TopicMessageErrorCode,
+  TopicMessageBroadcastSnapshot,
+  TopicReplyBroadcastSnapshot,
+  TopicReplyErrorCode,
+  TopicMessageLikeErrorCode,
+} from './protocol/messageTypes.js'
 import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
 import type { PrivateRoom, PrivateRoomMember } from './game/privateRoomsStore.js'
 import { createPrivateRoomChatStore, PRIVATE_ROOM_CHAT_HISTORY_LIMIT } from './game/privateRoomChatStore.js'
@@ -466,6 +474,8 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'subscribe_topic_messages':
     case 'unsubscribe_topic_messages':
     case 'send_topic_message':
+    case 'send_topic_reply':
+    case 'toggle_topic_message_like':
       return true
     case 'ping':
     case 'request_player_profile':
@@ -858,10 +868,70 @@ const topicMessageRateLimitByProfileId = new Map<string, TopicMessageRateLimitEn
 let topicMessageRateLimitLastCleanupAt = 0
 
 type TopicMessageLastSentEntry = { normalizedBody: string; sentAt: number }
-// Ключ: `${profileId}:${topicId}` — duplicate guard-ът е scoped ПО ТЕМА
-// (Етап 2 брифа т.7), НЕ глобално per profile, за да не блокира легитимно
-// еднакъв кратък текст, изпратен в две различни теми.
+// Ключ: `${profileId}:${topicId}:${parentMessageId ?? 'root'}` (Етап 3
+// разширение — виж duplicateTopicMessageKey) — duplicate guard-ът е scoped
+// ПО ТЕМА+ROOT (Етап 2 брифа т.7), НЕ глобално per profile, за да не блокира
+// легитимно еднакъв кратък текст в различни теми/root threads.
 const topicMessageLastSentByProfileAndTopic = new Map<string, TopicMessageLastSentEntry>()
+
+// ─── Likes (Етап 3) — rate limit + cross-instance drift-detection polling ──
+//
+// Likes НЯМАТ собствен seq в topic_messages (toggle е DELETE-or-INSERT в
+// topic_message_likes, не append-only log) — затова cross-instance
+// realtime за likes НЕ може да reuse-не directly poll-cursor invariant-а на
+// root/reply. Вместо event-replay модел, ползваме lightweight AGGREGATE
+// drift-detection polling: на всеки tick, за message-ите с локални
+// subscribers в момента, сравняваме текущия DB likeCount с последно
+// известния и broadcast-ваме САМО делтата. Latency е ограничен от
+// TOPIC_MESSAGE_LIKE_POLL_INTERVAL_MS (секунди), не instant — приет trade-off
+// (виж Етап 3 плана, "Cross-instance strategy — Likes": read-mostly
+// aggregate числа не оправдават нов seq-log за instant sync).
+const TOPIC_MESSAGE_LIKE_RATE_LIMIT_WINDOW_MS = 10_000
+const TOPIC_MESSAGE_LIKE_RATE_LIMIT_MAX_PER_WINDOW = 20
+const TOPIC_MESSAGE_LIKE_LOCALLY_ANNOUNCED_TTL_MS = 15_000
+const TOPIC_MESSAGE_LIKE_POLL_INTERVAL_MS = 4_000
+
+type TopicMessageRateLimitEntry2 = { count: number; windowStartedAt: number }
+const topicMessageLikeRateLimitByProfileId = new Map<string, TopicMessageRateLimitEntry2>()
+let topicMessageLikeRateLimitLastCleanupAt = 0
+
+function checkTopicMessageLikeRateLimit(profileId: string, now: number = Date.now()): boolean {
+  const existing = topicMessageLikeRateLimitByProfileId.get(profileId)
+
+  if (!existing || now - existing.windowStartedAt >= TOPIC_MESSAGE_LIKE_RATE_LIMIT_WINDOW_MS) {
+    topicMessageLikeRateLimitByProfileId.set(profileId, { count: 1, windowStartedAt: now })
+    return true
+  }
+
+  if (existing.count >= TOPIC_MESSAGE_LIKE_RATE_LIMIT_MAX_PER_WINDOW) {
+    return false
+  }
+
+  existing.count += 1
+  return true
+}
+
+function cleanupTopicMessageLikeRateLimitState(now: number): void {
+  if (now - topicMessageLikeRateLimitLastCleanupAt < TOPIC_MESSAGE_RATE_LIMIT_CLEANUP_INTERVAL_MS) {
+    return
+  }
+  topicMessageLikeRateLimitLastCleanupAt = now
+  for (const [profileId, entry] of topicMessageLikeRateLimitByProfileId.entries()) {
+    if (now - entry.windowStartedAt >= TOPIC_MESSAGE_LIKE_RATE_LIMIT_WINDOW_MS) {
+      topicMessageLikeRateLimitByProfileId.delete(profileId)
+    }
+  }
+}
+
+// messageId -> кога е бил toggle-нат локално от ТОЗИ instance. Poll tick-ът
+// прескача broadcast на count, който вече е бил local-instant-broadcast-нат
+// за same messageId в последните TTL мс (same-instance echo suppression,
+// аналогично на topicMessageLocallyAnnouncedSeqs, но keyed по messageId, не
+// seq — likes нямат ordered seq).
+const topicMessageLikeLocallyAnnouncedAt = new Map<string, number>()
+// Последно излъчения (или локално известен) likeCount per messageId — за
+// drift detection: poll-ът broadcast-ва САМО ако текущия DB count се различава.
+const topicMessageLikeLastKnownCountByMessageId = new Map<string, number>()
 
 function checkTopicMessageRateLimit(profileId: string, now: number = Date.now()): boolean {
   const existing = topicMessageRateLimitByProfileId.get(profileId)
@@ -879,13 +949,23 @@ function checkTopicMessageRateLimit(profileId: string, now: number = Date.now())
   return true
 }
 
+// parentMessageId=null → root sentinel ('root') — пази точно предишния key
+// space непроменен за root съобщения. Не-null → reply, keyed отделно по
+// parentMessageId, за да не третира reply към root-A като duplicate на reply
+// със същия текст към root-B (Етап 3 брифа: "еднакъв текст в две различни
+// теми е допустим" — същия принцип, разширен и за различни root parent-и).
+function duplicateTopicMessageKey(profileId: string, topicId: string, parentMessageId: string | null): string {
+  return `${profileId}:${topicId}:${parentMessageId ?? 'root'}`
+}
+
 function isDuplicateTopicMessage(
   profileId: string,
   topicId: string,
+  parentMessageId: string | null,
   normalizedBody: string,
   now: number = Date.now(),
 ): boolean {
-  const last = topicMessageLastSentByProfileAndTopic.get(`${profileId}:${topicId}`)
+  const last = topicMessageLastSentByProfileAndTopic.get(duplicateTopicMessageKey(profileId, topicId, parentMessageId))
   return last !== undefined
     && last.normalizedBody === normalizedBody
     && now - last.sentAt < TOPIC_MESSAGE_DUPLICATE_GUARD_MS
@@ -894,10 +974,11 @@ function isDuplicateTopicMessage(
 function recordTopicMessageSent(
   profileId: string,
   topicId: string,
+  parentMessageId: string | null,
   normalizedBody: string,
   now: number = Date.now(),
 ): void {
-  topicMessageLastSentByProfileAndTopic.set(`${profileId}:${topicId}`, { normalizedBody, sentAt: now })
+  topicMessageLastSentByProfileAndTopic.set(duplicateTopicMessageKey(profileId, topicId, parentMessageId), { normalizedBody, sentAt: now })
 }
 
 function cleanupTopicMessageRateLimitState(now: number): void {
@@ -919,21 +1000,31 @@ function cleanupTopicMessageRateLimitState(now: number): void {
   }
 }
 
-// Batch avatar-hydration — reuse-ва playerProgressStore.getProfileSnapshotsByIds,
+// viewer-agnostic частта на broadcast snapshot-а — likeCount/replyCount/
+// avatar са едни и същи за всички subscribers, но viewerHasLiked е
+// per-subscriber (виж appendViewerHasLiked по-долу) и НЕ може да е тук.
+type TopicMessageBroadcastBase = Omit<TopicMessageBroadcastSnapshot, 'viewerHasLiked'>
+type TopicReplyBroadcastBase = Omit<TopicReplyBroadcastSnapshot, 'viewerHasLiked'>
+
+// Batch avatar+aggregate hydration — reuse-ва playerProgressStore.getProfileSnapshotsByIds,
 // СЪЩИЯТ batch helper, ползван от REST enrichment-а в handleTopicMessagesRequest
-// (Етап 1) — за да не се получи N+1 profile lookup нито при catch-up batch,
-// нито при cross-instance poll batch (Етап 2 брифа т.3: "НЕ прави profile/
-// avatar lookup по един sender на message"). Извиква се ВИНАГИ с целия batch
-// накуп (всички редове от един poll tick / целия catch-up page), никога в
-// цикъл по едно съобщение. За единично local-send съобщение — извикване със
-// масив от 1 елемент е допустимо и е СЪЩИЯТ code path (Етап 2 брифа: "за
-// local send на единично message е допустим единичен lookup").
+// (Етап 1), плюс topicMessageStore.getMessageAggregatesByIds (Етап 3) за
+// likeCount/replyCount — за да не се получи N+1 profile/aggregate lookup нито
+// при catch-up batch, нито при cross-instance poll batch (Етап 2 брифа т.3:
+// "НЕ прави profile/avatar lookup по един sender на message", Етап 3 брифа
+// т.9: "не N+1 COUNT(*) на всяко message"). Извиква се ВИНАГИ с целия batch
+// накуп, никога в цикъл по едно съобщение. viewerProfileId=null тук нарочно —
+// aggregates-ите, върнати оттук, са viewer-AGNOSTIC (likeCount/replyCount),
+// viewerHasLiked се добавя отделно per-subscriber (appendViewerHasLiked).
 function hydrateTopicMessagesWithCurrentAvatars(
   messages: readonly TopicMessageSnapshot[],
-): TopicMessageBroadcastSnapshot[] {
+): TopicMessageBroadcastBase[] {
   const uniqueSenderProfileIds = [...new Set(messages.map((m) => m.senderProfileId))]
   const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
   const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
+
+  const messageIds = messages.map((m) => m.messageId)
+  const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, null)
 
   return messages.map((message) => ({
     seq: message.seq,
@@ -946,12 +1037,37 @@ function hydrateTopicMessagesWithCurrentAvatars(
     senderRole: message.senderRole,
     body: message.body,
     createdAt: message.createdAt,
+    likeCount: aggregatesByMessageId.get(message.messageId)?.likeCount ?? 0,
+    replyCount: aggregatesByMessageId.get(message.messageId)?.replyCount ?? 0,
   }))
+}
+
+// viewerHasLiked е per-subscriber private state — не може да е част от
+// общия (viewer-agnostic) snapshot, изчислен веднъж за целия broadcast batch.
+// Единичен lookup тук е евтин (message_id+profile_id PK lookup), извикан по
+// веднъж на subscriber на broadcast (не N+1 върху batch-а от съобщения —
+// самият snapshot batch си остава single query, виж hydrateTopicMessagesWithCurrentAvatars).
+function viewerHasLikedMessage(messageId: string, viewerProfileId: string | null): boolean {
+  if (viewerProfileId === null) return false
+  const aggregates = topicMessageStore.getMessageAggregatesByIds([messageId], viewerProfileId)
+  return aggregates.get(messageId)?.viewerHasLiked ?? false
+}
+
+// replyCount е viewer-aware (blocked sender-и не се броят, виж коментара в
+// topicMessageStore.getMessageAggregatesByIds) — точно като viewerHasLiked,
+// не може да е част от shared broadcast base-а (различни subscribers имат
+// различни blocked sets). Единичен per-subscriber lookup тук, извикан само
+// за ROOT съобщения (реплики нямат собствен replyCount).
+function viewerAwareReplyCount(messageId: string, viewerProfileId: string | null): number {
+  if (viewerProfileId === null) return 0
+  const excludedSenderProfileIds = [...getLobbyChatBlockedSet(viewerProfileId)]
+  const aggregates = topicMessageStore.getMessageAggregatesByIds([messageId], viewerProfileId, excludedSenderProfileIds)
+  return aggregates.get(messageId)?.replyCount ?? 0
 }
 
 function broadcastTopicMessageToLocalSubscribers(
   topicId: string,
-  snapshot: TopicMessageBroadcastSnapshot,
+  snapshot: TopicMessageBroadcastBase,
   opts?: { originatingConnectionId?: ConnectionId; requestId?: string },
 ): void {
   const subscribers = topicMessageSubscribersByTopicId.get(topicId)
@@ -984,10 +1100,144 @@ function broadcastTopicMessageToLocalSubscribers(
     safeSendToConnection(subscriberConnectionId, {
       type: 'topic_message',
       ...snapshot,
+      // replyCount override-ва shared base стойността (viewer-agnostic global
+      // count от hydrateTopicMessagesWithCurrentAvatars) с viewer-aware брой —
+      // blocked sender-и на ТОЗИ subscriber не се броят (виж viewerAwareReplyCount).
+      replyCount: viewerAwareReplyCount(snapshot.messageId, subscriberConnection.profileId),
+      viewerHasLiked: viewerHasLikedMessage(snapshot.messageId, subscriberConnection.profileId),
       ...(isOriginator && opts?.requestId ? { requestId: opts.requestId } : {}),
     })
   }
 }
+
+// Огледално на broadcastTopicMessageToLocalSubscribers, за reply push (Етап
+// 3). Reply-и се показват САМО когато viewer-ът има expanded-нат съответния
+// root thread — но сървърът не следи expanded state client-side, затова
+// broadcast-ва към ВСИЧКИ topic subscribers (клиентът решава дали да
+// append-не в DOM-а или само да инкрементира replyCount локално, виж Етап 3
+// брифа: "ако collapsed → само counter се обновява"). Blocking filter е
+// идентичен на root.
+function broadcastTopicReplyToLocalSubscribers(
+  topicId: string,
+  snapshot: TopicReplyBroadcastBase,
+  opts?: { originatingConnectionId?: ConnectionId; requestId?: string },
+): void {
+  const subscribers = topicMessageSubscribersByTopicId.get(topicId)
+  if (subscribers === undefined || subscribers.size === 0) {
+    return
+  }
+
+  for (const subscriberConnectionId of [...subscribers]) {
+    const subscriberConnection = getConnectionById(serverState, subscriberConnectionId)
+    const socket = socketRegistry.get(subscriberConnectionId)
+
+    if (subscriberConnection === null || !socket || socket.readyState !== WebSocket.OPEN) {
+      subscribers.delete(subscriberConnectionId)
+      topicMessageSubscriberTopicIdByConnectionId.delete(subscriberConnectionId)
+      continue
+    }
+
+    if (
+      subscriberConnection.profileId !== null &&
+      getLobbyChatBlockedSet(subscriberConnection.profileId).has(snapshot.senderProfileId)
+    ) {
+      continue
+    }
+
+    const isOriginator = opts?.originatingConnectionId === subscriberConnectionId
+
+    safeSendToConnection(subscriberConnectionId, {
+      type: 'topic_reply',
+      ...snapshot,
+      viewerHasLiked: viewerHasLikedMessage(snapshot.messageId, subscriberConnection.profileId),
+      ...(isOriginator && opts?.requestId ? { requestId: opts.requestId } : {}),
+    })
+  }
+}
+
+// PUBLIC broadcast за like count промяна — само messageId+likeCount, БЕЗ
+// liker identity и БЕЗ viewerHasLiked (private, виж topic_message_like_changed_self
+// в самия toggle handler). Няма blocking filter тук нарочно — likeCount е
+// aggregate/viewer-agnostic число (Етап 3 брифа: "block не променя aggregate
+// count"), не разкрива нищо лично за подателя на самия like.
+function broadcastTopicMessageLikeChangedToLocalSubscribers(topicId: string, messageId: string, likeCount: number): void {
+  const subscribers = topicMessageSubscribersByTopicId.get(topicId)
+  if (subscribers === undefined || subscribers.size === 0) {
+    return
+  }
+  for (const subscriberConnectionId of [...subscribers]) {
+    safeSendToConnection(subscriberConnectionId, {
+      type: 'topic_message_like_changed',
+      messageId,
+      likeCount,
+    })
+  }
+}
+
+// Lightweight aggregate drift-detection poll (Етап 3 cross-instance likes) —
+// НЕ е seq-based invariant като root/reply poll-а. За всеки topicId с
+// локални subscribers в момента, взима likeCount за message-ите, чийто
+// count вече следим (topicMessageLikeLastKnownCountByMessageId), и
+// broadcast-ва само реалните промени. Message-и влизат в tracking set-а
+// когато local toggle се случи (виж toggle handler-а) — множество instances
+// естествено се синхронизират, защото всеки от тях следи message-ите,
+// toggle-нати НА НЕГО, и всеки клиент subscribe-ва към ЕДИН instance
+// наведнъж (WS connection е sticky към конкретен process).
+//
+// Ограничение: ако instance B никога не е видял local toggle за дадено
+// message (само instance A го toggle-ва), instance B никога няма да го
+// добави в tracking set-а си и никога няма да poll-не/broadcast-не delta-та
+// му към СВОИТЕ subscribers. Приемливо в рамките на Етап 3 scope, защото
+// realtime like updates са needed само за viewers, гледащи message-а В
+// МОМЕНТА — REST/canonical refresh (topic re-open, reconnect) винаги вижда
+// коректния DB count независимо от tracking state-а. Виж Етап 3 плана,
+// секция "Cross-instance strategy — Likes" за пълния trade-off rationale.
+function runTopicMessageLikePoll(): void {
+  if (isServerShuttingDown) return
+  const now = Date.now()
+  cleanupTopicMessageLikeRateLimitState(now)
+
+  try {
+    const trackedMessageIds = [...topicMessageLikeLastKnownCountByMessageId.keys()]
+    if (trackedMessageIds.length > 0) {
+      const currentCounts = topicMessageStore.getLikeCountsByMessageIds(trackedMessageIds)
+
+      for (const messageId of trackedMessageIds) {
+        const currentCount = currentCounts.get(messageId) ?? 0
+        const knownCount = topicMessageLikeLastKnownCountByMessageId.get(messageId)
+
+        // Same-instance echo suppression — ако ТОЗИ instance е toggle-нал
+        // message-а наскоро, local-instant broadcast-ът вече е доставил
+        // актуалния count; пропускаме, за да не дублираме съобщението.
+        const announcedAt = topicMessageLikeLocallyAnnouncedAt.get(messageId)
+        const recentlyLocallyAnnounced = announcedAt !== undefined && now - announcedAt < TOPIC_MESSAGE_LIKE_LOCALLY_ANNOUNCED_TTL_MS
+
+        if (currentCount !== knownCount) {
+          topicMessageLikeLastKnownCountByMessageId.set(messageId, currentCount)
+          if (!recentlyLocallyAnnounced) {
+            const targetMessage = topicMessageStore.getMessageById(messageId)
+            if (targetMessage !== null) {
+              broadcastTopicMessageLikeChangedToLocalSubscribers(targetMessage.topicId, messageId, currentCount)
+            }
+          }
+        }
+      }
+    }
+
+    for (const [messageId, announcedAt] of topicMessageLikeLocallyAnnouncedAt.entries()) {
+      if (now - announcedAt >= TOPIC_MESSAGE_LIKE_LOCALLY_ANNOUNCED_TTL_MS) {
+        topicMessageLikeLocallyAnnouncedAt.delete(messageId)
+      }
+    }
+  } catch (error) {
+    console.error('[topics] like drift-detection poll failed:', error)
+  }
+}
+
+let topicMessageLikePollInterval: ReturnType<typeof setInterval> | null = setInterval(
+  runTopicMessageLikePoll,
+  TOPIC_MESSAGE_LIKE_POLL_INTERVAL_MS,
+)
 
 // Startup baseline = текущия getMaxSeq() — НЕ 0 — за да не се replay-ва
 // цялата историческа topic_messages таблица към local subscribers след
@@ -1035,12 +1285,28 @@ function runTopicMessagesCrossInstancePoll(): void {
     topicMessagePollCursor = nextCursor
 
     // ЕДНО batch hydration извикване за целия tick, независимо от броя
-    // различни теми/автори в rowsToBroadcast — виж коментара над
-    // hydrateTopicMessagesWithCurrentAvatars (Етап 2 брифа т.3).
+    // различни теми/автори/root-или-reply в rowsToBroadcast — виж коментара
+    // над hydrateTopicMessagesWithCurrentAvatars (Етап 2 брифа т.3, Етап 3
+    // разширение). Разклоняваме по parentMessageId ПОСЛЕ hydration-а (не
+    // преди) — една batch заявка обслужва и root, и reply редове наведнъж.
     if (rowsToBroadcast.length > 0) {
       const hydrated = hydrateTopicMessagesWithCurrentAvatars(rowsToBroadcast)
       for (const message of hydrated) {
-        broadcastTopicMessageToLocalSubscribers(message.topicId, message)
+        // Seed-ва like drift-detection tracking set-а (runTopicMessageLikePoll)
+        // за ВСЯКО ново root/reply, видяно от poll-а — не само чрез
+        // subscribe catch-up (виж коментара там). Без това, root/reply
+        // insert-нат СЛЕД subscribe-а на дадена инстанция никога не влиза в
+        // tracking set-а ѝ, и likes върху него никога не се synchronize-ват
+        // cross-instance (виж checkTopicRepliesLikesRealtime.ts [Cross-Like]).
+        if (!topicMessageLikeLastKnownCountByMessageId.has(message.messageId)) {
+          topicMessageLikeLastKnownCountByMessageId.set(message.messageId, message.likeCount)
+        }
+        if (message.parentMessageId === null) {
+          broadcastTopicMessageToLocalSubscribers(message.topicId, message)
+        } else {
+          const { replyCount: _replyCount, ...replyBase } = message
+          broadcastTopicReplyToLocalSubscribers(message.topicId, { ...replyBase, parentMessageId: message.parentMessageId })
+        }
       }
     }
   } catch (error) {
@@ -6565,15 +6831,114 @@ async function handleTopicMessagesRequest(
   const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
   const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
 
-  const enrichedMessages = page.messages.map((message) => ({
-    ...message,
-    senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
-  }))
+  // Батово likeCount/replyCount/viewerHasLiked за цялата страница (Етап 3,
+  // виж topicMessageStore.getMessageAggregatesByIds) — до 4 агрегатни заявки
+  // ОБЩО, не N+1 per message. excludedSenderProfileIds прави replyCount
+  // viewer-aware (blocked-и replies не се броят — виж коментара в store-а).
+  const messageIds = page.messages.map((m) => m.messageId)
+  const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId, excludedSenderProfileIds)
+
+  const enrichedMessages = page.messages.map((message) => {
+    const aggregates = aggregatesByMessageId.get(message.messageId)
+    return {
+      ...message,
+      senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
+      likeCount: aggregates?.likeCount ?? 0,
+      replyCount: aggregates?.replyCount ?? 0,
+      viewerHasLiked: aggregates?.viewerHasLiked ?? false,
+    }
+  })
 
   sendJsonResponse(res, 200, {
     ok: true,
     topic,
     messages: enrichedMessages,
+    hasMore: page.hasMore,
+    oldestSeq: page.oldestSeq,
+  })
+  return true
+}
+
+const TOPIC_REPLIES_DEFAULT_LIMIT = 20
+const TOPIC_REPLIES_MAX_LIMIT = 50
+
+function clampTopicRepliesLimit(rawValue: string | null): number {
+  const parsed = rawValue !== null ? Number.parseInt(rawValue, 10) : NaN
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return TOPIC_REPLIES_DEFAULT_LIMIT
+  }
+  return Math.min(parsed, TOPIC_REPLIES_MAX_LIMIT)
+}
+
+// Reply history — cursor pagination (Етап 3), огледално на root history, но
+// forward (getReplies/getRepliesAfter са ASC — replies се четат хронологично
+// отгоре-надолу, "Покажи още" зарежда НАПРЕД от последния известен, не назад
+// от най-новия). VIP НЕ се изисква тук (само за писане на reply) — regular
+// registered non-VIP чете replies свободно, точно като root history.
+async function handleTopicRepliesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/([^/]+)\/messages\/([^/]+)\/replies$/.exec(pathname)
+  if (!match || req.method !== 'GET') {
+    return false
+  }
+
+  const auth = requireRegisteredProfileSession(req)
+  if (!auth.ok) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си, за да разгледаш „Теми“.',
+    })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+  const rootMessageId = decodeURIComponent(match[2] ?? '')
+
+  const topic = topicStore.getTopicById(topicId)
+  if (topic === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
+    return true
+  }
+
+  const rootMessage = topicMessageStore.getMessageById(rootMessageId)
+  if (rootMessage === null || rootMessage.topicId !== topicId || rootMessage.deletedAt !== null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Съобщението не беше намерено.' })
+    return true
+  }
+
+  const excludedSenderProfileIds = [...getLobbyChatBlockedSet(auth.profileId)]
+  const limit = clampTopicRepliesLimit(requestUrl.searchParams.get('limit'))
+  const afterRaw = requestUrl.searchParams.get('after')
+  const afterSeq = afterRaw !== null ? Number.parseInt(afterRaw, 10) : null
+
+  const page = afterSeq !== null && Number.isInteger(afterSeq)
+    ? topicMessageStore.getRepliesAfter(rootMessageId, afterSeq, limit, excludedSenderProfileIds)
+    : topicMessageStore.getReplies(rootMessageId, limit, excludedSenderProfileIds)
+
+  const uniqueSenderProfileIds = [...new Set(page.messages.map((m) => m.senderProfileId))]
+  const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
+  const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
+
+  const messageIds = page.messages.map((m) => m.messageId)
+  const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId)
+
+  const enrichedReplies = page.messages.map((message) => {
+    const aggregates = aggregatesByMessageId.get(message.messageId)
+    return {
+      ...message,
+      senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
+      likeCount: aggregates?.likeCount ?? 0,
+      viewerHasLiked: aggregates?.viewerHasLiked ?? false,
+    }
+  })
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    replies: enrichedReplies,
     hasMore: page.hasMore,
     oldestSeq: page.oldestSeq,
   })
@@ -10308,6 +10673,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleTopicRepliesRequest(req, res, requestUrl.pathname, requestUrl)) {
+    return
+  }
+
   if (await handleProfileByIdRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -12467,10 +12836,26 @@ wsServer.on('connection', (socket, request) => {
           excludedSenderProfileIds,
         )
 
+        const hydratedCatchup = hydrateTopicMessagesWithCurrentAvatars(page.messages).map((m) => ({
+          ...m,
+          viewerHasLiked: viewerHasLikedMessage(m.messageId, latestConnection.profileId),
+        }))
+
+        // Seed-ва like drift-detection tracking set-а (runTopicMessageLikePoll)
+        // с message-ите, които ТОЗИ subscriber вече вижда — без това, likes
+        // toggle-нати на ДРУГ instance никога не биха влезли в tracking set-а
+        // на текущия (той сам иначе seed-ва само при own local toggle, виж
+        // коментара при runTopicMessageLikePoll).
+        for (const m of hydratedCatchup) {
+          if (!topicMessageLikeLastKnownCountByMessageId.has(m.messageId)) {
+            topicMessageLikeLastKnownCountByMessageId.set(m.messageId, m.likeCount)
+          }
+        }
+
         safeSendToConnection(connection.id, {
           type: 'topic_message_catchup',
           topicId: message.topicId,
-          messages: hydrateTopicMessagesWithCurrentAvatars(page.messages),
+          messages: hydratedCatchup,
           truncated: page.hasMore,
         })
         return
@@ -12548,10 +12933,10 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        // Scoped по profileId+topicId (Етап 2 брифа т.7) — НЕ глобално per
-        // profile, за да не блокира легитимно еднакъв кратък текст в две
-        // различни теми.
-        if (isDuplicateTopicMessage(latestConnection.profileId, message.topicId, validation.body)) {
+        // Scoped по profileId+topicId+root (Етап 2 брифа т.7, Етап 3
+        // разширение) — НЕ глобално per profile, за да не блокира легитимно
+        // еднакъв кратък текст в две различни теми.
+        if (isDuplicateTopicMessage(latestConnection.profileId, message.topicId, null, validation.body)) {
           sendTopicMessageError('duplicate_message', 'Вече изпрати това съобщение.')
           return
         }
@@ -12568,7 +12953,7 @@ wsServer.on('connection', (socket, request) => {
           body: validation.body,
         })
 
-        recordTopicMessageSent(latestConnection.profileId, message.topicId, validation.body)
+        recordTopicMessageSent(latestConnection.profileId, message.topicId, null, validation.body)
 
         // Local instant broadcast — маркира seq-а като locally-announced ПРЕДИ
         // broadcast (за да го хване следващият poll tick дори ако той изпревари
@@ -12584,6 +12969,182 @@ wsServer.on('connection', (socket, request) => {
             requestId,
           })
         }
+        return
+      }
+
+      if (message.type === 'send_topic_reply') {
+        const requestId = message.requestId
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        function sendTopicReplyError(code: TopicReplyErrorCode, errorMessage: string): void {
+          safeSendToConnection(connection.id, {
+            type: 'topic_reply_error',
+            code,
+            message: errorMessage,
+            requestId,
+          })
+        }
+
+        if (latestConnection?.profileId == null) {
+          sendTopicReplyError('not_authenticated', 'Трябва да влезеш в профила си.')
+          return
+        }
+
+        if (playerProgressStore.isTemporaryProfile(latestConnection.profileId)) {
+          sendTopicReplyError('guest_not_allowed', '„Теми“ само за регистрирани потребители.')
+          return
+        }
+
+        // VIP guard — reply е писане в Topics, идентично на root send (Етап 3
+        // брифа: "Reply е писане в Topics" → "Server-side VIP guard е
+        // задължителен и остава security boundary").
+        if (!vipStore.getStatus(latestConnection.profileId).isActive) {
+          sendTopicReplyError('vip_required', 'Писането в „Теми“ изисква активен VIP.')
+          return
+        }
+
+        const topic = topicStore.getTopicById(message.topicId)
+        if (topic === null || topic.status === 'removed') {
+          sendTopicReplyError('topic_not_found', 'Темата не беше намерена.')
+          return
+        }
+        if (topic.status === 'locked') {
+          sendTopicReplyError('topic_locked', 'Темата е заключена за писане.')
+          return
+        }
+
+        const parent = topicMessageStore.getMessageById(message.parentMessageId)
+        if (parent === null || parent.topicId !== message.topicId || parent.deletedAt !== null) {
+          sendTopicReplyError('parent_not_found', 'Съобщението, на което отговаряш, не беше намерено.')
+          return
+        }
+        // Едно ниво (Етап 3 продуктово решение) — reply винаги сочи ДИРЕКТНО
+        // към ROOT съобщение. Ако parent самият е reply (parentMessageId !==
+        // null), отхвърляме тук — UI никога не би трябвало да изложи Reply
+        // контрола под reply row (виж renderTopicsScreen.ts), но server-ът
+        // остава единствения authoritative guard.
+        if (parent.parentMessageId !== null) {
+          sendTopicReplyError('reply_to_reply_denied', 'Може да отговаряш само на основно съобщение.')
+          return
+        }
+
+        const validation = validateTopicMessageBody(message.body)
+        if (!validation.ok) {
+          const messagesByCode: Record<typeof validation.code, string> = {
+            empty_body: 'Съобщението не може да бъде празно.',
+            body_too_long: `Съобщението може да е най-много ${TOPIC_MESSAGE_MAX_BODY_CODE_POINTS} символа.`,
+            invalid_body: 'Съобщението съдържа неразрешени символи.',
+          }
+          sendTopicReplyError(validation.code, messagesByCode[validation.code])
+          return
+        }
+
+        // Споделен Topics-writing rate limit bucket (Етап 3 брифа: "един общ
+        // Topics-writing anti-spam budget за profile" — reply консумира от
+        // СЪЩИЯ topicMessageRateLimitByProfileId prozorec като root send, за
+        // да не може limit-ът да бъде заобиколен чрез редуване root/reply).
+        if (!checkTopicMessageRateLimit(latestConnection.profileId)) {
+          sendTopicReplyError('rate_limited', 'Твърде много съобщения. Изчакай малко и опитай пак.')
+          return
+        }
+
+        if (isDuplicateTopicMessage(latestConnection.profileId, message.topicId, message.parentMessageId, validation.body)) {
+          sendTopicReplyError('duplicate_message', 'Вече изпрати това съобщение.')
+          return
+        }
+
+        const publicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
+        const senderDisplayName = publicProfile?.displayName?.trim() || 'Играч'
+        const senderRole = authStore.getAccountRoleForProfile(latestConnection.profileId) ?? 'player'
+
+        const row = topicMessageStore.insertReply({
+          topicId: message.topicId,
+          parentMessageId: message.parentMessageId,
+          senderProfileId: latestConnection.profileId,
+          senderDisplayName,
+          senderRole,
+          body: validation.body,
+        })
+
+        recordTopicMessageSent(latestConnection.profileId, message.topicId, message.parentMessageId, validation.body)
+
+        // Същия locally-announced+poll-cursor инвариант като root (Етап 3
+        // разширение — виж коментара при pollNewMessagesStatement/
+        // computeTopicMessagePollAdvance: parent-agnostic по дизайн).
+        topicMessageLocallyAnnouncedSeqs.set(row.seq, Date.now())
+        const [hydrated] = hydrateTopicMessagesWithCurrentAvatars([row])
+        if (hydrated && hydrated.parentMessageId !== null) {
+          const { replyCount: _replyCount, ...replyBase } = hydrated
+          broadcastTopicReplyToLocalSubscribers(message.topicId, { ...replyBase, parentMessageId: hydrated.parentMessageId }, {
+            originatingConnectionId: connection.id,
+            requestId,
+          })
+        }
+        return
+      }
+
+      if (message.type === 'toggle_topic_message_like') {
+        const requestId = message.requestId
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        function sendTopicLikeError(code: TopicMessageLikeErrorCode, errorMessage: string): void {
+          safeSendToConnection(connection.id, {
+            type: 'topic_message_like_error',
+            code,
+            message: errorMessage,
+            requestId,
+          })
+        }
+
+        if (latestConnection?.profileId == null) {
+          sendTopicLikeError('not_authenticated', 'Трябва да влезеш в профила си.')
+          return
+        }
+
+        if (playerProgressStore.isTemporaryProfile(latestConnection.profileId)) {
+          sendTopicLikeError('guest_not_allowed', '„Теми“ само за регистрирани потребители.')
+          return
+        }
+
+        // Likes НЕ са VIP функция (Етап 3 брифа) — само auth + not-guest guard,
+        // никакъв vipStore.getStatus() lookup тук.
+
+        const targetMessage = topicMessageStore.getMessageById(message.messageId)
+        if (targetMessage === null || targetMessage.deletedAt !== null) {
+          sendTopicLikeError('message_not_found', 'Съобщението не беше намерено.')
+          return
+        }
+
+        // Отделен, по-хлабав bucket от root/reply send (Етап 3 брифа: "не
+        // използвай същия много строг message-send лимит").
+        if (!checkTopicMessageLikeRateLimit(latestConnection.profileId)) {
+          sendTopicLikeError('rate_limited', 'Твърде много действия. Изчакай малко и опитай пак.')
+          return
+        }
+
+        // toggleLike прави BEGIN IMMEDIATE транзакция вътрешно (store слой) —
+        // PRIMARY KEY(message_id, liker_profile_id) е ultimate correctness
+        // arbiter (Етап 3 брифа т.7: "DB constraint е final correctness",
+        // rapid double-click/multiple tabs решени на DB ниво, не тук).
+        const { likeCount, viewerHasLiked } = topicMessageStore.toggleLike(message.messageId, latestConnection.profileId)
+
+        // Маркираме за drift-detection polling-а (виж
+        // runTopicMessageLikePoll) — same-instance echo suppression,
+        // аналогично на topicMessageLocallyAnnouncedSeqs за root/reply.
+        topicMessageLikeLocallyAnnouncedAt.set(message.messageId, Date.now())
+        topicMessageLikeLastKnownCountByMessageId.set(message.messageId, likeCount)
+
+        // PUBLIC broadcast — само messageId+likeCount, НИКАКВА liker identity.
+        broadcastTopicMessageLikeChangedToLocalSubscribers(targetMessage.topicId, message.messageId, likeCount)
+
+        // PRIVATE ack — само към toggle-ващия connection, носи viewerHasLiked.
+        safeSendToConnection(connection.id, {
+          type: 'topic_message_like_changed_self',
+          messageId: message.messageId,
+          likeCount,
+          viewerHasLiked,
+          requestId,
+        })
         return
       }
 
@@ -12972,6 +13533,11 @@ function clearMutationTimersForShutdown(): void {
   if (topicMessagePollInterval !== null) {
     clearInterval(topicMessagePollInterval)
     topicMessagePollInterval = null
+  }
+
+  if (topicMessageLikePollInterval !== null) {
+    clearInterval(topicMessageLikePollInterval)
+    topicMessageLikePollInterval = null
   }
 
   if (lobbyChatRetentionInterval !== null) {

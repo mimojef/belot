@@ -766,6 +766,18 @@ export type ClientMessage =
       /** Задължителен (за разлика от lobby chat) — единствен ack-correlation механизъм. */
       requestId: string
     }
+  | {
+      type: 'send_topic_reply'
+      topicId: string
+      parentMessageId: string
+      body: string
+      requestId: string
+    }
+  | {
+      type: 'toggle_topic_message_like'
+      messageId: string
+      requestId: string
+    }
 
 export type PrivateRoomMemberSnapshot = {
   profileId: string | null
@@ -1520,6 +1532,31 @@ export type TopicMessageSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   body: string
   createdAt: string
+  /** Етап 3 — batch-computed, виж server-side getMessageAggregatesByIds. */
+  likeCount: number
+  replyCount: number
+  viewerHasLiked: boolean
+}
+
+/**
+ * Reply (Етап 3) — огледално на TopicMessageSnapshot, но БЕЗ replyCount
+ * (replies са едно ниво, никога нямат собствени replies) и БЕЗ VIP
+ * badge-related данни (Продуктово решение: не показвай VIP badge до
+ * авторите на replies).
+ */
+export type TopicReplySnapshot = {
+  seq: number
+  messageId: string
+  topicId: string
+  parentMessageId: string
+  senderProfileId: string
+  senderDisplayName: string
+  senderAvatarUrl: string | null
+  senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
+  body: string
+  createdAt: string
+  likeCount: number
+  viewerHasLiked: boolean
 }
 
 export type TopicMessageCatchupMessage = {
@@ -1552,6 +1589,54 @@ export type TopicMessageErrorMessage = {
   code: TopicMessageErrorCode
   message: string
   requestId?: string
+}
+
+// ─── Replies (Етап 3) ────────────────────────────────────────────────────
+
+export type TopicReplyReceivedMessage = TopicReplySnapshot & {
+  type: 'topic_reply'
+  requestId?: string
+}
+
+export type TopicReplyErrorCode =
+  | TopicMessageErrorCode
+  | 'parent_not_found'
+  | 'reply_to_reply_denied'
+
+export type TopicReplyErrorMessage = {
+  type: 'topic_reply_error'
+  code: TopicReplyErrorCode
+  message: string
+  requestId: string
+}
+
+// ─── Likes (Етап 3) ──────────────────────────────────────────────────────
+
+export type TopicMessageLikeChangedMessage = {
+  type: 'topic_message_like_changed'
+  messageId: string
+  likeCount: number
+}
+
+export type TopicMessageLikeChangedSelfMessage = {
+  type: 'topic_message_like_changed_self'
+  messageId: string
+  likeCount: number
+  viewerHasLiked: boolean
+  requestId: string
+}
+
+export type TopicMessageLikeErrorCode =
+  | 'not_authenticated'
+  | 'guest_not_allowed'
+  | 'message_not_found'
+  | 'rate_limited'
+
+export type TopicMessageLikeErrorMessage = {
+  type: 'topic_message_like_error'
+  code: TopicMessageLikeErrorCode
+  message: string
+  requestId: string
 }
 
 export type ServerMessage =
@@ -1619,6 +1704,11 @@ export type ServerMessage =
   | TopicMessageCatchupMessage
   | TopicMessageReceivedMessage
   | TopicMessageErrorMessage
+  | TopicReplyReceivedMessage
+  | TopicReplyErrorMessage
+  | TopicMessageLikeChangedMessage
+  | TopicMessageLikeChangedSelfMessage
+  | TopicMessageLikeErrorMessage
 
 type CreateGameServerClientOptions = {
   url?: string
@@ -1667,6 +1757,8 @@ export type GameServerClient = {
   subscribeTopicMessages: (topicId: string, afterSeq: number) => void
   unsubscribeTopicMessages: (topicId: string) => void
   sendTopicMessage: (topicId: string, body: string, requestId: string) => void
+  sendTopicReply: (topicId: string, parentMessageId: string, body: string, requestId: string) => void
+  toggleTopicMessageLike: (messageId: string, requestId: string) => void
 }
 
 function getDefaultServerUrl(): string {
@@ -1966,6 +2058,14 @@ export function createGameServerClient(
     send({ type: 'send_topic_message', topicId, body, requestId })
   }
 
+  function sendTopicReply(topicId: string, parentMessageId: string, body: string, requestId: string): void {
+    send({ type: 'send_topic_reply', topicId, parentMessageId, body, requestId })
+  }
+
+  function toggleTopicMessageLike(messageId: string, requestId: string): void {
+    send({ type: 'toggle_topic_message_like', messageId, requestId })
+  }
+
   return {
     connect,
     disconnect,
@@ -2005,5 +2105,7 @@ export function createGameServerClient(
     subscribeTopicMessages,
     unsubscribeTopicMessages,
     sendTopicMessage,
+    sendTopicReply,
+    toggleTopicMessageLike,
   }
 }

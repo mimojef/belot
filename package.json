@@ -18,6 +18,7 @@
     "check:chat-draft-preserved": "npx tsx scripts/checkChatDraftPreserved.ts",
     "check:topics-switch-race": "npx tsx scripts/checkTopicsSwitchRace.ts",
     "check:topics-composer-vip-gate": "npx tsx scripts/checkTopicsComposerVipGate.ts",
+    "check:topics-replies-likes-client": "npx tsx scripts/checkTopicsRepliesLikesClient.ts",
     "check:profile-popup-mobile-responsive": "npx tsx scripts/checkProfilePopupMobileResponsive.ts",
     "check:support-chat-typing-stability": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSupportChatTypingStability.ts",
     "check:all-chat-typing-stability": "node server/node_modules/tsx/dist/cli.mjs scripts/checkAllChatTypingStability.ts",

@@ -6,7 +6,7 @@
 // topicsSwitchRaceHarness.ts (виж него за rationale на подхода), но фокусиран
 // върху Етап 2: composer/VIP gate/realtime merge поведение.
 import { createLobbyFlowController } from '/src/app/lobby/createLobbyFlowController.ts'
-import type { TopicSnapshot, TopicMessageSnapshot, ServerMessage } from '/src/app/network/createGameServerClient.ts'
+import type { TopicSnapshot, TopicMessageSnapshot, TopicReplySnapshot, ServerMessage } from '/src/app/network/createGameServerClient.ts'
 
 const root = document.createElement('div')
 document.body.appendChild(root)
@@ -28,6 +28,26 @@ function makeMessage(topicId: string, seq: number, body: string, senderProfileId
     senderRole: 'player',
     body,
     createdAt: new Date().toISOString(),
+    likeCount: 0,
+    replyCount: 0,
+    viewerHasLiked: false,
+  }
+}
+
+function makeReply(topicId: string, seq: number, parentMessageId: string, body: string, senderProfileId = 'someone', senderDisplayName = 'Someone'): TopicReplySnapshot {
+  return {
+    seq,
+    messageId: `${topicId}-reply-${seq}-${body}`,
+    topicId,
+    parentMessageId,
+    senderProfileId,
+    senderDisplayName,
+    senderAvatarUrl: null,
+    senderRole: 'player',
+    body,
+    createdAt: new Date().toISOString(),
+    likeCount: 0,
+    viewerHasLiked: false,
   }
 }
 
@@ -39,10 +59,19 @@ let nextMessagesResult: { ok: true; messages: TopicMessageSnapshot[]; hasMore: b
   hasMore: false,
   oldestSeq: null,
 }
+let nextRepliesResult: { ok: true; replies: TopicReplySnapshot[]; hasMore: boolean; oldestSeq: number | null } = {
+  ok: true,
+  replies: [],
+  hasMore: false,
+  oldestSeq: null,
+}
 
 const subscribeLog: Array<{ topicId: string; afterSeq: number }> = []
 const unsubscribeLog: string[] = []
 const sendLog: Array<{ topicId: string; body: string; requestId: string }> = []
+const replySendLog: Array<{ topicId: string; parentMessageId: string; body: string; requestId: string }> = []
+const likeToggleLog: Array<{ messageId: string; requestId: string }> = []
+const repliesLoadLog: Array<{ topicId: string; rootMessageId: string; afterSeq: number | null }> = []
 let vipGateCallCount = 0
 let claimCallCount = 0
 
@@ -66,6 +95,16 @@ const controller = createLobbyFlowController({
   },
   onTopicMessageSend: (topicId: string, body: string, requestId: string) => {
     sendLog.push({ topicId, body, requestId })
+  },
+  onTopicReplySend: (topicId: string, parentMessageId: string, body: string, requestId: string) => {
+    replySendLog.push({ topicId, parentMessageId, body, requestId })
+  },
+  onTopicMessageLikeToggle: (messageId: string, requestId: string) => {
+    likeToggleLog.push({ messageId, requestId })
+  },
+  onTopicRepliesLoad: async (topicId: string, rootMessageId: string, afterSeq: number | null) => {
+    repliesLoadLog.push({ topicId, rootMessageId, afterSeq })
+    return nextRepliesResult
   },
   onGetTopicsVipGateStatus: async () => {
     vipGateCallCount++
@@ -99,12 +138,62 @@ function q<T extends Element>(selector: string): T | null {
       oldestSeq: messages.length > 0 ? messages[0]!.seq : null,
     }
   },
+  setNextRepliesResult: (replies: TopicReplySnapshot[], hasMore = false) => {
+    nextRepliesResult = {
+      ok: true,
+      replies,
+      hasMore,
+      oldestSeq: replies.length > 0 ? replies[replies.length - 1]!.seq : null,
+    }
+  },
   makeMessage,
+  makeReply,
   getSubscribeLog: () => subscribeLog,
   getUnsubscribeLog: () => unsubscribeLog,
   getSendLog: () => sendLog,
+  getReplySendLog: () => replySendLog,
+  getLikeToggleLog: () => likeToggleLog,
+  getRepliesLoadLog: () => repliesLoadLog,
   getVipGateCallCount: () => vipGateCallCount,
   getClaimCallCount: () => claimCallCount,
+  clickReplyButton: (rootMessageId: string) => q<HTMLButtonElement>(`[data-topic-message-reply="${rootMessageId}"]`)?.click(),
+  clickLikeButton: (messageId: string) => q<HTMLButtonElement>(`[data-topic-message-like="${messageId}"]`)?.click(),
+  isRepliesSectionExpanded: (rootMessageId: string) => q(`[data-topic-replies-section="${rootMessageId}"]`) !== null,
+  getReplyComposerValue: (rootMessageId: string) =>
+    q<HTMLTextAreaElement>(`[data-topics-reply-composer-form][data-topics-reply-composer-root-id="${rootMessageId}"] [data-topics-reply-composer-text="1"]`)?.value ?? null,
+  setReplyComposerValue: (rootMessageId: string, value: string) => {
+    const el = q<HTMLTextAreaElement>(`[data-topics-reply-composer-form][data-topics-reply-composer-root-id="${rootMessageId}"] [data-topics-reply-composer-text="1"]`)
+    if (!el) return
+    el.value = value
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  },
+  submitReplyComposer: (rootMessageId: string) =>
+    q<HTMLFormElement>(`[data-topics-reply-composer-form][data-topics-reply-composer-root-id="${rootMessageId}"]`)?.requestSubmit(),
+  pressEnterInReplyComposer: (rootMessageId: string, shiftKey: boolean) => {
+    const el = q<HTMLTextAreaElement>(`[data-topics-reply-composer-form][data-topics-reply-composer-root-id="${rootMessageId}"] [data-topics-reply-composer-text="1"]`)
+    el?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey, bubbles: true, cancelable: true }))
+  },
+  isReplyComposerOpen: (rootMessageId: string) =>
+    q(`[data-topics-reply-composer-form][data-topics-reply-composer-root-id="${rootMessageId}"]`) !== null,
+  getLikeButtonState: (messageId: string) => {
+    const btn = q<HTMLButtonElement>(`[data-topic-message-like="${messageId}"]`)
+    if (!btn) return null
+    const icon = btn.querySelector('.topic-message-action-icon')?.textContent ?? ''
+    const countEl = btn.querySelector('.topic-message-action-count')
+    return {
+      pressed: btn.getAttribute('aria-pressed'),
+      liked: icon.includes('♥'),
+      count: countEl ? Number(countEl.textContent) : 0,
+      disabled: btn.disabled,
+    }
+  },
+  getReplyButtonCount: (rootMessageId: string) => {
+    const btn = q<HTMLButtonElement>(`[data-topic-message-reply="${rootMessageId}"]`)
+    const countEl = btn?.querySelector('.topic-message-action-count')
+    return countEl ? Number(countEl.textContent) : 0
+  },
+  getVisibleReplyIds: (rootMessageId: string) =>
+    Array.from(document.querySelectorAll(`[data-topic-replies-section="${rootMessageId}"] [data-topic-reply]`)).map((el) => el.getAttribute('data-topic-reply')),
   simulateServerMessage: (message: ServerMessage) => controller.handleServerMessage(message),
   getComposerValue: () => q<HTMLTextAreaElement>('[data-topics-composer-text="1"]')?.value ?? null,
   isComposerReadonly: () => q<HTMLTextAreaElement>('[data-topics-composer-text="1"]')?.readOnly ?? null,

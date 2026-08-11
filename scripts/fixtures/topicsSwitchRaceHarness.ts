@@ -30,6 +30,9 @@ function makeMessage(topicId: string, body: string, senderProfileId = 'someone',
     senderRole: 'player',
     body,
     createdAt: new Date().toISOString(),
+    likeCount: 0,
+    replyCount: 0,
+    viewerHasLiked: false,
   }
 }
 
@@ -171,6 +174,23 @@ const controller = createLobbyFlowController({
       pendingProfileResolvers.set(profileId, queue)
     })
   },
+  // Instant same-tick ack (не deferred queue) — [28]/[29] тестват само UI
+  // icon-only/tooltip/optimistic-flip поведението, не пълния WS roundtrip
+  // timing (тествано отделно в server/scripts/checkTopicMessagesRealtime.ts).
+  // БЕЗ instant ack, бутонът остава disabled (pending state) завинаги в тази
+  // тестова сесия — счупва Tab focus order-а на следващи тестове (disabled
+  // елементи не са focusable).
+  onTopicMessageLikeToggle: (messageId: string, requestId: string) => {
+    controller.handleServerMessage({
+      type: 'topic_message_like_changed_self',
+      messageId,
+      likeCount: 1,
+      viewerHasLiked: true,
+      requestId,
+    })
+  },
+  onTopicReplySend: () => {},
+  onTopicRepliesLoad: async () => ({ ok: true, replies: [], hasMore: false, oldestSeq: null }),
 })
 
 // ─── Тестова кука, извиквана от Playwright през page.evaluate ───────────────

@@ -684,7 +684,7 @@ try {
     )
 
     const likeMobileInfo = await mobilePage.evaluate(() => {
-      const btn = document.querySelector('[data-topic-message-like="1"]') as HTMLElement | null
+      const btn = document.querySelector('[data-topic-message-like]') as HTMLElement | null
       if (!btn) return null
       const icon = btn.querySelector('.topic-message-action-icon') as HTMLElement | null
       const cs = getComputedStyle(btn)
@@ -996,9 +996,9 @@ try {
     await isoPage.waitForTimeout(3600) // изчакваме auto-dismiss (3.5s), за да не пречи на следващите тестове
   })
 
-  await check('[28] Like: само икона (без постоянен текст), по-голяма от преди, aria-label + tooltip, реална tap зона, показва "скоро" toast', async () => {
+  await check('[28] Like: само икона (без постоянен текст), по-голяма от преди, aria-label + tooltip, реална tap зона, реален optimistic toggle (Етап 3)', async () => {
     const likeInfo = await isoPage.evaluate(() => {
-      const btn = document.querySelector('[data-topic-message-like="1"]') as HTMLButtonElement | null
+      const btn = document.querySelector('[data-topic-message-like]') as HTMLButtonElement | null
       if (!btn) return null
       const icon = btn.querySelector('.topic-message-action-icon') as HTMLElement | null
       const cs = getComputedStyle(btn)
@@ -1023,17 +1023,18 @@ try {
     assert(likeInfo!.iconFontSize !== null && likeInfo!.iconFontSize >= 18, `иконата трябва да е осезаемо по-голяма (>=18px), получено: ${likeInfo!.iconFontSize}`)
 
     // Много message rows са се натрупали от предишни тестове в СЪЩИЯ isoPage
-    // — data-topic-message-like="1" не е уникален per row (споделен маркер),
-    // затова навсякъде тук explicit-но взимаме ПЪРВОТО съвпадение (.first()),
+    // — data-topic-message-like е keyed по messageId (Етап 3), не е уникален
+    // selector сам по себе си при множество rows, затова навсякъде тук
+    // explicit-но взимаме ПЪРВОТО съвпадение (.first()),
     // огледално на document.querySelector семантиката, ползвана другаде в
     // този файл. scrollIntoViewIfNeeded() ПРЕДИ да мерим rectBefore, за да не
     // объркаме auto-scroll-а (по-долу от hover()-а) с реален layout shift.
-    const likeLocator = isoPage.locator('[data-topic-message-like="1"]').first()
+    const likeLocator = isoPage.locator('[data-topic-message-like]').first()
     await likeLocator.scrollIntoViewIfNeeded()
 
-    const rectBefore = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like="1"]')!.getBoundingClientRect().toJSON())
+    const rectBefore = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like]')!.getBoundingClientRect().toJSON())
     const opacityBefore = await isoPage.evaluate(() => {
-      const btn = document.querySelector('[data-topic-message-like="1"]') as HTMLElement
+      const btn = document.querySelector('[data-topic-message-like]') as HTMLElement
       return parseFloat(getComputedStyle(btn, '::after').opacity)
     })
     assertEqual(opacityBefore, 0, 'tooltip-ът НЕ трябва да е видим без hover/focus')
@@ -1042,30 +1043,38 @@ try {
     // CSS transition:opacity 0.15s ease — изчакваме до 400ms, poll-вайки за
     // финалната стойност, вместо fixed sleep по-къс от transition-а.
     await isoPage.waitForFunction(() => {
-      const btn = document.querySelector('[data-topic-message-like="1"]') as HTMLElement
+      const btn = document.querySelector('[data-topic-message-like]') as HTMLElement
       return parseFloat(getComputedStyle(btn, '::after').opacity) === 1
     }, undefined, { timeout: 400 })
     const opacityOnHover = await isoPage.evaluate(() => {
-      const btn = document.querySelector('[data-topic-message-like="1"]') as HTMLElement
+      const btn = document.querySelector('[data-topic-message-like]') as HTMLElement
       return parseFloat(getComputedStyle(btn, '::after').opacity)
     })
     assertEqual(opacityOnHover, 1, 'desktop hover трябва да покаже "Харесай" tooltip-а (opacity:1)')
-    const rectAfterHover = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like="1"]')!.getBoundingClientRect().toJSON())
+    const rectAfterHover = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like]')!.getBoundingClientRect().toJSON())
     assertEqual(JSON.stringify(rectBefore), JSON.stringify(rectAfterHover), 'hover tooltip-ът НЕ трябва да мести layout-а (position:absolute)')
 
+    // Етап 3 — Like вече е реален toggle (optimistic UI flip), не "скоро"
+    // toast. Click трябва веднага (синхронно, преди какъвто и да е WS
+    // roundtrip) да смени иконата ♡ → ♥ и aria-pressed=false → true.
+    const iconBefore = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like] .topic-message-action-icon')?.textContent ?? '')
+    const pressedBefore = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like]')?.getAttribute('aria-pressed'))
+    assertEqual(pressedBefore, 'false', 'преди click aria-pressed трябва да е false (не е харесано)')
+
     await likeLocator.click()
-    await isoPage.waitForFunction(
-      () => document.body.textContent?.includes('Функцията ще бъде налична скоро.') ?? false,
-      undefined,
-      { timeout: 2000 },
-    )
+    await isoPage.waitForFunction(() => document.querySelector('[data-topic-message-like]')?.getAttribute('aria-pressed') === 'true', undefined, { timeout: 1000 })
+    const iconAfter = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like] .topic-message-action-icon')?.textContent ?? '')
+    assert(iconBefore !== iconAfter, `like иконата трябва да се смени при click (optimistic flip), преди="${iconBefore}", след="${iconAfter}"`)
+
+    const toastVisible = await isoPage.evaluate(() => document.body.textContent?.includes('Функцията ще бъде налична скоро.') ?? false)
+    assert(!toastVisible, 'Like вече НЕ трябва да показва "ще бъде налично скоро" toast (Етап 3 — реална функционалност)')
+
     await isoPage.mouse.move(0, 0)
-    await isoPage.waitForTimeout(3600)
   })
 
-  await check('[29] Reply: само икона, aria-label + tooltip, keyboard focus показва tooltip, показва "скоро" toast', async () => {
+  await check('[29] Reply: само икона, aria-label + tooltip, keyboard focus показва tooltip, non-VIP click отваря VIP popup (Етап 3)', async () => {
     const replyInfo = await isoPage.evaluate(() => {
-      const btn = document.querySelector('[data-topic-message-reply="1"]') as HTMLButtonElement | null
+      const btn = document.querySelector('[data-topic-message-reply]') as HTMLButtonElement | null
       if (!btn) return null
       const icon = btn.querySelector('.topic-message-action-icon') as HTMLElement | null
       const iconCs = icon ? getComputedStyle(icon) : null
@@ -1089,25 +1098,37 @@ try {
     // го тригерва надеждно, затова focus-ваме Like (реда преди Reply в DOM-а)
     // и после реално натискаме Tab клавиша, за да стигнем до Reply — това е
     // истинска keyboard навигация, каквато :focus-visible очаква.
-    const replyLocator = isoPage.locator('[data-topic-message-reply="1"]').first()
-    await isoPage.locator('[data-topic-message-like="1"]').first().focus()
+    const replyLocator = isoPage.locator('[data-topic-message-reply]').first()
+    await isoPage.locator('[data-topic-message-like]').first().focus()
     await isoPage.keyboard.press('Tab')
     await isoPage.waitForFunction(() => {
-      const btn = document.querySelector('[data-topic-message-reply="1"]') as HTMLElement | null
+      const btn = document.querySelector('[data-topic-message-reply]') as HTMLElement | null
       return btn === document.activeElement && parseFloat(getComputedStyle(btn, '::after').opacity) === 1
     }, undefined, { timeout: 400 })
     const opacityOnFocus = await isoPage.evaluate(() => {
-      const btn = document.querySelector('[data-topic-message-reply="1"]') as HTMLElement
+      const btn = document.querySelector('[data-topic-message-reply]') as HTMLElement
       return parseFloat(getComputedStyle(btn, '::after').opacity)
     })
     assertEqual(opacityOnFocus, 1, 'keyboard focus трябва да покаже "Отговори" tooltip-а (:focus-visible)')
 
+    // Етап 3 — Reply вече е реална функционалност (не "скоро" toast). Non-VIP
+    // (harness-ът няма topicsVipGate wired → isActive:false) click трябва да
+    // отвори СЪЩИЯ VIP-required popup, ползван от root composer-a, БЕЗ да
+    // focus-не inline reply composer textarea.
     await replyLocator.click()
-    await isoPage.waitForFunction(
-      () => document.body.textContent?.includes('Функцията ще бъде налична скоро.') ?? false,
-      undefined,
-      { timeout: 2000 },
-    )
+    await isoPage.waitForSelector('[data-topics-vip-popup-card="1"]', { state: 'attached', timeout: 1000 })
+
+    const toastVisible = await isoPage.evaluate(() => document.body.textContent?.includes('Функцията ще бъде налична скоро.') ?? false)
+    assert(!toastVisible, 'Reply вече НЕ трябва да показва "ще бъде налично скоро" toast (Етап 3 — реална функционалност)')
+
+    const replyComposerFocused = await isoPage.evaluate(() => document.activeElement?.matches('[data-topics-reply-composer-text="1"]') ?? false)
+    assert(!replyComposerFocused, 'Non-VIP click НЕ трябва да focus-не inline reply composer-а — VIP popup-ът е правилният flow')
+
+    // Затваряме popup-а, за да не пречи на следващите тестове в СЪЩИЯ isoPage.
+    await isoPage.evaluate(() => {
+      const closeBtn = document.querySelector<HTMLButtonElement>('[data-topics-vip-popup-close="1"]')
+      closeBtn?.click()
+    })
   })
 
   await check('[30] Desktop Topics width: header/topics-bar/message-stream/composer споделят СЪЩАТА content ширина (canonical navbar width)', async () => {

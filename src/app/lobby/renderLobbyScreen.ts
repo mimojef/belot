@@ -29,6 +29,7 @@ import type {
   TournamentSummarySnapshot,
   TopicSnapshot,
   TopicMessageSnapshot,
+  TopicReplySnapshot,
 } from '../network/createGameServerClient'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, ActiveRoomSnapshot } from '../adminServer/adminServerTypes'
 import { isBotsOnlyActiveRoom, isStaleActiveRoom } from '../adminServer/adminServerTypes'
@@ -333,6 +334,17 @@ export type LobbyScreenState = {
   topicComposerDraftByTopicId: Record<string, string>
   topicComposerPendingRequestIdByTopicId: Record<string, string | null>
   topicComposerErrorTextByTopicId: Record<string, string | null>
+  topicExpandedReplyRootIds: string[]
+  topicRepliesByRootId: Record<string, TopicReplySnapshot[] | null>
+  topicRepliesHasMoreByRootId: Record<string, boolean>
+  topicRepliesLoadingByRootId: Record<string, boolean>
+  topicReplyComposerDraftByRootId: Record<string, string>
+  topicReplyComposerPendingRequestIdByRootId: Record<string, string | null>
+  topicReplyComposerErrorTextByRootId: Record<string, string | null>
+  topicReplyComposerOpenRootId: string | null
+  topicMessageLikeCountById: Record<string, number>
+  topicMessageViewerHasLikedById: Record<string, boolean>
+  topicMessageLikePendingRequestIdById: Record<string, string | null>
   topicsVipGate: { isActive: boolean; hasClaimedLaunchGift: boolean } | null
   topicsVipGateLoading: boolean
   topicsVipPopupOpen: boolean
@@ -705,13 +717,17 @@ export type RenderLobbyScreenOptions = {
   onTopicsClick: () => void
   onTopicChipClick: (topicId: string) => void
   onTopicCreateClick: () => void
-  onTopicMessageLikeClick: () => void
-  onTopicMessageReplyClick: () => void
   onTopicsBackToGeneral: () => void
   onTopicMessagesLoadOlder: () => void
   onTopicComposerInput: (topicId: string, value: string) => void
   onTopicComposerSubmit: (topicId: string) => void
   onTopicComposerNonVipTap: () => void
+  onTopicRepliesLoadMore: (rootMessageId: string) => void
+  onTopicMessageLikeToggleClick: (messageId: string) => void
+  onTopicReplyClick: (rootMessageId: string) => void
+  onTopicReplyComposerCancel: (rootMessageId: string) => void
+  onTopicReplyComposerInput: (rootMessageId: string, value: string) => void
+  onTopicReplyComposerSubmit: (rootMessageId: string) => void
   onTopicsVipPopupClose: () => void
   onTopicsVipPopupClaimLaunchGift: () => void
   onTopicsVipPopupSeePlans: () => void
@@ -9959,19 +9975,70 @@ export function renderLobbyScreen(
     }
   }
 
-  // ─── UI polish pass: create-topic / like / reply "скоро" toast wiring ──────
-  // Все още неимплементирани features — само UI feedback, без backend/state.
-  {
-    root.querySelector<HTMLButtonElement>('[data-topics-create="1"]')?.addEventListener('click', () => {
-      options.onTopicCreateClick()
+  // ─── UI polish pass: create-topic "скоро" toast wiring ──────────────────
+  // Все още неимплементирано (Етап 4) — само UI feedback, без backend/state.
+  root.querySelector<HTMLButtonElement>('[data-topics-create="1"]')?.addEventListener('click', () => {
+    options.onTopicCreateClick()
+  })
+
+  // ─── Likes (Етап 3) — реален toggle, per-message data attribute ─────────
+  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-like]').forEach((btn) => {
+    const messageId = btn.dataset.topicMessageLike ?? ''
+    if (!messageId) return
+    btn.addEventListener('click', () => {
+      options.onTopicMessageLikeToggleClick(messageId)
     })
-    root.querySelectorAll<HTMLButtonElement>('[data-topic-message-like="1"]').forEach((btn) => {
-      btn.addEventListener('click', () => options.onTopicMessageLikeClick())
+  })
+
+  // ─── Replies (Етап 3) — expand/collapse, load more, inline composer ─────
+  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-reply]').forEach((btn) => {
+    const rootMessageId = btn.dataset.topicMessageReply ?? ''
+    if (!rootMessageId) return
+    btn.addEventListener('click', () => {
+      options.onTopicReplyClick(rootMessageId)
     })
-    root.querySelectorAll<HTMLButtonElement>('[data-topic-message-reply="1"]').forEach((btn) => {
-      btn.addEventListener('click', () => options.onTopicMessageReplyClick())
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-topic-replies-load-more]').forEach((btn) => {
+    const rootMessageId = btn.dataset.topicRepliesLoadMore ?? ''
+    if (!rootMessageId) return
+    btn.addEventListener('click', () => {
+      options.onTopicRepliesLoadMore(rootMessageId)
     })
-  }
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-topics-reply-composer-cancel]').forEach((btn) => {
+    const rootMessageId = btn.dataset.topicsReplyComposerCancel ?? ''
+    if (!rootMessageId) return
+    btn.addEventListener('click', () => {
+      options.onTopicReplyComposerCancel(rootMessageId)
+    })
+  })
+
+  root.querySelectorAll<HTMLFormElement>('[data-topics-reply-composer-form="1"]').forEach((form) => {
+    const rootMessageId = form.dataset.topicsReplyComposerRootId ?? ''
+    if (!rootMessageId) return
+    const textarea = form.querySelector<HTMLTextAreaElement>('[data-topics-reply-composer-text="1"]')
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault()
+      options.onTopicReplyComposerSubmit(rootMessageId)
+    })
+
+    if (textarea) {
+      autoGrowTextarea(textarea)
+      textarea.addEventListener('input', () => {
+        options.onTopicReplyComposerInput(rootMessageId, textarea.value)
+        autoGrowTextarea(textarea)
+      })
+      textarea.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault()
+          options.onTopicReplyComposerSubmit(rootMessageId)
+        }
+      })
+    }
+  })
 
   root
     .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-shop="1"]')

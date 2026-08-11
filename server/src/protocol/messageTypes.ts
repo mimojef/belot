@@ -242,6 +242,20 @@ export type ClientMessage =
       /** Задължителен (за разлика от lobby chat) — единствен ack-correlation механизъм, виж Етап 2 брифа т.7. */
       requestId: string
     }
+  | {
+      type: 'send_topic_reply'
+      topicId: string
+      /** Винаги root съобщение — reply-към-reply се отхвърля server-side (Етап 3, едно ниво). */
+      parentMessageId: string
+      body: string
+      requestId: string
+    }
+  | {
+      type: 'toggle_topic_message_like'
+      /** Работи еднакво за root съобщение и reply — likes не различават нивото. */
+      messageId: string
+      requestId: string
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -831,6 +845,11 @@ export type ServerMessage =
   | TopicMessageCatchupMessage
   | TopicMessageReceivedMessage
   | TopicMessageErrorMessage
+  | TopicReplyReceivedMessage
+  | TopicReplyErrorMessage
+  | TopicMessageLikeChangedMessage
+  | TopicMessageLikeChangedSelfMessage
+  | TopicMessageLikeErrorMessage
 
 export type ProfileLikedMessage = {
   type: 'profile_liked'
@@ -985,6 +1004,43 @@ export type TopicMessageBroadcastSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   body: string
   createdAt: string
+  /**
+   * Етап 3 — включено в root push-а (не в reply push-а, виж
+   * TopicReplyBroadcastSnapshot), за да не се налага отделна REST/WS заявка
+   * за aggregate данни веднага след live-append на ново root съобщение.
+   * likeCount/replyCount на прясно вмъкнато съобщение винаги са 0 в
+   * практика (никой не може да е like-нал/отговорил преди broadcast-а да
+   * пристигне), но полетата се пращат explicit за shape симетрия с REST.
+   */
+  likeCount: number
+  replyCount: number
+  /**
+   * Per-viewer — САМО в payload-а, изпратен КЪМ ТОЗИ subscriber (viewer-side
+   * agregation се прави individually per subscriber connection при
+   * broadcast, виж index.ts). НЕ е глобално константно поле в DB реда.
+   */
+  viewerHasLiked: boolean
+}
+
+/**
+ * Reply push (нов reply / cross-instance poll / catch-up) — НЕ включва
+ * replyCount (replies са едно ниво, reply-и-към-reply не съществуват), и НЕ
+ * показва VIP badge-related данни (Етап 3 брифа: "не показвай VIP badge до
+ * авторите" — важи и за replies, senderRole вече не носи VIP информация).
+ */
+export type TopicReplyBroadcastSnapshot = {
+  seq: number
+  messageId: string
+  topicId: string
+  parentMessageId: string
+  senderProfileId: string
+  senderDisplayName: string
+  senderAvatarUrl: string | null
+  senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
+  body: string
+  createdAt: string
+  likeCount: number
+  viewerHasLiked: boolean
 }
 
 export type TopicMessageCatchupMessage = {
@@ -1023,6 +1079,62 @@ export type TopicMessageErrorMessage = {
   code: TopicMessageErrorCode
   message: string
   requestId?: string
+}
+
+// ─── Replies (Етап 3) ────────────────────────────────────────────────────
+
+export type TopicReplyReceivedMessage = TopicReplyBroadcastSnapshot & {
+  type: 'topic_reply'
+  requestId?: string
+}
+
+export type TopicReplyErrorCode =
+  | TopicMessageErrorCode
+  | 'parent_not_found'
+  | 'reply_to_reply_denied'
+
+export type TopicReplyErrorMessage = {
+  type: 'topic_reply_error'
+  code: TopicReplyErrorCode
+  message: string
+  requestId: string
+}
+
+// ─── Likes (Етап 3) ──────────────────────────────────────────────────────
+//
+// Разделени в ДВЕ съобщения нарочно: `topic_message_like_changed` е
+// PUBLIC broadcast към всички subscribers на темата (само messageId +
+// likeCount — viewer-agnostic aggregate, никаква liker identity разкрита).
+// `topic_message_like_changed_self` се изпраща САМО към connection-а на
+// потребителя, който е направил toggle-а — носи и viewerHasLiked (private
+// state, само собственика трябва да го знае) + requestId за ack-correlation
+// с pending optimistic UI toggle-а на клиента.
+
+export type TopicMessageLikeChangedMessage = {
+  type: 'topic_message_like_changed'
+  messageId: string
+  likeCount: number
+}
+
+export type TopicMessageLikeChangedSelfMessage = {
+  type: 'topic_message_like_changed_self'
+  messageId: string
+  likeCount: number
+  viewerHasLiked: boolean
+  requestId: string
+}
+
+export type TopicMessageLikeErrorCode =
+  | 'not_authenticated'
+  | 'guest_not_allowed'
+  | 'message_not_found'
+  | 'rate_limited'
+
+export type TopicMessageLikeErrorMessage = {
+  type: 'topic_message_like_error'
+  code: TopicMessageLikeErrorCode
+  message: string
+  requestId: string
 }
 
 export function getDisplayNameFromIdentity(
