@@ -488,7 +488,7 @@ try {
   // изобщо, независимо какво прави потребителят с chips-овете вдясно.
   await check('[11] "+" бутонът остава фиксиран при horizontal swipe на topics bar', async () => {
     const plusBefore = await page.evaluate(() => {
-      const btn = document.querySelector('[data-topics-create-inert="1"]')
+      const btn = document.querySelector('[data-topics-create="1"]')
       const rect = btn?.getBoundingClientRect()
       return rect ? { left: rect.left, top: rect.top } : null
     })
@@ -501,7 +501,7 @@ try {
     await page.waitForTimeout(100)
 
     const plusAfterSwipe = await page.evaluate(() => {
-      const btn = document.querySelector('[data-topics-create-inert="1"]')
+      const btn = document.querySelector('[data-topics-create="1"]')
       const rect = btn?.getBoundingClientRect()
       return rect ? { left: rect.left, top: rect.top } : null
     })
@@ -577,7 +577,7 @@ try {
     await narrowPage.waitForTimeout(50)
 
     const plusBefore = await narrowPage.evaluate(() => {
-      const r = document.querySelector('[data-topics-create-inert="1"]')?.getBoundingClientRect()
+      const r = document.querySelector('[data-topics-create="1"]')?.getBoundingClientRect()
       return r ? { left: r.left, top: r.top } : null
     })
     const topicsScrollLeftBefore = await narrowPage.evaluate(() => (document.querySelector('[data-topics-bar-scroll="1"]') as HTMLElement).scrollLeft)
@@ -595,7 +595,7 @@ try {
     await narrowPage.waitForTimeout(100)
 
     const plusAfter = await narrowPage.evaluate(() => {
-      const r = document.querySelector('[data-topics-create-inert="1"]')?.getBoundingClientRect()
+      const r = document.querySelector('[data-topics-create="1"]')?.getBoundingClientRect()
       return r ? { left: r.left, top: r.top } : null
     })
     const topicsScrollLeftAfter = await narrowPage.evaluate(() => (document.querySelector('[data-topics-bar-scroll="1"]') as HTMLElement).scrollLeft)
@@ -666,7 +666,7 @@ try {
     assertEqual(arrowsHidden.right, 'none', 'десен arrow control трябва да е скрит на touch viewport')
 
     const plusBefore = await mobilePage.evaluate(() => {
-      const r = document.querySelector('[data-topics-create-inert="1"]')?.getBoundingClientRect()
+      const r = document.querySelector('[data-topics-create="1"]')?.getBoundingClientRect()
       return r ? { left: r.left, top: r.top } : null
     })
     await mobilePage.evaluate(() => {
@@ -675,13 +675,36 @@ try {
     })
     await mobilePage.waitForTimeout(100)
     const plusAfter = await mobilePage.evaluate(() => {
-      const r = document.querySelector('[data-topics-create-inert="1"]')?.getBoundingClientRect()
+      const r = document.querySelector('[data-topics-create="1"]')?.getBoundingClientRect()
       return r ? { left: r.left, top: r.top } : null
     })
     assert(
       plusBefore !== null && plusAfter !== null && Math.abs(plusBefore.left - plusAfter.left) < 1,
       '"+" не трябва да мръдне при touch swipe на mobile',
     )
+
+    const likeMobileInfo = await mobilePage.evaluate(() => {
+      const btn = document.querySelector('[data-topic-message-like="1"]') as HTMLElement | null
+      if (!btn) return null
+      const icon = btn.querySelector('.topic-message-action-icon') as HTMLElement | null
+      const cs = getComputedStyle(btn)
+      const r = btn.getBoundingClientRect()
+      return {
+        visibleText: btn.textContent?.trim() ?? '',
+        iconFontSize: icon ? parseFloat(getComputedStyle(icon).fontSize) : null,
+        paddingTop: parseFloat(cs.paddingTop),
+        paddingBottom: parseFloat(cs.paddingBottom),
+        width: r.width,
+        height: r.height,
+      }
+    })
+    assert(likeMobileInfo !== null, 'Like копчето трябва да съществува на mobile')
+    assert((likeMobileInfo!.visibleText?.length ?? 0) <= 2, `mobile Like НЕ трябва да показва постоянен текст, получено: "${likeMobileInfo!.visibleText}"`)
+    assert(likeMobileInfo!.iconFontSize !== null && likeMobileInfo!.iconFontSize >= 18, 'иконата трябва да остане голяма на mobile')
+    assert(likeMobileInfo!.paddingTop + likeMobileInfo!.paddingBottom >= 18, 'mobile tap зоната трябва да е удобна за пръст (media query padding)')
+
+    const bodyScrollWidth = await mobilePage.evaluate(() => document.body.scrollWidth)
+    assert(bodyScrollWidth <= 390, `не трябва да има horizontal overflow на mobile, получено bodyScrollWidth=${bodyScrollWidth}`)
 
     await mobileContext.close()
   })
@@ -734,20 +757,25 @@ try {
     assertEqual(footerCount, 0, 'Не трябва да има footer елементи в Topics view')
   })
 
-  await check('[19] Composer shell присъства и е позициониран (визуален shell, disabled)', async () => {
+  await check('[19] Composer форма присъства и е позиционирана (Етап 2 — real composer, тук без VIP callback -> vip-locked readonly)', async () => {
     const composer = await isoPage.evaluate(() => {
-      const el = document.querySelector('[data-topics-composer-shell="1"]')
-      const input = document.querySelector('[data-topics-composer-shell="1"] input')
-      const button = document.querySelector('[data-topics-composer-shell="1"] button')
+      const form = document.querySelector('[data-topics-composer-form="1"]')
+      const textarea = document.querySelector('[data-topics-composer-text="1"]')
+      const button = document.querySelector('[data-topics-composer-send="1"]')
       return {
-        exists: el !== null,
-        inputDisabled: input ? (input as HTMLInputElement).disabled : null,
-        buttonDisabled: button ? (button as HTMLButtonElement).disabled : null,
+        exists: form !== null,
+        // Този harness не подава onGetTopicsVipGateStatus/onClaimTopicsLaunchGift
+        // -> topicsVipGate остава null -> composer се рендира non-VIP-locked
+        // (readonly, НЕ disabled — виж Етап 2 корекция т.4 UX модел).
+        vipLocked: form ? (form as HTMLFormElement).dataset.topicsComposerVipLocked === '1' : null,
+        textareaReadonly: textarea ? (textarea as HTMLTextAreaElement).readOnly : null,
+        buttonExists: button !== null,
       }
     })
-    assert(composer.exists, 'Composer shell трябва да съществува в DOM-а')
-    assertEqual(composer.inputDisabled, true, 'Composer input трябва да е disabled (Етап 1, visual-only)')
-    assertEqual(composer.buttonDisabled, true, 'Composer бутонът трябва да е disabled (Етап 1, visual-only)')
+    assert(composer.exists, 'Composer формата трябва да съществува в DOM-а')
+    assertEqual(composer.vipLocked, true, 'Без VIP gate callback composer-ът трябва да е vip-locked')
+    assertEqual(composer.textareaReadonly, true, 'Textarea трябва да е readonly (не disabled) в non-VIP състояние')
+    assert(composer.buttonExists, 'Send бутонът трябва да съществува')
   })
 
   await check('[20] Message stream е единственият vertical scroll container (fixed top/composer не мърдат при scroll)', async () => {
@@ -765,7 +793,7 @@ try {
 
     const before = await isoPage.evaluate(() => ({
       header: document.querySelector('[data-topics-fixed-top="1"]')?.getBoundingClientRect().top,
-      composer: document.querySelector('[data-topics-composer-shell="1"]')?.getBoundingClientRect().top,
+      composer: document.querySelector('[data-topics-composer-form="1"]')?.getBoundingClientRect().top,
     }))
 
     await isoPage.evaluate(() => {
@@ -776,7 +804,7 @@ try {
 
     const after = await isoPage.evaluate(() => ({
       header: document.querySelector('[data-topics-fixed-top="1"]')?.getBoundingClientRect().top,
-      composer: document.querySelector('[data-topics-composer-shell="1"]')?.getBoundingClientRect().top,
+      composer: document.querySelector('[data-topics-composer-form="1"]')?.getBoundingClientRect().top,
       windowScrollY: window.scrollY,
     }))
 
@@ -919,7 +947,226 @@ try {
     assertEqual(windowScrollY, 0, 'window.scrollY трябва да остане 0 по време на load-older')
   })
 
-  await check('[25] Няма JS грешки в конзолата по време на viewport isolation сценариите', () => {
+  // ─── [26]-[30] UI polish pass: "+" (зелен, скоро), Like/Reply (скоро), width ──
+
+  await check('[26] "+" бутонът е зелен (не сив/disabled) и pinned най-вляво пред chips', async () => {
+    const info = await isoPage.evaluate(() => {
+      const btn = document.querySelector('[data-topics-create="1"]') as HTMLButtonElement | null
+      const row = document.querySelector('[data-topics-bar-row="1"]')
+      if (!btn || !row) return null
+      const cs = getComputedStyle(btn)
+      const firstChild = row.children[0]
+      return {
+        isFirstChild: firstChild === btn,
+        hasAriaDisabled: btn.hasAttribute('aria-disabled'),
+        backgroundImage: cs.backgroundImage,
+      }
+    })
+    assert(info !== null, '"+" бутонът и topics-bar-row трябва да съществуват')
+    assert(info!.isFirstChild, '"+" трябва да е първият елемент в topics-bar-row (най-вляво, pinned)')
+    assert(!info!.hasAriaDisabled, '"+" вече НЕ трябва да носи aria-disabled (реагира на клик с toast, не е истински disabled)')
+    // Браузърът нормализира hex цветовете от inline style-а до rgb() при computed style четене.
+    assert(
+      /rgb\(34,\s*197,\s*94\)/.test(info!.backgroundImage) || /rgb\(22,\s*163,\s*74\)/.test(info!.backgroundImage),
+      `"+" трябва да ползва зеления gradient (#22c55e/#16a34a), получен background-image: ${info!.backgroundImage}`,
+    )
+  })
+
+  await check('[27] Клик върху "+" показва "ще бъде налично скоро" toast, БЕЗ create-topic форма/навигация', async () => {
+    const urlBefore = isoPage.url()
+    const activeTopicBefore = await isoPage.evaluate(() =>
+      document.querySelector('[data-topic-chip][data-active="1"]')?.getAttribute('data-topic-chip') ?? null,
+    )
+    await isoPage.click('[data-topics-create="1"]')
+    await isoPage.waitForFunction(
+      () => document.body.textContent?.includes('Създаването на теми ще бъде налично скоро.') ?? false,
+      undefined,
+      { timeout: 2000 },
+    )
+    const hasCreateForm = await isoPage.evaluate(() =>
+      document.querySelector('[data-topic-create-form]') !== null ||
+      document.querySelector('form[data-topics-create-form]') !== null,
+    )
+    assert(!hasCreateForm, 'НЕ трябва да се отвори create-topic форма')
+    assertEqual(isoPage.url(), urlBefore, 'URL не трябва да се промени (без навигация)')
+    const activeTopicAfter = await isoPage.evaluate(() =>
+      document.querySelector('[data-topic-chip][data-active="1"]')?.getAttribute('data-topic-chip') ?? null,
+    )
+    assertEqual(activeTopicAfter, activeTopicBefore, 'активната тема не трябва да се променя')
+    await isoPage.waitForTimeout(3600) // изчакваме auto-dismiss (3.5s), за да не пречи на следващите тестове
+  })
+
+  await check('[28] Like: само икона (без постоянен текст), по-голяма от преди, aria-label + tooltip, реална tap зона, показва "скоро" toast', async () => {
+    const likeInfo = await isoPage.evaluate(() => {
+      const btn = document.querySelector('[data-topic-message-like="1"]') as HTMLButtonElement | null
+      if (!btn) return null
+      const icon = btn.querySelector('.topic-message-action-icon') as HTMLElement | null
+      const cs = getComputedStyle(btn)
+      const iconCs = icon ? getComputedStyle(icon) : null
+      return {
+        tagName: btn.tagName,
+        visibleText: btn.textContent?.trim() ?? '',
+        ariaLabel: btn.getAttribute('aria-label'),
+        dataTooltip: btn.getAttribute('data-tooltip'),
+        hasTitleAttr: btn.hasAttribute('title'),
+        paddingTop: parseFloat(cs.paddingTop),
+        paddingBottom: parseFloat(cs.paddingBottom),
+        iconFontSize: iconCs ? parseFloat(iconCs.fontSize) : null,
+      }
+    })
+    assert(likeInfo !== null, 'поне едно Like копче трябва да съществува в текущия message stream')
+    assertEqual(likeInfo!.tagName, 'BUTTON', 'Like трябва да е истински <button>, не <span>')
+    assertEqual(likeInfo!.ariaLabel, 'Харесай', 'Like трябва да има aria-label="Харесай"')
+    assertEqual(likeInfo!.dataTooltip, 'Харесай', 'Like трябва да носи data-tooltip="Харесай" (custom tooltip pattern)')
+    assert(!likeInfo!.hasTitleAttr, 'Like НЕ трябва да ползва browser-native title tooltip (имаме собствен tooltip pattern)')
+    assert(likeInfo!.paddingTop + likeInfo!.paddingBottom >= 14, 'Like трябва да има реален vertical padding за tap зона, по-голяма от самата икона')
+    assert(likeInfo!.iconFontSize !== null && likeInfo!.iconFontSize >= 18, `иконата трябва да е осезаемо по-голяма (>=18px), получено: ${likeInfo!.iconFontSize}`)
+
+    // Много message rows са се натрупали от предишни тестове в СЪЩИЯ isoPage
+    // — data-topic-message-like="1" не е уникален per row (споделен маркер),
+    // затова навсякъде тук explicit-но взимаме ПЪРВОТО съвпадение (.first()),
+    // огледално на document.querySelector семантиката, ползвана другаде в
+    // този файл. scrollIntoViewIfNeeded() ПРЕДИ да мерим rectBefore, за да не
+    // объркаме auto-scroll-а (по-долу от hover()-а) с реален layout shift.
+    const likeLocator = isoPage.locator('[data-topic-message-like="1"]').first()
+    await likeLocator.scrollIntoViewIfNeeded()
+
+    const rectBefore = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like="1"]')!.getBoundingClientRect().toJSON())
+    const opacityBefore = await isoPage.evaluate(() => {
+      const btn = document.querySelector('[data-topic-message-like="1"]') as HTMLElement
+      return parseFloat(getComputedStyle(btn, '::after').opacity)
+    })
+    assertEqual(opacityBefore, 0, 'tooltip-ът НЕ трябва да е видим без hover/focus')
+
+    await likeLocator.hover()
+    // CSS transition:opacity 0.15s ease — изчакваме до 400ms, poll-вайки за
+    // финалната стойност, вместо fixed sleep по-къс от transition-а.
+    await isoPage.waitForFunction(() => {
+      const btn = document.querySelector('[data-topic-message-like="1"]') as HTMLElement
+      return parseFloat(getComputedStyle(btn, '::after').opacity) === 1
+    }, undefined, { timeout: 400 })
+    const opacityOnHover = await isoPage.evaluate(() => {
+      const btn = document.querySelector('[data-topic-message-like="1"]') as HTMLElement
+      return parseFloat(getComputedStyle(btn, '::after').opacity)
+    })
+    assertEqual(opacityOnHover, 1, 'desktop hover трябва да покаже "Харесай" tooltip-а (opacity:1)')
+    const rectAfterHover = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like="1"]')!.getBoundingClientRect().toJSON())
+    assertEqual(JSON.stringify(rectBefore), JSON.stringify(rectAfterHover), 'hover tooltip-ът НЕ трябва да мести layout-а (position:absolute)')
+
+    await likeLocator.click()
+    await isoPage.waitForFunction(
+      () => document.body.textContent?.includes('Функцията ще бъде налична скоро.') ?? false,
+      undefined,
+      { timeout: 2000 },
+    )
+    await isoPage.mouse.move(0, 0)
+    await isoPage.waitForTimeout(3600)
+  })
+
+  await check('[29] Reply: само икона, aria-label + tooltip, keyboard focus показва tooltip, показва "скоро" toast', async () => {
+    const replyInfo = await isoPage.evaluate(() => {
+      const btn = document.querySelector('[data-topic-message-reply="1"]') as HTMLButtonElement | null
+      if (!btn) return null
+      const icon = btn.querySelector('.topic-message-action-icon') as HTMLElement | null
+      const iconCs = icon ? getComputedStyle(icon) : null
+      return {
+        tagName: btn.tagName,
+        visibleText: btn.textContent?.trim() ?? '',
+        ariaLabel: btn.getAttribute('aria-label'),
+        dataTooltip: btn.getAttribute('data-tooltip'),
+        iconFontSize: iconCs ? parseFloat(iconCs.fontSize) : null,
+      }
+    })
+    assert(replyInfo !== null, 'поне едно Reply копче трябва да съществува')
+    assertEqual(replyInfo!.tagName, 'BUTTON', 'Reply трябва да е истински <button>, не <span>')
+    assertEqual(replyInfo!.ariaLabel, 'Отговори', 'Reply трябва да има aria-label="Отговори"')
+    assertEqual(replyInfo!.dataTooltip, 'Отговори', 'Reply трябва да носи data-tooltip="Отговори"')
+    assert(replyInfo!.iconFontSize !== null && replyInfo!.iconFontSize >= 18, `иконата трябва да е осезаемо по-голяма (>=18px), получено: ${replyInfo!.iconFontSize}`)
+
+    // Keyboard focus (:focus-visible) трябва да покаже същия tooltip —
+    // accessibility еквивалент на hover. `:focus-visible` в Chromium следва
+    // input modality-то — програмен .focus() (без предхождащ Tab) не винаги
+    // го тригерва надеждно, затова focus-ваме Like (реда преди Reply в DOM-а)
+    // и после реално натискаме Tab клавиша, за да стигнем до Reply — това е
+    // истинска keyboard навигация, каквато :focus-visible очаква.
+    const replyLocator = isoPage.locator('[data-topic-message-reply="1"]').first()
+    await isoPage.locator('[data-topic-message-like="1"]').first().focus()
+    await isoPage.keyboard.press('Tab')
+    await isoPage.waitForFunction(() => {
+      const btn = document.querySelector('[data-topic-message-reply="1"]') as HTMLElement | null
+      return btn === document.activeElement && parseFloat(getComputedStyle(btn, '::after').opacity) === 1
+    }, undefined, { timeout: 400 })
+    const opacityOnFocus = await isoPage.evaluate(() => {
+      const btn = document.querySelector('[data-topic-message-reply="1"]') as HTMLElement
+      return parseFloat(getComputedStyle(btn, '::after').opacity)
+    })
+    assertEqual(opacityOnFocus, 1, 'keyboard focus трябва да покаже "Отговори" tooltip-а (:focus-visible)')
+
+    await replyLocator.click()
+    await isoPage.waitForFunction(
+      () => document.body.textContent?.includes('Функцията ще бъде налична скоро.') ?? false,
+      undefined,
+      { timeout: 2000 },
+    )
+  })
+
+  await check('[30] Desktop Topics width: header/topics-bar/message-stream/composer споделят СЪЩАТА content ширина (canonical navbar width)', async () => {
+    const rectOf = async (sel: string): Promise<{ left: number; right: number } | null> => isoPage.evaluate((s) => {
+      const el = document.querySelector(s)
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      return { left: Math.round(r.left), right: Math.round(r.right) }
+    }, sel)
+    const widths = {
+      fixedTop: await rectOf('[data-topics-fixed-top="1"]'),
+      streamContainer: await rectOf('[data-topics-stream-container="1"]'),
+      composerForm: await rectOf('[data-topics-composer-form="1"]'),
+    }
+    assert(widths.fixedTop !== null && widths.streamContainer !== null, 'header и message stream трябва да съществуват')
+    assert(
+      Math.abs(widths.fixedTop!.left - widths.streamContainer!.left) <= 8 &&
+      Math.abs(widths.fixedTop!.right - widths.streamContainer!.right) <= 8,
+      `header и message stream трябва да имат почти същите леви/десни граници: header=${JSON.stringify(widths.fixedTop)}, stream=${JSON.stringify(widths.streamContainer)}`,
+    )
+    if (widths.composerForm) {
+      assert(
+        Math.abs(widths.fixedTop!.left - widths.composerForm.left) <= 8 &&
+        Math.abs(widths.fixedTop!.right - widths.composerForm.right) <= 8,
+        `composer трябва да следва СЪЩАТА ширина като header/stream: header=${JSON.stringify(widths.fixedTop)}, composer=${JSON.stringify(widths.composerForm)}`,
+      )
+    }
+  })
+
+  // [32] е ДИРЕКТНАТА регресия за проблема от втория UI polish кръг: споделен
+  // max-width constant (тествано в [30] по-горе) НЕ гарантира еднаква
+  // ФАКТИЧЕСКИ рендирана ширина — nav е content-driven (margin:auto
+  // self-centering изключва stretch), затова тук сравняваме РЕАЛНИТЕ
+  // getBoundingClientRect() ръбове на <nav> срещу [data-topics-desktop-shell],
+  // не абстрактен CSS-constant равенство.
+  await check('[32] Desktop: Topics outer shell edges (getBoundingClientRect) съвпадат с РЕАЛНО рендираните navbar edges, не само max-width константата', async () => {
+    const rectOf = async (sel: string): Promise<{ left: number; right: number; width: number } | null> => isoPage.evaluate((s) => {
+      const el = document.querySelector(s)
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      return { left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width) }
+    }, sel)
+    const navRect = await rectOf('nav')
+    const shellRect = await rectOf('[data-topics-desktop-shell="1"]')
+    assert(navRect !== null, 'nav трябва да съществува на desktop')
+    assert(shellRect !== null, '[data-topics-desktop-shell="1"] трябва да съществува на desktop')
+    // Допустима толерантност само за border/padding субпиксел разлики
+    // (виж коментара в renderLobbyScreen.ts над JS width-measurement блока),
+    // НЕ за структурно разминаване като преди фикса (~1600 vs ~1270, delta 330px).
+    const TOLERANCE_PX = 4
+    assert(
+      Math.abs(navRect!.left - shellRect!.left) <= TOLERANCE_PX &&
+      Math.abs(navRect!.right - shellRect!.right) <= TOLERANCE_PX &&
+      Math.abs(navRect!.width - shellRect!.width) <= TOLERANCE_PX,
+      `Topics shell трябва визуално да се подравнява с РЕАЛНО рендираната navbar ширина (±${TOLERANCE_PX}px): nav=${JSON.stringify(navRect)}, shell=${JSON.stringify(shellRect)}`,
+    )
+  })
+
+  await check('[33] Няма JS грешки в конзолата по време на viewport isolation сценариите (вкл. UI polish pass взаимодействията)', () => {
     assert(isoErrors.length === 0, `Конзолни грешки: ${isoErrors.join(' | ')}`)
   })
 

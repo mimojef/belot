@@ -81,6 +81,13 @@ import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestT
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import { renderLevelLockedStakePopup, attachLevelLockedStakePopupEventListeners, type LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
 
+// Каноничната desktop content ширина за целия сайт — вече ползвана от
+// renderNav() (виж по-долу) и non-topics content wrapper-а (desktop клона на
+// root render-а). UI polish pass (Topics width): Topics content wrapper-ът
+// вече consumnира СЪЩАТА константа, вместо отделно hardcode-нато число, за да
+// не могат двете стойности да се разминат при бъдеща промяна.
+const PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX = 1640
+
 const MISSION_TYPE_LABELS: Record<string, string> = {
   win_games: 'Спечели N игри',
   win_capot_games: 'Спечели N игри с капо',
@@ -322,6 +329,17 @@ export type LobbyScreenState = {
   topicMessagesHasMore: boolean
   topicMessagesOldestSeq: number | null
   topicOlderMessagesLoading: boolean
+  topicMessagesRenderReason: 'initial' | 'prepend' | 'live-append' | 'reconnect-refresh' | null
+  topicComposerDraftByTopicId: Record<string, string>
+  topicComposerPendingRequestIdByTopicId: Record<string, string | null>
+  topicComposerErrorTextByTopicId: Record<string, string | null>
+  topicsVipGate: { isActive: boolean; hasClaimedLaunchGift: boolean } | null
+  topicsVipGateLoading: boolean
+  topicsVipPopupOpen: boolean
+  topicsVipClaimSubmitting: boolean
+  topicsVipClaimErrorText: string | null
+  topicsVipSeePlansMessageVisible: boolean
+  topicsInfoToast: { text: string } | null
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -686,8 +704,17 @@ export type RenderLobbyScreenOptions = {
   onTournamentsClick: () => void
   onTopicsClick: () => void
   onTopicChipClick: (topicId: string) => void
+  onTopicCreateClick: () => void
+  onTopicMessageLikeClick: () => void
+  onTopicMessageReplyClick: () => void
   onTopicsBackToGeneral: () => void
   onTopicMessagesLoadOlder: () => void
+  onTopicComposerInput: (topicId: string, value: string) => void
+  onTopicComposerSubmit: (topicId: string) => void
+  onTopicComposerNonVipTap: () => void
+  onTopicsVipPopupClose: () => void
+  onTopicsVipPopupClaimLaunchGift: () => void
+  onTopicsVipPopupSeePlans: () => void
   onTopicMessageAuthorClick: (profileId: string, displayName: string) => void
   onTournamentHowItWorksOpen: () => void
   onTournamentsFilterChange: (filter: 'all' | 'mine') => void
@@ -1157,6 +1184,15 @@ function submitTextareaOnEnter(textarea: HTMLTextAreaElement | null): void {
     event.preventDefault()
     textarea.form?.requestSubmit()
   })
+}
+
+// Bounded auto-grow (Етап 2 Topics composer) — рязко се разширява до
+// съдържанието, capped от CSS max-height (виж inline style в
+// renderTopicsComposer) — composer-ът никога не поглъща целия message viewport.
+function autoGrowTextarea(textarea: HTMLTextAreaElement | null): void {
+  if (!textarea) return
+  textarea.style.height = 'auto'
+  textarea.style.height = `${textarea.scrollHeight}px`
 }
 
 function formatAmount(value: number): string {
@@ -1900,7 +1936,7 @@ function renderNav(state: LobbyScreenState): string {
     <nav style="
       background: #0a0a0a;
       border-bottom: 1px solid rgba(255,255,255,0.10);
-      max-width: 1640px;
+      max-width: ${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px;
       margin: 0 auto;
       box-sizing: border-box;
       padding: 0 5px;
@@ -8987,6 +9023,19 @@ export function renderLobbyScreen(
   const savedTopicMessagesDistanceFromBottom = prevTopicMessagesScrollEl
     ? prevTopicMessagesScrollEl.scrollHeight - prevTopicMessagesScrollEl.scrollTop
     : null
+  // 'live-append'/'reconnect-refresh' клон (Етап 2) — огледално на
+  // wasLobbyChatNearBottom по-долу: ново live съобщение дърпа до дъното
+  // САМО ако потребителят вече е бил близо до него, иначе append без да го
+  // "издърпаме" насила докато чете стари съобщения (Етап 2 брифа т.8).
+  const wasTopicMessagesNearBottom = prevTopicMessagesScrollEl === null
+    ? true
+    : prevTopicMessagesScrollEl.scrollHeight - prevTopicMessagesScrollEl.scrollTop - prevTopicMessagesScrollEl.clientHeight < 48
+  const savedTopicMessagesScrollTop = prevTopicMessagesScrollEl?.scrollTop ?? 0
+
+  const prevTopicComposerTextEl = root.querySelector<HTMLTextAreaElement>('[data-topics-composer-text="1"]')
+  const wasTopicComposerFocused = prevTopicComposerTextEl !== null && document.activeElement === prevTopicComposerTextEl
+  const savedTopicComposerSelectionStart = wasTopicComposerFocused ? prevTopicComposerTextEl.selectionStart : null
+  const savedTopicComposerSelectionEnd = wasTopicComposerFocused ? prevTopicComposerTextEl.selectionEnd : null
 
   const savedScrollTop = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')?.scrollTop ?? 0
   // Отделно от savedScrollTop по-горе: списъкът с admin support запитвания има собствен
@@ -9201,12 +9250,14 @@ export function renderLobbyScreen(
 
       <div data-lobby-scale-stage="1" style="${state.view === 'topics'
         ? 'width:100%;height:100%;display:flex;flex-direction:column;min-height:0;'
-        : 'width:1640px; margin:0 auto; zoom:var(--lobby-scale);'}">
+        : `width:${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px; margin:0 auto; zoom:var(--lobby-scale);`}">
         ${renderNav(state)}
 
-        <div style="${state.view === 'topics'
-          ? 'flex:1;min-height:0;display:flex;flex-direction:column;max-width:1640px;width:100%;margin:0 auto;padding:16px 20px;background:#000000;box-sizing:border-box;overflow:hidden;'
-          : 'max-width: 1640px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;'}">
+        <div
+          ${state.view === 'topics' ? 'data-topics-desktop-shell="1"' : ''}
+          style="${state.view === 'topics'
+          ? `flex:1;min-height:0;display:flex;flex-direction:column;max-width:${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px;width:100%;margin:0 auto;padding:16px 20px;background:#000000;box-sizing:border-box;overflow:hidden;`
+          : `max-width: ${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;`}">
           ${state.view === 'support'
             ? renderAdminSupportPage(state)
             : state.view === 'guest-contact-messages'
@@ -9811,6 +9862,115 @@ export function renderLobbyScreen(
     // атрибутите в markup-а са статични ("disabled" always в render-а),
     // трябва реално измерена проверка веднага след DOM-ът е в документа.
     updateTopicsArrowState()
+  }
+
+  // ─── Composer (Етап 2) ───────────────────────────────────────────────────
+  {
+    const topicsComposerForm = root.querySelector<HTMLFormElement>('[data-topics-composer-form="1"]')
+    const topicsComposerTextEl = root.querySelector<HTMLTextAreaElement>('[data-topics-composer-text="1"]')
+    const topicsComposerSendBtn = root.querySelector<HTMLButtonElement>('[data-topics-composer-send="1"]')
+
+    autoGrowTextarea(topicsComposerTextEl)
+
+    if (topicsComposerForm) {
+      const topicId = topicsComposerForm.dataset.topicsComposerTopicId ?? ''
+      const isVipLocked = topicsComposerForm.dataset.topicsComposerVipLocked === '1'
+
+      topicsComposerForm.addEventListener('submit', (event) => {
+        event.preventDefault()
+        if (topicId) options.onTopicComposerSubmit(topicId)
+      })
+
+      if (isVipLocked) {
+        // Non-VIP: прихващаме ПРЕДИ focus/mobile keyboard да се задействат
+        // (Етап 2 брифа — "tap не трябва да отваря mobile keyboard"). `readonly`
+        // в HTML е defense-in-depth baseline, истинската интерцепция е тук.
+        const interceptNonVipTap = (event: Event): void => {
+          event.preventDefault()
+          options.onTopicComposerNonVipTap()
+        }
+        topicsComposerTextEl?.addEventListener('pointerdown', interceptNonVipTap)
+        topicsComposerSendBtn?.addEventListener('pointerdown', interceptNonVipTap)
+      } else {
+        submitTextareaOnEnter(topicsComposerTextEl)
+        topicsComposerTextEl?.addEventListener('input', (event) => {
+          const textarea = event.currentTarget as HTMLTextAreaElement
+          if (topicId) options.onTopicComposerInput(topicId, textarea.value)
+          autoGrowTextarea(textarea)
+        })
+        keepComposerFocusOnPointerSubmit(topicsComposerSendBtn)
+      }
+    }
+  }
+
+  // ─── VIP popup (Етап 2) ──────────────────────────────────────────────────
+  {
+    root.querySelector<HTMLElement>('[data-topics-vip-popup-backdrop="1"]')?.addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) options.onTopicsVipPopupClose()
+    })
+    root.querySelector<HTMLButtonElement>('[data-topics-vip-popup-close="1"]')?.addEventListener('click', () => {
+      options.onTopicsVipPopupClose()
+    })
+    root.querySelector<HTMLButtonElement>('[data-topics-vip-popup-claim="1"]')?.addEventListener('click', () => {
+      options.onTopicsVipPopupClaimLaunchGift()
+    })
+    root.querySelector<HTMLButtonElement>('[data-topics-vip-popup-see-plans="1"]')?.addEventListener('click', () => {
+      options.onTopicsVipPopupSeePlans()
+    })
+  }
+
+  // ─── UI polish pass v2: Topics desktop shell = РЕАЛНАТА рендирана navbar
+  // ширина ─────────────────────────────────────────────────────────────────
+  //
+  // Root cause на предишния опит (max-width:1640px reuse): nav (`renderNav`)
+  // има `margin:0 auto` за центриране — а auto margins на cross-axis-а на
+  // flex item ИЗКЛЮЧВАТ align-items:stretch (spec поведение) и вместо това
+  // карат nav да се самоопредели по max-content (сумата от logo+бутони+gaps),
+  // центриран чрез auto margins, capped единствено от max-width:1640px,
+  // никога реално достигнат. Затова nav рендира ~1260-1330px, докато Topics
+  // content wrapper-ът (без auto-margin self-centering — просто `width:100%`
+  // вътре в ВЕЧЕ центриран 1640px родител) реално ЗАПЪЛВА тези 1640px.
+  // Двете стойности са фундаментално различни механизми — споделеният
+  // max-width taван не гарантира еднаква ФАКТИЧЕСКИ рендирана ширина.
+  //
+  // nav-ът е content-driven (не мога/не трябва да го променям — user
+  // изрично забрани пипане на navbar-а) — затова тук directly МЕРИМ
+  // реалната му getBoundingClientRect().width СЛЕД render и я прилагаме
+  // като max-width на Topics shell-а. Това е "reuse на реалната navbar shell
+  // width логика", буквално — не копие на константа, която може да се
+  // разсинхронизира ако nav съдържанието се промени (нови бутони, badge-ове).
+  //
+  // Само desktop (data-topics-desktop-shell съществува единствено в desktop
+  // клона на markup-а по-горе — mobile изобщо няма nav/scale-stage структура,
+  // затова querySelector тук естествено връща null на mobile, без нужда от
+  // изричен isPhoneLayoutViewport() check).
+  {
+    const navEl = root.querySelector<HTMLElement>('nav')
+    const topicsShellEl = root.querySelector<HTMLElement>('[data-topics-desktop-shell="1"]')
+    if (navEl && topicsShellEl) {
+      const navWidth = navEl.getBoundingClientRect().width
+      // min(navWidth, наличната viewport ширина минус safe padding) идва
+      // автоматично от CSS max-width семантиката — width:100% (вече в
+      // markup-а) + max-width:navWidth означава браузърът естествено избира
+      // по-малкото от двете, без допълнителна JS логика тук.
+      if (navWidth > 0) {
+        topicsShellEl.style.maxWidth = `${Math.round(navWidth)}px`
+      }
+    }
+  }
+
+  // ─── UI polish pass: create-topic / like / reply "скоро" toast wiring ──────
+  // Все още неимплементирани features — само UI feedback, без backend/state.
+  {
+    root.querySelector<HTMLButtonElement>('[data-topics-create="1"]')?.addEventListener('click', () => {
+      options.onTopicCreateClick()
+    })
+    root.querySelectorAll<HTMLButtonElement>('[data-topic-message-like="1"]').forEach((btn) => {
+      btn.addEventListener('click', () => options.onTopicMessageLikeClick())
+    })
+    root.querySelectorAll<HTMLButtonElement>('[data-topic-message-reply="1"]').forEach((btn) => {
+      btn.addEventListener('click', () => options.onTopicMessageReplyClick())
+    })
   }
 
   root
@@ -11789,17 +11949,33 @@ export function renderLobbyScreen(
 
   const newTopicMessagesScrollEl = root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
   if (newTopicMessagesScrollEl) {
-    if (savedTopicMessagesDistanceFromBottom !== null) {
-      // Prepend (или обикновен re-render на същия екран) — възстановяваме
-      // точната визуална позиция чрез запазената delta от долния край.
+    if (state.topicMessagesRenderReason === 'prepend' && savedTopicMessagesDistanceFromBottom !== null) {
+      // Load older (scroll нагоре) — възстановяваме точната визуална позиция
+      // чрез запазената delta от долния край, потребителят не "подскача".
       newTopicMessagesScrollEl.scrollTop = newTopicMessagesScrollEl.scrollHeight - savedTopicMessagesDistanceFromBottom
+    } else if (state.topicMessagesRenderReason === 'live-append' || state.topicMessagesRenderReason === 'reconnect-refresh') {
+      // Ново live съобщение (WS push) или reconnect/truncated-catchup refresh
+      // (Етап 2 брифа т.8) — near-bottom threshold, огледално на
+      // wasLobbyChatNearBottom: не дърпаме насила потребител, който чете стари.
+      newTopicMessagesScrollEl.scrollTop = wasTopicMessagesNearBottom
+        ? newTopicMessagesScrollEl.scrollHeight
+        : savedTopicMessagesScrollTop
     } else {
-      // Първо зареждане на тема (или превключване към нова тема) — viewport
+      // 'initial' (първо зареждане на тема / превключване) или null — viewport
       // към последните съобщения (т.4 от Етап 1 брифа: "viewport е към
       // долната част/последните съобщения").
       newTopicMessagesScrollEl.scrollTop = newTopicMessagesScrollEl.scrollHeight
     }
   }
+
+  const newTopicComposerTextEl = root.querySelector<HTMLTextAreaElement>('[data-topics-composer-text="1"]')
+  if (newTopicComposerTextEl && wasTopicComposerFocused) {
+    newTopicComposerTextEl.focus()
+    if (savedTopicComposerSelectionStart !== null && savedTopicComposerSelectionEnd !== null) {
+      newTopicComposerTextEl.setSelectionRange(savedTopicComposerSelectionStart, savedTopicComposerSelectionEnd)
+    }
+  }
+  autoGrowTextarea(newTopicComposerTextEl)
 
   const newAdminSupportMobileListEl = root.querySelector<HTMLElement>('[data-admin-support-mobile-list-scroll="1"]')
   if (newAdminSupportMobileListEl && savedAdminSupportMobileListScrollTop > 0) {

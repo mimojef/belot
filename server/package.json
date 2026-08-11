@@ -80,6 +80,7 @@
     "check:gift-limit": "tsx scripts/checkYellowCoinGiftLimit.ts",
     "check:vip-store": "tsx scripts/checkVipStore.ts",
     "check:topics-store": "tsx scripts/checkTopicsStore.ts",
+    "check:topic-messages-realtime": "tsx scripts/checkTopicMessagesRealtime.ts",
     "check:gift-limit-frontend": "tsx scripts/checkGiftLimitFrontend.ts",
     "check:admin-profile-moderation": "tsx scripts/checkAdminProfileModeration.ts",
     "check:profile-name-release-and-admin-edit-target": "tsx scripts/checkProfileNameReleaseAndAdminEditTarget.ts",

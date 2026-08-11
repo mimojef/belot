@@ -31,12 +31,14 @@ import {
 import { createChatStore } from './db/chatStore.js'
 import { createLobbyChatStore } from './db/lobbyChatStore.js'
 import { createTopicStore } from './db/topicStore.js'
-import { createTopicMessageStore } from './db/topicMessageStore.js'
+import { createTopicMessageStore, type TopicMessageSnapshot } from './db/topicMessageStore.js'
 import {
   validateLobbyChatBody,
   countUnicodeCodePoints,
   LOBBY_CHAT_MAX_BODY_CODE_POINTS,
 } from './protocol/lobbyChatValidation.js'
+import { validateTopicMessageBody, TOPIC_MESSAGE_MAX_BODY_CODE_POINTS } from './protocol/topicMessageValidation.js'
+import { computeTopicMessagePollAdvance } from './realtime/topicMessagePollAdvance.js'
 import {
   validatePrivateRoomChatBody,
   PRIVATE_ROOM_CHAT_MAX_BODY_CODE_POINTS,
@@ -227,7 +229,7 @@ import {
 } from './game/createRoomShadowSynchronizer.js'
 import { resolveGameWorkerEntryUrl } from './game/resolveGameWorkerEntryUrl.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
-import type { LobbyChatErrorCode, PrivateRoomChatErrorCode } from './protocol/messageTypes.js'
+import type { LobbyChatErrorCode, PrivateRoomChatErrorCode, TopicMessageErrorCode, TopicMessageBroadcastSnapshot } from './protocol/messageTypes.js'
 import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
 import type { PrivateRoom, PrivateRoomMember } from './game/privateRoomsStore.js'
 import { createPrivateRoomChatStore, PRIVATE_ROOM_CHAT_HISTORY_LIMIT } from './game/privateRoomChatStore.js'
@@ -461,6 +463,9 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'subscribe_lobby_chat':
     case 'unsubscribe_lobby_chat':
     case 'send_lobby_chat_message':
+    case 'subscribe_topic_messages':
+    case 'unsubscribe_topic_messages':
+    case 'send_topic_message':
       return true
     case 'ping':
     case 'request_player_profile':
@@ -807,6 +812,247 @@ let lobbyChatRetentionStartupTimeout: ReturnType<typeof setTimeout> | null = set
 let lobbyChatRetentionInterval: ReturnType<typeof setInterval> | null = setInterval(
   runLobbyChatRetentionCleanup,
   LOBBY_CHAT_RETENTION_INTERVAL_MS,
+)
+
+// ─── "Теми" (Topics) realtime — root съобщения, Етап 2 ─────────────────────
+//
+// Същия instant-local-broadcast + cross-instance-poll модел като lobby chat
+// по-горе, НО с коригиран poll cursor invariant:
+//
+//   topicMessagePollCursor се движи ИЗКЛЮЧИТЕЛНО вътре в
+//   runTopicMessagesCrossInstancePoll, и то само на seq-а на реда, който
+//   poll-ът току-що е прочел от DB — НИКОГА от local send пътя.
+//
+// Причина: ако local send напредваше cursor-а директно на своя seq (какъвто
+// е моделът на lobbyChatLastAnnouncedSeq по-горе), следният race е възможен —
+// instance A cursor=100; instance B insert-ва seq=101 (A не знае още);
+// instance A insert-ва локално seq=102 и би преместил cursor-а на 102 директно
+// → seq=101 е изгубен завинаги за A-related subscribers, защото следващият
+// poll на A би прочел "seq > 102", прескачайки 101. Затова local send тук
+// САМО маркира своя seq в topicMessageLocallyAnnouncedSeqs (bounded set) —
+// за да не бъде broadcast-нат ВТОРИ път, когато по-късно poll-ът стигне до
+// същия ред — но никога не пипа cursor-а. Виж
+// server/scripts/checkTopicMessagesRealtime.ts за regression test на точно
+// този сценарий.
+//
+// Subscription модел: за разлика от lobby chat (единствен глобален канал),
+// Topics UX показва точно ЕДНА активна тема наведнъж (хоризонтална
+// навигация) — затова connection→topicId е скалар (не Set), което прави
+// cleanup при disconnect/switch O(1) вместо обхождане на всички теми.
+
+const topicMessageSubscriberTopicIdByConnectionId = new Map<ConnectionId, string>()
+const topicMessageSubscribersByTopicId = new Map<string, Set<ConnectionId>>()
+
+const TOPIC_MESSAGES_REALTIME_CATCHUP_LIMIT = 50
+const TOPIC_MESSAGE_POLL_BATCH_SIZE = 200
+const TOPIC_MESSAGE_RATE_LIMIT_WINDOW_MS = 10_000
+const TOPIC_MESSAGE_RATE_LIMIT_MAX_PER_WINDOW = 5
+const TOPIC_MESSAGE_RATE_LIMIT_CLEANUP_INTERVAL_MS = 30_000
+const TOPIC_MESSAGE_DUPLICATE_GUARD_MS = 8_000
+const TOPIC_MESSAGE_LOCALLY_ANNOUNCED_TTL_MS = 30_000
+
+type TopicMessageRateLimitEntry = { count: number; windowStartedAt: number }
+// Отделен bucket от lobbyChatRateLimitByProfileId — писане в Теми не трябва
+// да consume-ва/бъде consume-нато от квотата на общия лайв чат.
+const topicMessageRateLimitByProfileId = new Map<string, TopicMessageRateLimitEntry>()
+let topicMessageRateLimitLastCleanupAt = 0
+
+type TopicMessageLastSentEntry = { normalizedBody: string; sentAt: number }
+// Ключ: `${profileId}:${topicId}` — duplicate guard-ът е scoped ПО ТЕМА
+// (Етап 2 брифа т.7), НЕ глобално per profile, за да не блокира легитимно
+// еднакъв кратък текст, изпратен в две различни теми.
+const topicMessageLastSentByProfileAndTopic = new Map<string, TopicMessageLastSentEntry>()
+
+function checkTopicMessageRateLimit(profileId: string, now: number = Date.now()): boolean {
+  const existing = topicMessageRateLimitByProfileId.get(profileId)
+
+  if (!existing || now - existing.windowStartedAt >= TOPIC_MESSAGE_RATE_LIMIT_WINDOW_MS) {
+    topicMessageRateLimitByProfileId.set(profileId, { count: 1, windowStartedAt: now })
+    return true
+  }
+
+  if (existing.count >= TOPIC_MESSAGE_RATE_LIMIT_MAX_PER_WINDOW) {
+    return false
+  }
+
+  existing.count += 1
+  return true
+}
+
+function isDuplicateTopicMessage(
+  profileId: string,
+  topicId: string,
+  normalizedBody: string,
+  now: number = Date.now(),
+): boolean {
+  const last = topicMessageLastSentByProfileAndTopic.get(`${profileId}:${topicId}`)
+  return last !== undefined
+    && last.normalizedBody === normalizedBody
+    && now - last.sentAt < TOPIC_MESSAGE_DUPLICATE_GUARD_MS
+}
+
+function recordTopicMessageSent(
+  profileId: string,
+  topicId: string,
+  normalizedBody: string,
+  now: number = Date.now(),
+): void {
+  topicMessageLastSentByProfileAndTopic.set(`${profileId}:${topicId}`, { normalizedBody, sentAt: now })
+}
+
+function cleanupTopicMessageRateLimitState(now: number): void {
+  if (now - topicMessageRateLimitLastCleanupAt < TOPIC_MESSAGE_RATE_LIMIT_CLEANUP_INTERVAL_MS) {
+    return
+  }
+  topicMessageRateLimitLastCleanupAt = now
+
+  for (const [profileId, entry] of topicMessageRateLimitByProfileId.entries()) {
+    if (now - entry.windowStartedAt >= TOPIC_MESSAGE_RATE_LIMIT_WINDOW_MS) {
+      topicMessageRateLimitByProfileId.delete(profileId)
+    }
+  }
+
+  for (const [key, entry] of topicMessageLastSentByProfileAndTopic.entries()) {
+    if (now - entry.sentAt >= TOPIC_MESSAGE_DUPLICATE_GUARD_MS) {
+      topicMessageLastSentByProfileAndTopic.delete(key)
+    }
+  }
+}
+
+// Batch avatar-hydration — reuse-ва playerProgressStore.getProfileSnapshotsByIds,
+// СЪЩИЯТ batch helper, ползван от REST enrichment-а в handleTopicMessagesRequest
+// (Етап 1) — за да не се получи N+1 profile lookup нито при catch-up batch,
+// нито при cross-instance poll batch (Етап 2 брифа т.3: "НЕ прави profile/
+// avatar lookup по един sender на message"). Извиква се ВИНАГИ с целия batch
+// накуп (всички редове от един poll tick / целия catch-up page), никога в
+// цикъл по едно съобщение. За единично local-send съобщение — извикване със
+// масив от 1 елемент е допустимо и е СЪЩИЯТ code path (Етап 2 брифа: "за
+// local send на единично message е допустим единичен lookup").
+function hydrateTopicMessagesWithCurrentAvatars(
+  messages: readonly TopicMessageSnapshot[],
+): TopicMessageBroadcastSnapshot[] {
+  const uniqueSenderProfileIds = [...new Set(messages.map((m) => m.senderProfileId))]
+  const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
+  const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
+
+  return messages.map((message) => ({
+    seq: message.seq,
+    messageId: message.messageId,
+    topicId: message.topicId,
+    parentMessageId: message.parentMessageId,
+    senderProfileId: message.senderProfileId,
+    senderDisplayName: message.senderDisplayName,
+    senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
+    senderRole: message.senderRole,
+    body: message.body,
+    createdAt: message.createdAt,
+  }))
+}
+
+function broadcastTopicMessageToLocalSubscribers(
+  topicId: string,
+  snapshot: TopicMessageBroadcastSnapshot,
+  opts?: { originatingConnectionId?: ConnectionId; requestId?: string },
+): void {
+  const subscribers = topicMessageSubscribersByTopicId.get(topicId)
+  if (subscribers === undefined || subscribers.size === 0) {
+    return
+  }
+
+  for (const subscriberConnectionId of [...subscribers]) {
+    const subscriberConnection = getConnectionById(serverState, subscriberConnectionId)
+    const socket = socketRegistry.get(subscriberConnectionId)
+
+    if (subscriberConnection === null || !socket || socket.readyState !== WebSocket.OPEN) {
+      subscribers.delete(subscriberConnectionId)
+      topicMessageSubscriberTopicIdByConnectionId.delete(subscriberConnectionId)
+      continue
+    }
+
+    // Viewer-side hard-exclude — СЪЩИЯТ getLobbyChatBlockedSet helper, ползван
+    // от Topics REST history (Етап 1) — realtime push НЕ трябва да заобикаля
+    // block semantics-а, който REST-ът вече налага (Етап 2 брифа т.9).
+    if (
+      subscriberConnection.profileId !== null &&
+      getLobbyChatBlockedSet(subscriberConnection.profileId).has(snapshot.senderProfileId)
+    ) {
+      continue
+    }
+
+    const isOriginator = opts?.originatingConnectionId === subscriberConnectionId
+
+    safeSendToConnection(subscriberConnectionId, {
+      type: 'topic_message',
+      ...snapshot,
+      ...(isOriginator && opts?.requestId ? { requestId: opts.requestId } : {}),
+    })
+  }
+}
+
+// Startup baseline = текущия getMaxSeq() — НЕ 0 — за да не се replay-ва
+// цялата историческа topic_messages таблица към local subscribers след
+// рестарт на процеса (Етап 2 брифа т.2). Historical gap-ове за КОНКРЕТЕН
+// client се възстановяват чрез afterSeq catch-up при subscribe / REST, НЕ
+// чрез replay на цялата DB от global poll-а.
+let topicMessagePollCursor = topicMessageStore.getMaxSeq()
+
+// seq -> кога е бил broadcast-нат локално от ТОЗИ instance при insert. Poll
+// tick-ът чете тази карта, за да прескочи ВТОРИ broadcast на съобщение, което
+// собствения local send path вече е доставил instant-но (виж инвариант
+// коментара най-горе на секцията). Bounded: prune-нато след всеки poll tick
+// (всичко seq <= новия cursor вече е "видяно" от poll-а) + hard TTL safety
+// net в случай poll-ът някога спре да тиктака.
+const topicMessageLocallyAnnouncedSeqs = new Map<number, number>()
+
+function pruneTopicMessageLocallyAnnouncedSeqs(now: number): void {
+  for (const [seq, announcedAt] of topicMessageLocallyAnnouncedSeqs.entries()) {
+    if (seq <= topicMessagePollCursor || now - announcedAt >= TOPIC_MESSAGE_LOCALLY_ANNOUNCED_TTL_MS) {
+      topicMessageLocallyAnnouncedSeqs.delete(seq)
+    }
+  }
+}
+
+function runTopicMessagesCrossInstancePoll(): void {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  const now = Date.now()
+  cleanupTopicMessageRateLimitState(now)
+
+  try {
+    const rows = topicMessageStore.pollNewMessages(topicMessagePollCursor, TOPIC_MESSAGE_POLL_BATCH_SIZE)
+
+    // Чист invariant helper (server/src/realtime/topicMessagePollAdvance.ts,
+    // независимо unit-тестван) — cursor напредва за ВСЕКИ прочетен ред,
+    // независимо дали е locally-announced; виж коментара при декларацията
+    // на topicMessagePollCursor по-горе за пълния race rationale.
+    const { nextCursor, rowsToBroadcast } = computeTopicMessagePollAdvance(
+      topicMessagePollCursor,
+      new Set(topicMessageLocallyAnnouncedSeqs.keys()),
+      rows,
+    )
+    topicMessagePollCursor = nextCursor
+
+    // ЕДНО batch hydration извикване за целия tick, независимо от броя
+    // различни теми/автори в rowsToBroadcast — виж коментара над
+    // hydrateTopicMessagesWithCurrentAvatars (Етап 2 брифа т.3).
+    if (rowsToBroadcast.length > 0) {
+      const hydrated = hydrateTopicMessagesWithCurrentAvatars(rowsToBroadcast)
+      for (const message of hydrated) {
+        broadcastTopicMessageToLocalSubscribers(message.topicId, message)
+      }
+    }
+  } catch (error) {
+    console.error('[topics] cross-instance message poll failed:', error)
+  }
+
+  pruneTopicMessageLocallyAnnouncedSeqs(now)
+}
+
+let topicMessagePollInterval: ReturnType<typeof setInterval> | null = setInterval(
+  runTopicMessagesCrossInstancePoll,
+  LOBBY_CHAT_POLL_INTERVAL_MS,
 )
 
 // ─── Личен чат — attachment cleanup ─────────────────────────────────────────
@@ -12164,6 +12410,183 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (message.type === 'subscribe_topic_messages') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection?.profileId == null) {
+          safeSendToConnection(connection.id, {
+            type: 'topic_message_error',
+            code: 'not_authenticated',
+            message: 'Трябва да влезеш в профила си.',
+          })
+          return
+        }
+
+        if (playerProgressStore.isTemporaryProfile(latestConnection.profileId)) {
+          safeSendToConnection(connection.id, {
+            type: 'topic_message_error',
+            code: 'guest_not_allowed',
+            message: '„Теми“ само за регистрирани потребители.',
+          })
+          return
+        }
+
+        const topic = topicStore.getTopicById(message.topicId)
+        if (topic === null) {
+          safeSendToConnection(connection.id, {
+            type: 'topic_message_error',
+            code: 'topic_not_found',
+            message: 'Темата не беше намерена.',
+          })
+          return
+        }
+
+        // Topics UX показва точно ЕДНА активна тема наведнъж — маха стария
+        // subscription (ако имало различен topicId), регистрира новия.
+        const previousTopicId = topicMessageSubscriberTopicIdByConnectionId.get(connection.id)
+        if (previousTopicId !== undefined && previousTopicId !== message.topicId) {
+          topicMessageSubscribersByTopicId.get(previousTopicId)?.delete(connection.id)
+        }
+
+        topicMessageSubscriberTopicIdByConnectionId.set(connection.id, message.topicId)
+        let subscribers = topicMessageSubscribersByTopicId.get(message.topicId)
+        if (subscribers === undefined) {
+          subscribers = new Set()
+          topicMessageSubscribersByTopicId.set(message.topicId, subscribers)
+        }
+        subscribers.add(connection.id)
+
+        // Gap-closing catch-up (Етап 2 брифа т.1/т.8) — afterSeq=0 е валиден
+        // baseline за тема без позната клиентска история; getMessagesAfter
+        // просто връща всичко от началото до cap-а в този случай.
+        const excludedSenderProfileIds = [...getLobbyChatBlockedSet(latestConnection.profileId)]
+        const page = topicMessageStore.getMessagesAfter(
+          message.topicId,
+          message.afterSeq,
+          TOPIC_MESSAGES_REALTIME_CATCHUP_LIMIT,
+          excludedSenderProfileIds,
+        )
+
+        safeSendToConnection(connection.id, {
+          type: 'topic_message_catchup',
+          topicId: message.topicId,
+          messages: hydrateTopicMessagesWithCurrentAvatars(page.messages),
+          truncated: page.hasMore,
+        })
+        return
+      }
+
+      if (message.type === 'unsubscribe_topic_messages') {
+        topicMessageSubscribersByTopicId.get(message.topicId)?.delete(connection.id)
+        if (topicMessageSubscriberTopicIdByConnectionId.get(connection.id) === message.topicId) {
+          topicMessageSubscriberTopicIdByConnectionId.delete(connection.id)
+        }
+        return
+      }
+
+      if (message.type === 'send_topic_message') {
+        const requestId = message.requestId
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        function sendTopicMessageError(code: TopicMessageErrorCode, errorMessage: string): void {
+          safeSendToConnection(connection.id, {
+            type: 'topic_message_error',
+            code,
+            message: errorMessage,
+            requestId,
+          })
+        }
+
+        if (latestConnection?.profileId == null) {
+          sendTopicMessageError('not_authenticated', 'Трябва да влезеш в профила си.')
+          return
+        }
+
+        if (playerProgressStore.isTemporaryProfile(latestConnection.profileId)) {
+          sendTopicMessageError('guest_not_allowed', '„Теми“ само за регистрирани потребители.')
+          return
+        }
+
+        // VIP guard — server е source of truth, независимо какво клиентският
+        // composer показва локално (Етап 2 брифа: "Frontend скриването НЕ е
+        // security boundary"). Ако VIP е изтекъл между отваряне на composer-а
+        // и send-а, клиентът получава 'vip_required' тук и re-fetch-ва
+        // canonical статус (виж controller-а, т.5 от корекциите).
+        if (!vipStore.getStatus(latestConnection.profileId).isActive) {
+          sendTopicMessageError('vip_required', 'Писането в „Теми“ изисква активен VIP.')
+          return
+        }
+
+        const topic = topicStore.getTopicById(message.topicId)
+
+        // removed третираме идентично на unknown (т.6 от корекциите) — НЕ
+        // topic_locked за premahnata тема.
+        if (topic === null || topic.status === 'removed') {
+          sendTopicMessageError('topic_not_found', 'Темата не беше намерена.')
+          return
+        }
+
+        if (topic.status === 'locked') {
+          sendTopicMessageError('topic_locked', 'Темата е заключена за писане.')
+          return
+        }
+
+        const validation = validateTopicMessageBody(message.body)
+
+        if (!validation.ok) {
+          const messagesByCode: Record<typeof validation.code, string> = {
+            empty_body: 'Съобщението не може да бъде празно.',
+            body_too_long: `Съобщението може да е най-много ${TOPIC_MESSAGE_MAX_BODY_CODE_POINTS} символа.`,
+            invalid_body: 'Съобщението съдържа неразрешени символи.',
+          }
+          sendTopicMessageError(validation.code, messagesByCode[validation.code])
+          return
+        }
+
+        if (!checkTopicMessageRateLimit(latestConnection.profileId)) {
+          sendTopicMessageError('rate_limited', 'Твърде много съобщения. Изчакай малко и опитай пак.')
+          return
+        }
+
+        // Scoped по profileId+topicId (Етап 2 брифа т.7) — НЕ глобално per
+        // profile, за да не блокира легитимно еднакъв кратък текст в две
+        // различни теми.
+        if (isDuplicateTopicMessage(latestConnection.profileId, message.topicId, validation.body)) {
+          sendTopicMessageError('duplicate_message', 'Вече изпрати това съобщение.')
+          return
+        }
+
+        const publicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
+        const senderDisplayName = publicProfile?.displayName?.trim() || 'Играч'
+        const senderRole = authStore.getAccountRoleForProfile(latestConnection.profileId) ?? 'player'
+
+        const row = topicMessageStore.insertMessage({
+          topicId: message.topicId,
+          senderProfileId: latestConnection.profileId,
+          senderDisplayName,
+          senderRole,
+          body: validation.body,
+        })
+
+        recordTopicMessageSent(latestConnection.profileId, message.topicId, validation.body)
+
+        // Local instant broadcast — маркира seq-а като locally-announced ПРЕДИ
+        // broadcast (за да го хване следващият poll tick дори ако той изпревари
+        // synchronous-ния return тук, което не би могло да стане в единствената
+        // Node event loop нишка, но държим реда defensive- но правилен). ПОЛ
+        // CURSOR-ЪТ СЪЗНАТЕЛНО НЕ СЕ ПИПА ТУК — виж инвариант коментара при
+        // декларацията на topicMessagePollCursor по-горе във файла.
+        topicMessageLocallyAnnouncedSeqs.set(row.seq, Date.now())
+        const [hydrated] = hydrateTopicMessagesWithCurrentAvatars([row])
+        if (hydrated) {
+          broadcastTopicMessageToLocalSubscribers(message.topicId, hydrated, {
+            originatingConnectionId: connection.id,
+            requestId,
+          })
+        }
+        return
+      }
+
       sendJsonMessage(socket, {
         type: 'error',
         message: 'Unsupported message type.',
@@ -12182,6 +12605,12 @@ wsServer.on('connection', (socket, request) => {
   socket.on('close', () => {
     guestIdByConnection.delete(connection.id)
     lobbyChatSubscriberConnectionIds.delete(connection.id)
+
+    const disconnectedTopicId = topicMessageSubscriberTopicIdByConnectionId.get(connection.id)
+    if (disconnectedTopicId !== undefined) {
+      topicMessageSubscribersByTopicId.get(disconnectedTopicId)?.delete(connection.id)
+      topicMessageSubscriberTopicIdByConnectionId.delete(connection.id)
+    }
 
     try {
       if (isServerShuttingDown) {
@@ -12538,6 +12967,11 @@ function clearMutationTimersForShutdown(): void {
   if (lobbyChatPollInterval !== null) {
     clearInterval(lobbyChatPollInterval)
     lobbyChatPollInterval = null
+  }
+
+  if (topicMessagePollInterval !== null) {
+    clearInterval(topicMessagePollInterval)
+    topicMessagePollInterval = null
   }
 
   if (lobbyChatRetentionInterval !== null) {

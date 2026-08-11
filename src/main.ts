@@ -3543,6 +3543,60 @@ async function loadTopicMessages(
   }
 }
 
+// Отделен от loadOwnVipStatus (profile popup use case, само activeUntil) —
+// composer gating в "Теми" се нуждае и от hasClaimedLaunchGift, за да избере
+// правилния VIP popup текст ("Вземи 30 дни безплатно" vs "Виж VIP плановете").
+async function loadTopicsVipGateStatus(): Promise<
+  | { ok: true; isActive: boolean; hasClaimedLaunchGift: boolean }
+  | { ok: false }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/vip/status`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json().catch(() => ({}))) as {
+      ok?: boolean
+      status?: { isActive?: boolean }
+      hasClaimedLaunchGift?: boolean
+    }
+    if (!response.ok || !data.ok) {
+      return { ok: false }
+    }
+    return {
+      ok: true,
+      isActive: data.status?.isActive ?? false,
+      hasClaimedLaunchGift: data.hasClaimedLaunchGift ?? false,
+    }
+  } catch {
+    return { ok: false }
+  }
+}
+
+async function claimTopicsLaunchGiftRequest(): Promise<
+  | { ok: true; isActive: boolean }
+  | { ok: false; alreadyClaimed: boolean }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/vip/claim-launch-gift`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    const data = (await response.json().catch(() => ({}))) as {
+      ok?: boolean
+      code?: string
+      status?: { isActive?: boolean }
+    }
+    if (!response.ok || !data.ok) {
+      return { ok: false, alreadyClaimed: data.code === 'already_claimed' }
+    }
+    return { ok: true, isActive: data.status?.isActive ?? true }
+  } catch {
+    return { ok: false, alreadyClaimed: false }
+  }
+}
+
 async function loadTournaments(
   params: { mine: boolean; page: number },
 ): Promise<
@@ -3977,6 +4031,15 @@ lobby = createLobbyFlowController({
   onLobbyChatDeleteMessage: (messageId) => {
     void deleteLobbyChatMessage(messageId)
   },
+  onTopicMessagesSubscribe: (topicId, afterSeq) => {
+    client.subscribeTopicMessages(topicId, afterSeq)
+  },
+  onTopicMessagesUnsubscribe: (topicId) => {
+    client.unsubscribeTopicMessages(topicId)
+  },
+  onTopicMessageSend: (topicId, body, requestId) => {
+    client.sendTopicMessage(topicId, body, requestId)
+  },
   getAuthSession: () => currentAuthSession,
   getIsInGame: () => activeRoom.hasActiveRoom(),
   onLoginSubmit: (email, password) =>
@@ -4184,6 +4247,8 @@ lobby = createLobbyFlowController({
   onTopicsLoad: () => loadTopics(),
   onProfileByIdLoad: (profileId) => loadProfileById(profileId),
   onTopicMessagesLoad: (topicId, beforeSeq) => loadTopicMessages(topicId, beforeSeq),
+  onGetTopicsVipGateStatus: () => loadTopicsVipGateStatus(),
+  onClaimTopicsLaunchGift: () => claimTopicsLaunchGiftRequest(),
   onTournamentCreate: (input) => createTournamentRequest(input),
   onTournamentDetailLoad: (tournamentId) => loadTournamentDetail(tournamentId),
   onTournamentUnlock: (tournamentId, password) => unlockTournamentDetail(tournamentId, password),
@@ -4556,6 +4621,10 @@ client = createGameServerClient({
       // началния екран в момента на reconnect-а (виж коментара над
       // reconcileLobbyChatSubscription в createLobbyFlowController.ts).
       lobby.forceLobbyChatResubscribeIfOnLobbyScreen()
+      // Огледално, но за Topics realtime (Етап 2) — нов connection.id прави
+      // старата WS subscription невалидна server-side. Resubscribe-ва с
+      // gap-closing afterSeq САМО ако клиентът реално е на "Теми" екрана.
+      lobby.forceTopicMessagesResubscribeIfOnTopicsScreen()
       // Огледално на горното, но за членство в частна маса: ако потребителят
       // е бил в чакалня на частна маса (или е избрал "Изчакай в лоби") към
       // момента на прекъсването/презареждането (кратка мобилна връзка,

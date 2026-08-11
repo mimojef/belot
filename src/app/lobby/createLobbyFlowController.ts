@@ -547,6 +547,24 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; messages: TopicMessageSnapshot[]; hasMore: boolean; oldestSeq: number | null }
     | { ok: false; message: string }
   >
+  /**
+   * Gap-closing WS subscribe (Етап 2 корекция т.1) — извиква се ЕДИНСТВЕНО
+   * след успешен REST load, с afterSeq = последния познат seq за тази тема
+   * (0 за тема без позната история). Никога subscribe без cursor.
+   */
+  onTopicMessagesSubscribe?: (topicId: string, afterSeq: number) => void
+  onTopicMessagesUnsubscribe?: (topicId: string) => void
+  /** requestId се генерира от контролера (не от викащия) — служи само за ack correlation, виж Етап 2 брифа т.7. */
+  onTopicMessageSend?: (topicId: string, body: string, requestId: string) => void
+  /** GET VIP gate статус (isActive + hasClaimedLaunchGift) за composer gating в "Теми" — отделно от onGetOwnVipStatus (profile popup use case). */
+  onGetTopicsVipGateStatus?: () => Promise<
+    | { ok: true; isActive: boolean; hasClaimedLaunchGift: boolean }
+    | { ok: false }
+  >
+  onClaimTopicsLaunchGift?: () => Promise<
+    | { ok: true; isActive: boolean }
+    | { ok: false; alreadyClaimed: boolean }
+  >
   onTournamentCreate?: (input: TournamentCreateInput) => Promise<
     | { ok: true; tournament: TournamentSummarySnapshot }
     | { ok: false; message: string }
@@ -635,6 +653,7 @@ export type LobbyFlowController = {
   openAuthModal: (mode: Exclude<import('./renderLobbyScreen').LobbyAuthModalMode, 'closed'>) => void
   suspendLobbyChatForActiveRoom: () => void
   forceLobbyChatResubscribeIfOnLobbyScreen: () => void
+  forceTopicMessagesResubscribeIfOnTopicsScreen: () => void
   resyncPrivateRoomMembership: () => void
   joinPrivateRoom: (privateRoomId: string) => void
   updateLobbyChatDraft: (value: string) => void
@@ -714,6 +733,33 @@ type InternalLobbyFlowState = {
    * НАЙ-НОВИЯТ поискан, независимо от коя тема е.
    */
   topicMessagesRequestGeneration: number
+  /** Последният ПОЗНАТ seq за темата (от REST load + WS live push) — gap-closing cursor за subscribe (Етап 2 корекция т.1/т.8), keyed по topicId, НЕ единичен scalar. */
+  topicMessagesLatestKnownSeqByTopicId: Record<string, number>
+  /** topicId, за който в момента ИМА активна WS subscription — null = никаква. Скалар (не Set), защото Topics UX показва точно една активна тема наведнъж. */
+  topicMessagesSubscribedTopicId: string | null
+  /**
+   * Transient hint за renderLobbyScreen.ts кой scroll стратегия да ползва при
+   * следващия render на message stream-а — консумира се и се нулира веднага
+   * след render. 'initial' = jump to bottom; 'prepend' = запази distance-from-
+   * bottom (load older); 'live-append'/'reconnect-refresh' = near-bottom
+   * threshold (48px) преди насилствен scroll, огледално на lobby chat модела.
+   */
+  topicMessagesRenderReason: 'initial' | 'prepend' | 'live-append' | 'reconnect-refresh' | null
+  /** Draft текст per тема — потвърдено отклонение от flat-field конвенцията (lobbyChatDraft), защото Topics е genuinely multi-channel. */
+  topicComposerDraftByTopicId: Record<string, string>
+  /** pending requestId per тема, докато чакаме sever ack (echo/error) — null = нищо не се изпраща в момента за тази тема. */
+  topicComposerPendingRequestIdByTopicId: Record<string, string | null>
+  topicComposerErrorTextByTopicId: Record<string, string | null>
+  /** VIP gate статус за "Теми" composer — null = все още не е зареден. */
+  topicsVipGate: { isActive: boolean; hasClaimedLaunchGift: boolean } | null
+  topicsVipGateLoading: boolean
+  topicsVipPopupOpen: boolean
+  topicsVipClaimSubmitting: boolean
+  topicsVipClaimErrorText: string | null
+  /** "Виж VIP плановете" inert съобщение (Етап 2 корекция т.5) — показва се inline в popup-а, без checkout/навигация. */
+  topicsVipSeePlansMessageVisible: boolean
+  /** UI polish pass — кратък "ще бъде налично скоро" toast за create-topic/like/reply (все още неимплементирани), огледално на subadminActionToast моделa. */
+  topicsInfoToast: { text: string } | null
   /**
    * Инкрементира се при всяко отваряне на profile popup чрез profileId (виж
    * onTopicMessageAuthorClick) — stale-response guard: ако потребителят
@@ -1093,6 +1139,19 @@ function createInitialState(): InternalLobbyFlowState {
     topicMessagesOldestSeq: null,
     topicOlderMessagesLoading: false,
     topicMessagesRequestGeneration: 0,
+    topicMessagesLatestKnownSeqByTopicId: {},
+    topicMessagesSubscribedTopicId: null,
+    topicMessagesRenderReason: null,
+    topicComposerDraftByTopicId: {},
+    topicComposerPendingRequestIdByTopicId: {},
+    topicComposerErrorTextByTopicId: {},
+    topicsVipGate: null,
+    topicsVipGateLoading: false,
+    topicsVipPopupOpen: false,
+    topicsVipClaimSubmitting: false,
+    topicsVipClaimErrorText: null,
+    topicsVipSeePlansMessageVisible: false,
+    topicsInfoToast: null,
     profilePopupRequestToken: 0,
     profilePopupTargetRole: null,
     profilePopupTargetRoleProfileId: null,
@@ -2919,6 +2978,17 @@ export function createLobbyFlowController(
       topicMessagesHasMore: state.topicMessagesHasMore,
       topicMessagesOldestSeq: state.topicMessagesOldestSeq,
       topicOlderMessagesLoading: state.topicOlderMessagesLoading,
+      topicMessagesRenderReason: state.topicMessagesRenderReason,
+      topicComposerDraftByTopicId: state.topicComposerDraftByTopicId,
+      topicComposerPendingRequestIdByTopicId: state.topicComposerPendingRequestIdByTopicId,
+      topicComposerErrorTextByTopicId: state.topicComposerErrorTextByTopicId,
+      topicsVipGate: state.topicsVipGate,
+      topicsVipGateLoading: state.topicsVipGateLoading,
+      topicsVipPopupOpen: state.topicsVipPopupOpen,
+      topicsVipClaimSubmitting: state.topicsVipClaimSubmitting,
+      topicsVipClaimErrorText: state.topicsVipClaimErrorText,
+      topicsVipSeePlansMessageVisible: state.topicsVipSeePlansMessageVisible,
+      topicsInfoToast: state.topicsInfoToast,
     }
 
     renderLobbyScreen(options.root, {
@@ -3124,11 +3194,38 @@ export function createLobbyFlowController(
       onTopicChipClick: (topicId) => {
         openTopic(topicId)
       },
+      onTopicCreateClick: () => {
+        handleTopicCreateClick()
+      },
+      onTopicMessageLikeClick: () => {
+        handleTopicMessageLikeClick()
+      },
+      onTopicMessageReplyClick: () => {
+        handleTopicMessageReplyClick()
+      },
       onTopicsBackToGeneral: () => {
         backToGeneralTopic()
       },
       onTopicMessagesLoadOlder: () => {
         void loadOlderTopicMessages()
+      },
+      onTopicComposerInput: (topicId, value) => {
+        updateTopicComposerDraft(topicId, value)
+      },
+      onTopicComposerSubmit: (topicId) => {
+        submitTopicComposerMessage(topicId)
+      },
+      onTopicComposerNonVipTap: () => {
+        handleTopicComposerNonVipTap()
+      },
+      onTopicsVipPopupClose: () => {
+        closeTopicsVipPopup()
+      },
+      onTopicsVipPopupClaimLaunchGift: () => {
+        void claimTopicsLaunchGift()
+      },
+      onTopicsVipPopupSeePlans: () => {
+        showTopicsVipPlansInertMessage()
       },
       onTopicMessageAuthorClick: (profileId, displayName) => {
         const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId
@@ -4496,9 +4593,36 @@ export function createLobbyFlowController(
     render()
   }
 
+  // Realtime subscription helpers (Етап 2) — виж corrected flow в брифа т.1:
+  // 1) unsubscribe от старата тема; 2) REST load; 3) subscribe с afterSeq =
+  // gap-closing cursor. Скалар (не Set) — Topics UX показва точно ЕДНА
+  // активна тема наведнъж.
+  function unsubscribeFromCurrentTopicMessages(): void {
+    if (state.topicMessagesSubscribedTopicId !== null) {
+      options.onTopicMessagesUnsubscribe?.(state.topicMessagesSubscribedTopicId)
+      state.topicMessagesSubscribedTopicId = null
+    }
+  }
+
+  function subscribeToTopicMessagesGapClosing(topicId: string): void {
+    const afterSeq = state.topicMessagesLatestKnownSeqByTopicId[topicId] ?? 0
+    options.onTopicMessagesSubscribe?.(topicId, afterSeq)
+    state.topicMessagesSubscribedTopicId = topicId
+  }
+
+  function computeLatestSeq(messages: readonly TopicMessageSnapshot[]): number {
+    return messages.reduce((max, m) => Math.max(max, m.seq), 0)
+  }
+
   // A) Initial open / topic switch — НЕ reuse-ва стар scroll anchor, зарежда
   // history за новата тема, viewport отива до дъното (последните съобщения)
   // след успешен load. Вика се от showTopicsDirectory() и openTopic().
+  //
+  // Gap-closing subscribe (Етап 2 корекция т.1): subscribe-ваме СЛЕД REST
+  // load-а да е приключил успешно, с afterSeq = seq-а на най-новото
+  // съобщение, което REST snapshot-ът току-що ни показа — така всяко
+  // съобщение, изпратено В ПРОЗОРЕЦА между snapshot-а и subscribe-а, се
+  // доставя чрез topic_message_catchup, никога не се губи.
   async function loadTopicMessagesForActiveTopic(topicId: string): Promise<void> {
     const requestGeneration = ++state.topicMessagesRequestGeneration
 
@@ -4535,20 +4659,34 @@ export function createLobbyFlowController(
     state.topicMessagesHasMore = result.hasMore
     state.topicMessagesOldestSeq = result.oldestSeq
     state.topicMessagesErrorText = null
+    state.topicMessagesLatestKnownSeqByTopicId[topicId] = computeLatestSeq(result.messages)
     // Viewport към последните съобщения — render() тук е последван от
     // scroll-to-bottom логиката в renderLobbyScreen.ts (виж
     // savedTopicMessagesDistanceFromBottom === null клона).
+    state.topicMessagesRenderReason = 'initial'
     render()
+
+    // Все още на СЪЩАТА тема (generation guard-ът по-горе вече потвърди) —
+    // едва СЕГА regisтрираме WS interest, с прясно изчисления gap-closing cursor.
+    subscribeToTopicMessagesGapClosing(topicId)
   }
 
   async function showTopicsDirectory(): Promise<void> {
     leaveAdminServerIfActive()
+    unsubscribeFromCurrentTopicMessages()
     state.currentScreen = 'topics'
     state.profilePopupOpen = false
     state.profilePopupProfile = null
     state.profilePopupCanEdit = true
     stopWaitingRoomActivity()
     resetFinalFillSequence()
+    // Force-refresh (НЕ lazy-guard-нат ensureTopicsVipGateLoaded) — всяко
+    // влизане в "Теми" трябва да вижда СВЕЖ VIP статус, огледално на
+    // onTopicsLoad по-долу (той също не е lazy-cached). Без това, ако VIP
+    // статусът се промени между две посещения на екрана в СЪЩАТА сесия (claim
+    // от друг таб, expiry), composer gating-ът би останал заклещен на
+    // остарялата стойност до hard reload.
+    void refreshTopicsVipGateStatus()
 
     if (!options.onTopicsLoad) {
       state.topicsErrorText = 'Списъкът с теми временно не е наличен.'
@@ -4592,6 +4730,10 @@ export function createLobbyFlowController(
 
   function openTopic(topicId: string): void {
     if (state.activeTopicId === topicId) return
+    // Стъпка 1 от gap-closing flow-а (Етап 2 корекция т.1): unsubscribe от
+    // старата тема ПРЕДИ каквото и да е друго — иначе push-ове за вече
+    // напуснатата тема биха продължили да пристигат.
+    unsubscribeFromCurrentTopicMessages()
     state.activeTopicId = topicId
     state.topicMessages = null
     state.topicMessagesHasMore = false
@@ -4651,7 +4793,200 @@ export function createLobbyFlowController(
     state.topicMessages = [...result.messages, ...(state.topicMessages ?? [])]
     state.topicMessagesHasMore = result.hasMore
     state.topicMessagesOldestSeq = result.oldestSeq ?? state.topicMessagesOldestSeq
+    state.topicMessagesRenderReason = 'prepend'
     render()
+  }
+
+  // ─── Realtime merge/dedupe (Етап 2) ─────────────────────────────────────
+
+  /** Dedupe по messageId, ordering по seq — единна merge функция за REST history / live WS push / catch-up (Етап 2 корекция т.8). */
+  function mergeTopicMessages(
+    existing: readonly TopicMessageSnapshot[],
+    incoming: readonly TopicMessageSnapshot[],
+  ): TopicMessageSnapshot[] {
+    if (incoming.length === 0) return [...existing]
+    const byId = new Map<string, TopicMessageSnapshot>()
+    for (const m of existing) byId.set(m.messageId, m)
+    for (const m of incoming) byId.set(m.messageId, m)
+    return [...byId.values()].sort((a, b) => a.seq - b.seq)
+  }
+
+  function updateLatestKnownSeqFromMessages(topicId: string, messages: readonly TopicMessageSnapshot[]): void {
+    const incomingMax = computeLatestSeq(messages)
+    const current = state.topicMessagesLatestKnownSeqByTopicId[topicId] ?? 0
+    if (incomingMax > current) {
+      state.topicMessagesLatestKnownSeqByTopicId[topicId] = incomingMax
+    }
+  }
+
+  // Truncated catch-up (Етап 2 корекция т.1/т.8) — падаме обратно на обикновен
+  // REST recent refresh (същата функция като initial load), merge-нат по
+  // messageId. НЕ форсираме scroll до дъното — 'reconnect-refresh' се третира
+  // като live-append (near-bottom threshold) в renderLobbyScreen.ts, за да не
+  // издърпаме насила потребител, който в момента чете стари съобщения.
+  async function refreshTopicMessagesAfterTruncatedCatchup(topicId: string): Promise<void> {
+    if (!options.onTopicMessagesLoad || state.activeTopicId !== topicId) return
+    const result = await options.onTopicMessagesLoad(topicId, null)
+    if (state.currentScreen !== 'topics' || state.activeTopicId !== topicId) return
+    if (!result.ok) return
+    state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], result.messages)
+    updateLatestKnownSeqFromMessages(topicId, result.messages)
+    state.topicMessagesRenderReason = 'reconnect-refresh'
+    render()
+  }
+
+  /** WS reconnect hook (аналог на forceLobbyChatResubscribeIfOnLobbyScreen) — извиква се от main.ts на всяко WS onOpen. */
+  function forceTopicMessagesResubscribeIfOnTopicsScreen(): void {
+    if (state.currentScreen !== 'topics' || state.activeTopicId === null) return
+    subscribeToTopicMessagesGapClosing(state.activeTopicId)
+  }
+
+  // ─── VIP gate + launch gift (Етап 2) ────────────────────────────────────
+
+  async function ensureTopicsVipGateLoaded(): Promise<void> {
+    if (state.topicsVipGate !== null || state.topicsVipGateLoading || !options.onGetTopicsVipGateStatus) {
+      return
+    }
+    state.topicsVipGateLoading = true
+    render()
+    const result = await options.onGetTopicsVipGateStatus()
+    state.topicsVipGateLoading = false
+    if (state.currentScreen !== 'topics') {
+      return
+    }
+    if (result.ok) {
+      state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: result.hasClaimedLaunchGift }
+    }
+    render()
+  }
+
+  /** Force re-fetch (не lazy-guard-нат) — ползва се след claim, след vip_required error от сървъра, и след launch-gift race от друг таб (Етап 2 корекция т.5). */
+  async function refreshTopicsVipGateStatus(): Promise<void> {
+    if (!options.onGetTopicsVipGateStatus) return
+    const result = await options.onGetTopicsVipGateStatus()
+    if (result.ok) {
+      state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: result.hasClaimedLaunchGift }
+    }
+    render()
+  }
+
+  function openTopicsVipPopup(): void {
+    state.topicsVipPopupOpen = true
+    state.topicsVipClaimErrorText = null
+    state.topicsVipSeePlansMessageVisible = false
+    void ensureTopicsVipGateLoaded()
+    render()
+  }
+
+  function closeTopicsVipPopup(): void {
+    state.topicsVipPopupOpen = false
+    state.topicsVipClaimErrorText = null
+    state.topicsVipSeePlansMessageVisible = false
+    render()
+  }
+
+  // ─── UI polish pass: "ще бъде налично скоро" toast (create-topic/like/reply) ──
+  // Огледално на subadminActionToast модела (renderLobbyScreen.ts
+  // renderSubadminActionToast) — generation-token-guarded auto-clear, за да
+  // не изтрие по-стар таймер по-нов toast, ако потребителят кликне бързо
+  // няколко пъти подред. Тези функции НЕ пипат realtime/VIP/send
+  // архитектурата от Етап 2 — само UI feedback за все още неимплементирани
+  // features (create-topic, likes, replies).
+  let topicsInfoToastGeneration = 0
+
+  function showTopicsInfoToast(text: string): void {
+    state.topicsInfoToast = { text }
+    render()
+
+    const toastGeneration = ++topicsInfoToastGeneration
+    setTimeout(() => {
+      if (toastGeneration !== topicsInfoToastGeneration) return
+      state.topicsInfoToast = null
+      render()
+    }, 3500)
+  }
+
+  function handleTopicCreateClick(): void {
+    showTopicsInfoToast('Създаването на теми ще бъде налично скоро.')
+  }
+
+  function handleTopicMessageLikeClick(): void {
+    showTopicsInfoToast('Функцията ще бъде налична скоро.')
+  }
+
+  function handleTopicMessageReplyClick(): void {
+    showTopicsInfoToast('Функцията ще бъде налична скоро.')
+  }
+
+  function showTopicsVipPlansInertMessage(): void {
+    // Етап 2 корекция т.5 — НЕ Stripe, НЕ навигация. Само кратко inline съобщение.
+    state.topicsVipSeePlansMessageVisible = true
+    render()
+  }
+
+  async function claimTopicsLaunchGift(): Promise<void> {
+    if (state.topicsVipClaimSubmitting || !options.onClaimTopicsLaunchGift) return
+    state.topicsVipClaimSubmitting = true
+    state.topicsVipClaimErrorText = null
+    render()
+
+    const result = await options.onClaimTopicsLaunchGift()
+    state.topicsVipClaimSubmitting = false
+
+    if (result.ok) {
+      state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: true }
+      state.topicsVipPopupOpen = false
+      render()
+      return
+    }
+
+    // already_claimed race (напр. друг таб го е взел междувременно) —
+    // re-fetch-ваме canonical статус вместо да покажем статичен error, за да
+    // unlock-нем composer-а веднага ако VIP всъщност вече е active (Етап 2 корекция т.5).
+    if (result.alreadyClaimed) {
+      await refreshTopicsVipGateStatus()
+      if (!(state.topicsVipGate?.isActive ?? false)) {
+        state.topicsVipClaimErrorText = 'Безплатният VIP подарък вече е използван за този профил.'
+      } else {
+        state.topicsVipPopupOpen = false
+      }
+      render()
+      return
+    }
+
+    state.topicsVipClaimErrorText = 'Възникна грешка. Опитай отново.'
+    render()
+  }
+
+  // ─── Composer (Етап 2) ───────────────────────────────────────────────────
+
+  function updateTopicComposerDraft(topicId: string, value: string): void {
+    state.topicComposerDraftByTopicId[topicId] = value
+  }
+
+  function handleTopicComposerNonVipTap(): void {
+    openTopicsVipPopup()
+  }
+
+  function submitTopicComposerMessage(topicId: string): void {
+    const draft = state.topicComposerDraftByTopicId[topicId] ?? ''
+    const trimmed = draft.trim()
+    if (trimmed.length === 0) return
+    if (state.topicComposerPendingRequestIdByTopicId[topicId]) return // вече чакаме ack за тази тема
+
+    // Client-side gate е само UX (избягва излишен round-trip) — реалният
+    // guard е server-side (Етап 2 брифа: "Frontend скриването НЕ е security boundary").
+    if (!(state.topicsVipGate?.isActive ?? false)) {
+      openTopicsVipPopup()
+      return
+    }
+
+    const requestId = `topic-msg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    state.topicComposerPendingRequestIdByTopicId[topicId] = requestId
+    state.topicComposerErrorTextByTopicId[topicId] = null
+    render()
+
+    options.onTopicMessageSend?.(topicId, trimmed, requestId)
   }
 
   async function showTournamentsList(): Promise<void> {
@@ -8256,6 +8591,14 @@ export function createLobbyFlowController(
       return
     }
     reconcileLobbyChatSubscription()
+    // Teardown-only reconcile за Topics realtime subscription — setup
+    // (subscribe) се прави ИЗРИЧНО и последователно от openTopic/
+    // loadTopicMessagesForActiveTopic (Етап 2 корекция т.1 gap-closing flow),
+    // но напускане на "Теми" екрана изцяло (навигация другаде) трябва винаги
+    // да unsubscribe-ва, независимо кой път е довел дотам.
+    if (state.currentScreen !== 'topics') {
+      unsubscribeFromCurrentTopicMessages()
+    }
     if (state.authModalMode !== 'closed') {
       if (state.authSubmitInFlight) {
         return
@@ -8291,6 +8634,10 @@ export function createLobbyFlowController(
     }
 
     renderLobby()
+    // Transient "защо се променят Topics съобщенията" hint — консумиран
+    // синхронно от renderLobbyScreen вътре в renderLobby() по-горе, нулира
+    // се веднага след употреба (виж topicMessagesRenderReason в типа).
+    state.topicMessagesRenderReason = null
     syncUrlPath()
   }
 
@@ -9253,6 +9600,79 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'topic_message_catchup') {
+      // Stale-response guard — потребителят може вече да е превключил темата
+      // докато catch-up отговорът е висял (rapid switch race).
+      if (message.topicId !== state.activeTopicId) {
+        return true
+      }
+      if (message.messages.length > 0) {
+        state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], message.messages)
+        updateLatestKnownSeqFromMessages(message.topicId, message.messages)
+        // reconnect-refresh поведение (near-bottom threshold, НЕ форсиран
+        // bottom) — catch-up batch-ът може да съдържа съобщения, докато
+        // потребителят чете стари, скролнал нагоре.
+        state.topicMessagesRenderReason = 'reconnect-refresh'
+        render()
+      }
+      if (message.truncated) {
+        // Gap-ът е по-голям от cap-а — падаме обратно на обикновен REST
+        // recent refresh (Етап 2 брифа т.1/т.8), без да форсираме bottom.
+        void refreshTopicMessagesAfterTruncatedCatchup(message.topicId)
+      }
+      return true
+    }
+
+    if (message.type === 'topic_message') {
+      // Defense-in-depth guard — subscription-ът вече би трябвало да
+      // гарантира това (сървърът broadcast-ва само към subscribers на
+      // точно тази тема), но rapid switch race по мрежата е възможен.
+      if (message.topicId !== state.activeTopicId) {
+        return true
+      }
+
+      const { type: _msgType, requestId, ...incomingMessage } = message
+      state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], [incomingMessage])
+      updateLatestKnownSeqFromMessages(message.topicId, [incomingMessage])
+
+      // Ack по requestId (НЕ по body matching — Етап 2 корекция т.4): само
+      // ТОЧНО съвпадащ pending requestId за тази тема чисти draft-а/pending state-а.
+      if (requestId !== undefined && requestId === state.topicComposerPendingRequestIdByTopicId[message.topicId]) {
+        state.topicComposerDraftByTopicId[message.topicId] = ''
+        state.topicComposerPendingRequestIdByTopicId[message.topicId] = null
+        state.topicComposerErrorTextByTopicId[message.topicId] = null
+      }
+
+      state.topicMessagesRenderReason = 'live-append'
+      render()
+      return true
+    }
+
+    if (message.type === 'topic_message_error') {
+      const pendingTopicId = Object.keys(state.topicComposerPendingRequestIdByTopicId).find(
+        (topicId) => state.topicComposerPendingRequestIdByTopicId[topicId] === message.requestId,
+      )
+      if (pendingTopicId !== undefined) {
+        state.topicComposerPendingRequestIdByTopicId[pendingTopicId] = null
+        // Draft НЕ се чисти при грешка — потребителят не губи текста (Етап 2 корекция т.4).
+        state.topicComposerErrorTextByTopicId[pendingTopicId] = message.message
+      }
+
+      if (message.code === 'vip_required') {
+        // Server е source of truth — VIP може да е изтекъл между отваряне на
+        // composer-а и send-а. Re-fetch canonical статус и отвори VIP flow-а
+        // веднага, БЕЗ page reload (Етап 2 корекция т.5).
+        if (state.topicsVipGate) {
+          state.topicsVipGate = { ...state.topicsVipGate, isActive: false }
+        }
+        void refreshTopicsVipGateStatus()
+        state.topicsVipPopupOpen = true
+      }
+
+      render()
+      return true
+    }
+
     if (message.type === 'private_rooms_list') {
       state.privateRooms = message.rooms
       render()
@@ -9769,6 +10189,15 @@ export function createLobbyFlowController(
         // може потребителят да опита пак; чернова текста НЕ се губи.
         state.lobbyChatSending = false
         state.lobbyChatPendingRequestId = null
+        // Огледално за Topics composer (Етап 2 корекция т.4/т.7): ack за
+        // pending send никога няма да пристигне по мъртва връзка — освобождаваме
+        // pending state-а по всички теми, БЕЗ auto-resend и БЕЗ да чистим draft-а
+        // (потребителят не губи текста; ако съобщението реално е било записано
+        // server-side преди disconnect-а, catch-up/reconnect-refresh го открива
+        // чрез messageId dedupe, не чрез този pending флаг).
+        for (const topicId of Object.keys(state.topicComposerPendingRequestIdByTopicId)) {
+          state.topicComposerPendingRequestIdByTopicId[topicId] = null
+        }
       }
       render()
     },
@@ -9825,6 +10254,7 @@ export function createLobbyFlowController(
     openAuthModal,
     suspendLobbyChatForActiveRoom,
     forceLobbyChatResubscribeIfOnLobbyScreen,
+    forceTopicMessagesResubscribeIfOnTopicsScreen,
     resyncPrivateRoomMembership,
     joinPrivateRoom: handlePrivateRoomJoin,
     updateLobbyChatDraft,

@@ -536,6 +536,53 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       }
     }
 
+    if (parsed.type === 'subscribe_topic_messages') {
+      const topicId = normalizeRequiredText(parsed.topicId)
+      if (topicId === null) return null
+
+      // afterSeq е ЗАДЪЛЖИТЕЛЕН gap-closing cursor (Етап 2 брифа т.1) — 0 е
+      // валиден baseline за тема без позната история, но полето трябва да
+      // присъства структурно (не undefined), за да не се "изплъзне" случайно
+      // subscribe без cursor покрай бъдещ refactor на клиента.
+      if (typeof parsed.afterSeq !== 'number' || !Number.isInteger(parsed.afterSeq) || parsed.afterSeq < 0) {
+        return null
+      }
+
+      return {
+        type: 'subscribe_topic_messages',
+        topicId,
+        afterSeq: parsed.afterSeq,
+      }
+    }
+
+    if (parsed.type === 'unsubscribe_topic_messages') {
+      const topicId = normalizeRequiredText(parsed.topicId)
+      if (topicId === null) return null
+      return { type: 'unsubscribe_topic_messages', topicId }
+    }
+
+    if (parsed.type === 'send_topic_message') {
+      // Само структурна проверка (тип на полетата) — семантичните правила
+      // (VIP, topic status, дължина, rate limit) са в index.ts, за да могат
+      // да върнат конкретен `topic_message_error.code` + requestId.
+      const topicId = normalizeRequiredText(parsed.topicId)
+      if (topicId === null || typeof parsed.body !== 'string') return null
+
+      // requestId е ЗАДЪЛЖИТЕЛЕН тук (за разлика от send_lobby_chat_message)
+      // — единствен ack-correlation механизъм за draft clearing/pending state
+      // (Етап 2 брифа т.7); липсващ/празен requestId е structural failure,
+      // не се подразбира default.
+      const requestId = normalizeRequiredText(parsed.requestId)
+      if (requestId === null) return null
+
+      return {
+        type: 'send_topic_message',
+        topicId,
+        body: parsed.body,
+        requestId: requestId.slice(0, 100),
+      }
+    }
+
     if (parsed.type === 'respond_private_room_invite') {
       const inviteId = normalizeRequiredText(parsed.inviteId)
 

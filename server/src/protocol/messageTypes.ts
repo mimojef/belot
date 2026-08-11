@@ -219,6 +219,29 @@ export type ClientMessage =
       body: string
       requestId?: string
     }
+  | {
+      type: 'subscribe_topic_messages'
+      topicId: string
+      /**
+       * Последният seq, който клиентът вече знае за тази тема (от REST load
+       * или предишна WS сесия) — ЗАДЪЛЖИТЕЛЕН gap-closing cursor (Етап 2
+       * брифа т.1): всеки subscribe затваря прозореца между REST snapshot-а
+       * и регистрацията на WS interest-а. `0` за тема без никакви познати
+       * съобщения все още (празна история).
+       */
+      afterSeq: number
+    }
+  | {
+      type: 'unsubscribe_topic_messages'
+      topicId: string
+    }
+  | {
+      type: 'send_topic_message'
+      topicId: string
+      body: string
+      /** Задължителен (за разлика от lobby chat) — единствен ack-correlation механизъм, виж Етап 2 брифа т.7. */
+      requestId: string
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -805,6 +828,9 @@ export type ServerMessage =
   | LobbyChatMessageDeletedMessage
   | LobbyChatErrorMessage
   | ChatMessageReceivedMessage
+  | TopicMessageCatchupMessage
+  | TopicMessageReceivedMessage
+  | TopicMessageErrorMessage
 
 export type ProfileLikedMessage = {
   type: 'profile_liked'
@@ -929,6 +955,72 @@ export type LobbyChatErrorCode =
 export type LobbyChatErrorMessage = {
   type: 'lobby_chat_error'
   code: LobbyChatErrorCode
+  message: string
+  requestId?: string
+}
+
+// --- "Теми" realtime (root съобщения, Етап 2) — REST (GET /api/topics,
+// GET /api/topics/:id/messages) остава canonical за initial/older история;
+// тези WS типове са само за: (1) регистриране на interest в текущо
+// активната тема, (2) send на ново root съобщение, (3) live push към
+// subscribers, (4) bounded gap-closing catch-up при (re)subscribe. Никога не
+// broadcast-ват пълна история — виж topicMessageStore.getMessagesAfter.
+
+/**
+ * Съвместим DTO с TopicMessageSnapshot от REST response-а (index.ts
+ * enrichment слой, GET /api/topics/:id/messages) — включително
+ * senderAvatarUrl, batch-hydrate-нат от canonical profile данни, НЕ по едно
+ * запитване на съобщение. WS push (local instant, cross-instance poll,
+ * catch-up) трябва да носи същия shape, за да може клиентът да ги merge-ва
+ * без DTO-специфични клонове.
+ */
+export type TopicMessageBroadcastSnapshot = {
+  seq: number
+  messageId: string
+  topicId: string
+  parentMessageId: string | null
+  senderProfileId: string
+  senderDisplayName: string
+  senderAvatarUrl: string | null
+  senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
+  body: string
+  createdAt: string
+}
+
+export type TopicMessageCatchupMessage = {
+  type: 'topic_message_catchup'
+  topicId: string
+  messages: TopicMessageBroadcastSnapshot[]
+  /**
+   * true = имало е повече от cap-а нови съобщения от afterSeq насам — този
+   * batch е непълен. Клиентът трябва да падне обратно на обикновен REST
+   * recent refresh (същата функция като initial load), merge-нат по
+   * messageId, БЕЗ да форсира scroll до дъното ако потребителят е бил
+   * scroll-нал нагоре (виж Етап 2 брифа, т.8).
+   */
+  truncated: boolean
+}
+
+export type TopicMessageReceivedMessage = TopicMessageBroadcastSnapshot & {
+  type: 'topic_message'
+  requestId?: string
+}
+
+export type TopicMessageErrorCode =
+  | 'not_authenticated'
+  | 'guest_not_allowed'
+  | 'vip_required'
+  | 'topic_not_found'
+  | 'topic_locked'
+  | 'empty_body'
+  | 'body_too_long'
+  | 'invalid_body'
+  | 'duplicate_message'
+  | 'rate_limited'
+
+export type TopicMessageErrorMessage = {
+  type: 'topic_message_error'
+  code: TopicMessageErrorCode
   message: string
   requestId?: string
 }

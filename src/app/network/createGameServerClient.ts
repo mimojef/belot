@@ -749,6 +749,23 @@ export type ClientMessage =
       body: string
       requestId?: string
     }
+  | {
+      type: 'subscribe_topic_messages'
+      topicId: string
+      /** Задължителен gap-closing cursor — виж Етап 2 брифа т.1. 0 за тема без позната история. */
+      afterSeq: number
+    }
+  | {
+      type: 'unsubscribe_topic_messages'
+      topicId: string
+    }
+  | {
+      type: 'send_topic_message'
+      topicId: string
+      body: string
+      /** Задължителен (за разлика от lobby chat) — единствен ack-correlation механизъм. */
+      requestId: string
+    }
 
 export type PrivateRoomMemberSnapshot = {
   profileId: string | null
@@ -1473,12 +1490,11 @@ export type LobbyChatErrorMessage = {
   requestId?: string
 }
 
-// --- "Теми" (topics) — Етап 1 е чисто REST read-only, БЕЗ WS realtime
-// handlers. Тези типове описват REST response shape (GET /api/topics,
-// GET /api/topics/:id/messages), не WS протокол съобщения — затова НЕ са
-// част от ServerMessage union-а по-долу. Realtime push (subscribe_topic и
-// т.н.) е бъдещ етап; когато дойде, ще получи собствени WS message типове
-// тук, без rewrite на тези REST snapshot типове.
+// --- "Теми" (topics) — Етап 1 добави чисто REST read-only слой (GET
+// /api/topics, GET /api/topics/:id/messages) за initial/older история.
+// Етап 2 добавя WS realtime push за НОВИ root съобщения (TopicMessage*
+// типовете по-долу, ЧАСТ от ServerMessage union-а) — REST слоят по-горе
+// остава непроменен и продължава да е canonical за history/pagination.
 
 export type TopicSnapshot = {
   topicId: string
@@ -1504,6 +1520,38 @@ export type TopicMessageSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   body: string
   createdAt: string
+}
+
+export type TopicMessageCatchupMessage = {
+  type: 'topic_message_catchup'
+  topicId: string
+  messages: TopicMessageSnapshot[]
+  /** true = имало е повече нови съобщения от afterSeq, отколкото cap-ът позволява — падни обратно на REST recent refresh. */
+  truncated: boolean
+}
+
+export type TopicMessageReceivedMessage = TopicMessageSnapshot & {
+  type: 'topic_message'
+  requestId?: string
+}
+
+export type TopicMessageErrorCode =
+  | 'not_authenticated'
+  | 'guest_not_allowed'
+  | 'vip_required'
+  | 'topic_not_found'
+  | 'topic_locked'
+  | 'empty_body'
+  | 'body_too_long'
+  | 'invalid_body'
+  | 'duplicate_message'
+  | 'rate_limited'
+
+export type TopicMessageErrorMessage = {
+  type: 'topic_message_error'
+  code: TopicMessageErrorCode
+  message: string
+  requestId?: string
 }
 
 export type ServerMessage =
@@ -1568,6 +1616,9 @@ export type ServerMessage =
   | LobbyChatMessageEventMessage
   | LobbyChatMessageDeletedMessage
   | LobbyChatErrorMessage
+  | TopicMessageCatchupMessage
+  | TopicMessageReceivedMessage
+  | TopicMessageErrorMessage
 
 type CreateGameServerClientOptions = {
   url?: string
@@ -1613,6 +1664,9 @@ export type GameServerClient = {
   subscribeLobbyChat: () => void
   unsubscribeLobbyChat: () => void
   sendLobbyChatMessage: (body: string, requestId?: string) => void
+  subscribeTopicMessages: (topicId: string, afterSeq: number) => void
+  unsubscribeTopicMessages: (topicId: string) => void
+  sendTopicMessage: (topicId: string, body: string, requestId: string) => void
 }
 
 function getDefaultServerUrl(): string {
@@ -1900,6 +1954,18 @@ export function createGameServerClient(
     send({ type: 'send_lobby_chat_message', body, requestId })
   }
 
+  function subscribeTopicMessages(topicId: string, afterSeq: number): void {
+    send({ type: 'subscribe_topic_messages', topicId, afterSeq })
+  }
+
+  function unsubscribeTopicMessages(topicId: string): void {
+    send({ type: 'unsubscribe_topic_messages', topicId })
+  }
+
+  function sendTopicMessage(topicId: string, body: string, requestId: string): void {
+    send({ type: 'send_topic_message', topicId, body, requestId })
+  }
+
   return {
     connect,
     disconnect,
@@ -1936,5 +2002,8 @@ export function createGameServerClient(
     subscribeLobbyChat,
     unsubscribeLobbyChat,
     sendLobbyChatMessage,
+    subscribeTopicMessages,
+    unsubscribeTopicMessages,
+    sendTopicMessage,
   }
 }

@@ -1,8 +1,10 @@
 import type { TopicMessageSnapshot } from '../network/createGameServerClient'
 import type { LobbyScreenState } from './renderLobbyScreen'
+import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup'
 
-// Read-only Етап 1 — няма composer, likes, create-topic, moderation.
-// Виж CLAUDE.md / project memory за пълния roadmap на следващите етапи.
+// Read-only Етап 1 — няма likes, create-topic, moderation, unread badges.
+// Етап 2 добави real composer (root send, VIP gate, launch gift) — виж
+// CLAUDE.md / project memory за пълния roadmap на следващите етапи.
 
 function escapeHtml(value: string): string {
   return value
@@ -133,6 +135,8 @@ function renderTopicsBar(state: LobbyScreenState): string {
       }
       .topics-arrow-control:disabled { opacity: 0.25; cursor: default; }
       .topics-arrow-control:not(:disabled):hover { color: #d4a520; }
+      .topic-create-chip:hover { filter:brightness(1.12); }
+      .topic-create-chip:active { filter:brightness(0.95); }
     </style>
     <div
       data-topics-bar-row="1"
@@ -146,9 +150,9 @@ function renderTopicsBar(state: LobbyScreenState): string {
     >
       <button
         type="button"
-        data-topics-create-inert="1"
+        data-topics-create="1"
         class="topic-create-chip"
-        aria-disabled="true"
+        aria-label="Нова тема (ще бъде налично скоро)"
         title="Скоро"
         style="
           flex:0 0 auto;
@@ -156,13 +160,14 @@ function renderTopicsBar(state: LobbyScreenState): string {
           align-items:center;
           justify-content:center;
           border-radius:50%;
-          border:1px solid rgba(255,255,255,0.14);
-          background:rgba(255,255,255,0.03);
-          color:rgba(248,250,252,0.38);
+          border:1px solid rgba(74,222,128,0.4);
+          background:linear-gradient(135deg,#22c55e 0%,#16a34a 100%);
+          color:#ffffff;
           font-size:18px;
           font-weight:900;
-          cursor:default;
+          cursor:pointer;
           margin-right:4px;
+          box-shadow:0 2px 8px rgba(34,197,94,0.35);
         "
       >+</button>
       ${renderTopicsArrowControl('left')}
@@ -208,9 +213,21 @@ function renderTopicMessageRow(message: TopicMessageSnapshot): string {
           <span style="font-size:12px;color:rgba(248,250,252,0.42);">${formatTopicMessageTime(message.createdAt)}</span>
         </div>
         <div style="margin-top:2px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;white-space:pre-wrap;">${escapeHtml(message.body)}</div>
-        <div style="margin-top:6px;display:flex;align-items:center;gap:16px;font-size:12px;color:rgba(248,250,252,0.34);">
-          <span data-topic-message-like-slot="1">&#9825;</span>
-          <span data-topic-message-reply-slot="1">&#128172;</span>
+        <div style="margin-top:4px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
+          <button
+            type="button"
+            data-topic-message-like="1"
+            class="topic-message-action-btn"
+            aria-label="Харесай"
+            data-tooltip="Харесай"
+          ><span class="topic-message-action-icon" aria-hidden="true">&#9825;</span></button>
+          <button
+            type="button"
+            data-topic-message-reply="1"
+            class="topic-message-action-btn"
+            aria-label="Отговори"
+            data-tooltip="Отговори"
+          ><span class="topic-message-action-icon" aria-hidden="true">&#128172;</span></button>
         </div>
       </div>
     </div>
@@ -253,6 +270,64 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
   // item-ът би отказал да се свие под content-a си и overflow-y:auto никога
   // не би се активирал в родителски-ограничена височина).
   return `
+    <style>
+      /* Like/Reply — само икона (без постоянен текст), второстепенни спрямо
+         съобщението (приглушен цвят), но с реална tap/click зона по-голяма
+         от самата глифа (padding) — desktop ~38px effective размер, mobile
+         ~44px (media query), огледално на .topic-chip/.topic-create-chip
+         конвенцията за touch target-и. position:relative тук е anchor-ът за
+         ::after tooltip-а по-долу (същия pattern като
+         .lobby-nav-btn-icon-only в renderNav — виж коментара там). */
+      .topic-message-action-btn {
+        position:relative;
+        display:inline-flex;align-items:center;justify-content:center;
+        border:0;background:transparent;border-radius:8px;
+        padding:9px;
+        color:rgba(248,250,252,0.46);
+        cursor:pointer;
+      }
+      .topic-message-action-icon {
+        font-size:20px;
+        line-height:1;
+      }
+      .topic-message-action-btn:hover { background:rgba(255,255,255,0.06); color:rgba(248,250,252,0.8); }
+      .topic-message-action-btn:active { background:rgba(255,255,255,0.10); }
+      @media (hover: none) and (pointer: coarse) {
+        .topic-message-action-btn { padding:11px; }
+      }
+      /* Desktop hover/keyboard-focus tooltip — reuse на established
+         Pika.bg icon-only tooltip pattern (виж .lobby-nav-btn-icon-only в
+         renderNav, renderLobbyScreen.ts), не browser-native title атрибут.
+         position:absolute маха tooltip-а от normal flow — не мести layout-а. */
+      .topic-message-action-btn::after {
+        content: attr(data-tooltip);
+        position: absolute;
+        top: 100%;
+        left: 50%;
+        transform: translateX(-50%) translateY(6px);
+        background: #0a0a0a;
+        border: 1px solid rgba(212,165,32,0.35);
+        color: #d4a520;
+        font-size: 11px; font-weight: 700;
+        padding: 5px 10px;
+        border-radius: 6px;
+        white-space: nowrap;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.15s ease;
+        z-index: 1000;
+      }
+      .topic-message-action-btn:hover::after,
+      .topic-message-action-btn:focus-visible::after {
+        opacity: 1;
+      }
+      /* Само hover устройства виждат tooltip-а изобщо — на touch (mobile)
+         :hover може да "залепне" след tap и да остави tooltip видим. */
+      @media (hover: none) and (pointer: coarse) {
+        .topic-message-action-btn:hover::after { opacity: 0; }
+        .topic-message-action-btn:focus-visible::after { opacity: 1; }
+      }
+    </style>
     <div data-topic-messages-scroll="1" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;">
       ${loadOlderIndicator}
       <div data-topic-messages-list="1" style="display:flex;flex-direction:column;">
@@ -262,20 +337,30 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
   `
 }
 
-// Визуален shell за бъдещия composer (Етап 2 wiring: send_topic_message,
-// VIP gating, launch gift popup) — тук е САМО геометрията/стилът, за да може
-// реалната крайна layout геометрия на екрана да се тества сега. Полето е
-// disabled (не readonly с fake активност) — коректно отразява, че писането
-// още не е функционално, вместо да имитира работещ composer без backend.
-// НЕ добавяй event listeners/click handlers към него в Етап 1.
-function renderTopicsComposerShell(): string {
+// Реален composer (Етап 2) — textarea (Enter=send, Shift+Enter=newline,
+// bounded auto-grow, wiring в renderLobbyScreen.ts), VIP-gated за Non-VIP:
+//
+// - VIP (isActive=true): нормално editable поле.
+// - Non-VIP (isActive=false, вкл. все още незареден gate статус): textarea
+//   е `readonly` (НЕ `disabled`) — визуално изглежда като нормално поле,
+//   без сив/disabled стил. `data-topics-composer-vip-locked="1"` маркира
+//   състоянието за renderLobbyScreen.ts да прикачи pointerdown interception
+//   (preventDefault ПРЕДИ focus/mobile keyboard) вместо нормален focus.
+function renderTopicsComposer(state: LobbyScreenState, topicId: string): string {
+  const isVip = state.topicsVipGate?.isActive ?? false
+  const draft = state.topicComposerDraftByTopicId[topicId] ?? ''
+  const isSending = Boolean(state.topicComposerPendingRequestIdByTopicId[topicId])
+  const errorText = state.topicComposerErrorTextByTopicId[topicId] ?? null
+
   return `
-    <div
-      data-topics-composer-shell="1"
+    <form
+      data-topics-composer-form="1"
+      data-topics-composer-topic-id="${escapeHtml(topicId)}"
+      ${isVip ? '' : 'data-topics-composer-vip-locked="1"'}
       style="
         flex:0 0 auto;
         display:flex;
-        align-items:center;
+        align-items:flex-end;
         gap:8px;
         padding:10px 12px;
         border:1px solid rgba(255,255,255,0.10);
@@ -284,40 +369,90 @@ function renderTopicsComposerShell(): string {
         background:#0a0a0a;
       "
     >
-      <input
-        type="text"
-        disabled
+      <textarea
+        data-topics-composer-text="1"
+        name="body"
+        rows="1"
+        maxlength="2000"
         placeholder="Напиши съобщение..."
+        ${isVip ? '' : 'readonly'}
         style="
           flex:1;
           min-width:0;
-          height:40px;
+          max-height:120px;
+          min-height:40px;
+          box-sizing:border-box;
           border-radius:8px;
           border:1px solid rgba(212,165,32,0.24);
           background:#050505;
-          color:rgba(248,250,252,0.42);
-          padding:0 12px;
+          color:#f8fafc;
+          padding:10px 12px;
           font-size:14px;
-          font-weight:700;
+          font-weight:600;
           outline:none;
+          resize:none;
+          font-family:inherit;
+          line-height:1.4;
+          overflow-y:auto;
         "
-      >
+      >${escapeHtml(draft)}</textarea>
       <button
-        type="button"
-        disabled
+        data-topics-composer-send="1"
+        type="submit"
+        ${isSending ? 'disabled' : ''}
         style="
           flex:0 0 auto;
           height:40px;
           padding:0 16px;
           border:0;
           border-radius:8px;
-          background:rgba(212,165,32,0.18);
-          color:rgba(248,250,252,0.38);
+          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+          color:#080808;
           font-size:13px;
           font-weight:900;
-          cursor:default;
+          cursor:${isSending ? 'default' : 'pointer'};
+          opacity:${isSending ? '0.6' : '1'};
         "
       >Изпрати</button>
+    </form>
+    ${errorText ? `<div data-topics-composer-error="1" style="flex:0 0 auto;padding:4px 12px 0;font-size:12px;color:#f87171;">${escapeHtml(errorText)}</div>` : ''}
+  `
+}
+
+// Кратък "ще бъде налично скоро" toast за create-topic/like/reply (все още
+// неимплементирани, UI polish pass) — огледално на renderSubadminActionToast
+// в renderLobbyScreen.ts (същия layout/анимация), но локален за Topics
+// екрана, вместо да пипаме глобалните mobile/desktop mount точки.
+function renderTopicsInfoToast(state: LobbyScreenState): string {
+  const toast = state.topicsInfoToast
+  if (!toast) return ''
+
+  return `
+    <div style="
+      position:fixed;inset:0;z-index:9700;
+      display:flex;align-items:flex-end;justify-content:center;
+      padding-bottom:64px;
+      pointer-events:none;
+    ">
+      <div style="
+        pointer-events:auto;
+        background:#1a1a2e;
+        border:1px solid rgba(212,165,32,0.55);
+        border-radius:12px;
+        padding:14px 22px;
+        text-align:center;
+        box-shadow:0 8px 40px rgba(0,0,0,0.7);
+        max-width:calc(100vw - 48px);
+        animation:topicsInfoToastIn 0.18s ease both;
+      ">
+        <style>
+          @keyframes topicsInfoToastIn {
+            from { opacity:0; transform:scale(0.92); }
+            to   { opacity:1; transform:scale(1); }
+          }
+        </style>
+        <div style="font-size:14px;font-weight:800;color:#fde68a;">${escapeHtml(toast.text)}</div>
+      </div>
     </div>
   `
 }
@@ -373,8 +508,8 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
   //   1) data-topics-fixed-top  — заглавие + topics bar, никога не мърда
   //   2) data-topics-stream-container — flex:1;min-height:0, ЕДИНСТВЕНИЯТ
   //      vertical scroll container (виж renderTopicMessageStream)
-  //   3) data-topics-composer-shell — визуален shell за бъдещия composer
-  //      (Етап 2), flex:0 0 auto, фиксиран на дъното, БЕЗ send логика тук.
+  //   3) composer form (Етап 2) — flex:0 0 auto, фиксиран на дъното
+  const activeTopicId = state.activeTopicId
   return `
     <section data-topics-screen="1" style="flex:1;min-height:0;display:flex;flex-direction:column;padding:0 4px;overflow:hidden;">
       <div data-topics-fixed-top="1" style="flex:0 0 auto;display:flex;flex-direction:column;gap:12px;padding-bottom:12px;">
@@ -384,7 +519,15 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
       <div data-topics-stream-container="1" style="flex:1;min-height:0;border:1px solid rgba(255,255,255,0.10);border-radius:12px 12px 0 0;border-bottom:0;background:#0a0a0a;display:flex;flex-direction:column;overflow:hidden;">
         ${renderTopicMessageStream(state)}
       </div>
-      ${renderTopicsComposerShell()}
+      ${activeTopicId ? renderTopicsComposer(state, activeTopicId) : ''}
     </section>
+    ${renderVipRequiredPopup({
+      open: state.topicsVipPopupOpen,
+      hasClaimedLaunchGift: state.topicsVipGate ? state.topicsVipGate.hasClaimedLaunchGift : null,
+      claimSubmitting: state.topicsVipClaimSubmitting,
+      claimErrorText: state.topicsVipClaimErrorText,
+      seePlansMessageVisible: state.topicsVipSeePlansMessageVisible,
+    })}
+    ${renderTopicsInfoToast(state)}
   `
 }
