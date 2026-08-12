@@ -201,6 +201,7 @@ export async function createYellowCoinGiftStore(
     FROM profile_friendships
     WHERE friendship_id = ?
       AND status = 'accepted'
+      AND kind = 'friend'
       AND (
         requester_profile_id = ?
         OR addressee_profile_id = ?

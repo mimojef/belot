@@ -510,6 +510,9 @@ export type PlayerProfileMessage = {
   roomId: RoomId
   seat: Seat
   profile: PlayerPublicProfileSnapshot | null
+  ok?: boolean
+  code?: 'profile_blocked_by_viewer' | 'profile_blocked_viewer'
+  message?: string
 }
 
 export type RoomCreatedMessage = {

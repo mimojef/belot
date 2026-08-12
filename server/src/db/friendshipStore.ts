@@ -234,6 +234,44 @@ export async function createFriendshipStore(
       AND kind = 'friend';
   `)
 
+  const selectVipDmForPendingFriendshipStatement = database.prepare(`
+    SELECT
+      vip.friendship_id
+    FROM profile_friendships pending
+    JOIN profile_friendships vip
+      ON vip.lower_profile_id = pending.lower_profile_id
+      AND vip.higher_profile_id = pending.higher_profile_id
+      AND vip.status = 'accepted'
+      AND vip.kind = 'vip_dm'
+    WHERE pending.friendship_id = ?
+      AND pending.addressee_profile_id = ?
+      AND pending.status = 'pending'
+      AND pending.kind = 'friend'
+    LIMIT 1;
+  `)
+
+  const convertVipDmToFriendStatement = database.prepare(`
+    UPDATE profile_friendships
+    SET
+      requester_profile_id = ?,
+      addressee_profile_id = ?,
+      status = 'accepted',
+      kind = 'friend',
+      updated_at = CURRENT_TIMESTAMP,
+      responded_at = CURRENT_TIMESTAMP
+    WHERE friendship_id = ?
+      AND status = 'accepted'
+      AND kind = 'vip_dm';
+  `)
+
+  const deletePendingFriendshipByIdStatement = database.prepare(`
+    DELETE FROM profile_friendships
+    WHERE friendship_id = ?
+      AND addressee_profile_id = ?
+      AND status = 'pending'
+      AND kind = 'friend';
+  `)
+
   const deletePendingFriendshipStatement = database.prepare(`
     DELETE FROM profile_friendships
     WHERE friendship_id = ?
@@ -485,8 +523,68 @@ export async function createFriendshipStore(
       WHERE friendship_id = ?
         AND addressee_profile_id = ?
         AND status = 'pending'
+        AND kind = 'friend'
       LIMIT 1;
     `).get(friendshipId, profileId)) as { requester_profile_id: string } | undefined
+
+    if (existingRow !== undefined) {
+      database.exec('BEGIN IMMEDIATE;')
+      try {
+        const vipDmRow = selectVipDmForPendingFriendshipStatement.get(
+          friendshipId,
+          profileId,
+        ) as { friendship_id: string } | undefined
+
+        if (vipDmRow !== undefined) {
+          deletePendingFriendshipByIdStatement.run(friendshipId, profileId)
+          const convertResult = convertVipDmToFriendStatement.run(
+            existingRow.requester_profile_id,
+            profileId,
+            vipDmRow.friendship_id,
+          ) as { changes?: number }
+
+          if ((convertResult.changes ?? 0) === 0) {
+            throw new Error('Existing vip_dm conversation could not be converted to friend.')
+          }
+
+          database.exec('COMMIT;')
+
+          return {
+            ok: true,
+            friendships: listForProfile(profileId),
+            requesterProfileId: existingRow.requester_profile_id,
+          }
+        }
+
+        const result = acceptFriendshipStatement.run(
+          friendshipId,
+          profileId,
+        ) as { changes?: number }
+
+        if ((result.changes ?? 0) === 0) {
+          database.exec('ROLLBACK;')
+          return {
+            ok: false,
+            message: 'РџРѕРєР°РЅР°С‚Р° РЅРµ Р±РµС€Рµ РЅР°РјРµСЂРµРЅР° РёР»Рё РІРµС‡Рµ Рµ РѕР±СЂР°Р±РѕС‚РµРЅР°.',
+          }
+        }
+
+        database.exec('COMMIT;')
+
+        return {
+          ok: true,
+          friendships: listForProfile(profileId),
+          requesterProfileId: existingRow.requester_profile_id,
+        }
+      } catch (error) {
+        try {
+          database.exec('ROLLBACK;')
+        } catch {
+          // Keep the original write failure visible to the caller.
+        }
+        throw error
+      }
+    }
 
     const result = acceptFriendshipStatement.run(
       friendshipId,
@@ -503,7 +601,7 @@ export async function createFriendshipStore(
     return {
       ok: true,
       friendships: listForProfile(profileId),
-      requesterProfileId: existingRow?.requester_profile_id ?? null,
+      requesterProfileId: null,
     }
   }
 
@@ -520,6 +618,7 @@ export async function createFriendshipStore(
       WHERE friendship_id = ?
         AND addressee_profile_id = ?
         AND status = 'pending'
+        AND kind = 'friend'
       LIMIT 1;
     `).get(friendshipId, profileId) as { requester_profile_id: string } | undefined
 

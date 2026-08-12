@@ -4556,7 +4556,9 @@ function renderMobileFriendCard(
 function renderMobileChatPanel(state: LobbyScreenState): string {
   if (state.chatLoading) return `${renderMobilePageTitle('Чат')}${renderMobileStateMessage('Зареждане на чат...')}`
 
-  const sortedConversations = [...state.chatConversations].sort(
+  const sortedConversations = state.chatConversations
+    .filter((conversation) => conversation.kind !== 'vip_dm')
+    .sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
   )
   const activeConversation = sortedConversations.find(
@@ -5541,7 +5543,8 @@ function renderChatPanel(state: LobbyScreenState): string {
     `
   }
 
-  const visibleConversations = state.chatShowArchived ? state.chatArchivedConversations : state.chatConversations
+  const visibleConversations = (state.chatShowArchived ? state.chatArchivedConversations : state.chatConversations)
+    .filter((conversation) => conversation.kind !== 'vip_dm')
   const sortedConversations = [...visibleConversations].sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
   )

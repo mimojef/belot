@@ -8847,7 +8847,7 @@ export function createLobbyFlowController(
       return
     }
 
-    const firstConversation = state.chatConversations[0] ?? null
+    const firstConversation = state.chatConversations.find((conversation) => conversation.kind !== 'vip_dm') ?? null
 
     if (firstConversation !== null && state.activeChatFriendshipId === null) {
       state.activeChatFriendshipId = firstConversation.friendshipId

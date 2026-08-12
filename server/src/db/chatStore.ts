@@ -19,7 +19,15 @@ export const PERSONAL_CHAT_STORAGE_LIMIT = 500
 // sendMessage), значи автоматично "изважда" разговора от архивираните.
 const CONVERSATION_ARCHIVE_AFTER_DAYS = 365
 
-export type ChatConversationKind = 'friend' | 'pika_support'
+export type ChatConversationKind = 'friend' | 'vip_dm' | 'pika_support'
+export type ChatStoreErrorCode =
+  | 'blocked'
+  | 'conversation_not_found'
+  | 'invalid_conversation_kind'
+  | 'recipient_not_found'
+  | 'self'
+  | 'vip_required'
+  | 'vip_counterpart_required'
 
 export type ChatAttachmentSnapshot = {
   attachmentId: string
@@ -78,13 +86,23 @@ export type ChatStore = {
     recipientProfileId: ProfileId,
   ) =>
     | { ok: true; friendshipId: string; conversation: ChatConversationSnapshot }
-    | { ok: false; message: string }
+    | { ok: false; message: string; code?: ChatStoreErrorCode }
+  getOrCreateVipDmConversation: (
+    senderProfileId: ProfileId,
+    recipientProfileId: ProfileId,
+  ) =>
+    | { ok: true; friendshipId: string; conversation: ChatConversationSnapshot }
+    | { ok: false; message: string; code?: ChatStoreErrorCode }
+  canSendMessage: (
+    profileId: ProfileId,
+    friendshipId: string,
+  ) => { ok: true } | { ok: false; message: string; code?: ChatStoreErrorCode }
   listMessages: (
     profileId: ProfileId,
     friendshipId: string,
   ) =>
     | { ok: true; messages: ChatMessageSnapshot[] }
-    | { ok: false; message: string }
+    | { ok: false; message: string; code?: ChatStoreErrorCode }
   sendMessage: (
     profileId: ProfileId,
     friendshipId: string,
@@ -97,7 +115,7 @@ export type ChatStore = {
         messages: ChatMessageSnapshot[]
         newMessage: ChatMessageSnapshot
       }
-    | { ok: false; message: string }
+    | { ok: false; message: string; code?: ChatStoreErrorCode }
   markConversationRead: (profileId: ProfileId, friendshipId: string) => void
   isFirstUnreadMessage: (recipientProfileId: ProfileId, friendshipId: string) => boolean
   getAttachmentForDownload: (
@@ -119,6 +137,8 @@ type FriendshipRow = {
   friendship_id: string
   requester_profile_id: string
   addressee_profile_id: string
+  lower_profile_id: string
+  higher_profile_id: string
   updated_at: string
   kind: string
 }
@@ -144,6 +164,17 @@ type ChatMessageRow = {
 function buildAttachmentUrls(friendshipId: string, storageFilename: string): { viewUrl: string; downloadUrl: string } {
   const base = `/api/chat/${encodeURIComponent(friendshipId)}/attachments/${encodeURIComponent(storageFilename)}`
   return { viewUrl: base, downloadUrl: `${base}?download=1` }
+}
+
+function getPairKey(friendship: FriendshipRow): string {
+  return `${friendship.lower_profile_id}:${friendship.higher_profile_id}`
+}
+
+function toConversationKind(kind: string): ChatConversationKind | null {
+  if (kind === 'friend' || kind === 'vip_dm' || kind === 'pika_support') {
+    return kind
+  }
+  return null
 }
 
 function getFriendProfileId(
@@ -228,8 +259,13 @@ export type ChatStoreProfileEligibilityChecker = {
   isRegisteredHumanProfile: (profileId: ProfileId) => boolean
 }
 
+export type ChatStoreVipStatusChecker = {
+  isActiveVip: (profileId: ProfileId) => boolean
+}
+
 export type ChatStoreOptions = {
   officialPikaProfileId?: string | null
+  vipStatusChecker?: ChatStoreVipStatusChecker
 }
 
 export async function createChatStore(
@@ -247,6 +283,7 @@ export async function createChatStore(
   // var-а за "кой е официалният Pika.bg профил".
   const officialPikaProfileId =
     options.officialPikaProfileId ?? getConfiguredOfficialPikaProfileId()
+  const vipStatusChecker = options.vipStatusChecker ?? null
 
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
@@ -262,6 +299,8 @@ export async function createChatStore(
       friendship_id,
       requester_profile_id,
       addressee_profile_id,
+      lower_profile_id,
+      higher_profile_id,
       updated_at,
       kind
     FROM profile_friendships
@@ -278,6 +317,8 @@ export async function createChatStore(
       friendship_id,
       requester_profile_id,
       addressee_profile_id,
+      lower_profile_id,
+      higher_profile_id,
       updated_at,
       kind
     FROM profile_friendships
@@ -297,12 +338,48 @@ export async function createChatStore(
       friendship_id,
       requester_profile_id,
       addressee_profile_id,
+      lower_profile_id,
+      higher_profile_id,
       updated_at,
       kind
     FROM profile_friendships
     WHERE lower_profile_id = ?
       AND higher_profile_id = ?
       AND kind = 'pika_support'
+    LIMIT 1;
+  `)
+
+  const selectAcceptedFriendByPairStatement = database.prepare(`
+    SELECT
+      friendship_id,
+      requester_profile_id,
+      addressee_profile_id,
+      lower_profile_id,
+      higher_profile_id,
+      updated_at,
+      kind
+    FROM profile_friendships
+    WHERE lower_profile_id = ?
+      AND higher_profile_id = ?
+      AND status = 'accepted'
+      AND kind = 'friend'
+    LIMIT 1;
+  `)
+
+  const selectVipDmByPairStatement = database.prepare(`
+    SELECT
+      friendship_id,
+      requester_profile_id,
+      addressee_profile_id,
+      lower_profile_id,
+      higher_profile_id,
+      updated_at,
+      kind
+    FROM profile_friendships
+    WHERE lower_profile_id = ?
+      AND higher_profile_id = ?
+      AND status = 'accepted'
+      AND kind = 'vip_dm'
     LIMIT 1;
   `)
 
@@ -320,6 +397,19 @@ export async function createChatStore(
       kind,
       responded_at
     ) VALUES (?, ?, ?, ?, ?, 'accepted', 'pika_support', CURRENT_TIMESTAMP);
+  `)
+
+  const insertVipDmConversationStatement = database.prepare(`
+    INSERT INTO profile_friendships (
+      friendship_id,
+      requester_profile_id,
+      addressee_profile_id,
+      lower_profile_id,
+      higher_profile_id,
+      status,
+      kind,
+      responded_at
+    ) VALUES (?, ?, ?, ?, ?, 'accepted', 'vip_dm', CURRENT_TIMESTAMP);
   `)
 
   const selectLatestMessageStatement = database.prepare(`
@@ -583,7 +673,11 @@ export async function createChatStore(
     ) as ChatMessageRow | undefined
 
     const updatedAt = dbDateToUtc(lastMessageRow?.created_at ?? friendship.updated_at)
-    const kind = friendship.kind === 'pika_support' ? 'pika_support' : 'friend'
+    const kind = toConversationKind(friendship.kind)
+
+    if (kind === null) {
+      return null
+    }
 
     return {
       friendshipId: friendship.friendship_id,
@@ -621,7 +715,31 @@ export async function createChatStore(
       profileId,
     ) as FriendshipRow[]
 
-    return friendships
+    const canonicalFriendshipRows: FriendshipRow[] = []
+    const personalHumanPairKindByPair = new Map<string, 'friend' | 'vip_dm'>()
+
+    for (const friendship of friendships) {
+      const kind = toConversationKind(friendship.kind)
+      if (kind === null) continue
+
+      if (kind === 'pika_support') {
+        canonicalFriendshipRows.push(friendship)
+        continue
+      }
+
+      const pairKey = getPairKey(friendship)
+      const previousKind = personalHumanPairKindByPair.get(pairKey)
+      if (previousKind === 'friend') continue
+      if (previousKind === 'vip_dm' && kind === 'vip_dm') continue
+      if (previousKind === 'vip_dm' && kind === 'friend') {
+        const existingIndex = canonicalFriendshipRows.findIndex((row) => getPairKey(row) === pairKey && row.kind === 'vip_dm')
+        if (existingIndex >= 0) canonicalFriendshipRows.splice(existingIndex, 1)
+      }
+      personalHumanPairKindByPair.set(pairKey, kind)
+      canonicalFriendshipRows.push(friendship)
+    }
+
+    return canonicalFriendshipRows
       .map((friendship) => createConversationSnapshot(friendship, profileId, onlineProfileIds))
       .filter((conversation): conversation is ChatConversationSnapshot => {
         return conversation !== null
@@ -645,7 +763,7 @@ export async function createChatStore(
     recipientProfileId: ProfileId,
   ):
     | { ok: true; friendshipId: string; conversation: ChatConversationSnapshot }
-    | { ok: false; message: string } {
+    | { ok: false; message: string; code?: ChatStoreErrorCode } {
     if (officialPikaProfileId === null || initiatorProfileId !== officialPikaProfileId) {
       return {
         ok: false,
@@ -721,18 +839,251 @@ export async function createChatStore(
     }
   }
 
+  function getOrCreateVipDmConversation(
+    senderProfileId: ProfileId,
+    recipientProfileId: ProfileId,
+  ):
+    | { ok: true; friendshipId: string; conversation: ChatConversationSnapshot }
+    | { ok: false; message: string; code?: ChatStoreErrorCode } {
+    if (senderProfileId === recipientProfileId) {
+      return {
+        ok: false,
+        code: 'self',
+        message: 'Не можеш да започнеш личен разговор със себе си.',
+      }
+    }
+
+    if (!profileEligibilityChecker.isRegisteredHumanProfile(recipientProfileId)) {
+      return {
+        ok: false,
+        code: 'recipient_not_found',
+        message: 'Играчът не беше намерен.',
+      }
+    }
+
+    if (
+      blockChecker.isBlocked(senderProfileId, recipientProfileId)
+      || blockChecker.isBlocked(recipientProfileId, senderProfileId)
+    ) {
+      return {
+        ok: false,
+        code: 'blocked',
+        message: 'Чатът е недостъпен поради блокиране.',
+      }
+    }
+
+    const pair = createChatProfilePair(senderProfileId, recipientProfileId)
+
+    const existingFriend = selectAcceptedFriendByPairStatement.get(
+      pair.lowerProfileId,
+      pair.higherProfileId,
+    ) as FriendshipRow | undefined
+
+    if (existingFriend !== undefined) {
+      const conversation = createConversationSnapshot(existingFriend, senderProfileId)
+      if (conversation === null) {
+        return {
+          ok: false,
+          code: 'invalid_conversation_kind',
+          message: 'Разговорът не може да бъде отворен.',
+        }
+      }
+      return { ok: true, friendshipId: existingFriend.friendship_id, conversation }
+    }
+
+    const existingVipDm = selectVipDmByPairStatement.get(
+      pair.lowerProfileId,
+      pair.higherProfileId,
+    ) as FriendshipRow | undefined
+
+    if (existingVipDm !== undefined) {
+      const conversation = createConversationSnapshot(existingVipDm, senderProfileId)
+      if (conversation === null) {
+        return {
+          ok: false,
+          code: 'invalid_conversation_kind',
+          message: 'Разговорът не може да бъде отворен.',
+        }
+      }
+      return { ok: true, friendshipId: existingVipDm.friendship_id, conversation }
+    }
+
+    if (vipStatusChecker === null || !vipStatusChecker.isActiveVip(senderProfileId)) {
+      return {
+        ok: false,
+        code: 'vip_required',
+        message: 'Необходим е активен VIP, за да започнеш този разговор.',
+      }
+    }
+
+    if (!vipStatusChecker.isActiveVip(recipientProfileId)) {
+      return {
+        ok: false,
+        code: 'vip_counterpart_required',
+        message: 'Получателят трябва да има активен VIP.',
+      }
+    }
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const friendAfterLock = selectAcceptedFriendByPairStatement.get(
+        pair.lowerProfileId,
+        pair.higherProfileId,
+      ) as FriendshipRow | undefined
+
+      if (friendAfterLock === undefined) {
+        const vipAfterLock = selectVipDmByPairStatement.get(
+          pair.lowerProfileId,
+          pair.higherProfileId,
+        ) as FriendshipRow | undefined
+
+        if (vipAfterLock === undefined) {
+          try {
+            insertVipDmConversationStatement.run(
+              randomUUID(),
+              senderProfileId,
+              recipientProfileId,
+              pair.lowerProfileId,
+              pair.higherProfileId,
+            )
+          } catch {
+            // Another writer may have won the partial unique index race.
+          }
+        }
+      }
+
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // Keep the original error visible.
+      }
+      throw error
+    }
+
+    const finalFriend = selectAcceptedFriendByPairStatement.get(
+      pair.lowerProfileId,
+      pair.higherProfileId,
+    ) as FriendshipRow | undefined
+    const friendship = finalFriend ?? (
+      selectVipDmByPairStatement.get(
+        pair.lowerProfileId,
+        pair.higherProfileId,
+      ) as FriendshipRow | undefined
+    )
+
+    if (friendship === undefined) {
+      return {
+        ok: false,
+        code: 'conversation_not_found',
+        message: 'Разговорът не беше създаден.',
+      }
+    }
+
+    const conversation = createConversationSnapshot(friendship, senderProfileId)
+    if (conversation === null) {
+      return {
+        ok: false,
+        code: 'invalid_conversation_kind',
+        message: 'Разговорът не може да бъде отворен.',
+      }
+    }
+
+    return {
+      ok: true,
+      friendshipId: friendship.friendship_id,
+      conversation,
+    }
+  }
+
+  function authorizeSendMessage(
+    profileId: ProfileId,
+    friendshipId: string,
+  ):
+    | { ok: true; friendship: FriendshipRow; recipientProfileId: ProfileId }
+    | { ok: false; message: string; code?: ChatStoreErrorCode } {
+    const friendship = getAcceptedFriendship(profileId, friendshipId)
+
+    if (friendship === null) {
+      return {
+        ok: false,
+        code: 'conversation_not_found',
+        message: 'Чатът е недостъпен.',
+      }
+    }
+
+    const kind = toConversationKind(friendship.kind)
+    if (kind === null) {
+      return {
+        ok: false,
+        code: 'invalid_conversation_kind',
+        message: 'Чатът е с невалиден тип.',
+      }
+    }
+
+    const recipientProfileId = getFriendProfileId(friendship, profileId)
+
+    if (
+      blockChecker.isBlocked(profileId, recipientProfileId)
+      || blockChecker.isBlocked(recipientProfileId, profileId)
+    ) {
+      return {
+        ok: false,
+        code: 'blocked',
+        message: 'Чатът е недостъпен поради блокиране.',
+      }
+    }
+
+    if (kind === 'vip_dm') {
+      if (vipStatusChecker === null || !vipStatusChecker.isActiveVip(profileId)) {
+        return {
+          ok: false,
+          code: 'vip_required',
+          message: 'Необходим е активен VIP, за да изпратиш съобщение.',
+        }
+      }
+      if (!vipStatusChecker.isActiveVip(recipientProfileId)) {
+        return {
+          ok: false,
+          code: 'vip_counterpart_required',
+          message: 'Получателят трябва да има активен VIP.',
+        }
+      }
+    }
+
+    return { ok: true, friendship, recipientProfileId }
+  }
+
+  function canSendMessage(
+    profileId: ProfileId,
+    friendshipId: string,
+  ): { ok: true } | { ok: false; message: string; code?: ChatStoreErrorCode } {
+    const authorization = authorizeSendMessage(profileId, friendshipId)
+    if (!authorization.ok) return authorization
+    return { ok: true }
+  }
+
   function listMessages(
     profileId: ProfileId,
     friendshipId: string,
   ):
     | { ok: true; messages: ChatMessageSnapshot[] }
-    | { ok: false; message: string } {
+    | { ok: false; message: string; code?: ChatStoreErrorCode } {
     const friendship = getAcceptedFriendship(profileId, friendshipId)
 
     if (friendship === null) {
       return {
         ok: false,
         message: 'Чатът е достъпен само между приятели.',
+      }
+    }
+
+    if (toConversationKind(friendship.kind) === null) {
+      return {
+        ok: false,
+        code: 'invalid_conversation_kind',
+        message: 'Chat has an invalid conversation kind.',
       }
     }
 
@@ -759,8 +1110,14 @@ export async function createChatStore(
         messages: ChatMessageSnapshot[]
         newMessage: ChatMessageSnapshot
       }
-    | { ok: false; message: string } {
-    const friendship = getAcceptedFriendship(profileId, friendshipId)
+    | { ok: false; message: string; code?: ChatStoreErrorCode } {
+    const authorization = authorizeSendMessage(profileId, friendshipId)
+
+    if (!authorization.ok) {
+      return authorization
+    }
+
+    const friendship = authorization.friendship
 
     if (friendship === null) {
       return {
@@ -964,6 +1321,8 @@ export async function createChatStore(
   return {
     listConversations,
     getOrCreatePikaSupportConversation,
+    getOrCreateVipDmConversation,
+    canSendMessage,
     listMessages,
     sendMessage,
     markConversationRead,

@@ -582,6 +582,11 @@ const chatStore = await createChatStore(
   playerProgressStore,
   blockStore,
   friendshipStore,
+  {
+    vipStatusChecker: {
+      isActiveVip: (profileId) => vipStore.getStatus(profileId).isActive,
+    },
+  },
 )
 const lobbyChatStore = await createLobbyChatStore(databaseBootstrap.databaseFilePath)
 const topicStore = await createTopicStore(databaseBootstrap.databaseFilePath)
@@ -3690,6 +3695,19 @@ function sendPlayerProfileToConnection(
   const baseProfile = participant === null
     ? null
     : dbProfile ?? participant.publicProfile ?? createFallbackPublicProfileSnapshot(participant)
+
+  const accessDenial = getProfileAccessDenial(viewerProfileId, profileId)
+
+  if (accessDenial !== null) {
+    safeSendToConnection(connectionId, {
+      type: 'player_profile',
+      roomId,
+      seat,
+      profile: null,
+      ...accessDenial,
+    })
+    return
+  }
 
   const enrichedProfile = baseProfile && profileId
     ? {
@@ -6801,6 +6819,41 @@ function enrichPlayerProfilesForViewer(
 // от players directory/leaderboards). Достъпен за всеки логнат потребител —
 // profile popup-ът (напр. от "Теми") трябва да покаже актуални данни за
 // произволен профил, не само за тези вече в state.players кеша на клиента.
+type ProfileAccessDenial =
+  | { ok: false; code: 'profile_blocked_by_viewer'; message: string }
+  | { ok: false; code: 'profile_blocked_viewer'; message: string }
+
+function getProfileAccessDenial(
+  viewerProfileId: string | null,
+  targetProfileId: string | null,
+): ProfileAccessDenial | null {
+  if (
+    viewerProfileId === null ||
+    targetProfileId === null ||
+    viewerProfileId === targetProfileId
+  ) {
+    return null
+  }
+
+  if (blockStore.isBlocked(viewerProfileId, targetProfileId)) {
+    return {
+      ok: false,
+      code: 'profile_blocked_by_viewer',
+      message: 'Вие сте блокирали този потребител.',
+    }
+  }
+
+  if (blockStore.isBlocked(targetProfileId, viewerProfileId)) {
+    return {
+      ok: false,
+      code: 'profile_blocked_viewer',
+      message: 'Този потребител ви е блокирал.',
+    }
+  }
+
+  return null
+}
+
 async function handleProfileByIdRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -6823,6 +6876,13 @@ async function handleProfileByIdRequest(
       ok: false,
       message: 'Профилът не беше намерен.',
     })
+    return true
+  }
+
+  const accessDenial = getProfileAccessDenial(currentProfileId, profileId)
+
+  if (accessDenial !== null) {
+    sendJsonResponse(res, 403, accessDenial)
     return true
   }
 
@@ -10658,13 +10718,15 @@ async function handleChatRequest(
   const readMatch = /^\/api\/chat\/([^/]+)\/read$/.exec(pathname)
   const attachmentMatch = /^\/api\/chat\/([^/]+)\/attachments\/([^/]+)$/.exec(pathname)
   const isPikaSupportStart = pathname === '/api/chat/pika-support/start'
+  const isVipDmStart = pathname === '/api/chat/vip-dm/start'
 
   if (
     pathname !== '/api/chat/conversations' &&
     messagesMatch === null &&
     readMatch === null &&
     attachmentMatch === null &&
-    !isPikaSupportStart
+    !isPikaSupportStart &&
+    !isVipDmStart
   ) {
     return false
   }
@@ -10748,6 +10810,36 @@ async function handleChatRequest(
     return true
   }
 
+  if (isVipDmStart && req.method === 'POST') {
+    const body = await readJsonRequestBody(req, MAX_IMAGE_ATTACHMENT_JSON_BYTES)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
+      return true
+    }
+
+    const recipientProfileId = getStringField(body, 'recipientProfileId').trim()
+
+    if (recipientProfileId.length === 0) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Липсва получател.' })
+      return true
+    }
+
+    const result = chatStore.getOrCreateVipDmConversation(profileId, recipientProfileId)
+
+    if (!result.ok) {
+      sendJsonResponse(res, 403, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      friendshipId: result.friendshipId,
+      conversation: result.conversation,
+    })
+    return true
+  }
+
   if (readMatch !== null && req.method === 'POST') {
     const friendshipId = decodeURIComponent(readMatch[1]).trim()
     chatStore.markConversationRead(profileId, friendshipId)
@@ -10792,6 +10884,12 @@ async function handleChatRequest(
     const imageDataUrlField = body.imageDataUrl
     let attachmentInput: { storageFilename: string; width: number; height: number; byteSize: number; contentType: string } | null = null
     let writtenAttachmentFilename: string | null = null
+
+    const sendAuthorization = chatStore.canSendMessage(profileId, friendshipId)
+    if (!sendAuthorization.ok) {
+      sendJsonResponse(res, 400, sendAuthorization)
+      return true
+    }
 
     if (typeof imageDataUrlField === 'string' && imageDataUrlField.trim().length > 0) {
       const imageBuffer = decodeImageAttachmentDataUrl(imageDataUrlField)

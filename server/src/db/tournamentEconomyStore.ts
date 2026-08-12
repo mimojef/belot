@@ -882,6 +882,7 @@ export async function createTournamentEconomyStore(
     SELECT 1 as found
     FROM profile_friendships
     WHERE status = 'accepted'
+      AND kind = 'friend'
       AND (
         (requester_profile_id = ? AND addressee_profile_id = ?)
         OR (requester_profile_id = ? AND addressee_profile_id = ?)
@@ -905,6 +906,7 @@ export async function createTournamentEconomyStore(
         ELSE f.requester_profile_id
       END
     WHERE f.status = 'accepted'
+      AND f.kind = 'friend'
       AND (f.requester_profile_id = ? OR f.addressee_profile_id = ?)
     ORDER BY lower(p.display_name) ASC;
   `)

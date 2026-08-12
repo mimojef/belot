@@ -483,9 +483,24 @@ try {
   })
 
   await check('[19] Блокиран sender → A не може да изпрати снимка', async () => {
+    const filesBefore = await readdir(iso.uploadsDir).catch(() => [])
+    const historyBefore = await httpJson(port, 'GET', `/api/chat/${friendshipId}/messages`, userA.cookie)
+    assertEqual(historyBefore.status, 200, `history before blocked image ${JSON.stringify(historyBefore.body)}`)
+    const messageCountBefore = historyBefore.body.messages.length
+
     const imgRes = await httpJson(port, 'POST', `/api/chat/${friendshipId}/messages`, userA.cookie, {
       body: '', imageDataUrl: toDataUrl('jpeg', jpegBuffer),
     })
+    const historyAfter = await httpJson(port, 'GET', `/api/chat/${friendshipId}/messages`, userA.cookie)
+    assertEqual(historyAfter.status, 200, `history after blocked image ${JSON.stringify(historyAfter.body)}`)
+    assertEqual(historyAfter.body.messages.length, messageCountBefore, 'blocked image send must not create message row')
+
+    const filesAfter = await readdir(iso.uploadsDir).catch(() => [])
+    assertEqual(
+      JSON.stringify(filesAfter.sort()),
+      JSON.stringify(filesBefore.sort()),
+      'blocked image send must not leave a new attachment file',
+    )
     assert(imgRes.status !== 200, `снимка мина въпреки блокирането (status=${imgRes.status})`)
     assert(imgRes.body.ok === false, 'ok трябва да е false')
   })

@@ -308,7 +308,7 @@ export type ChatMessageSnapshot = {
   attachment: ChatAttachmentSnapshot | null
 }
 
-export type ChatConversationKind = 'friend' | 'pika_support'
+export type ChatConversationKind = 'friend' | 'vip_dm' | 'pika_support'
 
 export type ChatConversationSnapshot = {
   friendshipId: string

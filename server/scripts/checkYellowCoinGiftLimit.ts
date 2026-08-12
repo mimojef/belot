@@ -186,6 +186,8 @@ function buildBaseSchema(db: DatabaseSync): void {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       responded_at TEXT NULL,
+      kind TEXT NOT NULL DEFAULT 'friend'
+        CHECK (kind IN ('friend', 'pika_support', 'vip_dm')),
       CHECK (requester_profile_id <> addressee_profile_id),
       CHECK (lower_profile_id <> higher_profile_id),
       UNIQUE (lower_profile_id, higher_profile_id),
@@ -284,8 +286,8 @@ function seedFriendship(db: DatabaseSync, id: string, p1: string, p2: string): v
   const lower = p1 < p2 ? p1 : p2
   const higher = p1 < p2 ? p2 : p1
   db.exec(`INSERT OR IGNORE INTO profile_friendships
-    (friendship_id, requester_profile_id, addressee_profile_id, lower_profile_id, higher_profile_id, status)
-    VALUES ('${id}', '${p1}', '${p2}', '${lower}', '${higher}', 'accepted')`)
+    (friendship_id, requester_profile_id, addressee_profile_id, lower_profile_id, higher_profile_id, status, kind)
+    VALUES ('${id}', '${p1}', '${p2}', '${lower}', '${higher}', 'accepted', 'friend')`)
 }
 
 function seedGiftLedger(
