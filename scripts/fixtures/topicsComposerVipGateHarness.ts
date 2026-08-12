@@ -206,8 +206,16 @@ function q<T extends Element>(selector: string): T | null {
   },
   submitComposerForm: () => q<HTMLFormElement>('[data-topics-composer-form="1"]')?.requestSubmit(),
   clickComposerTextarea: () => {
+    // Реален потребителски tap е pointerdown → (browser-native focus/click
+    // chain) → click. Production non-VIP handler-ите (renderLobbyScreen.ts)
+    // са нарочно разделени: pointerdown прави САМО preventDefault() (спира
+    // mobile keyboard focus), а popup-ът се отваря на click (изчаква пълен
+    // press-release цикъл, за да няма self-closing race — виж коментара на
+    // wiring-а). dispatchEvent() не symuliра native event chaining, затова
+    // тук explicit-но пращаме и двете, mirror на реален click().
     const el = q<HTMLTextAreaElement>('[data-topics-composer-text="1"]')
     el?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }))
+    el?.click()
   },
   focusComposerTextarea: () => q<HTMLTextAreaElement>('[data-topics-composer-text="1"]')?.focus(),
   isComposerTextareaFocused: () => document.activeElement === q<HTMLTextAreaElement>('[data-topics-composer-text="1"]'),

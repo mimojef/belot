@@ -8,12 +8,23 @@
  * === Section A: Role authorization ===
  * [A1]  admin МОЖЕ да заключи тема (200)
  * [A2]  subadmin МОЖЕ да заключи тема (200)
- * [A3]  pika_team МОЖЕ да заключи тема (200)
+ * [A3]  pika_team НЕ МОЖЕ да заключи тема (403) — whole-topic lock/unlock/delete
+ *       е admin/subadmin/top_chat_admin само (corrective pass — виж Section AA)
  * [A4]  top_chat_admin МОЖЕ да заключи тема (200)
  * [A5]  Обикновен player НЕ МОЖЕ да заключи тема (403)
  * [A6]  VIP player (не moderator role) НЕ МОЖЕ да заключи тема (403) — VIP ≠ moderator
  * [A7]  Guest/temporary profile НЕ МОЖЕ да заключи тема (403)
  * [A8]  Unauthenticated (без сесия) НЕ МОЖЕ да заключи тема (401/403)
+ *
+ * === Section AA: Whole-topic role matrix (corrective pass — lock/unlock/delete
+ * е по-тесен permission set от mute/unmute/reports/audit, isTopicWholeTopicModeratorSession) ===
+ * [AA1-3]   admin МОЖЕ lock/unlock/delete
+ * [AA4-6]   subadmin МОЖЕ lock/unlock/delete
+ * [AA7-9]   top_chat_admin МОЖЕ lock/unlock/delete
+ * [AA10-12] pika_team НЕ МОЖЕ lock/unlock/delete (403)
+ * [AA13-15] chat_admin НЕ МОЖЕ lock/unlock/delete (403)
+ * [AA16]    pika_team продължава да МОЖЕ mute/unmute (непроменена политика)
+ * [AA17]    pika_team продължава да МОЖЕ reports list + audit log (непроменена политика)
  *
  * === Section B: Locked topic blocks writes ===
  * [B1]  Locked topic блокира root post (WS send_topic_message -> topic_locked)
@@ -236,7 +247,7 @@ async function registerAndLogin(port: number, email: string, displayName: string
   return { cookie, profileId }
 }
 
-function promoteAccount(databaseFile: string, email: string, role: 'admin' | 'subadmin' | 'pika_team' | 'top_chat_admin'): void {
+function promoteAccount(databaseFile: string, email: string, role: 'admin' | 'subadmin' | 'pika_team' | 'top_chat_admin' | 'chat_admin'): void {
   const database = new DatabaseSync(databaseFile, { open: true, enableForeignKeyConstraints: true })
   try {
     database.exec('PRAGMA journal_mode = WAL;')
@@ -330,6 +341,7 @@ try {
   const subadmin = await registerAndLogin(port, `tmod-subadmin-${runId}@example.test`, 'SubadminUser')
   const pikaTeam = await registerAndLogin(port, `tmod-pikateam-${runId}@example.test`, 'PikaTeamUser')
   const topChatAdmin = await registerAndLogin(port, `tmod-topchatadmin-${runId}@example.test`, 'TopChatAdminUser')
+  const chatAdmin = await registerAndLogin(port, `tmod-chatadmin-${runId}@example.test`, 'ChatAdminUser')
   const normalPlayer = await registerAndLogin(port, `tmod-player-${runId}@example.test`, 'NormalPlayer')
   const vipPlayer = await registerAndLogin(port, `tmod-vip-${runId}@example.test`, 'VipPlayer')
   const targetUser = await registerAndLogin(port, `tmod-target-${runId}@example.test`, 'TargetUser')
@@ -339,6 +351,7 @@ try {
   promoteAccount(iso.dbFile, `tmod-subadmin-${runId}@example.test`, 'subadmin')
   promoteAccount(iso.dbFile, `tmod-pikateam-${runId}@example.test`, 'pika_team')
   promoteAccount(iso.dbFile, `tmod-topchatadmin-${runId}@example.test`, 'top_chat_admin')
+  promoteAccount(iso.dbFile, `tmod-chatadmin-${runId}@example.test`, 'chat_admin')
   grantVip(iso.dbFile, vipPlayer.profileId)
 
   insertExtraTopic(iso.dbFile, 'topic-lock-test', 'lock-test', 'Lock Test Topic')
@@ -348,6 +361,7 @@ try {
   insertExtraTopic(iso.dbFile, 'topic-realtime-test', 'realtime-test', 'Realtime Test Topic')
   insertExtraTopic(iso.dbFile, 'topic-idempotency-test', 'idempotency-test', 'Idempotency Test Topic')
   insertExtraTopic(iso.dbFile, 'topic-report-test', 'report-test', 'Report Test Topic')
+  insertExtraTopic(iso.dbFile, 'topic-whole-topic-matrix-test', 'whole-topic-matrix-test', 'Whole Topic Matrix Test Topic')
   grantVip(iso.dbFile, targetUser.profileId)
   grantVip(iso.dbFile, normalPlayer.profileId)
 
@@ -365,10 +379,9 @@ try {
     await httpPostJson(port, '/api/topics/topic-lock-test/unlock', subadmin.cookie, {})
   })
 
-  await check('[A3] pika_team МОЖЕ да заключи тема (200)', async () => {
+  await check('[A3] pika_team НЕ МОЖЕ да заключи тема (403) — whole-topic lock/unlock/delete е admin/subadmin/top_chat_admin само (corrective pass)', async () => {
     const r = await httpPostJson(port, '/api/topics/topic-lock-test/lock', pikaTeam.cookie, { reason: 'test', durationMs: 30 * 60 * 1000 })
-    assert(r.status === 200, `очаквано 200, получено ${r.status}`)
-    await httpPostJson(port, '/api/topics/topic-lock-test/unlock', pikaTeam.cookie, {})
+    assert(r.status === 403, `очаквано 403 за pika_team whole-topic lock, получено ${r.status}`)
   })
 
   await check('[A4] top_chat_admin МОЖЕ да заключи тема (200)', async () => {
@@ -398,6 +411,107 @@ try {
   await check('[A8] Unauthenticated (без сесия) НЕ МОЖЕ да заключи тема (401/403)', async () => {
     const r = await httpPostJson(port, '/api/topics/topic-lock-test/lock', undefined, { reason: 'test', durationMs: 30 * 60 * 1000 })
     assert(r.status === 401 || r.status === 403, `очаквано 401/403, получено ${r.status}`)
+  })
+
+  console.log('\n=== Section AA: Whole-topic role matrix (lock/unlock/delete) — corrective pass ===\n')
+
+  // Собствена тема per allowed role (unlock изисква вече locked; delete
+  // консумира темата), за да не кръстосват тестовете състояние помежду си.
+  insertExtraTopic(iso.dbFile, 'topic-matrix-admin', 'matrix-admin', 'Matrix Admin Topic')
+  insertExtraTopic(iso.dbFile, 'topic-matrix-subadmin', 'matrix-subadmin', 'Matrix Subadmin Topic')
+  insertExtraTopic(iso.dbFile, 'topic-matrix-topchatadmin', 'matrix-topchatadmin', 'Matrix TopChatAdmin Topic')
+
+  await check('[AA1] admin МОЖЕ lock (200)', async () => {
+    const r = await httpPostJson(port, '/api/topics/topic-matrix-admin/lock', admin.cookie, { reason: 'matrix', durationMs: 30 * 60 * 1000 })
+    assert(r.status === 200, `очаквано 200, получено ${r.status}`)
+  })
+
+  await check('[AA2] admin МОЖЕ unlock (200)', async () => {
+    const r = await httpPostJson(port, '/api/topics/topic-matrix-admin/unlock', admin.cookie, {})
+    assert(r.status === 200, `очаквано 200, получено ${r.status}`)
+  })
+
+  await check('[AA3] admin МОЖЕ delete (200)', async () => {
+    const r = await httpDeleteJson(port, '/api/topics/topic-matrix-admin', admin.cookie, { reason: 'matrix delete' })
+    assert(r.status === 200, `очаквано 200, получено ${r.status}`)
+  })
+
+  await check('[AA4] subadmin МОЖЕ lock (200)', async () => {
+    const r = await httpPostJson(port, '/api/topics/topic-matrix-subadmin/lock', subadmin.cookie, { reason: 'matrix', durationMs: 30 * 60 * 1000 })
+    assert(r.status === 200, `очаквано 200, получено ${r.status}`)
+  })
+
+  await check('[AA5] subadmin МОЖЕ unlock (200)', async () => {
+    const r = await httpPostJson(port, '/api/topics/topic-matrix-subadmin/unlock', subadmin.cookie, {})
+    assert(r.status === 200, `очаквано 200, получено ${r.status}`)
+  })
+
+  await check('[AA6] subadmin МОЖЕ delete (200)', async () => {
+    const r = await httpDeleteJson(port, '/api/topics/topic-matrix-subadmin', subadmin.cookie, { reason: 'matrix delete' })
+    assert(r.status === 200, `очаквано 200, получено ${r.status}`)
+  })
+
+  await check('[AA7] top_chat_admin МОЖЕ lock (200)', async () => {
+    const r = await httpPostJson(port, '/api/topics/topic-matrix-topchatadmin/lock', topChatAdmin.cookie, { reason: 'matrix', durationMs: 30 * 60 * 1000 })
+    assert(r.status === 200, `очаквано 200, получено ${r.status}`)
+  })
+
+  await check('[AA8] top_chat_admin МОЖЕ unlock (200)', async () => {
+    const r = await httpPostJson(port, '/api/topics/topic-matrix-topchatadmin/unlock', topChatAdmin.cookie, {})
+    assert(r.status === 200, `очаквано 200, получено ${r.status}`)
+  })
+
+  await check('[AA9] top_chat_admin МОЖЕ delete (200)', async () => {
+    const r = await httpDeleteJson(port, '/api/topics/topic-matrix-topchatadmin', topChatAdmin.cookie, { reason: 'matrix delete' })
+    assert(r.status === 200, `очаквано 200, получено ${r.status}`)
+  })
+
+  await check('[AA10] pika_team НЕ МОЖЕ lock (403)', async () => {
+    const r = await httpPostJson(port, '/api/topics/topic-whole-topic-matrix-test/lock', pikaTeam.cookie, { reason: 'matrix', durationMs: 30 * 60 * 1000 })
+    assert(r.status === 403, `очаквано 403, получено ${r.status}`)
+  })
+
+  await check('[AA11] pika_team НЕ МОЖЕ unlock (403)', async () => {
+    // Заключваме с admin, за да тестваме unlock отказа отделно от lock отказа.
+    await httpPostJson(port, '/api/topics/topic-whole-topic-matrix-test/lock', admin.cookie, { reason: 'setup for AA11', durationMs: 30 * 60 * 1000 })
+    const r = await httpPostJson(port, '/api/topics/topic-whole-topic-matrix-test/unlock', pikaTeam.cookie, {})
+    assert(r.status === 403, `очаквано 403, получено ${r.status}`)
+    await httpPostJson(port, '/api/topics/topic-whole-topic-matrix-test/unlock', admin.cookie, {})
+  })
+
+  await check('[AA12] pika_team НЕ МОЖЕ delete (403)', async () => {
+    const r = await httpDeleteJson(port, '/api/topics/topic-whole-topic-matrix-test', pikaTeam.cookie, { reason: 'matrix delete attempt' })
+    assert(r.status === 403, `очаквано 403, получено ${r.status}`)
+  })
+
+  await check('[AA13] chat_admin НЕ МОЖЕ lock (403)', async () => {
+    const r = await httpPostJson(port, '/api/topics/topic-whole-topic-matrix-test/lock', chatAdmin.cookie, { reason: 'matrix', durationMs: 30 * 60 * 1000 })
+    assert(r.status === 403, `очаквано 403, получено ${r.status}`)
+  })
+
+  await check('[AA14] chat_admin НЕ МОЖЕ unlock (403)', async () => {
+    await httpPostJson(port, '/api/topics/topic-whole-topic-matrix-test/lock', admin.cookie, { reason: 'setup for AA14', durationMs: 30 * 60 * 1000 })
+    const r = await httpPostJson(port, '/api/topics/topic-whole-topic-matrix-test/unlock', chatAdmin.cookie, {})
+    assert(r.status === 403, `очаквано 403, получено ${r.status}`)
+    await httpPostJson(port, '/api/topics/topic-whole-topic-matrix-test/unlock', admin.cookie, {})
+  })
+
+  await check('[AA15] chat_admin НЕ МОЖЕ delete (403)', async () => {
+    const r = await httpDeleteJson(port, '/api/topics/topic-whole-topic-matrix-test', chatAdmin.cookie, { reason: 'matrix delete attempt' })
+    assert(r.status === 403, `очаквано 403, получено ${r.status}`)
+  })
+
+  await check('[AA16] existing mute permissions НЕ са неволно променени — pika_team продължава да МОЖЕ mute', async () => {
+    const r = await httpPostJson(port, '/api/topics/topic-whole-topic-matrix-test/mute', pikaTeam.cookie, { profileId: bystander.profileId, reason: 'matrix mute check', durationMs: 30 * 60 * 1000 })
+    assert(r.status === 200, `очаквано 200 (mute permissions непроменени за pika_team), получено ${r.status}`)
+    await httpPostJson(port, '/api/topics/topic-whole-topic-matrix-test/unmute', pikaTeam.cookie, { profileId: bystander.profileId })
+  })
+
+  await check('[AA17] existing reports/audit permissions НЕ са неволно променени — pika_team продължава да МОЖЕ GET reports list и audit log', async () => {
+    const reportsRes = await httpGetJson(port, '/api/admin/topic-reports', pikaTeam.cookie)
+    assert(reportsRes.status === 200, `очаквано 200 за reports list (pika_team), получено ${reportsRes.status}`)
+    const auditRes = await httpGetJson(port, '/api/admin/topics/topic-whole-topic-matrix-test/moderation-log', pikaTeam.cookie)
+    assert(auditRes.status === 200, `очаквано 200 за audit log (pika_team), получено ${auditRes.status}`)
   })
 
   console.log('\n=== Section B: Locked topic blocks writes ===\n')

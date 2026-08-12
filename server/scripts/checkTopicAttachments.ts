@@ -28,6 +28,16 @@
  * [17] resolveAttachmentUrl оставя path-а НЕПРОМЕНЕН при празен apiBaseUrl (production same-origin/proxy)
  * [18] renderTopicAttachment (img src / viewer data-атрибути / download href) използва resolveAttachmentUrl — регресира ако Topics отново рендира raw relative URL (bug: local dev SPA fallback вместо image/webp)
  * [19] renderChatAttachmentBubble (chat/support) също минава през resolveAttachmentUrl — consistency между Topics и chat/support attachment display
+ *
+ * Hard-delete reference-existence модел (corrective pass — заменя стария live-JOIN подход):
+ * [20] attachmentExistsForFilename: true веднага след insert
+ * [21] attachmentExistsForFilename: false след hard-delete на attachment реда (whole-topic delete пътят, mirror на topicModerationStore.deleteTopic)
+ * [22] attachmentExistsForFilename: false за непознат/orphan filename
+ * [23] listPendingAttachmentDeletions връща queue-нат job за hard-deleted attachment (enqueue стана ВЪТРЕ в deleteTopic транзакцията, не отделна caller стъпка)
+ * [24] server source: runTopicAttachmentCleanup ползва attachmentExistsForFilename (НЕ isAttachmentReferencedByLiveTopicContent — тази функция вече не съществува) за eligibility
+ * [25] server source: runTopicAttachmentOrphanScan ползва СЪЩАТА reference-existence дефиниция като cleanup worker-а
+ * [26] server source: index.ts НЕ съдържа никакво позоваване на isAttachmentReferencedByLiveTopicContent (regression guard — един-единствен cleanup модел, не два паралелни)
+ * [27] getAttachmentForDownload вече КОРЕКТНО връща null за removed-topic attachment (hard-delete = auth boundary, доказано с реален topicModerationStore.deleteTopic)
  */
 
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
@@ -37,6 +47,7 @@ import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import sharp from 'sharp'
 import { createTopicMessageStore } from '../src/db/topicMessageStore.js'
+import { createTopicModerationStore } from '../src/db/topicModerationStore.js'
 import {
   decodeImageAttachmentDataUrl,
   IMAGE_ATTACHMENT_MAX_SOURCE_DIMENSION_PX,
@@ -51,6 +62,7 @@ const serverRoot = resolve(__dirname, '..')
 const topicsMigrationPath = resolve(serverRoot, 'database/migrations/20260810_002_create_topics_and_messages.sql')
 const likesMigrationPath = resolve(serverRoot, 'database/migrations/20260811_001_create_topic_message_likes.sql')
 const attachmentsMigrationPath = resolve(serverRoot, 'database/migrations/20260811_002_create_topic_message_attachments.sql')
+const moderationMigrationPath = resolve(serverRoot, 'database/migrations/20260811_003_create_topic_moderation.sql')
 
 let passed = 0
 let failed = 0
@@ -96,6 +108,14 @@ function buildBaseSchema(db: DatabaseSync): void {
       profile_id TEXT PRIMARY KEY,
       display_name TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `)
+  // Минимален mock (established convention, mirror на checkTopicsStore.ts) —
+  // само за да удовлетвори FK референциите на topics.locked_by_account_id/
+  // removed_by_account_id и т.н. (Етап 4 moderation migration).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS accounts (
+      account_id TEXT PRIMARY KEY
     );
   `)
 }
@@ -427,6 +447,131 @@ await check('[19] renderChatAttachmentBubble (chat/support) също минав�
   const devHtml = renderChatAttachmentBubble(attachment, DEV_API_BASE_URL)
   assert(devHtml.includes('src="http://localhost:3001/api/chat/friendship-1/attachments/33333333-3333-4333-8333-333333333333.webp"'), 'chat img src трябва да е resolved спрямо dev backend origin-а')
   assert(!devHtml.includes('src="/api/chat/'), 'chat не трябва да остане raw relative src (regression за същия bug клас)')
+})
+
+// ─── [20]-[27] Hard-delete reference-existence модел (corrective pass) ─────
+//
+// Продуктово решение (реверсия на предходния pass): whole-topic delete вече
+// HARD-DELETE-ва topic_message_attachments редовете веднага (в
+// topicModerationStore.deleteTopic, вижте checkTopicModeration.ts [29]-[33]
+// за самата транзакция). Затова "row съществува" отново е напълно надежден
+// canonical сигнал за cleanup eligibility — same reference-existence модел
+// като chat/support — и НЕ се нуждае от отделна live-JOIN семантика.
+
+await withTempDir(async (dir) => {
+  const dbPath = join(dir, 'attachments-reference-existence.sqlite')
+  const db = new DatabaseSync(dbPath, { open: true })
+  buildBaseSchema(db)
+  await applyMigrationFile(db, topicsMigrationPath)
+  await applyMigrationFile(db, likesMigrationPath)
+  await applyMigrationFile(db, attachmentsMigrationPath)
+  await applyMigrationFile(db, moderationMigrationPath)
+  db.prepare(`INSERT INTO accounts (account_id) VALUES ('moderator-1')`).run()
+  seedProfile(db, 'sender-1')
+  insertTopic(db, { topicId: 'topic-live', slug: 'topic-live', title: 'Жива тема' })
+  insertTopic(db, { topicId: 'topic-to-remove', slug: 'topic-to-remove', title: 'Тема за изтриване' })
+  db.close()
+
+  const store = await createTopicMessageStore(dbPath)
+  const moderationStore = await createTopicModerationStore(dbPath)
+  try {
+
+  const liveRootImage = makeAttachment('44444444-4444-4444-8444-444444444444.webp')
+  store.insertMessage({
+    topicId: 'topic-live',
+    senderProfileId: 'sender-1',
+    senderDisplayName: 'S1',
+    senderRole: 'player',
+    body: 'live root with image',
+    attachment: liveRootImage,
+  })
+
+  const removedTopicRootImage = makeAttachment('77777777-7777-4777-8777-777777777777.webp')
+  const removedTopicRoot = store.insertMessage({
+    topicId: 'topic-to-remove',
+    senderProfileId: 'sender-1',
+    senderDisplayName: 'S1',
+    senderRole: 'player',
+    body: 'root in a topic that will be removed',
+    attachment: removedTopicRootImage,
+  })
+  const removedTopicReplyImage = makeAttachment('88888888-8888-4888-8888-888888888888.webp')
+  store.insertReply({
+    topicId: 'topic-to-remove',
+    parentMessageId: removedTopicRoot.messageId,
+    senderProfileId: 'sender-1',
+    senderDisplayName: 'S1',
+    senderRole: 'player',
+    body: 'reply in a topic that will be removed',
+    attachment: removedTopicReplyImage,
+  })
+
+  await check('[20] attachmentExistsForFilename: true веднага след insert', () => {
+    assert(store.attachmentExistsForFilename(liveRootImage.storageFilename) === true, 'live attachment трябва да съществува')
+    assert(store.attachmentExistsForFilename(removedTopicRootImage.storageFilename) === true, 'attachment-ът все още съществува преди delete')
+  })
+
+  await check('[22] attachmentExistsForFilename: false за непознат/orphan filename', () => {
+    assert(store.attachmentExistsForFilename('99999999-9999-4999-8999-999999999999.webp') === false, 'несъществуващ filename никога не съществува')
+  })
+
+  // Реален whole-topic delete през canonical transaction owner-а — точно
+  // production пътят, не директна SQL мутация.
+  moderationStore.deleteTopic({ topicId: 'topic-to-remove', actorAccountId: 'moderator-1', actorRole: 'admin', reason: 'cleanup test' })
+
+  await check('[21] attachmentExistsForFilename: false след hard-delete на attachment реда (whole-topic delete)', () => {
+    assert(store.attachmentExistsForFilename(removedTopicRootImage.storageFilename) === false, 'root attachment трябва да е hard-deleted след topic delete')
+    assert(store.attachmentExistsForFilename(removedTopicReplyImage.storageFilename) === false, 'reply attachment трябва да е hard-deleted след topic delete')
+    assert(store.attachmentExistsForFilename(liveRootImage.storageFilename) === true, 'attachment на НЕтронатата жива тема трябва да остане')
+  })
+
+  await check('[23] listPendingAttachmentDeletions връща queue-нат job за hard-deleted attachment (enqueue стана ВЪТРЕ в deleteTopic транзакцията)', () => {
+    const pending = store.listPendingAttachmentDeletions(10).map((p) => p.storageFilename).sort()
+    assertEqual(
+      pending.join(','),
+      [removedTopicReplyImage.storageFilename, removedTopicRootImage.storageFilename].sort().join(','),
+      'и двата filename-а трябва да са в cleanup queue-то без отделна caller-side enqueue стъпка',
+    )
+  })
+
+  await check('[27] getAttachmentForDownload вече КОРЕКТНО връща null за removed-topic attachment (hard-delete = auth boundary)', () => {
+    const result = store.getAttachmentForDownload('topic-to-remove', removedTopicRootImage.storageFilename)
+    assertEqual(result, null, 'removed-topic attachment не трябва да е downloadable веднага след delete транзакцията')
+  })
+
+  } finally {
+    store.close()
+    moderationStore.close()
+  }
+})
+
+// ─── [24]-[26] Cleanup worker/orphan scan source-level wiring guard ────────
+//
+// Regression guard: гарантира, че production кодът ползва reference-existence
+// модела (attachmentExistsForFilename) на ДВЕТЕ места — cleanup worker И
+// orphan scan — и че никъде в index.ts не се е промъкнало обратно
+// позоваване на премахнатата isAttachmentReferencedByLiveTopicContent
+// (би означавало два паралелни, несъвместими cleanup модела).
+
+await check('[24] server source: runTopicAttachmentCleanup ползва attachmentExistsForFilename за eligibility', async () => {
+  const serverSource = await readFile(join(serverRoot, 'src', 'index.ts'), 'utf8')
+  const fnBody = serverSource.match(/async function runTopicAttachmentCleanup\(\)[\s\S]*?\n\}/)?.[0] ?? ''
+  assert(fnBody.length > 0, 'runTopicAttachmentCleanup function not found')
+  assert(fnBody.includes('topicMessageStore.attachmentExistsForFilename('), 'cleanup worker трябва да ползва attachmentExistsForFilename')
+})
+
+await check('[25] server source: runTopicAttachmentOrphanScan ползва СЪЩАТА reference-existence дефиниция като cleanup worker-а', async () => {
+  const serverSource = await readFile(join(serverRoot, 'src', 'index.ts'), 'utf8')
+  const fnBody = serverSource.match(/async function runTopicAttachmentOrphanScan\(\)[\s\S]*?\n\}/)?.[0] ?? ''
+  assert(fnBody.length > 0, 'runTopicAttachmentOrphanScan function not found')
+  assert(fnBody.includes('topicMessageStore.attachmentExistsForFilename('), 'orphan scan трябва да ползва attachmentExistsForFilename')
+})
+
+await check('[26] server source: index.ts НЕ съдържа никакво позоваване на isAttachmentReferencedByLiveTopicContent (един cleanup модел, не два паралелни)', async () => {
+  const serverSource = await readFile(join(serverRoot, 'src', 'index.ts'), 'utf8')
+  assert(!serverSource.includes('isAttachmentReferencedByLiveTopicContent'), 'премахнатата функция не трябва да е референцирана никъде в index.ts')
+  const storeSource = await readFile(join(serverRoot, 'src', 'db', 'topicMessageStore.ts'), 'utf8')
+  assert(!storeSource.includes('isAttachmentReferencedByLiveTopicContent'), 'премахнатата функция не трябва да е референцирана никъде в topicMessageStore.ts')
 })
 
 console.log(`\n${passed} passed, ${failed} failed\n`)

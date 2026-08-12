@@ -394,8 +394,10 @@ export type LobbyScreenState = {
   adminTopicReportsPendingCount: number
   adminTopicReportsFilter: TopicReportStatus | null
   adminTopicReportActionBusyId: string | null
-  /** Client-side UX gate (server е authoritative на всяко HTTP moderation действие) — виж isTopicModeratorAuthSession в createLobbyFlowController.ts. */
+  /** Client-side UX gate (server е authoritative на всяко HTTP moderation действие) — виж isTopicModeratorAuthSession в createLobbyFlowController.ts. Покрива mute/unmute/reports/audit UI. */
   isTopicModerator: boolean
+  /** По-тесен client-side UX gate за whole-topic Lock/Unlock/Delete контроли — виж isTopicWholeTopicModeratorAuthSession в createLobbyFlowController.ts. */
+  isWholeTopicModerator: boolean
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean

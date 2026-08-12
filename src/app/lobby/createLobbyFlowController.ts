@@ -148,16 +148,33 @@ function isLobbyChatModeratorAuthSession(session: LobbyAuthSession | null): bool
 }
 
 /**
- * Topics moderation UI достъп (lock/unlock/mute/unmute/delete тема бутони)
- * — само UX, сървърът презаверява на всяко HTTP moderation действие през
+ * Topics moderation UI достъп (mute/unmute/reports/audit) — само UX,
+ * сървърът презаверява на всяко HTTP moderation действие през
  * isTopicModeratorSession (authStore.ts). Изрично БЕЗ chat_admin — Topics
- * moderation е отделен permission set от lobby chat moderation.
+ * moderation е отделен permission set от lobby chat moderation. НЕ ползвай
+ * за whole-topic lock/unlock/delete контролите — виж
+ * isTopicWholeTopicModeratorAuthSession по-долу (по-тесен permission set,
+ * corrective pass брифа §A1/§A2).
  */
 function isTopicModeratorAuthSession(session: LobbyAuthSession | null): boolean {
   return session !== null && (
     session.account.role === 'admin'
     || session.account.role === 'subadmin'
     || session.account.role === 'pika_team'
+    || session.account.role === 'top_chat_admin'
+  )
+}
+
+/**
+ * Whole-topic destructive/control UI достъп (Lock/Unlock/Delete бутони) —
+ * само UX, сървърът презаверява през isTopicWholeTopicModeratorSession
+ * (authStore.ts). По-тесен от isTopicModeratorAuthSession — pika_team и
+ * chat_admin виждат mute/report контроли, но НЕ тези.
+ */
+function isTopicWholeTopicModeratorAuthSession(session: LobbyAuthSession | null): boolean {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'subadmin'
     || session.account.role === 'top_chat_admin'
   )
 }
@@ -3235,6 +3252,7 @@ export function createLobbyFlowController(
       adminTopicReportsFilter: state.adminTopicReportsFilter,
       adminTopicReportActionBusyId: state.adminTopicReportActionBusyId,
       isTopicModerator: isTopicModeratorAuthSession(options.getAuthSession?.() ?? null),
+      isWholeTopicModerator: isTopicWholeTopicModeratorAuthSession(options.getAuthSession?.() ?? null),
     }
 
     renderLobbyScreen(options.root, {

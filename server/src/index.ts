@@ -27,6 +27,7 @@ import {
   isFullAdminSession,
   isLobbyChatModeratorSession,
   isTopicModeratorSession,
+  isTopicWholeTopicModeratorSession,
   type AuthSessionSnapshot,
 } from './db/authStore.js'
 import { createChatStore } from './db/chatStore.js'
@@ -1927,6 +1928,14 @@ async function runTopicAttachmentCleanup(): Promise<void> {
     let failedCount = 0
 
     for (const entry of pending) {
+      // Defensive: ако файлът вече принадлежи на друг, по-нов attachment
+      // запис (теоретично невъзможно заради UNIQUE storage_filename, но
+      // проверяваме explicit преди физическо изтриване, за да никога не
+      // трием файл, който все още е активно свързан с валидно съобщение) —
+      // mirror на runChatAttachmentCleanup/runSupportAttachmentCleanup.
+      // Topics вече е hard-delete модел за attachments (whole-topic delete
+      // изтрива topic_message_attachments веднага, не soft-delete) — same
+      // reference-existence семантика като chat/support, не live-JOIN.
       if (topicMessageStore.attachmentExistsForFilename(entry.storageFilename)) {
         topicMessageStore.markAttachmentDeletionDone(entry.eventSeq)
         continue
@@ -1971,6 +1980,9 @@ async function runTopicAttachmentOrphanScan(): Promise<void> {
         continue
       }
 
+      // reference-existence проверка (mirror на runTopicAttachmentCleanup по-горе
+      // и chat/support orphan scan-овете) — hard-delete модел, DB row
+      // presence е достатъчен canonical сигнал за "все още нужен".
       if (topicMessageStore.attachmentExistsForFilename(entry.name)) {
         continue
       }
@@ -2024,6 +2036,46 @@ let topicAttachmentOrphanScanStartupTimeout: ReturnType<typeof setTimeout> | nul
 let topicAttachmentOrphanScanInterval: ReturnType<typeof setInterval> | null = setInterval(
   () => { void runTopicAttachmentOrphanScan() },
   TOPIC_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS,
+)
+
+// ─── Removed Topics — 180-day retention final purge ─────────────────────────
+//
+// Продуктово решение (corrective pass): изтрита (removed) тема пази текстовото
+// си съдържание (topic row, root messages, replies, likes, mutes, reports)
+// точно 180 дни от `topics.removed_at` (authoritative anchor, НЕ created_at,
+// НЕ message deleted_at) — за модерационна справка. Attachments вече са
+// hard-deleted веднага при самия delete (deleteTopic), не участват тук.
+// Daily cadence е достатъчна за 180-дневен прозорец (established convention,
+// mirror на LOBBY_CHAT_RETENTION_INTERVAL_MS/STARTUP_DELAY_MS по-горе) — без
+// нужда от minute-level polling.
+const TOPIC_RETENTION_DAYS = 180
+const TOPIC_RETENTION_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000
+const TOPIC_RETENTION_PURGE_STARTUP_DELAY_MS = 60 * 1000
+const TOPIC_RETENTION_PURGE_BATCH_SIZE = 200
+
+function runTopicRetentionPurge(): void {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  try {
+    const cutoff = new Date(Date.now() - TOPIC_RETENTION_DAYS * 24 * 60 * 60 * 1000)
+    const purgedCount = topicModerationStore.purgeRemovedTopicsBefore(cutoff, TOPIC_RETENTION_PURGE_BATCH_SIZE)
+    if (purgedCount > 0) {
+      console.log(`[topics] Retention purge: hard-deleted ${purgedCount} removed topic(s) older than ${TOPIC_RETENTION_DAYS} days`)
+    }
+  } catch (error) {
+    console.error('[topics] Retention purge failed:', error)
+  }
+}
+
+let topicRetentionPurgeStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+  runTopicRetentionPurge,
+  TOPIC_RETENTION_PURGE_STARTUP_DELAY_MS,
+)
+let topicRetentionPurgeInterval: ReturnType<typeof setInterval> | null = setInterval(
+  runTopicRetentionPurge,
+  TOPIC_RETENTION_PURGE_INTERVAL_MS,
 )
 
 function msUntilNextSofiaMidnight(): number {
@@ -7524,7 +7576,7 @@ async function handleTopicLockRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (!isTopicModeratorSession(session)) {
+  if (!isTopicWholeTopicModeratorSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да заключваш теми.' })
     return true
   }
@@ -7583,7 +7635,7 @@ async function handleTopicUnlockRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (!isTopicModeratorSession(session)) {
+  if (!isTopicWholeTopicModeratorSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да отключваш теми.' })
     return true
   }
@@ -7779,7 +7831,7 @@ async function handleTopicDeleteRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (!isTopicModeratorSession(session)) {
+  if (!isTopicWholeTopicModeratorSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да триеш теми.' })
     return true
   }
@@ -7799,13 +7851,11 @@ async function handleTopicDeleteRequest(
     return true
   }
 
-  // КРИТИЧНО (Топикс moderation брифа т.9): attachment filenames се събират
-  // ПРЕДИ deleteTopic-а — soft-delete-ът НЕ trие topic_message_attachments
-  // редовете (само маркира topic_messages.deleted_at), затова редът тук е
-  // без значение за DB integrity, но enqueue-ването ПРЕДИ delete пази
-  // extra safety marge, ако бъдещ hard-cleanup job премести логиката.
-  const attachmentFilenames = topicModerationStore.getAttachmentFilenamesForTopic(topicId)
-
+  // topicModerationStore.deleteTopic е canonical transaction owner — hard-
+  // delete на attachment redovete + queue insertion за физически cleanup
+  // стават В ЕДНА BEGIN IMMEDIATE транзакция ВЪТРЕ в store-а (виж коментара
+  // там), не отделни enqueue извиквания тук след commit. Никакъв прозорец
+  // между "DB reference изтрит" и "queue job insert-нат".
   const result = topicModerationStore.deleteTopic({
     topicId,
     actorAccountId: session.account.accountId,
@@ -7821,9 +7871,6 @@ async function handleTopicDeleteRequest(
   // already_removed третираме идентично на success навън — идемпотентно
   // (брифа т.12), темата вече гарантирано е премахната при връщане 200.
   if (result.ok) {
-    for (const filename of attachmentFilenames) {
-      topicMessageStore.enqueueAttachmentDeletion(filename)
-    }
     broadcastTopicDeletedToLocalSubscribers(topicId)
   }
 
@@ -14946,6 +14993,16 @@ function clearMutationTimersForShutdown(): void {
   if (topicAttachmentCleanupStartupTimeout !== null) {
     clearTimeout(topicAttachmentCleanupStartupTimeout)
     topicAttachmentCleanupStartupTimeout = null
+  }
+
+  if (topicRetentionPurgeInterval !== null) {
+    clearInterval(topicRetentionPurgeInterval)
+    topicRetentionPurgeInterval = null
+  }
+
+  if (topicRetentionPurgeStartupTimeout !== null) {
+    clearTimeout(topicRetentionPurgeStartupTimeout)
+    topicRetentionPurgeStartupTimeout = null
   }
 
   if (topicAttachmentOrphanScanInterval !== null) {

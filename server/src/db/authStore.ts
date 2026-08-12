@@ -90,6 +90,25 @@ export function isTopicModeratorSession(
   )
 }
 
+/**
+ * Whole-topic destructive/control действия (lock/unlock/delete тема) — по-тесен
+ * permission set от isTopicModeratorSession. Продуктово решение: pika_team
+ * (и chat_admin) имат достъп до mute/unmute/reports/audit (isTopicModeratorSession
+ * по-горе), но НЕ до lock/unlock/delete на цяла тема — тези остават admin/
+ * subadmin/top_chat_admin, симетрично на isAdminOrSubadminAuthSession конвенцията
+ * на клиента. НЕ замествай isTopicModeratorSession с тази функция другаде —
+ * mute/reports/audit permissions остават непроменени (corrective pass брифа §A3).
+ */
+export function isTopicWholeTopicModeratorSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'subadmin'
+    || session.account.role === 'top_chat_admin'
+  )
+}
+
 export type ElevatedRole = 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin'
 
 export type SubadminRoleChangeErrorCode =

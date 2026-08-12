@@ -1020,17 +1020,23 @@ function renderTopicReportSuccessToast(state: LobbyScreenState): string {
   `
 }
 
-// Компактни icon-only moderation action бутони — Заключи/Отключи/Изтрий за
-// модератор (isTopicModerator), Докладвай за обикновен потребител. Не
-// претрупва нормалния Topics UI (брифа т.5) — само 44px icon бутони в
-// header реда, popup-ите за duration/reason/confirm се отварят при click.
+// Компактни icon-only moderation action бутони — Заключи/Отключи/Изтрий
+// САМО за whole-topic модератор (isWholeTopicModerator: admin/subadmin/
+// top_chat_admin — corrective pass §A1), Докладвай за обикновен
+// потребител. Topic-moderator-но-не-whole-topic (pika_team/chat_admin,
+// isTopicModerator=true но isWholeTopicModerator=false) вижда НИТО едното —
+// те имат mute права (отделен per-message control, виж
+// renderTopicAuthorBlock), но не и destructive whole-topic контроли, и не
+// са "обикновени потребители" за да им се предложи Report. Не претрупва
+// нормалния Topics UI (брифа т.5) — само 44px icon бутони в header реда,
+// popup-ите за duration/reason/confirm се отварят при click.
 function renderTopicHeaderModerationControls(state: LobbyScreenState, activeTopic: NonNullable<LobbyScreenState['topics']>[number]): string {
   if (activeTopic.isGeneral) return ''
 
   const isLocked = state.activeTopicLock?.isLocked ?? (activeTopic.status === 'locked')
   const buttons: string[] = []
 
-  if (state.isTopicModerator) {
+  if (state.isWholeTopicModerator) {
     if (isLocked) {
       buttons.push(`
         <button type="button" data-topic-unlock="${escapeHtml(activeTopic.topicId)}" title="Отключи темата" aria-label="Отключи темата"
@@ -1052,7 +1058,11 @@ function renderTopicHeaderModerationControls(state: LobbyScreenState, activeTopi
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
       </button>
     `)
-  } else {
+  } else if (!state.isTopicModerator) {
+    // Report бутонът е за обикновени потребители — topic-moderator-но-не-
+    // whole-topic (pika_team/chat_admin) остава без бутон тук изобщо, точно
+    // както преди corrective pass-а (isTopicModerator branch-ът винаги ги е
+    // изключвал от Report бутона).
     buttons.push(`
       <button type="button" data-topic-report="1" title="Докладвай темата" aria-label="Докладвай темата"
         style="height:36px;width:36px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:#050505;color:rgba(248,250,252,0.62);display:flex;align-items:center;justify-content:center;cursor:pointer;">

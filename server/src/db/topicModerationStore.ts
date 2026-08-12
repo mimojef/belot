@@ -92,15 +92,25 @@ export type TopicModerationStore = {
   /** Server-authoritative enforcement lookup за send_topic_message/send_topic_reply — expiry checked at read time. */
   isProfileMutedInTopic: (topicId: string, profileId: string) => boolean
 
-  // ─── Delete (soft-delete + eager attachment cleanup от caller-а) ────────
-  /** Връща storage filenames-ите на ВСИЧКИ attachments в темата — caller-ът (index.ts) ги enqueue-ва за физически cleanup ПРЕДИ/след soft-delete-а. */
+  // ─── Delete (attachments hard-delete + queue insertion, topic/messages
+  // soft-delete — всичко в ЕДНА транзакция вътре в deleteTopic) ────────────
+  /** Връща storage filenames-ите на ВСИЧКИ attachments в темата — reusable helper (тестове/diagnostics), НЕ нужен за normal delete flow (deleteTopic вече го извиква вътрешно). */
   getAttachmentFilenamesForTopic: (topicId: string) => string[]
+  /**
+   * Atomic whole-topic delete — В ЕДНА BEGIN IMMEDIATE транзакция: hard-delete
+   * на всички topic_message_attachments redovete + insert на съответните
+   * cleanup queue jobs (topic_message_attachment_deletions), после topic/
+   * messages soft-delete + audit ред. `deletedAttachmentFilenames` връща
+   * точно кои filenames са били hard-deleted (за caller-ово logging/broadcast,
+   * queue insertion-ът вече е станал вътре в транзакцията, caller-ът НЕ
+   * трябва да enqueue-ва повторно).
+   */
   deleteTopic: (input: {
     topicId: string
     actorAccountId: string
     actorRole: TopicModeratorRole
     reason: string
-  }) => { ok: true } | { ok: false; code: 'not_found' | 'already_removed' }
+  }) => { ok: true; deletedAttachmentFilenames: string[] } | { ok: false; code: 'not_found' | 'already_removed' }
 
   // ─── Reports ─────────────────────────────────────────────────────────────
   createReport: (input: {
@@ -118,6 +128,14 @@ export type TopicModerationStore = {
 
   // ─── Audit log ───────────────────────────────────────────────────────────
   listAuditLogForTopic: (topicId: string, limit: number) => TopicModerationAuditEntry[]
+
+  /**
+   * 180-дневен final purge — hard-DELETE на removed topics, чийто
+   * `removed_at` <= cutoff. Bounded batch (без OFFSET), idempotent/safe за
+   * повторни и cross-instance извиквания. Връща брой реално purge-нати
+   * теми. Виж имплементацията за пълен FK cascade rationale.
+   */
+  purgeRemovedTopicsBefore: (cutoff: Date, batchSize: number) => number
 
   close: () => void
 }
@@ -486,23 +504,46 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     UPDATE topic_messages SET deleted_at = CURRENT_TIMESTAMP WHERE topic_id = ? AND deleted_at IS NULL;
   `)
 
-  // Soft-delete (не hard DELETE FROM topics) — темата остава четима за
-  // audit/history цели (виж брифа резюмето: "Soft-delete + eager attachment
-  // cleanup"), но всички read пътища (listActiveTopics/handleTopicsRequest)
-  // вече третират status='removed' идентично на "не съществува" (Етап 1-3
-  // established convention). Attachment filenames се събират ПРЕДИ soft-
-  // delete-а (getAttachmentFilenamesForTopic извиква се от caller-а, index.ts,
-  // ПРЕДИ deleteTopic — виж handleTopicDeleteRequest) — enqueue-ването на
-  // физическия cleanup queue е отговорност на index.ts (store-ът тук не знае
-  // нищо за filesystem paths), но redovete в topic_message_attachments
-  // умишлено НЕ се трият тук (нито topic_messages hard-delete-нати) — само
-  // deleted_at маркиран, за да остане история четима.
+  // Attachment hard-delete при whole-topic delete (продуктово решение:
+  // attachments НЕ се пазят 180 дни, за разлика от text съдържанието) —
+  // filenames вече се събират чрез getAttachmentFilenamesForTopic по-горе,
+  // ПРЕДИ да ги трием, за да можем да ги enqueue-нем за физически cleanup в
+  // СЪЩАТА транзакция (виж deleteTopic по-долу).
+  const deleteAttachmentsForTopicStatement = database.prepare(`
+    DELETE FROM topic_message_attachments
+    WHERE message_id IN (SELECT message_id FROM topic_messages WHERE topic_id = ?);
+  `)
+
+  // Mirror на topicMessageStore.enqueueAttachmentDeletion insert statement-а
+  // (СЪЩАТА таблица, СЪЩАТА SQLite база — topic_message_attachment_deletions
+  // няма FK към нищо, чисто operational queue) — вмъкнат тук directno, за да
+  // може insertion-ът да е ЧАСТ от deleteTopic транзакцията по-долу
+  // (canonical transaction owner, виж коментара там), не отделно извикване
+  // от caller-a след COMMIT.
+  const insertAttachmentDeletionStatement = database.prepare(`
+    INSERT INTO topic_message_attachment_deletions (storage_filename) VALUES (?);
+  `)
+
+  // Soft-delete за topic/messages (текстовото съдържание се пази за 180-дневен
+  // retention прозорец, виж purgeRemovedTopicsBefore) — темата остава четима
+  // за audit/history цели, но всички read пътища (listActiveTopics/
+  // handleTopicsRequest) вече третират status='removed' идентично на "не
+  // съществува" (Етап 1-3 established convention).
+  //
+  // Attachments са ДРУГ lifecycle от text съдържанието (продуктово решение —
+  // не се пазят 180 дни): topic_message_attachments редовете се HARD-DELETE-
+  // ват веднага (не soft-delete), физическото cleanup queue insertion е
+  // ЧАСТ от СЪЩАТА BEGIN IMMEDIATE транзакция като topics/topic_messages
+  // update-ите — единствен canonical transaction owner тук в store-а, за да
+  // няма прозорец между "DB reference изтрит" и "queue job insert-нат",
+  // където process crash би оставил physical файл без cleanup job (виж
+  // corrective pass брифа §4).
   function deleteTopic(input: {
     topicId: string
     actorAccountId: string
     actorRole: TopicModeratorRole
     reason: string
-  }): { ok: true } | { ok: false; code: 'not_found' | 'already_removed' } {
+  }): { ok: true; deletedAttachmentFilenames: string[] } | { ok: false; code: 'not_found' | 'already_removed' } {
     const statusRow = selectTopicStatusStatement.get(input.topicId) as { status: string } | undefined
     if (statusRow === undefined) {
       return { ok: false, code: 'not_found' }
@@ -511,8 +552,15 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
       return { ok: false, code: 'already_removed' }
     }
 
+    let deletedAttachmentFilenames: string[] = []
+
     database.exec('BEGIN IMMEDIATE;')
     try {
+      deletedAttachmentFilenames = getAttachmentFilenamesForTopic(input.topicId)
+      for (const filename of deletedAttachmentFilenames) {
+        insertAttachmentDeletionStatement.run(filename)
+      }
+      deleteAttachmentsForTopicStatement.run(input.topicId)
       updateTopicRemovedStatement.run(input.actorAccountId, input.reason, input.topicId)
       softDeleteTopicMessagesStatement.run(input.topicId)
       appendAudit({
@@ -530,7 +578,7 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
       throw error
     }
 
-    return { ok: true }
+    return { ok: true, deletedAttachmentFilenames }
   }
 
   // ─── Reports ─────────────────────────────────────────────────────────────
@@ -627,6 +675,101 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     return rows.map(toAuditEntry)
   }
 
+  // ─── 180-day retention final purge ──────────────────────────────────────
+  //
+  // Bounded batch DELETE, mirror на lobbyChatStore.purgeOlderThanDays/
+  // topicMessageStore.purgeDoneAttachmentDeletions established convention —
+  // SELECT topic_id ... ORDER BY topic_id ASC LIMIT ? (без OFFSET), после
+  // DELETE FROM topics WHERE topic_id IN (...). `topics.removed_at` е
+  // authoritative retention anchor (НЕ created_at, НЕ message deleted_at —
+  // виж корективния брифа §8/§10).
+  //
+  // Boundary policy (продуктово решение, corrective pass #2): "след като са
+  // навършени 180 дни от removed_at, темата е eligible" → removed_at <=
+  // cutoff (НЕ строго <). 179 дни: НЕ eligible. Точно 180 дни: eligible.
+  // 181 дни: eligible.
+  //
+  // FK cascade inventory (проверено срещу миграциите, виж финалния отчет):
+  //   topic_messages          → ON DELETE CASCADE от topics (изтрива root+replies)
+  //   topic_message_likes     → ON DELETE CASCADE от topic_messages (двойна каскада)
+  //   topic_mutes             → ON DELETE CASCADE от topics
+  //   topic_reports           → ON DELETE CASCADE от topics
+  //   topic_moderation_audit_log.topic_id → БЕЗ FK (умишлено, виж migration
+  //     коментара: "audit логът трябва да преживее topic_delete действието
+  //     самото" — това important за immediate delete, за да оцелее lock/
+  //     mute/delete audit history до финалния purge). Тъй като FK липсва,
+  //     redовете НЕ се трият автоматично при DELETE FROM topics — explicit
+  //     DELETE FROM topic_moderation_audit_log WHERE topic_id = ? се прави
+  //     ТУК, в СЪЩАТА транзакция, ПРЕДИ topics delete-а (продуктово решение
+  //     #2: audit history също е с 180-дневен retention, не безсрочен).
+  //   topic_message_attachments/topic_message_attachment_deletions — вече
+  //     hard-deleted/enqueue-нати при самия immediate delete (deleteTopic),
+  //     нищо не остава за тях тук; cleanup queue-то е operational
+  //     инфраструктура и НЕ се трие от topic purge-а.
+  const selectPurgeEligibleTopicIdsStatement = database.prepare(`
+    SELECT topic_id FROM topics
+    WHERE status = 'removed' AND removed_at IS NOT NULL AND removed_at <= ?
+    ORDER BY topic_id ASC
+    LIMIT ?;
+  `)
+
+  const deleteTopicsByIdStatementCache = new Map<number, ReturnType<typeof database.prepare>>()
+  function getDeleteTopicsByIdsStatement(count: number): ReturnType<typeof database.prepare> {
+    const cached = deleteTopicsByIdStatementCache.get(count)
+    if (cached) return cached
+    const placeholders = Array.from({ length: count }, () => '?').join(',')
+    const statement = database.prepare(`DELETE FROM topics WHERE topic_id IN (${placeholders});`)
+    deleteTopicsByIdStatementCache.set(count, statement)
+    return statement
+  }
+
+  const deleteAuditLogByIdStatementCache = new Map<number, ReturnType<typeof database.prepare>>()
+  function getDeleteAuditLogByTopicIdsStatement(count: number): ReturnType<typeof database.prepare> {
+    const cached = deleteAuditLogByIdStatementCache.get(count)
+    if (cached) return cached
+    const placeholders = Array.from({ length: count }, () => '?').join(',')
+    const statement = database.prepare(`DELETE FROM topic_moderation_audit_log WHERE topic_id IN (${placeholders});`)
+    deleteAuditLogByIdStatementCache.set(count, statement)
+    return statement
+  }
+
+  /**
+   * Purge-ва removed topics, чийто `removed_at` е >= 180 дни в миналото
+   * (cutoff се подава от caller-а — index.ts computed-ва точния UTC cutoff;
+   * removed_at <= cutoff, виж boundary policy по-горе), заедно с topic-
+   * specific moderation audit history-то им. Всеки batch (SELECT eligible
+   * ids → DELETE audit log редове за тези ids → DELETE topics редове) е
+   * ЕДНА BEGIN IMMEDIATE/COMMIT транзакция — atomic по batch, никога
+   * "topics изтрити, audit останал" или обратното при crash/грешка
+   * (ROLLBACK при exception, нищо от batch-а не се прилага частично).
+   * Bounded batch (без OFFSET) — safe за повторни/cross-instance извиквания:
+   * ако няма eligible редове, no-op; ако два instance-а покрият частично
+   * застъпващ се batch, SQLite row-level DELETE semantics не corrupt-ва
+   * нищо (втория instance просто ще завари вече изтрити topic_id-та,
+   * DELETE...WHERE IN на несъществуващ id е no-op).
+   */
+  function purgeRemovedTopicsBefore(cutoff: Date, batchSize: number): number {
+    const cutoffStr = toSqliteDateTimeString(cutoff)
+    let totalDeleted = 0
+    for (;;) {
+      const rows = selectPurgeEligibleTopicIdsStatement.all(cutoffStr, batchSize) as Array<{ topic_id: string }>
+      if (rows.length === 0) break
+      const ids = rows.map((row) => row.topic_id)
+      database.exec('BEGIN IMMEDIATE;')
+      try {
+        getDeleteAuditLogByTopicIdsStatement(ids.length).run(...ids)
+        getDeleteTopicsByIdsStatement(ids.length).run(...ids)
+        database.exec('COMMIT;')
+      } catch (error) {
+        database.exec('ROLLBACK;')
+        throw error
+      }
+      totalDeleted += ids.length
+      if (rows.length < batchSize) break
+    }
+    return totalDeleted
+  }
+
   function close(): void {
     database.close()
   }
@@ -646,6 +789,7 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     countPendingReports,
     reviewReport,
     listAuditLogForTopic,
+    purgeRemovedTopicsBefore,
     close,
   }
 }

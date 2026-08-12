@@ -972,28 +972,38 @@ try {
     )
   })
 
-  await check('[27] Клик върху "+" показва "ще бъде налично скоро" toast, БЕЗ create-topic форма/навигация', async () => {
+  await check('[27] Клик върху "+" (non-VIP fixture) отваря VIP-required popup, БЕЗ create-topic форма/навигация — mirror на Like/Reply non-VIP gate (Custom Topic Creation, canonical HEAD)', async () => {
+    // Production поведение (canonical HEAD a4e54f1): "+" вече НЕ показва
+    // placeholder toast — handleTopicCreateClick() reuse-ва establishedата
+    // composer non-VIP tap логика (виж createLobbyFlowController.ts). Harness-ът
+    // няма topicsVipGate wired (isActive:false по подразбиране), значи клик
+    // трябва да отвори СЪЩИЯ VIP-required popup като Like/Reply (тестове
+    // [28]/[29] по-долу), НЕ create-topic формата директно.
     const urlBefore = isoPage.url()
     const activeTopicBefore = await isoPage.evaluate(() =>
       document.querySelector('[data-topic-chip][data-active="1"]')?.getAttribute('data-topic-chip') ?? null,
     )
     await isoPage.click('[data-topics-create="1"]')
-    await isoPage.waitForFunction(
-      () => document.body.textContent?.includes('Създаването на теми ще бъде налично скоро.') ?? false,
-      undefined,
-      { timeout: 2000 },
-    )
-    const hasCreateForm = await isoPage.evaluate(() =>
-      document.querySelector('[data-topic-create-form]') !== null ||
-      document.querySelector('form[data-topics-create-form]') !== null,
-    )
-    assert(!hasCreateForm, 'НЕ трябва да се отвори create-topic форма')
+    await isoPage.waitForSelector('[data-topics-vip-popup-card="1"]', { state: 'attached', timeout: 1000 })
+
+    const toastVisible = await isoPage.evaluate(() => document.body.textContent?.includes('Създаването на теми ще бъде налично скоро.') ?? false)
+    assert(!toastVisible, '"+" вече НЕ трябва да показва стария placeholder toast (Custom Topic Creation — реална функционалност)')
+
+    const hasCreateForm = await isoPage.evaluate(() => document.querySelector('[data-topic-create-form="1"]') !== null)
+    assert(!hasCreateForm, 'non-VIP клик НЕ трябва да отвори create-topic формата directno — VIP gate-ът е пред нея')
     assertEqual(isoPage.url(), urlBefore, 'URL не трябва да се промени (без навигация)')
     const activeTopicAfter = await isoPage.evaluate(() =>
       document.querySelector('[data-topic-chip][data-active="1"]')?.getAttribute('data-topic-chip') ?? null,
     )
     assertEqual(activeTopicAfter, activeTopicBefore, 'активната тема не трябва да се променя')
-    await isoPage.waitForTimeout(3600) // изчакваме auto-dismiss (3.5s), за да не пречи на следващите тестове
+
+    // Затваряме popup-а, за да не пречи на следващите тестове в СЪЩИЯ isoPage
+    // (mirror на teardown-а в [29] по-долу — established convention).
+    await isoPage.evaluate(() => {
+      const closeBtn = document.querySelector<HTMLButtonElement>('[data-topics-vip-popup-close="1"]')
+      closeBtn?.click()
+    })
+    await isoPage.waitForSelector('[data-topics-vip-popup-backdrop="1"]', { state: 'detached', timeout: 1000 })
   })
 
   await check('[28] Like: само икона (без постоянен текст), по-голяма от преди, aria-label + tooltip, реална tap зона, реален optimistic toggle (Етап 3)', async () => {
