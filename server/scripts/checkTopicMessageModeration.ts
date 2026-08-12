@@ -76,6 +76,7 @@ const likesMigrationPath = resolve(serverRoot, 'database/migrations/20260811_001
 const attachmentsMigrationPath = resolve(serverRoot, 'database/migrations/20260811_002_create_topic_message_attachments.sql')
 const moderationMigrationPath = resolve(serverRoot, 'database/migrations/20260811_003_create_topic_moderation.sql')
 const messageModerationMigrationPath = resolve(serverRoot, 'database/migrations/20260812_001_create_topic_message_moderation.sql')
+const selfDeletionAuditMigrationPath = resolve(serverRoot, 'database/migrations/20260812_002_create_topic_message_self_deletion_audit.sql')
 
 let passed = 0
 let failed = 0
@@ -174,6 +175,7 @@ async function setupDb(dir: string, filename: string): Promise<string> {
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, moderationMigrationPath)
   await applyMigrationFile(db, messageModerationMigrationPath)
+  await applyMigrationFile(db, selfDeletionAuditMigrationPath)
   seedProfile(db, 'sender-1')
   seedProfile(db, 'sender-2')
   seedProfile(db, 'sender-3')
@@ -212,12 +214,16 @@ await withTempDir(async (dir) => {
     const rootWithReplies = store.insertMessage({
       topicId: 'topic-a', senderProfileId: 'sender-1', senderDisplayName: 'S1', senderRole: 'player', body: 'root с replies',
     })
-    const reply1 = store.insertReply({
+    const reply1Result = store.insertReply({
       topicId: 'topic-a', parentMessageId: rootWithReplies.messageId, senderProfileId: 'sender-2', senderDisplayName: 'S2', senderRole: 'player', body: 'reply 1',
     })
-    const reply2 = store.insertReply({
+    if (!reply1Result.ok) throw new Error('unexpected parent_not_found in test setup')
+    const reply1 = reply1Result.message
+    const reply2Result = store.insertReply({
       topicId: 'topic-a', parentMessageId: rootWithReplies.messageId, senderProfileId: 'sender-3', senderDisplayName: 'S3', senderRole: 'player', body: 'reply 2',
     })
+    if (!reply2Result.ok) throw new Error('unexpected parent_not_found in test setup')
+    const reply2 = reply2Result.message
 
     let rootDeleteResult: ReturnType<typeof store.deleteMessage> | null = null
 
@@ -267,12 +273,16 @@ await withTempDir(async (dir) => {
     const root = store.insertMessage({
       topicId: 'topic-a', senderProfileId: 'sender-1', senderDisplayName: 'S1', senderRole: 'player', body: 'root',
     })
-    const targetReply = store.insertReply({
+    const targetReplyResult = store.insertReply({
       topicId: 'topic-a', parentMessageId: root.messageId, senderProfileId: 'sender-2', senderDisplayName: 'S2', senderRole: 'player', body: 'target reply',
     })
-    const siblingReply = store.insertReply({
+    if (!targetReplyResult.ok) throw new Error('unexpected parent_not_found in test setup')
+    const targetReply = targetReplyResult.message
+    const siblingReplyResult = store.insertReply({
       topicId: 'topic-a', parentMessageId: root.messageId, senderProfileId: 'sender-3', senderDisplayName: 'S3', senderRole: 'player', body: 'sibling reply',
     })
+    if (!siblingReplyResult.ok) throw new Error('unexpected parent_not_found in test setup')
+    const siblingReply = siblingReplyResult.message
 
     await check('[6] Delete на reply → само reply deleted', () => {
       const result = store.deleteMessage({ topicId: 'topic-a', messageId: targetReply.messageId, actorAccountId: 'mod-1', actorRole: 'chat_admin' })
@@ -313,9 +323,11 @@ await withTempDir(async (dir) => {
       topicId: 'topic-a', senderProfileId: 'sender-1', senderDisplayName: 'S1', senderRole: 'player', body: 'root with image', attachment: rootImg,
     })
     const replyImg = makeAttachment('22222222-2222-4222-8222-222222222222.webp')
-    const reply = store.insertReply({
+    const replyResult = store.insertReply({
       topicId: 'topic-a', parentMessageId: root.messageId, senderProfileId: 'sender-2', senderDisplayName: 'S2', senderRole: 'player', body: 'reply with image', attachment: replyImg,
     })
+    if (!replyResult.ok) throw new Error('unexpected parent_not_found in test setup')
+    const reply = replyResult.message
     const otherImg = makeAttachment('33333333-3333-4333-8333-333333333333.webp')
     store.insertMessage({
       topicId: 'topic-b', senderProfileId: 'sender-1', senderDisplayName: 'S1', senderRole: 'player', body: 'unrelated message', attachment: otherImg,
@@ -406,9 +418,11 @@ await withTempDir(async (dir) => {
       topicId: 'topic-a', senderProfileId: 'sender-1', senderDisplayName: 'S1', senderRole: 'player', body: 'root',
     })
     const targetImg = makeAttachment('44444444-4444-4444-8444-444444444444.webp')
-    const targetReply = store.insertReply({
+    const targetReplyResult = store.insertReply({
       topicId: 'topic-a', parentMessageId: root.messageId, senderProfileId: 'sender-2', senderDisplayName: 'S2', senderRole: 'player', body: 'target reply', attachment: targetImg,
     })
+    if (!targetReplyResult.ok) throw new Error('unexpected parent_not_found in test setup')
+    const targetReply = targetReplyResult.message
     const siblingImg = makeAttachment('55555555-5555-4555-8555-555555555555.webp')
     store.insertReply({
       topicId: 'topic-a', parentMessageId: root.messageId, senderProfileId: 'sender-3', senderDisplayName: 'S3', senderRole: 'player', body: 'sibling reply', attachment: siblingImg,
@@ -470,9 +484,11 @@ await withTempDir(async (dir) => {
     const root = store.insertMessage({
       topicId: 'topic-a', senderProfileId: 'sender-1', senderDisplayName: 'S1', senderRole: 'player', body: 'root',
     })
-    const reply1 = store.insertReply({
+    const reply1Result = store.insertReply({
       topicId: 'topic-a', parentMessageId: root.messageId, senderProfileId: 'sender-2', senderDisplayName: 'S2', senderRole: 'player', body: 'reply 1',
     })
+    if (!reply1Result.ok) throw new Error('unexpected parent_not_found in test setup')
+    const reply1 = reply1Result.message
     store.insertReply({
       topicId: 'topic-a', parentMessageId: root.messageId, senderProfileId: 'sender-3', senderDisplayName: 'S3', senderRole: 'player', body: 'reply 2',
     })
@@ -543,9 +559,11 @@ await withTempDir(async (dir) => {
     const root = store.insertMessage({
       topicId: 'topic-a', senderProfileId: 'sender-1', senderDisplayName: 'S1', senderRole: 'player', body: 'root',
     })
-    const reply = store.insertReply({
+    const replyResult = store.insertReply({
       topicId: 'topic-a', parentMessageId: root.messageId, senderProfileId: 'sender-2', senderDisplayName: 'S2', senderRole: 'player', body: 'standalone reply',
     })
+    if (!replyResult.ok) throw new Error('unexpected parent_not_found in test setup')
+    const reply = replyResult.message
 
     store.deleteMessage({ topicId: 'topic-a', messageId: reply.messageId, actorAccountId: 'mod-1', actorRole: 'subadmin' })
 
@@ -671,7 +689,9 @@ await withTempDir(async (dir) => {
 
     // Root с вече-soft-deleted reply (thread delete), >180 дни — за [32].
     const rootForCascade = store.insertMessage({ topicId: 'topic-a', senderProfileId: 'sender-1', senderDisplayName: 'S1', senderRole: 'player', body: 'root for cascade purge' })
-    const replyForCascade = store.insertReply({ topicId: 'topic-a', parentMessageId: rootForCascade.messageId, senderProfileId: 'sender-2', senderDisplayName: 'S2', senderRole: 'player', body: 'reply for cascade purge' })
+    const replyForCascadeResult = store.insertReply({ topicId: 'topic-a', parentMessageId: rootForCascade.messageId, senderProfileId: 'sender-2', senderDisplayName: 'S2', senderRole: 'player', body: 'reply for cascade purge' })
+    if (!replyForCascadeResult.ok) throw new Error('unexpected parent_not_found in test setup')
+    const replyForCascade = replyForCascadeResult.message
     store.deleteMessage({ topicId: 'topic-a', messageId: rootForCascade.messageId, actorAccountId: 'mod-1', actorRole: 'admin' })
     {
       const db2 = new DatabaseSync(dbPath, { open: true })
@@ -681,8 +701,12 @@ await withTempDir(async (dir) => {
 
     // Standalone reply delete (root остава live), >180 дни — за [33].
     const rootForStandalone = store.insertMessage({ topicId: 'topic-a', senderProfileId: 'sender-1', senderDisplayName: 'S1', senderRole: 'player', body: 'root, live, sibling purge test' })
-    const replyForStandalonePurge = store.insertReply({ topicId: 'topic-a', parentMessageId: rootForStandalone.messageId, senderProfileId: 'sender-2', senderDisplayName: 'S2', senderRole: 'player', body: 'reply to purge standalone' })
-    const siblingReplyLive = store.insertReply({ topicId: 'topic-a', parentMessageId: rootForStandalone.messageId, senderProfileId: 'sender-3', senderDisplayName: 'S3', senderRole: 'player', body: 'sibling reply, stays live' })
+    const replyForStandalonePurgeResult = store.insertReply({ topicId: 'topic-a', parentMessageId: rootForStandalone.messageId, senderProfileId: 'sender-2', senderDisplayName: 'S2', senderRole: 'player', body: 'reply to purge standalone' })
+    if (!replyForStandalonePurgeResult.ok) throw new Error('unexpected parent_not_found in test setup')
+    const replyForStandalonePurge = replyForStandalonePurgeResult.message
+    const siblingReplyLiveResult = store.insertReply({ topicId: 'topic-a', parentMessageId: rootForStandalone.messageId, senderProfileId: 'sender-3', senderDisplayName: 'S3', senderRole: 'player', body: 'sibling reply, stays live' })
+    if (!siblingReplyLiveResult.ok) throw new Error('unexpected parent_not_found in test setup')
+    const siblingReplyLive = siblingReplyLiveResult.message
     store.deleteMessage({ topicId: 'topic-a', messageId: replyForStandalonePurge.messageId, actorAccountId: 'mod-1', actorRole: 'admin' })
     {
       const db2 = new DatabaseSync(dbPath, { open: true })

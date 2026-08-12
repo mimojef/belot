@@ -79,6 +79,7 @@ const likesMigrationPath = resolve(serverRoot, 'database/migrations/20260811_001
 const attachmentsMigrationPath = resolve(serverRoot, 'database/migrations/20260811_002_create_topic_message_attachments.sql')
 const moderationMigrationPath = resolve(serverRoot, 'database/migrations/20260811_003_create_topic_moderation.sql')
 const messageModerationMigrationPath = resolve(serverRoot, 'database/migrations/20260812_001_create_topic_message_moderation.sql')
+const selfDeletionAuditMigrationPath = resolve(serverRoot, 'database/migrations/20260812_002_create_topic_message_self_deletion_audit.sql')
 
 let passed = 0
 let failed = 0
@@ -173,6 +174,7 @@ async function setupDb(dir: string, filename: string): Promise<string> {
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, moderationMigrationPath)
   await applyMigrationFile(db, messageModerationMigrationPath)
+  await applyMigrationFile(db, selfDeletionAuditMigrationPath)
   seedAccount(db, 'moderator-1')
   seedAccount(db, 'moderator-2')
   seedProfile(db, 'target-1')
@@ -411,7 +413,7 @@ await withTempDir(async (dir) => {
       body: 'root with image',
       attachment: { storageFilename: 'root-attachment.webp', width: 100, height: 100, byteSize: 500, contentType: 'image/webp' },
     })
-    messageStore.insertReply({
+    void messageStore.insertReply({
       topicId: 'topic-a',
       parentMessageId: rootMessage.messageId,
       senderProfileId: 'target-2',
@@ -585,7 +587,7 @@ await withTempDir(async (dir) => {
       senderRole: 'player',
       body: 'root в тема за purge',
     })
-    messageStore.insertReply({
+    void messageStore.insertReply({
       topicId: 'topic-200-days',
       parentMessageId: rootMsg.messageId,
       senderProfileId: 'target-2',

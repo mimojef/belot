@@ -7960,6 +7960,14 @@ async function handleTopicDeleteRequest(
 // handleTopicDeleteRequest е anchored с $ веднага след :topicId capture
 // group-а, значи технически не би пресякъл този по-дълъг path, но
 // established convention в проекта е по-специфични routes първи).
+// Unified DELETE endpoint — поддържа ДВА authorization пътя (own-delete-own-
+// content брифа §11/§12): (A) moderator (established 5-role permission set,
+// thread-wide root delete semantics непроменени), (B) ordinary author,
+// изтриващ СОБСТВЕНО съобщение/reply (нов, по-тесен delete модел — root
+// delete-нат само ако 0 live replies, виж deleteOwnMessage()). Store
+// semantics НЕ се смесват: moderator path вика established deleteMessage(),
+// owner path вика новия deleteOwnMessage() — двете имат различни guarantees
+// и НИКОГА не се извикват взаимозаменяемо.
 async function handleTopicMessageDeleteRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -7973,7 +7981,32 @@ async function handleTopicMessageDeleteRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (!isTopicMessageModeratorSession(session)) {
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  // isTopicMessageModeratorSession е type predicate (session is
+  // AuthSessionSnapshot) — извикването му тук би narrow-нало session-а по
+  // начин, който TS после третира като incompatible intersection в '!'
+  // branch-а (session вече е established non-null от null-check-а по-горе).
+  // Explicit role-set сравнение вместо reuse на predicate-a избягва тази
+  // TS control-flow особеност, без промяна в семантиката.
+  const isModerator = (
+    session.account.role === 'admin'
+    || session.account.role === 'subadmin'
+    || session.account.role === 'top_chat_admin'
+    || session.account.role === 'pika_team'
+    || session.account.role === 'chat_admin'
+  )
+
+  // Guest/temporary profiles никога не могат да бъдат sender_profile_id на
+  // topic съобщение (established write guard), значи те никога не могат да
+  // бъдат owner — единствената валидна причина да продължат тук е ако СА
+  // moderator (moderator ролите не могат да бъдат temporary profiles на
+  // практика, но guard-ът остава explicit за яснота, mirror на established
+  // isTemporaryProfile проверки другаде).
+  if (!isModerator && playerProgressStore.isTemporaryProfile(session.profile.profileId)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да триеш съобщения в „Теми“.' })
     return true
   }
@@ -7987,26 +8020,67 @@ async function handleTopicMessageDeleteRequest(
   // 180-day retention/purge (topicModerationStore.purgeRemovedTopicsBefore,
   // anchored от topics.removed_at) е authoritative за removed теми, mirror
   // на established removed-третиране в send_topic_message/handleTopicReportRequest
-  // (individual-message-moderation брифа §27).
+  // (individual-message-moderation брифа §27, own-delete брифа §5/§27).
   if (topic === null || topic.status === 'removed') {
     sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
     return true
   }
 
-  // LOCKED topic: moderation delete Е РАЗРЕШЕН тук нарочно — locked спира
-  // само нови user writes (send_topic_message/send_topic_reply), НЕ
-  // moderation actions (established прецедент: whole-topic lock/unlock/mute
-  // също работят в locked тема). НЕ извикваме getTopicLockSnapshot guard тук.
+  // LOCKED topic: delete Е РАЗРЕШЕН тук нарочно (и за moderator, И за own-
+  // delete) — locked спира само нови user writes (send_topic_message/
+  // send_topic_reply), НЕ delete actions (established прецедент: whole-topic
+  // lock/unlock/mute също работят в locked тема; own-delete брифа §5 explicit
+  // потвърждава same третиране за author delete). НЕ извикваме
+  // getTopicLockSnapshot guard тук.
 
-  // isTopicMessageModeratorSession гарантира role е един от петте individual-
-  // message-moderation роли — типовият predicate стеснява само session
-  // (non-null), не и вложеното account.role поле, затова explicit cast тук
-  // (огледално на toTopicModeratorRole/handleLobbyChatDeleteRequest коментара).
-  const result = topicMessageStore.deleteMessage({
+  if (isModerator) {
+    // isTopicMessageModeratorSession гарантира role е един от петте
+    // individual-message-moderation роли — типовият predicate стеснява само
+    // session (non-null), не и вложеното account.role поле, затова explicit
+    // cast тук (огледално на toTopicModeratorRole/handleLobbyChatDeleteRequest
+    // коментара). Established thread-wide root delete semantics — НЕПРОМЕНЕНИ.
+    const result = topicMessageStore.deleteMessage({
+      topicId,
+      messageId,
+      actorAccountId: session.account.accountId,
+      actorRole: session.account.role as 'admin' | 'subadmin' | 'top_chat_admin' | 'pika_team' | 'chat_admin',
+    })
+
+    if (!result.ok && result.code === 'not_found') {
+      sendJsonResponse(res, 404, { ok: false, message: 'Съобщението не беше намерено.' })
+      return true
+    }
+
+    // already_deleted третираме идентично на success навън — идемпотентно,
+    // съобщението вече гарантирано не съществува в потока при връщане 200.
+    if (result.ok) {
+      topicMessageLastAnnouncedDeletionEventSeq = topicMessageStore.getMaxDeletionEventSeq()
+      broadcastTopicMessageDeletedToLocalSubscribers(topicId, messageId, result.parentMessageId, result.deletedAt)
+    }
+
+    sendJsonResponse(res, 200, { ok: true, topicId, messageId })
+    return true
+  }
+
+  // НЕ moderator — единственият друг валиден authorization път е owner.
+  // Handler-level pre-check дава точната HTTP семантика за live чуждо
+  // съобщение в същата тема (403), докато deleteOwnMessage() остава
+  // authoritative defense-in-depth re-check вътре в store-а/transaction-а.
+  const targetMessage = topicMessageStore.getMessageById(messageId)
+  if (
+    targetMessage !== null
+    && targetMessage.topicId === topicId
+    && targetMessage.deletedAt === null
+    && targetMessage.senderProfileId !== session.profile.profileId
+  ) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да изтриеш това съобщение.' })
+    return true
+  }
+
+  const result = topicMessageStore.deleteOwnMessage({
     topicId,
     messageId,
-    actorAccountId: session.account.accountId,
-    actorRole: session.account.role as 'admin' | 'subadmin' | 'top_chat_admin' | 'pika_team' | 'chat_admin',
+    ownerProfileId: session.profile.profileId,
   })
 
   if (!result.ok && result.code === 'not_found') {
@@ -8014,8 +8088,15 @@ async function handleTopicMessageDeleteRequest(
     return true
   }
 
-  // already_deleted третираме идентично на success навън — идемпотентно,
-  // съобщението вече гарантирано не съществува в потока при връщане 200.
+  if (!result.ok && result.code === 'has_live_replies') {
+    sendJsonResponse(res, 409, {
+      ok: false,
+      code: 'has_live_replies',
+      message: 'Не можеш да изтриеш публикация, към която вече има отговори.',
+    })
+    return true
+  }
+
   if (result.ok) {
     topicMessageLastAnnouncedDeletionEventSeq = topicMessageStore.getMaxDeletionEventSeq()
     broadcastTopicMessageDeletedToLocalSubscribers(topicId, messageId, result.parentMessageId, result.deletedAt)
@@ -14486,7 +14567,7 @@ wsServer.on('connection', (socket, request) => {
 
           let row: TopicMessageSnapshot
           try {
-            row = topicMessageStore.insertReply({
+            const insertResult = topicMessageStore.insertReply({
               topicId: message.topicId,
               parentMessageId: message.parentMessageId,
               senderProfileId,
@@ -14495,6 +14576,18 @@ wsServer.on('connection', (socket, request) => {
               body: validation.body,
               attachment: uploadResult.attachmentInput,
             })
+            if (!insertResult.ok) {
+              // Race: root-ът е бил soft-deleted (own-delete или moderator
+              // delete) МЕЖДУ initial parent check-а по-горе и завършека на
+              // upload-а — fresh re-check вътре в insertReply() транзакцията
+              // хвана го (own-delete-own-content брифа §15).
+              if (uploadResult.writtenAttachmentFilename !== null) {
+                await deleteTopicAttachmentFileByFilename(uploadResult.writtenAttachmentFilename)
+              }
+              sendTopicReplyError('parent_not_found', 'Съобщението, на което отговаряш, не беше намерено.')
+              return
+            }
+            row = insertResult.message
           } catch (error) {
             if (uploadResult.writtenAttachmentFilename !== null) {
               await deleteTopicAttachmentFileByFilename(uploadResult.writtenAttachmentFilename)

@@ -246,23 +246,55 @@ function renderTopicReplyButton(rootMessageId: string, replyCount: number): stri
   `
 }
 
-// Individual message/reply moderation delete — icon-only, до Like/Reply
-// action бутоните (root) или до Like бутона (reply), gated зад
-// state.isTopicMessageModerator (5 роли: admin/subadmin/top_chat_admin/
-// pika_team/chat_admin). Visibility НЕ зависи от автора на съобщението —
-// moderator вижда delete и върху собствено съобщение (individual-message-
-// moderation брифа §6/§18). isRoot определя confirmation текста
-// (openTopicMessageDeleteConfirm), не самото server-side поведение.
-function renderTopicMessageDeleteButton(state: LobbyScreenState, messageId: string, isRoot: boolean): string {
-  if (!state.isTopicMessageModerator) return ''
+// Individual message/reply delete — icon-only, до Like/Reply action
+// бутоните (root) или до Like бутона (reply). Visibility: moderator (5
+// роли) ИЛИ author на самото съобщение (own-delete-own-content брифа §21).
+// Author+moderator overlap показва САМО ЕДИН бутон (следва moderator
+// capability — §23), не два.
+//
+// Semantics при клик зависят от viewer capability, не от isRoot сам по
+// себе си:
+//  - Moderator: винаги enabled за live target, root delete триe thread-а
+//    (established, непроменено).
+//  - Ordinary author (НЕ moderator): reply винаги enabled; root enabled
+//    САМО ако replyCount===0, ИНАЧЕ disabled (видим, НЕ скрит — §21/§22).
+//    Server е authoritative за реалната проверка (race-safe вътре в
+//    транзакцията, виж deleteOwnMessage()) — клиентският replyCount е само
+//    UX hint за disabled state, не security boundary.
+function renderTopicMessageDeleteButton(
+  state: LobbyScreenState,
+  messageId: string,
+  isRoot: boolean,
+  senderProfileId: string,
+  replyCount: number,
+): string {
+  const isModerator = state.isTopicMessageModerator
+  const isOwner = state.profile.profileId !== null && senderProfileId === state.profile.profileId
+  if (!isModerator && !isOwner) return ''
+
+  // Moderator capability има предимство при overlap — root с replies остава
+  // enabled, thread-wide delete (§7/§23), независимо че viewer е и author.
+  const isBlockedOwnRootWithReplies = !isModerator && isOwner && isRoot && replyCount > 0
+
+  // isModeratorAction определя confirmation текста (root: "и всички
+  // отговори" САМО ако действа moderator capability-то; ordinary own-root
+  // delete по дефиниция е 0-replies, значи текстът не бива да ги споменава
+  // — §24). Пренасяме го през data-attribute, тъй като render-ът тук вече
+  // знае authoritative viewer capability (isModerator/isOwner), докато click
+  // handler-ът долу (renderLobbyScreen.ts) само чете DOM.
+  const isModeratorAction = isModerator
+
   return `
     <button
       type="button"
       data-topic-message-delete="${escapeHtml(messageId)}"
       data-topic-message-delete-is-root="${isRoot ? '1' : '0'}"
+      data-topic-message-delete-is-moderator-action="${isModeratorAction ? '1' : '0'}"
       class="topic-message-action-btn"
       aria-label="Изтрий"
-      data-tooltip="Изтрий"
+      data-tooltip="${isBlockedOwnRootWithReplies ? 'Не можете да изтриете публикация, към която вече има отговори.' : 'Изтрий'}"
+      ${isBlockedOwnRootWithReplies ? 'aria-disabled="true" data-topic-message-delete-blocked="1"' : ''}
+      style="${isBlockedOwnRootWithReplies ? 'opacity:0.4;cursor:not-allowed;' : ''}"
     ><span class="topic-message-action-icon" aria-hidden="true">&#128465;</span></button>
   `
 }
@@ -456,7 +488,7 @@ export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySn
         ${reply.attachment ? renderTopicAttachment(reply.attachment, state.apiBaseUrl) : ''}
         <div style="margin-top:2px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
           ${renderTopicLikeButton(state, reply.messageId, reply.likeCount, reply.viewerHasLiked)}
-          ${renderTopicMessageDeleteButton(state, reply.messageId, false)}
+          ${renderTopicMessageDeleteButton(state, reply.messageId, false, reply.senderProfileId, 0)}
         </div>
       </div>
     </div>
@@ -557,7 +589,7 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
         <div style="margin-top:4px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
           ${renderTopicLikeButton(state, message.messageId, message.likeCount, message.viewerHasLiked)}
           ${renderTopicReplyButton(message.messageId, message.replyCount)}
-          ${renderTopicMessageDeleteButton(state, message.messageId, true)}
+          ${renderTopicMessageDeleteButton(state, message.messageId, true, message.senderProfileId, message.replyCount)}
         </div>
       </div>
       ${renderRepliesSection(state, message.messageId)}
@@ -660,15 +692,28 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
         transition: opacity 0.15s ease;
         z-index: 1000;
       }
+      /* Blocked own-root-with-replies tooltip е пълно изречение, не 1 дума
+         (own-delete-own-content брифа §22) — nowrap би overflow-нал извън
+         viewport-а, затова explicit wrap + width bound само за този case. */
+      .topic-message-action-btn[data-topic-message-delete-blocked="1"]::after {
+        white-space: normal;
+        width: 200px;
+        text-align: center;
+        line-height: 1.4;
+      }
       .topic-message-action-btn:hover::after,
-      .topic-message-action-btn:focus-visible::after {
+      .topic-message-action-btn:focus-visible::after,
+      .topic-message-action-btn:focus::after,
+      .topic-message-action-btn[data-tooltip-open="1"]::after {
         opacity: 1;
       }
       /* Само hover устройства виждат tooltip-а изобщо — на touch (mobile)
          :hover може да "залепне" след tap и да остави tooltip видим. */
       @media (hover: none) and (pointer: coarse) {
         .topic-message-action-btn:hover::after { opacity: 0; }
-        .topic-message-action-btn:focus-visible::after { opacity: 1; }
+        .topic-message-action-btn:focus-visible::after,
+        .topic-message-action-btn:focus::after,
+        .topic-message-action-btn[data-tooltip-open="1"]::after { opacity: 1; }
       }
     </style>
     <div data-topic-messages-scroll="1" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;">
@@ -1000,8 +1045,15 @@ function renderTopicMessageDeleteConfirmPopup(state: LobbyScreenState): string {
 
   const busy = state.topicMessageDeleteBusy
   const title = pending.isRoot ? 'Изтриване на съобщение' : 'Изтриване на отговор'
+  // Moderator root delete е thread-wide (established, replies винаги
+  // премахнати заедно) — предупреждението остава непроменено. Own-root
+  // delete е позволен САМО при 0 live replies (own-delete-own-content брифа
+  // §1/§14/§24), значи текстът за него никога не бива да споменава replies —
+  // те по дефиниция не съществуват в този сценарий.
   const bodyText = pending.isRoot
-    ? 'Съобщението и всички отговори към него ще бъдат премахнати.'
+    ? (pending.isModeratorAction
+      ? 'Съобщението и всички отговори към него ще бъдат премахнати.'
+      : 'Съобщението ще бъде премахнато.')
     : 'Отговорът ще бъде премахнат.'
 
   return `

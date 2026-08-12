@@ -123,6 +123,9 @@ export type TopicMessageStore = {
    * винаги сочещ директно към ROOT съобщение — едно ниво, виж Етап 3 брифа:
    * "reply-to-reply" enforcement е caller-ова отговорност в index.ts преди
    * извикване тук, store-ът не проверява дали parent самият е root).
+   * Fresh parent-live re-check ВЪТРЕ в транзакцията — `parent_not_found`
+   * резултат (не throw) ако root-ът е бил soft-deleted МЕЖДУ caller-овия
+   * pre-check и това извикване (race protection, виж имплементацията).
    */
   insertReply: (input: {
     topicId: string
@@ -132,7 +135,7 @@ export type TopicMessageStore = {
     senderRole: TopicMessageSenderRole
     body: string
     attachment?: NewTopicMessageAttachmentInput | null
-  }) => TopicMessageSnapshot
+  }) => { ok: true; message: TopicMessageSnapshot } | { ok: false; code: 'parent_not_found' }
   /** Първите `limit` replies на `parentMessageId`, старо→ново (хронологично четене отгоре-надолу, за разлика от root viewport-към-дъното). */
   getReplies: (
     parentMessageId: string,
@@ -161,6 +164,22 @@ export type TopicMessageStore = {
   }) => (
     | { ok: true; deletedMessageIds: string[]; deletedAttachmentFilenames: string[]; parentMessageId: string | null; deletedAt: string }
     | { ok: false; code: 'not_found' | 'already_deleted' }
+  )
+  /**
+   * Ordinary-author self-delete на СОБСТВЕНО root съобщение или reply —
+   * различно от deleteMessage() (moderator delete): ownership verified вътре
+   * в store-а, ROOT target никога не cascade-ва replies (rejected с
+   * 'has_live_replies' ако root-ът има поне 1 live reply, race-safe проверка
+   * вътре в BEGIN IMMEDIATE), insert-ва self-delete audit ред вместо
+   * moderator audit. Виж имплементацията за пълния rationale.
+   */
+  deleteOwnMessage: (input: {
+    topicId: string
+    messageId: string
+    ownerProfileId: string
+  }) => (
+    | { ok: true; deletedMessageIds: string[]; deletedAttachmentFilenames: string[]; parentMessageId: string | null; deletedAt: string }
+    | { ok: false; code: 'not_found' | 'already_deleted' | 'has_live_replies' }
   )
   /** Baseline за cross-instance individual-message-deletion poll cursor при startup. */
   getMaxDeletionEventSeq: () => number
@@ -486,6 +505,19 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     ) VALUES (?, ?, ?, ?, ?, ?, ?);
   `)
 
+  /**
+   * Insert-ва reply. `parent_not_found` резултат (вместо throw) покрива race
+   * прозореца между caller-ов pre-check (index.ts, преди async upload I/O) и
+   * реалния insert: ако root-ът бъде soft-deleted (own-delete или moderator
+   * delete) МЕЖДУ initial parent check-а и завършека на бавната image-upload
+   * стъпка, fresh re-check ТУК, вътре в СЪЩАТА BEGIN IMMEDIATE транзакция,
+   * гарантира, че никога няма да се insert-не "orphan" reply към вече-мъртъв
+   * root (own-delete-own-content брифа §15: "reply insert vs own-root delete
+   * не трябва да произведе deleted root с live newly-created reply").
+   * SQLite serialized-writer semantics (BEGIN IMMEDIATE) прави тази проверка
+   * atomic спрямо конкурентен deleteOwnMessage()/deleteMessage() BEGIN
+   * IMMEDIATE блок на друг caller — който получи write lock-а първи, печели.
+   */
   function insertReply(input: {
     topicId: string
     parentMessageId: string
@@ -494,10 +526,16 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     senderRole: TopicMessageSenderRole
     body: string
     attachment?: NewTopicMessageAttachmentInput | null
-  }): TopicMessageSnapshot {
+  }): { ok: true; message: TopicMessageSnapshot } | { ok: false; code: 'parent_not_found' } {
     const messageId = randomUUID()
     database.exec('BEGIN IMMEDIATE;')
     try {
+      const parentRow = selectByMessageIdStatement.get(input.parentMessageId) as TopicMessageRow | undefined
+      if (parentRow === undefined || parentRow.topic_id !== input.topicId || parentRow.deleted_at !== null) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'parent_not_found' }
+      }
+
       insertReplyStatement.run(
         messageId,
         input.topicId,
@@ -523,7 +561,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
       throw error
     }
     const row = selectByMessageIdStatement.get(messageId) as TopicMessageRow
-    return toSnapshot(row)
+    return { ok: true, message: toSnapshot(row) }
   }
 
   // Forward (ASC) — replies се четат хронологично отгоре-надолу (за разлика
@@ -722,6 +760,132 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
         target.sender_profile_id,
         input.actorAccountId,
         input.actorRole,
+      )
+
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // ignore rollback failure, surface the original error below
+      }
+      throw error
+    }
+
+    const updatedTargetRow = selectByMessageIdStatement.get(target.message_id) as TopicMessageRow
+    return {
+      ok: true,
+      deletedMessageIds: affectedMessageIds,
+      deletedAttachmentFilenames,
+      parentMessageId: target.parent_message_id,
+      deletedAt: dbDateToUtc(updatedTargetRow.deleted_at as string),
+    }
+  }
+
+  const selectLiveReplyCountForRootStatement = database.prepare(`
+    SELECT COUNT(*) as cnt FROM topic_messages WHERE parent_message_id = ? AND deleted_at IS NULL;
+  `)
+
+  const insertMessageSelfDeletionAuditStatement = database.prepare(`
+    INSERT INTO topic_message_self_deletion_audit_log (
+      log_id, topic_id, message_id, parent_message_id, sender_profile_id
+    ) VALUES (?, ?, ?, ?, ?);
+  `)
+
+  /**
+   * Ordinary-author (non-moderator) self-delete на СОБСТВЕНО root съобщение
+   * или reply — различно от deleteMessage() (moderator delete) по три
+   * ключови начина:
+   *  - Ownership е verified тук ВЪТРЕ в store-а (target.sender_profile_id
+   *    === input.ownerProfileId), не само на handler ниво — store-ът е
+   *    последната authoritative линия на защита.
+   *  - ROOT target: soft-delete-ва САМО root-а, НИКОГА replies — за разлика
+   *    от moderator thread-wide delete. Ако root-ът има поне 1 live
+   *    (deleted_at IS NULL) reply, delete-ът е ЦЯЛОСТНО отхвърлен
+   *    (code: 'has_live_replies') — авторът няма право да премахва чужди
+   *    replies чрез изтриване на собствения си root (own-delete брифа §1/§13).
+   *    Live-reply county се проверява ВЪТРЕ в BEGIN IMMEDIATE транзакцията
+   *    (fresh COUNT(*) след придобит write lock), НЕ на база client-подаден
+   *    replyCount snapshot — предотвратява race, при който reply бъде
+   *    insert-нат МЕЖДУ клиентската "0 replies" проверка и реалния delete
+   *    request (брифа §14: "Client-side replyCount===0 НЕ е достатъчен").
+   *  - Insert-ва ЕДИН self-delete audit ред (topic_message_self_deletion_audit_log),
+   *    НИКОГА moderator deletion audit (brифа §16: "НЕ insert-вай moderator
+   *    deletion audit").
+   * Deletion event/attachment cleanup инфраструктурата е пълен reuse на
+   * established statements (mirror на deleteMessage), само REPLY target
+   * никога не разклонява към cascade collection (affectedMessageIds е винаги
+   * точно [target.message_id] тук, за разлика от deleteMessage-a's root case).
+   * Idempotent: вече-deleted target → already_deleted, без нов audit/event ред.
+   */
+  function deleteOwnMessage(input: {
+    topicId: string
+    messageId: string
+    ownerProfileId: string
+  }):
+    | { ok: true; deletedMessageIds: string[]; deletedAttachmentFilenames: string[]; parentMessageId: string | null; deletedAt: string }
+    | { ok: false; code: 'not_found' | 'already_deleted' | 'has_live_replies' } {
+    const target = selectByMessageIdStatement.get(input.messageId) as TopicMessageRow | undefined
+
+    if (target === undefined || target.topic_id !== input.topicId) {
+      return { ok: false, code: 'not_found' }
+    }
+
+    // Ownership проверка е ТУК, вътре в store-а — не разчитаме единствено на
+    // caller-а (index.ts handler-а) да е filtrirал коректно; store-ът е
+    // последната authoritative линия. Wrong-owner опит третираме идентично
+    // на not_found навън (handler-ът вече прави explicit 403 преди да стигне
+    // дотук за non-owner/non-moderator, но store-ът остава defense-in-depth).
+    if (target.sender_profile_id !== input.ownerProfileId) {
+      return { ok: false, code: 'not_found' }
+    }
+
+    if (target.deleted_at !== null) {
+      return { ok: false, code: 'already_deleted' }
+    }
+
+    const isRoot = target.parent_message_id === null
+    const affectedMessageIds: string[] = [target.message_id]
+
+    let deletedAttachmentFilenames: string[] = []
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      if (isRoot) {
+        // Fresh live-reply count СЛЕД придобит BEGIN IMMEDIATE write lock —
+        // established SQLite semantics гарантира, че никой друг writer не
+        // може да insert-не reply МЕЖДУ тази проверка и самия soft-delete по-
+        // долу (същата транзакция вижда consistent snapshot до COMMIT).
+        const liveReplyCount = (selectLiveReplyCountForRootStatement.get(target.message_id) as { cnt: number }).cnt
+        if (liveReplyCount > 0) {
+          database.exec('ROLLBACK;')
+          return { ok: false, code: 'has_live_replies' }
+        }
+      }
+
+      const attachmentRows = getSelectAttachmentFilenamesForMessagesStatement(affectedMessageIds.length)
+        .all(...affectedMessageIds) as Array<{ storage_filename: string }>
+      deletedAttachmentFilenames = attachmentRows.map((row) => row.storage_filename)
+
+      for (const filename of deletedAttachmentFilenames) {
+        insertAttachmentDeletionStatement.run(filename)
+      }
+
+      getDeleteAttachmentsForMessagesStatement(affectedMessageIds.length).run(...affectedMessageIds)
+
+      const changes = getSoftDeleteMessagesStatement(affectedMessageIds.length).run(...affectedMessageIds)
+      if ((changes.changes as number) === 0) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'already_deleted' }
+      }
+
+      insertMessageDeletionEventStatement.run(input.topicId, target.message_id, target.parent_message_id)
+      insertMessageSelfDeletionAuditStatement.run(
+        randomUUID(),
+        input.topicId,
+        target.message_id,
+        target.parent_message_id,
+        target.sender_profile_id,
       )
 
       database.exec('COMMIT;')
@@ -1032,6 +1196,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     getRepliesAfter,
     getMessageById,
     deleteMessage,
+    deleteOwnMessage,
     getMaxDeletionEventSeq,
     pollMessageDeletionEvents,
     purgeDeletedTopicMessagesBefore,

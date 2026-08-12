@@ -383,7 +383,7 @@ export type LobbyScreenState = {
   topicDeleteBusy: boolean
   topicDeleteErrorText: string | null
   /** Individual root съобщение/reply moderation delete confirm popup — single-step (без reason поле, за разлика от topicDeleteConfirm). isRoot определя кой предупредителен текст се показва (root: "и всички отговори", reply: само отговора). */
-  topicMessageDeleteConfirm: { topicId: string; messageId: string; isRoot: boolean } | null
+  topicMessageDeleteConfirm: { topicId: string; messageId: string; isRoot: boolean; isModeratorAction: boolean } | null
   topicMessageDeleteBusy: boolean
   topicMessageDeleteErrorText: string | null
   topicReportPopupOpen: boolean
@@ -806,7 +806,7 @@ export type RenderLobbyScreenOptions = {
   onTopicDeleteReasonChange: (reason: string) => void
   onTopicDeleteAdvance: () => void
   onTopicDeleteConfirmSubmit: () => void
-  onTopicMessageDeleteClick: (topicId: string, messageId: string, isRoot: boolean) => void
+  onTopicMessageDeleteClick: (topicId: string, messageId: string, isRoot: boolean, isModeratorAction: boolean) => void
   onTopicMessageDeleteConfirmClose: () => void
   onTopicMessageDeleteConfirmSubmit: () => void
   onTopicReportClick: () => void
@@ -10417,10 +10417,29 @@ export function renderLobbyScreen(
   // single-step confirm popup (виж renderTopicMessageDeleteConfirmPopup).
   root.querySelectorAll<HTMLButtonElement>('[data-topic-message-delete]').forEach((btn) => {
     btn.addEventListener('click', () => {
+      // Blocked (own root с live replies, non-moderator) — aria-disabled, не
+      // native disabled, точно за да може tap/click да стигне тук и да
+      // покаже обяснението (data-tooltip вече е зададен от render-а с точния
+      // текст) БЕЗ да изпрати заявка (own-delete-own-content брифа §22: "tap
+      // показва кратко обяснение, но НЕ изпраща request"). Established
+      // .topic-message-action-btn tooltip pattern (:hover/:focus-visible
+      // ::after) вече покрива desktop; mobile browsers показват native
+      // aria-disabled focus behavior, плюс explicit data-tooltip-open state
+      // за touch devices, където :hover/:focus-visible не е надеждна обратна
+      // връзка.
+      if (btn.dataset.topicMessageDeleteBlocked === '1') {
+        btn.focus()
+        btn.dataset.tooltipOpen = '1'
+        window.setTimeout(() => {
+          delete btn.dataset.tooltipOpen
+        }, 1800)
+        return
+      }
       const messageId = btn.dataset.topicMessageDelete?.trim() ?? ''
       const isRoot = btn.dataset.topicMessageDeleteIsRoot === '1'
+      const isModeratorAction = btn.dataset.topicMessageDeleteIsModeratorAction === '1'
       if (messageId.length > 0 && state.activeTopicId) {
-        options.onTopicMessageDeleteClick(state.activeTopicId, messageId, isRoot)
+        options.onTopicMessageDeleteClick(state.activeTopicId, messageId, isRoot, isModeratorAction)
       }
     })
   })

@@ -46,6 +46,7 @@ const topicsMigrationPath = resolve(serverRoot, 'database/migrations/20260810_00
 const likesMigrationPath = resolve(serverRoot, 'database/migrations/20260811_001_create_topic_message_likes.sql')
 const attachmentsMigrationPath = resolve(serverRoot, 'database/migrations/20260811_002_create_topic_message_attachments.sql')
 const messageModerationMigrationPath = resolve(serverRoot, 'database/migrations/20260812_001_create_topic_message_moderation.sql')
+const selfDeletionAuditMigrationPath = resolve(serverRoot, 'database/migrations/20260812_002_create_topic_message_self_deletion_audit.sql')
 
 let passed = 0
 let failed = 0
@@ -161,6 +162,7 @@ await withTempDir(async (dir) => {
     await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, messageModerationMigrationPath)
+  await applyMigrationFile(db, selfDeletionAuditMigrationPath)
     const info = db.prepare(`PRAGMA table_info(topic_message_likes);`).all() as Array<{ name: string; pk: number }>
     const pkCols = info.filter((c) => c.pk > 0).map((c) => c.name).sort()
     assertEqual(JSON.stringify(pkCols), JSON.stringify(['liker_profile_id', 'message_id']), 'PK трябва да е точно (message_id, liker_profile_id)')
@@ -202,6 +204,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, messageModerationMigrationPath)
+  await applyMigrationFile(db, selfDeletionAuditMigrationPath)
 
   seedProfile(db, 'sender-1')
   seedProfile(db, 'sender-2')
@@ -216,7 +219,7 @@ await withTempDir(async (dir) => {
   const store = await createTopicMessageStore(dbPath)
 
   await check('[3] insertReply вмъква ред с parent_message_id = зададения root', () => {
-    const reply = store.insertReply({
+    const replyResult = store.insertReply({
       topicId: 'topic-x',
       parentMessageId: 'root-a',
       senderProfileId: 'sender-2',
@@ -224,6 +227,8 @@ await withTempDir(async (dir) => {
       senderRole: 'player',
       body: 'reply to A',
     })
+    if (!replyResult.ok) throw new Error('unexpected parent_not_found in test setup')
+    const reply = replyResult.message
     assertEqual(reply.parentMessageId, 'root-a', 'parentMessageId трябва да е root-a')
     assertEqual(reply.topicId, 'topic-x', 'topicId трябва да се пази')
   })
@@ -297,6 +302,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, messageModerationMigrationPath)
+  await applyMigrationFile(db, selfDeletionAuditMigrationPath)
 
   seedProfile(db, 'viewer-1')
   seedProfile(db, 'viewer-2')
@@ -348,6 +354,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, messageModerationMigrationPath)
+  await applyMigrationFile(db, selfDeletionAuditMigrationPath)
 
   seedProfile(db, 'viewer-1')
   seedProfile(db, 'viewer-2')
@@ -443,6 +450,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, messageModerationMigrationPath)
+  await applyMigrationFile(db, selfDeletionAuditMigrationPath)
 
   seedProfile(db, 'sender-1')
   insertTopic(db, { topicId: 'topic-x', slug: 'topic-x', title: 'Тема X' })
@@ -450,7 +458,9 @@ await withTempDir(async (dir) => {
   const store = await createTopicMessageStore(dbPath)
 
   const root = store.insertMessage({ topicId: 'topic-x', senderProfileId: 'sender-1', senderDisplayName: 'S1', senderRole: 'player', body: 'root' })
-  const reply = store.insertReply({ topicId: 'topic-x', parentMessageId: root.messageId, senderProfileId: 'sender-1', senderDisplayName: 'S1', senderRole: 'player', body: 'reply' })
+  const replyResult = store.insertReply({ topicId: 'topic-x', parentMessageId: root.messageId, senderProfileId: 'sender-1', senderDisplayName: 'S1', senderRole: 'player', body: 'reply' })
+  if (!replyResult.ok) throw new Error('unexpected parent_not_found in test setup')
+  const reply = replyResult.message
 
   await check('[20] pollNewMessages вече връща И root, И reply редове (Етап 3 разширение)', () => {
     const rows = store.pollNewMessages(0, 100)

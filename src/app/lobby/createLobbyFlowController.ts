@@ -938,7 +938,7 @@ type InternalLobbyFlowState = {
   topicDeleteBusy: boolean
   topicDeleteErrorText: string | null
   /** Individual root съобщение/reply moderation delete confirm — single-step (без reason поле). */
-  topicMessageDeleteConfirm: { topicId: string; messageId: string; isRoot: boolean } | null
+  topicMessageDeleteConfirm: { topicId: string; messageId: string; isRoot: boolean; isModeratorAction: boolean } | null
   topicMessageDeleteBusy: boolean
   topicMessageDeleteErrorText: string | null
   /** Report popup — обикновен потребител докладва тема. */
@@ -3621,8 +3621,8 @@ export function createLobbyFlowController(
       onTopicDeleteConfirmSubmit: () => {
         void confirmTopicDelete()
       },
-      onTopicMessageDeleteClick: (topicId, messageId, isRoot) => {
-        openTopicMessageDeleteConfirm(topicId, messageId, isRoot)
+      onTopicMessageDeleteClick: (topicId, messageId, isRoot, isModeratorAction) => {
+        openTopicMessageDeleteConfirm(topicId, messageId, isRoot, isModeratorAction)
       },
       onTopicMessageDeleteConfirmClose: () => {
         closeTopicMessageDeleteConfirm()
@@ -5253,12 +5253,14 @@ export function createLobbyFlowController(
   }
 
   // Single-step confirm (за разлика от двустъпковия topicDeleteConfirm по-горе
-  // — individual-message delete няма reason field, брифа §19). isRoot
-  // определя предупредителния текст (root: "и всички отговори"), не
-  // server-side поведението (delete request-ът е идентичен, сървърът сам
-  // определя root-vs-reply от parent_message_id).
-  function openTopicMessageDeleteConfirm(topicId: string, messageId: string, isRoot: boolean): void {
-    state.topicMessageDeleteConfirm = { topicId, messageId, isRoot }
+  // — individual-message delete няма reason field, брифа §19). isRoot +
+  // isModeratorAction заедно определят confirmation текста: moderator root
+  // delete предупреждава за "и всички отговори" (established, thread-wide),
+  // ordinary own-root delete НЕ споменава replies (по дефиниция е 0-replies
+  // — own-delete-own-content брифа §24). Server-side поведението вече е
+  // determined от action capability-то (isModeratorAction), не от UI текста.
+  function openTopicMessageDeleteConfirm(topicId: string, messageId: string, isRoot: boolean, isModeratorAction: boolean): void {
+    state.topicMessageDeleteConfirm = { topicId, messageId, isRoot, isModeratorAction }
     state.topicMessageDeleteErrorText = null
     render()
   }
