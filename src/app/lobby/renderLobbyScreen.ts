@@ -363,6 +363,7 @@ export type LobbyScreenState = {
   topicsVipClaimErrorText: string | null
   topicsVipSeePlansMessageVisible: boolean
   topicsInfoToast: { text: string } | null
+  topicsPersonalMessagePendingProfileId: string | null
   topicCreatePopupOpen: boolean
   topicCreateBusy: boolean
   topicCreateErrorText: string | null
@@ -830,6 +831,7 @@ export type RenderLobbyScreenOptions = {
   onAdminTopicReportsFilterChange: (status: TopicReportStatus | null) => void
   onAdminTopicReportReview: (reportId: string, status: 'reviewed' | 'dismissed') => void
   onTopicMessageAuthorClick: (profileId: string, displayName: string) => void
+  onTopicMessagePersonalClick: (profileId: string, displayName: string) => void
   onTournamentHowItWorksOpen: () => void
   onTournamentsFilterChange: (filter: 'all' | 'mine') => void
   onTournamentCreatePopupOpen: () => void
@@ -5444,9 +5446,9 @@ function renderTopicsPersonalMessages(state: LobbyScreenState, activeConversatio
     : []
   const vipDmDisabledReason = activeConversation.kind !== 'vip_dm'
     ? null
-    : state.profile.isVip !== true
+    : (state.topicsVipGate?.isActive ?? (state.profile.isVip === true)) !== true
       ? 'За да изпращате лични съобщения тук, е необходим активен VIP.'
-      : activeConversation.friend.isVip !== true
+      : activeConversation.friend.isVip === false
         ? 'Този потребител в момента не е активен VIP.'
         : activeConversation.friend.isBlockedByMe === true
           ? 'Вие сте блокирали този потребител.'
@@ -5488,7 +5490,7 @@ function renderTopicsPersonalMessages(state: LobbyScreenState, activeConversatio
       <div style="display:flex;gap:10px;align-items:center;">
         ${renderChatImagePickerControls(state, activeConversation.friendshipId, vipDmDisabledReason !== null)}
         <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." ${isComposerDisabled ? 'disabled' : ''} style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;opacity:${isComposerDisabled ? '0.62' : '1'};">
-        <button type="submit" ${isComposerDisabled ? 'disabled' : ''} style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:${isComposerDisabled ? 'default' : 'pointer'};opacity:${isComposerDisabled ? '0.6' : '1'};">${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'Качване...' : 'Изпрати'}</button>
+        <button type="submit" data-topics-personal-send="1" aria-label="Изпрати" title="Изпрати" ${isComposerDisabled ? 'disabled' : ''} style="height:42px;width:42px;flex:0 0 42px;display:inline-flex;align-items:center;justify-content:center;padding:0;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:16px;font-weight:900;line-height:1;cursor:${isComposerDisabled ? 'default' : 'pointer'};opacity:${isComposerDisabled ? '0.6' : '1'};"><span aria-hidden="true">&#10148;</span></button>
       </div>
     </form>
   `
@@ -10250,6 +10252,14 @@ export function renderLobbyScreen(
       const profileId = button.dataset.topicMessageAuthor ?? ''
       const displayName = button.dataset.topicMessageAuthorName ?? ''
       if (profileId) options.onTopicMessageAuthorClick(profileId, displayName)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-personal]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const profileId = button.dataset.topicMessagePersonal ?? ''
+      const displayName = button.dataset.topicMessagePersonalName ?? ''
+      if (profileId) options.onTopicMessagePersonalClick(profileId, displayName)
     })
   })
 

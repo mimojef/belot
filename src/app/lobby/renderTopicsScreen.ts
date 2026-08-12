@@ -296,6 +296,23 @@ function renderTopicReplyButton(rootMessageId: string, replyCount: number): stri
 //    Server е authoritative за реалната проверка (race-safe вътре в
 //    транзакцията, виж deleteOwnMessage()) — клиентският replyCount е само
 //    UX hint за disabled state, не security boundary.
+function renderTopicPersonalMessageButton(state: LobbyScreenState, senderProfileId: string, senderDisplayName: string): string {
+  const ownProfileId = state.profile.profileId
+  if (ownProfileId === null || senderProfileId === ownProfileId) return ''
+  const isPending = state.topicsPersonalMessagePendingProfileId === senderProfileId
+
+  return `
+    <button
+      type="button"
+      data-topic-message-personal="${escapeHtml(senderProfileId)}"
+      data-topic-message-personal-name="${escapeHtml(senderDisplayName)}"
+      class="topic-message-personal-btn"
+      aria-label="Лично съобщение до ${escapeHtml(senderDisplayName)}"
+      ${isPending ? 'disabled' : ''}
+    >Лично</button>
+  `
+}
+
 function renderTopicMessageDeleteButton(
   state: LobbyScreenState,
   messageId: string,
@@ -411,6 +428,7 @@ function renderTopicAuthorBlock(state: LobbyScreenState, senderProfileId: string
   const ownProfileId = state.profile.profileId
   const canModerateThisAuthor = state.isTopicModerator && state.activeTopicId !== null && senderProfileId !== ownProfileId
   const isMuteStatusLoading = state.topicMuteStatusLoadingProfileId === senderProfileId
+  const personalMessageButton = renderTopicPersonalMessageButton(state, senderProfileId, senderDisplayName)
   const muteControl = canModerateThisAuthor
     ? `
       <button
@@ -434,15 +452,18 @@ function renderTopicAuthorBlock(state: LobbyScreenState, senderProfileId: string
       aria-label="Профил на ${escapeHtml(senderDisplayName)}"
     >${renderMessageAvatar(senderDisplayName, senderAvatarUrl)}</button>
     <div style="flex:1;min-width:0;">
-      <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">
-        <button
-          type="button"
-          data-topic-message-author="${escapeHtml(senderProfileId)}"
-          data-topic-message-author-name="${escapeHtml(senderDisplayName)}"
-          style="border:0;background:transparent;padding:0;cursor:pointer;font-size:14px;font-weight:900;color:#f8fafc;"
-        >${escapeHtml(senderDisplayName)}</button>
-        <span style="font-size:12px;color:rgba(248,250,252,0.42);">${formatTopicMessageTime(createdAt)}${editedAt !== null ? ' · редактирано' : ''}</span>
-        ${muteControl}
+      <div class="topic-message-author-row">
+        <div class="topic-message-author-meta">
+          <button
+            type="button"
+            data-topic-message-author="${escapeHtml(senderProfileId)}"
+            data-topic-message-author-name="${escapeHtml(senderDisplayName)}"
+            style="border:0;background:transparent;padding:0;cursor:pointer;font-size:14px;font-weight:900;color:#f8fafc;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+          >${escapeHtml(senderDisplayName)}</button>
+          <span style="font-size:12px;color:rgba(248,250,252,0.42);white-space:nowrap;">${formatTopicMessageTime(createdAt)}${editedAt !== null ? ' · редактирано' : ''}</span>
+          ${muteControl}
+        </div>
+        ${personalMessageButton}
       </div>
     </div>
   `
@@ -775,6 +796,47 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
       }
       .topic-message-action-btn:hover { background:rgba(255,255,255,0.06); color:rgba(248,250,252,0.8); }
       .topic-message-action-btn:active { background:rgba(255,255,255,0.10); }
+      .topic-message-author-row {
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap:8px;
+        min-width:0;
+      }
+      .topic-message-author-meta {
+        display:flex;
+        align-items:baseline;
+        gap:8px;
+        min-width:0;
+        flex:1 1 auto;
+        overflow:hidden;
+      }
+      .topic-message-personal-btn {
+        flex:0 0 auto;
+        min-height:28px;
+        padding:0 9px;
+        border:1px solid rgba(212,165,32,0.34);
+        border-radius:8px;
+        background:rgba(212,165,32,0.08);
+        color:#f4c95b;
+        font-size:12px;
+        font-weight:900;
+        line-height:1;
+        cursor:pointer;
+        white-space:nowrap;
+      }
+      .topic-message-personal-btn:hover {
+        background:rgba(212,165,32,0.15);
+        border-color:rgba(212,165,32,0.52);
+        color:#fde68a;
+      }
+      .topic-message-personal-btn:active { background:rgba(212,165,32,0.22); }
+      .topic-message-personal-btn:disabled {
+        opacity:0.55;
+        cursor:default;
+        color:#d8b85a;
+        background:rgba(212,165,32,0.05);
+      }
       /* Active liked state — ясно различимо (Pika.bg gold accent + filled
          heart glyph), но остава в icon-only стилистиката (Етап 3 брифа: "Не
          искам постоянния текст «Харесай»"). */
@@ -783,6 +845,9 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
       .topic-message-action-btn:disabled { opacity:0.6; cursor:default; }
       @media (hover: none) and (pointer: coarse) {
         .topic-message-action-btn { padding:11px; }
+        .topic-message-author-row { align-items:flex-start; }
+        .topic-message-author-meta { flex-wrap:wrap; row-gap:2px; }
+        .topic-message-personal-btn { min-height:30px; padding:0 10px; }
       }
       /* Desktop hover/keyboard-focus tooltip — reuse на established
          Pika.bg icon-only tooltip pattern (виж .lobby-nav-btn-icon-only в

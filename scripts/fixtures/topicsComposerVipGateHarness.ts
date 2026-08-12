@@ -6,7 +6,7 @@
 // topicsSwitchRaceHarness.ts (виж него за rationale на подхода), но фокусиран
 // върху Етап 2: composer/VIP gate/realtime merge поведение.
 import { createLobbyFlowController } from '/src/app/lobby/createLobbyFlowController.ts'
-import type { TopicSnapshot, TopicMessageSnapshot, TopicReplySnapshot, ServerMessage } from '/src/app/network/createGameServerClient.ts'
+import type { ChatConversationSnapshot, TopicSnapshot, TopicMessageSnapshot, TopicReplySnapshot, ServerMessage } from '/src/app/network/createGameServerClient.ts'
 
 const root = document.createElement('div')
 document.body.appendChild(root)
@@ -54,7 +54,7 @@ function makeReply(topicId: string, seq: number, parentMessageId: string, body: 
 }
 
 let vipGate = { isActive: false, hasClaimedLaunchGift: false }
-let claimResult: { ok: true; isActive: boolean } | { ok: false; alreadyClaimed: boolean } = { ok: true, isActive: true }
+let claimResult: { ok: true; isActive: boolean; activeUntil?: string | null } | { ok: false; alreadyClaimed: boolean } = { ok: true, isActive: true, activeUntil: null }
 let nextMessagesResult: { ok: true; messages: TopicMessageSnapshot[]; hasMore: boolean; oldestSeq: number | null } = {
   ok: true,
   messages: [],
@@ -74,6 +74,20 @@ const sendLog: Array<{ topicId: string; body: string; requestId: string }> = []
 const replySendLog: Array<{ topicId: string; parentMessageId: string; body: string; requestId: string }> = []
 const likeToggleLog: Array<{ messageId: string; requestId: string }> = []
 const repliesLoadLog: Array<{ topicId: string; rootMessageId: string; afterSeq: number | null }> = []
+const vipDmStartLog: string[] = []
+let chatConversations: ChatConversationSnapshot[] = []
+let vipDmStartResult:
+  | { ok: true; conversation: ChatConversationSnapshot }
+  | { ok: false; message: string; code?: 'blocked' | 'vip_required' | 'vip_counterpart_required' } = {
+    ok: false,
+    message: 'Личните съобщения към потребители извън приятелите са достъпни само за VIP.',
+    code: 'vip_required',
+  }
+let profileLoadResult: { ok: true; profile: any } | { ok: false; message: string; code?: 'profile_blocked_by_viewer' | 'profile_blocked_viewer' } = {
+  ok: true,
+  profile: null,
+}
+let chatConversationsAfterVipDmStart: ChatConversationSnapshot[] | null = null
 let vipGateCallCount = 0
 let claimCallCount = 0
 
@@ -107,6 +121,31 @@ const controller = createLobbyFlowController({
   onTopicRepliesLoad: async (topicId: string, rootMessageId: string, afterSeq: number | null) => {
     repliesLoadLog.push({ topicId, rootMessageId, afterSeq })
     return nextRepliesResult
+  },
+  onChatConversationsLoad: async () => ({ ok: true, conversations: chatConversations }),
+  onChatMessagesLoad: async () => ({ ok: true, messages: [] }),
+  onVipDmChatStart: async (recipientProfileId: string) => {
+    vipDmStartLog.push(recipientProfileId)
+    if (vipDmStartResult.ok) {
+      chatConversations = chatConversationsAfterVipDmStart ?? [
+        vipDmStartResult.conversation,
+        ...chatConversations.filter((conversation) => conversation.friendshipId !== vipDmStartResult.conversation.friendshipId),
+      ]
+      chatConversationsAfterVipDmStart = null
+    }
+    return vipDmStartResult
+  },
+  onProfileByIdLoad: async (profileId: string) => {
+    if (!profileLoadResult.ok) return profileLoadResult
+    return {
+      ok: true,
+      profile: profileLoadResult.profile ?? {
+        profileId,
+        displayName: 'Target',
+        avatarUrl: null,
+        isVip: true,
+      },
+    }
   },
   onGetTopicsVipGateStatus: async () => {
     vipGateCallCount++
@@ -148,18 +187,51 @@ function q<T extends Element>(selector: string): T | null {
       oldestSeq: replies.length > 0 ? replies[replies.length - 1]!.seq : null,
     }
   },
+  setChatConversations: (conversations: ChatConversationSnapshot[]) => {
+    chatConversations = conversations
+  },
+  setChatConversationsAfterVipDmStart: (conversations: ChatConversationSnapshot[] | null) => {
+    chatConversationsAfterVipDmStart = conversations
+  },
+  setVipDmStartResult: (result: typeof vipDmStartResult) => {
+    vipDmStartResult = result
+  },
+  setProfileLoadResult: (result: typeof profileLoadResult) => {
+    profileLoadResult = result
+  },
   makeMessage,
   makeReply,
+  makeConversation: (friendshipId: string, kind: 'friend' | 'vip_dm', friendProfileId: string, friendDisplayName = 'Friend', friendIsVip: boolean | null | undefined = true): ChatConversationSnapshot => {
+    const friend: Record<string, unknown> = { profileId: friendProfileId, displayName: friendDisplayName, avatarUrl: null }
+    if (friendIsVip !== undefined) friend.isVip = friendIsVip
+    return {
+      friendshipId,
+      kind,
+      friend: friend as any,
+      lastMessage: null,
+      updatedAt: new Date().toISOString(),
+      unreadCount: 0,
+      isArchived: false,
+    }
+  },
   getSubscribeLog: () => subscribeLog,
   getUnsubscribeLog: () => unsubscribeLog,
   getSendLog: () => sendLog,
   getReplySendLog: () => replySendLog,
   getLikeToggleLog: () => likeToggleLog,
   getRepliesLoadLog: () => repliesLoadLog,
+  getVipDmStartLog: () => vipDmStartLog,
+  clearVipDmStartLog: () => { vipDmStartLog.length = 0 },
   getVipGateCallCount: () => vipGateCallCount,
   getClaimCallCount: () => claimCallCount,
   clickReplyButton: (rootMessageId: string) => q<HTMLButtonElement>(`[data-topic-message-reply="${rootMessageId}"]`)?.click(),
   clickLikeButton: (messageId: string) => q<HTMLButtonElement>(`[data-topic-message-like="${messageId}"]`)?.click(),
+  clickDirectPersonalButton: (profileId: string) => q<HTMLButtonElement>(`[data-topic-message-personal="${profileId}"]`)?.click(),
+  isTopicsStreamVisible: () => q('[data-topic-messages-scroll="1"]') !== null,
+  isTopicsPersonalDetailVisible: () => q('[data-topics-personal-detail="1"]') !== null,
+  getTopicsPersonalPanelView: () => q<HTMLElement>('[data-topics-personal-panel="1"]')?.dataset.personalView ?? null,
+  getChatComposerDisabledReason: () => q('[data-chat-composer-disabled-reason="1"]')?.textContent ?? null,
+  isChatComposerDisabled: () => q<HTMLFormElement>('[data-lobby-chat-form]')?.dataset.chatComposerDisabled === '1',
   isRepliesSectionExpanded: (rootMessageId: string) => q(`[data-topic-replies-section="${rootMessageId}"]`) !== null,
   getReplyComposerValue: (rootMessageId: string) =>
     q<HTMLTextAreaElement>(`[data-topics-reply-composer-form][data-topics-reply-composer-root-id="${rootMessageId}"] [data-topics-reply-composer-text="1"]`)?.value ?? null,

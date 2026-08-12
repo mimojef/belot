@@ -29,8 +29,12 @@ const controller = await read('src/app/lobby/createLobbyFlowController.ts')
 const mainSource = await read('src/main.ts')
 const packageJson = await read('package.json')
 const topicsPersonalPanelSource = renderLobby.slice(
-  renderLobby.indexOf('export function renderTopicsPersonalChatPanel'),
+  renderLobby.indexOf('function renderTopicsPersonalMessages'),
   renderLobby.indexOf('function renderChatPanel'),
+)
+const standaloneChatPanelSource = renderLobby.slice(
+  renderLobby.indexOf('function renderChatPanel'),
+  renderLobby.indexOf('export function renderPlayersDirectory'),
 )
 
 function createRenderState(overrides: Partial<LobbyScreenState> = {}): LobbyScreenState {
@@ -74,6 +78,7 @@ function createRenderState(overrides: Partial<LobbyScreenState> = {}): LobbyScre
     topicsVipClaimErrorText: null,
     topicsVipSeePlansMessageVisible: false,
     topicsInfoToast: null,
+    topicsPersonalMessagePendingProfileId: null,
     topicCreatePopupOpen: false,
     topicCreateBusy: false,
     topicCreateErrorText: null,
@@ -270,6 +275,14 @@ await check('[10] Composer, attachments and image viewer reuse existing Personal
   assert(renderLobby.includes('data-chat-image-pick'), 'chat image pick selector must remain')
   assert(renderLobby.includes('data-chat-image-input'), 'chat image input selector must remain')
   assert(renderLobby.includes('renderImageViewerOverlay(state)'), 'shared image viewer must remain wired')
+  assert(topicsPersonalPanelSource.includes('data-topics-personal-send="1"'), 'Topics Personal must render its own compact send button marker')
+  assert(topicsPersonalPanelSource.includes('aria-label="Изпрати"'), 'Topics Personal icon send button must keep Bulgarian accessible label')
+  assert(topicsPersonalPanelSource.includes('title="Изпрати"'), 'Topics Personal icon send button must keep Bulgarian title')
+  assert(topicsPersonalPanelSource.includes('<span aria-hidden="true">&#10148;</span>'), 'Topics Personal send button must use the canonical send icon glyph')
+  assert(topicsPersonalPanelSource.includes('width:42px;flex:0 0 42px;display:inline-flex;align-items:center;justify-content:center'), 'Topics Personal send button must be compact and centered for mobile')
+  assert(topicsPersonalPanelSource.includes('${isComposerDisabled ? \'disabled\' : \'\'}'), 'Topics Personal icon send button must preserve disabled/pending semantics')
+  assert(standaloneChatPanelSource.includes("state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'Качване…' : 'Изпрати'"), 'legacy standalone Chat send button must remain text-based')
+  assert(!standaloneChatPanelSource.includes('data-topics-personal-send="1"'), 'legacy standalone Chat must not receive the Topics Personal send marker')
 })
 
 await check('[11] Navigation/back and mobile list/detail state are wired', () => {
@@ -408,38 +421,135 @@ await check('[22] Other-user profile entry points use protected canonical profil
   assert(mainSource.includes("code?: 'profile_blocked_by_viewer' | 'profile_blocked_viewer'"), 'HTTP profile loader must preserve profile block denial code')
 })
 
-await check('[23] Topics profile exposes the dedicated Personal Message action only through explicit Topics context', () => {
-  assert(profilePopupSource.includes('data-player-profile-topics-personal-message'), 'profile popup must render the Topics Personal Message action hook')
-  assert(profilePopupSource.includes('Лично съобщение'), 'profile popup must show exact Bulgarian Personal Message label')
-  assert(controller.includes("type ProfilePopupContext = 'topics' | 'other'"), 'controller must model profile popup context explicitly')
-  assert(controller.includes("void openProtectedProfileById(profileId, displayName, 'topics')"), 'Topics author profile opens must mark Topics context')
-  assert(controller.includes("state.profilePopupContext === 'topics'"), 'Personal Message visibility must be gated by Topics context')
-  assert(controller.includes('showTopicsPersonalMessageButton,'), 'popup sync must receive the Topics-only visibility flag')
+await check('[23] Topics post row shows Personal button for other users and hides it for own posts', () => {
+  const html = renderTopicsScreen(createRenderState({
+    topicsMode: 'topics',
+    topicMessages: [
+      {
+        messageId: 'foreign-post',
+        topicId: 'topic-general',
+        parentMessageId: null,
+        senderProfileId: 'other-profile',
+        senderDisplayName: 'Other Player',
+        senderAvatarUrl: null,
+        senderRole: 'player',
+        body: 'FOREIGN_POST',
+        createdAt: '2026-08-12T09:00:00.000Z',
+        deletedAt: null,
+        editedAt: null,
+        attachment: null,
+        replyCount: 0,
+        likeCount: 0,
+        viewerHasLiked: false,
+      },
+      {
+        messageId: 'own-post',
+        topicId: 'topic-general',
+        parentMessageId: null,
+        senderProfileId: 'viewer',
+        senderDisplayName: 'Viewer',
+        senderAvatarUrl: null,
+        senderRole: 'player',
+        body: 'OWN_POST',
+        createdAt: '2026-08-12T09:01:00.000Z',
+        deletedAt: null,
+        editedAt: null,
+        attachment: null,
+        replyCount: 0,
+        likeCount: 0,
+        viewerHasLiked: false,
+      },
+    ],
+  }))
+
+  assert(html.includes('data-topic-message-personal="other-profile"'), 'foreign Topics post must expose direct Personal button')
+  assert(html.includes('>Лично</button>'), 'direct Personal button must use exact compact label')
+  assert(!html.includes('data-topic-message-personal="viewer"'), 'own Topics post must not expose direct Personal button')
 })
 
-await check('[24] Topics Personal Message opens existing friend/vip_dm before starting a new vip_dm', () => {
+await check('[24] Topics author avatar/name still open profile, while profile popup has no Topics Personal entry', () => {
+  assert(renderTopics.includes('data-topic-message-author="${escapeHtml(senderProfileId)}"'), 'avatar/name profile hook must remain')
+  assert(renderLobby.includes('options.onTopicMessageAuthorClick(profileId, displayName)'), 'author click must still open profile flow')
+  assert(controller.includes("void openProtectedProfileById(profileId, displayName, 'topics')"), 'Topics author click must keep protected profile authorization')
+  assert(controller.includes('const showTopicsPersonalMessageButton = false'), 'Topics profile popup must not expose Personal Message action anymore')
+})
+
+await check('[25] Direct Topics Personal button opens existing friend/vip_dm before starting a new vip_dm', () => {
+  assert(renderLobby.includes('[data-topic-message-personal]'), 'render wiring must listen for direct post-row Personal button')
+  assert(controller.includes('async function openTopicsPersonalMessageFromPost'), 'missing direct post-row Personal helper')
   assert(controller.includes('function findTopicsPersonalConversationByProfileId'), 'missing canonical existing-conversation lookup')
+  assert(controller.includes('conversation.friend.profileId === profileId'), 'existing lookup must match the exact target profileId')
   assert(controller.includes("conversation.kind === 'friend' || conversation.kind === 'vip_dm'"), 'existing lookup must include friend + vip_dm')
-  assert(controller.includes('await loadChatConversations()'), 'profile action must refresh/reconcile conversations before deciding')
+  assert(controller.includes('await loadChatConversations()'), 'direct action must refresh/reconcile conversations before deciding')
   assert(controller.includes('await showTopicsPersonalChat(existingConversation.friendshipId)'), 'existing conversation must open exact canonical friendshipId')
+  assert(controller.includes('state.topicsVipGate !== null && !state.topicsVipGate.isActive'), 'known inactive viewer VIP state must short-circuit only after existing lookup')
+  assert(controller.includes('openTopicsVipPopup()'), 'known inactive viewer VIP state must open canonical Topics VIP popup')
   assert(controller.includes('if (!options.onVipDmChatStart)'), 'new vip_dm start must be behind backend start option')
+  const refreshIndex = controller.indexOf('await loadChatConversations()')
+  const existingIndex = controller.indexOf('const existingConversation = findTopicsPersonalConversationByProfileId(recipientProfileId)')
+  const inactiveVipIndex = controller.indexOf('state.topicsVipGate !== null && !state.topicsVipGate.isActive')
+  const startIndex = controller.indexOf('const result = await options.onVipDmChatStart(recipientProfileId)')
+  assert(refreshIndex !== -1 && existingIndex !== -1 && startIndex !== -1 && refreshIndex < existingIndex && existingIndex < startIndex, 'existing friend/vip_dm lookup must happen before vip-dm/start')
+  assert(inactiveVipIndex !== -1 && existingIndex < inactiveVipIndex && inactiveVipIndex < startIndex, 'known inactive viewer VIP short-circuit must happen after existing lookup and before vip-dm/start')
 })
 
-await check('[25] New VIP DM start uses backend canonical conversation and prevents duplicate rows', () => {
+await check('[26] New direct VIP DM start uses backend canonical conversation and prevents duplicate rows', () => {
   assert(mainSource.includes("/api/chat/vip-dm/start"), 'main client must call the canonical vip-dm/start endpoint')
   assert(mainSource.includes('body: JSON.stringify({ recipientProfileId })'), 'vip-dm/start must send recipientProfileId body')
   assert(controller.includes('mergeCanonicalChatConversation(result.conversation)'), 'successful start must merge returned canonical conversation')
   assert(controller.includes('state.chatConversations.filter((c) => c.friendshipId !== conversation.friendshipId)'), 'merge must dedupe by canonical friendshipId')
+  assert(controller.includes('!state.chatConversations.some((conversation) => conversation.friendshipId === result.conversation.friendshipId)'), 'fresh canonical conversations must not be overwritten by stale start response')
   assert(controller.includes('await showTopicsPersonalChat(result.conversation.friendshipId)'), 'successful start must open returned canonical friendshipId')
+  assert(renderLobby.includes('activeConversation.friend.isVip === false'), 'counterpart VIP disabled state must require canonical false, not unknown/missing')
 })
 
-await check('[26] VIP DM start errors map to Bulgarian UX without raw machine codes', () => {
+await check('[27] Direct Topics Personal block/VIP failures use safe Bulgarian UX', () => {
+  assert(controller.includes('async function authorizeTopicsPersonalMessageTarget'), 'direct action must preflight protected profile authorization')
+  assert(controller.includes('state.profileAccessBlockPopup = { profileId: recipientProfileId, code: result.code }'), 'blocked-by-viewer/target must render exact block popup')
   assert(mainSource.includes("case 'vip_required':"), 'vip_required must be mapped')
   assert(mainSource.includes('Личните съобщения към потребители извън приятелите са достъпни само за VIP.'), 'viewer VIP-required Bulgarian UX missing')
+  assert(controller.includes("if (result.code === 'vip_required')"), 'new direct vip_required start must have dedicated Topics VIP gate branch')
+  assert(controller.includes('openTopicsVipPopup()'), 'new direct vip_required start must reuse canonical Topics VIP popup')
+  assert(controller.includes('void refreshTopicsVipGateStatus()'), 'new direct vip_required start must refresh canonical VIP gate state')
   assert(mainSource.includes("case 'vip_counterpart_required':"), 'vip_counterpart_required must be mapped')
   assert(mainSource.includes('Този потребител в момента не е активен VIP.'), 'counterpart inactive Bulgarian UX missing')
   assert(mainSource.includes("case 'blocked':"), 'blocked must be mapped')
-  assert(controller.includes('state.friendActionMessage = result.message'), 'profile action errors must be shown as safe UX message')
+  assert(mainSource.includes('code: data.code'), 'vip-dm/start code must be preserved for direct block popup mapping')
+  assert(controller.includes('state.topicsInfoToast = { text: result.message }'), 'VIP failures must show Bulgarian UX in Topics without profile popup')
+  const vipRequiredIndex = controller.indexOf("if (result.code === 'vip_required')")
+  const vipPopupIndex = controller.indexOf('openTopicsVipPopup()', vipRequiredIndex)
+  const toastIndex = controller.indexOf('state.topicsInfoToast = { text: result.message }', vipRequiredIndex)
+  assert(vipRequiredIndex !== -1 && vipPopupIndex !== -1 && toastIndex !== -1 && vipRequiredIndex < vipPopupIndex && vipPopupIndex < toastIndex, 'vip_required must open VIP popup before generic transient toast branch')
+})
+
+await check('[28] Direct Personal button layout is mobile/desktop overflow-safe', () => {
+  assert(renderTopics.includes('class="topic-message-author-row"'), 'author header row wrapper missing')
+  assert(renderTopics.includes('class="topic-message-author-meta"'), 'author metadata wrapper missing')
+  assert(renderTopics.includes('class="topic-message-personal-btn"'), 'Personal button class missing')
+  assert(renderTopics.includes('topicsPersonalMessagePendingProfileId === senderProfileId'), 'Personal button must expose pending disabled state')
+  assert(renderTopics.includes('.topic-message-personal-btn:disabled'), 'Personal button disabled style missing')
+  assert(renderTopics.includes('overflow:hidden;text-overflow:ellipsis;white-space:nowrap'), 'author name must keep overflow guard')
+  assert(renderTopics.includes('@media (hover: none) and (pointer: coarse)'), 'mobile touch media query must keep layout safe')
+})
+
+await check('[29] Direct Personal click is one-flight guarded and survives rerender without duplicate start', () => {
+  assert(controller.includes('if (state.topicsPersonalMessagePendingProfileId !== null) return'), 'direct Personal click must be guarded while a previous click is pending')
+  assert(controller.includes('state.topicsPersonalMessagePendingProfileId = recipientProfileId'), 'direct Personal click must mark the exact pending recipient')
+  assert(controller.includes('finally {'), 'pending direct Personal click state must clear via finally')
+  assert(controller.includes('state.topicsPersonalMessagePendingProfileId = null'), 'pending direct Personal click state must clear')
+  assert(renderTopics.includes("${isPending ? 'disabled' : ''}"), 'pending direct Personal button must be disabled in DOM')
+  const listenerOccurrences = (renderLobby.match(/querySelectorAll<HTMLButtonElement>\('\[data-topic-message-personal\]'\)/g) ?? []).length
+  assert(listenerOccurrences === 1, 'direct Personal listener must be wired once per render')
+})
+
+await check('[30] Failed new Direct Personal start does not leave Personal detail/composer state sticky', () => {
+  assert(controller.includes('function clearTopicsPersonalTransientState'), 'missing Topics Personal transient cleanup helper')
+  assert(controller.includes('state.chatErrorText = null'), 'cleanup must clear chat error text')
+  assert(controller.includes('state.chatLoading = false'), 'cleanup must clear chat loading state')
+  assert(controller.includes('state.chatMessagesLoading = false'), 'cleanup must clear chat message loading state')
+  assert(controller.includes('state.topicsInfoToast = null'), 'returning to Topics stream must clear stale transient inline toast')
+  assert(controller.includes("state.topicsMode = 'topics'"), 'cleanup must run on Topics stream/list return paths')
+  assert(controller.includes("state.topicsPersonalView = 'list'"), 'returning to Topics must leave Personal detail view')
 })
 
 console.log('PASS topics personal integration client checks')

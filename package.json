@@ -17,7 +17,7 @@
     "check:consent-analytics": "npx tsx scripts/checkConsentAnalytics.ts",
     "check:chat-draft-preserved": "npx tsx scripts/checkChatDraftPreserved.ts",
     "check:topics-switch-race": "npx tsx scripts/checkTopicsSwitchRace.ts",
-    "check:topics-composer-vip-gate": "npx tsx scripts/checkTopicsComposerVipGate.ts",
+    "check:topics-composer-vip-gate": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicsComposerVipGate.ts",
     "check:topics-replies-likes-client": "npx tsx scripts/checkTopicsRepliesLikesClient.ts",
     "check:topic-message-self-delete-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicMessageSelfDeleteClient.ts --project-root=.",
     "check:topic-message-edit-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicMessageEditClient.ts --project-root=.",

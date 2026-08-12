@@ -410,7 +410,7 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onVipDmChatStart?: (recipientProfileId: string) => Promise<
     | { ok: true; conversation: ChatConversationSnapshot }
-    | { ok: false; message: string }
+    | { ok: false; message: string; code?: 'blocked' | 'vip_required' | 'vip_counterpart_required' | 'self' | 'recipient_not_found' | 'conversation_not_found' | 'invalid_conversation_kind' }
   >
   onChatConversationsLoad?: (includeArchived?: boolean) => Promise<
     | { ok: true; conversations: ChatConversationSnapshot[] }
@@ -687,7 +687,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false }
   >
   onClaimTopicsLaunchGift?: () => Promise<
-    | { ok: true; isActive: boolean }
+    | { ok: true; isActive: boolean; activeUntil?: string | null }
     | { ok: false; alreadyClaimed: boolean }
   >
   onTournamentCreate?: (input: TournamentCreateInput) => Promise<
@@ -924,6 +924,7 @@ type InternalLobbyFlowState = {
   topicsVipSeePlansMessageVisible: boolean
   /** UI polish pass — кратък "ще бъде налично скоро" toast за create-topic/like/reply (все още неимплементирани), огледално на subadminActionToast моделa. */
   topicsInfoToast: { text: string } | null
+  topicsPersonalMessagePendingProfileId: string | null
 
   // ─── Create Topic popup (Custom Topic Creation) ─────────────────────────
   /** Mirror на tournamentCreatePopupOpen lifecycle-а. */
@@ -1391,6 +1392,7 @@ function createInitialState(): InternalLobbyFlowState {
     topicsVipClaimErrorText: null,
     topicsVipSeePlansMessageVisible: false,
     topicsInfoToast: null,
+    topicsPersonalMessagePendingProfileId: null,
     topicCreatePopupOpen: false,
     topicCreateBusy: false,
     topicCreateErrorText: null,
@@ -3292,6 +3294,7 @@ export function createLobbyFlowController(
       topicsVipClaimErrorText: state.topicsVipClaimErrorText,
       topicsVipSeePlansMessageVisible: state.topicsVipSeePlansMessageVisible,
       topicsInfoToast: state.topicsInfoToast,
+      topicsPersonalMessagePendingProfileId: state.topicsPersonalMessagePendingProfileId,
       topicCreatePopupOpen: state.topicCreatePopupOpen,
       topicCreateBusy: state.topicCreateBusy,
       topicCreateErrorText: state.topicCreateErrorText,
@@ -3713,6 +3716,9 @@ export function createLobbyFlowController(
       },
       onTopicMessageAuthorClick: (profileId, displayName) => {
         void openProtectedProfileById(profileId, displayName, 'topics')
+      },
+      onTopicMessagePersonalClick: (profileId) => {
+        void openTopicsPersonalMessageFromPost(profileId)
       },
       onTournamentHowItWorksOpen: () => {
         showTournamentHowItWorksPage()
@@ -5606,6 +5612,8 @@ export function createLobbyFlowController(
     state.currentScreen = 'topics'
     state.topicsMode = 'topics'
     state.topicsPersonalView = 'list'
+    clearTopicsPersonalTransientState()
+    state.topicsInfoToast = null
     state.profilePopupOpen = false
     state.profilePopupProfile = null
     state.profilePopupCanEdit = true
@@ -5688,6 +5696,8 @@ export function createLobbyFlowController(
   function openTopic(topicId: string): void {
     state.topicsMode = 'topics'
     state.topicsPersonalView = 'list'
+    clearTopicsPersonalTransientState()
+    state.topicsInfoToast = null
     if (state.activeTopicId === topicId) return
     // Стъпка 1 от gap-closing flow-а (Етап 2 корекция т.1): unsubscribe от
     // старата тема ПРЕДИ каквото и да е друго — иначе push-ове за вече
@@ -6076,6 +6086,13 @@ export function createLobbyFlowController(
     render()
   }
 
+  function clearTopicsPersonalTransientState(): void {
+    state.chatErrorText = null
+    state.chatLoading = false
+    state.chatMessagesLoading = false
+    state.topicsPersonalMessagePendingProfileId = null
+  }
+
   function closeTopicsVipPopup(): void {
     state.topicsVipPopupOpen = false
     state.topicsVipClaimErrorText = null
@@ -6212,6 +6229,10 @@ export function createLobbyFlowController(
 
     if (result.ok) {
       state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: true }
+      if (result.activeUntil !== undefined) {
+        state.ownVipActiveUntil = result.activeUntil
+        state.ownVipActiveUntilLoadedForProfileId = options.getAuthSession?.()?.profile.profileId ?? state.ownVipActiveUntilLoadedForProfileId
+      }
       state.topicsVipPopupOpen = false
       render()
       return
@@ -6325,6 +6346,11 @@ export function createLobbyFlowController(
 
   function handleTopicComposerNonVipTap(): void {
     openTopicsVipPopup()
+  }
+
+  function isCurrentViewerVipForPersonalComposer(): boolean {
+    if (state.topicsVipGate !== null) return state.topicsVipGate.isActive
+    return options.getAuthSession?.()?.profile.isVip === true
   }
 
   function submitTopicComposerMessage(topicId: string): void {
@@ -8593,48 +8619,103 @@ export function createLobbyFlowController(
     ) ?? null
   }
 
-  async function openTopicsPersonalMessageFromProfile(recipientProfileId: string): Promise<void> {
-    if (state.profilePopupContext !== 'topics') return
+  async function authorizeTopicsPersonalMessageTarget(recipientProfileId: string): Promise<boolean> {
+    if (!options.onProfileByIdLoad) return true
+
+    const result = await options.onProfileByIdLoad(recipientProfileId)
+    if (result.ok) return true
+
+    if (result.code === 'profile_blocked_by_viewer' || result.code === 'profile_blocked_viewer') {
+      state.profilePopupOpen = false
+      state.profilePopupProfile = null
+      state.profilePopupContext = 'other'
+      state.profileAccessBlockPopup = { profileId: recipientProfileId, code: result.code }
+      render()
+      return false
+    }
+
+    state.topicsInfoToast = { text: result.message || 'Профилът не беше зареден.' }
+    render()
+    return false
+  }
+
+  async function openTopicsPersonalMessageFromPost(recipientProfileId: string): Promise<void> {
     if (recipientProfileId.trim().length === 0) return
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession?.profile.profileId === recipientProfileId) return
+    if (state.topicsPersonalMessagePendingProfileId !== null) return
 
     state.chatErrorText = null
-    await loadChatConversations()
+    state.topicsInfoToast = null
+    state.topicsPersonalMessagePendingProfileId = recipientProfileId
+    render()
 
-    const existingConversation = findTopicsPersonalConversationByProfileId(recipientProfileId)
-    if (existingConversation !== null) {
+    try {
+      const authorized = await authorizeTopicsPersonalMessageTarget(recipientProfileId)
+      if (!authorized) return
+
+      await loadChatConversations()
+
+      const existingConversation = findTopicsPersonalConversationByProfileId(recipientProfileId)
+      if (existingConversation !== null) {
+        state.profilePopupOpen = false
+        state.profilePopupProfile = null
+        state.profilePopupContext = 'other'
+        syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+        await showTopicsPersonalChat(existingConversation.friendshipId)
+        return
+      }
+
+      if (state.topicsVipGate !== null && !state.topicsVipGate.isActive) {
+        openTopicsVipPopup()
+        return
+      }
+
+      if (!options.onVipDmChatStart) {
+        state.topicsInfoToast = { text: 'Личните съобщения временно не са налични.' }
+        render()
+        return
+      }
+
+      const result = await options.onVipDmChatStart(recipientProfileId)
+
+      if (!result.ok) {
+        if (result.code === 'vip_required') {
+          if (state.topicsVipGate) {
+            state.topicsVipGate = { ...state.topicsVipGate, isActive: false }
+          }
+          void refreshTopicsVipGateStatus()
+          openTopicsVipPopup()
+          return
+        }
+        if (result.code === 'blocked') {
+          const blockAuthorization = await options.onProfileByIdLoad?.(recipientProfileId)
+          if (blockAuthorization && !blockAuthorization.ok && (blockAuthorization.code === 'profile_blocked_by_viewer' || blockAuthorization.code === 'profile_blocked_viewer')) {
+            state.profileAccessBlockPopup = { profileId: recipientProfileId, code: blockAuthorization.code }
+            render()
+            return
+          }
+        }
+        state.topicsInfoToast = { text: result.message }
+        render()
+        return
+      }
+
+      mergeCanonicalChatConversation(result.conversation)
+      await loadChatConversations()
+      if (!state.chatConversations.some((conversation) => conversation.friendshipId === result.conversation.friendshipId)) {
+        mergeCanonicalChatConversation(result.conversation)
+      }
+
       state.profilePopupOpen = false
       state.profilePopupProfile = null
       state.profilePopupContext = 'other'
       syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
-      await showTopicsPersonalChat(existingConversation.friendshipId)
-      return
+      await showTopicsPersonalChat(result.conversation.friendshipId)
+    } finally {
+      state.topicsPersonalMessagePendingProfileId = null
+      render()
     }
-
-    if (!options.onVipDmChatStart) {
-      state.friendActionMessageProfileId = recipientProfileId
-      state.friendActionMessage = 'Личните съобщения временно не са налични.'
-      renderPopupOnly()
-      return
-    }
-
-    const result = await options.onVipDmChatStart(recipientProfileId)
-
-    if (!result.ok) {
-      state.friendActionMessageProfileId = recipientProfileId
-      state.friendActionMessage = result.message
-      renderPopupOnly()
-      return
-    }
-
-    mergeCanonicalChatConversation(result.conversation)
-    await loadChatConversations()
-    mergeCanonicalChatConversation(result.conversation)
-
-    state.profilePopupOpen = false
-    state.profilePopupProfile = null
-    state.profilePopupContext = 'other'
-    syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
-    await showTopicsPersonalChat(result.conversation.friendshipId)
   }
 
   async function submitGiftCoins(
@@ -8786,7 +8867,7 @@ export function createLobbyFlowController(
     if (state.currentScreen !== 'topics') return
     state.topicsMode = 'topics'
     state.topicsPersonalView = 'list'
-    state.chatErrorText = null
+    clearTopicsPersonalTransientState()
     render()
 
     if (state.activeTopicId !== null) {
@@ -9276,10 +9357,10 @@ export function createLobbyFlowController(
 
     const activeConversation = state.chatConversations.find((conversation) => conversation.friendshipId === friendshipId) ?? null
     if (activeConversation?.kind === 'vip_dm') {
-      const viewerIsVip = options.getAuthSession?.()?.profile.isVip === true
+      const viewerIsVip = isCurrentViewerVipForPersonalComposer()
       const disabledReason = !viewerIsVip
         ? 'За да изпращате лични съобщения тук, е необходим активен VIP.'
-        : activeConversation.friend.isVip !== true
+        : activeConversation.friend.isVip === false
           ? 'Този потребител в момента не е активен VIP.'
           : activeConversation.friend.isBlockedByMe === true
             ? 'Вие сте блокирали този потребител.'
@@ -10396,7 +10477,7 @@ export function createLobbyFlowController(
       onFriendRemoveClick: (friendshipId) => { void removeFriendRelationship(friendshipId) },
       onGiftCoinsClick: (friendshipId) => { openGiftModal(friendshipId) },
       onPikaSupportChatClick: (profileId) => { void startPikaSupportChatAndOpen(profileId) },
-      onTopicsPersonalMessageClick: (profileId) => { void openTopicsPersonalMessageFromProfile(profileId) },
+      onTopicsPersonalMessageClick: () => {},
       onLikeClick: (profileId) => { void likeProfile(profileId) },
       onGrantSubadminClick: (profileId) => {
         if (!profileId) return
@@ -10802,10 +10883,7 @@ export function createLobbyFlowController(
     const isOwnProfile = authSession !== null
       && popupProfile.profileId !== null
       && popupProfile.profileId === authSession.profile.profileId
-    const showTopicsPersonalMessageButton =
-      state.profilePopupContext === 'topics' &&
-      !isOwnProfile &&
-      popupProfile.profileId !== null
+    const showTopicsPersonalMessageButton = false
     syncProfilePopup(
       {
         isOpen: state.profilePopupOpen,

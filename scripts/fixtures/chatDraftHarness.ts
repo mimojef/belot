@@ -43,6 +43,7 @@ function makeConversation(
   const last = msgs[msgs.length - 1] ?? null
   return {
     friendshipId,
+    kind: 'friend',
     friend,
     lastMessage: last,
     updatedAt: new Date().toISOString(),

@@ -104,7 +104,7 @@ async function setVipGate(page: Page, isActive: boolean, hasClaimedLaunchGift: b
     [isActive, hasClaimedLaunchGift],
   )
 }
-async function setClaimResult(page: Page, result: { ok: true; isActive: boolean } | { ok: false; alreadyClaimed: boolean }): Promise<void> {
+async function setClaimResult(page: Page, result: { ok: true; isActive: boolean; activeUntil?: string | null } | { ok: false; alreadyClaimed: boolean }): Promise<void> {
   await page.evaluate((r) => (window as any).__topicsComposerVipGateHarness.setClaimResult(r), result)
 }
 async function setNextMessagesResult(page: Page, messages: unknown[], hasMore = false): Promise<void> {
@@ -113,10 +113,25 @@ async function setNextMessagesResult(page: Page, messages: unknown[], hasMore = 
     [messages, hasMore] as [unknown[], boolean],
   )
 }
+async function setChatConversations(page: Page, conversations: unknown[]): Promise<void> {
+  await page.evaluate((items) => (window as any).__topicsComposerVipGateHarness.setChatConversations(items), conversations)
+}
+async function setChatConversationsAfterVipDmStart(page: Page, conversations: unknown[] | null): Promise<void> {
+  await page.evaluate((items) => (window as any).__topicsComposerVipGateHarness.setChatConversationsAfterVipDmStart(items), conversations)
+}
+async function setVipDmStartResult(page: Page, result: unknown): Promise<void> {
+  await page.evaluate((r) => (window as any).__topicsComposerVipGateHarness.setVipDmStartResult(r), result)
+}
 async function makeMessage(page: Page, topicId: string, seq: number, body: string, senderProfileId = 'someone', senderDisplayName = 'Someone'): Promise<any> {
   return page.evaluate(
     ([t, s, b, p, d]) => (window as any).__topicsComposerVipGateHarness.makeMessage(t, s, b, p, d),
     [topicId, seq, body, senderProfileId, senderDisplayName] as [string, number, string, string, string],
+  )
+}
+async function makeConversation(page: Page, friendshipId: string, kind: 'friend' | 'vip_dm', friendProfileId: string, friendDisplayName = 'Friend', friendIsVip: boolean | null | undefined = true): Promise<unknown> {
+  return page.evaluate(
+    ([id, k, profileId, name, isVip]) => (window as any).__topicsComposerVipGateHarness.makeConversation(id, k, profileId, name, isVip),
+    [friendshipId, kind, friendProfileId, friendDisplayName, friendIsVip] as [string, 'friend' | 'vip_dm', string, string, boolean | null | undefined],
   )
 }
 async function getSubscribeLog(page: Page): Promise<Array<{ topicId: string; afterSeq: number }>> {
@@ -127,6 +142,12 @@ async function getUnsubscribeLog(page: Page): Promise<string[]> {
 }
 async function getSendLog(page: Page): Promise<Array<{ topicId: string; body: string; requestId: string }>> {
   return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getSendLog())
+}
+async function getVipDmStartLog(page: Page): Promise<string[]> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getVipDmStartLog())
+}
+async function clearVipDmStartLog(page: Page): Promise<void> {
+  await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.clearVipDmStartLog())
 }
 async function simulateServerMessage(page: Page, message: Record<string, unknown>): Promise<void> {
   await page.evaluate((m) => (window as any).__topicsComposerVipGateHarness.simulateServerMessage(m), message)
@@ -166,6 +187,24 @@ async function clickVipPopupSeePlans(page: Page): Promise<void> {
 }
 async function clickVipPopupClose(page: Page): Promise<void> {
   await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.clickVipPopupClose())
+}
+async function clickDirectPersonalButton(page: Page, profileId: string): Promise<void> {
+  await page.evaluate((id) => (window as any).__topicsComposerVipGateHarness.clickDirectPersonalButton(id), profileId)
+}
+async function isTopicsStreamVisible(page: Page): Promise<boolean> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.isTopicsStreamVisible())
+}
+async function isTopicsPersonalDetailVisible(page: Page): Promise<boolean> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.isTopicsPersonalDetailVisible())
+}
+async function getChatComposerDisabledReason(page: Page): Promise<string | null> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getChatComposerDisabledReason())
+}
+async function isChatComposerDisabled(page: Page): Promise<boolean> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.isChatComposerDisabled())
+}
+async function getTopicsPersonalPanelView(page: Page): Promise<string | null> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getTopicsPersonalPanelView())
 }
 async function getVisibleMessageBodies(page: Page): Promise<string[]> {
   return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getVisibleMessageBodies())
@@ -465,6 +504,257 @@ try {
 
   await check('[20] Няма JS грешки в конзолата по време на сценария', () => {
     assert(consoleErrors.length === 0, `Конзолни грешки: ${consoleErrors.join(' | ')}`)
+  })
+  await check('[20a] Direct Personal known non-VIP opens VIP popup with zero start calls', async () => {
+    await clickVipPopupClose(page)
+    const msg = await makeMessage(page, 'topic-general', 51, 'Mimojef post', 'mimojef-profile', 'Mimojef')
+    await setChatConversations(page, [])
+    await setVipDmStartResult(page, {
+      ok: false,
+      code: 'vip_required',
+      message: 'Личните съобщения към потребители извън приятелите са достъпни само за VIP.',
+    })
+    await setVipGate(page, false, true)
+    await openTopicsAndWaitComposer(page, false, true, [msg])
+    await clearVipDmStartLog(page)
+
+    await clickDirectPersonalButton(page, 'mimojef-profile')
+    await page.waitForTimeout(80)
+
+    assertEqual((await getVipDmStartLog(page)).length, 0, 'known non-VIP Direct Personal must not call vip-dm/start')
+    assertEqual(await isVipPopupOpen(page), true, 'known non-VIP Direct Personal must open canonical VIP popup')
+    assertEqual(await isTopicsStreamVisible(page), true, 'Topics stream must remain visible')
+    assertEqual(await isTopicsPersonalDetailVisible(page), false, 'Personal detail must not open')
+    assertEqual(await getChatComposerDisabledReason(page), null, 'no persistent Personal composer restriction should remain')
+
+    await clickVipPopupClose(page)
+    await page.waitForTimeout(30)
+    assertEqual(await isVipPopupOpen(page), false, 'VIP popup closes cleanly')
+    assertEqual(await isTopicsStreamVisible(page), true, 'after close user stays in the same Topics stream')
+    assertEqual(await getComposerErrorText(page), null, 'no stale inline vip_required message should remain')
+  })
+
+  await check('[20a2] Existing friend opens for known non-VIP with zero start calls', async () => {
+    const msg = await makeMessage(page, 'topic-general', 54, 'Friend post', 'friend-existing', 'Friend')
+    const existing = await makeConversation(page, 'friend-existing-id', 'friend', 'friend-existing', 'Friend')
+    await setChatConversations(page, [existing])
+    await setVipGate(page, false, true)
+    await openTopicsAndWaitComposer(page, false, true, [msg])
+    await clearVipDmStartLog(page)
+
+    await clickDirectPersonalButton(page, 'friend-existing')
+    await page.waitForTimeout(90)
+
+    assertEqual((await getVipDmStartLog(page)).length, 0, 'existing friend must not call vip-dm/start')
+    assertEqual(await isVipPopupOpen(page), false, 'existing friend must not open VIP popup')
+    assertEqual(await isTopicsPersonalDetailVisible(page), true, 'existing friend conversation must open')
+    assertEqual(await getTopicsPersonalPanelView(page), 'conversation', 'existing friend must select conversation view')
+  })
+
+  await check('[20b] Direct Personal vip_counterpart_required stays in Topics with transient target UX', async () => {
+    const msg = await makeMessage(page, 'topic-general', 52, 'Target not VIP post', 'target-not-vip', 'Target')
+    await setChatConversations(page, [])
+    await setVipDmStartResult(page, {
+      ok: false,
+      code: 'vip_counterpart_required',
+      message: 'Този потребител в момента не е активен VIP.',
+    })
+    await openTopicsAndWaitComposer(page, true, true, [msg])
+    await clearVipDmStartLog(page)
+
+    await clickDirectPersonalButton(page, 'target-not-vip')
+    await page.waitForTimeout(60)
+
+    assertEqual((await getVipDmStartLog(page)).length, 1, 'counterpart failure must make exactly one start attempt')
+    assertEqual(await isVipPopupOpen(page), false, 'counterpart-not-VIP must not open viewer VIP popup')
+    assertEqual(await isTopicsStreamVisible(page), true, 'Topics stream must remain visible')
+    assertEqual(await isTopicsPersonalDetailVisible(page), false, 'Personal detail must not open')
+    const body = (await page.textContent('body')) ?? ''
+    assert(body.includes('Този потребител в момента не е активен VIP.'), 'target-not-VIP transient UX must be visible')
+  })
+
+  await check('[20c] Existing expired vip_dm opens history read-only, unlike new vip_required', async () => {
+    const msg = await makeMessage(page, 'topic-general', 53, 'Existing VIP DM post', 'existing-vip', 'Existing')
+    const existing = await makeConversation(page, 'vip-existing', 'vip_dm', 'existing-vip', 'Existing')
+    await setChatConversations(page, [existing])
+    await setVipDmStartResult(page, {
+      ok: false,
+      code: 'vip_required',
+      message: 'Личните съобщения към потребители извън приятелите са достъпни само за VIP.',
+    })
+    await openTopicsAndWaitComposer(page, false, true, [msg])
+    await clearVipDmStartLog(page)
+
+    await clickDirectPersonalButton(page, 'existing-vip')
+    await page.waitForTimeout(90)
+
+    assertEqual((await getVipDmStartLog(page)).length, 0, 'existing vip_dm must not call new start')
+    assertEqual(await isVipPopupOpen(page), false, 'existing vip_dm history must not open viewer VIP popup')
+    assertEqual(await isTopicsPersonalDetailVisible(page), true, 'existing vip_dm history must open')
+    assert((await getChatComposerDisabledReason(page)) !== null, 'existing expired vip_dm composer must stay read-only')
+  })
+
+  await check('[20d] Direct Personal client-active path calls start exactly once', async () => {
+    const msg = await makeMessage(page, 'topic-general', 55, 'Active viewer new DM post', 'new-target-active', 'Active Target')
+    await setChatConversations(page, [])
+    await setVipDmStartResult(page, {
+      ok: false,
+      code: 'vip_counterpart_required',
+      message: 'Този потребител в момента не е активен VIP.',
+    })
+    await setVipGate(page, true, true)
+    await openTopicsAndWaitComposer(page, true, true, [msg])
+    await clearVipDmStartLog(page)
+
+    await clickDirectPersonalButton(page, 'new-target-active')
+    await page.waitForTimeout(60)
+
+    assertEqual((await getVipDmStartLog(page)).length, 1, 'client-active new DM must call server exactly once')
+    assertEqual(await isTopicsPersonalDetailVisible(page), false, 'failed server-authoritative start must not open Personal detail')
+  })
+
+  await check('[20e] Direct Personal stale client-active vip_required opens VIP popup without Personal state', async () => {
+    const msg = await makeMessage(page, 'topic-general', 56, 'Stale active viewer post', 'stale-active-target', 'Stale Target')
+    await setChatConversations(page, [])
+    await setVipDmStartResult(page, {
+      ok: false,
+      code: 'vip_required',
+      message: 'Личните съобщения към потребители извън приятелите са достъпни само за VIP.',
+    })
+    await setVipGate(page, true, true)
+    await openTopicsAndWaitComposer(page, true, true, [msg])
+    await clearVipDmStartLog(page)
+
+    await clickDirectPersonalButton(page, 'stale-active-target')
+    await page.waitForTimeout(80)
+
+    assertEqual((await getVipDmStartLog(page)).length, 1, 'stale client-active path must still call server exactly once')
+    assertEqual(await isVipPopupOpen(page), true, 'server vip_required must open canonical VIP popup')
+    assertEqual(await isTopicsStreamVisible(page), true, 'Topics stream must remain behind VIP popup')
+    assertEqual(await isTopicsPersonalDetailVisible(page), false, 'server vip_required must not open Personal detail')
+    await clickVipPopupClose(page)
+  })
+
+  await check('[20f] Launch gift claim reconciles VIP state before opening new Mimojef vip_dm', async () => {
+    const msg = await makeMessage(page, 'topic-general', 57, 'Mimojef after claim post', 'mimojef-after-claim', 'Mimojef')
+    const conversation = await makeConversation(page, 'vip-after-claim', 'vip_dm', 'mimojef-after-claim', 'Mimojef', true)
+    await setChatConversations(page, [])
+    await setVipDmStartResult(page, {
+      ok: true,
+      conversation,
+    })
+    await setClaimResult(page, {
+      ok: true,
+      isActive: true,
+      activeUntil: '2026-09-11T10:00:00.000Z',
+    })
+    await setVipGate(page, false, false)
+    await openTopicsAndWaitComposer(page, false, false, [msg])
+    await clearVipDmStartLog(page)
+
+    await clickDirectPersonalButton(page, 'mimojef-after-claim')
+    await page.waitForTimeout(60)
+    assertEqual(await isVipPopupOpen(page), true, 'initial non-VIP Direct Personal must open VIP popup')
+    assertEqual((await getVipDmStartLog(page)).length, 0, 'initial non-VIP Direct Personal must not start')
+
+    await clickVipPopupClaim(page)
+    await page.waitForTimeout(80)
+    assertEqual(await isVipPopupOpen(page), false, 'successful claim closes VIP popup')
+    await clickDirectPersonalButton(page, 'mimojef-after-claim')
+    await page.waitForTimeout(140)
+
+    assertEqual((await getVipDmStartLog(page)).length, 1, 'after claim Direct Personal must pass early gate and call start once')
+    assertEqual(await isTopicsPersonalDetailVisible(page), true, 'after claim vip_dm conversation must open')
+    assertEqual(await getTopicsPersonalPanelView(page), 'conversation', 'after claim must select conversation detail')
+    assertEqual(await getChatComposerDisabledReason(page), null, 'viewer-side read-only VIP reason must be absent after claim')
+    assertEqual(await isChatComposerDisabled(page), false, 'after claim Personal composer must be enabled')
+  })
+
+  await check('[20g] Open vip_dm composer reevaluates after launch gift claim in same session', async () => {
+    const msg = await makeMessage(page, 'topic-general', 58, 'Existing open VIP DM claim post', 'open-vip-claim', 'Open VIP')
+    const existing = await makeConversation(page, 'vip-open-claim', 'vip_dm', 'open-vip-claim', 'Open VIP', true)
+    await setChatConversations(page, [existing])
+    await setClaimResult(page, {
+      ok: true,
+      isActive: true,
+      activeUntil: '2026-09-11T11:00:00.000Z',
+    })
+    await setVipGate(page, false, false)
+    await openTopicsAndWaitComposer(page, false, false, [msg])
+
+    await clickComposerTextarea(page)
+    await page.waitForTimeout(40)
+    assertEqual(await isVipPopupOpen(page), true, 'VIP popup must be open before claim')
+    await clickDirectPersonalButton(page, 'open-vip-claim')
+    await page.waitForTimeout(100)
+
+    assertEqual(await isTopicsPersonalDetailVisible(page), true, 'existing vip_dm detail must open while viewer inactive')
+    assertEqual(await isChatComposerDisabled(page), true, 'existing vip_dm composer must be disabled while viewer inactive')
+    assert((await getChatComposerDisabledReason(page)) !== null, 'viewer-side disabled reason must be visible while inactive')
+
+    await clickVipPopupClaim(page)
+    await page.waitForTimeout(100)
+
+    assertEqual(await isTopicsPersonalDetailVisible(page), true, 'same existing vip_dm detail must remain open after claim')
+    assertEqual(await getChatComposerDisabledReason(page), null, 'viewer-side disabled reason must disappear after claim')
+    assertEqual(await isChatComposerDisabled(page), false, 'same existing vip_dm composer must become enabled after claim')
+  })
+
+  await check('[20h] Fresh canonical conversation overrides stale start response counterpart VIP false', async () => {
+    const msg = await makeMessage(page, 'topic-general', 59, 'Fresh true overrides stale false', 'fresh-true-target', 'Fresh True')
+    const stale = await makeConversation(page, 'vip-fresh-true', 'vip_dm', 'fresh-true-target', 'Fresh True', false)
+    const fresh = await makeConversation(page, 'vip-fresh-true', 'vip_dm', 'fresh-true-target', 'Fresh True', true)
+    await setChatConversations(page, [])
+    await setChatConversationsAfterVipDmStart(page, [fresh])
+    await setVipDmStartResult(page, {
+      ok: true,
+      conversation: stale,
+    })
+    await setVipGate(page, true, true)
+    await openTopicsAndWaitComposer(page, true, true, [msg])
+    await clearVipDmStartLog(page)
+
+    await clickDirectPersonalButton(page, 'fresh-true-target')
+    await page.waitForTimeout(140)
+
+    assertEqual((await getVipDmStartLog(page)).length, 1, 'new start must be called once')
+    assertEqual(await isTopicsPersonalDetailVisible(page), true, 'conversation detail must open')
+    assertEqual(await getChatComposerDisabledReason(page), null, 'stale false start response must not override fresh true DTO')
+    assertEqual(await isChatComposerDisabled(page), false, 'composer must be enabled from fresh canonical true DTO')
+  })
+
+  await check('[20i] Unknown counterpart VIP does not become inactive', async () => {
+    const msg = await makeMessage(page, 'topic-general', 60, 'Unknown counterpart VIP', 'unknown-vip-target', 'Unknown VIP')
+    const unknown = await makeConversation(page, 'vip-unknown-counterpart', 'vip_dm', 'unknown-vip-target', 'Unknown VIP', undefined)
+    await setChatConversations(page, [unknown])
+    await setVipGate(page, true, true)
+    await openTopicsAndWaitComposer(page, true, true, [msg])
+
+    await clickDirectPersonalButton(page, 'unknown-vip-target')
+    await page.waitForTimeout(100)
+
+    assertEqual(await isTopicsPersonalDetailVisible(page), true, 'unknown counterpart conversation must open')
+    assertEqual(await getChatComposerDisabledReason(page), null, 'unknown/missing counterpart VIP must not render inactive reason')
+    assertEqual(await isChatComposerDisabled(page), false, 'unknown/missing counterpart VIP must not disable composer')
+  })
+
+  await check('[20j] Canonical counterpart VIP false still disables composer', async () => {
+    const msg = await makeMessage(page, 'topic-general', 61, 'Canonical false counterpart VIP', 'false-vip-target', 'False VIP')
+    const inactive = await makeConversation(page, 'vip-false-counterpart', 'vip_dm', 'false-vip-target', 'False VIP', false)
+    await setChatConversations(page, [inactive])
+    await setVipGate(page, true, true)
+    await openTopicsAndWaitComposer(page, true, true, [msg])
+
+    await clickDirectPersonalButton(page, 'false-vip-target')
+    await page.waitForTimeout(100)
+
+    assertEqual(await isTopicsPersonalDetailVisible(page), true, 'canonical false counterpart conversation must open')
+    assert((await getChatComposerDisabledReason(page)) !== null, 'canonical false counterpart must render disabled reason')
+    assertEqual(await isChatComposerDisabled(page), true, 'canonical false counterpart must disable composer')
+  })
+
+  await check('[20k] No JS errors after Direct Personal VIP gate scenarios', () => {
+    assert(consoleErrors.length === 0, `Console errors: ${consoleErrors.join(' | ')}`)
   })
 } finally {
   if (browser) await browser.close()

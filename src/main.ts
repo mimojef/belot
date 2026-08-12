@@ -2146,7 +2146,7 @@ async function startPikaSupportChat(recipientProfileId: string): Promise<
 
 async function startVipDmChat(recipientProfileId: string): Promise<
   | { ok: true; conversation: ChatConversationSnapshot }
-  | { ok: false; message: string }
+  | { ok: false; message: string; code?: ChatMessagesResponse['code'] }
 > {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/chat/vip-dm/start`, {
@@ -2163,6 +2163,7 @@ async function startVipDmChat(recipientProfileId: string): Promise<
       return {
         ok: false,
         message: formatPersonalChatError(data),
+        code: data.code,
       }
     }
 
@@ -3993,7 +3994,7 @@ async function loadTopicsVipGateStatus(): Promise<
 }
 
 async function claimTopicsLaunchGiftRequest(): Promise<
-  | { ok: true; isActive: boolean }
+  | { ok: true; isActive: boolean; activeUntil: string | null }
   | { ok: false; alreadyClaimed: boolean }
 > {
   try {
@@ -4005,12 +4006,24 @@ async function claimTopicsLaunchGiftRequest(): Promise<
     const data = (await response.json().catch(() => ({}))) as {
       ok?: boolean
       code?: string
-      status?: { isActive?: boolean }
+      status?: { isActive?: boolean; activeUntil?: string | null }
     }
     if (!response.ok || !data.ok) {
       return { ok: false, alreadyClaimed: data.code === 'already_claimed' }
     }
-    return { ok: true, isActive: data.status?.isActive ?? true }
+    const isActive = data.status?.isActive ?? true
+    const activeUntil = data.status?.activeUntil ?? null
+    if (currentAuthSession !== null) {
+      currentAuthSession = {
+        ...currentAuthSession,
+        profile: {
+          ...currentAuthSession.profile,
+          isVip: isActive,
+        },
+      }
+      saveSessionCache(currentAuthSession)
+    }
+    return { ok: true, isActive, activeUntil }
   } catch {
     return { ok: false, alreadyClaimed: false }
   }
