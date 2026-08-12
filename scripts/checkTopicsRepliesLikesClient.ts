@@ -262,7 +262,7 @@ try {
     await call(
       page,
       (h: H, reply: unknown) => h.simulateServerMessage(reply as Record<string, unknown>),
-      { type: 'topic_reply', requestId, seq: 999, messageId: 'reply-success-1', topicId: 'topic-general', parentMessageId: rootA, senderProfileId: 'me', senderDisplayName: 'Me', senderAvatarUrl: null, senderRole: 'player', body: 'success draft', createdAt: new Date().toISOString(), likeCount: 0, viewerHasLiked: false },
+      { type: 'topic_reply', requestId, seq: 999, messageId: 'reply-success-1', topicId: 'topic-general', parentMessageId: rootA, senderProfileId: 'me', senderDisplayName: 'Me', senderAvatarUrl: null, senderRole: 'player', body: 'success draft', createdAt: new Date().toISOString(), editedAt: null, likeCount: 0, viewerHasLiked: false, attachment: null },
     )
     await page.waitForTimeout(100)
 
@@ -353,7 +353,7 @@ try {
     await call(
       page,
       (h: H, msg: unknown) => h.simulateServerMessage(msg as Record<string, unknown>),
-      { type: 'topic_reply', seq: 500, messageId: 'reply-push-expanded', topicId: 'topic-general', parentMessageId: rootA, senderProfileId: 'author-z', senderDisplayName: 'Author Z', senderAvatarUrl: null, senderRole: 'player', body: 'live reply', createdAt: new Date().toISOString(), likeCount: 0, viewerHasLiked: false },
+      { type: 'topic_reply', seq: 500, messageId: 'reply-push-expanded', topicId: 'topic-general', parentMessageId: rootA, senderProfileId: 'author-z', senderDisplayName: 'Author Z', senderAvatarUrl: null, senderRole: 'player', body: 'live reply', createdAt: new Date().toISOString(), editedAt: null, likeCount: 0, viewerHasLiked: false, attachment: null },
     )
     await page.waitForTimeout(100)
 
@@ -370,7 +370,7 @@ try {
     await call(
       page,
       (h: H, msg: unknown) => h.simulateServerMessage(msg as Record<string, unknown>),
-      { type: 'topic_reply', seq: 501, messageId: 'reply-push-collapsed', topicId: 'topic-general', parentMessageId: rootA, senderProfileId: 'author-z', senderDisplayName: 'Author Z', senderAvatarUrl: null, senderRole: 'player', body: 'collapsed live reply', createdAt: new Date().toISOString(), likeCount: 0, viewerHasLiked: false },
+      { type: 'topic_reply', seq: 501, messageId: 'reply-push-collapsed', topicId: 'topic-general', parentMessageId: rootA, senderProfileId: 'author-z', senderDisplayName: 'Author Z', senderAvatarUrl: null, senderRole: 'player', body: 'collapsed live reply', createdAt: new Date().toISOString(), editedAt: null, likeCount: 0, viewerHasLiked: false, attachment: null },
     )
     await page.waitForTimeout(100)
 

@@ -95,6 +95,8 @@
     "check:topic-message-moderation-auth-realtime": "tsx scripts/checkTopicMessageModerationAuthRealtime.ts",
     "check:topic-message-self-delete": "tsx scripts/checkTopicMessageSelfDelete.ts",
     "check:topic-message-self-delete-auth-realtime": "tsx scripts/checkTopicMessageSelfDeleteAuthRealtime.ts",
+    "check:topic-message-edit": "tsx scripts/checkTopicMessageEdit.ts",
+    "check:topic-message-edit-auth-realtime": "tsx scripts/checkTopicMessageEditAuthRealtime.ts",
     "check:gift-limit-frontend": "tsx scripts/checkGiftLimitFrontend.ts",
     "check:admin-profile-moderation": "tsx scripts/checkAdminProfileModeration.ts",
     "check:profile-name-release-and-admin-edit-target": "tsx scripts/checkProfileNameReleaseAndAdminEditTarget.ts",

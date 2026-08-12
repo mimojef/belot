@@ -3745,6 +3745,45 @@ async function deleteTopicMessage(
   }
 }
 
+async function editTopicMessage(
+  topicId: string,
+  messageId: string,
+  body: string,
+): Promise<
+  | { ok: true; body: string; editedAt: string | null; changed: boolean; parentMessageId: string | null }
+  | { ok: false; code?: string; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/messages/${encodeURIComponent(messageId)}`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    })
+    const data = (await response.json().catch(() => ({}))) as {
+      ok?: boolean
+      code?: string
+      message?: string
+      body?: string
+      editedAt?: string | null
+      changed?: boolean
+      parentMessageId?: string | null
+    }
+    if (!response.ok || !data.ok || typeof data.body !== 'string') {
+      return { ok: false, code: data.code, message: data.message ?? 'Грешка при редактиране на съобщението.' }
+    }
+    return {
+      ok: true,
+      body: data.body,
+      editedAt: data.editedAt ?? null,
+      changed: Boolean(data.changed),
+      parentMessageId: data.parentMessageId ?? null,
+    }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function reportTopic(
   topicId: string,
   reason: string,
@@ -4549,6 +4588,7 @@ lobby = createLobbyFlowController({
   onTopicUnmuteProfile: (topicId, profileId) => unmuteProfileInTopic(topicId, profileId),
   onTopicDelete: (topicId, reason) => deleteTopic(topicId, reason),
   onTopicMessageDelete: (topicId, messageId) => deleteTopicMessage(topicId, messageId),
+  onTopicMessageEdit: (topicId, messageId, body) => editTopicMessage(topicId, messageId, body),
   onTopicReport: (topicId, reason) => reportTopic(topicId, reason),
   onTopicReportsLoad: (status) => loadTopicReports(status),
   onTopicReportReview: (reportId, status) => reviewTopicReport(reportId, status),

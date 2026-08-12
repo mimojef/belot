@@ -654,6 +654,10 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true }
     | { ok: false; message: string }
   >
+  onTopicMessageEdit?: (topicId: string, messageId: string, body: string) => Promise<
+    | { ok: true; body: string; editedAt: string | null; changed: boolean; parentMessageId: string | null }
+    | { ok: false; code?: string; message: string }
+  >
   onTopicReport?: (topicId: string, reason: string) => Promise<
     | { ok: true }
     | { ok: false; code?: string; message: string }
@@ -941,6 +945,9 @@ type InternalLobbyFlowState = {
   topicMessageDeleteConfirm: { topicId: string; messageId: string; isRoot: boolean; isModeratorAction: boolean } | null
   topicMessageDeleteBusy: boolean
   topicMessageDeleteErrorText: string | null
+  topicMessageEdit: { topicId: string; messageId: string; draft: string } | null
+  topicMessageEditBusy: boolean
+  topicMessageEditErrorText: string | null
   /** Report popup — обикновен потребител докладва тема. */
   topicReportPopupOpen: boolean
   topicReportReason: string
@@ -1382,6 +1389,9 @@ function createInitialState(): InternalLobbyFlowState {
     topicMessageDeleteConfirm: null,
     topicMessageDeleteBusy: false,
     topicMessageDeleteErrorText: null,
+    topicMessageEdit: null,
+    topicMessageEditBusy: false,
+    topicMessageEditErrorText: null,
     topicReportPopupOpen: false,
     topicReportReason: '',
     topicReportBusy: false,
@@ -3272,6 +3282,9 @@ export function createLobbyFlowController(
       topicMessageDeleteConfirm: state.topicMessageDeleteConfirm,
       topicMessageDeleteBusy: state.topicMessageDeleteBusy,
       topicMessageDeleteErrorText: state.topicMessageDeleteErrorText,
+      topicMessageEdit: state.topicMessageEdit,
+      topicMessageEditBusy: state.topicMessageEditBusy,
+      topicMessageEditErrorText: state.topicMessageEditErrorText,
       topicReportPopupOpen: state.topicReportPopupOpen,
       topicReportReason: state.topicReportReason,
       topicReportBusy: state.topicReportBusy,
@@ -3629,6 +3642,18 @@ export function createLobbyFlowController(
       },
       onTopicMessageDeleteConfirmSubmit: () => {
         void confirmTopicMessageDelete()
+      },
+      onTopicMessageEditClick: (topicId, messageId) => {
+        openTopicMessageEditor(topicId, messageId)
+      },
+      onTopicMessageEditInput: (messageId, value) => {
+        updateTopicMessageEditDraft(messageId, value)
+      },
+      onTopicMessageEditCancel: (messageId) => {
+        closeTopicMessageEditor(messageId)
+      },
+      onTopicMessageEditSubmit: (messageId) => {
+        void submitTopicMessageEdit(messageId)
       },
       onTopicReportClick: () => {
         openTopicReportPopup()
@@ -5294,6 +5319,86 @@ export function createLobbyFlowController(
     // съобщението/thread-а за ВСИЧКИ subscribers (вкл. самия actor) — виж
     // handleServerMessage. Не дублираме local state mutation тук (same-instance
     // broadcast стига и до самия originator, mirror на confirmTopicDelete).
+  }
+
+  function findLoadedTopicMessage(messageId: string): TopicMessageSnapshot | TopicReplySnapshot | null {
+    const rootMessage = state.topicMessages?.find((m) => m.messageId === messageId) ?? null
+    if (rootMessage) return rootMessage
+
+    for (const replies of Object.values(state.topicRepliesByRootId)) {
+      const reply = replies?.find((r) => r.messageId === messageId) ?? null
+      if (reply) return reply
+    }
+    return null
+  }
+
+  function applyTopicMessageEdit(messageId: string, parentMessageId: string | null, body: string, editedAt: string): boolean {
+    let changed = false
+    if (parentMessageId === null) {
+      if (state.topicMessages) {
+        state.topicMessages = state.topicMessages.map((message) => {
+          if (message.messageId !== messageId) return message
+          changed = true
+          return { ...message, body, editedAt }
+        })
+      }
+      return changed
+    }
+
+    const replies = state.topicRepliesByRootId[parentMessageId]
+    if (!replies) return false
+    state.topicRepliesByRootId[parentMessageId] = replies.map((reply) => {
+      if (reply.messageId !== messageId) return reply
+      changed = true
+      return { ...reply, body, editedAt }
+    })
+    return changed
+  }
+
+  function openTopicMessageEditor(topicId: string, messageId: string): void {
+    if (state.topicMessageEditBusy) return
+    const message = findLoadedTopicMessage(messageId)
+    if (message === null) return
+    state.topicMessageEdit = { topicId, messageId, draft: message.body }
+    state.topicMessageEditErrorText = null
+    render()
+  }
+
+  function updateTopicMessageEditDraft(messageId: string, value: string): void {
+    if (state.topicMessageEdit?.messageId !== messageId) return
+    state.topicMessageEdit = { ...state.topicMessageEdit, draft: value }
+  }
+
+  function closeTopicMessageEditor(messageId: string): void {
+    if (state.topicMessageEditBusy || state.topicMessageEdit?.messageId !== messageId) return
+    state.topicMessageEdit = null
+    state.topicMessageEditErrorText = null
+    render()
+  }
+
+  async function submitTopicMessageEdit(messageId: string): Promise<void> {
+    const edit = state.topicMessageEdit
+    if (edit === null || edit.messageId !== messageId || state.topicMessageEditBusy) return
+
+    state.topicMessageEditBusy = true
+    state.topicMessageEditErrorText = null
+    render()
+
+    const result = await options.onTopicMessageEdit?.(edit.topicId, edit.messageId, edit.draft)
+    state.topicMessageEditBusy = false
+
+    if (!result || !result.ok) {
+      state.topicMessageEditErrorText = result?.message ?? 'Грешка при редактиране на съобщението.'
+      render()
+      return
+    }
+
+    if (result.editedAt !== null) {
+      applyTopicMessageEdit(edit.messageId, result.parentMessageId, result.body, result.editedAt)
+    }
+    state.topicMessageEdit = null
+    state.topicMessageEditErrorText = null
+    render()
   }
 
   function openTopicReportPopup(): void {
@@ -11160,6 +11265,16 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'topic_message_edited') {
+      if (message.topicId === state.activeTopicId) {
+        const changed = applyTopicMessageEdit(message.messageId, message.parentMessageId, message.body, message.editedAt)
+        if (changed) {
+          render()
+        }
+      }
+      return true
+    }
+
     if (message.type === 'topic_message_deleted') {
       // Public broadcast при moderator delete на ОТДЕЛНО root съобщение или
       // reply (individual-message moderation, различно от topic_deleted
@@ -11183,6 +11298,11 @@ export function createLobbyFlowController(
         if (state.topicReplyComposerOpenRootId === message.messageId) {
           state.topicReplyComposerOpenRootId = null
         }
+        if (state.topicMessageEdit !== null && findLoadedTopicMessage(state.topicMessageEdit.messageId) === null) {
+          state.topicMessageEdit = null
+          state.topicMessageEditErrorText = null
+          state.topicMessageEditBusy = false
+        }
       } else {
         // REPLY target — маха само него от родителския replies списък. Root
         // и sibling replies остават непокътнати; replyCount на root-а се
@@ -11192,6 +11312,11 @@ export function createLobbyFlowController(
         const siblingReplies = state.topicRepliesByRootId[message.parentMessageId]
         if (siblingReplies) {
           state.topicRepliesByRootId[message.parentMessageId] = siblingReplies.filter((r) => r.messageId !== message.messageId)
+        }
+        if (state.topicMessageEdit?.messageId === message.messageId) {
+          state.topicMessageEdit = null
+          state.topicMessageEditErrorText = null
+          state.topicMessageEditBusy = false
         }
       }
       render()

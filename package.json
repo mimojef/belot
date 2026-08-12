@@ -20,6 +20,7 @@
     "check:topics-composer-vip-gate": "npx tsx scripts/checkTopicsComposerVipGate.ts",
     "check:topics-replies-likes-client": "npx tsx scripts/checkTopicsRepliesLikesClient.ts",
     "check:topic-message-self-delete-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicMessageSelfDeleteClient.ts --project-root=.",
+    "check:topic-message-edit-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicMessageEditClient.ts --project-root=.",
     "check:profile-popup-mobile-responsive": "npx tsx scripts/checkProfilePopupMobileResponsive.ts",
     "check:support-chat-typing-stability": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSupportChatTypingStability.ts",
     "check:all-chat-typing-stability": "node server/node_modules/tsx/dist/cli.mjs scripts/checkAllChatTypingStability.ts",

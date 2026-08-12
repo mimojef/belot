@@ -1559,6 +1559,7 @@ export type TopicMessageSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   body: string
   createdAt: string
+  editedAt: string | null
   /** Етап 3 — batch-computed, виж server-side getMessageAggregatesByIds. */
   likeCount: number
   replyCount: number
@@ -1583,6 +1584,7 @@ export type TopicReplySnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   body: string
   createdAt: string
+  editedAt: string | null
   likeCount: number
   viewerHasLiked: boolean
   attachment: TopicAttachmentSnapshot | null
@@ -1769,6 +1771,15 @@ export type TopicMessageDeletedMessage = {
   deletedAt: string
 }
 
+export type TopicMessageEditedMessage = {
+  type: 'topic_message_edited'
+  topicId: string
+  messageId: string
+  parentMessageId: string | null
+  body: string
+  editedAt: string
+}
+
 export type ServerMessage =
   | ConnectedMessage
   | PongMessage
@@ -1845,6 +1856,7 @@ export type ServerMessage =
   | TopicMuteStateChangedMessage
   | TopicDeletedMessage
   | TopicMessageDeletedMessage
+  | TopicMessageEditedMessage
 
 type CreateGameServerClientOptions = {
   url?: string

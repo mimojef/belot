@@ -47,6 +47,7 @@ const likesMigrationPath = resolve(serverRoot, 'database/migrations/20260811_001
 const attachmentsMigrationPath = resolve(serverRoot, 'database/migrations/20260811_002_create_topic_message_attachments.sql')
 const messageModerationMigrationPath = resolve(serverRoot, 'database/migrations/20260812_001_create_topic_message_moderation.sql')
 const selfDeletionAuditMigrationPath = resolve(serverRoot, 'database/migrations/20260812_002_create_topic_message_self_deletion_audit.sql')
+const editMigrationPath = resolve(serverRoot, 'database/migrations/20260812_003_add_topic_message_editing.sql')
 
 let passed = 0
 let failed = 0
@@ -163,6 +164,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, messageModerationMigrationPath)
   await applyMigrationFile(db, selfDeletionAuditMigrationPath)
+  await applyMigrationFile(db, editMigrationPath)
     const info = db.prepare(`PRAGMA table_info(topic_message_likes);`).all() as Array<{ name: string; pk: number }>
     const pkCols = info.filter((c) => c.pk > 0).map((c) => c.name).sort()
     assertEqual(JSON.stringify(pkCols), JSON.stringify(['liker_profile_id', 'message_id']), 'PK трябва да е точно (message_id, liker_profile_id)')
@@ -205,6 +207,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, messageModerationMigrationPath)
   await applyMigrationFile(db, selfDeletionAuditMigrationPath)
+  await applyMigrationFile(db, editMigrationPath)
 
   seedProfile(db, 'sender-1')
   seedProfile(db, 'sender-2')
@@ -303,6 +306,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, messageModerationMigrationPath)
   await applyMigrationFile(db, selfDeletionAuditMigrationPath)
+  await applyMigrationFile(db, editMigrationPath)
 
   seedProfile(db, 'viewer-1')
   seedProfile(db, 'viewer-2')
@@ -355,6 +359,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, messageModerationMigrationPath)
   await applyMigrationFile(db, selfDeletionAuditMigrationPath)
+  await applyMigrationFile(db, editMigrationPath)
 
   seedProfile(db, 'viewer-1')
   seedProfile(db, 'viewer-2')
@@ -451,6 +456,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, messageModerationMigrationPath)
   await applyMigrationFile(db, selfDeletionAuditMigrationPath)
+  await applyMigrationFile(db, editMigrationPath)
 
   seedProfile(db, 'sender-1')
   insertTopic(db, { topicId: 'topic-x', slug: 'topic-x', title: 'Тема X' })

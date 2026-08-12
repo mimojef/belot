@@ -386,6 +386,9 @@ export type LobbyScreenState = {
   topicMessageDeleteConfirm: { topicId: string; messageId: string; isRoot: boolean; isModeratorAction: boolean } | null
   topicMessageDeleteBusy: boolean
   topicMessageDeleteErrorText: string | null
+  topicMessageEdit: { topicId: string; messageId: string; draft: string } | null
+  topicMessageEditBusy: boolean
+  topicMessageEditErrorText: string | null
   topicReportPopupOpen: boolean
   topicReportReason: string
   topicReportBusy: boolean
@@ -809,6 +812,10 @@ export type RenderLobbyScreenOptions = {
   onTopicMessageDeleteClick: (topicId: string, messageId: string, isRoot: boolean, isModeratorAction: boolean) => void
   onTopicMessageDeleteConfirmClose: () => void
   onTopicMessageDeleteConfirmSubmit: () => void
+  onTopicMessageEditClick: (topicId: string, messageId: string) => void
+  onTopicMessageEditInput: (messageId: string, value: string) => void
+  onTopicMessageEditCancel: (messageId: string) => void
+  onTopicMessageEditSubmit: (messageId: string) => void
   onTopicReportClick: () => void
   onTopicReportPopupClose: () => void
   onTopicReportReasonChange: (reason: string) => void
@@ -10441,6 +10448,49 @@ export function renderLobbyScreen(
       if (messageId.length > 0 && state.activeTopicId) {
         options.onTopicMessageDeleteClick(state.activeTopicId, messageId, isRoot, isModeratorAction)
       }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-edit]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.topicMessageEditBlocked === '1') {
+        btn.focus()
+        btn.dataset.tooltipOpen = '1'
+        window.setTimeout(() => {
+          delete btn.dataset.tooltipOpen
+        }, 1800)
+        return
+      }
+      const messageId = btn.dataset.topicMessageEdit?.trim() ?? ''
+      if (messageId.length > 0 && state.activeTopicId) {
+        options.onTopicMessageEditClick(state.activeTopicId, messageId)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLFormElement>('[data-topic-message-edit-form]').forEach((form) => {
+    const messageId = form.dataset.topicMessageEditForm ?? ''
+    if (!messageId) return
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault()
+      options.onTopicMessageEditSubmit(messageId)
+    })
+  })
+
+  root.querySelectorAll<HTMLTextAreaElement>('[data-topic-message-edit-text]').forEach((textarea) => {
+    const messageId = textarea.dataset.topicMessageEditText ?? ''
+    if (!messageId) return
+    textarea.addEventListener('input', (event) => {
+      options.onTopicMessageEditInput(messageId, (event.currentTarget as HTMLTextAreaElement).value)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-edit-cancel]').forEach((btn) => {
+    const messageId = btn.dataset.topicMessageEditCancel ?? ''
+    if (!messageId) return
+    btn.addEventListener('click', () => {
+      options.onTopicMessageEditCancel(messageId)
     })
   })
 

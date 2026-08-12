@@ -13,6 +13,7 @@ import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup
 // 14px (UI polish: "не залепвай съдържанието до линията, но значително
 // по-малко от сегашното"), особено ценно на mobile ширина.
 const REPLY_INDENT_PX = 14
+const TOPIC_MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000
 
 // Предварително планирани duration опции (Топикс moderation брифа т.2) —
 // точно ТЕЗИ 4 стойности, валидирани и server-side (виж
@@ -43,6 +44,12 @@ function formatTopicMessageTime(value: string): string {
     hour: '2-digit',
     minute: '2-digit',
   }).format(date)
+}
+
+function isTopicMessageEditWindowExpired(createdAt: string): boolean {
+  const createdAtMs = Date.parse(createdAt)
+  if (!Number.isFinite(createdAtMs)) return false
+  return Date.now() - createdAtMs >= TOPIC_MESSAGE_EDIT_WINDOW_MS
 }
 
 // Реален avatar от canonical profile data (senderAvatarUrl е derived
@@ -299,7 +306,76 @@ function renderTopicMessageDeleteButton(
   `
 }
 
-function renderTopicAuthorBlock(state: LobbyScreenState, senderProfileId: string, senderDisplayName: string, senderAvatarUrl: string | null, createdAt: string): string {
+function renderTopicMessageEditButton(
+  state: LobbyScreenState,
+  messageId: string,
+  isRoot: boolean,
+  senderProfileId: string,
+  createdAt: string,
+  replyCount: number,
+): string {
+  const isOwner = state.profile.profileId !== null && senderProfileId === state.profile.profileId
+  if (!isOwner) return ''
+
+  const isLocked = Boolean(state.activeTopicLock?.isLocked)
+  const isExpired = isTopicMessageEditWindowExpired(createdAt)
+  const hasLiveReplies = isRoot && replyCount > 0
+  const blockedReason = isLocked
+    ? 'Темата е заключена.'
+    : hasLiveReplies
+      ? 'Не можете да редактирате публикация, към която вече има отговори.'
+      : isExpired
+        ? 'Времето за редакция изтече.'
+        : null
+
+  return `
+    <button
+      type="button"
+      data-topic-message-edit="${escapeHtml(messageId)}"
+      class="topic-message-action-btn"
+      aria-label="Редактирай"
+      data-tooltip="${escapeHtml(blockedReason ?? 'Редактирай')}"
+      ${blockedReason ? 'aria-disabled="true" data-topic-message-edit-blocked="1"' : ''}
+      style="${blockedReason ? 'opacity:0.4;cursor:not-allowed;' : ''}"
+    ><span class="topic-message-action-icon" aria-hidden="true">&#9998;</span></button>
+  `
+}
+
+function renderTopicMessageEditForm(state: LobbyScreenState, messageId: string): string {
+  const edit = state.topicMessageEdit
+  if (edit === null || edit.messageId !== messageId) return ''
+
+  const busy = state.topicMessageEditBusy
+  const errorText = state.topicMessageEditErrorText
+  return `
+    <form data-topic-message-edit-form="${escapeHtml(messageId)}" style="display:grid;gap:8px;margin-top:2px;">
+      <textarea
+        data-topic-message-edit-text="${escapeHtml(messageId)}"
+        rows="3"
+        maxlength="2000"
+        ${busy ? 'disabled' : ''}
+        style="box-sizing:border-box;width:100%;min-height:76px;max-height:180px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#f8fafc;padding:9px 10px;font-size:14px;font-weight:600;outline:none;resize:vertical;font-family:inherit;line-height:1.45;"
+      >${escapeHtml(edit.draft)}</textarea>
+      <div style="display:flex;align-items:center;gap:8px;justify-content:flex-end;">
+        <button
+          type="button"
+          data-topic-message-edit-cancel="${escapeHtml(messageId)}"
+          ${busy ? 'disabled' : ''}
+          style="height:34px;padding:0 10px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:transparent;color:rgba(248,250,252,0.72);font-size:12px;font-weight:800;cursor:${busy ? 'default' : 'pointer'};"
+        >Откажи</button>
+        <button
+          type="submit"
+          data-topic-message-edit-save="${escapeHtml(messageId)}"
+          ${busy ? 'disabled' : ''}
+          style="height:34px;padding:0 12px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:12px;font-weight:900;cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};"
+        >Запази</button>
+      </div>
+      ${errorText ? `<div style="font-size:11px;color:#f87171;">${escapeHtml(errorText)}</div>` : ''}
+    </form>
+  `
+}
+
+function renderTopicAuthorBlock(state: LobbyScreenState, senderProfileId: string, senderDisplayName: string, senderAvatarUrl: string | null, createdAt: string, editedAt: string | null): string {
   // MUTE/UNMUTE compact icon бутон — само за модератор, само за активната
   // тема (mute е topic-specific, брифа т.4), скрит за собствения профил на
   // viewer-a (модератор не мутира себе си). Не претрупва обикновения
@@ -337,7 +413,7 @@ function renderTopicAuthorBlock(state: LobbyScreenState, senderProfileId: string
           data-topic-message-author-name="${escapeHtml(senderDisplayName)}"
           style="border:0;background:transparent;padding:0;cursor:pointer;font-size:14px;font-weight:900;color:#f8fafc;"
         >${escapeHtml(senderDisplayName)}</button>
-        <span style="font-size:12px;color:rgba(248,250,252,0.42);">${formatTopicMessageTime(createdAt)}</span>
+        <span style="font-size:12px;color:rgba(248,250,252,0.42);">${formatTopicMessageTime(createdAt)}${editedAt !== null ? ' · редактирано' : ''}</span>
         ${muteControl}
       </div>
     </div>
@@ -478,16 +554,21 @@ function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: strin
 }
 
 export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySnapshot): string {
+  const isEditing = state.topicMessageEdit?.messageId === reply.messageId
   return `
     <div data-topic-reply="${escapeHtml(reply.messageId)}">
       <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 4px 8px ${REPLY_INDENT_PX}px;">
-        ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt)}
+        ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt, reply.editedAt)}
       </div>
       <div style="margin:-6px 0 6px ${REPLY_INDENT_PX}px;">
-        ${reply.body.length > 0 ? `<div style="font-size:14px;line-height:1.4;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(reply.body)}</div>` : ''}
+        ${isEditing
+          ? renderTopicMessageEditForm(state, reply.messageId)
+          : (reply.body.length > 0 ? `<div style="font-size:14px;line-height:1.4;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(reply.body)}</div>` : '')
+        }
         ${reply.attachment ? renderTopicAttachment(reply.attachment, state.apiBaseUrl) : ''}
         <div style="margin-top:2px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
           ${renderTopicLikeButton(state, reply.messageId, reply.likeCount, reply.viewerHasLiked)}
+          ${renderTopicMessageEditButton(state, reply.messageId, false, reply.senderProfileId, reply.createdAt, 0)}
           ${renderTopicMessageDeleteButton(state, reply.messageId, false, reply.senderProfileId, 0)}
         </div>
       </div>
@@ -578,17 +659,22 @@ export function renderTopicAttachment(attachment: TopicAttachmentSnapshot, apiBa
 }
 
 export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMessageSnapshot): string {
+  const isEditing = state.topicMessageEdit?.messageId === message.messageId
   return `
     <div data-topic-message="${escapeHtml(message.messageId)}">
       <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 4px 0;">
-        ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt)}
+        ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt)}
       </div>
       <div style="padding:0 4px 10px 46px;">
-        ${message.body.length > 0 ? `<div style="margin-top:2px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body)}</div>` : ''}
+        ${isEditing
+          ? renderTopicMessageEditForm(state, message.messageId)
+          : (message.body.length > 0 ? `<div style="margin-top:2px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body)}</div>` : '')
+        }
         ${message.attachment ? renderTopicAttachment(message.attachment, state.apiBaseUrl) : ''}
         <div style="margin-top:4px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
           ${renderTopicLikeButton(state, message.messageId, message.likeCount, message.viewerHasLiked)}
           ${renderTopicReplyButton(message.messageId, message.replyCount)}
+          ${renderTopicMessageEditButton(state, message.messageId, true, message.senderProfileId, message.createdAt, message.replyCount)}
           ${renderTopicMessageDeleteButton(state, message.messageId, true, message.senderProfileId, message.replyCount)}
         </div>
       </div>
@@ -698,6 +784,12 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
       .topic-message-action-btn[data-topic-message-delete-blocked="1"]::after {
         white-space: normal;
         width: 200px;
+        text-align: center;
+        line-height: 1.4;
+      }
+      .topic-message-action-btn[data-topic-message-edit-blocked="1"]::after {
+        white-space: normal;
+        width: 220px;
         text-align: center;
         line-height: 1.4;
       }

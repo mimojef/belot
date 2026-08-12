@@ -1095,6 +1095,7 @@ function hydrateTopicMessagesWithCurrentAvatars(
       senderRole: message.senderRole,
       body: message.body,
       createdAt: message.createdAt,
+      editedAt: message.editedAt,
       attachment,
       likeCount: aggregatesByMessageId.get(message.messageId)?.likeCount ?? 0,
       replyCount: aggregatesByMessageId.get(message.messageId)?.replyCount ?? 0,
@@ -1317,6 +1318,44 @@ function broadcastTopicMessageDeletedToLocalSubscribers(
   }
 }
 
+function broadcastTopicMessageEditedToLocalSubscribers(topicId: string, message: TopicMessageSnapshot): void {
+  if (message.deletedAt !== null || message.editedAt === null) {
+    return
+  }
+
+  const subscribers = topicMessageSubscribersByTopicId.get(topicId)
+  if (subscribers === undefined || subscribers.size === 0) {
+    return
+  }
+
+  for (const subscriberConnectionId of [...subscribers]) {
+    const subscriberConnection = getConnectionById(serverState, subscriberConnectionId)
+    const socket = socketRegistry.get(subscriberConnectionId)
+
+    if (subscriberConnection === null || !socket || socket.readyState !== WebSocket.OPEN) {
+      subscribers.delete(subscriberConnectionId)
+      topicMessageSubscriberTopicIdByConnectionId.delete(subscriberConnectionId)
+      continue
+    }
+
+    if (
+      subscriberConnection.profileId !== null
+      && getLobbyChatBlockedSet(subscriberConnection.profileId).has(message.senderProfileId)
+    ) {
+      continue
+    }
+
+    safeSendToConnection(subscriberConnectionId, {
+      type: 'topic_message_edited',
+      topicId,
+      messageId: message.messageId,
+      parentMessageId: message.parentMessageId,
+      body: message.body,
+      editedAt: message.editedAt,
+    })
+  }
+}
+
 // Target-only (private) — САМО до connections на заглушения/отглушения
 // потребител, НЕ broadcast към всички subscribers (брифа т.10: "останалите
 // клиенти не трябва да получават чувствителна/ненужна moderation
@@ -1421,6 +1460,7 @@ const topicMessageLocallyAnnouncedSeqs = new Map<number, number>()
 // restart (established топик message poll invariant, виж topicMessagePollCursor
 // коментара по-горе).
 let topicMessageLastAnnouncedDeletionEventSeq = topicMessageStore.getMaxDeletionEventSeq()
+let topicMessageLastAnnouncedEditEventSeq = topicMessageStore.getMaxEditEventSeq()
 
 function pruneTopicMessageLocallyAnnouncedSeqs(now: number): void {
   for (const [seq, announcedAt] of topicMessageLocallyAnnouncedSeqs.entries()) {
@@ -1505,6 +1545,22 @@ function runTopicMessagesCrossInstancePoll(): void {
     }
   } catch (error) {
     console.error('[topics] cross-instance message deletion poll failed:', error)
+  }
+
+  try {
+    const editEvents = topicMessageStore.pollMessageEditEvents(
+      topicMessageLastAnnouncedEditEventSeq,
+      TOPIC_MESSAGE_POLL_BATCH_SIZE,
+    )
+    for (const event of editEvents) {
+      topicMessageLastAnnouncedEditEventSeq = Math.max(topicMessageLastAnnouncedEditEventSeq, event.eventSeq)
+      const targetRow = topicMessageStore.getMessageById(event.messageId)
+      if (targetRow !== null && targetRow.topicId === event.topicId && targetRow.deletedAt === null) {
+        broadcastTopicMessageEditedToLocalSubscribers(event.topicId, targetRow)
+      }
+    }
+  } catch (error) {
+    console.error('[topics] cross-instance message edit poll failed:', error)
   }
 
   pruneTopicMessageLocallyAnnouncedSeqs(now)
@@ -8106,6 +8162,128 @@ async function handleTopicMessageDeleteRequest(
   return true
 }
 
+async function handleTopicMessageEditRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/([^/]+)\/messages\/([^/]+)$/.exec(pathname)
+  if (!match || req.method !== 'PATCH') {
+    return false
+  }
+
+  const auth = requireRegisteredProfileSession(req)
+  if (!auth.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  if (playerProgressStore.isTemporaryProfile(auth.profileId)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да редактираш съобщения в „Теми“.' })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+  const messageId = decodeURIComponent(match[2] ?? '')
+
+  const topic = topicStore.getTopicById(topicId)
+  if (topic === null || topic.status === 'removed') {
+    sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
+    return true
+  }
+
+  const lockSnapshot = topicModerationStore.getTopicLockSnapshot(topicId)
+  if (lockSnapshot?.isLocked) {
+    sendJsonResponse(res, 409, { ok: false, code: 'topic_locked', message: 'Темата е заключена.' })
+    return true
+  }
+
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+    return true
+  }
+
+  const rawBody = (body as { body?: unknown }).body
+  if (typeof rawBody !== 'string') {
+    sendJsonResponse(res, 400, { ok: false, code: 'invalid_body', message: 'Невалиден текст.' })
+    return true
+  }
+
+  const targetMessage = topicMessageStore.getMessageById(messageId)
+  if (
+    targetMessage !== null
+    && targetMessage.topicId === topicId
+    && targetMessage.deletedAt === null
+    && targetMessage.senderProfileId !== auth.profileId
+  ) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да редактираш това съобщение.' })
+    return true
+  }
+
+  const result = topicMessageStore.editOwnMessage({
+    topicId,
+    messageId,
+    ownerProfileId: auth.profileId,
+    body: rawBody,
+  })
+
+  if (!result.ok && result.code === 'not_found') {
+    sendJsonResponse(res, 404, { ok: false, message: 'Съобщението не беше намерено.' })
+    return true
+  }
+
+  if (!result.ok && result.code === 'edit_window_expired') {
+    sendJsonResponse(res, 409, { ok: false, code: 'edit_window_expired', message: 'Времето за редакция изтече.' })
+    return true
+  }
+
+  if (!result.ok && result.code === 'has_live_replies') {
+    sendJsonResponse(res, 409, {
+      ok: false,
+      code: 'has_live_replies',
+      message: 'Не можете да редактирате публикация, към която вече има отговори.',
+    })
+    return true
+  }
+
+  if (
+    !result.ok
+    && (result.code === 'empty_body' || result.code === 'body_too_long' || result.code === 'invalid_body')
+  ) {
+    const validationMessageByCode: Record<'empty_body' | 'body_too_long' | 'invalid_body', string> = {
+      empty_body: 'Съобщението не може да е празно.',
+      body_too_long: `Съобщението е твърде дълго. Максимум ${TOPIC_MESSAGE_MAX_BODY_CODE_POINTS} символа.`,
+      invalid_body: 'Съобщението съдържа неподдържани символи.',
+    }
+    sendJsonResponse(res, 400, { ok: false, code: result.code, message: validationMessageByCode[result.code] })
+    return true
+  }
+
+  if (!result.ok) {
+    sendJsonResponse(res, 400, { ok: false, code: result.code, message: 'Редакцията не беше приета.' })
+    return true
+  }
+
+  if (result.changed) {
+    topicMessageLastAnnouncedEditEventSeq = topicMessageStore.getMaxEditEventSeq()
+    broadcastTopicMessageEditedToLocalSubscribers(topicId, result.message)
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    topicId,
+    messageId,
+    parentMessageId: result.message.parentMessageId,
+    body: result.message.body,
+    editedAt: result.message.editedAt,
+    changed: result.changed,
+  })
+  return true
+}
+
 const TOPIC_REPORT_REASON_MAX_LENGTH = 300
 
 async function handleTopicReportRequest(
@@ -12046,6 +12224,10 @@ async function handleHttpRequest(
 
   // handleTopicMessageDeleteRequest ПРЕДИ handleTopicDeleteRequest —
   // по-специфичен path (4 сегмента, /messages/:messageId suffix).
+  if (await handleTopicMessageEditRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleTopicMessageDeleteRequest(req, res, requestUrl.pathname)) {
     return
   }

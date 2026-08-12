@@ -28,6 +28,7 @@ function makeMessage(topicId: string, seq: number, body: string, senderProfileId
     senderRole: 'player',
     body,
     createdAt: new Date().toISOString(),
+    editedAt: null,
     likeCount: 0,
     replyCount: 0,
     viewerHasLiked: false,
@@ -46,6 +47,7 @@ function makeReply(topicId: string, seq: number, parentMessageId: string, body: 
     senderRole: 'player',
     body,
     createdAt: new Date().toISOString(),
+    editedAt: null,
     likeCount: 0,
     viewerHasLiked: false,
   }

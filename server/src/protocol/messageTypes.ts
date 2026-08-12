@@ -873,6 +873,7 @@ export type ServerMessage =
   | TopicMuteStateChangedMessage
   | TopicDeletedMessage
   | TopicMessageDeletedMessage
+  | TopicMessageEditedMessage
 
 export type ProfileLikedMessage = {
   type: 'profile_liked'
@@ -1042,6 +1043,7 @@ export type TopicMessageBroadcastSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   body: string
   createdAt: string
+  editedAt: string | null
   /** Attachment feature — максимум 1 image/съобщение, null ако няма. */
   attachment: TopicAttachmentSnapshot | null
   /**
@@ -1079,6 +1081,7 @@ export type TopicReplyBroadcastSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   body: string
   createdAt: string
+  editedAt: string | null
   attachment: TopicAttachmentSnapshot | null
   likeCount: number
   viewerHasLiked: boolean
@@ -1285,6 +1288,15 @@ export type TopicMessageDeletedMessage = {
   messageId: string
   parentMessageId: string | null
   deletedAt: string
+}
+
+export type TopicMessageEditedMessage = {
+  type: 'topic_message_edited'
+  topicId: string
+  messageId: string
+  parentMessageId: string | null
+  body: string
+  editedAt: string
 }
 
 export function getDisplayNameFromIdentity(

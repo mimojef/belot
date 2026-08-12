@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { dbDateToUtc } from './dbDate.js'
+import { validateTopicMessageBody } from '../protocol/topicMessageValidation.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -25,6 +26,7 @@ export type TopicMessageSnapshot = {
   senderRole: TopicMessageSenderRole
   body: string
   createdAt: string
+  editedAt: string | null
   deletedAt: string | null
 }
 
@@ -46,6 +48,12 @@ export type TopicMessageDeletionEvent = {
   topicId: string
   messageId: string
   parentMessageId: string | null
+}
+
+export type TopicMessageEditEvent = {
+  eventSeq: number
+  topicId: string
+  messageId: string
 }
 
 export type TopicMessageAggregates = {
@@ -181,10 +189,22 @@ export type TopicMessageStore = {
     | { ok: true; deletedMessageIds: string[]; deletedAttachmentFilenames: string[]; parentMessageId: string | null; deletedAt: string }
     | { ok: false; code: 'not_found' | 'already_deleted' | 'has_live_replies' }
   )
+  editOwnMessage: (input: {
+    topicId: string
+    messageId: string
+    ownerProfileId: string
+    body: string
+    now?: Date
+  }) => (
+    | { ok: true; changed: boolean; message: TopicMessageSnapshot }
+    | { ok: false; code: 'not_found' | 'edit_window_expired' | 'has_live_replies' | 'empty_body' | 'body_too_long' | 'invalid_body' }
+  )
   /** Baseline за cross-instance individual-message-deletion poll cursor при startup. */
   getMaxDeletionEventSeq: () => number
   /** Poll за нови individual-message deletion fanout събития СЛЕД `afterEventSeq` — mirror на pollNewMessages, но за deletion events. */
   pollMessageDeletionEvents: (afterEventSeq: number, limit: number) => TopicMessageDeletionEvent[]
+  getMaxEditEventSeq: () => number
+  pollMessageEditEvents: (afterEventSeq: number, limit: number) => TopicMessageEditEvent[]
   /**
    * Bounded batch hard-purge на individual-message-moderation soft-deleted
    * съобщения с `deleted_at <= cutoff`, ЧИЯТО тема НЕ Е `removed` (whole-topic
@@ -267,6 +287,7 @@ type TopicMessageRow = {
   sender_role: TopicMessageSenderRole
   body: string
   created_at: string
+  edited_at: string | null
   deleted_at: string | null
 }
 
@@ -282,6 +303,7 @@ function toSnapshot(row: TopicMessageRow): TopicMessageSnapshot {
     senderRole: row.sender_role,
     body: row.body,
     createdAt: dbDateToUtc(row.created_at),
+    editedAt: row.edited_at ? dbDateToUtc(row.edited_at) : null,
     deletedAt: row.deleted_at ? dbDateToUtc(row.deleted_at) : null,
   }
 }
@@ -310,7 +332,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
       ? `AND sender_profile_id NOT IN (${Array(excludedCount).fill('?').join(',')})`
       : ''
     return database.prepare(`
-      SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, deleted_at
+      SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, edited_at, deleted_at
       FROM topic_messages
       WHERE topic_id = ?
         AND parent_message_id IS NULL
@@ -378,7 +400,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
       ? `AND sender_profile_id NOT IN (${Array(excludedCount).fill('?').join(',')})`
       : ''
     return database.prepare(`
-      SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, deleted_at
+      SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, edited_at, deleted_at
       FROM topic_messages
       WHERE topic_id = ?
         AND parent_message_id IS NULL
@@ -417,7 +439,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
   `)
 
   const selectByMessageIdStatement = database.prepare(`
-    SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, deleted_at
+    SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, edited_at, deleted_at
     FROM topic_messages
     WHERE message_id = ?
     LIMIT 1;
@@ -484,7 +506,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
   // разклонява broadcast-а по row.parentMessageId след прочитане оттук).
   // deleted_at филтърът остава — изтрити редове никога не се broadcast-ват.
   const pollNewMessagesStatement = database.prepare(`
-    SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, deleted_at
+    SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, edited_at, deleted_at
     FROM topic_messages
     WHERE seq > ?
       AND deleted_at IS NULL
@@ -572,7 +594,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
       ? `AND sender_profile_id NOT IN (${Array(excludedCount).fill('?').join(',')})`
       : ''
     return database.prepare(`
-      SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, deleted_at
+      SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, edited_at, deleted_at
       FROM topic_messages
       WHERE parent_message_id = ?
         AND deleted_at IS NULL
@@ -908,6 +930,97 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     }
   }
 
+  const TOPIC_MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000
+
+  function parseStoredTimestampMs(value: string): number {
+    return Date.parse(dbDateToUtc(value))
+  }
+
+  const selectAttachmentExistsForMessageStatement = database.prepare(`
+    SELECT 1 FROM topic_message_attachments WHERE message_id = ? LIMIT 1;
+  `)
+
+  const updateOwnMessageBodyStatement = database.prepare(`
+    UPDATE topic_messages
+    SET body = ?, edited_at = strftime('%Y-%m-%dT%H:%M:%f', 'now')
+    WHERE message_id = ? AND deleted_at IS NULL;
+  `)
+
+  const insertMessageEditEventStatement = database.prepare(`
+    INSERT INTO topic_message_edit_events (topic_id, message_id) VALUES (?, ?);
+  `)
+
+  function editOwnMessage(input: {
+    topicId: string
+    messageId: string
+    ownerProfileId: string
+    body: string
+    now?: Date
+  }):
+    | { ok: true; changed: boolean; message: TopicMessageSnapshot }
+    | { ok: false; code: 'not_found' | 'edit_window_expired' | 'has_live_replies' | 'empty_body' | 'body_too_long' | 'invalid_body' } {
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const target = selectByMessageIdStatement.get(input.messageId) as TopicMessageRow | undefined
+
+      if (
+        target === undefined
+        || target.topic_id !== input.topicId
+        || target.sender_profile_id !== input.ownerProfileId
+        || target.deleted_at !== null
+      ) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'not_found' }
+      }
+
+      const nowMs = input.now?.getTime() ?? Date.now()
+      const createdAtMs = parseStoredTimestampMs(target.created_at)
+      if (!Number.isFinite(createdAtMs) || nowMs - createdAtMs >= TOPIC_MESSAGE_EDIT_WINDOW_MS) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'edit_window_expired' }
+      }
+
+      if (target.parent_message_id === null) {
+        const liveReplyCount = (selectLiveReplyCountForRootStatement.get(target.message_id) as { cnt: number }).cnt
+        if (liveReplyCount > 0) {
+          database.exec('ROLLBACK;')
+          return { ok: false, code: 'has_live_replies' }
+        }
+      }
+
+      const hasAttachment = selectAttachmentExistsForMessageStatement.get(target.message_id) !== undefined
+      const validation = validateTopicMessageBody(input.body, hasAttachment)
+      if (!validation.ok) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: validation.code }
+      }
+
+      if (validation.body === target.body) {
+        database.exec('COMMIT;')
+        return { ok: true, changed: false, message: toSnapshot(target) }
+      }
+
+      const changes = updateOwnMessageBodyStatement.run(validation.body, target.message_id)
+      if ((changes.changes as number) === 0) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'not_found' }
+      }
+
+      insertMessageEditEventStatement.run(target.topic_id, target.message_id)
+
+      const updatedTarget = selectByMessageIdStatement.get(target.message_id) as TopicMessageRow
+      database.exec('COMMIT;')
+      return { ok: true, changed: true, message: toSnapshot(updatedTarget) }
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // ignore rollback failure, surface the original error below
+      }
+      throw error
+    }
+  }
+
   const selectMaxDeletionEventSeqStatement = database.prepare(`
     SELECT COALESCE(MAX(event_seq), 0) as maxSeq FROM topic_message_deletion_events;
   `)
@@ -937,6 +1050,36 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
       topicId: row.topic_id,
       messageId: row.message_id,
       parentMessageId: row.parent_message_id,
+    }))
+  }
+
+  const selectMaxEditEventSeqStatement = database.prepare(`
+    SELECT COALESCE(MAX(event_seq), 0) as maxSeq FROM topic_message_edit_events;
+  `)
+
+  function getMaxEditEventSeq(): number {
+    const row = selectMaxEditEventSeqStatement.get() as { maxSeq: number }
+    return row.maxSeq
+  }
+
+  const selectEditEventsStatement = database.prepare(`
+    SELECT event_seq, topic_id, message_id
+    FROM topic_message_edit_events
+    WHERE event_seq > ?
+    ORDER BY event_seq ASC
+    LIMIT ?;
+  `)
+
+  function pollMessageEditEvents(afterEventSeq: number, limit: number): TopicMessageEditEvent[] {
+    const rows = selectEditEventsStatement.all(afterEventSeq, limit) as Array<{
+      event_seq: number
+      topic_id: string
+      message_id: string
+    }>
+    return rows.map((row) => ({
+      eventSeq: row.event_seq,
+      topicId: row.topic_id,
+      messageId: row.message_id,
     }))
   }
 
@@ -1197,8 +1340,11 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     getMessageById,
     deleteMessage,
     deleteOwnMessage,
+    editOwnMessage,
     getMaxDeletionEventSeq,
     pollMessageDeletionEvents,
+    getMaxEditEventSeq,
+    pollMessageEditEvents,
     purgeDeletedTopicMessagesBefore,
     getMessageAggregatesByIds,
     getAttachmentsByMessageIds,
