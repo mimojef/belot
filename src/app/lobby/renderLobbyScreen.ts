@@ -330,6 +330,8 @@ export type LobbyScreenState = {
   topicsErrorText: string | null
   topics: TopicSnapshot[] | null
   activeTopicId: string | null
+  topicsMode: 'topics' | 'personal'
+  topicsPersonalView: 'list' | 'conversation'
   topicMessagesLoading: boolean
   topicMessagesErrorText: string | null
   topicMessages: TopicMessageSnapshot[] | null
@@ -528,6 +530,7 @@ export type LobbyScreenState = {
   chatArchivedLoading: boolean
   activeChatFriendshipId: string | null
   chatMessages: ChatMessageSnapshot[]
+  chatMessagesFriendshipId: string | null
   chatLoading: boolean
   chatMessagesLoading: boolean
   chatErrorText: string | null
@@ -770,6 +773,9 @@ export type RenderLobbyScreenOptions = {
   onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
   onTournamentsClick: () => void
   onTopicsClick: () => void
+  onTopicsPersonalOpen: () => void
+  onTopicsPersonalBack: () => void
+  onTopicsPersonalConversationBack: () => void
   onTopicChipClick: (topicId: string) => void
   onTopicCreateClick: () => void
   onTopicCreatePopupClose: () => void
@@ -5362,6 +5368,168 @@ function formatChatTime(value: string): string {
     hour: '2-digit',
     minute: '2-digit',
   }).format(date)
+}
+
+export function formatPersonalChatUnreadBadgeCount(count: number): string | null {
+  if (!Number.isFinite(count) || count <= 0) return null
+  return String(Math.min(Math.floor(count), 99))
+}
+
+export function getPersonalChatUnreadTotal(state: LobbyScreenState): number {
+  return state.chatConversations
+    .filter((conversation) => conversation.kind === 'friend')
+    .reduce((total, conversation) => total + Math.max(0, Math.floor(conversation.unreadCount)), 0)
+}
+
+function renderTopicsPersonalConversationRow(
+  conversation: ChatConversationSnapshot,
+  activeFriendshipId: string | null,
+): string {
+  const isActive = activeFriendshipId === conversation.friendshipId
+  const displayName = conversation.friend.displayName?.trim() || 'Играч'
+  const avatarUrl = conversation.friend.avatarUrl?.trim() ?? ''
+  const preview = conversation.lastMessage?.body ?? 'Няма съобщения'
+  const activityTime = formatChatTime(conversation.updatedAt)
+  const unreadBadge = formatPersonalChatUnreadBadgeCount(conversation.unreadCount)
+
+  return `
+    <button
+      type="button"
+      data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}"
+      data-topics-personal-row="1"
+      ${isActive ? 'data-active="1"' : ''}
+      style="
+        display:flex;align-items:center;gap:12px;width:100%;border:0;
+        border-bottom:1px solid rgba(255,255,255,0.06);
+        background:${isActive ? 'rgba(212,165,32,0.12)' : 'transparent'};
+        color:#ffffff;text-align:left;padding:12px 14px;cursor:pointer;min-width:0;box-sizing:border-box;
+      "
+    >
+      <div style="position:relative;width:46px;height:46px;flex:0 0 auto;">
+        <div style="width:46px;height:46px;border-radius:8px;border:1px solid rgba(212,165,32,0.48);background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:19px;font-weight:900;">
+          ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}
+        </div>
+        ${conversation.friend.isOnline !== undefined ? `<div style="position:absolute;bottom:-2px;right:-2px;width:11px;height:11px;border-radius:50%;background:${conversation.friend.isOnline ? '#22c55e' : '#ef4444'};border:2px solid #050505;"></div>` : ''}
+      </div>
+      <div style="min-width:0;flex:1;">
+        <div style="display:flex;align-items:center;gap:6px;">
+          <div style="font-size:14px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">${escapeHtml(displayName)}</div>
+          ${activityTime ? `<span data-topics-personal-row-time="1" style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.38);white-space:nowrap;flex:0 0 auto;">${escapeHtml(activityTime)}</span>` : ''}
+          ${unreadBadge !== null ? `<span data-topics-personal-row-badge="1" aria-label="${escapeHtml(`${conversation.unreadCount} непрочетени съобщения`)}" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 4px;flex-shrink:0;">${escapeHtml(unreadBadge)}</span>` : ''}
+        </div>
+        <div style="margin-top:4px;font-size:12px;font-weight:700;color:${conversation.unreadCount > 0 ? '#ffffff' : 'rgba(255,255,255,0.54)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(preview)}</div>
+      </div>
+    </button>
+  `
+}
+
+function renderTopicsPersonalMessages(state: LobbyScreenState, activeConversation: ChatConversationSnapshot): string {
+  const messagesBelongToActiveConversation = state.chatMessagesFriendshipId === activeConversation.friendshipId
+  const visibleMessages = messagesBelongToActiveConversation
+    ? state.chatMessages.filter((message) => message.friendshipId === activeConversation.friendshipId)
+    : []
+
+  return `
+    <div data-chat-messages-scroll="1" style="flex:1;min-height:0;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
+      ${state.chatMessagesLoading || !messagesBelongToActiveConversation ? `
+        <div style="margin:auto;color:#d4a520;font-size:15px;font-weight:900;">Зареждане...</div>
+      ` : visibleMessages.length === 0 ? `
+        <div style="margin:auto;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;">Няма съобщения. Започни разговора.</div>
+      ` : visibleMessages.map((message) => {
+        const isEmojiOnly = /^(\[e:\d{2}\])+$/.test(message.body.trim())
+        const hasText = message.body.trim().length > 0
+        return `
+          <div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:min(82%,620px);display:grid;gap:3px;">
+            ${message.attachment ? `
+              <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
+                ${renderChatAttachmentBubble(message.attachment, state.apiBaseUrl)}
+                ${hasText ? `<div style="padding:0 4px 2px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
+              </div>
+            ` : `
+              <div style="${isEmojiOnly
+                ? 'padding:2px;line-height:1;'
+                : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;`}">
+                ${isEmojiOnly
+                  ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="/assets/animated-emoji/emoji-${n}.webp" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
+                  : renderPersonalChatMessageBody(message.body)}
+              </div>
+            `}
+            <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.42);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div>
+          </div>
+        `
+      }).join('')}
+    </div>
+    <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-top:1px solid rgba(212,165,32,0.20);flex:0 0 auto;">
+      <div style="display:flex;gap:10px;align-items:center;">
+        ${renderChatImagePickerControls(state, activeConversation.friendshipId)}
+        <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;">
+        <button type="submit" ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;opacity:${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? '0.6' : '1'};">${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'Качване...' : 'Изпрати'}</button>
+      </div>
+    </form>
+  `
+}
+
+export function renderTopicsPersonalChatPanel(state: LobbyScreenState): string {
+  const friendConversations = state.chatConversations
+    .filter((conversation) => conversation.kind === 'friend')
+    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+  const activeConversation = state.topicsPersonalView === 'conversation'
+    ? friendConversations.find((conversation) => conversation.friendshipId === state.activeChatFriendshipId) ?? null
+    : null
+
+  if (state.chatLoading) {
+    return `
+      <div data-topics-personal-panel="1" style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;color:#d4a520;font-size:15px;font-weight:900;">
+        Зареждане на лични разговори...
+      </div>
+    `
+  }
+
+  return `
+    <style>
+      [data-topics-personal-panel="1"] {
+        display:grid;
+        grid-template-columns:minmax(240px,320px) minmax(0,1fr);
+        gap:12px;
+      }
+      [data-topics-personal-conversation-back="1"] { display:none; }
+      @media (max-width: 720px) {
+        [data-topics-personal-panel="1"] { display:flex; flex-direction:column; }
+        [data-topics-personal-list="1"], [data-topics-personal-detail="1"] { flex:1; min-height:0; }
+        [data-topics-personal-panel="1"][data-personal-view="conversation"] [data-topics-personal-list="1"] { display:none !important; }
+        [data-topics-personal-panel="1"][data-personal-view="list"] [data-topics-personal-detail="1"] { display:none !important; }
+        [data-topics-personal-conversation-back="1"] { display:inline-flex; }
+      }
+    </style>
+    <div data-topics-personal-panel="1" data-personal-view="${state.topicsPersonalView}" style="flex:1;min-height:0;overflow:hidden;">
+      <div data-topics-personal-list="1" style="min-height:0;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;overflow:hidden;display:flex;flex-direction:column;">
+        ${friendConversations.length === 0 ? `
+          <div data-topics-personal-empty="1" style="margin:auto;padding:24px 16px;color:rgba(255,255,255,0.62);font-size:14px;font-weight:800;text-align:center;display:grid;gap:6px;">
+            <div>Нямате лични разговори.</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.45);">Можете да започнете разговор от профила на приятел.</div>
+          </div>
+        ` : `
+          <div style="overflow-y:auto;flex:1;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
+            ${friendConversations.map((conversation) => renderTopicsPersonalConversationRow(conversation, state.activeChatFriendshipId)).join('')}
+          </div>
+        `}
+      </div>
+      <div data-topics-personal-detail="1" style="min-width:0;min-height:0;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:linear-gradient(180deg,#111 0%,#050505 100%);overflow:hidden;display:flex;flex-direction:column;">
+        ${activeConversation === null ? `
+          <div style="min-height:260px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.62);font-size:15px;font-weight:800;text-align:center;padding:20px;">
+            Избери личен разговор.
+          </div>
+        ` : `
+          <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid rgba(212,165,32,0.24);flex:0 0 auto;">
+            <button type="button" data-topics-personal-conversation-back="1" aria-label="Назад към личните разговори" style="align-items:center;justify-content:center;width:34px;height:34px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;font-size:18px;font-weight:900;cursor:pointer;">&larr;</button>
+            <div style="font-size:18px;font-weight:900;color:#f8fafc;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(activeConversation.friend.displayName ?? 'Играч')}</div>
+            ${state.chatErrorText ? `<div style="margin-left:auto;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.chatErrorText)}</div>` : ''}
+          </div>
+          ${renderTopicsPersonalMessages(state, activeConversation)}
+        `}
+      </div>
+    </div>
+  `
 }
 
 function renderChatPanel(state: LobbyScreenState): string {
@@ -9989,6 +10157,18 @@ export function renderLobbyScreen(
         options.onTopicsClick()
       })
     })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-topics-personal-open="1"]')
+    ?.addEventListener('click', options.onTopicsPersonalOpen)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-topics-personal-back="1"]')
+    ?.addEventListener('click', options.onTopicsPersonalBack)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-topics-personal-conversation-back="1"]')
+    ?.addEventListener('click', options.onTopicsPersonalConversationBack)
 
   root.querySelectorAll<HTMLButtonElement>('[data-topic-chip]').forEach((button) => {
     button.addEventListener('click', () => {

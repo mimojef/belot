@@ -191,7 +191,7 @@ check('[8] дълъг URL в Topics носи mobile overflow guard (overflow-wra
 
 check('[7] source-level: Topics НЕ дефинира собствен URL regex/linkifier (single shared mechanism)', () => {
   const topicsSource = readFileSync(join(PROJECT_ROOT, 'src', 'app', 'lobby', 'renderTopicsScreen.ts'), 'utf8')
-  assert(topicsSource.includes("import { resolveAttachmentUrl, renderLinkifiedChatMessageBody } from './renderLobbyScreen'"), 'Topics трябва да import-ва shared linkifier-а от renderLobbyScreen.ts')
+  assert(/import\s*\{[\s\S]*renderLinkifiedChatMessageBody[\s\S]*\}\s*from '\.\/renderLobbyScreen'/.test(topicsSource), 'Topics трябва да import-ва shared linkifier-а от renderLobbyScreen.ts')
   assert(topicsSource.includes('renderLinkifiedChatMessageBody(reply.body)'), 'reply body трябва да минава през shared linkifier-а')
   assert(topicsSource.includes('renderLinkifiedChatMessageBody(message.body)'), 'root message body трябва да минава през shared linkifier-а')
   assert(!/https\?:\\\/\\\//.test(topicsSource), 'Topics не трябва да съдържа собствен URL regex литерал (regression за "втори независим linkifier")')

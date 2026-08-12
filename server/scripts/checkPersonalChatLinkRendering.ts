@@ -117,7 +117,7 @@ check('personal chat uses the shared linkifier and private-room chat stays plain
   assert(privateRoomSource.includes('escapeHtml(message.body)'), 'private-room waiting chat should keep escaped message body')
   assert(!privateRoomSource.includes('renderPersonalChatMessageBody'), 'private-room chat should not use personal chat linkifier')
   assert(!privateRoomSource.includes('renderLinkifiedChatMessageBody'), 'private-room chat should not use shared linkifier')
-  assert(countOccurrences(lobbySource, 'renderPersonalChatMessageBody(message.body)') === 4, 'personal chat message bubbles should still call the personal wrapper')
+  assert(countOccurrences(lobbySource, 'renderPersonalChatMessageBody(message.body)') >= 6, 'personal chat message bubbles should still call the personal wrapper, including Topics Personal reuse')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

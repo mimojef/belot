@@ -836,6 +836,8 @@ type InternalLobbyFlowState = {
   topicsErrorText: string | null
   topics: TopicSnapshot[] | null
   activeTopicId: string | null
+  topicsMode: 'topics' | 'personal'
+  topicsPersonalView: 'list' | 'conversation'
   topicSeenInFlightByTopicId: Record<string, boolean | undefined>
   topicSeenQueuedByTopicId: Record<string, boolean | undefined>
   topicMessagesLoading: boolean
@@ -1090,6 +1092,7 @@ type InternalLobbyFlowState = {
   chatArchivedLoading: boolean
   activeChatFriendshipId: string | null
   chatMessages: ChatMessageSnapshot[]
+  chatMessagesFriendshipId: string | null
   chatLoading: boolean
   chatMessagesLoading: boolean
   chatErrorText: string | null
@@ -1340,6 +1343,8 @@ function createInitialState(): InternalLobbyFlowState {
     topicsErrorText: null,
     topics: null,
     activeTopicId: null,
+    topicsMode: 'topics',
+    topicsPersonalView: 'list',
     topicSeenInFlightByTopicId: {},
     topicSeenQueuedByTopicId: {},
     topicMessagesLoading: false,
@@ -1534,6 +1539,7 @@ function createInitialState(): InternalLobbyFlowState {
     chatArchivedLoading: false,
     activeChatFriendshipId: null,
     chatMessages: [],
+    chatMessagesFriendshipId: null,
     chatLoading: false,
     chatMessagesLoading: false,
     chatErrorText: null,
@@ -3052,6 +3058,7 @@ export function createLobbyFlowController(
       chatArchivedLoading: state.chatArchivedLoading,
       activeChatFriendshipId: state.activeChatFriendshipId,
       chatMessages: state.chatMessages,
+      chatMessagesFriendshipId: state.chatMessagesFriendshipId,
       chatLoading: state.chatLoading,
       chatMessagesLoading: state.chatMessagesLoading,
       chatErrorText: state.chatErrorText,
@@ -3240,6 +3247,8 @@ export function createLobbyFlowController(
       topicsErrorText: state.topicsErrorText,
       topics: state.topics,
       activeTopicId: state.activeTopicId,
+      topicsMode: state.topicsMode,
+      topicsPersonalView: state.topicsPersonalView,
       topicMessagesLoading: state.topicMessagesLoading,
       topicMessagesErrorText: state.topicMessagesErrorText,
       topicMessages: state.topicMessages,
@@ -3907,13 +3916,20 @@ export function createLobbyFlowController(
       onChatClick: () => {
         void showChatPanel()
       },
+      onTopicsPersonalOpen: () => {
+        void showTopicsPersonalChat()
+      },
+      onTopicsPersonalBack: () => {
+        closeTopicsPersonalChat()
+      },
+      onTopicsPersonalConversationBack: () => {
+        backToTopicsPersonalList()
+      },
       onChatConversationClick: (friendshipId) => {
         void openChatConversation(friendshipId)
       },
       onChatMarkRead: (friendshipId) => {
-        state.chatConversations = state.chatConversations.map((c) =>
-          c.friendshipId === friendshipId ? { ...c, unreadCount: 0 } : c,
-        )
+        markChatConversationReadLocally(friendshipId)
         render()
         void options.onChatMarkRead?.(friendshipId)
       },
@@ -5604,7 +5620,11 @@ export function createLobbyFlowController(
     // ВСЯКО ново зареждане (не само сравнение по topicId): ако потребителят
     // отвори A→B→A бързо, response за първата (сега "остаряла") заявка за A
     // никога не презаписва по-новата, дори топикId да съвпада отново.
-    if (state.currentScreen !== 'topics' || state.topicMessagesRequestGeneration !== requestGeneration) {
+    if (
+      state.currentScreen !== 'topics' ||
+      state.topicsMode !== 'topics' ||
+      state.topicMessagesRequestGeneration !== requestGeneration
+    ) {
       return
     }
 
@@ -5638,6 +5658,8 @@ export function createLobbyFlowController(
     leaveAdminServerIfActive()
     unsubscribeFromCurrentTopicMessages()
     state.currentScreen = 'topics'
+    state.topicsMode = 'topics'
+    state.topicsPersonalView = 'list'
     state.profilePopupOpen = false
     state.profilePopupProfile = null
     state.profilePopupCanEdit = true
@@ -5650,6 +5672,13 @@ export function createLobbyFlowController(
     // от друг таб, expiry), composer gating-ът би останал заклещен на
     // остарялата стойност до hard reload.
     void refreshTopicsVipGateStatus()
+    if ((options.getAuthSession?.() ?? null) !== null && options.onChatConversationsLoad) {
+      void loadChatConversations().then(() => {
+        if (state.currentScreen === 'topics') {
+          render()
+        }
+      })
+    }
 
     if (!options.onTopicsLoad) {
       state.topicsErrorText = 'Списъкът с теми временно не е наличен.'
@@ -5711,6 +5740,8 @@ export function createLobbyFlowController(
   }
 
   function openTopic(topicId: string): void {
+    state.topicsMode = 'topics'
+    state.topicsPersonalView = 'list'
     if (state.activeTopicId === topicId) return
     // Стъпка 1 от gap-closing flow-а (Етап 2 корекция т.1): unsubscribe от
     // старата тема ПРЕДИ каквото и да е друго — иначе push-ове за вече
@@ -5764,7 +5795,11 @@ export function createLobbyFlowController(
     // Ако потребителят е превключил тема междувременно (generation token се
     // е сменил), изхвърляме резултата — той принадлежи на вече напусната
     // тема (т.3B/C от брифа).
-    if (state.topicMessagesRequestGeneration !== requestGeneration) {
+    if (
+      state.currentScreen !== 'topics' ||
+      state.topicsMode !== 'topics' ||
+      state.topicMessagesRequestGeneration !== requestGeneration
+    ) {
       return
     }
 
@@ -8649,9 +8684,106 @@ export function createLobbyFlowController(
     ) {
       state.activeChatFriendshipId = null
       state.chatMessages = []
+      state.chatMessagesFriendshipId = null
     }
 
     return true
+  }
+
+  function getFriendChatConversations(): ChatConversationSnapshot[] {
+    return state.chatConversations.filter((conversation) => conversation.kind === 'friend')
+  }
+
+  function isActivePersonalChatConversation(friendshipId: string): boolean {
+    return (
+      state.activeChatFriendshipId === friendshipId &&
+      (
+        state.currentScreen === 'chat' ||
+        (
+          state.currentScreen === 'topics' &&
+          state.topicsMode === 'personal' &&
+          state.topicsPersonalView === 'conversation'
+        )
+      )
+    )
+  }
+
+  function markChatConversationReadLocally(friendshipId: string): void {
+    state.chatConversations = state.chatConversations.map((c) =>
+      c.friendshipId === friendshipId ? { ...c, unreadCount: 0 } : c,
+    )
+  }
+
+  async function showTopicsPersonalChat(targetFriendshipId: string | null = null): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (authSession === null) {
+      state.authModalMode = 'cta'
+      state.authErrorText = null
+      render()
+      return
+    }
+
+    state.currentScreen = 'topics'
+    state.topicsMode = 'personal'
+    state.topicsPersonalView = targetFriendshipId === null ? 'list' : 'conversation'
+    state.chatShowArchived = false
+    state.chatErrorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    unsubscribeFromCurrentTopicMessages()
+
+    state.chatLoading = true
+    render()
+
+    const loaded = await loadChatConversations()
+
+    if (state.currentScreen !== 'topics' || state.topicsMode !== 'personal') {
+      return
+    }
+
+    state.chatLoading = false
+
+    if (!loaded) {
+      render()
+      return
+    }
+
+    const friendConversations = getFriendChatConversations()
+    const targetConversation = targetFriendshipId !== null
+      ? friendConversations.find((conversation) => conversation.friendshipId === targetFriendshipId) ?? null
+      : null
+
+    if (targetConversation !== null) {
+      state.topicsPersonalView = 'conversation'
+      await openChatConversation(targetConversation.friendshipId, false)
+      markChatConversationReadLocally(targetConversation.friendshipId)
+      render()
+      void options.onChatMarkRead?.(targetConversation.friendshipId)
+      return
+    }
+
+    state.topicsPersonalView = 'list'
+    render()
+  }
+
+  function closeTopicsPersonalChat(): void {
+    if (state.currentScreen !== 'topics') return
+    state.topicsMode = 'topics'
+    state.topicsPersonalView = 'list'
+    state.chatErrorText = null
+    render()
+
+    if (state.activeTopicId !== null) {
+      void loadTopicMessagesForActiveTopic(state.activeTopicId)
+    }
+  }
+
+  function backToTopicsPersonalList(): void {
+    if (state.currentScreen !== 'topics' || state.topicsMode !== 'personal') return
+    state.topicsPersonalView = 'list'
+    render()
   }
 
   // Ненатрапчив toggle между активен/архивиран изглед на списъка с
@@ -8861,7 +8993,12 @@ export function createLobbyFlowController(
     }
 
     state.activeChatFriendshipId = friendshipId
+    if (state.currentScreen === 'topics' && state.topicsMode === 'personal') {
+      state.topicsPersonalView = 'conversation'
+    }
     state.chatMessagesLoading = true
+    state.chatMessages = []
+    state.chatMessagesFriendshipId = null
     state.chatErrorText = null
 
     if (shouldRenderLoading) {
@@ -8870,7 +9007,7 @@ export function createLobbyFlowController(
 
     const result = await options.onChatMessagesLoad(friendshipId)
 
-    if (state.activeChatFriendshipId !== friendshipId) {
+    if (!isActivePersonalChatConversation(friendshipId)) {
       return
     }
 
@@ -8883,6 +9020,7 @@ export function createLobbyFlowController(
     }
 
     state.chatMessages = result.messages
+    state.chatMessagesFriendshipId = friendshipId
     state.chatErrorText = null
     render()
   }
@@ -9078,7 +9216,7 @@ export function createLobbyFlowController(
   }
 
   function refocusPersonalChatComposer(friendshipId: string, selectionStart: number, selectionEnd = selectionStart, selectionDirection: 'forward' | 'backward' | 'none' | null = 'none'): void {
-    if (state.currentScreen !== 'chat' || state.activeChatFriendshipId !== friendshipId) return
+    if (!isActivePersonalChatConversation(friendshipId)) return
     const input = options.root.querySelector<HTMLInputElement>(
       `[data-lobby-chat-form="${selectorEscape(friendshipId)}"] [data-lobby-chat-message-input="1"]`,
     )
@@ -9175,9 +9313,10 @@ export function createLobbyFlowController(
     // успех от сървъра.
     state.chatDraftByFriendshipId = { ...state.chatDraftByFriendshipId, [friendshipId]: '' }
     clearChatPendingImage(friendshipId)
-    const isStillActiveChatConversation = state.currentScreen === 'chat' && state.activeChatFriendshipId === friendshipId
+    const isStillActiveChatConversation = isActivePersonalChatConversation(friendshipId)
     if (isStillActiveChatConversation) {
       state.chatMessages = result.messages
+      state.chatMessagesFriendshipId = friendshipId
       state.chatErrorText = null
     }
     const existingConversation = state.chatConversations.find(
@@ -9203,14 +9342,18 @@ export function createLobbyFlowController(
     await loadChatConversations()
 
     if (
-      state.currentScreen === 'chat' &&
-      state.activeChatFriendshipId === friendshipId &&
+      isActivePersonalChatConversation(friendshipId) &&
       options.onChatMessagesLoad
     ) {
       const result = await options.onChatMessagesLoad(friendshipId)
 
+      if (!isActivePersonalChatConversation(friendshipId)) {
+        return
+      }
+
       if (result.ok) {
         state.chatMessages = result.messages
+        state.chatMessagesFriendshipId = friendshipId
         state.chatErrorText = null
       } else {
         state.chatErrorText = result.message
@@ -10969,7 +11112,7 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'chat_message_received') {
-      const isActiveConversation = state.currentScreen === 'chat' && state.activeChatFriendshipId === message.friendshipId
+      const isActiveConversation = isActivePersonalChatConversation(message.friendshipId)
       if (!isActiveConversation) {
         state.chatConversations = state.chatConversations.map((c) =>
           c.friendshipId === message.friendshipId ? { ...c, unreadCount: c.unreadCount + 1 } : c,
@@ -12002,6 +12145,7 @@ export function createLobbyFlowController(
       ) {
         state.activeChatFriendshipId = null
         state.chatMessages = []
+        state.chatMessagesFriendshipId = null
       }
       render()
     },
@@ -12041,11 +12185,18 @@ export function createLobbyFlowController(
       }
     },
     isConversationOpen: (friendshipId: string) => {
-      return state.currentScreen === 'chat' && state.activeChatFriendshipId === friendshipId
+      return isActivePersonalChatConversation(friendshipId)
     },
     openChatWithFriend: (friendshipId: string) => {
+      if (state.currentScreen === 'topics') {
+        void showTopicsPersonalChat(friendshipId)
+        return
+      }
+
       void showChatPanel().then(() => {
         void openChatConversation(friendshipId)
+        markChatConversationReadLocally(friendshipId)
+        render()
         void options.onChatMarkRead?.(friendshipId)
       })
     },

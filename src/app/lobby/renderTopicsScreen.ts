@@ -1,6 +1,12 @@
 import type { TopicMessageSnapshot, TopicReplySnapshot, TopicAttachmentSnapshot, TopicReportStatus } from '../network/createGameServerClient'
 import type { LobbyScreenState } from './renderLobbyScreen'
-import { resolveAttachmentUrl, renderLinkifiedChatMessageBody } from './renderLobbyScreen'
+import {
+  formatPersonalChatUnreadBadgeCount,
+  getPersonalChatUnreadTotal,
+  renderTopicsPersonalChatPanel,
+  resolveAttachmentUrl,
+  renderLinkifiedChatMessageBody,
+} from './renderLobbyScreen'
 import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup'
 
 // Read-only Етап 1 — root history + navigation. Етап 2 добави real composer
@@ -1338,19 +1344,53 @@ function renderTopicModerationBanners(state: LobbyScreenState): string {
 
 function renderTopicsHeader(state: LobbyScreenState): string {
   const activeTopic = (state.topics ?? []).find((t) => t.topicId === state.activeTopicId) ?? null
-  const isGeneral = activeTopic?.isGeneral ?? true
+  const personalUnreadTotal = getPersonalChatUnreadTotal(state)
+  const personalUnreadBadge = formatPersonalChatUnreadBadgeCount(personalUnreadTotal)
 
-  if (isGeneral || activeTopic === null) {
-    return `<h1 style="margin:0;font-size:20px;font-weight:900;color:#f8fafc;">Теми</h1>`
+  if (state.topicsMode === 'personal') {
+    return `
+      <div data-topics-header-row="1" data-topics-personal-header="1" style="display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;">
+        <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+          <button
+            type="button"
+            data-topics-personal-back="1"
+            aria-label="Назад към Теми"
+            style="display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;font-size:18px;font-weight:900;cursor:pointer;flex:0 0 auto;"
+          >&larr;</button>
+          <h1 style="margin:0;font-size:20px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Лични</h1>
+        </div>
+      </div>
+    `
   }
 
+  const showGeneralBack = activeTopic !== null && !activeTopic.isGeneral
+
   return `
-    <div style="display:flex;align-items:center;gap:12px;">
-      <button type="button" data-topics-back-to-general="1" style="display:inline-flex;align-items:center;gap:6px;border:0;background:transparent;color:#d4a520;font-size:14px;font-weight:800;cursor:pointer;padding:0;">
-        &larr; Общ чат
+    <div data-topics-header-row="1" style="display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;">
+      <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+        ${showGeneralBack ? `
+          <button type="button" data-topics-back-to-general="1" aria-label="Назад към Общ чат" style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;font-size:16px;font-weight:900;cursor:pointer;flex:0 0 auto;">
+            &larr;
+          </button>
+        ` : ''}
+        <h1 style="margin:0;font-size:20px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Теми</h1>
+        ${activeTopic !== null && !activeTopic.isGeneral ? `<span style="min-width:0;color:rgba(248,250,252,0.62);font-size:13px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(activeTopic.title)}</span>` : ''}
+        ${activeTopic !== null ? renderTopicHeaderModerationControls(state, activeTopic) : ''}
+      </div>
+      <button
+        type="button"
+        data-topics-personal-open="1"
+        aria-label="${personalUnreadTotal > 0 ? `Лични разговори, ${personalUnreadTotal} непрочетени съобщения` : 'Лични разговори'}"
+        style="
+          position:relative;display:inline-flex;align-items:center;justify-content:center;gap:7px;
+          min-height:36px;padding:0 12px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);
+          background:#050505;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;flex:0 0 auto;
+        "
+      >
+        <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#d4a520" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>
+        <span>Лични</span>
+        ${personalUnreadBadge !== null ? `<span data-topics-personal-badge="1" aria-hidden="true" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;line-height:1;">${escapeHtml(personalUnreadBadge)}</span><span style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">${escapeHtml(`${personalUnreadTotal} непрочетени лични съобщения`)}</span>` : ''}
       </button>
-      <h1 style="margin:0;font-size:18px;font-weight:900;color:#f8fafc;">${escapeHtml(activeTopic.title)}</h1>
-      ${renderTopicHeaderModerationControls(state, activeTopic)}
     </div>
   `
 }
@@ -1466,17 +1506,20 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
   //      vertical scroll container (виж renderTopicMessageStream)
   //   3) composer form (Етап 2) — flex:0 0 auto, фиксиран на дъното
   const activeTopicId = state.activeTopicId
+  const isPersonalMode = state.topicsMode === 'personal'
   return `
     <section data-topics-screen="1" style="flex:1;min-height:0;display:flex;flex-direction:column;padding:0 4px;overflow:hidden;">
       <div data-topics-fixed-top="1" style="flex:0 0 auto;display:flex;flex-direction:column;gap:12px;padding-bottom:12px;">
         ${renderTopicsHeader(state)}
-        ${renderTopicsBar(state)}
+        ${isPersonalMode ? '' : renderTopicsBar(state)}
       </div>
+      ${isPersonalMode ? renderTopicsPersonalChatPanel(state) : `
       <div data-topics-stream-container="1" style="flex:1;min-height:0;border:1px solid rgba(255,255,255,0.10);border-radius:12px 12px 0 0;border-bottom:0;background:#0a0a0a;display:flex;flex-direction:column;overflow:hidden;">
         ${renderTopicModerationBanners(state)}
         ${renderTopicMessageStream(state)}
       </div>
       ${activeTopicId ? renderTopicsComposer(state, activeTopicId) : ''}
+      `}
     </section>
     ${renderVipRequiredPopup({
       open: state.topicsVipPopupOpen,
