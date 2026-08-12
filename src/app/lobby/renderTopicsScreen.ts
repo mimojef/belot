@@ -246,6 +246,27 @@ function renderTopicReplyButton(rootMessageId: string, replyCount: number): stri
   `
 }
 
+// Individual message/reply moderation delete — icon-only, до Like/Reply
+// action бутоните (root) или до Like бутона (reply), gated зад
+// state.isTopicMessageModerator (5 роли: admin/subadmin/top_chat_admin/
+// pika_team/chat_admin). Visibility НЕ зависи от автора на съобщението —
+// moderator вижда delete и върху собствено съобщение (individual-message-
+// moderation брифа §6/§18). isRoot определя confirmation текста
+// (openTopicMessageDeleteConfirm), не самото server-side поведение.
+function renderTopicMessageDeleteButton(state: LobbyScreenState, messageId: string, isRoot: boolean): string {
+  if (!state.isTopicMessageModerator) return ''
+  return `
+    <button
+      type="button"
+      data-topic-message-delete="${escapeHtml(messageId)}"
+      data-topic-message-delete-is-root="${isRoot ? '1' : '0'}"
+      class="topic-message-action-btn"
+      aria-label="Изтрий"
+      data-tooltip="Изтрий"
+    ><span class="topic-message-action-icon" aria-hidden="true">&#128465;</span></button>
+  `
+}
+
 function renderTopicAuthorBlock(state: LobbyScreenState, senderProfileId: string, senderDisplayName: string, senderAvatarUrl: string | null, createdAt: string): string {
   // MUTE/UNMUTE compact icon бутон — само за модератор, само за активната
   // тема (mute е topic-specific, брифа т.4), скрит за собствения профил на
@@ -433,8 +454,9 @@ export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySn
       <div style="margin:-6px 0 6px ${REPLY_INDENT_PX}px;">
         ${reply.body.length > 0 ? `<div style="font-size:14px;line-height:1.4;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(reply.body)}</div>` : ''}
         ${reply.attachment ? renderTopicAttachment(reply.attachment, state.apiBaseUrl) : ''}
-        <div style="margin-top:2px;margin-left:-8px;">
+        <div style="margin-top:2px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
           ${renderTopicLikeButton(state, reply.messageId, reply.likeCount, reply.viewerHasLiked)}
+          ${renderTopicMessageDeleteButton(state, reply.messageId, false)}
         </div>
       </div>
     </div>
@@ -535,6 +557,7 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
         <div style="margin-top:4px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
           ${renderTopicLikeButton(state, message.messageId, message.likeCount, message.viewerHasLiked)}
           ${renderTopicReplyButton(message.messageId, message.replyCount)}
+          ${renderTopicMessageDeleteButton(state, message.messageId, true)}
         </div>
       </div>
       ${renderRepliesSection(state, message.messageId)}
@@ -966,6 +989,46 @@ function renderTopicDeleteConfirmPopup(state: LobbyScreenState): string {
   `
 }
 
+// Individual root съобщение/reply moderation delete confirm — single-step
+// (без reason поле, за разлика от renderTopicDeleteConfirmPopup по-горе,
+// individual-message-moderation брифа §19). isRoot определя предупредителния
+// текст (root: "и всички отговори" — explicit thread-wide consequence,
+// reply: само отговора).
+function renderTopicMessageDeleteConfirmPopup(state: LobbyScreenState): string {
+  const pending = state.topicMessageDeleteConfirm
+  if (!pending) return ''
+
+  const busy = state.topicMessageDeleteBusy
+  const title = pending.isRoot ? 'Изтриване на съобщение' : 'Изтриване на отговор'
+  const bodyText = pending.isRoot
+    ? 'Съобщението и всички отговори към него ще бъдат премахнати.'
+    : 'Отговорът ще бъде премахнат.'
+
+  return `
+    <div data-topic-message-delete-confirm-backdrop="1" style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
+      <div style="background:#1a1a2e;border:1px solid rgba(239,68,68,0.5);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+        <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:8px;">${escapeHtml(title)}</div>
+        ${state.topicMessageDeleteErrorText ? `<div style="font-size:12px;color:#f87171;margin-bottom:12px;">${escapeHtml(state.topicMessageDeleteErrorText)}</div>` : ''}
+        <div style="font-size:14px;color:rgba(255,255,255,0.7);line-height:1.5;margin-bottom:20px;">
+          ${escapeHtml(bodyText)}
+        </div>
+        <div style="display:flex;gap:12px;">
+          <button type="button" data-topic-message-delete-cancel="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
+            border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};
+          ">Отказ</button>
+          <button type="button" data-topic-message-delete-confirm="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(239,68,68,0.7);background:rgba(239,68,68,0.9);
+            border-radius:10px;color:#fff;font-size:14px;font-weight:900;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.7' : '1'};
+          ">${busy ? 'Изчакай…' : 'Изтрий'}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
 // Report popup — достъпен за обикновен потребител (не-модератор), кратко
 // reason поле, без duration избор.
 function renderTopicReportPopup(state: LobbyScreenState): string {
@@ -1260,6 +1323,7 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
     ${renderTopicsInfoToast(state)}
     ${renderTopicModerationActionPopup(state)}
     ${renderTopicDeleteConfirmPopup(state)}
+    ${renderTopicMessageDeleteConfirmPopup(state)}
     ${renderTopicReportPopup(state)}
     ${renderTopicReportSuccessToast(state)}
   `

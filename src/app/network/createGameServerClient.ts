@@ -1754,6 +1754,21 @@ export type TopicDeletedMessage = {
   topicId: string
 }
 
+/**
+ * Public broadcast при moderator delete на ОТДЕЛНО root съобщение или reply
+ * (individual message/reply moderation) — различно от TopicDeletedMessage
+ * (whole-topic delete). `parentMessageId === null` → target-ът е бил ROOT,
+ * клиентът маха root И всички locally-loaded replies към него;
+ * `parentMessageId !== null` → target-ът е бил REPLY, маха се само той.
+ */
+export type TopicMessageDeletedMessage = {
+  type: 'topic_message_deleted'
+  topicId: string
+  messageId: string
+  parentMessageId: string | null
+  deletedAt: string
+}
+
 export type ServerMessage =
   | ConnectedMessage
   | PongMessage
@@ -1829,6 +1844,7 @@ export type ServerMessage =
   | TopicLockStateChangedMessage
   | TopicMuteStateChangedMessage
   | TopicDeletedMessage
+  | TopicMessageDeletedMessage
 
 type CreateGameServerClientOptions = {
   url?: string

@@ -109,6 +109,29 @@ export function isTopicWholeTopicModeratorSession(
   )
 }
 
+/**
+ * Individual message/reply moderation достъп (delete на ОТДЕЛНО root
+ * съобщение или reply в Topics) — admin/subadmin/top_chat_admin/pika_team/
+ * chat_admin. Различен role set от isTopicModeratorSession (той е за
+ * whole-topic mute/reports/audit, 4 роли, БЕЗ chat_admin) — умишлено НЕ
+ * reuse-ва нито isTopicModeratorSession, нито isLobbyChatModeratorSession
+ * (макар role set-ът на последния да съвпада 1:1 в момента) — Topics
+ * individual-message moderation е собствен semantic domain, отделен от
+ * lobby chat moderation, дори permission set-овете временно да съвпадат
+ * (individual-message-moderation брифа §4).
+ */
+export function isTopicMessageModeratorSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'subadmin'
+    || session.account.role === 'top_chat_admin'
+    || session.account.role === 'pika_team'
+    || session.account.role === 'chat_admin'
+  )
+}
+
 export type ElevatedRole = 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin'
 
 export type SubadminRoleChangeErrorCode =

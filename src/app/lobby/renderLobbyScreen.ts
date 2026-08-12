@@ -382,6 +382,10 @@ export type LobbyScreenState = {
   topicDeleteReason: string
   topicDeleteBusy: boolean
   topicDeleteErrorText: string | null
+  /** Individual root съобщение/reply moderation delete confirm popup — single-step (без reason поле, за разлика от topicDeleteConfirm). isRoot определя кой предупредителен текст се показва (root: "и всички отговори", reply: само отговора). */
+  topicMessageDeleteConfirm: { topicId: string; messageId: string; isRoot: boolean } | null
+  topicMessageDeleteBusy: boolean
+  topicMessageDeleteErrorText: string | null
   topicReportPopupOpen: boolean
   topicReportReason: string
   topicReportBusy: boolean
@@ -398,6 +402,8 @@ export type LobbyScreenState = {
   isTopicModerator: boolean
   /** По-тесен client-side UX gate за whole-topic Lock/Unlock/Delete контроли — виж isTopicWholeTopicModeratorAuthSession в createLobbyFlowController.ts. */
   isWholeTopicModerator: boolean
+  /** Client-side UX gate за individual root съобщение/reply moderation delete (5 роли, вкл. chat_admin) — виж isTopicMessageModeratorAuthSession в createLobbyFlowController.ts. Различен role set от isTopicModerator. */
+  isTopicMessageModerator: boolean
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -800,6 +806,9 @@ export type RenderLobbyScreenOptions = {
   onTopicDeleteReasonChange: (reason: string) => void
   onTopicDeleteAdvance: () => void
   onTopicDeleteConfirmSubmit: () => void
+  onTopicMessageDeleteClick: (topicId: string, messageId: string, isRoot: boolean) => void
+  onTopicMessageDeleteConfirmClose: () => void
+  onTopicMessageDeleteConfirmSubmit: () => void
   onTopicReportClick: () => void
   onTopicReportPopupClose: () => void
   onTopicReportReasonChange: (reason: string) => void
@@ -10401,6 +10410,33 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-topic-delete-confirm="1"]')?.addEventListener('click', () => {
     options.onTopicDeleteConfirmSubmit()
+  })
+
+  // Individual message/reply moderation delete — icon-only бутони, keyed по
+  // messageId (mirror на data-topic-message-reply wiring по-долу), plюs
+  // single-step confirm popup (виж renderTopicMessageDeleteConfirmPopup).
+  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-delete]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const messageId = btn.dataset.topicMessageDelete?.trim() ?? ''
+      const isRoot = btn.dataset.topicMessageDeleteIsRoot === '1'
+      if (messageId.length > 0 && state.activeTopicId) {
+        options.onTopicMessageDeleteClick(state.activeTopicId, messageId, isRoot)
+      }
+    })
+  })
+
+  root.querySelector<HTMLDivElement>('[data-topic-message-delete-confirm-backdrop="1"]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) {
+      options.onTopicMessageDeleteConfirmClose()
+    }
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-message-delete-cancel="1"]')?.addEventListener('click', () => {
+    options.onTopicMessageDeleteConfirmClose()
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-message-delete-confirm="1"]')?.addEventListener('click', () => {
+    options.onTopicMessageDeleteConfirmSubmit()
   })
 
   // Report popup.

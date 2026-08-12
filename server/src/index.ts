@@ -26,6 +26,7 @@ import {
   isAdminOrSubadminSession,
   isFullAdminSession,
   isLobbyChatModeratorSession,
+  isTopicMessageModeratorSession,
   isTopicModeratorSession,
   isTopicWholeTopicModeratorSession,
   type AuthSessionSnapshot,
@@ -33,7 +34,7 @@ import {
 import { createChatStore } from './db/chatStore.js'
 import { createLobbyChatStore } from './db/lobbyChatStore.js'
 import { createTopicStore, type TopicSnapshot } from './db/topicStore.js'
-import { createTopicMessageStore, type TopicMessageSnapshot } from './db/topicMessageStore.js'
+import { createTopicMessageStore, type TopicMessageSnapshot, type TopicMessageDeletionEvent } from './db/topicMessageStore.js'
 import {
   createTopicModerationStore,
   type TopicModeratorRole,
@@ -1291,6 +1292,31 @@ function broadcastTopicDeletedToLocalSubscribers(topicId: string): void {
   }
 }
 
+// Public broadcast при moderator delete на ОТДЕЛНО root съобщение или reply
+// (individual-message moderation) — за разлика от broadcastTopicDeletedToLocalSubscribers
+// по-горе, тук НЕ маха subscribers (темата остава напълно достъпна, само
+// едно съобщение/thread изчезва). Reuse на СЪЩИЯ per-topic subscriber Set.
+function broadcastTopicMessageDeletedToLocalSubscribers(
+  topicId: string,
+  messageId: string,
+  parentMessageId: string | null,
+  deletedAt: string,
+): void {
+  const subscribers = topicMessageSubscribersByTopicId.get(topicId)
+  if (subscribers === undefined || subscribers.size === 0) {
+    return
+  }
+  for (const subscriberConnectionId of [...subscribers]) {
+    safeSendToConnection(subscriberConnectionId, {
+      type: 'topic_message_deleted',
+      topicId,
+      messageId,
+      parentMessageId,
+      deletedAt,
+    })
+  }
+}
+
 // Target-only (private) — САМО до connections на заглушения/отглушения
 // потребител, НЕ broadcast към всички subscribers (брифа т.10: "останалите
 // клиенти не трябва да получават чувствителна/ненужна moderation
@@ -1389,6 +1415,13 @@ let topicMessagePollCursor = topicMessageStore.getMaxSeq()
 // net в случай poll-ът някога спре да тиктака.
 const topicMessageLocallyAnnouncedSeqs = new Map<number, number>()
 
+// Individual message/reply moderation delete — cross-instance fanout cursor
+// (mirror на lobbyChatLastAnnouncedDeletionEventSeq). Startup baseline =
+// getMaxDeletionEventSeq() — НЕ 0 — за да няма historical replay след
+// restart (established топик message poll invariant, виж topicMessagePollCursor
+// коментара по-горе).
+let topicMessageLastAnnouncedDeletionEventSeq = topicMessageStore.getMaxDeletionEventSeq()
+
 function pruneTopicMessageLocallyAnnouncedSeqs(now: number): void {
   for (const [seq, announcedAt] of topicMessageLocallyAnnouncedSeqs.entries()) {
     if (seq <= topicMessagePollCursor || now - announcedAt >= TOPIC_MESSAGE_LOCALLY_ANNOUNCED_TTL_MS) {
@@ -1446,6 +1479,32 @@ function runTopicMessagesCrossInstancePoll(): void {
     }
   } catch (error) {
     console.error('[topics] cross-instance message poll failed:', error)
+  }
+
+  // Individual message/reply moderation delete — deletion-event poll, СЪЩИЯТ
+  // tick, отделен monotonic cursor (mirror на runLobbyChatCrossInstancePoll,
+  // който прави и двете стъпки в 1 interval, не отделен нов timer — брифа
+  // §16/§24). Local-instance delete-ите вече са broadcast-нати instant-но от
+  // handleTopicMessageDeleteRequest (виж topicMessageLastAnnouncedDeletionEventSeq
+  // bump-а там) — тук напредваме cursor-а покрай тях без ВТОРИ broadcast,
+  // но НЕ пропускаме foreign (друга инстанция) deletion events.
+  try {
+    const deletionEvents = topicMessageStore.pollMessageDeletionEvents(
+      topicMessageLastAnnouncedDeletionEventSeq,
+      TOPIC_MESSAGE_POLL_BATCH_SIZE,
+    )
+    for (const event of deletionEvents) {
+      topicMessageLastAnnouncedDeletionEventSeq = Math.max(topicMessageLastAnnouncedDeletionEventSeq, event.eventSeq)
+      const targetRow = topicMessageStore.getMessageById(event.messageId)
+      broadcastTopicMessageDeletedToLocalSubscribers(
+        event.topicId,
+        event.messageId,
+        event.parentMessageId,
+        targetRow?.deletedAt ?? new Date().toISOString(),
+      )
+    }
+  } catch (error) {
+    console.error('[topics] cross-instance message deletion poll failed:', error)
   }
 
   pruneTopicMessageLocallyAnnouncedSeqs(now)
@@ -2066,6 +2125,22 @@ function runTopicRetentionPurge(): void {
     }
   } catch (error) {
     console.error('[topics] Retention purge failed:', error)
+  }
+
+  // Individual message/reply moderation delete — СЪЩИЯТ maintenance cycle,
+  // отделен bounded purge (mirror на whole-topic purge-а по-горе, но
+  // anchored от topic_messages.deleted_at, НЕ topics.removed_at). Изключва
+  // съобщения от removed теми explicitly — whole-topic purge-ът по-горе е
+  // authoritative там (individual-message-moderation брифа §3/§22/§24, не
+  // два competing purge lifecycle-а за една и съща removed тема).
+  try {
+    const messageCutoff = new Date(Date.now() - TOPIC_RETENTION_DAYS * 24 * 60 * 60 * 1000)
+    const purgedMessageCount = topicMessageStore.purgeDeletedTopicMessagesBefore(messageCutoff, TOPIC_RETENTION_PURGE_BATCH_SIZE)
+    if (purgedMessageCount > 0) {
+      console.log(`[topics] Retention purge: hard-deleted ${purgedMessageCount} individually-moderated message(s)/reply(s) older than ${TOPIC_RETENTION_DAYS} days`)
+    }
+  } catch (error) {
+    console.error('[topics] Individual message retention purge failed:', error)
   }
 }
 
@@ -7878,6 +7953,78 @@ async function handleTopicDeleteRequest(
   return true
 }
 
+// Individual root съобщение/reply moderation delete — различно от
+// handleTopicDeleteRequest по-горе (whole-topic delete). Регистриран ПРЕДИ
+// handleTopicDeleteRequest в route dispatch-а (по-специфичен path с 4
+// сегмента, /api/topics/:topicId/messages/:messageId — regex-ът на
+// handleTopicDeleteRequest е anchored с $ веднага след :topicId capture
+// group-а, значи технически не би пресякъл този по-дълъг path, но
+// established convention в проекта е по-специфични routes първи).
+async function handleTopicMessageDeleteRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/([^/]+)\/messages\/([^/]+)$/.exec(pathname)
+  if (!match || req.method !== 'DELETE') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicMessageModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да триеш съобщения в „Теми“.' })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+  const messageId = decodeURIComponent(match[2] ?? '')
+
+  const topic = topicStore.getTopicById(topicId)
+
+  // removed тема: individual-message endpoint не работи там — whole-topic
+  // 180-day retention/purge (topicModerationStore.purgeRemovedTopicsBefore,
+  // anchored от topics.removed_at) е authoritative за removed теми, mirror
+  // на established removed-третиране в send_topic_message/handleTopicReportRequest
+  // (individual-message-moderation брифа §27).
+  if (topic === null || topic.status === 'removed') {
+    sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
+    return true
+  }
+
+  // LOCKED topic: moderation delete Е РАЗРЕШЕН тук нарочно — locked спира
+  // само нови user writes (send_topic_message/send_topic_reply), НЕ
+  // moderation actions (established прецедент: whole-topic lock/unlock/mute
+  // също работят в locked тема). НЕ извикваме getTopicLockSnapshot guard тук.
+
+  // isTopicMessageModeratorSession гарантира role е един от петте individual-
+  // message-moderation роли — типовият predicate стеснява само session
+  // (non-null), не и вложеното account.role поле, затова explicit cast тук
+  // (огледално на toTopicModeratorRole/handleLobbyChatDeleteRequest коментара).
+  const result = topicMessageStore.deleteMessage({
+    topicId,
+    messageId,
+    actorAccountId: session.account.accountId,
+    actorRole: session.account.role as 'admin' | 'subadmin' | 'top_chat_admin' | 'pika_team' | 'chat_admin',
+  })
+
+  if (!result.ok && result.code === 'not_found') {
+    sendJsonResponse(res, 404, { ok: false, message: 'Съобщението не беше намерено.' })
+    return true
+  }
+
+  // already_deleted третираме идентично на success навън — идемпотентно,
+  // съобщението вече гарантирано не съществува в потока при връщане 200.
+  if (result.ok) {
+    topicMessageLastAnnouncedDeletionEventSeq = topicMessageStore.getMaxDeletionEventSeq()
+    broadcastTopicMessageDeletedToLocalSubscribers(topicId, messageId, result.parentMessageId, result.deletedAt)
+  }
+
+  sendJsonResponse(res, 200, { ok: true, topicId, messageId })
+  return true
+}
+
 const TOPIC_REPORT_REASON_MAX_LENGTH = 300
 
 async function handleTopicReportRequest(
@@ -11813,6 +11960,12 @@ async function handleHttpRequest(
   }
 
   if (await handleTopicModerationAuditLogRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  // handleTopicMessageDeleteRequest ПРЕДИ handleTopicDeleteRequest —
+  // по-специфичен path (4 сегмента, /messages/:messageId suffix).
+  if (await handleTopicMessageDeleteRequest(req, res, requestUrl.pathname)) {
     return
   }
 

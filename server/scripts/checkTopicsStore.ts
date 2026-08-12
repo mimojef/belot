@@ -41,6 +41,7 @@ const topicsMigrationPath = resolve(serverRoot, 'database/migrations/20260810_00
 const likesMigrationPath = resolve(serverRoot, 'database/migrations/20260811_001_create_topic_message_likes.sql')
 const attachmentsMigrationPath = resolve(serverRoot, 'database/migrations/20260811_002_create_topic_message_attachments.sql')
 const moderationMigrationPath = resolve(serverRoot, 'database/migrations/20260811_003_create_topic_moderation.sql')
+const messageModerationMigrationPath = resolve(serverRoot, 'database/migrations/20260812_001_create_topic_message_moderation.sql')
 
 // ─── Брояч ───────────────────────────────────────────────────────────────
 
@@ -315,6 +316,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, topicsMigrationPath)
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
+  await applyMigrationFile(db, messageModerationMigrationPath)
 
   seedProfile(db, 'sender-1')
   seedProfile(db, 'sender-2')
@@ -494,6 +496,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, topicsMigrationPath)
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
+  await applyMigrationFile(db, messageModerationMigrationPath)
 
   seedProfile(db, 'profile-with-avatar')
   seedProfile(db, 'profile-without-avatar')
@@ -585,6 +588,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, topicsMigrationPath)
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
+  await applyMigrationFile(db, messageModerationMigrationPath)
 
   const authorIds = ['author-1', 'author-2', 'author-3']
   for (const id of authorIds) seedProfile(db, id)

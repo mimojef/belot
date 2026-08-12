@@ -63,6 +63,7 @@ const topicsMigrationPath = resolve(serverRoot, 'database/migrations/20260810_00
 const likesMigrationPath = resolve(serverRoot, 'database/migrations/20260811_001_create_topic_message_likes.sql')
 const attachmentsMigrationPath = resolve(serverRoot, 'database/migrations/20260811_002_create_topic_message_attachments.sql')
 const moderationMigrationPath = resolve(serverRoot, 'database/migrations/20260811_003_create_topic_moderation.sql')
+const messageModerationMigrationPath = resolve(serverRoot, 'database/migrations/20260812_001_create_topic_message_moderation.sql')
 
 let passed = 0
 let failed = 0
@@ -212,6 +213,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, topicsMigrationPath)
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
+  await applyMigrationFile(db, messageModerationMigrationPath)
 
   seedProfile(db, 'sender-1')
   seedProfile(db, 'sender-2')
@@ -466,6 +468,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, moderationMigrationPath)
+  await applyMigrationFile(db, messageModerationMigrationPath)
   db.prepare(`INSERT INTO accounts (account_id) VALUES ('moderator-1')`).run()
   seedProfile(db, 'sender-1')
   insertTopic(db, { topicId: 'topic-live', slug: 'topic-live', title: 'Жива тема' })

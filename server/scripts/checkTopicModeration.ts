@@ -78,6 +78,7 @@ const topicsMigrationPath = resolve(serverRoot, 'database/migrations/20260810_00
 const likesMigrationPath = resolve(serverRoot, 'database/migrations/20260811_001_create_topic_message_likes.sql')
 const attachmentsMigrationPath = resolve(serverRoot, 'database/migrations/20260811_002_create_topic_message_attachments.sql')
 const moderationMigrationPath = resolve(serverRoot, 'database/migrations/20260811_003_create_topic_moderation.sql')
+const messageModerationMigrationPath = resolve(serverRoot, 'database/migrations/20260812_001_create_topic_message_moderation.sql')
 
 let passed = 0
 let failed = 0
@@ -171,6 +172,7 @@ async function setupDb(dir: string, filename: string): Promise<string> {
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
   await applyMigrationFile(db, moderationMigrationPath)
+  await applyMigrationFile(db, messageModerationMigrationPath)
   seedAccount(db, 'moderator-1')
   seedAccount(db, 'moderator-2')
   seedProfile(db, 'target-1')

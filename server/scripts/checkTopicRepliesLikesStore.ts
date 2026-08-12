@@ -45,6 +45,7 @@ const serverRoot = resolve(__dirname, '..')
 const topicsMigrationPath = resolve(serverRoot, 'database/migrations/20260810_002_create_topics_and_messages.sql')
 const likesMigrationPath = resolve(serverRoot, 'database/migrations/20260811_001_create_topic_message_likes.sql')
 const attachmentsMigrationPath = resolve(serverRoot, 'database/migrations/20260811_002_create_topic_message_attachments.sql')
+const messageModerationMigrationPath = resolve(serverRoot, 'database/migrations/20260812_001_create_topic_message_moderation.sql')
 
 let passed = 0
 let failed = 0
@@ -90,6 +91,11 @@ function buildBaseSchema(db: DatabaseSync): void {
       profile_id TEXT PRIMARY KEY,
       display_name TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS accounts (
+      account_id TEXT PRIMARY KEY
     );
   `)
 }
@@ -154,6 +160,7 @@ await withTempDir(async (dir) => {
   await check('[0] Migration създава topic_message_likes с PRIMARY KEY(message_id, liker_profile_id)', async () => {
     await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
+  await applyMigrationFile(db, messageModerationMigrationPath)
     const info = db.prepare(`PRAGMA table_info(topic_message_likes);`).all() as Array<{ name: string; pk: number }>
     const pkCols = info.filter((c) => c.pk > 0).map((c) => c.name).sort()
     assertEqual(JSON.stringify(pkCols), JSON.stringify(['liker_profile_id', 'message_id']), 'PK трябва да е точно (message_id, liker_profile_id)')
@@ -194,6 +201,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, topicsMigrationPath)
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
+  await applyMigrationFile(db, messageModerationMigrationPath)
 
   seedProfile(db, 'sender-1')
   seedProfile(db, 'sender-2')
@@ -288,6 +296,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, topicsMigrationPath)
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
+  await applyMigrationFile(db, messageModerationMigrationPath)
 
   seedProfile(db, 'viewer-1')
   seedProfile(db, 'viewer-2')
@@ -338,6 +347,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, topicsMigrationPath)
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
+  await applyMigrationFile(db, messageModerationMigrationPath)
 
   seedProfile(db, 'viewer-1')
   seedProfile(db, 'viewer-2')
@@ -432,6 +442,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, topicsMigrationPath)
   await applyMigrationFile(db, likesMigrationPath)
   await applyMigrationFile(db, attachmentsMigrationPath)
+  await applyMigrationFile(db, messageModerationMigrationPath)
 
   seedProfile(db, 'sender-1')
   insertTopic(db, { topicId: 'topic-x', slug: 'topic-x', title: 'Тема X' })

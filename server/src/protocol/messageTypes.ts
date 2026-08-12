@@ -872,6 +872,7 @@ export type ServerMessage =
   | TopicLockStateChangedMessage
   | TopicMuteStateChangedMessage
   | TopicDeletedMessage
+  | TopicMessageDeletedMessage
 
 export type ProfileLikedMessage = {
   type: 'profile_liked'
@@ -1267,6 +1268,23 @@ export type TopicMuteStateChangedMessage = {
 export type TopicDeletedMessage = {
   type: 'topic_deleted'
   topicId: string
+}
+
+/**
+ * Public broadcast при moderator delete на ОТДЕЛНО root съобщение или reply
+ * (individual message/reply moderation — различно от TopicDeletedMessage,
+ * който е whole-topic delete). Explicit `parentMessageId` snapshot вместо
+ * fragile client-side DOM inspection (individual-message-moderation брифа
+ * §15): `parentMessageId === null` → target-ът е бил ROOT, клиентът маха
+ * root И всички locally-loaded replies към него; `parentMessageId !== null`
+ * → target-ът е бил REPLY, клиентът маха само него.
+ */
+export type TopicMessageDeletedMessage = {
+  type: 'topic_message_deleted'
+  topicId: string
+  messageId: string
+  parentMessageId: string | null
+  deletedAt: string
 }
 
 export function getDisplayNameFromIdentity(

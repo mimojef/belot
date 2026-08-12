@@ -3726,6 +3726,25 @@ async function deleteTopic(
   }
 }
 
+async function deleteTopicMessage(
+  topicId: string,
+  messageId: string,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/messages/${encodeURIComponent(messageId)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    })
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Грешка при изтриване на съобщението.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function reportTopic(
   topicId: string,
   reason: string,
@@ -4529,6 +4548,7 @@ lobby = createLobbyFlowController({
   onTopicMuteProfile: (topicId, profileId, reason, durationMs) => muteProfileInTopic(topicId, profileId, reason, durationMs),
   onTopicUnmuteProfile: (topicId, profileId) => unmuteProfileInTopic(topicId, profileId),
   onTopicDelete: (topicId, reason) => deleteTopic(topicId, reason),
+  onTopicMessageDelete: (topicId, messageId) => deleteTopicMessage(topicId, messageId),
   onTopicReport: (topicId, reason) => reportTopic(topicId, reason),
   onTopicReportsLoad: (status) => loadTopicReports(status),
   onTopicReportReview: (reportId, status) => reviewTopicReport(reportId, status),

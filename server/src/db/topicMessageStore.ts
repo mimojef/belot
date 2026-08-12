@@ -34,6 +34,20 @@ export type TopicMessageHistoryPage = {
   oldestSeq: number | null
 }
 
+/**
+ * Fanout събитие за cross-instance individual message/reply moderation
+ * delete broadcast — mirror на LobbyChatDeletionEvent. `parentMessageId`
+ * е snapshot на target-а към момента на изтриване: null = target е бил
+ * root (client маха целия thread), non-null = target е бил reply (client
+ * маха само него).
+ */
+export type TopicMessageDeletionEvent = {
+  eventSeq: number
+  topicId: string
+  messageId: string
+  parentMessageId: string | null
+}
+
 export type TopicMessageAggregates = {
   likeCount: number
   replyCount: number
@@ -134,6 +148,30 @@ export type TopicMessageStore = {
   ) => TopicMessageHistoryPage
   /** По message_id за единичен lookup (parent-is-root проверка при reply insert, message-exists проверка при like toggle). */
   getMessageById: (messageId: string) => TopicMessageSnapshot | null
+  /**
+   * Moderator delete на ОТДЕЛНО root съобщение или reply (individual-message
+   * moderation, различно от topicModerationStore.deleteTopic whole-topic
+   * delete). Виж имплементацията за пълния transaction rationale.
+   */
+  deleteMessage: (input: {
+    topicId: string
+    messageId: string
+    actorAccountId: string | null
+    actorRole: 'admin' | 'subadmin' | 'top_chat_admin' | 'pika_team' | 'chat_admin'
+  }) => (
+    | { ok: true; deletedMessageIds: string[]; deletedAttachmentFilenames: string[]; parentMessageId: string | null; deletedAt: string }
+    | { ok: false; code: 'not_found' | 'already_deleted' }
+  )
+  /** Baseline за cross-instance individual-message-deletion poll cursor при startup. */
+  getMaxDeletionEventSeq: () => number
+  /** Poll за нови individual-message deletion fanout събития СЛЕД `afterEventSeq` — mirror на pollNewMessages, но за deletion events. */
+  pollMessageDeletionEvents: (afterEventSeq: number, limit: number) => TopicMessageDeletionEvent[]
+  /**
+   * Bounded batch hard-purge на individual-message-moderation soft-deleted
+   * съобщения с `deleted_at <= cutoff`, ЧИЯТО тема НЕ Е `removed` (whole-topic
+   * 180-day purge е authoritative за removed теми, виж имплементацията).
+   */
+  purgeDeletedTopicMessagesBefore: (cutoff: Date, batchSize: number) => number
   /**
    * Batch likeCount/replyCount/viewerHasLiked за набор от messageId-та —
    * до 4 агрегатни заявки ОБЩО за целия набор (не per-message), захранва REST
@@ -554,6 +592,226 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     return row ? toSnapshot(row) : null
   }
 
+  // ─── Individual message/reply moderation delete ─────────────────────────
+  //
+  // Root delete CASCADE-обхваща своите replies В САМАТА транзакция (не разчита
+  // на DB FK CASCADE — soft-delete е UPDATE, не DELETE, FK CASCADE никога не
+  // тригерва тук). Reply delete засяга само себе си. Mirror на established
+  // lobbyChatStore.deleteMessage атомарност (BEGIN IMMEDIATE, load-then-branch,
+  // idempotent already_deleted).
+
+  const selectReplyIdsForRootStatement = database.prepare(`
+    SELECT message_id FROM topic_messages
+    WHERE parent_message_id = ? AND deleted_at IS NULL;
+  `)
+
+  const selectAttachmentFilenamesForMessagesStatementCache = new Map<number, ReturnType<typeof database.prepare>>()
+  function getSelectAttachmentFilenamesForMessagesStatement(count: number): ReturnType<typeof database.prepare> {
+    const cached = selectAttachmentFilenamesForMessagesStatementCache.get(count)
+    if (cached) return cached
+    const placeholders = Array.from({ length: count }, () => '?').join(',')
+    const statement = database.prepare(`
+      SELECT storage_filename FROM topic_message_attachments WHERE message_id IN (${placeholders});
+    `)
+    selectAttachmentFilenamesForMessagesStatementCache.set(count, statement)
+    return statement
+  }
+
+  const deleteAttachmentsForMessagesStatementCache = new Map<number, ReturnType<typeof database.prepare>>()
+  function getDeleteAttachmentsForMessagesStatement(count: number): ReturnType<typeof database.prepare> {
+    const cached = deleteAttachmentsForMessagesStatementCache.get(count)
+    if (cached) return cached
+    const placeholders = Array.from({ length: count }, () => '?').join(',')
+    const statement = database.prepare(`
+      DELETE FROM topic_message_attachments WHERE message_id IN (${placeholders});
+    `)
+    deleteAttachmentsForMessagesStatementCache.set(count, statement)
+    return statement
+  }
+
+  const softDeleteMessagesStatementCache = new Map<number, ReturnType<typeof database.prepare>>()
+  function getSoftDeleteMessagesStatement(count: number): ReturnType<typeof database.prepare> {
+    const cached = softDeleteMessagesStatementCache.get(count)
+    if (cached) return cached
+    const placeholders = Array.from({ length: count }, () => '?').join(',')
+    const statement = database.prepare(`
+      UPDATE topic_messages SET deleted_at = CURRENT_TIMESTAMP WHERE message_id IN (${placeholders}) AND deleted_at IS NULL;
+    `)
+    softDeleteMessagesStatementCache.set(count, statement)
+    return statement
+  }
+
+  const insertMessageDeletionEventStatement = database.prepare(`
+    INSERT INTO topic_message_deletion_events (topic_id, message_id, parent_message_id) VALUES (?, ?, ?);
+  `)
+
+  const insertMessageDeletionAuditStatement = database.prepare(`
+    INSERT INTO topic_message_deletion_audit_log (
+      log_id, topic_id, message_id, parent_message_id, sender_profile_id, actor_account_id, actor_role
+    ) VALUES (?, ?, ?, ?, ?, ?, ?);
+  `)
+
+  /**
+   * Moderator delete на ЕДНО target съобщение (root ИЛИ reply):
+   *  - Ако target е ROOT (parent_message_id IS NULL): soft-delete-ва root-а
+   *    И всичките му (все още live) replies В ЕДНА транзакция — цял thread,
+   *    коректен deletion timestamp (CURRENT_TIMESTAMP на самия UPDATE),
+   *    ЕДИН deletion event + ЕДИН audit ред за root action (не N reда за
+   *    collateral replies, брифа §11).
+   *  - Ако target е REPLY: soft-delete само него, root и sibling replies
+   *    остават напълно непокътнати.
+   * Attachment DB redовете (max 1/съобщение) на ВСИЧКИ засегнати message ids
+   * се hard-delete-ват веднага и filenames се enqueue-ват за физически
+   * cleanup — reuse на established whole-topic invariant (topicModerationStore.deleteTopic).
+   * Idempotent: вече-deleted target → already_deleted, без нов audit/event ред.
+   */
+  function deleteMessage(input: {
+    topicId: string
+    messageId: string
+    actorAccountId: string | null
+    actorRole: 'admin' | 'subadmin' | 'top_chat_admin' | 'pika_team' | 'chat_admin'
+  }):
+    | { ok: true; deletedMessageIds: string[]; deletedAttachmentFilenames: string[]; parentMessageId: string | null; deletedAt: string }
+    | { ok: false; code: 'not_found' | 'already_deleted' } {
+    const target = selectByMessageIdStatement.get(input.messageId) as TopicMessageRow | undefined
+
+    if (target === undefined || target.topic_id !== input.topicId) {
+      return { ok: false, code: 'not_found' }
+    }
+
+    if (target.deleted_at !== null) {
+      return { ok: false, code: 'already_deleted' }
+    }
+
+    const isRoot = target.parent_message_id === null
+    const affectedMessageIds: string[] = [target.message_id]
+
+    if (isRoot) {
+      const replyRows = selectReplyIdsForRootStatement.all(target.message_id) as Array<{ message_id: string }>
+      for (const row of replyRows) {
+        affectedMessageIds.push(row.message_id)
+      }
+    }
+
+    let deletedAttachmentFilenames: string[] = []
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const attachmentRows = getSelectAttachmentFilenamesForMessagesStatement(affectedMessageIds.length)
+        .all(...affectedMessageIds) as Array<{ storage_filename: string }>
+      deletedAttachmentFilenames = attachmentRows.map((row) => row.storage_filename)
+
+      for (const filename of deletedAttachmentFilenames) {
+        insertAttachmentDeletionStatement.run(filename)
+      }
+
+      getDeleteAttachmentsForMessagesStatement(affectedMessageIds.length).run(...affectedMessageIds)
+
+      const changes = getSoftDeleteMessagesStatement(affectedMessageIds.length).run(...affectedMessageIds)
+      if ((changes.changes as number) === 0) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'already_deleted' }
+      }
+
+      insertMessageDeletionEventStatement.run(input.topicId, target.message_id, target.parent_message_id)
+      insertMessageDeletionAuditStatement.run(
+        randomUUID(),
+        input.topicId,
+        target.message_id,
+        target.parent_message_id,
+        target.sender_profile_id,
+        input.actorAccountId,
+        input.actorRole,
+      )
+
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // ignore rollback failure, surface the original error below
+      }
+      throw error
+    }
+
+    const updatedTargetRow = selectByMessageIdStatement.get(target.message_id) as TopicMessageRow
+    return {
+      ok: true,
+      deletedMessageIds: affectedMessageIds,
+      deletedAttachmentFilenames,
+      parentMessageId: target.parent_message_id,
+      deletedAt: dbDateToUtc(updatedTargetRow.deleted_at as string),
+    }
+  }
+
+  const selectMaxDeletionEventSeqStatement = database.prepare(`
+    SELECT COALESCE(MAX(event_seq), 0) as maxSeq FROM topic_message_deletion_events;
+  `)
+
+  function getMaxDeletionEventSeq(): number {
+    const row = selectMaxDeletionEventSeqStatement.get() as { maxSeq: number }
+    return row.maxSeq
+  }
+
+  const selectDeletionEventsStatement = database.prepare(`
+    SELECT event_seq, topic_id, message_id, parent_message_id
+    FROM topic_message_deletion_events
+    WHERE event_seq > ?
+    ORDER BY event_seq ASC
+    LIMIT ?;
+  `)
+
+  function pollMessageDeletionEvents(afterEventSeq: number, limit: number): TopicMessageDeletionEvent[] {
+    const rows = selectDeletionEventsStatement.all(afterEventSeq, limit) as Array<{
+      event_seq: number
+      topic_id: string
+      message_id: string
+      parent_message_id: string | null
+    }>
+    return rows.map((row) => ({
+      eventSeq: row.event_seq,
+      topicId: row.topic_id,
+      messageId: row.message_id,
+      parentMessageId: row.parent_message_id,
+    }))
+  }
+
+  /**
+   * Bounded batch hard-purge на individual-message-moderation soft-deleted
+   * съобщения, чийто `deleted_at` е >= 180 дни в миналото (removed_at <=
+   * cutoff boundary policy, симетрично на topicModerationStore.purgeRemovedTopicsBefore).
+   * Изключва съобщения от `removed` теми изрично — whole-topic 180-day purge
+   * (purgeRemovedTopicsBefore, anchored от topics.removed_at) е authoritative
+   * там, за да няма два competing purge lifecycle-а за една и съща removed
+   * тема (individual-message-moderation брифа §3/§22).
+   * Hard DELETE FROM topic_messages CASCADE-трие автоматично: replies (self-FK,
+   * само за root targets — вече soft-deleted заедно с root-а в deleteMessage),
+   * topic_message_likes, topic_message_deletion_events, topic_message_deletion_audit_log
+   * (виж migration коментара). topic_message_attachments вече е празно за тези
+   * redове (hard-deleted immediate при самия deleteMessage() delete-call).
+   * Bounded batch без OFFSET (established convention).
+   */
+  function purgeDeletedTopicMessagesBefore(cutoff: Date, batchSize: number): number {
+    const cutoffStr = cutoff.toISOString().slice(0, 19).replace('T', ' ')
+    let totalDeleted = 0
+    for (;;) {
+      const rows = database.prepare(`
+        SELECT m.message_id FROM topic_messages m
+        INNER JOIN topics t ON t.topic_id = m.topic_id
+        WHERE m.deleted_at IS NOT NULL AND m.deleted_at <= ? AND t.status != 'removed'
+        ORDER BY m.message_id ASC
+        LIMIT ?;
+      `).all(cutoffStr, batchSize) as Array<{ message_id: string }>
+      if (rows.length === 0) break
+      const ids = rows.map((row) => row.message_id)
+      const placeholders = ids.map(() => '?').join(',')
+      database.prepare(`DELETE FROM topic_messages WHERE message_id IN (${placeholders});`).run(...ids)
+      totalDeleted += ids.length
+      if (rows.length < batchSize) break
+    }
+    return totalDeleted
+  }
+
   // ─── Likes (Етап 3) ──────────────────────────────────────────────────────
 
   function getMessageAggregatesByIds(
@@ -773,6 +1031,10 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     getReplies,
     getRepliesAfter,
     getMessageById,
+    deleteMessage,
+    getMaxDeletionEventSeq,
+    pollMessageDeletionEvents,
+    purgeDeletedTopicMessagesBefore,
     getMessageAggregatesByIds,
     getAttachmentsByMessageIds,
     getAttachmentForDownload,

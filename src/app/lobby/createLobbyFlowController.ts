@@ -148,6 +148,25 @@ function isLobbyChatModeratorAuthSession(session: LobbyAuthSession | null): bool
 }
 
 /**
+ * Individual message/reply moderation UI достъп (delete на ОТДЕЛНО root
+ * съобщение или reply) — само UX, сървърът презаверява на всяко HTTP
+ * moderation действие през isTopicMessageModeratorSession (authStore.ts).
+ * Различен role set от isTopicModeratorAuthSession (той е за whole-topic
+ * mute/reports/audit, 4 роли, БЕЗ chat_admin) — умишлено собствен predicate,
+ * не reuse на isLobbyChatModeratorAuthSession, макар role set-ът да съвпада
+ * 1:1 в момента (individual-message-moderation брифа §4).
+ */
+function isTopicMessageModeratorAuthSession(session: LobbyAuthSession | null): boolean {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'subadmin'
+    || session.account.role === 'top_chat_admin'
+    || session.account.role === 'pika_team'
+    || session.account.role === 'chat_admin'
+  )
+}
+
+/**
  * Topics moderation UI достъп (mute/unmute/reports/audit) — само UX,
  * сървърът презаверява на всяко HTTP moderation действие през
  * isTopicModeratorSession (authStore.ts). Изрично БЕЗ chat_admin — Topics
@@ -631,6 +650,10 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true }
     | { ok: false; message: string }
   >
+  onTopicMessageDelete?: (topicId: string, messageId: string) => Promise<
+    | { ok: true }
+    | { ok: false; message: string }
+  >
   onTopicReport?: (topicId: string, reason: string) => Promise<
     | { ok: true }
     | { ok: false; code?: string; message: string }
@@ -914,6 +937,10 @@ type InternalLobbyFlowState = {
   topicDeleteReason: string
   topicDeleteBusy: boolean
   topicDeleteErrorText: string | null
+  /** Individual root съобщение/reply moderation delete confirm — single-step (без reason поле). */
+  topicMessageDeleteConfirm: { topicId: string; messageId: string; isRoot: boolean } | null
+  topicMessageDeleteBusy: boolean
+  topicMessageDeleteErrorText: string | null
   /** Report popup — обикновен потребител докладва тема. */
   topicReportPopupOpen: boolean
   topicReportReason: string
@@ -1352,6 +1379,9 @@ function createInitialState(): InternalLobbyFlowState {
     topicDeleteReason: '',
     topicDeleteBusy: false,
     topicDeleteErrorText: null,
+    topicMessageDeleteConfirm: null,
+    topicMessageDeleteBusy: false,
+    topicMessageDeleteErrorText: null,
     topicReportPopupOpen: false,
     topicReportReason: '',
     topicReportBusy: false,
@@ -3239,6 +3269,9 @@ export function createLobbyFlowController(
       topicDeleteReason: state.topicDeleteReason,
       topicDeleteBusy: state.topicDeleteBusy,
       topicDeleteErrorText: state.topicDeleteErrorText,
+      topicMessageDeleteConfirm: state.topicMessageDeleteConfirm,
+      topicMessageDeleteBusy: state.topicMessageDeleteBusy,
+      topicMessageDeleteErrorText: state.topicMessageDeleteErrorText,
       topicReportPopupOpen: state.topicReportPopupOpen,
       topicReportReason: state.topicReportReason,
       topicReportBusy: state.topicReportBusy,
@@ -3253,6 +3286,7 @@ export function createLobbyFlowController(
       adminTopicReportActionBusyId: state.adminTopicReportActionBusyId,
       isTopicModerator: isTopicModeratorAuthSession(options.getAuthSession?.() ?? null),
       isWholeTopicModerator: isTopicWholeTopicModeratorAuthSession(options.getAuthSession?.() ?? null),
+      isTopicMessageModerator: isTopicMessageModeratorAuthSession(options.getAuthSession?.() ?? null),
     }
 
     renderLobbyScreen(options.root, {
@@ -3586,6 +3620,15 @@ export function createLobbyFlowController(
       },
       onTopicDeleteConfirmSubmit: () => {
         void confirmTopicDelete()
+      },
+      onTopicMessageDeleteClick: (topicId, messageId, isRoot) => {
+        openTopicMessageDeleteConfirm(topicId, messageId, isRoot)
+      },
+      onTopicMessageDeleteConfirmClose: () => {
+        closeTopicMessageDeleteConfirm()
+      },
+      onTopicMessageDeleteConfirmSubmit: () => {
+        void confirmTopicMessageDelete()
       },
       onTopicReportClick: () => {
         openTopicReportPopup()
@@ -5207,6 +5250,48 @@ export function createLobbyFlowController(
     // Realtime topic_deleted push (публичен broadcast) ще прибере ВСИЧКИ
     // subscribers (вкл. самия actor, ако е subscribed) обратно в Topics
     // directory — виж handleServerMessage. Не дублираме навигацията тук.
+  }
+
+  // Single-step confirm (за разлика от двустъпковия topicDeleteConfirm по-горе
+  // — individual-message delete няма reason field, брифа §19). isRoot
+  // определя предупредителния текст (root: "и всички отговори"), не
+  // server-side поведението (delete request-ът е идентичен, сървърът сам
+  // определя root-vs-reply от parent_message_id).
+  function openTopicMessageDeleteConfirm(topicId: string, messageId: string, isRoot: boolean): void {
+    state.topicMessageDeleteConfirm = { topicId, messageId, isRoot }
+    state.topicMessageDeleteErrorText = null
+    render()
+  }
+
+  function closeTopicMessageDeleteConfirm(): void {
+    if (state.topicMessageDeleteBusy) return
+    state.topicMessageDeleteConfirm = null
+    render()
+  }
+
+  async function confirmTopicMessageDelete(): Promise<void> {
+    const pending = state.topicMessageDeleteConfirm
+    if (!pending || state.topicMessageDeleteBusy) return
+
+    state.topicMessageDeleteBusy = true
+    state.topicMessageDeleteErrorText = null
+    render()
+
+    const result = await options.onTopicMessageDelete?.(pending.topicId, pending.messageId)
+    state.topicMessageDeleteBusy = false
+
+    if (!result || !result.ok) {
+      state.topicMessageDeleteErrorText = result?.message ?? 'Грешка при изтриване на съобщението.'
+      render()
+      return
+    }
+
+    state.topicMessageDeleteConfirm = null
+    render()
+    // Realtime topic_message_deleted push (публичен broadcast) ще махне
+    // съобщението/thread-а за ВСИЧКИ subscribers (вкл. самия actor) — виж
+    // handleServerMessage. Не дублираме local state mutation тук (same-instance
+    // broadcast стига и до самия originator, mirror на confirmTopicDelete).
   }
 
   function openTopicReportPopup(): void {
@@ -11067,6 +11152,44 @@ export function createLobbyFlowController(
         const fallbackTopic = (state.topics ?? []).find((t) => t.isGeneral) ?? state.topics?.[0] ?? null
         if (fallbackTopic) {
           openTopic(fallbackTopic.topicId)
+        }
+      }
+      render()
+      return true
+    }
+
+    if (message.type === 'topic_message_deleted') {
+      // Public broadcast при moderator delete на ОТДЕЛНО root съобщение или
+      // reply (individual-message moderation, различно от topic_deleted
+      // по-горе). No-op ако local state изобщо не съдържа messageId-а (block
+      // filtering/viewer never loaded it — брифа §28). Никакъв tombstone
+      // текст — пълно премахване от локалния state, mirror на established
+      // lobby_chat_message_deleted handling.
+      if (message.parentMessageId === null) {
+        // ROOT target — маха root-а И всички locally-loaded replies към него,
+        // затваря pending reply composer state (draft/pending/error) за този
+        // root, за да не остане невидим dangling UI state (брифа §20).
+        if (state.topicMessages) {
+          state.topicMessages = state.topicMessages.filter((m) => m.messageId !== message.messageId)
+        }
+        delete state.topicRepliesByRootId[message.messageId]
+        state.topicExpandedReplyRootIds = state.topicExpandedReplyRootIds.filter((id) => id !== message.messageId)
+        delete state.topicReplyComposerDraftByRootId[message.messageId]
+        delete state.topicReplyComposerPendingRequestIdByRootId[message.messageId]
+        delete state.topicReplyComposerErrorTextByRootId[message.messageId]
+        delete state.topicReplyComposerPendingImageByRootId[message.messageId]
+        if (state.topicReplyComposerOpenRootId === message.messageId) {
+          state.topicReplyComposerOpenRootId = null
+        }
+      } else {
+        // REPLY target — маха само него от родителския replies списък. Root
+        // и sibling replies остават непокътнати; replyCount на root-а се
+        // reconcile-ва естествено от canonical aggregate mechanism (следваща
+        // REST/poll refresh), mirror на established deleted_at IS NULL
+        // read-path семантика — не пипаме локален counter directno тук.
+        const siblingReplies = state.topicRepliesByRootId[message.parentMessageId]
+        if (siblingReplies) {
+          state.topicRepliesByRootId[message.parentMessageId] = siblingReplies.filter((r) => r.messageId !== message.messageId)
         }
       }
       render()
