@@ -360,7 +360,7 @@ try {
     await clickMessageAuthor(page, 'author-x')
     // canonical fetch за author-x остава pending (не сме доставили отговор).
     await page.waitForTimeout(20)
-    assert(await isProfilePopupOpen(page), 'Popup трябва да е отворен веднага при клик (с placeholder данни)')
+    assert(!(await isProfilePopupOpen(page)), 'Popup must stay closed while canonical profile authorization is pending')
 
     await clickMessageAuthor(page, 'author-y')
     // canonical fetch за author-y също остава pending.
@@ -394,7 +394,7 @@ try {
     )
   })
 
-  await check('[8] Popup затворен преди response → закъснелият response не го отваря отново', async () => {
+  await check('[8] Pending author profile auth не показва placeholder и отваря popup чак след canonical response', async () => {
     // Нужна е НОВА onTopicMessagesLoad заявка за topic-b (queue-то от [6] е
     // вече консумирано) — превключваме away и обратно, за да я тригнем.
     await clickTopicChip(page, 'topic-general')
@@ -410,20 +410,18 @@ try {
 
     await clickMessageAuthor(page, 'author-z')
     await page.waitForTimeout(20)
-    assert(await isProfilePopupOpen(page), 'Popup трябва да е отворен след клика')
+    assert(!(await isProfilePopupOpen(page)), 'Popup must stay closed until the canonical profile authorization response arrives')
 
-    await closeProfilePopup(page)
-    await page.waitForTimeout(20)
-    assert(!(await isProfilePopupOpen(page)), 'Popup трябва да е затворен след клик на close')
-
-    // Закъснелият response за author-z пристига СЛЕД затварянето.
+    // Response за author-z пристига след pending състоянието.
     await deliverNextProfileResponse(page, 'author-z')
-    await page.waitForTimeout(100)
-
-    assert(
-      !(await isProfilePopupOpen(page)),
-      'Закъснелият response НЕ трябва да отвори повторно затворения popup',
+    await page.waitForFunction(
+      (needle) => ((window as any).__topicsSwitchRaceHarness.getProfilePopupText() ?? '').includes(needle),
+      'Canonical author-z',
+      { timeout: 3000 },
     )
+
+    const text = await getProfilePopupText(page)
+    assert(text !== null && text.includes('Canonical author-z'), `Popup must show author-z after canonical response, got: ${text}`)
   })
 
   // ─── [10] Layout regression: header/topics bar остават фиксирани при vertical scroll ──

@@ -24,7 +24,9 @@ async function check(name: string, fn: () => void | Promise<void>): Promise<void
 
 const renderTopics = await read('src/app/lobby/renderTopicsScreen.ts')
 const renderLobby = await read('src/app/lobby/renderLobbyScreen.ts')
+const profilePopupSource = await read('src/ui/overlays/renderPlayerProfilePopup.ts')
 const controller = await read('src/app/lobby/createLobbyFlowController.ts')
+const mainSource = await read('src/main.ts')
 const packageJson = await read('package.json')
 const topicsPersonalPanelSource = renderLobby.slice(
   renderLobby.indexOf('export function renderTopicsPersonalChatPanel'),
@@ -114,6 +116,7 @@ function createRenderState(overrides: Partial<LobbyScreenState> = {}): LobbyScre
     blockedPlayersErrorText: null,
     blockedPlayersLimit: 0,
     blockLimitPopupOpen: false,
+    profileAccessBlockPopup: null,
     noPlayersModalOpen: false,
     isInGame: false,
     displayName: 'Viewer',
@@ -209,9 +212,9 @@ await check('[3] Topics Personal mode hides topic stream/chips and renders perso
   assert(renderLobby.includes("const activeConversation = state.topicsPersonalView === 'conversation'"), 'detail must render only after selecting a conversation')
 })
 
-await check('[4] Global Personal badge uses friend-only unread message sum and visual 99 cap', () => {
+await check('[4] Global Personal badge uses friend + vip_dm unread message sum and visual 99 cap', () => {
   assert(renderLobby.includes('export function getPersonalChatUnreadTotal'), 'missing global unread helper')
-  assert(renderLobby.includes(".filter((conversation) => conversation.kind === 'friend')"), 'global unread must filter friend conversations')
+  assert(renderLobby.includes("conversation.kind === 'friend' || conversation.kind === 'vip_dm'"), 'global unread must include friend + vip_dm conversations')
   assert(renderLobby.includes('conversation.unreadCount'), 'global unread must use unreadCount values')
   assert(renderLobby.includes('reduce((total, conversation) => total +'), 'global unread must sum message counts')
   assert(renderLobby.includes('export function formatPersonalChatUnreadBadgeCount'), 'missing badge formatter')
@@ -220,12 +223,12 @@ await check('[4] Global Personal badge uses friend-only unread message sum and v
   assert(renderTopics.includes('data-topics-personal-badge="1"'), 'missing global Personal badge node')
 })
 
-await check('[5] Personal list is friend-only and excludes pika_support', () => {
+await check('[5] Topics Personal list includes friend + vip_dm and excludes pika_support', () => {
   assert(renderLobby.includes('const friendConversations = state.chatConversations'), 'personal list must derive from chatConversations')
-  assert(renderLobby.includes(".filter((conversation) => conversation.kind === 'friend')"), 'personal list must filter kind friend')
+  assert(renderLobby.includes("conversation.kind === 'friend' || conversation.kind === 'vip_dm'"), 'personal list must include kind friend + vip_dm')
   assert(topicsPersonalPanelSource.length > 0, 'could not isolate Topics Personal panel source')
   assert(!topicsPersonalPanelSource.includes('pikaSupportBadge'), 'Topics Personal panel must not render pika support badge/list items')
-  assert(controller.includes('getFriendChatConversations()'), 'controller must use friend-only conversation helper')
+  assert(controller.includes('getTopicsPersonalChatConversations()'), 'controller must use Topics Personal conversation helper')
 })
 
 await check('[6] Per-conversation badges use same 99 cap and are hidden at zero', () => {
@@ -382,6 +385,61 @@ await check('[19] Topics profile entry opens Topics Personal while legacy Chat e
   assert(controller.includes('void showTopicsPersonalChat(friendshipId)'), 'Topics profile chat action must open Topics Personal conversation')
   assert(controller.includes('void showChatPanel().then'), 'legacy non-Topics chat entry must still use standalone Chat screen')
   assert(controller.includes("state.currentScreen = 'chat'"), 'standalone Chat screen must still exist for legacy entry')
+})
+
+await check('[20] Legacy Chat remains friend-only while Topics Personal admits vip_dm', () => {
+  assert(renderLobby.includes(".filter((conversation) => conversation.kind === 'friend')"), 'legacy Chat must filter strictly to friend conversations')
+  assert(renderLobby.includes("conversation.kind === 'friend' || conversation.kind === 'vip_dm'"), 'Topics Personal/global badge must include vip_dm')
+  assert(!topicsPersonalPanelSource.includes('pikaSupportBadge'), 'Topics Personal must keep pika_support isolated')
+})
+
+await check('[21] Profile block denial popup uses exact safe UX copy and unblock semantics', () => {
+  assert(renderLobby.includes('Вие сте блокирали този потребител.'), 'viewer-is-blocker text missing')
+  assert(renderLobby.includes('Този потребител ви е блокирал.'), 'target-is-blocker text missing')
+  assert(renderLobby.includes('data-profile-access-block-unblock'), 'blocked-by-viewer popup must expose unblock action')
+  assert(renderLobby.includes("popup.code === 'profile_blocked_by_viewer'"), 'unblock action must be gated to viewer-is-blocker denial')
+})
+
+await check('[22] Other-user profile entry points use protected canonical profile open flow', () => {
+  assert(controller.includes('async function openProtectedProfileById'), 'missing protected profile-open helper')
+  assert(controller.includes('const requestToken = ++state.profilePopupRequestToken'), 'protected profile flow must keep stale-response generation guard')
+  assert(controller.includes('state.profileAccessBlockPopup = { profileId, code: result.code }'), 'block denial must render safe popup instead of profile content')
+  assert(controller.includes('void openProtectedProfileById(profile.profileId, profile.displayName)'), 'directory/profile row handlers must use protected flow')
+  assert(mainSource.includes("code?: 'profile_blocked_by_viewer' | 'profile_blocked_viewer'"), 'HTTP profile loader must preserve profile block denial code')
+})
+
+await check('[23] Topics profile exposes the dedicated Personal Message action only through explicit Topics context', () => {
+  assert(profilePopupSource.includes('data-player-profile-topics-personal-message'), 'profile popup must render the Topics Personal Message action hook')
+  assert(profilePopupSource.includes('Лично съобщение'), 'profile popup must show exact Bulgarian Personal Message label')
+  assert(controller.includes("type ProfilePopupContext = 'topics' | 'other'"), 'controller must model profile popup context explicitly')
+  assert(controller.includes("void openProtectedProfileById(profileId, displayName, 'topics')"), 'Topics author profile opens must mark Topics context')
+  assert(controller.includes("state.profilePopupContext === 'topics'"), 'Personal Message visibility must be gated by Topics context')
+  assert(controller.includes('showTopicsPersonalMessageButton,'), 'popup sync must receive the Topics-only visibility flag')
+})
+
+await check('[24] Topics Personal Message opens existing friend/vip_dm before starting a new vip_dm', () => {
+  assert(controller.includes('function findTopicsPersonalConversationByProfileId'), 'missing canonical existing-conversation lookup')
+  assert(controller.includes("conversation.kind === 'friend' || conversation.kind === 'vip_dm'"), 'existing lookup must include friend + vip_dm')
+  assert(controller.includes('await loadChatConversations()'), 'profile action must refresh/reconcile conversations before deciding')
+  assert(controller.includes('await showTopicsPersonalChat(existingConversation.friendshipId)'), 'existing conversation must open exact canonical friendshipId')
+  assert(controller.includes('if (!options.onVipDmChatStart)'), 'new vip_dm start must be behind backend start option')
+})
+
+await check('[25] New VIP DM start uses backend canonical conversation and prevents duplicate rows', () => {
+  assert(mainSource.includes("/api/chat/vip-dm/start"), 'main client must call the canonical vip-dm/start endpoint')
+  assert(mainSource.includes('body: JSON.stringify({ recipientProfileId })'), 'vip-dm/start must send recipientProfileId body')
+  assert(controller.includes('mergeCanonicalChatConversation(result.conversation)'), 'successful start must merge returned canonical conversation')
+  assert(controller.includes('state.chatConversations.filter((c) => c.friendshipId !== conversation.friendshipId)'), 'merge must dedupe by canonical friendshipId')
+  assert(controller.includes('await showTopicsPersonalChat(result.conversation.friendshipId)'), 'successful start must open returned canonical friendshipId')
+})
+
+await check('[26] VIP DM start errors map to Bulgarian UX without raw machine codes', () => {
+  assert(mainSource.includes("case 'vip_required':"), 'vip_required must be mapped')
+  assert(mainSource.includes('Личните съобщения към потребители извън приятелите са достъпни само за VIP.'), 'viewer VIP-required Bulgarian UX missing')
+  assert(mainSource.includes("case 'vip_counterpart_required':"), 'vip_counterpart_required must be mapped')
+  assert(mainSource.includes('Този потребител в момента не е активен VIP.'), 'counterpart inactive Bulgarian UX missing')
+  assert(mainSource.includes("case 'blocked':"), 'blocked must be mapped')
+  assert(controller.includes('state.friendActionMessage = result.message'), 'profile action errors must be shown as safe UX message')
 })
 
 console.log('PASS topics personal integration client checks')

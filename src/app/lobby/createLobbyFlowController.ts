@@ -115,6 +115,9 @@ export type LobbyFlowScreen =
   | 'fair-play'
 export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
+export type ProfileAccessBlockCode = 'profile_blocked_by_viewer' | 'profile_blocked_viewer'
+type ProfilePopupContext = 'topics' | 'other'
+
 export type LobbyAuthSession = {
   account: {
     role: string
@@ -405,6 +408,10 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; friendshipId: string }
     | { ok: false; message: string }
   >
+  onVipDmChatStart?: (recipientProfileId: string) => Promise<
+    | { ok: true; conversation: ChatConversationSnapshot }
+    | { ok: false; message: string }
+  >
   onChatConversationsLoad?: (includeArchived?: boolean) => Promise<
     | { ok: true; conversations: ChatConversationSnapshot[] }
     | { ok: false; message: string }
@@ -601,7 +608,7 @@ export type CreateLobbyFlowControllerOptions = {
   /** Canonical single-profile fetch по id — за profile popup, когато профилът не е (или може да е остарял) в state.players кеша. */
   onProfileByIdLoad?: (profileId: string) => Promise<
     | { ok: true; profile: PlayerPublicProfileSnapshot }
-    | { ok: false; message: string }
+    | { ok: false; message: string; code?: ProfileAccessBlockCode }
   >
   /** beforeSeq=null → последните N съобщения; иначе → по-стари от beforeSeq (cursor pagination). */
   onTopicMessagesLoad?: (topicId: string, beforeSeq: number | null) => Promise<
@@ -828,6 +835,7 @@ type InternalLobbyFlowState = {
   profilePopupOpen: boolean
   profilePopupProfile: PlayerPublicProfileSnapshot | null
   profilePopupCanEdit: boolean
+  profilePopupContext: ProfilePopupContext
   /** VIP изтичане на СОБСТВЕНИЯ профил на viewer-а — lazy-load само когато popup-ът показва own profile. null = все още не е зареден. */
   ownVipActiveUntil: string | null
   /** profileId, за който ownVipActiveUntil вече е (или се) зарежда — memoization guard, аналогично на profilePopupTargetRoleProfileId. */
@@ -1179,6 +1187,7 @@ type InternalLobbyFlowState = {
   blockedPlayersErrorText: string | null
   blockedPlayersLimit: number
   blockLimitPopupOpen: boolean
+  profileAccessBlockPopup: { profileId: string; code: ProfileAccessBlockCode } | null
   noPlayersModalOpen: boolean
   supportPopupOpen: boolean
   supportMessages: SupportMessageSnapshot[]
@@ -1337,6 +1346,7 @@ function createInitialState(): InternalLobbyFlowState {
     profilePopupOpen: false,
     profilePopupProfile: null,
     profilePopupCanEdit: true,
+    profilePopupContext: 'other',
     ownVipActiveUntil: null,
     ownVipActiveUntilLoadedForProfileId: null,
     topicsLoading: false,
@@ -1599,6 +1609,7 @@ function createInitialState(): InternalLobbyFlowState {
     blockedPlayersErrorText: null,
     blockedPlayersLimit: 50,
     blockLimitPopupOpen: false,
+    profileAccessBlockPopup: null,
     noPlayersModalOpen: false,
     supportPopupOpen: false,
     supportMessages: [],
@@ -3127,6 +3138,7 @@ export function createLobbyFlowController(
       blockedPlayersErrorText: state.blockedPlayersErrorText,
       blockedPlayersLimit: state.blockedPlayersLimit,
       blockLimitPopupOpen: state.blockLimitPopupOpen,
+      profileAccessBlockPopup: state.profileAccessBlockPopup,
       noPlayersModalOpen: state.noPlayersModalOpen,
       isInGame: options.getIsInGame?.() ?? false,
       supportPopupOpen: state.supportPopupOpen,
@@ -3700,63 +3712,7 @@ export function createLobbyFlowController(
         render()
       },
       onTopicMessageAuthorClick: (profileId, displayName) => {
-        const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId
-        const isOwn = Boolean(ownProfileId && profileId === ownProfileId)
-        const requestToken = ++state.profilePopupRequestToken
-
-        // Отваряме popup-а веднага с каквото вече знаем (кеширан players
-        // запис или само profileId/displayName от message row-а), после
-        // fetch-ваме canonical данни отдолу — потребителят не чака празен
-        // popup, но резултатът ще се презапише с актуалните данни щом дойдат.
-        const cached = state.players.find((p) => p.profileId === profileId) ?? null
-        state.profilePopupProfile = isOwn
-          ? null
-          : cached ?? {
-              profileId,
-              displayName,
-              avatarUrl: null,
-              level: null,
-              rankTitle: null,
-              skillRating: null,
-              completedGamesCount: null,
-              wonGamesCount: null,
-              currentRankGames: null,
-              nextRankGames: null,
-              gamesUntilNextRank: null,
-              rankProgressRatio: null,
-              averageRating: null,
-              totalRatingsCount: null,
-              yellowCoinsBalance: null,
-              galleryImages: [],
-              gender: null,
-              likesCount: null,
-              hasLikedByMe: null,
-              isBlockedByMe: null,
-              isVip: null,
-            }
-        state.profilePopupCanEdit = isOwn
-        state.profilePopupOpen = true
-        renderPopupOnly()
-        if (isOwn) {
-          void fetchOwnLikesCount()
-          return
-        }
-        void ensureFriendshipsLoaded()
-
-        if (!options.onProfileByIdLoad) return
-        void (async () => {
-          const result = await options.onProfileByIdLoad!(profileId)
-          // Stale-response guard: ако потребителят е кликнал на друг профил
-          // МЕЖДУВРЕМЕННО, token-ът вече не съвпада — изхвърляме резултата.
-          // Проверяваме и profilePopupOpen изрично — token сам по себе си не
-          // се "изгаря" при затваряне (close минава през ~30 различни call
-          // sites, не всички викат renderPopupOnly), затова затворен popup
-          // винаги отхвърля закъснял резултат, независимо от token-а.
-          if (state.profilePopupRequestToken !== requestToken || !state.profilePopupOpen) return
-          if (!result.ok) return
-          state.profilePopupProfile = result.profile
-          renderPopupOnly()
-        })()
+        void openProtectedProfileById(profileId, displayName, 'topics')
       },
       onTournamentHowItWorksOpen: () => {
         showTournamentHowItWorksPage()
@@ -3909,6 +3865,13 @@ export function createLobbyFlowController(
         state.blockLimitPopupOpen = false
         render()
       },
+      onProfileAccessBlockClose: () => {
+        state.profileAccessBlockPopup = null
+        render()
+      },
+      onProfileAccessBlockUnblock: (profileId) => {
+        void unblockPlayer(profileId)
+      },
       onNoPlayersModalClose: () => {
         state.noPlayersModalOpen = false
         render()
@@ -3953,14 +3916,8 @@ export function createLobbyFlowController(
         render()
       },
       onPlayerCardClick: (profile) => {
-        const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId
-        const isOwn = Boolean(ownProfileId && profile.profileId === ownProfileId)
-        state.profilePopupProfile = isOwn ? null : (state.players.find(p => p.profileId === profile.profileId) ?? profile)
-        state.profilePopupCanEdit = isOwn
-        state.profilePopupOpen = true
-        renderPopupOnly()
-        if (isOwn) void fetchOwnLikesCount()
-        else void ensureFriendshipsLoaded()
+        if (profile.profileId === null) return
+        void openProtectedProfileById(profile.profileId, profile.displayName)
       },
       onPlayersSearchChange: (query) => {
         // Desktop: обновява и draft, и applied → мигновен локален filter,
@@ -3983,23 +3940,12 @@ export function createLobbyFlowController(
       },
       onPlayersPageChange: (page) => { void goToPlayersPage(page) },
       onLeaderboardPlayerClick: (profile) => {
-        const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId
-        const isOwn = Boolean(ownProfileId && profile.profileId === ownProfileId)
-        state.profilePopupProfile = isOwn ? null : (state.players.find(p => p.profileId === profile.profileId) ?? profile)
-        state.profilePopupCanEdit = isOwn
-        state.profilePopupOpen = true
-        renderPopupOnly()
-        if (isOwn) void fetchOwnLikesCount()
-        else void ensureFriendshipsLoaded()
+        if (profile.profileId === null) return
+        void openProtectedProfileById(profile.profileId, profile.displayName)
       },
       onFriendProfileClick: (profile) => {
-        const ownProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId
-        const isOwn = Boolean(ownProfileId && profile.profileId === ownProfileId)
-        state.profilePopupProfile = isOwn ? null : (state.players.find(p => p.profileId === profile.profileId) ?? profile)
-        state.profilePopupCanEdit = isOwn
-        state.profilePopupOpen = true
-        renderPopupOnly()
-        if (isOwn) void fetchOwnLikesCount()
+        if (profile.profileId === null) return
+        void openProtectedProfileById(profile.profileId, profile.displayName)
       },
       onFriendRequestClick: (profileId) => {
         void submitFriendRequest(profileId)
@@ -8627,6 +8573,70 @@ export function createLobbyFlowController(
     })
   }
 
+  function mergeCanonicalChatConversation(conversation: ChatConversationSnapshot): void {
+    const existingConversation = state.chatConversations.find(
+      (c) => c.friendshipId === conversation.friendshipId,
+    )
+    const updatedConversation = existingConversation?.friend.isOnline !== undefined
+      ? { ...conversation, friend: { ...conversation.friend, isOnline: existingConversation.friend.isOnline } }
+      : conversation
+    state.chatConversations = [
+      updatedConversation,
+      ...state.chatConversations.filter((c) => c.friendshipId !== conversation.friendshipId),
+    ]
+  }
+
+  function findTopicsPersonalConversationByProfileId(profileId: string): ChatConversationSnapshot | null {
+    return state.chatConversations.find((conversation) =>
+      conversation.friend.profileId === profileId &&
+      (conversation.kind === 'friend' || conversation.kind === 'vip_dm')
+    ) ?? null
+  }
+
+  async function openTopicsPersonalMessageFromProfile(recipientProfileId: string): Promise<void> {
+    if (state.profilePopupContext !== 'topics') return
+    if (recipientProfileId.trim().length === 0) return
+
+    state.chatErrorText = null
+    await loadChatConversations()
+
+    const existingConversation = findTopicsPersonalConversationByProfileId(recipientProfileId)
+    if (existingConversation !== null) {
+      state.profilePopupOpen = false
+      state.profilePopupProfile = null
+      state.profilePopupContext = 'other'
+      syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+      await showTopicsPersonalChat(existingConversation.friendshipId)
+      return
+    }
+
+    if (!options.onVipDmChatStart) {
+      state.friendActionMessageProfileId = recipientProfileId
+      state.friendActionMessage = 'Личните съобщения временно не са налични.'
+      renderPopupOnly()
+      return
+    }
+
+    const result = await options.onVipDmChatStart(recipientProfileId)
+
+    if (!result.ok) {
+      state.friendActionMessageProfileId = recipientProfileId
+      state.friendActionMessage = result.message
+      renderPopupOnly()
+      return
+    }
+
+    mergeCanonicalChatConversation(result.conversation)
+    await loadChatConversations()
+    mergeCanonicalChatConversation(result.conversation)
+
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupContext = 'other'
+    syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+    await showTopicsPersonalChat(result.conversation.friendshipId)
+  }
+
   async function submitGiftCoins(
     friendshipId: string,
     amount: number,
@@ -8694,6 +8704,10 @@ export function createLobbyFlowController(
     return state.chatConversations.filter((conversation) => conversation.kind === 'friend')
   }
 
+  function getTopicsPersonalChatConversations(): ChatConversationSnapshot[] {
+    return state.chatConversations.filter((conversation) => conversation.kind === 'friend' || conversation.kind === 'vip_dm')
+  }
+
   function isActivePersonalChatConversation(friendshipId: string): boolean {
     return (
       state.activeChatFriendshipId === friendshipId &&
@@ -8750,7 +8764,7 @@ export function createLobbyFlowController(
       return
     }
 
-    const friendConversations = getFriendChatConversations()
+    const friendConversations = getTopicsPersonalChatConversations()
     const targetConversation = targetFriendshipId !== null
       ? friendConversations.find((conversation) => conversation.friendshipId === targetFriendshipId) ?? null
       : null
@@ -8847,7 +8861,7 @@ export function createLobbyFlowController(
       return
     }
 
-    const firstConversation = state.chatConversations.find((conversation) => conversation.kind !== 'vip_dm') ?? null
+    const firstConversation = getFriendChatConversations()[0] ?? null
 
     if (firstConversation !== null && state.activeChatFriendshipId === null) {
       state.activeChatFriendshipId = firstConversation.friendshipId
@@ -9258,6 +9272,23 @@ export function createLobbyFlowController(
 
     if (body.trim().length === 0 && pendingImage === null) {
       return
+    }
+
+    const activeConversation = state.chatConversations.find((conversation) => conversation.friendshipId === friendshipId) ?? null
+    if (activeConversation?.kind === 'vip_dm') {
+      const viewerIsVip = options.getAuthSession?.()?.profile.isVip === true
+      const disabledReason = !viewerIsVip
+        ? 'За да изпращате лични съобщения тук, е необходим активен VIP.'
+        : activeConversation.friend.isVip !== true
+          ? 'Този потребител в момента не е активен VIP.'
+          : activeConversation.friend.isBlockedByMe === true
+            ? 'Вие сте блокирали този потребител.'
+            : null
+      if (disabledReason !== null) {
+        state.chatErrorText = disabledReason
+        render()
+        return
+      }
     }
 
     const previousInput = options.root.querySelector<HTMLInputElement>(
@@ -10344,9 +10375,11 @@ export function createLobbyFlowController(
   function getPopupCallbacks(): ProfilePopupCallbacks {
     return {
       onClose: () => {
+        state.profilePopupRequestToken += 1
         state.profilePopupOpen = false
         state.profilePopupProfile = null
         state.profilePopupCanEdit = true
+        state.profilePopupContext = 'other'
         syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
       },
       onEditClick: (profileId) => {
@@ -10363,6 +10396,7 @@ export function createLobbyFlowController(
       onFriendRemoveClick: (friendshipId) => { void removeFriendRelationship(friendshipId) },
       onGiftCoinsClick: (friendshipId) => { openGiftModal(friendshipId) },
       onPikaSupportChatClick: (profileId) => { void startPikaSupportChatAndOpen(profileId) },
+      onTopicsPersonalMessageClick: (profileId) => { void openTopicsPersonalMessageFromProfile(profileId) },
       onLikeClick: (profileId) => { void likeProfile(profileId) },
       onGrantSubadminClick: (profileId) => {
         if (!profileId) return
@@ -10711,6 +10745,55 @@ export function createLobbyFlowController(
     }, 3500)
   }
 
+  async function openProtectedProfileById(profileId: string, displayNameHint: string | null = null, context: ProfilePopupContext = 'other'): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+    const ownProfileId = authSession?.profile.profileId ?? null
+    const isOwn = ownProfileId !== null && profileId === ownProfileId
+    const requestToken = ++state.profilePopupRequestToken
+
+    state.profileAccessBlockPopup = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = isOwn
+    state.profilePopupContext = context
+
+    if (isOwn) {
+      state.profilePopupOpen = true
+      renderPopupOnly()
+      void fetchOwnLikesCount()
+      return
+    }
+
+    render()
+    void ensureFriendshipsLoaded()
+
+    if (!options.onProfileByIdLoad) return
+    const result = await options.onProfileByIdLoad(profileId)
+
+    if (state.profilePopupRequestToken !== requestToken) return
+
+    if (!result.ok) {
+      if (result.code === 'profile_blocked_by_viewer' || result.code === 'profile_blocked_viewer') {
+      state.profilePopupOpen = false
+      state.profilePopupProfile = null
+      state.profilePopupContext = 'other'
+      state.profileAccessBlockPopup = { profileId, code: result.code }
+        render()
+        return
+      }
+      state.friendActionMessageProfileId = profileId
+      state.friendActionMessage = result.message || `Профилът на ${displayNameHint ?? 'потребителя'} не беше зареден.`
+      render()
+      return
+    }
+
+    state.profilePopupProfile = result.profile
+    state.profilePopupCanEdit = false
+    state.profilePopupContext = context
+    state.profilePopupOpen = true
+    renderPopupOnly()
+  }
+
   function renderPopupOnly(): void {
     const authSession = options.getAuthSession?.() ?? null
     ensureProfilePopupTargetRoleLoaded()
@@ -10719,6 +10802,10 @@ export function createLobbyFlowController(
     const isOwnProfile = authSession !== null
       && popupProfile.profileId !== null
       && popupProfile.profileId === authSession.profile.profileId
+    const showTopicsPersonalMessageButton =
+      state.profilePopupContext === 'topics' &&
+      !isOwnProfile &&
+      popupProfile.profileId !== null
     syncProfilePopup(
       {
         isOpen: state.profilePopupOpen,
@@ -10730,6 +10817,7 @@ export function createLobbyFlowController(
         viewerIsFullAdmin: isFullAdminAuthSession(authSession),
         targetAccountRole: state.profilePopupTargetRole,
         showPikaSupportChatButton: shouldShowPikaSupportChatButton(authSession),
+        showTopicsPersonalMessageButton,
         ownVipActiveUntil: isOwnProfile ? state.ownVipActiveUntil : null,
       },
       getPopupCallbacks(),
@@ -11113,10 +11201,21 @@ export function createLobbyFlowController(
 
     if (message.type === 'chat_message_received') {
       const isActiveConversation = isActivePersonalChatConversation(message.friendshipId)
-      if (!isActiveConversation) {
-        state.chatConversations = state.chatConversations.map((c) =>
-          c.friendshipId === message.friendshipId ? { ...c, unreadCount: c.unreadCount + 1 } : c,
-        )
+      const existingConversation = state.chatConversations.find((c) => c.friendshipId === message.friendshipId) ?? null
+      if (existingConversation !== null) {
+        const updatedConversation = {
+          ...existingConversation,
+          updatedAt: new Date().toISOString(),
+          unreadCount: isActiveConversation
+            ? 0
+            : existingConversation.unreadCount + 1,
+        }
+        state.chatConversations = [
+          updatedConversation,
+          ...state.chatConversations.filter((c) => c.friendshipId !== message.friendshipId),
+        ]
+        render()
+      } else if (!isActiveConversation) {
         render()
       }
       void refreshChatAfterNotification(message.friendshipId)

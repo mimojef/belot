@@ -430,6 +430,36 @@ type ChatMessagesResponse = {
   conversation?: ChatConversationSnapshot
   newMessage?: ChatMessageSnapshot
   message?: string
+  code?: 'blocked' | 'vip_required' | 'vip_counterpart_required' | 'self' | 'recipient_not_found' | 'conversation_not_found' | 'invalid_conversation_kind'
+}
+
+type ChatStartResponse = {
+  ok?: boolean
+  friendshipId?: string
+  conversation?: ChatConversationSnapshot
+  message?: string
+  code?: ChatMessagesResponse['code']
+}
+
+function formatPersonalChatError(data: { code?: ChatMessagesResponse['code']; message?: string }): string {
+  switch (data.code) {
+    case 'blocked':
+      return 'Не можете да изпращате съобщения в този разговор.'
+    case 'vip_required':
+      return 'Личните съобщения към потребители извън приятелите са достъпни само за VIP.'
+    case 'vip_counterpart_required':
+      return 'Този потребител в момента не е активен VIP.'
+    case 'self':
+      return 'Не можете да изпратите лично съобщение до себе си.'
+    case 'recipient_not_found':
+      return 'Потребителят не беше намерен.'
+    case 'conversation_not_found':
+      return 'Разговорът не беше намерен.'
+    case 'invalid_conversation_kind':
+      return 'Този разговор не е достъпен тук.'
+    default:
+      return data.message ?? 'Съобщението не беше изпратено.'
+  }
 }
 
 type GiftCoinsResponse = {
@@ -2114,6 +2144,40 @@ async function startPikaSupportChat(recipientProfileId: string): Promise<
   }
 }
 
+async function startVipDmChat(recipientProfileId: string): Promise<
+  | { ok: true; conversation: ChatConversationSnapshot }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/chat/vip-dm/start`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify({ recipientProfileId }),
+    })
+    const data = await response.json().catch(() => ({})) as ChatStartResponse
+
+    if (!response.ok || !data.ok || !data.conversation) {
+      return {
+        ok: false,
+        message: formatPersonalChatError(data),
+      }
+    }
+
+    return {
+      ok: true,
+      conversation: data.conversation,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за чат.',
+    }
+  }
+}
+
 async function loadChatMessages(friendshipId: string): Promise<
   | { ok: true; messages: ChatMessageSnapshot[] }
   | { ok: false; message: string }
@@ -2232,6 +2296,12 @@ async function sendChatMessage(
       !data.conversation ||
       !Array.isArray(data.messages)
     ) {
+      if (data.code) {
+        return {
+          ok: false,
+          message: formatPersonalChatError(data),
+        }
+      }
       return {
         ok: false,
         message: data.message ?? 'Съобщението не беше изпратено.',
@@ -3473,14 +3543,22 @@ async function loadProfileById(
   profileId: string,
 ): Promise<
   | { ok: true; profile: PlayerPublicProfileSnapshot }
-  | { ok: false; message: string }
+  | { ok: false; message: string; code?: 'profile_blocked_by_viewer' | 'profile_blocked_viewer' }
 > {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/profiles/${encodeURIComponent(profileId)}`, {
       method: 'GET',
       credentials: 'include',
     })
-    const data = (await response.json()) as { ok: boolean; message?: string; profile?: PlayerPublicProfileSnapshot }
+    const data = (await response.json()) as {
+      ok: boolean
+      message?: string
+      profile?: PlayerPublicProfileSnapshot
+      code?: 'profile_blocked_by_viewer' | 'profile_blocked_viewer'
+    }
+    if (!response.ok && (data.code === 'profile_blocked_by_viewer' || data.code === 'profile_blocked_viewer')) {
+      return { ok: false, message: data.message ?? 'Профилът не е достъпен.', code: data.code }
+    }
     if (!response.ok || !data.ok || !data.profile) {
       return { ok: false, message: data.message ?? 'Профилът не беше зареден.' }
     }
@@ -4470,6 +4548,7 @@ lobby = createLobbyFlowController({
   onLikeProfile: (profileId) => submitProfileLike(profileId),
   onGiftCoinsSubmit: (friendshipId, amount) => submitGiftCoins(friendshipId, amount),
   onPikaSupportChatStart: (recipientProfileId) => startPikaSupportChat(recipientProfileId),
+  onVipDmChatStart: (recipientProfileId) => startVipDmChat(recipientProfileId),
   onChatConversationsLoad: (includeArchived) => loadChatConversations(includeArchived),
   onChatMessagesLoad: (friendshipId) => loadChatMessages(friendshipId),
   onChatMarkRead: async (friendshipId) => {

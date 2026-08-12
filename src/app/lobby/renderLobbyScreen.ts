@@ -415,6 +415,7 @@ export type LobbyScreenState = {
   blockedPlayersErrorText: string | null
   blockedPlayersLimit: number
   blockLimitPopupOpen: boolean
+  profileAccessBlockPopup: { profileId: string; code: 'profile_blocked_by_viewer' | 'profile_blocked_viewer' } | null
   noPlayersModalOpen: boolean
   isInGame: boolean
   displayName: string
@@ -880,6 +881,8 @@ export type RenderLobbyScreenOptions = {
   onBlockedPlayersClose: () => void
   onUnblockClick: (profileId: string) => void
   onBlockLimitPopupClose: () => void
+  onProfileAccessBlockClose: () => void
+  onProfileAccessBlockUnblock: (profileId: string) => void
   onNoPlayersModalClose: () => void
   onChatClick: () => void
   onChatConversationClick: (friendshipId: string) => void
@@ -1086,6 +1089,7 @@ export type ProfilePopupCallbacks = {
   onFriendRemoveClick: (friendshipId: string) => void
   onGiftCoinsClick: (friendshipId: string) => void
   onPikaSupportChatClick: (profileId: string) => void
+  onTopicsPersonalMessageClick: (profileId: string) => void
   onLikeClick: (profileId: string) => void
   onGrantSubadminClick: (profileId: string | null) => void
   onRevokeSubadminClick: (profileId: string | null) => void
@@ -1199,6 +1203,11 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
       const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfilePikaSupportChat?.trim() ?? ''
       if (profileId) cb.onPikaSupportChatClick(profileId)
     })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-topics-personal-message]')
+    ?.addEventListener('click', (e) => {
+      const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileTopicsPersonalMessage?.trim() ?? ''
+      if (profileId) cb.onTopicsPersonalMessageClick(profileId)
+    })
   el.querySelectorAll<HTMLButtonElement>('[data-player-profile-friend-accept]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.playerProfileFriendAccept?.trim() ?? ''
@@ -1251,6 +1260,7 @@ export function syncProfilePopup(
     viewerIsFullAdmin?: boolean
     targetAccountRole?: PlayerAccountRole | null
     showPikaSupportChatButton?: boolean
+    showTopicsPersonalMessageButton?: boolean
     ownVipActiveUntil?: string | null
   },
   cb: ProfilePopupCallbacks,
@@ -1279,6 +1289,7 @@ export function syncProfilePopup(
     targetAccountRole: popupState.targetAccountRole ?? null,
     ownVipActiveUntil: popupState.ownVipActiveUntil ?? null,
     showPikaSupportChatButton: popupState.showPikaSupportChatButton ?? false,
+    showTopicsPersonalMessageButton: popupState.showTopicsPersonalMessageButton ?? false,
   })
   attachPopupListeners(el, cb, popupState.profile?.profileId ?? null)
 }
@@ -5130,9 +5141,10 @@ function renderImageViewerOverlay(state: LobbyScreenState): string {
 
 // Скрит file input + видима икона-бутон + thumbnail preview на избраната
 // (все още неизпратена) снимка — споделен между desktop и mobile chat форми.
-function renderChatImagePickerControls(state: LobbyScreenState, friendshipId: string): string {
+function renderChatImagePickerControls(state: LobbyScreenState, friendshipId: string, forceDisabled = false): string {
   const pending = state.chatPendingImageByFriendshipId[friendshipId]
   const isUploading = state.chatUploadingFriendshipIds.has(friendshipId)
+  const isDisabled = isUploading || forceDisabled
 
   return `
     <input
@@ -5140,15 +5152,15 @@ function renderChatImagePickerControls(state: LobbyScreenState, friendshipId: st
       accept="image/jpeg,image/png,image/webp"
       data-chat-image-input="${escapeHtml(friendshipId)}"
       style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"
-      ${isUploading ? 'disabled' : ''}
+      ${isDisabled ? 'disabled' : ''}
     >
     <button
       type="button"
       data-chat-image-pick="${escapeHtml(friendshipId)}"
       title="Прикачи снимка"
       aria-label="Прикачи снимка"
-      ${isUploading ? 'disabled' : ''}
-      style="height:42px;width:42px;flex:0 0 auto;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;display:flex;align-items:center;justify-content:center;cursor:${isUploading ? 'default' : 'pointer'};opacity:${isUploading ? '0.5' : '1'};"
+      ${isDisabled ? 'disabled' : ''}
+      style="height:42px;width:42px;flex:0 0 auto;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;display:flex;align-items:center;justify-content:center;cursor:${isDisabled ? 'default' : 'pointer'};opacity:${isDisabled ? '0.5' : '1'};"
     >
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
     </button>
@@ -5160,8 +5172,8 @@ function renderChatImagePickerControls(state: LobbyScreenState, friendshipId: st
           data-chat-image-remove="${escapeHtml(friendshipId)}"
           title="Премахни снимката"
           aria-label="Премахни снимката"
-          ${isUploading ? 'disabled' : ''}
-          style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;border:0;background:#ef4444;color:#fff;font-size:11px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;cursor:${isUploading ? 'default' : 'pointer'};padding:0;"
+          ${isDisabled ? 'disabled' : ''}
+          style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;border:0;background:#ef4444;color:#fff;font-size:11px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;cursor:${isDisabled ? 'default' : 'pointer'};padding:0;"
         >✕</button>
       </div>
     ` : ''}
@@ -5379,7 +5391,7 @@ export function formatPersonalChatUnreadBadgeCount(count: number): string | null
 
 export function getPersonalChatUnreadTotal(state: LobbyScreenState): number {
   return state.chatConversations
-    .filter((conversation) => conversation.kind === 'friend')
+    .filter((conversation) => conversation.kind === 'friend' || conversation.kind === 'vip_dm')
     .reduce((total, conversation) => total + Math.max(0, Math.floor(conversation.unreadCount)), 0)
 }
 
@@ -5430,6 +5442,16 @@ function renderTopicsPersonalMessages(state: LobbyScreenState, activeConversatio
   const visibleMessages = messagesBelongToActiveConversation
     ? state.chatMessages.filter((message) => message.friendshipId === activeConversation.friendshipId)
     : []
+  const vipDmDisabledReason = activeConversation.kind !== 'vip_dm'
+    ? null
+    : state.profile.isVip !== true
+      ? 'За да изпращате лични съобщения тук, е необходим активен VIP.'
+      : activeConversation.friend.isVip !== true
+        ? 'Този потребител в момента не е активен VIP.'
+        : activeConversation.friend.isBlockedByMe === true
+          ? 'Вие сте блокирали този потребител.'
+          : null
+  const isComposerDisabled = vipDmDisabledReason !== null || state.chatUploadingFriendshipIds.has(activeConversation.friendshipId)
 
   return `
     <div data-chat-messages-scroll="1" style="flex:1;min-height:0;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
@@ -5461,11 +5483,12 @@ function renderTopicsPersonalMessages(state: LobbyScreenState, activeConversatio
         `
       }).join('')}
     </div>
-    <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-top:1px solid rgba(212,165,32,0.20);flex:0 0 auto;">
+    <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" data-chat-composer-disabled="${isComposerDisabled ? '1' : '0'}" style="display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-top:1px solid rgba(212,165,32,0.20);flex:0 0 auto;">
+      ${vipDmDisabledReason !== null ? `<div data-chat-composer-disabled-reason="1" style="font-size:12px;font-weight:800;color:#fbbf24;line-height:1.35;">${escapeHtml(vipDmDisabledReason)}</div>` : ''}
       <div style="display:flex;gap:10px;align-items:center;">
-        ${renderChatImagePickerControls(state, activeConversation.friendshipId)}
-        <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;">
-        <button type="submit" ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;opacity:${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? '0.6' : '1'};">${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'Качване...' : 'Изпрати'}</button>
+        ${renderChatImagePickerControls(state, activeConversation.friendshipId, vipDmDisabledReason !== null)}
+        <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." ${isComposerDisabled ? 'disabled' : ''} style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;opacity:${isComposerDisabled ? '0.62' : '1'};">
+        <button type="submit" ${isComposerDisabled ? 'disabled' : ''} style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:${isComposerDisabled ? 'default' : 'pointer'};opacity:${isComposerDisabled ? '0.6' : '1'};">${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'Качване...' : 'Изпрати'}</button>
       </div>
     </form>
   `
@@ -5473,7 +5496,7 @@ function renderTopicsPersonalMessages(state: LobbyScreenState, activeConversatio
 
 export function renderTopicsPersonalChatPanel(state: LobbyScreenState): string {
   const friendConversations = state.chatConversations
-    .filter((conversation) => conversation.kind === 'friend')
+    .filter((conversation) => conversation.kind === 'friend' || conversation.kind === 'vip_dm')
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
   const activeConversation = state.topicsPersonalView === 'conversation'
     ? friendConversations.find((conversation) => conversation.friendshipId === state.activeChatFriendshipId) ?? null
@@ -5544,7 +5567,7 @@ function renderChatPanel(state: LobbyScreenState): string {
   }
 
   const visibleConversations = (state.chatShowArchived ? state.chatArchivedConversations : state.chatConversations)
-    .filter((conversation) => conversation.kind !== 'vip_dm')
+    .filter((conversation) => conversation.kind === 'friend')
   const sortedConversations = [...visibleConversations].sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
   )
@@ -9326,6 +9349,29 @@ function renderBlockLimitPopup(state: LobbyScreenState): string {
   `
 }
 
+function renderProfileAccessBlockPopup(state: LobbyScreenState): string {
+  const popup = state.profileAccessBlockPopup
+  if (popup === null) return ''
+
+  const viewerIsBlocker = popup.code === 'profile_blocked_by_viewer'
+  const message = viewerIsBlocker
+    ? 'Вие сте блокирали този потребител.'
+    : 'Този потребител ви е блокирал.'
+
+  return `
+    <div data-profile-access-block-popup-root="1" style="position:fixed;inset:0;z-index:13600;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <button type="button" data-profile-access-block-close="1" aria-label="Затвори" style="position:absolute;inset:0;border:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);cursor:pointer;"></button>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,430px);border-radius:8px;background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);border:1px solid rgba(212,165,32,0.50);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:26px 22px;text-align:center;display:grid;gap:18px;">
+        <div style="font-size:17px;font-weight:900;color:#f8fafc;line-height:1.45;">${escapeHtml(message)}</div>
+        <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+          ${viewerIsBlocker ? `<button type="button" data-profile-access-block-unblock="${escapeHtml(popup.profileId)}" style="min-height:40px;padding:0 18px;border:1px solid rgba(212,165,32,0.55);border-radius:8px;background:linear-gradient(180deg,rgba(244,201,91,0.96) 0%,rgba(201,143,19,0.96) 100%);color:#080808;font-size:13px;font-weight:900;cursor:pointer;">Отблокирай</button>` : ''}
+          <button type="button" data-profile-access-block-close="1" style="min-height:40px;padding:0 18px;border:1px solid rgba(255,255,255,0.18);border-radius:8px;background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.86);font-size:13px;font-weight:900;cursor:pointer;">Затвори</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
 function renderNoPlayersModal(state: LobbyScreenState): string {
   if (!state.noPlayersModalOpen) return ''
 
@@ -9566,6 +9612,7 @@ export function renderLobbyScreen(
       ${renderTopChatAdminActionToast(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
+      ${renderProfileAccessBlockPopup(state)}
       ${renderNoPlayersModal(state)}
       ${renderSupportPopup(state)}
       ${renderGuestContactPopup(state)}
@@ -9842,6 +9889,7 @@ export function renderLobbyScreen(
       ${renderTopChatAdminActionToast(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
+      ${renderProfileAccessBlockPopup(state)}
       ${renderNoPlayersModal(state)}
       ${renderSupportPopup(state)}
       ${renderGuestContactPopup(state)}
@@ -10105,6 +10153,17 @@ export function renderLobbyScreen(
     btn.addEventListener('click', () => {
       const profileId = btn.dataset.unblockProfile?.trim() ?? ''
       if (profileId) options.onUnblockClick(profileId)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-profile-access-block-close="1"]').forEach((btn) => {
+    btn.addEventListener('click', options.onProfileAccessBlockClose)
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-profile-access-block-unblock]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const profileId = btn.dataset.profileAccessBlockUnblock?.trim() ?? ''
+      if (profileId) options.onProfileAccessBlockUnblock(profileId)
     })
   })
 
@@ -11573,6 +11632,7 @@ export function renderLobbyScreen(
       viewerIsFullAdmin: state.isAdmin,
       targetAccountRole: state.profilePopupTargetRole,
       showPikaSupportChatButton: state.showPikaSupportChatButton,
+      showTopicsPersonalMessageButton: false,
     },
     {
       onClose: options.onProfileClose,
@@ -11585,6 +11645,7 @@ export function renderLobbyScreen(
       onFriendRemoveClick: options.onFriendRemoveClick,
       onGiftCoinsClick: options.onGiftCoinsClick,
       onPikaSupportChatClick: options.onPikaSupportChatClick,
+      onTopicsPersonalMessageClick: () => {},
       onLikeClick: options.onLikeClick,
       onGrantSubadminClick: options.onProfileGrantSubadminClick,
       onRevokeSubadminClick: options.onProfileRevokeSubadminClick,

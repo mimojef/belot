@@ -21,6 +21,7 @@ export type RenderPlayerProfilePopupOptions = {
    * non-friend.
    */
   showPikaSupportChatButton?: boolean
+  showTopicsPersonalMessageButton?: boolean
   /**
    * Само за ПЪЛЕН администратор (не субадмин) — управлява видимостта на
    * "Субадмин" баджа и бутоните "Направи/Премахни субадмин". Обикновени
@@ -787,6 +788,7 @@ function renderProfileContent(
   viewerIsFullAdmin: boolean,
   targetAccountRole: PlayerAccountRole | null,
   showPikaSupportChatButton: boolean,
+  showTopicsPersonalMessageButton: boolean,
   ownVipActiveUntil: string | null,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
@@ -923,6 +925,29 @@ function renderProfileContent(
                   >
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                     Чат
+                  </button>
+                ` : ''}
+                ${showTopicsPersonalMessageButton && profile.profileId ? `
+                  <button
+                    type="button"
+                    data-player-profile-topics-personal-message="${escapeHtml(profile.profileId)}"
+                    style="
+                      min-height:38px;
+                      padding:0 14px;
+                      border:1px solid rgba(212,165,32,0.62);
+                      border-radius:8px;
+                      background:linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%);
+                      color:#080808;
+                      font-size:13px;
+                      font-weight:900;
+                      cursor:pointer;
+                      display:flex;
+                      align-items:center;
+                      gap:6px;
+                    "
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    Лично съобщение
                   </button>
                 ` : ''}
                 ${profile.profileId ? `
@@ -1189,6 +1214,7 @@ export function renderPlayerProfilePopup(
           options.viewerIsFullAdmin ?? false,
           options.targetAccountRole ?? null,
           options.showPikaSupportChatButton ?? false,
+          options.showTopicsPersonalMessageButton ?? false,
           options.ownVipActiveUntil ?? null,
         )
       : renderEmptyContent(options.seat)
@@ -1217,11 +1243,16 @@ export function renderPlayerProfilePopup(
         filter: brightness(1.1);
         transform: translateY(-1px);
       }
+      [data-player-profile-topics-personal-message]:hover {
+        filter: brightness(1.12);
+        transform: translateY(-1px);
+      }
       [data-player-profile-like],
       [data-player-profile-friend-request],
       [data-player-profile-block],
       [data-player-profile-gift-coins],
-      [data-player-profile-pika-support-chat] {
+      [data-player-profile-pika-support-chat],
+      [data-player-profile-topics-personal-message] {
         transition: filter 120ms ease, transform 120ms ease, background 120ms ease, border-color 120ms ease;
       }
 
