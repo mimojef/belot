@@ -3544,6 +3544,29 @@ async function loadTopicMessages(
   }
 }
 
+async function markTopicSeen(
+  topicId: string,
+): Promise<{ ok: true; lastSeenSeq: number; unreadCount: number } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/seen`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+    const data = (await response.json().catch(() => ({}))) as {
+      ok?: boolean
+      message?: string
+      lastSeenSeq?: number
+      unreadCount?: number
+    }
+    if (!response.ok || !data.ok || typeof data.lastSeenSeq !== 'number') {
+      return { ok: false, message: data.message ?? 'Грешка при отбелязване на темата като прочетена.' }
+    }
+    return { ok: true, lastSeenSeq: data.lastSeenSeq, unreadCount: data.unreadCount ?? 0 }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function loadTopicReplies(
   topicId: string,
   rootMessageId: string,
@@ -4578,6 +4601,7 @@ lobby = createLobbyFlowController({
   >,
   onTournamentsLoad: (params) => loadTournaments(params),
   onTopicsLoad: () => loadTopics(),
+  onTopicMarkSeen: (topicId) => markTopicSeen(topicId),
   onProfileByIdLoad: (profileId) => loadProfileById(profileId),
   onTopicMessagesLoad: (topicId, beforeSeq) => loadTopicMessages(topicId, beforeSeq),
   onTopicRepliesLoad: (topicId, rootMessageId, afterSeq) => loadTopicReplies(topicId, rootMessageId, afterSeq),

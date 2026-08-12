@@ -874,6 +874,8 @@ export type ServerMessage =
   | TopicDeletedMessage
   | TopicMessageDeletedMessage
   | TopicMessageEditedMessage
+  | TopicUnreadCountChangedMessage
+  | TopicSeenUpdatedMessage
 
 export type ProfileLikedMessage = {
   type: 'profile_liked'
@@ -1297,6 +1299,19 @@ export type TopicMessageEditedMessage = {
   parentMessageId: string | null
   body: string
   editedAt: string
+}
+
+export type TopicUnreadCountChangedMessage = {
+  type: 'topic_unread_count_changed'
+  topicId: string
+  unreadCount: number
+}
+
+export type TopicSeenUpdatedMessage = {
+  type: 'topic_seen_updated'
+  topicId: string
+  lastSeenSeq: number
+  unreadCount: number
 }
 
 export function getDisplayNameFromIdentity(

@@ -15,6 +15,7 @@ export type TopicSnapshot = {
   status: TopicStatus
   sortOrder: number
   createdAt: string
+  unreadCount: number
   /** Moderation (Етап 4) — null докато темата никога не е била заключвана/премахвана. Виж topicModerationStore.ts за пълния rationale (isLocked computed at read time, expiry server-authoritative). */
   lockedUntil: string | null
   lockedReason: string | null
@@ -88,6 +89,7 @@ function toSnapshot(row: TopicRow): TopicSnapshot {
     status: row.status,
     sortOrder: row.sort_order,
     createdAt: dbDateToUtc(row.created_at),
+    unreadCount: 0,
     lockedUntil: row.locked_until ? dbDateToUtc(row.locked_until) : null,
     lockedReason: row.locked_reason,
   }

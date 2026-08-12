@@ -1532,6 +1532,7 @@ export type TopicSnapshot = {
   status: 'active' | 'locked' | 'removed'
   sortOrder: number
   createdAt: string
+  unreadCount: number
   /** Moderation (Етап 4) — null докато темата никога не е била заключвана. Server-authoritative expiry, виж topicModerationStore.ts. */
   lockedUntil: string | null
   lockedReason: string | null
@@ -1559,6 +1560,7 @@ export type TopicMessageSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   body: string
   createdAt: string
+  unreadCount: number
   editedAt: string | null
   /** Етап 3 — batch-computed, виж server-side getMessageAggregatesByIds. */
   likeCount: number
@@ -1780,6 +1782,19 @@ export type TopicMessageEditedMessage = {
   editedAt: string
 }
 
+export type TopicUnreadCountChangedMessage = {
+  type: 'topic_unread_count_changed'
+  topicId: string
+  unreadCount: number
+}
+
+export type TopicSeenUpdatedMessage = {
+  type: 'topic_seen_updated'
+  topicId: string
+  lastSeenSeq: number
+  unreadCount: number
+}
+
 export type ServerMessage =
   | ConnectedMessage
   | PongMessage
@@ -1857,6 +1872,8 @@ export type ServerMessage =
   | TopicDeletedMessage
   | TopicMessageDeletedMessage
   | TopicMessageEditedMessage
+  | TopicUnreadCountChangedMessage
+  | TopicSeenUpdatedMessage
 
 type CreateGameServerClientOptions = {
   url?: string

@@ -594,6 +594,10 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; topics: TopicSnapshot[] }
     | { ok: false; message: string }
   >
+  onTopicMarkSeen?: (topicId: string) => Promise<
+    | { ok: true; lastSeenSeq: number; unreadCount: number }
+    | { ok: false; message: string }
+  >
   /** Canonical single-profile fetch по id — за profile popup, когато профилът не е (или може да е остарял) в state.players кеша. */
   onProfileByIdLoad?: (profileId: string) => Promise<
     | { ok: true; profile: PlayerPublicProfileSnapshot }
@@ -832,6 +836,8 @@ type InternalLobbyFlowState = {
   topicsErrorText: string | null
   topics: TopicSnapshot[] | null
   activeTopicId: string | null
+  topicSeenInFlightByTopicId: Record<string, boolean | undefined>
+  topicSeenQueuedByTopicId: Record<string, boolean | undefined>
   topicMessagesLoading: boolean
   topicMessagesErrorText: string | null
   topicMessages: TopicMessageSnapshot[] | null
@@ -1334,6 +1340,8 @@ function createInitialState(): InternalLobbyFlowState {
     topicsErrorText: null,
     topics: null,
     activeTopicId: null,
+    topicSeenInFlightByTopicId: {},
+    topicSeenQueuedByTopicId: {},
     topicMessagesLoading: false,
     topicMessagesErrorText: null,
     topicMessages: null,
@@ -5069,6 +5077,74 @@ export function createLobbyFlowController(
     return messages.reduce((max, m) => Math.max(max, m.seq), 0)
   }
 
+  function normalizeTopicUnreadCount(count: number): number {
+    if (!Number.isFinite(count)) return 0
+    return Math.max(0, Math.floor(count))
+  }
+
+  function updateTopicUnreadCount(topicId: string, unreadCount: number): boolean {
+    if (state.topics === null) return false
+    const normalized = normalizeTopicUnreadCount(unreadCount)
+    let changed = false
+    state.topics = state.topics.map((topic) => {
+      if (topic.topicId !== topicId) return topic
+      if (topic.unreadCount === normalized) return topic
+      changed = true
+      return { ...topic, unreadCount: normalized }
+    })
+    return changed
+  }
+
+  async function reconcileTopicsDirectoryFromServer(): Promise<void> {
+    if (state.currentScreen !== 'topics' || !options.onTopicsLoad) return
+    const activeTopicId = state.activeTopicId
+    const result = await options.onTopicsLoad()
+    if (state.currentScreen !== 'topics') return
+    if (!result.ok) return
+
+    state.topics = result.topics
+    const activeTopic = activeTopicId !== null
+      ? result.topics.find((topic) => topic.topicId === activeTopicId) ?? null
+      : null
+    if (activeTopic !== null) {
+      state.activeTopicLock = deriveTopicLockSnapshot(activeTopic)
+      void markActiveTopicSeen(activeTopic.topicId)
+    }
+    render()
+  }
+
+  async function markActiveTopicSeen(topicId: string): Promise<void> {
+    const changed = updateTopicUnreadCount(topicId, 0)
+    if (changed && state.currentScreen === 'topics') {
+      render()
+    }
+
+    if (!options.onTopicMarkSeen) return
+    if (state.topicSeenInFlightByTopicId[topicId]) {
+      state.topicSeenQueuedByTopicId[topicId] = true
+      return
+    }
+
+    state.topicSeenInFlightByTopicId[topicId] = true
+    state.topicSeenQueuedByTopicId[topicId] = false
+    const result = await options.onTopicMarkSeen(topicId)
+    state.topicSeenInFlightByTopicId[topicId] = false
+
+    if (state.currentScreen !== 'topics') return
+    if (result.ok) {
+      if (updateTopicUnreadCount(topicId, result.unreadCount)) {
+        render()
+      }
+    } else {
+      void reconcileTopicsDirectoryFromServer()
+    }
+
+    if (state.topicSeenQueuedByTopicId[topicId] && state.activeTopicId === topicId) {
+      state.topicSeenQueuedByTopicId[topicId] = false
+      void markActiveTopicSeen(topicId)
+    }
+  }
+
   // ─── Topics Moderation (Етап 4) ──────────────────────────────────────────
   //
   // isLocked е computed CLIENT-SIDE тук САМО за display purposes (banner
@@ -5555,6 +5631,7 @@ export function createLobbyFlowController(
     // Все още на СЪЩАТА тема (generation guard-ът по-горе вече потвърди) —
     // едва СЕГА regisтрираме WS interest, с прясно изчисления gap-closing cursor.
     subscribeToTopicMessagesGapClosing(topicId)
+    void markActiveTopicSeen(topicId)
   }
 
   async function showTopicsDirectory(): Promise<void> {
@@ -5613,6 +5690,9 @@ export function createLobbyFlowController(
     // При вход в "Теми" отваряме "Общ чат" по подразбиране (т.2/8 от брифа).
     const generalTopic = result.topics.find((t) => t.isGeneral) ?? result.topics[0] ?? null
     state.activeTopicId = generalTopic?.topicId ?? null
+    if (state.activeTopicId !== null) {
+      updateTopicUnreadCount(state.activeTopicId, 0)
+    }
     state.topicMessages = null
     state.topicMessagesHasMore = false
     state.topicMessagesOldestSeq = null
@@ -5637,6 +5717,7 @@ export function createLobbyFlowController(
     // напуснатата тема биха продължили да пристигат.
     unsubscribeFromCurrentTopicMessages()
     state.activeTopicId = topicId
+    updateTopicUnreadCount(topicId, 0)
     state.topicMessages = null
     state.topicMessagesHasMore = false
     state.topicMessagesOldestSeq = null
@@ -5974,6 +6055,7 @@ export function createLobbyFlowController(
     // да не блокира subscribeToTopicsDirectory guard-а ("вече subscribed").
     state.topicsDirectorySubscribed = false
     subscribeToTopicsDirectory()
+    void reconcileTopicsDirectoryFromServer()
   }
 
   // ─── VIP gate + launch gift (Етап 2) ────────────────────────────────────
@@ -10979,6 +11061,24 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'topic_unread_count_changed') {
+      if (message.topicId === state.activeTopicId) {
+        void markActiveTopicSeen(message.topicId)
+        return true
+      }
+      if (updateTopicUnreadCount(message.topicId, message.unreadCount)) {
+        render()
+      }
+      return true
+    }
+
+    if (message.type === 'topic_seen_updated') {
+      if (updateTopicUnreadCount(message.topicId, message.unreadCount)) {
+        render()
+      }
+      return true
+    }
+
     if (message.type === 'topic_message_catchup') {
       // Stale-response guard — потребителят може вече да е превключил темата
       // докато catch-up отговорът е висял (rapid switch race).
@@ -10995,6 +11095,7 @@ export function createLobbyFlowController(
         state.topicMessagesRenderReason = 'reconnect-refresh'
         render()
       }
+      void markActiveTopicSeen(message.topicId)
       if (message.truncated) {
         // Gap-ът е по-голям от cap-а — падаме обратно на обикновен REST
         // recent refresh (Етап 2 брифа т.1/т.8), без да форсираме bottom.
@@ -11028,6 +11129,7 @@ export function createLobbyFlowController(
       }
 
       state.topicMessagesRenderReason = 'live-append'
+      void markActiveTopicSeen(message.topicId)
       render()
       return true
     }
@@ -11104,6 +11206,7 @@ export function createLobbyFlowController(
         clearTopicReplyComposerPendingImage(rootMessageId)
       }
 
+      void markActiveTopicSeen(message.topicId)
       render()
       return true
     }

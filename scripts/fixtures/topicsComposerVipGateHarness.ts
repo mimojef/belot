@@ -12,8 +12,8 @@ const root = document.createElement('div')
 document.body.appendChild(root)
 
 const topics: TopicSnapshot[] = [
-  { topicId: 'topic-general', slug: 'general', title: 'Общ чат', description: null, isGeneral: true, createdByProfileId: null, status: 'active', sortOrder: 0, createdAt: new Date().toISOString() },
-  { topicId: 'topic-b', slug: 'topic-b', title: 'Тема Б', description: null, isGeneral: false, createdByProfileId: null, status: 'active', sortOrder: 1, createdAt: new Date().toISOString() },
+  { topicId: 'topic-general', slug: 'general', title: 'Общ чат', description: null, isGeneral: true, createdByProfileId: null, status: 'active', sortOrder: 0, createdAt: new Date().toISOString(), unreadCount: 0 },
+  { topicId: 'topic-b', slug: 'topic-b', title: 'Тема Б', description: null, isGeneral: false, createdByProfileId: null, status: 'active', sortOrder: 1, createdAt: new Date().toISOString(), unreadCount: 0 },
 ]
 
 function makeMessage(topicId: string, seq: number, body: string, senderProfileId = 'someone', senderDisplayName = 'Someone'): TopicMessageSnapshot {

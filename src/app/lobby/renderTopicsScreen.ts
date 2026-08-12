@@ -52,6 +52,12 @@ function isTopicMessageEditWindowExpired(createdAt: string): boolean {
   return Date.now() - createdAtMs >= TOPIC_MESSAGE_EDIT_WINDOW_MS
 }
 
+export function formatTopicUnreadBadgeCount(count: number): string | null {
+  if (!Number.isFinite(count) || count <= 0) return null
+  const normalized = Math.floor(count)
+  return String(Math.min(normalized, 99))
+}
+
 // Реален avatar от canonical profile data (senderAvatarUrl е derived
 // server-side, виж коментара в TopicMessageSnapshot) — letter fallback само
 // когато профилът действително няма avatar. URL винаги минава през
@@ -67,10 +73,11 @@ function renderMessageAvatar(senderDisplayName: string, senderAvatarUrl: string 
   `
 }
 
-function renderTopicsBarChip(topic: { topicId: string; title: string; isGeneral: boolean }, isActive: boolean): string {
+function renderTopicsBarChip(topic: { topicId: string; title: string; isGeneral: boolean; unreadCount?: number }, isActive: boolean): string {
   const activeStyle = isActive
     ? 'background:rgba(212,165,32,0.16);border-color:#d4a520;color:#d4a520;'
     : 'background:rgba(255,255,255,0.04);border-color:rgba(255,255,255,0.12);color:rgba(248,250,252,0.78);'
+  const unreadBadge = isActive ? null : formatTopicUnreadBadgeCount(topic.unreadCount ?? 0)
 
   return `
     <button
@@ -93,7 +100,7 @@ function renderTopicsBarChip(topic: { topicId: string; title: string; isGeneral:
         cursor:pointer;
         scroll-snap-align:start;
       "
-    >${escapeHtml(topic.title)}</button>
+    ><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(topic.title)}</span>${unreadBadge !== null ? `<span class="topic-unread-badge">${escapeHtml(unreadBadge)}</span>` : ''}</button>
   `
 }
 
@@ -163,6 +170,21 @@ function renderTopicsBar(state: LobbyScreenState): string {
       .topics-arrow-control:not(:disabled):hover { color: #d4a520; }
       .topic-create-chip:hover { filter:brightness(1.12); }
       .topic-create-chip:active { filter:brightness(0.95); }
+      .topic-unread-badge {
+        min-width:18px;
+        height:18px;
+        border-radius:9px;
+        background:#ef4444;
+        color:#ffffff;
+        padding:0 5px;
+        display:inline-flex;
+        align-items:center;
+        justify-content:center;
+        font-size:10px;
+        font-weight:900;
+        line-height:1;
+        flex:0 0 auto;
+      }
     </style>
     <div
       data-topics-bar-row="1"
