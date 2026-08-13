@@ -1102,6 +1102,7 @@ function hydrateTopicMessagesWithCurrentAvatars(
       senderRole: message.senderRole,
       body: message.body,
       createdAt: message.createdAt,
+      lastActivityAt: message.lastActivityAt,
       editedAt: message.editedAt,
       attachment,
       likeCount: aggregatesByMessageId.get(message.messageId)?.likeCount ?? 0,

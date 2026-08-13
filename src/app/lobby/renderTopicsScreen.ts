@@ -70,6 +70,27 @@ function formatTopicMessageTime(value: string): string {
   }).format(date)
 }
 
+export function formatTopicActivityTime(value: string, nowMs = Date.now()): string {
+  const activityMs = Date.parse(value)
+  if (!Number.isFinite(activityMs)) return ''
+  const diffMs = Math.max(0, nowMs - activityMs)
+  const minutes = Math.floor(diffMs / 60_000)
+  if (minutes < 1) return 'Сега'
+  if (minutes < 60) return `Преди ${minutes} м.`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `Преди ${hours} ч.`
+  const days = Math.floor(hours / 24)
+  if (days < 7) return `Преди ${days} д.`
+  const activityDate = new Date(activityMs)
+  const nowDate = new Date(nowMs)
+  const day = String(activityDate.getDate()).padStart(2, '0')
+  const month = String(activityDate.getMonth() + 1).padStart(2, '0')
+  if (activityDate.getFullYear() === nowDate.getFullYear()) {
+    return `${day}.${month}.`
+  }
+  return `${day}.${month}.${String(activityDate.getFullYear()).slice(-2)}`
+}
+
 function isTopicMessageEditWindowExpired(createdAt: string): boolean {
   const createdAtMs = Date.parse(createdAt)
   if (!Number.isFinite(createdAtMs)) return false
@@ -575,6 +596,9 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
           ${renderTopicReplyButton(message.messageId, message.replyCount)}
           ${renderTopicMessageEditButton(state, message.messageId, true, message.senderProfileId, message.createdAt, message.replyCount)}
           ${renderTopicMessageDeleteButton(state, message.messageId, true, message.senderProfileId, message.replyCount)}
+        </div>
+        <div data-topic-message-last-activity="${escapeHtml(message.messageId)}" style="margin-top:2px;font-size:11px;font-weight:700;color:rgba(248,250,252,0.38);line-height:1.2;">
+          Активност: ${escapeHtml(formatTopicActivityTime(message.lastActivityAt))}
         </div>
       </div>
       ${renderRepliesSection(state, message.messageId)}

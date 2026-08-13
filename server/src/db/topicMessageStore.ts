@@ -26,6 +26,7 @@ export type TopicMessageSnapshot = {
   senderRole: TopicMessageSenderRole
   body: string
   createdAt: string
+  lastActivityAt: string
   editedAt: string | null
   deletedAt: string | null
 }
@@ -287,6 +288,7 @@ type TopicMessageRow = {
   sender_role: TopicMessageSenderRole
   body: string
   created_at: string
+  last_activity_at?: string | null
   edited_at: string | null
   deleted_at: string | null
 }
@@ -303,6 +305,7 @@ function toSnapshot(row: TopicMessageRow): TopicMessageSnapshot {
     senderRole: row.sender_role,
     body: row.body,
     createdAt: dbDateToUtc(row.created_at),
+    lastActivityAt: dbDateToUtc(row.last_activity_at ?? row.created_at),
     editedAt: row.edited_at ? dbDateToUtc(row.edited_at) : null,
     deletedAt: row.deleted_at ? dbDateToUtc(row.deleted_at) : null,
   }
@@ -327,21 +330,97 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
   // Заявяваме `limit + 1` ред и после проверяваме дали действително сме
   // получили повече от `limit`, за да изчислим hasMore БЕЗ отделна COUNT(*)
   // заявка — известен evтин "peek ahead" pattern за cursor pagination.
-  function buildStatement(excludedCount: number, beforeClause: string) {
-    const exclusionClause = excludedCount > 0
+  function buildStatement(excludedCount: number, withCursor: boolean) {
+    const replyExclusionClause = excludedCount > 0
       ? `AND sender_profile_id NOT IN (${Array(excludedCount).fill('?').join(',')})`
       : ''
+    const rootExclusionClause = excludedCount > 0
+      ? `AND root.sender_profile_id NOT IN (${Array(excludedCount).fill('?').join(',')})`
+      : ''
+    const cursorClause = withCursor
+      ? 'WHERE last_activity_at < ? OR (last_activity_at = ? AND seq < ?)'
+      : ''
     return database.prepare(`
-      SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, edited_at, deleted_at
-      FROM topic_messages
-      WHERE topic_id = ?
-        AND parent_message_id IS NULL
-        AND deleted_at IS NULL
-        ${beforeClause}
-        ${exclusionClause}
-      ORDER BY seq DESC
+      WITH reply_activity AS (
+        SELECT parent_message_id, MAX(created_at) AS last_reply_created_at
+        FROM topic_messages
+        WHERE topic_id = ?
+          AND parent_message_id IS NOT NULL
+          AND deleted_at IS NULL
+          ${replyExclusionClause}
+        GROUP BY parent_message_id
+      ),
+      root_messages AS (
+        SELECT
+          root.seq,
+          root.message_id,
+          root.topic_id,
+          root.parent_message_id,
+          root.sender_profile_id,
+          root.sender_display_name,
+          root.sender_role,
+          root.body,
+          root.created_at,
+          COALESCE(reply_activity.last_reply_created_at, root.created_at) AS last_activity_at,
+          root.edited_at,
+          root.deleted_at
+        FROM topic_messages root
+        LEFT JOIN reply_activity ON reply_activity.parent_message_id = root.message_id
+        WHERE root.topic_id = ?
+          AND root.parent_message_id IS NULL
+          AND root.deleted_at IS NULL
+          ${rootExclusionClause}
+      )
+      SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, last_activity_at, edited_at, deleted_at
+      FROM root_messages
+      ${cursorClause}
+      ORDER BY last_activity_at DESC, seq DESC
       LIMIT ?;
     `)
+  }
+
+  function getRootActivityCursor(
+    topicId: string,
+    beforeSeq: number,
+    excludedSenderProfileIds: readonly string[],
+  ): { lastActivityAt: string; seq: number } | null {
+    const excludedCount = excludedSenderProfileIds.length
+    const replyExclusionClause = excludedCount > 0
+      ? `AND sender_profile_id NOT IN (${Array(excludedCount).fill('?').join(',')})`
+      : ''
+    const rootExclusionClause = excludedCount > 0
+      ? `AND root.sender_profile_id NOT IN (${Array(excludedCount).fill('?').join(',')})`
+      : ''
+    const statement = database.prepare(`
+      WITH reply_activity AS (
+        SELECT parent_message_id, MAX(created_at) AS last_reply_created_at
+        FROM topic_messages
+        WHERE topic_id = ?
+          AND parent_message_id IS NOT NULL
+          AND deleted_at IS NULL
+          ${replyExclusionClause}
+        GROUP BY parent_message_id
+      )
+      SELECT
+        root.seq,
+        COALESCE(reply_activity.last_reply_created_at, root.created_at) AS last_activity_at
+      FROM topic_messages root
+      LEFT JOIN reply_activity ON reply_activity.parent_message_id = root.message_id
+      WHERE root.topic_id = ?
+        AND root.seq = ?
+        AND root.parent_message_id IS NULL
+        AND root.deleted_at IS NULL
+        ${rootExclusionClause}
+      LIMIT 1;
+    `)
+    const row = statement.get(
+      topicId,
+      ...excludedSenderProfileIds,
+      topicId,
+      beforeSeq,
+      ...excludedSenderProfileIds,
+    ) as { seq: number; last_activity_at: string } | undefined
+    return row ? { lastActivityAt: row.last_activity_at, seq: row.seq } : null
   }
 
   function runPage(
@@ -351,12 +430,21 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     beforeSeq: number | null,
   ): TopicMessageHistoryPage {
     const normalizedLimit = Number.isInteger(limit) && limit > 0 ? limit : 30
-    const beforeClause = beforeSeq !== null ? 'AND seq < ?' : ''
-    const statement = buildStatement(excludedSenderProfileIds.length, beforeClause)
+    const cursor = beforeSeq !== null
+      ? getRootActivityCursor(topicId, beforeSeq, excludedSenderProfileIds)
+      : null
+    if (beforeSeq !== null && cursor === null) {
+      return { messages: [], hasMore: false, oldestSeq: beforeSeq }
+    }
+    const statement = buildStatement(excludedSenderProfileIds.length, cursor !== null)
 
     const args: Array<string | number> = [topicId]
-    if (beforeSeq !== null) args.push(beforeSeq)
     args.push(...excludedSenderProfileIds)
+    args.push(topicId)
+    args.push(...excludedSenderProfileIds)
+    if (cursor !== null) {
+      args.push(cursor.lastActivityAt, cursor.lastActivityAt, cursor.seq)
+    }
     // +1 "peek ahead" — виж коментара над buildStatement.
     args.push(normalizedLimit + 1)
 
@@ -367,8 +455,8 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     // pageRows е seq DESC (най-новото първо) — reverse към старо→ново за
     // директен viewport render (виж т.4 от брифа: "подреждат се визуално
     // от по-стари към по-нови").
-    const messages = pageRows.map(toSnapshot).reverse()
-    const oldestSeq = messages.length > 0 ? messages[0]!.seq : null
+    const messages = pageRows.map(toSnapshot)
+    const oldestSeq = messages.length > 0 ? messages[messages.length - 1]!.seq : null
 
     return { messages, hasMore, oldestSeq }
   }

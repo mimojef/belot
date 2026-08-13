@@ -25,6 +25,7 @@
     "check:topics-personal-integration-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicsPersonalIntegrationClient.ts --project-root=.",
     "check:unified-notification-badges": "node server/node_modules/tsx/dist/cli.mjs scripts/checkUnifiedNotificationBadges.ts",
     "check:topics-scroll-retention-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicsScrollRetentionClient.ts --project-root=.",
+    "check:topics-activity-ordering-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicsActivityOrderingClient.ts",
     "check:profile-popup-mobile-responsive": "npx tsx scripts/checkProfilePopupMobileResponsive.ts",
     "check:support-chat-typing-stability": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSupportChatTypingStability.ts",
     "check:all-chat-typing-stability": "node server/node_modules/tsx/dist/cli.mjs scripts/checkAllChatTypingStability.ts",

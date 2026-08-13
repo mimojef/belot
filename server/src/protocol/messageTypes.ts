@@ -1048,6 +1048,7 @@ export type TopicMessageBroadcastSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   body: string
   createdAt: string
+  lastActivityAt: string
   editedAt: string | null
   /** Attachment feature — максимум 1 image/съобщение, null ако няма. */
   attachment: TopicAttachmentSnapshot | null

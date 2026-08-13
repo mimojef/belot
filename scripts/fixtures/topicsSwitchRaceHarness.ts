@@ -19,6 +19,7 @@ const topics: TopicSnapshot[] = [
 ]
 
 function makeMessage(topicId: string, body: string, senderProfileId = 'someone', senderDisplayName = 'Someone'): TopicMessageSnapshot {
+  const createdAt = new Date().toISOString()
   return {
     seq: Math.floor(Math.random() * 100000),
     messageId: `${topicId}-${body}-${Math.random()}`,
@@ -29,7 +30,8 @@ function makeMessage(topicId: string, body: string, senderProfileId = 'someone',
     senderAvatarUrl: null,
     senderRole: 'player',
     body,
-    createdAt: new Date().toISOString(),
+    createdAt,
+    lastActivityAt: createdAt,
     editedAt: null,
     likeCount: 0,
     replyCount: 0,
@@ -145,7 +147,7 @@ function deliverNextResponseWithAuthorsAndHasMore(
     ok: true,
     messages,
     hasMore,
-    oldestSeq: messages.length > 0 ? messages[0]!.seq : 1,
+    oldestSeq: messages.length > 0 ? messages[messages.length - 1]!.seq : 1,
   })
 }
 

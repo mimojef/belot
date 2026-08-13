@@ -1560,6 +1560,7 @@ export type TopicMessageSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   body: string
   createdAt: string
+  lastActivityAt: string
   unreadCount: number
   editedAt: string | null
   /** Етап 3 — batch-computed, виж server-side getMessageAggregatesByIds. */

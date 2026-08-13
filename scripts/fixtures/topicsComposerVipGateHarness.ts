@@ -22,6 +22,7 @@ let authSession: LobbyAuthSession = {
 }
 
 function makeMessage(topicId: string, seq: number, body: string, senderProfileId = 'someone', senderDisplayName = 'Someone'): TopicMessageSnapshot {
+  const createdAt = new Date().toISOString()
   return {
     seq,
     messageId: `${topicId}-${seq}-${body}`,
@@ -32,7 +33,8 @@ function makeMessage(topicId: string, seq: number, body: string, senderProfileId
     senderAvatarUrl: null,
     senderRole: 'player',
     body,
-    createdAt: new Date().toISOString(),
+    createdAt,
+    lastActivityAt: createdAt,
     editedAt: null,
     likeCount: 0,
     replyCount: 0,
@@ -188,7 +190,7 @@ function q<T extends Element>(selector: string): T | null {
       ok: true,
       messages,
       hasMore,
-      oldestSeq: messages.length > 0 ? messages[0]!.seq : null,
+      oldestSeq: messages.length > 0 ? messages[messages.length - 1]!.seq : null,
     }
   },
   setNextRepliesResult: (replies: TopicReplySnapshot[], hasMore = false) => {
@@ -374,6 +376,8 @@ function q<T extends Element>(selector: string): T | null {
   },
   getTopicChipBadgeText: (topicId: string) => q(`[data-topic-chip="${CSS.escape(topicId)}"] .topic-unread-badge`)?.textContent ?? null,
   getTopicsPersonalBadgeText: () => q('[data-topics-personal-badge="1"]')?.textContent ?? null,
+  clickTopicsPersonalOpen: () => q<HTMLButtonElement>('[data-topics-personal-open="1"]')?.click(),
+  clickTopicsBackToGeneral: () => (q<HTMLButtonElement>('[data-topics-personal-back="1"]') ?? q<HTMLButtonElement>('[data-topics-back-to-general="1"]'))?.click(),
   isTopicsStreamVisible: () => q('[data-topic-messages-scroll="1"]') !== null,
   isTopicsPersonalDetailVisible: () => q('[data-topics-personal-detail="1"]') !== null,
   getTopicsPersonalPanelView: () => q<HTMLElement>('[data-topics-personal-panel="1"]')?.dataset.personalView ?? null,

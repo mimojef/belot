@@ -108,6 +108,7 @@ function makeRootMessage(body: string): TopicMessageSnapshot {
     senderRole: 'player',
     body,
     createdAt: new Date('2026-08-11T10:00:00Z').toISOString(),
+    lastActivityAt: new Date('2026-08-11T10:00:00Z').toISOString(),
     editedAt: null,
     likeCount: 0,
     replyCount: 0,

@@ -78,6 +78,8 @@ type H = {
   controller: { handleServerMessage: (message: Record<string, unknown>) => boolean }
   openTopicsScreen: () => void
   clickTopicChip: (topicId: string) => void
+  clickTopicsPersonalOpen: () => void
+  clickTopicsBackToGeneral: () => void
   setVipGate: (isActive: boolean, hasClaimedLaunchGift: boolean) => void
   setNextMessagesResult: (messages: unknown[], hasMore?: boolean) => void
   setNextRepliesResult: (replies: unknown[], hasMore?: boolean) => void
@@ -100,6 +102,8 @@ type H = {
   getVisibleReplyIds: (rootMessageId: string) => Array<string | null>
   isVipPopupOpen: () => boolean
   getComposerErrorText: () => string | null
+  isTopicsStreamVisible: () => boolean
+  getTopicsPersonalPanelView: () => string | null
 }
 
 // Playwright page.evaluate(fn, arg) сериализира fn директно (Function.prototype.toString
@@ -417,12 +421,14 @@ try {
     await page.waitForTimeout(100)
     assert(await call(page, (h: H, id: string) => h.isReplyComposerOpen(id), rootA), 'composer трябва да е отворен преди switch')
 
-    await call(page, (h: H) => h.setNextMessagesResult([], false))
-    await call(page, (h: H, id: string) => h.clickTopicChip(id), 'topic-b')
+    await call(page, (h: H) => h.clickTopicsPersonalOpen())
     await page.waitForTimeout(100)
 
-    const bodies = await page.evaluate(() => document.querySelectorAll('[data-topic-message]').length)
-    assertEqual(bodies, 0, 'topic-b трябва да е празна (различен topic context)')
+    assertEqual(await call(page, (h: H) => h.isTopicsStreamVisible()), false, 'Personal mode трябва да скрива topic stream-а')
+    assertEqual(await call(page, (h: H) => h.getTopicsPersonalPanelView()), 'list', 'Personal mode трябва да отвори inbox list context')
+    await call(page, (h: H) => h.clickTopicsBackToGeneral())
+    await page.waitForTimeout(100)
+    assertEqual(await call(page, (h: H, id: string) => h.isReplyComposerOpen(id), rootA), true, 'връщане към Общ запазва reply composer state само в canonical general context')
   })
 
   await check('Няма JS грешки в конзолата по време на сценариите', () => {

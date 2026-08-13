@@ -879,7 +879,7 @@ type InternalLobbyFlowState = {
    * bottom (load older); 'live-append'/'reconnect-refresh' = near-bottom
    * threshold (96px) преди насилствен scroll, огледално на lobby chat модела.
    */
-  topicMessagesRenderReason: 'initial' | 'prepend' | 'live-append' | 'reconnect-refresh' | 'own-message' | null
+  topicMessagesRenderReason: 'initial' | 'prepend' | 'live-append' | 'reconnect-refresh' | 'own-message' | 'reorder' | null
   topicMessagesScrollAnchor: { messageId: string; top: number } | null
   /** Draft текст per тема — потвърдено отклонение от flat-field конвенцията (lobbyChatDraft), защото Topics е genuinely multi-channel. */
   topicComposerDraftByTopicId: Record<string, string>
@@ -5657,7 +5657,7 @@ export function createLobbyFlowController(
       return
     }
 
-    state.topicMessages = result.messages
+    state.topicMessages = sortTopicMessagesByActivity(result.messages)
     state.topicMessagesHasMore = result.hasMore
     state.topicMessagesOldestSeq = result.oldestSeq
     state.topicMessagesErrorText = null
@@ -5830,6 +5830,11 @@ export function createLobbyFlowController(
     scrollEl.scrollTop = scrollEl.scrollHeight - distanceFromBottom
   }
 
+  function isTopicMessagesNearTop(thresholdPx = 96): boolean {
+    const scrollEl = options.root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
+    return scrollEl === null || scrollEl.scrollTop <= thresholdPx
+  }
+
   // B) Load older в СЪЩАТА тема — НЕ инкрементира generation token-а (не е
   // "нов switch", а продължение на текущия), но капсулира текущата стойност
   // при старт, за да засече дали потребителят е превключил тема междувременно
@@ -5873,7 +5878,7 @@ export function createLobbyFlowController(
     }
 
     // Prepend по-старите съобщения пред вече заредените (старо→ново ред).
-    state.topicMessages = [...result.messages, ...(state.topicMessages ?? [])]
+    state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], result.messages)
     state.topicMessagesHasMore = result.hasMore
     state.topicMessagesOldestSeq = result.oldestSeq ?? state.topicMessagesOldestSeq
     seedLikeStateFromMessages(result.messages)
@@ -6092,6 +6097,21 @@ export function createLobbyFlowController(
   // ─── Realtime merge/dedupe (Етап 2) ─────────────────────────────────────
 
   /** Dedupe по messageId, ordering по seq — единна merge функция за REST history / live WS push / catch-up (Етап 2 корекция т.8). */
+  function getTopicMessageActivityMs(message: TopicMessageSnapshot): number {
+    const activityMs = Date.parse(message.lastActivityAt)
+    if (Number.isFinite(activityMs)) return activityMs
+    const createdMs = Date.parse(message.createdAt)
+    return Number.isFinite(createdMs) ? createdMs : 0
+  }
+
+  function sortTopicMessagesByActivity(messages: readonly TopicMessageSnapshot[]): TopicMessageSnapshot[] {
+    return [...messages].sort((a, b) => {
+      const activityDelta = getTopicMessageActivityMs(b) - getTopicMessageActivityMs(a)
+      if (activityDelta !== 0) return activityDelta
+      return b.seq - a.seq
+    })
+  }
+
   function mergeTopicMessages(
     existing: readonly TopicMessageSnapshot[],
     incoming: readonly TopicMessageSnapshot[],
@@ -6100,7 +6120,7 @@ export function createLobbyFlowController(
     const byId = new Map<string, TopicMessageSnapshot>()
     for (const m of existing) byId.set(m.messageId, m)
     for (const m of incoming) byId.set(m.messageId, m)
-    return [...byId.values()].sort((a, b) => a.seq - b.seq)
+    return sortTopicMessagesByActivity([...byId.values()])
   }
 
   // Етап 3 — likeCount/viewerHasLiked "override" state-ът се захранва от
@@ -6131,13 +6151,33 @@ export function createLobbyFlowController(
   // издърпаме насила потребител, който в момента чете стари съобщения.
   async function refreshTopicMessagesAfterTruncatedCatchup(topicId: string): Promise<void> {
     if (!options.onTopicMessagesLoad || state.activeTopicId !== topicId) return
+    const scrollAnchor = captureTopicMessagesScrollAnchor()
     const result = await options.onTopicMessagesLoad(topicId, null)
     if (state.currentScreen !== 'topics' || state.activeTopicId !== topicId) return
     if (!result.ok) return
     state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], result.messages)
+    state.topicMessagesHasMore = result.hasMore
+    state.topicMessagesOldestSeq = result.oldestSeq
     updateLatestKnownSeqFromMessages(topicId, result.messages)
     seedLikeStateFromMessages(result.messages)
+    state.topicMessagesScrollAnchor = scrollAnchor
     state.topicMessagesRenderReason = 'reconnect-refresh'
+    render()
+  }
+
+  async function refreshTopicMessagesAfterActivityChange(topicId: string): Promise<void> {
+    if (!options.onTopicMessagesLoad || state.activeTopicId !== topicId) return
+    const scrollAnchor = captureTopicMessagesScrollAnchor()
+    const result = await options.onTopicMessagesLoad(topicId, null)
+    if (state.currentScreen !== 'topics' || state.activeTopicId !== topicId) return
+    if (!result.ok) return
+    state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], result.messages)
+    state.topicMessagesHasMore = result.hasMore
+    state.topicMessagesOldestSeq = result.oldestSeq
+    updateLatestKnownSeqFromMessages(topicId, result.messages)
+    seedLikeStateFromMessages(result.messages)
+    state.topicMessagesScrollAnchor = scrollAnchor
+    state.topicMessagesRenderReason = 'reorder'
     render()
   }
 
@@ -11540,12 +11580,14 @@ export function createLobbyFlowController(
         return true
       }
       if (message.messages.length > 0) {
+        const scrollAnchor = isTopicMessagesNearTop() ? null : captureTopicMessagesScrollAnchor()
         state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], message.messages)
         updateLatestKnownSeqFromMessages(message.topicId, message.messages)
         seedLikeStateFromMessages(message.messages)
         // reconnect-refresh поведение (near-bottom threshold, НЕ форсиран
         // bottom) — catch-up batch-ът може да съдържа съобщения, докато
         // потребителят чете стари, скролнал нагоре.
+        state.topicMessagesScrollAnchor = scrollAnchor
         state.topicMessagesRenderReason = 'reconnect-refresh'
         render()
       }
@@ -11567,13 +11609,14 @@ export function createLobbyFlowController(
       }
 
       const { type: _msgType, requestId, ...incomingMessage } = message
+      const isOwnRootMessageAck = requestId !== undefined && requestId === state.topicComposerPendingRequestIdByTopicId[message.topicId]
+      const scrollAnchor = isOwnRootMessageAck || isTopicMessagesNearTop() ? null : captureTopicMessagesScrollAnchor()
       state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], [incomingMessage])
       updateLatestKnownSeqFromMessages(message.topicId, [incomingMessage])
       seedLikeStateFromMessages([incomingMessage])
 
       // Ack по requestId (НЕ по body matching — Етап 2 корекция т.4): само
       // ТОЧНО съвпадащ pending requestId за тази тема чисти draft-а/pending state-а.
-      const isOwnRootMessageAck = requestId !== undefined && requestId === state.topicComposerPendingRequestIdByTopicId[message.topicId]
       if (isOwnRootMessageAck) {
         state.topicComposerDraftByTopicId[message.topicId] = ''
         state.topicComposerPendingRequestIdByTopicId[message.topicId] = null
@@ -11583,6 +11626,7 @@ export function createLobbyFlowController(
         clearTopicComposerPendingImage(message.topicId)
       }
 
+      state.topicMessagesScrollAnchor = scrollAnchor
       state.topicMessagesRenderReason = isOwnRootMessageAck ? 'own-message' : 'live-append'
       void markActiveTopicSeen(message.topicId)
       render()
@@ -11637,8 +11681,12 @@ export function createLobbyFlowController(
       // Root replyCount винаги се увеличава, независимо от expanded state
       // (Етап 3 брифа: "ако collapsed → само counter се обновява").
       const rootMessage = (state.topicMessages ?? []).find((m) => m.messageId === rootMessageId)
+      const scrollAnchor = captureTopicMessagesScrollAnchor()
       if (rootMessage) {
         rootMessage.replyCount += 1
+        if (Date.parse(incomingReply.createdAt) >= getTopicMessageActivityMs(rootMessage)) {
+          rootMessage.lastActivityAt = incomingReply.createdAt
+        }
       }
 
       const isExpanded = state.topicExpandedReplyRootIds.includes(rootMessageId)
@@ -11659,6 +11707,14 @@ export function createLobbyFlowController(
         state.topicReplyComposerPendingRequestIdByRootId[rootMessageId] = null
         state.topicReplyComposerErrorTextByRootId[rootMessageId] = null
         clearTopicReplyComposerPendingImage(rootMessageId)
+      }
+
+      if (rootMessage) {
+        state.topicMessages = sortTopicMessagesByActivity(state.topicMessages ?? [])
+        state.topicMessagesScrollAnchor = scrollAnchor
+        state.topicMessagesRenderReason = 'reorder'
+      } else {
+        void refreshTopicMessagesAfterActivityChange(message.topicId)
       }
 
       void markActiveTopicSeen(message.topicId)
@@ -11875,6 +11931,9 @@ export function createLobbyFlowController(
           state.topicMessageEdit = null
           state.topicMessageEditErrorText = null
           state.topicMessageEditBusy = false
+        }
+        if (message.topicId === state.activeTopicId) {
+          void refreshTopicMessagesAfterActivityChange(message.topicId)
         }
       }
       render()

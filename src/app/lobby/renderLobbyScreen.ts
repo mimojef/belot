@@ -338,7 +338,7 @@ export type LobbyScreenState = {
   topicMessagesHasMore: boolean
   topicMessagesOldestSeq: number | null
   topicOlderMessagesLoading: boolean
-  topicMessagesRenderReason: 'initial' | 'prepend' | 'live-append' | 'reconnect-refresh' | 'own-message' | null
+  topicMessagesRenderReason: 'initial' | 'prepend' | 'live-append' | 'reconnect-refresh' | 'own-message' | 'reorder' | null
   topicMessagesScrollAnchor: { messageId: string; top: number } | null
   topicComposerDraftByTopicId: Record<string, string>
   topicComposerPendingRequestIdByTopicId: Record<string, string | null>
@@ -9529,9 +9529,9 @@ export function renderLobbyScreen(
   // wasLobbyChatNearBottom по-долу: ново live съобщение дърпа до дъното
   // САМО ако потребителят вече е бил близо до него, иначе append без да го
   // "издърпаме" насила докато чете стари съобщения (Етап 2 брифа т.8).
-  const wasTopicMessagesNearBottom = prevTopicMessagesScrollEl === null
+  const wasTopicMessagesNearTop = prevTopicMessagesScrollEl === null
     ? true
-    : prevTopicMessagesScrollEl.scrollHeight - prevTopicMessagesScrollEl.scrollTop - prevTopicMessagesScrollEl.clientHeight <= topicMessagesNearBottomThresholdPx
+    : prevTopicMessagesScrollEl.scrollTop <= topicMessagesNearBottomThresholdPx
   const savedTopicMessagesScrollTop = prevTopicMessagesScrollEl?.scrollTop ?? 0
   const explicitTopicMessagesScrollAnchor = state.topicMessagesScrollAnchor
   const stableTopicMessagesScrollAnchor = explicitTopicMessagesScrollAnchor ?? (() => {
@@ -10337,7 +10337,7 @@ export function renderLobbyScreen(
   const topicMessagesScroll = root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
   if (topicMessagesScroll) {
     topicMessagesScroll.addEventListener('scroll', () => {
-      if (topicMessagesScroll.scrollTop <= 40) {
+      if (topicMessagesScroll.scrollHeight - topicMessagesScroll.scrollTop - topicMessagesScroll.clientHeight <= 40) {
         options.onTopicMessagesLoadOlder()
       }
     })
@@ -12865,18 +12865,18 @@ export function renderLobbyScreen(
       // Load older (scroll нагоре) — възстановяваме точната визуална позиция
       // чрез запазената delta от долния край, потребителят не "подскача".
       newTopicMessagesScrollEl.scrollTop = newTopicMessagesScrollEl.scrollHeight - savedTopicMessagesDistanceFromBottom
-    } else if (state.topicMessagesRenderReason === 'live-append' || state.topicMessagesRenderReason === 'reconnect-refresh') {
+    } else if (state.topicMessagesRenderReason === 'live-append' || state.topicMessagesRenderReason === 'reconnect-refresh' || state.topicMessagesRenderReason === 'reorder') {
       // Ново live съобщение (WS push) или reconnect/truncated-catchup refresh
       // (Етап 2 брифа т.8) — near-bottom threshold, огледално на
       // wasLobbyChatNearBottom: не дърпаме насила потребител, който чете стари.
-      newTopicMessagesScrollEl.scrollTop = wasTopicMessagesNearBottom
-        ? newTopicMessagesScrollEl.scrollHeight
+      newTopicMessagesScrollEl.scrollTop = wasTopicMessagesNearTop
+        ? 0
         : savedTopicMessagesScrollTop
     } else if (state.topicMessagesRenderReason === 'initial' || state.topicMessagesRenderReason === 'own-message') {
       // 'initial' (първо зареждане на тема / превключване) или null — viewport
       // към последните съобщения (т.4 от Етап 1 брифа: "viewport е към
       // долната част/последните съобщения").
-      newTopicMessagesScrollEl.scrollTop = newTopicMessagesScrollEl.scrollHeight
+      newTopicMessagesScrollEl.scrollTop = 0
     } else if (stableTopicMessagesScrollAnchor !== null && stableTopicMessagesScrollAnchor.messageId.length > 0) {
       const anchorEl = root.querySelector<HTMLElement>(`[data-topic-message="${cssEscape(stableTopicMessagesScrollAnchor.messageId)}"]`)
       if (anchorEl) {
@@ -12887,7 +12887,7 @@ export function renderLobbyScreen(
     } else if (prevTopicMessagesScrollEl !== null) {
       newTopicMessagesScrollEl.scrollTop = savedTopicMessagesScrollTop
     } else {
-      newTopicMessagesScrollEl.scrollTop = newTopicMessagesScrollEl.scrollHeight
+      newTopicMessagesScrollEl.scrollTop = 0
     }
   }
   state.topicMessagesScrollAnchor = null

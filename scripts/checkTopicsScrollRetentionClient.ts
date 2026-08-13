@@ -94,6 +94,7 @@ async function call<T>(page: Page, fn: (h: H, arg: any) => T, arg: any = undefin
 }
 
 function makeTopicMessage(topicId: string, seq: number, prefix: string): Record<string, unknown> {
+  const createdAt = new Date().toISOString()
   return {
     type: 'topic_message',
     seq,
@@ -105,7 +106,8 @@ function makeTopicMessage(topicId: string, seq: number, prefix: string): Record<
     senderAvatarUrl: null,
     senderRole: 'player',
     body: `${prefix} message ${seq}`,
-    createdAt: new Date().toISOString(),
+    createdAt,
+    lastActivityAt: createdAt,
     editedAt: null,
     likeCount: 0,
     replyCount: 0,
@@ -214,6 +216,11 @@ async function assertAtBottom(page: Page, label: string, tolerancePx = 8): Promi
   assert(distance !== null && distance <= tolerancePx, `${label}: bottom distance ${distance}, expected <= ${tolerancePx}`)
 }
 
+async function assertAtTop(page: Page, label: string, tolerancePx = 8): Promise<void> {
+  const scrollTop = await call(page, (h: H) => h.getMessagesScrollTop())
+  assert(scrollTop !== null && scrollTop <= tolerancePx, `${label}: scrollTop ${scrollTop}, expected <= ${tolerancePx}`)
+}
+
 async function assertNotAtBottom(page: Page, label: string): Promise<void> {
   const distance = await call(page, (h: H) => h.getMessagesBottomDistance())
   assert(distance !== null && distance > 120, `${label}: unexpectedly near bottom (${distance}px)`)
@@ -263,11 +270,11 @@ try {
       }
     }
 
-    await check(`[${viewportLabel}] initial topic load scrolls to bottom`, async () => {
+    await check(`[${viewportLabel}] initial topic load scrolls to top`, async () => {
       await withHarness(async (page) => {
         const messages = await makeMessages(page, 'topic-general', 1, 46, `${viewportLabel}-initial`)
         await openTopic(page, messages)
-        await assertAtBottom(page, 'initial topic load')
+        await assertAtTop(page, 'initial topic load')
       })
     })
 
@@ -311,14 +318,14 @@ try {
       })
     })
 
-    await check(`[${viewportLabel}] near-bottom realtime root stays pinned`, async () => {
+    await check(`[${viewportLabel}] near-top realtime root stays pinned`, async () => {
       await withHarness(async (page) => {
         const messages = await makeMessages(page, 'topic-general', 1, 46, `${viewportLabel}-near-bottom`)
         await openTopic(page, messages)
-        await setBottomDistance(page, 24)
+        await call(page, (h: H) => h.setMessagesScrollTop(24))
         await call(page, (h: H, msg: Record<string, unknown>) => h.simulateServerMessage(msg), makeTopicMessage('topic-general', 1000, `${viewportLabel}-near-bottom-live`))
         await page.waitForTimeout(100)
-        await assertAtBottom(page, 'near-bottom realtime root', 96)
+        await assertAtTop(page, 'near-top realtime root', 96)
       })
     })
 
@@ -426,31 +433,32 @@ try {
       })
     })
 
-    await check(`[${viewportLabel}] load older prepend preserves viewport`, async () => {
+    await check(`[${viewportLabel}] load older from bottom preserves viewport`, async () => {
       await withHarness(async (page) => {
         const messages = await makeMessages(page, 'topic-general', 31, 30, `${viewportLabel}-recent`)
         await openTopic(page, messages, true)
-        const anchorId = messages[0]!.messageId
+        const anchorId = messages[messages.length - 1]!.messageId
         const older = await makeMessages(page, 'topic-general', 1, 30, `${viewportLabel}-older`)
         await call(page, (h: H, arg: unknown[]) => h.setNextMessagesResult(arg, false), older)
         const before = await page.evaluate((id) => {
           const scroll = document.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
           const anchor = document.querySelector<HTMLElement>(`[data-topic-message="${CSS.escape(id as string)}"]`)
           if (!scroll || !anchor) throw new Error('missing load older scroll precondition elements')
-          scroll.scrollTop = 20
+          scroll.scrollTop = scroll.scrollHeight - scroll.clientHeight - 20
           const scrollTop = scroll.scrollTop
-          if (scrollTop > 40) throw new Error(`load older precondition failed: scrollTop=${scrollTop}`)
+          const bottomDistance = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight
+          if (bottomDistance > 40) throw new Error(`load older precondition failed: bottomDistance=${bottomDistance}, scrollTop=${scrollTop}`)
           const anchorTop = anchor.getBoundingClientRect().top
           scroll.dispatchEvent(new Event('scroll', { bubbles: true }))
           return anchorTop
         }, anchorId)
         await page.waitForFunction(() => document.querySelectorAll('[data-topic-message]').length >= 60, undefined, { timeout: 5000 })
         const after = await call(page, (h: H, id: string) => h.getMessageTop(id), anchorId)
-        assertClose(after, before, 'load older prepend', 6)
+        assertClose(after, before, 'load older from bottom', 6)
       })
     })
 
-    await check(`[${viewportLabel}] own successful root message scrolls to bottom`, async () => {
+    await check(`[${viewportLabel}] own successful root message scrolls to top`, async () => {
       await withHarness(async (page) => {
         const messages = await makeMessages(page, 'topic-general', 1, 46, `${viewportLabel}-own`)
         await openTopic(page, messages)
@@ -466,7 +474,7 @@ try {
           { ...makeTopicMessage('topic-general', 3000, `${viewportLabel}-own-ack`), requestId, senderProfileId: 'me', senderDisplayName: 'Me' },
         )
         await page.waitForTimeout(100)
-        await assertAtBottom(page, 'own successful root message')
+        await assertAtTop(page, 'own successful root message')
       })
     })
 

@@ -345,8 +345,8 @@ await withTempDir(async (dir) => {
   await check('[8] getRecentMessages връща последните N съобщения, подредени старо→ново', () => {
     const page = store.getRecentMessages('topic-x', 3, [])
     assertEqual(page.messages.length, 3, 'трябва да върне точно 3 съобщения')
-    assertEqual(page.messages[0]!.body, 'Съобщение 3', 'най-старото от последните 3 трябва да е първо')
-    assertEqual(page.messages[2]!.body, 'Съобщение 5', 'най-новото трябва да е последно')
+    assertEqual(page.messages[0]!.body, 'Съобщение 5', 'най-активното трябва да е първо')
+    assertEqual(page.messages[2]!.body, 'Съобщение 3', 'третото по activity трябва да е последно в page-а')
   })
 
   await check('[9] getRecentMessages hasMore=true когато има повече от limit съобщения', () => {
@@ -366,8 +366,8 @@ await withTempDir(async (dir) => {
     const oldestSeq = recentPage.oldestSeq!
     const olderPage = store.getMessagesBefore('topic-x', oldestSeq, 2, [])
     assertEqual(olderPage.messages.length, 2, 'по-старите 2: Съобщение 2, 3')
-    assertEqual(olderPage.messages[0]!.body, 'Съобщение 2', 'старо→ново подредба')
-    assertEqual(olderPage.messages[1]!.body, 'Съобщение 3', 'старо→ново подредба')
+    assertEqual(olderPage.messages[0]!.body, 'Съобщение 3', 'activity DESC подредба')
+    assertEqual(olderPage.messages[1]!.body, 'Съобщение 2', 'activity DESC подредба')
     assert(olderPage.messages.every((m) => m.seq < oldestSeq), 'всички трябва да имат seq < oldestSeq')
   })
 
@@ -457,8 +457,43 @@ await withTempDir(async (dir) => {
       'две последователни заявки трябва да върнат идентична подредба',
     )
     for (let i = 1; i < page1.messages.length; i++) {
-      assert(page1.messages[i]!.seq > page1.messages[i - 1]!.seq, 'seq трябва да е строго нарастващ по позиция')
+      assert(page1.messages[i]!.seq < page1.messages[i - 1]!.seq, 'seq tie-breaker трябва да е DESC при равна activity стойност')
     }
+  })
+
+  await check('[17b] old root with fresh live reply participates in recent activity page', () => {
+    insertTopic(db, { topicId: 'topic-activity', slug: 'topic-activity', title: 'Activity' })
+    insertMessage(db, {
+      messageId: 'activity-new-root',
+      topicId: 'topic-activity',
+      senderProfileId: 'sender-1',
+      senderDisplayName: 'Sender One',
+      body: 'newer root without replies',
+      createdAt: '2026-08-13T10:00:00.000Z',
+    })
+    insertMessage(db, {
+      messageId: 'activity-old-root',
+      topicId: 'topic-activity',
+      senderProfileId: 'sender-1',
+      senderDisplayName: 'Sender One',
+      body: 'old root with fresh reply',
+      createdAt: '2026-08-01T10:00:00.000Z',
+    })
+    insertMessage(db, {
+      messageId: 'activity-fresh-reply',
+      topicId: 'topic-activity',
+      parentMessageId: 'activity-old-root',
+      senderProfileId: 'sender-2',
+      senderDisplayName: 'Sender Two',
+      body: 'fresh reply',
+      createdAt: '2026-08-13T10:01:00.000Z',
+    })
+    const activePage = store.getRecentMessages('topic-activity', 1, [])
+    assertEqual(activePage.messages[0]!.messageId, 'activity-old-root', 'fresh reply should lift old root into recent page')
+    assertEqual(activePage.messages[0]!.lastActivityAt, '2026-08-13T10:01:00.000Z', 'lastActivityAt should be newest live reply')
+    db.prepare(`UPDATE topic_messages SET deleted_at = ? WHERE message_id = ?`).run('2026-08-13T10:02:00.000Z', 'activity-fresh-reply')
+    const fallbackPage = store.getRecentMessages('topic-activity', 1, [])
+    assertEqual(fallbackPage.messages[0]!.messageId, 'activity-new-root', 'deleted latest reply must not keep old root at top')
   })
 
   await check('[18] Blocking filter (excludedSenderProfileIds) изключва блокирани податели', () => {
