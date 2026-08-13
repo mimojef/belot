@@ -112,8 +112,8 @@ function renderTopicsBarChip(topic: { topicId: string; title: string; isGeneral:
         display:inline-flex;
         align-items:center;
         gap:6px;
-        padding:0 16px;
-        border-radius:999px;
+        padding:0 14px;
+        border-radius:8px;
         border:1px solid;
         ${activeStyle}
         font-size:13px;
@@ -171,10 +171,10 @@ function renderTopicsBar(state: LobbyScreenState): string {
          effective touch target (т.5 от корекциите) без визуално да изглежда
          прекалено голямо — само height/width растат, padding/font остават. */
       .topic-chip, .topic-create-chip { height:36px; }
-      .topic-create-chip { width:36px; }
+      .topic-create-chip { width:42px; }
       @media (hover: none) and (pointer: coarse) {
         .topic-chip, .topic-create-chip { height:44px; }
-        .topic-create-chip { width:44px; }
+        .topic-create-chip { width:48px; }
       }
       /* Native horizontal scrollbar скрит cross-browser — swipe/wheel/arrow
          навигацията остава напълно функционална, само визуалният scrollbar
@@ -214,9 +214,9 @@ function renderTopicsBar(state: LobbyScreenState): string {
       style="
         display:flex;
         align-items:center;
-        gap:4px;
+        gap:8px;
         min-width:0;
-        padding:10px 4px;
+        padding:12px 4px 8px;
       "
     >
       <button
@@ -229,14 +229,14 @@ function renderTopicsBar(state: LobbyScreenState): string {
           display:inline-flex;
           align-items:center;
           justify-content:center;
-          border-radius:50%;
+          border-radius:8px;
           border:1px solid rgba(74,222,128,0.4);
           background:linear-gradient(135deg,#22c55e 0%,#16a34a 100%);
           color:#ffffff;
           font-size:18px;
           font-weight:900;
           cursor:pointer;
-          margin-right:4px;
+          margin-right:2px;
           box-shadow:0 2px 8px rgba(34,197,94,0.35);
         "
       >+</button>
@@ -1601,7 +1601,7 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
   const isPersonalMode = state.topicsMode === 'personal'
   return `
     <section data-topics-screen="1" style="flex:1;min-height:0;display:flex;flex-direction:column;padding:0 4px;overflow:hidden;">
-      <div data-topics-fixed-top="1" style="flex:0 0 auto;display:flex;flex-direction:column;gap:12px;padding-bottom:12px;">
+      <div data-topics-fixed-top="1" style="flex:0 0 auto;display:flex;flex-direction:column;gap:10px;padding:6px 0 12px;">
         ${renderTopicsHeader(state)}
         ${isPersonalMode ? '' : renderTopicsBar(state)}
       </div>
