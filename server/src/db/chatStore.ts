@@ -166,10 +166,6 @@ function buildAttachmentUrls(friendshipId: string, storageFilename: string): { v
   return { viewUrl: base, downloadUrl: `${base}?download=1` }
 }
 
-function getPairKey(friendship: FriendshipRow): string {
-  return `${friendship.lower_profile_id}:${friendship.higher_profile_id}`
-}
-
 function toConversationKind(kind: string): ChatConversationKind | null {
   if (kind === 'friend' || kind === 'vip_dm' || kind === 'pika_support') {
     return kind
@@ -715,31 +711,7 @@ export async function createChatStore(
       profileId,
     ) as FriendshipRow[]
 
-    const canonicalFriendshipRows: FriendshipRow[] = []
-    const personalHumanPairKindByPair = new Map<string, 'friend' | 'vip_dm'>()
-
-    for (const friendship of friendships) {
-      const kind = toConversationKind(friendship.kind)
-      if (kind === null) continue
-
-      if (kind === 'pika_support') {
-        canonicalFriendshipRows.push(friendship)
-        continue
-      }
-
-      const pairKey = getPairKey(friendship)
-      const previousKind = personalHumanPairKindByPair.get(pairKey)
-      if (previousKind === 'friend') continue
-      if (previousKind === 'vip_dm' && kind === 'vip_dm') continue
-      if (previousKind === 'vip_dm' && kind === 'friend') {
-        const existingIndex = canonicalFriendshipRows.findIndex((row) => getPairKey(row) === pairKey && row.kind === 'vip_dm')
-        if (existingIndex >= 0) canonicalFriendshipRows.splice(existingIndex, 1)
-      }
-      personalHumanPairKindByPair.set(pairKey, kind)
-      canonicalFriendshipRows.push(friendship)
-    }
-
-    return canonicalFriendshipRows
+    return friendships
       .map((friendship) => createConversationSnapshot(friendship, profileId, onlineProfileIds))
       .filter((conversation): conversation is ChatConversationSnapshot => {
         return conversation !== null
@@ -874,23 +846,6 @@ export async function createChatStore(
 
     const pair = createChatProfilePair(senderProfileId, recipientProfileId)
 
-    const existingFriend = selectAcceptedFriendByPairStatement.get(
-      pair.lowerProfileId,
-      pair.higherProfileId,
-    ) as FriendshipRow | undefined
-
-    if (existingFriend !== undefined) {
-      const conversation = createConversationSnapshot(existingFriend, senderProfileId)
-      if (conversation === null) {
-        return {
-          ok: false,
-          code: 'invalid_conversation_kind',
-          message: 'Разговорът не може да бъде отворен.',
-        }
-      }
-      return { ok: true, friendshipId: existingFriend.friendship_id, conversation }
-    }
-
     const existingVipDm = selectVipDmByPairStatement.get(
       pair.lowerProfileId,
       pair.higherProfileId,
@@ -926,29 +881,22 @@ export async function createChatStore(
 
     database.exec('BEGIN IMMEDIATE;')
     try {
-      const friendAfterLock = selectAcceptedFriendByPairStatement.get(
+      const vipAfterLock = selectVipDmByPairStatement.get(
         pair.lowerProfileId,
         pair.higherProfileId,
       ) as FriendshipRow | undefined
 
-      if (friendAfterLock === undefined) {
-        const vipAfterLock = selectVipDmByPairStatement.get(
-          pair.lowerProfileId,
-          pair.higherProfileId,
-        ) as FriendshipRow | undefined
-
-        if (vipAfterLock === undefined) {
-          try {
-            insertVipDmConversationStatement.run(
-              randomUUID(),
-              senderProfileId,
-              recipientProfileId,
-              pair.lowerProfileId,
-              pair.higherProfileId,
-            )
-          } catch {
-            // Another writer may have won the partial unique index race.
-          }
+      if (vipAfterLock === undefined) {
+        try {
+          insertVipDmConversationStatement.run(
+            randomUUID(),
+            senderProfileId,
+            recipientProfileId,
+            pair.lowerProfileId,
+            pair.higherProfileId,
+          )
+        } catch {
+          // Another writer may have won the partial unique index race.
         }
       }
 
@@ -962,16 +910,10 @@ export async function createChatStore(
       throw error
     }
 
-    const finalFriend = selectAcceptedFriendByPairStatement.get(
+    const friendship = selectVipDmByPairStatement.get(
       pair.lowerProfileId,
       pair.higherProfileId,
     ) as FriendshipRow | undefined
-    const friendship = finalFriend ?? (
-      selectVipDmByPairStatement.get(
-        pair.lowerProfileId,
-        pair.higherProfileId,
-      ) as FriendshipRow | undefined
-    )
 
     if (friendship === undefined) {
       return {

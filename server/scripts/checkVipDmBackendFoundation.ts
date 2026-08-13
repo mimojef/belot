@@ -344,7 +344,7 @@ async function main(): Promise<void> {
       assertEqual(row.cnt, 1, 'vip_dm row count')
     })
 
-    await check('[3] friend pair returns canonical friend conversation and creates no vip_dm', () => {
+    await check('[3] friend pair starts a separate vip_dm conversation', () => {
       const request = friendshipStore.sendRequest(carol, dana)
       assert(request.ok, 'friend request failed')
       if (!request.ok) return
@@ -355,12 +355,15 @@ async function main(): Promise<void> {
       const started = chatStore.getOrCreateVipDmConversation(carol, dana)
       assert(started.ok, 'start on friend pair failed')
       if (!started.ok) return
-      assertEqual(started.friendshipId, request.friendshipId, 'friendshipId')
-      assertEqual(started.conversation.kind, 'friend', 'friend pair kind')
+      assert(started.friendshipId !== request.friendshipId, 'vip_dm reused friend friendshipId')
+      assertEqual(started.conversation.kind, 'vip_dm', 'friend pair vip_dm kind')
       const pair = createPair(carol, dana)
       const vipRows = db!.prepare(`SELECT COUNT(*) AS cnt FROM profile_friendships WHERE kind = 'vip_dm' AND lower_profile_id = ? AND higher_profile_id = ?`)
         .get(pair.lowerProfileId, pair.higherProfileId) as { cnt: number }
-      assertEqual(vipRows.cnt, 0, 'vip_dm duplicate count')
+      assertEqual(vipRows.cnt, 1, 'vip_dm row count')
+      const friendRows = db!.prepare(`SELECT COUNT(*) AS cnt FROM profile_friendships WHERE kind = 'friend' AND lower_profile_id = ? AND higher_profile_id = ?`)
+        .get(pair.lowerProfileId, pair.higherProfileId) as { cnt: number }
+      assertEqual(friendRows.cnt, 1, 'friend row count')
     })
 
     await check('[4] non-VIP sender/recipient, self, and blocked pairs are denied', () => {
@@ -500,7 +503,7 @@ async function main(): Promise<void> {
       assert(chatStore.sendMessage(supportA, supportId, 'support no vip').ok, 'pika_support gained accidental VIP requirement')
     })
 
-    await check('[7] existing vip_dm converts to friend on accept with same id/messages/reads/attachments', () => {
+    await check('[7] existing vip_dm stays separate when friend request is accepted', () => {
       grantVip(erin)
       const frank = registerHuman('vipdm-frank-convert@example.test', 'VipDmFrankConvert')
       grantVip(frank)
@@ -522,7 +525,7 @@ async function main(): Promise<void> {
       assert(request.friendshipId !== vipDm.friendshipId, 'pending friend unexpectedly reused vip_dm id before accept')
       const accept = friendshipStore.acceptRequest(frank, request.friendshipId)
       assert(accept.ok, 'friend accept failed')
-      const row = db!.prepare(`
+      const vipRow = db!.prepare(`
         SELECT kind, status, requester_profile_id, addressee_profile_id, lower_profile_id,
           higher_profile_id, responded_at
         FROM profile_friendships
@@ -536,38 +539,71 @@ async function main(): Promise<void> {
         higher_profile_id: string
         responded_at: string | null
       } | undefined
-      assert(row !== undefined, 'converted row missing')
-      assertEqual(row!.kind, 'friend', 'converted kind')
-      assertEqual(row!.status, 'accepted', 'converted status')
-      assertEqual(row!.requester_profile_id, erin, 'converted requester')
-      assertEqual(row!.addressee_profile_id, frank, 'converted addressee')
-      assertEqual(row!.lower_profile_id, createPair(erin, frank).lowerProfileId, 'converted lower profile id')
-      assertEqual(row!.higher_profile_id, createPair(erin, frank).higherProfileId, 'converted higher profile id')
-      assert(row!.responded_at !== null, 'converted responded_at missing')
-      const pending = db!.prepare(`SELECT 1 FROM profile_friendships WHERE friendship_id = ?`).get(request.friendshipId)
-      assert(pending === undefined, 'pending friend duplicate was not deleted')
+      assert(vipRow !== undefined, 'vip_dm row missing after friend accept')
+      assertEqual(vipRow!.kind, 'vip_dm', 'vip_dm kind after friend accept')
+      assertEqual(vipRow!.status, 'accepted', 'vip_dm status after friend accept')
+      assertEqual(vipRow!.requester_profile_id, erin, 'vip_dm requester unchanged')
+      assertEqual(vipRow!.addressee_profile_id, frank, 'vip_dm addressee unchanged')
+      assertEqual(vipRow!.lower_profile_id, createPair(erin, frank).lowerProfileId, 'vip_dm lower profile id')
+      assertEqual(vipRow!.higher_profile_id, createPair(erin, frank).higherProfileId, 'vip_dm higher profile id')
+      const friendRow = db!.prepare(`
+        SELECT kind, status, responded_at
+        FROM profile_friendships
+        WHERE friendship_id = ?
+      `).get(request.friendshipId) as { kind: string; status: string; responded_at: string | null } | undefined
+      assert(friendRow !== undefined, 'accepted friend row missing')
+      assertEqual(friendRow!.kind, 'friend', 'accepted friend kind')
+      assertEqual(friendRow!.status, 'accepted', 'accepted friend status')
+      assert(friendRow!.responded_at !== null, 'accepted friend responded_at missing')
       const duplicateRows = db!.prepare(`
         SELECT COUNT(*) AS cnt
         FROM profile_friendships
         WHERE lower_profile_id = ? AND higher_profile_id = ?
       `).get(createPair(erin, frank).lowerProfileId, createPair(erin, frank).higherProfileId) as { cnt: number }
-      assertEqual(duplicateRows.cnt, 1, 'converted pair row count')
+      assertEqual(duplicateRows.cnt, 2, 'separate friend+vip_dm pair row count')
       const friendList = friendshipStore.listForProfile(erin)
-      const visibleFriendRows = friendList.friends.filter((friend) => friend.friendshipId === vipDm.friendshipId)
-      assertEqual(visibleFriendRows.length, 1, 'converted friend list visibility')
+      assert(friendList.friends.some((friend) => friend.friendshipId === request.friendshipId), 'accepted friend missing from friend list')
+      assert(!friendList.friends.some((friend) => friend.friendshipId === vipDm.friendshipId), 'vip_dm leaked into friend list')
       const history = chatStore.listMessages(erin, vipDm.friendshipId)
-      assert(history.ok, 'converted history failed')
-      if (history.ok) assert(history.messages.some((m) => m.body === 'before friendship'), 'converted messages lost')
+      assert(history.ok, 'vip_dm history failed')
+      if (history.ok) assert(history.messages.some((m) => m.body === 'before friendship'), 'vip_dm messages lost')
+      const friendMessage = chatStore.sendMessage(erin, request.friendshipId, 'friend only after accept')
+      assert(friendMessage.ok, 'friend message failed after accept')
+      const friendHistory = chatStore.listMessages(frank, request.friendshipId)
+      assert(friendHistory.ok, 'friend history failed')
+      if (friendHistory.ok) {
+        assert(friendHistory.messages.some((m) => m.body === 'friend only after accept'), 'friend message missing from friend history')
+        assert(!friendHistory.messages.some((m) => m.body === 'before friendship'), 'vip_dm message leaked into friend history')
+      }
+      const vipHistoryAfterFriendMessage = chatStore.listMessages(frank, vipDm.friendshipId)
+      assert(vipHistoryAfterFriendMessage.ok, 'vip_dm history after friend message failed')
+      if (vipHistoryAfterFriendMessage.ok) {
+        assert(!vipHistoryAfterFriendMessage.messages.some((m) => m.body === 'friend only after accept'), 'friend message leaked into vip_dm history')
+      }
       const readRow = db!.prepare(`SELECT 1 FROM chat_conversation_reads WHERE profile_id = ? AND friendship_id = ?`)
         .get(frank, vipDm.friendshipId)
-      assert(readRow !== undefined, 'converted reads lost')
+      assert(readRow !== undefined, 'vip_dm reads lost')
       const attachment = db!.prepare(`
         SELECT 1
         FROM friend_chat_attachments a
         JOIN friend_chat_messages m ON m.message_id = a.message_id
         WHERE m.friendship_id = ?
       `).get(vipDm.friendshipId)
-      assert(attachment !== undefined, 'converted attachments lost')
+      assert(attachment !== undefined, 'vip_dm attachments lost')
+      const friendAttachment = db!.prepare(`
+        SELECT 1
+        FROM friend_chat_attachments a
+        JOIN friend_chat_messages m ON m.message_id = a.message_id
+        WHERE m.friendship_id = ?
+      `).get(request.friendshipId)
+      assert(friendAttachment === undefined, 'vip_dm attachment leaked into friend conversation')
+      const remove = friendshipStore.removeRelationship(erin, request.friendshipId)
+      assert(remove.ok, 'friend removal failed')
+      const vipAfterRemove = db!.prepare(`SELECT kind, status FROM profile_friendships WHERE friendship_id = ?`)
+        .get(vipDm.friendshipId) as { kind: string; status: string } | undefined
+      assert(vipAfterRemove !== undefined, 'friend removal deleted vip_dm')
+      assertEqual(vipAfterRemove!.kind, 'vip_dm', 'vip_dm kind after friend removal')
+      assertEqual(vipAfterRemove!.status, 'accepted', 'vip_dm status after friend removal')
     })
 
     await check('[8] unknown kind fails closed and is not returned as friend', () => {
@@ -614,7 +650,7 @@ async function main(): Promise<void> {
       assert(vip.friendshipId !== supportId, 'vip_dm start returned pika_support row')
     })
 
-    await check('[11] conversation list supports vip_dm metadata and canonicalizes legacy friend+vip_dm duplicates', () => {
+    await check('[11] conversation list returns separate friend and vip_dm rows for one pair', () => {
       const listA = registerHuman('vipdm-list-a@example.test', 'VipDmListA')
       const listB = registerHuman('vipdm-list-b@example.test', 'VipDmListB')
       grantVip(listA)
@@ -642,9 +678,9 @@ async function main(): Promise<void> {
       `).run(legacyFriendId, listA, listB, pair.lowerProfileId, pair.higherProfileId)
       const afterLegacyDuplicate = chatStore.listConversations(listA)
         .filter((conversation) => conversation.friend.profileId === listB && (conversation.kind === 'friend' || conversation.kind === 'vip_dm'))
-      assertEqual(afterLegacyDuplicate.length, 1, 'legacy friend+vip_dm pair visible conversation count')
-      assertEqual(afterLegacyDuplicate[0]!.kind, 'friend', 'legacy friend+vip_dm canonical kind')
-      assertEqual(afterLegacyDuplicate[0]!.friendshipId, legacyFriendId, 'legacy friend+vip_dm canonical friendshipId')
+      assertEqual(afterLegacyDuplicate.length, 2, 'friend+vip_dm pair visible conversation count')
+      assert(afterLegacyDuplicate.some((conversation) => conversation.kind === 'friend' && conversation.friendshipId === legacyFriendId), 'friend row missing from list')
+      assert(afterLegacyDuplicate.some((conversation) => conversation.kind === 'vip_dm' && conversation.friendshipId === vipDm.friendshipId), 'vip_dm row missing from list')
     })
 
     chatStore.close()

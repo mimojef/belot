@@ -146,7 +146,7 @@ function createRenderState(overrides: Partial<LobbyScreenState> = {}): LobbyScre
     chatAdminActionToast: null,
     chatConversations: [{
       friendshipId: 'friend-b',
-      kind: 'friend',
+      kind: 'vip_dm',
       friend: { profileId: 'friend-profile', displayName: 'Mimojef', avatarUrl: null },
       lastMessage: null,
       updatedAt: '2026-08-12T10:00:00.000Z',
@@ -217,9 +217,10 @@ await check('[3] Topics Personal mode hides topic stream/chips and renders perso
   assert(renderLobby.includes("const activeConversation = state.topicsPersonalView === 'conversation'"), 'detail must render only after selecting a conversation')
 })
 
-await check('[4] Global Personal badge uses friend + vip_dm unread message sum and visual 99 cap', () => {
+await check('[4] Topics Personal badge uses vip_dm-only unread message sum and visual 99 cap', () => {
   assert(renderLobby.includes('export function getPersonalChatUnreadTotal'), 'missing global unread helper')
-  assert(renderLobby.includes("conversation.kind === 'friend' || conversation.kind === 'vip_dm'"), 'global unread must include friend + vip_dm conversations')
+  assert(renderLobby.includes("conversation.kind === 'vip_dm'"), 'global unread must include vip_dm conversations')
+  assert(!renderLobby.includes("conversation.kind === 'friend' || conversation.kind === 'vip_dm'"), 'global unread/personal filters must not include friend conversations')
   assert(renderLobby.includes('conversation.unreadCount'), 'global unread must use unreadCount values')
   assert(renderLobby.includes('reduce((total, conversation) => total +'), 'global unread must sum message counts')
   assert(renderLobby.includes('export function formatPersonalChatUnreadBadgeCount'), 'missing badge formatter')
@@ -228,9 +229,8 @@ await check('[4] Global Personal badge uses friend + vip_dm unread message sum a
   assert(renderTopics.includes('data-topics-personal-badge="1"'), 'missing global Personal badge node')
 })
 
-await check('[5] Topics Personal list includes friend + vip_dm and excludes pika_support', () => {
-  assert(renderLobby.includes('const friendConversations = state.chatConversations'), 'personal list must derive from chatConversations')
-  assert(renderLobby.includes("conversation.kind === 'friend' || conversation.kind === 'vip_dm'"), 'personal list must include kind friend + vip_dm')
+await check('[5] Topics Personal list includes vip_dm only and excludes friend/pika_support', () => {
+  assert(controller.includes("return state.chatConversations.filter((conversation) => conversation.kind === 'vip_dm')"), 'personal list helper must include only vip_dm')
   assert(topicsPersonalPanelSource.length > 0, 'could not isolate Topics Personal panel source')
   assert(!topicsPersonalPanelSource.includes('pikaSupportBadge'), 'Topics Personal panel must not render pika support badge/list items')
   assert(controller.includes('getTopicsPersonalChatConversations()'), 'controller must use Topics Personal conversation helper')
@@ -400,10 +400,25 @@ await check('[19] Topics profile entry opens Topics Personal while legacy Chat e
   assert(controller.includes("state.currentScreen = 'chat'"), 'standalone Chat screen must still exist for legacy entry')
 })
 
-await check('[20] Legacy Chat remains friend-only while Topics Personal admits vip_dm', () => {
+await check('[20] Legacy Chat remains friend-only while Topics Personal is vip_dm-only', () => {
   assert(renderLobby.includes(".filter((conversation) => conversation.kind === 'friend')"), 'legacy Chat must filter strictly to friend conversations')
-  assert(renderLobby.includes("conversation.kind === 'friend' || conversation.kind === 'vip_dm'"), 'Topics Personal/global badge must include vip_dm')
+  assert(controller.includes("return state.chatConversations.filter((conversation) => conversation.kind === 'vip_dm')"), 'Topics Personal helper must filter strictly to vip_dm conversations')
   assert(!topicsPersonalPanelSource.includes('pikaSupportBadge'), 'Topics Personal must keep pika_support isolated')
+})
+
+await check('[20b] Active conversation reconciliation is kind-aware across Chat and Topics Personal', () => {
+  assert(controller.includes('function isChatConversationValidForCurrentSurface'), 'missing kind-aware active conversation guard')
+  assert(controller.includes("if (state.currentScreen === 'chat') return conversation.kind === 'friend'"), 'legacy Chat active guard must accept only friend conversations')
+  assert(controller.includes("if (state.currentScreen === 'topics' && state.topicsMode === 'personal') return conversation.kind === 'vip_dm'"), 'Topics Personal active guard must accept only vip_dm conversations')
+  assert(controller.includes('reconcileActiveChatConversation()'), 'conversation loads must reconcile active friendshipId against current surface')
+  assert(controller.includes('const activeFriendConversation = state.activeChatFriendshipId !== null'), 'showChatPanel must verify active id is a friend conversation before skipping auto-open')
+})
+
+await check('[20c] Legacy Chat unread badges and mobile list are friend-only', () => {
+  assert(renderLobby.includes("c.kind === 'friend' && c.unreadCount > 0"), 'desktop Chat nav badge must count only friend conversations')
+  assert(renderLobby.includes("conversation.kind === 'friend' && conversation.unreadCount > 0"), 'mobile Chat badge must count only friend conversations')
+  assert(renderLobby.includes(".filter((conversation) => conversation.kind === 'friend')"), 'mobile/desktop Chat lists must filter strictly to friend conversations')
+  assert(!renderLobby.includes("conversation.kind !== 'vip_dm'"), 'legacy Chat must not use broad not-vip_dm filters')
 })
 
 await check('[21] Profile block denial popup uses exact safe UX copy and unblock semantics', () => {
@@ -474,12 +489,13 @@ await check('[24] Topics author avatar/name still open profile, while profile po
   assert(controller.includes('const showTopicsPersonalMessageButton = false'), 'Topics profile popup must not expose Personal Message action anymore')
 })
 
-await check('[25] Direct Topics Personal button opens existing friend/vip_dm before starting a new vip_dm', () => {
+await check('[25] Direct Topics Personal button ignores existing friend and opens existing vip_dm before start', () => {
   assert(renderLobby.includes('[data-topic-message-personal]'), 'render wiring must listen for direct post-row Personal button')
   assert(controller.includes('async function openTopicsPersonalMessageFromPost'), 'missing direct post-row Personal helper')
   assert(controller.includes('function findTopicsPersonalConversationByProfileId'), 'missing canonical existing-conversation lookup')
   assert(controller.includes('conversation.friend.profileId === profileId'), 'existing lookup must match the exact target profileId')
-  assert(controller.includes("conversation.kind === 'friend' || conversation.kind === 'vip_dm'"), 'existing lookup must include friend + vip_dm')
+  assert(controller.includes("conversation.kind === 'vip_dm'"), 'existing lookup must include only vip_dm')
+  assert(!controller.includes("conversation.kind === 'friend' || conversation.kind === 'vip_dm'"), 'direct lookup must not include friend conversations')
   assert(controller.includes('await loadChatConversations()'), 'direct action must refresh/reconcile conversations before deciding')
   assert(controller.includes('await showTopicsPersonalChat(existingConversation.friendshipId)'), 'existing conversation must open exact canonical friendshipId')
   assert(controller.includes('state.topicsVipGate !== null && !state.topicsVipGate.isActive'), 'known inactive viewer VIP state must short-circuit only after existing lookup')
@@ -489,7 +505,7 @@ await check('[25] Direct Topics Personal button opens existing friend/vip_dm bef
   const existingIndex = controller.indexOf('const existingConversation = findTopicsPersonalConversationByProfileId(recipientProfileId)')
   const inactiveVipIndex = controller.indexOf('state.topicsVipGate !== null && !state.topicsVipGate.isActive')
   const startIndex = controller.indexOf('const result = await options.onVipDmChatStart(recipientProfileId)')
-  assert(refreshIndex !== -1 && existingIndex !== -1 && startIndex !== -1 && refreshIndex < existingIndex && existingIndex < startIndex, 'existing friend/vip_dm lookup must happen before vip-dm/start')
+  assert(refreshIndex !== -1 && existingIndex !== -1 && startIndex !== -1 && refreshIndex < existingIndex && existingIndex < startIndex, 'existing vip_dm lookup must happen before vip-dm/start')
   assert(inactiveVipIndex !== -1 && existingIndex < inactiveVipIndex && inactiveVipIndex < startIndex, 'known inactive viewer VIP short-circuit must happen after existing lookup and before vip-dm/start')
 })
 

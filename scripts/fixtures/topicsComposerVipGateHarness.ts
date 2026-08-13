@@ -189,6 +189,7 @@ function q<T extends Element>(selector: string): T | null {
   },
   setChatConversations: (conversations: ChatConversationSnapshot[]) => {
     chatConversations = conversations
+    controller.setChatConversations(conversations)
   },
   setChatConversationsAfterVipDmStart: (conversations: ChatConversationSnapshot[] | null) => {
     chatConversationsAfterVipDmStart = conversations
@@ -227,6 +228,11 @@ function q<T extends Element>(selector: string): T | null {
   clickReplyButton: (rootMessageId: string) => q<HTMLButtonElement>(`[data-topic-message-reply="${rootMessageId}"]`)?.click(),
   clickLikeButton: (messageId: string) => q<HTMLButtonElement>(`[data-topic-message-like="${messageId}"]`)?.click(),
   clickDirectPersonalButton: (profileId: string) => q<HTMLButtonElement>(`[data-topic-message-personal="${profileId}"]`)?.click(),
+  clickChatNav: () => q<HTMLButtonElement>('[data-lobby-nav-chat="1"]')?.click(),
+  openChatConversation: (friendshipId: string) => controller.openChatWithFriend(friendshipId),
+  getChatConversationText: (friendshipId: string) => q(`[data-lobby-chat-conversation="${CSS.escape(friendshipId)}"]`)?.textContent ?? null,
+  getChatFormFriendshipId: () => q<HTMLFormElement>('[data-lobby-chat-form]')?.dataset.lobbyChatForm ?? null,
+  getBodyText: () => document.body.textContent ?? '',
   isTopicsStreamVisible: () => q('[data-topic-messages-scroll="1"]') !== null,
   isTopicsPersonalDetailVisible: () => q('[data-topics-personal-detail="1"]') !== null,
   getTopicsPersonalPanelView: () => q<HTMLElement>('[data-topics-personal-panel="1"]')?.dataset.personalView ?? null,

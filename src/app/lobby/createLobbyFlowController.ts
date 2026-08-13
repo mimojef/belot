@@ -8658,7 +8658,7 @@ export function createLobbyFlowController(
   function findTopicsPersonalConversationByProfileId(profileId: string): ChatConversationSnapshot | null {
     return state.chatConversations.find((conversation) =>
       conversation.friend.profileId === profileId &&
-      (conversation.kind === 'friend' || conversation.kind === 'vip_dm')
+      conversation.kind === 'vip_dm'
     ) ?? null
   }
 
@@ -8810,16 +8810,7 @@ export function createLobbyFlowController(
     state.chatConversations = result.conversations
     state.chatErrorText = null
 
-    if (
-      state.activeChatFriendshipId !== null &&
-      !state.chatConversations.some((conversation) => {
-        return conversation.friendshipId === state.activeChatFriendshipId
-      })
-    ) {
-      state.activeChatFriendshipId = null
-      state.chatMessages = []
-      state.chatMessagesFriendshipId = null
-    }
+    reconcileActiveChatConversation()
 
     return true
   }
@@ -8829,7 +8820,30 @@ export function createLobbyFlowController(
   }
 
   function getTopicsPersonalChatConversations(): ChatConversationSnapshot[] {
-    return state.chatConversations.filter((conversation) => conversation.kind === 'friend' || conversation.kind === 'vip_dm')
+    return state.chatConversations.filter((conversation) => conversation.kind === 'vip_dm')
+  }
+
+  function isChatConversationValidForCurrentSurface(conversation: ChatConversationSnapshot): boolean {
+    if (state.currentScreen === 'chat') return conversation.kind === 'friend'
+    if (state.currentScreen === 'topics' && state.topicsMode === 'personal') return conversation.kind === 'vip_dm'
+    return true
+  }
+
+  function clearActiveChatConversation(): void {
+    state.activeChatFriendshipId = null
+    state.chatMessages = []
+    state.chatMessagesFriendshipId = null
+    state.chatMessagesLoading = false
+  }
+
+  function reconcileActiveChatConversation(): void {
+    if (state.activeChatFriendshipId === null) return
+    const activeConversation = state.chatConversations.find((conversation) => {
+      return conversation.friendshipId === state.activeChatFriendshipId
+    }) ?? null
+    if (activeConversation === null || !isChatConversationValidForCurrentSurface(activeConversation)) {
+      clearActiveChatConversation()
+    }
   }
 
   function isActivePersonalChatConversation(friendshipId: string): boolean {
@@ -8985,9 +8999,13 @@ export function createLobbyFlowController(
       return
     }
 
-    const firstConversation = getFriendChatConversations()[0] ?? null
+    const friendConversations = getFriendChatConversations()
+    const firstConversation = friendConversations[0] ?? null
+    const activeFriendConversation = state.activeChatFriendshipId !== null
+      ? friendConversations.find((conversation) => conversation.friendshipId === state.activeChatFriendshipId) ?? null
+      : null
 
-    if (firstConversation !== null && state.activeChatFriendshipId === null) {
+    if (firstConversation !== null && activeFriendConversation === null) {
       state.activeChatFriendshipId = firstConversation.friendshipId
       await openChatConversation(firstConversation.friendshipId, false)
       return
@@ -12359,16 +12377,7 @@ export function createLobbyFlowController(
     setChatConversations: (value) => {
       state.chatConversations = value
       state.chatErrorText = null
-      if (
-        state.activeChatFriendshipId !== null &&
-        !value.some((conversation) => {
-          return conversation.friendshipId === state.activeChatFriendshipId
-        })
-      ) {
-        state.activeChatFriendshipId = null
-        state.chatMessages = []
-        state.chatMessagesFriendshipId = null
-      }
+      reconcileActiveChatConversation()
       render()
     },
     startMatchmaking,

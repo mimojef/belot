@@ -2250,7 +2250,7 @@ function renderNav(state: LobbyScreenState): string {
           ">
             <span style="position:relative;display:flex;align-items:center;flex-shrink:0;">
               <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-              ${(() => { const unread = state.chatConversations.filter(c => c.unreadCount > 0).length; return unread > 0 ? `<span style="position:absolute;top:-6px;right:-8px;min-width:16px;height:16px;border-radius:8px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;">${unread}</span>` : '' })()}
+              ${(() => { const unread = state.chatConversations.filter(c => c.kind === 'friend' && c.unreadCount > 0).length; return unread > 0 ? `<span style="position:absolute;top:-6px;right:-8px;min-width:16px;height:16px;border-radius:8px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;">${unread}</span>` : '' })()}
             </span>
             Чат
           </button>
@@ -3780,7 +3780,7 @@ function renderQuickActionBadge(count: number): string {
 
 function renderMobileMenu(state: LobbyScreenState): string {
   const pendingCount = getNotificationsBadgeCount(state)
-  const unreadChatCount = state.chatConversations.filter((conversation) => conversation.unreadCount > 0).length
+  const unreadChatCount = state.chatConversations.filter((conversation) => conversation.kind === 'friend' && conversation.unreadCount > 0).length
   const mailUnreadCount = state.supportUnreadCount + (state.isAdmin ? state.adminGuestContactUnreadCount : 0)
   const mobileMenuBadgeCount = (state.friendships?.incomingPending.length ?? 0) + unreadChatCount + mailUnreadCount
 
@@ -4571,7 +4571,7 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
   if (state.chatLoading) return `${renderMobilePageTitle('Чат')}${renderMobileStateMessage('Зареждане на чат...')}`
 
   const sortedConversations = state.chatConversations
-    .filter((conversation) => conversation.kind !== 'vip_dm')
+    .filter((conversation) => conversation.kind === 'friend')
     .sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
   )
@@ -5394,7 +5394,7 @@ export function formatPersonalChatUnreadBadgeCount(count: number): string | null
 
 export function getPersonalChatUnreadTotal(state: LobbyScreenState): number {
   return state.chatConversations
-    .filter((conversation) => conversation.kind === 'friend' || conversation.kind === 'vip_dm')
+    .filter((conversation) => conversation.kind === 'vip_dm')
     .reduce((total, conversation) => total + Math.max(0, Math.floor(conversation.unreadCount)), 0)
 }
 
@@ -5498,11 +5498,11 @@ function renderTopicsPersonalMessages(state: LobbyScreenState, activeConversatio
 }
 
 export function renderTopicsPersonalChatPanel(state: LobbyScreenState): string {
-  const friendConversations = state.chatConversations
-    .filter((conversation) => conversation.kind === 'friend' || conversation.kind === 'vip_dm')
+  const personalConversations = state.chatConversations
+    .filter((conversation) => conversation.kind === 'vip_dm')
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
   const activeConversation = state.topicsPersonalView === 'conversation'
-    ? friendConversations.find((conversation) => conversation.friendshipId === state.activeChatFriendshipId) ?? null
+    ? personalConversations.find((conversation) => conversation.friendshipId === state.activeChatFriendshipId) ?? null
     : null
 
   if (state.chatLoading) {
@@ -5531,14 +5531,14 @@ export function renderTopicsPersonalChatPanel(state: LobbyScreenState): string {
     </style>
     <div data-topics-personal-panel="1" data-personal-view="${state.topicsPersonalView}" style="flex:1;min-height:0;overflow:hidden;">
       <div data-topics-personal-list="1" style="min-height:0;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;overflow:hidden;display:flex;flex-direction:column;">
-        ${friendConversations.length === 0 ? `
+        ${personalConversations.length === 0 ? `
           <div data-topics-personal-empty="1" style="margin:auto;padding:24px 16px;color:rgba(255,255,255,0.62);font-size:14px;font-weight:800;text-align:center;display:grid;gap:6px;">
             <div>Нямате лични разговори.</div>
             <div style="font-size:12px;color:rgba(255,255,255,0.45);">Можете да започнете разговор от профила на приятел.</div>
           </div>
         ` : `
           <div style="overflow-y:auto;flex:1;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
-            ${friendConversations.map((conversation) => renderTopicsPersonalConversationRow(conversation, state.activeChatFriendshipId)).join('')}
+            ${personalConversations.map((conversation) => renderTopicsPersonalConversationRow(conversation, state.activeChatFriendshipId)).join('')}
           </div>
         `}
       </div>

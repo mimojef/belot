@@ -134,6 +134,22 @@ async function makeConversation(page: Page, friendshipId: string, kind: 'friend'
     [friendshipId, kind, friendProfileId, friendDisplayName, friendIsVip] as [string, 'friend' | 'vip_dm', string, string, boolean | null | undefined],
   )
 }
+function withConversationPreview(conversation: any, body: string, unreadCount: number, createdAt: string): any {
+  return {
+    ...conversation,
+    lastMessage: {
+      messageId: `${conversation.friendshipId}-last`,
+      friendshipId: conversation.friendshipId,
+      senderProfileId: conversation.friend.profileId,
+      body,
+      createdAt,
+      isOwnMessage: false,
+      attachment: null,
+    },
+    updatedAt: createdAt,
+    unreadCount,
+  }
+}
 async function getSubscribeLog(page: Page): Promise<Array<{ topicId: string; afterSeq: number }>> {
   return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getSubscribeLog())
 }
@@ -190,6 +206,21 @@ async function clickVipPopupClose(page: Page): Promise<void> {
 }
 async function clickDirectPersonalButton(page: Page, profileId: string): Promise<void> {
   await page.evaluate((id) => (window as any).__topicsComposerVipGateHarness.clickDirectPersonalButton(id), profileId)
+}
+async function clickChatNav(page: Page): Promise<void> {
+  await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.clickChatNav())
+}
+async function openChatConversation(page: Page, friendshipId: string): Promise<void> {
+  await page.evaluate((id) => (window as any).__topicsComposerVipGateHarness.openChatConversation(id), friendshipId)
+}
+async function getChatConversationText(page: Page, friendshipId: string): Promise<string | null> {
+  return page.evaluate((id) => (window as any).__topicsComposerVipGateHarness.getChatConversationText(id), friendshipId)
+}
+async function getChatFormFriendshipId(page: Page): Promise<string | null> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getChatFormFriendshipId())
+}
+async function getBodyText(page: Page): Promise<string> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getBodyText())
 }
 async function isTopicsStreamVisible(page: Page): Promise<boolean> {
   return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.isTopicsStreamVisible())
@@ -534,7 +565,7 @@ try {
     assertEqual(await getComposerErrorText(page), null, 'no stale inline vip_required message should remain')
   })
 
-  await check('[20a2] Existing friend opens for known non-VIP with zero start calls', async () => {
+  await check('[20a2] Existing friend is ignored by Direct Personal for known non-VIP', async () => {
     const msg = await makeMessage(page, 'topic-general', 54, 'Friend post', 'friend-existing', 'Friend')
     const existing = await makeConversation(page, 'friend-existing-id', 'friend', 'friend-existing', 'Friend')
     await setChatConversations(page, [existing])
@@ -545,10 +576,15 @@ try {
     await clickDirectPersonalButton(page, 'friend-existing')
     await page.waitForTimeout(90)
 
-    assertEqual((await getVipDmStartLog(page)).length, 0, 'existing friend must not call vip-dm/start')
-    assertEqual(await isVipPopupOpen(page), false, 'existing friend must not open VIP popup')
-    assertEqual(await isTopicsPersonalDetailVisible(page), true, 'existing friend conversation must open')
-    assertEqual(await getTopicsPersonalPanelView(page), 'conversation', 'existing friend must select conversation view')
+    assertEqual((await getVipDmStartLog(page)).length, 0, 'known non-VIP friend target must not call vip-dm/start')
+    assertEqual(await isVipPopupOpen(page), true, 'known non-VIP friend target must open VIP popup')
+    assertEqual(await isTopicsStreamVisible(page), true, 'existing friend must keep Topics stream behind VIP popup')
+    assertEqual(await isTopicsPersonalDetailVisible(page), false, 'existing friend conversation must not open in Topics Personal')
+    assertEqual(await getTopicsPersonalPanelView(page), null, 'existing friend must not enter Topics Personal view')
+
+    await clickVipPopupClose(page)
+    await page.waitForTimeout(30)
+    assertEqual(await isVipPopupOpen(page), false, 'friend-target VIP popup closes cleanly')
   })
 
   await check('[20b] Direct Personal vip_counterpart_required stays in Topics with transient target UX', async () => {
@@ -751,6 +787,43 @@ try {
     assertEqual(await isTopicsPersonalDetailVisible(page), true, 'canonical false counterpart conversation must open')
     assert((await getChatComposerDisabledReason(page)) !== null, 'canonical false counterpart must render disabled reason')
     assertEqual(await isChatComposerDisabled(page), true, 'canonical false counterpart must disable composer')
+  })
+
+  await check('[20j2] Same-pair friend/vip_dm previews and active ids stay isolated', async () => {
+    const friend = withConversationPreview(
+      await makeConversation(page, 'FRIEND_ID', 'friend', 'same-pair-target', 'Mimojef', true),
+      'FRIEND PREVIEW',
+      2,
+      '2026-08-13T10:00:00.000Z',
+    )
+    const vip = withConversationPreview(
+      await makeConversation(page, 'VIP_ID', 'vip_dm', 'same-pair-target', 'Mimojef', true),
+      'TOPICS PREVIEW',
+      5,
+      '2026-08-13T10:05:00.000Z',
+    )
+    await setChatConversations(page, [vip, friend])
+    await setVipGate(page, true, true)
+    await openTopicsAndWaitComposer(page, true, true, [
+      await makeMessage(page, 'topic-general', 62, 'Same pair post', 'same-pair-target', 'Mimojef'),
+    ])
+
+    await openChatConversation(page, 'VIP_ID')
+    await page.waitForTimeout(120)
+
+    const topicsRow = await getChatConversationText(page, 'VIP_ID')
+    assert(topicsRow !== null && topicsRow.includes('TOPICS PREVIEW'), 'Topics Personal row must show vip_dm preview')
+    assert(!((await getBodyText(page)).includes('FRIEND PREVIEW')), 'Topics Personal must not render friend preview for same profile')
+    assertEqual(await getChatFormFriendshipId(page), 'VIP_ID', 'Topics Personal detail must use VIP_ID')
+
+    await clickChatNav(page)
+    await page.waitForTimeout(180)
+
+    const friendRow = await getChatConversationText(page, 'FRIEND_ID')
+    assert(friendRow !== null && friendRow.includes('FRIEND PREVIEW'), 'Legacy Chat row must show friend preview')
+    assert(friendRow.includes('2'), 'Legacy Chat row must show friend unread count')
+    assert(!((await getBodyText(page)).includes('TOPICS PREVIEW')), 'Legacy Chat must not render vip_dm preview for same profile')
+    assertEqual(await getChatFormFriendshipId(page), 'FRIEND_ID', 'Legacy Chat detail must switch to FRIEND_ID, not keep VIP_ID active')
   })
 
   await check('[20k] No JS errors after Direct Personal VIP gate scenarios', () => {
