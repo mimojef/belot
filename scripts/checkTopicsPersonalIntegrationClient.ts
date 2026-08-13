@@ -217,15 +217,15 @@ await check('[3] Topics Personal mode hides topic stream/chips and renders perso
   assert(renderLobby.includes("const activeConversation = state.topicsPersonalView === 'conversation'"), 'detail must render only after selecting a conversation')
 })
 
-await check('[4] Topics Personal badge uses vip_dm-only unread message sum and visual 99 cap', () => {
+await check('[4] Topics Personal badge uses vip_dm-only unread message sum and shared 99+ display cap', () => {
   assert(renderLobby.includes('export function getPersonalChatUnreadTotal'), 'missing global unread helper')
   assert(renderLobby.includes("conversation.kind === 'vip_dm'"), 'global unread must include vip_dm conversations')
   assert(!renderLobby.includes("conversation.kind === 'friend' || conversation.kind === 'vip_dm'"), 'global unread/personal filters must not include friend conversations')
   assert(renderLobby.includes('conversation.unreadCount'), 'global unread must use unreadCount values')
   assert(renderLobby.includes('reduce((total, conversation) => total +'), 'global unread must sum message counts')
   assert(renderLobby.includes('export function formatPersonalChatUnreadBadgeCount'), 'missing badge formatter')
-  assert(renderLobby.includes('Math.min(Math.floor(count), 99)'), 'badge formatter must cap to 99')
-  assert(!renderLobby.includes('99+'), 'personal chat rendering must never use 99+')
+  assert(renderLobby.includes('return formatNotificationBadgeCount(count)'), 'personal badge formatter must reuse shared notification formatter')
+  assert(renderLobby.includes("return normalized >= 100 ? '99+' : String(normalized)"), 'shared badge formatter must render 100+ as 99+')
   assert(renderTopics.includes('data-topics-personal-badge="1"'), 'missing global Personal badge node')
 })
 
@@ -236,7 +236,7 @@ await check('[5] Topics Personal list includes vip_dm only and excludes friend/p
   assert(controller.includes('getTopicsPersonalChatConversations()'), 'controller must use Topics Personal conversation helper')
 })
 
-await check('[6] Per-conversation badges use same 99 cap and are hidden at zero', () => {
+await check('[6] Per-conversation badges use shared 99+ cap and are hidden at zero', () => {
   assert(renderLobby.includes('data-topics-personal-row-badge="1"'), 'missing row unread badge')
   assert(renderLobby.includes('formatPersonalChatUnreadBadgeCount(conversation.unreadCount)'), 'row badge must use capped formatter')
   assert(renderLobby.includes('unreadBadge !== null'), 'row badge must hide when zero')
@@ -415,8 +415,8 @@ await check('[20b] Active conversation reconciliation is kind-aware across Chat 
 })
 
 await check('[20c] Legacy Chat unread badges and mobile list are friend-only', () => {
-  assert(renderLobby.includes("c.kind === 'friend' && c.unreadCount > 0"), 'desktop Chat nav badge must count only friend conversations')
-  assert(renderLobby.includes("conversation.kind === 'friend' && conversation.unreadCount > 0"), 'mobile Chat badge must count only friend conversations')
+  assert(renderLobby.includes("return sumConversationUnreadByKind(state, 'friend')"), 'Chat unread helper must count only friend conversations')
+  assert(renderLobby.includes('const friendChatUnreadCount = getFriendChatUnreadRaw(state)'), 'desktop/mobile Chat badges must use the friend-only raw helper')
   assert(renderLobby.includes(".filter((conversation) => conversation.kind === 'friend')"), 'mobile/desktop Chat lists must filter strictly to friend conversations')
   assert(!renderLobby.includes("conversation.kind !== 'vip_dm'"), 'legacy Chat must not use broad not-vip_dm filters')
 })

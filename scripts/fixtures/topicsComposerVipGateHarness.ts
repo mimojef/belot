@@ -5,8 +5,8 @@
 // със stub-нати мрежови/WS callback-ове вместо реален backend. Огледално на
 // topicsSwitchRaceHarness.ts (виж него за rationale на подхода), но фокусиран
 // върху Етап 2: composer/VIP gate/realtime merge поведение.
-import { createLobbyFlowController } from '/src/app/lobby/createLobbyFlowController.ts'
-import type { ChatConversationSnapshot, TopicSnapshot, TopicMessageSnapshot, TopicReplySnapshot, ServerMessage } from '/src/app/network/createGameServerClient.ts'
+import { createLobbyFlowController, type LobbyAuthSession } from '/src/app/lobby/createLobbyFlowController.ts'
+import type { ChatConversationSnapshot, FriendshipsSnapshot, TopicSnapshot, TopicMessageSnapshot, TopicReplySnapshot, ServerMessage } from '/src/app/network/createGameServerClient.ts'
 
 const root = document.createElement('div')
 document.body.appendChild(root)
@@ -15,6 +15,11 @@ const topics: TopicSnapshot[] = [
   { topicId: 'topic-general', slug: 'general', title: 'Общ чат', description: null, isGeneral: true, createdByProfileId: null, status: 'active', sortOrder: 0, createdAt: new Date().toISOString(), unreadCount: 0 },
   { topicId: 'topic-b', slug: 'topic-b', title: 'Тема Б', description: null, isGeneral: false, createdByProfileId: null, status: 'active', sortOrder: 1, createdAt: new Date().toISOString(), unreadCount: 0 },
 ]
+
+let authSession: LobbyAuthSession = {
+  account: { role: 'player' },
+  profile: { profileId: 'me', displayName: 'Me' } as any,
+}
 
 function makeMessage(topicId: string, seq: number, body: string, senderProfileId = 'someone', senderDisplayName = 'Someone'): TopicMessageSnapshot {
   return {
@@ -88,8 +93,11 @@ let profileLoadResult: { ok: true; profile: any } | { ok: false; message: string
   profile: null,
 }
 let chatConversationsAfterVipDmStart: ChatConversationSnapshot[] | null = null
+let supportUnreadResult = { unreadCount: 0, supportUnreadCount: 0, guestUnreadCount: 0 }
 let vipGateCallCount = 0
 let claimCallCount = 0
+let topicsLoadCallCount = 0
+let topicMessagesLoadCallCount = 0
 
 const controller = createLobbyFlowController({
   root,
@@ -97,12 +105,15 @@ const controller = createLobbyFlowController({
   leaveMatchmaking: () => {},
   onMatchFound: () => {},
   onLobbyChatSend: () => {},
-  getAuthSession: () => ({
-    account: { role: 'player' },
-    profile: { profileId: 'me', displayName: 'Me' } as any,
-  }),
-  onTopicsLoad: async () => ({ ok: true, topics }),
-  onTopicMessagesLoad: async (_topicId: string, _beforeSeq: number | null) => nextMessagesResult,
+  getAuthSession: () => authSession,
+  onTopicsLoad: async () => {
+    topicsLoadCallCount++
+    return { ok: true, topics }
+  },
+  onTopicMessagesLoad: async (_topicId: string, _beforeSeq: number | null) => {
+    topicMessagesLoadCallCount++
+    return nextMessagesResult
+  },
   onTopicMessagesSubscribe: (topicId: string, afterSeq: number) => {
     subscribeLog.push({ topicId, afterSeq })
   },
@@ -124,6 +135,7 @@ const controller = createLobbyFlowController({
   },
   onChatConversationsLoad: async () => ({ ok: true, conversations: chatConversations }),
   onChatMessagesLoad: async () => ({ ok: true, messages: [] }),
+  onSupportUnreadLoad: async () => ({ ok: true, ...supportUnreadResult }),
   onVipDmChatStart: async (recipientProfileId: string) => {
     vipDmStartLog.push(recipientProfileId)
     if (vipDmStartResult.ok) {
@@ -191,6 +203,58 @@ function q<T extends Element>(selector: string): T | null {
     chatConversations = conversations
     controller.setChatConversations(conversations)
   },
+  setIncomingFriendRequests: (count: number) => {
+    const now = new Date().toISOString()
+    const friendships: FriendshipsSnapshot = {
+      incomingPending: Array.from({ length: count }, (_value, index) => ({
+        friendshipId: `pending-${index + 1}`,
+        status: 'pending',
+        direction: 'incoming',
+        profile: { profileId: `friend-request-${index + 1}`, displayName: `Friend ${index + 1}`, avatarUrl: null } as any,
+        createdAt: now,
+        updatedAt: now,
+      })),
+      outgoingPending: [],
+      friends: [],
+    }
+    controller.setFriendships(friendships)
+  },
+  setSupportUnread: (supportUnreadCount: number, guestUnreadCount = 0) => {
+    supportUnreadResult = {
+      unreadCount: supportUnreadCount + guestUnreadCount,
+      supportUnreadCount,
+      guestUnreadCount,
+    }
+    controller.refreshSupportUnread()
+  },
+  setTopicUnreadCounts: (counts: Record<string, number>) => {
+    for (const topic of topics) {
+      topic.unreadCount = counts[topic.topicId] ?? 0
+    }
+    controller.render()
+  },
+  setTopicDirectoryResponse: (items: Array<{ topicId: string; slug?: string; title?: string; isGeneral?: boolean; unreadCount: number }>) => {
+    topics.splice(0, topics.length, ...items.map((item, index) => ({
+      topicId: item.topicId,
+      slug: item.slug ?? item.topicId,
+      title: item.title ?? `Topic ${index + 1}`,
+      description: null,
+      isGeneral: item.isGeneral ?? false,
+      createdByProfileId: null,
+      status: 'active' as const,
+      sortOrder: index,
+      createdAt: new Date().toISOString(),
+      unreadCount: item.unreadCount,
+    })))
+  },
+  setAuthProfile: (profileId: string, displayName = profileId) => {
+    authSession = {
+      account: { role: 'player' },
+      profile: { profileId, displayName } as any,
+    }
+  },
+  refreshTopicsDirectoryMetadata: () => controller.refreshTopicsDirectoryMetadata(),
+  clearTopicsDirectoryMetadata: () => controller.clearTopicsDirectoryMetadata(),
   setChatConversationsAfterVipDmStart: (conversations: ChatConversationSnapshot[] | null) => {
     chatConversationsAfterVipDmStart = conversations
   },
@@ -223,8 +287,20 @@ function q<T extends Element>(selector: string): T | null {
   getRepliesLoadLog: () => repliesLoadLog,
   getVipDmStartLog: () => vipDmStartLog,
   clearVipDmStartLog: () => { vipDmStartLog.length = 0 },
+  handleServerMessage: (message: ServerMessage) => {
+    if (message.type === 'chat_message_received') {
+      chatConversations = chatConversations.map((conversation) => (
+        conversation.friendshipId === message.friendshipId
+          ? { ...conversation, unreadCount: conversation.unreadCount + 1, updatedAt: new Date().toISOString() }
+          : conversation
+      ))
+    }
+    return controller.handleServerMessage(message)
+  },
   getVipGateCallCount: () => vipGateCallCount,
   getClaimCallCount: () => claimCallCount,
+  getTopicsLoadCallCount: () => topicsLoadCallCount,
+  getTopicMessagesLoadCallCount: () => topicMessagesLoadCallCount,
   clickReplyButton: (rootMessageId: string) => q<HTMLButtonElement>(`[data-topic-message-reply="${rootMessageId}"]`)?.click(),
   clickLikeButton: (messageId: string) => q<HTMLButtonElement>(`[data-topic-message-like="${messageId}"]`)?.click(),
   clickDirectPersonalButton: (profileId: string) => q<HTMLButtonElement>(`[data-topic-message-personal="${profileId}"]`)?.click(),
@@ -233,6 +309,70 @@ function q<T extends Element>(selector: string): T | null {
   getChatConversationText: (friendshipId: string) => q(`[data-lobby-chat-conversation="${CSS.escape(friendshipId)}"]`)?.textContent ?? null,
   getChatFormFriendshipId: () => q<HTMLFormElement>('[data-lobby-chat-form]')?.dataset.lobbyChatForm ?? null,
   getBodyText: () => document.body.textContent ?? '',
+  openMobileMenu: () => {
+    const details = q<HTMLDetailsElement>('[data-lobby-mobile-menu="1"]')
+    if (details) details.open = true
+  },
+  getMobileMenuTotalBadgeText: () => q('[data-mobile-menu-total-badge="1"]')?.textContent ?? null,
+  getMobileMenuItemBadgeText: (icon: string) => q(`[data-mobile-menu-item-badge="${CSS.escape(icon)}"]`)?.textContent ?? null,
+  getMobileMenuItemBadgeColor: (icon: string) => {
+    const el = q<HTMLElement>(`[data-mobile-menu-item-badge="${CSS.escape(icon)}"]`)
+    return el ? getComputedStyle(el).backgroundColor : null
+  },
+  getMobileMenuItemBadgeRect: (icon: string) => {
+    const el = q<HTMLElement>(`[data-mobile-menu-item-badge="${CSS.escape(icon)}"]`)
+    if (!el) return null
+    const rect = el.getBoundingClientRect()
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+  },
+  getDesktopNavBadgeText: (item: string) => q(`nav [data-desktop-nav-badge="${CSS.escape(item)}"]`)?.textContent ?? null,
+  getDesktopNavBadgeColor: (item: string) => {
+    const el = q<HTMLElement>(`nav [data-desktop-nav-badge="${CSS.escape(item)}"]`)
+    return el ? getComputedStyle(el).backgroundColor : null
+  },
+  getDesktopNavBadgeRect: (item: string) => {
+    const el = q<HTMLElement>(`nav [data-desktop-nav-badge="${CSS.escape(item)}"]`)
+    if (!el) return null
+    const rect = el.getBoundingClientRect()
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+  },
+  getDesktopNavItemRect: (item: string) => {
+    const el = q<HTMLElement>(`nav [data-lobby-nav-${CSS.escape(item)}="1"]`)
+    if (!el) return null
+    const rect = el.getBoundingClientRect()
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+  },
+  getDesktopNavItemIconRect: (item: string) => {
+    const el = q<HTMLElement>(`nav [data-lobby-nav-${CSS.escape(item)}="1"] svg`)
+    if (!el) return null
+    const rect = el.getBoundingClientRect()
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+  },
+  getDesktopNavItemLabelRect: (item: string) => {
+    const el = q<HTMLElement>(`nav [data-lobby-nav-${CSS.escape(item)}="1"]`)
+    if (!el) return null
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+    let node = walker.nextNode()
+    while (node !== null) {
+      if ((node.textContent ?? '').trim().length > 0) {
+        const range = document.createRange()
+        range.selectNodeContents(node)
+        const rect = range.getBoundingClientRect()
+        range.detach()
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+      }
+      node = walker.nextNode()
+    }
+    return null
+  },
+  getDesktopNavRect: () => {
+    const el = q<HTMLElement>('nav')
+    if (!el) return null
+    const rect = el.getBoundingClientRect()
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+  },
+  getTopicChipBadgeText: (topicId: string) => q(`[data-topic-chip="${CSS.escape(topicId)}"] .topic-unread-badge`)?.textContent ?? null,
+  getTopicsPersonalBadgeText: () => q('[data-topics-personal-badge="1"]')?.textContent ?? null,
   isTopicsStreamVisible: () => q('[data-topic-messages-scroll="1"]') !== null,
   isTopicsPersonalDetailVisible: () => q('[data-topics-personal-detail="1"]') !== null,
   getTopicsPersonalPanelView: () => q<HTMLElement>('[data-topics-personal-panel="1"]')?.dataset.personalView ?? null,

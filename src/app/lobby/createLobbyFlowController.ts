@@ -20,6 +20,7 @@ import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown } f
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
   renderLobbyScreen,
+  formatNotificationBadgeCount,
   releaseLobbyChatBodyScrollLock,
   resolveLobbyChatSenderRole,
   syncProfilePopup,
@@ -773,6 +774,8 @@ export type LobbyFlowController = {
   setPrivateRoomInGameNotificationsEnabled: (value: boolean) => void
   setFriendships: (value: FriendshipsSnapshot | null) => void
   setChatConversations: (value: ChatConversationSnapshot[]) => void
+  refreshTopicsDirectoryMetadata: () => Promise<boolean>
+  clearTopicsDirectoryMetadata: () => void
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
   resetToLobby: () => void
   openAuthModal: (mode: Exclude<import('./renderLobbyScreen').LobbyAuthModalMode, 'closed'>) => void
@@ -843,6 +846,7 @@ type InternalLobbyFlowState = {
   topicsLoading: boolean
   topicsErrorText: string | null
   topics: TopicSnapshot[] | null
+  topicsLoadedForProfileId: string | null
   activeTopicId: string | null
   topicsMode: 'topics' | 'personal'
   topicsPersonalView: 'list' | 'conversation'
@@ -1354,6 +1358,7 @@ function createInitialState(): InternalLobbyFlowState {
     topicsLoading: false,
     topicsErrorText: null,
     topics: null,
+    topicsLoadedForProfileId: null,
     activeTopicId: null,
     topicsMode: 'topics',
     topicsPersonalView: 'list',
@@ -5067,6 +5072,66 @@ export function createLobbyFlowController(
     return changed
   }
 
+  let topicsDirectoryMetadataRequestGeneration = 0
+
+  function clearTopicsDirectoryMetadata(): void {
+    topicsDirectoryMetadataRequestGeneration++
+    state.topics = null
+    state.topicsLoadedForProfileId = null
+    state.topicsErrorText = null
+    unsubscribeFromTopicsDirectory()
+    render()
+  }
+
+  async function refreshTopicsDirectoryMetadata(): Promise<boolean> {
+    const authSession = options.getAuthSession?.() ?? null
+    const profileId = authSession?.profile.profileId ?? null
+    const requestGeneration = ++topicsDirectoryMetadataRequestGeneration
+
+    if (profileId === null || !options.onTopicsLoad) {
+      if (state.topics !== null || state.topicsLoadedForProfileId !== null) {
+        state.topics = null
+        state.topicsLoadedForProfileId = null
+        state.topicsErrorText = null
+        unsubscribeFromTopicsDirectory()
+        render()
+      }
+      return false
+    }
+
+    if (state.topicsLoadedForProfileId !== null && state.topicsLoadedForProfileId !== profileId) {
+      state.topics = null
+      state.topicsLoadedForProfileId = null
+      state.topicsErrorText = null
+      unsubscribeFromTopicsDirectory()
+      render()
+    }
+
+    const result = await options.onTopicsLoad()
+    const latestAuthSession = options.getAuthSession?.() ?? null
+    if (
+      requestGeneration !== topicsDirectoryMetadataRequestGeneration ||
+      latestAuthSession?.profile.profileId !== profileId
+    ) {
+      return false
+    }
+
+    if (!result.ok) {
+      if (state.currentScreen === 'topics') {
+        state.topicsErrorText = result.message
+        render()
+      }
+      return false
+    }
+
+    state.topics = result.topics
+    state.topicsLoadedForProfileId = profileId
+    state.topicsErrorText = null
+    subscribeToTopicsDirectory()
+    render()
+    return true
+  }
+
   async function reconcileTopicsDirectoryFromServer(): Promise<void> {
     if (state.currentScreen !== 'topics' || !options.onTopicsLoad) return
     const activeTopicId = state.activeTopicId
@@ -5075,6 +5140,7 @@ export function createLobbyFlowController(
     if (!result.ok) return
 
     state.topics = result.topics
+    state.topicsLoadedForProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId ?? state.topicsLoadedForProfileId
     const activeTopic = activeTopicId !== null
       ? result.topics.find((topic) => topic.topicId === activeTopicId) ?? null
       : null
@@ -5663,6 +5729,7 @@ export function createLobbyFlowController(
     }
 
     state.topics = result.topics
+    state.topicsLoadedForProfileId = (options.getAuthSession?.() ?? null)?.profile.profileId ?? state.topicsLoadedForProfileId
     state.topicsErrorText = null
 
     // Directory-wide realtime interest — subscribe-ваме СЛЕД REST loadTopics()
@@ -6083,13 +6150,17 @@ export function createLobbyFlowController(
 
   /** WS reconnect hook за directory-wide subscription-а (Custom Topic Creation) — mirror на forceTopicMessagesResubscribeIfOnTopicsScreen, извиква се от main.ts на всяко WS onOpen. */
   function forceTopicsDirectoryResubscribeIfOnTopicsScreen(): void {
-    if (state.currentScreen !== 'topics') return
+    if (state.currentScreen !== 'topics' && state.topics === null) return
     // Нова WS connection = server-side subscriber set-ът (keyed по
     // connection.id) вече не съдържа тази връзка — reset локалния флаг, за
     // да не блокира subscribeToTopicsDirectory guard-а ("вече subscribed").
     state.topicsDirectorySubscribed = false
     subscribeToTopicsDirectory()
-    void reconcileTopicsDirectoryFromServer()
+    if (state.currentScreen === 'topics') {
+      void reconcileTopicsDirectoryFromServer()
+    } else {
+      void refreshTopicsDirectoryMetadata()
+    }
   }
 
   // ─── VIP gate + launch gift (Етап 2) ────────────────────────────────────
@@ -10371,10 +10442,12 @@ export function createLobbyFlowController(
     // да unsubscribe-ва, независимо кой път е довел дотам.
     if (state.currentScreen !== 'topics') {
       unsubscribeFromCurrentTopicMessages()
-      // Симетрично teardown-only reconcile за directory-wide subscription
-      // (Custom Topic Creation) — setup е explicit в showTopicsDirectory(),
-      // но напускане на "Теми" отвсякъде трябва винаги да unsubscribe-ва.
-      unsubscribeFromTopicsDirectory()
+      // Directory-wide subscription вече служи и за lightweight Lobby badge
+      // metadata. Държим я жива извън Topics, докато има зареден directory
+      // snapshot за логнат профил; без snapshot/auth няма какво да reconcile-ваме.
+      if ((options.getAuthSession?.() ?? null) === null || state.topics === null) {
+        unsubscribeFromTopicsDirectory()
+      }
     }
     if (state.authModalMode !== 'closed') {
       if (state.authSubmitInFlight) {
@@ -12380,6 +12453,8 @@ export function createLobbyFlowController(
       reconcileActiveChatConversation()
       render()
     },
+    refreshTopicsDirectoryMetadata,
+    clearTopicsDirectoryMetadata,
     startMatchmaking,
     resetToLobby,
     openAuthModal,
@@ -12455,10 +12530,11 @@ export function createLobbyFlowController(
           state.supportUnreadCount = result.supportUnreadCount ?? result.unreadCount
           state.adminGuestContactUnreadCount = result.guestUnreadCount ?? 0
           const totalUnread = state.supportUnreadCount + state.adminGuestContactUnreadCount
+          const displayUnread = formatNotificationBadgeCount(totalUnread)
           const badge = options.root.querySelector<HTMLElement>('[data-support-unread-badge="1"]')
           if (badge) {
-            badge.style.display = totalUnread > 0 ? 'flex' : 'none'
-            badge.textContent = totalUnread > 0 ? String(totalUnread) : ''
+            badge.style.display = displayUnread !== null ? 'flex' : 'none'
+            badge.textContent = displayUnread ?? ''
           } else {
             render()
           }

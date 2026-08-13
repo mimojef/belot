@@ -2025,10 +2025,16 @@ function renderNav(state: LobbyScreenState): string {
   const shopActive = activeView === 'shop'
   const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'admin-tournaments' || activeView === 'admin-tournament-detail' || activeView === 'guest-contact-messages'
   const lobbyActive = activeView === 'tables'
-  const mailUnreadCount = state.supportUnreadCount + (state.isAdmin ? state.adminGuestContactUnreadCount : 0)
+  const mailUnreadCount = getSupportUnreadRaw(state)
   const notificationsBadgeCount = getNotificationsBadgeCount(state)
+  const notificationsBadge = formatNotificationBadgeCount(notificationsBadgeCount)
   const incomingFriendRequestsCount =
     state.friendships?.incomingPending.length ?? 0
+  const friendChatUnreadCount = getFriendChatUnreadRaw(state)
+  const friendChatUnreadBadge = formatNotificationBadgeCount(friendChatUnreadCount)
+  const topicsUnreadCount = getTopicsTotalUnreadRaw(state)
+  const topicsUnreadBadge = formatNotificationBadgeCount(topicsUnreadCount)
+  const supportUnreadBadge = formatNotificationBadgeCount(mailUnreadCount)
 
   return `
     <style>
@@ -2205,8 +2211,8 @@ function renderNav(state: LobbyScreenState): string {
         </a>
         ${state.profile.profileId !== null ? `
           <a href="/topics" data-lobby-nav-topics="1" ${topicsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
-            display:flex; align-items:center; gap:10px;
-            padding:0 18px;
+            position:relative;display:flex; align-items:center; gap:10px;
+            padding:0 28px 0 18px;
             background:${topicsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
             font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
             color:${topicsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
@@ -2217,6 +2223,7 @@ function renderNav(state: LobbyScreenState): string {
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
             </svg>
             Теми
+            ${topicsUnreadBadge !== null ? `<span data-desktop-nav-badge="topics" aria-hidden="true" style="position:absolute;top:6px;right:7px;min-width:18px;height:18px;border-radius:999px;background:#ef4444;color:#fff;border:1.5px solid #0a0a0a;font-size:10px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;padding:0 5px;box-sizing:border-box;">${escapeHtml(topicsUnreadBadge)}</span>` : ''}
           </a>
         ` : ''}
         <a href="/players" data-lobby-nav-players="1" ${playersActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
@@ -2250,7 +2257,7 @@ function renderNav(state: LobbyScreenState): string {
           ">
             <span style="position:relative;display:flex;align-items:center;flex-shrink:0;">
               <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-              ${(() => { const unread = state.chatConversations.filter(c => c.kind === 'friend' && c.unreadCount > 0).length; return unread > 0 ? `<span style="position:absolute;top:-6px;right:-8px;min-width:16px;height:16px;border-radius:8px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;">${unread}</span>` : '' })()}
+              ${friendChatUnreadBadge !== null ? `<span data-desktop-nav-badge="chat" style="position:absolute;top:-6px;right:-8px;min-width:16px;height:16px;border-radius:8px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;">${escapeHtml(friendChatUnreadBadge)}</span>` : ''}
             </span>
             Чат
           </button>
@@ -2344,12 +2351,12 @@ function renderNav(state: LobbyScreenState): string {
                 position:absolute; top:2px; right:0px;
                 min-width:18px; height:18px; border-radius:9px;
                 background:#ef4444; border:1.5px solid #0a0a0a;
-                display:${mailUnreadCount > 0 ? 'flex' : 'none'}; align-items:center; justify-content:center;
+                 display:${supportUnreadBadge !== null ? 'flex' : 'none'}; align-items:center; justify-content:center;
                 font-size:10px; font-weight:800; color:#fff;
                 padding:0 4px; box-sizing:border-box;
                 font-family:Inter,system-ui,sans-serif;
                 pointer-events:none;
-              ">${mailUnreadCount > 0 ? mailUnreadCount : ''}</span>
+              ">${supportUnreadBadge !== null ? escapeHtml(supportUnreadBadge) : ''}</span>
             </button>
             ${state.isAdmin || state.isTopicModerator ? `
               <div data-admin-mail-dropdown="1" style="
@@ -2396,7 +2403,7 @@ function renderNav(state: LobbyScreenState): string {
             color:rgba(255,255,255,0.65); position:relative;
           ">
             <img src="/assets/lobby/nav-icon-preview/nav-notifications-white.png" alt="" style="width:28px; height:31px; display:block; object-fit:contain;">
-            ${notificationsBadgeCount > 0 ? `<span style="
+            ${notificationsBadge !== null ? `<span style="
               position:absolute; top:2px; right:0px;
               min-width:18px; height:18px; border-radius:9px;
               background:#ef4444; border:1.5px solid #0a0a0a;
@@ -2405,7 +2412,7 @@ function renderNav(state: LobbyScreenState): string {
               padding:0 4px; box-sizing:border-box;
               font-family:Inter,system-ui,sans-serif;
               pointer-events:none;
-            ">${notificationsBadgeCount}</span>` : ''}
+            ">${escapeHtml(notificationsBadge)}</span>` : ''}
           </button>
           <button data-lobby-nav-logout="1" style="
             display:flex; align-items:center; gap:8px;
@@ -3153,6 +3160,56 @@ function getPendingFriendRequestBadgeCount(state: LobbyScreenState): number {
   return getPendingFriendRequestNotifications(state).length
 }
 
+export function normalizeNotificationBadgeCount(count: number): number {
+  if (!Number.isFinite(count)) return 0
+  return Math.max(0, Math.floor(count))
+}
+
+export function formatNotificationBadgeCount(count: number): string | null {
+  const normalized = normalizeNotificationBadgeCount(count)
+  if (normalized <= 0) return null
+  return normalized >= 100 ? '99+' : String(normalized)
+}
+
+function sumConversationUnreadByKind(state: LobbyScreenState, kind: ChatConversationSnapshot['kind']): number {
+  return state.chatConversations
+    .filter((conversation) => conversation.kind === kind)
+    .reduce((total, conversation) => total + normalizeNotificationBadgeCount(conversation.unreadCount), 0)
+}
+
+export function getFriendChatUnreadRaw(state: LobbyScreenState): number {
+  return sumConversationUnreadByKind(state, 'friend')
+}
+
+export function getTopicsPersonalUnreadRaw(state: LobbyScreenState): number {
+  return sumConversationUnreadByKind(state, 'vip_dm')
+}
+
+export function getTopicsMessagesUnreadRaw(state: LobbyScreenState): number {
+  return (state.topics ?? [])
+    .reduce((total, topic) => total + normalizeNotificationBadgeCount(topic.unreadCount ?? 0), 0)
+}
+
+export function getTopicsTotalUnreadRaw(state: LobbyScreenState): number {
+  return getTopicsMessagesUnreadRaw(state) + getTopicsPersonalUnreadRaw(state)
+}
+
+export function getSupportUnreadRaw(state: LobbyScreenState): number {
+  return normalizeNotificationBadgeCount(state.supportUnreadCount) +
+    (state.isAdmin ? normalizeNotificationBadgeCount(state.adminGuestContactUnreadCount) : 0)
+}
+
+export function getFriendsNotificationRaw(state: LobbyScreenState): number {
+  return getPendingFriendRequestBadgeCount(state)
+}
+
+export function getMobileMenuNotificationRaw(state: LobbyScreenState): number {
+  return getFriendChatUnreadRaw(state) +
+    getTopicsTotalUnreadRaw(state) +
+    getSupportUnreadRaw(state) +
+    getFriendsNotificationRaw(state)
+}
+
 function getNotificationsBadgeCount(state: LobbyScreenState): number {
   return (
     state.dailyMissionsUnclaimedCount +
@@ -3771,18 +3828,23 @@ export function getPrivateRoomsBadgeCount(privateRooms: readonly PrivateRoomSnap
 }
 
 function renderQuickActionBadge(count: number): string {
-  if (count <= 0) {
+  const displayCount = formatNotificationBadgeCount(count)
+  if (displayCount === null) {
     return ''
   }
 
-  return `<span aria-hidden="true" style="position:absolute;top:10px;right:12px;min-width:20px;height:20px;border-radius:999px;background:#ef4444;color:#ffffff;border:2px solid #000000;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;line-height:1;box-shadow:0 0 0 2px rgba(239,68,68,0.22),0 0 14px rgba(239,68,68,0.72);">${count}</span>`
+  return `<span aria-hidden="true" style="position:absolute;top:10px;right:12px;min-width:20px;height:20px;border-radius:999px;background:#ef4444;color:#ffffff;border:2px solid #000000;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;line-height:1;box-shadow:0 0 0 2px rgba(239,68,68,0.22),0 0 14px rgba(239,68,68,0.72);padding:0 5px;box-sizing:border-box;">${escapeHtml(displayCount)}</span>`
 }
 
 function renderMobileMenu(state: LobbyScreenState): string {
   const pendingCount = getNotificationsBadgeCount(state)
-  const unreadChatCount = state.chatConversations.filter((conversation) => conversation.kind === 'friend' && conversation.unreadCount > 0).length
-  const mailUnreadCount = state.supportUnreadCount + (state.isAdmin ? state.adminGuestContactUnreadCount : 0)
-  const mobileMenuBadgeCount = (state.friendships?.incomingPending.length ?? 0) + unreadChatCount + mailUnreadCount
+  const pendingBadge = formatNotificationBadgeCount(pendingCount)
+  const friendChatUnreadCount = getFriendChatUnreadRaw(state)
+  const topicsUnreadCount = getTopicsTotalUnreadRaw(state)
+  const supportUnreadCount = getSupportUnreadRaw(state)
+  const friendsNotificationCount = getFriendsNotificationRaw(state)
+  const mobileMenuBadgeCount = getMobileMenuNotificationRaw(state)
+  const mobileMenuBadge = formatNotificationBadgeCount(mobileMenuBadgeCount)
 
   return `
     <header style="
@@ -3813,7 +3875,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
             background:#0b0b0b;color:#ffffff;position:relative;display:flex;align-items:center;justify-content:center;
           ">
             <img src="/assets/lobby/nav-icon-preview/nav-notifications-white.png" alt="" style="width:22px;height:24px;display:block;object-fit:contain;">
-            ${pendingCount > 0 ? `<span style="position:absolute;right:4px;top:4px;min-width:16px;height:16px;border-radius:8px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;">${pendingCount}</span>` : ''}
+            ${pendingBadge !== null ? `<span style="position:absolute;right:4px;top:4px;min-width:16px;height:16px;border-radius:8px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;">${escapeHtml(pendingBadge)}</span>` : ''}
           </button>
         ` : `
           <button data-lobby-nav-guest-contact="1" aria-label="Контакти" style="
@@ -3834,7 +3896,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
             position:relative;z-index:3;
           ">
             Меню
-            ${mobileMenuBadgeCount > 0 ? `<span style="position:absolute;right:-6px;top:-6px;min-width:18px;height:18px;border-radius:999px;background:#ef4444;color:#fff;border:2px solid #050505;font-size:10px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;padding:0 4px;box-sizing:border-box;">${mobileMenuBadgeCount}</span>` : ''}
+            ${mobileMenuBadge !== null ? `<span data-mobile-menu-total-badge="1" style="position:absolute;right:-6px;top:-6px;min-width:18px;height:18px;border-radius:999px;background:#ef4444;color:#fff;border:2px solid #050505;font-size:10px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;padding:0 5px;box-sizing:border-box;">${escapeHtml(mobileMenuBadge)}</span>` : ''}
           </summary>
           <button type="button" data-lobby-mobile-menu-backdrop="1" aria-label="Затвори менюто" style="
             position:fixed;inset:0;z-index:1;border:0;background:rgba(0,0,0,0.01);
@@ -3852,11 +3914,11 @@ function renderMobileMenu(state: LobbyScreenState): string {
             <button type="button" data-lobby-nav-leaderboards="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('leaderboards', 'Класация')}</button>
             <button type="button" data-lobby-nav-tournaments="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('tournaments', 'Турнири')}</button>
             ${state.profile.profileId !== null ? `
-              <button type="button" data-lobby-nav-topics="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('topics', 'Теми')}</button>
-              <button type="button" data-lobby-nav-friends="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('friends', `Приятели${(state.friendships?.incomingPending.length ?? 0) > 0 ? ` (${state.friendships?.incomingPending.length ?? 0})` : ''}`)}</button>
-              <button type="button" data-lobby-nav-chat="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('chat', `Чат${unreadChatCount > 0 ? ` (${unreadChatCount})` : ''}`)}</button>
+              <button type="button" data-lobby-nav-topics="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('topics', 'Теми', topicsUnreadCount)}</button>
+              <button type="button" data-lobby-nav-friends="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('friends', 'Приятели', friendsNotificationCount)}</button>
+              <button type="button" data-lobby-nav-chat="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('chat', 'Чат', friendChatUnreadCount)}</button>
               <button type="button" data-lobby-nav-blocked-players="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('blocked', 'Блокирани')}</button>
-              <button type="button" data-lobby-nav-support="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('support', `Поддръжка${mailUnreadCount > 0 ? ` (${mailUnreadCount})` : ''}`)}</button>
+              <button type="button" data-lobby-nav-support="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('support', 'Поддръжка', supportUnreadCount)}</button>
               ${state.isAdminOrSubadmin ? `
                 ${state.isAdmin ? `
                 <button type="button" data-lobby-nav-admin="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ настройки')}</button>
@@ -3888,8 +3950,10 @@ function mobileMenuButtonStyle(background = 'rgba(255,255,255,0.055)', color = '
 function mobileMenuSvgItemContent(
   icon: 'admin' | 'blocked' | 'chat' | 'friends' | 'leaderboards' | 'lobby' | 'login' | 'logout' | 'players' | 'shop' | 'support' | 'tournaments' | 'topics',
   label: string,
+  badgeCount = 0,
 ): string {
   const stroke = icon === 'logout' ? '#fecaca' : '#d4a520'
+  const badge = formatNotificationBadgeCount(badgeCount)
   const path = icon === 'support'
     ? '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>'
     : icon === 'admin'
@@ -3916,7 +3980,8 @@ function mobileMenuSvgItemContent(
 
   return `
     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="${stroke}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block;flex:0 0 auto;">${path}</svg>
-    <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${label}</span>
+    <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(label)}</span>
+    ${badge !== null ? `<span data-mobile-menu-item-badge="${icon}" aria-hidden="true" style="margin-left:auto;min-width:22px;height:20px;border-radius:999px;background:#ef4444;color:#fff;border:1px solid rgba(5,5,5,0.96);font-size:11px;font-weight:900;line-height:1;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;box-sizing:border-box;flex:0 0 auto;">${escapeHtml(badge)}</span>` : ''}
   `
 }
 
@@ -4587,7 +4652,8 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
           const isActive = activeConversation?.friendshipId === conversation.friendshipId
           const displayName = conversation.friend.displayName?.trim() || 'Играч'
           const avatarUrl = conversation.friend.avatarUrl?.trim() ?? ''
-          return `<button type="button" data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}" style="flex:0 0 88px;border:1px solid ${isActive ? 'rgba(212,165,32,0.72)' : 'rgba(255,255,255,0.12)'};border-radius:8px;background:#080808;color:#ffffff;padding:8px;display:grid;gap:6px;justify-items:center;"><div style="position:relative;width:44px;height:44px;flex:0 0 auto;"><div style="width:100%;height:100%;border-radius:8px;background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-weight:900;">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}</div>${renderFriendOnlineStatusDot(conversation.friend.isOnline)}</div><div style="max-width:72px;font-size:11px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>${conversation.unreadCount > 0 ? `<div style="font-size:10px;font-weight:900;color:#fca5a5;">${conversation.unreadCount} нови</div>` : ''}</button>`
+          const unreadBadge = formatNotificationBadgeCount(conversation.unreadCount)
+          return `<button type="button" data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}" style="flex:0 0 88px;border:1px solid ${isActive ? 'rgba(212,165,32,0.72)' : 'rgba(255,255,255,0.12)'};border-radius:8px;background:#080808;color:#ffffff;padding:8px;display:grid;gap:6px;justify-items:center;"><div style="position:relative;width:44px;height:44px;flex:0 0 auto;"><div style="width:100%;height:100%;border-radius:8px;background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-weight:900;">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}</div>${renderFriendOnlineStatusDot(conversation.friend.isOnline)}</div><div style="max-width:72px;font-size:11px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>${unreadBadge !== null ? `<div style="font-size:10px;font-weight:900;color:#fca5a5;">${escapeHtml(unreadBadge)} нови</div>` : ''}</button>`
         }).join('')}
       </div>
 
@@ -5388,14 +5454,11 @@ function formatChatTime(value: string): string {
 }
 
 export function formatPersonalChatUnreadBadgeCount(count: number): string | null {
-  if (!Number.isFinite(count) || count <= 0) return null
-  return String(Math.min(Math.floor(count), 99))
+  return formatNotificationBadgeCount(count)
 }
 
 export function getPersonalChatUnreadTotal(state: LobbyScreenState): number {
-  return state.chatConversations
-    .filter((conversation) => conversation.kind === 'vip_dm')
-    .reduce((total, conversation) => total + Math.max(0, Math.floor(conversation.unreadCount)), 0)
+  return getTopicsPersonalUnreadRaw(state)
 }
 
 function renderTopicsPersonalConversationRow(
@@ -5610,6 +5673,7 @@ function renderChatPanel(state: LobbyScreenState): string {
               const preview = conversation.lastMessage?.body ?? 'Няма съобщения'
               const isOnline = conversation.friend.isOnline
               const isPikaSupport = conversation.kind === 'pika_support'
+              const unreadBadge = formatNotificationBadgeCount(conversation.unreadCount)
 
               return `
                 <button type="button" data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}" style="display:flex;align-items:center;gap:12px;width:100%;border:0;border-bottom:1px solid rgba(255,255,255,0.06);background:${isActive ? 'rgba(212,165,32,0.12)' : 'transparent'};color:#ffffff;text-align:left;padding:12px 14px;cursor:pointer;min-width:0;box-sizing:border-box;">
@@ -5623,7 +5687,7 @@ function renderChatPanel(state: LobbyScreenState): string {
                     <div style="display:flex;align-items:center;gap:6px;">
                       <div style="font-size:14px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">${escapeHtml(displayName)}</div>
                       ${isPikaSupport ? pikaSupportBadge : ''}
-                      ${conversation.unreadCount > 0 ? `<span style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 4px;flex-shrink:0;">${conversation.unreadCount}</span>` : ''}
+                      ${unreadBadge !== null ? `<span style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 4px;flex-shrink:0;">${escapeHtml(unreadBadge)}</span>` : ''}
                     </div>
                     <div style="margin-top:4px;font-size:12px;font-weight:700;color:${conversation.unreadCount > 0 ? '#ffffff' : 'rgba(255,255,255,0.54)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(preview)}</div>
                   </div>

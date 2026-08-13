@@ -23,6 +23,7 @@
     "check:topic-message-edit-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicMessageEditClient.ts --project-root=.",
     "check:topic-unread-seen-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicUnreadSeenClient.ts --project-root=.",
     "check:topics-personal-integration-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicsPersonalIntegrationClient.ts --project-root=.",
+    "check:unified-notification-badges": "node server/node_modules/tsx/dist/cli.mjs scripts/checkUnifiedNotificationBadges.ts",
     "check:topics-scroll-retention-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicsScrollRetentionClient.ts --project-root=.",
     "check:profile-popup-mobile-responsive": "npx tsx scripts/checkProfilePopupMobileResponsive.ts",
     "check:support-chat-typing-stability": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSupportChatTypingStability.ts",

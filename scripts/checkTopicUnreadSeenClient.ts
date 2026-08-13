@@ -67,12 +67,24 @@ await check('[5] unread/seen realtime messages update directory state', () => {
   assert(flowSrc.includes('message.unreadCount'), 'unreadCount reconciliation missing')
 })
 
-await check('[6] badge render is visual-only capped at 99 without plus suffix', () => {
+await check('[6] badge render uses shared 99/100 notification formatter', () => {
   assert(renderSrc.includes('formatTopicUnreadBadgeCount'), 'badge formatter missing')
-  assert(renderSrc.includes('return String(Math.min(normalized, 99))'), '99 visual cap missing')
+  assert(renderSrc.includes('return formatNotificationBadgeCount(count)'), 'topic badge must reuse shared notification formatter')
   assert(renderSrc.includes('topic-unread-badge'), 'badge class missing')
   assert(renderSrc.includes('isActive ? null'), 'active topic badge should be hidden')
-  assert(!renderSrc.includes("'99+'"), 'badge must never render 99+')
+})
+
+await check('[7] Lobby initial auth lifecycle loads topic directory unread metadata without message history', () => {
+  const refreshStart = flowSrc.indexOf('async function refreshTopicsDirectoryMetadata(): Promise<boolean>')
+  const refreshEnd = flowSrc.indexOf('async function reconcileTopicsDirectoryFromServer', refreshStart)
+  const refreshBody = refreshStart >= 0 && refreshEnd > refreshStart ? flowSrc.slice(refreshStart, refreshEnd) : ''
+  assert(mainSrc.includes('syncLobbyTopicsDirectoryMetadata'), 'main must sync topics directory metadata during auth lifecycle')
+  assert(mainSrc.includes('await syncLobbyTopicsDirectoryMetadata()'), 'auth lifecycle must await topics metadata sync')
+  assert(refreshBody.includes('refreshTopicsDirectoryMetadata'), 'controller topics metadata refresh helper missing')
+  assert(flowSrc.includes('topicsLoadedForProfileId'), 'profile guard for topics metadata missing')
+  assert(refreshBody.includes('latestAuthSession?.profile.profileId !== profileId'), 'stale profile metadata guard missing')
+  assert(refreshBody.includes('subscribeToTopicsDirectory()'), 'topics directory realtime subscription missing after metadata load')
+  assert(!refreshBody.includes('onTopicMessagesLoad'), 'metadata refresh must not load topic message history')
 })
 
 if (failed > 0) {

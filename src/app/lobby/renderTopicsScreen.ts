@@ -2,6 +2,7 @@ import type { TopicMessageSnapshot, TopicReplySnapshot, TopicAttachmentSnapshot,
 import type { LobbyScreenState } from './renderLobbyScreen'
 import {
   formatPersonalChatUnreadBadgeCount,
+  formatNotificationBadgeCount,
   getPersonalChatUnreadTotal,
   renderTopicsPersonalChatPanel,
   resolveAttachmentUrl,
@@ -76,9 +77,7 @@ function isTopicMessageEditWindowExpired(createdAt: string): boolean {
 }
 
 export function formatTopicUnreadBadgeCount(count: number): string | null {
-  if (!Number.isFinite(count) || count <= 0) return null
-  const normalized = Math.floor(count)
-  return String(Math.min(normalized, 99))
+  return formatNotificationBadgeCount(count)
 }
 
 // Реален avatar от canonical profile data (senderAvatarUrl е derived
@@ -207,6 +206,7 @@ function renderTopicsBar(state: LobbyScreenState): string {
         font-weight:900;
         line-height:1;
         flex:0 0 auto;
+        box-sizing:border-box;
       }
     </style>
     <div

@@ -531,6 +531,7 @@ function syncLobbyWithAuthSession(): void {
   if (currentAuthSession === null) {
     lobby.setFriendships(null)
     lobby.setChatConversations([])
+    lobby.clearTopicsDirectoryMetadata()
     return
   }
 
@@ -575,6 +576,15 @@ async function syncLobbyChatConversations(): Promise<boolean> {
   return false
 }
 
+async function syncLobbyTopicsDirectoryMetadata(): Promise<boolean> {
+  if (currentAuthSession === null) {
+    lobby.clearTopicsDirectoryMetadata()
+    return true
+  }
+
+  return lobby.refreshTopicsDirectoryMetadata()
+}
+
 // Извиква се на всеки сигурен lifecycle момент (връщане в лоби, PWA resume),
 // докато pendingChatRefreshTracker веднъж успее. canAttemptNow е локалната ни
 // преценка (не сме в игра, имаме сесия) — самата успешност на заявката пак
@@ -605,6 +615,7 @@ async function loadAuthSession(): Promise<void> {
   if (cached !== null) {
     currentAuthSession = cached
     syncLobbyWithAuthSession()
+    void syncLobbyTopicsDirectoryMetadata()
     lobby.refreshDailyRewardsStatus()
     if (!activeRoom.hasActiveRoom() && !_isResetPasswordPath) lobby.render()
   }
@@ -635,6 +646,7 @@ async function loadAuthSession(): Promise<void> {
     }
     await syncLobbyFriendships()
     await syncLobbyChatConversations()
+    await syncLobbyTopicsDirectoryMetadata()
     if (!activeRoom.hasActiveRoom() && !_isResetPasswordPath) lobby.render()
   } catch {
     if (currentAuthSession === null) currentAuthSession = null
@@ -667,12 +679,14 @@ async function submitAuthRequest(
     // (напр. предишен профил в същия таб/PWA runtime, или guest сесия).
     clearPendingChatRefresh()
     syncLobbyWithAuthSession()
+    lobby.clearTopicsDirectoryMetadata()
     lobby.resetToLobby()
     lobby.refreshDailyRewardsStatus()
     lobby.refreshSupportUnread()
     startSupportUnreadPolling()
     await syncLobbyFriendships()
     await syncLobbyChatConversations()
+    await syncLobbyTopicsDirectoryMetadata()
     refreshGameServerConnectionForAuth()
     // Meta CompleteRegistration — само за успешен register, никога login.
     // eventId е стабилен спрямо accountId (веднъж заделен от сървъра при
