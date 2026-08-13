@@ -248,6 +248,20 @@ async function getDesktopNavRect(page: Page): Promise<DomRectSnapshot | null> {
   return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getDesktopNavRect())
 }
 
+async function getNavKeyOrder(page: Page, containerSelector: string, keys: string[]): Promise<string[]> {
+  return page.evaluate(
+    ([selector, k]) => (window as any).__topicsComposerVipGateHarness.getNavKeyOrder(selector, k),
+    [containerSelector, keys] as [string, string[]],
+  )
+}
+
+async function getNavItemIconHtml(page: Page, containerSelector: string, item: string): Promise<string | null> {
+  return page.evaluate(
+    ([selector, key]) => document.querySelector(`${selector} [data-lobby-nav-${key}="1"] svg`)?.outerHTML ?? null,
+    [containerSelector, item] as [string, string],
+  )
+}
+
 async function hasLegacyTopicsStrip(page: Page): Promise<boolean> {
   return page.evaluate(() =>
     document.querySelector('[data-topics-bar-scroll="1"]') !== null ||
@@ -747,6 +761,66 @@ try {
       assert(seenLog.some((entry) => entry.rootMessageId === 'thread-a'), 'opening Thread A must mark only Thread A seen')
       await clickTopicThreadBack(page)
       assertEqual(await getTopicsGeneralBadgeText(page), '4', 'General after opening Thread A')
+    })
+  })
+
+  const MASTER_NAV_ORDER = ['lobby', 'shop', 'topics', 'chat', 'tournaments', 'friends', 'players', 'leaderboards', 'blocked-players', 'support', 'logout']
+
+  await check('[23] Locked master navigation order (mobile) and badge binding survive reorder', async () => {
+    await withMobilePage({ width: 390, height: 844 }, async (page) => {
+      const friend = await makeConversation(page, 'FRIEND_ORDER', 'friend', 11)
+      await setChatConversations(page, [friend])
+      await setIncomingFriendRequests(page, 22)
+      await setSupportUnread(page, 33)
+      await setTopicDirectoryResponse(page, [
+        { topicId: 'topic-general', slug: 'general', title: 'Общ чат', isGeneral: true, unreadCount: 44 },
+      ])
+      assertEqual(await refreshTopicsDirectoryMetadata(page), true, 'nav order metadata refresh')
+
+      const order = await getNavKeyOrder(page, '[data-lobby-mobile-menu-panel="1"]', MASTER_NAV_ORDER)
+      assertEqual(order.join(','), MASTER_NAV_ORDER.join(','), `mobile menu order must match locked master order, got: ${order.join(',')}`)
+
+      const lobbyIdx = order.indexOf('lobby')
+      const shopIdx = order.indexOf('shop')
+      const topicsIdx = order.indexOf('topics')
+      const chatIdx = order.indexOf('chat')
+      const tournamentsIdx = order.indexOf('tournaments')
+      assert(
+        lobbyIdx < shopIdx && shopIdx < topicsIdx && topicsIdx < chatIdx && chatIdx < tournamentsIdx,
+        `Лоби < Магазин < Теми < Чат < Турнири must hold, got: ${order.join(',')}`,
+      )
+
+      await openMobileMenu(page)
+      assertEqual(await getMobileMenuItemBadgeText(page, 'topics'), '44', 'Topics badge stays bound to topics key after reorder')
+      assertEqual(await getMobileMenuItemBadgeText(page, 'chat'), '11', 'Chat badge stays bound to chat key after reorder')
+      assertEqual(await getMobileMenuItemBadgeText(page, 'friends'), '22', 'Friends badge stays bound to friends key after reorder')
+      assertEqual(await getMobileMenuItemBadgeText(page, 'support'), '33', 'Support badge stays bound to support key after reorder')
+
+      const topicsIcon = await getNavItemIconHtml(page, '[data-lobby-mobile-menu-panel="1"]', 'topics')
+      const chatIcon = await getNavItemIconHtml(page, '[data-lobby-mobile-menu-panel="1"]', 'chat')
+      assert(topicsIcon !== null && chatIcon !== null && topicsIcon !== chatIcon, 'mobile Topics icon must differ from Chat icon')
+    })
+  })
+
+  await check('[24] Locked master navigation order (desktop) and badge binding survive reorder', async () => {
+    await withDesktopPage({ width: 1280, height: 800 }, async (page) => {
+      const friend = await makeConversation(page, 'FRIEND_ORDER_DESKTOP', 'friend', 5)
+      await setChatConversations(page, [friend])
+      await setTopicDirectoryResponse(page, [
+        { topicId: 'topic-general', slug: 'general', title: 'Общ чат', isGeneral: true, unreadCount: 9 },
+      ])
+      assertEqual(await refreshTopicsDirectoryMetadata(page), true, 'desktop nav order metadata refresh')
+
+      const desktopKeys = ['lobby', 'shop', 'topics', 'chat', 'tournaments', 'friends', 'players', 'leaderboards', 'blocked-players']
+      const order = await getNavKeyOrder(page, '[data-lobby-nav-primary-group="1"]', desktopKeys)
+      assertEqual(order.join(','), desktopKeys.join(','), `desktop nav order must match locked master order (for present entries), got: ${order.join(',')}`)
+
+      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '9', 'desktop Topics badge stays bound to topics key after reorder')
+      assertEqual(await getDesktopNavBadgeText(page, 'chat'), '5', 'desktop Chat badge stays bound to chat key after reorder')
+
+      const topicsIcon = await getNavItemIconHtml(page, '[data-lobby-nav-primary-group="1"]', 'topics')
+      const chatIcon = await getNavItemIconHtml(page, '[data-lobby-nav-primary-group="1"]', 'chat')
+      assert(topicsIcon !== null && chatIcon !== null && topicsIcon !== chatIcon, 'desktop Topics icon must differ from Chat icon')
     })
   })
 } finally {

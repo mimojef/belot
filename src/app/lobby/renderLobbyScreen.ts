@@ -2106,7 +2106,7 @@ function renderNav(state: LobbyScreenState): string {
         <img src="/assets/lobby/logo.png" alt="Pika.bg" style="width:192px; height:52px; display:block; object-fit:contain;">
       </a>
 
-      <div style="display:flex; align-items:stretch; gap:0; height:100%; flex:1;">
+      <div data-lobby-nav-primary-group="1" style="display:flex; align-items:stretch; gap:0; height:100%; flex:1;">
         <a href="/lobby" data-lobby-nav-lobby="1" ${lobbyActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
@@ -2140,6 +2140,60 @@ function renderNav(state: LobbyScreenState): string {
           </svg>
           <span class="lobby-nav-btn-label">Магазин</span>
         </button>
+        ${state.profile.profileId !== null ? `
+          <a href="/topics" data-lobby-nav-topics="1" ${topicsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+            position:relative;display:flex; align-items:center; gap:10px;
+            padding:0 28px 0 18px;
+            background:${topicsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+            font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+            color:${topicsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+            border-bottom:2px solid ${topicsActive ? '#d4a520' : 'transparent'};
+            text-decoration:none; height:100%;
+          ">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+            Теми
+            ${topicsUnreadBadge !== null ? `<span data-desktop-nav-badge="topics" aria-hidden="true" style="position:absolute;top:6px;right:7px;min-width:18px;height:18px;border-radius:999px;background:#ef4444;color:#fff;border:1.5px solid #0a0a0a;font-size:10px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;padding:0 5px;box-sizing:border-box;">${escapeHtml(topicsUnreadBadge)}</span>` : ''}
+          </a>
+        ` : ''}
+        ${state.profile.profileId !== null ? `
+          <button type="button" data-lobby-nav-chat="1" ${chatActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+            display:flex; align-items:center; gap:10px;
+            padding:0 18px;
+            border:0;
+            background:${chatActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+            font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+            color:${chatActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+            border-bottom:2px solid ${chatActive ? '#d4a520' : 'transparent'};
+            cursor:pointer;
+            height:100%;
+          ">
+            <span style="position:relative;display:flex;align-items:center;flex-shrink:0;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+              ${friendChatUnreadBadge !== null ? `<span data-desktop-nav-badge="chat" style="position:absolute;top:-6px;right:-8px;min-width:16px;height:16px;border-radius:8px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;">${escapeHtml(friendChatUnreadBadge)}</span>` : ''}
+            </span>
+            Чат
+          </button>
+        ` : ''}
+        <a href="/tournaments" data-lobby-nav-tournaments="1" ${tournamentsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
+          display:flex; align-items:center; gap:10px;
+          padding:0 18px;
+          background:${tournamentsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+          color:${tournamentsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${tournamentsActive ? '#d4a520' : 'transparent'};
+          text-decoration:none; height:100%;
+        ">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+            <path d="M8 21h8"/>
+            <path d="M12 17v4"/>
+            <path d="M7 4h10v6a5 5 0 0 1-10 0z"/>
+            <path d="M5 4H3v2a4 4 0 0 0 4 4"/>
+            <path d="M19 4h2v2a4 4 0 0 1-4 4"/>
+          </svg>
+          Турнири
+        </a>
         <button type="button" data-lobby-nav-friends="1" ${friendsActive ? 'data-active="1"' : ''} class="lobby-nav-btn lobby-nav-btn-icon-only" aria-label="Приятели" data-tooltip="Приятели" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
@@ -2165,74 +2219,6 @@ function renderNav(state: LobbyScreenState): string {
             </span>
           ` : ''}
         </button>
-        <button type="button" data-lobby-nav-blocked-players="1" class="lobby-nav-btn lobby-nav-btn-icon-only" aria-label="Блокирани" data-tooltip="Блокирани" style="
-          display:flex; align-items:center; gap:10px;
-          padding:0 18px;
-          border:0;
-          background:transparent;
-          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:rgba(255,255,255,0.70);
-          border-bottom:2px solid transparent;
-          cursor:pointer;
-          height:100%;
-        ">
-          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
-            <circle cx="12" cy="12" r="10"/>
-            <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
-          </svg>
-          <span class="lobby-nav-btn-label">Блокирани</span>
-        </button>
-        <a href="/ranking" data-lobby-nav-leaderboards="1" ${leaderboardsActive ? 'data-active="1"' : ''} class="lobby-nav-btn lobby-nav-btn-icon-only" aria-label="Класация" data-tooltip="Класация" style="
-          display:flex; align-items:center; gap:10px;
-          padding:0 18px;
-          background:${leaderboardsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
-          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:${leaderboardsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
-          border-bottom:2px solid ${leaderboardsActive ? '#d4a520' : 'transparent'};
-          text-decoration:none; height:100%;
-        ">
-          <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
-            <line x1="18" y1="20" x2="18" y2="10"/>
-            <line x1="12" y1="20" x2="12" y2="4"/>
-            <line x1="6" y1="20" x2="6" y2="14"/>
-          </svg>
-          <span class="lobby-nav-btn-label">Класация</span>
-        </a>
-        <a href="/tournaments" data-lobby-nav-tournaments="1" ${tournamentsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
-          display:flex; align-items:center; gap:10px;
-          padding:0 18px;
-          background:${tournamentsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
-          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-          color:${tournamentsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
-          border-bottom:2px solid ${tournamentsActive ? '#d4a520' : 'transparent'};
-          text-decoration:none; height:100%;
-        ">
-          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
-            <path d="M8 21h8"/>
-            <path d="M12 17v4"/>
-            <path d="M7 4h10v6a5 5 0 0 1-10 0z"/>
-            <path d="M5 4H3v2a4 4 0 0 0 4 4"/>
-            <path d="M19 4h2v2a4 4 0 0 1-4 4"/>
-          </svg>
-          Турнири
-        </a>
-        ${state.profile.profileId !== null ? `
-          <a href="/topics" data-lobby-nav-topics="1" ${topicsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
-            position:relative;display:flex; align-items:center; gap:10px;
-            padding:0 28px 0 18px;
-            background:${topicsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
-            font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-            color:${topicsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
-            border-bottom:2px solid ${topicsActive ? '#d4a520' : 'transparent'};
-            text-decoration:none; height:100%;
-          ">
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-            </svg>
-            Теми
-            ${topicsUnreadBadge !== null ? `<span data-desktop-nav-badge="topics" aria-hidden="true" style="position:absolute;top:6px;right:7px;min-width:18px;height:18px;border-radius:999px;background:#ef4444;color:#fff;border:1.5px solid #0a0a0a;font-size:10px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;padding:0 5px;box-sizing:border-box;">${escapeHtml(topicsUnreadBadge)}</span>` : ''}
-          </a>
-        ` : ''}
         <a href="/players" data-lobby-nav-players="1" ${playersActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
           display:flex; align-items:center; gap:10px;
           padding:0 18px;
@@ -2250,25 +2236,39 @@ function renderNav(state: LobbyScreenState): string {
           </svg>
           Играчи
         </a>
-        ${state.profile.profileId !== null ? `
-          <button type="button" data-lobby-nav-chat="1" ${chatActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
-            display:flex; align-items:center; gap:10px;
-            padding:0 18px;
-            border:0;
-            background:${chatActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
-            font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-            color:${chatActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
-            border-bottom:2px solid ${chatActive ? '#d4a520' : 'transparent'};
-            cursor:pointer;
-            height:100%;
-          ">
-            <span style="position:relative;display:flex;align-items:center;flex-shrink:0;">
-              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-              ${friendChatUnreadBadge !== null ? `<span data-desktop-nav-badge="chat" style="position:absolute;top:-6px;right:-8px;min-width:16px;height:16px;border-radius:8px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;">${escapeHtml(friendChatUnreadBadge)}</span>` : ''}
-            </span>
-            Чат
-          </button>
-        ` : ''}
+        <a href="/ranking" data-lobby-nav-leaderboards="1" ${leaderboardsActive ? 'data-active="1"' : ''} class="lobby-nav-btn lobby-nav-btn-icon-only" aria-label="Класация" data-tooltip="Класация" style="
+          display:flex; align-items:center; gap:10px;
+          padding:0 18px;
+          background:${leaderboardsActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+          color:${leaderboardsActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${leaderboardsActive ? '#d4a520' : 'transparent'};
+          text-decoration:none; height:100%;
+        ">
+          <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+            <line x1="18" y1="20" x2="18" y2="10"/>
+            <line x1="12" y1="20" x2="12" y2="4"/>
+            <line x1="6" y1="20" x2="6" y2="14"/>
+          </svg>
+          <span class="lobby-nav-btn-label">Класация</span>
+        </a>
+        <button type="button" data-lobby-nav-blocked-players="1" class="lobby-nav-btn lobby-nav-btn-icon-only" aria-label="Блокирани" data-tooltip="Блокирани" style="
+          display:flex; align-items:center; gap:10px;
+          padding:0 18px;
+          border:0;
+          background:transparent;
+          font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+          color:rgba(255,255,255,0.70);
+          border-bottom:2px solid transparent;
+          cursor:pointer;
+          height:100%;
+        ">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+          </svg>
+          <span class="lobby-nav-btn-label">Блокирани</span>
+        </button>
       </div>
 
       <div style="display:flex; align-items:center; gap:4px; margin-left:auto;">
@@ -3919,13 +3919,17 @@ function renderMobileMenu(state: LobbyScreenState): string {
           ">
             <button type="button" data-lobby-nav-lobby="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('lobby', 'Лоби')}</button>
             <button type="button" data-lobby-nav-shop="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('shop', 'Магазин')}</button>
-            <button type="button" data-lobby-nav-players="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('players', 'Играчите')}</button>
-            <button type="button" data-lobby-nav-leaderboards="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('leaderboards', 'Класация')}</button>
-            <button type="button" data-lobby-nav-tournaments="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('tournaments', 'Турнири')}</button>
             ${state.profile.profileId !== null ? `
               <button type="button" data-lobby-nav-topics="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('topics', 'Теми', topicsUnreadCount)}</button>
-              <button type="button" data-lobby-nav-friends="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('friends', 'Приятели', friendsNotificationCount)}</button>
               <button type="button" data-lobby-nav-chat="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('chat', 'Чат', friendChatUnreadCount)}</button>
+            ` : ''}
+            <button type="button" data-lobby-nav-tournaments="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('tournaments', 'Турнири')}</button>
+            ${state.profile.profileId !== null ? `
+              <button type="button" data-lobby-nav-friends="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('friends', 'Приятели', friendsNotificationCount)}</button>
+            ` : ''}
+            <button type="button" data-lobby-nav-players="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('players', 'Играчите')}</button>
+            <button type="button" data-lobby-nav-leaderboards="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('leaderboards', 'Класация')}</button>
+            ${state.profile.profileId !== null ? `
               <button type="button" data-lobby-nav-blocked-players="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('blocked', 'Блокирани')}</button>
               <button type="button" data-lobby-nav-support="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('support', 'Поддръжка', supportUnreadCount)}</button>
               ${state.isAdminOrSubadmin ? `
@@ -3971,8 +3975,10 @@ function mobileMenuSvgItemContent(
         ? '<path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v6a5 5 0 0 1-10 0z"/><path d="M5 4H3v2a4 4 0 0 0 4 4"/><path d="M19 4h2v2a4 4 0 0 1-4 4"/>'
       : icon === 'blocked'
         ? '<circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>'
-      : icon === 'chat' || icon === 'topics'
+      : icon === 'topics'
         ? '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'
+      : icon === 'chat'
+        ? '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>'
       : icon === 'friends'
         ? '<path d="m11 17 2 2a1 1 0 1 0 3-3"/><path d="m14 14 2.5 2.5a1 1 0 1 0 3-3l-3.88-3.88a3 3 0 0 0-4.24 0l-.88.88a1 1 0 1 1-3-3l2.81-2.81a5.79 5.79 0 0 1 7.06-.87l.47.28a2 2 0 0 0 1.42.25L21 4"/><path d="m21 3 1 11h-1"/><path d="M3 3 2 14l6.5 6.5a1 1 0 1 0 3-3"/><path d="M3 4h8"/>'
       : icon === 'leaderboards'

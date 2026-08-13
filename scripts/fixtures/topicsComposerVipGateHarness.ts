@@ -405,6 +405,25 @@ function q<T extends Element>(selector: string): T | null {
     const rect = el.getBoundingClientRect()
     return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
   },
+  // Master navigation order regression (locked product order) — връща
+  // видимите data-lobby-nav-* keys в DOM ред в рамките на containerSelector,
+  // за да можем да асъртнем relative order без да пипаме index-базирани
+  // селектори (badge/click wiring си остават keyed по data-attribute).
+  getNavKeyOrder: (containerSelector: string, keys: string[]) => {
+    const container = q<HTMLElement>(containerSelector)
+    if (!container) return []
+    const selector = keys.map((key) => `[data-lobby-nav-${key}="1"]`).join(',')
+    const elements = Array.from(container.querySelectorAll<HTMLElement>(selector))
+    const seen = new Set<HTMLElement>()
+    const ordered: string[] = []
+    for (const el of elements) {
+      if (seen.has(el)) continue
+      seen.add(el)
+      const key = keys.find((candidate) => el.hasAttribute(`data-lobby-nav-${candidate}`))
+      if (key) ordered.push(key)
+    }
+    return ordered
+  },
   getTopicChipBadgeText: (topicId: string) => q(`[data-topic-chip="${CSS.escape(topicId)}"] .topic-unread-badge`)?.textContent ?? null,
   getTopicsPersonalBadgeText: () => q('[data-topics-personal-badge="1"]')?.textContent ?? null,
   clickTopicsPersonalOpen: () => q<HTMLButtonElement>('[data-topics-personal-open="1"]')?.click(),
