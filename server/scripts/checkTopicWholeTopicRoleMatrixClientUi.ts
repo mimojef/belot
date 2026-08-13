@@ -95,6 +95,8 @@ check('[5] Mute control (renderTopicAuthorBlock) остава гейтнат п�
   const fnBody = topicsScreenSrc.match(/function renderTopicAuthorBlock[\s\S]*?\n\}/)?.[0] ?? ''
   assert(fnBody.length > 0, 'renderTopicAuthorBlock function not found')
   assert(fnBody.includes('state.isTopicModerator'), 'mute gate must still reference state.isTopicModerator (wide set — pika_team/chat_admin keep mute rights)')
+  assert(fnBody.includes("renderTopicActionIcon('moderate')"), 'mute control must use deterministic SVG helper')
+  assert(!fnBody.includes('&#9881;'), 'mute control must not use Unicode gear')
 })
 
 check('[6] Reports menu entry (mail dropdown) остава гейтнат по широкия state.isTopicModerator (непроменено)', () => {

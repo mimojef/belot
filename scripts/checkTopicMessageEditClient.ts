@@ -52,6 +52,15 @@ await check('[3] edit button is owner-only and distinct from moderator delete', 
   assert(renderTopics.includes('if (!isOwner) return'), 'non-owner visibility guard missing')
 })
 
+await check('[3.1] edit action icon is deterministic SVG, not Unicode pencil', () => {
+  const editButtonBlock = renderTopics.slice(renderTopics.indexOf('function renderTopicMessageEditButton'), renderTopics.indexOf('function renderTopicMessageEditForm'))
+  assert(renderTopics.includes('function renderTopicActionIcon'), 'shared action icon helper missing')
+  assert(editButtonBlock.includes("renderTopicActionIcon('edit')"), 'edit button must use SVG helper')
+  assert(!editButtonBlock.includes('&#9998;'), 'edit button must not use Unicode pencil')
+  assert(renderTopics.includes('width="20" height="20" viewBox="0 0 24 24"'), 'SVG must use deterministic viewBox')
+  assert(renderTopics.includes('stroke="currentColor"'), 'SVG must inherit currentColor')
+})
+
 await check('[4] blocked edit states are visible and do not use native disabled', () => {
   assert(renderTopics.includes('data-topic-message-edit-blocked="1"'), 'blocked edit data attribute missing')
   assert(renderTopics.includes('Не можете да редактирате публикация, към която вече има отговори.'), 'root replies message missing')

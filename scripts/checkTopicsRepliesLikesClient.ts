@@ -32,6 +32,8 @@
 import { createServer as createViteServer, type ViteDevServer } from 'vite'
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright'
 import { createServer as createNetServer } from 'node:net'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 let passed = 0
 let failed = 0
@@ -118,6 +120,34 @@ async function call<T>(page: Page, fn: (h: H, arg: any) => T, arg: any = undefin
 }
 
 console.log('\ncheckTopicsRepliesLikesClient\n')
+
+const renderTopicsSource = readFileSync(resolve(process.cwd(), 'src/app/lobby/renderTopicsScreen.ts'), 'utf8')
+const topicActionSource = renderTopicsSource.slice(
+  renderTopicsSource.indexOf('function renderTopicLikeButton'),
+  renderTopicsSource.indexOf('function renderTopicMessageEditForm'),
+)
+
+await check('[0.1] Topics action icons use deterministic inline SVG helpers', () => {
+  assert(renderTopicsSource.includes('function renderTopicActionIcon'), 'shared action icon helper missing')
+  assert(renderTopicsSource.includes('width="20" height="20" viewBox="0 0 24 24"'), 'SVGs must use deterministic 20x20 viewBox')
+  assert(renderTopicsSource.includes('stroke="currentColor"'), 'SVGs must inherit currentColor')
+  assert(renderTopicsSource.includes("renderTopicActionIcon('like', { filled: viewerHasLiked })"), 'like action must use SVG helper')
+  assert(renderTopicsSource.includes("renderTopicActionIcon('reply')"), 'reply action must use SVG helper')
+})
+
+await check('[0.2] Topics action rows no longer render Unicode glyph entities', () => {
+  ;['&#128172;', '&#9825;', '&#9829;', '&#128465;', '&#9998;'].forEach((glyph) => {
+    assert(!topicActionSource.includes(glyph), `${glyph} must not be used in message action row`)
+  })
+})
+
+await check('[0.3] Topics action icon wrapper is a fixed 20x20 box and counts remain separate', () => {
+  assert(renderTopicsSource.includes('width:20px;'), 'icon wrapper width must be fixed')
+  assert(renderTopicsSource.includes('height:20px;'), 'icon wrapper height must be fixed')
+  assert(renderTopicsSource.includes('flex:0 0 20px;'), 'icon wrapper flex basis must be fixed')
+  assert(renderTopicsSource.includes('line-height:0;'), 'icon wrapper must not depend on font metrics')
+  assert(renderTopicsSource.includes('topic-message-action-count'), 'action count element must remain present')
+})
 
 let vite: ViteDevServer | null = null
 let browser: Browser | null = null

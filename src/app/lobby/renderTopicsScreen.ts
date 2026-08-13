@@ -20,6 +20,23 @@ import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup
 // по-малко от сегашното"), особено ценно на mobile ширина.
 const REPLY_INDENT_PX = 14
 const TOPIC_MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000
+type TopicActionIconKind = 'like' | 'reply' | 'edit' | 'delete' | 'moderate'
+
+function renderTopicActionIcon(kind: TopicActionIconKind, options: { filled?: boolean } = {}): string {
+  const commonSvgAttrs = 'width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" focusable="false"'
+  const commonStrokeAttrs = 'stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"'
+  const fill = options.filled ? 'currentColor' : 'none'
+  const heartPath = '<path d="M19.5 12.6 12 20l-7.5-7.4a5 5 0 0 1 7.1-7.1l.4.4.4-.4a5 5 0 0 1 7.1 7.1z"/>'
+  const paths: Record<TopicActionIconKind, string> = {
+    like: heartPath,
+    reply: '<path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/>',
+    edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/>',
+    delete: '<path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+    moderate: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2a2 2 0 1 1-4 0V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.3 7a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 20 7.2l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.8.8z"/>',
+  }
+
+  return `<span class="topic-message-action-icon" aria-hidden="true"><svg ${commonSvgAttrs} fill="${fill}" ${commonStrokeAttrs}>${paths[kind]}</svg></span>`
+}
 
 // Предварително планирани duration опции (Топикс moderation брифа т.2) —
 // точно ТЕЗИ 4 стойности, валидирани и server-side (виж
@@ -265,7 +282,7 @@ function renderTopicLikeButton(state: LobbyScreenState, messageId: string, snaps
       aria-pressed="${viewerHasLiked ? 'true' : 'false'}"
       data-tooltip="Харесай"
       ${isPending ? 'disabled' : ''}
-    ><span class="topic-message-action-icon" aria-hidden="true">${viewerHasLiked ? '&#9829;' : '&#9825;'}</span>${likeCount > 0 ? `<span class="topic-message-action-count">${likeCount}</span>` : ''}</button>
+    >${renderTopicActionIcon('like', { filled: viewerHasLiked })}${likeCount > 0 ? `<span class="topic-message-action-count">${likeCount}</span>` : ''}</button>
   `
 }
 
@@ -277,7 +294,7 @@ function renderTopicReplyButton(rootMessageId: string, replyCount: number): stri
       class="topic-message-action-btn"
       aria-label="Отговори"
       data-tooltip="Отговори"
-    ><span class="topic-message-action-icon" aria-hidden="true">&#128172;</span>${replyCount > 0 ? `<span class="topic-message-action-count">${replyCount}</span>` : ''}</button>
+    >${renderTopicActionIcon('reply')}${replyCount > 0 ? `<span class="topic-message-action-count">${replyCount}</span>` : ''}</button>
   `
 }
 
@@ -347,7 +364,7 @@ function renderTopicMessageDeleteButton(
       data-tooltip="${isBlockedOwnRootWithReplies ? 'Не можете да изтриете публикация, към която вече има отговори.' : 'Изтрий'}"
       ${isBlockedOwnRootWithReplies ? 'aria-disabled="true" data-topic-message-delete-blocked="1"' : ''}
       style="${isBlockedOwnRootWithReplies ? 'opacity:0.4;cursor:not-allowed;' : ''}"
-    ><span class="topic-message-action-icon" aria-hidden="true">&#128465;</span></button>
+    >${renderTopicActionIcon('delete')}</button>
   `
 }
 
@@ -382,7 +399,7 @@ function renderTopicMessageEditButton(
       data-tooltip="${escapeHtml(blockedReason ?? 'Редактирай')}"
       ${blockedReason ? 'aria-disabled="true" data-topic-message-edit-blocked="1"' : ''}
       style="${blockedReason ? 'opacity:0.4;cursor:not-allowed;' : ''}"
-    ><span class="topic-message-action-icon" aria-hidden="true">&#9998;</span></button>
+    >${renderTopicActionIcon('edit')}</button>
   `
 }
 
@@ -439,7 +456,7 @@ function renderTopicAuthorBlock(state: LobbyScreenState, senderProfileId: string
         aria-label="Модерация на ${escapeHtml(senderDisplayName)}"
         ${isMuteStatusLoading ? 'disabled' : ''}
         style="border:0;background:transparent;padding:2px 4px;cursor:${isMuteStatusLoading ? 'default' : 'pointer'};color:rgba(248,250,252,0.38);font-size:14px;line-height:1;flex:0 0 auto;opacity:${isMuteStatusLoading ? '0.5' : '1'};"
-      >&#9881;</button>
+      >${renderTopicActionIcon('moderate')}</button>
     `
     : ''
 
@@ -786,8 +803,18 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
         cursor:pointer;
       }
       .topic-message-action-icon {
-        font-size:20px;
-        line-height:1;
+        width:20px;
+        height:20px;
+        display:inline-flex;
+        align-items:center;
+        justify-content:center;
+        flex:0 0 20px;
+        line-height:0;
+      }
+      .topic-message-action-icon svg {
+        width:100%;
+        height:100%;
+        display:block;
       }
       .topic-message-action-count {
         font-size:12px;

@@ -53,6 +53,14 @@ check('[2] author+moderator overlap uses one moderator-action control', () => {
   assert(deleteButtonFn.includes('data-topic-message-delete-is-moderator-action'), 'DOM must carry action kind into confirmation flow')
 })
 
+check('[2.1] delete action icon is deterministic SVG, not Unicode wastebasket', () => {
+  assert(topicsScreenSrc.includes('function renderTopicActionIcon'), 'shared action icon helper missing')
+  assert(deleteButtonFn.includes("renderTopicActionIcon('delete')"), 'delete button must use SVG helper')
+  assert(!deleteButtonFn.includes('&#128465;'), 'delete button must not use Unicode wastebasket')
+  assert(topicsScreenSrc.includes('width="20" height="20" viewBox="0 0 24 24"'), 'SVG must use deterministic viewBox')
+  assert(topicsScreenSrc.includes('stroke="currentColor"'), 'SVG must inherit currentColor')
+})
+
 check('[3] ordinary owner root with replies is visible but blocked', () => {
   assert(deleteButtonFn.includes('!isModerator && isOwner && isRoot && replyCount > 0'), 'must detect blocked own root with live replies')
   assert(deleteButtonFn.includes('aria-disabled="true"'), 'blocked control must use aria-disabled, not native disabled')

@@ -252,11 +252,10 @@ function q<T extends Element>(selector: string): T | null {
   getLikeButtonState: (messageId: string) => {
     const btn = q<HTMLButtonElement>(`[data-topic-message-like="${messageId}"]`)
     if (!btn) return null
-    const icon = btn.querySelector('.topic-message-action-icon')?.textContent ?? ''
     const countEl = btn.querySelector('.topic-message-action-count')
     return {
       pressed: btn.getAttribute('aria-pressed'),
-      liked: icon.includes('♥'),
+      liked: btn.getAttribute('aria-pressed') === 'true',
       count: countEl ? Number(countEl.textContent) : 0,
       disabled: btn.disabled,
     }
