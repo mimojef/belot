@@ -109,6 +109,7 @@ function makeRootMessage(body: string): TopicMessageSnapshot {
     body,
     createdAt: new Date('2026-08-11T10:00:00Z').toISOString(),
     lastActivityAt: new Date('2026-08-11T10:00:00Z').toISOString(),
+    unreadCount: 0,
     editedAt: null,
     likeCount: 0,
     replyCount: 0,

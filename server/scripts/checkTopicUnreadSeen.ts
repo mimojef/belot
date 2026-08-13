@@ -16,6 +16,7 @@ const migrationPaths = [
   '20260812_002_create_topic_message_self_deletion_audit.sql',
   '20260812_003_add_topic_message_editing.sql',
   '20260812_004_create_topic_read_state.sql',
+  '20260813_001_create_topic_thread_read_state.sql',
 ].map((name) => resolve(serverRoot, 'database/migrations', name))
 
 let passed = 0
@@ -84,6 +85,7 @@ async function setupDb(dir: string): Promise<string> {
     INSERT INTO topics (topic_id, slug, title, is_general, created_by_profile_id, status, sort_order)
     VALUES
       ('topic-a', 'topic-a', 'Topic A', 0, NULL, 'active', 10),
+      ('topic-thread', 'topic-thread', 'Topic Thread', 1, NULL, 'active', 15),
       ('topic-locked', 'topic-locked', 'Topic Locked', 0, NULL, 'locked', 20),
       ('topic-removed', 'topic-removed', 'Topic Removed', 0, NULL, 'removed', 30);
   `).run()
@@ -131,6 +133,20 @@ function insertMessage(dbPath: string, input: {
 
 function unreadCount(store: TopicReadStateStore, profileId: string, topicId: string, blocked: string[] = []): number {
   return store.getUnreadCountsByTopicIds(profileId, [topicId], blocked).get(topicId) ?? 0
+}
+
+function threadUnreadCount(store: TopicReadStateStore, profileId: string, rootMessageId: string, blocked: string[] = []): number {
+  return store.getUnreadCountsByRootMessageIds(profileId, [rootMessageId], blocked).get(rootMessageId) ?? 0
+}
+
+function generalThreadUnreadTotal(store: TopicReadStateStore, profileId: string, topicId: string, blocked: string[] = []): number {
+  return store.getGeneralThreadUnreadTotal(profileId, topicId, blocked)
+}
+
+function softDeleteMessage(dbPath: string, messageId: string): void {
+  withDb(dbPath, (db) => {
+    db.prepare(`UPDATE topic_messages SET deleted_at = CURRENT_TIMESTAMP WHERE message_id = ?`).run(messageId)
+  })
 }
 
 console.log('\n=== Topic Unread / Seen (store-level) ===\n')
@@ -184,6 +200,62 @@ await withTempDir(async (dir) => {
       assertEqual(unreadCount(store, 'viewer-1', 'topic-a'), 1, 'unread after bob unblock boundary')
       insertMessage(dbPath, { topicId: 'topic-a', senderProfileId: 'bob-1', body: 'bob after unblock' })
       assertEqual(unreadCount(store, 'viewer-1', 'topic-a'), 2, 'unread after new bob message')
+    })
+
+    await check('[7] thread unread is per root and opening one thread does not clear siblings', () => {
+      const rootA = insertMessage(dbPath, { topicId: 'topic-thread', senderProfileId: 'alice-1', body: 'thread A' })
+      const rootB = insertMessage(dbPath, { topicId: 'topic-thread', senderProfileId: 'alice-1', body: 'thread B' })
+      insertMessage(dbPath, { topicId: 'topic-thread', senderProfileId: 'alice-1', parentMessageId: rootA.messageId, body: 'A historical reply' })
+      insertMessage(dbPath, { topicId: 'topic-thread', senderProfileId: 'bob-1', parentMessageId: rootB.messageId, body: 'B historical reply' })
+      store.ensureReadStateForTopics('viewer-1', ['topic-thread'])
+
+      assertEqual(threadUnreadCount(store, 'viewer-1', rootA.messageId), 0, 'historical Thread A unread uses topic baseline')
+      assertEqual(threadUnreadCount(store, 'viewer-1', rootB.messageId), 0, 'historical Thread B unread uses topic baseline')
+      assertEqual(generalThreadUnreadTotal(store, 'viewer-1', 'topic-thread'), 0, 'historical General aggregate uses topic baseline')
+
+      insertMessage(dbPath, { topicId: 'topic-thread', senderProfileId: 'alice-1', parentMessageId: rootA.messageId, body: 'A first post-rollout reply' })
+      assertEqual(threadUnreadCount(store, 'viewer-1', rootA.messageId), 1, 'Thread A increments after post-rollout reply')
+      assertEqual(generalThreadUnreadTotal(store, 'viewer-1', 'topic-thread'), 1, 'General increments after post-rollout reply')
+
+      const initialSeenA = store.markThreadSeenToLatestSeq('viewer-1', rootA.messageId)
+      assert(initialSeenA.ok, 'mark initial Thread A seen')
+      assertEqual(threadUnreadCount(store, 'viewer-1', rootA.messageId), 0, 'Thread A clears after exact open')
+      assertEqual(generalThreadUnreadTotal(store, 'viewer-1', 'topic-thread'), 0, 'General clears after exact Thread A open')
+
+      for (let i = 0; i < 36; i++) {
+        insertMessage(dbPath, { topicId: 'topic-thread', senderProfileId: 'alice-1', parentMessageId: rootA.messageId, body: `A reply ${i}` })
+      }
+      for (let i = 0; i < 4; i++) {
+        insertMessage(dbPath, { topicId: 'topic-thread', senderProfileId: 'bob-1', parentMessageId: rootB.messageId, body: `B reply ${i}` })
+      }
+
+      assertEqual(threadUnreadCount(store, 'viewer-1', rootA.messageId), 36, 'Thread A unread')
+      assertEqual(threadUnreadCount(store, 'viewer-1', rootB.messageId), 4, 'Thread B unread')
+      assertEqual(generalThreadUnreadTotal(store, 'viewer-1', 'topic-thread'), 40, 'General aggregate before open')
+
+      store.ensureReadStateForTopics('viewer-1', ['topic-thread'])
+      assertEqual(generalThreadUnreadTotal(store, 'viewer-1', 'topic-thread'), 40, 'Open General does not clear thread unread')
+
+      const seenA = store.markThreadSeenToLatestSeq('viewer-1', rootA.messageId)
+      assert(seenA.ok, 'mark thread A seen')
+      assertEqual(threadUnreadCount(store, 'viewer-1', rootA.messageId), 0, 'Thread A after open')
+      assertEqual(threadUnreadCount(store, 'viewer-1', rootB.messageId), 4, 'Thread B after opening A')
+      assertEqual(generalThreadUnreadTotal(store, 'viewer-1', 'topic-thread'), 4, 'General aggregate after opening A')
+
+      const unreadB = insertMessage(dbPath, { topicId: 'topic-thread', senderProfileId: 'bob-1', parentMessageId: rootB.messageId, body: 'B new reply' })
+      assertEqual(threadUnreadCount(store, 'viewer-1', rootB.messageId), 5, 'Thread B increments after new reply')
+      assertEqual(generalThreadUnreadTotal(store, 'viewer-1', 'topic-thread'), 5, 'General increments after B reply')
+
+      insertMessage(dbPath, { topicId: 'topic-thread', senderProfileId: 'viewer-1', parentMessageId: rootB.messageId, body: 'own reply' })
+      assertEqual(threadUnreadCount(store, 'viewer-1', rootB.messageId), 5, 'own reply excluded')
+      assertEqual(threadUnreadCount(store, 'viewer-1', rootB.messageId, ['bob-1']), 0, 'blocked sender replies excluded')
+
+      softDeleteMessage(dbPath, unreadB.messageId)
+      assertEqual(threadUnreadCount(store, 'viewer-1', rootB.messageId), 4, 'deleted unread reply removed')
+
+      softDeleteMessage(dbPath, rootB.messageId)
+      assertEqual(threadUnreadCount(store, 'viewer-1', rootB.messageId), 0, 'deleted root removes thread contribution')
+      assertEqual(generalThreadUnreadTotal(store, 'viewer-1', 'topic-thread'), 0, 'General removes deleted root contribution')
     })
   } finally {
     store.close()

@@ -576,11 +576,13 @@ export function renderTopicAttachment(attachment: TopicAttachmentSnapshot, apiBa
 export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMessageSnapshot, options: { variant?: 'general' | 'thread' } = {}): string {
   const isEditing = state.topicMessageEdit?.messageId === message.messageId
   const isThread = options.variant === 'thread'
+  const threadUnreadBadge = !isThread ? formatTopicUnreadBadgeCount(message.unreadCount) : null
   const cardOpenAttrs = isThread
     ? ''
     : `data-topic-card-open="${escapeHtml(message.messageId)}" role="button" tabindex="0" aria-label="Отвори разговора"`
   return `
     <div data-topic-message="${escapeHtml(message.messageId)}" ${cardOpenAttrs} class="topic-root-card${isThread ? ' topic-root-card-thread' : ' topic-root-card-clickable'}">
+      ${threadUnreadBadge !== null ? `<span data-topic-thread-unread-badge="${escapeHtml(message.messageId)}" aria-label="${escapeHtml(`${message.unreadCount} непрочетени в разговора`)}" style="position:absolute;top:10px;right:10px;min-width:20px;height:20px;border-radius:10px;background:#ef4444;color:#fff;font-size:11px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;line-height:1;box-shadow:0 0 0 2px rgba(0,0,0,0.72);z-index:1;">${escapeHtml(threadUnreadBadge)}</span>` : ''}
       <div style="display:flex;align-items:flex-start;gap:10px;padding:12px 12px 0;">
         ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt)}
       </div>
@@ -679,6 +681,7 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
       .topic-message-action-btn:hover { background:rgba(255,255,255,0.06); color:rgba(248,250,252,0.8); }
       .topic-message-action-btn:active { background:rgba(255,255,255,0.10); }
       .topic-root-card {
+        position:relative;
         box-sizing:border-box;
         width:100%;
         border:1px solid rgba(255,255,255,0.16);

@@ -35,6 +35,7 @@ function makeMessage(topicId: string, seq: number, body: string, senderProfileId
     body,
     createdAt,
     lastActivityAt: createdAt,
+    unreadCount: 0,
     editedAt: null,
     likeCount: 0,
     replyCount: 0,
@@ -81,6 +82,7 @@ const sendLog: Array<{ topicId: string; body: string; requestId: string }> = []
 const replySendLog: Array<{ topicId: string; parentMessageId: string; body: string; requestId: string }> = []
 const likeToggleLog: Array<{ messageId: string; requestId: string }> = []
 const repliesLoadLog: Array<{ topicId: string; rootMessageId: string; afterSeq: number | null }> = []
+const threadSeenLog: Array<{ topicId: string; rootMessageId: string }> = []
 const vipDmStartLog: string[] = []
 let chatConversations: ChatConversationSnapshot[] = []
 let vipDmStartResult:
@@ -118,6 +120,14 @@ const controller = createLobbyFlowController({
   },
   onTopicMessagesSubscribe: (topicId: string, afterSeq: number) => {
     subscribeLog.push({ topicId, afterSeq })
+  },
+  onTopicThreadMarkSeen: async (topicId: string, rootMessageId: string) => {
+    threadSeenLog.push({ topicId, rootMessageId })
+    const topic = topics.find((candidate) => candidate.topicId === topicId)
+    const root = nextMessagesResult.messages.find((message) => message.messageId === rootMessageId)
+    if (topic) topic.unreadCount = Math.max(0, topic.unreadCount - (root?.unreadCount ?? 0))
+    if (root) root.unreadCount = 0
+    return { ok: true, lastSeenSeq: root?.seq ?? 0, unreadCount: 0, topicUnreadCount: topic?.unreadCount ?? 0 }
   },
   onTopicMessagesUnsubscribe: (topicId: string) => {
     unsubscribeLog.push(topicId)
@@ -288,6 +298,7 @@ function q<T extends Element>(selector: string): T | null {
   getReplySendLog: () => replySendLog,
   getLikeToggleLog: () => likeToggleLog,
   getRepliesLoadLog: () => repliesLoadLog,
+  getThreadSeenLog: () => threadSeenLog,
   getVipDmStartLog: () => vipDmStartLog,
   clearVipDmStartLog: () => { vipDmStartLog.length = 0 },
   handleServerMessage: (message: ServerMessage) => {

@@ -117,6 +117,7 @@ function makeTopicMessage(topicId: string, seq: number, prefix: string): Record<
     body: `${prefix} message ${seq}`,
     createdAt,
     lastActivityAt: createdAt,
+    unreadCount: 0,
     editedAt: null,
     likeCount: 0,
     replyCount: 0,

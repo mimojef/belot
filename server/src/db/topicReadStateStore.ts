@@ -7,9 +7,23 @@ export type TopicReadStateSnapshot = {
   updatedAt: string
 }
 
+export type TopicThreadReadStateSnapshot = {
+  profileId: string
+  rootMessageId: string
+  lastSeenSeq: number
+  updatedAt: string
+}
+
 type TopicReadStateRow = {
   profile_id: string
   topic_id: string
+  last_seen_seq: number
+  updated_at: string
+}
+
+type TopicThreadReadStateRow = {
+  profile_id: string
+  root_message_id: string
   last_seen_seq: number
   updated_at: string
 }
@@ -18,13 +32,28 @@ export type TopicReadStateStore = {
   ensureReadStateForTopics: (profileId: string, topicIds: readonly string[]) => void
   markTopicSeenToLatestSeq: (profileId: string, topicId: string) => { ok: true; state: TopicReadStateSnapshot } | { ok: false; code: 'not_found' }
   markTopicSeenThroughSeq: (profileId: string, topicId: string, seenSeq: number) => { ok: true; state: TopicReadStateSnapshot } | { ok: false; code: 'not_found' }
+  markThreadSeenToLatestSeq: (
+    profileId: string,
+    rootMessageId: string,
+  ) => { ok: true; state: TopicThreadReadStateSnapshot; topicId: string } | { ok: false; code: 'not_found' }
   markSenderSeenThroughCurrent: (profileId: string, senderProfileId: string) => void
   getReadState: (profileId: string, topicId: string) => TopicReadStateSnapshot | null
+  getThreadReadState: (profileId: string, rootMessageId: string) => TopicThreadReadStateSnapshot | null
   getUnreadCountsByTopicIds: (
     profileId: string,
     topicIds: readonly string[],
     excludedSenderProfileIds?: readonly string[],
   ) => Map<string, number>
+  getUnreadCountsByRootMessageIds: (
+    profileId: string,
+    rootMessageIds: readonly string[],
+    excludedSenderProfileIds?: readonly string[],
+  ) => Map<string, number>
+  getGeneralThreadUnreadTotal: (
+    profileId: string,
+    topicId: string,
+    excludedSenderProfileIds?: readonly string[],
+  ) => number
   getLatestSeqForTopic: (topicId: string) => number
   close: () => void
 }
@@ -33,6 +62,15 @@ function toSnapshot(row: TopicReadStateRow): TopicReadStateSnapshot {
   return {
     profileId: row.profile_id,
     topicId: row.topic_id,
+    lastSeenSeq: row.last_seen_seq,
+    updatedAt: row.updated_at,
+  }
+}
+
+function toThreadSnapshot(row: TopicThreadReadStateRow): TopicThreadReadStateSnapshot {
+  return {
+    profileId: row.profile_id,
+    rootMessageId: row.root_message_id,
     lastSeenSeq: row.last_seen_seq,
     updatedAt: row.updated_at,
   }
@@ -60,6 +98,13 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
     LIMIT 1;
   `)
 
+  const selectThreadReadStateStatement = database.prepare(`
+    SELECT profile_id, root_message_id, last_seen_seq, updated_at
+    FROM topic_thread_read_state
+    WHERE profile_id = ? AND root_message_id = ?
+    LIMIT 1;
+  `)
+
   const selectLatestTopicSeqStatement = database.prepare(`
     SELECT COALESCE(MAX(seq), 0) as latestSeq
     FROM topic_messages
@@ -73,6 +118,20 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
     LIMIT 1;
   `)
 
+  const selectLiveRootMessageStatement = database.prepare(`
+    SELECT m.topic_id, COALESCE(MAX(thread_msg.seq), m.seq) as latestSeq
+    FROM topic_messages m
+    JOIN topics t ON t.topic_id = m.topic_id AND t.status IN ('active', 'locked')
+    JOIN topic_messages thread_msg
+      ON thread_msg.topic_id = m.topic_id
+      AND (thread_msg.message_id = m.message_id OR thread_msg.parent_message_id = m.message_id)
+    WHERE m.message_id = ?
+      AND m.parent_message_id IS NULL
+      AND m.deleted_at IS NULL
+    GROUP BY m.topic_id, m.seq
+    LIMIT 1;
+  `)
+
   const upsertReadStateStatement = database.prepare(`
     INSERT INTO topic_read_state (profile_id, topic_id, last_seen_seq, updated_at)
     VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%f', 'now'))
@@ -81,6 +140,17 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
       updated_at = CASE
         WHEN excluded.last_seen_seq > topic_read_state.last_seen_seq THEN excluded.updated_at
         ELSE topic_read_state.updated_at
+      END;
+  `)
+
+  const upsertThreadReadStateStatement = database.prepare(`
+    INSERT INTO topic_thread_read_state (profile_id, root_message_id, last_seen_seq, updated_at)
+    VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+    ON CONFLICT(profile_id, root_message_id) DO UPDATE SET
+      last_seen_seq = MAX(topic_thread_read_state.last_seen_seq, excluded.last_seen_seq),
+      updated_at = CASE
+        WHEN excluded.last_seen_seq > topic_thread_read_state.last_seen_seq THEN excluded.updated_at
+        ELSE topic_thread_read_state.updated_at
       END;
   `)
 
@@ -111,6 +181,11 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
   function getReadState(profileId: string, topicId: string): TopicReadStateSnapshot | null {
     const row = selectReadStateStatement.get(profileId, topicId) as TopicReadStateRow | undefined
     return row ? toSnapshot(row) : null
+  }
+
+  function getThreadReadState(profileId: string, rootMessageId: string): TopicThreadReadStateSnapshot | null {
+    const row = selectThreadReadStateStatement.get(profileId, rootMessageId) as TopicThreadReadStateRow | undefined
+    return row ? toThreadSnapshot(row) : null
   }
 
   function ensureReadStateForTopics(profileId: string, topicIds: readonly string[]): void {
@@ -180,6 +255,26 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
     }
   }
 
+  function markThreadSeenToLatestSeq(
+    profileId: string,
+    rootMessageId: string,
+  ): { ok: true; state: TopicThreadReadStateSnapshot; topicId: string } | { ok: false; code: 'not_found' } {
+    const liveRoot = selectLiveRootMessageStatement.get(rootMessageId) as { topic_id: string; latestSeq: number } | undefined
+    if (liveRoot === undefined) return { ok: false, code: 'not_found' }
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      upsertThreadReadStateStatement.run(profileId, rootMessageId, liveRoot.latestSeq)
+      const state = getThreadReadState(profileId, rootMessageId)
+      database.exec('COMMIT;')
+      if (state === null) return { ok: false, code: 'not_found' }
+      return { ok: true, state, topicId: liveRoot.topic_id }
+    } catch (error) {
+      database.exec('ROLLBACK;')
+      throw error
+    }
+  }
+
   function markSenderSeenThroughCurrent(profileId: string, senderProfileId: string): void {
     markSenderSeenThroughCurrentStatement.run(profileId, senderProfileId)
   }
@@ -232,6 +327,89 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
     return counts
   }
 
+  function buildThreadUnreadQuery(rootFilterSql: string, excludedSenderProfileIds: readonly string[]): string {
+    const exclusionClause = excludedSenderProfileIds.length > 0
+      ? `AND m.sender_profile_id NOT IN (${placeholders(excludedSenderProfileIds.length)})`
+      : ''
+
+    return `
+      SELECT root.message_id as root_message_id, COUNT(m.message_id) as unread_count
+      FROM topic_messages root
+      JOIN topics t ON t.topic_id = root.topic_id AND t.status IN ('active', 'locked')
+      JOIN topic_messages m
+        ON m.topic_id = root.topic_id
+        AND (m.message_id = root.message_id OR m.parent_message_id = root.message_id)
+      LEFT JOIN topic_thread_read_state trs
+        ON trs.profile_id = ? AND trs.root_message_id = root.message_id
+      LEFT JOIN topic_read_state rs
+        ON rs.profile_id = ? AND rs.topic_id = root.topic_id
+      LEFT JOIN topic_sender_seen_state ss
+        ON ss.profile_id = ?
+        AND ss.topic_id = m.topic_id
+        AND ss.sender_profile_id = m.sender_profile_id
+      WHERE ${rootFilterSql}
+        AND root.parent_message_id IS NULL
+        AND root.deleted_at IS NULL
+        AND m.deleted_at IS NULL
+        AND m.sender_profile_id != ?
+        AND m.seq > COALESCE(trs.last_seen_seq, rs.last_seen_seq, 0)
+        AND m.seq > COALESCE(ss.seen_through_seq, 0)
+        ${exclusionClause}
+      GROUP BY root.message_id;
+    `
+  }
+
+  function getUnreadCountsByRootMessageIds(
+    profileId: string,
+    rootMessageIds: readonly string[],
+    excludedSenderProfileIds: readonly string[] = [],
+  ): Map<string, number> {
+    const uniqueRootMessageIds = [...new Set(rootMessageIds.filter((id) => id.trim().length > 0))]
+    const counts = new Map<string, number>()
+    for (const rootMessageId of uniqueRootMessageIds) counts.set(rootMessageId, 0)
+    if (uniqueRootMessageIds.length === 0) return counts
+
+    const statement = database.prepare(buildThreadUnreadQuery(
+      `root.message_id IN (${placeholders(uniqueRootMessageIds.length)})`,
+      excludedSenderProfileIds,
+    ))
+
+    const rows = statement.all(
+      profileId,
+      profileId,
+      profileId,
+      ...uniqueRootMessageIds,
+      profileId,
+      ...excludedSenderProfileIds,
+    ) as Array<{ root_message_id: string; unread_count: number }>
+
+    for (const row of rows) counts.set(row.root_message_id, row.unread_count)
+    return counts
+  }
+
+  function getGeneralThreadUnreadTotal(
+    profileId: string,
+    topicId: string,
+    excludedSenderProfileIds: readonly string[] = [],
+  ): number {
+    const statement = database.prepare(`
+      SELECT COALESCE(SUM(unread_count), 0) as unread_count
+      FROM (
+        ${buildThreadUnreadQuery('root.topic_id = ?', excludedSenderProfileIds).replace(/;\s*$/, '')}
+      ) thread_counts;
+    `)
+
+    const row = statement.get(
+      profileId,
+      profileId,
+      profileId,
+      topicId,
+      profileId,
+      ...excludedSenderProfileIds,
+    ) as { unread_count: number } | undefined
+    return row?.unread_count ?? 0
+  }
+
   function close(): void {
     database.close()
   }
@@ -240,9 +418,13 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
     ensureReadStateForTopics,
     markTopicSeenToLatestSeq,
     markTopicSeenThroughSeq,
+    markThreadSeenToLatestSeq,
     markSenderSeenThroughCurrent,
     getReadState,
+    getThreadReadState,
     getUnreadCountsByTopicIds,
+    getUnreadCountsByRootMessageIds,
+    getGeneralThreadUnreadTotal,
     getLatestSeqForTopic,
     close,
   }

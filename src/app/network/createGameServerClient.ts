@@ -1796,6 +1796,23 @@ export type TopicSeenUpdatedMessage = {
   unreadCount: number
 }
 
+export type TopicThreadUnreadCountChangedMessage = {
+  type: 'topic_thread_unread_count_changed'
+  topicId: string
+  rootMessageId: string
+  unreadCount: number
+  topicUnreadCount: number
+}
+
+export type TopicThreadSeenUpdatedMessage = {
+  type: 'topic_thread_seen_updated'
+  topicId: string
+  rootMessageId: string
+  lastSeenSeq: number
+  unreadCount: number
+  topicUnreadCount: number
+}
+
 export type ServerMessage =
   | ConnectedMessage
   | PongMessage
@@ -1875,6 +1892,8 @@ export type ServerMessage =
   | TopicMessageEditedMessage
   | TopicUnreadCountChangedMessage
   | TopicSeenUpdatedMessage
+  | TopicThreadUnreadCountChangedMessage
+  | TopicThreadSeenUpdatedMessage
 
 type CreateGameServerClientOptions = {
   url?: string

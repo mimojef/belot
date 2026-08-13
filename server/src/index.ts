@@ -1103,6 +1103,7 @@ function hydrateTopicMessagesWithCurrentAvatars(
       body: message.body,
       createdAt: message.createdAt,
       lastActivityAt: message.lastActivityAt,
+      unreadCount: 0,
       editedAt: message.editedAt,
       attachment,
       likeCount: aggregatesByMessageId.get(message.messageId)?.likeCount ?? 0,
@@ -1173,12 +1174,15 @@ function broadcastTopicMessageToLocalSubscribers(
       // count от hydrateTopicMessagesWithCurrentAvatars) с viewer-aware брой —
       // blocked sender-и на ТОЗИ subscriber не се броят (виж viewerAwareReplyCount).
       replyCount: viewerAwareReplyCount(snapshot.messageId, subscriberConnection.profileId),
+      unreadCount: subscriberConnection.profileId === null
+        ? 0
+        : getTopicThreadUnreadCountForProfile(subscriberConnection.profileId, snapshot.messageId),
       viewerHasLiked: viewerHasLikedMessage(snapshot.messageId, subscriberConnection.profileId),
       ...(isOriginator && opts?.requestId ? { requestId: opts.requestId } : {}),
     })
   }
 
-  reconcileTopicUnreadForDirectorySubscribers(topicId, snapshot.senderProfileId)
+  reconcileTopicUnreadForDirectorySubscribers(topicId, snapshot.senderProfileId, snapshot.messageId)
 }
 
 // Огледално на broadcastTopicMessageToLocalSubscribers, за reply push (Етап
@@ -1225,7 +1229,7 @@ function broadcastTopicReplyToLocalSubscribers(
     })
   }
 
-  reconcileTopicUnreadForDirectorySubscribers(topicId, snapshot.senderProfileId)
+  reconcileTopicUnreadForDirectorySubscribers(topicId, snapshot.senderProfileId, snapshot.parentMessageId)
 }
 
 // PUBLIC broadcast за like count промяна — само messageId+likeCount, БЕЗ
@@ -1265,6 +1269,10 @@ function broadcastToProfileConnections(profileId: string, payload: unknown): voi
 
 function getTopicUnreadCountForProfile(profileId: string, topicId: string): number {
   const blocked = [...getLobbyChatBlockedSet(profileId)]
+  const topic = topicStore.getTopicById(topicId)
+  if (topic?.isGeneral) {
+    return topicReadStateStore.getGeneralThreadUnreadTotal(profileId, topicId, blocked)
+  }
   return topicReadStateStore.getUnreadCountsByTopicIds(profileId, [topicId], blocked).get(topicId) ?? 0
 }
 
@@ -1275,7 +1283,9 @@ function topicsWithUnreadCountsForProfile(profileId: string, topics: TopicSnapsh
   const counts = topicReadStateStore.getUnreadCountsByTopicIds(profileId, topicIds, blocked)
   return topics.map((topic) => ({
     ...topic,
-    unreadCount: counts.get(topic.topicId) ?? 0,
+    unreadCount: topic.isGeneral
+      ? topicReadStateStore.getGeneralThreadUnreadTotal(profileId, topic.topicId, blocked)
+      : counts.get(topic.topicId) ?? 0,
   }))
 }
 
@@ -1285,6 +1295,22 @@ function broadcastTopicSeenUpdatedToProfile(profileId: string, topicId: string, 
     topicId,
     lastSeenSeq,
     unreadCount: 0,
+  })
+}
+
+function getTopicThreadUnreadCountForProfile(profileId: string, rootMessageId: string): number {
+  const blocked = [...getLobbyChatBlockedSet(profileId)]
+  return topicReadStateStore.getUnreadCountsByRootMessageIds(profileId, [rootMessageId], blocked).get(rootMessageId) ?? 0
+}
+
+function broadcastTopicThreadSeenUpdatedToProfile(profileId: string, topicId: string, rootMessageId: string, lastSeenSeq: number): void {
+  broadcastToProfileConnections(profileId, {
+    type: 'topic_thread_seen_updated',
+    topicId,
+    rootMessageId,
+    lastSeenSeq,
+    unreadCount: 0,
+    topicUnreadCount: getTopicUnreadCountForProfile(profileId, topicId),
   })
 }
 
@@ -1307,7 +1333,8 @@ function broadcastTopicUnreadCountsToProfile(profileId: string): void {
   }
 }
 
-function reconcileTopicUnreadForDirectorySubscribers(topicId: string, senderProfileId?: string): void {
+function reconcileTopicUnreadForDirectorySubscribers(topicId: string, senderProfileId?: string, rootMessageId?: string): void {
+  const topic = topicStore.getTopicById(topicId)
   for (const subscriberConnectionId of [...topicsDirectorySubscriberConnectionIds]) {
     const subscriberConnection = getConnectionById(serverState, subscriberConnectionId)
     const socket = socketRegistry.get(subscriberConnectionId)
@@ -1319,7 +1346,7 @@ function reconcileTopicUnreadForDirectorySubscribers(topicId: string, senderProf
     if (profileId === null) continue
 
     const activeTopicId = topicMessageSubscriberTopicIdByConnectionId.get(subscriberConnectionId)
-    if (activeTopicId === topicId) {
+    if (activeTopicId === topicId && !topic?.isGeneral) {
       markTopicSeenForActiveProfile(profileId, topicId)
       continue
     }
@@ -1336,6 +1363,15 @@ function reconcileTopicUnreadForDirectorySubscribers(topicId: string, senderProf
       topicId,
       unreadCount: getTopicUnreadCountForProfile(profileId, topicId),
     })
+    if (topic?.isGeneral && rootMessageId !== undefined) {
+      safeSendToConnection(subscriberConnectionId, {
+        type: 'topic_thread_unread_count_changed',
+        topicId,
+        rootMessageId,
+        unreadCount: getTopicThreadUnreadCountForProfile(profileId, rootMessageId),
+        topicUnreadCount: getTopicUnreadCountForProfile(profileId, topicId),
+      })
+    }
   }
 }
 
@@ -1403,7 +1439,7 @@ function broadcastTopicMessageDeletedToLocalSubscribers(
       })
     }
   }
-  reconcileTopicUnreadForDirectorySubscribers(topicId)
+  reconcileTopicUnreadForDirectorySubscribers(topicId, undefined, parentMessageId ?? messageId)
 }
 
 function broadcastTopicMessageEditedToLocalSubscribers(topicId: string, message: TopicMessageSnapshot): void {
@@ -7584,6 +7620,70 @@ async function handleTopicSeenRequest(
   return true
 }
 
+async function handleTopicThreadSeenRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/([^/]+)\/messages\/([^/]+)\/seen$/.exec(pathname)
+  if (!match || req.method !== 'POST') {
+    return false
+  }
+
+  const auth = requireRegisteredProfileSession(req)
+  if (!auth.ok) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си, за да маркираш разговора като прочетен.',
+    })
+    return true
+  }
+
+  if (playerProgressStore.isTemporaryProfile(auth.profileId)) {
+    sendJsonResponse(res, 403, {
+      ok: false,
+      message: '„Теми“ са само за регистрирани потребители.',
+    })
+    return true
+  }
+
+  const topicId = decodeURIComponent(match[1] ?? '')
+  const rootMessageId = decodeURIComponent(match[2] ?? '')
+  const rootMessage = topicMessageStore.getMessageById(rootMessageId)
+  if (
+    rootMessage === null ||
+    rootMessage.topicId !== topicId ||
+    rootMessage.parentMessageId !== null ||
+    rootMessage.deletedAt !== null
+  ) {
+    sendJsonResponse(res, 404, {
+      ok: false,
+      message: 'Разговорът не беше намерен.',
+    })
+    return true
+  }
+
+  const result = topicReadStateStore.markThreadSeenToLatestSeq(auth.profileId, rootMessageId)
+  if (!result.ok) {
+    sendJsonResponse(res, 404, {
+      ok: false,
+      message: 'Разговорът не беше намерен.',
+    })
+    return true
+  }
+
+  broadcastTopicThreadSeenUpdatedToProfile(auth.profileId, topicId, rootMessageId, result.state.lastSeenSeq)
+  sendJsonResponse(res, 200, {
+    ok: true,
+    topicId,
+    rootMessageId,
+    lastSeenSeq: result.state.lastSeenSeq,
+    unreadCount: 0,
+    topicUnreadCount: getTopicUnreadCountForProfile(auth.profileId, topicId),
+  })
+  return true
+}
+
 function clampTopicMessagesLimit(rawValue: string | null): number {
   const parsed = rawValue !== null ? Number.parseInt(rawValue, 10) : NaN
   if (!Number.isInteger(parsed) || parsed <= 0) {
@@ -7654,6 +7754,11 @@ async function handleTopicMessagesRequest(
   const messageIds = page.messages.map((m) => m.messageId)
   const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId, excludedSenderProfileIds)
   const attachmentsByMessageId = topicMessageStore.getAttachmentsByMessageIds(messageIds)
+  const unreadCountsByMessageId = topicReadStateStore.getUnreadCountsByRootMessageIds(
+    auth.profileId,
+    messageIds,
+    excludedSenderProfileIds,
+  )
 
   const enrichedMessages = page.messages.map((message) => {
     const aggregates = aggregatesByMessageId.get(message.messageId)
@@ -7673,6 +7778,7 @@ async function handleTopicMessagesRequest(
       likeCount: aggregates?.likeCount ?? 0,
       replyCount: aggregates?.replyCount ?? 0,
       viewerHasLiked: aggregates?.viewerHasLiked ?? false,
+      unreadCount: unreadCountsByMessageId.get(message.messageId) ?? 0,
     }
   })
 
@@ -12413,6 +12519,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleTopicThreadSeenRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleTopicMessagesRequest(req, res, requestUrl.pathname, requestUrl)) {
     return
   }
@@ -14601,6 +14711,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        const profileId = latestConnection.profileId
         const topic = topicStore.getTopicById(message.topicId)
         if (topic === null) {
           safeSendToConnection(connection.id, {
@@ -14629,7 +14740,7 @@ wsServer.on('connection', (socket, request) => {
         // Gap-closing catch-up (Етап 2 брифа т.1/т.8) — afterSeq=0 е валиден
         // baseline за тема без позната клиентска история; getMessagesAfter
         // просто връща всичко от началото до cap-а в този случай.
-        const excludedSenderProfileIds = [...getLobbyChatBlockedSet(latestConnection.profileId)]
+        const excludedSenderProfileIds = [...getLobbyChatBlockedSet(profileId)]
         const page = topicMessageStore.getMessagesAfter(
           message.topicId,
           message.afterSeq,
@@ -14639,7 +14750,8 @@ wsServer.on('connection', (socket, request) => {
 
         const hydratedCatchup = hydrateTopicMessagesWithCurrentAvatars(page.messages).map((m) => ({
           ...m,
-          viewerHasLiked: viewerHasLikedMessage(m.messageId, latestConnection.profileId),
+          viewerHasLiked: viewerHasLikedMessage(m.messageId, profileId),
+          unreadCount: getTopicThreadUnreadCountForProfile(profileId, m.messageId),
         }))
 
         // Seed-ва like drift-detection tracking set-а (runTopicMessageLikePoll)
@@ -14659,7 +14771,9 @@ wsServer.on('connection', (socket, request) => {
           messages: hydratedCatchup,
           truncated: page.hasMore,
         })
-        markTopicSeenForActiveProfile(latestConnection.profileId, message.topicId)
+        if (!topic.isGeneral) {
+          markTopicSeenForActiveProfile(profileId, message.topicId)
+        }
         return
       }
 

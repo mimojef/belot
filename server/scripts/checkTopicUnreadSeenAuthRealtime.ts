@@ -23,13 +23,20 @@ const serverRoot = resolve(process.cwd())
 const indexSrc = await readFile(resolve(serverRoot, 'src/index.ts'), 'utf8')
 const protocolSrc = await readFile(resolve(serverRoot, 'src/protocol/messageTypes.ts'), 'utf8')
 const migrationSrc = await readFile(resolve(serverRoot, 'database/migrations/20260812_004_create_topic_read_state.sql'), 'utf8')
+const threadMigrationSrc = await readFile(
+  resolve(serverRoot, 'database/migrations/20260813_001_create_topic_thread_read_state.sql'),
+  'utf8',
+)
 
 console.log('\n=== Topic Unread / Seen (auth + realtime contract) ===\n')
 
-await check('[1] only migration 004 owns topic read-state schema', () => {
+await check('[1] topic-level and thread-level read-state migrations own their schemas', () => {
   assert(migrationSrc.includes('CREATE TABLE IF NOT EXISTS topic_read_state'), 'topic_read_state table missing')
   assert(migrationSrc.includes('CREATE TABLE IF NOT EXISTS topic_sender_seen_state'), 'topic_sender_seen_state table missing')
   assert(migrationSrc.includes('idx_topic_messages_sender_topic_seq'), 'sender/topic/seq index missing')
+  assert(threadMigrationSrc.includes('CREATE TABLE IF NOT EXISTS topic_thread_read_state'), 'topic_thread_read_state table missing')
+  assert(threadMigrationSrc.includes('PRIMARY KEY (profile_id, root_message_id)'), 'thread read-state primary key missing')
+  assert(threadMigrationSrc.includes('idx_topic_messages_topic_parent_seq'), 'topic/parent/seq index missing')
 })
 
 await check('[2] seen HTTP route uses registered session auth and rejects temporary profiles', () => {
@@ -53,23 +60,40 @@ await check('[3] topic list initializes read state and returns unread counts', (
 await check('[4] realtime messages are in the shared protocol union', () => {
   assert(protocolSrc.includes("type: 'topic_unread_count_changed'"), 'topic_unread_count_changed type missing')
   assert(protocolSrc.includes("type: 'topic_seen_updated'"), 'topic_seen_updated type missing')
+  assert(protocolSrc.includes("type: 'topic_thread_unread_count_changed'"), 'topic_thread_unread_count_changed type missing')
+  assert(protocolSrc.includes("type: 'topic_thread_seen_updated'"), 'topic_thread_seen_updated type missing')
   assert(protocolSrc.includes('TopicUnreadCountChangedMessage'), 'TopicUnreadCountChangedMessage union member missing')
   assert(protocolSrc.includes('TopicSeenUpdatedMessage'), 'TopicSeenUpdatedMessage union member missing')
+  assert(protocolSrc.includes('TopicThreadUnreadCountChangedMessage'), 'TopicThreadUnreadCountChangedMessage union member missing')
+  assert(protocolSrc.includes('TopicThreadSeenUpdatedMessage'), 'TopicThreadSeenUpdatedMessage union member missing')
 })
 
-await check('[5] active topic subscribers are marked seen and inactive directory subscribers get unread counts', () => {
+await check('[5] active legacy topics mark seen while General threads keep per-thread unread', () => {
   const reconcile = indexSrc.match(/function reconcileTopicUnreadForDirectorySubscribers[\s\S]*?\n}\n/)?.[0] ?? ''
   assert(reconcile.includes('topicsDirectorySubscriberConnectionIds'), 'directory subscriber loop missing')
   assert(reconcile.includes('activeTopicId === topicId'), 'active topic branch missing')
+  assert(reconcile.includes('activeTopicId === topicId && !topic?.isGeneral'), 'General must not use topic-level active seen')
   assert(reconcile.includes('markTopicSeenForActiveProfile'), 'active topic must mark seen')
   assert(reconcile.includes("type: 'topic_unread_count_changed'"), 'inactive subscribers must receive unread count')
+  assert(reconcile.includes("type: 'topic_thread_unread_count_changed'"), 'General thread unread event missing')
+  assert(reconcile.includes('getTopicThreadUnreadCountForProfile(profileId, rootMessageId)'), 'per-thread unread lookup missing')
 })
 
 await check('[6] root/reply create, delete, subscribe, and unblock flows reconcile unread state', () => {
-  assert(indexSrc.includes('reconcileTopicUnreadForDirectorySubscribers(topicId, snapshot.senderProfileId)'), 'root message unread reconcile missing')
-  assert(indexSrc.includes('reconcileTopicUnreadForDirectorySubscribers(topicId, snapshot.senderProfileId)'), 'reply unread reconcile missing')
-  assert(indexSrc.includes('reconcileTopicUnreadForDirectorySubscribers(topicId)'), 'delete unread reconcile missing')
-  assert(indexSrc.includes('markTopicSeenForActiveProfile(latestConnection.profileId, message.topicId)'), 'subscribe_topic_messages mark-seen missing')
+  assert(
+    indexSrc.includes('reconcileTopicUnreadForDirectorySubscribers(topicId, snapshot.senderProfileId, snapshot.messageId)'),
+    'root message unread reconcile missing',
+  )
+  assert(
+    indexSrc.includes('reconcileTopicUnreadForDirectorySubscribers(topicId, snapshot.senderProfileId, snapshot.parentMessageId)'),
+    'reply unread reconcile missing',
+  )
+  assert(
+    indexSrc.includes('reconcileTopicUnreadForDirectorySubscribers(topicId, undefined, parentMessageId ?? messageId)'),
+    'delete unread reconcile missing',
+  )
+  assert(indexSrc.includes('if (!topic.isGeneral)'), 'subscribe_topic_messages must guard topic-level seen for General')
+  assert(indexSrc.includes('markTopicSeenForActiveProfile(profileId, message.topicId)'), 'subscribe_topic_messages mark-seen missing')
   assert(indexSrc.includes('markSenderSeenThroughCurrent(myProfileId, targetProfileId)'), 'unblock sender boundary missing')
   assert(indexSrc.includes('broadcastTopicUnreadCountsToProfile(myProfileId)'), 'unblock unread rebroadcast missing')
 })

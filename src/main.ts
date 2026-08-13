@@ -3660,6 +3660,42 @@ async function markTopicSeen(
   }
 }
 
+async function markTopicThreadSeen(
+  topicId: string,
+  rootMessageId: string,
+): Promise<
+  | { ok: true; lastSeenSeq: number; unreadCount: number; topicUnreadCount: number }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/messages/${encodeURIComponent(rootMessageId)}/seen`,
+      {
+        method: 'POST',
+        credentials: 'include',
+      },
+    )
+    const data = (await response.json().catch(() => ({}))) as {
+      ok?: boolean
+      message?: string
+      lastSeenSeq?: number
+      unreadCount?: number
+      topicUnreadCount?: number
+    }
+    if (!response.ok || !data.ok || typeof data.lastSeenSeq !== 'number') {
+      return { ok: false, message: data.message ?? 'Грешка при отбелязване на разговора като прочетен.' }
+    }
+    return {
+      ok: true,
+      lastSeenSeq: data.lastSeenSeq,
+      unreadCount: data.unreadCount ?? 0,
+      topicUnreadCount: data.topicUnreadCount ?? 0,
+    }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function loadTopicReplies(
   topicId: string,
   rootMessageId: string,
@@ -4708,6 +4744,7 @@ lobby = createLobbyFlowController({
   onTournamentsLoad: (params) => loadTournaments(params),
   onTopicsLoad: () => loadTopics(),
   onTopicMarkSeen: (topicId) => markTopicSeen(topicId),
+  onTopicThreadMarkSeen: (topicId, rootMessageId) => markTopicThreadSeen(topicId, rootMessageId),
   onProfileByIdLoad: (profileId) => loadProfileById(profileId),
   onTopicMessagesLoad: (topicId, beforeSeq) => loadTopicMessages(topicId, beforeSeq),
   onTopicRepliesLoad: (topicId, rootMessageId, afterSeq) => loadTopicReplies(topicId, rootMessageId, afterSeq),

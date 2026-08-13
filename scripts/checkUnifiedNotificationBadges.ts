@@ -128,6 +128,42 @@ async function setTopicUnreadCounts(page: Page, counts: Record<string, number>):
   await page.evaluate((value) => (window as any).__topicsComposerVipGateHarness.setTopicUnreadCounts(value), counts)
 }
 
+async function setTopicRootMessages(page: Page, messages: Array<Record<string, unknown>>): Promise<void> {
+  await page.evaluate((value) => (window as any).__topicsComposerVipGateHarness.setNextMessagesResult(value), messages)
+}
+
+async function makeTopicRootMessage(page: Page, seq: number, id: string, unreadCount: number): Promise<Record<string, unknown>> {
+  return page.evaluate(
+    ([messageSeq, messageId, unread]) => {
+      const message = (window as any).__topicsComposerVipGateHarness.makeMessage('topic-general', messageSeq, `Thread ${messageId}`, 'author', 'Author')
+      message.messageId = messageId
+      message.unreadCount = unread
+      return message
+    },
+    [seq, id, unreadCount],
+  )
+}
+
+async function getTopicThreadBadgeText(page: Page, rootMessageId: string): Promise<string | null> {
+  return page.evaluate((id) =>
+    document.querySelector(`[data-topic-thread-unread-badge="${CSS.escape(id)}"]`)?.textContent ?? null,
+  rootMessageId)
+}
+
+async function clickTopicRootCard(page: Page, rootMessageId: string): Promise<void> {
+  await page.evaluate((id) => (window as any).__topicsComposerVipGateHarness.clickRootCard(id), rootMessageId)
+  await page.waitForTimeout(80)
+}
+
+async function clickTopicThreadBack(page: Page): Promise<void> {
+  await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.clickThreadBack())
+  await page.waitForTimeout(80)
+}
+
+async function getThreadSeenLog(page: Page): Promise<Array<{ topicId: string; rootMessageId: string }>> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getThreadSeenLog())
+}
+
 async function setTopicDirectoryResponse(
   page: Page,
   topics: Array<{ topicId: string; slug?: string; title?: string; isGeneral?: boolean; unreadCount: number }>,
@@ -679,6 +715,38 @@ try {
 
       await openTopics(page)
       assertEqual(await getTopicsPersonalBadgeText(page), '2', 'combined Topics Personal badge')
+    })
+  })
+
+  await check('[22] thread unread regression: opening General does not clear Menu; opening one card clears only that thread', async () => {
+    await withMobilePage({ width: 390, height: 844 }, async (page) => {
+      await setChatConversations(page, [])
+      await setTopicDirectoryResponse(page, [
+        { topicId: 'topic-general', slug: 'general', title: 'Общ чат', isGeneral: true, unreadCount: 10 },
+      ])
+      await setTopicRootMessages(page, [
+        await makeTopicRootMessage(page, 1, 'thread-a', 6),
+        await makeTopicRootMessage(page, 2, 'thread-b', 4),
+      ])
+      assertEqual(await refreshTopicsDirectoryMetadata(page), true, 'thread metadata refresh')
+
+      await openMobileMenu(page)
+      assertEqual(await getMobileMenuTotalBadgeText(page), '10', 'Menu before Topics')
+      assertEqual(await getMobileMenuItemBadgeText(page, 'topics'), '10', 'Topics before opening')
+
+      await openTopics(page)
+      assertEqual(await getTopicsGeneralBadgeText(page), '10', 'General after opening Topics')
+      assertEqual(await getTopicThreadBadgeText(page, 'thread-a'), '6', 'Thread A card badge')
+      assertEqual(await getTopicThreadBadgeText(page, 'thread-b'), '4', 'Thread B card badge')
+
+      await openMobileMenu(page)
+      assertEqual(await getMobileMenuTotalBadgeText(page), '10', 'Menu remains 10 after opening General')
+
+      await clickTopicRootCard(page, 'thread-a')
+      const seenLog = await getThreadSeenLog(page)
+      assert(seenLog.some((entry) => entry.rootMessageId === 'thread-a'), 'opening Thread A must mark only Thread A seen')
+      await clickTopicThreadBack(page)
+      assertEqual(await getTopicsGeneralBadgeText(page), '4', 'General after opening Thread A')
     })
   })
 } finally {

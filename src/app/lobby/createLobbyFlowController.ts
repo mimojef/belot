@@ -606,6 +606,10 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; lastSeenSeq: number; unreadCount: number }
     | { ok: false; message: string }
   >
+  onTopicThreadMarkSeen?: (topicId: string, rootMessageId: string) => Promise<
+    | { ok: true; lastSeenSeq: number; unreadCount: number; topicUnreadCount: number }
+    | { ok: false; message: string }
+  >
   /** Canonical single-profile fetch по id — за profile popup, когато профилът не е (или може да е остарял) в state.players кеша. */
   onProfileByIdLoad?: (profileId: string) => Promise<
     | { ok: true; profile: PlayerPublicProfileSnapshot }
@@ -852,6 +856,8 @@ type InternalLobbyFlowState = {
   topicsPersonalView: 'list' | 'conversation'
   topicSeenInFlightByTopicId: Record<string, boolean | undefined>
   topicSeenQueuedByTopicId: Record<string, boolean | undefined>
+  topicThreadSeenInFlightByRootId: Record<string, boolean | undefined>
+  topicThreadSeenQueuedByRootId: Record<string, boolean | undefined>
   topicMessagesLoading: boolean
   topicMessagesErrorText: string | null
   topicMessages: TopicMessageSnapshot[] | null
@@ -1367,6 +1373,8 @@ function createInitialState(): InternalLobbyFlowState {
     topicsPersonalView: 'list',
     topicSeenInFlightByTopicId: {},
     topicSeenQueuedByTopicId: {},
+    topicThreadSeenInFlightByRootId: {},
+    topicThreadSeenQueuedByRootId: {},
     topicMessagesLoading: false,
     topicMessagesErrorText: null,
     topicMessages: null,
@@ -5073,6 +5081,19 @@ export function createLobbyFlowController(
     return changed
   }
 
+  function updateTopicThreadUnreadCount(rootMessageId: string, unreadCount: number): boolean {
+    if (state.topicMessages === null) return false
+    const normalized = normalizeTopicUnreadCount(unreadCount)
+    let changed = false
+    state.topicMessages = state.topicMessages.map((message) => {
+      if (message.messageId !== rootMessageId) return message
+      if (message.unreadCount === normalized) return message
+      changed = true
+      return { ...message, unreadCount: normalized }
+    })
+    return changed
+  }
+
   let topicsDirectoryMetadataRequestGeneration = 0
 
   function clearTopicsDirectoryMetadata(): void {
@@ -5147,12 +5168,20 @@ export function createLobbyFlowController(
       : null
     if (activeTopic !== null) {
       state.activeTopicLock = deriveTopicLockSnapshot(activeTopic)
-      void markActiveTopicSeen(activeTopic.topicId)
+      if (!activeTopic.isGeneral) {
+        void markActiveTopicSeen(activeTopic.topicId)
+      }
     }
     render()
   }
 
+  function isGeneralTopicId(topicId: string): boolean {
+    const topic = (state.topics ?? []).find((candidate) => candidate.topicId === topicId) ?? null
+    return Boolean(topic?.isGeneral || topic?.topicId === 'topic-general' || topic?.slug === 'general')
+  }
+
   async function markActiveTopicSeen(topicId: string): Promise<void> {
+    if (isGeneralTopicId(topicId)) return
     const changed = updateTopicUnreadCount(topicId, 0)
     if (changed && state.currentScreen === 'topics') {
       render()
@@ -5181,6 +5210,47 @@ export function createLobbyFlowController(
     if (state.topicSeenQueuedByTopicId[topicId] && state.activeTopicId === topicId) {
       state.topicSeenQueuedByTopicId[topicId] = false
       void markActiveTopicSeen(topicId)
+    }
+  }
+
+  async function markTopicThreadSeen(rootMessageId: string): Promise<void> {
+    const topicId = state.activeTopicId
+    if (topicId === null || !options.onTopicThreadMarkSeen) return
+
+    const changedThread = updateTopicThreadUnreadCount(rootMessageId, 0)
+    if (changedThread && state.currentScreen === 'topics') {
+      render()
+    }
+
+    if (state.topicThreadSeenInFlightByRootId[rootMessageId]) {
+      state.topicThreadSeenQueuedByRootId[rootMessageId] = true
+      return
+    }
+
+    state.topicThreadSeenInFlightByRootId[rootMessageId] = true
+    state.topicThreadSeenQueuedByRootId[rootMessageId] = false
+    const result = await options.onTopicThreadMarkSeen(topicId, rootMessageId)
+    state.topicThreadSeenInFlightByRootId[rootMessageId] = false
+
+    if (state.currentScreen !== 'topics') return
+    if (result.ok) {
+      const changedTopic = updateTopicUnreadCount(topicId, result.topicUnreadCount)
+      const changedRoot = updateTopicThreadUnreadCount(rootMessageId, result.unreadCount)
+      if (changedTopic || changedRoot) {
+        render()
+      }
+    } else {
+      void reconcileTopicsDirectoryFromServer()
+    }
+
+    if (
+      state.topicThreadSeenQueuedByRootId[rootMessageId] &&
+      state.activeTopicId === topicId &&
+      state.topicsMode === 'thread' &&
+      state.topicThreadRootMessageId === rootMessageId
+    ) {
+      state.topicThreadSeenQueuedByRootId[rootMessageId] = false
+      void markTopicThreadSeen(rootMessageId)
     }
   }
 
@@ -5748,7 +5818,7 @@ export function createLobbyFlowController(
     // При вход в "Теми" отваряме "Общ чат" по подразбиране (т.2/8 от брифа).
     const generalTopic = result.topics.find((t) => t.isGeneral) ?? result.topics[0] ?? null
     state.activeTopicId = generalTopic?.topicId ?? null
-    if (state.activeTopicId !== null) {
+    if (state.activeTopicId !== null && !isGeneralTopicId(state.activeTopicId)) {
       updateTopicUnreadCount(state.activeTopicId, 0)
     }
     state.topicMessages = null
@@ -5782,7 +5852,9 @@ export function createLobbyFlowController(
     // напуснатата тема биха продължили да пристигат.
     unsubscribeFromCurrentTopicMessages()
     state.activeTopicId = topicId
-    updateTopicUnreadCount(topicId, 0)
+    if (!isGeneralTopicId(topicId)) {
+      updateTopicUnreadCount(topicId, 0)
+    }
     state.topicMessages = null
     state.topicMessagesHasMore = false
     state.topicMessagesOldestSeq = null
@@ -5875,6 +5947,7 @@ export function createLobbyFlowController(
     }
     pushTopicThreadHistory()
     render()
+    void markTopicThreadSeen(rootMessageId)
     void expandReplyThread(rootMessageId)
   }
 
@@ -11613,7 +11686,7 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'topic_unread_count_changed') {
-      if (message.topicId === state.activeTopicId) {
+      if (message.topicId === state.activeTopicId && !isGeneralTopicId(message.topicId)) {
         void markActiveTopicSeen(message.topicId)
         return true
       }
@@ -11625,6 +11698,31 @@ export function createLobbyFlowController(
 
     if (message.type === 'topic_seen_updated') {
       if (updateTopicUnreadCount(message.topicId, message.unreadCount)) {
+        render()
+      }
+      return true
+    }
+
+    if (message.type === 'topic_thread_unread_count_changed') {
+      const isCurrentThread = state.topicsMode === 'thread' && state.topicThreadRootMessageId === message.rootMessageId
+      const changedRoot = updateTopicThreadUnreadCount(
+        message.rootMessageId,
+        isCurrentThread ? 0 : message.unreadCount,
+      )
+      const changedTopic = updateTopicUnreadCount(message.topicId, message.topicUnreadCount)
+      if (isCurrentThread) {
+        void markTopicThreadSeen(message.rootMessageId)
+      }
+      if (changedRoot || changedTopic) {
+        render()
+      }
+      return true
+    }
+
+    if (message.type === 'topic_thread_seen_updated') {
+      const changedRoot = updateTopicThreadUnreadCount(message.rootMessageId, message.unreadCount)
+      const changedTopic = updateTopicUnreadCount(message.topicId, message.topicUnreadCount)
+      if (changedRoot || changedTopic) {
         render()
       }
       return true
@@ -11780,7 +11878,11 @@ export function createLobbyFlowController(
         void refreshTopicMessagesAfterActivityChange(message.topicId)
       }
 
-      void markActiveTopicSeen(message.topicId)
+      if (isCurrentThread) {
+        void markTopicThreadSeen(rootMessageId)
+      } else {
+        void markActiveTopicSeen(message.topicId)
+      }
       render()
       return true
     }

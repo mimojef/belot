@@ -879,6 +879,8 @@ export type ServerMessage =
   | TopicMessageEditedMessage
   | TopicUnreadCountChangedMessage
   | TopicSeenUpdatedMessage
+  | TopicThreadUnreadCountChangedMessage
+  | TopicThreadSeenUpdatedMessage
 
 export type ProfileLikedMessage = {
   type: 'profile_liked'
@@ -1049,6 +1051,7 @@ export type TopicMessageBroadcastSnapshot = {
   body: string
   createdAt: string
   lastActivityAt: string
+  unreadCount: number
   editedAt: string | null
   /** Attachment feature — максимум 1 image/съобщение, null ако няма. */
   attachment: TopicAttachmentSnapshot | null
@@ -1316,6 +1319,23 @@ export type TopicSeenUpdatedMessage = {
   topicId: string
   lastSeenSeq: number
   unreadCount: number
+}
+
+export type TopicThreadUnreadCountChangedMessage = {
+  type: 'topic_thread_unread_count_changed'
+  topicId: string
+  rootMessageId: string
+  unreadCount: number
+  topicUnreadCount: number
+}
+
+export type TopicThreadSeenUpdatedMessage = {
+  type: 'topic_thread_seen_updated'
+  topicId: string
+  rootMessageId: string
+  lastSeenSeq: number
+  unreadCount: number
+  topicUnreadCount: number
 }
 
 export function getDisplayNameFromIdentity(
