@@ -1452,7 +1452,7 @@ function renderTopicsHeader(state: LobbyScreenState): string {
             data-topic-thread-back="1"
             aria-label="Назад към Общ"
             style="display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:36px;padding:0 12px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;font-size:13px;font-weight:900;cursor:pointer;flex:0 0 auto;"
-          >&larr; <span>Общ</span></button>
+          >&larr; <span>Общи</span></button>
           <h1 style="margin:0;font-size:20px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Теми</h1>
         </div>
         <button
@@ -1503,7 +1503,7 @@ function renderTopicsHeader(state: LobbyScreenState): string {
             font-size:13px;font-weight:900;cursor:pointer;flex:0 0 auto;
           "
         >
-          <span>Общ</span>
+          <span>Общи</span>
           ${generalUnreadBadge !== null ? `<span data-topics-general-badge="1" aria-hidden="true" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;line-height:1;">${escapeHtml(generalUnreadBadge)}</span><span style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">${escapeHtml(`${generalUnreadTotal} непрочетени в Общ чат`)}</span>` : ''}
         </button>
         <button
