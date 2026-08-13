@@ -100,10 +100,10 @@ function makeState(options: {
   }
 }
 
-async function makeConversation(page: Page, friendshipId: string, kind: 'friend' | 'vip_dm', unreadCount: number): Promise<unknown> {
+async function makeConversation(page: Page, friendshipId: string, kind: 'friend' | 'vip_dm' | 'pika_support', unreadCount: number): Promise<unknown> {
   const conversation = await page.evaluate(
     ([id, conversationKind]) => (window as any).__topicsComposerVipGateHarness.makeConversation(id, conversationKind, `${id}-profile`, id, true),
-    [friendshipId, kind] as [string, 'friend' | 'vip_dm'],
+    [friendshipId, kind] as [string, 'friend' | 'vip_dm' | 'pika_support'],
   )
   return { ...(conversation as Record<string, unknown>), unreadCount }
 }
@@ -272,6 +272,23 @@ async function hasLegacyTopicsStrip(page: Page): Promise<boolean> {
 
 async function getTopicsPersonalBadgeText(page: Page): Promise<string | null> {
   return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getTopicsPersonalBadgeText())
+}
+
+async function openChatConversation(page: Page, friendshipId: string): Promise<void> {
+  await page.evaluate((id) => (window as any).__topicsComposerVipGateHarness.openChatConversation(id), friendshipId)
+  await page.waitForTimeout(60)
+}
+
+async function getChatFormFriendshipId(page: Page): Promise<string | null> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getChatFormFriendshipId())
+}
+
+async function isLegacyChatScreenVisible(page: Page): Promise<boolean> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.isLegacyChatScreenVisible())
+}
+
+async function isTopicsScreenVisible(page: Page): Promise<boolean> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.isTopicsScreenVisible())
 }
 
 async function getTopicsGeneralBadgeText(page: Page): Promise<string | null> {
@@ -761,6 +778,88 @@ try {
       assert(seenLog.some((entry) => entry.rootMessageId === 'thread-a'), 'opening Thread A must mark only Thread A seen')
       await clickTopicThreadBack(page)
       assertEqual(await getTopicsGeneralBadgeText(page), '4', 'General after opening Thread A')
+    })
+  })
+
+  await check('[22b] PRODUCTION HOTFIX: chat notification "Виж" routes by canonical conversation kind, not by viewer screen — same pair can have both a friend and a vip_dm conversation without mixing them', async () => {
+    await withDesktopPage({ width: 1280, height: 800 }, async (page) => {
+      // Mimojef <-> Marta33 сценарий (§9 от hotfix заданието): ЕДНА и СЪЩА
+      // двойка профили има едновременно 'friend' и 'vip_dm' разговор, с
+      // различна история. openChatConversation() тук е точният production
+      // caller (main.ts onView -> lobby.openChatWithFriend(friendshipId)) —
+      // popup-ът подава само friendshipId, никога kind/screen context.
+      const friendConversation = await makeConversation(page, 'PAIR_FRIEND', 'friend', 7)
+      const vipDmConversation = await makeConversation(page, 'PAIR_VIPDM', 'vip_dm', 4)
+      await setChatConversations(page, [friendConversation, vipDmConversation])
+
+      // [A][C][D] kind='friend' popup "Виж" -> точно тази friend беседа в
+      // legacy Chat, БЕЗ да пипа Topics/topicsMode.
+      await openChatConversation(page, 'PAIR_FRIEND')
+      assertEqual(await isLegacyChatScreenVisible(page), true, '[A] friend popup трябва да отвори legacy Chat екрана')
+      assertEqual(await isTopicsScreenVisible(page), false, '[D] friend popup НЕ трябва да превключва към Topics/topicsMode=personal')
+      assertEqual(await getChatFormFriendshipId(page), 'PAIR_FRIEND', '[C] friend popup трябва да отвори ТОЧНО friend разговора, не vip_dm за същата двойка')
+      assertEqual(await getDesktopNavBadgeText(page, 'chat'), null, '[F] отварянето на friend разговора трябва да изчисти неговия unread (Chat badge)')
+      // Topics nav badge = General threads(0 тук) + vip_dm — все още 4,
+      // значи friend popup-ът не е докоснал vip_dm unread-а на същата двойка.
+      // (getTopicsPersonalBadgeText е част от Topics екрана самия — не е в
+      // DOM-a, докато сме на legacy Chat, затова тук проверяваме винаги
+      // видимия nav badge.)
+      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '4', '[F] vip_dm unread за същата двойка остава недокоснат от friend popup-а')
+
+      // [B][C][E] kind='vip_dm' popup "Виж" -> точно тази vip_dm беседа в
+      // Теми -> Лични, БЕЗ да отваря legacy Chat.
+      await openChatConversation(page, 'PAIR_VIPDM')
+      assertEqual(await isTopicsScreenVisible(page), true, '[B] vip_dm popup трябва да отвори Topics екрана')
+      assertEqual(await isLegacyChatScreenVisible(page), false, '[E] vip_dm popup НЕ трябва да отваря legacy Chat')
+      assertEqual(await getChatFormFriendshipId(page), 'PAIR_VIPDM', '[C] vip_dm popup трябва да отвори ТОЧНО vip_dm разговора, не friend за същата двойка')
+
+      // Regression guard: старата (счупена) логика branch-ваше по
+      // state.currentScreen==='topics' — ако бяхме на Topics екрана в
+      // момента на клика, ДОРИ friend известие би отворило Topics Personal.
+      // Тук доказваме обратното: докато вече сме на Topics екрана (от
+      // vip_dm стъпката по-горе), кликването на friend known отваря
+      // legacy Chat, не Topics Personal.
+      await openChatConversation(page, 'PAIR_FRIEND')
+      assertEqual(await isLegacyChatScreenVisible(page), true, 'regression guard: friend popup отваря legacy Chat дори когато viewer-ът В МОМЕНТА е на Topics екрана')
+      assertEqual(await isTopicsScreenVisible(page), false, 'regression guard: friend popup не оставя viewer-а на Topics екрана')
+      assertEqual(await getChatFormFriendshipId(page), 'PAIR_FRIEND', 'regression guard: точния friend разговор, независимо от предишния screen context')
+    })
+  })
+
+  await check('[22c] PRODUCTION HOTFIX: pika_support notification opens the canonical support inbox (not legacy Chat), unknown/missing conversation never guesses a product', async () => {
+    await withDesktopPage({ width: 1280, height: 800 }, async (page) => {
+      const friendConversation = await makeConversation(page, 'PAIR_FRIEND_2', 'friend', 0)
+      const supportConversation = await makeConversation(page, 'PIKA_SUPPORT_CONV', 'pika_support', 0)
+      await setChatConversations(page, [friendConversation, supportConversation])
+
+      // kind='pika_support' popup "Виж" -> каноничният support inbox
+      // (същото, което бутонът "Поддръжка" отваря за обикновен viewer —
+      // тестовият harness authSession е 'player' role, не full admin).
+      // Legacy Chat филтрира списъка си само до kind='friend'
+      // (renderChatPanel) — pika_support разговор там би показал
+      // грешна/празна активна беседа, затова НЕ е валиден destination.
+      await openChatConversation(page, 'PIKA_SUPPORT_CONV')
+      const supportPopupVisible = await page.evaluate(() => document.querySelector('[data-support-popup-backdrop="1"]') !== null)
+      assertEqual(supportPopupVisible, true, 'pika_support popup трябва да отвори каноничния support попъп')
+      assertEqual(await isLegacyChatScreenVisible(page), false, 'pika_support popup НЕ трябва да отваря legacy Chat (списъкът му е friend-only и би показал грешна беседа)')
+      assertEqual(await isTopicsScreenVisible(page), false, 'pika_support popup НЕ трябва да отваря Topics/Topics Personal')
+
+      // Затваряме support попъпа, за да проверим следващия сценарий чисто.
+      await page.evaluate(() => document.querySelector<HTMLButtonElement>('[data-support-popup-close="1"]')?.click())
+      await page.waitForTimeout(60)
+
+      // Непознат/липсващ friendshipId (напр. WS известие изпреварило
+      // първоначалното зареждане на chatConversations) — НЕ трябва да се
+      // интерпретира по подразбиране като 'friend' (точно грешно
+      // предположение причини production регресията). Кодът опреснява
+      // canonical списъка веднъж; тук той пак няма да го намери (не е част
+      // от chatConversations по-горе) -> безопасно съобщение, без да отваря
+      // legacy Chat/Topics/support наслуки.
+      await openChatConversation(page, 'GHOST_CONVERSATION_NOT_IN_LIST')
+      assertEqual(await isLegacyChatScreenVisible(page), false, 'непознат/липсващ разговор НЕ трябва да отваря legacy Chat по подразбиране')
+      assertEqual(await isTopicsScreenVisible(page), false, 'непознат/липсващ разговор НЕ трябва да отваря Topics Personal по подразбиране')
+      const bodyText = await page.evaluate(() => document.body.textContent ?? '')
+      assert(bodyText.includes('Разговорът вече не е наличен.'), 'непознат/липсващ разговор трябва да покаже честно съобщение вместо да гадае продукт')
     })
   })
 

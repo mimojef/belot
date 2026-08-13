@@ -4326,36 +4326,7 @@ export function createLobbyFlowController(
         render()
       },
       onSupportClick: () => {
-        const authSession = options.getAuthSession?.() ?? null
-        if (authSession === null) return
-        leaveAdminServerIfActive()
-        // Чат с поддръжката (admin inbox) — само пълен admin; subadmin вижда обичайния свой чат.
-        if (isFullAdminAuthSession(authSession)) {
-          state.currentScreen = 'support'
-          state.adminSupportSelectedProfileId = null
-          state.adminSupportConversations = []
-          state.adminSupportConversationsLoading = true
-          state.adminSupportMobileConversationOpen = false
-          render()
-          void loadAdminSupportConversations()
-          return
-        }
-        state.supportPopupOpen = true
-        state.supportErrorText = null
-        state.supportMessages = []
-        state.supportLoading = true
-        render()
-        void (async () => {
-          const result = await options.onSupportMessagesLoad?.()
-          state.supportLoading = false
-          if (result?.ok) {
-            state.supportMessages = result.messages
-            state.supportUnreadCount = 0
-          } else {
-            state.supportErrorText = result?.message ?? 'Грешка при зареждане.'
-          }
-          render()
-        })()
+        openSupportInbox()
       },
       onSupportClose: () => {
         state.supportPopupOpen = false
@@ -8860,6 +8831,47 @@ export function createLobbyFlowController(
     render()
   }
 
+  // Каноничното "отвори моя/нашия pika_support поток" действие — вика се
+  // от бутона "Поддръжка" (onSupportClick) И от openChatWithFriend, когато
+  // разпознае kind='pika_support' известие (production hotfix: legacy Chat
+  // филтрира списъка си само до kind='friend' — renderChatPanel — там
+  // pika_support разговор би показал грешна/празна активна беседа, затова
+  // не може да бъде legacy Chat destination). Извлечена извън onSupportClick
+  // непроменена (чист code-motion), за да няма два независими копия на
+  // admin-inbox/support-popup branching логиката, които могат да се разминат.
+  function openSupportInbox(): void {
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession === null) return
+    leaveAdminServerIfActive()
+    // Чат с поддръжката (admin inbox) — само пълен admin; subadmin вижда обичайния свой чат.
+    if (isFullAdminAuthSession(authSession)) {
+      state.currentScreen = 'support'
+      state.adminSupportSelectedProfileId = null
+      state.adminSupportConversations = []
+      state.adminSupportConversationsLoading = true
+      state.adminSupportMobileConversationOpen = false
+      render()
+      void loadAdminSupportConversations()
+      return
+    }
+    state.supportPopupOpen = true
+    state.supportErrorText = null
+    state.supportMessages = []
+    state.supportLoading = true
+    render()
+    void (async () => {
+      const result = await options.onSupportMessagesLoad?.()
+      state.supportLoading = false
+      if (result?.ok) {
+        state.supportMessages = result.messages
+        state.supportUnreadCount = 0
+      } else {
+        state.supportErrorText = result?.message ?? 'Грешка при зареждане.'
+      }
+      render()
+    })()
+  }
+
   // Единствен client-side entry point за СЪЗДАВАНЕ/намиране на служебен
   // pika_support разговор — вика се само от бутона "Чат" в profile popup-а,
   // видим само когато state.showPikaSupportChatButton е true (виж
@@ -12739,17 +12751,61 @@ export function createLobbyFlowController(
       return isActivePersonalChatConversation(friendshipId)
     },
     openChatWithFriend: (friendshipId: string) => {
-      if (state.currentScreen === 'topics') {
-        void showTopicsPersonalChat(friendshipId)
-        return
+      // Единствен caller е "Виж" от глобалния chat notification popup
+      // (main.ts) — popup-ът носи само friendshipId, без kind, защото
+      // сървърът излъчва chat_message_received по един общ поток за
+      // 'friend'/'vip_dm'/'pika_support' (един sendMessage endpoint, виж
+      // server/src/index.ts handleChatRequest). Route-ваме по canonical
+      // kind от вече заредения state.chatConversations (keyed по
+      // friendshipId), НЕ по state.currentScreen — currentScreen е UI
+      // context на VIEWER-a в момента на клика, няма отношение към това
+      // към кой продукт принадлежи ТОЗИ конкретен разговор, и една и съща
+      // двойка профили може да има едновременно 'friend' И 'vip_dm'
+      // разговор с различна история (production regression fix).
+      const routeByConversation = (conversation: ChatConversationSnapshot | undefined): void => {
+        if (conversation?.kind === 'vip_dm') {
+          void showTopicsPersonalChat(friendshipId)
+          return
+        }
+        if (conversation?.kind === 'pika_support') {
+          // Legacy Chat филтрира списъка си само до kind='friend'
+          // (renderChatPanel) — pika_support разговор там би показал
+          // грешна/празна активна беседа. Каноничното място е СЪЩОТО,
+          // което бутонът "Поддръжка" отваря (admin inbox за пълен admin,
+          // иначе support попъп-а за всеки друг, вкл. subadmin).
+          openSupportInbox()
+          return
+        }
+        if (conversation?.kind === 'friend') {
+          void showChatPanel().then(() => {
+            void openChatConversation(friendshipId)
+            markChatConversationReadLocally(friendshipId)
+            render()
+            void options.onChatMarkRead?.(friendshipId)
+          })
+          return
+        }
+
+        // Непознат/липсващ разговор в кеша (напр. WS известието е
+        // изпреварило първоначалното зареждане на chatConversations) —
+        // НИКОГА не гадаем kind по подразбиране (точно грешно предположение
+        // причини production регресията, която оправяме тук). Опресняваме
+        // веднъж canonical списъка (същия pattern като
+        // openTopicsPersonalMessageFromPost) и решаваме отново; ако
+        // разговорът реално не съществува/не е достъпен, показваме честно
+        // съобщение вместо да отворим произволен грешен продукт.
+        void loadChatConversations().then(() => {
+          const refreshed = state.chatConversations.find((c) => c.friendshipId === friendshipId)
+          if (refreshed !== undefined) {
+            routeByConversation(refreshed)
+            return
+          }
+          state.errorText = 'Разговорът вече не е наличен.'
+          render()
+        })
       }
 
-      void showChatPanel().then(() => {
-        void openChatConversation(friendshipId)
-        markChatConversationReadLocally(friendshipId)
-        render()
-        void options.onChatMarkRead?.(friendshipId)
-      })
+      routeByConversation(state.chatConversations.find((c) => c.friendshipId === friendshipId))
     },
     getFriendshipActionForProfile: (profileId: string) => {
       const authSession = options.getAuthSession?.() ?? null

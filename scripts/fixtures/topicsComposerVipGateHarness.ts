@@ -279,7 +279,7 @@ function q<T extends Element>(selector: string): T | null {
   },
   makeMessage,
   makeReply,
-  makeConversation: (friendshipId: string, kind: 'friend' | 'vip_dm', friendProfileId: string, friendDisplayName = 'Friend', friendIsVip: boolean | null | undefined = true): ChatConversationSnapshot => {
+  makeConversation: (friendshipId: string, kind: 'friend' | 'vip_dm' | 'pika_support', friendProfileId: string, friendDisplayName = 'Friend', friendIsVip: boolean | null | undefined = true): ChatConversationSnapshot => {
     const friend: Record<string, unknown> = { profileId: friendProfileId, displayName: friendDisplayName, avatarUrl: null }
     if (friendIsVip !== undefined) friend.isVip = friendIsVip
     return {
@@ -429,6 +429,13 @@ function q<T extends Element>(selector: string): T | null {
   clickTopicsPersonalOpen: () => q<HTMLButtonElement>('[data-topics-personal-open="1"]')?.click(),
   clickTopicsBackToGeneral: () => (q<HTMLButtonElement>('[data-topics-personal-back="1"]') ?? q<HTMLButtonElement>('[data-topics-back-to-general="1"]'))?.click(),
   isTopicsStreamVisible: () => q('[data-topic-messages-scroll="1"]') !== null,
+  // Production hotfix regression (friend vs vip_dm popup routing) — за да
+  // докажем КЪДЕ реално отвори openChatWithFriend, а не само с кой
+  // friendshipId, differentiate legacy Chat screen (data-lobby-chat-toggle-archived,
+  // уникален за renderChatPanel) от Topics screen shell (data-topics-screen,
+  // единствен root, рендерван само при state.view==='topics').
+  isLegacyChatScreenVisible: () => q('[data-lobby-chat-toggle-archived="1"]') !== null,
+  isTopicsScreenVisible: () => q('[data-topics-screen="1"]') !== null,
   isTopicsPersonalDetailVisible: () => q('[data-topics-personal-detail="1"]') !== null,
   getTopicsPersonalPanelView: () => q<HTMLElement>('[data-topics-personal-panel="1"]')?.dataset.personalView ?? null,
   getChatComposerDisabledReason: () => q('[data-chat-composer-disabled-reason="1"]')?.textContent ?? null,

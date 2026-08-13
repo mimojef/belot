@@ -262,11 +262,14 @@ await check('[8] Active/inactive realtime semantics include Topics Personal acti
   assert(controller.includes('if (!isActiveConversation)'), 'inactive conversations must still increment unread locally')
 })
 
-await check('[9] Profile/open-chat entry reuses same canonical conversation in Topics context', () => {
+await check('[9] openChatWithFriend routes by canonical conversation kind, not by current screen (production hotfix)', () => {
   assert(controller.includes('openChatWithFriend: (friendshipId: string) => {'), 'missing openChatWithFriend public entry')
-  assert(controller.includes("if (state.currentScreen === 'topics')"), 'openChatWithFriend must branch for Topics context')
-  assert(controller.includes('void showTopicsPersonalChat(friendshipId)'), 'Topics profile chat must open Personal mode conversation')
-  assert(controller.includes('void showChatPanel().then'), 'existing non-Topics chat entry must remain')
+  const openFn = controller.slice(controller.indexOf('openChatWithFriend: (friendshipId: string) => {'), controller.indexOf('getFriendshipActionForProfile: (profileId: string) => {'))
+  assert(!openFn.includes("state.currentScreen === 'topics'"), 'openChatWithFriend must NOT branch by state.currentScreen — this was the friend-notification-popup regression (kind=friend popup incorrectly opened Topics Personal whenever the viewer happened to be on the Topics screen)')
+  assert(openFn.includes('state.chatConversations.find((c) => c.friendshipId === friendshipId)'), 'openChatWithFriend must look up the exact conversation by canonical friendshipId')
+  assert(openFn.includes("conversation?.kind === 'vip_dm'"), 'routing must be keyed by the canonical kind of THIS conversation, not by viewer UI context')
+  assert(openFn.includes('void showTopicsPersonalChat(friendshipId)'), 'kind=vip_dm must still open Topics Personal conversation')
+  assert(openFn.includes('void showChatPanel().then'), 'kind=friend (default/unknown) must open legacy Chat')
 })
 
 await check('[10] Composer, attachments and image viewer reuse existing Personal Chat selectors/helpers', () => {
@@ -395,10 +398,11 @@ await check('[18] Topics Personal detail refuses stale chatMessages from another
   assert(html.includes('Зареждане'), 'mismatched message owner should render a clean loading state')
 })
 
-await check('[19] Topics profile entry opens Topics Personal while legacy Chat entry remains standalone', () => {
-  assert(controller.includes("if (state.currentScreen === 'topics')"), 'profile chat action must branch in Topics context')
-  assert(controller.includes('void showTopicsPersonalChat(friendshipId)'), 'Topics profile chat action must open Topics Personal conversation')
-  assert(controller.includes('void showChatPanel().then'), 'legacy non-Topics chat entry must still use standalone Chat screen')
+await check('[19] kind=vip_dm notification opens Topics Personal while kind=friend notification opens standalone legacy Chat', () => {
+  const openFn = controller.slice(controller.indexOf('openChatWithFriend: (friendshipId: string) => {'), controller.indexOf('getFriendshipActionForProfile: (profileId: string) => {'))
+  assert(openFn.includes("conversation?.kind === 'vip_dm'"), 'vip_dm conversation action must branch by canonical kind, not viewer screen context')
+  assert(openFn.includes('void showTopicsPersonalChat(friendshipId)'), 'vip_dm chat action must open Topics Personal conversation')
+  assert(openFn.includes('void showChatPanel().then'), 'friend (default) chat entry must still use standalone Chat screen')
   assert(controller.includes("state.currentScreen = 'chat'"), 'standalone Chat screen must still exist for legacy entry')
 })
 
