@@ -337,6 +337,141 @@ async function runUserSupportChat(baseUrl: string, browser: Browser, mobile: boo
   }
 }
 
+// Production hotfix: Topics composers (root "Общ" + thread reply) бяха
+// изпуснати от focus/caret preservation-а — несвързан badge/notification
+// rerender (напр. chat_message_received за СЪВСЕМ друг разговор) крадеше
+// focus-а от активно писане. Reuse-ва СЪЩИТЕ доказани helper-и
+// (assertSequentialTyping/assertExternalRenderRestores/assertSelectionRangeRestores)
+// като останалите composer-и по-горе — не е нов паралелен механизъм.
+const UNRELATED_CHAT_NOTIFICATION = {
+  type: 'chat_message_received' as const,
+  friendshipId: 'unrelated-conversation-not-open',
+  senderProfileId: 'someone-else',
+  fromDisplayName: 'Someone Else',
+  fromAvatarUrl: null,
+  messageId: `unrelated-msg-${Date.now()}`,
+  shouldNotify: true,
+}
+
+async function runTopicsRootComposer(baseUrl: string, browser: Browser, mobile: boolean): Promise<void> {
+  const page = await browser.newPage({
+    viewport: mobile ? { width: 390, height: 844 } : { width: 1400, height: 900 },
+    isMobile: mobile,
+    hasTouch: mobile,
+  })
+  try {
+    await page.goto(`${baseUrl}/scripts/fixtures/topicsComposerVipGateHarness.html`)
+    await page.waitForFunction(() => (window as any).__topicsComposerVipGateHarness !== undefined)
+    await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.setVipGate(true, true))
+    await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.setNextMessagesResult([]))
+    await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.openTopicsScreen())
+    await page.waitForSelector('[data-topics-composer-text="1"]', { state: 'attached' })
+
+    const selector = {
+      input: '[data-topics-composer-text="1"]',
+      scroll: '[data-topic-messages-scroll="1"]',
+    }
+    const mode = mobile ? 'mobile' : 'desktop'
+    await check(`Topics root composer ${mode}: sequential typing stability`, () => assertSequentialTyping(page, selector, 'Topics root composer'))
+    await check(`Topics root composer ${mode}: unrelated notification/badge render restores draft focus caret scroll`, () => assertExternalRenderRestores(
+      page,
+      selector,
+      'Topics root composer',
+      async () => {
+        await page.evaluate((message) => (window as any).__topicsComposerVipGateHarness.simulateServerMessage(message), UNRELATED_CHAT_NOTIFICATION)
+      },
+    ))
+    await check(`Topics root composer ${mode}: selected range survives unrelated render`, () => assertSelectionRangeRestores(
+      page,
+      selector,
+      'Topics root composer',
+      async () => {
+        await page.evaluate((message) => (window as any).__topicsComposerVipGateHarness.simulateServerMessage(message), { ...UNRELATED_CHAT_NOTIFICATION, messageId: `unrelated-msg-2-${Date.now()}` })
+      },
+    ))
+
+    // Negative test [H]: потребителят explicit-но кликва извън composer-а
+    // (blur) — следващ passive rerender НЕ трябва насила да върне focus-а
+    // обратно в него (само защото беше последният focused елемент преди).
+    await check(`Topics root composer ${mode}: explicit blur/click-outside is NOT overridden by a later unrelated render`, async () => {
+      await page.locator(selector.input).fill('draft before clicking away')
+      await page.evaluate((inputSelector) => {
+        const input = document.querySelector<HTMLTextAreaElement>(inputSelector)
+        input?.blur()
+      }, selector.input)
+      const blurredNow = await page.evaluate((inputSelector) => document.activeElement !== document.querySelector(inputSelector), selector.input)
+      assert(blurredNow, 'composer must actually be blurred before the unrelated render fires')
+
+      await page.evaluate((message) => (window as any).__topicsComposerVipGateHarness.simulateServerMessage(message), { ...UNRELATED_CHAT_NOTIFICATION, messageId: `unrelated-msg-blur-${Date.now()}` })
+      await page.waitForTimeout(80)
+
+      const stillBlurred = await page.evaluate((inputSelector) => document.activeElement !== document.querySelector(inputSelector), selector.input)
+      assert(stillBlurred, 'explicit user blur must not be overridden — passive render must not force focus back into the composer')
+    })
+  } finally {
+    await page.close()
+  }
+}
+
+async function runTopicsReplyComposer(baseUrl: string, browser: Browser, mobile: boolean): Promise<void> {
+  const page = await browser.newPage({
+    viewport: mobile ? { width: 390, height: 844 } : { width: 1400, height: 900 },
+    isMobile: mobile,
+    hasTouch: mobile,
+  })
+  try {
+    await page.goto(`${baseUrl}/scripts/fixtures/topicsComposerVipGateHarness.html`)
+    await page.waitForFunction(() => (window as any).__topicsComposerVipGateHarness !== undefined)
+    await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.setVipGate(true, true))
+    const rootMessage = await page.evaluate(() =>
+      (window as any).__topicsComposerVipGateHarness.makeMessage('topic-general', 1, 'RootMessageToReplyTo', 'someone', 'Someone'),
+    )
+    await page.evaluate((message) => (window as any).__topicsComposerVipGateHarness.setNextMessagesResult([message]), rootMessage)
+    await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.openTopicsScreen())
+    await page.waitForSelector('[data-topic-message-reply]', { state: 'attached' })
+    await page.evaluate((id) => (window as any).__topicsComposerVipGateHarness.clickReplyButton(id), (rootMessage as any).messageId)
+    await page.waitForSelector('[data-topics-reply-composer-text="1"]', { state: 'attached' })
+
+    const selector = {
+      input: '[data-topics-reply-composer-text="1"]',
+      scroll: '[data-topic-messages-scroll="1"]',
+    }
+    const mode = mobile ? 'mobile' : 'desktop'
+    await check(`Topics thread reply composer ${mode}: sequential typing stability`, () => assertSequentialTyping(page, selector, 'Topics reply composer'))
+    await check(`Topics thread reply composer ${mode}: unrelated notification/badge render restores draft focus caret scroll`, () => assertExternalRenderRestores(
+      page,
+      selector,
+      'Topics reply composer',
+      async () => {
+        await page.evaluate((message) => (window as any).__topicsComposerVipGateHarness.simulateServerMessage(message), UNRELATED_CHAT_NOTIFICATION)
+      },
+    ))
+    await check(`Topics thread reply composer ${mode}: selected range survives unrelated render`, () => assertSelectionRangeRestores(
+      page,
+      selector,
+      'Topics reply composer',
+      async () => {
+        await page.evaluate((message) => (window as any).__topicsComposerVipGateHarness.simulateServerMessage(message), { ...UNRELATED_CHAT_NOTIFICATION, messageId: `unrelated-msg-3-${Date.now()}` })
+      },
+    ))
+
+    // Negative test [G]: explicit user navigation away от thread-а (Назад
+    // към Общ) — passive re-render СЛЕД това НЕ трябва да върне focus в
+    // вече несъществуващия/невидим reply composer.
+    await check(`Topics thread reply composer ${mode}: navigating back to General then unrelated render does NOT refocus the old composer`, async () => {
+      await page.locator(selector.input).fill('draft before navigating away')
+      await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.clickThreadBack())
+      await page.waitForSelector('[data-topics-reply-composer-text="1"]', { state: 'detached' })
+      await page.evaluate((message) => (window as any).__topicsComposerVipGateHarness.simulateServerMessage(message), { ...UNRELATED_CHAT_NOTIFICATION, messageId: `unrelated-msg-4-${Date.now()}` })
+      await page.waitForTimeout(80)
+      const stillGone = await page.evaluate(() => document.querySelector('[data-topics-reply-composer-text="1"]') === null)
+      assert(stillGone, 'reply composer must stay gone after navigating back to General — unrelated render must not reopen/refocus it')
+    })
+  } finally {
+    await page.close()
+  }
+}
+
 function makeAdminState(overrides: Partial<LobbyScreenState> = {}): LobbyScreenState {
   return {
     adminSupportConversations: [{
@@ -455,6 +590,8 @@ try {
     await runPrivateRoomChat(baseUrl, browser, mobile)
     await runUserSupportChat(baseUrl, browser, mobile)
     await runAdminSupportChat(browser, mobile)
+    await runTopicsRootComposer(baseUrl, browser, mobile)
+    await runTopicsReplyComposer(baseUrl, browser, mobile)
   }
 } finally {
   if (browser) await browser.close()

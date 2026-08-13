@@ -9567,6 +9567,19 @@ export function renderLobbyScreen(
   const savedTopicComposerSelectionStart = wasTopicComposerFocused ? prevTopicComposerTextEl.selectionStart : null
   const savedTopicComposerSelectionEnd = wasTopicComposerFocused ? prevTopicComposerTextEl.selectionEnd : null
 
+  // Thread reply composer-ът (за разлика от root "Общ" composer-a точно
+  // над него) липсваше от focus/caret preservation-а — несвързан badge/
+  // notification rerender докато потребителят пише отговор го обезфокусваше
+  // (production UX hotfix). Пазим и rootId-a на формата (не само selector-a),
+  // за да не върнем focus-а насила, ако между render-ите потребителят реално
+  // е затворил/сменил thread-а (топлив state.topicReplyComposerOpenRootId).
+  const prevTopicReplyComposerTextEl = root.querySelector<HTMLTextAreaElement>('[data-topics-reply-composer-text="1"]')
+  const prevTopicReplyComposerFormEl = prevTopicReplyComposerTextEl?.closest<HTMLFormElement>('[data-topics-reply-composer-form="1"]') ?? null
+  const savedTopicReplyComposerRootId = prevTopicReplyComposerFormEl?.dataset.topicsReplyComposerRootId ?? null
+  const wasTopicReplyComposerFocused = prevTopicReplyComposerTextEl !== null && document.activeElement === prevTopicReplyComposerTextEl
+  const savedTopicReplyComposerSelectionStart = wasTopicReplyComposerFocused ? prevTopicReplyComposerTextEl.selectionStart : null
+  const savedTopicReplyComposerSelectionEnd = wasTopicReplyComposerFocused ? prevTopicReplyComposerTextEl.selectionEnd : null
+
   const savedScrollTop = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')?.scrollTop ?? 0
   // Отделно от savedScrollTop по-горе: списъкът с admin support запитвания има собствен
   // scroll контейнер, за да не се презаписва позицията му от detail изгледа на разговора
@@ -12994,6 +13007,21 @@ export function renderLobbyScreen(
     }
   }
   autoGrowTextarea(newTopicComposerTextEl)
+
+  if (wasTopicReplyComposerFocused) {
+    const newTopicReplyComposerTextEl = root.querySelector<HTMLTextAreaElement>('[data-topics-reply-composer-text="1"]')
+    const newTopicReplyComposerFormEl = newTopicReplyComposerTextEl?.closest<HTMLFormElement>('[data-topics-reply-composer-form="1"]') ?? null
+    const newTopicReplyComposerRootId = newTopicReplyComposerFormEl?.dataset.topicsReplyComposerRootId ?? null
+    // Restore-ваме САМО ако след render-а все още сме на СЪЩИЯ reply
+    // composer (същия rootId) — ако потребителят реално е затворил/сменил
+    // thread-а между render-ите, не връщаме focus насила в друг composer.
+    if (newTopicReplyComposerTextEl && newTopicReplyComposerRootId !== null && newTopicReplyComposerRootId === savedTopicReplyComposerRootId) {
+      newTopicReplyComposerTextEl.focus()
+      if (savedTopicReplyComposerSelectionStart !== null && savedTopicReplyComposerSelectionEnd !== null) {
+        newTopicReplyComposerTextEl.setSelectionRange(savedTopicReplyComposerSelectionStart, savedTopicReplyComposerSelectionEnd)
+      }
+    }
+  }
 
   const newAdminSupportMobileListEl = root.querySelector<HTMLElement>('[data-admin-support-mobile-list-scroll="1"]')
   if (newAdminSupportMobileListEl && savedAdminSupportMobileListScrollTop > 0) {
