@@ -3342,6 +3342,8 @@ export function createLobbyFlowController(
       isTopicMessageModerator: isTopicMessageModeratorAuthSession(options.getAuthSession?.() ?? null),
     }
 
+    const topicsBarHorizontalScroll = captureTopicsBarHorizontalScroll()
+
     renderLobbyScreen(options.root, {
       state: lobbyState,
       apiBaseUrl: options.getApiBaseUrl?.() ?? '',
@@ -4771,6 +4773,7 @@ export function createLobbyFlowController(
         render()
       },
     })
+    restoreTopicsBarHorizontalScroll(topicsBarHorizontalScroll)
 
     if (
       state.currentScreen === 'tournament-detail' &&
@@ -5829,6 +5832,41 @@ export function createLobbyFlowController(
     const scrollEl = options.root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
     if (scrollEl === null) return
     scrollEl.scrollTop = scrollEl.scrollHeight - distanceFromBottom
+  }
+
+  function captureTopicsBarHorizontalScroll(): { scrollLeft: number; anchorTopicId: string | null; anchorLeft: number | null } | null {
+    const scrollEl = options.root.querySelector<HTMLElement>('[data-topics-bar-scroll="1"]')
+    if (scrollEl === null) return null
+    const anchorEl = scrollEl.querySelector<HTMLElement>('[data-topic-chip][data-active="1"]')
+      ?? Array.from(scrollEl.querySelectorAll<HTMLElement>('[data-topic-chip]'))
+        .find((chip) => chip.getBoundingClientRect().right >= scrollEl.getBoundingClientRect().left)
+      ?? null
+    return {
+      scrollLeft: scrollEl.scrollLeft,
+      anchorTopicId: anchorEl?.dataset.topicChip ?? null,
+      anchorLeft: anchorEl ? anchorEl.getBoundingClientRect().left : null,
+    }
+  }
+
+  function restoreTopicsBarHorizontalScroll(snapshot: { scrollLeft: number; anchorTopicId: string | null; anchorLeft: number | null } | null): void {
+    if (snapshot === null) return
+    const scrollEl = options.root.querySelector<HTMLElement>('[data-topics-bar-scroll="1"]')
+    if (scrollEl === null) return
+
+    const maxScrollLeft = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth)
+    scrollEl.scrollLeft = Math.max(0, Math.min(snapshot.scrollLeft, maxScrollLeft))
+
+    if (snapshot.anchorTopicId !== null && snapshot.anchorLeft !== null) {
+      const anchorEl = scrollEl.querySelector<HTMLElement>(`[data-topic-chip="${selectorEscape(snapshot.anchorTopicId)}"]`)
+      if (anchorEl !== null) {
+        scrollEl.scrollLeft = Math.max(
+          0,
+          Math.min(scrollEl.scrollLeft + anchorEl.getBoundingClientRect().left - snapshot.anchorLeft, maxScrollLeft),
+        )
+      }
+    }
+
+    scrollEl.dispatchEvent(new Event('scroll', { bubbles: true }))
   }
 
   // B) Load older в СЪЩАТА тема — НЕ инкрементира generation token-а (не е

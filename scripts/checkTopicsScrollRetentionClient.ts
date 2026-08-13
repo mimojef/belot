@@ -64,6 +64,8 @@ type H = {
   setVipGate: (isActive: boolean, hasClaimedLaunchGift: boolean) => void
   setNextMessagesResult: (messages: unknown[], hasMore?: boolean) => void
   setNextRepliesResult: (replies: unknown[], hasMore?: boolean) => void
+  setTopicDirectoryResponse: (items: Array<{ topicId: string; slug?: string; title?: string; isGeneral?: boolean; unreadCount: number }>) => void
+  render: () => void
   makeMessage: (topicId: string, seq: number, body: string, senderProfileId?: string, senderDisplayName?: string) => any
   makeReply: (topicId: string, seq: number, parentMessageId: string, body: string, senderProfileId?: string, senderDisplayName?: string) => any
   simulateServerMessage: (message: Record<string, unknown>) => boolean
@@ -229,8 +231,87 @@ async function assertAnchorPreserved(page: Page, anchorId: string, label: string
   await assertNotAtBottom(page, label)
 }
 
+type TopicsBarMetrics = {
+  scrollLeft: number
+  scrollWidth: number
+  clientWidth: number
+  maxScrollLeft: number
+}
+
+type HorizontalResult = {
+  initial: number
+  afterUserScroll: number
+  afterTopicSelection: number
+  afterOrdinaryRender: number
+  afterUnreadUpdate: number
+}
+
+const horizontalResults: Record<string, HorizontalResult> = {}
+let desktopArrowResult: { initial: number; afterArrow: number; afterRender: number } | null = null
+
+function makeHorizontalTopics(): Array<{ topicId: string; slug: string; title: string; isGeneral: boolean; unreadCount: number }> {
+  return [
+    { topicId: 'topic-general', slug: 'general', title: 'Общ чат', isGeneral: true, unreadCount: 0 },
+    ...Array.from({ length: 14 }, (_value, index) => ({
+      topicId: `topic-${index + 1}`,
+      slug: `topic-${index + 1}`,
+      title: `Дълга тема ${index + 1}`,
+      isGeneral: false,
+      unreadCount: index % 3 === 0 ? index + 1 : 0,
+    })),
+  ]
+}
+
+async function getTopicsBarMetrics(page: Page): Promise<TopicsBarMetrics> {
+  return page.evaluate(() => {
+    const el = document.querySelector<HTMLElement>('[data-topics-bar-scroll="1"]')
+    if (!el) throw new Error('missing topics bar scroll element')
+    return {
+      scrollLeft: el.scrollLeft,
+      scrollWidth: el.scrollWidth,
+      clientWidth: el.clientWidth,
+      maxScrollLeft: el.scrollWidth - el.clientWidth,
+    }
+  })
+}
+
+async function setTopicsBarScrollLeft(page: Page, scrollLeft: number): Promise<void> {
+  await page.evaluate((value) => {
+    const el = document.querySelector<HTMLElement>('[data-topics-bar-scroll="1"]')
+    if (!el) throw new Error('missing topics bar scroll element')
+    el.scrollLeft = value
+    el.dispatchEvent(new Event('scroll', { bubbles: true }))
+  }, scrollLeft)
+  await page.waitForTimeout(80)
+}
+
+async function isTopicChipVisible(page: Page, topicId: string): Promise<boolean> {
+  return page.evaluate((id) => {
+    const scroll = document.querySelector<HTMLElement>('[data-topics-bar-scroll="1"]')
+    const chip = document.querySelector<HTMLElement>(`[data-topic-chip="${CSS.escape(id as string)}"]`)
+    if (!scroll || !chip) return false
+    const scrollRect = scroll.getBoundingClientRect()
+    const chipRect = chip.getBoundingClientRect()
+    return chipRect.left >= scrollRect.left - 2 && chipRect.right <= scrollRect.right + 2
+  }, topicId)
+}
+
+async function openHorizontalTopics(page: Page, viewportLabel: string): Promise<void> {
+  await call(page, (h: H, items: ReturnType<typeof makeHorizontalTopics>) => h.setTopicDirectoryResponse(items), makeHorizontalTopics())
+  const messages = await makeMessages(page, 'topic-general', 1, 36, `${viewportLabel}-horizontal-general`)
+  await openTopic(page, messages)
+  const metrics = await getTopicsBarMetrics(page)
+  assert(metrics.scrollWidth > metrics.clientWidth + 80, `${viewportLabel}: expected real horizontal overflow, got scrollWidth=${metrics.scrollWidth}, clientWidth=${metrics.clientWidth}`)
+}
+
+async function assertHorizontalNotReset(label: string, actual: number, expectedMinimum: number): Promise<void> {
+  assert(actual > 2, `${label}: scrollLeft reset to start (${actual})`)
+  assert(actual >= expectedMinimum - 48, `${label}: scrollLeft moved too far left, actual=${actual}, expected at least ${expectedMinimum - 48}`)
+}
+
 const viewports: Array<{ label: string; viewport: ViewportSize }> = [
   { label: 'mobile-390', viewport: { width: 390, height: 844 } },
+  { label: 'mobile-360', viewport: { width: 360, height: 800 } },
   { label: 'desktop', viewport: { width: 1366, height: 900 } },
 ]
 
@@ -268,6 +349,70 @@ try {
         const messages = await makeMessages(page, 'topic-general', 1, 46, `${viewportLabel}-initial`)
         await openTopic(page, messages)
         await assertAtBottom(page, 'initial topic load')
+      })
+    })
+
+    await check(`[${viewportLabel}] horizontal topic strip preserves scrollLeft across selection and rerenders`, async () => {
+      await withHarness(async (page) => {
+        await openHorizontalTopics(page, viewportLabel)
+        const initial = await getTopicsBarMetrics(page)
+        assert(initial.scrollLeft <= 2, `${viewportLabel}: initial topic strip should start near 0, got ${initial.scrollLeft}`)
+
+        const targetScrollLeft = Math.round(initial.maxScrollLeft * 0.65)
+        await setTopicsBarScrollLeft(page, targetScrollLeft)
+        const afterUserScroll = await getTopicsBarMetrics(page)
+        assert(afterUserScroll.scrollLeft > 2, `${viewportLabel}: user scroll did not move strip, got ${afterUserScroll.scrollLeft}`)
+
+        const farTopicId = 'topic-9'
+        assert(await isTopicChipVisible(page, farTopicId), `${viewportLabel}: ${farTopicId} should be visible after horizontal scroll`)
+        const farTopicMessages = await makeMessages(page, farTopicId, 1, 34, `${viewportLabel}-horizontal-far`)
+        await call(page, (h: H, arg: unknown[]) => h.setNextMessagesResult(arg, false), farTopicMessages)
+        await call(page, (h: H, topicId: string) => h.clickTopicChip(topicId), farTopicId)
+        await page.waitForFunction((id) => document.querySelector(`[data-topic-message="${CSS.escape(id as string)}"]`) !== null, farTopicMessages[farTopicMessages.length - 1]!.messageId)
+        await page.waitForTimeout(100)
+        const afterTopicSelection = await getTopicsBarMetrics(page)
+        await assertHorizontalNotReset(`${viewportLabel}: topic selection`, afterTopicSelection.scrollLeft, afterUserScroll.scrollLeft)
+        assert(await isTopicChipVisible(page, farTopicId), `${viewportLabel}: selected far topic should stay visible after selection rerender`)
+
+        await call(page, (h: H) => h.render())
+        await page.waitForTimeout(100)
+        const afterOrdinaryRender = await getTopicsBarMetrics(page)
+        await assertHorizontalNotReset(`${viewportLabel}: ordinary rerender`, afterOrdinaryRender.scrollLeft, afterTopicSelection.scrollLeft)
+
+        await call(page, (h: H, msg: Record<string, unknown>) => h.simulateServerMessage(msg), {
+          type: 'topic_unread_count_changed',
+          topicId: 'topic-11',
+          unreadCount: 101,
+        })
+        await page.waitForTimeout(100)
+        const afterUnreadUpdate = await getTopicsBarMetrics(page)
+        await assertHorizontalNotReset(`${viewportLabel}: unread update`, afterUnreadUpdate.scrollLeft, afterOrdinaryRender.scrollLeft)
+
+        horizontalResults[viewportLabel] = {
+          initial: initial.scrollLeft,
+          afterUserScroll: afterUserScroll.scrollLeft,
+          afterTopicSelection: afterTopicSelection.scrollLeft,
+          afterOrdinaryRender: afterOrdinaryRender.scrollLeft,
+          afterUnreadUpdate: afterUnreadUpdate.scrollLeft,
+        }
+
+        if (viewportLabel === 'desktop') {
+          await setTopicsBarScrollLeft(page, 0)
+          const beforeArrow = await getTopicsBarMetrics(page)
+          await page.click('[data-topics-arrow="right"]')
+          await page.waitForTimeout(350)
+          const afterArrow = await getTopicsBarMetrics(page)
+          assert(afterArrow.scrollLeft > beforeArrow.scrollLeft + 20, `desktop: right arrow did not move strip, before=${beforeArrow.scrollLeft}, after=${afterArrow.scrollLeft}`)
+          await call(page, (h: H) => h.render())
+          await page.waitForTimeout(100)
+          const afterArrowRender = await getTopicsBarMetrics(page)
+          await assertHorizontalNotReset('desktop: arrow rerender', afterArrowRender.scrollLeft, afterArrow.scrollLeft)
+          desktopArrowResult = {
+            initial: beforeArrow.scrollLeft,
+            afterArrow: afterArrow.scrollLeft,
+            afterRender: afterArrowRender.scrollLeft,
+          }
+        }
       })
     })
 
@@ -446,6 +591,16 @@ try {
 } finally {
   if (browser) await browser.close()
   if (vite) await vite.close()
+}
+
+if (Object.keys(horizontalResults).length > 0) {
+  console.log('Horizontal topic strip results:')
+  for (const [label, result] of Object.entries(horizontalResults)) {
+    console.log(`  ${label}: initial=${result.initial.toFixed(1)}, user=${result.afterUserScroll.toFixed(1)}, selection=${result.afterTopicSelection.toFixed(1)}, render=${result.afterOrdinaryRender.toFixed(1)}, unread=${result.afterUnreadUpdate.toFixed(1)}`)
+  }
+  if (desktopArrowResult !== null) {
+    console.log(`  desktop-arrow: initial=${desktopArrowResult.initial.toFixed(1)}, arrow=${desktopArrowResult.afterArrow.toFixed(1)}, render=${desktopArrowResult.afterRender.toFixed(1)}`)
+  }
 }
 
 console.log(`\n${passed} passed, ${failed} failed\n`)

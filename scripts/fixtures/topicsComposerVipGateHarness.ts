@@ -247,6 +247,7 @@ function q<T extends Element>(selector: string): T | null {
       unreadCount: item.unreadCount,
     })))
   },
+  render: () => controller.render(),
   setAuthProfile: (profileId: string, displayName = profileId) => {
     authSession = {
       account: { role: 'player' },
