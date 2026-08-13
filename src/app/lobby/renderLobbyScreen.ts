@@ -828,6 +828,7 @@ export type RenderLobbyScreenOptions = {
   onTopicMessageDeleteConfirmClose: () => void
   onTopicMessageDeleteConfirmSubmit: () => void
   onTopicMessageEditClick: (topicId: string, messageId: string) => void
+  onTopicsInfoToast: (text: string) => void
   onTopicMessageEditInput: (messageId: string, value: string) => void
   onTopicMessageEditCancel: (messageId: string) => void
   onTopicMessageEditSubmit: (messageId: string) => void
@@ -10737,8 +10738,10 @@ export function renderLobbyScreen(
       // за touch devices, където :hover/:focus-visible не е надеждна обратна
       // връзка.
       if (btn.dataset.topicMessageDeleteBlocked === '1') {
+        const reason = btn.dataset.topicMessageDeleteDeniedReason?.trim() ?? ''
         btn.focus()
         btn.dataset.tooltipOpen = '1'
+        if (reason.length > 0) options.onTopicsInfoToast(reason)
         window.setTimeout(() => {
           delete btn.dataset.tooltipOpen
         }, 1800)
@@ -10756,8 +10759,10 @@ export function renderLobbyScreen(
   root.querySelectorAll<HTMLButtonElement>('[data-topic-message-edit]').forEach((btn) => {
     btn.addEventListener('click', () => {
       if (btn.dataset.topicMessageEditBlocked === '1') {
+        const reason = btn.dataset.topicMessageEditDeniedReason?.trim() ?? ''
         btn.focus()
         btn.dataset.tooltipOpen = '1'
+        if (reason.length > 0) options.onTopicsInfoToast(reason)
         window.setTimeout(() => {
           delete btn.dataset.tooltipOpen
         }, 1800)

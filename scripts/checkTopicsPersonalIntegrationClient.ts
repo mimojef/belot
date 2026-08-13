@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { renderTopicsScreen } from '../src/app/lobby/renderTopicsScreen'
+import { renderTopicsScreen, renderTopicMessageRow, renderTopicReplyRow } from '../src/app/lobby/renderTopicsScreen'
 import type { LobbyScreenState } from '../src/app/lobby/renderLobbyScreen'
 
 const args = process.argv.slice(2)
@@ -545,9 +545,16 @@ await check('[27] Direct Topics Personal block/VIP failures use safe Bulgarian U
 await check('[28] Direct Personal button layout is mobile/desktop overflow-safe', () => {
   assert(renderTopics.includes('class="topic-message-author-row"'), 'author header row wrapper missing')
   assert(renderTopics.includes('class="topic-message-author-meta"'), 'author metadata wrapper missing')
+  assert(renderTopics.includes('function renderTopicMetaRow'), 'root/thread/reply rows must share a dedicated meta/control row renderer')
+  assert(renderTopics.includes('class="topic-root-meta-row"'), 'meta row class missing')
+  assert(renderTopics.includes('class="topic-root-activity-time"'), 'relative time must have its own meta row slot')
+  assert(renderTopics.includes('class="topic-root-meta-actions"'), 'meta actions wrapper missing')
+  assert(!renderTopics.includes('showPersonalButton'), 'author header must never keep a Personal-button escape hatch, it always lives in the meta row')
   assert(renderTopics.includes('class="topic-message-personal-btn"'), 'Personal button class missing')
   assert(renderTopics.includes('topicsPersonalMessagePendingProfileId === senderProfileId'), 'Personal button must expose pending disabled state')
   assert(renderTopics.includes('.topic-message-personal-btn:disabled'), 'Personal button disabled style missing')
+  assert(renderTopics.includes('.topic-root-card-has-unread .topic-message-author-row'), 'unread root cards must reserve header space for the top-right badge')
+  assert(!renderTopics.includes('Активност:'), 'General root activity text must not include the Активност: prefix')
   assert(renderTopics.includes('overflow:hidden;text-overflow:ellipsis;white-space:nowrap'), 'author name must keep overflow guard')
   assert(renderTopics.includes('@media (hover: none) and (pointer: coarse)'), 'mobile touch media query must keep layout safe')
 })
@@ -570,6 +577,87 @@ await check('[30] Failed new Direct Personal start does not leave Personal detai
   assert(controller.includes('state.topicsInfoToast = null'), 'returning to Topics stream must clear stale transient inline toast')
   assert(controller.includes("state.topicsMode = 'topics'"), 'cleanup must run on Topics stream/list return paths')
   assert(controller.includes("state.topicsPersonalView = 'list'"), 'returning to Topics must leave Personal detail view')
+})
+
+await check('[31] Thread root header and thread replies move Personal/edit controls into the shared meta row without duplicating them', () => {
+  const baseState = createRenderState()
+
+  const foreignThreadRoot = {
+    seq: 1,
+    messageId: 'thread-root-foreign',
+    topicId: 'topic-general',
+    parentMessageId: null,
+    senderProfileId: 'other-profile',
+    senderDisplayName: 'Other Player',
+    senderAvatarUrl: null,
+    senderRole: 'player',
+    body: 'THREAD_ROOT_FOREIGN',
+    createdAt: '2026-08-12T09:00:00.000Z',
+    lastActivityAt: '2026-08-12T09:05:00.000Z',
+    unreadCount: 0,
+    deletedAt: null,
+    editedAt: null,
+    attachment: null,
+    replyCount: 1,
+    likeCount: 0,
+    viewerHasLiked: false,
+  }
+  const foreignRootHtml = renderTopicMessageRow(baseState, foreignThreadRoot as any, { variant: 'thread' })
+  const foreignRootMetaIndex = foreignRootHtml.indexOf('class="topic-root-meta-row"')
+  assert(foreignRootMetaIndex !== -1, 'thread root must render the shared meta row')
+  assert((foreignRootHtml.match(/Лично<\/button>/g) ?? []).length === 1, '[G] thread root Personal button must not be duplicated')
+  assert(foreignRootHtml.indexOf('Лично</button>') > foreignRootMetaIndex, '[B] thread root Personal button for foreign author must live inside the meta row, not the header')
+  assert(!foreignRootHtml.includes('data-topic-message-edit="thread-root-foreign"'), 'foreign thread root must not expose an owner edit pencil')
+  assert(!foreignRootHtml.slice(0, foreignRootMetaIndex).includes('Лично'), '[A] thread root header must not render Personal even for a foreign author')
+
+  const ownThreadRoot = { ...foreignThreadRoot, messageId: 'thread-root-own', senderProfileId: 'viewer', senderDisplayName: 'Viewer', createdAt: new Date().toISOString(), lastActivityAt: new Date().toISOString(), replyCount: 0 }
+  const ownRootHtml = renderTopicMessageRow(baseState, ownThreadRoot as any, { variant: 'thread' })
+  const ownRootMetaIndex = ownRootHtml.indexOf('class="topic-root-meta-row"')
+  assert(!ownRootHtml.includes('Лично'), '[A] own thread root must never show Personal, in header or meta row')
+  assert(!ownRootHtml.slice(0, ownRootMetaIndex).includes('data-topic-message-edit='), 'thread root header must not render the edit pencil, only the meta row does')
+  const ownRootPencilIndex = ownRootHtml.indexOf('data-topic-message-edit="thread-root-own"')
+  assert(ownRootPencilIndex !== -1 && ownRootPencilIndex > ownRootMetaIndex, 'own thread root edit pencil must live in the meta row when allowed')
+  assert((ownRootHtml.match(/data-topic-message-edit="thread-root-own"/g) ?? []).length === 1, '[G] thread root edit pencil must not be duplicated')
+
+  const foreignReply = {
+    seq: 2,
+    messageId: 'reply-foreign',
+    topicId: 'topic-general',
+    parentMessageId: 'thread-root-foreign',
+    senderProfileId: 'other-profile',
+    senderDisplayName: 'Other Player',
+    senderAvatarUrl: null,
+    senderRole: 'player',
+    body: 'REPLY_FOREIGN',
+    createdAt: '2026-08-12T09:10:00.000Z',
+    editedAt: null,
+    likeCount: 0,
+    viewerHasLiked: false,
+    attachment: null,
+  }
+  const foreignReplyHtml = renderTopicReplyRow(baseState, foreignReply as any)
+  const foreignReplyMetaIndex = foreignReplyHtml.indexOf('class="topic-root-meta-row"')
+  assert(foreignReplyMetaIndex !== -1, 'reply must render the shared meta row')
+  assert((foreignReplyHtml.match(/Лично<\/button>/g) ?? []).length === 1, '[G] reply Personal button must not be duplicated')
+  assert(foreignReplyHtml.indexOf('Лично</button>') > foreignReplyMetaIndex, '[D] foreign reply Personal button must live in the meta row')
+  assert(!foreignReplyHtml.slice(0, foreignReplyMetaIndex).includes('Лично'), '[C] reply header must not render Personal even for a foreign author')
+  assert(!foreignReplyHtml.includes('data-topic-message-edit="reply-foreign"'), 'foreign reply must not expose an owner edit pencil')
+
+  const ownReply = { ...foreignReply, messageId: 'reply-own', senderProfileId: 'viewer', senderDisplayName: 'Viewer', createdAt: new Date().toISOString() }
+  const ownReplyHtml = renderTopicReplyRow(baseState, ownReply as any)
+  const ownReplyMetaIndex = ownReplyHtml.indexOf('class="topic-root-meta-row"')
+  assert(!ownReplyHtml.includes('Лично'), '[E] own reply must never show Personal')
+  assert(!ownReplyHtml.slice(0, ownReplyMetaIndex).includes('data-topic-message-edit='), 'reply header must not render the edit pencil, only the meta row does')
+  const ownReplyPencilIndex = ownReplyHtml.indexOf('data-topic-message-edit="reply-own"')
+  assert(ownReplyPencilIndex !== -1 && ownReplyPencilIndex > ownReplyMetaIndex, '[F] own editable reply must show the edit pencil inside the meta row')
+  assert((ownReplyHtml.match(/data-topic-message-edit="reply-own"/g) ?? []).length === 1, '[G] reply edit pencil must not be duplicated')
+})
+
+await check('[32] Denied pencil toast UX ([H]) is unaffected by moving the pencil into the meta row', () => {
+  assert(renderTopics.includes('data-topic-message-edit-blocked="1"'), 'blocked edit data attribute missing')
+  assert(renderTopics.includes('data-topic-message-edit-denied-reason'), 'blocked edit denied reason data attribute missing')
+  assert(renderLobby.includes('options.onTopicsInfoToast(reason)'), 'blocked edit click must still open the canonical Topics toast')
+  assert(controller.includes('function showTopicsInfoToast(text: string): void'), 'controller must still expose the canonical Topics toast helper')
 })
 
 console.log('PASS topics personal integration client checks')

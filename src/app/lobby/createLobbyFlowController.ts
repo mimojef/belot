@@ -3697,6 +3697,9 @@ export function createLobbyFlowController(
       onTopicMessageEditClick: (topicId, messageId) => {
         openTopicMessageEditor(topicId, messageId)
       },
+      onTopicsInfoToast: (text) => {
+        showTopicsInfoToast(text)
+      },
       onTopicMessageEditInput: (messageId, value) => {
         updateTopicMessageEditDraft(messageId, value)
       },
@@ -5479,6 +5482,17 @@ export function createLobbyFlowController(
     if (state.topicMessageDeleteBusy) return
     state.topicMessageDeleteConfirm = null
     render()
+  }
+
+  function showTopicsInfoToast(text: string): void {
+    state.topicsInfoToast = { text }
+    render()
+    window.setTimeout(() => {
+      if (state.topicsInfoToast?.text === text) {
+        state.topicsInfoToast = null
+        render()
+      }
+    }, 3000)
   }
 
   async function confirmTopicMessageDelete(): Promise<void> {

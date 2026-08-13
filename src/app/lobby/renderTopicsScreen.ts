@@ -215,8 +215,8 @@ function renderTopicMessageDeleteButton(
       data-topic-message-delete-is-moderator-action="${isModeratorAction ? '1' : '0'}"
       class="topic-message-action-btn"
       aria-label="Изтрий"
-      data-tooltip="${isBlockedOwnRootWithReplies ? 'Не можете да изтриете публикация, към която вече има отговори.' : 'Изтрий'}"
-      ${isBlockedOwnRootWithReplies ? 'aria-disabled="true" data-topic-message-delete-blocked="1"' : ''}
+      data-tooltip="${isBlockedOwnRootWithReplies ? 'Не можете да изтриете собствена тема, в която вече има отговори.' : 'Изтрий'}"
+      ${isBlockedOwnRootWithReplies ? 'aria-disabled="true" data-topic-message-delete-blocked="1" data-topic-message-delete-denied-reason="Не можете да изтриете собствена тема, в която вече има отговори."' : ''}
       style="${isBlockedOwnRootWithReplies ? 'opacity:0.4;cursor:not-allowed;' : ''}"
     >${renderTopicActionIcon('delete')}</button>
   `
@@ -239,7 +239,7 @@ function renderTopicMessageEditButton(
   const blockedReason = isLocked
     ? 'Темата е заключена.'
     : hasLiveReplies
-      ? 'Не можете да редактирате публикация, към която вече има отговори.'
+      ? 'Не можете да редактирате тема, в която вече има отговори.'
       : isExpired
         ? 'Времето за редакция изтече.'
         : null
@@ -251,7 +251,7 @@ function renderTopicMessageEditButton(
       class="topic-message-action-btn"
       aria-label="Редактирай"
       data-tooltip="${escapeHtml(blockedReason ?? 'Редактирай')}"
-      ${blockedReason ? 'aria-disabled="true" data-topic-message-edit-blocked="1"' : ''}
+      ${blockedReason ? `aria-disabled="true" data-topic-message-edit-blocked="1" data-topic-message-edit-denied-reason="${escapeHtml(blockedReason)}"` : ''}
       style="${blockedReason ? 'opacity:0.4;cursor:not-allowed;' : ''}"
     >${renderTopicActionIcon('edit')}</button>
   `
@@ -291,7 +291,14 @@ function renderTopicMessageEditForm(state: LobbyScreenState, messageId: string):
   `
 }
 
-function renderTopicAuthorBlock(state: LobbyScreenState, senderProfileId: string, senderDisplayName: string, senderAvatarUrl: string | null, createdAt: string, editedAt: string | null): string {
+function renderTopicAuthorBlock(
+  state: LobbyScreenState,
+  senderProfileId: string,
+  senderDisplayName: string,
+  senderAvatarUrl: string | null,
+  createdAt: string,
+  editedAt: string | null,
+): string {
   // MUTE/UNMUTE compact icon бутон — само за модератор, само за активната
   // тема (mute е topic-specific, брифа т.4), скрит за собствения профил на
   // viewer-a (модератор не мутира себе си). Не претрупва обикновения
@@ -299,7 +306,9 @@ function renderTopicAuthorBlock(state: LobbyScreenState, senderProfileId: string
   const ownProfileId = state.profile.profileId
   const canModerateThisAuthor = state.isTopicModerator && state.activeTopicId !== null && senderProfileId !== ownProfileId
   const isMuteStatusLoading = state.topicMuteStatusLoadingProfileId === senderProfileId
-  const personalMessageButton = renderTopicPersonalMessageButton(state, senderProfileId, senderDisplayName)
+  // "Лично" живее единствено в долния meta row (renderTopicMetaRow) — за
+  // ВСИЧКИ контексти (general root, thread root header, replies), не само
+  // за root картите. Header-ът показва само avatar + име + timestamp.
   const muteControl = canModerateThisAuthor
     ? `
       <button
@@ -334,7 +343,34 @@ function renderTopicAuthorBlock(state: LobbyScreenState, senderProfileId: string
           <span style="font-size:12px;color:rgba(248,250,252,0.42);white-space:nowrap;">${formatTopicMessageTime(createdAt)}${editedAt !== null ? ' · редактирано' : ''}</span>
           ${muteControl}
         </div>
-        ${personalMessageButton}
+      </div>
+    </div>
+  `
+}
+
+// Долен meta row — reused за general root карти, thread root header и
+// replies (виж брифа "root/thread layout"): relative time вляво, edit
+// pencil (ако е allowed) + "Лично" (ако е allowed) вдясно. За root
+// съобщения relativeTimeIso = lastActivityAt (activity semantics
+// непроменени); за replies = createdAt (нямат lastActivityAt поле).
+function renderTopicMetaRow(
+  state: LobbyScreenState,
+  messageId: string,
+  isRoot: boolean,
+  senderProfileId: string,
+  senderDisplayName: string,
+  createdAt: string,
+  replyCount: number,
+  relativeTimeIso: string,
+): string {
+  return `
+    <div class="topic-root-meta-row">
+      <span data-topic-message-last-activity="${escapeHtml(messageId)}" class="topic-root-activity-time">
+        ${escapeHtml(formatTopicActivityTime(relativeTimeIso))}
+      </span>
+      <div class="topic-root-meta-actions">
+        ${renderTopicMessageEditButton(state, messageId, isRoot, senderProfileId, createdAt, replyCount)}
+        ${renderTopicPersonalMessageButton(state, senderProfileId, senderDisplayName)}
       </div>
     </div>
   `
@@ -491,9 +527,9 @@ export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySn
         ${reply.attachment ? renderTopicAttachment(reply.attachment, state.apiBaseUrl) : ''}
         <div style="margin-top:2px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
           ${renderTopicLikeButton(state, reply.messageId, reply.likeCount, reply.viewerHasLiked)}
-          ${renderTopicMessageEditButton(state, reply.messageId, false, reply.senderProfileId, reply.createdAt, 0)}
           ${renderTopicMessageDeleteButton(state, reply.messageId, false, reply.senderProfileId, 0)}
         </div>
+        ${renderTopicMetaRow(state, reply.messageId, false, reply.senderProfileId, reply.senderDisplayName, reply.createdAt, 0, reply.createdAt)}
       </div>
     </div>
   `
@@ -581,7 +617,7 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
     ? ''
     : `data-topic-card-open="${escapeHtml(message.messageId)}" role="button" tabindex="0" aria-label="Отвори разговора"`
   return `
-    <div data-topic-message="${escapeHtml(message.messageId)}" ${cardOpenAttrs} class="topic-root-card${isThread ? ' topic-root-card-thread' : ' topic-root-card-clickable'}">
+    <div data-topic-message="${escapeHtml(message.messageId)}" ${cardOpenAttrs} class="topic-root-card${isThread ? ' topic-root-card-thread' : ' topic-root-card-clickable'}${threadUnreadBadge !== null ? ' topic-root-card-has-unread' : ''}">
       ${threadUnreadBadge !== null ? `<span data-topic-thread-unread-badge="${escapeHtml(message.messageId)}" aria-label="${escapeHtml(`${message.unreadCount} непрочетени в разговора`)}" style="position:absolute;top:10px;right:10px;min-width:20px;height:20px;border-radius:10px;background:#ef4444;color:#fff;font-size:11px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;line-height:1;box-shadow:0 0 0 2px rgba(0,0,0,0.72);z-index:1;">${escapeHtml(threadUnreadBadge)}</span>` : ''}
       <div style="display:flex;align-items:flex-start;gap:10px;padding:12px 12px 0;">
         ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt)}
@@ -595,12 +631,9 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
         <div style="margin-top:6px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
           ${renderTopicLikeButton(state, message.messageId, message.likeCount, message.viewerHasLiked)}
           ${renderTopicReplyButton(message.messageId, message.replyCount)}
-          ${renderTopicMessageEditButton(state, message.messageId, true, message.senderProfileId, message.createdAt, message.replyCount)}
           ${renderTopicMessageDeleteButton(state, message.messageId, true, message.senderProfileId, message.replyCount)}
         </div>
-        <div data-topic-message-last-activity="${escapeHtml(message.messageId)}" style="margin-top:2px;font-size:11px;font-weight:700;color:rgba(248,250,252,0.38);line-height:1.2;">
-          Активност: ${escapeHtml(formatTopicActivityTime(message.lastActivityAt))}
-        </div>
+        ${renderTopicMetaRow(state, message.messageId, true, message.senderProfileId, message.senderDisplayName, message.createdAt, message.replyCount, message.lastActivityAt)}
       </div>
     </div>
   `
@@ -697,6 +730,9 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
         outline:2px solid rgba(212,165,32,0.72);
         outline-offset:2px;
       }
+      .topic-root-card-has-unread .topic-message-author-row {
+        padding-right:48px;
+      }
       .topic-message-author-row {
         display:flex;
         align-items:center;
@@ -738,6 +774,34 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
         color:#d8b85a;
         background:rgba(212,165,32,0.05);
       }
+      .topic-root-meta-row {
+        margin-top:4px;
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap:8px;
+        min-width:0;
+      }
+      .topic-root-activity-time {
+        flex:1 1 auto;
+        min-width:0;
+        overflow:hidden;
+        text-overflow:ellipsis;
+        white-space:nowrap;
+        font-size:11px;
+        font-weight:700;
+        color:rgba(248,250,252,0.38);
+        line-height:1.2;
+      }
+      .topic-root-meta-actions {
+        flex:0 1 auto;
+        min-width:0;
+        display:flex;
+        align-items:center;
+        justify-content:flex-end;
+        gap:6px;
+        flex-wrap:wrap;
+      }
       /* Active liked state — ясно различимо (Pika.bg gold accent + filled
          heart glyph), но остава в icon-only стилистиката (Етап 3 брифа: "Не
          искам постоянния текст «Харесай»"). */
@@ -749,6 +813,8 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
         .topic-message-author-row { align-items:flex-start; }
         .topic-message-author-meta { flex-wrap:wrap; row-gap:2px; }
         .topic-message-personal-btn { min-height:30px; padding:0 10px; }
+        .topic-root-meta-row { align-items:center; }
+        .topic-root-meta-actions { gap:4px; }
       }
       /* Desktop hover/keyboard-focus tooltip — reuse на established
          Pika.bg icon-only tooltip pattern (виж .lobby-nav-btn-icon-only в

@@ -264,6 +264,7 @@ try {
       assert((await getActivityText(page, 'root-hour')).includes('Преди 2 ч.'), 'expected hours label')
       assert((await getActivityText(page, 'root-day')).includes('Преди 3 д.'), 'expected days label')
       assert((await getActivityText(page, 'root-old-date')).includes('06.08.'), 'expected compact date label')
+      assert(!(await getActivityText(page, 'root-min')).includes('Активност:'), 'activity presentation must not include the Активност: prefix')
     })
   })
 

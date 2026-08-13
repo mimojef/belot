@@ -63,11 +63,24 @@ await check('[3.1] edit action icon is deterministic SVG, not Unicode pencil', (
 
 await check('[4] blocked edit states are visible and do not use native disabled', () => {
   assert(renderTopics.includes('data-topic-message-edit-blocked="1"'), 'blocked edit data attribute missing')
-  assert(renderTopics.includes('Не можете да редактирате публикация, към която вече има отговори.'), 'root replies message missing')
+  assert(renderTopics.includes('data-topic-message-edit-denied-reason'), 'blocked edit denied reason data attribute missing')
+  assert(renderTopics.includes('Не можете да редактирате тема, в която вече има отговори.'), 'root replies message missing')
   assert(renderTopics.includes('Времето за редакция изтече.'), 'expired message missing')
   assert(renderTopics.includes('Темата е заключена.'), 'locked message missing')
   const editButtonBlock = renderTopics.slice(renderTopics.indexOf('function renderTopicMessageEditButton'), renderTopics.indexOf('function renderTopicMessageEditForm'))
   assert(!editButtonBlock.includes(' disabled'), 'blocked edit button should not use native disabled')
+})
+
+await check('[4.1] blocked edit click opens canonical Topics toast and does not open editor', () => {
+  assert(renderLobby.includes('btn.dataset.topicMessageEditDeniedReason'), 'blocked edit click must read exact denied reason')
+  assert(renderLobby.includes('options.onTopicsInfoToast(reason)'), 'blocked edit click must open Topics info toast')
+  const editClickBlock = renderLobby.match(/root\.querySelectorAll<HTMLButtonElement>\('\[data-topic-message-edit\]'\)[\s\S]*?\n  \}\)/)?.[0] ?? ''
+  const blockedIndex = editClickBlock.indexOf("btn.dataset.topicMessageEditBlocked === '1'")
+  const toastIndex = editClickBlock.indexOf('options.onTopicsInfoToast(reason)')
+  const callbackIndex = editClickBlock.indexOf('options.onTopicMessageEditClick')
+  assert(blockedIndex !== -1 && toastIndex !== -1 && callbackIndex !== -1 && blockedIndex < toastIndex && toastIndex < callbackIndex, 'blocked edit toast must happen before edit callback')
+  assert(controller.includes('function showTopicsInfoToast(text: string): void'), 'controller must expose canonical Topics toast helper')
+  assert(controller.includes('window.setTimeout(() => {'), 'Topics toast helper must auto-hide')
 })
 
 await check('[5] inline editor has textarea, cancel/save, preserves attachment rendering outside editor', () => {

@@ -65,16 +65,21 @@ check('[3] ordinary owner root with replies is visible but blocked', () => {
   assert(deleteButtonFn.includes('!isModerator && isOwner && isRoot && replyCount > 0'), 'must detect blocked own root with live replies')
   assert(deleteButtonFn.includes('aria-disabled="true"'), 'blocked control must use aria-disabled, not native disabled')
   assert(deleteButtonFn.includes('data-topic-message-delete-blocked="1"'), 'blocked control must be marked for click guard')
-  assert(deleteButtonFn.includes('Не можете да изтриете публикация, към която вече има отговори.'), 'blocked explanation text must be present')
+  assert(deleteButtonFn.includes('data-topic-message-delete-denied-reason="Не можете да изтриете собствена тема, в която вече има отговори."'), 'blocked toast explanation text must be present')
 })
 
-check('[4] blocked tap/click shows explanation and sends no DELETE request', () => {
+check('[4] blocked tap/click shows toast explanation and sends no DELETE request', () => {
   assert(deleteClickBlock.includes("btn.dataset.topicMessageDeleteBlocked === '1'"), 'click handler must branch for blocked controls')
   assert(deleteClickBlock.includes("btn.dataset.tooltipOpen = '1'"), 'blocked click must explicitly open tooltip for touch/mobile')
+  assert(deleteClickBlock.includes('btn.dataset.topicMessageDeleteDeniedReason'), 'blocked click must read exact denied reason')
+  assert(deleteClickBlock.includes('options.onTopicsInfoToast(reason)'), 'blocked click must open canonical Topics info toast')
   assert(deleteClickBlock.includes('return'), 'blocked branch must return before invoking onTopicMessageDeleteClick')
   const blockedBranchIndex = deleteClickBlock.indexOf("btn.dataset.topicMessageDeleteBlocked === '1'")
+  const toastIndex = deleteClickBlock.indexOf('options.onTopicsInfoToast(reason)')
   const callbackIndex = deleteClickBlock.indexOf('options.onTopicMessageDeleteClick')
   assert(blockedBranchIndex !== -1 && callbackIndex !== -1 && blockedBranchIndex < callbackIndex, 'blocked branch must run before callback')
+  assert(toastIndex !== -1 && blockedBranchIndex < toastIndex && toastIndex < callbackIndex, 'blocked toast must run before delete callback')
+  assert(controllerSrc.includes('function showTopicsInfoToast(text: string): void'), 'controller must expose canonical Topics toast helper')
 })
 
 check('[5] tooltip CSS supports mobile/touch open state', () => {
