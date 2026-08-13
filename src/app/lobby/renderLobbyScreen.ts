@@ -3186,8 +3186,10 @@ export function getTopicsPersonalUnreadRaw(state: LobbyScreenState): number {
 }
 
 export function getTopicsMessagesUnreadRaw(state: LobbyScreenState): number {
-  return (state.topics ?? [])
-    .reduce((total, topic) => total + normalizeNotificationBadgeCount(topic.unreadCount ?? 0), 0)
+  const generalTopic = (state.topics ?? []).find((topic) =>
+    topic.isGeneral || topic.topicId === 'topic-general' || topic.slug === 'general',
+  )
+  return normalizeNotificationBadgeCount(generalTopic?.unreadCount ?? 0)
 }
 
 export function getTopicsTotalUnreadRaw(state: LobbyScreenState): number {
@@ -10310,13 +10312,6 @@ export function renderLobbyScreen(
     .querySelector<HTMLButtonElement>('[data-topics-personal-conversation-back="1"]')
     ?.addEventListener('click', options.onTopicsPersonalConversationBack)
 
-  root.querySelectorAll<HTMLButtonElement>('[data-topic-chip]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const topicId = button.dataset.topicChip ?? ''
-      if (topicId) options.onTopicChipClick(topicId)
-    })
-  })
-
   root.querySelectorAll<HTMLButtonElement>('[data-topics-back-to-general="1"]').forEach((button) => {
     button.addEventListener('click', () => {
       options.onTopicsBackToGeneral()
@@ -10346,69 +10341,6 @@ export function renderLobbyScreen(
         options.onTopicMessagesLoadOlder()
       }
     })
-  }
-
-  const topicsScreenRoot = root.querySelector<HTMLElement>('[data-topics-screen="1"]')
-  const topicsBarScroll = root.querySelector<HTMLElement>('[data-topics-bar-scroll="1"]')
-  const topicsArrowLeft = root.querySelector<HTMLButtonElement>('[data-topics-arrow="left"]')
-  const topicsArrowRight = root.querySelector<HTMLButtonElement>('[data-topics-arrow="right"]')
-
-  if (topicsBarScroll) {
-    const TOPICS_ARROW_SCROLL_STEP_PX = 160
-    const TOPICS_EDGE_EPSILON_PX = 2
-
-    function updateTopicsArrowState(): void {
-      if (!topicsBarScroll) return
-      const maxScrollLeft = topicsBarScroll.scrollWidth - topicsBarScroll.clientWidth
-      const atStart = topicsBarScroll.scrollLeft <= TOPICS_EDGE_EPSILON_PX
-      const atEnd = topicsBarScroll.scrollLeft >= maxScrollLeft - TOPICS_EDGE_EPSILON_PX
-      if (topicsArrowLeft) topicsArrowLeft.disabled = atStart
-      if (topicsArrowRight) topicsArrowRight.disabled = atEnd || maxScrollLeft <= 0
-    }
-
-    // Wheel routing (т.7 от брифа): нормален vertical wheel ВСЯКЪДЕ в Topics
-    // screen-а — заглавие, topics bar, празно място между fixed-top и
-    // stream-а — трябва да скролва message stream-а, НЕ да мести topics
-    // strip-а хоризонтално, НЕ да chain-ва към page/lobby root. Attach-нато
-    // на data-topics-screen (целия екран), не само на bar-а, за да покрие
-    // цялата "fixed top" зона с едно място — bubble-натите wheel events от
-    // header/bar/empty space стигат тук. data-topic-messages-scroll вече
-    // си има native overflow-y:auto — не е нужен routing върху него самия
-    // (естественият browser scroll там вече върши правилното нещо), затова
-    // изрично го изключваме от target-а тук, за да не дублираме handling.
-    //
-    // Истинско horizontal действие (trackpad deltaX, Shift+wheel — браузърите
-    // превръщат Shift+wheel в deltaX естествено) продължава да движи topics
-    // strip-а нормално, без preventDefault. Локално само за Topics screen-а
-    // — не пипа wheel поведението никъде другаде в приложението.
-    topicsScreenRoot?.addEventListener('wheel', (event) => {
-      const target = event.target as HTMLElement | null
-      if (target?.closest('[data-topic-messages-scroll="1"]')) return
-
-      const isPrimarilyVertical = Math.abs(event.deltaY) > Math.abs(event.deltaX)
-      if (!isPrimarilyVertical) return
-
-      event.preventDefault()
-      if (topicMessagesScroll) {
-        topicMessagesScroll.scrollTop += event.deltaY
-      }
-    }, { passive: false })
-
-    topicsBarScroll.addEventListener('scroll', () => {
-      updateTopicsArrowState()
-    }, { passive: true })
-
-    topicsArrowLeft?.addEventListener('click', () => {
-      topicsBarScroll.scrollBy({ left: -TOPICS_ARROW_SCROLL_STEP_PX, behavior: 'smooth' })
-    })
-    topicsArrowRight?.addEventListener('click', () => {
-      topicsBarScroll.scrollBy({ left: TOPICS_ARROW_SCROLL_STEP_PX, behavior: 'smooth' })
-    })
-
-    // Начално състояние (след render/resize/topic switch) — arrow disabled
-    // атрибутите в markup-а са статични ("disabled" always в render-а),
-    // трябва реално измерена проверка веднага след DOM-ът е в документа.
-    updateTopicsArrowState()
   }
 
   // ─── Composer (Етап 2) ───────────────────────────────────────────────────
@@ -10645,12 +10577,6 @@ export function renderLobbyScreen(
       }
     }
   }
-
-  // ─── UI polish pass: create-topic "скоро" toast wiring ──────────────────
-  // Все още неимплементирано (Етап 4) — само UI feedback, без backend/state.
-  root.querySelector<HTMLButtonElement>('[data-topics-create="1"]')?.addEventListener('click', () => {
-    options.onTopicCreateClick()
-  })
 
   // ─── Likes (Етап 3) — реален toggle, per-message data attribute ─────────
   root.querySelectorAll<HTMLButtonElement>('[data-topic-message-like]').forEach((btn) => {

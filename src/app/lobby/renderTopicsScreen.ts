@@ -95,173 +95,6 @@ function renderMessageAvatar(senderDisplayName: string, senderAvatarUrl: string 
   `
 }
 
-function renderTopicsBarChip(topic: { topicId: string; title: string; isGeneral: boolean; unreadCount?: number }, isActive: boolean): string {
-  const activeStyle = isActive
-    ? 'background:rgba(212,165,32,0.16);border-color:#d4a520;color:#d4a520;'
-    : 'background:rgba(255,255,255,0.04);border-color:rgba(255,255,255,0.12);color:rgba(248,250,252,0.78);'
-  const unreadBadge = isActive ? null : formatTopicUnreadBadgeCount(topic.unreadCount ?? 0)
-
-  return `
-    <button
-      type="button"
-      data-topic-chip="${escapeHtml(topic.topicId)}"
-      class="topic-chip"
-      ${isActive ? 'data-active="1"' : ''}
-      style="
-        flex:0 0 auto;
-        display:inline-flex;
-        align-items:center;
-        gap:6px;
-        padding:0 14px;
-        border-radius:8px;
-        border:1px solid;
-        ${activeStyle}
-        font-size:13px;
-        font-weight:800;
-        white-space:nowrap;
-        cursor:pointer;
-        scroll-snap-align:start;
-      "
-    ><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(topic.title)}</span>${unreadBadge !== null ? `<span class="topic-unread-badge">${escapeHtml(unreadBadge)}</span>` : ''}</button>
-  `
-}
-
-function renderTopicsArrowControl(direction: 'left' | 'right'): string {
-  // Скрити на touch devices (там навигацията е чрез swipe, виж CSS правилото
-  // по-долу) — видими само за mouse/desktop layout. disabled по подразбиране
-  // при render; enable/disable state-ът се управлява от JS wiring
-  // (updateTopicsArrowState в renderLobbyScreen.ts) спрямо реалната
-  // scrollLeft/scrollWidth позиция, не статично.
-  const isLeft = direction === 'left'
-  return `
-    <button
-      type="button"
-      data-topics-arrow="${direction}"
-      class="topics-arrow-control"
-      aria-label="${isLeft ? 'Превърти темите наляво' : 'Превърти темите надясно'}"
-      disabled
-      style="
-        flex:0 0 auto;
-        align-items:center;
-        justify-content:center;
-        width:24px;
-        height:36px;
-        border:0;
-        background:transparent;
-        color:rgba(248,250,252,0.62);
-        cursor:pointer;
-        font-size:16px;
-        line-height:1;
-      "
-    >${isLeft ? '&#8249;' : '&#8250;'}</button>
-  `
-}
-
-function renderTopicsBar(state: LobbyScreenState): string {
-  const topics = state.topics ?? []
-
-  // Структура: outer flex row (data-topics-bar-row, НЕ scroll-ва) съдържа
-  // "+" (flex:0 0 auto, извън scroll flow-а на чиповете), опционални ‹ ›
-  // arrow controls (desktop/mouse само), и inner horizontal-scroll
-  // container (data-topics-bar-scroll) само за реалните topic chips. "+"
-  // никога не участва в horizontal scroll/snap/wheel movement.
-  return `
-    <style>
-      /* Desktop може да остане по-компактен (36px); mobile изисква ~44px
-         effective touch target (т.5 от корекциите) без визуално да изглежда
-         прекалено голямо — само height/width растат, padding/font остават. */
-      .topic-chip, .topic-create-chip { height:36px; }
-      .topic-create-chip { width:42px; }
-      @media (hover: none) and (pointer: coarse) {
-        .topic-chip, .topic-create-chip { height:44px; }
-        .topic-create-chip { width:48px; }
-      }
-      /* Native horizontal scrollbar скрит cross-browser — swipe/wheel/arrow
-         навигацията остава напълно функционална, само визуалният scrollbar
-         (който преди се показваше върху/под chips-овете) изчезва. */
-      [data-topics-bar-scroll] { scrollbar-width: none; }
-      [data-topics-bar-scroll]::-webkit-scrollbar { display: none; }
-      /* Arrow controls са за mouse/desktop навигация — на реални touch
-         устройства потребителят вече swipe-ва директно, стрелките само биха
-         отнели ширина без полза. */
-      .topics-arrow-control { display: inline-flex; }
-      @media (hover: none) and (pointer: coarse) {
-        .topics-arrow-control { display: none; }
-      }
-      .topics-arrow-control:disabled { opacity: 0.25; cursor: default; }
-      .topics-arrow-control:not(:disabled):hover { color: #d4a520; }
-      .topic-create-chip:hover { filter:brightness(1.12); }
-      .topic-create-chip:active { filter:brightness(0.95); }
-      .topic-unread-badge {
-        min-width:18px;
-        height:18px;
-        border-radius:9px;
-        background:#ef4444;
-        color:#ffffff;
-        padding:0 5px;
-        display:inline-flex;
-        align-items:center;
-        justify-content:center;
-        font-size:10px;
-        font-weight:900;
-        line-height:1;
-        flex:0 0 auto;
-        box-sizing:border-box;
-      }
-    </style>
-    <div
-      data-topics-bar-row="1"
-      style="
-        display:flex;
-        align-items:center;
-        gap:8px;
-        min-width:0;
-        padding:12px 4px 8px;
-      "
-    >
-      <button
-        type="button"
-        data-topics-create="1"
-        class="topic-create-chip"
-        aria-label="Нова тема"
-        style="
-          flex:0 0 auto;
-          display:inline-flex;
-          align-items:center;
-          justify-content:center;
-          border-radius:8px;
-          border:1px solid rgba(74,222,128,0.4);
-          background:linear-gradient(135deg,#22c55e 0%,#16a34a 100%);
-          color:#ffffff;
-          font-size:18px;
-          font-weight:900;
-          cursor:pointer;
-          margin-right:2px;
-          box-shadow:0 2px 8px rgba(34,197,94,0.35);
-        "
-      >+</button>
-      ${renderTopicsArrowControl('left')}
-      <div
-        data-topics-bar-scroll="1"
-        style="
-          flex:1;
-          min-width:0;
-          display:flex;
-          align-items:center;
-          gap:8px;
-          overflow-x:auto;
-          overflow-y:hidden;
-          -webkit-overflow-scrolling:touch;
-          scroll-snap-type:x proximity;
-        "
-      >
-        ${topics.map((topic) => renderTopicsBarChip(topic, topic.topicId === state.activeTopicId)).join('')}
-      </div>
-      ${renderTopicsArrowControl('right')}
-    </div>
-  `
-}
-
 // Like бутон — icon-only (♡/♥), с малък числов counter до иконата (Етап 3
 // брифа: "До иконата трябва да може да се показва малък числов counter",
 // "Не искам постоянния текст «Харесай»" — само tooltip, не visible label).
@@ -789,8 +622,8 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
       /* Like/Reply — само икона (без постоянен текст), второстепенни спрямо
          съобщението (приглушен цвят), но с реална tap/click зона по-голяма
          от самата глифа (padding) — desktop ~38px effective размер, mobile
-         ~44px (media query), огледално на .topic-chip/.topic-create-chip
-         конвенцията за touch target-и. position:relative тук е anchor-ът за
+         ~44px (media query), съобразено с touch target конвенцията.
+         position:relative тук е anchor-ът за
          ::after tooltip-а по-долу (същия pattern като
          .lobby-nav-btn-icon-only в renderNav — виж коментара там). */
       .topic-message-action-btn {
@@ -1445,6 +1278,13 @@ function renderTopicModerationBanners(state: LobbyScreenState): string {
 
 function renderTopicsHeader(state: LobbyScreenState): string {
   const activeTopic = (state.topics ?? []).find((t) => t.topicId === state.activeTopicId) ?? null
+  const generalTopic = (state.topics ?? []).find((t) => t.isGeneral || t.topicId === 'topic-general' || t.slug === 'general') ?? null
+  const isGeneralActive = activeTopic?.isGeneral ?? false
+  const generalUnreadTotal = generalTopic?.unreadCount ?? 0
+  const generalUnreadBadge = formatTopicUnreadBadgeCount(generalUnreadTotal)
+  const generalButtonStyle = isGeneralActive
+    ? 'border-color:#d4a520;background:rgba(212,165,32,0.16);color:#d4a520;'
+    : 'border-color:rgba(212,165,32,0.34);background:#050505;color:#f8fafc;'
   const personalUnreadTotal = getPersonalChatUnreadTotal(state)
   const personalUnreadBadge = formatPersonalChatUnreadBadgeCount(personalUnreadTotal)
 
@@ -1464,34 +1304,42 @@ function renderTopicsHeader(state: LobbyScreenState): string {
     `
   }
 
-  const showGeneralBack = activeTopic !== null && !activeTopic.isGeneral
-
   return `
-    <div data-topics-header-row="1" style="display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;">
+    <div data-topics-header-row="1" style="display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;">
       <div style="display:flex;align-items:center;gap:10px;min-width:0;">
-        ${showGeneralBack ? `
-          <button type="button" data-topics-back-to-general="1" aria-label="Назад към Общ чат" style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;font-size:16px;font-weight:900;cursor:pointer;flex:0 0 auto;">
-            &larr;
-          </button>
-        ` : ''}
         <h1 style="margin:0;font-size:20px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Теми</h1>
-        ${activeTopic !== null && !activeTopic.isGeneral ? `<span style="min-width:0;color:rgba(248,250,252,0.62);font-size:13px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(activeTopic.title)}</span>` : ''}
         ${activeTopic !== null ? renderTopicHeaderModerationControls(state, activeTopic) : ''}
       </div>
-      <button
-        type="button"
-        data-topics-personal-open="1"
-        aria-label="${personalUnreadTotal > 0 ? `Лични разговори, ${personalUnreadTotal} непрочетени съобщения` : 'Лични разговори'}"
-        style="
-          position:relative;display:inline-flex;align-items:center;justify-content:center;gap:7px;
-          min-height:36px;padding:0 12px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);
-          background:#050505;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;flex:0 0 auto;
-        "
-      >
-        <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#d4a520" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>
-        <span>Лични</span>
-        ${personalUnreadBadge !== null ? `<span data-topics-personal-badge="1" aria-hidden="true" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;line-height:1;">${escapeHtml(personalUnreadBadge)}</span><span style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">${escapeHtml(`${personalUnreadTotal} непрочетени лични съобщения`)}</span>` : ''}
-      </button>
+      <div data-topics-header-actions="1" style="display:flex;align-items:center;justify-content:flex-end;gap:8px;flex:0 0 auto;min-width:0;">
+        <button
+          type="button"
+          data-topics-back-to-general="1"
+          aria-label="Общ чат"
+          aria-pressed="${isGeneralActive ? 'true' : 'false'}"
+          style="
+            position:relative;display:inline-flex;align-items:center;justify-content:center;gap:7px;
+            min-height:36px;padding:0 12px;border-radius:8px;border:1px solid;${generalButtonStyle}
+            font-size:13px;font-weight:900;cursor:pointer;flex:0 0 auto;
+          "
+        >
+          <span>Общ</span>
+          ${generalUnreadBadge !== null ? `<span data-topics-general-badge="1" aria-hidden="true" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;line-height:1;">${escapeHtml(generalUnreadBadge)}</span><span style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">${escapeHtml(`${generalUnreadTotal} непрочетени в Общ чат`)}</span>` : ''}
+        </button>
+        <button
+          type="button"
+          data-topics-personal-open="1"
+          aria-label="${personalUnreadTotal > 0 ? `Лични разговори, ${personalUnreadTotal} непрочетени съобщения` : 'Лични разговори'}"
+          style="
+            position:relative;display:inline-flex;align-items:center;justify-content:center;gap:7px;
+            min-height:36px;padding:0 12px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);
+            background:#050505;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;flex:0 0 auto;
+          "
+        >
+          <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#d4a520" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>
+          <span>Лични</span>
+          ${personalUnreadBadge !== null ? `<span data-topics-personal-badge="1" aria-hidden="true" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;line-height:1;">${escapeHtml(personalUnreadBadge)}</span><span style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">${escapeHtml(`${personalUnreadTotal} непрочетени лични съобщения`)}</span>` : ''}
+        </button>
+      </div>
     </div>
   `
 }
@@ -1602,7 +1450,7 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
   // промяна render() се преизпълнява и flex преизчислява сам.
   //
   // Три flex:0 0 auto/flex:1 секции отгоре надолу:
-  //   1) data-topics-fixed-top  — заглавие + topics bar, никога не мърда
+  //   1) data-topics-fixed-top  — заглавие + top actions, никога не мърда
   //   2) data-topics-stream-container — flex:1;min-height:0, ЕДИНСТВЕНИЯТ
   //      vertical scroll container (виж renderTopicMessageStream)
   //   3) composer form (Етап 2) — flex:0 0 auto, фиксиран на дъното
@@ -1610,9 +1458,8 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
   const isPersonalMode = state.topicsMode === 'personal'
   return `
     <section data-topics-screen="1" style="flex:1;min-height:0;display:flex;flex-direction:column;padding:0 4px;overflow:hidden;">
-      <div data-topics-fixed-top="1" style="flex:0 0 auto;display:flex;flex-direction:column;gap:10px;padding:6px 0 12px;">
+      <div data-topics-fixed-top="1" style="flex:0 0 auto;display:flex;flex-direction:column;padding:6px 0 10px;">
         ${renderTopicsHeader(state)}
-        ${isPersonalMode ? '' : renderTopicsBar(state)}
       </div>
       ${isPersonalMode ? renderTopicsPersonalChatPanel(state) : `
       <div data-topics-stream-container="1" style="flex:1;min-height:0;border:1px solid rgba(255,255,255,0.10);border-radius:12px 12px 0 0;border-bottom:0;background:#0a0a0a;display:flex;flex-direction:column;overflow:hidden;">

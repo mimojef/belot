@@ -201,10 +201,11 @@ await check('[1] Topics header has locked top row and Personal button', () => {
   assert(renderTopics.includes('<h1 style="margin:0;font-size:20px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Теми</h1>'), 'Теми is not the stable left header title')
 })
 
-await check('[2] Personal button is not rendered as a topic chip and chips stay separate', () => {
-  assert(/isPersonalMode\s*\?\s*''\s*:\s*renderTopicsBar\(state\)/.test(renderTopics), 'topics bar is not guarded by personal mode')
+await check('[2] Personal button is not rendered as a topic chip and legacy topic strip is hidden', () => {
+  assert(renderTopics.includes('data-topics-back-to-general="1"'), 'missing visible General top action')
   assert(!/data-topic-chip=.*Лични/.test(renderTopics), 'Лични must not be a topic chip')
-  assert(renderTopics.includes('data-topics-create="1"'), 'pinned + create control is missing')
+  assert(!renderTopics.includes('data-topics-bar-scroll="1"'), 'legacy horizontal topics strip must not render')
+  assert(!renderTopics.includes('data-topics-create="1"'), 'legacy create topic control must not render')
 })
 
 await check('[3] Topics Personal mode hides topic stream/chips and renders personal panel', () => {

@@ -70,8 +70,8 @@ await check('[5] unread/seen realtime messages update directory state', () => {
 await check('[6] badge render uses shared 99/100 notification formatter', () => {
   assert(renderSrc.includes('formatTopicUnreadBadgeCount'), 'badge formatter missing')
   assert(renderSrc.includes('return formatNotificationBadgeCount(count)'), 'topic badge must reuse shared notification formatter')
-  assert(renderSrc.includes('topic-unread-badge'), 'badge class missing')
-  assert(renderSrc.includes('isActive ? null'), 'active topic badge should be hidden')
+  assert(renderSrc.includes('data-topics-general-badge="1"'), 'General topic badge node missing')
+  assert(renderSrc.includes('const generalUnreadBadge = formatTopicUnreadBadgeCount(generalUnreadTotal)'), 'General badge must use canonical topic-general unread formatter')
 })
 
 await check('[7] Lobby initial auth lifecycle loads topic directory unread metadata without message history', () => {

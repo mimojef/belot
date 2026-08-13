@@ -79,7 +79,9 @@ function makeState(options: {
       { friendshipId: 'support-id', kind: 'pika_support', unreadCount: options.pikaSupportUnread ?? 0 },
     ],
     topics: (options.topicUnreadCounts ?? []).map((unreadCount, index) => ({
-      topicId: `topic-${index + 1}`,
+      topicId: index === 0 ? 'topic-general' : `topic-hidden-${index}`,
+      slug: index === 0 ? 'general' : `hidden-${index}`,
+      isGeneral: index === 0,
       unreadCount,
     })),
     pendingFriendRequests: [],
@@ -210,12 +212,20 @@ async function getDesktopNavRect(page: Page): Promise<DomRectSnapshot | null> {
   return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getDesktopNavRect())
 }
 
-async function getTopicChipBadgeText(page: Page, topicId: string): Promise<string | null> {
-  return page.evaluate((value) => (window as any).__topicsComposerVipGateHarness.getTopicChipBadgeText(value), topicId)
+async function hasLegacyTopicsStrip(page: Page): Promise<boolean> {
+  return page.evaluate(() =>
+    document.querySelector('[data-topics-bar-scroll="1"]') !== null ||
+    document.querySelector('[data-topic-chip]') !== null ||
+    document.querySelector('[data-topics-create="1"]') !== null,
+  )
 }
 
 async function getTopicsPersonalBadgeText(page: Page): Promise<string | null> {
   return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getTopicsPersonalBadgeText())
+}
+
+async function getTopicsGeneralBadgeText(page: Page): Promise<string | null> {
+  return page.evaluate(() => document.querySelector('[data-topics-general-badge="1"]')?.textContent ?? null)
 }
 
 async function handleServerMessage(page: Page, message: Record<string, unknown>): Promise<void> {
@@ -234,15 +244,15 @@ await check('[1] formatter hides zero, shows 1..99 exactly, and renders 100+ as 
   assertEqual(formatNotificationBadgeCount(101), '99+', '101 cap')
 })
 
-await check('[2] CASE 1 raw menu formula: friend 3 + topics 55 + support 1 + friends 2 = 61', () => {
+await check('[2] CASE 1 raw menu formula ignores hidden legacy topics', () => {
   const state = makeState({ friendUnread: 3, topicUnreadCounts: [20, 30, 5], supportUnread: 1, friendRequests: 2 })
   assertEqual(getFriendChatUnreadRaw(state), 3, 'Chat')
-  assertEqual(getTopicsMessagesUnreadRaw(state), 55, 'Topics messages')
+  assertEqual(getTopicsMessagesUnreadRaw(state), 20, 'visible General topic messages')
   assertEqual(getTopicsPersonalUnreadRaw(state), 0, 'Topics Personal')
-  assertEqual(getTopicsTotalUnreadRaw(state), 55, 'Topics total')
+  assertEqual(getTopicsTotalUnreadRaw(state), 20, 'Topics total')
   assertEqual(getSupportUnreadRaw(state), 1, 'Support')
   assertEqual(getFriendsNotificationRaw(state), 2, 'Friends')
-  assertEqual(getMobileMenuNotificationRaw(state), 61, 'Menu')
+  assertEqual(getMobileMenuNotificationRaw(state), 26, 'Menu')
 })
 
 await check('[3] CASE 2 raw menu formula includes vip_dm in Topics, not Chat', () => {
@@ -261,11 +271,12 @@ await check('[4] CASE 3 display uses raw total, not preformatted child values', 
   assertEqual(formatNotificationBadgeCount(getMobileMenuNotificationRaw(state)), '99+', 'Menu display')
 })
 
-await check('[5] Topics Personal and topic chip boundary display is shared', () => {
+await check('[5] Topics Personal and topic message boundary display is shared', () => {
   assertEqual(formatNotificationBadgeCount(getTopicsPersonalUnreadRaw(makeState({ vipDmUnread: 99 }))), '99', 'Personal 99')
   assertEqual(formatNotificationBadgeCount(getTopicsPersonalUnreadRaw(makeState({ vipDmUnread: 100 }))), '99+', 'Personal 100')
-  assertEqual(formatNotificationBadgeCount(getTopicsMessagesUnreadRaw(makeState({ topicUnreadCounts: [99] }))), '99', 'Topic chip 99')
-  assertEqual(formatNotificationBadgeCount(getTopicsMessagesUnreadRaw(makeState({ topicUnreadCounts: [100] }))), '99+', 'Topic chip 100')
+  assertEqual(formatNotificationBadgeCount(getTopicsMessagesUnreadRaw(makeState({ topicUnreadCounts: [99] }))), '99', 'Topic messages 99')
+  assertEqual(formatNotificationBadgeCount(getTopicsMessagesUnreadRaw(makeState({ topicUnreadCounts: [100] }))), '99+', 'Topic messages 100')
+  assertEqual(formatNotificationBadgeCount(getTopicsMessagesUnreadRaw(makeState({ topicUnreadCounts: [0, 100] }))), null, 'Hidden topic messages ignored')
 })
 
 await check('[6] CASE 7 reading vip_dm only lowers Topics Personal/Topics/Menu, not Chat', () => {
@@ -288,6 +299,14 @@ await check('[7] CASE 8 friend/vip isolation is by conversation kind, not counte
   assertEqual(getTopicsPersonalUnreadRaw(incomingFriend), 0, 'friend does not affect Personal')
   assertEqual(getFriendChatUnreadRaw(incomingVip), 0, 'vip_dm does not affect Chat')
   assertEqual(getTopicsPersonalUnreadRaw(incomingVip), 1, 'vip_dm affects Personal')
+})
+
+await check('[7b] hidden directory topics do not contribute to visible Topics aggregate', () => {
+  const state = makeState({ vipDmUnread: 3, topicUnreadCounts: [2, 7, 4] })
+  assertEqual(getTopicsMessagesUnreadRaw(state), 2, 'General topic unread')
+  assertEqual(getTopicsPersonalUnreadRaw(state), 3, 'Personal vip_dm unread')
+  assertEqual(getTopicsTotalUnreadRaw(state), 5, 'Topics aggregate excludes hidden topics')
+  assertEqual(getMobileMenuNotificationRaw(state), 5, 'Menu receives only visible Topics aggregate')
 })
 
 let vite: ViteDevServer | null = null
@@ -345,15 +364,15 @@ try {
       })
     })
 
-    await check(`[9] mobile visual at ${viewport.width}px: red 99+ badges fit menu rows and topic chips`, async () => {
+    await check(`[9] mobile visual at ${viewport.width}px: red 99+ badges fit menu rows and top controls`, async () => {
       await withMobilePage(viewport, async (page) => {
         const friend = await makeConversation(page, 'FRIEND_70', 'friend', 70)
         const vip = await makeConversation(page, 'VIP_30', 'vip_dm', 30)
         await setChatConversations(page, [friend, vip])
         await setIncomingFriendRequests(page, 2)
         await setSupportUnread(page, 1)
-        await setTopicUnreadCounts(page, { 'topic-general': 80, 'topic-b': 100 })
         await openTopics(page)
+        await setTopicUnreadCounts(page, { 'topic-general': 80, 'topic-b': 100 })
         await openMobileMenu(page)
 
         assertEqual(await getMobileMenuTotalBadgeText(page), '99+', 'Menu total badge')
@@ -361,7 +380,7 @@ try {
         assertEqual(await getMobileMenuItemBadgeText(page, 'topics'), '99+', 'Topics row badge')
         assertEqual(await getMobileMenuItemBadgeText(page, 'support'), '1', 'Support row badge')
         assertEqual(await getMobileMenuItemBadgeText(page, 'friends'), '2', 'Friends row badge')
-        assertEqual(await getTopicChipBadgeText(page, 'topic-b'), '99+', 'inactive topic chip')
+        assertEqual(await hasLegacyTopicsStrip(page), false, 'legacy topic strip hidden')
         assertEqual(await getTopicsPersonalBadgeText(page), '30', 'Topics Personal badge')
 
         const topicsBadgeColor = await getMobileMenuItemBadgeColor(page, 'topics')
@@ -370,6 +389,22 @@ try {
         assert(topicsBadgeRect !== null, 'Topics badge rect missing')
         assert(topicsBadgeRect!.width >= 22, `Topics 99+ badge too narrow: ${JSON.stringify(topicsBadgeRect)}`)
         assert(topicsBadgeRect!.x + topicsBadgeRect!.width <= viewport.width + 1, `Topics 99+ badge overflows viewport: ${JSON.stringify(topicsBadgeRect)}`)
+      })
+    })
+
+    await check(`[9b] mobile visible Topics aggregate at ${viewport.width}px excludes hidden legacy topics`, async () => {
+      await withMobilePage(viewport, async (page) => {
+        const vip = await makeConversation(page, 'VIP_VISIBLE_TOPICS', 'vip_dm', 3)
+        await setChatConversations(page, [vip])
+        await openTopics(page)
+        await setTopicUnreadCounts(page, { 'topic-general': 2, 'topic-strategies': 7, 'topic-tournaments': 4 })
+
+        assertEqual(await getTopicsGeneralBadgeText(page), '2', 'Общ badge')
+        assertEqual(await getTopicsPersonalBadgeText(page), '3', 'Лични badge')
+
+        await openMobileMenu(page)
+        assertEqual(await getMobileMenuItemBadgeText(page, 'topics'), '5', 'Topics aggregate badge')
+        assertEqual(await getMobileMenuTotalBadgeText(page), '5', 'Menu receives visible Topics aggregate only')
       })
     })
   }
@@ -395,9 +430,9 @@ try {
 
       await handleServerMessage(page, { type: 'topic_unread_count_changed', topicId: 'topic-b', unreadCount: 6 })
       await openMobileMenu(page)
-      assertEqual(await getTopicChipBadgeText(page, 'topic-b'), '6', 'topic chip updates')
-      assertEqual(await getMobileMenuItemBadgeText(page, 'topics'), '7', 'topic message increments Topics aggregate')
-      assertEqual(await getMobileMenuTotalBadgeText(page), '8', 'Menu includes Chat + Topics')
+      assertEqual(await hasLegacyTopicsStrip(page), false, 'legacy topic strip remains hidden after topic unread update')
+      assertEqual(await getMobileMenuItemBadgeText(page, 'topics'), '1', 'hidden topic unread does not increment Topics aggregate')
+      assertEqual(await getMobileMenuTotalBadgeText(page), '2', 'Menu includes Chat + visible Topics only')
     })
   })
 
@@ -412,14 +447,14 @@ try {
     })
   })
 
-  await check('[12] desktop aggregate regression: topic unread 52 + vip_dm 3 renders Topics 55', async () => {
+  await check('[12] desktop aggregate regression: hidden topic unread 52 + vip_dm 3 renders Topics 3', async () => {
     await withDesktopPage({ width: 1366, height: 900 }, async (page) => {
       const vip = await makeConversation(page, 'VIP_DESKTOP_AGG', 'vip_dm', 3)
       await setChatConversations(page, [vip])
       await setTopicUnreadCounts(page, { 'topic-b': 52 })
       await openTopics(page)
 
-      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '55', 'desktop Topics badge')
+      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '3', 'desktop Topics badge')
       assertEqual(await getDesktopNavBadgeText(page, 'chat'), null, 'desktop Chat badge')
     })
   })
@@ -428,12 +463,12 @@ try {
     await withDesktopPage({ width: 1366, height: 900 }, async (page) => {
       const vip = await makeConversation(page, 'VIP_DESKTOP_BOUNDARY', 'vip_dm', 3)
       await setChatConversations(page, [vip])
-      await setTopicUnreadCounts(page, { 'topic-b': 96 })
       await openTopics(page)
+      await setTopicUnreadCounts(page, { 'topic-general': 96 })
 
       assertEqual(await getDesktopNavBadgeText(page, 'topics'), '99', 'desktop Topics raw 99')
 
-      await setTopicUnreadCounts(page, { 'topic-b': 97 })
+      await setTopicUnreadCounts(page, { 'topic-general': 97 })
       assertEqual(await getDesktopNavBadgeText(page, 'topics'), '99+', 'desktop Topics raw 100')
     })
   })
@@ -455,7 +490,7 @@ try {
       assertEqual(await getDesktopNavBadgeText(page, 'topics'), '1', 'vip_dm increments desktop Topics')
 
       await handleServerMessage(page, { type: 'topic_unread_count_changed', topicId: 'topic-b', unreadCount: 6 })
-      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '7', 'topic unread increments desktop Topics aggregate')
+      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '1', 'hidden topic unread does not increment desktop Topics aggregate')
     })
   })
 
@@ -468,12 +503,12 @@ try {
       await openTopics(page)
 
       assertEqual(await getDesktopNavBadgeText(page, 'chat'), '3', 'desktop Chat before read')
-      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '9', 'desktop Topics before read')
+      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '5', 'desktop Topics before read')
 
       const readVip = await makeConversation(page, 'VIP_DESKTOP_READ', 'vip_dm', 0)
       await setChatConversations(page, [friend, readVip])
       assertEqual(await getDesktopNavBadgeText(page, 'chat'), '3', 'desktop Chat after vip_dm read')
-      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '4', 'desktop Topics after vip_dm read')
+      assertEqual(await getDesktopNavBadgeText(page, 'topics'), null, 'desktop Topics after vip_dm read ignores hidden topic')
 
       await setTopicUnreadCounts(page, { 'topic-b': 0 })
       assertEqual(await getDesktopNavBadgeText(page, 'chat'), '3', 'desktop Chat after topic read')
@@ -493,7 +528,7 @@ try {
 
         const vip = await makeConversation(page, 'VIP_DESKTOP_VISUAL', 'vip_dm', 3)
         await setChatConversations(page, [vip])
-        await setTopicUnreadCounts(page, { 'topic-b': 97 })
+        await setTopicUnreadCounts(page, { 'topic-general': 97 })
 
         assertEqual(await getDesktopNavBadgeText(page, 'topics'), '99+', 'desktop Topics visual badge')
         assertEqual(await getDesktopNavBadgeColor(page, 'topics'), 'rgb(239, 68, 68)', 'desktop Topics visual badge red')
@@ -538,12 +573,12 @@ try {
       assertEqual(await getTopicMessagesLoadCallCount(page), messageLoadsBefore, 'no message history loaded before opening Topics')
 
       await openMobileMenu(page)
-      assertEqual(await getMobileMenuTotalBadgeText(page), '4', 'Menu badge')
+      assertEqual(await getMobileMenuTotalBadgeText(page), '3', 'Menu badge')
       assertEqual(await getMobileMenuItemBadgeText(page, 'chat'), '1', 'Chat dropdown badge')
-      assertEqual(await getMobileMenuItemBadgeText(page, 'topics'), '3', 'Topics dropdown badge')
+      assertEqual(await getMobileMenuItemBadgeText(page, 'topics'), '2', 'Topics dropdown badge')
 
       await openTopics(page)
-      assertEqual(await getTopicChipBadgeText(page, 'topic-new'), '1', 'new topic chip after opening Topics')
+      assertEqual(await hasLegacyTopicsStrip(page), false, 'legacy topic strip hidden after opening Topics')
     })
   })
 
@@ -558,7 +593,7 @@ try {
 
       assertEqual(await refreshTopicsDirectoryMetadata(page), true, 'initial desktop topics metadata refresh')
       assertEqual(await getTopicMessagesLoadCallCount(page), 0, 'desktop initial metadata does not load message history')
-      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '3', 'desktop Topics badge')
+      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '2', 'desktop Topics badge')
       assertEqual(await getDesktopNavBadgeText(page, 'chat'), '1', 'desktop Chat badge')
     })
   })
@@ -590,7 +625,10 @@ try {
       assertEqual(await getDesktopNavBadgeText(page, 'topics'), '2', 'topic_created does not increment unread')
 
       await handleServerMessage(page, { type: 'topic_unread_count_changed', topicId: 'topic-created-zero', unreadCount: 1 })
-      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '3', 'canonical unread update increments Topics')
+      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '2', 'hidden topic unread update does not increment Topics')
+
+      await handleServerMessage(page, { type: 'topic_unread_count_changed', topicId: 'topic-general', unreadCount: 3 })
+      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '3', 'General unread update increments Topics')
     })
   })
 
@@ -611,7 +649,7 @@ try {
         { topicId: 'topic-new', slug: 'topic-new', title: 'Нова тема', unreadCount: 1 },
       ])
       assertEqual(await refreshTopicsDirectoryMetadata(page), true, 'profile B metadata refresh')
-      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '3', 'profile B Topics badge')
+      assertEqual(await getDesktopNavBadgeText(page, 'topics'), '2', 'profile B Topics badge')
 
       await setAuthProfile(page, 'profile-a', 'Profile A')
       await clearTopicsDirectoryMetadata(page)
@@ -636,8 +674,8 @@ try {
 
       await openMobileMenu(page)
       assertEqual(await getMobileMenuItemBadgeText(page, 'chat'), '1', 'combined Chat badge')
-      assertEqual(await getMobileMenuItemBadgeText(page, 'topics'), '5', 'combined Topics badge')
-      assertEqual(await getMobileMenuTotalBadgeText(page), '6', 'combined Menu badge')
+      assertEqual(await getMobileMenuItemBadgeText(page, 'topics'), '2', 'combined Topics badge')
+      assertEqual(await getMobileMenuTotalBadgeText(page), '3', 'combined Menu badge')
 
       await openTopics(page)
       assertEqual(await getTopicsPersonalBadgeText(page), '2', 'combined Topics Personal badge')
