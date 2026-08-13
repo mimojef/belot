@@ -53,7 +53,7 @@ await check('[3] flow clears active-topic unread and reconciles with server', ()
 })
 
 await check('[4] active topic load, switch, catchup, roots, replies, and reconnect trigger mark-seen', () => {
-  assert(flowSrc.includes('subscribeToTopicMessagesGapClosing(topicId)\n    void markActiveTopicSeen(topicId)'), 'initial load mark-seen missing')
+  assert(/subscribeToTopicMessagesGapClosing\(topicId\)\s+void markActiveTopicSeen\(topicId\)/.test(flowSrc), 'initial load mark-seen missing')
   assert(flowSrc.includes('updateTopicUnreadCount(topicId, 0)'), 'topic switch clear missing')
   assert(flowSrc.includes("message.type === 'topic_message_catchup'"), 'catchup handler missing')
   assert(flowSrc.includes("message.type === 'topic_message'"), 'root realtime handler missing')

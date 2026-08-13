@@ -685,11 +685,13 @@ try {
       const btn = document.querySelector('[data-topic-message-like]') as HTMLElement | null
       if (!btn) return null
       const icon = btn.querySelector('.topic-message-action-icon') as HTMLElement | null
+      const iconRect = icon?.getBoundingClientRect() ?? null
       const cs = getComputedStyle(btn)
       const r = btn.getBoundingClientRect()
       return {
         visibleText: btn.textContent?.trim() ?? '',
-        iconFontSize: icon ? parseFloat(getComputedStyle(icon).fontSize) : null,
+        iconWidth: iconRect?.width ?? null,
+        iconHeight: iconRect?.height ?? null,
         paddingTop: parseFloat(cs.paddingTop),
         paddingBottom: parseFloat(cs.paddingBottom),
         width: r.width,
@@ -698,7 +700,7 @@ try {
     })
     assert(likeMobileInfo !== null, 'Like копчето трябва да съществува на mobile')
     assert((likeMobileInfo!.visibleText?.length ?? 0) <= 2, `mobile Like НЕ трябва да показва постоянен текст, получено: "${likeMobileInfo!.visibleText}"`)
-    assert(likeMobileInfo!.iconFontSize !== null && likeMobileInfo!.iconFontSize >= 18, 'иконата трябва да остане голяма на mobile')
+    assert(likeMobileInfo!.iconWidth !== null && likeMobileInfo!.iconWidth >= 18 && likeMobileInfo!.iconHeight !== null && likeMobileInfo!.iconHeight >= 18, 'иконата трябва да остане голяма на mobile')
     assert(likeMobileInfo!.paddingTop + likeMobileInfo!.paddingBottom >= 18, 'mobile tap зоната трябва да е удобна за пръст (media query padding)')
 
     const bodyScrollWidth = await mobilePage.evaluate(() => document.body.scrollWidth)
@@ -1010,7 +1012,7 @@ try {
       if (!btn) return null
       const icon = btn.querySelector('.topic-message-action-icon') as HTMLElement | null
       const cs = getComputedStyle(btn)
-      const iconCs = icon ? getComputedStyle(icon) : null
+      const iconRect = icon?.getBoundingClientRect() ?? null
       return {
         tagName: btn.tagName,
         visibleText: btn.textContent?.trim() ?? '',
@@ -1019,7 +1021,8 @@ try {
         hasTitleAttr: btn.hasAttribute('title'),
         paddingTop: parseFloat(cs.paddingTop),
         paddingBottom: parseFloat(cs.paddingBottom),
-        iconFontSize: iconCs ? parseFloat(iconCs.fontSize) : null,
+        iconWidth: iconRect?.width ?? null,
+        iconHeight: iconRect?.height ?? null,
       }
     })
     assert(likeInfo !== null, 'поне едно Like копче трябва да съществува в текущия message stream')
@@ -1028,7 +1031,7 @@ try {
     assertEqual(likeInfo!.dataTooltip, 'Харесай', 'Like трябва да носи data-tooltip="Харесай" (custom tooltip pattern)')
     assert(!likeInfo!.hasTitleAttr, 'Like НЕ трябва да ползва browser-native title tooltip (имаме собствен tooltip pattern)')
     assert(likeInfo!.paddingTop + likeInfo!.paddingBottom >= 14, 'Like трябва да има реален vertical padding за tap зона, по-голяма от самата икона')
-    assert(likeInfo!.iconFontSize !== null && likeInfo!.iconFontSize >= 18, `иконата трябва да е осезаемо по-голяма (>=18px), получено: ${likeInfo!.iconFontSize}`)
+    assert(likeInfo!.iconWidth !== null && likeInfo!.iconWidth >= 18 && likeInfo!.iconHeight !== null && likeInfo!.iconHeight >= 18, `иконата трябва да е осезаемо по-голяма (>=18px), получено: ${likeInfo!.iconWidth}x${likeInfo!.iconHeight}`)
 
     // Много message rows са се натрупали от предишни тестове в СЪЩИЯ isoPage
     // — data-topic-message-like е keyed по messageId (Етап 3), не е уникален
@@ -1065,14 +1068,14 @@ try {
     // Етап 3 — Like вече е реален toggle (optimistic UI flip), не "скоро"
     // toast. Click трябва веднага (синхронно, преди какъвто и да е WS
     // roundtrip) да смени иконата ♡ → ♥ и aria-pressed=false → true.
-    const iconBefore = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like] .topic-message-action-icon')?.textContent ?? '')
+    const fillBefore = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like] .topic-message-action-icon svg')?.getAttribute('fill') ?? '')
     const pressedBefore = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like]')?.getAttribute('aria-pressed'))
     assertEqual(pressedBefore, 'false', 'преди click aria-pressed трябва да е false (не е харесано)')
 
     await likeLocator.click()
     await isoPage.waitForFunction(() => document.querySelector('[data-topic-message-like]')?.getAttribute('aria-pressed') === 'true', undefined, { timeout: 1000 })
-    const iconAfter = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like] .topic-message-action-icon')?.textContent ?? '')
-    assert(iconBefore !== iconAfter, `like иконата трябва да се смени при click (optimistic flip), преди="${iconBefore}", след="${iconAfter}"`)
+    const fillAfter = await isoPage.evaluate(() => document.querySelector('[data-topic-message-like] .topic-message-action-icon svg')?.getAttribute('fill') ?? '')
+    assert(fillBefore !== fillAfter && fillAfter === 'currentColor', `like SVG fill трябва да се смени при click (optimistic flip), преди="${fillBefore}", след="${fillAfter}"`)
 
     const toastVisible = await isoPage.evaluate(() => document.body.textContent?.includes('Функцията ще бъде налична скоро.') ?? false)
     assert(!toastVisible, 'Like вече НЕ трябва да показва "ще бъде налично скоро" toast (Етап 3 — реална функционалност)')
@@ -1085,20 +1088,21 @@ try {
       const btn = document.querySelector('[data-topic-message-reply]') as HTMLButtonElement | null
       if (!btn) return null
       const icon = btn.querySelector('.topic-message-action-icon') as HTMLElement | null
-      const iconCs = icon ? getComputedStyle(icon) : null
+      const iconRect = icon?.getBoundingClientRect() ?? null
       return {
         tagName: btn.tagName,
         visibleText: btn.textContent?.trim() ?? '',
         ariaLabel: btn.getAttribute('aria-label'),
         dataTooltip: btn.getAttribute('data-tooltip'),
-        iconFontSize: iconCs ? parseFloat(iconCs.fontSize) : null,
+        iconWidth: iconRect?.width ?? null,
+        iconHeight: iconRect?.height ?? null,
       }
     })
     assert(replyInfo !== null, 'поне едно Reply копче трябва да съществува')
     assertEqual(replyInfo!.tagName, 'BUTTON', 'Reply трябва да е истински <button>, не <span>')
     assertEqual(replyInfo!.ariaLabel, 'Отговори', 'Reply трябва да има aria-label="Отговори"')
     assertEqual(replyInfo!.dataTooltip, 'Отговори', 'Reply трябва да носи data-tooltip="Отговори"')
-    assert(replyInfo!.iconFontSize !== null && replyInfo!.iconFontSize >= 18, `иконата трябва да е осезаемо по-голяма (>=18px), получено: ${replyInfo!.iconFontSize}`)
+    assert(replyInfo!.iconWidth !== null && replyInfo!.iconWidth >= 18 && replyInfo!.iconHeight !== null && replyInfo!.iconHeight >= 18, `иконата трябва да е осезаемо по-голяма (>=18px), получено: ${replyInfo!.iconWidth}x${replyInfo!.iconHeight}`)
 
     // Keyboard focus (:focus-visible) трябва да покаже същия tooltip —
     // accessibility еквивалент на hover. `:focus-visible` в Chromium следва

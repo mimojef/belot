@@ -873,9 +873,10 @@ type InternalLobbyFlowState = {
    * следващия render на message stream-а — консумира се и се нулира веднага
    * след render. 'initial' = jump to bottom; 'prepend' = запази distance-from-
    * bottom (load older); 'live-append'/'reconnect-refresh' = near-bottom
-   * threshold (48px) преди насилствен scroll, огледално на lobby chat модела.
+   * threshold (96px) преди насилствен scroll, огледално на lobby chat модела.
    */
-  topicMessagesRenderReason: 'initial' | 'prepend' | 'live-append' | 'reconnect-refresh' | null
+  topicMessagesRenderReason: 'initial' | 'prepend' | 'live-append' | 'reconnect-refresh' | 'own-message' | null
+  topicMessagesScrollAnchor: { messageId: string; top: number } | null
   /** Draft текст per тема — потвърдено отклонение от flat-field конвенцията (lobbyChatDraft), защото Topics е genuinely multi-channel. */
   topicComposerDraftByTopicId: Record<string, string>
   /** pending requestId per тема, докато чакаме sever ack (echo/error) — null = нищо не се изпраща в момента за тази тема. */
@@ -1368,6 +1369,7 @@ function createInitialState(): InternalLobbyFlowState {
     topicMessagesLatestKnownSeqByTopicId: {},
     topicMessagesSubscribedTopicId: null,
     topicMessagesRenderReason: null,
+    topicMessagesScrollAnchor: null,
     topicComposerDraftByTopicId: {},
     topicComposerPendingRequestIdByTopicId: {},
     topicComposerErrorTextByTopicId: {},
@@ -3270,6 +3272,7 @@ export function createLobbyFlowController(
       topicMessagesOldestSeq: state.topicMessagesOldestSeq,
       topicOlderMessagesLoading: state.topicOlderMessagesLoading,
       topicMessagesRenderReason: state.topicMessagesRenderReason,
+      topicMessagesScrollAnchor: state.topicMessagesScrollAnchor,
       topicComposerDraftByTopicId: state.topicComposerDraftByTopicId,
       topicComposerPendingRequestIdByTopicId: state.topicComposerPendingRequestIdByTopicId,
       topicComposerErrorTextByTopicId: state.topicComposerErrorTextByTopicId,
@@ -3561,11 +3564,12 @@ export function createLobbyFlowController(
       onTopicMessageLikeToggleClick: (messageId) => {
         submitTopicMessageLikeToggle(messageId)
       },
-      onTopicReplyClick: (rootMessageId) => {
+      onTopicReplyClick: (rootMessageId, scrollAnchor) => {
         if (!(state.topicsVipGate?.isActive ?? false)) {
           handleTopicReplyComposerNonVipTap()
           return
         }
+        state.topicMessagesScrollAnchor = scrollAnchor ?? null
         // VIP toggle семантика е върху COMPOSER-а, не самия expanded thread
         // (двете са независими — само ЕДИН inline composer е отворен
         // наведнъж, виж т.13, но root A може да остане expanded докато
@@ -5726,6 +5730,40 @@ export function createLobbyFlowController(
     if (generalTopic) openTopic(generalTopic.topicId)
   }
 
+  function captureTopicMessagesScrollAnchor(): { messageId: string; top: number } | null {
+    const scrollEl = options.root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
+    if (scrollEl === null) return null
+    const scrollRect = scrollEl.getBoundingClientRect()
+    const anchorEl = Array.from(scrollEl.querySelectorAll<HTMLElement>('[data-topic-message]'))
+      .find((el) => el.getBoundingClientRect().bottom >= scrollRect.top)
+    return anchorEl
+      ? { messageId: anchorEl.dataset.topicMessage ?? '', top: anchorEl.getBoundingClientRect().top }
+      : null
+  }
+
+  function captureTopicMessagesDistanceFromBottom(): number | null {
+    const scrollEl = options.root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
+    return scrollEl === null ? null : scrollEl.scrollHeight - scrollEl.scrollTop
+  }
+
+  function restoreTopicMessagesScrollAnchor(anchor: { messageId: string; top: number } | null): boolean {
+    if (anchor === null || anchor.messageId.length === 0) return false
+    const scrollEl = options.root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
+    if (scrollEl === null) return false
+    const anchorEl = Array.from(scrollEl.querySelectorAll<HTMLElement>('[data-topic-message]'))
+      .find((el) => el.dataset.topicMessage === anchor.messageId) ?? null
+    if (anchorEl === null) return false
+    scrollEl.scrollTop += anchorEl.getBoundingClientRect().top - anchor.top
+    return true
+  }
+
+  function restoreTopicMessagesDistanceFromBottom(distanceFromBottom: number | null): void {
+    if (distanceFromBottom === null) return
+    const scrollEl = options.root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
+    if (scrollEl === null) return
+    scrollEl.scrollTop = scrollEl.scrollHeight - distanceFromBottom
+  }
+
   // B) Load older в СЪЩАТА тема — НЕ инкрементира generation token-а (не е
   // "нов switch", а продължение на текущия), но капсулира текущата стойност
   // при старт, за да засече дали потребителят е превключил тема междувременно
@@ -5743,6 +5781,8 @@ export function createLobbyFlowController(
       return
     }
 
+    const scrollAnchor = captureTopicMessagesScrollAnchor()
+    const scrollDistanceFromBottom = captureTopicMessagesDistanceFromBottom()
     state.topicOlderMessagesLoading = true
     render()
 
@@ -5771,8 +5811,11 @@ export function createLobbyFlowController(
     state.topicMessagesHasMore = result.hasMore
     state.topicMessagesOldestSeq = result.oldestSeq ?? state.topicMessagesOldestSeq
     seedLikeStateFromMessages(result.messages)
+    state.topicMessagesScrollAnchor = scrollAnchor
     state.topicMessagesRenderReason = 'prepend'
     render()
+    restoreTopicMessagesDistanceFromBottom(scrollDistanceFromBottom)
+    restoreTopicMessagesScrollAnchor(scrollAnchor)
   }
 
   // ─── Replies expand/collapse/pagination (Етап 3) ────────────────────────
@@ -10354,6 +10397,7 @@ export function createLobbyFlowController(
     // синхронно от renderLobbyScreen вътре в renderLobby() по-горе, нулира
     // се веднага след употреба (виж topicMessagesRenderReason в типа).
     state.topicMessagesRenderReason = null
+    state.topicMessagesScrollAnchor = null
     syncUrlPath()
   }
 
@@ -11439,7 +11483,8 @@ export function createLobbyFlowController(
 
       // Ack по requestId (НЕ по body matching — Етап 2 корекция т.4): само
       // ТОЧНО съвпадащ pending requestId за тази тема чисти draft-а/pending state-а.
-      if (requestId !== undefined && requestId === state.topicComposerPendingRequestIdByTopicId[message.topicId]) {
+      const isOwnRootMessageAck = requestId !== undefined && requestId === state.topicComposerPendingRequestIdByTopicId[message.topicId]
+      if (isOwnRootMessageAck) {
         state.topicComposerDraftByTopicId[message.topicId] = ''
         state.topicComposerPendingRequestIdByTopicId[message.topicId] = null
         state.topicComposerErrorTextByTopicId[message.topicId] = null
@@ -11448,7 +11493,7 @@ export function createLobbyFlowController(
         clearTopicComposerPendingImage(message.topicId)
       }
 
-      state.topicMessagesRenderReason = 'live-append'
+      state.topicMessagesRenderReason = isOwnRootMessageAck ? 'own-message' : 'live-append'
       void markActiveTopicSeen(message.topicId)
       render()
       return true

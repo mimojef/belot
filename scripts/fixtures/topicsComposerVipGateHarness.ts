@@ -302,6 +302,16 @@ function q<T extends Element>(selector: string): T | null {
   getMessagesScrollTop: () => q<HTMLElement>('[data-topic-messages-scroll="1"]')?.scrollTop ?? null,
   getMessagesScrollHeight: () => q<HTMLElement>('[data-topic-messages-scroll="1"]')?.scrollHeight ?? null,
   getMessagesClientHeight: () => q<HTMLElement>('[data-topic-messages-scroll="1"]')?.clientHeight ?? null,
+  getMessagesBottomDistance: () => {
+    const el = q<HTMLElement>('[data-topic-messages-scroll="1"]')
+    return el ? el.scrollHeight - el.scrollTop - el.clientHeight : null
+  },
+  getMessageTop: (messageId: string) => q<HTMLElement>(`[data-topic-message="${CSS.escape(messageId)}"]`)?.getBoundingClientRect().top ?? null,
+  getMessageBottom: (messageId: string) => q<HTMLElement>(`[data-topic-message="${CSS.escape(messageId)}"]`)?.getBoundingClientRect().bottom ?? null,
+  getMessageCount: () => document.querySelectorAll('[data-topic-message]').length,
+  dispatchMessagesScroll: () => {
+    q<HTMLElement>('[data-topic-messages-scroll="1"]')?.dispatchEvent(new Event('scroll', { bubbles: true }))
+  },
   setMessagesScrollTop: (value: number) => {
     const el = q<HTMLElement>('[data-topic-messages-scroll="1"]')
     if (el) el.scrollTop = value

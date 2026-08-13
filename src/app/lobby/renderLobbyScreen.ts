@@ -338,7 +338,8 @@ export type LobbyScreenState = {
   topicMessagesHasMore: boolean
   topicMessagesOldestSeq: number | null
   topicOlderMessagesLoading: boolean
-  topicMessagesRenderReason: 'initial' | 'prepend' | 'live-append' | 'reconnect-refresh' | null
+  topicMessagesRenderReason: 'initial' | 'prepend' | 'live-append' | 'reconnect-refresh' | 'own-message' | null
+  topicMessagesScrollAnchor: { messageId: string; top: number } | null
   topicComposerDraftByTopicId: Record<string, string>
   topicComposerPendingRequestIdByTopicId: Record<string, string | null>
   topicComposerErrorTextByTopicId: Record<string, string | null>
@@ -792,7 +793,7 @@ export type RenderLobbyScreenOptions = {
   onTopicComposerImageRemove: (topicId: string) => void
   onTopicRepliesLoadMore: (rootMessageId: string) => void
   onTopicMessageLikeToggleClick: (messageId: string) => void
-  onTopicReplyClick: (rootMessageId: string) => void
+  onTopicReplyClick: (rootMessageId: string, scrollAnchor?: { messageId: string; top: number } | null) => void
   onTopicReplyComposerCancel: (rootMessageId: string) => void
   onTopicReplyComposerInput: (rootMessageId: string, value: string) => void
   onTopicReplyComposerSubmit: (rootMessageId: string) => void
@@ -9444,6 +9445,7 @@ export function renderLobbyScreen(
     state.lobbyChatFullscreen = false
   }
   setLobbyChatBodyScrollLocked(shouldShowLobbyChatFullscreen)
+  const topicMessagesNearBottomThresholdPx = 96
 
   // Prepend-safe scroll preservation за "Теми" message stream (т.4/7 от Етап 1
   // брифа): при зареждане на по-стари съобщения над текущите, потребителят не
@@ -9463,8 +9465,18 @@ export function renderLobbyScreen(
   // "издърпаме" насила докато чете стари съобщения (Етап 2 брифа т.8).
   const wasTopicMessagesNearBottom = prevTopicMessagesScrollEl === null
     ? true
-    : prevTopicMessagesScrollEl.scrollHeight - prevTopicMessagesScrollEl.scrollTop - prevTopicMessagesScrollEl.clientHeight < 48
+    : prevTopicMessagesScrollEl.scrollHeight - prevTopicMessagesScrollEl.scrollTop - prevTopicMessagesScrollEl.clientHeight <= topicMessagesNearBottomThresholdPx
   const savedTopicMessagesScrollTop = prevTopicMessagesScrollEl?.scrollTop ?? 0
+  const explicitTopicMessagesScrollAnchor = state.topicMessagesScrollAnchor
+  const stableTopicMessagesScrollAnchor = explicitTopicMessagesScrollAnchor ?? (() => {
+    if (prevTopicMessagesScrollEl === null) return null
+    const scrollRect = prevTopicMessagesScrollEl.getBoundingClientRect()
+    const anchorEl = Array.from(prevTopicMessagesScrollEl.querySelectorAll<HTMLElement>('[data-topic-message]'))
+      .find((el) => el.getBoundingClientRect().bottom >= scrollRect.top)
+    return anchorEl
+      ? { messageId: anchorEl.dataset.topicMessage ?? '', top: anchorEl.getBoundingClientRect().top }
+      : null
+  })()
 
   const prevTopicComposerTextEl = root.querySelector<HTMLTextAreaElement>('[data-topics-composer-text="1"]')
   const wasTopicComposerFocused = prevTopicComposerTextEl !== null && document.activeElement === prevTopicComposerTextEl
@@ -10590,7 +10602,11 @@ export function renderLobbyScreen(
     const rootMessageId = btn.dataset.topicMessageReply ?? ''
     if (!rootMessageId) return
     btn.addEventListener('click', () => {
-      options.onTopicReplyClick(rootMessageId)
+      const anchorEl = root.querySelector<HTMLElement>(`[data-topic-message="${cssEscape(rootMessageId)}"]`)
+      const scrollAnchor = anchorEl
+        ? { messageId: rootMessageId, top: anchorEl.getBoundingClientRect().top }
+        : null
+      options.onTopicReplyClick(rootMessageId, scrollAnchor)
     })
   })
 
@@ -12841,7 +12857,21 @@ export function renderLobbyScreen(
 
   const newTopicMessagesScrollEl = root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
   if (newTopicMessagesScrollEl) {
-    if (state.topicMessagesRenderReason === 'prepend' && savedTopicMessagesDistanceFromBottom !== null) {
+    if (explicitTopicMessagesScrollAnchor !== null) {
+      const anchorEl = root.querySelector<HTMLElement>(`[data-topic-message="${cssEscape(explicitTopicMessagesScrollAnchor.messageId)}"]`)
+      if (anchorEl) {
+        newTopicMessagesScrollEl.scrollTop += anchorEl.getBoundingClientRect().top - explicitTopicMessagesScrollAnchor.top
+      } else if (prevTopicMessagesScrollEl !== null) {
+        newTopicMessagesScrollEl.scrollTop = savedTopicMessagesScrollTop
+      }
+    } else if (state.topicMessagesRenderReason === 'prepend' && stableTopicMessagesScrollAnchor !== null && stableTopicMessagesScrollAnchor.messageId.length > 0) {
+      const anchorEl = root.querySelector<HTMLElement>(`[data-topic-message="${cssEscape(stableTopicMessagesScrollAnchor.messageId)}"]`)
+      if (anchorEl) {
+        newTopicMessagesScrollEl.scrollTop += anchorEl.getBoundingClientRect().top - stableTopicMessagesScrollAnchor.top
+      } else if (savedTopicMessagesDistanceFromBottom !== null) {
+        newTopicMessagesScrollEl.scrollTop = newTopicMessagesScrollEl.scrollHeight - savedTopicMessagesDistanceFromBottom
+      }
+    } else if (state.topicMessagesRenderReason === 'prepend' && savedTopicMessagesDistanceFromBottom !== null) {
       // Load older (scroll нагоре) — възстановяваме точната визуална позиция
       // чрез запазената delta от долния край, потребителят не "подскача".
       newTopicMessagesScrollEl.scrollTop = newTopicMessagesScrollEl.scrollHeight - savedTopicMessagesDistanceFromBottom
@@ -12852,13 +12882,25 @@ export function renderLobbyScreen(
       newTopicMessagesScrollEl.scrollTop = wasTopicMessagesNearBottom
         ? newTopicMessagesScrollEl.scrollHeight
         : savedTopicMessagesScrollTop
-    } else {
+    } else if (state.topicMessagesRenderReason === 'initial' || state.topicMessagesRenderReason === 'own-message') {
       // 'initial' (първо зареждане на тема / превключване) или null — viewport
       // към последните съобщения (т.4 от Етап 1 брифа: "viewport е към
       // долната част/последните съобщения").
       newTopicMessagesScrollEl.scrollTop = newTopicMessagesScrollEl.scrollHeight
+    } else if (stableTopicMessagesScrollAnchor !== null && stableTopicMessagesScrollAnchor.messageId.length > 0) {
+      const anchorEl = root.querySelector<HTMLElement>(`[data-topic-message="${cssEscape(stableTopicMessagesScrollAnchor.messageId)}"]`)
+      if (anchorEl) {
+        newTopicMessagesScrollEl.scrollTop += anchorEl.getBoundingClientRect().top - stableTopicMessagesScrollAnchor.top
+      } else if (prevTopicMessagesScrollEl !== null) {
+        newTopicMessagesScrollEl.scrollTop = savedTopicMessagesScrollTop
+      }
+    } else if (prevTopicMessagesScrollEl !== null) {
+      newTopicMessagesScrollEl.scrollTop = savedTopicMessagesScrollTop
+    } else {
+      newTopicMessagesScrollEl.scrollTop = newTopicMessagesScrollEl.scrollHeight
     }
   }
+  state.topicMessagesScrollAnchor = null
 
   const newTopicComposerTextEl = root.querySelector<HTMLTextAreaElement>('[data-topics-composer-text="1"]')
   if (newTopicComposerTextEl && wasTopicComposerFocused) {
