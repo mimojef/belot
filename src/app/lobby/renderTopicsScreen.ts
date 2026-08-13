@@ -623,10 +623,10 @@ export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySn
   const isEditing = state.topicMessageEdit?.messageId === reply.messageId
   return `
     <div data-topic-reply="${escapeHtml(reply.messageId)}">
-      <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 4px 8px ${REPLY_INDENT_PX}px;">
+      <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 4px 8px 12px;">
         ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt, reply.editedAt)}
       </div>
-      <div style="margin:-6px 0 6px ${REPLY_INDENT_PX}px;">
+      <div style="margin:-6px 0 6px 58px;">
         ${isEditing
           ? renderTopicMessageEditForm(state, reply.messageId)
           : (reply.body.length > 0 ? `<div style="font-size:14px;line-height:1.4;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(reply.body)}</div>` : '')
@@ -677,7 +677,7 @@ function renderRepliesSection(state: LobbyScreenState, rootMessageId: string): s
   // "малко по-ярка", "без прекален glow") — alpha вдигнат от 0.16 на 0.55,
   // без box-shadow/glow ефект, за да остане елегантен, не крещящ.
   return `
-    <div data-topic-replies-section="${escapeHtml(rootMessageId)}" style="border-left:2px solid rgba(212,165,32,0.55);margin-left:18px;">
+    <div data-topic-replies-section="${escapeHtml(rootMessageId)}" style="border-left:2px solid rgba(212,165,32,0.55);margin:0 12px 12px 46px;padding-top:2px;">
       ${listHtml}
       ${loadMoreHtml}
       ${composerHtml}
@@ -727,17 +727,17 @@ export function renderTopicAttachment(attachment: TopicAttachmentSnapshot, apiBa
 export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMessageSnapshot): string {
   const isEditing = state.topicMessageEdit?.messageId === message.messageId
   return `
-    <div data-topic-message="${escapeHtml(message.messageId)}">
-      <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 4px 0;">
+    <div data-topic-message="${escapeHtml(message.messageId)}" class="topic-root-card">
+      <div style="display:flex;align-items:flex-start;gap:10px;padding:12px 12px 0;">
         ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt)}
       </div>
-      <div style="padding:0 4px 10px 46px;">
+      <div style="padding:0 12px 12px 58px;">
         ${isEditing
           ? renderTopicMessageEditForm(state, message.messageId)
-          : (message.body.length > 0 ? `<div style="margin-top:2px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body)}</div>` : '')
+          : (message.body.length > 0 ? `<div style="margin-top:4px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body)}</div>` : '')
         }
         ${message.attachment ? renderTopicAttachment(message.attachment, state.apiBaseUrl) : ''}
-        <div style="margin-top:4px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
+        <div style="margin-top:6px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
           ${renderTopicLikeButton(state, message.messageId, message.likeCount, message.viewerHasLiked)}
           ${renderTopicReplyButton(message.messageId, message.replyCount)}
           ${renderTopicMessageEditButton(state, message.messageId, true, message.senderProfileId, message.createdAt, message.replyCount)}
@@ -823,6 +823,15 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
       }
       .topic-message-action-btn:hover { background:rgba(255,255,255,0.06); color:rgba(248,250,252,0.8); }
       .topic-message-action-btn:active { background:rgba(255,255,255,0.10); }
+      .topic-root-card {
+        box-sizing:border-box;
+        width:100%;
+        border:1px solid rgba(255,255,255,0.16);
+        border-radius:10px;
+        background:linear-gradient(180deg,#151515 0%,#101010 100%);
+        box-shadow:inset 0 1px 0 rgba(255,255,255,0.055);
+        overflow:hidden;
+      }
       .topic-message-author-row {
         display:flex;
         align-items:center;
@@ -930,7 +939,7 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
     </style>
     <div data-topic-messages-scroll="1" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;">
       ${loadOlderIndicator}
-      <div data-topic-messages-list="1" style="display:flex;flex-direction:column;">
+      <div data-topic-messages-list="1" style="display:flex;flex-direction:column;gap:8px;padding:6px 6px 10px;box-sizing:border-box;">
         ${messages.map((m) => renderTopicMessageRow(state, m)).join('')}
       </div>
     </div>
