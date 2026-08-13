@@ -211,9 +211,9 @@ await check('[2] Personal button is not rendered as a topic chip and legacy topi
 await check('[3] Topics Personal mode hides topic stream/chips and renders personal panel', () => {
   assert(renderTopics.includes('const isPersonalMode = state.topicsMode === \'personal\''), 'missing personal mode guard')
   assert(renderTopics.includes('renderTopicsPersonalChatPanel(state)'), 'missing personal panel render')
-  assert(renderLobby.includes('topicsMode: \'topics\' | \'personal\''), 'LobbyScreenState missing topicsMode')
+  assert(renderLobby.includes('topicsMode: \'topics\' | \'thread\' | \'personal\''), 'LobbyScreenState missing topicsMode')
   assert(renderLobby.includes('topicsPersonalView: \'list\' | \'conversation\''), 'LobbyScreenState missing personal view')
-  assert(controller.includes('topicsMode: \'topics\' | \'personal\''), 'controller state missing topicsMode')
+  assert(controller.includes('topicsMode: \'topics\' | \'thread\' | \'personal\''), 'controller state missing topicsMode')
   assert(controller.includes('topicsPersonalView: \'list\' | \'conversation\''), 'controller state missing personal view')
   assert(renderLobby.includes("const activeConversation = state.topicsPersonalView === 'conversation'"), 'detail must render only after selecting a conversation')
 })

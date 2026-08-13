@@ -400,18 +400,16 @@ try {
     assertEqual(await getComposerValue(page), 'Уникален текст 12345', 'draft НЕ трябва да се чисти по body match')
   })
 
-  await check('[11] Draft preservation per topic — A→B→A пази недовършения текст', async () => {
+  await check('[11] General draft survives Personal roundtrip; hidden legacy topics have no chip entry', async () => {
     await openTopicsAndWaitComposer(page, true, true)
     await setComposerValue(page, 'чернова в Общ чат')
-    await setNextMessagesResult(page, [])
-    await clickTopicChip(page, 'topic-b')
+    const hiddenTopicChipExists = await page.evaluate(() => document.querySelector('[data-topic-chip="topic-b"]') !== null)
+    assertEqual(hiddenTopicChipExists, false, 'hidden legacy topic-b must not render as a topic chip')
+    await page.click('[data-topics-personal-open="1"]')
     await page.waitForTimeout(40)
-    assertEqual(await getComposerValue(page), '', 'нова тема трябва да стартира с празен draft')
-    await setComposerValue(page, 'чернова в Тема Б')
-    await setNextMessagesResult(page, [])
-    await clickTopicChip(page, 'topic-general')
+    await page.click('[data-topics-personal-back="1"]')
     await page.waitForTimeout(40)
-    assertEqual(await getComposerValue(page), 'чернова в Общ чат', 'draft-ът от Общ чат трябва да е запазен')
+    assertEqual(await getComposerValue(page), 'чернова в Общ чат', 'General draft трябва да се пази при Personal roundtrip')
   })
 
   await check('[12] Gap-closing subscribe: afterSeq = seq на последното REST-заредено съобщение', async () => {
@@ -422,15 +420,17 @@ try {
     assert(last !== undefined && last.topicId === 'topic-general' && last.afterSeq === 42, `последен subscribe: ${JSON.stringify(last)}`)
   })
 
-  await check('[13] Topic switch: unsubscribe от старата тема се извиква преди subscribe към новата', async () => {
+  await check('[13] Hidden legacy topic chip click is a no-op; General subscription remains canonical', async () => {
     await openTopicsAndWaitComposer(page, true, true, [])
-    await setNextMessagesResult(page, [])
+    const beforeUnsub = (await getUnsubscribeLog(page)).length
+    const beforeSub = (await getSubscribeLog(page)).length
     await clickTopicChip(page, 'topic-b')
     await page.waitForTimeout(40)
     const unsub = await getUnsubscribeLog(page)
-    assert(unsub.includes('topic-general'), `unsubscribe log: ${JSON.stringify(unsub)}`)
+    assertEqual(unsub.length, beforeUnsub, `hidden topic chip click must not unsubscribe: ${JSON.stringify(unsub)}`)
     const sub = await getSubscribeLog(page)
-    assert(sub.some((s) => s.topicId === 'topic-b'), `subscribe log: ${JSON.stringify(sub)}`)
+    assertEqual(sub.length, beforeSub, `hidden topic chip click must not subscribe: ${JSON.stringify(sub)}`)
+    assert(!sub.slice(beforeSub).some((s) => s.topicId === 'topic-b'), `must not subscribe to hidden topic-b: ${JSON.stringify(sub)}`)
   })
 
   await check('[14] vip_required от сървъра при send → отваря VIP flow веднага, без reload', async () => {

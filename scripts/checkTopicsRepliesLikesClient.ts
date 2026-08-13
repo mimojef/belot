@@ -89,6 +89,11 @@ type H = {
   getLikeToggleLog: () => Array<{ messageId: string; requestId: string }>
   getRepliesLoadLog: () => Array<{ topicId: string; rootMessageId: string; afterSeq: number | null }>
   simulateServerMessage: (message: Record<string, unknown>) => boolean
+  clickRootCard: (rootMessageId: string) => void
+  clickThreadBack: () => void
+  isThreadVisible: () => boolean
+  getThreadRootMessageId: () => string | null
+  isReplyComposerReadonly: (rootMessageId: string) => boolean | null
   clickReplyButton: (rootMessageId: string) => void
   clickLikeButton: (messageId: string) => void
   isRepliesSectionExpanded: (rootMessageId: string) => boolean
@@ -101,6 +106,7 @@ type H = {
   getReplyButtonCount: (rootMessageId: string) => number
   getVisibleReplyIds: (rootMessageId: string) => Array<string | null>
   isVipPopupOpen: () => boolean
+  clickVipPopupClose: () => void
   getComposerErrorText: () => string | null
   isTopicsStreamVisible: () => boolean
   getTopicsPersonalPanelView: () => string | null
@@ -202,43 +208,53 @@ try {
     assertEqual(state!.pressed, 'false', 'aria-pressed трябва да е false')
   })
 
-  await check('[3] Non-VIP click Reply -> отваря VIP popup, БЕЗ да отвори inline composer', async () => {
+  await check('[3] Non-VIP click Reply -> opens thread; VIP popup appears only when trying to write', async () => {
     const { rootA } = await openGeneralWithRoots(false)
     await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
     await page.waitForTimeout(100)
     const vipOpen = await call(page, (h: H) => h.isVipPopupOpen())
-    assert(vipOpen, 'VIP popup трябва да се отвори при non-VIP click на Reply')
+    assert(!vipOpen, 'Non-VIP read/open на thread НЕ трябва да отваря VIP popup')
+    assert(await call(page, (h: H) => h.isThreadVisible()), 'Reply click трябва да отвори отделен thread view')
+    assertEqual(await call(page, (h: H) => h.getThreadRootMessageId()), rootA, 'thread view трябва да е за точния rootMessageId')
     const composerOpen = await call(page, (h: H, id: string) => h.isReplyComposerOpen(id), rootA)
-    assert(!composerOpen, 'inline reply composer НЕ трябва да се отвори за non-VIP')
+    assert(composerOpen, 'thread reply composer трябва да е видим за non-VIP')
+    assertEqual(await call(page, (h: H, id: string) => h.isReplyComposerReadonly(id), rootA), true, 'non-VIP thread composer трябва да е readonly')
+    await call(page, (h: H, id: string) => h.pressEnterInReplyComposer(id, false), rootA)
+    await page.waitForTimeout(100)
+    assert(await call(page, (h: H) => h.isVipPopupOpen()), 'Опит за писане като non-VIP трябва да отвори VIP popup')
+    await call(page, (h: H) => h.clickVipPopupClose())
   })
 
-  await check('[4] VIP click Reply -> expand-ва thread + отваря inline composer (fetch replies)', async () => {
+  await check('[4] VIP click Reply -> opens exact thread + reply composer (fetch replies)', async () => {
     const { rootA } = await openGeneralWithRoots(true)
     await call(page, (h: H) => h.setNextRepliesResult([], false))
     await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
     await page.waitForTimeout(100)
+    assert(await call(page, (h: H) => h.isThreadVisible()), 'thread view трябва да се отвори')
+    assertEqual(await call(page, (h: H) => h.getThreadRootMessageId()), rootA, 'thread view трябва да е за rootA')
     const expanded = await call(page, (h: H, id: string) => h.isRepliesSectionExpanded(id), rootA)
-    assert(expanded, 'replies section трябва да е expanded след VIP click')
+    assert(expanded, 'replies section трябва да се render-ва вътре в thread view')
     const composerOpen = await call(page, (h: H, id: string) => h.isReplyComposerOpen(id), rootA)
-    assert(composerOpen, 'inline reply composer трябва да се отвори за VIP click')
+    assert(composerOpen, 'thread reply composer трябва да се отвори за VIP click')
     const loadLog = await call(page, (h: H) => h.getRepliesLoadLog())
     assert(loadLog.some((l) => l.rootMessageId === rootA), 'onTopicRepliesLoad трябва да е извикан за rootA')
   })
 
-  await check('[5] Collapse (повторен click Reply) -> replies section изчезва, composer се затваря', async () => {
+  await check('[5] Thread Back -> closes thread; General stays without inline replies', async () => {
     const { rootA } = await openGeneralWithRoots(true)
     await call(page, (h: H) => h.setNextRepliesResult([], false))
     await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
     await page.waitForTimeout(100)
-    assert(await call(page, (h: H, id: string) => h.isRepliesSectionExpanded(id), rootA), 'трябва да е expanded преди collapse')
+    assert(await call(page, (h: H) => h.isThreadVisible()), 'thread трябва да е отворен преди Back')
 
-    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await call(page, (h: H) => h.clickThreadBack())
     await page.waitForTimeout(100)
-    const stillExpanded = await call(page, (h: H, id: string) => h.isRepliesSectionExpanded(id), rootA)
-    assert(!stillExpanded, 'replies section трябва да изчезне след collapse click')
+    assert(!await call(page, (h: H) => h.isThreadVisible()), 'thread трябва да се затвори след Back')
+    const generalExpanded = await call(page, (h: H, id: string) => h.isRepliesSectionExpanded(id), rootA)
+    assert(!generalExpanded, 'General stream НЕ трябва да показва inline replies след Back')
   })
 
-  await check('[6] Reply draft isolation: draft за root A остава непокътнат след отваряне на composer за root B', async () => {
+  await check('[6] Reply draft isolation: draft за root A остава непокътнат след thread за root B', async () => {
     const { rootA, rootB } = await openGeneralWithRoots(true)
     await call(page, (h: H) => h.setNextRepliesResult([], false))
     await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
@@ -246,7 +262,8 @@ try {
     await call(page, (h: H, [id, v]: [string, string]) => h.setReplyComposerValue(id, v), [rootA, 'draft за A'])
     await page.waitForTimeout(50)
 
-    // Само ЕДИН composer отворен наведнъж (продуктово решение) — click на B затваря A composer-а visually.
+    await call(page, (h: H) => h.clickThreadBack())
+    await page.waitForTimeout(100)
     await call(page, (h: H, id: string) => h.clickReplyButton(id), rootB)
     await page.waitForTimeout(100)
     await call(page, (h: H, [id, v]: [string, string]) => h.setReplyComposerValue(id, v), [rootB, 'draft за B'])
@@ -255,11 +272,68 @@ try {
     const bDraft = await call(page, (h: H, id: string) => h.getReplyComposerValue(id), rootB)
     assertEqual(bDraft, 'draft за B', 'B composer-ът трябва да пази собствения си draft')
 
-    // Отваряме А отново — draft-ът за A трябва да е запазен в state-a (дори composer-ът да е бил затворен визуално).
+    await call(page, (h: H) => h.clickThreadBack())
+    await page.waitForTimeout(100)
     await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
     await page.waitForTimeout(100)
     const aDraftAfterReturn = await call(page, (h: H, id: string) => h.getReplyComposerValue(id), rootA)
     assertEqual(aDraftAfterReturn, 'draft за A', 'A draft-ът трябва да е запазен в state-a, независимо от B composer отварянето междувременно')
+  })
+
+  await check('[6.1] Root card surface opens exact thread; General has no inline replies', async () => {
+    const { rootA } = await openGeneralWithRoots(true)
+    await call(page, (h: H) => h.setNextRepliesResult([], false))
+    await call(page, (h: H, id: string) => h.clickRootCard(id), rootA)
+    await page.waitForTimeout(100)
+    assert(await call(page, (h: H) => h.isThreadVisible()), 'root card surface трябва да отвори thread view')
+    assertEqual(await call(page, (h: H) => h.getThreadRootMessageId()), rootA, 'card click трябва да отвори точния rootMessageId')
+    await call(page, (h: H) => h.clickThreadBack())
+    await page.waitForTimeout(100)
+    assert(!await call(page, (h: H, id: string) => h.isRepliesSectionExpanded(id), rootA), 'General НЕ трябва да render-ва inline replies')
+  })
+
+  await check('[6.2] Nested Like click does not open thread', async () => {
+    const { rootA } = await openGeneralWithRoots(true)
+    await call(page, (h: H, id: string) => h.clickLikeButton(id), rootA)
+    await page.waitForTimeout(50)
+    assert(!await call(page, (h: H) => h.isThreadVisible()), 'nested like button click НЕ трябва да отвори thread')
+  })
+
+  await check('[6.3] Browser Back closes open thread to General', async () => {
+    const { rootA } = await openGeneralWithRoots(true)
+    await call(page, (h: H) => h.setNextRepliesResult([], false))
+    await call(page, (h: H, id: string) => h.clickRootCard(id), rootA)
+    await page.waitForTimeout(100)
+    assert(await call(page, (h: H) => h.isThreadVisible()), 'thread трябва да е отворен преди browser Back')
+    await page.goBack({ timeout: 3000 }).catch(() => null)
+    await page.waitForTimeout(100)
+    assert(!await call(page, (h: H) => h.isThreadVisible()), 'browser Back трябва да затвори thread-а, не да остави thread view')
+  })
+
+  await check('[6.4] Root delete while thread open closes thread safely', async () => {
+    const { rootA } = await openGeneralWithRoots(true)
+    await call(page, (h: H) => h.setNextRepliesResult([], false))
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+    assert(await call(page, (h: H) => h.isThreadVisible()), 'thread трябва да е отворен преди delete push')
+    await call(
+      page,
+      (h: H, msg: unknown) => h.simulateServerMessage(msg as Record<string, unknown>),
+      { type: 'topic_message_deleted', topicId: 'topic-general', messageId: rootA, parentMessageId: null },
+    )
+    await page.waitForTimeout(100)
+    assert(!await call(page, (h: H) => h.isThreadVisible()), 'root delete трябва да затвори thread view безопасно')
+  })
+
+  await check('[6.5] Thread renders replies in ascending order from canonical replies load', async () => {
+    const { rootA } = await openGeneralWithRoots(true)
+    const reply1 = await call(page, (h: H, id: string) => h.makeReply('topic-general', 10, id, 'first reply'), rootA)
+    const reply2 = await call(page, (h: H, id: string) => h.makeReply('topic-general', 11, id, 'second reply'), rootA)
+    await call(page, (h: H, replies: unknown) => h.setNextRepliesResult(replies as any[], false), [reply1, reply2])
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+    const ids = await call(page, (h: H, id: string) => h.getVisibleReplyIds(id), rootA)
+    assertEqual(ids.join('|'), `${reply1.messageId}|${reply2.messageId}`, 'thread replies трябва да са във възходящ ред')
   })
 
   await check('[7] Reply composer Enter изпраща, Shift+Enter НЕ изпраща', async () => {
@@ -414,12 +488,12 @@ try {
     assertEqual(countAfter, 1, 'root replyCount трябва да се увеличи дори при collapsed thread')
   })
 
-  await check('[15] Topic switch не пренася reply composer state от старата тема', async () => {
+  await check('[15] Personal open from thread clears thread id and does not restore wrong composer', async () => {
     const { rootA } = await openGeneralWithRoots(true)
     await call(page, (h: H) => h.setNextRepliesResult([], false))
     await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
     await page.waitForTimeout(100)
-    assert(await call(page, (h: H, id: string) => h.isReplyComposerOpen(id), rootA), 'composer трябва да е отворен преди switch')
+    assert(await call(page, (h: H) => h.isThreadVisible()), 'thread трябва да е отворен преди Personal switch')
 
     await call(page, (h: H) => h.clickTopicsPersonalOpen())
     await page.waitForTimeout(100)
@@ -428,7 +502,8 @@ try {
     assertEqual(await call(page, (h: H) => h.getTopicsPersonalPanelView()), 'list', 'Personal mode трябва да отвори inbox list context')
     await call(page, (h: H) => h.clickTopicsBackToGeneral())
     await page.waitForTimeout(100)
-    assertEqual(await call(page, (h: H, id: string) => h.isReplyComposerOpen(id), rootA), true, 'връщане към Общ запазва reply composer state само в canonical general context')
+    assertEqual(await call(page, (h: H) => h.isThreadVisible()), false, 'връщане към Общ от Personal НЕ трябва да възстановява стар thread id')
+    assertEqual(await call(page, (h: H, id: string) => h.isReplyComposerOpen(id), rootA), false, 'General stream НЕ трябва да възстановява thread composer')
   })
 
   await check('Няма JS грешки в конзолата по време на сценариите', () => {

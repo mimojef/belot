@@ -848,7 +848,7 @@ type InternalLobbyFlowState = {
   topics: TopicSnapshot[] | null
   topicsLoadedForProfileId: string | null
   activeTopicId: string | null
-  topicsMode: 'topics' | 'personal'
+  topicsMode: 'topics' | 'thread' | 'personal'
   topicsPersonalView: 'list' | 'conversation'
   topicSeenInFlightByTopicId: Record<string, boolean | undefined>
   topicSeenQueuedByTopicId: Record<string, boolean | undefined>
@@ -881,6 +881,9 @@ type InternalLobbyFlowState = {
    */
   topicMessagesRenderReason: 'initial' | 'prepend' | 'live-append' | 'reconnect-refresh' | 'own-message' | 'reorder' | null
   topicMessagesScrollAnchor: { messageId: string; top: number } | null
+  topicThreadRootMessageId: string | null
+  topicThreadReturnScrollAnchor: { messageId: string; top: number } | null
+  topicThreadRenderReason: 'initial' | 'live-append' | 'own-reply' | null
   /** Draft текст per тема — потвърдено отклонение от flat-field конвенцията (lobbyChatDraft), защото Topics е genuinely multi-channel. */
   topicComposerDraftByTopicId: Record<string, string>
   /** pending requestId per тема, докато чакаме sever ack (echo/error) — null = нищо не се изпраща в момента за тази тема. */
@@ -1375,6 +1378,9 @@ function createInitialState(): InternalLobbyFlowState {
     topicMessagesSubscribedTopicId: null,
     topicMessagesRenderReason: null,
     topicMessagesScrollAnchor: null,
+    topicThreadRootMessageId: null,
+    topicThreadReturnScrollAnchor: null,
+    topicThreadRenderReason: null,
     topicComposerDraftByTopicId: {},
     topicComposerPendingRequestIdByTopicId: {},
     topicComposerErrorTextByTopicId: {},
@@ -3278,6 +3284,9 @@ export function createLobbyFlowController(
       topicOlderMessagesLoading: state.topicOlderMessagesLoading,
       topicMessagesRenderReason: state.topicMessagesRenderReason,
       topicMessagesScrollAnchor: state.topicMessagesScrollAnchor,
+      topicThreadRootMessageId: state.topicThreadRootMessageId,
+      topicThreadReturnScrollAnchor: state.topicThreadReturnScrollAnchor,
+      topicThreadRenderReason: state.topicThreadRenderReason,
       topicComposerDraftByTopicId: state.topicComposerDraftByTopicId,
       topicComposerPendingRequestIdByTopicId: state.topicComposerPendingRequestIdByTopicId,
       topicComposerErrorTextByTopicId: state.topicComposerErrorTextByTopicId,
@@ -3566,27 +3575,20 @@ export function createLobbyFlowController(
       onTopicRepliesLoadMore: (rootMessageId) => {
         void loadMoreReplies(rootMessageId)
       },
+      onTopicThreadOpen: (rootMessageId, scrollAnchor) => {
+        openTopicThread(rootMessageId, scrollAnchor ?? null)
+      },
+      onTopicThreadBack: () => {
+        closeTopicThreadToGeneral()
+      },
       onTopicMessageLikeToggleClick: (messageId) => {
         submitTopicMessageLikeToggle(messageId)
       },
       onTopicReplyClick: (rootMessageId, scrollAnchor) => {
-        if (!(state.topicsVipGate?.isActive ?? false)) {
-          handleTopicReplyComposerNonVipTap()
-          return
-        }
-        state.topicMessagesScrollAnchor = scrollAnchor ?? null
-        // VIP toggle семантика е върху COMPOSER-а, не самия expanded thread
-        // (двете са независими — само ЕДИН inline composer е отворен
-        // наведнъж, виж т.13, но root A може да остане expanded докато
-        // потребителят разглежда/пише в composer-а на root B). Click на
-        // root, чийто composer вече е отворен → collapse thread-а и затвори
-        // composer-а. Click на друг root (или все още затворен) → отвори
-        // composer-а му (и expand-не thread-а му, ако не е вече).
-        if (state.topicReplyComposerOpenRootId === rootMessageId) {
-          collapseReplyThread(rootMessageId)
-        } else {
-          openInlineReplyComposer(rootMessageId)
-        }
+        openTopicThread(rootMessageId, scrollAnchor ?? null)
+      },
+      onTopicReplyComposerNonVipTap: () => {
+        handleTopicReplyComposerNonVipTap()
       },
       onTopicReplyComposerCancel: (rootMessageId) => {
         closeInlineReplyComposer(rootMessageId)
@@ -5681,6 +5683,9 @@ export function createLobbyFlowController(
     state.currentScreen = 'topics'
     state.topicsMode = 'topics'
     state.topicsPersonalView = 'list'
+    state.topicThreadRootMessageId = null
+    state.topicThreadReturnScrollAnchor = null
+    state.topicThreadRenderReason = null
     clearTopicsPersonalTransientState()
     state.topicsInfoToast = null
     state.profilePopupOpen = false
@@ -5766,6 +5771,9 @@ export function createLobbyFlowController(
   function openTopic(topicId: string): void {
     state.topicsMode = 'topics'
     state.topicsPersonalView = 'list'
+    state.topicThreadRootMessageId = null
+    state.topicThreadReturnScrollAnchor = null
+    state.topicThreadRenderReason = null
     clearTopicsPersonalTransientState()
     state.topicsInfoToast = null
     if (state.activeTopicId === topicId) return
@@ -5792,6 +5800,10 @@ export function createLobbyFlowController(
   }
 
   function backToGeneralTopic(): void {
+    if (state.topicsMode === 'thread') {
+      closeTopicThreadToGeneral()
+      return
+    }
     const generalTopic = (state.topics ?? []).find((t) => t.isGeneral) ?? null
     if (generalTopic) openTopic(generalTopic.topicId)
   }
@@ -5828,6 +5840,61 @@ export function createLobbyFlowController(
     const scrollEl = options.root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
     if (scrollEl === null) return
     scrollEl.scrollTop = scrollEl.scrollHeight - distanceFromBottom
+  }
+
+  let topicThreadHistoryPushed = false
+
+  function findLoadedTopicRootMessage(rootMessageId: string): TopicMessageSnapshot | null {
+    return (state.topicMessages ?? []).find((m) => m.messageId === rootMessageId) ?? null
+  }
+
+  function pushTopicThreadHistory(): void {
+    try {
+      if (topicThreadHistoryPushed) return
+      history.pushState({ ...(history.state ?? {}), pikaTopicsThread: true }, '')
+      topicThreadHistoryPushed = true
+    } catch {
+      topicThreadHistoryPushed = false
+    }
+  }
+
+  function openTopicThread(rootMessageId: string, scrollAnchor: { messageId: string; top: number } | null = null): void {
+    if (findLoadedTopicRootMessage(rootMessageId) === null) return
+
+    const currentAnchor = scrollAnchor ?? captureTopicMessagesScrollAnchor()
+    state.currentScreen = 'topics'
+    state.topicsMode = 'thread'
+    state.topicsPersonalView = 'list'
+    clearTopicsPersonalTransientState()
+    state.topicThreadRootMessageId = rootMessageId
+    state.topicThreadReturnScrollAnchor = currentAnchor
+    state.topicThreadRenderReason = 'initial'
+    state.topicReplyComposerOpenRootId = rootMessageId
+    if (!state.topicExpandedReplyRootIds.includes(rootMessageId)) {
+      state.topicExpandedReplyRootIds = [...state.topicExpandedReplyRootIds, rootMessageId]
+    }
+    pushTopicThreadHistory()
+    render()
+    void expandReplyThread(rootMessageId)
+  }
+
+  function closeTopicThreadToGeneral(): void {
+    const returnAnchor = state.topicThreadReturnScrollAnchor
+    state.topicsMode = 'topics'
+    state.topicsPersonalView = 'list'
+    state.topicThreadRootMessageId = null
+    state.topicThreadReturnScrollAnchor = null
+    state.topicThreadRenderReason = null
+    state.topicReplyComposerOpenRootId = null
+    state.topicMessagesScrollAnchor = returnAnchor
+    render()
+  }
+
+  function handleTopicThreadPopstate(): boolean {
+    if (state.currentScreen !== 'topics' || state.topicsMode !== 'thread') return false
+    topicThreadHistoryPushed = false
+    closeTopicThreadToGeneral()
+    return true
   }
 
   function isTopicMessagesNearTop(thresholdPx = 96): boolean {
@@ -5893,16 +5960,6 @@ export function createLobbyFlowController(
   // Toggle behavior-ът живее директно в onTopicReplyClick bridge-а по-горе
   // (collapse при повторен click на VIP viewer) — тук само примитивите.
 
-  function collapseReplyThread(rootMessageId: string): void {
-    state.topicExpandedReplyRootIds = state.topicExpandedReplyRootIds.filter((id) => id !== rootMessageId)
-    // Затваряме и reply composer-а, ако е бил отворен точно за този thread
-    // (продуктово решение: само ЕДИН inline composer наведнъж, виж т.13).
-    if (state.topicReplyComposerOpenRootId === rootMessageId) {
-      state.topicReplyComposerOpenRootId = null
-    }
-    render()
-  }
-
   async function expandReplyThread(rootMessageId: string): Promise<void> {
     state.topicExpandedReplyRootIds = [...state.topicExpandedReplyRootIds, rootMessageId]
     render()
@@ -5923,7 +5980,8 @@ export function createLobbyFlowController(
 
     // Stale-response guard — потребителят може вече да е превключил тема
     // или collapse-нал thread-а, докато заявката е висяла.
-    if (state.activeTopicId !== topicId || !state.topicExpandedReplyRootIds.includes(rootMessageId)) {
+    const isCurrentThread = state.topicsMode === 'thread' && state.topicThreadRootMessageId === rootMessageId
+    if (state.activeTopicId !== topicId || (!state.topicExpandedReplyRootIds.includes(rootMessageId) && !isCurrentThread)) {
       state.topicRepliesLoadingByRootId[rootMessageId] = false
       return
     }
@@ -5942,6 +6000,9 @@ export function createLobbyFlowController(
     for (const reply of result.replies) {
       state.topicMessageLikeCountById[reply.messageId] = reply.likeCount
       state.topicMessageViewerHasLikedById[reply.messageId] = reply.viewerHasLiked
+    }
+    if (isCurrentThread) {
+      state.topicThreadRenderReason = 'initial'
     }
     render()
   }
@@ -5968,7 +6029,8 @@ export function createLobbyFlowController(
 
     const result = await options.onTopicRepliesLoad(topicId, rootMessageId, lastKnownSeq)
 
-    if (state.activeTopicId !== topicId || !state.topicExpandedReplyRootIds.includes(rootMessageId)) {
+    const isCurrentThread = state.topicsMode === 'thread' && state.topicThreadRootMessageId === rootMessageId
+    if (state.activeTopicId !== topicId || (!state.topicExpandedReplyRootIds.includes(rootMessageId) && !isCurrentThread)) {
       state.topicRepliesLoadingByRootId[rootMessageId] = false
       return
     }
@@ -6035,16 +6097,6 @@ export function createLobbyFlowController(
 
   function updateTopicReplyComposerDraft(rootMessageId: string, value: string): void {
     state.topicReplyComposerDraftByRootId[rootMessageId] = value
-  }
-
-  /** VIP click на Reply контролата → отваря inline composer (ако вече не е отворен) и разгъва thread-а. Non-VIP се прихваща в renderLobbyScreen.ts преди тук (виж onTopicReplyComposerNonVipTap). */
-  function openInlineReplyComposer(rootMessageId: string): void {
-    state.topicReplyComposerOpenRootId = rootMessageId
-    if (!state.topicExpandedReplyRootIds.includes(rootMessageId)) {
-      void expandReplyThread(rootMessageId)
-    } else {
-      render()
-    }
   }
 
   function closeInlineReplyComposer(rootMessageId: string): void {
@@ -8989,6 +9041,10 @@ export function createLobbyFlowController(
     state.currentScreen = 'topics'
     state.topicsMode = 'personal'
     state.topicsPersonalView = targetFriendshipId === null ? 'list' : 'conversation'
+    state.topicThreadRootMessageId = null
+    state.topicThreadReturnScrollAnchor = null
+    state.topicThreadRenderReason = null
+    state.topicReplyComposerOpenRootId = null
     state.chatShowArchived = false
     state.chatErrorText = null
     state.profilePopupOpen = false
@@ -10528,6 +10584,7 @@ export function createLobbyFlowController(
     // се веднага след употреба (виж topicMessagesRenderReason в типа).
     state.topicMessagesRenderReason = null
     state.topicMessagesScrollAnchor = null
+    state.topicThreadRenderReason = null
     syncUrlPath()
   }
 
@@ -11689,9 +11746,10 @@ export function createLobbyFlowController(
         }
       }
 
+      const isCurrentThread = state.topicsMode === 'thread' && state.topicThreadRootMessageId === rootMessageId
       const isExpanded = state.topicExpandedReplyRootIds.includes(rootMessageId)
       const alreadyLoaded = state.topicRepliesByRootId[rootMessageId] !== undefined && state.topicRepliesByRootId[rootMessageId] !== null
-      if (isExpanded && alreadyLoaded) {
+      if ((isExpanded || isCurrentThread) && alreadyLoaded) {
         const existing = state.topicRepliesByRootId[rootMessageId] ?? []
         const byId = new Map<string, TopicReplySnapshot>()
         for (const r of existing) byId.set(r.messageId, r)
@@ -11707,12 +11765,17 @@ export function createLobbyFlowController(
         state.topicReplyComposerPendingRequestIdByRootId[rootMessageId] = null
         state.topicReplyComposerErrorTextByRootId[rootMessageId] = null
         clearTopicReplyComposerPendingImage(rootMessageId)
+        state.topicThreadRenderReason = isCurrentThread ? 'own-reply' : state.topicThreadRenderReason
       }
 
       if (rootMessage) {
         state.topicMessages = sortTopicMessagesByActivity(state.topicMessages ?? [])
-        state.topicMessagesScrollAnchor = scrollAnchor
-        state.topicMessagesRenderReason = 'reorder'
+        if (isCurrentThread) {
+          state.topicThreadRenderReason = state.topicThreadRenderReason ?? 'live-append'
+        } else {
+          state.topicMessagesScrollAnchor = scrollAnchor
+          state.topicMessagesRenderReason = 'reorder'
+        }
       } else {
         void refreshTopicMessagesAfterActivityChange(message.topicId)
       }
@@ -11911,6 +11974,13 @@ export function createLobbyFlowController(
         delete state.topicReplyComposerPendingImageByRootId[message.messageId]
         if (state.topicReplyComposerOpenRootId === message.messageId) {
           state.topicReplyComposerOpenRootId = null
+        }
+        if (state.topicsMode === 'thread' && state.topicThreadRootMessageId === message.messageId) {
+          state.topicsMode = 'topics'
+          state.topicThreadRootMessageId = null
+          state.topicMessagesScrollAnchor = state.topicThreadReturnScrollAnchor
+          state.topicThreadReturnScrollAnchor = null
+          state.topicThreadRenderReason = null
         }
         if (state.topicMessageEdit !== null && findLoadedTopicMessage(state.topicMessageEdit.messageId) === null) {
           state.topicMessageEdit = null
@@ -12402,6 +12472,7 @@ export function createLobbyFlowController(
     // Image viewer-ът (ако е отворен) консумира popstate събитието първо —
     // виж коментара при openImageViewer/handleWindowPopstate по-горе.
     if (handleWindowPopstate()) return
+    if (handleTopicThreadPopstate()) return
     const path = window.location.pathname
     applyRouteSeo(path)
     navigateFromPath(path)

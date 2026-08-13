@@ -304,6 +304,26 @@ function q<T extends Element>(selector: string): T | null {
   getClaimCallCount: () => claimCallCount,
   getTopicsLoadCallCount: () => topicsLoadCallCount,
   getTopicMessagesLoadCallCount: () => topicMessagesLoadCallCount,
+  clickRootCard: (rootMessageId: string) => q<HTMLElement>(`[data-topic-card-open="${CSS.escape(rootMessageId)}"]`)?.click(),
+  clickThreadBack: () => q<HTMLButtonElement>('[data-topic-thread-back="1"]')?.click(),
+  isThreadVisible: () => q('[data-topic-thread-scroll="1"]') !== null,
+  getThreadRootMessageId: () => q<HTMLElement>('[data-topic-thread-list="1"] [data-topic-message]')?.dataset.topicMessage ?? null,
+  getThreadScrollTop: () => q<HTMLElement>('[data-topic-thread-scroll="1"]')?.scrollTop ?? null,
+  getThreadScrollHeight: () => q<HTMLElement>('[data-topic-thread-scroll="1"]')?.scrollHeight ?? null,
+  getThreadClientHeight: () => q<HTMLElement>('[data-topic-thread-scroll="1"]')?.clientHeight ?? null,
+  getThreadBottomDistance: () => {
+    const el = q<HTMLElement>('[data-topic-thread-scroll="1"]')
+    return el ? el.scrollHeight - el.scrollTop - el.clientHeight : null
+  },
+  setThreadScrollTop: (value: number) => {
+    const el = q<HTMLElement>('[data-topic-thread-scroll="1"]')
+    if (el) {
+      el.scrollTop = value
+      el.dispatchEvent(new Event('scroll', { bubbles: true }))
+    }
+  },
+  isReplyComposerReadonly: (rootMessageId: string) =>
+    q<HTMLTextAreaElement>(`[data-topics-reply-composer-form][data-topics-reply-composer-root-id="${CSS.escape(rootMessageId)}"] [data-topics-reply-composer-text="1"]`)?.readOnly ?? null,
   clickReplyButton: (rootMessageId: string) => q<HTMLButtonElement>(`[data-topic-message-reply="${rootMessageId}"]`)?.click(),
   clickLikeButton: (messageId: string) => q<HTMLButtonElement>(`[data-topic-message-like="${messageId}"]`)?.click(),
   clickDirectPersonalButton: (profileId: string) => q<HTMLButtonElement>(`[data-topic-message-personal="${profileId}"]`)?.click(),

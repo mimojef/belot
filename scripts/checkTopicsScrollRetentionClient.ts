@@ -67,6 +67,15 @@ type H = {
   makeReply: (topicId: string, seq: number, parentMessageId: string, body: string, senderProfileId?: string, senderDisplayName?: string) => any
   simulateServerMessage: (message: Record<string, unknown>) => boolean
   clickReplyButton: (rootMessageId: string) => void
+  clickThreadBack: () => void
+  getThreadScrollTop: () => number | null
+  getThreadScrollHeight: () => number | null
+  getThreadClientHeight: () => number | null
+  getThreadBottomDistance: () => number | null
+  setThreadScrollTop: (value: number) => void
+  setReplyComposerValue: (rootMessageId: string, value: string) => void
+  submitReplyComposer: (rootMessageId: string) => void
+  getReplySendLog: () => Array<{ topicId: string; parentMessageId: string; body: string; requestId: string }>
   setComposerValue: (value: string) => void
   submitComposerForm: () => void
   getSendLog: () => Array<{ topicId: string; body: string; requestId: string }>
@@ -216,6 +225,11 @@ async function assertAtBottom(page: Page, label: string, tolerancePx = 8): Promi
   assert(distance !== null && distance <= tolerancePx, `${label}: bottom distance ${distance}, expected <= ${tolerancePx}`)
 }
 
+async function assertThreadAtBottom(page: Page, label: string, tolerancePx = 8): Promise<void> {
+  const distance = await call(page, (h: H) => h.getThreadBottomDistance())
+  assert(distance !== null && distance <= tolerancePx, `${label}: thread bottom distance ${distance}, expected <= ${tolerancePx}`)
+}
+
 async function assertAtTop(page: Page, label: string, tolerancePx = 8): Promise<void> {
   const scrollTop = await call(page, (h: H) => h.getMessagesScrollTop())
   assert(scrollTop !== null && scrollTop <= tolerancePx, `${label}: scrollTop ${scrollTop}, expected <= ${tolerancePx}`)
@@ -341,18 +355,14 @@ try {
       })
     })
 
-    await check(`[${viewportLabel}] middle incoming reply preserves viewport`, async () => {
+    await check(`[${viewportLabel}] middle incoming reply in another thread preserves General viewport`, async () => {
       await withHarness(async (page) => {
         const messages = await makeMessages(page, 'topic-general', 1, 52, `${viewportLabel}-reply`)
         await openTopic(page, messages)
         const rootId = messages[8]!.messageId
         const anchorId = messages[28]!.messageId
-        const replies = await makeReplies(page, 'topic-general', rootId, 1, 2, `${viewportLabel}-reply-initial`)
-        await call(page, (h: H, arg: unknown[]) => h.setNextRepliesResult(arg, false), replies)
-        await call(page, (h: H, id: string) => h.clickReplyButton(id), rootId)
-        await page.waitForFunction((id) => document.querySelector(`[data-topic-replies-section="${CSS.escape(id as string)}"]`) !== null, rootId)
         await scrollMessageNearTop(page, anchorId)
-        await assertAnchorPreserved(page, anchorId, 'middle incoming reply', async () => {
+        await assertAnchorPreserved(page, anchorId, 'middle incoming reply in General', async () => {
           await call(
             page,
             (h: H, msg: Record<string, unknown>) => h.simulateServerMessage(msg),
@@ -412,7 +422,7 @@ try {
       })
     })
 
-    await check(`[${viewportLabel}] reply expand/collapse keeps clicked root anchored`, async () => {
+    await check(`[${viewportLabel}] thread open/back restores clicked root anchor`, async () => {
       await withHarness(async (page) => {
         const messages = await makeMessages(page, 'topic-general', 1, 52, `${viewportLabel}-toggle`)
         await openTopic(page, messages)
@@ -420,16 +430,133 @@ try {
         const replies = await makeReplies(page, 'topic-general', rootId, 1, 4, `${viewportLabel}-toggle`)
         await call(page, (h: H, arg: unknown[]) => h.setNextRepliesResult(arg, false), replies)
         await scrollMessageNearTop(page, rootId)
+        const before = await call(page, (h: H, id: string) => h.getMessageTop(id), rootId)
+        await call(page, (h: H, id: string) => h.clickReplyButton(id), rootId)
+        await page.waitForFunction((id) => document.querySelector(`[data-topic-replies-section="${CSS.escape(id as string)}"]`) !== null, rootId)
+        await page.click('[data-topic-thread-back="1"]')
+        await page.waitForFunction(() => document.querySelector('[data-topic-messages-scroll="1"]') !== null)
+        const after = await call(page, (h: H, id: string) => h.getMessageTop(id), rootId)
+        assertClose(after, before, 'thread open/back root anchor', 8)
+      })
+    })
 
-        await assertAnchorPreserved(page, rootId, 'reply expand', async () => {
-          await call(page, (h: H, id: string) => h.clickReplyButton(id), rootId)
-          await page.waitForFunction((id) => document.querySelector(`[data-topic-replies-section="${CSS.escape(id as string)}"]`) !== null, rootId)
-        })
+    await check(`[${viewportLabel}] thread initial open and realtime reply scroll lifecycle`, async () => {
+      await withHarness(async (page) => {
+        const messages = await makeMessages(page, 'topic-general', 1, 52, `${viewportLabel}-thread-scroll`)
+        await openTopic(page, messages)
+        const rootId = messages[18]!.messageId
+        const replies = await makeReplies(page, 'topic-general', rootId, 1, 36, `${viewportLabel}-thread-scroll`)
+        await call(page, (h: H, arg: unknown[]) => h.setNextRepliesResult(arg, false), replies)
+        await call(page, (h: H, id: string) => h.clickReplyButton(id), rootId)
+        await page.waitForFunction((id) => document.querySelector(`[data-topic-replies-section="${CSS.escape(id as string)}"]`) !== null, rootId)
+        await page.waitForFunction(() => {
+          const el = document.querySelector<HTMLElement>('[data-topic-thread-scroll="1"]')
+          return el !== null && el.scrollHeight > el.clientHeight + 120 && el.scrollHeight - el.scrollTop - el.clientHeight <= 8
+        }, undefined, { timeout: 5000 })
+        await assertThreadAtBottom(page, 'initial thread open with many replies')
 
-        await assertAnchorPreserved(page, rootId, 'reply collapse', async () => {
-          await call(page, (h: H, id: string) => h.clickReplyButton(id), rootId)
-          await page.waitForFunction((id) => document.querySelector(`[data-topic-replies-section="${CSS.escape(id as string)}"]`) === null, rootId)
+        await call(page, (h: H) => h.setThreadScrollTop(40))
+        await page.waitForTimeout(30)
+        const scrolledUpBefore = await call(page, (h: H) => h.getThreadScrollTop())
+        await call(
+          page,
+          (h: H, msg: Record<string, unknown>) => h.simulateServerMessage(msg),
+          {
+            type: 'topic_reply',
+            seq: 2000,
+            messageId: `${viewportLabel}-thread-live-scrolled-up`,
+            topicId: 'topic-general',
+            parentMessageId: rootId,
+            senderProfileId: 'thread-live-author',
+            senderDisplayName: 'Thread Live',
+            senderAvatarUrl: null,
+            senderRole: 'player',
+            body: `scrolled up live reply ${'body '.repeat(8)}`,
+            createdAt: new Date().toISOString(),
+            editedAt: null,
+            likeCount: 0,
+            viewerHasLiked: false,
+            attachment: null,
+          },
+        )
+        await page.waitForTimeout(100)
+        const scrolledUpAfter = await call(page, (h: H) => h.getThreadScrollTop())
+        assertClose(scrolledUpAfter, scrolledUpBefore, 'scrolled-up current-thread realtime reply', 4)
+
+        await page.evaluate(() => {
+          const el = document.querySelector<HTMLElement>('[data-topic-thread-scroll="1"]')
+          if (!el) throw new Error('missing thread scroll')
+          el.scrollTop = el.scrollHeight - el.clientHeight - 24
+          el.dispatchEvent(new Event('scroll', { bubbles: true }))
         })
+        await page.waitForTimeout(30)
+        await call(
+          page,
+          (h: H, msg: Record<string, unknown>) => h.simulateServerMessage(msg),
+          {
+            type: 'topic_reply',
+            seq: 2001,
+            messageId: `${viewportLabel}-thread-live-near-bottom`,
+            topicId: 'topic-general',
+            parentMessageId: rootId,
+            senderProfileId: 'thread-live-author',
+            senderDisplayName: 'Thread Live',
+            senderAvatarUrl: null,
+            senderRole: 'player',
+            body: `near bottom live reply ${'body '.repeat(8)}`,
+            createdAt: new Date().toISOString(),
+            editedAt: null,
+            likeCount: 0,
+            viewerHasLiked: false,
+            attachment: null,
+          },
+        )
+        await page.waitForTimeout(100)
+        await assertThreadAtBottom(page, 'near-bottom current-thread realtime reply')
+
+        await call(page, (h: H) => h.setThreadScrollTop(40))
+        await page.waitForTimeout(30)
+        await call(page, (h: H, arg: [string, string]) => h.setReplyComposerValue(arg[0], arg[1]), [rootId, 'own reply from thread'])
+        await call(page, (h: H, id: string) => h.submitReplyComposer(id), rootId)
+        await page.waitForTimeout(50)
+        const replySendLog = await call(page, (h: H) => h.getReplySendLog())
+        const requestId = replySendLog[replySendLog.length - 1]!.requestId
+        await call(
+          page,
+          (h: H, msg: Record<string, unknown>) => h.simulateServerMessage(msg),
+          {
+            type: 'topic_reply',
+            requestId,
+            seq: 2002,
+            messageId: `${viewportLabel}-thread-own-reply`,
+            topicId: 'topic-general',
+            parentMessageId: rootId,
+            senderProfileId: 'me',
+            senderDisplayName: 'Me',
+            senderAvatarUrl: null,
+            senderRole: 'player',
+            body: 'own reply from thread',
+            createdAt: new Date().toISOString(),
+            editedAt: null,
+            likeCount: 0,
+            viewerHasLiked: false,
+            attachment: null,
+          },
+        )
+        await page.waitForTimeout(100)
+        await assertThreadAtBottom(page, 'own successful thread reply')
+
+        await call(page, (h: H) => h.clickThreadBack())
+        await page.waitForFunction(() => document.querySelector('[data-topic-messages-scroll="1"]') !== null)
+        const rootVisibleAfterBack = await page.evaluate((id) => {
+          const scroll = document.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
+          const root = document.querySelector<HTMLElement>(`[data-topic-message="${CSS.escape(id as string)}"]`)
+          if (!scroll || !root) return false
+          const scrollRect = scroll.getBoundingClientRect()
+          const rootRect = root.getBoundingClientRect()
+          return rootRect.bottom > scrollRect.top && rootRect.top < scrollRect.bottom
+        }, rootId)
+        assert(rootVisibleAfterBack, 'thread lifecycle Back -> General трябва да остави правилния root видим след activity bump')
       })
     })
 

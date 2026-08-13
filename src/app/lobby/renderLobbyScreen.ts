@@ -330,7 +330,7 @@ export type LobbyScreenState = {
   topicsErrorText: string | null
   topics: TopicSnapshot[] | null
   activeTopicId: string | null
-  topicsMode: 'topics' | 'personal'
+  topicsMode: 'topics' | 'thread' | 'personal'
   topicsPersonalView: 'list' | 'conversation'
   topicMessagesLoading: boolean
   topicMessagesErrorText: string | null
@@ -340,6 +340,9 @@ export type LobbyScreenState = {
   topicOlderMessagesLoading: boolean
   topicMessagesRenderReason: 'initial' | 'prepend' | 'live-append' | 'reconnect-refresh' | 'own-message' | 'reorder' | null
   topicMessagesScrollAnchor: { messageId: string; top: number } | null
+  topicThreadRootMessageId: string | null
+  topicThreadReturnScrollAnchor: { messageId: string; top: number } | null
+  topicThreadRenderReason: 'initial' | 'live-append' | 'own-reply' | null
   topicComposerDraftByTopicId: Record<string, string>
   topicComposerPendingRequestIdByTopicId: Record<string, string | null>
   topicComposerErrorTextByTopicId: Record<string, string | null>
@@ -792,8 +795,11 @@ export type RenderLobbyScreenOptions = {
   onTopicComposerImageSelect: (topicId: string, file: File) => void
   onTopicComposerImageRemove: (topicId: string) => void
   onTopicRepliesLoadMore: (rootMessageId: string) => void
+  onTopicThreadOpen: (rootMessageId: string, scrollAnchor?: { messageId: string; top: number } | null) => void
+  onTopicThreadBack: () => void
   onTopicMessageLikeToggleClick: (messageId: string) => void
   onTopicReplyClick: (rootMessageId: string, scrollAnchor?: { messageId: string; top: number } | null) => void
+  onTopicReplyComposerNonVipTap: () => void
   onTopicReplyComposerCancel: (rootMessageId: string) => void
   onTopicReplyComposerInput: (rootMessageId: string, value: string) => void
   onTopicReplyComposerSubmit: (rootMessageId: string) => void
@@ -9543,6 +9549,11 @@ export function renderLobbyScreen(
       ? { messageId: anchorEl.dataset.topicMessage ?? '', top: anchorEl.getBoundingClientRect().top }
       : null
   })()
+  const prevTopicThreadScrollEl = root.querySelector<HTMLElement>('[data-topic-thread-scroll="1"]')
+  const wasTopicThreadNearBottom = prevTopicThreadScrollEl === null
+    ? true
+    : prevTopicThreadScrollEl.scrollHeight - prevTopicThreadScrollEl.scrollTop - prevTopicThreadScrollEl.clientHeight <= topicMessagesNearBottomThresholdPx
+  const savedTopicThreadScrollTop = prevTopicThreadScrollEl?.scrollTop ?? 0
 
   const prevTopicComposerTextEl = root.querySelector<HTMLTextAreaElement>('[data-topics-composer-text="1"]')
   const wasTopicComposerFocused = prevTopicComposerTextEl !== null && document.activeElement === prevTopicComposerTextEl
@@ -10601,6 +10612,39 @@ export function renderLobbyScreen(
   })
 
   // ─── Topics Moderation (Етап 4) ────────────────────────────────────────
+  root.querySelector<HTMLButtonElement>('[data-topic-thread-back="1"]')?.addEventListener('click', () => {
+    options.onTopicThreadBack()
+  })
+
+  const topicCardInteractiveSelector = [
+    'button',
+    'a',
+    'input',
+    'textarea',
+    'select',
+    'label',
+    '[data-image-viewer-open="1"]',
+  ].join(',')
+  root.querySelectorAll<HTMLElement>('[data-topic-card-open]').forEach((card) => {
+    const rootMessageId = card.dataset.topicCardOpen ?? ''
+    if (!rootMessageId) return
+    const openCard = () => {
+      const scrollAnchor = { messageId: rootMessageId, top: card.getBoundingClientRect().top }
+      options.onTopicThreadOpen(rootMessageId, scrollAnchor)
+    }
+    card.addEventListener('click', (event) => {
+      const target = event.target as HTMLElement | null
+      if (target?.closest(topicCardInteractiveSelector)) return
+      openCard()
+    })
+    card.addEventListener('keydown', (event) => {
+      if (event.target !== card) return
+      if (event.key !== 'Enter' && event.key !== ' ') return
+      event.preventDefault()
+      openCard()
+    })
+  })
+
   root.querySelector<HTMLButtonElement>('[data-topic-lock]')?.addEventListener('click', (event) => {
     const btn = event.currentTarget as HTMLButtonElement
     const topicId = btn.dataset.topicLock ?? ''
@@ -10799,21 +10843,41 @@ export function renderLobbyScreen(
     const rootMessageId = form.dataset.topicsReplyComposerRootId ?? ''
     if (!rootMessageId) return
     const textarea = form.querySelector<HTMLTextAreaElement>('[data-topics-reply-composer-text="1"]')
+    const isVipLocked = form.dataset.topicsReplyComposerVipLocked === '1'
 
     form.addEventListener('submit', (e) => {
       e.preventDefault()
+      if (isVipLocked) {
+        options.onTopicReplyComposerNonVipTap()
+        return
+      }
       options.onTopicReplyComposerSubmit(rootMessageId)
     })
 
     if (textarea) {
       autoGrowTextarea(textarea)
+      if (isVipLocked) {
+        textarea.addEventListener('pointerdown', (event) => {
+          event.preventDefault()
+          options.onTopicReplyComposerNonVipTap()
+        })
+        textarea.addEventListener('click', (event) => {
+          event.preventDefault()
+          options.onTopicReplyComposerNonVipTap()
+        })
+      }
       textarea.addEventListener('input', () => {
+        if (isVipLocked) return
         options.onTopicReplyComposerInput(rootMessageId, textarea.value)
         autoGrowTextarea(textarea)
       })
       textarea.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault()
+          if (isVipLocked) {
+            options.onTopicReplyComposerNonVipTap()
+            return
+          }
           options.onTopicReplyComposerSubmit(rootMessageId)
         }
       })
@@ -10826,6 +10890,10 @@ export function renderLobbyScreen(
     const replyImageRemoveBtn = form.querySelector<HTMLButtonElement>(`[data-topics-reply-image-remove="${cssEscape(rootMessageId)}"]`)
 
     replyImagePickBtn?.addEventListener('click', () => {
+      if (isVipLocked) {
+        options.onTopicReplyComposerNonVipTap()
+        return
+      }
       replyImageInput?.click()
     })
     replyImageInput?.addEventListener('change', () => {
@@ -12891,6 +12959,21 @@ export function renderLobbyScreen(
     }
   }
   state.topicMessagesScrollAnchor = null
+
+  const newTopicThreadScrollEl = root.querySelector<HTMLElement>('[data-topic-thread-scroll="1"]')
+  if (newTopicThreadScrollEl) {
+    if (state.topicThreadRenderReason === 'own-reply') {
+      newTopicThreadScrollEl.scrollTop = newTopicThreadScrollEl.scrollHeight
+    } else if (state.topicThreadRenderReason === 'live-append') {
+      newTopicThreadScrollEl.scrollTop = wasTopicThreadNearBottom
+        ? newTopicThreadScrollEl.scrollHeight
+        : savedTopicThreadScrollTop
+    } else if (state.topicThreadRenderReason === 'initial') {
+      newTopicThreadScrollEl.scrollTop = newTopicThreadScrollEl.scrollHeight
+    } else if (prevTopicThreadScrollEl !== null) {
+      newTopicThreadScrollEl.scrollTop = savedTopicThreadScrollTop
+    }
+  }
 
   const newTopicComposerTextEl = root.querySelector<HTMLTextAreaElement>('[data-topics-composer-text="1"]')
   if (newTopicComposerTextEl && wasTopicComposerFocused) {

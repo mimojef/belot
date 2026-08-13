@@ -405,12 +405,13 @@ function renderTopicsImagePickerControls(options: {
   `
 }
 
-function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: string): string {
+function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: string, options: { variant?: 'inline' | 'thread' } = {}): string {
   const draft = state.topicReplyComposerDraftByRootId[rootMessageId] ?? ''
   const isSending = Boolean(state.topicReplyComposerPendingRequestIdByRootId[rootMessageId])
   const errorText = state.topicReplyComposerErrorTextByRootId[rootMessageId] ?? null
   const pendingImage = state.topicReplyComposerPendingImageByRootId[rootMessageId] ?? null
   const isVip = state.topicsVipGate?.isActive ?? false
+  const isThread = options.variant === 'thread'
 
   return `
     <style>
@@ -422,10 +423,11 @@ function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: strin
         .topics-reply-composer-btn-icon { display:inline-flex; }
       }
     </style>
-    <div style="margin:6px 0 10px;padding-left:${REPLY_INDENT_PX}px;">
+    <div style="${isThread ? 'flex:0 0 auto;padding:10px 12px;border:1px solid rgba(255,255,255,0.10);border-top:1px solid rgba(255,255,255,0.14);border-radius:0 0 12px 12px;background:#0a0a0a;' : `margin:6px 0 10px;padding-left:${REPLY_INDENT_PX}px;`}">
       <form
         data-topics-reply-composer-form="1"
         data-topics-reply-composer-root-id="${escapeHtml(rootMessageId)}"
+        ${isVip ? '' : 'data-topics-reply-composer-vip-locked="1"'}
         style="display:flex;align-items:flex-end;gap:8px;"
       >
         ${renderTopicsImagePickerControls({
@@ -439,12 +441,13 @@ function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: strin
           data-topics-reply-composer-text="1"
           name="body"
           rows="1"
+          ${isVip ? '' : 'readonly'}
           maxlength="2000"
           placeholder="Напиши отговор..."
           style="
-            flex:1;min-width:0;max-height:100px;min-height:36px;box-sizing:border-box;
+            flex:1;min-width:0;max-height:${isThread ? '120px' : '100px'};min-height:${isThread ? '40px' : '36px'};box-sizing:border-box;
             border-radius:8px;border:1px solid rgba(212,165,32,0.24);background:#050505;
-            color:#f8fafc;padding:8px 10px;font-size:13px;font-weight:600;outline:none;
+            color:#f8fafc;padding:${isThread ? '10px 12px' : '8px 10px'};font-size:${isThread ? '14px' : '13px'};font-weight:600;outline:none;
             resize:none;font-family:inherit;line-height:1.4;overflow-y:auto;
           "
         >${escapeHtml(draft)}</textarea>
@@ -497,9 +500,6 @@ export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySn
 }
 
 function renderRepliesSection(state: LobbyScreenState, rootMessageId: string): string {
-  const isExpanded = state.topicExpandedReplyRootIds.includes(rootMessageId)
-  if (!isExpanded) return ''
-
   const replies = state.topicRepliesByRootId[rootMessageId]
   const isLoading = Boolean(state.topicRepliesLoadingByRootId[rootMessageId])
   const hasMore = Boolean(state.topicRepliesHasMoreByRootId[rootMessageId])
@@ -523,18 +523,13 @@ function renderRepliesSection(state: LobbyScreenState, rootMessageId: string): s
     `
     : ''
 
-  const composerHtml = state.topicReplyComposerOpenRootId === rootMessageId
-    ? renderInlineReplyComposer(state, rootMessageId)
-    : ''
-
   // Златната вертикала — по-ярка и по-ясно видима (т.1 от брифа: "около 2px",
   // "малко по-ярка", "без прекален glow") — alpha вдигнат от 0.16 на 0.55,
   // без box-shadow/glow ефект, за да остане елегантен, не крещящ.
   return `
-    <div data-topic-replies-section="${escapeHtml(rootMessageId)}" style="border-left:2px solid rgba(212,165,32,0.55);margin:0 12px 12px 46px;padding-top:2px;">
+    <div data-topic-replies-section="${escapeHtml(rootMessageId)}" style="border-left:1px solid rgba(212,165,32,0.55);margin:0 12px 12px 16px;padding:2px 0 0 0;box-sizing:border-box;">
       ${listHtml}
       ${loadMoreHtml}
-      ${composerHtml}
     </div>
   `
 }
@@ -578,10 +573,14 @@ export function renderTopicAttachment(attachment: TopicAttachmentSnapshot, apiBa
   `
 }
 
-export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMessageSnapshot): string {
+export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMessageSnapshot, options: { variant?: 'general' | 'thread' } = {}): string {
   const isEditing = state.topicMessageEdit?.messageId === message.messageId
+  const isThread = options.variant === 'thread'
+  const cardOpenAttrs = isThread
+    ? ''
+    : `data-topic-card-open="${escapeHtml(message.messageId)}" role="button" tabindex="0" aria-label="Отвори разговора"`
   return `
-    <div data-topic-message="${escapeHtml(message.messageId)}" class="topic-root-card">
+    <div data-topic-message="${escapeHtml(message.messageId)}" ${cardOpenAttrs} class="topic-root-card${isThread ? ' topic-root-card-thread' : ' topic-root-card-clickable'}">
       <div style="display:flex;align-items:flex-start;gap:10px;padding:12px 12px 0;">
         ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt)}
       </div>
@@ -601,7 +600,6 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
           Активност: ${escapeHtml(formatTopicActivityTime(message.lastActivityAt))}
         </div>
       </div>
-      ${renderRepliesSection(state, message.messageId)}
     </div>
   `
 }
@@ -688,6 +686,13 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
         background:linear-gradient(180deg,#151515 0%,#101010 100%);
         box-shadow:inset 0 1px 0 rgba(255,255,255,0.055);
         overflow:hidden;
+      }
+      .topic-root-card-clickable {
+        cursor:pointer;
+      }
+      .topic-root-card-clickable:focus-visible {
+        outline:2px solid rgba(212,165,32,0.72);
+        outline-offset:2px;
       }
       .topic-message-author-row {
         display:flex;
@@ -798,6 +803,63 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
       ${loadOlderIndicator}
       <div data-topic-messages-list="1" style="display:flex;flex-direction:column;gap:8px;padding:6px 6px 10px;box-sizing:border-box;">
         ${messages.map((m) => renderTopicMessageRow(state, m)).join('')}
+      </div>
+    </div>
+  `
+}
+
+function renderTopicThreadView(state: LobbyScreenState): string {
+  const rootMessageId = state.topicThreadRootMessageId
+  const rootMessage = rootMessageId === null
+    ? null
+    : (state.topicMessages ?? []).find((m) => m.messageId === rootMessageId) ?? null
+
+  if (rootMessageId === null || rootMessage === null) {
+    return `
+      <div data-topic-thread-scroll="1" style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;color:rgba(248,250,252,0.5);font-size:14px;text-align:center;padding:16px;">
+        Разговорът вече не е наличен.
+      </div>
+    `
+  }
+
+  return `
+    <style>
+      .topic-message-action-btn {
+        position:relative;
+        display:inline-flex;align-items:center;justify-content:center;
+        gap:4px;
+        border:0;background:transparent;border-radius:8px;
+        padding:9px;
+        color:rgba(248,250,252,0.46);
+        cursor:pointer;
+      }
+      .topic-message-action-icon { width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 20px;line-height:0; }
+      .topic-message-action-icon svg { width:100%;height:100%;display:block; }
+      .topic-message-action-count { font-size:12px;font-weight:800;color:inherit; }
+      .topic-message-action-btn:hover { background:rgba(255,255,255,0.06); color:rgba(248,250,252,0.8); }
+      .topic-message-action-btn-liked { color:#d4a520; }
+      .topic-root-card { box-sizing:border-box;width:100%;border:1px solid rgba(255,255,255,0.16);border-radius:10px;background:linear-gradient(180deg,#151515 0%,#101010 100%);box-shadow:inset 0 1px 0 rgba(255,255,255,0.055);overflow:hidden; }
+      .topic-message-author-row { display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0; }
+      .topic-message-author-meta { display:flex;align-items:baseline;gap:8px;min-width:0;flex:1 1 auto;overflow:hidden; }
+      .topic-message-personal-btn { flex:0 0 auto;min-height:28px;padding:0 9px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:rgba(212,165,32,0.08);color:#f4c95b;font-size:12px;font-weight:900;line-height:1;cursor:pointer;white-space:nowrap; }
+      [data-topic-replies-section] [data-topic-reply] + [data-topic-reply]::before {
+        content:"";
+        display:block;
+        height:1px;
+        margin:2px 10px 4px 12px;
+        background:rgba(255,255,255,0.12);
+      }
+      @media (hover: none) and (pointer: coarse) {
+        .topic-message-action-btn { padding:11px; }
+        .topic-message-author-row { align-items:flex-start; }
+        .topic-message-author-meta { flex-wrap:wrap; row-gap:2px; }
+        .topic-message-personal-btn { min-height:30px; padding:0 10px; }
+      }
+    </style>
+    <div data-topic-thread-scroll="1" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;">
+      <div data-topic-thread-list="1" style="display:flex;flex-direction:column;gap:8px;padding:6px 6px 10px;box-sizing:border-box;">
+        ${renderTopicMessageRow(state, rootMessage, { variant: 'thread' })}
+        ${renderRepliesSection(state, rootMessageId)}
       </div>
     </div>
   `
@@ -1312,6 +1374,32 @@ function renderTopicsHeader(state: LobbyScreenState): string {
   const personalUnreadTotal = getPersonalChatUnreadTotal(state)
   const personalUnreadBadge = formatPersonalChatUnreadBadgeCount(personalUnreadTotal)
 
+  if (state.topicsMode === 'thread') {
+    return `
+      <div data-topics-header-row="1" data-topic-thread-header="1" style="display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;">
+        <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+          <button
+            type="button"
+            data-topic-thread-back="1"
+            aria-label="Назад към Общ"
+            style="display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:36px;padding:0 12px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;font-size:13px;font-weight:900;cursor:pointer;flex:0 0 auto;"
+          >&larr; <span>Общ</span></button>
+          <h1 style="margin:0;font-size:20px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Теми</h1>
+        </div>
+        <button
+          type="button"
+          data-topics-personal-open="1"
+          aria-label="${personalUnreadTotal > 0 ? `Лични разговори, ${personalUnreadTotal} непрочетени съобщения` : 'Лични разговори'}"
+          style="position:relative;display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:36px;padding:0 12px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;flex:0 0 auto;"
+        >
+          <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#d4a520" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>
+          <span>Лични</span>
+          ${personalUnreadBadge !== null ? `<span data-topics-personal-badge="1" aria-hidden="true" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;line-height:1;">${escapeHtml(personalUnreadBadge)}</span>` : ''}
+        </button>
+      </div>
+    `
+  }
+
   if (state.topicsMode === 'personal') {
     return `
       <div data-topics-header-row="1" data-topics-personal-header="1" style="display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;">
@@ -1480,12 +1568,19 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
   //   3) composer form (Етап 2) — flex:0 0 auto, фиксиран на дъното
   const activeTopicId = state.activeTopicId
   const isPersonalMode = state.topicsMode === 'personal'
+  const isThreadMode = state.topicsMode === 'thread'
   return `
     <section data-topics-screen="1" style="flex:1;min-height:0;display:flex;flex-direction:column;padding:0 4px;overflow:hidden;">
       <div data-topics-fixed-top="1" style="flex:0 0 auto;display:flex;flex-direction:column;padding:6px 0 10px;">
         ${renderTopicsHeader(state)}
       </div>
-      ${isPersonalMode ? renderTopicsPersonalChatPanel(state) : `
+      ${isPersonalMode ? renderTopicsPersonalChatPanel(state) : isThreadMode ? `
+      <div data-topics-stream-container="1" style="flex:1;min-height:0;border:1px solid rgba(255,255,255,0.10);border-radius:12px 12px 0 0;border-bottom:0;background:#0a0a0a;display:flex;flex-direction:column;overflow:hidden;">
+        ${renderTopicModerationBanners(state)}
+        ${renderTopicThreadView(state)}
+      </div>
+      ${state.topicThreadRootMessageId ? renderInlineReplyComposer(state, state.topicThreadRootMessageId, { variant: 'thread' }) : ''}
+      ` : `
       <div data-topics-stream-container="1" style="flex:1;min-height:0;border:1px solid rgba(255,255,255,0.10);border-radius:12px 12px 0 0;border-bottom:0;background:#0a0a0a;display:flex;flex-direction:column;overflow:hidden;">
         ${renderTopicModerationBanners(state)}
         ${renderTopicMessageStream(state)}
