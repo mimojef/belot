@@ -664,4 +664,180 @@ await check('[32] Denied pencil toast UX ([H]) is unaffected by moving the penci
   assert(controller.includes('function showTopicsInfoToast(text: string): void'), 'controller must still expose the canonical Topics toast helper')
 })
 
+// [33] Empty vip_dm rows (0 messages) must never appear as a Personal list row,
+// while remaining fully usable as the active detail/compose context — this is
+// the client-only fix for empty "Лично" conversations leaking into the list.
+// See §1-§8 of the audit: only the render-time list collection is filtered,
+// state.chatConversations (canonical) and detail resolution stay untouched.
+
+await check('[33a] Existing empty vip_dm (lastMessage=null) is not rendered as a Personal list row', () => {
+  const html = renderTopicsScreen(createRenderState({
+    topicsMode: 'personal',
+    topicsPersonalView: 'list',
+    chatConversations: [{
+      friendshipId: 'empty-vip-dm',
+      kind: 'vip_dm',
+      friend: { profileId: 'empty-friend', displayName: 'EmptyPerson', avatarUrl: null },
+      lastMessage: null,
+      updatedAt: '2026-08-12T10:00:00.000Z',
+      unreadCount: 0,
+      isArchived: false,
+    }],
+    activeChatFriendshipId: null,
+  }))
+
+  assert(!html.includes('EmptyPerson'), 'empty vip_dm (0 messages) must not render as a Personal list row')
+  assert(html.includes('data-topics-personal-empty="1"'), 'list must fall back to the empty-state placeholder when only empty vip_dm rows exist')
+})
+
+await check('[33b] vip_dm with at least one message renders normally in the Personal list', () => {
+  const html = renderTopicsScreen(createRenderState({
+    topicsMode: 'personal',
+    topicsPersonalView: 'list',
+    chatConversations: [{
+      friendshipId: 'friend-b',
+      kind: 'vip_dm',
+      friend: { profileId: 'friend-profile', displayName: 'Mimojef', avatarUrl: null },
+      lastMessage: {
+        messageId: 'personal-b',
+        friendshipId: 'friend-b',
+        senderProfileId: 'friend-profile',
+        body: 'REAL_MESSAGE',
+        createdAt: '2026-08-12T10:00:00.000Z',
+        isOwnMessage: false,
+        attachment: null,
+      },
+      updatedAt: '2026-08-12T10:00:00.000Z',
+      unreadCount: 0,
+      isArchived: false,
+    }],
+    activeChatFriendshipId: null,
+  }))
+
+  assert(html.includes('Mimojef'), 'vip_dm with a real message must render as a Personal list row')
+  assert(!html.includes('data-topics-personal-empty="1"'), 'list must not show the empty-state placeholder when a real conversation exists')
+})
+
+await check('[33c] Fresh "Лично" start (empty vip_dm) opens detail/composer without appearing in the left list', () => {
+  const html = renderTopicsScreen(createRenderState({
+    topicsMode: 'personal',
+    topicsPersonalView: 'conversation',
+    chatConversations: [{
+      friendshipId: 'fresh-vip-dm',
+      kind: 'vip_dm',
+      friend: { profileId: 'fresh-friend', displayName: 'FreshTarget', avatarUrl: null },
+      lastMessage: null,
+      updatedAt: '2026-08-12T11:00:00.000Z',
+      unreadCount: 0,
+      isArchived: false,
+    }],
+    activeChatFriendshipId: 'fresh-vip-dm',
+    chatMessages: [],
+    chatMessagesFriendshipId: 'fresh-vip-dm',
+  }))
+
+  assert(html.includes('data-topics-personal-detail="1"'), 'detail panel must render')
+  assert(html.includes('FreshTarget'), 'fresh empty vip_dm must still resolve as the active detail conversation (full collection, not filtered)')
+  assert(!html.includes('data-topics-personal-row="1"'), 'fresh empty vip_dm must not be rendered as a left-list row')
+})
+
+await check('[33d] Back without send leaves no empty row behind (list view shows empty state again)', () => {
+  const html = renderTopicsScreen(createRenderState({
+    topicsMode: 'personal',
+    topicsPersonalView: 'list',
+    chatConversations: [{
+      friendshipId: 'fresh-vip-dm',
+      kind: 'vip_dm',
+      friend: { profileId: 'fresh-friend', displayName: 'FreshTarget', avatarUrl: null },
+      lastMessage: null,
+      updatedAt: '2026-08-12T11:00:00.000Z',
+      unreadCount: 0,
+      isArchived: false,
+    }],
+    activeChatFriendshipId: 'fresh-vip-dm',
+  }))
+
+  assert(!html.includes('data-topics-personal-row="1"'), 'navigating back to the list without sending must not leave a visible empty row')
+  assert(html.includes('data-topics-personal-empty="1"'), 'list must show the standard empty state, not a phantom conversation row')
+})
+
+await check('[33e] After first send, the conversation appears in the list with the real lastMessage', () => {
+  const html = renderTopicsScreen(createRenderState({
+    topicsMode: 'personal',
+    topicsPersonalView: 'list',
+    chatConversations: [{
+      friendshipId: 'fresh-vip-dm',
+      kind: 'vip_dm',
+      friend: { profileId: 'fresh-friend', displayName: 'FreshTarget', avatarUrl: null },
+      lastMessage: {
+        messageId: 'first-message',
+        friendshipId: 'fresh-vip-dm',
+        senderProfileId: 'viewer',
+        body: 'FIRST_SENT_MESSAGE',
+        createdAt: '2026-08-12T11:05:00.000Z',
+        isOwnMessage: true,
+        attachment: null,
+      },
+      updatedAt: '2026-08-12T11:05:00.000Z',
+      unreadCount: 0,
+      isArchived: false,
+    }],
+    activeChatFriendshipId: 'fresh-vip-dm',
+  }))
+
+  assert(html.includes('FreshTarget'), 'conversation must appear as a list row immediately once lastMessage is non-null')
+  assert(html.includes('FIRST_SENT_MESSAGE'), 'list row preview must reflect the real sent message')
+})
+
+await check('[33f] Same pair with friend + empty vip_dm: friend stays out of Topics Personal, empty vip_dm stays out of the list', () => {
+  const html = renderTopicsScreen(createRenderState({
+    topicsMode: 'personal',
+    topicsPersonalView: 'list',
+    chatConversations: [
+      {
+        friendshipId: 'friend-row',
+        kind: 'friend',
+        friend: { profileId: 'shared-profile', displayName: 'SharedFriend', avatarUrl: null },
+        lastMessage: null,
+        updatedAt: '2026-08-12T09:00:00.000Z',
+        unreadCount: 0,
+        isArchived: false,
+      },
+      {
+        friendshipId: 'shared-vip-dm',
+        kind: 'vip_dm',
+        friend: { profileId: 'shared-profile', displayName: 'SharedFriend', avatarUrl: null },
+        lastMessage: null,
+        updatedAt: '2026-08-12T09:00:00.000Z',
+        unreadCount: 0,
+        isArchived: false,
+      },
+    ],
+    activeChatFriendshipId: null,
+  }))
+
+  assert(!html.includes('SharedFriend'), 'neither the friend row (wrong surface) nor the empty vip_dm (0 messages) should render in Topics Personal list')
+  assert(html.includes('data-topics-personal-empty="1"'), 'list must show the empty state, unaffected by the coexisting friend conversation')
+})
+
+await check('[33g] pika_support is unaffected by the empty vip_dm visibility filter', () => {
+  assert(!renderLobby.includes("kind === 'pika_support' && conversation.lastMessage"), 'pika_support list logic must not gain a message-existence filter')
+  const supportPanelSource = renderLobby.slice(renderLobby.indexOf('function renderChatPanel'), renderLobby.indexOf('export function renderPlayersDirectory'))
+  assert(!supportPanelSource.includes('visiblePersonalConversations'), 'legacy Chat/pika_support panel must not use the new Topics Personal visibility filter')
+})
+
+await check('[33h] Notification routing (openChatWithFriend) still resolves vip_dm conversations by canonical friendshipId, unaffected by the list-visibility filter', () => {
+  const openFn = controller.slice(controller.indexOf('openChatWithFriend: (friendshipId: string) => {'), controller.indexOf('getFriendshipActionForProfile: (profileId: string) => {'))
+  assert(openFn.includes('state.chatConversations.find((c) => c.friendshipId === friendshipId)'), 'notification routing must still look up the canonical conversation from full state.chatConversations, not a filtered/visible subset')
+  assert(!openFn.includes('visiblePersonalConversations'), 'notification routing must not depend on the render-only visible list')
+})
+
+await check('[33i] Personal list rendering isolates a full identity/detail collection from the filtered visible-rows collection', () => {
+  assert(renderLobby.includes('const personalConversations = state.chatConversations'), 'full vip_dm collection must still be derived from canonical state.chatConversations')
+  assert(renderLobby.includes('const visiblePersonalConversations = personalConversations.filter('), 'visible rows must be a filtered derivative of the full collection, not a second independent query')
+  assert(renderLobby.includes("conversation.lastMessage !== null"), 'visibility filter must key off lastMessage presence, matching the locked product rule')
+  assert(renderLobby.includes('personalConversations.find((conversation) => conversation.friendshipId === state.activeChatFriendshipId)'), 'active/detail conversation resolution must use the full collection so a fresh empty vip_dm still opens')
+  assert(renderLobby.includes('visiblePersonalConversations.map((conversation) => renderTopicsPersonalConversationRow'), 'left-list rows must be rendered from the filtered visible collection only')
+})
+
 console.log('PASS topics personal integration client checks')

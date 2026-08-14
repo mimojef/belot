@@ -5576,9 +5576,17 @@ function renderTopicsPersonalMessages(state: LobbyScreenState, activeConversatio
 }
 
 export function renderTopicsPersonalChatPanel(state: LobbyScreenState): string {
+  // Пълната колекция обслужва identity/detail resolution (напр. току-що
+  // създаден празен vip_dm от "Лично", преди да е изпратено първо съобщение) —
+  // тя НЕ се render-ва директно като list rows.
   const personalConversations = state.chatConversations
     .filter((conversation) => conversation.kind === 'vip_dm')
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+  // Видимите rows в лявата колона показват само разговори с поне 1 съобщение —
+  // празен vip_dm (0 съобщения) никога не е list row, само detail/compose context.
+  const visiblePersonalConversations = personalConversations.filter(
+    (conversation) => conversation.lastMessage !== null,
+  )
   const activeConversation = state.topicsPersonalView === 'conversation'
     ? personalConversations.find((conversation) => conversation.friendshipId === state.activeChatFriendshipId) ?? null
     : null
@@ -5609,14 +5617,14 @@ export function renderTopicsPersonalChatPanel(state: LobbyScreenState): string {
     </style>
     <div data-topics-personal-panel="1" data-personal-view="${state.topicsPersonalView}" style="flex:1;min-height:0;overflow:hidden;">
       <div data-topics-personal-list="1" style="min-height:0;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;overflow:hidden;display:flex;flex-direction:column;">
-        ${personalConversations.length === 0 ? `
+        ${visiblePersonalConversations.length === 0 ? `
           <div data-topics-personal-empty="1" style="margin:auto;padding:24px 16px;color:rgba(255,255,255,0.62);font-size:14px;font-weight:800;text-align:center;display:grid;gap:6px;">
             <div>Нямате лични разговори.</div>
             <div style="font-size:12px;color:rgba(255,255,255,0.45);">Можете да започнете разговор от профила на приятел.</div>
           </div>
         ` : `
           <div style="overflow-y:auto;flex:1;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
-            ${personalConversations.map((conversation) => renderTopicsPersonalConversationRow(conversation, state.activeChatFriendshipId)).join('')}
+            ${visiblePersonalConversations.map((conversation) => renderTopicsPersonalConversationRow(conversation, state.activeChatFriendshipId)).join('')}
           </div>
         `}
       </div>
