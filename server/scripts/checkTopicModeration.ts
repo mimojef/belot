@@ -81,6 +81,7 @@ const moderationMigrationPath = resolve(serverRoot, 'database/migrations/2026081
 const messageModerationMigrationPath = resolve(serverRoot, 'database/migrations/20260812_001_create_topic_message_moderation.sql')
 const selfDeletionAuditMigrationPath = resolve(serverRoot, 'database/migrations/20260812_002_create_topic_message_self_deletion_audit.sql')
 const editMigrationPath = resolve(serverRoot, 'database/migrations/20260812_003_add_topic_message_editing.sql')
+const sectionMutesMigrationPath = resolve(serverRoot, 'database/migrations/20260814_001_create_topic_section_mutes.sql')
 
 let passed = 0
 let failed = 0
@@ -177,6 +178,7 @@ async function setupDb(dir: string, filename: string): Promise<string> {
   await applyMigrationFile(db, messageModerationMigrationPath)
   await applyMigrationFile(db, selfDeletionAuditMigrationPath)
   await applyMigrationFile(db, editMigrationPath)
+  await applyMigrationFile(db, sectionMutesMigrationPath)
   seedAccount(db, 'moderator-1')
   seedAccount(db, 'moderator-2')
   seedProfile(db, 'target-1')
@@ -853,6 +855,87 @@ await withTempDir(async (dir) => {
     }
   } finally {
     // moderationStore вече е затворен по-горе; нищо допълнително за close тук.
+  }
+})
+
+// ─── GLOBAL TOPICS MUTE — topic_section_mutes store API ─────────────────
+//
+// Legacy topic_mutes/muteProfileInTopic/isProfileMutedInTopic ([5]-[10]
+// по-горе) остават НЕПРОМЕНЕНИ — все още per-topic, само вече не са
+// enforcement source. Тук тестваме новите *InTopics global функции, които
+// живеят в отделна topic_section_mutes таблица (PRIMARY KEY(profile_id) —
+// без topic_id, значи mute от контекста на ЕДНА тема важи навсякъде).
+
+await withTempDir(async (dir) => {
+  const dbPath = await setupDb(dir, 'global-mute.sqlite')
+  const store = await createTopicModerationStore(dbPath)
+  try {
+    await check('[G0] muteProfileInTopics: mute задействан от topic-a → isProfileMutedInTopicsSection е true ГЛОБАЛНО (за profile-а, не само за topic-a)', () => {
+      store.muteProfileInTopics({ topicId: 'topic-a', profileId: 'target-1', actorAccountId: 'moderator-1', actorRole: 'admin', reason: 'spam everywhere', durationMs: 30 * 60 * 1000 })
+      assert(store.isProfileMutedInTopicsSection('target-1') === true, 'target-1 трябва да е global muted')
+    })
+
+    await check('[G1] Global mute задействан от topic-a блокира еднакво — getSectionMuteSnapshot не зависи от topicId изобщо (сигнатурата дори не приема topicId)', () => {
+      const snapshot = store.getSectionMuteSnapshot('target-1')
+      assert(snapshot.isMuted === true, 'snapshot трябва да показва muted')
+      assertEqual(snapshot.reason, 'spam everywhere', 'reason трябва да съвпада')
+      assert(snapshot.mutedUntil !== null, 'mutedUntil трябва да е попълнен')
+    })
+
+    await check('[G2] getSectionMuteSnapshot: expired global mute (muted_until в миналото) → isMuted=false', () => {
+      store.muteProfileInTopics({ topicId: 'topic-b', profileId: 'target-2', actorAccountId: 'moderator-1', actorRole: 'admin', reason: 'x', durationMs: 1000 })
+      const db = new DatabaseSync(dbPath, { open: true })
+      db.prepare(`UPDATE topic_section_mutes SET muted_until = ? WHERE profile_id = 'target-2'`).run(pastIso(60_000))
+      db.close()
+      assertEqual(store.isProfileMutedInTopicsSection('target-2'), false, 'expired global mute трябва да computed-не isMuted=false')
+    })
+
+    await check('[G3] unmuteProfileInTopics: ръчен early unmute преди expiry → isMuted=false незабавно, changed=true, редът е изтрит', () => {
+      const { changed } = store.unmuteProfileInTopics({ topicId: 'topic-a', profileId: 'target-1', actorAccountId: 'moderator-1', actorRole: 'admin' })
+      assertEqual(changed, true, 'unmute на active global mute трябва да е changed=true')
+      assertEqual(store.isProfileMutedInTopicsSection('target-1'), false, 'target-1 вече не трябва да е global muted')
+      const db = new DatabaseSync(dbPath, { open: true })
+      const row = db.prepare(`SELECT 1 FROM topic_section_mutes WHERE profile_id = 'target-1'`).get()
+      db.close()
+      assert(row === undefined, 'редът трябва да е реално изтрит от DB')
+    })
+
+    await check('[G4] unmuteProfileInTopics: idempotent — unmute на вече unmuted профил → changed=false', () => {
+      const { changed } = store.unmuteProfileInTopics({ topicId: 'topic-a', profileId: 'target-1', actorAccountId: 'moderator-1', actorRole: 'admin' })
+      assertEqual(changed, false, 'unmute на вече unmuted профил трябва да е no-op')
+    })
+
+    await check('[G5] Повторен muteProfileInTopics (нов mute от друга тема) презаписва стар global mute (UPSERT) — само 1 ред за profile_id', () => {
+      const other = 'target-global-upsert'
+      const db = new DatabaseSync(dbPath, { open: true })
+      seedProfile(db, other)
+      db.close()
+      store.muteProfileInTopics({ topicId: 'topic-a', profileId: other, actorAccountId: 'moderator-1', actorRole: 'admin', reason: 'first', durationMs: 30 * 60 * 1000 })
+      store.muteProfileInTopics({ topicId: 'topic-b', profileId: other, actorAccountId: 'moderator-2', actorRole: 'subadmin', reason: 'second', durationMs: 60 * 60 * 1000 })
+      const db2 = new DatabaseSync(dbPath, { open: true })
+      const rows = db2.prepare(`SELECT reason FROM topic_section_mutes WHERE profile_id = ?`).all(other) as Array<{ reason: string }>
+      db2.close()
+      assertEqual(rows.length, 1, 'трябва да има точно 1 ред (UPSERT, не INSERT дубликат) независимо от кой topicId идват mute действията')
+      assertEqual(rows[0]!.reason, 'second', 'reason трябва да е от последния mute')
+    })
+
+    await check('[G6] Audit log: global topic_mute/topic_unmute запазват topicId САМО като source context — action/target_profile_id/reason/expires_at семантиката е идентична на legacy per-topic mute', () => {
+      const entries = store.listAuditLogForTopic('topic-a', 20)
+      const muteEntry = entries.find((e) => e.action === 'topic_mute' && e.targetProfileId === 'target-1')
+      const unmuteEntry = entries.find((e) => e.action === 'topic_unmute' && e.targetProfileId === 'target-1')
+      assert(muteEntry !== undefined, 'global mute трябва пак да append-ва topic_mute audit ред, keyed по topicId=topic-a (source context)')
+      assert(unmuteEntry !== undefined, 'global unmute трябва пак да append-ва topic_unmute audit ред')
+      assertEqual(muteEntry!.reason, 'spam everywhere', 'audit reason трябва да съвпада с подадения при mute action-a')
+    })
+
+    await check('[G7] Legacy per-topic topic_mutes остава напълно НЕЗАСЕГНАТО от global mute/unmute действия — отделна таблица', () => {
+      // target-1 никога не е бил муtнат чрез стария per-topic API в този тест —
+      // isProfileMutedInTopic (legacy) трябва да остане false, доказвайки че
+      // новите *InTopics функции пишат САМО в topic_section_mutes.
+      assertEqual(store.isProfileMutedInTopic('topic-a', 'target-1'), false, 'legacy per-topic mute status не трябва да се промени от global mute действия')
+    })
+  } finally {
+    store.close()
   }
 })
 

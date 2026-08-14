@@ -1628,6 +1628,7 @@ export type TopicMessageErrorMessage = {
   requestId?: string
   mutedUntil?: string
   topicId?: string
+  reason?: string
 }
 
 // ─── Replies (Етап 3) ────────────────────────────────────────────────────
@@ -1649,6 +1650,7 @@ export type TopicReplyErrorMessage = {
   requestId: string
   mutedUntil?: string
   topicId?: string
+  reason?: string
 }
 
 // ─── Likes (Етап 3) ──────────────────────────────────────────────────────
@@ -1691,6 +1693,7 @@ export type TopicCreateErrorCode =
   | 'not_authenticated'
   | 'guest_not_allowed'
   | 'vip_required'
+  | 'topic_muted'
   | 'empty_title'
   | 'title_too_long'
   | 'invalid_title'
@@ -1702,6 +1705,8 @@ export type TopicCreateErrorMessage = {
   code: TopicCreateErrorCode
   message: string
   requestId: string
+  mutedUntil?: string
+  reason?: string
 }
 
 // ─── Moderation (Етап 4) ────────────────────────────────────────────────
@@ -1744,9 +1749,16 @@ export type TopicLockStateChangedMessage = {
   lockedReason: string | null
 }
 
-/** Target-only (private) — САМО заглушеният/отглушеният потребител получава това, не broadcast към всички subscribers. */
+/**
+ * Target-only (private) — САМО заглушеният/отглушеният потребител получава
+ * това, не broadcast към всички subscribers. scope='topics_section' —
+ * state-ът важи за ЦЯЛАТА секция "Теми" (create topic, root post, reply,
+ * vip_dm), не само за `topicId` — `topicId` е само audit/source context,
+ * НЕ enforcement scope филтър.
+ */
 export type TopicMuteStateChangedMessage = {
   type: 'topic_mute_state_changed'
+  scope: 'topics_section'
   topicId: string
   isMuted: boolean
   mutedUntil: string | null

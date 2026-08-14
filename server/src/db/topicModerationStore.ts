@@ -27,6 +27,19 @@ export type TopicMuteSnapshot = {
   reason: string | null
 }
 
+/**
+ * Global Topics-section mute snapshot — виж topic_section_mutes migration
+ * коментара за пълния rationale. Shape-ово идентичен на TopicMuteSnapshot
+ * (per-topic legacy) нарочно, за да reuse-ва максимално client-side
+ * форматиращата логика (formatModerationExpiry и т.н.) без промяна.
+ */
+export type TopicSectionMuteSnapshot = {
+  isMuted: boolean
+  mutedUntil: string | null
+  mutedByAccountId: string | null
+  reason: string | null
+}
+
 export type TopicModerationAuditEntry = {
   logId: string
   actorAccountId: string | null
@@ -91,6 +104,32 @@ export type TopicModerationStore = {
   getMuteSnapshot: (topicId: string, profileId: string) => TopicMuteSnapshot
   /** Server-authoritative enforcement lookup за send_topic_message/send_topic_reply — expiry checked at read time. */
   isProfileMutedInTopic: (topicId: string, profileId: string) => boolean
+
+  // ─── Global Topics-section mute (enforcement source of truth след GLOBAL
+  // TOPICS MUTE брифа) — topicId остава само audit/source context, НЕ
+  // enforcement scope. Виж topic_section_mutes migration коментара. ────────
+  /**
+   * `topicId` е ЕДИНСТВЕНО за audit context ("moderator-ът е задействал
+   * действието от тази конкретна тема") — enforcement-ът важи навсякъде в
+   * Теми, независимо от коя тема е бил натиснат бутонът.
+   */
+  muteProfileInTopics: (input: {
+    topicId: string
+    profileId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+    reason: string
+    durationMs: number
+  }) => TopicSectionMuteSnapshot
+  unmuteProfileInTopics: (input: {
+    topicId: string
+    profileId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+  }) => { changed: boolean }
+  getSectionMuteSnapshot: (profileId: string) => TopicSectionMuteSnapshot
+  /** Server-authoritative enforcement lookup за ВСИЧКИ 5 Topics write paths — expiry checked at read time, никога persisted boolean. */
+  isProfileMutedInTopicsSection: (profileId: string) => boolean
 
   // ─── Delete (attachments hard-delete + queue insertion, topic/messages
   // soft-delete — всичко в ЕДНА транзакция вътре в deleteTopic) ────────────
@@ -168,6 +207,25 @@ type TopicMuteRow = {
 }
 
 function toMuteSnapshot(row: TopicMuteRow | undefined, now: number): TopicMuteSnapshot {
+  if (!row) {
+    return { isMuted: false, mutedUntil: null, mutedByAccountId: null, reason: null }
+  }
+  const mutedUntilIso = dbDateToUtc(row.muted_until)
+  return {
+    isMuted: new Date(mutedUntilIso).getTime() > now,
+    mutedUntil: mutedUntilIso,
+    mutedByAccountId: row.muted_by_account_id,
+    reason: row.reason,
+  }
+}
+
+type TopicSectionMuteRow = {
+  muted_until: string
+  muted_by_account_id: string | null
+  reason: string | null
+}
+
+function toSectionMuteSnapshot(row: TopicSectionMuteRow | undefined, now: number): TopicSectionMuteSnapshot {
   if (!row) {
     return { isMuted: false, mutedUntil: null, mutedByAccountId: null, reason: null }
   }
@@ -477,6 +535,110 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     return getMuteSnapshot(topicId, profileId).isMuted
   }
 
+  // ─── Global Topics-section mute (enforcement source of truth) ──────────
+  //
+  // Reuse-ва идентичен UPSERT/DELETE/BEGIN IMMEDIATE pattern като горния
+  // per-topic mute/unmute — единствената разлика е PRIMARY KEY(profile_id)
+  // вместо (topic_id, profile_id). `topicId`, подаден на входа, се пази
+  // САМО в audit log-а (appendAudit по-долу) като source context — никога
+  // не участва в самата topic_section_mutes заявка.
+
+  const upsertSectionMuteStatement = database.prepare(`
+    INSERT INTO topic_section_mutes (profile_id, muted_until, muted_by_account_id, reason)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(profile_id) DO UPDATE SET
+      muted_until = excluded.muted_until,
+      muted_by_account_id = excluded.muted_by_account_id,
+      reason = excluded.reason,
+      created_at = CURRENT_TIMESTAMP;
+  `)
+
+  const selectSectionMuteStatement = database.prepare(`
+    SELECT muted_until, muted_by_account_id, reason FROM topic_section_mutes WHERE profile_id = ? LIMIT 1;
+  `)
+
+  function muteProfileInTopics(input: {
+    topicId: string
+    profileId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+    reason: string
+    durationMs: number
+  }): TopicSectionMuteSnapshot {
+    const now = Date.now()
+    const mutedUntil = toSqliteDateTimeString(new Date(now + input.durationMs))
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      upsertSectionMuteStatement.run(input.profileId, mutedUntil, input.actorAccountId, input.reason)
+      appendAudit({
+        actorAccountId: input.actorAccountId,
+        actorRole: input.actorRole,
+        action: 'topic_mute',
+        topicId: input.topicId,
+        targetProfileId: input.profileId,
+        reason: input.reason,
+        expiresAt: mutedUntil,
+      })
+      database.exec('COMMIT;')
+    } catch (error) {
+      database.exec('ROLLBACK;')
+      throw error
+    }
+
+    const row = selectSectionMuteStatement.get(input.profileId) as TopicSectionMuteRow
+    return toSectionMuteSnapshot(row, now)
+  }
+
+  // Ръчен unmute ТРИЕ реда (не overwrite с минала дата) — same rationale
+  // като deleteMuteStatement по-горе. Idempotent: DELETE на несъществуващ
+  // ред просто changes=0, без грешка.
+  const deleteSectionMuteStatement = database.prepare(`
+    DELETE FROM topic_section_mutes WHERE profile_id = ?;
+  `)
+
+  function unmuteProfileInTopics(input: {
+    topicId: string
+    profileId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+  }): { changed: boolean } {
+    const row = selectSectionMuteStatement.get(input.profileId) as TopicSectionMuteRow | undefined
+    const wasActive = row !== undefined && toSectionMuteSnapshot(row, Date.now()).isMuted
+    if (!wasActive) {
+      return { changed: false }
+    }
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      deleteSectionMuteStatement.run(input.profileId)
+      appendAudit({
+        actorAccountId: input.actorAccountId,
+        actorRole: input.actorRole,
+        action: 'topic_unmute',
+        topicId: input.topicId,
+        targetProfileId: input.profileId,
+        reason: null,
+        expiresAt: null,
+      })
+      database.exec('COMMIT;')
+    } catch (error) {
+      database.exec('ROLLBACK;')
+      throw error
+    }
+
+    return { changed: true }
+  }
+
+  function getSectionMuteSnapshot(profileId: string): TopicSectionMuteSnapshot {
+    const row = selectSectionMuteStatement.get(profileId) as TopicSectionMuteRow | undefined
+    return toSectionMuteSnapshot(row, Date.now())
+  }
+
+  function isProfileMutedInTopicsSection(profileId: string): boolean {
+    return getSectionMuteSnapshot(profileId).isMuted
+  }
+
   // ─── Delete (soft-delete + eager attachment cleanup) ────────────────────
 
   const selectAttachmentFilenamesForTopicStatement = database.prepare(`
@@ -782,6 +944,10 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     unmuteProfileInTopic,
     getMuteSnapshot,
     isProfileMutedInTopic,
+    muteProfileInTopics,
+    unmuteProfileInTopics,
+    getSectionMuteSnapshot,
+    isProfileMutedInTopicsSection,
     getAttachmentFilenamesForTopic,
     deleteTopic,
     createReport,

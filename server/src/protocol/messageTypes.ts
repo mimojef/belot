@@ -1139,6 +1139,8 @@ export type TopicMessageErrorMessage = {
   mutedUntil?: string
   /** Само при code==='topic_locked'|'topic_muted' — за да може клиентът да потвърди грешката е за АКТИВНАТА тема (rapid topic switch guard), не остаряла заявка от вече напусната тема. */
   topicId?: string
+  /** Само при code==='topic_muted' — точната причина, зададена от модератора (GLOBAL TOPICS MUTE брифа §9: клиентът никога не трябва да разчита само на realtime push-а за да покаже reason). */
+  reason?: string
 }
 
 // ─── Replies (Етап 3) ────────────────────────────────────────────────────
@@ -1160,6 +1162,8 @@ export type TopicReplyErrorMessage = {
   requestId: string
   mutedUntil?: string
   topicId?: string
+  /** Само при code==='topic_muted' — точната причина, зададена от модератора (виж TopicMessageErrorMessage.reason коментара). */
+  reason?: string
 }
 
 // ─── Likes (Етап 3) ──────────────────────────────────────────────────────
@@ -1220,6 +1224,7 @@ export type TopicCreateErrorCode =
   | 'not_authenticated'
   | 'guest_not_allowed'
   | 'vip_required'
+  | 'topic_muted'
   | 'empty_title'
   | 'title_too_long'
   | 'invalid_title'
@@ -1231,6 +1236,10 @@ export type TopicCreateErrorMessage = {
   code: TopicCreateErrorCode
   message: string
   requestId: string
+  /** Само при code==='topic_muted' — server-authoritative expiry, виж TopicMessageErrorMessage коментара за пълния rationale. */
+  mutedUntil?: string
+  /** Само при code==='topic_muted' — точната причина, зададена от модератора (GLOBAL TOPICS MUTE брифа §9: клиентът никога не трябва да разчита само на realtime push-а за да покаже reason). */
+  reason?: string
 }
 
 // ─── Moderation (Етап 4) ────────────────────────────────────────────────
@@ -1262,9 +1271,18 @@ export type TopicLockStateChangedMessage = {
  * заглушения потребител, НЕ broadcast към всички subscribers (брифа т.10:
  * "останалите клиенти не трябва да получават чувствителна/ненужна
  * moderation информация"). Виж broadcastToProfileConnections в index.ts.
+ *
+ * GLOBAL TOPICS MUTE брифа §12: `scope: 'topics_section'` е explicit
+ * маркер, че isMuted/mutedUntil/reason важат за ЦЯЛАТА секция "Теми"
+ * (create topic, root post, reply, vip_dm), не само за `topicId`.
+ * `topicId` остава само audit/source context (от коя тема е задействано
+ * действието) — клиентът НЕ трябва да го използва като enforcement scope
+ * филтър (напр. "приложи push-а само ако topicId === activeTopicId" е
+ * грешно след тази промяна).
  */
 export type TopicMuteStateChangedMessage = {
   type: 'topic_mute_state_changed'
+  scope: 'topics_section'
   topicId: string
   isMuted: boolean
   mutedUntil: string | null

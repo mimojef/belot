@@ -1483,7 +1483,8 @@ function broadcastTopicMessageEditedToLocalSubscribers(topicId: string, message:
 // Target-only (private) — САМО до connections на заглушения/отглушения
 // потребител, НЕ broadcast към всички subscribers (брифа т.10: "останалите
 // клиенти не трябва да получават чувствителна/ненужна moderation
-// информация").
+// информация"). scope='topics_section' (GLOBAL TOPICS MUTE брифа §12) —
+// state-ът важи за ЦЯЛАТА секция "Теми", topicId е само audit context.
 function notifyProfileOfTopicMuteStateChange(
   profileId: string,
   topicId: string,
@@ -1491,6 +1492,7 @@ function notifyProfileOfTopicMuteStateChange(
 ): void {
   broadcastToProfileConnections(profileId, {
     type: 'topic_mute_state_changed',
+    scope: 'topics_section',
     topicId,
     isMuted: muteSnapshot.isMuted,
     mutedUntil: muteSnapshot.mutedUntil,
@@ -8128,7 +8130,11 @@ async function handleTopicMuteStatusRequest(
     return true
   }
 
-  sendJsonResponse(res, 200, { ok: true, mute: topicModerationStore.getMuteSnapshot(topicId, profileId) })
+  // Global Topics-section mute lookup (виж GLOBAL TOPICS MUTE брифа) —
+  // topicId в URL-а е само UI context (модераторът гледа този конкретен
+  // потребител от тази конкретна тема), НЕ enforcement scope. Статусът е
+  // еднакъв независимо от кой topicId е подаден тук.
+  sendJsonResponse(res, 200, { ok: true, mute: topicModerationStore.getSectionMuteSnapshot(profileId) })
   return true
 }
 
@@ -8182,7 +8188,11 @@ async function handleTopicMuteRequest(
     return true
   }
 
-  const muteSnapshot = topicModerationStore.muteProfileInTopic({
+  // Global Topics-section mute (виж GLOBAL TOPICS MUTE брифа) — topicId
+  // остава само audit/source context (кой topic е бил отворен, когато
+  // модераторът е натиснал "Заглуши"), enforcement-ът важи навсякъде в
+  // Теми след тази заявка.
+  const muteSnapshot = topicModerationStore.muteProfileInTopics({
     topicId,
     profileId: targetProfileId,
     actorAccountId: session.account.accountId,
@@ -8237,7 +8247,11 @@ async function handleTopicUnmuteRequest(
     return true
   }
 
-  const { changed } = topicModerationStore.unmuteProfileInTopic({
+  // Early unmute (виж GLOBAL TOPICS MUTE брифа §13): трие global
+  // topic_section_mutes реда directno — legacy per-topic topic_mutes
+  // редове НЕ се пипат тук и НЕ могат да "реактивират" санкцията, защото
+  // enforcement вече чете изключително от topic_section_mutes.
+  const { changed } = topicModerationStore.unmuteProfileInTopics({
     topicId,
     profileId: targetProfileId,
     actorAccountId: session.account.accountId,
@@ -10967,6 +10981,24 @@ async function handleChatRequest(
       return true
     }
 
+    // Global Topics-section mute guard (GLOBAL TOPICS MUTE брифа §1.D) —
+    // route-level, засяга САМО този vip_dm-специфичен endpoint, никога
+    // споделената chatStore.startVipDmConversationWithMessage/sendMessage
+    // логика (за да не се докосне friend/pika_support, виж §8 в брифа).
+    // Проверено ПРЕДИ каквато и да е attachment обработка, за да не се
+    // хаби ресурс за заявка, която ще бъде отхвърлена.
+    const vipDmStartMuteSnapshot = topicModerationStore.getSectionMuteSnapshot(profileId)
+    if (vipDmStartMuteSnapshot.isMuted) {
+      sendJsonResponse(res, 403, {
+        ok: false,
+        code: 'topic_muted',
+        message: 'Временно сте заглушени в секция „Теми“.',
+        mutedUntil: vipDmStartMuteSnapshot.mutedUntil ?? undefined,
+        reason: vipDmStartMuteSnapshot.reason ?? undefined,
+      })
+      return true
+    }
+
     // Файлът се записва на диска ПРЕДИ DB транзакцията (същия established
     // pattern като POST /api/chat/:friendshipId/messages) — ако последващият
     // get-or-create+insert се провали или се rollback-не (напр. VIP guard
@@ -11133,6 +11165,30 @@ async function handleChatRequest(
     if (!sendAuthorization.ok) {
       sendJsonResponse(res, 400, sendAuthorization)
       return true
+    }
+
+    // Global Topics-section mute guard (GLOBAL TOPICS MUTE брифа §1.E) —
+    // route-level, засяга САМО kind='vip_dm' разговори. friend/pika_support
+    // изпращания през ТОЗИ ЖЕ handler НЕ се докосват — guard-ът е условен на
+    // canonical conversation.kind lookup, не на споделената
+    // chatStore.sendMessage вътрешна логика (§8 в брифа: friend/support
+    // остават незасегнати).
+    const conversationKindForMuteGuard = chatStore
+      .listConversations(profileId)
+      .find((c) => c.friendshipId === friendshipId)?.kind ?? null
+
+    if (conversationKindForMuteGuard === 'vip_dm') {
+      const vipDmSendMuteSnapshot = topicModerationStore.getSectionMuteSnapshot(profileId)
+      if (vipDmSendMuteSnapshot.isMuted) {
+        sendJsonResponse(res, 403, {
+          ok: false,
+          code: 'topic_muted',
+          message: 'Временно сте заглушени в секция „Теми“.',
+          mutedUntil: vipDmSendMuteSnapshot.mutedUntil ?? undefined,
+          reason: vipDmSendMuteSnapshot.reason ?? undefined,
+        })
+        return true
+      }
     }
 
     if (typeof imageDataUrlField === 'string' && imageDataUrlField.trim().length > 0) {
@@ -14987,21 +15043,23 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        // Topic-specific mute (profile_id + topic_id, НЕ global account mute)
-        // — server-authoritative, computed at read time (isProfileMutedInTopic
-        // reuse-ва СЪЩИЯ expiry-comparison pattern като lock-а по-горе).
-        // mutedUntil в грешката носи точния timestamp — клиентът форматира
-        // локализирания час (Bulgarian UI text), сървърът праща само
-        // generic съобщение + raw ISO expiry (виж брифа т.13).
-        const muteSnapshot = topicModerationStore.getMuteSnapshot(message.topicId, senderProfileId)
-        if (muteSnapshot.isMuted) {
+        // Global Topics-section mute (GLOBAL TOPICS MUTE брифа §1.B) — вече
+        // НЕ topic-specific: root post е писане навсякъде в "Теми", значи
+        // guard-ът важи независимо от message.topicId. Server-authoritative,
+        // computed at read time (isProfileMutedInTopicsSection reuse-ва
+        // СЪЩИЯ expiry-comparison pattern като lock-а по-горе). mutedUntil/
+        // reason в грешката носят точните server-authoritative стойности —
+        // клиентът НЕ трябва да разчита само на realtime push-а (брифа §9).
+        const sectionMuteSnapshot = topicModerationStore.getSectionMuteSnapshot(senderProfileId)
+        if (sectionMuteSnapshot.isMuted) {
           safeSendToConnection(connection.id, {
             type: 'topic_message_error',
             code: 'topic_muted',
-            message: 'Заглушен сте в тази тема.',
+            message: 'Временно сте заглушени в секция „Теми“.',
             requestId,
-            mutedUntil: muteSnapshot.mutedUntil ?? undefined,
+            mutedUntil: sectionMuteSnapshot.mutedUntil ?? undefined,
             topicId: message.topicId,
+            reason: sectionMuteSnapshot.reason ?? undefined,
           })
           return
         }
@@ -15162,15 +15220,18 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        const muteSnapshot = topicModerationStore.getMuteSnapshot(message.topicId, senderProfileId)
-        if (muteSnapshot.isMuted) {
+        // Global Topics-section mute (GLOBAL TOPICS MUTE брифа §1.C) — виж
+        // идентичния коментар в send_topic_message по-горе.
+        const sectionMuteSnapshot = topicModerationStore.getSectionMuteSnapshot(senderProfileId)
+        if (sectionMuteSnapshot.isMuted) {
           safeSendToConnection(connection.id, {
             type: 'topic_reply_error',
             code: 'topic_muted',
-            message: 'Заглушен сте в тази тема.',
+            message: 'Временно сте заглушени в секция „Теми“.',
             requestId,
-            mutedUntil: muteSnapshot.mutedUntil ?? undefined,
+            mutedUntil: sectionMuteSnapshot.mutedUntil ?? undefined,
             topicId: message.topicId,
+            reason: sectionMuteSnapshot.reason ?? undefined,
           })
           return
         }
@@ -15397,6 +15458,23 @@ wsServer.on('connection', (socket, request) => {
         // само UX, не security boundary.
         if (!vipStore.getStatus(creatorProfileId).isActive) {
           sendTopicCreateError('vip_required', 'Създаването на теми изисква активен VIP.')
+          return
+        }
+
+        // Global Topics-section mute guard (GLOBAL TOPICS MUTE брифа §1.A) —
+        // create-topic е писане в секция "Теми", значи същият enforcement
+        // guard важи, идентично на send_topic_message/send_topic_reply
+        // по-долу. Server-authoritative, computed at read time.
+        const sectionMuteSnapshot = topicModerationStore.getSectionMuteSnapshot(creatorProfileId)
+        if (sectionMuteSnapshot.isMuted) {
+          safeSendToConnection(connection.id, {
+            type: 'topic_create_error',
+            code: 'topic_muted',
+            message: 'Временно сте заглушени в секция „Теми“.',
+            requestId,
+            mutedUntil: sectionMuteSnapshot.mutedUntil ?? undefined,
+            reason: sectionMuteSnapshot.reason ?? undefined,
+          })
           return
         }
 

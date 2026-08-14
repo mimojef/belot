@@ -1095,7 +1095,7 @@ function renderTopicModerationActionPopup(state: LobbyScreenState): string {
         <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
           <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:4px;">Отглуши потребител?</div>
           <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:20px;">
-            ${escapeHtml(pending.targetDisplayName)} е заглушен в тази тема${pending.mutedUntil ? ` до ${escapeHtml(formatModerationExpiry(pending.mutedUntil))}` : ''}.
+            ${escapeHtml(pending.targetDisplayName)} е заглушен в секция „Теми“${pending.mutedUntil ? ` до ${escapeHtml(formatModerationExpiry(pending.mutedUntil))}` : ''}.
           </div>
           ${state.topicModerationActionErrorText ? `<div style="font-size:12px;color:#f87171;margin-bottom:8px;">${escapeHtml(state.topicModerationActionErrorText)}</div>` : ''}
           <div style="display:flex;gap:12px;">
@@ -1119,7 +1119,7 @@ function renderTopicModerationActionPopup(state: LobbyScreenState): string {
   const title = isLock ? 'Заключи темата' : 'Заглуши потребител'
   const subtitle = isLock
     ? escapeHtml(pending.topicTitle)
-    : `${escapeHtml(pending.targetDisplayName)} — в тази тема`
+    : `${escapeHtml(pending.targetDisplayName)} — в секция „Теми“`
   const busy = state.topicModerationActionBusy
   const selectedDurationMs = state.topicModerationActionDurationMs
 
@@ -1399,14 +1399,53 @@ function renderTopicHeaderModerationControls(state: LobbyScreenState, activeTopi
 }
 
 // Ясен, но ненатрапчив banner при заключена/muted тема (брифа т.3/т.4:
-// "Темата е заключена до 14:30" / "Заглушен сте в тази тема до 14:30").
-// server-authoritative timestamp формат-нат локално (Bulgarian час/дата).
-function formatModerationExpiry(iso: string): string {
+// "Темата е заключена до 14.08.2026, 14:30 ч." / "Заглушен сте в секция
+// „Теми“ до ..."). server-authoritative timestamp формат-нат локално
+// (Bulgarian дата+час). Годината И "ч." суфиксът се форматират ТУК, вътре
+// в единствения formatter — извикващият код НИКОГА не append-ва свой
+// собствен " ч." след резултата (FINAL PRE-COMMIT CHECK §2: предотвратява
+// двойно "ч. ч." на всяко бъдещо call site, не само днешните).
+export function formatModerationExpiry(iso: string): string {
   try {
-    return new Date(iso).toLocaleString('bg-BG', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+    // Ръчно построен формат (НЕ toLocaleString за годината) — bg-BG
+    // Intl.DateTimeFormat добавя "г." суфикс след годината
+    // (напр. "14.08.2026 г."), което не е желаният изход тук. Часът е в
+    // локалния timezone на клиента (established convention), 24-часов
+    // формат (padStart, без AM/PM).
+    const date = new Date(iso)
+    const day = String(date.getDate()).padStart(2, '0')
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const year = date.getFullYear()
+    const hours = String(date.getHours()).padStart(2, '0')
+    const minutes = String(date.getMinutes()).padStart(2, '0')
+    return `${day}.${month}.${year}, ${hours}:${minutes} ч.`
   } catch {
     return iso
   }
+}
+
+// GLOBAL TOPICS MUTE брифа §10/§9 — единен formatter за пълния Bulgarian
+// error текст при отказан write заради Topics-section mute (create topic,
+// root post, reply, vip_dm). Единствен source на тази формулировка,
+// reuse-ван от createLobbyFlowController.ts И main.ts (FINAL PRE-COMMIT
+// CHECK §1: премахва предишното дублиране на идентична логика на две
+// места, което позволяваше двете копия да се разминат).
+//
+// `reason` fallback: legacy mutes, promoted от 20260814_001 migration-а,
+// могат да имат reason=NULL (старата topic_mutes.reason колона е
+// nullable) или reason='' (defensive, макар API-то за нов moderator mute
+// да изисква непразна причина — виж parseTopicModerationReason в
+// index.ts). И двата случая се третират еднакво: потребителят НИКОГА не
+// вижда "Причина:" с празна стойност или null/undefined — вместо това
+// винаги вижда explicit "Причина: Не е посочена причина."
+export function formatTopicsSectionMuteErrorText(mutedUntil: string | null | undefined, reason: string | null | undefined): string {
+  const lines = ['Временно сте заглушени в секция „Теми“.']
+  if (mutedUntil) {
+    lines.push(`Можете да публикувате отново след ${formatModerationExpiry(mutedUntil)}`)
+  }
+  const trimmedReason = reason?.trim()
+  lines.push(`Причина: ${trimmedReason ? trimmedReason : 'Не е посочена причина.'}`)
+  return lines.join('\n')
 }
 
 function renderTopicModerationBanners(state: LobbyScreenState): string {
@@ -1423,7 +1462,7 @@ function renderTopicModerationBanners(state: LobbyScreenState): string {
   if (state.activeTopicViewerMute?.isMuted && state.activeTopicViewerMute.mutedUntil) {
     banners.push(`
       <div style="padding:8px 12px;background:rgba(212,165,32,0.12);border-bottom:1px solid rgba(212,165,32,0.28);color:#fde68a;font-size:12px;font-weight:800;text-align:center;">
-        🔇 Заглушен сте в тази тема до ${escapeHtml(formatModerationExpiry(state.activeTopicViewerMute.mutedUntil))}
+        🔇 Заглушен сте в секция „Теми“ до ${escapeHtml(formatModerationExpiry(state.activeTopicViewerMute.mutedUntil))}${state.activeTopicViewerMute.reason ? ` — ${escapeHtml(state.activeTopicViewerMute.reason)}` : ''}
       </div>
     `)
   }

@@ -40,6 +40,7 @@ import {
   computeShopPurchaseConfirmDispatch,
 } from './shopResumeConfirmState'
 import { createDebouncedPlayerSearch } from './createDebouncedPlayerSearch'
+import { formatTopicsSectionMuteErrorText } from './renderTopicsScreen'
 import type {
   AdminSettingsSnapshot,
   AdminStatsSnapshot,
@@ -414,7 +415,7 @@ export type CreateLobbyFlowControllerOptions = {
   // за да не се създава vip_dm ред без изпратено съобщение.
   onVipDmFirstMessageSend?: (recipientProfileId: string, body: string, imageDataUrl: string | null) => Promise<
     | { ok: true; conversation: ChatConversationSnapshot; messages: ChatMessageSnapshot[]; newMessage?: ChatMessageSnapshot }
-    | { ok: false; message: string; code?: 'blocked' | 'vip_required' | 'vip_counterpart_required' | 'self' | 'recipient_not_found' | 'conversation_not_found' | 'invalid_conversation_kind' | 'message_required' }
+    | { ok: false; message: string; code?: 'blocked' | 'vip_required' | 'vip_counterpart_required' | 'self' | 'recipient_not_found' | 'conversation_not_found' | 'invalid_conversation_kind' | 'message_required' | 'topic_muted'; mutedUntil?: string; reason?: string }
   >
   onChatConversationsLoad?: (includeArchived?: boolean) => Promise<
     | { ok: true; conversations: ChatConversationSnapshot[] }
@@ -1343,6 +1344,7 @@ const DEFAULT_COUNTDOWN_MS = 20000
 // докато pending vip_dm compose context (§7 в task spec-а) все още няма
 // реален friendshipId — не може да се сблъска с истински UUID friendshipId.
 const PENDING_VIP_DM_UPLOAD_KEY = '__pending_vip_dm__'
+
 const LOBBY_CHAT_CLIENT_MAX_MESSAGES = 80
 const GUEST_TRIAL_MAX_GAMES = 3
 export const GUEST_TRIAL_STAKE: MatchStake = 5000
@@ -6199,6 +6201,16 @@ export function createLobbyFlowController(
       return
     }
 
+    // GLOBAL TOPICS MUTE брифа §11 — виж isLocallyKnownTopicsSectionMuted коментара.
+    if (isLocallyKnownTopicsSectionMuted()) {
+      state.topicReplyComposerErrorTextByRootId[rootMessageId] = formatTopicsSectionMuteErrorText(
+        state.activeTopicViewerMute?.mutedUntil ?? null,
+        state.activeTopicViewerMute?.reason ?? null,
+      )
+      render()
+      return
+    }
+
     const requestId = `topic-reply-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
     state.topicReplyComposerPendingRequestIdByRootId[rootMessageId] = requestId
     state.topicReplyComposerErrorTextByRootId[rootMessageId] = null
@@ -6423,6 +6435,16 @@ export function createLobbyFlowController(
     if (trimmed.length === 0) return
     if (state.topicCreateBusy) return // established idempotency guard
 
+    // GLOBAL TOPICS MUTE брифа §11 — виж isLocallyKnownTopicsSectionMuted коментара.
+    if (isLocallyKnownTopicsSectionMuted()) {
+      state.topicCreateErrorText = formatTopicsSectionMuteErrorText(
+        state.activeTopicViewerMute?.mutedUntil ?? null,
+        state.activeTopicViewerMute?.reason ?? null,
+      )
+      render()
+      return
+    }
+
     const requestId = `topic-create-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
     state.topicCreatePendingRequestId = requestId
     state.topicCreateBusy = true
@@ -6642,6 +6664,20 @@ export function createLobbyFlowController(
     return options.getAuthSession?.()?.profile.isVip === true
   }
 
+  // GLOBAL TOPICS MUTE брифа §11 — precheck е ЧИСТО UX optimization, НИКОГА
+  // authority. Връща true самò когато локалният snapshot доказано показва
+  // АКТИВЕН mute С бъдеще mutedUntil (isMuted===true И mutedUntil > now) —
+  // само в този случай instant UX denial е позволен, без network round-trip.
+  // Ако snapshot липсва (null), е неясен, или mutedUntil вече е изтекъл
+  // локално (stale push/error state, който сървърът вече не би потвърдил) —
+  // винаги връща false, request-ът се изпраща и сървърът решава authoritative
+  // (никога stale local state не блокира потребител след реален expiry).
+  function isLocallyKnownTopicsSectionMuted(): boolean {
+    const snapshot = state.activeTopicViewerMute
+    if (!snapshot || !snapshot.isMuted || !snapshot.mutedUntil) return false
+    return new Date(snapshot.mutedUntil).getTime() > Date.now()
+  }
+
   function submitTopicComposerMessage(topicId: string): void {
     const draft = state.topicComposerDraftByTopicId[topicId] ?? ''
     const trimmed = draft.trim()
@@ -6656,6 +6692,17 @@ export function createLobbyFlowController(
     // Снимка е писане (Attachment брифа т.3) — СЪЩИЯТ VIP gate важи за нея.
     if (!(state.topicsVipGate?.isActive ?? false)) {
       openTopicsVipPopup()
+      return
+    }
+
+    // GLOBAL TOPICS MUTE брифа §11 — instant UX denial само при доказано
+    // активен local snapshot, server остава authority при следващ опит.
+    if (isLocallyKnownTopicsSectionMuted()) {
+      state.topicComposerErrorTextByTopicId[topicId] = formatTopicsSectionMuteErrorText(
+        state.activeTopicViewerMute?.mutedUntil ?? null,
+        state.activeTopicViewerMute?.reason ?? null,
+      )
+      render()
       return
     }
 
@@ -9049,6 +9096,17 @@ export function createLobbyFlowController(
     if (state.chatUploadingFriendshipIds.has(PENDING_VIP_DM_UPLOAD_KEY)) return
     if (body.trim().length === 0 && imageDataUrl === null) return
 
+    // GLOBAL TOPICS MUTE брифа §1.D/§11 — vip_dm е част от Topics
+    // enforcement scope-а; виж isLocallyKnownTopicsSectionMuted коментара.
+    if (isLocallyKnownTopicsSectionMuted()) {
+      state.chatErrorText = formatTopicsSectionMuteErrorText(
+        state.activeTopicViewerMute?.mutedUntil ?? null,
+        state.activeTopicViewerMute?.reason ?? null,
+      )
+      render()
+      return
+    }
+
     state.chatUploadingFriendshipIds = new Set(state.chatUploadingFriendshipIds).add(PENDING_VIP_DM_UPLOAD_KEY)
     state.chatErrorText = null
     render()
@@ -9081,6 +9139,13 @@ export function createLobbyFlowController(
           render()
           return
         }
+      }
+      // GLOBAL TOPICS MUTE брифа §1.D — vip_dm е част от Topics enforcement
+      // scope-а; синхронизираме global mute state-а веднага, за да отразят
+      // и другите write composer-и (root/reply/create-topic) restriction-а
+      // без да чакат отделен push.
+      if (result.code === 'topic_muted') {
+        state.activeTopicViewerMute = { isMuted: true, mutedUntil: result.mutedUntil ?? null, mutedByAccountId: null, reason: result.reason ?? null }
       }
       // Draft/снимка НЕ се пипат при неуспех — established UX (виж sendChatMessage) — потребителят може да retry-не.
       state.chatErrorText = result.message
@@ -9785,7 +9850,11 @@ export function createLobbyFlowController(
           ? 'Този потребител в момента не е активен VIP.'
           : activeConversation.friend.isBlockedByMe === true
             ? 'Вие сте блокирали този потребител.'
-            : null
+            // GLOBAL TOPICS MUTE брифа §1.E/§11 — vip_dm е част от Topics
+            // enforcement scope-а; виж isLocallyKnownTopicsSectionMuted коментара.
+            : isLocallyKnownTopicsSectionMuted()
+              ? formatTopicsSectionMuteErrorText(state.activeTopicViewerMute?.mutedUntil ?? null, state.activeTopicViewerMute?.reason ?? null)
+              : null
       if (disabledReason !== null) {
         state.chatErrorText = disabledReason
         render()
@@ -11916,7 +11985,10 @@ export function createLobbyFlowController(
       if (pendingTopicId !== undefined) {
         state.topicComposerPendingRequestIdByTopicId[pendingTopicId] = null
         // Draft НЕ се чисти при грешка — потребителят не губи текста (Етап 2 корекция т.4).
-        state.topicComposerErrorTextByTopicId[pendingTopicId] = message.message
+        // GLOBAL TOPICS MUTE брифа §10 — exact сървърен mutedUntil/reason.
+        state.topicComposerErrorTextByTopicId[pendingTopicId] = message.code === 'topic_muted'
+          ? formatTopicsSectionMuteErrorText(message.mutedUntil, message.reason)
+          : message.message
       }
 
       if (message.code === 'vip_required') {
@@ -11933,9 +12005,11 @@ export function createLobbyFlowController(
       // Пропуснат mute realtime push (напр. mute-нат докато composer-ът е
       // бил отворен, но преди target-only WS push-а да пристигне) — send
       // опитът самия открива restriction-a. Обновяваме banner state-а
-      // веднага от error response-а, не чакаме отделен push.
-      if (message.code === 'topic_muted' && message.topicId === state.activeTopicId) {
-        state.activeTopicViewerMute = { isMuted: true, mutedUntil: message.mutedUntil ?? null, mutedByAccountId: null, reason: null }
+      // веднага от error response-а, не чакаме отделен push. GLOBAL TOPICS
+      // MUTE брифа §9: state-ът е global — важи независимо от активната
+      // тема, значи НЕ е условен на message.topicId === state.activeTopicId.
+      if (message.code === 'topic_muted') {
+        state.activeTopicViewerMute = { isMuted: true, mutedUntil: message.mutedUntil ?? null, mutedByAccountId: null, reason: message.reason ?? null }
       }
 
       render()
@@ -12014,7 +12088,10 @@ export function createLobbyFlowController(
       )
       if (pendingRootId !== undefined) {
         state.topicReplyComposerPendingRequestIdByRootId[pendingRootId] = null
-        state.topicReplyComposerErrorTextByRootId[pendingRootId] = message.message
+        // GLOBAL TOPICS MUTE брифа §10 — exact сървърен mutedUntil/reason.
+        state.topicReplyComposerErrorTextByRootId[pendingRootId] = message.code === 'topic_muted'
+          ? formatTopicsSectionMuteErrorText(message.mutedUntil, message.reason)
+          : message.message
       }
 
       if (message.code === 'vip_required') {
@@ -12025,8 +12102,8 @@ export function createLobbyFlowController(
         state.topicsVipPopupOpen = true
       }
 
-      if (message.code === 'topic_muted' && message.topicId === state.activeTopicId) {
-        state.activeTopicViewerMute = { isMuted: true, mutedUntil: message.mutedUntil ?? null, mutedByAccountId: null, reason: null }
+      if (message.code === 'topic_muted') {
+        state.activeTopicViewerMute = { isMuted: true, mutedUntil: message.mutedUntil ?? null, mutedByAccountId: null, reason: message.reason ?? null }
       }
 
       render()
@@ -12103,7 +12180,15 @@ export function createLobbyFlowController(
 
     if (message.type === 'topic_create_error') {
       if (message.requestId === state.topicCreatePendingRequestId) {
-        handleTopicCreateError(message.message)
+        // GLOBAL TOPICS MUTE брифа §10 — exact сървърен mutedUntil/reason,
+        // форматирани в пълния Bulgarian error текст, не generic съобщение.
+        const errorText = message.code === 'topic_muted'
+          ? formatTopicsSectionMuteErrorText(message.mutedUntil, message.reason)
+          : message.message
+        handleTopicCreateError(errorText)
+        if (message.code === 'topic_muted') {
+          state.activeTopicViewerMute = { isMuted: true, mutedUntil: message.mutedUntil ?? null, mutedByAccountId: null, reason: message.reason ?? null }
+        }
       }
       // requestId mismatch → stale/foreign response, игнорирай мълчаливо
       // (established convention, mirror на topic_message_error handling-а).
@@ -12133,9 +12218,12 @@ export function createLobbyFlowController(
       // Target-only push (виж index.ts notifyProfileOfTopicMuteStateChange)
       // — само СОБСТВЕНИЯТ browser на заглушения/отглушения потребител
       // получава това съобщение, значи винаги важи за viewer-а самия.
-      if (message.topicId === state.activeTopicId) {
-        state.activeTopicViewerMute = { isMuted: message.isMuted, mutedUntil: message.mutedUntil, mutedByAccountId: null, reason: message.reason }
-      }
+      // scope='topics_section' (GLOBAL TOPICS MUTE брифа §12) — state-ът
+      // важи за ЦЯЛАТА секция "Теми", НЕ само за message.topicId, затова
+      // винаги се прилага, независимо от активната тема (multi-tab: всеки
+      // отворен таб на същия потребител получава own connection push и
+      // прилага state-а идентично).
+      state.activeTopicViewerMute = { isMuted: message.isMuted, mutedUntil: message.mutedUntil, mutedByAccountId: null, reason: message.reason }
       render()
       return true
     }

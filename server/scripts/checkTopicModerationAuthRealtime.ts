@@ -583,12 +583,16 @@ try {
     assertEqual(err.code, 'topic_muted', `очаквано topic_muted, получено ${String(err.code)}`)
   })
 
-  await check('[C3] Muted user МОЖЕ да пише в ДРУГА тема (mute е topic-specific, не global)', async () => {
+  await check('[C3] GLOBAL TOPICS MUTE: Muted (от topic-mute-test-a) user НЕ МОЖЕ да пише в ДРУГА тема (mute вече е Topics-wide, не topic-specific)', async () => {
+    // Продуктовото правило се обърна (GLOBAL TOPICS MUTE брифа §1) — mute,
+    // задействан от контекста на topic-mute-test-a, вече блокира писане
+    // ВСЯКЪДЕ в "Теми", включително topic-mute-test-b.
     sendWs(wsTarget, { type: 'subscribe_topic_messages', topicId: 'topic-mute-test-b', afterSeq: 0 })
     await waitForWsMessage(wsTarget, (m) => m.type === 'topic_message_catchup' && m.topicId === 'topic-mute-test-b')
-    sendWs(wsTarget, { type: 'send_topic_message', topicId: 'topic-mute-test-b', body: 'allowed in other topic', requestId: 'req-mute-c3' })
+    sendWs(wsTarget, { type: 'send_topic_message', topicId: 'topic-mute-test-b', body: 'should be blocked everywhere', requestId: 'req-mute-c3' })
     const result = await waitForWsMessage(wsTarget, (m) => (m.type === 'topic_message' || m.type === 'topic_message_error') && m.requestId === 'req-mute-c3')
-    assertEqual(result.type, 'topic_message', `очаквано успешен send в друга тема, получено ${result.type}/${String((result as { code?: string }).code)}`)
+    assertEqual(result.type, 'topic_message_error', `очаквано блокиран send в ДРУГА тема (global mute), получено ${result.type}`)
+    assertEqual((result as { code?: string }).code, 'topic_muted', 'code трябва да е topic_muted независимо от коя тема')
   })
 
   console.log('\n=== Section D: Expiry / early unlock / unmute restore write access ===\n')
@@ -696,6 +700,184 @@ try {
   await check('[F4] Invalid/несъществуваща тема -> 404 при report опит', async () => {
     const r = await httpPostJson(port, '/api/topics/nonexistent-topic-id/report', normalPlayer.cookie, { reason: 'test' })
     assert(r.status === 404, `очаквано 404, получено ${r.status}`)
+  })
+
+  console.log('\n=== Section H: GLOBAL TOPICS MUTE — всички 5 write paths + friend/support/likes isolation + expiry ===\n')
+
+  // Собствен target потребител за Section H (независим от targetUser, който
+  // вече е unmuted от Section D2) + собствена тема, за да не кръстосваме
+  // state с предишните секции.
+  const hUser = await registerAndLogin(port, `tmod-h-target-${runId}@example.test`, 'GlobalMuteTarget')
+  const hCounterpart = await registerAndLogin(port, `tmod-h-counterpart-${runId}@example.test`, 'GlobalMuteCounterpart')
+  grantVip(iso.dbFile, hUser.profileId)
+  grantVip(iso.dbFile, hCounterpart.profileId)
+  insertExtraTopic(iso.dbFile, 'topic-h-a', 'h-topic-a', 'Global Mute Test Topic A')
+  insertExtraTopic(iso.dbFile, 'topic-h-b', 'h-topic-b', 'Global Mute Test Topic B')
+
+  const wsH = await openWs(port, hUser.cookie)
+  sendWs(wsH, { type: 'subscribe_topic_messages', topicId: 'topic-h-a', afterSeq: 0 })
+  await waitForWsMessage(wsH, (m) => m.type === 'topic_message_catchup' && m.topicId === 'topic-h-a')
+
+  // Mute, задействан от контекста на topic-h-a — трябва да блокира ВСИЧКИ
+  // 5 write paths, независимо от topicId.
+  const muteRes = await httpPostJson(port, '/api/topics/topic-h-a/mute', admin.cookie, { profileId: hUser.profileId, reason: 'global mute test reason', durationMs: 60 * 60 * 1000 })
+  assert(muteRes.status === 200, `mute setup трябва да успее, получено ${muteRes.status}`)
+
+  await check('[H1] Mute блокира create_topic (WS) с exact mutedUntil + reason в error payload', async () => {
+    sendWs(wsH, { type: 'create_topic', title: `Blocked Topic ${Date.now()}`, requestId: 'req-h1' })
+    const err = await waitForWsMessage(wsH, (m) => m.type === 'topic_create_error' && m.requestId === 'req-h1')
+    assertEqual(err.code, 'topic_muted', `очаквано topic_muted, получено ${String(err.code)}`)
+    assert(typeof err.mutedUntil === 'string' && String(err.mutedUntil).length > 0, 'error payload трябва да носи exact mutedUntil')
+    assertEqual(err.reason, 'global mute test reason', 'error payload трябва да носи exact reason')
+  })
+
+  await check('[H2] Mute блокира root post (WS) в ДРУГА тема (topic-h-b) — не само topic-h-a', async () => {
+    sendWs(wsH, { type: 'subscribe_topic_messages', topicId: 'topic-h-b', afterSeq: 0 })
+    await waitForWsMessage(wsH, (m) => m.type === 'topic_message_catchup' && m.topicId === 'topic-h-b')
+    sendWs(wsH, { type: 'send_topic_message', topicId: 'topic-h-b', body: 'blocked root in other topic', requestId: 'req-h2' })
+    const err = await waitForWsMessage(wsH, (m) => m.type === 'topic_message_error' && m.requestId === 'req-h2')
+    assertEqual(err.code, 'topic_muted', `очаквано topic_muted, получено ${String(err.code)}`)
+    assertEqual(err.reason, 'global mute test reason', 'reason трябва да съвпада')
+  })
+
+  let hReplyRootMessageId = ''
+  await check('[H3] Mute блокира reply (WS)', async () => {
+    // За да получим root съобщение за reply target, минаваме през
+    // hCounterpart (не-муtнат потребител) в topic-h-a.
+    const wsCounterpart = await openWs(port, hCounterpart.cookie)
+    sendWs(wsCounterpart, { type: 'subscribe_topic_messages', topicId: 'topic-h-a', afterSeq: 0 })
+    await waitForWsMessage(wsCounterpart, (m) => m.type === 'topic_message_catchup' && m.topicId === 'topic-h-a')
+    sendWs(wsCounterpart, { type: 'send_topic_message', topicId: 'topic-h-a', body: 'root for H3 reply test', requestId: 'req-h3-root' })
+    const rootMsg = await waitForWsMessage(wsCounterpart, (m) => m.type === 'topic_message' && m.requestId === 'req-h3-root')
+    hReplyRootMessageId = String(rootMsg.messageId)
+    wsCounterpart.close()
+
+    sendWs(wsH, { type: 'subscribe_topic_messages', topicId: 'topic-h-a', afterSeq: 0 })
+    await waitForWsMessage(wsH, (m) => m.type === 'topic_message_catchup' && m.topicId === 'topic-h-a')
+    sendWs(wsH, { type: 'send_topic_reply', topicId: 'topic-h-a', parentMessageId: hReplyRootMessageId, body: 'blocked reply', requestId: 'req-h3' })
+    const err = await waitForWsMessage(wsH, (m) => m.type === 'topic_reply_error' && m.requestId === 'req-h3')
+    assertEqual(err.code, 'topic_muted', `очаквано topic_muted, получено ${String(err.code)}`)
+    assertEqual(err.reason, 'global mute test reason', 'reason трябва да съвпада')
+  })
+
+  await check('[H4] Mute блокира vip_dm FIRST message (POST /api/chat/vip-dm/start-with-message)', async () => {
+    const r = await httpPostJson(port, '/api/chat/vip-dm/start-with-message', hUser.cookie, { recipientProfileId: hCounterpart.profileId, body: 'blocked vip_dm first message' })
+    assert(r.status === 403, `очаквано 403, получено ${r.status}`)
+    const body = r.body as { code?: string; mutedUntil?: string; reason?: string }
+    assertEqual(body.code, 'topic_muted', `очаквано code=topic_muted, получено ${body.code}`)
+    assert(typeof body.mutedUntil === 'string' && body.mutedUntil.length > 0, 'HTTP error body трябва да носи exact mutedUntil')
+    assertEqual(body.reason, 'global mute test reason', 'HTTP error body трябва да носи exact reason')
+  })
+
+  let hVipDmFriendshipId = ''
+  await check('[H5] Mute блокира EXISTING vip_dm conversation send', async () => {
+    // Създаваме vip_dm разговор от НЕ-муtнатия counterpart (start-with-message
+    // не е блокиран за него), после проверяваме, че мутnатият hUser не може
+    // да прати в него, макар разговорът вече да съществува.
+    const startRes = await httpPostJson(port, '/api/chat/vip-dm/start-with-message', hCounterpart.cookie, { recipientProfileId: hUser.profileId, body: 'hello from counterpart' })
+    assert(startRes.status === 200, `start-with-message от не-муtнатия counterpart трябва да успее, получено ${startRes.status}`)
+    const startBody = startRes.body as { friendshipId?: string }
+    assert(typeof startBody.friendshipId === 'string', 'трябва да върне friendshipId')
+    hVipDmFriendshipId = startBody.friendshipId!
+
+    const sendRes = await httpPostJson(port, `/api/chat/${hVipDmFriendshipId}/messages`, hUser.cookie, { body: 'blocked reply to existing vip_dm' })
+    assert(sendRes.status === 403, `очаквано 403 за муtнат send в existing vip_dm, получено ${sendRes.status}`)
+    const sendBody = sendRes.body as { code?: string; mutedUntil?: string; reason?: string }
+    assertEqual(sendBody.code, 'topic_muted', `очаквано code=topic_muted, получено ${sendBody.code}`)
+    assertEqual(sendBody.reason, 'global mute test reason', 'reason трябва да съвпада')
+  })
+
+  await check('[H6] friend Chat send остава РАЗРЕШЕН докато потребителят е Topics-muted', async () => {
+    const requestRes = await httpPostJson(port, '/api/friends/request', hUser.cookie, { profileId: hCounterpart.profileId })
+    assert(requestRes.status === 200, `friend request трябва да успее, получено ${requestRes.status}`)
+    const pending = (requestRes.body as { friendships?: { outgoingPending?: Array<{ friendshipId?: string }> } }).friendships?.outgoingPending ?? []
+    const pendingFriendshipId = pending.find((p) => typeof p.friendshipId === 'string')?.friendshipId
+    assert(typeof pendingFriendshipId === 'string', 'pending friendshipId трябва да съществува')
+
+    const acceptRes = await httpPostJson(port, `/api/friends/${encodeURIComponent(pendingFriendshipId!)}/accept`, hCounterpart.cookie, {})
+    assert(acceptRes.status === 200, `friend accept трябва да успее, получено ${acceptRes.status}`)
+
+    const sendRes = await httpPostJson(port, `/api/chat/${pendingFriendshipId}/messages`, hUser.cookie, { body: 'friend chat allowed during Topics mute' })
+    assert(sendRes.status === 200, `friend Chat send трябва да остане разрешен докато Topics-muted, получено ${sendRes.status}`)
+  })
+
+  await check('[H7] Support send остава РАЗРЕШЕН докато потребителят е Topics-muted', async () => {
+    const r = await httpPostJson(port, '/api/support/messages', hUser.cookie, { body: 'support allowed during Topics mute' })
+    assert(r.status === 200, `Support send трябва да остане разрешен докато Topics-muted, получено ${r.status}`)
+  })
+
+  await check('[H8] Like остава РАЗРЕШЕН докато потребителят е Topics-muted (likes не са write-mute gated)', async () => {
+    sendWs(wsH, { type: 'toggle_topic_message_like', messageId: hReplyRootMessageId, requestId: 'req-h8' })
+    const result = await waitForWsMessage(wsH, (m) => (m.type === 'topic_message_like_changed_self') && m.requestId === 'req-h8')
+    assertEqual(result.type, 'topic_message_like_changed_self', `like трябва да остане разрешен по време на Topics mute, получено ${result.type}`)
+    // Revert toggle-а, за да не оставим странично състояние за други тестове.
+    sendWs(wsH, { type: 'toggle_topic_message_like', messageId: hReplyRootMessageId, requestId: 'req-h8-revert' })
+    await waitForWsMessage(wsH, (m) => m.type === 'topic_message_like_changed_self' && m.requestId === 'req-h8-revert')
+  })
+
+  await check('[H9] Realtime: mute state (scope=topics_section) стига до target-а само веднъж, target-only push, друг subscriber НЕ го получава', async () => {
+    const wsBystanderH = await openWs(port, bystander.cookie)
+    sendWs(wsBystanderH, { type: 'subscribe_topic_messages', topicId: 'topic-h-a', afterSeq: 0 })
+    await waitForWsMessage(wsBystanderH, (m) => m.type === 'topic_message_catchup' && m.topicId === 'topic-h-a')
+
+    const secondMuteRes = await httpPostJson(port, '/api/topics/topic-h-a/mute', admin.cookie, { profileId: hUser.profileId, reason: 'realtime scope check', durationMs: 30 * 60 * 1000 })
+    assert(secondMuteRes.status === 200, `re-mute трябва да успее, получено ${secondMuteRes.status}`)
+
+    const notify = await waitForWsMessage(wsH, (m) => m.type === 'topic_mute_state_changed' && m.reason === 'realtime scope check')
+    assertEqual(notify.scope, 'topics_section', 'push трябва да носи scope=topics_section marker (GLOBAL TOPICS MUTE брифа §12)')
+    assertEqual(notify.isMuted, true, 'isMuted трябва да е true')
+
+    await assertNoWsMessage(wsBystanderH, (m) => m.type === 'topic_mute_state_changed')
+    wsBystanderH.close()
+  })
+
+  await check('[H10] Early unmute веднага разрешава write отново (без чакане на expiry)', async () => {
+    const unmuteRes = await httpPostJson(port, '/api/topics/topic-h-a/unmute', admin.cookie, { profileId: hUser.profileId })
+    assert(unmuteRes.status === 200, `unmute трябва да успее, получено ${unmuteRes.status}`)
+
+    // wsH последно е бил subscribe-нат за topic-h-a (H9 push проверка) —
+    // re-subscribe към topic-h-b, за да потвърдим, че unmute-ът важи ГЛОБАЛНО
+    // (не само за темата, от която е бил задействан unmute-а).
+    sendWs(wsH, { type: 'subscribe_topic_messages', topicId: 'topic-h-b', afterSeq: 0 })
+    await waitForWsMessage(wsH, (m) => m.type === 'topic_message_catchup' && m.topicId === 'topic-h-b')
+    sendWs(wsH, { type: 'send_topic_message', topicId: 'topic-h-b', body: 'allowed after early unmute', requestId: 'req-h10' })
+    const result = await waitForWsMessage(wsH, (m) => (m.type === 'topic_message' || m.type === 'topic_message_error') && m.requestId === 'req-h10')
+    assertEqual(result.type, 'topic_message', `очаквано успешен send след early unmute, получено ${result.type}/${String((result as { code?: string }).code)}`)
+  })
+
+  await check('[H11] Mute expiry автоматично разрешава write — server-authoritative computed-at-read-time enforcement, не persisted boolean', async () => {
+    // Валидна mute duration (established allowed-durations guard позволява
+    // само 30мин/1ч/3ч/24ч — не произволни кратки стойности), после
+    // директна DB манипулация на muted_until в миналото — established
+    // repo pattern за симулиране на естествен expiry без реален sleep (виж
+    // checkTopicModeration.ts pastIso helper-а за същия подход).
+    const shortMuteRes = await httpPostJson(port, '/api/topics/topic-h-a/mute', admin.cookie, { profileId: hUser.profileId, reason: 'expiry test', durationMs: 30 * 60 * 1000 })
+    assert(shortMuteRes.status === 200, `mute setup трябва да успее, получено ${shortMuteRes.status}`)
+
+    // wsH последно е бил subscribe-нат за topic-h-b (H10) — re-subscribe към topic-h-a.
+    sendWs(wsH, { type: 'subscribe_topic_messages', topicId: 'topic-h-a', afterSeq: 0 })
+    await waitForWsMessage(wsH, (m) => m.type === 'topic_message_catchup' && m.topicId === 'topic-h-a')
+    sendWs(wsH, { type: 'send_topic_message', topicId: 'topic-h-a', body: 'blocked while still muted', requestId: 'req-h11-blocked' })
+    const blockedResult = await waitForWsMessage(wsH, (m) => (m.type === 'topic_message' || m.type === 'topic_message_error') && m.requestId === 'req-h11-blocked')
+    assertEqual(blockedResult.type, 'topic_message_error', 'докато mute-ът е активен, write трябва да е блокиран')
+
+    const expireDb = new DatabaseSync(iso.dbFile, { open: true, enableForeignKeyConstraints: true })
+    expireDb.exec('PRAGMA journal_mode = WAL;')
+    expireDb.prepare(`UPDATE topic_section_mutes SET muted_until = ? WHERE profile_id = ?`).run(
+      new Date(Date.now() - 60_000).toISOString().slice(0, 19).replace('T', ' '),
+      hUser.profileId,
+    )
+    expireDb.close()
+
+    sendWs(wsH, { type: 'send_topic_message', topicId: 'topic-h-a', body: 'allowed after natural expiry', requestId: 'req-h11-allowed' })
+    const allowedResult = await waitForWsMessage(wsH, (m) => (m.type === 'topic_message' || m.type === 'topic_message_error') && m.requestId === 'req-h11-allowed')
+    assertEqual(allowedResult.type, 'topic_message', `очаквано разрешен write след естествен expiry, получено ${allowedResult.type}/${String((allowedResult as { code?: string }).code)}`)
+  })
+
+  await check('[H12] Moderator popup subtitle text вече казва „в секция Теми", НЕ „в тази тема" (source-level copy check)', async () => {
+    const renderTopicsScreenSource = await (await import('node:fs/promises')).readFile(resolve(serverRoot, '..', 'src/app/lobby/renderTopicsScreen.ts'), 'utf8')
+    assert(renderTopicsScreenSource.includes('в секция „Теми“'), 'renderTopicsScreen.ts трябва да съдържа новия "в секция „Теми“" copy')
+    assert(!renderTopicsScreenSource.includes('— в тази тема`'), 'renderTopicsScreen.ts НЕ трябва повече да съдържа старото "— в тази тема" subtitle copy')
   })
 
   console.log('\n=== Section G: Concurrency / idempotency (HTTP-level) ===\n')

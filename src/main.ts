@@ -33,6 +33,7 @@ import { validateProfileDisplayName } from './app/lobby/profileDisplayNameValida
 import { readProfileImageFileAsDataUrl } from './app/profileImages/profileImageUploadHelpers'
 import type { GiftLimitErrorPayload } from './app/lobby/formatGiftLimitError'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
+import { formatTopicsSectionMuteErrorText } from './app/lobby/renderTopicsScreen'
 import type { PlayerAccountRole } from './ui/overlays/renderPlayerProfilePopup'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult } from './app/adminServer/adminServerTypes'
 import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
@@ -430,10 +431,13 @@ type ChatMessagesResponse = {
   conversation?: ChatConversationSnapshot
   newMessage?: ChatMessageSnapshot
   message?: string
-  code?: 'blocked' | 'vip_required' | 'vip_counterpart_required' | 'self' | 'recipient_not_found' | 'conversation_not_found' | 'invalid_conversation_kind' | 'message_required'
+  code?: 'blocked' | 'vip_required' | 'vip_counterpart_required' | 'self' | 'recipient_not_found' | 'conversation_not_found' | 'invalid_conversation_kind' | 'message_required' | 'topic_muted'
+  /** Само при code==='topic_muted' — GLOBAL TOPICS MUTE брифа §1.D/E (vip_dm е част от "Теми" enforcement scope-а). */
+  mutedUntil?: string
+  reason?: string
 }
 
-function formatPersonalChatError(data: { code?: ChatMessagesResponse['code']; message?: string }): string {
+function formatPersonalChatError(data: { code?: ChatMessagesResponse['code']; message?: string; mutedUntil?: string; reason?: string }): string {
   switch (data.code) {
     case 'blocked':
       return 'Не можете да изпращате съобщения в този разговор.'
@@ -451,6 +455,12 @@ function formatPersonalChatError(data: { code?: ChatMessagesResponse['code']; me
       return 'Този разговор не е достъпен тук.'
     case 'message_required':
       return 'Изпрати съобщение, за да започнеш този разговор.'
+    case 'topic_muted':
+      // GLOBAL TOPICS MUTE брифа §10 — exact сървърен mutedUntil/reason,
+      // Теми → Лични (vip_dm) е част от Topics-section enforcement scope-а.
+      // Reuse на единствения formatter (FINAL PRE-COMMIT CHECK §1/§2) —
+      // никакво локално дублиране на текста/expiry форматирането тук.
+      return formatTopicsSectionMuteErrorText(data.mutedUntil, data.reason)
     default:
       return data.message ?? 'Съобщението не беше изпратено.'
   }
@@ -2163,7 +2173,7 @@ async function startVipDmFirstMessage(
   imageDataUrl?: string | null,
 ): Promise<
   | { ok: true; conversation: ChatConversationSnapshot; messages: ChatMessageSnapshot[]; newMessage?: ChatMessageSnapshot }
-  | { ok: false; message: string; code?: ChatMessagesResponse['code'] }
+  | { ok: false; message: string; code?: ChatMessagesResponse['code']; mutedUntil?: string; reason?: string }
 > {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/chat/vip-dm/start-with-message`, {
@@ -2188,6 +2198,8 @@ async function startVipDmFirstMessage(
         ok: false,
         message: formatPersonalChatError(data),
         code: data.code,
+        mutedUntil: data.mutedUntil,
+        reason: data.reason,
       }
     }
 

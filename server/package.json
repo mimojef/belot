@@ -92,6 +92,7 @@
     "check:topic-creation": "tsx scripts/checkTopicCreation.ts",
     "check:topic-moderation": "tsx scripts/checkTopicModeration.ts",
     "check:topic-moderation-auth-realtime": "tsx scripts/checkTopicModerationAuthRealtime.ts",
+    "check:topic-section-mute-migration": "tsx scripts/checkTopicSectionMuteMigration.ts",
     "check:topic-message-moderation": "tsx scripts/checkTopicMessageModeration.ts",
     "check:topic-message-moderation-auth-realtime": "tsx scripts/checkTopicMessageModerationAuthRealtime.ts",
     "check:topic-message-self-delete": "tsx scripts/checkTopicMessageSelfDelete.ts",
