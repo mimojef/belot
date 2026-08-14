@@ -430,15 +430,7 @@ type ChatMessagesResponse = {
   conversation?: ChatConversationSnapshot
   newMessage?: ChatMessageSnapshot
   message?: string
-  code?: 'blocked' | 'vip_required' | 'vip_counterpart_required' | 'self' | 'recipient_not_found' | 'conversation_not_found' | 'invalid_conversation_kind'
-}
-
-type ChatStartResponse = {
-  ok?: boolean
-  friendshipId?: string
-  conversation?: ChatConversationSnapshot
-  message?: string
-  code?: ChatMessagesResponse['code']
+  code?: 'blocked' | 'vip_required' | 'vip_counterpart_required' | 'self' | 'recipient_not_found' | 'conversation_not_found' | 'invalid_conversation_kind' | 'message_required'
 }
 
 function formatPersonalChatError(data: { code?: ChatMessagesResponse['code']; message?: string }): string {
@@ -457,6 +449,8 @@ function formatPersonalChatError(data: { code?: ChatMessagesResponse['code']; me
       return 'Разговорът не беше намерен.'
     case 'invalid_conversation_kind':
       return 'Този разговор не е достъпен тук.'
+    case 'message_required':
+      return 'Изпрати съобщение, за да започнеш този разговор.'
     default:
       return data.message ?? 'Съобщението не беше изпратено.'
   }
@@ -2158,22 +2152,38 @@ async function startPikaSupportChat(recipientProfileId: string): Promise<
   }
 }
 
-async function startVipDmChat(recipientProfileId: string): Promise<
-  | { ok: true; conversation: ChatConversationSnapshot }
+// Атомарен start+send за ПЪРВОТО vip_dm съобщение (виж §4/§9 в task
+// spec-а) — заменя старото startVipDmChat (create-only, без съобщение).
+// Server-side get-or-create vip_dm + insert съобщение стават в 1 SQLite
+// транзакция (chatStore.startVipDmConversationWithMessage); ако insert-ът
+// се провали, нов vip_dm ред не остава persistent.
+async function startVipDmFirstMessage(
+  recipientProfileId: string,
+  body: string,
+  imageDataUrl?: string | null,
+): Promise<
+  | { ok: true; conversation: ChatConversationSnapshot; messages: ChatMessageSnapshot[]; newMessage?: ChatMessageSnapshot }
   | { ok: false; message: string; code?: ChatMessagesResponse['code'] }
 > {
   try {
-    const response = await fetch(`${getApiBaseUrl()}/api/chat/vip-dm/start`, {
+    const response = await fetch(`${getApiBaseUrl()}/api/chat/vip-dm/start-with-message`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       credentials: 'include',
-      body: JSON.stringify({ recipientProfileId }),
+      body: JSON.stringify(
+        imageDataUrl ? { recipientProfileId, body, imageDataUrl } : { recipientProfileId, body },
+      ),
     })
-    const data = await response.json().catch(() => ({})) as ChatStartResponse
+    const data = await readChatMessagesResponse(response)
 
-    if (!response.ok || !data.ok || !data.conversation) {
+    if (
+      !response.ok ||
+      !data.ok ||
+      !data.conversation ||
+      !Array.isArray(data.messages)
+    ) {
       return {
         ok: false,
         message: formatPersonalChatError(data),
@@ -2184,6 +2194,8 @@ async function startVipDmChat(recipientProfileId: string): Promise<
     return {
       ok: true,
       conversation: data.conversation,
+      messages: data.messages,
+      newMessage: data.newMessage,
     }
   } catch {
     return {
@@ -4611,7 +4623,7 @@ lobby = createLobbyFlowController({
   onLikeProfile: (profileId) => submitProfileLike(profileId),
   onGiftCoinsSubmit: (friendshipId, amount) => submitGiftCoins(friendshipId, amount),
   onPikaSupportChatStart: (recipientProfileId) => startPikaSupportChat(recipientProfileId),
-  onVipDmChatStart: (recipientProfileId) => startVipDmChat(recipientProfileId),
+  onVipDmFirstMessageSend: (recipientProfileId, body, imageDataUrl) => startVipDmFirstMessage(recipientProfileId, body, imageDataUrl),
   onChatConversationsLoad: (includeArchived) => loadChatConversations(includeArchived),
   onChatMessagesLoad: (friendshipId) => loadChatMessages(friendshipId),
   onChatMarkRead: async (friendshipId) => {

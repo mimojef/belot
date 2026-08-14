@@ -368,6 +368,9 @@ export type LobbyScreenState = {
   topicsVipSeePlansMessageVisible: boolean
   topicsInfoToast: { text: string } | null
   topicsPersonalMessagePendingProfileId: string | null
+  // Pending compose context за нов vip_dm БЕЗ persistent friendshipId —
+  // виж §7 в task spec-а (createLobbyFlowController.ts за пълния rationale).
+  topicsPersonalPendingRecipient: { profileId: string; displayName: string } | null
   topicCreatePopupOpen: boolean
   topicCreateBusy: boolean
   topicCreateErrorText: string | null
@@ -5575,6 +5578,41 @@ function renderTopicsPersonalMessages(state: LobbyScreenState, activeConversatio
   `
 }
 
+// Синтетичен ключ, огледален на PENDING_VIP_DM_UPLOAD_KEY в
+// createLobbyFlowController.ts — DOM/state ключ за composer/draft/upload,
+// докато pending vip_dm compose context (§7 в task spec-а) все още няма
+// реален friendshipId.
+const PENDING_VIP_DM_UPLOAD_KEY = '__pending_vip_dm__'
+
+// Composer за pending vip_dm compose context — recipient е известен, но
+// friendshipId още не съществува (виж §7/§9 в task spec-а). Reuse-ва
+// същите data-lobby-chat-form/data-lobby-chat-message-input selectors, само
+// с PENDING_VIP_DM_UPLOAD_KEY вместо истински friendshipId — контролерът
+// (sendChatMessage) detect-ва този sentinel и route-ва към атомарния
+// start+send path вместо обикновения sendMessage(friendshipId, ...).
+function renderTopicsPersonalPendingComposer(state: LobbyScreenState, recipientDisplayName: string): string {
+  const isUploading = state.chatUploadingFriendshipIds.has(PENDING_VIP_DM_UPLOAD_KEY)
+  const isComposerDisabled = isUploading
+
+  return `
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid rgba(212,165,32,0.24);flex:0 0 auto;">
+      <button type="button" data-topics-personal-conversation-back="1" aria-label="Назад към личните разговори" style="align-items:center;justify-content:center;width:34px;height:34px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;font-size:18px;font-weight:900;cursor:pointer;">&larr;</button>
+      <div style="font-size:18px;font-weight:900;color:#f8fafc;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(recipientDisplayName)}</div>
+      ${state.chatErrorText ? `<div style="margin-left:auto;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.chatErrorText)}</div>` : ''}
+    </div>
+    <div data-chat-messages-scroll="1" style="flex:1;min-height:0;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
+      <div style="margin:auto;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;">Няма съобщения. Започни разговора.</div>
+    </div>
+    <form data-lobby-chat-form="${escapeHtml(PENDING_VIP_DM_UPLOAD_KEY)}" data-chat-composer-disabled="${isComposerDisabled ? '1' : '0'}" style="display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-top:1px solid rgba(212,165,32,0.20);flex:0 0 auto;">
+      <div style="display:flex;gap:10px;align-items:center;">
+        ${renderChatImagePickerControls(state, PENDING_VIP_DM_UPLOAD_KEY, isComposerDisabled)}
+        <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[PENDING_VIP_DM_UPLOAD_KEY] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." ${isComposerDisabled ? 'disabled' : ''} style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;opacity:${isComposerDisabled ? '0.62' : '1'};">
+        <button type="submit" data-topics-personal-send="1" aria-label="Изпрати" title="Изпрати" ${isComposerDisabled ? 'disabled' : ''} style="height:42px;width:42px;flex:0 0 42px;display:inline-flex;align-items:center;justify-content:center;padding:0;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:16px;font-weight:900;line-height:1;cursor:${isComposerDisabled ? 'default' : 'pointer'};opacity:${isComposerDisabled ? '0.6' : '1'};"><span aria-hidden="true">&#10148;</span></button>
+      </div>
+    </form>
+  `
+}
+
 export function renderTopicsPersonalChatPanel(state: LobbyScreenState): string {
   // Пълната колекция обслужва identity/detail resolution (напр. току-що
   // създаден празен vip_dm от "Лично", преди да е изпратено първо съобщение) —
@@ -5629,7 +5667,7 @@ export function renderTopicsPersonalChatPanel(state: LobbyScreenState): string {
         `}
       </div>
       <div data-topics-personal-detail="1" style="min-width:0;min-height:0;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:linear-gradient(180deg,#111 0%,#050505 100%);overflow:hidden;display:flex;flex-direction:column;">
-        ${activeConversation === null ? `
+        ${activeConversation === null && state.topicsPersonalPendingRecipient !== null ? renderTopicsPersonalPendingComposer(state, state.topicsPersonalPendingRecipient.displayName) : activeConversation === null ? `
           <div style="min-height:260px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.62);font-size:15px;font-weight:800;text-align:center;padding:20px;">
             Избери личен разговор.
           </div>

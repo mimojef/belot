@@ -24,6 +24,7 @@ export type ChatStoreErrorCode =
   | 'blocked'
   | 'conversation_not_found'
   | 'invalid_conversation_kind'
+  | 'message_required'
   | 'recipient_not_found'
   | 'self'
   | 'vip_required'
@@ -93,6 +94,23 @@ export type ChatStore = {
   ) =>
     | { ok: true; friendshipId: string; conversation: ChatConversationSnapshot }
     | { ok: false; message: string; code?: ChatStoreErrorCode }
+  // Атомарен start+send за ПЪРВОТО съобщение на нов (или вече съществуващ)
+  // vip_dm разговор — виж §5 в task spec-а. Единствен path, който може да
+  // СЪЗДАДЕ нов vip_dm ред след fix-а (legacy getOrCreateVipDmConversation
+  // вече не създава без съществуващ conversation).
+  startVipDmConversationWithMessage: (
+    senderProfileId: ProfileId,
+    recipientProfileId: ProfileId,
+    body: string,
+    attachment?: NewChatAttachmentInput | null,
+  ) =>
+    | {
+        ok: true
+        conversation: ChatConversationSnapshot
+        messages: ChatMessageSnapshot[]
+        newMessage: ChatMessageSnapshot
+      }
+    | { ok: false; message: string; code?: ChatStoreErrorCode }
   canSendMessage: (
     profileId: ProfileId,
     friendshipId: string,
@@ -118,6 +136,7 @@ export type ChatStore = {
     | { ok: false; message: string; code?: ChatStoreErrorCode }
   markConversationRead: (profileId: ProfileId, friendshipId: string) => void
   isFirstUnreadMessage: (recipientProfileId: ProfileId, friendshipId: string) => boolean
+  isFirstUnreadMessageAfterInsert: (recipientProfileId: ProfileId, friendshipId: string) => boolean
   getAttachmentForDownload: (
     profileId: ProfileId,
     friendshipId: string,
@@ -811,11 +830,23 @@ export async function createChatStore(
     }
   }
 
-  function getOrCreateVipDmConversation(
+  // Споделена основна проверка/lookup логика за vip_dm start пътищата
+  // (legacy getOrCreateVipDmConversation И атомарния startVipDmConversationWithMessage).
+  // НЕ отваря собствена BEGIN/COMMIT — извикващият управлява транзакционната
+  // граница, за да няма nested SQLite транзакции (SQLite няма истински nested
+  // transactions; вложен BEGIN върху вече отворена транзакция е грешка).
+  //
+  // allowCreate=false (legacy /vip-dm/start без съобщение, виж §3 в task spec-а):
+  // ако разговорът НЕ съществува, НЕ INSERT-ва нов ред — връща
+  // code='message_required', за да спре да pollute-ва DB с празни vip_dm.
+  // allowCreate=true (атомарния start-with-message path): при липса на
+  // съществуващ ред, INSERT-ва нов, вътре в извикващата транзакция.
+  function resolveVipDmFriendshipRow(
     senderProfileId: ProfileId,
     recipientProfileId: ProfileId,
+    allowCreate: boolean,
   ):
-    | { ok: true; friendshipId: string; conversation: ChatConversationSnapshot }
+    | { ok: true; friendship: FriendshipRow }
     | { ok: false; message: string; code?: ChatStoreErrorCode } {
     if (senderProfileId === recipientProfileId) {
       return {
@@ -852,15 +883,15 @@ export async function createChatStore(
     ) as FriendshipRow | undefined
 
     if (existingVipDm !== undefined) {
-      const conversation = createConversationSnapshot(existingVipDm, senderProfileId)
-      if (conversation === null) {
-        return {
-          ok: false,
-          code: 'invalid_conversation_kind',
-          message: 'Разговорът не може да бъде отворен.',
-        }
+      return { ok: true, friendship: existingVipDm }
+    }
+
+    if (!allowCreate) {
+      return {
+        ok: false,
+        code: 'message_required',
+        message: 'Изпрати първо съобщение, за да започнеш този разговор.',
       }
-      return { ok: true, friendshipId: existingVipDm.friendship_id, conversation }
     }
 
     if (vipStatusChecker === null || !vipStatusChecker.isActiveVip(senderProfileId)) {
@@ -879,35 +910,16 @@ export async function createChatStore(
       }
     }
 
-    database.exec('BEGIN IMMEDIATE;')
     try {
-      const vipAfterLock = selectVipDmByPairStatement.get(
+      insertVipDmConversationStatement.run(
+        randomUUID(),
+        senderProfileId,
+        recipientProfileId,
         pair.lowerProfileId,
         pair.higherProfileId,
-      ) as FriendshipRow | undefined
-
-      if (vipAfterLock === undefined) {
-        try {
-          insertVipDmConversationStatement.run(
-            randomUUID(),
-            senderProfileId,
-            recipientProfileId,
-            pair.lowerProfileId,
-            pair.higherProfileId,
-          )
-        } catch {
-          // Another writer may have won the partial unique index race.
-        }
-      }
-
-      database.exec('COMMIT;')
-    } catch (error) {
-      try {
-        database.exec('ROLLBACK;')
-      } catch {
-        // Keep the original error visible.
-      }
-      throw error
+      )
+    } catch {
+      // Another writer may have won the partial unique index race — re-select below.
     }
 
     const friendship = selectVipDmByPairStatement.get(
@@ -923,7 +935,40 @@ export async function createChatStore(
       }
     }
 
-    const conversation = createConversationSnapshot(friendship, senderProfileId)
+    return { ok: true, friendship }
+  }
+
+  // Legacy entry point — вика се от POST /api/chat/vip-dm/start (без
+  // съобщение). От fix-а насам НЕ създава нов празен vip_dm ред (виж §3 в
+  // task spec-а): allowCreate=false, за да предотврати стари/некеширани
+  // клиенти да продължават да pollute-ват DB с празни разговори. Ако
+  // разговорът вече съществува (canonical, с поне 1 съобщение или стар
+  // legacy ред), просто го връща.
+  function getOrCreateVipDmConversation(
+    senderProfileId: ProfileId,
+    recipientProfileId: ProfileId,
+  ):
+    | { ok: true; friendshipId: string; conversation: ChatConversationSnapshot }
+    | { ok: false; message: string; code?: ChatStoreErrorCode } {
+    database.exec('BEGIN IMMEDIATE;')
+    let resolved: ReturnType<typeof resolveVipDmFriendshipRow>
+    try {
+      resolved = resolveVipDmFriendshipRow(senderProfileId, recipientProfileId, false)
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // Keep the original error visible.
+      }
+      throw error
+    }
+
+    if (!resolved.ok) {
+      return resolved
+    }
+
+    const conversation = createConversationSnapshot(resolved.friendship, senderProfileId)
     if (conversation === null) {
       return {
         ok: false,
@@ -934,8 +979,119 @@ export async function createChatStore(
 
     return {
       ok: true,
-      friendshipId: friendship.friendship_id,
+      friendshipId: resolved.friendship.friendship_id,
       conversation,
+    }
+  }
+
+  // Атомарен start+send: get-or-create vip_dm + insert на ПЪРВОТО съобщение
+  // в ЕДНА SQLite транзакция (виж §5 в task spec-а). Ако insert-ът на
+  // съобщението се провали, ROLLBACK анулира и новосъздадения vip_dm ред —
+  // никога не остава persistent conversation без съобщение от този path.
+  // Attachment файлът (ако има) вече е записан на диска ОТ ИЗВИКВАЩИЯ преди
+  // тази функция (виж index.ts handler-а) — тук само DB редовете; при
+  // rollback извикващият трие orphan файла (същия established pattern като
+  // обикновения POST /api/chat/:friendshipId/messages).
+  function startVipDmConversationWithMessage(
+    senderProfileId: ProfileId,
+    recipientProfileId: ProfileId,
+    body: string,
+    attachment: NewChatAttachmentInput | null = null,
+  ):
+    | {
+        ok: true
+        conversation: ChatConversationSnapshot
+        messages: ChatMessageSnapshot[]
+        newMessage: ChatMessageSnapshot
+      }
+    | { ok: false; message: string; code?: ChatStoreErrorCode } {
+    const normalizedBody = normalizeMessageBody(body)
+
+    if (normalizedBody === null) {
+      return {
+        ok: false,
+        message: 'Съобщението трябва да е до 1000 символа.',
+      }
+    }
+
+    if (normalizedBody.length === 0 && attachment === null) {
+      return {
+        ok: false,
+        message: 'Съобщението трябва да съдържа текст или снимка.',
+      }
+    }
+
+    const messageId = randomUUID()
+    let friendshipId: string | undefined
+    let insertedRow: ChatMessageRow | undefined
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const resolved = resolveVipDmFriendshipRow(senderProfileId, recipientProfileId, true)
+
+      if (!resolved.ok) {
+        database.exec('COMMIT;')
+        return resolved
+      }
+
+      friendshipId = resolved.friendship.friendship_id
+
+      insertMessageStatement.run(messageId, friendshipId, senderProfileId, normalizedBody)
+
+      if (attachment !== null) {
+        insertAttachmentStatement.run(
+          messageId,
+          attachment.storageFilename,
+          attachment.width,
+          attachment.height,
+          attachment.byteSize,
+          attachment.contentType,
+        )
+      }
+
+      insertedRow = selectInsertedMessageStatement.get(messageId) as ChatMessageRow | undefined
+      touchFriendshipStatement.run(friendshipId)
+      upsertReadStatement.run(senderProfileId, friendshipId)
+
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // Keep the original write failure visible to the caller.
+      }
+      throw error
+    }
+
+    if (friendshipId === undefined || insertedRow === undefined) {
+      return {
+        ok: false,
+        message: 'Съобщението не беше записано.',
+      }
+    }
+
+    const friendshipRow = selectAcceptedFriendshipStatement.get(
+      friendshipId,
+      senderProfileId,
+      senderProfileId,
+    ) as FriendshipRow | undefined
+    const conversation = friendshipRow !== undefined
+      ? createConversationSnapshot(friendshipRow, senderProfileId)
+      : null
+    const messagesResult = listMessages(senderProfileId, friendshipId)
+
+    if (conversation === null || !messagesResult.ok) {
+      return {
+        ok: false,
+        message: 'Съобщението беше записано, но чатът не се обнови.',
+      }
+    }
+
+    return {
+      ok: true,
+      conversation,
+      messages: messagesResult.messages,
+      newMessage: toMessageSnapshot(insertedRow, senderProfileId),
     }
   }
 
@@ -1193,6 +1349,17 @@ export async function createChatStore(
     return getUnreadCount(recipientProfileId, friendshipId) === 0
   }
 
+  // Огледално на isFirstUnreadMessage, но за извикване СЛЕД insert-а — за
+  // startVipDmConversationWithMessage, където friendshipId не е известен
+  // ПРЕДИ атомарната транзакция (get-or-create се случва вътре в нея), значи
+  // isFirstUnreadMessage (която изисква извикване преди insert) не може да
+  // се приложи директно. Вярно само когато току-що вмъкнатото съобщение е
+  // ЕДИНСТВЕНОТО непрочетено — т.е. или разговорът е чисто нов, или
+  // получателят вече е бил "up to date" преди това съобщение.
+  function isFirstUnreadMessageAfterInsert(recipientProfileId: ProfileId, friendshipId: string): boolean {
+    return getUnreadCount(recipientProfileId, friendshipId) === 1
+  }
+
   // Guard за защитения view/download endpoint (index.ts handleChatAttachmentRequest):
   // изисква профилът да участва в accepted friendship-а (същия стандарт като
   // listMessages/sendMessage) И attachment записът действително да принадлежи
@@ -1264,11 +1431,13 @@ export async function createChatStore(
     listConversations,
     getOrCreatePikaSupportConversation,
     getOrCreateVipDmConversation,
+    startVipDmConversationWithMessage,
     canSendMessage,
     listMessages,
     sendMessage,
     markConversationRead,
     isFirstUnreadMessage,
+    isFirstUnreadMessageAfterInsert,
     getAttachmentForDownload,
     listPendingAttachmentDeletions,
     markAttachmentDeletionDone,

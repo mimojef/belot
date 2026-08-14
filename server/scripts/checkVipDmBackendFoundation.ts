@@ -328,23 +328,23 @@ async function main(): Promise<void> {
       db!.prepare(`DELETE FROM profile_friendships WHERE friendship_id = ?`).run(friendshipId)
     })
 
-    await check('[2] VIP to VIP non-friend start creates vip_dm; repeat returns same row', () => {
+    await check('[2] VIP to VIP non-friend first send creates vip_dm; repeat reuses same row', () => {
       grantVip(alice)
       grantVip(bob)
-      const first = chatStore.getOrCreateVipDmConversation(alice, bob)
+      const first = chatStore.startVipDmConversationWithMessage(alice, bob, 'hello from alice')
       assert(first.ok, 'first start failed')
       if (!first.ok) return
       assertEqual(first.conversation.kind, 'vip_dm', 'conversation kind')
-      const second = chatStore.getOrCreateVipDmConversation(bob, alice)
+      const second = chatStore.startVipDmConversationWithMessage(bob, alice, 'hello from bob')
       assert(second.ok, 'repeat start failed')
       if (!second.ok) return
-      assertEqual(second.friendshipId, first.friendshipId, 'repeat friendshipId')
+      assertEqual(second.conversation.friendshipId, first.conversation.friendshipId, 'repeat friendshipId')
       const row = db!.prepare(`SELECT COUNT(*) AS cnt FROM profile_friendships WHERE kind = 'vip_dm' AND lower_profile_id = ? AND higher_profile_id = ?`)
         .get(createPair(alice, bob).lowerProfileId, createPair(alice, bob).higherProfileId) as { cnt: number }
       assertEqual(row.cnt, 1, 'vip_dm row count')
     })
 
-    await check('[3] friend pair starts a separate vip_dm conversation', () => {
+    await check('[3] friend pair starts a separate vip_dm conversation on first send', () => {
       const request = friendshipStore.sendRequest(carol, dana)
       assert(request.ok, 'friend request failed')
       if (!request.ok) return
@@ -352,10 +352,10 @@ async function main(): Promise<void> {
       assert(accept.ok, 'friend accept failed')
       grantVip(carol)
       grantVip(dana)
-      const started = chatStore.getOrCreateVipDmConversation(carol, dana)
+      const started = chatStore.startVipDmConversationWithMessage(carol, dana, 'vip_dm alongside friend')
       assert(started.ok, 'start on friend pair failed')
       if (!started.ok) return
-      assert(started.friendshipId !== request.friendshipId, 'vip_dm reused friend friendshipId')
+      assert(started.conversation.friendshipId !== request.friendshipId, 'vip_dm reused friend friendshipId')
       assertEqual(started.conversation.kind, 'vip_dm', 'friend pair vip_dm kind')
       const pair = createPair(carol, dana)
       const vipRows = db!.prepare(`SELECT COUNT(*) AS cnt FROM profile_friendships WHERE kind = 'vip_dm' AND lower_profile_id = ? AND higher_profile_id = ?`)
@@ -366,72 +366,75 @@ async function main(): Promise<void> {
       assertEqual(friendRows.cnt, 1, 'friend row count')
     })
 
-    await check('[4] non-VIP sender/recipient, self, and blocked pairs are denied', () => {
-      const nonVipSender = chatStore.getOrCreateVipDmConversation(erin, alice)
+    await check('[4] non-VIP sender/recipient, self, and blocked pairs are denied on the atomic first-send path (no ghost row left behind)', () => {
+      const nonVipSender = chatStore.startVipDmConversationWithMessage(erin, alice, 'no vip yet')
       assert(!nonVipSender.ok && nonVipSender.code === 'vip_required', 'non-VIP sender was not denied with vip_required')
 
       grantVip(erin)
       const frank = registerHuman('vipdm-frank@example.test', 'VipDmFrank')
-      const nonVipRecipient = chatStore.getOrCreateVipDmConversation(erin, frank)
+      const nonVipRecipient = chatStore.startVipDmConversationWithMessage(erin, frank, 'recipient no vip')
       assert(!nonVipRecipient.ok && nonVipRecipient.code === 'vip_counterpart_required', 'non-VIP recipient was not denied')
 
-      const self = chatStore.getOrCreateVipDmConversation(erin, erin)
+      const self = chatStore.startVipDmConversationWithMessage(erin, erin, 'to myself')
       assert(!self.ok && self.code === 'self', 'self start was not denied')
 
       blockStore.toggleBlock(erin, bob)
-      const blocked = chatStore.getOrCreateVipDmConversation(erin, bob)
+      const blocked = chatStore.startVipDmConversationWithMessage(erin, bob, 'blocked attempt')
       assert(!blocked.ok && blocked.code === 'blocked', 'blocked start was not denied')
       blockStore.toggleBlock(erin, bob)
+
+      const deniedPair = createPair(erin, frank)
+      const ghostRows = db!.prepare(`SELECT COUNT(*) AS cnt FROM profile_friendships WHERE kind = 'vip_dm' AND lower_profile_id = ? AND higher_profile_id = ?`)
+        .get(deniedPair.lowerProfileId, deniedPair.higherProfileId) as { cnt: number }
+      assertEqual(ghostRows.cnt, 0, 'denied atomic first-send attempts must not leave ghost vip_dm rows')
     })
 
     await check('[5] vip_dm send requires both active VIP; expiry keeps history/read state', () => {
-      const started = chatStore.getOrCreateVipDmConversation(alice, bob)
+      const started = chatStore.startVipDmConversationWithMessage(alice, bob, 'hello vip')
       assert(started.ok, 'vip_dm missing')
       if (!started.ok) return
-      const sent = chatStore.sendMessage(alice, started.friendshipId, 'hello vip')
-      assert(sent.ok, 'vip_dm send failed while both active')
-      chatStore.markConversationRead(bob, started.friendshipId)
+      const friendshipId = started.conversation.friendshipId
+      chatStore.markConversationRead(bob, friendshipId)
       db!.prepare(`UPDATE vip_status SET active_until = ? WHERE profile_id = ?`).run(futureSqlDate(-1), alice)
-      const expired = chatStore.sendMessage(alice, started.friendshipId, 'after expiry')
+      const expired = chatStore.sendMessage(alice, friendshipId, 'after expiry')
       assert(!expired.ok && expired.code === 'vip_required', 'expired sender was not denied')
-      const history = chatStore.listMessages(alice, started.friendshipId)
+      const history = chatStore.listMessages(alice, friendshipId)
       assert(history.ok, 'history read failed after expiry')
       if (history.ok) assert(history.messages.some((m) => m.body === 'hello vip'), 'history was lost after expiry')
       const readRow = db!.prepare(`SELECT 1 FROM chat_conversation_reads WHERE profile_id = ? AND friendship_id = ?`)
-        .get(bob, started.friendshipId)
+        .get(bob, friendshipId)
       assert(readRow !== undefined, 'read state was lost after expiry')
       grantVip(alice)
-      const renewed = chatStore.sendMessage(alice, started.friendshipId, 'after renew')
+      const renewed = chatStore.sendMessage(alice, friendshipId, 'after renew')
       assert(renewed.ok, 'send did not recover after renew')
     })
 
     await check('[6] block denies send but does not delete vip_dm history or attachments; unblock restores while VIP active', () => {
-      const started = chatStore.getOrCreateVipDmConversation(alice, bob)
-      assert(started.ok, 'vip_dm missing')
-      if (!started.ok) return
-      const withAttachment = chatStore.sendMessage(alice, started.friendshipId, '', {
+      const started = chatStore.startVipDmConversationWithMessage(alice, bob, '', {
         storageFilename: `${randomUUID()}.webp`,
         width: 20,
         height: 20,
         byteSize: 123,
         contentType: 'image/webp',
       })
-      assert(withAttachment.ok, 'attachment message failed')
+      assert(started.ok, 'vip_dm missing')
+      if (!started.ok) return
+      const friendshipId = started.conversation.friendshipId
       blockStore.toggleBlock(bob, alice)
-      const blocked = chatStore.sendMessage(alice, started.friendshipId, 'blocked')
+      const blocked = chatStore.sendMessage(alice, friendshipId, 'blocked')
       assert(!blocked.ok && blocked.code === 'blocked', 'blocked send was not denied')
       const messageRows = db!.prepare(`SELECT COUNT(*) AS cnt FROM friend_chat_messages WHERE friendship_id = ?`)
-        .get(started.friendshipId) as { cnt: number }
+        .get(friendshipId) as { cnt: number }
       assert(messageRows.cnt >= 1, 'messages were deleted by block')
       const attachmentRows = db!.prepare(`
         SELECT COUNT(*) AS cnt
         FROM friend_chat_attachments a
         JOIN friend_chat_messages m ON m.message_id = a.message_id
         WHERE m.friendship_id = ?
-      `).get(started.friendshipId) as { cnt: number }
+      `).get(friendshipId) as { cnt: number }
       assert(attachmentRows.cnt >= 1, 'attachments were deleted by block')
       blockStore.toggleBlock(bob, alice)
-      const restored = chatStore.sendMessage(alice, started.friendshipId, 'unblocked')
+      const restored = chatStore.sendMessage(alice, friendshipId, 'unblocked')
       assert(restored.ok, 'send did not recover after unblock')
     })
 
@@ -469,24 +472,24 @@ async function main(): Promise<void> {
       const vipB = registerHuman('vipdm-matrix-vip-b@example.test', 'MatrixVipB')
       grantVip(vipA)
       grantVip(vipB)
-      const vipDm = chatStore.getOrCreateVipDmConversation(vipA, vipB)
+      const vipDm = chatStore.startVipDmConversationWithMessage(vipA, vipB, 'vip both active')
       assert(vipDm.ok, 'vip_dm matrix start failed')
       if (!vipDm.ok) return
-      assert(chatStore.sendMessage(vipA, vipDm.friendshipId, 'vip both active').ok, 'vip_dm both active send failed')
+      const vipDmFriendshipId = vipDm.conversation.friendshipId
       expireVip(vipA)
-      const inactiveSender = chatStore.sendMessage(vipA, vipDm.friendshipId, 'vip inactive sender')
+      const inactiveSender = chatStore.sendMessage(vipA, vipDmFriendshipId, 'vip inactive sender')
       assert(!inactiveSender.ok && inactiveSender.code === 'vip_required', 'vip_dm inactive sender code mismatch')
       grantVip(vipA)
       expireVip(vipB)
-      const inactiveRecipient = chatStore.sendMessage(vipA, vipDm.friendshipId, 'vip inactive recipient')
+      const inactiveRecipient = chatStore.sendMessage(vipA, vipDmFriendshipId, 'vip inactive recipient')
       assert(!inactiveRecipient.ok && inactiveRecipient.code === 'vip_counterpart_required', 'vip_dm inactive recipient code mismatch')
       grantVip(vipB)
       blockStore.toggleBlock(vipA, vipB)
-      const vipBlockedBySender = chatStore.sendMessage(vipA, vipDm.friendshipId, 'vip blocked sender')
+      const vipBlockedBySender = chatStore.sendMessage(vipA, vipDmFriendshipId, 'vip blocked sender')
       assert(!vipBlockedBySender.ok && vipBlockedBySender.code === 'blocked', 'vip_dm A->B block code mismatch')
       blockStore.toggleBlock(vipA, vipB)
       blockStore.toggleBlock(vipB, vipA)
-      const vipBlockedByRecipient = chatStore.sendMessage(vipA, vipDm.friendshipId, 'vip blocked recipient')
+      const vipBlockedByRecipient = chatStore.sendMessage(vipA, vipDmFriendshipId, 'vip blocked recipient')
       assert(!vipBlockedByRecipient.ok && vipBlockedByRecipient.code === 'blocked', 'vip_dm B->A block code mismatch')
       blockStore.toggleBlock(vipB, vipA)
 
@@ -507,22 +510,21 @@ async function main(): Promise<void> {
       grantVip(erin)
       const frank = registerHuman('vipdm-frank-convert@example.test', 'VipDmFrankConvert')
       grantVip(frank)
-      const vipDm = chatStore.getOrCreateVipDmConversation(erin, frank)
-      assert(vipDm.ok, 'vip_dm creation failed')
-      if (!vipDm.ok) return
-      chatStore.markConversationRead(frank, vipDm.friendshipId)
-      const message = chatStore.sendMessage(erin, vipDm.friendshipId, 'before friendship', {
+      const vipDm = chatStore.startVipDmConversationWithMessage(erin, frank, 'before friendship', {
         storageFilename: `${randomUUID()}.webp`,
         width: 16,
         height: 16,
         byteSize: 99,
         contentType: 'image/webp',
       })
-      assert(message.ok, 'vip_dm message failed')
+      assert(vipDm.ok, 'vip_dm creation failed')
+      if (!vipDm.ok) return
+      const vipDmFriendshipId = vipDm.conversation.friendshipId
+      chatStore.markConversationRead(frank, vipDmFriendshipId)
       const request = friendshipStore.sendRequest(erin, frank)
       assert(request.ok, 'friend request failed after vip_dm')
       if (!request.ok) return
-      assert(request.friendshipId !== vipDm.friendshipId, 'pending friend unexpectedly reused vip_dm id before accept')
+      assert(request.friendshipId !== vipDmFriendshipId, 'pending friend unexpectedly reused vip_dm id before accept')
       const accept = friendshipStore.acceptRequest(frank, request.friendshipId)
       assert(accept.ok, 'friend accept failed')
       const vipRow = db!.prepare(`
@@ -530,7 +532,7 @@ async function main(): Promise<void> {
           higher_profile_id, responded_at
         FROM profile_friendships
         WHERE friendship_id = ?
-      `).get(vipDm.friendshipId) as {
+      `).get(vipDmFriendshipId) as {
         kind: string
         status: string
         requester_profile_id: string
@@ -563,8 +565,8 @@ async function main(): Promise<void> {
       assertEqual(duplicateRows.cnt, 2, 'separate friend+vip_dm pair row count')
       const friendList = friendshipStore.listForProfile(erin)
       assert(friendList.friends.some((friend) => friend.friendshipId === request.friendshipId), 'accepted friend missing from friend list')
-      assert(!friendList.friends.some((friend) => friend.friendshipId === vipDm.friendshipId), 'vip_dm leaked into friend list')
-      const history = chatStore.listMessages(erin, vipDm.friendshipId)
+      assert(!friendList.friends.some((friend) => friend.friendshipId === vipDmFriendshipId), 'vip_dm leaked into friend list')
+      const history = chatStore.listMessages(erin, vipDmFriendshipId)
       assert(history.ok, 'vip_dm history failed')
       if (history.ok) assert(history.messages.some((m) => m.body === 'before friendship'), 'vip_dm messages lost')
       const friendMessage = chatStore.sendMessage(erin, request.friendshipId, 'friend only after accept')
@@ -575,20 +577,20 @@ async function main(): Promise<void> {
         assert(friendHistory.messages.some((m) => m.body === 'friend only after accept'), 'friend message missing from friend history')
         assert(!friendHistory.messages.some((m) => m.body === 'before friendship'), 'vip_dm message leaked into friend history')
       }
-      const vipHistoryAfterFriendMessage = chatStore.listMessages(frank, vipDm.friendshipId)
+      const vipHistoryAfterFriendMessage = chatStore.listMessages(frank, vipDmFriendshipId)
       assert(vipHistoryAfterFriendMessage.ok, 'vip_dm history after friend message failed')
       if (vipHistoryAfterFriendMessage.ok) {
         assert(!vipHistoryAfterFriendMessage.messages.some((m) => m.body === 'friend only after accept'), 'friend message leaked into vip_dm history')
       }
       const readRow = db!.prepare(`SELECT 1 FROM chat_conversation_reads WHERE profile_id = ? AND friendship_id = ?`)
-        .get(frank, vipDm.friendshipId)
+        .get(frank, vipDmFriendshipId)
       assert(readRow !== undefined, 'vip_dm reads lost')
       const attachment = db!.prepare(`
         SELECT 1
         FROM friend_chat_attachments a
         JOIN friend_chat_messages m ON m.message_id = a.message_id
         WHERE m.friendship_id = ?
-      `).get(vipDm.friendshipId)
+      `).get(vipDmFriendshipId)
       assert(attachment !== undefined, 'vip_dm attachments lost')
       const friendAttachment = db!.prepare(`
         SELECT 1
@@ -600,7 +602,7 @@ async function main(): Promise<void> {
       const remove = friendshipStore.removeRelationship(erin, request.friendshipId)
       assert(remove.ok, 'friend removal failed')
       const vipAfterRemove = db!.prepare(`SELECT kind, status FROM profile_friendships WHERE friendship_id = ?`)
-        .get(vipDm.friendshipId) as { kind: string; status: string } | undefined
+        .get(vipDmFriendshipId) as { kind: string; status: string } | undefined
       assert(vipAfterRemove !== undefined, 'friend removal deleted vip_dm')
       assertEqual(vipAfterRemove!.kind, 'vip_dm', 'vip_dm kind after friend removal')
       assertEqual(vipAfterRemove!.status, 'accepted', 'vip_dm status after friend removal')
@@ -635,19 +637,28 @@ async function main(): Promise<void> {
       assert(giftText.includes("AND kind = 'friend'"), 'yellow coin gift friend query lacks kind guard')
     })
 
-    await check('[10] pika_support remains isolated from vip_dm start', () => {
-      const pair = createPair(alice, bob)
+    await check('[10] pika_support remains isolated from vip_dm start/lookup', () => {
+      const isoA = registerHuman('vipdm-iso-a@example.test', 'VipDmIsoA')
+      const isoB = registerHuman('vipdm-iso-b@example.test', 'VipDmIsoB')
+      grantVip(isoA)
+      grantVip(isoB)
+      const pair = createPair(isoA, isoB)
       const supportId = randomUUID()
       db!.prepare(`
         INSERT INTO profile_friendships (
           friendship_id, requester_profile_id, addressee_profile_id,
           lower_profile_id, higher_profile_id, status, kind
         ) VALUES (?, ?, ?, ?, ?, 'accepted', 'pika_support')
-      `).run(supportId, alice, bob, pair.lowerProfileId, pair.higherProfileId)
-      const vip = chatStore.getOrCreateVipDmConversation(alice, bob)
-      assert(vip.ok, 'vip_dm lookup failed')
+      `).run(supportId, isoA, isoB, pair.lowerProfileId, pair.higherProfileId)
+      const created = chatStore.startVipDmConversationWithMessage(isoA, isoB, 'not support')
+      assert(created.ok, 'vip_dm atomic start failed')
+      if (!created.ok) return
+      assert(created.conversation.friendshipId !== supportId, 'vip_dm start returned pika_support row')
+      const vip = chatStore.getOrCreateVipDmConversation(isoA, isoB)
+      assert(vip.ok, 'vip_dm legacy lookup failed')
       if (!vip.ok) return
-      assert(vip.friendshipId !== supportId, 'vip_dm start returned pika_support row')
+      assert(vip.friendshipId !== supportId, 'legacy vip_dm lookup returned pika_support row')
+      assertEqual(vip.friendshipId, created.conversation.friendshipId, 'legacy lookup must resolve the same canonical vip_dm row')
     })
 
     await check('[11] conversation list returns separate friend and vip_dm rows for one pair', () => {
@@ -655,12 +666,11 @@ async function main(): Promise<void> {
       const listB = registerHuman('vipdm-list-b@example.test', 'VipDmListB')
       grantVip(listA)
       grantVip(listB)
-      const vipDm = chatStore.getOrCreateVipDmConversation(listA, listB)
+      const vipDm = chatStore.startVipDmConversationWithMessage(listA, listB, 'list metadata')
       assert(vipDm.ok, 'vip_dm list start failed')
       if (!vipDm.ok) return
-      const sent = chatStore.sendMessage(listA, vipDm.friendshipId, 'list metadata')
-      assert(sent.ok, 'vip_dm list message failed')
-      const beforeRead = chatStore.listConversations(listB).find((conversation) => conversation.friendshipId === vipDm.friendshipId)
+      const vipDmFriendshipId = vipDm.conversation.friendshipId
+      const beforeRead = chatStore.listConversations(listB).find((conversation) => conversation.friendshipId === vipDmFriendshipId)
       assert(beforeRead !== undefined, 'vip_dm conversation missing from list')
       assertEqual(beforeRead!.kind, 'vip_dm', 'vip_dm listed kind')
       assertEqual(beforeRead!.friend.profileId, listA, 'vip_dm listed friend profile')
@@ -680,7 +690,184 @@ async function main(): Promise<void> {
         .filter((conversation) => conversation.friend.profileId === listB && (conversation.kind === 'friend' || conversation.kind === 'vip_dm'))
       assertEqual(afterLegacyDuplicate.length, 2, 'friend+vip_dm pair visible conversation count')
       assert(afterLegacyDuplicate.some((conversation) => conversation.kind === 'friend' && conversation.friendshipId === legacyFriendId), 'friend row missing from list')
-      assert(afterLegacyDuplicate.some((conversation) => conversation.kind === 'vip_dm' && conversation.friendshipId === vipDm.friendshipId), 'vip_dm row missing from list')
+      assert(afterLegacyDuplicate.some((conversation) => conversation.kind === 'vip_dm' && conversation.friendshipId === vipDmFriendshipId), 'vip_dm row missing from list')
+    })
+
+    // ─── Permanent VIP_DM ghost prevention regressions (§15 в task spec-а) ───
+
+    await check('[12] legacy getOrCreateVipDmConversation does NOT insert a new row when none exists (message_required)', () => {
+      const legacyA = registerHuman('vipdm-legacy-a@example.test', 'VipDmLegacyA')
+      const legacyB = registerHuman('vipdm-legacy-b@example.test', 'VipDmLegacyB')
+      grantVip(legacyA)
+      grantVip(legacyB)
+      const pair = createPair(legacyA, legacyB)
+      const before = db!.prepare(`SELECT COUNT(*) AS cnt FROM profile_friendships WHERE kind = 'vip_dm' AND lower_profile_id = ? AND higher_profile_id = ?`)
+        .get(pair.lowerProfileId, pair.higherProfileId) as { cnt: number }
+      assertEqual(before.cnt, 0, 'precondition: no vip_dm row yet')
+      const result = chatStore.getOrCreateVipDmConversation(legacyA, legacyB)
+      assert(!result.ok && result.code === 'message_required', 'legacy start without existing conversation must fail with message_required, not create a row')
+      const after = db!.prepare(`SELECT COUNT(*) AS cnt FROM profile_friendships WHERE kind = 'vip_dm' AND lower_profile_id = ? AND higher_profile_id = ?`)
+        .get(pair.lowerProfileId, pair.higherProfileId) as { cnt: number }
+      assertEqual(after.cnt, 0, 'legacy start must NOT insert a ghost vip_dm row (G)')
+    })
+
+    await check('[13] legacy getOrCreateVipDmConversation still returns an EXISTING vip_dm unchanged (old-client backward compat)', () => {
+      const legacyC = registerHuman('vipdm-legacy-c@example.test', 'VipDmLegacyC')
+      const legacyD = registerHuman('vipdm-legacy-d@example.test', 'VipDmLegacyD')
+      grantVip(legacyC)
+      grantVip(legacyD)
+      const started = chatStore.startVipDmConversationWithMessage(legacyC, legacyD, 'already started')
+      assert(started.ok, 'atomic start failed for precondition')
+      if (!started.ok) return
+      const legacyResult = chatStore.getOrCreateVipDmConversation(legacyD, legacyC)
+      assert(legacyResult.ok, 'legacy start must still return an existing conversation (H)')
+      if (!legacyResult.ok) return
+      assertEqual(legacyResult.friendshipId, started.conversation.friendshipId, 'legacy start must return the SAME canonical friendshipId, not a duplicate')
+      const rowCount = db!.prepare(`SELECT COUNT(*) AS cnt FROM profile_friendships WHERE friendship_id = ?`)
+        .get(started.conversation.friendshipId) as { cnt: number }
+      assertEqual(rowCount.cnt, 1, 'legacy start on existing conversation must not create a duplicate row')
+    })
+
+    await check('[14] atomic startVipDmConversationWithMessage creates exactly 1 vip_dm + 1 message and returns canonical friendshipId (C)', () => {
+      const atomicA = registerHuman('vipdm-atomic-a@example.test', 'VipDmAtomicA')
+      const atomicB = registerHuman('vipdm-atomic-b@example.test', 'VipDmAtomicB')
+      grantVip(atomicA)
+      grantVip(atomicB)
+      const pair = createPair(atomicA, atomicB)
+      const result = chatStore.startVipDmConversationWithMessage(atomicA, atomicB, 'first message ever')
+      assert(result.ok, 'atomic start-with-message failed')
+      if (!result.ok) return
+      assertEqual(result.conversation.kind, 'vip_dm', 'atomic result kind')
+      assert(result.newMessage.body === 'first message ever', 'atomic result newMessage body mismatch')
+      const vipRowCount = db!.prepare(`SELECT COUNT(*) AS cnt FROM profile_friendships WHERE kind = 'vip_dm' AND lower_profile_id = ? AND higher_profile_id = ?`)
+        .get(pair.lowerProfileId, pair.higherProfileId) as { cnt: number }
+      assertEqual(vipRowCount.cnt, 1, 'exactly 1 vip_dm row after atomic first send')
+      const messageCount = db!.prepare(`SELECT COUNT(*) AS cnt FROM friend_chat_messages WHERE friendship_id = ?`)
+        .get(result.conversation.friendshipId) as { cnt: number }
+      assertEqual(messageCount.cnt, 1, 'exactly 1 message row after atomic first send')
+    })
+
+    await check('[15] atomic startVipDmConversationWithMessage rolls back BOTH the vip_dm row and the message on a simulated insert failure (D)', () => {
+      const failA = registerHuman('vipdm-fail-a@example.test', 'VipDmFailA')
+      const failB = registerHuman('vipdm-fail-b@example.test', 'VipDmFailB')
+      grantVip(failA)
+      grantVip(failB)
+      const pair = createPair(failA, failB)
+      let threw = false
+      try {
+        // width=0 violates the friend_chat_attachments CHECK (width > 0) —
+        // fails INSIDE the same transaction as the vip_dm get-or-create,
+        // after the row would have been created, forcing a full ROLLBACK.
+        chatStore.startVipDmConversationWithMessage(failA, failB, '', {
+          storageFilename: `${randomUUID()}.webp`,
+          width: 0,
+          height: 10,
+          byteSize: 100,
+          contentType: 'image/webp',
+        })
+      } catch {
+        threw = true
+      }
+      assert(threw, 'simulated attachment CHECK violation must propagate as a thrown error')
+      const vipRowCount = db!.prepare(`SELECT COUNT(*) AS cnt FROM profile_friendships WHERE kind = 'vip_dm' AND lower_profile_id = ? AND higher_profile_id = ?`)
+        .get(pair.lowerProfileId, pair.higherProfileId) as { cnt: number }
+      assertEqual(vipRowCount.cnt, 0, '0 new vip_dm rows after rolled-back atomic send (D)')
+      const messageCount = db!.prepare(`SELECT COUNT(*) AS cnt FROM friend_chat_messages m JOIN profile_friendships pf ON pf.friendship_id = m.friendship_id WHERE pf.lower_profile_id = ? AND pf.higher_profile_id = ? AND pf.kind = 'vip_dm'`)
+        .get(pair.lowerProfileId, pair.higherProfileId) as { cnt: number }
+      assertEqual(messageCount.cnt, 0, '0 message rows after rolled-back atomic send (D)')
+      // Foreign key integrity must survive the rollback — no orphaned attachment row either.
+      const fkViolations = db!.prepare('PRAGMA foreign_key_check').all()
+      assertEqual(fkViolations.length, 0, 'no FK violations after rolled-back atomic send')
+    })
+
+    await check('[16] atomic startVipDmConversationWithMessage reuses an EXISTING vip_dm instead of creating a duplicate (E)', () => {
+      const existA = registerHuman('vipdm-exist-a@example.test', 'VipDmExistA')
+      const existB = registerHuman('vipdm-exist-b@example.test', 'VipDmExistB')
+      grantVip(existA)
+      grantVip(existB)
+      const first = chatStore.startVipDmConversationWithMessage(existA, existB, 'message one')
+      assert(first.ok, 'first atomic send failed')
+      if (!first.ok) return
+      const second = chatStore.startVipDmConversationWithMessage(existA, existB, 'message two')
+      assert(second.ok, 'second atomic send on existing conversation failed')
+      if (!second.ok) return
+      assertEqual(second.conversation.friendshipId, first.conversation.friendshipId, 'second send must reuse the SAME canonical friendshipId, no duplicate (E)')
+      const pair = createPair(existA, existB)
+      const vipRowCount = db!.prepare(`SELECT COUNT(*) AS cnt FROM profile_friendships WHERE kind = 'vip_dm' AND lower_profile_id = ? AND higher_profile_id = ?`)
+        .get(pair.lowerProfileId, pair.higherProfileId) as { cnt: number }
+      assertEqual(vipRowCount.cnt, 1, 'still exactly 1 vip_dm row after a second first-party send')
+      const messageCount = db!.prepare(`SELECT COUNT(*) AS cnt FROM friend_chat_messages WHERE friendship_id = ?`)
+        .get(first.conversation.friendshipId) as { cnt: number }
+      assertEqual(messageCount.cnt, 2, 'both messages must land in the same conversation')
+    })
+
+    await check('[17] concurrent-style same-pair atomic sends never create two vip_dm rows for one pair (F, partial unique index race safety)', () => {
+      const raceA = registerHuman('vipdm-race-a@example.test', 'VipDmRaceA')
+      const raceB = registerHuman('vipdm-race-b@example.test', 'VipDmRaceB')
+      grantVip(raceA)
+      grantVip(raceB)
+      // SQLite (better-sqlite3/node:sqlite synchronous driver) has no true
+      // concurrent writers within a single process — this test instead
+      // verifies the invariant the partial unique index + BEGIN IMMEDIATE
+      // are designed to guarantee: repeated first-message attempts from
+      // BOTH directions of the same pair (simulating two tabs/two users
+      // racing to message each other first) never produce more than one row.
+      const fromA = chatStore.startVipDmConversationWithMessage(raceA, raceB, 'race from A')
+      const fromB = chatStore.startVipDmConversationWithMessage(raceB, raceA, 'race from B')
+      assert(fromA.ok, 'first racer send failed')
+      assert(fromB.ok, 'second racer send failed')
+      if (!fromA.ok || !fromB.ok) return
+      assertEqual(fromB.conversation.friendshipId, fromA.conversation.friendshipId, 'both directions must resolve to the SAME vip_dm pair (F)')
+      const pair = createPair(raceA, raceB)
+      const vipRowCount = db!.prepare(`SELECT COUNT(*) AS cnt FROM profile_friendships WHERE kind = 'vip_dm' AND lower_profile_id = ? AND higher_profile_id = ?`)
+        .get(pair.lowerProfileId, pair.higherProfileId) as { cnt: number }
+      assertEqual(vipRowCount.cnt, 1, 'exactly one vip_dm pair row must exist regardless of which side sent first (F)')
+    })
+
+    await check('[18] atomic first-message send enforces the same VIP/block/self guards as the legacy start (no bypass)', () => {
+      const guardA = registerHuman('vipdm-guard-a@example.test', 'VipDmGuardA')
+      const guardSelf = chatStore.startVipDmConversationWithMessage(guardA, guardA, 'to myself')
+      assert(!guardSelf.ok && guardSelf.code === 'self', 'atomic self-send must be denied with self code')
+
+      const guardNonVip = registerHuman('vipdm-guard-nonvip@example.test', 'VipDmGuardNonVip')
+      const guardTarget = registerHuman('vipdm-guard-target@example.test', 'VipDmGuardTarget')
+      grantVip(guardTarget)
+      const guardVipRequired = chatStore.startVipDmConversationWithMessage(guardNonVip, guardTarget, 'no vip yet')
+      assert(!guardVipRequired.ok && guardVipRequired.code === 'vip_required', 'atomic send without sender VIP must be denied')
+      const pairNonVip = createPair(guardNonVip, guardTarget)
+      const nonVipRowCount = db!.prepare(`SELECT COUNT(*) AS cnt FROM profile_friendships WHERE kind = 'vip_dm' AND lower_profile_id = ? AND higher_profile_id = ?`)
+        .get(pairNonVip.lowerProfileId, pairNonVip.higherProfileId) as { cnt: number }
+      assertEqual(nonVipRowCount.cnt, 0, 'denied atomic send must not leave a ghost vip_dm row')
+
+      grantVip(guardNonVip)
+      blockStore.toggleBlock(guardNonVip, guardTarget)
+      const guardBlocked = chatStore.startVipDmConversationWithMessage(guardNonVip, guardTarget, 'blocked attempt')
+      assert(!guardBlocked.ok && guardBlocked.code === 'blocked', 'atomic send between blocked profiles must be denied')
+      blockStore.toggleBlock(guardNonVip, guardTarget)
+    })
+
+    await check('[19] atomic first-message send with an attachment succeeds and links exactly 1 attachment row (I)', () => {
+      const attA = registerHuman('vipdm-att-a@example.test', 'VipDmAttA')
+      const attB = registerHuman('vipdm-att-b@example.test', 'VipDmAttB')
+      grantVip(attA)
+      grantVip(attB)
+      const result = chatStore.startVipDmConversationWithMessage(attA, attB, '', {
+        storageFilename: `${randomUUID()}.webp`,
+        width: 32,
+        height: 32,
+        byteSize: 555,
+        contentType: 'image/webp',
+      })
+      assert(result.ok, 'atomic send with attachment failed')
+      if (!result.ok) return
+      assert(result.newMessage.attachment !== null, 'atomic result newMessage missing attachment')
+      const attachmentCount = db!.prepare(`
+        SELECT COUNT(*) AS cnt
+        FROM friend_chat_attachments a
+        JOIN friend_chat_messages m ON m.message_id = a.message_id
+        WHERE m.friendship_id = ?
+      `).get(result.conversation.friendshipId) as { cnt: number }
+      assertEqual(attachmentCount.cnt, 1, 'exactly 1 attachment row linked to the atomic first message')
     })
 
     chatStore.close()

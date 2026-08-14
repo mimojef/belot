@@ -10826,6 +10826,7 @@ async function handleChatRequest(
   const attachmentMatch = /^\/api\/chat\/([^/]+)\/attachments\/([^/]+)$/.exec(pathname)
   const isPikaSupportStart = pathname === '/api/chat/pika-support/start'
   const isVipDmStart = pathname === '/api/chat/vip-dm/start'
+  const isVipDmStartWithMessage = pathname === '/api/chat/vip-dm/start-with-message'
 
   if (
     pathname !== '/api/chat/conversations' &&
@@ -10833,7 +10834,8 @@ async function handleChatRequest(
     readMatch === null &&
     attachmentMatch === null &&
     !isPikaSupportStart &&
-    !isVipDmStart
+    !isVipDmStart &&
+    !isVipDmStartWithMessage
   ) {
     return false
   }
@@ -10943,6 +10945,141 @@ async function handleChatRequest(
       ok: true,
       friendshipId: result.friendshipId,
       conversation: result.conversation,
+    })
+    return true
+  }
+
+  // Атомарен start+send за ПЪРВОТО vip_dm съобщение (виж §4/§5 в task spec-а).
+  // Единственият path, който може да СЪЗДАДЕ нов vip_dm ред след fix-а —
+  // старият /vip-dm/start вече само чете съществуващи разговори.
+  if (isVipDmStartWithMessage && req.method === 'POST') {
+    const body = await readJsonRequestBody(req, MAX_IMAGE_ATTACHMENT_JSON_BYTES)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
+      return true
+    }
+
+    const recipientProfileId = getStringField(body, 'recipientProfileId').trim()
+
+    if (recipientProfileId.length === 0) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Липсва получател.' })
+      return true
+    }
+
+    // Файлът се записва на диска ПРЕДИ DB транзакцията (същия established
+    // pattern като POST /api/chat/:friendshipId/messages) — ако последващият
+    // get-or-create+insert се провали или се rollback-не (напр. VIP guard
+    // отхвърли заявката, или insert-ът хвърли грешка), файлът се трие
+    // веднага, за да не остане orphan нито DB ред без съобщение, нито
+    // attachment файл без DB запис (виж §6 в task spec-а).
+    const imageDataUrlField = body.imageDataUrl
+    let attachmentInput: { storageFilename: string; width: number; height: number; byteSize: number; contentType: string } | null = null
+    let writtenAttachmentFilename: string | null = null
+
+    if (typeof imageDataUrlField === 'string' && imageDataUrlField.trim().length > 0) {
+      const imageBuffer = decodeImageAttachmentDataUrl(imageDataUrlField)
+
+      if (imageBuffer === null) {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          message: 'Поддържат се само JPEG, PNG и WebP снимки до 10 MB.',
+        })
+        return true
+      }
+
+      const processed = await createChatAttachmentWebp(imageBuffer)
+
+      if (processed === null) {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          message: 'Поддържат се само JPEG, PNG и WebP снимки.',
+        })
+        return true
+      }
+
+      const storageFilename = `${randomUUID()}.webp`
+
+      try {
+        await writeWebpAttachmentFile(CHAT_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer)
+        writtenAttachmentFilename = storageFilename
+      } catch {
+        sendJsonResponse(res, 500, {
+          ok: false,
+          message: 'Качването на снимката не бе успешно. Опитайте отново.',
+        })
+        return true
+      }
+
+      attachmentInput = {
+        storageFilename,
+        width: processed.width,
+        height: processed.height,
+        byteSize: processed.buffer.length,
+        contentType: 'image/webp',
+      }
+    }
+
+    let result: ReturnType<typeof chatStore.startVipDmConversationWithMessage>
+
+    try {
+      result = chatStore.startVipDmConversationWithMessage(
+        profileId,
+        recipientProfileId,
+        getStringField(body, 'body'),
+        attachmentInput,
+      )
+    } catch (error) {
+      // DB транзакцията (get-or-create + insert съобщение) се провали ПОСЛЕ
+      // вече записания файл на диска — изтрий го веднага, аналогично на
+      // обикновения send handler по-долу.
+      if (writtenAttachmentFilename !== null) {
+        await deleteChatAttachmentFileByFilename(writtenAttachmentFilename)
+      }
+
+      throw error
+    }
+
+    if (!result.ok) {
+      // Guard грешка (VIP/blocked/self/recipient_not_found) — nested
+      // транзакцията вече е rollback-нала/не е създала нов vip_dm ред
+      // (resolveVipDmFriendshipRow не INSERT-ва при неуспешна проверка), но
+      // файлът на диска трябва да се изтрие изрично тук.
+      if (writtenAttachmentFilename !== null) {
+        await deleteChatAttachmentFileByFilename(writtenAttachmentFilename)
+      }
+
+      sendJsonResponse(res, 403, result)
+      return true
+    }
+
+    const recipientProfileIdForNotification = result.conversation.friend.profileId
+    const newMessageId = result.newMessage.messageId
+
+    if (recipientProfileIdForNotification !== null) {
+      // friendshipId не е известен ПРЕДИ атомарната транзакция (get-or-create
+      // се случва вътре в нея), затова обикновената isFirstUnreadMessage
+      // (изисква извикване преди insert) не важи тук — виж
+      // isFirstUnreadMessageAfterInsert в chatStore.ts.
+      const shouldNotify = chatStore.isFirstUnreadMessageAfterInsert(
+        recipientProfileIdForNotification,
+        result.conversation.friendshipId,
+      )
+      sendChatNotificationToProfile({
+        recipientProfileId: recipientProfileIdForNotification,
+        friendshipId: result.conversation.friendshipId,
+        senderProfileId: profileId,
+        messageId: newMessageId,
+        shouldNotify,
+      })
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      friendshipId: result.conversation.friendshipId,
+      conversation: result.conversation,
+      messages: result.messages,
+      newMessage: result.newMessage,
     })
     return true
   }

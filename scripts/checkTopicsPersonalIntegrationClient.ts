@@ -79,6 +79,7 @@ function createRenderState(overrides: Partial<LobbyScreenState> = {}): LobbyScre
     topicsVipSeePlansMessageVisible: false,
     topicsInfoToast: null,
     topicsPersonalMessagePendingProfileId: null,
+    topicsPersonalPendingRecipient: null,
     topicCreatePopupOpen: false,
     topicCreateBusy: false,
     topicCreateErrorText: null,
@@ -497,7 +498,7 @@ await check('[24] Topics author avatar/name still open profile, while profile po
   assert(controller.includes('const showTopicsPersonalMessageButton = false'), 'Topics profile popup must not expose Personal Message action anymore')
 })
 
-await check('[25] Direct Topics Personal button ignores existing friend and opens existing vip_dm before start', () => {
+await check('[25] Direct Topics Personal button opens existing vip_dm, or pending compose context WITHOUT calling backend (ghost-row prevention)', () => {
   assert(renderLobby.includes('[data-topic-message-personal]'), 'render wiring must listen for direct post-row Personal button')
   assert(controller.includes('async function openTopicsPersonalMessageFromPost'), 'missing direct post-row Personal helper')
   assert(controller.includes('function findTopicsPersonalConversationByProfileId'), 'missing canonical existing-conversation lookup')
@@ -508,42 +509,44 @@ await check('[25] Direct Topics Personal button ignores existing friend and open
   assert(controller.includes('await showTopicsPersonalChat(existingConversation.friendshipId)'), 'existing conversation must open exact canonical friendshipId')
   assert(controller.includes('state.topicsVipGate !== null && !state.topicsVipGate.isActive'), 'known inactive viewer VIP state must short-circuit only after existing lookup')
   assert(controller.includes('openTopicsVipPopup()'), 'known inactive viewer VIP state must open canonical Topics VIP popup')
-  assert(controller.includes('if (!options.onVipDmChatStart)'), 'new vip_dm start must be behind backend start option')
+  assert(controller.includes('if (!options.onVipDmFirstMessageSend)'), 'pending compose context must be behind the atomic first-message send option')
+  assert(!controller.includes('options.onVipDmChatStart'), 'legacy create-only vip-dm/start option must no longer be wired from the click handler (ghost-row prevention)')
+  assert(controller.includes('state.topicsPersonalPendingRecipient = { profileId: recipientProfileId, displayName: recipientDisplayName }'), 'no-existing-conversation path must open a pending compose context, not call backend')
   const refreshIndex = controller.indexOf('await loadChatConversations()')
   const existingIndex = controller.indexOf('const existingConversation = findTopicsPersonalConversationByProfileId(recipientProfileId)')
   const inactiveVipIndex = controller.indexOf('state.topicsVipGate !== null && !state.topicsVipGate.isActive')
-  const startIndex = controller.indexOf('const result = await options.onVipDmChatStart(recipientProfileId)')
-  assert(refreshIndex !== -1 && existingIndex !== -1 && startIndex !== -1 && refreshIndex < existingIndex && existingIndex < startIndex, 'existing vip_dm lookup must happen before vip-dm/start')
-  assert(inactiveVipIndex !== -1 && existingIndex < inactiveVipIndex && inactiveVipIndex < startIndex, 'known inactive viewer VIP short-circuit must happen after existing lookup and before vip-dm/start')
+  const pendingIndex = controller.indexOf('state.topicsPersonalPendingRecipient = { profileId: recipientProfileId, displayName: recipientDisplayName }')
+  assert(refreshIndex !== -1 && existingIndex !== -1 && pendingIndex !== -1 && refreshIndex < existingIndex && existingIndex < pendingIndex, 'existing vip_dm lookup must happen before opening the pending compose context')
+  assert(inactiveVipIndex !== -1 && existingIndex < inactiveVipIndex && inactiveVipIndex < pendingIndex, 'known inactive viewer VIP short-circuit must happen after existing lookup and before pending compose context')
 })
 
-await check('[26] New direct VIP DM start uses backend canonical conversation and prevents duplicate rows', () => {
-  assert(mainSource.includes("/api/chat/vip-dm/start"), 'main client must call the canonical vip-dm/start endpoint')
-  assert(mainSource.includes('body: JSON.stringify({ recipientProfileId })'), 'vip-dm/start must send recipientProfileId body')
-  assert(controller.includes('mergeCanonicalChatConversation(result.conversation)'), 'successful start must merge returned canonical conversation')
+await check('[26] First vip_dm SEND uses the atomic start-with-message endpoint and merges the canonical result (no pre-send backend row)', () => {
+  assert(mainSource.includes("/api/chat/vip-dm/start-with-message"), 'main client must call the atomic start-with-message endpoint for the first message')
+  assert(!mainSource.includes("fetch(`${getApiBaseUrl()}/api/chat/vip-dm/start`"), 'main client must no longer call the legacy create-only vip-dm/start endpoint')
+  assert(controller.includes('async function sendVipDmFirstMessage'), 'missing atomic first-message send helper')
+  assert(controller.includes('mergeCanonicalChatConversation(result.conversation)'), 'successful send must merge returned canonical conversation')
   assert(controller.includes('state.chatConversations.filter((c) => c.friendshipId !== conversation.friendshipId)'), 'merge must dedupe by canonical friendshipId')
-  assert(controller.includes('!state.chatConversations.some((conversation) => conversation.friendshipId === result.conversation.friendshipId)'), 'fresh canonical conversations must not be overwritten by stale start response')
-  assert(controller.includes('await showTopicsPersonalChat(result.conversation.friendshipId)'), 'successful start must open returned canonical friendshipId')
+  assert(controller.includes('!state.chatConversations.some((conversation) => conversation.friendshipId === result.conversation.friendshipId)'), 'fresh canonical conversations must not be overwritten by stale response')
+  assert(controller.includes('await showTopicsPersonalChat(result.conversation.friendshipId)'), 'successful send must open returned canonical friendshipId')
   assert(renderLobby.includes('activeConversation.friend.isVip === false'), 'counterpart VIP disabled state must require canonical false, not unknown/missing')
 })
 
-await check('[27] Direct Topics Personal block/VIP failures use safe Bulgarian UX', () => {
+await check('[27] Direct Topics Personal block/VIP failures use safe Bulgarian UX (atomic first-message path)', () => {
   assert(controller.includes('async function authorizeTopicsPersonalMessageTarget'), 'direct action must preflight protected profile authorization')
   assert(controller.includes('state.profileAccessBlockPopup = { profileId: recipientProfileId, code: result.code }'), 'blocked-by-viewer/target must render exact block popup')
   assert(mainSource.includes("case 'vip_required':"), 'vip_required must be mapped')
   assert(mainSource.includes('Личните съобщения към потребители извън приятелите са достъпни само за VIP.'), 'viewer VIP-required Bulgarian UX missing')
-  assert(controller.includes("if (result.code === 'vip_required')"), 'new direct vip_required start must have dedicated Topics VIP gate branch')
-  assert(controller.includes('openTopicsVipPopup()'), 'new direct vip_required start must reuse canonical Topics VIP popup')
-  assert(controller.includes('void refreshTopicsVipGateStatus()'), 'new direct vip_required start must refresh canonical VIP gate state')
+  assert(controller.includes("if (result.code === 'vip_required')"), 'first-message vip_required must have a dedicated Topics VIP gate branch')
+  assert(controller.includes('openTopicsVipPopup()'), 'first-message vip_required must reuse canonical Topics VIP popup')
+  assert(controller.includes('void refreshTopicsVipGateStatus()'), 'first-message vip_required must refresh canonical VIP gate state')
   assert(mainSource.includes("case 'vip_counterpart_required':"), 'vip_counterpart_required must be mapped')
   assert(mainSource.includes('Този потребител в момента не е активен VIP.'), 'counterpart inactive Bulgarian UX missing')
   assert(mainSource.includes("case 'blocked':"), 'blocked must be mapped')
-  assert(mainSource.includes('code: data.code'), 'vip-dm/start code must be preserved for direct block popup mapping')
-  assert(controller.includes('state.topicsInfoToast = { text: result.message }'), 'VIP failures must show Bulgarian UX in Topics without profile popup')
-  const vipRequiredIndex = controller.indexOf("if (result.code === 'vip_required')")
+  assert(mainSource.includes("case 'message_required':"), 'legacy no-op start must map message_required to safe Bulgarian UX')
+  assert(controller.includes('state.chatErrorText = result.message'), 'first-message failures must surface Bulgarian UX inline in the composer, without losing the pending context')
+  const vipRequiredIndex = controller.indexOf("if (result.code === 'vip_required')", controller.indexOf('async function sendVipDmFirstMessage'))
   const vipPopupIndex = controller.indexOf('openTopicsVipPopup()', vipRequiredIndex)
-  const toastIndex = controller.indexOf('state.topicsInfoToast = { text: result.message }', vipRequiredIndex)
-  assert(vipRequiredIndex !== -1 && vipPopupIndex !== -1 && toastIndex !== -1 && vipRequiredIndex < vipPopupIndex && vipPopupIndex < toastIndex, 'vip_required must open VIP popup before generic transient toast branch')
+  assert(vipRequiredIndex !== -1 && vipPopupIndex !== -1 && vipRequiredIndex < vipPopupIndex, 'vip_required must open VIP popup from the first-message send path')
 })
 
 await check('[28] Direct Personal button layout is mobile/desktop overflow-safe', () => {
@@ -573,7 +576,7 @@ await check('[29] Direct Personal click is one-flight guarded and survives reren
   assert(listenerOccurrences === 1, 'direct Personal listener must be wired once per render')
 })
 
-await check('[30] Failed new Direct Personal start does not leave Personal detail/composer state sticky', () => {
+await check('[30] Failed new Direct Personal start does not leave Personal detail/composer state sticky, and pending vip_dm context clears on close (ghost-row prevention)', () => {
   assert(controller.includes('function clearTopicsPersonalTransientState'), 'missing Topics Personal transient cleanup helper')
   assert(controller.includes('state.chatErrorText = null'), 'cleanup must clear chat error text')
   assert(controller.includes('state.chatLoading = false'), 'cleanup must clear chat loading state')
@@ -581,6 +584,11 @@ await check('[30] Failed new Direct Personal start does not leave Personal detai
   assert(controller.includes('state.topicsInfoToast = null'), 'returning to Topics stream must clear stale transient inline toast')
   assert(controller.includes("state.topicsMode = 'topics'"), 'cleanup must run on Topics stream/list return paths')
   assert(controller.includes("state.topicsPersonalView = 'list'"), 'returning to Topics must leave Personal detail view')
+  assert(controller.includes('function clearPendingVipDmComposeContext'), 'missing pending vip_dm compose context cleanup helper')
+  assert(controller.includes('clearTopicsPersonalTransientState'.concat('')) && controller.slice(controller.indexOf('function clearTopicsPersonalTransientState'), controller.indexOf('function clearTopicsPersonalTransientState') + 400).includes('clearPendingVipDmComposeContext()'), 'closing Topics Personal entirely must also clear any pending vip_dm compose context')
+  assert(controller.includes('function backToTopicsPersonalList'), 'missing detail-to-list back helper')
+  const backFnSource = controller.slice(controller.indexOf('function backToTopicsPersonalList'), controller.indexOf('function backToTopicsPersonalList') + 300)
+  assert(backFnSource.includes('clearPendingVipDmComposeContext()'), 'Back button from a pending (unsent) vip_dm compose context must clear it — no persistent row, no stuck pending state (§7/§15.A/D)')
 })
 
 await check('[31] Thread root header and thread replies move Personal/edit controls into the shared meta row without duplicating them', () => {

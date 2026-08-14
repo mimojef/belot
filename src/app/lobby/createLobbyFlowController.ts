@@ -409,9 +409,12 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; friendshipId: string }
     | { ok: false; message: string }
   >
-  onVipDmChatStart?: (recipientProfileId: string) => Promise<
-    | { ok: true; conversation: ChatConversationSnapshot }
-    | { ok: false; message: string; code?: 'blocked' | 'vip_required' | 'vip_counterpart_required' | 'self' | 'recipient_not_found' | 'conversation_not_found' | 'invalid_conversation_kind' }
+  // Атомарен start+send за ПЪРВОТО vip_dm съобщение (виж §4/§9 в task
+  // spec-а) — заменя старото onVipDmChatStart (create-only, без съобщение),
+  // за да не се създава vip_dm ред без изпратено съобщение.
+  onVipDmFirstMessageSend?: (recipientProfileId: string, body: string, imageDataUrl: string | null) => Promise<
+    | { ok: true; conversation: ChatConversationSnapshot; messages: ChatMessageSnapshot[]; newMessage?: ChatMessageSnapshot }
+    | { ok: false; message: string; code?: 'blocked' | 'vip_required' | 'vip_counterpart_required' | 'self' | 'recipient_not_found' | 'conversation_not_found' | 'invalid_conversation_kind' | 'message_required' }
   >
   onChatConversationsLoad?: (includeArchived?: boolean) => Promise<
     | { ok: true; conversations: ChatConversationSnapshot[] }
@@ -939,6 +942,13 @@ type InternalLobbyFlowState = {
   /** UI polish pass — кратък "ще бъде налично скоро" toast за create-topic/like/reply (все още неимплементирани), огледално на subadminActionToast моделa. */
   topicsInfoToast: { text: string } | null
   topicsPersonalMessagePendingProfileId: string | null
+  // Pending compose context за нов vip_dm БЕЗ persistent friendshipId —
+  // виж §7 в task spec-а. Click на "Лично" вече НЕ вика backend веднага;
+  // вместо това отваря detail/composer с recipient в този state. Само
+  // първият успешен SEND (startVipDmFirstMessage) създава реален
+  // friendshipId атомарно заедно със самото съобщение. Back/close просто
+  // нулира това поле — 0 backend write, 0 DB row.
+  topicsPersonalPendingRecipient: { profileId: string; displayName: string } | null
 
   // ─── Create Topic popup (Custom Topic Creation) ─────────────────────────
   /** Mirror на tournamentCreatePopupOpen lifecycle-а. */
@@ -1329,6 +1339,10 @@ type InternalLobbyFlowState = {
 
 const DEFAULT_REQUIRED_PLAYERS = 4
 const DEFAULT_COUNTDOWN_MS = 20000
+// Синтетичен ключ за chatUploadingFriendshipIds/chatDraftByFriendshipId,
+// докато pending vip_dm compose context (§7 в task spec-а) все още няма
+// реален friendshipId — не може да се сблъска с истински UUID friendshipId.
+const PENDING_VIP_DM_UPLOAD_KEY = '__pending_vip_dm__'
 const LOBBY_CHAT_CLIENT_MAX_MESSAGES = 80
 const GUEST_TRIAL_MAX_GAMES = 3
 export const GUEST_TRIAL_STAKE: MatchStake = 5000
@@ -1414,6 +1428,7 @@ function createInitialState(): InternalLobbyFlowState {
     topicsVipSeePlansMessageVisible: false,
     topicsInfoToast: null,
     topicsPersonalMessagePendingProfileId: null,
+    topicsPersonalPendingRecipient: null,
     topicCreatePopupOpen: false,
     topicCreateBusy: false,
     topicCreateErrorText: null,
@@ -3320,6 +3335,7 @@ export function createLobbyFlowController(
       topicsVipSeePlansMessageVisible: state.topicsVipSeePlansMessageVisible,
       topicsInfoToast: state.topicsInfoToast,
       topicsPersonalMessagePendingProfileId: state.topicsPersonalMessagePendingProfileId,
+      topicsPersonalPendingRecipient: state.topicsPersonalPendingRecipient,
       topicCreatePopupOpen: state.topicCreatePopupOpen,
       topicCreateBusy: state.topicCreateBusy,
       topicCreateErrorText: state.topicCreateErrorText,
@@ -3739,8 +3755,8 @@ export function createLobbyFlowController(
       onTopicMessageAuthorClick: (profileId, displayName) => {
         void openProtectedProfileById(profileId, displayName, 'topics')
       },
-      onTopicMessagePersonalClick: (profileId) => {
-        void openTopicsPersonalMessageFromPost(profileId)
+      onTopicMessagePersonalClick: (profileId, displayName) => {
+        void openTopicsPersonalMessageFromPost(profileId, displayName)
       },
       onTournamentHowItWorksOpen: () => {
         showTournamentHowItWorksPage()
@@ -6354,6 +6370,16 @@ export function createLobbyFlowController(
     state.chatLoading = false
     state.chatMessagesLoading = false
     state.topicsPersonalMessagePendingProfileId = null
+    clearPendingVipDmComposeContext()
+  }
+
+  // Back/close без SEND (§7/§8/§9/§15.A-D в task spec-а): само локален
+  // state reset — 0 backend write, никакъв vip_dm ред е бил създаден, защото
+  // create+send стават атомарно едва при действителен SEND.
+  function clearPendingVipDmComposeContext(): void {
+    state.topicsPersonalPendingRecipient = null
+    state.chatDraftByFriendshipId = { ...state.chatDraftByFriendshipId, [PENDING_VIP_DM_UPLOAD_KEY]: '' }
+    clearChatPendingImage(PENDING_VIP_DM_UPLOAD_KEY)
   }
 
   function closeTopicsVipPopup(): void {
@@ -8943,7 +8969,12 @@ export function createLobbyFlowController(
     return false
   }
 
-  async function openTopicsPersonalMessageFromPost(recipientProfileId: string): Promise<void> {
+  // Click "Лично" вече НЕ вика backend create веднага (виж §2/§7 в task
+  // spec-а — предотвратява empty vip_dm ghost rows). Ако вече има canonical
+  // conversation, отваря го. Ако не — само отваря pending compose context
+  // (без friendshipId, без backend write); реалният vip_dm ред се създава
+  // атомарно едва при първия успешен SEND, виж startVipDmFirstMessage.
+  async function openTopicsPersonalMessageFromPost(recipientProfileId: string, recipientDisplayName: string): Promise<void> {
     if (recipientProfileId.trim().length === 0) return
     const authSession = options.getAuthSession?.() ?? null
     if (authSession?.profile.profileId === recipientProfileId) return
@@ -8975,51 +9006,96 @@ export function createLobbyFlowController(
         return
       }
 
-      if (!options.onVipDmChatStart) {
+      if (!options.onVipDmFirstMessageSend) {
         state.topicsInfoToast = { text: 'Личните съобщения временно не са налични.' }
         render()
         return
       }
 
-      const result = await options.onVipDmChatStart(recipientProfileId)
-
-      if (!result.ok) {
-        if (result.code === 'vip_required') {
-          if (state.topicsVipGate) {
-            state.topicsVipGate = { ...state.topicsVipGate, isActive: false }
-          }
-          void refreshTopicsVipGateStatus()
-          openTopicsVipPopup()
-          return
-        }
-        if (result.code === 'blocked') {
-          const blockAuthorization = await options.onProfileByIdLoad?.(recipientProfileId)
-          if (blockAuthorization && !blockAuthorization.ok && (blockAuthorization.code === 'profile_blocked_by_viewer' || blockAuthorization.code === 'profile_blocked_viewer')) {
-            state.profileAccessBlockPopup = { profileId: recipientProfileId, code: blockAuthorization.code }
-            render()
-            return
-          }
-        }
-        state.topicsInfoToast = { text: result.message }
-        render()
-        return
-      }
-
-      mergeCanonicalChatConversation(result.conversation)
-      await loadChatConversations()
-      if (!state.chatConversations.some((conversation) => conversation.friendshipId === result.conversation.friendshipId)) {
-        mergeCanonicalChatConversation(result.conversation)
-      }
-
+      // Няма съществуващ разговор — отваряме pending compose context.
+      // Server-side проверките (VIP/block/self) се преповтарят authoritative
+      // при действителния send (startVipDmFirstMessage), тук е само UX preview.
+      state.currentScreen = 'topics'
+      state.topicsMode = 'personal'
+      state.topicsPersonalView = 'conversation'
+      state.topicsPersonalPendingRecipient = { profileId: recipientProfileId, displayName: recipientDisplayName }
+      state.activeChatFriendshipId = null
+      state.chatMessages = []
+      state.chatMessagesFriendshipId = null
+      state.chatErrorText = null
       state.profilePopupOpen = false
       state.profilePopupProfile = null
       state.profilePopupContext = 'other'
       syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
-      await showTopicsPersonalChat(result.conversation.friendshipId)
+      render()
     } finally {
       state.topicsPersonalMessagePendingProfileId = null
       render()
     }
+  }
+
+  // Изпраща ПЪРВОТО съобщение на pending compose context — атомарно създава
+  // vip_dm + съобщение в 1 server request (виж §4/§5/§9 в task spec-а).
+  // Back/close без SEND никога не вика тази функция, значи 0 backend write.
+  async function sendVipDmFirstMessage(body: string, imageDataUrl: string | null): Promise<void> {
+    const pendingRecipient = state.topicsPersonalPendingRecipient
+
+    if (pendingRecipient === null) return
+    if (!options.onVipDmFirstMessageSend) {
+      state.chatErrorText = 'Личните съобщения временно не са налични.'
+      render()
+      return
+    }
+    if (state.chatUploadingFriendshipIds.has(PENDING_VIP_DM_UPLOAD_KEY)) return
+    if (body.trim().length === 0 && imageDataUrl === null) return
+
+    state.chatUploadingFriendshipIds = new Set(state.chatUploadingFriendshipIds).add(PENDING_VIP_DM_UPLOAD_KEY)
+    state.chatErrorText = null
+    render()
+
+    const result = await options.onVipDmFirstMessageSend(pendingRecipient.profileId, body, imageDataUrl)
+
+    const nextUploading = new Set(state.chatUploadingFriendshipIds)
+    nextUploading.delete(PENDING_VIP_DM_UPLOAD_KEY)
+    state.chatUploadingFriendshipIds = nextUploading
+
+    // Pending context е бил изоставен (Back/close) междувременно — не
+    // прилагай отговор върху вече неактуален UI state.
+    if (state.topicsPersonalPendingRecipient?.profileId !== pendingRecipient.profileId) {
+      return
+    }
+
+    if (!result.ok) {
+      if (result.code === 'vip_required') {
+        if (state.topicsVipGate) {
+          state.topicsVipGate = { ...state.topicsVipGate, isActive: false }
+        }
+        void refreshTopicsVipGateStatus()
+        openTopicsVipPopup()
+        return
+      }
+      if (result.code === 'blocked') {
+        const blockAuthorization = await options.onProfileByIdLoad?.(pendingRecipient.profileId)
+        if (blockAuthorization && !blockAuthorization.ok && (blockAuthorization.code === 'profile_blocked_by_viewer' || blockAuthorization.code === 'profile_blocked_viewer')) {
+          state.profileAccessBlockPopup = { profileId: pendingRecipient.profileId, code: blockAuthorization.code }
+          render()
+          return
+        }
+      }
+      // Draft/снимка НЕ се пипат при неуспех — established UX (виж sendChatMessage) — потребителят може да retry-не.
+      state.chatErrorText = result.message
+      render()
+      return
+    }
+
+    mergeCanonicalChatConversation(result.conversation)
+    await loadChatConversations()
+    if (!state.chatConversations.some((conversation) => conversation.friendshipId === result.conversation.friendshipId)) {
+      mergeCanonicalChatConversation(result.conversation)
+    }
+
+    clearPendingVipDmComposeContext()
+    await showTopicsPersonalChat(result.conversation.friendshipId)
   }
 
   async function submitGiftCoins(
@@ -9200,6 +9276,7 @@ export function createLobbyFlowController(
   function backToTopicsPersonalList(): void {
     if (state.currentScreen !== 'topics' || state.topicsMode !== 'personal') return
     state.topicsPersonalView = 'list'
+    clearPendingVipDmComposeContext()
     render()
   }
 
@@ -9662,6 +9739,24 @@ export function createLobbyFlowController(
     friendshipId: string,
     body: string,
   ): Promise<void> {
+    // Pending vip_dm compose context (§7/§9 в task spec-а) — още няма
+    // персистиран friendshipId, delegира на атомарния start+send path.
+    if (friendshipId === PENDING_VIP_DM_UPLOAD_KEY) {
+      const pendingImage = state.chatPendingImageByFriendshipId[PENDING_VIP_DM_UPLOAD_KEY] ?? null
+      let imageDataUrl: string | null = null
+      if (pendingImage !== null) {
+        try {
+          imageDataUrl = await readFileAsDataUrl(pendingImage.file)
+        } catch {
+          state.chatErrorText = 'Качването на снимката не бе успешно. Опитайте отново.'
+          render()
+          return
+        }
+      }
+      await sendVipDmFirstMessage(body, imageDataUrl)
+      return
+    }
+
     if (!options.onChatSend) {
       state.chatErrorText = 'Чатът временно не е наличен.'
       render()

@@ -296,7 +296,13 @@ async function main(): Promise<void> {
     assert(joinIndex > secondDirectionIndex, 'private-room block guard is not before joinRoom')
   })
 
-  await check('[4] POST vip-dm/start concurrent same/reverse directions and friend-accept race converge canonically', async () => {
+  // Забележка (ghost-row prevention fix): POST /api/chat/vip-dm/start вече
+  // НЕ създава нов ред без съществуващ разговор (връща 403 message_required)
+  // — единственият create path е атомарният POST
+  // /api/chat/vip-dm/start-with-message (get-or-create + insert message в
+  // 1 транзакция). Тестът долу упражнява concurrent create races върху
+  // start-with-message, и отделно проверява, че легacy start НЕ INSERT-ва.
+  await check('[4] POST vip-dm/start-with-message concurrent same/reverse directions and friend-accept race converge canonically; legacy start never inserts', async () => {
     const isolated = await createIsolatedServerRoot()
     const port = await getFreePort()
     const databasePath = join(isolated.serverDir, 'database', 'data', 'belot-v2.sqlite')
@@ -311,22 +317,36 @@ async function main(): Promise<void> {
       grantVip(databasePath, a.profileId)
       grantVip(databasePath, b.profileId)
 
+      // Legacy no-op start BEFORE any message exists: must NOT insert (G).
+      const legacyBeforeSend = await requestJson(port, 'POST', '/api/chat/vip-dm/start', a.cookie, { recipientProfileId: b.profileId })
+      assert(legacyBeforeSend.status === 403, `legacy start before any message must be 403, got ${legacyBeforeSend.status}`)
+      assert(legacyBeforeSend.body.code === 'message_required', `legacy start before any message must return message_required, got ${legacyBeforeSend.body.code}`)
+      const rowsBeforeSend = getConversationRows(databasePath, a.profileId, b.profileId)
+      assert(rowsBeforeSend.length === 0, `legacy start must not insert a ghost row, rows=${JSON.stringify(rowsBeforeSend)}`)
+
       const [sameOne, sameTwo] = await Promise.all([
-        requestJson(port, 'POST', '/api/chat/vip-dm/start', a.cookie, { recipientProfileId: b.profileId }),
-        requestJson(port, 'POST', '/api/chat/vip-dm/start', a.cookie, { recipientProfileId: b.profileId }),
+        requestJson(port, 'POST', '/api/chat/vip-dm/start-with-message', a.cookie, { recipientProfileId: b.profileId, body: 'same direction one' }),
+        requestJson(port, 'POST', '/api/chat/vip-dm/start-with-message', a.cookie, { recipientProfileId: b.profileId, body: 'same direction two' }),
       ])
       assert(sameOne.status === 200 && sameTwo.status === 200, `same-direction start statuses ${sameOne.status}/${sameTwo.status}`)
       assert(sameOne.body.friendshipId === sameTwo.body.friendshipId, 'same-direction concurrent starts returned different friendshipIds')
       const sameRows = getConversationRows(databasePath, a.profileId, b.profileId)
       assert(sameRows.length === 1 && sameRows[0]!.kind === 'vip_dm', `same-direction rows=${JSON.stringify(sameRows)}`)
 
+      // Legacy start AFTER a message exists must now resolve the SAME canonical row (H).
+      const legacyAfterSend = await requestJson(port, 'POST', '/api/chat/vip-dm/start', b.cookie, { recipientProfileId: a.profileId })
+      assert(legacyAfterSend.status === 200, `legacy start after existing conversation must succeed, got ${legacyAfterSend.status}`)
+      assert(legacyAfterSend.body.friendshipId === sameOne.body.friendshipId, 'legacy start after existing conversation must return the same canonical friendshipId')
+      const rowsAfterLegacy = getConversationRows(databasePath, a.profileId, b.profileId)
+      assert(rowsAfterLegacy.length === 1, `legacy start on existing conversation must not create a duplicate, rows=${JSON.stringify(rowsAfterLegacy)}`)
+
       const c = await register(port, `concurrent-c-${Date.now()}@example.test`, 'ConcurrentC')
       const d = await register(port, `concurrent-d-${Date.now()}@example.test`, 'ConcurrentD')
       grantVip(databasePath, c.profileId)
       grantVip(databasePath, d.profileId)
       const [reverseOne, reverseTwo] = await Promise.all([
-        requestJson(port, 'POST', '/api/chat/vip-dm/start', c.cookie, { recipientProfileId: d.profileId }),
-        requestJson(port, 'POST', '/api/chat/vip-dm/start', d.cookie, { recipientProfileId: c.profileId }),
+        requestJson(port, 'POST', '/api/chat/vip-dm/start-with-message', c.cookie, { recipientProfileId: d.profileId, body: 'reverse one' }),
+        requestJson(port, 'POST', '/api/chat/vip-dm/start-with-message', d.cookie, { recipientProfileId: c.profileId, body: 'reverse two' }),
       ])
       assert(reverseOne.status === 200 && reverseTwo.status === 200, `reverse start statuses ${reverseOne.status}/${reverseTwo.status}`)
       assert(reverseOne.body.friendshipId === reverseTwo.body.friendshipId, 'reverse concurrent starts returned different friendshipIds')
@@ -344,7 +364,7 @@ async function main(): Promise<void> {
       assert(typeof pendingFriendshipId === 'string', 'pending friendshipId missing')
 
       const [startDuringAccept, acceptDuringStart] = await Promise.all([
-        requestJson(port, 'POST', '/api/chat/vip-dm/start', e.cookie, { recipientProfileId: f.profileId }),
+        requestJson(port, 'POST', '/api/chat/vip-dm/start-with-message', e.cookie, { recipientProfileId: f.profileId, body: 'race message' }),
         requestJson(port, 'POST', `/api/friends/${encodeURIComponent(pendingFriendshipId!)}/accept`, f.cookie),
       ])
       assert(startDuringAccept.status === 200, `vip_dm start during accept status=${startDuringAccept.status}`)
@@ -356,14 +376,14 @@ async function main(): Promise<void> {
       assert(raceFriend !== undefined && raceFriend.status === 'accepted', `race friend row missing/not accepted: ${JSON.stringify(raceRows)}`)
       assert(raceVipDm !== undefined && raceVipDm.status === 'accepted', `race vip_dm row missing/not accepted: ${JSON.stringify(raceRows)}`)
       assert(raceFriend!.friendship_id !== raceVipDm!.friendship_id, 'race friend and vip_dm reused the same friendshipId')
-      assert(startDuringAccept.body.friendshipId === raceVipDm!.friendship_id, 'race vip-dm/start did not return vip_dm row')
+      assert(startDuringAccept.body.friendshipId === raceVipDm!.friendship_id, 'race vip-dm/start-with-message did not return vip_dm row')
       const startAfterFriend = await requestJson(port, 'POST', '/api/chat/vip-dm/start', f.cookie, { recipientProfileId: e.profileId })
-      assert(startAfterFriend.status === 200, `start after accepted friend status=${startAfterFriend.status}`)
-      assert(startAfterFriend.body.friendshipId === raceVipDm!.friendship_id, 'start after accepted friend did not return canonical vip_dm row')
+      assert(startAfterFriend.status === 200, `legacy start after accepted friend+existing vip_dm status=${startAfterFriend.status}`)
+      assert(startAfterFriend.body.friendshipId === raceVipDm!.friendship_id, 'legacy start after accepted friend did not return canonical vip_dm row')
       const raceRowsAfter = getConversationRows(databasePath, e.profileId, f.profileId)
-      assert(raceRowsAfter.length === 2, `start after accepted friend changed row count: ${JSON.stringify(raceRowsAfter)}`)
-      assert(raceRowsAfter.filter((row) => row.kind === 'friend').length === 1, `start after accepted friend changed friend rows: ${JSON.stringify(raceRowsAfter)}`)
-      assert(raceRowsAfter.filter((row) => row.kind === 'vip_dm').length === 1, `start after accepted friend changed vip_dm rows: ${JSON.stringify(raceRowsAfter)}`)
+      assert(raceRowsAfter.length === 2, `legacy start after accepted friend changed row count: ${JSON.stringify(raceRowsAfter)}`)
+      assert(raceRowsAfter.filter((row) => row.kind === 'friend').length === 1, `legacy start after accepted friend changed friend rows: ${JSON.stringify(raceRowsAfter)}`)
+      assert(raceRowsAfter.filter((row) => row.kind === 'vip_dm').length === 1, `legacy start after accepted friend changed vip_dm rows: ${JSON.stringify(raceRowsAfter)}`)
     } finally {
       await stopServer(server)
       await isolated.cleanup()
