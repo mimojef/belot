@@ -50,6 +50,8 @@ export type PlayerPublicProfileSnapshot = {
   hasLikedByMe: boolean | null
   isBlockedByMe: boolean | null
   isVip: boolean | null
+  /** Authoritative VIP expiration (ISO) — null ако профилът никога не е имал VIP или той е изтекъл. */
+  vipActiveUntil: string | null
 }
 
 export type TournamentStatus =

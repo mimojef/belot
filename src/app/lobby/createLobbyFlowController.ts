@@ -1906,6 +1906,7 @@ function createLocalProfilePreview(
     hasLikedByMe: null,
     isBlockedByMe: null,
     isVip: null,
+    vipActiveUntil: null,
   }
 }
 

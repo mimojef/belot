@@ -3687,6 +3687,7 @@ function createFallbackPublicProfileSnapshot(
     hasLikedByMe: null,
     isBlockedByMe: null,
     isVip: null,
+    vipActiveUntil: null,
   }
 }
 
@@ -6839,17 +6840,25 @@ function enrichPlayerProfilesForViewer(
   profiles: PlayerPublicProfileSnapshot[],
   currentProfileId: string | null,
 ): PlayerPublicProfileSnapshot[] {
-  return profiles.map((p) => ({
-    ...p,
-    likesCount: p.profileId ? likeStore.getLikesCount(p.profileId) : null,
-    hasLikedByMe: p.profileId && currentProfileId
-      ? likeStore.hasLikedRecently(currentProfileId, p.profileId)
-      : null,
-    isBlockedByMe: p.profileId && currentProfileId
-      ? blockStore.isBlocked(currentProfileId, p.profileId)
-      : null,
-    isVip: p.profileId ? vipStore.getStatus(p.profileId).isActive : null,
-  }))
+  return profiles.map((p) => {
+    // Един vipStore.getStatus() извикване за isVip И vipActiveUntil — вместо
+    // отделна VIP HTTP заявка при отваряне на чужд профил, expiration-ът се
+    // включва директно в profile payload-а (players directory, search,
+    // /api/profiles/:id — всички минават през тази shared enrichment).
+    const vipStatus = p.profileId ? vipStore.getStatus(p.profileId) : null
+    return {
+      ...p,
+      likesCount: p.profileId ? likeStore.getLikesCount(p.profileId) : null,
+      hasLikedByMe: p.profileId && currentProfileId
+        ? likeStore.hasLikedRecently(currentProfileId, p.profileId)
+        : null,
+      isBlockedByMe: p.profileId && currentProfileId
+        ? blockStore.isBlocked(currentProfileId, p.profileId)
+        : null,
+      isVip: vipStatus?.isActive ?? null,
+      vipActiveUntil: vipStatus?.activeUntil ?? null,
+    }
+  })
 }
 
 // Canonical single-profile lookup by id — reuse-ва playerProgressStore

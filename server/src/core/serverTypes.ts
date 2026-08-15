@@ -87,6 +87,7 @@ export type PlayerPublicProfileSnapshot = {
   hasLikedByMe: boolean | null
   isBlockedByMe: boolean | null
   isVip: boolean | null
+  vipActiveUntil: string | null
 }
 
 export type HumanRoomParticipant = {

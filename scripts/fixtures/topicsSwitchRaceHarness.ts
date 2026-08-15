@@ -69,6 +69,7 @@ function makeProfile(profileId: string, displayName: string, overrides: Partial<
     hasLikedByMe: null,
     isBlockedByMe: null,
     isVip: null,
+    vipActiveUntil: null,
     ...overrides,
   }
 }

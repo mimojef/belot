@@ -279,7 +279,7 @@ let browser: Browser | null = null
 // бутоните (Харесай/Покани/Блокирай) винаги се рендират.
 const PROFILE_WITH_AVATAR = { profileId: 'author-with-avatar', displayName: 'С Аватар', overrides: { avatarUrl: 'https://picsum.photos/seed/avatar-a/100/100', isVip: false, level: 7, yellowCoinsBalance: 84250, likesCount: 12 } }
 const PROFILE_NO_AVATAR = { profileId: 'author-no-avatar', displayName: 'Без Аватар', overrides: { avatarUrl: null, isVip: false, level: 3 } }
-const PROFILE_VIP = { profileId: 'author-vip', displayName: 'VIP Играч', overrides: { avatarUrl: 'https://picsum.photos/seed/avatar-vip/100/100', isVip: true, level: 12 } }
+const PROFILE_VIP = { profileId: 'author-vip', displayName: 'VIP Играч', overrides: { avatarUrl: 'https://picsum.photos/seed/avatar-vip/100/100', isVip: true, level: 12, vipActiveUntil: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString() } }
 
 try {
   const port = await findFreePort()
@@ -697,26 +697,163 @@ try {
     await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness !== undefined, undefined, { timeout: 10_000 })
     await openTopicsScreen(page)
 
-    await check('[O10] Чужд VIP профил показва публичния VIP бадж, БЕЗ точния брой оставащи дни', async () => {
+    await check('[O10] Чужд активен VIP профил: „VIP“ бадж + „N дни“ като ОТДЕЛЕН текст вдясно (не вътре в pill-a)', async () => {
+      const future = new Date(Date.now() + 556 * 24 * 60 * 60 * 1000).toISOString()
       await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-other-vip', 'other-vip-profile', 'Other VIP')
       await page.waitForSelector('[data-topic-message-author="other-vip-profile"]', { state: 'attached', timeout: 3000 })
       await clickMessageAuthor(page, 'other-vip-profile')
       await page.waitForTimeout(20)
-      await deliverNextProfileResponseWithOverrides(page, 'other-vip-profile', 'Other VIP', { isVip: true, yellowCoinsBalance: 99999 })
+      await deliverNextProfileResponseWithOverrides(page, 'other-vip-profile', 'Other VIP', { isVip: true, yellowCoinsBalance: 99999, vipActiveUntil: future })
       await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
       await page.waitForTimeout(100)
 
       const ownVipRowExists = await page.evaluate(() => document.querySelector('[data-player-profile-own-vip-days="1"]') !== null)
-      assert(!ownVipRowExists, 'чужд профил НЕ трябва да показва data-player-profile-own-vip-days (точния брой оставащи VIP дни)')
+      assert(!ownVipRowExists, 'чужд профил НЕ трябва да показва data-player-profile-own-vip-days (собствения-профил ред)')
 
       const publicBadgeText = await page.evaluate(() => document.querySelector('[data-player-profile-vip-badge="1"]')?.textContent?.trim() ?? null)
-      assert(publicBadgeText === 'VIP', `публичният VIP бадж за чужд профил трябва да е точно "VIP" (без брой дни), получих "${publicBadgeText}"`)
+      assert(publicBadgeText === 'VIP', `публичният VIP бадж за чужд профил трябва да е точно "VIP" (без брой дни вътре в pill-a), получих "${publicBadgeText}"`)
+
+      const foreignVipRowText = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-vip-days="1"]')?.textContent ?? null)
+      assert(foreignVipRowText?.includes('556 дни') ?? false, `очаквах "556 дни" в чуждия VIP ред, получих "${foreignVipRowText}"`)
 
       const editVisible = await page.evaluate(() => document.querySelector('[data-player-profile-edit="1"]') !== null)
       assert(!editVisible, 'обикновен viewer (не admin) не трябва да вижда „Редакция“ за чужд профил')
 
       await closeProfilePopup(page)
       await page.waitForTimeout(100)
+    })
+
+    await check('[O14] Чужд профил + 1 оставащ ден → "1 ден" (единствено число), бадж-ът остава само "VIP"', async () => {
+      const future = new Date(Date.now() + 20 * 60 * 60 * 1000).toISOString() // 20ч напред → ceil=1
+      await refreshGeneralTopicQueue(page)
+      await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-other-vip-1d', 'other-vip-profile-1d', 'Other VIP 1d')
+      await page.waitForSelector('[data-topic-message-author="other-vip-profile-1d"]', { state: 'attached', timeout: 3000 })
+      await clickMessageAuthor(page, 'other-vip-profile-1d')
+      await page.waitForTimeout(20)
+      await deliverNextProfileResponseWithOverrides(page, 'other-vip-profile-1d', 'Other VIP 1d', { isVip: true, vipActiveUntil: future })
+      await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+      await page.waitForTimeout(100)
+
+      const foreignVipRowText = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-vip-days="1"]')?.textContent ?? null)
+      assert(foreignVipRowText?.includes('1 ден') ?? false, `очаквах "1 ден", получих "${foreignVipRowText}"`)
+      assert(!(foreignVipRowText?.includes('1 дни') ?? false), `не трябва да съдържа "1 дни", получих "${foreignVipRowText}"`)
+      const publicBadgeText = await page.evaluate(() => document.querySelector('[data-player-profile-vip-badge="1"]')?.textContent?.trim() ?? null)
+      assert(publicBadgeText === 'VIP', `бадж-ът трябва да остане точно "VIP", получих "${publicBadgeText}"`)
+
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
+    })
+
+    await check('[O15] Чужд профил + изтекъл VIP (минал active_until) → целият VIP ред липсва, никъде няма "0 дни"', async () => {
+      const past = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString()
+      await refreshGeneralTopicQueue(page)
+      await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-other-expired', 'other-expired-profile', 'Other Expired')
+      await page.waitForSelector('[data-topic-message-author="other-expired-profile"]', { state: 'attached', timeout: 3000 })
+      await clickMessageAuthor(page, 'other-expired-profile')
+      await page.waitForTimeout(20)
+      await deliverNextProfileResponseWithOverrides(page, 'other-expired-profile', 'Other Expired', { isVip: false, vipActiveUntil: past })
+      await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+      await page.waitForTimeout(100)
+
+      const vipRowExists = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-vip-days="1"]') !== null)
+      assert(!vipRowExists, 'изтекъл VIP за чужд профил трябва да крие целия VIP ред')
+      const badgeExists = await page.evaluate(() => document.querySelector('[data-player-profile-vip-badge="1"]') !== null)
+      assert(!badgeExists, 'изтекъл VIP не трябва да показва и самия "VIP" бадж')
+      const popupText = await page.evaluate(() => document.querySelector('[data-player-profile-popup-card="1"]')?.textContent ?? '')
+      assert(!popupText.includes('0 дни'), `не трябва да се показва "VIP 0 дни" за чужд профил, получих popup текст: "${popupText}"`)
+
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
+    })
+
+    await check('[O16] Чужд профил без VIP данни (vipActiveUntil липсва) → VIP редът също липсва (същия helper, 0 дни → скрит)', async () => {
+      await refreshGeneralTopicQueue(page)
+      await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-other-novip', 'other-novip-profile', 'Other NoVip')
+      await page.waitForSelector('[data-topic-message-author="other-novip-profile"]', { state: 'attached', timeout: 3000 })
+      await clickMessageAuthor(page, 'other-novip-profile')
+      await page.waitForTimeout(20)
+      await deliverNextProfileResponseWithOverrides(page, 'other-novip-profile', 'Other NoVip', {})
+      await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+      await page.waitForTimeout(100)
+
+      const vipRowExists = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-vip-days="1"]') !== null)
+      assert(!vipRowExists, 'профил без VIP данни не трябва да показва VIP реда')
+
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
+    })
+
+    await check('[O17] Сърцата в popup-а са SVG икони, не emoji/text glyph (♥)', async () => {
+      await refreshGeneralTopicQueue(page)
+      await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-heart-check', 'heart-check-profile', 'Heart Check')
+      await page.waitForSelector('[data-topic-message-author="heart-check-profile"]', { state: 'attached', timeout: 3000 })
+      await clickMessageAuthor(page, 'heart-check-profile')
+      await page.waitForTimeout(20)
+      await deliverNextProfileResponseWithOverrides(page, 'heart-check-profile', 'Heart Check', { likesCount: 7 })
+      await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+      await page.waitForTimeout(100)
+
+      const popupText = await page.evaluate(() => document.querySelector('[data-player-profile-popup-card="1"]')?.textContent ?? '')
+      assert(!popupText.includes('♥') && !popupText.includes('❤'), `popup текстът не трябва да съдържа heart emoji/glyph, получих: "${popupText}"`)
+
+      const likeButtonHasSvg = await page.evaluate(() => document.querySelector('[data-player-profile-like] svg') !== null)
+      assert(likeButtonHasSvg, '„Харесай“ бутонът трябва да съдържа SVG сърце')
+
+      const likesStatHasSvg = await page.evaluate(() => document.querySelector('[data-player-profile-stat="1"] svg') !== null)
+      assert(likesStatHasSvg, '„Харесан: N“ статистиката трябва да съдържа SVG сърце')
+
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
+    })
+
+    await context.close()
+  })()
+
+  // ─── Foreign profile mobile 360x776: header (avatar/име/баланс/VIP ред) ──
+  await (async () => {
+    const context: BrowserContext = await browser!.newContext({ viewport: { width: 360, height: 776 }, hasTouch: true, isMobile: true })
+    const page = await context.newPage()
+    const errors: string[] = []
+    page.on('pageerror', (err) => errors.push(err.message))
+    await page.goto(baseUrl)
+    await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness !== undefined, undefined, { timeout: 10_000 })
+    await openTopicsScreen(page)
+
+    await check('[O18] Чужд профил 360x776: avatar вляво, име/баланс/VIP ред вдясно, без overflow', async () => {
+      const future = new Date(Date.now() + 556 * 24 * 60 * 60 * 1000).toISOString()
+      await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-trento', 'trento-profile', 'Trento76')
+      await page.waitForSelector('[data-topic-message-author="trento-profile"]', { state: 'attached', timeout: 3000 })
+      await clickMessageAuthor(page, 'trento-profile')
+      await page.waitForTimeout(20)
+      await deliverNextProfileResponseWithOverrides(page, 'trento-profile', 'Trento76', {
+        isVip: true,
+        vipActiveUntil: future,
+        yellowCoinsBalance: 6011000,
+        avatarUrl: 'https://picsum.photos/seed/trento76/200/200',
+      })
+      await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+      await page.waitForTimeout(100)
+
+      await assertPopupFitsViewport(page, 360, 776, 'foreign profile Trento76')
+
+      const summaryText = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-summary="1"]')?.textContent ?? null)
+      assert(summaryText?.includes('6') ?? false, `балансът трябва да е видим в foreign summary, получих "${summaryText}"`)
+      assert(summaryText?.includes('556 дни') ?? false, `VIP дните трябва да са видими в foreign summary, получих "${summaryText}"`)
+
+      const avatarRect = await page.evaluate(() => document.querySelector('[data-player-profile-avatar="1"]')?.getBoundingClientRect())
+      const summaryRect = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-summary="1"]')?.getBoundingClientRect())
+      assert(avatarRect !== undefined && summaryRect !== undefined, 'avatar и foreign summary трябва да съществуват в DOM-а')
+      assert(avatarRect!.left < summaryRect!.left, `avatar трябва да е вляво от summary блока, avatar.left=${avatarRect!.left}, summary.left=${summaryRect!.left}`)
+
+      const hOverflow = await page.evaluate(() => document.body.scrollWidth > window.innerWidth)
+      assert(!hOverflow, 'чужд профил при 360px не трябва да има horizontal overflow')
+
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
+    })
+
+    await check('[O19] Няма JS грешки в конзолата по време на foreign profile mobile сценария', () => {
+      assert(errors.length === 0, `Конзолни грешки: ${errors.join(' | ')}`)
     })
 
     await context.close()

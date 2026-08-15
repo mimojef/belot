@@ -81,6 +81,11 @@ function formatNullableText(
   return text.length > 0 ? escapeHtml(text) : fallback
 }
 
+/** Споделена inline heart SVG — заменя ♥ text glyph-а навсякъде в този popup (бутон "Харесай" + "Харесан: N" статистика). currentColor вместо hardcoded fill, за да наследява color от wrapping елемента. */
+function renderHeartIcon(sizePx: number): string {
+  return `<svg width="${sizePx}" height="${sizePx}" viewBox="0 0 24 24" fill="currentColor" style="display:inline-block;flex:0 0 auto;vertical-align:-2px;color:#dc2626;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>`
+}
+
 function renderLevelBadge(level: number | null | undefined, size: 'sm' | 'md' = 'md'): string {
   if (typeof level !== 'number' || !Number.isFinite(level) || level < 1) return ''
   const sz = size === 'sm' ? '16px' : '20px'
@@ -220,35 +225,6 @@ function renderGameStats(profile: PlayerPublicProfileSnapshot): string {
       ${statItem('Победи', formatInteger(wonGames), '#fde68a')}
       ${divider}
       ${statItem('Успех', escapeHtml(successRate), '#86efac')}
-    </div>
-  `
-}
-
-function renderCoinBalanceInline(profile: PlayerPublicProfileSnapshot): string {
-  if (profile.yellowCoinsBalance === null || profile.yellowCoinsBalance === undefined) {
-    return ''
-  }
-
-  return `
-    <div
-      data-player-profile-balance-inline="1"
-      style="
-        margin-left:auto;
-        display:inline-flex;
-        align-items:center;
-        justify-content:flex-end;
-        gap:7px;
-        min-width:0;
-        max-width:220px;
-        color:#d4a520;
-        font-size:20px;
-        line-height:1;
-        font-weight:900;
-        white-space:nowrap;
-      "
-    >
-      <img src="/assets/lobby/icon-coin.png" alt="" style="width:24px;height:24px;display:block;object-fit:contain;flex:0 0 auto;">
-      <span style="overflow:hidden;text-overflow:ellipsis;">${escapeHtml(Number(profile.yellowCoinsBalance).toLocaleString('bg-BG'))}</span>
     </div>
   `
 }
@@ -515,35 +491,52 @@ export function formatVipDaysLabel(days: number): string {
   return `VIP · ${formatVipDaysWords(days)}`
 }
 
-function renderVipBadge(profile: PlayerPublicProfileSnapshot, isOwnProfile: boolean): string {
-  // Собственият профил показва VIP статус чрез компактния "VIP · N дни" ред
-  // в renderOwnProfileSummary (винаги видим, вкл. неактивен VIP) — не
-  // дублираме публичния бадж тук за собствения профил. За чужди профили
-  // оставаме само с публичния "VIP" бадж (без точен брой дни — т.13 от брифа
-  // за VIP foundation: не показваме на други потребители оставащия VIP срок).
-  if (isOwnProfile || !profile.isVip) {
+/**
+ * Чужд профил: VIP бадж (само текст "VIP", непроменен визуален стил на
+ * банерчето) + оставащи дни като ОТДЕЛЕН нормален текст вдясно от него — НЕ
+ * вътре в pill-a. Целият ред е видим САМО ако VIP е активен (vipDays > 0);
+ * изтекъл/липсващ VIP крие реда изцяло — за разлика от собствения профил,
+ * чийто VIP ред е ВИНАГИ видим (виж renderOwnProfileSummary). Ползва СЪЩИЯ
+ * computeVipRemainingDays/formatVipDaysWords helper като собствения профил —
+ * няма второ, различно изчисление на оставащите дни.
+ */
+function renderForeignVipRow(profile: PlayerPublicProfileSnapshot): string {
+  const vipDays = computeVipRemainingDays(profile.vipActiveUntil)
+  if (vipDays <= 0) {
     return ''
   }
 
   return `
-    <span
-      data-player-profile-vip-badge="1"
+    <div
+      data-player-profile-foreign-vip-days="1"
       style="
         display:inline-flex;
         align-items:center;
-        padding:3px 10px;
-        border-radius:999px;
-        background:rgba(212,165,32,0.16);
-        border:1px solid rgba(212,165,32,0.58);
-        color:#d4a520;
-        font-size:11px;
-        font-weight:900;
-        letter-spacing:0.04em;
-        text-transform:uppercase;
-        white-space:nowrap;
-        text-shadow:0 0 8px rgba(212,165,32,0.32);
+        gap:8px;
+        min-width:0;
+        margin-top:6px;
       "
-    >VIP</span>
+    >
+      <span
+        data-player-profile-vip-badge="1"
+        style="
+          display:inline-flex;
+          align-items:center;
+          padding:3px 10px;
+          border-radius:999px;
+          background:rgba(212,165,32,0.16);
+          border:1px solid rgba(212,165,32,0.58);
+          color:#d4a520;
+          font-size:11px;
+          font-weight:900;
+          letter-spacing:0.04em;
+          text-transform:uppercase;
+          white-space:nowrap;
+          text-shadow:0 0 8px rgba(212,165,32,0.32);
+        "
+      >VIP</span>
+      <span style="font-size:13px;font-weight:400;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(formatVipDaysWords(vipDays))}</span>
+    </div>
   `
 }
 
@@ -600,6 +593,46 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
         Редакция
       </span>
+    </div>
+  `
+}
+
+/**
+ * Чужд профил: баланс + VIP ред (само ако е активен), стек от вертикални
+ * редове вдясно от avatar-а — структурно огледално на renderOwnProfileSummary,
+ * но: (1) НИКОГА "Редакция" тук (обикновен viewer не редактира чужд профил —
+ * admin edit контролът си остава в title реда, непроменен), (2) VIP редът се
+ * крие изцяло при неактивен/изтекъл/липсващ VIP, вместо да е винаги видим.
+ */
+function renderForeignProfileSummary(profile: PlayerPublicProfileSnapshot): string {
+  const hasBalance = profile.yellowCoinsBalance !== null && profile.yellowCoinsBalance !== undefined
+  const vipRow = renderForeignVipRow(profile)
+
+  if (!hasBalance && !vipRow) {
+    return ''
+  }
+
+  return `
+    <div data-player-profile-foreign-summary="1" style="display:flex;flex-direction:column;gap:5px;min-width:0;">
+      ${hasBalance ? `
+        <div
+          data-player-profile-balance-foreign="1"
+          style="
+            display:inline-flex;
+            align-items:center;
+            gap:7px;
+            min-width:0;
+            color:#d4a520;
+            font-size:20px;
+            line-height:1;
+            font-weight:900;
+          "
+        >
+          <img src="/assets/lobby/icon-coin.png" alt="" style="width:22px;height:22px;display:block;object-fit:contain;flex:0 0 auto;">
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(Number(profile.yellowCoinsBalance).toLocaleString('bg-BG'))}</span>
+        </div>
+      ` : ''}
+      ${vipRow}
     </div>
   `
 }
@@ -953,8 +986,6 @@ function renderProfileContent(
               ${escapeHtml(displayName)}
             </div>
 
-            ${renderVipBadge(profile, isOwnProfile)}
-
             ${(canEdit || isAdmin) && !isOwnProfile ? `
               <span
                 data-player-profile-edit="1"
@@ -978,10 +1009,9 @@ function renderProfileContent(
             ${renderChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderPikaTeamRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderTopChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
-            ${!isOwnProfile ? renderCoinBalanceInline(profile) : ''}
           </div>
 
-          ${isOwnProfile ? renderOwnProfileSummary(profile, ownVipActiveUntil) : ''}
+          ${isOwnProfile ? renderOwnProfileSummary(profile, ownVipActiveUntil) : renderForeignProfileSummary(profile)}
 
           <div data-player-profile-rating="1" style="display:flex;align-items:center;gap:6px;">
             <div style="font-size:13px;font-weight:400;color:rgba(148,163,184,0.80);">Рейтинг:</div>
@@ -1058,7 +1088,7 @@ function renderProfileContent(
                       gap:5px;
                     "
                   >
-                    <span style="color:#ef4444;font-size:22px;line-height:1;">♥</span>${profile.hasLikedByMe ? 'Харесан' : 'Харесай'}
+                    ${renderHeartIcon(14)}${profile.hasLikedByMe ? 'Харесан' : 'Харесай'}
                   </button>
                 ` : ''}
                 ${friendshipAction && !friendshipAction.giftFriendshipId ? `
@@ -1141,7 +1171,7 @@ function renderProfileContent(
             ${typeof profile.likesCount === 'number' ? `
             <div data-player-profile-stat-divider="1" style="width:1px;align-self:stretch;background:rgba(212,165,32,0.45);"></div>
             <div data-player-profile-stat="1" style="font-size:13px;color:rgba(255,255,255,0.55);padding:0 12px;">
-              <span style="color:#ef4444;font-size:22px;line-height:1;vertical-align:middle;">♥</span> Харесан: <span data-player-profile-stat-value="1" style="color:#fde68a;font-weight:700;">${profile.likesCount.toLocaleString('bg-BG')}</span>
+              ${renderHeartIcon(14)} Харесан: <span data-player-profile-stat-value="1" style="color:#fde68a;font-weight:700;">${profile.likesCount.toLocaleString('bg-BG')}</span>
             </div>
             ` : ''}
           </div>
@@ -1399,18 +1429,8 @@ export function renderPlayerProfilePopup(
           grid-column:2;
         }
 
-        [data-player-profile-balance-inline="1"] {
-          max-width:100% !important;
-          font-size:16px !important;
-          gap:5px !important;
-        }
-
-        [data-player-profile-balance-inline="1"] img {
-          width:20px !important;
-          height:20px !important;
-        }
-
-        [data-player-profile-own-summary="1"] {
+        [data-player-profile-own-summary="1"],
+        [data-player-profile-foreign-summary="1"] {
           order:3;
           grid-column:2;
         }
