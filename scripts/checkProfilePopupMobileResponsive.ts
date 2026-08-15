@@ -697,7 +697,8 @@ try {
     await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness !== undefined, undefined, { timeout: 10_000 })
     await openTopicsScreen(page)
 
-    await check('[O10] Чужд активен VIP профил: „VIP“ бадж + „N дни“ като ОТДЕЛЕН текст вдясно (не вътре в pill-a)', async () => {
+    await check('[O10] Admin гледа чужд активен VIP профил: вижда бадж „VIP“ + оставащи дни (не вътре в pill-a)', async () => {
+      await page.evaluate((r) => (window as any).__topicsSwitchRaceHarness.setOwnAccountRole(r), 'admin')
       const future = new Date(Date.now() + 556 * 24 * 60 * 60 * 1000).toISOString()
       await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-other-vip', 'other-vip-profile', 'Other VIP')
       await page.waitForSelector('[data-topic-message-author="other-vip-profile"]', { state: 'attached', timeout: 3000 })
@@ -711,19 +712,17 @@ try {
       assert(!ownVipRowExists, 'чужд профил НЕ трябва да показва data-player-profile-own-vip-days (собствения-профил ред)')
 
       const publicBadgeText = await page.evaluate(() => document.querySelector('[data-player-profile-vip-badge="1"]')?.textContent?.trim() ?? null)
-      assert(publicBadgeText === 'VIP', `публичният VIP бадж за чужд профил трябва да е точно "VIP" (без брой дни вътре в pill-a), получих "${publicBadgeText}"`)
+      assert(publicBadgeText === 'VIP', `VIP бадж-ът трябва да е точно "VIP" (без брой дни вътре в pill-a), получих "${publicBadgeText}"`)
 
       const foreignVipRowText = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-vip-days="1"]')?.textContent ?? null)
-      assert(foreignVipRowText?.includes('556 дни') ?? false, `очаквах "556 дни" в чуждия VIP ред, получих "${foreignVipRowText}"`)
-
-      const editVisible = await page.evaluate(() => document.querySelector('[data-player-profile-edit="1"]') !== null)
-      assert(!editVisible, 'обикновен viewer (не admin) не трябва да вижда „Редакция“ за чужд профил')
+      assert(foreignVipRowText?.includes('556 дни') ?? false, `admin трябва да вижда "556 дни" в чуждия VIP ред, получих "${foreignVipRowText}"`)
 
       await closeProfilePopup(page)
       await page.waitForTimeout(100)
     })
 
-    await check('[O14] Чужд профил + 1 оставащ ден → "1 ден" (единствено число), бадж-ът остава само "VIP"', async () => {
+    await check('[O14] Admin гледа чужд профил с 1 оставащ ден → "1 ден" (единствено число), бадж-ът остава само "VIP"', async () => {
+      await page.evaluate((r) => (window as any).__topicsSwitchRaceHarness.setOwnAccountRole(r), 'admin')
       const future = new Date(Date.now() + 20 * 60 * 60 * 1000).toISOString() // 20ч напред → ceil=1
       await refreshGeneralTopicQueue(page)
       await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-other-vip-1d', 'other-vip-profile-1d', 'Other VIP 1d')
@@ -744,7 +743,8 @@ try {
       await page.waitForTimeout(100)
     })
 
-    await check('[O15] Чужд профил + изтекъл VIP (минал active_until) → целият VIP ред липсва, никъде няма "0 дни"', async () => {
+    await check('[O15] Admin гледа чужд изтекъл VIP (минал active_until) → целият VIP ред липсва, никъде няма "0 дни"', async () => {
+      await page.evaluate((r) => (window as any).__topicsSwitchRaceHarness.setOwnAccountRole(r), 'admin')
       const past = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString()
       await refreshGeneralTopicQueue(page)
       await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-other-expired', 'other-expired-profile', 'Other Expired')
@@ -756,7 +756,7 @@ try {
       await page.waitForTimeout(100)
 
       const vipRowExists = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-vip-days="1"]') !== null)
-      assert(!vipRowExists, 'изтекъл VIP за чужд профил трябва да крие целия VIP ред')
+      assert(!vipRowExists, 'изтекъл VIP за чужд профил трябва да крие целия VIP ред, дори за admin')
       const badgeExists = await page.evaluate(() => document.querySelector('[data-player-profile-vip-badge="1"]') !== null)
       assert(!badgeExists, 'изтекъл VIP не трябва да показва и самия "VIP" бадж')
       const popupText = await page.evaluate(() => document.querySelector('[data-player-profile-popup-card="1"]')?.textContent ?? '')
@@ -766,7 +766,8 @@ try {
       await page.waitForTimeout(100)
     })
 
-    await check('[O16] Чужд профил без VIP данни (vipActiveUntil липсва) → VIP редът също липсва (същия helper, 0 дни → скрит)', async () => {
+    await check('[O16] Non-admin (player) гледа чужд профил без VIP данни (vipActiveUntil липсва) → VIP редът също липсва', async () => {
+      await page.evaluate((r) => (window as any).__topicsSwitchRaceHarness.setOwnAccountRole(r), 'player')
       await refreshGeneralTopicQueue(page)
       await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-other-novip', 'other-novip-profile', 'Other NoVip')
       await page.waitForSelector('[data-topic-message-author="other-novip-profile"]', { state: 'attached', timeout: 3000 })
@@ -782,6 +783,68 @@ try {
       await closeProfilePopup(page)
       await page.waitForTimeout(100)
     })
+
+    await check('[O20] Player (non-admin) гледа чужд активен VIP профил → вижда САМО бадж "VIP", БЕЗ оставащи дни', async () => {
+      await page.evaluate((r) => (window as any).__topicsSwitchRaceHarness.setOwnAccountRole(r), 'player')
+      const future = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()
+      await refreshGeneralTopicQueue(page)
+      await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-player-view-vip', 'player-view-vip-profile', 'Player View VIP')
+      await page.waitForSelector('[data-topic-message-author="player-view-vip-profile"]', { state: 'attached', timeout: 3000 })
+      await clickMessageAuthor(page, 'player-view-vip-profile')
+      await page.waitForTimeout(20)
+      await deliverNextProfileResponseWithOverrides(page, 'player-view-vip-profile', 'Player View VIP', { isVip: true, vipActiveUntil: future })
+      await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+      await page.waitForTimeout(100)
+
+      const foreignVipRowText = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-vip-days="1"]')?.textContent?.trim() ?? null)
+      assert(foreignVipRowText === 'VIP', `player трябва да вижда само "VIP", без дни/expiration, получих "${foreignVipRowText}"`)
+
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
+    })
+
+    await check('[O21] Non-admin (player) гледа чужд изтекъл VIP профил → VIP редът липсва', async () => {
+      await page.evaluate((r) => (window as any).__topicsSwitchRaceHarness.setOwnAccountRole(r), 'player')
+      const past = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString()
+      await refreshGeneralTopicQueue(page)
+      await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-player-view-expired', 'player-view-expired-profile', 'Player View Expired')
+      await page.waitForSelector('[data-topic-message-author="player-view-expired-profile"]', { state: 'attached', timeout: 3000 })
+      await clickMessageAuthor(page, 'player-view-expired-profile')
+      await page.waitForTimeout(20)
+      await deliverNextProfileResponseWithOverrides(page, 'player-view-expired-profile', 'Player View Expired', { isVip: false, vipActiveUntil: past })
+      await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+      await page.waitForTimeout(100)
+
+      const vipRowExists = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-vip-days="1"]') !== null)
+      assert(!vipRowExists, 'изтекъл VIP трябва да крие целия ред и за non-admin viewer')
+
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
+    })
+
+    const NON_ADMIN_VIEW_ROLES: Array<'subadmin' | 'pika_team' | 'top_chat_admin' | 'chat_admin'> = [
+      'subadmin', 'pika_team', 'top_chat_admin', 'chat_admin',
+    ]
+    for (const role of NON_ADMIN_VIEW_ROLES) {
+      await check(`[O22] ${role} гледа чужд активен VIP профил → вижда САМО бадж "VIP", БЕЗ оставащи дни`, async () => {
+        await page.evaluate((r) => (window as any).__topicsSwitchRaceHarness.setOwnAccountRole(r), role)
+        const future = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString()
+        await refreshGeneralTopicQueue(page)
+        await deliverNextResponseWithAuthor(page, 'topic-general', `hello-from-${role}-view-vip`, `${role}-view-vip-profile`, `${role} View VIP`)
+        await page.waitForSelector(`[data-topic-message-author="${role}-view-vip-profile"]`, { state: 'attached', timeout: 3000 })
+        await clickMessageAuthor(page, `${role}-view-vip-profile`)
+        await page.waitForTimeout(20)
+        await deliverNextProfileResponseWithOverrides(page, `${role}-view-vip-profile`, `${role} View VIP`, { isVip: true, vipActiveUntil: future })
+        await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+        await page.waitForTimeout(100)
+
+        const foreignVipRowText = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-vip-days="1"]')?.textContent?.trim() ?? null)
+        assert(foreignVipRowText === 'VIP', `${role} трябва да вижда само "VIP", без дни, получих "${foreignVipRowText}"`)
+
+        await closeProfilePopup(page)
+        await page.waitForTimeout(100)
+      })
+    }
 
     await check('[O17] Сърцата в popup-а са SVG икони, не emoji/text glyph (♥)', async () => {
       await refreshGeneralTopicQueue(page)
@@ -819,7 +882,10 @@ try {
     await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness !== undefined, undefined, { timeout: 10_000 })
     await openTopicsScreen(page)
 
-    await check('[O18] Чужд профил 360x776: avatar вляво, име/баланс/VIP ред вдясно, без overflow', async () => {
+    await check('[O18] Admin гледа чужд профил 360x776: avatar вляво, име/баланс/VIP ред (с дни) вдясно, без overflow', async () => {
+      // Admin viewer нарочно тук — тества layout-а с НАЙ-дългото възможно
+      // VIP съдържание ("VIP · 556 дни"), не само голия бадж на non-admin.
+      await page.evaluate((r) => (window as any).__topicsSwitchRaceHarness.setOwnAccountRole(r), 'admin')
       const future = new Date(Date.now() + 556 * 24 * 60 * 60 * 1000).toISOString()
       await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-trento', 'trento-profile', 'Trento76')
       await page.waitForSelector('[data-topic-message-author="trento-profile"]', { state: 'attached', timeout: 3000 })

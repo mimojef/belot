@@ -508,8 +508,16 @@ export function formatVipDaysLabel(days: number): string {
  * чийто VIP ред е ВИНАГИ видим (виж renderOwnProfileSummary). Ползва СЪЩИЯ
  * computeVipRemainingDays/formatVipDaysWords helper като собствения профил —
  * няма второ, различно изчисление на оставащите дни.
+ *
+ * viewerIsFullAdmin управлява САМО дали текстът с оставащите дни се показва:
+ * admin вижда "VIP · N дни" (нужно за "Дай VIP" flow-а — вижда текущия
+ * остатък преди/след grant); всички други viewers (subadmin, pika_team,
+ * top_chat_admin, chat_admin, player, guest) виждат само бадж-а "VIP", без
+ * брой дни/expiration — не показваме на други потребители чуждия VIP срок.
+ * vipActiveUntil остава в profile payload-а винаги (нужен за admin
+ * изчислението тук) — само render permission-ът е ролево-зависим.
  */
-function renderForeignVipRow(profile: PlayerPublicProfileSnapshot): string {
+function renderForeignVipRow(profile: PlayerPublicProfileSnapshot, viewerIsFullAdmin: boolean): string {
   const vipDays = computeVipRemainingDays(profile.vipActiveUntil)
   if (vipDays <= 0) {
     return ''
@@ -544,7 +552,7 @@ function renderForeignVipRow(profile: PlayerPublicProfileSnapshot): string {
           text-shadow:0 0 8px rgba(212,165,32,0.32);
         "
       >VIP</span>
-      <span style="font-size:13px;font-weight:400;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(formatVipDaysWords(vipDays))}</span>
+      ${viewerIsFullAdmin ? `<span style="font-size:13px;font-weight:400;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(formatVipDaysWords(vipDays))}</span>` : ''}
     </div>
   `
 }
@@ -613,9 +621,9 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
  * admin edit контролът си остава в title реда, непроменен), (2) VIP редът се
  * крие изцяло при неактивен/изтекъл/липсващ VIP, вместо да е винаги видим.
  */
-function renderForeignProfileSummary(profile: PlayerPublicProfileSnapshot): string {
+function renderForeignProfileSummary(profile: PlayerPublicProfileSnapshot, viewerIsFullAdmin: boolean): string {
   const hasBalance = profile.yellowCoinsBalance !== null && profile.yellowCoinsBalance !== undefined
-  const vipRow = renderForeignVipRow(profile)
+  const vipRow = renderForeignVipRow(profile, viewerIsFullAdmin)
 
   if (!hasBalance && !vipRow) {
     return ''
@@ -1152,7 +1160,7 @@ function renderProfileContent(
 
           ${renderVipGrantForm(profile.profileId, isOwnProfile, viewerIsFullAdmin, vipGrantOpen, vipGrantSubmitting, vipGrantErrorText)}
 
-          ${isOwnProfile ? renderOwnProfileSummary(profile, ownVipActiveUntil) : renderForeignProfileSummary(profile)}
+          ${isOwnProfile ? renderOwnProfileSummary(profile, ownVipActiveUntil) : renderForeignProfileSummary(profile, viewerIsFullAdmin)}
 
           <div data-player-profile-rating="1" style="display:flex;align-items:center;gap:6px;">
             <div style="font-size:13px;font-weight:400;color:rgba(148,163,184,0.80);">Рейтинг:</div>
