@@ -7,6 +7,7 @@
 // loadTopicMessagesForActiveTopic/openTopic) — не зависи от реален
 // сървър/WebSocket.
 import { createLobbyFlowController } from '/src/app/lobby/createLobbyFlowController.ts'
+import { getRenderLobbyScreenCallCount } from '/src/app/lobby/renderLobbyScreen.ts'
 import type { TopicSnapshot, TopicMessageSnapshot, PlayerPublicProfileSnapshot } from '/src/app/network/createGameServerClient.ts'
 
 const root = document.createElement('div')
@@ -152,6 +153,26 @@ function deliverNextResponseWithAuthorsAndHasMore(
   })
 }
 
+// Мутируем own-profile snapshot — по подразбиране минимален (profileId='me'),
+// но тестовете (напр. own profile popup VIP/balance layout) могат да
+// презаписват overrides (yellowCoinsBalance и т.н.) ПРЕДИ да отворят popup-а.
+let ownAuthProfileOverrides: Record<string, unknown> = {}
+
+// Deferred-response контрол за onGetOwnVipStatus — аналогично на
+// pendingProfileResolvers по-горе, за да можем детерминистично да
+// доставяме active_until (или грешка) точно когато теста иска.
+const pendingOwnVipStatusResolvers: Array<(result: { ok: true; activeUntil: string | null } | { ok: false }) => void> = []
+// Общ брой РЕАЛНО стартирани onGetOwnVipStatus заявки за целия session —
+// за request-dedupe regression (репетативни generic render() цикли, докато
+// popup-ът стои отворен, НЕ трябва да множат заявките).
+let ownVipStatusCallCount = 0
+
+// Mock резултат за следващото onProfileEditSubmit — нужен за profile-popup
+// ↔ edit-екран flow regression теста (Cancel/X връща popup със СТАРИ данни,
+// успешен Save връща popup с НОВИ данни, без fallback към Lobby).
+let nextProfileEditSubmitError: string | null = null
+let nextProfileEditSubmitAvatarUrl: string | null = null
+
 const controller = createLobbyFlowController({
   root,
   joinMatchmaking: () => {},
@@ -160,7 +181,10 @@ const controller = createLobbyFlowController({
   onLobbyChatSend: () => {},
   getAuthSession: () => ({
     account: { role: 'player' },
-    profile: { profileId: 'me', displayName: 'Me' } as any,
+    // galleryImages:[] по подразбиране — реалният PlayerPublicProfileSnapshot
+    // от сървъра винаги го включва; profile edit модалът го итерира директно
+    // ([...editorProfile.galleryImages]), затова mock-ът трябва да го има.
+    profile: { profileId: 'me', displayName: 'Me', galleryImages: [], ...ownAuthProfileOverrides } as any,
   }),
   onTopicsLoad: async () => ({ ok: true, topics }),
   onTopicMessagesLoad: (topicId: string, _beforeSeq: number | null) => {
@@ -176,6 +200,12 @@ const controller = createLobbyFlowController({
       const queue = pendingProfileResolvers.get(profileId) ?? []
       queue.push(resolve)
       pendingProfileResolvers.set(profileId, queue)
+    })
+  },
+  onGetOwnVipStatus: () => {
+    ownVipStatusCallCount += 1
+    return new Promise((resolve) => {
+      pendingOwnVipStatusResolvers.push(resolve)
     })
   },
   // Instant same-tick ack (не deferred queue) — [28]/[29] тестват само UI
@@ -195,6 +225,18 @@ const controller = createLobbyFlowController({
   },
   onTopicReplySend: () => {},
   onTopicRepliesLoad: async () => ({ ok: true, replies: [], hasMore: false, oldestSeq: null }),
+  onProfileEditSubmit: async () => {
+    if (nextProfileEditSubmitError !== null) {
+      const message = nextProfileEditSubmitError
+      nextProfileEditSubmitError = null
+      return message
+    }
+    if (nextProfileEditSubmitAvatarUrl !== null) {
+      ownAuthProfileOverrides = { ...ownAuthProfileOverrides, avatarUrl: nextProfileEditSubmitAvatarUrl }
+      nextProfileEditSubmitAvatarUrl = null
+    }
+    return null
+  },
 })
 
 // ─── Тестова кука, извиквана от Playwright през page.evaluate ───────────────
@@ -233,4 +275,46 @@ const controller = createLobbyFlowController({
     const closeBtn = document.querySelector<HTMLButtonElement>('[data-player-profile-popup-close="1"]')
     closeBtn?.click()
   },
+  // ─── Own profile popup (VIP/balance summary row тестове) ────────────────
+  render: () => controller.render(),
+  setOwnProfileOverrides: (overrides: Record<string, unknown>) => {
+    ownAuthProfileOverrides = overrides
+  },
+  openOwnProfile: () => {
+    // Реалният production trigger: клик върху "Профил" бутона на lobby
+    // екрана (data-lobby-profile-button="1") — огледално на onProfileClick
+    // wiring-а в createLobbyFlowController.ts/renderLobbyScreen.ts, НЕ
+    // директен controller-only shortcut, за да тестваме реалния DOM path.
+    const btn = document.querySelector<HTMLButtonElement>('[data-lobby-profile-button="1"]')
+    btn?.click()
+  },
+  deliverOwnVipStatus: (activeUntil: string | null) => {
+    const resolver = pendingOwnVipStatusResolvers.shift()
+    resolver?.({ ok: true, activeUntil })
+  },
+  getOwnVipStatusPendingCount: () => pendingOwnVipStatusResolvers.length,
+  getOwnVipStatusCallCount: () => ownVipStatusCallCount,
+  getOwnProfileSummaryText: () => document.querySelector('[data-player-profile-own-summary="1"]')?.textContent ?? null,
+  getOwnVipDaysText: () => document.querySelector('[data-player-profile-own-vip-days="1"]')?.textContent ?? null,
+  getOwnBalanceText: () => document.querySelector('[data-player-profile-balance-own="1"]')?.textContent ?? null,
+  isOwnEditVisible: () => document.querySelector('[data-player-profile-edit="1"]') !== null,
+  // ─── Profile popup ↔ profile edit screen flow (Cancel/X/Save regression) ─
+  clickOwnEdit: () => {
+    document.querySelector<HTMLButtonElement>('[data-player-profile-edit="1"]')?.click()
+  },
+  isProfileEditorOpen: () => document.querySelector('[data-lobby-profile-editor-root="1"]') !== null,
+  clickProfileEditorCancel: () => {
+    document.querySelector<HTMLButtonElement>('[data-lobby-profile-editor-cancel="1"]')?.click()
+  },
+  clickProfileEditorClose: () => {
+    document.querySelector<HTMLButtonElement>('[data-lobby-profile-editor-close="1"]')?.click()
+  },
+  setNextProfileEditSubmitAvatarUrl: (avatarUrl: string) => {
+    nextProfileEditSubmitAvatarUrl = avatarUrl
+  },
+  submitProfileEditorForm: () => {
+    document.querySelector<HTMLButtonElement>('[data-lobby-profile-editor-form="1"] button[type="submit"]')?.click()
+  },
+  getOwnAvatarImgSrc: () => document.querySelector<HTMLImageElement>('[data-player-profile-avatar="1"] img')?.getAttribute('src') ?? null,
+  getRenderLobbyScreenCallCount,
 }

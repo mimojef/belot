@@ -2931,6 +2931,11 @@ export function createLobbyFlowController(
 
     const authSession = options.getAuthSession?.() ?? null
     ensureProfilePopupTargetRoleLoaded()
+    // Покрива входни точки, които отварят own profile popup-а само чрез
+    // plain render() (напр. onProfileClick), не renderPopupOnly() — иначе
+    // VIP статусът никога не се зарежда за own profile при тях (същия
+    // "покрий всички входни точки" pattern като ensureProfilePopupTargetRoleLoaded).
+    ensureOwnVipStatusLoaded()
     const friendshipAction = createProfileFriendshipAction(authSession)
     const acceptedRelationship =
       state.profilePopupProfile?.profileId
@@ -3027,6 +3032,7 @@ export function createLobbyFlowController(
       profile: createLocalProfilePreview(state, authSession),
       profilePopupProfile: state.profilePopupProfile,
       profilePopupCanEdit: state.profilePopupCanEdit,
+      ownVipActiveUntil: state.ownVipActiveUntil,
       profilePopupTargetRole: state.profilePopupTargetRole,
       subadminActionConfirm: state.subadminActionConfirm,
       subadminActionBusy: state.subadminActionBusy,
@@ -3486,7 +3492,27 @@ export function createLobbyFlowController(
         state.profileNameChangeErrorText = null
         state.profileNameChangeSuccessAmount = null
         clearProfileEditorPendingState()
-        render()
+        // Edit-екранът се отваря САМО от отворен profile popup (виж
+        // onEditClick по-долу) — при Cancel/X връщаме popup-а обратно
+        // видим (state.profilePopupProfile не е пипан по време на edit,
+        // значи показва старите данни), вместо да оставяме потребителя
+        // да пада обратно към Lobby зад затворения popup.
+        //
+        // ВАЖНО: НЕ минаваме през генеричния render() тук — той rebuild-ва
+        // ЦЕЛИЯ root.innerHTML (пълния Lobby екран), което разкрива голия,
+        // недимнат Lobby за момента между премахването на edit overlay-я и
+        // повторното append-ване на popup DOM възела. Вместо това премахваме
+        // директно само edit overlay възела (евтина, targeted DOM операция)
+        // и връщаме popup-а през renderPopupOnly() — същия overlay-only
+        // render механизъм, ползван вече от admin players-search профил
+        // флоу-а (виж openOtherProfilePopup по-долу) — така никога не се
+        // rebuild-ва/показва Lobby между двата overlay екрана.
+        // skipAnimation:true, защото popup DOM възелът е бил унищожен, докато
+        // edit overlay-ят е стоял отгоре му (isFirstOpen би бил true) — без
+        // това, entrance fade-in анимацията (140-160ms) би разкрила same Lobby.
+        options.root.querySelector('[data-lobby-profile-editor-root="1"]')?.remove()
+        state.profilePopupOpen = true
+        renderPopupOnly({ skipAnimation: true })
       },
       onProfileEditorFileError: (message) => {
         state.profileEditorErrorText = message
@@ -4863,7 +4889,12 @@ export function createLobbyFlowController(
     state.profileEditorSubmitting = false
     state.profilePopupOpen = true
     clearProfileEditorPendingState()
-    render()
+    // Същият overlay-only преход като при Cancel/X (виж onProfileEditClose) —
+    // директно премахваме edit overlay-я и връщаме popup-а през
+    // renderPopupOnly({skipAnimation:true}), вместо пълен Lobby render(), за
+    // да няма нито един frame с разкрит гол Lobby между двата overlay екрана.
+    options.root.querySelector('[data-lobby-profile-editor-root="1"]')?.remove()
+    renderPopupOnly({ skipAnimation: true })
   }
 
   async function submitProfileNameChange(displayName: string): Promise<void> {
@@ -11098,7 +11129,13 @@ export function createLobbyFlowController(
 
   function ensureOwnVipStatusLoaded(): void {
     const authSession = options.getAuthSession?.() ?? null
-    const profile = state.profilePopupProfile
+    // За own profile state.profilePopupProfile си остава null (виж
+    // openProtectedProfileById/onProfileClick — never populate-ват го за
+    // собствения профил), затова използваме СЪЩИЯ fallback като
+    // renderPopupOnly() (createLocalProfilePreview), иначе тази проверка
+    // винаги early-return-ва и VIP статусът никога не се зарежда за own
+    // profile (production data-flow bug, фиксиран тук).
+    const profile = state.profilePopupProfile ?? createLocalProfilePreview(state, authSession)
     const ownProfileId = authSession?.profile.profileId ?? null
 
     if (!state.profilePopupOpen || profile === null || profile.profileId === null || ownProfileId === null) {
@@ -11369,7 +11406,7 @@ export function createLobbyFlowController(
     renderPopupOnly()
   }
 
-  function renderPopupOnly(): void {
+  function renderPopupOnly(renderOptions?: { skipAnimation?: boolean }): void {
     const authSession = options.getAuthSession?.() ?? null
     ensureProfilePopupTargetRoleLoaded()
     ensureOwnVipStatusLoaded()
@@ -11391,6 +11428,7 @@ export function createLobbyFlowController(
         showPikaSupportChatButton: shouldShowPikaSupportChatButton(authSession),
         showTopicsPersonalMessageButton,
         ownVipActiveUntil: isOwnProfile ? state.ownVipActiveUntil : null,
+        skipAnimation: renderOptions?.skipAnimation,
       },
       getPopupCallbacks(),
     )

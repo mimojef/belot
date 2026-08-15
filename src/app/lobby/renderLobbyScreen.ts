@@ -114,6 +114,16 @@ let _pendingAvatarFile: File | null = null
 let _pendingAvatarCrop: AvatarCropSelection | null = null
 let _pendingAvatarPreviewDataUrl: string | null = null
 
+// Брояч на реални извиквания на пълния Lobby render (root.innerHTML rebuild)
+// — test-only observability, ползван от regression теста за Edit↔Profile
+// overlay прехода, за да докаже, че renderPopupOnly()-базираните преходи
+// НЕ минават през тук (виж onProfileEditClose/submitProfileEdit в
+// createLobbyFlowController.ts). Не влияе на production поведение.
+let _renderLobbyScreenCallCount = 0
+export function getRenderLobbyScreenCallCount(): number {
+  return _renderLobbyScreenCallCount
+}
+
 export function clearProfileEditorPendingState(): void {
   _pendingGalleryItems = []
   _pendingAvatarFile = null
@@ -439,6 +449,12 @@ export type LobbyScreenState = {
   profile: PlayerPublicProfileSnapshot
   profilePopupProfile: PlayerPublicProfileSnapshot | null
   profilePopupCanEdit: boolean
+  /**
+   * ISO дата на изтичане на собствения VIP (authoritative active_until) —
+   * пропагира се към renderPlayerProfilePopup САМО когато popup-ът реално
+   * показва собствения профил (виж syncProfilePopup wiring-а по-долу).
+   */
+  ownVipActiveUntil: string | null
   /** Роля на разглеждания акаунт — само за isAdmin (пълен) viewer; виж renderPlayerProfilePopup. */
   profilePopupTargetRole: PlayerAccountRole | null
   /**
@@ -1275,6 +1291,13 @@ export function syncProfilePopup(
     showPikaSupportChatButton?: boolean
     showTopicsPersonalMessageButton?: boolean
     ownVipActiveUntil?: string | null
+    // Форсира skipAnimation дори при "first open" (нов popupRootEl) — нужно
+    // при връщане Edit→Profile: popup DOM възелът е бил унищожен, докато
+    // edit overlay-ят е бил отворен отгоре му, но КОНЦЕПТУАЛНО потребителят
+    // никога не е напускал profile flow-а, затова не трябва да прегражда
+    // entrance fade-in анимацията (140-160ms), която за момент разкрива
+    // голия Lobby зад полу-прозрачния backdrop.
+    skipAnimation?: boolean
   },
   cb: ProfilePopupCallbacks,
 ): void {
@@ -1297,7 +1320,7 @@ export function syncProfilePopup(
     isAdmin: popupState.isAdmin ?? false,
     isOwnProfile: popupState.isOwnProfile ?? false,
     friendshipAction: popupState.friendshipAction,
-    skipAnimation: !isFirstOpen,
+    skipAnimation: !isFirstOpen || (popupState.skipAnimation ?? false),
     viewerIsFullAdmin: popupState.viewerIsFullAdmin ?? false,
     targetAccountRole: popupState.targetAccountRole ?? null,
     ownVipActiveUntil: popupState.ownVipActiveUntil ?? null,
@@ -9559,6 +9582,7 @@ export function renderLobbyScreen(
   root: HTMLElement,
   options: RenderLobbyScreenOptions,
 ): void {
+  _renderLobbyScreenCallCount += 1
   const { state } = options
   const canStartSearch = state.isConnected && !state.isSearching
   const isPhoneLayout = isPhoneLayoutViewport()
@@ -11775,18 +11799,29 @@ export function renderLobbyScreen(
     onMissionClaim: options.onMissionClaimClick,
   })
 
-  // Управление на профил попъпа директно на document.body (без участие в root.innerHTML)
+  // Управление на профил попъпа директно на document.body (без участие в
+  // root.innerHTML) — този sync се вика при ВСЕКИ render (badge/WS/presence
+  // и т.н.), не само при explicit popup действия (renderPopupOnly в
+  // createLobbyFlowController.ts). isOwnProfile/ownVipActiveUntil ТРЯБВА да
+  // се преизчисляват тук по същия начин, иначе следващ несвързан re-render
+  // ги презаписва обратно към false/null (production data-flow bug,
+  // фиксиран тук — виж renderOwnProfileSummary/renderVipBadge).
+  const profilePopupResolvedProfile = state.profilePopupProfile ?? state.profile
+  const profilePopupIsOwnProfile = profilePopupResolvedProfile.profileId !== null
+    && profilePopupResolvedProfile.profileId === state.profile.profileId
   syncProfilePopup(
     {
       isOpen: state.profilePopupOpen,
-      profile: state.profilePopupProfile ?? state.profile,
+      profile: profilePopupResolvedProfile,
       canEdit: state.profilePopupCanEdit,
       isAdmin: state.isAdmin,
+      isOwnProfile: profilePopupIsOwnProfile,
       friendshipAction: state.friendshipAction,
       viewerIsFullAdmin: state.isAdmin,
       targetAccountRole: state.profilePopupTargetRole,
       showPikaSupportChatButton: state.showPikaSupportChatButton,
       showTopicsPersonalMessageButton: false,
+      ownVipActiveUntil: profilePopupIsOwnProfile ? state.ownVipActiveUntil : null,
     },
     {
       onClose: options.onProfileClose,

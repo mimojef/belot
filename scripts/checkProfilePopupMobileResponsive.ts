@@ -28,6 +28,7 @@
 import { createServer as createViteServer, type ViteDevServer } from 'vite'
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright'
 import { createServer as createNetServer } from 'node:net'
+import { computeVipRemainingDays, formatVipDaysLabel } from '../src/ui/overlays/renderPlayerProfilePopup.ts'
 
 let passed = 0
 let failed = 0
@@ -90,24 +91,35 @@ async function clickMessageAuthor(page: Page, profileId: string): Promise<void> 
   }, profileId)
 }
 
-async function clickTopicChip(page: Page, topicId: string): Promise<void> {
-  await page.evaluate((id) => {
-    ;(window as any).__topicsSwitchRaceHarness.clickTopicChip(id)
-  }, topicId)
-}
-
 async function deliverNextResponse(page: Page, topicId: string): Promise<void> {
   await page.evaluate((id) => {
     ;(window as any).__topicsSwitchRaceHarness.deliverNextResponse(id)
   }, topicId)
 }
 
-/** Нужна е НОВА onTopicMessagesLoad заявка за topic-general — превключваме away (topic-a) и обратно, за да я тригнем (pendingResolvers queue-то за topic-general може вече да е консумирано от предишен сценарий). */
+/**
+ * Нужна е НОВА onTopicMessagesLoad заявка за topic-general (pendingResolvers
+ * queue-то за topic-general може вече да е консумирано от предишен сценарий
+ * в СЪЩИЯ page/controller session).
+ *
+ * Старият механизъм (chip-click away към topic-a и обратно към topic-general)
+ * разчиташе на data-topic-chip навигацията, премахната в "Simplify Topics
+ * navigation" (ee52049) — вече не съществува в production UI, затова
+ * clickTopicChip тук вече не намираше нищо и pendingResolvers никога не се
+ * презареждаше (production-verified regression, виж checkTopicsSwitchRace.ts
+ * [2] "legacy topic strip entry points remain absent from render source").
+ *
+ * Текущият реален начин: showTopicsDirectory() (зад navigateToTopics(), т.е.
+ * "Теми" nav entry point-а) безусловно вика loadTopicMessagesForActiveTopic()
+ * при ВСЯКО влизане, дори ако вече сме на Topics екрана (виж коментара в
+ * createLobbyFlowController.ts showTopicsDirectory: "всяко влизане в 'Теми'
+ * трябва да вижда свеж статус"). Затова просто повторно извикване на
+ * openTopicsScreen() (= controller.navigateToTopics()) е достатъчно, за да
+ * получим свеж pending resolver — без нужда от chip-based "switch away".
+ */
 async function refreshGeneralTopicQueue(page: Page): Promise<void> {
-  await clickTopicChip(page, 'topic-a')
-  await deliverNextResponse(page, 'topic-a')
+  await openTopicsScreen(page)
   await page.waitForTimeout(20)
-  await clickTopicChip(page, 'topic-general')
 }
 
 async function deliverNextProfileResponseWithOverrides(
@@ -191,6 +203,73 @@ async function assertActionButtonsFitViewport(page: Page, viewportWidth: number,
 }
 
 console.log('\ncheckProfilePopupMobileResponsive\n')
+
+// ─── VIP remaining days — pure calculation (own profile header redesign) ───
+// Без браузър: computeVipRemainingDays е чист helper, изчислен от authoritative
+// active_until timestamp (НЕ отделно DB поле). Math.ceil + clamp(0) семантика.
+console.log('=== VIP remaining days — pure calculation ===\n')
+
+await check('[V1] Липсващ timestamp (null) → 0 дни', () => {
+  assert(computeVipRemainingDays(null) === 0, `очаквах 0, получих ${computeVipRemainingDays(null)}`)
+})
+
+await check('[V2] Липсващ timestamp (undefined) → 0 дни', () => {
+  assert(computeVipRemainingDays(undefined) === 0, `очаквах 0, получих ${computeVipRemainingDays(undefined)}`)
+})
+
+await check('[V3] Невалиден timestamp низ → 0 дни (не хвърля грешка)', () => {
+  assert(computeVipRemainingDays('not-a-date') === 0, `очаквах 0, получих ${computeVipRemainingDays('not-a-date')}`)
+})
+
+await check('[V4] Timestamp в миналото (изтекъл VIP) → 0 дни, никога отрицателно', () => {
+  const now = Date.parse('2026-08-15T12:00:00.000Z')
+  const past = new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString()
+  assert(computeVipRemainingDays(past, now) === 0, `очаквах 0, получих ${computeVipRemainingDays(past, now)}`)
+})
+
+await check('[V5] Активен VIP с много оставащи дни (556) изчислява точно', () => {
+  const now = Date.parse('2026-08-15T12:00:00.000Z')
+  const future = new Date(now + 556 * 24 * 60 * 60 * 1000).toISOString()
+  const days = computeVipRemainingDays(future, now)
+  assert(days === 556, `очаквах 556, получих ${days}`)
+  assert(formatVipDaysLabel(days) === 'VIP · 556 дни', `очаквах "VIP · 556 дни", получих "${formatVipDaysLabel(days)}"`)
+})
+
+await check('[V6] Голяма стойност (1245 дни) без overflow/грешка в изчислението', () => {
+  const now = Date.parse('2026-08-15T12:00:00.000Z')
+  const future = new Date(now + 1245 * 24 * 60 * 60 * 1000).toISOString()
+  const days = computeVipRemainingDays(future, now)
+  assert(days === 1245, `очаквах 1245, получих ${days}`)
+  assert(formatVipDaysLabel(days) === 'VIP · 1245 дни', `очаквах "VIP · 1245 дни", получих "${formatVipDaysLabel(days)}"`)
+})
+
+await check('[V7] Точно 1 оставащ ден (24ч напред) → "1 ден" (единствено число), НЕ "1 дни"', () => {
+  const now = Date.parse('2026-08-15T12:00:00.000Z')
+  const future = new Date(now + 24 * 60 * 60 * 1000).toISOString()
+  const days = computeVipRemainingDays(future, now)
+  assert(days === 1, `очаквах 1, получих ${days}`)
+  assert(formatVipDaysLabel(days) === 'VIP · 1 ден', `очаквах "VIP · 1 ден", получих "${formatVipDaysLabel(days)}"`)
+})
+
+await check('[V8] Off-by-one guard: няколко часа преди expiration все още показва "1 ден", НЕ "0 дни" (Math.ceil, не floor)', () => {
+  const now = Date.parse('2026-08-15T12:00:00.000Z')
+  const future = new Date(now + 3 * 60 * 60 * 1000).toISOString() // 3 часа напред
+  const days = computeVipRemainingDays(future, now)
+  assert(days === 1, `очаквах 1 (ceil на 3ч от 24ч денонощие), получих ${days}`)
+})
+
+await check('[V9] Off-by-one guard: 25 часа напред → "2 дни" (ceil), не заклещва на "1 ден"', () => {
+  const now = Date.parse('2026-08-15T12:00:00.000Z')
+  const future = new Date(now + 25 * 60 * 60 * 1000).toISOString()
+  const days = computeVipRemainingDays(future, now)
+  assert(days === 2, `очаквах 2, получих ${days}`)
+})
+
+await check('[V10] Нулева стойност → множествено число "0 дни" (не "0 ден")', () => {
+  assert(formatVipDaysLabel(0) === 'VIP · 0 дни', `очаквах "VIP · 0 дни", получих "${formatVipDaysLabel(0)}"`)
+})
+
+console.log('\n=== Browser (Playwright) checks ===\n')
 
 let vite: ViteDevServer | null = null
 let browser: Browser | null = null
@@ -358,6 +437,286 @@ try {
 
     await check('[11] Desktop: няма JS грешки в конзолата', () => {
       assert(errors.length === 0, `Конзолни грешки: ${errors.join(' | ')}`)
+    })
+
+    await context.close()
+  })()
+
+  // ─── Own profile popup: balance + "VIP · N дни" + Редакция (header redesign) ───
+  await (async () => {
+    const ownViewport = { width: 360, height: 776 }
+    const context: BrowserContext = await browser!.newContext({ viewport: ownViewport, hasTouch: true, isMobile: true })
+    const page = await context.newPage()
+    const errors: string[] = []
+    page.on('pageerror', (err) => errors.push(err.message))
+    await page.goto(baseUrl)
+    await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness !== undefined, undefined, { timeout: 10_000 })
+    // Начален render — production main.ts прави същото веднъж при boot;
+    // без него data-lobby-profile-button не съществува все още в DOM-а.
+    await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.render())
+
+    async function openOwnProfilePopup(overrides: Record<string, unknown>, vipActiveUntil: string | null): Promise<void> {
+      await page.evaluate((ov) => (window as any).__topicsSwitchRaceHarness.setOwnProfileOverrides(ov), overrides)
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.openOwnProfile())
+      await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.getOwnVipStatusPendingCount() > 0, undefined, { timeout: 3000 })
+      await page.evaluate((au) => (window as any).__topicsSwitchRaceHarness.deliverOwnVipStatus(au), vipActiveUntil)
+      await page.waitForTimeout(80)
+    }
+    async function closeOwn(): Promise<void> {
+      await closeProfilePopup(page)
+      await page.waitForTimeout(120)
+    }
+
+    await check('[O1] Own profile 360x776: активен VIP много дни → "VIP · 556 дни", popup се побира изцяло', async () => {
+      const future = new Date(Date.now() + 556 * 24 * 60 * 60 * 1000).toISOString()
+      await openOwnProfilePopup({ yellowCoinsBalance: 114500 }, future)
+      const vipText = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnVipDaysText())
+      assert(vipText?.includes('VIP · 556 дни') ?? false, `очаквах "VIP · 556 дни", получих "${vipText}"`)
+      await assertPopupFitsViewport(page, ownViewport.width, ownViewport.height, 'own profile active VIP')
+      await closeOwn()
+    })
+
+    await check('[O2] Own profile: 1 оставащ ден → "VIP · 1 ден" (единствено число)', async () => {
+      const future = new Date(Date.now() + 20 * 60 * 60 * 1000).toISOString() // 20ч напред → ceil=1
+      await openOwnProfilePopup({}, future)
+      const vipText = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnVipDaysText())
+      assert(vipText?.includes('VIP · 1 ден') ?? false, `очаквах "VIP · 1 ден", получих "${vipText}"`)
+      assert(!(vipText?.includes('1 дни') ?? false), `не трябва да съдържа "1 дни", получих "${vipText}"`)
+      await closeOwn()
+    })
+
+    await check('[O3] Own profile: изтекъл VIP (минал timestamp) → "VIP · 0 дни", редът остава видим', async () => {
+      const past = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString()
+      await openOwnProfilePopup({}, past)
+      const vipText = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnVipDaysText())
+      assert(vipText?.includes('VIP · 0 дни') ?? false, `очаквах "VIP · 0 дни", получих "${vipText}"`)
+      await closeOwn()
+    })
+
+    await check('[O4] Own profile: липсващ VIP (activeUntil=null) → "VIP · 0 дни", редът НЕ се крие', async () => {
+      await openOwnProfilePopup({}, null)
+      const vipText = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnVipDaysText())
+      assert(vipText?.includes('VIP · 0 дни') ?? false, `очаквах "VIP · 0 дни", получих "${vipText}"`)
+      const rowExists = await page.evaluate(() => document.querySelector('[data-player-profile-own-vip-days="1"]') !== null)
+      assert(rowExists, 'VIP редът трябва да присъства дори без активен VIP — layout-ът не трябва да зависи от VIP статус')
+      await closeOwn()
+    })
+
+    await check('[O5] Own profile: голяма стойност "VIP · 1245 дни" + голям баланс 12 450 000 — без overflow при 360px', async () => {
+      const future = new Date(Date.now() + 1245 * 24 * 60 * 60 * 1000).toISOString()
+      await openOwnProfilePopup({ yellowCoinsBalance: 12450000 }, future)
+      const vipText = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnVipDaysText())
+      assert(vipText?.includes('VIP · 1245 дни') ?? false, `очаквах "VIP · 1245 дни", получих "${vipText}"`)
+      const balanceText = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnBalanceText())
+      assert(balanceText?.includes('12') ?? false, `балансът трябва да е видим, получих "${balanceText}"`)
+      await assertPopupFitsViewport(page, ownViewport.width, ownViewport.height, 'own profile large values')
+      const hOverflow = await page.evaluate(() => document.body.scrollWidth > window.innerWidth)
+      assert(!hOverflow, 'не трябва да има horizontal overflow при големи стойности')
+      await closeOwn()
+    })
+
+    await check('[O6] Own profile: „Редакция“ е видима и достъпна', async () => {
+      await openOwnProfilePopup({ yellowCoinsBalance: 1000 }, null)
+      const editVisible = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.isOwnEditVisible())
+      assert(editVisible, '„Редакция“ трябва да е видима за own profile')
+      await closeOwn()
+    })
+
+    await check('[O8] Own profile: повторни generic render() докато popup-ът е отворен НЕ трябва да предизвикват повторни onGetOwnVipStatus заявки (request-dedupe guard)', async () => {
+      await page.evaluate((ov) => (window as any).__topicsSwitchRaceHarness.setOwnProfileOverrides(ov), { yellowCoinsBalance: 7000 })
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.openOwnProfile())
+      await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.getOwnVipStatusPendingCount() > 0, undefined, { timeout: 3000 })
+
+      const callCountAfterOpen = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnVipStatusCallCount())
+
+      // Симулираме честите generic render() цикли (WS/presence/badge events), докато заявката е ОЩЕ pending.
+      for (let i = 0; i < 5; i++) {
+        await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.render())
+      }
+      const callCountWhilePending = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnVipStatusCallCount())
+      assert(
+        callCountWhilePending === callCountAfterOpen,
+        `докато заявката е pending, повторни render() не трябва да стартират нова заявка: преди=${callCountAfterOpen}, след=${callCountWhilePending}`,
+      )
+
+      // Доставяме отговора и продължаваме с повторни render() след resolve.
+      const future = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString()
+      await page.evaluate((au) => (window as any).__topicsSwitchRaceHarness.deliverOwnVipStatus(au), future)
+      await page.waitForTimeout(80)
+
+      for (let i = 0; i < 5; i++) {
+        await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.render())
+      }
+      const callCountAfterResolve = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnVipStatusCallCount())
+      assert(
+        callCountAfterResolve === callCountAfterOpen,
+        `след resolve, повторни render() докато popup-ът стои отворен НЕ трябва да стартират нова заявка: очаквах ${callCountAfterOpen}, получих ${callCountAfterResolve}`,
+      )
+
+      await closeOwn()
+    })
+
+    await check('[O11] Own profile: Edit → X → popup-ът се отваря отново със СТАРИТЕ данни (не Lobby fallback)', async () => {
+      const oldAvatarUrl = 'https://picsum.photos/seed/own-avatar-old-x/200/200'
+      await openOwnProfilePopup({ avatarUrl: oldAvatarUrl, yellowCoinsBalance: 3000 }, null)
+
+      const avatarBeforeEdit = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnAvatarImgSrc())
+      assert(avatarBeforeEdit === oldAvatarUrl, `очаквах avatar=${oldAvatarUrl}, получих ${avatarBeforeEdit}`)
+
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.clickOwnEdit())
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.isProfileEditorOpen() === true, undefined, { timeout: 3000 })
+      const popupOpenDuringEdit = await page.evaluate(() => document.querySelector('[data-player-profile-popup-root="1"]') !== null)
+      assert(!popupOpenDuringEdit, 'докато edit екранът е отворен, старият popup НЕ трябва да остава в DOM-а (двоен overlay)')
+
+      const renderCountBeforeClose = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getRenderLobbyScreenCallCount())
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.clickProfileEditorClose())
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.isProfileEditorOpen() === false, undefined, { timeout: 3000 })
+      const renderCountAfterClose = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getRenderLobbyScreenCallCount())
+      assert(
+        renderCountAfterClose === renderCountBeforeClose,
+        `X→Profile не трябва да минава през generic renderLobbyScreen() (пълен Lobby rebuild): преди=${renderCountBeforeClose}, след=${renderCountAfterClose}`,
+      )
+
+      const popupReopened = await page.evaluate(() => document.querySelector('[data-player-profile-popup-root="1"]') !== null)
+      assert(popupReopened, 'след X, profile popup-ът трябва да се отвори отново (не fallback към Lobby)')
+
+      const avatarAfterClose = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnAvatarImgSrc())
+      assert(avatarAfterClose === oldAvatarUrl, `след X очаквах старите данни (avatar=${oldAvatarUrl}), получих ${avatarAfterClose}`)
+
+      await closeOwn()
+    })
+
+    await check('[O12] Own profile: Edit → Откажи → popup-ът се отваря отново със СТАРИТЕ данни (не Lobby fallback)', async () => {
+      const oldAvatarUrl = 'https://picsum.photos/seed/own-avatar-old-cancel/200/200'
+      await openOwnProfilePopup({ avatarUrl: oldAvatarUrl, yellowCoinsBalance: 3500 }, null)
+
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.clickOwnEdit())
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.isProfileEditorOpen() === true, undefined, { timeout: 3000 })
+
+      const renderCountBeforeCancel = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getRenderLobbyScreenCallCount())
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.clickProfileEditorCancel())
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.isProfileEditorOpen() === false, undefined, { timeout: 3000 })
+      const renderCountAfterCancel = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getRenderLobbyScreenCallCount())
+      assert(
+        renderCountAfterCancel === renderCountBeforeCancel,
+        `Откажи→Profile не трябва да минава през generic renderLobbyScreen() (пълен Lobby rebuild): преди=${renderCountBeforeCancel}, след=${renderCountAfterCancel}`,
+      )
+
+      const popupReopened = await page.evaluate(() => document.querySelector('[data-player-profile-popup-root="1"]') !== null)
+      assert(popupReopened, 'след "Откажи", profile popup-ът трябва да се отвори отново (не fallback към Lobby)')
+
+      const avatarAfterCancel = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnAvatarImgSrc())
+      assert(avatarAfterCancel === oldAvatarUrl, `след "Откажи" очаквах старите данни (avatar=${oldAvatarUrl}), получих ${avatarAfterCancel}`)
+
+      await closeOwn()
+    })
+
+    await check('[O13] Own profile: Edit → успешен Save → popup-ът остава отворен с НОВИТЕ данни (не Lobby fallback)', async () => {
+      const oldAvatarUrl = 'https://picsum.photos/seed/own-avatar-before-save/200/200'
+      const newAvatarUrl = 'https://picsum.photos/seed/own-avatar-after-save/200/200'
+      await openOwnProfilePopup({ avatarUrl: oldAvatarUrl, yellowCoinsBalance: 4200 }, null)
+
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.clickOwnEdit())
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.isProfileEditorOpen() === true, undefined, { timeout: 3000 })
+
+      await page.evaluate((url) => (window as any).__topicsSwitchRaceHarness.setNextProfileEditSubmitAvatarUrl(url), newAvatarUrl)
+      // Броячът се хваща ВЕДНАГА след click-а, в СЪЩОТО evaluate извикване —
+      // submitProfileEdit() синхронно прави ОЧАКВАН pending-state render()
+      // ("Запазване...", докато editor-ът е още видим — това е ОК, не е
+      // Lobby flash) ПРЕДИ да опре в await-а към onProfileEditSubmit mock-а.
+      // Затова базовата стойност трябва да е СЛЕД този pending render, за да
+      // тества точно success→popup reopen прехода, а не самия submit start.
+      const renderCountAfterSubmitClick = await page.evaluate(() => {
+        ;(window as any).__topicsSwitchRaceHarness.submitProfileEditorForm()
+        return (window as any).__topicsSwitchRaceHarness.getRenderLobbyScreenCallCount()
+      })
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.isProfileEditorOpen() === false, undefined, { timeout: 3000 })
+      const renderCountAfterSave = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getRenderLobbyScreenCallCount())
+      assert(
+        renderCountAfterSave === renderCountAfterSubmitClick,
+        `Save→Profile (след успешния onProfileEditSubmit resolve) не трябва да минава през generic renderLobbyScreen() (пълен Lobby rebuild): преди=${renderCountAfterSubmitClick}, след=${renderCountAfterSave}`,
+      )
+
+      const popupReopened = await page.evaluate(() => document.querySelector('[data-player-profile-popup-root="1"]') !== null)
+      assert(popupReopened, 'след успешен Save, profile popup-ът трябва да се отвори отново (не fallback към Lobby)')
+
+      const avatarAfterSave = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnAvatarImgSrc())
+      assert(avatarAfterSave === newAvatarUrl, `след Save очаквах новите данни (avatar=${newAvatarUrl}), получих ${avatarAfterSave}`)
+
+      await closeOwn()
+    })
+
+    await check('[O7] Няма JS грешки в конзолата по време на own profile сценариите', () => {
+      assert(errors.length === 0, `Конзолни грешки: ${errors.join(' | ')}`)
+    })
+
+    await context.close()
+  })()
+
+  // ─── Own profile desktop regression (отделен viewport context) ─────────
+  await (async () => {
+    const desktopViewport = { width: 1400, height: 900 }
+    const context: BrowserContext = await browser!.newContext({ viewport: desktopViewport })
+    const page = await context.newPage()
+    await page.goto(baseUrl)
+    await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness !== undefined, undefined, { timeout: 10_000 })
+    await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.render())
+
+    await check('[O9] Own profile desktop 1400x900: VIP ред + баланс + Редакция рендерират коректно, без overflow', async () => {
+      const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+      await page.evaluate((ov) => (window as any).__topicsSwitchRaceHarness.setOwnProfileOverrides(ov), { yellowCoinsBalance: 55000 })
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.openOwnProfile())
+      await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.getOwnVipStatusPendingCount() > 0, undefined, { timeout: 3000 })
+      await page.evaluate((au) => (window as any).__topicsSwitchRaceHarness.deliverOwnVipStatus(au), future)
+      await page.waitForTimeout(80)
+
+      const vipText = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getOwnVipDaysText())
+      assert(vipText?.includes('VIP · 30 дни') ?? false, `очаквах "VIP · 30 дни", получих "${vipText}"`)
+      const editVisible = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.isOwnEditVisible())
+      assert(editVisible, '„Редакция“ трябва да е видима за own profile на desktop')
+      const hOverflow = await page.evaluate(() => document.body.scrollWidth > window.innerWidth)
+      assert(!hOverflow, 'Desktop own profile не трябва да има horizontal overflow')
+    })
+
+    await context.close()
+  })()
+
+  // ─── Other profile: НЕ показва точния брой оставащи VIP дни ─────────────
+  // Собствена, изолирана page/context навигация (свеж pendingResolvers per
+  // topic-general) — не reuse-ва refreshGeneralTopicQueue/chip-based helper-а
+  // по-горе (data-topic-chip вече не съществува в render source-а след
+  // "Simplify Topics navigation" — pre-existing, несвързан с тази задача gap;
+  // тук просто консумираме директно ПЪРВАТА естествена pending заявка).
+  await (async () => {
+    const context: BrowserContext = await browser!.newContext({ viewport: { width: 390, height: 844 } })
+    const page = await context.newPage()
+    await page.goto(baseUrl)
+    await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness !== undefined, undefined, { timeout: 10_000 })
+    await openTopicsScreen(page)
+
+    await check('[O10] Чужд VIP профил показва публичния VIP бадж, БЕЗ точния брой оставащи дни', async () => {
+      await deliverNextResponseWithAuthor(page, 'topic-general', 'hello-from-other-vip', 'other-vip-profile', 'Other VIP')
+      await page.waitForSelector('[data-topic-message-author="other-vip-profile"]', { state: 'attached', timeout: 3000 })
+      await clickMessageAuthor(page, 'other-vip-profile')
+      await page.waitForTimeout(20)
+      await deliverNextProfileResponseWithOverrides(page, 'other-vip-profile', 'Other VIP', { isVip: true, yellowCoinsBalance: 99999 })
+      await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+      await page.waitForTimeout(100)
+
+      const ownVipRowExists = await page.evaluate(() => document.querySelector('[data-player-profile-own-vip-days="1"]') !== null)
+      assert(!ownVipRowExists, 'чужд профил НЕ трябва да показва data-player-profile-own-vip-days (точния брой оставащи VIP дни)')
+
+      const publicBadgeText = await page.evaluate(() => document.querySelector('[data-player-profile-vip-badge="1"]')?.textContent?.trim() ?? null)
+      assert(publicBadgeText === 'VIP', `публичният VIP бадж за чужд профил трябва да е точно "VIP" (без брой дни), получих "${publicBadgeText}"`)
+
+      const editVisible = await page.evaluate(() => document.querySelector('[data-player-profile-edit="1"]') !== null)
+      assert(!editVisible, 'обикновен viewer (не admin) не трябва да вижда „Редакция“ за чужд профил')
+
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
     })
 
     await context.close()

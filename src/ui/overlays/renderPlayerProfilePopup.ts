@@ -487,14 +487,43 @@ function renderEmptyContent(seat: Seat | null): string {
   `
 }
 
-function renderVipBadge(profile: PlayerPublicProfileSnapshot, isOwnProfile: boolean, vipActiveUntil?: string | null): string {
-  if (!profile.isVip) {
+const MS_PER_DAY = 24 * 60 * 60 * 1000
+
+/**
+ * Оставащи VIP дни от authoritative expiration timestamp (active_until) —
+ * НЕ dedicated DB поле. `Math.ceil` (не floor/round) избягва off-by-one:
+ * ако остават напр. 3 часа до изтичане, това все още е "1 ден" за
+ * потребителя, не "0 дни". Clamp-нато до минимум 0 — никога отрицателно
+ * (изтекъл/липсващ VIP, включително потребител, който никога не е имал VIP).
+ */
+export function computeVipRemainingDays(vipActiveUntil: string | null | undefined, nowMs: number = Date.now()): number {
+  if (!vipActiveUntil) {
+    return 0
+  }
+  const activeUntilMs = new Date(vipActiveUntil).getTime()
+  if (!Number.isFinite(activeUntilMs)) {
+    return 0
+  }
+  return Math.max(0, Math.ceil((activeUntilMs - nowMs) / MS_PER_DAY))
+}
+
+function formatVipDaysWords(days: number): string {
+  return `${days} ${days === 1 ? 'ден' : 'дни'}`
+}
+
+export function formatVipDaysLabel(days: number): string {
+  return `VIP · ${formatVipDaysWords(days)}`
+}
+
+function renderVipBadge(profile: PlayerPublicProfileSnapshot, isOwnProfile: boolean): string {
+  // Собственият профил показва VIP статус чрез компактния "VIP · N дни" ред
+  // в renderOwnProfileSummary (винаги видим, вкл. неактивен VIP) — не
+  // дублираме публичния бадж тук за собствения профил. За чужди профили
+  // оставаме само с публичния "VIP" бадж (без точен брой дни — т.13 от брифа
+  // за VIP foundation: не показваме на други потребители оставащия VIP срок).
+  if (isOwnProfile || !profile.isVip) {
     return ''
   }
-
-  const ownExpiryLabel = isOwnProfile && vipActiveUntil
-    ? ` до ${new Date(vipActiveUntil).toLocaleDateString('bg-BG')}`
-    : ''
 
   return `
     <span
@@ -514,7 +543,64 @@ function renderVipBadge(profile: PlayerPublicProfileSnapshot, isOwnProfile: bool
         white-space:nowrap;
         text-shadow:0 0 8px rgba(212,165,32,0.32);
       "
-    >VIP${ownExpiryLabel}</span>
+    >VIP</span>
+  `
+}
+
+/**
+ * Компактна собствена profile summary зона — баланс + VIP оставащи дни +
+ * Редакция, стек от вертикални редове вдясно от avatar-а (mobile-first,
+ * виж CLAUDE.md/task brief-а). VIP редът е ВИНАГИ видим за собствения
+ * профил (дори без активен VIP → "VIP · 0 дни"), за да не мести layout-а
+ * според VIP статус.
+ */
+function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipActiveUntil: string | null): string {
+  const hasBalance = profile.yellowCoinsBalance !== null && profile.yellowCoinsBalance !== undefined
+  const vipDays = computeVipRemainingDays(ownVipActiveUntil)
+
+  return `
+    <div data-player-profile-own-summary="1" style="display:flex;flex-direction:column;gap:5px;min-width:0;">
+      ${hasBalance ? `
+        <div
+          data-player-profile-balance-own="1"
+          style="
+            display:inline-flex;
+            align-items:center;
+            gap:7px;
+            min-width:0;
+            color:#d4a520;
+            font-size:20px;
+            line-height:1;
+            font-weight:900;
+          "
+        >
+          <img src="/assets/lobby/icon-coin.png" alt="" style="width:22px;height:22px;display:block;object-fit:contain;flex:0 0 auto;">
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(Number(profile.yellowCoinsBalance).toLocaleString('bg-BG'))}</span>
+        </div>
+      ` : ''}
+      <div
+        data-player-profile-own-vip-days="1"
+        style="font-size:13px;letter-spacing:0.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
+      ><span style="color:#d4a520;font-weight:800;">VIP · </span><span style="color:#f8fafc;font-weight:400;">${escapeHtml(formatVipDaysWords(vipDays))}</span></div>
+      <span
+        data-player-profile-edit="1"
+        style="
+          display:inline-flex;
+          align-items:center;
+          gap:7px;
+          color:#f8fafc;
+          font-size:15px;
+          font-weight:400;
+          cursor:pointer;
+          white-space:nowrap;
+          width:fit-content;
+          margin-top:6px;
+        "
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        Редакция
+      </span>
+    </div>
   `
 }
 
@@ -857,17 +943,17 @@ function renderProfileContent(
           <div data-player-profile-title="1" style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;width:100%;">
             <div
               style="
-                font-size:30px;
+                font-size:22px;
                 line-height:1.05;
                 font-weight:900;
-                color:#f8fafc;
+                color:#22c55e;
                 word-break:break-word;
               "
             >
               ${escapeHtml(displayName)}
             </div>
 
-            ${renderVipBadge(profile, isOwnProfile, ownVipActiveUntil)}
+            ${renderVipBadge(profile, isOwnProfile)}
 
             ${(canEdit || isAdmin) && !isOwnProfile ? `
               <span
@@ -876,9 +962,9 @@ function renderProfileContent(
                   display:inline-flex;
                   align-items:center;
                   gap:7px;
-                  color:#22c55e;
+                  color:#f8fafc;
                   font-size:16px;
-                  font-weight:900;
+                  font-weight:400;
                   cursor:pointer;
                   white-space:nowrap;
                   padding-bottom:1px;
@@ -892,8 +978,10 @@ function renderProfileContent(
             ${renderChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderPikaTeamRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderTopChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
-            ${renderCoinBalanceInline(profile)}
+            ${!isOwnProfile ? renderCoinBalanceInline(profile) : ''}
           </div>
+
+          ${isOwnProfile ? renderOwnProfileSummary(profile, ownVipActiveUntil) : ''}
 
           <div data-player-profile-rating="1" style="display:flex;align-items:center;gap:6px;">
             <div style="font-size:13px;font-weight:400;color:rgba(148,163,184,0.80);">Рейтинг:</div>
@@ -1296,7 +1384,7 @@ export function renderPlayerProfilePopup(
         }
 
         [data-player-profile-stats="1"] {
-          order:5;
+          order:6;
           grid-column:1 / -1;
           display:grid !important;
           grid-template-columns:repeat(3, minmax(0, 1fr));
@@ -1322,8 +1410,13 @@ export function renderPlayerProfilePopup(
           height:20px !important;
         }
 
-        [data-player-profile-rating="1"] {
+        [data-player-profile-own-summary="1"] {
           order:3;
+          grid-column:2;
+        }
+
+        [data-player-profile-rating="1"] {
+          order:4;
           grid-column:1 / -1;
           flex-wrap:nowrap;
         }
@@ -1339,7 +1432,7 @@ export function renderPlayerProfilePopup(
         }
 
         [data-player-profile-actions="1"] {
-          order:4;
+          order:5;
           grid-column:1 / -1;
         }
 
