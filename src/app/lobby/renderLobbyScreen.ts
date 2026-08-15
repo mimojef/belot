@@ -457,6 +457,10 @@ export type LobbyScreenState = {
   ownVipActiveUntil: string | null
   /** Роля на разглеждания акаунт — само за isAdmin (пълен) viewer; виж renderPlayerProfilePopup. */
   profilePopupTargetRole: PlayerAccountRole | null
+  /** "Дай VIP" inline grant форма в чужд profile popup — само за пълен admin. */
+  vipGrantOpen: boolean
+  vipGrantSubmitting: boolean
+  vipGrantErrorText: string | null
   /**
    * previousRole: ако назначаваме субадмин, докато акаунтът реално е
    * chat_admin (или обратно за chatAdminActionConfirm по-долу) — само за
@@ -770,6 +774,9 @@ export type RenderLobbyScreenOptions = {
   onProfileRevokeTopChatAdminClick: (profileId: string | null) => void
   onTopChatAdminActionCancel: () => void
   onTopChatAdminActionConfirm: () => void
+  onProfileVipGrantOpen: (profileId: string | null) => void
+  onProfileVipGrantCancel: () => void
+  onProfileVipGrantSubmit: (profileId: string | null, rawDays: string) => void
   onProfileEditClose: () => void
   onProfileEditSubmit: (
     avatarFile: File | null,
@@ -1128,6 +1135,9 @@ export type ProfilePopupCallbacks = {
   onRevokePikaTeamClick: (profileId: string | null) => void
   onGrantTopChatAdminClick: (profileId: string | null) => void
   onRevokeTopChatAdminClick: (profileId: string | null) => void
+  onVipGrantOpen: (profileId: string | null) => void
+  onVipGrantCancel: () => void
+  onVipGrantSubmit: (profileId: string | null, rawDays: string) => void
 }
 
 function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profileId: string | null): void {
@@ -1207,6 +1217,24 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
     revokeTopChatAdminEl.addEventListener('mouseenter', () => { revokeTopChatAdminEl.style.textDecoration = 'underline' })
     revokeTopChatAdminEl.addEventListener('mouseleave', () => { revokeTopChatAdminEl.style.textDecoration = 'none' })
   }
+  const vipGrantOpenEl = el.querySelector<HTMLElement>('[data-player-profile-vip-grant-open="1"]')
+  if (vipGrantOpenEl) {
+    vipGrantOpenEl.addEventListener('click', () => {
+      cb.onVipGrantOpen(profileId)
+    })
+    vipGrantOpenEl.addEventListener('mouseenter', () => { vipGrantOpenEl.style.textDecoration = 'underline' })
+    vipGrantOpenEl.addEventListener('mouseleave', () => { vipGrantOpenEl.style.textDecoration = 'none' })
+  }
+  el.querySelector<HTMLButtonElement>('[data-player-profile-vip-grant-cancel="1"]')
+    ?.addEventListener('click', () => {
+      cb.onVipGrantCancel()
+    })
+  el.querySelector<HTMLFormElement>('[data-player-profile-vip-grant-form="1"]')
+    ?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const rawDays = el.querySelector<HTMLInputElement>('[data-player-profile-vip-grant-input="1"]')?.value ?? ''
+      cb.onVipGrantSubmit(profileId, rawDays)
+    })
   el.querySelector<HTMLButtonElement>('[data-player-profile-like]')
     ?.addEventListener('click', (e) => {
       const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileLike?.trim() ?? ''
@@ -1291,6 +1319,9 @@ export function syncProfilePopup(
     showPikaSupportChatButton?: boolean
     showTopicsPersonalMessageButton?: boolean
     ownVipActiveUntil?: string | null
+    vipGrantOpen?: boolean
+    vipGrantSubmitting?: boolean
+    vipGrantErrorText?: string | null
     // Форсира skipAnimation дори при "first open" (нов popupRootEl) — нужно
     // при връщане Edit→Profile: popup DOM възелът е бил унищожен, докато
     // edit overlay-ят е бил отворен отгоре му, но КОНЦЕПТУАЛНО потребителят
@@ -1326,6 +1357,9 @@ export function syncProfilePopup(
     ownVipActiveUntil: popupState.ownVipActiveUntil ?? null,
     showPikaSupportChatButton: popupState.showPikaSupportChatButton ?? false,
     showTopicsPersonalMessageButton: popupState.showTopicsPersonalMessageButton ?? false,
+    vipGrantOpen: popupState.vipGrantOpen ?? false,
+    vipGrantSubmitting: popupState.vipGrantSubmitting ?? false,
+    vipGrantErrorText: popupState.vipGrantErrorText ?? null,
   })
   attachPopupListeners(el, cb, popupState.profile?.profileId ?? null)
 }
@@ -11822,6 +11856,9 @@ export function renderLobbyScreen(
       showPikaSupportChatButton: state.showPikaSupportChatButton,
       showTopicsPersonalMessageButton: false,
       ownVipActiveUntil: profilePopupIsOwnProfile ? state.ownVipActiveUntil : null,
+      vipGrantOpen: state.vipGrantOpen,
+      vipGrantSubmitting: state.vipGrantSubmitting,
+      vipGrantErrorText: state.vipGrantErrorText,
     },
     {
       onClose: options.onProfileClose,
@@ -11844,6 +11881,9 @@ export function renderLobbyScreen(
       onRevokePikaTeamClick: options.onProfileRevokePikaTeamClick,
       onGrantTopChatAdminClick: options.onProfileGrantTopChatAdminClick,
       onRevokeTopChatAdminClick: options.onProfileRevokeTopChatAdminClick,
+      onVipGrantOpen: options.onProfileVipGrantOpen,
+      onVipGrantCancel: options.onProfileVipGrantCancel,
+      onVipGrantSubmit: options.onProfileVipGrantSubmit,
     },
   )
 

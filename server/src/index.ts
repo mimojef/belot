@@ -6633,6 +6633,78 @@ async function handleAdminTopChatAdminRoleRequest(
   return true
 }
 
+/**
+ * Само пълен admin (isFullAdminSession — role==='admin' от FRESH session,
+ * не frontend-only проверка) може да "подари" VIP дни директно от чужд
+ * profile popup. Grant-ва през СЪЩИЯ vipStore.grantVip() authoritative
+ * mechanism като launch-gift/purchase (reason='admin_grant',
+ * base=max(now, currentActiveUntil) удължаване — виж vipStore.applyGrant),
+ * с audit trail в vip_grants.granted_by_profile_id + resulting_active_until.
+ * Не създава паралелна VIP система. Връща пълния, прясно enriched профил
+ * (не само activeUntil) — клиентът презаписва popup-а веднага без reload
+ * (viж updateEditedTargetProfile в createLobbyFlowController.ts).
+ */
+async function handleAdminVipGrantRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = pathname.match(/^\/api\/admin\/profiles\/([^/]+)\/vip-grant$/)
+  if (!match) return false
+
+  if (req.method !== 'POST') return false
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Само администратор може да дава VIP.' })
+    return true
+  }
+
+  const targetProfileId = decodeURIComponent((match[1] ?? '').trim())
+
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(targetProfileId)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден profileId.' })
+    return true
+  }
+
+  if (session.profile.profileId === targetProfileId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Не можеш да дадеш VIP на себе си оттук.' })
+    return true
+  }
+
+  if (playerProgressStore.getPublicProfile(targetProfileId) === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Профилът не беше намерен.' })
+    return true
+  }
+
+  const body = await readJsonRequestBody(req, MAX_JSON_BODY_BYTES)
+  if (!isRecord(body) || !hasOnlyAllowedFields(body, new Set(['days']))) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Позволено е само поле days.' })
+    return true
+  }
+
+  const days = getNumberField(body, 'days')
+  if (days === null || !Number.isInteger(days) || days <= 0) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Броят дни трябва да е цяло положително число.' })
+    return true
+  }
+
+  vipStore.grantVip(targetProfileId, 'admin_grant', { unit: 'days', amount: days }, session.profile.profileId)
+
+  const updatedProfile = playerProgressStore.getPublicProfile(targetProfileId)
+  if (updatedProfile === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Профилът не беше намерен след grant-а.' })
+    return true
+  }
+
+  const [enrichedProfile] = enrichPlayerProfilesForViewer([updatedProfile], session.profile.profileId)
+
+  sendJsonResponse(res, 200, { ok: true, profile: enrichedProfile })
+  return true
+}
+
 async function handleProfileBlockRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -12646,6 +12718,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminTopChatAdminRoleRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminVipGrantRequest(req, res, requestUrl.pathname)) {
     return
   }
 

@@ -174,6 +174,18 @@ let ownVipStatusCallCount = 0
 let nextProfileEditSubmitError: string | null = null
 let nextProfileEditSubmitAvatarUrl: string | null = null
 
+// Ролята на own-профила (account.role) — определя isFullAdminAuthSession
+// client-side (viewerIsFullAdmin/isAdmin). По подразбиране 'player'; тестовете
+// за "Дай VIP" (само admin) я превключват преди да отворят чужд profile popup.
+let ownAuthAccountRole: 'player' | 'admin' | 'subadmin' | 'pika_team' | 'top_chat_admin' | 'chat_admin' = 'player'
+
+// Mock резултат за следващото onAdminGrantVip — тестовете задават точния
+// очакван резултатен профил (или грешка) преди да submit-нат "Дай VIP" формата.
+let nextAdminGrantVipResult:
+  | { ok: true; profile: PlayerPublicProfileSnapshot }
+  | { ok: false; message: string }
+  | null = null
+
 const controller = createLobbyFlowController({
   root,
   joinMatchmaking: () => {},
@@ -181,7 +193,7 @@ const controller = createLobbyFlowController({
   onMatchFound: () => {},
   onLobbyChatSend: () => {},
   getAuthSession: () => ({
-    account: { role: 'player' },
+    account: { role: ownAuthAccountRole },
     // galleryImages:[] по подразбиране — реалният PlayerPublicProfileSnapshot
     // от сървъра винаги го включва; profile edit модалът го итерира директно
     // ([...editorProfile.galleryImages]), затова mock-ът трябва да го има.
@@ -237,6 +249,14 @@ const controller = createLobbyFlowController({
       nextProfileEditSubmitAvatarUrl = null
     }
     return null
+  },
+  onAdminGrantVip: async () => {
+    if (nextAdminGrantVipResult === null) {
+      return { ok: false, message: 'no mock result configured for this test' }
+    }
+    const result = nextAdminGrantVipResult
+    nextAdminGrantVipResult = null
+    return result
   },
 })
 
@@ -318,4 +338,30 @@ const controller = createLobbyFlowController({
   },
   getOwnAvatarImgSrc: () => document.querySelector<HTMLImageElement>('[data-player-profile-avatar="1"] img')?.getAttribute('src') ?? null,
   getRenderLobbyScreenCallCount,
+  // ─── "Дай VIP" admin grant (foreign profile popup) ───────────────────────
+  setOwnAccountRole: (role: 'player' | 'admin' | 'subadmin' | 'pika_team' | 'top_chat_admin' | 'chat_admin') => {
+    ownAuthAccountRole = role
+  },
+  isVipGrantTriggerVisible: () => document.querySelector('[data-player-profile-vip-grant-open="1"]') !== null,
+  isVipGrantFormOpen: () => document.querySelector('[data-player-profile-vip-grant-form="1"]') !== null,
+  clickVipGrantOpen: () => {
+    document.querySelector<HTMLButtonElement>('[data-player-profile-vip-grant-open="1"]')?.click()
+  },
+  clickVipGrantCancel: () => {
+    document.querySelector<HTMLButtonElement>('[data-player-profile-vip-grant-cancel="1"]')?.click()
+  },
+  setVipGrantDaysInput: (value: string) => {
+    const input = document.querySelector<HTMLInputElement>('[data-player-profile-vip-grant-input="1"]')
+    if (input) input.value = value
+  },
+  submitVipGrantForm: () => {
+    document.querySelector<HTMLButtonElement>('[data-player-profile-vip-grant-submit="1"]')?.click()
+  },
+  getVipGrantErrorText: () => document.querySelector('[data-player-profile-vip-grant-error="1"]')?.textContent ?? null,
+  setNextAdminGrantVipSuccess: (profileId: string, displayName: string, overrides: Partial<PlayerPublicProfileSnapshot>) => {
+    nextAdminGrantVipResult = { ok: true, profile: makeProfile(profileId, displayName, overrides) }
+  },
+  setNextAdminGrantVipError: (message: string) => {
+    nextAdminGrantVipResult = { ok: false, message }
+  },
 }

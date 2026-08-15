@@ -243,6 +243,16 @@ export type CreateLobbyFlowControllerOptions = {
   onPresetAvatarApply?: (targetProfileId: string | null, avatarUrl: string) => Promise<string | null>
   onProfileGalleryDelete?: (targetProfileId: string | null, imageId: string) => Promise<string | null>
   onProfileNameChangeSubmit?: (targetProfileId: string | null, displayName: string) => Promise<string | null>
+  /**
+   * Само за пълен admin — server-side проверката е authoritative (виж
+   * handleAdminVipGrantRequest в server/src/index.ts); тук е само UI trigger.
+   * Връща пълния, прясно enriched профил (не само activeUntil), за да може
+   * updateEditedTargetProfile да презапише popup-а веднага, без reload.
+   */
+  onAdminGrantVip?: (
+    targetProfileId: string,
+    days: number,
+  ) => Promise<{ ok: true; profile: PlayerPublicProfileSnapshot } | { ok: false; message: string }>
   onChangePasswordSubmit?: (currentPassword: string, newPassword: string) => Promise<string | null>
   onPlayersLoad?: (
     page: number,
@@ -1028,6 +1038,10 @@ type InternalLobbyFlowState = {
   topChatAdminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | 'chat_admin' | 'pika_team' | null } | null
   topChatAdminActionBusy: boolean
   topChatAdminActionToast: { text: string; ok: boolean } | null
+  /** "Дай VIP" inline grant форма в чужд profile popup — само за пълен admin. */
+  vipGrantOpen: boolean
+  vipGrantSubmitting: boolean
+  vipGrantErrorText: string | null
   profileEditorOpen: boolean
   profileEditorTargetProfileId: string | null
   profileEditorTargetProfile: PlayerPublicProfileSnapshot | null
@@ -1482,6 +1496,9 @@ function createInitialState(): InternalLobbyFlowState {
     topChatAdminActionConfirm: null,
     topChatAdminActionBusy: false,
     topChatAdminActionToast: null,
+    vipGrantOpen: false,
+    vipGrantSubmitting: false,
+    vipGrantErrorText: null,
     profileEditorOpen: false,
     profileEditorTargetProfileId: null,
     profileEditorTargetProfile: null,
@@ -3035,6 +3052,9 @@ export function createLobbyFlowController(
       profilePopupCanEdit: state.profilePopupCanEdit,
       ownVipActiveUntil: state.ownVipActiveUntil,
       profilePopupTargetRole: state.profilePopupTargetRole,
+      vipGrantOpen: state.vipGrantOpen,
+      vipGrantSubmitting: state.vipGrantSubmitting,
+      vipGrantErrorText: state.vipGrantErrorText,
       subadminActionConfirm: state.subadminActionConfirm,
       subadminActionBusy: state.subadminActionBusy,
       subadminActionToast: state.subadminActionToast,
@@ -3421,6 +3441,9 @@ export function createLobbyFlowController(
         state.profilePopupOpen = false
         state.profilePopupProfile = null
         state.profilePopupCanEdit = true
+        state.vipGrantOpen = false
+        state.vipGrantSubmitting = false
+        state.vipGrantErrorText = null
         renderPopupOnly()
       },
       // ВАЖНО: трябва да приема profileId и да делегира към същия
@@ -3483,6 +3506,15 @@ export function createLobbyFlowController(
       },
       onTopChatAdminActionConfirm: () => {
         void confirmTopChatAdminAction()
+      },
+      onProfileVipGrantOpen: (profileId) => {
+        getPopupCallbacks().onVipGrantOpen(profileId)
+      },
+      onProfileVipGrantCancel: () => {
+        getPopupCallbacks().onVipGrantCancel()
+      },
+      onProfileVipGrantSubmit: (profileId, rawDays) => {
+        getPopupCallbacks().onVipGrantSubmit(profileId, rawDays)
       },
       onProfileEditClose: () => {
         if (state.profileEditorSubmitting) return
@@ -4928,6 +4960,52 @@ export function createLobbyFlowController(
       void new Audio('/audio/game-sounds/coins.mp3').play().catch(() => undefined)
     }
     render()
+  }
+
+  /**
+   * "Дай VIP" — само админско действие върху ЧУЖД profile popup, извикано
+   * от onVipGrantSubmit. Клиентската валидация тук е за instant feedback
+   * (без round-trip за очевидно грешен вход) — server-side проверката
+   * (handleAdminVipGrantRequest) е authoritative и се прави независимо.
+   * Успешен grant презаписва profile popup-а веднага (updateEditedTargetProfile
+   * + renderPopupOnly(), НЕ render()) — same overlay-only принцип като
+   * Edit↔Profile, за да няма Lobby flicker. При грешка popup-ът и формата
+   * остават отворени, локалният VIP статус НЕ се променя.
+   */
+  async function submitAdminVipGrant(profileId: string | null, rawDays: string): Promise<void> {
+    if (state.vipGrantSubmitting) return
+    if (!profileId) return
+
+    const trimmed = rawDays.trim()
+    const days = Number(trimmed)
+    if (trimmed === '' || !Number.isInteger(days) || days <= 0) {
+      state.vipGrantErrorText = 'Въведи цяло положително число дни.'
+      renderPopupOnly()
+      return
+    }
+
+    state.vipGrantSubmitting = true
+    state.vipGrantErrorText = null
+    renderPopupOnly()
+
+    const result = options.onAdminGrantVip
+      ? await options.onAdminGrantVip(profileId, days).catch(
+          () => ({ ok: false as const, message: 'Няма връзка със сървъра.' }),
+        )
+      : { ok: false as const, message: 'Функцията временно не е налична.' }
+
+    if (!result.ok) {
+      state.vipGrantSubmitting = false
+      state.vipGrantErrorText = result.message
+      renderPopupOnly()
+      return
+    }
+
+    updateEditedTargetProfile(result.profile)
+    state.vipGrantOpen = false
+    state.vipGrantSubmitting = false
+    state.vipGrantErrorText = null
+    renderPopupOnly()
   }
 
   async function fetchOwnLikesCount(): Promise<void> {
@@ -10987,6 +11065,9 @@ export function createLobbyFlowController(
         state.profilePopupProfile = null
         state.profilePopupCanEdit = true
         state.profilePopupContext = 'other'
+        state.vipGrantOpen = false
+        state.vipGrantSubmitting = false
+        state.vipGrantErrorText = null
         syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
       },
       onEditClick: (profileId) => {
@@ -11080,6 +11161,26 @@ export function createLobbyFlowController(
         state.profilePopupOpen = false
         syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
         render()
+      },
+      // За разлика от subadmin/chat-admin/pika-team/top-chat-admin grant-овете
+      // по-горе, "Дай VIP" НЕ затваря popup-а и НЕ отваря отделен confirm
+      // overlay — компактна inline форма В САМИЯ popup (виж task brief-а).
+      // Всички преходи минават през renderPopupOnly(), не render(), за да
+      // няма Lobby flicker (същия overlay-only принцип като Edit↔Profile).
+      onVipGrantOpen: (profileId) => {
+        if (!profileId) return
+        state.vipGrantOpen = true
+        state.vipGrantErrorText = null
+        renderPopupOnly()
+      },
+      onVipGrantCancel: () => {
+        state.vipGrantOpen = false
+        state.vipGrantErrorText = null
+        state.vipGrantSubmitting = false
+        renderPopupOnly()
+      },
+      onVipGrantSubmit: (profileId, rawDays) => {
+        void submitAdminVipGrant(profileId, rawDays)
       },
     }
   }
@@ -11429,6 +11530,9 @@ export function createLobbyFlowController(
         showPikaSupportChatButton: shouldShowPikaSupportChatButton(authSession),
         showTopicsPersonalMessageButton,
         ownVipActiveUntil: isOwnProfile ? state.ownVipActiveUntil : null,
+        vipGrantOpen: state.vipGrantOpen,
+        vipGrantSubmitting: state.vipGrantSubmitting,
+        vipGrantErrorText: state.vipGrantErrorText,
         skipAnimation: renderOptions?.skipAnimation,
       },
       getPopupCallbacks(),

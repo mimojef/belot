@@ -3199,6 +3199,30 @@ async function loadAdminTargetRole(
   }
 }
 
+async function adminGrantVip(
+  targetProfileId: string,
+  days: number,
+): Promise<{ ok: true; profile: PlayerPublicProfileSnapshot } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(targetProfileId)}/vip-grant`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ days }),
+      },
+    )
+    const data = (await response.json().catch(() => ({ ok: false, message: 'Невалиден отговор от сървъра.' }))) as AdminProfileResponse
+    if (!response.ok || !data.ok || !data.profile) {
+      return { ok: false, message: data.message ?? 'VIP не беше даден.' }
+    }
+    return { ok: true, profile: data.profile }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function loadOwnVipStatus(): Promise<{ ok: true; activeUntil: string | null } | { ok: false }> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/vip/status`, {
@@ -4588,6 +4612,7 @@ lobby = createLobbyFlowController({
   getApiBaseUrl: () => getApiBaseUrl(),
   onProfileGalleryDelete: (targetProfileId, imageId) => deleteProfileGalleryImage(targetProfileId, imageId),
   onProfileNameChangeSubmit: (targetProfileId, displayName) => submitProfileNameChange(targetProfileId, displayName),
+  onAdminGrantVip: (targetProfileId, days) => adminGrantVip(targetProfileId, days),
   onChangePasswordSubmit: (currentPassword, newPassword) => submitChangePassword(currentPassword, newPassword),
   onPlayersLoad: (page, snapshotToken) => loadPlayersDirectory(page, snapshotToken),
   onPlayersSearch: (query, signal) => searchPlayersDirectory(query, signal),

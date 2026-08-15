@@ -40,6 +40,15 @@ export type RenderPlayerProfilePopupOptions = {
    * оставаме само с публичния "VIP" бадж, без дата (виж т.13 от брифа).
    */
   ownVipActiveUntil?: string | null
+  /**
+   * "Дай VIP" inline grant форма — само за viewerIsFullAdmin, само за чужд
+   * профил. vipGrantOpen превключва между trigger линка и разгънатото поле;
+   * submitting/errorText управляват inline съобщението (без reload/затваряне
+   * на popup-а).
+   */
+  vipGrantOpen?: boolean
+  vipGrantSubmitting?: boolean
+  vipGrantErrorText?: string | null
 }
 
 export type PlayerAccountRole = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
@@ -897,6 +906,132 @@ function renderTopChatAdminRoleControls(
   `
 }
 
+/**
+ * "Дай VIP" trigger линк — само viewerIsFullAdmin (role==='admin', НЕ
+ * subadmin/pika_team/top_chat_admin/chat_admin), само чужд профил
+ * (isOwnProfile===false), само с валиден profileId. Скрит докато формата
+ * е отворена (viж renderVipGrantForm по-долу — взаимно изключващи се).
+ */
+function renderVipGrantTrigger(
+  profileId: string | null,
+  isOwnProfile: boolean,
+  viewerIsFullAdmin: boolean,
+  vipGrantOpen: boolean,
+): string {
+  if (isOwnProfile || !viewerIsFullAdmin || !profileId || vipGrantOpen) {
+    return ''
+  }
+
+  return `
+    <span
+      data-player-profile-vip-grant-open="1"
+      style="
+        display:inline-flex;
+        align-items:center;
+        gap:6px;
+        color:#d4a520;
+        font-size:14px;
+        font-weight:900;
+        cursor:pointer;
+        white-space:nowrap;
+      "
+    >Дай VIP</span>
+  `
+}
+
+/**
+ * Компактна inline "Дай VIP" форма — отваря се БЕЗ нов page/navigation flow,
+ * директно в profile popup-а (виж task brief-а). Enter потвърждава (native
+ * <form> submit), Отказ/X затварят само формата (не самия popup — виж
+ * onVipGrantCancel в createLobbyFlowController.ts). Валидацията на
+ * "цяло положително число" е в контролера (submitAdminVipGrant), не тук —
+ * тази функция само рендерира текущото state (submitting/errorText).
+ */
+function renderVipGrantForm(
+  profileId: string | null,
+  isOwnProfile: boolean,
+  viewerIsFullAdmin: boolean,
+  vipGrantOpen: boolean,
+  vipGrantSubmitting: boolean,
+  vipGrantErrorText: string | null,
+): string {
+  if (isOwnProfile || !viewerIsFullAdmin || !profileId || !vipGrantOpen) {
+    return ''
+  }
+
+  return `
+    <form
+      data-player-profile-vip-grant-form="1"
+      style="
+        display:flex;
+        align-items:center;
+        gap:8px;
+        flex-wrap:wrap;
+        padding:10px 12px;
+        border-radius:8px;
+        border:1px solid rgba(212,165,32,0.38);
+        background:rgba(212,165,32,0.07);
+      "
+    >
+      <label style="font-size:12px;font-weight:800;color:rgba(226,232,240,0.82);white-space:nowrap;">Брой дни:</label>
+      <input
+        type="number"
+        inputmode="numeric"
+        data-player-profile-vip-grant-input="1"
+        ${vipGrantSubmitting ? 'disabled' : ''}
+        style="
+          width:76px;
+          height:34px;
+          border-radius:6px;
+          border:1px solid rgba(212,165,32,0.45);
+          background:#050505;
+          color:#f8fafc;
+          padding:0 8px;
+          font-size:14px;
+          font-weight:700;
+          outline:none;
+        "
+      />
+      <button
+        type="submit"
+        data-player-profile-vip-grant-submit="1"
+        ${vipGrantSubmitting ? 'disabled' : ''}
+        style="
+          height:34px;
+          padding:0 14px;
+          border:0;
+          border-radius:6px;
+          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+          color:#080808;
+          font-size:13px;
+          font-weight:900;
+          cursor:${vipGrantSubmitting ? 'default' : 'pointer'};
+          opacity:${vipGrantSubmitting ? '0.62' : '1'};
+        "
+      >${vipGrantSubmitting ? 'Изпращане...' : 'Дай VIP'}</button>
+      <button
+        type="button"
+        data-player-profile-vip-grant-cancel="1"
+        ${vipGrantSubmitting ? 'disabled' : ''}
+        style="
+          height:34px;
+          padding:0 14px;
+          border:1px solid rgba(255,255,255,0.16);
+          border-radius:6px;
+          background:#080808;
+          color:#f8fafc;
+          font-size:13px;
+          font-weight:900;
+          cursor:pointer;
+        "
+      >Отказ</button>
+      ${vipGrantErrorText ? `
+        <div data-player-profile-vip-grant-error="1" style="width:100%;font-size:12px;font-weight:800;color:#fca5a5;">${escapeHtml(vipGrantErrorText)}</div>
+      ` : ''}
+    </form>
+  `
+}
+
 function renderProfileContent(
   profile: PlayerPublicProfileSnapshot,
   seat: Seat | null,
@@ -909,6 +1044,9 @@ function renderProfileContent(
   showPikaSupportChatButton: boolean,
   showTopicsPersonalMessageButton: boolean,
   ownVipActiveUntil: string | null,
+  vipGrantOpen: boolean,
+  vipGrantSubmitting: boolean,
+  vipGrantErrorText: string | null,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -1009,7 +1147,10 @@ function renderProfileContent(
             ${renderChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderPikaTeamRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderTopChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
+            ${renderVipGrantTrigger(profile.profileId, isOwnProfile, viewerIsFullAdmin, vipGrantOpen)}
           </div>
+
+          ${renderVipGrantForm(profile.profileId, isOwnProfile, viewerIsFullAdmin, vipGrantOpen, vipGrantSubmitting, vipGrantErrorText)}
 
           ${isOwnProfile ? renderOwnProfileSummary(profile, ownVipActiveUntil) : renderForeignProfileSummary(profile)}
 
@@ -1334,6 +1475,9 @@ export function renderPlayerProfilePopup(
           options.showPikaSupportChatButton ?? false,
           options.showTopicsPersonalMessageButton ?? false,
           options.ownVipActiveUntil ?? null,
+          options.vipGrantOpen ?? false,
+          options.vipGrantSubmitting ?? false,
+          options.vipGrantErrorText ?? null,
         )
       : renderEmptyContent(options.seat)
 

@@ -20,7 +20,12 @@
  * [10] vip_grants ред пази interval_unit/interval_amount точно както е подаден
  *        (audit trail — не се преизчислява в дни при запис)
  * [11] vip_grants НЯМА purchase_id/granted_by_account_id колони (самостоятелен
- *        ledger, без coupling към coin_purchase_ledger)
+ *        ledger, без coupling към coin_purchase_ledger/accounts), но ИМА
+ *        granted_by_profile_id + resulting_active_until (admin grant audit)
+ * [19] grantVip('admin_grant', ..., adminProfileId) записва granted_by_profile_id;
+ *        launch_gift/purchase grants оставят полето NULL (self-service)
+ * [20] vip_grants.resulting_active_until на grant реда съвпада точно с
+ *        activeUntil, върнат от grantVip() за същия grant
  *
  * addCalendarInterval — subscription-style clamp semantics (unit ниво, точно
  * примерите от брифа):
@@ -118,8 +123,10 @@ async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   }
 }
 
-// Самостоятелна schema (огледало на реалната migration) — БЕЗ purchase_id,
-// БЕЗ granted_by_account_id, БЕЗ coin_purchase_ledger FK.
+// Самостоятелна schema (огледало на реалните migrations, вкл.
+// 20260815_001_add_vip_grant_admin_audit_fields.sql) — БЕЗ purchase_id, БЕЗ
+// granted_by_account_id, БЕЗ coin_purchase_ledger FK. granted_by_profile_id +
+// resulting_active_until са admin-grant audit trail-a (виж [19]/[20]).
 function buildSchema(db: DatabaseSync): void {
   db.exec('PRAGMA foreign_keys = ON;')
   db.exec(`
@@ -143,6 +150,8 @@ function buildSchema(db: DatabaseSync): void {
       interval_unit TEXT NOT NULL CHECK (interval_unit IN ('days', 'months', 'years')),
       interval_amount INTEGER NOT NULL CHECK (interval_amount > 0),
       granted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      granted_by_profile_id TEXT NULL REFERENCES profiles(profile_id) ON DELETE SET NULL,
+      resulting_active_until TEXT NULL,
       FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
     );
 
@@ -199,6 +208,8 @@ await withTempDir(async (dir) => {
   seedProfile(db, 'profile-race')
   seedProfile(db, 'profile-10-audit')
   seedProfile(db, 'profile-clamp')
+  seedProfile(db, 'profile-19-audit')
+  seedProfile(db, 'admin-actor-19')
 
   const store = await createVipStore(dbPath)
 
@@ -309,16 +320,55 @@ await withTempDir(async (dir) => {
     assertEqual(row.interval_amount, 1, 'audit trail трябва да пази amount=1')
   })
 
-  await check('[11] vip_grants НЯМА purchase_id/granted_by_account_id (самостоятелен ledger)', () => {
+  await check('[11] vip_grants НЯМА purchase_id/granted_by_account_id, но ИМА admin audit trail полета', () => {
     const columns = db.prepare(`PRAGMA table_info(vip_grants)`).all() as Array<{ name: string }>
     const columnNames = columns.map((c) => c.name)
     assert(!columnNames.includes('purchase_id'), 'vip_grants НЕ трябва да има purchase_id колона')
-    assert(!columnNames.includes('granted_by_account_id'), 'vip_grants НЕ трябва да има granted_by_account_id колона')
+    assert(!columnNames.includes('granted_by_account_id'), 'vip_grants НЕ трябва да има granted_by_account_id колона (audit-ва се по profile_id, не account_id)')
     assertEqual(
       columnNames.sort().join(','),
-      ['grant_id', 'profile_id', 'reason', 'interval_unit', 'interval_amount', 'granted_at'].sort().join(','),
-      'vip_grants трябва да съдържа точно шестте минимални полета',
+      [
+        'grant_id', 'profile_id', 'reason', 'interval_unit', 'interval_amount', 'granted_at',
+        'granted_by_profile_id', 'resulting_active_until',
+      ].sort().join(','),
+      'vip_grants трябва да съдържа точно осемте полета (оригиналните шест + admin grant audit trail-a)',
     )
+  })
+
+  await check('[19] admin_grant записва granted_by_profile_id на admin-a; launch_gift/purchase остават NULL', () => {
+    const status = store.grantVip('profile-19-audit', 'admin_grant', { unit: 'days', amount: 15 }, 'admin-actor-19')
+    assert(status.isActive === true, 'трябва да е активен след admin grant')
+
+    const adminRow = db.prepare(
+      `SELECT granted_by_profile_id FROM vip_grants WHERE profile_id = ? AND reason = 'admin_grant'`,
+    ).get('profile-19-audit') as { granted_by_profile_id: string | null }
+    assertEqual(adminRow.granted_by_profile_id, 'admin-actor-19', 'admin_grant трябва да пази actor-a на granted_by_profile_id')
+
+    const launchGiftRow = db.prepare(
+      `SELECT granted_by_profile_id FROM vip_grants WHERE profile_id = ? AND reason = 'launch_gift'`,
+    ).get('profile-1') as { granted_by_profile_id: string | null } | undefined
+    assert(
+      launchGiftRow !== undefined && launchGiftRow.granted_by_profile_id === null,
+      'launch_gift е self-service — granted_by_profile_id трябва да е NULL',
+    )
+
+    const purchaseRow = db.prepare(
+      `SELECT granted_by_profile_id FROM vip_grants WHERE profile_id = ? AND reason = 'purchase'`,
+    ).get('profile-7') as { granted_by_profile_id: string | null } | undefined
+    assert(
+      purchaseRow !== undefined && purchaseRow.granted_by_profile_id === null,
+      'purchase е self-service — granted_by_profile_id трябва да е NULL',
+    )
+  })
+
+  await check('[20] vip_grants.resulting_active_until на grant реда съвпада с върнатия activeUntil', () => {
+    const status = store.grantVip('profile-19-audit', 'admin_grant', { unit: 'days', amount: 3 }, 'admin-actor-19')
+    const row = db.prepare(
+      `SELECT resulting_active_until FROM vip_grants WHERE profile_id = ? AND reason = 'admin_grant' ORDER BY granted_at DESC, rowid DESC LIMIT 1`,
+    ).get('profile-19-audit') as { resulting_active_until: string }
+    const resultingMs = new Date(row.resulting_active_until.endsWith('Z') ? row.resulting_active_until : `${row.resulting_active_until}Z`).getTime()
+    const statusMs = new Date(status.activeUntil!).getTime()
+    assertEqual(resultingMs, statusMs, 'resulting_active_until на grant реда трябва да съвпада точно с activeUntil, върнат от grantVip()')
   })
 
   store.close()

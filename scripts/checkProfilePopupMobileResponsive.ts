@@ -858,6 +858,194 @@ try {
 
     await context.close()
   })()
+
+  // ─── "Дай VIP" admin grant (само role==='admin', само чужд профил) ─────
+  await (async () => {
+    const context: BrowserContext = await browser!.newContext({ viewport: { width: 390, height: 844 } })
+    const page = await context.newPage()
+    const errors: string[] = []
+    page.on('pageerror', (err) => errors.push(err.message))
+    await page.goto(baseUrl)
+    await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness !== undefined, undefined, { timeout: 10_000 })
+
+    async function openForeignProfilePopupAs(
+      role: 'player' | 'admin' | 'subadmin' | 'pika_team' | 'top_chat_admin' | 'chat_admin',
+      profileId: string,
+      displayName: string,
+      overrides: Record<string, unknown>,
+    ): Promise<void> {
+      await page.evaluate((r) => (window as any).__topicsSwitchRaceHarness.setOwnAccountRole(r), role)
+      await refreshGeneralTopicQueue(page)
+      await deliverNextResponseWithAuthor(page, 'topic-general', `hello-from-${profileId}`, profileId, displayName)
+      await page.waitForSelector(`[data-topic-message-author="${profileId}"]`, { state: 'attached', timeout: 3000 })
+      await clickMessageAuthor(page, profileId)
+      await page.waitForTimeout(20)
+      await deliverNextProfileResponseWithOverrides(page, profileId, displayName, overrides)
+      await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+      await page.waitForTimeout(100)
+    }
+
+    await check('[V1] admin viewer вижда "Дай VIP" в чужд profile popup', async () => {
+      await openForeignProfilePopupAs('admin', 'vipgrant-admin-target-1', 'Target One', {})
+      const visible = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.isVipGrantTriggerVisible())
+      assert(visible, '"Дай VIP" трябва да е видим за admin viewer в чужд профил')
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
+    })
+
+    const NON_ADMIN_ROLES: Array<'player' | 'subadmin' | 'pika_team' | 'top_chat_admin' | 'chat_admin'> = [
+      'player', 'subadmin', 'pika_team', 'top_chat_admin', 'chat_admin',
+    ]
+    for (const role of NON_ADMIN_ROLES) {
+      await check(`[V2] ${role} viewer НЕ вижда "Дай VIP" в чужд profile popup`, async () => {
+        await openForeignProfilePopupAs(role, `vipgrant-target-${role}`, `Target ${role}`, {})
+        const visible = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.isVipGrantTriggerVisible())
+        assert(!visible, `"Дай VIP" НЕ трябва да е видим за ${role}`)
+        await closeProfilePopup(page)
+        await page.waitForTimeout(100)
+      })
+    }
+
+    await check('[V4] "Дай VIP" → Отказ затваря само формата (popup остава отворен, без generic Lobby render)', async () => {
+      await openForeignProfilePopupAs('admin', 'vipgrant-cancel-target', 'Cancel Target', {})
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.clickVipGrantOpen())
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.isVipGrantFormOpen() === true, undefined, { timeout: 3000 })
+
+      const renderCountBeforeCancel = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getRenderLobbyScreenCallCount())
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.clickVipGrantCancel())
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.isVipGrantFormOpen() === false, undefined, { timeout: 3000 })
+      const renderCountAfterCancel = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getRenderLobbyScreenCallCount())
+      assert(
+        renderCountAfterCancel === renderCountBeforeCancel,
+        `Отказ не трябва да минава през generic renderLobbyScreen(): преди=${renderCountBeforeCancel}, след=${renderCountAfterCancel}`,
+      )
+
+      const popupStillOpen = await page.evaluate(() => document.querySelector('[data-player-profile-popup-root="1"]') !== null)
+      assert(popupStillOpen, 'profile popup-ът трябва да остане отворен след Отказ')
+
+      const triggerVisibleAgain = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.isVipGrantTriggerVisible())
+      assert(triggerVisibleAgain, 'след Отказ trigger-ът "Дай VIP" трябва да се появи отново')
+
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
+    })
+
+    await check('[V5] 0 / отрицателно / decimal / нечислова / празна стойност се reject-ват (client-side), формата остава отворена', async () => {
+      await openForeignProfilePopupAs('admin', 'vipgrant-invalid-target', 'Invalid Target', {})
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.clickVipGrantOpen())
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.isVipGrantFormOpen() === true, undefined, { timeout: 3000 })
+
+      for (const invalid of ['0', '-5', '2.5', 'abc', '']) {
+        await page.evaluate((v) => (window as any).__topicsSwitchRaceHarness.setVipGrantDaysInput(v), invalid)
+        await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.submitVipGrantForm())
+        await page.waitForTimeout(50)
+        const errorText = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getVipGrantErrorText())
+        assert(errorText !== null, `очаквах грешка за невалидна стойност "${invalid}", получих null`)
+        const formStillOpen = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.isVipGrantFormOpen())
+        assert(formStillOpen, `формата трябва да остане отворена след невалидна стойност "${invalid}"`)
+      }
+
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
+    })
+
+    await check('[V6] Успешен grant: popup остава отворен, VIP редът се обновява ВЕДНАГА, без generic Lobby render', async () => {
+      const targetProfileId = 'vipgrant-success-target'
+      const targetDisplayName = 'Success Target'
+      await openForeignProfilePopupAs('admin', targetProfileId, targetDisplayName, {})
+
+      const vipRowBefore = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-vip-days="1"]') !== null)
+      assert(!vipRowBefore, 'преди grant-а не трябва да има VIP ред (профилът няма VIP)')
+
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.clickVipGrantOpen())
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.isVipGrantFormOpen() === true, undefined, { timeout: 3000 })
+
+      const newActiveUntil = new Date(Date.now() + 15 * 24 * 60 * 60 * 1000).toISOString()
+      await page.evaluate(
+        ({ pid, name, au }) => (window as any).__topicsSwitchRaceHarness.setNextAdminGrantVipSuccess(pid, name, { isVip: true, vipActiveUntil: au }),
+        { pid: targetProfileId, name: targetDisplayName, au: newActiveUntil },
+      )
+      await page.evaluate((v) => (window as any).__topicsSwitchRaceHarness.setVipGrantDaysInput(v), '15')
+
+      const renderCountBeforeSubmit = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getRenderLobbyScreenCallCount())
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.submitVipGrantForm())
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.isVipGrantFormOpen() === false, undefined, { timeout: 3000 })
+      const renderCountAfterSubmit = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getRenderLobbyScreenCallCount())
+      assert(
+        renderCountAfterSubmit === renderCountBeforeSubmit,
+        `успешен grant не трябва да минава през generic renderLobbyScreen(): преди=${renderCountBeforeSubmit}, след=${renderCountAfterSubmit}`,
+      )
+
+      const popupStillOpen = await page.evaluate(() => document.querySelector('[data-player-profile-popup-root="1"]') !== null)
+      assert(popupStillOpen, 'profile popup-ът трябва да остане отворен след успешен grant')
+
+      const vipRowText = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-vip-days="1"]')?.textContent ?? null)
+      assert(vipRowText?.includes('15 дни') ?? false, `VIP редът трябва веднага да покаже "15 дни", получих "${vipRowText}"`)
+
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
+    })
+
+    await check('[V7] Grant грешка от сървъра: popup + формата остават отворени, VIP статусът НЕ се променя локално', async () => {
+      const targetProfileId = 'vipgrant-error-target'
+      const targetDisplayName = 'Error Target'
+      await openForeignProfilePopupAs('admin', targetProfileId, targetDisplayName, {})
+
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.clickVipGrantOpen())
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.isVipGrantFormOpen() === true, undefined, { timeout: 3000 })
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.setNextAdminGrantVipError('Сървърна грешка при grant.'))
+      await page.evaluate((v) => (window as any).__topicsSwitchRaceHarness.setVipGrantDaysInput(v), '10')
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.submitVipGrantForm())
+      await page.waitForTimeout(100)
+
+      const errorText = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.getVipGrantErrorText())
+      assert(errorText?.includes('Сървърна грешка') ?? false, `очаквах видимо съобщение за грешка, получих "${errorText}"`)
+
+      const formStillOpen = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.isVipGrantFormOpen())
+      assert(formStillOpen, 'формата трябва да остане отворена при грешка')
+
+      const popupStillOpen = await page.evaluate(() => document.querySelector('[data-player-profile-popup-root="1"]') !== null)
+      assert(popupStillOpen, 'profile popup-ът трябва да остане отворен при грешка')
+
+      const vipRowExists = await page.evaluate(() => document.querySelector('[data-player-profile-foreign-vip-days="1"]') !== null)
+      assert(!vipRowExists, 'при грешка VIP статусът НЕ трябва да се е променил локално (все още без VIP)')
+
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
+    })
+
+    await check('[V8] Няма JS грешки в конзолата по време на "Дай VIP" сценариите', () => {
+      assert(errors.length === 0, `Конзолни грешки: ${errors.join(' | ')}`)
+    })
+
+    await context.close()
+  })()
+
+  // ─── "Дай VIP" НЕ се показва в own profile (отделен, чист context) ──────
+  await (async () => {
+    const context: BrowserContext = await browser!.newContext({ viewport: { width: 390, height: 844 } })
+    const page = await context.newPage()
+    await page.goto(baseUrl)
+    await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness !== undefined, undefined, { timeout: 10_000 })
+    // Начален render — production main.ts прави същото веднъж при boot;
+    // без него data-lobby-profile-button не съществува все още в DOM-а.
+    await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.render())
+
+    await check('[V3] admin viewer в own profile НЕ вижда "Дай VIP"', async () => {
+      await page.evaluate((r) => (window as any).__topicsSwitchRaceHarness.setOwnAccountRole(r), 'admin')
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.openOwnProfile())
+      await page.waitForSelector('[data-player-profile-popup-root="1"]', { state: 'attached', timeout: 3000 })
+      await page.waitForFunction(() => (window as any).__topicsSwitchRaceHarness.getOwnVipStatusPendingCount() > 0, undefined, { timeout: 3000 })
+      await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.deliverOwnVipStatus(null))
+      await page.waitForTimeout(80)
+      const visible = await page.evaluate(() => (window as any).__topicsSwitchRaceHarness.isVipGrantTriggerVisible())
+      assert(!visible, '"Дай VIP" не трябва да се показва в own profile, дори за admin')
+      await closeProfilePopup(page)
+      await page.waitForTimeout(100)
+    })
+
+    await context.close()
+  })()
 } finally {
   if (browser) await browser.close()
   if (vite) await vite.close()

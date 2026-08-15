@@ -34,7 +34,17 @@ export type VipStore = {
   getStatus: (profileId: ProfileId) => VipStatusSnapshot
   hasClaimedLaunchGift: (profileId: ProfileId) => boolean
   claimLaunchGift: (profileId: ProfileId, interval: VipInterval) => ClaimLaunchGiftResult
-  grantVip: (profileId: ProfileId, reason: VipGrantReason, interval: VipInterval) => VipStatusSnapshot
+  /**
+   * grantedByProfileId — admin-a, извършващ grant-а (audit trail в
+   * vip_grants.granted_by_profile_id). Null за self-service grants
+   * (launch_gift/purchase) — само admin_grant подава реален actor.
+   */
+  grantVip: (
+    profileId: ProfileId,
+    reason: VipGrantReason,
+    interval: VipInterval,
+    grantedByProfileId?: ProfileId | null,
+  ) => VipStatusSnapshot
   close: () => void
 }
 
@@ -135,8 +145,9 @@ export async function createVipStore(databaseFilePath: string): Promise<VipStore
 
   const insertGrantStatement = database.prepare(`
     INSERT INTO vip_grants (
-      grant_id, profile_id, reason, interval_unit, interval_amount
-    ) VALUES (?, ?, ?, ?, ?);
+      grant_id, profile_id, reason, interval_unit, interval_amount,
+      granted_by_profile_id, resulting_active_until
+    ) VALUES (?, ?, ?, ?, ?, ?, ?);
   `)
 
   const upsertStatusStatement = database.prepare(`
@@ -156,11 +167,12 @@ export async function createVipStore(databaseFilePath: string): Promise<VipStore
     return selectLaunchGiftGrantStatement.get(profileId) !== undefined
   }
 
-  function applyGrant(profileId: ProfileId, reason: VipGrantReason, interval: VipInterval): void {
-    const grantId = randomUUID()
-
-    insertGrantStatement.run(grantId, profileId, reason, interval.unit, interval.amount)
-
+  function applyGrant(
+    profileId: ProfileId,
+    reason: VipGrantReason,
+    interval: VipInterval,
+    grantedByProfileId: ProfileId | null,
+  ): void {
     // Текущият active_until (ако е в бъдещето) е базата за удължаване; ако
     // вече е изтекъл или липсва, новият период тръгва от сега. Изчислението
     // на новата дата е чист JS (addCalendarInterval), не SQL datetime()
@@ -175,8 +187,23 @@ export async function createVipStore(databaseFilePath: string): Promise<VipStore
       : now
 
     const newActiveUntil = addCalendarInterval(extensionBase, interval)
+    const newActiveUntilSqlite = toSqliteDateTimeString(newActiveUntil)
 
-    upsertStatusStatement.run(profileId, toSqliteDateTimeString(newActiveUntil))
+    // resulting_active_until се пази директно на grant реда — audit trail-ът
+    // трябва да знае ТОЧНО какъв active_until е произвел всеки конкретен
+    // grant, без крехък replay на историята (vip_status се презаписва).
+    const grantId = randomUUID()
+    insertGrantStatement.run(
+      grantId,
+      profileId,
+      reason,
+      interval.unit,
+      interval.amount,
+      grantedByProfileId,
+      newActiveUntilSqlite,
+    )
+
+    upsertStatusStatement.run(profileId, newActiveUntilSqlite)
   }
 
   function claimLaunchGift(profileId: ProfileId, interval: VipInterval): ClaimLaunchGiftResult {
@@ -188,7 +215,7 @@ export async function createVipStore(databaseFilePath: string): Promise<VipStore
         return { ok: false, code: 'already_claimed', status: getStatus(profileId) }
       }
 
-      applyGrant(profileId, 'launch_gift', interval)
+      applyGrant(profileId, 'launch_gift', interval, null)
 
       database.exec('COMMIT;')
     } catch (error) {
@@ -206,10 +233,15 @@ export async function createVipStore(databaseFilePath: string): Promise<VipStore
     return { ok: true, status: getStatus(profileId) }
   }
 
-  function grantVip(profileId: ProfileId, reason: VipGrantReason, interval: VipInterval): VipStatusSnapshot {
+  function grantVip(
+    profileId: ProfileId,
+    reason: VipGrantReason,
+    interval: VipInterval,
+    grantedByProfileId: ProfileId | null = null,
+  ): VipStatusSnapshot {
     database.exec('BEGIN IMMEDIATE;')
     try {
-      applyGrant(profileId, reason, interval)
+      applyGrant(profileId, reason, interval, grantedByProfileId)
       database.exec('COMMIT;')
     } catch (error) {
       try {
