@@ -995,6 +995,8 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomsCreateClose: () => void
   onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30) => void
   onPrivateRoomJoin: (privateRoomId: string) => void
+  /** Клик върху зает seat/avatar в списъка "Частни маси" — отваря съществуващия profile popup flow (не влиза в масата). */
+  onPrivateRoomMemberClick: (profileId: string, displayName: string) => void
   onPrivateRoomLeave: () => void
   onPrivateRoomInvite: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
   onCancelPrivateRoomInvite: (inviteId: string) => void
@@ -8526,26 +8528,45 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
         const hostBadge = member.isHost
           ? `<div style="position:absolute;top:-5px;right:-5px;background:#f59e0b;border-radius:50%;width:16px;height:16px;display:flex;align-items:center;justify-content:center;font-size:9px;">★</div>`
           : ''
-        return `
-          <div style="display:flex;flex-direction:column;align-items:center;gap:5px;min-width:0;">
-            <div style="position:relative;width:84px;height:84px;border-radius:10px;overflow:visible;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);">
-              <div style="width:84px;height:84px;border-radius:10px;overflow:hidden;">${avatarInner}</div>
+        const slotInnerHtml = `
+            <div style="position:relative;box-sizing:border-box;width:100%;max-width:84px;aspect-ratio:1;border-radius:10px;overflow:visible;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);">
+              <div style="width:100%;height:100%;border-radius:10px;overflow:hidden;">${avatarInner}</div>
               ${hostBadge}
             </div>
-            <div style="font-size:10px;color:rgba(255,255,255,0.6);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:92px;text-align:center;">
-              ${member.displayName}
-            </div>
+            <div style="font-size:10px;color:rgba(255,255,255,0.6);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;text-align:center;">
+              ${escapeHtml(member.displayName)}
+            </div>`
+
+        // Заетите места отварят profile popup-а САМО ако членът има реален
+        // profileId (бот/временен гост без профил остава некликаем — няма
+        // какъв профил да отвори openProtectedProfileById). Отделен <button>
+        // от "Влез в масата" (различно DOM поддърво) — кликът тук никога не
+        // buble-ва към join действието.
+        if (member.profileId) {
+          return `
+          <button
+            type="button"
+            data-private-room-member="${escapeHtml(member.profileId)}"
+            data-private-room-member-name="${escapeHtml(member.displayName)}"
+            aria-label="Профил на ${escapeHtml(member.displayName)}"
+            style="display:flex;flex-direction:column;align-items:center;gap:5px;min-width:0;width:100%;border:0;background:transparent;padding:0;cursor:pointer;"
+          >${slotInnerHtml}
+          </button>`
+        }
+
+        return `
+          <div style="display:flex;flex-direction:column;align-items:center;gap:5px;min-width:0;width:100%;">${slotInnerHtml}
           </div>`
       }
       return `
-        <div style="display:flex;flex-direction:column;align-items:center;gap:5px;">
-          <div style="width:84px;height:84px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px dashed rgba(255,255,255,0.12);"></div>
+        <div style="display:flex;flex-direction:column;align-items:center;gap:5px;min-width:0;width:100%;">
+          <div style="box-sizing:border-box;width:100%;max-width:84px;aspect-ratio:1;border-radius:10px;background:rgba(255,255,255,0.04);border:1px dashed rgba(255,255,255,0.12);"></div>
           <div style="height:14px;"></div>
         </div>`
     }).join('')
 
     return `
-      <div style="padding:12px 16px;background:rgba(255,255,255,0.04);border-radius:12px;border:1px solid rgba(255,255,255,0.08);">
+      <div style="box-sizing:border-box;width:100%;padding:12px 16px;background:rgba(255,255,255,0.04);border-radius:12px;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
           <div style="flex:1;min-width:0;">
             <div style="font-size:14px;font-weight:700;color:#fff;">
@@ -8569,7 +8590,7 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
               ">Влез в масата</button>`
           }
         </div>
-        <div style="display:flex;gap:12px;">
+        <div style="display:grid;grid-template-columns:repeat(4, minmax(0, 1fr));gap:clamp(6px, 2vw, 12px);">
           ${memberSlotsHtml}
         </div>
       </div>
@@ -8604,6 +8625,10 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
     : `<div style="text-align:center;color:rgba(255,255,255,0.3);font-size:14px;padding:40px 0;">Няма активни маси в момента.</div>`
 
   return `
+    <style>
+      [data-private-room-member] { transition: filter 120ms ease, transform 120ms ease; }
+      [data-private-room-member]:hover { filter: brightness(1.18); transform: translateY(-1px); }
+    </style>
     <div style="max-width:760px;margin:0 auto;padding:24px 0 40px;">
       <!-- Хедър -->
       <div style="display:flex;align-items:center;margin-bottom:24px;gap:16px;flex-wrap:wrap;">
@@ -12757,6 +12782,16 @@ export function renderLobbyScreen(
     btn.addEventListener('click', () => {
       const id = btn.dataset.privateRoomJoin?.trim() ?? ''
       if (id) options.onPrivateRoomJoin(id)
+    })
+  })
+
+  // Отделен бутон от data-private-room-join по-горе (различно DOM поддърво
+  // в roomRowHtml) — клик върху зает seat/avatar никога не тригва join.
+  root.querySelectorAll<HTMLButtonElement>('[data-private-room-member]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const profileId = btn.dataset.privateRoomMember?.trim() ?? ''
+      const displayName = btn.dataset.privateRoomMemberName?.trim() ?? ''
+      if (profileId) options.onPrivateRoomMemberClick(profileId, displayName)
     })
   })
 

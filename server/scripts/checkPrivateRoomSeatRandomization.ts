@@ -1,9 +1,15 @@
 /**
  * checkPrivateRoomSeatRandomization.ts
  *
- * Verifies the server-side random seat/team assignment used by the private
- * table "Запълни с ботове" feature (server/src/core/seededRandom.ts,
- * consumed once by handlePrivateRoomBotFill in server/src/index.ts).
+ * Verifies the server-side random seat/team assignment used by BOTH private
+ * table start paths (server/src/core/seededRandom.ts): the organic "4th
+ * member joins/accepts invite" path (handlePrivateRoomFull) and the
+ * "Запълни с ботове" path (handlePrivateRoomBotFill), both in
+ * server/src/index.ts. Regression guard for a bug where handlePrivateRoomFull
+ * seated members by fixed join order (findFirstOpenSeat scanning the
+ * constant SERVER_SEAT_ORDER) — since SERVER_TEAM_A_SEATS=['bottom','top'],
+ * the 3rd player to join always ended up as the room creator's partner,
+ * letting players pick teammates by controlling join order.
  *
  * Deliberately avoids statistically-flaky tests that rely on many random
  * runs: shuffleSeatOrder()'s Fisher-Yates loop for 4 seats needs exactly 3
@@ -30,9 +36,10 @@
  *    split required by the spec (proven exhaustively, not approximately).
  *  - 3 humans + 1 bot: each of the 3 humans is the bot's partner in exactly
  *    8/24 permutations — no fixed bias toward one human.
- *  - Static guard: shuffleSeatOrder is only called from the bot-fill code
- *    path in index.ts, never from reconnect/resume code — so reconnect
- *    cannot trigger a re-shuffle (the result is stored once in room.seats).
+ *  - Static guard: shuffleSeatOrder is called from exactly the two private
+ *    table start paths (handlePrivateRoomFull, handlePrivateRoomBotFill) in
+ *    index.ts, never from reconnect/resume code — so reconnect cannot
+ *    trigger a re-shuffle (the result is stored once in room.seats).
  */
 
 import { readFileSync } from 'node:fs'
@@ -249,12 +256,31 @@ check(
   const resumeHumanControlHandlerMatch = indexTsSource.match(
     /'resume_human_control'[\s\S]{0,2000}?\n {6}return/,
   )
+  // handlePrivateRoomFull — организацично 4-о попълване (join/invite-accept).
+  // Преди regression fix-a: join order директно определяше seat/team чрез
+  // findFirstOpenSeat() (SERVER_SEAT_ORDER сканиран по ред) — 3-тият
+  // присъединил се играч винаги ставаше партньор на създателя. Fix-ът добавя
+  // shuffleSeatOrder() тук, огледално на handlePrivateRoomBotFill.
+  const privateRoomFullHandlerMatch = indexTsSource.match(
+    /function handlePrivateRoomFull[\s\S]{0,8000}?\n}/,
+  )
+  const privateRoomBotFillHandlerMatch = indexTsSource.match(
+    /function handlePrivateRoomBotFill[\s\S]{0,8000}?\n}/,
+  )
 
   const shuffleCallCount = (indexTsSource.match(/shuffleSeatOrder\(/g) ?? []).length
 
   check(
-    '[8] shuffleSeatOrder is called exactly once in index.ts (inside handlePrivateRoomBotFill)',
-    shuffleCallCount === 1,
+    '[8] shuffleSeatOrder е извикан точно 2 пъти в index.ts (handlePrivateRoomFull + handlePrivateRoomBotFill)',
+    shuffleCallCount === 2,
+  )
+  check(
+    '[8a] handlePrivateRoomFull (органично 4-о попълване чрез join/invite-accept) вика shuffleSeatOrder — join order вече не определя seat/team',
+    privateRoomFullHandlerMatch !== null && privateRoomFullHandlerMatch[0].includes('shuffleSeatOrder'),
+  )
+  check(
+    '[8a2] handlePrivateRoomBotFill продължава да вика shuffleSeatOrder (regression guard за вече съществуващото поведение)',
+    privateRoomBotFillHandlerMatch !== null && privateRoomBotFillHandlerMatch[0].includes('shuffleSeatOrder'),
   )
   check(
     '[8b] the reconnect ("resume_room") handler body does not call shuffleSeatOrder',

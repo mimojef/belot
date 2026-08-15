@@ -4351,6 +4351,9 @@ export function createLobbyFlowController(
         options.onPrivateRoomCreate?.(stake, isLocked, waitMinutes)
       },
       onPrivateRoomJoin: handlePrivateRoomJoin,
+      onPrivateRoomMemberClick: (profileId, displayName) => {
+        void openProtectedProfileById(profileId, displayName, 'other')
+      },
       onPrivateRoomLeave: () => {
         state.myPrivateRoom = null
         options.onPrivateRoomLeave?.()

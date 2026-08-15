@@ -252,8 +252,6 @@ import { validateTopicTitle, TOPIC_TITLE_MAX_CODE_POINTS } from './protocol/topi
 import { createPrivateRoomsStore } from './game/privateRoomsStore.js'
 import type { PrivateRoom, PrivateRoomMember } from './game/privateRoomsStore.js'
 import { createPrivateRoomChatStore, PRIVATE_ROOM_CHAT_HISTORY_LIMIT } from './game/privateRoomChatStore.js'
-import { addHumanToRoom } from './core/addHumanToRoom.js'
-import { createRoomWithHumanHost } from './core/createRoomWithHumanHost.js'
 import { createGuestTrialRoom } from './core/createGuestTrialRoom.js'
 import { createServerRoom } from './core/createServerRoom.js'
 import { createHumanParticipant } from './core/createHumanParticipant.js'
@@ -2793,24 +2791,18 @@ function resolveLiveConnectionForMember(
 }
 
 function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
-  const [hostMember, ...restMembers] = privateRoom.members
+  // Единствената random стъпка — извиква се точно веднъж, тук, при
+  // окончателното стартиране (огледално на handlePrivateRoomBotFill по-долу).
+  // Преди този fix: host-ът винаги сядаше на findFirstOpenSeat() на празна
+  // стая ('bottom'), а всеки следващ member() get-ваше следващото свободно
+  // място по SERVER_SEAT_ORDER — чисто join order → seat/team, без randomness.
+  // Понеже SERVER_TEAM_A_SEATS=['bottom','top'], 3-тият присъединил се играч
+  // винаги ставаше партньор на създателя. Резултатът се материализира
+  // директно в room.seats (server-authoritative), не се преизчислява при
+  // reconnect/snapshot/render.
+  const shuffledSeats = shuffleSeatOrder()
 
-  const hostPublicProfile = hostMember.profileId
-    ? playerProgressStore.getPublicProfile(hostMember.profileId)
-    : null
-
-  const hostLiveConnectionId = resolveLiveConnectionForMember(serverState, hostMember)
-
-  const roomResult = createRoomWithHumanHost({
-    connectionId: hostLiveConnectionId,
-    identity: {
-      profileId: hostMember.profileId,
-      displayName: hostMember.displayName,
-      avatarUrl: hostMember.avatarUrl,
-      level: hostMember.level,
-      rankTitle: hostMember.rankTitle,
-    },
-    publicProfile: hostPublicProfile,
+  let currentRoom = createServerRoom({
     config: {
       allowBots: false,
       isPrivate: true,
@@ -2818,26 +2810,13 @@ function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
       stakeAmount: privateRoom.stake,
     },
   })
-
-  let currentRoom = roomResult.room
   let nextServerState = upsertServerRoom(serverState, currentRoom)
 
   const seatAssignments: Array<{ connectionId: string; seat: Seat }> = []
   const liveConnectionIdsForExpiryNotice: string[] = []
-  if (hostLiveConnectionId !== null) {
-    liveConnectionIdsForExpiryNotice.push(hostLiveConnectionId)
-  }
 
-  if (hostLiveConnectionId !== null) {
-    const hostConn = getConnectionById(nextServerState, hostLiveConnectionId)
-    if (hostConn) {
-      const nextHostConn = attachConnectionToRoomSeat(hostConn, hostLiveConnectionId, currentRoom, roomResult.seat)
-      nextServerState = updateServerConnectionInState(nextServerState, hostLiveConnectionId, nextHostConn)
-      seatAssignments.push({ connectionId: hostLiveConnectionId, seat: roomResult.seat })
-    }
-  }
-
-  for (const member of restMembers) {
+  privateRoom.members.forEach((member, index) => {
+    const seat = shuffledSeats[index]!
     const publicProfile = member.profileId
       ? playerProgressStore.getPublicProfile(member.profileId)
       : null
@@ -2847,7 +2826,7 @@ function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
       liveConnectionIdsForExpiryNotice.push(memberLiveConnectionId)
     }
 
-    const addResult = addHumanToRoom(currentRoom, {
+    const participant = createHumanParticipant({
       connectionId: memberLiveConnectionId,
       identity: {
         profileId: member.profileId,
@@ -2859,18 +2838,21 @@ function handlePrivateRoomFull(privateRoom: PrivateRoom): void {
       publicProfile,
     })
 
-    currentRoom = addResult.room
+    currentRoom = seatParticipantInRoom(currentRoom, seat, participant)
     nextServerState = updateServerRoomInState(nextServerState, currentRoom.id, currentRoom)
 
     if (memberLiveConnectionId !== null) {
       const memberConn = getConnectionById(nextServerState, memberLiveConnectionId)
       if (memberConn) {
-        const nextMemberConn = attachConnectionToRoomSeat(memberConn, memberLiveConnectionId, currentRoom, addResult.seat)
+        const nextMemberConn = attachConnectionToRoomSeat(memberConn, memberLiveConnectionId, currentRoom, seat)
         nextServerState = updateServerConnectionInState(nextServerState, memberLiveConnectionId, nextMemberConn)
-        seatAssignments.push({ connectionId: memberLiveConnectionId, seat: addResult.seat })
+        seatAssignments.push({ connectionId: memberLiveConnectionId, seat })
       }
     }
-  }
+  })
+
+  currentRoom = updateRoomHostPlayerId(currentRoom)
+  nextServerState = updateServerRoomInState(nextServerState, currentRoom.id, currentRoom)
 
   const initializedRoom = initializeRoomAuthoritativeGameState(currentRoom)
 
