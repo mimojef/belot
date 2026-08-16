@@ -233,6 +233,10 @@ function send(client: TestClient, message: Record<string, unknown>): void {
   client.ws.send(JSON.stringify(message))
 }
 
+function occupiedCount(room: any): number {
+  return room.slots.filter((s: any) => s.occupant !== null).length
+}
+
 async function waitForFrame(
   client: TestClient,
   predicate: (frame: any) => boolean,
@@ -456,7 +460,7 @@ try {
 
   await check('[5a] an eligible creator (sufficient balance and level) gets a normal private_room_updated with 1 member', () => {
     if (created.room.stake !== 20000) throw new Error(`room.stake=${created.room.stake}`)
-    if (created.room.members.length !== 1) throw new Error(`members.length=${created.room.members.length}`)
+    if (occupiedCount(created.room) !== 1) throw new Error(`occupiedCount=${occupiedCount(created.room)}`)
   })
 
   const { cookie: guestCookie, profileId: guestProfileId } = await registerAndLogin(port, 'guest', runId)
@@ -464,9 +468,9 @@ try {
   setProfileLevel(isolated.dbFile, guestProfileId, 20)
   const guestClient = await connectWs(port, guestCookie, guestProfileId)
 
-  send(guestClient, { type: 'join_private_room', privateRoomId: roomId })
+  send(guestClient, { type: 'join_private_room', privateRoomId: roomId, team: 'B', slotIndex: 0 })
   await check('[5b] the existing join_private_room realtime flow still works after adding eligibility gating', async () => {
-    const updated = await waitForFrame(hostClient, (f) => f.type === 'private_room_updated' && f.room.members.length === 2, 10_000, 'host sees 2nd member')
+    const updated = await waitForFrame(hostClient, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 2, 10_000, 'host sees 2nd member')
     if (updated.room.id !== roomId) throw new Error('room id mismatch after join')
   })
 
@@ -523,7 +527,7 @@ try {
   const joinLowLevelClient = await connectWs(port, joinLowLevelCookie, joinLowLevelProfileId)
 
   joinHostClient.frames.length = 0
-  send(joinLowLevelClient, { type: 'join_private_room', privateRoomId: joinTargetRoomId })
+  send(joinLowLevelClient, { type: 'join_private_room', privateRoomId: joinTargetRoomId, team: 'B', slotIndex: 0 })
 
   await check('[7-2a] join_private_room with insufficient level is rejected with private_room_level_required', async () => {
     const errorFrame = await waitForFrame(joinLowLevelClient, (f) => f.type === 'error', 5_000, 'join insufficient level rejection')
@@ -549,7 +553,7 @@ try {
   const joinPoorClient = await connectWs(port, joinPoorCookie, joinPoorProfileId)
 
   joinHostClient.frames.length = 0
-  send(joinPoorClient, { type: 'join_private_room', privateRoomId: joinTargetRoomId })
+  send(joinPoorClient, { type: 'join_private_room', privateRoomId: joinTargetRoomId, team: 'B', slotIndex: 0 })
 
   await check('[7-3a] join_private_room with insufficient balance is rejected with private_room_insufficient_balance', async () => {
     const errorFrame = await waitForFrame(joinPoorClient, (f) => f.type === 'error', 5_000, 'join insufficient balance rejection')
@@ -566,7 +570,7 @@ try {
   // [7-5] direct/manual WebSocket join with the same invalid profile is
   // rejected too — not just the frontend button path (re-send, same result).
   joinPoorClient.frames.length = 0
-  send(joinPoorClient, { type: 'join_private_room', privateRoomId: joinTargetRoomId })
+  send(joinPoorClient, { type: 'join_private_room', privateRoomId: joinTargetRoomId, team: 'B', slotIndex: 0 })
   await check('[7-5] a repeated direct WS join attempt with the same ineligible profile is rejected again', async () => {
     const errorFrame = await waitForFrame(joinPoorClient, (f) => f.type === 'error', 5_000, 'repeated direct join rejection')
     if (errorFrame.code !== 'private_room_insufficient_balance') throw new Error(`code=${errorFrame.code}, message=${errorFrame.message}`)
@@ -578,16 +582,16 @@ try {
   setProfileLevel(isolated.dbFile, joinOkProfileId, 20)
   const joinOkClient = await connectWs(port, joinOkCookie, joinOkProfileId)
 
-  send(joinOkClient, { type: 'join_private_room', privateRoomId: joinTargetRoomId })
+  send(joinOkClient, { type: 'join_private_room', privateRoomId: joinTargetRoomId, team: 'B', slotIndex: 0 })
 
   await check('[7-1] an eligible joiner (sufficient level and balance) joins successfully', async () => {
     const updated = await waitForFrame(joinOkClient, (f) => f.type === 'private_room_updated' && f.room.id === joinTargetRoomId, 10_000, 'eligible join ack')
-    if (updated.room.members.length !== 2) throw new Error(`expected 2 members after the only successful join, got ${updated.room.members.length}`)
+    if (occupiedCount(updated.room) !== 2) throw new Error(`expected 2 members after the only successful join, got ${occupiedCount(updated.room)}`)
   })
 
   await check('[7-1b] the previously rejected joins never actually added a member — final count is exactly 2 (host + the one eligible joiner)', async () => {
-    const finalState = await waitForFrame(joinHostClient, (f) => f.type === 'private_room_updated' && f.room.members.length === 2, 10_000, 'host sees exactly 2 members')
-    if (finalState.room.members.length !== 2) throw new Error(`members.length=${finalState.room.members.length}`)
+    const finalState = await waitForFrame(joinHostClient, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 2, 10_000, 'host sees exactly 2 members')
+    if (occupiedCount(finalState.room) !== 2) throw new Error(`occupiedCount=${occupiedCount(finalState.room)}`)
   })
 
   // [7-6] reconnect for an already-joined member is unaffected by the new
@@ -601,7 +605,7 @@ try {
     const reconnected = await connectWs(port, joinOkCookie, joinOkProfileId)
     send(reconnected, { type: 'request_private_rooms_list' })
     const updated = await waitForFrame(reconnected, (f) => f.type === 'private_room_updated' && f.room.id === joinTargetRoomId, 10_000, 'reconnect restores private room membership')
-    if (updated.room.members.length !== 2) throw new Error(`expected 2 members preserved after reconnect, got ${updated.room.members.length}`)
+    if (occupiedCount(updated.room) !== 2) throw new Error(`expected 2 members preserved after reconnect, got ${occupiedCount(updated.room)}`)
     try { reconnected.ws.close() } catch { /* ignore */ }
   })
 

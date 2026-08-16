@@ -18,7 +18,7 @@
  */
 
 import { parseClientMessage } from '../src/protocol/parseClientMessage.js'
-import { createPrivateRoomsStore, type PrivateRoom } from '../src/game/privateRoomsStore.js'
+import { createPrivateRoomsStore, type PrivateRoom, type PrivateRoomBotOccupant } from '../src/game/privateRoomsStore.js'
 import { setSupportedMatchStakes } from '../src/matchmaking/matchmakingTypes.js'
 
 // isSupportedStake() (used by the create_private_room parser branch) checks
@@ -125,7 +125,9 @@ function makeCreateInput(overrides: Partial<Parameters<ReturnType<typeof createP
   }
 }
 
-function makeJoinInput(privateRoomId: string, connectionId: string, profileId: string) {
+const noBlocks = () => false
+
+function makeJoinInput(privateRoomId: string, connectionId: string, profileId: string, team: 'A' | 'B', slotIndex: 0 | 1) {
   return {
     privateRoomId,
     connectionId,
@@ -134,6 +136,29 @@ function makeJoinInput(privateRoomId: string, connectionId: string, profileId: s
     avatarUrl: null,
     level: 5,
     rankTitle: null,
+    team,
+    slotIndex,
+    isBlockedWith: noBlocks,
+  }
+}
+
+function makeBotOccupant(id: string): PrivateRoomBotOccupant {
+  return {
+    kind: 'bot',
+    botProfileId: `bot-${id}`,
+    botCode: 'CATALOG_BOT',
+    difficulty: 'normal',
+    identity: {
+      accountId: null,
+      profileId: `bot-${id}`,
+      username: null,
+      displayName: `Bot ${id}`,
+      avatarUrl: null,
+      level: 7,
+      rankTitle: 'Новак',
+      skillRating: 1000,
+      gender: null,
+    },
   }
 }
 
@@ -192,7 +217,7 @@ checkParserCase('[P14] waitMinutes=[15] (array) -> rejected', '[15]', 'reject')
       for (const isLocked of [false, true]) {
         const store = createPrivateRoomsStore({
           onRoomsChanged: () => {},
-          onRoomFull: () => {},
+          onRoomReady: () => {},
           onRoomExpired: () => {},
           onRoomClosed: () => {},
           onMemberLeft: () => {},
@@ -208,8 +233,8 @@ checkParserCase('[P14] waitMinutes=[15] (array) -> rejected', '[15]', 'reject')
 
     // Same waitMinutes, open vs locked -> identical TTL delta (isLocked no
     // longer influences the timeout at all).
-    const storeA = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomFull: () => {}, onRoomExpired: () => {}, onRoomClosed: () => {}, onMemberLeft: () => {} })
-    const storeB = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomFull: () => {}, onRoomExpired: () => {}, onRoomClosed: () => {}, onMemberLeft: () => {} })
+    const storeA = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomReady: () => {}, onRoomExpired: () => {}, onRoomClosed: () => {}, onMemberLeft: () => {} })
+    const storeB = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomReady: () => {}, onRoomExpired: () => {}, onRoomClosed: () => {}, onMemberLeft: () => {} })
     const resA = storeA.createRoom(makeCreateInput({ waitMinutes: 10, isLocked: false, connectionId: 'ca' }))
     const resB = storeB.createRoom(makeCreateInput({ waitMinutes: 10, isLocked: true, connectionId: 'cb' }))
     check(
@@ -227,13 +252,13 @@ checkParserCase('[P14] waitMinutes=[15] (array) -> rejected', '[15]', 'reject')
 {
   const clock = installFakeClock()
   try {
-    const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomFull: () => {}, onRoomExpired: () => {}, onRoomClosed: () => {}, onMemberLeft: () => {} })
+    const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomReady: () => {}, onRoomExpired: () => {}, onRoomClosed: () => {}, onMemberLeft: () => {} })
     const created = store.createRoom(makeCreateInput({ waitMinutes: 10, connectionId: 'host-conn' }))
     if (!created.ok) throw new Error('setup failed')
     const originalExpiresAt = created.room.expiresAt
 
     clock.advanceBy(60_000)
-    const joined = store.joinRoom(makeJoinInput(created.room.id, 'guest-conn', 'guest-profile'))
+    const joined = store.joinTeam(makeJoinInput(created.room.id, 'guest-conn', 'guest-profile', 'B', 0))
     check('[S3] join does not change expiresAt', joined.ok && joined.room.expiresAt === originalExpiresAt)
 
     clock.advanceBy(30_000)
@@ -258,12 +283,12 @@ checkParserCase('[P14] waitMinutes=[15] (array) -> rejected', '[15]', 'reject')
     // 4a: room-full via join cancels the timer (no expiry fires afterwards).
     {
       let expiredCount = 0
-      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomFull: () => {}, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => {}, onMemberLeft: () => {} })
+      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomReady: () => {}, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => {}, onMemberLeft: () => {} })
       const created = store.createRoom(makeCreateInput({ waitMinutes: 5, connectionId: 'h1' }))
       if (!created.ok) throw new Error('setup failed')
-      store.joinRoom(makeJoinInput(created.room.id, 'p2', 'pr2'))
-      store.joinRoom(makeJoinInput(created.room.id, 'p3', 'pr3'))
-      store.joinRoom(makeJoinInput(created.room.id, 'p4', 'pr4')) // 4th member -> room full, cancelExpiry
+      store.joinTeam(makeJoinInput(created.room.id, 'p2', 'pr2', 'A', 1))
+      store.joinTeam(makeJoinInput(created.room.id, 'p3', 'pr3', 'B', 0))
+      store.joinTeam(makeJoinInput(created.room.id, 'p4', 'pr4', 'B', 1)) // 4th member -> room full, cancelExpiry
       clock.advanceBy(10 * 60_000)
       check('[S6] room becoming full cancels the expiry timer (onRoomExpired never fires)', expiredCount === 0)
     }
@@ -271,7 +296,7 @@ checkParserCase('[P14] waitMinutes=[15] (array) -> rejected', '[15]', 'reject')
     // 4b: manual close cancels the timer.
     {
       let expiredCount = 0
-      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomFull: () => {}, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => {}, onMemberLeft: () => {} })
+      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomReady: () => {}, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => {}, onMemberLeft: () => {} })
       const created = store.createRoom(makeCreateInput({ waitMinutes: 5, connectionId: 'h2' }))
       if (!created.ok) throw new Error('setup failed')
       store.closeRoom('h2')
@@ -282,7 +307,7 @@ checkParserCase('[P14] waitMinutes=[15] (array) -> rejected', '[15]', 'reject')
     // 4c: last member leaving (0 remaining) cancels the timer.
     {
       let expiredCount = 0
-      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomFull: () => {}, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => {}, onMemberLeft: () => {} })
+      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomReady: () => {}, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => {}, onMemberLeft: () => {} })
       const created = store.createRoom(makeCreateInput({ waitMinutes: 5, connectionId: 'h3' }))
       if (!created.ok) throw new Error('setup failed')
       store.leaveRoom('h3') // solo host leaves -> 0 members remaining
@@ -290,15 +315,20 @@ checkParserCase('[P14] waitMinutes=[15] (array) -> rejected', '[15]', 'reject')
       check('[S8] 0 remaining members cancels the expiry timer', expiredCount === 0)
     }
 
-    // 4d: bot-fill cancels the timer.
+    // 4d: bots completing both teams cancels the timer. Unlike the old
+    // whole-table beginBotFill(), completing a room now takes one
+    // addBotToTeam() call per team (each needs its own human owner) — put
+    // one human on each team so both can add a bot and the room reaches 4/4.
     {
       let expiredCount = 0
-      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomFull: () => {}, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => {}, onMemberLeft: () => {} })
+      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomReady: () => {}, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => {}, onMemberLeft: () => {} })
       const created = store.createRoom(makeCreateInput({ waitMinutes: 5, connectionId: 'h4' }))
       if (!created.ok) throw new Error('setup failed')
-      store.joinRoom(makeJoinInput(created.room.id, 'p2', 'pr2'))
-      const botFillResult = store.beginBotFill('h4')
-      check('[S9] beginBotFill succeeds with 2 members', botFillResult.ok)
+      store.joinTeam(makeJoinInput(created.room.id, 'p2', 'pr2', 'B', 0))
+      const addBotA = store.addBotToTeam({ connectionId: 'h4', team: 'A', botOccupant: makeBotOccupant('a'), isBlockedWith: noBlocks })
+      check('[S9a] addBotToTeam(A) succeeds (room not complete yet)', addBotA.ok && addBotA.readyToStart === false)
+      const addBotB = store.addBotToTeam({ connectionId: 'p2', team: 'B', botOccupant: makeBotOccupant('b'), isBlockedWith: noBlocks })
+      check('[S9b] addBotToTeam(B) completes the room (4/4)', addBotB.ok && addBotB.readyToStart === true)
       clock.advanceBy(10 * 60_000)
       check('[S10] bot-fill cancels the expiry timer', expiredCount === 0)
     }
@@ -314,7 +344,7 @@ checkParserCase('[P14] waitMinutes=[15] (array) -> rejected', '[15]', 'reject')
   const clock = installFakeClock()
   try {
     let expiredRooms: PrivateRoom[] = []
-    const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomFull: () => {}, onRoomExpired: (room) => { expiredRooms.push(room) }, onRoomClosed: () => {}, onMemberLeft: () => {} })
+    const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomReady: () => {}, onRoomExpired: (room) => { expiredRooms.push(room) }, onRoomClosed: () => {}, onMemberLeft: () => {} })
     const created = store.createRoom(makeCreateInput({ waitMinutes: 5, connectionId: 'h5' }))
     if (!created.ok) throw new Error('setup failed')
     clock.advanceBy(5 * 60_000)
@@ -338,29 +368,31 @@ checkParserCase('[P14] waitMinutes=[15] (array) -> rejected', '[15]', 'reject')
     {
       let expiredCount = 0
       let fullCount = 0
-      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomFull: () => { fullCount++ }, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => {}, onMemberLeft: () => {} })
+      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomReady: () => { fullCount++ }, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => {}, onMemberLeft: () => {} })
       const created = store.createRoom(makeCreateInput({ waitMinutes: 5, connectionId: 'r1' }))
       if (!created.ok) throw new Error('setup failed')
-      store.joinRoom(makeJoinInput(created.room.id, 'p2', 'pr2'))
-      store.joinRoom(makeJoinInput(created.room.id, 'p3', 'pr3'))
+      store.joinTeam(makeJoinInput(created.room.id, 'p2', 'pr2', 'A', 1))
+      store.joinTeam(makeJoinInput(created.room.id, 'p3', 'pr3', 'B', 0))
       clock.advanceBy(5 * 60_000 - 1) // 1ms before expiry
-      store.joinRoom(makeJoinInput(created.room.id, 'p4', 'pr4')) // 4th join, right at the edge
+      store.joinTeam(makeJoinInput(created.room.id, 'p4', 'pr4', 'B', 1)) // 4th join, right at the edge
       clock.advanceBy(60_000) // push well past the original expiry instant
       check('[R1] expiry-vs-last-join race: room becomes full, never expires (no double outcome)', fullCount === 1 && expiredCount === 0)
     }
 
-    // 6b: expiry racing "Запълни с ботове" — bot-fill call happens before the
-    // clock is advanced to the expiry instant, so it wins deterministically.
+    // 6b: expiry racing bot completion — both addBotToTeam calls (one per
+    // team, each needing its own human owner) happen before the clock is
+    // advanced to the expiry instant, so they win deterministically.
     {
       let expiredCount = 0
-      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomFull: () => {}, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => {}, onMemberLeft: () => {} })
+      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomReady: () => {}, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => {}, onMemberLeft: () => {} })
       const created = store.createRoom(makeCreateInput({ waitMinutes: 5, connectionId: 'r2' }))
       if (!created.ok) throw new Error('setup failed')
-      store.joinRoom(makeJoinInput(created.room.id, 'p2', 'pr2'))
+      store.joinTeam(makeJoinInput(created.room.id, 'p2', 'pr2', 'B', 0))
       clock.advanceBy(5 * 60_000 - 1)
-      const botFillResult = store.beginBotFill('r2')
+      store.addBotToTeam({ connectionId: 'r2', team: 'A', botOccupant: makeBotOccupant('a'), isBlockedWith: noBlocks })
+      const secondBotFill = store.addBotToTeam({ connectionId: 'p2', team: 'B', botOccupant: makeBotOccupant('b'), isBlockedWith: noBlocks })
       clock.advanceBy(60_000)
-      check('[R2] expiry-vs-bot-fill race: bot-fill succeeds, no expiry fires afterwards', botFillResult.ok && expiredCount === 0)
+      check('[R2] expiry-vs-bot-completion race: both bot-adds succeed, no expiry fires afterwards', secondBotFill.ok && secondBotFill.readyToStart === true && expiredCount === 0)
     }
 
     // 6c: an expiry callback firing after the room was already removed by
@@ -373,7 +405,7 @@ checkParserCase('[P14] waitMinutes=[15] (array) -> rejected', '[15]', 'reject')
     {
       let expiredCount = 0
       let closedCount = 0
-      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomFull: () => {}, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => { closedCount++ }, onMemberLeft: () => {} })
+      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomReady: () => {}, onRoomExpired: () => { expiredCount++ }, onRoomClosed: () => { closedCount++ }, onMemberLeft: () => {} })
       const created = store.createRoom(makeCreateInput({ waitMinutes: 5, connectionId: 'r3' }))
       if (!created.ok) throw new Error('setup failed')
       const closeResult = store.closeRoom('r3')
@@ -390,12 +422,12 @@ checkParserCase('[P14] waitMinutes=[15] (array) -> rejected', '[15]', 'reject')
     // additionally verify the room is fully gone from the store so nothing
     // downstream could still reference it as "pending".
     {
-      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomFull: () => {}, onRoomExpired: () => {}, onRoomClosed: () => {}, onMemberLeft: () => {} })
+      const store = createPrivateRoomsStore({ onRoomsChanged: () => {}, onRoomReady: () => {}, onRoomExpired: () => {}, onRoomClosed: () => {}, onMemberLeft: () => {} })
       const created = store.createRoom(makeCreateInput({ waitMinutes: 5, connectionId: 'r4' }))
       if (!created.ok) throw new Error('setup failed')
-      store.joinRoom(makeJoinInput(created.room.id, 'p2', 'pr2'))
-      store.joinRoom(makeJoinInput(created.room.id, 'p3', 'pr3'))
-      store.joinRoom(makeJoinInput(created.room.id, 'p4', 'pr4'))
+      store.joinTeam(makeJoinInput(created.room.id, 'p2', 'pr2', 'A', 1))
+      store.joinTeam(makeJoinInput(created.room.id, 'p3', 'pr3', 'B', 0))
+      store.joinTeam(makeJoinInput(created.room.id, 'p4', 'pr4', 'B', 1))
       check('[R4] a started (room-full) game leaves no trace in the private-rooms store', store.listRooms().length === 0)
     }
   } finally {

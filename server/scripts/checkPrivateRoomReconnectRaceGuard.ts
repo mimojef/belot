@@ -297,12 +297,14 @@ try {
   const created = await waitForFrame(host, (f) => f.type === 'private_room_updated', 10_000, 'create_private_room ack')
   const roomId: string = created.room.id
 
-  send(guest1, { type: 'join_private_room', privateRoomId: roomId })
-  await waitForFrame(host, (f) => f.type === 'private_room_updated' && f.room.members.length === 2, 10_000, '2 members')
+  const occupiedCount = (room: any): number => room.slots.filter((s: any) => s.occupant !== null).length
 
-  send(victim, { type: 'join_private_room', privateRoomId: roomId })
-  await waitForFrame(host, (f) => f.type === 'private_room_updated' && f.room.members.length === 3, 10_000, '3 members (victim joined)')
-  await waitForFrame(victim, (f) => f.type === 'private_room_updated' && f.room.members.length === 3, 10_000, 'victim sees own join')
+  send(guest1, { type: 'join_private_room', privateRoomId: roomId, team: 'A', slotIndex: 1 })
+  await waitForFrame(host, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 2, 10_000, '2 members')
+
+  send(victim, { type: 'join_private_room', privateRoomId: roomId, team: 'B', slotIndex: 0 })
+  await waitForFrame(host, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 3, 10_000, '3 members (victim joined)')
+  await waitForFrame(victim, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 3, 10_000, 'victim sees own join')
 
   // ───────────────────────────────────────────────────────────────────────
   // [1] Victim's WebSocket dies (mobile blip) — no leave_private_room, just
@@ -334,7 +336,7 @@ try {
   // still pointing at the now-dead original socket.
   // ───────────────────────────────────────────────────────────────────────
   const fourth = await connectClient(port, 'fourth')
-  send(fourth, { type: 'join_private_room', privateRoomId: roomId })
+  send(fourth, { type: 'join_private_room', privateRoomId: roomId, team: 'B', slotIndex: 1 })
 
   await check('[2] the 4th human join makes the table naturally reach 4/4 and start a single game', async () => {
     const hostFull = await waitForFrame(host, (f) => f.type === 'private_room_full', 15_000, 'host private_room_full')

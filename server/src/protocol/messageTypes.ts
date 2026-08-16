@@ -5,6 +5,7 @@ import type {
   RoomId,
   RoomStatus,
   Seat,
+  Team,
   TournamentAttendanceSnapshot,
   TournamentBotReplacementSnapshot,
   TournamentRoomBannerSnapshot,
@@ -171,6 +172,8 @@ export type ClientMessage =
   | {
       type: 'join_private_room'
       privateRoomId: string
+      team: Team
+      slotIndex: 0 | 1
       displayName?: string
     }
   | {
@@ -193,7 +196,12 @@ export type ClientMessage =
       type: 'request_private_rooms_list'
     }
   | {
-      type: 'fill_private_room_with_bots'
+      type: 'add_bot_to_private_room_team'
+      team: Team
+    }
+  | {
+      type: 'remove_bot_from_private_room_team'
+      team: Team
     }
   | {
       type: 'subscribe_private_room_chat'
@@ -481,6 +489,12 @@ export type PongMessage = {
   timestamp: number
 }
 
+export type PrivateRoomActionErrorCode =
+  | 'private_room_slot_taken'
+  | 'private_room_team_full'
+  | 'private_room_partner_blocked'
+  | 'private_room_bot_owner_missing'
+
 export type ErrorMessage = {
   type: 'error'
   message: string
@@ -488,6 +502,7 @@ export type ErrorMessage = {
     | 'private_room_stake_unavailable'
     | 'private_room_insufficient_balance'
     | 'private_room_level_required'
+    | PrivateRoomActionErrorCode
 }
 
 export type GuestTrialErrorMessage = {
@@ -639,20 +654,29 @@ export type PhraseReactionMessage = {
 
 export type PrivateRoomWaitMinutes = 5 | 10 | 15 | 30
 
-export type PrivateRoomMemberSnapshot = {
+export type PrivateRoomOccupantSnapshot = {
   profileId: string | null
   displayName: string
   avatarUrl: string | null
   level: number | null
   rankTitle: string | null
   isHost: boolean
+  isBot: boolean
+}
+
+export type PrivateRoomSlotSnapshot = {
+  team: Team
+  slotIndex: 0 | 1
+  occupant: PrivateRoomOccupantSnapshot | null
 }
 
 export type PrivateRoomSnapshot = {
   id: string
   kind: 'open' | 'locked'
   stake: MatchStake
-  members: PrivateRoomMemberSnapshot[]
+  // Винаги дължина 4, фиксиран ред A0,A1,B0,B1 — празните слотове се изпращат
+  // явно (occupant:null), клиентът вече не гадае team по позиция в масив.
+  slots: PrivateRoomSlotSnapshot[]
   createdAt: number
   expiresAt: number
 }
@@ -691,6 +715,16 @@ export type PrivateRoomInviteReceivedMessage = {
 export type PrivateRoomInviteAcceptedMessage = {
   type: 'private_room_invite_accepted'
   toDisplayName: string
+}
+
+// Изпраща се само на приемащата връзка при успешен accept — за разлика от
+// private_room_updated (значи "това Е твоята стая"), приемащият все още не е
+// зает слот, само получава room-lifetime authorization (виж
+// privateRoomsStore.authorizedProfileIds). Клиентът ползва privateRoomId, за
+// да навигира към preview на точно тази стая.
+export type PrivateRoomInviteAcceptConfirmedMessage = {
+  type: 'private_room_invite_accept_confirmed'
+  privateRoomId: string
 }
 
 export type PrivateRoomInviteDeclinedMessage = {
@@ -831,6 +865,7 @@ export type ServerMessage =
   | PrivateRoomExpiredMessage
   | PrivateRoomInviteReceivedMessage
   | PrivateRoomInviteAcceptedMessage
+  | PrivateRoomInviteAcceptConfirmedMessage
   | PrivateRoomInviteDeclinedMessage
   | PrivateRoomInviteExpiredMessage
   | PrivateRoomInviteCancelledMessage

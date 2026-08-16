@@ -2,44 +2,46 @@
  * checkPrivateRoomWebSocketRoundTrip.ts
  *
  * Real spawned-server, real WebSocket round-trip integration test for the
- * private-table waiting-room + chat + "Запълни с ботове" flow added in
- * commit ca321c7. Unlike checkPrivateRoomBotFillGating.ts (which calls
- * privateRoomsStore functions directly, in-process, as a pure unit test),
- * this test exercises the ACTUAL server process end-to-end: real HTTP
- * registration, real cookie sessions, real separate WebSocket connections
- * per human participant, real JSON frames over the wire — following the
- * exact isolated-server pattern established by checkVoluntaryLeaveChatGate.ts
- * / checkVoluntaryLeaveSnapshotPersistence.ts.
+ * private-table explicit team/slot join + per-team bot control flow. Unlike
+ * the pure privateRoomsStore unit tests (checkPrivateRoomTeamJoinChoice.ts,
+ * checkPrivateRoomBotOwnership.ts, etc.), this test exercises the ACTUAL
+ * server process end-to-end: real HTTP registration, real cookie sessions,
+ * real separate WebSocket connections per human participant, real JSON
+ * frames over the wire — following the exact isolated-server pattern
+ * established by checkVoluntaryLeaveChatGate.ts.
  *
- * Covers (see task spec):
- *  - create_private_room -> join_private_room -> server-authoritative
- *    private_room_updated membership confirmation.
+ * Covers:
+ *  - create_private_room -> join_private_room{team,slotIndex} ->
+ *    server-authoritative private_room_updated membership confirmation,
+ *    with the creator auto-seated at Team A, slot 0.
  *  - subscribe_private_room_chat -> private_room_chat_history, then a real
  *    send_private_room_chat_message reaching exactly the two real members
  *    and NOT an outsider connection (isolation), and the outsider being
  *    rejected (not_member) on both subscribe and send.
- *  - fill_private_room_with_bots (2 humans + 2 bots, and 3 humans + 1 bot):
- *    exactly one ServerRoom created, exactly 4 unique occupied seats,
- *    correct bot count, every human receives the real room_snapshot with
- *    the game already started (roomStatus flips to 'playing' once the
- *    game worker's authoritative tick syncs back), isPrivateTableOrigin
- *    === true, the private room disappears from private_rooms_list, chat
- *    on the old privateRoomId is rejected afterward (not_member), and a
- *    repeated fill command does not create a second room.
- *  - Authorization/race guards: non-creator cannot start, lone creator
- *    cannot start (needs 2-3 humans), a 4th human joining concurrently
- *    with the fill command never produces 5 participants or two rooms.
+ *  - Per-team bot completion (2 humans + 2 bots, and 3 humans + 1 bot):
+ *    each team's own human adds their own team's bot via
+ *    add_bot_to_private_room_team — a human cannot add a bot to a team they
+ *    are not seated in (private_room_bot_owner_missing) — and the room only
+ *    starts once BOTH teams are complete: exactly one ServerRoom created,
+ *    exactly 4 unique occupied seats, correct bot count, every human
+ *    receives the real room_snapshot with the game already started,
+ *    isPrivateTableOrigin === true, the private room disappears from
+ *    private_rooms_list, chat on the old privateRoomId is rejected
+ *    afterward (not_member), and a repeated bot-add command after start
+ *    does not create a second room.
+ *  - Race guard: a human join and a competing bot-add targeting the exact
+ *    same (team, slotIndex) never both succeed — exactly one safe terminal
+ *    state, never 5 participants, never two rooms.
  *  - Reconnect: a human who disconnects (WS close, no leave_private_room)
  *    while still in the pre-game waiting room is restored on reconnect
- *    (existing privateRoomsStore.reconnectMember behaviour, unaffected by
- *    this feature) instead of silently losing their seat.
+ *    (privateRoomsStore.reconnectMember behaviour) instead of silently
+ *    losing their seat.
  *
- * Deterministic: no statistical/many-run sampling. The only "race" test
- * fires two real concurrent commands and asserts the OUTCOME INVARIANT
- * (exactly one valid terminal state, never 5 participants, never two
- * rooms) rather than asserting which one specifically wins — the winner
- * depends on real network/event-loop arrival order, but the safety
- * invariant holds unconditionally either way.
+ * Deterministic: no statistical/many-run sampling. The race test fires two
+ * real concurrent commands and asserts the OUTCOME INVARIANT (exactly one
+ * valid terminal state) rather than asserting which one specifically wins —
+ * the winner depends on real network/event-loop arrival order, but the
+ * safety invariant holds unconditionally either way.
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
@@ -237,6 +239,14 @@ function framesOfType(client: TestClient, type: string): any[] {
   return client.frames.filter((f) => f.type === type)
 }
 
+function occupiedCount(room: any): number {
+  return room.slots.filter((s: any) => s.occupant !== null).length
+}
+
+function slotOccupant(room: any, team: 'A' | 'B', slotIndex: 0 | 1): any {
+  return room.slots.find((s: any) => s.team === team && s.slotIndex === slotIndex)?.occupant ?? null
+}
+
 function isActiveServerAuthoritativeRoomSnapshot(frame: any, roomId: string): boolean {
   return (
     frame.type === 'room_snapshot' &&
@@ -293,10 +303,10 @@ try {
   console.log('Server ready.\n')
 
   // ───────────────────────────────────────────────────────────────────────
-  // Scenario A: 2 humans + 2 bots, plus creator-alone / non-creator gating,
-  // plus chat isolation against an outsider.
+  // Scenario A: explicit team join + per-team bot completion (2 humans + 2
+  // bots, one bot per team), plus chat isolation against an outsider.
   // ───────────────────────────────────────────────────────────────────────
-  console.log('--- Scenario A: 2 humans + 2 bots ---')
+  console.log('--- Scenario A: 2 humans + 2 bots (one per team) ---')
 
   const hostA = await connectClient(port, 'hostA')
   const guestA1 = await connectClient(port, 'guestA1')
@@ -306,33 +316,36 @@ try {
   const createdA = await waitForFrame(hostA, (f) => f.type === 'private_room_updated', 10_000, 'create_private_room ack')
   const roomIdA: string = createdA.room.id
 
-  await check('[A1] create_private_room produces a server-authoritative private_room_updated with 1 member (creator)', async () => {
-    if (createdA.room.members.length !== 1) throw new Error(`members.length=${createdA.room.members.length}`)
-    if (createdA.room.members[0].isHost !== true) throw new Error('creator not marked isHost')
+  await check('[A1] create_private_room produces a server-authoritative private_room_updated with 1 occupied slot (creator @ Team A, slot 0)', async () => {
+    if (occupiedCount(createdA.room) !== 1) throw new Error(`occupiedCount=${occupiedCount(createdA.room)}`)
+    const a0 = slotOccupant(createdA.room, 'A', 0)
+    if (a0 === null || a0.isHost !== true) throw new Error('creator not seated at A,0 as host')
   })
 
-  await check('[A2] lone creator cannot fill with bots (needs 2 or 3 humans)', async () => {
+  await check('[A2] the lone creator CAN add a bot to their OWN team (Team A: 1 human + 1 empty)', async () => {
     hostA.frames.length = 0
-    send(hostA, { type: 'fill_private_room_with_bots' })
-    const errorFrame = await waitForFrame(hostA, (f) => f.type === 'error', 5_000, 'lone-creator fill rejection')
-    if (typeof errorFrame.message !== 'string' || errorFrame.message.length === 0) throw new Error('expected a rejection message')
+    send(hostA, { type: 'add_bot_to_private_room_team', team: 'A' })
+    const updated = await waitForFrame(hostA, (f) => f.type === 'private_room_updated', 5_000, 'host sees Team A bot added')
+    const a1 = slotOccupant(updated.room, 'A', 1)
+    if (a1 === null || a1.isBot !== true) throw new Error('expected a bot at A,1')
+    if (occupiedCount(updated.room) !== 2) throw new Error(`occupiedCount=${occupiedCount(updated.room)} (room must not auto-start with Team B still empty)`)
   })
 
-  send(guestA1, { type: 'join_private_room', privateRoomId: roomIdA })
-  await waitForFrame(hostA, (f) => f.type === 'private_room_updated' && f.room.members.length === 2, 10_000, 'host sees 2nd member')
-  await waitForFrame(guestA1, (f) => f.type === 'private_room_updated' && f.room.members.length === 2, 10_000, 'guest sees own join confirmed')
+  send(guestA1, { type: 'join_private_room', privateRoomId: roomIdA, team: 'B', slotIndex: 0 })
+  await waitForFrame(hostA, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 3, 10_000, 'host sees guest join Team B')
+  await waitForFrame(guestA1, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 3, 10_000, 'guest sees own join confirmed')
 
-  await check('[A3] server-authoritative membership: both host and guest see exactly 2 members for the same room id', async () => {
+  await check('[A3] server-authoritative membership: both host and guest see the same 3-occupied room', async () => {
     const hostView = [...hostA.frames].reverse().find((f) => f.type === 'private_room_updated')
     const guestView = [...guestA1.frames].reverse().find((f) => f.type === 'private_room_updated')
     if (hostView.room.id !== roomIdA || guestView.room.id !== roomIdA) throw new Error('room id mismatch')
-    if (hostView.room.members.length !== 2 || guestView.room.members.length !== 2) throw new Error('expected 2 members on both views')
+    if (occupiedCount(hostView.room) !== 3 || occupiedCount(guestView.room) !== 3) throw new Error('expected 3 occupied slots on both views')
   })
 
-  await check('[A4] non-creator cannot trigger fill-with-bots', async () => {
+  await check('[A4] a human cannot add a bot to a team they are NOT seated in (Team A is guestA1\'s opponent team)', async () => {
     guestA1.frames.length = 0
-    send(guestA1, { type: 'fill_private_room_with_bots' })
-    const errorFrame = await waitForFrame(guestA1, (f) => f.type === 'error', 5_000, 'non-creator fill rejection')
+    send(guestA1, { type: 'add_bot_to_private_room_team', team: 'A' })
+    const errorFrame = await waitForFrame(guestA1, (f) => f.type === 'error', 5_000, 'cross-team bot-add rejection')
     if (typeof errorFrame.message !== 'string' || errorFrame.message.length === 0) throw new Error('expected a rejection message')
   })
 
@@ -384,10 +397,10 @@ try {
     if (leakedToHost || leakedToGuest) throw new Error('rejected outsider message leaked to real members')
   })
 
-  // ─── fill_private_room_with_bots: 2 humans + 2 bots ─────────────────────
+  // ─── guestA1 completes Team B with their own bot -> room reaches 4/4 ────
   hostA.frames.length = 0
   guestA1.frames.length = 0
-  send(hostA, { type: 'fill_private_room_with_bots' })
+  send(guestA1, { type: 'add_bot_to_private_room_team', team: 'B' })
 
   const hostFullA = await waitForFrame(hostA, (f) => f.type === 'private_room_full', 15_000, 'host private_room_full')
   const guestFullA = await waitForFrame(guestA1, (f) => f.type === 'private_room_full', 15_000, 'guest private_room_full')
@@ -454,13 +467,13 @@ try {
     if (errorFrame === undefined) throw new Error('expected not_member after the waiting room converted to a game')
   })
 
-  await check('[A19] a repeated fill_private_room_with_bots command does not create a second room', async () => {
+  await check('[A19] a repeated add_bot_to_private_room_team command after the room already started does not create a second room', async () => {
     hostA.frames.length = 0
-    send(hostA, { type: 'fill_private_room_with_bots' })
-    const errorFrame = await waitForFrame(hostA, (f) => f.type === 'error', 5_000, 'duplicate fill rejection')
+    send(hostA, { type: 'add_bot_to_private_room_team', team: 'A' })
+    const errorFrame = await waitForFrame(hostA, (f) => f.type === 'error', 5_000, 'post-start bot-add rejection')
     if (errorFrame === undefined) throw new Error('expected a plain error, not a second private_room_full')
     const secondFull = hostA.frames.some((f) => f.type === 'private_room_full')
-    if (secondFull) throw new Error('a duplicate fill command produced a SECOND private_room_full — second room created')
+    if (secondFull) throw new Error('a duplicate bot-add command produced a SECOND private_room_full — second room created')
   })
 
   // ───────────────────────────────────────────────────────────────────────
@@ -476,17 +489,19 @@ try {
   const createdB = await waitForFrame(hostB, (f) => f.type === 'private_room_updated', 10_000, 'create_private_room B')
   const roomIdB: string = createdB.room.id
 
-  send(guestB1, { type: 'join_private_room', privateRoomId: roomIdB })
-  await waitForFrame(hostB, (f) => f.type === 'private_room_updated' && f.room.members.length === 2, 10_000, 'B: 2 members')
-  send(guestB2, { type: 'join_private_room', privateRoomId: roomIdB })
-  await waitForFrame(hostB, (f) => f.type === 'private_room_updated' && f.room.members.length === 3, 10_000, 'B: 3 members')
-  await waitForFrame(guestB1, (f) => f.type === 'private_room_updated' && f.room.members.length === 3, 10_000, 'B: guest1 sees 3 members')
-  await waitForFrame(guestB2, (f) => f.type === 'private_room_updated' && f.room.members.length === 3, 10_000, 'B: guest2 sees 3 members')
+  // Team A fills with 2 real humans (host + guest1); Team B gets a single
+  // human (guest2), who then completes their own team with a bot.
+  send(guestB1, { type: 'join_private_room', privateRoomId: roomIdB, team: 'A', slotIndex: 1 })
+  await waitForFrame(hostB, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 2, 10_000, 'B: 2 occupied')
+  send(guestB2, { type: 'join_private_room', privateRoomId: roomIdB, team: 'B', slotIndex: 0 })
+  await waitForFrame(hostB, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 3, 10_000, 'B: 3 occupied')
+  await waitForFrame(guestB1, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 3, 10_000, 'B: guest1 sees 3 occupied')
+  await waitForFrame(guestB2, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 3, 10_000, 'B: guest2 sees 3 occupied')
 
   hostB.frames.length = 0
   guestB1.frames.length = 0
   guestB2.frames.length = 0
-  send(hostB, { type: 'fill_private_room_with_bots' })
+  send(guestB2, { type: 'add_bot_to_private_room_team', team: 'B' })
 
   const hostFullB = await waitForFrame(hostB, (f) => f.type === 'private_room_full', 15_000, 'B host private_room_full')
   const guest1FullB = await waitForFrame(guestB1, (f) => f.type === 'private_room_full', 15_000, 'B guest1 private_room_full')
@@ -522,11 +537,12 @@ try {
   })
 
   // ───────────────────────────────────────────────────────────────────────
-  // Race: 4th human joining concurrently with the fill command. Outcome
-  // must ALWAYS be safe (exactly 4 seats, exactly one room) regardless of
-  // which real network message the server happens to process first.
+  // Race: a 4th human join and a competing bot-add, BOTH targeting the same
+  // physically free slot (Team B, slot 1). Outcome must ALWAYS be safe
+  // (exactly 4 seats, exactly one room) regardless of which real network
+  // message the server happens to process first.
   // ───────────────────────────────────────────────────────────────────────
-  console.log('\n--- Race: 4th human vs fill_private_room_with_bots ---')
+  console.log('\n--- Race: 4th human join vs bot-add for the same (team, slotIndex) ---')
 
   const hostC = await connectClient(port, 'hostC')
   const guestC1 = await connectClient(port, 'guestC1')
@@ -537,10 +553,12 @@ try {
   const createdC = await waitForFrame(hostC, (f) => f.type === 'private_room_updated', 10_000, 'create_private_room C')
   const roomIdC: string = createdC.room.id
 
-  send(guestC1, { type: 'join_private_room', privateRoomId: roomIdC })
-  await waitForFrame(hostC, (f) => f.type === 'private_room_updated' && f.room.members.length === 2, 10_000, 'C: 2 members')
-  send(guestC2, { type: 'join_private_room', privateRoomId: roomIdC })
-  await waitForFrame(hostC, (f) => f.type === 'private_room_updated' && f.room.members.length === 3, 10_000, 'C: 3 members')
+  // Team A fills (host + guest1); Team B gets guest2, leaving exactly one
+  // physically free slot in the whole room: Team B, slot 1.
+  send(guestC1, { type: 'join_private_room', privateRoomId: roomIdC, team: 'A', slotIndex: 1 })
+  await waitForFrame(hostC, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 2, 10_000, 'C: 2 occupied')
+  send(guestC2, { type: 'join_private_room', privateRoomId: roomIdC, team: 'B', slotIndex: 0 })
+  await waitForFrame(hostC, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 3, 10_000, 'C: 3 occupied')
 
   hostC.frames.length = 0
   guestC1.frames.length = 0
@@ -549,9 +567,11 @@ try {
 
   // Fire both real WS messages back-to-back without awaiting in between —
   // the actual arrival/processing order at the server is real network
-  // timing, not something this test controls or needs to control.
-  send(guestC3, { type: 'join_private_room', privateRoomId: roomIdC })
-  send(hostC, { type: 'fill_private_room_with_bots' })
+  // timing, not something this test controls or needs to control. guestC3
+  // targets Team B, slot 1 directly; guestC2 (Team B's own human) races it
+  // with a bot-add for their own team's only free slot — the same slot.
+  send(guestC3, { type: 'join_private_room', privateRoomId: roomIdC, team: 'B', slotIndex: 1 })
+  send(guestC2, { type: 'add_bot_to_private_room_team', team: 'B' })
 
   await check('[R1] the race between a 4th human joining and bot-fill resolves to exactly one safe terminal state', async () => {
     await waitForCondition(
@@ -612,8 +632,8 @@ try {
   const createdD = await waitForFrame(hostD, (f) => f.type === 'private_room_updated', 10_000, 'create_private_room D')
   const roomIdD: string = createdD.room.id
 
-  send(guestD1, { type: 'join_private_room', privateRoomId: roomIdD })
-  await waitForFrame(hostD, (f) => f.type === 'private_room_updated' && f.room.members.length === 2, 10_000, 'D: 2 members')
+  send(guestD1, { type: 'join_private_room', privateRoomId: roomIdD, team: 'B', slotIndex: 0 })
+  await waitForFrame(hostD, (f) => f.type === 'private_room_updated' && occupiedCount(f.room) === 2, 10_000, 'D: 2 occupied')
 
   await check('[D1] a human who disconnects (WS close, no explicit leave) while waiting can reconnect and is restored to the same room', async () => {
     guestD1.ws.close()
@@ -623,7 +643,9 @@ try {
     const reconnected = await reconnectClient(port, guestD1)
     send(reconnected, { type: 'request_private_rooms_list' })
     const updated = await waitForFrame(reconnected, (f) => f.type === 'private_room_updated' && f.room.id === roomIdD, 10_000, 'reconnect restores private room membership')
-    if (updated.room.members.length !== 2) throw new Error(`expected 2 members preserved after reconnect, got ${updated.room.members.length}`)
+    if (occupiedCount(updated.room) !== 2) throw new Error(`expected 2 occupied slots preserved after reconnect, got ${occupiedCount(updated.room)}`)
+    const b0 = slotOccupant(updated.room, 'B', 0)
+    if (b0 === null || b0.isBot === true) throw new Error('reconnected human is no longer at their original Team B, slot 0')
     guestD1 = reconnected
   })
 

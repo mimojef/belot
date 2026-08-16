@@ -270,7 +270,12 @@ await check('[9] openChatWithFriend routes by canonical conversation kind, not b
   assert(openFn.includes('state.chatConversations.find((c) => c.friendshipId === friendshipId)'), 'openChatWithFriend must look up the exact conversation by canonical friendshipId')
   assert(openFn.includes("conversation?.kind === 'vip_dm'"), 'routing must be keyed by the canonical kind of THIS conversation, not by viewer UI context')
   assert(openFn.includes('void showTopicsPersonalChat(friendshipId)'), 'kind=vip_dm must still open Topics Personal conversation')
-  assert(openFn.includes('void showChatPanel().then'), 'kind=friend (default/unknown) must open legacy Chat')
+  // showChatPanel(true) — skipAutoSelectFallback=true, добавено за да пази
+  // openChatWithFriend/startPikaSupportChatAndOpen от собствения си throwaway
+  // "auto-select първи friend разговор" bump на activeChatRequestGeneration
+  // (иначе race guard-ът погрешно отхвърля СОБСТВЕНАТА цел на caller-а, виж
+  // checkPikaSupportChatRouting.ts [A3]) — самата "отваря legacy Chat" семантика е непроменена.
+  assert(openFn.includes('void showChatPanel(true).then'), 'kind=friend (default/unknown) must open legacy Chat')
 })
 
 await check('[10] Composer, attachments and image viewer reuse existing Personal Chat selectors/helpers', () => {
@@ -403,28 +408,39 @@ await check('[19] kind=vip_dm notification opens Topics Personal while kind=frie
   const openFn = controller.slice(controller.indexOf('openChatWithFriend: (friendshipId: string) => {'), controller.indexOf('getFriendshipActionForProfile: (profileId: string) => {'))
   assert(openFn.includes("conversation?.kind === 'vip_dm'"), 'vip_dm conversation action must branch by canonical kind, not viewer screen context')
   assert(openFn.includes('void showTopicsPersonalChat(friendshipId)'), 'vip_dm chat action must open Topics Personal conversation')
-  assert(openFn.includes('void showChatPanel().then'), 'friend (default) chat entry must still use standalone Chat screen')
+  assert(openFn.includes('void showChatPanel(true).then'), 'friend (default) chat entry must still use standalone Chat screen')
   assert(controller.includes("state.currentScreen = 'chat'"), 'standalone Chat screen must still exist for legacy entry')
 })
 
-await check('[20] Legacy Chat remains friend-only while Topics Personal is vip_dm-only', () => {
-  assert(renderLobby.includes(".filter((conversation) => conversation.kind === 'friend')"), 'legacy Chat must filter strictly to friend conversations')
+// [20]/[20b]/[20c] обновени за PIKABG X→Y cross-delivery production fix
+// (checkPikaSupportChatRouting.ts): Legacy Chat първоначално филтрираше
+// строго до kind='friend' — 'pika_support' отпадаше от списъка, активният
+// pika_support разговор никога не се намираше по friendshipId и composer
+// формата мълчаливо се bind-ваше към sortedConversations[0] (грешен друг
+// разговор). Legacy Chat вече показва 'friend' И 'pika_support' (само
+// 'vip_dm' остава изключен — той си има собствен Topics Personal UI).
+// Unread badge-broene (sumConversationUnreadByKind/getFriendChatUnreadRaw)
+// умишлено НЕ е променено тук (остава strictly friend-only) — известен,
+// отделен, по-маловажен gap (пропуснат unread badge за нови pika_support
+// съобщения), докладван отделно, не част от routing/delivery корекцията.
+await check('[20] Legacy Chat now includes friend AND pika_support (only vip_dm stays excluded); Topics Personal remains vip_dm-only', () => {
+  assert(renderLobby.includes(".filter((conversation) => conversation.kind === 'friend' || conversation.kind === 'pika_support')"), 'legacy Chat (desktop + mobile) must filter to friend OR pika_support conversations')
   assert(controller.includes("return state.chatConversations.filter((conversation) => conversation.kind === 'vip_dm')"), 'Topics Personal helper must filter strictly to vip_dm conversations')
   assert(!topicsPersonalPanelSource.includes('pikaSupportBadge'), 'Topics Personal must keep pika_support isolated')
 })
 
 await check('[20b] Active conversation reconciliation is kind-aware across Chat and Topics Personal', () => {
   assert(controller.includes('function isChatConversationValidForCurrentSurface'), 'missing kind-aware active conversation guard')
-  assert(controller.includes("if (state.currentScreen === 'chat') return conversation.kind === 'friend'"), 'legacy Chat active guard must accept only friend conversations')
+  assert(controller.includes("if (state.currentScreen === 'chat') return conversation.kind === 'friend' || conversation.kind === 'pika_support'"), 'legacy Chat active guard must accept friend OR pika_support conversations (else reconcileActiveChatConversation would silently clear an active pika_support chat on every background conversations reload)')
   assert(controller.includes("if (state.currentScreen === 'topics' && state.topicsMode === 'personal') return conversation.kind === 'vip_dm'"), 'Topics Personal active guard must accept only vip_dm conversations')
   assert(controller.includes('reconcileActiveChatConversation()'), 'conversation loads must reconcile active friendshipId against current surface')
   assert(controller.includes('const activeFriendConversation = state.activeChatFriendshipId !== null'), 'showChatPanel must verify active id is a friend conversation before skipping auto-open')
 })
 
-await check('[20c] Legacy Chat unread badges and mobile list are friend-only', () => {
-  assert(renderLobby.includes("return sumConversationUnreadByKind(state, 'friend')"), 'Chat unread helper must count only friend conversations')
+await check('[20c] Legacy Chat unread badges stay friend-only (known separate gap); mobile/desktop conversation lists include pika_support', () => {
+  assert(renderLobby.includes("return sumConversationUnreadByKind(state, 'friend')"), 'Chat unread badge helper intentionally still counts only friend conversations (pika_support unread badge is a separate, not-yet-addressed gap)')
   assert(renderLobby.includes('const friendChatUnreadCount = getFriendChatUnreadRaw(state)'), 'desktop/mobile Chat badges must use the friend-only raw helper')
-  assert(renderLobby.includes(".filter((conversation) => conversation.kind === 'friend')"), 'mobile/desktop Chat lists must filter strictly to friend conversations')
+  assert(renderLobby.includes(".filter((conversation) => conversation.kind === 'friend' || conversation.kind === 'pika_support')"), 'mobile/desktop Chat lists must filter to friend OR pika_support conversations')
   assert(!renderLobby.includes("conversation.kind !== 'vip_dm'"), 'legacy Chat must not use broad not-vip_dm filters')
 })
 

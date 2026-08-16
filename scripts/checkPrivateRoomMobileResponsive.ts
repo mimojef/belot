@@ -114,11 +114,23 @@ async function elementWithinViewport(page: Page, selector: string): Promise<bool
 }
 
 function makeMember(profileId: string, displayName: string, isHost: boolean, level = 5) {
-  return { profileId, displayName, avatarUrl: null, level, rankTitle: isHost ? null : 'Играч', isHost }
+  return { profileId, displayName, avatarUrl: null, level, rankTitle: isHost ? null : 'Играч', isHost, isBot: false }
 }
 
+// Позиционно мапва плоския members масив в team/slot модела: index 0->A0
+// (винаги "мен" в тези сценарии), 1->B0, 2->A1, 3->B1 — едно място на отбор
+// първо, после второто — за да могат 2-членни стаи естествено да тестват
+// "по 1 човек на отбор, bot control активен и за двамата собственици"
+// сценарии, релевантни за per-team модела.
 function makeRoom(id: string, members: unknown[], kind: 'open' | 'locked' = 'open', stake = 5000, expiresAt?: number) {
-  return { id, kind, stake, members, createdAt: Date.now(), expiresAt: expiresAt ?? Date.now() + 10 * 60_000 }
+  const slotDefs: Array<{ team: 'A' | 'B'; slotIndex: 0 | 1 }> = [
+    { team: 'A', slotIndex: 0 },
+    { team: 'B', slotIndex: 0 },
+    { team: 'A', slotIndex: 1 },
+    { team: 'B', slotIndex: 1 },
+  ]
+  const slots = slotDefs.map((def, i) => ({ ...def, occupant: members[i] ?? null }))
+  return { id, kind, stake, slots, createdAt: Date.now(), expiresAt: expiresAt ?? Date.now() + 10 * 60_000 }
 }
 
 const LONG_CYRILLIC_NAME = 'Константин-Александър Величковски-Радославов'
@@ -150,19 +162,28 @@ async function runWaitingRoomScenario(page: Page, label: string, viewportWidth: 
     assert(hostBadgeCount === 1, `Очаквах точно 1 host badge, получих ${hostBadgeCount}`)
   })
 
-  await check(`${label} [3] 2-ма човека: 2 заети + 2 свободни места`, async () => {
-    const occupied = await page.locator('.prw-seat:not(.prw-seat-empty)').count()
-    const empty = await page.locator('.prw-seat-empty').count()
+  await check(`${label} [3] 2-ма човека (по 1 на отбор): 2 заети + 2 свободни места`, async () => {
+    const occupied = await page.locator('.prw-slot:not(.prw-slot-empty)').count()
+    const empty = await page.locator('.prw-slot-empty').count()
     assert(occupied === 2, `occupied=${occupied}`)
     assert(empty === 2, `empty=${empty}`)
   })
 
-  await check(`${label} [4] "Запълни с ботове" е видим и активен за домакина при 2-ма души`, async () => {
-    const btn = page.locator('[data-private-waiting-fillbots-button="1"]')
-    await assertVisibleEnabled(btn)
+  await check(`${label} [4] "Запълни с бот" е видим и активен за собствения отбор (А) на "мен"`, async () => {
+    await assertVisibleEnabled(page.locator('[data-private-room-bot-team="A"]'))
+    const text = await page.locator('[data-private-room-bot-team="A"]').textContent()
+    assert((text ?? '').includes('Запълни с бот'), `текст: "${text}"`)
   })
 
-  // ─── 3 humans ────────────────────────────────────────────────────────────
+  await check(`${label} [4b] Бутонът на чуждия отбор (Б) е видим, но disabled — не е скрит`, async () => {
+    const btn = page.locator('[data-private-room-bot-team="B"]')
+    const count = await btn.count()
+    assert(count === 1, `очаквах точно 1 бутон за Отбор Б, получих ${count}`)
+    const disabled = await btn.isDisabled()
+    assert(disabled, 'бутонът на Отбор Б трябваше да е disabled за играч от Отбор А')
+  })
+
+  // ─── 3 humans: my own team (A) fills up ─────────────────────────────────
   await page.evaluate(({ room }) => {
     ;(window as any).__prwHarness.pushRoomUpdated(room)
   }, {
@@ -174,17 +195,21 @@ async function runWaitingRoomScenario(page: Page, label: string, viewportWidth: 
   })
 
   await check(`${label} [5] 3-ма души: 3 заети + 1 свободно място`, async () => {
-    const occupied = await page.locator('.prw-seat:not(.prw-seat-empty)').count()
-    const empty = await page.locator('.prw-seat-empty').count()
+    const occupied = await page.locator('.prw-slot:not(.prw-slot-empty)').count()
+    const empty = await page.locator('.prw-slot-empty').count()
     assert(occupied === 3, `occupied=${occupied}`)
     assert(empty === 1, `empty=${empty}`)
   })
 
-  await check(`${label} [6] "Запълни с ботове" остава активен при 3-ма души`, async () => {
-    await assertVisibleEnabled(page.locator('[data-private-waiting-fillbots-button="1"]'))
+  await check(`${label} [6] Собственият отбор (А) вече е пълен: бутонът показва "Отборът е пълен" и е disabled`, async () => {
+    const btn = page.locator('[data-private-room-bot-team="A"]')
+    const text = await btn.textContent()
+    const disabled = await btn.isDisabled()
+    assert((text ?? '').includes('Отборът е пълен'), `текст: "${text}"`)
+    assert(disabled, 'бутонът на пълен собствен отбор трябваше да е disabled')
   })
 
-  // ─── Non-host view: button must not be visible at all ───────────────────
+  // ─── Team ownership (not host status) gates the bot button ──────────────
   await page.evaluate(({ room }) => {
     ;(window as any).__prwHarness.pushRoomUpdated(room)
   }, {
@@ -193,12 +218,15 @@ async function runWaitingRoomScenario(page: Page, label: string, viewportWidth: 
       makeMember('me', 'Тестов Играч', false),
     ]),
   })
-  await check(`${label} [7] Не-домакинът НЕ вижда бутона "Запълни с ботове"`, async () => {
-    const count = await page.locator('[data-private-waiting-fillbots-button="1"]').count()
-    assert(count === 0, `не-домакин вижда бутона (count=${count})`)
+  await check(`${label} [7] Не-домакин, но в собствения си отбор (Б): вижда СВОЯ бутон активен`, async () => {
+    await assertVisibleEnabled(page.locator('[data-private-room-bot-team="B"]'))
+  })
+  await check(`${label} [7b] Не-домакинът НЕ може да управлява чуждия отбор (А), дори бутонът да се вижда`, async () => {
+    const disabled = await page.locator('[data-private-room-bot-team="A"]').isDisabled()
+    assert(disabled, 'не-домакин не биваше да вижда активен бутон за чужд отбор')
   })
 
-  // Restore host view with 4 members total not yet — go back to 2 humans, me=host.
+  // Restore host view with 2 humans, me=host (Team A), guest-1 (Team B).
   await page.evaluate(({ room }) => {
     ;(window as any).__prwHarness.pushRoomUpdated(room)
   }, { room: makeRoom('room-1', [makeMember('me', 'Тестов Играч', true), makeMember('guest-1', 'Гост Едно', false)]) })
@@ -219,7 +247,7 @@ async function runWaitingRoomScenario(page: Page, label: string, viewportWidth: 
   })
 
   await check(`${label} [8b] Дългите имена все пак се показват (текст не е празен)`, async () => {
-    const text = await page.locator('.prw-seat-name').first().textContent()
+    const text = await page.locator('.prw-slot-name').first().textContent()
     assert((text ?? '').trim().length > 0, 'името е празно')
   })
 
@@ -339,67 +367,86 @@ async function runWaitingRoomScenario(page: Page, label: string, viewportWidth: 
     assert(stillFocused, 'полето трябваше да остане фокусирано')
   })
 
-  // ─── Fill-with-bots: confirmation, loading, error recovery ──────────────
-  await page.evaluate(() => (window as any).__prwHarness.clearCalls())
-  await page.locator('[data-private-waiting-fillbots-button="1"]').click()
+  // Restore to 1-human-per-team (me@A0 host, guest-1@B0) — the [13] check
+  // above left Team A full (3 members), which would make Team A's bot
+  // button disabled going into the bot-add scenario below.
+  await page.evaluate(({ room }) => {
+    ;(window as any).__prwHarness.pushRoomUpdated(room)
+  }, { room: makeRoom('room-chat', [makeMember('me', 'Тестов Играч', true), makeMember('guest-1', 'Гост Едно', false)]) })
 
-  await check(`${label} [14] Клик на "Запълни с ботове" показва потвърждение с очаквания текст`, async () => {
-    const text = await page.locator('.prw-confirm-text').first().textContent()
-    assert((text ?? '').includes('Свободните места ще бъдат запълнени с ботове'), `текст: "${text}"`)
+  // ─── Per-team bot add: direct action, no confirmation dialog (a bot-add
+  // is a small, reversible action — "Махни бот" undoes it — unlike the old
+  // whole-table fill which auto-started the game and needed a confirm step).
+  await page.evaluate(() => (window as any).__prwHarness.clearCalls())
+  await page.locator('[data-private-room-bot-team="A"]').click()
+
+  await check(`${label} [14] Клик на "Запълни с бот" вика onPrivateRoomAddBot с правилния отбор, без потвърждение`, async () => {
+    const calls = await page.evaluate(() => (window as any).__prwHarness.getCalls())
+    const call = calls.find((c: any) => c.name === 'onPrivateRoomAddBot')
+    assert(call !== undefined, 'onPrivateRoomAddBot не е извикан')
+    assert(call.args[0] === 'A', `очаквах team="A", получих ${JSON.stringify(call.args)}`)
   })
 
-  await shot(page, `${viewportWidth}-fillbots-confirm`)
-
-  await page.locator('[data-private-waiting-fillbots-confirm-yes="1"]').click()
-
-  await check(`${label} [14b] Потвърждаването вика onPrivateRoomFillWithBots и бутонът показва "Стартиране..." (disabled)`, async () => {
-    const calls = await page.evaluate(() => (window as any).__prwHarness.getCalls())
-    assert(calls.some((c: any) => c.name === 'onPrivateRoomFillWithBots'), 'onPrivateRoomFillWithBots не е извикан')
-    const btn = page.locator('[data-private-waiting-fillbots-button="1"]')
+  await check(`${label} [14b] Бутонът показва loading state ("...") и е disabled, докато чака отговор`, async () => {
+    const btn = page.locator('[data-private-room-bot-team="A"]')
     const text = await btn.textContent()
     const disabled = await btn.isDisabled()
-    assert((text ?? '').includes('Стартиране'), `текст на бутона: "${text}"`)
+    assert((text ?? '').trim() === '...', `текст на бутона по време на loading: "${text}"`)
     assert(disabled, 'бутонът трябваше да е disabled по време на loading')
   })
 
+  await shot(page, `${viewportWidth}-bot-add-loading`)
+
   await check(`${label} [15] Ако сървърът отхвърли (race condition), грешката се показва И бутонът спира да е "заклещен" в loading`, async () => {
     await page.evaluate(() => {
-      ;(window as any).__prwHarness.pushGenericError('Запълването с ботове изисква 2 или 3 играчи в масата.')
+      ;(window as any).__prwHarness.pushGenericError('Отборът е пълен.')
     })
-    await page.waitForFunction(() => document.body.textContent?.includes('Запълването с ботове изисква') ?? false, undefined, { timeout: 3_000 })
-    const btn = page.locator('[data-private-waiting-fillbots-button="1"]')
+    await page.waitForFunction(() => document.body.textContent?.includes('Отборът е пълен') ?? false, undefined, { timeout: 3_000 })
+    const btn = page.locator('[data-private-room-bot-team="A"]')
     const disabled = await btn.isDisabled()
     assert(!disabled, 'бутонът остана заклещен в disabled/loading след отхвърлена команда')
   })
 
-  // ─── Leave: confirmation cancel + confirm ────────────────────────────────
-  await page.locator('[data-private-waiting-leave-button="1"]').click()
-  await check(`${label} [16] Клик на "Напусни" показва потвърждение с очаквания текст`, async () => {
-    const text = await page.locator('.prw-confirm-text').first().textContent()
-    assert((text ?? '').includes('мястото ти ще бъде освободено'), `текст: "${text}"`)
+  // ─── Leave: own red "−" on the local player's own avatar, confirmation
+  // cancel + confirm (no separate global "Напусни" button anymore). ───────
+  await page.locator('[data-private-room-leave-slot="1"]').click()
+  await check(`${label} [16] Клик на собствения "−" показва потвърждение с очаквания текст`, async () => {
+    const text = await page.locator('.prw-popup-text').first().textContent()
+    assert((text ?? '').includes('освободите мястото си'), `текст: "${text}"`)
   })
-  await shot(page, `${viewportWidth}-leave-confirm`)
+  // No documentary shot() here: settlePaint() clicks a corner of <html> to
+  // force paint, but with the new fixed-overlay backdrop popup that corner
+  // IS the backdrop, so the click would dismiss the popup before the next
+  // step (cancel-click assertion below) can run against it.
 
-  await page.locator('[data-private-waiting-leave-confirm-cancel="1"]').click()
-  await check(`${label} [16b] "Откажи" затваря диалога без да вика onPrivateRoomLeave`, async () => {
-    const count = await page.locator('.prw-confirm-box', { hasText: 'мястото ти ще бъде освободено' }).count()
+  await page.locator('[data-private-room-leave-popup-cancel="1"]').click()
+  await check(`${label} [16b] "Отказ" затваря диалога без да вика onPrivateRoomLeave`, async () => {
+    const count = await page.locator('[data-private-room-leave-popup-backdrop="1"]').count()
     assert(count === 0, 'диалогът не се затвори')
     const calls = await page.evaluate(() => (window as any).__prwHarness.getCalls())
-    assert(!calls.some((c: any) => c.name === 'onPrivateRoomLeave'), 'onPrivateRoomLeave не трябваше да е извикан след Откажи')
+    assert(!calls.some((c: any) => c.name === 'onPrivateRoomLeave'), 'onPrivateRoomLeave не трябваше да е извикан след Отказ')
   })
 
   await page.evaluate(() => (window as any).__prwHarness.clearCalls())
-  await page.locator('[data-private-waiting-leave-button="1"]').click()
-  await page.locator('[data-private-waiting-leave-confirm-yes="1"]').click()
+  await page.locator('[data-private-room-leave-slot="1"]').click()
+  await page.locator('[data-private-room-leave-popup-confirm="1"]').click()
   await check(`${label} [17] Потвърденото напускане вика onPrivateRoomLeave`, async () => {
     const calls = await page.evaluate(() => (window as any).__prwHarness.getCalls())
     assert(calls.some((c: any) => c.name === 'onPrivateRoomLeave'), 'onPrivateRoomLeave не е извикан')
   })
 
-  await check(`${label} [17b] private_room_left връща контролера извън чакалнята`, async () => {
+  // Точка 6 от корекциите: ако стаята още съществува (тя е в
+  // state.privateRooms — harness-ът я push-на там при първия join),
+  // напускането НЕ редиректва — потребителят остава на same-screen preview,
+  // вече като previewer (вижда "+" отново, собственият "−" изчезва).
+  await check(`${label} [17b] private_room_left оставя контролера на preview на СЪЩАТА стая (стаята още съществува)`, async () => {
     await page.evaluate(() => (window as any).__prwHarness.pushRoomLeft('room-chat'))
     const screen = await page.evaluate(() => (window as any).__prwHarness.getCurrentScreen())
-    assert(screen !== 'private-room-waiting', `очаквах да напусне екрана, currentScreen=${screen}`)
+    assert(screen === 'private-room-waiting', `очаквах да остане на чакалнята като previewer, currentScreen=${screen}`)
+    const ownLeaveBadgeCount = await page.locator('[data-private-room-leave-slot="1"]').count()
+    assert(ownLeaveBadgeCount === 0, 'собственият "−" не биваше вече да се вижда след напускане')
+    const joinButtonCount = await page.locator('[data-private-room-slot-join]').count()
+    assert(joinButtonCount > 0, 'previewer-ът трябва да вижда поне един кликаем "+" след напускане')
   })
 
   // ─── Closed/expired while waiting -> navigates away with info banner ────
@@ -467,6 +514,18 @@ async function assertVisibleEnabled(locator: ReturnType<Page['locator']>): Promi
   assert(box !== null && box.width >= 30 && box.height >= 30, `touch target твърде малък: ${JSON.stringify(box)}`)
 }
 
+// За малки badge-style контроли (напр. собствения "−" върху аватара) —
+// значително по-малка, но все пак достатъчна touch зона (WCAG 2.5.5-подобна
+// долна граница), не пълноширочинен бутон като assertVisibleEnabled по-горе.
+async function assertVisibleEnabledSmallBadge(locator: ReturnType<Page['locator']>): Promise<void> {
+  const count = await locator.count()
+  assert(count === 1, `очаквах точно 1 елемент, получих ${count}`)
+  const disabled = await locator.isDisabled()
+  assert(!disabled, 'елементът е disabled, а не трябваше')
+  const box = await locator.boundingBox()
+  assert(box !== null && box.width >= 18 && box.height >= 18, `touch target твърде малък: ${JSON.stringify(box)}`)
+}
+
 async function runKeyboardOpenScenario(page: Page, label: string, viewportWidth: number, viewportHeight: number): Promise<void> {
   await page.goto('/scripts/fixtures/privateRoomWaitingHarness.html')
   await page.waitForFunction(() => (window as any).__prwHarness !== undefined, undefined, { timeout: 10_000 })
@@ -502,8 +561,8 @@ async function runKeyboardOpenScenario(page: Page, label: string, viewportWidth:
     assert(Array.isArray(args) && args[1] === 'съобщение с отворена клавиатура', 'изпращането не мина докато "клавиатурата" е отворена')
   })
 
-  await check(`${label} [KB3] Чатът не покрива бутона "Напусни" (все още видим и кликаем)`, async () => {
-    await assertVisibleEnabled(page.locator('[data-private-waiting-leave-button="1"]'))
+  await check(`${label} [KB3] Чатът не покрива собствения "−" (все още видим и кликаем)`, async () => {
+    await assertVisibleEnabledSmallBadge(page.locator('[data-private-room-leave-slot="1"]'))
   })
 
   await shot(page, `${viewportWidth}-keyboard-open`)
@@ -512,7 +571,7 @@ async function runKeyboardOpenScenario(page: Page, label: string, viewportWidth:
   await check(`${label} [KB4] Затварянето на "клавиатурата" възстановява нормална височина без счупен layout`, async () => {
     const { overflow } = await hasHorizontalScroll(page)
     assert(!overflow, 'layout счупен след затваряне на клавиатурата (хоризонтален overflow)')
-    await assertVisibleEnabled(page.locator('[data-private-waiting-leave-button="1"]'))
+    await assertVisibleEnabledSmallBadge(page.locator('[data-private-room-leave-slot="1"]'))
   })
 }
 
@@ -530,38 +589,60 @@ async function runMobileWaitingRoomLayoutScenario(page: Page, label: string, vie
   }, { room: makeRoom('mobile-grid-room', [makeMember('me', 'Тестов Играч', true)], 'open') })
   await page.waitForSelector('[data-private-room-waiting-screen="1"]', { state: 'attached' })
 
-  await check(`${label} [G1] Grid: exactly 2 columns at mobile width`, async () => {
-    const columnCount = await page.evaluate(() => {
-      const el = document.querySelector('.prw-seats')
-      const cols = getComputedStyle(el!).gridTemplateColumns.trim().split(/\s+/)
-      return cols.length
-    })
-    assert(columnCount === 2, `expected 2 grid-template-columns, got ${columnCount}`)
+  // Точка 2 от корекциите: на mobile Отбор А и Отбор Б НЕ се stack-ват
+  // вертикално — остават side-by-side (same row), с вертикален divider
+  // между тях; всеки отбор показва своите 2 места stacked ВЪТРЕ в колоната.
+  await check(`${label} [G1] Exactly 2 team columns (.prw-team) render`, async () => {
+    const count = await page.locator('.prw-team').count()
+    assert(count === 2, `expected 2 .prw-team columns, got ${count}`)
   })
 
-  await check(`${label} [G2] Grid: the 4 seats form exactly 2 rows of 2 (2x2)`, async () => {
-    const rects = await page.$$eval('.prw-seat', (els) => els.map((el) => el.getBoundingClientRect()).map((r) => ({ top: Math.round(r.top), left: Math.round(r.left) })))
-    assert(rects.length === 4, `expected 4 seat cards, got ${rects.length}`)
+  await check(`${label} [G1b] A vertical divider (.prw-team-divider) renders between the two teams`, async () => {
+    const count = await page.locator('.prw-team-divider').count()
+    assert(count === 1, `expected exactly 1 team divider, got ${count}`)
+  })
+
+  await check(`${label} [G2] The two teams are side-by-side (same row), NOT stacked vertically, even at this mobile width`, async () => {
+    const rects = await page.$$eval('.prw-team', (els) => els.map((el) => el.getBoundingClientRect()).map((r) => ({ top: Math.round(r.top), left: Math.round(r.left) })))
+    assert(rects.length === 2, `expected 2 team columns, got ${rects.length}`)
     const rowTops = [...new Set(rects.map((r) => r.top))]
     const colLefts = [...new Set(rects.map((r) => r.left))]
-    assert(rowTops.length === 2, `expected 2 distinct row positions, got ${rowTops.length} (${JSON.stringify(rowTops)})`)
-    assert(colLefts.length === 2, `expected 2 distinct column positions, got ${colLefts.length} (${JSON.stringify(colLefts)})`)
+    assert(rowTops.length === 1, `teams must share the same row (top), got distinct tops ${JSON.stringify(rowTops)} — teams appear stacked vertically`)
+    assert(colLefts.length === 2, `expected 2 distinct horizontal positions (side-by-side), got ${JSON.stringify(colLefts)}`)
+    assert(rects[0]!.left < rects[1]!.left, 'Отбор А трябва да е вляво от Отбор Б')
   })
 
-  await check(`${label} [G3] Grid: all 4 seat cards have equal height`, async () => {
-    const heights = await page.$$eval('.prw-seat', (els) => els.map((el) => Math.round(el.getBoundingClientRect().height)))
-    const distinct = [...new Set(heights)]
-    assert(distinct.length === 1, `expected equal heights across all 4 cards, got ${JSON.stringify(heights)}`)
+  await check(`${label} [G3] Each team column contains exactly 2 slot cards, stacked vertically WITHIN the column`, async () => {
+    const teamHandles = await page.locator('.prw-team').all()
+    assert(teamHandles.length === 2, `expected 2 teams, got ${teamHandles.length}`)
+    for (const team of teamHandles) {
+      const rects = await team.locator('.prw-slot').evaluateAll((els) => els.map((el) => el.getBoundingClientRect()).map((r) => ({ top: Math.round(r.top), left: Math.round(r.left) })))
+      assert(rects.length === 2, `expected 2 slots per team, got ${rects.length}`)
+      const lefts = [...new Set(rects.map((r) => r.left))]
+      const tops = [...new Set(rects.map((r) => r.top))]
+      assert(lefts.length === 1, `the 2 slots within one team must share the same horizontal position, got ${JSON.stringify(lefts)}`)
+      assert(tops.length === 2, `the 2 slots within one team must be stacked (distinct vertical positions), got ${JSON.stringify(tops)}`)
+    }
   })
 
-  await check(`${label} [G4] Grid: seat card height is in the 60-100px compact range`, async () => {
-    const height = await page.$eval('.prw-seat', (el) => el.getBoundingClientRect().height)
-    assert(height >= 60 && height <= 100, `seat card height ${height}px out of the expected compact range`)
+  await check(`${label} [G4] All 4 slot cards have (sub-pixel-tolerant) equal height`, async () => {
+    const heights = await page.$$eval('.prw-slot', (els) => els.map((el) => Math.round(el.getBoundingClientRect().height)))
+    const spread = Math.max(...heights) - Math.min(...heights)
+    // 1px tolerance: sub-pixel layout rounding differences between an empty
+    // "+" card and an occupied card (different inline content) are normal
+    // browser rendering noise, not a real height mismatch.
+    assert(spread <= 1, `expected roughly equal heights across all 4 cards, got ${JSON.stringify(heights)}`)
   })
 
-  await check(`${label} [G5] Grid: no horizontal overflow with the 2x2 layout`, async () => {
+  await check(`${label} [G5] No horizontal overflow with the side-by-side team columns`, async () => {
     const { overflow } = await hasHorizontalScroll(page)
-    assert(!overflow, 'horizontal overflow with the mobile 2x2 seat grid')
+    assert(!overflow, 'horizontal overflow with the mobile team-column layout')
+  })
+
+  await check(`${label} [G5b] Team headers "Отбор А"/"Отбор Б" are present and correctly ordered left-to-right`, async () => {
+    const texts = await page.$$eval('.prw-team-header', (els) => els.map((el) => el.textContent?.trim()))
+    assert(texts.length === 2, `expected 2 team headers, got ${texts.length}`)
+    assert(texts[0] === 'Отбор А' && texts[1] === 'Отбор Б', `unexpected team header order: ${JSON.stringify(texts)}`)
   })
 
   // ─── Host badge: only on the host, correct text, survives long names ────
@@ -587,7 +668,7 @@ async function runMobileWaitingRoomLayoutScenario(page: Page, label: string, vie
 
   await check(`${label} [H4] Long host name: the name is ellipsized (does not force the card wider)`, async () => {
     const overflowsHidden = await page.evaluate(() => {
-      const nameEl = document.querySelector('.prw-seat-name')
+      const nameEl = document.querySelector('.prw-slot-name')
       if (!nameEl) return false
       const style = getComputedStyle(nameEl)
       return style.textOverflow === 'ellipsis' && style.overflow === 'hidden'
@@ -605,14 +686,15 @@ async function runMobileWaitingRoomLayoutScenario(page: Page, label: string, vie
     assert(box !== null && box.width >= 40 && box.height >= 10, `host badge shrank to an unreadable size: ${JSON.stringify(box)}`)
   })
 
-  // ─── Empty seat stays the same height as occupied ones ───────────────────
-  await check(`${label} [G6] Empty seat card has the same height as occupied cards`, async () => {
-    const heights = await page.$$eval('.prw-seat', (els) => els.map((el) => Math.round(el.getBoundingClientRect().height)))
-    const distinct = [...new Set(heights)]
-    assert(distinct.length === 1, `empty and occupied seat heights differ: ${JSON.stringify(heights)}`)
+  // ─── Empty slot stays the same height as occupied ones (1px tolerance —
+  // see [G4] above for why exact pixel equality is not the right bar). ─────
+  await check(`${label} [G6] Empty slot card has roughly the same height as occupied cards`, async () => {
+    const heights = await page.$$eval('.prw-slot', (els) => els.map((el) => Math.round(el.getBoundingClientRect().height)))
+    const spread = Math.max(...heights) - Math.min(...heights)
+    assert(spread <= 1, `empty and occupied slot heights differ too much: ${JSON.stringify(heights)}`)
   })
 
-  // ─── 4/4 players still forms a clean 2x2, no overflow ────────────────────
+  // ─── 4/4 players: teams still side-by-side (not stacked), no overflow ────
   await page.evaluate(({ room }) => {
     ;(window as any).__prwHarness.pushRoomUpdated(room)
   }, {
@@ -624,11 +706,12 @@ async function runMobileWaitingRoomLayoutScenario(page: Page, label: string, vie
     ], 'locked'),
   })
 
-  await check(`${label} [G7] 4/4 players (locked room): still exactly 4 cards, 2x2, no overflow`, async () => {
-    const rects = await page.$$eval('.prw-seat', (els) => els.map((el) => el.getBoundingClientRect()).map((r) => ({ top: Math.round(r.top), left: Math.round(r.left) })))
-    assert(rects.length === 4, `expected 4 seat cards at 4/4, got ${rects.length}`)
-    const rowTops = [...new Set(rects.map((r) => r.top))]
-    assert(rowTops.length === 2, `expected 2 rows at 4/4, got ${rowTops.length}`)
+  await check(`${label} [G7] 4/4 players (locked room): still exactly 4 cards, teams side-by-side, no overflow`, async () => {
+    const slotRects = await page.$$eval('.prw-slot', (els) => els.map((el) => el.getBoundingClientRect()).map((r) => ({ top: Math.round(r.top), left: Math.round(r.left) })))
+    assert(slotRects.length === 4, `expected 4 slot cards at 4/4, got ${slotRects.length}`)
+    const teamRects = await page.$$eval('.prw-team', (els) => els.map((el) => el.getBoundingClientRect()).map((r) => Math.round(r.top)))
+    const teamRowTops = [...new Set(teamRects)]
+    assert(teamRowTops.length === 1, `teams must stay side-by-side (same row) even at 4/4, got distinct tops ${JSON.stringify(teamRowTops)}`)
     const { overflow } = await hasHorizontalScroll(page)
     assert(!overflow, 'horizontal overflow at 4/4 players')
   })
@@ -751,12 +834,12 @@ async function runMobileWaitingRoomLayoutScenario(page: Page, label: string, vie
     assert(!overflow, 'horizontal overflow with countdown in critical state')
   })
 
-  await check(`${label} [CD3] Countdown badge and leave button remain on-screen together (no element pushed off-screen)`, async () => {
-    const leaveBox = await page.locator('[data-private-waiting-leave-button="1"]').boundingBox()
+  await check(`${label} [CD3] Countdown badge and own leave "−" remain on-screen together (no element pushed off-screen)`, async () => {
+    const leaveBox = await page.locator('[data-private-room-leave-slot="1"]').boundingBox()
     const countdownBox = await page.locator('[data-private-room-countdown="1"]').first().boundingBox()
-    assert(leaveBox !== null && countdownBox !== null, 'countdown badge or leave button missing')
+    assert(leaveBox !== null && countdownBox !== null, 'countdown badge or own leave "−" missing')
     const vp = page.viewportSize()
-    assert(leaveBox!.x + leaveBox!.width <= (vp?.width ?? 0) + 1, 'leave button extends past the viewport width')
+    assert(leaveBox!.x + leaveBox!.width <= (vp?.width ?? 0) + 1, 'leave badge extends past the viewport width')
     assert(countdownBox!.x >= -1, 'countdown badge extends before the viewport left edge')
   })
 
@@ -802,14 +885,14 @@ async function runMobileWaitingRoomLayoutScenario(page: Page, label: string, vie
       assert(box !== null && box.width > 0, 'countdown value is not visible/rendered')
     })
 
-    await check(`${label} [CD7] Narrow viewport: countdown badge and "Напусни" both remain within the viewport (no horizontal overflow)`, async () => {
-      const leaveBox = await page.locator('[data-private-waiting-leave-button="1"]').boundingBox()
+    await check(`${label} [CD7] Narrow viewport: countdown badge and own leave "−" both remain within the viewport (no horizontal overflow)`, async () => {
+      const leaveBox = await page.locator('[data-private-room-leave-slot="1"]').boundingBox()
       const countdownBox = await page.locator('[data-private-room-countdown="1"]').first().boundingBox()
-      assert(leaveBox !== null && countdownBox !== null, 'countdown badge or leave button missing at narrow viewport')
+      assert(leaveBox !== null && countdownBox !== null, 'countdown badge or own leave "−" missing at narrow viewport')
       assert(countdownBox!.x >= -1 && countdownBox!.x + countdownBox!.width <= viewportWidth + 1, `countdown badge out of bounds: ${JSON.stringify(countdownBox)}`)
-      assert(leaveBox!.x >= -1 && leaveBox!.x + leaveBox!.width <= viewportWidth + 1, `leave button out of bounds: ${JSON.stringify(leaveBox)}`)
+      assert(leaveBox!.x >= -1 && leaveBox!.x + leaveBox!.width <= viewportWidth + 1, `leave badge out of bounds: ${JSON.stringify(leaveBox)}`)
       const { overflow } = await hasHorizontalScroll(page)
-      assert(!overflow, 'horizontal overflow at narrow viewport with countdown + leave button')
+      assert(!overflow, 'horizontal overflow at narrow viewport with countdown + leave badge')
     })
   }
 }

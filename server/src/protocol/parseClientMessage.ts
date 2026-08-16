@@ -28,6 +28,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
+function parsePrivateRoomTeam(value: unknown): 'A' | 'B' | null {
+  return value === 'A' || value === 'B' ? value : null
+}
+
+function parsePrivateRoomSlotIndex(value: unknown): 0 | 1 | null {
+  return value === 0 || value === 1 ? value : null
+}
+
 function normalizeOptionalDisplayName(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined
@@ -438,14 +446,18 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
 
     if (parsed.type === 'join_private_room') {
       const privateRoomId = normalizeRequiredText(parsed.privateRoomId)
+      const team = parsePrivateRoomTeam(parsed.team)
+      const slotIndex = parsePrivateRoomSlotIndex(parsed.slotIndex)
 
-      if (privateRoomId === null) {
+      if (privateRoomId === null || team === null || slotIndex === null) {
         return null
       }
 
       return {
         type: 'join_private_room',
         privateRoomId,
+        team,
+        slotIndex,
         displayName: normalizeOptionalDisplayName(parsed.displayName),
       }
     }
@@ -473,8 +485,16 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return { type: 'cancel_private_room_invite', inviteId }
     }
 
-    if (parsed.type === 'fill_private_room_with_bots') {
-      return { type: 'fill_private_room_with_bots' }
+    if (parsed.type === 'add_bot_to_private_room_team') {
+      const team = parsePrivateRoomTeam(parsed.team)
+      if (team === null) return null
+      return { type: 'add_bot_to_private_room_team', team }
+    }
+
+    if (parsed.type === 'remove_bot_from_private_room_team') {
+      const team = parsePrivateRoomTeam(parsed.team)
+      if (team === null) return null
+      return { type: 'remove_bot_from_private_room_team', team }
     }
 
     if (parsed.type === 'subscribe_private_room_chat') {

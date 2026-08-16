@@ -303,7 +303,13 @@ await check('[16] "Влез" бутонът навигира през същес
 })
 
 await check('[17] navigateToPrivateRooms() в контролера сменя currentScreen на "private-rooms" (същия екран като съществуващия onPrivateRoomsOpen), без join', () => {
-  const fn = extractBlock(controllerSrc, 'navigateToPrivateRooms: () => {', 'navigateToPrivateRooms', '\n    },')
+  // Извлечена в именувана top-level функция (не inline arrow в options
+  // обекта) — вижте коментара непосредствено след дефиницията ѝ в
+  // createLobbyFlowController.ts: "за да може да се извиква и публично...
+  // огледално на startMatchmaking" (публична част от controller-ния API,
+  // виж return statement-а). Функционалното поведение (проверено тук) е
+  // непроменено — само формата на декларацията.
+  const fn = extractBlock(controllerSrc, 'function navigateToPrivateRooms(): void {', 'navigateToPrivateRooms', '\n  }')
   assert(fn.includes(`state.currentScreen = 'private-rooms'`), 'трябва да смени currentScreen на екрана със списъка на частните маси')
   assert(!fn.includes('onPrivateRoomJoin'), 'не трябва да присъединява автоматично играча към маса')
 })

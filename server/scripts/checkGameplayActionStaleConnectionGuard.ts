@@ -26,7 +26,7 @@
  *
  * Тестова стратегия: реален spawned сървър + реални `ws` клиенти (Node),
  * аналогично на checkPrivateRoomReconnectRaceGuard.ts. Играта се докарва до
- * 'playing' фаза чрез private room + "Запълни с ботове" (бързо, без да се
+ * 'playing' фаза чрез private room + per-team bot добавяне (бързо, без да се
  * чака matchmaking bot-fill прозореца от 17-20 сек). На victim-ия ход:
  *
  *  1. Отваря се ВТОРА WebSocket връзка (Tab B) за СЪЩИЯ профил, вече
@@ -247,6 +247,10 @@ function latestSnapshot(client: TestClient, roomId: string): any | null {
   return snaps.length > 0 ? snaps[snaps.length - 1] : null
 }
 
+function occupiedSlotCount(room: any): number {
+  return (room.slots as any[]).filter((s) => s.occupant !== null).length
+}
+
 // Auto-drives a human seat through cutting + bidding: cuts with a fixed
 // valid index when it's this seat's turn to cut; bids clubs whenever
 // validActions says it's still legally available (guaranteed available to
@@ -348,11 +352,14 @@ try {
   const created = await waitForFrame(host, (f) => f.type === 'private_room_updated', 10_000, 'create_private_room ack')
   const privateRoomId: string = created.room.id
 
-  send(victim, { type: 'join_private_room', privateRoomId })
-  await waitForFrame(host, (f) => f.type === 'private_room_updated' && f.room.members.length === 2, 10_000, '2 members')
-  await waitForFrame(victim, (f) => f.type === 'private_room_updated' && f.room.members.length === 2, 10_000, 'victim sees own join')
+  send(victim, { type: 'join_private_room', privateRoomId, team: 'B', slotIndex: 0 })
+  await waitForFrame(host, (f) => f.type === 'private_room_updated' && occupiedSlotCount(f.room) === 2, 10_000, '2 occupied slots')
+  await waitForFrame(victim, (f) => f.type === 'private_room_updated' && occupiedSlotCount(f.room) === 2, 10_000, 'victim sees own join')
 
-  send(host, { type: 'fill_private_room_with_bots' })
+  send(host, { type: 'add_bot_to_private_room_team', team: 'A' })
+  await waitForFrame(host, (f) => f.type === 'private_room_updated' && occupiedSlotCount(f.room) === 3, 10_000, 'team A bot added (3 occupied)')
+
+  send(victim, { type: 'add_bot_to_private_room_team', team: 'B' })
   const hostFull = await waitForFrame(host, (f) => f.type === 'private_room_full', 10_000, 'host private_room_full')
   const victimFull = await waitForFrame(victim, (f) => f.type === 'private_room_full', 10_000, 'victim private_room_full')
   const roomId: string = hostFull.roomId

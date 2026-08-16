@@ -702,6 +702,8 @@ export type ClientMessage =
   | {
       type: 'join_private_room'
       privateRoomId: string
+      team: Team
+      slotIndex: 0 | 1
       displayName?: string
     }
   | {
@@ -724,7 +726,12 @@ export type ClientMessage =
       type: 'request_private_rooms_list'
     }
   | {
-      type: 'fill_private_room_with_bots'
+      type: 'add_bot_to_private_room_team'
+      team: Team
+    }
+  | {
+      type: 'remove_bot_from_private_room_team'
+      team: Team
     }
   | {
       type: 'subscribe_private_room_chat'
@@ -795,20 +802,28 @@ export type ClientMessage =
       type: 'unsubscribe_topics_directory'
     }
 
-export type PrivateRoomMemberSnapshot = {
+export type PrivateRoomOccupantSnapshot = {
   profileId: string | null
   displayName: string
   avatarUrl: string | null
   level: number | null
   rankTitle: string | null
   isHost: boolean
+  isBot: boolean
+}
+
+export type PrivateRoomSlotSnapshot = {
+  team: Team
+  slotIndex: 0 | 1
+  occupant: PrivateRoomOccupantSnapshot | null
 }
 
 export type PrivateRoomSnapshot = {
   id: string
   kind: 'open' | 'locked'
   stake: MatchStake
-  members: PrivateRoomMemberSnapshot[]
+  // Винаги дължина 4, фиксиран ред A0,A1,B0,B1.
+  slots: PrivateRoomSlotSnapshot[]
   createdAt: number
   expiresAt: number
 }
@@ -1000,9 +1015,20 @@ export type PongMessage = {
   timestamp: number
 }
 
+export type PrivateRoomActionErrorCode =
+  | 'private_room_slot_taken'
+  | 'private_room_team_full'
+  | 'private_room_partner_blocked'
+  | 'private_room_bot_owner_missing'
+
 export type ErrorMessage = {
   type: 'error'
   message: string
+  code?:
+    | 'private_room_stake_unavailable'
+    | 'private_room_insufficient_balance'
+    | 'private_room_level_required'
+    | PrivateRoomActionErrorCode
 }
 
 export type GuestTrialErrorMessage = {
@@ -1253,6 +1279,11 @@ export type PrivateRoomInviteReceivedMessage = {
 export type PrivateRoomInviteAcceptedMessage = {
   type: 'private_room_invite_accepted'
   toDisplayName: string
+}
+
+export type PrivateRoomInviteAcceptConfirmedMessage = {
+  type: 'private_room_invite_accept_confirmed'
+  privateRoomId: string
 }
 
 export type PrivateRoomInviteDeclinedMessage = {
@@ -1857,6 +1888,7 @@ export type ServerMessage =
   | PrivateRoomExpiredMessage
   | PrivateRoomInviteReceivedMessage
   | PrivateRoomInviteAcceptedMessage
+  | PrivateRoomInviteAcceptConfirmedMessage
   | PrivateRoomInviteDeclinedMessage
   | PrivateRoomInviteExpiredMessage
   | PrivateRoomInviteCancelledMessage
@@ -1941,12 +1973,13 @@ export type GameServerClient = {
   sendPhraseReaction: (roomId: string, phraseId: string) => void
   requestPrivateRoomsList: () => void
   createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30) => void
-  joinPrivateRoom: (privateRoomId: string) => void
+  joinPrivateRoomSlot: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
   leavePrivateRoom: () => void
   inviteToPrivateRoom: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
   cancelPrivateRoomInvite: (inviteId: string) => void
   respondPrivateRoomInvite: (inviteId: string, accept: boolean) => void
-  fillPrivateRoomWithBots: () => void
+  addBotToPrivateRoomTeam: (team: Team) => void
+  removeBotFromPrivateRoomTeam: (team: Team) => void
   subscribePrivateRoomChat: (privateRoomId: string) => void
   unsubscribePrivateRoomChat: (privateRoomId: string) => void
   sendPrivateRoomChatMessage: (privateRoomId: string, body: string, requestId?: string) => void
@@ -2200,8 +2233,8 @@ export function createGameServerClient(
     send({ type: 'create_private_room', stake, isLocked, waitMinutes })
   }
 
-  function joinPrivateRoom(privateRoomId: string): void {
-    send({ type: 'join_private_room', privateRoomId })
+  function joinPrivateRoomSlot(privateRoomId: string, team: Team, slotIndex: 0 | 1): void {
+    send({ type: 'join_private_room', privateRoomId, team, slotIndex })
   }
 
   function leavePrivateRoom(): void {
@@ -2220,8 +2253,12 @@ export function createGameServerClient(
     send({ type: 'respond_private_room_invite', inviteId, accept })
   }
 
-  function fillPrivateRoomWithBots(): void {
-    send({ type: 'fill_private_room_with_bots' })
+  function addBotToPrivateRoomTeam(team: Team): void {
+    send({ type: 'add_bot_to_private_room_team', team })
+  }
+
+  function removeBotFromPrivateRoomTeam(team: Team): void {
+    send({ type: 'remove_bot_from_private_room_team', team })
   }
 
   function subscribePrivateRoomChat(privateRoomId: string): void {
@@ -2304,12 +2341,13 @@ export function createGameServerClient(
     sendPhraseReaction,
     requestPrivateRoomsList,
     createPrivateRoom,
-    joinPrivateRoom,
+    joinPrivateRoomSlot,
     leavePrivateRoom,
     inviteToPrivateRoom,
     cancelPrivateRoomInvite,
     respondPrivateRoomInvite,
-    fillPrivateRoomWithBots,
+    addBotToPrivateRoomTeam,
+    removeBotFromPrivateRoomTeam,
     subscribePrivateRoomChat,
     unsubscribePrivateRoomChat,
     sendPrivateRoomChatMessage,

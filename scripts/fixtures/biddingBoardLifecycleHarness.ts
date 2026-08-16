@@ -18,6 +18,7 @@ document.body.appendChild(root)
 let bidCommands = 0
 let resyncRequestCount = 0
 let reconnectFallbackCount = 0
+const requestedPlayerProfiles: Array<{ roomId: string; seat: string }> = []
 
 class FakeAudio {
   constructor(_src?: string) {}
@@ -68,7 +69,7 @@ const controller = createActiveRoomFlowController({
   sendLeaveMatchVote: () => {},
   sendEmojiReaction: () => {},
   sendPhraseReaction: () => {},
-  requestPlayerProfile: () => {},
+  requestPlayerProfile: (roomId: string, seat: string) => { requestedPlayerProfiles.push({ roomId, seat }) },
   getFriendshipAction: () => null,
   onSendFriendRequest: async () => ({ ok: false, message: 'unused' }),
   onLikeProfile: async () => ({ ok: false }),
@@ -280,9 +281,30 @@ function reset(): void {
   bidCommands = 0
   resyncRequestCount = 0
   reconnectFallbackCount = 0
+  requestedPlayerProfiles.length = 0
   document.body.querySelectorAll('[data-bidding-popup-host]').forEach((n) => n.remove())
   document.body.querySelectorAll('[data-seat-panels-host]').forEach((n) => n.remove())
   document.body.querySelectorAll('[data-playing-bottom-hand-host]').forEach((n) => n.remove())
+  document.body.querySelectorAll('[data-player-profile-popup-root]').forEach((n) => n.remove())
+}
+
+// Real click on the seat's profile button, exactly the DOM path
+// document.body's global click listener in createActiveRoomFlowController.ts
+// listens for ([data-profile-seat-btn] via closest()).
+function clickSeatProfile(seat: string): boolean {
+  const btn = document.body.querySelector<HTMLElement>(`[data-profile-seat-btn="${seat}"]`)
+  if (!btn) return false
+  btn.click()
+  return true
+}
+
+function pushPlayerProfile(roomId: string, seat: string, profile: unknown): void {
+  controller.handleServerMessage({ type: 'player_profile', roomId, seat, profile } as any)
+}
+
+function getPopupBodyText(): string | null {
+  const root = document.body.querySelector<HTMLElement>('[data-player-profile-popup-root="1"]')
+  return root ? (root.textContent ?? '') : null
 }
 
 ;(window as any).__biddingLifecycleHarness = {
@@ -299,6 +321,10 @@ function reset(): void {
   biddingPopupVisibleNodeCount,
   biddingPopupState,
   clickBidAction,
+  clickSeatProfile,
+  pushPlayerProfile,
+  getPopupBodyText,
+  getRequestedPlayerProfiles: () => requestedPlayerProfiles,
   render,
   dispatchResize,
   injectStaleBiddingPopupHost,

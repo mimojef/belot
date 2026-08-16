@@ -1,16 +1,42 @@
 import { randomUUID } from 'node:crypto'
 import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
-import type { PrivateRoomWaitMinutes } from '../protocol/messageTypes.js'
+import type { PrivateRoomActionErrorCode, PrivateRoomWaitMinutes } from '../protocol/messageTypes.js'
+import type {
+  BotBehaviorPreset,
+  BotDifficulty,
+  BotLogicSource,
+  PlayerIdentitySnapshot,
+  Team,
+} from '../core/serverTypes.js'
 
-const MAX_MEMBERS = 4
+const TOTAL_SLOTS = 4
 
-export type PrivateRoomMember = {
+export type PrivateRoomHumanOccupant = {
+  kind: 'human'
   connectionId: string
   profileId: string | null
   displayName: string
   avatarUrl: string | null
   level: number | null
   rankTitle: string | null
+}
+
+export type PrivateRoomBotOccupant = {
+  kind: 'bot'
+  botProfileId?: string
+  botCode: string
+  difficulty: BotDifficulty
+  behaviorPreset?: BotBehaviorPreset
+  logicSource?: BotLogicSource
+  identity: PlayerIdentitySnapshot
+}
+
+export type PrivateRoomOccupant = PrivateRoomHumanOccupant | PrivateRoomBotOccupant
+
+export type PrivateRoomSlot = {
+  team: Team
+  slotIndex: 0 | 1
+  occupant: PrivateRoomOccupant | null
 }
 
 export type PrivateRoomInvite = {
@@ -22,16 +48,128 @@ export type PrivateRoomInvite = {
   sentAt: number
 }
 
+// Фиксиран ред завинаги: A0, A1, B0, B1 — leave/host-reassignment/list-preview
+// логиката разчита на този ред за детерминирано "първи зает human слот" скан.
+export type PrivateRoomSlots = [PrivateRoomSlot, PrivateRoomSlot, PrivateRoomSlot, PrivateRoomSlot]
+
 export type PrivateRoom = {
   id: string
   kind: 'open' | 'locked'
   stake: MatchStake
   hostProfileId: string | null
   hostConnectionId: string
-  members: PrivateRoomMember[]
+  slots: PrivateRoomSlots
   pendingInvites: PrivateRoomInvite[]
+  /**
+   * Room-lifetime authorization за locked стаи: кой profileId има право да
+   * claim-ва/rejoin-ва слот в тази стая. Populate-ва се веднъж (при create за
+   * създателя, при invite accept за поканения) и НИКОГА не се маха при join
+   * или leave — изчезва само когато room обектът бъде изтрит. Разделено
+   * съзнателно от `pendingInvites` (еднократни, консумирани при отговор).
+   */
+  authorizedProfileIds: Set<string>
   createdAt: number
   expiresAt: number
+}
+
+export function getTeamSlots(room: PrivateRoom, team: Team): [PrivateRoomSlot, PrivateRoomSlot] {
+  const teamSlots = room.slots.filter((s) => s.team === team)
+  return [teamSlots[0]!, teamSlots[1]!]
+}
+
+export function findSlot(room: PrivateRoom, team: Team, slotIndex: 0 | 1): PrivateRoomSlot | undefined {
+  return room.slots.find((s) => s.team === team && s.slotIndex === slotIndex)
+}
+
+export function findSlotByConnectionId(room: PrivateRoom, connectionId: string): PrivateRoomSlot | undefined {
+  return room.slots.find((s) => s.occupant?.kind === 'human' && s.occupant.connectionId === connectionId)
+}
+
+export function findSlotByProfileId(room: PrivateRoom, profileId: string): PrivateRoomSlot | undefined {
+  return room.slots.find((s) => s.occupant?.kind === 'human' && s.occupant.profileId === profileId)
+}
+
+export function getOccupiedCount(room: PrivateRoom): number {
+  return room.slots.filter((s) => s.occupant !== null).length
+}
+
+export function getHumanCount(room: PrivateRoom): number {
+  return room.slots.filter((s) => s.occupant?.kind === 'human').length
+}
+
+export function getTeamHumanCount(room: PrivateRoom, team: Team): number {
+  return getTeamSlots(room, team).filter((s) => s.occupant?.kind === 'human').length
+}
+
+// Скан в *фиксирания* A0→A1→B0→B1 ред на room.slots — гарантира
+// детерминирано host-reassignment, което никога не сочи към бот.
+export function findFirstHumanOccupant(room: PrivateRoom): PrivateRoomHumanOccupant | null {
+  for (const slot of room.slots) {
+    if (slot.occupant?.kind === 'human') return slot.occupant
+  }
+  return null
+}
+
+export type RoomReadiness =
+  | { ready: true }
+  | { ready: false; reason: 'blocked_partnership'; blockedTeam: Team }
+  | { ready: false; reason: 'duplicate_bot_identity' }
+
+export type IsBlockedWith = (profileIdA: string, profileIdB: string) => boolean
+
+// Финалната валидация преди старт на маса — вика се само когато всичките 4
+// слота вече са заети (occupiedCount===4). Duplicate-bot проверката е
+// defensive double-check: addBotToTeam подава excludedProfileIds на
+// selectMatchmakingBotProfiles именно за да не се стигне до тук, но това е
+// последната порта преди игра да старира.
+// Идентификатор за duplicate-bot проверката по-долу. botProfileId е
+// незадължително поле на типа (огледално на BotRoomParticipant.botProfileId
+// в serverTypes.ts) — днешният единствен caller (index.ts, 'add_bot_to_
+// private_room_team') винаги го попълва от selectMatchmakingBotProfiles()
+// (DB/catalog профилите имат non-null ProfileId; temp-bot fallback-ът
+// генерира temp-bot-${randomUUID()}), но evaluateRoomReadiness е defensive
+// последна порта, не бива да разчита мълчаливо на това. identity.profileId
+// е вторият fallback (identity полето е задължително на occupant-а, макар
+// вътрешният му profileId пак да е nullable по тип). Ако НИТО едно от двете
+// не съществува, връщаме споделен sentinel — два "безименни" бота стават
+// автоматично "дубликат" (safe/conservative: не можем да ги докажем
+// различни, затова отказваме старт вместо да рискуваме два неразличими bot
+// участника), вместо старото поведение, което тихо ги пропускаше от
+// проверката изцяло.
+function getBotIdentityKey(bot: PrivateRoomBotOccupant): string {
+  if (bot.botProfileId != null) return `profile:${bot.botProfileId}`
+  if (bot.identity.profileId != null) return `identity:${bot.identity.profileId}`
+  return '__no_stable_bot_identity__'
+}
+
+export function evaluateRoomReadiness(room: PrivateRoom, isBlockedWith: IsBlockedWith): RoomReadiness {
+  const botIdentityKeys = room.slots
+    .map((s) => s.occupant)
+    .filter((o): o is PrivateRoomBotOccupant => o !== null && o.kind === 'bot')
+    .map(getBotIdentityKey)
+
+  if (new Set(botIdentityKeys).size !== botIdentityKeys.length) {
+    return { ready: false, reason: 'duplicate_bot_identity' }
+  }
+
+  for (const team of ['A', 'B'] as const) {
+    const humans = getTeamSlots(room, team)
+      .map((s) => s.occupant)
+      .filter((o): o is PrivateRoomHumanOccupant => o !== null && o.kind === 'human')
+
+    if (humans.length === 2) {
+      const [a, b] = humans
+      if (
+        a.profileId !== null &&
+        b.profileId !== null &&
+        (isBlockedWith(a.profileId, b.profileId) || isBlockedWith(b.profileId, a.profileId))
+      ) {
+        return { ready: false, reason: 'blocked_partnership', blockedTeam: team }
+      }
+    }
+  }
+
+  return { ready: true }
 }
 
 export type CancelInviteResult =
@@ -42,20 +180,17 @@ export type CloseRoomResult =
   | { ok: true; room: PrivateRoom }
   | { ok: false; message: string }
 
-export type BeginBotFillResult =
-  | { ok: true; room: PrivateRoom }
-  | { ok: false; message: string }
-
 export type PrivateRoomsStore = {
   createRoom: (input: CreateRoomInput) => CreateRoomResult
-  joinRoom: (input: JoinRoomInput) => JoinRoomResult
-  leaveRoom: (connectionId: string) => void
+  joinTeam: (input: JoinTeamInput) => JoinTeamResult
+  leaveRoom: (connectionId: string) => PrivateRoom | null
   closeRoom: (hostConnectionId: string) => CloseRoomResult
   inviteFriend: (input: InviteFriendInput) => InviteFriendResult
   cancelInvite: (inviteId: string, senderConnectionId: string) => CancelInviteResult
   removeInviteById: (inviteId: string) => PrivateRoomInvite | null
   respondToInvite: (input: RespondToInviteInput) => RespondToInviteResult
-  beginBotFill: (hostConnectionId: string) => BeginBotFillResult
+  addBotToTeam: (input: AddBotToTeamInput) => AddBotToTeamResult
+  removeBotFromTeam: (input: RemoveBotFromTeamInput) => RemoveBotFromTeamResult
   listRooms: () => PrivateRoom[]
   getRoomByConnectionId: (connectionId: string) => PrivateRoom | null
   getRoomByProfileId: (profileId: string) => PrivateRoom | null
@@ -79,7 +214,7 @@ export type CreateRoomResult =
   | { ok: true; room: PrivateRoom }
   | { ok: false; message: string }
 
-export type JoinRoomInput = {
+export type JoinTeamInput = {
   privateRoomId: string
   connectionId: string
   profileId: string | null
@@ -87,11 +222,34 @@ export type JoinRoomInput = {
   avatarUrl: string | null
   level: number | null
   rankTitle: string | null
+  team: Team
+  slotIndex: 0 | 1
+  isBlockedWith: IsBlockedWith
 }
 
-export type JoinRoomResult =
+export type JoinTeamResult =
+  | { ok: true; room: PrivateRoom; readyToStart: boolean; readiness?: RoomReadiness }
+  | { ok: false; message: string; code?: PrivateRoomActionErrorCode }
+
+export type AddBotToTeamInput = {
+  connectionId: string
+  team: Team
+  botOccupant: PrivateRoomBotOccupant
+  isBlockedWith: IsBlockedWith
+}
+
+export type AddBotToTeamResult =
+  | { ok: true; room: PrivateRoom; readyToStart: boolean; readiness?: RoomReadiness }
+  | { ok: false; message: string; code?: PrivateRoomActionErrorCode }
+
+export type RemoveBotFromTeamInput = {
+  connectionId: string
+  team: Team
+}
+
+export type RemoveBotFromTeamResult =
   | { ok: true; room: PrivateRoom }
-  | { ok: false; message: string }
+  | { ok: false; message: string; code?: PrivateRoomActionErrorCode }
 
 export type InviteFriendInput = {
   senderConnectionId: string
@@ -105,25 +263,23 @@ export type InviteFriendResult =
 
 export type RespondToInviteInput = {
   inviteId: string
-  connectionId: string
-  profileId: string | null
-  displayName: string
-  avatarUrl: string | null
-  level: number | null
-  rankTitle: string | null
+  profileId: string
   accept: boolean
 }
 
 export type RespondToInviteResult =
-  | { ok: true; room: PrivateRoom; joined: boolean }
+  | { ok: true; room: PrivateRoom; accepted: boolean }
   | { ok: false; message: string }
 
 type StoreCallbacks = {
   onRoomsChanged: () => void
-  onRoomFull: (room: PrivateRoom) => void
+  // Фиксира "стаята стана 4/4 И мина final block validation" — за разлика от
+  // старото onRoomFull, вече НЕ значи просто "4 заети слота" (виж
+  // evaluateRoomReadiness — 4/4-но-blocked стая не води до onRoomReady).
+  onRoomReady: (room: PrivateRoom) => void
   onRoomExpired: (room: PrivateRoom) => void
   onRoomClosed: (room: PrivateRoom) => void
-  onMemberLeft: (room: PrivateRoom, member: PrivateRoomMember) => void
+  onMemberLeft: (room: PrivateRoom, occupant: PrivateRoomHumanOccupant) => void
 }
 
 export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRoomsStore {
@@ -139,8 +295,10 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
       if (current) {
         rooms.delete(current.id)
         expiryTimers.delete(current.id)
-        for (const m of current.members) {
-          connectionToRoom.delete(m.connectionId)
+        for (const slot of current.slots) {
+          if (slot.occupant?.kind === 'human') {
+            connectionToRoom.delete(slot.occupant.connectionId)
+          }
         }
         callbacks.onRoomExpired(current)
         callbacks.onRoomsChanged()
@@ -158,6 +316,20 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     }
   }
 
+  // Детачва стаята от store-а синхронно (rooms.delete + connectionToRoom
+  // cleanup) — извиква се само когато readiness.ready===true, точно както
+  // старият "room full" detach. Node event loop-ът гарантира, че нищо
+  // конкурентно не може да я пипне между тази стъпка и onRoomReady().
+  function detachReadyRoom(room: PrivateRoom): void {
+    cancelExpiry(room.id)
+    rooms.delete(room.id)
+    for (const slot of room.slots) {
+      if (slot.occupant?.kind === 'human') {
+        connectionToRoom.delete(slot.occupant.connectionId)
+      }
+    }
+  }
+
   function createRoom(input: CreateRoomInput): CreateRoomResult {
     if (connectionToRoom.has(input.connectionId)) {
       return { ok: false, message: 'Вече си влязъл в тази маса.' }
@@ -165,7 +337,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
 
     if (input.profileId !== null) {
       for (const room of rooms.values()) {
-        if (room.members.some((m) => m.profileId === input.profileId)) {
+        if (room.slots.some((s) => s.occupant?.kind === 'human' && s.occupant.profileId === input.profileId)) {
           return { ok: false, message: 'Вече си влязъл в тази маса.' }
         }
       }
@@ -174,7 +346,8 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     const now = Date.now()
     const timeoutMs = input.waitMinutes * 60 * 1000
 
-    const member: PrivateRoomMember = {
+    const creatorOccupant: PrivateRoomHumanOccupant = {
+      kind: 'human',
       connectionId: input.connectionId,
       profileId: input.profileId,
       displayName: input.displayName,
@@ -183,14 +356,22 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
       rankTitle: input.rankTitle,
     }
 
+    const slots: PrivateRoomSlots = [
+      { team: 'A', slotIndex: 0, occupant: creatorOccupant },
+      { team: 'A', slotIndex: 1, occupant: null },
+      { team: 'B', slotIndex: 0, occupant: null },
+      { team: 'B', slotIndex: 1, occupant: null },
+    ]
+
     const room: PrivateRoom = {
       id: randomUUID(),
       kind: input.isLocked ? 'locked' : 'open',
       stake: input.stake,
       hostProfileId: input.profileId,
       hostConnectionId: input.connectionId,
-      members: [member],
+      slots,
       pendingInvites: [],
+      authorizedProfileIds: new Set(input.profileId !== null ? [input.profileId] : []),
       createdAt: now,
       expiresAt: now + timeoutMs,
     }
@@ -203,7 +384,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     return { ok: true, room }
   }
 
-  function joinRoom(input: JoinRoomInput): JoinRoomResult {
+  function joinTeam(input: JoinTeamInput): JoinTeamResult {
     if (connectionToRoom.has(input.connectionId)) {
       return { ok: false, message: 'Вече си влязъл в тази маса.' }
     }
@@ -214,18 +395,44 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     }
 
     if (room.kind === 'locked') {
-      return { ok: false, message: 'Масата е заключена — нужна е покана.' }
+      if (input.profileId === null || !room.authorizedProfileIds.has(input.profileId)) {
+        return { ok: false, message: 'Масата е заключена — нужна е покана.' }
+      }
     }
 
-    if (room.members.length >= MAX_MEMBERS) {
-      return { ok: false, message: 'Масата е пълна.' }
-    }
-
-    if (input.profileId !== null && room.members.some((m) => m.profileId === input.profileId)) {
+    if (
+      input.profileId !== null &&
+      room.slots.some((s) => s.occupant?.kind === 'human' && s.occupant.profileId === input.profileId)
+    ) {
       return { ok: false, message: 'Вече си в тази маса.' }
     }
 
-    const member: PrivateRoomMember = {
+    const targetSlot = findSlot(room, input.team, input.slotIndex)
+    if (targetSlot === undefined) {
+      return { ok: false, message: 'Невалидно място.' }
+    }
+    if (targetSlot.occupant !== null) {
+      return { ok: false, message: 'Мястото вече е заето.', code: 'private_room_slot_taken' }
+    }
+
+    const [slotA, slotB] = getTeamSlots(room, input.team)
+    const partnerSlot = slotA.slotIndex === input.slotIndex ? slotB : slotA
+    if (
+      partnerSlot.occupant?.kind === 'human' &&
+      partnerSlot.occupant.profileId !== null &&
+      input.profileId !== null &&
+      (input.isBlockedWith(input.profileId, partnerSlot.occupant.profileId) ||
+        input.isBlockedWith(partnerSlot.occupant.profileId, input.profileId))
+    ) {
+      return {
+        ok: false,
+        message: 'В този отбор има играч, който ви е блокирал и не иска да сте негов партньор.',
+        code: 'private_room_partner_blocked',
+      }
+    }
+
+    const occupant: PrivateRoomHumanOccupant = {
+      kind: 'human',
       connectionId: input.connectionId,
       profileId: input.profileId,
       displayName: input.displayName,
@@ -234,65 +441,188 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
       rankTitle: input.rankTitle,
     }
 
-    const nextRoom: PrivateRoom = { ...room, members: [...room.members, member] }
+    const nextSlots = room.slots.map((s) =>
+      s.team === input.team && s.slotIndex === input.slotIndex ? { ...s, occupant } : s,
+    ) as PrivateRoomSlots
+
+    const nextRoom: PrivateRoom = { ...room, slots: nextSlots }
     rooms.set(nextRoom.id, nextRoom)
     connectionToRoom.set(input.connectionId, nextRoom.id)
 
-    if (nextRoom.members.length >= MAX_MEMBERS) {
-      cancelExpiry(nextRoom.id)
-      rooms.delete(nextRoom.id)
-      for (const m of nextRoom.members) {
-        connectionToRoom.delete(m.connectionId)
+    if (getOccupiedCount(nextRoom) >= TOTAL_SLOTS) {
+      const readiness = evaluateRoomReadiness(nextRoom, input.isBlockedWith)
+      if (readiness.ready) {
+        detachReadyRoom(nextRoom)
+        callbacks.onRoomReady(nextRoom)
+        callbacks.onRoomsChanged()
+        return { ok: true, room: nextRoom, readyToStart: true, readiness }
       }
-      callbacks.onRoomFull(nextRoom)
+
+      // Стаята остава жива в store-а — не auto-kick, не auto-start.
       callbacks.onRoomsChanged()
-    } else {
-      callbacks.onRoomsChanged()
+      return { ok: true, room: nextRoom, readyToStart: false, readiness }
     }
+
+    callbacks.onRoomsChanged()
+    return { ok: true, room: nextRoom, readyToStart: false }
+  }
+
+  function addBotToTeam(input: AddBotToTeamInput): AddBotToTeamResult {
+    const roomId = connectionToRoom.get(input.connectionId)
+    if (roomId === undefined) {
+      return { ok: false, message: 'Не си в частна маса.' }
+    }
+
+    const room = rooms.get(roomId)
+    if (room === undefined) {
+      connectionToRoom.delete(input.connectionId)
+      return { ok: false, message: 'Масата не съществува.' }
+    }
+
+    const callerSlot = room.slots.find(
+      (s) => s.team === input.team && s.occupant?.kind === 'human' && s.occupant.connectionId === input.connectionId,
+    )
+    if (callerSlot === undefined) {
+      return {
+        ok: false,
+        message: 'Само играч от този отбор може да добавя бот тук.',
+        code: 'private_room_bot_owner_missing',
+      }
+    }
+
+    const emptySlot = getTeamSlots(room, input.team).find((s) => s.occupant === null)
+    if (emptySlot === undefined) {
+      return { ok: false, message: 'Отборът е пълен.', code: 'private_room_team_full' }
+    }
+
+    const nextSlots = room.slots.map((s) =>
+      s.team === input.team && s.slotIndex === emptySlot.slotIndex ? { ...s, occupant: input.botOccupant } : s,
+    ) as PrivateRoomSlots
+
+    const nextRoom: PrivateRoom = { ...room, slots: nextSlots }
+    rooms.set(nextRoom.id, nextRoom)
+
+    if (getOccupiedCount(nextRoom) >= TOTAL_SLOTS) {
+      const readiness = evaluateRoomReadiness(nextRoom, input.isBlockedWith)
+      if (readiness.ready) {
+        detachReadyRoom(nextRoom)
+        callbacks.onRoomReady(nextRoom)
+        callbacks.onRoomsChanged()
+        return { ok: true, room: nextRoom, readyToStart: true, readiness }
+      }
+
+      callbacks.onRoomsChanged()
+      return { ok: true, room: nextRoom, readyToStart: false, readiness }
+    }
+
+    callbacks.onRoomsChanged()
+    return { ok: true, room: nextRoom, readyToStart: false }
+  }
+
+  function removeBotFromTeam(input: RemoveBotFromTeamInput): RemoveBotFromTeamResult {
+    const roomId = connectionToRoom.get(input.connectionId)
+    if (roomId === undefined) {
+      return { ok: false, message: 'Не си в частна маса.' }
+    }
+
+    const room = rooms.get(roomId)
+    if (room === undefined) {
+      connectionToRoom.delete(input.connectionId)
+      return { ok: false, message: 'Масата не съществува.' }
+    }
+
+    const callerSlot = room.slots.find(
+      (s) => s.team === input.team && s.occupant?.kind === 'human' && s.occupant.connectionId === input.connectionId,
+    )
+    if (callerSlot === undefined) {
+      return {
+        ok: false,
+        message: 'Само играч от този отбор може да маха бот тук.',
+        code: 'private_room_bot_owner_missing',
+      }
+    }
+
+    const botSlot = getTeamSlots(room, input.team).find((s) => s.occupant?.kind === 'bot')
+    if (botSlot === undefined) {
+      return { ok: false, message: 'В този отбор няма бот.' }
+    }
+
+    const nextSlots = room.slots.map((s) =>
+      s.team === input.team && s.slotIndex === botSlot.slotIndex ? { ...s, occupant: null } : s,
+    ) as PrivateRoomSlots
+
+    const nextRoom: PrivateRoom = { ...room, slots: nextSlots }
+    rooms.set(nextRoom.id, nextRoom)
+    callbacks.onRoomsChanged()
 
     return { ok: true, room: nextRoom }
   }
 
-  function leaveRoom(connectionId: string): void {
+  // Връща стаята след leave-а (за да могат remaining members да получат
+  // fresh private_room_updated — виж sendPrivateRoomUpdateToMembers в
+  // index.ts), или null ако стаята вече не съществува (изтрита защото не
+  // остана нито един човек, или connectionId изобщо не е бил в стая).
+  function leaveRoom(connectionId: string): PrivateRoom | null {
     const roomId = connectionToRoom.get(connectionId)
-    if (roomId === undefined) return
+    if (roomId === undefined) return null
 
     const room = rooms.get(roomId)
     if (room === undefined) {
       connectionToRoom.delete(connectionId)
-      return
+      return null
     }
 
-    const leavingMember = room.members.find((m) => m.connectionId === connectionId)
+    const leaverSlot = room.slots.find((s) => s.occupant?.kind === 'human' && s.occupant.connectionId === connectionId)
     connectionToRoom.delete(connectionId)
+    if (leaverSlot === undefined) return room
 
-    const remaining = room.members.filter((m) => m.connectionId !== connectionId)
+    const leavingOccupant = leaverSlot.occupant as PrivateRoomHumanOccupant
 
-    if (remaining.length === 0) {
+    let nextSlots: PrivateRoomSlot[] = room.slots.map((s) =>
+      s.team === leaverSlot.team && s.slotIndex === leaverSlot.slotIndex ? { ...s, occupant: null } : s,
+    )
+
+    // Orphan-bot cleanup: ако партньорският слот в същия отбор е бот, маха се
+    // и той — никога не оставяме бот без собствен човек в отбора.
+    const partnerSlotIndex = nextSlots.findIndex(
+      (s) => s.team === leaverSlot.team && s.slotIndex !== leaverSlot.slotIndex,
+    )
+    if (partnerSlotIndex !== -1 && nextSlots[partnerSlotIndex]!.occupant?.kind === 'bot') {
+      nextSlots = nextSlots.map((s, i) => (i === partnerSlotIndex ? { ...s, occupant: null } : s))
+    }
+
+    const finalSlots = nextSlots as PrivateRoomSlots
+    const remainingHumanCount = finalSlots.filter((s) => s.occupant?.kind === 'human').length
+
+    if (remainingHumanCount === 0) {
       cancelExpiry(roomId)
       rooms.delete(roomId)
       callbacks.onRoomsChanged()
-      return
+      return null
     }
 
-    const nextHostConnectionId =
-      room.hostConnectionId === connectionId ? remaining[0].connectionId : room.hostConnectionId
-    const nextHostProfileId =
-      room.hostConnectionId === connectionId ? remaining[0].profileId : room.hostProfileId
+    let nextHostConnectionId = room.hostConnectionId
+    let nextHostProfileId = room.hostProfileId
+
+    if (room.hostConnectionId === connectionId) {
+      // Точка 2: детерминиран A0→A1→B0→B1 скан, но НИКОГА не сочи бот —
+      // findFirstHumanOccupant пропуска бот слотове дори да са по-рано в реда.
+      const newHost = findFirstHumanOccupant({ ...room, slots: finalSlots })!
+      nextHostConnectionId = newHost.connectionId
+      nextHostProfileId = newHost.profileId
+    }
 
     const nextRoom: PrivateRoom = {
       ...room,
-      members: remaining,
+      slots: finalSlots,
       hostConnectionId: nextHostConnectionId,
       hostProfileId: nextHostProfileId,
     }
 
     rooms.set(roomId, nextRoom)
-
-    if (leavingMember) {
-      callbacks.onMemberLeft(nextRoom, leavingMember)
-    }
+    callbacks.onMemberLeft(nextRoom, leavingOccupant)
     callbacks.onRoomsChanged()
+    return nextRoom
   }
 
   function closeRoom(hostConnectionId: string): CloseRoomResult {
@@ -309,8 +639,10 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
 
     cancelExpiry(roomId)
     rooms.delete(roomId)
-    for (const m of room.members) {
-      connectionToRoom.delete(m.connectionId)
+    for (const slot of room.slots) {
+      if (slot.occupant?.kind === 'human') {
+        connectionToRoom.delete(slot.occupant.connectionId)
+      }
     }
 
     callbacks.onRoomClosed(room)
@@ -375,16 +707,19 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
       return { ok: false, message: 'Само заключени маси поддържат покани.' }
     }
 
-    if (room.members.length >= MAX_MEMBERS) {
+    if (getOccupiedCount(room) >= TOTAL_SLOTS) {
       return { ok: false, message: 'Масата е пълна.' }
     }
 
-    const senderMember = room.members.find((m) => m.connectionId === input.senderConnectionId)
-    if (senderMember === undefined) {
+    const senderSlot = room.slots.find(
+      (s) => s.occupant?.kind === 'human' && s.occupant.connectionId === input.senderConnectionId,
+    )
+    const senderOccupant = senderSlot?.occupant as PrivateRoomHumanOccupant | undefined
+    if (senderOccupant === undefined) {
       return { ok: false, message: 'Не си в тази маса.' }
     }
 
-    if (senderMember.profileId === null) {
+    if (senderOccupant.profileId === null) {
       return { ok: false, message: 'Трябва да си влязъл с профил за да каниш приятели.' }
     }
 
@@ -392,14 +727,14 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
       return { ok: false, message: 'Вече е изпратена покана до този играч.' }
     }
 
-    if (room.members.some((m) => m.profileId === input.toProfileId)) {
+    if (room.slots.some((s) => s.occupant?.kind === 'human' && s.occupant.profileId === input.toProfileId)) {
       return { ok: false, message: 'Играчът вече е в масата.' }
     }
 
     const invite: PrivateRoomInvite = {
       inviteId: randomUUID(),
-      fromProfileId: senderMember.profileId,
-      fromDisplayName: senderMember.displayName,
+      fromProfileId: senderOccupant.profileId,
+      fromDisplayName: senderOccupant.displayName,
       toProfileId: input.toProfileId,
       privateRoomId: roomId,
       sentAt: Date.now(),
@@ -415,11 +750,10 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     return { ok: true, invite, room: nextRoom }
   }
 
+  // Приемане на покана вече НЕ сяда автоматично — само разрешава profileId-а
+  // за room-lifetime authorization (виж authorizedProfileIds по-горе).
+  // Реалният seat claim минава през joinTeam, точно както при open стаите.
   function respondToInvite(input: RespondToInviteInput): RespondToInviteResult {
-    if (input.profileId === null) {
-      return { ok: false, message: 'Трябва да си влязъл с профил.' }
-    }
-
     let targetRoom: PrivateRoom | null = null
 
     for (const room of rooms.values()) {
@@ -443,83 +777,22 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     if (!input.accept) {
       const nextRoom: PrivateRoom = { ...targetRoom, pendingInvites: nextInvites }
       rooms.set(nextRoom.id, nextRoom)
-      return { ok: true, room: nextRoom, joined: false }
+      callbacks.onRoomsChanged()
+      return { ok: true, room: nextRoom, accepted: false }
     }
 
-    if (connectionToRoom.has(input.connectionId)) {
-      return { ok: false, message: 'Вече си в друга частна маса.' }
-    }
-
-    if (targetRoom.members.length >= MAX_MEMBERS) {
-      return { ok: false, message: 'Масата е пълна.' }
-    }
-
-    const member: PrivateRoomMember = {
-      connectionId: input.connectionId,
-      profileId: input.profileId,
-      displayName: input.displayName,
-      avatarUrl: input.avatarUrl,
-      level: input.level,
-      rankTitle: input.rankTitle,
-    }
+    const nextAuthorizedProfileIds = new Set(targetRoom.authorizedProfileIds)
+    nextAuthorizedProfileIds.add(input.profileId)
 
     const nextRoom: PrivateRoom = {
       ...targetRoom,
-      members: [...targetRoom.members, member],
       pendingInvites: nextInvites,
+      authorizedProfileIds: nextAuthorizedProfileIds,
     }
-
     rooms.set(nextRoom.id, nextRoom)
-    connectionToRoom.set(input.connectionId, nextRoom.id)
-
-    if (nextRoom.members.length >= MAX_MEMBERS) {
-      cancelExpiry(nextRoom.id)
-      rooms.delete(nextRoom.id)
-      for (const m of nextRoom.members) {
-        connectionToRoom.delete(m.connectionId)
-      }
-      callbacks.onRoomFull(nextRoom)
-      callbacks.onRoomsChanged()
-    } else {
-      callbacks.onRoomsChanged()
-    }
-
-    return { ok: true, room: nextRoom, joined: true }
-  }
-
-  function beginBotFill(hostConnectionId: string): BeginBotFillResult {
-    const roomId = connectionToRoom.get(hostConnectionId)
-    if (roomId === undefined) {
-      return { ok: false, message: 'Не си в частна маса.' }
-    }
-
-    const room = rooms.get(roomId)
-    if (room === undefined) {
-      connectionToRoom.delete(hostConnectionId)
-      return { ok: false, message: 'Масата не съществува.' }
-    }
-
-    if (room.hostConnectionId !== hostConnectionId) {
-      return { ok: false, message: 'Само домакинът може да стартира със ботове.' }
-    }
-
-    if (room.members.length < 2 || room.members.length >= MAX_MEMBERS) {
-      return { ok: false, message: 'Запълването с ботове изисква 2 или 3 играчи в масата.' }
-    }
-
-    // Detach the room from the store synchronously (same pattern as the
-    // room-full auto-start path) so no concurrent join/invite/second
-    // bot-fill call can observe or mutate it afterwards — Node's
-    // single-threaded event loop guarantees this happens atomically with
-    // respect to any other WS message handler.
-    cancelExpiry(roomId)
-    rooms.delete(roomId)
-    for (const m of room.members) {
-      connectionToRoom.delete(m.connectionId)
-    }
     callbacks.onRoomsChanged()
 
-    return { ok: true, room }
+    return { ok: true, room: nextRoom, accepted: true }
   }
 
   function listRooms(): PrivateRoom[] {
@@ -534,30 +807,37 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
 
   function getRoomByProfileId(profileId: string): PrivateRoom | null {
     for (const room of rooms.values()) {
-      if (room.members.some((m) => m.profileId === profileId)) {
+      if (room.slots.some((s) => s.occupant?.kind === 'human' && s.occupant.profileId === profileId)) {
         return room
       }
     }
     return null
   }
 
+  // Точка 4 (втори review кръг): защо старият disconnect не освобождава
+  // reconnected occupant-а — removeConnection(connectionId) по-долу само
+  // трие ключ от connectionToRoom по ПОДАДЕНИЯ connectionId. Ако reconnect
+  // вече е пренаписал слота на нов connectionId преди delayed WS 'close' за
+  // стария socket да пристигне, removeConnection(oldConnectionId) просто
+  // трие вече несъществуващ ключ — no-op, безвредно.
   function reconnectMember(newConnectionId: string, profileId: string): PrivateRoom | null {
     const room = getRoomByProfileId(profileId)
     if (room === null) return null
 
-    const memberIndex = room.members.findIndex((m) => m.profileId === profileId)
-    if (memberIndex === -1) return null
+    const slotIndex = room.slots.findIndex((s) => s.occupant?.kind === 'human' && s.occupant.profileId === profileId)
+    if (slotIndex === -1) return null
 
-    const oldConnectionId = room.members[memberIndex].connectionId
+    const oldOccupant = room.slots[slotIndex]!.occupant as PrivateRoomHumanOccupant
+    const oldConnectionId = oldOccupant.connectionId
 
-    const updatedMembers = room.members.map((m, i) =>
-      i === memberIndex ? { ...m, connectionId: newConnectionId } : m,
-    )
+    const nextSlots = room.slots.map((s, i) =>
+      i === slotIndex ? { ...s, occupant: { ...oldOccupant, connectionId: newConnectionId } } : s,
+    ) as PrivateRoomSlots
 
     const isHost = room.hostConnectionId === oldConnectionId
     const nextRoom: PrivateRoom = {
       ...room,
-      members: updatedMembers,
+      slots: nextSlots,
       hostConnectionId: isHost ? newConnectionId : room.hostConnectionId,
     }
 
@@ -574,14 +854,15 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
 
   return {
     createRoom,
-    joinRoom,
+    joinTeam,
     leaveRoom,
     closeRoom,
     inviteFriend,
     cancelInvite,
     removeInviteById,
     respondToInvite,
-    beginBotFill,
+    addBotToTeam,
+    removeBotFromTeam,
     listRooms,
     getRoomByConnectionId,
     getRoomByProfileId,

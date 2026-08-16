@@ -20,6 +20,7 @@ import type {
   PlayerMissionProgressSnapshot,
   PlayerPublicProfileSnapshot,
   PrivateRoomSnapshot,
+  Team,
   GuestContactMessageListItem,
   SupportMessageSnapshot,
   SupportConversationSnapshot,
@@ -42,6 +43,13 @@ import type { PlayerAccountRole, PlayerProfileFriendshipAction } from '../../ui/
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import { PUBLIC_LEGAL_PAGES, type PublicLegalPageKey } from './publicLegalPages'
+import {
+  PRIVATE_ROOM_POPUP_STYLES,
+  renderPrivateRoomBlockedPopup,
+  renderPrivateRoomInviteFriendsPopup,
+  renderPrivateRoomJoinConfirmPopup,
+  type PrivateRoomInviteEligibleFriend,
+} from './privateRoomPopupMarkup'
 import { renderRulesPage } from './renderRulesPage'
 import { renderStrategyPage } from './renderStrategyPage'
 import { renderLearnPage } from './renderLearnPage'
@@ -634,7 +642,11 @@ export type LobbyScreenState = {
   privateRoomInviteQueue: Array<{ inviteId: string }>
   privateRoomInfoText: string | null
   privateRoomConflictPromptOpen: boolean
+  privateRoomConflictPromptVariant: 'generic' | 'list-join'
+  privateRoomJoinSlotPopup: { team: Team; slotIndex: 0 | 1 } | null
+  privateRoomBlockedPopupText: string | null
   inviteFriendsPopupOpen: boolean
+  inviteFriends: PrivateRoomInviteEligibleFriend[] | null
   supportPopupOpen: boolean
   supportMessages: SupportMessageSnapshot[]
   supportUnreadCount: number
@@ -994,14 +1006,25 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomsCreateOpen: () => void
   onPrivateRoomsCreateClose: () => void
   onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30) => void
+  /** Клик върху ред в списъка — само preview navigation, не изпраща join_private_room; реалният seat claim минава през конкретния "+" на waiting-room екрана. */
   onPrivateRoomJoin: (privateRoomId: string) => void
   /** Клик върху зает seat/avatar в списъка "Частни маси" — отваря съществуващия profile popup flow (не влиза в масата). */
   onPrivateRoomMemberClick: (profileId: string, displayName: string) => void
-  onPrivateRoomLeave: () => void
+  /** Клик върху конкретен свободен "+" на карта в списъка (не собствената маса) — отваря join-confirm popup-а за точно този (room, team, slotIndex). Ако потребителят вече седи на друга маса, контролерът показва conflict popup-а вместо да отвори join popup-а. */
+  onPrivateRoomListSlotJoinOpen: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
+  /** Потвърждение на join-confirm popup-а (споделен между списъка и waiting room екрана) — изпраща реалния join_private_room. */
+  onPrivateRoomJoinSlotPopupConfirm: () => void
+  /** Отказ/затваряне на join-confirm popup-а — без заявка към сървъра. */
+  onPrivateRoomJoinSlotPopupCancel: () => void
+  /** Затваря X-only blocked-partner popup-а (споделен между списъка и waiting room екрана). */
+  onPrivateRoomBlockedPopupClose: () => void
+  /** "ВЛЕЗ" бутон на собствената маса в списъка — чиста навигация към вече съществуващата чакалня, без нов join. */
+  onPrivateRoomListEnter: (privateRoomId: string) => void
   onPrivateRoomInvite: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
   onCancelPrivateRoomInvite: (inviteId: string) => void
   onInviteFriendsOpen: () => void
   onInviteFriendsClose: () => void
+  onPrivateRoomInviteSend: (profileId: string, displayName: string) => void
   onPrivateRoomInviteAccept: (inviteId: string) => void
   onPrivateRoomInviteDecline: (inviteId: string) => void
   onPrivateRoomInfoDismiss: () => void
@@ -4712,8 +4735,10 @@ function renderMobileFriendCard(
 function renderMobileChatPanel(state: LobbyScreenState): string {
   if (state.chatLoading) return `${renderMobilePageTitle('Чат')}${renderMobileStateMessage('Зареждане на чат...')}`
 
+  // Виж коментара при renderChatPanel's visibleConversations — идентичен
+  // filter fix (mobile огледало на същия панел, същият production bug).
   const sortedConversations = state.chatConversations
-    .filter((conversation) => conversation.kind === 'friend')
+    .filter((conversation) => conversation.kind === 'friend' || conversation.kind === 'pika_support')
     .sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
   )
@@ -5752,8 +5777,18 @@ function renderChatPanel(state: LobbyScreenState): string {
     `
   }
 
+  // ВАЖНО: allowlist, НЕ blocklist само на 'vip_dm' — 'vip_dm' изрично се
+  // изключва тук, защото има собствен dedicated UI (Topics personal chat,
+  // виж renderTopicsPersonalChat/showTopicsPersonalChat). 'pika_support'
+  // ТРЯБВА да остане в тоя списък — този панел вече рендира коректно badge
+  // и цветове за него (isPikaSupport/pikaSupportBadge по-долу). Изключването
+  // му тук (стар filter: === 'friend') беше production regression: активният
+  // разговор (activeConversation, търсен по friendshipId в ТОЗИ списък) не
+  // го намираше и мълчаливо fallback-ваше към sortedConversations[0] —
+  // първия 'friend' разговор по updatedAt — карайки composer формата да праща
+  // съобщения в СЪВСЕМ ДРУГ разговор (PIKABG X→Y cross-delivery bug).
   const visibleConversations = (state.chatShowArchived ? state.chatArchivedConversations : state.chatConversations)
-    .filter((conversation) => conversation.kind === 'friend')
+    .filter((conversation) => conversation.kind === 'friend' || conversation.kind === 'pika_support')
   const sortedConversations = [...visibleConversations].sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
   )
@@ -8512,104 +8547,213 @@ function renderAdminGuestContactMessagesPage(state: LobbyScreenState, isMobile =
 }
 
 function renderPrivateRoomsPage(state: LobbyScreenState): string {
-  const hasMyRoom = state.myPrivateRoom !== null
+  // Реконсилиран spot-check срещу canonical private_rooms_list — ако
+  // state.myPrivateRoom сочи стая, която вече не е в списъка (изтекла/
+  // затворена/играта е стартирала), третираме го тук като "нямам маса" за
+  // целите на списъка (ordering + "ВЛЕЗ" + "already seated" guard), без да
+  // блокираме join към други маси заради stale race. Самото state.myPrivateRoom
+  // се коригира отделно чрез private_room_left/expired/closed съобщенията —
+  // това е допълнителна defensive проверка само за render-а тук.
+  const myRoom = state.myPrivateRoom !== null && state.privateRooms.some((r) => r.id === state.myPrivateRoom!.id)
+    ? state.myPrivateRoom
+    : null
+  const hasMyRoom = myRoom !== null
+
+  const TEAM_SLOT_CSS = `
+    .prl-teams {
+      display:grid;
+      grid-template-columns:1fr auto 1fr;
+      gap:clamp(6px, 2vw, 14px);
+      align-items:start;
+    }
+    .prl-team-label {
+      font-size:10px;
+      font-weight:800;
+      letter-spacing:0.04em;
+      color:rgba(255,255,255,0.45);
+      text-align:center;
+      margin-bottom:6px;
+    }
+    .prl-team-slots {
+      display:grid;
+      grid-template-columns:1fr;
+      gap:clamp(6px, 2vw, 10px);
+    }
+    .prl-divider {
+      width:1px;
+      align-self:stretch;
+      background:rgba(255,255,255,0.10);
+    }
+    .prl-slot-occupant {
+      display:flex;
+      align-items:center;
+      gap:8px;
+      min-width:0;
+      width:100%;
+    }
+    .prl-slot-avatar-wrap {
+      position:relative;
+      box-sizing:border-box;
+      width:clamp(32px, 9vw, 40px);
+      height:clamp(32px, 9vw, 40px);
+      flex-shrink:0;
+      border-radius:9px;
+      overflow:visible;
+      background:rgba(255,255,255,0.08);
+      border:1px solid rgba(255,255,255,0.15);
+    }
+    .prl-slot-name {
+      font-size:11px;
+      color:rgba(255,255,255,0.65);
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      min-width:0;
+    }
+    .prl-slot-plus {
+      box-sizing:border-box;
+      width:100%;
+      height:clamp(32px, 9vw, 40px);
+      min-height:40px;
+      border-radius:9px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      font-size:18px;
+      font-weight:900;
+    }
+    button.prl-slot-plus {
+      border:1px dashed rgba(167,139,250,0.5);
+      background:rgba(167,139,250,0.10);
+      color:#a78bfa;
+      cursor:pointer;
+    }
+    button.prl-slot-plus:hover {
+      background:rgba(167,139,250,0.2);
+    }
+    div.prl-slot-plus {
+      border:1px dashed rgba(255,255,255,0.12);
+      background:rgba(255,255,255,0.04);
+      color:rgba(255,255,255,0.25);
+    }
+  `
 
   const roomRowHtml = (room: PrivateRoomSnapshot): string => {
     const timeLeft = Math.max(0, room.expiresAt - Date.now())
     const minutesLeft = Math.ceil(timeLeft / 60000)
     const isLocked = room.kind === 'locked'
+    const isMine = room.id === myRoom?.id
 
-    const memberSlotsHtml = Array.from({ length: 4 }, (_, i) => {
-      const member = room.members[i]
-      if (member) {
-        const avatarInner = member.avatarUrl
-          ? `<img src="${member.avatarUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:10px;" />`
-          : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:22px;color:rgba(255,255,255,0.5);">👤</div>`
-        const hostBadge = member.isHost
-          ? `<div style="position:absolute;top:-5px;right:-5px;background:#f59e0b;border-radius:50%;width:16px;height:16px;display:flex;align-items:center;justify-content:center;font-size:9px;">★</div>`
+    const occupiedCount = room.slots.filter((s) => s.occupant !== null).length
+    const hostOccupant = room.slots.map((s) => s.occupant).find((o) => o?.isHost === true) ?? null
+
+    const teamSlotHtml = (team: Team, slotIndex: 0 | 1): string => {
+      const slot = room.slots.find((s) => s.team === team && s.slotIndex === slotIndex)
+      const occupant = slot?.occupant ?? null
+
+      if (occupant) {
+        const avatarInner = occupant.avatarUrl
+          ? `<img src="${occupant.avatarUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:9px;" />`
+          : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:16px;color:rgba(255,255,255,0.5);">${occupant.isBot ? '🤖' : '👤'}</div>`
+        const hostBadge = occupant.isHost
+          ? `<div style="position:absolute;top:-4px;right:-4px;background:#f59e0b;border-radius:50%;width:14px;height:14px;display:flex;align-items:center;justify-content:center;font-size:8px;">★</div>`
           : ''
         const slotInnerHtml = `
-            <div style="position:relative;box-sizing:border-box;width:100%;max-width:84px;aspect-ratio:1;border-radius:10px;overflow:visible;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);">
-              <div style="width:100%;height:100%;border-radius:10px;overflow:hidden;">${avatarInner}</div>
+            <div class="prl-slot-avatar-wrap">
+              <div style="width:100%;height:100%;border-radius:9px;overflow:hidden;">${avatarInner}</div>
               ${hostBadge}
             </div>
-            <div style="font-size:10px;color:rgba(255,255,255,0.6);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;text-align:center;">
-              ${escapeHtml(member.displayName)}
-            </div>`
+            <div class="prl-slot-name">${escapeHtml(occupant.displayName)}</div>`
 
-        // Заетите места отварят profile popup-а САМО ако членът има реален
-        // profileId (бот/временен гост без профил остава некликаем — няма
-        // какъв профил да отвори openProtectedProfileById). Отделен <button>
-        // от "Влез в масата" (различно DOM поддърво) — кликът тук никога не
-        // buble-ва към join действието.
-        if (member.profileId) {
+        // Заетите места отварят profile popup-а САМО ако участникът има реален
+        // profileId (бот/временен гост без профил остава некликаем). Отделен
+        // <button> от "+"-а по-долу — кликът тук никога не buble-ва към join.
+        if (!occupant.isBot && occupant.profileId) {
           return `
           <button
             type="button"
-            data-private-room-member="${escapeHtml(member.profileId)}"
-            data-private-room-member-name="${escapeHtml(member.displayName)}"
-            aria-label="Профил на ${escapeHtml(member.displayName)}"
-            style="display:flex;flex-direction:column;align-items:center;gap:5px;min-width:0;width:100%;border:0;background:transparent;padding:0;cursor:pointer;"
+            data-private-room-member="${escapeHtml(occupant.profileId)}"
+            data-private-room-member-name="${escapeHtml(occupant.displayName)}"
+            aria-label="Профил на ${escapeHtml(occupant.displayName)}"
+            class="prl-slot-occupant"
+            style="border:0;background:transparent;padding:0;cursor:pointer;"
           >${slotInnerHtml}
           </button>`
         }
 
-        return `
-          <div style="display:flex;flex-direction:column;align-items:center;gap:5px;min-width:0;width:100%;">${slotInnerHtml}
-          </div>`
+        return `<div class="prl-slot-occupant">${slotInnerHtml}</div>`
       }
-      return `
-        <div style="display:flex;flex-direction:column;align-items:center;gap:5px;min-width:0;width:100%;">
-          <div style="box-sizing:border-box;width:100%;max-width:84px;aspect-ratio:1;border-radius:10px;background:rgba(255,255,255,0.04);border:1px dashed rgba(255,255,255,0.12);"></div>
-          <div style="height:14px;"></div>
+
+      // Свободен слот. Кликаем "+" само когато: не е собствената ми маса
+      // (за own room "+" е чисто визуален — виж §8 от спецификацията) и
+      // масата е "open" (заключените маси пазят старото поведение — никакво
+      // взаимодействие със слот без покана/authorization, сървърът си остава
+      // единствен authority, тук просто не даваме UI да го подканя).
+      if (!isMine && !isLocked) {
+        return `<button type="button" class="prl-slot-plus" data-private-room-list-slot-join="${room.id}:${team}:${slotIndex}" aria-label="Заеми място в Отбор ${team === 'A' ? 'А' : 'Б'}">+</button>`
+      }
+      return `<div class="prl-slot-plus">+</div>`
+    }
+
+    const teamsHtml = `
+      <div class="prl-teams">
+        <div>
+          <div class="prl-team-label">ОТБОР А</div>
+          <div class="prl-team-slots">${teamSlotHtml('A', 0)}${teamSlotHtml('A', 1)}</div>
+        </div>
+        <div class="prl-divider"></div>
+        <div>
+          <div class="prl-team-label">ОТБОР Б</div>
+          <div class="prl-team-slots">${teamSlotHtml('B', 0)}${teamSlotHtml('B', 1)}</div>
+        </div>
+      </div>
+    `
+
+    const headerActionHtml = isMine
+      ? `
+        <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
+          <button type="button" data-private-room-list-enter="${room.id}" style="
+            padding:7px 20px;border:0;background:linear-gradient(180deg, #f4c95b 0%, #c98f13 100%);
+            border-radius:9px;color:#101010;font-size:13px;font-weight:900;cursor:pointer;white-space:nowrap;
+          ">ВЛЕЗ</button>
+          ${isLocked && occupiedCount < 4
+            ? `<button type="button" data-private-room-invite-open="1" style="
+                padding:5px 12px;border:1px solid rgba(167,139,250,0.5);background:rgba(167,139,250,0.12);
+                border-radius:8px;color:#a78bfa;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;
+              ">+ Покани приятели</button>`
+            : ''}
         </div>`
-    }).join('')
+      : (isLocked
+          ? `<div style="font-size:12px;color:rgba(239,68,68,0.7);font-weight:600;padding:5px 12px;border:1px solid rgba(239,68,68,0.25);border-radius:8px;">Заключена</div>`
+          : '')
 
     return `
-      <div style="box-sizing:border-box;width:100%;padding:12px 16px;background:rgba(255,255,255,0.04);border-radius:12px;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">
+      <div style="box-sizing:border-box;width:100%;padding:12px 16px;background:rgba(255,255,255,0.04);border-radius:12px;border:1px solid ${isMine ? 'rgba(244,201,91,0.35)' : 'rgba(255,255,255,0.08)'};overflow:hidden;">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
           <div style="flex:1;min-width:0;">
+            ${isMine ? `<div style="font-size:10px;font-weight:800;letter-spacing:0.04em;color:#f4c95b;margin-bottom:2px;">ТВОЯТА МАСА</div>` : ''}
             <div style="font-size:14px;font-weight:700;color:#fff;">
-              ${room.members[0]?.displayName ?? 'Неизвестен'}
+              ${hostOccupant?.displayName ?? 'Неизвестен'}
             </div>
             <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:3px;">
-              Вход ${formatStake(room.stake)} жълт. · ${room.members.length}/4 играча · ~${minutesLeft} мин.
+              Вход ${formatStake(room.stake)} жълт. · ${occupiedCount}/4 места · ~${minutesLeft} мин.
               ${isLocked ? ' · <span style="color:rgba(239,68,68,0.8);">Заключена</span>' : ''}
             </div>
           </div>
-          ${isLocked
-            ? (state.myPrivateRoom?.id === room.id && room.members.length < 4
-                ? `<button type="button" id="invite-friends-open" style="
-                    padding:7px 16px;border:1px solid rgba(167,139,250,0.5);background:rgba(167,139,250,0.15);
-                    border-radius:9px;color:#a78bfa;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;
-                  ">+ Покани приятели</button>`
-                : `<div style="font-size:12px;color:rgba(239,68,68,0.7);font-weight:600;padding:5px 12px;border:1px solid rgba(239,68,68,0.25);border-radius:8px;">Заключена</div>`)
-            : `<button type="button" data-private-room-join="${room.id}" style="
-                padding:7px 16px;border:1px solid rgba(167,139,250,0.5);background:rgba(167,139,250,0.12);
-                border-radius:9px;color:#a78bfa;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;
-              ">Влез в масата</button>`
-          }
+          ${headerActionHtml}
         </div>
-        <div style="display:grid;grid-template-columns:repeat(4, minmax(0, 1fr));gap:clamp(6px, 2vw, 12px);">
-          ${memberSlotsHtml}
-        </div>
+        ${teamsHtml}
       </div>
     `
   }
 
-  const myRoomId = state.myPrivateRoom?.id ?? null
   const allRooms = [
-    ...state.privateRooms.filter(r => r.id === myRoomId),
-    ...state.privateRooms.filter(r => r.id !== myRoomId && r.kind === 'open'),
-    ...state.privateRooms.filter(r => r.id !== myRoomId && r.kind === 'locked'),
+    ...state.privateRooms.filter(r => r.id === myRoom?.id),
+    ...state.privateRooms.filter(r => r.id !== myRoom?.id && r.kind === 'open'),
+    ...state.privateRooms.filter(r => r.id !== myRoom?.id && r.kind === 'locked'),
   ]
   const allRoomsHtml = allRooms.map(roomRowHtml).join('')
 
-  // hasMyRoom вече практически винаги е false тук — веднага щом сървърът
-  // потвърди членство (private_room_updated), контролерът пренасочва към
-  // отделния екран на чакалнята ('private-room-waiting'). Списъкът показва
-  // само наличните маси и бутона "Влез" — без вградено "Моята маса" табче
-  // и без чат под редовете (виж task спецификацията).
   const hasNoConfiguredStakes = !state.matchRoomsLoading && !state.matchRooms.some((r) => r.isEnabled)
   const createBtnDisabled = hasMyRoom || hasNoConfiguredStakes
   const createBtnHtml = `
@@ -8628,6 +8772,8 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
     <style>
       [data-private-room-member] { transition: filter 120ms ease, transform 120ms ease; }
       [data-private-room-member]:hover { filter: brightness(1.18); transform: translateY(-1px); }
+      ${TEAM_SLOT_CSS}
+      ${PRIVATE_ROOM_POPUP_STYLES}
     </style>
     <div style="max-width:760px;margin:0 auto;padding:24px 0 40px;">
       <!-- Хедър -->
@@ -8646,6 +8792,8 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
     </div>
 
     ${renderPrivateRoomsCreatePopup(state)}
+    ${renderPrivateRoomJoinConfirmPopup(state.privateRoomJoinSlotPopup)}
+    ${renderPrivateRoomBlockedPopup(state.privateRoomBlockedPopupText)}
   `
 }
 
@@ -8822,98 +8970,6 @@ function renderPrivateRoomInvitePopup(state: LobbyScreenState): string {
   `
 }
 
-function renderInviteFriendsPopup(state: LobbyScreenState, _options: RenderLobbyScreenOptions): string {
-  if (!state.inviteFriendsPopupOpen || !state.myPrivateRoom) return ''
-
-  const room = state.myPrivateRoom
-  const freeSeats = 4 - room.members.length
-  if (freeSeats <= 0) return ''
-
-  const onlineFriends = state.friendships?.friends.filter((f) => f.isOnline) ?? null
-
-  return `
-    <div style="
-      position:fixed;inset:0;z-index:9100;
-      display:flex;align-items:center;justify-content:center;
-      background:rgba(0,0,0,0.65);
-    " id="invite-friends-overlay">
-      <div style="
-        background:linear-gradient(160deg,#1a1a2e,#13132a);
-        border:1px solid rgba(167,139,250,0.35);
-        border-radius:20px;
-        width:400px;
-        max-width:calc(100vw - 32px);
-        max-height:80vh;
-        display:flex;flex-direction:column;
-        box-shadow:0 12px 48px rgba(0,0,0,0.8);
-        overflow:hidden;
-      ">
-        <div style="padding:20px 20px 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,0.07);">
-          <div>
-            <div style="font-size:15px;font-weight:800;color:#fff;">Покани приятели</div>
-            <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:2px;">Свободни места: ${freeSeats}</div>
-          </div>
-          <button type="button" id="invite-friends-close" style="
-            width:30px;height:30px;border-radius:50%;border:none;
-            background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.6);
-            font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;
-          ">✕</button>
-        </div>
-
-        <div style="flex:1;overflow-y:auto;padding:12px 16px;" id="invite-friends-list">
-          ${
-            onlineFriends === null
-              ? `<div style="text-align:center;padding:32px 0;color:rgba(255,255,255,0.4);font-size:14px;">Зарежда...</div>`
-              : onlineFriends.length === 0
-                ? `<div style="text-align:center;padding:32px 0;color:rgba(255,255,255,0.4);font-size:14px;">Нямаш онлайн приятели в момента.</div>`
-                : onlineFriends
-                    .map((f) => {
-                      const profileId = f.profile.profileId ?? ''
-                      const displayName = f.profile.displayName
-                      const avatarUrl = f.profile.avatarUrl
-                      const isInGame = f.isInGame === true
-                      const avatarHtml = avatarUrl
-                        ? `<img src="${avatarUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`
-                        : `<div style="font-size:20px;line-height:42px;text-align:center;">👤</div>`
-                      return `
-                        <label style="
-                          display:flex;align-items:center;gap:12px;
-                          padding:10px;border-radius:12px;cursor:${isInGame ? 'not-allowed' : 'pointer'};
-                          opacity:${isInGame ? '0.5' : '1'};
-                          background:rgba(255,255,255,0.03);
-                          margin-bottom:6px;
-                        ">
-                          <div style="width:42px;height:42px;border-radius:50%;border:1.5px solid rgba(167,139,250,0.4);overflow:hidden;flex-shrink:0;">
-                            ${avatarHtml}
-                          </div>
-                          <div style="flex:1;min-width:0;">
-                            <div style="font-size:14px;font-weight:700;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${displayName}</div>
-                            <div style="font-size:11px;color:${isInGame ? '#f87171' : '#4ade80'};margin-top:1px;">${isInGame ? 'В игра' : 'Онлайн'}</div>
-                          </div>
-                          <input type="checkbox"
-                            data-invite-friend-id="${profileId}"
-                            data-invite-friend-name="${displayName}"
-                            ${isInGame ? 'disabled' : ''}
-                            style="width:18px;height:18px;accent-color:#a78bfa;flex-shrink:0;"
-                          >
-                        </label>
-                      `
-                    })
-                    .join('')
-          }
-        </div>
-
-        <div style="padding:14px 16px;border-top:1px solid rgba(255,255,255,0.07);">
-          <button type="button" id="invite-friends-submit" style="
-            width:100%;padding:12px;border:none;
-            background:linear-gradient(135deg,#7c3aed,#a78bfa);
-            border-radius:12px;color:#fff;font-size:14px;font-weight:800;cursor:pointer;
-          ">Покани избраните</button>
-        </div>
-      </div>
-    </div>
-  `
-}
 
 // Показва се, когато потребител, вече чакащ в частна маса (state.myPrivateRoom
 // !== null — може да е стигнал дотук през "Изчакай в лоби"), се опита
@@ -8925,6 +8981,21 @@ function renderInviteFriendsPopup(state: LobbyScreenState, _options: RenderLobby
 // маса автоматично.
 function renderPrivateRoomConflictPopup(state: LobbyScreenState): string {
   if (!state.privateRoomConflictPromptOpen) return ''
+  // 'list-join' — "+" клик на ДРУГА маса, докато вече си седнал/имаш
+  // запазено място в своя — договорено bespoke копие. Primary бутонът
+  // ползва СЪЩИЯ data-private-room-conflict-return handler (чист
+  // returnToPrivateRoomWaiting() — само навигация, без нов join и без
+  // промяна на seat/team/bots), само етикетът е различен. 'generic' —
+  // трите други конфликтни точки (matchmaking/create/invite-accept) —
+  // непроменен споделен текст.
+  const isListJoin = state.privateRoomConflictPromptVariant === 'list-join'
+  const titleHtml = isListJoin
+    ? `
+      <div style="font-size:18px;font-weight:900;color:#fff;margin-bottom:6px;">Вече сте седнал на друга маса</div>
+      <div style="font-size:14px;font-weight:600;color:rgba(255,255,255,0.62);margin-bottom:14px;">Вече имате запазено място в друга частна маса.</div>
+    `
+    : `<div style="font-size:18px;font-weight:900;color:#fff;margin-bottom:14px;">Вече чакаш в частна маса.</div>`
+  const primaryLabel = isListJoin ? 'Виж масата' : 'Върни се'
   return `
     <div style="
       position:fixed;inset:0;z-index:9600;
@@ -8936,7 +9007,7 @@ function renderPrivateRoomConflictPopup(state: LobbyScreenState): string {
         border-radius:16px;padding:28px 28px 24px;max-width:380px;width:90%;
         box-shadow:0 20px 60px rgba(0,0,0,0.6);
       ">
-        <div style="font-size:18px;font-weight:900;color:#fff;margin-bottom:14px;">Вече чакаш в частна маса.</div>
+        ${titleHtml}
         <div style="display:flex;gap:12px;">
           <button type="button" data-private-room-conflict-dismiss="1" style="
             flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
@@ -8946,7 +9017,7 @@ function renderPrivateRoomConflictPopup(state: LobbyScreenState): string {
             flex:1;padding:11px;border:0;
             background:linear-gradient(180deg, #f4c95b 0%, #c98f13 100%);
             border-radius:10px;color:#101010;font-size:14px;font-weight:800;cursor:pointer;
-          ">Върни се</button>
+          ">${primaryLabel}</button>
         </div>
       </div>
     </div>
@@ -9838,7 +9909,11 @@ export function renderLobbyScreen(
       ${renderShopPurchaseConfirmModal(state)}
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
-      ${renderInviteFriendsPopup(state, options)}
+      ${renderPrivateRoomInviteFriendsPopup({
+        isOpen: state.inviteFriendsPopupOpen,
+        freeSeats: state.myPrivateRoom ? 4 - state.myPrivateRoom.slots.filter((s) => s.occupant !== null).length : 0,
+        friends: state.inviteFriends,
+      })}
       ${renderPrivateRoomInfoPopup(state)}
       ${renderPrivateRoomConflictPopup(state)}
       ${renderSubadminActionConfirmPopup(state)}
@@ -10115,7 +10190,11 @@ export function renderLobbyScreen(
       ${renderShopPurchaseConfirmModal(state)}
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
-      ${renderInviteFriendsPopup(state, options)}
+      ${renderPrivateRoomInviteFriendsPopup({
+        isOpen: state.inviteFriendsPopupOpen,
+        freeSeats: state.myPrivateRoom ? 4 - state.myPrivateRoom.slots.filter((s) => s.occupant !== null).length : 0,
+        friends: state.inviteFriends,
+      })}
       ${renderPrivateRoomInfoPopup(state)}
       ${renderPrivateRoomConflictPopup(state)}
       ${renderSubadminActionConfirmPopup(state)}
@@ -12778,20 +12857,56 @@ export function renderLobbyScreen(
       options.onPrivateRoomCreate(stake, isLocked, waitMinutes)
     })
 
-  root.querySelectorAll<HTMLButtonElement>('[data-private-room-join]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.privateRoomJoin?.trim() ?? ''
-      if (id) options.onPrivateRoomJoin(id)
-    })
-  })
-
-  // Отделен бутон от data-private-room-join по-горе (различно DOM поддърво
-  // в roomRowHtml) — клик върху зает seat/avatar никога не тригва join.
+  // Отделен бутон от "+"-ите по-долу (различно DOM поддърво в roomRowHtml) —
+  // клик върху зает seat/avatar никога не тригва join.
   root.querySelectorAll<HTMLButtonElement>('[data-private-room-member]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const profileId = btn.dataset.privateRoomMember?.trim() ?? ''
       const displayName = btn.dataset.privateRoomMemberName?.trim() ?? ''
       if (profileId) options.onPrivateRoomMemberClick(profileId, displayName)
+    })
+  })
+
+  // Директен "+" на конкретен свободен слот в списъка (не собствената маса) —
+  // отваря join-confirm popup-а за точно този (roomId, team, slotIndex).
+  root.querySelectorAll<HTMLButtonElement>('[data-private-room-list-slot-join]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const raw = btn.getAttribute('data-private-room-list-slot-join')
+      if (raw === null) return
+      const [roomId, teamRaw, slotIndexRaw] = raw.split(':')
+      if (!roomId || (teamRaw !== 'A' && teamRaw !== 'B')) return
+      const slotIndex = slotIndexRaw === '0' ? 0 : slotIndexRaw === '1' ? 1 : null
+      if (slotIndex === null) return
+      options.onPrivateRoomListSlotJoinOpen(roomId, teamRaw, slotIndex)
+    })
+  })
+
+  // Join-confirm popup — споделен markup/data-* атрибути с
+  // renderPrivateRoomWaitingScreen.ts (никога не са монтирани едновременно).
+  root.querySelector<HTMLButtonElement>('[data-private-room-join-popup-confirm="1"]')
+    ?.addEventListener('click', () => options.onPrivateRoomJoinSlotPopupConfirm())
+
+  root.querySelector<HTMLButtonElement>('[data-private-room-join-popup-cancel="1"]')
+    ?.addEventListener('click', () => options.onPrivateRoomJoinSlotPopupCancel())
+
+  root.querySelector<HTMLElement>('[data-private-room-join-popup-backdrop="1"]')
+    ?.addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) options.onPrivateRoomJoinSlotPopupCancel()
+    })
+
+  root.querySelector<HTMLButtonElement>('[data-private-room-blocked-popup-close="1"]')
+    ?.addEventListener('click', () => options.onPrivateRoomBlockedPopupClose())
+
+  root.querySelector<HTMLElement>('[data-private-room-blocked-popup-backdrop="1"]')
+    ?.addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) options.onPrivateRoomBlockedPopupClose()
+    })
+
+  // "ВЛЕЗ" на собствената маса в списъка — чиста навигация, без нов join.
+  root.querySelectorAll<HTMLButtonElement>('[data-private-room-list-enter]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-private-room-list-enter')
+      if (id) options.onPrivateRoomListEnter(id)
     })
   })
 
@@ -12981,34 +13096,27 @@ export function renderLobbyScreen(
       if (e.target === e.currentTarget) options.onTournamentCancelConfirmClose()
     })
 
-  root.querySelector<HTMLButtonElement>('[data-private-room-leave="1"]')
-    ?.addEventListener('click', options.onPrivateRoomLeave)
+  root.querySelectorAll<HTMLButtonElement>('[data-private-room-invite-open="1"]').forEach((btn) => {
+    btn.addEventListener('click', options.onInviteFriendsOpen)
+  })
 
-  root.querySelector<HTMLButtonElement>('#invite-friends-open')
-    ?.addEventListener('click', options.onInviteFriendsOpen)
-
-  root.querySelector<HTMLButtonElement>('#invite-friends-close')
+  root.querySelector<HTMLButtonElement>('[data-private-room-invite-close="1"]')
     ?.addEventListener('click', options.onInviteFriendsClose)
 
-  root.querySelector<HTMLButtonElement>('#invite-friends-overlay')
+  root.querySelector<HTMLElement>('[data-private-room-invite-backdrop="1"]')
     ?.addEventListener('click', (e) => {
       if (e.target === e.currentTarget) options.onInviteFriendsClose()
     })
 
-  root.querySelector<HTMLButtonElement>('#invite-friends-submit')
-    ?.addEventListener('click', () => {
-      const checkboxes = root.querySelectorAll<HTMLInputElement>('[data-invite-friend-id]:checked')
-      const toProfiles: Array<{ profileId: string; displayName: string }> = []
-      checkboxes.forEach((cb) => {
-        const profileId = cb.dataset.inviteFriendId?.trim() ?? ''
-        const displayName = cb.dataset.inviteFriendName?.trim() ?? ''
-        if (profileId && displayName) toProfiles.push({ profileId, displayName })
-      })
-      if (toProfiles.length > 0) {
-        options.onPrivateRoomInvite(toProfiles)
-        options.onInviteFriendsClose()
-      }
+  root.querySelectorAll<HTMLButtonElement>('[data-private-room-invite-send]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const raw = btn.getAttribute('data-private-room-invite-send')
+      if (!raw) return
+      const [profileId, ...nameParts] = raw.split(':')
+      const displayName = nameParts.join(':')
+      if (profileId && displayName) options.onPrivateRoomInviteSend(profileId, displayName)
     })
+  })
 
   root.querySelectorAll<HTMLButtonElement>('[data-private-room-invite-accept]').forEach((btn) => {
     btn.addEventListener('click', () => {

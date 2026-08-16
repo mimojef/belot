@@ -14,11 +14,13 @@
  * fixtures built with the actual createServerRoom() factory, proving the
  * exact server-authoritative computation, not just its presence in source.
  *
- * Part B: source-text checks that the private-room-origin game-start paths
- * (handlePrivateRoomFull / handlePrivateRoomBotFill in index.ts) set the
- * flag, that the public/guest-trial paths never do, and that the client
- * threads the value from the server snapshot end-to-end without deriving it
- * from bot/human counts, stake, or room name.
+ * Part B: source-text checks that the private-room-origin game-start path
+ * (handlePrivateRoomReady in index.ts — the unified function that replaced
+ * the old handlePrivateRoomFull/handlePrivateRoomBotFill pair once private
+ * rooms moved to explicit team/slot choice) sets the flag, that the
+ * public/guest-trial paths never do, and that the client threads the value
+ * from the server snapshot end-to-end without deriving it from bot/human
+ * counts, stake, or room name.
  */
 
 import { readFileSync } from 'node:fs'
@@ -119,33 +121,26 @@ function readSource(relativePath: string): string {
     return source.slice(start, end)
   }
 
-  const handlePrivateRoomFullBody = sliceBetween(
+  // handlePrivateRoomFull/handlePrivateRoomBotFill were unified into a
+  // single handlePrivateRoomReady() when private rooms moved to explicit
+  // team/slot choice — occupants (human OR bot) are already fully resolved
+  // in room.slots by the time it runs, so the human-vs-bot-fill distinction
+  // no longer needs two separate code paths. One check now covers both the
+  // normal 4-human start and the per-team bot-completion start, since both
+  // funnel through this same function.
+  const handlePrivateRoomReadyBody = sliceBetween(
     indexTs,
-    'function handlePrivateRoomFull',
+    'function handlePrivateRoomReady',
     'function handlePrivateRoomExpired',
   )
-  const handlePrivateRoomBotFillBody = sliceBetween(
-    indexTs,
-    'function handlePrivateRoomBotFill',
-    'const privateRoomChatStore',
-  )
 
   check(
-    '[B1] handlePrivateRoomFull found in index.ts',
-    handlePrivateRoomFullBody !== null,
+    '[B1] handlePrivateRoomReady found in index.ts',
+    handlePrivateRoomReadyBody !== null,
   )
   check(
-    '[B1b] handlePrivateRoomFull (normal 4-human private start) sets isPrivateTableOrigin: true',
-    handlePrivateRoomFullBody !== null && /isPrivateTableOrigin:\s*true/.test(handlePrivateRoomFullBody),
-  )
-
-  check(
-    '[B2] handlePrivateRoomBotFill found in index.ts',
-    handlePrivateRoomBotFillBody !== null,
-  )
-  check(
-    '[B2b] handlePrivateRoomBotFill ("Запълни с ботове" start) sets isPrivateTableOrigin: true',
-    handlePrivateRoomBotFillBody !== null && /isPrivateTableOrigin:\s*true/.test(handlePrivateRoomBotFillBody),
+    '[B1b] handlePrivateRoomReady (both normal 4-human and per-team bot-completion starts) sets isPrivateTableOrigin: true',
+    handlePrivateRoomReadyBody !== null && /isPrivateTableOrigin:\s*true/.test(handlePrivateRoomReadyBody),
   )
 }
 

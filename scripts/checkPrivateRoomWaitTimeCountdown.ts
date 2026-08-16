@@ -77,19 +77,29 @@ function findFreePort(): Promise<number> {
 }
 
 function makeMember(profileId: string, displayName: string, isHost: boolean, level = 5) {
-  return { profileId, displayName, avatarUrl: null, level, rankTitle: isHost ? null : 'Играч', isHost }
+  return { profileId, displayName, avatarUrl: null, level, rankTitle: isHost ? null : 'Играч', isHost, isBot: false }
 }
 
+// Позиционно мапва плоския members масив (както преди) в team/slot модела:
+// index 0->A0, 1->A1, 2->B0, 3->B1 — достатъчно за countdown/tick-loop
+// тестовете тук, които не проверяват team grouping-а самия по себе си.
 function makeRoom(
   id: string,
   members: unknown[],
   opts: { kind?: 'open' | 'locked'; stake?: number; expiresAt?: number } = {},
 ) {
+  const slotDefs: Array<{ team: 'A' | 'B'; slotIndex: 0 | 1 }> = [
+    { team: 'A', slotIndex: 0 },
+    { team: 'A', slotIndex: 1 },
+    { team: 'B', slotIndex: 0 },
+    { team: 'B', slotIndex: 1 },
+  ]
+  const slots = slotDefs.map((def, i) => ({ ...def, occupant: members[i] ?? null }))
   return {
     id,
     kind: opts.kind ?? 'open',
     stake: opts.stake ?? 5000,
-    members,
+    slots,
     createdAt: Date.now(),
     expiresAt: opts.expiresAt ?? Date.now() + 10 * 60_000,
   }
@@ -530,11 +540,11 @@ async function runOpenLockedResponsiveScenario(page: Page, label: string): Promi
     ]),
   })
 
-  await check(`${label} [R-4of4] 4/4 players with a long display name: no overflow, leave button still reachable`, async () => {
+  await check(`${label} [R-4of4] 4/4 players with a long display name: no overflow, wait-in-lobby button still reachable`, async () => {
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1)
     assert(!overflow, 'horizontal overflow at 4/4 players with long name')
-    const box = await page.locator('[data-private-waiting-leave-button="1"]').boundingBox()
-    assert(box !== null, 'leave button missing from DOM')
+    const box = await page.locator('[data-private-waiting-wait-in-lobby-button="1"]').boundingBox()
+    assert(box !== null, 'wait-in-lobby button missing from DOM')
   })
 }
 

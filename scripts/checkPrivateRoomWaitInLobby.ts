@@ -119,14 +119,23 @@ if (waitInLobbyHandlerMatch !== null) {
 }
 
 // The button itself must exist in the waiting-screen markup, alongside
-// (not replacing) the existing "Напусни" button.
+// (not replacing) the existing leave flow.
 check(
   '[1c] renderPrivateRoomWaitingScreen.ts renders a "Изчакай в лоби" button (data-private-waiting-wait-in-lobby-button)',
   /data-private-waiting-wait-in-lobby-button="1"[^>]*>Изчакай в лоби</.test(waitingScreenSrc),
 )
+// КОРЕКЦИЯ: leave flow-ът беше пренаписан (по-ранна задача в тази сесия,
+// §11 "− = освобождавам мястото си") от единичен data-private-waiting-leave-button
+// клик в двустъпков red "−" (data-private-room-leave-slot) -> confirm popup
+// (data-private-room-leave-popup-confirm, текст "Напусни") — ръчно потвърдено
+// работещо. Старият атрибут вече не съществува никъде.
 check(
-  '[setup] "Напусни" button still present, unchanged label',
-  /data-private-waiting-leave-button="1"[^>]*>Напусни</.test(waitingScreenSrc),
+  '[setup] own red "−" leave-slot button still present (data-private-room-leave-slot)',
+  /data-private-room-leave-slot="1"/.test(waitingScreenSrc),
+)
+check(
+  '[setup] "Напусни" confirm button still present in the leave-confirm popup, unchanged label',
+  /data-private-room-leave-popup-confirm="1"[^>]*>Напусни</.test(waitingScreenSrc),
 )
 
 // ─── [3] No waiting strip anywhere — desktop or mobile ──────────────────────
@@ -175,16 +184,26 @@ check('[setup] navigateToPrivateRooms() implementation located', navigateFnMatch
 
 if (navigateFnMatch !== null) {
   const body = navigateFnMatch[1]
+  // КОРЕКЦИЯ (частни маси list-screen UX, direct "+" join): navigateToPrivateRooms()
+  // вече ВИНАГИ отваря списъка, дори state.myPrivateRoom !== null — членството
+  // се показва pinned най-отгоре с "ВЛЕЗ" бутон (виж roomRowHtml в
+  // renderLobbyScreen.ts + handlePrivateRoomListEnter в контролера), вместо
+  // auto-redirect директно към чакалнята. Потребителят сам избира да влезе
+  // обратно, вместо screen-ът да го решава вместо него. Старите [5]/[6]
+  // проверки за auto-redirect клона вече НЕ важат — заменени с проверка, че
+  // клонът е премахнат и функцията безусловно отваря списъка. Живо (real
+  // browser + real WS) покритие на самото "ВЛЕЗ"/pinning поведение: виж
+  // checkPrivateRoomListDirectJoin.ts [5]/[6]/[7].
   check(
-    '[5] navigateToPrivateRooms() opens the waiting room directly (delegates to returnToPrivateRoomWaiting()) when state.myPrivateRoom !== null — not the list',
-    /if \(state\.myPrivateRoom !== null\) \{\s*\n\s*returnToPrivateRoomWaiting\(\)\s*\n\s*return\s*\n\s*\}/.test(body),
+    '[5] navigateToPrivateRooms() no longer has an early "if (state.myPrivateRoom !== null) return" auto-redirect branch — it ALWAYS opens the list, letting the pinned own-room card + "ВЛЕЗ" button (not the navigation function) decide',
+    !/if \(state\.myPrivateRoom !== null\)/.test(body),
   )
   check(
-    '[6] the myPrivateRoom !== null branch does NOT call onPrivateRoomJoin/onPrivateRoomCreate (no re-join, no duplicate membership) — it returns before reaching the list-open logic below',
-    /returnToPrivateRoomWaiting\(\)\s*\n\s*return\s*\n\s*\}\s*\n\s*state\.currentScreen = 'private-rooms'/.test(body),
+    '[6] navigateToPrivateRooms() does not call onPrivateRoomJoin/onPrivateRoomCreate (no re-join, no duplicate membership) regardless of membership state',
+    !/onPrivateRoomJoin/.test(body) && !/onPrivateRoomCreate/.test(body),
   )
   check(
-    '[7] when state.myPrivateRoom === null, navigateToPrivateRooms() falls through to the ORIGINAL list-open behavior (currentScreen=\'private-rooms\', privateRoomsTab=\'all\', options.onPrivateRoomsOpen)',
+    '[7] navigateToPrivateRooms() unconditionally sets currentScreen=\'private-rooms\', privateRoomsTab=\'all\', and calls options.onPrivateRoomsOpen — the single, non-branching list-open behavior',
     /state\.currentScreen = 'private-rooms'/.test(body) &&
       /state\.privateRoomsTab = 'all'/.test(body) &&
       /options\.onPrivateRoomsOpen\?\.\(\)/.test(body),
@@ -247,8 +266,8 @@ check(
   /function resyncPrivateRoomMembership\(\): void \{\s*\n\s*options\.onPrivateRoomsOpen\?\.\(\)\s*\n\s*\}/.test(controllerSrc),
 )
 check(
-  '[8d] navigateToPrivateRooms() reads state.myPrivateRoom fresh on every call (no separate cached/duplicated "am I waiting" flag to keep in sync with reconnect)',
-  navigateFnMatch !== null && /if \(state\.myPrivateRoom !== null\)/.test(navigateFnMatch[1]),
+  '[8d] renderPrivateRoomsPage (the list, now the single render path regardless of membership) reads state.myPrivateRoom fresh on every render for own-room reconciliation — no separate cached/duplicated "am I waiting" flag to keep in sync with reconnect',
+  /const myRoom = state\.myPrivateRoom !== null && state\.privateRooms\.some/.test(lobbyScreenSrc),
 )
 
 // ─── [9] Conflict popup → "Върни се" opens the waiting room, no re-join ────
@@ -258,9 +277,9 @@ check(
   /onPrivateRoomConflictReturnClick: \(\) => \{\s*\n\s*state\.privateRoomConflictPromptOpen = false\s*\n\s*returnToPrivateRoomWaiting\(\)/.test(controllerSrc),
 )
 check(
-  '[9b] the conflict popup shows the exact required copy "Вече чакаш в частна маса." with a "Върни се" button',
+  '[9b] the conflict popup shows the exact required copy "Вече чакаш в частна маса." with a "Върни се" button for the generic (non-list-join) variant',
   /Вече чакаш в частна маса\.<\/div>/.test(lobbyScreenSrc) &&
-    />Върни се<\/button>/.test(lobbyScreenSrc),
+    /isListJoin \? 'Виж масата' : 'Върни се'/.test(lobbyScreenSrc),
 )
 
 // ─── [10] private_room_full starts the active game from any screen ────────
@@ -281,8 +300,8 @@ check(
   /if \(message\.type === 'private_room_left'\) \{[\s\S]{0,120}state\.myPrivateRoom = null/.test(controllerSrc),
 )
 check(
-  '[11b] private_room_expired clears state.myPrivateRoom',
-  /if \(message\.type === 'private_room_expired'\) \{[\s\S]{0,220}state\.myPrivateRoom = null/.test(controllerSrc),
+  '[11b] private_room_expired clears state.myPrivateRoom (gated by isMineOrPreviewed — the leave->preview redesign\'s guard against clearing membership for an unrelated room\'s expiry)',
+  /if \(message\.type === 'private_room_expired'\) \{[\s\S]{0,400}state\.myPrivateRoom = null/.test(controllerSrc),
 )
 check(
   '[11c] private_room_closed (host closed the table — the "removed" path) clears state.myPrivateRoom',
@@ -297,7 +316,7 @@ check(
 
 check(
   '[G1] onSearchClick blocks with the conflict prompt instead of auto-leaving the private room to start matchmaking',
-  /onSearchClick: \(\) => \{[\s\S]{0,160}state\.myPrivateRoom !== null\) \{\s*\n\s*state\.privateRoomConflictPromptOpen = true/.test(controllerSrc),
+  /onSearchClick: \(\) => \{[\s\S]{0,160}state\.myPrivateRoom !== null\) \{\s*\n\s*openPrivateRoomConflictPrompt\(\)/.test(controllerSrc),
 )
 check(
   '[G2] onPrivateRoomCreate blocks (as the FIRST check) when already a member, before any stake/level/balance check runs',

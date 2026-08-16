@@ -1,12 +1,26 @@
-import type { MatchStake } from '../network/createGameServerClient'
+import type { MatchStake, Team } from '../network/createGameServerClient'
+import {
+  PRIVATE_ROOM_POPUP_STYLES,
+  renderPrivateRoomBlockedPopup,
+  renderPrivateRoomInviteFriendsPopup,
+  renderPrivateRoomJoinConfirmPopup,
+  type PrivateRoomInviteEligibleFriend,
+} from './privateRoomPopupMarkup'
 
-export type PrivateRoomWaitingMemberSnapshot = {
+export type PrivateRoomWaitingOccupantSnapshot = {
   profileId: string | null
   displayName: string
   avatarUrl: string | null
   level: number | null
   rankTitle: string | null
   isHost: boolean
+  isBot: boolean
+}
+
+export type PrivateRoomWaitingSlotSnapshot = {
+  team: Team
+  slotIndex: 0 | 1
+  occupant: PrivateRoomWaitingOccupantSnapshot | null
 }
 
 export type PrivateRoomWaitingChatMessageSnapshot = {
@@ -18,16 +32,23 @@ export type PrivateRoomWaitingChatMessageSnapshot = {
   createdAt: number
 }
 
+// 'member' = локалният играч вече е зает слот в тази стая (вижда собствения
+// си "−", chat-ът е функционален). 'previewer' = разглежда стаята преди да
+// избере отбор (вижда кликаеми "+", chat-ът не е достъпен).
+export type PrivateRoomWaitingViewerRole = 'member' | 'previewer'
+
 export type RenderPrivateRoomWaitingScreenParams = {
   isLocked: boolean
   stake: MatchStake
-  members: PrivateRoomWaitingMemberSnapshot[]
+  slots: PrivateRoomWaitingSlotSnapshot[]
   localProfileId: string | null
-  isHost: boolean
-  canFillWithBots: boolean
-  fillBotsLoading: boolean
-  fillBotsConfirmOpen: boolean
+  viewerRole: PrivateRoomWaitingViewerRole
+  joinSlotPopup: { team: Team; slotIndex: 0 | 1 } | null
   leaveConfirmOpen: boolean
+  blockedPopupText: string | null
+  botActionLoadingTeam: Team | null
+  inviteFriendsPopupOpen: boolean
+  inviteFriends: PrivateRoomInviteEligibleFriend[] | null
   chatMessages: PrivateRoomWaitingChatMessageSnapshot[]
   chatDraft: string
   chatSending: boolean
@@ -101,30 +122,139 @@ function formatChatTime(createdAtMs: number): string {
   }
 }
 
-function renderSeatCard(member: PrivateRoomWaitingMemberSnapshot | null, localProfileId: string | null): string {
-  if (member === null) {
+function getTeamSlots(slots: PrivateRoomWaitingSlotSnapshot[], team: Team): [PrivateRoomWaitingSlotSnapshot, PrivateRoomWaitingSlotSnapshot] {
+  const teamSlots = slots.filter((s) => s.team === team)
+  return [teamSlots[0]!, teamSlots[1]!]
+}
+
+function getLocalTeam(slots: PrivateRoomWaitingSlotSnapshot[], localProfileId: string | null): Team | null {
+  if (localProfileId === null) return null
+  const ownSlot = slots.find((s) => s.occupant !== null && !s.occupant.isBot && s.occupant.profileId === localProfileId)
+  return ownSlot?.team ?? null
+}
+
+type TeamBotControlState = {
+  label: string
+  mode: 'fill' | 'remove' | null
+  enabled: boolean
+}
+
+function computeTeamBotControlState(
+  slots: PrivateRoomWaitingSlotSnapshot[],
+  team: Team,
+  localTeam: Team | null,
+): TeamBotControlState {
+  const [slotA, slotB] = getTeamSlots(slots, team)
+  const occupants = [slotA.occupant, slotB.occupant]
+  const humanCount = occupants.filter((o) => o !== null && !o.isBot).length
+  const botCount = occupants.filter((o) => o !== null && o.isBot).length
+  const isOwnTeam = localTeam === team
+
+  if (!isOwnTeam) {
+    // Винаги видим, никога скрит — просто disabled за противниковия отбор /
+    // spectator-и, показва реалното състояние на този отбор.
+    if (botCount > 0) return { label: 'Махни бот', mode: 'remove', enabled: false }
+    if (humanCount === 2) return { label: 'Отборът е пълен', mode: null, enabled: false }
+    return { label: 'Запълни с бот', mode: 'fill', enabled: false }
+  }
+
+  if (humanCount === 1 && botCount === 0) return { label: 'Запълни с бот', mode: 'fill', enabled: true }
+  if (humanCount === 1 && botCount === 1) return { label: 'Махни бот', mode: 'remove', enabled: true }
+  if (humanCount === 2) return { label: 'Отборът е пълен', mode: null, enabled: false }
+  return { label: 'Запълни с бот', mode: 'fill', enabled: false }
+}
+
+function renderSlotCard(
+  slot: PrivateRoomWaitingSlotSnapshot,
+  localProfileId: string | null,
+  viewerRole: PrivateRoomWaitingViewerRole,
+): string {
+  const occupant = slot.occupant
+  const slotKey = `${slot.team}:${slot.slotIndex}`
+
+  if (occupant === null) {
+    const clickable = viewerRole === 'previewer'
     return `
-      <div class="prw-seat prw-seat-empty">
-        <div class="prw-seat-avatar prw-seat-avatar-empty"></div>
-        <div class="prw-seat-name prw-seat-name-empty">Свободно място</div>
-      </div>
+      <button
+        type="button"
+        data-private-room-slot-join="${slotKey}"
+        class="prw-slot prw-slot-empty"
+        ${clickable ? '' : 'disabled'}
+      >
+        <span class="prw-slot-plus" aria-hidden="true">+</span>
+        <span class="prw-slot-name-empty">Свободно място</span>
+      </button>
     `
   }
 
-  const isLocal = member.profileId !== null && member.profileId === localProfileId
+  const isLocal = viewerRole === 'member' && !occupant.isBot && occupant.profileId !== null && occupant.profileId === localProfileId
+  const isClickableProfile = !occupant.isBot && !isLocal && occupant.profileId !== null
+
+  const subLine = occupant.isBot
+    ? '<span class="prw-bot-badge">БОТ</span>'
+    : occupant.isHost
+      ? '<span class="prw-host-badge">ДОМАКИН</span>'
+      : (occupant.rankTitle ? escapeHtml(occupant.rankTitle) : 'Играч')
+
+  const innerHtml = `
+    <div class="prw-slot-avatar${occupant.isBot ? ' prw-slot-avatar-bot' : ''}">
+      ${occupant.avatarUrl ? `<img src="${escapeHtml(occupant.avatarUrl)}" alt="" draggable="false">` : escapeHtml(occupant.isBot ? '🤖' : getInitialLetter(occupant.displayName))}
+      ${isLocal ? `
+        <button type="button" data-private-room-leave-slot="1" class="prw-leave-badge" aria-label="Напусни мястото си">
+          <span aria-hidden="true">−</span>
+        </button>
+      ` : ''}
+    </div>
+    <div class="prw-slot-copy">
+      <div class="prw-slot-name">
+        ${escapeHtml(occupant.displayName)}${isLocal ? ' <span class="prw-you-tag">ТИ</span>' : ''}
+      </div>
+      <div class="prw-slot-sub">${subLine}</div>
+    </div>
+  `
+
+  if (isClickableProfile) {
+    return `
+      <button
+        type="button"
+        data-private-room-member="${escapeHtml(occupant.profileId ?? '')}"
+        data-private-room-member-name="${escapeHtml(occupant.displayName)}"
+        class="prw-slot${isLocal ? ' prw-slot-local' : ''}"
+      >${innerHtml}</button>
+    `
+  }
+
+  return `<div class="prw-slot${isLocal ? ' prw-slot-local' : ''}">${innerHtml}</div>`
+}
+
+function renderTeamColumn(
+  slots: PrivateRoomWaitingSlotSnapshot[],
+  team: Team,
+  localProfileId: string | null,
+  viewerRole: PrivateRoomWaitingViewerRole,
+  localTeam: Team | null,
+  botActionLoadingTeam: Team | null,
+): string {
+  const [slotA, slotB] = getTeamSlots(slots, team)
+  const control = computeTeamBotControlState(slots, team, localTeam)
+  const isLoading = botActionLoadingTeam === team
+  const teamLabel = team === 'A' ? 'Отбор А' : 'Отбор Б'
 
   return `
-    <div class="prw-seat${isLocal ? ' prw-seat-local' : ''}">
-      <div class="prw-seat-avatar">
-        ${member.avatarUrl ? `<img src="${escapeHtml(member.avatarUrl)}" alt="" draggable="false">` : escapeHtml(getInitialLetter(member.displayName))}
+    <div class="prw-team">
+      <div class="prw-team-header">${teamLabel}</div>
+      <div class="prw-team-slots">
+        ${renderSlotCard(slotA, localProfileId, viewerRole)}
+        ${renderSlotCard(slotB, localProfileId, viewerRole)}
       </div>
-      <div class="prw-seat-copy">
-        <div class="prw-seat-name">
-          ${escapeHtml(member.displayName)}${isLocal ? ' <span class="prw-you-tag">ТИ</span>' : ''}
-        </div>
-        <div class="prw-seat-sub">
-          ${member.isHost ? '<span class="prw-host-badge">ДОМАКИН</span>' : (member.rankTitle ? escapeHtml(member.rankTitle) : 'Играч')}
-        </div>
+      <div class="prw-bot-row">
+        <button
+          type="button"
+          data-private-room-bot-team="${team}"
+          data-private-room-bot-mode="${control.mode ?? ''}"
+          class="prw-bot-button"
+          ${control.enabled && !isLoading ? '' : 'disabled'}
+        >${isLoading ? '...' : control.label}</button>
       </div>
     </div>
   `
@@ -145,8 +275,9 @@ function renderChatMessage(message: PrivateRoomWaitingChatMessageSnapshot, local
 }
 
 export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingScreenParams): string {
-  const seats: Array<PrivateRoomWaitingMemberSnapshot | null> = Array.from({ length: 4 }, (_, i) => params.members[i] ?? null)
-  const humanCount = params.members.length
+  const occupiedCount = params.slots.filter((s) => s.occupant !== null).length
+  const localTeam = getLocalTeam(params.slots, params.localProfileId)
+  const isMember = params.viewerRole === 'member'
 
   return `
     <section data-private-room-waiting-screen="1" class="prw-screen">
@@ -194,18 +325,6 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           font-size:13px;
           font-weight:700;
           color:rgba(248,250,252,0.56);
-        }
-
-        .prw-leave-button {
-          height:38px;
-          padding:0 16px;
-          border-radius:8px;
-          border:1px solid rgba(239,68,68,0.5);
-          background:rgba(239,68,68,0.10);
-          color:#f87171;
-          font-size:13px;
-          font-weight:800;
-          cursor:pointer;
         }
 
         .prw-waiting-actions {
@@ -303,33 +422,104 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           font-weight:700;
         }
 
-        .prw-seats {
+        /* ─── Team columns ─────────────────────────────────────────────── */
+
+        .prw-teams {
           display:grid;
-          grid-template-columns:1fr 1fr;
-          gap:10px;
+          grid-template-columns:1fr auto 1fr;
+          gap:clamp(8px, 3vw, 16px);
+          align-items:start;
         }
 
-        .prw-seat {
+        .prw-team {
+          display:grid;
+          gap:8px;
+          min-width:0;
+        }
+
+        .prw-team-divider {
+          align-self:stretch;
+          width:1px;
+          background:rgba(255,255,255,0.14);
+        }
+
+        .prw-team-header {
+          text-align:center;
+          font-size:13px;
+          font-weight:900;
+          letter-spacing:0.04em;
+          text-transform:uppercase;
+          color:#d4a520;
+        }
+
+        .prw-team-slots {
+          display:grid;
+          gap:8px;
+        }
+
+        .prw-slot {
           display:flex;
           align-items:center;
-          gap:12px;
-          padding:12px 14px;
+          gap:10px;
+          padding:10px 12px;
           border-radius:12px;
           background:rgba(255,255,255,0.05);
           border:1px solid rgba(255,255,255,0.10);
+          min-width:0;
+          width:100%;
+          box-sizing:border-box;
+          text-align:left;
+          font-family:inherit;
+          color:inherit;
         }
 
-        .prw-seat-local {
+        button.prw-slot {
+          cursor:pointer;
+        }
+
+        div.prw-slot {
+          cursor:default;
+        }
+
+        .prw-slot-local {
           border-color:rgba(212,165,32,0.55);
           background:rgba(212,165,32,0.08);
         }
 
-        .prw-seat-empty {
+        .prw-slot-empty {
           border:1px dashed rgba(255,255,255,0.16);
           background:rgba(255,255,255,0.02);
+          justify-content:center;
+          flex-direction:column;
+          gap:2px;
+          cursor:pointer;
         }
 
-        .prw-seat-avatar {
+        .prw-slot-empty:disabled {
+          cursor:default;
+          opacity:0.7;
+        }
+
+        .prw-slot-plus {
+          font-size:26px;
+          line-height:1;
+          font-weight:900;
+          color:#f4c95b;
+        }
+
+        .prw-slot-empty:disabled .prw-slot-plus {
+          color:rgba(244,201,91,0.35);
+        }
+
+        .prw-slot-name-empty {
+          font-size:11px;
+          font-style:italic;
+          color:rgba(255,255,255,0.34);
+          font-weight:600;
+        }
+
+        .prw-slot-avatar {
+          position:relative;
           width:42px;
           height:42px;
           flex:0 0 42px;
@@ -342,26 +532,48 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           font-size:17px;
           font-weight:900;
           color:#f4c95b;
-          overflow:hidden;
+          overflow:visible;
         }
 
-        .prw-seat-avatar img {
+        .prw-slot-avatar img {
           width:100%;
           height:100%;
+          border-radius:50%;
           object-fit:cover;
         }
 
-        .prw-seat-avatar-empty {
-          background:rgba(255,255,255,0.04);
-          border-color:rgba(255,255,255,0.14);
+        .prw-slot-avatar-bot {
+          background:rgba(148,163,184,0.16);
+          border-color:rgba(148,163,184,0.5);
+          color:#cbd5e1;
         }
 
-        .prw-seat-copy {
+        .prw-leave-badge {
+          position:absolute;
+          top:-6px;
+          right:-6px;
+          width:24px;
+          height:24px;
+          border-radius:50%;
+          background:#ef4444;
+          border:2px solid #000;
+          color:#fff;
+          font-size:15px;
+          font-weight:900;
+          line-height:1;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          cursor:pointer;
+          padding:0;
+        }
+
+        .prw-slot-copy {
           min-width:0;
           flex:1 1 auto;
         }
 
-        .prw-seat-name {
+        .prw-slot-name {
           font-size:14px;
           font-weight:800;
           color:#f8fafc;
@@ -370,13 +582,7 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           white-space:nowrap;
         }
 
-        .prw-seat-name-empty {
-          font-style:italic;
-          color:rgba(255,255,255,0.34);
-          font-weight:600;
-        }
-
-        .prw-seat-sub {
+        .prw-slot-sub {
           margin-top:2px;
           font-size:11px;
           font-weight:700;
@@ -394,74 +600,37 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           font-weight:900;
         }
 
-        .prw-fillbots-row {
-          display:flex;
-          justify-content:center;
+        .prw-bot-badge {
+          color:#94a3b8;
+          font-weight:900;
         }
 
-        .prw-fillbots-button {
+        .prw-bot-row {
+          display:flex;
+        }
+
+        .prw-bot-button {
           width:100%;
-          height:46px;
+          height:40px;
           border-radius:10px;
           border:0;
           background:linear-gradient(180deg, #f4c95b 0%, #c98f13 100%);
           color:#101010;
-          font-size:14px;
+          font-size:13px;
           font-weight:900;
           cursor:pointer;
         }
 
-        .prw-fillbots-button:disabled {
-          opacity:0.55;
+        .prw-bot-button:disabled {
+          opacity:0.5;
           cursor:not-allowed;
+          background:rgba(255,255,255,0.10);
+          color:rgba(255,255,255,0.5);
         }
 
-        .prw-confirm-box {
-          padding:14px;
-          border-radius:12px;
-          background:rgba(0,0,0,0.55);
-          border:1px solid rgba(212,165,32,0.35);
-          display:grid;
-          gap:10px;
-        }
+        /* ─── Popups (join-confirm / leave-confirm / blocked-partner) ────── */
 
-        .prw-confirm-text {
-          font-size:13px;
-          font-weight:700;
-          color:#f8fafc;
-        }
-
-        .prw-confirm-actions {
-          display:flex;
-          gap:10px;
-        }
-
-        .prw-confirm-yes,
-        .prw-confirm-cancel {
-          flex:1;
-          height:40px;
-          border-radius:8px;
-          font-size:13px;
-          font-weight:900;
-          cursor:pointer;
-        }
-
-        .prw-confirm-yes {
-          border:0;
-          background:linear-gradient(180deg, #f4c95b 0%, #c98f13 100%);
-          color:#101010;
-        }
-
-        .prw-confirm-cancel {
-          border:1px solid rgba(255,255,255,0.18);
-          background:transparent;
-          color:rgba(255,255,255,0.75);
-        }
-
-        .prw-confirm-yes.prw-confirm-danger {
-          background:#ef4444;
-          color:#fff;
-        }
+        ${PRIVATE_ROOM_POPUP_STYLES}
 
         .prw-chat-panel {
           border-radius:12px;
@@ -603,9 +772,6 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
             min-height:calc(100dvh - 28px);
           }
 
-          /* Header becomes two stacked rows: title+info, then countdown+leave
-             together on their own full-width row — matches the "countdown
-             badge and Напусни on the next line" requirement. */
           .prw-header {
             flex-direction:column;
             align-items:stretch;
@@ -644,8 +810,7 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
             flex-wrap:nowrap;
           }
 
-          .prw-waiting-actions .prw-wait-in-lobby-button,
-          .prw-waiting-actions .prw-leave-button {
+          .prw-waiting-actions .prw-wait-in-lobby-button {
             flex:1 1 0;
             min-width:0;
             height:36px;
@@ -655,11 +820,6 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
             white-space:nowrap;
           }
 
-          /* Very narrow phones: "Оставащо време" has no room to render fully
-             and would otherwise clip mid-word ("ОСТАВАЩО ВРЕ..."). Swap to a
-             short, complete label instead — the remaining-time value itself
-             (data-private-room-countdown-value) is untouched and always
-             stays fully visible; only the label text changes. */
           @media (max-width: 340px) {
             .prw-header-actions .prw-countdown-label-full {
               display:none;
@@ -673,85 +833,83 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
             }
           }
 
-          /* 2x2 compact grid — fixed row height, no vertical stacking. */
-          .prw-seats {
-            grid-template-columns:1fr 1fr;
-            grid-template-rows:repeat(2, minmax(72px, auto));
-            gap:8px;
+          /* Точка 2: отборите остават side-by-side и на mobile — НЕ се
+             stack-ват вертикално. Само отстъпите/шрифтовете се смаляват,
+             за да се съберат в тесен viewport без хоризонтален overflow. */
+          .prw-teams {
+            gap:6px;
           }
 
-          .prw-seat {
-            padding:8px 10px;
-            gap:8px;
-            min-width:0;
+          .prw-team-header {
+            font-size:11px;
           }
 
-          .prw-seat-avatar {
-            width:34px;
-            height:34px;
-            flex:0 0 34px;
-            font-size:14px;
+          .prw-team-slots {
+            gap:6px;
           }
 
-          .prw-seat-copy {
-            display:flex;
-            flex-direction:column;
-            justify-content:center;
-            gap:2px;
-            min-width:0;
+          .prw-slot {
+            padding:7px 8px;
+            gap:6px;
           }
 
-          .prw-seat-name {
-            font-size:12px;
-            /* Room for an inline host badge without overflowing the card —
-               the name itself still ellipsizes first (see .prw-seat-name). */
-            max-width:100%;
+          .prw-slot-avatar {
+            width:32px;
+            height:32px;
+            flex:0 0 32px;
+            font-size:13px;
           }
 
-          .prw-seat-sub {
+          .prw-leave-badge {
+            width:22px;
+            height:22px;
+            font-size:13px;
+            top:-5px;
+            right:-5px;
+          }
+
+          .prw-slot-plus {
+            font-size:20px;
+          }
+
+          .prw-slot-name {
+            font-size:11px;
+          }
+
+          .prw-slot-sub {
+            font-size:9px;
+          }
+
+          .prw-slot-name-empty {
             font-size:10px;
           }
 
-          .prw-host-badge {
+          .prw-host-badge,
+          .prw-bot-badge {
             display:inline-flex;
             align-items:center;
-            flex:0 0 auto;
-            padding:1px 6px;
+            padding:1px 5px;
             border-radius:999px;
-            background:rgba(167,139,250,0.16);
-            border:1px solid rgba(167,139,250,0.4);
-            font-size:9px;
+            font-size:8px;
             letter-spacing:0.02em;
             white-space:nowrap;
           }
 
-          .prw-seat-name-empty {
+          .prw-host-badge {
+            background:rgba(167,139,250,0.16);
+            border:1px solid rgba(167,139,250,0.4);
+          }
+
+          .prw-bot-badge {
+            background:rgba(148,163,184,0.14);
+            border:1px solid rgba(148,163,184,0.4);
+          }
+
+          .prw-bot-button {
+            height:36px;
             font-size:11px;
-            text-align:center;
           }
 
-          .prw-seat-empty {
-            justify-content:center;
-          }
-
-          .prw-seat-avatar-empty {
-            width:26px;
-            height:26px;
-            flex:0 0 26px;
-          }
-
-          .prw-fillbots-button {
-            height:42px;
-            font-size:13px;
-          }
-
-          /* Chat: the panel grows to fill remaining space instead of a fixed
-             height, so the composer never gets pushed off-screen. The
-             message list is the only scrolling region inside it; the
-             composer is a non-shrinking flex item pinned to the panel's
-             bottom (NOT position:fixed against the viewport), so it can
-             never be covered by the keyboard or browser chrome and never
-             needs a horizontal scroll. */
           .prw-chat-panel {
             flex:1 1 260px;
             min-height:220px;
@@ -788,7 +946,7 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           <div>
             <h1 class="prw-title">Чакалня — частна маса</h1>
             <div class="prw-subtitle">
-              ${params.isLocked ? 'Заключена' : 'Отворена'} · Залог ${formatStake(params.stake)} · ${humanCount}/4 играчи
+              ${params.isLocked ? 'Заключена' : 'Отворена'} · Залог ${formatStake(params.stake)} · ${occupiedCount}/4 заети места
             </div>
           </div>
           <div class="prw-header-actions">
@@ -798,52 +956,27 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
 
         <div class="prw-waiting-actions">
           <button type="button" data-private-waiting-wait-in-lobby-button="1" class="prw-wait-in-lobby-button">Изчакай в лоби</button>
-          <button type="button" data-private-waiting-leave-button="1" class="prw-leave-button">Напусни</button>
+          ${params.isLocked && isMember && occupiedCount < 4
+            ? `<button type="button" data-private-room-invite-open="1" class="prw-wait-in-lobby-button">+ Покани приятели</button>`
+            : ''}
         </div>
 
         ${params.infoText ? `<div class="prw-info-banner">${escapeHtml(params.infoText)}</div>` : ''}
 
-        ${params.leaveConfirmOpen ? `
-          <div class="prw-confirm-box">
-            <div class="prw-confirm-text">Ако напуснеш чакалнята, мястото ти ще бъде освободено. Сигурен ли си?</div>
-            <div class="prw-confirm-actions">
-              <button type="button" data-private-waiting-leave-confirm-yes="1" class="prw-confirm-yes prw-confirm-danger">Да, напусни</button>
-              <button type="button" data-private-waiting-leave-confirm-cancel="1" class="prw-confirm-cancel">Откажи</button>
-            </div>
-          </div>
-        ` : ''}
-
-        <div class="prw-seats">
-          ${seats.map((seat) => renderSeatCard(seat, params.localProfileId)).join('')}
+        <div class="prw-teams">
+          ${renderTeamColumn(params.slots, 'A', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam)}
+          <div class="prw-team-divider" aria-hidden="true"></div>
+          ${renderTeamColumn(params.slots, 'B', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam)}
         </div>
-
-        ${params.isHost ? `
-          <div class="prw-fillbots-row">
-            <button
-              type="button"
-              data-private-waiting-fillbots-button="1"
-              class="prw-fillbots-button"
-              ${params.canFillWithBots && !params.fillBotsLoading ? '' : 'disabled'}
-            >${params.fillBotsLoading ? 'Стартиране...' : 'Запълни с ботове'}</button>
-          </div>
-        ` : ''}
-
-        ${params.fillBotsConfirmOpen ? `
-          <div class="prw-confirm-box">
-            <div class="prw-confirm-text">Свободните места ще бъдат запълнени с ботове и играта ще започне. Продължи?</div>
-            <div class="prw-confirm-actions">
-              <button type="button" data-private-waiting-fillbots-confirm-yes="1" class="prw-confirm-yes">Да, продължи</button>
-              <button type="button" data-private-waiting-fillbots-confirm-cancel="1" class="prw-confirm-cancel">Откажи</button>
-            </div>
-          </div>
-        ` : ''}
 
         <div class="prw-chat-panel">
           <div class="prw-chat-header">Чат на чакалнята</div>
           <div data-private-waiting-chat-scroll="1" class="prw-chat-scroll">
-            ${params.chatMessages.length === 0
-              ? '<div class="prw-chat-empty">Все още няма съобщения.<br>Напиши нещо на другите играчи.</div>'
-              : params.chatMessages.map((m) => renderChatMessage(m, params.localProfileId)).join('')}
+            ${!isMember
+              ? '<div class="prw-chat-empty">Чатът е достъпен, след като заемете място на масата.</div>'
+              : params.chatMessages.length === 0
+                ? '<div class="prw-chat-empty">Все още няма съобщения.<br>Напиши нещо на другите играчи.</div>'
+                : params.chatMessages.map((m) => renderChatMessage(m, params.localProfileId)).join('')}
           </div>
           ${params.chatErrorText ? `<div class="prw-chat-error">${escapeHtml(params.chatErrorText)}</div>` : ''}
           <form data-private-waiting-chat-form="1" class="prw-chat-form">
@@ -855,12 +988,35 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
               autocomplete="off"
               placeholder="Напиши съобщение..."
               value="${escapeHtml(params.chatDraft)}"
-              ${params.chatSending ? 'disabled' : ''}
+              ${params.chatSending || !isMember ? 'disabled' : ''}
             >
-            <button type="submit" class="prw-chat-send" ${params.chatSending ? 'disabled' : ''}>Изпрати</button>
+            <button type="submit" class="prw-chat-send" ${params.chatSending || !isMember ? 'disabled' : ''}>Изпрати</button>
           </form>
         </div>
       </div>
+
+      ${renderPrivateRoomJoinConfirmPopup(params.joinSlotPopup)}
+
+      ${renderPrivateRoomInviteFriendsPopup({
+        isOpen: params.inviteFriendsPopupOpen,
+        freeSeats: 4 - occupiedCount,
+        friends: params.inviteFriends,
+      })}
+
+      ${params.leaveConfirmOpen ? `
+        <div class="prw-popup-backdrop" data-private-room-leave-popup-backdrop="1">
+          <div class="prw-popup-box">
+            <div class="prw-popup-title">Напускане на масата</div>
+            <div class="prw-popup-text">Сигурни ли сте, че искате да освободите мястото си в тази частна маса?</div>
+            <div class="prw-popup-actions">
+              <button type="button" data-private-room-leave-popup-confirm="1" class="prw-confirm-yes prw-confirm-danger">Напусни</button>
+              <button type="button" data-private-room-leave-popup-cancel="1" class="prw-confirm-cancel">Отказ</button>
+            </div>
+          </div>
+        </div>
+      ` : ''}
+
+      ${renderPrivateRoomBlockedPopup(params.blockedPopupText)}
     </section>
   `
 }

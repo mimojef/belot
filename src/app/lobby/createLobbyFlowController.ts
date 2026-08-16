@@ -16,6 +16,7 @@ import {
   formatPrivateRoomCountdown,
   getPrivateRoomCountdownState,
 } from './renderPrivateRoomWaitingScreen'
+import type { PrivateRoomInviteEligibleFriend } from './privateRoomPopupMarkup'
 import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown } from './renderTournamentsScreen'
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
@@ -67,6 +68,7 @@ import type {
   PrivateRoomSnapshot,
   RoomSeatSnapshot,
   ServerMessage,
+  Team,
   GuestContactMessageListItem,
   SupportMessageSnapshot,
   SupportConversationSnapshot,
@@ -480,12 +482,13 @@ export type CreateLobbyFlowControllerOptions = {
   onPrivateRoomsOpen?: () => void
   onPrivateRoomsClose?: () => void
   onPrivateRoomCreate?: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30) => void
-  onPrivateRoomJoin?: (privateRoomId: string) => void
+  onPrivateRoomJoinSlot?: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
   onPrivateRoomLeave?: () => void
   onPrivateRoomInvite?: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
   onCancelPrivateRoomInvite?: (inviteId: string) => void
   onPrivateRoomInviteRespond?: (inviteId: string, accept: boolean) => void
-  onPrivateRoomFillWithBots?: () => void
+  onPrivateRoomAddBot?: (team: Team) => void
+  onPrivateRoomRemoveBot?: (team: Team) => void
   onPrivateRoomChatSubscribe?: (privateRoomId: string) => void
   onPrivateRoomChatUnsubscribe?: (privateRoomId: string) => void
   onPrivateRoomChatSend?: (privateRoomId: string, body: string, requestId?: string) => void
@@ -1139,6 +1142,14 @@ type InternalLobbyFlowState = {
   chatArchivedConversations: ChatConversationSnapshot[]
   chatArchivedLoading: boolean
   activeChatFriendshipId: string | null
+  // Monotonic race guard за entry points, които правят pre-flight мрежов
+  // hop ПРЕДИ да извикат openChatConversation (startPikaSupportChatAndOpen,
+  // showTopicsPersonalChat, openChatWithFriend) — огледално на
+  // topicMessagesRequestGeneration. Без него, по-бавен по-РАНО кликнат flow
+  // може да resolve-не СЛЕД по-бърз по-КЪСНО кликнат flow и мълчаливо да
+  // презапише activeChatFriendshipId с грешния разговор точно преди/по
+  // време на съставяне на съобщение (production PIKABG X→Y cross-delivery).
+  activeChatRequestGeneration: number
   chatMessages: ChatMessageSnapshot[]
   chatMessagesFriendshipId: string | null
   chatLoading: boolean
@@ -1210,9 +1221,15 @@ type InternalLobbyFlowState = {
   privateRoomWaitingChatSending: boolean
   privateRoomWaitingChatPendingRequestId: string | null
   privateRoomWaitingChatErrorText: string | null
-  privateRoomWaitingLeaveConfirmOpen: boolean
-  privateRoomWaitingFillBotsConfirmOpen: boolean
-  privateRoomWaitingFillBotsLoading: boolean
+  // Стаята, която текущо се преглежда — сетва се при клик на ред в списъка,
+  // при invite-accept-confirmed, и при успешен join/reconnect-restore (за да
+  // може leave→preview flow-ът винаги да знае коя стая да показва). Docs:
+  // виж "Leave поведение (точка 6)" в плана за частните маси.
+  previewedPrivateRoomId: string | null
+  privateRoomJoinSlotPopup: { privateRoomId: string; team: Team; slotIndex: 0 | 1 } | null
+  privateRoomLeaveSlotConfirmOpen: boolean
+  privateRoomBlockedPopupText: string | null
+  privateRoomBotActionLoadingTeam: Team | null
   // true за периода между "потребителят натисна create/join/приеми покана"
   // и сървърният отговор — вижте private_room_updated handler-а: force-
   // навигацията към чакалнята трябва да се случи само за ТОЗИ явен flow,
@@ -1220,7 +1237,19 @@ type InternalLobbyFlowState = {
   // resync след reload, докато потребителят е избрал "Изчакай в лоби").
   privateRoomJoinInFlight: boolean
   privateRoomConflictPromptOpen: boolean
+  // 'list-join' — потребителят натисна конкретен "+" на ДРУГА маса, докато
+  // вече е седнал/има запазено място в своя собствена (openPrivateRoomListSlotJoinPopup)
+  // — показва bespoke UX ("Вече сте седнал на друга маса" / "Виж масата").
+  // 'generic' — трите други конфликтни точки (matchmaking search, create,
+  // invite-accept) — непроменен споделен текст ("Вече чакаш в частна маса.").
+  privateRoomConflictPromptVariant: 'generic' | 'list-join'
   inviteFriendsPopupOpen: boolean
+  // Профили, поканени в ТЕКУЩАТА стая по време на тази сесия — client-side
+  // optimistic tracking (сървърът не излага pendingInvites в
+  // PrivateRoomSnapshot), само за "Изпратена" UI индикация. Нулира се при
+  // всяка смяна на стаята (виж isNewRoom/leave/expired/closed handler-ите).
+  // Сървърът си остава единствен authority срещу реален duplicate spam.
+  privateRoomInvitedProfileIds: Set<string>
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -1605,6 +1634,7 @@ function createInitialState(): InternalLobbyFlowState {
     chatArchivedConversations: [],
     chatArchivedLoading: false,
     activeChatFriendshipId: null,
+    activeChatRequestGeneration: 0,
     chatMessages: [],
     chatMessagesFriendshipId: null,
     chatLoading: false,
@@ -1654,12 +1684,16 @@ function createInitialState(): InternalLobbyFlowState {
     privateRoomWaitingChatSending: false,
     privateRoomWaitingChatPendingRequestId: null,
     privateRoomWaitingChatErrorText: null,
-    privateRoomWaitingLeaveConfirmOpen: false,
-    privateRoomWaitingFillBotsConfirmOpen: false,
-    privateRoomWaitingFillBotsLoading: false,
+    previewedPrivateRoomId: null,
+    privateRoomJoinSlotPopup: null,
+    privateRoomLeaveSlotConfirmOpen: false,
+    privateRoomBlockedPopupText: null,
+    privateRoomBotActionLoadingTeam: null,
     privateRoomJoinInFlight: false,
     privateRoomConflictPromptOpen: false,
+    privateRoomConflictPromptVariant: 'generic',
     inviteFriendsPopupOpen: false,
+    privateRoomInvitedProfileIds: new Set(),
     blockedPlayersPopupOpen: false,
     blockedPlayers: null,
     blockedPlayersLoading: false,
@@ -3198,7 +3232,11 @@ export function createLobbyFlowController(
       privateRoomInviteQueue: state.privateRoomInviteQueue,
       privateRoomInfoText: state.privateRoomInfoText,
       privateRoomConflictPromptOpen: state.privateRoomConflictPromptOpen,
+      privateRoomConflictPromptVariant: state.privateRoomConflictPromptVariant,
+      privateRoomJoinSlotPopup: state.privateRoomJoinSlotPopup,
+      privateRoomBlockedPopupText: state.privateRoomBlockedPopupText,
       inviteFriendsPopupOpen: state.inviteFriendsPopupOpen,
+      inviteFriends: resolveInviteEligibleFriends(),
       blockedPlayersPopupOpen: state.blockedPlayersPopupOpen,
       blockedPlayers: state.blockedPlayers,
       blockedPlayersLoading: state.blockedPlayersLoading,
@@ -3417,8 +3455,7 @@ export function createLobbyFlowController(
       onSearchClick: () => {
         options.tryUnlockDocumentAudio?.()
         if (state.myPrivateRoom !== null) {
-          state.privateRoomConflictPromptOpen = true
-          render()
+          openPrivateRoomConflictPrompt()
           return
         }
         startMatchmaking(state.selectedStake, state.displayName.trim() || undefined)
@@ -4354,11 +4391,14 @@ export function createLobbyFlowController(
       onPrivateRoomMemberClick: (profileId, displayName) => {
         void openProtectedProfileById(profileId, displayName, 'other')
       },
-      onPrivateRoomLeave: () => {
-        state.myPrivateRoom = null
-        options.onPrivateRoomLeave?.()
+      onPrivateRoomListSlotJoinOpen: openPrivateRoomListSlotJoinPopup,
+      onPrivateRoomJoinSlotPopupConfirm: confirmPrivateRoomJoinSlotPopup,
+      onPrivateRoomJoinSlotPopupCancel: cancelPrivateRoomJoinSlotPopup,
+      onPrivateRoomBlockedPopupClose: () => {
+        state.privateRoomBlockedPopupText = null
         render()
       },
+      onPrivateRoomListEnter: handlePrivateRoomListEnter,
       onPrivateRoomInvite: (toProfiles) => {
         state.privateRoomInfoText = null
         options.onPrivateRoomInvite?.(toProfiles)
@@ -4376,6 +4416,18 @@ export function createLobbyFlowController(
         state.inviteFriendsPopupOpen = false
         render()
       },
+      // Per-friend "Покани" клик — изпраща еднолична покана веднага и
+      // маркира профила optimistically като "sent" (бутонът им става
+      // disabled "Изпратена"), БЕЗ да затваря popup-а — потребителят може
+      // да покани няколко приятели последователно. Сървърът си остава
+      // финалният authority срещу реален duplicate spam (inviteFriend
+      // отхвърля повторна покана към същия профил за същата стая).
+      onPrivateRoomInviteSend: (profileId, displayName) => {
+        state.privateRoomInvitedProfileIds.add(profileId)
+        state.privateRoomInfoText = null
+        options.onPrivateRoomInvite?.([{ profileId, displayName }])
+        render()
+      },
       onPrivateRoomInviteAccept: (inviteId) => {
         if (state.myPrivateRoom !== null) {
           openPrivateRoomConflictPrompt()
@@ -4383,7 +4435,6 @@ export function createLobbyFlowController(
         }
         state.privateRoomInvite = state.privateRoomInviteQueue[0] ?? null
         state.privateRoomInviteQueue = state.privateRoomInviteQueue.slice(1)
-        state.privateRoomJoinInFlight = true
         options.onPrivateRoomInviteRespond?.(inviteId, true)
         render()
       },
@@ -9072,6 +9123,12 @@ export function createLobbyFlowController(
       return
     }
 
+    // Прочетено ПРЕДИ мрежовия hop по-долу — ако друг chat-open flow (нов
+    // PIKABG start, чат ред, notification "Виж") сработи междувременно,
+    // openChatConversation ще е bump-нал generation-а и проверката след await-а
+    // ще хване тази заявка като остаряла (виж activeChatRequestGeneration).
+    const requestGeneration = state.activeChatRequestGeneration
+
     const result = await options.onPikaSupportChatStart(recipientProfileId)
 
     if (!result.ok) {
@@ -9080,11 +9137,19 @@ export function createLobbyFlowController(
       return
     }
 
+    if (state.activeChatRequestGeneration !== requestGeneration) {
+      // Друг разговор вече е станал активен, докато чакахме create-or-find
+      // round trip-а — тази заявка е остаряла, НЕ презаписвай активния чат
+      // с нея (production race guard, виж коментара при state полето).
+      return
+    }
+
     state.profilePopupOpen = false
     state.profilePopupProfile = null
     syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
 
-    void showChatPanel().then(() => {
+    void showChatPanel(true).then(() => {
+      if (state.activeChatRequestGeneration !== requestGeneration) return
       void openChatConversation(result.friendshipId)
     })
   }
@@ -9339,7 +9404,11 @@ export function createLobbyFlowController(
   }
 
   function isChatConversationValidForCurrentSurface(conversation: ChatConversationSnapshot): boolean {
-    if (state.currentScreen === 'chat') return conversation.kind === 'friend'
+    // 'pika_support' е валиден и на 'chat' екрана (виж renderChatPanel filter
+    // fix) — без това, reconcileActiveChatConversation() би изчистил активния
+    // pika_support разговор при всяко loadChatConversations() (напр. фоново
+    // презареждане), докато потребителят реално го гледа.
+    if (state.currentScreen === 'chat') return conversation.kind === 'friend' || conversation.kind === 'pika_support'
     if (state.currentScreen === 'topics' && state.topicsMode === 'personal') return conversation.kind === 'vip_dm'
     return true
   }
@@ -9405,12 +9474,21 @@ export function createLobbyFlowController(
     state.profilePopupCanEdit = true
     unsubscribeFromCurrentTopicMessages()
 
+    // Прочетено ПРЕДИ loadChatConversations по-долу — race guard срещу друг
+    // по-нов chat-open flow (напр. PIKABG start или друг ред в списъка),
+    // който сработва междувременно, виж activeChatRequestGeneration.
+    const requestGeneration = state.activeChatRequestGeneration
+
     state.chatLoading = true
     render()
 
     const loaded = await loadChatConversations()
 
     if (state.currentScreen !== 'topics' || state.topicsMode !== 'personal') {
+      return
+    }
+
+    if (state.activeChatRequestGeneration !== requestGeneration) {
       return
     }
 
@@ -9481,7 +9559,16 @@ export function createLobbyFlowController(
     render()
   }
 
-  async function showChatPanel(): Promise<void> {
+  // skipAutoSelectFallback: подадено от caller-и, които ВЕЧЕ имат конкретна
+  // цел, готова да я приложат веднага след showChatPanel() (startPikaSupportChatAndOpen,
+  // openChatWithFriend) — без него, auto-select-fallback-ът по-долу временно
+  // bind-ва разговора към "първия приятел" (нищо общо с реалната цел),
+  // самò той извиква openChatConversation() и по този начин bump-ва
+  // activeChatRequestGeneration — карайки race guard-а на caller-а погрешно
+  // да разпознае СОБСТВЕНИЯ СИ throwaway междинен избор като "друг, по-нов
+  // flow ме е superseded-нал" и да изостави реалната си, вярна цел
+  // (production regression, открит от checkPikaSupportChatRouting.ts [A3]).
+  async function showChatPanel(skipAutoSelectFallback = false): Promise<void> {
     leaveAdminServerIfActive()
     state.currentScreen = 'chat'
     state.isSearching = false
@@ -9519,16 +9606,18 @@ export function createLobbyFlowController(
       return
     }
 
-    const friendConversations = getFriendChatConversations()
-    const firstConversation = friendConversations[0] ?? null
-    const activeFriendConversation = state.activeChatFriendshipId !== null
-      ? friendConversations.find((conversation) => conversation.friendshipId === state.activeChatFriendshipId) ?? null
-      : null
+    if (!skipAutoSelectFallback) {
+      const friendConversations = getFriendChatConversations()
+      const firstConversation = friendConversations[0] ?? null
+      const activeFriendConversation = state.activeChatFriendshipId !== null
+        ? friendConversations.find((conversation) => conversation.friendshipId === state.activeChatFriendshipId) ?? null
+        : null
 
-    if (firstConversation !== null && activeFriendConversation === null) {
-      state.activeChatFriendshipId = firstConversation.friendshipId
-      await openChatConversation(firstConversation.friendshipId, false)
-      return
+      if (firstConversation !== null && activeFriendConversation === null) {
+        state.activeChatFriendshipId = firstConversation.friendshipId
+        await openChatConversation(firstConversation.friendshipId, false)
+        return
+      }
     }
 
     render()
@@ -9668,6 +9757,12 @@ export function createLobbyFlowController(
       return
     }
 
+    // Bump-ваме generation-а тук, ЗАЩОТО тази функция е единственото място,
+    // което реално пише activeChatFriendshipId — всеки pre-flight caller
+    // (startPikaSupportChatAndOpen/showTopicsPersonalChat/openChatWithFriend)
+    // прочита стойността ПРЕДИ собствения си мрежов hop и я сверява точно
+    // преди да стигне дотук, за да не презапише по-нов разговор с остаряла заявка.
+    state.activeChatRequestGeneration += 1
     state.activeChatFriendshipId = friendshipId
     if (state.currentScreen === 'topics' && state.topicsMode === 'personal') {
       state.topicsPersonalView = 'conversation'
@@ -10621,7 +10716,10 @@ export function createLobbyFlowController(
   // фиксиран екран, защото местната чакалня може да смени room id-то си
   // (напр. re-join в друга маса без пълен logout).
   function reconcilePrivateRoomWaitingChatSubscription(): void {
-    const targetRoomId = state.currentScreen === 'private-room-waiting' ? (state.myPrivateRoom?.id ?? null) : null
+    // Previewer-ите (не са зели слот в тази стая) никога не се абонират за
+    // чата на чакалнята — само реални членове.
+    const isMember = state.currentScreen === 'private-room-waiting' && state.myPrivateRoom !== null
+    const targetRoomId = isMember ? state.myPrivateRoom!.id : null
 
     if (targetRoomId === state.privateRoomWaitingChatSubscribedRoomId) {
       return
@@ -10638,23 +10736,40 @@ export function createLobbyFlowController(
     }
   }
 
+  // Стаята и ролята на текущия зрител: 'member' ако вече е зает слот
+  // (state.myPrivateRoom), иначе 'previewer' на стаята, посочена от
+  // previewedPrivateRoomId, ако тя още съществува в живия private_rooms_list
+  // поток (state.privateRooms се push-ва на всяка сървърна мутация,
+  // независимо дали зрителят е член — currentRoomId остава null докато
+  // играта не старира).
+  function resolvePrivateRoomWaitingRoomView(): { room: PrivateRoomSnapshot; viewerRole: 'member' | 'previewer' } | null {
+    if (state.myPrivateRoom !== null) {
+      return { room: state.myPrivateRoom, viewerRole: 'member' }
+    }
+    const previewed = state.previewedPrivateRoomId !== null
+      ? state.privateRooms.find((r) => r.id === state.previewedPrivateRoomId) ?? null
+      : null
+    if (previewed !== null) {
+      return { room: previewed, viewerRole: 'previewer' }
+    }
+    return null
+  }
+
   function renderPrivateRoomWaitingRoom(): void {
     reconcilePrivateRoomWaitingChatSubscription()
 
-    const room = state.myPrivateRoom
+    const resolved = resolvePrivateRoomWaitingRoomView()
 
-    if (room === null) {
+    if (resolved === null) {
       state.currentScreen = 'private-rooms'
       renderLobby()
       return
     }
 
+    const { room, viewerRole } = resolved
+
     const authSession = options.getAuthSession?.() ?? null
     const localProfileId = authSession?.profile.profileId ?? null
-    const localMember = room.members.find((m) => m.profileId !== null && m.profileId === localProfileId) ?? null
-    const isHost = localMember?.isHost ?? false
-    const humanCount = room.members.length
-    const canFillWithBots = isHost && humanCount >= 2 && humanCount <= 3
 
     const previousInput = options.root.querySelector<HTMLInputElement>('[data-private-waiting-chat-input="1"]')
     const wasInputFocused = previousInput !== null && document.activeElement === previousInput
@@ -10671,13 +10786,15 @@ export function createLobbyFlowController(
     options.root.innerHTML = renderPrivateRoomWaitingScreen({
       isLocked: room.kind === 'locked',
       stake: room.stake,
-      members: room.members,
+      slots: room.slots,
       localProfileId,
-      isHost,
-      canFillWithBots,
-      fillBotsLoading: state.privateRoomWaitingFillBotsLoading,
-      fillBotsConfirmOpen: state.privateRoomWaitingFillBotsConfirmOpen,
-      leaveConfirmOpen: state.privateRoomWaitingLeaveConfirmOpen,
+      viewerRole,
+      joinSlotPopup: state.privateRoomJoinSlotPopup,
+      leaveConfirmOpen: state.privateRoomLeaveSlotConfirmOpen,
+      blockedPopupText: state.privateRoomBlockedPopupText,
+      botActionLoadingTeam: state.privateRoomBotActionLoadingTeam,
+      inviteFriendsPopupOpen: state.inviteFriendsPopupOpen,
+      inviteFriends: resolveInviteEligibleFriends(),
       chatMessages: state.privateRoomWaitingChatMessages,
       chatDraft: state.privateRoomWaitingChatDraft,
       chatSending: state.privateRoomWaitingChatSending,
@@ -10700,46 +10817,143 @@ export function createLobbyFlowController(
         render()
       })
 
-    options.root.querySelector<HTMLButtonElement>('[data-private-waiting-leave-button="1"]')
+    options.root.querySelector<HTMLButtonElement>('[data-private-room-invite-open="1"]')
       ?.addEventListener('click', () => {
-        state.privateRoomWaitingLeaveConfirmOpen = true
+        state.inviteFriendsPopupOpen = true
+        state.friendships = null
+        render()
+        void ensureFriendshipsLoaded()
+      })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-room-invite-close="1"]')
+      ?.addEventListener('click', () => {
+        state.inviteFriendsPopupOpen = false
         render()
       })
 
-    options.root.querySelector<HTMLButtonElement>('[data-private-waiting-leave-confirm-yes="1"]')
+    options.root.querySelector<HTMLElement>('[data-private-room-invite-backdrop="1"]')
+      ?.addEventListener('click', (event) => {
+        if (event.target === event.currentTarget) {
+          state.inviteFriendsPopupOpen = false
+          render()
+        }
+      })
+
+    options.root.querySelectorAll<HTMLButtonElement>('[data-private-room-invite-send]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const raw = btn.getAttribute('data-private-room-invite-send')
+        if (!raw) return
+        const [profileId, ...nameParts] = raw.split(':')
+        const displayName = nameParts.join(':')
+        if (!profileId || !displayName) return
+        state.privateRoomInvitedProfileIds.add(profileId)
+        state.privateRoomInfoText = null
+        options.onPrivateRoomInvite?.([{ profileId, displayName }])
+        render()
+      })
+    })
+
+    // "+" клик (само previewer-и получават enabled бутон — виж
+    // renderSlotCard's disabled атрибут — но пазим guard и тук defensively).
+    options.root.querySelectorAll<HTMLButtonElement>('[data-private-room-slot-join]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (viewerRole !== 'previewer') return
+        const raw = btn.getAttribute('data-private-room-slot-join')
+        if (raw === null) return
+        const [teamRaw, slotIndexRaw] = raw.split(':')
+        if (teamRaw !== 'A' && teamRaw !== 'B') return
+        const slotIndex = slotIndexRaw === '0' ? 0 : slotIndexRaw === '1' ? 1 : null
+        if (slotIndex === null) return
+        state.privateRoomJoinSlotPopup = { privateRoomId: room.id, team: teamRaw, slotIndex }
+        render()
+      })
+    })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-room-join-popup-confirm="1"]')
+      ?.addEventListener('click', () => confirmPrivateRoomJoinSlotPopup())
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-room-join-popup-cancel="1"]')
+      ?.addEventListener('click', () => cancelPrivateRoomJoinSlotPopup())
+
+    options.root.querySelector<HTMLElement>('[data-private-room-join-popup-backdrop="1"]')
+      ?.addEventListener('click', (event) => {
+        if (event.target === event.currentTarget) cancelPrivateRoomJoinSlotPopup()
+      })
+
+    // Собствен червен "−" — stopPropagation за да не отваря едновременно
+    // profile popup на същата карта (собствената карта не е wrap-ната в
+    // data-private-room-member button, но пазим stopPropagation defensively).
+    options.root.querySelector<HTMLButtonElement>('[data-private-room-leave-slot="1"]')
+      ?.addEventListener('click', (event) => {
+        event.stopPropagation()
+        state.privateRoomLeaveSlotConfirmOpen = true
+        render()
+      })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-room-leave-popup-confirm="1"]')
       ?.addEventListener('click', () => {
-        state.privateRoomWaitingLeaveConfirmOpen = false
+        state.privateRoomLeaveSlotConfirmOpen = false
         options.onPrivateRoomLeave?.()
         render()
       })
 
-    options.root.querySelector<HTMLButtonElement>('[data-private-waiting-leave-confirm-cancel="1"]')
+    options.root.querySelector<HTMLButtonElement>('[data-private-room-leave-popup-cancel="1"]')
       ?.addEventListener('click', () => {
-        state.privateRoomWaitingLeaveConfirmOpen = false
+        state.privateRoomLeaveSlotConfirmOpen = false
         render()
       })
 
-    options.root.querySelector<HTMLButtonElement>('[data-private-waiting-fillbots-button="1"]')
+    options.root.querySelector<HTMLElement>('[data-private-room-leave-popup-backdrop="1"]')
+      ?.addEventListener('click', (event) => {
+        if (event.target === event.currentTarget) {
+          state.privateRoomLeaveSlotConfirmOpen = false
+          render()
+        }
+      })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-room-blocked-popup-close="1"]')
       ?.addEventListener('click', () => {
-        if (!canFillWithBots || state.privateRoomWaitingFillBotsLoading) return
-        state.privateRoomWaitingFillBotsConfirmOpen = true
+        state.privateRoomBlockedPopupText = null
         render()
       })
 
-    options.root.querySelector<HTMLButtonElement>('[data-private-waiting-fillbots-confirm-yes="1"]')
-      ?.addEventListener('click', () => {
-        if (state.privateRoomWaitingFillBotsLoading) return
-        state.privateRoomWaitingFillBotsConfirmOpen = false
-        state.privateRoomWaitingFillBotsLoading = true
-        options.onPrivateRoomFillWithBots?.()
-        render()
+    options.root.querySelector<HTMLElement>('[data-private-room-blocked-popup-backdrop="1"]')
+      ?.addEventListener('click', (event) => {
+        if (event.target === event.currentTarget) {
+          state.privateRoomBlockedPopupText = null
+          render()
+        }
       })
 
-    options.root.querySelector<HTMLButtonElement>('[data-private-waiting-fillbots-confirm-cancel="1"]')
-      ?.addEventListener('click', () => {
-        state.privateRoomWaitingFillBotsConfirmOpen = false
+    // Bot бутони по отбор — enabled/disabled state вече е решен от render
+    // функцията (computeTeamBotControlState); тук просто действаме, ако
+    // бутонът не е disabled.
+    options.root.querySelectorAll<HTMLButtonElement>('[data-private-room-bot-team]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (btn.disabled || state.privateRoomBotActionLoadingTeam !== null) return
+        const team = btn.getAttribute('data-private-room-bot-team')
+        const mode = btn.getAttribute('data-private-room-bot-mode')
+        if (team !== 'A' && team !== 'B') return
+        state.privateRoomBotActionLoadingTeam = team
+        if (mode === 'remove') {
+          options.onPrivateRoomRemoveBot?.(team)
+        } else {
+          options.onPrivateRoomAddBot?.(team)
+        }
         render()
       })
+    })
+
+    // Клик върху зает слот с реален чужд играч — отваря съществуващия
+    // profile popup flow (не влиза в масата, не е "+").
+    options.root.querySelectorAll<HTMLButtonElement>('[data-private-room-member]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const profileId = btn.getAttribute('data-private-room-member')
+        const displayName = btn.getAttribute('data-private-room-member-name')
+        if (profileId === null || profileId === '') return
+        void openProtectedProfileById(profileId, displayName, 'other')
+      })
+    })
 
     const chatForm = options.root.querySelector<HTMLFormElement>('[data-private-waiting-chat-form="1"]')
     const chatInput = options.root.querySelector<HTMLInputElement>('[data-private-waiting-chat-input="1"]')
@@ -11769,13 +11983,23 @@ export function createLobbyFlowController(
         // The waiting room bypasses normal lobby chrome (same as
         // matchmaking-room), so it never displays the generic
         // state.errorText toast — without this branch, a server-side
-        // rejection (e.g. a race-lost "Запълни с ботове" attempt) would be
-        // silently swallowed instead of shown in the waiting room's own
-        // info banner.
+        // rejection (e.g. a race-lost bot-add attempt) would be silently
+        // swallowed instead of shown in the waiting room's own info banner.
+        // privateRoomJoinSlotPopup is cleared on EITHER screen — a rejected
+        // join (e.g. private_room_slot_taken race) must not leave a stale
+        // confirm popup open, whether it was triggered from the list's
+        // direct "+" or the waiting room's previewer "+".
         if (state.currentScreen === 'private-room-waiting') {
-          state.privateRoomWaitingFillBotsLoading = false
+          state.privateRoomBotActionLoadingTeam = null
         }
-        state.privateRoomInfoText = message.message
+        state.privateRoomJoinSlotPopup = null
+        if (message.code === 'private_room_partner_blocked') {
+          // Отделен X-only popup вместо generic info banner — виж
+          // спецификацията за "Не можете да влезете в този отбор".
+          state.privateRoomBlockedPopupText = message.message
+        } else {
+          state.privateRoomInfoText = message.message
+        }
       } else {
         state.errorText = message.message
       }
@@ -12485,13 +12709,21 @@ export function createLobbyFlowController(
       // off whatever screen they're currently on.
       const shouldForceWaitingScreen = isNewRoom && state.privateRoomJoinInFlight
       state.myPrivateRoom = message.room
+      // Пази коя стая да покаже leave→preview fallback-ът (виж
+      // private_room_left по-долу) — сетва се при всяко установяване на
+      // членство, независимо от начина (list-row preview join,
+      // invite-accept-confirmed navigation, или reconnect-restore).
+      state.previewedPrivateRoomId = message.room.id
       if (isNewRoom) {
         state.privateRoomJoinInFlight = false
         state.privateRoomWaitingChatMessages = []
         state.privateRoomWaitingChatSubscribedRoomId = null
         state.privateRoomWaitingChatErrorText = null
-        state.privateRoomWaitingFillBotsConfirmOpen = false
-        state.privateRoomWaitingLeaveConfirmOpen = false
+        state.privateRoomJoinSlotPopup = null
+        state.privateRoomLeaveSlotConfirmOpen = false
+        state.privateRoomBlockedPopupText = null
+        state.privateRoomBotActionLoadingTeam = null
+        state.privateRoomInvitedProfileIds = new Set()
         // Avoid carrying a stale banner (e.g. "Домакинът затвори масата.")
         // from a previous room into a freshly (re)joined one.
         state.privateRoomInfoText = null
@@ -12506,19 +12738,54 @@ export function createLobbyFlowController(
     if (message.type === 'private_room_left') {
       leavePrivateRoomWaitingScreen()
       state.myPrivateRoom = null
-      state.currentScreen = 'private-rooms'
+      state.privateRoomInvitedProfileIds = new Set()
+      // Точка 6: ако стаята още съществува (свободни слотове от други хора),
+      // оставаме на same-screen като previewer — НЕ редиректваме към
+      // списъка. state.privateRooms вече е актуален по това време (сървърът
+      // праща private_rooms_list ПРЕДИ private_room_left в рамките на
+      // синхронния leave_private_room handler).
+      const previewedRoomStillExists = state.previewedPrivateRoomId !== null
+        && state.privateRooms.some((r) => r.id === state.previewedPrivateRoomId)
+      if (!previewedRoomStillExists) {
+        state.previewedPrivateRoomId = null
+        state.currentScreen = 'private-rooms'
+      }
       render()
       return true
     }
 
     if (message.type === 'private_room_expired') {
-      if (state.myPrivateRoom?.id === message.privateRoomId) {
+      const isMineOrPreviewed = state.myPrivateRoom?.id === message.privateRoomId
+        || state.previewedPrivateRoomId === message.privateRoomId
+      if (isMineOrPreviewed) {
         leavePrivateRoomWaitingScreen()
         state.myPrivateRoom = null
-        state.currentScreen = 'private-rooms'
-        state.privateRoomInfoText = 'Частната маса беше затворена, защото времето за изчакване изтече.'
+        state.previewedPrivateRoomId = null
+        state.privateRoomJoinSlotPopup = null
+        state.privateRoomLeaveSlotConfirmOpen = false
+        state.privateRoomBlockedPopupText = null
+        state.privateRoomBotActionLoadingTeam = null
+        state.privateRoomInvitedProfileIds = new Set()
+        // Отива в ОСНОВНОТО Lobby, не в списъка "Частни маси" — ако
+        // потребителят вече е бил в Lobby (напр. през "Изчакай в лоби"),
+        // това просто презаписва currentScreen със същата стойност (no-op
+        // navigation-wise), точно каквото изисква сценарият "не го
+        // навигирай никъде". private_rooms_list/badge вече идват от
+        // canonical server broadcast-а — не се пипат тук.
+        state.currentScreen = 'lobby'
+        state.privateRoomInfoText = 'Времето за чакане изтече. Частната маса беше затворена.'
         render()
       }
+      return true
+    }
+
+    if (message.type === 'private_room_invite_accept_confirmed') {
+      // Приемане на покана вече не сяда автоматично — само дава room-lifetime
+      // authorization. Навигираме към preview на стаята; реалният seat claim
+      // минава през същия join-slot popup flow, както при отворените маси.
+      state.previewedPrivateRoomId = message.privateRoomId
+      state.currentScreen = 'private-room-waiting'
+      render()
       return true
     }
 
@@ -12589,6 +12856,7 @@ export function createLobbyFlowController(
       if (state.myPrivateRoom?.id === message.privateRoomId) {
         leavePrivateRoomWaitingScreen()
         state.myPrivateRoom = null
+        state.privateRoomInvitedProfileIds = new Set()
         state.currentScreen = 'private-rooms'
         state.privateRoomInfoText = 'Домакинът затвори масата.'
         render()
@@ -12609,9 +12877,10 @@ export function createLobbyFlowController(
     if (message.type === 'private_room_full') {
       leavePrivateRoomWaitingScreen()
       state.myPrivateRoom = null
+      state.previewedPrivateRoomId = null
+      state.privateRoomInvitedProfileIds = new Set()
       state.currentScreen = 'lobby'
       state.privateRoomsCreatePopupOpen = false
-      state.privateRoomWaitingFillBotsLoading = false
       options.onMatchFound({
         type: 'match_found',
         roomId: message.roomId,
@@ -12672,9 +12941,10 @@ export function createLobbyFlowController(
     state.privateRoomWaitingChatSending = false
     state.privateRoomWaitingChatPendingRequestId = null
     state.privateRoomWaitingChatErrorText = null
-    state.privateRoomWaitingLeaveConfirmOpen = false
-    state.privateRoomWaitingFillBotsConfirmOpen = false
-    state.privateRoomWaitingFillBotsLoading = false
+    state.privateRoomJoinSlotPopup = null
+    state.privateRoomLeaveSlotConfirmOpen = false
+    state.privateRoomBlockedPopupText = null
+    state.privateRoomBotActionLoadingTeam = null
   }
 
   // Reopens the SAME waiting room the user is already a member of — no new
@@ -12694,17 +12964,13 @@ export function createLobbyFlowController(
   // вход (desktop lobby картата, mobile quick action бутона —
   // data-lobby-private-rooms-card, споделен между двата render клона; плюс
   // всеки external caller като "влез в частните маси" от
-  // privateRoomCreatedNotification в main.ts). Ако потребителят вече чака в
-  // частна маса (state.myPrivateRoom !== null — независимо дали е стигнал
-  // дотук чрез "Изчакай в лоби" или просто никога не я е напускал), отваря
-  // директно ТЕКУЩАТА му чакалня вместо списъка — без повторен join, без
-  // leave, без дублирано membership. В противен случай запазва старото
-  // поведение: отваря нормалния списък с частни маси.
+  // privateRoomCreatedNotification в main.ts). Винаги отваря списъка —
+  // ако потребителят вече е член на маса (state.myPrivateRoom !== null),
+  // тя е pinned най-отгоре в списъка с бутон "ВЛЕЗ" (виж roomRowHtml в
+  // renderLobbyScreen.ts / handlePrivateRoomListEnter по-долу), вместо
+  // директно да прескача екрана — потребителят сам избира дали да влезе
+  // обратно в чакалнята или само да разгледа другите маси.
   function navigateToPrivateRooms(): void {
-    if (state.myPrivateRoom !== null) {
-      returnToPrivateRoomWaiting()
-      return
-    }
     state.currentScreen = 'private-rooms'
     state.privateRoomInfoText = null
     state.privateRoomsTab = 'all'
@@ -12712,12 +12978,16 @@ export function createLobbyFlowController(
     render()
   }
 
-  // Общ helper за трите конфликтни точки (matchmaking search, join на друга
-  // частна маса, създаване на нова частна маса, приемане на покана) — вижте
-  // task spec §10: "не напускай автоматично текущата маса", само блокирай и
-  // покажи път назад.
-  function openPrivateRoomConflictPrompt(): void {
+  // Общ helper за конфликтните точки (matchmaking search, създаване на нова
+  // частна маса, приемане на покана, и — с variant='list-join' — конкретния
+  // "+" клик на ДРУГА маса от списъка) — вижте task spec §10: "не напускай
+  // автоматично текущата маса", само блокирай и покажи път назад.
+  // variant='generic' (по подразбиране) пази непроменения споделен текст;
+  // 'list-join' показва bespoke UX копие, договорено специално за "+"-на-
+  // друга-маса сценария (виж renderPrivateRoomConflictPopup).
+  function openPrivateRoomConflictPrompt(variant: 'generic' | 'list-join' = 'generic'): void {
     state.privateRoomConflictPromptOpen = true
+    state.privateRoomConflictPromptVariant = variant
     render()
   }
 
@@ -12731,8 +13001,97 @@ export function createLobbyFlowController(
       openPrivateRoomConflictPrompt()
       return
     }
+    // Чист client-side preview navigation — НЕ изпраща join_private_room.
+    // Реалният seat claim минава само през конкретния "+" (join-slot popup
+    // confirm), никога само от отваряне на preview-а.
+    state.previewedPrivateRoomId = privateRoomId
+    state.currentScreen = 'private-room-waiting'
+    render()
+  }
+
+  // Реконсилиран membership check срещу canonical private_rooms_list — вижте
+  // идентичната логика в renderPrivateRoomsPage (renderLobbyScreen.ts) за
+  // "ВЛЕЗ"/ordering. Използва се тук за "already seated elsewhere" guard-а,
+  // за да не блокира join към нова маса заради stale state.myPrivateRoom,
+  // сочещ вече изтекла/затворена/стартирала маса (task spec §10).
+  function hasActiveOwnPrivateRoomMembership(): boolean {
+    return state.myPrivateRoom !== null && state.privateRooms.some((r) => r.id === state.myPrivateRoom!.id)
+  }
+
+  // Списък с покания-eligible приятели за текущата (заключена) собствена
+  // маса — споделен между списъчния екран и waiting room-а (виж
+  // renderPrivateRoomInviteFriendsPopup в privateRoomPopupMarkup.ts).
+  //
+  // Policy, потвърдена от реалния server код (не предположение):
+  // invite_to_private_room/inviteFriend НЕ изискват target-ът да е online —
+  // единствената сървърна проверка е isProfileInActiveGame (виж index.ts).
+  // Затова тук НЕ филтрираме до online — offline приятели остават в списъка,
+  // само с "Офлайн" индикация (informational, не gating).
+  function resolveInviteEligibleFriends(): PrivateRoomInviteEligibleFriend[] | null {
+    if (state.friendships === null) return null
+    if (state.myPrivateRoom === null) return []
+
+    const localProfileId = options.getAuthSession?.()?.profile.profileId ?? null
+    const seatedProfileIds = new Set(
+      state.myPrivateRoom.slots
+        .map((s) => s.occupant?.profileId)
+        .filter((id): id is string => id !== null && id !== undefined),
+    )
+
+    return state.friendships.friends
+      .filter((f) => f.profile.profileId !== null)
+      .filter((f) => f.profile.profileId !== localProfileId)
+      .filter((f) => !seatedProfileIds.has(f.profile.profileId as string))
+      .map((f) => ({
+        profileId: f.profile.profileId as string,
+        displayName: f.profile.displayName,
+        avatarUrl: f.profile.avatarUrl,
+        isOnline: f.isOnline === true,
+        isInGame: f.isInGame === true,
+        status: state.privateRoomInvitedProfileIds.has(f.profile.profileId as string) ? 'sent' as const : 'invitable' as const,
+      }))
+  }
+
+  // Директен "+" клик на конкретен слот в списъка "Частни маси" (не
+  // собствената маса — тези бутони изобщо не се рендират за own room, виж
+  // roomRowHtml). Ако потребителят вече седи на друга (реално активна) маса,
+  // показва conflict popup-а вместо join popup — не пипа server state.
+  function openPrivateRoomListSlotJoinPopup(privateRoomId: string, team: Team, slotIndex: 0 | 1): void {
+    if (hasActiveOwnPrivateRoomMembership()) {
+      openPrivateRoomConflictPrompt('list-join')
+      return
+    }
+    state.privateRoomJoinSlotPopup = { privateRoomId, team, slotIndex }
+    render()
+  }
+
+  // Споделено между списъка ("+" директно от картата) и waiting room екрана
+  // (previewer "+") — reads вече отворения popup от state, изпраща реалния
+  // join_private_room, и маркира privateRoomJoinInFlight, за да може
+  // private_room_updated handler-ът (виж по-долу) да force-навигира към
+  // 'private-room-waiting' след success, независимо дали confirm-ът е дошъл
+  // от списъка (потребителят е на 'private-rooms') или от чакалнята
+  // (вече е на 'private-room-waiting' — reassignment-ът е no-op там).
+  function confirmPrivateRoomJoinSlotPopup(): void {
+    const popup = state.privateRoomJoinSlotPopup
+    if (popup === null) return
+    state.privateRoomJoinSlotPopup = null
     state.privateRoomJoinInFlight = true
-    options.onPrivateRoomJoin?.(privateRoomId)
+    options.onPrivateRoomJoinSlot?.(popup.privateRoomId, popup.team, popup.slotIndex)
+    render()
+  }
+
+  function cancelPrivateRoomJoinSlotPopup(): void {
+    state.privateRoomJoinSlotPopup = null
+    render()
+  }
+
+  // "ВЛЕЗ" на собствената маса в списъка — чиста навигация към вече
+  // съществуващата чакалня (reuse на returnToPrivateRoomWaiting()), никакъв
+  // нов join_private_room, никаква промяна на team/slot/bot (task spec §7).
+  function handlePrivateRoomListEnter(privateRoomId: string): void {
+    if (state.myPrivateRoom?.id !== privateRoomId) return
+    returnToPrivateRoomWaiting()
   }
 
   async function openMissionsPopup(): Promise<void> {
@@ -13106,7 +13465,12 @@ export function createLobbyFlowController(
           return
         }
         if (conversation?.kind === 'friend') {
-          void showChatPanel().then(() => {
+          // Race guard срещу друг по-нов chat-open flow, който сработва,
+          // докато showChatPanel() зарежда (напр. PIKABG start), виж
+          // activeChatRequestGeneration.
+          const requestGeneration = state.activeChatRequestGeneration
+          void showChatPanel(true).then(() => {
+            if (state.activeChatRequestGeneration !== requestGeneration) return
             void openChatConversation(friendshipId)
             markChatConversationReadLocally(friendshipId)
             render()

@@ -8,7 +8,7 @@
 // сървър/WebSocket.
 import { createLobbyFlowController } from '/src/app/lobby/createLobbyFlowController.ts'
 import { getRenderLobbyScreenCallCount } from '/src/app/lobby/renderLobbyScreen.ts'
-import type { TopicSnapshot, TopicMessageSnapshot, PlayerPublicProfileSnapshot } from '/src/app/network/createGameServerClient.ts'
+import type { TopicSnapshot, TopicMessageSnapshot, PlayerPublicProfileSnapshot, ChatConversationSnapshot, ChatMessageSnapshot } from '/src/app/network/createGameServerClient.ts'
 
 const root = document.createElement('div')
 document.body.appendChild(root)
@@ -186,6 +186,33 @@ let nextAdminGrantVipResult:
   | { ok: false; message: string }
   | null = null
 
+// ─── Personal chat / PIKABG official support chat (checkPikaSupportChatRouting.ts) ───
+// Мутируем "сървърен" списък разговори (kind='friend'|'vip_dm'|'pika_support')
+// + съобщения per friendshipId — достатъчно за да проверим client-only route-ването
+// от profile popup "ЧАТ" бутона до renderChatPanel/activeChatFriendshipId, без
+// нужда от реален backend (същият принцип като chatDraftHarness.ts).
+let chatConversationsSnapshot: ChatConversationSnapshot[] = []
+const chatMessagesByFriendship: Record<string, ChatMessageSnapshot[]> = {}
+const chatSentLog: Array<{ friendshipId: string; body: string }> = []
+// Deferred queue за onPikaSupportChatStart — позволява на теста да контролира
+// ТОЧНО кога всяка "start/find pika_support conversation" заявка resolve-ва,
+// нужно за race-guard сценария (по-бавна по-РАНО кликната заявка, resolve-ваща
+// СЛЕД по-бърза по-КЪСНО кликната).
+const pendingPikaStartResolvers = new Map<
+  string,
+  Array<(result: { ok: true; friendshipId: string } | { ok: false; message: string }) => void>
+>()
+// Симулира реалната сървърна block policy (chatStore.ts authorizeSendMessage/
+// sendMessage): blockChecker.isBlocked се проверява само на SEND, НЕ на
+// getOrCreatePikaSupportConversation (conversation start/find success-ва
+// независимо от block статус) — виж checkOfficialPikaSupportChat.ts
+// "[extra] blocked recipients still cannot receive new messages...".
+const blockedChatFriendshipIds = new Set<string>()
+
+function findChatConversation(friendshipId: string): ChatConversationSnapshot | undefined {
+  return chatConversationsSnapshot.find((c) => c.friendshipId === friendshipId)
+}
+
 const controller = createLobbyFlowController({
   root,
   joinMatchmaking: () => {},
@@ -257,6 +284,45 @@ const controller = createLobbyFlowController({
     const result = nextAdminGrantVipResult
     nextAdminGrantVipResult = null
     return result
+  },
+  onPikaSupportChatStart: (recipientProfileId: string) => {
+    return new Promise((resolve) => {
+      const queue = pendingPikaStartResolvers.get(recipientProfileId) ?? []
+      queue.push(resolve)
+      pendingPikaStartResolvers.set(recipientProfileId, queue)
+    })
+  },
+  onChatConversationsLoad: async () => ({ ok: true, conversations: chatConversationsSnapshot }),
+  onChatMessagesLoad: async (friendshipId: string) => ({
+    ok: true,
+    messages: chatMessagesByFriendship[friendshipId] ?? [],
+  }),
+  onChatMarkRead: async () => {},
+  onChatSend: async (friendshipId: string, body: string) => {
+    if (blockedChatFriendshipIds.has(friendshipId)) {
+      return { ok: false, message: 'Чатът е недостъпен поради блокиране.' }
+    }
+    chatSentLog.push({ friendshipId, body })
+    const message: ChatMessageSnapshot = {
+      messageId: `own-${Date.now()}-${Math.random()}`,
+      friendshipId,
+      senderProfileId: 'pika-sender-self',
+      body,
+      createdAt: new Date().toISOString(),
+      isOwnMessage: true,
+      attachment: null,
+    }
+    chatMessagesByFriendship[friendshipId] = [...(chatMessagesByFriendship[friendshipId] ?? []), message]
+    const existing = findChatConversation(friendshipId)
+    if (existing) {
+      existing.lastMessage = message
+      existing.updatedAt = message.createdAt
+    }
+    const conversation = findChatConversation(friendshipId)
+    if (!conversation) {
+      return { ok: false, message: 'conversation not found in fixture' }
+    }
+    return { ok: true, conversation, messages: chatMessagesByFriendship[friendshipId], newMessage: message }
   },
 })
 
@@ -363,5 +429,59 @@ const controller = createLobbyFlowController({
   },
   setNextAdminGrantVipError: (message: string) => {
     nextAdminGrantVipResult = { ok: false, message }
+  },
+  // ─── Personal chat / PIKABG official support chat routing ────────────────
+  setChatConversations: (conversations: ChatConversationSnapshot[]) => {
+    chatConversationsSnapshot = conversations
+  },
+  addChatConversation: (conversation: ChatConversationSnapshot) => {
+    chatConversationsSnapshot = [conversation, ...chatConversationsSnapshot]
+  },
+  seedChatMessage: (friendshipId: string, message: ChatMessageSnapshot) => {
+    chatMessagesByFriendship[friendshipId] = [...(chatMessagesByFriendship[friendshipId] ?? []), message]
+  },
+  clickPikaSupportChatButton: () => {
+    document.querySelector<HTMLButtonElement>('[data-player-profile-pika-support-chat]')?.click()
+  },
+  isPikaSupportChatButtonVisible: () => document.querySelector('[data-player-profile-pika-support-chat]') !== null,
+  isPikaStartPending: (recipientProfileId: string): boolean =>
+    (pendingPikaStartResolvers.get(recipientProfileId)?.length ?? 0) > 0,
+  deliverNextPikaStartResponse: (recipientProfileId: string, friendshipId: string) => {
+    const queue = pendingPikaStartResolvers.get(recipientProfileId)
+    const resolver = queue?.shift()
+    resolver?.({ ok: true, friendshipId })
+  },
+  deliverNextPikaStartError: (recipientProfileId: string, message: string) => {
+    const queue = pendingPikaStartResolvers.get(recipientProfileId)
+    const resolver = queue?.shift()
+    resolver?.({ ok: false, message })
+  },
+  isChatFormPresent: () => document.querySelector('[data-lobby-chat-form]') !== null,
+  getChatFormFriendshipId: () => document.querySelector('[data-lobby-chat-form]')?.getAttribute('data-lobby-chat-form') ?? null,
+  getActiveChatHeaderText: () => {
+    const form = document.querySelector('[data-lobby-chat-form]')
+    const panel = form?.parentElement ?? null
+    return panel?.children?.[0]?.textContent ?? null
+  },
+  isChatEmptyStateShown: () => {
+    const text = document.body.textContent ?? ''
+    return document.querySelector('[data-lobby-chat-form]') === null && text.includes('Избери приятел от списъка')
+  },
+  fillAndSubmitChatForm: (body: string) => {
+    const form = document.querySelector<HTMLFormElement>('[data-lobby-chat-form]')
+    if (!form) return false
+    const input = form.querySelector<HTMLInputElement>('[data-lobby-chat-message-input="1"]')
+    if (input) {
+      input.value = body
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }))
+    return true
+  },
+  getChatSentLog: () => chatSentLog,
+  getChatMessageBodies: (friendshipId: string) => (chatMessagesByFriendship[friendshipId] ?? []).map((m) => m.body),
+  setChatSendBlocked: (friendshipId: string, blocked: boolean) => {
+    if (blocked) blockedChatFriendshipIds.add(friendshipId)
+    else blockedChatFriendshipIds.delete(friendshipId)
   },
 }
