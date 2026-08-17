@@ -409,7 +409,7 @@ export type LobbyScreenState = {
         sourceMessageId: string | null
         sourceKind: 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified'
       }
-    | { kind: 'unmute'; topicId: string; targetProfileId: string; targetDisplayName: string; mutedUntil: string | null }
+    | { kind: 'unmute'; topicId: string; targetProfileId: string; targetDisplayName: string; mutedUntil: string | null; reason: string | null }
     | null
   topicModerationActionDurationMs: number | null
   topicModerationActionReason: string
@@ -1150,6 +1150,16 @@ let topicCreateEscListenerAttached = false
 let latestTopicCreateCloseHandler: (() => void) | null = null
 let privateRoomInfoDismissTimer: ReturnType<typeof setTimeout> | null = null
 let mobileMenuOpen = false
+// One-shot entrance-animation flag (mobile menu flicker fix) — true САМО
+// веднага след реално closed->open user action (виж openMobileMenu()).
+// Consume-ва се от renderMobileMenu() при следващия mount (изиграва
+// mobile-menu-shade-in/mobile-menu-backdrop-in точно веднъж), после остава
+// false през следващите background renders, докато менюто остава логически
+// отворено — без това, всеки несвързан render() (напр.
+// topic_unread_count_changed) би replay-нал entrance анимацията при пълния
+// innerHTML remount (mobileMenuOpen сам по себе си стои true през целия
+// период, затова не може да служи за този check).
+let mobileMenuEntranceAnimationPending = false
 let mobileMenuCloseTimer: ReturnType<typeof setTimeout> | null = null
 let stakesFirstCardIndex = -1
 let stakesAnimFrame = 0
@@ -4055,6 +4065,22 @@ function renderMobileMenu(state: LobbyScreenState): string {
   const mobileMenuBadgeCount = getMobileMenuNotificationRaw(state)
   const mobileMenuBadge = formatNotificationBadgeCount(mobileMenuBadgeCount)
 
+  // Consume-ва one-shot flag-а ТУК (виж декларацията му по-горе) — играе
+  // entrance анимацията само за mount-а веднага след реално closed->open
+  // (openMobileMenu()); всеки следващ mount, докато менюто остава логически
+  // отворено (background render/innerHTML remount), вижда pending=false и
+  // рендира panel/backdrop БЕЗ animation декларация → без replay/flicker.
+  const shouldPlayMobileMenuEntranceAnimation = mobileMenuOpen && mobileMenuEntranceAnimationPending
+  if (shouldPlayMobileMenuEntranceAnimation) {
+    mobileMenuEntranceAnimationPending = false
+  }
+  const mobileMenuBackdropAnimationStyle = shouldPlayMobileMenuEntranceAnimation
+    ? 'animation:mobile-menu-backdrop-in 120ms ease both;'
+    : ''
+  const mobileMenuPanelAnimationStyle = shouldPlayMobileMenuEntranceAnimation
+    ? 'animation:mobile-menu-shade-in 150ms cubic-bezier(0.2,0.8,0.2,1) both;'
+    : ''
+
   return `
     <header style="
       position:sticky;top:0;z-index:120;
@@ -4109,13 +4135,13 @@ function renderMobileMenu(state: LobbyScreenState): string {
           </summary>
           <button type="button" data-lobby-mobile-menu-backdrop="1" aria-label="Затвори менюто" style="
             position:fixed;inset:0;z-index:1;border:0;background:rgba(0,0,0,0.01);
-            padding:0;margin:0;cursor:default;animation:mobile-menu-backdrop-in 120ms ease both;
+            padding:0;margin:0;cursor:default;${mobileMenuBackdropAnimationStyle}
           "></button>
           <div data-lobby-mobile-menu-panel="1" style="
             position:absolute;right:0;top:50px;width:min(82vw,280px);
             background:#090909;border:1px solid rgba(212,165,32,0.38);border-radius:8px;
             box-shadow:0 18px 44px rgba(0,0,0,0.68);padding:8px;display:grid;gap:6px;
-            z-index:2;transform-origin:top right;animation:mobile-menu-shade-in 150ms cubic-bezier(0.2,0.8,0.2,1) both;
+            z-index:2;transform-origin:top right;${mobileMenuPanelAnimationStyle}
           ">
             <button type="button" data-lobby-nav-lobby="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('lobby', 'Лоби')}</button>
             <button type="button" data-lobby-nav-shop="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('shop', 'Магазин')}</button>
@@ -10358,6 +10384,7 @@ export function renderLobbyScreen(
     const panel = mobileMenuEl.querySelector<HTMLElement>('[data-lobby-mobile-menu-panel="1"]')
     const backdrop = mobileMenuEl.querySelector<HTMLElement>('[data-lobby-mobile-menu-backdrop="1"]')
     mobileMenuOpen = false
+    mobileMenuEntranceAnimationPending = false
     if (panel) panel.style.animation = 'mobile-menu-shade-out 120ms ease both'
     if (backdrop) backdrop.style.animation = 'mobile-menu-backdrop-out 120ms ease both'
     mobileMenuCloseTimer = window.setTimeout(() => {
@@ -10370,6 +10397,11 @@ export function renderLobbyScreen(
     if (!mobileMenuEl) return
     clearMobileMenuCloseTimer()
     mobileMenuOpen = true
+    // Реално closed->open user action — маркира entrance анимацията за
+    // изиграване на следващия mount/remount (виж renderMobileMenu()
+    // consume-а по-горе), точно веднъж, дори remount-ът да дойде от
+    // несвързан background render малко след клика.
+    mobileMenuEntranceAnimationPending = true
     mobileMenuEl.open = true
     const panel = mobileMenuEl.querySelector<HTMLElement>('[data-lobby-mobile-menu-panel="1"]')
     const backdrop = mobileMenuEl.querySelector<HTMLElement>('[data-lobby-mobile-menu-backdrop="1"]')
@@ -10398,6 +10430,7 @@ export function renderLobbyScreen(
     button.addEventListener('click', () => {
       clearMobileMenuCloseTimer()
       mobileMenuOpen = false
+      mobileMenuEntranceAnimationPending = false
       if (mobileMenuEl) mobileMenuEl.open = false
     })
   })

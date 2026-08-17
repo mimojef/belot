@@ -226,7 +226,7 @@ const controller = createLobbyFlowController({
     // ([...editorProfile.galleryImages]), затова mock-ът трябва да го има.
     profile: { profileId: 'me', displayName: 'Me', galleryImages: [], ...ownAuthProfileOverrides } as any,
   }),
-  onTopicsLoad: async () => ({ ok: true, topics }),
+  onTopicsLoad: async () => ({ ok: true, topics, viewerSectionMute: null }),
   onTopicMessagesLoad: (topicId: string, _beforeSeq: number | null) => {
     loadCallLog.push(topicId)
     return new Promise((resolve) => {

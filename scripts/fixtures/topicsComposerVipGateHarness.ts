@@ -112,7 +112,7 @@ const controller = createLobbyFlowController({
   getAuthSession: () => authSession,
   onTopicsLoad: async () => {
     topicsLoadCallCount++
-    return { ok: true, topics }
+    return { ok: true, topics, viewerSectionMute: null }
   },
   onTopicMessagesLoad: async (_topicId: string, _beforeSeq: number | null) => {
     topicMessagesLoadCallCount++

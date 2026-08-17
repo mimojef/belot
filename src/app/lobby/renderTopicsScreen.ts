@@ -23,7 +23,7 @@ const REPLY_INDENT_PX = 14
 const TOPIC_MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000
 /** "Лафче" system topic fixed id — seed-нат от migration 20260817_002, mirror на server LAFCHE_TOPIC_ID (index.ts). */
 export const LAFCHE_TOPIC_ID = 'topic-lafche'
-type TopicActionIconKind = 'like' | 'reply' | 'edit' | 'delete' | 'moderate'
+type TopicActionIconKind = 'like' | 'reply' | 'edit' | 'delete' | 'moderate' | 'muted'
 
 function renderTopicActionIcon(kind: TopicActionIconKind, options: { filled?: boolean } = {}): string {
   const commonSvgAttrs = 'width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" focusable="false"'
@@ -36,9 +36,63 @@ function renderTopicActionIcon(kind: TopicActionIconKind, options: { filled?: bo
     edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/>',
     delete: '<path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
     moderate: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2a2 2 0 1 1-4 0V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.3 7a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 20 7.2l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.8.8z"/>',
+    // Section-wide Topics mute indicator — reuse на СЪЩИЯ "прекъснат кръг"
+    // path, ползван от navbar "Блокирани" иконата (mobileMenuSvgItemContent
+    // 'blocked' в renderLobbyScreen.ts) — established визуален pattern за
+    // "временно ограничен/блокиран", не нов стил.
+    muted: '<circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>',
   }
 
   return `<span class="topic-message-action-icon" aria-hidden="true"><svg ${commonSvgAttrs} fill="${fill}" ${commonStrokeAttrs}>${paths[kind]}</svg></span>`
+}
+
+// Section-wide Topics mute indicator до името на автора — reuse-ва
+// renderTopicActionIcon('muted') (СЪЩИЯТ SVG path като navbar "Блокирани").
+// За normal viewer: чисто информационен <span> — НЕ button, без reason/
+// mutedUntil/moderator identity (само boolean-driven от isMuted), не
+// clickable. За moderator (canModerate вече е computed от caller-а — Lafche:
+// state.isLafcheModerator; normal Topics: state.isTopicModerator, СЪЩИЯТ
+// gate, който вече показва зъбното колело): кликаема, reuse-ва ТОЧНО СЪЩИЯ
+// data-topic-mute-toggle wiring/mechanism като съществуващото зъбно колело
+// (querySelectorAll('[data-topic-mute-toggle]') в renderLobbyScreen.ts) —
+// нула нов JS wiring, нула втори unmute mechanism (openTopicMuteMenuForAuthor
+// вече отваря unmute confirm popup-а, ако targetProfileId е реално muted).
+function renderTopicAuthorMuteIndicator(params: {
+  isMuted: boolean
+  canModerate: boolean
+  targetProfileId: string
+  targetDisplayName: string
+  sourceMessageId: string | null
+  sourceKind: 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified'
+}): string {
+  if (!params.isMuted) return ''
+  const icon = renderTopicActionIcon('muted')
+
+  if (params.canModerate) {
+    return `
+      <button
+        type="button"
+        data-topic-mute-toggle="${escapeHtml(params.targetProfileId)}"
+        data-topic-mute-toggle-name="${escapeHtml(params.targetDisplayName)}"
+        ${params.sourceMessageId !== null ? `data-topic-mute-toggle-message-id="${escapeHtml(params.sourceMessageId)}"` : ''}
+        data-topic-mute-toggle-source-kind="${params.sourceKind}"
+        class="topic-mute-indicator"
+        title="Заглушен в „Теми“ — управлявай"
+        aria-label="${escapeHtml(params.targetDisplayName)} е заглушен в „Теми“ — управлявай заглушаването"
+        style="border:0;background:transparent;padding:0;margin:0;color:#ef4444;cursor:pointer;display:inline-flex;align-items:center;flex:0 0 auto;"
+      >${icon}</button>
+    `
+  }
+
+  return `
+    <span
+      class="topic-mute-indicator"
+      role="img"
+      aria-label="Временно заглушен в секция „Теми“"
+      title="Временно заглушен в секция „Теми“"
+      style="color:#ef4444;display:inline-flex;align-items:center;flex:0 0 auto;"
+    >${icon}</span>
+  `
 }
 
 // Предварително планирани duration опции (Топикс moderation брифа т.2) —
@@ -313,6 +367,7 @@ function renderTopicAuthorBlock(
   createdAt: string,
   editedAt: string | null,
   messageContext: { messageId: string; isRoot: boolean } | null = null,
+  isTopicsSectionMuted = false,
 ): string {
   // MUTE/UNMUTE compact icon бутон — само за модератор, само за активната
   // тема (mute е topic-specific, брифа т.4), скрит за собствения профил на
@@ -324,6 +379,18 @@ function renderTopicAuthorBlock(
   // messageContext — постът, до чиито автор мутиращият бутон стои
   // (mute-evidence брифа §1/§3), за server-side snapshot при submit.
   const sourceKind = messageContext === null ? 'unspecified' : (messageContext.isRoot ? 'topic_root' : 'topic_reply')
+  // Червен "прекъснат кръг" индикатор до името, ако авторът В МОМЕНТА има
+  // активно section-wide Topics заглушаване (мутиращ брифа §1/§10) — чисто
+  // информативен за обикновен viewer, кликаем (reuse на muteControl
+  // wiring-а чрез data-topic-mute-toggle) за модератор.
+  const muteIndicator = renderTopicAuthorMuteIndicator({
+    isMuted: isTopicsSectionMuted,
+    canModerate: canModerateThisAuthor,
+    targetProfileId: senderProfileId,
+    targetDisplayName: senderDisplayName,
+    sourceMessageId: messageContext !== null ? messageContext.messageId : null,
+    sourceKind,
+  })
   // "Лично" живее единствено в долния meta row (renderTopicMetaRow) — за
   // ВСИЧКИ контексти (general root, thread root header, replies), не само
   // за root картите. Header-ът показва само avatar + име + timestamp.
@@ -360,6 +427,7 @@ function renderTopicAuthorBlock(
             data-topic-message-author-name="${escapeHtml(senderDisplayName)}"
             style="border:0;background:transparent;padding:0;cursor:pointer;font-size:14px;font-weight:900;color:#f8fafc;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
           >${escapeHtml(senderDisplayName)}</button>
+          ${muteIndicator}
           <span style="font-size:12px;color:rgba(248,250,252,0.42);white-space:nowrap;">${formatTopicMessageTime(createdAt)}${editedAt !== null ? ' · редактирано' : ''}</span>
           ${muteControl}
         </div>
@@ -537,7 +605,7 @@ export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySn
   return `
     <div data-topic-reply="${escapeHtml(reply.messageId)}">
       <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 4px 8px 12px;">
-        ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt, reply.editedAt, { messageId: reply.messageId, isRoot: false })}
+        ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt, reply.editedAt, { messageId: reply.messageId, isRoot: false }, reply.isTopicsSectionMuted)}
       </div>
       <div style="margin:-6px 0 6px 58px;">
         ${isEditing
@@ -640,7 +708,7 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
     <div data-topic-message="${escapeHtml(message.messageId)}" ${cardOpenAttrs} class="topic-root-card${isThread ? ' topic-root-card-thread' : ' topic-root-card-clickable'}${threadUnreadBadge !== null ? ' topic-root-card-has-unread' : ''}">
       ${threadUnreadBadge !== null ? `<span data-topic-thread-unread-badge="${escapeHtml(message.messageId)}" aria-label="${escapeHtml(`${message.unreadCount} непрочетени в разговора`)}" style="position:absolute;top:10px;right:10px;min-width:20px;height:20px;border-radius:10px;background:#ef4444;color:#fff;font-size:11px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;line-height:1;box-shadow:0 0 0 2px rgba(0,0,0,0.72);z-index:1;">${escapeHtml(threadUnreadBadge)}</span>` : ''}
       <div style="display:flex;align-items:flex-start;gap:10px;padding:12px 12px 0;">
-        ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt, { messageId: message.messageId, isRoot: true })}
+        ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt, { messageId: message.messageId, isRoot: true }, message.isTopicsSectionMuted)}
       </div>
       <div style="padding:0 12px 12px 58px;">
         ${isEditing
@@ -759,6 +827,14 @@ function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMessageSn
               data-topic-message-author-name="${escapeHtml(message.senderDisplayName)}"
               style="border:0;background:transparent;padding:0;cursor:pointer;font-size:14px;font-weight:900;color:#f8fafc;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
             >${escapeHtml(message.senderDisplayName)}</button>
+            ${renderTopicAuthorMuteIndicator({
+              isMuted: message.isTopicsSectionMuted,
+              canModerate: state.isLafcheModerator && message.senderProfileId !== state.profile.profileId,
+              targetProfileId: message.senderProfileId,
+              targetDisplayName: message.senderDisplayName,
+              sourceMessageId: message.messageId,
+              sourceKind: 'lafche_post',
+            })}
             <span style="font-size:12px;font-weight:400;color:rgba(248,250,252,0.42);white-space:nowrap;">${escapeHtml(formatLafchePostTime(message.createdAt))}</span>
             ${renderLafcheMuteButton(state, message.senderProfileId, message.senderDisplayName, message.messageId)}
             ${renderLafcheDeleteButton(state, message.messageId)}
@@ -1032,6 +1108,19 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
         width: 16px;
         height: 16px;
       }
+      /* Section-wide Topics mute indicator (червена "прекъснат кръг" икона до
+         името на muted автор) — малка/компактна навсякъде (Lafche И normal
+         root/reply author row), не увеличава височината на реда. Reuse-ва
+         renderTopicActionIcon('muted') маркировката, само size override тук. */
+      .topic-mute-indicator {
+        width: 13px;
+        height: 13px;
+      }
+      .topic-mute-indicator .topic-message-action-icon,
+      .topic-mute-indicator .topic-message-action-icon svg {
+        width: 13px;
+        height: 13px;
+      }
     </style>
     <div data-topic-messages-scroll="1" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;">
       ${loadOlderIndicator}
@@ -1275,10 +1364,14 @@ function renderTopicModerationActionPopup(state: LobbyScreenState): string {
     return `
       <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
         <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
-          <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:4px;">Отглуши потребител?</div>
-          <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:12px;">
-            ${escapeHtml(pending.targetDisplayName)} е заглушен в секция „Теми“${pending.mutedUntil ? ` до ${escapeHtml(formatModerationExpiry(pending.mutedUntil))}` : ''}.
+          <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:12px;">Заглушен потребител</div>
+          <div style="font-size:14px;color:rgba(255,255,255,0.82);line-height:1.5;margin-bottom:${pending.reason ? '10' : '12'}px;">
+            ${escapeHtml(pending.targetDisplayName)} е временно ограничен от публикуване в секция „Теми“${pending.mutedUntil ? ` до ${escapeHtml(formatModerationExpiry(pending.mutedUntil))}` : ''}.
           </div>
+          ${pending.reason ? `
+          <div style="font-size:13px;color:rgba(255,255,255,0.68);line-height:1.4;margin-bottom:12px;">
+            <span style="font-weight:800;color:rgba(255,255,255,0.85);">Причина:</span> ${escapeHtml(pending.reason)}
+          </div>` : ''}
           <button type="button" data-topic-mute-history-open-for-profile="${escapeHtml(pending.targetProfileId)}" style="border:0;background:transparent;color:#d4a520;text-decoration:underline;font-size:12px;font-weight:800;cursor:pointer;padding:0;margin-bottom:16px;display:block;">История на ограниченията на този профил</button>
           ${state.topicModerationActionErrorText ? `<div style="font-size:12px;color:#f87171;margin-bottom:8px;">${escapeHtml(state.topicModerationActionErrorText)}</div>` : ''}
           <div style="display:flex;gap:12px;">
@@ -1286,12 +1379,12 @@ function renderTopicModerationActionPopup(state: LobbyScreenState): string {
               flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
               border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;
               cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};
-            ">Отказ</button>
+            ">Затвори</button>
             <button type="button" data-topic-moderation-submit="1" ${busy ? 'disabled' : ''} style="
               flex:1;padding:11px;border:1px solid rgba(74,222,128,0.5);background:rgba(74,222,128,0.16);
               border-radius:10px;color:#4ade80;font-size:14px;font-weight:900;
               cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.7' : '1'};
-            ">${busy ? 'Изчакай…' : 'Отглуши'}</button>
+            ">${busy ? 'Изчакай…' : 'Премахни заглушаването'}</button>
           </div>
         </div>
       </div>

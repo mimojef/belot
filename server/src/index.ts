@@ -1097,6 +1097,9 @@ function hydrateTopicMessagesWithCurrentAvatars(
   const uniqueSenderProfileIds = [...new Set(messages.map((m) => m.senderProfileId))]
   const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
   const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
+  // Batch lookup — ЕДНА заявка за целия batch sender profile IDs (mute
+  // indicator icon брифа §8), не N+1 lookup по съобщение.
+  const activeSectionMutedProfileIds = topicModerationStore.getActiveSectionMutedProfileIds(uniqueSenderProfileIds)
 
   const messageIds = messages.map((m) => m.messageId)
   const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, null)
@@ -1133,6 +1136,7 @@ function hydrateTopicMessagesWithCurrentAvatars(
       attachment,
       likeCount: aggregatesByMessageId.get(message.messageId)?.likeCount ?? 0,
       replyCount: aggregatesByMessageId.get(message.messageId)?.replyCount ?? 0,
+      isTopicsSectionMuted: activeSectionMutedProfileIds.has(message.senderProfileId),
     }
   })
 }
@@ -1553,6 +1557,30 @@ function notifyProfileOfTopicMuteStateChange(
     mutedUntil: muteSnapshot.mutedUntil,
     reason: muteSnapshot.reason,
   })
+}
+
+// Public, boolean-only broadcast (mute indicator icon брифа §7/§8) — до
+// ВСИЧКИ connections, активно subscribe-нати за поне една Topics тема в
+// момента (не само topicId контекста, от който е задействано действието —
+// section-wide mute важи навсякъде, авторът може да има видими постове в
+// няколко различни отворени теми едновременно). Малка, целенасочена
+// итерация (реалният брой едновременни Topics viewers е малък) — не е
+// heavy global reload/polling система. НЕ праща reason/mutedUntil/moderator
+// identity — само boolean флаг, mirror на TopicProfileMuteStateChangedMessage
+// коментара в протокола.
+function broadcastTopicsSectionMuteIndicatorChange(profileId: string, isTopicsSectionMuted: boolean): void {
+  const notifiedConnectionIds = new Set<ConnectionId>()
+  for (const subscribers of topicMessageSubscribersByTopicId.values()) {
+    for (const subscriberConnectionId of subscribers) {
+      if (notifiedConnectionIds.has(subscriberConnectionId)) continue
+      notifiedConnectionIds.add(subscriberConnectionId)
+      safeSendToConnection(subscriberConnectionId, {
+        type: 'topic_profile_mute_state_changed',
+        profileId,
+        isTopicsSectionMuted,
+      })
+    }
+  }
 }
 
 // Lightweight aggregate drift-detection poll (Етап 3 cross-instance likes) —
@@ -7608,9 +7636,25 @@ async function handleTopicsListRequest(
 
   const topics = topicsWithUnreadCountsForProfile(auth.profileId, topicStore.listActiveTopics())
 
+  // Current-viewer own section-wide mute snapshot (regression fix — composer
+  // mute-lock брифа §6) — при вход/refresh на "Теми" НЯМА друг proactive
+  // канал за собствения статус на viewer-а (само realtime topic_mute_state_changed
+  // push, докато е вече свързан, виж showTopicsDirectory/loadTopicsDirectory
+  // коментара в createLobbyFlowController.ts). Reuse на СЪЩАТА
+  // getSectionMuteSnapshot функция, ползвана и от enforcement/lazy-lookup
+  // пътищата другаде — не нов mute mechanism. Explicit strip на
+  // mutedByAccountId (moderator identity), mirror на notifyProfileOfTopicMuteStateChange
+  // private push shape-а — never expose-ва се, дори на самия muted профил.
+  const viewerSectionMuteSnapshot = topicModerationStore.getSectionMuteSnapshot(auth.profileId)
+
   sendJsonResponse(res, 200, {
     ok: true,
     topics,
+    viewerSectionMute: {
+      isMuted: viewerSectionMuteSnapshot.isMuted,
+      mutedUntil: viewerSectionMuteSnapshot.mutedUntil,
+      reason: viewerSectionMuteSnapshot.reason,
+    },
   })
   return true
 }
@@ -7796,6 +7840,7 @@ async function handleTopicMessagesRequest(
   const uniqueSenderProfileIds = [...new Set(page.messages.map((m) => m.senderProfileId))]
   const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
   const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
+  const activeSectionMutedProfileIds = topicModerationStore.getActiveSectionMutedProfileIds(uniqueSenderProfileIds)
 
   // Батово likeCount/replyCount/viewerHasLiked за цялата страница (Етап 3,
   // виж topicMessageStore.getMessageAggregatesByIds) — до 4 агрегатни заявки
@@ -7829,6 +7874,7 @@ async function handleTopicMessagesRequest(
       replyCount: aggregates?.replyCount ?? 0,
       viewerHasLiked: aggregates?.viewerHasLiked ?? false,
       unreadCount: unreadCountsByMessageId.get(message.messageId) ?? 0,
+      isTopicsSectionMuted: activeSectionMutedProfileIds.has(message.senderProfileId),
     }
   })
 
@@ -7905,6 +7951,7 @@ async function handleTopicRepliesRequest(
   const uniqueSenderProfileIds = [...new Set(page.messages.map((m) => m.senderProfileId))]
   const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
   const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
+  const activeSectionMutedProfileIds = topicModerationStore.getActiveSectionMutedProfileIds(uniqueSenderProfileIds)
 
   const messageIds = page.messages.map((m) => m.messageId)
   const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId)
@@ -7927,6 +7974,7 @@ async function handleTopicRepliesRequest(
         : null,
       likeCount: aggregates?.likeCount ?? 0,
       viewerHasLiked: aggregates?.viewerHasLiked ?? false,
+      isTopicsSectionMuted: activeSectionMutedProfileIds.has(message.senderProfileId),
     }
   })
 
@@ -8331,6 +8379,7 @@ async function handleTopicMuteRequest(
   })
 
   notifyProfileOfTopicMuteStateChange(targetProfileId, topicId, muteSnapshot)
+  broadcastTopicsSectionMuteIndicatorChange(targetProfileId, muteSnapshot.isMuted)
 
   sendJsonResponse(res, 200, { ok: true, mute: muteSnapshot })
   return true
@@ -8398,6 +8447,7 @@ async function handleTopicUnmuteRequest(
 
   if (changed) {
     notifyProfileOfTopicMuteStateChange(targetProfileId, topicId, { isMuted: false, mutedUntil: null, reason: null })
+    broadcastTopicsSectionMuteIndicatorChange(targetProfileId, false)
   }
 
   sendJsonResponse(res, 200, { ok: true })

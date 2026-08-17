@@ -3632,7 +3632,7 @@ async function loadProfileById(
 }
 
 async function loadTopics(): Promise<
-  | { ok: true; topics: TopicSnapshot[] }
+  | { ok: true; topics: TopicSnapshot[]; viewerSectionMute: { isMuted: boolean; mutedUntil: string | null; reason: string | null } | null }
   | { ok: false; message: string }
 > {
   try {
@@ -3640,11 +3640,16 @@ async function loadTopics(): Promise<
       method: 'GET',
       credentials: 'include',
     })
-    const data = (await response.json()) as { ok: boolean; message?: string; topics?: TopicSnapshot[] }
+    const data = (await response.json()) as {
+      ok: boolean
+      message?: string
+      topics?: TopicSnapshot[]
+      viewerSectionMute?: { isMuted: boolean; mutedUntil: string | null; reason: string | null }
+    }
     if (!response.ok || !data.ok || !Array.isArray(data.topics)) {
       return { ok: false, message: data.message ?? 'Грешка при зареждане на темите.' }
     }
-    return { ok: true, topics: data.topics }
+    return { ok: true, topics: data.topics, viewerSectionMute: data.viewerSectionMute ?? null }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
   }

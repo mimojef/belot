@@ -180,6 +180,14 @@ export type TopicModerationStore = {
   getSectionMuteSnapshot: (profileId: string) => TopicSectionMuteSnapshot
   /** Server-authoritative enforcement lookup за ВСИЧКИ 5 Topics write paths — expiry checked at read time, никога persisted boolean. */
   isProfileMutedInTopicsSection: (profileId: string) => boolean
+  /**
+   * Batch version на isProfileMutedInTopicsSection — ЕДНА заявка за целия
+   * batch profile IDs (mute indicator icon брифа), не N+1 lookup по
+   * sender/message. Връща само profile ID-тата с РЕАЛНО активен (still
+   * unexpired) section mute в момента на извикването — expired/manually
+   * unmuted профили никога не влизат в резултата.
+   */
+  getActiveSectionMutedProfileIds: (profileIds: readonly string[]) => Set<string>
 
   // ─── Mute evidence/history (Лафче mute-evidence брифа) ──────────────────
   /** Internal/moderator изглед — пълен (носи moderator identity). User-facing mapping-ът маха identity полетата на HTTP response ниво (виж index.ts). */
@@ -816,6 +824,30 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     return getSectionMuteSnapshot(profileId).isMuted
   }
 
+  // Batch lookup за mute indicator icon-а — ЕДНА заявка за целия batch
+  // sender profile IDs (mirror на topicReadStateStore.getUnreadCountsByTopicIds
+  // batch pattern), не N+1 query по sender. isMuted е derived at read time
+  // (muted_until > now), никога persisted boolean — идентична семантика на
+  // toSectionMuteSnapshot по-горе.
+  function getActiveSectionMutedProfileIds(profileIds: readonly string[]): Set<string> {
+    const uniqueProfileIds = [...new Set(profileIds.filter((id) => id.trim().length > 0))]
+    const result = new Set<string>()
+    if (uniqueProfileIds.length === 0) return result
+
+    const placeholders = uniqueProfileIds.map(() => '?').join(',')
+    const statement = database.prepare(`
+      SELECT profile_id, muted_until FROM topic_section_mutes WHERE profile_id IN (${placeholders});
+    `)
+    const rows = statement.all(...uniqueProfileIds) as Array<{ profile_id: string; muted_until: string }>
+    const now = Date.now()
+    for (const row of rows) {
+      if (new Date(dbDateToUtc(row.muted_until)).getTime() > now) {
+        result.add(row.profile_id)
+      }
+    }
+    return result
+  }
+
   // LEFT JOIN topic_messages за LIVE deleted_at (не само snapshot-натия
   // original_message_deleted_at, взет В МОМЕНТА на mute-а) — ако постът
   // бъде изтрит СЛЕД като evidence реда вече съществува, COALESCE-ът тук
@@ -1214,6 +1246,7 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     unmuteProfileInTopics,
     getSectionMuteSnapshot,
     isProfileMutedInTopicsSection,
+    getActiveSectionMutedProfileIds,
     listMuteEvidenceForProfile,
     getAttachmentFilenamesForTopic,
     deleteTopic,

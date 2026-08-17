@@ -1601,6 +1601,8 @@ export type TopicMessageSnapshot = {
   replyCount: number
   viewerHasLiked: boolean
   attachment: TopicAttachmentSnapshot | null
+  /** Derived at read time — авторът В МОМЕНТА има ли активно section-wide Topics заглушаване (мутиращ индикатор брифа §1/§8). Никога reason/mutedUntil/moderator тук — само boolean. */
+  isTopicsSectionMuted: boolean
 }
 
 /**
@@ -1624,6 +1626,8 @@ export type TopicReplySnapshot = {
   likeCount: number
   viewerHasLiked: boolean
   attachment: TopicAttachmentSnapshot | null
+  /** Derived at read time — виж TopicMessageSnapshot.isTopicsSectionMuted. */
+  isTopicsSectionMuted: boolean
 }
 
 export type TopicMessageCatchupMessage = {
@@ -1872,6 +1876,22 @@ export type TopicMessageEditedMessage = {
   editedAt: string
 }
 
+/**
+ * Public broadcast (mute indicator icon брифа §7) — САМО boolean флаг за
+ * конкретен профил, НЕ reason/mutedUntil/moderator identity (тези остават
+ * private, само в target-only topic_mute_state_changed push-а и
+ * moderator-only unmute popup-а). Изпраща се до ВСИЧКИ connections,
+ * активно subscribe-нати за поне една Topics тема в момента (виж
+ * topicMessageSubscribersByTopicId server-side) — не e per-topic, защото
+ * section-wide mute важи навсякъде, а не само в темата, от която е
+ * задействано модераторското действие.
+ */
+export type TopicProfileMuteStateChangedMessage = {
+  type: 'topic_profile_mute_state_changed'
+  profileId: string
+  isTopicsSectionMuted: boolean
+}
+
 export type TopicUnreadCountChangedMessage = {
   type: 'topic_unread_count_changed'
   topicId: string
@@ -1980,6 +2000,7 @@ export type ServerMessage =
   | TopicDeletedMessage
   | TopicMessageDeletedMessage
   | TopicMessageEditedMessage
+  | TopicProfileMuteStateChangedMessage
   | TopicUnreadCountChangedMessage
   | TopicSeenUpdatedMessage
   | TopicThreadUnreadCountChangedMessage

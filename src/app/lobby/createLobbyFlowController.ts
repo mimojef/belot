@@ -633,7 +633,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onTopicsLoad?: () => Promise<
-    | { ok: true; topics: TopicSnapshot[] }
+    | { ok: true; topics: TopicSnapshot[]; viewerSectionMute: { isMuted: boolean; mutedUntil: string | null; reason: string | null } | null }
     | { ok: false; message: string }
   >
   onTopicMarkSeen?: (topicId: string) => Promise<
@@ -1028,7 +1028,7 @@ type InternalLobbyFlowState = {
         sourceMessageId: string | null
         sourceKind: 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified'
       }
-    | { kind: 'unmute'; topicId: string; targetProfileId: string; targetDisplayName: string; mutedUntil: string | null }
+    | { kind: 'unmute'; topicId: string; targetProfileId: string; targetDisplayName: string; mutedUntil: string | null; reason: string | null }
     | null
   topicModerationActionDurationMs: number | null
   topicModerationActionReason: string
@@ -5451,6 +5451,14 @@ export function createLobbyFlowController(
         void markActiveTopicSeen(activeTopic.topicId)
       }
     }
+    // WS reconnect (regression fix, брифа §6) — same viewerSectionMute
+    // reconciliation като showTopicsDirectory, за да не остане composer-ът
+    // "отключен" за вече muted viewer след reconnect (dropped connection
+    // means dropped realtime topic_mute_state_changed push too).
+    state.activeTopicViewerMute = result.viewerSectionMute
+      ? { isMuted: result.viewerSectionMute.isMuted, mutedUntil: result.viewerSectionMute.mutedUntil, mutedByAccountId: null, reason: result.viewerSectionMute.reason }
+      : null
+    evaluateTopicsSectionMutePopup()
     render()
   }
 
@@ -5633,7 +5641,7 @@ export function createLobbyFlowController(
     }
 
     if (result.mute.isMuted) {
-      state.topicModerationActionPopup = { kind: 'unmute', topicId, targetProfileId, targetDisplayName, mutedUntil: result.mute.mutedUntil }
+      state.topicModerationActionPopup = { kind: 'unmute', topicId, targetProfileId, targetDisplayName, mutedUntil: result.mute.mutedUntil, reason: result.mute.reason }
     } else {
       state.topicModerationActionPopup = { kind: 'mute', topicId, targetProfileId, targetDisplayName, sourceMessageId, sourceKind }
       state.topicModerationActionDurationMs = null
@@ -5897,6 +5905,34 @@ export function createLobbyFlowController(
       changed = true
       return { ...reply, body, editedAt }
     })
+    return changed
+  }
+
+  // Realtime mute indicator icon (mute indicator брифа §7) — обновява
+  // isTopicsSectionMuted за ВСИЧКИ locally-loaded съобщения/replies на
+  // profileId-я, независимо от кой root thread идват (потребителят може да
+  // има няколко expanded thread-а едновременно). НЕ пипа
+  // activeTopicViewerMute/topicsSectionMutePopupOpen (viewer-own mute state,
+  // напълно отделен от чужд author indicator, виж topic_mute_state_changed
+  // handler-а).
+  function applyTopicsSectionMuteIndicatorChange(profileId: string, isTopicsSectionMuted: boolean): boolean {
+    let changed = false
+    if (state.topicMessages) {
+      state.topicMessages = state.topicMessages.map((message) => {
+        if (message.senderProfileId !== profileId || message.isTopicsSectionMuted === isTopicsSectionMuted) return message
+        changed = true
+        return { ...message, isTopicsSectionMuted }
+      })
+    }
+    for (const rootMessageId of Object.keys(state.topicRepliesByRootId)) {
+      const replies = state.topicRepliesByRootId[rootMessageId]
+      if (!replies) continue
+      state.topicRepliesByRootId[rootMessageId] = replies.map((reply) => {
+        if (reply.senderProfileId !== profileId || reply.isTopicsSectionMuted === isTopicsSectionMuted) return reply
+        changed = true
+        return { ...reply, isTopicsSectionMuted }
+      })
+    }
     return changed
   }
 
@@ -6186,11 +6222,24 @@ export function createLobbyFlowController(
     state.topicMessagesOldestSeq = null
     // Lock state derive-нат directno от TopicSnapshot (вече носи
     // lockedUntil/lockedReason от REST list-а) — не отделен REST call.
-    // Mute state (per-viewer, per-topic) НЕ идва batch-нато оттук —
-    // reset-ва се при всеки topic switch и се попълва само от realtime
-    // topic_mute_state_changed push (target-only), виж handleServerMessage.
+    // Mute state (section-wide, НЕ per-topic) — populate-нато ТУК от
+    // result.viewerSectionMute (REST, /api/topics), за да покрие "entering
+    // Topics с вече активен mute"/refresh/reconnect (regression fix, брифа
+    // §6) — преди тази корекция activeTopicViewerMute се populate-ваше
+    // ИЗКЛЮЧИТЕЛНО от realtime topic_mute_state_changed push (target-only),
+    // докато viewer-ът е вече свързан, значи вече активен mute от ПРЕДИ
+    // текущата сесия/refresh никога не се виждаше от composer-а. Realtime
+    // push-ът (виж handleServerMessage) продължава да важи за НОВ mute,
+    // наложен докато потребителят вече е в "Теми".
     state.activeTopicLock = generalTopic ? deriveTopicLockSnapshot(generalTopic) : null
-    state.activeTopicViewerMute = null
+    state.activeTopicViewerMute = result.viewerSectionMute
+      ? { isMuted: result.viewerSectionMute.isMuted, mutedUntil: result.viewerSectionMute.mutedUntil, mutedByAccountId: null, reason: result.viewerSectionMute.reason }
+      : null
+    // Trigger B (mute popup брифа): entering "Теми" с вече активен mute →
+    // popup веднага, не само composer readonly (evaluateTopicsSectionMutePopup
+    // е ack-gated — няма да се отвори повторно, ако вече е било "Разбрах"-нато
+    // за ТОЗИ конкретен mutedUntil).
+    evaluateTopicsSectionMutePopup()
     render()
 
     if (state.activeTopicId) {
@@ -6222,7 +6271,11 @@ export function createLobbyFlowController(
     state.topicOlderMessagesLoading = false
     const switchedTopic = (state.topics ?? []).find((t) => t.topicId === topicId) ?? null
     state.activeTopicLock = switchedTopic ? deriveTopicLockSnapshot(switchedTopic) : null
-    state.activeTopicViewerMute = null
+    // activeTopicViewerMute НЕ се reset-ва тук (regression fix, брифа §6
+    // adjacent gap) — section-wide mute важи независимо от коя тема е
+    // активна, затова вече известният snapshot (populate-нат при вход в
+    // "Теми", виж showTopicsDirectory) остава валиден и след превключване
+    // на тема, вместо да се губи до следващия realtime push.
     render()
     // loadTopicMessagesForActiveTopic инкрементира generation token-а
     // СИНХРОННО (преди първия await) — това "убива" всяка still-pending
@@ -12903,6 +12956,18 @@ export function createLobbyFlowController(
         if (changed) {
           render()
         }
+      }
+      return true
+    }
+
+    if (message.type === 'topic_profile_mute_state_changed') {
+      // Public, boolean-only broadcast (mute indicator icon брифа §7) — не е
+      // topic-scoped (section-wide mute важи навсякъде), затова се прилага
+      // независимо от активната тема, стига авторът да има locally-loaded
+      // съобщения/replies в момента.
+      const changed = applyTopicsSectionMuteIndicatorChange(message.profileId, message.isTopicsSectionMuted)
+      if (changed) {
+        render()
       }
       return true
     }
