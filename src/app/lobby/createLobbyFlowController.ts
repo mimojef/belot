@@ -140,17 +140,16 @@ function isAdminOrSubadminAuthSession(session: LobbyAuthSession | null): boolean
 }
 
 /**
- * Единственото право на chat_admin: показва бутона "(×)" за изтриване на
- * съобщения от общия лайв чат. Само UX — сървърът презаверява това право на
- * всяко DELETE през isLobbyChatModeratorSession (виж authStore.ts).
+ * "Публикации от Pika.bg" — показва бутона "(×)" за изтриване на публикации.
+ * Само UX — сървърът презаверява това право на всяко DELETE през
+ * isPikaAnnouncementAuthorSession (виж authStore.ts). Умишлено по-тесен от
+ * старото поведение (admin/subadmin/chat_admin/pika_team/top_chat_admin) —
+ * виж §3 в "Публикации от Pika.bg" брифа.
  */
-function isLobbyChatModeratorAuthSession(session: LobbyAuthSession | null): boolean {
+function isPikaAnnouncementAuthorAuthSession(session: LobbyAuthSession | null): boolean {
   return session !== null && (
     session.account.role === 'admin'
-    || session.account.role === 'subadmin'
-    || session.account.role === 'chat_admin'
     || session.account.role === 'pika_team'
-    || session.account.role === 'top_chat_admin'
   )
 }
 
@@ -160,8 +159,8 @@ function isLobbyChatModeratorAuthSession(session: LobbyAuthSession | null): bool
  * moderation действие през isTopicMessageModeratorSession (authStore.ts).
  * Различен role set от isTopicModeratorAuthSession (той е за whole-topic
  * mute/reports/audit, 4 роли, БЕЗ chat_admin) — умишлено собствен predicate,
- * не reuse на isLobbyChatModeratorAuthSession, макар role set-ът да съвпада
- * 1:1 в момента (individual-message-moderation брифа §4).
+ * не reuse на isPikaAnnouncementAuthorAuthSession или друг lobby-chat
+ * predicate (individual-message-moderation брифа §4).
  */
 function isTopicMessageModeratorAuthSession(session: LobbyAuthSession | null): boolean {
   return session !== null && (
@@ -1162,8 +1161,9 @@ type InternalLobbyFlowState = {
   // при премахване/успешно изпращане (виж onChatImageRemove/sendChatMessage).
   chatPendingImageByFriendshipId: Record<string, { file: File; previewUrl: string } | undefined>
   chatUploadingFriendshipIds: Set<string>
-  // Общ лайв чат в лобито (отделен от chatConversations/chatMessages по-горе —
-  // тези са за 1:1 личния чат от раздел "ЧАТ"; виж CLAUDE.md/задачата).
+  // "Публикации от Pika.bg" в лобито (отделен от chatConversations/
+  // chatMessages по-горе — тези са за 1:1 личния чат от раздел "ЧАТ";
+  // виж CLAUDE.md/задачата).
   lobbyChatMessages: LobbyChatMessageSnapshot[]
   lobbyChatSubscribed: boolean
   lobbyChatDraft: string
@@ -1171,6 +1171,7 @@ type InternalLobbyFlowState = {
   lobbyChatPendingRequestId: string | null
   lobbyChatErrorText: string | null
   lobbyChatFullscreen: boolean
+  lobbyChatWriteLockedPopupOpen: boolean
   notificationsOpen: boolean
   privateRoomInGameNotificationsEnabled: boolean
   pendingFriendRequests: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
@@ -1650,6 +1651,7 @@ function createInitialState(): InternalLobbyFlowState {
     lobbyChatPendingRequestId: null,
     lobbyChatErrorText: null,
     lobbyChatFullscreen: false,
+    lobbyChatWriteLockedPopupOpen: false,
     notificationsOpen: false,
     privateRoomInGameNotificationsEnabled: true,
     pendingFriendRequests: [],
@@ -3127,7 +3129,9 @@ export function createLobbyFlowController(
       shopPurchaseMessageText: state.shopPurchaseMessageText,
       isAdmin: isFullAdminAuthSession(authSession),
       isAdminOrSubadmin: isAdminOrSubadminAuthSession(authSession),
-      canDeleteLobbyChat: isLobbyChatModeratorAuthSession(authSession),
+      canDeleteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
+      canWriteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
+      lobbyChatWriteLockedPopupOpen: state.lobbyChatWriteLockedPopupOpen,
       adminStats: state.adminStats,
       adminStatsLoading: state.adminStatsLoading,
       adminStatsErrorText: state.adminStatsErrorText,
@@ -4162,6 +4166,16 @@ export function createLobbyFlowController(
       },
       onLobbyChatFullscreenChange: (isFullscreen) => {
         setLobbyChatFullscreen(isFullscreen)
+      },
+      onLobbyChatWriteLockedTap: () => {
+        openLobbyChatWriteLockedPopup()
+      },
+      onLobbyChatWriteLockedPopupClose: () => {
+        closeLobbyChatWriteLockedPopup()
+      },
+      onLobbyChatWriteLockedGotoTopics: () => {
+        closeLobbyChatWriteLockedPopup()
+        void showTopicsDirectory()
       },
       onGuestTrialPlayClick: () => {
         handleGuestTrialPlayClick()
@@ -11093,6 +11107,16 @@ export function createLobbyFlowController(
 
   function setLobbyChatFullscreen(value: boolean): void {
     state.lobbyChatFullscreen = value
+    render()
+  }
+
+  function openLobbyChatWriteLockedPopup(): void {
+    state.lobbyChatWriteLockedPopupOpen = true
+    render()
+  }
+
+  function closeLobbyChatWriteLockedPopup(): void {
+    state.lobbyChatWriteLockedPopupOpen = false
     render()
   }
 

@@ -151,9 +151,13 @@ const main = source('src/main.ts')
 const protocol = source('server/src/protocol/messageTypes.ts')
 const clientProtocol = source('src/app/network/createGameServerClient.ts')
 
-check('[2] server delete authorization explicitly allows admin/subadmin/chat_admin/pika_team only', () => {
-  assert(/isLobbyChatModeratorSession[\s\S]*role === 'admin'[\s\S]*role === 'subadmin'[\s\S]*role === 'chat_admin'[\s\S]*role === 'pika_team'/.test(authStore), 'moderator allowlist missing pika_team')
-  assert(index.includes("actorRoleAtDeletion: session.account.role as 'admin' | 'subadmin' | 'chat_admin' | 'pika_team'"), 'delete audit cast missing pika_team')
+check('[2] "Публикации от Pika.bg" delete authorization explicitly allows admin/pika_team only', () => {
+  // isLobbyChatModeratorSession (5-роли allowlist) остава в authStore.ts за
+  // съвместимост/reuse другаде, но вече НЕ се ползва за lobby-chat delete —
+  // "Публикации от Pika.bg" брифа §3 стесни delete до admin/pika_team само,
+  // виж isPikaAnnouncementAuthorSession.
+  assert(/isPikaAnnouncementAuthorSession[\s\S]{0,200}role === 'admin'[\s\S]{0,80}role === 'pika_team'/.test(authStore), 'isPikaAnnouncementAuthorSession missing or allowlist changed')
+  assert(index.includes("actorRoleAtDeletion: session.account.role as 'admin' | 'pika_team'"), 'delete audit cast should be narrowed to admin | pika_team only')
   assert(!authStore.includes("role === 'player'\n    || session.account.role === 'pika_team'"), 'player must not be part of delete allowlist')
 })
 

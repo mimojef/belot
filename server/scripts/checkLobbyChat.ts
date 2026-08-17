@@ -8,10 +8,22 @@
  * SQLite база, реални HTTP + WS заявки, точно както клиентът би ги видял.
  *
  * === Server / WS (Section A) ===
+ *
+ * ПРОМЯНА (permission narrowing, "Публикации от Pika.bg"): каналът вече е
+ * read-only за повечето потребители — write И delete право само за
+ * `admin`/`pika_team` (isPikaAnnouncementAuthorSession). Затова `userA` в
+ * тази секция вече е `pika_team` акаунт (не plain player) — той е основният
+ * "sender" за validation/rate-limit/duplicate/spoof/unicode/seq тестовете,
+ * които тестват логика, независима от write-permission гейта. `userB`
+ * остава plain `player` — ползва се и за да потвърди новия forbidden гейт,
+ * и (през нов pika_team акаунт `userBAnnouncer`, виж A9) за block теста.
+ *
  * [A1]  Анонимен (без сесия) може да се абонира и да получи история/live
- *       broadcast, но НЕ може да пише — сървърът отказва.
- * [A2]  Регистриран потребител може да пише; broadcast-ът достига до
- *       подателя със съответстващ requestId.
+ *       broadcast, но НЕ може да пише — сървърът отказва (not_authenticated).
+ * [A2]  pika_team потребител може да пише; broadcast-ът достига до
+ *       подателя със съответстващ requestId. Обикновен player НЕ може —
+ *       връща lobby_chat_error code=forbidden (write гейтът е стеснен до
+ *       admin/pika_team).
  * [A3]  Публичното име на автора се вижда коректно в history И в live
  *       broadcast; НЕ се разкриват имейл/роля/account ID.
  * [A4]  Опит за подмяна на автора (senderDisplayName/senderProfileId в
@@ -22,13 +34,18 @@
  *       отново позволено.
  * [A7]  Ограничение на бързо повторно изпращане на идентичен текст.
  * [A8]  Unsubscribe → съответният клиент вече не получава broadcast-и.
- * [A9]  Блокиране: A блокира B → A не вижда съобщенията на B (history И live);
- *       B продължава да вижда съобщенията на A (едностранно).
+ * [A9]  Блокиране: A блокира "B-announcer" (pika_team акаунт, единственият
+ *       начин B-страната да пише след permission narrowing-а) → A не вижда
+ *       съобщенията му (history И live); той продължава да вижда
+ *       съобщенията на A (едностранно). Тества block/unblock логиката, не
+ *       write permission — целта е непроменена спрямо оригиналния тест.
  * [A10] Модерация: пълен admin трие съобщение → веднага lobby_chat_message_deleted
  *       до всички абонати; съобщението изчезва от следваща история.
- * [A11] Admin, subadmin И chat_admin МОГАТ да трият (200); обикновен player
- *       НЕ може (403). (Обновено: subadmin/chat_admin получиха това право —
- *       виж isLobbyChatModeratorSession в authStore.ts.)
+ * [A11] Admin И pika_team МОГАТ да трият (200); subadmin, chat_admin,
+ *       top_chat_admin И обикновен player НЕ могат (403). (Обновено:
+ *       permission narrowing — delete правото вече е стеснено от старите
+ *       5 роли (isLobbyChatModeratorSession) до само admin/pika_team
+ *       (isPikaAnnouncementAuthorSession), виж authStore.ts.)
  * [A12] Повторно изтриване на вече изтрито съобщение е безопасно (200, без
  *       дублиран audit запис).
  * [A13] Стабилен ред (seq) при бързо изпратени съобщения; дедупликация по
@@ -42,9 +59,17 @@
  *       трябва да имат допълнителен излишен индекс; created_at на
  *       lobby_chat_deletion_events ТРЯБВА да има индекс (ползва се от
  *       retention purge заявката) — намерен и коригиран проблем.
- * [A17] senderIsChatAdmin snapshot флаг: true в WS broadcast/history за
- *       съобщение от chat_admin подател, false за admin/subadmin/player
- *       (само за оцветяване на името в клиента, виж renderLobbyChatMessageRow).
+ * [A17] senderIsChatAdmin snapshot флаг: ОПРОСТЕН след permission narrowing.
+ *       Флагът вече е hardcoded `false` в index.ts за ВСЕКИ подател, защото
+ *       write гейтът стеснява подателя до admin/pika_team — chat_admin вече
+ *       изобщо не може да прати съобщение, за да оцвети каквото и да било.
+ *       Тестът вече само потвърждава, че флагът е false за admin И
+ *       pika_team подателите (старата "chat_admin -> true" проверка вече
+ *       няма как да се изпълни, защото chat_admin получава `forbidden`
+ *       преди insertMessage въобще да се извика — виж новия [A2] за това).
+ * [A-Perm] Нова целенасочена секция за самата permission логика: pika_team
+ *       и admin МОГАТ да пишат/трият; subadmin/chat_admin/top_chat_admin/
+ *       player НЕ могат да трият (403); player не може да пише (forbidden).
  *
  * === Cross-instance broadcast (Section B) ===
  * [B1]  Съобщение, изпратено през instance #1, стига до абонат на instance #2
@@ -488,20 +513,32 @@ try {
   console.log('  Сървърът е готов.\n')
 
   const runId = `${Date.now()}-${process.pid}`
+  // userA е основният "sender" за validation/rate-limit/duplicate/spoof/
+  // unicode/seq тестовете — вече трябва да е allowed role (pika_team), за
+  // да стигне въобще до тази логика (виж header коментара по-горе).
   const userA = await registerAndLogin(portA, `lc-user-a-${runId}@example.test`, 'Mimojef')
   const userB = await registerAndLogin(portA, `lc-user-b-${runId}@example.test`, 'Blondie')
+  // userBAnnouncer: втори pika_team акаунт, различен от userA — нужен за
+  // A9 (block теста), защото userB (plain player) вече не може да пише,
+  // а тестовата цел там е block/unblock логиката, не write permission.
+  const userBAnnouncer = await registerAndLogin(portA, `lc-user-b-announcer-${runId}@example.test`, 'BlondieTeam')
   const adminUser = await registerAndLogin(portA, `lc-admin-${runId}@example.test`, 'AdminUser')
   const subadminUser = await registerAndLogin(portA, `lc-subadmin-${runId}@example.test`, 'SubadminUser')
   const chatAdminUser = await registerAndLogin(portA, `lc-chat-admin-${runId}@example.test`, 'ChatAdminUser')
+  const topChatAdminUser = await registerAndLogin(portA, `lc-top-chat-admin-${runId}@example.test`, 'TopChatAdminUser')
 
   const dbForRoles = new DatabaseSync(isoA.dbFile, { open: true, enableForeignKeyConstraints: true })
+  dbForRoles.prepare(`UPDATE accounts SET role='pika_team' WHERE email=?`).run(`lc-user-a-${runId}@example.test`)
+  dbForRoles.prepare(`UPDATE accounts SET role='pika_team' WHERE email=?`).run(`lc-user-b-announcer-${runId}@example.test`)
   dbForRoles.prepare(`UPDATE accounts SET role='admin' WHERE email=?`).run(`lc-admin-${runId}@example.test`)
   dbForRoles.prepare(`UPDATE accounts SET role='subadmin' WHERE email=?`).run(`lc-subadmin-${runId}@example.test`)
   dbForRoles.prepare(`UPDATE accounts SET role='chat_admin' WHERE email=?`).run(`lc-chat-admin-${runId}@example.test`)
+  dbForRoles.prepare(`UPDATE accounts SET role='top_chat_admin' WHERE email=?`).run(`lc-top-chat-admin-${runId}@example.test`)
   dbForRoles.close()
 
   const wsA = await openWs(portA, userA.cookie)
   const wsB = await openWs(portA, userB.cookie)
+  const wsBAnnouncer = await openWs(portA, userBAnnouncer.cookie)
   const wsAdmin = await openWs(portA, adminUser.cookie)
   const wsSubadmin = await openWs(portA, subadminUser.cookie)
   const wsChatAdmin = await openWs(portA, chatAdminUser.cookie)
@@ -521,26 +558,33 @@ try {
   await waitForWsMessage(wsA, (m) => m.type === 'lobby_chat_history')
   sendWs(wsB, { type: 'subscribe_lobby_chat' })
   await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_history')
+  sendWs(wsBAnnouncer, { type: 'subscribe_lobby_chat' })
+  await waitForWsMessage(wsBAnnouncer, (m) => m.type === 'lobby_chat_history')
   sendWs(wsAdmin, { type: 'subscribe_lobby_chat' })
   await waitForWsMessage(wsAdmin, (m) => m.type === 'lobby_chat_history')
 
   let lastMessageId = ''
   let lastSeq = -1
 
-  await check('[A2] Регистриран потребител пише -> broadcast с requestId стига до подателя', async () => {
+  await check('[A2] pika_team потребител пише -> broadcast с requestId стига до подателя; plain player -> forbidden', async () => {
     sendWs(wsA, { type: 'send_lobby_chat_message', body: 'Добро утро', requestId: 'req-a2' })
     const msg = await waitForWsMessage(wsA, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-a2')
     assert(typeof msg.messageId === 'string' && msg.messageId.length > 0, 'липсва messageId')
     assert(msg.body === 'Добро утро', 'тялото на съобщението трябва да съвпада')
     lastMessageId = msg.messageId as string
     lastSeq = msg.seq as number
+
+    // Permission narrowing: plain player вече не може да пише тук изобщо.
+    sendWs(wsB, { type: 'send_lobby_chat_message', body: 'опит от player', requestId: 'req-a2-player-forbidden' })
+    const forbiddenErr = await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_error' && m.requestId === 'req-a2-player-forbidden')
+    assert(forbiddenErr.code === 'forbidden', `очакван code=forbidden за player подател, получен ${forbiddenErr.code}`)
   })
 
   await check('[A3] Публичното име се вижда коректно; без email/роля/account ID', async () => {
-    sendWs(wsB, { type: 'send_lobby_chat_message', body: 'Здравейте всички', requestId: 'req-a3' })
-    const msg = await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-a3')
-    assert(msg.senderDisplayName === 'Blondie', `очаквано display name Blondie, получено ${msg.senderDisplayName}`)
-    assert(msg.senderProfileId === userB.profileId, 'senderProfileId трябва да съвпада с истинския профил')
+    sendWs(wsBAnnouncer, { type: 'send_lobby_chat_message', body: 'Здравейте всички', requestId: 'req-a3' })
+    const msg = await waitForWsMessage(wsBAnnouncer, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-a3')
+    assert(msg.senderDisplayName === 'BlondieTeam', `очаквано display name BlondieTeam, получено ${msg.senderDisplayName}`)
+    assert(msg.senderProfileId === userBAnnouncer.profileId, 'senderProfileId трябва да съвпада с истинския профил')
     const raw = JSON.stringify(msg)
     assert(!raw.includes('@example.test'), 'съобщението не трябва да съдържа имейл')
     assert(!('role' in msg), 'съобщението не трябва да съдържа роля')
@@ -648,40 +692,44 @@ try {
     await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_history')
   })
 
-  await check('[A9] Блокиране: A блокира B -> A не вижда съобщенията на B (history + live); B вижда A', async () => {
-    const blockRes = await fetch(`http://127.0.0.1:${portA}/api/profiles/${userB.profileId}/block`, {
+  await check('[A9] Блокиране: A блокира B-announcer -> A не вижда съобщенията му (history + live); той вижда A', async () => {
+    // userB (plain player) вече не може да пише тук (permission narrowing) —
+    // за тази тестова роля ("B-страна, която пише съобщения") ползваме
+    // userBAnnouncer (pika_team), различен акаунт от userA. Тестовата ЦЕЛ
+    // остава непроменена: block/unblock логиката, не write permission.
+    const blockRes = await fetch(`http://127.0.0.1:${portA}/api/profiles/${userBAnnouncer.profileId}/block`, {
       method: 'POST',
       headers: { Cookie: userA.cookie },
     })
     assert(blockRes.status === 200, `block заявката трябва да е 200, получена ${blockRes.status}`)
 
     const bMarker = `blocked-marker-${Date.now()}`
-    sendWs(wsB, { type: 'send_lobby_chat_message', body: bMarker, requestId: 'req-blocked-live' })
-    await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-blocked-live')
+    sendWs(wsBAnnouncer, { type: 'send_lobby_chat_message', body: bMarker, requestId: 'req-blocked-live' })
+    await waitForWsMessage(wsBAnnouncer, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-blocked-live')
 
     const collectedForA = await collectWsMessages(wsA, 1200)
     const aSawBlockedLive = collectedForA.some((m) => m.type === 'lobby_chat_message' && m.body === bMarker)
-    assert(!aSawBlockedLive, 'A не трябва да вижда live съобщение от блокирания B')
+    assert(!aSawBlockedLive, 'A не трябва да вижда live съобщение от блокирания B-announcer')
 
-    // Нов subscribe (нова история) не трябва да съдържа съобщения от B.
+    // Нов subscribe (нова история) не трябва да съдържа съобщения от B-announcer.
     sendWs(wsA, { type: 'subscribe_lobby_chat' })
     const historyForA = await waitForWsMessage(wsA, (m) => m.type === 'lobby_chat_history')
     const historyMessages = historyForA.messages as Array<{ senderProfileId: string }>
     assert(
-      !historyMessages.some((m) => m.senderProfileId === userB.profileId),
-      'историята на A не трябва да съдържа съобщения от блокирания B',
+      !historyMessages.some((m) => m.senderProfileId === userBAnnouncer.profileId),
+      'историята на A не трябва да съдържа съобщения от блокирания B-announcer',
     )
 
-    // A изпраща -> B (небклокиран от своя страна) продължава да вижда A.
+    // A изпраща -> B-announcer (небклокиран от своя страна) продължава да вижда A.
     const aMarker = `unblocked-direction-${Date.now()}`
-    sendWs(wsB, { type: 'subscribe_lobby_chat' })
-    await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_history')
+    sendWs(wsBAnnouncer, { type: 'subscribe_lobby_chat' })
+    await waitForWsMessage(wsBAnnouncer, (m) => m.type === 'lobby_chat_history')
     sendWs(wsA, { type: 'send_lobby_chat_message', body: aMarker, requestId: 'req-a-to-b' })
-    const seenByB = await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_message' && m.body === aMarker)
-    assert(seenByB.senderProfileId === userA.profileId, 'B трябва да продължи да вижда съобщенията на A (едностранно блокиране)')
+    const seenByB = await waitForWsMessage(wsBAnnouncer, (m) => m.type === 'lobby_chat_message' && m.body === aMarker)
+    assert(seenByB.senderProfileId === userA.profileId, 'B-announcer трябва да продължи да вижда съобщенията на A (едностранно блокиране)')
 
     // Разблокирай за чистота на следващите тестове.
-    await fetch(`http://127.0.0.1:${portA}/api/profiles/${userB.profileId}/block`, {
+    await fetch(`http://127.0.0.1:${portA}/api/profiles/${userBAnnouncer.profileId}/block`, {
       method: 'POST',
       headers: { Cookie: userA.cookie },
     })
@@ -700,19 +748,23 @@ try {
     assert(!stillThere, 'изтритото съобщение не трябва да се появява в последваща история')
   })
 
-  await check('[A11] Subadmin и chat_admin МОГАТ да трият (200); player и неавтентикиран — НЕ (403)', async () => {
-    // Отделно съобщение за всеки опит — веднъж изтрито, не може да послужи повторно.
-    sendWs(wsB, { type: 'send_lobby_chat_message', body: `за-player-опит-${Date.now()}`, requestId: 'req-player-attempt' })
-    const forPlayer = await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-player-attempt')
+  await check('[A11] Admin МОЖЕ да трие (200); subadmin, chat_admin, player и неавтентикиран — НЕ (403)', async () => {
+    // Permission narrowing: delete правото вече е стеснено до admin/pika_team
+    // (isPikaAnnouncementAuthorSession) — subadmin/chat_admin/top_chat_admin
+    // вече НЕ могат (преди можеха, виж стария isLobbyChatModeratorSession с 5
+    // роли). Съобщенията се пращат от wsBAnnouncer (pika_team, allowed sender),
+    // защото wsB (plain player) вече не може да пише изобщо.
+    sendWs(wsBAnnouncer, { type: 'send_lobby_chat_message', body: `за-player-опит-${Date.now()}`, requestId: 'req-player-attempt' })
+    const forPlayer = await waitForWsMessage(wsBAnnouncer, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-player-attempt')
 
-    sendWs(wsB, { type: 'send_lobby_chat_message', body: `за-анонимен-опит-${Date.now()}`, requestId: 'req-anon-attempt' })
-    const forAnon = await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-anon-attempt')
+    sendWs(wsBAnnouncer, { type: 'send_lobby_chat_message', body: `за-анонимен-опит-${Date.now()}`, requestId: 'req-anon-attempt' })
+    const forAnon = await waitForWsMessage(wsBAnnouncer, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-anon-attempt')
 
-    sendWs(wsB, { type: 'send_lobby_chat_message', body: `за-subadmin-изтриване-${Date.now()}`, requestId: 'req-subadmin-delete' })
-    const forSubadmin = await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-subadmin-delete')
+    sendWs(wsBAnnouncer, { type: 'send_lobby_chat_message', body: `за-subadmin-изтриване-${Date.now()}`, requestId: 'req-subadmin-delete' })
+    const forSubadmin = await waitForWsMessage(wsBAnnouncer, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-subadmin-delete')
 
-    sendWs(wsB, { type: 'send_lobby_chat_message', body: `за-chat-admin-изтриване-${Date.now()}`, requestId: 'req-chat-admin-delete' })
-    const forChatAdmin = await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-chat-admin-delete')
+    sendWs(wsBAnnouncer, { type: 'send_lobby_chat_message', body: `за-chat-admin-изтриване-${Date.now()}`, requestId: 'req-chat-admin-delete' })
+    const forChatAdmin = await waitForWsMessage(wsBAnnouncer, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-chat-admin-delete')
 
     const playerAttempt = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(forPlayer.messageId as string)}`, userB.cookie)
     assert(playerAttempt.status === 403, `player delete трябва да е 403, получен ${playerAttempt.status}`)
@@ -721,12 +773,12 @@ try {
     assert(anonAttempt.status === 403, `неавтентикиран delete трябва да е 403, получен ${anonAttempt.status}`)
 
     const subadminAttempt = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(forSubadmin.messageId as string)}`, subadminUser.cookie)
-    assert(subadminAttempt.status === 200, `subadmin delete трябва да е 200, получен ${subadminAttempt.status}`)
+    assert(subadminAttempt.status === 403, `subadmin delete трябва вече да е 403 (permission narrowing), получен ${subadminAttempt.status}`)
 
     const chatAdminAttempt = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(forChatAdmin.messageId as string)}`, chatAdminUser.cookie)
-    assert(chatAdminAttempt.status === 200, `chat_admin delete трябва да е 200, получен ${chatAdminAttempt.status}`)
+    assert(chatAdminAttempt.status === 403, `chat_admin delete трябва вече да е 403 (permission narrowing), получен ${chatAdminAttempt.status}`)
 
-    // Директна проверка, че сървърът наистина е изтрил (не само върнал 200) —
+    // Директна проверка в базата, че сървърът наистина Е ОТКАЗАЛ да изтрие —
     // подправена/невалидна заявка не бива да променя съобщението.
     const db = new DatabaseSync(isoA.dbFile, { open: true, enableForeignKeyConstraints: true })
     try {
@@ -734,22 +786,19 @@ try {
       assert(playerMsgRow.deleted_at === null, 'player-blocked съобщението НЕ трябва да е маркирано изтрито')
 
       const subadminMsgRow = db.prepare(`SELECT deleted_at FROM lobby_chat_messages WHERE message_id = ?`).get(forSubadmin.messageId) as { deleted_at: string | null }
-      assert(subadminMsgRow.deleted_at !== null, 'subadmin трябва наистина да е изтрил съобщението')
+      assert(subadminMsgRow.deleted_at === null, 'subadmin вече НЕ трябва да може да изтрие съобщението (permission narrowing)')
 
       const chatAdminMsgRow = db.prepare(`SELECT deleted_at FROM lobby_chat_messages WHERE message_id = ?`).get(forChatAdmin.messageId) as { deleted_at: string | null }
-      assert(chatAdminMsgRow.deleted_at !== null, 'chat_admin трябва наистина да е изтрил съобщението')
-
-      const auditRoleRows = db.prepare(`
-        SELECT message_id, actor_role_at_deletion FROM lobby_chat_deletion_audit_log
-        WHERE message_id IN (?, ?)
-      `).all(forSubadmin.messageId, forChatAdmin.messageId) as { message_id: string; actor_role_at_deletion: string }[]
-      const bySubadmin = auditRoleRows.find((r) => r.message_id === forSubadmin.messageId)
-      const byChatAdmin = auditRoleRows.find((r) => r.message_id === forChatAdmin.messageId)
-      assert(bySubadmin?.actor_role_at_deletion === 'subadmin', `audit actor_role_at_deletion за subadmin трябва да е 'subadmin', получено ${bySubadmin?.actor_role_at_deletion}`)
-      assert(byChatAdmin?.actor_role_at_deletion === 'chat_admin', `audit actor_role_at_deletion за chat_admin трябва да е 'chat_admin', получено ${byChatAdmin?.actor_role_at_deletion}`)
+      assert(chatAdminMsgRow.deleted_at === null, 'chat_admin вече НЕ трябва да може да изтрие съобщението (permission narrowing)')
     } finally {
       db.close()
     }
+
+    // Почисти реално (admin) за да не остават "живи" съобщения след теста.
+    await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(forPlayer.messageId as string)}`, adminUser.cookie)
+    await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(forAnon.messageId as string)}`, adminUser.cookie)
+    await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(forSubadmin.messageId as string)}`, adminUser.cookie)
+    await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(forChatAdmin.messageId as string)}`, adminUser.cookie)
   })
 
   await check('[A12] Повторно изтриване на вече изтрито съобщение е безопасно (идемпотентно)', async () => {
@@ -768,47 +817,50 @@ try {
     }
   })
 
-  await check('[A17] senderIsChatAdmin: true за съобщение от chat_admin, false за admin/subadmin/player', async () => {
-    // subadmin/chat_admin socket-ите досега само са изтривали през HTTP
-    // (виж [A11]) — никога не са се абонирали за live broadcast, затова тук
-    // подателят не би получил СОБСТВЕНОТО си потвърждение без предварителен subscribe.
-    sendWs(wsSubadmin, { type: 'subscribe_lobby_chat' })
-    await waitForWsMessage(wsSubadmin, (m) => m.type === 'lobby_chat_history')
+  await check('[A17] senderIsChatAdmin: винаги false (chat_admin вече не може да пише изобщо, флагът е hardcoded false)', async () => {
+    // Permission narrowing: write гейтът вече стеснява подателя до
+    // admin/pika_team ПРЕДИ insertMessage изобщо да се извика — chat_admin
+    // получава `forbidden` (виж [A2]) и никога не достига до
+    // senderIsChatAdmin логиката. index.ts вече hardcode-ва флага на `false`
+    // за всеки подател, който Я МИНЕ гейта. Тестът е опростен да го потвърди
+    // за admin И pika_team (единствените allowed sender роли) — старата
+    // "chat_admin -> true" проверка вече е невъзможен сценарий по дизайн.
     sendWs(wsChatAdmin, { type: 'subscribe_lobby_chat' })
     await waitForWsMessage(wsChatAdmin, (m) => m.type === 'lobby_chat_history')
 
-    // Свеж, никога преди неизползван player акаунт — wsB вече е изпратил
-    // много съобщения в по-ранни тестове (A9/A11 и др.) и може да е близо до
-    // rate limit-а (5 съобщения / 10с прозорец); свеж профил гарантира, че
-    // тази проверка не зависи от точния timing на предходните тестове.
-    const freshPlayer = await registerAndLogin(portA, `lc-color-player-${runId}@example.test`, 'ColorPlayer')
-    const wsFreshPlayer = await openWs(portA, freshPlayer.cookie)
-    sendWs(wsFreshPlayer, { type: 'subscribe_lobby_chat' })
-    await waitForWsMessage(wsFreshPlayer, (m) => m.type === 'lobby_chat_history')
-
+    // chat_admin вече не може да пише -> forbidden (потвърждаваме старото
+    // поведение вече не съществува, вместо мълчаливо да го пропуснем).
     sendWs(wsChatAdmin, { type: 'send_lobby_chat_message', body: `от-chat-admin-${Date.now()}`, requestId: 'req-color-chat-admin' })
-    const fromChatAdmin = await waitForWsMessage(wsChatAdmin, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-color-chat-admin')
-    assert(fromChatAdmin.senderIsChatAdmin === true, `senderIsChatAdmin трябва да е true за chat_admin подател, получено ${fromChatAdmin.senderIsChatAdmin}`)
+    const chatAdminErr = await waitForWsMessage(wsChatAdmin, (m) => m.type === 'lobby_chat_error' && m.requestId === 'req-color-chat-admin')
+    assert(chatAdminErr.code === 'forbidden', `chat_admin вече не може да пише, очакван code=forbidden, получен ${chatAdminErr.code}`)
 
     sendWs(wsAdmin, { type: 'send_lobby_chat_message', body: `от-admin-${Date.now()}`, requestId: 'req-color-admin' })
     const fromAdmin = await waitForWsMessage(wsAdmin, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-color-admin')
     assert(fromAdmin.senderIsChatAdmin === false, `senderIsChatAdmin трябва да е false за пълен admin подател, получено ${fromAdmin.senderIsChatAdmin}`)
 
-    sendWs(wsSubadmin, { type: 'send_lobby_chat_message', body: `от-subadmin-${Date.now()}`, requestId: 'req-color-subadmin' })
-    const fromSubadmin = await waitForWsMessage(wsSubadmin, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-color-subadmin')
-    assert(fromSubadmin.senderIsChatAdmin === false, `senderIsChatAdmin трябва да е false за subadmin подател, получено ${fromSubadmin.senderIsChatAdmin}`)
+    // Свеж pika_team акаунт — wsBAnnouncer вече е изпратил няколко съобщения
+    // в по-ранни тестове (A3/A9/A11) и може да е близо до rate limit-а (5
+    // съобщения / 10с прозорец); свеж профил гарантира, че тази проверка не
+    // зависи от точния timing на предходните тестове.
+    const freshPikaTeam = await registerAndLogin(portA, `lc-color-pika-team-${runId}@example.test`, 'ColorPikaTeam')
+    const dbForFreshRole = new DatabaseSync(isoA.dbFile, { open: true, enableForeignKeyConstraints: true })
+    dbForFreshRole.prepare(`UPDATE accounts SET role='pika_team' WHERE email=?`).run(`lc-color-pika-team-${runId}@example.test`)
+    dbForFreshRole.close()
+    const wsFreshPikaTeam = await openWs(portA, freshPikaTeam.cookie)
+    sendWs(wsFreshPikaTeam, { type: 'subscribe_lobby_chat' })
+    await waitForWsMessage(wsFreshPikaTeam, (m) => m.type === 'lobby_chat_history')
 
-    sendWs(wsFreshPlayer, { type: 'send_lobby_chat_message', body: `от-player-${Date.now()}`, requestId: 'req-color-player' })
-    const fromPlayer = await waitForWsMessage(wsFreshPlayer, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-color-player')
-    assert(fromPlayer.senderIsChatAdmin === false, `senderIsChatAdmin трябва да е false за обикновен player, получено ${fromPlayer.senderIsChatAdmin}`)
-    await closeWs(wsFreshPlayer)
+    sendWs(wsFreshPikaTeam, { type: 'send_lobby_chat_message', body: `от-pika-team-${Date.now()}`, requestId: 'req-color-pika-team' })
+    const fromPikaTeam = await waitForWsMessage(wsFreshPikaTeam, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-color-pika-team')
+    assert(fromPikaTeam.senderIsChatAdmin === false, `senderIsChatAdmin трябва да е false за pika_team подател, получено ${fromPikaTeam.senderIsChatAdmin}`)
+    await closeWs(wsFreshPikaTeam)
 
     // Проверка и в историята (subscribe наново), не само в live broadcast-а.
-    sendWs(wsChatAdmin, { type: 'subscribe_lobby_chat' })
-    const historyForChatAdmin = await waitForWsMessage(wsChatAdmin, (m) => m.type === 'lobby_chat_history')
-    const historyEntry = (historyForChatAdmin.messages as Array<{ messageId: string; senderIsChatAdmin: boolean }>)
-      .find((m) => m.messageId === fromChatAdmin.messageId)
-    assert(historyEntry?.senderIsChatAdmin === true, 'senderIsChatAdmin трябва да остане true и в lobby_chat_history')
+    sendWs(wsAdmin, { type: 'subscribe_lobby_chat' })
+    const historyForAdmin = await waitForWsMessage(wsAdmin, (m) => m.type === 'lobby_chat_history')
+    const historyEntry = (historyForAdmin.messages as Array<{ messageId: string; senderIsChatAdmin: boolean }>)
+      .find((m) => m.messageId === fromAdmin.messageId)
+    assert(historyEntry?.senderIsChatAdmin === false, 'senderIsChatAdmin трябва да остане false и в lobby_chat_history')
   })
 
   await check('[A13] Стабилен ред (seq) при бързи съобщения; дедупликация по messageId', async () => {
@@ -840,11 +892,15 @@ try {
       const oldMessage = store.insertMessage({
         senderProfileId: userA.profileId,
         senderDisplayName: 'Mimojef',
+        senderIsChatAdmin: false,
+        senderRole: 'pika_team',
         body: 'старо съобщение за retention теста',
       })
       const freshMessage = store.insertMessage({
         senderProfileId: userA.profileId,
         senderDisplayName: 'Mimojef',
+        senderIsChatAdmin: false,
+        senderRole: 'pika_team',
         body: 'прясно съобщение за retention теста',
       })
 
@@ -914,10 +970,115 @@ try {
     }
   })
 
+  console.log('\n=== Lobby Chat — Section A-Perm (write/delete permission matrix) ===\n')
+
+  await check('[A-Perm 1] pika_team МОЖЕ да пише (200/lobby_chat_message)', async () => {
+    // Свеж pika_team акаунт, не wsA — wsA вече е изпратил много съобщения в
+    // по-ранни тестове (A2/A5/A15/A6/A7/A13 и др.) и може да е близо до/над
+    // rate limit-а (5 съобщения / 10с прозорец); свеж профил гарантира, че
+    // тази проверка не зависи от точния timing на предходните тестове.
+    const freshPikaWriter = await registerAndLogin(portA, `lc-perm-pika-write-${runId}@example.test`, 'PermPikaWriter')
+    const dbForFreshRole = new DatabaseSync(isoA.dbFile, { open: true, enableForeignKeyConstraints: true })
+    dbForFreshRole.prepare(`UPDATE accounts SET role='pika_team' WHERE email=?`).run(`lc-perm-pika-write-${runId}@example.test`)
+    dbForFreshRole.close()
+    const wsFreshPikaWriter = await openWs(portA, freshPikaWriter.cookie)
+    sendWs(wsFreshPikaWriter, { type: 'subscribe_lobby_chat' })
+    await waitForWsMessage(wsFreshPikaWriter, (m) => m.type === 'lobby_chat_history')
+
+    sendWs(wsFreshPikaWriter, { type: 'send_lobby_chat_message', body: `perm-pika-team-write-${Date.now()}`, requestId: 'req-perm-pika-write' })
+    const msg = await waitForWsMessage(wsFreshPikaWriter, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-perm-pika-write')
+    assert(typeof msg.messageId === 'string' && msg.messageId.length > 0, 'pika_team трябва успешно да публикува съобщение')
+    await closeWs(wsFreshPikaWriter)
+  })
+
+  await check('[A-Perm 2] admin МОЖЕ да пише (200/lobby_chat_message)', async () => {
+    sendWs(wsAdmin, { type: 'send_lobby_chat_message', body: `perm-admin-write-${Date.now()}`, requestId: 'req-perm-admin-write' })
+    const msg = await waitForWsMessage(wsAdmin, (m) => m.type === 'lobby_chat_message' && m.requestId === 'req-perm-admin-write')
+    assert(typeof msg.messageId === 'string' && msg.messageId.length > 0, 'admin трябва успешно да публикува съобщение')
+  })
+
+  await check('[A-Perm 3] Обикновен player НЕ МОЖЕ да пише -> lobby_chat_error code=forbidden', async () => {
+    sendWs(wsB, { type: 'send_lobby_chat_message', body: `perm-player-write-${Date.now()}`, requestId: 'req-perm-player-write' })
+    const err = await waitForWsMessage(wsB, (m) => m.type === 'lobby_chat_error' && m.requestId === 'req-perm-player-write')
+    assert(err.code === 'forbidden', `очакван code=forbidden (не not_authenticated/guest_not_allowed), получен ${err.code}`)
+  })
+
+  // Гост/temp профил: guard-ът е playerProgressStore.isTemporaryProfile(),
+  // ИДЕНТИЧНИЯТ code path, вече established и unaffected от тази промяна
+  // (топиците ползват същия guard, виж checkTopicCreation.ts header
+  // коментара). Реален temp профил тук се създава единствено през
+  // join_guest_trial WS съобщение, което изисква пълен guest-trial room
+  // flow (валиден stake, room creation и т.н.) — извън обхвата на този
+  // focused permission check. guest_not_allowed поведението остава
+  // непроменено от нашата промяна (гейтът е ПРЕДИ role-based forbidden
+  // гейта в index.ts) и вече е покрито индиректно от факта, че [A2]/[A1]
+  // все още минават с непроменен ред на гейтовете.
+
+  // A-Perm 4-9 създават delete-target съобщения директно през
+  // lobbyChatStore (bypass-вайки WS send гейта/rate-limit-а изцяло, същия
+  // подход като [A14]) — тези проверки тестват DELETE permission matrix-а,
+  // не write-a, и не бива да зависят от send rate-limit състоянието,
+  // натрупано от wsAdmin/wsA в предходните тестове.
+  const { createLobbyChatStore: createLobbyChatStoreForPerm } = await import(
+    pathToFileURL(resolve(isoA.serverDir, 'dist', 'db', 'lobbyChatStore.js')).href
+  ) as typeof import('../src/db/lobbyChatStore.js')
+  const permTargetStore = await createLobbyChatStoreForPerm(isoA.dbFile)
+
+  function insertPermDeleteTarget(label: string): string {
+    const msg = permTargetStore.insertMessage({
+      senderProfileId: userA.profileId,
+      senderDisplayName: 'Mimojef',
+      senderIsChatAdmin: false,
+      senderRole: 'pika_team',
+      body: `perm-delete-target-${label}-${Date.now()}`,
+    })
+    return msg.messageId
+  }
+
+  await check('[A-Perm 4] pika_team МОЖЕ да трие (200)', async () => {
+    const messageId = insertPermDeleteTarget('pika-team')
+    const del = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(messageId)}`, userA.cookie)
+    assert(del.status === 200, `pika_team delete трябва да е 200, получен ${del.status}`)
+  })
+
+  await check('[A-Perm 5] admin МОЖЕ да трие (200)', async () => {
+    const messageId = insertPermDeleteTarget('admin')
+    const del = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(messageId)}`, adminUser.cookie)
+    assert(del.status === 200, `admin delete трябва да е 200, получен ${del.status}`)
+  })
+
+  await check('[A-Perm 6] subadmin НЕ МОЖЕ да трие (403)', async () => {
+    const messageId = insertPermDeleteTarget('subadmin')
+    const del = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(messageId)}`, subadminUser.cookie)
+    assert(del.status === 403, `subadmin delete трябва да е 403, получен ${del.status}`)
+  })
+
+  await check('[A-Perm 7] chat_admin НЕ МОЖЕ да трие (403)', async () => {
+    const messageId = insertPermDeleteTarget('chat-admin')
+    const del = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(messageId)}`, chatAdminUser.cookie)
+    assert(del.status === 403, `chat_admin delete трябва да е 403, получен ${del.status}`)
+  })
+
+  await check('[A-Perm 8] top_chat_admin НЕ МОЖЕ да трие (403) — не е тествано преди тази промяна', async () => {
+    const messageId = insertPermDeleteTarget('top-chat-admin')
+    const del = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(messageId)}`, topChatAdminUser.cookie)
+    assert(del.status === 403, `top_chat_admin delete трябва да е 403, получен ${del.status}`)
+  })
+
+  await check('[A-Perm 9] Player НЕ МОЖЕ да трие (403)', async () => {
+    const messageId = insertPermDeleteTarget('player')
+    const del = await httpDeleteJson(portA, `/api/lobby-chat/messages/${encodeURIComponent(messageId)}`, userB.cookie)
+    assert(del.status === 403, `player delete трябва да е 403, получен ${del.status}`)
+  })
+
+  permTargetStore.close()
+
   wsA.terminate()
   wsB.terminate()
+  wsBAnnouncer.terminate()
   wsAdmin.terminate()
   wsSubadmin.terminate()
+  wsChatAdmin.terminate()
   wsAnon.terminate()
 } catch (err) {
   fail('Section A setup/HTTP error', err)

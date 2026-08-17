@@ -38,6 +38,14 @@ export type LobbyChatStore = {
   listRecentMessages: (
     limit: number,
     excludedSenderProfileIds: readonly string[],
+    /**
+     * "Публикации от Pika.bg" cutover marker (виж
+     * adminSettingsStore.getLobbyChatPikaAnnouncementCutoffSeq) — само
+     * съобщения с seq СТРОГО ПО-ГОЛЯМ от тази стойност се връщат. Старите
+     * съобщения от преди cutover-а (включително от admin/pika_team
+     * податели) остават в базата, но никога не се изпращат като история.
+     */
+    minSeq: number,
   ) => LobbyChatMessageSnapshot[]
   deleteMessage: (input: {
     messageId: string
@@ -165,6 +173,7 @@ export async function createLobbyChatStore(
       SELECT seq, message_id, sender_profile_id, sender_display_name, sender_is_chat_admin, sender_role, body, created_at, deleted_at
       FROM lobby_chat_messages
       WHERE deleted_at IS NULL
+      AND seq > ?
       ${exclusionClause}
       ORDER BY seq DESC
       LIMIT ?;
@@ -214,12 +223,13 @@ export async function createLobbyChatStore(
   function listRecentMessages(
     limit: number,
     excludedSenderProfileIds: readonly string[],
+    minSeq: number,
   ): LobbyChatMessageSnapshot[] {
     const statement = buildRecentMessagesStatement(excludedSenderProfileIds.length)
     const rows = (
       excludedSenderProfileIds.length > 0
-        ? statement.all(...excludedSenderProfileIds, limit)
-        : statement.all(limit)
+        ? statement.all(minSeq, ...excludedSenderProfileIds, limit)
+        : statement.all(minSeq, limit)
     ) as LobbyChatMessageRow[]
 
     return rows.map(toSnapshot).reverse()

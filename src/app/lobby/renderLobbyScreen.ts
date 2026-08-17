@@ -519,10 +519,13 @@ export type LobbyScreenState = {
   /** Admin ИЛИ subadmin — вижда "⚙ Админ" менюто (само "Информация"/"Сървър" вътре, ако не е isAdmin). */
   isAdminOrSubadmin: boolean
   /**
-   * admin, subadmin ИЛИ chat_admin — единствено за показване на бутона "(×)"
-   * в общия лайв чат. НЕ дава достъп до нищо друго (виж isAdmin/isAdminOrSubadmin
-   * по-горе за админските менюта) — сървърът презаверява това право на всяко
-   * DELETE през isLobbyChatModeratorSession, така че скриването тук е само UX.
+   * admin ИЛИ pika_team — единствено за показване на бутона "(×)" в
+   * "Публикации от Pika.bg". НЕ дава достъп до нищо друго (виж isAdmin/
+   * isAdminOrSubadmin по-горе за админските менюта) — сървърът презаверява
+   * това право на всяко DELETE през isPikaAnnouncementAuthorSession, така
+   * че скриването тук е само UX. Умишлено по-тесен от старото поведение
+   * (admin/subadmin/chat_admin/pika_team/top_chat_admin) — виж §3 в
+   * "Публикации от Pika.bg" брифа.
    */
   canDeleteLobbyChat: boolean
   adminStats: AdminStatsSnapshot | null
@@ -580,14 +583,24 @@ export type LobbyScreenState = {
   // при премахване/успешно изпращане (виж createLobbyFlowController.ts).
   chatPendingImageByFriendshipId: Record<string, { file: File; previewUrl: string } | undefined>
   chatUploadingFriendshipIds: Set<string>
-  // Общ лайв чат в лобито (херо карето на началния екран) — отделен поток от
-  // chatConversations/chatMessages по-горе (личен 1:1 чат от раздел "ЧАТ").
+  // "Публикации от Pika.bg" в лобито (бивш общ лайв чат, херо карето на
+  // началния екран) — отделен поток от chatConversations/chatMessages
+  // по-горе (личен 1:1 чат от раздел "ЧАТ").
   lobbyChatMessages: LobbyChatMessageSnapshot[]
   lobbyChatSubscribed: boolean
   lobbyChatDraft: string
   lobbyChatSending: boolean
   lobbyChatErrorText: string | null
   lobbyChatFullscreen: boolean
+  /**
+   * admin ИЛИ pika_team — единствените роли, които могат да пишат в
+   * "Публикации от Pika.bg". Само UX (readonly composer + popup вместо
+   * disabled бутон) — сървърът презаверява на всяко изпращане (виж
+   * index.ts send_lobby_chat_message handler).
+   */
+  canWriteLobbyChat: boolean
+  /** Popup: "Публикации от Pika.bg" — показва се при клик/tap на composer-а от потребител без право да пише. */
+  lobbyChatWriteLockedPopupOpen: boolean
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
   guestTrialPopup: GuestTrialPopupState
@@ -969,6 +982,9 @@ export type RenderLobbyScreenOptions = {
   onLobbyChatSubmit: () => void
   onLobbyChatDelete: (messageId: string) => void
   onLobbyChatFullscreenChange: (isFullscreen: boolean) => void
+  onLobbyChatWriteLockedTap: () => void
+  onLobbyChatWriteLockedPopupClose: () => void
+  onLobbyChatWriteLockedGotoTopics: () => void
   onGuestTrialPlayClick: () => void
   onGuestTrialRegisterClick: () => void
   onGuestTrialLoginClick: () => void
@@ -1761,6 +1777,41 @@ function renderAuthModal(state: LobbyScreenState): string {
         <div style="display:grid;gap:14px;">
           ${body}
           <div data-lobby-auth-error="1" style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;${state.authErrorText ? '' : 'display:none;'}">${state.authErrorText ? escapeHtml(state.authErrorText) : ''}</div>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+/**
+ * Popup: показва се, когато логнат потребител БЕЗ право да пише (не
+ * admin/pika_team) кликне/tap-не composer-а или SEND бутона в "Публикации
+ * от Pika.bg". Отделен от renderAuthModal (auth modal е само за гост
+ * login/register CTA) — визуален стил (backdrop+card) е mirror на
+ * renderAuthModal за консистентност.
+ */
+function renderLobbyChatWriteLockedPopup(state: LobbyScreenState): string {
+  if (!state.lobbyChatWriteLockedPopupOpen) {
+    return ''
+  }
+
+  return `
+    <div data-lobby-livechat-write-locked-modal-root="1" style="position:fixed;inset:0;z-index:13000;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div data-lobby-livechat-write-locked-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.45);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,440px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
+        <button type="button" data-lobby-livechat-write-locked-modal-close="1" aria-label="Затвори" style="position:absolute;right:4px;top:4px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
+        <div style="display:grid;gap:14px;text-align:center;">
+          <div style="font-size:22px;line-height:1.25;font-weight:900;color:#f8fafc;">
+            Публикации от Pika.bg
+          </div>
+          <div style="font-size:14px;line-height:1.55;color:rgba(255,255,255,0.72);font-weight:600;">
+            Тази секция е предназначена само за публикации от екипа на Pika.bg.<br><br>
+            Ако искате да пишете, да зададете въпрос или да започнете дискусия, използвайте секция „Теми".
+          </div>
+          <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:6px;">
+            <button type="button" data-lobby-livechat-write-locked-goto-topics="1" style="height:46px;min-width:150px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;">Към Теми</button>
+            <button type="button" data-lobby-livechat-write-locked-modal-close="1" style="height:46px;min-width:130px;border:1px solid rgba(212,165,32,0.62);border-radius:8px;background:#080808;color:#f8fafc;font-size:15px;font-weight:900;cursor:pointer;">Затвори</button>
+          </div>
         </div>
       </div>
     </div>
@@ -2610,12 +2661,18 @@ export function renderLobbyChatMessageRow(state: LobbyScreenState, message: Lobb
 }
 
 /**
- * Общ лайв чат в лобито — вгражда се вдясно от hero-cards.png в лявото херо
- * каре (desktop/guest) или като компактна лента под профилната карта (mobile).
- * Гост (state.profile.profileId === null): полето е `readonly` + целият
- * `<form>` носи data-lobby-livechat-guest-gate, за да може wiring кодът да
- * пренасочи клик/submit към auth попъп с текст "Общ чат само за регистрирани
- * потребители" (не към действително изпращане) — виж attachLobbyScreenHandlers.
+ * "Публикации от Pika.bg" в лобито — вгражда се вдясно от hero-cards.png в
+ * лявото херо каре (desktop/guest) или като компактна лента под профилната
+ * карта (mobile). Composer-ът е `readonly` за всеки, който няма право да
+ * пише (гост ИЛИ логнат потребител без admin/pika_team роля):
+ * - Гост (state.profile.profileId === null): `<form>` носи
+ *   data-lobby-livechat-guest-gate — wiring кодът пренасочва клик/submit към
+ *   съществуващия auth попъп ('lobby-chat-guest' режим).
+ * - Логнат, но без право да пише (!canWriteLobbyChat): `<form>` носи
+ *   data-lobby-livechat-write-locked-gate — wiring кодът отваря новия
+ *   "Публикации от Pika.bg" popup (lobbyChatWriteLockedPopupOpen), pointerdown/
+ *   click pattern mirror на Topics non-VIP composer (renderTopicsScreen.ts) —
+ *   виж attachLobbyScreenHandlers.
  */
 function renderLobbyChatFullscreenIcon(isFullscreen: boolean): string {
   return isFullscreen
@@ -2627,18 +2684,22 @@ function renderLobbyChatPanel(state: LobbyScreenState, opts: { isGuest: boolean;
   const { isGuest, compact } = opts
   const fullscreen = compact && opts.fullscreen === true
   const isDisconnected = !state.isConnected
+  const canWrite = !isGuest && state.canWriteLobbyChat
+  const isReadOnly = isGuest || !canWrite
 
   const messagesHtml = state.lobbyChatMessages.length === 0
-    ? `<div style="margin:auto;color:rgba(255,255,255,0.42);font-size:12px;font-weight:700;text-align:center;padding:8px;">Все още няма съобщения. Пиши първи!</div>`
+    ? `<div style="margin:auto;color:rgba(255,255,255,0.42);font-size:12px;font-weight:700;text-align:center;padding:8px;">Все още няма съобщения.</div>`
     : state.lobbyChatMessages.map((m) => renderLobbyChatMessageRow(state, m)).join('')
 
   const placeholderText = isGuest
-    ? 'Влез, за да пишеш в чата...'
-    : isDisconnected
-      ? 'Изчакай връзка...'
-      : 'Напиши съобщение...'
+    ? 'Влез, за да четеш още...'
+    : !canWrite
+      ? 'Само екипът на Pika.bg може да пише тук...'
+      : isDisconnected
+        ? 'Изчакай връзка...'
+        : 'Напиши съобщение...'
 
-  const sendButtonDisabled = !isGuest && (isDisconnected || state.lobbyChatSending)
+  const sendButtonDisabled = canWrite && (isDisconnected || state.lobbyChatSending)
   const titleSize = compact ? '11px' : '13px'
   const rowHeight = compact ? '30px' : '34px'
   const fontSize = compact ? '13px' : '13px'
@@ -2647,7 +2708,7 @@ function renderLobbyChatPanel(state: LobbyScreenState, opts: { isGuest: boolean;
         <button
           type="button"
           data-lobby-livechat-fullscreen-toggle="1"
-          aria-label="${fullscreen ? 'Свий лайв чата' : 'Разгъни лайв чата на цял екран'}"
+          aria-label="${fullscreen ? 'Свий панела' : 'Разгъни панела на цял екран'}"
           title="${fullscreen ? 'Свий' : 'Цял екран'}"
           style="width:26px;height:26px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.62);border-radius:6px;background:#050505;color:#d4a520;padding:0;cursor:pointer;box-shadow:inset 0 0 0 1px rgba(212,165,32,0.12);flex:0 0 auto;"
         >
@@ -2656,11 +2717,17 @@ function renderLobbyChatPanel(state: LobbyScreenState, opts: { isGuest: boolean;
       `
     : ''
 
+  const gateAttribute = isGuest
+    ? 'data-lobby-livechat-guest-gate="1"'
+    : !canWrite
+      ? 'data-lobby-livechat-write-locked-gate="1"'
+      : ''
+
   return `
     <div style="display:flex;flex-direction:column;min-width:0;height:100%;box-sizing:border-box;">
       ${compact ? `
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-shrink:0;padding-bottom:${fullscreen ? '5' : '2'}px;border-bottom:1px solid rgba(212,165,32,0.28);">
-          <div style="font-size:${titleSize};font-weight:900;letter-spacing:0.06em;text-transform:uppercase;color:#d4a520;">Лайв чат</div>
+          <div style="font-size:${titleSize};font-weight:900;letter-spacing:0.06em;text-transform:uppercase;color:#d4a520;">Публикации от Pika.BG</div>
           <div style="display:flex;align-items:center;gap:8px;flex:0 0 auto;">
             ${isDisconnected ? `<div style="font-size:10px;font-weight:800;color:#f87171;">Няма връзка</div>` : ''}
             ${fullscreenToggle}
@@ -2668,7 +2735,7 @@ function renderLobbyChatPanel(state: LobbyScreenState, opts: { isGuest: boolean;
         </div>
       ` : `
         <div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0;padding-bottom:7px;">
-          <div style="font-size:${titleSize};font-weight:900;letter-spacing:0.06em;text-transform:uppercase;color:#d4a520;">Лайв чат</div>
+          <div style="font-size:${titleSize};font-weight:900;letter-spacing:0.06em;text-transform:uppercase;color:#d4a520;">Публикации от Pika.BG</div>
           ${isDisconnected ? `<div style="font-size:10px;font-weight:800;color:#f87171;">Няма връзка</div>` : ''}
         </div>
       `}
@@ -2678,7 +2745,7 @@ function renderLobbyChatPanel(state: LobbyScreenState, opts: { isGuest: boolean;
       ${state.lobbyChatErrorText ? `
         <div style="flex-shrink:0;margin-top:4px;font-size:11px;font-weight:800;color:#fecaca;">${escapeHtml(state.lobbyChatErrorText)}</div>
       ` : ''}
-      <form data-lobby-livechat-form="1" ${isGuest ? 'data-lobby-livechat-guest-gate="1"' : ''} style="display:flex;gap:6px;margin-top:6px;flex-shrink:0;">
+      <form data-lobby-livechat-form="1" ${gateAttribute} style="display:flex;gap:6px;margin-top:6px;flex-shrink:0;">
         <input
           type="text"
           name="lobbyChatMessage"
@@ -2686,9 +2753,9 @@ function renderLobbyChatPanel(state: LobbyScreenState, opts: { isGuest: boolean;
           value="${escapeHtml(state.lobbyChatDraft)}"
           maxlength="600"
           autocomplete="off"
-          ${isGuest ? 'readonly' : ''}
+          ${isReadOnly ? 'readonly' : ''}
           placeholder="${escapeHtml(placeholderText)}"
-          style="flex:1;min-width:0;height:${rowHeight};border-radius:7px;border:1px solid rgba(212,165,32,0.30);background:#050505;color:#ffffff;padding:0 10px;font-size:${fontSize};font-weight:600;outline:none;box-sizing:border-box;${isGuest ? 'cursor:pointer;' : ''}"
+          style="flex:1;min-width:0;height:${rowHeight};border-radius:7px;border:1px solid rgba(212,165,32,0.30);background:#050505;color:#ffffff;padding:0 10px;font-size:${fontSize};font-weight:600;outline:none;box-sizing:border-box;${isReadOnly ? 'cursor:pointer;' : ''}"
         >
         <button
           type="submit"
@@ -9903,6 +9970,7 @@ export function renderLobbyScreen(
       ${renderProfileEditModal(state)}
       ${renderChangePasswordModal(state)}
       ${renderAuthModal(state)}
+      ${renderLobbyChatWriteLockedPopup(state)}
       ${renderGuestTrialPopup(state.guestTrialPopup)}
       ${renderGuestLockedStakePopup(state.guestLockedStakePopup)}
       ${renderLevelLockedStakePopup(state.levelLockedStakePopup)}
@@ -10184,6 +10252,7 @@ export function renderLobbyScreen(
       ${renderProfileEditModal(state)}
       ${renderChangePasswordModal(state)}
       ${renderAuthModal(state)}
+      ${renderLobbyChatWriteLockedPopup(state)}
       ${renderGuestTrialPopup(state.guestTrialPopup)}
       ${renderGuestLockedStakePopup(state.guestLockedStakePopup)}
       ${renderLevelLockedStakePopup(state.levelLockedStakePopup)}
@@ -11474,12 +11543,20 @@ export function renderLobbyScreen(
     })
   })
 
-  // Общ лайв чат в лобито (херо карето / mobile лента) — гост-версия на
-  // формата носи data-lobby-livechat-guest-gate: и submit, и клик/фокус върху
-  // полето отварят auth попъпа вместо реално изпращане (сървърът и без това
-  // би отказал непостоянен профил, но за гост UX-ът е "обясни защо", не грешка).
+  // "Публикации от Pika.bg" в лобито (херо карето / mobile лента):
+  // - Гост-версия на формата носи data-lobby-livechat-guest-gate: submit и
+  //   клик/фокус върху полето отварят auth попъпа вместо реално изпращане
+  //   (сървърът и без това би отказал непостоянен профил, но за гост UX-ът
+  //   е "обясни защо", не грешка).
+  // - Логнат-без-право версия носи data-lobby-livechat-write-locked-gate:
+  //   pointerdown/click pattern mirror на Topics non-VIP composer (виж
+  //   isVipLocked блока по-долу за пълния rationale) — pointerdown само
+  //   preventDefault() (спира mobile keyboard focus навреме), click отваря
+  //   "Публикации от Pika.bg" попъпа едва след завършен tap цикъл, за да
+  //   не падне tap "остатък" върху вече отворения backdrop и да го затвори.
   root.querySelectorAll<HTMLFormElement>('[data-lobby-livechat-form="1"]').forEach((form) => {
     const isGuestGated = form.hasAttribute('data-lobby-livechat-guest-gate')
+    const isWriteLockedGated = form.hasAttribute('data-lobby-livechat-write-locked-gate')
 
     form.addEventListener('submit', (event) => {
       event.preventDefault()
@@ -11487,22 +11564,57 @@ export function renderLobbyScreen(
         options.onAuthModeChange('lobby-chat-guest')
         return
       }
+      if (isWriteLockedGated) {
+        options.onLobbyChatWriteLockedTap()
+        return
+      }
       options.onLobbyChatSubmit()
     })
 
     const input = form.querySelector<HTMLInputElement>('[data-lobby-livechat-input="1"]')
-    if (input) {
-      if (isGuestGated) {
-        input.addEventListener('click', () => options.onAuthModeChange('lobby-chat-guest'))
-        input.addEventListener('focus', () => {
-          input.blur()
-          options.onAuthModeChange('lobby-chat-guest')
-        })
-      } else {
-        input.addEventListener('input', () => options.onLobbyChatDraftChange(input.value))
-      }
+    const sendBtn = form.querySelector<HTMLButtonElement>('[data-lobby-livechat-send="1"]')
+
+    if (isGuestGated) {
+      input?.addEventListener('click', () => options.onAuthModeChange('lobby-chat-guest'))
+      input?.addEventListener('focus', () => {
+        input.blur()
+        options.onAuthModeChange('lobby-chat-guest')
+      })
+    } else if (isWriteLockedGated) {
+      input?.addEventListener('pointerdown', (event) => {
+        event.preventDefault()
+      })
+      input?.addEventListener('click', (event) => {
+        event.preventDefault()
+        options.onLobbyChatWriteLockedTap()
+      })
+      sendBtn?.addEventListener('click', (event) => {
+        event.preventDefault()
+        options.onLobbyChatWriteLockedTap()
+      })
+    } else if (input) {
+      input.addEventListener('input', () => options.onLobbyChatDraftChange(input.value))
     }
   })
+
+  root
+    .querySelectorAll<HTMLButtonElement>('[data-lobby-livechat-write-locked-modal-close="1"]')
+    .forEach((btn) => btn.addEventListener('click', options.onLobbyChatWriteLockedPopupClose))
+
+  root
+    .querySelector<HTMLElement>('[data-lobby-livechat-write-locked-modal-backdrop="1"]')
+    ?.addEventListener('click', options.onLobbyChatWriteLockedPopupClose)
+
+  root
+    .querySelector<HTMLElement>('[data-lobby-livechat-write-locked-modal-root="1"]')
+    ?.addEventListener('click', options.onLobbyChatWriteLockedPopupClose)
+  root
+    .querySelector<HTMLElement>('[data-lobby-livechat-write-locked-modal-root="1"] [role="dialog"]')
+    ?.addEventListener('click', (e) => e.stopPropagation())
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-livechat-write-locked-goto-topics="1"]')
+    ?.addEventListener('click', options.onLobbyChatWriteLockedGotoTopics)
 
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-livechat-delete]').forEach((btn) => {
     btn.addEventListener('click', () => {

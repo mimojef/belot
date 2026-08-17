@@ -72,6 +72,25 @@ export function isLobbyChatModeratorSession(
 }
 
 /**
+ * "Публикации от Pika.bg" (бивш общ Live Chat в лобито, ограничен до
+ * официален канал) — write И delete достъп: admin/pika_team. Умишлено
+ * по-тесен от isLobbyChatModeratorSession (5 роли, delete-only, за
+ * стария общ чат) — subadmin/chat_admin/top_chat_admin НЕ получават
+ * автоматично право тук само защото са могли да трият в стария общ чат
+ * (Публикации от Pika.bg брифа §2/§3: "Не разширявай автоматично
+ * правата на други роли само защото преди са имали право"). НЕ замествай
+ * isLobbyChatModeratorSession другаде с тази функция.
+ */
+export function isPikaAnnouncementAuthorSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'pika_team'
+  )
+}
+
+/**
  * Topics moderation достъп (lock/unlock/mute/unmute/delete тема) —
  * admin/subadmin/pika_team/top_chat_admin. Изрично БЕЗ chat_admin (за
  * разлика от isLobbyChatModeratorSession) — chat_admin правото е тясно

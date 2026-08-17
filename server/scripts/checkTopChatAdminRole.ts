@@ -163,15 +163,20 @@ const clientProtocol = source('src/app/network/createGameServerClient.ts')
 
 check('[1] DB migration preserves existing roles and allows top_chat_admin in all role CHECK constraints', runMigrationSmoke)
 
-check('[2] server delete authorization explicitly allows admin/subadmin/chat_admin/pika_team/top_chat_admin only', () => {
+check('[2] isLobbyChatModeratorSession (legacy 5-role helper, still exported) keeps admin/subadmin/chat_admin/pika_team/top_chat_admin', () => {
+  // isLobbyChatModeratorSession вече НЕ гейтва "Публикации от Pika.bg" delete
+  // (виж isPikaAnnouncementAuthorSession, admin/pika_team само — "Публикации
+  // от Pika.bg" брифа §3) — функцията остава в authStore.ts недокосната за
+  // съвместимост/reuse другаде, тестваме само че самата ѝ дефиниция не се е
+  // променила случайно при пренасянето на delete логиката.
   const helper = authStore.match(/function isLobbyChatModeratorSession[\s\S]*?\n}/)?.[0] ?? ''
-  assert(helper.includes("role === 'admin'"), 'admin missing from moderator allowlist')
-  assert(helper.includes("role === 'subadmin'"), 'subadmin missing from moderator allowlist')
-  assert(helper.includes("role === 'chat_admin'"), 'chat_admin missing from moderator allowlist')
-  assert(helper.includes("role === 'pika_team'"), 'pika_team missing from moderator allowlist')
-  assert(helper.includes("role === 'top_chat_admin'"), 'top_chat_admin missing from moderator allowlist')
-  assert(!helper.includes("role === 'player'"), 'player must not be part of moderator allowlist')
-  assert(index.includes("actorRoleAtDeletion: session.account.role as 'admin' | 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin'"), 'delete audit cast missing top_chat_admin')
+  assert(helper.includes("role === 'admin'"), 'admin missing from legacy moderator allowlist')
+  assert(helper.includes("role === 'subadmin'"), 'subadmin missing from legacy moderator allowlist')
+  assert(helper.includes("role === 'chat_admin'"), 'chat_admin missing from legacy moderator allowlist')
+  assert(helper.includes("role === 'pika_team'"), 'pika_team missing from legacy moderator allowlist')
+  assert(helper.includes("role === 'top_chat_admin'"), 'top_chat_admin missing from legacy moderator allowlist')
+  assert(!helper.includes("role === 'player'"), 'player must not be part of legacy moderator allowlist')
+  assert(index.includes("actorRoleAtDeletion: session.account.role as 'admin' | 'pika_team'"), '"Публикации от Pika.bg" delete audit cast should be narrowed to admin | pika_team only, top_chat_admin must not be able to delete')
 })
 
 check('[3] top_chat_admin does not gain admin/subadmin section access or role management access', () => {

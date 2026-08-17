@@ -25,7 +25,7 @@ import {
   getSessionTokenFromCookieHeader,
   isAdminOrSubadminSession,
   isFullAdminSession,
-  isLobbyChatModeratorSession,
+  isPikaAnnouncementAuthorSession,
   isTopicMessageModeratorSession,
   isTopicModeratorSession,
   isTopicWholeTopicModeratorSession,
@@ -613,6 +613,14 @@ const topicModerationStore = await createTopicModerationStore(databaseBootstrap.
 const lobbyChatSubscriberConnectionIds = new Set<ConnectionId>()
 
 const LOBBY_CHAT_HISTORY_LIMIT = 50
+// "Публикации от Pika.bg" cutover marker — прочетен ЕДНАГА при startup от
+// admin_settings (seed-нат ЕДИН ПЪТ от migration 20260817_001, никога не се
+// преизчислява при restart). Съобщения от преди cutover-а (стария общ Live
+// Chat, включително от admin/pika_team податели) остават в базата, но не се
+// изпращат като история — виж lobbyChatStore.listRecentMessages извикването
+// по-долу. НЕ ползвай lobbyChatLastAnnouncedSeq (getMaxSeq() при startup) за
+// това — той е cross-instance broadcast dedup baseline, различна семантика.
+const lobbyChatPikaAnnouncementCutoffSeq = adminSettingsStore.getLobbyChatPikaAnnouncementCutoffSeq()
 const LOBBY_CHAT_POLL_INTERVAL_MS = 700
 const LOBBY_CHAT_POLL_BATCH_SIZE = 200
 const LOBBY_CHAT_RETENTION_DAYS = 30
@@ -11350,11 +11358,16 @@ async function handleChatAttachmentDownloadRequest(
   }
 }
 
-// Модерация на общия лайв чат — admin, subadmin ИЛИ chat_admin
-// (isLobbyChatModeratorSession проверява ролята НА МОМЕНТА през жива JOIN
-// към accounts, виж authStore.getSession). HTTP (не WS), нарочно — за да
-// имаме прясна cookie-based сесийна проверка на всяко изтриване, а не роля
-// кеширана само при WS handshake-а на дълготрайна връзка.
+// Модерация на "Публикации от Pika.bg" (бивш общ лайв чат, вече ограничен
+// до официален канал) — САМО admin ИЛИ pika_team (isPikaAnnouncementAuthorSession),
+// умишлено по-тесен от isLobbyChatModeratorSession (5 роли) — subadmin/
+// chat_admin/top_chat_admin вече не трият тук (Публикации от Pika.bg брифа §3:
+// "Не разширявай автоматично правата на други роли само защото преди са
+// имали право да трият в общия Live Chat"). isPikaAnnouncementAuthorSession
+// проверява ролята НА МОМЕНТА през жива JOIN към accounts, виж
+// authStore.getSession. HTTP (не WS), нарочно — за да имаме прясна
+// cookie-based сесийна проверка на всяко изтриване, а не роля кеширана само
+// при WS handshake-а на дълготрайна връзка.
 async function handleLobbyChatDeleteRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -11369,10 +11382,10 @@ async function handleLobbyChatDeleteRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (!isLobbyChatModeratorSession(session)) {
+  if (!isPikaAnnouncementAuthorSession(session)) {
     sendJsonResponse(res, 403, {
       ok: false,
-      message: 'Нямаш право да триеш съобщения от общия чат.',
+      message: 'Нямаш право да триеш публикации от Pika.bg.',
     })
     return true
   }
@@ -11384,12 +11397,11 @@ async function handleLobbyChatDeleteRequest(
     return true
   }
 
-  // isLobbyChatModeratorSession гарантира role !== 'player' — типовият predicate
-  // стеснява само session (non-null), не и вложеното account.role поле.
+  // isPikaAnnouncementAuthorSession гарантира role === 'admin' | 'pika_team'.
   const result = lobbyChatStore.deleteMessage({
     messageId,
     actorAccountId: session.account.accountId,
-    actorRoleAtDeletion: session.account.role as 'admin' | 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin',
+    actorRoleAtDeletion: session.account.role as 'admin' | 'pika_team',
   })
 
   if (!result.ok && result.code === 'not_found') {
@@ -14866,7 +14878,11 @@ wsServer.on('connection', (socket, request) => {
           ? [...getLobbyChatBlockedSet(latestConnection.profileId)]
           : []
 
-        const history = lobbyChatStore.listRecentMessages(LOBBY_CHAT_HISTORY_LIMIT, excludedSenderProfileIds)
+        const history = lobbyChatStore.listRecentMessages(
+          LOBBY_CHAT_HISTORY_LIMIT,
+          excludedSenderProfileIds,
+          lobbyChatPikaAnnouncementCutoffSeq,
+        )
 
         safeSendToConnection(connection.id, {
           type: 'lobby_chat_history',
@@ -14912,6 +14928,12 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        const senderRoleForGate = authStore.getAccountRoleForProfile(latestConnection.profileId) ?? 'player'
+        if (senderRoleForGate !== 'admin' && senderRoleForGate !== 'pika_team') {
+          sendLobbyChatError('forbidden', 'Само екипът на Pika.bg може да публикува тук.')
+          return
+        }
+
         const validation = validateLobbyChatBody(message.body)
 
         if (!validation.ok) {
@@ -14936,8 +14958,10 @@ wsServer.on('connection', (socket, request) => {
 
         const publicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
         const senderDisplayName = publicProfile?.displayName?.trim() || 'Играч'
-        const senderRole = authStore.getAccountRoleForProfile(latestConnection.profileId) ?? 'player'
-        const senderIsChatAdmin = senderRole === 'chat_admin'
+        const senderRole = senderRoleForGate
+        // senderRoleForGate е стеснен до 'admin' | 'pika_team' от write gate-а
+        // по-горе — chat_admin вече не може да изпраща тук, значи винаги false.
+        const senderIsChatAdmin = false
 
         const snapshot = lobbyChatStore.insertMessage({
           senderProfileId: latestConnection.profileId,

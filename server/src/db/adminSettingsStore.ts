@@ -10,6 +10,15 @@ export type AdminSettingsStore = {
   updateSettings: (
     input: Partial<AdminSettingsSnapshot>,
   ) => { ok: true; settings: AdminSettingsSnapshot } | { ok: false; message: string }
+  /**
+   * Persistent cutoff за "Публикации от Pika.bg" — seq на последното
+   * съобщение от СТАРИЯ общ Live Chat в момента на cutover-а (seed-нато
+   * ЕДНАГА от migration 20260817_001, никога не се преизчислява при
+   * restart). Съобщения с seq <= тази стойност НЕ се показват в новата
+   * секция (виж lobbyChatStore.listRecentMessages/pollNewMessages
+   * извикванията в index.ts). Не е admin-editable — само read.
+   */
+  getLobbyChatPikaAnnouncementCutoffSeq: () => number
   close: () => void
 }
 
@@ -27,6 +36,8 @@ const SETTING_KEYS = {
   signupBonusYellowCoins: 'signup_bonus_yellow_coins',
   profileNameChangePrice: 'profile_name_change_price',
 } as const
+
+const LOBBY_CHAT_PIKA_ANNOUNCEMENT_CUTOFF_SEQ_KEY = 'lobby_chat_pika_announcement_cutoff_seq'
 
 function normalizeSettingNumber(
   value: unknown,
@@ -87,6 +98,13 @@ export async function createAdminSettingsStore(
     ON CONFLICT(setting_key) DO UPDATE SET
       setting_value = excluded.setting_value,
       updated_at = CURRENT_TIMESTAMP;
+  `)
+
+  const selectLobbyChatCutoffSeqStatement = database.prepare(`
+    SELECT setting_value
+    FROM admin_settings
+    WHERE setting_key = ?
+    LIMIT 1;
   `)
 
   function getSettings(): AdminSettingsSnapshot {
@@ -151,6 +169,18 @@ export async function createAdminSettingsStore(
     }
   }
 
+  // Ако migration 20260817_001 по някаква причина не е приложена (напр.
+  // изолирана тестова база, seed-ната преди тя да съществува) — fallback 0
+  // означава "няма cutoff", т.е. цялата стара история би се показала. Това
+  // е безопасно за нови/тестови бази (без стари съобщения за скриване), не
+  // и заместител на реалната миграция за production базата.
+  function getLobbyChatPikaAnnouncementCutoffSeq(): number {
+    const row = selectLobbyChatCutoffSeqStatement.get(
+      LOBBY_CHAT_PIKA_ANNOUNCEMENT_CUTOFF_SEQ_KEY,
+    ) as SettingRow | undefined
+    return parseStoredInteger(row?.setting_value ?? '', 0)
+  }
+
   function close(): void {
     database.close()
   }
@@ -158,6 +188,7 @@ export async function createAdminSettingsStore(
   return {
     getSettings,
     updateSettings,
+    getLobbyChatPikaAnnouncementCutoffSeq,
     close,
   }
 }
