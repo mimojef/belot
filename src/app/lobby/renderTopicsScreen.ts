@@ -21,6 +21,8 @@ import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup
 // по-малко от сегашното"), особено ценно на mobile ширина.
 const REPLY_INDENT_PX = 14
 const TOPIC_MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000
+/** "Лафче" system topic fixed id — seed-нат от migration 20260817_002, mirror на server LAFCHE_TOPIC_ID (index.ts). */
+export const LAFCHE_TOPIC_ID = 'topic-lafche'
 type TopicActionIconKind = 'like' | 'reply' | 'edit' | 'delete' | 'moderate'
 
 function renderTopicActionIcon(kind: TopicActionIconKind, options: { filled?: boolean } = {}): string {
@@ -48,6 +50,18 @@ const TOPIC_MODERATION_DURATION_OPTIONS: Array<{ ms: number; label: string }> = 
   { ms: 60 * 60 * 1000, label: '1 час' },
   { ms: 3 * 60 * 60 * 1000, label: '3 часа' },
   { ms: 24 * 60 * 60 * 1000, label: '24 часа' },
+]
+
+// Кратка, опционална reason category taxonomy (mute-evidence брифа §10) —
+// НЕ заменя free-text reason полето, само допълва го за по-лесно
+// filtriране в internal audit изгледа. '' value = null category.
+const TOPIC_MODERATION_REASON_CATEGORY_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: '', label: '— без категория —' },
+  { value: 'insults', label: 'Обиди / лични нападки' },
+  { value: 'provocation', label: 'Провокации / конфликт' },
+  { value: 'spam', label: 'Спам / flood' },
+  { value: 'inappropriate_content', label: 'Неподходящо съдържание' },
+  { value: 'other', label: 'Друго' },
 ]
 
 function escapeHtml(value: string): string {
@@ -298,6 +312,7 @@ function renderTopicAuthorBlock(
   senderAvatarUrl: string | null,
   createdAt: string,
   editedAt: string | null,
+  messageContext: { messageId: string; isRoot: boolean } | null = null,
 ): string {
   // MUTE/UNMUTE compact icon бутон — само за модератор, само за активната
   // тема (mute е topic-specific, брифа т.4), скрит за собствения профил на
@@ -306,6 +321,9 @@ function renderTopicAuthorBlock(
   const ownProfileId = state.profile.profileId
   const canModerateThisAuthor = state.isTopicModerator && state.activeTopicId !== null && senderProfileId !== ownProfileId
   const isMuteStatusLoading = state.topicMuteStatusLoadingProfileId === senderProfileId
+  // messageContext — постът, до чиито автор мутиращият бутон стои
+  // (mute-evidence брифа §1/§3), за server-side snapshot при submit.
+  const sourceKind = messageContext === null ? 'unspecified' : (messageContext.isRoot ? 'topic_root' : 'topic_reply')
   // "Лично" живее единствено в долния meta row (renderTopicMetaRow) — за
   // ВСИЧКИ контексти (general root, thread root header, replies), не само
   // за root картите. Header-ът показва само avatar + име + timestamp.
@@ -315,6 +333,8 @@ function renderTopicAuthorBlock(
         type="button"
         data-topic-mute-toggle="${escapeHtml(senderProfileId)}"
         data-topic-mute-toggle-name="${escapeHtml(senderDisplayName)}"
+        ${messageContext !== null ? `data-topic-mute-toggle-message-id="${escapeHtml(messageContext.messageId)}"` : ''}
+        data-topic-mute-toggle-source-kind="${sourceKind}"
         title="Модерация"
         aria-label="Модерация на ${escapeHtml(senderDisplayName)}"
         ${isMuteStatusLoading ? 'disabled' : ''}
@@ -517,7 +537,7 @@ export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySn
   return `
     <div data-topic-reply="${escapeHtml(reply.messageId)}">
       <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 4px 8px 12px;">
-        ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt, reply.editedAt)}
+        ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt, reply.editedAt, { messageId: reply.messageId, isRoot: false })}
       </div>
       <div style="margin:-6px 0 6px 58px;">
         ${isEditing
@@ -620,7 +640,7 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
     <div data-topic-message="${escapeHtml(message.messageId)}" ${cardOpenAttrs} class="topic-root-card${isThread ? ' topic-root-card-thread' : ' topic-root-card-clickable'}${threadUnreadBadge !== null ? ' topic-root-card-has-unread' : ''}">
       ${threadUnreadBadge !== null ? `<span data-topic-thread-unread-badge="${escapeHtml(message.messageId)}" aria-label="${escapeHtml(`${message.unreadCount} непрочетени в разговора`)}" style="position:absolute;top:10px;right:10px;min-width:20px;height:20px;border-radius:10px;background:#ef4444;color:#fff;font-size:11px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;line-height:1;box-shadow:0 0 0 2px rgba(0,0,0,0.72);z-index:1;">${escapeHtml(threadUnreadBadge)}</span>` : ''}
       <div style="display:flex;align-items:flex-start;gap:10px;padding:12px 12px 0;">
-        ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt)}
+        ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt, { messageId: message.messageId, isRoot: true })}
       </div>
       <div style="padding:0 12px 12px 58px;">
         ${isEditing
@@ -634,6 +654,96 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
           ${renderTopicMessageDeleteButton(state, message.messageId, true, message.senderProfileId, message.replyCount)}
         </div>
         ${renderTopicMetaRow(state, message.messageId, true, message.senderProfileId, message.senderDisplayName, message.createdAt, message.replyCount, message.lastActivityAt)}
+      </div>
+    </div>
+  `
+}
+
+// "Лафче" mute бутон — icon-only, огледален на muteControl блока в
+// renderTopicAuthorBlock, но gated по state.isLafcheModerator (3 роли:
+// admin/pika_team/top_chat_admin), НЕ state.isTopicModerator (4 роли, вкл.
+// subadmin) — "Лафче" брифа §6. data-topic-mute-toggle маркерът е СЪЩИЯТ
+// като normal Topics — wiring кодът в renderLobbyScreen.ts вече чете
+// state.activeTopicId динамично (виж onTopicMuteClick), значи reuse-ва се
+// 1:1 без промяна там; server-side branch-ва authorization по topicId
+// (isLafcheModeratorSession само за topic-lafche, виж index.ts).
+function renderLafcheMuteButton(state: LobbyScreenState, senderProfileId: string, senderDisplayName: string, messageId: string): string {
+  const ownProfileId = state.profile.profileId
+  if (!state.isLafcheModerator || senderProfileId === ownProfileId) return ''
+  const isMuteStatusLoading = state.topicMuteStatusLoadingProfileId === senderProfileId
+  return `
+    <button
+      type="button"
+      data-topic-mute-toggle="${escapeHtml(senderProfileId)}"
+      data-topic-mute-toggle-name="${escapeHtml(senderDisplayName)}"
+      data-topic-mute-toggle-message-id="${escapeHtml(messageId)}"
+      data-topic-mute-toggle-source-kind="lafche_post"
+      class="topic-message-action-btn"
+      title="Модерация"
+      aria-label="Модерация на ${escapeHtml(senderDisplayName)}"
+      ${isMuteStatusLoading ? 'disabled' : ''}
+    >${renderTopicActionIcon('moderate')}</button>
+  `
+}
+
+// "Лафче" delete бутон — moderator (isLafcheModerator, 3 роли) ИЛИ author
+// на самия пост. За разлика от renderTopicMessageDeleteButton (normal
+// Topics), няма "blocked own root with replies" клон — Лафче постовете
+// никога нямат replies (reply functionality не е активирано за
+// topic-lafche, "Лафче" брифа §4), значи авторът винаги може да трие
+// собствения си пост.
+function renderLafcheDeleteButton(state: LobbyScreenState, messageId: string, senderProfileId: string): string {
+  const isModerator = state.isLafcheModerator
+  const isOwner = state.profile.profileId !== null && senderProfileId === state.profile.profileId
+  if (!isModerator && !isOwner) return ''
+  return `
+    <button
+      type="button"
+      data-topic-message-delete="${escapeHtml(messageId)}"
+      data-topic-message-delete-is-root="1"
+      data-topic-message-delete-is-moderator-action="${isModerator ? '1' : '0'}"
+      class="topic-message-action-btn"
+      aria-label="Изтрий"
+      data-tooltip="Изтрий"
+    >${renderTopicActionIcon('delete')}</button>
+  `
+}
+
+// "Лафче" пост — плосък елемент в общ поток (Лафче брифа §4): avatar+име+
+// съдържание+attachment, БЕЗ timestamp/"Преди ..."/бутон "Лично"/reply
+// button/reply counter/replies/thread. Разделителна линия между постовете
+// е CSS sibling selector (виж .lafche-post + .lafche-post::before по-долу,
+// mirror на established [data-topic-reply] + [data-topic-reply] pattern-а),
+// не border на самия елемент — избягва двойна линия при hover/last-child.
+function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMessageSnapshot): string {
+  const isEditing = state.topicMessageEdit?.messageId === message.messageId
+  return `
+    <div data-topic-message="${escapeHtml(message.messageId)}" class="lafche-post">
+      <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 4px;">
+        <button
+          type="button"
+          data-topic-message-author="${escapeHtml(message.senderProfileId)}"
+          data-topic-message-author-name="${escapeHtml(message.senderDisplayName)}"
+          style="border:0;background:transparent;padding:0;cursor:pointer;flex:0 0 auto;"
+          aria-label="Профил на ${escapeHtml(message.senderDisplayName)}"
+        >${renderMessageAvatar(message.senderDisplayName, message.senderAvatarUrl)}</button>
+        <div style="flex:1;min-width:0;">
+          <button
+            type="button"
+            data-topic-message-author="${escapeHtml(message.senderProfileId)}"
+            data-topic-message-author-name="${escapeHtml(message.senderDisplayName)}"
+            style="border:0;background:transparent;padding:0;cursor:pointer;font-size:14px;font-weight:900;color:#f8fafc;display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+          >${escapeHtml(message.senderDisplayName)}</button>
+          ${isEditing
+            ? renderTopicMessageEditForm(state, message.messageId)
+            : (message.body.length > 0 ? `<div style="margin-top:2px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body)}</div>` : '')
+          }
+          ${message.attachment ? renderTopicAttachment(message.attachment, state.apiBaseUrl) : ''}
+          <div style="margin-top:4px;margin-left:-9px;display:flex;align-items:center;gap:6px;">
+            ${renderLafcheMuteButton(state, message.senderProfileId, message.senderDisplayName, message.messageId)}
+            ${renderLafcheDeleteButton(state, message.messageId, message.senderProfileId)}
+          </div>
+        </div>
       </div>
     </div>
   `
@@ -657,6 +767,7 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
   }
 
   const messages = state.topicMessages ?? []
+  const isLafche = state.activeTopicId === LAFCHE_TOPIC_ID
 
   if (messages.length === 0) {
     return `
@@ -666,7 +777,12 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
     `
   }
 
-  const loadOlderIndicator = state.topicOlderMessagesLoading
+  // "Лафче" никога не показва load-older UI (Лафче брифа §3: "НЕ показвай
+  // load older", "НЕ прави pagination UI") — независимо от
+  // topicOlderMessagesLoading state-а (той просто никога не се задейства
+  // за тази тема, защото клиентът никога не извиква load-older action-а,
+  // но explicit isLafche guard тук е defense-in-depth за яснота).
+  const loadOlderIndicator = !isLafche && state.topicOlderMessagesLoading
     ? `<div style="text-align:center;padding:8px 0;color:rgba(248,250,252,0.42);font-size:12px;">Зареждане на по-стари...</div>`
     : ''
 
@@ -867,11 +983,27 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
         .topic-message-action-btn:focus::after,
         .topic-message-action-btn[data-tooltip-open="1"]::after { opacity: 1; }
       }
+      /* "Лафче" разделителна линия между постовете (Лафче брифа §4) —
+         sibling selector, mirror на [data-topic-reply] + [data-topic-reply]
+         pattern-а (renderTopicThreadView) — без border на самия елемент,
+         за да няма линия преди първия/след последния пост. */
+      .lafche-post + .lafche-post {
+        border-top: 1px solid rgba(255,255,255,0.12);
+      }
     </style>
     <div data-topic-messages-scroll="1" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;">
       ${loadOlderIndicator}
-      <div data-topic-messages-list="1" style="display:flex;flex-direction:column;gap:8px;padding:6px 6px 10px;box-sizing:border-box;">
-        ${messages.map((m) => renderTopicMessageRow(state, m)).join('')}
+      <div data-topic-messages-list="1" style="display:flex;flex-direction:column;${isLafche ? '' : 'gap:8px;'}padding:6px 6px 10px;box-sizing:border-box;">
+        ${isLafche
+          // state.topicMessages е поддържан newest-first (sortTopicMessagesByActivity,
+          // виж createLobbyFlowController.ts) — General card feed reuse-ва
+          // това directno (top=newest), но "Лафче" иска chat-style
+          // oldest-top/newest-bottom (Лафче брифа §3), затова reverse само
+          // тук, само за render — НЕ пипаме споделения state array (той е
+          // общ за General/Лафче, докато activeTopicId се превключва).
+          ? [...messages].reverse().map((m) => renderLafcheMessageRow(state, m)).join('')
+          : messages.map((m) => renderTopicMessageRow(state, m)).join('')
+        }
       </div>
     </div>
   `
@@ -1094,9 +1226,10 @@ function renderTopicModerationActionPopup(state: LobbyScreenState): string {
       <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
         <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
           <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:4px;">Отглуши потребител?</div>
-          <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:20px;">
+          <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:12px;">
             ${escapeHtml(pending.targetDisplayName)} е заглушен в секция „Теми“${pending.mutedUntil ? ` до ${escapeHtml(formatModerationExpiry(pending.mutedUntil))}` : ''}.
           </div>
+          <button type="button" data-topic-mute-history-open-for-profile="${escapeHtml(pending.targetProfileId)}" style="border:0;background:transparent;color:#d4a520;text-decoration:underline;font-size:12px;font-weight:800;cursor:pointer;padding:0;margin-bottom:16px;display:block;">История на ограниченията на този профил</button>
           ${state.topicModerationActionErrorText ? `<div style="font-size:12px;color:#f87171;margin-bottom:8px;">${escapeHtml(state.topicModerationActionErrorText)}</div>` : ''}
           <div style="display:flex;gap:12px;">
             <button type="button" data-topic-moderation-cancel="1" ${busy ? 'disabled' : ''} style="
@@ -1127,7 +1260,8 @@ function renderTopicModerationActionPopup(state: LobbyScreenState): string {
     <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
       <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
         <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:4px;">${escapeHtml(title)}</div>
-        <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:16px;">${subtitle}</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:${isLock ? '16' : '4'}px;">${subtitle}</div>
+        ${!isLock ? `<button type="button" data-topic-mute-history-open-for-profile="${escapeHtml(pending.targetProfileId)}" style="border:0;background:transparent;color:#d4a520;text-decoration:underline;font-size:12px;font-weight:800;cursor:pointer;padding:0;margin-bottom:16px;display:block;">История на ограниченията на този профил</button>` : ''}
 
         <div style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.7);margin-bottom:8px;">Продължителност</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px;">
@@ -1143,6 +1277,19 @@ function renderTopicModerationActionPopup(state: LobbyScreenState): string {
             `
           }).join('')}
         </div>
+
+        ${!isLock ? `
+        <div style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.7);margin-bottom:8px;">Категория (по избор)</div>
+        <select
+          data-topic-moderation-reason-category="1"
+          ${busy ? 'disabled' : ''}
+          style="width:100%;box-sizing:border-box;border-radius:8px;border:1px solid rgba(212,165,32,0.24);background:#050505;color:#f8fafc;padding:9px 10px;font-size:13px;font-weight:600;outline:none;margin-bottom:12px;"
+        >
+          ${TOPIC_MODERATION_REASON_CATEGORY_OPTIONS.map((opt) => `
+            <option value="${opt.value}" ${state.topicModerationActionReasonCategory === opt.value ? 'selected' : ''}>${escapeHtml(opt.label)}</option>
+          `).join('')}
+        </select>
+        ` : ''}
 
         <div style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.7);margin-bottom:8px;">Причина</div>
         <textarea
@@ -1168,6 +1315,145 @@ function renderTopicModerationActionPopup(state: LobbyScreenState): string {
             border-radius:10px;color:#080808;font-size:14px;font-weight:900;
             cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.7' : '1'};
           ">${busy ? 'Изчакай…' : (isLock ? 'Заключи' : 'Заглуши')}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+const TOPIC_MUTE_EVIDENCE_REASON_CATEGORY_LABELS: Record<string, string> = {
+  insults: 'Обиди / лични нападки',
+  provocation: 'Провокации / конфликт',
+  spam: 'Спам / flood',
+  inappropriate_content: 'Неподходящо съдържание',
+  other: 'Друго',
+}
+
+const TOPIC_MUTE_EVIDENCE_STATUS_LABELS: Record<string, { text: string; color: string }> = {
+  active: { text: 'Активно', color: '#fde68a' },
+  expired: { text: 'Изтекло', color: 'rgba(255,255,255,0.5)' },
+  manually_unmuted: { text: 'Отменено предсрочно', color: '#86efac' },
+}
+
+/**
+ * "Моята история" — user-facing mute-evidence изглед (mute-evidence брифа
+ * §6). ИЗРИЧНО НЕ показва moderator identity — само "Наложено от
+ * модерацията на Pika.bg" (§6: "На потребителя НЕ показвай кой конкретен
+ * moderator го е наложил"), server response-ът (handleTopicMuteEvidenceForSelfRequest)
+ * вече не носи mutedByAccountId изобщо, значи UI-то структурно не може да
+ * го изложи тук дори по грешка.
+ */
+function renderTopicMuteHistoryPopup(state: LobbyScreenState): string {
+  if (!state.topicMuteHistoryPopupOpen) return ''
+
+  const entries = state.topicMuteHistoryEntries
+  const loading = state.topicMuteHistoryLoading
+  const errorText = state.topicMuteHistoryErrorText
+
+  const bodyHtml = loading
+    ? `<div style="padding:24px 0;text-align:center;color:rgba(255,255,255,0.5);font-size:13px;">Зареждане...</div>`
+    : errorText
+      ? `<div style="padding:16px 0;text-align:center;color:#f87171;font-size:13px;">${escapeHtml(errorText)}</div>`
+      : entries === null || entries.length === 0
+        ? `<div style="padding:24px 0;text-align:center;color:rgba(255,255,255,0.42);font-size:13px;">Нямаш наложени ограничения.</div>`
+        : entries.map((entry) => {
+            const statusInfo = TOPIC_MUTE_EVIDENCE_STATUS_LABELS[entry.status] ?? { text: entry.status, color: 'rgba(255,255,255,0.6)' }
+            const categoryLabel = entry.reasonCategory ? TOPIC_MUTE_EVIDENCE_REASON_CATEGORY_LABELS[entry.reasonCategory] : null
+            return `
+              <div style="border:1px solid rgba(255,255,255,0.14);border-radius:10px;padding:12px;margin-bottom:10px;">
+                <div style="font-size:14px;font-weight:900;color:#fff;margin-bottom:4px;">Ограничение за публикуване</div>
+                <div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:2px;">Наложено: ${escapeHtml(formatModerationExpiry(entry.createdAt))}</div>
+                <div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:2px;">До: ${escapeHtml(formatModerationExpiry(entry.mutedUntil))}</div>
+                <div style="font-size:12px;font-weight:800;margin-bottom:2px;color:${statusInfo.color};">Статус: ${escapeHtml(statusInfo.text)}</div>
+                ${entry.unmutedAt ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:2px;">Предсрочно отменено: ${escapeHtml(formatModerationExpiry(entry.unmutedAt))}</div>` : ''}
+                ${categoryLabel ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:2px;">Категория: ${escapeHtml(categoryLabel)}</div>` : ''}
+                ${entry.reasonText ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:8px;">Причина: ${escapeHtml(entry.reasonText)}</div>` : '<div style="margin-bottom:8px;"></div>'}
+                <div style="font-size:11px;font-weight:800;color:rgba(255,255,255,0.42);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Публикация, заради която е наложено ограничението:</div>
+                <div style="background:#050505;border-radius:8px;padding:10px;border:1px solid rgba(255,255,255,0.08);">
+                  ${entry.sourceBodySnapshot.length > 0
+                    ? `<div style="font-size:13px;line-height:1.4;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;white-space:pre-wrap;">${escapeHtml(entry.sourceBodySnapshot)}</div>`
+                    : `<div style="font-size:12px;color:rgba(255,255,255,0.4);font-style:italic;">${entry.sourceKind === 'unspecified' ? 'Няма прикачена публикация към това ограничение.' : 'Публикацията не съдържа текст.'}</div>`
+                  }
+                  ${entry.sourceAttachment ? `<img src="${escapeHtml(entry.sourceAttachment.viewUrl)}" alt="" style="display:block;max-width:100%;width:auto;max-height:220px;border-radius:6px;margin-top:8px;">` : ''}
+                  ${entry.originalMessagePostDeleted ? `<div style="font-size:11px;color:rgba(255,255,255,0.38);margin-top:6px;">Публикацията вече е изтрита от потока.</div>` : ''}
+                </div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.38);margin-top:8px;">Наложено от модерацията на Pika.bg</div>
+              </div>
+            `
+          }).join('')
+
+  return `
+    <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
+      <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:20px;max-width:460px;width:100%;max-height:82vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex:0 0 auto;">
+          <div style="font-size:17px;font-weight:900;color:#fff;">Моята история в „Теми“</div>
+          <button type="button" data-topic-mute-history-close="1" aria-label="Затвори" style="border:0;background:transparent;color:rgba(255,255,255,0.5);font-size:20px;line-height:1;cursor:pointer;padding:4px;">×</button>
+        </div>
+        <div style="overflow-y:auto;flex:1;min-height:0;">
+          ${bodyHtml}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+/**
+ * Internal/moderator "история на профила" popup (mute-evidence брифа §7) —
+ * отваря се от "История на ограниченията на този профил" линка в mute/
+ * unmute action popup-а (repeat-offender visibility). За разлика от
+ * renderTopicMuteHistoryPopup (user-facing, §6), тук ПОКАЗВАМЕ moderator
+ * identity (mutedByAccountId) — виж §7: "кой moderator го е наложил".
+ * Достъпен само за isTopicModerator (server-authoritative gate вече
+ * приложен в handleTopicMuteEvidenceForModeratorRequest).
+ */
+function renderTopicMuteHistoryModeratorPopup(state: LobbyScreenState): string {
+  const targetProfileId = state.topicMuteHistoryModeratorTargetProfileId
+  if (targetProfileId === null) return ''
+
+  const entries = state.topicMuteHistoryModeratorEntries
+  const loading = state.topicMuteHistoryModeratorLoading
+  const errorText = state.topicMuteHistoryModeratorErrorText
+
+  const bodyHtml = loading
+    ? `<div style="padding:24px 0;text-align:center;color:rgba(255,255,255,0.5);font-size:13px;">Зареждане...</div>`
+    : errorText
+      ? `<div style="padding:16px 0;text-align:center;color:#f87171;font-size:13px;">${escapeHtml(errorText)}</div>`
+      : entries === null || entries.length === 0
+        ? `<div style="padding:24px 0;text-align:center;color:rgba(255,255,255,0.42);font-size:13px;">Няма наложени ограничения за този профил.</div>`
+        : entries.map((entry) => {
+            const statusInfo = TOPIC_MUTE_EVIDENCE_STATUS_LABELS[entry.status] ?? { text: entry.status, color: 'rgba(255,255,255,0.6)' }
+            const categoryLabel = entry.reasonCategory ? TOPIC_MUTE_EVIDENCE_REASON_CATEGORY_LABELS[entry.reasonCategory] : null
+            return `
+              <div style="border:1px solid rgba(255,255,255,0.14);border-radius:10px;padding:12px;margin-bottom:10px;">
+                <div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:2px;">Наложено: ${escapeHtml(formatModerationExpiry(entry.createdAt))}</div>
+                <div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:2px;">До: ${escapeHtml(formatModerationExpiry(entry.mutedUntil))}</div>
+                <div style="font-size:12px;font-weight:800;margin-bottom:2px;color:${statusInfo.color};">Статус: ${escapeHtml(statusInfo.text)}</div>
+                ${entry.unmutedAt ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:2px;">Предсрочно отменено: ${escapeHtml(formatModerationExpiry(entry.unmutedAt))}${entry.unmutedByAccountId ? ` (account ${escapeHtml(entry.unmutedByAccountId)})` : ''}</div>` : ''}
+                <div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:2px;">Наложил: ${entry.mutedByAccountId ? escapeHtml(entry.mutedByAccountId) : '—'} (${escapeHtml(entry.mutedByRole)})</div>
+                ${categoryLabel ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:2px;">Категория: ${escapeHtml(categoryLabel)}</div>` : ''}
+                ${entry.reasonText ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:8px;">Причина: ${escapeHtml(entry.reasonText)}</div>` : '<div style="margin-bottom:8px;"></div>'}
+                <div style="font-size:11px;font-weight:800;color:rgba(255,255,255,0.42);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">Публикация:</div>
+                <div style="background:#050505;border-radius:8px;padding:10px;border:1px solid rgba(255,255,255,0.08);">
+                  ${entry.sourceBodySnapshot.length > 0
+                    ? `<div style="font-size:13px;line-height:1.4;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;white-space:pre-wrap;">${escapeHtml(entry.sourceBodySnapshot)}</div>`
+                    : `<div style="font-size:12px;color:rgba(255,255,255,0.4);font-style:italic;">${entry.sourceKind === 'unspecified' ? 'Няма прикачена публикация към това ограничение.' : 'Публикацията не съдържа текст.'}</div>`
+                  }
+                  ${entry.sourceAttachment ? `<img src="${escapeHtml(entry.sourceAttachment.viewUrl)}" alt="" style="display:block;max-width:100%;width:auto;max-height:220px;border-radius:6px;margin-top:8px;">` : ''}
+                  ${entry.originalMessageDeletedAt ? `<div style="font-size:11px;color:rgba(255,255,255,0.38);margin-top:6px;">Публикацията е изтрита: ${escapeHtml(formatModerationExpiry(entry.originalMessageDeletedAt))}</div>` : ''}
+                </div>
+              </div>
+            `
+          }).join('')
+
+  return `
+    <div style="position:fixed;inset:0;z-index:9700;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.75);padding:16px;">
+      <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:20px;max-width:460px;width:100%;max-height:82vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex:0 0 auto;">
+          <div style="font-size:17px;font-weight:900;color:#fff;">История на ограниченията</div>
+          <button type="button" data-topic-mute-history-close-for-profile="1" aria-label="Затвори" style="border:0;background:transparent;color:rgba(255,255,255,0.5);font-size:20px;line-height:1;cursor:pointer;padding:4px;">×</button>
+        </div>
+        <div style="overflow-y:auto;flex:1;min-height:0;">
+          ${bodyHtml}
         </div>
       </div>
     </div>
@@ -1463,6 +1749,7 @@ function renderTopicModerationBanners(state: LobbyScreenState): string {
     banners.push(`
       <div style="padding:8px 12px;background:rgba(212,165,32,0.12);border-bottom:1px solid rgba(212,165,32,0.28);color:#fde68a;font-size:12px;font-weight:800;text-align:center;">
         🔇 Заглушен сте в секция „Теми“ до ${escapeHtml(formatModerationExpiry(state.activeTopicViewerMute.mutedUntil))}${state.activeTopicViewerMute.reason ? ` — ${escapeHtml(state.activeTopicViewerMute.reason)}` : ''}
+        <button type="button" data-topic-mute-history-open="1" style="margin-left:8px;border:0;background:transparent;color:#fde68a;text-decoration:underline;font-size:12px;font-weight:800;cursor:pointer;padding:0;">Виж историята</button>
       </div>
     `)
   }
@@ -1481,6 +1768,15 @@ function renderTopicsHeader(state: LobbyScreenState): string {
     : 'border-color:rgba(212,165,32,0.34);background:#050505;color:#f8fafc;'
   const personalUnreadTotal = getPersonalChatUnreadTotal(state)
   const personalUnreadBadge = formatPersonalChatUnreadBadgeCount(personalUnreadTotal)
+  // "Лафче" — червена точка (0/1), НЕ числов badge (Лафче брифа §8: "1 или
+  // 100 нови поста = пак една червена точка") — за разлика от generalUnreadBadge/
+  // personalUnreadBadge по-горе (реален брой).
+  const lafcheTopic = (state.topics ?? []).find((t) => t.topicId === LAFCHE_TOPIC_ID) ?? null
+  const isLafcheActive = state.activeTopicId === LAFCHE_TOPIC_ID
+  const lafcheHasUnread = (lafcheTopic?.unreadCount ?? 0) > 0
+  const lafcheButtonStyle = isLafcheActive
+    ? 'border-color:#d4a520;background:rgba(212,165,32,0.16);color:#d4a520;'
+    : 'border-color:rgba(212,165,32,0.34);background:#050505;color:#f8fafc;'
 
   if (state.topicsMode === 'thread') {
     return `
@@ -1531,6 +1827,20 @@ function renderTopicsHeader(state: LobbyScreenState): string {
         ${activeTopic !== null ? renderTopicHeaderModerationControls(state, activeTopic) : ''}
       </div>
       <div data-topics-header-actions="1" style="display:flex;align-items:center;justify-content:flex-end;gap:8px;flex:0 0 auto;min-width:0;">
+        <button
+          type="button"
+          data-topics-lafche-open="1"
+          aria-label="${lafcheHasUnread ? 'Лафче, има непрочетени публикации' : 'Лафче'}"
+          aria-pressed="${isLafcheActive ? 'true' : 'false'}"
+          style="
+            position:relative;display:inline-flex;align-items:center;justify-content:center;gap:7px;
+            min-height:36px;padding:0 12px;border-radius:8px;border:1px solid;${lafcheButtonStyle}
+            font-size:13px;font-weight:900;cursor:pointer;flex:0 0 auto;
+          "
+        >
+          <span>Лафче</span>
+          ${lafcheHasUnread ? `<span data-topics-lafche-badge="1" aria-hidden="true" style="width:9px;height:9px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 2px #050505;"></span><span style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">Има непрочетени публикации</span>` : ''}
+        </button>
         <button
           type="button"
           data-topics-back-to-general="1"
@@ -1706,6 +2016,8 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
     ${renderTopicCreatePopup(state)}
     ${renderTopicsInfoToast(state)}
     ${renderTopicModerationActionPopup(state)}
+    ${renderTopicMuteHistoryPopup(state)}
+    ${renderTopicMuteHistoryModeratorPopup(state)}
     ${renderTopicDeleteConfirmPopup(state)}
     ${renderTopicMessageDeleteConfirmPopup(state)}
     ${renderTopicReportPopup(state)}

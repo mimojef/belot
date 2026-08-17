@@ -110,6 +110,27 @@ export function isTopicModeratorSession(
 }
 
 /**
+ * "Лафче" (system Topics поток, topic_id='topic-lafche') delete+mute достъп
+ * — САМО admin/pika_team/top_chat_admin, изрично БЕЗ subadmin (за разлика
+ * от isTopicModeratorSession по-горе, който важи за General/user-created
+ * теми). Прилага се само когато действието е scoped към topic-lafche
+ * конкретно (виж handleTopicMuteRequest/handleTopicUnmuteRequest/
+ * handleTopicMuteStatusRequest/handleTopicMessageDeleteRequest в index.ts —
+ * branch по topicId === 'topic-lafche') — НЕ замества isTopicModeratorSession
+ * за General/user topics ("Лафче" брифа §6: "Не давай тези права автоматично
+ * на subadmin/chat_admin").
+ */
+export function isLafcheModeratorSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'pika_team'
+    || session.account.role === 'top_chat_admin'
+  )
+}
+
+/**
  * Whole-topic destructive/control действия (lock/unlock/delete тема) — по-тесен
  * permission set от isTopicModeratorSession. Продуктово решение: pika_team
  * (и chat_admin) имат достъп до mute/unmute/reports/audit (isTopicModeratorSession

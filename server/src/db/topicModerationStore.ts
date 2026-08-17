@@ -52,6 +52,45 @@ export type TopicModerationAuditEntry = {
   createdAt: string
 }
 
+export type TopicMuteEvidenceSourceKind = 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified'
+export type TopicMuteEvidenceStatus = 'active' | 'expired' | 'manually_unmuted'
+export type TopicMuteEvidenceReasonCategory =
+  | 'insults'
+  | 'provocation'
+  | 'spam'
+  | 'inappropriate_content'
+  | 'other'
+
+/**
+ * Пълен snapshot — internal/moderator изглед (носи moderator identity, виж
+ * §6/§8 в брифа: "На потребителя НЕ показвай кой конкретен moderator го е
+ * наложил"). User-facing изгледът маха muted_by_account_id/unmuted_by_account_id
+ * на API response ниво (виж handleTopicMuteEvidenceForSelfRequest в index.ts),
+ * НЕ отделен store shape — една authoritative заявка, два response mapping-а.
+ */
+export type TopicMuteEvidenceEntry = {
+  muteHistoryId: string
+  muteAuditLogId: string
+  profileId: string
+  sourceTopicId: string
+  sourceMessageId: string | null
+  sourceKind: TopicMuteEvidenceSourceKind
+  sourceBodySnapshot: string
+  sourceAttachment: { storageFilename: string; width: number; height: number } | null
+  sourceCreatedAt: string | null
+  originalMessageDeletedAt: string | null
+  mutedByAccountId: string | null
+  mutedByRole: TopicModeratorRole
+  reasonText: string | null
+  reasonCategory: TopicMuteEvidenceReasonCategory | null
+  durationMs: number
+  mutedUntil: string
+  status: TopicMuteEvidenceStatus
+  unmutedAt: string | null
+  unmutedByAccountId: string | null
+  createdAt: string
+}
+
 export type TopicReportStatus = 'pending' | 'reviewed' | 'dismissed'
 
 export type TopicReportSnapshot = {
@@ -113,13 +152,24 @@ export type TopicModerationStore = {
    * действието от тази конкретна тема") — enforcement-ът важи навсякъде в
    * Теми, независимо от коя тема е бил натиснат бутонът.
    */
+  /**
+   * `sourceMessageId`/`sourceKind` — server-side snapshot evidence (Лафче
+   * mute-evidence брифа §1/§3): ЗАДЪЛЖИТЕЛНО извиквано ATOMIC заедно с
+   * mute state update-а (обвито в СЪЩАТА BEGIN IMMEDIATE транзакция) — не е
+   * позволено mute да се приложи без evidence запис. sourceMessageId е
+   * null-able (мутиране без конкретен triggering post, напр. от profile
+   * popup) → sourceKind='unspecified', snapshot полетата остават празни.
+   */
   muteProfileInTopics: (input: {
     topicId: string
     profileId: string
     actorAccountId: string
     actorRole: TopicModeratorRole
     reason: string
+    reasonCategory?: TopicMuteEvidenceReasonCategory | null
     durationMs: number
+    sourceMessageId?: string | null
+    sourceKind?: TopicMuteEvidenceSourceKind
   }) => TopicSectionMuteSnapshot
   unmuteProfileInTopics: (input: {
     topicId: string
@@ -130,6 +180,10 @@ export type TopicModerationStore = {
   getSectionMuteSnapshot: (profileId: string) => TopicSectionMuteSnapshot
   /** Server-authoritative enforcement lookup за ВСИЧКИ 5 Topics write paths — expiry checked at read time, никога persisted boolean. */
   isProfileMutedInTopicsSection: (profileId: string) => boolean
+
+  // ─── Mute evidence/history (Лафче mute-evidence брифа) ──────────────────
+  /** Internal/moderator изглед — пълен (носи moderator identity). User-facing mapping-ът маха identity полетата на HTTP response ниво (виж index.ts). */
+  listMuteEvidenceForProfile: (profileId: string, limit: number) => TopicMuteEvidenceEntry[]
 
   // ─── Delete (attachments hard-delete + queue insertion, topic/messages
   // soft-delete — всичко в ЕДНА транзакция вътре в deleteTopic) ────────────
@@ -328,6 +382,9 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
   `)
 
+  // Връща генерирания log_id (нужно за topic_mute_evidence cross-reference,
+  // виж insertMuteEvidence по-долу) — съществуващите 8 call sites просто
+  // игнорират връщаната стойност (backward-compatible additive промяна).
   function appendAudit(input: {
     actorAccountId: string
     actorRole: TopicModeratorRole
@@ -336,9 +393,10 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     targetProfileId: string | null
     reason: string | null
     expiresAt: string | null
-  }): void {
+  }): string {
+    const logId = randomUUID()
     insertAuditStatement.run(
-      randomUUID(),
+      logId,
       input.actorAccountId,
       input.actorRole,
       input.action,
@@ -347,6 +405,7 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
       input.reason,
       input.expiresAt,
     )
+    return logId
   }
 
   function lockTopic(input: {
@@ -557,13 +616,95 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     SELECT muted_until, muted_by_account_id, reason FROM topic_section_mutes WHERE profile_id = ? LIMIT 1;
   `)
 
+  // ─── Mute evidence/history (Лафче mute-evidence брифа) ────────────────────
+  //
+  // ЗАЩО query-ваме topic_messages/topic_message_attachments ДИРЕКТНО тук
+  // (не през topicMessageStore): established прецедент в тоя файл —
+  // selectAttachmentFilenamesForTopicStatement/deleteAttachmentsForTopicStatement
+  // по-долу вече правят точно това (deleteTopic flow-а). Всеки store има
+  // собствена DatabaseSync connection към СЪЩИЯ физически .sqlite файл —
+  // cross-table четене в рамките на ЕДНА транзакция изисква ЕДНА connection
+  // (BEGIN IMMEDIATE тук трябва да покрие и snapshot SELECT-а, и evidence
+  // INSERT-а atomically), затова не може да делегираме snapshot fetch-а на
+  // отделен topicMessageStore instance с друга connection.
+  const selectSourceMessageForEvidenceStatement = database.prepare(`
+    SELECT body, created_at, deleted_at, topic_id FROM topic_messages WHERE message_id = ? LIMIT 1;
+  `)
+  const selectSourceAttachmentForEvidenceStatement = database.prepare(`
+    SELECT storage_filename, width, height FROM topic_message_attachments WHERE message_id = ? LIMIT 1;
+  `)
+  const insertMuteEvidenceStatement = database.prepare(`
+    INSERT INTO topic_mute_evidence (
+      mute_history_id, mute_audit_log_id, profile_id, source_topic_id, source_message_id, source_kind,
+      source_body_snapshot, source_attachment_storage_filename, source_attachment_width, source_attachment_height,
+      source_created_at, original_message_deleted_at, muted_by_account_id, muted_by_role,
+      reason_text, reason_category, duration_ms, muted_until
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+  `)
+
+  /**
+   * Server-side snapshot (Лафче mute-evidence брифа §1/§3: "Snapshot-ът
+   * трябва да се създава server-side от DB данните", "Не вярвай на content,
+   * изпратен от клиента") — зарежда source_body_snapshot/attachment
+   * ИЗКЛЮЧИТЕЛНО от topic_messages/topic_message_attachments в момента на
+   * mute-а, никога от client payload. sourceMessageId===null означава mute
+   * без конкретен triggering post → snapshot полетата остават празни,
+   * sourceKind принудително 'unspecified'.
+   */
+  function insertMuteEvidence(input: {
+    muteAuditLogId: string
+    profileId: string
+    topicId: string
+    sourceMessageId: string | null
+    sourceKind: TopicMuteEvidenceSourceKind
+    mutedByAccountId: string
+    mutedByRole: TopicModeratorRole
+    reasonText: string
+    reasonCategory: TopicMuteEvidenceReasonCategory | null
+    durationMs: number
+    mutedUntil: string
+  }): void {
+    const sourceRow = input.sourceMessageId !== null
+      ? (selectSourceMessageForEvidenceStatement.get(input.sourceMessageId) as
+          { body: string; created_at: string; deleted_at: string | null; topic_id: string } | undefined)
+      : undefined
+    const attachmentRow = input.sourceMessageId !== null
+      ? (selectSourceAttachmentForEvidenceStatement.get(input.sourceMessageId) as
+          { storage_filename: string; width: number; height: number } | undefined)
+      : undefined
+
+    insertMuteEvidenceStatement.run(
+      randomUUID(),
+      input.muteAuditLogId,
+      input.profileId,
+      input.topicId,
+      input.sourceMessageId,
+      sourceRow ? input.sourceKind : 'unspecified',
+      sourceRow?.body ?? '',
+      attachmentRow?.storage_filename ?? null,
+      attachmentRow?.width ?? null,
+      attachmentRow?.height ?? null,
+      sourceRow?.created_at ?? null,
+      sourceRow?.deleted_at ?? null,
+      input.mutedByAccountId,
+      input.mutedByRole,
+      input.reasonText,
+      input.reasonCategory,
+      input.durationMs,
+      input.mutedUntil,
+    )
+  }
+
   function muteProfileInTopics(input: {
     topicId: string
     profileId: string
     actorAccountId: string
     actorRole: TopicModeratorRole
     reason: string
+    reasonCategory?: TopicMuteEvidenceReasonCategory | null
     durationMs: number
+    sourceMessageId?: string | null
+    sourceKind?: TopicMuteEvidenceSourceKind
   }): TopicSectionMuteSnapshot {
     const now = Date.now()
     const mutedUntil = toSqliteDateTimeString(new Date(now + input.durationMs))
@@ -571,7 +712,7 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     database.exec('BEGIN IMMEDIATE;')
     try {
       upsertSectionMuteStatement.run(input.profileId, mutedUntil, input.actorAccountId, input.reason)
-      appendAudit({
+      const auditLogId = appendAudit({
         actorAccountId: input.actorAccountId,
         actorRole: input.actorRole,
         action: 'topic_mute',
@@ -579,6 +720,22 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
         targetProfileId: input.profileId,
         reason: input.reason,
         expiresAt: mutedUntil,
+      })
+      // ЗАДЪЛЖИТЕЛНО в СЪЩАТА транзакция — mute state update без evidence
+      // insert е недопустимо (Лафче mute-evidence брифа §3: "Не допускай
+      // ситуация: mute е наложен; но evidence/history record липсва").
+      insertMuteEvidence({
+        muteAuditLogId: auditLogId,
+        profileId: input.profileId,
+        topicId: input.topicId,
+        sourceMessageId: input.sourceMessageId ?? null,
+        sourceKind: input.sourceKind ?? 'unspecified',
+        mutedByAccountId: input.actorAccountId,
+        mutedByRole: input.actorRole,
+        reasonText: input.reason,
+        reasonCategory: input.reasonCategory ?? null,
+        durationMs: input.durationMs,
+        mutedUntil,
       })
       database.exec('COMMIT;')
     } catch (error) {
@@ -595,6 +752,25 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
   // ред просто changes=0, без грешка.
   const deleteSectionMuteStatement = database.prepare(`
     DELETE FROM topic_section_mutes WHERE profile_id = ?;
+  `)
+
+  // Маркира НАЙ-СКОРОШНИЯ 'active' evidence ред на профила като
+  // manually_unmuted (Лафче mute-evidence брифа §2: "дата/час на предсрочно
+  // unmute", "кой е направил unmute"). "Най-скорошен active" вместо "всички
+  // active" — по дизайн максимум 1 евентуален active evidence ред на
+  // профил в даден момент (mute-ът е section-wide UPSERT, нов mute
+  // презаписва предишния state ред, значи предишният evidence ред би
+  // трябвало вече да е expired/manually_unmuted от предходно действие; LIMIT
+  // 1 е defensive, не разчита на тази инвариантност строго).
+  const markLatestActiveMuteEvidenceUnmutedStatement = database.prepare(`
+    UPDATE topic_mute_evidence
+    SET status = 'manually_unmuted', unmuted_at = CURRENT_TIMESTAMP, unmuted_by_account_id = ?
+    WHERE mute_history_id = (
+      SELECT mute_history_id FROM topic_mute_evidence
+      WHERE profile_id = ? AND status = 'active'
+      ORDER BY created_at DESC
+      LIMIT 1
+    );
   `)
 
   function unmuteProfileInTopics(input: {
@@ -621,6 +797,7 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
         reason: null,
         expiresAt: null,
       })
+      markLatestActiveMuteEvidenceUnmutedStatement.run(input.actorAccountId, input.profileId)
       database.exec('COMMIT;')
     } catch (error) {
       database.exec('ROLLBACK;')
@@ -637,6 +814,95 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
 
   function isProfileMutedInTopicsSection(profileId: string): boolean {
     return getSectionMuteSnapshot(profileId).isMuted
+  }
+
+  // LEFT JOIN topic_messages за LIVE deleted_at (не само snapshot-натия
+  // original_message_deleted_at, взет В МОМЕНТА на mute-а) — ако постът
+  // бъде изтрит СЛЕД като evidence реда вече съществува, COALESCE-ът тук
+  // хваща тази по-късна промяна at READ time (established pattern в целия
+  // файл — isMuted/isLocked никога не са persisted transitions). m.deleted_at
+  // е NULL и след hard-purge (редът вече не съществува), в който случай
+  // COALESCE пада обратно към snapshot-натата стойност от момента на mute-а.
+  const selectMuteEvidenceForProfileStatement = database.prepare(`
+    SELECT
+      e.mute_history_id, e.mute_audit_log_id, e.profile_id, e.source_topic_id, e.source_message_id, e.source_kind,
+      e.source_body_snapshot, e.source_attachment_storage_filename, e.source_attachment_width, e.source_attachment_height,
+      e.source_created_at, COALESCE(m.deleted_at, e.original_message_deleted_at) AS original_message_deleted_at,
+      e.muted_by_account_id, e.muted_by_role,
+      e.reason_text, e.reason_category, e.duration_ms, e.muted_until, e.status, e.unmuted_at, e.unmuted_by_account_id, e.created_at
+    FROM topic_mute_evidence e
+    LEFT JOIN topic_messages m ON m.message_id = e.source_message_id
+    WHERE e.profile_id = ?
+    ORDER BY e.created_at DESC
+    LIMIT ?;
+  `)
+
+  type TopicMuteEvidenceRow = {
+    mute_history_id: string
+    mute_audit_log_id: string
+    profile_id: string
+    source_topic_id: string
+    source_message_id: string | null
+    source_kind: TopicMuteEvidenceSourceKind
+    source_body_snapshot: string
+    source_attachment_storage_filename: string | null
+    source_attachment_width: number | null
+    source_attachment_height: number | null
+    source_created_at: string | null
+    original_message_deleted_at: string | null
+    muted_by_account_id: string | null
+    muted_by_role: TopicModeratorRole
+    reason_text: string | null
+    reason_category: TopicMuteEvidenceReasonCategory | null
+    duration_ms: number
+    muted_until: string
+    status: TopicMuteEvidenceStatus
+    unmuted_at: string | null
+    unmuted_by_account_id: string | null
+    created_at: string
+  }
+
+  // status='active' в DB е computed at WRITE time (кога mute-ът е наложен),
+  // НЕ auto-transition-ва към 'expired' при естествено изтичане (няма
+  // background job) — presentation layer тук computed-ва ефективния status
+  // at READ time (mirror на established isMuted/isLocked pattern в целия
+  // файл: expiry сравнение при четене, никога persisted transition).
+  // 'manually_unmuted' статус в DB е authoritative, НЕ се пренаписва.
+  function toMuteEvidenceEntry(row: TopicMuteEvidenceRow, now: number): TopicMuteEvidenceEntry {
+    const effectiveStatus: TopicMuteEvidenceStatus = row.status === 'active' && new Date(dbDateToUtc(row.muted_until)).getTime() <= now
+      ? 'expired'
+      : row.status
+    return {
+      muteHistoryId: row.mute_history_id,
+      muteAuditLogId: row.mute_audit_log_id,
+      profileId: row.profile_id,
+      sourceTopicId: row.source_topic_id,
+      sourceMessageId: row.source_message_id,
+      sourceKind: row.source_kind,
+      sourceBodySnapshot: row.source_body_snapshot,
+      sourceAttachment: row.source_attachment_storage_filename !== null && row.source_attachment_width !== null && row.source_attachment_height !== null
+        ? { storageFilename: row.source_attachment_storage_filename, width: row.source_attachment_width, height: row.source_attachment_height }
+        : null,
+      sourceCreatedAt: row.source_created_at !== null ? dbDateToUtc(row.source_created_at) : null,
+      originalMessageDeletedAt: row.original_message_deleted_at !== null ? dbDateToUtc(row.original_message_deleted_at) : null,
+      mutedByAccountId: row.muted_by_account_id,
+      mutedByRole: row.muted_by_role,
+      reasonText: row.reason_text,
+      reasonCategory: row.reason_category,
+      durationMs: row.duration_ms,
+      mutedUntil: dbDateToUtc(row.muted_until),
+      status: effectiveStatus,
+      unmutedAt: row.unmuted_at !== null ? dbDateToUtc(row.unmuted_at) : null,
+      unmutedByAccountId: row.unmuted_by_account_id,
+      createdAt: dbDateToUtc(row.created_at),
+    }
+  }
+
+  function listMuteEvidenceForProfile(profileId: string, limit: number): TopicMuteEvidenceEntry[] {
+    const normalizedLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 200) : 50
+    const rows = selectMuteEvidenceForProfileStatement.all(profileId, normalizedLimit) as TopicMuteEvidenceRow[]
+    const now = Date.now()
+    return rows.map((row) => toMuteEvidenceEntry(row, now))
   }
 
   // ─── Delete (soft-delete + eager attachment cleanup) ────────────────────
@@ -948,6 +1214,7 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     unmuteProfileInTopics,
     getSectionMuteSnapshot,
     isProfileMutedInTopicsSection,
+    listMuteEvidenceForProfile,
     getAttachmentFilenamesForTopic,
     deleteTopic,
     createReport,

@@ -1773,6 +1773,50 @@ export type TopicReportSnapshot = {
   createdAt: string
 }
 
+export type TopicMuteEvidenceSourceKind = 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified'
+export type TopicMuteEvidenceStatus = 'active' | 'expired' | 'manually_unmuted'
+export type TopicMuteEvidenceReasonCategory = 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other'
+
+/** GET /api/topics/mute-evidence/mine отговор — БЕЗ moderator identity (mute-evidence брифа §6). */
+export type TopicMuteEvidenceSelfEntry = {
+  muteHistoryId: string
+  sourceKind: TopicMuteEvidenceSourceKind
+  sourceBodySnapshot: string
+  sourceAttachment: { viewUrl: string; downloadUrl: string; width: number; height: number } | null
+  sourceCreatedAt: string | null
+  originalMessagePostDeleted: boolean
+  reasonText: string | null
+  reasonCategory: TopicMuteEvidenceReasonCategory | null
+  durationMs: number
+  mutedUntil: string
+  status: TopicMuteEvidenceStatus
+  unmutedAt: string | null
+  createdAt: string
+}
+
+/** GET /api/topics/mute-evidence/profile/:profileId отговор — internal/moderator, с moderator identity. */
+export type TopicMuteEvidenceModeratorEntry = {
+  muteHistoryId: string
+  muteAuditLogId: string
+  sourceTopicId: string
+  sourceMessageId: string | null
+  sourceKind: TopicMuteEvidenceSourceKind
+  sourceBodySnapshot: string
+  sourceAttachment: { viewUrl: string; downloadUrl: string; width: number; height: number } | null
+  sourceCreatedAt: string | null
+  originalMessageDeletedAt: string | null
+  mutedByAccountId: string | null
+  mutedByRole: 'admin' | 'subadmin' | 'pika_team' | 'top_chat_admin'
+  reasonText: string | null
+  reasonCategory: TopicMuteEvidenceReasonCategory | null
+  durationMs: number
+  mutedUntil: string
+  status: TopicMuteEvidenceStatus
+  unmutedAt: string | null
+  unmutedByAccountId: string | null
+  createdAt: string
+}
+
 /** Public broadcast — ВСИЧКИ subscribers на темата виждат lock/unlock realtime, без refresh. */
 export type TopicLockStateChangedMessage = {
   type: 'topic_lock_state_changed'

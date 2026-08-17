@@ -25,6 +25,7 @@ import {
   getSessionTokenFromCookieHeader,
   isAdminOrSubadminSession,
   isFullAdminSession,
+  isLafcheModeratorSession,
   isPikaAnnouncementAuthorSession,
   isTopicMessageModeratorSession,
   isTopicModeratorSession,
@@ -40,6 +41,8 @@ import {
   createTopicModerationStore,
   type TopicModeratorRole,
   type TopicModerationAction,
+  type TopicMuteEvidenceSourceKind,
+  type TopicMuteEvidenceReasonCategory,
 } from './db/topicModerationStore.js'
 import {
   validateLobbyChatBody,
@@ -907,6 +910,16 @@ const topicMessageSubscribersByTopicId = new Map<string, Set<ConnectionId>>()
 const topicsDirectorySubscriberConnectionIds = new Set<ConnectionId>()
 
 const TOPIC_MESSAGES_REALTIME_CATCHUP_LIMIT = 50
+// "Лафче" system topic — fixed id, seed-нат от migration 20260817_002 (mirror
+// на topic-general seed-a). Reuse-ва изцяло topics/topic_messages
+// инфраструктурата (Вариант A от inspection брифа), НЕ нова таблица.
+const LAFCHE_TOPIC_ID = 'topic-lafche'
+// "Последните 300 root posts" (Лафче брифа §3) — покрива TOPIC_MESSAGES_REALTIME_CATCHUP_LIMIT-а
+// по-горе (50) само за първоначален catch-up; getRecentMessages с explicit
+// по-висок limit се ползва за HTTP initial-load handler-а (виж handleTopicMessagesRequest).
+// Старите postове над 300 остават четими в DB (не се трият), просто не се
+// зареждат в клиента — client-ът никога не показва "load older" за тази тема.
+const LAFCHE_MESSAGE_HISTORY_LIMIT = 300
 const TOPIC_MESSAGE_POLL_BATCH_SIZE = 200
 const TOPIC_MESSAGE_RATE_LIMIT_WINDOW_MS = 10_000
 const TOPIC_MESSAGE_RATE_LIMIT_MAX_PER_WINDOW = 5
@@ -7724,9 +7737,17 @@ async function handleTopicMessagesRequest(
 
   const excludedSenderProfileIds = [...getLobbyChatBlockedSet(auth.profileId)]
 
-  const limit = clampTopicMessagesLimit(requestUrl.searchParams.get('limit'))
   const beforeRaw = requestUrl.searchParams.get('before')
   const beforeSeq = beforeRaw !== null ? Number.parseInt(beforeRaw, 10) : null
+
+  // "Лафче" initial load (без beforeSeq — не "load older" pagination, виж
+  // клиента, който никога не изгражда load-more UI за тази тема): override
+  // до LAFCHE_MESSAGE_HISTORY_LIMIT (300), независимо от заявения client
+  // ?limit=, вместо стандартния TOPIC_MESSAGES_MAX_LIMIT (50) таван за
+  // normal Topics (Лафче брифа §3).
+  const limit = topicId === LAFCHE_TOPIC_ID && beforeSeq === null
+    ? LAFCHE_MESSAGE_HISTORY_LIMIT
+    : clampTopicMessagesLimit(requestUrl.searchParams.get('limit'))
 
   const page = beforeSeq !== null && Number.isInteger(beforeSeq)
     ? topicMessageStore.getMessagesBefore(topicId, beforeSeq, limit, excludedSenderProfileIds)
@@ -7988,6 +8009,36 @@ function parseTopicModerationDurationMs(rawDurationMs: unknown): number | null {
   return TOPIC_MODERATION_ALLOWED_DURATIONS_MS.includes(rawDurationMs) ? rawDurationMs : null
 }
 
+const TOPIC_MUTE_EVIDENCE_SOURCE_KINDS = ['lafche_post', 'topic_root', 'topic_reply', 'unspecified'] as const
+const TOPIC_MUTE_EVIDENCE_REASON_CATEGORIES = ['insults', 'provocation', 'spam', 'inappropriate_content', 'other'] as const
+
+/**
+ * client-provided sourceMessageId/sourceKind са ЕДИНСТВЕНО "кой пост е бил
+ * визуално отворен, когато moderator-ът натисна мутиращия бутон" — само
+ * ROUTING hint. Реалният evidence snapshot (body/attachment) се зарежда
+ * server-side ОТ DB, НИКОГА от client payload (mute-evidence брифа §3: "Не
+ * вярвай на content, изпратен от клиента") — виж insertMuteEvidence в
+ * topicModerationStore.ts, което прави собствен SELECT по messageId, без
+ * значение какво клиентът твърди за съдържанието.
+ */
+function parseTopicMuteEvidenceSourceMessageId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const trimmed = raw.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function parseTopicMuteEvidenceSourceKind(raw: unknown): TopicMuteEvidenceSourceKind {
+  return typeof raw === 'string' && (TOPIC_MUTE_EVIDENCE_SOURCE_KINDS as readonly string[]).includes(raw)
+    ? (raw as TopicMuteEvidenceSourceKind)
+    : 'unspecified'
+}
+
+function parseTopicMuteEvidenceReasonCategory(raw: unknown): TopicMuteEvidenceReasonCategory | null {
+  return typeof raw === 'string' && (TOPIC_MUTE_EVIDENCE_REASON_CATEGORIES as readonly string[]).includes(raw)
+    ? (raw as TopicMuteEvidenceReasonCategory)
+    : null
+}
+
 // isTopicModeratorSession гарантира role !== 'player'/'chat_admin'/'guest' —
 // type predicate стеснява само session (non-null), не и вложеното
 // account.role поле, затова explicit cast тук (огледално на
@@ -8115,12 +8166,20 @@ async function handleTopicMuteStatusRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (!isTopicModeratorSession(session)) {
+  const topicId = decodeURIComponent(match[1] ?? '')
+
+  // "Лафче" (topic-lafche) — само admin/pika_team/top_chat_admin, за
+  // разлика от normal Topics (isTopicModeratorSession, 4 роли вкл.
+  // subadmin) — виж isLafcheModeratorSession коментара в authStore.ts.
+  const isAllowed = topicId === LAFCHE_TOPIC_ID
+    ? isLafcheModeratorSession(session)
+    : isTopicModeratorSession(session)
+
+  if (!isAllowed) {
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
     return true
   }
 
-  const topicId = decodeURIComponent(match[1] ?? '')
   const profileId = requestUrl.searchParams.get('profileId')
   if (!profileId) {
     sendJsonResponse(res, 400, { ok: false, message: 'Липсва потребител.' })
@@ -8148,12 +8207,22 @@ async function handleTopicMuteRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (!isTopicModeratorSession(session)) {
+  const topicId = decodeURIComponent(match[1] ?? '')
+
+  // "Лафче" (topic-lafche) — само admin/pika_team/top_chat_admin (Лафче
+  // брифа §6/§7), за разлика от normal Topics 4-role set-а по-долу.
+  // Explicit session===null check СЛЕД isAllowed (не само вътре в
+  // predicate-ите) — тернарният isAllowed сам не narrow-ва session за TS,
+  // mirror на established isModerator pattern-а в handleTopicMessageDeleteRequest.
+  const isAllowed = topicId === LAFCHE_TOPIC_ID
+    ? isLafcheModeratorSession(session)
+    : isTopicModeratorSession(session)
+
+  if (!isAllowed || session === null) {
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да заглушаваш потребители.' })
     return true
   }
 
-  const topicId = decodeURIComponent(match[1] ?? '')
   const topic = topicStore.getTopicById(topicId)
   if (topic === null || topic.status === 'removed') {
     sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
@@ -8167,7 +8236,14 @@ async function handleTopicMuteRequest(
     sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
     return true
   }
-  const parsedBody = body as { profileId?: unknown; reason?: unknown; durationMs?: unknown }
+  const parsedBody = body as {
+    profileId?: unknown
+    reason?: unknown
+    durationMs?: unknown
+    sourceMessageId?: unknown
+    sourceKind?: unknown
+    reasonCategory?: unknown
+  }
 
   const targetProfileId = typeof parsedBody.profileId === 'string' ? parsedBody.profileId.trim() : ''
   if (targetProfileId.length === 0) {
@@ -8184,6 +8260,12 @@ async function handleTopicMuteRequest(
     sendJsonResponse(res, 400, { ok: false, message: 'Невалидна продължителност.' })
     return true
   }
+  // sourceMessageId/sourceKind/reasonCategory — виж parseTopicMuteEvidenceSourceMessageId
+  // коментара по-горе: само routing hint, реалният snapshot се зарежда
+  // server-side от DB вътре в muteProfileInTopics/insertMuteEvidence.
+  const sourceMessageId = parseTopicMuteEvidenceSourceMessageId(parsedBody.sourceMessageId)
+  const sourceKind = parseTopicMuteEvidenceSourceKind(parsedBody.sourceKind)
+  const reasonCategory = parseTopicMuteEvidenceReasonCategory(parsedBody.reasonCategory)
 
   // Global Topics-section mute (виж GLOBAL TOPICS MUTE брифа) — topicId
   // остава само audit/source context (кой topic е бил отворен, когато
@@ -8195,7 +8277,10 @@ async function handleTopicMuteRequest(
     actorAccountId: session.account.accountId,
     actorRole: toTopicModeratorRole(session),
     reason,
+    reasonCategory,
     durationMs,
+    sourceMessageId,
+    sourceKind,
   })
 
   notifyProfileOfTopicMuteStateChange(targetProfileId, topicId, muteSnapshot)
@@ -8217,12 +8302,21 @@ async function handleTopicUnmuteRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  if (!isTopicModeratorSession(session)) {
+  const topicId = decodeURIComponent(match[1] ?? '')
+
+  // "Лафче" (topic-lafche) — само admin/pika_team/top_chat_admin (Лафче
+  // брифа §6/§7), за разлика от normal Topics 4-role set-а по-долу.
+  // Explicit session===null check СЛЕД isAllowed (не само вътре в
+  // predicate-ите), mirror на handleTopicMuteRequest по-горе.
+  const isAllowed = topicId === LAFCHE_TOPIC_ID
+    ? isLafcheModeratorSession(session)
+    : isTopicModeratorSession(session)
+
+  if (!isAllowed || session === null) {
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да отглушаваш потребители.' })
     return true
   }
 
-  const topicId = decodeURIComponent(match[1] ?? '')
   const topic = topicStore.getTopicById(topicId)
   if (topic === null || topic.status === 'removed') {
     sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
@@ -8260,6 +8354,123 @@ async function handleTopicUnmuteRequest(
   }
 
   sendJsonResponse(res, 200, { ok: true })
+  return true
+}
+
+/**
+ * User-facing "моята история" (mute-evidence брифа §6/§8) — само собствените
+ * records на автентикирания потребител, НИКОГА чужди (profileId идва
+ * ИЗКЛЮЧИТЕЛНО от сесията, никога от URL/query параметър — за разлика от
+ * internal endpoint-а по-долу). Moderator identity (mutedByAccountId)
+ * ИЗРИЧНО маха от response-а тук — виж §6: "На потребителя НЕ показвай кой
+ * конкретен moderator го е наложил". Attachment view/download URLs се
+ * изграждат само ако source_kind/attachment все още препращат към жив
+ * topic_id (buildTopicAttachmentUrls изисква topicId) — sourceTopicId
+ * винаги присъства (NOT NULL колона), значи винаги е safe да се build-нат.
+ */
+async function handleTopicMuteEvidenceForSelfRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/topics/mute-evidence/mine' || req.method !== 'GET') {
+    return false
+  }
+
+  const auth = requireRegisteredProfileSession(req)
+  if (!auth.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  const entries = topicModerationStore.listMuteEvidenceForProfile(auth.profileId, 50)
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    entries: entries.map((entry) => ({
+      muteHistoryId: entry.muteHistoryId,
+      sourceKind: entry.sourceKind,
+      sourceBodySnapshot: entry.sourceBodySnapshot,
+      sourceAttachment: entry.sourceAttachment
+        ? { ...buildTopicAttachmentUrls(entry.sourceTopicId, entry.sourceAttachment.storageFilename), width: entry.sourceAttachment.width, height: entry.sourceAttachment.height }
+        : null,
+      sourceCreatedAt: entry.sourceCreatedAt,
+      originalMessagePostDeleted: entry.originalMessageDeletedAt !== null,
+      reasonText: entry.reasonText,
+      reasonCategory: entry.reasonCategory,
+      durationMs: entry.durationMs,
+      mutedUntil: entry.mutedUntil,
+      status: entry.status,
+      unmutedAt: entry.unmutedAt,
+      createdAt: entry.createdAt,
+      // mutedByAccountId/unmutedByAccountId ИЗРИЧНО НЕ се излагат тук.
+    })),
+  })
+  return true
+}
+
+/**
+ * Internal/moderator пълен audit изглед (mute-evidence брифа §7/§8) — носи
+ * moderator identity (mutedByAccountId/unmutedByAccountId), reuse-ва
+ * isTopicModeratorSession (СЪЩИЯТ достъп като mute-status/mute/unmute
+ * endpoints по-горе, 4 роли: admin/subadmin/pika_team/top_chat_admin) — НЕ
+ * тесния isLafcheModeratorSession, защото историята обхваща mutes от ВСИЧКИ
+ * Topics контексти (General/user topics/Лафче), не само Лафче-specific
+ * действия (§8: "Internal moderation: използвай съществуващите Topics
+ * moderation permissions").
+ */
+async function handleTopicMuteEvidenceForModeratorRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/mute-evidence\/profile\/([^/]+)$/.exec(pathname)
+  if (!match || req.method !== 'GET') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+    return true
+  }
+
+  const profileId = decodeURIComponent(match[1] ?? '')
+  const limitRaw = requestUrl.searchParams.get('limit')
+  const limitParsed = limitRaw !== null ? Number.parseInt(limitRaw, 10) : NaN
+  const limit = Number.isInteger(limitParsed) && limitParsed > 0 ? limitParsed : 50
+
+  const entries = topicModerationStore.listMuteEvidenceForProfile(profileId, limit)
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    entries: entries.map((entry) => ({
+      muteHistoryId: entry.muteHistoryId,
+      muteAuditLogId: entry.muteAuditLogId,
+      sourceTopicId: entry.sourceTopicId,
+      sourceMessageId: entry.sourceMessageId,
+      sourceKind: entry.sourceKind,
+      sourceBodySnapshot: entry.sourceBodySnapshot,
+      sourceAttachment: entry.sourceAttachment
+        ? { ...buildTopicAttachmentUrls(entry.sourceTopicId, entry.sourceAttachment.storageFilename), width: entry.sourceAttachment.width, height: entry.sourceAttachment.height }
+        : null,
+      sourceCreatedAt: entry.sourceCreatedAt,
+      originalMessageDeletedAt: entry.originalMessageDeletedAt,
+      mutedByAccountId: entry.mutedByAccountId,
+      mutedByRole: entry.mutedByRole,
+      reasonText: entry.reasonText,
+      reasonCategory: entry.reasonCategory,
+      durationMs: entry.durationMs,
+      mutedUntil: entry.mutedUntil,
+      status: entry.status,
+      unmutedAt: entry.unmutedAt,
+      unmutedByAccountId: entry.unmutedByAccountId,
+      createdAt: entry.createdAt,
+    })),
+  })
   return true
 }
 
@@ -8356,19 +8567,29 @@ async function handleTopicMessageDeleteRequest(
     return true
   }
 
+  const topicId = decodeURIComponent(match[1] ?? '')
+  const messageId = decodeURIComponent(match[2] ?? '')
+
   // isTopicMessageModeratorSession е type predicate (session is
   // AuthSessionSnapshot) — извикването му тук би narrow-нало session-а по
   // начин, който TS после третира като incompatible intersection в '!'
   // branch-а (session вече е established non-null от null-check-а по-горе).
   // Explicit role-set сравнение вместо reuse на predicate-a избягва тази
   // TS control-flow особеност, без промяна в семантиката.
-  const isModerator = (
-    session.account.role === 'admin'
-    || session.account.role === 'subadmin'
-    || session.account.role === 'top_chat_admin'
-    || session.account.role === 'pika_team'
-    || session.account.role === 'chat_admin'
-  )
+  //
+  // "Лафче" (topic-lafche) е изключение — САМО admin/pika_team/top_chat_admin
+  // (isLafcheModeratorSession, БЕЗ subadmin/chat_admin), за разлика от
+  // normal Topics 5-role set-а по-долу (Лафче брифа §6). Branch-ът е строго
+  // по topicId, за да не пипа moderation правата за General/user-created теми.
+  const isModerator = topicId === LAFCHE_TOPIC_ID
+    ? isLafcheModeratorSession(session)
+    : (
+      session.account.role === 'admin'
+      || session.account.role === 'subadmin'
+      || session.account.role === 'top_chat_admin'
+      || session.account.role === 'pika_team'
+      || session.account.role === 'chat_admin'
+    )
 
   // Guest/temporary profiles никога не могат да бъдат sender_profile_id на
   // topic съобщение (established write guard), значи те никога не могат да
@@ -8380,9 +8601,6 @@ async function handleTopicMessageDeleteRequest(
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да триеш съобщения в „Теми“.' })
     return true
   }
-
-  const topicId = decodeURIComponent(match[1] ?? '')
-  const messageId = decodeURIComponent(match[2] ?? '')
 
   const topic = topicStore.getTopicById(topicId)
 
@@ -12750,6 +12968,14 @@ async function handleHttpRequest(
   }
 
   if (await handleTopicUnmuteRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTopicMuteEvidenceForSelfRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTopicMuteEvidenceForModeratorRequest(req, res, requestUrl.pathname, requestUrl)) {
     return
   }
 

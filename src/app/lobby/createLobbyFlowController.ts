@@ -41,7 +41,7 @@ import {
   computeShopPurchaseConfirmDispatch,
 } from './shopResumeConfirmState'
 import { createDebouncedPlayerSearch } from './createDebouncedPlayerSearch'
-import { formatTopicsSectionMuteErrorText } from './renderTopicsScreen'
+import { formatTopicsSectionMuteErrorText, LAFCHE_TOPIC_ID } from './renderTopicsScreen'
 import type {
   AdminSettingsSnapshot,
   AdminStatsSnapshot,
@@ -84,6 +84,8 @@ import type {
   TopicMuteSnapshot,
   TopicReportSnapshot,
   TopicReportStatus,
+  TopicMuteEvidenceSelfEntry,
+  TopicMuteEvidenceModeratorEntry,
 } from '../network/createGameServerClient'
 
 export type LobbyFlowScreen =
@@ -185,6 +187,22 @@ function isTopicModeratorAuthSession(session: LobbyAuthSession | null): boolean 
   return session !== null && (
     session.account.role === 'admin'
     || session.account.role === 'subadmin'
+    || session.account.role === 'pika_team'
+    || session.account.role === 'top_chat_admin'
+  )
+}
+
+/**
+ * "Лафче" (system Topics поток, topic_id='topic-lafche') delete+mute UI
+ * достъп — само UX, сървърът презаверява през isLafcheModeratorSession
+ * (authStore.ts) на всяко HTTP действие, branch-нат само за topic-lafche.
+ * САМО admin/pika_team/top_chat_admin, изрично БЕЗ subadmin (за разлика от
+ * isTopicModeratorAuthSession по-горе, който важи за General/user теми) —
+ * "Лафче" брифа §6.
+ */
+function isLafcheModeratorAuthSession(session: LobbyAuthSession | null): boolean {
+  return session !== null && (
+    session.account.role === 'admin'
     || session.account.role === 'pika_team'
     || session.account.role === 'top_chat_admin'
   )
@@ -670,7 +688,25 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; mute: TopicMuteSnapshot }
     | { ok: false; message: string }
   >
-  onTopicMuteProfile?: (topicId: string, profileId: string, reason: string, durationMs: number) => Promise<
+  /** Собствената "моята история" на потребителя (mute-evidence брифа §6) — profileId идва от сесията server-side, никога параметър тук. */
+  onTopicMuteHistoryLoad?: () => Promise<
+    | { ok: true; entries: TopicMuteEvidenceSelfEntry[] }
+    | { ok: false; message: string }
+  >
+  /** Internal/moderator история на конкретен профил (mute-evidence брифа §7) — носи moderator identity, reuse-ва isTopicModeratorSession достъпа. */
+  onTopicMuteHistoryLoadForProfile?: (profileId: string) => Promise<
+    | { ok: true; entries: TopicMuteEvidenceModeratorEntry[] }
+    | { ok: false; message: string }
+  >
+  onTopicMuteProfile?: (
+    topicId: string,
+    profileId: string,
+    reason: string,
+    durationMs: number,
+    sourceMessageId: string | null,
+    sourceKind: 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified',
+    reasonCategory: 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other' | null,
+  ) => Promise<
     | { ok: true; mute: TopicMuteSnapshot }
     | { ok: false; message: string }
   >
@@ -981,15 +1017,35 @@ type InternalLobbyFlowState = {
   /** Discriminated popup state за lock/mute/unmute action — избор на duration + reason + потвърждение, огледално на subadminActionConfirm модела. 'unmute' е прост confirm (без duration/reason), отворен САМО след lazy-fetch потвърди active mute (виж openTopicMuteMenuForAuthor). */
   topicModerationActionPopup:
     | { kind: 'lock'; topicId: string; topicTitle: string }
-    | { kind: 'mute'; topicId: string; targetProfileId: string; targetDisplayName: string }
+    | {
+        kind: 'mute'
+        topicId: string
+        targetProfileId: string
+        targetDisplayName: string
+        /** Post-ът, чийто mute бутон е бил натиснат — snapshot evidence context (Лафче mute-evidence брифа §1/§3). null = mute инициирано без конкретен пост (напр. бъдещ profile-popup entry point). */
+        sourceMessageId: string | null
+        sourceKind: 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified'
+      }
     | { kind: 'unmute'; topicId: string; targetProfileId: string; targetDisplayName: string; mutedUntil: string | null }
     | null
   topicModerationActionDurationMs: number | null
   topicModerationActionReason: string
+  /** Кратка reason category (опционален taxonomy, mute-evidence брифа §10) — reuse-ва reason free-text полето, не заменя го. */
+  topicModerationActionReasonCategory: 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other' | null
   topicModerationActionBusy: boolean
   topicModerationActionErrorText: string | null
   /** Lazy mute-status fetch в прогрес (виж openTopicMuteMenuForAuthor) — disable-ва gear иконата, докато чакаме отговор. */
   topicMuteStatusLoadingProfileId: string | null
+  /** "Моята история" popup (mute-evidence брифа §6) — виждан САМО от собствения профил на viewer-а, без moderator identity. */
+  topicMuteHistoryPopupOpen: boolean
+  topicMuteHistoryEntries: TopicMuteEvidenceSelfEntry[] | null
+  topicMuteHistoryLoading: boolean
+  topicMuteHistoryErrorText: string | null
+  /** Internal/moderator "история на този профил" (mute-evidence брифа §7) — носи moderator identity, отваря се от mute/unmute popup-а на модератор. */
+  topicMuteHistoryModeratorTargetProfileId: string | null
+  topicMuteHistoryModeratorEntries: TopicMuteEvidenceModeratorEntry[] | null
+  topicMuteHistoryModeratorLoading: boolean
+  topicMuteHistoryModeratorErrorText: string | null
   /** Delete confirmation — отделен popup (различна форма от lock/mute: само reason, без duration), с explicit "потвърди" крачка срещу accidental single-click deletion. */
   topicDeleteConfirm: { topicId: string; topicTitle: string; step: 'reason' | 'confirm' } | null
   topicDeleteReason: string
@@ -1486,9 +1542,18 @@ function createInitialState(): InternalLobbyFlowState {
     topicModerationActionPopup: null,
     topicModerationActionDurationMs: null,
     topicModerationActionReason: '',
+    topicModerationActionReasonCategory: null,
     topicModerationActionBusy: false,
     topicModerationActionErrorText: null,
     topicMuteStatusLoadingProfileId: null,
+    topicMuteHistoryPopupOpen: false,
+    topicMuteHistoryEntries: null,
+    topicMuteHistoryLoading: false,
+    topicMuteHistoryErrorText: null,
+    topicMuteHistoryModeratorTargetProfileId: null,
+    topicMuteHistoryModeratorEntries: null,
+    topicMuteHistoryModeratorLoading: false,
+    topicMuteHistoryModeratorErrorText: null,
     topicDeleteConfirm: null,
     topicDeleteReason: '',
     topicDeleteBusy: false,
@@ -3416,9 +3481,18 @@ export function createLobbyFlowController(
       topicModerationActionPopup: state.topicModerationActionPopup,
       topicModerationActionDurationMs: state.topicModerationActionDurationMs,
       topicModerationActionReason: state.topicModerationActionReason,
+      topicModerationActionReasonCategory: state.topicModerationActionReasonCategory,
       topicModerationActionBusy: state.topicModerationActionBusy,
       topicModerationActionErrorText: state.topicModerationActionErrorText,
       topicMuteStatusLoadingProfileId: state.topicMuteStatusLoadingProfileId,
+      topicMuteHistoryPopupOpen: state.topicMuteHistoryPopupOpen,
+      topicMuteHistoryEntries: state.topicMuteHistoryEntries,
+      topicMuteHistoryLoading: state.topicMuteHistoryLoading,
+      topicMuteHistoryErrorText: state.topicMuteHistoryErrorText,
+      topicMuteHistoryModeratorTargetProfileId: state.topicMuteHistoryModeratorTargetProfileId,
+      topicMuteHistoryModeratorEntries: state.topicMuteHistoryModeratorEntries,
+      topicMuteHistoryModeratorLoading: state.topicMuteHistoryModeratorLoading,
+      topicMuteHistoryModeratorErrorText: state.topicMuteHistoryModeratorErrorText,
       topicDeleteConfirm: state.topicDeleteConfirm,
       topicDeleteReason: state.topicDeleteReason,
       topicDeleteBusy: state.topicDeleteBusy,
@@ -3444,6 +3518,7 @@ export function createLobbyFlowController(
       isTopicModerator: isTopicModeratorAuthSession(options.getAuthSession?.() ?? null),
       isWholeTopicModerator: isTopicWholeTopicModeratorAuthSession(options.getAuthSession?.() ?? null),
       isTopicMessageModerator: isTopicMessageModeratorAuthSession(options.getAuthSession?.() ?? null),
+      isLafcheModerator: isLafcheModeratorAuthSession(options.getAuthSession?.() ?? null),
     }
 
     renderLobbyScreen(options.root, {
@@ -3764,14 +3839,26 @@ export function createLobbyFlowController(
         showTopicsVipPlansInertMessage()
       },
       // ─── Topics Moderation (Етап 4) ────────────────────────────────────
+      onTopicMuteHistoryOpen: () => {
+        void openTopicMuteHistoryPopup()
+      },
+      onTopicMuteHistoryClose: () => {
+        closeTopicMuteHistoryPopup()
+      },
+      onTopicMuteHistoryOpenForProfile: (targetProfileId) => {
+        void openTopicMuteHistoryModeratorPopup(targetProfileId)
+      },
+      onTopicMuteHistoryCloseForProfile: () => {
+        closeTopicMuteHistoryModeratorPopup()
+      },
       onTopicLockClick: (topicId, topicTitle) => {
         openTopicLockPopup(topicId, topicTitle)
       },
       onTopicUnlockClick: (topicId) => {
         void unlockActiveTopic(topicId)
       },
-      onTopicMuteClick: (topicId, targetProfileId, targetDisplayName) => {
-        void openTopicMuteMenuForAuthor(topicId, targetProfileId, targetDisplayName)
+      onTopicMuteClick: (topicId, targetProfileId, targetDisplayName, sourceMessageId, sourceKind) => {
+        void openTopicMuteMenuForAuthor(topicId, targetProfileId, targetDisplayName, sourceMessageId ?? null, sourceKind ?? 'unspecified')
       },
       onTopicUnmuteClick: (topicId, targetProfileId) => {
         void unmuteProfileInActiveTopic(topicId, targetProfileId)
@@ -3784,6 +3871,9 @@ export function createLobbyFlowController(
       },
       onTopicModerationActionReasonChange: (reason) => {
         updateTopicModerationActionReason(reason)
+      },
+      onTopicModerationActionReasonCategoryChange: (category) => {
+        updateTopicModerationActionReasonCategory(category)
       },
       onTopicModerationActionSubmit: () => {
         void submitTopicModerationAction()
@@ -4024,6 +4114,9 @@ export function createLobbyFlowController(
       },
       onChatClick: () => {
         void showChatPanel()
+      },
+      onTopicsLafcheOpen: () => {
+        openTopic(LAFCHE_TOPIC_ID)
       },
       onTopicsPersonalOpen: () => {
         void showTopicsPersonalChat()
@@ -5456,7 +5549,61 @@ export function createLobbyFlowController(
   // renderTopicsScreen.ts data-topic-mute-toggle) — модераторският "⚙" клик
   // до автор първо проверява active mute статус, после решава дали да
   // отвори Mute (duration+reason) или Unmute (прост confirm) popup-а.
-  async function openTopicMuteMenuForAuthor(topicId: string, targetProfileId: string, targetDisplayName: string): Promise<void> {
+  // sourceMessageId/sourceKind — постът, до чийто автор е бил натиснат "⚙"
+  // (mute-evidence брифа §1/§3) — пренася се в mute popup state-a, за да
+  // стигне до server-side snapshot-a при submit (submitTopicModerationAction).
+  async function openTopicMuteHistoryPopup(): Promise<void> {
+    state.topicMuteHistoryPopupOpen = true
+    state.topicMuteHistoryLoading = true
+    state.topicMuteHistoryErrorText = null
+    render()
+
+    const result = await options.onTopicMuteHistoryLoad?.()
+    state.topicMuteHistoryLoading = false
+    if (!result || !result.ok) {
+      state.topicMuteHistoryErrorText = result?.message ?? 'Грешка при зареждане на историята.'
+      render()
+      return
+    }
+    state.topicMuteHistoryEntries = result.entries
+    render()
+  }
+
+  function closeTopicMuteHistoryPopup(): void {
+    state.topicMuteHistoryPopupOpen = false
+    render()
+  }
+
+  async function openTopicMuteHistoryModeratorPopup(targetProfileId: string): Promise<void> {
+    state.topicMuteHistoryModeratorTargetProfileId = targetProfileId
+    state.topicMuteHistoryModeratorLoading = true
+    state.topicMuteHistoryModeratorErrorText = null
+    render()
+
+    const result = await options.onTopicMuteHistoryLoadForProfile?.(targetProfileId)
+    state.topicMuteHistoryModeratorLoading = false
+    if (!result || !result.ok) {
+      state.topicMuteHistoryModeratorErrorText = result?.message ?? 'Грешка при зареждане на историята.'
+      render()
+      return
+    }
+    state.topicMuteHistoryModeratorEntries = result.entries
+    render()
+  }
+
+  function closeTopicMuteHistoryModeratorPopup(): void {
+    state.topicMuteHistoryModeratorTargetProfileId = null
+    state.topicMuteHistoryModeratorEntries = null
+    render()
+  }
+
+  async function openTopicMuteMenuForAuthor(
+    topicId: string,
+    targetProfileId: string,
+    targetDisplayName: string,
+    sourceMessageId: string | null = null,
+    sourceKind: 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified' = 'unspecified',
+  ): Promise<void> {
     if (state.topicMuteStatusLoadingProfileId !== null) return
     state.topicMuteStatusLoadingProfileId = targetProfileId
     render()
@@ -5472,9 +5619,10 @@ export function createLobbyFlowController(
     if (result.mute.isMuted) {
       state.topicModerationActionPopup = { kind: 'unmute', topicId, targetProfileId, targetDisplayName, mutedUntil: result.mute.mutedUntil }
     } else {
-      state.topicModerationActionPopup = { kind: 'mute', topicId, targetProfileId, targetDisplayName }
+      state.topicModerationActionPopup = { kind: 'mute', topicId, targetProfileId, targetDisplayName, sourceMessageId, sourceKind }
       state.topicModerationActionDurationMs = null
       state.topicModerationActionReason = ''
+      state.topicModerationActionReasonCategory = null
       state.topicModerationActionErrorText = null
     }
     render()
@@ -5492,6 +5640,12 @@ export function createLobbyFlowController(
 
   function updateTopicModerationActionReason(reason: string): void {
     state.topicModerationActionReason = reason
+  }
+
+  function updateTopicModerationActionReasonCategory(
+    category: 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other' | null,
+  ): void {
+    state.topicModerationActionReasonCategory = category
   }
 
   async function submitTopicModerationAction(): Promise<void> {
@@ -5547,7 +5701,15 @@ export function createLobbyFlowController(
     }
 
     // kind === 'mute'
-    const result = await options.onTopicMuteProfile?.(pending.topicId, pending.targetProfileId, reason, durationMs)
+    const result = await options.onTopicMuteProfile?.(
+      pending.topicId,
+      pending.targetProfileId,
+      reason,
+      durationMs,
+      pending.sourceMessageId,
+      pending.sourceKind,
+      state.topicModerationActionReasonCategory,
+    )
     state.topicModerationActionBusy = false
     if (!result || !result.ok) {
       state.topicModerationActionErrorText = result?.message ?? 'Грешка при заглушаване.'

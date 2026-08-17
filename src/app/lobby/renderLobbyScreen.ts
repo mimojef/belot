@@ -35,6 +35,8 @@ import type {
   TopicMuteSnapshot,
   TopicReportSnapshot,
   TopicReportStatus,
+  TopicMuteEvidenceSelfEntry,
+  TopicMuteEvidenceModeratorEntry,
 } from '../network/createGameServerClient'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, ActiveRoomSnapshot } from '../adminServer/adminServerTypes'
 import { isBotsOnlyActiveRoom, isStaleActiveRoom } from '../adminServer/adminServerTypes'
@@ -89,7 +91,7 @@ import {
   renderTournamentHowItWorksPage,
   extractTournamentCreateInputFromForm,
 } from './renderTournamentsScreen'
-import { renderTopicsScreen, renderAdminTopicReportsPanel } from './renderTopicsScreen'
+import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID } from './renderTopicsScreen'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import { renderLevelLockedStakePopup, attachLevelLockedStakePopupEventListeners, type LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
@@ -398,12 +400,28 @@ export type LobbyScreenState = {
   activeTopicViewerMute: TopicMuteSnapshot | null
   topicModerationActionPopup:
     | { kind: 'lock'; topicId: string; topicTitle: string }
-    | { kind: 'mute'; topicId: string; targetProfileId: string; targetDisplayName: string }
+    | {
+        kind: 'mute'
+        topicId: string
+        targetProfileId: string
+        targetDisplayName: string
+        sourceMessageId: string | null
+        sourceKind: 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified'
+      }
     | { kind: 'unmute'; topicId: string; targetProfileId: string; targetDisplayName: string; mutedUntil: string | null }
     | null
   topicModerationActionDurationMs: number | null
   topicModerationActionReason: string
+  topicModerationActionReasonCategory: 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other' | null
   topicMuteStatusLoadingProfileId: string | null
+  topicMuteHistoryPopupOpen: boolean
+  topicMuteHistoryEntries: TopicMuteEvidenceSelfEntry[] | null
+  topicMuteHistoryLoading: boolean
+  topicMuteHistoryErrorText: string | null
+  topicMuteHistoryModeratorTargetProfileId: string | null
+  topicMuteHistoryModeratorEntries: TopicMuteEvidenceModeratorEntry[] | null
+  topicMuteHistoryModeratorLoading: boolean
+  topicMuteHistoryModeratorErrorText: string | null
   topicModerationActionBusy: boolean
   topicModerationActionErrorText: string | null
   topicDeleteConfirm: { topicId: string; topicTitle: string; step: 'reason' | 'confirm' } | null
@@ -435,6 +453,8 @@ export type LobbyScreenState = {
   isWholeTopicModerator: boolean
   /** Client-side UX gate за individual root съобщение/reply moderation delete (5 роли, вкл. chat_admin) — виж isTopicMessageModeratorAuthSession в createLobbyFlowController.ts. Различен role set от isTopicModerator. */
   isTopicMessageModerator: boolean
+  /** Client-side UX gate за "Лафче" (topic-lafche) delete+mute — admin/pika_team/top_chat_admin, БЕЗ subadmin/chat_admin. Виж isLafcheModeratorAuthSession в createLobbyFlowController.ts. Server е authoritative (isLafcheModeratorSession в authStore.ts, branch по topicId==='topic-lafche'). */
+  isLafcheModerator: boolean
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -830,6 +850,7 @@ export type RenderLobbyScreenOptions = {
   onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
   onTournamentsClick: () => void
   onTopicsClick: () => void
+  onTopicsLafcheOpen: () => void
   onTopicsPersonalOpen: () => void
   onTopicsPersonalBack: () => void
   onTopicsPersonalConversationBack: () => void
@@ -862,13 +883,24 @@ export type RenderLobbyScreenOptions = {
   onTopicsVipPopupClaimLaunchGift: () => void
   onTopicsVipPopupSeePlans: () => void
   // ─── Topics Moderation (Етап 4) ──────────────────────────────────────────
+  onTopicMuteHistoryOpen: () => void
+  onTopicMuteHistoryClose: () => void
+  onTopicMuteHistoryOpenForProfile: (profileId: string) => void
+  onTopicMuteHistoryCloseForProfile: () => void
   onTopicLockClick: (topicId: string, topicTitle: string) => void
   onTopicUnlockClick: (topicId: string) => void
-  onTopicMuteClick: (topicId: string, targetProfileId: string, targetDisplayName: string) => void
+  onTopicMuteClick: (
+    topicId: string,
+    targetProfileId: string,
+    targetDisplayName: string,
+    sourceMessageId?: string | null,
+    sourceKind?: 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified',
+  ) => void
   onTopicUnmuteClick: (topicId: string, targetProfileId: string) => void
   onTopicModerationActionPopupClose: () => void
   onTopicModerationActionDurationChange: (durationMs: number) => void
   onTopicModerationActionReasonChange: (reason: string) => void
+  onTopicModerationActionReasonCategoryChange: (category: 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other' | null) => void
   onTopicModerationActionSubmit: () => void
   onTopicDeleteClick: (topicId: string, topicTitle: string) => void
   onTopicDeleteConfirmClose: () => void
@@ -3351,8 +3383,20 @@ export function getTopicsMessagesUnreadRaw(state: LobbyScreenState): number {
   return normalizeNotificationBadgeCount(generalTopic?.unreadCount ?? 0)
 }
 
+/**
+ * "Лафче" принос към агрегирания Topics badge — ВИНАГИ 0 или 1, никога
+ * реалният брой непрочетени постове (Лафче брифа §9: "1 или 100 нови
+ * поста = пак една червена точка"). generalTopic-a по-горе НИКОГА не
+ * включва lafche (търси само isGeneral/topic-general/slug==='general'),
+ * значи няма double-count риск тук — просто добавяме тази стойност отделно.
+ */
+export function getLafcheUnreadContribution(state: LobbyScreenState): number {
+  const lafcheTopic = (state.topics ?? []).find((topic) => topic.topicId === LAFCHE_TOPIC_ID)
+  return (lafcheTopic?.unreadCount ?? 0) > 0 ? 1 : 0
+}
+
 export function getTopicsTotalUnreadRaw(state: LobbyScreenState): number {
-  return getTopicsMessagesUnreadRaw(state) + getTopicsPersonalUnreadRaw(state)
+  return getTopicsMessagesUnreadRaw(state) + getTopicsPersonalUnreadRaw(state) + getLafcheUnreadContribution(state)
 }
 
 export function getSupportUnreadRaw(state: LobbyScreenState): number {
@@ -9812,6 +9856,15 @@ export function renderLobbyScreen(
   const wasTopicMessagesNearTop = prevTopicMessagesScrollEl === null
     ? true
     : prevTopicMessagesScrollEl.scrollTop <= topicMessagesNearBottomThresholdPx
+  // "Лафче" reuse-ва СЪЩИЯ data-topic-messages-scroll container като General
+  // (Вариант A — минимален diff), но иска обратна (chat-style, bottom-
+  // anchored) семантика вместо General card-feed-a top-anchored семантика
+  // (Лафче брифа §3: smart autoscroll до дъно само ако вече си бил близо).
+  // Отделен near-BOTTOM snapshot тук, паралелно на near-TOP-a на General,
+  // gate-нат по activeTopicId в write-back блока по-долу.
+  const wasLafcheNearBottom = prevTopicMessagesScrollEl === null
+    ? true
+    : prevTopicMessagesScrollEl.scrollHeight - prevTopicMessagesScrollEl.scrollTop - prevTopicMessagesScrollEl.clientHeight <= topicMessagesNearBottomThresholdPx
   const savedTopicMessagesScrollTop = prevTopicMessagesScrollEl?.scrollTop ?? 0
   const explicitTopicMessagesScrollAnchor = state.topicMessagesScrollAnchor
   const stableTopicMessagesScrollAnchor = explicitTopicMessagesScrollAnchor ?? (() => {
@@ -10609,6 +10662,10 @@ export function renderLobbyScreen(
     })
 
   root
+    .querySelector<HTMLButtonElement>('[data-topics-lafche-open="1"]')
+    ?.addEventListener('click', options.onTopicsLafcheOpen)
+
+  root
     .querySelector<HTMLButtonElement>('[data-topics-personal-open="1"]')
     ?.addEventListener('click', options.onTopicsPersonalOpen)
 
@@ -10968,11 +11025,15 @@ export function renderLobbyScreen(
   root.querySelectorAll<HTMLButtonElement>('[data-topic-mute-toggle]').forEach((btn) => {
     const targetProfileId = btn.dataset.topicMuteToggle ?? ''
     const targetDisplayName = btn.dataset.topicMuteToggleName ?? ''
+    // Post context за mute-evidence snapshot (виж §1/§3 в mute-evidence
+    // брифа) — undefined/'' означава mute инициирано без конкретен пост.
+    const sourceMessageId = btn.dataset.topicMuteToggleMessageId || null
+    const sourceKind = (btn.dataset.topicMuteToggleSourceKind as 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified' | undefined) ?? 'unspecified'
     if (!targetProfileId) return
     btn.addEventListener('click', () => {
       const topicId = state.activeTopicId
       if (!topicId) return
-      options.onTopicMuteClick(topicId, targetProfileId, targetDisplayName)
+      options.onTopicMuteClick(topicId, targetProfileId, targetDisplayName, sourceMessageId, sourceKind)
     })
   })
 
@@ -10993,12 +11054,39 @@ export function renderLobbyScreen(
     options.onTopicModerationActionReasonChange((event.currentTarget as HTMLTextAreaElement).value)
   })
 
+  root.querySelector<HTMLSelectElement>('[data-topic-moderation-reason-category="1"]')?.addEventListener('change', (event) => {
+    const value = (event.currentTarget as HTMLSelectElement).value
+    options.onTopicModerationActionReasonCategoryChange(
+      value === '' ? null : (value as 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other'),
+    )
+  })
+
   root.querySelector<HTMLButtonElement>('[data-topic-moderation-cancel="1"]')?.addEventListener('click', () => {
     options.onTopicModerationActionPopupClose()
   })
 
   root.querySelector<HTMLButtonElement>('[data-topic-moderation-submit="1"]')?.addEventListener('click', () => {
     options.onTopicModerationActionSubmit()
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-mute-history-open="1"]')?.addEventListener('click', () => {
+    options.onTopicMuteHistoryOpen()
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-mute-history-close="1"]')?.addEventListener('click', () => {
+    options.onTopicMuteHistoryClose()
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-topic-mute-history-open-for-profile]').forEach((btn) => {
+    const profileId = btn.dataset.topicMuteHistoryOpenForProfile ?? ''
+    if (!profileId) return
+    btn.addEventListener('click', () => {
+      options.onTopicMuteHistoryOpenForProfile(profileId)
+    })
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topic-mute-history-close-for-profile="1"]')?.addEventListener('click', () => {
+    options.onTopicMuteHistoryCloseForProfile()
   })
 
   // Delete confirm — двустъпков (reason → confirm), виж renderTopicDeleteConfirmPopup.
@@ -13314,7 +13402,26 @@ export function renderLobbyScreen(
   }
 
   const newTopicMessagesScrollEl = root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
-  if (newTopicMessagesScrollEl) {
+  if (newTopicMessagesScrollEl && state.activeTopicId === LAFCHE_TOPIC_ID) {
+    // "Лафче" — chat-style bottom-anchored scroll (Лафче брифа §3), напълно
+    // отделно от General card-feed state machine-а по-долу (top-anchored,
+    // prepend/near-top семантика — несъвместима с Лафче нуждите). 'initial'
+    // (отваряне на Лафче) винаги отива до дъното; live-append дърпа до
+    // дъното САМО ако viewer вече е бил близо до него (wasLafcheNearBottom),
+    // иначе пази точната scroll позиция без "издърпване" — mirror на
+    // wasTopicThreadNearBottom pattern-а (renderTopicThreadView).
+    if (state.topicMessagesRenderReason === 'initial' || state.topicMessagesRenderReason === 'own-message') {
+      newTopicMessagesScrollEl.scrollTop = newTopicMessagesScrollEl.scrollHeight
+    } else if (state.topicMessagesRenderReason === 'live-append' || state.topicMessagesRenderReason === 'reconnect-refresh' || state.topicMessagesRenderReason === 'reorder') {
+      newTopicMessagesScrollEl.scrollTop = wasLafcheNearBottom
+        ? newTopicMessagesScrollEl.scrollHeight
+        : savedTopicMessagesScrollTop
+    } else if (prevTopicMessagesScrollEl !== null) {
+      newTopicMessagesScrollEl.scrollTop = savedTopicMessagesScrollTop
+    } else {
+      newTopicMessagesScrollEl.scrollTop = newTopicMessagesScrollEl.scrollHeight
+    }
+  } else if (newTopicMessagesScrollEl) {
     if (explicitTopicMessagesScrollAnchor !== null) {
       const anchorEl = root.querySelector<HTMLElement>(`[data-topic-message="${cssEscape(explicitTopicMessagesScrollAnchor.messageId)}"]`)
       if (anchorEl) {

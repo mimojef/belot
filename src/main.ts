@@ -3802,6 +3802,22 @@ type TopicMuteSnapshot = {
   reason: string | null
 }
 
+type TopicMuteEvidenceSelfEntry = {
+  muteHistoryId: string
+  sourceKind: 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified'
+  sourceBodySnapshot: string
+  sourceAttachment: { viewUrl: string; downloadUrl: string; width: number; height: number } | null
+  sourceCreatedAt: string | null
+  originalMessagePostDeleted: boolean
+  reasonText: string | null
+  reasonCategory: 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other' | null
+  durationMs: number
+  mutedUntil: string
+  status: 'active' | 'expired' | 'manually_unmuted'
+  unmutedAt: string | null
+  createdAt: string
+}
+
 async function lockTopic(
   topicId: string,
   reason: string,
@@ -3861,18 +3877,79 @@ async function loadTopicMuteStatus(
   }
 }
 
+async function loadMyTopicMuteEvidence(): Promise<
+  { ok: true; entries: TopicMuteEvidenceSelfEntry[] } | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics/mute-evidence/mine`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string; entries?: TopicMuteEvidenceSelfEntry[] }
+    if (!response.ok || !data.ok || !data.entries) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на историята.' }
+    }
+    return { ok: true, entries: data.entries }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+type TopicMuteEvidenceModeratorEntry = {
+  muteHistoryId: string
+  muteAuditLogId: string
+  sourceTopicId: string
+  sourceMessageId: string | null
+  sourceKind: 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified'
+  sourceBodySnapshot: string
+  sourceAttachment: { viewUrl: string; downloadUrl: string; width: number; height: number } | null
+  sourceCreatedAt: string | null
+  originalMessageDeletedAt: string | null
+  mutedByAccountId: string | null
+  mutedByRole: 'admin' | 'subadmin' | 'pika_team' | 'top_chat_admin'
+  reasonText: string | null
+  reasonCategory: 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other' | null
+  durationMs: number
+  mutedUntil: string
+  status: 'active' | 'expired' | 'manually_unmuted'
+  unmutedAt: string | null
+  unmutedByAccountId: string | null
+  createdAt: string
+}
+
+async function loadTopicMuteEvidenceForProfile(
+  profileId: string,
+): Promise<{ ok: true; entries: TopicMuteEvidenceModeratorEntry[] } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics/mute-evidence/profile/${encodeURIComponent(profileId)}`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string; entries?: TopicMuteEvidenceModeratorEntry[] }
+    if (!response.ok || !data.ok || !data.entries) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на историята.' }
+    }
+    return { ok: true, entries: data.entries }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function muteProfileInTopic(
   topicId: string,
   profileId: string,
   reason: string,
   durationMs: number,
+  sourceMessageId: string | null,
+  sourceKind: 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified',
+  reasonCategory: 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other' | null,
 ): Promise<{ ok: true; mute: TopicMuteSnapshot } | { ok: false; message: string }> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/mute`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profileId, reason, durationMs }),
+      body: JSON.stringify({ profileId, reason, durationMs, sourceMessageId, sourceKind, reasonCategory }),
     })
     const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string; mute?: TopicMuteSnapshot }
     if (!response.ok || !data.ok || !data.mute) {
@@ -4801,7 +4878,10 @@ lobby = createLobbyFlowController({
   onTopicLock: (topicId, reason, durationMs) => lockTopic(topicId, reason, durationMs),
   onTopicUnlock: (topicId) => unlockTopic(topicId),
   onTopicMuteStatusLoad: (topicId, profileId) => loadTopicMuteStatus(topicId, profileId),
-  onTopicMuteProfile: (topicId, profileId, reason, durationMs) => muteProfileInTopic(topicId, profileId, reason, durationMs),
+  onTopicMuteHistoryLoad: () => loadMyTopicMuteEvidence(),
+  onTopicMuteHistoryLoadForProfile: (profileId) => loadTopicMuteEvidenceForProfile(profileId),
+  onTopicMuteProfile: (topicId, profileId, reason, durationMs, sourceMessageId, sourceKind, reasonCategory) =>
+    muteProfileInTopic(topicId, profileId, reason, durationMs, sourceMessageId, sourceKind, reasonCategory),
   onTopicUnmuteProfile: (topicId, profileId) => unmuteProfileInTopic(topicId, profileId),
   onTopicDelete: (topicId, reason) => deleteTopic(topicId, reason),
   onTopicMessageDelete: (topicId, messageId) => deleteTopicMessage(topicId, messageId),
